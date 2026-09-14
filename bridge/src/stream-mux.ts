@@ -50,6 +50,7 @@ export interface PeerSessionView {
   /** Whether this device pulls trees on demand rather than being pushed them.
    *  Per-device: the bridge may only stop pushing when EVERY attached one does. */
   readonly pullsTree: boolean;
+  readonly terminalFramesV1?: boolean;
 }
 
 /** Who an outbound frame is for. A bridge holds one E2E session per attached
@@ -139,6 +140,8 @@ export interface StreamMuxTransport {
     msg: unknown,
     channel: Channel,
     target?: SendTarget,
+    signal?: AbortSignal,
+    authorized?: () => boolean,
   ): Promise<SendOutcome>;
   /** What the machine knows about one app session, or null for a route id that
    *  holds none. The mux needs it to apply a stream's per-device filters to a
@@ -229,13 +232,23 @@ export class StreamMux {
       unboundAtPeer: false,
     };
     entry.unsub = bus.subscribe({
-      deliver: (msg, channel) => {
+      // This stream IS the relay wire, so an audience-targeted publish meant
+      // for the desktop's loopback socket must not be enveloped onto it.
+      audience: "relay",
+      deliver: (msg, channel, signal, peerId) => {
         // Ahead of mayDeliver: a stream nobody is receiving is not an
         // authorization question, and the switch is the more expensive read.
-        if (entry.unboundAtPeer) return;
-        if (!mayDeliver()) return;
-        const target = gated();
-        if (target) void this.transport.sendEnvelope(streamId, msg, channel, target);
+        const requested: SendTarget | undefined = peerId ? { kind: "peer", peerId } : undefined;
+        const canSend = () => !entry.unboundAtPeer && mayDeliver() && gated(requested) !== null;
+        if (!canSend()) {
+          if (signal && !signal.aborted) return Promise.reject(new Error("Terminal delivery gated"));
+          return;
+        }
+        const sent = this.transport.sendEnvelope(streamId, msg, channel, gated(requested)!, signal, canSend);
+        if (signal) return sent.then((outcome) => {
+          if (outcome !== "sent" && !signal.aborted) throw new Error(`Terminal delivery ${outcome}`);
+        });
+        void sent;
       },
     });
     this.streams.set(streamId, entry);

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { VtCapabilityResponder } from "../src/vt-capability-responder";
+import { ANTGRID_QUERY_COLORS, VtCapabilityResponder } from "../src/vt-capability-responder";
 
 const COLORS = {
   foreground: "rgb:fafa/fafa/fafa",
@@ -109,5 +109,20 @@ describe("VtCapabilityResponder", () => {
     const r = make();
     expect(r.feed("just some text\r\n")).toBe("");
     expect(r.feed("\x1b[32mgreen\x1b[0m\r\n")).toBe("");
+  });
+
+  test("osc-colors scope answers only OSC 10/11/12", () => {
+    const r = new VtCapabilityResponder({ ...COLORS, scope: "osc-colors" });
+    expect(r.feed("\x1b]11;?\x07")).toBe(`\x1b]11;${COLORS.background}\x07`);
+    expect(r.feed("\x1b[c")).toBe("");
+    expect(r.feed("\x1b[6n")).toBe("");
+    expect(r.feed("\x1b[?2004$p")).toBe("");
+    expect(r.feed("\x1b[?u")).toBe("");
+  });
+
+  test("ANTGRID_QUERY_COLORS matches AbColors' rgb: encoding", () => {
+    for (const value of Object.values(ANTGRID_QUERY_COLORS)) {
+      expect(value).toMatch(/^rgb:[0-9a-f]{4}\/[0-9a-f]{4}\/[0-9a-f]{4}$/);
+    }
   });
 });

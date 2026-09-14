@@ -13,6 +13,7 @@ import { TrustedPeersProvider } from "./trusted-peers";
 import { loadRemoteAccessPolicy, type RemoteAccessPolicyStore } from "./remote-access-policy";
 import { loadAgentReachPolicy, type AgentReachPolicyStore } from "./agent-reach-policy";
 import { resolveAbDir } from "./antgrid-dir";
+import { closeTerminalHistoryStore } from "./terminal-manager";
 import { VERSION } from "./version";
 import type { DeviceIdentity } from "./device";
 import type { TierClaim } from "./entitlement";
@@ -2699,6 +2700,9 @@ export class HostServer {
     this.cores.clear();
     for (const e of entries) { try { e.promotion?.stop(); } catch (err) { log.warn("Failed to stop promotion for %s during shutdown: %s", e.core.projectId, err instanceof Error ? err.message : String(err)); } }
     await Promise.all(entries.map((e) => e.core.shutdown(reason).catch(() => {})));
+    // Every core's `TerminalManager` shares this ONE store (D3); close it only
+    // once every core has stopped using it, which the await above guarantees.
+    closeTerminalHistoryStore();
   }
 
   // --- internals ---

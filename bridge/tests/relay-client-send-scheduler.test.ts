@@ -64,6 +64,29 @@ function tunnelChunk(requestId: string): object {
 }
 
 describe("RelayClient send scheduler", () => {
+  it("cancels only the addressed viewer's queued terminal frame", async () => {
+    const { client, sent, s } = makeClient();
+    const second = installFakeSession(client, "phone-2").scheduler as SendScheduler;
+    s.hold = true;
+    second.hold = true;
+    const bus = new MessageBus();
+    const handle = client.attachStream(bus, {});
+    sent.length = 0;
+    const controller = new AbortController();
+    const status = createMessage("terminal:display:status", {
+      terminalId: "t", code: "ACK_TIMEOUT", message: "Reconnect",
+    });
+    const delivery = bus.deliverTo(status, "preview", "relay", controller.signal, PHONE_ID);
+    expect(s.queued("preview").frames).toBe(1);
+    expect(second.queued("preview").frames).toBe(0);
+    controller.abort();
+    await delivery;
+    // An aborted attachment deliberately retires without surfacing a send error.
+    expect(s.queued("preview").frames).toBe(0);
+    expect(sent).toEqual([]);
+    handle.detach();
+  });
+
   it("writes a sealed session ping ahead of held preview frames", () => {
     const { client, sent, s } = makeClient();
     s.hold = true;

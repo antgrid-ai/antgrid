@@ -324,6 +324,53 @@ test("a torn-down session takes its pullsTree with it — the capability does no
   expect(client.establishedPeers()).toEqual([]);
 });
 
+// Capability claims belong to the app session that authenticated them.
+test("peerSupportsTerminalFramesV1 is true once the app advertises terminalFramesV1", () => {
+  const { client } = establishSession({
+    agentEd: ed25519Pair(), phoneEd: ed25519Pair(), attemptId: "attempt-a",
+    capabilities: { checkoutRouting: true, terminalFramesV1: true },
+  });
+  expect(client.peerSession(PHONE_ID)?.terminalFramesV1).toBe(true);
+});
+
+test("peerSupportsTerminalFramesV1 is false when the app omits terminalFramesV1", () => {
+  const { client } = establishSession({
+    agentEd: ed25519Pair(), phoneEd: ed25519Pair(), attemptId: "attempt-a",
+    capabilities: { checkoutRouting: true, pullsTree: true },
+  });
+  expect(client.peerSession(PHONE_ID)?.terminalFramesV1).toBe(false);
+});
+
+test("peerSupportsTerminalFramesV1 is false for a wrong-typed capability", () => {
+  const { client } = establishSession({
+    agentEd: ed25519Pair(), phoneEd: ed25519Pair(), attemptId: "attempt-a",
+    capabilities: { terminalFramesV1: 1 },
+  });
+  expect(client.peerSession(PHONE_ID)?.terminalFramesV1).toBe(false);
+});
+
+test("peerSupportsTerminalFramesV1 reads false once the session is torn down — no app cannot render frames", () => {
+  const { client } = establishSession({
+    agentEd: ed25519Pair(), phoneEd: ed25519Pair(), attemptId: "attempt-a",
+    capabilities: { checkoutRouting: true, terminalFramesV1: true },
+  });
+  (client as any).dropSession(PHONE_ID);
+  expect(client.peerSession(PHONE_ID)).toBeNull();
+});
+
+test("onHandshakeComplete carries terminalFramesV1 alongside the other capabilities", () => {
+  // Collected into an array rather than a nullable let: TS narrows a `let x = null`
+  // to `null` at the assertion because it cannot see the callback run, and the
+  // length also pins that promotion fires the callback exactly once.
+  const seen: Array<{ checkoutRouting: boolean; pullsTree: boolean; terminalFramesV1: boolean; peerId: string }> = [];
+  establishSession({
+    agentEd: ed25519Pair(), phoneEd: ed25519Pair(), attemptId: "attempt-a",
+    capabilities: { checkoutRouting: true, terminalFramesV1: true },
+    onHandshakeComplete: ((caps: any) => { seen.push(caps); }) as () => void,
+  });
+  expect(seen).toEqual([{ checkoutRouting: true, pullsTree: false, terminalFramesV1: true, peerId: PHONE_ID }]);
+});
+
 test("agent rejects a client-hello with an invalid transcript signature", () => {
   const agentEd = ed25519Pair();
   const phoneEd = ed25519Pair();

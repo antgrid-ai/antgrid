@@ -181,6 +181,7 @@ export function deviceRoutes(deps: { db: DB; auth: Auth; relay: RelayPushConfig 
   r.get("/account/me", async (c) => {
     const userId = c.get("userId");
     const email = c.get("userEmail");
+    const name = c.get("userName");
     await provisionProductAccountForUser(deps.db, userId);
     const sub = await activeSubscriptionForUser(deps.db, userId);
     if (!sub) return c.json({ error: "NO_SUBSCRIPTION" }, 500);
@@ -195,6 +196,7 @@ export function deviceRoutes(deps: { db: DB; auth: Auth; relay: RelayPushConfig 
     return c.json({
       userId,
       email,
+      name,
       tier,
       worker_limit: workerLimit,
       // `session_limit` is the retired name for `worker_limit`, kept in

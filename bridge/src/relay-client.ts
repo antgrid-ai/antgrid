@@ -68,7 +68,7 @@ export interface RelayClientOptions {
    *  `peerId` says which, and a joining device needs its own state replay even
    *  though its sibling is already up to date. */
   onHandshakeComplete?: (
-    capabilities: { checkoutRouting: boolean; pullsTree: boolean; peerId: string },
+    capabilities: { checkoutRouting: boolean; pullsTree: boolean; terminalFramesV1: boolean; peerId: string },
   ) => void;
   onMessage?: (msg: AbMessage) => void;
   onTunnelMessage?: (msg: unknown, peerId: string) => void;
@@ -210,6 +210,7 @@ interface PeerSession {
   /** Whether THIS device pulls trees on demand. Per-session because the bridge
    *  may only stop pushing `tree:full` when every attached device pulls. */
   pullsTree: boolean;
+  terminalFramesV1: boolean;
 }
 
 function formatDiagnosticBytes(bytes: number): string {
@@ -425,6 +426,7 @@ export class RelayClient {
       checkoutRouting: session.checkoutRouting,
       reachable: session.reachable,
       pullsTree: session.pullsTree,
+      terminalFramesV1: session.terminalFramesV1,
     };
   }
 
@@ -493,7 +495,7 @@ export class RelayClient {
         }
         this.sendJson({ type: "stream-close", streamId: id });
       },
-      sendEnvelope: (id, msg, channel, target) => this.sendAppEnvelope(id, msg, channel, target),
+      sendEnvelope: (id, msg, channel, target, signal, authorized) => this.sendAppEnvelope(id, msg, channel, target, signal, authorized),
       peerSession: (peerId) => this.peerSession(peerId),
     });
     this.creditBatchBytes = CREDIT_BATCH_BYTES;
@@ -1357,7 +1359,7 @@ export class RelayClient {
       type: string;
       attemptId?: string;
       confirm?: string;
-      capabilities?: { checkoutRouting?: boolean; pullsTree?: boolean };
+      capabilities?: { checkoutRouting?: boolean; pullsTree?: boolean; terminalFramesV1?: boolean };
       channel?: unknown;
       consumed?: unknown;
     },
@@ -1598,7 +1600,7 @@ export class RelayClient {
     obj: {
       attemptId?: string;
       confirm?: string;
-      capabilities?: { checkoutRouting?: boolean; pullsTree?: boolean };
+      capabilities?: { checkoutRouting?: boolean; pullsTree?: boolean; terminalFramesV1?: boolean };
     },
     peerId: string,
   ): void {
@@ -1646,11 +1648,13 @@ export class RelayClient {
         rxFlow: RelayClient.freshRxFlow(),
         stallWarned: {},
         pullsTree: obj.capabilities?.pullsTree === true,
+        terminalFramesV1: obj.capabilities?.terminalFramesV1 === true,
       };
       this.pending.delete(peerId);
       this.stopHalfOpenTimer(attempt);
       this.sessions.set(peerId, session);
       if (live) {
+        this.mux.notifyPeerSessionOffline(peerId);
         this.recordQueueDrop("rekey", live.scheduler.clear());
         zeroizeSessionKeys(live.sessionKeys);
         live.transport.zeroize();
@@ -1661,6 +1665,7 @@ export class RelayClient {
       this.opts.onHandshakeComplete?.({
         checkoutRouting: session.checkoutRouting,
         pullsTree: session.pullsTree,
+        terminalFramesV1: session.terminalFramesV1,
         peerId,
       });
       this.mux.notifyPeerOnline();
@@ -1754,7 +1759,10 @@ export class RelayClient {
     msg: unknown,
     channel: Channel,
     target: SendTarget = { kind: "broadcast" },
+    signal?: AbortSignal,
+    authorized?: () => boolean,
   ): Promise<SendOutcome> {
+    if (signal?.aborted || authorized?.() === false) return Promise.resolve("dropped");
     const type = (msg as { type?: string } | null)?.type;
     const recipients = this.resolveRecipients(target);
     if (recipients.length === 0) {
@@ -1802,6 +1810,8 @@ export class RelayClient {
     const perRecipient: { session: PeerSession; frames: QueuedAppFrame[] }[] = [];
     for (const session of recipients) {
       const frames: QueuedAppFrame[] = fragmented.frames.map((plaintext) => ({
+        signal,
+        authorized,
         channel,
         streamId,
         plaintext,
@@ -1831,8 +1841,10 @@ export class RelayClient {
       // frames will ever run — report the drop for the message here.
       if (!failed) { failed = true; resolveOutcome("dropped"); }
     }
+    const abort = () => { for (const { session } of perRecipient) session.scheduler.dropAborted(); };
+    signal?.addEventListener("abort", abort, { once: true });
     this.drain();
-    return settled;
+    return settled.finally(() => signal?.removeEventListener("abort", abort));
   }
 
   /** Which sessions a {@link SendTarget} selects. An unreachable session is

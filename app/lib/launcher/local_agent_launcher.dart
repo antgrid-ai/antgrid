@@ -322,6 +322,7 @@ class LocalAgentLauncher {
         capabilities: const {
           'checkoutRouting': true,
           'pullsTree': true,
+          'terminalFramesV1': true,
           'sessionBusCarrier': true,
         },
       );

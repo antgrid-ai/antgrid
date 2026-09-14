@@ -6,15 +6,21 @@ import '../../design/ab_icons.dart';
 import '../../design/ab_tokens.dart';
 import '../../design/widgets/ab_icon_button.dart';
 import '../../providers/app_version.dart';
+import '../../providers/support_chat.dart';
 import '../../util/external_url.dart';
 
 /// Body rows of the settings HELP section. Renders rows only — the `_Section`
 /// frame is private to `app_settings_screen.dart`, which mounts this inside it.
 class HelpAboutSection extends ConsumerWidget {
-  const HelpAboutSection({super.key, this.openUrl = openExternalUrl});
+  const HelpAboutSection({
+    super.key,
+    this.openUrl = openExternalUrl,
+    this.openChat = openSupportChat,
+  });
 
   /// Injectable so tests capture URLs instead of launching a browser.
   final Future<void> Function(BuildContext, String) openUrl;
+  final Future<void> Function(BuildContext, WidgetRef) openChat;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -28,7 +34,11 @@ class HelpAboutSection extends ConsumerWidget {
           onTap: () => openUrl(context, 'https://antgrid.ai/get-started'),
         ),
         _LinkRow(
-          label: 'Support',
+          label: 'Chat with support',
+          onTap: () => openChat(context, ref),
+        ),
+        _LinkRow(
+          label: 'Support centre',
           onTap: () => openUrl(context, 'https://antgrid.ai/support'),
         ),
         Padding(

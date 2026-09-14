@@ -84,7 +84,11 @@ class LocalTransport extends BufferedAgentTransport {
     this.appVersion = 'app',
     this.connectTimeout = const Duration(seconds: 15),
     this.netTap,
-    this.capabilities = const {'checkoutRouting': true, 'pullsTree': true},
+    this.capabilities = const {
+      'checkoutRouting': true,
+      'pullsTree': true,
+      'terminalFramesV1': true,
+    },
   });
 
   /// Records a frame that never left, or never reached dispatch.

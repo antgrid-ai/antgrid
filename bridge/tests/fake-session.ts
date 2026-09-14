@@ -34,6 +34,7 @@ export function installFakeSession(
     },
     stallWarned: {},
     pullsTree: false,
+    terminalFramesV1: false,
     ...over,
   };
   c.sessions.set(peerId, session);

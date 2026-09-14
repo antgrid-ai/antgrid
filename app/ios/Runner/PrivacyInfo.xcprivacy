@@ -97,7 +97,7 @@
         </dict>
         <!-- Anonymous usage events (event name, platform, app version, install-
              scoped random UUID — not the account/device id). Opt-out telemetry
-             to our own first-party backend + Plausible (privacy.md §4). -->
+             to our own first-party backend + Umami (privacy.md §4). -->
         <dict>
             <key>NSPrivacyCollectedDataType</key>
             <string>NSPrivacyCollectedDataTypeProductInteraction</string>

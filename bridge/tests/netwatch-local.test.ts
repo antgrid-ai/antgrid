@@ -112,14 +112,14 @@ describe("LocalListener netwatch taps", () => {
 
   it("records an outbound frame with the message's own id as its join key", async () => {
     const ws = await connectOwner();
-    const msg = createMessage("terminal:output", { terminalId: "t1", data: "out" });
+    const msg = createMessage("terminal:notification", { terminalId: "t1", kind: "osc9", title: "out" });
     bus.publish(msg, "control");
     const wire = await nextText(ws);
 
     const tx = local().filter((e) => e.dir === "tx");
     expect(tx).toHaveLength(1);
     expect(tx[0].kind).toBe("json");
-    expect(tx[0].msgType).toBe("terminal:output");
+    expect(tx[0].msgType).toBe("terminal:notification");
     expect(tx[0].channel).toBe("control");
     // The relay path pays a nonce hash for its join key because its route
     // header carries no message id. Loopback frames carry theirs, and hashing
@@ -133,7 +133,7 @@ describe("LocalListener netwatch taps", () => {
 
   it("gives a round-tripped frame the same id on both sides of the socket", async () => {
     const ws = await connectOwner();
-    const msg = createMessage("terminal:output", { terminalId: "t1", data: "echo me" });
+    const msg = createMessage("terminal:notification", { terminalId: "t1", kind: "osc9", title: "echo me" });
     bus.publish(msg, "control");
     // Echoing the delivered text back is what the app's own send looks like from
     // here, so this is a real round trip rather than two hand-built events.
@@ -143,7 +143,7 @@ describe("LocalListener netwatch taps", () => {
     const tx = seen.find((e) => e.dir === "tx")!;
     const rx = seen.find((e) => e.dir === "rx")!;
     expect(rx.kind).toBe("json");
-    expect(rx.msgType).toBe("terminal:output");
+    expect(rx.msgType).toBe("terminal:notification");
     // Every join in the CLI rests on this equality. If the two sides ever
     // derived their ids differently, `--join` would pair nothing and report it
     // as "the other endpoint never saw this frame".
@@ -157,13 +157,13 @@ describe("LocalListener netwatch taps", () => {
     // this is the window a core emits into after the desktop quit or during a
     // reconnect — the frame is dropped with no log at any level, which is where
     // "the app never showed that" begins.
-    listener.deliver(createMessage("terminal:output", { terminalId: "t1", data: "x" }), "control");
+    listener.deliver(createMessage("terminal:notification", { terminalId: "t1", kind: "osc9", title: "x" }), "control");
 
     const drops = local().filter((e) => e.kind === "drop");
     expect(drops).toHaveLength(1);
     expect(drops[0].reason).toBe("no-owner");
     expect(drops[0].dir).toBe("tx");
-    expect(drops[0].msgType).toBe("terminal:output");
+    expect(drops[0].msgType).toBe("terminal:notification");
   });
 
   it("records text on an established socket that is not a message at all", async () => {
@@ -231,7 +231,7 @@ describe("LocalListener netwatch taps", () => {
 
   it("stamps every event with the project whose socket it crossed", async () => {
     const ws = await connectOwner();
-    bus.publish(createMessage("terminal:output", { terminalId: "t1", data: "out" }), "control");
+    bus.publish(createMessage("terminal:notification", { terminalId: "t1", kind: "osc9", title: "out" }), "control");
     ws.send(await nextText(ws));
     ws.send("{not json");
 
@@ -264,7 +264,7 @@ describe("LocalListener body capture", () => {
     await badClosed;
 
     const ws = await connectOwner();
-    bus.publish(createMessage("terminal:output", { terminalId: "t1", data: "out" }), "control");
+    bus.publish(createMessage("terminal:notification", { terminalId: "t1", kind: "osc9", title: "out" }), "control");
     ws.send(await nextText(ws));
     const seen = await untilLocal(3);
 
@@ -280,21 +280,21 @@ describe("LocalListener body capture", () => {
 
   it("records no plaintext until someone asks for it", async () => {
     const ws = await connectOwner();
-    bus.publish(createMessage("terminal:output", { terminalId: "t1", data: "secret output" }), "control");
+    bus.publish(createMessage("terminal:notification", { terminalId: "t1", kind: "osc9", title: "secret output" }), "control");
     ws.send(await nextText(ws));
 
     // Always-on metadata is the whole reason the ring is affordable. A body
     // nobody armed is the user's own keystrokes and build output kept in memory
     // by default.
     for (const e of await untilLocal(2)) expect(e.body).toBeUndefined();
-    expect(local().some((e) => e.msgType === "terminal:output")).toBe(true);
+    expect(local().some((e) => e.msgType === "terminal:notification")).toBe(true);
     ws.close();
   });
 
   it("carries both directions' plaintext once armed", async () => {
     const ws = await connectOwner();
     armBodyCapture(true, 60_000);
-    bus.publish(createMessage("terminal:output", { terminalId: "t1", data: "hello world" }), "control");
+    bus.publish(createMessage("terminal:notification", { terminalId: "t1", kind: "osc9", title: "hello world" }), "control");
     const wire = await nextText(ws);
     ws.send(wire);
 
@@ -341,7 +341,7 @@ describe("LocalListener body capture", () => {
     const ws = await connectOwner();
     armBodyCapture(true, 60_000);
     const data = "x".repeat(20_000);
-    bus.publish(createMessage("terminal:output", { terminalId: "t1", data }), "control");
+    bus.publish(createMessage("terminal:notification", { terminalId: "t1", kind: "osc9", title: data }), "control");
     const wire = await nextText(ws);
 
     const tx = local().find((e) => e.dir === "tx")!;
@@ -359,7 +359,7 @@ describe("LocalListener body capture", () => {
     armBodyCapture(true, 20);
     await new Promise((r) => setTimeout(r, 120));
 
-    bus.publish(createMessage("terminal:output", { terminalId: "t1", data: "after the window" }), "control");
+    bus.publish(createMessage("terminal:notification", { terminalId: "t1", kind: "osc9", title: "after the window" }), "control");
     ws.send(await nextText(ws));
 
     // The dead man's switch: the only thing that ever disarms is the watcher
@@ -421,7 +421,7 @@ describe("antgrid watch --local", () => {
       kind: "json",
       transport: "local",
       channel: "control",
-      msgType: "terminal:input",
+      msgType: "terminal:notification",
       frameId: "id-1",
       body: "before[2Jafter",
     });

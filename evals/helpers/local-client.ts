@@ -17,7 +17,7 @@ export class LocalTestClient {
    *  give up checkout routing. */
   async connect(
     disc: LocalConnectInfo,
-    opts: { pullsTree?: boolean; capabilities?: Record<string, unknown> } = {},
+    opts: { pullsTree?: boolean; terminalFramesV1?: boolean; capabilities?: Record<string, unknown> } = {},
   ): Promise<void> {
     this.ws = new WebSocket(`ws://127.0.0.1:${disc.port}`);
     await new Promise<void>((resolve, reject) => {
@@ -48,6 +48,7 @@ export class LocalTestClient {
       capabilities: {
         checkoutRouting: true,
         ...(opts.pullsTree === false ? {} : { pullsTree: true }),
+        ...(opts.terminalFramesV1 === false ? {} : { terminalFramesV1: true }),
         ...opts.capabilities,
       },
     }));

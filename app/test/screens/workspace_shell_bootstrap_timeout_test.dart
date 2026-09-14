@@ -8,6 +8,10 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+import 'package:antgrid/providers/cached_sessions.dart';
+import 'package:antgrid/providers/agent_transport.dart';
+import 'package:antgrid/models/session_target.dart';
+import 'package:antgrid/providers/relay_error_banner.dart';
 import 'package:antgrid/util/ab_log.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -86,5 +90,77 @@ void main() {
       isNotEmpty,
       reason: 'the dropped reply should be reported to app.log',
     );
+  });
+
+  testWidgets('a late unchanged list clears the session timeout banner', (
+    tester,
+  ) async {
+    final transport = FakeAgentTransport();
+    final container = await pumpWorkspaceShell(
+      tester,
+      transport: (_) => transport,
+    );
+    await tester.pump();
+    await tester.pump();
+    final list = transport.sent.lastWhere((m) => m['type'] == 'session:list');
+    await tester.pump(const Duration(seconds: 16));
+    expect(container.read(relayErrorBannerProvider)?.code, 'SESSIONS');
+    transport.emit('session:list:result', {
+      'requestId': list['requestId'],
+      'sessions': const [],
+    });
+    await tester.pump();
+    expect(container.read(relayErrorBannerProvider), isNull);
+    container
+        .read(relayErrorBannerProvider.notifier)
+        .set(const RelayErrorBanner('LICENSE', 'License expired'));
+    transport.emit('session:list:result', {
+      'requestId': list['requestId'],
+      'sessions': const [],
+    });
+    await tester.pump();
+    expect(container.read(relayErrorBannerProvider)?.code, 'LICENSE');
+    await tester.runAsync(container.read(cachedSessionsStoreProvider).flushNow);
+  });
+
+  testWidgets('a prior project reply cannot clear the focused project banner', (
+    tester,
+  ) async {
+    final transports = <String, FakeAgentTransport>{};
+    final container = await pumpWorkspaceShell(
+      tester,
+      followSelectedTarget: true,
+      transport: (id) => transports.putIfAbsent(id, FakeAgentTransport.new),
+    );
+    await tester.pump();
+    await tester.pump();
+    final first = transports[testAgentDeviceId]!;
+    final firstList = first.sent.lastWhere((m) => m['type'] == 'session:list');
+    container
+        .read(selectedTargetProvider.notifier)
+        .set(const LocalProject('agent-123.second-project'));
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+    final second = transports['agent-123.second-project']!;
+    final secondList = second.sent.lastWhere(
+      (m) => m['type'] == 'session:list',
+    );
+    await tester.pump(const Duration(seconds: 16));
+    final banner = container.read(relayErrorBannerProvider);
+    expect(banner?.code, 'SESSIONS');
+    first.emit('session:list:result', {
+      'requestId': firstList['requestId'],
+      'sessions': const [],
+    });
+    await tester.pump();
+    expect(container.read(relayErrorBannerProvider), same(banner));
+    second.emit('session:list:result', {
+      'requestId': secondList['requestId'],
+      'sessions': const [],
+    });
+    await tester.pump();
+    expect(container.read(relayErrorBannerProvider), isNull);
+    await tester.runAsync(container.read(cachedSessionsStoreProvider).flushNow);
   });
 }

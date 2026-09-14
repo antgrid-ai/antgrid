@@ -544,3 +544,25 @@ test("the not-found page is kept out of the index", async ({ page }) => {
   await page.goto("/");
   await expect(page.locator('meta[name="robots"]')).toHaveCount(0);
 });
+
+// Analytics is the rare surface that fails silently in BOTH directions, which is
+// why it is pinned here rather than left to the build: a tag dropped in a layout
+// refactor stops the numbers with no error anywhere, and a tag that loses its
+// domain gate quietly files every `astro dev` session, CI run and preview deploy
+// as real traffic — read back later as growth that never happened.
+//
+// The gate is enforced by the tracker, not the server: s.js returns early unless
+// location.hostname is in data-domains. So the attribute IS the mechanism, and
+// asserting it is the whole test — deliberately without loading s.js, because a
+// third-party origin must never be able to fail this suite (see the note above).
+test("every page carries the analytics tag, gated to the canonical host", async ({ page }) => {
+  // One page per layout: Base directly, and Legal, which wraps it. A regression
+  // that reaches only the markdown pages is the one nobody would notice.
+  for (const path of ["/", "/download", "/privacy"]) {
+    await page.goto(path);
+    const tag = page.locator('script[src="https://wa.radhaai.com/s.js"]');
+    await expect(tag, `no analytics tag on ${path}`).toHaveCount(1);
+    await expect(tag).toHaveAttribute("data-website-id", "1b36bb4c-d7aa-4ae1-aa96-3c6d2025fcda");
+    await expect(tag).toHaveAttribute("data-domains", "antgrid.ai,www.antgrid.ai");
+  }
+});

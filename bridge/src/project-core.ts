@@ -496,6 +496,7 @@ export class ProjectCore {
     await listener.start();
     this.listener = listener;
     core.setOwnerPullsTreeProvider(() => listener.ownerPullsTree);
+    core.setOwnerTerminalFramesV1Provider(() => listener.ownerSupportsTerminalFramesV1);
 
     // Connect info is published via the control-plane `project:open` response
     // (no per-project discovery file). Surface it for the host to hand out.
