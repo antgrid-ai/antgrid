@@ -936,6 +936,23 @@ test("clientGone is a no-op for a client that had nothing on screen", () => {
   expect(clientGone(s, DESKTOP)).toBe(s);
 });
 
+test("a question notification puts the session on attention and does not end its turn", () => {
+  // A terminal-mode agent that stopped to ask is a live block, not a finish:
+  // adding it to the turn-end set instead would silently mark the session done
+  // at the moment it most needs you.
+  const s = fold([sessions(1), turnStartFrame("r0"), push("question", "r0")]);
+  expect(s.status).toBe("attention");
+  expect(s.activeTurns.has("r0")).toBe(true);
+});
+
+test("a new session does NOT clear an active question on a sibling", () => {
+  // The call-to-action half: a block outlives another session starting, unlike
+  // the turn-end states, which a fresh session is allowed to age out.
+  const blocked = fold([sessions(1), push("question")]);
+  const grown = fold([sessions(2)], blocked);
+  expect(grown.status).toBe("attention");
+});
+
 // The producer of `waiting-on: human` on a peer machine (spec 5.3). Read BEFORE
 // the state is swapped, like closedTurns, or the comparison is against itself.
 test("attentionEdges names only the sessions whose human-blocked state flipped", () => {

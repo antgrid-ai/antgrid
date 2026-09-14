@@ -48,7 +48,9 @@ import 'command_bar.dart';
 import 'command_output_overlay.dart';
 import 'handler/handler_arm_explainer.dart';
 import 'handler/handler_away_hint.dart';
+import 'handler/handler_escalation_overlay.dart';
 import 'handler/handler_item_status.dart';
+import 'handler/handler_layout.dart';
 import 'handler/handler_pa_bar.dart';
 import 'remote_access_control.dart';
 import 'remote_host_chip.dart';
@@ -89,6 +91,23 @@ class AgentPanel extends ConsumerWidget {
     // the view the user asked for on tap rather than when the bridge acks —
     // holding the old view up for the whole teardown reads as an ignored tap.
     final isChat = ref.watch(activeSessionModeProvider) == 'chat';
+    // A BOOLEAN through `.select`, never the state itself: this build is the
+    // whole panel, and a plain watch of the handler state rebuilds the terminal
+    // on every judge decision the focused session makes (the hazard
+    // `workspaceBadgesProvider` documents for this same provider).
+    //
+    // A BLOCKING row, not presence: the reserve's whole justification is that
+    // the `terminal:resize` it costs lands while the agent is stopped (see the
+    // mount below). An ask is raised on a pass that has ALREADY replied to the
+    // agent (`raiseAsk`, handler/engine.ts), so the agent is streaming past it
+    // right now — reserving for one reflows a running TUI mid-output, and again
+    // when it is answered. The card still floats over the terminal either way;
+    // what an ask does not get is the terminal's last line back.
+    final hasBlockingEscalation = ref.watch(
+      focusedSessionHandlerStateProvider.select(
+        (s) => s.escalations.any((e) => !e.nonBlocking),
+      ),
+    );
 
     return DisplayVisibility(
       child: Column(
@@ -142,9 +161,46 @@ class AgentPanel extends ConsumerWidget {
                     key: ValueKey(activeId),
                     sessionId: activeId,
                   )
-                // Overlay is terminal-only; it must never paint over the transcript.
-                : const Stack(
-                    children: [TerminalScreen(), CommandOutputOverlay()],
+                // Both overlays are terminal-only; neither may paint over the
+                // transcript, which owns its own inline resolution UI.
+                //
+                // The escalation card FLOATS and the terminal reserves only the
+                // collapsed strip beneath it: a height change on the terminal
+                // child sends a `terminal:resize` up the wire (see
+                // `_maybeSendResize` in terminal_view_wrapper.dart, whose row
+                // count comes off the incoming constraints), so reserving on a
+                // BLOCKING row costs one reflow when the question arrives and one
+                // when it goes — both at the moment the agent is stopped and
+                // drawing nothing — while reserving on expand/collapse would cost
+                // one per chevron tap. What the reserve buys is the terminal's
+                // last line, which is the line the user collapsed the card in
+                // order to read.
+                : Stack(
+                    children: [
+                      Padding(
+                        padding: EdgeInsets.only(
+                          bottom: hasBlockingEscalation
+                              ? handlerEscalationCollapsedHeight(context)
+                              : 0,
+                        ),
+                        child: const TerminalScreen(),
+                      ),
+                      // Both of the following are opaque, full-width and pinned
+                      // to the same bottom edge, so their order IS the stacking
+                      // contract and belongs here rather than in either of them.
+                      // The escalation sits UNDER the command panel because only
+                      // one of the two can be dismissed: a failed command's
+                      // output stands until the user closes it, so an escalation
+                      // painted over it puts the close and rerun buttons out of
+                      // reach for as long as the question stands — and reading
+                      // that failure is routinely what answering the question
+                      // needs. The command panel retires and gives the card back.
+                      // Keyed by session for the reason the transcript above is:
+                      // the collapse flag must not leak from one session into
+                      // another.
+                      HandlerEscalationOverlay(key: ValueKey(activeId)),
+                      const CommandOutputOverlay(),
+                    ],
                   ),
           ),
           const HandlerAwayHint(),
@@ -444,8 +500,9 @@ class _SessionOverflowMenu extends ConsumerWidget {
 
 /// [HandlerHeaderControl]'s arm/disarm action, redone as a single text row —
 /// the pending-escalation pill it also carries is a status surface (still
-/// reachable from the Handler tab and the transcript's own away-hint/PA bar),
-/// not an action, so a Chrome-style action menu doesn't restate it.
+/// reachable from the panel's own escalation card, the Handler tab, and the
+/// transcript's away-hint/PA bar), not an action, so a Chrome-style action menu
+/// doesn't restate it.
 class _HandlerMenuItem extends ConsumerWidget {
   const _HandlerMenuItem();
 
@@ -750,8 +807,12 @@ class HandlerHeaderControl extends ConsumerWidget {
       // Words and tone both come from the shared vocabulary, so this pill and
       // the Handler tab never describe one session two ways.
       final state = session.runState;
-      pillLabel = handlerRunStateLabel(state).toUpperCase();
-      pillColor = handlerRunStateColor(p, state);
+      // `asksOnly` reads the session's GATED rows, so a bridge that re-emits
+      // `nonBlocking` without advertising a verb that answers one keeps the
+      // loud word — the app must not soften a question it has no way to answer.
+      final asksOnly = session.asksOnly;
+      pillLabel = handlerRunStateLabel(state, asksOnly: asksOnly).toUpperCase();
+      pillColor = handlerRunStateColor(p, state, asksOnly: asksOnly);
       switch (state) {
         case HandlerRunState.needsYou:
           pillLabel = '$pillLabel ${session.pendingEscalations}';
@@ -787,8 +848,24 @@ class HandlerHeaderControl extends ConsumerWidget {
     final otherPending =
         state.pendingEscalations - (session?.pendingEscalations ?? 0);
     if (session?.runState != HandlerRunState.needsYou && otherPending > 0) {
-      pillLabel = 'NEEDS YOU $otherPending';
-      pillColor = p.accent;
+      // The word comes from the rows this override is actually counting, not
+      // from the focused session's own state: one blocking row anywhere in that
+      // set is a stopped agent, and a stopped agent outranks any number of
+      // questions the work is running past. Rows here are the project-wide list
+      // the capability gate has already been over.
+      //
+      // Spelled the same way round as `HandlerSessionState.asksOnly` — every
+      // row an ask, over a non-empty set — rather than as "no blocking row",
+      // because the count and the rows come from different places and the count
+      // can be the higher of the two. With nothing to read, the quiet word would
+      // be an assertion about rows this app does not hold, and the whole reason
+      // this override exists is that a stopped session must not hide.
+      final counted = state.escalations
+          .where((e) => e.terminalId != activeId)
+          .toList();
+      final asked = counted.isNotEmpty && counted.every((e) => e.nonBlocking);
+      pillLabel = '${asked ? 'ASKED YOU' : 'NEEDS YOU'} $otherPending';
+      pillColor = asked ? p.textSecondary : p.accent;
       pillNavigates = true;
     }
 
@@ -810,19 +887,12 @@ class HandlerHeaderControl extends ConsumerWidget {
     // is handed over as pending state instead — the same handover a deep link
     // naming a view uses, drained by the shell after the restore.
     void openHandler() {
-      // Every branch below lands on the handler tab, by handover or by call, so
-      // a pending agent-page stamp from an earlier navigation must not survive
-      // any of them — its drain runs last and would override the tab.
-      ref.read(pendingAgentPageProvider.notifier).set(null);
       final waiting = session?.runState == HandlerRunState.needsYou
           ? null
           : state.escalations
                 .firstWhereOrNull((e) => e.terminalId != activeId)
                 ?.terminalId;
-      if (waiting == null) {
-        ref.read(revealHandlerTabProvider)?.call();
-        return;
-      }
+      if (waiting == null) return revealHandlerTabNow(ref);
       ref.read(activeSessionIdProvider.notifier).set(waiting);
       // Read back rather than assumed: `ActiveSessionId.set` REFUSES a session
       // the bridge is already deleting, and such a session keeps its replayed
@@ -830,18 +900,25 @@ class HandlerHeaderControl extends ConsumerWidget {
       // and the handover below would stamp the session still in focus with a
       // destination picked for a different one.
       if (ref.read(activeSessionIdProvider) != waiting) {
-        ref.read(revealHandlerTabProvider)?.call();
-        return;
+        return revealHandlerTabNow(ref);
       }
+      // The handover branch owes the same clear the direct one gets from
+      // [revealHandlerTabNow]: the agent-page stamp drains after the view one
+      // and would take the user off the tab this just asked for.
+      ref.read(pendingAgentPageProvider.notifier).set(null);
       ref.read(pendingWorkspaceViewProvider.notifier).set((
         target: ref.read(selectedTargetProvider),
         value: WorkspaceView.handler,
       ));
     }
 
-    // A NEEDS YOU pill is a call to action, so it navigates to the Handler
-    // tab where the question is answerable; WATCHING/HANDLING are pure
-    // status and stay inert.
+    // A NEEDS YOU pill is a call to action, so it navigates; WATCHING/HANDLING
+    // are pure status and stay inert.
+    //
+    // What it navigates TO has narrowed since [HandlerEscalationOverlay] landed:
+    // the focused session's own question is answerable in place, over the
+    // terminal it stopped, so the journey this pill still owns is the OTHER
+    // session — which is exactly the branch `openHandler` takes above.
     final pill = pillLabel == null
         ? null
         : pillNavigates
@@ -862,7 +939,7 @@ class HandlerHeaderControl extends ConsumerWidget {
     }
 
     // This control composes no payload of its own — no backlog, no judge
-    // override, no posture. Everything the session needs is either already
+    // override, no lens. Everything the session needs is either already
     // stored on the bridge or extracted behind the handoff, so sending any of
     // those keys here would overwrite state this control never showed. The arm
     // sheet is where a payload can come from, and it sends only what the user

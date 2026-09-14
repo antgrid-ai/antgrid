@@ -663,6 +663,9 @@ export class ProjectCore {
       // defaults true, so it reads "can receive in-band" for a phone that has
       // never connected and mutes push after a host restart.
       shouldFallback: () => !peerConnected || core.connState.appFocusPaused,
+      // Read live, never captured: a slot is armed and disarmed under a stream
+      // that outlives both.
+      isHandlerArmed: (terminalId) => core.isHandlerArmed(terminalId),
       // Target every registered phone that CANNOT receive this in band right
       // now, which is the question push actually answers. A device is in band
       // only while it holds a reachable session AND that session's client has

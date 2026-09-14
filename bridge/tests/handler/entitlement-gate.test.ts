@@ -138,7 +138,7 @@ describe("arm()", () => {
     const { engine, sent, saved } = makeEngine(credentialed("free"), {
       loadSessionFn: (): HandlerSessionRecord => ({
         version: 2, terminalId: "t1", armed: true, suspended: true, goal: GOAL,
-        backlog: [], armedAt: 1, escalations: [],
+        instructions: [], backlog: [], armedAt: 1, escalations: [],
       }),
     });
     engine.arm({ terminalId: "t1" });

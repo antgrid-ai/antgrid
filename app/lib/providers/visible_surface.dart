@@ -68,6 +68,23 @@ final pendingAgentPageProvider =
       () => ValueController(null),
     );
 
+/// Reveals the Handler tab right now, for a caller with no session switch to
+/// make.
+///
+/// The pending agent-page stamp is cleared first and that order is the whole
+/// point of the function: the shell drains that stamp LAST, so a request left
+/// by an earlier navigation would override the tab this just revealed. Every
+/// caller owes that clear, and a second hand-written copy of the pair is where
+/// one of them stops owing it.
+///
+/// The other half of the handover — the one that DOES move focus — belongs to
+/// `AgentPanel.openHandler`, which writes [pendingWorkspaceViewProvider]
+/// instead for the reason spelled out there.
+void revealHandlerTabNow(WidgetRef ref) {
+  ref.read(pendingAgentPageProvider.notifier).set(null);
+  ref.read(revealHandlerTabProvider)?.call();
+}
+
 /// A file a navigation named, waiting for the file explorer to open it.
 ///
 /// Grouped with [pendingWorkspaceViewProvider] because a file is only reachable

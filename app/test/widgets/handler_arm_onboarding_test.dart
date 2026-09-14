@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/design/widgets/ab_button.dart';
+import 'package:antgrid/design/widgets/ab_text_field.dart';
 import 'package:antgrid/models/agent_descriptor.dart';
 import 'package:antgrid/models/handler_state.dart';
 import 'package:antgrid/navigation/root_navigator.dart';
@@ -95,17 +96,15 @@ void main() {
       );
     });
 
-    test('a seeded goal is named, and only when one exists', () {
-      const seeded =
-          'Handler starts from what you asked for when you opened this '
-          'session, and queues that as your backlog.';
+    test('the seeded goal is not described here at all', () {
+      // It used to be, as a paragraph saying a backlog would appear from
+      // something typed on another screen. The sheet now shows that sentence
+      // itself, directly above the composer asking what to add beyond it, so
+      // the paragraph had become the same fact stated twice in a row.
+      expect(handlerArmExplainerBody(agentObservable: true), base);
       expect(
         handlerArmExplainerBody(agentObservable: true),
-        isNot(contains(seeded)),
-      );
-      expect(
-        handlerArmExplainerBody(agentObservable: true, hasOpeningPrompt: true),
-        '$base\n\n$seeded',
+        isNot(contains('starts from what you asked for')),
       );
     });
 
@@ -126,16 +125,6 @@ void main() {
         handlerArmExplainerBody(agentObservable: true, judgeCapable: true),
         base,
       );
-    });
-
-    test('the judge caveat reads after the seeded goal', () {
-      final body = handlerArmExplainerBody(
-        agentObservable: true,
-        judgeCapable: false,
-        hasOpeningPrompt: true,
-      );
-      expect(body, contains('queues that as your backlog'));
-      expect(body, endsWith(escalateOnlyNotice));
     });
 
     test('an unwatchable agent does not stack a second caveat', () {
@@ -162,7 +151,6 @@ void main() {
       final body = handlerArmExplainerBody(
         agentObservable: false,
         agentLabel: 'Claude Code',
-        hasOpeningPrompt: true,
       );
       expect(body, endsWith(unwatchableNotice('Claude Code')));
     });
@@ -178,8 +166,8 @@ void main() {
       });
 
       test('the standing explanation is the only thing dropped', () {
-        // Coverage is per-agent and the goal is per-session: neither is retired
-        // by having read the explanation once.
+        // Coverage is per-agent: it is not retired by having read the
+        // explanation once.
         expect(
           handlerArmExplainerBody(
             agentObservable: false,
@@ -203,27 +191,12 @@ void main() {
         );
       });
 
-      test('a seeded goal names Handler, having lost its antecedent', () {
+      test('a seeded goal adds nothing back to this copy', () {
+        // The goal is shown on the sheet as itself, so a repeat arm over a
+        // covered agent still says nothing here — goal or no goal.
         expect(
-          handlerArmExplainerBody(
-            agentObservable: true,
-            hasOpeningPrompt: true,
-            explain: false,
-          ),
-          'Handler starts from what you asked for when you opened this '
-          'session, and queues that as your backlog.',
-        );
-      });
-
-      test('an unwatchable agent still withholds the goal', () {
-        expect(
-          handlerArmExplainerBody(
-            agentObservable: false,
-            agentLabel: 'Claude Code',
-            hasOpeningPrompt: true,
-            explain: false,
-          ),
-          unwatchableNotice('Claude Code'),
+          handlerArmExplainerBody(agentObservable: true, explain: false),
+          isNull,
         );
       });
     });
@@ -580,6 +553,21 @@ void main() {
       await tester.pumpAndSettle();
     }
 
+    /// The machine naming the lenses it reads. Presence of the list is the
+    /// capability signal, so a sheet opened before one lands offers nothing to
+    /// pick — every test that touches the lens row sends this first.
+    Future<void> advertiseLenses(
+      WidgetTester tester,
+      FakeAgentTransport transport,
+    ) async {
+      transport.emit('handler:status', {
+        'projectId': 'p',
+        'sessions': <dynamic>[],
+        'lenses': ['pm', 'qa', 'critic', 'release'],
+      });
+      await tester.pumpAndSettle();
+    }
+
     testWidgets('a remembered prompt arms as the session goal', (tester) async {
       final (transport, container, context) = await pumpArm(tester);
       container
@@ -600,6 +588,7 @@ void main() {
       tester,
     ) async {
       final (transport, container, context) = await pumpArm(tester);
+      await advertiseLenses(tester, transport);
 
       await armThroughSheet(tester, container, context);
 
@@ -607,11 +596,11 @@ void main() {
       expect(sent['armed'], true);
       expect(sent.containsKey('goal'), isFalse);
       expect(sent.containsKey('backlog'), isFalse);
-      // The posture the sheet SHOWS is a seed, not something the bridge
-      // reported: a cold cache over a session the bridge holds a posture for
-      // is the ordinary case after a restart, so an untouched control must
-      // send nothing rather than reset that pick to the default.
-      expect(sent.containsKey('personality'), isFalse);
+      // A cold cache over a session the bridge holds a lens for is the ordinary
+      // case after a restart, so an untouched control must send nothing rather
+      // than reset that pick to the default.
+      expect(sent.containsKey('role'), isFalse);
+      expect(sent.containsKey('brief'), isFalse);
       await confirmArmed(tester, transport);
     });
 
@@ -634,7 +623,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Arm Handler'), findsWidgets);
-      // …but without re-teaching what Handler is. The composer and the posture
+      // …but without re-teaching what Handler is. The composer and the lens
       // control are the whole sheet from here on.
       expect(
         find.textContaining('Handler watches this session while'),
@@ -653,8 +642,9 @@ void main() {
       await confirmArmed(tester, transport);
     });
 
-    testWidgets('a posture picked on the sheet rides the arm', (tester) async {
+    testWidgets('a lens picked on the sheet rides the arm', (tester) async {
       final (transport, container, context) = await pumpArm(tester);
+      await advertiseLenses(tester, transport);
 
       unawaited(
         armWithSheet(
@@ -665,22 +655,24 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      await tester.tap(find.text('AUTOPILOT'));
+      await tester.tap(find.text('QA'));
       await tester.pumpAndSettle();
       await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
       await tester.pumpAndSettle();
 
-      expect(armFrame(transport)['personality'], 'autopilot');
+      expect(armFrame(transport)['role'], 'qa');
+      expect(armFrame(transport).containsKey('brief'), isFalse);
       await confirmArmed(tester, transport);
     });
 
-    testWidgets('a posture moved away from and back still rides the arm', (
+    testWidgets('a lens moved away from and back still rides the arm', (
       tester,
     ) async {
-      // The seed is a display value: the bridge may hold a posture this app has
-      // never been told about, so landing back on what the sheet opened showing
-      // is a choice about it, not the absence of one.
+      // The default is a real answer, not the absence of one: the bridge may
+      // hold a lens this app has never been told about, so landing back on the
+      // rules alone has to go out as a clear.
       final (transport, container, context) = await pumpArm(tester);
+      await advertiseLenses(tester, transport);
 
       unawaited(
         armWithSheet(
@@ -691,14 +683,72 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      await tester.tap(find.text('CLOSER'));
+      await tester.tap(find.text('CRITIC'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('WATCHDOG'));
+      await tester.tap(find.text('INTENT AND COMPLETION'));
       await tester.pumpAndSettle();
       await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
       await tester.pumpAndSettle();
 
-      expect(armFrame(transport)['personality'], 'watchdog');
+      expect(armFrame(transport)['role'], '');
+      await confirmArmed(tester, transport);
+    });
+
+    testWidgets('the default picked over a cold cache goes out as a clear', (
+      tester,
+    ) async {
+      // Nothing is selected when this app has not been told what the session
+      // runs, so the one tap that says "the rules alone" is the only thing that
+      // can replace a lens the bridge is holding.
+      final (transport, container, context) = await pumpArm(tester);
+      await advertiseLenses(tester, transport);
+
+      unawaited(
+        armWithSheet(
+          context: context,
+          container: container,
+          terminalId: 't1',
+          agentObservable: true,
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('INTENT AND COMPLETION'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
+      await tester.pumpAndSettle();
+
+      expect(armFrame(transport)['role'], '');
+      await confirmArmed(tester, transport);
+    });
+
+    testWidgets('a brief typed and never submitted rides the arm alone', (
+      tester,
+    ) async {
+      // The sheet's one commit is its button, so a field waiting on Enter would
+      // drop what the user wrote — and a brief must not carry a lens clear the
+      // user never made.
+      final (transport, container, context) = await pumpArm(tester);
+      await advertiseLenses(tester, transport);
+
+      unawaited(
+        armWithSheet(
+          context: context,
+          container: container,
+          terminalId: 't1',
+          agentObservable: true,
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byType(AbTextField),
+        '  watch the migrations  ',
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
+      await tester.pumpAndSettle();
+
+      expect(armFrame(transport)['brief'], 'watch the migrations');
+      expect(armFrame(transport).containsKey('role'), isFalse);
       await confirmArmed(tester, transport);
     });
 
@@ -854,7 +904,7 @@ void main() {
       await confirmArmed(tester, transport);
     });
 
-    testWidgets('an arm over a remembered prompt says the goal is seeded', (
+    testWidgets('an arm over a remembered prompt shows the goal it seeds', (
       tester,
     ) async {
       final (transport, container, context) = await pumpArm(tester);
@@ -872,10 +922,10 @@ void main() {
       );
       await tester.pumpAndSettle();
 
+      // The sentence itself, verbatim — the sheet no longer describes it as
+      // something typed elsewhere, it shows it.
       expect(
-        find.textContaining(
-          'Handler starts from what you asked for when you opened this session',
-        ),
+        find.text('Your backlog starts with: fix the flaky login test'),
         findsOneWidget,
       );
       await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
@@ -899,10 +949,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(
-        find.textContaining('Handler starts from what you asked for'),
-        findsNothing,
-      );
+      expect(find.textContaining('Your backlog starts with'), findsNothing);
       // A first arm still gets the standing explanation — the other half of
       // what handlerArmedOnce gates on this sheet.
       expect(

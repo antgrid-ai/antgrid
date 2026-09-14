@@ -29,68 +29,107 @@ String handlerRunStateToWire(HandlerRunState s) {
   }
 }
 
-/// How far Handler leans toward answering on the user's behalf. Mirrors the
-/// bridge's `HandlerPersonalitySchema` (`bridge/src/protocol.ts`) and is carried
-/// on every session snapshot.
+/// What the judge looks for and asks about, added on top of the rules it
+/// already judges under. Mirrors the bridge's `HandlerLensSchema`
+/// (`bridge/src/protocol.ts`); the text behind each id is bridge-authored and
+/// never travels on the wire, which is why a lens is an id and not free text.
 ///
-/// It moves one line only — where `handle` gives way to `escalate` — plus the
-/// tone of the notification. It has no bearing on what a backlog item must cite
-/// to close, which is why no surface may present it as a speed or quality dial.
-enum HandlerPersonality {
-  /// Escalate freely; handle only the unambiguous. What a session judges under
-  /// until someone picks otherwise.
-  watchdog,
+/// A lens adds questions and nothing else. It never moves the line between
+/// handling and escalating — the bridge's RULES own that line — so no surface
+/// may present one as an autonomy or a speed dial.
+enum HandlerLens { pm, qa, critic, release }
 
-  /// Handle what the session itself settles; escalate genuine ambiguity.
-  closer,
-
-  /// Handle wherever it can; escalate only where it must.
-  autopilot,
-}
-
-/// The bridge resolves the default before sending, so a snapshot always names
-/// one. Null here means a bridge too old to have the field — rendered as
-/// "not reported", never as [HandlerPersonality.watchdog]: a picker showing a
-/// preset the far end has never heard of is a control over nothing.
-HandlerPersonality? handlerPersonalityFromWire(dynamic s) {
-  switch (s) {
-    case 'watchdog':
-      return HandlerPersonality.watchdog;
-    case 'closer':
-      return HandlerPersonality.closer;
-    case 'autopilot':
-      return HandlerPersonality.autopilot;
-    default:
-      return null;
-  }
-}
+/// Null for anything this build cannot name, and for the absence that IS the
+/// unnamed default. Callers keep the raw wire string beside the result: an id a
+/// newer bridge added has to render as itself, never as the default.
+HandlerLens? handlerLensFromWire(dynamic s) => switch (s) {
+  'pm' => HandlerLens.pm,
+  'qa' => HandlerLens.qa,
+  'critic' => HandlerLens.critic,
+  'release' => HandlerLens.release,
+  _ => null,
+};
 
 /// The wire spelling, the one place the enum is turned back into the string
 /// `handler:configure` carries.
-String handlerPersonalityToWire(HandlerPersonality p) => switch (p) {
-  HandlerPersonality.watchdog => 'watchdog',
-  HandlerPersonality.closer => 'closer',
-  HandlerPersonality.autopilot => 'autopilot',
+String handlerLensToWire(HandlerLens l) => switch (l) {
+  HandlerLens.pm => 'pm',
+  HandlerLens.qa => 'qa',
+  HandlerLens.critic => 'critic',
+  HandlerLens.release => 'release',
 };
 
-/// Picker label. Sentence case, matching every other control in the app.
-String handlerPersonalityLabel(HandlerPersonality p) => switch (p) {
-  HandlerPersonality.watchdog => 'Watchdog',
-  HandlerPersonality.closer => 'Closer',
-  HandlerPersonality.autopilot => 'Autopilot',
+/// Picker label. PM and QA stay uppercase — they are how the roles are written,
+/// not sentences that happen to start with an abbreviation.
+String handlerLensLabel(HandlerLens l) => switch (l) {
+  HandlerLens.pm => 'PM',
+  HandlerLens.qa => 'QA',
+  HandlerLens.critic => 'Critic',
+  HandlerLens.release => 'Release manager',
 };
 
-/// One line of what the preset actually does, shown under the picker. Phrased
-/// as policy rather than personality: the user is choosing where a threshold
-/// sits, and "cautious"/"bold" would describe a mood instead of a rule.
-String handlerPersonalityBlurb(HandlerPersonality p) => switch (p) {
-  HandlerPersonality.watchdog =>
-    'Answers only what is unambiguous. Anything with two reasonable readings comes to you.',
-  HandlerPersonality.closer =>
-    'Answers what the session itself settles. Genuine ambiguity still comes to you.',
-  HandlerPersonality.autopilot =>
-    'Answers wherever it can, treating your goal as standing authority. It still escalates whatever it is unsure of.',
+/// The default has no role name on purpose: it is the rules alone, so it is
+/// offered as what it does rather than as a fifth role.
+const String handlerLensDefaultLabel = 'Intent and completion';
+
+/// One line of what the judge additionally asks under a lens, shown beneath the
+/// picker; null is the unnamed default. Every line here describes QUESTIONS —
+/// one promising more or less autonomy would describe a dial this is not.
+String handlerLensBlurb(HandlerLens? l) => switch (l) {
+  null =>
+    "Judges each pause against your goal and the backlog — whether a step serves the intent, and whether an item's evidence closes it.",
+  HandlerLens.pm =>
+    'Asks which backlog item a step serves and what remains before an item counts as finished; reports what you will be able to see or do.',
+  HandlerLens.qa =>
+    'Asks the agent to run what proves an item and show the result, and names what is still unverified.',
+  HandlerLens.critic =>
+    'Asks what the agent ruled out and what breaks if it is wrong — one probe per stop, at a close or before an irreversible step.',
+  HandlerLens.release =>
+    'Asks whether the tests ran and the docs, migrations and changelog exist, and reports what still stands between the work and a release.',
 };
+
+/// What the caption says while the judge cannot run headless. The lens is
+/// stored and inert, and a control that reads as running while every pause
+/// comes to the user is the one claim this must never make.
+const String handlerLensParkedBlurb =
+    'Stored, but not running — nothing is being judged, so every pause comes '
+    'to you whatever this says.';
+
+/// What it says when this machine has never named the lenses it accepts. It
+/// asserts only that — the frame may predate lenses or simply not have arrived
+/// — because naming a cause this app cannot check is how a caption starts
+/// lying about a machine that is merely slow.
+const String handlerLensUnreportedBlurb =
+    'This machine has not named the lenses it reads, so there is nothing to '
+    'pick here yet.';
+
+/// What it says while this app has not been told which lens the session runs:
+/// a cold cache over a session the far end still holds one for. Never the
+/// default's own line — painting that would report a pick nobody stated.
+const String handlerLensUnsetBlurb =
+    'Runs as it was last set on this machine until you pick one.';
+
+/// What it says when the session runs an id this build cannot name — a newer
+/// machine's lens. The pick is real and is left alone until the user replaces
+/// it, which one tap does.
+const String handlerLensUnknownBlurb =
+    "This session is judging under a lens this build can't name — picking one "
+    'replaces it.';
+
+/// What the bridge will print of a brief, mirrored by hand from
+/// `MAX_BRIEF_CHARS` (`bridge/src/handler/decision.ts`). The bridge clips in
+/// UTF-16 code units and never refuses on length, so a field counting anything
+/// else can only cost an emoji-heavy brief its tail.
+const int handlerMaxBriefChars = 500;
+
+/// A session's lens and brief as a surface seeds from them.
+///
+/// A null pick means this app has NOT been told — a cold cache, or a machine
+/// that never advertised lenses — and renders with nothing selected. A null
+/// [HandlerLensPick.roleId] INSIDE a pick is the unnamed default, which is a
+/// real answer. The raw wire string is what is carried, so an id this build
+/// cannot name is shown as itself rather than collapsed into the default.
+typedef HandlerLensPick = ({String? roleId, String? brief});
 
 /// How much of the Handler an armed session can actually get. Mirrors the
 /// bridge's `HandlerObservability` (`bridge/src/handler/engine.ts`), carried on
@@ -224,6 +263,22 @@ class HandlerSessionState {
   final String goal;
   final List<HandlerInstructionItem> backlog;
 
+  /// A window onto the user's own instruction stack — entry #1 (which [goal]
+  /// mirrors) followed by the newest up to four, oldest first. Never the whole
+  /// list: the bridge keeps every sentence the user ever typed
+  /// (`bridge/src/handler/session-store.ts`), but only this much travels.
+  /// Empty is a real answer, not "not reported" — a bridge that HAS this field
+  /// always sends it, including empty for an armed session nobody has
+  /// instructed yet, the same voice [askAnswer] and [roleId] already speak.
+  final List<String> instructions;
+
+  /// How many entries the bridge is actually holding — RETAINED, not lifetime:
+  /// `pushInstruction` splices the oldest away past its cap and nothing counts
+  /// the drops. `instructionsTotal - instructions.length` is the number elided
+  /// between entry #1 and the newest few, which is what makes the window
+  /// readable as "+N more" without a second count that could disagree with it.
+  final int instructionsTotal;
+
   /// Unanswered escalations replayed with every status snapshot, so the
   /// "needs you" list survives app restarts and reconnects (the one-shot
   /// `handler:escalation` push alone would be lost with the process).
@@ -234,12 +289,22 @@ class HandlerSessionState {
   final String? judgeTool;
   final String? judgeModel;
 
-  /// Why the handler is waiting ('limit' | 'outage') and the epoch-ms wake
-  /// deadline. Both are present only while [runState] is
-  /// [HandlerRunState.parked]; a park with no known deadline leaves
-  /// [parkedUntil] null.
+  /// The BACKOFF POLICY the bridge picked ('limit' = wait out the provider's
+  /// own window, 'outage' = exponential retry) and the epoch-ms wake deadline.
+  /// Both are present only while [runState] is [HandlerRunState.parked]; a park
+  /// with no known deadline leaves [parkedUntil] null.
+  ///
+  /// [parkKind] is NOT a reason and must never be rendered as one — every park
+  /// that is not a provider limit is filed under 'outage', Handler's own judge
+  /// failing included. [parkCause] is the attribution, and the only one of the
+  /// two a surface may put into words (see `handlerParkReason`).
   final String? parkKind;
   final int? parkedUntil;
+
+  /// WHOSE system stopped serving us, absent on a bridge that predates the
+  /// field. Kept raw like [roleId]: a cause a newer bridge names must fall back
+  /// to the kind's own weaker copy rather than be dropped.
+  final String? parkCause;
 
   /// What the handler can actually do with THIS armed session, as the bridge
   /// reports it. Null = not reported (a bridge predating the field) — the UI
@@ -251,9 +316,41 @@ class HandlerSessionState {
   /// an agent, this describes a session (its live mode and its judge pick).
   final HandlerObservability? observability;
 
-  /// The posture this session judges under, as the bridge resolved it. Null
-  /// only from a bridge predating the field.
-  final HandlerPersonality? personality;
+  /// Whether this bridge can be TOLD the answer to one of this session's asks —
+  /// `handler:answer` for a tap, an escalationId-bearing `handler:instruct` for
+  /// free text. False from a bridge that has neither.
+  ///
+  /// Presence on the wire is the whole signal, the way `observability`'s is.
+  /// The ask row cannot advertise itself: a bridge can read `nonBlocking` off a
+  /// record a newer bridge wrote and re-emit it faithfully while having no verb
+  /// that answers one, so an ungated row would render a one-tap that goes
+  /// nowhere or a sheet whose text lands in the PTY.
+  final bool askAnswer;
+
+  /// An answer has been given and has not reached the agent yet. State rather
+  /// than capability — it is the only surface that would ever expose a relay
+  /// that failed or is still waiting on the agent's next event.
+  final bool askAnswerPending;
+
+  /// This bridge banks an answer to a BLOCKING escalation for its judge when the
+  /// frame says the words were already delivered into the session. Capability, the
+  /// way [askAnswer] is: a bridge without it reads the same `escalationId` as an
+  /// ordinary instruction and mints a session-long authorization grant out of the
+  /// user's answer.
+  final bool escalationAnswer;
+
+  /// The lens this session judges under, as the bridge resolved it. Kept as the
+  /// raw wire string — [role] resolves it — so an id a newer bridge added is
+  /// never quietly rendered as the default.
+  ///
+  /// State, not capability: absent is the unnamed default rather than a bridge
+  /// that cannot do lenses. What a machine ACCEPTS is [HandlerState.lenses].
+  final String? roleId;
+
+  /// The user's brief beneath the lens, non-empty or null: the bridge omits an
+  /// empty one, and an empty string on a surface would read as a brief that
+  /// says nothing rather than as no brief at all.
+  final String? brief;
 
   const HandlerSessionState({
     required this.terminalId,
@@ -262,22 +359,67 @@ class HandlerSessionState {
     required this.armedAt,
     required this.goal,
     required this.backlog,
+    this.instructions = const [],
+    this.instructionsTotal = 0,
     required this.escalations,
     this.judgeTool,
     this.judgeModel,
     this.parkKind,
     this.parkedUntil,
+    this.parkCause,
     this.observability,
-    this.personality,
+    this.askAnswer = false,
+    this.askAnswerPending = false,
+    this.escalationAnswer = false,
+    this.roleId,
+    this.brief,
   });
 
   int get backlogTotal => backlog.length;
+
+  /// The lens as this build knows it. Null for the unnamed default AND for an
+  /// id it cannot name — [roleId] is what tells those two apart.
+  HandlerLens? get role => handlerLensFromWire(roleId);
+
+  /// Whether everything standing on this session is a question the agent is
+  /// working past. A `guard_blocked` report parses as blocking, so a session
+  /// holding one keeps the loud word — nothing but a Dismiss retires it.
+  ///
+  /// Reads the GATED rows: `HandlerService` clears `nonBlocking` on every
+  /// emission for a session that cannot be answered, so this is false on a
+  /// bridge that would leave the user's answer nowhere to go.
+  bool get asksOnly =>
+      escalations.isNotEmpty && escalations.every((e) => e.nonBlocking);
 
   /// Only `done` counts, never the other terminal states: `skipped` and
   /// `failed` close an item without achieving it, and reporting them as
   /// progress is the summary-inflation failure mode this guards against.
   int get backlogDone => backlog.where((i) => i.status == 'done').length;
 
+  /// What to show as "what the user asked for", from whichever of the two
+  /// fields a bridge actually sent. [instructions] wins whenever a bridge
+  /// populated it; a bridge that predates the field sends none, so this falls
+  /// back to the single sentence [goal] already carries — which is exactly how
+  /// this session rendered before [instructions] existed, and must keep
+  /// rendering for a bridge that still doesn't send it.
+  List<String> get askedFor => instructions.isNotEmpty
+      ? instructions
+      : (goal.trim().isEmpty ? const [] : [goal.trim()]);
+
+  /// The count to show beside [askedFor]. Reads [instructionsTotal] only while
+  /// [instructions] is actually populated — an older bridge's [goal] fallback
+  /// has no retained-count concept of its own, so its total is simply how many
+  /// sentences [askedFor] is showing.
+  int get askedForTotal => instructions.isNotEmpty
+      ? instructionsTotal
+      : askedFor.length;
+
+  // Re-lists every field on purpose, and both callers make that dangerous:
+  // `_applyEscalationFloors` and `_dropRows` (`handler_service.dart`) run
+  // inside `_emit` for every session on every frame, so a field left out of
+  // this body resets to its default on every single emit while every fromWire
+  // test stays green — no compile error, nothing to catch it but a reader
+  // checking the list by hand.
   HandlerSessionState copyWith({
     HandlerRunState? runState,
     int? pendingEscalations,
@@ -289,13 +431,20 @@ class HandlerSessionState {
     armedAt: armedAt,
     goal: goal,
     backlog: backlog,
+    instructions: instructions,
+    instructionsTotal: instructionsTotal,
     escalations: escalations ?? this.escalations,
     judgeTool: judgeTool,
     judgeModel: judgeModel,
     parkKind: parkKind,
     parkedUntil: parkedUntil,
+    parkCause: parkCause,
     observability: observability,
-    personality: personality,
+    askAnswer: askAnswer,
+    askAnswerPending: askAnswerPending,
+    escalationAnswer: escalationAnswer,
+    roleId: roleId,
+    brief: brief,
   );
 
   static HandlerSessionState? fromWire(dynamic json) {
@@ -341,6 +490,56 @@ class HandlerSessionState {
     // render either way.
     final parkKind = json['parkKind'];
     final parkedUntil = json['parkedUntil'];
+    final parkCause = json['parkCause'];
+    // Both ask booleans degrade to false rather than rejecting the session, for
+    // the reason every other lenient read here has: a capability the bridge did
+    // not claim is one the app must not act on, and losing the armed card over
+    // a wrong-typed flag would be a far larger failure than losing the feature.
+    final askAnswer = json['askAnswer'];
+    final askAnswerPending = json['askAnswerPending'];
+    final escalationAnswer = json['escalationAnswer'];
+    // Lenient like everything else here, and kept raw: a role this build cannot
+    // name still belongs on the bar as itself, and neither it nor a malformed
+    // brief is worth losing the armed session over.
+    final role = json['role'];
+    final brief = json['brief'];
+    // Nested, not two sibling keys — the same reason `HandlerWrapUpOutcome`
+    // keeps `{total, items}` together rather than a second `more` field: two
+    // numbers that must agree are two numbers that can disagree. Absence
+    // means an older bridge, not "no instructions" (that is `{total: 0, items:
+    // []}`, a real and durable state for an armed session nobody has
+    // instructed), so the fallback below reproduces exactly what this session
+    // rendered before this field existed: [goal] alone.
+    //
+    // Otherwise lenient in the OPPOSITE direction from every read above: a
+    // bridge sending six entries or a 200-char one is sending truth, not
+    // malformed input, so its own 5/120 bounds are never enforced here —
+    // unlike `HandlerEscalationChoice`, which is bounded because a surface
+    // renders it as a fixed-size chip. `total` is the one number worth
+    // distrusting regardless, because unlike a role or a brief a bad one would
+    // actually RENDER: clamped up to what was actually parsed, never trusted
+    // outright.
+    final instructionsJson = json['instructions'];
+    var instructions = const <String>[];
+    // Trimmed, to agree with `askedFor`'s own fallback: a whitespace-only goal
+    // renders no row, so it must not be counted as one either.
+    var instructionsTotal = goal.trim().isEmpty ? 0 : 1;
+    if (instructionsJson is Map) {
+      final itemsJson = instructionsJson['items'];
+      if (itemsJson is List) {
+        instructions = [
+          for (final i in itemsJson)
+            if (i is String && i.isNotEmpty) i,
+        ];
+        final rawTotal = instructionsJson['total'];
+        final parsedTotal = rawTotal is num
+            ? rawTotal.toInt()
+            : instructions.length;
+        instructionsTotal = parsedTotal < instructions.length
+            ? instructions.length
+            : parsedTotal;
+      }
+    }
     return HandlerSessionState(
       terminalId: terminalId,
       runState: runState,
@@ -348,13 +547,20 @@ class HandlerSessionState {
       armedAt: armedAt.toInt(),
       goal: goal,
       backlog: backlog,
+      instructions: instructions,
+      instructionsTotal: instructionsTotal,
       escalations: escalations,
       judgeTool: judgeTool is String ? judgeTool : null,
       judgeModel: judgeModel is String ? judgeModel : null,
       parkKind: parkKind is String ? parkKind : null,
       parkedUntil: parkedUntil is num ? parkedUntil.toInt() : null,
+      parkCause: parkCause is String ? parkCause : null,
       observability: handlerObservabilityFromWire(json['observability']),
-      personality: handlerPersonalityFromWire(json['personality']),
+      askAnswer: askAnswer is bool ? askAnswer : false,
+      askAnswerPending: askAnswerPending is bool ? askAnswerPending : false,
+      escalationAnswer: escalationAnswer is bool ? escalationAnswer : false,
+      roleId: role is String ? role : null,
+      brief: brief is String && brief.isNotEmpty ? brief : null,
     );
   }
 }
@@ -378,15 +584,23 @@ class HandlerEscalationChoice {
   /// refuse.
   final String text;
 
+  /// What taking this one-tap commits to, judge-authored for the approve
+  /// chip and engine-authored for reject. Optional: an older bridge, or one
+  /// the judge left blank, draws the card exactly as it did before this
+  /// field existed.
+  final String? cost;
+
   const HandlerEscalationChoice({
     required this.choiceId,
     required this.label,
     required this.text,
+    this.cost,
   });
 
   static const _maxChoiceId = 40;
   static const _maxLabel = 40;
   static const _maxText = 400;
+  static const _maxCost = 160;
 
   /// The wire's own rule. A control character would render as an unreadable
   /// chip and, on the PTY path, submit an extra line past the answer.
@@ -397,6 +611,7 @@ class HandlerEscalationChoice {
     final choiceId = json['choiceId'];
     final label = json['label'];
     final text = json['text'];
+    final cost = json['cost'];
     if (choiceId is! String ||
         label is! String ||
         text is! String ||
@@ -404,6 +619,11 @@ class HandlerEscalationChoice {
         choiceId.length > _maxChoiceId ||
         label.isEmpty ||
         label.length > _maxLabel ||
+        // Whitespace-only or a control character draws a blank or garbled
+        // button — reject the entry, not degrade it: a chip with no readable
+        // label cannot be drawn at all, so there is nothing to fall back to.
+        label.trim().isEmpty ||
+        !_printable.hasMatch(label) ||
         text.length > _maxText ||
         // Whitespace alone is dropped by every consumer of [text] — the send
         // path refuses to submit a bare newline into a session — so it would
@@ -416,6 +636,13 @@ class HandlerEscalationChoice {
       choiceId: choiceId,
       label: label,
       text: text,
+      // Degraded, unlike label/text: a malformed cost is a missing sub-line, and
+      // rejecting the entry for one would cost the user the whole card (listFromWire
+      // returns null on any bad entry). The two required fields keep the reject-the-row
+      // polarity because without either the chip cannot be drawn at all.
+      cost: cost is String && cost.trim().isNotEmpty && cost.length <= _maxCost
+          ? cost
+          : null,
     );
   }
 
@@ -428,9 +655,11 @@ class HandlerEscalationChoice {
   ///    make one-tappable. Tolerating absence is the whole compatibility
   ///    contract, the same one `kind` already established.
   ///  - [kind] is `resolve_in_session`. That escalation is an option-based
-  ///    agent prompt, resolvable only by the chat RPC that needs a
-  ///    permissionId the escalation never carries; a chip on one would inject
-  ///    text that answers nothing while the bridge clears the row anyway. The
+  ///    agent prompt, resolvable only where the session draws it — the chat
+  ///    transcript's card, or the agent's own prompt in the terminal — and
+  ///    either surface holds an id the escalation never carries; a chip on one
+  ///    would inject text that answers nothing while the bridge clears the row
+  ///    anyway. The
   ///    bridge refuses to mint these — this is the app's own floor, because a
   ///    dead button is invisible to whoever taps it.
   ///  - [kind] is `guard_blocked`. That row exists BECAUSE a guard refused this
@@ -462,6 +691,106 @@ class HandlerEscalationChoice {
       return null;
     }
     return choices;
+  }
+}
+
+/// One tap-to-answer option on an ASK. Mirrors the `askOptions` element of
+/// `OpenEscalationWire` (`bridge/src/protocol.ts`) and `OpenEscalationSchema`
+/// (`bridge/src/handler/session-store.ts`) — three hand-written copies of one
+/// shape, so the bounds below move with them.
+///
+/// Deliberately NOT a [HandlerEscalationChoice] and never carried in
+/// [HandlerEscalation.choices]: a choice carries `text` that the ordinary reply
+/// transport types into the session, and an ask must send the agent nothing.
+/// There is no `text` here at all — a tap sends [choiceId] alone and the bridge
+/// resolves the words from its own persisted row, so what the user reads on the
+/// button is exactly what the judge is told they chose.
+class HandlerAskOption {
+  /// Stable name the bridge minted, so a tap can round-trip through an OS
+  /// notification action. Identity, never authority.
+  final String choiceId;
+
+  /// The answer itself, in the judge's words. Bounded at 80 rather than the 40
+  /// a chip label gets, because here the label IS the answer and has to carry a
+  /// sentence rather than name one that travels separately.
+  final String label;
+
+  /// What choosing it costs. Required, because it is what the reader has
+  /// instead of the verbatim `text` a quick choice shows them before they tap.
+  final String cost;
+
+  /// Whether the judge names this one as its pick. The wire spells it
+  /// `true`-or-absent, so absent and `false` are one thing and this is a plain
+  /// bool rather than a nullable one.
+  final bool recommended;
+
+  const HandlerAskOption({
+    required this.choiceId,
+    required this.label,
+    required this.cost,
+    this.recommended = false,
+  });
+
+  static const _maxChoiceId = 40;
+  static const _maxLabel = 80;
+  static const _maxCost = 160;
+
+  static HandlerAskOption? fromWire(dynamic json) {
+    if (json is! Map) return null;
+    final choiceId = json['choiceId'];
+    final label = json['label'];
+    final cost = json['cost'];
+    if (choiceId is! String ||
+        label is! String ||
+        cost is! String ||
+        choiceId.isEmpty ||
+        choiceId.length > _maxChoiceId ||
+        label.isEmpty ||
+        label.length > _maxLabel ||
+        cost.isEmpty ||
+        cost.length > _maxCost) {
+      return null;
+    }
+    return HandlerAskOption(
+      choiceId: choiceId,
+      label: label,
+      cost: cost,
+      // Anything but the wire's own `true` reads as not recommended: a second
+      // spelling of "no" must not become a second emphasised option.
+      recommended: json['recommended'] == true,
+    );
+  }
+
+  /// Parses the optional `askOptions` array carried by both the one-shot
+  /// escalation push and the status replay. Returns null — never an empty list
+  /// — whenever the options must be dropped, which leaves the QUESTION standing
+  /// and answerable in the user's own words:
+  ///
+  ///  - the key is absent: an ordinary escalation, or an ask the judge offered
+  ///    no options on.
+  ///  - the count is outside the wire's 2..4, or any entry is malformed. One
+  ///    button is not a choice, and a partial list hides the option the user
+  ///    would have picked.
+  ///  - two entries share a [choiceId]. A tap is resolved by first match, so a
+  ///    repeated id answers with an option the user did not read — which is
+  ///    exactly what sending the id rather than the words is supposed to make
+  ///    impossible.
+  ///
+  /// Never the `return null`-the-whole-row idiom [HandlerEscalation.fromWire]
+  /// uses for a wrong-typed `floorRule`: that idiom would cost the user the
+  /// question itself over decoration on it.
+  static List<HandlerAskOption>? listFromWire(dynamic json) {
+    if (json is! List || json.length < 2 || json.length > 4) return null;
+    final options = <HandlerAskOption>[];
+    for (final e in json) {
+      final option = fromWire(e);
+      if (option == null) return null;
+      options.add(option);
+    }
+    if (options.map((o) => o.choiceId).toSet().length != options.length) {
+      return null;
+    }
+    return options;
   }
 }
 
@@ -503,7 +832,8 @@ class HandlerEscalation {
   // both sides, so a missed mirror is silent.
   //
   // null/'reply' → free-text reply sheet; 'resolve_in_session' → option-based
-  // prompt (permission/question) answered in the chat transcript UI;
+  // prompt answered where the session draws it (a chat slot's permission /
+  // question card, a PTY agent's own prompt in the terminal);
   // 'guard_blocked' → a report that a harness guard refused an action Handler
   // wanted to take. A reply to one is optional, a dismiss is what retires it
   // (`handler:dismiss`), and the bridge never sends choices for one.
@@ -514,6 +844,34 @@ class HandlerEscalation {
   /// for every reason this is null. [draftReply] is populated either way, so
   /// the free-text sheet is unaffected by its presence.
   final List<HandlerEscalationChoice>? choices;
+
+  /// The session did NOT stop for this one — an ASK, raised on a pass that had
+  /// already replied to the agent, so the work went on and the user answers
+  /// when they can. False is what every row before this field meant.
+  ///
+  /// Hand-mirror of `OpenEscalationWire.nonBlocking` (`bridge/src/protocol.ts`)
+  /// and `OpenEscalationSchema` (`bridge/src/handler/session-store.ts`), and
+  /// spelled the same way round for the same reason: absent reads as blocking,
+  /// which is the safe answer on a row that predates the field and on one an
+  /// older bridge stripped it from.
+  ///
+  /// This is the GATED value, not the raw one. `HandlerService` clears it on
+  /// every emission for a session whose snapshot did not advertise `askAnswer`,
+  /// because a bridge can re-emit the field faithfully off a record a newer
+  /// bridge wrote while having no verb that answers one.
+  final bool nonBlocking;
+
+  /// Backlog ids the answer does not gate — what the agent is still working on
+  /// while the question stands. A claim to be re-derived against the owning
+  /// session's live backlog at render time, never a count to be trusted: an id
+  /// that has since finished costs a smaller number and never a wrong one.
+  final List<String> unblocked;
+
+  /// The tap-to-answer options on an ask, or null for one answerable only in
+  /// the user's own words. Never empty — see [HandlerAskOption.listFromWire].
+  /// Cleared alongside [nonBlocking] by the capability gate, so the two can
+  /// never disagree about whether a tap has anywhere to go.
+  final List<HandlerAskOption>? askOptions;
 
   const HandlerEscalation({
     required this.escalationId,
@@ -526,6 +884,9 @@ class HandlerEscalation {
     required this.at,
     this.kind,
     this.choices,
+    this.nonBlocking = false,
+    this.unblocked = const [],
+    this.askOptions,
   });
 
   /// The same escalation with its card withdrawn, still answerable in the
@@ -542,6 +903,41 @@ class HandlerEscalation {
     floorRule: floorRule,
     at: at,
     kind: kind,
+    nonBlocking: nonBlocking,
+    unblocked: unblocked,
+    askOptions: askOptions,
+  );
+
+  /// The same escalation with the ask half rewritten, for the one caller that
+  /// has to: `HandlerService`'s capability gate, which downgrades a row whose
+  /// session cannot be told the answer. Only the ask fields are settable —
+  /// everything else rides through — because nothing else has ever needed
+  /// changing after a parse, and a parameter nobody passes is a field a future
+  /// rebuild can silently drop.
+  ///
+  /// [askOptions] cannot be cleared by passing null (that is indistinguishable
+  /// from omitting it), so [clearAskOptions] exists and the two must never be
+  /// combined. Coverage that every wire field is carried is structural: see
+  /// `app/test/models/handler_escalation_mirror_gate_test.dart`.
+  HandlerEscalation copyWith({
+    bool? nonBlocking,
+    List<String>? unblocked,
+    List<HandlerAskOption>? askOptions,
+    bool clearAskOptions = false,
+  }) => HandlerEscalation(
+    escalationId: escalationId,
+    terminalId: terminalId,
+    question: question,
+    reasoning: reasoning,
+    draftReply: draftReply,
+    urgency: urgency,
+    floorRule: floorRule,
+    at: at,
+    kind: kind,
+    choices: choices,
+    nonBlocking: nonBlocking ?? this.nonBlocking,
+    unblocked: unblocked ?? this.unblocked,
+    askOptions: clearAskOptions ? null : (askOptions ?? this.askOptions),
   );
 
   HandlerEscalationChoice? choiceById(String choiceId) {
@@ -574,6 +970,8 @@ class HandlerEscalation {
     if (floorRule != null && floorRule is! String) return null;
     final kind = json['kind'];
     if (kind != null && kind is! String) return null;
+    final nonBlocking = json['nonBlocking'];
+    final unblocked = json['unblocked'];
     return HandlerEscalation(
       escalationId: escalationId,
       terminalId: terminalId,
@@ -588,6 +986,20 @@ class HandlerEscalation {
         json['choices'],
         kind: kind,
       ),
+      // The three ask fields DEGRADE rather than reject, unlike the `floorRule`
+      // and `kind` arms above: a wrong-typed value here costs the user a
+      // rendering nicety, and dropping the row over it would cost them the
+      // question. False, empty and null are each what a bridge predating the
+      // field says, so the conservative reading and the compatible one are the
+      // same value.
+      nonBlocking: nonBlocking is bool ? nonBlocking : false,
+      unblocked: unblocked is List
+          ? [
+              for (final id in unblocked)
+                if (id is String) id,
+            ]
+          : const [],
+      askOptions: HandlerAskOption.listFromWire(json['askOptions']),
     );
   }
 }
@@ -801,7 +1213,8 @@ class HandlerActivityRecord {
   // 'continue' | 'handle' | 'escalate' | 'armed' | 'goal_edited' |
   // 'item_done' | 'item_blocked' | 'item_skipped' | 'item_failed' |
   // 'instruction_dropped' | 'instruction_authorized' | 'instruction_amended' |
-  // 'floor_warning' | 'evidence_rejected' | 'wrapped_up' | 'parked' | 'resumed'
+  // 'floor_warning' | 'evidence_rejected' | 'wrapped_up' | 'parked' | 'resumed' |
+  // 'asked' | 'ask_rejected' | 'answered'
   final String decision;
   final String reason;
   final String? detail;
@@ -880,6 +1293,16 @@ class HandlerState {
   /// What an absent per-session judge tool resolves to for PTY slots — the
   /// project's agent tool. Chat slots resolve from their own session entry.
   final String? defaultTool;
+
+  /// The lens ids this project's bridge says it accepts, or null from one that
+  /// never said. PRESENCE is the capability signal, the way a session's
+  /// `observability` is: null leaves the lens controls inert, and a surface
+  /// offers only the ids it also knows, so it can never send one this bridge
+  /// would refuse.
+  ///
+  /// Project-level rather than per session because the surface that needs it
+  /// most is the arm sheet, where no session snapshot exists yet.
+  final List<String>? lenses;
   final Map<String, HandlerSessionState> sessions; // keyed by terminalId
   final List<HandlerEscalation> escalations;
   final List<HandlerActivityRecord> activity;
@@ -913,6 +1336,7 @@ class HandlerState {
 
   const HandlerState({
     this.defaultTool,
+    this.lenses,
     required this.sessions,
     required this.escalations,
     required this.activity,
@@ -925,6 +1349,7 @@ class HandlerState {
 
   const HandlerState.initial()
     : defaultTool = null,
+      lenses = null,
       sessions = const {},
       escalations = const [],
       activity = const [],
@@ -950,8 +1375,7 @@ class HandlerState {
   /// alone badges zero over a tab already rendering a NEEDS YOU card. A badge
   /// and the surface it points at must never be able to answer differently
   /// about what is waiting.
-  int get escalationBadgeCount =>
-      pendingEscalations > escalations.length
+  int get escalationBadgeCount => pendingEscalations > escalations.length
       ? pendingEscalations
       : escalations.length;
 
@@ -972,9 +1396,11 @@ class HandlerState {
   List<String> pendingInstructionsFor(String terminalId) =>
       pendingInstructions[terminalId] ?? const [];
 
-  /// This project's state narrowed to the one terminal the Handler tab shows.
+  /// This project's state narrowed to the one terminal the focused-session
+  /// surfaces show — the Handler tab, and the escalation card the agent panel
+  /// floats over the terminal.
   ///
-  /// Only the tab narrows. The service and the bridge engine stay project-wide
+  /// Only those narrow. The service and the bridge engine stay project-wide
   /// — one HandlerService per project, one engine keyed by terminalId — because
   /// escalations, undo offers and wrap-ups all have to keep arriving for
   /// sessions nobody is looking at, and the session kebab's attention row
@@ -1015,6 +1441,9 @@ class HandlerState {
     if (terminalId == null) {
       return HandlerState.initial().copyWith(
         defaultTool: defaultTool,
+        // Project-wide like [defaultTool]: what the bridge accepts does not
+        // narrow to a session, and the arm sheet reads it with none named.
+        lenses: lenses,
         // Carried for the same reason [defaultTool] is: it describes the
         // project, not the session this narrowing failed to name.
         entitlement: entitlement,
@@ -1042,6 +1471,7 @@ class HandlerState {
 
   HandlerState copyWith({
     String? defaultTool,
+    List<String>? lenses,
     Map<String, HandlerSessionState>? sessions,
     List<HandlerEscalation>? escalations,
     List<HandlerActivityRecord>? activity,
@@ -1051,9 +1481,15 @@ class HandlerState {
     Map<String, List<String>>? pendingInstructions,
     HandlerEntitlement? entitlement,
     bool clearEntitlement = false,
+    bool clearLenses = false,
   }) {
     return HandlerState(
       defaultTool: defaultTool ?? this.defaultTool,
+      // Clearable because PRESENCE is the capability: a bridge replaced under
+      // a live remote session by one that predates the lens announces that
+      // only by leaving the key out, and an advert that could only latch on
+      // would keep offering chips that bridge silently strips.
+      lenses: clearLenses ? null : (lenses ?? this.lenses),
       sessions: sessions ?? this.sessions,
       escalations: escalations ?? this.escalations,
       activity: activity ?? this.activity,
@@ -1061,9 +1497,9 @@ class HandlerState {
       wrapUps: wrapUps ?? this.wrapUps,
       pendingUndo: pendingUndo ?? this.pendingUndo,
       pendingInstructions: pendingInstructions ?? this.pendingInstructions,
-      // The one field here that has to be CLEARABLE: a refusal is lifted by an
-      // upgrade or a fresh sign-in, and a gate that only ever latches on would
-      // outlive the thing it describes with no frame able to correct it.
+      // Clearable for the same reason: a refusal is lifted by an upgrade or a
+      // fresh sign-in, and a gate that only ever latches on would outlive the
+      // thing it describes with no frame able to correct it.
       entitlement: clearEntitlement ? null : (entitlement ?? this.entitlement),
     );
   }

@@ -158,9 +158,9 @@ class _AccessSection extends ConsumerWidget {
             ),
           ),
           const SizedBox(height: AbTokens.space10),
-          // The nullable policy, not the coerced `enabled` above: this row
-          // says what the bit does RIGHT NOW, and "remote access is off" is a
-          // claim about the machine that an unread policy cannot support.
+          // The nullable policy, not the coerced `enabled` above: this row
+          // says what the bit does RIGHT NOW, and "remote access is off" is a
+          // claim about the machine that an unread policy cannot support.
           _AgentReachRow(remoteAccessOn: policy?.enabled),
         ],
       ),
@@ -274,8 +274,9 @@ String _reachCopy(AgentReachPolicy? policy, bool? remoteAccessOn) {
   return switch (remoteAccessOn) {
     true => effect,
     false => 'Nothing until remote access is on. $effect',
-    null => "Couldn't read remote access, so whether this is in effect right "
-        'now is unknown. $effect',
+    null =>
+      "Couldn't read remote access, so whether this is in effect right "
+          'now is unknown. $effect',
   };
 }
 

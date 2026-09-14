@@ -58,6 +58,23 @@ export interface AgentContext {
    *  block that never reaches the Handler leaves a blocked agent unsupervised,
    *  with no further event able to raise it. */
   isStaleIdleNudge?: (terminalId: string) => boolean;
+  /** True when the AGENT is already displaying [promptTool]'s own prompt on this
+   *  slot — an AskUserQuestion, reported by its pre/post tool hooks. Claude
+   *  schedules a permission notification seconds after any prompt appears, so
+   *  the same block is announced twice: once with the question text, once as a
+   *  generic "Permission needed". Wired in buildAgentCore rather than read off
+   *  the Handler engine, because the second announcement has to be suppressed
+   *  for an UNARMED session too.
+   *
+   *  Asked about a PROMPT, never about the slot: an agent batches
+   *  AskUserQuestion alongside a Bash call that needs approving, and a slot-wide
+   *  answer silences the approval nobody has been told about. An unnamed tool is
+   *  answered NO by the owner for the same reason.
+   *
+   *  ABSENT MEANS NO PROMPT IS OPEN — the opposite reading from
+   *  {@link isStaleIdleNudge}, and safe for the same reason: this predicate can
+   *  only ever silence, so an unwired owner must forward everything. */
+  hasOpenAgentPrompt?: (terminalId: string, promptTool: string | undefined) => boolean;
   /** Called when an injected hook pings /hook-alive, the drift probe for any
    *  agent whose `hooks.posts` declares that path. */
   onHookAlive?: (terminalId: string) => void;
@@ -94,14 +111,22 @@ const HOOK_AGENT_NAMES = Object.keys(BY_HOOK_NAME) as [string, ...string[]];
 
 export const NotifyBodySchema = z.object({
   // Mirrors the notificationType enum in protocol.ts — validated here so the
-  // bridge never emits a schema-invalid message onto the E2E channel.
-  type: z.enum(["task_complete", "permission_request", "idle", "error"]),
+  // bridge never emits a schema-invalid message onto the E2E channel. A member
+  // present there and missing here is not a compile error: the post is answered
+  // 400, `runHookInvocation` ignores every response, and that notification
+  // simply never arrives again.
+  type: z.enum(["task_complete", "permission_request", "awaiting_input", "question", "idle", "error"]),
   message: z.string().optional(),
   // Slot id (== ANTGRID_TERMINAL_ID) — names the session in the title.
   terminalId: z.string().optional(),
   // Hooks post pointers and the bridge reads.
   transcriptPath: z.string().optional(),
   agent: z.enum(HOOK_AGENT_NAMES).optional(),
+  // The AGENT-side tool this notification is about (`Bash`, `AskUserQuestion`),
+  // when the poster could name one. It is what the open-prompt suppression
+  // matches on, so a second, unrelated block on the same slot still lands.
+  // Never on the wire: the app is shown the message, not the tool.
+  promptTool: z.string().optional(),
 });
 
 export const SessionTitleSchema = z.object({
@@ -121,9 +146,27 @@ export type SessionTitleBody = z.infer<typeof SessionTitleSchema>;
 const HandlerEventSchema = z.object({
   terminalId: z.string().min(1),
   agent: z.string().optional(),
-  event: z.enum(["turn_end", "awaiting_input", "limit_hit", "limit_cleared", "turn_failed"]),
+  event: z.enum([
+    "turn_end", "awaiting_input", "question", "prompt_answered",
+    "limit_hit", "limit_cleared", "turn_failed",
+  ]),
   transcriptPath: z.string().optional(),
   sessionId: z.string().optional(),
+  // `question` only: what the agent asked, so the escalation body can say it
+  // rather than "Agent asks a question". Deliberately unbounded — a body
+  // rejected here is a 400 nobody reads and a blocked agent nobody hears
+  // about, so the poster clips instead.
+  detail: z.string().optional(),
+  // The agent's own id for the prompt. A `question` carries it so the
+  // `prompt_answered` reporting the same id retires exactly that row. Absent
+  // means the agent named none — never "", which the engine reads as "every
+  // prompt on this session is gone".
+  promptId: z.string().optional(),
+  // Which agent-side tool the prompt belongs to: declared by `question`, parsed
+  // out of the CLI's sentence by `awaiting_input`. Mirrors NotifyBodySchema's
+  // field of the same name, because the paired posts of one hook invocation ask
+  // the host the same question and must not be answered differently.
+  promptTool: z.string().optional(),
   // Lifecycle detail: when the provider's limit window ends (epoch ms; absent →
   // the engine's fallback wait) and what the driver called the failure.
   resetsAt: z.number().optional(),
@@ -349,6 +392,32 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
         }
         const parsed = NotifyBodySchema.safeParse(raw);
         if (!parsed.success) return json({ error: "Invalid body" }, 400);
+        // `awaiting_input` IS the notification hook's verdict that this is the
+        // post-completion idle nudge — a live block classifies as
+        // `permission_request` — so the type already carries the reading
+        // /handler-event has to be told separately in its own field. Refused for
+        // the reason it is refused there: the work reduction calls a nudge on a
+        // resolved turn stale and leaves the dot on "done", so forwarding it
+        // buzzes "Needs your input" at a session that has finished. Still 200 —
+        // the hook must not see a failure.
+        if (parsed.data.type === "awaiting_input"
+          && parsed.data.terminalId
+          && ctx.isStaleIdleNudge?.(parsed.data.terminalId)) {
+          log.debug("Dropped a post-completion idle nudge for %s", parsed.data.terminalId);
+          return json({ ok: true, stale: true });
+        }
+        // The agent is already displaying THIS tool's prompt on this slot, and
+        // the `question` notification that reported it carried the question
+        // text. The permission notification the CLI schedules seconds later
+        // describes the SAME block and can only say "Permission needed" — one
+        // block, one push. Scoped to the two ambiguous kinds: a turn end or an
+        // error is a different fact and must always land.
+        if ((parsed.data.type === "permission_request" || parsed.data.type === "awaiting_input")
+          && parsed.data.terminalId
+          && ctx.hasOpenAgentPrompt?.(parsed.data.terminalId, parsed.data.promptTool)) {
+          log.debug("Dropped a re-announcing %s for %s", parsed.data.type, parsed.data.terminalId);
+          return json({ ok: true, suppressed: true });
+        }
         const dedupKey = JSON.stringify(parsed.data);
         const now = Date.now();
         for (const [key, at] of recentNotifies) {
@@ -447,9 +516,24 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
         // /notify dotted the session "needs you", and nothing re-raises it.
         // `idleNudge` is the poster's own reading of the message, which is exactly
         // what /notify branches on: unless it says this is the nudge shape, forward.
+        //
+        // The second predicate answers the OTHER way this one event kind
+        // arrives spuriously: the agent is displaying this tool's own prompt,
+        // already reported as a `question` carrying its text, and the CLI's
+        // permission notification re-announces that block seconds later saying
+        // nothing new. Forwarding it costs a context assemble plus a judge spawn
+        // over an agent that can read neither. It is asked about the TOOL the
+        // post names, so a parallel batch's Bash approval still reaches the
+        // Handler, and it fails toward forwarding on every unknown — an unnamed
+        // tool and an unwired owner both answer no.
         if (parsed.data.event === "awaiting_input" && parsed.data.idleNudge === true
           && ctx.isStaleIdleNudge?.(parsed.data.terminalId)) {
           log.debug("Dropped a post-completion idle nudge for %s", parsed.data.terminalId);
+          return json({ ok: true, stale: true });
+        }
+        if (parsed.data.event === "awaiting_input"
+          && ctx.hasOpenAgentPrompt?.(parsed.data.terminalId, parsed.data.promptTool)) {
+          log.debug("Dropped a re-announced block for %s", parsed.data.terminalId);
           return json({ ok: true, stale: true });
         }
         ctx.onHandlerEvent?.(parsed.data);

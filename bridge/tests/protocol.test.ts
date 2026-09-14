@@ -483,6 +483,47 @@ describe("terminal:output carries optional seq", () => {
   });
 });
 
+describe("handler:status carries the park's attribution beside its policy", () => {
+  const frame = (session: Record<string, unknown>) => JSON.stringify({
+    id: "6b1e0a2c-3c2f-4c5a-9a5e-2f0f0a3b7c11",
+    timestamp: Date.now(),
+    type: "handler:status",
+    projectId: "p1",
+    sessions: [{
+      terminalId: "t1",
+      state: "parked",
+      pendingEscalations: 0,
+      armedAt: 1,
+      goal: "migrate auth",
+      backlog: [],
+      escalations: [],
+      ...session,
+    }],
+    snapshots: [],
+  });
+
+  it("accepts parkCause", () => {
+    // The app is the first reader that PARSES this frame, so a field missing from
+    // the schema is a silent strip rather than an error: the attribution would be
+    // gone and a judge call of ours timing out would read on the PA bar as the
+    // AGENT's provider being down, which is the whole reason cause is separate
+    // from kind.
+    const parsed = parseMessage(frame({ parkKind: "outage", parkCause: "judge_failure" }));
+    expect(parsed?.type).toBe("handler:status");
+    if (parsed?.type !== "handler:status") throw new Error("unreachable");
+    expect(parsed.sessions[0]!.parkCause).toBe("judge_failure");
+  });
+
+  it("still accepts a park with no cause", () => {
+    // A park written by an older bridge, or rehydrated off a record predating the
+    // field, is honestly unattributed — the app falls back to parkKind's copy.
+    const parsed = parseMessage(frame({ parkKind: "limit" }));
+    expect(parsed?.type).toBe("handler:status");
+    if (parsed?.type !== "handler:status") throw new Error("unreachable");
+    expect(parsed.sessions[0]!.parkCause).toBeUndefined();
+  });
+});
+
 describe("the session object is unchanged and unextended", () => {
   const envelope = { id: "3f2a0f5e-1c3b-4c2b-9f2e-2b7c1d4e5a60", timestamp: 1_700_000_000_000 };
   const address = { machineId: "m1", projectId: "p1", sessionId: "s1" };

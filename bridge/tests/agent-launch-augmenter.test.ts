@@ -53,13 +53,30 @@ describe("augmentAgentLaunch", () => {
     expect(a.env).toEqual({});
     expect(a.notificationsInjected).toBe(true);
     const hooks = JSON.parse(readFileSync(join(a.args[1], "hooks", "hooks.json"), "utf8"));
-    for (const event of ["SessionStart", "Stop", "StopFailure", "Notification", "UserPromptSubmit"]) {
+    for (const event of [
+      "SessionStart", "Stop", "StopFailure", "Notification",
+      "PreToolUse", "PostToolUse", "PostToolUseFailure", "UserPromptSubmit",
+    ]) {
       expect(hooks.hooks[event]).toHaveLength(1);
       expect(hooks.hooks[event][0].hooks).toHaveLength(1);
       expect(hooks.hooks[event][0].hooks[0].command).toBe(HOOK_COMMAND.binary);
       expect(hooks.hooks[event][0].hooks[0].args).toContain("hook");
       expect(hooks.hooks[event][0].hooks[0].args.join(" ")).not.toMatch(/\bnode(?:\.exe)?\b/i);
     }
+    // The tool hooks are scoped to the one tool that asks the user. `matcher` is
+    // a RegEx over the tool name and an EMPTY one matches everything, so a
+    // dropped matcher would fire a loopback POST on every tool call the agent
+    // makes — this is the assertion that makes that fail loudly.
+    expect(hooks.hooks.PreToolUse[0].matcher).toBe("AskUserQuestion");
+    expect(hooks.hooks.PostToolUse[0].matcher).toBe("AskUserQuestion");
+    // The failure twin is not redundant: it fires INSTEAD of PostToolUse for a
+    // question the user escapes out of, and Claude fires no Stop hook on an
+    // interrupt — losing it leaves the escalation standing for the whole turn.
+    expect(hooks.hooks.PostToolUseFailure[0].matcher).toBe("AskUserQuestion");
+    // `async: true` would let the question POST land after the permission
+    // notification it exists to pre-empt, and the double push comes back
+    // non-deterministically.
+    expect(hooks.hooks.PreToolUse[0].hooks[0].async).toBeUndefined();
   });
 
   test("codex uses the bridge for notify and command hooks", () => {

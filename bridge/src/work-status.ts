@@ -117,16 +117,18 @@ interface WorkInputs {
   defaultTool: string | undefined;
 }
 
-/** Notification types that mean "the turn is over" (as opposed to the two
+/** Notification types that mean "the turn is over" (as opposed to the
  *  call-to-action states, which are mid-turn blocks). */
 function endsTurn(n: NotificationType): boolean {
   return n === "task_complete" || n === "idle" || n === "error";
 }
 
 /** A live block on a session — outlives a sibling session starting, unlike the
- *  turn-end states. */
+ *  turn-end states. `question` belongs here and NEVER in {@link endsTurn}: an
+ *  agent asking is an agent still working on the turn it asked from. */
 function isCallToAction(n: NotificationType): boolean {
-  return n === "permission_request" || n === "awaiting_input" || n === "error";
+  return n === "permission_request" || n === "awaiting_input"
+    || n === "question" || n === "error";
 }
 
 /** Has [sessionId]'s OWN turn already ended? The only window in which an
@@ -172,7 +174,8 @@ function statusFor(sessionId: string, i: WorkInputs): WorkStatus {
   const n = i.notifications.get(sessionId) ?? i.notifications.get(UNATTRIBUTED_TURN);
   switch (n) {
     case "permission_request":
-    case "awaiting_input": return "attention";
+    case "awaiting_input":
+    case "question": return "attention";
     case "error": return "error";
     case "task_complete":
     case "idle": return "done";
@@ -541,7 +544,8 @@ export function closeTurn(prev: WorkStatusState, sessionId: string): WorkStatusS
   const pendingTurns = withoutTurn(prev.pendingTurns, sessionId);
   const pendingRequests = clearRequests(prev.pendingRequests, sessionId);
   // A chat session's block lives in pendingRequests; a terminal-mode session's
-  // lives in notifications (permission_request/awaiting_input from the hook) —
+  // lives in notifications (the hook's permission_request/awaiting_input/
+  // question) —
   // clearing only the former left an Esc-interrupted terminal session stuck on
   // "attention" forever, since neither a chat turn-end nor a cancel had ever
   // needed to touch this map before. Same helper turnStart uses to open a turn,
@@ -785,8 +789,8 @@ function foldSessions(
   for (const id of prev.typedSessions) if (live.has(id)) typedSessions.add(id);
   // A newly-started session is a fresh turn of work — clear a stale done-type
   // UNATTRIBUTED notification so a turn-start on the new session isn't masked by
-  // a fallback that predates it. permission_request, awaiting_input and error
-  // are LIVE call-to-action signals for an already-running session; a new
+  // a fallback that predates it. The call-to-action signals ({@link
+  // isCallToAction}) are LIVE for an already-running session; a new
   // session starting does not resolve an outstanding prompt or clear an error on
   // a sibling. Attributed entries need none of this — they only ever apply to
   // their own session.
