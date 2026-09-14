@@ -1225,9 +1225,10 @@ export class TerminalSession {
    * (CTRL_BREAK to its pid answers ERROR_INVALID_PARAMETER), and the
    * AttachConsole + group-0 route reported success and delivered nothing, twice,
    * including against a non-ConPTY control child. What DOES arrive is a
-   * KEYSTROKE: a raw-mode reader receives 0x03 verbatim, a cooked-mode one
-   * receives nothing at all. That asymmetry is why only agent PTYs are asked —
-   * a build tool in a service or setup PTY could not see this if we sent it.
+   * KEYSTROKE: a raw-mode reader receives 0x03 verbatim. In cooked mode the
+   * console may handle Ctrl-C itself and terminate the process instead of
+   * delivering input, so the ask is reserved for agent PTYs whose TUI can
+   * interpret it as a request to leave.
    */
   private askToExit(pty: IPty): void {
     if (process.platform !== "win32") {
