@@ -1751,6 +1751,15 @@ class TerminalService {
     return true;
   }
 
+  /// A pane movement supersedes a resize still waiting in the debounce window.
+  /// The caller must also forget its local booking so returning to the same
+  /// rendered grid can re-offer a size the wire never received.
+  bool cancelPendingResize(String terminalId) {
+    if (!_resizeTimers.containsKey(terminalId)) return false;
+    _cancelQueuedResize(terminalId);
+    return true;
+  }
+
   void requestStart(
     String terminalId, {
     String? name,

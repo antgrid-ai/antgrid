@@ -500,10 +500,30 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   /// lockstep with the locally-rendered grid — see
   /// `_TerminalGridFreeze.onSettled`.
   Size? _renderSize;
+  bool _gridMoving = false;
+
+  void _onRenderSizeMoving() {
+    if (!mounted) return;
+    final canceled = widget.terminalService.cancelPendingResize(
+      widget.tab.terminalId,
+    );
+    if (_gridMoving && !canceled) return;
+    setState(() {
+      _gridMoving = true;
+      if (canceled) {
+        _lastSentCols = null;
+        _lastSentRows = null;
+        _observedSizeEpoch = null;
+      }
+    });
+  }
 
   void _onRenderSizeSettled(Size size) {
-    if (!mounted || _renderSize == size) return;
-    setState(() => _renderSize = size);
+    if (!mounted || (!_gridMoving && _renderSize == size)) return;
+    setState(() {
+      _gridMoving = false;
+      _renderSize = size;
+    });
   }
 
   bool get _hasSelection => (_selectedText ?? '').isNotEmpty;
@@ -633,9 +653,17 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   @override
   void didUpdateWidget(TerminalViewWrapper oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.tab.driverClientId != widget.tab.driverClientId) {
+    final myClientId = ref.read(clientIdProvider).value;
+    final wasDriver =
+        oldWidget.tab.driverClientId == null ||
+        oldWidget.tab.driverClientId == myClientId;
+    final isDriver =
+        widget.tab.driverClientId == null ||
+        widget.tab.driverClientId == myClientId;
+    if (wasDriver != isDriver) {
       // A former owner's settled size may predate passive viewport changes.
       _renderSize = null;
+      _gridMoving = false;
     }
     if (oldWidget.terminalService != widget.terminalService) {
       _cancelTakeover();
@@ -1704,6 +1732,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
                       );
                       return amDriver
                           ? _TerminalGridFreeze(
+                              onMoving: _onRenderSizeMoving,
                               onSettled: _onRenderSizeSettled,
                               child: authoritativeView,
                             )
@@ -2018,6 +2047,12 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     // local grid disagree on is a line drawn in the wrong place for as long as
     // the disagreement lasts.
     final renderSize = amDriver ? _renderSize : null;
+    // The first layout of a newly mounted session may be an intermediate pane
+    // width while its per-session panel mode is still being restored. The
+    // freeze renders at that width, but does not declare it settled until the
+    // constraints have held still; resizing a TUI at the intermediate width
+    // leaves hard-wrapped rows that its final resize cannot rejoin.
+    if (amDriver && (renderSize == null || _gridMoving)) return;
     final widthForCols = renderSize?.width ?? constraints.maxWidth;
     final heightForRows = renderSize?.height ?? constraints.maxHeight;
 
@@ -2048,8 +2083,15 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
         nativeRows != _lastSentRows;
     if (!(amDriver && changed)) return;
 
+    final service = widget.terminalService;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
+      if (!mounted ||
+          widget.tab.terminalId != terminalId ||
+          widget.tab.sizeEpoch != sizeEpoch ||
+          !identical(widget.terminalService, service) ||
+          _renderSize != renderSize) {
+        return;
+      }
       // Book the size and consume the claim only if the service actually took
       // the request. A terminal can mount before the per-install client id
       // resolves, and `sendResize` drops those; recording them anyway leaves
@@ -2062,7 +2104,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       // Queued is not delivered: `sendResize` can still discard the frame it
       // armed, and those paths answer with a `sizeEpoch` bump rather than a
       // return value, because they resolve long after this callback is gone.
-      final sent = widget.terminalService.sendResize(
+      final sent = service.sendResize(
         terminalId,
         nativeCols,
         nativeRows,
@@ -2124,6 +2166,10 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
 class _TerminalGridFreeze extends StatefulWidget {
   final Widget child;
 
+  /// Fires when a new live size supersedes the pinned grid, before a queued
+  /// resize can leave the app for a geometry the pane is moving away from.
+  final VoidCallback? onMoving;
+
   /// Fires (post-frame) with the size the child is actually rendered at, both
   /// on the initial instant pin and after each settle. The driver sources the
   /// PTY's authoritative `cols`/`rows` from this — NOT from the live viewport —
@@ -2134,7 +2180,11 @@ class _TerminalGridFreeze extends StatefulWidget {
   /// re-triggers it.
   final ValueChanged<Size>? onSettled;
 
-  const _TerminalGridFreeze({required this.child, this.onSettled});
+  const _TerminalGridFreeze({
+    required this.child,
+    this.onMoving,
+    this.onSettled,
+  });
 
   @override
   State<_TerminalGridFreeze> createState() => _TerminalGridFreezeState();
@@ -2144,6 +2194,7 @@ class _TerminalGridFreezeState extends State<_TerminalGridFreeze> {
   static const _settleDelay = Duration(milliseconds: 150);
 
   Size? _pinnedSize;
+  bool _hasSettled = false;
   Timer? _settleTimer;
 
   /// The size [_settleTimer] is currently counting down towards, so a rebuild
@@ -2180,6 +2231,14 @@ class _TerminalGridFreezeState extends State<_TerminalGridFreeze> {
     });
   }
 
+  void _notifyMoving() {
+    final cb = widget.onMoving;
+    if (cb == null) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) cb();
+    });
+  }
+
   /// Arms the settle countdown for [size], measuring quiet from the last time
   /// the size actually MOVED — never from the last rebuild.
   ///
@@ -2193,6 +2252,7 @@ class _TerminalGridFreezeState extends State<_TerminalGridFreeze> {
   void _scheduleSettle(Size size) {
     if (_sameSize(_settlingTo, size)) return;
     _settlingTo = size;
+    _notifyMoving();
     _settleTimer?.cancel();
     _settleTimer = Timer(_settleDelay, () {
       // Cleared before the mount check so `_settlingTo` never outlives the
@@ -2201,6 +2261,7 @@ class _TerminalGridFreezeState extends State<_TerminalGridFreeze> {
       _settlingTo = null;
       _settleTimer = null;
       if (!mounted) return;
+      _hasSettled = true;
       setState(() => _pinnedSize = size);
       _notifySettled(size);
     });
@@ -2217,19 +2278,18 @@ class _TerminalGridFreezeState extends State<_TerminalGridFreeze> {
     return LayoutBuilder(
       builder: (context, constraints) {
         final live = Size(constraints.maxWidth, constraints.maxHeight);
-        // Adopt the first observed size instantly so the initial layout
-        // doesn't show a 150ms blank flash.
-        if (_pinnedSize == null) {
-          _pinnedSize = live;
-          _notifySettled(live);
-        }
-        if (!_sameSize(_pinnedSize, live)) {
+        // Paint at the first observed size immediately, but wait for quiet
+        // before telling the driver it may resize the PTY to that size.
+        _pinnedSize ??= live;
+        if (!_hasSettled || !_sameSize(_pinnedSize, live)) {
           _scheduleSettle(live);
         } else {
           // Back at the pinned size before the countdown expired (a drag that
           // returned, a transient constraint). Dropping the timer keeps it from
           // pinning a size the panel no longer has.
+          final wasMoving = _settleTimer != null;
           _cancelSettle();
+          if (wasMoving) _notifySettled(_pinnedSize!);
         }
         final inner = _pinnedSize!;
         return ClipRect(
