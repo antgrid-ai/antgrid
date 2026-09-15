@@ -1,4 +1,4 @@
-import { needsKeystrokeTurnStart } from "./agents/registry";
+import { needsKeystrokeTurnStart } from "./agent-runtime";
 import type { ClientKey } from "./message-bus";
 import type { AbMessage, NotificationType, WorkStatus } from "./protocol";
 

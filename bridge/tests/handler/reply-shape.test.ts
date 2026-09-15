@@ -3,7 +3,7 @@ import { describe, it, expect } from "bun:test";
 import {
   MAX_REPLY_CHARS, checkReplyShape, findCommand, oneLine, replyShape, splitSlashCommand,
 } from "../../src/handler/reply-shape";
-import type { CapCommand } from "../../src/structured/chat-session";
+import type { CapCommand } from "../../../packages/antgrid-agents/src/structured/chat-session";
 import type { HandlerDecision } from "../../src/handler/decision";
 
 function handle(over: Partial<HandlerDecision>): HandlerDecision {

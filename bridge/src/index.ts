@@ -1,3 +1,4 @@
+import "./agent-host";
 import { Command } from "commander";
 import { join } from "node:path";
 import type { Level } from "pino";

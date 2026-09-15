@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { initialPromptArgv } from "../src/initial-prompt";
+import { initialPromptArgv } from "../../packages/antgrid-agents/src/initial-prompt";
 
 describe("initialPromptArgv", () => {
   it("positional prompt guarded by `--` for claude-code / codex / cursor-agent", () => {

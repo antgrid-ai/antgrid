@@ -26,8 +26,8 @@ describe("TOOL_UPDATE_SPECS", () => {
 
 describe("updateSpecFor", () => {
   it("returns the spec for a supported tool", () => {
-    expect(updateSpecFor("opencode")?.updateArgs).toEqual(["upgrade"]);
-    expect(updateSpecFor("claude-code")?.command).toBe("claude");
+    expect(updateSpecFor("opencode")).toMatchObject({ updateArgs: ["upgrade"] });
+    expect(updateSpecFor("claude-code")).toMatchObject({ command: "claude" });
   });
 
   it("returns null for a tool with no self-updater (fail-soft upstream)", () => {

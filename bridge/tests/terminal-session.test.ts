@@ -1,5 +1,6 @@
+import { isAntigravityBinary } from "../../packages/antgrid-agents/src/agents/antigravity/startup";
 import { describe, it, expect, afterEach } from "bun:test";
-import { stripInheritedCertOverrides, isAntigravityBinary } from "../src/terminal-session";
+import { stripInheritedCertOverrides } from "../src/terminal-session";
 
 const FLAG = "ANTGRID_STRIP_INHERITED_CERT_OVERRIDES";
 

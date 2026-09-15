@@ -2,13 +2,16 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { augmentAgentLaunch } from "../src/agent-launch-augmenter";
+import { NO_INJECTION, NO_OBSERVATION } from "../../packages/antgrid-agents/src/agents/launch-inject";
+import { suppressesOscNotifications, suppressesOscTitle } from "../../packages/antgrid-agents/src/known-agents";
+import { augmentAgentLaunch } from "../src/agent-runtime";
+import { augmentAgentLaunch as augmentWithRegistry } from "antgrid-agents/agent-launch-augmenter";
 import { type HookCommand } from "../src/hook-command";
-import { cursorHookCommand } from "../src/agents/cursor-agent/global-hooks";
-import { codexNotifyOnlyArgs } from "../src/agents/codex/driver";
-import { pluginDirArg } from "../src/agents/claude-code/driver";
-import { AGENTS } from "../src/agents/registry";
-import type { AgentKey, LaunchAugmentation } from "../src/agents/types";
+import { cursorHookCommand } from "../../packages/antgrid-agents/src/agents/cursor-agent/global-hooks";
+import { codexNotifyOnlyArgs } from "../../packages/antgrid-agents/src/agents/codex/driver";
+import { pluginDirArg } from "../../packages/antgrid-agents/src/agents/claude-code/driver";
+import { AGENTS } from "../src/agent-runtime";
+import type { AgentKey, LaunchAugmentation } from "../../packages/antgrid-agents/src/agents/types";
 
 const dirs: string[] = [];
 function abdir() { const d = mkdtempSync(join(tmpdir(), "ab-aug-")); dirs.push(d); return d; }
@@ -106,14 +109,18 @@ describe("augmentAgentLaunch", () => {
     const prev = process.env.OPENCODE_CONFIG;
     process.env.OPENCODE_CONFIG = "/user/own.json";
     try {
-      expect(augmentAgentLaunch("opencode", { abDir: abdir(), self: BRIDGE_SELF })).toEqual({ args: [], env: {} });
+      const launch = augmentAgentLaunch("opencode", { abDir: abdir(), self: BRIDGE_SELF });
+      expect(launch).toEqual(NO_INJECTION);
+      expect(launch.observation?.handler).toBe(false);
+      expect(suppressesOscNotifications("opencode", launch.observation)).toBe(false);
+      expect(suppressesOscTitle("opencode", launch.observation)).toBe(false);
     } finally {
       if (prev === undefined) delete process.env.OPENCODE_CONFIG; else process.env.OPENCODE_CONFIG = prev;
     }
   });
 
   test("unknown tool has no injection", () => {
-    expect(augmentAgentLaunch("some-shell", { abDir: abdir(), self: BRIDGE_SELF })).toEqual({ args: [], env: {} });
+    expect(augmentAgentLaunch("some-shell", { abDir: abdir(), self: BRIDGE_SELF })).toEqual(NO_INJECTION);
   });
 
   test("cursor-agent merges bridge hooks into the global hooks file", () => {
@@ -168,7 +175,7 @@ describe("augmentAgentLaunch", () => {
     const a = augmentAgentLaunch("cursor-agent", { abDir, cursorDir: cursorDirAsFile, self: BRIDGE_SELF });
     // --trust survives the failed write: workspace trust is independent of the
     // hooks channel, and the spawn must not regress to a trust prompt.
-    expect(a).toEqual({ args: ["--trust"], env: {}, notificationsInjected: false });
+    expect(a).toEqual({ args: ["--trust"], env: {}, notificationsInjected: false, observation: NO_OBSERVATION });
   });
 
   test("claude launches without plugin-dir and enables OSC fallback when materialization fails", () => {
@@ -178,6 +185,7 @@ describe("augmentAgentLaunch", () => {
       args: [],
       env: {},
       notificationsInjected: false,
+      observation: NO_OBSERVATION,
     });
   });
 
@@ -226,6 +234,7 @@ describe("augmentAgentLaunch", () => {
       args: [],
       env: { GODEBUG: "x509usefallbackroots=1" },
       notificationsInjected: false,
+      observation: NO_OBSERVATION,
     });
   });
 
@@ -258,6 +267,29 @@ describe("augmentAgentLaunch", () => {
   });
 });
 
+
+test("failed runtime plugin config leaves independent fallback channels available", () => {
+  const previous = process.env.OPENCODE_CONFIG;
+  delete process.env.OPENCODE_CONFIG;
+  const file = join(abdir(), "not-a-directory");
+  writeFileSync(file, "x");
+  try {
+    const launch = augmentAgentLaunch("opencode", { abDir: file, self: BRIDGE_SELF });
+    expect(launch.observation).toEqual(NO_OBSERVATION);
+    expect(suppressesOscTitle("opencode", launch.observation)).toBe(false);
+    expect(suppressesOscNotifications("opencode", launch.observation)).toBe(false);
+  } finally {
+    if (previous === undefined) delete process.env.OPENCODE_CONFIG;
+    else process.env.OPENCODE_CONFIG = previous;
+  }
+});
+
+test("notification and title installation outcomes are independent", () => {
+  expect(suppressesOscNotifications("opencode", { ...NO_OBSERVATION, notifications: true })).toBe(true);
+  expect(suppressesOscTitle("opencode", { ...NO_OBSERVATION, notifications: true })).toBe(false);
+  expect(suppressesOscNotifications("opencode", { ...NO_OBSERVATION, titles: true })).toBe(false);
+  expect(suppressesOscTitle("opencode", { ...NO_OBSERVATION, titles: true })).toBe(true);
+});
 describe("augmentAgentLaunch MCP injection", () => {
   test("claude points --mcp-config at a file outside the plugin dir", () => {
     const abDir = abdir();
@@ -363,19 +395,12 @@ describe("augmentAgentLaunch MCP injection", () => {
 
   test("a throwing mcp.inject costs the tools and nothing else", () => {
     const spec = AGENTS["claude-code"];
-    const real = spec.mcp!;
-    // Cast: the registry is frozen-by-convention, not by type, and this is the
-    // only way to exercise the augmenter's own catch.
-    (spec as { mcp?: typeof real }).mcp = {
-      inject() { throw new Error("boom"); },
-    };
-    try {
-      const abDir = abdir();
-      const a = augmentAgentLaunch("claude-code", { abDir, self: BRIDGE_SELF });
-      expect(a.args).toEqual(["--plugin-dir", join(abDir, "plugin", "claude")]);
-      expect(a.notificationsInjected).toBe(true);
-    } finally {
-      (spec as { mcp?: typeof real }).mcp = real;
-    }
+    const abDir = abdir();
+    const a = augmentWithRegistry("claude-code", {
+      abDir, hookCommand: HOOK_COMMAND,
+      mcpCommand: { binary: HOOK_COMMAND.binary, preargs: ["mcp"] },
+    }, () => ({ ...spec, mcp: { inject() { throw new Error("boom"); } } }));
+    expect(a.args).toEqual(["--plugin-dir", join(abDir, "plugin", "claude")]);
+    expect(a.notificationsInjected).toBe(true);
   });
 });

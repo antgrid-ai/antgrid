@@ -14,7 +14,7 @@
 // expensive fresh one.
 
 import { inProbePool, readRepoCard } from "../capability-card";
-import { agentSpec } from "../agents/registry";
+import { agentSpec } from "../agent-runtime";
 import type { SessionEntry, WorkStatus } from "../protocol";
 import { LOCAL_MACHINE_ID, LOCAL_ROW_FLOOR, REMOTE_CARRIER_SILENCE_MS } from "./constants";
 import { namesMachine } from "./address";

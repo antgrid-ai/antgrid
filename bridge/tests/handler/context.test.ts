@@ -8,7 +8,7 @@ import {
   stripAnsi, assembleContext,
   PTY_MAX_CHARS, DECIDE_MAX_CHARS, DECIDE_MAX_MSGS,
 } from "../../src/handler/context";
-import { readLastClaudeMessages } from "../../src/agents/claude-code/transcript";
+import { readLastClaudeMessages } from "../../../packages/antgrid-agents/src/agents/claude-code/transcript";
 
 function writeJsonl(lines: object[]): string {
   const p = join(mkdtempSync(join(tmpdir(), "ab-ctx-")), "t.jsonl");
@@ -107,7 +107,7 @@ function writeOpencodeDb(texts: string[]): string {
 test("codex + agentSessionId reads the rollout and returns the resolved path", async () => {
   const home = writeCodexHome([{ type: "event_msg", payload: { type: "agent_message", message: "built it" } }]);
   const c = await assembleContext({
-    tool: "codex", agentSessionId: CODEX_THREAD, recentPty: "ignored", purpose: "decide", codexHome: home,
+    tool: "codex", agentSessionId: CODEX_THREAD, recentPty: "ignored", purpose: "decide", adapterOptions: { codex: { codexHome: home } },
   });
   expect(c.source).toBe("transcript");
   expect(c.text).toContain("built it");
@@ -119,7 +119,7 @@ test("codex without agentSessionId, or with an unfindable thread, falls back to 
   expect(noId.source).toBe("pty");
   const home = mkdtempSync(join(tmpdir(), "ab-ctx-cx-"));
   const miss = await assembleContext({
-    tool: "codex", agentSessionId: "not-there", recentPty: "tail", purpose: "decide", codexHome: home,
+    tool: "codex", agentSessionId: "not-there", recentPty: "tail", purpose: "decide", adapterOptions: { codex: { codexHome: home } },
   });
   expect(miss.source).toBe("pty");
   expect(miss.transcriptPath).toBeUndefined();
@@ -128,7 +128,7 @@ test("codex without agentSessionId, or with an unfindable thread, falls back to 
 test("opencode + agentSessionId reads the db; no transcriptPath is returned", async () => {
   const db = writeOpencodeDb(["question", "answer"]);
   const c = await assembleContext({
-    tool: "opencode", agentSessionId: "ses_1", recentPty: "ignored", purpose: "decide", opencodeDbPath: db,
+    tool: "opencode", agentSessionId: "ses_1", recentPty: "ignored", purpose: "decide", adapterOptions: { opencode: { opencodeDbPath: db } },
   });
   expect(c.source).toBe("transcript");
   expect(c.text).toBe("question\n---\nanswer");
@@ -138,7 +138,7 @@ test("opencode + agentSessionId reads the db; no transcriptPath is returned", as
 test("opencode with a missing db falls back to PTY", async () => {
   const c = await assembleContext({
     tool: "opencode", agentSessionId: "ses_1", recentPty: "tail", purpose: "decide",
-    opencodeDbPath: join(tmpdir(), "ab-none", "opencode.db"),
+    adapterOptions: { opencode: { opencodeDbPath: join(tmpdir(), "ab-none", "opencode.db") } },
   });
   expect(c.source).toBe("pty");
 });

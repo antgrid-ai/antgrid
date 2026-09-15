@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import {
   removeManagedCursorHookEntries,
   replaceManagedCursorHookEntries,
-} from "../src/agents/cursor-agent/global-hooks";
+} from "../../packages/antgrid-agents/src/agents/cursor-agent/global-hooks";
 
 test("replaces legacy and stale Antgrid commands while preserving user hooks", () => {
   const current = {

@@ -2,7 +2,7 @@ import { test, expect } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 
-const SCRIPT = join(import.meta.dir, "..", "..", "plugin", "antigravity", "post-title.js");
+const SCRIPT = join(import.meta.dir, "..", "..", "..", "packages", "antgrid-agents", "assets", "antigravity", "post-title.js");
 
 // Port 0, then read back what the kernel assigned. A literal port here sits
 // inside the Linux ephemeral range (32768-60999), so any other socket this
@@ -61,6 +61,14 @@ test("Stop (clean) posts /session-title with titleOnly and /notify task_complete
     titleOnly: true,
   });
   expect(JSON.parse(notify.body)).toEqual({ type: "task_complete", terminalId: "t1" });
+});
+
+test("every native hook post preserves the launching run ID", async () => {
+  const { server, hits } = run("Stop", JSON.stringify({ conversationId: "conv-run" }), { ANTGRID_RUN_ID: "run-2" });
+  await Bun.sleep(150);
+  server.stop(true);
+  expect(hits).toHaveLength(2);
+  for (const hit of hits) expect(JSON.parse(hit.body).runId).toBe("run-2");
 });
 
 test("Stop with a real error posts /session-title but skips /notify", async () => {

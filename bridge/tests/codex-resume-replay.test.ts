@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { codexResumeReplay } from "../src/agents/codex/resume-replay";
+import { codexResumeReplay } from "../../packages/antgrid-agents/src/agents/codex/resume-replay";
 
 // Minimal thread shape mirroring ThreadResumeResponse.thread. Each turn has an
 // id and an items array; item shape matches what mapThreadItem consumes (see

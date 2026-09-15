@@ -1,12 +1,12 @@
 // bridge/src/handler/judge.ts
 import { randomUUID } from "node:crypto";
 
-import { runHeadless } from "../agents/headless";
+import { executeHeadless } from "../agents/headless";
 import {
   capturePrompt, modelwatch,
   type ModelCallEvent, type ModelCallPurpose,
 } from "../modelwatch";
-import type { CapCommand } from "../structured/chat-session";
+import type { CapCommand } from "antgrid-agents/structured/chat-session";
 import {
   buildDecidePrompt, buildRetryPrompt, buildShapeRetryPrompt, parseDecisionFromOutput, pickJudge,
   type HandlerDecision,
@@ -107,12 +107,11 @@ async function runWithRetry<T>(opts: {
   // binary is what runs: appending one to the scripted stand-in would move the
   // prompt out of the argv position the script reads it from.
   const scripted = judgeScript();
-  const run = (p: string, timeoutMs: number, attempt: number) => runHeadless(
-    scripted ? ["bun", scripted, p] : judge.command.cmd(p, opts.model),
+  const run = (p: string, timeoutMs: number, attempt: number) => executeHeadless(
+    scripted ? { cmd: () => ["bun", scripted, p], noHistory: "stateless" } : judge.command,
+    p, opts.model,
     {
       cwd: opts.cwd, timeoutMs, spawn,
-      env: judge.command.env, scratchEnv: judge.command.scratchEnv,
-      usage: scripted ? undefined : judge.command.usage,
       call: {
         callId, purpose: opts.purpose, attempt,
         requestedTool: opts.tool, actualTool: opts.tool, reach: judge.tier,

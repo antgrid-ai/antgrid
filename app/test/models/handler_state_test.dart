@@ -26,6 +26,35 @@ HandlerEscalation _esc(String id, {required String urgency, required int at}) =>
     );
 
 void main() {
+  test('runtime availability preserves support and older bridge absence', () {
+    final wire = <String, dynamic>{
+      'terminalId': 't1',
+      'state': 'watching',
+      'pendingEscalations': 0,
+      'armedAt': 1,
+      'goal': 'goal',
+      'backlog': [],
+      'observability': 'full',
+    };
+    expect(HandlerSessionState.fromWire(wire)!.availability, isNull);
+    wire['availability'] = {
+      'state': 'unavailable',
+      'reason': 'Waiting for restart',
+    };
+    final session = HandlerSessionState.fromWire(wire)!;
+    expect(session.observability, HandlerObservability.full);
+    expect(session.availability!.state, HandlerAvailabilityState.unavailable);
+    expect(
+      session.availability!.note,
+      'Waiting for restart. Start or restart the agent to try again.',
+    );
+    expect(
+      session.copyWith(pendingEscalations: 1).availability,
+      same(session.availability),
+    );
+    wire['availability'] = {'state': 'future-value'};
+    expect(HandlerSessionState.fromWire(wire)!.availability, isNull);
+  });
   group('compareEscalations', () {
     test('urgent first, and oldest first inside each band', () {
       final ordered = [

@@ -1,0 +1,14 @@
+{
+  "name": "@antgrid/integrations",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "mcp": "bun run ../src/index.ts mcp",
+    "install-integrations": "bun run setup.ts install",
+    "uninstall-integrations": "bun run setup.ts uninstall"
+  },
+  "dependencies": {
+    "antgrid-agents": "workspace:*"
+  }
+}

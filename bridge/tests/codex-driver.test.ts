@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { CodexDriver, type CodexEndpoint } from "../src/agents/codex/chat-backend";
+import { CodexDriver, type CodexEndpoint } from "../../packages/antgrid-agents/src/agents/codex/chat-backend";
 import type { AbMessage } from "../src/protocol";
 
 // Fake endpoint: capture outbound, let the test fire notifications/requests.
@@ -538,7 +538,7 @@ describe("CodexDriver", () => {
     });
     const driver = new CodexDriver({ sessionId: "s1", endpoint: ep, sendMessage: (m) => sent.push(m), cwd: "/x" });
     const id = await driver.start("th-resumed");
-    expect(id).toBe("th-resumed");
+    expect(id).toBeUndefined();
     expect(requests.some((r) => r.method === "thread/resume" && r.params.threadId === "th-resumed")).toBe(true);
     expect(requests.some((r) => r.method === "thread/start")).toBe(false);
     // Replayed history reaches the app as ONE batched frame: per-frame replay

@@ -459,12 +459,12 @@ imposes no attribution requirement, but it is listed here for completeness.
 
 `antgrid-wire` is also a dependency; it is first-party.
 
-### `packages/antgrid-wire`, `bridge/plugin`, `evals/`
+### `packages/antgrid-wire`, `bridge/integrations`, `evals/`
 
 | Workspace | Package | Version | Licence | Copyright holder |
 |---|---|---|---|---|
 | `packages/antgrid-wire` | `zod` | 4.4.1 | MIT | Copyright (c) 2025 Colin McDonnell |
-| `bridge/plugin` | `@modelcontextprotocol/sdk` | 1.29.0 | MIT | Copyright (c) 2024 Anthropic, PBC |
+| `bridge/integrations` | `@modelcontextprotocol/sdk` | 1.29.0 | MIT | Copyright (c) 2024 Anthropic, PBC |
 | `evals/` | `antgrid-wire` | workspace | ELv2 | first-party |
 
 ---
