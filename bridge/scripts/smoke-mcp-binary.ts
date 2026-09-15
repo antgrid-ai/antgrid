@@ -10,7 +10,12 @@ import { resolve } from "node:path";
 // artifact stays the only thing under test.
 
 const PROTOCOL_VERSION = "2024-11-05";
-const EXPECTED_TOOLS = [
+// A floor, not the table: the exact list is asserted in the bridge suite
+// (index-mcp-subcommand.test.ts), and a second copy here only goes stale —
+// this job runs on a release build, so a drifted copy fails the release and
+// nothing else. What the compiled binary has to prove is that the tools it
+// registers survived `bun --compile`.
+const REQUIRED_TOOLS = [
   "antgrid_init",
   "antgrid_list_commands",
   "antgrid_run_command",
@@ -107,8 +112,11 @@ try {
 
   const listed = await rpc.call(2, "tools/list", {});
   const toolNames = (listed.tools as { name: string }[]).map((t) => t.name);
-  if (JSON.stringify(toolNames) !== JSON.stringify(EXPECTED_TOOLS)) {
-    throw new Error(`unexpected tool list: ${JSON.stringify(toolNames)}`);
+  const missing = REQUIRED_TOOLS.filter((name) => !toolNames.includes(name));
+  if (missing.length > 0) {
+    throw new Error(
+      `compiled mcp binary is missing tools ${JSON.stringify(missing)}; listed ${JSON.stringify(toolNames)}`,
+    );
   }
 
   const called = await rpc.call(3, "tools/call", {
