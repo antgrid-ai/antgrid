@@ -1,218 +1,127 @@
-# Iroh migration qualification
+# Iroh qualification
 
-Checkpoint: 2026-09-15. **Release gate not passed. Branch implementation is in progress.**
+Checkpoint: 2026-09-15. **Release remains unqualified; WebSocket is the default.**
+Implementation and regression history live in the [task ledger](iroh-migration-ledger.md).
+The [approved plan](iroh-migration-plan.md) defines acceptance criteria;
+[operations](iroh-operations.md) covers staging, rollout and rollback.
 
-Production-path implementation and current checks are tracked in the
-[task ledger](iroh-migration-ledger.md); [operations](iroh-operations.md) describes
-configuration and outstanding deployment gates. The remaining sections preserve
-prototype evidence and must not be read as qualification of the new integration.
+## Executed evidence and its limits
 
-The user has approved implementing the full migration on this isolated branch,
-then qualifying it in staging before production rollout. Physical Android/iOS,
-remaining release targets, security and performance remain **release gates**;
-they no longer block implementation on the branch. See the
-[task ledger](iroh-migration-ledger.md) for the latest sequencing decision.
-This checkpoint now includes a Windows encrypted-terminal prototype
-using the existing E2E/session drivers, real PTYs, project multiplexing and rekey,
-plus compiled packaging and rejection tests. It uses fixtures for central
-admission, account inventory and project dispatch. No performance acceptance
-criterion or mobile/forced-relay release gate has been measured.
+These are recorded results from September 14-15, not checks rerun whenever this
+file changes. The ledger records component gates and subsequent fixes; a clean
+full E2E sweep after all fixes remains outstanding.
 
-## Locked migration decisions
+| Gate | Recorded result | Boundary |
+| --- | --- | --- |
+| Real HTTP authorization | 25 assertions passed | Actual Hono/Better Auth and PostgreSQL: credential/device binding, sibling and cross-account denial, dual signatures, replay, rotation/history, snapshots and revocation/outbox enqueue. No native payloads. |
+| Backend plus native HostServer | Passed; revocation closed the pair after 19.95 seconds | Real OAuth/enrollment/leases, signed E2E, two real projects on one direct loopback connection during central outage. Central welcome was controlled and omitted stream acknowledgements; app driver was handwritten, not Flutter. |
+| Native host smoke, source and compiled | Passed | Terminal I/O and frame ACKs, managed-checkout Git, two projects, central outage and immediate remote-access-off. Authorization fixtures. |
+| Rust relay | Six fence/accounting tests and one trusted-TLS gate passed | Published upstream 1.2.0, actual 1.0.0 client protocol compatibility, account isolation, signed disconnect, blocked destination writes denied after revocation, expiry/permits and concurrent byte attribution. Controlled backend responder. |
+| Real backend plus relay | 11 assertions passed | Actual OAuth/Prisma enrollment, signed admission, trusted TLS packets, unknown endpoint denial and revocation closing both peers within 60 seconds. Empty outbox targets isolate the lease backstop; this does not prove push delivery or native QUIC forced relay. |
+| Windows packaging | Full debug Flutter build and compiled Dart native smoke passed | Source-built DLL included beside the app; explicit-path smoke checks echo, malformed lengths, extra streams and revoked sends. No signed installer qualification. |
+| Download site | Build and browser contracts: 38 passed, two skipped | Apple Silicon download link checked; release responses and installer requests were intercepted. No installer integrity evidence. |
+| Android resume | Three emulator cycles, 2.754-3.256 seconds to E2E; user reported two minutes backgrounded successfully | Local WebSocket smoke. User run supplied no additional measurements. Physical devices, native resume and desktop sleep/wake remain unqualified. |
 
-- Scope L, beginning with an M-sized qualification prototype. Use upstream
-  `@number0/iroh`, Flutter-free `iroh_quic`, and `iroh_flutter` packaging. A
-  required missing upstream capability blocks qualification; no binding fork.
-- Retain the authenticated central WebSocket for inventory, presence and
-  revocation. Self-host Iroh relays with authenticated endpoint admission,
-  active disconnect and bounded authorization lifetimes.
-- Preserve application E2E, signed transcript bytes, establishment/rekey,
-  channel scheduling, frame/reassembly budgets and feature-service behavior.
-- One endpoint per active process/account enrollment; one app-initiated
-  connection per app–machine pair reused across projects. ALPN `antgrid/peer/1`;
-  one reliable bidirectional QUIC stream, four-byte unsigned big-endian record
-  lengths around existing route frames. Validate length before allocation,
-  destination, frame content and unexpected streams. Path changes do not
-  establish new E2E sessions or invalidate project bindings.
-- Modes: `websocket`, `iroh-preferred`, test-only `iroh-only`. Preferred allows
-  five seconds before choosing payload fallback. Only the selected generation
-  may handshake/write; no opportunistic upgrade of a healthy WebSocket session.
-  Denial, revocation and protocol violations are terminal. Fail pending actions
-  with connection-lost/unknown-outcome on replacement; never replay commands.
-- Separate endpoint enrollment keys from application identity keys. Bind each
-  enrollment to the credential's actual device using single-use expiring,
-  domain-separated challenges signed by both keys. Inventory carries endpoint
-  ID, registration generation and authenticated capabilities. Rotation revokes
-  old sessions. Keep desktop-controller and local-bridge identities distinct.
-- Refresh authoritative device/peer authorization every 20 seconds while remote
-  sessions are active. Maximum 60-second monotonic lease from request start;
-  failed refreshes, disk cache, pushes and peer traffic cannot renew it. Require
-  fresh authorization after restart/resume. Reject stale generations. On expiry
-  or revocation block inbound commands/outbound data, clear queues and keys,
-  and close affected peers. Central disconnect alone does not immediately kill
-  a healthy leased direct session.
-- Every remote transport enforces account trust, live machine remote-access
-  policy, `seenProjects`, `isSafeProjectId` and checkout capabilities. Direct
-  traffic must never enter the loopback exemption. Local switch-off is immediate.
-- Embed upstream `iroh-relay` in an Antgrid Rust service, TLS/443 externally;
-  private authenticated administration. Fail-closed admission checks have a
-  two-second backend timeout. Fence admission/revocation races, disconnect on
-  every configured instance, and revalidate open endpoints within 60 seconds.
-  Bound connections, pending admissions and traffic; collect usage without new
-  billing quotas. Approved environment-specific relays only; no implicit public
-  relay fallback and no customer-held shared admission secret.
-- Intel macOS builds and universal assembly are removed. New macOS artifacts
-  and updater metadata target Apple Silicon. No historical-client transition
-  is required. Signed Apple Silicon packaging remains unqualified.
-- Keep ELv2 implementation out of Apache packages. Browser P2P, central-WebSocket
-  removal, custom UDP and additional QUIC streams are outside scope.
+## Reproduce current gates
 
-## Reproducible implementation
+Run workspace scripts from the repository root. Dart/Flutter analysis and CLI
+checks must run serially; never run bare root `bun test`.
 
-[`scripts/iroh-qualification`](../scripts/iroh-qualification/README.md) is a
-standalone ELv2 project outside production workspaces. It includes exact Bun/pub
-lockfiles, a native bind/close probe, a Bun listener and a Flutter-free Dart
-initiator, compilation instructions and the verified Windows native digest.
-The encrypted prototype imports production bridge and pure-Dart client code
-without modifying it. Its adapters and fixture handlers remain isolated from
-production builds and the root test sweep.
+- `bun run --filter antgrid-bridge qualify:iroh-host`
+- `bun run --filter antgrid-evals test:evals:iroh-authorization`
+- `bun run --filter antgrid-evals test:evals:iroh-host-authorization`
+- Build the relay probe with `cargo build --locked -j 2 --manifest-path iroh-relay/Cargo.toml --example real_backend_gate`, then run `bun run --filter antgrid-evals test:evals:iroh-relay-authorization`.
+- [Relay README](../iroh-relay/README.md) gives Rust fence/TLS and older-client compatibility commands, security design and limits of evidence.
+- [Pure-Dart native smoke](../packages/antgrid_peer_transport/README.md) exercises the production record adapter with synthetic admission.
+- `bun run scripts/check-iroh-packaging.ts` verifies active Flutter sources against [reviewed integrity manifests](../scripts/iroh-packaging/README.md).
 
-### Encrypted prototype results
+Backend gates require the existing PostgreSQL/Prisma test prerequisites. Native
+smokes require the correct native library; fixture gates do not replace combined
+backend or physical packaging tests.
 
-`bun run --cwd scripts/iroh-qualification qualify` passed all ten native
-scenarios on Windows x64. Its machine-readable output is generated at
-`.tmp/iroh-qualification/prototype-results.json`. The final terminal run was also
-compiled and passed with the Dart native cache redirected to an empty directory.
+## Packaging evidence and remaining checks
 
-| Scenario | Verified behavior |
-|---|---|
-| Encrypted terminal | Existing `AppSessionHandshaker` ↔ `RelayClient` signed E2E and confirmation; unchanged `MachineSession` and `StreamMux` carry two projects |
-| Real terminal | Existing `TerminalSession` PTYs and `TerminalFrameSource` produce current-version screen frames; the client checks computed arithmetic output |
-| Project reuse and rekey | Same Iroh connection and project binding; two establishments and exactly three terminal inputs, including input after rekey |
-| Wrong agent identity | Signature rejected; zero establishments, project opens or terminal inputs |
-| Wrong app identity | Signature rejected; zero establishments, project opens or terminal inputs |
-| Oversized record | Both Bun and Dart reject the native four-byte length before body allocation |
-| Wrong destination | Both endpoints reject valid route frames addressed elsewhere before dispatch |
-| Extra QUIC stream | Both endpoints reject an additional bidirectional stream before terminal input |
-| Connection loss | Pending RPC fails with existing `E_SESSION_DOWN`; client session becomes unestablished |
+Reviewed bindings are `@number0/iroh` 1.1.0, `iroh_quic`/`iroh_flutter` 1.0.3 and
+FRB 2.12.0. Exact dependency and source hashes belong in committed lockfiles and
+integrity manifests. Run the packaging guard after dependency resolution and
+after building; never regenerate its baseline from a changed build cache.
 
-The final compiled terminal run sent 25 route frames and received 22, with
-2,399 peak queued record bytes in the Bun adapter. These are smoke observations,
-not throughput or latency measurements. No performance claim follows from them.
+Flutter builds the published plugin's Rust source. This differs from the signed
+prebuilt used by the CLI prototype. Upstream setup verifies detached Ed25519
+signatures; never use `--no-verify`. Existing cached files are not fresh integrity
+evidence. Verify the adjacent packaged artifact and smoke with an empty cache.
+The recorded Windows prebuilt digest does not authenticate source-built DLLs.
 
-The seven record-unit cases also passed: invalid bounds, fragmented/coalesced
-reads, truncated EOF, bounded queue overflow, queued-write discard and fencing an
-in-flight read after close. TypeScript typechecking and Dart static analysis pass.
-The reused bridge E2E regression suite passes (19 tests), as do 36 selected
-pure-Dart handshake, E2E-vector, rekey and project-binding regression tests.
+The Windows source build used Rust 1.98.1; source hashes remained unchanged.
+A workspace pub cache avoided an upstream hidden-folder symlink resolver issue.
+Normal development subsequently required rustup on PATH and Visual Studio ATL;
+the complete debug app then built. Windows/Linux initialization selects explicit
+bundled paths and Android opens the packaged library name. Apple bundled-only
+loading needs a supported, verified path/API: default upstream resolution can
+prefer development/cache libraries, and direct generated runtime initialization
+does not establish the public runtime's initialized state.
 
-**Qualification boundary:** account inventory and control admission are fixtures;
-the bridge adapter answers local control messages and maps authenticated Iroh
-peers onto the existing remote route source. It uses a local WebSocket shim so
-the production session driver stays unchanged. Project dispatch and terminal
-subscriptions are minimal fixture handlers, not `HostServer`/`agent-core`.
-The Dart adapter subclasses `RelayService` as a prototype seam. This verifies
-existing encrypted-session interoperability over Iroh, but not production
-enrollment, checkout authorization, revocation/leases, fallback or full hydration.
-Screen-frame transport is tested; physical Flutter/Ghostty rendering is not.
+Still verify locked Rust resolution/compiler provenance and final library hashes,
+symbols, ABI, package signatures and clean-cache native loading for each target:
+Windows x64 MSIX, Linux x64 AppImage/baseline linker compatibility, signed and
+notarized Apple Silicon app, and supported physical Android/iOS architectures.
+Check every bundled Mach-O, not only app and bridge executables. Intel builds and
+universal assembly are removed; no historical-client transition is required.
+Local-network permission denial/resume and release-mode crash resistance remain
+physical packaging gates. Upstream release panic behavior can terminate a process.
 
-Versions tested: Bun 1.3.14, Dart SDK 3.13.1, `@number0/iroh` 1.1.0,
-`iroh_quic` 1.0.3, `flutter_rust_bridge` 2.12.0, Windows x64. The Dart package's
-shipped Rust lockfile resolves Iroh 1.0.0. The JS package declares Iroh 1.0.0
-with Cargo semver semantics; do not infer its exact compiled core version from
-that declaration. NPM artifact integrity is pinned in the probe's Bun lockfile.
+## Security and lifecycle qualification still required
 
-| Check | Observed result |
-|---|---|
-| Upstream Windows Dart native download | Ed25519 signature verified by upstream setup; SHA-256 recorded in `native-artifacts.json` |
-| Bun native endpoint | Bind and close pass with minimal preset |
-| Bun ↔ Dart source probe | Pass: authenticated endpoint IDs on both ends, exact ALPN, bidirectional stream, 4096 synthetic bytes echoed |
-| Stream reads | Pass: split prefix writes, bounded exact prefix/body reads, coalesced echo; not exhaustive framing conformance |
-| Compiled Bun ↔ compiled Dart | Pass with embedded N-API addon and DLL beside Dart executable; native cache redirected to empty directory |
-| Final successful compiled run | QUIC counters: TX 21,910 bytes / 38 datagrams; RX 23,173 bytes / 36 datagrams; zero reported lost packets/bytes. These include protocol overhead, are not server payload metrics and are not a benchmark |
-| Dart CLI shutdown | Pass only after closing endpoint and disposing upstream FRB runtime ports |
-| Dart static analysis | `dart analyze scripts/iroh-qualification/dart`: no issues |
-| Physical Android inventory | `adb devices -l`: no attached devices |
-| Physical iOS, macOS/Linux runners, self-hosted relay | Not available through this session; not tested |
+The integration review found and corrected real OAuth metadata parsing, native
+hello naming, record/header size accounting, write deadlines, independent local
+stream readiness and late unconfirmed native carriers blocking WebSocket hello.
+Dart selection captures peer identity, registration generation and approved-relay
+configuration across awaits; handshake cancellation and leases fence late crypto
+completion and key ownership. These fixes and unit gates do not prove every
+asynchronous interleaving.
 
-The experiments use loopback addresses, disabled relays and no public address
-lookup. They establish local application E2E interoperability but cannot establish
-NAT traversal, relay interoperability, mobile packaging or production remote
-authorization behavior.
+Unknown native failure strings remain terminal because the binding lacks verified
+typed close causes. Authentication, revocation and protocol failures must never
+cause fallback. Upstream-owned key-copy zeroization and precise path-byte telemetry
+remain unsupported or unverified. FRB runtime disposal is process-final, never
+per-peer cleanup. Endpoint history prohibits revoked seed reuse; reseeding and
+re-enrollment UX still needs qualification. Upgraded local software must provision
+protected keys or fail closed, including on WebSocket.
 
-### Findings to carry into the prototype
+Qualify real Dart/app-to-bridge QUIC/E2E over direct WAN and the self-hosted forced
+relay; multiple machines/apps/projects, all feature services and checkout-safe
+hydration; queued-data expiry and credential/endpoint/policy rotation during each
+await; admission/disconnect races, lost pushes, backend/central/relay outages and
+remote-access-off. Exercise late dials/accepts, cancellation under stream mutex
+contention, UDP blocked at either end, network transitions, background/resume,
+long sleep, repeated reconnects and mixed versions. Never replay pending input or
+non-idempotent commands after peer loss.
 
-The published JS manifest points to `iroh-js/index.js` and
-`iroh-js/index.d.ts`, while the tarball ships them at its root. Bun's ordinary
-loader succeeded despite this mismatch; the probe uses the shipped `index.js`
-subpath explicitly. `createRequire` prevented native embedding in the compiled
-probe; static `require` let Bun embed the addon successfully. Neither finding
-required patching the upstream package.
+The relay uses account-wide generation fences and retires all account destinations
+so packets queued by a revoked sender cannot later flush to another peer. Stock
+high-level upstream admission plus asynchronous disconnect is insufficient: a
+revocation may occur after authorization but before registry insertion. The
+implemented public-API composition and local race tests address that gap; see the
+[service security boundary](../iroh-relay/README.md#security-boundary).
+Still qualify Linux container execution/signatures, distributed outbox delivery,
+configuration invalidation across processes, retained outbox cleanup, billing
+invalidation, cold-start/rotation races and resource ceilings under load. Collect
+third-party source license texts before release.
 
-The Dart package allows FRB `^2.12.0`, which resolved to 2.13.0 in the initial
-dependency resolution. Pinning 2.12.0 matches generated-code/native runtime
-expectations. No 2.13.0 runtime interoperability result is claimed.
+Dedicated control-authentication/discovery, E2E, project-binding and usable-terminal
+timings, CPU/memory and path-byte measurements remain incomplete. Missing telemetry
+must not be interpreted as zero latency or traffic. No performance acceptance
+criterion has passed. Use identical workloads with at least 100 connects and
+1,000 input samples per network profile, applying every threshold in the approved
+plan before staged promotion. Deployment, DNS and secrets remain operator actions.
 
-`Endpoint.close()` completed but the Dart CLI remained alive beyond the probe's
-20-second deadline. Calling upstream generated `RustLib.dispose()` released
-runtime ports and allowed clean exit. It is an internal-package import and
-runtime-final teardown, not a qualified per-peer or Flutter-resume solution.
-Endpoint/callback disposal under repeated enrollment and network lifecycle
-changes remains a gate item.
+## Historical evidence
 
-The published Dart API exposes remote identity, custom relays, secret-key
-import/export/signing, stream I/O, close, path events and aggregate QUIC
-counters. Presence of these APIs is source evidence, not behavioral qualification.
-Cancellation while an operation holds a stream mutex, independent dial
-cancellation on a shared endpoint, path accounting and callback cleanup need
-targeted stress tests. No definitive upstream capability blocker is asserted
-from an API search alone.
-
-Sources inspected: [JS package](https://www.npmjs.com/package/@number0/iroh/v/1.1.0),
-[Dart package](https://pub.dev/packages/iroh_quic/versions/1.0.3),
-[Dart source snapshot](https://github.com/snowpinelabs/iroh_dart/tree/5b2d1e899aad081b0c4e3e9b675977ceffdfd9e7),
-[native release](https://github.com/snowpinelabs/iroh_dart/releases/tag/v1.0.3).
-Published package tarballs, rather than mutable branch declarations, supplied
-the probe's native/API inputs.
-
-## Work still required before passing the gate
-
-1. Extend the working encrypted-terminal prototype to direct WAN and forced
-   self-hosted relay paths, then replace fixture project/control handlers with
-   the complete host lifecycle. Qualify checkout routing and hydration through
-   the actual feature services. The current loopback result alone does not
-   qualify those behaviors or performance.
-2. Package and run on physical Android/iOS, Windows x64, Linux x64 and Apple
-   Silicon, plus existing mobile architectures. Pin and verify all Flutter and
-   native artifacts. Verify secure endpoint-key persistence, identity, custom
-   relay selection, cancellation, shutdown, path metrics and network changes.
-3. Qualify endpoint impersonation, enrollment binding, generation races,
-   revocation during admission and active direct/relayed traffic, lost pushes,
-   backend outages, lease expiry during queued bulk, and remote-access-off.
-   Then implement production abstractions, enrollment/snapshots, leases,
-   self-hosted relay administration, rollout selection and lifecycle handling.
-4. Complete framing/E2E vectors, fragmentation/coalescing/malformed lengths,
-   queue pressure, rekey, stale writers, multiple peers/projects, bridge restart,
-   checkout routing and non-idempotent action failures. Exercise UDP blocked at
-   either/both ends, relay outage, Wi-Fi/mobile transitions, background/resume,
-   sleep/wake, reconnects and mixed WebSocket versions. Run workspace gates,
-   pure-Dart tests, explicit E2E evals and serial Dart/Flutter analysis.
-5. Measure identical devices/workloads with at least 100 connects and 1,000
-   input samples per network profile. Instrument control authentication,
-   discovery, peer/E2E establishment, project binding and usable terminal,
-   input-to-screen p50/p95, direct/relay bytes, fallback reasons, CPU and memory
-   without payload logging. Require ≥95% lower steady-state server payload
-   bytes on direct-capable transfers, lower direct-WAN p95 interaction latency,
-   ≤10% startup/forced-relay p95 regression, ≤1 percentage-point connection
-   success regression, and no duplicate commands, bypasses, unbounded queues
-   or native crashes.
-
-After qualification, deploy additive backend support, then internal, 1%, 10%,
-50%, 100% cohorts with passing gates and ≥48 hours of healthy telemetry before
-each promotion. Release operators own DNS, secrets and production deployment.
-Rollback disables preference for new sessions and reconnects without replay;
-retain additive database fields. Retire WebSocket payloads only after two
-qualified releases and 14 consecutive days with ≥50% lower server payload bytes,
-<1% fallback and supported-client compatibility accounted for. Keep central
-control WebSocket traffic. Architecture/protocol/runbook changes must accompany
-the actual production implementation, not describe the probe as shipped behavior.
+The standalone Windows prototype passed encrypted terminal/rekey, identity denial,
+record/stream rejection and compiled Bun/Dart interoperability checks. It used
+fixture authorization/project handlers and a local WebSocket shim; those results
+are not production-host qualification. Its source, dependency graphs and detailed
+results, plus the superseded integration/packaging/upstream reviews, remain in Git
+at `9ed88a01`. The retired prototype path was `scripts/iroh-qualification/`.
+Current implementation evidence belongs above and in the ledger; local captures
+remain ignored artifacts.

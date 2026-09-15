@@ -34,7 +34,7 @@ that separate source build needs platform packaging qualification.
 
 Current release limitations and security evidence are in
 [the migration ledger](../../docs/iroh-migration-ledger.md) and
-[upstream audit](../../docs/iroh-relay-upstream-audit.md). WebSocket remains the
+[qualification](../../docs/iroh-qualification.md). WebSocket remains the
 production default. Unknown native close causes remain terminal until upstream
 bindings provide a classification that cannot turn authorization rejection into
 fallback.

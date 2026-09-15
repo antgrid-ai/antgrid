@@ -68,7 +68,7 @@ jobs:
           set -f
           NATIVE_PATHS='app/android app/pubspec.yaml app/pubspec.lock
             packages/antgrid_peer_transport/pubspec.yaml packages/antgrid_peer_transport/pubspec.lock
-            scripts/check-iroh-packaging.ts scripts/iroh-qualification/flutter-source-pins.json
+            scripts/check-iroh-packaging.ts scripts/iroh-packaging/flutter-source-pins.json
             .github/actions/setup-android .github/workflows/ci-android.yml'
 
           full() { echo "$1 — building the full AAB."; echo "changed=true" >> "$GITHUB_OUTPUT"; exit 0; }

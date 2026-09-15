@@ -3,7 +3,7 @@
 Release status: **unqualified**. WebSocket remains the default. The authenticated
 self-hosted Iroh relay service under `iroh-relay/` is being integrated using
 upstream public APIs. Admission, revocation fencing and resource controls passed
-local gates documented in [the upstream audit](iroh-relay-upstream-audit.md);
+local gates documented in [qualification](iroh-qualification.md);
 deployment and native forced-relay/platform/performance gates remain open.
 A stock allow-all relay does not satisfy this deployment contract.
 
@@ -40,8 +40,8 @@ client authorization lease; only an authenticated snapshot can do that.
 Do not configure an Iroh URL until its admission, active disconnect and resource
 limits pass qualification. URL changes advance policy on the next authorization
 snapshot; coordinated immediate invalidation across processes is still an
-operator/qualification gap. Delivered-outbox retention and production dashboards
-also remain to be implemented and load-qualified.
+operator/qualification gap. Delivered-outbox retention remains to be implemented; the supplied monitoring
+configuration still needs deployment and load qualification.
 
 ## Staging checks
 

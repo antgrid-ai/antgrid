@@ -1,7 +1,6 @@
 # Iroh migration task ledger
 
-Plan: [approved scope](iroh-migration-plan.md). Existing prototype and research
-are preserved. Status refers to production implementation, not prototype smoke.
+Plan: [approved scope](iroh-migration-plan.md). Historical prototype and review detail remain in Git. Status refers to production implementation, not prototype smoke.
 
 | Work | Status | Evidence |
 | --- | --- | --- |
@@ -14,7 +13,7 @@ are preserved. Status refers to production implementation, not prototype smoke.
 | Upstream relay hooks / Rust service | Implemented, staging unqualified | Locked upstream 1.2.0 service; six fence/accounting tests and actual TLS routing/disconnect test passed, including older 1.0.0 protocol compatibility; combined real backend/service gate passed 11 assertions |
 | Native host/app integration / selection | Implemented | Source and compiled HostServer/native/E2E smoke passed terminal input/output, frame ACKs, managed-checkout Git, two projects, central outage and immediate remote-access-off |
 | Packaging / Apple Silicon / operations | Partially verified | Flutter-built Windows native DLL passed compiled Dart smoke; full Windows debug app build passed after Rust PATH and Visual Studio ATL setup; CI/monitoring YAML and Compose config parse; Docker daemon/physical builds unavailable |
-| Final local gates | Component gates passed; full E2E not clean | Wire 119 passed; relay 193 passed; Flutter 4,208 passed, two skipped, analysis clean; original full E2E sweep: 106 passed, 28 skipped, 20 failures; 13 fixture regressions corrected/rechecked; installed-agent follow-up below; uncommitted-vector guard remains |
+| Final local gates | Component gates passed; full E2E not clean | Wire 119 passed; relay 193 passed; Flutter 4,208 passed, two skipped, analysis clean; original full E2E sweep: 106 passed, 28 skipped, 20 failures; 13 fixture regressions corrected/rechecked; installed-agent follow-up below; clean full-sweep verification remains outstanding |
 | Physical/staging/security/performance qualification | Unqualified | Operator infrastructure and physical platforms required |
 
 Final bounded checks: site build and browser contracts passed (38 passed, two
@@ -38,8 +37,8 @@ echoed user prompt. Dedicated Claude/Codex workspace scripts support focused
 reruns: `test:evals:claude` and `test:evals:codex` in the eval workspace.
 
 Envelope vector regeneration produced identical bytes and its five schema tests
-passed (37 assertions). The committed/git-clean guard is unchanged and remains
-pending the migration commit. These focused checks do not constitute a new full
+passed (37 assertions). The migration was subsequently committed in `e9a11452`; this ledger does not
+record a post-commit rerun of the committed/git-clean guard. These focused checks do not constitute a new full
 E2E sweep.
 
 Final verification after collector edits: `bun run --filter antgrid-evals
@@ -127,9 +126,17 @@ unqualified. Local TLS relay packet gates and fixture-controlled native host
 smokes do not establish those results. Lifecycle telemetry still needs dedicated
 central authentication/discovery, E2E, project-binding, usable-terminal, CPU,
 memory and path-byte measurements. Outbox retention and billing invalidation
-load also need operational qualification. See the security, packaging and
-upstream relay reviews, qualification record and operations guide.
+load also need operational qualification. See the [qualification record](iroh-qualification.md),
+[relay README](../iroh-relay/README.md) and [operations guide](iroh-operations.md).
 
 Temporary agent handoffs and dated investigation logs were consolidated into
 this ledger. Historical detail remains in Git history; local capture artifacts
 remain ignored rather than becoming permanent repository documentation.
+
+## Documentation consolidation - September 15
+
+Retained the approved plan, this task ledger, qualification record and operations
+guide. Consolidated current security, packaging and relay evidence in qualification;
+removed superseded reviews and the redundant relay handoff. Detailed historical
+reviews remain in Git at `9ed88a01`. The service README owns relay design and commands.
+This documentation cleanup does not advance any runtime or release gate.

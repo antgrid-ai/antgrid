@@ -18,7 +18,7 @@ Version pins and package integrity are recorded in `bun.lock`,
 The Flutter plugin includes its upstream Rust `Cargo.lock`; it builds native
 artifacts through upstream cargokit. The signed standalone Windows artifact
 used by the CLI probe is recorded in
-`scripts/iroh-qualification/native-artifacts.json`.
+`scripts/iroh-packaging/native-artifacts.json`.
 
 These additions were inspected at their installed package licence files. The
 historical bulk scan below predates the native peer dependencies; a complete

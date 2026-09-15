@@ -15,7 +15,7 @@ const pins = z.object({
   schemaVersion: z.literal(1),
   packages: z.record(z.string(), z.object({ version: z.string(), archiveSha256: hash })),
   rustFiles: z.object({ "Cargo.lock": hash, "Cargo.toml": hash }),
-}).parse(JSON.parse(await readFile(join(root, "scripts/iroh-qualification/flutter-source-pins.json"), "utf8"))) as {
+}).parse(JSON.parse(await readFile(join(root, "scripts/iroh-packaging/flutter-source-pins.json"), "utf8"))) as {
   packages: Record<string, { version: string; archiveSha256: string }>;
   rustFiles: Record<string, string>;
 };

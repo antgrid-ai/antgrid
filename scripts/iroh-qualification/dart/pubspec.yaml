@@ -1,9 +1,0 @@
-name: antgrid_iroh_qualification
-publish_to: none
-environment:
-  sdk: ^3.12.0
-dependencies:
-  antgrid_relay_client:
-    path: ../../../packages/antgrid_relay_client
-  flutter_rust_bridge: 2.12.0
-  iroh_quic: 1.0.3

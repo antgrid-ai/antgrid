@@ -56,7 +56,7 @@ not close a healthy authorized native payload connection.
 Approved relay maps disable implicit public discovery. The self-hosted relay
 under `iroh-relay/` composes upstream public handshake and registry interfaces;
 its admission/dispatch fencing and resource accounting remain under verification.
-See [the upstream audit](iroh-relay-upstream-audit.md). Native
+See [the relay security boundary](../iroh-relay/README.md#security-boundary). Native
 error classification and key erasure also require qualification. Nothing in this
 branch authorizes enabling production preference before those gates pass.
 
