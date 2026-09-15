@@ -40,19 +40,15 @@ export class TestApp {
    * the old bare-id (displacing) behaviour, leaving `machineDeviceId` unset
    * unless the caller also supplies one.
    *
-   * NOT a safe, additive probe, even with the default slot. Two layers are
-   * involved: the relay routes the slotted hello to a distinct connection, so
-   * it no longer sends a SUPERSEDED close to `env.app`'s socket — but the
-   * bridge (`bridge/src/relay-client.ts`, single-active-phone takeover) still
-   * sees a second same-account slot as a competing
-   * phone. It sends a sealed `session-takeover` to the previously-established
-   * session, zeroizes those keys, and stops liveness — deliberately, that's
-   * production behaviour, not a bug. So after a second `TestApp.connect(env)`,
-   * `env.app`'s WebSocket stays open but its E2E session is dead: further
-   * sealed round trips on `env.app` (e.g. `pullStateSnapshot`) are silently
-   * dropped by the bridge and never answered. A caller that still needs
-   * `env.app` afterwards must re-handshake it (`RelayClient.reconnect`/
-   * `performE2EHandshake`) — `TestApp.connect(env)` does not do this for you.
+   * An ADDITIVE probe on both layers: the relay routes the slotted hello to a
+   * distinct connection, so it sends no SUPERSEDED close to `env.app`'s
+   * socket, and the bridge keeps one established E2E session per app device
+   * (`bridge/src/relay-client.ts`), so it admits this one alongside `env.app`'s
+   * rather than displacing it. `env.app` stays usable afterwards with no
+   * re-handshake. The one residue is bookkeeping: a probe that disconnects
+   * without rekeying leaves an unreachable session on the bridge until its TTL
+   * reap, and a suite opening many probes can reach the bridge's session cap,
+   * at which point the OLDEST session is evicted with a `session-takeover`.
    */
   static async connect(
     env: TestEnv,

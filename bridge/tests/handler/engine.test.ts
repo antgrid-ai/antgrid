@@ -4,15 +4,18 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
-import { HandlerEngine, quickChoicesFor } from "../../src/handler/engine";
+import { HandlerEngine, MAX_EVIDENCE_REASKS, quickChoicesFor } from "../../src/handler/engine";
 import { RunawayGuard } from "../../src/handler/runaway-guard";
-import { LIMIT_FALLBACK_MS, LIMIT_PARK_CEILING, MIN_PARK_MS } from "../../src/handler/lifecycle";
+import {
+  LIMIT_FALLBACK_MS, LIMIT_PARK_CEILING, MIN_PARK_MS, TRANSIENT_CEILING,
+} from "../../src/handler/lifecycle";
 import { __setRootForTest } from "../../src/logger";
 import type { AbMessage } from "../../src/protocol";
-import type { HandlerDecision } from "../../src/handler/decision";
+import type { DecisionAsk, HandlerDecision } from "../../src/handler/decision";
 import type { InstructionItem, ItemTransition } from "../../src/handler/backlog";
 import { MAX_ITEM_CHARS, type ExtractedItem } from "../../src/handler/extract";
-import type { HandlerSessionRecord } from "../../src/handler/session-store";
+import { MAX_BRIEF_CHARS } from "../../src/handler/decision";
+import type { HandlerSessionRecord, OpenEscalation } from "../../src/handler/session-store";
 import { MAX_STORED, type StoredSnapshot } from "../../src/handler/snapshot-store";
 import { MAX_STORED_WRAPUPS } from "../../src/handler/wrap-up-store";
 import type { WrapUpRecord } from "../../src/handler/wrap-up";
@@ -26,9 +29,13 @@ function item(id: string, over: Partial<InstructionItem> = {}): InstructionItem 
   return { id, text: `item ${id}`, status: "queued", createdAt: 1, ...over };
 }
 
+function lastSaved(saved: unknown[]): HandlerSessionRecord {
+  return saved.at(-1) as HandlerSessionRecord;
+}
+
 function sessionRecord(over: Partial<HandlerSessionRecord> = {}): HandlerSessionRecord {
   return {
-    version: 2, terminalId: "t1", armed: true, goal: GOAL, backlog: [],
+    version: 2, terminalId: "t1", armed: true, goal: GOAL, instructions: [], backlog: [],
     armedAt: 1, escalations: [], ...over,
   };
 }
@@ -124,7 +131,8 @@ function makeEngine(overrides: Record<string, unknown> = {}) {
 }
 
 interface SessionSnapshot {
-  state: string; parkKind?: string; parkedUntil?: number; pendingEscalations: number;
+  state: string; parkKind?: string; parkCause?: string; parkedUntil?: number;
+  pendingEscalations: number;
   goal: string; backlog: InstructionItem[];
   observability?: string;
 }
@@ -161,17 +169,18 @@ describe("arm/disarm", () => {
     expect(status.sessions[0].terminalId).toBe("t1");
     expect(status.sessions[0].state).toBe("watching");
   });
-  it("a one-tap arm carries neither a goal nor a backlog", () => {
+  it("a one-tap arm carries no instruction and no backlog", () => {
     // Arming resolves before anything has stated what the session is for, so an
     // empty payload is a legitimate arm rather than a malformed one.
     const { engine, saved, activity } = makeEngine();
     engine.arm({ terminalId: "t1" });
     const rec = saved[0] as HandlerSessionRecord;
+    expect(rec.instructions).toEqual([]);
     expect(rec.goal).toBe("");
     expect(rec.backlog).toEqual([]);
-    expect((activity[0] as { reason: string }).reason).toBe("(no goal set)");
+    expect((activity[0] as { reason: string }).reason).toBe("(nothing asked yet)");
   });
-  it("re-arming an armed session logs goal_edited and leaves an absent backlog alone", () => {
+  it("re-arming an armed session stacks the new instruction and leaves an absent backlog alone", () => {
     // Absent means "leave it alone", never "clear it": the bridge's copy holds
     // the statuses this session has already banked, and a re-arm (or a judge
     // pick) carries no backlog.
@@ -182,9 +191,22 @@ describe("arm/disarm", () => {
     });
     engine.arm({ terminalId: "t1", goal: "edited" });
     expect((activity[1] as { decision: string }).decision).toBe("goal_edited");
+    expect((activity[1] as { reason: string }).reason).toBe("edited");
     const rec = saved.at(-1) as HandlerSessionRecord;
-    expect(rec.goal).toBe("edited");
+    // Append-only: the sentence the agent has been working under is still what
+    // the session was opened to do, so the edit stacks rather than replaces.
+    expect(rec.instructions.map((i) => i.text)).toEqual([GOAL, "edited"]);
+    expect(rec.goal).toBe(GOAL);
     expect(rec.backlog.map((i) => i.status)).toEqual(["done"]);
+  });
+  it("a re-arm restating the same goal stacks nothing and logs nothing", () => {
+    // handler:configure carries the whole payload on every judge pick and every
+    // backlog reorder, so an unchanged sentence is not a new instruction.
+    const { engine, saved, activity } = makeEngine();
+    engine.arm({ terminalId: "t1", goal: GOAL });
+    engine.arm({ terminalId: "t1", goal: GOAL, judgeTool: "claude-code" });
+    expect(lastSaved(saved).instructions.map((i) => i.text)).toEqual([GOAL]);
+    expect(records(activity, "goal_edited")).toHaveLength(0);
   });
   it("an explicitly empty backlog clears the stored one", () => {
     const { engine, saved } = makeEngine();
@@ -208,6 +230,86 @@ describe("arm/disarm", () => {
     expect((saved.at(-1) as { armed: boolean }).armed).toBe(false);
     const status = sent.at(-1) as never as { sessions: unknown[] };
     expect(status.sessions).toHaveLength(0);
+  });
+});
+
+// The wire's window onto the instruction list session-store.ts keeps in full —
+// see HandlerSessionSnapshot's `instructions` (protocol.ts) for the pin and the
+// elision arithmetic these pin down. `emitStatus` is called directly rather than
+// awaiting `instruct`'s extraction spawn: it is the same public re-emit
+// agent-core calls on every handshake, and calling it synchronously here is what
+// keeps these cases from racing the default `runExtractionFn`'s resolution.
+describe("the instructions window (handler:status)", () => {
+  function instructionsOf(sent: AbMessage[]): { total: number; items: string[] } | undefined {
+    const status = sent.filter((m) => m.type === "handler:status").at(-1) as never as {
+      sessions: Array<{ instructions?: { total: number; items: string[] } }>;
+    };
+    return status.sessions[0]?.instructions;
+  }
+
+  it("one instruction: the window is that entry, total 1", () => {
+    const { engine, sent } = makeEngine();
+    engine.arm({ terminalId: "t1", goal: GOAL });
+    expect(instructionsOf(sent)).toEqual({ total: 1, items: [GOAL] });
+  });
+
+  it("five instructions: the whole list, in order, total 5", () => {
+    const { engine, sent } = makeEngine();
+    engine.arm({ terminalId: "t1", goal: "one" });
+    for (const text of ["two", "three", "four", "five"]) engine.instruct({ terminalId: "t1", text });
+    engine.emitStatus();
+    expect(instructionsOf(sent)).toEqual({ total: 5, items: ["one", "two", "three", "four", "five"] });
+  });
+
+  it("twelve instructions: entry #1 pinned, items[1..4] are entries 9-12, total 12", () => {
+    const { engine, sent } = makeEngine();
+    engine.arm({ terminalId: "t1", goal: "one" });
+    for (let n = 2; n <= 12; n++) engine.instruct({ terminalId: "t1", text: `entry ${n}` });
+    engine.emitStatus();
+    expect(instructionsOf(sent)).toEqual({
+      total: 12,
+      items: ["one", "entry 9", "entry 10", "entry 11", "entry 12"],
+    });
+    // Entry #1 names the session on the card headline throughout, whatever has
+    // stacked onto it since.
+    expect(statusOf(sent).goal).toBe("one");
+  });
+
+  it("a multi-line instruction is collapsed, not escaped-then-collapsed, and stays within the wire bound", () => {
+    const { engine, sent } = makeEngine();
+    // oneLine BEFORE previewForUser: escaping first would turn the newline into
+    // the 4-char literal "\x0a" and burn budget collapsing was supposed to save.
+    const raw = `${"a".repeat(150)}\n${"b".repeat(50)}`;
+    engine.arm({ terminalId: "t1", goal: raw });
+    const window = instructionsOf(sent)!;
+    expect(window.items).toHaveLength(1);
+    expect(window.items[0]).not.toContain("\\x0a");
+    // The length itself, not just "no throw": clip alone can return 121 chars
+    // for a .max(120) field and blank the whole frame at the app's parser.
+    expect(window.items[0]!.length).toBeLessThanOrEqual(120);
+  });
+
+  it("an armed session with no instructions still emits the field, with total 0", () => {
+    const { engine, sent } = makeEngine();
+    engine.arm({ terminalId: "t1" });
+    expect(instructionsOf(sent)).toEqual({ total: 0, items: [] });
+  });
+
+  it("the persisted record keeps the raw instruction list, not the wire window", () => {
+    const { engine, saved } = makeEngine();
+    engine.arm({ terminalId: "t1", goal: GOAL });
+    expect(lastSaved(saved).instructions).toEqual([{ text: GOAL, at: 1000 }]);
+  });
+
+  it("the wrap-up record does not gain the instructions window", async () => {
+    const { engine, wrapUps } = makeEngine({
+      runDecisionFn: async () => decide({ transitions: [{ id: "a", status: "done", evidence: "ran to completion" }] }),
+    });
+    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a")] });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(wrapUps()).toHaveLength(1);
+    expect(wrapUps()[0]).not.toHaveProperty("instructions");
+    expect(wrapUps()[0]!.goal).toBe(GOAL);
   });
 });
 
@@ -260,63 +362,193 @@ test("decision runs on the session judge, falling back to the session's own tool
   expect(calls[1]).toEqual({ tool: "claude-code", model: undefined });
 });
 
-test("arm persists the posture and reports it on the snapshot", () => {
-  const saved: HandlerSessionRecord[] = [];
-  const sent: AbMessage[] = [];
-  const { engine } = makeEngine({ saveSessionFn: (r: HandlerSessionRecord) => saved.push(r), sendAb: (m: AbMessage) => sent.push(m) });
+// The lens and the brief are state on the snapshot; the ids this bridge accepts
+// are a fact about the bridge and ride the frame itself.
+test("arm persists the lens and the brief and reports both on the snapshot", () => {
+  const { engine, sent, saved } = makeEngine();
+  engine.arm({ terminalId: "t1", goal: GOAL, role: "qa", brief: "show me the exit codes" });
+  const rec = saved.at(-1) as HandlerSessionRecord;
+  expect(rec.role).toBe("qa");
+  expect(rec.brief).toBe("show me the exit codes");
+  // The retired posture is not written back: a bridge rolled back onto this record
+  // would otherwise re-persist a posture no app on either side can see.
+  expect("personality" in rec).toBe(false);
+  const status = sent.filter((m) => m.type === "handler:status").at(-1) as never as {
+    lenses?: string[]; sessions: Array<Record<string, unknown>>;
+  };
+  expect(status.lenses).toEqual(["pm", "qa", "critic", "release"]);
+  expect(status.sessions[0].role).toBe("qa");
+  expect(status.sessions[0].brief).toBe("show me the exit codes");
+  expect("personality" in status.sessions[0]).toBe(false);
+});
+
+// Absent is the unnamed default — the rules alone — and the app reads it as that.
+// A bridge that filled the key in would leave a picked lens indistinguishable
+// from no pick at all.
+test("a session that never picked a lens carries neither key", () => {
+  const { engine, sent } = makeEngine();
+  engine.arm({ terminalId: "t1", goal: GOAL });
+  const status = sent.filter((m) => m.type === "handler:status").at(-1) as never as {
+    sessions: Array<Record<string, unknown>>;
+  };
+  expect("role" in status.sessions[0]).toBe(false);
+  expect("brief" in status.sessions[0]).toBe(false);
+});
+
+// The surface that most needs the advert is the arm sheet, which has no session
+// to read — so it rides every frame, including the one emitted with nothing armed.
+test("the lens ids ride a frame emitted before anything is armed", () => {
+  const { engine, sent } = makeEngine();
+  engine.emitStatus();
+  const status = sent.filter((m) => m.type === "handler:status").at(-1) as never as {
+    lenses?: string[]; sessions: unknown[];
+  };
+  expect(status.sessions).toHaveLength(0);
+  expect(status.lenses).toEqual(["pm", "qa", "critic", "release"]);
+});
+
+// Absent-keeps, the same rule the judge fields follow: a backlog edit and a goal
+// edit both re-arm carrying neither, and neither may reset one.
+test("a re-arm carrying neither keeps the stored lens and brief", () => {
+  const { engine, saved } = makeEngine();
+  engine.arm({ terminalId: "t1", goal: GOAL, role: "critic", brief: "mind the rollback" });
+  engine.arm({ terminalId: "t1", goal: GOAL });
+  expect(lastSaved(saved).role).toBe("critic");
+  expect(lastSaved(saved).brief).toBe("mind the rollback");
+});
+
+// The empty string is the clear, and it has to be sayable separately from absent:
+// a picker with no way back to the unnamed default is a lens the user cannot undo.
+test("an empty role or brief clears back to the unnamed default", () => {
+  const { engine, saved } = makeEngine();
+  engine.arm({ terminalId: "t1", goal: GOAL, role: "release", brief: "note the changelog" });
+  engine.arm({ terminalId: "t1", goal: GOAL, role: "" });
+  expect(lastSaved(saved).role).toBeUndefined();
+  expect(lastSaved(saved).brief).toBe("note the changelog");
+  engine.arm({ terminalId: "t1", goal: GOAL, brief: "" });
+  expect(lastSaved(saved).brief).toBeUndefined();
+});
+
+test("bridge-restart re-arm keeps the persisted lens and brief", () => {
+  const { engine, saved } = makeEngine({
+    loadSessionFn: () => sessionRecord({ role: "critic", brief: "mind the rollback" }),
+  });
+  engine.arm({ terminalId: "t1", goal: GOAL });
+  expect(lastSaved(saved).role).toBe("critic");
+  expect(lastSaved(saved).brief).toBe("mind the rollback");
+});
+
+// The record stores a lens as a lenient string so a spelling this build does not
+// share cannot null the record and take the backlog with it. The cost is that an
+// unknown one is silent, so it is said once — and once per value, not once per arm.
+test("a record naming an unknown lens arms under the default and says so once", async () => {
+  const { engine, saved } = makeEngine({ loadSessionFn: () => sessionRecord({ role: "not-a-lens" }) });
+  const warned = await capturingWarnings(async () => {
+    engine.arm({ terminalId: "t1", goal: GOAL });
+    engine.disarm("t1");
+    engine.arm({ terminalId: "t1", goal: GOAL });
+  });
+  expect(lastSaved(saved).role).toBeUndefined();
+  expect(warned.split("not-a-lens")).toHaveLength(2);
+});
+
+// An older app still ships the retired posture key on every arm. It selects
+// nothing: autonomy is derived from the rules, and no posture names a lens.
+test("a legacy posture on an arm chooses no lens and is not persisted", () => {
+  const { engine, saved } = makeEngine();
   engine.arm({ terminalId: "t1", goal: GOAL, personality: "autopilot" });
-  expect(saved.at(-1)?.personality).toBe("autopilot");
-  const status = sent.filter((m) => m.type === "handler:status").at(-1) as never as {
-    sessions: Array<{ personality?: string }>;
-  };
-  expect(status.sessions[0].personality).toBe("autopilot");
+  const rec = saved.at(-1) as HandlerSessionRecord;
+  expect(rec.role).toBeUndefined();
+  expect("personality" in rec).toBe(false);
 });
 
-// The app renders its picker straight off this field, so a session that has
-// never been given a posture must still report the one it judges under — an
-// absent value would leave the picker blank over a judge already running.
-test("a session that never picked a posture still reports the default", () => {
-  const sent: AbMessage[] = [];
-  const { engine } = makeEngine({ sendAb: (m: AbMessage) => sent.push(m) });
-  engine.arm({ terminalId: "t1", goal: GOAL });
-  const status = sent.filter((m) => m.type === "handler:status").at(-1) as never as {
-    sessions: Array<{ personality?: string }>;
-  };
-  expect(status.sessions[0].personality).toBe("watchdog");
+// A posture arriving beside a real lens must not compete with it, and the line
+// saying it selected nothing is worth exactly one per engine: an older app ships
+// the key on EVERY configure, so a per-arm line would bury the log it sits in.
+test("an old posture on the wire changes nothing", async () => {
+  const { engine, saved } = makeEngine();
+  const warned = await capturingWarnings(async () => {
+    engine.arm({ terminalId: "t1", goal: GOAL, personality: "closer" });
+    engine.arm({ terminalId: "t1", goal: GOAL, role: "pm" });
+    engine.arm({ terminalId: "t1", goal: GOAL, personality: "autopilot" });
+  });
+  expect(lastSaved(saved).role).toBe("pm");
+  expect(saved.some((r) => "personality" in (r as HandlerSessionRecord))).toBe(false);
+  expect(warned.match(/reads as the default lens/g)).toHaveLength(1);
 });
 
-// Absent-keeps, the same rule the judge fields follow: a backlog edit and a
-// goal edit both re-arm carrying no posture, and neither may reset one.
-test("a re-arm carrying no posture keeps the stored one", () => {
-  const saved: HandlerSessionRecord[] = [];
-  const { engine } = makeEngine({ saveSessionFn: (r: HandlerSessionRecord) => saved.push(r) });
-  engine.arm({ terminalId: "t1", goal: GOAL, personality: "closer" });
-  engine.arm({ terminalId: "t1", goal: GOAL });
-  expect(saved.at(-1)?.personality).toBe("closer");
-});
-
-test("bridge-restart re-arm keeps the persisted posture", () => {
-  const saved: HandlerSessionRecord[] = [];
-  const { engine } = makeEngine({
-    saveSessionFn: (r: HandlerSessionRecord) => saved.push(r),
+// The same value off disk, which is how every session armed before the upgrade
+// arrives. It rehydrates under the default and is not written back, so a bridge
+// rolled back onto this record finds the posture already gone.
+test("a posture on the record rehydrates under the default and says so once", async () => {
+  const { engine, saved } = makeEngine({
     loadSessionFn: () => sessionRecord({ personality: "autopilot" }),
   });
-  engine.arm({ terminalId: "t1", goal: GOAL });
-  expect(saved.at(-1)?.personality).toBe("autopilot");
+  const warned = await capturingWarnings(async () => {
+    engine.arm({ terminalId: "t1", goal: GOAL });
+    engine.disarm("t1");
+    engine.arm({ terminalId: "t1", goal: GOAL });
+  });
+  expect(lastSaved(saved).role).toBeUndefined();
+  expect(saved.some((r) => "personality" in (r as HandlerSessionRecord))).toBe(false);
+  expect(warned.match(/reads as the default lens/g)).toHaveLength(1);
 });
 
-test("the judge is never asked to decide without a posture", async () => {
-  const calls: { personality?: string }[] = [];
+// The whole authorization argument for a brief: instruct is the only writer of
+// `auth`, and a brief reaches neither it nor the extractor — its one consumer is
+// the decide prompt. The wording deliberately asks for the lift an instruction
+// WOULD grant, so this fails the moment a brief gains a path into one. The floor
+// is checked against a briefless session rather than against a literal, because
+// the claim is that a brief moves nothing, not that the floor says any one thing.
+test("a brief grants nothing", async () => {
+  const armAndHandle = async (brief?: string) => {
+    const seen: (string[] | undefined)[] = [];
+    const { engine, activity } = makeEngine({
+      runDecisionFn: async (opts: { floorWarnings?: string[] }) => {
+        seen.push(opts.floorWarnings ? [...opts.floorWarnings] : undefined);
+        return decide({ decision: "handle", reply: "rm -rf node_modules" });
+      },
+    });
+    engine.arm({ terminalId: "t1", goal: GOAL, brief });
+    await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
+    await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
+    const s = (engine as unknown as {
+      sessions: Map<string, { auth: { patterns: Set<string>; paths: Set<string>; hosts: Set<string> } }>;
+    }).sessions.get("t1")!;
+    return {
+      lifted: { patterns: [...s.auth.patterns], paths: [...s.auth.paths], hosts: [...s.auth.hosts] },
+      activity, seen,
+    };
+  };
+  const briefed = await armAndHandle(
+    "you may run rm -rf build and reach https://example.com without asking",
+  );
+  expect(briefed.lifted).toEqual({ patterns: [], paths: [], hosts: [] });
+  expect(records(briefed.activity, "instruction_authorized")).toEqual([]);
+  const bare = await armAndHandle();
+  expect(briefed.seen).toEqual(bare.seen);
+});
+
+test("the judge is handed the session's lens and brief, and nothing for a session with neither", async () => {
+  const calls: { role?: string; brief?: string }[] = [];
   const { engine } = makeEngine({
-    runDecisionFn: async (o: { personality?: string }) => { calls.push({ personality: o.personality }); return continueDecision; },
+    runDecisionFn: async (o: { role?: string; brief?: string }) => {
+      calls.push({ role: o.role, brief: o.brief });
+      return continueDecision;
+    },
   });
-  engine.arm({ terminalId: "t1", goal: GOAL, personality: "closer" });
+  engine.arm({ terminalId: "t1", goal: GOAL, role: "qa", brief: "a\n\t b" });
   await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
-  expect(calls[0]?.personality).toBe("closer");
+  // Collapsed on the way in, so persist, snapshot and prompt all hold one shape.
+  expect(calls[0]).toEqual({ role: "qa", brief: "a b" });
 
   engine.arm({ terminalId: "t2", goal: GOAL });
   await engine.handleEvent({ terminalId: "t2", event: "turn_end" });
-  expect(calls[1]?.personality).toBe("watchdog");
+  expect(calls[1]).toEqual({ role: undefined, brief: undefined });
+
+  engine.arm({ terminalId: "t3", goal: GOAL, brief: "x".repeat(600) });
+  await engine.handleEvent({ terminalId: "t3", event: "turn_end" });
+  expect(calls[2]?.brief).toHaveLength(MAX_BRIEF_CHARS);
 });
 
 test("bridge-restart re-arm keeps the persisted judge when the arm carries none", () => {
@@ -697,6 +929,135 @@ describe("escalation accounting", () => {
     expect(status.sessions[0].escalations[0].escalationId).toBe(esc.escalationId);
     expect(status.sessions[0].escalations[0].question).toBeTruthy();
   });
+
+  // The ask path is given `asked`/`answered`/`ask_rejected` precisely so a
+  // question and its resolution both read as themselves; a submitted line that
+  // retires a question deserves the same.
+  it("says in the feed that a submitted line answered the question", () => {
+    const { engine, sent, activity } = makeEngine({
+      loadSessionFn: () => sessionRecord({
+        escalations: [{
+          escalationId: "e1", question: "Which env should this target?", reasoning: "r",
+          draftReply: "", urgency: "normal", at: 1,
+        }],
+      }),
+    });
+    engine.arm({ terminalId: "t1" });
+    engine.onUserReply("t1", "staging\r");
+    expect(statusOf(sent).pendingEscalations).toBe(0);
+    const rows = records(activity, "answered") as { reason: string; detail?: string }[];
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.reason).toBe("Your reply answered Handler's question");
+    expect(rows[0]!.detail).toBe("Which env should this target?");
+  });
+
+  it("counts every question a single submitted line retired at once", () => {
+    const { engine, activity } = makeEngine({
+      loadSessionFn: () => sessionRecord({
+        escalations: [
+          { escalationId: "e1", question: "Which env?", reasoning: "r", draftReply: "", urgency: "normal", at: 1 },
+          { escalationId: "e2", question: "Which branch?", reasoning: "r", draftReply: "", urgency: "normal", at: 2 },
+        ],
+      }),
+    });
+    engine.arm({ terminalId: "t1" });
+    engine.onUserReply("t1", "staging, main\r");
+    const rows = records(activity, "answered") as { reason: string; detail?: string }[];
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.reason).toBe("Your reply answered 2 of Handler's questions");
+  });
+
+  it("says nothing when a submitted line cleared nothing", () => {
+    const { engine, activity } = makeEngine({
+      loadSessionFn: () => sessionRecord({
+        goal: "", backlog: [item("i1")],
+        escalations: [{
+          escalationId: "a1", question: "Which database?", reasoning: "r", draftReply: "",
+          urgency: "normal", at: 1, nonBlocking: true, unblocked: ["i1"],
+          askOptions: [
+            { choiceId: "opt1", label: "A", cost: "x" },
+            { choiceId: "opt2", label: "B", cost: "y" },
+          ],
+        }],
+      }),
+    });
+    engine.arm({ terminalId: "t1" });
+    const promptGenOf = () => (engine as unknown as {
+      sessions: Map<string, { promptGen?: number }>;
+    }).sessions.get("t1")?.promptGen;
+    const before = promptGenOf();
+    engine.onUserReply("t1", "carry on\r");
+    expect(records(activity, "answered")).toEqual([]);
+    expect(promptGenOf()).toBe(before);
+  });
+
+  // The suspended pass banked a hash computed BEFORE the question it stood on was
+  // retired. Without the promptGen bump paired with the hash clear above, its
+  // return re-banks that stale hash on top of the clear, and the next event finds
+  // an unmoved-looking context and judges nothing.
+  it("a submitted line that retires a question invalidates the prompt already in flight", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let started = false;
+    const { engine } = makeEngine({
+      loadSessionFn: () => sessionRecord({
+        escalations: [{
+          escalationId: "e1", question: "Drop the pricing page?", reasoning: "r",
+          draftReply: "", urgency: "normal", at: 1,
+        }],
+      }),
+      runDecisionFn: async () => { started = true; await gate; return decide({}); },
+    });
+    engine.arm({ terminalId: "t1" });
+    const inFlight = engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    for (let i = 0; i < 400 && !started; i++) await new Promise<void>((r) => { setTimeout(r, 1); });
+    engine.onUserReply("t1", "skip it\r");
+    release();
+    await inFlight;
+    const s = (engine as unknown as {
+      sessions: Map<string, { lastJudgedContextHash?: string }>;
+    }).sessions.get("t1")!;
+    expect(s.lastJudgedContextHash).toBeUndefined();
+  });
+
+  // A `resolve_in_session` row is retired by a RESOLVE on the agent's OWN
+  // permission/question prompt, an act with nothing to do with "a reply typed
+  // into this session" — and its `question` is a notify body, not prose. Neither
+  // reads naturally under the wording above, so it gets none.
+  it("says nothing in the feed when a resolve retires the agent's own permission prompt", async () => {
+    const { engine, sent, activity } = makeEngine();
+    engine.arm({ terminalId: "t1", goal: GOAL });
+    await engine.handleEvent({ terminalId: "t1", event: "permission_request", detail: "Bash: rm -rf build" });
+    // This row carries no `promptId` (the fixture's event named none), so ANY
+    // named resolve retires it under the kept filter above — an id-less legacy
+    // row is the case that would otherwise inflate this count for an answer the
+    // resolve never gave.
+    engine.onUserReply("t1", "\r", { resolvedPromptId: "some-other-prompt" });
+    expect(records(activity, "answered")).toEqual([]);
+    expect(statusOf(sent).pendingEscalations).toBe(0);
+  });
+
+  // A chat resolve's bare "\r" is a SUBMIT keystroke, so it clears every other
+  // blocking `reply` row standing on the same terminal (unchanged: see the
+  // kept-filter comment above) — but that row was never what the resolve
+  // answered. Saying "Your reply answered Handler's question" here would tell
+  // the user their tap on an unrelated permission dialog answered a question
+  // they never saw an answer box for.
+  it("says nothing in the feed when a resolve also clears an unrelated blocking question", async () => {
+    const { engine, sent, activity } = makeEngine({
+      loadSessionFn: () => sessionRecord({
+        escalations: [{
+          escalationId: "e1", question: "Which env should this target?", reasoning: "r",
+          draftReply: "", urgency: "normal", at: 1,
+        }],
+      }),
+    });
+    engine.arm({ terminalId: "t1", goal: GOAL });
+    await engine.handleEvent({ terminalId: "t1", event: "permission_request", detail: "Bash: rm -rf build", promptId: "perm-1" });
+    engine.onUserReply("t1", "\r", { resolvedPromptId: "perm-1" });
+    expect(records(activity, "answered")).toEqual([]);
+    expect(statusOf(sent).pendingEscalations).toBe(0);
+  });
 });
 
 function decide(d: Partial<HandlerDecision>): HandlerDecision {
@@ -1060,11 +1421,15 @@ describe("evidence citations", () => {
     // Scrollback moves on. A quote that was honest two passes ago is no longer
     // checkable, and accepting it would make the corpus the whole session's
     // history — which is not the window the judge is reasoning over.
+    // The refusal re-asks, so the tail is read several more times than there are
+    // scripted passes — and an EMPTY corpus skips grounding altogether
+    // (backlog.ts), which would close the item and make this case about nothing.
+    // Every later read is fresh material the stale quote is still absent from.
     const tails = ["the migration landed cleanly", "compiling the workspace now"];
     let n = 0;
     let transitions: ItemTransition[] = [];
     const { engine, sent } = makeEngine({
-      adapter: { ...PTY, recentOutput: () => tails[n++] ?? "" },
+      adapter: { ...PTY, recentOutput: () => tails[n++] ?? `still compiling — pass ${n}` },
       runDecisionFn: async () => decide({ transitions }),
     });
     engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a")] });
@@ -1091,7 +1456,10 @@ describe("evidence citations", () => {
 
   it("a repeat refusal on the same item is logged again but not fed to the user twice", async () => {
     // One row per ITEM: the feed is a history of what happened to the backlog,
-    // not a transcript of how many ways the judge tried to close one line.
+    // not a transcript of how many ways the judge tried to close one line. The log
+    // is where that transcript lives, and it now also carries the re-ask chain —
+    // the first event spends the whole budget, the second finds the escalation
+    // that chain raised already standing and asks once.
     const { engine, activity } = makeEngine({
       runDecisionFn: async () => decide({
         transitions: [{ id: "a", status: "done", evidence: "everything is finished and green" }],
@@ -1103,7 +1471,7 @@ describe("evidence citations", () => {
       await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
     });
     expect(records(activity, "evidence_rejected")).toHaveLength(1);
-    expect(logged.match(/not in the context/g)).toHaveLength(2);
+    expect(logged.match(/not in the context/g)).toHaveLength(1 + MAX_EVIDENCE_REASKS + 1);
   });
 
   it("a refused completion lifts no runaway cap and wraps nothing up", async () => {
@@ -1235,6 +1603,18 @@ pass ${n++}` },
       expect(records(activity, "wrapped_up")).toHaveLength(1);
     });
 
+    it("a re-ask chain does not spend the anchor's waiver", async () => {
+      // The four checks a chain makes are one judged pause asked again, so they
+      // count once. Counted separately they exhaust MAX_ANCHOR_REFUSALS inside a
+      // single turn, the waiver fires on the fourth, and a grounded quote about
+      // the wrong subject closes the item — the incident the anchor exists for.
+      const { engine, sent, activity } = routeEngine();
+      engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a", { text: ROUTE })] });
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      expect(statusOf(sent).backlog[0].status).toBe("queued");
+      expect(records(activity, "wrapped_up")).toHaveLength(0);
+    });
+
     it("gives up the anchor after a bounded number of refusals when there is no catalog", async () => {
       // A PTY has no catalog and cannot get one, so nothing can prove the token is
       // not a command — the anchor is asked for and then, once it has plainly gone
@@ -1248,6 +1628,10 @@ pass ${n++}` },
       for (let i = 0; i < 3; i++) await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
       expect(statusOf(sent).backlog[0].status).toBe("queued");
       expect(progressed).toEqual([]);
+      // The first event's chain ended by asking the user, and a session must not
+      // auto-disarm over a completion the harness refused while that question is
+      // still standing — so the waived pass wraps up only once it is answered.
+      engine.onUserReply("t1", "have another look\r");
       await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
       expect(records(activity, "wrapped_up")).toHaveLength(1);
       expect(progressed).toEqual(["t1"]);
@@ -1290,7 +1674,335 @@ pass ${n++}` },
     await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
     await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
     expect(seen[1]?.[0]).toContain("item a");
-    expect(seen[2]).toEqual([]);
+    // The last pass, not seen[2]: the refusal on the first event re-asks, so the
+    // scripted passes no longer sit at consecutive indices.
+    expect(seen.at(-1)).toEqual([]);
+  });
+
+  it("re-asks the judge with its own rejection rather than resting on a refused completion", async () => {
+    // The pass that refuses is the pass that has to fix it. Every event able to
+    // reach a judge means the agent has stopped and a `continue` injects nothing,
+    // so resting here waits on a pass nobody is going to raise.
+    let calls = 0;
+    const seen: Array<string[] | undefined> = [];
+    const { engine, activity } = makeEngine({
+      runDecisionFn: async (o: { evidenceRejections?: string[] }) => {
+        seen.push(o.evidenceRejections ? [...o.evidenceRejections] : undefined);
+        calls++;
+        return decide({
+          transitions: [{
+            id: "a", status: "done",
+            evidence: calls === 1 ? "everything is finished and green" : "merged upstream",
+          }],
+        });
+      },
+    });
+    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a")] });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(calls).toBe(2);
+    // The re-ask is only worth making because the judge is handed what it got
+    // wrong; a chain that re-asked the same prompt would just repeat itself.
+    expect(seen[1]?.[0]).toContain("item a");
+    expect(records(activity, "item_done")).toHaveLength(1);
+    expect(records(activity, "wrapped_up")).toHaveLength(1);
+  });
+
+  it("escalates once the re-ask budget is spent instead of resting at watching", async () => {
+    // The freeze this exists for: the session rested at `watching` with an item
+    // the harness had refused, no escalation, and no further event coming.
+    let calls = 0;
+    const { engine, sent, activity } = makeEngine({
+      runDecisionFn: async () => {
+        calls++;
+        return decide({
+          transitions: [{ id: "a", status: "done", evidence: "everything is finished and green" }],
+        });
+      },
+    });
+    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a")] });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(calls).toBe(1 + MAX_EVIDENCE_REASKS);
+    expect(statusOf(sent).state).toBe("needs_you");
+    expect(statusOf(sent).pendingEscalations).toBe(1);
+    const escalated = records(activity, "escalate") as Array<{ reason: string }>;
+    expect(escalated).toHaveLength(1);
+    expect(escalated[0].reason).toContain("item a");
+    // The chain is one episode, so the feed carries one row for the item and none
+    // of the per-retry verdicts that would make it a transcript of the judge.
+    expect(records(activity, "evidence_rejected")).toHaveLength(1);
+    expect(records(activity, "continue")).toHaveLength(0);
+  });
+
+  it("spends the budget once per refusal episode, not once per event", async () => {
+    // A question already on the user's screen is the exit. Re-spending the budget
+    // behind it would cost three judge calls per turn and ask them the same thing
+    // again on every one.
+    let calls = 0;
+    const { engine, sent, activity } = makeEngine({
+      runDecisionFn: async () => {
+        calls++;
+        return decide({
+          transitions: [{ id: "a", status: "done", evidence: "everything is finished and green" }],
+        });
+      },
+    });
+    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a")] });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    const spent = calls;
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(calls).toBe(spent + 1);
+    expect(records(activity, "escalate")).toHaveLength(1);
+    expect(statusOf(sent).state).toBe("needs_you");
+  });
+
+  it("progress clears the re-ask budget", async () => {
+    // The budget is spent per episode, and an item closing is what ends one — so
+    // a later refusal gets its own three tries rather than none. The item has to
+    // close while the counter is still up: a chain that has already escalated
+    // zeroed it on the way out, and a record written after that proves nothing.
+    let calls = 0;
+    const { engine, saved } = makeEngine({
+      runDecisionFn: async () => {
+        calls++;
+        return decide({
+          transitions: [{
+            id: "a", status: "done",
+            evidence: calls === 1 ? "everything is finished and green" : "merged upstream",
+          }],
+        });
+      },
+    });
+    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a"), item("b")] });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    // The refusal and the re-ask that answered it, and nothing after: the closing
+    // pass ends the episode, so the chain neither runs on nor escalates.
+    expect(calls).toBe(2);
+    const spend = saved.map((r) => (r as HandlerSessionRecord).evidenceReasks ?? 0);
+    expect(spend).toContain(1);
+    expect(spend.at(-1)).toBe(0);
+  });
+
+  it("a reply to the agent ends the refusal episode", async () => {
+    // The chain stands in for a pass nobody is going to raise, and an injected
+    // reply IS that pass. Left armed past it, the budget turns the next ordinary
+    // `continue` into three more judge calls and then a question about a refusal
+    // the agent was already told to fix.
+    let calls = 0;
+    const { engine, saved, injected, activity } = makeEngine({
+      runDecisionFn: async () => {
+        calls++;
+        if (calls === 1) {
+          return decide({
+            transitions: [{ id: "a", status: "done", evidence: "everything is finished and green" }],
+          });
+        }
+        // The likeliest answer to being shown its own rejection: tell the agent to
+        // produce the evidence rather than claim the item again.
+        if (calls === 2) return decide({ decision: "handle", reply: "paste the test output" });
+        return decide({ reason: "still working through b" });
+      },
+    });
+    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a"), item("b")] });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(injected).toHaveLength(1);
+    expect(lastSaved(saved).evidenceReasks).toBe(0);
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(calls).toBe(3);
+    expect(records(activity, "escalate")).toHaveLength(0);
+  });
+
+  it("a standing ask does not exempt a refused completion", async () => {
+    // An ask rode a pass that already replied to the agent, so it stopped nothing
+    // and its answer resolves nothing here. Counted as somebody being waited on,
+    // it rests the session on the refusal — the freeze this whole exit is for.
+    let calls = 0;
+    const { engine, activity } = makeEngine({
+      runDecisionFn: async () => {
+        calls++;
+        if (calls === 1) {
+          return decide({
+            decision: "handle", reply: "keep going",
+            ask: {
+              question: "Which database should the migration target?",
+              reasoning: "the cutover order turns on it",
+              unblocked: ["b"],
+              options: [
+                { label: "Staging for now", cost: "one extra deploy later" },
+                { label: "Straight at production", cost: "no second cutover" },
+              ],
+            },
+          });
+        }
+        return decide({
+          transitions: [{ id: "a", status: "done", evidence: "everything is finished and green" }],
+        });
+      },
+    });
+    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a"), item("b")] });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(records(activity, "asked")).toHaveLength(1);
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(calls).toBe(2 + MAX_EVIDENCE_REASKS);
+    expect(records(activity, "escalate")).toHaveLength(1);
+  });
+
+  it("hands a refusal to a fresher event rather than re-asking over it", async () => {
+    // The chain's premise is that nothing else is coming. A queued event says
+    // otherwise — the session is not frozen, and the chain would hold that event
+    // behind up to three more judge calls before it ever ran.
+    let calls = 0;
+    let second: Promise<void> | undefined;
+    const { engine, activity } = makeEngine({
+      runDecisionFn: async () => {
+        calls++;
+        // Registered while this pass is still running, the way agent-core's own
+        // unawaited POST does it.
+        if (calls === 1) second = engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+        return calls === 1
+          ? decide({ transitions: [{ id: "a", status: "done", evidence: "everything is finished and green" }] })
+          : decide({ reason: "still working" });
+      },
+    });
+    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a")] });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    await second;
+    expect(calls).toBe(2);
+    expect(records(activity, "escalate")).toHaveLength(0);
+  });
+
+  it("escalates over the refusal that spent the budget, not the one appended longest ago", async () => {
+    // A repeat refusal is deduped, so the remembered lines are not append-ordered
+    // by recency on their own — and the card names its item with the last of them.
+    let calls = 0;
+    const { engine, activity } = makeEngine({
+      runDecisionFn: async () => {
+        calls++;
+        const bogus = "everything is finished and green";
+        return decide({
+          transitions: calls === 1
+            ? [{ id: "a", status: "done", evidence: bogus }, { id: "b", status: "done", evidence: bogus }]
+            : [{ id: "a", status: "done", evidence: bogus }],
+        });
+      },
+    });
+    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a"), item("b")] });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    const escalated = records(activity, "escalate") as Array<{ reason: string }>;
+    expect(escalated).toHaveLength(1);
+    expect(escalated[0].reason).toContain("item a");
+  });
+
+  it("gives a resumed session its budget back only with the refusals it was spent on", async () => {
+    // A counter restored alone escalates to a card naming no item, no quote and no
+    // reason, which then blocks wrap-up until somebody dismisses it.
+    let calls = 0;
+    const { engine, activity } = makeEngine({
+      loadSessionFn: () => sessionRecord({ suspended: true, backlog: [item("a")], evidenceReasks: 2 }),
+      runDecisionFn: async () => { calls++; return decide({ reason: "still working" }); },
+    });
+    engine.arm({ terminalId: "t1" });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(calls).toBe(1);
+    expect(records(activity, "escalate")).toHaveLength(0);
+  });
+
+  it("carries the refusal lines across a restart so the card can still name the item", async () => {
+    const { engine, activity } = makeEngine({
+      loadSessionFn: () => sessionRecord({
+        suspended: true, backlog: [item("a")],
+        evidenceReasks: MAX_EVIDENCE_REASKS,
+        evidenceRejections: [{ id: "a", line: `"item a" — nothing on record says so` }],
+      }),
+      runDecisionFn: async () => decide({ reason: "still working" }),
+    });
+    engine.arm({ terminalId: "t1" });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    const escalated = records(activity, "escalate") as Array<{ reason: string }>;
+    expect(escalated).toHaveLength(1);
+    expect(escalated[0].reason).toContain("item a");
+  });
+
+  it("drops a resumed refusal whose item closed, and the budget with it", async () => {
+    // A restored line about a `done` item contradicts the backlog rendered beside
+    // it, and the spend it would hand back escalates to a card naming work the
+    // user can already see is finished.
+    let calls = 0;
+    const { engine, activity } = makeEngine({
+      loadSessionFn: () => sessionRecord({
+        suspended: true,
+        backlog: [item("a", { status: "done" }), item("b")],
+        evidenceReasks: MAX_EVIDENCE_REASKS,
+        evidenceRejections: [{ id: "a", line: `"item a" — nothing on record says so` }],
+      }),
+      runDecisionFn: async () => { calls++; return decide({ reason: "still working" }); },
+    });
+    engine.arm({ terminalId: "t1" });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(calls).toBe(1);
+    expect(records(activity, "escalate")).toHaveLength(0);
+  });
+
+  it("a pass that closes one item while refusing another does not refill the budget", async () => {
+    // Withholding the reset on a refusing pass is what bounds the chain. A judge
+    // that closes one item per pass while refusing the next would otherwise get
+    // its three tries back at every level, so one turn_end would fan out to a
+    // nested judge spawn per backlog item — the freeze traded for a session that
+    // is merely stuck for a very long time, with nothing on the user's screen.
+    const closes = ["a", "b", "c", "d"];
+    let calls = 0;
+    const { engine, activity } = makeEngine({
+      runDecisionFn: async () => {
+        calls++;
+        return decide({
+          transitions: [
+            // Quoted from the fixture tail, so this half applies.
+            { id: closes[Math.min(calls, closes.length) - 1]!, status: "done", evidence: "shipped to main" },
+            // Ungroundable, so the same pass is also refused.
+            { id: "z", status: "done", evidence: "everything is finished and green" },
+          ],
+        });
+      },
+    });
+    engine.arm({
+      terminalId: "t1", goal: GOAL,
+      backlog: [...closes, "z"].map((id) => item(id)),
+    });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(calls).toBe(1 + MAX_EVIDENCE_REASKS);
+    expect(records(activity, "escalate")).toHaveLength(1);
+  });
+
+  it("rests a refusal for a queued blocking prompt rather than re-asking over it", async () => {
+    // A blocking prompt is registered on the queue and never in `latest`, so the
+    // first half of wakeSourcePending cannot see it. Without the second, a real
+    // permission block waits out up to three more judge calls before its "needs
+    // you" row and push are raised — a blocked agent nobody hears about.
+    let calls = 0;
+    let prompt: Promise<void> | undefined;
+    const { engine, activity } = makeEngine({
+      runDecisionFn: async () => {
+        calls++;
+        // Registered while this pass is still running, the way agent-core's own
+        // unawaited POST does it.
+        if (calls === 1) {
+          prompt = engine.handleEvent({
+            terminalId: "t1", event: "permission_request",
+            detail: "Bash: rm -rf build", promptId: "p1",
+          });
+        }
+        return decide({
+          transitions: [{ id: "a", status: "done", evidence: "everything is finished and green" }],
+        });
+      },
+    });
+    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a")] });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    await prompt;
+    expect(calls).toBe(1);
+    expect(records(activity, "continue")).toHaveLength(1);
+    const escalated = records(activity, "escalate") as Array<{ reason: string }>;
+    expect(escalated).toHaveLength(1);
+    expect(escalated[0].reason).toBe("blocking prompt requires you");
   });
 });
 
@@ -2174,7 +2886,7 @@ test("opencode decide context reads the db but hands the judge no path", async (
 describe("quick-choice escalations", () => {
   const DRAFT = "Yes, reuse the existing migration table.";
 
-  interface Choice { choiceId: string; label: string; text: string }
+  interface Choice { choiceId: string; label: string; text: string; cost?: string }
 
   function escalatingWith(draftReply: string) {
     return {
@@ -2344,6 +3056,81 @@ describe("quick-choice escalations", () => {
     expect(quickChoicesFor({ draftReply: "yes\rrm -rf /", projectPath: "/proj" })).toBeUndefined();
     expect(quickChoicesFor({ draftReply: "y".repeat(401), projectPath: "/proj" })).toBeUndefined();
     expect(quickChoicesFor({ draftReply: "y".repeat(400), projectPath: "/proj" })).toHaveLength(2);
+  });
+
+  // The button says what it does: the judge's own label and cost land on
+  // the approve chip, and the draft it names stays exactly where it was.
+  it("puts the judge's own words on the approve button and its cost beneath", () => {
+    const choices = quickChoicesFor({
+      draftReply: DRAFT, projectPath: "/proj",
+      approve: { label: "Drop the pricing page", cost: "FAQ and clean build ship now" },
+    })!;
+    expect(choices[0]).toEqual({
+      choiceId: "approve", label: "Drop the pricing page", text: DRAFT,
+      cost: "FAQ and clean build ship now",
+    });
+  });
+
+  it("falls back to Approve when the judge names nothing", () => {
+    const choices = quickChoicesFor({ draftReply: DRAFT, projectPath: "/proj" })!;
+    expect(choices[0]!.label).toBe("Approve");
+    expect(choices[0]!.cost).toBeUndefined();
+  });
+
+  it("falls back to Approve on a whitespace-only label", () => {
+    // " " is truthy — the trim-then-fallback order is what keeps this from
+    // drawing a blank button on the card that stops the session.
+    const choices = quickChoicesFor({
+      draftReply: DRAFT, projectPath: "/proj",
+      approve: { label: "   ", cost: "" },
+    })!;
+    expect(choices[0]!.label).toBe("Approve");
+    expect(choices[0]!.cost).toBeUndefined();
+  });
+
+  it("clips an over-long label and cost rather than dropping the chip", () => {
+    const choices = quickChoicesFor({
+      draftReply: DRAFT, projectPath: "/proj",
+      approve: { label: "x".repeat(100), cost: "y".repeat(300) },
+    })!;
+    expect(choices).toHaveLength(2);
+    expect(choices[0]!.label.length).toBeLessThanOrEqual(40);
+    expect(choices[0]!.label.endsWith("…")).toBe(true);
+    expect(choices[0]!.cost!.length).toBeLessThanOrEqual(160);
+    expect(choices[0]!.cost!.endsWith("…")).toBe(true);
+  });
+
+  it("keeps the reject chip engine-authored", () => {
+    // Nothing about the judge's approve label may bleed into the one chip that
+    // has to mean the same thing on every card.
+    const choices = quickChoicesFor({
+      draftReply: DRAFT, projectPath: "/proj",
+      approve: { label: "Drop the pricing page", cost: "FAQ and clean build ship now" },
+    })!;
+    expect(choices[1]).toEqual({
+      choiceId: "reject", label: "Reject",
+      text: "Do not proceed. Wait for my instructions.",
+    });
+  });
+
+  // End-to-end: the judge's `notify.approve` reaches the wire through escalate,
+  // not only through quickChoicesFor called directly.
+  it("wires notify.approve through escalate onto the emitted choices", async () => {
+    const { engine, sent } = makeEngine({
+      runDecisionFn: async () => decide({
+        decision: "escalate",
+        notify: {
+          title: "Handler", body: "Drop the pricing page?", draftReply: DRAFT, urgency: "normal",
+          approve: { label: "Drop the pricing page", cost: "FAQ and clean build ship now" },
+        },
+      }),
+    });
+    engine.arm({ terminalId: "t1", goal: GOAL });
+    await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
+    expect(choicesOf(sent)![0]).toEqual({
+      choiceId: "approve", label: "Drop the pricing page", text: DRAFT,
+      cost: "FAQ and clean build ship now",
+    });
   });
 
   // A tap answers through the ordinary reply transport and mints nothing.
@@ -2712,6 +3499,50 @@ describe("guard-rejection reports (kind: guard_blocked)", () => {
     expect(statusOf(sent).state).toBe("needs_you");
   });
 
+  // The measured live case: a ~600-char question and a ~490-char reasoning both
+  // opened with the same four facts. The row that STOPS the session had no
+  // length discipline at all, unlike an ask's.
+  it("clips an over-long escalation question and its reasoning the way an ask's are clipped", async () => {
+    const longBody = "Q".repeat(900);
+    const longReason = "R".repeat(900);
+    const { engine, sent } = makeEngine({
+      runDecisionFn: async () => decide({
+        decision: "escalate", reason: longReason,
+        notify: { title: "Handler", body: longBody, draftReply: "", urgency: "normal" },
+      }),
+    });
+    engine.arm({ terminalId: "t1", goal: GOAL });
+    await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
+    const [esc] = escalations(sent);
+    expect(esc!.question).toHaveLength(401);
+    expect(esc!.question.endsWith("…")).toBe(true);
+    expect(esc!.reasoning).toHaveLength(401);
+    expect(esc!.reasoning.endsWith("…")).toBe(true);
+  });
+
+  // The dedup at the top of escalate() compares against the STORED reasoning, so
+  // clipping only on the way OUT (rendering) rather than at the mint would leave
+  // the stored value at its full length and the comparison would never match a
+  // second identical report — a fresh card and a fresh push every pass for the
+  // situation the standing row already describes.
+  it("still dedups a repeated guard_blocked report with an over-long reason", async () => {
+    const longVerb = `/${"x".repeat(900)}`;
+    const { engine, sent, activity } = withCatalog({
+      runDecisionFn: async () => decide({
+        decision: "handle", action: { kind: "slash_command", value: `${longVerb} --fix` },
+      }),
+    });
+    engine.arm({ terminalId: "t1", goal: GOAL });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(escalations(sent)).toHaveLength(1);
+    expect(rowsOf(sent)).toHaveLength(1);
+    expect(records(activity, "escalate")).toHaveLength(2);
+    const [esc] = escalations(sent);
+    expect(esc!.reasoning).toHaveLength(401);
+    expect(esc!.reasoning.endsWith("…")).toBe(true);
+  });
+
   it("a sixth standing report drops the oldest", async () => {
     let n = 0;
     const { engine, sent } = makeEngine({
@@ -2842,7 +3673,9 @@ describe("lifecycle park / resume", () => {
 
   it("a blocking prompt mid-park unparks, cancels the timer, and escalates with no judge call", async () => {
     let judged = 0;
-    const { engine, sent, timers } = makeEngine({ runDecisionFn: async () => { judged++; return decide({}); } });
+    const { engine, sent, activity, timers } = makeEngine({
+      runDecisionFn: async () => { judged++; return decide({}); },
+    });
     engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
     await engine.handleEvent({ terminalId: "t1", event: "permission_request", detail: "Bash: rm -rf build" });
@@ -2851,27 +3684,97 @@ describe("lifecycle park / resume", () => {
     expect(sent.some((m) => m.type === "handler:escalation")).toBe(true);
     expect(statusOf(sent).state).toBe("needs_you");
     expect(statusOf(sent).parkKind).toBeUndefined();
+    // The second deliberate silence: the escalation this raised is the row that
+    // says the wait is over, so a `resumed` beside it would say it twice.
+    expect(records(activity, "resumed")).toHaveLength(0);
   });
 
   it("a submitted line unparks a session with zero pending escalations", async () => {
-    const { engine, sent, timers } = makeEngine();
+    const { engine, sent, activity, timers } = makeEngine();
     engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
     engine.onUserReply("t1", "k");
     expect(statusOf(sent).state).toBe("parked"); // a bare keystroke is not a resume
+    expect(records(activity, "resumed")).toHaveLength(0);
     engine.onUserReply("t1", "go on\r");
     expect(timers.at(-1)!.cancelled).toBe(true);
     expect(statusOf(sent).state).toBe("watching");
     expect(statusOf(sent).parkKind).toBeUndefined();
+    // Every other end of a park says why it ended, and the feed is where a
+    // session leaving `parked` is explained at all — asserted as the literal
+    // reason, because "distinguishable from the timer" is the whole point.
+    const rows = records(activity, "resumed") as Array<{ reason: string }>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0].reason).toBe("you replied to the agent");
+  });
+
+  it("a line that ends a park and answers a question records both, park first", async () => {
+    const { engine, activity } = makeEngine({
+      runDecisionFn: async () => decide({ decision: "escalate" }),
+    });
+    engine.arm({ terminalId: "t1", goal: GOAL });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
+    engine.onUserReply("t1", "go on\r");
+    // Two separate facts about one line, and an implementation that made them
+    // exclusive would drop whichever it judged less important.
+    expect(records(activity, "resumed")).toHaveLength(1);
+    expect(records(activity, "answered")).toHaveLength(1);
+    const kinds = activity.map((a) => (a as { decision: string }).decision);
+    // The app's feed prepends by arrival, so the later row renders on top: the
+    // answer leads and "Resumed:" sits beneath it.
+    expect(kinds.indexOf("resumed")).toBeLessThan(kinds.indexOf("answered"));
+  });
+
+  it("an app-routed resolve that ends a park records the resume, not an answer", async () => {
+    const { engine, activity } = makeEngine();
+    engine.arm({ terminalId: "c1", goal: GOAL });
+    await engine.handleEvent({
+      terminalId: "c1", event: "permission_request", detail: "Bash: ls", promptId: "perm-1",
+    });
+    await engine.handleEvent({ terminalId: "c1", event: "limit_hit" });
+    engine.onUserReply("c1", "\r", { resolvedPromptId: "perm-1" });
+    // The asymmetry is deliberate: `answered` is withheld because the tap named
+    // the prompt it answered and claims nothing about any other row, while the
+    // park genuinely ended — and it ended because the user replied.
+    expect(records(activity, "resumed")).toHaveLength(1);
+    expect(records(activity, "answered")).toHaveLength(0);
+  });
+
+  it("a line into an unparked session records no resume", async () => {
+    const { engine, activity } = makeEngine({
+      runDecisionFn: async () => decide({ decision: "escalate" }),
+    });
+    engine.arm({ terminalId: "t1", goal: GOAL });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    engine.onUserReply("t1", "carry on\r");
+    expect(records(activity, "answered")).toHaveLength(1);
+    expect(records(activity, "resumed")).toHaveLength(0);
   });
 
   it("a prompt retraction unparks a session with zero pending escalations", async () => {
-    const { engine, sent, timers } = makeEngine();
+    const { engine, sent, activity, timers } = makeEngine();
     engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
     engine.onPromptRetracted("t1");
     expect(timers.at(-1)!.cancelled).toBe(true);
     expect(statusOf(sent).state).toBe("watching");
+    // The same entry point serves a driver withdrawing a prompt and a PTY
+    // question reporting its own completion, so the row names neither party.
+    const rows = records(activity, "resumed") as Array<{ reason: string }>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0].reason).toBe("the prompt is no longer waiting");
+  });
+
+  it("disarming a parked session records no resume", async () => {
+    // One of the three deliberate silences unparkIfParked documents: there is no
+    // supervised session left to resume, so a `resumed` row would be a claim
+    // about a session that no longer exists.
+    const { engine, activity } = makeEngine();
+    engine.arm({ terminalId: "t1", goal: GOAL });
+    await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
+    engine.disarm("t1");
+    expect(records(activity, "resumed")).toHaveLength(0);
   });
 
   it("disarm and terminal exit cancel the park timer", async () => {
@@ -3155,6 +4058,74 @@ describe("lifecycle transient ceiling", () => {
   });
 });
 
+// Two unrelated failures share the "outage" backoff curve, so parkKind cannot be
+// read as a reason — which is exactly how Antgrid's own judge timing out was
+// rendered to the user as their agent's provider being down.
+describe("park attribution (parkCause)", () => {
+  it("a provider limit is attributed to the agent's limit", async () => {
+    const { engine, sent } = makeEngine();
+    engine.arm({ terminalId: "t1", goal: GOAL });
+    await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
+    expect(statusOf(sent).parkKind).toBe("limit");
+    expect(statusOf(sent).parkCause).toBe("agent_limit");
+  });
+
+  it("an agent turn failure and a judge that could not run share a kind, not a cause", async () => {
+    // The whole point of the field: both park as "outage", and only one of them
+    // is anything the user's own provider did.
+    const { engine, sent } = makeEngine();
+    engine.arm({ terminalId: "t1", goal: GOAL });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_failed", errorClass: "overloaded" });
+    expect(statusOf(sent).parkKind).toBe("outage");
+    expect(statusOf(sent).parkCause).toBe("agent_failure");
+  });
+
+  it("a judge that could not run names the judge", async () => {
+    const { engine, sent } = makeEngine({ runDecisionFn: async () => null });
+    engine.arm({ terminalId: "t1", goal: GOAL });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(statusOf(sent).parkKind).toBe("outage");
+    expect(statusOf(sent).parkCause).toBe("judge_failure");
+  });
+
+  it("an unpark clears the attribution with the kind", async () => {
+    // Left standing, it describes a wait that is over — and the app renders it
+    // beside a countdown that is no longer there.
+    const { engine, sent } = makeEngine();
+    engine.arm({ terminalId: "t1", goal: GOAL });
+    await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
+    await engine.handleEvent({ terminalId: "t1", event: "limit_cleared" });
+    expect(statusOf(sent).state).toBe("watching");
+    expect(statusOf(sent).parkCause).toBeUndefined();
+  });
+
+  it("survives a restart, so a rehydrated park still says who it is waiting on", async () => {
+    const { engine, saved } = makeEngine({ runDecisionFn: async () => null });
+    engine.arm({ terminalId: "t1", goal: GOAL });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect((saved.at(-1) as { parkCause?: string }).parkCause).toBe("judge_failure");
+
+    const restarted = makeEngine({
+      loadSessionFn: () => sessionRecord({
+        parkKind: "outage", parkCause: "judge_failure", parkedUntil: 1000 + 90_000,
+      }),
+    });
+    restarted.engine.arm({ terminalId: "t1", goal: GOAL });
+    expect(statusOf(restarted.sent).parkCause).toBe("judge_failure");
+  });
+
+  it("a record written before the field existed rehydrates without one", () => {
+    // The app falls back to the backoff policy for exactly this bridge, so an
+    // absent cause has to stay absent rather than be guessed at.
+    const { engine, sent } = makeEngine({
+      loadSessionFn: () => sessionRecord({ parkKind: "outage", parkedUntil: 1000 + 90_000 }),
+    });
+    engine.arm({ terminalId: "t1", goal: GOAL });
+    expect(statusOf(sent).state).toBe("parked");
+    expect(statusOf(sent).parkCause).toBeUndefined();
+  });
+});
+
 describe("lifecycle guard invariant", () => {
   it("a park/resume cycle never resets the consecutive counter", async () => {
     let reply = "first";
@@ -3277,6 +4248,108 @@ describe("lifecycle persistence", () => {
   });
 });
 
+// The judge is shown what the user asked for verbatim, so the list has to hold
+// every sentence in the order it arrived — extraction keeps none of the wording,
+// and nothing else on the session does either.
+describe("the instruction list", () => {
+  const settle = () => new Promise<void>((r) => { setTimeout(r, 0); });
+
+  it("an arm with a goal records one entry", () => {
+    const { engine, saved } = makeEngine();
+    engine.arm({ terminalId: "t1", goal: GOAL });
+    expect(lastSaved(saved).instructions.map((i) => i.text)).toEqual([GOAL]);
+    expect(lastSaved(saved).goal).toBe(GOAL);
+  });
+
+  it("every accepted instruction stacks in the order it was typed", async () => {
+    const { engine, saved } = makeEngine({ runExtractionFn: async () => ({ items: [], amend: [] }) });
+    engine.arm({ terminalId: "t1", goal: GOAL });
+    engine.instruct({ terminalId: "t1", text: "  and revert the migration  " });
+    engine.instruct({ terminalId: "t1", text: "then open a PR" });
+    await settle();
+    expect(lastSaved(saved).instructions.map((i) => i.text))
+      .toEqual([GOAL, "and revert the migration", "then open a PR"]);
+  });
+
+  it("an instruction on an unarmed terminal records nothing", () => {
+    const { engine, saved } = makeEngine();
+    engine.instruct({ terminalId: "t1", text: "do the thing" });
+    expect(saved).toHaveLength(0);
+  });
+
+  // The judge reads the list; only the typed instruction itself reaches
+  // authorizeInstruction, and the answer to a question Handler asked is parked for
+  // the judge rather than stacked as a new thing the user wants done.
+  it("an answer to a standing ask is not an instruction", async () => {
+    const standing = {
+      escalationId: "a1", question: "which registry?", reasoning: "only you can say",
+      draftReply: "", urgency: "normal" as const, at: 1, nonBlocking: true, unblocked: ["i1"],
+    };
+    const { engine, saved } = makeEngine({
+      loadSessionFn: () => sessionRecord({ goal: GOAL, backlog: [item("i1")], escalations: [standing] }),
+    });
+    engine.arm({ terminalId: "t1" });
+    engine.instruct({ terminalId: "t1", text: "the internal one", escalationId: "a1" });
+    await settle();
+    expect(lastSaved(saved).instructions.map((i) => i.text)).toEqual([GOAL]);
+  });
+
+  it("the judge is handed every entry, in order", async () => {
+    let seen: string[] = [];
+    const { engine } = makeEngine({
+      runExtractionFn: async () => ({ items: [], amend: [] }),
+      runDecisionFn: async (o: { instructions: string[] }) => {
+        seen = o.instructions;
+        return decide({});
+      },
+    });
+    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("i1")] });
+    engine.instruct({ terminalId: "t1", text: "and revert the migration" });
+    await settle();
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(seen).toEqual([GOAL, "and revert the migration"]);
+  });
+
+  // The record predates the field, which is the shape every session armed before
+  // this change is sitting in on disk.
+  it("a record carrying only a goal rehydrates as one instruction", () => {
+    const { engine, saved } = makeEngine({
+      loadSessionFn: () => ({
+        version: 2, terminalId: "t1", armed: true, suspended: true, goal: "migrate auth",
+        instructions: [], backlog: [item("i1")], armedAt: 7, escalations: [],
+      }),
+    });
+    engine.arm({ terminalId: "t1" });
+    expect(lastSaved(saved).instructions).toEqual([{ text: "migrate auth", at: 7 }]);
+  });
+
+  // The wrap-up push is read hours later on a lock screen, so its headline has to
+  // name the session — which is the first thing asked of it, not the last.
+  it("the wrap-up headline is the first instruction", async () => {
+    const { engine, pushes } = makeEngine({
+      runDecisionFn: async () => decide({
+        transitions: [{ id: "i1", status: "done", evidence: "ran to completion" }],
+      }),
+    });
+    engine.arm({ terminalId: "t1", goal: "land the migration", backlog: [item("i1")] });
+    engine.arm({ terminalId: "t1", goal: "and open a PR" });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(pushes.at(-1)).toContain("Handler: done — land the migration");
+  });
+
+  it("falls back to the standing headline when nothing was ever asked", async () => {
+    const { engine, pushes } = makeEngine({
+      loadSessionFn: () => sessionRecord({ goal: "", backlog: [item("i1")] }),
+      runDecisionFn: async () => decide({
+        transitions: [{ id: "i1", status: "done", evidence: "ran to completion" }],
+      }),
+    });
+    engine.arm({ terminalId: "t1" });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(pushes.at(-1)).toContain("Handler: done — session complete");
+  });
+});
+
 describe("instruct (extraction)", () => {
   // instruct() is deliberately fire-and-forget, so nothing returned by it
   // can be awaited — the tests wait on the macrotask queue instead.
@@ -3368,6 +4441,34 @@ describe("instruct (extraction)", () => {
     engine.instruct({ terminalId: "t1", text: "ship it" });
     await settle();
     expect(statusOf(sent).backlog.map((i) => i.text)).toEqual(["ship it"]);
+  });
+
+  it("the fallback files fallbackText, not the head of the instruction", async () => {
+    const { engine, sent } = makeEngine({ runExtractionFn: async () => null });
+    engine.arm({ terminalId: "t1" });
+    // A session-bus delivery is a bridge-authored wrapper around the human's
+    // words, and its preamble alone is longer than the fallback's cut — so the
+    // cut, which is a prefix, would file boilerplate and none of the mandate.
+    const wrapper = "[antgrid session bus] provenance and instructions. ".repeat(12);
+    expect(wrapper.length).toBeGreaterThan(MAX_ITEM_CHARS);
+    engine.instruct({
+      terminalId: "t1",
+      text: `${wrapper}"own the backend"`,
+      fallbackText: "own the backend",
+    });
+    await settle();
+    expect(statusOf(sent).backlog.map((i) => i.text)).toEqual(["own the backend"]);
+  });
+
+  it("the full instruction, not fallbackText, is what extraction and the lift scan read", async () => {
+    const seen: string[] = [];
+    const { engine } = makeEngine({
+      runExtractionFn: async (o: { text: string }) => { seen.push(o.text); return { items: [], amend: [] }; },
+    });
+    engine.arm({ terminalId: "t1" });
+    engine.instruct({ terminalId: "t1", text: "wrapper says: ship it", fallbackText: "ship it" });
+    await settle();
+    expect(seen).toEqual(["wrapper says: ship it"]);
   });
 
   it("extraction returning nothing at all falls back rather than appending an empty batch", async () => {
@@ -3545,7 +4646,11 @@ describe("instruct (extraction)", () => {
     });
     expect(records(activity, "instruction_dropped")).toHaveLength(1);
     expect(statusOf(sent).backlog).toHaveLength(100);
-    expect(saved).toHaveLength(savedBefore);
+    // One save, and it is the sentence itself: the backlog took nothing, but what
+    // the user asked for is on the record either way and a restart must not lose
+    // the one copy of it.
+    expect(saved).toHaveLength(savedBefore + 1);
+    expect(lastSaved(saved).instructions.at(-1)?.text).toBe("also revert the migration");
     expect(sent.slice(sentBefore).map((m) => m.type))
       .toEqual(["handler:activity", "handler:status"]);
   });
@@ -4715,7 +5820,7 @@ describe("observabilityFor", () => {
     const { engine } = makeEngine({
       observable: () => true,
       tool: () => "kimi",
-      loadSessionFn: () => ({ terminalId: "t1", armed: false, judgeTool: "claude-code" }),
+      loadSessionFn: () => sessionRecord({ armed: false, judgeTool: "claude-code" }),
     });
     expect(engine.observabilityFor("t1")).toBe("full");
   });
@@ -4747,5 +5852,1774 @@ describe("observabilityFor", () => {
     const { engine, sent } = makeEngine({ observable: () => true, tool: () => "kimi" });
     engine.arm({ terminalId: "t1", goal: GOAL });
     expect(statusOf(sent).observability).toBe("escalate_only");
+  });
+});
+
+
+// The answer transports, tested against SYNTHETIC ask rows: nothing raises an ask
+// yet, so every row below is planted on disk and rehydrated by arm() — the same
+// path a bridge restart takes.
+describe("answering an ask", () => {
+  const tick = () => new Promise<void>((r) => { setTimeout(r, 1); });
+  // Both entry points are fire-and-forget, and the relay pass one of them may start
+  // runs on the engine's own per-terminal chain with a context assembly inside it —
+  // so a fixed number of macrotasks is a race the moment the process is loaded.
+  // Wait on the thing being asserted; spend `settle` only where the assertion is
+  // that nothing happened.
+  const settle = async () => { for (let i = 0; i < 8; i++) await tick(); };
+  const until = async (cond: () => boolean) => {
+    for (let i = 0; i < 400 && !cond(); i++) await tick();
+  };
+
+  const options = [
+    { choiceId: "opt1", label: "Point it at staging for now", cost: "one extra deploy later" },
+    { choiceId: "opt2", label: "Go straight at production", cost: "no second cutover", recommended: true as const },
+  ];
+  function ask(over: Partial<OpenEscalation> = {}): OpenEscalation {
+    return {
+      escalationId: "a1", question: "Which database should the migration target?",
+      reasoning: "r", draftReply: "", urgency: "normal", kind: "reply", at: 2,
+      nonBlocking: true, unblocked: ["i1"], askOptions: options, ...over,
+    };
+  }
+  // Armed with no goal on purpose: a goal is extracted at arm time and would put a
+  // SECOND item in every backlog assertion below — the surface a tap must leave
+  // exactly as it found it. The one item it does carry is the one every ask here
+  // names in `unblocked`, because reconcileAsks promotes an ask whose named work
+  // has finished or was never there — an ask over an empty backlog is a row this
+  // engine could not have minted.
+  const armedWithAsk = (escalations: OpenEscalation[], over: Record<string, unknown> = {}) => {
+    const h = makeEngine({
+      loadSessionFn: () => sessionRecord({ goal: "", backlog: [item("i1")], escalations }),
+      ...over,
+    });
+    h.engine.arm({ terminalId: "t1" });
+    return h;
+  };
+
+  // `auth` is in-memory and crosses no wire, so "a tap grants nothing" has no
+  // observable surface at all — and it is the single most load-bearing property of
+  // the whole ask shape. Read the session itself rather than assert something
+  // weaker beside it.
+  interface PrivateSession {
+    auth: { patterns: Set<string>; paths: Set<string>; hosts: Set<string> };
+    backlog: InstructionItem[];
+    escalations: OpenEscalation[];
+    lastJudgedContextHash?: string;
+    askAnswer?: { escalationId: string; question: string; answer: string; tapped: boolean; at: number };
+    awaitingAgent?: boolean;
+  }
+  const session = (engine: HandlerEngine): PrivateSession =>
+    (engine as unknown as { sessions: Map<string, PrivateSession> }).sessions.get("t1")!;
+  const lifted = (s: PrivateSession) =>
+    ({ patterns: [...s.auth.patterns], paths: [...s.auth.paths], hosts: [...s.auth.hosts] });
+  const statuses = (sent: AbMessage[]) => sent.filter((m) => m.type === "handler:status");
+  const answeredRows = (activity: unknown[]) =>
+    records(activity, "answered") as { reason: string; detail?: string }[];
+
+  it("a tap parks the label, retires the row, and rests the session", () => {
+    const { engine, sent, saved, activity } = armedWithAsk([ask()]);
+    engine.answerAsk({ terminalId: "t1", escalationId: "a1", choiceId: "opt2" });
+    expect(session(engine).escalations).toEqual([]);
+    // The label the user read on the button, resolved from this bridge's own row:
+    // the frame carried an id and nothing else.
+    expect(session(engine).askAnswer).toEqual({
+      escalationId: "a1", question: "Which database should the migration target?",
+      answer: "Go straight at production", tapped: true, at: 1000,
+    });
+    expect(statusOf(sent).state).toBe("watching");
+    expect(statusOf(sent).pendingEscalations).toBe(0);
+    // Persisted, because the row it answers is already gone: an answer lost to a
+    // restart leaves the user with no surface that could say so.
+    const rec = saved.at(-1) as HandlerSessionRecord;
+    expect(rec.escalations).toEqual([]);
+    expect(rec.askAnswer?.answer).toBe("Go straight at production");
+    const rows = answeredRows(activity);
+    expect(rows[0]!.reason).toBe("You answered Handler's question");
+    // Not an `escalate` row: the app titles those "Escalated:", and an answer
+    // filed as a stop is the round-1 defect this kind exists to close.
+    expect(records(activity, "escalate")).toHaveLength(0);
+    expect(rows[0]!.detail).toBe("Go straight at production");
+  });
+
+  it("a tap grants nothing", () => {
+    // The whole authorization argument in one assertion: instruct is the only
+    // writer of `auth`, and a tap reaches neither it nor the extractor. The option
+    // deliberately names a command an instruction WOULD lift, so the test fails if
+    // a tap ever gains a path into either.
+    const { engine, activity } = armedWithAsk([ask({
+      askOptions: [
+        { choiceId: "opt1", label: "Yes — rm -rf build and re-run it", cost: "the build dir goes" },
+        { choiceId: "opt2", label: "No, leave it", cost: "the stale output stays" },
+      ],
+    })]);
+    engine.answerAsk({ terminalId: "t1", escalationId: "a1", choiceId: "opt1" });
+    expect(lifted(session(engine))).toEqual({ patterns: [], paths: [], hosts: [] });
+    // The extractor is the other thing a tap must not reach: the backlog is what
+    // it was before, item for item.
+    expect(session(engine).backlog.map((i) => i.id)).toEqual(["i1"]);
+    expect(records(activity, "instruction_authorized")).toEqual([]);
+  });
+
+  it("clears the banked context hash, or the pass that would relay judges nothing", () => {
+    // contextHash covers ctx.text alone, and an answer that lives only in a prompt
+    // option moves nothing in it — so the next pass would return at the
+    // unmoved-context check and the answer would be discarded with no row, no log
+    // and no push.
+    const { engine } = armedWithAsk([ask()]);
+    session(engine).lastJudgedContextHash = "banked";
+    engine.answerAsk({ terminalId: "t1", escalationId: "a1", choiceId: "opt1" });
+    expect(session(engine).lastJudgedContextHash).toBeUndefined();
+  });
+
+  it("a park is not over because a question was answered", async () => {
+    const { engine, sent } = armedWithAsk([ask()]);
+    await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
+    expect(statusOf(sent).state).toBe("parked");
+    engine.answerAsk({ terminalId: "t1", escalationId: "a1", choiceId: "opt1" });
+    expect(statusOf(sent).state).toBe("parked");
+  });
+
+  const refusals: Array<{ name: string; escalationId: string; choiceId: string; rows: OpenEscalation[] }> = [
+    { name: "an escalationId this session does not hold", escalationId: "gone", choiceId: "opt1", rows: [ask()] },
+    {
+      name: "a row that is not an ask", escalationId: "a1", choiceId: "opt1",
+      rows: [ask({ nonBlocking: undefined })],
+    },
+    { name: "a choiceId the row does not carry", escalationId: "a1", choiceId: "opt9", rows: [ask()] },
+  ];
+  for (const c of refusals) {
+    it(`refuses ${c.name} and resyncs the sender`, async () => {
+      const { engine, sent, saved, activity } = armedWithAsk(c.rows);
+      const beforeStatuses = statuses(sent).length;
+      const beforeSaved = saved.length;
+      await capturingWarnings(async () => {
+        engine.answerAsk({ terminalId: "t1", escalationId: c.escalationId, choiceId: c.choiceId });
+      });
+      // Exactly one frame, and it is the resync: the row stands, nothing is parked,
+      // and nothing reached the feed.
+      expect(statuses(sent).length).toBe(beforeStatuses + 1);
+      expect(saved.length).toBe(beforeSaved);
+      expect(session(engine).escalations).toEqual(c.rows);
+      expect(session(engine).askAnswer).toBeUndefined();
+      expect(answeredRows(activity)).toEqual([]);
+      expect(records(activity, "escalate")).toEqual([]);
+    });
+  }
+
+  it("a tap on a terminal with no armed session is a safe no-op", async () => {
+    const { engine, sent } = makeEngine();
+    const warned = await capturingWarnings(async () => {
+      engine.answerAsk({ terminalId: "t-unknown", escalationId: "a1", choiceId: "opt1" });
+    });
+    expect(warned).toContain("no armed session");
+    expect(sent).toEqual([]);
+  });
+
+  it("a second answer replacing an unrelayed one says so in the feed", () => {
+    const { engine, activity } = armedWithAsk([ask(), ask({ escalationId: "a2" })]);
+    engine.answerAsk({ terminalId: "t1", escalationId: "a1", choiceId: "opt1" });
+    engine.answerAsk({ terminalId: "t1", escalationId: "a2", choiceId: "opt2" });
+    const replaced = answeredRows(activity).find((r) => r.reason === "Your earlier answer was replaced");
+    expect(replaced?.detail).toBe("Point it at staging for now");
+    expect(session(engine).askAnswer!.answer).toBe("Go straight at production");
+  });
+
+  it("the snapshot advertises that this bridge can be told an answer", () => {
+    // The row cannot advertise itself: a bridge that reads `nonBlocking` off a
+    // record a newer one wrote re-emits it faithfully with no verb that answers it,
+    // and an app acting on the row alone would answer into a live PTY.
+    const { sent } = armedWithAsk([ask()]);
+    expect((statusOf(sent) as unknown as { askAnswer?: true }).askAnswer).toBe(true);
+  });
+
+  it("the snapshot advertises that this bridge can be told a blocking escalation's answer", () => {
+    // Same reasoning as `askAnswer` above, for the sibling capability: if this
+    // mint is ever lost, `escalationAnswer` stays false forever, the app's gate
+    // refuses to send the note, and the judge keeps re-asking a question the user
+    // already answered — with no error anywhere to say why.
+    const { sent } = armedWithAsk([ask()]);
+    expect((statusOf(sent) as unknown as { escalationAnswer?: true }).escalationAnswer).toBe(true);
+  });
+
+  describe("free text on handler:instruct", () => {
+    it("naming a standing ask parks the answer and never becomes work", async () => {
+      const { engine, activity, saved } = armedWithAsk([ask()]);
+      const granted = engine.instruct({
+        terminalId: "t1", escalationId: "a1", text: "use staging, and rm -rf build first",
+      });
+      await settle();
+      // The lift is still taken, on the raw payload and at the single feed point:
+      // it is the user's own sentence, and that is what authorization is scoped to.
+      expect(granted?.operations).toEqual([{ tier: "DESTRUCTIVE", matched: "rm -rf" }]);
+      expect((records(activity, "instruction_authorized")[0] as { reason: string }).reason)
+        .toBe("rm -rf");
+      // NO extraction: the extractor splits a sentence into work, and an answer
+      // routed through it becomes a backlog item the judge drives at the agent.
+      // The sentence names one, so a backlog left item for item is the assertion.
+      expect(session(engine).backlog.map((i) => i.id)).toEqual(["i1"]);
+      expect(session(engine).askAnswer)
+        .toMatchObject({ escalationId: "a1", answer: "use staging, and rm -rf build first", tapped: false });
+      expect((saved.at(-1) as HandlerSessionRecord).escalations).toEqual([]);
+    });
+
+    it("names the bare hosts describeGrant deliberately omits from an ordinary row", async () => {
+      // Handler's own question is what elicited this sentence, so the one
+      // session-long grant the user could never otherwise see is spelled out. At
+      // most one row per answered ask, which is what makes that affordable.
+      const { engine, activity } = armedWithAsk([ask()]);
+      engine.instruct({ terminalId: "t1", escalationId: "a1", text: "bump the version in package.json" });
+      await settle();
+      const rows = records(activity, "instruction_authorized") as { reason: string; detail?: string }[];
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.reason).toBe("1 host");
+      expect(rows[0]!.detail).toBe("package.json");
+    });
+
+    it("an escalationId naming nothing FAILS CLOSED rather than becoming an instruction", async () => {
+      // The race this exists for: reconcileAsks retires an ask by clearing
+      // `nonBlocking`, driven by agent events, so falling through here would
+      // authorize and extract a sentence the user sent as an ANSWER on a window the
+      // agent influences.
+      const { engine, activity, sent } = armedWithAsk([ask({ nonBlocking: undefined })]);
+      const beforeStatuses = statuses(sent).length;
+      const warned = await capturingWarnings(async () => {
+        expect(engine.instruct({
+          terminalId: "t1", escalationId: "a1", text: "clear the build dir with rm -rf build",
+        })).toBeNull();
+        await settle();
+      });
+      expect(warned).toContain("not an answerable question");
+      expect(statuses(sent).length).toBe(beforeStatuses + 1);
+      expect(session(engine).backlog.map((i) => i.id)).toEqual(["i1"]);
+      expect(lifted(session(engine))).toEqual({ patterns: [], paths: [], hosts: [] });
+      expect(records(activity, "instruction_authorized")).toEqual([]);
+      expect(session(engine).askAnswer).toBeUndefined();
+    });
+
+    it("an escalationId on an unarmed terminal takes no lift and resyncs", async () => {
+      const { engine, activity } = makeEngine();
+      await capturingWarnings(async () => {
+        expect(engine.instruct({ terminalId: "t-unknown", escalationId: "a1", text: "rm -rf build" }))
+          .toBeNull();
+        await settle();
+      });
+      expect(records(activity, "instruction_authorized")).toEqual([]);
+    });
+
+    it("an instruction carrying no escalationId is today's path, byte for byte", async () => {
+      const { engine, activity } = armedWithAsk([ask()]);
+      engine.instruct({ terminalId: "t1", text: "also update the docs" });
+      await until(() => session(engine).backlog.length > 0);
+      // Extracted as work, and the standing ask is untouched by it.
+      expect(session(engine).backlog).toHaveLength(1);
+      expect(session(engine).escalations).toHaveLength(1);
+      expect(answeredRows(activity)).toEqual([]);
+      expect(records(activity, "escalate")).toEqual([]);
+    });
+
+    it("an empty answer is dropped without retiring the question", async () => {
+      const { engine } = armedWithAsk([ask()]);
+      expect(engine.instruct({ terminalId: "t1", escalationId: "a1", text: "   " })).toBeNull();
+      await settle();
+      expect(session(engine).escalations).toHaveLength(1);
+      expect(session(engine).askAnswer).toBeUndefined();
+    });
+  });
+
+  describe("when the answer is relayed", () => {
+    it("waits for the agent's own turn_end while a reply is outstanding", async () => {
+      // The ask rides a handle that already injected, so the agent is working and
+      // its turn_end IS the relay pass. Re-entering here would race it and land the
+      // relay mid-turn, which is the delivery a framed answer exists to avoid.
+      const judged = { n: 0 };
+      const { engine } = armedWithAsk([ask()], {
+        runDecisionFn: async () => { judged.n++; return decide({ decision: "handle", reply: "carry on" }); },
+      });
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      expect(judged.n).toBe(1);
+      expect(session(engine).awaitingAgent).toBe(true);
+      engine.answerAsk({ terminalId: "t1", escalationId: "a1", choiceId: "opt1" });
+      await settle();
+      expect(judged.n).toBe(1);
+    });
+
+    it("re-enters on the event `latest` already holds once nothing is outstanding", async () => {
+      const judged = { n: 0 };
+      const { engine } = armedWithAsk([ask()], {
+        runDecisionFn: async () => { judged.n++; return decide({}); },
+      });
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      expect(judged.n).toBe(1);
+      expect(session(engine).awaitingAgent).toBeUndefined();
+      engine.answerAsk({ terminalId: "t1", escalationId: "a1", choiceId: "opt1" });
+      await until(() => judged.n === 2);
+      expect(judged.n).toBe(2);
+    });
+
+    it("an agent event clears the outstanding reply, so the next answer re-enters", async () => {
+      const judged = { n: 0 };
+      const decisions: HandlerDecision[] = [decide({ decision: "handle", reply: "carry on" })];
+      const { engine } = armedWithAsk([ask()], {
+        runDecisionFn: async () => { judged.n++; return decisions.shift() ?? decide({}); },
+      });
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      expect(judged.n).toBe(2);
+      expect(session(engine).awaitingAgent).toBeUndefined();
+      engine.answerAsk({ terminalId: "t1", escalationId: "a1", choiceId: "opt1" });
+      await until(() => judged.n === 3);
+      expect(judged.n).toBe(3);
+    });
+
+    it("a fresher event overtaking the re-entry is the one that gets judged", async () => {
+      const seen: string[] = [];
+      const { engine } = armedWithAsk([ask()], {
+        runDecisionFn: async (o: { context: string }) => { seen.push(o.context); return decide({}); },
+      });
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      engine.answerAsk({ terminalId: "t1", escalationId: "a1", choiceId: "opt1" });
+      await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
+      await settle();
+      // handleEvent's own liveness re-check is what keeps the re-entry from judging
+      // context the agent has already moved past.
+      expect(seen).toHaveLength(2);
+      expect(seen.at(-1)).not.toBe(seen[0]);
+    });
+
+    it("synthesises one event when a restart left nothing to re-enter on", async () => {
+      // The answered-after-a-restart case: `latest` is in-memory, so a bridge that
+      // came back between the ask and the answer has no event to re-enter on and no
+      // agent event is guaranteed ever again. Delivery was chosen over the smaller
+      // producer set, so one pass is started here.
+      const judged = { n: 0 };
+      const { engine, activity } = armedWithAsk([ask(), ask({ escalationId: "a2" })], {
+        runDecisionFn: async () => { judged.n++; return decide({}); },
+      });
+      const synthesised = () => answeredRows(activity)
+        .filter((r) => r.reason.startsWith("Handler started a pass to relay your answer"));
+      engine.answerAsk({ terminalId: "t1", escalationId: "a1", choiceId: "opt1" });
+      await until(() => judged.n === 1);
+      expect(judged.n).toBe(1);
+      expect(synthesised()).toHaveLength(1);
+
+      // At most ONE per answered ask: the synthesised event is now `latest`, so the
+      // next answer re-enters on it rather than starting a second producer.
+      engine.answerAsk({ terminalId: "t1", escalationId: "a2", choiceId: "opt2" });
+      await until(() => judged.n === 2);
+      expect(judged.n).toBe(2);
+      expect(synthesised()).toHaveLength(1);
+    });
+
+    it("a synthesised pass judges without a transcript rather than throwing", async () => {
+      // A restarted bridge took its PTYs with it, so the path a pre-restart event
+      // held names a file for a terminal that is gone. The synthesised event carries
+      // none, and the live adapter is what answers instead.
+      let handed: string | undefined = "unset";
+      const { engine } = armedWithAsk([ask()], {
+        adapter: {
+          injectReply: () => {},
+          recentOutput: () => EVIDENCE_TAIL,
+          transcriptPath: () => undefined,
+          outputKind: () => "pty",
+          commandCatalog: () => undefined,
+        },
+        runDecisionFn: async (o: { transcriptPath?: string }) => {
+          handed = o.transcriptPath;
+          return decide({});
+        },
+      });
+      engine.answerAsk({ terminalId: "t1", escalationId: "a1", choiceId: "opt1" });
+      await until(() => handed !== "unset");
+      expect(handed).toBeUndefined();
+    });
+  });
+});
+
+// A BLOCKING escalation's answer is a fundamentally different fact than an ask's:
+// the words already reached the agent through the ordinary reply transport, so
+// this note exists only to tell the judge its question was answered — never to
+// relay anything and never to lift anything. `delivered`/`choiceId` on
+// handler:instruct is the wire shape; instruct's delivered arm is the bridge
+// side.
+describe("answering the question that stopped the session", () => {
+  const DRAFT = "Yes, reuse the existing migration table.";
+  // Minted the same way the app would see it — through quickChoicesFor itself —
+  // rather than hand-typed, so a change to the mint site cannot drift silently
+  // out of step with what these fixtures exercise.
+  const CHOICES = quickChoicesFor({ draftReply: DRAFT, projectPath: "/proj" })!;
+  const REJECT_TEXT = CHOICES[1]!.text;
+
+  function blockingRow(over: Partial<OpenEscalation> = {}): OpenEscalation {
+    return {
+      escalationId: "e1", question: "Handler has a question", reasoning: "r",
+      draftReply: DRAFT, urgency: "normal", at: 2, choices: CHOICES, ...over,
+    };
+  }
+  const armedWithRow = (escalations: OpenEscalation[], over: Record<string, unknown> = {}) => {
+    const h = makeEngine({
+      loadSessionFn: () => sessionRecord({ goal: "", backlog: [item("i1")], escalations }),
+      ...over,
+    });
+    h.engine.arm({ terminalId: "t1" });
+    return h;
+  };
+  interface PrivateSession {
+    auth: { patterns: Set<string>; paths: Set<string>; hosts: Set<string> };
+    backlog: InstructionItem[];
+    escalations: OpenEscalation[];
+    lastJudgedContextHash?: string;
+    askAnswer?: { escalationId: string; question: string; answer: string; tapped: boolean; blocking?: true; at: number };
+  }
+  const session = (engine: HandlerEngine): PrivateSession =>
+    (engine as unknown as { sessions: Map<string, PrivateSession> }).sessions.get("t1")!;
+  const lifted = (s: PrivateSession) =>
+    ({ patterns: [...s.auth.patterns], paths: [...s.auth.paths], hosts: [...s.auth.hosts] });
+  const statuses = (sent: AbMessage[]) => sent.filter((m) => m.type === "handler:status");
+  const answeredRows = (activity: unknown[]) =>
+    records(activity, "answered") as { reason: string; detail?: string }[];
+  const tick = () => new Promise<void>((r) => { setTimeout(r, 1); });
+  const settle = async () => { for (let i = 0; i < 8; i++) await tick(); };
+
+  it("banks a delivered answer for the judge and retires the row", () => {
+    const { engine, saved, activity } = armedWithRow([blockingRow()]);
+    // `text` is deliberately something no choice on the row offers: the frame's
+    // own text must never be what gets banked, so a fixture where it happens to
+    // coincide with the choice's text cannot tell the two apart. If `answer` came
+    // from `text` instead of `esc.choices`, this would bank this string, not DRAFT.
+    const granted = engine.instruct({
+      terminalId: "t1", escalationId: "e1", text: "something the card never offered",
+      delivered: true, choiceId: "approve",
+    });
+    // No grant summary to describe: the delivered arm mints no authorization.
+    expect(granted).toBeNull();
+    expect(session(engine).escalations).toEqual([]);
+    // The words banked are the card's own text, resolved by choiceId — not
+    // whatever the frame's `text` field happened to carry.
+    expect(session(engine).askAnswer).toEqual({
+      escalationId: "e1", question: "Handler has a question",
+      answer: DRAFT, tapped: true, blocking: true, at: 1000,
+    });
+    const rec = saved.at(-1) as HandlerSessionRecord;
+    expect(rec.escalations).toEqual([]);
+    expect(rec.askAnswer?.blocking).toBe(true);
+    const rows = answeredRows(activity);
+    expect(rows.at(-1)!.reason).toBe("You answered Handler's question");
+    expect(rows.at(-1)!.detail).toBe(DRAFT);
+  });
+
+  it("banks the option's own words when the answer was a tap, never the frame's text", () => {
+    // The frame's `text` here is neither choice's text — a command an ordinary
+    // instruction would authorize, standing in for "whatever the app happened to
+    // put on the wire". Only `s.auth` staying empty and `answer` reading as
+    // REJECT_TEXT proves the choiceId lookup won, not the frame's own words.
+    const { engine } = armedWithRow([blockingRow()]);
+    engine.instruct({
+      terminalId: "t1", escalationId: "e1", text: "rm -rf /", delivered: true, choiceId: "reject",
+    });
+    expect(session(engine).askAnswer?.answer).toBe(REJECT_TEXT);
+    expect(lifted(session(engine))).toEqual({ patterns: [], paths: [], hosts: [] });
+  });
+
+  it("a delivered answer with no choiceId banks the delivered text itself", () => {
+    // A typed-but-delivered note carries no choiceId at all — the case the `??
+    // text` fallback in the delivered arm exists for.
+    const { engine } = armedWithRow([blockingRow()]);
+    engine.instruct({ terminalId: "t1", escalationId: "e1", text: "actually, use the old table", delivered: true });
+    expect(session(engine).askAnswer).toMatchObject({ answer: "actually, use the old table", tapped: false });
+  });
+
+  it("refuses a choiceId that names no option on the row", async () => {
+    const { engine, sent } = armedWithRow([blockingRow()]);
+    const before = statuses(sent).length;
+    const warned = await capturingWarnings(async () => {
+      expect(engine.instruct({
+        terminalId: "t1", escalationId: "e1", text: DRAFT, delivered: true, choiceId: "opt9",
+      })).toBeNull();
+    });
+    expect(warned).toContain("names no choice");
+    expect(statuses(sent).length).toBe(before + 1);
+    expect(session(engine).escalations).toHaveLength(1);
+    expect(session(engine).askAnswer).toBeUndefined();
+  });
+
+  it("refuses a choiceId on a frame that delivered nothing", async () => {
+    // A choiceId is meaningless off the delivered channel, and instruct must not
+    // guess which reading was meant.
+    const { engine, sent } = armedWithRow([blockingRow()]);
+    const before = statuses(sent).length;
+    const warned = await capturingWarnings(async () => {
+      expect(engine.instruct({
+        terminalId: "t1", escalationId: "e1", text: DRAFT, choiceId: "approve",
+      })).toBeNull();
+    });
+    expect(warned).toContain("not an answerable question");
+    expect(statuses(sent).length).toBe(before + 1);
+    expect(session(engine).escalations).toHaveLength(1);
+  });
+
+  it("refuses a delivered note that names an ask", async () => {
+    const askRow: OpenEscalation = {
+      escalationId: "a1", question: "Which db?", reasoning: "r", draftReply: "",
+      urgency: "normal", kind: "reply", at: 2, nonBlocking: true, unblocked: ["i1"],
+      askOptions: [{ choiceId: "opt1", label: "staging", cost: "x" }],
+    };
+    const { engine, sent } = armedWithRow([askRow]);
+    const before = statuses(sent).length;
+    const warned = await capturingWarnings(async () => {
+      expect(engine.instruct({ terminalId: "t1", escalationId: "a1", text: "staging", delivered: true }))
+        .toBeNull();
+    });
+    expect(warned).toContain("not an answerable question");
+    expect(statuses(sent).length).toBe(before + 1);
+    expect(session(engine).escalations).toEqual([askRow]);
+  });
+
+  it("refuses an undelivered answer that names a blocking row", async () => {
+    const { engine, sent } = armedWithRow([blockingRow()]);
+    const before = statuses(sent).length;
+    const warned = await capturingWarnings(async () => {
+      expect(engine.instruct({ terminalId: "t1", escalationId: "e1", text: DRAFT })).toBeNull();
+    });
+    expect(warned).toContain("not an answerable question");
+    expect(statuses(sent).length).toBe(before + 1);
+    expect(session(engine).escalations).toHaveLength(1);
+    expect(session(engine).askAnswer).toBeUndefined();
+  });
+
+  it("refuses a delivered note on a guard_blocked row", async () => {
+    const { engine, sent } = armedWithRow([blockingRow({ kind: "guard_blocked" })]);
+    const before = statuses(sent).length;
+    const warned = await capturingWarnings(async () => {
+      expect(engine.instruct({
+        terminalId: "t1", escalationId: "e1", text: DRAFT, delivered: true, choiceId: "approve",
+      })).toBeNull();
+    });
+    expect(warned).toContain("not an answerable question");
+    expect(statuses(sent).length).toBe(before + 1);
+    expect(session(engine).escalations).toHaveLength(1);
+  });
+
+  it("refuses a delivered note on a resolve_in_session row", async () => {
+    // Raised live rather than rehydrated: a `resolve_in_session` row does not
+    // survive a restart (see "a rehydrated resolve_in_session row is dropped"),
+    // so a fixture naming one AS rehydrated would never reach instruct at all.
+    const { engine, sent } = makeEngine();
+    engine.arm({ terminalId: "t1", goal: GOAL });
+    await engine.handleEvent({ terminalId: "t1", event: "permission_request", detail: "Bash: ls" });
+    const escId = (sent.find((m) => m.type === "handler:escalation") as never as { escalationId: string })
+      .escalationId;
+    const before = sent.filter((m) => m.type === "handler:status").length;
+    const warned = await capturingWarnings(async () => {
+      expect(engine.instruct({
+        terminalId: "t1", escalationId: escId, text: DRAFT, delivered: true, choiceId: "approve",
+      })).toBeNull();
+    });
+    expect(warned).toContain("not an answerable question");
+    expect(sent.filter((m) => m.type === "handler:status").length).toBe(before + 1);
+    expect((sent.at(-1) as never as { sessions: Array<{ pendingEscalations: number }> })
+      .sessions[0]!.pendingEscalations).toBe(1);
+  });
+
+  it("takes no authorization lift and queues no extraction on a tapped note (regression guard)", () => {
+    // The option deliberately names a command an ordinary instruction WOULD lift,
+    // so the test fails if a delivered note ever gains a path into either.
+    const row = blockingRow({
+      draftReply: "yes, run rm -rf build first and then continue",
+      choices: [
+        { choiceId: "approve", label: "Approve", text: "yes, run rm -rf build first and then continue" },
+        { choiceId: "reject", label: "Reject", text: REJECT_TEXT },
+      ],
+    });
+    const { engine, activity } = armedWithRow([row]);
+    engine.instruct({
+      terminalId: "t1", escalationId: "e1",
+      text: "yes, run rm -rf build first and then continue", delivered: true, choiceId: "approve",
+    });
+    expect(lifted(session(engine))).toEqual({ patterns: [], paths: [], hosts: [] });
+    expect(session(engine).backlog.map((i) => i.id)).toEqual(["i1"]);
+    expect(records(activity, "instruction_authorized")).toEqual([]);
+  });
+
+  it("starts no pass of its own (regression guard)", async () => {
+    // The agent's own turn_end is the pass that reads a delivered answer — unlike
+    // an ask's answer, which has no other producer and so must synthesise one.
+    const judged = { n: 0 };
+    const { engine } = armedWithRow([blockingRow()], {
+      runDecisionFn: async () => { judged.n++; return decide({}); },
+    });
+    engine.instruct({
+      terminalId: "t1", escalationId: "e1", text: DRAFT, delivered: true, choiceId: "approve",
+    });
+    await settle();
+    expect(judged.n).toBe(0);
+  });
+
+  // Regression guard, not new coverage: `instruct` already failed closed on a
+  // blocking escalationId before the delivered arm existed, so this passed
+  // before this feature too. What it pins is the `!s.askAnswer.blocking` gate on
+  // `askAnswerPending`'s projection, which a later edit could still lose.
+  it("raises no ANSWER QUEUED chip for a delivered answer", () => {
+    const { engine, sent } = armedWithRow([blockingRow()]);
+    engine.instruct({
+      terminalId: "t1", escalationId: "e1", text: DRAFT, delivered: true, choiceId: "approve",
+    });
+    expect((statusOf(sent) as unknown as { askAnswerPending?: true }).askAnswerPending).toBeUndefined();
+  });
+
+  // The private-state assertions above pin what `parkAskAnswer` banks; this pins
+  // that the bank actually reaches the judge. Without `blocking` surviving the
+  // projection at the runDecisionFn call site, the judge would receive this
+  // answer under the ASK arm's wording — "the agent has not seen it" — and act on
+  // it as if nothing had reached the session yet, landing a second instruction on
+  // top of the one the tap already gave.
+  it("hands the pass its own turn_end starts the tapped answer, framed as blocking", async () => {
+    const seen: Array<{ question: string; answer: string; tapped: boolean; blocking?: true } | undefined> = [];
+    const { engine } = armedWithRow([blockingRow()], {
+      runDecisionFn: async (o: {
+        askAnswer?: { question: string; answer: string; tapped: boolean; blocking?: true };
+      }) => {
+        seen.push(o.askAnswer);
+        return decide({});
+      },
+    });
+    engine.instruct({
+      terminalId: "t1", escalationId: "e1", text: DRAFT, delivered: true, choiceId: "approve",
+    });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(seen).toEqual([{
+      question: "Handler has a question", answer: DRAFT, tapped: true, blocking: true,
+    }]);
+  });
+
+  // A pass already in flight when the delivered note lands banked its hash
+  // BEFORE this answer existed; without the promptGen bump inside parkAskAnswer,
+  // that pass's return re-banks the stale hash on top of the clear, and the
+  // agent's own turn_end — the one producer this path relies on — would find an
+  // unmoved-looking context and judge nothing. Parameterized over both delivered
+  // shapes, mirroring the ask-answer `racing()` cases below: the answer must
+  // survive the race whether it names a choice or not.
+  const deliveredCases: Array<{ name: string; choiceId?: string; wantTapped: boolean }> = [
+    { name: "typed-but-delivered (no choiceId)", wantTapped: false },
+    { name: "tapped (choiceId)", choiceId: "approve", wantTapped: true },
+  ];
+  for (const c of deliveredCases) {
+    it(`a delivered note (${c.name}) invalidates the prompt already in flight`, async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((r) => { release = r; });
+      let started = false;
+      const { engine } = armedWithRow([blockingRow()], {
+        runDecisionFn: async () => { started = true; await gate; return decide({}); },
+      });
+      const inFlight = engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      for (let i = 0; i < 400 && !started; i++) await tick();
+      engine.instruct({
+        terminalId: "t1", escalationId: "e1", text: DRAFT, delivered: true, choiceId: c.choiceId,
+      });
+      release();
+      await inFlight;
+      expect(session(engine).lastJudgedContextHash).toBeUndefined();
+    });
+
+    it(`survives a pass suspended in runDecisionFn and reaches the NEXT pass (${c.name})`, async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((r) => { release = r; });
+      const seen: Array<{ answer: string; tapped: boolean; blocking?: true } | undefined> = [];
+      let pass = 0;
+      const { engine } = armedWithRow([blockingRow()], {
+        runDecisionFn: async (o: {
+          askAnswer?: { answer: string; tapped: boolean; blocking?: true };
+        }) => {
+          // Filtered rather than pushed whole: the real payload also carries
+          // `question`, and this assertion cares only about the three fields the
+          // race can drop.
+          seen.push(o.askAnswer && { answer: o.askAnswer.answer, tapped: o.askAnswer.tapped, blocking: o.askAnswer.blocking });
+          if (pass++ === 0) await gate;
+          return decide({});
+        },
+      });
+      const inFlight = engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      for (let i = 0; i < 400 && pass === 0; i++) await tick();
+      engine.instruct({
+        terminalId: "t1", escalationId: "e1", text: DRAFT, delivered: true, choiceId: c.choiceId,
+      });
+      release();
+      await inFlight;
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      // The suspended pass's prompt was already built without it; only the pass
+      // its own arrival wakes may see it.
+      expect(seen[0]).toBeUndefined();
+      expect(seen[1]).toEqual({ answer: DRAFT, tapped: c.wantTapped, blocking: true });
+    });
+  }
+});
+
+describe("an instruction while a question is standing", () => {
+  const BLOCKING: OpenEscalation = {
+    escalationId: "e1", question: "Handler has a question", reasoning: "r",
+    draftReply: "", urgency: "normal", at: 2,
+  };
+  const ASK: OpenEscalation = {
+    escalationId: "a1", question: "Which db?", reasoning: "r", draftReply: "",
+    urgency: "normal", kind: "reply", at: 2, nonBlocking: true, unblocked: ["i1"],
+  };
+  const GUARD_BLOCKED: OpenEscalation = {
+    escalationId: "g1", question: "Handler did not send its reply",
+    reasoning: "reply contains control characters", draftReply: "yes\x1b[B",
+    urgency: "normal", at: 1, kind: "guard_blocked",
+  };
+
+  const armedWith = (
+    escalations: OpenEscalation[], record: Partial<HandlerSessionRecord> = {},
+    over: Record<string, unknown> = {},
+  ) => {
+    const h = makeEngine({
+      loadSessionFn: () => sessionRecord({ goal: GOAL, backlog: [item("i1")], escalations, ...record }),
+      ...over,
+    });
+    h.engine.arm({ terminalId: "t1" });
+    return h;
+  };
+  interface PrivateSession { escalations: OpenEscalation[] }
+  const session = (engine: HandlerEngine): PrivateSession =>
+    (engine as unknown as { sessions: Map<string, PrivateSession> }).sessions.get("t1")!;
+  const answeredRows = (activity: unknown[]) =>
+    records(activity, "answered") as { reason: string; detail?: string }[];
+  const tick = () => new Promise<void>((r) => { setTimeout(r, 1); });
+  const settle = async () => { for (let i = 0; i < 8; i++) await tick(); };
+
+  it("retires the question the instruction speaks over and says so in the feed", async () => {
+    // The retirement is inert on its own — escalate() injected nothing, so no
+    // agent event is coming to carry this instruction to a judge — and so fires
+    // a synthesised pass; stubbed so the assertions below race nothing real.
+    const { engine, sent, activity } = armedWith([BLOCKING], {}, {
+      runDecisionFn: async () => decide({}),
+    });
+    engine.instruct({ terminalId: "t1", text: "skip that, run the tests instead" });
+    await settle();
+    expect(statusOf(sent).pendingEscalations).toBe(0);
+    const rows = answeredRows(activity);
+    expect(rows).toContainEqual(expect.objectContaining({
+      reason: "Your instruction took the place of Handler's question",
+      detail: "Handler has a question",
+    }));
+  });
+
+  it("leaves an ask, a report and an option-based prompt standing (regression guard)", async () => {
+    const { engine, sent } = armedWith([ASK, GUARD_BLOCKED], {}, {
+      runDecisionFn: async () => decide({}),
+    });
+    // Raised live: a resolve_in_session row does not survive rehydration (arm()
+    // drops it on load), so planting one in the record would never reach instruct.
+    await engine.handleEvent({ terminalId: "t1", event: "permission_request", detail: "Bash: ls" });
+    expect(session(engine).escalations).toHaveLength(3);
+    engine.instruct({ terminalId: "t1", text: "keep going" });
+    await settle();
+    expect(session(engine).escalations.map((e) => e.kind).sort())
+      .toEqual(["guard_blocked", "reply", "resolve_in_session"]);
+    expect(statusOf(sent).pendingEscalations).toBe(3);
+  });
+
+  it("starts a pass so a stopped session moves", async () => {
+    const judged = { n: 0 };
+    const { engine, activity } = armedWith([BLOCKING], {}, {
+      runDecisionFn: async () => { judged.n++; return decide({}); },
+    });
+    engine.instruct({ terminalId: "t1", text: "do the other thing" });
+    await settle();
+    expect(judged.n).toBe(1);
+    const rows = answeredRows(activity);
+    expect(rows.some((r) => r.reason
+      === "Handler started a pass to pick up your instruction, since no agent event was due")).toBe(true);
+  });
+
+  it("starts no pass when no question was standing", async () => {
+    const judged = { n: 0 };
+    const { engine } = armedWith([], {}, {
+      runDecisionFn: async () => { judged.n++; return decide({}); },
+    });
+    engine.instruct({ terminalId: "t1", text: "do the other thing" });
+    await settle();
+    expect(judged.n).toBe(0);
+  });
+
+  it("leaves a parked session parked, and starts no pass", async () => {
+    const judged = { n: 0 };
+    const { engine, sent, activity } = armedWith([BLOCKING], {
+      parkKind: "limit", parkedUntil: 1000 + 90_000,
+    }, {
+      runDecisionFn: async () => { judged.n++; return decide({}); },
+    });
+    expect(statusOf(sent).state).toBe("parked");
+    engine.instruct({ terminalId: "t1", text: "do the other thing" });
+    await settle();
+    expect(statusOf(sent).state).toBe("parked");
+    expect(statusOf(sent).parkedUntil).toBe(1000 + 90_000);
+    expect(judged.n).toBe(0);
+    expect(statusOf(sent).pendingEscalations).toBe(0);
+    expect(answeredRows(activity).some((r) =>
+      r.reason === "Your instruction took the place of Handler's question")).toBe(true);
+  });
+
+  // Beside the existing no-escalation pin ("reports an amendment that matched
+  // nothing rather than queueing the sentence", BD-0 above), which stays at its
+  // two frames because `superseded` is 0 there and neither of the rows below is
+  // emitted. Here it widens to seven: the synchronous retire (activity + status)
+  // and pass-start note (activity), the queued extraction's own persist
+  // (status), and the pass itself moving to "handling" and back with its verdict
+  // (status, activity, status). If BD-0's pin goes red, the gate is wrong, not
+  // that test — see its own comment.
+  it("emits the widened frame sequence when a question was superseded", async () => {
+    const { engine, sent } = armedWith([BLOCKING], {}, {
+      runDecisionFn: async () => decide({}),
+    });
+    const sentBefore = sent.length;
+    engine.instruct({ terminalId: "t1", text: "do the other thing instead" });
+    await settle();
+    expect(sent.slice(sentBefore).map((m) => m.type)).toEqual([
+      "handler:activity", "handler:status",
+      "handler:activity",
+      "handler:status",
+      "handler:status", "handler:activity", "handler:status",
+    ]);
+  });
+
+  // A pass already in flight when the instruction landed judged the WORLD BEFORE
+  // it — the question still standing, the sentence not yet typed. Without the
+  // promptGen bump, that pass's return re-banks the hash it computed on that
+  // stale world, which would make the accurate context that follows look
+  // "already judged" and skip a pass genuinely owed. The second pass this
+  // instruction starts is left permanently suspended: it must never be the one
+  // that quietly launders the first pass's stale write-back into a pass.
+  it("an instruction that retires a question invalidates the prompt already in flight", async () => {
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((r) => { releaseFirst = r; });
+    const secondGate = new Promise<void>(() => {});
+    let pass = 0;
+    const { engine } = armedWith([BLOCKING], {}, {
+      runDecisionFn: async () => {
+        pass++;
+        if (pass === 1) await firstGate; else await secondGate;
+        return decide({});
+      },
+    });
+    const inFlight = engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    for (let i = 0; i < 400 && pass === 0; i++) await tick();
+    engine.instruct({ terminalId: "t1", text: "do the other thing instead" });
+    expect(session(engine).escalations).toEqual([]);
+    releaseFirst();
+    await inFlight;
+    expect((session(engine) as unknown as { lastJudgedContextHash?: string }).lastJudgedContextHash)
+      .toBeUndefined();
+  });
+});
+
+describe("raising an ask", () => {
+  const QUESTION = "Which database should the migration target?";
+  const ASK: DecisionAsk = {
+    question: QUESTION,
+    reasoning: "the cutover order turns on it and nothing else on the list does",
+    unblocked: ["i1"],
+    options: [
+      { label: "Point it at staging for now", cost: "one extra deploy later" },
+      { label: "Go straight at production", cost: "no second cutover", recommended: true },
+    ],
+  };
+  const asking = (over: Partial<DecisionAsk> = {}, d: Partial<HandlerDecision> = {}) =>
+    decide({ decision: "handle", reply: "yes", ask: { ...ASK, ...over }, ...d });
+
+  interface AskFrame {
+    escalationId: string; question: string; reasoning: string; draftReply: string;
+    urgency: string; kind?: string; at: number;
+    nonBlocking?: boolean; unblocked?: string[];
+    choices?: { choiceId: string }[];
+    askOptions?: { choiceId: string; label: string; cost: string; recommended?: true }[];
+  }
+  const frames = (sent: AbMessage[]) =>
+    sent.filter((m) => m.type === "handler:escalation") as never as AskFrame[];
+  const rows = (sent: AbMessage[]): AskFrame[] => {
+    const status = sent.filter((m) => m.type === "handler:status").at(-1) as never as {
+      sessions: { escalations: AskFrame[] }[];
+    };
+    return status.sessions[0]?.escalations ?? [];
+  };
+  const askRows = (activity: unknown[]) =>
+    records(activity, "asked") as { reason: string; detail?: string }[];
+  const rejectedRows = (activity: unknown[]) =>
+    records(activity, "ask_rejected") as { reason: string; detail?: string }[];
+
+  // The backlog is supplied at arm time, so nothing is extracted and `i1` is the
+  // one still-open item every ask below names.
+  const armedFor = (over: Record<string, unknown> = {}, backlog = [item("i1")]) => {
+    const h = makeEngine(over);
+    h.engine.arm({ terminalId: "t1", goal: GOAL, backlog });
+    return h;
+  };
+
+  it("a handle carrying an ask injects the reply and raises one non-blocking row", async () => {
+    const { engine, sent, injected } = armedFor({ runDecisionFn: async () => asking() });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(injected).toEqual([["t1", "yes"]]);
+    const raised = frames(sent);
+    expect(raised).toHaveLength(1);
+    const f = raised[0]!;
+    expect(f.nonBlocking).toBe(true);
+    expect(f.question).toBe(QUESTION);
+    // `normal`, never `high`: the high band is for a row that unblocks a stopped
+    // session in one tap, and this row stops nothing.
+    expect(f.urgency).toBe("normal");
+    expect(f.kind).toBe("reply");
+    // Both halves of the empty-composer guarantee. `choices` is the field every
+    // existing app surface types into the PTY, and `draftReply` is what a reply
+    // sheet prefills from — an ask carries neither, on any app version.
+    expect(f.choices).toBeUndefined();
+    expect(f.draftReply).toBe("");
+    expect(f.askOptions?.map((o) => o.choiceId)).toEqual(["opt1", "opt2"]);
+    expect(f.unblocked).toEqual(["i1"]);
+    // The session did not stop, but the row is still one the user has to answer.
+    expect(statusOf(sent).state).toBe("needs_you");
+    expect(statusOf(sent).pendingEscalations).toBe(1);
+  });
+
+  it("carries its options while a resolve_in_session row stands", async () => {
+    // quickChoicesFor withholds every chip there, on the premise that injected
+    // text cannot reach an agent stalled on a prompt. An ask injects nothing, so
+    // that premise is void for it — and it is not on this path at all.
+    const { engine, sent } = armedFor({ runDecisionFn: async () => asking() });
+    await engine.handleEvent({
+      terminalId: "t1", event: "permission_request", promptId: "p1", detail: "write a file",
+    });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    const ask = frames(sent).find((f) => f.nonBlocking)!;
+    expect(ask.askOptions).toHaveLength(2);
+  });
+
+  it("carries its options when a cost names an absolute path outside the project", async () => {
+    // The other gate that is not on this path: a per-card classifyDestructive
+    // whose absolute-path sweep would withhold the whole card over prose that
+    // never reaches a shell.
+    const { engine, sent } = armedFor({
+      runDecisionFn: async () => asking({
+        options: [
+          { label: "Keep the shared config", cost: "nothing under /etc/antgrid.conf moves" },
+          { label: "Rewrite it", cost: "the old /etc/antgrid.conf is gone" },
+        ],
+      }),
+    });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(frames(sent)[0]!.askOptions).toHaveLength(2);
+  });
+
+  it("clips an over-long label and cost rather than dropping the option", async () => {
+    const { engine, sent } = armedFor({
+      runDecisionFn: async () => asking({
+        options: [
+          { label: "L".repeat(81), cost: "C".repeat(161) },
+          { label: "short", cost: "also short" },
+        ],
+      }),
+    });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    const [first] = frames(sent)[0]!.askOptions!;
+    // Clipped WITHIN the wire bound, ellipsis included: one character over and the
+    // schema check would answer by dropping every option on the card.
+    expect(first!.label).toHaveLength(80);
+    expect(first!.label.endsWith("…")).toBe(true);
+    expect(first!.cost).toHaveLength(160);
+  });
+
+  it("escapes a control character in a label instead of sending it raw", async () => {
+    const { engine, sent } = armedFor({
+      runDecisionFn: async () => asking({
+        options: [
+          { label: `ring${String.fromCharCode(7)}ring`, cost: "none" },
+          { label: "quiet", cost: "none" },
+        ],
+      }),
+    });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    const [first] = frames(sent)[0]!.askOptions!;
+    expect(first!.label).toContain("x07");
+    expect(first!.label).not.toContain(String.fromCharCode(7));
+  });
+
+  it("drops an option with a blank label or cost and keeps the rest", async () => {
+    const { engine, sent } = armedFor({
+      runDecisionFn: async () => asking({
+        options: [
+          { label: "   ", cost: "one extra deploy" },
+          { label: "Go straight at production", cost: "no second cutover" },
+          { label: "Wait for the freeze", cost: "   " },
+          { label: "Ask the team first", cost: "a day" },
+        ],
+      }),
+    });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    const opts = frames(sent)[0]!.askOptions!;
+    expect(opts.map((o) => o.label)).toEqual(["Go straight at production", "Ask the team first"]);
+    // Ids are minted by POSITION among the survivors, so they stay contiguous and
+    // no app can resolve one against an option that was dropped.
+    expect(opts.map((o) => o.choiceId)).toEqual(["opt1", "opt2"]);
+  });
+
+  it("raises the question with no options rather than a one-chip card", async () => {
+    const { engine, sent } = armedFor({
+      runDecisionFn: async () => asking({
+        options: [
+          { label: "Go straight at production", cost: "no second cutover" },
+          { label: "", cost: "one extra deploy" },
+        ],
+      }),
+    });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    const f = frames(sent)[0]!;
+    // The question is never dropped over its options: a free-text ask is a
+    // complete ask, and a single option is a button that can only say yes.
+    expect(f.question).toBe(QUESTION);
+    expect(f.askOptions).toBeUndefined();
+  });
+
+  it("emphasises exactly one option however many the judge marked", async () => {
+    const { engine, sent } = armedFor({
+      runDecisionFn: async () => asking({
+        options: [
+          { label: "Point it at staging", cost: "one extra deploy", recommended: true },
+          { label: "Go straight at production", cost: "no second cutover", recommended: true },
+        ],
+      }),
+    });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(frames(sent)[0]!.askOptions!.map((o) => o.recommended)).toEqual([true, undefined]);
+  });
+
+  describe("the guards every ask is raised behind", () => {
+    it("raises nothing when the reply is refused by the HARD floor", async () => {
+      const { engine, sent, injected } = armedFor({
+        runDecisionFn: async () => asking({}, { reply: "mkfs.ext4 /dev/sdb" }),
+      });
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      expect(injected).toHaveLength(0);
+      expect(frames(sent).map((f) => f.kind)).toEqual(["guard_blocked"]);
+    });
+
+    it("raises nothing when the reply is refused by checkReplyShape", async () => {
+      const { engine, sent, injected } = armedFor({
+        runDecisionFn: async () => asking({}, { reply: "go\x1b[B\r" }),
+      });
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      expect(injected).toHaveLength(0);
+      expect(frames(sent).map((f) => f.kind)).toEqual(["guard_blocked"]);
+    });
+
+    it("raises nothing when the runaway cap has been spent", async () => {
+      // A row that says the work went on is one written after the reply provably
+      // reached the agent, so every guard above the call site has to return first.
+      const decisions: HandlerDecision[] = [decide({ decision: "handle", reply: "yes" })];
+      const { engine, sent } = armedFor({
+        guard: new RunawayGuard(1),
+        runDecisionFn: async () => decisions.shift() ?? asking(),
+      });
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      expect(frames(sent).map((f) => f.kind)).toEqual(["guard_blocked"]);
+    });
+
+    it("ignores an ask on a continue and on an escalate, loudly", async () => {
+      const decisions = [
+        decide({ decision: "continue", ask: ASK }),
+        decide({ decision: "escalate", ask: ASK }),
+      ];
+      const { engine, sent } = armedFor({ runDecisionFn: async () => decisions.shift()! });
+      const warnings = await capturingWarnings(async () => {
+        await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+        await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
+      });
+      // Neither branch sends the agent anything, so the row would sit over a
+      // session with no further event to raise it again.
+      expect(rows(sent).some((e) => e.nonBlocking)).toBe(false);
+      expect(warnings).toContain("handler ask ignored on continue");
+      expect(warnings).toContain("handler ask ignored on escalate");
+    });
+
+    it("refuses a second ask while one stands, and tells the judge why", async () => {
+      // Distinct replies, or the runaway guard refuses the second pass for
+      // repeating itself and the ask never reaches its own bound.
+      let n = 0;
+      const { engine, sent, activity } = armedFor({
+        runDecisionFn: async () => asking({ question: `${QUESTION} (${n})` }, { reply: `yes ${n++}` }),
+      });
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
+      expect(frames(sent)).toHaveLength(1);
+      expect(rejectedRows(activity).map((r) => r.reason))
+        .toContain("a question of yours is still unanswered");
+    });
+
+    it("raises an ask that names no still-open item, with an empty unblocked set", async () => {
+      // Raised as a non-blocking row with nothing in `unblocked` rather than
+      // discarded, since discarding it would turn a question the judge chose to
+      // ask cheaply into the expensive escalation it was avoiding, one pass
+      // later. reconcileAsks promotes it on the very next pass (see the sibling
+      // describe block "the ask sections in the decide prompt").
+      const { engine, sent, activity } = armedFor(
+        { runDecisionFn: async () => asking() },
+        [item("i1", { status: "done", evidence: "ran to completion" })],
+      );
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      const raised = frames(sent);
+      expect(raised).toHaveLength(1);
+      expect(raised[0]!.nonBlocking).toBe(true);
+      expect(raised[0]!.unblocked).toEqual([]);
+      expect(raised[0]!.askOptions).toBeDefined();
+      expect(askRows(activity)).toHaveLength(1);
+      expect(rejectedRows(activity)).toHaveLength(0);
+    });
+
+    it("hands that ask to reconcileAsks on the next pass", async () => {
+      const decisions = [asking(), decide({ decision: "handle", reply: "ok" })];
+      const { engine, sent, activity } = armedFor(
+        { runDecisionFn: async () => decisions.shift()! },
+        [item("i1", { status: "done", evidence: "ran to completion" })],
+      );
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      const row = rows(sent)[0]!;
+      expect(row.nonBlocking).toBeUndefined();
+      expect(row.askOptions).toBeUndefined();
+      // This ask's `unblocked` was already empty at raise time (i1 was `done`,
+      // never running), so no work ran alongside it — the "has finished" wording
+      // belongs to the other case, where `unblocked` genuinely emptied out.
+      expect((records(activity, "escalate") as { reason: string }[]).map((r) => r.reason))
+        .toContain("your question was raised over work that had already stopped, and now holds the agent");
+    });
+
+    it("raises a repeated question once, on whichever bound is reached first", async () => {
+      // Two guards would each stop this, and at MAX_OPEN_ASKS = 1 the count is
+      // always the one that speaks: the duplicate-question check sits behind it and
+      // is what would still refuse a repeat if that bound were ever raised. The
+      // reason in the feed is asserted so a change to either is visible here.
+      let n = 0;
+      const { engine, sent, activity } = armedFor({
+        runDecisionFn: async () => asking({}, { reply: `yes ${n++}` }),
+      });
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
+      expect(frames(sent)).toHaveLength(1);
+      expect(rejectedRows(activity).map((r) => r.reason))
+        .toContain("a question of yours is still unanswered");
+    });
+
+    it("drops an unblocked id the record could not carry", async () => {
+      // A row that fails its own schema makes the WHOLE session record unreadable
+      // on the next start, and the session comes back with no goal and no backlog.
+      // One past OpenEscalationSchema's own 64-character bound on an `unblocked`
+      // entry, spelled here the way the other bounds in this file are.
+      const long = "i".repeat(65);
+      const { engine, sent } = armedFor(
+        { runDecisionFn: async () => asking({ unblocked: [long, "i1"] }) },
+        [item(long), item("i1")],
+      );
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      expect(frames(sent)[0]!.unblocked).toEqual(["i1"]);
+    });
+
+    it("spends exactly one judge call per agent event", async () => {
+      // The inertness the whole shape rests on: raising an ask arms no timer,
+      // clears no hash and schedules no pass of its own.
+      let judged = 0;
+      const { engine } = armedFor({ runDecisionFn: async () => { judged++; return asking(); } });
+      for (let i = 0; i < 4; i++) await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      expect(judged).toBe(4);
+    });
+  });
+
+  // A standing ask, planted rather than raised, so each case starts from the state
+  // a bridge restart would rehydrate.
+  function standingAsk(over: Partial<OpenEscalation> = {}): OpenEscalation {
+    return {
+      escalationId: "a1", question: QUESTION, reasoning: "r", draftReply: "",
+      urgency: "normal", kind: "reply", at: 2, nonBlocking: true, unblocked: ["i1"],
+      askOptions: [
+        { choiceId: "opt1", label: "Point it at staging", cost: "one extra deploy" },
+        { choiceId: "opt2", label: "Go straight at production", cost: "no second cutover" },
+      ],
+      ...over,
+    };
+  }
+  const resumedWith = (
+    escalations: OpenEscalation[], backlog: InstructionItem[], over: Record<string, unknown> = {},
+  ) => {
+    const h = makeEngine({
+      loadSessionFn: () => sessionRecord({ goal: GOAL, backlog, escalations }),
+      runDecisionFn: async () => decide({}),
+      ...over,
+    });
+    h.engine.arm({ terminalId: "t1" });
+    return h;
+  };
+
+  describe("what an ask does not stop", () => {
+    it("the park timer still nudges", async () => {
+      const { engine, injected, timers } = resumedWith([standingAsk()], [item("i1")]);
+      await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
+      timers.at(-1)!.fn();
+      // The nudge is an unsupervised submitted line, and the danger it exists to
+      // avoid is answering a pending prompt on the user's behalf. The agent was
+      // already working past this question, so it holds no prompt to answer.
+      expect(injected).toEqual([["t1", "continue"]]);
+    });
+
+    it("a blocking question still stops the park timer", async () => {
+      // The same row with its claim withdrawn: now it IS what the session stopped
+      // for, and the nudge would answer it on the user's behalf.
+      const { engine, injected, timers } = resumedWith(
+        [standingAsk({ nonBlocking: undefined, askOptions: undefined })], [item("i1")],
+      );
+      await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
+      timers.at(-1)!.fn();
+      expect(injected).toHaveLength(0);
+    });
+
+    it("still suppresses both lifecycle ceilings", async () => {
+      // These are duplicate-row suppressors: an ask has already paged the user, and
+      // a stuck judge appending an identical row per failure is what they prevent.
+      const transient = resumedWith([standingAsk()], [item("i1")]);
+      for (let i = 0; i < TRANSIENT_CEILING; i++) {
+        await transient.engine.handleEvent({ terminalId: "t1", event: "turn_failed" });
+        const t = transient.timers.at(-1)!;
+        if (!t.fired && !t.cancelled) t.fn();
+      }
+      expect(frames(transient.sent)).toHaveLength(0);
+
+      const limit = resumedWith([standingAsk()], [item("i1")]);
+      for (let i = 0; i < LIMIT_PARK_CEILING; i++) {
+        await limit.engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
+        const t = limit.timers.at(-1)!;
+        if (!t.fired && !t.cancelled) t.fn();
+      }
+      expect(frames(limit.sent)).toHaveLength(0);
+    });
+
+    it("an id-less prompt retraction keeps the ask and drops a plain reply row", async () => {
+      const { engine, sent } = resumedWith([standingAsk()], [item("i1")], {
+        runDecisionFn: async () => decide({ decision: "escalate" }),
+      });
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      expect(rows(sent)).toHaveLength(2);
+      engine.onPromptRetracted("t1");
+      // An id-less retraction means every PROMPT is gone, and a question Handler
+      // put to the USER was never one.
+      expect(rows(sent).map((e) => e.escalationId)).toEqual(["a1"]);
+    });
+
+    it("a finished backlog does not disarm over it", async () => {
+      const { engine, sent, activity } = resumedWith([standingAsk()], [item("i1")], {
+        runDecisionFn: async () => decide({
+          transitions: [{ id: "i1", status: "done", evidence: "ran to completion" }],
+        }),
+      });
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      expect(records(activity, "wrapped_up")).toHaveLength(0);
+      expect(statusOf(sent).state).toBe("needs_you");
+      // Promoted on the way through, because the work it did not gate is over —
+      // and then held open by the ordinary pending-question gate.
+      expect(rows(sent)[0]!.nonBlocking).toBeUndefined();
+    });
+
+    it("a session holding only a guard_blocked report still wraps up", async () => {
+      // The complement, re-run because the wrap-up's two gates now have a
+      // reconcile between them.
+      const { engine, activity } = resumedWith(
+        [{
+          escalationId: "b0", question: "Handler did not send its reply", reasoning: "r",
+          draftReply: "d", urgency: "normal", at: 1, kind: "guard_blocked",
+        }],
+        [item("i1")],
+        {
+          runDecisionFn: async () => decide({
+            transitions: [{ id: "i1", status: "done", evidence: "ran to completion" }],
+          }),
+        },
+      );
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      expect(records(activity, "wrapped_up")).toHaveLength(1);
+    });
+  });
+
+  describe("reconciling a standing ask", () => {
+    const twoIds = (backlog: InstructionItem[], over: Record<string, unknown> = {}) =>
+      resumedWith([standingAsk({ unblocked: ["i1", "i2"] })], backlog, over);
+
+    it("prunes the ids that finished and leaves the row standing", async () => {
+      const { engine, sent, activity } = twoIds([
+        item("i1", { status: "done", evidence: "ran to completion" }), item("i2"),
+      ]);
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      const row = rows(sent)[0]!;
+      expect(row.unblocked).toEqual(["i2"]);
+      expect(row.nonBlocking).toBe(true);
+      expect(row.askOptions).toHaveLength(2);
+      expect(askRows(activity)).toHaveLength(0);
+    });
+
+    it("promotes the row and strips its options once none of the work is running", async () => {
+      const { engine, sent, activity, pushes, saved } = twoIds([
+        item("i1", { status: "done", evidence: "ran to completion" }),
+        item("i2", { status: "skipped", evidence: "no longer needed" }),
+      ]);
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      const row = rows(sent)[0]!;
+      expect(row.nonBlocking).toBeUndefined();
+      // Stripped in the SAME mutation. A promoted row that kept its options renders
+      // live buttons that answerAsk then refuses, with nothing for the app to latch.
+      expect(row.askOptions).toBeUndefined();
+      // Still an `escalate` row, and the only ask-related one that is: the
+      // promotion is the moment the question becomes a stop.
+      expect((records(activity, "escalate") as { reason: string }[]).map((r) => r.reason))
+        .toEqual(["your question now holds the agent; the work it did not gate has finished"]);
+      // No second push: the user was woken when the question was raised.
+      expect(pushes).toHaveLength(0);
+      expect((saved.at(-1) as HandlerSessionRecord).escalations[0]!.nonBlocking).toBeUndefined();
+    });
+
+    it("counts a permanently blocked item as not running", async () => {
+      // TERMINAL is {done, skipped, failed}, so `blocked` is formally still open —
+      // and a backlog that can never finish is exactly the session a gate behind
+      // allTerminal could never reach.
+      const { engine, sent } = twoIds([
+        item("i1", { status: "blocked" }),
+        item("i2", { status: "done", evidence: "ran to completion" }),
+      ]);
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      expect(rows(sent)[0]!.nonBlocking).toBeUndefined();
+    });
+
+    it("promotes an ask whose named work was never in the backlog", async () => {
+      const { engine, sent } = twoIds([item("i3")]);
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      expect(rows(sent)[0]!.nonBlocking).toBeUndefined();
+    });
+
+    it("promotes once, however many events follow", async () => {
+      const { engine, activity } = twoIds([
+        item("i1", { status: "done", evidence: "ran to completion" }),
+        item("i2", { status: "failed", evidence: "compiler said no" }),
+      ]);
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
+      // The promotion row is an `escalate`: the one moment an ask becomes a stop.
+      expect(records(activity, "escalate")).toHaveLength(1);
+    });
+  });
+});
+
+describe("an ask survives a typed line", () => {
+  const tick = () => new Promise<void>((r) => { setTimeout(r, 1); });
+  const settle = async () => { for (let i = 0; i < 8; i++) await tick(); };
+
+  const ASK: OpenEscalation = {
+    escalationId: "a1", question: "Which database should the migration target?",
+    reasoning: "r", draftReply: "", urgency: "normal", kind: "reply", at: 2,
+    nonBlocking: true, unblocked: ["i1"],
+    askOptions: [
+      { choiceId: "opt1", label: "Point it at staging", cost: "one extra deploy" },
+      { choiceId: "opt2", label: "Go straight at production", cost: "no second cutover" },
+    ],
+  };
+  const BLOCKING: OpenEscalation = {
+    escalationId: "e1", question: "Proceed?", reasoning: "r", draftReply: "yes",
+    urgency: "normal", kind: "reply", at: 1,
+  };
+
+  // Planted rather than raised, so every case starts from the state a bridge
+  // restart rehydrates — which is also the only way an ask can outlive the pass
+  // that raised it, and so the state the clearing rule is really about.
+  const armed = (
+    escalations: OpenEscalation[], record: Partial<HandlerSessionRecord> = {},
+    over: Record<string, unknown> = {},
+  ) => {
+    const h = makeEngine({
+      loadSessionFn: () => sessionRecord({ goal: GOAL, backlog: [item("i1")], escalations, ...record }),
+      ...over,
+    });
+    h.engine.arm({ terminalId: "t1" });
+    return h;
+  };
+
+  interface PrivateSession {
+    escalations: OpenEscalation[];
+    transientFailures: number;
+    limitParks: number;
+    askAnswer?: { escalationId: string; question: string; answer: string; tapped: boolean; at: number };
+  }
+  const session = (engine: HandlerEngine): PrivateSession =>
+    (engine as unknown as { sessions: Map<string, PrivateSession> }).sessions.get("t1")!;
+  const ids = (engine: HandlerEngine) => session(engine).escalations.map((e) => e.escalationId);
+  const savedIds = (saved: unknown[]) =>
+    (saved.at(-1) as HandlerSessionRecord).escalations.map((e) => e.escalationId);
+  const statuses = (sent: AbMessage[]) => sent.filter((m) => m.type === "handler:status").length;
+
+  it("keeps the ask while clearing a blocking sibling in the same call", () => {
+    const { engine, sent, saved } = armed([BLOCKING, ASK]);
+    engine.onUserReply("t1", "do the other thing first\r");
+    // The line answered the blocking pause and reached the agent; Handler's own
+    // question was never what the session stopped for, so consuming it here would
+    // spend an answer to a different question.
+    expect(ids(engine)).toEqual(["a1"]);
+    expect(savedIds(saved)).toEqual(["a1"]);
+    expect(statusOf(sent).state).toBe("needs_you");
+    expect(statusOf(sent).pendingEscalations).toBe(1);
+  });
+
+  it("survives the restart that rehydrated it", () => {
+    const { engine, sent } = armed([ASK]);
+    expect(statusOf(sent).pendingEscalations).toBe(1);
+    engine.onUserReply("t1", "carry on\r");
+    expect(ids(engine)).toEqual(["a1"]);
+    expect(statusOf(sent).state).toBe("needs_you");
+  });
+
+  it("resets the failure counters on a session standing only on an ask", () => {
+    const { engine, saved } = armed([ASK], { transientFailures: 2 });
+    engine.onUserReply("t1", "carry on\r");
+    // Nothing was cleared and nothing was unparked, so the whole point is that the
+    // counters moved anyway: transientBackoffMs reads this number, and leaving it
+    // at 2 means the next transient failure pages instead of backing off.
+    expect(session(engine).transientFailures).toBe(0);
+    // The record deliberately still says 2. The persist stayed behind the gate, so
+    // a typed line costs no disk write on a session it changes nothing else about
+    // — and a restart starts a fresh process at zero regardless.
+    expect((saved.at(-1) as HandlerSessionRecord).transientFailures).toBe(2);
+  });
+
+  it("resets them on a session with no rows at all", () => {
+    // The case the hoist widens into, and the one nothing covered before: a bare
+    // keystroke-submit on a quiet session used to leave a spent backoff standing.
+    const { engine } = armed([], { transientFailures: 2 });
+    engine.onUserReply("t1", "carry on\r");
+    expect(session(engine).transientFailures).toBe(0);
+  });
+
+  it("resets the limit-park count after a park that already resumed", async () => {
+    // limitParks is not persisted, so a park round-trip is the only way to reach a
+    // non-zero one on a session that is no longer parked — which is exactly the
+    // shape the early return used to skip.
+    const { engine, timers } = armed([ASK]);
+    await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
+    expect(session(engine).limitParks).toBe(1);
+    timers.at(-1)!.fn();
+    engine.onUserReply("t1", "carry on\r");
+    expect(session(engine).limitParks).toBe(0);
+  });
+
+  it("a dismiss retires the ask, banks the decline, and starts no pass", async () => {
+    let decided = 0;
+    const { engine, saved, activity, sent } = armed([ASK], {}, {
+      runDecisionFn: async () => { decided++; return decide({}); },
+    });
+    engine.dismissEscalation("t1", "a1");
+    await settle();
+    expect(ids(engine)).toEqual([]);
+    // Banked as an answer so the judge learns the question was refused and stops
+    // re-asking it; a decline carries nothing the agent could act on, so unlike
+    // the two answer transports it starts no relay pass.
+    expect(session(engine).askAnswer).toEqual({
+      escalationId: "a1", question: ASK.question,
+      answer: "(the user declined to answer)", tapped: false, at: 1000,
+    });
+    expect(decided).toBe(0);
+    expect((saved.at(-1) as HandlerSessionRecord).askAnswer?.answer)
+      .toBe("(the user declined to answer)");
+    expect((records(activity, "answered") as { reason: string }[]).map((r) => r.reason))
+      .toEqual(["You declined Handler's question"]);
+    expect(statusOf(sent).state).toBe("watching");
+  });
+
+  it("a dismiss on a blocking question beside an ask is still refused", () => {
+    const { engine, sent } = armed([BLOCKING, ASK]);
+    const before = statuses(sent);
+    engine.dismissEscalation("t1", "e1");
+    // A blocking `reply` row IS retired by the user's own line, so dismissing one
+    // would drop a live question more quietly than any path that exists today.
+    expect(ids(engine)).toEqual(["e1", "a1"]);
+    expect(statuses(sent)).toBe(before + 1);
+  });
+});
+
+describe("the ask sections in the decide prompt", () => {
+  const QUESTION = "Which database should the migration target?";
+  const ASK: DecisionAsk = {
+    question: QUESTION,
+    reasoning: "the cutover order turns on it and nothing else on the list does",
+    unblocked: ["i1"],
+    options: [
+      { label: "Point it at staging for now", cost: "one extra deploy later" },
+      { label: "Go straight at production", cost: "no second cutover" },
+    ],
+  };
+  interface AskOpts {
+    openAsks?: string[];
+    askRejections?: string[];
+    standingQuestions?: string[];
+    agentWorking?: boolean;
+    staleAskIds?: boolean;
+    askAnswer?: { question: string; answer: string; tapped: boolean; blocking?: true };
+  }
+  // What the engine owes buildDecidePrompt for the ask sections, captured per
+  // pass. Copied on the way in rather than held: every list here is derived off
+  // live session state, so keeping the arrays themselves would let a later pass
+  // rewrite what an earlier one was shown.
+  const watching = (next: () => HandlerDecision, over: Record<string, unknown> = {}) => {
+    const seen: AskOpts[] = [];
+    const h = makeEngine({
+      runDecisionFn: async (o: AskOpts) => {
+        seen.push({
+          openAsks: o.openAsks ? [...o.openAsks] : undefined,
+          askRejections: o.askRejections ? [...o.askRejections] : undefined,
+          standingQuestions: o.standingQuestions ? [...o.standingQuestions] : undefined,
+          agentWorking: o.agentWorking,
+          staleAskIds: o.staleAskIds,
+          askAnswer: o.askAnswer ? { ...o.askAnswer } : undefined,
+        });
+        return next();
+      },
+      ...over,
+    });
+    return { ...h, seen };
+  };
+  const queued = (ds: HandlerDecision[]) => () => ds.shift() ?? decide({});
+  // The relay pass an answer starts runs on the engine's own per-terminal chain
+  // with a context assembly inside it, so a fixed number of ticks is a race under
+  // a loaded run. Wait on the thing being asserted.
+  const until = async (cond: () => boolean) => {
+    for (let i = 0; i < 400 && !cond(); i++) await new Promise<void>((r) => { setTimeout(r, 1); });
+  };
+  // Planted rather than raised, so the case starts from the state a bridge restart
+  // would rehydrate. The one backlog item below is what it names in `unblocked`,
+  // because reconcileAsks promotes an ask whose named work was never there.
+  const standing = (): OpenEscalation => ({
+    escalationId: "a1", question: QUESTION, reasoning: "r", draftReply: "",
+    urgency: "normal", kind: "reply", at: 2, nonBlocking: true, unblocked: ["i1"],
+    askOptions: [
+      { choiceId: "opt1", label: "Point it at staging for now", cost: "one extra deploy later" },
+      { choiceId: "opt2", label: "Go straight at production", cost: "no second cutover" },
+    ],
+  });
+  const withStandingAsk = (next: () => HandlerDecision) => watching(next, {
+    loadSessionFn: () => sessionRecord({ goal: "", backlog: [item("i1")], escalations: [standing()] }),
+  });
+
+  it("lists the standing question on every pass after the one that raised it", async () => {
+    const { engine, seen } = watching(queued([
+      decide({ decision: "handle", reply: "carry on", ask: ASK }),
+      decide({ decision: "handle", reply: "carry on with the second half" }),
+    ]));
+    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("i1")] });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    // The pass that raises it is told nothing: the row does not exist until after
+    // the reply carrying it has provably reached the agent.
+    expect(seen[0]!.openAsks).toEqual([]);
+    expect(seen[1]!.openAsks).toEqual([QUESTION]);
+  });
+
+  // `agentWorking` has to be read BEFORE handleEventInner's own top-of-call clear
+  // of `awaitingAgent`, never after: every pass clears that flag for itself before
+  // its own judge call, so a live re-read at prompt-build time would always be
+  // false and the "mid-turn" arm could never fire — including right here, on the
+  // very next pass after a reply the harness itself just sent.
+  it("tells the judge the promoted question rides a reply still in flight, and stops saying so once the agent goes quiet", async () => {
+    const promoted: OpenEscalation = { ...standing(), nonBlocking: undefined, askOptions: undefined };
+    const { engine, seen } = watching(queued([
+      decide({ decision: "handle", reply: "still working on it" }),
+      decide({ decision: "continue" }),
+    ]), { loadSessionFn: () => sessionRecord({ goal: "", backlog: [item("i1")], escalations: [promoted] }) });
+    engine.arm({ terminalId: "t1" });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    // Nothing has been sent yet as this pass starts: the row was rehydrated from
+    // disk, not raised by a reply this process just injected.
+    expect(seen[0]!.standingQuestions).toEqual([QUESTION]);
+    expect(seen[0]!.agentWorking).toBeFalsy();
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    // The first pass's own `handle` set `awaitingAgent` right after injecting its
+    // reply, and this event is what that reply produced.
+    expect(seen[1]!.agentWorking).toBe(true);
+  });
+
+  it("stops listing an answered question and hands the judge the answer instead", async () => {
+    const { engine, seen } = withStandingAsk(() => decide({}));
+    engine.arm({ terminalId: "t1" });
+    engine.answerAsk({ terminalId: "t1", escalationId: "a1", choiceId: "opt2" });
+    await until(() => seen.length > 0);
+    expect(seen[0]!.openAsks).toEqual([]);
+    // The label off this bridge's own row: the frame that answered carried an id
+    // and nothing else.
+    expect(seen[0]!.askAnswer)
+      .toEqual({ question: QUESTION, answer: "Go straight at production", tapped: true });
+  });
+
+  it("hands a parked answer to exactly one judge pass, whatever it decides", async () => {
+    const { engine, seen } = withStandingAsk(queued([
+      decide({}),
+      decide({ decision: "handle", reply: "the user picked production" }),
+    ]));
+    engine.arm({ terminalId: "t1" });
+    engine.answerAsk({ terminalId: "t1", escalationId: "a1", choiceId: "opt2" });
+    await until(() => seen.length > 0);
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    // The answer is addressed to the JUDGE, not the agent, so the pass that READ
+    // it has consumed it — `continue` included, which decision.ts explicitly tells
+    // the judge to return when the answer changes nothing. Holding it for a relay
+    // that a `continue` says is not owed re-injects the same answer into every
+    // later prompt and pins ANSWER QUEUED for the life of the session.
+    expect(seen.map((o) => o.askAnswer?.answer))
+      .toEqual(["Go straight at production", undefined]);
+  });
+
+  // An answer parked while a pass is suspended in its judge call was never in that
+  // pass's prompt. Both cases below are the ordinary one — a user taps shortly
+  // after the agent's turn ends — and the transports run straight off agent-core's
+  // switch rather than on the engine's per-terminal chain, so nothing serialises
+  // them behind the pass. A compromised agent widens the window at will by keeping
+  // a judge call in flight, which is why neither may depend on losing the race.
+  const racing = (verdict: HandlerDecision) => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const seen: (string | undefined)[] = [];
+    let pass = 0;
+    const h = makeEngine({
+      loadSessionFn: () => sessionRecord({ goal: "", backlog: [item("i1")], escalations: [standing()] }),
+      runDecisionFn: async (o: AskOpts) => {
+        seen.push(o.askAnswer?.answer);
+        // Only the first pass waits: it is the one the answer has to arrive behind.
+        if (pass++ === 0) await gate;
+        return pass === 1 ? verdict : decide({ decision: "handle", reply: "relayed" });
+      },
+    });
+    return { ...h, seen, release: () => release() };
+  };
+
+  it("keeps an answer parked when the in-flight pass relays without it", async () => {
+    const { engine, seen, release } = racing(decide({ decision: "handle", reply: "carry on" }));
+    engine.arm({ terminalId: "t1" });
+    const inFlight = engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    await until(() => seen.length > 0);
+    engine.answerAsk({ terminalId: "t1", escalationId: "a1", choiceId: "opt2" });
+    release();
+    await inFlight;
+    await until(() => seen.length > 1);
+    // Clearing on `handle` unconditionally destroyed this answer unseen, while the
+    // row was already retired and every surface reported it delivered.
+    expect(seen[0]).toBeUndefined();
+    expect(seen[1]).toBe("Go straight at production");
+  });
+
+  it("still delivers an answer parked under a pass that relays nothing", async () => {
+    const { engine, seen, release } = racing(decide({}));
+    engine.arm({ terminalId: "t1" });
+    const inFlight = engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    await until(() => seen.length > 0);
+    engine.answerAsk({ terminalId: "t1", escalationId: "a1", choiceId: "opt2" });
+    release();
+    await inFlight;
+    // The strand: a `continue` injects nothing, so no agent event is coming and the
+    // re-entry parkAskAnswer queued is the only producer left. Re-banking the hash
+    // this pass computed would undo the clear that re-entry depends on and leave the
+    // answer behind ANSWER QUEUED for good.
+    await until(() => seen.length > 1);
+    expect(seen[1]).toBe("Go straight at production");
+  });
+
+  it("raises an ask over work that is only blocked, then reconcile promotes it and flags the ids stale", async () => {
+    const { engine, seen } = watching(queued([
+      decide({ decision: "handle", reply: "carry on", ask: ASK }),
+      decide({ decision: "handle", reply: "again" }),
+    ]), { loadSessionFn: () => sessionRecord({ goal: "", backlog: [item("i1", { status: "blocked" })] }) });
+    engine.arm({ terminalId: "t1" });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    // `blocked` is formally non-terminal, so the ask names no still-RUNNING item.
+    // It is raised anyway (see raiseAsk) with an empty `unblocked`, and
+    // reconcileAsks promotes it on the very next pass — at which point it is a
+    // STANDING question, not one openAsks (filtered on nonBlocking) still shows.
+    expect(seen[1]!.openAsks).toEqual([]);
+    expect(seen[1]!.standingQuestions).toEqual([QUESTION]);
+    expect(seen[1]!.staleAskIds).toBe(true);
+  });
+
+  it("refuses a second ask while the first stands promoted, via the cap rather than the dedup guard", async () => {
+    // The cap is keyed the same way the dedup guard below it is (`kind ===
+    // "reply"`), so a row reconcileAsks has promoted still occupies the single
+    // slot and the cap refuses the repeat before the dedup guard is ever
+    // reached. At MAX_OPEN_ASKS = 1 this makes the dedup guard unreachable
+    // here — it only bites at a wider cap, between two DIFFERENT standing rows
+    // that happen to carry byte-identical text.
+    const { engine, seen, sent } = watching(queued([
+      decide({ decision: "handle", reply: "carry on", ask: ASK }),
+      decide({ decision: "handle", reply: "again", ask: ASK }),
+      decide({ decision: "handle", reply: "third" }),
+    ]), { loadSessionFn: () => sessionRecord({ goal: "", backlog: [item("i1", { status: "blocked" })] }) });
+    engine.arm({ terminalId: "t1" });
+    for (let i = 0; i < 3; i++) await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    const asks = sent.filter((m) => m.type === "handler:escalation" && (m as { kind?: string }).kind === "reply");
+    expect(asks).toHaveLength(1);
+    expect(seen[2]!.standingQuestions).toEqual([QUESTION]);
+    expect(seen[2]!.askRejections).toEqual([`"${QUESTION}" — a question of yours is still unanswered`]);
+  });
+
+  it("carries a stale-ids flag forward, and a later, different raise naming live ids clears it", async () => {
+    const SECOND_QUESTION = "Which environment should the rollback target?";
+    const { engine, seen } = watching(queued([
+      decide({ decision: "handle", reply: "first", ask: ASK }),
+      decide({ decision: "continue" }),
+      decide({ decision: "handle", reply: "second", ask: { ...ASK, question: SECOND_QUESTION, unblocked: ["i2"] } }),
+      decide({ decision: "continue" }),
+    ]));
+    // `i1` is not on this backlog, so the first ask names no still-running item.
+    // It is raised anyway, with an empty `unblocked` — while the reply riding it
+    // goes out, which is exactly why the judge cannot tell without being told.
+    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("i2")] });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(seen[0]!.staleAskIds).toBeFalsy();
+    // Promoted by reconcileAsks before pass 2's judge call even runs, since the
+    // raised row's `unblocked` was already empty — so it reads as a standing
+    // question, and the flag survives to say why it was raised so cheaply.
+    await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
+    expect(seen[1]!.standingQuestions).toEqual([QUESTION]);
+    expect(seen[1]!.staleAskIds).toBe(true);
+    // The cap now counts the promoted row too (see the sibling test above), so a
+    // second, different question cannot be raised while the first still stands —
+    // a submitted line retires it, the same as it would any other standing
+    // question, and only then does the slot free for a genuinely different raise.
+    engine.onUserReply("t1", "moving on\r");
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    // A later raise naming a genuinely live id clears the flag rather than
+    // leaving the judge told about a habit it has already dropped.
+    await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
+    expect(seen[3]!.openAsks).toEqual([SECOND_QUESTION]);
+    expect(seen[3]!.staleAskIds).toBeFalsy();
+  });
+
+  // A session that raises exactly one stale-id ask and never raises another used
+  // to carry the flag forever: nothing but a later, successful raise ever cleared
+  // it. Retiring the row it describes — here, a submitted line superseding the
+  // now-promoted question — must clear it too, or the report prints on every pass
+  // for the rest of the session's life, on disk and past a restart.
+  it("clears the stale-ids flag once the row it describes is retired, with no later raise involved", async () => {
+    const { engine, seen } = watching(queued([
+      decide({ decision: "handle", reply: "first", ask: ASK }),
+      decide({ decision: "continue" }),
+      decide({ decision: "continue" }),
+    ]));
+    // No backlog at all, so ASK's `unblocked: ["i1"]` names nothing live.
+    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [] });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
+    expect(seen[1]!.standingQuestions).toEqual([QUESTION]);
+    expect(seen[1]!.staleAskIds).toBe(true);
+    engine.onUserReply("t1", "never mind\r");
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(seen[2]!.standingQuestions).toEqual([]);
+    expect(seen[2]!.staleAskIds).toBeFalsy();
   });
 });

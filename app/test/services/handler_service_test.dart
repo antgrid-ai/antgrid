@@ -26,6 +26,7 @@ Map<String, dynamic> _sessionJson({
   List<Map<String, dynamic>> escalations = const [],
   String? judgeTool,
   String? judgeModel,
+  Object? askAnswer,
 }) => {
   'terminalId': terminalId,
   'state': state,
@@ -36,6 +37,7 @@ Map<String, dynamic> _sessionJson({
   'escalations': escalations,
   'judgeTool': ?judgeTool,
   'judgeModel': ?judgeModel,
+  'askAnswer': ?askAnswer,
 };
 
 Map<String, dynamic> _sessionEntryJson(String id, {String mode = 'terminal'}) =>
@@ -85,6 +87,9 @@ Map<String, dynamic> _escalationJson(
   List<Map<String, dynamic>>? choices,
   String urgency = 'normal',
   int at = 1,
+  bool? nonBlocking,
+  List<String>? unblocked,
+  List<Map<String, dynamic>>? askOptions,
 }) => {
   'escalationId': escalationId,
   'question': 'q',
@@ -94,7 +99,24 @@ Map<String, dynamic> _escalationJson(
   'at': at,
   'kind': ?kind,
   'choices': ?choices,
+  'nonBlocking': ?nonBlocking,
+  'unblocked': ?unblocked,
+  'askOptions': ?askOptions,
 };
+
+const _askOptionsJson = [
+  {
+    'choiceId': 'keep',
+    'label': 'Keep the current schema and note the gap',
+    'cost': 'Leaves the migration for later',
+  },
+  {
+    'choiceId': 'migrate',
+    'label': 'Write the migration now',
+    'cost': 'Another twenty minutes before the tests run',
+    'recommended': true,
+  },
+];
 
 const _choicesJson = [
   {'choiceId': 'approve', 'label': 'Approve', 'text': 'd'},
@@ -910,5 +932,485 @@ void main() {
     await sub.cancel();
     await svc.dispose();
     await session.close();
+  });
+
+  test('the push and the replay agree about the ask fields', () async {
+    // The one thing coupling two separate hand-written field lists: the push
+    // builds a HandlerEscalation out of HandlerEscalationMessage, the replay
+    // builds one out of HandlerEscalation.fromWire, and a field only one of
+    // them reads makes the same row an ask for a moment and a stopped session
+    // for the rest of its life.
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = HandlerService.fromSession(session);
+    final sub = session.heavyStream.listen((_) {});
+
+    final ask = _escalationJson(
+      'e1',
+      nonBlocking: true,
+      unblocked: ['i1', 'i2'],
+      askOptions: _askOptionsJson,
+    );
+    t.emit('handler:status', {
+      'projectId': 'p',
+      'sessions': [
+        _sessionJson(terminalId: 't1', pendingEscalations: 0, askAnswer: true),
+      ],
+    });
+    t.emit('handler:escalation', {
+      'projectId': 'p',
+      'terminalId': 't1',
+      ...ask,
+    });
+    await Future<void>.delayed(Duration.zero);
+    final pushed = svc.currentState.escalations.single;
+
+    t.emit('handler:status', {
+      'projectId': 'p',
+      'sessions': [
+        _sessionJson(
+          terminalId: 't1',
+          pendingEscalations: 1,
+          state: 'needs_you',
+          escalations: [ask],
+          askAnswer: true,
+        ),
+      ],
+    });
+    await Future<void>.delayed(Duration.zero);
+    final replayed = svc.currentState.escalations.single;
+
+    expect(pushed.nonBlocking, isTrue);
+    expect(replayed.nonBlocking, pushed.nonBlocking);
+    expect(replayed.unblocked, pushed.unblocked);
+    expect(
+      replayed.askOptions?.map(
+        (o) => (o.choiceId, o.label, o.cost, o.recommended),
+      ),
+      pushed.askOptions?.map(
+        (o) => (o.choiceId, o.label, o.cost, o.recommended),
+      ),
+    );
+    expect(replayed.askOptions, hasLength(2));
+
+    await sub.cancel();
+    await svc.dispose();
+    await session.close();
+  });
+
+  test(
+    'an ask on a bridge that cannot be answered reads as blocking',
+    () async {
+      // A bridge can read `nonBlocking` off a record a newer bridge wrote and
+      // re-emit it faithfully while having no verb that answers one, so the row
+      // cannot be its own capability signal. Ungated it would render a one-tap
+      // that goes nowhere, or a sheet whose text lands in the PTY.
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = HandlerService.fromSession(session);
+      final sub = session.heavyStream.listen((_) {});
+
+      t.emit('handler:status', {
+        'projectId': 'p',
+        'sessions': [
+          _sessionJson(
+            terminalId: 't1',
+            pendingEscalations: 1,
+            state: 'needs_you',
+            escalations: [
+              _escalationJson(
+                'e1',
+                nonBlocking: true,
+                askOptions: _askOptionsJson,
+              ),
+            ],
+          ),
+        ],
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      expect(svc.currentState.escalations.single.nonBlocking, isFalse);
+      expect(svc.currentState.escalations.single.askOptions, isNull);
+      // The session's own copy is gated too, or the pill would say "asked you"
+      // over rows the list renders as stopping the agent.
+      final gated = svc.currentState.sessions['t1']!;
+      expect(gated.escalations.single.nonBlocking, isFalse);
+      expect(gated.asksOnly, isFalse);
+      // The question itself is untouched and still answerable in the user's own
+      // words.
+      expect(svc.currentState.escalations.single.question, 'q');
+
+      await sub.cancel();
+      await svc.dispose();
+      await session.close();
+    },
+  );
+
+  test('the advert is re-read every emission and never latched', () async {
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = HandlerService.fromSession(session);
+    final sub = session.heavyStream.listen((_) {});
+
+    Map<String, dynamic> frame({Object? askAnswer}) => {
+      'projectId': 'p',
+      'sessions': [
+        _sessionJson(
+          terminalId: 't1',
+          pendingEscalations: 1,
+          state: 'needs_you',
+          escalations: [
+            _escalationJson(
+              'e1',
+              nonBlocking: true,
+              unblocked: ['i1'],
+              askOptions: _askOptionsJson,
+            ),
+          ],
+          askAnswer: askAnswer,
+        ),
+      ],
+    };
+
+    t.emit('handler:status', frame(askAnswer: true));
+    await Future<void>.delayed(Duration.zero);
+    expect(svc.currentState.escalations.single.nonBlocking, isTrue);
+    expect(svc.currentState.escalations.single.askOptions, hasLength(2));
+    expect(svc.currentState.sessions['t1']!.asksOnly, isTrue);
+    // `unblocked` is a claim about the backlog rather than a capability, so it
+    // rides through either way and the footer re-derives it.
+    expect(svc.currentState.escalations.single.unblocked, ['i1']);
+
+    // A rollback to a bridge that reads the field but cannot answer it takes
+    // the ask treatment away again on the very next frame.
+    t.emit('handler:status', frame());
+    await Future<void>.delayed(Duration.zero);
+    expect(svc.currentState.escalations.single.nonBlocking, isFalse);
+    expect(svc.currentState.escalations.single.askOptions, isNull);
+    expect(svc.currentState.sessions['t1']!.asksOnly, isFalse);
+
+    await sub.cancel();
+    await svc.dispose();
+    await session.close();
+  });
+
+  group('answering an ask', () {
+    /// A session carrying one ask with two options, on a bridge that
+    /// advertises it can be told the answer.
+    Map<String, dynamic> askFrame({
+      Object? askAnswer = true,
+      bool nonBlocking = true,
+      List<Map<String, dynamic>>? siblings,
+    }) => {
+      'projectId': 'p',
+      'sessions': [
+        _sessionJson(
+          terminalId: 't1',
+          pendingEscalations: 1 + (siblings?.length ?? 0),
+          state: 'needs_you',
+          escalations: [
+            _escalationJson(
+              'ask-1',
+              nonBlocking: nonBlocking ? true : null,
+              unblocked: ['i1'],
+              askOptions: _askOptionsJson,
+            ),
+            ...?siblings,
+          ],
+          askAnswer: askAnswer,
+        ),
+      ],
+    };
+
+    /// Every verb that would put words in front of the agent. An answer must
+    /// reach none of them: the agent is still working, and what the user chose
+    /// belongs to Handler until the judge decides how to relay it.
+    void expectNothingReachedTheSession(FakeAgentTransport t) {
+      for (final type in const [
+        'terminal:input',
+        'agent:prompt',
+        'handler:dismiss',
+      ]) {
+        expect(
+          t.sent.any((m) => m['type'] == type),
+          isFalse,
+          reason: 'an answer must not send $type',
+        );
+      }
+    }
+
+    test('a tap sends the id alone, on its own verb', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = HandlerService.fromSession(session);
+      final sub = session.heavyStream.listen((_) {});
+
+      t.emit('handler:status', askFrame());
+      await Future<void>.delayed(Duration.zero);
+
+      expect(
+        svc.answerAsk(svc.currentState.escalations.single, 'migrate'),
+        isTrue,
+      );
+
+      final answers = t.sent.where((m) => m['type'] == 'handler:answer');
+      expect(answers, hasLength(1));
+      expect(answers.single['terminalId'], 't1');
+      expect(answers.single['escalationId'], 'ask-1');
+      expect(answers.single['choiceId'], 'migrate');
+      // The option's words are judge-authored, so they never travel back: the
+      // bridge resolves the label against its own persisted row, which is what
+      // makes a label that misrepresents what a tap sends unspellable.
+      expect(answers.single.containsKey('text'), isFalse);
+      expect(answers.single.containsKey('label'), isFalse);
+      expect(t.sent.any((m) => m['type'] == 'handler:instruct'), isFalse);
+      expectNothingReachedTheSession(t);
+
+      await sub.cancel();
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('a tap for an id the row does not offer sends nothing', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = HandlerService.fromSession(session);
+      final sub = session.heavyStream.listen((_) {});
+
+      t.emit('handler:status', askFrame());
+      await Future<void>.delayed(Duration.zero);
+
+      expect(
+        svc.answerAsk(svc.currentState.escalations.single, 'opt9'),
+        isFalse,
+      );
+      expect(t.sent.any((m) => m['type'] == 'handler:answer'), isFalse);
+      // The question is still standing, so the user can still answer it.
+      expect(svc.currentState.escalations, hasLength(1));
+
+      await sub.cancel();
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('a row that is not an ask refuses both transports', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = HandlerService.fromSession(session);
+      final sub = session.heavyStream.listen((_) {});
+
+      t.emit('handler:status', {
+        'projectId': 'p',
+        'sessions': [
+          _sessionJson(
+            terminalId: 't1',
+            pendingEscalations: 1,
+            state: 'needs_you',
+            escalations: [_escalationJson('e1')],
+            askAnswer: true,
+          ),
+        ],
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      final e = svc.currentState.escalations.single;
+      expect(svc.answerAsk(e, 'migrate'), isFalse);
+      expect(svc.answerAskText(e, 'do the migration'), isFalse);
+      expect(t.sent.any((m) => m['type'] == 'handler:answer'), isFalse);
+      expect(t.sent.any((m) => m['type'] == 'handler:instruct'), isFalse);
+
+      await sub.cancel();
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('a bridge that never advertised the verb is sent neither', () async {
+      // Both floors agree here on purpose: the emission gate has already
+      // rewritten the row as blocking, and the send path reads the advert again
+      // rather than trusting that — the advert is the whole of what says this
+      // bridge has a verb, and a `handler:answer` it does not know is dropped
+      // at its parser with no error frame and nothing logged.
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = HandlerService.fromSession(session);
+      final sub = session.heavyStream.listen((_) {});
+
+      t.emit('handler:status', askFrame(askAnswer: null));
+      await Future<void>.delayed(Duration.zero);
+
+      final e = svc.currentState.escalations.single;
+      expect(svc.answerAsk(e, 'migrate'), isFalse);
+      expect(svc.answerAskText(e, 'keep the schema'), isFalse);
+      expect(t.sent.any((m) => m['type'] == 'handler:answer'), isFalse);
+      expect(t.sent.any((m) => m['type'] == 'handler:instruct'), isFalse);
+
+      await sub.cancel();
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('free text rides handler:instruct and stays out of the '
+        'instruction drawer', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = HandlerService.fromSession(session);
+      final sub = session.heavyStream.listen((_) {});
+
+      t.emit('handler:status', askFrame());
+      await Future<void>.delayed(Duration.zero);
+
+      expect(
+        svc.answerAskText(
+          svc.currentState.escalations.single,
+          'keep the schema and note the gap',
+        ),
+        isTrue,
+      );
+
+      final sent = t.sent.where((m) => m['type'] == 'handler:instruct');
+      expect(sent, hasLength(1));
+      expect(sent.single['terminalId'], 't1');
+      expect(sent.single['text'], 'keep the schema and note the gap');
+      // The id is what tells the bridge this ANSWERS a standing question. A
+      // frame without it lifts authorization for the session and is split into
+      // backlog items the judge would then drive at the agent.
+      expect(sent.single['escalationId'], 'ask-1');
+      expectNothingReachedTheSession(t);
+      // `instruct`'s pending row is retired by a backlog or `armedAt` move,
+      // and an answer the judge merely reads moves neither — so a sentence
+      // parked there would hold the drawer's edit lock for the rest of the
+      // session.
+      expect(svc.currentState.pendingInstructionsFor('t1'), isEmpty);
+
+      await sub.cancel();
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('a corrected second answer is not refused as a duplicate', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = HandlerService.fromSession(session);
+      final sub = session.heavyStream.listen((_) {});
+
+      t.emit('handler:status', askFrame());
+      await Future<void>.delayed(Duration.zero);
+      expect(
+        svc.answerAskText(svc.currentState.escalations.single, 'migrate now'),
+        isTrue,
+      );
+
+      // A snapshot the bridge computed before the answer landed still lists the
+      // ask, which is the window a user corrects themselves in.
+      t.emit('handler:status', askFrame());
+      await Future<void>.delayed(Duration.zero);
+      expect(
+        svc.answerAskText(
+          svc.currentState.escalations.single,
+          'no — keep the schema',
+        ),
+        isTrue,
+      );
+
+      expect(t.sent.where((m) => m['type'] == 'handler:instruct'), hasLength(2));
+      expect(svc.currentState.pendingInstructionsFor('t1'), isEmpty);
+
+      await sub.cancel();
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('answering an ask leaves its siblings standing', () async {
+      // A submitted line clears a terminal's whole free-text set on both sides
+      // of the wire; an answer names one escalation and the bridge retires that
+      // row alone, so a sibling dropped here would come back off the next
+      // snapshot with the pill flickering behind it.
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = HandlerService.fromSession(session);
+      final sub = session.heavyStream.listen((_) {});
+
+      t.emit('handler:status', askFrame(siblings: [_escalationJson('stop-1')]));
+      await Future<void>.delayed(Duration.zero);
+
+      final ask = svc.currentState.escalations.firstWhere(
+        (e) => e.escalationId == 'ask-1',
+      );
+      expect(svc.answerAsk(ask, 'keep'), isTrue);
+
+      expect(svc.currentState.escalations.map((e) => e.escalationId), [
+        'stop-1',
+      ]);
+      final owner = svc.currentState.sessions['t1']!;
+      expect(owner.escalations.single.escalationId, 'stop-1');
+      expect(owner.pendingEscalations, 1);
+      expect(owner.runState, HandlerRunState.needsYou);
+
+      await sub.cancel();
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('a dismiss declines an ask and still refuses a blocking '
+        'question', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = HandlerService.fromSession(session);
+      final sub = session.heavyStream.listen((_) {});
+
+      t.emit('handler:status', askFrame(siblings: [_escalationJson('stop-1')]));
+      await Future<void>.delayed(Duration.zero);
+      final rows = {
+        for (final e in svc.currentState.escalations) e.escalationId: e,
+      };
+
+      // A blocking row is retired by the user's own submitted line, so
+      // dismissing one would drop a live question more quietly than any path
+      // that exists today. Refused on both sides of the wire.
+      svc.dismiss(rows['stop-1']!);
+      expect(t.sent.any((m) => m['type'] == 'handler:dismiss'), isFalse);
+
+      // An ask is the other way round: no typed line retires it, so declining
+      // is the only exit that is not an answer.
+      svc.dismiss(rows['ask-1']!);
+      final dismissals = t.sent.where((m) => m['type'] == 'handler:dismiss');
+      expect(dismissals, hasLength(1));
+      expect(dismissals.single['escalationId'], 'ask-1');
+      expect(svc.currentState.escalations.map((e) => e.escalationId), [
+        'stop-1',
+      ]);
+
+      await sub.cancel();
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('a line answering a blocking sibling leaves the ask standing', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = HandlerService.fromSession(session);
+      final sub = session.heavyStream.listen((_) {});
+
+      t.emit('handler:status', askFrame(siblings: [_escalationJson('stop-1')]));
+      await Future<void>.delayed(Duration.zero);
+
+      final stop = svc.currentState.escalations.firstWhere(
+        (e) => e.escalationId == 'stop-1',
+      );
+      expect(svc.reply(stop, 'go ahead'), isTrue);
+
+      // The bridge keeps the ask on a submitted line, so dropping it here would
+      // blank a question the very next snapshot brings straight back.
+      expect(svc.currentState.escalations.map((e) => e.escalationId), [
+        'ask-1',
+      ]);
+      final owner = svc.currentState.sessions['t1']!;
+      expect(owner.escalations.single.escalationId, 'ask-1');
+      expect(owner.pendingEscalations, 1);
+
+      await sub.cancel();
+      await svc.dispose();
+      await session.close();
+    });
   });
 }

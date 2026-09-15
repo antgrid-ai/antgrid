@@ -1,8 +1,27 @@
-import { isFragEnvelope, MAX_FRAGMENT_COUNT, type FragHint } from "antgrid-wire";
+import {
+  GLOBAL_REASSEMBLY_BUDGET,
+  isFragEnvelope,
+  MAX_FRAGMENT_COUNT,
+  type FragHint,
+} from "antgrid-wire";
+
+/** A reassembly byte ceiling shared by several reassemblers. One per machine:
+ *  the relay client runs a reassembler per app session, and without a shared
+ *  accountant N sessions would each get the full budget — an N-fold memory
+ *  regression that only shows up under a large transfer with two devices
+ *  attached. `used` is mutated by every participant; `limit` is the ceiling. */
+export interface SharedByteBudget {
+  used: number;
+  readonly limit: number;
+}
 
 export interface ReassemblerOpts {
   timeoutMs: number;
-  globalBudgetBytes: number;
+  /** Private budget ceiling for a reassembler that owns its own accounting.
+   *  Ignored when `budget` is given. */
+  globalBudgetBytes?: number;
+  /** Accountant shared with sibling reassemblers (see {@link SharedByteBudget}). */
+  budget?: SharedByteBudget;
   onComplete: (json: string) => void;
   onAbort: (hint: FragHint | null) => void;
   now?: () => number;
@@ -19,11 +38,15 @@ interface Transfer {
 
 export class FragReassembler {
   private transfers = new Map<string, Transfer>();
-  private totalBytes = 0;
+  private readonly budget: SharedByteBudget;
   private readonly now: () => number;
 
   constructor(private readonly opts: ReassemblerOpts) {
     this.now = opts.now ?? (() => Date.now());
+    this.budget = opts.budget ?? {
+      used: 0,
+      limit: opts.globalBudgetBytes ?? GLOBAL_REASSEMBLY_BUDGET,
+    };
   }
 
   accept(plaintext: string): boolean {
@@ -75,7 +98,7 @@ export class FragReassembler {
       transfer.count++;
       const bytes = Buffer.byteLength(parsed.data, "utf8");
       transfer.bytes += bytes;
-      this.totalBytes += bytes;
+      this.budget.used += bytes;
     }
     transfer.lastTs = this.now();
 
@@ -96,8 +119,20 @@ export class FragReassembler {
     }
   }
 
+  /** Drop every in-flight transfer and hand its bytes back to the budget.
+   *  Silent: the peer whose session this belonged to is gone, so there is
+   *  nobody left to tell about the aborted transfer. */
+  dispose(): void {
+    for (const [id, transfer] of this.transfers) this.remove(id, transfer);
+  }
+
+  /** Only this instance's transfers are eviction candidates even when the
+   *  budget is shared: a reassembler cannot reach into a sibling's map, so an
+   *  over-budget machine sheds the newest claimant's oldest transfer first.
+   *  The `!oldest` bail keeps that terminating when this instance holds
+   *  nothing left to give back. */
   private enforceBudget(): void {
-    while (this.totalBytes > this.opts.globalBudgetBytes) {
+    while (this.budget.used > this.budget.limit) {
       let oldest: [string, Transfer] | null = null;
       for (const entry of this.transfers) {
         if (!oldest || entry[1].lastTs < oldest[1].lastTs) oldest = entry;
@@ -108,7 +143,7 @@ export class FragReassembler {
   }
 
   private remove(id: string, transfer: Transfer): void {
-    this.totalBytes -= transfer.bytes;
+    this.budget.used -= transfer.bytes;
     this.transfers.delete(id);
   }
 

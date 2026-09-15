@@ -1,3 +1,4 @@
+import 'package:flutter/services.dart' show LengthLimitingTextInputFormatter;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -5,12 +6,12 @@ import '../../design/ab_colors.dart';
 import '../../design/ab_icons.dart';
 import '../../design/ab_tokens.dart';
 import '../../design/widgets/ab_adaptive_sheet.dart';
+import '../../design/widgets/ab_chip.dart';
 import '../../design/widgets/ab_control_box.dart';
 import '../../design/widgets/ab_dialog.dart';
 import '../../design/widgets/ab_icon.dart';
 import '../../design/widgets/ab_menu.dart';
 import '../../design/widgets/ab_section_header.dart';
-import '../../design/widgets/ab_segmented.dart';
 import '../../design/widgets/ab_separator.dart';
 import '../../design/widgets/ab_text_field.dart';
 import '../../models/agent_event.dart';
@@ -25,27 +26,15 @@ import '../../util/detached.dart';
 /// The sheet's own gutter. Everything on it lines up on this one inset.
 const _gutter = EdgeInsets.symmetric(horizontal: AbTokens.space16);
 
-/// What the posture caption says while nothing is being judged. The presets are
-/// stored and inert, and a control that reads as running while every pause
-/// escalates is the one claim this sheet must never make.
-const handlerPostureParkedBlurb =
-    'Stored, but not running — nothing is being judged, so every pause comes '
-    'to you whatever this says.';
-
-/// What the posture caption says when the far end has never named one. Claiming
-/// a preset here would be a control over nothing: the bridge that would have to
-/// honour it predates the setting, so no cell may read as chosen and no pick
-/// can be reported as taken.
-const handlerPostureUnreportedBlurb =
-    'This agent has not reported a posture — the machine it runs on is on a '
-    'build that predates the setting, so picking one changes nothing yet.';
-
 /// The escalate-only fact on the one surface that can act on it: the judge
 /// picker under this line is the fix, so it names the fix rather than stopping
 /// at the diagnosis the way the shield tooltip and the arm copy have to.
+///
+/// It names no lens, because the default has none to name: what a parked judge
+/// suspends is judging itself, which is true whatever the session looks for.
 String handlerJudgeParkedNotice(String? judgeLabel) =>
     "${judgeLabel ?? 'This judge'} can't run headless, so nothing is judged. "
-    'Pick one that can and this posture takes effect.';
+    'Pick one that can and judging resumes.';
 
 /// Just the judge half of [HandlerSessionSettingsValue] — what a picker that
 /// owns the judge and nothing else hands back. Null tool means the session's
@@ -81,28 +70,31 @@ String? handlerEffectiveJudge(
   return override ?? service?.resolvedDefaultTool(terminalId);
 }
 
-/// The two per-session choices Handler exposes: which CLI judges its pauses,
-/// and how far it leans toward answering them itself.
+/// The per-session choices Handler exposes: which CLI judges its pauses, and
+/// what that judge looks for while it does.
 ///
 /// One value type shared by both hosts — the arm sheet, which collects it
 /// and sends it with the arm, and the settings sheet, which commits each change
 /// as it is made. A null judge means the session's own tool; a null model means
-/// that CLI's default. A null personality is NOT a preset: it means the far end
-/// has never reported one (see [handlerPersonalityFromWire]), and the control
-/// showing it must say so rather than name a preset the bridge cannot honour.
+/// that CLI's default. A null [lens] is NOT the unnamed default: it means this
+/// app has not been told what this session judges under (see [HandlerLensPick]),
+/// and the control showing it must render with nothing selected rather than
+/// paint a pick nobody stated.
 typedef HandlerSessionSettingsValue = ({
   String? judgeTool,
   String? judgeModel,
-  HandlerPersonality? personality,
+  HandlerLensPick? lens,
 });
 
 /// One [HandlerService.arm] call's worth of change: null on a field means
-/// "leave the stored value alone", `''` on a judge field means "clear back to
-/// default". The shape `arm` already takes, so no caller re-derives it.
+/// "leave the stored value alone", `''` means "clear back to default" — the
+/// unnamed default for [role], no brief for [brief]. The shape `arm` already
+/// takes, so no caller re-derives it.
 typedef HandlerSessionSettingsEdit = ({
   String? judgeTool,
   String? judgeModel,
-  HandlerPersonality? personality,
+  String? role,
+  String? brief,
 });
 
 /// The edit that turns [from] into [to] — only the fields that MOVED.
@@ -116,6 +108,8 @@ HandlerSessionSettingsEdit handlerSessionSettingsEdit(
   HandlerSessionSettingsValue to,
 ) {
   final toolMoved = to.judgeTool != from.judgeTool;
+  final fromLens = from.lens;
+  final toLens = to.lens;
   return (
     judgeTool: toolMoved ? (to.judgeTool ?? '') : null,
     // A tool change ALWAYS carries the model, even when both sides read null:
@@ -126,7 +120,19 @@ HandlerSessionSettingsEdit handlerSessionSettingsEdit(
     judgeModel: toolMoved || to.judgeModel != from.judgeModel
         ? (to.judgeModel ?? '')
         : null,
-    personality: to.personality == from.personality ? null : to.personality,
+    // A pick made over a seed this app was never told is ALWAYS a change. The
+    // `from` side reads null on a cold cache and can name an id this build
+    // cannot, so diffing against it is what would leave a session under a lens
+    // that one tap on the default is supposed to replace.
+    role:
+        toLens != null && (fromLens == null || toLens.roleId != fromLens.roleId)
+        ? (toLens.roleId ?? '')
+        : null,
+    brief:
+        toLens != null &&
+            (fromLens == null || (toLens.brief ?? '') != (fromLens.brief ?? ''))
+        ? (toLens.brief ?? '')
+        : null,
   );
 }
 
@@ -134,10 +140,11 @@ HandlerSessionSettingsEdit handlerSessionSettingsEdit(
 /// disarmed session still offers back what it was last given (see
 /// [HandlerService.lastKnownSettings]).
 ///
-/// The posture is carried through UNCOERCED: a bridge that has never reported
-/// one is not a bridge running [HandlerPersonality.watchdog], and seeding the
-/// default here would put a preset on screen as a live fact and then send
-/// nothing when the user "changed" it to the value already displayed.
+/// The lens is carried through UNCOERCED: a machine that has never advertised
+/// lenses reports no pick, and a cold cache holds none either, neither of which
+/// is a session running the unnamed default. Painting the default there would
+/// put a lens on screen as a live fact and then send nothing when the user
+/// chose the value already displayed.
 HandlerSessionSettingsValue handlerSessionSettingsFor(
   HandlerService? service,
   String terminalId,
@@ -146,7 +153,7 @@ HandlerSessionSettingsValue handlerSessionSettingsFor(
   return (
     judgeTool: stored?.tool,
     judgeModel: stored?.model,
-    personality: stored?.personality,
+    lens: stored?.lens,
   );
 }
 
@@ -156,7 +163,7 @@ HandlerSessionSettingsValue handlerSessionSettingsFor(
 ///
 /// Both halves, in the order the settings sheet wants them. A host that already
 /// carries a judge picker of its own (the arm sheet's composer chip) mounts
-/// [HandlerPostureControl] alone rather than offering the same value twice.
+/// [HandlerLensControl] alone rather than offering the same value twice.
 class HandlerSessionSettings extends StatelessWidget {
   const HandlerSessionSettings({
     super.key,
@@ -172,7 +179,7 @@ class HandlerSessionSettings extends StatelessWidget {
 
   /// Whether a change lands on the pass after this one rather than immediately.
   /// True post-arm: judge calls are serialised, so a session mid-pass finishes
-  /// under the posture it started with. Said plainly rather than implied — a
+  /// under the lens it started with. Said plainly rather than implied — a
   /// control that looks instant and is not is one the user stops trusting.
   final bool appliesNextPass;
 
@@ -181,10 +188,10 @@ class HandlerSessionSettings extends StatelessWidget {
     crossAxisAlignment: CrossAxisAlignment.start,
     mainAxisSize: MainAxisSize.min,
     children: [
-      // The posture leads and the judge follows: how much Handler decides
-      // alone is what a user opens this for, while the judge is machinery
-      // most sessions never touch.
-      HandlerPostureControl(
+      // The lens leads and the judge follows: what the judge looks for is what
+      // a user opens this for, while which CLI judges is machinery most
+      // sessions never touch.
+      HandlerLensControl(
         terminalId: terminalId,
         value: value,
         onChanged: onChanged,
@@ -199,20 +206,28 @@ class HandlerSessionSettings extends StatelessWidget {
   );
 }
 
-/// How much Handler decides alone, plus the two lines that qualify it: the
-/// posture blurb, and the parked notice when the judge can't run headless.
+/// What the judge looks for and asks about, the free-text brief beneath it, and
+/// the lines that qualify both: the lens caption, and the parked notice when
+/// the judge can't run headless.
+///
+/// A lens ADDS questions and nothing else — the bridge's rules own where
+/// handling gives way to escalating — so nothing here may read as a dial over
+/// how much the session decides alone.
 ///
 /// The notice stays HERE rather than with the picker it names because it is an
-/// answer about the posture — why this control is stored and inert. Its copy
+/// answer about the lens — why this control is stored and inert. Its copy
 /// never says "below", so it reads true whether the picker that fixes it sits
 /// under this block (the settings sheet) or above it (the arm sheet's chip).
-class HandlerPostureControl extends ConsumerWidget {
-  const HandlerPostureControl({
+class HandlerLensControl extends ConsumerWidget {
+  const HandlerLensControl({
     super.key,
     required this.terminalId,
     required this.value,
     required this.onChanged,
     this.appliesNextPass = false,
+    this.commitBriefOnEdit = false,
+    this.onRoleTapped,
+    this.onBriefEdited,
   });
 
   final String terminalId;
@@ -221,6 +236,20 @@ class HandlerPostureControl extends ConsumerWidget {
 
   /// See [HandlerSessionSettings.appliesNextPass].
   final bool appliesNextPass;
+
+  /// Whether a keystroke in the brief is a commit. True only for a host that
+  /// collects the value and sends it ONCE (the arm sheet). Every commit on the
+  /// settings sheet is a configure frame, and the bridge's edit path clears
+  /// `lastJudgedContextHash` unconditionally — so a per-keystroke commit there
+  /// buys a real judge pass per character.
+  final bool commitBriefOnEdit;
+
+  /// Fired on every tap of a lens chip, including the one already selected, and
+  /// on every edit of the brief. A host whose seed may not be what the far end
+  /// holds needs to know a control was ANSWERED, which is not the same question
+  /// as whether the value ended up different — see the arm sheet's touch flags.
+  final VoidCallback? onRoleTapped;
+  final VoidCallback? onBriefEdited;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -239,65 +268,184 @@ class HandlerPostureControl extends ConsumerWidget {
         ? null
         : (catalog[effectiveJudge]?.label ?? effectiveJudge);
     // A judge that cannot go headless runs no decide pass at all — the bridge
-    // gates the whole path on this same answer — so the posture here is stored
-    // and does nothing until the judge picker changes.
+    // gates the whole path on this same answer — so a lens here is stored and
+    // does nothing until the judge picker changes.
     final parked = judgeCapable == false;
-    // Nothing reported one, so no cell may paint as chosen — the type argument
-    // is nullable for exactly that: `selected` matches no segment, which is the
-    // only honest rendering of "the far end has never named a posture".
-    final posture = value.personality;
-    final unreported = posture == null;
+    // Presence is the capability signal: a machine that never named the lenses
+    // it reads would strip a pick off the frame in silence, so the whole
+    // control goes inert rather than take one.
+    final advertised = ref.watch(handlerStateProvider).value?.lenses;
+    final unreported = advertised == null;
+    final pick = value.lens;
+    // A newer machine's lens. It is a real pick and stays in force untouched;
+    // no chip in this row can name it, so none of them may paint as chosen.
+    final unknownId =
+        pick?.roleId != null && handlerLensFromWire(pick!.roleId) == null;
+
+    // Only the intersection of what this build knows and what this machine
+    // named, so a newer app can never send an id the far end would refuse.
+    final offered = <(String, String?)>[
+      (handlerLensDefaultLabel, null),
+      for (final lens in HandlerLens.values)
+        if (advertised?.contains(handlerLensToWire(lens)) ?? false)
+          (handlerLensLabel(lens), handlerLensToWire(lens)),
+    ];
+
+    Widget chip(String label, String? id) {
+      final selected = !unreported && pick != null && pick.roleId == id;
+      return AbChip.toggle(
+        label: label,
+        size: AbChipSize.md,
+        selected: selected,
+        // The accent marks the one lens actually running. A parked chip keeps
+        // the muted default with its fill: chosen, and not in effect.
+        color: selected && !parked ? p.accent : null,
+        enabled: !unreported,
+        onTap: () {
+          onRoleTapped?.call();
+          onChanged((
+            judgeTool: value.judgeTool,
+            judgeModel: value.judgeModel,
+            lens: (roleId: id, brief: pick?.brief),
+          ));
+        },
+      );
+    }
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
-        const _Head(label: 'How much it handles'),
+        const _Head(label: 'What it looks for'),
         Padding(
           padding: _gutter,
-          child: AbSegmented<HandlerPersonality?>(
-            segments: [
-              for (final preset in HandlerPersonality.values)
-                AbSegment(
-                  value: preset,
-                  label: handlerPersonalityLabel(preset),
-                ),
-            ],
-            selected: posture,
-            // Still selectable while parked: the choice is stored and starts
-            // working the moment the judge is fixed. It just must not look
-            // like it is running.
-            inactive: parked || unreported,
-            onSelect: (preset) => onChanged((
-              judgeTool: value.judgeTool,
-              judgeModel: value.judgeModel,
-              personality: preset,
-            )),
+          // Chips rather than a segmented control: the row is the default plus
+          // however many lenses this machine names, and "Intent and completion"
+          // fits no cell in a control built for two or three closed options.
+          child: Wrap(
+            spacing: AbTokens.space6,
+            runSpacing: AbTokens.space6,
+            children: [for (final (label, id) in offered) chip(label, id)],
           ),
         ),
         _Caption(
           text: unreported
-              ? handlerPostureUnreportedBlurb
+              ? handlerLensUnreportedBlurb
               : parked
-              ? handlerPostureParkedBlurb
+              ? handlerLensParkedBlurb
+              : pick == null
+              ? handlerLensUnsetBlurb
+              : unknownId
+              ? handlerLensUnknownBlurb
               : appliesNextPass
-              ? '${handlerPersonalityBlurb(posture)} Takes effect on the next pass.'
-              : handlerPersonalityBlurb(posture),
-          // The parked line is the load-bearing one on this sheet, not an aside
-          // under a control that is working.
-          color: parked || unreported ? p.textSecondary : p.textMuted,
+              ? '${handlerLensBlurb(handlerLensFromWire(pick.roleId))} Takes effect on the next pass.'
+              : handlerLensBlurb(handlerLensFromWire(pick.roleId)),
         ),
         // This is the one class of surface where the warning is actionable;
         // everywhere else it appears it only diagnoses.
         if (parked) _Notice(text: handlerJudgeParkedNotice(judgeLabel)),
+        const _Head(label: 'Brief', sub: true),
+        _BriefField(
+          brief: pick?.brief,
+          enabled: !unreported,
+          commitOnEdit: commitBriefOnEdit,
+          onEdited: onBriefEdited,
+          onCommit: (text) => onChanged((
+            judgeTool: value.judgeTool,
+            judgeModel: value.judgeModel,
+            lens: (roleId: pick?.roleId, brief: text.isEmpty ? null : text),
+          )),
+        ),
       ],
     );
   }
 }
 
+/// The user's own note under the lens — whatever else they want looked for.
+///
+/// A single line on purpose: the bridge collapses a brief to one line before
+/// printing it, so a box that wrapped would promise the prompt a structure it
+/// discards. It also leaves Enter as the submit action, which is the commit
+/// this field has.
+class _BriefField extends StatefulWidget {
+  const _BriefField({
+    required this.brief,
+    required this.enabled,
+    required this.commitOnEdit,
+    required this.onCommit,
+    this.onEdited,
+  });
+
+  final String? brief;
+  final bool enabled;
+
+  /// See [HandlerLensControl.commitBriefOnEdit].
+  final bool commitOnEdit;
+
+  /// The committed text: trimmed on submit, raw while typing. Trimming a
+  /// keystroke commit would rewrite the controller under the cursor and eat the
+  /// space the user is still typing after.
+  final ValueChanged<String> onCommit;
+
+  /// See [HandlerLensControl.onBriefEdited].
+  final VoidCallback? onEdited;
+
+  @override
+  State<_BriefField> createState() => _BriefFieldState();
+}
+
+class _BriefFieldState extends State<_BriefField> {
+  late final TextEditingController _controller = TextEditingController(
+    text: widget.brief ?? '',
+  );
+
+  @override
+  void didUpdateWidget(_BriefField old) {
+    super.didUpdateWidget(old);
+    // Only when the value moved underneath us — a status frame correcting what
+    // the bridge actually kept — and never on every rebuild, which would fight
+    // the user's cursor as they type.
+    if (widget.brief != old.brief && (widget.brief ?? '') != _controller.text) {
+      _controller.text = widget.brief ?? '';
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: _gutter,
+    child: AbTextField(
+      controller: _controller,
+      hintText: 'Anything else to look for or ask about',
+      enabled: widget.enabled,
+      showClearButton: true,
+      onClear: () {
+        widget.onEdited?.call();
+        widget.onCommit('');
+      },
+      // The bridge clips a longer brief rather than refusing it, so this is a
+      // courtesy bound and not a gate: it shows the user where the prompt stops.
+      inputFormatters: [LengthLimitingTextInputFormatter(handlerMaxBriefChars)],
+      onChanged: (text) {
+        widget.onEdited?.call();
+        if (widget.commitOnEdit) widget.onCommit(text);
+      },
+      onSubmitted: (text) {
+        widget.onEdited?.call();
+        widget.onCommit(text.trim());
+      },
+    ),
+  );
+}
+
 /// Which CLI judges the session's pauses, and under which model.
 ///
-/// Split out from the posture so a host that already names the judge somewhere
+/// Split out from the lens so a host that already names the judge somewhere
 /// else can leave this block off — two controls writing one value is a state
 /// the user has to reconcile.
 class HandlerJudgeControl extends ConsumerWidget {
@@ -359,7 +507,7 @@ class HandlerJudgeControl extends ConsumerWidget {
               // answers to, so keeping it across a tool change hands the new
               // judge a flag it rejects on every pass.
               judgeModel: null,
-              personality: value.personality,
+              lens: value.lens,
             ));
           },
         ),
@@ -372,7 +520,7 @@ class HandlerJudgeControl extends ConsumerWidget {
           onChanged: (model) => onChanged((
             judgeTool: value.judgeTool,
             judgeModel: model,
-            personality: value.personality,
+            lens: value.lens,
           )),
         ),
       ],
@@ -552,11 +700,17 @@ class _Head extends StatelessWidget {
 }
 
 /// The explanatory line under a control.
+///
+/// One tint for every state it can carry. A live lens used to be muted, on the
+/// reasoning that a working control needs no commentary — but this line is not
+/// commentary: five chips reading PM, QA, CRITIC and the rest name roles and
+/// nothing else, so what each one asks the agent exists ONLY here. Setting the
+/// definition of the chosen option at the contrast floor is what made the row
+/// undecidable without leaving the sheet.
 class _Caption extends StatelessWidget {
-  const _Caption({required this.text, required this.color});
+  const _Caption({required this.text});
 
   final String text;
-  final Color color;
 
   @override
   Widget build(BuildContext context) => Padding(
@@ -568,7 +722,10 @@ class _Caption extends StatelessWidget {
     ),
     child: Text(
       text,
-      style: AbTokens.sansStyle(fontSize: AbTokens.fontXs, color: color),
+      style: AbTokens.sansStyle(
+        fontSize: AbTokens.fontXs,
+        color: context.antgrid.textSecondary,
+      ),
     ),
   );
 }
@@ -611,13 +768,15 @@ class _Notice extends StatelessWidget {
   }
 }
 
-/// Opens the settings sheet for an ARMED [terminalId] — the PA bar's posture
-/// chip and the Handler tab's armed menu are its two doors, and both exist only
+/// Opens the settings sheet for an ARMED [terminalId] — the PA bar's lens chip
+/// and the Handler tab's armed menu are its two doors, and both exist only
 /// while the session is armed.
 ///
 /// Every change commits on the spot as a `handler:configure` carrying `armed:
-/// true`, which is the bridge's edit path: there is no Save, and no state here
-/// that a dismissal could strand.
+/// true`, which is the bridge's edit path: there is no Save. The one thing a
+/// dismissal can strand is brief text typed and never submitted, which is
+/// accepted over committing a judge pass per keystroke — the bridge's edit path
+/// clears `lastJudgedContextHash` on every configure.
 ///
 /// `armed: true` is an EDIT only while a session exists to edit. This sheet is
 /// a modal and outlives the bar that opened it, so it closes itself rather than
@@ -678,7 +837,8 @@ class _SettingsSheetState extends ConsumerState<_SettingsSheet> {
     // that has not moved.
     if (edit.judgeTool == null &&
         edit.judgeModel == null &&
-        edit.personality == null) {
+        edit.role == null &&
+        edit.brief == null) {
       return;
     }
     // Pinned only once the send is real. A value pinned ahead of a dropped send
@@ -688,7 +848,8 @@ class _SettingsSheetState extends ConsumerState<_SettingsSheet> {
       terminalId: widget.terminalId,
       judgeTool: edit.judgeTool,
       judgeModel: edit.judgeModel,
-      personality: edit.personality,
+      role: edit.role,
+      brief: edit.brief,
     );
     setState(() => _value = next);
   }

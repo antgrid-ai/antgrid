@@ -89,6 +89,17 @@ export const logger: LoggerFacade = {
 };
 
 /**
+ * Move every pino instance (root and all children, past and future) off fd 1.
+ * A subcommand that owns stdout as a protocol transport — `mcp`, whose stdio
+ * carries JSON-RPC — is corrupted by a single log line there, and the symptom
+ * is the agent reporting a server that failed to initialize with nothing in
+ * our own logs to say why.
+ */
+export function redirectLogsToStderr(): void {
+  hub.target = process.stderr;
+}
+
+/**
  * Test hook — redirect every pino instance (root and all children, past and
  * future) at the shared `hub` so specs can assert output regardless of which
  * module first created its component child logger.

@@ -12,6 +12,7 @@ import '../../design/widgets/ab_icon.dart';
 import '../../design/widgets/ab_list_row.dart';
 import '../../models/handler_state.dart';
 import '../../providers/providers.dart';
+import '../../providers/session_mode.dart';
 import '../../providers/sessions.dart';
 import '../../providers/value_controller.dart';
 import '../../util/detached.dart';
@@ -68,21 +69,35 @@ String handlerPaStatusLabel(HandlerSessionState session, {DateTime? now}) {
 /// answering them, and never says which — so the line has to promise clearing,
 /// not answers.
 ///
-/// Two kinds are exempt from that clearing on the bridge and so must be exempt
-/// from the promise here: `resolve_in_session` (only the transcript's own
-/// resolve carries the id) and `guard_blocked` (a report of an action Handler
-/// could not take, retired only by its card's Dismiss). This prose is a
-/// hand-mirror of that rule; getting it wrong promises the user something the
-/// bridge refuses to do.
+/// Three categories, not two, and the third is the one this prose exists for.
+/// Rows a line CLEARS are the ordinary blocking questions. Rows it leaves
+/// standing and that are not the user's to answer here are `resolve_in_session`
+/// (only the session's own prompt carries the id that resolves it) and
+/// `guard_blocked` (a report of an action Handler could not take, retired only
+/// by its card's Dismiss) — both are subtracted from the count and otherwise
+/// unmentioned. A `nonBlocking` ask is the third: it also survives the line,
+/// but it is still the user's to answer, so it is subtracted AND named. Only
+/// its own card answers it (`handler:answer` for a tap, an escalationId-bearing
+/// `handler:instruct` for typed words) or declines it with a dismiss; a line
+/// typed here reaches the agent and leaves the question exactly where it was.
+///
+/// This prose is a hand-mirror of the bridge's clearing rule; getting it wrong
+/// promises the user something the bridge refuses to do.
+///
+/// [isChat] decides which surface a prompt is sent to, and there is no honest
+/// default: the same `resolve_in_session` row is minted for a chat slot's
+/// permission card and for a PTY agent's own prompt, so the caller has to say
+/// which session it is naming.
 ///
 /// Nothing is ever blocked. Handler's whole premise is acting while you are
 /// away, so a lock the user has to remember to undo would be left in the wrong
 /// position exactly when it matters.
 String? handlerTypingHint(
-  HandlerSessionState session,
-) => switch (session.runState) {
-  HandlerRunState.needsYou => _needsYouHint(session),
-  HandlerRunState.parked => _parkedHint(session),
+  HandlerSessionState session, {
+  required bool isChat,
+}) => switch (session.runState) {
+  HandlerRunState.needsYou => _needsYouHint(session, isChat),
+  HandlerRunState.parked => _parkedHint(session, isChat),
   HandlerRunState.handling =>
     'Handler is replying — a message now may cross it',
   // Watching is the resting state: nothing is being displaced, so a warning
@@ -90,20 +105,42 @@ String? handlerTypingHint(
   HandlerRunState.watching => null,
 };
 
-/// An option-based prompt (`kind: 'resolve_in_session'`) is one of the two rows
-/// a typed line neither answers nor clears — only the transcript's permission
-/// card or question form carries the id that resolves it, which is why
-/// `handler_screen.dart`'s `answer()` routes there instead of opening the reply
-/// sheet.
+/// An option-based prompt (`kind: 'resolve_in_session'`) is one of the rows
+/// a typed line neither answers nor clears — only the session's own resolution
+/// UI carries the id, which is why `answerHandlerEscalation` focuses the
+/// session instead of opening the reply sheet.
 int _prompts(HandlerSessionState session) =>
     session.escalations.where((e) => e.kind == 'resolve_in_session').length;
 
-/// The other one. A `guard_blocked` row reports an action Handler wanted to take
+/// Where that resolution UI actually is, which the session's MODE decides. A
+/// chat slot draws the permission card / question form inside the transcript;
+/// a PTY agent draws its own prompt in the terminal, and the engine mints the
+/// same kind for both (`isBlockingPrompt`, handler/engine.ts). Naming the wrong
+/// one sends a terminal user to look for a surface their session does not have.
+String _promptSurface(bool isChat) =>
+    isChat ? 'the transcript' : 'the terminal';
+
+/// A second one. A `guard_blocked` row reports an action Handler wanted to take
 /// and a guard refused, so there is no pause for a line to supersede — the
 /// bridge keeps it standing and only the card's Dismiss retires it. A hint that
 /// counted it would promise clearing the bridge will not do.
 int _reports(HandlerSessionState session) =>
     session.escalations.where((e) => e.kind == 'guard_blocked').length;
+
+/// Questions Handler asked the user that a typed line does not touch. Unlike
+/// the other two exemptions this row is still the user's to answer, so it is
+/// subtracted from the clear-count AND named in the prose.
+int _asks(HandlerSessionState s) =>
+    s.escalations.where((e) => e.nonBlocking).length;
+
+/// Appended once to whatever the line already promises, so the user reads one
+/// sentence rather than two competing ones.
+const _askStaysOpen = " — Handler's question stays open";
+
+/// The clear-count branch names questions the line DOES clear, and those are
+/// Handler's too — so beside it the ask needs the possessive to read as a
+/// different one.
+const _askStaysOpenBesideCleared = " — Handler's own question stays open";
 
 /// Plural because an agent can be stopped on several at once — parallel tool
 /// calls raise a permission prompt per call, and the bridge now carries a row
@@ -111,7 +148,8 @@ int _reports(HandlerSessionState session) =>
 String _promptSubject(int prompts) =>
     prompts == 1 ? 'the prompt' : '$prompts prompts';
 
-String? _needsYouHint(HandlerSessionState session) {
+String? _needsYouHint(HandlerSessionState session, bool isChat) {
+  final asks = _asks(session);
   final prompts = _prompts(session);
   if (prompts > 0) {
     // Both halves or neither. The redirect alone reads as "typing here does
@@ -119,51 +157,83 @@ String? _needsYouHint(HandlerSessionState session) {
     // queued behind the prompt — the silent clearing this whole line exists to
     // stop, merely moved to the mixed case.
     final others = _others(session, prompts);
-    final answer = 'Answer ${_promptSubject(prompts)} in the transcript';
-    if (others == 0) return '$answer — not here';
+    final surface = _promptSurface(isChat);
+    final answer = 'Answer ${_promptSubject(prompts)} in $surface';
     final questions = others == 1 ? 'question' : '$others questions';
-    return '$answer — a message here clears the other $questions';
+    // "here" is the composer, and it is somewhere OTHER than the prompt only on
+    // a chat slot: there the two are separate acts, so the tail warns about a
+    // second thing the user might go on to do. A PTY agent draws its prompt in
+    // the very terminal the keystrokes go to, which makes them ONE act —
+    // arrow-select + Enter is a submit keystroke (`isSubmitKeystroke`,
+    // bridge/src/keystrokes.ts), and the bridge answers a submit by clearing
+    // every free-text row on the session. Warning about "a message there" would
+    // describe the keystroke we just told them to send, so the terminal branch
+    // states the consequence instead of naming a second surface.
+    final tail = others == 0
+        ? (isChat ? ' — not here' : '')
+        : isChat
+        ? ' — a message here clears the other $questions'
+        : ' — that also clears the other $questions';
+    final line = '$answer$tail';
+    return asks > 0 ? '$line$_askStaysOpen' : line;
   }
   final pending = _others(session, 0);
   // A session standing only on reports is at needs_you with nothing a typed line
-  // would clear, so the bar has nothing to warn about.
-  if (pending == 0) return null;
-  return pending > 1
+  // would clear, so the bar has nothing to warn about. An ask is the one
+  // exemption that still needs saying: the line reaches the agent and the
+  // question stays, and a user who read nothing here would believe they answered
+  // it. That is the worst of the outcomes, so it is the one with no silent arm.
+  if (pending == 0) {
+    return asks > 0
+        ? 'Your next message goes to the agent$_askStaysOpen'
+        : null;
+  }
+  final cleared = pending > 1
       ? 'Your next message clears all $pending questions, answered or not'
       : 'Your next message clears this question, answered or not';
+  return asks > 0 ? '$cleared$_askStaysOpenBesideCleared' : cleared;
 }
 
 /// The questions a submitted line actually clears: everything the bridge counts,
-/// minus the two kinds it keeps standing.
+/// minus the three categories it keeps standing.
 ///
 /// Counted off the bridge's own total rather than the parsed rows, for the same
 /// reason the prompt count is subtracted from it — a row the lenient parse
 /// dropped must not shrink the number this line promises to clear. Floored: the
 /// two arrive in one snapshot but the parse can only ever lose rows, never
 /// invent them.
-int _others(HandlerSessionState session, int prompts) =>
-    math.max(0, session.pendingEscalations - prompts - _reports(session));
+///
+/// `pendingEscalations` is `s.escalations.length` on the bridge, so it counts
+/// asks too — and a missing subtrahend here does not read as a missing hint, it
+/// reads as a promise to clear a question nothing clears.
+int _others(HandlerSessionState session, int prompts) => math.max(
+  0,
+  session.pendingEscalations - prompts - _reports(session) - _asks(session),
+);
 
 /// A park ends on the first submitted line either way, but a prompt raised
 /// before the park survives it (`enterPark` never touches `s.escalations`), and
 /// the engine lands such a session back on `needs_you` rather than resuming —
 /// so the bare "resumes Handler" promise is one the bridge refuses to keep.
-String _parkedHint(HandlerSessionState session) {
+String _parkedHint(HandlerSessionState session, bool isChat) {
   final prompts = _prompts(session);
-  if (prompts == 0) return 'Your next message resumes Handler now';
+  if (prompts == 0) {
+    // Reachable rather than theoretical: the park timer's nudge counts only
+    // BLOCKING questions, so a session standing on an ask alone parks and
+    // self-resumes like any other.
+    return _asks(session) > 0
+        ? 'Your next message resumes Handler now — its question stays open'
+        : 'Your next message resumes Handler now';
+  }
   final verb = prompts == 1 ? 'needs' : 'need';
   return 'Your next message ends the pause — ${_promptSubject(prompts)} '
-      'still $verb the transcript';
+      'still $verb ${_promptSurface(isChat)}';
 }
 
 /// A park always resumes on its own, so the wake time carries the message;
 /// without a deadline the bare reason is all we can honestly promise.
 String _parkedLabel(HandlerSessionState session, DateTime now) {
-  final reason = switch (session.parkKind) {
-    'limit' => 'rate limit',
-    'outage' => 'provider outage',
-    _ => null,
-  };
+  final reason = handlerParkReason(session);
   final head = reason == null ? 'Paused' : 'Paused ($reason)';
   final until = session.parkedUntil;
   if (until == null) return head;
@@ -243,7 +313,38 @@ class _HandlerPaBarState extends ConsumerState<HandlerPaBar> {
     final openBacklog =
         ref.watch(handlerBacklogOpenerProvider) ??
         (id) => unawaited(showHandlerBacklogDrawer(context, id));
-    final hint = handlerTypingHint(session);
+    // The in-flight target while a mode flip is pending, else the acked entry
+    // value — and null reads as NOT chat, the same way `AgentPanel` reads it
+    // when it picks the terminal over the transcript. A prompt named for the
+    // wrong surface is the failure this bar exists to avoid, and the two
+    // surfaces have to agree about which session they are looking at.
+    final isChat = ref.watch(activeSessionModeProvider) == 'chat';
+    final hint = handlerTypingHint(session, isChat: isChat);
+    // An em-dash where this machine has never named the lenses it reads: the
+    // chip is read as a live fact about the session, and naming a lens on a
+    // machine that never advertised any is a claim about a control over
+    // nothing (see HandlerState.lenses). An id this build cannot name is shown
+    // as itself for the same reason — a newer machine's lens is a real pick,
+    // and folding it into the default would report one the user never made.
+    //
+    // "Default" is the bar's word for the unnamed lens: the picker's "Intent
+    // and completion" does not fit a row already short of width (see the
+    // subtitle note below), and a truncation like "Intent" would read as a
+    // fifth role. It is copy, never a value on the wire.
+    final role = session.role;
+    final lensLabel = state?.lenses == null
+        ? '—'
+        : session.roleId == null
+        ? 'Default'
+        : role == null
+        ? session.roleId!
+        : handlerLensLabel(role);
+    // Tinted where nothing is judging: the lens is stored and inert, and a bar
+    // naming it in ordinary chrome while every pause escalates says the
+    // opposite of what is happening.
+    final lensTone = session.observability == HandlerObservability.escalateOnly
+        ? p.warning
+        : p.textMuted;
 
     return Container(
       decoration: BoxDecoration(
@@ -267,10 +368,10 @@ class _HandlerPaBarState extends ConsumerState<HandlerPaBar> {
         trailing: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            // The posture, always — including the default. This bar is on
-            // screen for the whole time a session is armed, and it is the only
-            // place the setting is visible at all; showing it only once it has
-            // been changed makes "no chip" a state the user has to know how to
+            // The lens, always — including the default. This bar is on screen
+            // for the whole time a session is armed, and it is the only place
+            // the setting is visible at all; showing it only once it has been
+            // changed makes "no chip" a state the user has to know how to
             // read. It costs width the title is already short of (see the
             // subtitle note above), which is the trade.
             Builder(
@@ -282,25 +383,27 @@ class _HandlerPaBarState extends ConsumerState<HandlerPaBar> {
                   () =>
                       showHandlerSessionSettingsSheet(chipContext, terminalId),
                 ),
-                child: AbChip.system(
-                  // An em-dash where the bridge has reported no posture at all,
-                  // never the default's name: this chip is read as a live fact
-                  // about the session, and naming a preset the far end has
-                  // never heard of is a claim about a control over nothing (see
-                  // handlerPersonalityFromWire). The chip still opens the sheet,
-                  // which is where that gets explained.
-                  label: session.personality == null
-                      ? '—'
-                      : handlerPersonalityLabel(
-                          session.personality!,
-                        ).toUpperCase(),
-                  // Tinted where nothing is judging: the posture is stored and
-                  // inert, and a bar naming it in ordinary chrome while every
-                  // pause escalates says the opposite of what is happening.
-                  color:
-                      session.observability == HandlerObservability.escalateOnly
-                      ? p.warning
-                      : p.textMuted,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    AbChip.system(label: lensLabel, color: lensTone),
+                    // The brief sits behind the same door as the lens it
+                    // qualifies, so the marker is inside the gesture rather
+                    // than beside it: a mark the user cannot follow names
+                    // something with nowhere to go and read it.
+                    if (session.brief != null)
+                      Padding(
+                        padding: const EdgeInsets.only(left: AbTokens.space4),
+                        child: Semantics(
+                          label: 'Brief added',
+                          child: AbIcon(
+                            AbIcons.comment,
+                            size: 11,
+                            color: lensTone,
+                          ),
+                        ),
+                      ),
+                  ],
                 ),
               ),
             ),

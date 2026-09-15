@@ -544,10 +544,11 @@ export class RelayClient {
         this.missedPongs = 0;
         return;
       case "session-takeover":
-        // Sent by the bridge's single-active-phone takeover to the session
-        // it's about to tear down. Deliver it like any
-        // other session frame so a test can `waitFor` the mechanism directly,
-        // instead of only inferring it from a later dead round trip.
+        // Sent by the bridge to a session it is about to tear down. A bridge
+        // now keeps one session per app device, so the only producer left is
+        // capacity eviction past that cap. Deliver it like any other session
+        // frame so a test can `waitFor` the mechanism directly, instead of
+        // only inferring it from a later dead round trip.
         this.deliver(obj);
         return;
       default:

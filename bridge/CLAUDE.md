@@ -13,7 +13,8 @@ What may be written in any `CLAUDE.md`, this one included, is governed by
 the new record is missing — a forgotten one is a build error, not a session that
 quietly lacks the feature. `AgentSpec`'s optional fields are capabilities;
 absence is the honest answer, never a default. Every per-agent module under
-`src/` lives in `src/agents/<key>/`: `hooks.ts` for a hook agent, `driver.ts`
+`src/` lives in `src/agents/<key>/`: `hooks.ts` for a hook agent, `mcp.ts` for one
+pointed at the bridge's MCP server, `driver.ts`
 and the `chat-backend.ts` / `mapping.ts` / `spawn.ts` it wires for a chat agent,
 `title.ts` for one whose session name is read off disk. One thing lives outside
 it on purpose: the installed-side integration assets in `bridge/plugin/<agent>/`
@@ -126,11 +127,12 @@ what is here is identity plus the contracts that span more than one of them.
 - `worktrees/` — managed checkouts for isolated sessions: Git lifecycle (`worktree-manager.ts`), the durable record (`checkout-store.ts`), repository identity (`project-resolver.ts`). See **Isolated sessions** below.
 - `e2e/` — v2 handshake crypto (`transcript.ts`, `key-schedule.ts`, `confirm.ts`, `transport.ts`, `handshake-sig.ts`). See `docs/protocol/e2e-handshake.md` for the spec. `key-exchange.ts` provides the underlying X25519 ECDH primitive.
 - `relay-client.ts` — the ONE machine WebSocket (a machine holds exactly one `RelayClient`, owned by `HostServer`). v3 auth: single signed `hello` (epoch from `relay-epoch.ts`, minted once per process), `welcome` = authenticated, and backoff resets ONLY there. **Terminal-vs-retryable is the v3 error contract and the verdicts are not interchangeable**: `onAuthRevoked` fires only on the identity-dead pair `LICENSE_INVALID|LICENSE_REVOKED` (`LICENSE_AUTH_DEAD`); `LICENSE_EXPIRED` is deliberately NOT one — it is recoverable by time, so it takes the plain terminal path while token maintenance keeps re-minting and `onMinted` → `redialWithFreshToken()` brings the socket back with no process restart; `SUPERSEDED` means another socket now holds our deviceId (often our own redial evicting a half-open one), so log and stop on THIS socket, never `auth_revoked`. The E2E session — kind-byte dispatch, acked make-before-break rekey, ≤2 receive contexts — is documented in `e2e/`. Outbound APP frames go through `send-scheduler.ts` — one FIFO queue per channel, control drained ahead of preview, and **sealed at dequeue**, so a frame queued across a rekey goes out under the keys live at that moment and a torn-down session drops its backlog instead of writing it under retired keys. Sealed SESSION frames and the relay's own JSON verbs (`sendJson`) never enter it: liveness and stream admission must not queue behind app bulk. Session frames sealed under the ESTABLISHED keys are still CHARGED against the window even though the gate never holds them, because a relay drop report names only a channel and a byte count — bytes written outside the accounting would un-charge something that was never charged. The receiving half counts every kind-0 frame the established keys opened or nothing opened (a frame nobody can decrypt was charged too) and answers with a sealed `credit` session frame per batch of consumed bytes and unconditionally for both channels on every liveness tick; a received `credit` is also what refreshes a peer's liveness while bulk drains. Every routed frame the relay discards comes back as an `error` naming that frame's `channel` and `bytes`, and the sender un-charges them — a lost DATA frame is the one thing a cumulative credit cannot heal. Spec: `docs/protocol/e2e-handshake.md` §8.8. Neither end can read its socket buffer — Bun's client `bufferedAmount` reads 0 even with a gigabyte queued, and dart:io exposes nothing — so never gate on it; what the sender writes is bounded by its own accounting. `sendAppEnvelope`/`sendTunnel` return a `SendOutcome` promise that settles when the message left the queue (written or dropped); `TunnelManager` is the one consumer that awaits it.
-- `relay-slot.ts` — re-export of `antgrid-wire`'s slot helpers (one TS copy, shared with the relay). The phone reaches us on a per-machine SLOT (`<accountDeviceUuid>#<machineDeviceUuid>`; see `packages/antgrid_relay_client/CLAUDE.md`). The slot is the ROUTE address — `_peerId`, `pending.peerId`, the `phoneEd25519ByDeviceId` key and the single-active-phone takeover check all stay on it. Everything keyed by the ACCOUNT device uses `baseSlotDeviceId`: both transcripts in `handleClientHello` (the agent one is the HKDF salt — a slot there derives keys the app can't open), the `trustedPeers`/`pairedPhones` lookups in `resolvePhoneEd25519PubB64`/`backfillPeerPubkey`, and the `pairedPhones.upsert` row. Stripping never widens admission — every candidate is still gated by `verifyTranscriptSig`. Presence is filtered by `isForeignSlot`: the relay fans it to every same-account peer, so a sibling slot would otherwise repoint our reply address (`peer-online`) or suppress our heavy stream because another machine's socket closed (`peer-offline`).
+- `relay-slot.ts` — re-export of `antgrid-wire`'s slot helpers (one TS copy, shared with the relay). The phone reaches us on a per-machine SLOT (`<accountDeviceUuid>#<machineDeviceUuid>`; see `packages/antgrid_relay_client/CLAUDE.md`). The slot is the ROUTE address — the `sessions`/`pending` map keys, the `phoneEd25519ByDeviceId` key and the capacity check all stay on it, so two devices on one account are two sessions and not a takeover. Everything keyed by the ACCOUNT device uses `baseSlotDeviceId`: both transcripts in `handleClientHello` (the agent one is the HKDF salt — a slot there derives keys the app can't open), the `trustedPeers`/`pairedPhones` lookups in `resolvePhoneEd25519PubB64`/`backfillPeerPubkey`, and the `pairedPhones.upsert` row. Stripping never widens admission — every candidate is still gated by `verifyTranscriptSig`. Presence is filtered by `isForeignSlot`: the relay fans it to every same-account peer, so a sibling slot would otherwise repoint our reply address (`peer-online`) or suppress our heavy stream because another machine's socket closed (`peer-offline`).
 - `stream-mux.ts` — multiplexes project cores over the machine socket as sealed `{s, m}` envelopes (`s` absent/`"0"` = machine control plane; the ENVELOPE JSON is what gets fragmented, so `s` survives reassembly). `attachStream(bus, opts)` → `StreamHandle{streamId, detach, sendTunnel}`. **`opts.mayDeliver` is the OUTBOUND authorization hook**, re-read on every bus frame and every `sendTunnel` (tunnel bypasses the bus) — absent means always-deliver, so a caller that answers to a switch must fail closed in its own provider. On each `welcome` the mux re-opens every attached stream, because the relay dropped its `openStreams` on the disconnect. An inbound frame for an unknown streamId is dropped AND answered with a control-plane `stream-invalid {streamId}`: a host restart re-attaches every project under fresh ids, and without that notice the phone replays onto the dead id forever with nothing to trigger a renegotiation. **`stream-unbound` is its mirror and the pair must stay symmetric** — the app sends it when IT receives on a stream it holds no transport for, and `markUnbound` mutes that stream until the peer transmits on it, `stream-ready` re-announces it, or a new E2E session starts. Nothing else bounds that direction: a stream outlives the app process that bound it (the core keeps it across the peer's restart, and a re-open reuses the same id), so a fresh app inherits every id the agent holds, binds none until the user opens that project, and a live PTY on one drops a frame per frame meanwhile. It MUTES rather than detaches for that same reason — the re-open that heals it needs the id alive. No suite spans the two halves; the app's is in `packages/antgrid_relay_client`. The admission errors, and which a current relay can still send, are documented at their definitions (`ErrorCode` in `packages/antgrid-wire/src/relay-protocol.ts`; the relay side is the Streams bullet in `relay/CLAUDE.md`).
-- `host-server.ts` + `paired-phones.ts` — machine-level device trust. `HostServer.startRemoteControlPlane()` owns the single machine RelayClient (bare `deviceUuid`, the only registration shape); project cores attach as streams via `remoteDepsFor(projectId)`. Stream admission publishes `stream-ready {projectId, streamId}`, and `buildProjectsAdvertisement` (`agent:projects`) carries per-project `streamId` so a reconnecting phone binds without a fresh `project:start`; stopped projects start on demand. `startCore` re-advertises unconditionally: an open no phone asked for (restart re-open, desktop-side open) lands AFTER the handshake advert, and nothing else announces it. A rejected verb returns `control:result {ok:false,error}`, never a silent drop. The authorization rule is repo-wide — see **Conventions** in the root `CLAUDE.md` — but three bridge-side details are not. The switch is read live via `remoteAccessEnabled()`, so `mobile-access:set` takes effect without restarting a core (the verbs and `agents/mobile-access-policy.json` keep the old spelling on purpose: both cross a version boundary the rename cannot reach). It gates the stream in BOTH directions — inbound at `currentPhoneAllowed()`, outbound at the stream's `mayDeliver` (`attachRelayStream`) — and inbound alone is not enough, because a project the phone cold-started opens as a `mode:"remote"` core with no `PromotionHandle`, so `demoteAllPromoted()` never touches it and it would keep streaming terminal/tree/git at the phone. Gating at the send rather than at detach is deliberate: the core and its stream stay alive, so flipping the switch back on resumes the same `streamId` with no re-attach and no destroyed work.
+- `host-server.ts` + `paired-phones.ts` — machine-level device trust. `HostServer.startRemoteControlPlane()` owns the single machine RelayClient (bare `deviceUuid`, the only registration shape); project cores attach as streams via `remoteDepsFor(projectId)`. Stream admission publishes `stream-ready {projectId, streamId}`, and `buildProjectsAdvertisement` (`agent:projects`) carries per-project `streamId` so a reconnecting phone binds without a fresh `project:start`; stopped projects start on demand. `startCore` re-advertises unconditionally: an open no phone asked for (restart re-open, desktop-side open) lands AFTER the handshake advert, and nothing else announces it. A rejected verb returns `control:result {ok:false,error}`, never a silent drop. The authorization rule is repo-wide — see **Conventions** in the root `CLAUDE.md` — but three bridge-side details are not. The switch is read live via `remoteAccessEnabled()`, so `mobile-access:set` takes effect without restarting a core (the verbs and `agents/mobile-access-policy.json` keep the old spelling on purpose: both cross a version boundary the rename cannot reach). It gates the stream in BOTH directions — inbound at `remoteFrameAllowed()`, outbound at the stream's `mayDeliver` (`attachRelayStream`) — and inbound alone is not enough, because a project the phone cold-started opens as a `mode:"remote"` core with no `PromotionHandle`, so `demoteAllPromoted()` never touches it and it would keep streaming terminal/tree/git at the phone. Gating at the send rather than at detach is deliberate: the core and its stream stay alive, so flipping the switch back on resumes the same `streamId` with no re-attach and no destroyed work.
 - `auth/` — in-memory OAuth (no on-disk store). `credentials.ts` parses one JSON line from stdin into a `BootstrapPayload` (`local | remote`, 10s idle timeout) written by the app on spawn; `oauth-client.ts` mints tokens via `POST /api/auth/oauth2/token` and `startTokenMaintenance` re-mints at 80% of TTL. An `invalid_client` verdict means the cached pair is dead: emit `auth_revoked` to stderr and exit 4 (why that is keyed on the ERROR CODE rather than the status is documented on the callback in `oauth-client.ts`). Two consequences are cross-file and belong here. Credentials reach the host only ONCE, via the stdin bootstrap, so a host left running on a rotated-away pair can never recover on its own — the app respawns it when the account device changes (`local_host_warmup.dart`). And **the boot-time control-plane mint is exempt from the exit** (`fatalRevokeArmed`, disarmed across `start()`'s `startRemoteControlPlane()`): host.json and the ready marker are already out by then, so exiting would have the app's supervisor respawn straight back into the same dead pair — a permanent crash loop that also takes down the loopback plane local work depends on. Boot logs and serves loopback-only; a verdict from token maintenance afterwards is still fatal.
 - `crash-reporting.ts` — Sentry (`@sentry/bun`) for the HOST process only, into the same self-hosted errex project as the app. **Consent is the one gate the file cannot state on its own**: it arrives on the stdin bootstrap as `telemetryEnabled`, the app reads the SAME setting that decides its own Sentry init (so one install cannot report from one half and not the other), and its ABSENCE means off — a CLI or test host has nobody who consented. It is fixed for the host's lifetime, which is the same restart-scoped gate the app applies to itself, not an oversight. `SENTRY_DSN` is baked in at build time by `--define`, exactly like `LICENSE_API_URL`; errex issues SLUGS while the JS SDKs require a NUMERIC project id, so the DSN that works for the app does NOT work here. Everything else is documented at its definition in the file: which integrations are excluded and why, why `OnUncaughtException`/`OnUnhandledRejection` are KEPT and what `index.ts` owes them, the scrubber's lockstep with `app/lib/analytics/crash_reporting.dart`, and why the `hook` subcommand is uninstrumented.
+- `mcp/server.ts` — the Antgrid MCP server, and it ships as a bridge SUBCOMMAND (`antgrid-bridge mcp`, registered hidden in `index.ts`) rather than as a script an installer points at: the shipped bridge is a compiled single-file executable, so `process.execPath` plus a subcommand is the only self-invocation available — the same shape `worktree-setup` and the hook command use, and `resolveMcpCommand` (`hook-command.ts`) is `resolveHookCommand`'s sibling over one `resolveBridgeCommand`. That is what lets it be INJECTED per spawn, by `augmentAgentLaunch` off each spec's `AgentSpec.mcp`, exactly the way hook configs already are — so a session the app started has the tools with no `antgrid setup` ever run on the machine, and an agent that declares no profile gets none. `plugin/setup.ts` still writes the same `antgrid` entry for a session started OUTSIDE the bridge, and generates it from the same resolver so the two entries cannot desync. Two invariants the code says less loudly than they deserve: stdout is the JSON-RPC transport, so `cli/mcp.ts` moves the root logger to stderr BEFORE the server module loads (pino's default destination is fd 1, and one line there surfaces as an agent-side "server failed to initialize" with nothing in our logs); and `getApiUrl` reads `ANTGRID_API_PORT` from the environment ALONE, with no `api.port` fallback — the per-agent opt-in `HookProfile.portFileFallback` expresses has nothing to key on here, since nothing in the invocation names who spawned it, and the comment there says what a universal one would hand out. The two injected mechanisms are per-agent and measured, never guessed: claude gets `--mcp-config=<abDir>/mcp/claude.json` as ONE token, because the flag is variadic (measured: the separated form reads the next two words as further config paths) and `session-manager.ts` folds the session's own args in directly after it, whose config file must stay OUTSIDE `<abDir>/plugin/claude` (the `--plugin-dir` loader also reads a `.mcp.json` in the plugin tree, and the server would register a second time under a `plugin:<name>:` tool prefix), and never `--strict-mcp-config`, which would drop the user's own servers; codex gets three `-c mcp_servers.antgrid.*` overrides, which merge with the user's servers and feed none of the `hooks.*` fingerprints, so every `trusted_hash` is unchanged by them. Neither entry names a port or a terminal id: claude expands `${ANTGRID_API_PORT}` in the entry's `env` at spawn, and codex — which passes NONE of its own environment down to an MCP server — forwards the two by name through `env_vars`, so one file and one fixed override triple serve every terminal on the machine. The terminal id is what makes that safe rather than merely convenient: the loopback API is per CORE while an isolated session runs in a managed worktree, so the server puts its slot on every request and `api-server.ts` resolves the CALLER's checkout from it (`AgentContext.checkoutFor`, wired to the same `terminalOwner` lookup the message plane routes terminal frames by). A named command is looked up in that checkout's own `antgrid.yaml` and run in its tree, and a terminal belonging to another checkout answers as not found rather than as content — an agent must not run its build against another session's uncommitted work, nor read that session's conversation. Codex CHAT sessions get none of it, because `codexNotifyOnlyArgs` keeps just the `notify=` pair.
 
 ## Stopping an agent
 
@@ -154,6 +156,163 @@ before any suspension, nothing returns between the grace and the sweep, the grac
 is refused unless the sweep is job-backed, and the agents layer takes no runtime
 import. Break the shape and a test names the
 invariant, which is why the reasoning lives beside the code rather than here.
+
+## The session bus (`src/session-bus/`)
+
+The agent-to-agent plane: one session on one machine reaching another.
+`docs/session-messaging.md` is the spec; this is the set of invariants a future
+edit breaks silently.
+
+- **Outbound on the machine that opened the exchange goes to the loopback owner
+  and nowhere else.** `ProjectCore.sendToOwner` is the only path, and
+  `local-listener.ts` hands a bus frame to an owner only if its hello declared
+  `capabilities.sessionBusCarrier` (`ownerCarriesSessionBus`, surfaced to the
+  loopback API as `carrierPresent`). The desktop app is the carrier; no
+  attached carrier means the frame is HELD and retried by the coordinator, never
+  dropped, so a closed desktop is an indefinitely delayed exchange rather than a
+  failed one — on every path except the agent-initiated verbs, which read
+  `carrierPresent` up front and refuse `PEER_UNREACHABLE`
+  (`session-bus/api.ts`) rather than report a held frame to an agent that reads
+  every answer but a refusal as delivered.
+- **The remote half of the directory arrives by loopback push and by nothing
+  else.** The app peeks at control-plane sessions it already holds, asks each
+  machine for a session-bearing `machine.capability-card`, and pushes the
+  answers to the `session-bus:remote-directory` control verb. Never give it a
+  relay-side arm: `bus.setInboundHandler` accepts frames from any
+  account-trusted peer while the machine switch is on, so a directory verb
+  reachable there lets a phone write rows a local agent then reads as peers.
+  Mirrored rows are re-validated on arrival and decay on a TTL
+  (`REMOTE_ROWS_TTL_MS`, `session-bus/constants.ts`) rather than persisting,
+  because a bridge cannot dial another bridge and so can never ask again — and
+  the near end proves a carrier exists by having been pushed to, not by a
+  capability flag Zod could strip in silence.
+- **Nothing this side of the relay may be reported as delivery.** The carrier
+  taking a frame says only that it left this machine, so a post answers `sent`
+  and never "received". The one honest answer is the other side's ack: the
+  receiving coordinator emits a `session-bus:ack` keyed to the message id for
+  every post and notify it folds, and the sender stamps it onto its own log
+  entry. An unstamped entry is not a failed one — a receipt is fire-and-forget
+  and an unacked one is never retried — so the witnesses a frame that goes
+  nowhere has still carry the weight: the RECEIVING coordinator says so when
+  a frame names a session that bridge does not hold, and the app says the other
+  half — `no leg for addressed member` when the address was good and the machine
+  was not there, and `refused bus frame` with a `because` field naming the fact
+  it did not have. The sending machine has none at all — a carrier that accepts
+  frames and delivers none is already silent there, which it was, for three
+  hours, across a restart. Take a log line out of either survivor and it is
+  silent in both processes again.
+- **An artifact id from the other machine is a reference, not a handle.**
+  `coordinator.onFetch` answers a `session-bus:fetch`; nothing sends one, so the
+  requester half of cross-machine fetch does not exist. Every surface has to say
+  so — `publish_artifact`'s description and the note card — because an id
+  offered as fetchable that then is not teaches the reader to distrust the whole
+  list.
+- **A bus address is matched on machine + session; the project id is a LABEL.**
+  `addressesSameSession` (`session-bus/address.ts`) is what `handleInbound`
+  gates on, and the carrier matches a session on its id alone
+  (`classifyBusFrame`). One checkout can be open as more than one project — a
+  managed worktree opened in its own right hashes to an id of its own — so the
+  two machines legitimately hold different project ids for the same session, and
+  comparing them refused every frame forever over a display string. `sameAddress`
+  stays strict and stays correct for a session the app names on this bridge's
+  own row: both sides of that comparison come from one record. When the ids do
+  differ, both processes say so once (`the other machine addresses session … as
+  project …`, and the app's `this app holds the session under a project the
+  other machine does not address it by`) — routing no longer depends on it, but
+  the row still renders it.
+- **One coordinator now answers for every project a host has open (E9/§5.4),
+  which is what makes the invariant above load-bearing rather than academic:**
+  a peer admitted onto ANY project's stream can apply a frame naming a session
+  in any OTHER project this machine holds, because `addressesSameSession` was
+  always machine+session and never machine+session+project. What still bounds
+  that — and what does NOT, which is the half worth writing down — is named
+  here so it is a decision rather than something discovered later.
+  `remoteFrameAllowed` (`agent-core.ts`, gate applied once per inbound frame in
+  `attachTransport`, before dispatch) refuses every relay-origin frame while the
+  machine's mobile-access switch is off; that switch is machine-wide, so it
+  bounds the widened address space exactly as it bounded the narrow one —
+  loopback is exempt, but a loopback caller is this machine's own desktop,
+  already trusted with every session on it. A session id is
+  `crypto.randomUUID()` (`session-manager.ts`), so naming one is guessing a
+  UUID, never enumerating a small keyspace. The `checkoutRouting` gate
+  (`peerCanRouteCheckouts`, same call site) does NOT follow the address: it
+  reads the ARRIVING core's own `hasIsolatedSessions()`, so a peer admitted to a
+  project holding no isolated session passes it and may then name a session in
+  a project that does — the one refusal the move genuinely widened, left to
+  Wave 2 rather than described here as cover it does not give. The carrier
+  route table is keyed by CONTEXT id alone, so the same already-admitted peer
+  can re-point another project's context at itself by stamping that context id
+  on a frame addressed to a session it may legitimately name — refusing the
+  mismatch at `noteRoute` is not the fix, because E9's own case (a worktree
+  session answering its parent) is that mismatch, and the two are
+  indistinguishable there; it narrows with the admission gap above or not at
+  all. Net: WHO may
+  address this machine is unchanged (an account-trusted peer, mobile access on,
+  on a project in the host's catalog); what an already-admitted peer may NAME
+  once inside is now every session on the machine, and the isolated-session
+  gate covers only the project its frame arrived on.
+- **Outbound on the machine that is answering is `sendToAppSession(peerId)`,**
+  keyed by the app session — and, since the route table moved onto the
+  coordinator itself (E9/§5.4), the PROJECT — that carried the exchange in
+  (`SessionBusCoordinator.noteRoute`/`routeFor`, `session-bus/coordinator.ts`).
+  Falling through to the loopback owner
+  would hand the answer to THIS machine's desktop, which accepts it and returns
+  true — booking a delivery that never happened and retiring the only outbox
+  entry that could retry it. A broadcast would additionally leak the whole
+  exchange to the human's phone, which is the mirror of the sending-side
+  invariant above.
+- **Every delivery into an agent is rendered, and lands at a TURN BOUNDARY.**
+  `session-bus/delivery.ts` wraps the other agent's content as fenced data —
+  never raw, never a bare instruction — and `delivery-queue.ts` holds the line
+  until the turn closes. `DeliveryKindSchema` there is the whole set of queued
+  kinds.
+- **The Capability Card travels on the address and may only ever be FENCED.**
+  It is `SessionMemberCardSchema` on `SessionMemberRefSchema` (`protocol.ts`),
+  observed by that machine's own bridge (`capability-card.ts`), and it is what
+  answers OS + repo for a machine this bridge can never reach. Its values are a
+  hostname and a repo path — precisely what `authorizeInstruction` reads as a
+  grant — so no template may put it in a wrapper, and any kind that carries it
+  must stay on the `injectReply` path rather than reaching `instruct`.
+- **The no-progress halt is per (sender, target) PAIR** — two agents can trade
+  messages that advance nothing forever; a per-machine ceiling would let one
+  session spend another's budget, and a per-session one would let a halted pair
+  carry on through a third. `session-bus/pair-budget.ts` is pure and the host
+  holds the one store (beside the directory), because a halt "cleared only by a
+  human" has to outlive a restart. The record is MIRRORED per end, never shared:
+  the two ends can be on two machines, so each charges its own copy — outbound in
+  `SessionBusCoordinator.message`, inbound in its `onMessage` — and an edit that
+  drops either half leaves each end counting only what IT sent, which doubles
+  both ceilings and halts one side of a pair without the other. REFUSAL stays in
+  `message` alone, the single point every verb leaves through; a gate in the
+  loopback API or the MCP tools instead would be one a new caller could be
+  written around without noticing. A caller may ASK the same
+  question read-only through `SessionBusCoordinator.pairRefusal`, which charges
+  nothing and exists so the verb layer can order its own ladder (a halted pair
+  aimed at a stopped session has to hear about the halt, which only a human
+  lifts). It never replaces the check inside `message`.
+- **`/session-bus/*` in `api-server.ts` is the loopback route table**, keyed off
+  `?terminalId=` — which is what says whose session a request is about, and the
+  same slot that resolves an isolated session's checkout. Bus frames route by
+  `sessionId` on the project stream, so nothing here carries a `checkoutId` (the
+  comment above `session:setup` in `protocol.ts` is the standing reason).
+
+Known gaps, stated rather than papered over: a codex CHAT session gets no MCP
+server at all (`codexNotifyOnlyArgs`), so nothing in it can reach the bus; and
+artifacts (`session-bus/artifact-store.ts`) are session-scoped with no
+cross-context fetch, and are reclaimed only by the delete of the session that
+published them — nothing bounds them by age or total size while it lives.
+
+## The MCP subcommand
+
+`src/mcp/server.ts` and its `antgrid-bridge mcp` entry are described under
+**Adding an agent** (the `mcp/server.ts` bullet): how it is self-invoked, how
+`augmentAgentLaunch` injects it per spawn from `AgentSpec.mcp`, and why stdout
+and `ANTGRID_API_PORT` are what they are. One thing the session bus adds to it:
+
+- **A tool is DISPATCHED by name, not by whether this process believes the call
+  can succeed.** The server holds one tool table and evaluates nothing about the
+  caller, so a call it cannot answer must still reach the bridge and be refused
+  there — the refusal is the bridge's to author, never the server's to guess.
 
 ## Isolated sessions (`src/worktrees/`)
 

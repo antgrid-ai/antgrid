@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { answerRequest, clientFocusState, clientGone, closeTurn, initialWorkStatus, isStaleIdleNudge, reduceWorkStatus, sessionFocus, turnStart, userReply, type WorkStatusState } from "../src/work-status";
+import { answerRequest, attentionEdges, clientFocusState, clientGone, closeTurn, initialWorkStatus, isStaleIdleNudge, reduceWorkStatus, sessionFocus, turnOpenFor, turnStart, UNATTRIBUTED_TURN, userReply, type WorkStatusState } from "../src/work-status";
 import type { InboundSource } from "../src/message-bus";
 
 /** The two client classes the read state distinguishes: the phone reaches a core
@@ -934,4 +934,63 @@ test("a disconnect does not disarm read tracking", () => {
 test("clientGone is a no-op for a client that had nothing on screen", () => {
   const s = sessionFocus(fold([sessions(1)]), "r0", APP);
   expect(clientGone(s, DESKTOP)).toBe(s);
+});
+
+test("a question notification puts the session on attention and does not end its turn", () => {
+  // A terminal-mode agent that stopped to ask is a live block, not a finish:
+  // adding it to the turn-end set instead would silently mark the session done
+  // at the moment it most needs you.
+  const s = fold([sessions(1), turnStartFrame("r0"), push("question", "r0")]);
+  expect(s.status).toBe("attention");
+  expect(s.activeTurns.has("r0")).toBe(true);
+});
+
+test("a new session does NOT clear an active question on a sibling", () => {
+  // The call-to-action half: a block outlives another session starting, unlike
+  // the turn-end states, which a fresh session is allowed to age out.
+  const blocked = fold([sessions(1), push("question")]);
+  const grown = fold([sessions(2)], blocked);
+  expect(grown.status).toBe("attention");
+});
+
+// The producer of `waiting-on: human` on a peer machine (spec 5.3). Read BEFORE
+// the state is swapped, like closedTurns, or the comparison is against itself.
+test("attentionEdges names only the sessions whose human-blocked state flipped", () => {
+  const at = (...ids: string[]) =>
+    ({ sessionStatuses: new Map(ids.map((id) => [id, "attention" as const])) });
+  const mixed = {
+    sessionStatuses: new Map([
+      ["a", "attention" as const],
+      ["b", "working" as const],
+    ]),
+  };
+
+  expect(attentionEdges({ sessionStatuses: new Map() }, mixed)).toEqual([
+    { sessionId: "a", blocked: true },
+  ]);
+  expect(attentionEdges(mixed, mixed)).toEqual([]);
+  expect(attentionEdges(at("a"), { sessionStatuses: new Map([["a", "working" as const]]) })).toEqual([
+    { sessionId: "a", blocked: false },
+  ]);
+});
+
+test("a session that stopped is blocked on nobody", () => {
+  // Only a running session carries a status. Leaving it marked blocked would
+  // hold its tasks' expiry clocks stopped forever.
+  expect(
+    attentionEdges(
+      { sessionStatuses: new Map([["a", "attention" as const]]) },
+      { sessionStatuses: new Map() },
+    ),
+  ).toEqual([{ sessionId: "a", blocked: false }]);
+});
+
+test("an unattributed turn is open for every session, and closing it opens none", () => {
+  // The gate the session-bus delivery queue shares with this reduction: an
+  // agent that cannot attribute its turn-starts records them under the empty
+  // key, so "no turn under my own id" is not the same as idle.
+  expect(turnOpenFor(new Set([UNATTRIBUTED_TURN]), "r0")).toBe(true);
+  expect(turnOpenFor(new Set(["r0"]), "r0")).toBe(true);
+  expect(turnOpenFor(new Set(["r1"]), "r0")).toBe(false);
+  expect(turnOpenFor(new Set(), "r0")).toBe(false);
 });

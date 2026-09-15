@@ -63,10 +63,7 @@ class HandlerService {
   // UUIDs, so an unbounded map would accumulate an entry for every slot the
   // project ever opened, for the app's lifetime.
   static const _settingsCacheCap = 50;
-  final Map<
-    String,
-    ({String? tool, String? model, HandlerPersonality? personality})
-  >
+  final Map<String, ({String? tool, String? model, HandlerLensPick? lens})>
   _lastKnownSettings = {};
 
   // Records a clear (nulls) too — a status snapshot showing an armed session is
@@ -76,18 +73,17 @@ class HandlerService {
   // silently re-seeded (and re-armed) the stale tool.
   //
   // Re-inserts so a refreshed entry counts as most-recent, evicts oldest at cap.
+  // [lens] carries the third state the others cannot: null means this machine
+  // never advertised any lens, which is not the same as a session running the
+  // unnamed default (a pick whose roleId is null).
   void _rememberSettings(
     String terminalId,
     String? tool,
     String? model,
-    HandlerPersonality? personality,
+    HandlerLensPick? lens,
   ) {
     _lastKnownSettings.remove(terminalId);
-    _lastKnownSettings[terminalId] = (
-      tool: tool,
-      model: model,
-      personality: personality,
-    );
+    _lastKnownSettings[terminalId] = (tool: tool, model: model, lens: lens);
     while (_lastKnownSettings.length > _settingsCacheCap) {
       _lastKnownSettings.remove(_lastKnownSettings.keys.first);
     }
@@ -114,14 +110,22 @@ class HandlerService {
   // only what the bridge has yet to retire.
   final Set<String> _answeredEscalations = {};
 
-  /// Withdraws the one-tap from any escalation where a tap would be unsafe,
-  /// leaving the free-text row — the question stays answerable either way, so
-  /// this can only ever cost the user one extra step.
+  /// Withdraws the one-tap from any escalation where a tap would be unsafe, and
+  /// downgrades every ask this bridge cannot be told the answer to — leaving
+  /// the free-text row in both cases, so the question stays answerable and this
+  /// can only ever cost the user one extra step.
   ///
   /// The single choke point on purpose: escalations reach [_state] from the
   /// one-shot push and from the status replay, and a floor that lived on only
   /// one of those would be a card the other path still renders.
-  List<HandlerEscalation> _withChoiceFloors(List<HandlerEscalation> all) {
+  ///
+  /// It takes the whole state because the capability gate is a fact about the
+  /// row's SESSION, and it rewrites the sessions' own escalation lists as well
+  /// as the flat one. Those are two copies of the same rows and both are read:
+  /// gating only the flat list would leave [HandlerSessionState.asksOnly] true
+  /// over rows the Needs-you list renders as stopping the agent, so the pill
+  /// and the list would disagree about what the session is waiting for.
+  HandlerState _applyEscalationFloors(HandlerState next) {
     // An agent blocked on an option-based prompt reads nothing until that prompt
     // is resolved, so a one-tap raised beside one sends text into a stalled
     // session and leaves the pill where it was — an action that looks like it
@@ -130,23 +134,43 @@ class HandlerService {
     // The bridge declines to mint choices in the same situation — this covers
     // the order it cannot see, a prompt arriving after the card was minted.
     final blocked = {
-      for (final e in all)
+      for (final e in next.escalations)
         if (e.kind == 'resolve_in_session') e.terminalId,
     };
-    return [
-      for (final e in all)
-        if (e.choices != null &&
-            (_answeredEscalations.contains(e.escalationId) ||
-                blocked.contains(e.terminalId)))
-          e.withoutChoices()
-        else
-          e,
-    ];
+    HandlerEscalation floor(HandlerEscalation e) {
+      // A `nonBlocking` row is only an ASK if this bridge can be told the
+      // answer. A bridge that can READ the field but not answer it is reachable
+      // — a Store rollback onto a record a newer bridge wrote re-emits it
+      // faithfully — and the row itself cannot advertise that. Ungated, an ask
+      // would render with a one-tap that goes nowhere, or a sheet whose text
+      // lands in the PTY. Never latched: the advert is re-read every emission,
+      // so a session that loses it downgrades on the very next frame.
+      final gated = next.sessions[e.terminalId]?.askAnswer == true
+          ? e
+          : e.copyWith(nonBlocking: false, clearAskOptions: true);
+      // The standing-prompt withdrawal needs no ask exemption and must not be
+      // given one: an ask carries no `choices`, so this rule already passes it
+      // through untouched.
+      return gated.choices != null &&
+              (_answeredEscalations.contains(gated.escalationId) ||
+                  blocked.contains(gated.terminalId))
+          ? gated.withoutChoices()
+          : gated;
+    }
+
+    return next.copyWith(
+      escalations: [for (final e in next.escalations) floor(e)],
+      sessions: {
+        for (final entry in next.sessions.entries)
+          entry.key: entry.value.copyWith(
+            escalations: [for (final e in entry.value.escalations) floor(e)],
+          ),
+      },
+    );
   }
 
   void _emit(HandlerState next) {
-    final floored = _withChoiceFloors(next.escalations);
-    _state = next.copyWith(escalations: floored);
+    _state = _applyEscalationFloors(next);
     if (!_disposed) _stateController.add(_state);
   }
 
@@ -271,7 +295,10 @@ class HandlerService {
         s.terminalId,
         s.judgeTool,
         s.judgeModel,
-        s.personality,
+        // Read off the FRAME, not off the session: a bridge that never named
+        // its lenses reports no role because it has none, and caching that as
+        // "the default" would seed a picker with a fact nobody stated.
+        msg.lenses != null ? (roleId: s.roleId, brief: s.brief) : null,
       );
     }
     // Replace wholesale (welcome-replay safe) rather than merge — the
@@ -342,10 +369,17 @@ class HandlerService {
     // refusal that could only ever latch on would survive the upgrade that
     // lifted it. Never both arguments at once — see the copyWith rule.
     final entitlement = HandlerEntitlement.fromWire(msg.entitlement);
+    final gated = entitlement == null
+        ? next.copyWith(clearEntitlement: true)
+        : next.copyWith(entitlement: entitlement);
+    // The advert the same way. The cache above already reads the pick off the
+    // FRAME; the state has to agree with it, or a bridge downgraded under a
+    // live remote session keeps every lens chip enabled while the pick it
+    // seeds from says the machine never named one.
     _emit(
-      entitlement == null
-          ? next.copyWith(clearEntitlement: true)
-          : next.copyWith(entitlement: entitlement),
+      msg.lenses == null
+          ? gated.copyWith(clearLenses: true)
+          : gated.copyWith(lenses: msg.lenses),
     );
   }
 
@@ -369,6 +403,9 @@ class HandlerService {
           at: msg.timestamp,
           kind: msg.kind,
           choices: msg.choices,
+          nonBlocking: msg.nonBlocking,
+          unblocked: msg.unblocked,
+          askOptions: msg.askOptions,
         );
         _emit(
           _state.copyWith(
@@ -381,9 +418,9 @@ class HandlerService {
           ),
         );
         // Read back out of the state rather than forwarded: the floors in
-        // [_withChoiceFloors] may have withdrawn the card on the way in, and a
-        // notification offering choices the screen no longer shows would be a
-        // second surface disagreeing about what a tap does.
+        // [_applyEscalationFloors] may have withdrawn the card on the way in,
+        // and a notification offering choices the screen no longer shows would
+        // be a second surface disagreeing about what a tap does.
         _escalationController.add(
           _escalationById(escalation.escalationId) ?? escalation,
         );
@@ -454,47 +491,78 @@ class HandlerService {
   /// appends to it, so never round-trip a stale copy back.
   ///
   /// [judgeTool]/[judgeModel] are this session's judge choice; `''` clears back
-  /// to default and a name sets it. [personality] is its posture, which has no
-  /// clear — every preset is a real choice, and the default is only what a
-  /// session that has never been given one runs under. Pass null (the default)
-  /// to leave the stored record untouched, for any caller that surfaces no
-  /// picker: the keys are omitted from the wire message, which the bridge reads
-  /// as "no change", so arming without opening the settings sheet never
-  /// rewrites what that sheet would have shown.
+  /// to default and a name sets it. Pass null (the default) to leave the
+  /// stored record untouched, for any caller that surfaces no picker: those
+  /// keys are omitted from the wire message, which the bridge reads as "no
+  /// change", so arming without opening the settings sheet never rewrites what
+  /// that sheet would have shown.
+  ///
+  /// [role] and [brief] are this session's lens and the note beneath it, as
+  /// wire strings on the same terms the judge picks use: `''` clears back to
+  /// the unnamed default (or to no brief), a value sets one, and null omits
+  /// the key. A caller that surfaces no lens control, or whose control the
+  /// user never touched, must pass null for both — sending a value it only
+  /// inferred is how an arm silently drops the lens the bridge already holds.
   void arm({
     required String terminalId,
     String? goal,
     List<HandlerInstructionItem>? backlog,
     String? judgeTool,
     String? judgeModel,
-    HandlerPersonality? personality,
+    String? role,
+    String? brief,
   }) {
     if (_disposed) return;
-    if (judgeTool != null || judgeModel != null || personality != null) {
+    if (judgeTool != null ||
+        judgeModel != null ||
+        role != null ||
+        brief != null) {
       // Optimistically mirror the bridge's apply rules ('' clears, a name sets,
       // an omitted field keeps its old value) so [lastKnownSettings] is right
       // immediately: reopening the sheet before the status snapshot round-trips
       // would otherwise seed it with the pre-arm values — and committing those
       // stale ones silently reverts this arm's choice.
       final prev = lastKnownSettings(terminalId);
+      final prevLens = prev?.lens;
       _rememberSettings(
         terminalId,
         judgeTool != null ? (judgeTool.isEmpty ? null : judgeTool) : prev?.tool,
         judgeModel != null
             ? (judgeModel.trim().isEmpty ? null : judgeModel.trim())
             : prev?.model,
-        personality ?? prev?.personality,
+        // Sending either half makes the pick known, even from a cold cache:
+        // this arm is what the bridge will hold. The brief is cached as typed
+        // minus its edges — the bridge also collapses newlines and clips it to
+        // its prompt budget, and the next status frame is what corrects that.
+        role == null && brief == null
+            ? prevLens
+            : (
+                roleId: role != null
+                    ? (role.isEmpty ? null : role)
+                    : prevLens?.roleId,
+                brief: brief != null
+                    ? (brief.trim().isEmpty ? null : brief.trim())
+                    : prevLens?.brief,
+              ),
       );
     }
     // Mirrors the condition the bridge queues an arm-time extraction on: a goal
     // with words in it, no backlog carried alongside it (an app-supplied list is
     // already the user's own, and extracting the goal beside it would double
     // every item), and — for a session that is ALREADY armed — a goal that
-    // actually moved. Restating the same goal is a no-op there (`goalChanged` in
-    // bridge/src/handler/engine.ts), and a mark nothing will satisfy waits for
-    // the user's first sentence and swallows the frame that sentence's own
-    // append raised. `updateBacklog` sends a backlog and no goal, so an edit
-    // never sets this.
+    // actually moved. The bridge's own rule is `stacked` (bridge/src/handler/
+    // engine.ts): a restated sentence is a no-op unless it is not already
+    // ANYWHERE in the instructions list. This mirror can only test entry #1
+    // (`armedGoal`, the session's cached `goal`) — the app never holds the rest
+    // of the list, and the wire's windowed `instructions.items` couldn't fix
+    // that either: it clips each entry to 120 chars and carries entry #1 plus
+    // only the newest four. So a goal that restates an OLDER stacked sentence
+    // word for word reads here as new, while the bridge sees a restatement and
+    // stacks nothing. The false mark that leaves behind is contained by
+    // `_retirePending`, which drops it on the next frame reporting a non-empty
+    // backlog — costing at most one status frame wrongly credited to this
+    // extraction, never a mark stuck forever. `updateBacklog` sends a backlog
+    // and no goal, so an edit never sets this.
     //
     // A prediction, not a fact: the bridge also extracts a goal REHYDRATED off
     // its own disk record, which arrives on a one-tap arm carrying no goal at
@@ -516,9 +584,8 @@ class HandlerService {
         'backlog': ?backlog?.map((i) => i.toWire()).toList(),
         'judgeTool': ?judgeTool,
         'judgeModel': ?judgeModel,
-        'personality': ?(personality == null
-            ? null
-            : handlerPersonalityToWire(personality)),
+        'role': ?role,
+        'brief': ?brief,
       }),
     );
   }
@@ -650,16 +717,17 @@ class HandlerService {
     );
   }
 
-  /// Acknowledge a `guard_blocked` report — the only thing that retires one, on
-  /// either side of the wire. Nothing the agent or the user does next answers a
-  /// report about an action Handler never took.
+  /// Acknowledge a `guard_blocked` report, or decline an ask — the two rows a
+  /// submitted line never retires, so a dismiss is the only way out of either.
+  /// Nothing the agent does answers a report about an action Handler never took,
+  /// and an ask is the user's own to answer or refuse.
   ///
   /// Refuses every other kind: the app-side mirror of the bridge's own refusal,
-  /// because a Dismiss on a live question would drop it more silently than any
-  /// path that exists today.
+  /// because a Dismiss on a live blocking question would drop it more silently
+  /// than any path that exists today.
   void dismiss(HandlerEscalation escalation) {
     if (_disposed) return;
-    if (escalation.kind != 'guard_blocked') return;
+    if (escalation.kind != 'guard_blocked' && !escalation.nonBlocking) return;
     _sendDismiss(escalation);
     _dropRows(
       escalation.terminalId,
@@ -689,23 +757,34 @@ class HandlerService {
   /// never staler than the armed entry and is fresher during the arm→snapshot
   /// round-trip. The armed fallback only matters if enough other terminals
   /// evicted this one's cache entry while it stayed armed.
-  ({String? tool, String? model, HandlerPersonality? personality})?
-  lastKnownSettings(String terminalId) {
+  ({String? tool, String? model, HandlerLensPick? lens})? lastKnownSettings(
+    String terminalId,
+  ) {
     final cached = _lastKnownSettings[terminalId];
     if (cached != null) return cached;
     final armed = _state.sessions[terminalId];
     if (armed != null &&
         (armed.judgeTool != null ||
             armed.judgeModel != null ||
-            armed.personality != null)) {
+            // An armed session on a machine that advertised lenses reports a
+            // real one — the unnamed default included — so it is worth seeding
+            // a picker from even when nothing else here was ever set.
+            _state.lenses != null)) {
       return (
         tool: armed.judgeTool,
         model: armed.judgeModel,
-        personality: armed.personality,
+        lens: _state.lenses != null
+            ? (roleId: armed.roleId, brief: armed.brief)
+            : null,
       );
     }
     return null;
   }
+
+  /// Whether this machine named the lenses it accepts. False leaves every lens
+  /// control inert: an app that offered one anyway would take a pick the far
+  /// end strips off the frame in silence.
+  bool get lensesAdvertised => _state.lenses != null;
 
   /// The terminal's own CLI (chat slots report one; PTY slots may not) — the
   /// app-side half of the bridge's deps.tool(terminalId) resolution, used to
@@ -751,19 +830,62 @@ class HandlerService {
   /// unanswered escalation behind, so a surface that showed the send as
   /// in-flight has to be able to take that back — a control stuck reporting an
   /// answer nobody sent is worse than one that never latched.
-  bool reply(HandlerEscalation escalation, String text) {
+  ///
+  /// [tappedChoiceId] names the one-tap the user pressed, when this send is a
+  /// chip and not a typed line. It travels so the bridge can resolve the option's
+  /// words from its own persisted row: a chip's `text` is engine- or
+  /// judge-authored (`REJECT_CHOICE_TEXT`, or the judge's own `draftReply`), so
+  /// what must never be banked is the text, and what must be banked is which
+  /// option was taken.
+  bool reply(
+    HandlerEscalation escalation,
+    String text, {
+    String? tappedChoiceId,
+  }) {
     if (_disposed) return false;
-    // An option-based agent prompt is resolvable only by the chat transcript's
-    // permission/question UI, which holds the permissionId/questionId the driver
-    // is blocked on. Injected text answers nothing and the row rightly stays
-    // pending, so the send is pure noise into a stalled session. Callers route
-    // the user to the transcript; this is the floor for the ones that forget.
+    // An option-based agent prompt is resolvable only by the SESSION's own UI,
+    // which differs by mode — a chat slot's permission/question card in the
+    // transcript, a PTY agent's prompt drawn in the terminal — but either way it
+    // holds the id the driver is blocked on, which free text cannot carry.
+    // Injecting text is worse than noise on a PTY: it lands as keystrokes at the
+    // prompt, and the trailing CR accepts whatever option is highlighted. Callers
+    // route the user to the session; this is the floor for the ones that forget.
     if (escalation.kind == 'resolve_in_session') return false;
     // Never submit an empty answer: '$text\r' with blank text is a bare Enter,
     // which accepts the default at whatever prompt the agent is showing (e.g. a
     // [Y/n] confirmation). The reply sheet also disables its send button when
     // empty; this is the enforcement floor.
     if (text.trim().isEmpty) return false;
+    // Handler asked this question and is owed the answer as much as the agent is.
+    // Sent BEFORE the reply and never instead of it: the bridge resolves the row by
+    // id, and the reply's own submitted line retires that row on arrival — so a note
+    // sent afterwards names a question that is already gone and the judge learns
+    // nothing, which is the bug this closes.
+    //
+    // `delivered` is what tells the bridge the words went into the session. It is a
+    // fact about THIS send, which is why it travels rather than being re-derived
+    // from the row: reconcileAsks can promote a row between the render and the tap.
+    //
+    // Gated on the session's own advert, re-read on every send and never latched: a
+    // bridge without it reads the `escalationId` as an ordinary instruction, mints
+    // an authorization lift out of the user's answer and splits it into backlog
+    // items.
+    final notesAnswers =
+        _state.sessions[escalation.terminalId]?.escalationAnswer == true;
+    if (notesAnswers &&
+        !escalation.nonBlocking &&
+        escalation.kind != 'guard_blocked') {
+      session.send(
+        createAbMessage('handler:instruct', {
+          'projectId': session.projectId,
+          'terminalId': escalation.terminalId,
+          'text': text,
+          'escalationId': escalation.escalationId,
+          'delivered': true,
+          'choiceId': ?tappedChoiceId,
+        }),
+      );
+    }
     if (_isChat(escalation.terminalId)) {
       session.send(
         createAbMessage('agent:prompt', {
@@ -791,8 +913,15 @@ class HandlerService {
     // one already unblocked. A `guard_blocked` sibling is NOT one of those: the
     // bridge does not retire it on a submitted line, so suppressing it here would
     // hide a row the next snapshot still legitimately carries.
+    //
+    // Nor is an ask, and that exclusion is set hygiene rather than a live fix: an
+    // ask carries no `choices`, and the only thing that reads this set keys on
+    // `choices != null`, so an ask inside it changes nothing today. It earns its
+    // place against the refactor that gives an ask a card riding `choices`, at
+    // which point the inertness would end with nothing saying so.
     for (final e in _state.escalations) {
       if (e.terminalId == escalation.terminalId &&
+          !e.nonBlocking &&
           e.kind != 'resolve_in_session' &&
           e.kind != 'guard_blocked') {
         _answeredEscalations.add(e.escalationId);
@@ -803,21 +932,24 @@ class HandlerService {
     // tell that line apart from an unrelated one, which is the whole reason the
     // kind exists — so the dismiss rides along with it.
     if (escalation.kind == 'guard_blocked') _sendDismiss(escalation);
-    _dropRows(
-      escalation.terminalId,
-      (e) => _survivesReply(e, escalation),
-    );
+    _dropRows(escalation.terminalId, (e) => _survivesReply(e, escalation));
     return true;
   }
 
   /// Whether [e] outlives the submitted line that answered [answered]. Exactly
-  /// the bridge's rule: an option-based prompt is unanswerable by a typed line,
-  /// and a report is not answered by one either — but the report the user
-  /// replied FROM is dismissed alongside the send, so it goes.
+  /// the bridge's rule: an ask is a question Handler put to the user and the
+  /// typed line is aimed at the agent, an option-based prompt is unanswerable by
+  /// a typed line, and a report is not answered by one either — but the report
+  /// the user replied FROM is dismissed alongside the send, so it goes.
+  ///
+  /// Only `guard_blocked` carries that exclusion, and the asymmetry is the point:
+  /// [reply] sends a dismiss with the answer for a report, while an ask is never
+  /// answered through [reply] at all — its transports are [answerAsk] and
+  /// [answerAskText], which retire their own row.
   bool _survivesReply(HandlerEscalation e, HandlerEscalation answered) =>
+      e.nonBlocking ||
       e.kind == 'resolve_in_session' ||
-      (e.kind == 'guard_blocked' &&
-          e.escalationId != answered.escalationId);
+      (e.kind == 'guard_blocked' && e.escalationId != answered.escalationId);
 
   /// Optimistically drop every row on [terminalId] that [survives] rejects, and
   /// recompute the owning session's pending count so the header pill and tab
@@ -827,10 +959,7 @@ class HandlerService {
   /// Clearing wholesale instead would blank the pill over a session the bridge
   /// still reports as needs_you and flip it back a round trip later — the
   /// blank-over-a-blocked-agent flash this optimism exists to spare the user.
-  void _dropRows(
-    String terminalId,
-    bool Function(HandlerEscalation) survives,
-  ) {
+  void _dropRows(String terminalId, bool Function(HandlerEscalation) survives) {
     final sessions = Map<String, HandlerSessionState>.from(_state.sessions);
     final owner = sessions[terminalId];
     if (owner != null) {
@@ -861,18 +990,24 @@ class HandlerService {
   /// action — can never put text of its own into the session, and an id that no
   /// longer matches sends nothing rather than something else.
   ///
-  /// Routes through [reply] and deliberately NOT through [instruct]: a tap
-  /// grants no authorization lift. `handler:instruct` is the sole feed point
-  /// for instruction-scoped authorization, and it derives that only from the
-  /// user's own instruction text — chip text is Assistant output (the judge
-  /// composed the draft `[Approve]` sends), so minting a lift from it would
-  /// launder the judge's own words into a grant the user never gave. It would
-  /// also stack an extraction item no terminal status can resolve, leaving the
-  /// session unable to wrap up. The costs are asymmetric: under-lifting costs
-  /// one advisory `floor_warning` row per repeat, since the floor records
-  /// rather than blocks, while over-lifting costs a session-wide grant nobody
-  /// read. The real lift stays one control away, in the user's own words, via
-  /// the PA bar.
+  /// The words route through [reply] exactly as a typed answer's do — never
+  /// through [instruct] — and deliberately grant no authorization lift.
+  /// `handler:instruct` is the sole feed point for instruction-scoped
+  /// authorization, and it derives that only from the user's own instruction
+  /// text — chip text is Assistant output (the judge composed the draft
+  /// `[Approve]` sends), so minting a lift from it would launder the judge's
+  /// own words into a grant the user never gave. It would also stack an
+  /// extraction item no terminal status can resolve, leaving the session
+  /// unable to wrap up. The costs are asymmetric: under-lifting costs one
+  /// advisory `floor_warning` row per repeat, since the floor records rather
+  /// than blocks, while over-lifting costs a session-wide grant nobody read.
+  /// The real lift stays one control away, in the user's own words, via the
+  /// PA bar.
+  ///
+  /// [reply] also sends a note beside the words naming this choiceId, so the
+  /// bridge can bank what the card actually offered for its judge instead of
+  /// the words themselves — which are engine- or judge-authored, never the
+  /// user's own, and must never be recorded as if they were.
   ///
   /// Returns whether the answer reached the wire, so a card can only show a
   /// send as in-flight when one actually is.
@@ -880,12 +1015,116 @@ class HandlerService {
     if (_disposed) return false;
     // Resolved against the state's copy, not the caller's: an escalation held
     // across a frame (or arriving by notification id) can have had its card
-    // withdrawn since — by _withChoiceFloors — and the stale object would still
-    // offer the tap the floors just took away.
+    // withdrawn since — by _applyEscalationFloors — and the stale object would
+    // still offer the tap the floors just took away.
     final current = _escalationById(escalation.escalationId) ?? escalation;
     final choice = current.choiceById(choiceId);
     if (choice == null) return false;
-    return reply(current, choice.text);
+    return reply(current, choice.text, tappedChoiceId: choice.choiceId);
+  }
+
+  /// The live ask an answer may be sent against, or null when there is none.
+  ///
+  /// Re-resolved through [_escalationById] with NO fallback to the caller's own
+  /// object, unlike [answerWithChoice]: a card or a sheet held across a frame
+  /// can be answering a question the bridge has already retired, and the bridge
+  /// fails exactly that answer closed. Falling back to the stale row would be
+  /// this app asking it to accept one.
+  ///
+  /// The session's advert is read again here rather than inferred from a row
+  /// [_applyEscalationFloors] has already gated, because it is the whole of
+  /// what says this bridge has a verb for the answer at all — one that does not
+  /// drops `handler:answer` at its parser with no error frame and nothing
+  /// logged, and reads an `escalationId` on `handler:instruct` as an ordinary
+  /// instruction.
+  HandlerEscalation? _resolveAsk(HandlerEscalation escalation) {
+    if (_disposed) return null;
+    final current = _escalationById(escalation.escalationId);
+    if (current == null || !current.nonBlocking) return null;
+    if (_state.sessions[current.terminalId]?.askAnswer != true) return null;
+    return current;
+  }
+
+  /// Optimistically retire the answered ask and nothing else. A submitted line
+  /// clears a terminal's whole free-text set on both sides of the wire, but an
+  /// answer names one escalation and the bridge retires that row alone — so a
+  /// sibling dropped here would come straight back off the next snapshot with
+  /// its own question still unanswered.
+  void _retireAnsweredAsk(HandlerEscalation answered) => _dropRows(
+    answered.terminalId,
+    (e) => e.escalationId != answered.escalationId,
+  );
+
+  /// Answer an ask by tapping one of its own options.
+  ///
+  /// The frame carries [choiceId] and nothing else. The option's words are the
+  /// judge's, so the bridge resolves them against its own persisted row, and
+  /// what the judge is told the user chose is exactly the string that was on
+  /// the button. That is also why this takes neither of the paths that already
+  /// exist: [reply] types the text into the session and sweeps every sibling
+  /// row the way a submitted line does, and [instruct] mints an authorization
+  /// lift out of it and queues an extraction the judge would then drive back at
+  /// the agent — which is the judge instructing the agent in the user's name.
+  ///
+  /// Returns synchronously whether the answer reached the wire, because the
+  /// card latches its pending state only on a send that happened and every
+  /// refusal below leaves the question standing.
+  bool answerAsk(HandlerEscalation escalation, String choiceId) {
+    final current = _resolveAsk(escalation);
+    if (current == null) return false;
+    // Resolved against the options this app is currently showing, so an id the
+    // user never saw a button for sends nothing rather than something else —
+    // the same floor [answerWithChoice] puts on a quick choice, and what lets
+    // an OS notification action carry an id safely.
+    final offered = current.askOptions ?? const <HandlerAskOption>[];
+    if (!offered.any((o) => o.choiceId == choiceId)) return false;
+    session.send(
+      createAbMessage('handler:answer', {
+        'projectId': session.projectId,
+        'terminalId': current.terminalId,
+        'escalationId': current.escalationId,
+        'choiceId': choiceId,
+      }),
+    );
+    _retireAnsweredAsk(current);
+    return true;
+  }
+
+  /// Answer an ask in the user's own words.
+  ///
+  /// The `escalationId` rides along because it is what tells the bridge this
+  /// sentence ANSWERS a standing question rather than opening new work; without
+  /// it the same frame lifts authorization for the session and is split into
+  /// backlog items.
+  ///
+  /// Built here rather than routed through [instruct], for a reason about the
+  /// drawer rather than the wire: [instruct] parks the sentence in
+  /// `pendingInstructions` against an [_instructBaselines] snapshot, and
+  /// [_retirePending] only lets it go once that terminal's backlog length or
+  /// `armedAt` has moved. An answer the judge merely reads moves neither, so
+  /// the "sending" row and the drawer's edit lock would stand for the rest of
+  /// the session and a corrected second answer would be refused as a duplicate.
+  /// That debounce exists because extraction APPENDS and nothing absorbs a
+  /// repeat — a fact about the one path an answer does not take.
+  ///
+  /// Returns whether the answer reached the wire, for the same reason
+  /// [answerAsk] does.
+  bool answerAskText(HandlerEscalation escalation, String text) {
+    final current = _resolveAsk(escalation);
+    if (current == null) return false;
+    // An empty answer retires the row here and is dropped by the bridge, which
+    // the user reads as an answer given and then silently lost.
+    if (text.trim().isEmpty) return false;
+    session.send(
+      createAbMessage('handler:instruct', {
+        'projectId': session.projectId,
+        'terminalId': current.terminalId,
+        'text': text,
+        'escalationId': current.escalationId,
+      }),
+    );
+    _retireAnsweredAsk(current);
+    return true;
   }
 
   HandlerEscalation? _escalationById(String escalationId) {

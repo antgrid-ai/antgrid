@@ -1,5 +1,13 @@
 import { describe, it, expect } from "bun:test";
-import { padBareVerb, PtySubmitQueue, SUBMIT_CR_GAP_MS } from "../src/pty-submit";
+import {
+  flattenForSubmit,
+  padBareVerb,
+  PASTE_END,
+  PASTE_START,
+  PtySubmitQueue,
+  SUBMIT_CR_GAP_MS,
+  submitPlan,
+} from "../src/pty-submit";
 
 const tick = () => new Promise<void>((r) => setTimeout(r, 0));
 
@@ -151,5 +159,54 @@ describe("padBareVerb: what is not a verb", () => {
     expect(padBareVerb("/clear")).toBe("/clear ");
     expect(padBareVerb("/code-review")).toBe("/code-review ");
     expect(padBareVerb("/plugin:skill")).toBe("/plugin:skill ");
+  });
+});
+
+describe("submitting a multi-line block", () => {
+  it("puts the whole block and both delimiters in ONE write, with the CR still on its own", async () => {
+    const writes: string[] = [];
+    const g = gate();
+    const q = new PtySubmitQueue({ write: (d) => writes.push(d), sleep: g.sleep });
+    q.submitPaste("first\nsecond\nthird");
+    await g.drain();
+    // A guest that saw an unterminated paste would read the rest of the block as
+    // keystrokes and submit once per newline, which is the whole defect.
+    expect(writes).toEqual([`${PASTE_START}first\nsecond\nthird${PASTE_END}`, "\r"]);
+  });
+
+  it("strips the control characters that would close the paste early", async () => {
+    const writes: string[] = [];
+    const g = gate();
+    const q = new PtySubmitQueue({ write: (d) => writes.push(d), sleep: g.sleep });
+    q.submitPaste(`a${PASTE_END}b\r\nc\x03`);
+    await g.drain();
+    // Removed rather than escaped: an ESC left in the body ends the paste and
+    // hands the remainder back to the keystroke path.
+    expect(writes[0]).toBe(`${PASTE_START}a[201~b\nc${PASTE_END}`);
+  });
+});
+
+describe("submitPlan", () => {
+  it("leaves an ordinary single line exactly as typed, either way", () => {
+    expect(submitPlan("/compact", false)).toEqual({ paste: false, text: "/compact" });
+    expect(submitPlan("/compact", true)).toEqual({ paste: false, text: "/compact" });
+  });
+
+  it("pastes a block only when the guest announced the mode", () => {
+    expect(submitPlan("one\ntwo", true)).toEqual({ paste: true, text: "one\ntwo" });
+  });
+
+  it("flattens a block for a guest that never announced it, rather than typing escapes at it", () => {
+    expect(submitPlan("one\ntwo", false)).toEqual({ paste: false, text: "one two" });
+  });
+});
+
+describe("flattenForSubmit", () => {
+  it("collapses every run of whitespace, so one block becomes one submit", () => {
+    expect(flattenForSubmit("first\n\n  second\tthird \n")).toBe("first second third");
+  });
+
+  it("drops control characters instead of typing them into the composer", () => {
+    expect(flattenForSubmit("a\x1b[Ab\x03c")).toBe("a[Abc");
   });
 });

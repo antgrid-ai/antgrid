@@ -4,7 +4,7 @@ import 'agent_event.dart' show parseAgentEvent;
 import 'agent_hello.dart';
 import 'file_tree_models.dart';
 import 'git_sync_state.dart';
-import 'handler_state.dart' show HandlerEscalationChoice;
+import 'handler_state.dart' show HandlerAskOption, HandlerEscalationChoice;
 import 'layout_models.dart';
 import 'preview_models.dart';
 import 'service_status.dart';
@@ -240,7 +240,7 @@ class NotificationPushMessage {
   final String id;
   final int timestamp;
   final String
-  notificationType; // task_complete | permission_request | awaiting_input | idle | error
+  notificationType; // task_complete | permission_request | awaiting_input | question | idle | error
   final String? message;
   final String? sessionTitle;
 
@@ -536,6 +536,13 @@ class HandlerStatusMessage {
   /// What an absent per-session judge tool resolves to for PTY slots (the
   /// project's agent tool); chat slots resolve from their own session entry.
   final String? defaultTool;
+
+  /// The lens ids this bridge accepts. Presence is the capability advert (see
+  /// `HandlerState.lenses`, handler_state.dart) and absence is a bridge that
+  /// has none, so this stays NULLABLE where the other collections here degrade
+  /// to empty: an empty list would be a bridge offering no lens, which is a
+  /// different fact.
+  final List<String>? lenses;
   final List<Map<String, dynamic>> sessions;
 
   /// Every snapshot the project still knows about, replayed like the
@@ -561,6 +568,7 @@ class HandlerStatusMessage {
     required this.timestamp,
     required this.projectId,
     this.defaultTool,
+    this.lenses,
     required this.sessions,
     this.snapshots = const [],
     this.wrapUps = const [],
@@ -604,6 +612,14 @@ class HandlerEscalationMessage {
   /// this and the status replay share.
   final List<HandlerEscalationChoice>? choices;
 
+  /// The ask half of the row, documented on [HandlerEscalation], which this
+  /// message is a hand-copy of. The push and the status replay build that
+  /// object from two separate field lists, so all three land here too or a row
+  /// reads as an ask on reconnect and as a stopped session while it is live.
+  final bool nonBlocking;
+  final List<String> unblocked;
+  final List<HandlerAskOption>? askOptions;
+
   const HandlerEscalationMessage({
     required this.id,
     required this.timestamp,
@@ -617,6 +633,9 @@ class HandlerEscalationMessage {
     this.floorRule,
     this.kind,
     this.choices,
+    this.nonBlocking = false,
+    this.unblocked = const [],
+    this.askOptions,
   });
 }
 
@@ -2357,6 +2376,16 @@ Object? parseAbMessage(Map<String, dynamic> json) {
             if (w is Map<String, dynamic>) wrapUps.add(w);
           }
         }
+        // Null unless the bridge actually named a list, and every entry kept as
+        // it came: an id this build cannot name still says the far end takes
+        // one, and the offer is narrowed to what both ends know at the picker.
+        final lensesJson = json['lenses'];
+        final lenses = lensesJson is List
+            ? <String>[
+                for (final l in lensesJson)
+                  if (l is String) l,
+              ]
+            : null;
         return HandlerStatusMessage(
           id: id,
           timestamp: timestamp,
@@ -2364,6 +2393,7 @@ Object? parseAbMessage(Map<String, dynamic> json) {
           defaultTool: json['defaultTool'] is String
               ? json['defaultTool'] as String
               : null,
+          lenses: lenses,
           sessions: sessions,
           snapshots: snapshots,
           wrapUps: wrapUps,
@@ -2405,6 +2435,8 @@ Object? parseAbMessage(Map<String, dynamic> json) {
         }
         final floorRule = json['floorRule'];
         final kind = json['kind'] is String ? json['kind'] as String : null;
+        final nonBlocking = json['nonBlocking'];
+        final unblocked = json['unblocked'];
         return HandlerEscalationMessage(
           id: id,
           timestamp: timestamp,
@@ -2424,6 +2456,18 @@ Object? parseAbMessage(Map<String, dynamic> json) {
             json['choices'],
             kind: kind,
           ),
+          // Same is-check discipline, and the ask fields degrade for the same
+          // reason [HandlerEscalation.fromWire]'s do: the value each one takes
+          // when the key is missing is both the compatible reading and the
+          // conservative one.
+          nonBlocking: nonBlocking is bool ? nonBlocking : false,
+          unblocked: unblocked is List
+              ? [
+                  for (final id in unblocked)
+                    if (id is String) id,
+                ]
+              : const [],
+          askOptions: HandlerAskOption.listFromWire(json['askOptions']),
         );
       }
 
@@ -2474,6 +2518,34 @@ Object? parseAbMessage(Map<String, dynamic> json) {
     case 'agent:updateAvailable':
     case 'agent:updateResult':
       return parseAgentEvent(json);
+
+    // Session-bus frames are CARRIED, not consumed: the app is a transport leg
+    // between the two bridges of one exchange, so the payload is handed on
+    // verbatim rather than modelled — a field a newer bridge adds must survive
+    // an older app. Recognized here (returning the raw map, as the preview
+    // tunnel's frames effectively are) only so the classification gate sees a
+    // type that is deliberately unrouted; see kUnroutedInboundTypes.
+    case 'session-bus:post':
+    case 'session-bus:notify':
+    case 'session-bus:fetch':
+    case 'session-bus:fetch:result':
+    case 'session-bus:ack':
+      return json;
+
+    // The app's own reads of its bridge's session bus, plus the unsolicited
+    // note that one of those mailboxes grew. Handed on raw like the
+    // carried frames above, but for the opposite reason: these ARE this app's
+    // messages, and their one reader (`providers/session_bus_inbox.dart`)
+    // decodes them into the view models its surfaces render. A second set of
+    // models here would be two shapes to keep true against one schema.
+    //
+    // The two REQUESTS they answer (`session-bus:inbox` and
+    // `session-bus:thread`) are app→bridge and never arrive, so they have no
+    // case here; their type strings are authored where they are sent.
+    case 'session-bus:inbox:result':
+    case 'session-bus:thread:result':
+    case 'session-bus:arrived':
+      return json;
 
     default:
       return null;

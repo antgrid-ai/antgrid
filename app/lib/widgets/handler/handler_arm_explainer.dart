@@ -9,6 +9,7 @@ import '../../design/ab_tokens.dart';
 import '../../design/widgets/ab_adaptive_sheet.dart';
 import '../../design/widgets/ab_button.dart';
 import '../../design/widgets/ab_dialog.dart';
+import '../../design/widgets/ab_section_header.dart';
 import '../../design/widgets/ab_toast.dart';
 import '../../models/handler_state.dart';
 import '../../navigation/root_navigator.dart';
@@ -30,22 +31,19 @@ import 'handler_session_settings.dart';
 /// once the user has armed anything (see [FirstRunState.handlerArmedOnce]).
 /// Only that paragraph is dropped: this sheet opens on every arm, so its copy
 /// would otherwise re-teach a user who has walked away and come back many
-/// times. Everything below it is a fact about THIS arm — what will be queued,
-/// what the agent will report — and none of it is retired by having read the
-/// paragraph once.
+/// times. What is left is a fact about THIS arm — what the agent will report —
+/// and it is not retired by having read the paragraph once.
 ///
 /// The coverage line mirrors the catalog contract (see agentCatalogProvider):
 /// `false` is a bridge saying "cannot watch" — reuse [unwatchableNotice], the
 /// warning that otherwise lives only in the shield tooltip — while `null`
 /// means nobody has said anything, so the copy claims neither.
 ///
-/// [hasOpeningPrompt] announces the seeded goal: a backlog appears on its own
-/// the moment such a session arms, and the sentence it came from was typed on a
-/// different screen minutes earlier. Said before the coverage caveat — a
-/// warning still reads last — and withheld entirely from the `false` arm, since
-/// a session that will say nothing has nothing to say about what it starts
-/// from. This is the one screen whose whole job is to set the expectation
-/// before the user walks away.
+/// The seeded goal is NOT announced here. It used to be, as a sentence saying
+/// a backlog would appear from something typed on another screen — which the
+/// sheet now simply shows, verbatim, above the composer that asks what to add
+/// beyond it (see [_ArmSheet]). A paragraph describing a sentence, stacked
+/// directly over that sentence, is the same fact twice.
 ///
 /// [judgeCapable] is the second, independent half of the same coverage answer
 /// — the session IS watched, but its judge cannot run headless, so every pause
@@ -59,7 +57,6 @@ import 'handler_session_settings.dart';
 String? handlerArmExplainerBody({
   required bool? agentObservable,
   String? agentLabel,
-  bool hasOpeningPrompt = false,
   bool? judgeCapable,
   bool explain = true,
 }) {
@@ -67,11 +64,6 @@ String? handlerArmExplainerBody({
       "Handler watches this session while you're away. When the agent pauses "
       'on a question or a permission, Handler answers what it safely can and '
       'queues the rest for you.';
-  // Names Handler outright rather than opening on "It", because the paragraph
-  // that would have been its antecedent is gone on every arm past the first.
-  const goal =
-      'Handler starts from what you asked for when you opened this session, '
-      'and queues that as your backlog.';
   final warning = switch (agentObservable) {
     true => judgeCapable == false ? escalateOnlyNotice : null,
     false => unwatchableNotice(agentLabel),
@@ -79,14 +71,7 @@ String? handlerArmExplainerBody({
       "This agent hasn't reported what Handler can see here, so it may stay "
           'silent.',
   };
-  final paragraphs = [
-    if (explain) base,
-    // Withheld entirely from the unwatchable arm. Extraction still runs there,
-    // so the sentence is mechanically true, but it promises a backlog directly
-    // above the notice saying arming would stay silent.
-    if (hasOpeningPrompt && agentObservable != false) goal,
-    ?warning,
-  ];
+  final paragraphs = [if (explain) base, ?warning];
   return paragraphs.isEmpty ? null : paragraphs.join('\n\n');
 }
 
@@ -104,8 +89,8 @@ typedef HandlerArmDecision = ({
 });
 
 /// Shows the arm sheet — what Handler will do here, with the session's judge,
-/// posture and an instruction composer on it. Returns what the user decided, or
-/// null if they backed out.
+/// lens, brief and an instruction composer on it. Returns what the user
+/// decided, or null if they backed out.
 ///
 /// A sheet rather than a dialog, for one reason: this screen tells a user their
 /// judge cannot run headless, and the picker that fixes it belongs beside the
@@ -121,7 +106,7 @@ Future<HandlerArmDecision?> showHandlerArmSheet(
   required HandlerSessionSettingsValue initial,
   required bool? agentObservable,
   String? agentLabel,
-  bool hasOpeningPrompt = false,
+  String? openingPrompt,
   bool? judgeCapable,
   bool explain = true,
 }) => showAbAdaptiveSheet<HandlerArmDecision>(
@@ -129,7 +114,7 @@ Future<HandlerArmDecision?> showHandlerArmSheet(
   child: _ArmSheet(
     terminalId: terminalId,
     initial: initial,
-    hasOpeningPrompt: hasOpeningPrompt,
+    openingPrompt: openingPrompt,
     agentObservable: agentObservable,
     agentLabel: agentLabel,
     judgeCapable: judgeCapable,
@@ -141,7 +126,7 @@ class _ArmSheet extends ConsumerStatefulWidget {
   const _ArmSheet({
     required this.terminalId,
     required this.initial,
-    required this.hasOpeningPrompt,
+    required this.openingPrompt,
     required this.agentObservable,
     required this.agentLabel,
     required this.judgeCapable,
@@ -154,7 +139,7 @@ class _ArmSheet extends ConsumerStatefulWidget {
   final String? agentLabel;
 
   /// See [handlerArmExplainerBody]. Drops the standing explanation only; the
-  /// coverage warnings and the seeded goal are per-arm facts and stay.
+  /// coverage warnings are per-agent facts and stay.
   final bool explain;
 
   /// Whether the judge this sheet OPENED on can run headless. The seed only —
@@ -162,11 +147,16 @@ class _ArmSheet extends ConsumerStatefulWidget {
   /// (see [_ArmSheetState.build]).
   final bool? judgeCapable;
 
-  /// Steers the composer's hint alone. A seeded goal is already extracted on
-  /// arm, and an instruction typed here is extracted a second time — nothing
-  /// dedups across the two passes — so the sheet's job is to stop the user
-  /// restating what it has just told them is already queued.
-  final bool hasOpeningPrompt;
+  /// The sentence this session was opened with, already on its way to becoming
+  /// a backlog item, or null when nothing was remembered.
+  ///
+  /// Carried as the TEXT and not as a bool: the composer asks for anything
+  /// "beyond that", and the only screen that ever showed "that" was the box the
+  /// user typed it into, minutes ago and somewhere else. A pronoun whose
+  /// antecedent is off screen is what makes a user restate the sentence — and
+  /// nothing dedups across the two extraction passes, so the restatement lands
+  /// in the backlog twice.
+  final String? openingPrompt;
 
   @override
   ConsumerState<_ArmSheet> createState() => _ArmSheetState();
@@ -175,33 +165,32 @@ class _ArmSheet extends ConsumerStatefulWidget {
 class _ArmSheetState extends ConsumerState<_ArmSheet> {
   /// What the sheet opens on, and the `from` side of its judge delta.
   ///
-  /// The posture is seeded to a real preset even where nothing has reported one
-  /// — unlike the settings sheet, which reports what the far end holds and must
-  /// show "not reported" rather than invent it. This is the control the sheet
-  /// exists for, and its unreported copy names a bridge too old to have the
-  /// setting, which is a claim this surface has no grounds to make.
+  /// The lens is seeded UNCOERCED, the same as everywhere else: a null pick
+  /// means this app has not been told what this session judges under, and the
+  /// control renders with nothing selected and says it runs as it was last set.
+  /// The cache is empty after a restart while the bridge still holds the lens
+  /// the slot was last given, so painting the default there would report a pick
+  /// nobody made — and then send nothing when the user "chose" it.
   ///
-  /// That seed is a DISPLAY value and never a report, so it is not what the
-  /// posture is sent against — see [_postureTouched]. The service cache is
-  /// empty for a disarmed session after a restart while the bridge still holds
-  /// the posture that session was last given, and treating the seed as the
-  /// stored value would reset that pick to the default on every re-arm. The
-  /// judge needs none of this, which is why it can diff normally: it is never
-  /// seeded in the first place.
+  /// Which is why the lens is not sent off this delta at all: see
+  /// [_roleTouched]. The judge needs none of it and diffs normally.
   late final HandlerSessionSettingsValue _opened = (
     judgeTool: widget.initial.judgeTool,
     judgeModel: widget.initial.judgeModel,
-    personality: widget.initial.personality ?? HandlerPersonality.watchdog,
+    lens: widget.initial.lens,
   );
   late HandlerSessionSettingsValue _value = _opened;
 
-  /// Whether the user has TOUCHED the posture control, which is not the same
-  /// question as whether the value ended up different. Moving off the seed and
-  /// back is still a choice, and the seed it lands on may not be what the
-  /// bridge holds — so any touch sends, and only an untouched control stays
-  /// silent. A tap on the cell already selected never reaches here: AbSegmented
-  /// swallows it, which is why this cannot simply be "the user tapped it".
-  bool _postureTouched = false;
+  /// Whether the user has ANSWERED each lens control, which is not the same
+  /// question as whether the value ended up different. The seed may not be what
+  /// the bridge holds, so moving off it and back is still a choice — and a tap
+  /// on the chip already shown is one too, which is why these are set from the
+  /// control's own taps rather than from a diff.
+  ///
+  /// Two flags over two fields, never one: a brief typed over a pick this app
+  /// was never told must not carry a role clear the user never made.
+  bool _roleTouched = false;
+  bool _briefTouched = false;
   final _instruction = TextEditingController();
 
   @override
@@ -213,6 +202,17 @@ class _ArmSheetState extends ConsumerState<_ArmSheet> {
   @override
   Widget build(BuildContext context) {
     final p = context.antgrid;
+    // Whitespace alone is not a goal to quote, and the store holds whatever the
+    // New Session composer was sent with.
+    //
+    // Withheld entirely from the unwatchable arm, the same gate the paragraph
+    // this replaced carried: extraction still runs there, so the sentence is
+    // mechanically true, but promising a backlog directly above the notice
+    // saying arming would stay silent is the one claim it must not make.
+    final goal = widget.agentObservable == false
+        ? null
+        : widget.openingPrompt?.trim();
+    final hasGoal = goal != null && goal.isNotEmpty;
     // Recomputed on every build, never frozen at open: the composer's judge
     // chip is ON this sheet, so the escalate-only warning in this copy is one
     // the user can fix while reading it. A body computed once would keep
@@ -226,7 +226,6 @@ class _ArmSheetState extends ConsumerState<_ArmSheet> {
     final body = handlerArmExplainerBody(
       agentObservable: widget.agentObservable,
       agentLabel: widget.agentLabel,
-      hasOpeningPrompt: widget.hasOpeningPrompt,
       judgeCapable: effectiveJudge == null
           ? widget.judgeCapable
           : ref.watch(agentCatalogProvider)[effectiveJudge]?.judgeCapable,
@@ -268,9 +267,63 @@ class _ArmSheetState extends ConsumerState<_ArmSheet> {
             // The title row carries no bottom padding of its own — a paragraph's
             // leading is what has always separated it from what follows.
             const SizedBox(height: AbTokens.space12),
-          // Directly under the sentence about what gets queued, and above the
-          // posture control: this box IS the act, and how much Handler handles
-          // is a setting subordinate to it. No autofocus — the sheet is a thing
+          // The composer is the only block on this sheet that had no label, and
+          // it is the one the sheet exists for. A hint is not a label: it is
+          // gone the moment the user types, and on the ordinary repeat arm —
+          // where the explanatory body is retired — an unlabelled box under a
+          // bare title left the sheet with no statement of its subject at all.
+          // Geometry matches [HandlerLensControl]'s own heads so the three
+          // blocks read as one column.
+          const AbSectionHeader(
+            label: "What to do while you're away",
+            padding: EdgeInsets.fromLTRB(
+              AbTokens.space16,
+              0,
+              AbTokens.space16,
+              AbTokens.space6,
+            ),
+          ),
+          // The antecedent for the composer's "beyond that?", shown rather than
+          // referred to — this replaces the paragraph that used to describe it.
+          // Two lines at most: a reminder of a sentence the user wrote, not a
+          // second place to read it in full.
+          if (hasGoal)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(
+                AbTokens.space16,
+                0,
+                AbTokens.space16,
+                AbTokens.space8,
+              ),
+              child: Text.rich(
+                TextSpan(
+                  children: [
+                    TextSpan(
+                      // Names the surface the sentence lands on, and says
+                      // WHERE in it: this is entry #1, the one the backlog
+                      // pins above everything typed later.
+                      text: 'Your backlog starts with: ',
+                      style: AbTokens.sansStyle(
+                        fontSize: AbTokens.fontXs,
+                        color: p.textMuted,
+                      ),
+                    ),
+                    TextSpan(
+                      text: goal,
+                      style: AbTokens.sansStyle(
+                        fontSize: AbTokens.fontXs,
+                        color: p.textSecondary,
+                      ),
+                    ),
+                  ],
+                ),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          // Directly under the goal it continues, and above the lens control:
+          // this box IS the act, and what the judge looks for is a setting
+          // subordinate to it. No autofocus — the sheet is a thing
           // to read first, and a keyboard over it on a phone hides the copy
           // that explains what arming does.
           Padding(
@@ -283,7 +336,7 @@ class _ArmSheetState extends ConsumerState<_ArmSheet> {
             child: HandlerInstructionComposer(
               terminalId: widget.terminalId,
               controller: _instruction,
-              hintText: widget.hasOpeningPrompt
+              hintText: hasGoal
                   ? 'Anything to add beyond that?'
                   // The empty backlog's own invitation, verbatim: one act
                   // worded one way wherever the user meets it.
@@ -296,7 +349,7 @@ class _ArmSheetState extends ConsumerState<_ArmSheet> {
                 () => _value = (
                   judgeTool: pick.judgeTool,
                   judgeModel: pick.judgeModel,
-                  personality: _value.personality,
+                  lens: _value.lens,
                 ),
               ),
               judgeScopeNote: handlerJudgeScopeOnArm,
@@ -306,13 +359,16 @@ class _ArmSheetState extends ConsumerState<_ArmSheet> {
           ),
           // The judge rows stay off this sheet — the composer's chip is that
           // picker here, and mounting both would be two controls for one value.
-          HandlerPostureControl(
+          HandlerLensControl(
             terminalId: widget.terminalId,
             value: _value,
-            onChanged: (next) => setState(() {
-              _value = next;
-              _postureTouched = true;
-            }),
+            // A brief typed and never submitted still rides this arm: the one
+            // commit here is the button below, so a field waiting on Enter
+            // would drop what the user wrote on the way out.
+            commitBriefOnEdit: true,
+            onChanged: (next) => setState(() => _value = next),
+            onRoleTapped: () => _roleTouched = true,
+            onBriefEdited: () => _briefTouched = true,
           ),
           Padding(
             padding: const EdgeInsets.all(AbTokens.space16),
@@ -328,13 +384,20 @@ class _ArmSheetState extends ConsumerState<_ArmSheet> {
                   label: 'Arm Handler',
                   variant: AbButtonVariant.primary,
                   onTap: () {
+                    // Only the judge half of this delta is used: the lens is
+                    // sent off the touch flags instead, because a seed this app
+                    // was never told cannot be diffed against.
                     final edit = handlerSessionSettingsEdit(_opened, _value);
                     Navigator.of(context).maybePop((
                       settings: (
                         judgeTool: edit.judgeTool,
                         judgeModel: edit.judgeModel,
-                        personality: _postureTouched
-                            ? _value.personality
+                        role: _roleTouched ? (_value.lens?.roleId ?? '') : null,
+                        // Trimmed here rather than in the field, which commits
+                        // raw so the controller is never rewritten under the
+                        // cursor: a brief of nothing but spaces is a clear.
+                        brief: _briefTouched
+                            ? (_value.lens?.brief ?? '').trim()
                             : null,
                       ),
                       instruction: _instruction.text,
@@ -374,8 +437,8 @@ class _ArmSheetState extends ConsumerState<_ArmSheet> {
 /// away believing the session is watched.
 ///
 /// What the sheet sends is a DELTA: a control the user never touched sends
-/// nothing, so an arm cannot clear a judge or posture the bridge holds and this
-/// app has not yet been told about.
+/// nothing, so an arm cannot clear a judge, a lens or a brief the bridge holds
+/// and this app has not yet been told about.
 Future<void> armWithSheet({
   required BuildContext context,
   required ProviderContainer container,
@@ -413,7 +476,7 @@ Future<void> armWithSheet({
     ),
     agentObservable: agentObservable,
     agentLabel: agentLabel,
-    hasOpeningPrompt: goal != null,
+    openingPrompt: goal,
     judgeCapable: judgeCapable,
     explain: !container.read(firstRunProvider).handlerArmedOnce,
   );
@@ -423,7 +486,8 @@ Future<void> armWithSheet({
     goal: goal,
     judgeTool: decision.settings.judgeTool,
     judgeModel: decision.settings.judgeModel,
-    personality: decision.settings.personality,
+    role: decision.settings.role,
+    brief: decision.settings.brief,
   );
   latchHandlerArmedOnConfirmation(
     container,

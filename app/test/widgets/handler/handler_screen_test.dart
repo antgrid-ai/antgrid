@@ -1,5 +1,7 @@
 import 'dart:async';
 
+import 'package:antgrid/design/ab_tokens.dart';
+import 'package:antgrid/design/widgets/ab_button.dart';
 import 'package:antgrid/design/widgets/ab_icon.dart';
 import 'package:antgrid/design/widgets/ab_list_row.dart';
 import 'package:antgrid/models/handler_state.dart';
@@ -12,6 +14,7 @@ import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/services/handler_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+import 'package:antgrid/widgets/handler/handler_ask_footer.dart';
 import 'package:antgrid/widgets/handler/handler_blocked_action_card.dart';
 import 'package:antgrid/widgets/handler/handler_decision_card.dart';
 import 'package:antgrid/widgets/handler/handler_layout.dart';
@@ -132,11 +135,15 @@ Future<FakeAgentTransport> pumpLiveHandlerScreen(WidgetTester tester) async {
     cachedSessionsStore: cache,
     onClose: () async => await transport.dispose(),
   );
-  final service = HandlerService.fromSession(projectSession);
+  // The session's OWN service, not a second one built over the same streams:
+  // in production `handlerServiceProvider` reads exactly this instance, so a
+  // separate one would let a callback that re-resolves through
+  // `focusedServiceOrNull` act on a different HandlerService than the screen
+  // renders — a divergence no production path has.
+  final HandlerService service = projectSession.handlerService;
   final heavy = projectSession.heavyStream.listen((_) {}); // unpause the gate
   addTearDown(() async {
     await heavy.cancel();
-    await service.dispose();
     await projectSession.close();
   });
 
@@ -360,7 +367,32 @@ void main() {
     );
     expect(find.textContaining('Done: run the tests'), findsOneWidget);
     expect(find.textContaining('Skipped: open a PR'), findsOneWidget);
-    expect(find.text('Goal edited'), findsOneWidget);
+    expect(find.text('Also asked: ship it'), findsOneWidget);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  // Nothing was edited — a re-configure over a non-empty backlog stacks an
+  // instruction and leaves entry #1 where it was, so this row is the only
+  // place the added sentence ever surfaces. Proven against a reason distinct
+  // from the fixture default above, so a fixed label couldn't pass by accident.
+  testWidgets('a goal_edited row carries the sentence that was added, not a '
+      'fixed label', (tester) async {
+    await pumpHandlerScreen(
+      tester,
+      stateWith(sessions: {'t1': sessionState('t1')}).copyWith(
+        activity: const [
+          HandlerActivityRecord(
+            recordId: 'r1',
+            at: 1,
+            terminalId: 't1',
+            decision: 'goal_edited',
+            reason: 'also fix the flaky test',
+          ),
+        ],
+      ),
+    );
+    expect(find.text('Also asked: also fix the flaky test'), findsOneWidget);
+    expect(find.text('Goal edited'), findsNothing);
     debugDefaultTargetPlatformOverride = null;
   });
 
@@ -473,6 +505,9 @@ void main() {
     'wrapped_up',
     'parked',
     'resumed',
+    'asked',
+    'ask_rejected',
+    'answered',
   ];
 
   Future<void> pumpOneRow(WidgetTester tester, String decision) =>
@@ -1289,6 +1324,28 @@ void main() {
     );
   });
 
+  // The card and the bar read one helper, so the attribution cannot differ
+  // between the two surfaces a desktop user has on screen at once.
+  test('a park note names the judge when the judge is what failed', () {
+    final session = HandlerSessionState(
+      terminalId: 't1',
+      runState: HandlerRunState.parked,
+      pendingEscalations: 0,
+      armedAt: 1,
+      goal: 'ship it',
+      backlog: const [],
+      escalations: const [],
+      parkKind: 'outage',
+      parkedUntil: DateTime(2026, 8, 3, 14).millisecondsSinceEpoch,
+      parkCause: 'judge_failure',
+    );
+
+    expect(
+      handlerParkNote(session, now: DateTime(2026, 8, 3, 13)),
+      'judge unavailable · resumes 14:00',
+    );
+  });
+
   testWidgets('an unwatchable armed session says so on its row', (
     tester,
   ) async {
@@ -1670,6 +1727,344 @@ void main() {
       expect(find.textContaining('Handler is off'), findsOneWidget);
       expect(find.textContaining('answered the lint prompt'), findsNothing);
       debugDefaultTargetPlatformOverride = null;
+    });
+  });
+
+  group('an ask', () {
+    List<Map<String, dynamic>> optionsJson() => [
+      {
+        'choiceId': 'opt1',
+        'label': 'Ship it behind a flag',
+        'cost': 'One config key to take out later',
+        'recommended': true,
+      },
+      {
+        'choiceId': 'opt2',
+        'label': 'Hold it until you have read the diff',
+        'cost': 'The branch sits unmerged overnight',
+      },
+    ];
+
+    Map<String, dynamic> item(String id, String text, String status) => {
+      'id': id,
+      'text': text,
+      'status': status,
+      'createdAt': 1,
+    };
+
+    Map<String, dynamic> askJson({
+      List<Map<String, dynamic>>? options,
+      List<String> unblocked = const ['i1'],
+      bool nonBlocking = true,
+    }) => {
+      'escalationId': 'a1',
+      'question': 'ship behind a flag?',
+      'reasoning': 'The rollout plan is not written down.',
+      'draftReply': '',
+      'urgency': 'normal',
+      'at': 1,
+      'nonBlocking': nonBlocking,
+      'unblocked': unblocked,
+      'askOptions': ?options,
+    };
+
+    /// A replayed `handler:status` for one armed session that CAN be told an
+    /// answer. The advert is what the app's capability gate reads, so a frame
+    /// without it is the only way an ask reaches the screen as a blocking row.
+    Map<String, dynamic> statusJson({
+      List<Map<String, dynamic>> escalations = const [],
+      List<Map<String, dynamic>>? backlog,
+      bool askAnswer = true,
+      bool? askAnswerPending,
+    }) => {
+      'projectId': 'p',
+      'sessions': [
+        {
+          'terminalId': 't1',
+          'state': escalations.isEmpty ? 'watching' : 'needs_you',
+          'pendingEscalations': escalations.length,
+          'armedAt': 1,
+          'goal': 'ship it',
+          'backlog': backlog ?? [item('i1', 'wire the flag up', 'active')],
+          'escalations': escalations,
+          'askAnswer': askAnswer,
+          'askAnswerPending': ?askAnswerPending,
+        },
+      ],
+    };
+
+    /// Scoped to the card, because the session card below it renders the same
+    /// backlog item texts from its own list.
+    Finder onCard(Finder inner) => find.descendant(
+      of: find.byType(HandlerDecisionCard),
+      matching: inner,
+    );
+
+    testWidgets('with options draws one emphasised answer and its cost', (
+      tester,
+    ) async {
+      final t = await pumpLiveHandlerScreen(tester);
+      t.emit(
+        'handler:status',
+        statusJson(escalations: [askJson(options: optionsJson())]),
+      );
+      await pumpDelivery(tester);
+
+      expect(find.byType(HandlerDecisionCard), findsOneWidget);
+      expect(find.text('Hold it until you have read the diff'), findsOneWidget);
+      expect(find.text('One config key to take out later'), findsOneWidget);
+
+      final emphasised = tester
+          .widgetList<AbButton>(
+            find.byWidgetPredicate(
+              (w) => w is AbButton && w.variant == AbButtonVariant.primary,
+            ),
+          )
+          .toList();
+      expect(emphasised, hasLength(1));
+      expect(emphasised.single.label, 'Ship it behind a flag');
+
+      // Nothing on an ask is verbatim wire data bound for the session, so
+      // nothing on it wears the face that says so. A mono caption here would
+      // tell the user the string they are about to tap lands in the PTY.
+      for (final line in const [
+        'Ship it behind a flag',
+        'One config key to take out later',
+      ]) {
+        expect(
+          tester.widget<Text>(find.text(line)).style?.fontFamily,
+          isNot(AbTokens.fontMono),
+        );
+      }
+    });
+
+    testWidgets('a quick choice keeps its verbatim reply in mono', (
+      tester,
+    ) async {
+      // The other half of the same rule: `text` IS typed into the session, so
+      // the mono face is telling the truth there and must stay.
+      final t = await pumpLiveHandlerScreen(tester);
+      t.emit('handler:status', armedStatusJson());
+      await pumpDelivery(tester);
+      t.emit('handler:escalation', escalationJson(choices: choicesJson()));
+      await pumpDelivery(tester);
+
+      expect(
+        tester.widget<Text>(find.text(approveText)).style?.fontFamily,
+        AbTokens.fontMono,
+      );
+    });
+
+    testWidgets('a tap answers by id and puts nothing in the session', (
+      tester,
+    ) async {
+      final t = await pumpLiveHandlerScreen(tester);
+      t.emit(
+        'handler:status',
+        statusJson(escalations: [askJson(options: optionsJson())]),
+      );
+      await pumpDelivery(tester);
+
+      await tester.tap(find.text('Hold it until you have read the diff'));
+      await pumpDelivery(tester);
+
+      final answers = t.sent
+          .where((m) => m['type'] == 'handler:answer')
+          .toList();
+      expect(answers, hasLength(1));
+      expect(answers.single['terminalId'], 't1');
+      expect(answers.single['escalationId'], 'a1');
+      expect(answers.single['choiceId'], 'opt2');
+      // The words are the judge's and are resolved bridge-side; a tap that
+      // reached the PTY would be the one thing an ask exists not to do.
+      expect(t.sent.where((m) => m['type'] == 'terminal:input'), isEmpty);
+      expect(t.sent.where((m) => m['type'] == 'handler:instruct'), isEmpty);
+      expect(find.byType(HandlerDecisionCard), findsNothing);
+    });
+
+    testWidgets('without options it is still a row, and still says what is '
+        'running', (tester) async {
+      final t = await pumpLiveHandlerScreen(tester);
+      t.emit('handler:status', statusJson(escalations: [askJson()]));
+      await pumpDelivery(tester);
+
+      expect(find.byType(HandlerDecisionCard), findsNothing);
+      expect(find.text('ship behind a flag?'), findsOneWidget);
+      expect(find.text('Still working on 1 item'), findsOneWidget);
+      expect(find.text(handlerAskLatencyNote), findsOneWidget);
+    });
+
+    testWidgets('promoted to blocking it loses its buttons and keeps a way to '
+        'answer', (tester) async {
+      // The bridge strips `askOptions` in the same mutation that clears
+      // `nonBlocking`, and the screen requires both — so the frame that
+      // promotes an ask can never leave a live button behind it.
+      final t = await pumpLiveHandlerScreen(tester);
+      t.emit(
+        'handler:status',
+        statusJson(
+          escalations: [askJson(options: optionsJson(), nonBlocking: false)],
+        ),
+      );
+      await pumpDelivery(tester);
+
+      expect(find.byType(HandlerDecisionCard), findsNothing);
+      expect(find.text('Ship it behind a flag'), findsNothing);
+      expect(find.text(handlerAskLatencyNote), findsNothing);
+      expect(find.text('ASKED'), findsNothing);
+
+      await tester.tap(find.text('ship behind a flag?'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(EditableText), 'flag it');
+      await tester.pump();
+      await tester.tap(find.text('Approve & send'));
+      await tester.pumpAndSettle();
+
+      final sent = t.sent.where((m) => m['type'] == 'terminal:input').toList();
+      expect(sent, hasLength(1));
+      expect(sent.single['data'], 'flag it\r');
+    });
+
+    testWidgets('the footer counts only what is still running', (tester) async {
+      final t = await pumpLiveHandlerScreen(tester);
+      t.emit(
+        'handler:status',
+        statusJson(
+          escalations: [
+            askJson(
+              options: optionsJson(),
+              unblocked: const ['i1', 'i2', 'i3', 'i4'],
+            ),
+          ],
+          backlog: [
+            item('i1', 'wire the flag up', 'active'),
+            item('i2', 'write the migration', 'done'),
+            // Not running, even though the item vocabulary counts `blocked` as
+            // work still left: a blocked item has not MOVED, and telling the
+            // user the agent is busy with it is the reassurance this footer
+            // exists to withhold.
+            item('i3', 'wait on the review', 'blocked'),
+            item('i4', 'update the changelog', 'queued'),
+          ],
+        ),
+      );
+      await pumpDelivery(tester);
+
+      expect(onCard(find.text('Still working on 2 items')), findsOneWidget);
+      expect(onCard(find.text('wire the flag up')), findsOneWidget);
+      expect(onCard(find.text('update the changelog')), findsOneWidget);
+      expect(onCard(find.text('write the migration')), findsNothing);
+      expect(onCard(find.text('wait on the review')), findsNothing);
+    });
+
+    testWidgets('and says so when the work it named has all stopped', (
+      tester,
+    ) async {
+      // An ask that has become a stop. The count is re-derived every build for
+      // exactly this: the row still says the session did not stop for it, and
+      // by now nothing else is moving.
+      final t = await pumpLiveHandlerScreen(tester);
+      t.emit(
+        'handler:status',
+        statusJson(
+          escalations: [askJson(options: optionsJson())],
+          backlog: [item('i1', 'wire the flag up', 'done')],
+        ),
+      );
+      await pumpDelivery(tester);
+
+      expect(
+        onCard(find.text(handlerAskNothingRunningNote)),
+        findsOneWidget,
+      );
+      expect(onCard(find.textContaining('Still working on')), findsNothing);
+    });
+
+    testWidgets('carries ASKED, never URGENT, and adds no second section', (
+      tester,
+    ) async {
+      final t = await pumpLiveHandlerScreen(tester);
+      t.emit(
+        'handler:status',
+        statusJson(escalations: [askJson(options: optionsJson())]),
+      );
+      await pumpDelivery(tester);
+
+      expect(find.text('ASKED'), findsOneWidget);
+      expect(find.text('URGENT'), findsNothing);
+      // One pinned band over both row kinds. A section of its own with no
+      // header would leave the previous band standing, and ask rows would read
+      // as unanswered NEEDS YOU escalations at the wrong scroll offset.
+      expect(find.text('NEEDS YOU'), findsOneWidget);
+    });
+
+    testWidgets('a stopped row beside it still carries URGENT alone', (
+      tester,
+    ) async {
+      final t = await pumpLiveHandlerScreen(tester);
+      t.emit('handler:status', statusJson(escalations: [askJson()]));
+      await pumpDelivery(tester);
+      t.emit('handler:escalation', escalationJson());
+      await pumpDelivery(tester);
+
+      expect(find.text('URGENT'), findsOneWidget);
+      expect(find.text('ASKED'), findsOneWidget);
+      expect(find.text('NEEDS YOU'), findsOneWidget);
+    });
+
+    testWidgets('a full-sentence answer wraps inside the narrowest panel', (
+      tester,
+    ) async {
+      // The wire caps an option label at 80 characters because the label IS
+      // the answer, which is far past what a button-shaped Row can hold on a
+      // phone. Without [AbButton.wrapLabel] this is a painted overflow stripe
+      // over the one control the feature exists to be tapped at 02:00.
+      tester.view.physicalSize = const Size(280, 800);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+
+      final t = await pumpLiveHandlerScreen(tester);
+      t.emit(
+        'handler:status',
+        statusJson(
+          escalations: [
+            askJson(
+              options: [
+                {
+                  'choiceId': 'opt1',
+                  'label': 'Ship it behind a flag and take the flag out once '
+                      'the rollout has settled',
+                  'cost': 'One config key to take out later',
+                },
+                {
+                  'choiceId': 'opt2',
+                  'label': 'Hold it',
+                  'cost': 'The branch sits unmerged overnight',
+                },
+              ],
+            ),
+          ],
+        ),
+      );
+      await pumpDelivery(tester);
+
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('a parked answer is visible until it is relayed', (
+      tester,
+    ) async {
+      // The ask row is retired the moment the answer goes out, so between the
+      // tap and Handler's next pass this chip is the only thing on any surface
+      // saying the answer exists.
+      final t = await pumpLiveHandlerScreen(tester);
+      t.emit('handler:status', statusJson(askAnswerPending: true));
+      await pumpDelivery(tester);
+      expect(find.text('ANSWER QUEUED'), findsOneWidget);
+
+      t.emit('handler:status', statusJson());
+      await pumpDelivery(tester);
+      expect(find.text('ANSWER QUEUED'), findsNothing);
     });
   });
 }

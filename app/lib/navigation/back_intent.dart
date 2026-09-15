@@ -93,7 +93,7 @@ class BackHandlerRegistry {
 
   /// Whether any registered handler currently has something to unwind.
   ///
-  /// NOT `isNotEmpty`: `WorkspacePanel` renders all five tabs in an
+  /// NOT `isNotEmpty`: `WorkspacePanel` renders every tab ON OFFER in an
   /// `IndexedStack`, so every tab is mounted and registered at all times — a
   /// mere-existence test is true for the whole life of the workspace route and
   /// would light the title bar's chevron permanently.
