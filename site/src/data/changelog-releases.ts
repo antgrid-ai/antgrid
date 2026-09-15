@@ -6,6 +6,42 @@ import type { Release } from "./changelog";
 
 export const RELEASES: Release[] = [
   {
+    "version": "v1.20711.1020",
+    "date": "2026-09-15",
+    "url": "https://github.com/antgrid-ai/antgrid/releases/tag/v1.20711.1020",
+    "maintenance": false
+  },
+  {
+    "version": "v1.20710.1017",
+    "date": "2026-09-14",
+    "url": "https://github.com/antgrid-ai/antgrid/releases/tag/v1.20710.1017",
+    "maintenance": false
+  },
+  {
+    "version": "v1.20710.1016",
+    "date": "2026-09-14",
+    "url": "https://github.com/antgrid-ai/antgrid/releases/tag/v1.20710.1016",
+    "maintenance": false
+  },
+  {
+    "version": "v1.20706.1015",
+    "date": "2026-09-10",
+    "url": "https://github.com/antgrid-ai/antgrid/releases/tag/v1.20706.1015",
+    "maintenance": false
+  },
+  {
+    "version": "v1.20705.1014",
+    "date": "2026-09-09",
+    "url": "https://github.com/antgrid-ai/antgrid/releases/tag/v1.20705.1014",
+    "maintenance": false
+  },
+  {
+    "version": "v1.20705.1013",
+    "date": "2026-09-09",
+    "url": "https://github.com/antgrid-ai/antgrid/releases/tag/v1.20705.1013",
+    "maintenance": false
+  },
+  {
     "version": "v1.20704.1012",
     "date": "2026-09-08",
     "url": "https://github.com/antgrid-ai/antgrid/releases/tag/v1.20704.1012",
