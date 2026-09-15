@@ -1,0 +1,41 @@
+---
+import Base from "./Base.astro";
+import PostMeta from "../components/blog/PostMeta.astro";
+import { formatDate, postPath, type BlogPost } from "../data/blog-policy";
+import { links, SITE_URL } from "../config";
+import "../styles/blog.css";
+interface Props { post: BlogPost; related: BlogPost[] }
+const { post, related } = Astro.props;
+const { data } = post;
+const action = data.action ?? { label: "Explore Antgrid on GitHub", href: links.repo, category: "github" };
+const structuredData = {
+  "@context": "https://schema.org", "@type": "BlogPosting",
+  headline: data.title, description: data.description,
+  datePublished: data.publishedAt.toISOString(), dateModified: data.updatedAt?.toISOString(),
+  author: { "@type": "Person", name: data.author },
+  publisher: { "@type": "Organization", name: "Antgrid", url: SITE_URL },
+  mainEntityOfPage: new URL(postPath(post), SITE_URL).href,
+  image: new URL(data.ogImage ?? "/og/control-plane.png", SITE_URL).href,
+};
+---
+<Base title={`${data.title} | antgrid`} description={data.description} path={postPath(post)} ogImage={data.ogImage} ogImageAlt={data.ogImageAlt} article={{ publishedAt: data.publishedAt.toISOString(), updatedAt: data.updatedAt?.toISOString(), author: data.author }} rss>
+  <script slot="head" type="application/ld+json" is:inline set:html={JSON.stringify(structuredData).replace(/</g, "\\u003c")} />
+  <main class="blog-shell">
+    <article>
+      <header class="blog-post-heading">
+        <a class="blog-back" href="/blog">Back to Blog</a>
+        <PostMeta post={post} />
+        <h1>{data.title}</h1>
+        <p class="blog-deck">{data.description}</p>
+        <p class="blog-byline">By {data.author}{data.updatedAt && <> · Updated <time datetime={data.updatedAt.toISOString()}>{formatDate(data.updatedAt)}</time></>}</p>
+      </header>
+      {data.coverImage && <img class="blog-cover" src={data.coverImage} alt={data.coverImageAlt} />}
+      <div class="blog-prose"><slot /></div>
+      <footer class="blog-post-footer">
+        {data.claimsVerifiedAt && <p class="blog-verification">Product details verified against <a href={`${links.repo}/commit/${data.claimsVerifiedAt}`}><code>antgrid@{data.claimsVerifiedAt}</code></a>.</p>}
+        <a class="blog-action" href={action.href} data-umami-event="blog_cta" data-umami-event-slug={post.id} data-umami-event-destination={action.category}>{action.label}<span aria-hidden="true"> →</span></a>
+        {related.length > 0 && <section class="blog-related" aria-labelledby="related"><h2 id="related" class="blog-section-title">Related articles</h2>{related.map((other) => <div class="blog-row"><h3><a href={postPath(other)}>{other.data.title}</a></h3><PostMeta post={other} /></div>)}</section>}
+      </footer>
+    </article>
+  </main>
+</Base>

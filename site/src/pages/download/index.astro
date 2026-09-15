@@ -12,7 +12,7 @@ import { links, offerUrlFor, PLATFORMS } from "../../config";
 // only ever exists in config.ts.
 //
 // `<` is escaped on the way out because JSON.stringify does not escape it and
-// set:html inserts this verbatim: the HTML tokenizer ends a <script> at the
+// set:html inserts this verbatim: the HTML tokenizer ends a script tag at the
 // first `</script` in its raw text no matter what quoting it sits inside, so a
 // URL that ever contained one would close the tag and parse the rest of the
 // page's head as markup. < is the same character to a JS parser.

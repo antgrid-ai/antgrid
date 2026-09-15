@@ -79,6 +79,7 @@ export const links = {
   // own tag, so a support reply can point at the exact build a reader is
   // asking about rather than at the top of the list.
   changelog: "/changelog",
+  blog: "/blog",
   security: "/security",
   // Verification surfaces for /security. `HEAD` rather than a branch name:
   // GitHub resolves it to whatever the repo's default branch is, so renaming
