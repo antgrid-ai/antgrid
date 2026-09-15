@@ -9,18 +9,18 @@
 //      consequence of collapsing authorization to one boolean.
 //   4. Stop projB, then issue control-plane `project:start projB` → re-opens as a
 //      fresh stream (stream-ready) and re-advertises running:true.
-//   5. Turn the switch OFF over the loopback control plane → the advert goes
-//      empty and control-plane `project:start` is rejected NOT_ALLOWED, for a
-//      project the SAME phone was driving a moment earlier.
+//   5. Turn the switch OFF over the loopback control plane → E2E keys are
+//      retired and remote commands stop. Re-enable requires fresh E2E.
 //
 // Step 5 is the negative this file exists for. There is no per-project axis left
 // to deny along: a phone either reaches this machine or it doesn't.
 //
 // Known Windows test noise (NOT failures): fs.watch EPERM/EBUSY on teardown.
 import { test, expect } from "bun:test";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { setMobileAccess, setupTestEnv } from "../helpers/harness";
+import { handshakeWithoutPairing, setMobileAccess, setupTestEnv } from "../helpers/harness";
+import { TERMINAL_PROTOCOL_VERSION } from "../../bridge/src/terminal-frames/protocol";
 import { generateEphemeralKeypair } from "../../bridge/src/key-exchange";
 import type { RelayClient } from "../helpers/relay-client";
 import { createTestProject } from "../helpers/fixtures";
@@ -50,30 +50,25 @@ async function streamFor(app: RelayClient, projectId: string): Promise<string> {
 
 /** Drive a deterministic terminal ON A STREAM and collect output for a marker. */
 async function driveTerminal(app: RelayClient, streamId: string, terminalId: string, marker: string): Promise<string> {
-  const outputs: string[] = [];
-  const collect = (async () => {
-    const deadline = Date.now() + 6_000;
-    while (Date.now() < deadline) {
-      try {
-        const m = await app.waitForStreamAbType(streamId, "terminal:output", deadline - Date.now());
-        if ((m as any).terminalId === terminalId) outputs.push((m as any).data);
-        if (outputs.join("").includes(marker)) return;
-      } catch {
-        return;
-      }
-    }
-  })();
   app.sendOnStream(
     streamId,
     createMessage("terminal:start", {
       terminalId,
       name: terminalId,
-      command: process.platform === "win32" ? "cmd.exe" : "bash",
-      args: process.platform === "win32" ? ["/c", `echo ${marker}`] : ["-c", `echo ${marker}`],
+      command: "node",
+      args: ["-e", `console.log('${marker}');setTimeout(()=>{},1000)`],
     } as never),
   );
-  await collect;
+  await app.waitFor((m: any) => m.type === "terminal:started" && m.terminalId === terminalId, 5_000);
+  await subscribe(app, streamId, terminalId);
+  const outputs = await collectOutput(app, streamId, terminalId, 6_000);
   return outputs.join("");
+}
+
+async function subscribe(app: RelayClient, streamId: string, terminalId: string): Promise<void> {
+  const requestId = crypto.randomUUID();
+  app.sendOnStream(streamId, createMessage("terminal:subscribe", { terminalId, requestId, version: TERMINAL_PROTOCOL_VERSION }));
+  await app.waitFor((m: any) => m.type === "terminal:subscribed" && m.requestId === requestId, 5_000);
 }
 
 /** Fire a host-side notification through the per-core api-server's loopback
@@ -91,7 +86,7 @@ async function notify(abDir: string, notificationType: string, message: string):
   if (!res.ok) throw new Error(`/notify ${notificationType} failed: ${res.status}`);
 }
 
-/** Collect `terminal:output` for `terminalId` on `streamId` until `want` frames
+/** Collect acknowledged terminal frames for `terminalId` on `streamId` until `want` frames
  *  arrive or the window closes. Returns everything seen — the caller decides
  *  whether a non-empty result is the pass or the failure. */
 async function collectOutput(
@@ -105,8 +100,10 @@ async function collectOutput(
   const deadline = Date.now() + windowMs;
   while (Date.now() < deadline && out.length < want) {
     try {
-      const m = await app.waitForStreamAbType(streamId, "terminal:output", deadline - Date.now());
-      if ((m as any).terminalId === terminalId) out.push((m as any).data);
+      const m = await app.waitForStreamAbType(streamId, "terminal:frame", deadline - Date.now());
+      app.sendOnStream(streamId, createMessage("terminal:ack", { terminalId: m.terminalId,
+        runId: m.runId, attachmentId: m.attachmentId, sequence: m.sequence }));
+      if (m.terminalId === terminalId) out.push(m.ansi);
     } catch {
       break; // window closed with nothing more to read
     }
@@ -182,16 +179,15 @@ test("push rides the machine switch: delivered while on, silent while off, and a
 // The switch has to gate the stream in BOTH directions. Dropping inbound only
 // stops the phone DRIVING a project; a core it cold-started keeps pushing
 // terminal output, the file tree and git status at it, because a remote-mode
-// core holds no PromotionHandle for `demoteAllPromoted` to tear down. The gate
-// is at the send (stream-mux `mayDeliver`), not at attach — hence the third leg,
-// which is the property a detach-based fix could not deliver.
-test("outbound rides the machine switch: a cold-started project goes quiet while off and resumes on the SAME stream", async () => {
+// core holds no PromotionHandle for `demoteAllPromoted` to tear down.
+test("outbound rides the machine switch: output stops while off and resumes only after fresh E2E hydration", async () => {
   const env = await setupTestEnv({ fixtureName: "basic" });
   const projBdir = createTestProject("basic", { "__RELAY_URL__": env.relay.url.replace(/\/ws$/, "") });
 
   try {
     const cp = env.app;
     const projB = computeProjectId(projBdir.dir);
+    writeFileSync(join(projBdir.dir, "ticker.cjs"), "let i=0;setInterval(()=>console.log('TICK_'+ ++i),100);process.stdin.on('data',data=>require('node:fs').appendFileSync('input.log',data));");
 
     // Production shape: projB is in the host catalog but NOT running, so the
     // phone's project:start takes host-server's `!entry` branch and opens a
@@ -204,17 +200,13 @@ test("outbound rides the machine switch: a cold-started project goes quiet while
 
     // A terminal that keeps emitting on its own, so "did anything arrive?" is a
     // question about the STREAM, not about whether the phone could ask again.
-    const win = process.platform === "win32";
     cp.sendOnStream(streamB, createMessage("terminal:start", {
       terminalId: "ticker",
       name: "ticker",
-      command: win ? "cmd.exe" : "bash",
-      // `ping -n 2` for the delay, not `timeout /t` — a Git Bash PATH shadows
-      // cmd's `timeout` with GNU coreutils, which rejects `/t`.
-      args: win
-        ? ["/c", "for /L %i in (1,1,600) do @(echo TICK_%i & ping -n 2 127.0.0.1 >nul)"]
-        : ["-c", "for i in $(seq 1 600); do echo TICK_$i; sleep 1; done"],
+      command: "node", args: ["ticker.cjs"],
     } as never));
+    await cp.waitFor((m: any) => m.type === "terminal:started" && m.terminalId === "ticker", 5_000);
+    await subscribe(cp, streamB, "ticker");
 
     // === Switch ON: output flows ===
     // The control. Without it the silence below would pass for a terminal that
@@ -224,24 +216,33 @@ test("outbound rides the machine switch: a cold-started project goes quiet while
 
     // === Switch OFF: the same bound stream goes quiet ===
     await setMobileAccess(env.abDir, false);
-    cp.drainQueued("terminal:output"); // in-flight frames sent before the flip
+    cp.drainQueued("terminal:frame"); // in-flight frames sent before the flip
+    cp.sendOnStream(streamB, createMessage("terminal:input", { terminalId: "ticker", data: "FORBIDDEN_INPUT\r" }));
     const whileOff = await collectOutput(cp, streamB, "ticker", 6_000);
     expect(whileOff).toEqual([]);
+    expect(existsSync(join(projBdir.dir, "input.log"))).toBe(false);
 
-    // === Switch back ON: the SAME streamId resumes ===
-    // Gating at the send keeps the core and the stream alive, so nothing has to
-    // be re-opened and no work was destroyed. A fix that stopped the core or
-    // detached the stream would fail here.
+    // Re-enabling cannot resurrect old keys or replay denied input.
     await setMobileAccess(env.abDir, true);
-    const whileOnAgain = await collectOutput(cp, streamB, "ticker", 15_000, 2);
+    expect(await collectOutput(cp, streamB, "ticker", 500)).toEqual([]);
+    await handshakeWithoutPairing(cp, env.agentDeviceId, env.agent.ed25519Pubkey);
+    const freshStream = await cp.openProjectStream(projB, 12_000);
+    await subscribe(cp, freshStream, "ticker");
+    const whileOnAgain = await collectOutput(cp, freshStream, "ticker", 15_000, 2);
     expect(whileOnAgain.join("")).toContain("TICK_");
+    expect(existsSync(join(projBdir.dir, "input.log"))).toBe(false);
+    cp.sendOnStream(freshStream, createMessage("terminal:input", { terminalId: "ticker", data: "ALLOWED_INPUT\r" }));
+    for (let i = 0; i < 100 && !existsSync(join(projBdir.dir, "input.log")); i++) await Bun.sleep(20);
+    const deliveredInput = readFileSync(join(projBdir.dir, "input.log"), "utf8");
+    expect(deliveredInput).toContain("ALLOWED_INPUT");
+    expect(deliveredInput).not.toContain("FORBIDDEN_INPUT");
   } finally {
     await env.teardown();
     try { projBdir.cleanup(); } catch { /* Windows EBUSY teardown race */ }
   }
 }, 180_000);
 
-test("machine switch on: the whole catalog is drivable; switch off: the catalog empties and every start is refused", async () => {
+test("machine switch on exposes the catalog; switch off retires E2E and never replays a project start", async () => {
   const env = await setupTestEnv({ fixtureName: "basic" });
   const projBdir = createTestProject("basic", { "__RELAY_URL__": env.relay.url.replace(/\/ws$/, "") });
   const projCdir = createTestProject("basic", { "__RELAY_URL__": env.relay.url.replace(/\/ws$/, "") });
@@ -291,21 +292,23 @@ test("machine switch on: the whole catalog is drivable; switch off: the catalog 
     const outB2 = await driveTerminal(cp, streamB2, "tB2", "RESTART_B");
     expect(outB2).toContain("RESTART_B");
 
-    // === STEP 5: turn the machine off → catalog empties, starts are refused ===
+    expect((await loopbackControl(env.abDir, { id: "stop-c", type: "project:stop", projectId: projC })).ok).toBe(true);
+    // === STEP 5: turn the machine off → keys retire and starts cannot dispatch ===
     await setMobileAccess(env.abDir, false);
 
-    // projC was never started, so its start is not short-circuited by an
-    // already-warm core — the rejection can only come from the switch.
+    // projC is stopped, so a dispatched start would be visible in the host list.
     cp.drainQueued("control:result");
     cp.sendEncrypted(createMessage("project:start", { projectId: projC }));
-    const denyC = await cp.waitForAbType("control:result", 8_000);
-    expect(denyC.ok).toBe(false);
-    expect((denyC as any).error.code).toBe("NOT_ALLOWED");
-
-    cp.drainQueued("agent:projects");
+    expect(await cp.waitForAbType("control:result", 1_000).catch(() => null)).toBeNull();
+    const projectIsRunning = async () => (await loopbackControl(env.abDir, { id: "list", type: "project:list" }))
+      .projects.some((project: any) => project.projectId === projC && project.running);
+    expect(await projectIsRunning()).toBe(false);
+    await setMobileAccess(env.abDir, true);
+    await handshakeWithoutPairing(cp, env.agentDeviceId, env.agent.ed25519Pubkey);
     await cp.pullStateSnapshot();
-    const finalAdvert = await cp.waitForAbType("agent:projects", 8_000);
-    expect(finalAdvert.projects).toEqual([]);
+    expect(await projectIsRunning()).toBe(false);
+    await cp.openProjectStream(projC, 12_000);
+    expect(await projectIsRunning()).toBe(true);
   } finally {
     await env.teardown();
     try { projBdir.cleanup(); } catch { /* Windows EBUSY teardown race */ }

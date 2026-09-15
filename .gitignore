@@ -60,6 +60,7 @@ node_modules
 /app/coverage/
 /packages/*/build/
 /packages/*/pubspec.lock
+!/packages/antgrid_peer_transport/pubspec.lock
 
 # Symbolication related
 app.*.symbols
@@ -122,7 +123,19 @@ docs/superpowers/specs/
 # which was only ever ignored by infra/tofu/.gitignore and would become
 # committable the moment that file left with the directory.
 /infra/
-/deploy/
+/deploy/*
+# Public Iroh templates are reviewable; private ops leftovers remain ignored.
+!/deploy/iroh/
+/deploy/iroh/*
+!/deploy/iroh/README.md
+!/deploy/iroh/compose.yaml
+!/deploy/iroh/administration.nginx.conf
+!/deploy/iroh/monitoring/
+/deploy/iroh/monitoring/*
+!/deploy/iroh/monitoring/README.md
+!/deploy/iroh/monitoring/prometheus.yml
+!/deploy/iroh/monitoring/alerts.yml
+!/deploy/iroh/monitoring/grafana-dashboard.json
 
 # Contact sheets from `npm run gen:icons -- --preview`.
 .icon-preview/

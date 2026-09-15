@@ -1,3 +1,4 @@
+import { createHostPolicyFixture } from "./host-policy-fixture";
 // What a delete actually reclaims, asked through the loaders rather than of the
 // filesystem.
 //
@@ -261,7 +262,7 @@ function tempProject(): { folder: string; projectId: string } {
 }
 
 test("forgetting a project reclaims every session's bus state and its delivery queue", async () => {
-  const h = (host = new HostServer({
+  const h = (host = createHostPolicyFixture({
     remote: fakeRemoteConfig(),
     remoteRuntimeFactory: () => Promise.resolve(fakeRuntime()),
   }));

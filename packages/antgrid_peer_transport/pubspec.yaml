@@ -1,0 +1,14 @@
+name: antgrid_peer_transport
+description: Antgrid authenticated native peer transport (ELv2).
+publish_to: none
+version: 0.1.0
+environment:
+  sdk: ^3.12.0
+dependencies:
+  antgrid_relay_client:
+    path: ../antgrid_relay_client
+  cryptography: ^2.7.0
+  flutter_rust_bridge: 2.12.0
+  iroh_quic: 1.0.3
+dev_dependencies:
+  test: ^1.25.0

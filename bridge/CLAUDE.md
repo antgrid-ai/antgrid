@@ -95,6 +95,20 @@ them.
 
 ## Component map
 
+`peer-session-owner.ts` owns E2E sessions, fragments, credit scheduling and peer
+liveness; `relay-client.ts` supplies central authentication and WebSocket sinks.
+`peer/iroh-relay-client.ts` adds the leased native carrier while preserving the
+remote source used by command authorization. `auth/credentials.ts`'s optional
+`userId` and `endpointSecret` mirror the app's secure `DeviceRecord` and stdin
+bootstrap: the controller and local bridge have distinct records, and neither
+endpoint seed may be written to an ordinary bridge file. `HostServer` selects
+the transport through `ANTGRID_PEER_TRANSPORT`; platform qualification lives in
+`docs/iroh-qualification.md`.
+Desktop lifecycle resume notifies the existing host through owner-bearer
+`POST /peer-resume` (`control-listener.ts`), with no body; its 202 acknowledges
+synchronous remote-session fencing, while authorization refresh runs separately.
+Keep that contract mirrored in the app's `HostControlClient` lifecycle caller.
+
 What each area owns. Mechanism lives at the definitions in the files themselves;
 what is here is identity plus the contracts that span more than one of them.
 

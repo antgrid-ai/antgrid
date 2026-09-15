@@ -67,6 +67,8 @@ jobs:
           # one later from silently narrowing the gate.
           set -f
           NATIVE_PATHS='app/android app/pubspec.yaml app/pubspec.lock
+            packages/antgrid_peer_transport/pubspec.yaml packages/antgrid_peer_transport/pubspec.lock
+            scripts/check-iroh-packaging.ts scripts/iroh-qualification/flutter-source-pins.json
             .github/actions/setup-android .github/workflows/ci-android.yml'
 
           full() { echo "$1 — building the full AAB."; echo "changed=true" >> "$GITHUB_OUTPUT"; exit 0; }
@@ -113,9 +115,6 @@ jobs:
       # The native terminal qualification test runs the bridge's authoritative
       # frame serializer and reapplies its output through Ghostty. Flutter's pub
       # resolution does not install the serializer's Bun workspace dependencies.
-      - name: Install terminal qualification dependencies
-        run: bun install --frozen-lockfile --ignore-scripts
-
       # FCM client config, when the run can see secrets. Writing it here is what
       # puts the google-services plugin — resource generation and its manifest
       # merge, which ONLY a Firebase-enabled build exercises — under PR-time
@@ -150,7 +149,7 @@ jobs:
       - name: Analyze Dart packages
         run: |
           fail=0
-          for pkg in antgrid_relay_client antgrid_eval_client; do
+          for pkg in antgrid_relay_client antgrid_peer_transport antgrid_eval_client; do
             echo "::group::analyze $pkg"
             # Subshell so the cd can't leak into the next iteration. Each package
             # needs its OWN pub get — app's resolves into app/.dart_tool only.
@@ -180,6 +179,9 @@ jobs:
       # alignment — e.g. a portable_pty repoint onto a prebuilt linked without
       # the max-page-size flags. 32-bit armeabi-v7a is exempt: 16 KB pages are a
       # 64-bit-only feature.
+      - name: Verify Iroh source lock remained unchanged
+        run: bun run scripts/check-iroh-packaging.ts
+
       - name: Verify 16 KB alignment
         if: steps.native.outputs.changed == 'true'
         run: |

@@ -1,3 +1,4 @@
+import { createHostPolicyFixture } from "./host-policy-fixture";
 import { test, expect, beforeEach, afterEach, spyOn } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -45,7 +46,7 @@ afterEach(async () => {
 });
 
 test("opens one control-plane registration equal to the bare deviceUuid", async () => {
-  host = new HostServer({
+  host = createHostPolicyFixture({
     remote: fakeRemoteConfig(),
     remoteRuntimeFactory: () => Promise.resolve(fakeRuntime()),
   });
@@ -63,12 +64,12 @@ test("startControlPlane echoes the app's ownerBuild into host.json", async () =>
   // it notices a Store update replaced it while the previous install's host
   // stayed alive. The host never interprets the value, so the only contract is
   // that it comes back out byte-for-byte, and is absent when nobody supplied one.
-  host = new HostServer({ ownerBuild: "1.20662.412 (0f3b1c)" });
+  host = createHostPolicyFixture({ ownerBuild: "1.20662.412 (0f3b1c)" });
   await host.startControlPlane();
   expect(readHostFile(hostFilePath())?.ownerBuild).toBe("1.20662.412 (0f3b1c)");
   await host.shutdown();
 
-  host = new HostServer({});
+  host = createHostPolicyFixture({});
   await host.startControlPlane();
   expect(readHostFile(hostFilePath())?.ownerBuild).toBeUndefined();
 });
@@ -89,7 +90,7 @@ test("control plane heartbeats the current relayUrl on authenticate (keeps inven
     return new Response(null, { status: 200 });
   }) as unknown as typeof fetch);
   try {
-    host = new HostServer({
+    host = createHostPolicyFixture({
       remote: fakeRemoteConfig(),
       remoteRuntimeFactory: () => Promise.resolve(fakeRuntime()),
     });
@@ -125,7 +126,7 @@ test("mobile-access:set immediately pushes a heartbeat reflecting the new state"
     return new Response(null, { status: 200 });
   }) as unknown as typeof fetch);
   try {
-    host = new HostServer({
+    host = createHostPolicyFixture({
       remote: fakeRemoteConfig(),
       remoteRuntimeFactory: () => Promise.resolve(fakeRuntime()),
     });
@@ -155,7 +156,7 @@ test("onPeerOnline re-advertises to a revived session (no fresh handshake fires)
   // silently no-op, with nothing to correct it until an unrelated project:start
   // forced a full recompute. onPeerOnline re-advertises the moment the session
   // is reachable again, closing that window.
-  host = new HostServer({
+  host = createHostPolicyFixture({
     remote: fakeRemoteConfig(),
     remoteRuntimeFactory: () => Promise.resolve(fakeRuntime()),
   });
@@ -186,7 +187,7 @@ test("onPeerOnline re-advertises to a revived session (no fresh handshake fires)
 });
 
 test("no remote config → no control-plane relay opened", async () => {
-  host = new HostServer({}); // local-only
+  host = createHostPolicyFixture({}); // local-only
   await host.startControlPlane();
   expect(host.controlPlaneRegistrationId).toBeNull();
 });

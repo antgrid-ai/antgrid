@@ -1,0 +1,17 @@
+{
+  "listen": "0.0.0.0:443",
+  "adminListen": "127.0.0.1:9000",
+  "tlsCert": "/certs/fullchain.pem",
+  "tlsKey": "/certs/privkey.pem",
+  "relayUrl": "https://iroh.staging.example/",
+  "admissionUrl": "http://web:8787/internal/peer-admission",
+  "admissionSecret": "REPLACE_WITH_PRIVATE_BACKEND_RELAY_INTERNAL_SECRET",
+  "adminSecret": "REPLACE_WITH_PRIVATE_OUTBOX_TARGET_SECRET",
+  "maxConnections": 1024,
+  "maxPendingAdmissions": 64,
+  "maxAccounts": 4096,
+  "maxAccountConnections": 32,
+  "maxEndpointConnections": 2,
+  "bytesPerSecond": 10485760,
+  "burstBytes": 2097152
+}

@@ -5,6 +5,12 @@
     "typecheck": "tsc --noEmit",
     "test:mechanics": "bun test tests/",
     "test:evals": "bun test scenarios/ tests/",
+    "test:evals:claude": "bun test tests/chat-session-claude.test.ts",
+    "test:evals:codex": "bun test tests/chat-session.test.ts tests/chat-session-codex.test.ts",
+    "test:evals:local": "bun test tests/local-promotion.test.ts tests/local-terminal.test.ts",
+    "test:evals:iroh-authorization": "bun test tests/gate-iroh-authorization.test.ts",
+    "test:evals:iroh-host-authorization": "bun test tests/gate-iroh-host-authorization.test.ts",
+    "test:evals:iroh-relay-authorization": "bun test tests/gate-iroh-relay-authorization.test.ts",
     "test:evals:isolation": "bun test tests/gate-worktree-isolation.test.ts",
     "test:evals:pairing": "bun test scenarios/pairing/",
     "test:evals:terminal": "bun test scenarios/terminal/",
@@ -20,6 +26,7 @@
     "test:evals:dart-file-explorer": "bun test scenarios/dart-client-e2e/dart-file-explorer.test.ts"
   },
   "dependencies": {
+    "@number0/iroh": "1.1.0",
     "antgrid-wire": "workspace:*"
   },
   "devDependencies": {

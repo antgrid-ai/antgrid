@@ -64,6 +64,8 @@ void main() {
             expect(m.retryable, json['retryable']);
             expect(m.ref, json['ref']);
             expect(m.serverTime, json['serverTime']);
+          case 'peer-policy-changed':
+            expect((parsed as PeerPolicyChangedMessage).generation.toString(), json['generation']);
           case 'peer-online':
             expect((parsed as PeerOnlineMessage?)!.peerId, json['peerId']);
           case 'peer-offline':

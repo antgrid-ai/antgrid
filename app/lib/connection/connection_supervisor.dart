@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math';
 
 import '../util/ab_log.dart';
+import '../util/detached.dart';
 import 'supervisor_state.dart';
 
 const String _component = 'ConnectionSupervisor';
@@ -72,6 +73,11 @@ abstract class ConnMechanisms {
   /// so any late input arriving after a teardown calls it again on an already
   /// released connection.
   Future<void> release();
+}
+
+abstract interface class CentralControlMechanisms {
+  bool get centralControlNeedsReconnect;
+  Future<void> reconnectCentral(ConnCoords coords, String token);
 }
 
 /// Mirrors the app handshake driver's initial-attempt ceiling: past this many
@@ -173,6 +179,10 @@ class ConnectionSupervisor {
   final StreamController<SupervisorStatus> _statuses =
       StreamController<SupervisorStatus>.broadcast();
 
+  final _centralBackoff = _RungBackoff();
+  Timer? _centralTimer;
+  bool _centralInFlight = false;
+
   final Map<ConnRung, _RungBackoff> _backoff = <ConnRung, _RungBackoff>{
     for (final rung in ConnRung.values) rung: _RungBackoff(),
   };
@@ -261,6 +271,11 @@ class ConnectionSupervisor {
   }
 
   void noteSessionDown() => _kick();
+
+  void notePeerRejected() {
+    _block(BlockReason.peerRejected);
+    _kick();
+  }
 
   void noteSessionTakenOver() {
     // Sticky by design: another device holds the session. Re-establishing on
@@ -400,6 +415,7 @@ class ConnectionSupervisor {
       _resetAllBackoff();
       _routableStalls = 0;
       _emit(const Connected());
+      _maintainCentral();
       return;
     }
 
@@ -448,10 +464,11 @@ class ConnectionSupervisor {
       // decides what happens next — but swallowing it SILENTLY left a failing
       // dial or handshake with no trace anywhere, which is why a connection
       // that never climbed could only be diagnosed from the agent's logs.
-      AbLog.warn(_component, 'rung attempt failed', fields: {
-        'rung': rung.name,
-        'error': '$e',
-      });
+      AbLog.warn(
+        _component,
+        'rung attempt failed',
+        fields: {'rung': rung.name, 'error': '$e'},
+      );
       _failed(rung);
       return;
     }
@@ -469,9 +486,58 @@ class ConnectionSupervisor {
     // The step reported success but the rung is still down (dial completed
     // without a welcome, handshake returned without a session). Treat it as a
     // failure so it backs off instead of hot-looping.
-    AbLog.warn(_component, 'rung step returned without satisfying the rung',
-        fields: {'rung': rung.name});
+    AbLog.warn(
+      _component,
+      'rung step returned without satisfying the rung',
+      fields: {'rung': rung.name},
+    );
     _failed(rung);
+  }
+
+  void _maintainCentral() {
+    if (_mech is! CentralControlMechanisms) return;
+    final mechanisms = _mech as CentralControlMechanisms;
+    if (!mechanisms.centralControlNeedsReconnect ||
+        _centralInFlight ||
+        _disposed ||
+        !_wanted ||
+        _status is Blocked) {
+      return;
+    }
+    final due = _centralBackoff.nextAttemptAt;
+    if (due != null && due.isAfter(DateTime.now())) {
+      _centralTimer ??= Timer(due.difference(DateTime.now()), () {
+        _centralTimer = null;
+        _kick();
+      });
+      return;
+    }
+    final coords = _coords;
+    if (coords == null) return;
+    _centralInFlight = true;
+    detached(_component, 'central control maintenance', () async {
+      try {
+        final token = await _mech.mintToken();
+        if (_disposed ||
+            !_wanted ||
+            _status is Blocked ||
+            !mechanisms.centralControlNeedsReconnect) {
+          return;
+        }
+        await mechanisms.reconnectCentral(coords, token);
+        if (mechanisms.centralControlNeedsReconnect) {
+          throw StateError('Central reconnect not admitted');
+        }
+        _centralBackoff.reset();
+      } catch (_) {
+        _centralBackoff.nextAttemptAt = DateTime.now().add(
+          Duration(milliseconds: _backoffMs(_centralBackoff.attempt++)),
+        );
+      } finally {
+        _centralInFlight = false;
+        if (!_disposed && _wanted && _status is! Blocked) _kick();
+      }
+    });
   }
 
   void _stallOnRoutable() {
@@ -506,11 +572,15 @@ class ConnectionSupervisor {
     final backoff = _backoff[rung]!;
     final delayMs = _backoffMs(backoff.attempt);
     backoff.attempt++;
-    AbLog.debug(_component, 'rung backing off', fields: {
-      'rung': rung.name,
-      'attempt': backoff.attempt,
-      'delayMs': delayMs,
-    });
+    AbLog.debug(
+      _component,
+      'rung backing off',
+      fields: {
+        'rung': rung.name,
+        'attempt': backoff.attempt,
+        'delayMs': delayMs,
+      },
+    );
 
     if (rung == ConnRung.established &&
         backoff.attempt >= _kMaxInitialHandshakeAttempts) {
@@ -614,6 +684,8 @@ class ConnectionSupervisor {
   }
 
   void _cancelTimer() {
+    _centralTimer?.cancel();
+    _centralTimer = null;
     _timer?.cancel();
     _timer = null;
   }

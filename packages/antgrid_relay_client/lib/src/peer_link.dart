@@ -1,0 +1,57 @@
+import 'dart:async';
+import 'dart:typed_data';
+
+import 'frame.dart';
+import 'models/relay_message.dart';
+
+enum PeerLinkState { connecting, ready, closed }
+
+enum PeerPath { unknown, websocket, direct, relay }
+
+enum PeerSendOutcome { accepted, closed, tooLarge, backpressured, failed }
+
+typedef PeerLinkDiagnostic = void Function(Map<String, Object?> event);
+
+class PeerLinkFailure {
+  const PeerLinkFailure({
+    required this.code,
+    required this.retryable,
+    this.channel,
+    this.bytes,
+  });
+
+  final String code;
+  final bool retryable;
+  final String? channel;
+  final int? bytes;
+}
+
+/// Payload transport only. Central inventory/presence belongs to its own client.
+/// Implementations must bound queued bytes, fence writes by connection generation
+/// and complete sends on admission or rejection, never wait for remote delivery.
+abstract interface class PeerLink {
+  Stream<IncomingRouteMessage> get messageStream;
+  Stream<PeerLinkState> get payloadStateStream;
+  Stream<PeerPath> get pathStream;
+  Stream<PeerLinkFailure> get failureStream;
+
+  /// A known peer process restart requires fresh E2E. A central presence change
+  /// alone must not emit this for a transport that remains connected to the peer.
+  Stream<void> get peerRestartStream;
+  PeerLinkDiagnostic? get netTap;
+
+  /// Synchronous authorization/admission fence. Lease wrappers must clear this
+  /// before notifying listeners; consumers recheck it after asynchronous work.
+  bool get isDispatchAllowed;
+
+  /// Accepted means handed to the local transport, never delivered to the peer.
+  /// No failed outcome may be retried by the link itself.
+  Future<PeerSendOutcome> sendFrame(
+    String to,
+    String channel,
+    Uint8List payload, {
+    FrameKind kind = FrameKind.sealed,
+  });
+
+  Future<void> close();
+}

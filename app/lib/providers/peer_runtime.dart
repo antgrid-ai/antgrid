@@ -1,0 +1,32 @@
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../connection/peer_runtime.dart';
+import '../services/devices_api.dart' show ProvisioningException;
+import '../util/detached.dart';
+import 'auth.dart';
+import 'connection_identity.dart';
+import 'provider_retry.dart';
+
+final peerRuntimeProvider = FutureProvider<PeerRuntime?>((ref) async {
+  final record = await ref.watch(connectionDeviceRecordProvider.future);
+  if (record.endpointSecret == null) {
+    throw ProvisioningException(
+      'AUTH',
+      'A protected endpoint key is required for remote connections',
+    );
+  }
+  final minter = await ref.watch(connectionTokenMinterProvider.future);
+  if (minter == null) {
+    throw ProvisioningException(
+      'AUTH',
+      'Device credentials are required for remote connections',
+    );
+  }
+  if (!ref.mounted) return null;
+  final runtime = PeerRuntime(
+    record: record,
+    licenseApiUrl: ref.watch(licenseApiUrlProvider),
+    mintToken: minter.mint,
+  );
+  ref.onDispose(() => detached('PeerRuntime', 'dispose', runtime.dispose));
+  return runtime;
+}, retry: noProviderRetry);

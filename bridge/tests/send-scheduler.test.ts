@@ -36,6 +36,39 @@ function frame(
 const sealed = (bytes: number) => bytes + SEAL_OVERHEAD_BYTES;
 
 describe("SendScheduler queueing and priority", () => {
+  it("native writes settle on completion and prioritize control after an active preview", async () => {
+    const done = Promise.withResolvers<boolean>();
+    const order: string[] = [];
+    const outcomes: string[] = [];
+    const scheduler = new SendScheduler({ send: (frame) => {
+      order.push(frame.type);
+      return frame.type === "p1" ? { bytes: 30, completed: done.promise } : 30;
+    } });
+    scheduler.enqueue([{ ...frame("preview", 4, { type: "p1" }), settle: (result) => outcomes.push(result) }]);
+    expect(scheduler.drain()).toBe("held");
+    scheduler.enqueue([frame("preview", 4, { type: "p2" }), frame("control", 4, { type: "c1" })]);
+    expect(scheduler.drain()).toBe("held");
+    expect(outcomes).toEqual([]);
+    done.resolve(true);
+    await done.promise;
+    await Promise.resolve();
+    expect(outcomes).toEqual(["sent"]);
+    expect(order).toEqual(["p1", "c1", "p2"]);
+  });
+
+  it("clearing an active native write fences its late completion", async () => {
+    const done = Promise.withResolvers<boolean>();
+    const outcomes: string[] = [];
+    const scheduler = new SendScheduler({ send: () => ({ bytes: 30, completed: done.promise }) });
+    scheduler.enqueue([{ ...frame("control", 4), settle: (result) => outcomes.push(result) }]);
+    scheduler.drain();
+    scheduler.clear();
+    expect(outcomes).toEqual(["dropped"]);
+    done.resolve(true);
+    await done.promise;
+    await Promise.resolve();
+    expect(outcomes).toEqual(["dropped"]);
+  });
   it("drains FIFO within a channel and control ahead of preview", () => {
     const { s, wire } = makeScheduler();
     s.hold = true;

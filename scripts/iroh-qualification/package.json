@@ -1,0 +1,21 @@
+{
+  "name": "antgrid-iroh-qualification",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "probe": "bun run probe.ts",
+    "interop": "bun run interop.ts",
+    "prototype": "bun run prototype.ts",
+    "qualify": "bun run qualify.ts",
+    "test": "bun test records.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@number0/iroh": "1.1.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.13",
+    "typescript": "5.9.3"
+  }
+}

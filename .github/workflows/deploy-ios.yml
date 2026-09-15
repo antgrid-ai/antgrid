@@ -162,7 +162,17 @@ jobs:
 
       - name: Flutter pub get
         working-directory: app
-        run: flutter pub get
+        run: flutter pub get --enforce-lockfile
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3'
+
+      - name: Install pinned packaging tools
+        run: bun install --frozen-lockfile --ignore-scripts
+
+      - name: Verify pinned Iroh package sources
+        run: bun run scripts/check-iroh-packaging.ts
 
       # The committed ghostty-vt override beats the release download with no hash
       # check, so bumping the fork ref updates the bindings and leaves the binary
@@ -297,6 +307,9 @@ jobs:
             --dart-define=GIT_SHA=${{ steps.version.outputs.sha }} \
             --dart-define=BUILD_TIME=${{ steps.version.outputs.built }} \
             --export-options-plist="$RUNNER_TEMP/ExportOptions.plist"
+
+      - name: Verify Iroh source lock remained unchanged
+        run: bun run scripts/check-iroh-packaging.ts
 
       - name: Upload to TestFlight
         env:

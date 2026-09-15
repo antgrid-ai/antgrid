@@ -1,11 +1,13 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { startRelay, startFakeLicenseApi, TEST_LICENSE_TOKEN, type RelayHandle, type FakeLicenseApi } from "../helpers/harness";
+import { startRelay, startFakeLicenseApi, generateEvalAuth, TEST_LICENSE_TOKEN, type RelayHandle, type FakeLicenseApi } from "../helpers/harness";
 import { setupLocalTestEnv, type LocalTestEnv } from "../helpers/local-test-env";
 import { createMessage, type AbMessage } from "../../bridge/src/protocol";
+import { TERMINAL_PROTOCOL_VERSION } from "../../bridge/src/terminal-frames/protocol";
 
 let relay: RelayHandle;
 let local: LocalTestEnv;
 let licenseApi: FakeLicenseApi;
+const auth = generateEvalAuth();
 
 beforeAll(async () => {
   // Pick a random port to dodge collisions with long-running dev processes
@@ -16,6 +18,7 @@ beforeAll(async () => {
   // account-peer fetch) over a web base — supply a fake one via enableRelay's
   // licenseApiUrl so those fetches succeed.
   licenseApi = startFakeLicenseApi();
+  licenseApi.provision(auth);
   local = await setupLocalTestEnv({
     licenseToken: TEST_LICENSE_TOKEN,
     relayUrl: relay.url.replace(/\/ws$/, ""),
@@ -30,17 +33,28 @@ afterAll(async () => {
 
 test("agent:enableRelay promotes: relayReady emitted, local channel intact", async () => {
   const seen: AbMessage[] = [];
-  local.client.on((m) => seen.push(m));
+  local.client.on((m) => {
+    seen.push(m);
+    if (m.type === "terminal:started") local.client.send(createMessage("terminal:subscribe", {
+      terminalId: m.terminalId, version: TERMINAL_PROTOCOL_VERSION, requestId: "promotion-terminal",
+    }));
+    if (m.type === "terminal:frame") local.client.send(createMessage("terminal:ack", {
+      terminalId: m.terminalId, runId: m.runId, attachmentId: m.attachmentId, sequence: m.sequence,
+    }));
+  });
 
   local.client.send(
     createMessage("agent:enableRelay", {
       relayUrl: relay.url.replace(/\/ws$/, ""),
       licenseApiUrl: licenseApi.url,
       auth: {
-        deviceUuid: local.promo.deviceUuid,
-        ed25519Pub: local.promo.ed25519Pub,
-        ed25519Priv: local.promo.ed25519Priv,
-        licenseToken: TEST_LICENSE_TOKEN,
+        deviceUuid: auth.deviceUuid,
+        ed25519Pub: auth.ed25519Pub,
+        ed25519Priv: auth.ed25519Priv,
+        userId: auth.userId,
+        endpointSecret: auth.endpointSecret,
+        clientId: auth.clientId,
+        clientSecret: auth.clientSecret,
       },
     }),
   );
@@ -59,7 +73,7 @@ test("agent:enableRelay promotes: relayReady emitted, local channel intact", asy
   // has echoed anything — wait for both signals under one deadline so the
   // "OK" assertion below isn't racing the shell.
   const deadline = Date.now() + 8_000;
-  const sawOutput = () => seen.some((m) => m.type === "terminal:output" && m.data.includes("OK"));
+  const sawOutput = () => seen.some((m) => m.type === "terminal:frame" && m.ansi.includes("OK"));
   while (
     Date.now() < deadline &&
     (!seen.some((m) => m.type === "agent:relayReady") || !sawOutput())
@@ -72,8 +86,8 @@ test("agent:enableRelay promotes: relayReady emitted, local channel intact", asy
   expect(ready).toBeDefined();
 
   const outputs = seen
-    .filter((m): m is Extract<AbMessage, { type: "terminal:output" }> => m.type === "terminal:output")
-    .map((m) => m.data)
+    .filter((m): m is Extract<AbMessage, { type: "terminal:frame" }> => m.type === "terminal:frame")
+    .map((m) => m.ansi)
     .join("");
   expect(outputs).toContain("OK");
 

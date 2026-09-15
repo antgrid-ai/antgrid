@@ -1,3 +1,4 @@
+import { createHostPolicyFixture } from "./host-policy-fixture";
 // E12's two halves at the bridge: the "reachable by agents" bit gates
 // DISCLOSURE (a peer's agent reading this machine's session titles and work
 // status) and INTERRUPTION (a peer's agent posting into a session here)
@@ -126,7 +127,7 @@ function cardRequest(params: unknown) {
 async function hostWithReach(enabled: boolean): Promise<HostServer> {
   // Written before the host loads it: the store is read once at construction.
   if (!enabled) loadAgentReachPolicy(abDir).setEnabled(false);
-  const h = new HostServer({ remote: fakeRemoteConfig(), remoteRuntimeFactory: () => Promise.resolve(fakeRuntime()) });
+  const h = createHostPolicyFixture({ remote: fakeRemoteConfig(), remoteRuntimeFactory: () => Promise.resolve(fakeRuntime()) });
   await h.handleRemoteAccessVerb({ id: "t", type: "mobile-access:set", enabled: true });
   return h;
 }

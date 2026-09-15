@@ -23,3 +23,4 @@ export 'src/e2e/confirm.dart';
 export 'src/e2e/transport.dart';
 export 'src/e2e/handshake_sig.dart';
 export 'src/e2e/push_open.dart';
+export 'src/peer_link.dart';

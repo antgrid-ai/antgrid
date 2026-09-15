@@ -33,6 +33,13 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "2.0.3"
+  antgrid_peer_transport:
+    dependency: "direct main"
+    description:
+      path: "../packages/antgrid_peer_transport"
+      relative: true
+    source: path
+    version: "0.1.0"
   antgrid_relay_client:
     dependency: "direct main"
     description:
@@ -152,6 +159,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "2.1.2"
+  build_cli_annotations:
+    dependency: transitive
+    description:
+      name: build_cli_annotations
+      sha256: e563c2e01de8974566a1998410d3f6f03521788160a02503b0b1f1a46c7b3d95
+      url: "https://pub.dev"
+    source: hosted
+    version: "2.1.1"
   chalkdart:
     dependency: transitive
     description:
@@ -575,6 +590,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "3.4.2"
+  flutter_rust_bridge:
+    dependency: transitive
+    description:
+      name: flutter_rust_bridge
+      sha256: e87d6b9ee934dcd24a128ccb2bd91905d2d5fe5c06245d6a8f5477d4907a437a
+      url: "https://pub.dev"
+    source: hosted
+    version: "2.12.0"
   flutter_secure_storage:
     dependency: "direct main"
     description:
@@ -816,6 +839,22 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "1.0.5"
+  iroh_flutter:
+    dependency: "direct main"
+    description:
+      name: iroh_flutter
+      sha256: "7189b305868c88ee790107b1e1359e63667dd42b97efa8e282851aa80a5cb398"
+      url: "https://pub.dev"
+    source: hosted
+    version: "1.0.3"
+  iroh_quic:
+    dependency: transitive
+    description:
+      name: iroh_quic
+      sha256: e262a88f4f02a287197d691851b6e0418fd168280a59f581cbe41d8c6b29aa13
+      url: "https://pub.dev"
+    source: hosted
+    version: "1.0.3"
   irondash_engine_context:
     dependency: transitive
     description:

@@ -6,6 +6,13 @@ export type AuthVars = {
   sessionId: string;
   userEmail: string | null;
   userName: string | null;
+  deviceAuthorization?: {
+    id: string;
+    deviceId: string;
+    enrollmentId: string;
+    publicKey: Uint8Array;
+    kind: string;
+  };
 };
 
 type Session = {

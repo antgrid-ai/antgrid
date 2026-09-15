@@ -1,0 +1,24 @@
+groups:
+  - name: antgrid-iroh
+    rules:
+      - alert: IrohRelayMetricsUnavailable
+        expr: up{job="antgrid-iroh"} == 0 or absent(up{job="antgrid-iroh"})
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Iroh relay metrics are unavailable
+      - alert: IrohAuthorizationUnavailable
+        expr: antgrid_iroh_backend_ready == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: Iroh relay cannot obtain authoritative admission decisions
+      - alert: IrohAdmissionRejections
+        expr: rate(antgrid_iroh_rejections_total[5m]) > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Iroh relay admission rejections are sustained

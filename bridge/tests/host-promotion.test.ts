@@ -1,3 +1,4 @@
+import { createHostPolicyFixture } from "./host-policy-fixture";
 import { test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -134,7 +135,7 @@ afterEach(async () => {
 
 test("project:start promotes an already-open LOCAL core via the ONE shared runtime", async () => {
   const { factory } = makeCountingFactory();
-  host = new HostServer({ remote: fakeRemoteConfig(), remoteRuntimeFactory: factory });
+  host = createHostPolicyFixture({ remote: fakeRemoteConfig(), remoteRuntimeFactory: factory });
   const h = host;
 
   // Open projX LOCAL — a local core never builds the machine remote runtime.
@@ -174,7 +175,7 @@ test("project:start promotes an already-open LOCAL core via the ONE shared runti
 
 test("project:start reports a SESSION_LIMIT_EXCEEDED register rejection to the phone and tears the slot down", async () => {
   const { factory } = makeCountingFactory();
-  host = new HostServer({
+  host = createHostPolicyFixture({
     remote: fakeRemoteConfig(),
     remoteRuntimeFactory: factory,
     relayClientFactory: makeSessionLimitedRelayFactory(),
@@ -212,7 +213,7 @@ test("project:start reports a SESSION_LIMIT_EXCEEDED register rejection to the p
 
 test("advert running=false for a warm-but-unpromoted local core; flips true after project:start registers the slot", async () => {
   const { factory } = makeCountingFactory();
-  host = new HostServer({
+  host = createHostPolicyFixture({
     remote: fakeRemoteConfig(),
     remoteRuntimeFactory: factory,
     relayClientFactory: makeAuthenticatingRelayFactory(),
@@ -242,7 +243,7 @@ test("advert running=false for a warm-but-unpromoted local core; flips true afte
 
 test("turning mobile access OFF tears down EVERY promoted slot, leaving loopback sessions alive", async () => {
   const { factory } = makeCountingFactory();
-  host = new HostServer({ remote: fakeRemoteConfig(), remoteRuntimeFactory: factory });
+  host = createHostPolicyFixture({ remote: fakeRemoteConfig(), remoteRuntimeFactory: factory });
   const h = host;
 
   // Two projects open LOCAL and both promoted — the switch is machine-wide, so
@@ -276,7 +277,7 @@ test("turning mobile access OFF tears down EVERY promoted slot, leaving loopback
 
 test("phones:unpair drops the row without demoting — it is not a revocation", async () => {
   const { factory } = makeCountingFactory();
-  host = new HostServer({ remote: fakeRemoteConfig(), remoteRuntimeFactory: factory });
+  host = createHostPolicyFixture({ remote: fakeRemoteConfig(), remoteRuntimeFactory: factory });
   const h = host;
 
   await openAs(h, "projX", "local");
@@ -298,7 +299,7 @@ test("phones:unpair drops the row without demoting — it is not a revocation", 
 
 test("demoteAllPromoted tears down the relay slot and leaves the core warm/loopback-only", async () => {
   const { factory } = makeCountingFactory();
-  host = new HostServer({ remote: fakeRemoteConfig(), remoteRuntimeFactory: factory });
+  host = createHostPolicyFixture({ remote: fakeRemoteConfig(), remoteRuntimeFactory: factory });
   const h = host;
 
   // Open projX LOCAL and capture the loopback endpoint before promotion.

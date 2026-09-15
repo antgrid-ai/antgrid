@@ -44,6 +44,25 @@ function peerView(peerId: string, checkoutRouting: boolean): PeerSessionView {
 }
 
 describe("StreamMux (unit, stub transport)", () => {
+  test("host binding becomes locally ready before relay admission and survives re-registration", () => {
+    const { transport, opened } = makeTransport();
+    const mux = new StreamMux(transport);
+    const events: string[] = [];
+    const streamId = "0123456789abcdef";
+    const handle = mux.attach(new MessageBus(), {
+      streamId,
+      onLocalReady: (id) => events.push(`local:${id}`),
+      onAdmitted: (id) => events.push(`relay:${id}`),
+    });
+    expect(handle.streamId).toBe(streamId);
+    expect(events).toEqual([`local:${streamId}`]);
+    mux.onOpened(streamId);
+    mux.reopenAll();
+    expect(events).toEqual([`local:${streamId}`, `relay:${streamId}`]);
+    expect(opened).toEqual([streamId, streamId]);
+    expect(() => mux.attach(new MessageBus(), { streamId })).toThrow("duplicate");
+    handle.detach();
+  });
   test("attach allocates a 16-hex streamId and sends stream-open", () => {
     const { transport, opened } = makeTransport();
     const mux = new StreamMux(transport);

@@ -17,6 +17,14 @@ const baseSource = {
 };
 
 describe("loadEnv", () => {
+  test("Iroh relay discovery is explicit HTTPS and private policy targets stay separate", () => {
+    expect(loadEnv(baseSource).IROH_RELAY_URLS).toEqual([]);
+    expect(loadEnv(baseSource).PEER_POLICY_TARGETS).toEqual([]);
+    expect(loadEnv({ ...baseSource, IROH_RELAY_URLS: "https://relay.example/" }).IROH_RELAY_URLS).toEqual(["https://relay.example/"]);
+    for (const url of ["http://relay.example/", "https://user:secret@relay.example/", "https://relay.example/?token=secret"]) {
+      expect(() => loadEnv({ ...baseSource, IROH_RELAY_URLS: url })).toThrow();
+    }
+  });
   test("parses a valid env", () => {
     const env = loadEnv({
       NODE_ENV: "test",

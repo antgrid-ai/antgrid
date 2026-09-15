@@ -40,7 +40,7 @@ The app should feel agent command centre, not a web dashboard. It prioritizes in
 | **App** | `app/` | Flutter/Dart + Riverpod | Mobile/desktop UI: terminal viewer, file explorer, browser preview. |
 | **Web** | `web/` | TS/Bun + Hono + Postgres | Licensing, subscriptions, OAuth device-flow, Ed25519 JWT minting, Better-Auth sign-in. Entry: `src/index.ts`. |
 
-Shared packages in `packages/`: **`antgrid_relay_client`** (pure Dart relay/crypto client, no Flutter), **`antgrid_eval_client`** (E2E eval fixtures), **`antgrid-wire`** (TS: route-frame codec + relay control-envelope Zod schemas, shared by bridge/relay/web/evals; source of truth for `FRAME_VERSION`, and the Dart client mirrors it **by hand**). Full breakdown, the message flow and the `antgrid.yaml` schema: `docs/architecture.md`.
+Shared packages in `packages/`: **`antgrid_relay_client`** (pure Dart relay/crypto client and `PeerLink`, no Flutter), **`antgrid_peer_transport`** (ELv2 native transport and authorization leases, shared by app/CLI; keep it outside the Apache boundary), **`antgrid_eval_client`** (E2E eval fixtures), **`antgrid-wire`** (TS: route-frame codec + relay control-envelope Zod schemas, shared by bridge/relay/web/evals; source of truth for `FRAME_VERSION`, and the Dart client mirrors it **by hand**). Full breakdown, the message flow and the `antgrid.yaml` schema: `docs/architecture.md`.
 
 ## Gotchas (read before editing)
 

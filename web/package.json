@@ -11,6 +11,7 @@
     "start": "bun run src/index.ts",
     "pretest": "bun run prisma:generate && bun run build:assets",
     "test": "bun test",
+    "test:peer-admission": "bun run pretest && bun test ./tests/models/peer-authorization.test.ts",
     "typecheck": "tsc --noEmit",
     "migrate": "bunx --bun prisma@6 migrate deploy",
     "prisma:generate": "bunx --bun prisma@6 generate",

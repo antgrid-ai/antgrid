@@ -1,9 +1,10 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { parse as parseDotenv } from "dotenv";
-import { parseTrustedProxies } from "antgrid-wire";
+import { parseTrustedProxies, PeerAuthorizationSnapshotSchema } from "antgrid-wire";
 import { z } from "zod";
 import { billingToEnvFields, resolveBillingConfig } from "./config/billing.js";
+import { PeerPolicyTargetsSchema } from "./relay/peer-policy-outbox.js";
 
 const EnvSchema = z
   .object({
@@ -22,6 +23,13 @@ const EnvSchema = z
     EMAIL_FROM: z.string().default("Antgrid <no-reply@radhaai.org>"),
     RELAY_INTERNAL_URL: z.string().url().optional(),
     RELAY_INTERNAL_SECRET: z.string().min(16).optional(),
+    IROH_RELAY_URLS: z.string().optional().transform((value) =>
+      value ? value.split(",").map((url) => url.trim()).filter(Boolean) : [])
+      .pipe(PeerAuthorizationSnapshotSchema.shape.relayUrls),
+    PEER_POLICY_TARGETS: z.string().optional().transform((value, ctx) => {
+      try { return value ? JSON.parse(value) : []; }
+      catch { ctx.addIssue({ code: "custom", message: "Expected JSON array of private policy delivery targets" }); return z.NEVER; }
+    }).pipe(PeerPolicyTargetsSchema),
     PADDLE_API_KEY: z.string().optional(),
     PADDLE_WEBHOOK_SECRET: z.string().optional(),
     RAZORPAY_KEY_ID: z.string().optional(),

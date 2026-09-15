@@ -72,4 +72,12 @@ runs:
     - name: Flutter pub get
       working-directory: app
       shell: bash
-      run: flutter pub get
+      run: flutter pub get --enforce-lockfile
+
+    - name: Install pinned packaging tools
+      shell: bash
+      run: bun install --frozen-lockfile --ignore-scripts
+
+    - name: Verify pinned Iroh package sources
+      shell: bash
+      run: bun run scripts/check-iroh-packaging.ts

@@ -30,9 +30,8 @@ final hostControllerProvider = Provider<HostController>(
 /// Resolves a folder's host-owned repository identity, given only the folder
 /// path — the seam widgets call through so tests can substitute a fake
 /// without spawning a real bridge host.
-typedef LocalProjectResolver = Future<ResolvedLocalProject> Function(
-  String folder,
-);
+typedef LocalProjectResolver =
+    Future<ResolvedLocalProject> Function(String folder);
 
 /// Default implementation: ensures the singleton host (spawning if needed —
 /// this is the widget-facing seam, unlike the poll-driven closure in
@@ -64,20 +63,13 @@ final controlPlaneClientForProvider = FutureProvider.family<ControlPlaneClient?,
     agentTransportForProvider(bareDeviceUuid).future,
   );
   if (transport == null) return null;
-  // Reactive offline: the relay transport never emits a disconnect, so feed
-  // the client the machine socket's peer-presence. In v3 the phone's socket is
-  // NOT cascade-closed when the agent drops — the relay sends
-  // `peer-offline` (which keeps the socket `paired`), so presence must key on
-  // the peer-presence stream, not the connection state. `RelayService` emits
-  // false on both `peer-offline` and a raw socket drop, so a `false` here
-  // means the agent is unreachable either way and the client clears its stale
-  // advert (picker/drawer flip to offline WITHOUT a manual refresh); the live
-  // stream repopulates it when the agent re-adverts.
-  //
-  // peek (not connectionFor): the transport above already materialized this
-  // connection; a null peek just means no live socket → no presence to feed.
+  // The payload may remain usable during a central outage. Only the supervisor's
+  // effective peer state may invalidate the project's live adverts.
   final conn = ref.read(relayConnectionManagerProvider).peek(bareDeviceUuid);
-  final presence = conn?.relay.peerPresenceStream;
+  final presence = conn?.statusStream
+      .where((status) => status != null)
+      .map((status) => status is Connected)
+      .distinct();
   // The capture tap goes on the SAME RelayService the presence above came from
   // — the socket this control plane rides. Absent when there is no live one, in
   // which case the client simply is not a capture surface: the machine's request

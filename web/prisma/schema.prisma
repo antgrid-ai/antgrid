@@ -237,6 +237,55 @@ model Device {
   @@map("devices")
 }
 
+model PeerEndpointRegistration {
+  endpointId String @id @map("endpoint_id") @db.Char(64)
+  userId String @map("user_id")
+  deviceId String @map("device_id") @db.Uuid
+  enrollmentId String @map("enrollment_id")
+  generation BigInt
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  revokedAt DateTime? @map("revoked_at") @db.Timestamptz(6)
+
+  @@unique([enrollmentId, generation])
+  // One active endpoint per enrollment is a partial unique index in SQL.
+  @@index([userId])
+  @@map("peer_endpoint_registrations")
+}
+
+model PeerEndpointChallenge {
+  id String @id @default(uuid()) @db.Uuid
+  userId String @map("user_id")
+  deviceId String @map("device_id") @db.Uuid
+  enrollmentId String @map("enrollment_id")
+  endpointId String @map("endpoint_id") @db.Char(64)
+  expectedGeneration BigInt @map("expected_generation")
+  challenge String
+  expiresAt DateTime @map("expires_at") @db.Timestamptz(6)
+  consumedAt DateTime? @map("consumed_at") @db.Timestamptz(6)
+
+  @@index([expiresAt])
+  @@map("peer_endpoint_challenges")
+}
+
+model PeerAuthorizationPolicy {
+  userId String @id @map("user_id")
+  generation BigInt @default(0)
+  relayConfigHash String? @map("relay_config_hash")
+  @@map("peer_authorization_policies")
+}
+
+model PeerAuthorizationOutbox {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId String @map("user_id")
+  generation BigInt
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  deliveredAt DateTime? @map("delivered_at") @db.Timestamptz(6)
+  attempts Int @default(0)
+  nextAttemptAt DateTime @default(now()) @map("next_attempt_at") @db.Timestamptz(6)
+  @@index([deliveredAt, nextAttemptAt])
+  @@map("peer_authorization_outbox")
+}
+
 model User {
   id                  String          @id
   name                String

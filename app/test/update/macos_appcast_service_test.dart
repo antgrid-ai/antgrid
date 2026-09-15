@@ -18,7 +18,7 @@ String _appcast({required String build, required String shortVersion}) =>
 <sparkle:shortVersionString>$shortVersion</sparkle:shortVersionString>
 <sparkle:minimumSystemVersion>12.0</sparkle:minimumSystemVersion>
 <sparkle:releaseNotesLink>https://example.invalid/notes</sparkle:releaseNotesLink>
-<enclosure url="https://example.invalid/antgrid-macos.dmg" length="1" type="application/octet-stream"/>
+<enclosure url="https://example.invalid/antgrid-macos-arm64.dmg" length="1" type="application/octet-stream"/>
 </item>
 </channel>
 </rss>

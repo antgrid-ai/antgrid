@@ -11,6 +11,7 @@ enum BlockReason {
   licenseExpired, // unblocks: noteFreshToken()
   agentOffline, // unblocks: notePresence(true) or noteCoordsChanged()
   sessionTakenOver, // unblocks: retry() only (prevents two-device ping-pong)
+  peerRejected, // unblocks: explicit retry() after fresh authorization
   superseded, // unblocks: retry()
   deviceRevoked, // unblocks: retry() (after re-provision)
   handshakeFailing, // unblocks: retry() or notePresence(true)

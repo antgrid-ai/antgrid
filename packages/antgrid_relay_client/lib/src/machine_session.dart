@@ -10,10 +10,10 @@ import 'e2e/transport.dart';
 import 'flow.dart';
 import 'frag.dart';
 import 'frame.dart';
-import 'models/connection_state.dart';
 import 'models/relay_message.dart';
 import 'models/stream_envelope.dart';
 import 'relay_service.dart';
+import 'peer_link.dart';
 import 'send_scheduler.dart';
 
 /// Liveness constants; mirror `bridge/src/relay-client.ts`.
@@ -83,13 +83,13 @@ class ProjectBindException implements Exception {
   String toString() => 'ProjectBindException($code): $message';
 }
 
-/// One phone↔machine E2E session multiplexed over a single [RelayService]
+/// One phone↔machine E2E session multiplexed over a single [PeerLink]
 /// socket. Owns the single [SessionKeys] set, the handshake/rekey driver, the
 /// per-machine fragment reassembler, liveness, and the stream demux. Project
 /// traffic rides sealed `{s, m}` envelopes; `s` absent/"0" is the machine
 /// control plane. Replaces the v2 socket-per-project `RelayTransport`.
 class MachineSession {
-  final RelayService relay;
+  final PeerLink relay;
 
   /// The bare machine deviceUuid — the routing `to` for every outbound frame
   /// and the fragment-id namespace.
@@ -152,16 +152,16 @@ class MachineSession {
   final Map<String, StreamTransport> _streams = {};
 
   StreamSubscription<IncomingRouteMessage>? _msgSub;
-  StreamSubscription<AppState>? _stateSub;
-  StreamSubscription<bool>? _presenceSub;
-  StreamSubscription<ErrorMessage>? _errorSub;
+  StreamSubscription<PeerLinkState>? _stateSub;
+  StreamSubscription<void>? _presenceSub;
+  StreamSubscription<PeerLinkFailure>? _errorSub;
   Timer? _fragSweep;
   Timer? _livenessTimer;
 
   bool _disposed = false;
+  int _dispatchGeneration = 0;
   bool _established = false;
   bool _handshakeInFlight = false;
-  bool _peerWasOffline = false;
   int _missedPongs = 0;
   int _consecutiveTimeouts = 0;
   int _fragCounter = 0;
@@ -332,9 +332,9 @@ class MachineSession {
   /// supervisor replaced.
   void start() {
     _msgSub = relay.messageStream.listen(_onRouted);
-    _stateSub = relay.stateStream.listen(_onState);
-    _presenceSub = relay.peerPresenceStream.listen(_onPresence);
-    _errorSub = relay.errorStream.listen(_onRelayError);
+    _stateSub = relay.payloadStateStream.listen(_onState);
+    _presenceSub = relay.peerRestartStream.listen((_) => _onPeerRestart());
+    _errorSub = relay.failureStream.listen(_onRelayError);
     _fragSweep = Timer.periodic(
       const Duration(seconds: 2),
       (_) => _reassembler.sweep(),
@@ -611,7 +611,11 @@ class MachineSession {
         );
         return null;
       }
-      relay.sendMessage(machineDeviceId, f.channel, sealed);
+      if (!relay.isDispatchAllowed) return null;
+      final outcome = await relay.sendFrame(machineDeviceId, f.channel, sealed);
+      if (outcome != PeerSendOutcome.accepted || !identical(keys, _keys)) {
+        return null;
+      }
       // Each fragment is sealed on its own, so one message leaves as N frames
       // with N unrelated ids. Naming every one with the parent type is what
       // keeps a large transfer from reading as a burst of anonymous frames.
@@ -689,7 +693,7 @@ class MachineSession {
   /// giving them back every drop shrinks that channel's window for the rest of
   /// the session. Errors that name no frame are somebody else's business — the
   /// app fans them out to the streams through [noteFramesDropped].
-  void _onRelayError(ErrorMessage e) {
+  void _onRelayError(PeerLinkFailure e) {
     final channel = e.channel;
     final bytes = e.bytes;
     if (bytes == null || (channel != 'control' && channel != 'preview')) return;
@@ -702,21 +706,14 @@ class MachineSession {
   /// them. Every other transition is left alone: with pairing gone there is no
   /// grant whose loss could strand an otherwise-live session, and the
   /// supervisor re-drives [ensureEstablished] on whatever it observes.
-  void _onState(AppState s) {
-    if (s.connectionState == RelayConnectionState.disconnected) {
+  void _onState(PeerLinkState s) {
+    if (s == PeerLinkState.closed) {
       _teardownSession();
     }
   }
 
-  void _onPresence(bool present) {
-    if (!present) {
-      _peerWasOffline = true;
-      return;
-    }
-    if (_peerWasOffline) {
-      _peerWasOffline = false;
-      if (_established && !_handshakeInFlight) unawaited(_rekey());
-    }
+  void _onPeerRestart() {
+    if (_established && !_handshakeInFlight) unawaited(_rekey());
   }
 
   void _armKeysReady() {
@@ -727,6 +724,7 @@ class MachineSession {
   }
 
   void _teardownSession() {
+    _dispatchGeneration++;
     // Drop all session state — called when the socket dies and when the agent
     // hands the session to another device. Session keys are per-connection;
     // either event invalidates them. Clearing `_established` is also what
@@ -813,7 +811,6 @@ class MachineSession {
     old?.zeroize();
     if (!_keysReady.isCompleted) _keysReady.complete();
     _established = true;
-    _peerWasOffline = false;
     _lastRecv = DateTime.now();
     _missedPongs = 0;
     _consecutiveTimeouts = 0;
@@ -992,6 +989,7 @@ class MachineSession {
   // --- inbound dispatch -----------------------------------------------------
 
   void _onRouted(IncomingRouteMessage msg) {
+    if (_disposed || !relay.isDispatchAllowed) return;
     // Kind-1 (handshake) plaintext frames belong to the handshake driver, which
     // subscribes to the same messageStream and does its own dispatch.
     if (msg.kind == FrameKind.handshake) return;
@@ -1029,6 +1027,8 @@ class MachineSession {
     SessionKeys keys,
     int epoch,
   ) async {
+    if (_disposed || _keys == null || !relay.isDispatchAllowed) return;
+    final generation = _dispatchGeneration;
     // Captured before the open: the nonce that identifies this frame is only
     // readable while the payload is still sealed, and the type that makes it
     // legible only exists after. The two meet by id, not by threading — this
@@ -1065,6 +1065,10 @@ class MachineSession {
         if (plaintext != null) openedUnder = _sessionEpoch;
       }
     }
+    if (_disposed ||
+        generation != _dispatchGeneration ||
+        !relay.isDispatchAllowed)
+      return;
     // A candidate-key handshake frame during rekey (agent-ready/established) or
     // garbage → decrypt-or-drop.
     if (plaintext == null) {
@@ -1102,16 +1106,12 @@ class MachineSession {
     String frameId,
     int epoch,
   ) {
+    if (_disposed || _keys == null || !relay.isDispatchAllowed) return;
     Map<String, dynamic> json;
     try {
       json = jsonDecode(plaintext) as Map<String, dynamic>;
     } catch (_) {
-      _dropped(
-        'rx',
-        'plaintext-not-json',
-        channel: channel,
-        frameId: frameId,
-      );
+      _dropped('rx', 'plaintext-not-json', channel: channel, frameId: frameId);
       return;
     }
     final type = json['type'];
@@ -1123,7 +1123,12 @@ class MachineSession {
       return;
     }
     if (!json.containsKey('m')) {
-      _dropped('rx', 'unrecognized-plaintext', channel: channel, frameId: frameId);
+      _dropped(
+        'rx',
+        'unrecognized-plaintext',
+        channel: channel,
+        frameId: frameId,
+      );
       return;
     }
     final env = StreamEnvelope.fromJson(json);
@@ -1501,7 +1506,9 @@ class MachineSession {
       );
       return;
     }
-    relay.sendMessage(machineDeviceId, 'control', ct);
+    if (!relay.isDispatchAllowed) return;
+    final outcome = await relay.sendFrame(machineDeviceId, 'control', ct);
+    if (outcome != PeerSendOutcome.accepted || !identical(keys, _keys)) return;
     // Exempt from the GATE, never from the accounting: a relay drop report
     // names only a channel and a byte count, so a frame written without being
     // charged would have its report give back bytes some other frame is still

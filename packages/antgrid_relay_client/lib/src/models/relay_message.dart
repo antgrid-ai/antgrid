@@ -252,6 +252,18 @@ class IncomingRouteMessage {
   }
 }
 
+class PeerPolicyChangedMessage {
+  const PeerPolicyChangedMessage(this.generation);
+  final BigInt generation;
+  static PeerPolicyChangedMessage? fromJson(Map<String, dynamic> json) {
+    final value = json['generation'];
+    if (value is! String || !RegExp(r'^(0|[1-9][0-9]{0,18})$').hasMatch(value)) return null;
+    final generation = BigInt.parse(value);
+    if (generation > BigInt.parse('9223372036854775807')) return null;
+    return PeerPolicyChangedMessage(generation);
+  }
+}
+
 /// Parses a relay message JSON map into the appropriate typed message.
 /// Returns null if the type is unrecognized or the message is malformed.
 ///
@@ -272,6 +284,8 @@ Object? parseRelayMessage(Map<String, dynamic> json) {
       return StreamClosedMessage.fromJson(json);
     case 'error':
       return ErrorMessage.fromJson(json);
+    case 'peer-policy-changed':
+      return PeerPolicyChangedMessage.fromJson(json);
     case 'peer-online':
       return PeerOnlineMessage.fromJson(json);
     case 'peer-offline':

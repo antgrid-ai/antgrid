@@ -48,7 +48,7 @@ final connectionDeviceRecordProvider = FutureProvider<DeviceRecord>((
   }
 
   final cached = await store.readControllerIfMatchesUser(user.userId);
-  if (cached != null) return cached;
+  if (cached != null && cached.endpointSecret != null) return cached;
 
   return ref
       .read(deviceProvisioningProvider)
@@ -67,9 +67,8 @@ final connectionDeviceRecordProvider = FutureProvider<DeviceRecord>((
 /// `deviceUuid` claim, so sharing one device's token across two devices would
 /// make revoking either one kill both.
 ///
-/// Null when no record can be resolved (signed out, or provisioning refused):
-/// the dial then presents an empty token and the relay's license verdict is what
-/// tells the user to sign in.
+/// Null when no record can be resolved (signed out, or provisioning refused).
+/// Remote setup treats missing credentials as a terminal provisioning error.
 final connectionTokenMinterProvider = FutureProvider<LicenseTokenMinter?>((
   ref,
 ) async {

@@ -870,6 +870,8 @@ String connectFailureMessage(Object error) => switch (error) {
       'Connect failed: a newer connection replaced this one.',
     BlockReason.handshakeFailing =>
       'Connect failed: could not verify that machine.',
+    BlockReason.peerRejected =>
+      'Connect failed: remote access or the peer connection was rejected.',
   },
   _ => 'Connect failed.',
 };

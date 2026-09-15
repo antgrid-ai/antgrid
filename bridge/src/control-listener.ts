@@ -12,6 +12,7 @@ export interface ControlListenerOptions {
   token: string;
   /** Dispatches a validated request to the host; its return is the response. */
   handler: (req: ControlRequest) => Promise<ControlResponse>;
+  onPeerResume?: () => void;
 }
 
 /** Most control requests are tiny — a verb and a couple of short strings — and
@@ -388,6 +389,13 @@ export class ControlListener {
           return url.pathname === "/modelwatch"
             ? this.handleModelwatch(req, url)
             : this.handleNetwatch(req, url);
+        }
+        if (req.method === "POST" && url.pathname === "/peer-resume") {
+          if (!bearerMatches(req.headers.get("authorization"), this.opts.token)) {
+            return new Response("unauthorized", { status: 401 });
+          }
+          this.opts.onPeerResume?.();
+          return json({ ok: true }, 202);
         }
         if (req.method !== "POST" || url.pathname !== "/control") {
           return new Response("not found", { status: 404 });

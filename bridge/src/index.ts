@@ -159,6 +159,8 @@ program
                 clientId: payload.machine.auth.clientId,
                 clientSecret: payload.machine.auth.clientSecret,
                 deviceUuid: payload.machine.auth.deviceUuid,
+                userId: payload.machine.auth.userId,
+                endpointSecret: payload.machine.auth.endpointSecret,
               },
               onAuthRevoked: () => {
                 process.stderr.write(`${JSON.stringify({ event: "auth_revoked" })}\n`);

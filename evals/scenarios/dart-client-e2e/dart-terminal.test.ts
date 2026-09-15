@@ -58,13 +58,13 @@ describe("dart-terminal", () => {
     });
     await env.app.waitForTerminalStarted(env.streamId, "dart-term-output", 10_000);
 
-    const output = await env.app.waitForTerminalOutputContaining(
+    const output = await env.app.waitForTerminalFrameContaining(
       env.streamId,
       "dart-term-output",
       "EVAL_READY",
       15_000,
     );
-    expect(output.data.data).toContain("EVAL_READY");
+    expect(output.data.ansi).toContain("EVAL_READY");
   }, 25_000);
 
   test("sends terminal input and receives echo", async () => {
@@ -80,13 +80,13 @@ describe("dart-terminal", () => {
     const marker = `DART_TERM_${Date.now()}`;
     env.app.sendTerminalInput(env.streamId, "dart-term-repl", `console.log("${marker}")\n`);
 
-    const output = await env.app.waitForTerminalOutputContaining(
+    const output = await env.app.waitForTerminalFrameContaining(
       env.streamId,
       "dart-term-repl",
       marker,
       10_000,
     );
-    expect(output.data.data).toContain(marker);
+    expect(output.data.ansi).toContain(marker);
   }, 25_000);
 
   test("terminal resize stays responsive", async () => {

@@ -2,8 +2,8 @@ import { createHash } from "node:crypto";
 import type { Channel } from "./message-bus";
 import { BODY_REDACTED_MESSAGE_TYPES } from "./protocol";
 
-/** Which way the frame crossed the socket. */
-export type NetwatchDir = "tx" | "rx";
+/** Lifecycle observations have no socket direction. */
+export type NetwatchDir = "tx" | "rx" | "event";
 
 /**
  * Frame classification at the transport edge:
@@ -13,7 +13,7 @@ export type NetwatchDir = "tx" | "rx";
  *   - `json`      — a loopback frame: plain JSON, no seal, no frames, no streams
  *   - `drop`      — a frame that never left, or never reached dispatch
  */
-export type NetwatchKind = "sealed" | "handshake" | "control" | "json" | "drop";
+export type NetwatchKind = "sealed" | "handshake" | "control" | "json" | "drop" | "lifecycle";
 
 export interface NetwatchEvent {
   /** Monotonic counter of the process that RECORDED this — this bridge, or the
@@ -23,16 +23,8 @@ export interface NetwatchEvent {
   at: number;
   dir: NetwatchDir;
   kind: NetwatchKind;
-  /**
-   * Which transport carried this. The two are not the same wire — the relay
-   * path is sealed frames over a routed socket, the loopback LocalListener path
-   * is plain JSON with no seal, no frames and no streams — so a capture that
-   * did not say which one it came from could be read as relay traffic it never
-   * was. The app picks relay first and falls back to loopback
-   * (app/lib/providers/agent_transport.dart), and nothing else tells you which
-   * one you got.
-   */
-  transport: "relay" | "local";
+  /** Keep native peer and loopback bytes out of central payload accounting. */
+  transport: "relay" | "local" | "iroh";
   channel?: Channel;
   streamId?: string;
   /** Plaintext message type, once the pipeline knows it. Never a payload. */
@@ -305,7 +297,7 @@ export class Netwatch {
       // CAPTURE: it renders as NaN:NaN:NaN, collapses `joinCaptures`' overlap
       // window to nothing, and the join then reports that the two halves share
       // no window — a tool that lies rather than one that is missing a row.
-      if ((dir !== "tx" && dir !== "rx") || typeof kind !== "string" || !Number.isFinite(at)) continue;
+      if ((dir !== "tx" && dir !== "rx" && !(dir === "event" && kind === "lifecycle")) || typeof kind !== "string" || !Number.isFinite(at)) continue;
       // The field set is otherwise passed through verbatim (see above), with
       // `body` the one exception: the app's own event has no such field, so a
       // body here was not captured on the app's side of the socket — it is a

@@ -13,6 +13,7 @@ import 'dart:typed_data';
 
 import 'package:antgrid/providers/account_agents.dart';
 import 'package:antgrid/providers/agent_transport.dart';
+import 'package:antgrid/providers/peer_runtime.dart';
 import 'package:antgrid/providers/connection_identity.dart';
 import 'package:antgrid/providers/device_provisioning.dart';
 import 'package:antgrid/providers/providers.dart';
@@ -74,6 +75,18 @@ class _DialRecordingRelay extends RelayService {
 
   @override
   void disconnect() {}
+
+  @override
+  Future<PeerSendOutcome> sendFrame(
+    String to,
+    String channel,
+    Uint8List payload, {
+    FrameKind kind = FrameKind.sealed,
+  }) async {
+    if (!isDispatchAllowed) return PeerSendOutcome.closed;
+    sendMessage(to, channel, payload, kind: kind);
+    return PeerSendOutcome.accepted;
+  }
 
   @override
   void sendMessage(
@@ -186,6 +199,8 @@ void main() {
     final c = ProviderContainer(
       overrides: [
         ...stores.overrides,
+        // These fixtures isolate coordinates and E2E identity from HTTP enrollment.
+        peerRuntimeProvider.overrideWith((_) async => null),
         accountAgentsProvider.overrideWith((_) async => inventory),
         localDeviceUuidProvider.overrideWith((_) async => 'this-device'),
         connectionDeviceRecordProvider.overrideWith((_) async => record),

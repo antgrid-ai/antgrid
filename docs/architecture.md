@@ -6,6 +6,11 @@ only the cross-cutting shape.
 
 ## Message flow
 
+WebSocket remains the default payload transport. This branch also implements
+opt-in Iroh payload transport behind the same E2E session boundary; release remains
+unqualified. See [the task ledger](iroh-migration-ledger.md) and
+[qualification checkpoint](iroh-qualification.md) for evidence and release gates.
+
 ```
 App (Flutter) <--E2E encrypted--> Relay (WS router) <--E2E encrypted--> Agent (Bun)
 ```
@@ -14,6 +19,46 @@ The relay authenticates devices via a single signed `hello` frame (Ed25519
 proof-of-possession) but cannot decrypt payloads. Two WS channels: `control`
 (terminal, files, status) and `preview` (HTTP tunnel, streamed as start/chunk/end
 frames under the credit window).
+
+### Optional native peer payloads
+
+The authenticated central WebSocket retains inventory, presence and policy
+invalidation. The Apache Dart `PeerLink` interface separates that control
+connection from payload lifecycle. `MachineSession` and handshake drivers consume
+the selected link; feature services retain their existing interfaces. Native
+implementation and authoritative lease handling live in the ELv2
+`packages/antgrid_peer_transport` package, shared with its standalone CLI smoke.
+
+The bridge's `PeerSessionOwner` owns E2E, fragmentation, scheduling, credits and
+liveness. `RelayClient` retains central authentication and WebSocket routing;
+`IrohRelayClient` reuses the peer session machinery for authenticated native
+connections. Native requests keep remote command authorization, project catalog
+checks and checkout routing. Host-assigned stream readiness is independent of
+WebSocket stream admission, allowing native project use during a leased central
+outage.
+
+Each enrollment has a distinct protected endpoint seed. Device-bound OAuth
+credentials authorize challenge, dual-signature registration and snapshot APIs
+under `/account/devices/me/`. Registrations retain history and decimal-string
+generations. Snapshots supply entitlement, peer signing keys, endpoint identities
+and approved relay origins. Active leases refresh every 20 seconds and expire no
+later than 60 seconds from monotonic request start. Dispatch and queued writes
+recheck authorization; revocation closes affected sessions. Transactional policy
+outbox delivery informs connected clients and configured private relay targets.
+
+An app-initiated Iroh connection is reused across projects. ALPN
+`antgrid/peer/1` selects one reliable bidirectional stream carrying existing route
+frames with a four-byte big-endian length prefix. Additional application streams
+are rejected. Transport selection precedes E2E and is fenced by attempt generation;
+the app's `ConnectionSupervisor` remains the retry authority. Central outages do
+not close a healthy authorized native payload connection.
+
+Approved relay maps disable implicit public discovery. The self-hosted relay
+under `iroh-relay/` composes upstream public handshake and registry interfaces;
+its admission/dispatch fencing and resource accounting remain under verification.
+See [the upstream audit](iroh-relay-upstream-audit.md). Native
+error classification and key erasure also require qualification. Nothing in this
+branch authorizes enabling production preference before those gates pass.
 
 ### The session bus
 

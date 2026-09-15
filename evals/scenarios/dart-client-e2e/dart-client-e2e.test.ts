@@ -48,13 +48,13 @@ describe("dart-client-e2e", () => {
     });
     await env.app.waitForTerminalStarted(env.streamId, "dart-output-probe", 10_000);
 
-    const output = await env.app.waitForTerminalOutputContaining(
+    const output = await env.app.waitForTerminalFrameContaining(
       env.streamId,
       "dart-output-probe",
       "EVAL_READY",
       15_000,
     );
-    expect(output.data.data).toContain("EVAL_READY");
+    expect(output.data.ansi).toContain("EVAL_READY");
   }, 25_000);
 
   test("receives file tree via Dart client", async () => {
@@ -80,13 +80,13 @@ describe("dart-client-e2e", () => {
     const marker = `DART_ECHO_${Date.now()}`;
     env.app.sendTerminalInput(env.streamId, "dart-repl", `console.log("${marker}")\n`);
 
-    const output = await env.app.waitForTerminalOutputContaining(
+    const output = await env.app.waitForTerminalFrameContaining(
       env.streamId,
       "dart-repl",
       marker,
       10_000,
     );
-    expect(output.data.data).toContain(marker);
+    expect(output.data.ansi).toContain(marker);
   }, 25_000);
 
   test("sends terminal resize via Dart client", async () => {
@@ -96,13 +96,13 @@ describe("dart-client-e2e", () => {
     const marker = `RESIZE_CHECK_${Date.now()}`;
     env.app.sendTerminalInput(env.streamId, "dart-repl", `console.log("${marker}")\n`);
 
-    const output = await env.app.waitForTerminalOutputContaining(
+    const output = await env.app.waitForTerminalFrameContaining(
       env.streamId,
       "dart-repl",
       marker,
       10_000,
     );
-    expect(output.data.data).toContain(marker);
+    expect(output.data.ansi).toContain(marker);
   }, 15_000);
 
   test("requests file content via Dart client", async () => {

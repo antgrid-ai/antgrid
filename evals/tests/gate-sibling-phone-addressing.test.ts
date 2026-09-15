@@ -6,6 +6,7 @@ import {
   allocatePort,
   generateEvalAuth,
   spawnAgent,
+  setMobileAccess,
   startRelay,
   startFakeLicenseApi,
   type AgentHandle,
@@ -94,6 +95,7 @@ test("a same-account sibling's presence does not steal addressing from the activ
       auth,
       env: { ANTGRID_EVAL_TEST: "1" },
     });
+    await setMobileAccess(abDir, true);
     const agentDeviceId = auth.deviceUuid;
 
     // Phone 1 becomes the active phone.

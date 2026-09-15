@@ -1661,6 +1661,8 @@ const DeviceUuid = z
   .string()
   .regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i, "UUID format");
 const AgentEnableRelayAuth = z.object({
+  userId: z.string().min(1).optional(),
+  endpointSecret: z.string().regex(/^[A-Za-z0-9+/]{43}=$/).optional(),
   deviceUuid: DeviceUuid,
   ed25519Pub: Base64ish,
   ed25519Priv: Base64ish,

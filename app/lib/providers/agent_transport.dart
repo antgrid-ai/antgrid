@@ -37,6 +37,7 @@ import 'provider_retry.dart';
 import 'providers.dart';
 import 'recent_agents.dart';
 import 'relay_connection.dart';
+import 'peer_runtime.dart';
 import 'relay_error_banner.dart';
 import 'value_controller.dart';
 
@@ -314,9 +315,12 @@ Future<AgentTransport?> _buildRelayTransportFor(
   final minterResolver = ref.read(connectionMinterResolverProvider);
   var resolveCalls = 0;
 
+  final peerRuntime = await ref.read(peerRuntimeProvider.future);
+  if (!ref.mounted) throw StateError('Transport provider disposed');
   conn.ensureStarted(
     mechanisms: RelayMechanisms(
       relay: conn.relay,
+      peerRuntime: peerRuntime,
       crypto: crypto,
       machineDeviceId: base,
       identity: identity,

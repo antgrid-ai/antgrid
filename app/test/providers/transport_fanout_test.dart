@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/providers/connection_identity.dart';
+import 'package:antgrid/providers/peer_runtime.dart';
 import 'package:antgrid/providers/device_provisioning.dart';
 import 'package:antgrid/providers/recent_agents.dart';
 import 'package:antgrid/providers/relay_connection.dart';
@@ -76,6 +77,8 @@ void main() {
             (_) async => _connectionRecord(),
           ),
           connectionTokenMinterProvider.overrideWith((_) async => null),
+          // Machine routing is independent of endpoint enrollment.
+          peerRuntimeProvider.overrideWith((_) async => null),
         ],
       );
       addTearDown(c.dispose);
@@ -116,6 +119,7 @@ void main() {
           (_) async => _connectionRecord(),
         ),
         connectionTokenMinterProvider.overrideWith((_) async => null),
+        peerRuntimeProvider.overrideWith((_) async => null),
       ],
     );
     addTearDown(c.dispose);

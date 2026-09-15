@@ -185,8 +185,8 @@ function detailText(event: NetwatchEvent): string {
  * this process without it — an older host's ring, an app's own capture shipped
  * in by `--remote` — got here over the relay by construction.
  */
-function transportOf(event: NetwatchEvent): "relay" | "local" {
-  return event.transport === "local" ? "local" : "relay";
+function transportOf(event: NetwatchEvent): "relay" | "local" | "iroh" {
+  return event.transport === "local" || event.transport === "iroh" ? event.transport : "relay";
 }
 
 /** Whether this event survives the transport narrowing. Neither flag = both. */
@@ -218,7 +218,7 @@ function frameColumns(event: NetwatchEvent, color: boolean): string[] {
     // Relay is the dimmed half: a desktop machine carries both wires at once,
     // and loopback is the one no other column would hint at — the channel,
     // kind and size of a local frame all read like a relay frame's.
-    transport === "local" ? "local" : paint("relay", "dim", color),
+    transport === "relay" ? paint("relay", "dim", color) : transport.padEnd(5),
     (event.channel === "preview" ? "prev" : event.channel === "control" ? "ctrl" : "—").padEnd(4),
     (event.kind === "drop" ? "DROP" : field(event.kind, 9)).padEnd(9),
     bytes(event.bytes).padStart(7),
@@ -232,7 +232,7 @@ function frameColumns(event: NetwatchEvent, color: boolean): string[] {
  *  would be a word per line saying what the reader already knows. */
 export function renderEvent(event: NetwatchEvent, color = false, showOrigin = false): string {
   const drop = event.kind === "drop";
-  const arrow = drop ? "x" : event.dir === "tx" ? "->" : "<-";
+  const arrow = drop ? "x" : event.dir === "event" ? "·" : event.dir === "tx" ? "->" : "<-";
   const cols = [
     paint(clock(event.at), "dim", color),
     ...(showOrigin ? [paint(event.origin === "app" ? "app" : "brg", "dim", color)] : []),

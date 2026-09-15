@@ -90,14 +90,13 @@ describe.skipIf(!HAVE_CLAUDE)("claude-code chat session (E2E, installed binary)"
           (m: any) =>
             m._streamId === streamId &&
             m.sessionId === sessionId &&
-            (m.type === "agent:item-added" || m.type === "agent:turn-end"),
-          10_000,
-        )
-        .catch(() => null);
-      if (!msg) break;
+            (m.type === "agent:item-added" || m.type === "agent:turn-end" || m.type === "agent:error"),
+          Math.max(1, deadline - Date.now()),
+        );
+      if (msg.type === "agent:error") throw new Error(`Claude turn failed: ${msg.error?.message}`);
       if (msg.type === "agent:item-added") {
         const item = msg.item;
-        if (item?.kind === "message" && typeof item.text === "string" && item.text.includes("PONG")) {
+        if (item?.kind === "message" && item.role === "assistant" && typeof item.text === "string" && item.text.includes("PONG")) {
           sawMessageWithPong = true;
         }
       } else if (msg.type === "agent:turn-end") {
@@ -156,11 +155,12 @@ describe.skipIf(!HAVE_CLAUDE)("claude-code chat session (E2E, installed binary)"
           (m: any) =>
             m._streamId === streamId &&
             m.sessionId === nameSessionId &&
-            m.type === "agent:turn-end",
-          10_000,
-        )
-        .catch(() => null);
-      if (msg) turnEnded = true;
+            (m.type === "agent:turn-end" || m.type === "agent:error"),
+          Math.max(1, turnDeadline - Date.now()),
+        );
+      if (msg.type === "agent:error") throw new Error(`Claude title turn failed: ${msg.error?.message}`);
+      expect(msg.stopReason).toBe("end_turn");
+      turnEnded = true;
     }
     expect(turnEnded).toBe(true);
 
