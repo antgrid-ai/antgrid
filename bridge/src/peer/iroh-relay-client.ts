@@ -6,7 +6,7 @@ import { baseSlotDeviceId } from "../relay-slot";
 import type { Channel, MessageBus } from "../message-bus";
 import type { AttachStreamOpts, StreamHandle } from "../stream-mux";
 import type { PendingSinkWrite, QueuedAppFrame } from "../send-scheduler";
-import { AuthorizationLease, type EnrollmentIdentity } from "./authorization-lease";
+import { AuthorizationLease, type EnrollmentIdentity, type LeaseFailure } from "./authorization-lease";
 import { EndpointApiError, EndpointEnrollment } from "./enrollment";
 import { PeerRecords, type PeerRecordFailure } from "./records";
 import { frameIdFor } from "../netwatch";
@@ -59,7 +59,7 @@ export class IrohRelayClient extends RelayClient {
         throw error;
       }
     },
-      () => this.dropAllPeers(), () => {
+      (reason) => this.invalidatePeerConnections(reason), () => {
         this.recheckAuthorization();
         this.reconcileRelays();
       });
@@ -247,6 +247,20 @@ export class IrohRelayClient extends RelayClient {
     for (const peerId of [...this.nativePeers.keys()]) this.dropNativePeer(peerId, reason);
     for (const peerId of [...this.sessions.keys()]) this.dropSession(peerId);
     for (const peerId of [...this.pending.keys()]) this.tearDownPending(peerId);
+  }
+
+  private invalidatePeerConnections(reason: LeaseFailure): void {
+    const websocketPeers = new Set([...this.sessions.keys(), ...this.pending.keys(), ...this.authorizedHellos.keys()]);
+    const hasWebsocketPeer = [...websocketPeers].some((peerId) => !this.nativePeers.has(peerId));
+    this.dropAllPeers(reason === "resume" ? "connection-lost" : "unauthorized");
+    // Erasing WS keys alone leaves the app sending until its E2E liveness timer
+    // expires. Central offline/online transitions already drive a fresh handshake.
+    // Native-only sessions have their own connection-close signal.
+    if (hasWebsocketPeer && reason !== "closed" && this.ws?.readyState === WebSocket.OPEN) {
+      this.recordDiagnostic({ dir: "event", kind: "lifecycle", transport: "relay",
+        msgType: "peer:authorization-invalidated", detail: { reason } });
+      this.ws.close(1012, "Peer authorization invalidated");
+    }
   }
 
   protected override centralControlsPeer(peerId: string): boolean { return !this.nativePeers.has(peerId); }

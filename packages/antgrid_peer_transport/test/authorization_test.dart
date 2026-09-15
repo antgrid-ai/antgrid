@@ -26,6 +26,66 @@ Map<String, dynamic> snapshot({String policy = '1', bool allowed = true}) => {
 
 void main() {
   test(
+    'resume admission waits for fresh authorization, not the old request',
+    () async {
+      final old = Completer<AuthorizationSnapshot>();
+      final fresh = Completer<AuthorizationSnapshot>();
+      var calls = 0;
+      final lease = AuthorizationLease(
+        accountId: 'account',
+        deviceId: local,
+        enrollmentId: 'credential',
+        fetchSnapshot: () => ++calls == 1 ? old.future : fresh.future,
+      );
+      addTearDown(lease.dispose);
+      final beforeResume = lease.refresh();
+      final resume = lease.refreshFresh();
+      final admission = lease.refresh();
+      var admissionFinished = false;
+      admission.then((_) => admissionFinished = true);
+      old.complete(AuthorizationSnapshot.fromJson(snapshot()));
+      expect(await beforeResume, isFalse);
+      await Future<void>.delayed(Duration.zero);
+      expect(admissionFinished, isFalse);
+      expect(lease.permits(peer), isFalse);
+      expect(calls, 2);
+      fresh.complete(AuthorizationSnapshot.fromJson(snapshot()));
+      expect(await resume, isTrue);
+      expect(await admission, isTrue);
+      expect(lease.permits(peer), isTrue);
+    },
+  );
+
+  test(
+    'overlapping fresh requests share admission and remain revocation fenced',
+    () async {
+      final fresh = Completer<AuthorizationSnapshot>();
+      var calls = 0;
+      final lease = AuthorizationLease(
+        accountId: 'account',
+        deviceId: local,
+        enrollmentId: 'credential',
+        fetchSnapshot: () {
+          calls++;
+          return fresh.future;
+        },
+      );
+      addTearDown(lease.dispose);
+      final a = lease.refreshFresh();
+      await Future<void>.delayed(Duration.zero);
+      final b = lease.refreshFresh();
+      final admission = lease.refresh();
+      lease.notePolicyGeneration(BigInt.two);
+      fresh.complete(AuthorizationSnapshot.fromJson(snapshot()));
+      expect(await a, isFalse);
+      expect(await b, isFalse);
+      expect(await admission, isFalse);
+      expect(calls, 1);
+      expect(lease.permits(peer), isFalse);
+    },
+  );
+
+  test(
     'stale denied response cannot overwrite a newer lifecycle fence',
     () async {
       final pending = Completer<AuthorizationSnapshot>();

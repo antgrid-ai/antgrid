@@ -713,7 +713,12 @@ class MachineSession {
   }
 
   void _onPeerRestart() {
-    if (_established && !_handshakeInFlight) unawaited(_rekey());
+    if (!_established) return;
+    // A peer bounce can erase its session while our relay socket stays open.
+    // Commands awaiting a reply have an unknown outcome; queued input must not
+    // spill into the replacement session. Ordinary live rekeys keep their queue.
+    _cancelPendingWork();
+    if (!_handshakeInFlight) unawaited(_rekey());
   }
 
   void _armKeysReady() {
@@ -734,6 +739,14 @@ class MachineSession {
     _stopLiveness();
     _keys?.zeroize();
     _keys = null;
+    _cancelPendingWork();
+    _resetRxFlow();
+    // Re-arm only from the completed state: a second blip before the first
+    // establishment would otherwise orphan whoever is already awaiting.
+    if (_keysReady.isCompleted) _armKeysReady();
+  }
+
+  void _cancelPendingWork() {
     // Fail every in-flight RPC now: their replies can never arrive on a dead
     // session, so waiting out each timeout is a pure fail-slow spinner. Tier-3
     // hydration re-drives on the next establishment (streamReadyEvents); tier-2
@@ -754,10 +767,6 @@ class MachineSession {
         detail: {'why': 'session-down'},
       );
     }
-    _resetRxFlow();
-    // Re-arm only from the completed state: a second blip before the first
-    // establishment would otherwise orphan whoever is already awaiting.
-    if (_keysReady.isCompleted) _armKeysReady();
   }
 
   // --- handshake / rekey ----------------------------------------------------

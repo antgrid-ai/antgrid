@@ -466,7 +466,7 @@ class ConnectionSupervisor {
       // that never climbed could only be diagnosed from the agent's logs.
       AbLog.warn(
         _component,
-        'rung attempt failed',
+        '${rung.name} attempt failed: $e',
         fields: {'rung': rung.name, 'error': '$e'},
       );
       _failed(rung);
@@ -647,7 +647,11 @@ class ConnectionSupervisor {
   }
 
   void _block(BlockReason reason) {
-    AbLog.warn(_component, 'climb blocked', fields: {'reason': reason.name});
+    AbLog.warn(
+      _component,
+      'climb blocked: ${reason.name}',
+      fields: {'reason': reason.name},
+    );
     _emit(Blocked(reason));
   }
 

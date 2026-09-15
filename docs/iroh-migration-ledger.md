@@ -46,3 +46,50 @@ Final verification after collector edits: `bun run --filter antgrid-evals
 test:evals:codex` passed four tests/19 assertions in 27.90 seconds;
 `bun run --filter antgrid-evals typecheck` exited zero, including the Claude
 changes. `git diff --check` passed.
+
+## September 15 â€” Aspire Android emulator smoke recovery
+
+The local `antgrid` database was missing `20260914000000_peer_endpoints`.
+Applied it with the web workspace migration script; authorization, endpoint
+enrollment and peer inventory then returned HTTP 200. Restarted `app-windows`
+so the host could retry its startup enrollment after the schema repair.
+
+Fixed the app runtime's dependency on token-minter invalidation: resume and
+post-sign-in token refresh no longer dispose an enrollment runtime retained by
+machine connections. Initial coordinate resolution now waits for an in-flight
+inventory load before comparing the machine key with a fresh authorization
+snapshot. Cached keys still require authoritative confirmation. Console
+diagnostics now include the failed rung and peer-selection reason.
+
+The three focused provider/connection suites passed 17 tests, and
+`flutter analyze --no-pub` reported no issues. Aspire and host logs confirmed
+the emulator established an E2E session. An ADB Home/foreground cycle triggered
+fresh authorization and another confirmed E2E establishment without the previous
+disposed-runtime failure. This is local WebSocket smoke evidence, not native
+Iroh or forced-relay qualification.
+
+The subsequent multi-project smoke exposed a host-resume notification gap:
+WebSocket E2E keys were erased while the central carrier remained connected,
+leaving the phone waiting for liveness recovery. The current patch and pending
+verification are recorded in [the resume investigation handoff](iroh-resume-investigation-handoff.md).
+
+## Resume recovery follow-up â€” September 15
+
+- Host lease invalidation now signals affected WebSocket peers through central
+  disconnect/reconnect, while native-only sessions avoid central churn.
+- Real host/relay/Dart resume gate passes three cycles with two project streams
+  responding within 1.53 seconds (includes a deliberate 1.5-second settle wait).
+- Fixed eval CLI machine-scoped presence wiring; pending actions fail and queued
+  input is discarded on peer restart. Bridge focused suites, bridge/eval
+  typechecks and Dart rekey/flow-control suites pass. Flutter analysis reports
+  no issues after the shared-client change.
+- Live Aspire host has not been restarted; changes remain uncommitted. Full
+  details and current verification state: `iroh-resume-investigation-handoff.md`.
+
+### Android resume follow-up — September 15
+
+Removed duplicate foreground authorization invalidation and fixed admission joining a pre-resume lease request. Reproduced both lease races before the fix. Verified 15 pure-Dart tests, 19 Flutter tests, both analysis gates and three live emulator resume cycles (2.754–3.256 seconds to E2E). Android hot restart only; host terminals kept running. Details and evidence: docs/iroh-smoke-2026-09-15.md. Changes uncommitted; long-sleep and native qualification remain open.
+
+## Follow-up commit and user validation
+
+The user reported successful validation after two minutes backgrounded on September 15. No additional timing measurements or logs were supplied for that run. This commit includes the Windows setup documentation, emulator connection and host/Android resume fixes, regression tests and investigation records. Earlier uncommitted-status notes are historical. Token minting still has no explicit HTTP request timeout; longer sleep, network-transition, physical-device and native Iroh qualification remain open. No production preference was enabled.

@@ -151,10 +151,20 @@ published package.
 A compiled `antgrid_peer_transport/bin/native_smoke.dart` executable loaded that
 exact DLL by explicit path and passed echo, malformed length, extra-stream and
 revoked-send checks. This is Windows native-plugin build/runtime evidence.
-The complete Flutter app build is **unqualified**: the installed Visual Studio
-components lack `atlstr.h`, required by `flutter_secure_storage_windows`, and
-no final app executable was produced. Remaining platform builds and signed final
-bundle verification still require qualified runners.
+That initial complete Flutter app build stopped at missing `atlstr.h`, required
+by `flutter_secure_storage_windows`.
+
+On September 15, the normal development build exposed `rustup not found in
+PATH`: the earlier source-build checkpoint used a process-local Rust
+installation. Installing rustup in the normal user profile and adding
+`Microsoft.VisualStudio.Component.VC.ATL` to the active VS 18 Build Tools
+resolved both prerequisites. `flutter build windows --debug --no-pub` then
+passed, producing `build/windows/x64/runner/Debug/antgrid.exe` with the rebuilt
+`irohdart_ffi.dll` alongside it. The build used the existing visible pub cache;
+the upstream source-pin guard passed after the build. This qualifies local
+Windows debug compilation and bundle inclusion, not signed installers or app
+runtime/network behavior. Remaining platform builds and signed final bundle
+verification still require qualified runners.
 
 Production Windows/Linux initialization now passes an explicit bundled library
 path; Android explicitly opens the packaged shared-library name. Apple's missing

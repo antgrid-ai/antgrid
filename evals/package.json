@@ -10,6 +10,7 @@
     "test:evals:local": "bun test tests/local-promotion.test.ts tests/local-terminal.test.ts",
     "test:evals:iroh-authorization": "bun test tests/gate-iroh-authorization.test.ts",
     "test:evals:iroh-host-authorization": "bun test tests/gate-iroh-host-authorization.test.ts",
+    "test:evals:peer-resume": "bun test tests/gate-peer-resume.test.ts",
     "test:evals:iroh-relay-authorization": "bun test tests/gate-iroh-relay-authorization.test.ts",
     "test:evals:isolation": "bun test tests/gate-worktree-isolation.test.ts",
     "test:evals:pairing": "bun test scenarios/pairing/",

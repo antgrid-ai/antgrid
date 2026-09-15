@@ -118,9 +118,15 @@ flutter --version
 cd app && flutter pub get
 ```
 
+The app's `iroh_flutter` plugin builds Rust from source. Install **Rust via
+rustup, including the stable toolchain**, for native app builds on every
+platform. `rustup --version` and `cargo +stable --version` must work in the
+environment launching Flutter (including Aspire). The pure-Dart unit suites do
+not need this native build toolchain.
+
 ### Windows — desktop builds
 
-Two things, and the second one surprises people.
+Install the Rust toolchain above and these native dependencies.
 
 **1. Visual Studio 2022 or newer with the "Desktop development with C++"
 workload.** `app/windows/CMakeLists.txt` asks only for CMake 3.14, so that
@@ -128,6 +134,9 @@ number tells you nothing — the real floor comes from the Flutter plugins this
 app pulls in. Visual Studio 2019, whose bundled CMake is 3.20, fails. Visual
 Studio 2022 or newer is the requirement; VS 18 2026 with its bundled CMake 4.3.1
 is what has actually been measured working.
+
+Include the **C++ ATL for the selected x64/x86 MSVC toolset** individual
+component: `flutter_secure_storage_windows` includes `atlstr.h`.
 
 **2. A full JDK.** This is not optional and it is not obvious. `sentry_flutter`
 pulls in the transitive `jni` package, `jni` declares Windows support, so every
@@ -151,6 +160,24 @@ installs no JDK explicitly and still builds, because the runner image ships one
 Install the JDK **before** your first `flutter build windows`. A failed first
 configure leaves a permanent mess; see
 [Trap 1](#trap-1-a-failed-windows-cmake-configure-poisons-appbuild-permanently).
+
+**Rust and the launching shell.** After installing rustup, restart the terminal
+or IDE that launches Aspire so it inherits `%USERPROFILE%\.cargo\bin` in PATH.
+Restarting only the Flutter resource inherits Aspire's old environment.
+`iroh_flutter_plugin_cargokit.vcxproj` failing with `MSB8066` / exit code `-1`
+can hide `rustup not found in PATH`; inspect the preceding Cargokit output.
+
+The pinned upstream Cargokit resolver also fails when traversing the hidden
+AppData pub cache. Use a visible cache before dependency resolution and keep
+that environment when launching the app, as desktop CI does:
+
+```powershell
+# From the repository root, in the same terminal that launches Aspire/Flutter.
+$env:PUB_CACHE = Join-Path (Get-Location) '.pub-cache'
+Push-Location app
+flutter pub get --enforce-lockfile
+Pop-Location
+```
 
 **Shell.** Commands in this file are written for a POSIX shell. On Windows, Git
 Bash or WSL runs them as written. In PowerShell 5.1, `&&` is a parser error —
@@ -178,9 +205,8 @@ delete the stub files and `git checkout -- .` so git writes real links.
 
 ### macOS — desktop and iOS builds
 
-No extra system packages. A working Xcode toolchain plus the standard Flutter
-macOS setup is enough; CI builds the macOS desktop app with nothing beyond
-Flutter and Bun.
+A working Xcode toolchain, the standard Flutter macOS setup, and the Rust
+toolchain above are required; see the desktop workflow for CI setup.
 
 The desktop app targets **macOS 12 and up** — Flutter 3.47 dropped Big Sur. The
 floor is set in `app/macos/Podfile` and in every `MACOSX_DEPLOYMENT_TARGET` in
@@ -241,9 +267,9 @@ documented in `app/pubspec.yaml` and is by design.
 - Core library desugaring is required (`flutter_local_notifications`); it is
   already wired in `app/android/app/build.gradle.kts`.
 
-Optional: **Rust (rustup + cargo)**, because `super_clipboard` →
-`super_native_extensions` compiles its crate from source whenever no precompiled
-binary matches the target ABI; and an **NDK**, whose `llvm-readelf` is how you
+**Rust (rustup + cargo)** is required by `iroh_flutter`, and is also used by
+`super_clipboard` → `super_native_extensions` whenever no precompiled binary
+matches the target ABI. An **NDK** supplies `llvm-readelf`, which is how you
 check ELF alignment by hand. See
 [Trap 4](#trap-4-a-16-kb-alignment-failure-is-never-fixed-by-bumping-the-ndk).
 

@@ -34,6 +34,9 @@ class PeerSelectionFailure implements Exception {
   const PeerSelectionFailure(this.code, {required this.terminal});
   final String code;
   final bool terminal;
+
+  @override
+  String toString() => 'PeerSelectionFailure($code, terminal: $terminal)';
 }
 
 /// One selection attempt; retries belong to ConnectionSupervisor.

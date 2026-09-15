@@ -20,6 +20,7 @@ import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/providers/relay_connection.dart';
 import 'package:antgrid/services/account_agents_api.dart';
 import 'package:antgrid/services/keychain_device_store.dart';
+import 'package:antgrid/connection/connection_supervisor.dart';
 import 'package:antgrid/storage/recent_agents_store.dart';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:cryptography/cryptography.dart';
@@ -192,6 +193,50 @@ void main() {
       await Future<void>.delayed(const Duration(milliseconds: 10));
     }
   }
+
+  test(
+    'initial coordinates await loading inventory before using a cached key',
+    () async {
+      await stores.recentAgentsStore.upsert(_recent(_machine, _urlA));
+      final pending = Completer<List<InventoryAgent>>();
+      final c = ProviderContainer(
+        overrides: [
+          ...stores.overrides,
+          accountAgentsProvider.overrideWith((_) => pending.future),
+        ],
+      );
+      addTearDown(c.dispose);
+      var resolved = false;
+      final result = c
+          .read(connectionCoordsResolverProvider)
+          .resolve(
+            base: _machine,
+            refreshInventory: false,
+            fallback: const ConnCoords(
+              relayUrl: _urlA,
+              agentEd25519PubB64: _agentPubB64,
+            ),
+          )
+          .then((value) {
+            resolved = true;
+            return value;
+          });
+      await Future<void>.delayed(Duration.zero);
+      expect(resolved, isFalse);
+      pending.complete([
+        InventoryAgent(
+          deviceUuid: _machine,
+          displayName: 'Remote',
+          platform: 'linux',
+          ed25519Pub: 'fresh-key',
+          relayUrl: _urlB,
+        ),
+      ]);
+      final coords = await result;
+      expect(coords.agentEd25519PubB64, 'fresh-key');
+      expect(coords.relayUrl, _urlB);
+    },
+  );
 
   test('a Retry that disposes the transport element must not freeze the coords '
       'step on its build-time endpoint', () async {

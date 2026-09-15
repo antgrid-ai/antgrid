@@ -225,8 +225,11 @@ class PeerRuntime {
     for (final value in _currentSnapshot().peers) {
       if (value.deviceId == machineDeviceId) peer = value;
     }
-    if (peer == null || peer.ed25519Pub != machinePublicKey) {
+    if (peer == null) {
       throw const PeerSelectionFailure('PEER_IDENTITY_DENIED', terminal: true);
+    }
+    if (peer.ed25519Pub != machinePublicKey) {
+      throw const PeerSelectionFailure('PEER_KEY_MISMATCH', terminal: true);
     }
     final registration = peer.endpoint;
     final local = _currentSnapshot().endpoint;
@@ -277,7 +280,12 @@ class PeerRuntime {
     );
     if (!authorized()) {
       await selected.close();
-      throw const PeerSelectionFailure('DISPOSED', terminal: true);
+      throw PeerSelectionFailure(
+        _disposed
+            ? 'DISPOSED_AFTER_SELECTION'
+            : 'AUTHORIZATION_CHANGED_DURING_SELECTION',
+        terminal: true,
+      );
     }
     return SelectedPeerLink(
       LeasedPeerLink(

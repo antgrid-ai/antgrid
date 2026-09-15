@@ -74,7 +74,8 @@ class _AppShellState extends ConsumerState<AppShell> {
         await ref.read(preferencesServiceProvider).flush();
         return AppExitResponse.exit;
       },
-      onRestart: _reconnectRelay,
+      // onRestart precedes onResume during the same foreground transition;
+      // refreshing at both points can invalidate the first connection attempt.
       onResume: _resume,
       onStateChange: (state) {
         _mobileLifecycle?.handleState(state);
@@ -96,9 +97,8 @@ class _AppShellState extends ConsumerState<AppShell> {
     unawaited(pruneRemovedMachines(ref.container));
   }
 
-  /// One kick at a time: a single foregrounding fires both onRestart and
-  /// onResume (and cold launch adds the startup resume to the post-frame
-  /// kick), and a second concurrent kick would re-invalidate the providers the
+  /// One kick at a time: cold launch adds the startup resume to the post-frame
+  /// kick, and a second concurrent kick would re-invalidate the providers the
   /// first one's dials are still mid-building — restarting them for nothing.
   void _kickEagerDials() {
     _eagerKick ??= kickEagerControlPlaneDials(

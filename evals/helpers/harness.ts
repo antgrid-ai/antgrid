@@ -851,7 +851,7 @@ export async function setupDartTestEnv(opts: {
 
   // v3: app hello now carries a mandatory license token; the Dart
   // eval CLI forwards it to RelayService.connect.
-  await app.connect(relay.url, TEST_LICENSE_TOKEN);
+  await app.connect(relay.url, TEST_LICENSE_TOKEN, deviceUuid);
   // Pair-free: the phone addresses the agent by the coordinates it already
   // holds (bare machine deviceUuid + pinned Ed25519 pub), because nothing hands
   // it a peer id any more.

@@ -38,6 +38,12 @@ one for exercising the relay path end-to-end — see [App targets](#app-targets)
    `RELAY_INTERNAL_SECRET`, prisma migrations, seeded dev license JWT.
    Aspire orchestrates processes — it does not regenerate secrets.
 
+After switching to a branch with new database migrations, run
+`bun run --filter antgrid-web migrate` from the repository root before starting
+the smoke stack. Aspire does not apply migrations on startup. Missing peer
+authorization tables return HTTP 500 after relay authentication and prevent
+the encrypted session from establishing.
+
 ## Run
 
 ```pwsh

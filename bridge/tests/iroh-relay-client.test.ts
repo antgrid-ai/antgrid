@@ -157,6 +157,43 @@ test("resume closes native peers synchronously and fences pre-resume stream admi
   } finally { f.client.close(); }
 });
 
+test("resume signals WebSocket peers immediately while fresh authorization is pending", async () => {
+  const f = fixture();
+  const refreshed = Promise.withResolvers<unknown>();
+  const closes: number[] = [];
+  const access = f.client as unknown as {
+    ws: WebSocket | null;
+    authorizedHellos: Map<string, { attemptId: string; admitted: boolean }>;
+    lease: { current: unknown; refresh(): Promise<boolean> };
+  };
+  try {
+    await access.lease.refresh();
+    access.authorizedHellos.set(f.peerId, { attemptId: "ws-attempt", admitted: true });
+    access.ws = { readyState: WebSocket.OPEN, close: (code: number) => { closes.push(code); } } as unknown as WebSocket;
+    f.access.enrollment.authorization = () => refreshed.promise;
+    const resumed = f.client.noteResume();
+    expect(access.lease.current).toBeNull();
+    expect(access.authorizedHellos.size).toBe(0);
+    expect(closes).toEqual([1012]);
+    refreshed.resolve(f.snapshot);
+    expect(await resumed).toBe(true);
+  } finally { refreshed.resolve(f.snapshot); access.ws = null; f.client.close(); }
+});
+
+test("native-only resume does not churn the central control connection", async () => {
+  const f = fixture();
+  let centralCloses = 0;
+  const access = f.client as unknown as { ws: WebSocket | null };
+  try {
+    const peer = connection(f.endpointId);
+    await f.access.acceptPeer(peer.native);
+    access.ws = { readyState: WebSocket.OPEN, close: () => centralCloses++ } as unknown as WebSocket;
+    await f.client.noteResume();
+    expect(peer.closes()).toBe(1);
+    expect(centralCloses).toBe(0);
+  } finally { access.ws = null; f.client.close(); }
+});
+
 test("a revoked local endpoint cannot admit a peer using an otherwise allowed device lease", async () => {
   const f = fixture();
   try {

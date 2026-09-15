@@ -14,7 +14,9 @@ final peerRuntimeProvider = FutureProvider<PeerRuntime?>((ref) async {
       'A protected endpoint key is required for remote connections',
     );
   }
-  final minter = await ref.watch(connectionTokenMinterProvider.future);
+  // Resume refreshes the minter provider without changing enrollment. Existing
+  // machine connections retain this runtime, so that refresh must not dispose it.
+  final minter = await ref.read(connectionTokenMinterProvider.future);
   if (minter == null) {
     throw ProvisioningException(
       'AUTH',

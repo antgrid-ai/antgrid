@@ -209,6 +209,7 @@ class AuthorizationLease {
   bool _disposed = false;
   Timer? _expiry, _refresh;
   Future<bool>? _pending;
+  Future<bool>? _freshPending;
   Object? lastRefreshFailure;
   bool get isValid =>
       !_disposed && _snapshot?.allowed == true && _nowMs() < _deadline;
@@ -223,7 +224,9 @@ class AuthorizationLease {
                     peer.endpoint?.generation == generation)),
       );
 
-  Future<bool> refresh() =>
+  Future<bool> refresh() => _freshPending ?? _refreshCurrent();
+
+  Future<bool> _refreshCurrent() =>
       _pending ??= _runRefresh().whenComplete(() => _pending = null);
   Future<bool> _runRefresh() async {
     lastRefreshFailure = null;
@@ -273,10 +276,23 @@ class AuthorizationLease {
     invalidate();
   }
 
-  Future<bool> refreshFresh() async {
+  Future<bool> refreshFresh() {
+    final existing = _freshPending;
+    if (existing != null) return existing;
+    final result = Completer<bool>();
+    // Publish before invalidation: synchronous lease listeners may immediately
+    // request admission, which must wait for the post-resume snapshot.
+    _freshPending = result.future;
     invalidate();
+    final generation = _generation;
+    result.complete(_refreshAfterPending(generation));
+    return result.future.whenComplete(() => _freshPending = null);
+  }
+
+  Future<bool> _refreshAfterPending(int generation) async {
     await _pending;
-    return refresh();
+    if (_disposed || generation != _generation) return false;
+    return _refreshCurrent();
   }
 
   void startRefreshing() {
