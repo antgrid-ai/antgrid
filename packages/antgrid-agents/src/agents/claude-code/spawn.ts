@@ -117,9 +117,9 @@ export function createPersistentPromptStream(initial?: SDKUserMessage): {
   };
 }
 
-export function spawnClaude(opts: SpawnClaudeOpts): SpawnedClaude {
+export function spawnClaude(opts: SpawnClaudeOpts, sdkQuery: typeof query = query): SpawnedClaude {
   const { iterable, controller } = createPersistentPromptStream();
-  const q = query({
+  const q = sdkQuery({
     prompt: iterable,
     options: {
       pathToClaudeCodeExecutable: resolveClaudeBinary(opts.binPath),
