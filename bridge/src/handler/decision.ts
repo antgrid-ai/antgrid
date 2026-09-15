@@ -1,11 +1,11 @@
 // bridge/src/handler/decision.ts
 import { z } from "zod";
-import { agentSpec } from "../agents/registry";
-import { pickHeadlessFrom, type HeadlessCommand, type JudgeTier } from "../agents/types";
-import type { CapCommand } from "../structured/chat-session";
+import { agentSpec } from "../agent-runtime";
+import { pickHeadlessFrom, type HeadlessImplementation as HeadlessCommand, type JudgeTier } from "antgrid-agents/contracts";
+import type { CapCommand } from "antgrid-agents/structured/chat-session";
 import { clip, ItemTransitionSchema, oneLine } from "./backlog";
 import { extractJsonObject } from "./json-extract";
-import { unwrapEnvelope } from "../agents/usage-envelope";
+import { unwrapEnvelope } from "antgrid-agents/usage-envelope";
 import { MAX_REPLY_CHARS } from "./reply-shape";
 import type { HandlerLens } from "../protocol";
 
@@ -179,7 +179,7 @@ export type DecisionAskOption = NonNullable<DecisionAsk["options"]>[number];
 
 // Re-exported, not redefined: the reaches an agent declares live on
 // AgentSpec.headless, and a second spelling here could drift from them.
-export type { JudgeTier } from "../agents/types";
+export type { JudgeTier } from "antgrid-agents/contracts";
 
 // The judge command for an arbitrary tool string, read off the one place a tool
 // is described. Tier and command come back together because they are one field
@@ -201,7 +201,7 @@ export function pickJudge(
 // reading a transcript the agent itself wrote, where `claude` appears and
 // `claude-code` (our routing key) never does.
 function supervisedName(tool: string): string {
-  return agentSpec(tool)?.bin ?? tool;
+  return agentSpec(tool)?.cli?.bin ?? tool;
 }
 
 // Command names and descriptions come verbatim from filesystem frontmatter and

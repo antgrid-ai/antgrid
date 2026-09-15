@@ -1,5 +1,5 @@
 // bridge/src/handler/context.ts
-import { agentSpec } from "../agents/registry";
+import { agentSpec } from "../agent-runtime";
 
 // eslint-disable-next-line no-control-regex
 const ANSI = /\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
@@ -22,8 +22,7 @@ export async function assembleContext(opts: {
   // applying it there silently pinned chat sessions to 8k regardless of the
   // purpose budget.
   recentKind?: "pty" | "rendered";
-  // Test seams; production callers omit both.
-  codexHome?: string; opencodeDbPath?: string;
+  adapterOptions?: Record<string, Record<string, unknown>>;
 }): Promise<{ text: string; source: "transcript" | "pty"; transcriptPath?: string }> {
   const maxChars = opts.maxChars ?? DECIDE_MAX_CHARS;
   const maxMsgs = DECIDE_MAX_MSGS;
@@ -31,11 +30,10 @@ export async function assembleContext(opts: {
   const read = agentSpec(opts.tool)?.transcript;
   if (read) {
     const t = await read({
+      ...opts.adapterOptions?.[opts.tool],
       maxMsgs,
       transcriptPath: opts.transcriptPath,
       agentSessionId: opts.agentSessionId,
-      codexHome: opts.codexHome,
-      opencodeDbPath: opts.opencodeDbPath,
     });
     // A path is only a hint if it is what the context actually came from: a
     // rollout that resolved but yielded nothing must not leak one to a judge.

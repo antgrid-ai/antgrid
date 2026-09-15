@@ -190,6 +190,15 @@ Terminal qualification commands live in `bridge/package.json` and `evals/package
 
 ## Shared packages (`packages/`)
 
+- **`antgrid-agents`** - ELv2 Bun workspace for agent contracts, built-in adapters,
+  shared chat runtime, and integration assets. Bridge consumes public exports;
+  this package never imports bridge. Terminal preparation accepts conversation
+  intent and returns a complete invocation, while bridge retains checkout and
+  process ownership. Agent payload schemas are composed into bridge wire envelopes.
+  Host services are bound in `bridge/src/agent-host.ts`. Assets are embedded as text
+  and materialized into content-addressed directories for external runtimes.
+  Built-in registration remains static; dynamic plugin loading is not implemented.
+
 - **`antgrid_relay_client`** — pure Dart relay/crypto client, no Flutter.
 - **`antgrid_eval_client`** — E2E eval fixtures.
 - **`antgrid-wire`** — TS Bun workspace holding the binary route-frame codec

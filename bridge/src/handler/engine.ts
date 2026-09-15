@@ -5,6 +5,7 @@ import {
   HandlerLensSchema,
   type AbMessage,
   type HandlerEntitlement,
+  type HandlerAvailability,
   type HandlerLens,
 } from "../protocol";
 import { classifyDestructive, describeWarning, type FloorWarning } from "./destructive-floor";
@@ -39,9 +40,9 @@ import {
   type InstructionItem, type ItemStatus, type RejectionCode,
 } from "./backlog";
 import { checkReplyShape, findCommand, oneLine, replyShape } from "./reply-shape";
-import type { CapCommand } from "../structured/chat-session";
+import type { CapCommand } from "antgrid-agents/structured/chat-session";
 import type { SessionAdapter } from "./session-adapter";
-import { handlerObservable, judgeCapable } from "../agents/registry";
+import { handlerObservable, judgeCapable } from "../agent-runtime";
 import { createEntitlementReader, type EntitlementReader } from "../entitlement";
 import { normalizeBrief, type DecisionAsk, type HandlerDecision } from "./decision";
 import {
@@ -696,6 +697,7 @@ export function quickChoicesFor(p: {
 }
 
 export interface HandlerEngineDeps {
+  availability?: (terminalId: string) => HandlerAvailability;
   projectId: string;
   // Per terminal, not per project: an isolated session runs in its own managed
   // worktree, and both the judge's cwd and the destructive floor's inside-project
@@ -3961,6 +3963,7 @@ export class HandlerEngine {
       // Re-derived on every emit rather than frozen at arm time: a slot's mode
       // and its judge pick both change under a live arm.
       observability: this.observabilityFor(terminalId),
+      availability: this.deps.availability?.(terminalId),
       // Omitted when unset, the way every optional field on this snapshot is: an
       // absent lens is the unnamed default, and a bridge that filled one in would
       // leave the app unable to tell a picked lens from no pick at all.

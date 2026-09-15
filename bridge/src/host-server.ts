@@ -32,8 +32,8 @@ import { createMessage } from "./protocol";
 import { armBodyCapture, armRemoteIngest } from "./netwatch";
 import { armContextCapture, armPromptCapture, isContextCaptureArmed, isPromptCaptureArmed } from "./modelwatch";
 import { mintUiTicket, TICKET_TTL_MS } from "./netwatch-ui-session";
-import { detectInstalledTools, type DetectOptions } from "./tool-detector";
-import { isChatCapableTool } from "./structured/chat-capable";
+import { detectAvailableTools, type DetectOptions } from "./tool-detector";
+import { isChatCapableTool } from "./agent-runtime";
 import { buildAgentCatalog } from "./agent-catalog";
 import type { AbMessage, ProjectAdvertEntry, RpcRequest } from "./protocol";
 import { z } from "zod";
@@ -840,7 +840,7 @@ export class HostServer {
       onAuthenticated: () => this.pushHeartbeat(),
       onHandshakeComplete: () => {
         this.sendProjectsAdvertisement(bus);
-        this.sendToolsAdvertisement(bus);
+        void this.sendToolsAdvertisement(bus);
       },
       // A bridge-side reconnect to the RELAY (heartbeat lapse, network blip on
       // this machine — NOT the phone dropping) marks the sessions unreachable
@@ -1061,14 +1061,14 @@ export class HostServer {
    *  ride the sibling `agents` descriptor (buildAgentCatalog), because an app
    *  predating it would read a widened `tools[]` as "all of these are installed"
    *  and offer agents this machine cannot run. */
-  buildToolsAdvertisement(opts: DetectOptions = {}): Array<{ tool: string; path: string; chatCapable: boolean; label: string }> {
-    return detectInstalledTools(opts).map((t) => ({ ...t, chatCapable: isChatCapableTool(t.tool) }));
+  async buildToolsAdvertisement(opts: DetectOptions = {}) {
+    return (await detectAvailableTools(opts)).map((t) => ({ ...t, chatCapable: isChatCapableTool(t.tool) }));
   }
 
-  private sendToolsAdvertisement(bus: MessageBus): void {
+  private async sendToolsAdvertisement(bus: MessageBus): Promise<void> {
     bus.publish(
       createMessage("agent:tools", {
-        tools: this.buildToolsAdvertisement(),
+        tools: await this.buildToolsAdvertisement(),
         agents: buildAgentCatalog(),
       }),
       "control",
@@ -1132,7 +1132,11 @@ export class HostServer {
       // payload is still a cheap no-op.
       if (msg.method === "state.snapshot" && snapshotAsksFor(msg.params, ["agent:projects", "agent:tools"])) {
         this.sendProjectsAdvertisement(bus);
-        this.sendToolsAdvertisement(bus);
+        void this.sendToolsAdvertisement(bus)
+          .then(() => dispatchRpc(bus, msg))
+          .then((res) => bus.publish(res, channel))
+          .catch((err) => log.warn("state.snapshot discovery failed: %s", err));
+        return;
       }
       if (msg.method === "sessions.list") {
         // Gated, core-free session peek — handled HERE (not in the generic
@@ -1897,7 +1901,7 @@ export class HostServer {
           // Same builders as the remote `agent:tools` advert: the loopback and
           // relay pickers must describe a tool identically, and a second copy
           // of the entry shape is how they drift.
-          tools: this.buildToolsAdvertisement(),
+          tools: await this.buildToolsAdvertisement(),
           agents: buildAgentCatalog(),
         };
       case "project:open": {

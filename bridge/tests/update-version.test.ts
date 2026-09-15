@@ -299,17 +299,18 @@ describe("runAgentUpdate", () => {
     expect(t.events).toContain("start:a");
   });
 
-  it("swallows a failed stop so it neither blocks the update nor the restart", async () => {
+  it("refuses the update and restarts only sessions whose stop succeeded", async () => {
     const events: string[] = [];
     const out = await runAgentUpdate({
-      sessionIds: ["a"],
-      stop: async () => { throw new Error("stuck"); },
+      sessionIds: ["a", "b"],
+      stop: async (id) => { if (id === "a") throw new Error("stuck"); },
       start: (id) => { events.push(`start:${id}`); },
       execUpdate: async () => { events.push("update"); return { exitCode: 0, output: "" }; },
       installedAfter: async () => "0.144.3",
     });
-    expect(out.ok).toBe(true);
-    expect(events).toEqual(["update", "start:a"]);
+    expect(out.ok).toBe(false);
+    expect(out.output).toContain("stuck");
+    expect(events).toEqual(["start:b"]);
   });
 
   it("runs the update with no stop/restart when there are no live sessions", async () => {

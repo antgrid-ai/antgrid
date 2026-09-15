@@ -21,6 +21,16 @@ const REQUIRED_TOOLS = [
   "antgrid_run_command",
   "antgrid_list_terminals",
   "antgrid_read_terminal",
+  "antgrid_list_sessions",
+  "antgrid_whoami",
+  "antgrid_publish_artifact",
+  "antgrid_list_artifacts",
+  "antgrid_get_artifact",
+  "antgrid_post",
+  "antgrid_notify",
+  "antgrid_reply",
+  "antgrid_inbox",
+  "antgrid_thread",
 ];
 
 const binaryArg = process.argv[2];

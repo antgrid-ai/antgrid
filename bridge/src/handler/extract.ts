@@ -10,7 +10,7 @@
 import { z } from "zod";
 import { clip, isTerminalStatus, oneLine, type InstructionItem } from "./backlog";
 import { extractJsonObject } from "./json-extract";
-import { unwrapEnvelope } from "../agents/usage-envelope";
+import { unwrapEnvelope } from "antgrid-agents/usage-envelope";
 
 // An item is one thing the user asked for, in their own words — a line, not a
 // document. MAX_BACKLOG_ITEMS bounds how MANY items renderBacklog interpolates

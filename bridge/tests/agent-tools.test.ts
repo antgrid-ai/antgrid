@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { createMessage, parseMessage, AbMessageSchema } from "../src/protocol";
 import { HostServer } from "../src/host-server";
 import { buildAgentCatalog } from "../src/agent-catalog";
-import { AGENTS } from "../src/agents/registry";
+import { AGENTS } from "../../packages/antgrid-agents/src/agents/registry";
 
 test("agent:tools round-trips through the schema", () => {
   const msg = createMessage("agent:tools", {
@@ -29,11 +29,11 @@ test("agent:tools accepts entries without chatCapable (back-compat)", () => {
   expect((parsed as any).tools[0].chatCapable).toBeUndefined();
 });
 
-test("buildToolsAdvertisement returns detected tools stamped with chatCapable", () => {
+test("buildToolsAdvertisement returns detected tools stamped with chatCapable", async () => {
   // PATH override is the seam detectInstalledTools already exposes; here we just
   // assert the host wraps detectInstalledTools() output with the chatCapable flag.
   const host = Object.create(HostServer.prototype) as HostServer;
-  const payload = (host as any).buildToolsAdvertisement({
+  const payload = await (host as any).buildToolsAdvertisement({
     pathOverride: "", // empty PATH → no tools found → []
   });
   expect(Array.isArray(payload)).toBe(true);

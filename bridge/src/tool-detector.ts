@@ -1,7 +1,10 @@
-import { existsSync, statSync } from "node:fs";
-import { join, delimiter } from "node:path";
-import { platform } from "node:os";
-import { AGENTS } from "./agents/registry";
+import { findOnPath } from "./path-probe";
+export { findOnPath } from "./path-probe";
+import { delimiter } from "node:path";
+
+import { AGENTS } from "./agent-runtime";
+import { agentRuntime } from "./agent-runtime";
+import type { AgentRuntime } from "antgrid-agents/runtime";
 
 export interface DetectedTool {
   tool: string;
@@ -11,35 +14,6 @@ export interface DetectedTool {
    *  up from the key later — a later lookup would need a fallback for a miss
    *  that cannot happen, since every key here comes from AGENTS. */
   label: string;
-}
-
-const WINDOWS_EXTS = [".exe", ".cmd", ".bat", ".ps1"];
-
-/**
- * Resolve `bin` against `pathDirs`, returning the absolute path of the first
- * existing regular file. On Windows each directory is probed with every entry
- * in `exts` (in order) before moving to the next directory — matching cmd.exe's
- * dir-major, ext-major search. The `isFile()` guard rejects directories that
- * happen to share an executable's name. Returns null if nothing matches.
- */
-export function findOnPath(
-  bin: string,
-  pathDirs: string[],
-  exts: string[] = WINDOWS_EXTS,
-): string | null {
-  const isWin = platform() === "win32";
-  const candidates = isWin ? exts.map((e) => bin + e) : [bin];
-  for (const dir of pathDirs) {
-    for (const cand of candidates) {
-      const full = join(dir, cand);
-      try {
-        if (existsSync(full) && statSync(full).isFile()) return full;
-      } catch {
-        /* ignore */
-      }
-    }
-  }
-  return null;
 }
 
 export interface DetectOptions {
@@ -59,7 +33,8 @@ export function detectInstalledTools(opts: DetectOptions = {}): DetectedTool[] {
   const dirs = pathStr.split(delimiter).filter((d) => d.length > 0);
   const out: DetectedTool[] = [];
   for (const [tool, entry] of Object.entries(AGENTS)) {
-    const found = findOnPath(entry.bin, dirs);
+    if (!entry.cli?.bin) continue;
+    const found = findOnPath(entry.cli.bin, dirs);
     if (found) out.push({ tool, path: found, label: entry.label });
   }
   if (opts.pathOverride === undefined) cachedTools = out;
@@ -70,4 +45,13 @@ export function detectInstalledTools(opts: DetectOptions = {}): DetectedTool[] {
  *  production path starts from a clean cache. */
 export function resetToolDetectionCacheForTest(): void {
   cachedTools = null;
+  agentRuntime.invalidateDiscovery();
+}
+
+export async function detectAvailableTools(opts: DetectOptions & { refresh?: boolean } = {}, runtime: AgentRuntime = agentRuntime) {
+  const results = await Promise.all(Object.entries(runtime.agents).map(async ([tool, spec]) => {
+    const discovered = await runtime.discover(tool, { path: opts.pathOverride, refresh: opts.refresh || opts.pathOverride !== undefined });
+    return discovered.status === "available" ? { tool, path: discovered.executable, label: spec.label } : null;
+  }));
+  return results.filter((result): result is NonNullable<typeof result> => result !== null);
 }

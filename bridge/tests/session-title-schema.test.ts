@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { NotifyBodySchema, SessionTitleSchema } from "../src/api-server";
-import { AGENTS, BY_HOOK_NAME } from "../src/agents/registry";
+import { AGENTS, BY_HOOK_NAME } from "../../packages/antgrid-agents/src/agents/registry";
 
 // Every agent that posts under a hook name, taken from the registry rather than
 // re-listed: a hand-written copy here would pass while the schema it guards

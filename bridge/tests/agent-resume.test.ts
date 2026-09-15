@@ -53,17 +53,17 @@ describe("agentSessionGone", () => {
   test("a store that answers and lacks the id → gone", () => {
     const codexHome = newDir();
     seedCodexThreads(codexHome, ["other"]);
-    expect(agentSessionGone({ tool: "codex", agentSessionId: "missing", codexHome })).toBe(true);
+    expect(agentSessionGone({ tool: "codex", agentSessionId: "missing", adapterOptions: { "codex": { codexHome } } })).toBe(true);
   });
   test("a store that answers and holds the id → not gone", () => {
     const codexHome = newDir();
     seedCodexThreads(codexHome, ["uuid-1"]);
-    expect(agentSessionGone({ tool: "codex", agentSessionId: "uuid-1", codexHome })).toBe(false);
+    expect(agentSessionGone({ tool: "codex", agentSessionId: "uuid-1", adapterOptions: { "codex": { codexHome } } })).toBe(false);
   });
   test("a store that cannot be read → not gone, where sessionResumable is also optimistic", () => {
     const codexHome = join(newDir(), "no-such-home");
-    expect(agentSessionGone({ tool: "codex", agentSessionId: "uuid-1", codexHome })).toBe(false);
-    expect(sessionResumable({ tool: "codex", agentSessionId: "uuid-1", codexHome })).toBe(true);
+    expect(agentSessionGone({ tool: "codex", agentSessionId: "uuid-1", adapterOptions: { "codex": { codexHome } } })).toBe(false);
+    expect(sessionResumable({ tool: "codex", agentSessionId: "uuid-1", adapterOptions: { "codex": { codexHome } } })).toBe(true);
   });
   // github-copilot has the store check but has NOT claimed its store is what
   // `--resume` consults: its sessions outlive the local index, so a miss is a
@@ -72,8 +72,8 @@ describe("agentSessionGone", () => {
   test("a store check alone is not authority — copilot is never gone", () => {
     const copilotHome = newDir();
     seedCopilotSessions(copilotHome, ["uuid-c"]);
-    expect(agentSessionGone({ tool: "github-copilot", agentSessionId: "missing", copilotHome })).toBe(false);
-    expect(sessionResumable({ tool: "github-copilot", agentSessionId: "missing", copilotHome })).toBe(false);
+    expect(agentSessionGone({ tool: "github-copilot", agentSessionId: "missing", adapterOptions: { "github-copilot": { copilotHome } } })).toBe(false);
+    expect(sessionResumable({ tool: "github-copilot", agentSessionId: "missing", adapterOptions: { "github-copilot": { copilotHome } } })).toBe(false);
   });
   test("an agent with no store-existence check is never gone", () => {
     expect(agentSessionGone({ tool: "opencode", agentSessionId: "ses_1" })).toBe(false);
@@ -96,26 +96,26 @@ describe("sessionResumable", () => {
     expect(sessionResumable({ tool: "opencode", agentSessionId: "ses_1" })).toBe(true);
   });
   test("codex with a non-existent codexHome → optimistic true (undeterminable)", () => {
-    expect(sessionResumable({ tool: "codex", agentSessionId: "u", codexHome: "/no/such/dir" })).toBe(true);
+    expect(sessionResumable({ tool: "codex", agentSessionId: "u", adapterOptions: { codex: { codexHome: "/no/such/dir" } } })).toBe(true);
   });
   test("github-copilot returns true for an existing session id", () => {
     const copilotHome = newDir();
     seedCopilotSessions(copilotHome, ["uuid-c"]);
 
-    expect(sessionResumable({ tool: "github-copilot", agentSessionId: "uuid-c", copilotHome })).toBe(true);
+    expect(sessionResumable({ tool: "github-copilot", agentSessionId: "uuid-c", adapterOptions: { "github-copilot": { copilotHome } } })).toBe(true);
   });
   test("github-copilot returns false for a missing session id", () => {
     const copilotHome = newDir();
     seedCopilotSessions(copilotHome, ["uuid-c"]);
 
-    expect(sessionResumable({ tool: "github-copilot", agentSessionId: "missing", copilotHome })).toBe(false);
+    expect(sessionResumable({ tool: "github-copilot", agentSessionId: "missing", adapterOptions: { "github-copilot": { copilotHome } } })).toBe(false);
   });
   test("github-copilot returns optimistic true when home cannot be queried", () => {
     expect(
       sessionResumable({
         tool: "github-copilot",
         agentSessionId: "uuid-c",
-        copilotHome: join(newDir(), "no-such-home"),
+        adapterOptions: { "github-copilot": { copilotHome: join(newDir(), "no-such-home") } },
       }),
     ).toBe(true);
   });

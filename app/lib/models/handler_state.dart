@@ -249,6 +249,52 @@ class HandlerInstructionItem {
   };
 }
 
+enum HandlerAvailabilityState { unknown, preparing, available, unavailable }
+
+class HandlerAvailability {
+  final HandlerAvailabilityState state;
+  final String? reason;
+
+  const HandlerAvailability(this.state, {this.reason});
+
+  String? get note {
+    return switch (state) {
+      HandlerAvailabilityState.available => null,
+      HandlerAvailabilityState.preparing =>
+        'Waiting for the agent integration to connect.',
+      HandlerAvailabilityState.unknown =>
+        'Waiting for monitoring confirmation.',
+      HandlerAvailabilityState.unavailable => _unavailableNote,
+    };
+  }
+
+  String get _unavailableNote {
+    final detail = reason?.trim();
+    if (detail == null || detail.isEmpty) {
+      return 'Antgrid can\'t monitor this session. Start or restart the agent '
+          'to try again.';
+    }
+    final separator = RegExp(r'[.!?]$').hasMatch(detail) ? ' ' : '. ';
+    return '$detail${separator}Start or restart the agent to try again.';
+  }
+
+  static HandlerAvailability? fromWire(dynamic value) {
+    if (value is! Map) return null;
+    final state = switch (value['state']) {
+      'unknown' => HandlerAvailabilityState.unknown,
+      'preparing' => HandlerAvailabilityState.preparing,
+      'available' => HandlerAvailabilityState.available,
+      'unavailable' => HandlerAvailabilityState.unavailable,
+      _ => null,
+    };
+    if (state == null) return null;
+    return HandlerAvailability(
+      state,
+      reason: value['reason'] is String ? value['reason'] as String : null,
+    );
+  }
+}
+
 /// One armed handler session (per terminal). Mirrors the bridge's
 /// `HandlerSessionSnapshot` (`bridge/src/protocol.ts`).
 class HandlerSessionState {
@@ -315,6 +361,7 @@ class HandlerSessionState {
   /// `handlerChat`, and the two are not interchangeable: the catalog describes
   /// an agent, this describes a session (its live mode and its judge pick).
   final HandlerObservability? observability;
+  final HandlerAvailability? availability;
 
   /// Whether this bridge can be TOLD the answer to one of this session's asks —
   /// `handler:answer` for a tap, an escalationId-bearing `handler:instruct` for
@@ -368,6 +415,7 @@ class HandlerSessionState {
     this.parkedUntil,
     this.parkCause,
     this.observability,
+    this.availability,
     this.askAnswer = false,
     this.askAnswerPending = false,
     this.escalationAnswer = false,
@@ -410,9 +458,8 @@ class HandlerSessionState {
   /// [instructions] is actually populated — an older bridge's [goal] fallback
   /// has no retained-count concept of its own, so its total is simply how many
   /// sentences [askedFor] is showing.
-  int get askedForTotal => instructions.isNotEmpty
-      ? instructionsTotal
-      : askedFor.length;
+  int get askedForTotal =>
+      instructions.isNotEmpty ? instructionsTotal : askedFor.length;
 
   // Re-lists every field on purpose, and both callers make that dangerous:
   // `_applyEscalationFloors` and `_dropRows` (`handler_service.dart`) run
@@ -440,6 +487,7 @@ class HandlerSessionState {
     parkedUntil: parkedUntil,
     parkCause: parkCause,
     observability: observability,
+    availability: availability,
     askAnswer: askAnswer,
     askAnswerPending: askAnswerPending,
     escalationAnswer: escalationAnswer,
@@ -556,6 +604,7 @@ class HandlerSessionState {
       parkedUntil: parkedUntil is num ? parkedUntil.toInt() : null,
       parkCause: parkCause is String ? parkCause : null,
       observability: handlerObservabilityFromWire(json['observability']),
+      availability: HandlerAvailability.fromWire(json['availability']),
       askAnswer: askAnswer is bool ? askAnswer : false,
       askAnswerPending: askAnswerPending is bool ? askAnswerPending : false,
       escalationAnswer: escalationAnswer is bool ? escalationAnswer : false,

@@ -1,7 +1,7 @@
 // bridge/src/handler/structured-adapter.ts
 import type { AbMessage } from "../protocol";
 import type { SessionAdapter } from "./session-adapter";
-import type { CapCommand } from "../structured/chat-session";
+import type { CapCommand } from "antgrid-agents/structured/chat-session";
 import { DECIDE_MAX_CHARS } from "./context";
 
 // Flatten a driver transcript snapshot into judge-readable plain text.

@@ -1,0 +1,632 @@
+// The one place an agent is described. Everything per-agent that used to live in
+// a `switch` with a silently-degrading `default:` (resume argv, initial-prompt
+// argv, launch env, update spec) is a field here instead, so omitting it is a
+// compile error rather than a feature that quietly never runs.
+//
+// Adding an agent: add the key to AgentKey in ./types, then fill the record the
+// compiler now demands.
+
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { readCodexVersionJson, codexHomeDir } from "./codex/home";
+import { observeAntigravityTitles } from "./antigravity/title-watcher";
+import { isAntigravityBinary, primeAntigravityCertCache } from "./antigravity/startup";
+import { antigravityCliHome, resolveAntigravityTitle } from "./antigravity/title";
+import { resolveClaudeTranscriptTitle } from "./claude-code/title";
+import { codexThreadExistsSync, resolveCodexThreadTitle } from "./codex/title";
+import { copilotSessionExistsSync, resolveCopilotSessionTitle } from "./github-copilot/title";
+import { injectConfig } from "./config-inject";
+import { ETX } from "./types";
+import * as antigravityHooks from "./antigravity/hooks";
+import * as claudeHooks from "./claude-code/hooks";
+import * as codexHooks from "./codex/hooks";
+import * as claudeMcp from "./claude-code/mcp";
+import * as codexMcp from "./codex/mcp";
+import * as cursorHooks from "./cursor-agent/hooks";
+import * as copilotHooks from "./github-copilot/hooks";
+import * as opencodeHooks from "./opencode/hooks";
+import { createDriver as createClaudeDriver } from "./claude-code/driver";
+import { createDriver as createCodexDriver } from "./codex/driver";
+import { createDriver as createOpencodeDriver } from "./opencode/driver";
+import { lastAssistantText, readTranscript as readClaudeTranscript } from "./claude-code/transcript";
+import { readTranscript as readCodexTranscript } from "./codex/transcript";
+import { readTranscript as readOpencodeTranscript } from "./opencode/transcript";
+import { claudeForkHandoff, claudeNativeForkArgs, claudeLegacyForkSource } from "./claude-code/fork";
+import { codexForkHandoff, codexNativeForkArgs, codexLegacyForkSource } from "./codex/fork";
+import { opencodeForkHandoff, opencodeNativeForkArgs, opencodeLegacyForkSource } from "./opencode/fork";
+import { terminalForkHandoff } from "./fork-handoff";
+import {
+  readClaudeCodeUsage, readCodexUsage, readCopilotUsage, readOpencodeUsage,
+} from "./usage-envelope";
+
+import { pickHeadlessFrom, type AgentKey, type AgentSpec } from "./types";
+import { createAgentRegistry } from "./create-registry";
+import type { AgentDefinition } from "../runtime";
+
+type BuiltinAgentSpec = Omit<AgentSpec, "fork" | "approvalPolicies"> & import("./types").AgentCliSpec & {
+  fork: import("./types").AgentForkSupport & { nativeForkArgs?: (id: string) => string[] };
+  approvalPolicies: { bypass?: import("./types").AgentApprovalPolicy & { terminalArgs?: readonly string[] } };
+  bin: string;
+  resume: (id: string) => string[];
+  initialPrompt: (prompt: string) => string[];
+  headless?: Partial<Record<import("./types").HeadlessReach, import("./types").HeadlessCommand>>;
+  update?: import("./types").CliAgentUpdate;
+};
+const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
+  "claude-code": {
+    bin: "claude",
+    discoveryPaths: () => [join(homedir(), ".claude/local")],
+    label: "Claude Code",
+    approvalPolicies: { bypass: { terminal: true, terminalArgs: ["--dangerously-skip-permissions"], chat: true, risk: "bypasses-approvals" } },
+    hookName: "claude",
+    hookDir: "~/.claude/hooks",
+    notificationSource: "plugin",
+    titleSource: "structured",
+    resume: (id) => ["--resume", id],
+    initialPrompt: (p) => ["--", p],
+    fork: {
+      kind: "native-fork",
+      handoff: claudeForkHandoff,
+      nativeForkArgs: claudeNativeForkArgs,
+      decodeLegacyArgs: claudeLegacyForkSource,
+    },
+    hooks: claudeHooks,
+    mcp: claudeMcp,
+    notifyBodyFromTranscript: lastAssistantText,
+    driver: createClaudeDriver,
+    // Measured against the installed CLI on Windows. One Ctrl-C only arms the
+    // quit ("Press Ctrl-C again to exit") and is spent for nothing; two exit an
+    // idle session in 1.4-3.0s. The third covers a Ctrl-C the agent spends
+    // interrupting a live turn instead, and costs nothing when it is not needed
+    // — the presses stop the moment the PTY reports its exit.
+    //
+    // This is the agent the graceful phase exists for: the fullscreen renderer
+    // arms a `fullscreenBootPending[pid]` canary in `~/.claude.json` and
+    // withdraws it from a `process.on("exit")` hook, which neither
+    // `TerminateProcess` nor `SIGKILL` runs. A stale entry auto-disables that
+    // renderer MACHINE-WIDE until the file is hand-edited.
+    gracefulExit: { keystrokes: [ETX, ETX, ETX] },
+    // No "sealed" entry: an allowlist naming this agent's read tools is what a
+    // sealed argv would have to omit, and `--allowedTools` with an empty value
+    // has not been run against the real CLI. Until it is, naming takes the
+    // readonly entry below — which is what it already ran under, since the
+    // previous naming argv denied only Bash/Edit/Write/NotebookEdit and left
+    // Read, Grep and Glob allowed.
+    //
+    // NOT `--bare`, which looks made for this (skips hooks, plugins, memory):
+    // it also forces ANTHROPIC_API_KEY-only auth and never reads OAuth or the
+    // keychain, so it fails closed for every subscription user.
+    //
+    // `haiku` — an alias, not a dated snapshot, so it survives the next Haiku
+    // release rather than 404ing when this one is retired. Measured against the
+    // exact readonly argv below: a single `claude-haiku-4-5-20251001` key in
+    // `modelUsage`, `is_error: false`, at ~22% of an unpinned call's cost — see
+    // title-generate.ts for why this must be read off the tool that actually
+    // serves the call rather than the one requested.
+    cheapNamingModel: "haiku",
+    headless: {
+      readonly: {
+        // The prompt goes BEFORE --allowedTools, not last. --allowedTools is
+        // variadic, so a trailing prompt is parsed as one more tool name and
+        // claude exits 1 with "Input must be provided ... when using --print" —
+        // i.e. every call silently fails closed. Verified against the real CLI;
+        // keep the prompt ahead of any variadic flag added here later.
+        cmd: (prompt, model) => [
+          "claude", "-p", prompt, "--no-session-persistence", "--allowedTools",
+          "Read,Grep,Glob,Bash(git status:*),Bash(git diff:*),Bash(git log:*)",
+          ...(model ? ["--model", model] : []),
+        ],
+        // --no-session-persistence keeps these runs out of the user's own
+        // history: a supervisor pass or a naming call is machine bookkeeping,
+        // and one per agent pause buries the sessions the user actually started
+        // under /resume. Valid only with --print, which this argv already uses.
+        noHistory: "flag",
+        usage: {
+          from: "stdout",
+          // AFTER the variadic --allowedTools value, which is where the run that
+          // captured the envelope put it and is the harder of the two positions:
+          // it parsed with the tools list intact and the prompt still ahead of
+          // every variadic flag, so a placement before --allowedTools would be
+          // safe too. It is also where this argv already appends --model.
+          argv: (cmd) => [...cmd, "--output-format", "json"],
+          read: readClaudeCodeUsage,
+        },
+      },
+    },
+    transcript: readClaudeTranscript,
+    // Antgrid owns the session lifecycle: a conversation that hands itself to
+    // claude's own background supervisor exits the PTY, leaves the slot
+    // resuming an id a job we don't manage still holds, and relocates its cwd
+    // out of the session's checkout. Forced, not `??=` like buildClaudeEnv's
+    // defaults — no per-machine preference makes that outcome survivable here.
+    // Closes `/background`, `--bg`, `--routine`, `claude agents`. Does NOT
+    // close the two-press LEFT-ARROW gesture: its only guard is the
+    // machine-wide `leftArrowOpensAgents` global-config key, and the fleet
+    // gate never reaches the REPL keymap (measured on the 2.1.247 binary).
+    env: () => ({ CLAUDE_CODE_DISABLE_AGENT_VIEW: "1" }),
+    resumable: ({ transcriptPath }) => !transcriptPath || existsSync(transcriptPath),
+    resolveTitle: async ({ transcriptPath }) =>
+      transcriptPath ? await resolveClaudeTranscriptTitle(transcriptPath) : null,
+    update: {
+      npmPackage: "@anthropic-ai/claude-code",
+      command: "claude",
+      updateArgs: ["update"],
+    },
+  },
+  codex: {
+    bin: "codex",
+    normalizeTerminalNotification: (notice) => ({ type: "permission_request", message: notice.body ?? notice.title ?? "Codex needs approval" }),
+    label: "Codex",
+    approvalPolicies: { bypass: { terminal: true, terminalArgs: ["--dangerously-bypass-approvals-and-sandbox"], chat: true, risk: "bypasses-approvals-and-sandbox" } },
+    hookName: "codex",
+    hookDir: "~/.codex/hooks",
+    // Approval prompts use OSC; the Stop hook supplies completion messages.
+    notificationSource: "osc",
+    titleSource: "structured",
+    resume: (id) => ["resume", id],
+    resumeIsSubcommand: true,
+    initialPrompt: (p) => ["--", p],
+    fork: {
+      kind: "native-fork",
+      handoff: codexForkHandoff,
+      nativeForkArgs: codexNativeForkArgs,
+      decodeLegacyArgs: codexLegacyForkSource,
+    },
+    hooks: codexHooks,
+    mcp: codexMcp,
+    driver: createCodexDriver,
+    // codex offers no sandbox tighter than read-only, so there is no sealed
+    // entry to write: `--sandbox read-only` is the floor.
+    //
+    // "gpt-5.4-mini", the lowest-priority tier in this account's own
+    // ~/.codex/models_cache.json, verified against the readonly argv below: the
+    // CLI's own plain-mode banner echoed "model: gpt-5.4-mini" and the call
+    // completed. A dated, account-scoped slug rather than an alias — codex has
+    // none — so it is the likeliest of the declared entries to need re-verifying
+    // first if a title call starts failing for this vendor.
+    cheapNamingModel: "gpt-5.4-mini",
+    headless: {
+      readonly: {
+        // --skip-git-repo-check because a project need not be a git repo:
+        // without it codex exits 1 on "Not inside a trusted directory" and every
+        // call fails closed for non-repo projects. It does not widen the reach —
+        // the read-only sandbox is what makes this argv provably read-only, and
+        // that check only guards against writes in untracked dirs.
+        cmd: (prompt, model) => [
+          "codex", "exec", "--ephemeral", "--sandbox", "read-only", "--skip-git-repo-check",
+          ...(model ? ["-m", model] : []), prompt,
+        ],
+        // --ephemeral is codex's equivalent of claude's --no-session-persistence:
+        // no rollout file, so `codex exec resume --last` still points at the
+        // user's own work rather than at whichever bookkeeping pass ran most
+        // recently.
+        noHistory: "flag",
+        usage: {
+          from: "stdout",
+          // Immediately BEFORE the prompt, which is this argv's last element and
+          // is positional: that is where the run that captured the envelope put
+          // it, and a flag after a positional prompt has never been run here.
+          argv: (cmd) => [...cmd.slice(0, -1), "--json", ...cmd.slice(-1)],
+          read: readCodexUsage,
+        },
+      },
+    },
+    transcript: readCodexTranscript,
+    // null = the DB is undeterminable (missing/locked/schema drift), which is
+    // not a confirmation that the thread is gone. Passed through rather than
+    // collapsed here: callers separate "codex disowns this thread" from "codex
+    // could not say", and only the former may refuse a resume.
+    resumable: ({ agentSessionId, codexHome }) =>
+      codexThreadExistsSync(agentSessionId, codexHome ?? codexHomeDir()),
+    sessionStoreIsAuthoritative: true,
+    // The CLI's live state DB is the only source populated for bridge-spawned
+    // `codex-tui` sessions. session_index.jsonl is not read at all: every name
+    // in it is one the Codex DESKTOP app generated, and we name sessions
+    // ourselves (see ResolvedTitle).
+    resolveTitle: async ({ sessionId, codexHome }) =>
+      await resolveCodexThreadTitle(sessionId, codexHome ?? codexHomeDir()),
+    update: {
+      npmPackage: "@openai/codex",
+      command: "codex",
+      updateArgs: ["update"],
+      // Codex is the one tool with an updater-state file; the rest are npm-only.
+      readState: () => readCodexVersionJson(codexHomeDir()),
+    },
+  },
+  opencode: {
+    bin: "opencode",
+    label: "opencode",
+    approvalPolicies: {},
+    // No `bridge hook` events: opencode's plugin runs inside its own runtime and
+    // POSTs to the loopback API itself, under this name.
+    hookName: "opencode",
+    hookDir: "~/.opencode/hooks",
+    notificationSource: "plugin",
+    titleSource: "structured",
+    resume: (id) => ["--session", id],
+    initialPrompt: (p) => ["--prompt", p],
+    fork: {
+      kind: "native-fork",
+      handoff: opencodeForkHandoff,
+      nativeForkArgs: opencodeNativeForkArgs,
+      decodeLegacyArgs: opencodeLegacyForkSource,
+    },
+    hooks: opencodeHooks,
+    driver: createOpencodeDriver,
+    // "openai/gpt-5.4-mini" — the `provider/model` form this CLI's own `--model`
+    // requires, verified against the transcript argv below via the run's own
+    // log (`modelID=gpt-5.4-mini`, and a counter-run with no --model logging
+    // `gpt-5.6-terra-fast` for the same call, proving the flag is not ignored).
+    // The account's free tiers (`opencode/*-free`) are not candidates however
+    // cheap: their availability is not something a naming call can rely on, and
+    // a throttled call produces no title at all.
+    cheapNamingModel: "openai/gpt-5.4-mini",
+    headless: {
+      // "transcript", not "readonly": --agent plan selects opencode's built-in
+      // restricted Plan agent (edits denied by default; non-interactive `run`
+      // without --auto fails permission asks closed), which is config-level
+      // rather than flag-proven like claude's --allowedTools. So no tool hints,
+      // and no transcript path handed to a spawn whose restriction we can't
+      // verify.
+      transcript: {
+        cmd: (prompt, model) =>
+          ["opencode", "run", "--agent", "plan", ...(model ? ["--model", model] : []), prompt],
+        // opencode has no --ephemeral, so persistence is redirected instead of
+        // disabled: the whole session store is one SQLite file, and OPENCODE_DB
+        // takes `:memory:` verbatim (opencode's own tests and its desktop dev
+        // build use the same override), so the spawn's session is never written
+        // anywhere.
+        //
+        // Safe for auth, which is the question this turns on: model credentials
+        // live in auth.json under the DATA dir, read via OPENCODE_AUTH_CONTENT
+        // or the file — never through the database. (The `credential` table
+        // alongside `session` is connector secrets, not provider auth.) For the
+        // same reason never redirect XDG_DATA_HOME to achieve this: that WOULD
+        // move auth.json.
+        //
+        // What the scratch DB does lose is the `account` row, so an
+        // opencode-account token is absent for this spawn — no session sharing,
+        // and no account-backed remote config. Neither caller shares anything;
+        // remote config is the live risk if a team serves model settings that way.
+        env: { OPENCODE_DB: ":memory:" },
+        noHistory: "ephemeral-store",
+        usage: {
+          from: "stdout",
+          // Before the positional prompt, as codex's is, and for the same
+          // reason: that is the argv that was run.
+          argv: (cmd) => [...cmd.slice(0, -1), "--format", "json", ...cmd.slice(-1)],
+          // Tokens only. The reader takes no cost and no model name from this
+          // stream, and neither omission is a gap to fill later — see it for
+          // the measured reasons.
+          read: readOpencodeUsage,
+        },
+      },
+    },
+    transcript: readOpencodeTranscript,
+    // No resolveTitle: opencode writes no name of its own that we read. The
+    // one it generates arrives inline on the plugin's post and is dropped
+    // (see ResolvedTitle), so an opencode session is named only by
+    // generation off the transcript above.
+    env: ({ abDir }) =>
+      injectConfig("OPENCODE_TUI_CONFIG", abDir, "opencode-tui.json", {
+        attention: { enabled: true },
+      }),
+    update: { npmPackage: "opencode-ai", command: "opencode", updateArgs: ["upgrade"] },
+  },
+  "cursor-agent": {
+    bin: "cursor-agent",
+    label: "Cursor",
+    approvalPolicies: { bypass: { terminal: true, terminalArgs: ["--yolo"], risk: "bypasses-approvals" } },
+    hookName: "cursor",
+    hookDir: null,
+    notificationSource: "plugin",
+    titleSource: "osc",
+    resume: (id) => ["--resume", id],
+    initialPrompt: (p) => ["--", p],
+    fork: terminalForkHandoff("Cursor"),
+    hooks: cursorHooks,
+    augmentsDefaultSpec: true,
+    // No headless entry. `-p --mode ask` reads like the right argv and has
+    // never been run: cursor-agent exits 1 on every invocation without an
+    // `agent login` or CURSOR_API_KEY, so nothing about that argv's reach has
+    // been observed. Absence is the honest answer, and it is not only about a
+    // wrong label — ANY non-sealed reach makes the agent judge-capable, which
+    // would arm a supervisor over the user's working tree on an argv nobody
+    // has run. Naming is unaffected: a "none" call borrows an installed agent.
+  },
+  "github-copilot": {
+    bin: "copilot",
+    label: "Copilot",
+    approvalPolicies: { bypass: { terminal: true, terminalArgs: ["--yolo"], risk: "bypasses-approvals" } },
+    hookName: "github-copilot",
+    hookDir: null,
+    notificationSource: "osc",
+    titleSource: "structured",
+    // Copilot's optional-value --resume drops a space-separated value.
+    resume: (id) => [`--resume=${id}`],
+    initialPrompt: () => [],
+    fork: terminalForkHandoff("GitHub Copilot"),
+    hooks: copilotHooks,
+    augmentsDefaultSpec: true,
+    resumable: ({ agentSessionId, copilotHome }) =>
+      copilotSessionExistsSync(
+        agentSessionId,
+        copilotHome ?? process.env.COPILOT_HOME ?? join(homedir(), ".copilot"),
+      ),
+    resolveTitle: async ({ sessionId, copilotHome }) =>
+      await resolveCopilotSessionTitle(
+        sessionId,
+        copilotHome ?? process.env.COPILOT_HOME ?? join(homedir(), ".copilot"),
+      ),
+    // No `update`: github-copilot ships no self-updater (IDE-bound), so a
+    // request for one fails soft via updateSpecFor → null.
+    //
+    // No `cheapNamingModel`, and its absence is measured rather than unexamined:
+    // `--model` is inert on this account (`model_picker_enabled: false` on every
+    // catalog entry), so EVERY candidate — including the model this CLI itself
+    // resolves to with no flag, and Claude Haiku 4.5 in three spellings — is
+    // refused locally, exit 1, before any API call. Declaring one would turn
+    // every borrowed title for this vendor into a permanent hard failure.
+    // `COPILOT_MODEL` reaches the same resolver and fails identically, so it is
+    // not a way around this either.
+    //
+    // Which leaves the call itself as the only thing left to decline, and that
+    // is measured too: a `-p` run answering "Reply with the single word: ok"
+    // reported `totalPremiumRequestCost: 1` — a whole premium request, the
+    // same unit a real turn of work spends, for six words of session title.
+    billsPerCall: true,
+    headless: {
+      // "readonly", not "sealed": -p reads the working tree with no flag asking
+      // it to. Measured — it answered a "read package.json" prompt even under
+      // --deny-tool, whose value is optional and which therefore denies nothing
+      // when passed bare. Writes are the other half and they fail CLOSED: with
+      // --allow-all-tools withheld, a write hits a permission ask that
+      // non-interactive mode cannot answer ("unable to create the file due to
+      // permission restrictions"), which is what the entry relies on since no
+      // flag expresses read-only directly.
+      readonly: {
+        cmd: (prompt, model) => [
+          "copilot", "-p", prompt, "--silent",
+          ...(model ? ["--model", model] : []),
+        ],
+        // Copilot has no ephemeral flag — a -p run writes session-store.db and a
+        // whole session-state/<uuid>/ tree — so the home is redirected to a
+        // directory that lives only as long as the spawn.
+        // Safe for auth, and that is NOT the generalization it looks like:
+        // credentials do not live under COPILOT_HOME at all (no GH_TOKEN or
+        // GITHUB_TOKEN path either), so a run against an EMPTY scratch home
+        // still authenticates. Measured, because the opposite is true of vibe,
+        // where the same move would take the credentials with it.
+        scratchEnv: ["COPILOT_HOME"],
+        noHistory: "ephemeral-store",
+        usage: {
+          // The only vendor whose usage costs stdout nothing: with this flag the
+          // output was byte-identical to a run without it, so no parser here
+          // sees any difference. Copilot ALSO ships `--output-format json`,
+          // which would rewrite stdout the way the other three vendors' flags
+          // do — it is not the flag to reach for.
+          from: "side-file",
+          argv: (cmd, path) => [...cmd, "--usage-output-file", path],
+          read: readCopilotUsage,
+        },
+      },
+    },
+  },
+  // Plugin-tier, but through agy's own GLOBAL `~/.gemini/config/hooks.json`
+  // (see ./antigravity/hooks.ts) — it has no per-spawn hook channel, the same
+  // constraint cursor-agent is under. The installed CLI shim is `agy` (Google's
+  // Antigravity IDE), not `antigravity`. titleSource stays "osc": agy publishes
+  // its exe path as the OSC-2 title, handled by oscTitleUnusable rather than by
+  // suppressing the scanner.
+  antigravity: {
+    platformIntegration: { matches: isAntigravityBinary, windowsShell: true, prepare: primeAntigravityCertCache },
+    bin: "agy",
+    observeTitles: observeAntigravityTitles,
+    label: "Antigravity",
+    approvalPolicies: { bypass: { terminal: true, terminalArgs: ["--dangerously-skip-permissions"], risk: "bypasses-approvals" } },
+    hookName: "antigravity",
+    hookDir: null,
+    notificationSource: "plugin",
+    titleSource: "osc",
+    oscTitleUnusable: true,
+    // `agy --conversation <uuid>` is a global flag, so it goes before any raw
+    // args. See `agy --help`.
+    resume: (id) => ["--conversation", id],
+    initialPrompt: (p) => ["--prompt-interactive", p],
+    fork: terminalForkHandoff("Antigravity"),
+    hooks: antigravityHooks,
+    augmentsDefaultSpec: true,
+    resolveTitle: async ({ sessionId, transcriptPath, antigravityHome }) =>
+      await resolveAntigravityTitle(
+        sessionId,
+        antigravityHome ?? antigravityCliHome(),
+        transcriptPath,
+      ),
+  },
+  // opencode fork: same attention gating (default-off + focus-blur). Enabled
+  // via KILO_TUI_CONFIG injection (see env below); the app's default-blur
+  // (DEC 1004) supplies the blur it waits on.
+  kilo: {
+    bin: "kilo",
+    label: "Kilo",
+    approvalPolicies: { bypass: { terminal: true, terminalArgs: ["--auto"], risk: "bypasses-approvals" } },
+    hookName: null,
+    hookDir: null,
+    notificationSource: "osc",
+    titleSource: "osc",
+    resume: () => [],
+    initialPrompt: () => [],
+    // Kilo documents `--session <id> --fork`, but this integration does not
+    // observe a Kilo-native id. Do not advertise an unreachable native path.
+    fork: terminalForkHandoff("Kilo"),
+    env: ({ abDir }) =>
+      injectConfig("KILO_TUI_CONFIG", abDir, "kilo-tui.json", {
+        attention: { enabled: true },
+      }),
+    headless: {
+      // Kilo is an opencode fork down to the env-var names, so this is
+      // opencode's entry with the prefix changed — see it for why "transcript"
+      // rather than "readonly", and why the store is redirected rather than the
+      // data dir (auth lives beside the DB, not inside it).
+      transcript: {
+        cmd: (prompt, model) =>
+          ["kilo", "run", "--agent", "plan", ...(model ? ["--model", model] : []), prompt],
+        env: { KILO_DB: ":memory:" },
+        noHistory: "ephemeral-store",
+        // No usage descriptor. `kilo run --format json` exists and its event
+        // shape was read out of the shipped binary, but no successful run has
+        // ever been captured: this machine has no Kilo Gateway credentials, so
+        // every model routes through a 401 and no step_finish part — the only
+        // usage carrier — has been seen on the wire. A descriptor written from
+        // that schema would be the guess this field exists to refuse. Two
+        // further things the capture would have to settle: the cost field
+        // carries NO currency unit anywhere in the envelope, and `metrics.source`
+        // is literally "provider" | "computed", so kilo itself says when a
+        // number was computed locally rather than returned by the provider.
+      },
+    },
+  },
+  // Signals only with a bare terminal bell (no OSC 9/777). Since the bell now
+  // rings audibly instead of raising a desktop notification, kimi is heard, not
+  // notified — no OSC notification source exists to coerce it into.
+  kimi: {
+    bin: "kimi",
+    label: "Kimi",
+    approvalPolicies: { bypass: { terminal: true, terminalArgs: ["--auto"], risk: "bypasses-approvals" } },
+    hookName: null,
+    hookDir: null,
+    notificationSource: "osc",
+    titleSource: "osc",
+    resume: () => [],
+    initialPrompt: () => [],
+    fork: terminalForkHandoff("Kimi"),
+  },
+  // Textual TUI: notifications default ON, fails CLOSED on Textual focus
+  // (DEC 1004-derived), so the default-blur drives it — no injection.
+  "mistral-vibe": {
+    bin: "vibe",
+    label: "Mistral Vibe",
+    approvalPolicies: {},
+    hookName: null,
+    hookDir: null,
+    notificationSource: "osc",
+    titleSource: "osc",
+    resume: () => [],
+    initialPrompt: () => [],
+    // No headless entry, and `-p --agent ask` must not come back as one. Read
+    // against mistralai/mistral-vibe v2.24.5: `ask` is the APPROVAL-gated
+    // profile ("Requires approval for tool executions"), not a read-only one —
+    // that is `plan`, the only builtin pinning write_file and edit to
+    // permission "never". What makes ask LOOK read-only is that programmatic
+    // mode denies every callback it is handed (cli/programmatic.py), so a write
+    // fails closed on an approval it cannot answer.
+    //
+    // That is config-level, never argv-level, which is the whole distinction
+    // HeadlessReach draws: an agent profile is just another config layer, `ask`
+    // contributes no bypass_tool_permissions key, and the loop returns EXECUTE
+    // before consulting any permission the moment a user's own config sets one
+    // — no approval is raised, so nothing is denied. Even `--agent plan` falls
+    // to the same switch, so the best reach available here is "transcript", and
+    // it stays unrun besides (no MISTRAL_API_KEY on any machine measured).
+    fork: terminalForkHandoff("Mistral Vibe"),
+  },
+};
+
+/**
+ * hookName → AgentKey, for dispatching an inbound `bridge hook <name> <event>`
+ * or a loopback post's `agent` field back to its registry entry. Derived, never
+ * hand-maintained: the two vocabularies diverge (`cursor` vs `cursor-agent`) and
+ * a stale hand-written map is exactly the silent drop this refactor removes.
+ */
+for (const spec of Object.values(BUILTIN_AGENTS)) {
+  spec.conversations = {
+    terminal: ["fresh", ...(spec.resume?.("probe").length ? ["resume" as const] : []), ...(spec.fork.kind === "native-fork" ? ["fork" as const] : [])],
+    chat: spec.driver ? ["fresh", "resume"] : undefined,
+  };
+  spec.observation = spec.hooks?.observation;
+  const boundaries = spec.hooks?.turnBoundaryEvents;
+  spec.inferTurnStart = !!boundaries && boundaries.start.length === 0 && boundaries.end.length > 0;
+}
+const registry = createAgentRegistry(Object.entries(BUILTIN_AGENTS).map(([id, source]) => {
+  const { bin, args, resume, initialPrompt, resumeIsSubcommand, env, fork: sourceFork, approvalPolicies: sourcePolicies, ...adapter } = source;
+  const { nativeForkArgs, ...fork } = sourceFork;
+  const { terminalArgs: approvalBypassArgs, ...bypass } = sourcePolicies.bypass ?? {};
+  const approvalPolicies = sourcePolicies.bypass ? { bypass: bypass as import("./types").AgentApprovalPolicy } : {};
+  return [id as AgentKey, { ...adapter, fork, approvalPolicies, cli: { bin, args, resume, initialPrompt, resumeIsSubcommand, env, nativeForkArgs, approvalBypassArgs } }] as const;
+}));
+export const AGENTS = registry.agents;
+export const BY_HOOK_NAME = registry.byHookName;
+export const builtinRegistry = createAgentRegistry(Object.entries(AGENTS).map(([id, spec]) => [id, {
+  apiVersion: 1,
+  hookName: spec.hookName,
+  create: () => spec,
+} satisfies AgentDefinition] as const));
+
+/**
+ * Widening lookup for the many call sites that carry an arbitrary tool string
+ * (an antgrid.yaml `agent.name`, a wire-supplied `session.tool`). Returns
+ * undefined for anything not in the registry so callers keep an explicit
+ * fallback instead of indexing into a Record that claims total coverage.
+ */
+export function agentSpec(tool: string): AgentSpec | undefined {
+  return registry.get(tool);
+}
+
+/**
+ * Whether this tool can drive a headless judge — the only legal values for the
+ * Handler's judge-tool override. Named rather than inlined because the callers
+ * validate an UNTRUSTED wire string, and a bare index into AGENTS would type as
+ * always-present and let an unknown tool through.
+ */
+export function judgeCapable(tool: string): boolean {
+  // "repo", never "has a headless entry at all": a judge reads the working tree,
+  // so a sealed argv cannot serve one — and treating any one-shot capability as
+  // a judge would arm the Handler for every agent that can merely answer a
+  // question (see AgentSpec.headless).
+  return pickHeadlessFrom(agentSpec(tool)?.headless, "repo") !== null;
+}
+
+/**
+ * True when a terminal-mode session of [tool] reports turn ENDS but no turn
+ * START. Those are the only sessions whose "working" may be inferred from a
+ * submitted keystroke: the inferred turn is guaranteed a closer, so it cannot
+ * wedge the session on "working" (see work-status.ts's userReply).
+ *
+ * Excludes both ends of the spectrum. Claude declares a real UserPromptSubmit
+ * turn-start hook, so guessing there could only be wrong. An agent with no
+ * turn-end event — opencode and antigravity, whose out-of-band integrations
+ * declare no `bridge hook` events, and the hookless kilo/kimi/mistral-vibe —
+ * has nothing to close an inferred turn, so theirs would run until the session
+ * stopped, which is worse than reading "done".
+ *
+ * Read straight off each agent's own hook profile: this file no longer holds a
+ * cross-agent table of event names that an agent's events could drift from.
+ */
+export function needsKeystrokeTurnStart(tool: string | undefined): boolean {
+  const tb = tool === undefined ? undefined : agentSpec(tool)?.hooks?.turnBoundaryEvents;
+  return tb !== undefined && tb.start.length === 0 && tb.end.length > 0;
+}
+
+/**
+ * Whether an armed Handler can OBSERVE a session of [tool] in [mode] at all.
+ * "Unsupported" and "armed but quiet" are different facts, and this is the only
+ * thing that separates them — an unobservable terminal session arms cleanly
+ * today and then never fires, which reads to the user as a broken feature
+ * rather than an absent one.
+ *
+ * terminal: the agent's installed integration must POST /handler-event —
+ *   nothing else reaches the engine from a PTY.
+ * chat:     any chat driver qualifies; the engine taps the driver's own
+ *   outbound frames in-process (observeChatFrameForHandler in agent-core.ts).
+ *
+ * Derived rather than a fourth boolean on the spec: a standalone flag is exactly
+ * the kind of table that drifts from what the integration actually posts.
+ */
+export function handlerObservable(tool: string | undefined, mode: "terminal" | "chat"): boolean {
+  const spec = tool === undefined ? undefined : agentSpec(tool);
+  if (!spec) return false;
+  return mode === "chat"
+    ? spec.driver !== undefined
+    : spec.observation?.handler === true;
+}

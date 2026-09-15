@@ -5,8 +5,8 @@
 // the agents whose only carrier is a machine-global config, so silence must
 // never be the default an omission falls into.
 import { describe, expect, test } from "bun:test";
-import { AGENTS } from "../src/agents/registry";
-import type { AgentKey } from "../src/agents/types";
+import { AGENTS } from "../src/agent-runtime";
+import type { AgentKey } from "../../packages/antgrid-agents/src/agents/types";
 
 // Read off the registry, never hand-listed: a table total over `AgentKey`
 // forces the DECISION for a new agent, and only iterating the registry checks
