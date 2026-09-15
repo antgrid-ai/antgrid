@@ -1,5 +1,6 @@
 import { createPrivateKey, createPublicKey, sign } from "node:crypto";
-import { EndpointChallengeSchema, EndpointRegistrationSchema, PeerAuthorizationSnapshotSchema, endpointChallengeBytes } from "antgrid-wire";
+import { EndpointChallengeSchema, EndpointRegistrationSchema, endpointChallengeBytes } from "antgrid-wire";
+import { AcceptedAuthorizationSnapshotSchema } from "./dev-insecure-relay";
 import { rawSeedToPkcs8 } from "../e2e";
 import type { EnrollmentIdentity } from "./authorization-lease";
 
@@ -36,7 +37,7 @@ export class EndpointEnrollment {
   }
 
   async register(): Promise<void> {
-    const snapshot = PeerAuthorizationSnapshotSchema.parse(await this.authorization());
+    const snapshot = AcceptedAuthorizationSnapshotSchema.parse(await this.authorization());
     this.checkIdentity(snapshot);
     if (!snapshot.allowed) throw new Error("Endpoint authorization denied");
     if (snapshot.endpoint?.endpointId === this.endpointId) return;

@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { join } from "node:path";
 import { AuthorizationLease } from "../src/peer/authorization-lease";
 
 const identity = { accountId: "account", deviceId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", enrollmentId: "credential" };
@@ -65,3 +66,20 @@ test("older policy cannot renew an authoritative denial", async () => {
   expect(lease.current).toBeNull();
   lease.invalidate("closed");
 });
+
+// The bridge's enrollment and its lease must agree on which relay origins this
+// host accepts. If they disagree, `register()` succeeds and the first refresh
+// throws, so the native transport dies during startup and the WebSocket
+// fallback hides it.
+test("a plaintext relay origin is leased only where this host opted in", async () => {
+  const run = async (value: string) => {
+    const child = Bun.spawn(["bun", "run", join(import.meta.dir, "peer-dev-insecure-lease-fixture.ts")], {
+      env: { ...process.env, ANTGRID_DEV_INSECURE_RELAY: value }, stdout: "pipe", stderr: "pipe",
+    });
+    const output = await new Response(child.stdout).text();
+    await child.exited;
+    return output.split("\n").find((line) => line.startsWith("RESULT "))?.slice(7).trim();
+  };
+  expect(await run("true")).toBe("true");
+  expect(await run("false")).toBe("false");
+}, 30_000);

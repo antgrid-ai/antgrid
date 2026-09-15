@@ -47,6 +47,7 @@ class RelayMechanisms implements ConnMechanisms, CentralControlMechanisms {
     required Future<String> Function() mintToken,
     SessionHandshaker Function(String agentEd25519PubB64)? buildHandshaker,
     this.peerRuntime,
+    this.peerTransportMode,
   }) : _buildHandshaker = buildHandshaker,
        _relay = relay,
        _crypto = crypto,
@@ -59,6 +60,13 @@ class RelayMechanisms implements ConnMechanisms, CentralControlMechanisms {
        _mintToken = mintToken;
 
   final PeerRuntime? peerRuntime;
+
+  /// Overrides [configuredPeerTransportMode] for tests, and is forwarded to
+  /// [PeerRuntime.select] so the mode that picked the transport is the mode
+  /// that decides what a failure on it means.
+  final PeerTransportMode? peerTransportMode;
+  PeerTransportMode get _peerMode =>
+      peerTransportMode ?? configuredPeerTransportMode;
   final _selector = PeerLinkSelector();
   PeerLink? _payloadLink;
   PeerLink? _sessionLink;
@@ -230,6 +238,7 @@ class RelayMechanisms implements ConnMechanisms, CentralControlMechanisms {
           relay: _relay,
           machineDeviceId: _machineDeviceId,
           machinePublicKey: coords.agentEd25519PubB64,
+          mode: _peerMode,
           centralReady: centralReady,
         );
         final link = selection.link;
@@ -245,7 +254,16 @@ class RelayMechanisms implements ConnMechanisms, CentralControlMechanisms {
           return;
         }
         _peerFailureSub = link.failureStream.listen((failure) {
-          if (!failure.retryable) onTerminalPeerError?.call();
+          // Only the payload link died, so the relay socket's state stream
+          // reports nothing and the ladder has to be woken from here.
+          // Blocking is for the mode with nowhere to fall back to: under
+          // irohPreferred the redial re-runs PeerLinkSelector, which drops
+          // to WebSocket rather than stranding the machine.
+          if (!failure.retryable && _peerMode == PeerTransportMode.irohOnly) {
+            onTerminalPeerError?.call();
+          } else {
+            onSessionDown?.call();
+          }
         });
         await _ensureSession(coords.agentEd25519PubB64);
       } on PeerSelectionFailure catch (error) {

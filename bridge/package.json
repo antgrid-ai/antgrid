@@ -8,6 +8,7 @@
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "qualify:iroh-host": "bun run scripts/iroh-host-smoke.ts",
+    "qualify:iroh-interop": "bun run scripts/iroh-interop-smoke.ts",
     "prototype:terminal": "bun run scripts/terminal-frame-prototype.ts",
     "bench:terminal-frames": "bun run scripts/terminal-frame-bench.ts",
     "qualify:terminal-frames": "bun run scripts/terminal-frame-qualify.ts"

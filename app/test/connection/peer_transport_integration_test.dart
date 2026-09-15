@@ -16,6 +16,7 @@ class _Payload implements PeerLink {
   bool closed = false;
   final states = StreamController<PeerLinkState>.broadcast(sync: true);
   final paths = StreamController<PeerPath>.broadcast(sync: true);
+  final failures = StreamController<PeerLinkFailure>.broadcast(sync: true);
   @override
   bool get isDispatchAllowed => !closed;
   @override
@@ -27,7 +28,7 @@ class _Payload implements PeerLink {
   @override
   Stream<void> get peerRestartStream => const Stream.empty();
   @override
-  Stream<PeerLinkFailure> get failureStream => const Stream.empty();
+  Stream<PeerLinkFailure> get failureStream => failures.stream;
   @override
   PeerLinkDiagnostic? get netTap => null;
   @override
@@ -153,8 +154,9 @@ Future<void> _settle() async {
 RelayMechanisms _mechanisms(
   _Relay relay,
   _Runtime runtime,
-  _Handshake handshake,
-) => RelayMechanisms(
+  _Handshake handshake, {
+  PeerTransportMode? mode,
+}) => RelayMechanisms(
   relay: relay,
   crypto: CryptoService(),
   machineDeviceId: 'machine',
@@ -173,6 +175,7 @@ RelayMechanisms _mechanisms(
       const ConnCoords(relayUrl: 'wss://relay.test', agentEd25519PubB64: 'pin'),
   mintToken: () async => 'token',
   peerRuntime: runtime,
+  peerTransportMode: mode,
   buildHandshaker: (_) => handshake,
 );
 
@@ -233,5 +236,36 @@ void main() {
     expect(mechanisms.session, isNull);
     relay.dispose();
     await runtime.dispose();
+  });
+  test('a dead payload link wakes the ladder unless the mode cannot fall back', () async {
+    Future<({bool blocked, bool woken})> run(PeerTransportMode mode) async {
+      final relay = _Relay();
+      final payload = _Payload();
+      final runtime = _Runtime(payload);
+      final mechanisms = _mechanisms(relay, runtime, _Handshake(), mode: mode);
+      var blocked = false;
+      var woken = false;
+      mechanisms.onTerminalPeerError = () => blocked = true;
+      mechanisms.onSessionDown = () => woken = true;
+      await mechanisms.dial(
+        const ConnCoords(relayUrl: 'wss://relay.test', agentEd25519PubB64: 'pin'),
+        'token',
+      );
+      payload.failures.add(
+        const PeerLinkFailure(code: 'NATIVE_CLOSE_UNCLASSIFIED', retryable: false),
+      );
+      await _settle();
+      final outcome = (blocked: blocked, woken: woken);
+      await mechanisms.release();
+      relay.dispose();
+      await runtime.dispose();
+      return outcome;
+    }
+
+    expect(
+      await run(PeerTransportMode.irohPreferred),
+      (blocked: false, woken: true),
+    );
+    expect(await run(PeerTransportMode.irohOnly), (blocked: true, woken: false));
   });
 }

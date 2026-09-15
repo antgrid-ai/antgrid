@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:iroh_quic/iroh_quic.dart' as iroh;
 
+import 'relay_origin.dart';
 import 'selection.dart';
 
 const peerAlpn = 'antgrid/peer/1';
@@ -29,13 +30,7 @@ class NativeEndpointOwner {
     Future<void> Function()? initializeNative,
   }) async {
     for (final url in approvedRelays) {
-      final uri = Uri.parse(url);
-      if (uri.scheme != 'https' ||
-          uri.host.isEmpty ||
-          uri.userInfo.isNotEmpty ||
-          uri.hasQuery ||
-          uri.hasFragment ||
-          (uri.path != '' && uri.path != '/')) {
+      if (!isApprovedRelayOrigin(url)) {
         throw const PeerSelectionFailure('UNAPPROVED_RELAY', terminal: true);
       }
     }
@@ -81,9 +76,12 @@ class NativeEndpointOwner {
         utf8.encode(peerAlpn),
       );
     } catch (_) {
+      // Same rule as _fail: only a provable rejection is terminal. Left
+      // terminal, an unreachable relay or a dead route denies irohPreferred
+      // the WebSocket fallback PeerLinkSelector exists to provide.
       throw const PeerSelectionFailure(
         'NATIVE_CONNECT_UNCLASSIFIED',
-        terminal: true,
+        terminal: false,
       );
     }
     if (!authorized() ||
@@ -185,8 +183,8 @@ class IrohPeerLink implements PeerLink {
     );
     unawaited(
       _connection.closed().then(
-        (_) => _fail('NATIVE_CLOSE_UNCLASSIFIED', false),
-        onError: (Object _) => _fail('NATIVE_CLOSE_UNCLASSIFIED', false),
+        (_) => _fail('NATIVE_CLOSE_UNCLASSIFIED', true),
+        onError: (Object _) => _fail('NATIVE_CLOSE_UNCLASSIFIED', true),
       ),
     );
   }
@@ -225,7 +223,7 @@ class IrohPeerLink implements PeerLink {
     } on FrameException {
       _fail('INVALID_RECORD', false);
     } catch (_) {
-      if (!_closed) _fail('NATIVE_CLOSE_UNCLASSIFIED', false);
+      if (!_closed) _fail('NATIVE_CLOSE_UNCLASSIFIED', true);
     }
   }
 
@@ -276,7 +274,7 @@ class IrohPeerLink implements PeerLink {
                 : PeerSendOutcome.closed,
           );
       } catch (_) {
-        _fail('NATIVE_WRITE_UNCLASSIFIED', false);
+        _fail('NATIVE_WRITE_UNCLASSIFIED', true);
       } finally {
         timer.cancel();
         _queued -= size;
@@ -287,6 +285,12 @@ class IrohPeerLink implements PeerLink {
     return completion.future;
   }
 
+  /// `retryable: false` is reserved for what a second attempt cannot fix — a
+  /// protocol violation by the peer. An unexplained native close or write
+  /// error is precisely the case that cannot be classified, and the supervisor
+  /// turns any non-retryable failure into a sticky peerRejected block, so
+  /// defaulting the unknown to terminal makes a relay restart or an account's
+  /// routine retire indistinguishable from a revocation.
   void _fail(String code, bool retryable) {
     if (_closed) return;
     _closed = true;

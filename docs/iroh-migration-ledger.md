@@ -140,3 +140,77 @@ guide. Consolidated current security, packaging and relay evidence in qualificat
 removed superseded reviews and the redundant relay handoff. Detailed historical
 reviews remain in Git at `9ed88a01`. The service README owns relay design and commands.
 This documentation cleanup does not advance any runtime or release gate.
+
+## Aspire native smoke selection - September 15
+
+`aspire:all` now requests test-only Iroh without payload fallback. Aspire forwards
+the mode into both Flutter builds and the desktop bridge, and requires explicit
+`IROH_RELAY_URLS` for web. TypeScript compilation passed. A trusted, reachable
+Iroh relay is not available yet; running instances have not been restarted.
+This is launcher preparation, not native connection evidence. Production and
+other default launch paths remain WebSocket. See the Aspire README for setup.
+
+## Ops deployment review - September 15
+
+Read antgrid-ai/antgrid-ops development through the authenticated GitHub API.
+The existing rollout uses one VM, Compose blue/green web+relay stacks and a
+long-lived Caddy edge with automatic public TLS on 443. A single deployment
+can include the Iroh service; no process merge is necessary. Required changes:
+publish the Rust image from the app repo using its own Docker build context;
+add it and private administration to ops Compose; extend health/rollback gates;
+configure backend approved origins and revocation delivery to every live colour.
+Caddy already owns host 443, so the standalone Iroh port-publishing template
+cannot be used unchanged. Decide and qualify TLS upstream trust and certificate
+renewal, plus Iroh routing (/relay, /ping, /generate_204). Existing relay hostname
+can potentially route those paths separately from central /ws; full native
+proxy interoperability remains untested. Public TLS termination alone does not
+replace the current Rust TLS listener. Blue/green peers must not remain split
+across independent registries; qualify deliberate reconnect/drain and rollback
+without command replay. A deployed staging relay authorizes against staging,
+not local Aspire enrollment, unless a separate dev backend route is configured.
+No ops files, infrastructure, secrets or deployments were modified.
+
+## Local shared relay gateway implementation - September 15
+
+Aspire native mode now starts the locked Rust relay on loopback 443 and a
+Node HTTPS gateway on 3000, with central WS on 3001 and private administration
+on 9000. Both apps receive one shared HTTPS base URL; web receives that same
+approved origin, admission secret and both revocation targets. Ignored runtime
+configuration is generated at startup. A publicly trusted certificate and DNS
+name resolving to this PC remain prerequisites: inspected pinned native source
+uses embedded roots, and binding APIs do not expose custom CA configuration.
+No CA bypass or binding fork was introduced. Gateway integration checks passed
+HTTP routing, both upgrade paths, private-path denial and untrusted upstream
+TLS rejection with a test-process-only CA. Aspire TypeScript compilation passed.
+The actual Aspire native stack and Windows/emulator Iroh connection have NOT run;
+no usable hostname/certificate has been supplied. No running apps were restarted.
+
+## Cross-binding interop gate - September 15
+
+The product ships two different Iroh implementations: the app binds `iroh_quic`
+1.0.3 through FRB, the bridge binds `@number0/iroh` 1.1.0. Every automated
+native gate bound `@number0/iroh` on both ends, and the Dart native smoke bound
+`iroh_quic` on both ends, so no gate covered the pairing that actually ships.
+The retired prototype did cross it at the same version pair, but deliberately
+used adapter transports and a WebSocket shim rather than the production ones.
+
+`qualify:iroh-interop` closes that: a real `NativeEndpointOwner`/`IrohPeerLink`
+driving unchanged `MachineSession`/`AppSessionHandshaker` against a real
+`IrohRelayClient` host. The host fixture is now shared by both smokes
+(`bridge/scripts/iroh-smoke-fixture.ts`); `qualify:iroh-host` keeps its previous
+assertions and its recorded output is unchanged.
+
+The gate found one production-wiring defect the same-binding gates cannot see.
+`IrohPeerLink` rejects an inbound record whose route `to` is not its
+`localDeviceId`, and the host addresses the app by its machine-scoped relay slot
+(`relaySlotId`), not the bare device id. The TS gate reads records without
+checking `to`, so it never exercised that path. The app role now dials with the
+slot id while the handshake keeps binding the bare id, matching `PeerRuntime`.
+
+Executed: interop gate passed with two projects, managed-worktree Git, terminal
+input and frames, central outage and remote-access-off closing the native link;
+`qualify:iroh-host` re-passed with identical output; bridge typecheck, package
+`dart analyze`, 17 package tests and the Dart-to-Dart native smoke passed.
+Loopback with relays disabled, fixture authorization, and the prebuilt CLI
+library rather than the Flutter source build. WAN, forced relay, Flutter-built
+libraries and performance acceptance remain unqualified.

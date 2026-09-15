@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { verifyAsync } from "@noble/ed25519";
 import {
   ENDPOINT_CHALLENGE_MS, PEER_LEASE_MS, endpointChallengeBytes,
-  PeerAuthorizationSnapshotSchema, PeerRelayAdmissionResponseSchema, type EndpointChallenge,
+  peerAuthorizationSnapshotSchema, PeerRelayAdmissionResponseSchema, type EndpointChallenge,
   type PeerRelayAdmissionRequest, type PeerRelayAdmissionResponse,
 } from "antgrid-wire";
 import type { DB, Tx } from "../db/index.js";
@@ -119,11 +119,21 @@ export async function endpointInventory(tx: Tx, userId: string) {
     { endpointId: row.endpointId, generation: row.generation.toString() }]));
 }
 
-export async function peerAuthorizationSnapshot(db: DB, identity: Identity, relayUrls: string[]) {
-  return serializable(db, (tx) => authorizationSnapshot(tx, identity, relayUrls));
+/**
+ * `allowInsecureRelay` lets a minted snapshot carry a plaintext `http:` origin
+ * for the local dev stack. It must come from the serving process's own env and
+ * never from request input, or a caller could widen what it is being authorized
+ * against; it defaults to off so every existing call site stays TLS-only.
+ */
+export interface RelayOptions { allowInsecureRelay?: boolean }
+
+export async function peerAuthorizationSnapshot(db: DB, identity: Identity, relayUrls: string[],
+  options: RelayOptions = {}) {
+  return serializable(db, (tx) => authorizationSnapshot(tx, identity, relayUrls, options));
 }
 
-async function authorizationSnapshot(tx: Tx, identity: Identity, relayUrls: string[]) {
+async function authorizationSnapshot(tx: Tx, identity: Identity, relayUrls: string[],
+  options: RelayOptions) {
     const device = await currentIdentity(tx, identity);
     const sub = await activeSubscriptionForUser(tx, identity.userId);
     const billingId = await resolveBillingAccountId(tx, identity.userId);
@@ -157,7 +167,7 @@ async function authorizationSnapshot(tx: Tx, identity: Identity, relayUrls: stri
     // Subscription expiry can precede the normal authorization lease boundary.
     const deadlines = sub ? [sub.cancelledAt, sub.trialEndsAt, sub.currentPeriodEnd]
       .filter((date): date is Date => date !== null).map((date) => date.getTime() - Date.now()) : [0];
-    return PeerAuthorizationSnapshotSchema.parse({ accountId: identity.userId, deviceId: identity.deviceId,
+    return peerAuthorizationSnapshotSchema(options.allowInsecureRelay === true).parse({ accountId: identity.userId, deviceId: identity.deviceId,
       enrollmentId: identity.enrollmentId, policyGeneration: policy.generation.toString(),
       registrationGeneration: (await generation(tx, identity.enrollmentId)).toString(),
       allowed, leaseMs: allowed ? Math.max(0, Math.min(PEER_LEASE_MS, ...deadlines)) : 0,
@@ -165,7 +175,7 @@ async function authorizationSnapshot(tx: Tx, identity: Identity, relayUrls: stri
 }
 
 export async function peerRelayAdmission(db: DB, input: PeerRelayAdmissionRequest,
-  relayUrls: string[]): Promise<PeerRelayAdmissionResponse> {
+  relayUrls: string[], options: RelayOptions = {}): Promise<PeerRelayAdmissionResponse> {
   const denied = { allowed: false as const, requestId: input.requestId };
   if (!relayUrls.includes(input.relayUrl)) return denied;
   try {
@@ -179,7 +189,7 @@ export async function peerRelayAdmission(db: DB, input: PeerRelayAdmissionReques
       // Registration, credential binding and policy must come from one transaction.
       const snapshot = await authorizationSnapshot(tx, { id: device.id, userId: registration.userId,
         deviceId: registration.deviceId, enrollmentId: registration.enrollmentId,
-        publicKey: device.publicKey, kind: device.kind }, relayUrls);
+        publicKey: device.publicKey, kind: device.kind }, relayUrls, options);
       if (!snapshot.allowed || snapshot.leaseMs <= 0 || snapshot.endpoint?.endpointId !== input.endpointId ||
           snapshot.endpoint.generation !== registration.generation.toString() ||
           snapshot.registrationGeneration !== registration.generation.toString()) return denied;

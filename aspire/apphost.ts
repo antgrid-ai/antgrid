@@ -36,6 +36,7 @@ import {
   type ExecuteCommandResult,
 } from "./.modules/aspire.js";
 import { licenseApiHostForTarget, type AppTarget } from "./target-hosts.js";
+import { preparePeerStack } from "./peer-stack.js";
 
 // Absolute path to the agent entrypoint. MUST be absolute: LocalAgentLauncher
 // spawns the agent with `workingDirectory` set to the *opened project folder*,
@@ -83,8 +84,9 @@ async function triggerHotReload(port: number): Promise<ExecuteCommandResult> {
     : { success: false, errorMessage: body.message ?? "Hot reload failed." };
 }
 
-// Aspire compiles + runs the apphost under Node, so process.execPath is node.
-// LocalAgentLauncher needs bun.exe — resolve it from PATH instead.
+// process.execPath is whichever runtime Aspire started the apphost with — bun.exe
+// here, despite aspire.config.json naming typescript/nodejs — so it is not a way to
+// reach a named runtime. LocalAgentLauncher needs bun specifically: resolve it.
 function resolveBun(): string {
   const cmd = process.platform === "win32" ? "where bun" : "command -v bun";
   const out = execSync(cmd, { encoding: "utf8" }).split(/\r?\n/)[0]?.trim();
@@ -93,16 +95,36 @@ function resolveBun(): string {
 }
 const bunBin = process.env.ANTGRID_BUN_BIN ?? resolveBun();
 
+// Computed before preparePeerStack and the web resource: the cleartext relay
+// origin, web's LAN-IP token audience and the mobile dart-defines all derive
+// from it — see pickLanIp() and the web EXTRA_TOKEN_AUDIENCES wiring.
+const lanHost = pickLanIp();
+console.log(
+  lanHost === "localhost"
+    ? "[apphost] no LAN IP found — relay/mobile web use localhost (mobile won't reach the host; set ANTGRID_LAN_IP)"
+    : `[apphost] relay and mobile web targets use ${lanHost} (override with ANTGRID_LAN_IP)`,
+);
+
+const peerTransport = process.env.ANTGRID_PEER_TRANSPORT?.trim() || "websocket";
+if (!["websocket", "iroh-preferred", "iroh-only"].includes(peerTransport)) {
+  throw new Error(`Invalid ANTGRID_PEER_TRANSPORT: ${peerTransport}`);
+}
+const peerStack = peerTransport === "websocket" ? undefined : preparePeerStack(resolve(aspireDir, ".."), process.env, lanHost);
+console.log(`[apphost] payload transport: ${peerTransport}`);
+
 // Sets one env var on a resource to an Aspire reference expression (connection
-// string, allocated endpoint, …). Used by the callbacks below so web
-// and relay don't each re-spell the get-environment→set-ref dance.
+// string, allocated endpoint, …) or to a literal. Used by the callbacks below
+// so web and relay don't each re-spell the get-environment→set-ref dance.
 async function setEnvRef(
   ctx: EnvironmentCallbackContext,
   name: string,
   value: unknown,
 ): Promise<void> {
   const env = await ctx.environment();
-  await env.set(name, refExpr`${value}`);
+  // A string interpolated into an expression is inlined into its format string,
+  // where a `{` — and a JSON value carries several — is read as a placeholder
+  // and fails to resolve at launch. Only a reference needs the wrapper.
+  await env.set(name, typeof value === "string" ? value : refExpr`${value}`);
 }
 
 const builder = await createBuilder();
@@ -117,16 +139,7 @@ const WEB_PORT = 8787;
 // below and web's RELAY_INTERNAL_URL both derive from it, so they can't drift.
 // Deliberately NOT relay/.env's PORT=8080 (which scripts/dev.ts still uses) —
 // the pin injects PORT, so the relay listens here under `aspire run`.
-const RELAY_PORT = 3000;
-
-// Computed up-front (before the web resource) so web can accept the LAN-IP
-// token audience — see pickLanIp() and the web EXTRA_TOKEN_AUDIENCES wiring.
-const lanHost = pickLanIp();
-console.log(
-  lanHost === "localhost"
-    ? "[apphost] no LAN IP found — relay/mobile web use localhost (mobile won't reach the host; set ANTGRID_LAN_IP)"
-    : `[apphost] relay and mobile web targets use ${lanHost} (override with ANTGRID_LAN_IP)`,
-);
+const RELAY_PORT = peerStack ? 3001 : 3000;
 
 // web — relay JWKS + agent token refresh both depend on this.
 // Postgres is NOT Aspire-managed: web reads PG_DATABASE_URL from its own .env
@@ -141,6 +154,14 @@ const licenseApi = await builder
   // false makes Aspire bind web directly to it (no proxy hop).
   .withHttpEndpoint({ port: WEB_PORT, targetPort: WEB_PORT, env: "PORT", isProxied: false })
   .withEnvironmentCallback(async (ctx: EnvironmentCallbackContext) => {
+    if (peerStack) {
+      await setEnvRef(ctx, "IROH_RELAY_URLS", peerStack.url);
+      await setEnvRef(ctx, "PEER_POLICY_TARGETS", peerStack.policyTargets);
+      await setEnvRef(ctx, "RELAY_INTERNAL_SECRET", peerStack.admissionSecret);
+      // Without this web refuses to boot on an http origin, which is the point:
+      // the downgrade has to be stated on the process that mints the snapshot.
+      if (peerStack.insecure) await setEnvRef(ctx, "ANTGRID_DEV_INSECURE_RELAY", "true");
+    }
     // web/.env's RELAY_INTERNAL_URL is generated for `npm run dev`, where the
     // relay honours relay/.env's PORT=8080. Under `aspire run` the pin below
     // injects RELAY_PORT instead, so that .env value points at nothing and
@@ -184,9 +205,32 @@ const relay = await builder
   .withHttpEndpoint({ port: RELAY_PORT, targetPort: RELAY_PORT, env: "PORT", isProxied: false })
   .withReference(licenseApi)
   .waitFor(licenseApi)
-  .withEnvironmentCallback((ctx: EnvironmentCallbackContext) =>
-    setEnvRef(ctx, "LICENSE_API_URL", licenseApiHttp),
-  );
+  .withEnvironmentCallback(async (ctx: EnvironmentCallbackContext) => {
+    await setEnvRef(ctx, "LICENSE_API_URL", licenseApiHttp);
+    if (peerStack) await setEnvRef(ctx, "RELAY_INTERNAL_SECRET", peerStack.admissionSecret);
+  });
+
+const nativeRelay = peerStack ? await builder
+  .addExecutable("iroh-relay", process.platform === "win32" ? "cargo.exe" : "cargo", "../iroh-relay", [
+    "run", "--locked", "-j", "2", "--bin", "antgrid-iroh-relay", "--", peerStack.config,
+  ])
+  .waitFor(licenseApi) : undefined;
+
+const relayGateway = peerStack && nativeRelay ? await (() => {
+  let gateway = builder
+    .addExecutable("relay-gateway", process.execPath, ".", [resolve(aspireDir, "scripts/relay-gateway.mjs")])
+    .withEnvironment("ANTGRID_RELAY_HOST", peerStack.host)
+    .withEnvironment("ANTGRID_RELAY_NATIVE_PORT", String(peerStack.nativePort));
+  gateway = peerStack.insecure
+    ? gateway
+        .withEnvironment("ANTGRID_DEV_INSECURE_RELAY", "true")
+        .withHttpEndpoint({ port: 3000, targetPort: 3000, isProxied: false })
+    : gateway
+        .withEnvironment("ANTGRID_RELAY_TLS_CERT", peerStack.cert!)
+        .withEnvironment("ANTGRID_RELAY_TLS_KEY", peerStack.key!)
+        .withHttpsEndpoint({ port: 3000, targetPort: 3000, isProxied: false });
+  return gateway.waitFor(relay).waitFor(nativeRelay);
+})() : undefined;
 
 // Capture the relay endpoint (pinned to 3000 above) and inject its host:port
 // into the Flutter app below via the same dart-define route as LICENSE_API_URL.
@@ -307,8 +351,8 @@ for (const target of appTargets) {
     // Node) rather than directly: the wrapper runs `flutter run --machine`,
     // translates the daemon JSON stream back into readable dashboard logs, and
     // hosts the control server the "Hot reload" command talks to.
-    // process.execPath is the Node running the apphost, so we don't depend on
-    // `node` being on PATH. --machine is required for the daemon protocol; the
+    // process.execPath is the runtime already running the apphost, so the launcher
+    // needs nothing on PATH. --machine is required for the daemon protocol; the
     // launcher surfaces the Dart Tooling Daemon URI from the `app.dtd` daemon
     // event (for the Dart MCP connect_dart_tooling_daemon flow), and --print-dtd
     // is kept as a belt-and-suspenders hint to flutter to start the DTD.
@@ -325,10 +369,18 @@ for (const target of appTargets) {
     .waitFor(licenseApi)
     .waitFor(relay);
 
+  if (relayGateway) app = app.waitFor(relayGateway);
+
   if (isDesktopTarget(target)) {
     // ANTGRID_AGENT_* match scripts/dev.ts so LocalAgentLauncher finds bun +
     // the agent entrypoint for projects opened in the desktop app.
     app = app
+      .withEnvironment("ANTGRID_PEER_TRANSPORT", peerTransport)
+      // The bridge host inherits this from the app that spawns it; the app's own
+      // Dart transport reads the --dart-define below instead, which is
+      // compile-time so a release build cannot pick it up from a stray env var.
+      .withEnvironment("ANTGRID_DEV_INSECURE_RELAY", peerStack?.insecure ? "true" : "false")
+      .withEnvironment("ANTGRID_TEST_MODE", peerTransport === "iroh-only" ? "1" : "0")
       .withEnvironment("ANTGRID_AGENT_BIN", bunBin)
       .withEnvironment("ANTGRID_AGENT_PREARGS", agentScript)
       // Isolate the dev stack's Antgrid home (pairing, relay-epoch, sessions,
@@ -366,7 +418,15 @@ for (const target of appTargets) {
       // Desktop auth stays on localhost to share its cookie origin with Better
       // Auth's callback. Mobile targets need the LAN host to reach the web API.
       await args.add(refExpr`--dart-define=LICENSE_API_URL=http://${licenseApiHost}:${licenseApiPort}`);
-      await args.add(refExpr`--dart-define=RELAY_URL=http://${lanHost}:${relayPort}`);
+      if (peerStack) {
+        await args.add(refExpr`--dart-define=RELAY_URL=${peerStack.url}`);
+      } else {
+        await args.add(refExpr`--dart-define=RELAY_URL=http://${lanHost}:${relayPort}`);
+      }
+      await args.add(refExpr`--dart-define=ANTGRID_PEER_TRANSPORT=${peerTransport}`);
+      if (peerStack?.insecure) {
+        await args.add(refExpr`--dart-define=ANTGRID_DEV_INSECURE_RELAY=true`);
+      }
     })
     // Dashboard button → sends the Flutter daemon `app.restart` (hot reload).
     // Replaces the dead `r` keypress (no TTY for Aspire children).

@@ -192,7 +192,7 @@ async fn trusted_tls_authentication_account_routing_and_signed_active_disconnect
             let state = serving.clone();
             let tls = tls.clone();
             tokio::spawn(async move {
-                let _ = antgrid_iroh_relay::relay_connection(stream, state, gate, tls).await;
+                let _ = antgrid_iroh_relay::relay_connection(stream, state, gate, Some(tls)).await;
             });
         }
     });

@@ -38,6 +38,7 @@ export function peerAuthorizationRoutes(deps: { db: DB; auth: Auth; env: Env }) 
       { ...c.get("deviceAuthorization")!, userId: c.get("userId") }, input.data));
   });
   r.get(`${prefix}/authorization`, async (c) => c.json(await peerAuthorizationSnapshot(deps.db,
-    { ...c.get("deviceAuthorization")!, userId: c.get("userId") }, deps.env.IROH_RELAY_URLS ?? [])));
+    { ...c.get("deviceAuthorization")!, userId: c.get("userId") }, deps.env.IROH_RELAY_URLS ?? [],
+    { allowInsecureRelay: deps.env.ANTGRID_DEV_INSECURE_RELAY === true })));
   return r;
 }

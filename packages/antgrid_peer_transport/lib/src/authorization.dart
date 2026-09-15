@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'relay_origin.dart';
+
 void _exact(Map<String, dynamic> json, List<String> keys) {
   if (json.length != keys.length || keys.any((key) => !json.containsKey(key))) {
     throw const FormatException('Unexpected authorization fields');
@@ -160,13 +162,7 @@ class AuthorizationSnapshot {
       throw const FormatException('Invalid authorization bounds');
     }
     for (final url in relayUrls) {
-      final uri = Uri.parse(url);
-      if (uri.scheme != 'https' ||
-          uri.host.isEmpty ||
-          uri.userInfo.isNotEmpty ||
-          uri.hasQuery ||
-          uri.hasFragment ||
-          (uri.path != '' && uri.path != '/')) {
+      if (!isApprovedRelayOrigin(url)) {
         throw const FormatException('Invalid approved relay');
       }
     }

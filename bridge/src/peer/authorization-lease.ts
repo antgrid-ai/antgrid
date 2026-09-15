@@ -1,4 +1,5 @@
-import { PEER_LEASE_MS, PeerAuthorizationSnapshotSchema, type PeerAuthorizationSnapshot } from "antgrid-wire";
+import { PEER_LEASE_MS, type PeerAuthorizationSnapshot } from "antgrid-wire";
+import { AcceptedAuthorizationSnapshotSchema } from "./dev-insecure-relay";
 
 export interface EnrollmentIdentity {
   accountId: string;
@@ -49,7 +50,11 @@ export class AuthorizationLease {
     const generation = this.generation;
     const started = this.now();
     const operation = (async () => {
-      const parsed = PeerAuthorizationSnapshotSchema.parse(await this.request());
+      // Must stay the schema `EndpointEnrollment` registers against. A host
+      // that enrolls for an origin and then refuses every snapshot carrying it
+      // kills its own transport at startup, and a rejected parse surfaces as a
+      // Zod dump under PEER_TRANSPORT_UNAVAILABLE rather than a scheme refusal.
+      const parsed = AcceptedAuthorizationSnapshotSchema.parse(await this.request());
       if (this.stopped || generation !== this.generation) return false;
       if (parsed.accountId !== this.identity.accountId || parsed.deviceId !== this.identity.deviceId ||
           parsed.enrollmentId !== this.identity.enrollmentId) {

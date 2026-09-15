@@ -7,7 +7,8 @@ by `Cargo.lock` and `rust-toolchain.toml`.
 
 ## Security boundary
 
-The public listener terminates TLS on port 443, negotiates the upstream relay
+The public listener terminates TLS on port 443 (the sole exception is the
+local-development `devInsecureHttp` mode below), negotiates the upstream relay
 WebSocket protocol and invokes upstream signed-challenge authentication. It
 passes the authenticated endpoint to the backend's HMAC-authenticated
 `/internal/peer-admission` route, including its explicitly configured approved
@@ -61,6 +62,26 @@ certificates are loaded at process start; rotate by draining/restarting instance
 with fresh admission rather than mutating files mid-connection. Operator DNS,
 trusted certificates, private routing and secrets remain external actions.
 
+### `devInsecureHttp` (local development only)
+
+A local stack has no DNS name resolving to the developer's machine and no
+publicly trusted certificate, and the pinned client bindings expose no custom-CA
+surface, so a private CA cannot substitute for one. `devInsecureHttp: true`
+serves the same relay protocol over cleartext instead. It requires `relayUrl` to
+carry the `http` scheme, refuses a `tlsCert`/`tlsKey` pairing and lifts the
+port-443 pin; the advertised scheme and the wire actually served come from that
+one flag, so no configuration can advertise `https` while answering in the
+clear. Both `listen` and the `relayUrl` host are confined to loopback or a
+private range — a LAN address is allowed because a phone or emulator has to
+reach the stack, `0.0.0.0` and a public address are not — which keeps "local
+development only" a property this file enforces rather than one that emerges
+from what every peer happens to refuse. Everything else — signed-challenge authentication, HMAC admission, leases,
+fences and byte budgets — is the same code path. The process prints a
+`relay_insecure_http` event at startup. Every peer that dials such an origin has
+to opt in on its own side as well, so setting this alone makes nothing accept a
+plaintext relay. Upstream's own relay binary exposes the same escape hatch as
+`--dev`.
+
 ```sh
 cargo build --locked --release -j 2
 ./target/release/antgrid-iroh-relay /config/relay.json
@@ -81,7 +102,8 @@ ingress. It supports:
   Body limit 4 KiB; timestamp freshness 30 seconds. Success means the dispatch
   fence is active; it does not claim remote peers have observed socket closure.
 
-Public `/ping` and `/generate_204` return probe responses over TLS. The private
+Public `/ping` and `/generate_204` return probe responses over the same wire as
+the relay protocol itself. The private
 interface has its own connection cap and request deadline. A 503 outbox response
 must remain pending and retry; do not manually mark delivery complete.
 
@@ -132,6 +154,13 @@ cargo build --locked -j 2 --manifest-path compat-client/Cargo.toml
 ANTGRID_LEGACY_RELAY_CLIENT="$PWD/compat-client/target/debug/antgrid-relay-compat-client" \
   cargo test --locked -j 2 --test tls_relay -- --nocapture
 ```
+
+A cleartext gate drives the same two upstream relay clients through a
+`devInsecureHttp` listener over `http://`, asserting a datagram is relayed,
+that a second account sees nothing, that an endpoint the backend does not know
+is refused and that admission stays HMAC-authenticated with TLS off. A separate
+configuration gate asserts the flag's pairings. Neither weakens the default: a
+stock configuration is still refused without a certificate and off port 443.
 
 The fence tests cover stale admission, duplicate bind/endpoint limits, table
 capacity, raw write/flush denial, blocked-writer wakeup, expiry and permit release.

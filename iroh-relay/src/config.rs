@@ -1,14 +1,62 @@
 use anyhow::{Result, ensure};
 use serde::Deserialize;
-use std::{net::SocketAddr, path::PathBuf};
+use std::{
+    net::{IpAddr, SocketAddr},
+    path::PathBuf,
+};
+
+/// Cleartext is only defensible on a network the developer already controls, so
+/// `dev_insecure_http` is confined to one. A LAN address counts — a phone or an
+/// emulator has to reach the stack — but a public or unspecified bind does not.
+/// Keeping that here makes "local development only" a property of this file,
+/// rather than one that merely emerges from what every peer happens to refuse.
+fn is_local_network(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(address) => {
+            address.is_loopback() || address.is_private() || address.is_link_local()
+        }
+        // `is_unique_local` and `is_unicast_link_local` are still unstable.
+        IpAddr::V6(address) => {
+            address.is_loopback()
+                || address.segments()[0] & 0xfe00 == 0xfc00
+                || address.segments()[0] & 0xffc0 == 0xfe80
+        }
+    }
+}
+
+fn is_local_host(url: &reqwest::Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    if host == "localhost" {
+        return true;
+    }
+    // `host_str` serializes an IPv6 literal with its brackets.
+    let host = host
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .unwrap_or(host);
+    host.parse::<IpAddr>().is_ok_and(is_local_network)
+}
 
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Config {
     pub listen: SocketAddr,
     pub admin_listen: SocketAddr,
-    pub tls_cert: PathBuf,
-    pub tls_key: PathBuf,
+    /// Absent only with `dev_insecure_http`, which serves cleartext instead.
+    #[serde(default)]
+    pub tls_cert: Option<PathBuf>,
+    #[serde(default)]
+    pub tls_key: Option<PathBuf>,
+    /// Dev-only: serve the relay protocol over cleartext HTTP instead of TLS,
+    /// for a local stack that has no DNS name or publicly trusted certificate.
+    /// Upstream's own relay binary exposes the same escape hatch as `--dev`.
+    /// `validate` keeps this in lockstep with the approved origin's scheme and
+    /// with whether a certificate is configured, so a deployment cannot end up
+    /// serving cleartext while advertising `https`.
+    #[serde(default)]
+    pub dev_insecure_http: bool,
     pub admission_url: String,
     pub relay_url: String,
     pub admission_secret: String,
@@ -23,24 +71,49 @@ pub struct Config {
 }
 impl Config {
     pub fn validate(&self) -> Result<()> {
-        ensure!(
-            self.listen.port() == 443,
-            "client listener must use TLS port 443"
-        );
+        if self.dev_insecure_http {
+            ensure!(
+                self.tls_cert.is_none() && self.tls_key.is_none(),
+                "devInsecureHttp serves cleartext; remove tlsCert and tlsKey"
+            );
+            ensure!(
+                is_local_network(self.listen.ip()),
+                "devInsecureHttp must listen on a loopback or private address"
+            );
+        } else {
+            ensure!(
+                self.listen.port() == 443,
+                "client listener must use TLS port 443"
+            );
+            ensure!(
+                self.tls_cert.is_some() && self.tls_key.is_some(),
+                "tlsCert and tlsKey are required unless devInsecureHttp is set"
+            );
+        }
         ensure!(
             self.admin_listen.ip().is_loopback(),
             "admin listener must be loopback; use private sidecar routing"
         );
         let url = reqwest::Url::parse(&self.admission_url)?;
         let relay = reqwest::Url::parse(&self.relay_url)?;
+        // The advertised scheme is what clients dial, so it has to track how
+        // this listener actually serves. Tying the two to one flag means no
+        // configuration can advertise https while serving cleartext.
+        let relay_scheme = if self.dev_insecure_http { "http" } else { "https" };
         ensure!(
-            relay.scheme() == "https"
+            relay.scheme() == relay_scheme
                 && relay.username().is_empty()
                 && relay.password().is_none()
                 && relay.query().is_none()
                 && relay.fragment().is_none()
                 && relay.path() == "/",
             "invalid approved relay URL"
+        );
+        // The origin peers dial names the same network the listener is bound
+        // to, so a cleartext relay cannot advertise itself at a public name.
+        ensure!(
+            !self.dev_insecure_http || is_local_host(&relay),
+            "devInsecureHttp requires a loopback or private relay URL host"
         );
         ensure!(
             matches!(url.scheme(), "http" | "https")

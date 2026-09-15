@@ -38,14 +38,35 @@ use tokio_tungstenite::{
     },
 };
 
+/// `tls` is `None` only under `devInsecureHttp`, where the protocol below runs
+/// over cleartext for a local stack that has no certificate. The whole
+/// handshake-to-admission path is identical either way, so it lives in `serve`
+/// and neither branch can drift from the other.
 pub async fn relay_connection<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     stream: T,
     state: Arc<State>,
     gate: Arc<Gate>,
-    tls: TlsAcceptor,
+    tls: Option<TlsAcceptor>,
+) -> Result<()> {
+    let guarded = GuardedIo::new(stream, gate.clone());
+    match tls {
+        Some(tls) => {
+            // The accept is inside the budget `serve` would otherwise own alone,
+            // so a peer that stalls mid-handshake cannot hold a permit forever.
+            let stream = tokio::time::timeout(Duration::from_secs(5), tls.accept(guarded)).await??;
+            serve(stream, state, gate).await
+        }
+        None => serve(guarded, state, gate).await,
+    }
+}
+
+async fn serve<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
+    stream: T,
+    state: Arc<State>,
+    gate: Arc<Gate>,
 ) -> Result<()> {
     tokio::time::timeout(Duration::from_secs(5), async {
-        let mut stream = tls.accept(GuardedIo::new(stream, gate.clone())).await?;
+        let mut stream = stream;
         let mut prefix = Vec::new();
         while !prefix.ends_with(b"\r\n\r\n") {
             ensure!(prefix.len() < 8192, "HTTP headers too large"); prefix.push(stream.read_u8().await?);
@@ -157,17 +178,34 @@ pub async fn admin(
 pub async fn run(config: config::Config) -> Result<()> {
     config.validate()?;
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let cert = std::fs::read(&config.tls_cert)?;
-    let key = std::fs::read(&config.tls_key)?;
-    let certificates =
-        rustls_pemfile::certs(&mut &cert[..]).collect::<std::result::Result<Vec<_>, _>>()?;
-    let key = rustls_pemfile::private_key(&mut &key[..])?
-        .ok_or_else(|| anyhow::anyhow!("TLS key missing"))?;
-    let tls = TlsAcceptor::from(Arc::new(
-        rustls::ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(certificates, key)?,
-    ));
+    let tls = match (&config.tls_cert, &config.tls_key) {
+        (Some(cert_path), Some(key_path)) => {
+            let cert = std::fs::read(cert_path)?;
+            let key = std::fs::read(key_path)?;
+            let certificates =
+                rustls_pemfile::certs(&mut &cert[..]).collect::<std::result::Result<Vec<_>, _>>()?;
+            let key = rustls_pemfile::private_key(&mut &key[..])?
+                .ok_or_else(|| anyhow::anyhow!("TLS key missing"))?;
+            Some(TlsAcceptor::from(Arc::new(
+                rustls::ServerConfig::builder()
+                    .with_no_client_auth()
+                    .with_single_cert(certificates, key)?,
+            )))
+        }
+        // `validate` has already refused this pairing without dev_insecure_http.
+        _ => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "event": "relay_insecure_http",
+                    "listen": config.listen.to_string(),
+                    "relayUrl": config.relay_url,
+                    "warning": "serving the relay protocol over cleartext; local development only",
+                })
+            );
+            None
+        }
+    };
     let listener = TcpListener::bind(config.listen).await?;
     let administration = TcpListener::bind(config.admin_listen).await?;
     let admin_permits = Arc::new(Semaphore::new(16));

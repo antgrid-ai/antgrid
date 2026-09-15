@@ -120,7 +120,7 @@ async fn main() -> Result<()> {
             let state = serving.clone();
             let tls = tls.clone();
             tokio::spawn(async move {
-                let _ = antgrid_iroh_relay::relay_connection(stream, state, gate, tls).await;
+                let _ = antgrid_iroh_relay::relay_connection(stream, state, gate, Some(tls)).await;
             });
         }
     });
