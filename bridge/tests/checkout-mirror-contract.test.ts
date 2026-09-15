@@ -7,7 +7,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { CHECKOUT_VARIABLE_MESSAGE_TYPES } from "../src/protocol";
+import { CHECKOUT_VARIABLE_MESSAGE_TYPES, PREVIEW_CHANNEL_MESSAGE_TYPES } from "../src/protocol";
 import { CHECKOUT_REPLAY_TYPES } from "../src/message-bus";
 import {
   CHECKOUT_KINDS,
@@ -52,6 +52,10 @@ function readDartReplayMirror(): Set<string> {
   return dartSetLiteral(readDartSource(), "kCheckoutDurableReplayTypes");
 }
 
+function readDartPreviewChannelMirror(): Set<string> {
+  return dartSetLiteral(readDartSource(), "kPreviewChannelInboundTypes");
+}
+
 const REPLAY_DRIFT_REASON =
   "the checkout-scoped slice of REPLAY_TYPES in bridge/src/message-bus.ts and "
   + `${DART_MIRROR} kCheckoutDurableReplayTypes have drifted — a type missing `
@@ -61,6 +65,17 @@ const REPLAY_DRIFT_REASON =
 function replayDrift(from: Iterable<string>, to: Set<string>): string[] {
   const missing = [...from].filter((type) => !to.has(type)).sort();
   return missing.length === 0 ? [] : [REPLAY_DRIFT_REASON, ...missing];
+}
+
+const PREVIEW_DRIFT_REASON =
+  "bridge/src/protocol.ts PREVIEW_CHANNEL_MESSAGE_TYPES and "
+  + `${DART_MIRROR} kPreviewChannelInboundTypes have drifted — a type missing `
+  + "from the Dart set is dropped by MessageRouter before classification, "
+  + "silently, with nothing on either side reporting it.";
+
+function previewDrift(from: Iterable<string>, to: Set<string>): string[] {
+  const missing = [...from].filter((type) => !to.has(type)).sort();
+  return missing.length === 0 ? [] : [PREVIEW_DRIFT_REASON, ...missing];
 }
 
 /** Bun prints only the compared values, so the reason has to ride inside them. */
@@ -114,6 +129,48 @@ describe("checkout mirror contract", () => {
 
   test("every Dart durable-replay type is a checkout-scoped bridge replay type", () => {
     expect(replayDrift(readDartReplayMirror(), new Set(CHECKOUT_REPLAY_TYPES))).toEqual([]);
+  });
+
+  test("the scrape of the Dart preview-channel mirror found a plausible set", () => {
+    // Same vacuity guard as the checkout-variable scrape above.
+    const dart = readDartPreviewChannelMirror();
+    expect(dart.size).toBeGreaterThan(0);
+    expect(dart).toContain("terminal:frame");
+  });
+
+  test("every bridge preview-channel type is mirrored in Dart", () => {
+    expect(previewDrift(PREVIEW_CHANNEL_MESSAGE_TYPES, readDartPreviewChannelMirror())).toEqual([]);
+  });
+
+  test("every Dart preview-channel type exists on the bridge", () => {
+    expect(previewDrift(readDartPreviewChannelMirror(), PREVIEW_CHANNEL_MESSAGE_TYPES)).toEqual([]);
+  });
+
+  test("every preview-channel type is also checkout-variable", () => {
+    // PREVIEW_CHANNEL_MESSAGE_TYPES documents itself as a SUBSET of the
+    // checkout-variable set, and the app relies on it: a routed frame whose
+    // type is not checkout-variable carries no checkoutId, and
+    // checkoutIdForEnvelope defaults it to "main" — so it lands in main's
+    // slice of every per-checkout stream rather than nowhere, which is far
+    // harder to notice than a drop.
+    const notCheckoutVariable = [...PREVIEW_CHANNEL_MESSAGE_TYPES]
+      .filter((type) => !CHECKOUT_VARIABLE_MESSAGE_TYPES.has(type))
+      .sort();
+    expect(notCheckoutVariable).toEqual([]);
+  });
+
+  test("every preview-channel type also classifies as heavy or status, never ignore", () => {
+    // MessageRouter checks this set BEFORE classification (D2's channel gate),
+    // so a member absent from both classification buckets would clear the
+    // gate only to be dropped as MessageTier.ignore one line later — admitted
+    // and then silently discarded, which is worse than never admitting it.
+    const source = readDartSource();
+    const heavy = dartSetLiteral(source, "_heavyTypes");
+    const status = dartSetLiteral(source, "_statusTypes");
+    const unclassified = [...PREVIEW_CHANNEL_MESSAGE_TYPES]
+      .filter((type) => !heavy.has(type) && !status.has(type))
+      .sort();
+    expect(unclassified).toEqual([]);
   });
 
   test("every checkout kind answers both predicates deliberately", () => {

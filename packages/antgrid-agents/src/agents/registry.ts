@@ -21,6 +21,8 @@ import { ETX } from "./types";
 import * as antigravityHooks from "./antigravity/hooks";
 import * as claudeHooks from "./claude-code/hooks";
 import * as codexHooks from "./codex/hooks";
+import * as claudeMcp from "./claude-code/mcp";
+import * as codexMcp from "./codex/mcp";
 import * as cursorHooks from "./cursor-agent/hooks";
 import * as copilotHooks from "./github-copilot/hooks";
 import * as opencodeHooks from "./opencode/hooks";
@@ -70,6 +72,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
       decodeLegacyArgs: claudeLegacyForkSource,
     },
     hooks: claudeHooks,
+    mcp: claudeMcp,
     notifyBodyFromTranscript: lastAssistantText,
     driver: createClaudeDriver,
     // Measured against the installed CLI on Windows. One Ctrl-C only arms the
@@ -171,6 +174,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
       decodeLegacyArgs: codexLegacyForkSource,
     },
     hooks: codexHooks,
+    mcp: codexMcp,
     driver: createCodexDriver,
     // codex offers no sandbox tighter than read-only, so there is no sealed
     // entry to write: `--sandbox read-only` is the floor.

@@ -4,7 +4,7 @@
 // that a per-agent change cannot silently move a cross-agent verdict.
 import { describe, expect, test } from "bun:test";
 import { AGENTS, handlerObservable, needsKeystrokeTurnStart } from "../../packages/antgrid-agents/src/agents/registry";
-import { injectsHookAliveProbe } from "../../packages/antgrid-agents/src/agent-launch-augmenter";
+import { injectsHookAliveProbe } from "../src/agent-runtime";
 import type { AgentKey } from "../../packages/antgrid-agents/src/agents/types";
 
 const AGENT_KEYS = [

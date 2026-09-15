@@ -9,7 +9,7 @@ import { bundledPluginPath } from "./plugin-root";
 export function runProjectIntegrationSetup(ctx: {
   integrationDir: string;
   assetDirectory: string;
-  mcpEntry: { command: string; args: string[] };
+  mcpEntry: { command: string; args: string[]; env?: Record<string, string> };
   hookCommand: HookCommand;
   args: string[];
 }): void {

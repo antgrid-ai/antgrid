@@ -4,10 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { materializeAgentAssets, bundledPluginPath } from "antgrid-agents/assets";
-import { augmentAgentLaunch } from "../../packages/antgrid-agents/src/agent-launch-augmenter";
+import { augmentAgentLaunch } from "../src/agent-runtime";
 import type { HookCommand } from "../src/hook-command";
 
 const HOOK_COMMAND: HookCommand = { binary: "/opt/antgrid/antgrid-bridge", preargs: ["hook"] };
+
+// The single self-invocation decision `augmentAgentLaunch` derives both the
+// hook command and the MCP command from; resolves to HOOK_COMMAND above.
+const BRIDGE_SELF = { compiled: true, binary: HOOK_COMMAND.binary };
 
 const dirs: string[] = [];
 function tmp(): string {
@@ -42,7 +46,7 @@ describe("opencode launch config", () => {
     delete process.env.OPENCODE_CONFIG;
     let cfgPath: string | undefined;
     try {
-      cfgPath = augmentAgentLaunch("opencode", abDir, undefined, HOOK_COMMAND).env
+      cfgPath = augmentAgentLaunch("opencode", { abDir, self: BRIDGE_SELF }).env
         .OPENCODE_CONFIG;
     } finally {
       if (prev !== undefined) process.env.OPENCODE_CONFIG = prev;

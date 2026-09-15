@@ -4,12 +4,11 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "mcp": "bun run mcp-server.ts",
+    "mcp": "bun run ../src/index.ts mcp",
     "install-integrations": "bun run setup.ts install",
     "uninstall-integrations": "bun run setup.ts uninstall"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.1",
     "antgrid-agents": "workspace:*"
   }
 }

@@ -84,6 +84,8 @@ Dynamic loading remains outside this change.
 
 Package tests, package and bridge typechecks, focused bridge integration tests,
 Flutter model tests and analysis, and the compiled asset smoke check passed.
-The full bridge gate has four Windows graceful-exit failures. The same four
-failures reproduce using copies of the committed terminal session, manager, and
-platform implementation; they are not introduced by this migration.
+The initial full bridge gate exposed four Windows graceful-exit fixture failures,
+also reproduced with the previous terminal implementation. Merging development
+incorporated its fixture fixes; those scenarios now pass. The merge also carries
+MCP injection through the package API and keeps agent hook run identities separate
+from terminal screen-history run identities.

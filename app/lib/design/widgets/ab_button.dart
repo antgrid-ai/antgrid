@@ -31,6 +31,7 @@ class AbButton extends StatefulWidget {
     this.variant = AbButtonVariant.normal,
     this.fontSize,
     this.fontWeight,
+    this.wrapLabel = false,
   });
 
   final String label;
@@ -49,6 +50,17 @@ class AbButton extends StatefulWidget {
   /// Overrides the label font weight. Defaults to [FontWeight.normal]
   /// (subject to the DPR-gated weight bump in [AbTokens.sansStyle]).
   final FontWeight? fontWeight;
+
+  /// Lets a label longer than the space it is given wrap onto further lines
+  /// instead of overflowing. Opt-in, and it must stay that way: the label sits
+  /// in a min-size [Row], so making it flexible unconditionally would assert
+  /// the moment a button is placed somewhere with an unbounded width — which is
+  /// exactly where most of them are, inside another [Row].
+  ///
+  /// For a button whose label is a whole sentence rather than a verb. A caller
+  /// setting this owes the button a bounded width, which a [Column] gives and a
+  /// [Row] does not.
+  final bool wrapLabel;
 
   @override
   State<AbButton> createState() => _AbButtonState();
@@ -74,6 +86,16 @@ class _AbButtonState extends State<AbButton> {
     final vPad = widget.compact ? AbTokens.space2 : AbTokens.space4;
     final interactive = widget.onTap != null;
 
+    Widget label = Text(
+      widget.label,
+      style: AbTokens.sansStyle(
+        fontSize: fontSize,
+        color: textColor,
+        fontWeight: widget.fontWeight ?? FontWeight.normal,
+      ),
+    );
+    if (widget.wrapLabel) label = Flexible(child: label);
+
     Widget visual = Container(
       padding: EdgeInsets.symmetric(horizontal: hPad, vertical: vPad),
       decoration: BoxDecoration(
@@ -88,14 +110,7 @@ class _AbButtonState extends State<AbButton> {
             widget.leading!,
             const SizedBox(width: AbTokens.space4),
           ],
-          Text(
-            widget.label,
-            style: AbTokens.sansStyle(
-              fontSize: fontSize,
-              color: textColor,
-              fontWeight: widget.fontWeight ?? FontWeight.normal,
-            ),
-          ),
+          label,
         ],
       ),
     );

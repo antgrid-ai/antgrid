@@ -34,6 +34,42 @@ test("state is per-terminal", () => {
   expect(g.check("t2", "b")).toBeNull();
 });
 
+describe("remaining", () => {
+  it("starts at the constructed ceiling and hits zero exactly when check refuses", () => {
+    const g = new RunawayGuard(2);
+    expect(g.remaining("t")).toBe(2);
+    g.recordAutoReply("t", "a");
+    expect(g.remaining("t")).toBe(1);
+    expect(g.check("t", "b")).toBeNull();
+    g.recordAutoReply("t", "b");
+    // The number the judge is shown and the verdict the guard reaches must agree:
+    // a prompt saying one reply is left, followed by a refusal, is worse than no
+    // number at all.
+    expect(g.remaining("t")).toBe(0);
+    expect(g.check("t", "c")).toContain("runaway cap");
+  });
+
+  it("is restored by progress even while the repeat is still circular", () => {
+    const g = new RunawayGuard(2, 4);
+    g.recordAutoReply("t", "reply-a");
+    g.recordAutoReply("t", "reply-b");
+    expect(g.remaining("t")).toBe(0);
+    g.recordProgress("t");
+    expect(g.remaining("t")).toBe(2);
+    expect(g.check("t", "reply-a")).toContain("circular");
+  });
+
+  // Reading the budget is what every prompt does, including for terminals that
+  // never auto-reply and so never reach a `reset`. Creating state for one would
+  // leak an entry per supervised terminal for the life of the process.
+  it("creates no state for a terminal that never auto-replied", () => {
+    const g = new RunawayGuard(2);
+    expect(g.remaining("never")).toBe(2);
+    expect((g as unknown as { state: Map<string, unknown> }).state.has("never")).toBe(false);
+    expect(g.check("never", "a")).toBeNull();
+  });
+});
+
 describe("progress-based reset", () => {
   it("a satisfied item resets the consecutive cap but keeps circular detection", () => {
     const g = new RunawayGuard(2, 4);

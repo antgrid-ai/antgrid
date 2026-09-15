@@ -4,6 +4,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:visibility_detector/visibility_detector.dart';
 import 'package:antgrid/models/agent_event.dart';
 import 'package:antgrid/providers/now_ticker.dart';
+import 'package:antgrid/providers/session_bus_inbox.dart';
+import 'package:antgrid/widgets/session_inbox_panel.dart';
 import 'package:antgrid/widgets/transcript/markdown_body.dart';
 import 'package:antgrid/widgets/transcript/rows/message_row.dart';
 import 'package:antgrid/widgets/transcript/selection/transcript_selection_scope.dart';
@@ -11,6 +13,44 @@ import 'package:antgrid/widgets/transcript/transcript_rows.dart';
 
 AgentItem _item({required String text, String role = 'assistant'}) =>
     AgentItem(itemId: 'i1', kind: 'message', role: role, text: text);
+
+SessionBusThreadEntry _entry({
+  required bool outbound,
+  required String text,
+  int? deliveredAt,
+}) => SessionBusThreadEntry(
+  outbound: outbound,
+  at: DateTime(2026, 7, 3, 12).millisecondsSinceEpoch,
+  peer: const SessionBusAddress(
+    machineId: 'm-other',
+    projectId: 'p-other',
+    sessionId: 's-other',
+  ),
+  summary: text,
+  text: const <String>[],
+  deliveredAt: deliveredAt,
+);
+
+/// The thread view brings its own selection scope, because the transcript's
+/// comes from a screen a thread never mounts. Pumping it under [_pump]'s scope
+/// would test a nesting the app never builds.
+Future<void> _pumpThread(
+  WidgetTester tester,
+  List<SessionBusThreadEntry> entries,
+) {
+  return tester.pumpWidget(
+    ProviderScope(
+      overrides: [
+        nowMinuteProvider.overrideWith(
+          (ref) => Stream.value(DateTime(2026, 7, 3, 12, 5)),
+        ),
+      ],
+      child: MaterialApp(
+        home: Scaffold(body: SessionBusThreadEntries(entries: entries)),
+      ),
+    ),
+  );
+}
 
 Future<void> _pump(WidgetTester tester, Widget child) {
   // MessageRow needs both a pinned "now" (its meta row reads nowMinuteProvider)
@@ -215,5 +255,66 @@ void main() {
     expect(usageText.softWrap, isFalse);
     expect(usageText.overflow, TextOverflow.fade);
     expect(tester.takeException(), isNull);
+  });
+
+  // A session-bus thread reuses these same rows rather than growing a screen of
+  // its own (`docs/session-messaging.md` §10.2). These pin the two things that
+  // reuse has to get right, and that nothing in the panel's own test can see.
+  group('session-bus thread view', () {
+    // Both halves of an exchange, in the transcript's own two treatments: what
+    // this session sent takes the user's accent-bordered block, what the peer
+    // sent renders as prose.
+    testWidgets('renders both directions with the transcript rows', (
+      tester,
+    ) async {
+      await _pumpThread(tester, [
+        _entry(outbound: true, text: 'same 401 on token refresh?'),
+        _entry(outbound: false, text: 'yes, see auth.ts'),
+      ]);
+      await tester.pumpAndSettle();
+
+      expect(find.byType(MessageRow), findsNWidgets(2));
+      expect(find.text('same 401 on token refresh?'), findsOneWidget);
+      expect(find.byType(TranscriptMarkdown), findsOneWidget);
+    });
+
+    // The receipt is the only end-to-end acknowledgement anywhere in the
+    // design, so it has to reach the one surface that can show it.
+    testWidgets('an acked outbound entry carries its delivered stamp', (
+      tester,
+    ) async {
+      await _pumpThread(tester, [
+        _entry(
+          outbound: true,
+          text: 'sent',
+          deliveredAt: DateTime(2026, 7, 3, 12, 1).millisecondsSinceEpoch,
+        ),
+      ]);
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('Delivered'), findsOneWidget);
+    });
+
+    // No receipt is not a failure — nothing retries a post — so an unacked
+    // entry states what is true and nothing more.
+    testWidgets('an unacked outbound entry reads as sent, not as failed', (
+      tester,
+    ) async {
+      await _pumpThread(tester, [_entry(outbound: true, text: 'sent')]);
+      await tester.pumpAndSettle();
+
+      expect(find.text('Sent'), findsOneWidget);
+      expect(find.textContaining('Delivered'), findsNothing);
+    });
+
+    // deliveredAt is outbound-only, and a stamp under a received message would
+    // claim a receipt this session never issued.
+    testWidgets('an inbound entry carries no stamp', (tester) async {
+      await _pumpThread(tester, [_entry(outbound: false, text: 'hello')]);
+      await tester.pumpAndSettle();
+
+      expect(find.text('Sent'), findsNothing);
+      expect(find.textContaining('Delivered'), findsNothing);
+    });
   });
 }

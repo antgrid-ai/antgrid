@@ -1,51 +1,47 @@
-import { logger } from "./host";
-const log = logger.child({ component: "agent-launch" });
-import { resolveAbDir } from "./host";
-import type { HookCommand } from "./hook-command";
-import { resolveHookCommand } from "./host";
+import { logger, resolveAbDir, resolveHookCommand, agentHost } from "./host";
+import type { HookCommand, BridgeCommand } from "./hook-command";
 import { agentSpec } from "./agents/registry";
 import { NO_INJECTION, NO_OBSERVATION } from "./agents/launch-inject";
-import type { LaunchAugmentation } from "./agents/types";
-import type { AgentSpec } from "./agents/types";
+import type { AgentSpec, LaunchAugmentation } from "./agents/types";
 
+const log = logger.child({ component: "agent-launch" });
 export type { LaunchAugmentation };
-
-/**
- * Whether this agent's injected integration pings /hook-alive at session start,
- * so a terminal that never sees the ping can report the integration as dead.
- */
+export interface AugmentOptions {
+  abDir?: string;
+  cursorDir?: string;
+  geminiConfigDir?: string;
+  hookCommand?: HookCommand;
+  mcpCommand?: BridgeCommand;
+}
 export function injectsHookAliveProbe(tool: string): boolean {
   return agentSpec(tool)?.hooks?.observation.hookAlive === true;
 }
 
-/**
- * Per-spawn integration for one agent launch: the argv/env that install its
- * callback channel, plus whatever config or plugin file that channel needs on
- * disk first. Additive only — see each agent's `inject` in agents/<key>/hooks.ts.
- *
- * Fail-open at two levels, and both matter: an agent with no hook profile
- * injects nothing, and an injection that throws degrades to nothing. A session
- * that launches without notifications is recoverable by the OSC scanner; a
- * session that fails to launch is not.
- */
 export function augmentAgentLaunch(
   tool: string,
-  abDir: string = resolveAbDir(),
-  cursorDir?: string,
-  hookCommand: HookCommand = resolveHookCommand(),
-  geminiConfigDir?: string,
+  options: AugmentOptions = {},
   get: (tool: string) => AgentSpec | undefined = agentSpec,
 ): LaunchAugmentation {
-  const hooks = get(tool)?.hooks;
-  if (!hooks) return NO_INJECTION;
-  try {
-    const result = hooks.inject({ abDir, cursorDir, geminiConfigDir, hookCommand });
-    return {
-      ...result,
-      observation: result.observation ?? (result.notificationsInjected === false ? NO_OBSERVATION : hooks.observation),
-    };
-  } catch (err) {
-    log.warn("agent launch augmentation failed for %s: %s", tool, err);
-    return NO_INJECTION;
+  const spec = get(tool);
+  if (!spec?.hooks && !spec?.mcp) return NO_INJECTION;
+  const abDir = options.abDir ?? resolveAbDir();
+  let hooks = NO_INJECTION;
+  if (spec.hooks) {
+    try {
+      const result = spec.hooks.inject({ ...options, abDir, hookCommand: options.hookCommand ?? resolveHookCommand() });
+      hooks = { ...result, observation: result.observation ?? (result.notificationsInjected === false ? NO_OBSERVATION : spec.hooks.observation) };
+    } catch (err) {
+      log.warn("agent hook augmentation failed for %s: %s", tool, err);
+    }
   }
+  let mcp = NO_INJECTION;
+  if (spec.mcp) {
+    try {
+      const mcpCommand = options.mcpCommand ?? agentHost().mcpCommand?.();
+      if (mcpCommand) mcp = spec.mcp.inject({ abDir, mcpCommand });
+    } catch (err) {
+      log.warn("agent MCP augmentation failed for %s: %s", tool, err);
+    }
+  }
+  return { ...hooks, args: [...hooks.args, ...mcp.args], env: { ...hooks.env, ...mcp.env } };
 }

@@ -255,12 +255,19 @@ describe("viewer routes", () => {
       "phones:unpair": { id: "a", type: "phones:unpair", phonePubkey: "x" },
       "mobile-access:get": { id: "a", type: "mobile-access:get" },
       "mobile-access:set": { id: "a", type: "mobile-access:set", enabled: true },
+      "agent-reach:get": { id: "a", type: "agent-reach:get" },
+      "agent-reach:set": { id: "a", type: "agent-reach:set", enabled: true },
       "git:branches": { id: "a", type: "git:branches", projectId: "p", projectPath: "/x" },
       "git:remote-state": { id: "a", type: "git:remote-state", projectId: "p", projectPath: "/x", branch: "main" },
       "git:checkout": { id: "a", type: "git:checkout", projectId: "p", projectPath: "/x", branch: "main" },
       "netwatch:ui": { id: "a", type: "netwatch:ui" },
       "modelwatch:ui": { id: "a", type: "modelwatch:ui" },
       "checkout:path": { id: "a", type: "checkout:path", projectId: "p", checkoutId: "c" },
+      // Reads, but not viewer reads: the card and the directory name every
+      // project and session this machine holds, which is the inventory a viewer
+      // session exists to be narrowed away from.
+      "machine:capability-card": { id: "a", type: "machine:capability-card", projects: [] },
+      "session-bus:remote-directory": { id: "a", type: "session-bus:remote-directory", machines: [] },
     };
     // The two maps are exhaustive over the union by hand, which nothing but
     // this line keeps true: a verb added to the schema without a decision here

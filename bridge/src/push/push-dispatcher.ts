@@ -31,6 +31,13 @@ export interface PushDispatcherDeps {
    *  machine socket's identity, while the wizard-promotion path can only report
    *  the uuid the enabling `agent:enableRelay` carried (see relay-promotion.ts). */
   machineUuid: () => string;
+  /** True when the Handler is armed on that slot. One block must cost one push,
+   *  and an armed slot has two producers for the agent's question: the hook's
+   *  own `notification:push` and the forced escalation the same hook invocation
+   *  raises, which reaches here as `handler:escalation` carrying the same
+   *  sentence. Absent means unarmed, which keeps the notification — for an
+   *  unarmed session it is the only thing that ever says what was asked. */
+  isHandlerArmed?: (terminalId: string) => boolean;
   seal: (json: string, recipientPushPubkeyB64: string) => { epk: string; box: string };
   deliver: (token: string, provider: "fcm" | "apns", blob: { epk: string; box: string }) => void;
 }
@@ -45,6 +52,19 @@ export interface PushDispatcherDeps {
 export function createPushDispatcher(deps: PushDispatcherDeps) {
   return {
     onOutbound(msg: AbMessage): void {
+      // The escalation wins the pair, and it has to: it is the one carrying the
+      // escalationId the phone taps to answer. Decided here rather than at the
+      // producer because only the push layer can drop the SECOND delivery
+      // without also taking the notification's other readers with it — the
+      // session's own "needs you" dot is folded from this frame, and an attached
+      // app renders it in band.
+      if (msg.type === "notification:push"
+        && msg.notificationType === "question"
+        && msg.sessionId
+        && deps.isHandlerArmed?.(msg.sessionId)) {
+        log.debug("push: question notification not sent — the Handler is escalating it");
+        return;
+      }
       const composed = composePush(msg);
       if (!composed) return;
       // Past this point every return path drops a user-facing notification, and

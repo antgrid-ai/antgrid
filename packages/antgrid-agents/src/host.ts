@@ -13,6 +13,7 @@ export interface AgentHostServices {
   logger: AgentLogger;
   stateDirectory(): string;
   hookCommand(): HookCommand;
+  mcpCommand?(): HookCommand;
   killChildTree(child: { readonly pid?: number; kill(): unknown }): Promise<void>;
   stripInheritedCertOverrides(env: Record<string, string>): Record<string, string>;
 }

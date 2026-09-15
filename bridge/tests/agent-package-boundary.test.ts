@@ -22,7 +22,8 @@ test("agent package and bridge respect the public dependency boundary", () => {
           if (!adapter && spec.startsWith("antgrid-agents/") && !exports.has("./" + spec.slice("antgrid-agents/".length))) errors.push(`${file}: private export ${spec}`);
           if (!adapter && spec.startsWith(".") && resolve(dirname(path), spec).startsWith(packageRoot)) errors.push(`${file}: relative package import ${spec}`);
         }
-        if (!adapter && ts.isStringLiteral(node) && identities.has(node.text)) errors.push(`${file}: provider identity literal ${node.text}`);
+        // Type-only property keys (such as a terminal's cursor colour) do not dispatch providers.
+        if (!adapter && ts.isStringLiteral(node) && !ts.isLiteralTypeNode(node.parent) && identities.has(node.text)) errors.push(`${file}: provider identity literal ${node.text}`);
         ts.forEachChild(node, visit);
       };
       visit(source);

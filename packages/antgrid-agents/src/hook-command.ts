@@ -3,6 +3,8 @@ export interface HookCommand {
   preargs: string[];
 }
 
+export type BridgeCommand = HookCommand;
+
 export function hookArgv(
   command: HookCommand,
   agent: string,

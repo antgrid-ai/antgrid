@@ -1,5 +1,5 @@
-// The agent header's NEEDS YOU pill against the REAL shell rather than the
-// control alone: the tab it reveals belongs to WorkspaceShell, and so does the
+// The session kebab's attention row against the REAL shell rather than the
+// menu alone: the tab it reveals belongs to WorkspaceShell, and so does the
 // per-session UI restore that a focus change arms, so nothing short of the
 // shell can say whether the reveal survives the switch it makes.
 import 'package:antgrid/models/handler_state.dart';
@@ -132,9 +132,9 @@ Future<void> _giveSavedTab(WidgetTester tester, ProviderContainer c) async {
 }
 
 void main() {
-  // The restore is armed by the focus change the pill itself makes, and it
+  // The restore is armed by the focus change the row itself makes, and it
   // re-applies the target session's own saved tab a frame later — so a reveal
-  // that fires before it lands is silently undone, leaving the pill's one
+  // that fires before it lands is silently undone, leaving the menu's one
   // navigation looking like a dead tap.
   testWidgets('the tab it reveals survives the focus switch it makes', (
     tester,
@@ -143,11 +143,31 @@ void main() {
       await _giveSavedTab(tester, container);
       expect(_panelIndex(tester), isNot(WorkspaceView.handler.index));
 
-      await tester.tap(find.text('NEEDS YOU 1'));
+      await tester.tap(find.byTooltip('Session options'));
+      await _settle(tester);
+      await tester.tap(find.text('Answer another session'));
       await _settle(tester);
 
       expect(container.read(activeSessionIdProvider), 't2');
       expect(_panelIndex(tester), WorkspaceView.handler.index);
+    });
+  });
+
+  // The row lives behind a closed menu, so the dot on its trigger is the only
+  // thing that can say a session out of focus is waiting at all.
+  testWidgets('the kebab wears a dot only while a SIBLING waits', (
+    tester,
+  ) async {
+    await _withShell(tester, (container) async {
+      expect(find.byKey(const Key('session-attention-dot')), findsOneWidget);
+
+      container.read(activeSessionIdProvider.notifier).set('t2');
+      await _settle(tester);
+
+      // t2's own count belongs to the badge over its Handler tab now. A dot
+      // still pointing away from the session in focus would send the user
+      // looking for a second waiting session that does not exist.
+      expect(find.byKey(const Key('session-attention-dot')), findsNothing);
     });
   });
 }

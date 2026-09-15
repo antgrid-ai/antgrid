@@ -95,4 +95,54 @@ void main() {
       expect(viewing(sessionId: '', activeSessionId: ''), isFalse);
     });
   });
+
+  group('handlerAnnouncesAgentNotification', () {
+    bool announced({
+      String? notificationType = 'question',
+      String? sessionId = 's1',
+      bool handlerArmed = true,
+    }) => handlerAnnouncesAgentNotification(
+      notificationType: notificationType,
+      sessionId: sessionId,
+      handlerArmed: handlerArmed,
+    );
+
+    test('an armed slot answers its own question, so the agent copy drops', () {
+      // One hook invocation posts both the `question` notification and the
+      // handler event, and the escalation carries the same sentence plus the id
+      // that answers it. Two toasts for one block is what the bridge's push
+      // lane already refuses.
+      expect(announced(), isTrue);
+    });
+
+    test('an unarmed slot keeps its notification', () {
+      // Nothing escalates it, so suppressing here would lose the block
+      // entirely — the failure mode this predicate must never have.
+      expect(announced(handlerArmed: false), isFalse);
+    });
+
+    test("only a question is ever the Handler's to announce", () {
+      // A turn end, a permission prompt or an error is a different fact and is
+      // not paired with an escalation carrying the same words.
+      for (final type in const [
+        'permission_request',
+        'awaiting_input',
+        'task_complete',
+        'idle',
+        'error',
+        null,
+      ]) {
+        expect(
+          announced(notificationType: type),
+          isFalse,
+          reason: '$type is not the frame the escalation duplicates',
+        );
+      }
+    });
+
+    test('an unattributed question can never be matched to a slot', () {
+      expect(announced(sessionId: null), isFalse);
+      expect(announced(sessionId: ''), isFalse);
+    });
+  });
 }

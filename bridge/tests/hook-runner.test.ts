@@ -303,6 +303,225 @@ describe("Claude hooks", () => {
       },
     ]));
   });
+
+  test("a question tool call posts the question event and its own notification", async () => {
+    const h = harness({
+      agent: "claude",
+      event: "question",
+      stdin: JSON.stringify({
+        tool_name: "AskUserQuestion",
+        tool_use_id: "toolu_1",
+        tool_input: { questions: [{ question: "Which env?", options: [{ label: "prod" }] }] },
+        session_id: "s9",
+        transcript_path: "/t",
+      }),
+    });
+    await h.run();
+    expect(h.posts).toEqual(expect.arrayContaining([
+      {
+        port: 43123,
+        path: "/handler-event",
+        body: {
+          terminalId: "term-1", agent: "claude", event: "question",
+          detail: "Which env?", promptId: "toolu_1", promptTool: "AskUserQuestion",
+          transcriptPath: "/t", sessionId: "s9",
+        },
+      },
+      { port: 43123, path: "/notify", body: { type: "question", terminalId: "term-1", message: "Which env?" } },
+    ]));
+  });
+
+  test("a question payload with no question text still names the block from its header", async () => {
+    const h = harness({
+      agent: "claude",
+      event: "question",
+      stdin: JSON.stringify({
+        tool_use_id: "toolu_2",
+        tool_input: { questions: [{ header: "Deploy target" }] },
+      }),
+    });
+    await h.run();
+    expect(h.posts.map((p) => p.path)).toEqual(["/handler-event", "/notify"]);
+    expect(h.posts[0]!.body.detail).toBe("Deploy target");
+    expect(h.posts[1]!.body.message).toBe("Deploy target");
+  });
+
+  test("a question without a terminal id posts nothing", async () => {
+    // No slot, no supervision: an escalation nobody can route to a session is a
+    // stuck row, not a report.
+    const h = harness({
+      agent: "claude",
+      event: "question",
+      stdin: JSON.stringify({ tool_use_id: "toolu_3", tool_input: { questions: [{ question: "?" }] } }),
+      env: { ANTGRID_TERMINAL_ID: undefined },
+    });
+    await h.run();
+    expect(h.posts).toEqual([]);
+  });
+
+  test("the answered question posts its retraction and no notification", async () => {
+    const h = harness({
+      agent: "claude",
+      event: "question-answered",
+      stdin: JSON.stringify({
+        tool_name: "AskUserQuestion",
+        tool_use_id: "toolu_1",
+        tool_response: { answers: {} },
+        session_id: "s9",
+        transcript_path: "/t",
+      }),
+    });
+    await h.run();
+    expect(h.posts).toEqual([
+      {
+        port: 43123,
+        path: "/handler-event",
+        body: {
+          terminalId: "term-1", agent: "claude", event: "prompt_answered",
+          promptId: "toolu_1", transcriptPath: "/t", sessionId: "s9",
+        },
+      },
+    ]);
+  });
+
+  test("notification_type classifies the nudge and the block without reading the message", async () => {
+    // The verdict must no longer hang on the word "waiting": the CLI names what
+    // it is announcing, and the two shapes carry whatever text it likes.
+    const nudge = harness({
+      agent: "claude",
+      event: "notification",
+      stdin: JSON.stringify({ notification_type: "idle_prompt", message: "anything at all" }),
+    });
+    await nudge.run();
+    expect(nudge.posts).toEqual(expect.arrayContaining([
+      { port: 43123, path: "/notify", body: { type: "awaiting_input", terminalId: "term-1", message: "anything at all" } },
+      {
+        port: 43123,
+        path: "/handler-event",
+        body: {
+          terminalId: "term-1", agent: "claude", event: "awaiting_input",
+          transcriptPath: "", sessionId: "", idleNudge: true,
+        },
+      },
+    ]));
+
+    const block = harness({
+      agent: "claude",
+      event: "notification",
+      stdin: JSON.stringify({ notification_type: "permission_prompt", message: "anything at all" }),
+    });
+    await block.run();
+    expect(block.posts).toEqual(expect.arrayContaining([
+      { port: 43123, path: "/notify", body: { type: "permission_request", terminalId: "term-1", message: "anything at all" } },
+      {
+        port: 43123,
+        path: "/handler-event",
+        body: {
+          terminalId: "term-1", agent: "claude", event: "awaiting_input",
+          transcriptPath: "", sessionId: "", idleNudge: false,
+        },
+      },
+    ]));
+  });
+
+  test("a notification_type the CLI added falls back to the message", async () => {
+    // The fallback covers an installed CLI old enough to send no type at all
+    // (pinned by the two message-only cases above) AND a value added upstream,
+    // where guessing from the words is no worse than what shipped.
+    const h = harness({
+      agent: "claude",
+      event: "notification",
+      stdin: JSON.stringify({ notification_type: "agent_needs_input", message: "Claude is waiting for your input" }),
+    });
+    await h.run();
+    expect(h.posts).toEqual(expect.arrayContaining([
+      { port: 43123, path: "/notify", body: { type: "awaiting_input", terminalId: "term-1", message: "Claude is waiting for your input" } },
+    ]));
+  });
+
+  test("an interrupted question reports the same completion as an answered one", async () => {
+    // PostToolUseFailure fires INSTEAD of PostToolUse when the user escapes out
+    // of the dialog or denies the call, and Claude fires neither Stop nor
+    // StopFailure on an interrupt — so without this event the escalation stands
+    // with nothing able to retire it for the rest of the turn.
+    const h = harness({
+      agent: "claude",
+      event: "question-answered",
+      stdin: JSON.stringify({
+        tool_name: "AskUserQuestion",
+        tool_use_id: "toolu_9",
+        error: "The user doesn't want to take this action",
+        is_interrupt: true,
+      }),
+    });
+    await h.run();
+    expect(h.posts).toEqual([
+      {
+        port: 43123,
+        path: "/handler-event",
+        body: {
+          terminalId: "term-1", agent: "claude", event: "prompt_answered",
+          promptId: "toolu_9", transcriptPath: "", sessionId: "",
+        },
+      },
+    ]);
+  });
+
+  test("a tool call with no id of its own omits promptId rather than sending an empty one", async () => {
+    // "" and absent are different facts downstream: an id-less retraction means
+    // EVERY prompt on the session is gone, so a question minted with "" and a
+    // completion spelled undefined would take an unrelated row with it.
+    const asked = harness({
+      agent: "claude",
+      event: "question",
+      stdin: JSON.stringify({ tool_input: { questions: [{ question: "Which env?" }] } }),
+    });
+    await asked.run();
+    expect(asked.posts[0]!.body).not.toHaveProperty("promptId");
+
+    const answered = harness({ agent: "claude", event: "question-answered", stdin: "{}" });
+    await answered.run();
+    expect(answered.posts[0]!.body).not.toHaveProperty("promptId");
+  });
+
+  test("a permission notification carries the tool its sentence names", async () => {
+    // The only place the CLI says WHICH call it is blocked on — the Notification
+    // payload is {message, title, notification_type} and nothing else — and what
+    // keeps a parallel batch's Bash approval from being swallowed as a
+    // re-announcement of the question beside it.
+    const h = harness({
+      agent: "claude",
+      event: "notification",
+      stdin: JSON.stringify({
+        notification_type: "permission_prompt",
+        message: "Claude needs your permission to use Bash",
+      }),
+    });
+    await h.run();
+    const byPath = Object.fromEntries(h.posts.map((post) => [post.path, post.body]));
+    expect(byPath["/handler-event"]!.promptTool).toBe("Bash");
+    expect(byPath["/notify"]!.promptTool).toBe("Bash");
+  });
+
+  test("the idle nudge names no tool, and neither does a sentence that changed shape", async () => {
+    // Absent has to mean "cannot say which prompt this is about", which the host
+    // answers by forwarding: a wrong tool name would silence a real block.
+    const nudge = harness({
+      agent: "claude",
+      event: "notification",
+      stdin: JSON.stringify({ notification_type: "idle_prompt", message: "Claude is waiting for your input" }),
+    });
+    await nudge.run();
+    for (const post of nudge.posts) expect(post.body).not.toHaveProperty("promptTool");
+
+    const reworded = harness({
+      agent: "claude",
+      event: "notification",
+      stdin: JSON.stringify({ notification_type: "permission_prompt", message: "Approve this tool call?" }),
+    });
+    await reworded.run();
+    for (const post of reworded.posts) expect(post.body).not.toHaveProperty("promptTool");
+  });
 });
 
 describe("Codex hooks", () => {

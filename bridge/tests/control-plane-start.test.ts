@@ -32,7 +32,10 @@ function makeAuthenticatingRelayFactory() {
   return (_opts: RelayClientOptions): RelayClient =>
     ({
       deviceId: "control-plane-dev",
-      currentPeerPubkey: () => null,
+      hasEstablishedSession: () => false,
+      anySessionSupportsCheckoutRouting: () => false,
+      establishedPeers: () => [],
+      peerSession: () => null,
       setBus: () => {},
       connect: () => {},
       close: () => {},

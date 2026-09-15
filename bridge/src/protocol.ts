@@ -2,6 +2,24 @@ import * as agentPayloads from "antgrid-agents/payloads";
 import { z } from "zod";
 import { AbConfigSchema } from "./config";
 import { KNOWN_TIERS } from "./entitlement";
+import {
+  ARTIFACT_CHUNK_B64_MAX,
+  ARTIFACT_CHUNK_BYTES,
+  MAX_PARTS,
+  MAX_PART_CHARS,
+  MAX_SUMMARY_CHARS,
+  MAX_UNEXPECTED_CHARS,
+} from "./session-bus/constants";
+// The frame-display payload sub-schemas and their byte/row budgets live with the
+// implementation that has to honour them; only the eight wire ENVELOPES are
+// declared here (see the block below TerminalSnapshotMessage for why).
+import {
+  TERMINAL_HISTORY_PAGE_ROWS,
+  TERMINAL_PROTOCOL_VERSION,
+  TerminalHistoryBoundarySchema,
+  TerminalHistoryRowSchema,
+  TerminalScreenFrameSchema,
+} from "./terminal-frames/protocol";
 
 const BaseMessage = z.object({
   id: z.string().uuid(),
@@ -110,6 +128,13 @@ const TerminalNotificationMessage = BaseMessage.extend({
   ...CheckoutScoped,
 });
 
+const TerminalBellMessage = BaseMessage.extend({
+  type: z.literal("terminal:bell"),
+  terminalId: z.string(),
+  runId: z.string().uuid(),
+  ...CheckoutScoped,
+});
+
 const PingMessage = BaseMessage.extend({
   type: z.literal("ping"),
 });
@@ -139,9 +164,17 @@ const HandshakeAgentReadyMessage = BaseMessage.extend({
 const AppReadyMessage = BaseMessage.extend({
   type: z.literal("app:ready"),
   confirm: z.string(),
+  // Neither live reader parses `app:ready` through Zod — relay-client.ts and
+  // local-listener.ts both read the raw JSON — so this object is union typing
+  // and documentation, not the runtime gate. Adding a key here does not make
+  // the bridge honour it; the reads are hand-written on both transports.
   capabilities: z.object({
     checkoutRouting: z.literal(true).optional(),
     pullsTree: z.literal(true).optional(),
+    // The app can render `terminal:frame` display mode. Absent means it cannot,
+    // and the read of it MUST fail closed (unknown peer reads false) or an old
+    // app is switched into a mode it has no renderer for.
+    terminalFramesV1: z.literal(true).optional(),
   }).optional(),
 });
 
@@ -168,6 +201,7 @@ const TerminalResizeCommand = BaseMessage.extend({
   cols: z.number().int().positive(),
   rows: z.number().int().positive(),
   clientId: z.string(),
+  intent: z.enum(["resize", "takeover"]),
   baseDriverClientId: z.string().optional(),
   ...CheckoutScoped,
 });
@@ -178,8 +212,7 @@ const TerminalSizeMessage = BaseMessage.extend({
   cols: z.number().int().positive(),
   rows: z.number().int().positive(),
   // The clientId whose resize the PTY currently follows. A client renders
-  // natively when this equals its own id, else it renders this grid letterboxed
-  // or horizontally scrolled.
+  // with this grid; passive viewers center and scale it down when needed.
   driverClientId: z.string(),
   ...CheckoutScoped,
 });
@@ -992,7 +1025,7 @@ const CommandDoneMessage = BaseMessage.extend({
   ...CheckoutScoped,
 });
 
-export const NotificationTypeSchema = z.enum(["task_complete", "permission_request", "awaiting_input", "idle", "error"]);
+export const NotificationTypeSchema = z.enum(["task_complete", "permission_request", "awaiting_input", "question", "idle", "error"]);
 export type NotificationType = z.infer<typeof NotificationTypeSchema>;
 
 const NotificationPushMessage = BaseMessage.extend({
@@ -1082,16 +1115,24 @@ const BacklogWire = z.array(InstructionItemWire).refine(
 // stay in lockstep, or the hot path admits what the union rejects. Field-level
 // rules (BacklogWire) ride along through `.shape`; a whole-payload `.refine`
 // would have to be written on both.
-// How far Handler leans toward answering on the user's behalf: it moves where
-// the line between `handle` and `escalate` sits, and the tone of `notify`.
-// Nothing else — the evidence a transition must cite is the anti-inflation
-// guard, and a posture able to relax it would let a confident preset report
-// progress that never happened.
+
+// The judge's lens: what it LOOKS FOR and ASKS ABOUT, added on top of the rules.
+// A lens only adds questions — autonomy is derived from the rules, so no value
+// here moves where the line between handling and escalating sits, changes what a
+// transition must cite, or withholds a transition the evidence supports.
 //
-// A bounded preset, deliberately not a free-text guidance field: the value is
-// interpolated into the judge prompt, and a fixed set carries no injection.
-export const HandlerPersonalitySchema = z.enum(["watchdog", "closer", "autopilot"]);
-export type HandlerPersonality = z.infer<typeof HandlerPersonalitySchema>;
+// A bounded enum rather than free text because the value selects BRIDGE-AUTHORED
+// prompt text: nothing a sender types is interpolated by choosing one. The user's
+// own words travel separately as `brief`, fenced as user text.
+//
+// `brief` is therefore the ONE free-text field of this schema that reaches the
+// judge prompt, and it is defended in depth: the sanity cap below, a clip to the
+// prompt budget in the engine, a collapse to one line so it cannot forge a header,
+// a bullet naming it as the user's words, a standing sentence saying it authorises
+// nothing, and — mechanically, not by wording — no path from it to
+// authorizeInstruction (see the invariants on HandlerEngine.instruct).
+export const HandlerLensSchema = z.enum(["pm", "qa", "critic", "release"]);
+export type HandlerLens = z.infer<typeof HandlerLensSchema>;
 
 export const HandlerConfigureWire = z.object({
   terminalId: z.string(),
@@ -1108,11 +1149,30 @@ export const HandlerConfigureWire = z.object({
   // tool / CLI default model); absent = leave the stored choice untouched.
   judgeTool: z.string().optional(),
   judgeModel: z.string().optional(),
-  // Absent = leave the session's stored posture untouched, the same
-  // absent-keeps rule judgeTool follows. There is no "clear to default": every
-  // preset is a real choice, and the default is only what a session that has
-  // never been given one judges as.
-  personality: HandlerPersonalitySchema.optional(),
+  // The retired posture key, still shipped by an app that predates the lens.
+  // Declared as a plain unbounded string, and read only to say once that it
+  // selected nothing: agent-core re-parses this whole payload before arming, so
+  // a value refused here — an unrecognised preset, or a length — would drop the
+  // goal, the backlog, the judge picks and the arm itself. It aliases to the
+  // unnamed default and never to a lens; a posture was an autonomy dial, and
+  // autonomy is derived from the rules.
+  personality: z.string().optional(),
+  // The lens this session judges under. Absent = leave the stored lens
+  // untouched, the same absent-keeps rule judgeTool follows; "" = back to the
+  // unnamed default, which is the rules alone. An empty string rather than a
+  // JSON null because a sender that omits null-valued keys from its payload
+  // could not then say "clear" at all — only "keep".
+  role: z.union([HandlerLensSchema, z.literal("")]).optional(),
+  // The user's own words for what else to look for, added beneath the lens.
+  // Absent = keep, "" = clear.
+  //
+  // The bound is HandlerInstructWire.text's refuse-only-the-absurd one, NOT the
+  // prompt budget (MAX_BRIEF_CHARS, handler/decision.ts), which the engine applies
+  // by CLIPPING. agent-core re-parses the whole configure payload with this schema
+  // before arming, so a length refused here would drop the goal, the backlog, the
+  // judge picks and the arm itself — a user who tapped Arm Handler over a long
+  // sentence and walked away unwatched.
+  brief: z.string().max(10_000).optional(),
 });
 
 const HandlerConfigureMessage = BaseMessage.extend({
@@ -1134,12 +1194,68 @@ export const HandlerInstructWire = z.object({
   // Extraction truncates for prompt budget; the cap is here so an absurd payload
   // is refused at the wire instead of being carried that far.
   text: z.string().max(10_000),
+  // Present = this frame ANSWERS the standing ask with this id and is NOT a new
+  // instruction. Optional because the schema is a plain non-strict z.object and
+  // an older bridge strips it — which is only safe because the app never sends
+  // it to a session whose snapshot did not advertise the capability the frame
+  // relies on: `askAnswer` for an ask answered here alone, `escalationAnswer` for
+  // the `delivered` note below. When it IS present and names nothing, instruct
+  // fails CLOSED rather than falling through to today's path: an answer silently
+  // promoted to an authorizing, extracting instruction is exactly the laundering
+  // the ask shape exists to prevent.
+  escalationId: z.string().max(64).optional(),
+  // Present = the sender ALREADY typed this text into the session, and this frame
+  // is a note so the judge learns its question was answered. Absent = the words
+  // reached nobody but this bridge, which is what an ask's answer is.
+  //
+  // A property of the CHANNEL, never derived from the row it names: reconcileAsks
+  // clears `nonBlocking` on any agent event while the app holds a cached row, so a
+  // row-derived reading would tell the judge an ask's answer had reached the agent
+  // when it reached nobody — and then forbid it from ever asking again.
+  delivered: z.literal(true).optional(),
+  // Which one-tap option on that row the user pressed. Only meaningful beside
+  // `delivered`, and it names the option rather than carrying its words: those are
+  // resolved from THIS bridge's own persisted row, exactly the way handler:answer
+  // resolves an ask's option, so what is banked is the string the card actually
+  // offered and never a string the frame supplied. `text` still carries what the
+  // app put into the session — the frame stays self-describing — but on a tapped
+  // note it is not what is banked.
+  //
+  // Absent = the sender typed the answer, which is what every frame written before
+  // this field means. Present without `delivered`, instruct fails CLOSED rather
+  // than guessing: the cross-field rule lives there and not in a `.refine()` here,
+  // because whole-payload rules on this schema put a form in front of one line
+  // typed on a phone (see the header above).
+  choiceId: z.string().min(1).max(40).optional(),
 });
 
 const HandlerInstructMessage = BaseMessage.extend({
   type: z.literal("handler:instruct"),
   projectId: z.string(),
 }).extend(HandlerInstructWire.shape);
+
+// One tap on an ask's option. `escalationId` is REQUIRED and `choiceId` is
+// REQUIRED: a dedicated verb whose id resolution fails CLOSED is what keeps a
+// cross-language field-name typo, and a row retired between the render and the
+// tap, from degrading into an authorizing handler:instruct. No `text` field, ever
+// — the option's words are judge-authored, so they are resolved bridge-side from
+// the persisted row and never travel back through the one channel that mints
+// lifts (see quickChoicesFor in handler/engine.ts).
+//
+// Payload-only schema for the same reason as HandlerInstructWire: parseMessageFast
+// admits it on the discriminator alone, so agent-core re-parses with this before
+// the engine retires a row, and the envelope below rides on `.shape` so the two
+// cannot drift apart.
+export const HandlerAnswerWire = z.object({
+  terminalId: z.string(),
+  escalationId: z.string().max(64),
+  choiceId: z.string().min(1).max(40),
+});
+
+const HandlerAnswerMessage = BaseMessage.extend({
+  type: z.literal("handler:answer"),
+  projectId: z.string(),
+}).extend(HandlerAnswerWire.shape);
 
 // One tap-to-answer option on a quick-choice escalation. `text` is sent as
 // the USER's own reply through the ordinary reply transport, so it must be
@@ -1158,8 +1274,15 @@ const HandlerInstructMessage = BaseMessage.extend({
 // here rather than on the enclosing object.
 const EscalationChoiceWire = z.object({
   choiceId: z.string().min(1).max(40),
-  label: z.string().min(1).max(40),
+  // Non-empty refined on top of `.min(1)`: a whitespace-only label is truthy but
+  // draws a blank button on the card that stops the session.
+  label: z.string().min(1).max(40).regex(/^[^\x00-\x1f\x7f]+$/).refine((t) => t.trim().length > 0),
   text: z.string().min(1).max(400).regex(/^[^\x00-\x1f\x7f]+$/).refine((t) => t.trim().length > 0),
+  // What taking this chip commits to, one clause, shown under the button. New and
+  // optional, so no bound any row already on disk was written under moves and an app
+  // that predates it renders exactly what it renders today.
+  cost: z.string().min(1).max(160).regex(/^[^\x00-\x1f\x7f]+$/)
+    .refine((t) => t.trim().length > 0).optional(),
 });
 
 const uniqueChoiceIds = (cs: { choiceId: string }[]): boolean =>
@@ -1202,6 +1325,50 @@ const OpenEscalationWire = z.object({
   choices: z.array(EscalationChoiceWire).min(2).max(3)
     .refine(uniqueChoiceIds, "choiceId must be unique").optional(),
   at: z.number(),
+  // The session did NOT stop for this one: it was raised on a pass that had
+  // already replied to the agent, so the work went on and the user answers when
+  // they can. Absent means what every row before this field meant — the session
+  // stopped and is waiting.
+  //
+  // Spelled `nonBlocking` and not `blocking` on purpose: the naive truthiness
+  // test (`if (e.nonBlocking)`) is then the SAFE reading on a row that predates
+  // the field AND on one an older bridge stripped it from and re-persisted.
+  // `blocking?: boolean` inverts that, and the failure is one character wide,
+  // silent, and repeated at every reader in two languages.
+  //
+  // An app may only act on this when the session's own snapshot also advertised
+  // `askAnswer`: a bridge can read this field off a record a newer bridge wrote
+  // and re-emit it faithfully while having no verb that answers one, so the row
+  // cannot be its own capability signal.
+  nonBlocking: z.boolean().optional(),
+  // Backlog ids the answer does not gate. The app re-derives the count from its
+  // own copy of the backlog rather than trusting a number, so a stale id costs a
+  // smaller count and never a wrong claim.
+  unblocked: z.array(z.string().max(64)).max(10).optional(),
+  // The tap-to-answer options on an ASK. A separate field from `choices` and
+  // never a second producer into it: a `choices` entry carries `text` that the
+  // ordinary reply transport types into the PTY, and an ask must send the agent
+  // nothing. There is deliberately no `text` here — `label` IS the whole payload,
+  // resolved bridge-side from the persisted row, so what the user reads on the
+  // button is exactly what the judge is told they chose. See quickChoicesFor's
+  // comment in handler/engine.ts for the authorization argument this shape rests
+  // on.
+  //
+  // `label` is bounded at 80 rather than the 40 EscalationChoiceWire allows
+  // because there a label only names a reply that travels separately, while here
+  // it has to carry the whole answer as a sentence.
+  //
+  // The uniqueness refinement rides the ARRAY for the reason `choices`' does:
+  // `.shape` below carries it into HandlerEscalationMessage, and a repeated
+  // choiceId resolves a tap to an option the user did not read.
+  askOptions: z.array(z.object({
+    choiceId: z.string().min(1).max(40),
+    label: z.string().min(1).max(80),
+    cost: z.string().min(1).max(160),
+    // z.literal(true), not z.boolean(): absent and `false` must mean one thing,
+    // and a literal makes the second spelling unsayable.
+    recommended: z.literal(true).optional(),
+  })).min(2).max(4).refine(uniqueChoiceIds, "choiceId must be unique").optional(),
 });
 
 // One snapshot, as the app sees it. Shared by the one-shot advert and the
@@ -1319,12 +1486,23 @@ const HandlerSessionSnapshot = z.object({
   state: z.enum(["watching", "handling", "needs_you", "parked"]),
   pendingEscalations: z.number().int().nonnegative(),
   armedAt: z.number(),
+  // Mirrors instructions[0], so it moves if the store ever trims past
+  // MAX_INSTRUCTIONS (session-store.ts) — a live drift, documented rather than
+  // fixed here.
   goal: z.string(),
   backlog: BacklogWire,
   escalations: z.array(OpenEscalationWire),
-  // Why the session is parked and when it wakes (epoch ms), for the countdown
-  // chip. Present only while state is "parked".
+  // The BACKOFF POLICY the engine picked — how long to wait and on what curve —
+  // never a reason; `parkCause` below carries that. With `parkedUntil` (epoch ms)
+  // it drives the countdown chip. Present only while state is "parked".
   parkKind: z.enum(["limit", "outage"]).optional(),
+  // Who the pause is ATTRIBUTABLE to, which `parkKind` cannot say: that field is
+  // the backoff policy, and the two diverge on the case that named this one — a
+  // judge call of ours timing out parks as `outage` and read on the bar as the
+  // AGENT's provider being down. Optional because a park predating it, on disk or
+  // from an older bridge, is honestly unattributed; an app with no cause falls
+  // back to the policy's own copy.
+  parkCause: z.enum(["agent_limit", "agent_failure", "judge_failure"]).optional(),
   parkedUntil: z.number().optional(),
   // Per-session judge choice (absent = session default tool / CLI default model).
   judgeTool: z.string().optional(),
@@ -1335,11 +1513,62 @@ const HandlerSessionSnapshot = z.object({
   // the snapshot, and every key it reads keeps its position.
   observability: z.enum(["full", "escalate_only", "unsupported"]).optional(),
   availability: HandlerAvailabilitySchema.optional(),
-  // The posture this session actually judges under, resolved by the bridge and
-  // so always present on a status frame — an app reading it never has to know
-  // what an absent value would have meant. Optional and appended LAST for the
-  // same reason `observability` is: an older app still parses the snapshot.
-  personality: HandlerPersonalitySchema.optional(),
+  // Presence IS the capability signal, the way `observability`'s is and unlike
+  // `wrapUps`, where absent and empty mean the same thing: this bridge accepts
+  // handler:answer and an escalationId-bearing handler:instruct for this
+  // session's asks. ABSENT means an app must treat every `nonBlocking` row as an
+  // ordinary blocking escalation, because it has no way to answer one that would
+  // not land in the PTY. This exists because the ask ROW cannot advertise
+  // itself: a bridge that can READ the record field but not answer it (a Store
+  // rollback onto a record a newer bridge wrote) re-emits `nonBlocking`
+  // faithfully.
+  askAnswer: z.literal(true).optional(),
+  // An answer is parked and has not been relayed to the agent yet. State, not
+  // capability — a bridge with nothing parked simply omits it.
+  askAnswerPending: z.boolean().optional(),
+  // The lens this session judges under, and the user's brief beneath it. Both
+  // optional and appended LAST for the reason `observability` is: an older app
+  // still parses the snapshot and every key it already reads keeps its position.
+  //
+  // STATE, not a capability signal, unlike `askAnswer`: an absent `role` is the
+  // unnamed default rather than a bridge that cannot do lenses, and `brief` is
+  // present only when non-empty. What this bridge ACCEPTS rides the status frame's
+  // top-level `lenses` instead.
+  role: HandlerLensSchema.optional(),
+  brief: z.string().optional(),
+  // A window onto the full instruction list the store keeps (session-store.ts),
+  // not the list itself: `goal` above is the only other string this snapshot
+  // spends on it, and the app has nowhere durable to put more than a few — this
+  // is a REPLAY_TYPE and handler:activity, where a stacked sentence would
+  // otherwise show up, is not. Entry #1 stays pinned rather than dropped even
+  // when it falls out of the newest four: it is what names the session on the
+  // card headline, the wrap-up card, and the wrap-up push (see firstInstruction,
+  // engine.ts), and a window that could drop it would open a fresh divergence
+  // from those surfaces one tap wide. `total - items.length` is exactly what got
+  // elided BETWEEN position 0 and position 1 — always, since nothing between
+  // position 1 and the end is ever missing — which is what makes a
+  // non-contiguous window legible without a second count that could disagree
+  // with it. `total` is the RETAINED count — the entries `items` was windowed
+  // out of, so the two can never disagree — not a lifetime one: pushInstruction
+  // splices the oldest away past MAX_INSTRUCTIONS and nothing counts what it
+  // has already dropped. Optional
+  // and appended LAST for the reason `observability` is: an older app still
+  // parses the snapshot and every key it already reads keeps its position. A
+  // bridge that HAS this field always sends it, including `{ total: 0, items:
+  // [] }` for an armed session nobody has instructed — absence means "this
+  // bridge predates the list", never "no instructions".
+  instructions: z.object({
+    total: z.number().int().nonnegative(),
+    items: z.array(z.string().max(120)).max(5),
+  }).optional(),
+  // Presence IS the capability signal, the way `askAnswer`'s is: this bridge reads
+  // a `delivered` note on handler:instruct that names a BLOCKING row and banks the
+  // sentence for the judge instead of authorizing and extracting it as a new
+  // instruction. An app that sends the note to a bridge without this gets the old
+  // behaviour on the wrong verb — a session-long grant nobody read, plus a backlog
+  // item no terminal status can resolve — which is why the app must never send it
+  // uninvited. Absent means: send the reply and nothing else.
+  escalationAnswer: z.literal(true).optional(),
 });
 
 // Why this machine will not run the Handler, in the words the app has to answer
@@ -1371,6 +1600,14 @@ const HandlerStatusMessage = BaseMessage.extend({
   // project agent tool) — chat slots resolve from their own SessionEntry.tool
   // app-side. Judge overrides themselves are per-session (see snapshot).
   defaultTool: z.string().optional(),
+  // The lens ids this bridge accepts. PRESENCE is the capability advert, the way a
+  // snapshot's `observability` is; the contents say which ids, so a newer app can
+  // offer the intersection and never send one this bridge would refuse.
+  //
+  // Top-level rather than per session because `sessions` holds ARMED sessions only,
+  // and the surface that needs this most is the arm sheet — a slot with no snapshot
+  // to read.
+  lenses: z.array(HandlerLensSchema).optional(),
   sessions: z.array(HandlerSessionSnapshot),
   // Every snapshot this project still knows about, replayed for the same reason
   // escalations are: an app that restarted between the advert and the tap would
@@ -1419,6 +1656,7 @@ const HandlerActivityMessage = BaseMessage.extend({
     "instruction_dropped", "instruction_authorized", "instruction_amended",
     "floor_warning", "evidence_rejected",
     "wrapped_up", "parked", "resumed",
+    "asked", "ask_rejected", "answered",
   ]),
   reason: z.string(),
   detail: z.string().optional(),
@@ -1569,6 +1807,60 @@ const ConfigDetectToolsResultMessage = BaseMessage.extend({
     path: z.string().optional(),
   })),
   ...CheckoutScoped,
+});
+
+// Identity of one session on one machine, and the address every bus frame
+// carries. `machineId` is the account device uuid — the value the app already
+// addresses a machine by. Opaque to both bridges: neither derives it, the app
+// supplies both halves, because neither bridge can dial the other.
+export const SessionMemberKeySchema = z.object({
+  machineId: z.string().min(1).max(200),
+  projectId: z.string().min(1).max(200),
+  sessionId: z.string().min(1).max(200),
+});
+
+// The Capability Card as it travels on an address (spec 5.3): the two MVP
+// fields, both observed by that machine's own bridge before any agent ran
+// there. Mirrors `OsCard`/`RepoCard` in capability-card.ts, which is where the
+// values are actually read — a second shape would be two things to keep true.
+//
+// Every field is optional and tolerates an explicit null, top to bottom,
+// because the reader that fills it already produces nulls (`readRepoCard`) and
+// because a machine that could not answer must still be able to appear in the
+// directory: withholding a row over a blank branch would cost the human the
+// machine rather than the field. Bounded like every other label here — the
+// values are rendered into an agent's prompt.
+export const SessionMemberCardSchema = z.object({
+  os: z.object({
+    name: z.string().max(60).nullish(),
+    version: z.string().max(200).nullish(),
+    arch: z.string().max(30).nullish(),
+  }).nullish(),
+  repo: z.object({
+    label: z.string().max(120).nullish(),
+    // The normalized `host[:port]/path` match key, never the raw remote URL: a
+    // raw one can carry a credential in its authority, and this value is
+    // rendered into a delivery and into a tool answer.
+    remote: z.string().max(300).nullish(),
+    branch: z.string().max(250).nullish(),
+  }).nullish(),
+});
+
+// Identity plus the labels a row renders from, so the other end of an exchange
+// resolves with no lookup on a machine that cannot reach the one it names.
+// Bounded because they ride every frame that names that end AND are
+// interpolated into a Handler instruction, where the delivery template
+// sanitizes them further.
+//
+// The card is the exception to that second half: hostnames and a repo path are
+// exactly what the Handler's authorizer reads as a grant, so no template may put
+// it in a WRAPPER. It travels as fenced data or as a tool answer, and never
+// through `HandlerEngine.instruct` (see session-bus/delivery.ts).
+export const SessionMemberRefSchema = SessionMemberKeySchema.extend({
+  machineLabel: z.string().max(120).optional(),
+  projectLabel: z.string().max(120).optional(),
+  sessionName: z.string().max(120).optional(),
+  card: SessionMemberCardSchema.optional(),
 });
 
 const SessionEntrySchema = z.object({
@@ -1824,6 +2116,117 @@ const TerminalSnapshotMessage = BaseMessage.extend({
   ...CheckoutScoped,
 });
 
+// The frame display protocol (advertised as `terminalFramesV1`). These eight
+// envelopes are declared HERE, as literal source text, rather than imported from
+// terminal-frames/protocol.ts: checkout-protocol-contract.test.ts scrapes this
+// file for `BaseMessage.extend({ ... ...CheckoutScoped ... })` blocks and
+// asserts that set equals CHECKOUT_VARIABLE_MESSAGE_TYPES, and an import is
+// invisible to a textual scraper. The payload sub-schemas and every byte/row
+// budget stay in terminal-frames/protocol.ts, which owns them.
+//
+// All eight name a terminal INSIDE a checkout: PTY slots are namespaced
+// `<checkoutId>:<terminalId>`, so two isolated checkouts legitimately hold
+// same-named terminals. Hence `...CheckoutScoped` on every one, and hence all
+// eight in CHECKOUT_VARIABLE_MESSAGE_TYPES.
+//
+// `sequence`, `revision`, `epoch`, `rowId` and `beforeRowId` are deliberately
+// NOT bounded by the viewer/history budgets. Those budgets bound what may be in
+// flight (TERMINAL_VIEWER_MAX_FRAMES) or how large one payload may be
+// (TERMINAL_VIEWER_MAX_BYTES and TERMINAL_HISTORY_PAGE_ROWS, both enforced by
+// the imported sub-schemas); the counters are monotonic for the life of an
+// attachment or a run, so clamping them to a budget would reject a long-lived
+// terminal's legitimate frames.
+
+const TerminalSubscribeMessage = BaseMessage.extend({
+  type: z.literal("terminal:subscribe"),
+  terminalId: z.string(),
+  // The highest frame protocol version the app can render. Deliberately a plain
+  // int and not a literal: a version this bridge cannot serve is answered with
+  // `terminal:display:status` UPGRADE_REQUIRED, which is only reachable if the
+  // frame parses at all.
+  version: z.number().int().nonnegative(),
+  requestId: z.string().uuid(),
+  ...CheckoutScoped,
+});
+
+const TerminalSubscribedMessage = BaseMessage.extend({
+  type: z.literal("terminal:subscribed"),
+  terminalId: z.string(),
+  runId: z.string().uuid(),
+  attachmentId: z.string().uuid(),
+  version: z.literal(TERMINAL_PROTOCOL_VERSION),
+  requestId: z.string().uuid(),
+  ...CheckoutScoped,
+});
+
+const TerminalFrameMessage = BaseMessage.extend({
+  type: z.literal("terminal:frame"),
+  terminalId: z.string(),
+  runId: z.string().uuid(),
+  attachmentId: z.string().uuid(),
+  sequence: z.number().int().nonnegative(),
+  ...TerminalScreenFrameSchema.shape,
+  ...CheckoutScoped,
+});
+
+const TerminalAckMessage = BaseMessage.extend({
+  type: z.literal("terminal:ack"),
+  terminalId: z.string(),
+  runId: z.string().uuid(),
+  attachmentId: z.string().uuid(),
+  sequence: z.number().int().nonnegative(),
+  ...CheckoutScoped,
+});
+
+const TerminalUnsubscribeMessage = BaseMessage.extend({
+  type: z.literal("terminal:unsubscribe"),
+  terminalId: z.string(),
+  runId: z.string().uuid(),
+  attachmentId: z.string().uuid(),
+  ...CheckoutScoped,
+});
+
+const TerminalHistoryRequestMessage = BaseMessage.extend({
+  type: z.literal("terminal:history:request"),
+  terminalId: z.string(),
+  runId: z.string().uuid(),
+  attachmentId: z.string().uuid(),
+  requestId: z.string().uuid(),
+  epoch: z.number().int().nonnegative(),
+  beforeRowId: z.number().int().nonnegative(),
+  ...CheckoutScoped,
+});
+
+const TerminalHistoryPageMessage = BaseMessage.extend({
+  type: z.literal("terminal:history:page"),
+  terminalId: z.string(),
+  runId: z.string().uuid(),
+  attachmentId: z.string().uuid(),
+  requestId: z.string().uuid(),
+  history: TerminalHistoryBoundarySchema,
+  expired: z.boolean(),
+  beforeRowId: z.number().int().nonnegative(),
+  rows: z.array(TerminalHistoryRowSchema).max(TERMINAL_HISTORY_PAGE_ROWS),
+  ...CheckoutScoped,
+});
+
+const TerminalDisplayStatusMessage = BaseMessage.extend({
+  type: z.literal("terminal:display:status"),
+  terminalId: z.string(),
+  // Optional, and it must stay optional: UPGRADE_REQUIRED answers a subscribe
+  // that never produced an attachment, so there is no run or attachment to
+  // name. Requiring either would leave the one failure an old app can trigger
+  // unreportable.
+  runId: z.string().uuid().optional(),
+  attachmentId: z.string().uuid().optional(),
+  requestId: z.string().uuid().optional(),
+  code: z.enum(["UPGRADE_REQUIRED", "UNKNOWN_TERMINAL", "DISPLAY_FAILED", "ACK_TIMEOUT", "HISTORY_DISABLED", "ENDED"]),
+  message: z.string().max(1024),
+  finalSequence: z.number().int().nonnegative().optional(),
+  exitCode: z.number().int().nullable().optional(),
+  ...CheckoutScoped,
+});
+
 const FileTreeSnapshotRequestMessage = BaseMessage.extend({
   type: z.literal("file:tree:snapshot:request"),
   /** The revision the caller's tree is already at. Matched against the
@@ -1897,6 +2300,327 @@ const ResponseMessage = BaseMessage.extend({
 // Item taxonomy is nested inside item-added/item-updated so new item kinds
 // never require touching KNOWN_TYPES. AgentItem uses z.string() for `kind` so
 // the bridge can forward unknown kinds without a schema change.
+// ---------------------------------------------------------------------------
+// Session bus (`docs/session-messaging.md`) — the agent-to-agent frames.
+//
+// The envelope lives HERE rather than in bridge/src/session-bus/, which is
+// where the rest of the bus lives: it is a wire schema, the stores under
+// session-bus/ import `SessionMemberRefSchema` from this file, and a schema
+// module importing back would put this file's top-level `z.object` calls
+// behind a TDZ binding. Those modules re-export these names so a bus caller
+// still has one import site.
+// ---------------------------------------------------------------------------
+
+/** One unit of content. `artifact` carries the HANDLE only — spec 6.3's
+ *  reference-over-value: the bytes stay on the machine that made them and are
+ *  pulled with `session-bus:fetch` when the other side decides it wants them. */
+export const BusPartSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("text"), text: z.string().max(MAX_PART_CHARS) }),
+  z.object({ kind: z.literal("data"), data: z.record(z.string(), z.unknown()) }),
+  z.object({
+    kind: z.literal("artifact"),
+    artifactId: z.string().min(1).max(200),
+    name: z.string().min(1).max(200),
+    mediaType: z.string().min(1).max(120),
+    bytes: z.number().int().nonnegative(),
+    sha256: z.string().length(64),
+    summary: z.string().min(1).max(MAX_SUMMARY_CHARS),
+  }),
+]);
+export type BusPart = z.infer<typeof BusPartSchema>;
+
+export const BusEnvelopeSchema = z.object({
+  messageId: z.string().min(1).max(200),
+  /** The thread this belongs to, or null to open a new one. A correlation id
+   *  with no state machine (spec 4.2): it is carried and never validated, and
+   *  a thread is simply garbage once both sides stop writing to it. */
+  threadId: z.string().min(1).max(200).nullable(),
+  contextId: z.string().min(1).max(200),
+  parts: z.array(BusPartSchema).min(1).max(MAX_PARTS),
+  metadata: z.object({
+    /** Stamped from the connection by the receiving bridge, never a tool
+     *  parameter: an agent must not be able to author its own provenance. */
+    peer: SessionMemberRefSchema,
+    /** The one agent-authored envelope field (spec 3.4). MANDATORY, and never
+     *  defaulted — it is what the human and the other agent read first, so
+     *  inventing one would hide the omission instead of reporting it. */
+    summary: z.string().min(1).max(MAX_SUMMARY_CHARS),
+    timestamp: z.number().int().nonnegative(),
+    /** Spec 6.2's first-class channel for "here is what you asked for, and
+     *  separately, here is something you did not ask about". First-class so it
+     *  is not a smuggled instruction inside a text part. */
+    unexpected: z.string().max(MAX_UNEXPECTED_CHARS).optional(),
+  }),
+});
+export type BusEnvelope = z.infer<typeof BusEnvelopeSchema>;
+
+/** Both endpoints on every frame. Nothing shorter is an address: a machine holds
+ *  several projects and a project several sessions, and the carrier picks the
+ *  relay session to forward on out of `to`. */
+const SessionBusBaseWire = {
+  from: SessionMemberKeySchema,
+  to: SessionMemberKeySchema,
+  contextId: z.string().min(1).max(200),
+};
+
+/** The body both verbs carry, since spec 6.2 makes everything after the send
+ *  decision identical for the two. No `seq`: spec 6 makes messages lossy on
+ *  purpose, and reliable delivery behind text that changes no state would be
+ *  unbounded retry buying nothing. The E6 receipt witnesses arrival without
+ *  making it reliable — it is never retried either. */
+export const SessionBusMessageWire = z.object({
+  ...SessionBusBaseWire,
+  threadId: z.string().min(1).max(200).nullable(),
+  envelope: BusEnvelopeSchema,
+});
+
+export const SessionBusFetchWire = z.object({
+  ...SessionBusBaseWire,
+  requestId: z.string().min(1).max(200),
+  artifactId: z.string().min(1).max(200),
+  offset: z.number().int().nonnegative(),
+  length: z.number().int().positive().max(ARTIFACT_CHUNK_BYTES),
+});
+
+export const SessionBusFetchResultWire = z.object({
+  ...SessionBusBaseWire,
+  requestId: z.string().min(1).max(200),
+  ok: z.boolean(),
+  error: z.string().max(500).optional(),
+  errorCode: z.string().max(80).optional(),
+  artifactId: z.string().min(1).max(200),
+  offset: z.number().int().nonnegative(),
+  eof: z.boolean(),
+  dataBase64: z.string().max(ARTIFACT_CHUNK_B64_MAX),
+});
+
+/** The delivery receipt (E6), keyed by the id of the message it answers — the
+ *  only honest witness that a frame arrived, since everything this side of the
+ *  relay reports only that it left. It is fire-and-forget: an unacked ack is
+ *  never retried, and `ok: false` is still a receipt — "this reached me", not
+ *  "I liked it". No `seq`, because messages have none. */
+export const SessionBusAckWire = z.object({
+  ...SessionBusBaseWire,
+  messageId: z.string().min(1).max(200),
+  ok: z.boolean(),
+  error: z.string().max(500).optional(),
+});
+
+/** Two verbs rather than one verb and a flag (spec 7.1), and the shape is
+ *  identical because everything after the send decision is: a bridge that does
+ *  not know a verb REFUSES it, where a bridge that does not know a flag would
+ *  silently do the wrong thing — and a required Zod field is only fail-closed
+ *  in the old→new direction, which is the wrong one. */
+const SessionBusPostMessage = BaseMessage.extend({
+  type: z.literal("session-bus:post"),
+}).extend(SessionBusMessageWire.shape);
+
+const SessionBusNotifyMessage = BaseMessage.extend({
+  type: z.literal("session-bus:notify"),
+}).extend(SessionBusMessageWire.shape);
+
+const SessionBusFetchMessage = BaseMessage.extend({
+  type: z.literal("session-bus:fetch"),
+}).extend(SessionBusFetchWire.shape);
+
+const SessionBusFetchResultMessage = BaseMessage.extend({
+  type: z.literal("session-bus:fetch:result"),
+}).extend(SessionBusFetchResultWire.shape);
+
+const SessionBusAckMessage = BaseMessage.extend({
+  type: z.literal("session-bus:ack"),
+}).extend(SessionBusAckWire.shape);
+
+
+// ── Session bus: what the APP reads of its OWN bridge ────────────────────────
+// The five frames above are agent-to-agent traffic the app only CARRIES between
+// two bridges that cannot dial each other. These are the opposite: an app
+// asking the bridge it is attached to about its own sessions, and consuming the
+// answer. Same plane all the same — `SessionBusApi` is built inside the project
+// core with the machine-level directory injected into it, so machine-scoped
+// STATE never implied machine-scoped transport (`docs/session-messaging.md`
+// §5.4: "The transport did not move with it").
+//
+// Every one is answered from that single api rather than re-derived here. A
+// human surface and an agent tool that each computed who is reachable would
+// eventually disagree, and nothing would say which of the two was right.
+
+/** The bus's one refusal vocabulary (`session-bus/errors.ts`) as it rides a
+ *  result frame. `code` is a bare string rather than an enum over that map's
+ *  keys: a reader branches on the code and renders the `error` text authored at
+ *  the point of refusal, and one that dropped a whole frame over a code it had
+ *  not learned yet would turn a NEW refusal into silence.
+ *
+ *  Present exactly when the answer fields are absent. Collapsing a refusal into
+ *  an empty answer instead would render "this terminal names no session" as
+ *  "nobody has written to you", which is the one wrong thing an inbox can say. */
+const SessionBusRefusalWire = {
+  error: z.string().max(500).optional(),
+  code: z.string().max(80).optional(),
+};
+
+/** One directory row (§5.5). Mirrors `SessionDirectoryRow`
+ *  (`session-bus/directory.ts`) field for field rather than importing it, the
+ *  same one-way edge that module already keeps against the remote mirror's row:
+ *  the wire vocabulary lives here and the bus's internals must be free to gain
+ *  a field this does not carry. */
+const SessionBusDirectoryRowSchema = z.object({
+  /** Null in local mode, where no frame can leave the machine to need one. */
+  machineId: z.string().max(200).nullable(),
+  machineLabel: z.string().max(120).optional(),
+  projectId: z.string().max(200),
+  projectLabel: z.string().max(120).optional(),
+  sessionId: z.string().max(200),
+  title: z.string().max(200),
+  branch: z.string().max(250).nullable(),
+  activity: z.enum(["running", "idle", "stopped"]),
+  workStatus: WorkStatusSchema.optional(),
+  lastActiveAt: z.number(),
+  /** Whether that session's agent can be messaged back at all (§9). A
+   *  receive-only vendor is offered saying so, never as a peer that will
+   *  silently never answer. */
+  canReply: z.boolean(),
+});
+
+/** One machine in the reach report. It rides beside the rows and never in them:
+ *  a peer whose rows have all expired contributes nothing to the list and must
+ *  still be NAMED, or "that machine is not reachable from here" renders as
+ *  "that machine has nothing running". */
+const SessionBusReachMachineSchema = z.object({
+  machineId: z.string().max(200),
+  machineLabel: z.string().max(120).optional(),
+  status: z.enum(["answered", "no-card", "refused", "reach-refused", "unreachable"]),
+  rows: z.number(),
+  droppedRows: z.number(),
+  truncatedCard: z.number(),
+  ageMs: z.number(),
+});
+
+/** `DirectoryReach` (`session-bus/directory.ts`): either this answer never left
+ *  the machine, and why, or it spans the network and says what each peer
+ *  contributed. */
+const SessionBusDirectoryReachSchema = z.discriminatedUnion("scope", [
+  z.object({
+    scope: z.literal("machine"),
+    why: z.enum(["remote-access-off", "no-machine-id", "no-carrier"]),
+  }),
+  z.object({
+    scope: z.literal("network"),
+    lastPushAgoMs: z.number(),
+    machines: z.array(SessionBusReachMachineSchema),
+    staleMachines: z.number(),
+    notConnected: z.number(),
+  }),
+]);
+
+const SessionBusInboxArtifactSchema = z.object({
+  artifactId: z.string().max(200),
+  name: z.string().max(200),
+  mediaType: z.string().max(120),
+  bytes: z.number(),
+  sha256: z.string().max(64),
+  summary: z.string().max(MAX_SUMMARY_CHARS),
+});
+
+/** One unread post, rendered whole so a reader needs no second call per row. */
+const SessionBusInboxPostSchema = z.object({
+  messageId: z.string().max(200),
+  threadId: z.string().max(200).nullable(),
+  contextId: z.string().max(200),
+  at: z.number(),
+  from: SessionMemberKeySchema,
+  summary: z.string().max(MAX_SUMMARY_CHARS),
+  text: z.array(z.string()),
+  unexpected: z.string().max(MAX_UNEXPECTED_CHARS).optional(),
+  artifacts: z.array(SessionBusInboxArtifactSchema),
+});
+
+const SessionBusThreadEntrySchema = z.object({
+  direction: z.enum(["in", "out"]),
+  at: z.number(),
+  peer: SessionMemberKeySchema,
+  summary: z.string().max(MAX_SUMMARY_CHARS),
+  text: z.array(z.string()),
+  /** Outbound entries only, and its absence is "no receipt yet" rather than a
+   *  failure: a receipt is fire-and-forget and an unacked message is never
+   *  retried. This read is the only surface that stamp is visible on. */
+  deliveredAt: z.number().optional(),
+});
+
+const SessionBusDirectoryMessage = BaseMessage.extend({
+  type: z.literal("session-bus:directory"),
+  requestId: z.string(),
+  /** Whose directory this is. Every bus read is asked ON BEHALF of one session
+   *  — there is no machine-wide "who is out there" answer, because reachability
+   *  is computed from the asking session's own repo key and branch. */
+  sessionId: z.string(),
+});
+
+const SessionBusDirectoryResultMessage = BaseMessage.extend({
+  type: z.literal("session-bus:directory:result"),
+  requestId: z.string(),
+  sessions: z.array(SessionBusDirectoryRowSchema).optional(),
+  /** Rows the bound dropped. Never silent: a truncated list that claims to be
+   *  complete reads as "there is nobody else". */
+  truncated: z.number().optional(),
+  reach: SessionBusDirectoryReachSchema.optional(),
+  /** The asking machine's own id, so a renderer can tell a local row from a
+   *  peer's. Deriving it by elimination from `reach` would be wrong in exactly
+   *  the state that matters — a peer whose rows expired is named there while
+   *  contributing none. */
+  machineId: z.string().nullable().optional(),
+  ...SessionBusRefusalWire,
+});
+
+const SessionBusInboxMessage = BaseMessage.extend({
+  type: z.literal("session-bus:inbox"),
+  requestId: z.string(),
+  sessionId: z.string(),
+});
+
+const SessionBusInboxResultMessage = BaseMessage.extend({
+  type: z.literal("session-bus:inbox:result"),
+  requestId: z.string(),
+  /** A PEEK: answering this does not mark anything read. The agent's own read
+   *  is what spends the unread flag — see `SessionBusApi.inboxPeek`. */
+  posts: z.array(SessionBusInboxPostSchema).optional(),
+  /** Posts this session will never see, zero included (§7.4): a reader that
+   *  cannot tell an empty inbox from an emptied one has been told the wrong
+   *  thing, not merely told less. */
+  dropped: z.number().optional(),
+  ...SessionBusRefusalWire,
+});
+
+const SessionBusThreadMessage = BaseMessage.extend({
+  type: z.literal("session-bus:thread"),
+  requestId: z.string(),
+  sessionId: z.string(),
+  threadId: z.string(),
+});
+
+const SessionBusThreadResultMessage = BaseMessage.extend({
+  type: z.literal("session-bus:thread:result"),
+  requestId: z.string(),
+  /** Echoed even on a refusal: a surface holding several open threads has to
+   *  know which one was refused, and `requestId` alone says that only to the
+   *  caller that still remembers what it asked. */
+  threadId: z.string(),
+  contextId: z.string().optional(),
+  entries: z.array(SessionBusThreadEntrySchema).optional(),
+  ...SessionBusRefusalWire,
+});
+
+/** Unsolicited: a mailbox grew. Carries WHOSE and nothing else — no count,
+ *  because nothing renders one: a session's peers are not the user's business
+ *  and no surface announces their mail. What still needs the signal is a sheet
+ *  ALREADY open on that mailbox, which re-reads on it, and the kebab row that
+ *  is the one door to it. Coalesced per session on the bridge, so a burst of
+ *  arrivals is one push rather than one per post. */
+const SessionBusArrivedMessage = BaseMessage.extend({
+  type: z.literal("session-bus:arrived"),
+  sessionId: z.string(),
+});
+
 // ── Netwatch: shipping a remote app's half of the frame capture ───────────────
 // Both ride the machine CONTROL plane and are consumed by relay-client.ts before
 // anything project-scoped sees them. Deliberately absent from
@@ -1939,6 +2663,7 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   TerminalStartedMessage,
   TerminalExitedMessage,
   TerminalNotificationMessage,
+  TerminalBellMessage,
   TerminalStartCommand,
   TerminalStopCommand,
   TerminalResizeCommand,
@@ -1988,6 +2713,7 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   HandlerSnapshotMessage,
   HandlerUndoMessage,
   HandlerDismissMessage,
+  HandlerAnswerMessage,
   GitStatusMessage,
   GitDiffRequestMessage,
   GitDiffContentMessage,
@@ -2050,6 +2776,14 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   ClientFocusStateMessage,
   TerminalSnapshotRequestMessage,
   TerminalSnapshotMessage,
+  TerminalSubscribeMessage,
+  TerminalSubscribedMessage,
+  TerminalFrameMessage,
+  TerminalAckMessage,
+  TerminalUnsubscribeMessage,
+  TerminalHistoryRequestMessage,
+  TerminalHistoryPageMessage,
+  TerminalDisplayStatusMessage,
   FileTreeSnapshotRequestMessage,
   FileTreeSnapshotMessage,
   FileTreeUnchangedMessage,
@@ -2082,6 +2816,18 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   AgentPermissionResolveMessage,
   AgentQuestionResolveMessage,
   AgentTaskStopMessage,
+  SessionBusPostMessage,
+  SessionBusNotifyMessage,
+  SessionBusFetchMessage,
+  SessionBusFetchResultMessage,
+  SessionBusAckMessage,
+  SessionBusDirectoryMessage,
+  SessionBusDirectoryResultMessage,
+  SessionBusInboxMessage,
+  SessionBusInboxResultMessage,
+  SessionBusThreadMessage,
+  SessionBusThreadResultMessage,
+  SessionBusArrivedMessage,
   NetwatchConfigureMessage,
   NetwatchEventsMessage,
 ]);
@@ -2092,6 +2838,7 @@ export type NetwatchConfigure = z.infer<typeof NetwatchConfigureMessage>;
 export type NetwatchEvents = z.infer<typeof NetwatchEventsMessage>;
 
 export type TerminalNotificationMessage = z.infer<typeof TerminalNotificationMessage>;
+export type TerminalBellMessage = z.infer<typeof TerminalBellMessage>;
 
 export type TerminalOutput = z.infer<typeof TerminalOutputMessage>;
 export type TerminalInput = z.infer<typeof TerminalInputMessage>;
@@ -2139,6 +2886,7 @@ export type HandlerActivityMsg = z.infer<typeof HandlerActivityMessage>;
 export type HandlerSnapshotMsg = z.infer<typeof HandlerSnapshotMessage>;
 export type HandlerUndoMsg = z.infer<typeof HandlerUndoMessage>;
 export type HandlerDismissMsg = z.infer<typeof HandlerDismissMessage>;
+export type HandlerAnswerMsg = z.infer<typeof HandlerAnswerMessage>;
 export type GitStatus = z.infer<typeof GitStatusMessage>;
 export type GitDiffRequest = z.infer<typeof GitDiffRequestMessage>;
 export type GitDiffContent = z.infer<typeof GitDiffContentMessage>;
@@ -2204,6 +2952,9 @@ export type SessionEntry = z.infer<typeof SessionEntrySchema>;
 export type SessionList = z.infer<typeof SessionListMessage>;
 export type SessionListResult = z.infer<typeof SessionListResultMessage>;
 export type SessionCreate = z.infer<typeof SessionCreateMessage>;
+export type SessionMemberRef = z.infer<typeof SessionMemberRefSchema>;
+export type SessionMemberCard = z.infer<typeof SessionMemberCardSchema>;
+export type SessionMemberKey = z.infer<typeof SessionMemberKeySchema>;
 export type SessionFork = z.infer<typeof SessionForkMessage>;
 export type SessionStart = z.infer<typeof SessionStartMessage>;
 export type SessionStop = z.infer<typeof SessionStopMessage>;
@@ -2219,6 +2970,20 @@ export type SessionUpdated = z.infer<typeof SessionUpdatedMessage>;
 export type ClientFocusState = z.infer<typeof ClientFocusStateMessage>;
 export type TerminalSnapshotRequest = z.infer<typeof TerminalSnapshotRequestMessage>;
 export type TerminalSnapshot = z.infer<typeof TerminalSnapshotMessage>;
+// The wire types for the frame display protocol. This file is their single
+// home — the same eight names are also exported from terminal-frames/protocol.ts
+// (whose envelopes predate registration and lack CheckoutScoped's `main`
+// default), and `TerminalFrame` is a third name in terminal-frames/source.ts,
+// where it means the CAPTURE payload rather than a wire message. Import the
+// wire types from here; anything created by `createMessage` has these shapes.
+export type TerminalSubscribe = z.infer<typeof TerminalSubscribeMessage>;
+export type TerminalSubscribed = z.infer<typeof TerminalSubscribedMessage>;
+export type TerminalFrame = z.infer<typeof TerminalFrameMessage>;
+export type TerminalAck = z.infer<typeof TerminalAckMessage>;
+export type TerminalUnsubscribe = z.infer<typeof TerminalUnsubscribeMessage>;
+export type TerminalHistoryRequest = z.infer<typeof TerminalHistoryRequestMessage>;
+export type TerminalHistoryPage = z.infer<typeof TerminalHistoryPageMessage>;
+export type TerminalDisplayStatus = z.infer<typeof TerminalDisplayStatusMessage>;
 export type FileTreeSnapshotRequest = z.infer<typeof FileTreeSnapshotRequestMessage>;
 export type FileTreeSnapshot = z.infer<typeof FileTreeSnapshotMessage>;
 export type FileTreeUnchanged = z.infer<typeof FileTreeUnchangedMessage>;
@@ -2257,6 +3022,18 @@ export type AgentSetConfig = z.infer<typeof AgentSetConfigMessage>;
 export type AgentSessionAction = z.infer<typeof AgentSessionActionMessage>;
 export type AgentPermissionResolve = z.infer<typeof AgentPermissionResolveMessage>;
 export type AgentQuestionResolve = z.infer<typeof AgentQuestionResolveMessage>;
+export type SessionBusPost = z.infer<typeof SessionBusPostMessage>;
+export type SessionBusNotify = z.infer<typeof SessionBusNotifyMessage>;
+export type SessionBusFetch = z.infer<typeof SessionBusFetchMessage>;
+export type SessionBusFetchResult = z.infer<typeof SessionBusFetchResultMessage>;
+export type SessionBusAck = z.infer<typeof SessionBusAckMessage>;
+export type SessionBusDirectoryRead = z.infer<typeof SessionBusDirectoryMessage>;
+export type SessionBusDirectoryResult = z.infer<typeof SessionBusDirectoryResultMessage>;
+export type SessionBusInboxRead = z.infer<typeof SessionBusInboxMessage>;
+export type SessionBusInboxResult = z.infer<typeof SessionBusInboxResultMessage>;
+export type SessionBusThreadRead = z.infer<typeof SessionBusThreadMessage>;
+export type SessionBusThreadResult = z.infer<typeof SessionBusThreadResultMessage>;
+export type SessionBusArrived = z.infer<typeof SessionBusArrivedMessage>;
 
 /**
  * Types whose wire text must never be recorded verbatim, however loudly an
@@ -2286,6 +3063,12 @@ export const BODY_REDACTED_MESSAGE_TYPES = new Set<string>([
   "agent:enableRelay",
   "agent:question-resolve",
   "terminal:input",
+  // Rendered screen content, which is the same secret class `terminal:input` is
+  // redacted for: whatever the user typed is echoed back into these two, so a
+  // capture would otherwise hold the pasted token that the keystroke frames
+  // withheld. `terminal:snapshot` predates this rule and is knowingly not here.
+  "terminal:frame",
+  "terminal:history:page",
   "tunnel:http-request",
   "tunnel:http-start",
   "tunnel:http-chunk",
@@ -2295,8 +3078,10 @@ export const BODY_REDACTED_MESSAGE_TYPES = new Set<string>([
 /** The exhaustive checkout-variable protocol set. Any new filesystem-facing
  * type belongs here (and gets an explicit schema decision + contract test). */
 export const CHECKOUT_VARIABLE_MESSAGE_TYPES = new Set<string>([
-  "terminal:start", "terminal:stop", "terminal:input", "terminal:resize", "terminal:output", "terminal:started", "terminal:exited", "terminal:notification", "terminal:size",
+  "terminal:start", "terminal:stop", "terminal:input", "terminal:resize", "terminal:output", "terminal:started", "terminal:exited", "terminal:notification", "terminal:bell", "terminal:size",
   "terminal:snapshot:request", "terminal:snapshot",
+  "terminal:subscribe", "terminal:subscribed", "terminal:frame", "terminal:ack",
+  "terminal:unsubscribe", "terminal:history:request", "terminal:history:page", "terminal:display:status",
   "agent:status",
   "tree:full", "tree:update", "file:read", "file:content",
   "file:resolve-path", "file:resolve-path-result",
@@ -2314,6 +3099,35 @@ export const CHECKOUT_VARIABLE_MESSAGE_TYPES = new Set<string>([
   "config:read", "config:read-result", "config:write", "config:write-result", "config:changed", "config:detect-tools", "config:detect-tools-result",
   "ports:update", "port:detected", "preview:url", "file:tree:snapshot:request", "file:tree:snapshot", "file:tree:unchanged", "preview:snapshot:request", "preview:snapshot",
   "session:result", "control:result",
+]);
+
+/** The subset of CHECKOUT_VARIABLE_MESSAGE_TYPES carried on the "preview"
+ * channel rather than "control" (see MessageBus.publish's channel argument
+ * and send-scheduler.ts's control>preview priority): the two BULK per-frame
+ * terminal payloads, `terminal:frame` (a viewer's live screen) and
+ * `terminal:history:page` (a requested scrollback page). The frame
+ * protocol's other six wire types — `terminal:subscribe`/`subscribed`,
+ * `ack`, `unsubscribe`, `history:request`, `display:status` — are small,
+ * latched, one-shot exchanges the requester is actively waiting on, so they
+ * stay on "control" and are drained ahead of preview's bulk traffic rather
+ * than queuing behind it; see the comment on `TerminalViewerTransport.send`
+ * in agent-core.ts. Priority is not isolation: `SendScheduler.fits` also gates
+ * on `SOCKET_INFLIGHT_BYTES`, which is shared by both channels and sits only
+ * one channel-window above one, so a saturated preview channel leaves control
+ * a bounded headroom and then it too waits for a credit.
+ *
+ * Mirrored BY HAND as `kPreviewChannelInboundTypes` in
+ * app/lib/project/project_message_classification.dart, gated against this set
+ * in checkout-mirror-contract.test.ts. Drift here is silent on the wire in
+ * the worst way: a type added here with no Dart counterpart simply stops
+ * arriving at the app, with no error on either side. The bridge side is safe
+ * from the reverse drift only because every targeted terminal reply derives
+ * its channel from this set (`sendAbToItsChannel` in agent-core.ts) — a call
+ * site that hard-codes "preview" would keep sending a removed type onto a
+ * channel the app no longer admits it on. */
+export const PREVIEW_CHANNEL_MESSAGE_TYPES = new Set<string>([
+  "terminal:frame",
+  "terminal:history:page",
 ]);
 
 type MessagePayload<T extends AbMessage["type"]> = Omit<
@@ -2371,7 +3185,7 @@ export function parseMessage(raw: string): AbMessage | null {
  * Use this on the hot path (terminal:output) after the handshake is complete.
  */
 const KNOWN_TYPES = new Set<string>([
-  "terminal:output", "terminal:input", "terminal:started", "terminal:exited", "terminal:notification",
+  "terminal:output", "terminal:input", "terminal:started", "terminal:exited", "terminal:notification", "terminal:bell",
   "terminal:start", "terminal:stop", "terminal:resize", "terminal:size", "agent:status",
   "ping", "pong", "handshake:client-hello", "handshake:agent-hello", "handshake:agent-ready",
   "tree:full", "tree:update", "file:read", "file:content",
@@ -2380,7 +3194,7 @@ const KNOWN_TYPES = new Set<string>([
   "agent:disconnecting", "agent:projects", "agent:tools", "stream-ready", "stream-invalid", "stream-unbound", "control:result", "app:ready",
   "command:run", "command:output", "command:done", "notification:push", "push:register",
   "handler:configure", "handler:instruct", "handler:status", "handler:escalation", "handler:activity",
-  "handler:snapshot", "handler:undo", "handler:dismiss",
+  "handler:snapshot", "handler:undo", "handler:dismiss", "handler:answer",
   "git:status", "git:diff", "git:diff-content",
   "git:list-branches", "git:branches", "git:checkout", "git:checkout-result",
   "git:commit", "git:commit-result", "git:discard", "git:discard-result",
@@ -2406,6 +3220,8 @@ const KNOWN_TYPES = new Set<string>([
   "session:result", "session:updated",
   "client:focus-state",
   "terminal:snapshot:request", "terminal:snapshot",
+  "terminal:subscribe", "terminal:subscribed", "terminal:frame", "terminal:ack",
+  "terminal:unsubscribe", "terminal:history:request", "terminal:history:page", "terminal:display:status",
   "file:tree:snapshot:request", "file:tree:snapshot", "file:tree:unchanged",
   "preview:snapshot:request", "preview:snapshot",
   "request", "response",
@@ -2418,6 +3234,11 @@ const KNOWN_TYPES = new Set<string>([
   "agent:background-tasks",
   "agent:prompt", "agent:cancel", "agent:set-config",
   "agent:session-action", "agent:permission-resolve", "agent:question-resolve", "agent:task-stop",
+  "session-bus:post", "session-bus:notify", "session-bus:fetch", "session-bus:fetch:result", "session-bus:ack",
+  "session-bus:directory", "session-bus:directory:result",
+  "session-bus:inbox", "session-bus:inbox:result",
+  "session-bus:thread", "session-bus:thread:result",
+  "session-bus:arrived",
   "netwatch:configure", "netwatch:events",
 ]);
 

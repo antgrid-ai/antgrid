@@ -13,6 +13,10 @@ integration files. Package code must never import bridge internals.
 The host creates `createAgentRuntime({ registry, host })` from
 `antgrid-agents/runtime`. Each runtime snapshots its definitions and binds logging,
 state storage, hook resolution, and process services to its own operations.
+Hosts exposing session tools also provide `mcpCommand()`. The optional adapter
+`mcp.inject` operation receives that command and supplies its own configuration
+or arguments. Hook and MCP injection fail independently, so losing one does not
+remove the other integration.
 Terminal adapters
 receive semantic conversation intent and a host-selected working directory;
 their launch preparation may be asynchronous. Raw shell input remains distinct

@@ -34,6 +34,39 @@ test("composePush mirrors the app strings", () => {
   }))).toEqual({ title: "Handler — urgent", body: "Deploy?", kind: "handler", sourceMessageId: "e1", terminalId: "t" });
 });
 
+// The three titles are hand-mirrored in `handlerEscalationTitle`
+// (app/lib/screens/workspace_shell.dart) and pinned from the Dart side by
+// app/test/screens/handler_escalation_title_test.dart, which reads these very
+// literals back out of compose.ts. Changing a string here without changing it
+// there gives the user two accounts of one event, depending only on whether the
+// device was awake.
+const escalation = (over: Record<string, unknown> = {}) => createMessage("handler:escalation", {
+  projectId: "p1", escalationId: "e1", terminalId: "t", question: "Which schema?",
+  reasoning: "", draftReply: "", urgency: "normal", at: 1, ...over,
+});
+
+test("composePush: an ask is titled as a question, not as a stop", () => {
+  // Everything but the title is unchanged on purpose: `sourceMessageId` is what
+  // dedups the pushed copy against the live one, so an ask must keep spending
+  // the same id as any other escalation.
+  expect(composePush(escalation({ nonBlocking: true })))
+    .toEqual({ title: "Handler has a question", body: "Which schema?", kind: "handler", sourceMessageId: "e1", terminalId: "t" });
+});
+
+test("composePush: an escalation with no nonBlocking flag still stops the user", () => {
+  // The absent case is what every row predating the ask feature looks like, and
+  // every row an older bridge stripped the flag from and re-persisted.
+  expect(composePush(escalation())!.title).toBe("Handler needs you");
+  expect(composePush(escalation({ nonBlocking: false }))!.title).toBe("Handler needs you");
+});
+
+test("composePush: urgent outranks the ask wording", () => {
+  // Unreachable through raiseAsk, which mints `normal` for every ask — asserted
+  // so the precedence is a decision rather than an artifact of which branch
+  // happened to be written first.
+  expect(composePush(escalation({ urgency: "high", nonBlocking: true }))!.title).toBe("Handler — urgent");
+});
+
 test("composePush: sessionTitle becomes the title, message the body", () => {
   expect(composePush(createMessage("notification:push", {
     notificationType: "task_complete", message: "Added a regression test", sessionTitle: "Fix auth bug", projectId: "p1",
@@ -142,4 +175,42 @@ test("non-user-facing message → ignored", () => {
   const { d, delivered } = harness();
   d.onOutbound(createMessage("terminal:input", { terminalId: "t", data: "x" }));
   expect(delivered).toHaveLength(0);
+});
+test("an armed slot's question is pushed once, by the escalation that can answer it", () => {
+  // One hook invocation produces both: the agent's own question notification and
+  // the forced escalation the Handler raises from the same event. They carry the
+  // same sentence, so forwarding both buzzes the phone twice within milliseconds
+  // — and the escalation is the half that must survive, since it is the one
+  // carrying the escalationId the tap routes to.
+  const { d, delivered } = harness({ isHandlerArmed: () => true });
+  d.onOutbound(createMessage("notification:push", {
+    notificationType: "question", message: "Which env?", sessionId: "t1", projectId: "p1",
+  }));
+  expect(delivered).toHaveLength(0);
+  d.onOutbound(escalation({ terminalId: "t1", question: "Agent asks: Which env?", urgency: "high" }));
+  expect(delivered).toHaveLength(1);
+});
+
+test("an unarmed slot keeps its question notification", () => {
+  // Nothing else on that session ever says WHAT was asked: with no armed
+  // Handler there is no escalation, and the CLI's own permission notification
+  // reaches the phone as the same "Permission needed" every tool call gets.
+  const { d, delivered } = harness();
+  d.onOutbound(createMessage("notification:push", {
+    notificationType: "question", message: "Which env?", sessionId: "t1", projectId: "p1",
+  }));
+  expect(delivered).toHaveLength(1);
+});
+
+test("arming one slot never silences another, nor any other notification kind", () => {
+  const armed: string[] = [];
+  const { d, delivered } = harness({ isHandlerArmed: (id) => { armed.push(id); return id === "t1"; } });
+  d.onOutbound(createMessage("notification:push", {
+    notificationType: "question", message: "Which env?", sessionId: "t2", projectId: "p1",
+  }));
+  d.onOutbound(createMessage("notification:push", {
+    notificationType: "task_complete", message: "done", sessionId: "t1", projectId: "p1",
+  }));
+  expect(armed).toEqual(["t2"]);
+  expect(delivered).toHaveLength(2);
 });

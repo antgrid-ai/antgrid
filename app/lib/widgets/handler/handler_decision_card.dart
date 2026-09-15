@@ -5,7 +5,9 @@ import '../../design/ab_icons.dart';
 import '../../design/ab_tokens.dart';
 import '../../design/widgets/ab_button.dart';
 import '../../models/handler_state.dart';
+import 'handler_ask_footer.dart';
 import 'handler_layout.dart';
+import 'handler_why.dart';
 
 /// Worn by the tapped choice while its answer is in flight.
 const handlerChoiceSendingLabel = 'Sending…';
@@ -13,22 +15,35 @@ const handlerChoiceSendingLabel = 'Sending…';
 /// The card's own way out to the free-text reply sheet.
 const handlerCustomReplyLabel = 'Custom reply…';
 
-/// Inline decision card for an escalation that carries quick choices. Rendered
-/// exactly when [HandlerEscalation.choices] is non-null; an escalation without
-/// them keeps the free-text row it has always had.
+/// Inline decision card for an escalation the user can answer with one tap.
+/// Rendered for two different rows, and the difference between them decides
+/// almost everything below.
 ///
-/// Every choice renders the `text` it would send beside its label rather than
-/// behind it: the label is the judge's summary of a reply the judge also
-/// composed, and a one-tap the user cannot read is one they cannot refuse.
-/// For the same reason no choice is styled as the recommended one — the wire
-/// states an order, not a preference.
+/// A QUICK-CHOICE row carries [HandlerEscalation.choices]. Every choice renders
+/// the `text` it would send below its label rather than behind it: the label is
+/// the judge's summary of a reply the judge also composed, that reply is typed
+/// verbatim into the session, and a one-tap the user cannot read is one they
+/// cannot refuse. For the same reason no choice is styled as the recommended
+/// one — the wire states an order, not a preference.
+///
+/// An ASK carries [HandlerEscalation.askOptions] and is
+/// [HandlerEscalation.nonBlocking]; both are required, because the bridge
+/// strips the options in the same mutation that promotes an ask to blocking, so
+/// either one alone is a row mid-frame and never a row to put buttons on.
+/// Both arms carry an optional `cost` line and a judge-authored label, so the
+/// read-before-you-tap floor does not distinguish them — what does is the
+/// `text`: a quick choice has one to render beneath the label, verbatim and in
+/// mono, because a tap sends it into the session; an ask has none, because the
+/// label IS the whole payload and a tap sends nothing.
 class HandlerDecisionCard extends StatefulWidget {
   const HandlerDecisionCard({
     super.key,
     required this.escalation,
     required this.onChoice,
     required this.onCustomReply,
+    this.onAskOption,
     this.trailing,
+    this.footer,
   });
 
   final HandlerEscalation escalation;
@@ -49,9 +64,22 @@ class HandlerDecisionCard extends StatefulWidget {
   /// exactly the states where something else on the card has gone wrong.
   final VoidCallback? onCustomReply;
 
+  /// Receives the tapped [HandlerAskOption.choiceId] and answers whether it
+  /// reached the wire, exactly as [onChoice] does — and, exactly as [onChoice]
+  /// does, null disables every option rather than latching one. That is what
+  /// makes a row promoted between the render and the tap show a dead-looking
+  /// button instead of a live one that answers nothing.
+  final bool Function(String choiceId)? onAskOption;
+
   /// Session/time metadata, supplied by the caller so it matches the free-text
   /// rows sharing the section.
   final Widget? trailing;
+
+  /// Rendered under the options and above the custom-reply button. The ask's
+  /// still-working footer goes here; it is a slot rather than a field because
+  /// what it says has to be derived against the owning session's live backlog,
+  /// which this widget is deliberately not given.
+  final Widget? footer;
 
   @override
   State<HandlerDecisionCard> createState() => _HandlerDecisionCardState();
@@ -72,16 +100,18 @@ class _HandlerDecisionCardState extends State<HandlerDecisionCard> {
     }
   }
 
-  void _tap(String choiceId) {
-    final onChoice = widget.onChoice;
+  /// [send] is whichever of the two answer callbacks owns this row — they carry
+  /// the same contract (an id in, "did it reach the wire" out) so the latching
+  /// rule below can be written once for both.
+  void _tap(String choiceId, bool Function(String choiceId)? send) {
     // The disabled repaint is not itself the floor: the answer clears this card
     // within a frame, and a second tap landing in that frame still runs the
     // callback the old build handed to the gesture recognizer.
-    if (onChoice == null || _pending != null) return;
+    if (send == null || _pending != null) return;
     // Latched only on a send that happened. Every refusal path leaves the
     // escalation open, so latching first would trade one unsent answer for a
     // card that can never send another.
-    if (!onChoice(choiceId)) return;
+    if (!send(choiceId)) return;
     setState(() => _pending = choiceId);
   }
 
@@ -90,6 +120,13 @@ class _HandlerDecisionCardState extends State<HandlerDecisionCard> {
     final p = context.antgrid;
     final e = widget.escalation;
     final choices = e.choices ?? const <HandlerEscalationChoice>[];
+    // Both halves of the ask test, together, at the one place that draws
+    // buttons: the bridge clears `nonBlocking` and `askOptions` in a single
+    // mutation, so a row carrying one without the other is a frame in flight
+    // and never something to offer a tap on.
+    final askOptions = e.nonBlocking
+        ? (e.askOptions ?? const <HandlerAskOption>[])
+        : const <HandlerAskOption>[];
     final answering = _pending != null;
     // Full-bleed band, not a floating card: the horizontal margin it used to
     // carry stacked on top of the row gutter, so a card and the free-text
@@ -148,14 +185,22 @@ class _HandlerDecisionCardState extends State<HandlerDecisionCard> {
                     ),
                   ),
                 ],
-                const SizedBox(height: AbTokens.space2),
-                Text(
-                  e.reasoning,
-                  style: AbTokens.sansStyle(
-                    fontSize: AbTokens.fontXs,
-                    color: p.textMuted,
+                // Justification for reading afterward, not input to the
+                // decision. Collapsed, never removed: the escalate path's
+                // `reason` is the only place a stopped session explains
+                // itself.
+                if (e.reasoning.trim().isNotEmpty) ...[
+                  const SizedBox(height: AbTokens.space2),
+                  HandlerWhyDisclosure(escalation: e),
+                ],
+                if (e.nonBlocking)
+                  Text(
+                    handlerAskLatencyNote,
+                    style: AbTokens.sansStyle(
+                      fontSize: AbTokens.fontXs,
+                      color: p.textMuted,
+                    ),
                   ),
-                ),
                 for (final c in choices) ...[
                   const SizedBox(height: AbTokens.space8),
                   _ChoiceRow(
@@ -163,8 +208,22 @@ class _HandlerDecisionCardState extends State<HandlerDecisionCard> {
                     pending: _pending == c.choiceId,
                     onTap: answering || widget.onChoice == null
                         ? null
-                        : () => _tap(c.choiceId),
+                        : () => _tap(c.choiceId, widget.onChoice),
                   ),
+                ],
+                for (final o in askOptions) ...[
+                  const SizedBox(height: AbTokens.space8),
+                  _AskOptionRow(
+                    option: o,
+                    pending: _pending == o.choiceId,
+                    onTap: answering || widget.onAskOption == null
+                        ? null
+                        : () => _tap(o.choiceId, widget.onAskOption),
+                  ),
+                ],
+                if (widget.footer != null) ...[
+                  const SizedBox(height: AbTokens.space8),
+                  widget.footer!,
                 ],
                 const SizedBox(height: AbTokens.space8),
                 AbButton(
@@ -194,26 +253,92 @@ class _ChoiceRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final p = context.antgrid;
-    return Row(
+    return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
       children: [
         AbButton(
           label: pending ? handlerChoiceSendingLabel : choice.label,
+          // Needs a bounded width, which a Column gives and a Row does not —
+          // the judge's own words replace a fixed literal here and may run
+          // long enough to want more than one line.
+          wrapLabel: true,
           onTap: onTap,
         ),
-        const SizedBox(width: AbTokens.space8),
-        Expanded(
-          child: Text(
-            choice.text,
-            // Mono: this is verbatim what lands in the session, not chrome.
-            style: AbTokens.monoStyle(
+        if (choice.cost != null) ...[
+          const SizedBox(height: AbTokens.space2),
+          Text(
+            choice.cost!,
+            style: AbTokens.sansStyle(
               fontSize: AbTokens.fontXs,
               color: p.textMuted,
             ),
-            // Deliberately unbounded. The wire caps `text` at 400 characters
-            // and an ellipsis at three lines hides most of that on a phone —
-            // a one-tap the user cannot read is one they cannot refuse, which
-            // is the whole reason this text is beside the label at all.
+          ),
+        ],
+        const SizedBox(height: AbTokens.space2),
+        Text(
+          choice.text,
+          // Mono, and still deliberately unbounded: this is verbatim what
+          // lands in the session. The label names it; it does not replace it,
+          // and a one-tap the user cannot read is one they cannot refuse.
+          style: AbTokens.monoStyle(
+            fontSize: AbTokens.fontXs,
+            color: p.textMuted,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// One tap-to-answer option on an ask: the answer itself on the button, what
+/// choosing it costs underneath.
+///
+/// [_ChoiceRow] stacks the same way, but for a different reason: there the
+/// label names a reply shown in full beneath it; here the label IS the
+/// answer and runs to a sentence, so it takes the full width and the cost —
+/// the thing the user weighs it against — sits directly under it.
+///
+/// The cost is sans, never mono: nothing on this row reaches a session, and the
+/// mono face on this screen is what says a string is verbatim wire data.
+class _AskOptionRow extends StatelessWidget {
+  const _AskOptionRow({
+    required this.option,
+    required this.pending,
+    required this.onTap,
+  });
+
+  final HandlerAskOption option;
+  final bool pending;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.antgrid;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        AbButton(
+          label: pending ? handlerChoiceSendingLabel : option.label,
+          // The judge's own pick takes the card's primary treatment. Safe here
+          // and not on a quick choice for the reason the class doc gives: a tap
+          // sends the agent nothing, so an emphasis that turns out to be wrong
+          // costs the user a sentence in a prompt, not a command in a shell.
+          variant: option.recommended
+              ? AbButtonVariant.primary
+              : AbButtonVariant.normal,
+          // A whole answer, not a verb — see [AbButton.wrapLabel]. The Column
+          // above is what bounds it.
+          wrapLabel: true,
+          onTap: onTap,
+        ),
+        const SizedBox(height: AbTokens.space2),
+        Text(
+          option.cost,
+          style: AbTokens.sansStyle(
+            fontSize: AbTokens.fontXs,
+            color: p.textMuted,
           ),
         ),
       ],

@@ -56,3 +56,35 @@ bool isViewingSession({
   if (!onWorkspaceSurface || !agentSurfaceVisible) return false;
   return activeSessionId == sessionId;
 }
+
+/// Whether the Handler is already announcing this agent notification, so the
+/// agent's own copy of it must not be surfaced a second time.
+///
+/// One agent question posts BOTH a `question` notification and a handler event
+/// (`agents/claude-code/hooks.ts` puts the two in one invocation), and on an
+/// armed slot the engine escalates every blocking prompt without judging it
+/// (`isBlockingPrompt`, `handler/engine.ts`) — so the escalation carries the
+/// same sentence and, unlike the notification, the escalationId that answers
+/// it. The bridge drops the second delivery on the sealed push lane alone
+/// (`push/push-dispatcher.ts`, gated on its own `isHandlerArmed`), deliberately:
+/// the frame has to keep flowing, because the session's "needs you" dot is
+/// folded from it and an ATTACHED app renders it in band. This is that same rule
+/// for the in-band lane, and the two must stay in lockstep — a phone that gets
+/// one buzz while backgrounded and two while attached is worse than either.
+///
+/// Keyed on ARMED rather than on an escalation already standing, so the answer
+/// does not depend on which of the two frames the router happens to deliver
+/// first.
+///
+/// [handlerArmed] is scoped to the notification's own project: session ids are
+/// unique, but the armed set is per-project state and no other project's copy
+/// can answer for this one.
+bool handlerAnnouncesAgentNotification({
+  required String? notificationType,
+  required String? sessionId,
+  required bool handlerArmed,
+}) {
+  if (notificationType != 'question') return false;
+  if (sessionId == null || sessionId.isEmpty) return false;
+  return handlerArmed;
+}

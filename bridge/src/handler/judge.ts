@@ -12,7 +12,7 @@ import {
   type HandlerDecision,
 } from "./decision";
 import type { InstructionItem } from "./backlog";
-import type { HandlerPersonality } from "../protocol";
+import type { HandlerLens } from "../protocol";
 import {
   buildExtractPrompt, parseExtractionOutput, renderAmendable, type ExtractionResult,
 } from "./extract";
@@ -185,13 +185,21 @@ export async function runDecision(opts: {
   // `tool` is the JUDGE's CLI (a per-session pick may name a different agent
   // from the one being watched); `agentTool` is the agent under supervision,
   // and only the prompt reads it.
-  tool: string; model?: string; goal: string; backlogText: string; context: string;
+  tool: string; model?: string; instructions: string[]; backlogText: string; context: string;
   transcriptPath?: string; cwd: string; timeoutMs?: number; spawn?: typeof Bun.spawn;
   floorWarnings?: string[];
   evidenceRejections?: string[];
+  replyBudget?: number;
+  openAsks?: string[];
+  askRejections?: string[];
+  standingQuestions?: string[];
+  agentWorking?: boolean;
+  staleAskIds?: boolean;
+  askAnswer?: { question: string; answer: string; tapped: boolean; blocking?: true };
   agentTool?: string;
   commands?: CapCommand[];
-  personality?: HandlerPersonality;
+  role?: HandlerLens;
+  brief?: string;
   retryIfShape?: (decision: HandlerDecision) => string | null;
   onTimeout?: () => void;
 }): Promise<HandlerDecision | null> {
@@ -200,14 +208,17 @@ export async function runDecision(opts: {
     tool: opts.tool, model: opts.model, cwd: opts.cwd,
     timeoutMs: opts.timeoutMs ?? 45_000, spawn: opts.spawn, transcriptPath: opts.transcriptPath,
     retryIf: opts.retryIfShape, onTimeout: opts.onTimeout,
-    promptParts: { goal: opts.goal, backlogText: opts.backlogText, context: opts.context },
+    promptParts: { goal: opts.instructions.join("\n"), backlogText: opts.backlogText, context: opts.context },
     makePrompt: (path) => buildDecidePrompt({
-      goal: opts.goal, backlogText: opts.backlogText, context: opts.context, transcriptPath: path,
+      instructions: opts.instructions, backlogText: opts.backlogText, context: opts.context, transcriptPath: path,
       floorWarnings: opts.floorWarnings, evidenceRejections: opts.evidenceRejections,
+      replyBudget: opts.replyBudget,
+      openAsks: opts.openAsks, askRejections: opts.askRejections, askAnswer: opts.askAnswer,
+      standingQuestions: opts.standingQuestions, agentWorking: opts.agentWorking, staleAskIds: opts.staleAskIds,
       agentTool: opts.agentTool, commands: opts.commands,
       // The retry legs below append to this prompt rather than rebuilding one,
-      // so the posture rides through them with nothing further to do.
-      personality: opts.personality,
+      // so the lens and the brief ride through them with nothing further to do.
+      role: opts.role, brief: opts.brief,
     }),
     parse: (stdout) => {
       const r = parseDecisionFromOutput(stdout);

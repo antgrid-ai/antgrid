@@ -9,6 +9,7 @@ import { loadPairedPhones, type PairedPhonesStore } from "../../src/paired-phone
 import { generateEphemeralKeypair, deriveSharedSecret } from "../../src/key-exchange";
 import { createMessage } from "../../src/protocol";
 import type { MessageBus } from "../../src/message-bus";
+import type { AttachStreamOpts } from "../../src/stream-mux";
 
 // These exercise the REAL project-core push wiring (resolveTargets/shouldFallback),
 // not the dispatcher in isolation: push-dispatcher.test.ts injects both, so it
@@ -47,7 +48,7 @@ function openPush(blob: { epk: string; box: string }, privateKey: Buffer): any {
 }
 
 /** A relay slot whose phone has NEVER connected during this agent lifetime —
- *  `currentPeerPubkey()` is null exactly as after a host restart. */
+ *  it holds no established session, exactly as after a host restart. */
 async function startRestartedAgent(opts: { mobileAccess: boolean }) {
   const folder = mkdtempSync(join(tmpdir(), "antgrid-push-proj-"));
   cleanup.push(() => rmSync(folder, { recursive: true, force: true }));
@@ -82,9 +83,15 @@ async function startRestartedAgent(opts: { mobileAccess: boolean }) {
       // exactly the post-restart state the regression below is about.
       attachStream: (b) => {
         bus = b;
-        return { streamId: "s1", detach: () => {}, sendTunnel: async () => "sent" as const };
+        return {
+          streamId: "s1",
+          detach: () => {},
+          sendTunnel: async () => "sent" as const,
+          sendTo: async () => "sent" as const,
+        };
       },
-      currentPeerPubkey: () => null,
+      establishedPeers: () => [],
+      peerSession: () => null,
       machineDeviceId: () => "machine-uuid",
       sendPushDeliver: (p) => delivered.push(p),
     },
@@ -104,8 +111,8 @@ test("push targets the persisted phone when no peer has connected this agent lif
   // Regression: after a host restart the phone may never reconnect (machine
   // rebooted, long task, phone in pocket). Targeting used to bind to LIVE peer
   // state — `connState.peerOnline` defaults TRUE, so the fallback gate read
-  // "phone can receive in-band" with no phone at all, and `currentPeerPubkey()`
-  // was null so no target resolved. Result: zero pushes, forever.
+  // "phone can receive in-band" with no phone at all, and no session named a
+  // device so no target resolved. Result: zero pushes, forever.
   const { notify, delivered } = await startRestartedAgent({ mobileAccess: true });
 
   notify();
@@ -138,4 +145,161 @@ test("persisted-store fallback still refuses to push from a machine with mobile 
   notify();
 
   expect(delivered).toHaveLength(0);
+});
+
+/** A slot a DESKTOP app held and then left. The session inventory is empty after
+ *  the disconnect, while the persistent device registry still contains both the
+ *  tokenless desktop identity and the phone that should receive fallback push. */
+async function startAfterDesktopLeft() {
+  const folder = mkdtempSync(join(tmpdir(), "antgrid-push-proj-"));
+  cleanup.push(() => rmSync(folder, { recursive: true, force: true }));
+  writeFileSync(join(folder, "antgrid.yaml"), "");
+  const projectId = computeProjectId(folder);
+
+  const phonePush = generateEphemeralKeypair();
+  const store: PairedPhonesStore = loadPairedPhones(abDir);
+  // The tokenless desktop is registered FIRST, so `list()` order is not what
+  // decides whether the phone is reached.
+  store.upsert({
+    phonePubkey: "DESKTOP_PK",
+    phoneDeviceId: "desktop-1",
+    pairedAt: new Date().toISOString(),
+    lastSeenAt: new Date().toISOString(),
+  });
+  store.upsert({
+    phonePubkey: "PHONE_PK",
+    phoneDeviceId: "phone-1",
+    pairedAt: new Date().toISOString(),
+    lastSeenAt: new Date().toISOString(),
+    pushPubkey: phonePush.publicKey.toString("base64"),
+    pushToken: "TOKEN",
+    pushProvider: "fcm",
+  });
+
+  const delivered: Delivered[] = [];
+  let bus: MessageBus | null = null;
+  let streamOpts!: AttachStreamOpts;
+  const core = new ProjectCore({
+    folder,
+    mode: "remote",
+    identity: {
+      deviceId: randomUUID(), deviceName: "machine", createdAt: new Date().toISOString(),
+      ed25519PublicKey: "PK", ed25519PrivateKey: "SK",
+    },
+    pairedPhones: store,
+    remoteAccessEnabled: () => true,
+    remote: {
+      attachStream: (b, o) => {
+        bus = b;
+        streamOpts = o;
+        return {
+          streamId: "s1",
+          detach: () => {},
+          sendTunnel: async () => "sent" as const,
+          sendTo: async () => "sent" as const,
+        };
+      },
+      establishedPeers: () => [],
+      peerSession: () => null,
+      machineDeviceId: () => "machine-uuid",
+      sendPushDeliver: (p) => delivered.push(p),
+    },
+  });
+  cleanup.push(() => { void core.shutdown(); });
+  await core.start();
+
+  streamOpts.onPeerOnline?.();
+  streamOpts.onPeerOffline?.();
+
+  const notify = () =>
+    bus?.publish(
+      createMessage("notification:push", { notificationType: "task_complete", message: "built", projectId }),
+      "control",
+    );
+  return { notify, delivered };
+}
+
+test("push reaches the phone after a tokenless desktop peer disconnects", async () => {
+  // A desktop carries no push token, so its former session must not suppress the
+  // registered phone once no device can receive this notification in band.
+  const { notify, delivered } = await startAfterDesktopLeft();
+
+  notify();
+
+  expect(delivered).toHaveLength(1);
+  expect(delivered[0].pushToken).toBe("TOKEN");
+});
+
+/** Two push-capable phones with no reachable sessions. Both persistent devices
+ *  are away targets; the bridge has no live session from which to choose one. */
+async function startAfterPhoneLeft() {
+  const folder = mkdtempSync(join(tmpdir(), "antgrid-push-proj-"));
+  cleanup.push(() => rmSync(folder, { recursive: true, force: true }));
+  writeFileSync(join(folder, "antgrid.yaml"), "");
+  const projectId = computeProjectId(folder);
+
+  const store: PairedPhonesStore = loadPairedPhones(abDir);
+  for (const [pubkey, id, token] of [["PHONE_A_PK", "phone-a", "TOKEN_A"], ["PHONE_B_PK", "phone-b", "TOKEN_B"]]) {
+    store.upsert({
+      phonePubkey: pubkey,
+      phoneDeviceId: id,
+      pairedAt: new Date().toISOString(),
+      lastSeenAt: new Date().toISOString(),
+      pushPubkey: generateEphemeralKeypair().publicKey.toString("base64"),
+      pushToken: token,
+      pushProvider: "fcm",
+    });
+  }
+
+  const delivered: Delivered[] = [];
+  let bus: MessageBus | null = null;
+  let streamOpts!: AttachStreamOpts;
+  const core = new ProjectCore({
+    folder,
+    mode: "remote",
+    identity: {
+      deviceId: randomUUID(), deviceName: "machine", createdAt: new Date().toISOString(),
+      ed25519PublicKey: "PK", ed25519PrivateKey: "SK",
+    },
+    pairedPhones: store,
+    remoteAccessEnabled: () => true,
+    remote: {
+      attachStream: (b, o) => {
+        bus = b;
+        streamOpts = o;
+        return {
+          streamId: "s1",
+          detach: () => {},
+          sendTunnel: async () => "sent" as const,
+          sendTo: async () => "sent" as const,
+        };
+      },
+      establishedPeers: () => [],
+      peerSession: () => null,
+      machineDeviceId: () => "machine-uuid",
+      sendPushDeliver: (p) => delivered.push(p),
+    },
+  });
+  cleanup.push(() => { void core.shutdown(); });
+  await core.start();
+
+  streamOpts.onPeerOnline?.();
+  streamOpts.onPeerOffline?.();
+
+  const notify = () =>
+    bus?.publish(
+      createMessage("notification:push", { notificationType: "task_complete", message: "built", projectId }),
+      "control",
+    );
+  return { notify, delivered };
+}
+
+test("a departed peer leaves every away phone as a push target", async () => {
+  // With no reachable session, choosing whichever device disconnected last
+  // would silently drop the notification on every other registered phone.
+  const { notify, delivered } = await startAfterPhoneLeft();
+
+  notify();
+
+  expect(delivered.map((d) => d.pushToken).sort()).toEqual(["TOKEN_A", "TOKEN_B"]);
 });

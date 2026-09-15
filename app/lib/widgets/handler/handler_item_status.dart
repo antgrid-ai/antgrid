@@ -98,22 +98,66 @@ class HandlerPendingLabel extends StatelessWidget {
 
 /// What a run state is CALLED. `parked` is spoken as "Paused" everywhere — the
 /// wire word is an implementation detail the user never asked about.
-String handlerRunStateLabel(HandlerRunState state) => switch (state) {
-  HandlerRunState.watching => 'Watching',
-  HandlerRunState.handling => 'Handling',
-  HandlerRunState.needsYou => 'Needs you',
-  HandlerRunState.parked => 'Paused',
-};
+///
+/// [asksOnly] splits the one state that has two meanings. `needs_you` is the
+/// bridge's word for both "the session has stopped and is waiting on you" and
+/// "the session is still working and has a question standing" — see
+/// [HandlerSessionState.asksOnly], which reads the rows the capability gate has
+/// already been over. Only the second is an ask, and calling it "Needs you"
+/// tells the user their agent has stopped when it has not, which is the whole
+/// distinction the ask exists to make.
+String handlerRunStateLabel(HandlerRunState state, {bool asksOnly = false}) =>
+    switch (state) {
+      HandlerRunState.watching => 'Watching',
+      HandlerRunState.handling => 'Handling',
+      HandlerRunState.needsYou => asksOnly ? 'Asked you' : 'Needs you',
+      HandlerRunState.parked => 'Paused',
+    };
 
 /// Tone for a run state. Accent is reserved for the two states that mean work
 /// is moving or the user is wanted; watching is deliberately quiet, because it
 /// is the state a session sits in for hours.
-Color handlerRunStateColor(AbColors p, HandlerRunState state) =>
-    switch (state) {
-      HandlerRunState.watching => p.textMuted,
-      HandlerRunState.handling => p.accent,
-      HandlerRunState.needsYou => p.accent,
-      HandlerRunState.parked => p.warning,
+///
+/// An ask drops to [AbColors.textSecondary] rather than to the muted tier
+/// `watching` gets: it is still something the user is expected to answer, so it
+/// must not read as background, but it is not the stopped agent that earns the
+/// accent. The tone is the only part of the split a user takes in without
+/// reading, so it has to move with the word.
+Color handlerRunStateColor(
+  AbColors p,
+  HandlerRunState state, {
+  bool asksOnly = false,
+}) => switch (state) {
+  HandlerRunState.watching => p.textMuted,
+  HandlerRunState.handling => p.accent,
+  HandlerRunState.needsYou => asksOnly ? p.textSecondary : p.accent,
+  HandlerRunState.parked => p.warning,
+};
+
+/// What a park is BLAMED on, in the words every surface that names one uses.
+///
+/// Reads [HandlerSessionState.parkCause] and never [HandlerSessionState.parkKind],
+/// which is the whole point: the kind is the backoff policy the engine picked,
+/// and everything that is not a provider limit is filed under `outage` —
+/// Handler's own judge failing included. Rendering that as "provider outage"
+/// tells a user whose agent is serving fine to go and debug their agent's
+/// provider, over a stopped session Antgrid stopped itself.
+///
+/// The [parkKind] fallback is for a bridge that predates the cause, and says
+/// only what `outage` genuinely knows — a failure the engine will retry — since
+/// a bridge that sent no cause cannot tell whose failure it was. A cause a newer
+/// bridge invents falls through to that same fallback rather than being spelled
+/// out raw.
+String? handlerParkReason(HandlerSessionState session) =>
+    switch (session.parkCause) {
+      'agent_limit' => 'rate limit',
+      'agent_failure' => 'agent error',
+      'judge_failure' => 'judge unavailable',
+      _ => switch (session.parkKind) {
+        'limit' => 'rate limit',
+        'outage' => 'temporary failure',
+        _ => null,
+      },
     };
 
 /// Copy for the "this session cannot be watched" warning. [agentLabel] is the

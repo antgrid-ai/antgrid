@@ -56,9 +56,12 @@ export function prepareTerminalLaunch(request: TerminalLaunchRequest): PreparedT
 export function prepareCliTerminalLaunch(request: TerminalLaunchRequest, runtime?: { get(tool: string): AgentSpec | undefined; host: AgentHostServices }): PreparedTerminalLaunch {
   const { tool, configured, approvalPolicy, conversation } = request;
   const spec = runtime ? runtime.get(tool ?? configured.name) : agentSpec(tool ?? configured.name);
-  const augment = (id: string) => augmentAgentLaunch(id, request.storeDir,
-    typeof request.adapterOptions?.cursorDir === "string" ? request.adapterOptions.cursorDir : undefined,
-    runtime?.host.hookCommand(), undefined, runtime?.get);
+  const augment = (id: string) => augmentAgentLaunch(id, {
+    abDir: request.storeDir,
+    cursorDir: typeof request.adapterOptions?.cursorDir === "string" ? request.adapterOptions.cursorDir : undefined,
+    hookCommand: runtime?.host.hookCommand(),
+    mcpCommand: runtime?.host.mcpCommand?.(),
+  }, runtime?.get);
   let command: string;
   let args: string[] = [];
   let env: Record<string, string> = {};

@@ -1,14 +1,17 @@
 #!/usr/bin/env bun
-import { join, resolve } from "node:path";
+import { resolve } from "node:path";
 import { runProjectIntegrationSetup } from "antgrid-agents/project-integrations";
-import { resolveHookCommand } from "../src/hook-command";
+import { resolveHookCommand, resolveMcpCommand } from "../src/hook-command";
 import { resolveAbDir } from "../src/antgrid-dir";
 
 const integrationDir = resolve(import.meta.dirname);
+const mcp = resolveMcpCommand({ compiled: false, binary: process.execPath, entrypoint: resolve(integrationDir, "..", "src", "index.ts") });
 runProjectIntegrationSetup({
   integrationDir,
   assetDirectory: resolveAbDir(),
-  mcpEntry: { command: "bun", args: ["run", join(integrationDir, "mcp-server.ts")] },
+  mcpEntry: { command: mcp.binary, args: mcp.preargs, env: {
+    ANTGRID_API_PORT: "${ANTGRID_API_PORT}", ANTGRID_TERMINAL_ID: "${ANTGRID_TERMINAL_ID}",
+  } },
   hookCommand: resolveHookCommand({
     compiled: false, binary: process.execPath,
     entrypoint: resolve(integrationDir, "..", "src", "index.ts"),

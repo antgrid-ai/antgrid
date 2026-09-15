@@ -4,7 +4,13 @@ export type Channel = "control" | "preview";
 
 export interface TransportSubscriber {
   /** Bus calls this to deliver an outbound message to the wire. */
-  deliver(msg: AbMessage, channel: Channel): void;
+  deliver(msg: AbMessage, channel: Channel, signal?: AbortSignal, peerId?: string): unknown;
+  /** Which wire this subscriber IS, for the audience-targeted publishes below.
+   *  Left undefined by the subscribers that are not a client at all — the
+   *  work-status fold and the push dispatcher — and those receive every emit
+   *  regardless of targeting, because targeting decides what a CLIENT sees, not
+   *  what the core gets to observe. */
+  readonly audience?: InboundSource;
 }
 
 /** Where an inbound frame entered the core. The allowlist gate keys off this:
@@ -18,7 +24,26 @@ export type InboundHandler = (
   msg: AbMessage,
   channel: Channel,
   source: InboundSource,
+  peerId?: string,
 ) => void;
+
+/** Which CLIENT a frame came from, for read-state that must not be shared:
+ *  focus, unread marks, the foreground/background pause. The loopback owner is
+ *  one client; each relay app session is another, named by its route peerId.
+ *
+ *  A peerId travels BESIDE {@link InboundSource} rather than widening it — the
+ *  source decides gating (loopback is never gated) and is compared against the
+ *  bare `"relay"` literal in a dozen places, so a discriminated union there
+ *  would churn every one of them for nothing. */
+export type ClientKey = string;
+
+/** `"relay"` is the fallback key for a caller that threads no peerId (the bare
+ *  agent, unit tests): one anonymous relay client, which is what the whole
+ *  bridge assumed before per-device sessions existed. */
+export function clientKeyOf(source: InboundSource, peerId?: string): ClientKey {
+  if (source === "loopback") return "loopback";
+  return peerId ?? "relay";
+}
 
 /**
  * Message types that carry durable snapshot state (vs. streaming events).
@@ -117,10 +142,48 @@ export class MessageBus {
     this.emit(msg, channel, { force: true });
   }
 
+  /** Publish to ONE wire only, plus every audience-less subscriber.
+   *
+   *  For a reply that belongs to one client's own request rather than to the
+   *  project: a terminal frame answers the viewer that subscribed, and pushing
+   *  it at every other connected client costs them the bytes and hands them a
+   *  stream they never asked for. Never for a durable/replayed type — the cache
+   *  is keyed per type, not per audience, so a targeted frame would be replayed
+   *  to whoever reconnects next. */
+  publishOnly(msg: AbMessage, channel: Channel, only: InboundSource, peerId?: string): void {
+    this.emit(msg, channel, { audience: { only }, peerId });
+  }
+
+  async deliverTo(msg: AbMessage, channel: Channel, only: InboundSource, signal: AbortSignal, peerId?: string): Promise<void> {
+    if (signal.aborted) return;
+    const pending: Promise<unknown>[] = [];
+    for (const sub of this.subs) {
+      if (sub.audience !== undefined && sub.audience !== only) continue;
+      pending.push(Promise.resolve(sub.deliver(msg, channel, signal, peerId)));
+    }
+    await Promise.all(pending);
+  }
+
+  /** Publish to every wire EXCEPT the ones listed, plus every audience-less
+   *  subscriber.
+   *
+   *  For a stream one client has opted out of while the others have not — the
+   *  terminal-frame mode exclusivity gate, where a phone watching frames must
+   *  not silence the desktop's legacy output for the same terminal. Same
+   *  restriction as [publishOnly]: streaming types only. */
+  publishExcept(msg: AbMessage, channel: Channel, except: ReadonlySet<InboundSource>): void {
+    this.emit(msg, channel, { audience: { except } });
+  }
+
   private emit(
     msg: AbMessage,
     channel: Channel,
-    { force = false, deliver = true }: { force?: boolean; deliver?: boolean },
+    { force = false, deliver = true, audience, peerId }: {
+      peerId?: string;
+      force?: boolean;
+      deliver?: boolean;
+      audience?: { only?: InboundSource; except?: ReadonlySet<InboundSource> };
+    },
   ): void {
     const key = this.replayKey(msg);
     if (key !== null) {
@@ -140,7 +203,14 @@ export class MessageBus {
     // project-core.ts attachRelayStream).
     if (!deliver) return;
     for (const s of this.subs) {
-      s.deliver(msg, channel);
+      // PTY bytes remain observable internally; app displays are frame-only.
+      if (s.audience !== undefined &&
+          (msg.type === "terminal:output" || msg.type === "terminal:snapshot")) continue;
+      if (audience && s.audience !== undefined) {
+        if (audience.only !== undefined && s.audience !== audience.only) continue;
+        if (audience.except?.has(s.audience)) continue;
+      }
+      s.deliver(msg, channel, undefined, peerId);
     }
   }
 
@@ -182,8 +252,13 @@ export class MessageBus {
   /** `source` defaults to `relay` so any caller that omits it is gated by
    *  default (fail-closed); only an explicit `loopback` frame bypasses the
    *  allowlist gate. */
-  dispatchInbound(msg: AbMessage, channel: Channel, source: InboundSource = "relay"): void {
-    this.handler?.(msg, channel, source);
+  dispatchInbound(
+    msg: AbMessage,
+    channel: Channel,
+    source: InboundSource = "relay",
+    peerId?: string,
+  ): void {
+    this.handler?.(msg, channel, source, peerId);
   }
 
   /** Drop a session's session-scoped replay entries. Called at session

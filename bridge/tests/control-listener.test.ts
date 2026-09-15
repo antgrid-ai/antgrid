@@ -55,8 +55,8 @@ test("returns a 400 ok:false error for a malformed request body", async () => {
 test("rejects an oversized body without invoking the handler", async () => {
   let handlerCalled = false;
   const { port, token } = await start(async (r) => { handlerCalled = true; return { id: r.id, ok: true, type: "project:list", projects: [] }; });
-  // > 64 KiB body cap. Bun.serve rejects before the fetch handler parses it.
-  const huge = "x".repeat(128 * 1024);
+  // > 1 MiB body cap. Bun.serve rejects before the fetch handler parses it.
+  const huge = "x".repeat(2 * 1024 * 1024);
   const res = await fetch(`http://127.0.0.1:${port}/control`, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
