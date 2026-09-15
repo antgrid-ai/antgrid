@@ -257,12 +257,26 @@ class HandlerAvailability {
 
   const HandlerAvailability(this.state, {this.reason});
 
-  String? get note => switch (state) {
-    HandlerAvailabilityState.available => null,
-    HandlerAvailabilityState.preparing => reason ?? 'Waiting for agent events',
-    HandlerAvailabilityState.unavailable => reason ?? 'Monitoring unavailable',
-    HandlerAvailabilityState.unknown => reason ?? 'Monitoring not confirmed',
-  };
+  String? get note {
+    return switch (state) {
+      HandlerAvailabilityState.available => null,
+      HandlerAvailabilityState.preparing =>
+        'Waiting for the agent integration to connect.',
+      HandlerAvailabilityState.unknown =>
+        'Waiting for monitoring confirmation.',
+      HandlerAvailabilityState.unavailable => _unavailableNote,
+    };
+  }
+
+  String get _unavailableNote {
+    final detail = reason?.trim();
+    if (detail == null || detail.isEmpty) {
+      return 'Antgrid can\'t monitor this session. Start or restart the agent '
+          'to try again.';
+    }
+    final separator = RegExp(r'[.!?]$').hasMatch(detail) ? ' ' : '. ';
+    return '$detail${separator}Start or restart the agent to try again.';
+  }
 
   static HandlerAvailability? fromWire(dynamic value) {
     if (value is! Map) return null;
@@ -444,9 +458,8 @@ class HandlerSessionState {
   /// [instructions] is actually populated — an older bridge's [goal] fallback
   /// has no retained-count concept of its own, so its total is simply how many
   /// sentences [askedFor] is showing.
-  int get askedForTotal => instructions.isNotEmpty
-      ? instructionsTotal
-      : askedFor.length;
+  int get askedForTotal =>
+      instructions.isNotEmpty ? instructionsTotal : askedFor.length;
 
   // Re-lists every field on purpose, and both callers make that dangerous:
   // `_applyEscalationFloors` and `_dropRows` (`handler_service.dart`) run

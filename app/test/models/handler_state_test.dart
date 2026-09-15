@@ -44,7 +44,10 @@ void main() {
     final session = HandlerSessionState.fromWire(wire)!;
     expect(session.observability, HandlerObservability.full);
     expect(session.availability!.state, HandlerAvailabilityState.unavailable);
-    expect(session.availability!.note, 'Waiting for restart');
+    expect(
+      session.availability!.note,
+      'Waiting for restart. Start or restart the agent to try again.',
+    );
     expect(
       session.copyWith(pendingEscalations: 1).availability,
       same(session.availability),

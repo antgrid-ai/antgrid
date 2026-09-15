@@ -31,6 +31,7 @@ HandlerSessionState sessionState(
   String? judgeTool,
   String? judgeModel,
   HandlerObservability? observability,
+  HandlerAvailability? availability,
 }) => HandlerSessionState(
   terminalId: terminalId,
   runState: HandlerRunState.watching,
@@ -42,6 +43,7 @@ HandlerSessionState sessionState(
   judgeTool: judgeTool,
   judgeModel: judgeModel,
   observability: observability,
+  availability: availability,
 );
 
 HandlerState stateWith({
@@ -188,6 +190,38 @@ Future<void> pumpHandlerScreen(WidgetTester tester, HandlerState state) async {
 }
 
 void main() {
+  group('monitoring availability copy', () {
+    const cases = <HandlerAvailability, String>{
+      HandlerAvailability(HandlerAvailabilityState.preparing):
+          'Waiting for the agent integration to connect.',
+      HandlerAvailability(HandlerAvailabilityState.unknown):
+          'Waiting for monitoring confirmation.',
+      HandlerAvailability(
+        HandlerAvailabilityState.unavailable,
+        reason: 'Agent event stream ended.',
+      ): 'Agent event stream ended. Start or restart the agent to try again.',
+      HandlerAvailability(
+        HandlerAvailabilityState.unavailable,
+        reason: '   ',
+      ): 'Antgrid can\'t monitor this session. Start or restart the agent to try again.',
+    };
+
+    for (final entry in cases.entries) {
+      testWidgets('${entry.key.state.name} presents recovery guidance', (
+        tester,
+      ) async {
+        await pumpHandlerScreen(
+          tester,
+          stateWith(
+            sessions: {'t1': sessionState('t1', availability: entry.key)},
+          ),
+        );
+        expect(find.text(entry.value), findsOneWidget);
+        debugDefaultTargetPlatformOverride = null;
+      });
+    }
+  });
+
   testWidgets('off Handler shows the disabled empty state', (tester) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
     await tester.pumpWidget(
@@ -458,9 +492,7 @@ void main() {
   // The list the user did not touch, changing anyway. They said something, the
   // extractor matched it to a line they had already written, and the drawer may
   // not even have been open — so the row names the surface and quotes the item.
-  testWidgets('an amended row quotes the line that moved', (
-    tester,
-  ) async {
+  testWidgets('an amended row quotes the line that moved', (tester) async {
     await pumpHandlerScreen(
       tester,
       stateWith(sessions: {'t1': sessionState('t1')}).copyWith(
@@ -1486,7 +1518,9 @@ void main() {
       await pumpHandlerScreen(
         tester,
         const HandlerState.initial().copyWith(
-          wrapUps: [wrapUp(blockedTotal: 2, blockedReasons: const ['no /fix'])],
+          wrapUps: [
+            wrapUp(blockedTotal: 2, blockedReasons: const ['no /fix']),
+          ],
         ),
       );
       expect(find.textContaining('Handler is off'), findsNothing);
@@ -1543,7 +1577,10 @@ void main() {
       states.add(
         const HandlerState.initial().copyWith(
           wrapUps: [wrapUp()],
-          snapshots: [snapshot('s1', state: 'undone'), snapshot('s2')],
+          snapshots: [
+            snapshot('s1', state: 'undone'),
+            snapshot('s2'),
+          ],
         ),
       );
       await tester.pump();
@@ -1573,10 +1610,9 @@ void main() {
     testWidgets('sits between Sessions and Undo', (tester) async {
       await pumpHandlerScreen(
         tester,
-        stateWith(sessions: {'t1': sessionState('t1')}).copyWith(
-          wrapUps: [wrapUp()],
-          snapshots: [snapshot('s1')],
-        ),
+        stateWith(
+          sessions: {'t1': sessionState('t1')},
+        ).copyWith(wrapUps: [wrapUp()], snapshots: [snapshot('s1')]),
       );
       final sessions = tester.getTopLeft(find.text('SESSION')).dy;
       final wrapUps = tester.getTopLeft(find.text('WRAP-UP')).dy;
@@ -1635,10 +1671,7 @@ void main() {
           handlerStateProvider.overrideWith(
             (ref) => Stream.value(
               stateWith(
-                sessions: {
-                  't1': sessionState('t1'),
-                  't2': sessionState('t2'),
-                },
+                sessions: {'t1': sessionState('t1'), 't2': sessionState('t2')},
               ).copyWith(
                 activity: [
                   rec('t1', 'answered the lint prompt'),
@@ -1659,7 +1692,10 @@ void main() {
       await tester.pump();
 
       expect(find.textContaining('answered the lint prompt'), findsOneWidget);
-      expect(find.textContaining('answered the migration prompt'), findsNothing);
+      expect(
+        find.textContaining('answered the migration prompt'),
+        findsNothing,
+      );
 
       container.read(activeSessionIdProvider.notifier).set('t2');
       await tester.pump();
@@ -1713,9 +1749,9 @@ void main() {
             ),
             handlerStateProvider.overrideWith(
               (ref) => Stream.value(
-                stateWith(sessions: {'t1': sessionState('t1')}).copyWith(
-                  activity: [rec('t1', 'answered the lint prompt')],
-                ),
+                stateWith(
+                  sessions: {'t1': sessionState('t1')},
+                ).copyWith(activity: [rec('t1', 'answered the lint prompt')]),
               ),
             ),
           ],
@@ -1795,10 +1831,8 @@ void main() {
 
     /// Scoped to the card, because the session card below it renders the same
     /// backlog item texts from its own list.
-    Finder onCard(Finder inner) => find.descendant(
-      of: find.byType(HandlerDecisionCard),
-      matching: inner,
-    );
+    Finder onCard(Finder inner) =>
+        find.descendant(of: find.byType(HandlerDecisionCard), matching: inner);
 
     testWidgets('with options draws one emphasised answer and its cost', (
       tester,
@@ -1973,10 +2007,7 @@ void main() {
       );
       await pumpDelivery(tester);
 
-      expect(
-        onCard(find.text(handlerAskNothingRunningNote)),
-        findsOneWidget,
-      );
+      expect(onCard(find.text(handlerAskNothingRunningNote)), findsOneWidget);
       expect(onCard(find.textContaining('Still working on')), findsNothing);
     });
 
@@ -2032,7 +2063,8 @@ void main() {
               options: [
                 {
                   'choiceId': 'opt1',
-                  'label': 'Ship it behind a flag and take the flag out once '
+                  'label':
+                      'Ship it behind a flag and take the flag out once '
                       'the rollout has settled',
                   'cost': 'One config key to take out later',
                 },
