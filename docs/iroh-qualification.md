@@ -1,6 +1,6 @@
 # Iroh migration qualification
 
-Checkpoint: 2026-09-14. **Release gate not passed. Branch implementation is in progress.**
+Checkpoint: 2026-09-15. **Release gate not passed. Branch implementation is in progress.**
 
 Production-path implementation and current checks are tracked in the
 [task ledger](iroh-migration-ledger.md); [operations](iroh-operations.md) describes
@@ -11,7 +11,7 @@ The user has approved implementing the full migration on this isolated branch,
 then qualifying it in staging before production rollout. Physical Android/iOS,
 remaining release targets, security and performance remain **release gates**;
 they no longer block implementation on the branch. See the
-[continuation handoff](iroh-migration-handoff.md) for the latest sequencing decision.
+[task ledger](iroh-migration-ledger.md) for the latest sequencing decision.
 This checkpoint now includes a Windows encrypted-terminal prototype
 using the existing E2E/session drivers, real PTYs, project multiplexing and rekey,
 plus compiled packaging and rejection tests. It uses fixtures for central
@@ -61,11 +61,9 @@ criterion or mobile/forced-relay release gate has been measured.
   Bound connections, pending admissions and traffic; collect usage without new
   billing quotas. Approved environment-specific relays only; no implicit public
   relay fallback and no customer-held shared admission secret.
-- Drop Intel macOS for new releases after qualification. Coordinate bridge
-  compilation, Flutter/native packaging, metadata and updater eligibility so
-  existing Intel installations cannot receive incompatible updates. Retain
-  Apple Silicon and other existing targets. Current release files are unchanged
-  at this incomplete gate.
+- Intel macOS builds and universal assembly are removed. New macOS artifacts
+  and updater metadata target Apple Silicon. No historical-client transition
+  is required. Signed Apple Silicon packaging remains unqualified.
 - Keep ELv2 implementation out of Apache packages. Browser P2P, central-WebSocket
   removal, custom UDP and additional QUIC streams are outside scope.
 

@@ -13,7 +13,7 @@ are preserved. Status refers to production implementation, not prototype smoke.
 | Protected keys / authoritative leases | Implemented | Native Dart: 15 passed, analysis clean; restored secure records and missing enrollment fail closed; desktop resume fences host leases |
 | Upstream relay hooks / Rust service | Implemented, staging unqualified | Locked upstream 1.2.0 service; six fence/accounting tests and actual TLS routing/disconnect test passed, including older 1.0.0 protocol compatibility; combined real backend/service gate passed 11 assertions |
 | Native host/app integration / selection | Implemented | Source and compiled HostServer/native/E2E smoke passed terminal input/output, frame ACKs, managed-checkout Git, two projects, central outage and immediate remote-access-off |
-| Packaging / Apple Silicon / operations | Partially verified | Flutter-built Windows native DLL passed compiled Dart smoke; full app build blocked by missing Visual Studio ATL; CI/monitoring YAML and Compose config parse; Docker daemon/physical builds unavailable |
+| Packaging / Apple Silicon / operations | Partially verified | Flutter-built Windows native DLL passed compiled Dart smoke; full Windows debug app build passed after Rust PATH and Visual Studio ATL setup; CI/monitoring YAML and Compose config parse; Docker daemon/physical builds unavailable |
 | Final local gates | Component gates passed; full E2E not clean | Wire 119 passed; relay 193 passed; Flutter 4,208 passed, two skipped, analysis clean; original full E2E sweep: 106 passed, 28 skipped, 20 failures; 13 fixture regressions corrected/rechecked; installed-agent follow-up below; uncommitted-vector guard remains |
 | Physical/staging/security/performance qualification | Unqualified | Operator infrastructure and physical platforms required |
 
@@ -35,7 +35,7 @@ diagnostics did not distinguish credential access from network access.
 Chat collectors now honor the full bounded turn deadline and surface driver
 errors. Claude response evidence requires an assistant message, rather than the
 echoed user prompt. Dedicated Claude/Codex workspace scripts support focused
-reruns. See [Claude evidence](iroh-e2e-claude-handoff.md).
+reruns: `test:evals:claude` and `test:evals:codex` in the eval workspace.
 
 Envelope vector regeneration produced identical bytes and its five schema tests
 passed (37 assertions). The committed/git-clean guard is unchanged and remains
@@ -70,8 +70,7 @@ Iroh or forced-relay qualification.
 
 The subsequent multi-project smoke exposed a host-resume notification gap:
 WebSocket E2E keys were erased while the central carrier remained connected,
-leaving the phone waiting for liveness recovery. The current patch and pending
-verification are recorded in [the resume investigation handoff](iroh-resume-investigation-handoff.md).
+leaving the phone waiting for liveness recovery. The verified fix is described below.
 
 ## Resume recovery follow-up â€” September 15
 
@@ -83,13 +82,54 @@ verification are recorded in [the resume investigation handoff](iroh-resume-inve
   input is discarded on peer restart. Bridge focused suites, bridge/eval
   typechecks and Dart rekey/flow-control suites pass. Flutter analysis reports
   no issues after the shared-client change.
-- Live Aspire host has not been restarted; changes remain uncommitted. Full
-  details and current verification state: `iroh-resume-investigation-handoff.md`.
+- Resume fixes were committed in `7a86e6dd`; live desktop host sleep/wake remains unqualified.
 
 ### Android resume follow-up — September 15
 
-Removed duplicate foreground authorization invalidation and fixed admission joining a pre-resume lease request. Reproduced both lease races before the fix. Verified 15 pure-Dart tests, 19 Flutter tests, both analysis gates and three live emulator resume cycles (2.754–3.256 seconds to E2E). Android hot restart only; host terminals kept running. Details and evidence: docs/iroh-smoke-2026-09-15.md. Changes uncommitted; long-sleep and native qualification remain open.
+Removed duplicate foreground authorization invalidation and fixed admission joining a pre-resume lease request. Reproduced both lease races before the fix. Verified 15 pure-Dart tests, 19 Flutter tests, both analysis gates and three live emulator resume cycles (2.754-3.256 seconds to E2E). Android hot restart only; host terminals kept running. Evidence remains in ignored `.tmp/android-resume-validation*` artifacts. These changes are committed in `7a86e6dd`; longer sleep and native qualification remain open.
 
 ## Follow-up commit and user validation
 
-The user reported successful validation after two minutes backgrounded on September 15. No additional timing measurements or logs were supplied for that run. This commit includes the Windows setup documentation, emulator connection and host/Android resume fixes, regression tests and investigation records. Earlier uncommitted-status notes are historical. Token minting still has no explicit HTTP request timeout; longer sleep, network-transition, physical-device and native Iroh qualification remain open. No production preference was enabled.
+The user reported successful validation after two minutes backgrounded on September 15. No additional timing measurements or logs were supplied for that run. This commit includes the Windows setup documentation, emulator connection and host/Android resume fixes, regression tests and investigation records. Earlier uncommitted-status notes are historical. The token HTTP deadline is addressed below; longer sleep, network-transition, physical-device and native Iroh qualification remain open. No production preference was enabled.
+
+## Authentication timeout fixes - September 15
+
+App token minting, inventory, sign-in/session calls and device operations now
+use a 15-second HTTP deadline covering headers and body, with request abortion.
+Bridge token minting has the same bound. Late timed-out responses cannot update
+tokens or invoke bridge revocation callbacks. Bridge maintenance also ignores
+renewal completion after stop. Both maintenance loops retry mint directly after
+30 seconds on failure instead of adding another TTL-based delay.
+
+Device mutation timeouts retain their existing error contracts and never
+trigger automatic replay. A timeout does not establish whether the server
+applied the mutation; reconcile account state before retrying.
+
+Verification: 100 focused Flutter tests and 13 bridge OAuth tests passed.
+Full serial Flutter analysis, bridge typecheck and `git diff --check` passed.
+Coverage includes stalled headers/body, late responses, retry timing, sign-out
+cleanup and device timeout/no-replay. These timeout changes have not been loaded
+into the running Aspire instances.
+
+## Remaining release blockers
+
+WebSocket remains the default. No production preference or deployment is enabled.
+The current native binding lacks verified typed close causes, precise path-byte
+telemetry and explicit zeroization of upstream-owned key copies. Unknown native
+failures remain terminal. Apple bundled-only native loading still needs a
+supported verified path or upstream API. Endpoint history forbids seed reuse
+following revocation; reseeding/re-enrollment UX needs lifecycle qualification.
+
+Real Dart/app plus bridge QUIC/E2E over direct WAN and the self-hosted forced relay,
+physical mobile and remaining desktop packages, signed artifact verification,
+container deployment, resource/race workloads and performance acceptance remain
+unqualified. Local TLS relay packet gates and fixture-controlled native host
+smokes do not establish those results. Lifecycle telemetry still needs dedicated
+central authentication/discovery, E2E, project-binding, usable-terminal, CPU,
+memory and path-byte measurements. Outbox retention and billing invalidation
+load also need operational qualification. See the security, packaging and
+upstream relay reviews, qualification record and operations guide.
+
+Temporary agent handoffs and dated investigation logs were consolidated into
+this ledger. Historical detail remains in Git history; local capture artifacts
+remain ignored rather than becoming permanent repository documentation.

@@ -1,10 +1,70 @@
+import 'dart:async';
 import 'dart:convert';
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:antgrid/services/license_token_minter.dart';
 
 void main() {
+  test('failed renewal retries after 30 seconds without another TTL delay', () {
+    fakeAsync((clock) {
+      var calls = 0;
+      final minter = LicenseTokenMinter(
+        licenseApiUrl: 'https://api.antgrid.test',
+        clientId: 'cid',
+        clientSecret: 'secret',
+        httpClient: MockClient((_) async {
+          if (++calls == 2) throw Exception('offline');
+          return http.Response(
+            '{"access_token":"fresh","expires_in":3600}',
+            200,
+          );
+        }),
+      );
+      unawaited(minter.start());
+      clock.flushMicrotasks();
+      clock.elapse(const Duration(seconds: 2880));
+      expect(calls, 2);
+      clock.elapse(const Duration(seconds: 29));
+      expect(calls, 2);
+      clock.elapse(const Duration(seconds: 1));
+      expect(calls, 3);
+      minter.stop();
+      clock.elapse(const Duration(hours: 1));
+      expect(calls, 3);
+    });
+  });
+
+  test(
+    'timed-out mint can retry and late response cannot replace token',
+    () async {
+      final delayed = Completer<http.Response>();
+      var calls = 0;
+      final minter = LicenseTokenMinter(
+        licenseApiUrl: 'https://api.antgrid.test',
+        clientId: 'cid',
+        clientSecret: 'secret',
+        requestTimeout: const Duration(milliseconds: 20),
+        httpClient: MockClient((_) async {
+          if (++calls == 1) return delayed.future;
+          return http.Response(
+            '{"access_token":"fresh","expires_in":3600}',
+            200,
+          );
+        }),
+      );
+      await expectLater(minter.mint(), throwsA(isA<TimeoutException>()));
+      expect(minter.getToken(), isNull);
+      expect(await minter.mint(), 'fresh');
+      delayed.complete(
+        http.Response('{"access_token":"old","expires_in":3600}', 200),
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(minter.getToken(), 'fresh');
+    },
+  );
+
   test(
     'mint() POSTs client_credentials form and returns access_token',
     () async {

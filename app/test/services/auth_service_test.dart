@@ -1,4 +1,6 @@
 import 'dart:convert';
+import 'dart:async';
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -65,6 +67,32 @@ class _ClearFailingStorage extends _InMemoryStorage {
 }
 
 void main() {
+  test('sign-out clears local credentials when the server stalls', () {
+    fakeAsync((clock) {
+      final storage = _InMemoryStorage().._cookie = 'session=value';
+      final response = Completer<http.Response>();
+      var calls = 0;
+      final auth = AuthService(
+        licenseApiUrl: 'https://api.antgrid.test',
+        storage: storage,
+        httpClient: MockClient((_) {
+          calls++;
+          return response.future;
+        }),
+      );
+      var done = false;
+      auth.signOut().then((_) => done = true);
+      clock.flushMicrotasks();
+      clock.elapse(const Duration(seconds: 15));
+      expect(done, isTrue);
+      expect(storage._cookie, isNull);
+      expect(calls, 1);
+      response.complete(http.Response('', 200));
+      clock.flushMicrotasks();
+      expect(storage._cookie, isNull);
+    });
+  });
+
   group('AuthService', () {
     test('OAuth start URI uses a relative same-origin handoff', () {
       final uri = buildOAuthStartUri(
