@@ -4,5 +4,3 @@ dist/
 test-results/
 playwright-report/
 .env
-.test-output/
-.test-cache/

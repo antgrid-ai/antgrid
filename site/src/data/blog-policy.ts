@@ -1,10 +1,12 @@
 import { z } from "astro/zod";
+import type { ImageMetadata } from "astro";
 
 export const topics = { proof: "Proof", engineering: "Engineering", security: "Security", "field-notes": "Field notes" } as const;
 const text = z.string().trim().min(1);
 const localImage = text.regex(/^\/(?!\/)[^?#]+\.(png|jpe?g|webp|avif|svg)$/i, "Use a site-relative image path");
+export const coverImagePath = text.regex(/^\.\.?\/[^?#]+\.(png|jpe?g|webp|avif|svg)$/i, "Use an image path relative to the article, outside public/");
 const date = z.union([z.date(), z.iso.date(), z.iso.datetime({ offset: true })]).pipe(z.coerce.date());
-export const blogSchema = z.object({
+export const createBlogSchema = <T extends z.ZodType>(cover: T) => z.object({
   title: text,
   description: text,
   publishedAt: date,
@@ -13,7 +15,7 @@ export const blogSchema = z.object({
   author: text,
   draft: z.boolean(),
   featured: z.boolean().default(false),
-  coverImage: localImage.optional(),
+  coverImage: cover.optional(),
   coverImageAlt: text.optional(),
   ogImage: localImage.optional(),
   ogImageAlt: text.optional(),
@@ -30,7 +32,8 @@ export const blogSchema = z.object({
   }
 });
 
-export type BlogData = z.infer<typeof blogSchema>;
+export const blogSchema = createBlogSchema(coverImagePath);
+export type BlogData = Omit<z.infer<typeof blogSchema>, "coverImage"> & { coverImage?: string | ImageMetadata };
 export type BlogPost = { id: string; data: BlogData; body?: string };
 export function publishedPosts<T extends BlogPost>(entries: T[]): T[] {
   const posts = entries.filter((post) => !post.data.draft).sort((a, b) => b.data.publishedAt.getTime() - a.data.publishedAt.getTime() || a.id.localeCompare(b.id, "en"));

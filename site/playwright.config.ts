@@ -2,7 +2,7 @@ import { defineConfig, devices } from "@playwright/test";
 
 export default defineConfig({
   testDir: "./tests",
-  testIgnore: ["**/blog/**", "**/unit/**"],
+  testIgnore: ["**/unit/**"],
   fullyParallel: true,
   webServer: {
     command: "bun run build && bun run preview --port 4321",

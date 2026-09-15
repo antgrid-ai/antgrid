@@ -1,11 +1,11 @@
 import { defineCollection } from "astro:content";
 import { glob } from "astro/loaders";
-import { blogSchema } from "./data/blog-policy";
+import { createBlogSchema } from "./data/blog-policy";
 
 export const collections = {
   blog: defineCollection({
     loader: glob({
-      base: process.env.ANTGRID_BLOG_FIXTURES || "./src/content/blog",
+      base: "./src/content/blog",
       pattern: "*.md",
       generateId: ({ entry }) => {
         const slug = entry.replace(/\.md$/, "");
@@ -13,6 +13,6 @@ export const collections = {
         return slug;
       },
     }),
-    schema: blogSchema,
+    schema: ({ image }) => createBlogSchema(image()),
   }),
 };

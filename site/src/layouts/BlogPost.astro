@@ -1,5 +1,7 @@
 ---
 import Base from "./Base.astro";
+import { Image } from "astro:assets";
+import { getBlogImageOptions } from "../../scripts/blog-image-options.mjs";
 import PostMeta from "../components/blog/PostMeta.astro";
 import { formatDate, postPath, type BlogPost } from "../data/blog-policy";
 import { links, SITE_URL } from "../config";
@@ -7,6 +9,7 @@ import "../styles/blog.css";
 interface Props { post: BlogPost; related: BlogPost[] }
 const { post, related } = Astro.props;
 const { data } = post;
+if (typeof data.coverImage === "string") throw new Error(`${post.id}: cover image was not resolved by the content collection`);
 const action = data.action ?? { label: "Explore Antgrid on GitHub", href: links.repo, category: "github" };
 const structuredData = {
   "@context": "https://schema.org", "@type": "BlogPosting",
@@ -29,7 +32,7 @@ const structuredData = {
         <p class="blog-deck">{data.description}</p>
         <p class="blog-byline">By {data.author}{data.updatedAt && <> · Updated <time datetime={data.updatedAt.toISOString()}>{formatDate(data.updatedAt)}</time></>}</p>
       </header>
-      {data.coverImage && <img class="blog-cover" src={data.coverImage} alt={data.coverImageAlt} />}
+      {data.coverImage && <Image {...getBlogImageOptions(data.coverImage.format)} class="blog-cover" src={data.coverImage} alt={data.coverImageAlt!} loading="eager" fetchpriority="high" decoding="async" />}
       <div class="blog-prose"><slot /></div>
       <footer class="blog-post-footer">
         {data.claimsVerifiedAt && <p class="blog-verification">Product details verified against <a href={`${links.repo}/commit/${data.claimsVerifiedAt}`}><code>antgrid@{data.claimsVerifiedAt}</code></a>.</p>}
