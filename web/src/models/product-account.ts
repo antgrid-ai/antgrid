@@ -17,16 +17,14 @@ export async function findProductAccountByUserId(
   return db.productAccount.findUnique({ where: { userId } });
 }
 
-/** The `accountId IS NULL OR accountId = <new>` guard is load-bearing, not
- *  defensive noise: `ensureProductAccount` runs on nearly every authenticated
- *  request, and without it a member's `user.account_id` would be stomped back
- *  from their team to their personal account on each one. It reads like a no-op
- *  because the only subject it declines to write is a member. */
+/** Only ever fills a NULL. A member's `user.account_id` points at their team
+ *  while this is called with the account they OWN, so an unguarded write would
+ *  stomp them back to their personal account on every authenticated request —
+ *  and matching the value about to be written is no safer: `peer_user_policy`
+ *  fires on the UPDATE statement rather than on a value change, so re-writing
+ *  the identical id retires that account's live peer connections each time. */
 async function syncUserAccountId(db: Tx, userId: string, accountId: string): Promise<void> {
-  await db.user.updateMany({
-    where: { id: userId, OR: [{ accountId: null }, { accountId }] },
-    data: { accountId },
-  });
+  await db.user.updateMany({ where: { id: userId, accountId: null }, data: { accountId } });
 }
 
 export async function ensureProductAccount(db: Tx, userId: string): Promise<ProductAccountRow> {

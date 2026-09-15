@@ -250,6 +250,26 @@ describe("endpoint enrollment transactions", () => {
     expect(after.allowed).toBe(false);
     expect(BigInt(after.policyGeneration)).toBeGreaterThan(BigInt(before.policyGeneration));
   });
+  test("a no-op account_id write leaves the policy generation alone", async () => {
+    await provisionProductAccountForUser(pg.db, identity.userId);
+    const before = await peerAuthorizationSnapshot(pg.db, identity, []);
+    await pg.db.$executeRawUnsafe('UPDATE "user" SET account_id = account_id');
+    expect((await peerAuthorizationSnapshot(pg.db, identity, [])).policyGeneration).toBe(before.policyGeneration);
+  });
+  test("a billing change invalidates that account's users and no one else", async () => {
+    const account = await provisionProductAccountForUser(pg.db, identity.userId);
+    const strangerId = randomUUID();
+    await pg.db.user.create({ data: { id: strangerId, name: "stranger", email: `${strangerId}@example.com`, emailVerified: true } });
+    await provisionProductAccountForUser(pg.db, strangerId);
+    const mine = await peerAuthorizationSnapshot(pg.db, identity, []);
+    const theirs = await pg.db.peerAuthorizationPolicy.upsert({ where: { userId: strangerId },
+      create: { userId: strangerId }, update: {} });
+    await pg.db.subscription.updateMany({ where: { accountId: account.id }, data: { status: "canceled" } });
+    const after = await peerAuthorizationSnapshot(pg.db, identity, []);
+    expect(BigInt(after.policyGeneration)).toBeGreaterThan(BigInt(mine.policyGeneration));
+    expect((await pg.db.peerAuthorizationPolicy.findUniqueOrThrow({ where: { userId: strangerId } })).generation)
+      .toBe(theirs.generation);
+  });
   test("approved relay configuration advances policy even without an enrolled endpoint", async () => {
     const before = await peerAuthorizationSnapshot(pg.db, identity, []);
     const after = await peerAuthorizationSnapshot(pg.db, identity, ["https://relay.example/"]);
