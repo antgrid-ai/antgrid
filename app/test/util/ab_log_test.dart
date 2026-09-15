@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:antgrid/launcher/host_discovery.dart';
 import 'package:antgrid/util/ab_log.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -97,6 +98,21 @@ void main() {
     final o = readLines().single;
     expect(o['msg'], 'survived');
     expect(o['level'], 50);
+  });
+
+  test('an unconfigured writer leaves the dev rig app.log alone', () async {
+    // The suite resolves the same hostDir() a debug app uses, so a default
+    // writer appends fixture output to the live log of whatever app is
+    // running — where a fake supervisor's zero-delay backoff reads as a real
+    // retry storm. Matched on a marker rather than a length, because the
+    // running app may legitimately write during this test.
+    AbLog.dispose();
+    final marker = 'unconfigured-${DateTime.now().microsecondsSinceEpoch}';
+    AbLog.warn('AbLogTest', marker);
+    await AbLog.flush();
+    final live = File('${hostDir()}/app.log');
+    final written = live.existsSync() ? live.readAsStringSync() : '';
+    expect(written, isNot(contains(marker)));
   });
 
   test('creates the parent directory when it does not exist yet', () async {
