@@ -538,34 +538,39 @@ afterEach(async () => {
   rmSync(abDir, { recursive: true, force: true });
 });
 
-test("gate 1: ingest is refused and the mirror cleared when remote access is off", async () => {
+test("ingest is accepted while this machine's own remote access is off (E15)", async () => {
+  // The rows describe PEERS, each offered under that peer's own switch and its
+  // own agent-reach bit, so mirroring one discloses nothing about this machine.
+  // This machine's switch says who may reach IN; it has no say in what this
+  // machine may be told about who is out there.
+  const h = host!;
+  giveMachineIdentity(h, "self-machine");
+  await setMobileAccess(h, false);
+
+  const res = await ask(h, pushRequest([push({ machineId: "peer-1", rows: [wireRow({ sessionId: "a" })] })]));
+
+  expect(res.ok).toBe(true);
+  expect(res.accepted).toBe(1);
+  expect((h as any).remoteDirectory.lastPushAt()).not.toBeNull();
+});
+
+test("turning remote access off leaves the mirror intact (E15)", async () => {
+  // Dropping the rows on the flip would leave a session here reading
+  // UNKNOWN_PEER for peers that are answering perfectly — it may still open an
+  // exchange with one, and it needs the row to address it.
   const h = host!;
   giveMachineIdentity(h, "self-machine");
   await setMobileAccess(h, true);
   await ask(h, pushRequest([push({ machineId: "peer-1", rows: [wireRow({ sessionId: "a" })] })]));
-  expect((h as any).remoteDirectory.lastPushAt()).not.toBeNull();
-
-  await setMobileAccess(h, false);
-  const res = await ask(h, pushRequest([push({ machineId: "peer-1", rows: [wireRow({ sessionId: "b" })] })]));
-
-  expect(res.ok).toBe(false);
-  expect(res.error.code).toBe("NOT_ALLOWED");
-  expect((h as any).remoteDirectory.lastPushAt()).toBeNull();
-});
-
-test("gate 1: turning remote access off clears the mirror immediately, with no push required", async () => {
-  const h = host!;
-  giveMachineIdentity(h, "self-machine");
-  await setMobileAccess(h, true);
-  await ask(h, pushRequest([push({ machineId: "peer-1", rows: [wireRow({ sessionId: "a" })] })]));
-  expect((h as any).remoteDirectory.lastPushAt()).not.toBeNull();
+  const pushedAt = (h as any).remoteDirectory.lastPushAt();
+  expect(pushedAt).not.toBeNull();
 
   await setMobileAccess(h, false);
 
-  expect((h as any).remoteDirectory.lastPushAt()).toBeNull();
+  expect((h as any).remoteDirectory.lastPushAt()).toBe(pushedAt);
 });
 
-test("gate 2: ingest is refused when this machine has no relay identity", async () => {
+test("gate 1: ingest is refused when this machine has no relay identity", async () => {
   const h = host!;
   await setMobileAccess(h, true);
   // No giveMachineIdentity() call: controlPlaneRegistrationId stays null, the
@@ -579,7 +584,7 @@ test("gate 2: ingest is refused when this machine has no relay identity", async 
   expect((h as any).remoteDirectory.lastPushAt()).toBeNull();
 });
 
-test("gate 3: a push is sanitised and counted, reporting accepted/dropped rather than failing the whole push", async () => {
+test("gate 2: a push is sanitised and counted, reporting accepted/dropped rather than failing the whole push", async () => {
   const h = host!;
   giveMachineIdentity(h, "self-machine");
   await setMobileAccess(h, true);

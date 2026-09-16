@@ -6,10 +6,9 @@
 
 export const SESSION_BUS_ERRORS = {
   /** Membership is binary: a caller either names a session this bridge holds
-   *  or it does not. Not the only 403 — `REMOTE_ACCESS_OFF` below is the
-   *  other, and it is about the machine rather than the caller, so a surface
-   *  that has lost the code and is reading back from the status alone cannot
-   *  tell the two apart. */
+   *  or it does not. The bus's only 403 since E15 retired `REMOTE_ACCESS_OFF`,
+   *  so a surface reading back from the status alone now has one thing it can
+   *  mean. */
   NOT_MEMBER: 403,
   /** A send whose address resolves to nothing: {@link SessionDirectory.rowFor}
    *  found no row, local or mirrored, for the machine/project/session it was
@@ -27,18 +26,18 @@ export const SESSION_BUS_ERRORS = {
    *  else is on it. */
   NOT_ADDRESSABLE: 409,
   UNKNOWN_ARTIFACT: 404,
-  /** §7.3: a `notify` addressed at a session that is not running. Refused
-   *  rather than queued, because a stopped session never reaches the turn
-   *  boundary a notify waits for, and starting it on the sender's behalf is
-   *  not available — the session belongs to someone else. The text must name
-   *  `post` as the verb that still reaches: a post lands in the mailbox
-   *  whether or not anything is running to read it yet. */
+  /** §7.3: a `notify` addressed at a session that is not running. A stopped
+   *  session never reaches the turn boundary a notify waits for — but for a
+   *  SAME-MACHINE target this host can start on its own authority, `api.ts`
+   *  wakes it instead of refusing (see `SessionBusApiDeps.startSession`), and
+   *  this code never fires for that case. It still fires whenever waking is
+   *  not available: a cross-machine target (starting a process on someone
+   *  else's machine on the sender's behalf is not this host's call), a
+   *  same-machine target on a project this host has not warmed, or any caller
+   *  with no `startSession` hook wired at all. The text must name `post` as
+   *  the verb that still reaches: a post lands in the mailbox whether or not
+   *  anything is running to read it yet. */
   NOT_RUNNING: 409,
-  /** §6.3's send half: this machine's own remote-access switch is off, so a
-   *  frame addressed at another machine is refused here, where the sending
-   *  agent can see why, rather than accepted and left to queue undelivered
-   *  forever behind a switch nobody is going to flip from in here. */
-  REMOTE_ACCESS_OFF: 403,
   /** The two per-pair ceilings of §7.4, and they stay two codes on purpose:
    *  `NOTIFY_RATE` is a rolling-hour rate limit the pair simply waits out and
    *  refuses one verb, naming `post` as the one that still reaches; `NO_PROGRESS`

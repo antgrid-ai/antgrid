@@ -326,6 +326,15 @@ export interface AgentCore {
    *  initialized yet (pre-handshake). The control-plane delete RPC calls this
    *  for a warm core so the on-disk file and in-memory state stay consistent. */
   deleteSession(id: string, options?: DeleteSessionOptions): boolean | Promise<boolean>;
+  /** Starts (or re-announces) a session this core owns, by id, with no initial
+   *  prompt — the same bare restart `session:start` drives. Fire-and-forget: a
+   *  caller that needs the outcome watches `session:updated` rather than
+   *  awaiting this. A no-op for an id this core does not hold, or one already
+   *  running. Exists for the session-bus wake path (§7.3's same-machine
+   *  carve-out) — `host-server.ts` resolves the owning core by session id and
+   *  calls through here, since only that core's own `SessionManager` can start
+   *  a session it persists. */
+  startSession(id: string): void;
   /** Live session list with true per-session `running` (via SessionManager's
    *  in-memory PTY/chat sets), for the control-plane `sessions.list` peek when a
    *  warm core owns the project — the disk-only `readPersisted` reports every
@@ -495,6 +504,16 @@ export interface BuildAgentCoreOptions {
    *  means `listSessions` is refused rather than narrowed — see
    *  `SessionBusApiDeps.directory`. */
   sessionDirectory?: SessionDirectory;
+  /** Host-level hook that starts a session THIS MACHINE holds, by id, wherever
+   *  it lives — this core's own project or a sibling one. Travels with
+   *  `sessionDirectory` and resolves the same way `deliverLocal` does
+   *  (`host-server.ts`'s `sessionIndex.lookup` → the owning warm core →
+   *  `ProjectCore.startSession`). Absent means the session-bus §7.3 wake never
+   *  fires — a bare core with no host, or a session on a project this host has
+   *  not warmed, cannot be started from here. Returns false when no warm core
+   *  holds that session (never throws); true only means the start was asked
+   *  for, not that it finished — see `SessionBusApiDeps.startSession`. */
+  startSession?: (sessionId: string) => boolean;
   /** Hand one rendered line to the turn-boundary queue that owns delivery
    *  (spec 5.2). Absent means there is no queue to hold it: the turn-open set
    *  lives in the reduction ABOVE this core, so a core built without one has
@@ -1317,6 +1336,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // caller's slot resolves its own session; a service PTY names none and is
     // answered as having no bus surface at all.
     ...(opts.sessionDirectory ? { directory: opts.sessionDirectory } : {}),
+    ...(opts.startSession ? { startSession: opts.startSession } : {}),
     membership: (terminalId) => {
       const entry = sessions?.get(terminalId);
       if (!entry) return null;
@@ -1326,9 +1346,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       };
     },
     carrierPresent: () => opts.carrierPresent?.() ?? false,
-    // The same live read `remoteFrameAllowed` gates inbound frames with, so the
-    // switch answers one way for both directions at any instant.
-    remoteAccessEnabled,
   });
 
   /** A re-sync push reaches EVERY bus subscriber, so it may only be skipped when
@@ -5116,6 +5133,17 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       };
       const result = sessions.delete(id, options);
       return result instanceof Promise ? result.then(sweep) : sweep(result);
+    },
+    startSession(id: string): void {
+      // Swallowed rather than surfaced: the caller (the session-bus wake path)
+      // has already answered its own caller before this settles, matching
+      // `runAgentUpdate`'s "one dead restart must not sink the rest" — a start
+      // that fails leaves the notify held exactly as it would be for a session
+      // whose real restart failed for any other reason.
+      try {
+        const result = sessions?.start(id);
+        if (result instanceof Promise) result.catch(() => {});
+      } catch { /* fire-and-forget */ }
     },
     listSessions(includeArchived: boolean): SessionEntry[] | null {
       return sessions ? sessions.list(includeArchived) : null;

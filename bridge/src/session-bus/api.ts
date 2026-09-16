@@ -319,14 +319,15 @@ export interface SessionBusApiDeps {
   /** Whether this machine's own desktop app — the carrier for a remote leg — is
    *  attached. */
   carrierPresent: () => boolean;
-  /** Whether this machine is reachable from mobile at all — the same switch
-   *  {@link SessionBusApiDeps.carrierPresent}'s frame delivery answers to. Read
-   *  by the verb layer's own gate (§6.3): a leg that leaves this machine with
-   *  the switch off is refused where the agent can see the refusal, rather than
-   *  queued and silently undelivered. Per-pair spend is NOT here — the
-   *  coordinator charges and refuses it at the single point every frame
-   *  leaves through, so no caller of this API can spend around it. */
-  remoteAccessEnabled: () => boolean;
+  /** §7.3's same-machine carve-out: starts a session THIS HOST holds, by id.
+   *  Absent means the wake never fires and a stopped session is always
+   *  refused `NOT_RUNNING`, same as before this existed — a bare bus in a
+   *  unit test, or any caller with no host above it, gets the unconditional
+   *  refusal. Returns false for a session this host does not currently hold
+   *  warm (never throws); true only means a start was asked for, not that it
+   *  finished — the notify is let through either way and rides the same
+   *  "line held across a restart" delivery edge a real restart already uses. */
+  startSession?: (sessionId: string) => boolean;
   now?: () => number;
   newId?: () => string;
 }
@@ -543,23 +544,21 @@ export function createSessionBusApi(deps: SessionBusApiDeps): SessionBusApi {
       sessionId: addr.sessionId,
     };
 
-    // AHEAD of the row read, because each is a fact about THIS machine that
-    // needs no row to decide — and because each is itself what empties the
-    // mirror a row would come from. Read after it, both would be reachable only
-    // in the seconds between a switch flip and the next push, and every
-    // steady-state send would answer "no session with that address": an agent
-    // would re-read the directory, find it empty, and conclude the peer does
-    // not exist rather than tell its human to flip one switch.
+    // AHEAD of the row read, because it is a fact about THIS machine that needs
+    // no row to decide — and because it is itself what fills the mirror a row
+    // would come from. Read after it, an absent carrier would be reachable only
+    // in the window between the app detaching and the mirror aging out, and
+    // every steady-state send would answer "no session with that address": an
+    // agent would re-read the directory, find it empty, and conclude the peer
+    // does not exist rather than that nothing is carrying its messages.
+    //
+    // THIS machine's remote-access switch is deliberately NOT read here (E15).
+    // It governs what may be done TO this machine, not what this machine may
+    // do: a send leaves over the loopback carrier, and the answer returns down
+    // that same loopback socket, so neither leg is the inbound traffic the
+    // switch exists to refuse. The target machine's own switch is what decides
+    // whether a send is welcome, and it decides it there.
     if (!namesMachine(target.machineId, selfMachineId)) {
-      // §6.3's send half, refused where the sending agent can read it rather
-      // than accepted and left queued behind a switch only a human at this
-      // machine can flip.
-      if (!deps.remoteAccessEnabled()) {
-        return refuse(
-          "REMOTE_ACCESS_OFF",
-          "this machine's remote access is off, so nothing may leave it; a session on this machine is still reachable",
-        );
-      }
       // The desktop app carries every off-machine leg (§6.1). Without it the
       // send would answer sent:false with the message held, which every surface
       // renders as a success.
@@ -596,11 +595,25 @@ export function createSessionBusApi(deps: SessionBusApiDeps): SessionBusApi {
     // boundary. An idle one reaches it at once — the delivery queue hands a line
     // to an idle session immediately — so refusing there would refuse a live
     // peer at rest, which is what every session is between turns.
+    //
+    // A SAME-MACHINE target narrows the refusal: this bridge can start a
+    // session it already holds, so it does, and lets the send through — the
+    // message rides `coordinator.message()`'s ordinary path into the delivery
+    // queue exactly as it would for an already-running target, and the queue
+    // already knows how to hold a line for a session with no turn yet and
+    // flush it the moment that session reports itself running (the same edge
+    // "a line held across a restart" uses). A cross-machine target is still
+    // refused unconditionally: starting a process on another machine is not
+    // this host's call to make on the sender's behalf, whoever is on the other
+    // end of it.
     if (verb === "notify" && row.activity === "stopped") {
-      return refuse(
-        "NOT_RUNNING",
-        "that session is not running, so it will not reach the turn boundary a notify waits for; antgrid_post lands in its mailbox instead",
-      );
+      const woken = namesMachine(target.machineId, selfMachineId) && (deps.startSession?.(target.sessionId) ?? false);
+      if (!woken) {
+        return refuse(
+          "NOT_RUNNING",
+          "that session is not running, so it will not reach the turn boundary a notify waits for; antgrid_post lands in its mailbox instead",
+        );
+      }
     }
 
     const attached = partsForArtifacts(m.sessionId, req.artifactIds);

@@ -2502,7 +2502,7 @@ const SessionBusReachMachineSchema = z.object({
 const SessionBusDirectoryReachSchema = z.discriminatedUnion("scope", [
   z.object({
     scope: z.literal("machine"),
-    why: z.enum(["remote-access-off", "no-machine-id", "no-carrier"]),
+    why: z.enum(["no-machine-id", "no-carrier"]),
   }),
   z.object({
     scope: z.literal("network"),

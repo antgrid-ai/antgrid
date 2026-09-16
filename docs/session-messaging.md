@@ -355,12 +355,17 @@ The cost is two code paths where there was one. Contained by making the split a
 single decision at send time, with everything after it — wrapping, queueing,
 turn-boundary injection, budgets — identical for both.
 
-### 6.3 Symmetry requires remote access on both ends
+### 6.3 Remote access is asked of the receiving machine only
 
-The old design needed the switch on only at the recruited machine. Peers
-initiating in both directions need it on at **both**. Default is off, so a fresh
-pair of machines cannot message until a human turns it on at each — and that is
-the correct place for that consent to live (§8.1).
+The switch governs what may be done **to** a machine, never what that machine
+may do (E15). A send needs it on at the **target** — the machine the frame
+arrives at, and the one whose human consented to being arrived at. The sending
+machine's own switch is not read: the leg leaves over that machine's loopback
+carrier and the answer returns down the same loopback socket, so neither half
+is the inbound relay traffic the switch exists to refuse.
+
+Default is off, so a fresh machine cannot be messaged until a human turns it on
+*there* — and that is the correct place for that consent to live (§8.1).
 
 Local messaging is unaffected and needs nothing.
 
@@ -393,13 +398,25 @@ skipping it, and retries on the next boundary.
 None of that changes. It is the part of the old build that most deserves to
 survive, and it is what makes vendor heterogeneity tractable (§9).
 
-### 7.3 A notify to a session that is not running is refused
+### 7.3 A notify to a session that is not running wakes it, or is refused
 
 A stopped session never reaches a turn boundary, so a line queued for it waits
-forever. The old spec hit exactly this and answered it by *starting* the peer —
-which is not available here, because the session belongs to someone else.
+forever. The old spec hit exactly this and answered it by *starting* the peer.
 
-So: `notify` to a non-running session is refused, and the refusal names `post`.
+That answer is available again, narrowed to where this bridge actually has the
+authority for it: a SAME-MACHINE target. This bridge already runs every
+session on this machine; starting one it already holds is process control it
+already does for the desktop app's own `session:start`, not a new capability.
+A cross-machine target keeps the old refusal — starting a process on someone
+else's machine on the sender's behalf is not this host's call to make, whoever
+is on the other end of it.
+
+So: a same-machine `notify` to a stopped session starts it (with no initial
+prompt, exactly as a bare restart) and lets the send through; the line queues
+and delivers at the woken session's own first turn boundary, the same edge a
+line held across an ordinary restart already rides. Every other `notify` to a
+non-running session — cross-machine, or same-machine but the target's project
+is not currently open here — is still refused, and the refusal names `post`.
 Same pattern as the taskless-finding refusal — refuse, and name the verb that
 reaches.
 
@@ -440,11 +457,13 @@ target's instructions. Templates stay in one module with a test per kind.
 - **Local (same machine): open.** One user, one bridge, both PTYs already spawned
   by it. A gate here would guard a boundary that does not exist — the bridge can
   already write to both sessions.
-- **Remote: the existing remote-access switch, plus one subordinate bit.** The
-  remote-access boolean is still the sole authorization store — already
-  default-off, already machine-wide and immediate, already what gates every
-  remote verb. Beside it sits *reachable by agents*, which defaults **on** and
-  has no effect while remote access is off. See E12.
+- **Remote: the target machine's remote-access switch, plus one subordinate
+  bit.** The remote-access boolean is still the sole authorization store —
+  already default-off, already machine-wide and immediate, already what gates
+  every remote verb *into* a machine. Beside it sits *reachable by agents*,
+  which defaults **on** and has no effect while remote access is off. See E12.
+  Both are read at the machine being reached; a sender's own switch has no say
+  in whether it may reach out (E15).
 
 The second bit is not a second thing to find: turning remote access on still
 makes the feature work end to end. It exists so that a user who wants
@@ -458,7 +477,7 @@ The subordinate bit gates both halves together — off means a peer agent can
 neither read a directory row from this machine nor open an exchange with a
 session on it.
 
-**Where the gate stops, stated rather than implied.** Two carve-outs, both
+**Where the gate stops, stated rather than implied.** Three carve-outs, all
 deliberate:
 
 - *A context this machine leads.* An inbound frame whose `contextId` is a
@@ -472,6 +491,14 @@ deliberate:
   the capability card, and the MCP tools read the mirror that card fills. Gating
   it on the subordinate bit would take the recent-sessions list off the user's
   own phone in exchange for closing nothing.
+- *Nothing outbound is gated.* With this machine's own switch **off**, a session
+  here may still read the rows peers offered and open an exchange with one.
+  Every such row was published by the peer that owns it, under that peer's
+  switch and its own agent-reach bit, so mirroring one discloses nothing about
+  this machine; and the peer's answer comes home down this machine's own
+  loopback carrier, which is not the relay ingress the switch refuses. "Off"
+  means *nobody reaches in uninvited* — it has never meant this machine is out
+  of the network (E15).
 
 ### 8.2 What an addressable session cannot do
 
@@ -479,8 +506,8 @@ deliberate:
 - Start, stop, fork or configure another session.
 - Reach another session's human (E7).
 - Address a session outside its repo key, or on a machine that is not connected,
-  or on a machine with remote access off — or with *reachable by agents* off,
-  unless the context is one that machine leads (§8.1).
+  or on a machine whose OWN remote access is off — or with *reachable by agents*
+  off, unless the context is one that machine leads (§8.1).
 - Exceed its notify budget, or send at all once the pair is halted.
 
 ### 8.3 Content trust
@@ -774,3 +801,32 @@ are per-transport counters that two devices on one bridge both start at zero, so
 a fanned answer can complete a different device's pending request with a payload
 it never asked for. `state.snapshot` stays on the bus — every session would have
 asked for it anyway.
+
+**E15 — The remote-access switch is inbound-only; outbound is ungated.**
+§6.3 used to require the switch on at both ends, and the send gate, the
+directory's remote half and the mirror's ingest each read THIS machine's own
+bit. Three facts said that was wrong.
+
+It is named, enforced and described everywhere else as inbound: it is what
+`remoteFrameAllowed` drives, and the desktop's own copy for the off state
+(`remote_access_control.dart`) reads *"This machine is not reachable from your
+other devices"* — a promise the code was over-delivering on. Nothing mechanical
+needed it: the carrier is the loopback desktop app, so a leg leaves over
+loopback and the answer returns down that same loopback socket, neither of them
+the relay ingress the switch refuses. And the precedent was already here —
+E12's subordinate bit admits a frame on a context this machine leads, reasoning
+that refusing it would not be *nobody may interrupt me* but *my own agents may
+not finish a sentence they started*. That argument applies one level up, to the
+sentence's first word.
+
+So the switch answers one question: may another machine reach in here. A send
+is refused by the TARGET's switch, where a human consented to being reached;
+the sender's own is never read. `REMOTE_ACCESS_OFF` and the `remote-access-off`
+reach reason retire with it — no site is left that could produce either, and a
+code nothing emits is worse than no code.
+
+What this trades away: "off" no longer means this machine takes no part in
+cross-machine traffic at all. Agents here can still open exchanges, and a peer
+can answer into one they opened. Accepted — the narrower promise is the one the
+switch's name, its enforcement and its own UI string have always made, and the
+broader one was never written anywhere a user could read it.
