@@ -534,11 +534,17 @@ export class ProjectCore {
       attach: (remote) => this.attachLocalStreamForWizard(core, bus, remote),
     });
     this.promotion = promotion;
-    bus.setInboundHandler((msg, channel, source) => {
+    bus.setInboundHandler((msg, channel, source, peerId) => {
       if (promotion.handleInbound(msg)) return;
-      // Thread `source` through so the core's gate still distinguishes the
-      // desktop's loopback frames from relay frames after promotion.
-      coreInbound?.(msg, channel, source);
+      // Thread `source` AND `peerId` through so the core's gates still see what
+      // they see on a natively-remote core: `source` distinguishes the desktop's
+      // loopback frames from relay frames after promotion, and `peerId` is what
+      // every PER-DEVICE answer keys off (checkout routing, client generations,
+      // focus/read state). Dropping it collapsed every promoted phone onto the
+      // anonymous "relay" key and made `checkoutRoutingRefusal` read "frame
+      // carried no peer id" for all of them — a permanent refusal on any project
+      // holding an isolated session, which no reconnect can clear.
+      coreInbound?.(msg, channel, source, peerId);
     });
   }
 

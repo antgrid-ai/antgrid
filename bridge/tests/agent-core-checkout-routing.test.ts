@@ -637,6 +637,183 @@ test.skipIf(process.platform === "win32")(
   20000,
 );
 
+// The arms below are one bug: a relay-attached core whose per-device
+// lookup cannot answer used to `return` with nothing on the wire, and the app
+// learned of it only as an RPC that never came back. `state.snapshot` is the
+// only carrier of a relay checkout's agent:status, so that silence read as a
+// dead machine — a "session timeout" that was really a refusal. Each arm must
+// now ANSWER, and the suite that shipped the bug could not have caught it: its
+// only provider always returned a session and merely toggled the boolean.
+test("a refused RPC is answered, not dropped, when the device never declared checkoutRouting", async () => {
+  await initRepo();
+  const { bus, sent } = await bootCore(true);
+  await createSession(bus, sent, "Isolated", "worktree");
+  core!.setPeerSessionProvider((peerId) => ({
+    peerId, peerPubkey: "pub-app", checkoutRouting: false, reachable: true, pullsTree: false,
+  }));
+
+  sent.length = 0;
+  bus.dispatchInbound(createMessage("request", {
+    requestId: "snap-1", method: "state.snapshot", params: {},
+  }), "control", "relay", "app-dev#machine-dev");
+
+  const answer = await waitFor(sent, (m) => m.type === "response" && m.requestId === "snap-1");
+  expect(answer).toMatchObject({
+    type: "response",
+    ok: false,
+    error: { code: "CHECKOUT_ROUTING_REQUIRED" },
+  });
+});
+
+test("a plain verb refused for checkout routing comes back as control:result", async () => {
+  await initRepo();
+  const { bus, sent } = await bootCore(true);
+  await createSession(bus, sent, "Isolated", "worktree");
+  core!.setPeerSessionProvider((peerId) => ({
+    peerId, peerPubkey: "pub-app", checkoutRouting: false, reachable: true, pullsTree: false,
+  }));
+
+  sent.length = 0;
+  bus.dispatchInbound(createMessage("config:read", {}), "control", "relay", "app-dev#machine-dev");
+
+  const answer = await waitFor(sent, (m) => m.type === "control:result");
+  expect(answer).toMatchObject({
+    type: "control:result",
+    ok: false,
+    verb: "config:read",
+    error: { code: "CHECKOUT_ROUTING_REQUIRED" },
+  });
+});
+
+test("a refused session verb comes back as session:result, the frame its caller awaits", async () => {
+  // A reply on the wrong frame is not a reply: `sessions_service.dart` completes
+  // every pending session mutation off `session:result` + requestId, so a
+  // `control:result` here would leave the caller timing out exactly as the
+  // silent drop did.
+  await initRepo();
+  const { bus, sent } = await bootCore(true);
+  await createSession(bus, sent, "Isolated", "worktree");
+  core!.setPeerSessionProvider((peerId) => ({
+    peerId, peerPubkey: "pub-app", checkoutRouting: false, reachable: true, pullsTree: false,
+  }));
+
+  sent.length = 0;
+  bus.dispatchInbound(
+    createMessage("session:stop", { requestId: "stop-1", sessionId: "any" }),
+    "control", "relay", "app-dev#machine-dev",
+  );
+
+  const answer = await waitFor(sent, (m) => m.type === "session:result" && m.requestId === "stop-1");
+  expect(answer).toMatchObject({ type: "session:result", ok: false, errorCode: "CHECKOUT_ROUTING_REQUIRED" });
+  expect(sent.filter((m) => m.type === "control:result")).toEqual([]);
+});
+
+test("session:list is refused on control:result, never as an empty session:list:result", async () => {
+  // The exclusion is the point: `session:list:result` carries only
+  // `{requestId, sessions[]}`, so the only refusal expressible on it is an empty
+  // list — a project that reads as HAVING no sessions rather than one that
+  // refused to answer. An uncorrelated reply beats a credible lie.
+  await initRepo();
+  const { bus, sent } = await bootCore(true);
+  await createSession(bus, sent, "Isolated", "worktree");
+  core!.setPeerSessionProvider((peerId) => ({
+    peerId, peerPubkey: "pub-app", checkoutRouting: false, reachable: true, pullsTree: false,
+  }));
+
+  sent.length = 0;
+  bus.dispatchInbound(
+    createMessage("session:list", { requestId: "list-1" }),
+    "control", "relay", "app-dev#machine-dev",
+  );
+
+  const answer = await waitFor(sent, (m) => m.type === "control:result");
+  expect(answer).toMatchObject({ type: "control:result", ok: false, verb: "session:list" });
+  expect(sent.filter((m) => m.type === "session:list:result")).toEqual([]);
+});
+
+test("a peer id that resolves to no session is dropped, not refused, so the retry can heal it", async () => {
+  // Both a device mid-handshake and one whose E2E session has just died land on
+  // this arm, and both recover on the app's next attempt. Answering would end
+  // that: `_pullSnapshot` settles on any code but E_TIMEOUT, so a refusal turns
+  // a race that fixes itself into a workspace telling the user to reconnect.
+  await initRepo();
+  const { bus, sent } = await bootCore(true);
+  await createSession(bus, sent, "Isolated", "worktree");
+  core!.setPeerSessionProvider(() => null);
+
+  sent.length = 0;
+  bus.dispatchInbound(createMessage("request", {
+    requestId: "snap-4", method: "state.snapshot", params: {},
+  }), "control", "relay", "app-dev#machine-dev");
+  await new Promise((resolve) => setTimeout(resolve, 200));
+
+  expect(sent.filter((m) => m.type === "response" || m.type === "control:result")).toEqual([]);
+});
+
+test("a relay-attached core whose provider was torn out answers UNAVAILABLE instead of going silent", async () => {
+  // The shipped failure: a promotion handle's stop() nulls the provider while
+  // the core stays warm on its bus. The capability lookup then failed closed
+  // and the mobile-access gate read the SAME null as "local core, allow", so
+  // frames passed one gate and died silently at the next — permanently, since
+  // nothing re-wires a warm core.
+  await initRepo();
+  const { bus, sent } = await bootCore(true);
+  await createSession(bus, sent, "Isolated", "worktree");
+  core!.setPeerSessionProvider((peerId) => ({
+    peerId, peerPubkey: "pub-app", checkoutRouting: true, reachable: true, pullsTree: false,
+  }));
+  core!.setPeerSessionProvider(null);
+
+  sent.length = 0;
+  bus.dispatchInbound(createMessage("request", {
+    requestId: "snap-2", method: "state.snapshot", params: {},
+  }), "control", "relay", "app-dev#machine-dev");
+
+  const answer = await waitFor(sent, (m) => m.type === "response" && m.requestId === "snap-2");
+  expect(answer).toMatchObject({
+    type: "response",
+    ok: false,
+    error: { code: "CHECKOUT_ROUTING_UNAVAILABLE" },
+  });
+});
+
+test("clearing the provider does not hand a relay frame the local-core carve-out", async () => {
+  // remoteFrameAllowed() used to read the same null as "no relay transport, so
+  // no machine switch applies". A core that has faced the relay stays gated for
+  // life: with mobile access OFF, a relay frame is refused by THAT gate, and the
+  // proof it never reached dispatch is that no checkout-routing answer is sent.
+  await initRepo();
+  let mobileAccess = true;
+  core = await buildAgentCore({
+    folder: root,
+    mode: "remote",
+    remoteAccessEnabled: () => mobileAccess,
+    worktreeSessionsSupported: true,
+    identity: { deviceId: "agent", deviceName: "agent", createdAt: new Date().toISOString() },
+  });
+  const bus = new MessageBus();
+  const sent: AbMessage[] = [];
+  bus.subscribe({ deliver: (message) => sent.push(message) });
+  core.attachTransport(bus);
+  core.onHandshakeComplete();
+  await waitFor(sent, (message) => message.type === "agent:status");
+  await createSession(bus, sent, "Isolated", "worktree");
+
+  core.setPeerSessionProvider((peerId) => ({
+    peerId, peerPubkey: "pub-app", checkoutRouting: true, reachable: true, pullsTree: false,
+  }));
+  core.setPeerSessionProvider(null);
+  mobileAccess = false;
+
+  sent.length = 0;
+  bus.dispatchInbound(createMessage("request", {
+    requestId: "snap-3", method: "state.snapshot", params: {},
+  }), "control", "relay", "app-dev#machine-dev");
+  await new Promise((resolve) => setTimeout(resolve, 200));
+
+  expect(sent.filter((m) => m.type === "response" || m.type === "control:result")).toEqual([]);
+});
+
 test("a tunnel request from a session that cannot route checkouts is refused, while a capable device's is proxied", async () => {
   // The tunnel route bypasses the bus, so the per-device capability check the
   // bus dispatch makes had to be restated on it: a preview body IS a checkout's

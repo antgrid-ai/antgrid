@@ -446,7 +446,10 @@ test("promotion wires (and clears) the gate's session provider", async () => {
   // which is what makes every per-device answer fail closed.
   expect(wired("someone-else#machine-dev")).toBe(null);
 
-  // Teardown clears it (so the demoted local session is ungated again).
+  // Teardown clears the LOOKUP. It does not make the core local again: the
+  // core latches `relayEverAttached` on the first wire and never unlatches
+  // (`agent-core.ts`), so a demoted core still answers to the machine switch —
+  // clearing the provider used to hand a relay frame the local-core carve-out.
   ctrl.stop();
   expect(setCalls[setCalls.length - 1]).toBe(null);
 });

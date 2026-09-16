@@ -175,7 +175,7 @@ the set of invariants a future edit breaks silently.
   already trusted with every session on it. A session id is
   `crypto.randomUUID()` (`session-manager.ts`), so naming one is guessing a
   UUID, never enumerating a small keyspace. The `checkoutRouting` gate
-  (`peerCanRouteCheckouts`, same call site) does NOT follow the address: it
+  (`checkoutRoutingRefusal`, same call site) does NOT follow the address: it
   reads the ARRIVING core's own `hasIsolatedSessions()`, so a peer admitted to a
   project holding no isolated session passes it and may then name a session in
   a project that does — the one refusal the move genuinely widened, left to
