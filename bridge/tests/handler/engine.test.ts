@@ -547,7 +547,7 @@ test("the judge is handed the session's lens and brief, and nothing for a sessio
   await engine.handleEvent({ terminalId: "t2", event: "turn_end" });
   expect(calls[1]).toEqual({ role: undefined, brief: undefined });
 
-  engine.arm({ terminalId: "t3", goal: GOAL, brief: "x".repeat(600) });
+  engine.arm({ terminalId: "t3", goal: GOAL, brief: "x".repeat(MAX_BRIEF_CHARS + 200) });
   await engine.handleEvent({ terminalId: "t3", event: "turn_end" });
   expect(calls[2]?.brief).toHaveLength(MAX_BRIEF_CHARS);
 });

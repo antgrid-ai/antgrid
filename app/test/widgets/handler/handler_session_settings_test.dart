@@ -53,6 +53,52 @@ HandlerState _state(List<String>? lenses) => HandlerState(
   activity: const [],
 );
 
+/// Feeds its own `onChanged` back into `value`, the way [_SettingsSheetState]
+/// really wires the sheet in production. Needed the moment a test taps more
+/// than one chip in sequence: which PRESET reads as selected comes off the
+/// `value` prop (only [HandlerLensControl]'s own-lens flag is local state),
+/// so a harness that never echoes a commit back leaves every earlier preset
+/// looking chosen forever.
+class _ControlledSettings extends StatefulWidget {
+  const _ControlledSettings({
+    required this.initial,
+    required this.onChanged,
+    required this.appliesNextPass,
+  });
+
+  final HandlerSessionSettingsValue initial;
+  final ValueChanged<HandlerSessionSettingsValue> onChanged;
+  final bool appliesNextPass;
+
+  @override
+  State<_ControlledSettings> createState() => _ControlledSettingsState();
+}
+
+class _ControlledSettingsState extends State<_ControlledSettings> {
+  late HandlerSessionSettingsValue _value = widget.initial;
+
+  @override
+  void didUpdateWidget(_ControlledSettings old) {
+    super.didUpdateWidget(old);
+    // A second `_pump` call in the same test re-mounts this same State (no
+    // key, same runtimeType) rather than creating a fresh one — reset only
+    // when the CALLER handed a new starting value; a rebuild from this
+    // widget's own `onChanged` must not stomp what the user just did.
+    if (widget.initial != old.initial) _value = widget.initial;
+  }
+
+  @override
+  Widget build(BuildContext context) => HandlerSessionSettings(
+    terminalId: 't1',
+    value: _value,
+    appliesNextPass: widget.appliesNextPass,
+    onChanged: (v) {
+      setState(() => _value = v);
+      widget.onChanged(v);
+    },
+  );
+}
+
 Future<void> _pump(
   WidgetTester tester, {
   required HandlerSessionSettingsValue value,
@@ -80,9 +126,8 @@ Future<void> _pump(
           extensions: <ThemeExtension<dynamic>>[kDefaultPalette],
         ),
         home: Scaffold(
-          body: HandlerSessionSettings(
-            terminalId: 't1',
-            value: value,
+          body: _ControlledSettings(
+            initial: value,
             onChanged: onChanged ?? (_) {},
             appliesNextPass: appliesNextPass,
           ),
@@ -130,12 +175,18 @@ Future<void> _pumpHalf(
 AbChip _chip(WidgetTester tester, String label) =>
     tester.widget<AbChip>(find.widgetWithText(AbChip, label));
 
-const _defaultChip = 'INTENT AND COMPLETION';
+const _defaultChip = 'NOTHING EXTRA';
+const _ownChip = 'YOUR OWN';
 
-/// The brief's own field. The judge's model row is an [AbTextField] too on a
-/// machine that has never heard that CLI list its models, and the lens block is
-/// mounted first — so position is what tells the two apart.
-Finder get _briefField => find.byType(AbTextField).first;
+/// The "Your own" panel's field, keyed rather than positional: it only mounts
+/// once that chip is selected, unlike the always-on field this replaced.
+Finder get _ownField => find.byKey(const ValueKey('handlerOwnLensField'));
+
+/// Selects the sixth chip so the panel (and its field) mount.
+Future<void> _selectOwn(WidgetTester tester) async {
+  await tester.tap(find.text(_ownChip));
+  await tester.pump();
+}
 
 void main() {
   group('handlerSessionSettingsEdit', () {
@@ -280,12 +331,12 @@ void main() {
       tester,
     ) async {
       await _pump(tester, value: _value(judgeTool: 'claude'));
-      final lens = tester.getTopLeft(find.text('WHAT IT LOOKS FOR')).dy;
-      final brief = tester.getTopLeft(find.text('BRIEF')).dy;
+      final lens = tester
+          .getTopLeft(find.text('WHAT HANDLER WEIGHS'))
+          .dy;
       final judge = tester.getTopLeft(find.text('JUDGED BY')).dy;
       final model = tester.getTopLeft(find.text('MODEL')).dy;
-      expect(lens, lessThan(brief));
-      expect(brief, lessThan(judge));
+      expect(lens, lessThan(judge));
       expect(judge, lessThan(model));
     });
 
@@ -302,7 +353,10 @@ void main() {
           .widgetList<AbChip>(find.byType(AbChip))
           .where((c) => c.color == p.accent);
       expect(accented, hasLength(1));
-      expect(find.text(handlerLensBlurb(null)), findsOneWidget);
+      // "Nothing extra" is one of the two picks whose caption is empty — the
+      // floor line above the chips already says it (§7) — so neither the old
+      // null-branch blurb nor the parked one may render.
+      expect(find.text(handlerLensBlurb(null)), findsNothing);
       expect(find.text(handlerLensParkedBlurb), findsNothing);
     });
 
@@ -336,8 +390,8 @@ void main() {
       );
       // Still the user's choice to make — it starts working the moment the
       // judge is fixed — but it must not be painted as running.
-      expect(_chip(tester, 'QA').selected, isTrue);
-      expect(_chip(tester, 'QA').color, isNull);
+      expect(_chip(tester, 'PROOF IT WORKS').selected, isTrue);
+      expect(_chip(tester, 'PROOF IT WORKS').color, isNull);
       expect(find.text(handlerLensParkedBlurb), findsOneWidget);
       expect(find.textContaining(handlerJudgeParkedNotice('Codex')), findsOne);
     });
@@ -378,7 +432,10 @@ void main() {
         expect(chip.enabled, isFalse);
         expect(chip.selected, isFalse);
       }
-      expect(tester.widget<AbTextField>(_briefField).enabled, isFalse);
+      // "Your own" is one of the disabled six — nothing here can be picked,
+      // including the panel a tap on it would otherwise reveal.
+      expect(find.text(_ownChip), findsOneWidget);
+      expect(_ownField, findsNothing);
       expect(find.text(handlerLensUnreportedBlurb), findsOneWidget);
     });
 
@@ -392,11 +449,14 @@ void main() {
         value: _value(judgeTool: 'claude'),
         lenses: const ['pm', 'qa'],
       );
-      expect(find.text('PM'), findsOneWidget);
-      expect(find.text('QA'), findsOneWidget);
-      expect(find.text('CRITIC'), findsNothing);
-      expect(find.text('RELEASE MANAGER'), findsNothing);
+      expect(find.text('STAYS IN SCOPE'), findsOneWidget);
+      expect(find.text('PROOF IT WORKS'), findsOneWidget);
+      expect(find.text('WHAT COULD BREAK'), findsNothing);
+      expect(find.text('READY TO SHIP'), findsNothing);
       expect(find.text(_defaultChip), findsOneWidget);
+      // Neither preset id, so unconditional regardless of what the machine
+      // advertised (redesign spec §7).
+      expect(find.text(_ownChip), findsOneWidget);
     });
 
     testWidgets('a lens this build cannot name selects nothing and says so', (
@@ -446,7 +506,7 @@ void main() {
       final from = _value(judgeTool: 'claude');
       await _pump(tester, value: from, onChanged: (v) => sent = v);
 
-      await tester.tap(find.text('QA'));
+      await tester.tap(find.text('PROOF IT WORKS'));
       await tester.pump();
 
       final edit = handlerSessionSettingsEdit(from, sent!);
@@ -455,14 +515,18 @@ void main() {
       expect(edit.judgeModel, isNull);
     });
 
-    testWidgets('a submitted brief commits trimmed, and clears as empty', (
+    testWidgets('a submitted own lens commits trimmed, and clears as empty', (
       tester,
     ) async {
       HandlerSessionSettingsValue? sent;
       final from = _value(judgeTool: 'claude');
       await _pump(tester, value: from, onChanged: (v) => sent = v);
+      await _selectOwn(tester);
+      // Picking the chip alone is a commit too — an empty draft — before any
+      // text is typed.
+      sent = null;
 
-      await tester.enterText(_briefField, '  show tests  ');
+      await tester.enterText(_ownField, '  show tests  ');
       await tester.pump();
       // A keystroke alone commits nothing on this sheet: each commit is a
       // configure frame, and the bridge's edit path buys a real judge pass.
@@ -473,22 +537,23 @@ void main() {
       expect(handlerSessionSettingsEdit(from, sent!).brief, 'show tests');
 
       final typed = sent!;
-      await tester.enterText(_briefField, '');
+      await tester.enterText(_ownField, '');
       await tester.testTextInput.receiveAction(TextInputAction.done);
       await tester.pump();
       expect(handlerSessionSettingsEdit(typed, sent!).brief, '');
     });
 
-    testWidgets('the brief stops where the prompt stops', (tester) async {
+    testWidgets('the own lens stops where the prompt stops', (tester) async {
       // Mirrored by hand from the bridge's MAX_BRIEF_CHARS. The bridge clips
       // a longer brief rather than refusing it, so a cap that drifted here
       // would let the user type a tail the judge never reads.
-      expect(handlerMaxBriefChars, 500);
+      expect(handlerMaxBriefChars, 1000);
       HandlerSessionSettingsValue? sent;
       final from = _value(judgeTool: 'claude');
       await _pump(tester, value: from, onChanged: (v) => sent = v);
+      await _selectOwn(tester);
 
-      await tester.enterText(_briefField, 'x' * (handlerMaxBriefChars + 1));
+      await tester.enterText(_ownField, 'x' * (handlerMaxBriefChars + 1));
       await tester.testTextInput.receiveAction(TextInputAction.done);
       await tester.pump();
       expect(
@@ -512,7 +577,7 @@ void main() {
         catalog: const {'codex': false},
       );
 
-      expect(find.text('WHAT IT LOOKS FOR'), findsOneWidget);
+      expect(find.text('WHAT HANDLER WEIGHS'), findsOneWidget);
       // The parked blurb REPLACES the lens one — a lens that is stored and
       // inert must not also describe what it would be asking.
       expect(find.text(handlerLensParkedBlurb), findsOneWidget);
@@ -538,8 +603,7 @@ void main() {
 
       expect(find.text('JUDGED BY'), findsOneWidget);
       expect(find.text('MODEL'), findsOneWidget);
-      expect(find.text('WHAT IT LOOKS FOR'), findsNothing);
-      expect(find.text('BRIEF'), findsNothing);
+      expect(find.text('WHAT HANDLER WEIGHS'), findsNothing);
       expect(find.byType(AbChip), findsNothing);
     });
 
@@ -560,6 +624,125 @@ void main() {
       // A model id is a name only its own CLI answers to: carried across, it
       // becomes a flag the new judge rejects on every pass.
       expect(sent?.judgeModel, isNull);
+    });
+
+    testWidgets('the six chips are one radio group', (tester) async {
+      // Redesign spec §3.2, §9: one selection lives at a time, whichever of
+      // the six it lands on — never a preset row plus a separate disclosure.
+      const sixLabels = [
+        'NOTHING EXTRA',
+        'STAYS IN SCOPE',
+        'PROOF IT WORKS',
+        'WHAT COULD BREAK',
+        'READY TO SHIP',
+        'YOUR OWN',
+      ];
+      await _pump(tester, value: _value(judgeTool: 'claude'));
+      expect(_chip(tester, 'NOTHING EXTRA').selected, isTrue);
+
+      await tester.tap(find.text('WHAT COULD BREAK'));
+      await tester.pump();
+      for (final label in sixLabels) {
+        expect(
+          _chip(tester, label).selected,
+          label == 'WHAT COULD BREAK',
+          reason: label,
+        );
+      }
+
+      await tester.tap(find.text(_ownChip));
+      await tester.pump();
+      for (final label in sixLabels) {
+        expect(_chip(tester, label).selected, label == _ownChip, reason: label);
+      }
+    });
+
+    testWidgets('the own-lens panel shows only while its chip is picked', (
+      tester,
+    ) async {
+      await _pump(tester, value: _value(judgeTool: 'claude'));
+      expect(_ownField, findsNothing);
+
+      await _selectOwn(tester);
+      expect(_ownField, findsOneWidget);
+
+      await tester.tap(find.text('READY TO SHIP'));
+      await tester.pump();
+      expect(_ownField, findsNothing);
+
+      await tester.tap(find.text(_defaultChip));
+      await tester.pump();
+      expect(_ownField, findsNothing);
+    });
+
+    testWidgets(
+      'picking any other chip keeps the draft locally and sends an empty brief',
+      (tester) async {
+        // Redesign spec §6: two stances cannot both run, so a preset always
+        // clears the WIRE brief — but the draft itself rides in the panel's
+        // own controller until "Your own" is picked again.
+        HandlerSessionSettingsValue? sent;
+        await _pump(
+          tester,
+          value: _value(judgeTool: 'claude'),
+          onChanged: (v) => sent = v,
+        );
+        await _selectOwn(tester);
+        await tester.enterText(_ownField, 'watch the migrations');
+        await tester.pump();
+
+        await tester.tap(find.text('STAYS IN SCOPE'));
+        await tester.pump();
+        expect(sent?.lens, (roleId: 'pm', brief: ''));
+
+        await _selectOwn(tester);
+        expect(_ownField, findsOneWidget);
+        expect(
+          tester.widget<AbTextField>(_ownField).controller?.text,
+          'watch the migrations',
+        );
+      },
+    );
+
+    testWidgets('the own lens joins its lines with "; " on commit', (
+      tester,
+    ) async {
+      // The bridge's `oneLine` (decision.ts) collapses a bare newline to a
+      // space, which would fuse two typed rules into one — redesign spec §8.
+      HandlerSessionSettingsValue? sent;
+      await _pump(
+        tester,
+        value: _value(judgeTool: 'claude'),
+        onChanged: (v) => sent = v,
+      );
+      await _selectOwn(tester);
+
+      await tester.enterText(
+        _ownField,
+        '  first rule  \nsecond rule\n\nthird rule',
+      );
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pump();
+
+      expect(sent?.lens?.brief, 'first rule; second rule; third rule');
+    });
+  });
+
+  group('handlerJoinOwnLensLines', () {
+    test('trims each line and drops blank ones', () {
+      expect(
+        handlerJoinOwnLensLines('  a  \n\nb\n c '),
+        'a; b; c',
+      );
+    });
+
+    test('a single line passes through unjoined', () {
+      expect(handlerJoinOwnLensLines('one rule'), 'one rule');
+    });
+
+    test('an empty draft joins to an empty string', () {
+      expect(handlerJoinOwnLensLines(''), '');
+      expect(handlerJoinOwnLensLines('\n\n'), '');
     });
   });
 }

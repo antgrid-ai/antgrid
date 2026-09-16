@@ -59,18 +59,30 @@ String handlerLensToWire(HandlerLens l) => switch (l) {
   HandlerLens.release => 'release',
 };
 
-/// Picker label. PM and QA stay uppercase — they are how the roles are written,
-/// not sentences that happen to start with an abbreviation.
+/// Picker label — the STANCE the preset takes, not the job title it used to be
+/// named for (a role name teaches nothing about what changes). Uppercased by
+/// `AbChip.toggle` at the call site, never here, so this stays the string a
+/// reader would actually say. Kept to 16 chars or under so the same word
+/// serves the PA bar's tighter row (`handler_pa_bar.dart`) — one vocabulary,
+/// not a short set forked off this one.
 String handlerLensLabel(HandlerLens l) => switch (l) {
-  HandlerLens.pm => 'PM',
-  HandlerLens.qa => 'QA',
-  HandlerLens.critic => 'Critic',
-  HandlerLens.release => 'Release manager',
+  HandlerLens.pm => 'Stays in scope',
+  HandlerLens.qa => 'Proof it works',
+  HandlerLens.critic => 'What could break',
+  HandlerLens.release => 'Ready to ship',
 };
 
-/// The default has no role name on purpose: it is the rules alone, so it is
-/// offered as what it does rather than as a fifth role.
-const String handlerLensDefaultLabel = 'Intent and completion';
+/// The default has no stance name on purpose: it is the floor every session
+/// judges under regardless of pick, so it is offered as what it adds — nothing
+/// — rather than as a fifth stance.
+const String handlerLensDefaultLabel = 'Nothing extra';
+
+/// The sixth chip: a user-authored stance, exclusive with the four presets and
+/// with [handlerLensDefaultLabel] (§9 of the redesign spec — the rules do not
+/// compose). Never a wire id: choosing it clears [HandlerLensPick.roleId] and
+/// carries the user's own text as [HandlerLensPick.brief] instead, so the bar
+/// and the sheet need this label for a pick no [HandlerLens] value can name.
+const String handlerLensOwnLabel = 'Your own';
 
 /// One line of what the judge additionally asks under a lens, shown beneath the
 /// picker; null is the unnamed default. Every line here describes QUESTIONS —
@@ -106,8 +118,7 @@ const String handlerLensUnreportedBlurb =
 /// What it says while this app has not been told which lens the session runs:
 /// a cold cache over a session the far end still holds one for. Never the
 /// default's own line — painting that would report a pick nobody stated.
-const String handlerLensUnsetBlurb =
-    'Runs as it was last set on this machine until you pick one.';
+const String handlerLensUnsetBlurb = 'Runs as it was last set on this machine.';
 
 /// What it says when the session runs an id this build cannot name — a newer
 /// machine's lens. The pick is real and is left alone until the user replaces
@@ -120,7 +131,7 @@ const String handlerLensUnknownBlurb =
 /// `MAX_BRIEF_CHARS` (`bridge/src/handler/decision.ts`). The bridge clips in
 /// UTF-16 code units and never refuses on length, so a field counting anything
 /// else can only cost an emoji-heavy brief its tail.
-const int handlerMaxBriefChars = 500;
+const int handlerMaxBriefChars = 1000;
 
 /// A session's lens and brief as a surface seeds from them.
 ///
