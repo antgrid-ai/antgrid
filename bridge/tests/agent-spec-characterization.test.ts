@@ -1,3 +1,5 @@
+import { bundledPluginPath } from "antgrid-agents/assets";
+import { NO_INJECTION, NO_OBSERVATION } from "../../packages/antgrid-agents/src/agents/launch-inject";
 // Bug-for-bug snapshot of every per-agent behavior, one case per (agent x
 // concern), taken at the seams that survive the AgentSpec refactor. Later
 // phases may rewrite this file's IMPORT lines as symbols move into
@@ -19,9 +21,9 @@ import { pathToFileURL } from "node:url";
 import { Database } from "bun:sqlite";
 
 import { agentSessionGone, resumeArgv, sessionResumable } from "../src/agent-resume";
-import { initialPromptArgv } from "../src/initial-prompt";
+import { initialPromptArgv } from "../../packages/antgrid-agents/src/initial-prompt";
 import { updateSpecFor } from "../src/update/specs";
-import { augmentAgentLaunch } from "../src/agent-launch-augmenter";
+import { augmentAgentLaunch } from "../src/agent-runtime";
 import { runHookInvocation, type HookPost } from "../src/hook-runner";
 import { assembleContext } from "../src/handler/context";
 import { type HookCommand } from "../src/hook-command";
@@ -47,6 +49,10 @@ type PerAgent<T> = Record<AgentKey, T>;
 // and call-operator rules they are meant to pin.
 const BIN = "/opt/antgrid/antgrid-bridge";
 const HOOK_COMMAND: HookCommand = { binary: BIN, preargs: ["hook"] };
+
+// The single self-invocation decision `augmentAgentLaunch` derives both the
+// hook command and the MCP command from; resolves to HOOK_COMMAND above.
+const BRIDGE_SELF = { compiled: true, binary: HOOK_COMMAND.binary };
 const WIN = process.platform === "win32";
 
 const tmpDirs: string[] = [];
@@ -157,8 +163,7 @@ describe("resume pre-flight", () => {
         agentSessionGone({
           tool: key,
           agentSessionId: RESUME_ID,
-          codexHome: codexStore(["other"]),
-          copilotHome: copilotStore(["other"]),
+          adapterOptions: { "codex": { codexHome: codexStore(["other"]) }, "github-copilot": { copilotHome: copilotStore(["other"]) } },
         }),
       ).toBe(storeMissRefusesResume[key]);
     });
@@ -168,8 +173,7 @@ describe("resume pre-flight", () => {
         agentSessionGone({
           tool: key,
           agentSessionId: RESUME_ID,
-          codexHome: join(tmp("ab-spec-nohome-"), "missing"),
-          copilotHome: join(tmp("ab-spec-nohome-"), "missing"),
+          adapterOptions: { "codex": { codexHome: join(tmp("ab-spec-nohome-"), "missing") }, "github-copilot": { copilotHome: join(tmp("ab-spec-nohome-"), "missing") } },
         }),
       ).toBe(false);
     });
@@ -194,8 +198,7 @@ describe("resume pre-flight", () => {
         sessionResumable({
           tool: key,
           agentSessionId: RESUME_ID,
-          codexHome: codexStore(["other"]),
-          copilotHome: copilotStore(["other"]),
+          adapterOptions: { "codex": { codexHome: codexStore(["other"]) }, "github-copilot": { copilotHome: copilotStore(["other"]) } },
         }),
       ).toBe(storesLackTheId[key]);
     });
@@ -205,8 +208,7 @@ describe("resume pre-flight", () => {
         sessionResumable({
           tool: key,
           agentSessionId: RESUME_ID,
-          codexHome: codexStore([RESUME_ID]),
-          copilotHome: copilotStore([RESUME_ID]),
+          adapterOptions: { "codex": { codexHome: codexStore([RESUME_ID]) }, "github-copilot": { copilotHome: copilotStore([RESUME_ID]) } },
         }),
       ).toBe(true);
     });
@@ -216,8 +218,7 @@ describe("resume pre-flight", () => {
         sessionResumable({
           tool: key,
           agentSessionId: RESUME_ID,
-          codexHome: join(tmp("ab-spec-nohome-"), "missing"),
-          copilotHome: join(tmp("ab-spec-nohome-"), "missing"),
+          adapterOptions: { "codex": { codexHome: join(tmp("ab-spec-nohome-"), "missing") }, "github-copilot": { copilotHome: join(tmp("ab-spec-nohome-"), "missing") } },
         }),
       ).toBe(true);
     });
@@ -235,8 +236,7 @@ describe("resume pre-flight", () => {
           tool: key,
           agentSessionId: RESUME_ID,
           agentTranscriptPath: gonePath(),
-          codexHome: codexStore([RESUME_ID]),
-          copilotHome: copilotStore([RESUME_ID]),
+          adapterOptions: { "codex": { codexHome: codexStore([RESUME_ID]) }, "github-copilot": { copilotHome: copilotStore([RESUME_ID]) } },
         }),
       ).toBe(false);
     });
@@ -247,8 +247,7 @@ describe("resume pre-flight", () => {
           tool: key,
           agentSessionId: RESUME_ID,
           agentTranscriptPath: livePath(),
-          codexHome: codexStore(["other"]),
-          copilotHome: copilotStore(["other"]),
+          adapterOptions: { "codex": { codexHome: codexStore(["other"]) }, "github-copilot": { copilotHome: copilotStore(["other"]) } },
         }),
       ).toBe(true);
     });
@@ -266,7 +265,7 @@ describe("resume pre-flight", () => {
         tool: "codex",
         agentSessionId: RESUME_ID,
         agentTranscriptPath: "",
-        codexHome: codexStore(["other"]),
+        adapterOptions: { "codex": { codexHome: codexStore(["other"]) } },
       }),
     ).toBe(false);
   });
@@ -348,16 +347,30 @@ const CODEX_TUI_ARGS = [
 ];
 const CODEX_NOTIFY_ARG = `notify=["${BIN}","hook","codex","after-agent"]`;
 
+// The MCP overrides are a `mcp_servers.*` block, so they feed none of the
+// `hooks.*` fingerprints above and adding them leaves every trusted_hash
+// untouched. `env_vars` rather than `env` because codex passes NOTHING of its
+// own environment down to an MCP server; these two are forwarded by name and
+// resolve per PTY.
+const CODEX_MCP_INJECTION: string[] = [
+  "-c",
+  `mcp_servers.antgrid.command="${BIN}"`,
+  "-c",
+  `mcp_servers.antgrid.args=["mcp"]`,
+  "-c",
+  `mcp_servers.antgrid.env_vars=["ANTGRID_API_PORT","ANTGRID_TERMINAL_ID"]`,
+];
+
 describe("codex hook trust", () => {
   test("the -c hooks.state string is byte-for-byte stable", () => {
-    const args = augmentAgentLaunch("codex", tmp("ab-spec-"), tmp("ab-cursor-"), HOOK_COMMAND).args;
+    const args = augmentAgentLaunch("codex", { abDir: tmp("ab-spec-"), cursorDir: tmp("ab-cursor-"), self: BRIDGE_SELF }).args;
     const state = args.find((a) => a.startsWith("hooks.state="));
     expect(state).toBe(CODEX_INJECTION[5]);
   });
 
   test("the hook defs and their order are byte-for-byte stable", () => {
-    const args = augmentAgentLaunch("codex", tmp("ab-spec-"), tmp("ab-cursor-"), HOOK_COMMAND).args;
-    expect(args.slice(8)).toEqual(CODEX_INJECTION);
+    const args = augmentAgentLaunch("codex", { abDir: tmp("ab-spec-"), cursorDir: tmp("ab-cursor-"), self: BRIDGE_SELF }).args;
+    expect(args.slice(8)).toEqual([...CODEX_INJECTION, ...CODEX_MCP_INJECTION]);
   });
 });
 
@@ -372,7 +385,7 @@ describe("launch augmentation", () => {
     const prev = process.env.OPENCODE_CONFIG;
     delete process.env.OPENCODE_CONFIG;
     try {
-      return augmentAgentLaunch(tool, abDir, cursorDir, HOOK_COMMAND);
+      return augmentAgentLaunch(tool, { abDir, cursorDir, self: BRIDGE_SELF });
     } finally {
       if (prev !== undefined) process.env.OPENCODE_CONFIG = prev;
     }
@@ -381,14 +394,24 @@ describe("launch augmentation", () => {
   test("claude-code", () => {
     const abDir = tmp("ab-spec-");
     const a = augment("claude-code", abDir, tmp("ab-cursor-"));
-    expect(a.args).toEqual(["--plugin-dir", join(abDir, "plugin", "claude")]);
+    expect(a.args).toEqual([
+      "--plugin-dir",
+      join(abDir, "plugin", "claude"),
+      // Outside the plugin dir on purpose: a `.mcp.json` inside it would be
+      // loaded a second time by the plugin loader, under a second server name.
+      // One token because the flag is variadic — the separated form eats the
+      // session's own args, which are folded in right after it.
+      `--mcp-config=${join(abDir, "mcp", "claude.json")}`,
+    ]);
     expect(a.env).toEqual({});
     expect(a.notificationsInjected).toBe(true);
   });
 
   test("codex", () => {
     const a = augment("codex", tmp("ab-spec-"), tmp("ab-cursor-"));
-    expect(a.args).toEqual(["-c", CODEX_NOTIFY_ARG, ...CODEX_TUI_ARGS, ...CODEX_INJECTION]);
+    expect(a.args).toEqual([
+      "-c", CODEX_NOTIFY_ARG, ...CODEX_TUI_ARGS, ...CODEX_INJECTION, ...CODEX_MCP_INJECTION,
+    ]);
     expect(a.env).toEqual({});
     // Codex reports no outcome; session-manager reads undefined as success.
     expect(a.notificationsInjected).toBeUndefined();
@@ -409,8 +432,8 @@ describe("launch augmentation", () => {
     process.env.OPENCODE_CONFIG = "/user/own.json";
     try {
       expect(
-        augmentAgentLaunch("opencode", tmp("ab-spec-"), tmp("ab-cursor-"), HOOK_COMMAND),
-      ).toEqual({ args: [], env: {} });
+        augmentAgentLaunch("opencode", { abDir: tmp("ab-spec-"), cursorDir: tmp("ab-cursor-"), self: BRIDGE_SELF }),
+      ).toEqual(NO_INJECTION);
     } finally {
       if (prev === undefined) delete process.env.OPENCODE_CONFIG;
       else process.env.OPENCODE_CONFIG = prev;
@@ -428,10 +451,11 @@ describe("launch augmentation", () => {
   test("cursor-agent keeps --trust but reports failure when the hooks file cannot be written", () => {
     const notADir = join(tmp("ab-cursor-"), "not-a-dir");
     writeFileSync(notADir, "");
-    expect(augmentAgentLaunch("cursor-agent", tmp("ab-spec-"), notADir, HOOK_COMMAND)).toEqual({
+    expect(augmentAgentLaunch("cursor-agent", { abDir: tmp("ab-spec-"), cursorDir: notADir, self: BRIDGE_SELF })).toEqual({
       args: ["--trust"],
       env: {},
       notificationsInjected: false,
+      observation: NO_OBSERVATION,
     });
   });
 
@@ -445,24 +469,22 @@ describe("launch augmentation", () => {
 
   for (const key of ["kilo", "kimi", "mistral-vibe"] as const) {
     test(`${key} has no launch injection`, () => {
-      expect(augment(key, tmp("ab-spec-"), tmp("ab-cursor-"))).toEqual({ args: [], env: {} });
+      expect(augment(key, tmp("ab-spec-"), tmp("ab-cursor-"))).toEqual(NO_INJECTION);
     });
   }
 
   test("an unregistered tool has no launch injection", () => {
-    expect(augment("some-future-agent", tmp("ab-spec-"), tmp("ab-cursor-"))).toEqual({
-      args: [],
-      env: {},
-    });
+    expect(augment("some-future-agent", tmp("ab-spec-"), tmp("ab-cursor-"))).toEqual(NO_INJECTION);
   });
 
   test("claude-code falls back to OSC when materialization fails", () => {
     const notADir = join(tmp("ab-spec-"), "not-a-dir");
     writeFileSync(notADir, "");
-    expect(augmentAgentLaunch("claude-code", notADir, tmp("ab-cursor-"), HOOK_COMMAND)).toEqual({
+    expect(augmentAgentLaunch("claude-code", { abDir: notADir, cursorDir: tmp("ab-cursor-"), self: BRIDGE_SELF })).toEqual({
       args: [],
       env: {},
       notificationsInjected: false,
+      observation: NO_OBSERVATION,
     });
   });
 });
@@ -488,7 +510,7 @@ const pretty = (value: unknown) => `${JSON.stringify(value, null, 2)}\n`;
 describe("materialized files", () => {
   test("claude-code writes a plugin manifest and one command hook per event", () => {
     const abDir = tmp("ab-spec-");
-    augmentAgentLaunch("claude-code", abDir, tmp("ab-cursor-"), HOOK_COMMAND);
+    augmentAgentLaunch("claude-code", { abDir, cursorDir: tmp("ab-cursor-"), self: BRIDGE_SELF });
     const root = join(abDir, "plugin", "claude");
 
     expect(readFileSync(join(root, ".claude-plugin", "plugin.json"), "utf8")).toBe(
@@ -512,6 +534,9 @@ describe("materialized files", () => {
           Stop: [{ hooks: [hook("stop")] }],
           StopFailure: [{ hooks: [hook("stop-failure")] }],
           Notification: [{ hooks: [hook("notification")] }],
+          PreToolUse: [{ matcher: "AskUserQuestion", hooks: [hook("question")] }],
+          PostToolUse: [{ matcher: "AskUserQuestion", hooks: [hook("question-answered")] }],
+          PostToolUseFailure: [{ matcher: "AskUserQuestion", hooks: [hook("question-answered")] }],
           UserPromptSubmit: [{ hooks: [hook("user-prompt")] }],
         },
       }),
@@ -520,7 +545,7 @@ describe("materialized files", () => {
 
   test("github-copilot writes one manifest carrying both shell hooks", () => {
     const abDir = tmp("ab-spec-");
-    augmentAgentLaunch("github-copilot", abDir, tmp("ab-cursor-"), HOOK_COMMAND);
+    augmentAgentLaunch("github-copilot", { abDir, cursorDir: tmp("ab-cursor-"), self: BRIDGE_SELF });
     expect(readFileSync(join(abDir, "plugin", "copilot", "plugin.json"), "utf8")).toBe(
       pretty({
         name: "antgrid-copilot",
@@ -540,7 +565,7 @@ describe("materialized files", () => {
 
   test("cursor-agent merges two managed entries into the global hooks file", () => {
     const cursorDir = tmp("ab-cursor-");
-    augmentAgentLaunch("cursor-agent", tmp("ab-spec-"), cursorDir, HOOK_COMMAND);
+    augmentAgentLaunch("cursor-agent", { abDir: tmp("ab-spec-"), cursorDir, self: BRIDGE_SELF });
     expect(readFileSync(join(cursorDir, "hooks.json"), "utf8")).toBe(
       pretty({
         hooks: {
@@ -552,19 +577,17 @@ describe("materialized files", () => {
     );
   });
 
-  test("opencode points its config at the plugin bundled under bridge/plugin", () => {
+  test("opencode points its config at its materialized package asset", () => {
     // Anchored on this test file, NOT on whichever src/ module writes it: the
-    // bundled asset lives at bridge/plugin/opencode/plugin.ts and a producer
+    // bundled asset lives at packages/antgrid-agents/assets/opencode/plugin.ts and a producer
     // that resolves it relative to a moved source dir writes a config opencode
     // silently never loads.
-    const expectedUrl = pathToFileURL(
-      join(import.meta.dir, "..", "plugin", "opencode", "plugin.ts"),
-    ).href;
     const abDir = tmp("ab-spec-");
+    const expectedUrl = pathToFileURL(bundledPluginPath(abDir, "opencode", "plugin.ts")).href;
     const prev = process.env.OPENCODE_CONFIG;
     delete process.env.OPENCODE_CONFIG;
     try {
-      augmentAgentLaunch("opencode", abDir, tmp("ab-cursor-"), HOOK_COMMAND);
+      augmentAgentLaunch("opencode", { abDir, cursorDir: tmp("ab-cursor-"), self: BRIDGE_SELF });
     } finally {
       if (prev !== undefined) process.env.OPENCODE_CONFIG = prev;
     }
@@ -577,7 +600,7 @@ describe("materialized files", () => {
   for (const key of ["codex", "kilo", "kimi", "mistral-vibe"] as const) {
     test(`${key} materializes nothing`, () => {
       const abDir = tmp("ab-spec-");
-      augmentAgentLaunch(key, abDir, tmp("ab-cursor-"), HOOK_COMMAND);
+      augmentAgentLaunch(key, { abDir, cursorDir: tmp("ab-cursor-"), self: BRIDGE_SELF });
       expect(readdirSync(abDir)).toEqual([]);
     });
   }
@@ -1064,7 +1087,7 @@ describe("handler context", () => {
       agentSessionId: CODEX_THREAD,
       recentPty: "ignored",
       purpose: "decide",
-      codexHome: home,
+      adapterOptions: { "codex": { codexHome: home } },
     });
     expect(c.source).toBe("transcript");
     expect(c.text).toBe("built it");
@@ -1078,7 +1101,7 @@ describe("handler context", () => {
       agentSessionId: CODEX_THREAD,
       recentPty: "tail",
       purpose: "decide",
-      codexHome: home,
+      adapterOptions: { "codex": { codexHome: home } },
     });
     expect(c.source).toBe("pty");
     expect(c.transcriptPath).toBeUndefined();
@@ -1090,7 +1113,7 @@ describe("handler context", () => {
       agentSessionId: "ses_1",
       recentPty: "ignored",
       purpose: "decide",
-      opencodeDbPath: opencodeDb(["question", "answer"]),
+      adapterOptions: { "opencode": { opencodeDbPath: opencodeDb(["question", "answer"]) } },
     });
     expect(c.source).toBe("transcript");
     expect(c.text).toBe("question\n---\nanswer");
@@ -1107,8 +1130,7 @@ describe("handler context", () => {
         agentSessionId: CODEX_THREAD,
         recentPty: "\x1b[32m$ build ok\x1b[0m",
         purpose: "decide",
-        codexHome: codexHome([{ type: "event_msg", payload: { type: "agent_message", message: "built it" } }]),
-        opencodeDbPath: opencodeDb(["question"]),
+        adapterOptions: { "codex": { codexHome: codexHome([{ type: "event_msg", payload: { type: "agent_message", message: "built it" } }]) }, "opencode": { opencodeDbPath: opencodeDb(["question"]) } },
       });
       expect(c.source).toBe("pty");
       expect(c.text).toBe("$ build ok");
@@ -1145,6 +1167,7 @@ describe("update specs", () => {
       // The tool id must round-trip: the SAME string flows detection →
       // agent:updateAvailable → app echo → agent:update → session filter.
       expect(spec?.tool).toBe(key);
+      if (spec && "check" in spec) throw new Error("Expected a CLI updater");
       expect(spec?.npmPackage).toBe(want.npmPackage);
       expect(spec?.command).toBe(want.command);
       expect(spec?.updateArgs).toEqual(want.updateArgs);

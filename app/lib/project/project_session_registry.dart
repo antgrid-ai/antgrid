@@ -40,6 +40,12 @@ class ProjectSessionRegistry extends ChangeNotifier {
   final Map<String, DateTime> _lastFocused = {};
   final Map<String, bool> _isLocal = {};
 
+  /// Ids the warm cap may not evict, however cold. Written whole by ONE owner
+  /// (the session-bus carrier, which is the only subsystem that keeps a project
+  /// warm for something other than focus); splitting the write is how a pin
+  /// gets left behind after the thing that needed it is gone.
+  Set<String> _pinned = const {};
+
   ProjectSessionRegistry({
     required this.localCap,
     required this.relayCap,
@@ -47,6 +53,21 @@ class ProjectSessionRegistry extends ChangeNotifier {
   });
 
   List<String> get openProjects => List.unmodifiable(_open);
+
+  Set<String> get pinnedProjects => Set.unmodifiable(_pinned);
+
+  /// Replaces the un-evictable set. Re-runs eviction on every change, because
+  /// the shrinking direction is the one that matters: a bucket held over cap by
+  /// pins must come back down the moment the last pin lifts, and nothing else
+  /// would wake it (a warm project that is never touched again fires no
+  /// eviction pass of its own).
+  void setPinned(Set<String> ids) {
+    if (setEquals(_pinned, ids)) return;
+    _pinned = Set.unmodifiable(Set<String>.of(ids));
+    final before = _open.length;
+    _maybeEvict();
+    if (_open.length != before) notifyListeners();
+  }
 
   /// Adds the project if new and records last-focus time. Idempotent on touch
   /// of an existing project (only the timestamp updates; no notify).
@@ -150,6 +171,7 @@ class ProjectSessionRegistry extends ChangeNotifier {
         open: bucket,
         lastFocused: _lastFocused,
         protect: protect,
+        pinned: _pinned,
       );
       if (victim == null) break;
       _drop(victim);
@@ -184,6 +206,7 @@ class ProjectSessionRegistryController extends Notifier<List<String>> {
       registry.forceEvictAndSettle(projectId);
   Set<String> machinesWithOpenProjects() => registry.machinesWithOpenProjects();
   List<String> localOpenProjects() => registry.localOpenProjects();
+  void setPinned(Set<String> ids) => registry.setPinned(ids);
 }
 
 /// App-wired controller: builds the registry with a placeholder onEvict, then

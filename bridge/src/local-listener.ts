@@ -10,7 +10,9 @@ interface ConnState {
   state: "awaiting-hello" | "connected" | "rejected";
   appPid?: number;
   checkoutRouting?: boolean;
+  sessionBusCarrier?: boolean;
   pullsTree?: boolean;
+  terminalFramesV1?: boolean;
 }
 
 export interface LocalListenerOptions {
@@ -72,11 +74,28 @@ export class LocalListener implements TransportSubscriber {
     return this.ownerSocket?.data.checkoutRouting === true;
   }
 
+  /** Whether this owner forwards session-bus frames on to the machine each one
+   * is addressed to. An app that does not is not broken, it is older: the
+   * coordinator holds the frame in its outbox instead of sending it into a
+   * client that would drop it. */
+  get ownerCarriesSessionBus(): boolean {
+    return this.ownerSocket?.data.sessionBusCarrier === true;
+  }
+
   /** Whether the loopback owner pulls its own file tree (`file:tree:snapshot:request`),
    *  so a re-sync push would only duplicate it. True with no owner attached —
    *  there is then nothing the push could reach. */
   get ownerPullsTree(): boolean {
     return this.ownerSocket === null || this.ownerSocket.data.pullsTree === true;
+  }
+
+  /** Whether the loopback owner renders terminals from `terminal:frame`.
+   *  Fail-CLOSED, unlike {@link ownerPullsTree}: no owner, or an owner that
+   *  never named the capability, reads false so the legacy `terminal:output`
+   *  path stays selected — a desktop switched into a display mode it cannot
+   *  render shows nothing at all. */
+  get ownerSupportsTerminalFramesV1(): boolean {
+    return this.ownerSocket?.data.terminalFramesV1 === true;
   }
 
   /** Fail closed before a managed-checkout frame can reach an older desktop. */
@@ -152,8 +171,13 @@ export class LocalListener implements TransportSubscriber {
     this.ownerSocket = null;
   }
 
+  /** TransportSubscriber — this listener IS the loopback wire, so an
+   *  audience-targeted publish naming `relay` must not reach it. */
+  readonly audience = "loopback" as const;
+
   /** TransportSubscriber — bus -> wire (broadcast to owner only; spec invariant: ≤1 owner). */
-  deliver(msg: AbMessage, channel: Channel): void {
+  deliver(msg: AbMessage, channel: Channel, signal?: AbortSignal): void {
+    if (signal?.aborted) return;
     if (!this.ownerSocket) {
       // The frame is discarded with no log at any level, no retry and no notice
       // to anyone: a core emitting into a window where the desktop has quit,
@@ -205,6 +229,25 @@ export class LocalListener implements TransportSubscriber {
     });
   }
 
+  /**
+   * Send one frame to the desktop owner and to nobody else.
+   *
+   * Session-bus traffic never goes through the MessageBus even though
+   * {@link deliver} above ends at the same socket: a published frame fans out to
+   * every established app session, and the human's phone is one of them — it
+   * must never see another agent's bus traffic. This is the only
+   * other way a frame reaches the owner, and it takes the frame directly.
+   *
+   * False means the frame did not leave: no owner, or an owner that does not
+   * carry the bus. The caller holds it in its outbox and retries: an absent
+   * carrier is a machine that has not attached yet, never a refusal.
+   */
+  deliverToOwner(msg: AbMessage, channel: Channel = "control"): boolean {
+    if (!this.ownerSocket || !this.ownerCarriesSessionBus) return false;
+    this.ownerSocket.send(JSON.stringify({ channel, ...msg }));
+    return true;
+  }
+
   private handleHello(ws: ServerWebSocket<ConnState>, text: string, tokenBuf: Buffer): void {
     let envelope: any;
     try { envelope = JSON.parse(text); } catch {
@@ -227,7 +270,9 @@ export class LocalListener implements TransportSubscriber {
 
     const newPid = typeof envelope.appPid === "number" ? envelope.appPid : undefined;
     const checkoutRouting = envelope?.capabilities?.checkoutRouting === true;
+    const sessionBusCarrier = envelope?.capabilities?.sessionBusCarrier === true;
     const pullsTree = envelope?.capabilities?.pullsTree === true;
+    const terminalFramesV1 = envelope?.capabilities?.terminalFramesV1 === true;
 
     // A second hello carrying the VALID token is the same trusted app
     // reconnecting (a provider rebuild, retry, or eviction+reopen on the app
@@ -257,7 +302,9 @@ export class LocalListener implements TransportSubscriber {
     ws.data.state = "connected";
     ws.data.appPid = newPid;
     ws.data.checkoutRouting = checkoutRouting;
+    ws.data.sessionBusCarrier = sessionBusCarrier;
     ws.data.pullsTree = pullsTree;
+    ws.data.terminalFramesV1 = terminalFramesV1;
     this.ownerSocket = ws;
     // The accepted hello and its answer, so a capture opens with the moment the
     // desktop attached rather than with unexplained traffic from a socket the

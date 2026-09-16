@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { Layout } from "./layout.js";
+import { Layout, type LayoutUser } from "./layout.js";
 
 /** Refusals the accept POST can bounce back to this page. A dead link is not
  *  here — it renders `InviteInvalidPage` instead, since there is no form left to
@@ -29,7 +29,7 @@ const NOTICE_TEXT: Record<InviteNotice, string> = {
 
 export type InvitePageProps = {
   /** Null when signed out — `Layout` keys its nav and avatar off this. */
-  user: { email?: string | null } | null;
+  user: LayoutUser | null;
   invitedEmail: string;
   invitedBy: string;
   inviteId: string;
@@ -134,7 +134,7 @@ export function InvitePage(p: InvitePageProps) {
   );
 }
 
-export function InviteInvalidPage(props: { user: { email?: string | null } | null }) {
+export function InviteInvalidPage(props: { user: LayoutUser | null }) {
   return (
     <Layout title="Team invitation" user={props.user}>
       <div class="max-w-xl mx-auto mt-10">

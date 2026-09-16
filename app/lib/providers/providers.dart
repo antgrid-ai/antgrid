@@ -316,14 +316,15 @@ final handlerStateProvider = StreamProvider<HandlerState>((ref) {
 });
 
 /// [handlerStateProvider] narrowed to the focused session — what the Handler
-/// tab renders.
+/// tab renders, and what the agent panel floats over the terminal
+/// (`HandlerEscalationOverlay`).
 ///
 /// Session-scoped for the reason the files, git and terminals tabs are
 /// checkout-scoped: the workspace panel answers for the session in focus, and a
 /// tab mixing two sessions' rows makes the reader do the routing.
 ///
 /// The unnarrowed [handlerStateProvider] stays the source for every surface
-/// that genuinely spans sessions — above all the agent bar's NEEDS YOU pill,
+/// that genuinely spans sessions — above all the session kebab's attention row,
 /// which is what says another session is waiting and so must never narrow.
 final focusedSessionHandlerStateProvider = Provider<HandlerState>((ref) {
   final state = ref.watch(handlerStateProvider).value;

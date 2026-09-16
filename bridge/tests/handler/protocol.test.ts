@@ -1,7 +1,9 @@
 import { describe, test, expect, it } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   createMessage, parseMessage, parseMessageFast,
-  HandlerConfigureWire, HandlerInstructWire, HandlerUndoWire, HandlerDismissWire,
+  HandlerAnswerWire, HandlerConfigureWire, HandlerInstructWire, HandlerUndoWire, HandlerDismissWire,
   type HandlerInstructionItem,
 } from "../../src/protocol";
 
@@ -86,7 +88,8 @@ describe("handler wire", () => {
 
   test("activity accepts the item-outcome kinds; escalation accepts floorRule", () => {
     for (const decision of ["armed", "goal_edited", "item_done", "item_blocked",
-      "item_skipped", "item_failed", "evidence_rejected", "wrapped_up"] as const) {
+      "item_skipped", "item_failed", "evidence_rejected", "wrapped_up",
+      "asked", "ask_rejected", "answered"] as const) {
       const act = createMessage("handler:activity", {
         projectId: "p", recordId: "r", at: 1, terminalId: "t1", decision, reason: "done",
       });
@@ -161,6 +164,91 @@ describe("handler wire", () => {
     // of a chip the user did not read.
     expect(send([choice(), choice({ label: "Approve with tests", text: "yes, and run the suite" })]))
       .toBeNull();
+    // A whitespace-only label is truthy against `.min(1)` alone and would draw a
+    // blank button on the card that stops the session.
+    expect(send([choice({ label: "   " }), other])).toBeNull();
+  });
+
+  // The button says what it does, `cost` says what it commits to. New and
+  // optional, so an older row (and an older app reading it) is unaffected.
+  test("a choice's cost is optional, bounded, and control-char free", () => {
+    const base = {
+      projectId: "p", escalationId: "e1", terminalId: "t1", question: "q",
+      reasoning: "r", draftReply: "ship it", urgency: "normal", at: 1,
+    } as const;
+    const other = { choiceId: "reject", label: "Reject", text: "no" };
+    const send = (choices: unknown) => parseMessage(JSON.stringify({
+      ...createMessage("handler:escalation", base), choices,
+    })) as any;
+    const withCost = send([
+      { choiceId: "approve", label: "Drop the pricing page", text: "ship it", cost: "FAQ ships now" },
+      other,
+    ]);
+    expect(withCost).toBeTruthy();
+    expect(withCost.choices[0].cost).toBe("FAQ ships now");
+    // An older bridge never sends it, and an app that predates it must render
+    // exactly what it renders today.
+    const withoutCost = send([{ choiceId: "approve", label: "Approve", text: "ship it" }, other]);
+    expect(withoutCost).toBeTruthy();
+    expect(withoutCost.choices[0].cost).toBeUndefined();
+    expect(send([
+      { choiceId: "approve", label: "Approve", text: "ship it", cost: "ships now\r" }, other,
+    ])).toBeNull();
+    expect(send([
+      { choiceId: "approve", label: "Approve", text: "ship it", cost: "   " }, other,
+    ])).toBeNull();
+  });
+
+  test("escalation carries the ask fields, and survives their absence", () => {
+    const base = {
+      projectId: "p", escalationId: "e1", terminalId: "t1", question: "q",
+      reasoning: "r", draftReply: "", urgency: "normal", at: 1,
+    } as const;
+    const option = (over: Record<string, unknown> = {}) =>
+      ({ choiceId: "staging", label: "Point it at staging", cost: "one extra deploy later", ...over });
+    const other = { choiceId: "prod", label: "Go straight at production", cost: "no second cutover" };
+    const send = (over: Record<string, unknown>) => parseMessage(JSON.stringify({
+      ...createMessage("handler:escalation", base), ...over,
+    }));
+    // Absent is every row a bridge sends today, and it must read as the stopped
+    // session it has always meant.
+    const bare = parseMessage(JSON.stringify(createMessage("handler:escalation", base))) as any;
+    expect(bare).toBeTruthy();
+    expect(bare.nonBlocking).toBeUndefined();
+    expect(bare.askOptions).toBeUndefined();
+
+    const full = send({
+      nonBlocking: true, unblocked: ["i1", "i2"],
+      askOptions: [option(), { ...other, recommended: true }],
+    }) as any;
+    expect(full.nonBlocking).toBe(true);
+    expect(full.unblocked).toEqual(["i1", "i2"]);
+    // `label` is the whole payload of a tap, so it has to survive the wire
+    // verbatim — there is no second field the answer could be recovered from.
+    expect(full.askOptions[0].label).toBe("Point it at staging");
+    expect(full.askOptions[1].recommended).toBe(true);
+    // Each field stands alone: the app's capability gate strips them one at a
+    // time and must never produce a frame this refuses.
+    expect(send({ nonBlocking: true })).toBeTruthy();
+    expect(send({ unblocked: [] })).toBeTruthy();
+
+    // Four is what a notification action row can carry; one is a question with no
+    // alternative, and the composer is app-authored so it is never an entry here.
+    expect(send({ askOptions: [option(), other, option({ choiceId: "wait" }), option({ choiceId: "abort" })] })).toBeTruthy();
+    expect(send({ askOptions: [option()] })).toBeNull();
+    expect(send({ askOptions: [] })).toBeNull();
+    expect(send({ askOptions: [option(), other, option({ choiceId: "a" }), option({ choiceId: "b" }), option({ choiceId: "c" })] })).toBeNull();
+    // Every surface resolves a tap by first match, so a repeated id parks an
+    // answer the user did not read.
+    expect(send({ askOptions: [option(), option({ label: "Point it at staging, carefully" })] })).toBeNull();
+    // An option with nothing on it is a button whose answer is unreadable.
+    expect(send({ askOptions: [option({ label: "" }), other] })).toBeNull();
+    expect(send({ askOptions: [option({ cost: "" }), other] })).toBeNull();
+    expect(send({ askOptions: [option({ label: "x".repeat(81) }), other] })).toBeNull();
+    // `recommended` is z.literal(true) precisely so absent and `false` cannot
+    // become two spellings of the same thing.
+    expect(send({ askOptions: [option({ recommended: false }), other] })).toBeNull();
+    expect(send({ unblocked: Array.from({ length: 11 }, (_, i) => `i${i}`) })).toBeNull();
   });
 
   test("status snapshot escalations carry kind and choices through the replay", () => {
@@ -251,6 +339,73 @@ describe("handler wire", () => {
     expect(keys.at(-1)).toBe("observability");
   });
 
+  test("status advertises that asks can be answered, and replays an ask row", () => {
+    // The advert lives on the SNAPSHOT and not on the row because the row cannot
+    // advertise itself: a bridge that reads `nonBlocking` off a record a newer one
+    // wrote re-emits it faithfully while having no verb that answers it. An app
+    // that acted on the row alone would answer through the reply transport, into a
+    // PTY the session never stopped.
+    const session = {
+      terminalId: "t1", state: "needs_you" as const, pendingEscalations: 1,
+      armedAt: 1, goal: "g", backlog,
+      escalations: [{
+        escalationId: "a1", question: "Which database should the migration target?",
+        reasoning: "r", draftReply: "", urgency: "normal" as const, at: 2,
+        nonBlocking: true, unblocked: ["i1"],
+        askOptions: [
+          { choiceId: "staging", label: "Point it at staging for now", cost: "one extra deploy later" },
+          { choiceId: "prod", label: "Go straight at production", cost: "no second cutover" },
+        ],
+      }],
+    };
+    const msg = createMessage("handler:status", {
+      snapshots: [], projectId: "p",
+      sessions: [{ ...session, askAnswer: true, askAnswerPending: true }],
+    } as never);
+    const parsed = parseMessage(JSON.stringify(msg)) as any;
+    expect(parsed.sessions[0].askAnswer).toBe(true);
+    expect(parsed.sessions[0].askAnswerPending).toBe(true);
+    expect(parsed.sessions[0].escalations[0].nonBlocking).toBe(true);
+    expect(parsed.sessions[0].escalations[0].unblocked).toEqual(["i1"]);
+    expect(parsed.sessions[0].escalations[0].askOptions[1].choiceId).toBe("prod");
+
+    // Absent is every bridge that predates the verb, and it must still deliver a
+    // frame whose rows carry the flag — that is the rollback case exactly.
+    const bare = parseMessage(JSON.stringify(createMessage("handler:status", {
+      snapshots: [], projectId: "p", sessions: [session],
+    } as never))) as any;
+    expect(bare).toBeTruthy();
+    expect(bare.sessions[0].askAnswer).toBeUndefined();
+    expect(bare.sessions[0].escalations[0].nonBlocking).toBe(true);
+
+    // z.literal(true), so there is no second spelling of "this bridge cannot".
+    expect(parseMessage(JSON.stringify(createMessage("handler:status", {
+      snapshots: [], projectId: "p", sessions: [{ ...session, askAnswer: false }],
+    } as never)))).toBeNull();
+  });
+
+  test("status advertises that a BLOCKING escalation's answer can be banked", () => {
+    // A second, independent capability flag from `askAnswer`: this one gates
+    // handler:instruct's `delivered` note, not handler:answer's tap.
+    const session = {
+      terminalId: "t1", state: "needs_you" as const, pendingEscalations: 1,
+      armedAt: 1, goal: "g", backlog, escalations: [],
+    };
+    const msg = createMessage("handler:status", {
+      snapshots: [], projectId: "p", sessions: [{ ...session, escalationAnswer: true }],
+    } as never);
+    expect((parseMessage(JSON.stringify(msg)) as any).sessions[0].escalationAnswer).toBe(true);
+
+    const bare = parseMessage(JSON.stringify(createMessage("handler:status", {
+      snapshots: [], projectId: "p", sessions: [session],
+    } as never))) as any;
+    expect(bare.sessions[0].escalationAnswer).toBeUndefined();
+
+    expect(parseMessage(JSON.stringify(createMessage("handler:status", {
+      snapshots: [], projectId: "p", sessions: [{ ...session, escalationAnswer: false }],
+    } as never)))).toBeNull();
+  });
+
   // The record the app reads hours later, when the session that produced it is
   // gone from `sessions` and nothing else on the frame names it.
   const wrapUp = {
@@ -321,6 +476,39 @@ describe("handler wire", () => {
     expect(parsed.tool).toBeUndefined();
     expect(parsed.model).toBeUndefined();
   });
+
+  // `lenses` is top-level because the arm sheet reads it for a slot that has no
+  // snapshot yet, while a session's own lens is state on the snapshot.
+  test("handler:status advertises the lens ids at top level and carries the session's own lens", () => {
+    const msg = createMessage("handler:status", {
+      snapshots: [],
+      projectId: "p", lenses: ["pm", "qa", "critic", "release"],
+      sessions: [{
+        terminalId: "t", state: "watching", pendingEscalations: 0,
+        armedAt: 1, goal: "g", backlog: [],
+        escalations: [], role: "release", brief: "note the changelog",
+      }],
+    });
+    const parsed = parseMessage(JSON.stringify(msg)) as any;
+    expect(parsed.lenses).toEqual(["pm", "qa", "critic", "release"]);
+    expect(parsed.sessions[0].role).toBe("release");
+    expect(parsed.sessions[0].brief).toBe("note the changelog");
+  });
+
+  // Absent is the unnamed default, not a bridge that cannot do lenses — nothing
+  // may start defaulting the key on the way through.
+  test("a session with no lens carries neither key", () => {
+    const msg = createMessage("handler:status", {
+      snapshots: [], projectId: "p",
+      sessions: [{
+        terminalId: "t", state: "watching", pendingEscalations: 0,
+        armedAt: 1, goal: "g", backlog: [], escalations: [],
+      }],
+    });
+    const parsed = parseMessage(JSON.stringify(msg)) as any;
+    expect(parsed.sessions[0].role).toBeUndefined();
+    expect(parsed.sessions[0].brief).toBeUndefined();
+  });
 });
 
 // parseMessageFast validates ONLY the message type, so agent-core re-parses the
@@ -363,6 +551,53 @@ describe("HandlerConfigureWire (hot-path re-validation)", () => {
       terminalId: "t1", armed: true, backlog: [],
     }).success).toBe(true);
   });
+
+  it("carries a lens and a brief, and takes \"\" as the clear back to the default", () => {
+    const set = HandlerConfigureWire.safeParse({
+      terminalId: "t1", armed: true, role: "qa", brief: "watch the migration path",
+    });
+    expect(set.success).toBe(true);
+    if (set.success) {
+      expect(set.data.role).toBe("qa");
+      expect(set.data.brief).toBe("watch the migration path");
+    }
+    const cleared = HandlerConfigureWire.safeParse({
+      terminalId: "t1", armed: true, role: "", brief: "",
+    });
+    expect(cleared.success).toBe(true);
+    if (cleared.success) {
+      expect(cleared.data.role).toBe("");
+      expect(cleared.data.brief).toBe("");
+    }
+  });
+
+  // The lens ids are the bridge's own, and a value outside them would resolve to
+  // nothing the prompt can print.
+  it("rejects a lens id it does not define", () => {
+    expect(HandlerConfigureWire.safeParse({
+      terminalId: "t1", armed: true, role: "yolo",
+    }).success).toBe(false);
+  });
+
+  // The prompt budget is the ENGINE's, applied by clipping. Refusing a long brief
+  // here would drop the goal, the backlog, the judge picks and the arm along with
+  // it, since agent-core re-parses the whole payload with this schema.
+  it("accepts a brief far past the prompt budget and refuses only the absurd", () => {
+    expect(HandlerConfigureWire.safeParse({
+      terminalId: "t1", armed: true, brief: "x".repeat(5_000),
+    }).success).toBe(true);
+    expect(HandlerConfigureWire.safeParse({
+      terminalId: "t1", armed: true, brief: "x".repeat(10_001),
+    }).success).toBe(false);
+  });
+
+  // An older app still ships the retired posture key. Refusing the frame over it
+  // would take the arm with it.
+  it("still parses a configure whose only posture key is the legacy one", () => {
+    expect(HandlerConfigureWire.safeParse({
+      terminalId: "t1", armed: true, personality: "closer",
+    }).success).toBe(true);
+  });
 });
 
 // The two schemas are deliberate duplicates: the hot path re-validates the payload
@@ -384,6 +619,13 @@ describe("HandlerConfigureWire and HandlerConfigureMessage stay in lockstep", ()
       valid: true,
     },
     { name: "explicit backlog clear", payload: { terminalId: "t1", armed: true, backlog: [] }, valid: true },
+    {
+      name: "a lens and a brief",
+      payload: { terminalId: "t1", armed: true, role: "critic", brief: "mind the rollback" },
+      valid: true,
+    },
+    { name: "lens cleared to the default", payload: { terminalId: "t1", armed: true, role: "" }, valid: true },
+    { name: "unknown lens id", payload: { terminalId: "t1", armed: true, role: "yolo" }, valid: false },
     { name: "missing armed", payload: { terminalId: "t1" }, valid: false },
     { name: "non-string terminalId", payload: { terminalId: 7, armed: true }, valid: false },
     { name: "non-boolean armed", payload: { terminalId: "t1", armed: "yes" }, valid: false },
@@ -533,4 +775,141 @@ describe("handler:dismiss", () => {
       expect(viaPayload).toBe(c.valid);
     });
   }
+});
+
+describe("handler:answer", () => {
+  test("the answer verb routes through both parse paths", () => {
+    const msg = createMessage("handler:answer", {
+      projectId: "p", terminalId: "t1", escalationId: "e1", choiceId: "staging",
+    });
+    const parsed = parseMessage(JSON.stringify(msg)) as any;
+    expect(parsed.escalationId).toBe("e1");
+    expect(parsed.choiceId).toBe("staging");
+    // The hot path admits it on the discriminator alone, which is why agent-core
+    // re-parses with HandlerAnswerWire before the engine parks an answer.
+    expect(parseMessageFast(JSON.stringify(msg))?.type).toBe("handler:answer");
+  });
+
+  test("a tap carries ids and nothing else", () => {
+    // The option's words are judge-authored and are resolved bridge-side from the
+    // persisted row. A `text` field here would be the second producer into the one
+    // channel that mints authorization lifts.
+    expect(Object.keys(HandlerAnswerWire.shape).sort())
+      .toEqual(["choiceId", "escalationId", "terminalId"]);
+  });
+
+  const cases: Array<{ name: string; payload: Record<string, unknown>; valid: boolean }> = [
+    { name: "a well-formed tap", payload: { terminalId: "t1", escalationId: "e1", choiceId: "opt1" }, valid: true },
+    // Both ids are REQUIRED so a cross-language field-name typo fails LOUDLY,
+    // through agent-core's re-parse warn and its status resync, rather than
+    // arriving as a frame that names no row.
+    { name: "missing escalationId", payload: { terminalId: "t1", choiceId: "opt1" }, valid: false },
+    { name: "missing choiceId", payload: { terminalId: "t1", escalationId: "e1" }, valid: false },
+    { name: "missing terminalId", payload: { escalationId: "e1", choiceId: "opt1" }, valid: false },
+    { name: "an empty choiceId", payload: { terminalId: "t1", escalationId: "e1", choiceId: "" }, valid: false },
+    { name: "a non-string choiceId", payload: { terminalId: "t1", escalationId: "e1", choiceId: 7 }, valid: false },
+    {
+      name: "a choiceId at the cap",
+      payload: { terminalId: "t1", escalationId: "e1", choiceId: "c".repeat(40) },
+      valid: true,
+    },
+    {
+      name: "a choiceId over the cap",
+      payload: { terminalId: "t1", escalationId: "e1", choiceId: "c".repeat(41) },
+      valid: false,
+    },
+    {
+      name: "an escalationId over the cap",
+      payload: { terminalId: "t1", escalationId: "e".repeat(65), choiceId: "opt1" },
+      valid: false,
+    },
+  ];
+
+  for (const c of cases) {
+    it(`payload and envelope agree on ${c.name}`, () => {
+      const viaPayload = HandlerAnswerWire.safeParse(c.payload).success;
+      const viaEnvelope = parseMessage(JSON.stringify({
+        id: crypto.randomUUID(), timestamp: 1, type: "handler:answer", projectId: "p", ...c.payload,
+      })) !== null;
+      expect(viaPayload).toBe(viaEnvelope);
+      expect(viaPayload).toBe(c.valid);
+    });
+  }
+
+  test("the verb is wired at all five registration points", () => {
+    // Miss one and the type fails SILENTLY: the frame parses and reaches nothing,
+    // or it answers and never parses. Modelled on the same assertion
+    // checkout-protocol-contract.test.ts makes for session:setup.
+    const protocol = readFileSync(join(import.meta.dir, "../../src/protocol.ts"), "utf8");
+    // 1. the schema, 2. the exported type.
+    expect(protocol).toContain('type: z.literal("handler:answer")');
+    expect(protocol).toContain("export type HandlerAnswerMsg =");
+    // 3. the handler. CLAUDE.md still calls it "the index.ts switch"; the inbound
+    // switch itself lives in agent-core.ts.
+    const core = readFileSync(join(import.meta.dir, "../../src/agent-core.ts"), "utf8");
+    expect(core).toContain('case "handler:answer"');
+    // 4. KNOWN_TYPES and 5. the AbMessageSchema union, proven by behaviour rather
+    // than by grep: the two parse paths refuse a type either one has not heard of.
+    const raw = JSON.stringify(createMessage("handler:answer", {
+      projectId: "p", terminalId: "t1", escalationId: "e1", choiceId: "opt1",
+    }));
+    expect(parseMessageFast(raw)?.type).toBe("handler:answer");
+    expect(parseMessage(raw)).toMatchObject({ type: "handler:answer", choiceId: "opt1" });
+  });
+});
+
+describe("handler:instruct answers an ask by naming it", () => {
+  const send = (over: Record<string, unknown>) => parseMessage(JSON.stringify({
+    ...createMessage("handler:instruct", { projectId: "p", terminalId: "t1", text: "use staging" }),
+    ...over,
+  })) as any;
+
+  test("escalationId rides the frame, and its absence is an ordinary instruction", () => {
+    expect(send({ escalationId: "e1" }).escalationId).toBe("e1");
+    expect(send({}).escalationId).toBeUndefined();
+    expect(send({ escalationId: "e".repeat(64) })).toBeTruthy();
+    expect(send({ escalationId: "e".repeat(65) })).toBeNull();
+    expect(send({ escalationId: 7 })).toBeNull();
+  });
+
+  test("a bridge that predates the field strips it and still parses the instruction", () => {
+    // The rollback case, and the whole reason the app may send this only to a
+    // session whose snapshot advertised `askAnswer`: the schema is a plain
+    // non-strict z.object, so an older bridge silently reads the frame as a new
+    // instruction — which is an authorizing, extracting one.
+    const old = HandlerInstructWire.omit({ escalationId: true });
+    const parsed = old.safeParse({ terminalId: "t1", text: "use staging", escalationId: "e1" });
+    expect(parsed.success).toBe(true);
+    expect(parsed.success && "escalationId" in parsed.data).toBe(false);
+    expect(parsed.success && parsed.data.text).toBe("use staging");
+  });
+
+  test("delivered and choiceId round-trip, and both are absent for an ordinary instruction", () => {
+    expect(send({ escalationId: "e1", delivered: true, choiceId: "approve" }))
+      .toMatchObject({ delivered: true, choiceId: "approve" });
+    const plain = send({ escalationId: "e1" });
+    expect(plain.delivered).toBeUndefined();
+    expect(plain.choiceId).toBeUndefined();
+  });
+
+  test("a choiceId is bounded exactly like EscalationChoiceSchema's own", () => {
+    expect(send({ escalationId: "e1", delivered: true, choiceId: "c".repeat(40) })).toBeTruthy();
+    expect(send({ escalationId: "e1", delivered: true, choiceId: "c".repeat(41) })).toBeNull();
+    expect(send({ escalationId: "e1", delivered: true, choiceId: "" })).toBeNull();
+  });
+
+  test("delivered rejects anything but the literal true", () => {
+    expect(send({ escalationId: "e1", delivered: false })).toBeNull();
+    expect(send({ escalationId: "e1", delivered: "true" })).toBeNull();
+  });
+
+  test("a bridge that predates delivered/choiceId strips both and still parses", () => {
+    const old = HandlerInstructWire.omit({ delivered: true, choiceId: true });
+    const parsed = old.safeParse({
+      terminalId: "t1", text: "use staging", escalationId: "e1", delivered: true, choiceId: "approve",
+    });
+    expect(parsed.success).toBe(true);
+    expect(parsed.success && "delivered" in parsed.data).toBe(false);
+    expect(parsed.success && "choiceId" in parsed.data).toBe(false);
+  });
 });

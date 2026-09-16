@@ -39,6 +39,15 @@ export class RunawayGuard {
     return null;
   }
 
+  // Read through `this.state.get`, never the lazy private `get()`: building a
+  // prompt must not create guard state for a terminal that never auto-replies
+  // and so never reaches a `reset`. Same reason `recordProgress` reads it this
+  // way. The number is a FLOOR — `recordProgress` can restore it later in the
+  // same pass — so it is derived per prompt and never cached.
+  remaining(terminalId: string): number {
+    return Math.max(0, this.maxConsecutive - (this.state.get(terminalId)?.consecutive ?? 0));
+  }
+
   recordAutoReply(terminalId: string, replyText: string): void {
     const s = this.get(terminalId);
     s.consecutive += 1;

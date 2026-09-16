@@ -1,9 +1,13 @@
 import { expect, test } from "bun:test";
-import { augmentAgentLaunch } from "../src/agent-launch-augmenter";
-import { buildCodexNotifyInjection } from "../src/agents/codex/hooks";
-import { computeCommandHookHash, hookStateKey, EVENT_LABELS } from "../src/agents/codex/hook-fingerprint";
+import { augmentAgentLaunch } from "../src/agent-runtime";
+import { buildCodexNotifyInjection } from "../../packages/antgrid-agents/src/agents/codex/hooks";
+import { computeCommandHookHash, hookStateKey, EVENT_LABELS } from "../../packages/antgrid-agents/src/agents/codex/hook-fingerprint";
 
 const HOOK_COMMAND = { binary: "/Applications/O'Brien/Antgrid App/antgrid-bridge", preargs: ["hook"] };
+
+// The single self-invocation decision `augmentAgentLaunch` derives both the
+// hook command and the MCP command from; resolves to HOOK_COMMAND above.
+const BRIDGE_SELF = { compiled: true, binary: HOOK_COMMAND.binary };
 
 test("injects hook defs and a matching pre-seeded trusted_hash", () => {
   const args = buildCodexNotifyInjection(HOOK_COMMAND);
@@ -30,7 +34,7 @@ test("codex hook command defs contain no raw backslash", () => {
 });
 
 test("codex notify value contains bridge argv and no Node runtime", () => {
-  const { args } = augmentAgentLaunch("codex", "/tmp/abdir", undefined, HOOK_COMMAND);
+  const { args } = augmentAgentLaunch("codex", { abDir: "/tmp/abdir", self: BRIDGE_SELF });
   const notifyArg = args.find((a) => a.startsWith("notify="));
   expect(notifyArg).toBeDefined();
   expect(notifyArg).not.toContain("\\");

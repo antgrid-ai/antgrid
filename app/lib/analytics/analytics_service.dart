@@ -4,8 +4,9 @@ import 'package:http/http.dart' as http;
 class AnalyticsService {
   AnalyticsService({
     required http.Client client,
-    required String plausibleUrl,
-    required String plausibleDomain,
+    required String umamiUrl,
+    required String umamiWebsiteId,
+    required String umamiHostname,
     required String eventsApiUrl,
     required String installId,
     required String platform,
@@ -15,8 +16,10 @@ class AnalyticsService {
     DateTime Function()? now,
     this.batchSize = 10,
   }) : _client = client,
-       _plausibleUrl = plausibleUrl.replaceAll(RegExp(r'/+$'), ''),
-       _plausibleDomain = plausibleDomain,
+       _umamiUrl = umamiUrl.replaceAll(RegExp(r'/+$'), ''),
+       _umamiWebsiteId = umamiWebsiteId,
+       _umamiHostname = umamiHostname,
+       _userAgent = _userAgentFor(platform, appVersion),
        _eventsApiUrl = eventsApiUrl.replaceAll(RegExp(r'/+$'), ''),
        _installId = installId,
        _platform = platform,
@@ -28,8 +31,10 @@ class AnalyticsService {
   static bool _never() => false;
 
   final http.Client _client;
-  final String _plausibleUrl;
-  final String _plausibleDomain;
+  final String _umamiUrl;
+  final String _umamiWebsiteId;
+  final String _umamiHostname;
+  final String _userAgent;
   final String _eventsApiUrl;
   final String _installId;
   final String _platform;
@@ -46,7 +51,7 @@ class AnalyticsService {
   void track(String name, {Map<String, Object?> props = const {}}) {
     if (!_enabled()) return;
     final merged = {'platform': _platform, ..._clampProps(props)};
-    _sendToPlausible(name, merged);
+    _sendToUmami(name, merged);
     _enqueue(name, merged);
   }
 
@@ -58,23 +63,71 @@ class AnalyticsService {
         MapEntry(k, v is String && v.length > 120 ? v.substring(0, 120) : v),
   );
 
-  void _sendToPlausible(String name, Map<String, Object?> props) {
-    // Fire-and-forget. A realistic UA avoids Plausible's bot filtering.
+  /// The anonymous half of the split: this sink must never be able to be joined
+  /// to the first-party one, so [_installId] is deliberately absent from the
+  /// body and belongs only in [_enqueue].
+  ///
+  /// An empty website id means the beacon is inert — see
+  /// `AppEnvironment.umamiWebsiteId` for why that is the whole of the dev gate.
+  void _sendToUmami(String name, Map<String, Object?> props) {
+    if (_umamiWebsiteId.isEmpty) return;
+    // Fire-and-forget.
     _client
         .post(
-          Uri.parse('$_plausibleUrl/api/event'),
+          Uri.parse('$_umamiUrl/api/send'),
           headers: {
             'content-type': 'application/json',
-            'user-agent': 'Antgrid/$_appVersion ($_platform)',
+            'user-agent': _userAgent,
           },
           body: jsonEncode({
-            'name': name,
-            'domain': _plausibleDomain,
-            'url': 'app://antgrid/$name',
-            'props': props,
+            'type': 'event',
+            'payload': {
+              'website': _umamiWebsiteId,
+              'hostname': _umamiHostname,
+              // Umami keys its own filters on a url path, so one path per
+              // event name is what makes those filters reach an app event at
+              // all. It does not pollute the page report this website id also
+              // carries for the web app (web/src/ui/analytics.tsx): those
+              // reports select on Umami's pageview event_type, which a beacon
+              // carrying `name` is not.
+              'url': '/$name',
+              'name': name,
+              'data': props,
+            },
           }),
         )
         .ignore();
+  }
+
+  /// Umami reads the operating system off the User-Agent and from nowhere else,
+  /// so an agent naming only the product files every event under an unknown OS.
+  /// The parenthesised token is there for that parser — the smallest string it
+  /// matches per platform — while the product token stays first, so this
+  /// identifies our client rather than impersonating a browser.
+  ///
+  /// Two other things read this string and both are silent when they refuse:
+  /// the Cloudflare rules in front of the collect endpoint block bot-shaped
+  /// agents, and Umami runs `isbot` over it before storing anything (a match is
+  /// answered 200 and dropped). A missing event is never by itself evidence of
+  /// a bug on this side.
+  ///
+  /// Keys are the tags `analyticsPlatformTag` returns (app/lib/analytics/
+  /// events.dart), which are themselves kept in lockstep with a Zod enum in
+  /// web/src/routes/events.ts — so a rename there lands here too. A key that
+  /// stops matching costs that platform its OS token and nothing else: the
+  /// event still sends, and no test sees it.
+  static String _userAgentFor(String platform, String appVersion) {
+    const tokens = {
+      'windows': 'Windows NT 10.0; Win64; x64',
+      'macos': 'Macintosh; Intel Mac OS X',
+      'linux': 'X11; Linux x86_64',
+      'android': 'Linux; Android',
+      'ios': 'iPhone; like Mac OS X',
+    };
+    final token = tokens[platform];
+    return token == null
+        ? 'Antgrid/$appVersion'
+        : 'Antgrid/$appVersion ($token)';
   }
 
   void _enqueue(String name, Map<String, Object?> props) {

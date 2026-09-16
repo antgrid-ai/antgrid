@@ -3,14 +3,14 @@ import { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { resolveCodexThreadTitle } from "../src/agents/codex/title";
-import { resolveClaudeTranscriptTitle } from "../src/agents/claude-code/title";
+import { resolveCodexThreadTitle } from "../../packages/antgrid-agents/src/agents/codex/title";
+import { resolveClaudeTranscriptTitle } from "../../packages/antgrid-agents/src/agents/claude-code/title";
 import {
   parseAntigravityRenames,
   resolveAntigravityRename,
   resolveAntigravityTranscriptTitle,
-} from "../src/agents/antigravity/title";
-import { resolveStructuredTitle } from "../src/agents/title-dispatch";
+} from "../../packages/antgrid-agents/src/agents/antigravity/title";
+import { resolveStructuredTitle } from "../../packages/antgrid-agents/src/agents/title-dispatch";
 
 const dirs: string[] = [];
 function tmp() { const d = mkdtempSync(join(tmpdir(), "ab-tr-")); dirs.push(d); return d; }

@@ -196,6 +196,95 @@ void main() {
     expect((m as HandlerEscalationMessage).choices, isNull);
   });
 
+  test('handler:escalation carries the ask fields through the push', () {
+    // The push and the status replay are two separate hand-written field
+    // lists: a field only the replay reads makes the same row an ask a moment
+    // after it arrives as a stopped session.
+    final m =
+        parseAbMessage({
+              'type': 'handler:escalation',
+              'id': 'x',
+              'timestamp': 1,
+              'projectId': 'p',
+              'escalationId': 'e1',
+              'terminalId': 't1',
+              'question': 'which shape?',
+              'reasoning': 'r',
+              'draftReply': '',
+              'urgency': 'normal',
+              'nonBlocking': true,
+              'unblocked': ['i1', 'i2'],
+              'askOptions': [
+                {
+                  'choiceId': 'keep',
+                  'label': 'Keep the current schema',
+                  'cost': 'Leaves the migration for later',
+                },
+                {
+                  'choiceId': 'migrate',
+                  'label': 'Write the migration now',
+                  'cost': 'Another twenty minutes',
+                  'recommended': true,
+                },
+              ],
+            })
+            as HandlerEscalationMessage;
+    expect(m.nonBlocking, isTrue);
+    expect(m.unblocked, ['i1', 'i2']);
+    expect(m.askOptions, hasLength(2));
+    expect(m.askOptions![1].recommended, isTrue);
+    // An ask is never one-tappable through the transport that types into the
+    // session.
+    expect(m.choices, isNull);
+  });
+
+  test('handler:escalation without the ask fields reads as blocking', () {
+    final m = parseAbMessage({
+      'type': 'handler:escalation',
+      'id': 'x',
+      'timestamp': 1,
+      'projectId': 'p',
+      'escalationId': 'e1',
+      'terminalId': 't1',
+      'question': 'q',
+      'reasoning': 'r',
+      'draftReply': 'd',
+      'urgency': 'normal',
+    });
+    final e = m as HandlerEscalationMessage;
+    expect(e.nonBlocking, isFalse);
+    expect(e.unblocked, isEmpty);
+    expect(e.askOptions, isNull);
+  });
+
+  test('handler:escalation degrades a malformed ask field, keeps the row', () {
+    // parseAbMessage has no try/catch upstream, and dropping the message would
+    // cost the user the question over decoration on it.
+    final m = parseAbMessage({
+      'type': 'handler:escalation',
+      'id': 'x',
+      'timestamp': 1,
+      'projectId': 'p',
+      'escalationId': 'e1',
+      'terminalId': 't1',
+      'question': 'q',
+      'reasoning': 'r',
+      'draftReply': 'd',
+      'urgency': 'normal',
+      'nonBlocking': 'yes',
+      'unblocked': 'i1',
+      'askOptions': [
+        {'choiceId': 'keep', 'label': 'Keep it', 'cost': 'time'},
+      ],
+    });
+    expect(m, isA<HandlerEscalationMessage>());
+    final e = m as HandlerEscalationMessage;
+    expect(e.nonBlocking, isFalse);
+    expect(e.unblocked, isEmpty);
+    expect(e.askOptions, isNull);
+    expect(e.question, 'q');
+  });
+
   test('handler:activity parses, detail optional', () {
     final m = parseAbMessage({
       'type': 'handler:activity',

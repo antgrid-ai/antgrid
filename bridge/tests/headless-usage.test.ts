@@ -18,10 +18,10 @@ import { parseTitleFromOutput } from "../src/agents/title-generate";
 import { parseDecisionFromOutput } from "../src/handler/decision";
 import { parseExtractionOutput } from "../src/handler/extract";
 import { extractJsonObject } from "../src/handler/json-extract";
-import { AGENTS } from "../src/agents/registry";
+import { AGENTS } from "../../packages/antgrid-agents/src/agents/registry";
 import {
   readClaudeCodeUsage, readCodexUsage, readCopilotUsage, readOpencodeUsage, unwrapEnvelope,
-} from "../src/agents/usage-envelope";
+} from "../../packages/antgrid-agents/src/agents/usage-envelope";
 import {
   armContextCapture, armPromptCapture, modelwatch, __resetModelwatchForTest,
   type ModelCallContext,
@@ -833,7 +833,7 @@ describe("the production call sites ask for the numbers", () => {
     const decision = { decision: "continue", confidence: 0.9, reason: "the agent is working" };
     const { spawn, calls } = replay([JSON.stringify(decision)], COPILOT_OK);
     const d = await runDecision({
-      tool: "github-copilot", goal: "migrate the auth module", backlogText: "",
+      tool: "github-copilot", instructions: ["migrate the auth module"], backlogText: "",
       context: "C", cwd: ".", spawn,
     });
     expect(d?.decision).toBe("continue");
@@ -849,7 +849,7 @@ describe("the production call sites ask for the numbers", () => {
       claudeEnvelope(JSON.stringify(decision), 22),
     ]);
     const d = await runDecision({
-      tool: "claude-code", goal: "migrate the auth module", backlogText: "",
+      tool: "claude-code", instructions: ["migrate the auth module"], backlogText: "",
       context: "C", cwd: ".", spawn,
     });
     expect(d?.decision).toBe("continue");

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../design/ab_icons.dart';
 import '../design/ab_tokens.dart';
@@ -7,6 +8,7 @@ import '../design/widgets/ab_button.dart';
 import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../models/workspace_view.dart';
+import '../providers/visible_surface.dart';
 
 /// The enum is a model — nothing below the widget layer may reach into this
 /// file for it — but every widget-layer caller wants it together with the
@@ -42,7 +44,12 @@ extension WorkspaceViewUI on WorkspaceView {
 /// and the selected one has to be scrolled back to whenever it changes —
 /// picking Terminals from `WorkspaceMenuButton`'s popup otherwise swapped the
 /// body while every visible tab stayed unselected.
-class WorkspaceTabBar extends StatefulWidget {
+///
+/// Which tabs it lists comes from [visibleWorkspaceViewsProvider] rather than
+/// from the caller: the phone's nav and the agent bar's rail read the same
+/// provider, and a strip that took the list as a parameter could be handed a
+/// different one.
+class WorkspaceTabBar extends ConsumerStatefulWidget {
   const WorkspaceTabBar({
     super.key,
     required this.selected,
@@ -61,10 +68,10 @@ class WorkspaceTabBar extends StatefulWidget {
   final VoidCallback? onClose;
 
   @override
-  State<WorkspaceTabBar> createState() => _WorkspaceTabBarState();
+  ConsumerState<WorkspaceTabBar> createState() => _WorkspaceTabBarState();
 }
 
-class _WorkspaceTabBarState extends State<WorkspaceTabBar> {
+class _WorkspaceTabBarState extends ConsumerState<WorkspaceTabBar> {
   final _tabKeys = {for (final view in WorkspaceView.values) view: GlobalKey()};
   final _scrollController = ScrollController();
 
@@ -97,9 +104,9 @@ class _WorkspaceTabBarState extends State<WorkspaceTabBar> {
     if (tabContext == null) return;
     Scrollable.ensureVisible(
       tabContext,
-      // Centred rather than nudged to the nearest edge: the strip holds five
-      // tabs in a pane that fits three, so centring keeps a neighbour visible
-      // on either side and makes it obvious the rest scroll.
+      // Centred rather than nudged to the nearest edge: the strip holds more
+      // tabs than the pane fits, so centring keeps a neighbour visible on
+      // either side and makes it obvious the rest scroll.
       alignment: 0.5,
       duration: animate ? AbTokens.motionDefault : Duration.zero,
       curve: Curves.easeOut,
@@ -114,6 +121,7 @@ class _WorkspaceTabBarState extends State<WorkspaceTabBar> {
 
   @override
   Widget build(BuildContext context) {
+    final views = ref.watch(visibleWorkspaceViewsProvider);
     return Container(
       height: AbTokens.statusHeaderHeight,
       decoration: BoxDecoration(
@@ -150,7 +158,7 @@ class _WorkspaceTabBarState extends State<WorkspaceTabBar> {
                 physics: const ClampingScrollPhysics(),
                 child: Row(
                   children: [
-                    for (final view in WorkspaceView.values)
+                    for (final view in views)
                       _TabItem(
                         key: _tabKeys[view],
                         view: view,

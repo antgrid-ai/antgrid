@@ -269,6 +269,10 @@ jobs:
         # for the web service) — the desktop build never touches Postgres or web.
         run: bun install --ignore-scripts
 
+      - name: Qualify native terminal frames
+        working-directory: app
+        run: flutter test -j 2 test/terminal_frame_prototype_test.dart
+
       - name: Build bridge (universal macOS binary)
         run: |
           set -euo pipefail
@@ -291,6 +295,11 @@ jobs:
 
       - name: Smoke test compiled bridge hook
         run: bun run bridge/scripts/smoke-hook-binary.ts bridge/dist/antgrid-bridge
+
+      - name: Smoke test compiled adapter assets
+        run: bun run --filter antgrid-agents smoke:assets
+      - name: Smoke test compiled bridge mcp
+        run: bun run bridge/scripts/smoke-mcp-binary.ts bridge/dist/antgrid-bridge
 
       - name: Build macOS app
         id: build
@@ -637,6 +646,10 @@ jobs:
         # for the web service) — the desktop build never touches Postgres or web.
         run: bun install --ignore-scripts
 
+      - name: Qualify native terminal frames
+        working-directory: app
+        run: flutter test -j 2 test/terminal_frame_prototype_test.dart
+
       # The Windows-only half of the transport cipher. `ci-android.yml` runs
       # `flutter test` on ubuntu, where the CNG group skips itself entirely, so
       # this is the ONLY place the bcrypt.dll binding is exercised — a release
@@ -657,6 +670,12 @@ jobs:
       - name: Smoke test compiled bridge hook
         shell: pwsh
         run: bun run bridge/scripts/smoke-hook-binary.ts bridge/dist/antgrid-bridge.exe
+
+      - name: Smoke test compiled adapter assets
+        run: bun run --filter antgrid-agents smoke:assets
+      - name: Smoke test compiled bridge mcp
+        shell: pwsh
+        run: bun run bridge/scripts/smoke-mcp-binary.ts bridge/dist/antgrid-bridge.exe
 
       - name: Build Windows app
         id: build
@@ -848,6 +867,10 @@ jobs:
         # for the web service) — the desktop build never touches Postgres or web.
         run: bun install --ignore-scripts
 
+      - name: Qualify native terminal frames
+        working-directory: app
+        run: flutter test -j 2 test/terminal_frame_prototype_test.dart
+
       - name: Build bridge (Linux x64 binary)
         run: |
           set -euo pipefail
@@ -861,6 +884,11 @@ jobs:
 
       - name: Smoke test compiled bridge hook
         run: bun run bridge/scripts/smoke-hook-binary.ts bridge/dist/antgrid-bridge
+
+      - name: Smoke test compiled adapter assets
+        run: bun run --filter antgrid-agents smoke:assets
+      - name: Smoke test compiled bridge mcp
+        run: bun run bridge/scripts/smoke-mcp-binary.ts bridge/dist/antgrid-bridge
 
       - name: Build Linux app
         id: build

@@ -153,6 +153,10 @@ const INSTALL_STATE_COOKIE = "antgrid.gh_install";
 
 type UiContext = import("hono").Context<{ Variables: AuthVars }>;
 
+function layoutUser(c: UiContext) {
+  return { id: c.get("userId"), email: c.get("userEmail") };
+}
+
 /**
  * A seat count as a form field: digits, then the same request bound the JSON
  * API applies.
@@ -1144,7 +1148,7 @@ export function uiRoutes(deps: {
       isBillingAccountOwner(deps.db, userId),
     ]);
     if (!accountId) return c.redirect("/login");
-    const user = { email: c.get("userEmail") };
+    const user = layoutUser(c);
     const notice = parseTeamNotice(c.req.query("invite"));
 
     if (!isOwner) {
@@ -1475,7 +1479,9 @@ export function uiRoutes(deps: {
     const id = c.req.query("id") ?? "";
     const token = c.req.query("t") ?? "";
     const session = await deps.auth.api.getSession({ headers: c.req.raw.headers });
-    const user = session?.user ? { email: session.user.email } : null;
+    const user = session?.user
+      ? { id: session.user.id, email: session.user.email }
+      : null;
 
     // Honest 429 rather than the invalid-link page: telling a rate-limited
     // invitee their invitation is dead is the one answer they cannot recover
@@ -1555,7 +1561,7 @@ export function uiRoutes(deps: {
       }
       return c.html(
         <ConnectionsPage
-          user={{ email: c.get("userEmail") }}
+          user={layoutUser(c)}
           connections={connections}
           now={Date.now()}
         />,
@@ -1589,9 +1595,9 @@ export function uiRoutes(deps: {
     //   if (plan && isPlanId(plan.slug)) currentPlanSlug = plan.slug;
     // }
     return c.html(
-      <PricingPage user={{ email: c.get("userEmail") }} plans={plans} />
+      <PricingPage user={layoutUser(c)} plans={plans} />
       // <PricingPage
-      //   user={{ email: c.get("userEmail") }}
+      //   user={layoutUser(c)}
       //   plans={plans}
       //   env={deps.env}
       //   currentPlanSlug={currentPlanSlug}
@@ -1672,7 +1678,7 @@ export function uiRoutes(deps: {
   ) {
     const page = (
       <CheckoutPage
-        user={{ email: c.get("userEmail") }}
+        user={layoutUser(c)}
         plan={ctx.plan}
         detectedCountry={ctx.country}
         gateway={ctx.gateway}
@@ -1792,7 +1798,7 @@ export function uiRoutes(deps: {
   r.get("/devices", requireUserOrRedirect({ auth: deps.auth }), async (c) => {
     const userId = c.get("userId");
     const devices = await listActiveDevices(deps.db, userId);
-    return c.html(<DevicesPage user={{ email: c.get("userEmail") }} devices={devices} />);
+    return c.html(<DevicesPage user={layoutUser(c)} devices={devices} />);
   });
 
   r.get("/dashboard", requireUserOrRedirect({ auth: deps.auth }), async (c) => {
@@ -1817,7 +1823,7 @@ export function uiRoutes(deps: {
     const resumeRaw = c.req.query("resume");
     return c.html(
       <DashboardPage
-        user={{ email: c.get("userEmail") }}
+        user={layoutUser(c)}
         subscription={sub}
         plan={plan}
         tier={tier}
@@ -2073,7 +2079,7 @@ export function uiRoutes(deps: {
     ]);
     return c.html(
       <AccountPage
-        user={{ email: c.get("userEmail") }}
+        user={layoutUser(c)}
         blockedBySubscription={blocked}
         blockedByTeam={blockedByTeam}
         hasPassword={hasPassword}

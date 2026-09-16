@@ -12,6 +12,11 @@ import 'package:antgrid/test_helpers/fake_agent_transport.dart';
 import '../helpers/prefs_test_mock.dart';
 
 void main() {
+  test('service discovery can omit the executable path', () {
+    final tool = DetectedTool.fromJson({'tool': 'service'});
+    expect(tool.tool, 'service');
+    expect(tool.path, isNull);
+  });
   TestWidgetsFlutterBinding.ensureInitialized();
 
   setUp(() {

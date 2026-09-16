@@ -81,11 +81,7 @@ export default defineConfig({
   // prefetchAll rather than per-link opt-in because the site is nine pages —
   // tagging them individually is a list that goes stale, not a saving.
   prefetch: { prefetchAll: true, defaultStrategy: "hover" },
-  // Still behind the experimental flag as of Astro 5.18 — the docs describe it
-  // unflagged, but `fonts` at the top level throws ExperimentalFontsNotEnabled.
-  // Move it up a level when it stabilises; the shape of `fonts` itself is what
-  // the docs document, so only the nesting should need to change.
-  experimental: { fonts },
+  fonts,
   vite: { plugins: [tailwindcss()] },
   integrations: [
     // simple-icons is named explicitly because astro-icon otherwise assigns an

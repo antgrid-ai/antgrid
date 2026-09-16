@@ -57,12 +57,13 @@ import '../services/push_background_handler.dart'
     show decodePush, pushDataOf, pushDedupKey, routeOfPush;
 import '../services/push_identity.dart';
 import '../services/sessions_service.dart'
-    show SessionOperationException, SessionsService;
+    show SessionListing, SessionOperationException, SessionsService;
 import '../util/ab_log.dart';
 import '../util/detached.dart';
 import '../utils/notification_routing.dart';
 import '../utils/platform_utils.dart';
 import '../widgets/agent_panel.dart';
+import '../widgets/handler/handler_why.dart' show handlerFallbackQuestion;
 import '../widgets/mobile_bottom_nav.dart';
 import '../widgets/operational_error_toaster.dart';
 import '../widgets/projects_drawer.dart';
@@ -115,6 +116,40 @@ const double _kContextPanelMinWidth = 320.0;
 /// `ProjectPreferences.panelMode`, so reordering these is safe; renaming one
 /// drops that stored preference back to unchosen (see `_PanelModeNames` there).
 enum _PanelMode { normal, contextHidden, contextExpanded }
+
+/// The title an escalation is surfaced under — the in-app toast and the OS
+/// notification this app raises for itself.
+///
+/// HAND-MIRRORED in `composePush`'s `handler:escalation` branch
+/// (`bridge/src/push/compose.ts`), which titles the SAME escalation for a phone
+/// that is asleep or detached while this titles it for an attached app. Nothing
+/// in CI couples them, so a string changed on one side alone describes one
+/// event two different ways depending only on whether the device was awake —
+/// which is why `handler_escalation_title_test.dart` reads the bridge's own
+/// literals back out of that file. A shared golden fixture the bridge test
+/// writes and the Dart test reads is the real fix and is not built here; until
+/// it is, these three strings live in four places.
+///
+/// Pulled out of [WorkspaceShellState] so the branch can be pinned against
+/// literal escalations without pumping the whole shell — same reasoning as
+/// [workspaceBlockingError].
+@visibleForTesting
+String handlerEscalationTitle(HandlerEscalation esc) {
+  if (esc.urgency == 'high') return 'Handler — urgent';
+  // A question Handler raised on a pass that had already replied to the agent:
+  // the work went on, so the word must not be the one that means the session
+  // stopped. Safe to read straight off the row here because every escalation
+  // reaching this point has been through `HandlerService`'s capability gate —
+  // an ask a bridge cannot be told the answer to arrives with `nonBlocking`
+  // already cleared, so the app never offers a word it cannot honour.
+  //
+  // The split is also the whole of what reaches a locked phone: the push
+  // payload carries no channel, priority or interruption level (see
+  // `composePush`), so both titles buzz and light the screen identically.
+  // Everything else that separates a question from a stop is visible only once
+  // the user has been interrupted and has opened the Handler tab.
+  return esc.nonBlocking ? 'Handler has a question' : 'Handler needs you';
+}
 
 /// Downgrades a stored/observed panel-mode name away from `contextExpanded`
 /// before it can seed anything other than the session that actually chose
@@ -284,6 +319,9 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
   /// ([_kMaxNotifiedIds]) via [_markNotified] so a long-lived foreground session
   /// receiving many pushes can't grow it without bound.
   final Set<String> _notifiedIds = <String>{};
+  StreamSubscription<SessionListing>? _sessionListingSub;
+  // The project ID alone cannot distinguish an obsolete run after A → B → A.
+  int _sessionBootstrapGeneration = 0;
 
   /// Cap on [_notifiedIds]. Dedup only needs recent ids; re-seeing one evicted
   /// long ago risks at most one duplicate — fine for best-effort notifications.
@@ -399,7 +437,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     // them.
     final agentBarNotifier = ref.read(agentBarMountedProvider.notifier);
     // The reveal callback closes over this State (setState + _pageController),
-    // so leaving it published would let the agent header's NEEDS YOU pill call
+    // so leaving it published would let the session kebab's attention row call
     // into a disposed shell after a project switch.
     final revealNotifier = ref.read(revealHandlerTabProvider.notifier);
     // Same lifetime again: a stale tab left published here would let a back
@@ -466,6 +504,8 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
 
   @override
   void dispose() {
+    _sessionBootstrapGeneration++;
+    unawaited(_sessionListingSub?.cancel());
     WidgetsBinding.instance.removeObserver(this);
     _unsubscribeForegroundPush?.call();
     _unsubscribeForegroundPush = null;
@@ -510,11 +550,35 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     lifecycle: _lifecycle,
   );
 
+  /// Whether [entryId]'s Handler holds an armed slot for [sessionId] — the
+  /// app-side reading of the bridge's `isHandlerArmed`, which is what
+  /// `handler:status` lists. Read off the notification's OWN project session
+  /// rather than the focused one: this surfacer spans every warm project (see
+  /// [agentPushNotificationsProvider]), and the focused project's armed set
+  /// cannot answer for a background one.
+  bool _handlerArmed(String entryId, String? sessionId) {
+    if (sessionId == null) return false;
+    final session = ref.read(projectSessionProvider(entryId)).value;
+    return session?.handlerService.currentState.sessions[sessionId] != null;
+  }
+
   void _onAgentNotificationPush(NotificationPushMessage msg, String entryId) {
     if (_isViewingSession(msg.sessionId)) return;
+    // The Handler's escalation for this same block is surfaced by
+    // [_onHandlerEscalation] a beat away, carrying the same sentence and the id
+    // that answers it. Two buzzes for one question is what the bridge's push
+    // lane already refuses; this is the in-band half of that rule.
+    if (handlerAnnouncesAgentNotification(
+      notificationType: msg.notificationType,
+      sessionId: msg.sessionId,
+      handlerArmed: _handlerArmed(entryId, msg.sessionId),
+    )) {
+      return;
+    }
     const labels = {
       'permission_request': 'Permission needed',
       'awaiting_input': 'Needs your input',
+      'question': 'Agent asks',
       'task_complete': 'Task complete',
       'idle': 'Waiting for you',
       'error': 'Agent error',
@@ -547,10 +611,10 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     // Route through the shared surfacer (foreground toast / background OS
     // notification), identical to the agent-notification paths, so an
     // escalation from ANY warm project is surfaced — not just the focused one.
-    final title = esc.urgency == 'high'
-        ? 'Handler — urgent'
-        : 'Handler needs you';
-    final body = esc.question.isNotEmpty ? esc.question : 'Agent needs you';
+    final title = handlerEscalationTitle(esc);
+    final body = esc.question.isNotEmpty
+        ? esc.question
+        : handlerFallbackQuestion;
     _onAgentNotification(
       title: title,
       body: body,
@@ -673,7 +737,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     // switch to persisting WorkspaceView.name, rather than relying on this guard.
     final idx = prefs.workspaceViewIndex;
     if (idx >= 0 && idx < WorkspaceView.values.length) {
-      _selectedView = WorkspaceView.values[idx];
+      _selectedView = _offeredOr(WorkspaceView.values[idx]);
     }
     final key = ref.read(activeSessionUiKeyProvider);
     if (key != null) {
@@ -703,8 +767,20 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     _prefsApplied = true;
   }
 
+  /// Falls back to Files for a tab this session does not currently offer.
+  ///
+  /// [visibleWorkspaceViewsProvider] offers every view today, but a persisted
+  /// ordinal, a per-session restore and a deep link can each still name one it
+  /// has stopped offering — a build that dropped a view, or a conditional one
+  /// added back. Left unchecked, the panel shows a body with no tab marked and
+  /// nothing to switch back with.
+  WorkspaceView _offeredOr(WorkspaceView view) =>
+      ref.read(visibleWorkspaceViewsProvider).contains(view)
+      ? view
+      : WorkspaceView.files;
+
   void _restoreSessionUi(SessionWorkspaceState state) {
-    _selectedView = state.selectedView;
+    _selectedView = _offeredOr(state.selectedView);
     _panelMode = state.panelMode == null
         ? null
         : _PanelMode.values.asNameMap()[state.panelMode];
@@ -760,8 +836,15 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
   /// Both callers run this detached, so nothing here may reject — see
   /// [detached].
   Future<void> _bootstrapSessions() async {
+    final generation = ++_sessionBootstrapGeneration;
+    unawaited(_sessionListingSub?.cancel());
+    _sessionListingSub = null;
     final triggeredFor = ref.read(selectedRegistrationIdProvider);
     if (triggeredFor == null) return;
+    bool isCurrent() =>
+        mounted &&
+        generation == _sessionBootstrapGeneration &&
+        ref.read(selectedRegistrationIdProvider) == triggeredFor;
 
     // Wait for the per-project ProjectSession (transport + services) to
     // finish constructing before reading any per-project service façade.
@@ -776,17 +859,21 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
       // `reconcileActiveSession` off a fallback and leaves every surface
       // handover unspendable, since the drains wait on it. Same clear, same
       // guard as the requestList failure below.
-      if (mounted && ref.read(selectedRegistrationIdProvider) == triggeredFor) {
+      if (isCurrent()) {
         ref.read(pendingActiveSessionIdProvider.notifier).set(null);
         ref.read(pendingSessionStartSuppressedIdProvider.notifier).set(null);
       }
       return;
     }
-    if (!mounted || ref.read(selectedRegistrationIdProvider) != triggeredFor) {
-      return;
-    }
+    if (!isCurrent()) return;
 
     final svc = ref.read(sessionsServiceProvider);
+    _sessionListingSub = svc.listings.listen((listing) {
+      if (!listing.isReply || listing.includeArchived || !isCurrent()) return;
+      if (ref.read(relayErrorBannerProvider)?.code == 'SESSIONS') {
+        ref.read(relayErrorBannerProvider.notifier).set(null);
+      }
+    });
     List<SessionEntry> list;
     try {
       list = await svc.requestList();
@@ -795,9 +882,8 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
       // a relay stream drop. Nothing is wrong with the project and there is
       // nothing to tell the user: `SessionsService`'s `sessions:list` hydrator
       // re-runs the moment the transport re-establishes and refills the panel.
-      // Latching the banner here would outlive that recovery, because the only
-      // thing that clears it is a user tap (`ab_banner.dart`).
-      if (mounted && ref.read(selectedRegistrationIdProvider) == triggeredFor) {
+      // A session outage is shown by the connection surface itself.
+      if (isCurrent()) {
         ref.read(pendingActiveSessionIdProvider.notifier).set(null);
         ref.read(pendingSessionStartSuppressedIdProvider.notifier).set(null);
       }
@@ -807,7 +893,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
       // workspace is going to render with an empty sessions list and
       // unresponsive "+ new session" — surface it inline so the user has
       // an actionable next step instead of staring at a blank panel.
-      if (mounted && ref.read(selectedRegistrationIdProvider) == triggeredFor) {
+      if (isCurrent()) {
         // The queued pick was this run's to resolve, and nothing else will:
         // left set, it keeps `reconcileActiveSession` from ever falling back
         // to a default and holds the explorer's checkout unsettled, so the
@@ -826,15 +912,9 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
       }
       return;
     }
-    if (!mounted) return;
-    if (ref.read(selectedRegistrationIdProvider) != triggeredFor) return;
+    if (!isCurrent()) return;
 
-    // A load that succeeded retires the notice an earlier failed load left
-    // behind. Nothing else retires it — the banner is cleared only by a user
-    // tap — so without this a project that has fully recovered keeps offering
-    // "switch projects and back to retry" over a panel that already reloaded.
-    // Scoped to this screen's own code so a relay notice (license, auth) that
-    // a successful session list says nothing about is left alone.
+    // A successful list cannot retire unrelated relay or license notices.
     if (ref.read(relayErrorBannerProvider)?.code == 'SESSIONS') {
       ref.read(relayErrorBannerProvider.notifier).set(null);
     }
@@ -872,11 +952,10 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
           try {
             await _startBestEffort(svc, desired.id, raiseRefusal: true);
           } on SessionOperationException catch (error) {
-            if (mounted) reportStartRefusal(context, error);
+            if (mounted && isCurrent()) reportStartRefusal(context, error);
             return;
           }
-          if (!mounted) return;
-          if (ref.read(selectedRegistrationIdProvider) != triggeredFor) return;
+          if (!isCurrent()) return;
         }
         svc.focus(desired.id);
         return;
@@ -898,7 +977,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
       // session + own the post-start UI state. Without this guard the empty
       // list here races leaveNewSession() and can strand the user on the New
       // Session page or double-start. See the per-session-agent design.
-      if (ref.read(selectedRegistrationIdProvider) != triggeredFor) return;
+      if (!isCurrent()) return;
       if (ref.read(newSessionStartInFlightProvider)) return;
       ref
           .read(workbenchSurfaceProvider.notifier)
@@ -916,7 +995,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
           );
       return;
     } else {
-      if (ref.read(selectedRegistrationIdProvider) != triggeredFor) return;
+      if (!isCurrent()) return;
       // Keep the session already focused when this project still has it. The
       // bridge orders by `lastUsedAt`, which records ACTIVITY (a keystroke, an
       // agent notification) rather than what the user last opened — and
@@ -941,8 +1020,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
           !session.running &&
           !sessionStartQueued(session.setup)) {
         await _startBestEffort(svc, session.id);
-        if (!mounted) return;
-        if (ref.read(selectedRegistrationIdProvider) != triggeredFor) return;
+        if (!isCurrent()) return;
       }
       // Transcript hydration is driven by AgentTranscriptView.initState (the
       // single per-session chokepoint), not here — see hydrateAttachedChatIfNeeded.
@@ -991,9 +1069,9 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
 
   void switchToAgentPage() => _goToPage(_MobilePage.agent);
 
-  /// Reveal the Handler workspace tab from anywhere (e.g. the agent header's
-  /// NEEDS YOU pill). Desktop: selects the sidebar view, un-hiding the panel
-  /// first if the user had it closed — a pill that selected a tab nobody can
+  /// Reveal the Handler workspace tab from anywhere (e.g. the session kebab's
+  /// attention row). Desktop: selects the sidebar view, un-hiding the panel
+  /// first if the user had it closed — a row that selected a tab nobody can
   /// see would answer a call to action with nothing at all. Mobile: also swipes
   /// to the workspace page.
   void revealHandlerTab() {
@@ -1067,7 +1145,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
         saved = saved.copyWith(
           initialized: true,
           selectedView: idx >= 0 && idx < WorkspaceView.values.length
-              ? WorkspaceView.values[idx]
+              ? _offeredOr(WorkspaceView.values[idx])
               : WorkspaceView.files,
           panelMode: _seedablePanelModeName(prefs.panelMode),
         );
@@ -1099,7 +1177,11 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     // fireImmediately flag, so we use the initState path instead of
     // ref.listenManual to keep widget lifecycle straightforward.
     ref.listen<String?>(selectedRegistrationIdProvider, (prev, next) {
-      if (next == null || prev == next) return;
+      if (prev == next) return;
+      _sessionBootstrapGeneration++;
+      unawaited(_sessionListingSub?.cancel());
+      _sessionListingSub = null;
+      if (next == null) return;
       detached(
         'WorkspaceShell',
         'session bootstrap failed',
@@ -1716,7 +1798,13 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
 
   /// Switch the context-panel tab. Publishes the new tab so back handlers
   /// registered by the OTHER (still-mounted, offscreen) tabs stay inert.
+  ///
+  /// A view this session does not offer is refused rather than fallen back
+  /// from: a deep link naming a tab that isn't there should leave the user
+  /// where they were, not drop them on Files (see [_offeredOr], whose callers
+  /// are seeding a fresh workspace and have nowhere else to land).
   void _selectView(WorkspaceView view) {
+    if (!ref.read(visibleWorkspaceViewsProvider).contains(view)) return;
     setState(() {
       _selectedView = view;
       _updateSessionUi((s) => s.copyWith(selectedView: view));
@@ -1747,8 +1835,8 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
 
   /// Put [view] in front of the user in the docked context panel, un-hiding it
   /// first if the user had it closed — the same recovery [revealHandlerTab]
-  /// gives the NEEDS YOU pill, since the menu is reachable from panel modes
-  /// where the context panel is off screen entirely.
+  /// gives the kebab's attention row, since the menu is reachable from panel
+  /// modes where the context panel is off screen entirely.
   ///
   /// The entry point for every caller that names a view from outside the tab
   /// strip: the agent bar's workspace menu.
@@ -1794,8 +1882,8 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
       return;
     }
     // Desktop un-hides the docked context panel and selects the view there —
-    // same recovery [revealHandlerTab] gives the NEEDS YOU pill, since a
-    // navigation can land while the panel is off screen entirely.
+    // same recovery [revealHandlerTab] gives the kebab's attention row, since
+    // a navigation can land while the panel is off screen entirely.
     _revealWorkspaceView(pending.value);
   }
 
@@ -2222,7 +2310,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
   }
 
   /// The workspace rail and the context pane's own [WorkspaceTabBar] list the
-  /// same five views, so only ever one of them is up: the pane takes the job
+  /// same views, so only ever one of them is up: the pane takes the job
   /// over as it opens and hands it back as it closes. What is left to the rail
   /// is the one thing the tab strip cannot do — being the way back to a
   /// workspace the user has closed, which otherwise takes its own tab strip

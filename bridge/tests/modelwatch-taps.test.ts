@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 
 import { runHeadless } from "../src/agents/headless";
 import { generateTitleFromContext, type TitleGeneration } from "../src/agents/title-generate";
-import type { TitleOutcome } from "../src/agents/title-attempts";
+import type { TitleOutcome } from "../../packages/antgrid-agents/src/agents/title-attempts";
 import { runDecision, runExtraction } from "../src/handler/judge";
 import {
   armContextCapture, armPromptCapture, modelwatch, __resetModelwatchForTest,
@@ -91,7 +91,7 @@ describe("a judge retry, recorded per attempt", () => {
     ]);
 
     const decision = await runDecision({
-      tool: "claude-code", goal: "migrate the auth module", backlogText: "",
+      tool: "claude-code", instructions: ["migrate the auth module"], backlogText: "",
       context: "C", cwd: ".", timeoutMs: BUDGET_MS, spawn,
     });
 
@@ -123,7 +123,7 @@ describe("a judge retry, recorded per attempt", () => {
   it("keeps the retry's attribution identical to the first attempt's", async () => {
     const { spawn } = scriptedSpawn([{ stdout: "garbage" }, { stdout: "still garbage" }]);
     await runDecision({
-      tool: "claude-code", goal: "g", backlogText: "", context: "C", cwd: ".", spawn,
+      tool: "claude-code", instructions: ["g"], backlogText: "", context: "C", cwd: ".", spawn,
     });
 
     const attribution = events().map((e) => [
@@ -140,7 +140,7 @@ describe("a judge retry, recorded per attempt", () => {
   // end to join to: naming a tier would name one that never ran.
   it("records a lone outcome for a tool no judge serves", async () => {
     const decision = await runDecision({
-      tool: "kimi", goal: "g", backlogText: "", context: "C", cwd: ".",
+      tool: "kimi", instructions: ["g"], backlogText: "", context: "C", cwd: ".",
     });
 
     expect(decision).toBeNull();
@@ -438,7 +438,7 @@ describe("what the ring holds with nothing armed", () => {
       spawn: scriptedSpawn([{ stdout: `${NEEDLES.answer}\n` }]).spawn,
     });
     await runDecision({
-      tool: "claude-code", goal: NEEDLES.goal, backlogText: NEEDLES.backlog,
+      tool: "claude-code", instructions: [NEEDLES.goal], backlogText: NEEDLES.backlog,
       context: NEEDLES.transcript, cwd: ".",
       spawn: scriptedSpawn([{ stdout: NEEDLES.answer }]).spawn,
     });
@@ -446,7 +446,7 @@ describe("what the ring holds with nothing armed", () => {
       tool: "claude-code", text: NEEDLES.goal, cwd: ".",
       spawn: scriptedSpawn([{ stdout: GOOD_EXTRACTION }]).spawn,
     });
-    await runDecision({ tool: "kimi", goal: NEEDLES.goal, backlogText: "", context: "C", cwd: "." });
+    await runDecision({ tool: "kimi", instructions: [NEEDLES.goal], backlogText: "", context: "C", cwd: "." });
     await runHeadless(["agent", "--print", NEEDLES.argv], {
       cwd: ".", timeoutMs: 1_000, call: ctx(),
       spawn: (() => { throw Object.assign(new Error(NEEDLES.argv), { code: "ENOENT" }); }) as unknown as typeof Bun.spawn,
@@ -529,7 +529,7 @@ describe("what each arm admits, through the taps", () => {
       transitions: [{ id: "i1", status: "done", evidence: SECRET }],
     });
     await runDecision({
-      tool: "claude-code", goal: "g", backlogText: "",
+      tool: "claude-code", instructions: ["g"], backlogText: "",
       context: `$ cat .env\n${SECRET}`, cwd: ".",
       spawn: scriptedSpawn([{ stdout: quoted }]).spawn,
     });
@@ -568,7 +568,7 @@ describe("what each arm admits, through the taps", () => {
     armPromptCapture(true, 10_000);
     const { spawn } = scriptedSpawn([{ stdout: GOOD_DECISION }]);
     await runDecision({
-      tool: "claude-code", goal: GOAL, backlogText: BACKLOG, context: "the transcript",
+      tool: "claude-code", instructions: [GOAL], backlogText: BACKLOG, context: "the transcript",
       cwd: ".", spawn,
     });
 
@@ -591,7 +591,7 @@ describe("what each arm admits, through the taps", () => {
     armContextCapture(true, 10_000);
     const { spawn } = scriptedSpawn([{ stdout: "garbage" }, { stdout: GOOD_DECISION }]);
     await runDecision({
-      tool: "claude-code", goal: "migrate the auth module", backlogText: "",
+      tool: "claude-code", instructions: ["migrate the auth module"], backlogText: "",
       context: "the transcript", cwd: ".", spawn,
     });
 

@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readTranscriptTail, TAIL_BYTES } from "../src/transcript-tail";
-import { lastAssistantText } from "../src/agents/claude-code/transcript";
+import { lastAssistantText } from "../../packages/antgrid-agents/src/agents/claude-code/transcript";
 
 const tempDirs: string[] = [];
 

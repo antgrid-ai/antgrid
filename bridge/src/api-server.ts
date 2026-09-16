@@ -6,16 +6,41 @@ import { logger } from "./logger";
 import { resolveAbDir } from "./antgrid-dir";
 const log = logger.child({ component: "api-server" });
 import { createMessage, type AbMessage } from "./protocol";
-import { AGENTS, BY_HOOK_NAME } from "./agents/registry";
+import { AGENTS, BY_HOOK_NAME } from "./agent-runtime";
 import type { TerminalManager } from "./terminal-manager";
 import type { AbConfig } from "./config";
 import type { ProjectInfo } from "./file-watcher";
+import {
+  PublishArtifactBodySchema,
+  SendBodySchema,
+  ReplyBodySchema,
+  type SessionBusApi,
+} from "./session-bus/api";
+import { ARTIFACT_CHUNK_BYTES } from "./session-bus/constants";
+import { SESSION_BUS_ERRORS, isRefusal } from "./session-bus/errors";
+
+/** The tree one caller of this API works in: its own `antgrid.yaml`, and the
+ *  filesystem root a command it names must run against. */
+export interface CallerCheckout {
+  id: string;
+  path: string;
+  config: AbConfig;
+}
 
 export interface AgentContext {
+  acceptsHookRun?: (terminalId: string | undefined, runId: string | undefined) => boolean;
   manager: () => TerminalManager | null;
   config: () => AbConfig;
   project: () => ProjectInfo;
   sendAb: (msg: AbMessage) => void;
+  /** Which checkout a caller's terminal actually runs in. This API is per CORE,
+   *  so an isolated session's agent reaches it on the same port main's does and
+   *  the slot it was spawned with (`ANTGRID_TERMINAL_ID`, forwarded into the MCP
+   *  server's environment) is the only thing that says which tree is its own —
+   *  checkout-scoped routing one level below the message plane. Wired in
+   *  buildAgentCore; absent, or an id no terminal claims, is the project's own
+   *  checkout, which is also what a terminal-less caller gets. */
+  checkoutFor?: (terminalId?: string) => CallerCheckout;
   /** Current session name for a slot id, for the notification title. Wired in
    *  buildAgentCore to SessionManager.get(); undefined for service PTYs. */
   sessionName?: (terminalId: string) => string | undefined;
@@ -34,6 +59,23 @@ export interface AgentContext {
    *  block that never reaches the Handler leaves a blocked agent unsupervised,
    *  with no further event able to raise it. */
   isStaleIdleNudge?: (terminalId: string) => boolean;
+  /** True when the AGENT is already displaying [promptTool]'s own prompt on this
+   *  slot — an AskUserQuestion, reported by its pre/post tool hooks. Claude
+   *  schedules a permission notification seconds after any prompt appears, so
+   *  the same block is announced twice: once with the question text, once as a
+   *  generic "Permission needed". Wired in buildAgentCore rather than read off
+   *  the Handler engine, because the second announcement has to be suppressed
+   *  for an UNARMED session too.
+   *
+   *  Asked about a PROMPT, never about the slot: an agent batches
+   *  AskUserQuestion alongside a Bash call that needs approving, and a slot-wide
+   *  answer silences the approval nobody has been told about. An unnamed tool is
+   *  answered NO by the owner for the same reason.
+   *
+   *  ABSENT MEANS NO PROMPT IS OPEN — the opposite reading from
+   *  {@link isStaleIdleNudge}, and safe for the same reason: this predicate can
+   *  only ever silence, so an unwired owner must forward everything. */
+  hasOpenAgentPrompt?: (terminalId: string, promptTool: string | undefined) => boolean;
   /** Called when an injected hook pings /hook-alive, the drift probe for any
    *  agent whose `hooks.posts` declares that path. */
   onHookAlive?: (terminalId: string) => void;
@@ -44,6 +86,14 @@ export interface AgentContext {
    *  status. Bridge-internal: this never emits an app-facing frame — unlike
    *  /notify, a turn-start is not a user-facing notification. */
   onTurnStart?: (terminalId?: string) => void;
+  /** The session bus, when this core built one. Every decision the
+   *  `/session-bus/*` routes make is made in here, so the MCP tools above them
+   *  stay a transport and cannot answer differently from the routes. Absent
+   *  means the core has no bus at all (a test core, or one built before the
+   *  session manager was ready), and every route answers 503 rather than
+   *  refusing the caller — which would leave an agent unable to publish with
+   *  nothing saying why. */
+  sessionBus?: SessionBusApi;
 }
 
 const VERSION = "0.1.0";
@@ -61,18 +111,28 @@ const VERSION = "0.1.0";
 const HOOK_AGENT_NAMES = Object.keys(BY_HOOK_NAME) as [string, ...string[]];
 
 export const NotifyBodySchema = z.object({
+  runId: z.string().min(1).optional(),
   // Mirrors the notificationType enum in protocol.ts — validated here so the
-  // bridge never emits a schema-invalid message onto the E2E channel.
-  type: z.enum(["task_complete", "permission_request", "idle", "error"]),
+  // bridge never emits a schema-invalid message onto the E2E channel. A member
+  // present there and missing here is not a compile error: the post is answered
+  // 400, `runHookInvocation` ignores every response, and that notification
+  // simply never arrives again.
+  type: z.enum(["task_complete", "permission_request", "awaiting_input", "question", "idle", "error"]),
   message: z.string().optional(),
   // Slot id (== ANTGRID_TERMINAL_ID) — names the session in the title.
   terminalId: z.string().optional(),
   // Hooks post pointers and the bridge reads.
   transcriptPath: z.string().optional(),
   agent: z.enum(HOOK_AGENT_NAMES).optional(),
+  // The AGENT-side tool this notification is about (`Bash`, `AskUserQuestion`),
+  // when the poster could name one. It is what the open-prompt suppression
+  // matches on, so a second, unrelated block on the same slot still lands.
+  // Never on the wire: the app is shown the message, not the tool.
+  promptTool: z.string().optional(),
 });
 
 export const SessionTitleSchema = z.object({
+  runId: z.string().min(1).optional(),
   terminalId: z.string().min(1),
   sessionId: z.string().min(1),
   /** The message the user just submitted, from an agent with a PRE-turn hook
@@ -87,11 +147,30 @@ export const SessionTitleSchema = z.object({
 export type SessionTitleBody = z.infer<typeof SessionTitleSchema>;
 
 const HandlerEventSchema = z.object({
+  runId: z.string().min(1).optional(),
   terminalId: z.string().min(1),
   agent: z.string().optional(),
-  event: z.enum(["turn_end", "awaiting_input", "limit_hit", "limit_cleared", "turn_failed"]),
+  event: z.enum([
+    "turn_end", "awaiting_input", "question", "prompt_answered",
+    "limit_hit", "limit_cleared", "turn_failed",
+  ]),
   transcriptPath: z.string().optional(),
   sessionId: z.string().optional(),
+  // `question` only: what the agent asked, so the escalation body can say it
+  // rather than "Agent asks a question". Deliberately unbounded — a body
+  // rejected here is a 400 nobody reads and a blocked agent nobody hears
+  // about, so the poster clips instead.
+  detail: z.string().optional(),
+  // The agent's own id for the prompt. A `question` carries it so the
+  // `prompt_answered` reporting the same id retires exactly that row. Absent
+  // means the agent named none — never "", which the engine reads as "every
+  // prompt on this session is gone".
+  promptId: z.string().optional(),
+  // Which agent-side tool the prompt belongs to: declared by `question`, parsed
+  // out of the CLI's sentence by `awaiting_input`. Mirrors NotifyBodySchema's
+  // field of the same name, because the paired posts of one hook invocation ask
+  // the host the same question and must not be answered differently.
+  promptTool: z.string().optional(),
   // Lifecycle detail: when the provider's limit window ends (epoch ms; absent →
   // the engine's fallback wait) and what the driver called the failure.
   resetsAt: z.number().optional(),
@@ -121,14 +200,50 @@ function textResponse(data: string, status = 200) {
   return new Response(data, { status, headers: { "Content-Type": "text/plain" } });
 }
 
+/** One rendering for every session-bus answer: a refusal becomes its own status
+ *  and code, a result becomes 200. The status comes from `SESSION_BUS_ERRORS`, so
+ *  a route and the tool calling it can never disagree about what a code means. */
+function sessionBusJson(result: unknown): Response {
+  if (isRefusal(result)) {
+    return json({ error: result.error, code: result.code }, SESSION_BUS_ERRORS[result.code]);
+  }
+  return json(result);
+}
+
+function sessionBusPost<T>(schema: z.ZodType<T>, body: unknown, run: (b: T) => unknown): Response {
+  const parsed = schema.safeParse(body);
+  if (!parsed.success) return json({ error: "Invalid body" }, 400);
+  return sessionBusJson(run(parsed.data));
+}
+
+/** A non-negative integer query param, or [fallback] for anything else. A caller
+ *  that spelled a range badly reads from the start rather than being refused:
+ *  the artifact read is clamped to one chunk on the bridge side anyway. */
+function intParam(url: URL, name: string, fallback: number): number {
+  const raw = url.searchParams.get(name);
+  if (raw === null) return fallback;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
 // Cursor merges hook tiers, so a machine with both the project-tier entries
-// (plugin installer) and the user-tier entries (spawn augmenter) runs two
+// (integration installer) and the user-tier entries (spawn augmenter) runs two
 // identical hook processes per event, and both POST /notify. Collapse exact
 // duplicates inside a short window so the phone gets one notification.
 const NOTIFY_DEDUP_WINDOW_MS = 5_000;
 
 export function startApiServer(ctx: AgentContext): ApiServerHandle {
   const recentNotifies = new Map<string, number>();
+
+  /** The checkout the caller of this request works in. A caller names itself
+   *  with `?terminalId=`; anything else is answered out of the project's own
+   *  checkout, which is what every pre-checkout caller already got. */
+  function callerCheckout(url: URL): CallerCheckout {
+    const terminalId = url.searchParams.get("terminalId") ?? undefined;
+    return ctx.checkoutFor?.(terminalId)
+      ?? { id: "main", path: ctx.project().path, config: ctx.config() };
+  }
+
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -141,7 +256,7 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
       }
 
       if (req.method === "GET" && path === "/config") {
-        const config = ctx.config();
+        const config = callerCheckout(url).config;
         return json({
           commands: config.commands ?? [],
           services: config.services ?? [],
@@ -154,9 +269,17 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
         if (!mgr) return json({ error: "Agent not ready" }, 503);
 
         const all = url.searchParams.get("all") === "true";
+        const caller = callerCheckout(url);
         let terminals = mgr.getStatus();
         if (!all) {
           terminals = terminals.filter((t) => t.type !== "agent");
+        }
+        // A core runs the terminals of every checkout under it, so a caller
+        // inside an isolated session must see its own and no one else's — the
+        // scrollback of another session's agent is not context, it is someone
+        // else's conversation.
+        if (ctx.checkoutFor) {
+          terminals = terminals.filter((t) => ctx.checkoutFor!(t.terminalId).id === caller.id);
         }
         return json(terminals);
       }
@@ -168,6 +291,11 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
         if (!mgr) return json({ error: "Agent not ready" }, 503);
 
         const terminalId = decodeURIComponent(scrollbackMatch[1]);
+        // Same answer as a terminal that does not exist, deliberately: a caller
+        // in another checkout must not learn this one is there.
+        if (ctx.checkoutFor && ctx.checkoutFor(terminalId).id !== callerCheckout(url).id) {
+          return json({ error: "Terminal not found" }, 404);
+        }
         const snap = mgr.getScrollback(terminalId);
         if (snap === null) {
           return json({ error: "Terminal not found" }, 404);
@@ -179,10 +307,14 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
         const cmdMatch = path.match(/^\/commands\/([^/]+)\/run$/);
         if (!cmdMatch) return json({ error: "Not found" }, 404);
         const commandName = decodeURIComponent(cmdMatch[1]);
-        const config = ctx.config();
+        // Both the definition and the tree it runs in come from the CALLER's
+        // checkout: an isolated session's agent running `build` against main's
+        // working tree builds another session's uncommitted work and reads the
+        // result as its own.
+        const caller = callerCheckout(url);
         const project = ctx.project();
 
-        const cmdConfig = config.commands?.find((c) => c.name === commandName);
+        const cmdConfig = caller.config.commands?.find((c) => c.name === commandName);
         if (!cmdConfig) {
           return json({ error: `Unknown command: ${commandName}` }, 404);
         }
@@ -200,7 +332,7 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
         }
 
         const args = cmdConfig.args ?? [];
-        const cwd = cmdConfig.workingDir ?? project.path;
+        const cwd = cmdConfig.workingDir ?? caller.path;
         const env = cmdConfig.env ? { ...process.env, ...cmdConfig.env } : undefined;
 
         try {
@@ -224,6 +356,7 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
               }
               ctx.sendAb(createMessage("command:output", {
                 projectId: project.id,
+                checkoutId: caller.id,
                 commandName,
                 data: text,
               }));
@@ -243,6 +376,7 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
 
           ctx.sendAb(createMessage("command:done", {
             projectId: project.id,
+            checkoutId: caller.id,
             commandName,
             exitCode,
           }));
@@ -262,6 +396,33 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
         }
         const parsed = NotifyBodySchema.safeParse(raw);
         if (!parsed.success) return json({ error: "Invalid body" }, 400);
+        if (ctx.acceptsHookRun?.(parsed.data.terminalId, parsed.data.runId) === false) return json({ ok: true, stale: true });
+        // `awaiting_input` IS the notification hook's verdict that this is the
+        // post-completion idle nudge — a live block classifies as
+        // `permission_request` — so the type already carries the reading
+        // /handler-event has to be told separately in its own field. Refused for
+        // the reason it is refused there: the work reduction calls a nudge on a
+        // resolved turn stale and leaves the dot on "done", so forwarding it
+        // buzzes "Needs your input" at a session that has finished. Still 200 —
+        // the hook must not see a failure.
+        if (parsed.data.type === "awaiting_input"
+          && parsed.data.terminalId
+          && ctx.isStaleIdleNudge?.(parsed.data.terminalId)) {
+          log.debug("Dropped a post-completion idle nudge for %s", parsed.data.terminalId);
+          return json({ ok: true, stale: true });
+        }
+        // The agent is already displaying THIS tool's prompt on this slot, and
+        // the `question` notification that reported it carried the question
+        // text. The permission notification the CLI schedules seconds later
+        // describes the SAME block and can only say "Permission needed" — one
+        // block, one push. Scoped to the two ambiguous kinds: a turn end or an
+        // error is a different fact and must always land.
+        if ((parsed.data.type === "permission_request" || parsed.data.type === "awaiting_input")
+          && parsed.data.terminalId
+          && ctx.hasOpenAgentPrompt?.(parsed.data.terminalId, parsed.data.promptTool)) {
+          log.debug("Dropped a re-announcing %s for %s", parsed.data.type, parsed.data.terminalId);
+          return json({ ok: true, suppressed: true });
+        }
         const dedupKey = JSON.stringify(parsed.data);
         const now = Date.now();
         for (const [key, at] of recentNotifies) {
@@ -282,6 +443,7 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
           const read = key ? AGENTS[key].notifyBodyFromTranscript : undefined;
           if (read) message = (await read(transcriptPath)) ?? undefined;
         }
+        if (ctx.acceptsHookRun?.(parsed.data.terminalId, parsed.data.runId) === false) return json({ ok: true, stale: true });
         // Read, don't resolve: the namer pipeline already owns this title, and it
         // comes from the transcript's HEAD while the body comes from its TAIL.
         // Stale on turn 1 only — /session-title races this post and resolves
@@ -306,17 +468,21 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
         // turn-end can't close it. Drained either way so the hook's POST doesn't
         // block on an unread body.
         let terminalId: string | undefined;
+        let runId: string | undefined;
         try {
-          const body = await req.json() as { terminalId?: unknown } | null;
+          const body = await req.json() as { terminalId?: unknown; runId?: unknown } | null;
           if (typeof body?.terminalId === "string") terminalId = body.terminalId;
+          if (typeof body?.runId === "string") runId = body.runId;
         } catch { /* empty/invalid body is fine */ }
+        if (ctx.acceptsHookRun?.(terminalId, runId) === false) return json({ ok: true, stale: true });
         ctx.onTurnStart?.(terminalId);
         return json({ ok: true });
       }
 
       if (req.method === "POST" && path === "/hook-alive") {
         try {
-          const body = await req.json() as { terminalId?: string };
+          const body = await req.json() as { terminalId?: string; runId?: string };
+          if (ctx.acceptsHookRun?.(body.terminalId, body.runId) === false) return json({ ok: true, stale: true });
           if (body.terminalId) ctx.onHookAlive?.(body.terminalId);
           return json({ ok: true });
         } catch {
@@ -333,6 +499,7 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
         }
         const parsed = SessionTitleSchema.safeParse(body);
         if (!parsed.success) return json({ error: "Invalid body" }, 400);
+        if (ctx.acceptsHookRun?.(parsed.data.terminalId, parsed.data.runId) === false) return json({ ok: true, stale: true });
         ctx.onSessionTitle?.(parsed.data);
         return json({ ok: true });
       }
@@ -342,6 +509,7 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
         try { body = await req.json(); } catch { return json({ error: "Invalid JSON body" }, 400); }
         const parsed = HandlerEventSchema.safeParse(body);
         if (!parsed.success) return json({ error: "Invalid body" }, 400);
+        if (ctx.acceptsHookRun?.(parsed.data.terminalId, parsed.data.runId) === false) return json({ ok: true, stale: true });
         // The agent's notification hook is stateless: it fires the identical
         // "waiting for your input" signal for a real mid-turn block and for its
         // idle nudge after the turn already ended. Only the host knows which,
@@ -360,13 +528,86 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
         // /notify dotted the session "needs you", and nothing re-raises it.
         // `idleNudge` is the poster's own reading of the message, which is exactly
         // what /notify branches on: unless it says this is the nudge shape, forward.
+        //
+        // The second predicate answers the OTHER way this one event kind
+        // arrives spuriously: the agent is displaying this tool's own prompt,
+        // already reported as a `question` carrying its text, and the CLI's
+        // permission notification re-announces that block seconds later saying
+        // nothing new. Forwarding it costs a context assemble plus a judge spawn
+        // over an agent that can read neither. It is asked about the TOOL the
+        // post names, so a parallel batch's Bash approval still reaches the
+        // Handler, and it fails toward forwarding on every unknown — an unnamed
+        // tool and an unwired owner both answer no.
         if (parsed.data.event === "awaiting_input" && parsed.data.idleNudge === true
           && ctx.isStaleIdleNudge?.(parsed.data.terminalId)) {
           log.debug("Dropped a post-completion idle nudge for %s", parsed.data.terminalId);
           return json({ ok: true, stale: true });
         }
+        if (parsed.data.event === "awaiting_input"
+          && ctx.hasOpenAgentPrompt?.(parsed.data.terminalId, parsed.data.promptTool)) {
+          log.debug("Dropped a re-announced block for %s", parsed.data.terminalId);
+          return json({ ok: true, stale: true });
+        }
         ctx.onHandlerEvent?.(parsed.data);
         return json({ ok: true });
+      }
+
+      // The session bus. Every route resolves the CALLER from `?terminalId=` —
+      // the slot `ANTGRID_TERMINAL_ID` stamped into the agent's environment,
+      // which the MCP server puts on every request. The terminal id IS the
+      // session id for an agent session, which is what says whose artifacts are
+      // being asked for; a service PTY names none and resolves to no session.
+      if (path.startsWith("/session-bus/")) {
+        const bus = ctx.sessionBus;
+        if (!bus) return json({ error: "Session bus not available", code: "AGENT_NOT_READY" }, 503);
+        const terminalId = url.searchParams.get("terminalId") ?? undefined;
+        const rest = path.slice("/session-bus/".length);
+
+        if (req.method === "GET") {
+          if (rest === "artifacts") return sessionBusJson(bus.listArtifacts(terminalId));
+          if (rest === "sessions") return sessionBusJson(await bus.listSessions(terminalId));
+          if (rest === "inbox") return sessionBusJson(bus.inbox(terminalId));
+          if (rest === "self") return sessionBusJson(bus.self(terminalId));
+          if (rest === "thread") {
+            // An absent id is passed through as "" rather than answered here:
+            // the api's own thread lookup is what owns "unknown thread", so a
+            // caller that names no id gets that same refusal, not a route-level
+            // shortcut a client could learn to distinguish from a bad id.
+            return sessionBusJson(bus.thread(terminalId, url.searchParams.get("threadId") ?? ""));
+          }
+          const artifact = rest.match(/^artifacts\/([^/]+)$/);
+          if (artifact) {
+            return sessionBusJson(bus.getArtifact(
+              terminalId,
+              decodeURIComponent(artifact[1]),
+              intParam(url, "offset", 0),
+              intParam(url, "length", ARTIFACT_CHUNK_BYTES),
+            ));
+          }
+          return json({ error: "Not found" }, 404);
+        }
+
+        if (req.method !== "POST") return json({ error: "Not found" }, 404);
+
+        // An unreadable body is treated as an absent one rather than answered
+        // 400 here: the POST below validates with its own schema, so the refusal
+        // is identical.
+        let body: unknown;
+        try { body = await req.json(); } catch { body = undefined; }
+
+        if (rest === "artifacts") {
+          return sessionBusPost(PublishArtifactBodySchema, body, (b) => bus.publishArtifact(terminalId, b));
+        }
+        if (rest === "post") {
+          return sessionBusPost(SendBodySchema, body, (b) => bus.post(terminalId, b));
+        }
+        if (rest === "notify") {
+          return sessionBusPost(SendBodySchema, body, (b) => bus.notify(terminalId, b));
+        }
+        if (rest === "reply") {
+          return sessionBusPost(ReplyBodySchema, body, (b) => bus.reply(terminalId, b));
+        }
+        return json({ error: "Not found" }, 404);
       }
 
       return json({ error: "Not found" }, 404);

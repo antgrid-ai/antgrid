@@ -4,7 +4,7 @@ import 'agent_event.dart' show parseAgentEvent;
 import 'agent_hello.dart';
 import 'file_tree_models.dart';
 import 'git_sync_state.dart';
-import 'handler_state.dart' show HandlerEscalationChoice;
+import 'handler_state.dart' show HandlerAskOption, HandlerEscalationChoice;
 import 'layout_models.dart';
 import 'preview_models.dart';
 import 'service_status.dart';
@@ -229,11 +229,18 @@ class TerminalNotificationMessage {
   });
 }
 
+class TerminalBellMessage {
+  final String terminalId;
+  final String runId;
+
+  const TerminalBellMessage({required this.terminalId, required this.runId});
+}
+
 class NotificationPushMessage {
   final String id;
   final int timestamp;
   final String
-  notificationType; // task_complete | permission_request | awaiting_input | idle | error
+  notificationType; // task_complete | permission_request | awaiting_input | question | idle | error
   final String? message;
   final String? sessionTitle;
 
@@ -268,6 +275,257 @@ class TerminalSizeMessage {
   });
 }
 
+/// Where a run's persisted scrollback currently begins and ends.
+///
+/// [epoch] invalidates a viewer's row cursors wholesale: the store bumps it
+/// whenever rows are dropped or the run restarts, so a page request naming an
+/// older epoch is answered `expired` rather than with rows from a different
+/// timeline.
+class TerminalHistoryBoundary {
+  final int epoch;
+  final int firstRowId;
+  final int nextRowId;
+
+  /// `recording` or `disabled`. Anything else is an agent newer than this
+  /// build; callers must treat an unrecognized value as not-recording.
+  final String status;
+
+  const TerminalHistoryBoundary({
+    required this.epoch,
+    required this.firstRowId,
+    required this.nextRowId,
+    required this.status,
+  });
+
+  static TerminalHistoryBoundary? fromJson(Map<String, dynamic> json) {
+    final epoch = json['epoch'];
+    final firstRowId = json['firstRowId'];
+    final nextRowId = json['nextRowId'];
+    final status = json['status'];
+    if (epoch is! int ||
+        firstRowId is! int ||
+        nextRowId is! int ||
+        status is! String) {
+      return null;
+    }
+    return TerminalHistoryBoundary(
+      epoch: epoch,
+      firstRowId: firstRowId,
+      nextRowId: nextRowId,
+      status: status,
+    );
+  }
+}
+
+/// One styled run of cells inside a history row.
+class TerminalHistorySpan {
+  final String text;
+  final int cells;
+
+  /// The SGR sequence that opens this span, sent verbatim so the renderer
+  /// never has to reconstruct attributes it did not parse.
+  final String sgr;
+  final String? uri;
+
+  const TerminalHistorySpan({
+    required this.text,
+    required this.cells,
+    required this.sgr,
+    this.uri,
+  });
+
+  static TerminalHistorySpan? fromJson(Map<String, dynamic> json) {
+    final text = json['text'];
+    final cells = json['cells'];
+    final sgr = json['sgr'];
+    final uri = json['uri'];
+    if (text is! String || cells is! int || sgr is! String) return null;
+    return TerminalHistorySpan(
+      text: text,
+      cells: cells,
+      sgr: sgr,
+      uri: uri is String ? uri : null,
+    );
+  }
+}
+
+/// One row of scrollback above the live screen.
+class TerminalHistoryRow {
+  final int rowId;
+  final int cols;
+
+  /// Whether this row CONTINUES the one above it — xterm's own `isWrapped`
+  /// sense, carried through the agent's serializer unchanged. A renderer
+  /// re-joining logical lines therefore breaks BEFORE a row that is not
+  /// wrapped, never after one. The width it was written at is [cols], which may
+  /// differ from the row above after a resize.
+  final bool wrapped;
+  final List<TerminalHistorySpan> spans;
+
+  const TerminalHistoryRow({
+    required this.rowId,
+    required this.cols,
+    required this.wrapped,
+    required this.spans,
+  });
+
+  static TerminalHistoryRow? fromJson(Map<String, dynamic> json) {
+    final rowId = json['rowId'];
+    final cols = json['cols'];
+    final wrapped = json['wrapped'];
+    final spansJson = json['spans'];
+    if (rowId is! int ||
+        cols is! int ||
+        wrapped is! bool ||
+        spansJson is! List) {
+      return null;
+    }
+    final spans = <TerminalHistorySpan>[];
+    for (final s in spansJson) {
+      if (s is! Map<String, dynamic>) return null;
+      final span = TerminalHistorySpan.fromJson(s);
+      if (span == null) return null;
+      spans.add(span);
+    }
+    return TerminalHistoryRow(
+      rowId: rowId,
+      cols: cols,
+      wrapped: wrapped,
+      spans: spans,
+    );
+  }
+}
+
+/// The agent's acceptance of a `terminal:subscribe`.
+///
+/// [runId] identifies the PTY incarnation and [attachmentId] this viewer's
+/// slot on it; both are echoed on every ack, unsubscribe and history request
+/// so a frame for a superseded run can never be credited to its replacement.
+class TerminalSubscribedMessage {
+  final String id;
+  final int timestamp;
+  final String terminalId;
+  final String runId;
+  final String attachmentId;
+  final int version;
+  final String requestId;
+
+  const TerminalSubscribedMessage({
+    required this.id,
+    required this.timestamp,
+    required this.terminalId,
+    required this.runId,
+    required this.attachmentId,
+    required this.version,
+    required this.requestId,
+  });
+}
+
+/// A complete rendered screen for one instant of a run.
+///
+/// [sequence] is the per-attachment credit counter the viewer acks; [revision]
+/// is the source's own parse counter and is not contiguous, because the agent
+/// only captures a frame when the credit window allows it.
+class TerminalFrameMessage {
+  final String id;
+  final int timestamp;
+  final String terminalId;
+  final String runId;
+  final String attachmentId;
+  final int sequence;
+  final int version;
+  final int revision;
+  final int cols;
+  final int rows;
+  final String ansi;
+
+  /// True when the emulator's synchronized-update window expired before the
+  /// guest closed it, so [ansi] may show a half-drawn frame.
+  final bool syncTimedOut;
+  final TerminalHistoryBoundary history;
+
+  const TerminalFrameMessage({
+    required this.id,
+    required this.timestamp,
+    required this.terminalId,
+    required this.runId,
+    required this.attachmentId,
+    required this.sequence,
+    required this.version,
+    required this.revision,
+    required this.cols,
+    required this.rows,
+    required this.ansi,
+    required this.syncTimedOut,
+    required this.history,
+  });
+}
+
+/// One page of scrollback, answering a `terminal:history:request`.
+class TerminalHistoryPageMessage {
+  final String id;
+  final int timestamp;
+  final String terminalId;
+  final String runId;
+  final String attachmentId;
+  final String requestId;
+  final TerminalHistoryBoundary history;
+
+  /// The requested epoch is gone; [rows] is empty and the viewer must restart
+  /// its paging from [history] rather than treat this as the top of the run.
+  final bool expired;
+  final int beforeRowId;
+  final List<TerminalHistoryRow> rows;
+
+  const TerminalHistoryPageMessage({
+    required this.id,
+    required this.timestamp,
+    required this.terminalId,
+    required this.runId,
+    required this.attachmentId,
+    required this.requestId,
+    required this.history,
+    required this.expired,
+    required this.beforeRowId,
+    required this.rows,
+  });
+}
+
+/// Why a frame-mode display cannot continue, or ended.
+///
+/// [runId]/[attachmentId]/[requestId] are all optional because a failure can
+/// precede the attachment that would have carried them — a refused subscribe
+/// has only the terminal to name.
+class TerminalDisplayStatusMessage {
+  final String id;
+  final int timestamp;
+  final String terminalId;
+  final String? runId;
+  final String? attachmentId;
+  final String? requestId;
+
+  /// `UPGRADE_REQUIRED` | `UNKNOWN_TERMINAL` | `DISPLAY_FAILED` | `ACK_TIMEOUT` |
+  /// `HISTORY_DISABLED` | `ENDED`. An unrecognized code is a newer agent and
+  /// must be surfaced as a generic failure, never ignored.
+  final String code;
+  final String message;
+  final int? finalSequence;
+  final int? exitCode;
+
+  const TerminalDisplayStatusMessage({
+    required this.id,
+    required this.timestamp,
+    required this.terminalId,
+    this.runId,
+    this.attachmentId,
+    this.requestId,
+    required this.code,
+    required this.message,
+    this.finalSequence,
+    this.exitCode,
+  });
+}
+
 /// Raw per-session maps — typed parsing (goal, backlog, run state, judge)
 /// lives in `HandlerSessionState.fromWire` (`handler_state.dart`), not here.
 class HandlerStatusMessage {
@@ -278,6 +536,13 @@ class HandlerStatusMessage {
   /// What an absent per-session judge tool resolves to for PTY slots (the
   /// project's agent tool); chat slots resolve from their own session entry.
   final String? defaultTool;
+
+  /// The lens ids this bridge accepts. Presence is the capability advert (see
+  /// `HandlerState.lenses`, handler_state.dart) and absence is a bridge that
+  /// has none, so this stays NULLABLE where the other collections here degrade
+  /// to empty: an empty list would be a bridge offering no lens, which is a
+  /// different fact.
+  final List<String>? lenses;
   final List<Map<String, dynamic>> sessions;
 
   /// Every snapshot the project still knows about, replayed like the
@@ -303,6 +568,7 @@ class HandlerStatusMessage {
     required this.timestamp,
     required this.projectId,
     this.defaultTool,
+    this.lenses,
     required this.sessions,
     this.snapshots = const [],
     this.wrapUps = const [],
@@ -346,6 +612,14 @@ class HandlerEscalationMessage {
   /// this and the status replay share.
   final List<HandlerEscalationChoice>? choices;
 
+  /// The ask half of the row, documented on [HandlerEscalation], which this
+  /// message is a hand-copy of. The push and the status replay build that
+  /// object from two separate field lists, so all three land here too or a row
+  /// reads as an ask on reconnect and as a stopped session while it is live.
+  final bool nonBlocking;
+  final List<String> unblocked;
+  final List<HandlerAskOption>? askOptions;
+
   const HandlerEscalationMessage({
     required this.id,
     required this.timestamp,
@@ -359,6 +633,9 @@ class HandlerEscalationMessage {
     this.floorRule,
     this.kind,
     this.choices,
+    this.nonBlocking = false,
+    this.unblocked = const [],
+    this.askOptions,
   });
 }
 
@@ -1251,6 +1528,12 @@ Object? parseAbMessage(Map<String, dynamic> json) {
         body: json['body'] as String?,
       );
 
+    case 'terminal:bell':
+      final terminalId = json['terminalId'];
+      final runId = json['runId'];
+      if (terminalId is! String || runId is! String) return null;
+      return TerminalBellMessage(terminalId: terminalId, runId: runId);
+
     case 'notification:push':
       final notificationType = json['notificationType'];
       if (notificationType is! String) return null;
@@ -1884,6 +2167,140 @@ Object? parseAbMessage(Map<String, dynamic> json) {
         history: json['history'] == true,
       );
 
+    case 'terminal:subscribed':
+      final terminalId = json['terminalId'];
+      final runId = json['runId'];
+      final attachmentId = json['attachmentId'];
+      final version = json['version'];
+      final requestId = json['requestId'];
+      if (terminalId is! String ||
+          runId is! String ||
+          attachmentId is! String ||
+          version is! int ||
+          requestId is! String) {
+        return null;
+      }
+      return TerminalSubscribedMessage(
+        id: id,
+        timestamp: timestamp,
+        terminalId: terminalId,
+        runId: runId,
+        attachmentId: attachmentId,
+        version: version,
+        requestId: requestId,
+      );
+
+    case 'terminal:frame':
+      final terminalId = json['terminalId'];
+      final runId = json['runId'];
+      final attachmentId = json['attachmentId'];
+      final sequence = json['sequence'];
+      final version = json['version'];
+      final revision = json['revision'];
+      final cols = json['cols'];
+      final rows = json['rows'];
+      final ansi = json['ansi'];
+      final syncTimedOut = json['syncTimedOut'];
+      final historyJson = json['history'];
+      if (terminalId is! String ||
+          runId is! String ||
+          attachmentId is! String ||
+          sequence is! int ||
+          version is! int ||
+          revision is! int ||
+          cols is! int ||
+          rows is! int ||
+          ansi is! String ||
+          syncTimedOut is! bool ||
+          historyJson is! Map<String, dynamic>) {
+        return null;
+      }
+      final history = TerminalHistoryBoundary.fromJson(historyJson);
+      if (history == null) return null;
+      return TerminalFrameMessage(
+        id: id,
+        timestamp: timestamp,
+        terminalId: terminalId,
+        runId: runId,
+        attachmentId: attachmentId,
+        sequence: sequence,
+        version: version,
+        revision: revision,
+        cols: cols,
+        rows: rows,
+        ansi: ansi,
+        syncTimedOut: syncTimedOut,
+        history: history,
+      );
+
+    case 'terminal:history:page':
+      final terminalId = json['terminalId'];
+      final runId = json['runId'];
+      final attachmentId = json['attachmentId'];
+      final requestId = json['requestId'];
+      final historyJson = json['history'];
+      final expired = json['expired'];
+      final beforeRowId = json['beforeRowId'];
+      final rowsJson = json['rows'];
+      if (terminalId is! String ||
+          runId is! String ||
+          attachmentId is! String ||
+          requestId is! String ||
+          historyJson is! Map<String, dynamic> ||
+          expired is! bool ||
+          beforeRowId is! int ||
+          rowsJson is! List) {
+        return null;
+      }
+      final history = TerminalHistoryBoundary.fromJson(historyJson);
+      if (history == null) return null;
+      final rows = <TerminalHistoryRow>[];
+      for (final r in rowsJson) {
+        if (r is! Map<String, dynamic>) return null;
+        final row = TerminalHistoryRow.fromJson(r);
+        // A page with one unreadable row is a hole in the scrollback, not a
+        // shorter page — drop the whole frame rather than splice.
+        if (row == null) return null;
+        rows.add(row);
+      }
+      return TerminalHistoryPageMessage(
+        id: id,
+        timestamp: timestamp,
+        terminalId: terminalId,
+        runId: runId,
+        attachmentId: attachmentId,
+        requestId: requestId,
+        history: history,
+        expired: expired,
+        beforeRowId: beforeRowId,
+        rows: rows,
+      );
+
+    case 'terminal:display:status':
+      final terminalId = json['terminalId'];
+      final code = json['code'];
+      final message = json['message'];
+      if (terminalId is! String || code is! String || message is! String) {
+        return null;
+      }
+      final runId = json['runId'];
+      final attachmentId = json['attachmentId'];
+      final requestId = json['requestId'];
+      final finalSequence = json['finalSequence'];
+      final exitCode = json['exitCode'];
+      return TerminalDisplayStatusMessage(
+        id: id,
+        timestamp: timestamp,
+        terminalId: terminalId,
+        runId: runId is String ? runId : null,
+        attachmentId: attachmentId is String ? attachmentId : null,
+        requestId: requestId is String ? requestId : null,
+        code: code,
+        message: message,
+        finalSequence: finalSequence is int ? finalSequence : null,
+        exitCode: exitCode is int ? exitCode : null,
+      );
+
     case 'file:tree:snapshot:request':
       return FileTreeSnapshotRequestMessage(id: id, timestamp: timestamp);
 
@@ -1959,6 +2376,16 @@ Object? parseAbMessage(Map<String, dynamic> json) {
             if (w is Map<String, dynamic>) wrapUps.add(w);
           }
         }
+        // Null unless the bridge actually named a list, and every entry kept as
+        // it came: an id this build cannot name still says the far end takes
+        // one, and the offer is narrowed to what both ends know at the picker.
+        final lensesJson = json['lenses'];
+        final lenses = lensesJson is List
+            ? <String>[
+                for (final l in lensesJson)
+                  if (l is String) l,
+              ]
+            : null;
         return HandlerStatusMessage(
           id: id,
           timestamp: timestamp,
@@ -1966,6 +2393,7 @@ Object? parseAbMessage(Map<String, dynamic> json) {
           defaultTool: json['defaultTool'] is String
               ? json['defaultTool'] as String
               : null,
+          lenses: lenses,
           sessions: sessions,
           snapshots: snapshots,
           wrapUps: wrapUps,
@@ -2007,6 +2435,8 @@ Object? parseAbMessage(Map<String, dynamic> json) {
         }
         final floorRule = json['floorRule'];
         final kind = json['kind'] is String ? json['kind'] as String : null;
+        final nonBlocking = json['nonBlocking'];
+        final unblocked = json['unblocked'];
         return HandlerEscalationMessage(
           id: id,
           timestamp: timestamp,
@@ -2026,6 +2456,18 @@ Object? parseAbMessage(Map<String, dynamic> json) {
             json['choices'],
             kind: kind,
           ),
+          // Same is-check discipline, and the ask fields degrade for the same
+          // reason [HandlerEscalation.fromWire]'s do: the value each one takes
+          // when the key is missing is both the compatible reading and the
+          // conservative one.
+          nonBlocking: nonBlocking is bool ? nonBlocking : false,
+          unblocked: unblocked is List
+              ? [
+                  for (final id in unblocked)
+                    if (id is String) id,
+                ]
+              : const [],
+          askOptions: HandlerAskOption.listFromWire(json['askOptions']),
         );
       }
 
@@ -2076,6 +2518,34 @@ Object? parseAbMessage(Map<String, dynamic> json) {
     case 'agent:updateAvailable':
     case 'agent:updateResult':
       return parseAgentEvent(json);
+
+    // Session-bus frames are CARRIED, not consumed: the app is a transport leg
+    // between the two bridges of one exchange, so the payload is handed on
+    // verbatim rather than modelled — a field a newer bridge adds must survive
+    // an older app. Recognized here (returning the raw map, as the preview
+    // tunnel's frames effectively are) only so the classification gate sees a
+    // type that is deliberately unrouted; see kUnroutedInboundTypes.
+    case 'session-bus:post':
+    case 'session-bus:notify':
+    case 'session-bus:fetch':
+    case 'session-bus:fetch:result':
+    case 'session-bus:ack':
+      return json;
+
+    // The app's own reads of its bridge's session bus, plus the unsolicited
+    // note that one of those mailboxes grew. Handed on raw like the
+    // carried frames above, but for the opposite reason: these ARE this app's
+    // messages, and their one reader (`providers/session_bus_inbox.dart`)
+    // decodes them into the view models its surfaces render. A second set of
+    // models here would be two shapes to keep true against one schema.
+    //
+    // The two REQUESTS they answer (`session-bus:inbox` and
+    // `session-bus:thread`) are app→bridge and never arrive, so they have no
+    // case here; their type strings are authored where they are sent.
+    case 'session-bus:inbox:result':
+    case 'session-bus:thread:result':
+    case 'session-bus:arrived':
+      return json;
 
     default:
       return null;

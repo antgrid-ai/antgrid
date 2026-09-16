@@ -19,7 +19,12 @@ export interface ActivityRecord {
     | "item_done" | "item_blocked" | "item_skipped" | "item_failed"
     | "instruction_dropped" | "instruction_authorized" | "instruction_amended"
     | "floor_warning" | "evidence_rejected"
-    | "wrapped_up" | "parked" | "resumed";
+    | "wrapped_up" | "parked" | "resumed"
+    // The three moments of a question that is not a stop. They were `escalate`
+    // rows once, and every feed label for that kind leads "Escalated:" — so the
+    // one feature built on "a question is not a stop" rendered its question,
+    // its answer and its decline as three stops.
+    | "asked" | "ask_rejected" | "answered";
   reason: string;
   detail?: string;
 }

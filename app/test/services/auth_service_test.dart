@@ -905,7 +905,12 @@ void main() {
           final client = MockClient((req) async {
             captured = req;
             return http.Response(
-              jsonEncode({'userId': 'u1', 'email': 'a@b.com', 'tier': 'pro'}),
+              jsonEncode({
+                'userId': 'u1',
+                'email': 'a@b.com',
+                'name': 'Ada Lovelace',
+                'tier': 'pro',
+              }),
               200,
             );
           });
@@ -916,6 +921,7 @@ void main() {
           );
           final user = await service.fetchCurrentUser();
           expect(user?.userId, 'u1');
+          expect(user?.name, 'Ada Lovelace');
           expect(
             captured.headers['cookie'],
             '__Secure-better-auth.session_token=sess-secure',
@@ -941,7 +947,8 @@ void main() {
             storage: storage,
             httpClient: client,
           );
-          await service.fetchCurrentUser();
+          final user = await service.fetchCurrentUser();
+          expect(user?.name, isNull);
           expect(
             captured.headers['cookie'],
             'better-auth.session_token=sess-dev',

@@ -2,9 +2,11 @@
 // as known-agents.ts / agent-resume.ts: one concern, one file, no per-agent
 // knowledge of its own.
 
-import { AGENTS, handlerObservable, judgeCapable } from "./agents/registry";
-import type { AgentKey, AgentSpec } from "./agents/types";
+import { AGENTS, handlerObservable, judgeCapable } from "./agent-runtime";
+import type { AgentKey, AgentSpec } from "antgrid-agents/contracts";
 import type { AgentDescriptor } from "./protocol";
+import { agentRuntime } from "./agent-runtime";
+import type { AgentRuntime } from "antgrid-agents/runtime";
 
 /**
  * The registry projected onto the wire descriptor. Static per bridge build —
@@ -15,18 +17,18 @@ import type { AgentDescriptor } from "./protocol";
  * carries: the app's first-installed-agent pick reads position, so the two
  * arrays must agree.
  */
-export function buildAgentCatalog(): AgentDescriptor[] {
-  return (Object.entries(AGENTS) as [AgentKey, AgentSpec][]).map(([tool, spec]) => ({
+export function buildAgentCatalog(runtime: AgentRuntime = agentRuntime): AgentDescriptor[] {
+  return Object.entries(runtime.agents).map(([tool, spec]) => ({
     tool,
     label: spec.label,
     chatCapable: spec.driver !== undefined,
-    judgeCapable: judgeCapable(tool),
+    judgeCapable: runtime.judgeCapable(tool),
     handler: {
-      terminal: handlerObservable(tool, "terminal"),
-      chat: handlerObservable(tool, "chat"),
+      terminal: runtime.handlerObservable(tool, "terminal"),
+      chat: runtime.handlerObservable(tool, "chat"),
     },
     approvalPolicies: {
-      terminal: spec.approvalPolicies.bypass?.terminalArgs ? ["default", "bypass"] : ["default"],
+      terminal: spec.approvalPolicies.bypass?.terminal ? ["default", "bypass"] : ["default"],
       chat: spec.approvalPolicies.bypass?.chat ? ["default", "bypass"] : ["default"],
     },
     approvalPolicyRisk: spec.approvalPolicies.bypass?.risk,

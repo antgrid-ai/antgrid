@@ -15,8 +15,8 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { TerminalManager, gracefulBudget } from "../src/terminal-manager";
 import { TerminalSession, AGENT_GRACE_MS, WINDOWS_SHUTDOWN_GRACE_MS } from "../src/terminal-session";
-import { AGENTS } from "../src/agents/registry";
-import { ETX } from "../src/agents/types";
+import { AGENTS } from "../../packages/antgrid-agents/src/agents/registry";
+import { ETX } from "../../packages/antgrid-agents/src/agents/types";
 import { createConnState } from "../src/conn-state";
 import type { AbMessage } from "../src/protocol";
 
@@ -83,14 +83,24 @@ function writeScript(dir: string, name: string, body: string): string {
   return path;
 }
 
-/** A terminal that answers nothing this suite sends it: on POSIX it ignores
- *  SIGTERM and loops, on Windows it is a plain sleeper in cooked mode, which is
- *  precisely the reader a ConPTY keystroke cannot reach. */
+/** Cooked-mode Ctrl-C can terminate a Windows process through the console
+ *  handler. A stubborn agent must consume it in raw mode to exercise timeout
+ *  escalation rather than the answered-ask path. */
 function stubbornSleeper(dir: string): { command: string; args: string[] } {
   if (isWin) {
+    const script = writeScript(dir, "stubborn.ts", `
+import { writeFileSync, appendFileSync } from "node:fs";
+process.stdin.setRawMode(true);
+process.stdin.on("data", (chunk) => {
+  if (chunk.includes(3)) appendFileSync(${JSON.stringify(join(dir, "asks"))}, "etx\\n");
+});
+process.stdin.resume();
+writeFileSync(${JSON.stringify(join(dir, "leader.pid"))}, String(process.pid));
+setInterval(() => {}, 1e6);
+`);
     return {
-      command: "powershell.exe",
-      args: ["-NoProfile", "-NonInteractive", "-Command", "Start-Sleep -Seconds 120"],
+      command: process.execPath,
+      args: [script],
     };
   }
   const script = writeScript(dir, "stubborn.sh", "trap '' TERM\nprintf '%s' \"$$\" > \"$1\"\nwhile true; do sleep 1; done\n");
@@ -313,7 +323,7 @@ describe("the graceful phase", () => {
     const manager = new TerminalManager(() => {}, undefined, createConnState());
     try {
       manager.spawn({ terminalId: "t1", type: "agent", command, args });
-      await new Promise((r) => setTimeout(r, 500));
+      expect(await waitFor(() => readWhenWritten(join(dir, "leader.pid")), 15_000)).toBeDefined();
 
       manager.kill("t1", 2000);
       const tree = manager.treeKilled("t1");
@@ -335,7 +345,7 @@ describe("the graceful phase", () => {
     const manager = new TerminalManager(() => {}, undefined, createConnState());
     try {
       manager.spawn({ terminalId: "t1", type: "agent", command, args });
-      await new Promise((r) => setTimeout(r, 500));
+      expect(await waitFor(() => readWhenWritten(join(dir, "leader.pid")), 15_000)).toBeDefined();
 
       const started = Date.now();
       const first = manager.killAndAwaitTree("t1", 1200);
@@ -348,6 +358,7 @@ describe("the graceful phase", () => {
       // re-ask pushing the teardown out is what would blow the delete's own
       // 15s ceiling.
       expect(Date.now() - started).toBeLessThan(4500);
+      if (isWin) expect(readWhenWritten(join(dir, "asks"))).toBe("etx");
     } finally {
       manager.killAll();
       rmSync(dir, { recursive: true, force: true });
@@ -460,20 +471,21 @@ describe("a restart inside the grace", () => {
     const dir = tempDir("restart");
     const { command, args } = stubbornSleeper(dir);
     const exited: string[] = [];
+    const exitedRuns: (string | undefined)[] = [];
     const messages: AbMessage[] = [];
     const manager = new TerminalManager(
       (m) => messages.push(m),
-      { onTerminalExited: (id) => exited.push(id) },
+      { onTerminalExited: (id, runId) => { exited.push(id); exitedRuns.push(runId); } },
       createConnState(),
     );
     const exitFrames = (): AbMessage[] =>
       messages.filter((m) => m.type === "terminal:exited" && m.terminalId === "t1");
     try {
-      manager.spawn({ terminalId: "t1", type: "agent", command, args });
+      manager.spawn({ terminalId: "t1", type: "agent", command, args, env: { ANTGRID_RUN_ID: "old" } });
       await new Promise((r) => setTimeout(r, 400));
 
       manager.kill("t1", 3000);
-      manager.spawn({ terminalId: "t1", type: "agent", command, args });
+      manager.spawn({ terminalId: "t1", type: "agent", command, args, env: { ANTGRID_RUN_ID: "new" } });
       // Asserted with nothing awaited in between, because "eventually" is the
       // bug: a dispatch that waits for the real exit arrives after the
       // replacement has registered, and `namer.forget` /
@@ -481,6 +493,7 @@ describe("a restart inside the grace", () => {
       // reclaim the live run's title state and arming instead of the dead
       // run's.
       expect(exited).toEqual(["t1"]);
+      expect(exitedRuns).toEqual(["old"]);
 
       // Long enough for the replaced PTY's own exit to land on the new session.
       await new Promise((r) => setTimeout(r, 1500));
@@ -496,6 +509,7 @@ describe("a restart inside the grace", () => {
       manager.killAll();
       await waitFor(() => (exitFrames().length > 0 ? true : undefined), 5000);
       expect(exited).toEqual(["t1", "t1"]);
+      expect(exitedRuns).toEqual(["old", "new"]);
       expect(exitFrames()).toHaveLength(1);
     } finally {
       manager.killAll();
@@ -615,17 +629,23 @@ setInterval(() => {}, 1e6);
 
   windowsOnly("escalates on an agent that ignores the keystroke", async () => {
     const dir = tempDir("win-ignore");
-    const script = writeScript(dir, "agent.ts", "\nprocess.stdin.resume();\nsetInterval(() => {}, 1e6);\n");
+    const { command, args } = stubbornSleeper(dir);
     const messages: AbMessage[] = [];
     const manager = new TerminalManager((m) => messages.push(m), undefined, createConnState());
     try {
-      manager.spawn({ terminalId: "t1", type: "agent", command: process.execPath, args: [script] });
-      await new Promise((r) => setTimeout(r, 1500));
+      manager.spawn({ terminalId: "t1", type: "agent", command, args });
+      const raw = await waitFor(() => readWhenWritten(join(dir, "leader.pid")), 15_000);
+      expect(raw).toBeDefined();
+      const leader = Number(raw);
+      expect(alive(leader)).toBe(true);
 
       const started = Date.now();
       await manager.killAndAwaitTree("t1", 1200);
 
       expect(Date.now() - started).toBeGreaterThanOrEqual(1100);
+      expect(Date.now() - started).toBeLessThan(6000);
+      expect(readWhenWritten(join(dir, "asks"))).toBe("etx");
+      expect(await waitFor(() => alive(leader) ? undefined : true, 5000)).toBe(true);
       expect(await waitFor(
         () => (messages.some((m) => m.type === "terminal:exited" && m.terminalId === "t1") ? true : undefined),
         10_000,
@@ -681,7 +701,7 @@ describe("AgentSpec.gracefulExit", () => {
     // evaluates the spec table while ETX is still in its temporal dead zone.
     // The failure is a ReferenceError at import time across most of the suite,
     // with nothing pointing at the import that caused it.
-    const source = readFileSync(join(import.meta.dir, "../src/agents/types.ts"), "utf8");
+    const source = readFileSync(join(import.meta.dir, "../../packages/antgrid-agents/src/agents/types.ts"), "utf8");
     // Every form that pulls a module in at RUNTIME, not just `import x from`: a
     // bare `import "./m"` and a value `export { X } from "./m"` both do, and a
     // guard that only inspected `^import .*$` passed them straight through.

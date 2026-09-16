@@ -1,5 +1,7 @@
 // The agent-header Handler pill for a parked session. A park is the one run
 // state with no call to action, so it must read as status and stay inert.
+import 'package:antgrid/design/ab_colors.dart';
+import 'package:antgrid/design/widgets/ab_chip.dart';
 import 'package:antgrid/models/handler_state.dart';
 import 'package:antgrid/models/session_entry.dart';
 import 'package:antgrid/models/workspace_view.dart';
@@ -24,6 +26,8 @@ HandlerSessionState _session(
   int pendingEscalations = 0,
   String? parkKind,
   int? parkedUntil,
+  HandlerAvailability? availability,
+  List<HandlerEscalation> escalations = const [],
 }) => HandlerSessionState(
   terminalId: terminalId,
   runState: runState,
@@ -31,9 +35,10 @@ HandlerSessionState _session(
   armedAt: 1,
   goal: 'summary',
   backlog: const [],
-  escalations: const [],
+  escalations: escalations,
   parkKind: parkKind,
   parkedUntil: parkedUntil,
+  availability: availability,
 );
 
 SessionEntry _entry(String id, {bool deleting = false}) => SessionEntry(
@@ -51,8 +56,9 @@ SessionEntry _entry(String id, {bool deleting = false}) => SessionEntry(
 /// the pill derivation is all this exercises.
 Future<void> _pump(
   WidgetTester tester,
-  Map<String, HandlerSessionState> sessions,
-) async {
+  Map<String, HandlerSessionState> sessions, {
+  List<HandlerEscalation> escalations = const [],
+}) async {
   // The control reads first-run state while nothing is armed in focus (the
   // labeled-shield decision), which happens on the pre-emission first frame
   // here even though every case focuses an armed session.
@@ -66,7 +72,10 @@ Future<void> _pump(
         selectedRegistrationIdProvider.overrideWith((_) => null),
         handlerStateProvider.overrideWith(
           (ref) => Stream.value(
-            const HandlerState.initial().copyWith(sessions: sessions),
+            const HandlerState.initial().copyWith(
+              sessions: sessions,
+              escalations: escalations,
+            ),
           ),
         ),
       ],
@@ -77,6 +86,37 @@ Future<void> _pump(
 }
 
 void main() {
+  testWidgets('temporary monitoring failure is distinct from unsupported', (
+    tester,
+  ) async {
+    await _pump(tester, {
+      't1': _session(
+        't1',
+        runState: HandlerRunState.watching,
+        availability: const HandlerAvailability(
+          HandlerAvailabilityState.unavailable,
+        ),
+      ),
+    });
+    expect(find.text('MONITORING UNAVAILABLE'), findsOneWidget);
+    expect(find.text('NOT WATCHED'), findsNothing);
+  });
+
+  testWidgets('unconfirmed integration waits for the agent signal', (
+    tester,
+  ) async {
+    await _pump(tester, {
+      't1': _session(
+        't1',
+        runState: HandlerRunState.watching,
+        availability: const HandlerAvailability(
+          HandlerAvailabilityState.unknown,
+        ),
+      ),
+    });
+    expect(find.text('WAITING FOR AGENT'), findsOneWidget);
+  });
+
   testWidgets('a parked session shows its wake time', (tester) async {
     final today = DateTime.now();
     final until = DateTime(today.year, today.month, today.day, 14, 5);
@@ -129,6 +169,131 @@ void main() {
       ),
     });
     expect(find.text('NEEDS YOU 2'), findsOneWidget);
+  });
+
+  group('asked you versus needs you', () {
+    HandlerEscalation row(String terminalId, {bool nonBlocking = false}) =>
+        HandlerEscalation(
+          escalationId: '$terminalId-${nonBlocking ? 'ask' : 'stop'}',
+          terminalId: terminalId,
+          question: 'q',
+          reasoning: 'r',
+          draftReply: '',
+          urgency: 'normal',
+          at: 1,
+          nonBlocking: nonBlocking,
+        );
+
+    /// The chip carrying [label], so the tone can be read off the same widget
+    /// the word came from — the control mounts a shield beside it.
+    AbChip pill(WidgetTester tester, String label) => tester.widget<AbChip>(
+      find.ancestor(of: find.text(label), matching: find.byType(AbChip)),
+    );
+
+    AbColors palette(WidgetTester tester) =>
+        tester.element(find.byType(AbChip).first).antgrid;
+
+    testWidgets('a session whose every question is an ask says it asked', (
+      tester,
+    ) async {
+      await _pump(tester, {
+        't1': _session(
+          't1',
+          runState: HandlerRunState.needsYou,
+          pendingEscalations: 1,
+          escalations: [row('t1', nonBlocking: true)],
+        ),
+      });
+      expect(find.text('ASKED YOU 1'), findsOneWidget);
+      expect(pill(tester, 'ASKED YOU 1').color, palette(tester).textSecondary);
+    });
+
+    testWidgets('one blocking question among them keeps the loud word', (
+      tester,
+    ) async {
+      // The agent has stopped on that one, whatever the others are doing, and a
+      // stopped agent is what the accent tier is for.
+      await _pump(tester, {
+        't1': _session(
+          't1',
+          runState: HandlerRunState.needsYou,
+          pendingEscalations: 2,
+          escalations: [row('t1', nonBlocking: true), row('t1')],
+        ),
+      });
+      expect(find.text('NEEDS YOU 2'), findsOneWidget);
+      expect(pill(tester, 'NEEDS YOU 2').color, palette(tester).accent);
+    });
+
+    testWidgets('a row the capability gate downgraded reads as a stop', (
+      tester,
+    ) async {
+      // `HandlerService` clears `nonBlocking` on every emission for a session
+      // whose snapshot advertised no `askAnswer`, so an ungateable ask arrives
+      // here already spelled as blocking — which is the only spelling the pill
+      // may use for a question this app has no way to answer. The gate itself
+      // is pinned in handler_service_test.dart; what this pins is that the pill
+      // reads the gated rows and adds no softening of its own.
+      await _pump(tester, {
+        't1': _session(
+          't1',
+          runState: HandlerRunState.needsYou,
+          pendingEscalations: 1,
+          escalations: [row('t1')],
+        ),
+      });
+      expect(find.text('NEEDS YOU 1'), findsOneWidget);
+    });
+
+    testWidgets('the sibling override takes its word from the rows it counts', (
+      tester,
+    ) async {
+      await _pump(
+        tester,
+        {
+          't1': _session('t1', runState: HandlerRunState.watching),
+          't2': _session(
+            't2',
+            runState: HandlerRunState.needsYou,
+            pendingEscalations: 1,
+            escalations: [row('t2', nonBlocking: true)],
+          ),
+        },
+        escalations: [row('t2', nonBlocking: true)],
+      );
+      expect(find.text('ASKED YOU 1'), findsOneWidget);
+      expect(pill(tester, 'ASKED YOU 1').color, palette(tester).textSecondary);
+    });
+
+    testWidgets('and one stopped sibling anywhere in that set outranks them', (
+      tester,
+    ) async {
+      // The override is one label over several sessions and cannot name two, so
+      // it names the worse case: a count that reads ASKED YOU while one of the
+      // sessions behind it has actually stopped is the failure this word split
+      // exists to prevent.
+      await _pump(
+        tester,
+        {
+          't1': _session('t1', runState: HandlerRunState.watching),
+          't2': _session(
+            't2',
+            runState: HandlerRunState.needsYou,
+            pendingEscalations: 1,
+            escalations: [row('t2', nonBlocking: true)],
+          ),
+          't3': _session(
+            't3',
+            runState: HandlerRunState.needsYou,
+            pendingEscalations: 1,
+            escalations: [row('t3')],
+          ),
+        },
+        escalations: [row('t2', nonBlocking: true), row('t3')],
+      );
+      expect(find.text('NEEDS YOU 2'), findsOneWidget);
+      expect(pill(tester, 'NEEDS YOU 2').color, palette(tester).accent);
+    });
   });
 
   group('the pill that counts another session', () {
@@ -321,7 +486,10 @@ void main() {
           ),
         },
         focused: 't1',
-        escalations: [esc('t2', 0, urgency: 'high'), esc('t1', 0, at: 2)],
+        escalations: [
+          esc('t2', 0, urgency: 'high'),
+          esc('t1', 0, at: 2),
+        ],
         onReveal: () => revealed = true,
       );
 

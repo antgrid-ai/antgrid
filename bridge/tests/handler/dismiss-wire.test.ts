@@ -87,7 +87,7 @@ test("handler:dismiss reaches the engine, and a malformed one resyncs without di
   // one that carries a report across it.
   const rec: HandlerSessionRecord = {
     version: 2, terminalId: "t1", armed: false, suspended: true,
-    goal: "migrate auth", backlog: [], armedAt: 1,
+    goal: "migrate auth", instructions: [], backlog: [], armedAt: 1,
     escalations: [{
       escalationId: "b1", question: "Handler did not send its reply",
       reasoning: "reply contains control characters", draftReply: "yes[B",

@@ -263,6 +263,7 @@ describe("HostServer wiring", () => {
     return {
       deviceId: "control-plane-dev",
       currentPeerPubkey: () => null,
+      hasEstablishedSession: () => false,
       setBus: () => {},
       connect: () => {},
       close: () => {},

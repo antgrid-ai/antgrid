@@ -67,6 +67,7 @@ Future<ProjectSession> _armedSession(
   List<HandlerInstructionItem> backlog, {
   String state = 'watching',
   String goal = 'ship the fix',
+  ({int total, List<String> items})? instructions,
 }) async {
   useInMemoryPrefs();
   final transport = FakeAgentTransport();
@@ -82,6 +83,7 @@ Future<ProjectSession> _armedSession(
     backlog,
     state: state,
     goal: goal,
+    instructions: instructions,
   );
   return session;
 }
@@ -90,11 +92,18 @@ Future<ProjectSession> _armedSession(
 /// handler event on any armed session; what retires an outstanding instruction
 /// is this terminal's backlog having grown, so a second call carrying an
 /// appended item is how a test gets to the far side of an extraction.
+///
+/// [instructions] mirrors the wire's nested `instructions: {total, items}`
+/// object (see `HandlerSessionState.instructions`/`instructionsTotal`). Left
+/// null, the frame carries no such key at all — the shape a bridge that
+/// predates the field sends — rather than an empty one, which is a different,
+/// real state (an armed session nobody has instructed yet).
 void _emitStatus(
   ProjectSession session,
   List<HandlerInstructionItem> backlog, {
   String state = 'watching',
   String goal = 'ship the fix',
+  ({int total, List<String> items})? instructions,
 }) {
   _transportOf(session).emit('handler:status', {
     'projectId': 'p',
@@ -106,6 +115,11 @@ void _emitStatus(
         'armedAt': 1,
         'goal': goal,
         'backlog': [for (final i in backlog) i.toWire()],
+        if (instructions != null)
+          'instructions': {
+            'total': instructions.total,
+            'items': instructions.items,
+          },
       },
     ],
   });
@@ -624,14 +638,14 @@ void main() {
   // what they want done here gets the session's own opening sentence retyped,
   // and the extraction already running appends it a second time.
   testWidgets(
-    'an empty list under a goal points at the goal, not at the field',
+    'an empty list under what was asked for points there, not at the field',
     (tester) async {
       final session = await _armedSession(const []);
       await _pumpDrawer(tester, session);
 
-      expect(find.text('Working towards: ship the fix'), findsOneWidget);
+      expect(find.text('ship the fix'), findsOneWidget);
       expect(
-        find.text('Nothing queued beyond the goal above.'),
+        find.text('Nothing queued beyond what you asked for above.'),
         findsOneWidget,
       );
       expect(
@@ -658,6 +672,207 @@ void main() {
         'work it takes on by itself.',
       ),
       findsOneWidget,
+    );
+  });
+
+  // The wire window is entry #1 plus the newest up to four, and this block
+  // renders all of it — a heading, entry #1, an elision line for whatever the
+  // bridge left out, and the newest four.
+  group('what you asked for', () {
+    testWidgets('a single instruction renders with no elision line', (
+      tester,
+    ) async {
+      final session = await _armedSession(
+        const [],
+        instructions: (total: 1, items: ['only instruction']),
+      );
+      await _pumpDrawer(tester, session);
+
+      expect(find.text('WHAT YOU ASKED FOR'), findsOneWidget);
+      expect(find.text('only instruction'), findsOneWidget);
+      expect(find.textContaining('more in between'), findsNothing);
+    });
+
+    testWidgets(
+      'a long backlog renders entry #1, the elision count and the newest',
+      (tester) async {
+        final session = await _armedSession(
+          const [],
+          instructions: (
+            total: 12,
+            items: [
+              'first instruction',
+              'second',
+              'third',
+              'fourth',
+              'fifth',
+            ],
+          ),
+        );
+        await _pumpDrawer(tester, session);
+
+        // Entry #1 names the session and is never elided out of this block.
+        expect(find.text('first instruction'), findsOneWidget);
+        // 12 retained, 5 rendered — the reader has to be able to tell this is
+        // a window onto the list, not the list.
+        expect(find.text('7 more in between'), findsOneWidget);
+        // Every entry the bridge spent wire budget to send is drawn: this
+        // block is the only surface in the app that can show them at all.
+        expect(find.text('second'), findsOneWidget);
+        expect(find.text('third'), findsOneWidget);
+        expect(find.text('fourth'), findsOneWidget);
+        expect(find.text('fifth'), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      'nothing asked for renders neither the heading nor a row',
+      (tester) async {
+        // `askedFor` is empty only when BOTH sources are: no instructions
+        // list and no goal — the shape a fresh arm with an empty composer
+        // sends.
+        final session = await _armedSession(const [], goal: '');
+        await _pumpDrawer(tester, session);
+
+        expect(find.text('WHAT YOU ASKED FOR'), findsNothing);
+      },
+    );
+
+    testWidgets(
+      'an older-bridge frame with a goal renders exactly one row and no elision',
+      (tester) async {
+        // No `instructions` key at all — the shape a bridge that predates the
+        // field sends — so entry #1 falls back to the goal.
+        final session = await _armedSession(const []);
+        await _pumpDrawer(tester, session);
+
+        expect(find.text('WHAT YOU ASKED FOR'), findsOneWidget);
+        expect(find.text('ship the fix'), findsOneWidget);
+        expect(find.textContaining('more in between'), findsNothing);
+      },
+    );
+
+    testWidgets('a sentence still pending is not shown a second time here', (
+      tester,
+    ) async {
+      final session = await _armedSession(const []);
+      await _pumpDrawer(tester, session);
+
+      await _sendInstruction(tester, 'run tests now');
+      // engine.instruct pushes into the instruction list before extraction is
+      // even queued, so this status frame carries the sentence while the
+      // pending row below is still drawing the very same one.
+      _emitStatus(
+        session,
+        const [],
+        instructions: (total: 1, items: ['run tests now']),
+      );
+      await tester.pump();
+
+      // One copy on screen — the pending row's — not a second from this block.
+      expect(find.text('run tests now'), findsOneWidget);
+    });
+
+    testWidgets('a pending sentence is not counted as elided either', (
+      tester,
+    ) async {
+      final session = await _armedSession(const []);
+      await _pumpDrawer(tester, session);
+
+      await _sendInstruction(tester, 'run tests now');
+      // Two retained, both accounted for on this sheet: entry #1 in the block
+      // and the newest in the pending row below. A count computed after the
+      // filter would say "1 more in between" about a row two lines down —
+      // and call the NEWEST sentence an in-between one.
+      _emitStatus(
+        session,
+        const [],
+        instructions: (total: 2, items: ['ship the fix', 'run tests now']),
+      );
+      await tester.pump();
+
+      expect(find.textContaining('more in between'), findsNothing);
+    });
+
+    testWidgets(
+      'a restated sentence hides one entry, not every copy of it',
+      (tester) async {
+        // `engine.instruct` does not dedupe, so re-sending the sentence the
+        // session was opened with leaves TWO identical entries in the list —
+        // and only the newer of them is the one the pending row is drawing.
+        // Hiding both would take entry #1 off the only surface that renders
+        // it, and leave the elision line pinned behind the wrong sentence.
+        final session = await _armedSession(const []);
+        await _pumpDrawer(tester, session);
+
+        await _sendInstruction(tester, 'ship the fix');
+        _emitStatus(
+          session,
+          const [],
+          instructions: (total: 2, items: ['ship the fix', 'ship the fix']),
+        );
+        await tester.pump();
+
+        // Once in this block as entry #1, once in the pending row below.
+        expect(find.text('ship the fix'), findsNWidgets(2));
+        expect(find.text('WHAT YOU ASKED FOR'), findsOneWidget);
+        expect(find.textContaining('more in between'), findsNothing);
+      },
+    );
+
+    testWidgets('a pasted sentence long enough to be clipped still matches', (
+      tester,
+    ) async {
+      final long = 'ship ${'the whole refactor ' * 12}today';
+      final clipped = '${long.substring(0, 119)}…';
+      final session = await _armedSession(const []);
+      await _pumpDrawer(tester, session);
+
+      await _sendInstruction(tester, long);
+      // What the bridge would send back: clipWithin lands the ellipsis INSIDE
+      // the 120 bound, so the wire copy is 119 characters of the sentence plus
+      // one '…'. Matching a raw 120 characters of each side differs on that
+      // last character — and a pasted instruction is the whole reason this
+      // filter exists.
+      _emitStatus(
+        session,
+        const [],
+        goal: '',
+        instructions: (total: 1, items: [clipped]),
+      );
+      await tester.pump();
+
+      // The pending row's copy, and no second one from this block — the whole
+      // block goes away, since the one entry it had was the filtered one.
+      expect(find.text(long), findsOneWidget);
+      expect(find.text(clipped), findsNothing);
+      expect(find.text('WHAT YOU ASKED FOR'), findsNothing);
+    });
+
+    testWidgets(
+      'the empty-backlog copy is what an instruction list can say with no '
+      'goal at all',
+      (tester) async {
+        // A blank goal on its own reads as nothing asked for (see 'an empty
+        // list still says what Handler answers' above) — but an instruction
+        // list is the other source `askedFor` reads, and standing on its own
+        // it has to carry the same claim.
+        final session = await _armedSession(
+          const [],
+          goal: '',
+          instructions: (total: 1, items: ['keep the tests green']),
+        );
+        await _pumpDrawer(tester, session);
+
+        expect(
+          find.text('Nothing queued beyond what you asked for above.'),
+          findsOneWidget,
+        );
+        expect(
+          find.text("Add what you want done while you're away."),
+          findsNothing,
+        );
+      },
     );
   });
 

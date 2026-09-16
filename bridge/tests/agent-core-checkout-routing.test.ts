@@ -106,11 +106,14 @@ interface IsolatedFixture {
   checkoutPath: string;
 }
 
-/** Boot a core over the committed repo, attached to a fresh bus. */
-async function bootCore(): Promise<{ bus: MessageBus; sent: AbMessage[] }> {
+/** Boot a core over the committed repo, attached to a fresh bus. `remote` boots
+ *  it the way a relay-attached core runs, machine switch already on, so a refusal
+ *  can only come from a per-device gate. */
+async function bootCore(remote = false): Promise<{ bus: MessageBus; sent: AbMessage[] }> {
   core = await buildAgentCore({
     folder: root,
-    mode: "local",
+    mode: remote ? "remote" : "local",
+    ...(remote ? { remoteAccessEnabled: () => true } : {}),
     worktreeSessionsSupported: true,
     identity: { deviceId: "agent", deviceName: "agent", createdAt: new Date().toISOString() },
   });
@@ -366,7 +369,7 @@ test("a configured terminal in a managed checkout is attributed to that checkout
   )).toBe(true);
 });
 
-test("a terminal snapshot request is answered by the asking checkout alone", async () => {
+test("a retired terminal snapshot request returns one checkout-scoped upgrade error", async () => {
   await initRepo();
   const { bus, sent } = await startWithIsolatedSession();
   // cwd deliberately outside the project: on Windows a live PTY holds its own
@@ -386,12 +389,11 @@ test("a terminal snapshot request is answered by the asking checkout alone", asy
     "control",
     "loopback",
   );
-  await waitFor(sent, (message) => message.type === "terminal:snapshot");
-  // Serializing a screen is real work and every runtime sees the frame, so the
-  // guard has to short-circuit before the isolated runtime does any of it —
-  // otherwise the app applies whichever reply lands last.
-  await new Promise((resolve) => setTimeout(resolve, 400));
-  expect(sent.filter((message) => message.type === "terminal:snapshot").length).toBe(1);
+  const reply = await waitFor(sent, (message) => message.type === "terminal:display:status");
+  expect(reply).toMatchObject({ code: "UPGRADE_REQUIRED", checkoutId: "main" });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  expect(sent.filter((message) => message.type === "terminal:display:status").length).toBe(1);
+  expect(sent.filter((message) => message.type === "terminal:snapshot")).toEqual([]);
 });
 
 test("a terminal.snapshot RPC is answered once, with no broadcast alongside it", async () => {
@@ -634,3 +636,40 @@ test.skipIf(process.platform === "win32")(
   },
   20000,
 );
+
+test("a tunnel request from a session that cannot route checkouts is refused, while a capable device's is proxied", async () => {
+  // The tunnel route bypasses the bus, so the per-device capability check the
+  // bus dispatch makes had to be restated on it: a preview body IS a checkout's
+  // dev server rendered verbatim, and a device that may not address a checkout
+  // must not be handed one's page instead of an error.
+  await initRepo();
+  const { bus, sent } = await bootCore(true);
+  await createSession(bus, sent, "Isolated", "worktree");
+
+  // Tunnel answers leave through the plaintext hook, never the bus.
+  const plain: object[] = [];
+  core!.setPlainHook(async (frame) => { plain.push(frame); return "sent"; });
+  let checkoutRouting = false;
+  core!.setPeerSessionProvider((peerId) => ({
+    peerId, peerPubkey: "pub-app", checkoutRouting, reachable: true, pullsTree: false,
+  }));
+  const responses = () => plain.filter((frame) => (frame as { type?: string }).type === "tunnel:http-start");
+  const request = (requestId: string) => core!.handleTunnelMessage({
+    // Nothing listens on this port: an ADMITTED request still answers 502, so a
+    // response frame is proof the gate passed it to the proxy.
+    type: "tunnel:http-request", requestId, port: 65500, method: "GET", path: "/secret",
+  }, "app-dev#machine-dev");
+
+  request("stale");
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  expect(responses()).toEqual([]);
+
+  checkoutRouting = true;
+  request("modern");
+  const deadline = Date.now() + 3000;
+  while (Date.now() < deadline && responses().length === 0) {
+    await new Promise((resolve) => setTimeout(resolve, 15));
+  }
+  expect(responses()).toHaveLength(1);
+  expect(responses()[0]).toMatchObject({ requestId: "modern" });
+}, 20000);

@@ -2,8 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 
 import { pickHeadless, resolveHeadless, runHeadless } from "../src/agents/headless";
-import { AGENTS, judgeCapable } from "../src/agents/registry";
-import { pickHeadlessFrom, type AgentKey, type AgentSpec } from "../src/agents/types";
+import { AGENTS, judgeCapable } from "../../packages/antgrid-agents/src/agents/registry";
+import { pickHeadlessFrom, type AgentKey, type AgentSpec } from "../../packages/antgrid-agents/src/agents/types";
 
 const cmd = (label: string) => ({
   cmd: () => [label],

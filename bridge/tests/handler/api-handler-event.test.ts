@@ -179,3 +179,109 @@ test("an awaiting_input that claims nothing about its shape is forwarded", async
   expect(got).toHaveLength(1);
   h.stop();
 });
+
+// ── The agent's own prompt ──────────────────────────────────────────────────
+//
+// A terminal-mode agent that stops to ask reports it through its own tool
+// hooks: `question` carries the text and the id, `prompt_answered` returns the
+// same id when the tool completes. Both were answered 400 before the enum knew
+// them, which is a blocked agent nobody hears about.
+
+test("POST /handler-event forwards a question with its detail and promptId", async () => {
+  const got: any[] = [];
+  const h = startApiServer(baseCtx({ onHandlerEvent: (b: any) => got.push(b) }));
+  const res = await fetch(`http://127.0.0.1:${h.port}/handler-event`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      terminalId: "t1", event: "question", agent: "claude",
+      detail: "Which env?", promptId: "toolu_1",
+    }),
+  });
+  expect(res.status).toBe(200);
+  expect(got).toHaveLength(1);
+  expect(got[0].event).toBe("question");
+  // Without BOTH the escalation reads "Agent asks a question" with the question
+  // itself nowhere — a card that stops the session and does not say why.
+  expect(got[0].detail).toBe("Which env?");
+  expect(got[0].promptId).toBe("toolu_1");
+  h.stop();
+});
+
+test("POST /handler-event forwards prompt_answered with the id that opened it", async () => {
+  const got: any[] = [];
+  const h = startApiServer(baseCtx({ onHandlerEvent: (b: any) => got.push(b) }));
+  const res = await fetch(`http://127.0.0.1:${h.port}/handler-event`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ terminalId: "t1", event: "prompt_answered", promptId: "toolu_1" }),
+  });
+  expect(res.status).toBe(200);
+  expect(got.map((b) => b.event)).toEqual(["prompt_answered"]);
+  expect(got[0].promptId).toBe("toolu_1");
+  h.stop();
+});
+
+test("an awaiting_input is dropped while the agent holds a prompt on that terminal", async () => {
+  // It can only be the permission notification the CLI schedules seconds after
+  // any prompt appears, re-announcing the block the question already reported
+  // with its text.
+  const got: any[] = [];
+  const h = startApiServer(baseCtx({
+    onHandlerEvent: (b: any) => got.push(b),
+    hasOpenAgentPrompt: () => true,
+  }));
+  const res = await fetch(`http://127.0.0.1:${h.port}/handler-event`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ terminalId: "t1", event: "awaiting_input" }),
+  });
+  expect(res.status).toBe(200);
+  expect(await res.json()).toEqual({ ok: true, stale: true });
+  expect(got).toEqual([]);
+  h.stop();
+});
+
+test("a context with no hasOpenAgentPrompt forwards awaiting_input (fail toward forwarding)", async () => {
+  // Absent must read as "no prompt is open": this predicate only ever silences,
+  // so an unwired owner would otherwise mute every block on the machine.
+  const got: any[] = [];
+  const h = startApiServer(baseCtx({ onHandlerEvent: (b: any) => got.push(b) }));
+  const res = await fetch(`http://127.0.0.1:${h.port}/handler-event`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ terminalId: "t1", event: "awaiting_input" }),
+  });
+  expect(res.status).toBe(200);
+  expect(got).toHaveLength(1);
+  h.stop();
+});
+
+test("the question and lifecycle kinds are never gated on the open-prompt predicate", async () => {
+  // The companion to the awaiting_input-only rule above: suppressing the very
+  // event that reports the prompt would make the gate silence its own source.
+  const got: any[] = [];
+  const h = startApiServer(baseCtx({
+    onHandlerEvent: (b: any) => got.push(b),
+    hasOpenAgentPrompt: () => true,
+  }));
+  const post = (body: unknown) => fetch(`http://127.0.0.1:${h.port}/handler-event`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
+  expect((await post({ terminalId: "t1", event: "question", detail: "Which env?" })).status).toBe(200);
+  expect((await post({ terminalId: "t1", event: "prompt_answered" })).status).toBe(200);
+  expect((await post({ terminalId: "t1", event: "turn_end" })).status).toBe(200);
+  expect((await post({ terminalId: "t1", event: "turn_failed" })).status).toBe(200);
+  expect(got.map((b) => b.event)).toEqual(["question", "prompt_answered", "turn_end", "turn_failed"]);
+  h.stop();
+});
+
+test("the open-prompt predicate is asked about the event's own terminalId", async () => {
+  const asked: string[] = [];
+  const h = startApiServer(baseCtx({
+    onHandlerEvent: () => {},
+    hasOpenAgentPrompt: (id: string) => { asked.push(id); return false; },
+  }));
+  await fetch(`http://127.0.0.1:${h.port}/handler-event`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ terminalId: "t2", event: "awaiting_input" }),
+  });
+  expect(asked).toEqual(["t2"]);
+  h.stop();
+});

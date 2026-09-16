@@ -1,15 +1,18 @@
+import { resolveTerminalInvocation } from "./terminal-invocation";
+import { needsShellForAgentBinary, prepareAgentBinary } from "antgrid-agents/terminal-platform";
+import { agentRuntime } from "./agent-host";
 import { spawn as ptySpawn } from "bun-pty";
 import type { IPty, IDisposable } from "bun-pty";
-import { execFile, execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { delimiter, dirname, extname } from "node:path";
 import { logger } from "./logger";
-import { ETX, type GracefulExitAsk } from "./agents/types";
+import { ETX, type GracefulExitAsk } from "antgrid-agents/contracts";
 const log = logger.child({ component: "terminal-session" });
 import { createMessage, type AbMessage } from "./protocol";
-import { findOnPath } from "./tool-detector";
+import { findOnPath } from "./path-probe";
 import { TerminalNotificationScanner, type NotificationEvent } from "./notification-scanner";
-import { VtCapabilityResponder } from "./vt-capability-responder";
+import { ANTGRID_QUERY_COLORS, VtCapabilityResponder } from "./vt-capability-responder";
 import { padBareVerb, PtySubmitQueue } from "./pty-submit";
 import {
   createKillOnCloseJob,
@@ -351,6 +354,7 @@ export interface TerminalSessionOptions {
   name?: string;
   shell?: string;
   command?: string;
+  invocationKind?: "exec" | "shell";
   args?: string[];
   cwd?: string;
   env?: Record<string, string>;
@@ -386,33 +390,7 @@ export interface TerminalSessionOptions {
 
 const BATCH_INTERVAL_MS = 16;
 
-/**
- * Byte cap on a coalesced `terminal:output` frame. Binds only above
- * BATCH_MAX_BYTES/BATCH_INTERVAL_MS of PTY output — under that the timer
- * flushes first, so interactive echo latency is the interval's business, not
- * this constant's.
- *
- * Sized against the relay's route limiter, which counts FRAMES, not bytes:
- * `rateLimitMsgPerSec` (relay/src/config.ts) is 1200/s per (pair, channel) and
- * an exceeded bucket DROPS the frame rather than queuing it, which for terminal
- * output is corrupted scrollback. At 4 KB that put a hard ceiling near 5 MB/s of
- * sustained output from one terminal; at 16 KB it is near 20 MB/s. Far below
- * MAX_FRAME_PAYLOAD (1.5 MB, packages/antgrid-wire/src/frag.ts), so the frame
- * itself is never the limit.
- *
- * The app-side receive cost per KB of output confirms the same direction and
- * bounds it: measured on Windows over `app/test/config/frame_batch_bench.dart`,
- * ~27 us/KB at 4 KB and 8 KB, ~21 us/KB at 16 KB and 32 KB, then WORSE again
- * past 64 KB. So 8 KB buys nothing on that axis and 256 KB is a regression.
- *
- * One cross-platform consequence, deliberate: a batch this size seals to ~22 KB
- * of JSON (escape-heavy output inflates ~1.35x), which crosses the 10,000-byte
- * `BackgroundCipher.defaultChannelPolicy` threshold in cryptography_flutter. On
- * Linux — the one platform with neither a plugin nor a native cipher — that
- * moves the pure Dart AES-GCM off the UI isolate and onto a spawned one: same
- * CPU, better responsiveness, but re-measure here if Linux ever gets its own
- * native cipher.
- */
+// Bound internal output coalescing independently of the serialized viewer frames.
 const BATCH_MAX_BYTES = 16384;
 
 /**
@@ -465,64 +443,6 @@ export function stripInheritedCertOverrides(
 }
 
 /**
- * True for antigravity's `agy`/`agy.EXE` shim, bare or pathful. agy.EXE is a
- * real PE binary but is deliberately routed through cmd.exe on Windows rather
- * than direct-ConPTY-spawned like other .exe agents — see the isAgy usage in
- * spawn() for why (confirmed A/B: agy launched directly, outside any
- * ConPTY-attached spawn, completes its OAuth/eligibility check fine; the
- * identical binary, same user/machine/moment, fails every outbound HTTPS call
- * with `tls: ... certificate signed by unknown authority` only when bun-pty
- * makes it the direct ConPTY child).
- */
-export function isAntigravityBinary(command: string): boolean {
-  return /(^|[\\/])agy(\.exe)?$/i.test(command);
-}
-
-/**
- * Warms Windows' CryptoAPI intermediate-certificate cache for agy's target
- * host before spawning it. Go's crypto/x509 on Windows verifies via
- * CertGetCertificateChain with CACHE-ONLY lookups — unlike browsers/.NET, it
- * never fetches a missing intermediate CA over the network. If the
- * intermediate for daily-cloudcode-pa.googleapis.com isn't already cached in
- * this Windows profile, agy fails outright with `certificate signed by
- * unknown authority`. Confirmed live: with SSL_CERT_* / proxy vars already
- * stripped and the env otherwise identical, a plain PowerShell request
- * (Invoke-WebRequest → .NET → SChannel, which DOES fetch-and-cache missing
- * intermediates) against the same host succeeds every time — the failure is
- * specific to Go's cache-only lookup, not the environment or network path.
- *
- * Synchronous and blocking (not fire-and-forget): agy can fire its own HTTPS
- * call within ~1-2s of spawn, faster than an async priming request reliably
- * wins the race (that's what the async version of this probe demonstrated —
- * it usually completed just AFTER agy's own failing call). The priming has
- * to land before the PTY exists, not concurrently with it. Bounded by a
- * short timeout and fails open — a network hiccup here must never block
- * opening the terminal, since agy would then just show its normal error.
- *
- * Windows' CryptoAPI intermediate cache is machine/profile-level, so one
- * successful prime serves every agy spawn for this bridge's lifetime. We
- * memoize on success to pay the (event-loop-blocking) PowerShell cost at most
- * once per process — a failed prime is NOT recorded, so a later spawn retries.
- */
-let antigravityCertCachePrimed = false;
-function primeAntigravityCertCache(env: Record<string, string>): void {
-  if (process.platform !== "win32" || antigravityCertCachePrimed) return;
-  const script =
-    "try { Invoke-WebRequest -UseBasicParsing -Uri https://daily-cloudcode-pa.googleapis.com -Method Head -TimeoutSec 4 | Out-Null; Write-Output 'CERT-CACHE-PRIME-OK' } catch { Write-Output ('CERT-CACHE-PRIME-DONE ' + $_.Exception.Message) }";
-  try {
-    const out = execFileSync(
-      "powershell.exe",
-      ["-NoProfile", "-NonInteractive", "-Command", script],
-      { env, timeout: 5_000, encoding: "utf8" },
-    ).trim();
-    antigravityCertCachePrimed = true;
-    logger.info(`antigravity cert-cache prime: ${out}`);
-  } catch (e) {
-    logger.warn(`antigravity cert-cache prime failed, continuing spawn anyway: ${(e as Error).message}`);
-  }
-}
-
-/**
  * Resolve a bare Windows command (no path separator, no extension) against
  * PATH + PATHEXT, returning the first match and its extension. The extension
  * tells us whether the resolved target is a real PE binary (`.exe`/`.com` →
@@ -549,6 +469,7 @@ export class TerminalSession {
   private _rows: number;
   private _driverClientId: string | null = null;
   private command: string | undefined;
+  private invocationKind: "exec" | "shell" | undefined;
   private args: string[];
   private cwd: string | undefined;
   private extraEnv: Record<string, string>;
@@ -599,6 +520,8 @@ export class TerminalSession {
   private notificationScanner = new TerminalNotificationScanner();
   private suppressOscNotifications = false;
   private suppressOscTitle = false;
+  private desiredOscNotifications = false;
+  private desiredOscTitle = false;
   private _hookAliveProbeAgent?: string;
 
   onOutput(fn: (data: string) => void): () => void {
@@ -623,14 +546,17 @@ export class TerminalSession {
     this._cols = opts.cols ?? 80;
     this._rows = opts.rows ?? 24;
     this.command = opts.command;
+    this.invocationKind = opts.invocationKind;
     this.args = opts.args ?? [];
     this.cwd = opts.cwd;
     this.extraEnv = opts.env ?? {};
     this.type = opts.type;
     this.onMessage = opts.onMessage;
     this.onTitle = opts.onTitle;
-    this.suppressOscNotifications = opts.suppressOscNotifications ?? false;
-    this.suppressOscTitle = opts.suppressOscTitle ?? false;
+    this.desiredOscNotifications = opts.suppressOscNotifications ?? false;
+    this.desiredOscTitle = opts.suppressOscTitle ?? false;
+    this.suppressOscNotifications = this.desiredOscNotifications && !opts.hookAliveProbeAgent;
+    this.suppressOscTitle = this.desiredOscTitle && !opts.hookAliveProbeAgent;
     this._hookAliveProbeAgent = opts.hookAliveProbeAgent;
     this.ask = opts.gracefulAsk ?? {};
 
@@ -671,6 +597,10 @@ export class TerminalSession {
   // as enableOscNotifications, kept as a separate toggle since the two signals
   // are suppressed independently (see titleSourceFor vs notificationSourceFor).
   enableOscTitle(): void { this.suppressOscTitle = false; }
+  confirmHookAlive(): void {
+    this.suppressOscNotifications = this.desiredOscNotifications;
+    this.suppressOscTitle = this.desiredOscTitle;
+  }
 
   private detectShell(): string {
     return process.env.SHELL || (process.platform === "win32" ? "powershell.exe" : "/bin/bash");
@@ -680,70 +610,16 @@ export class TerminalSession {
     let cmd: string;
     let args: string[];
     if (this.command) {
-      // Shell-wrap rules:
-      //  - Free-form commands with whitespace (e.g. "npm run serve") need a
-      //    shell because PTY treats arg 0 as a literal executable path.
-      //  - On Windows, ConPTY can only directly exec a PE binary — it can't run
-      //    `.cmd`/`.bat` shims (e.g. `npm`, `claude`, `opencode` under
-      //    `~/.bun/bin` or `~/AppData/Roaming/npm`), which must go through
-      //    cmd.exe. So we resolve bare names against PATH and direct-spawn
-      //    anything that's a true `.exe`/`.com`, reserving the shell wrap for
-      //    genuine shims, free-form lines, and unresolved commands.
-      //  - WHY prefer direct spawn beyond shim support: bun-pty does not use
-      //    Windows CommandLineToArgvW quoting. It serializes argv POSIX-style
-      //    (single-quote each token, then `shell_words::split` on the Rust
-      //    side) and re-joins for CreateProcess. A pre-joined, hand-quoted
-      //    cmd.exe line gets processed twice and corrupted — e.g.
-      //    `node -e "console.log('x')"` reaches node with the inner quoting
-      //    mangled and prints nothing. Direct-spawning the resolved exe with a
-      //    plain argv array skips the cmd.exe re-parse entirely. For the shims
-      //    that genuinely need cmd.exe we pass argv as SEPARATE elements (not a
-      //    pre-joined line) so each token survives the round-trip; see below.
-      const isWin = process.platform === "win32";
-      const hasWhitespace = this.args.length === 0 && /\s/.test(this.command);
-      let directCmd: string | null = null; // resolved exe to spawn directly
-      let needsShell = hasWhitespace;
-      if (isWin && !hasWhitespace) {
-        const pathful = this.command.includes("\\") || this.command.includes("/");
-        if (/\.(cmd|bat)$/i.test(this.command) || isAntigravityBinary(this.command)) {
-          needsShell = true; // explicit shim / ConPTY-direct-spawn workaround (see isAntigravityBinary)
-        } else if (/\.(exe|com)$/i.test(this.command) || pathful) {
-          // Already a concrete target (explicit .exe/.com, or a path) — leave
-          // it for direct spawn below.
-        } else {
-          // Bare name: resolve via PATH to tell a real exe from a shim.
-          const resolved = resolveWinExecutable(this.command);
-          if (resolved && (resolved.ext === ".exe" || resolved.ext === ".com")) {
-            directCmd = resolved.path; // real executable — exec it directly
-          } else {
-            needsShell = true; // .cmd/.bat shim, assoc-run script, or not found
-          }
-        }
-      }
-      if (needsShell) {
-        if (isWin) {
-          // Pass command + args as SEPARATE argv elements, NOT a pre-joined,
-          // hand-quoted line. bun-pty's POSIX-style serialization + Rust
-          // re-join (see the comment above) corrupts a pre-quoted line —
-          // splitting `"a b"` into two tokens and leaking literal quotes.
-          // Separate elements survive intact; cmd.exe /c then runs
-          // `<command> <args…>`. The free-form whitespace case has no args, so
-          // the command travels as a single token. Caveat: raw cmd
-          // metacharacters (& | < > ^) inside a discrete arg still aren't
-          // escaped — a limitation of bun-pty's POSIX-oriented pipeline, not
-          // reachable through the structured args[] our callers use.
-          cmd = process.env.ComSpec ?? "cmd.exe";
-          args = ["/d", "/s", "/c", this.command, ...this.args];
-        } else {
-          // POSIX only reaches here for the whitespace free-form case (args is
-          // empty), so the command is already a complete `sh -c` line.
-          cmd = process.env.SHELL ?? "/bin/sh";
-          args = ["-c", this.command];
-        }
-      } else {
-        cmd = directCmd ?? this.command;
-        args = this.args;
-      }
+      const invocation = resolveTerminalInvocation({
+        command: this.command, args: this.args, invocationKind: this.invocationKind,
+      }, {
+        platform: process.platform,
+        shell: process.platform === "win32" ? process.env.ComSpec ?? "cmd.exe" : process.env.SHELL ?? "/bin/sh",
+        resolveWindowsExecutable: resolveWinExecutable,
+        requiresWindowsShell: (command) => needsShellForAgentBinary(command, agentRuntime.agents),
+      });
+      cmd = invocation.command;
+      args = invocation.args;
     } else {
       cmd = this.shell;
       args = [];
@@ -761,9 +637,7 @@ export class TerminalSession {
       ...this.extraEnv,
     } as Record<string, string>);
 
-    if (isAntigravityBinary(this.command ?? "")) {
-      primeAntigravityCertCache(env);
-    }
+    prepareAgentBinary(this.command ?? "", env, agentRuntime.agents);
 
     this.pty = ptySpawn(cmd, args, {
       cols: this._cols,
@@ -986,31 +860,105 @@ export class TerminalSession {
   }
 
   /**
+   * Send a multi-line block as one prompt. Callable only where the guest is
+   * known to honour bracketed paste — `TerminalManager.submit` owns that
+   * decision, because the mode tracker lives with the scrollback, not here.
+   */
+  submitPaste(text: string): void {
+    this.submitQueue.submitPaste(text);
+  }
+
+  /**
    * Answer the VT capability queries the spawned process emits at startup.
    * The responder is stateful (it carries a query split across PTY chunks and
    * follows the guest's own mode changes), so it must live for the whole
    * session — see `vt-capability-responder.ts` for why this side answers at
-   * all and why it is the only side that does.
-   *
-   * The colours are Antgrid's design tokens and must stay in lockstep with
-   * `AbColors` (`app/lib/design/ab_colors.dart`): they are what the guest
-   * picks its own contrast against.
+   * all and why it is the only side that does. Starts at full scope: with no
+   * `TerminalFrameSource` installed yet (or its construction having fallen
+   * back to a plain `TerminalScreen`), this is the ONLY responder there is.
+   * ONE instance for the session's whole life — narrow/widen switch its
+   * `scope` in place (see `VtCapabilityResponder.setScope`) rather than
+   * swapping in a fresh one, which would forget `carry` and every DEC mode
+   * the guest had already set.
    */
-  private capabilityResponder = new VtCapabilityResponder({
-    foreground: "rgb:fafa/fafa/fafa", // ≈ textPrimary
-    background: "rgb:0909/0909/0b0b", // ≈ bgDeepest
-    cursor: "rgb:8181/8c8c/f8f8", //     ≈ accent indigo
-  });
+  private readonly capabilityResponder = new VtCapabilityResponder(ANTGRID_QUERY_COLORS);
+
+  /**
+   * Held OSC 10/11/12 replies while narrowed — see `deferCapabilityReplies`
+   * and `flushCapabilityReplies`.
+   */
+  private pendingCapabilityReplies: string[] = [];
+
+  /**
+   * Set while a live `TerminalFrameSource`'s parser-boundary responder is
+   * answering everything but OSC 10/11/12. While set,
+   * `respondToCapabilityQueries` holds its replies instead of writing them
+   * immediately: the byte responder runs synchronously off the raw PTY chunk,
+   * while the parser-boundary replies fire only once that chunk has actually
+   * been parsed (batched, and behind xterm's own async write buffer — see
+   * `TerminalScreen.feed`'s doc) — an immediate write would let an OSC reply
+   * overtake a same-chunk, or even earlier-chunk, DA1/CPR/DECRQM reply that
+   * had not been produced yet. `flushCapabilityReplies` is what releases the
+   * hold, from the same parser-completion boundary those replies fire from.
+   */
+  private deferCapabilityReplies = false;
+
+  /**
+   * Switches the byte-level responder above down to OSC 10/11/12 only. Called
+   * once a `TerminalFrameSource` has installed its own parser-boundary
+   * responder for everything else (`TerminalFrameSource.answerQueries`) — see
+   * the `scope` doc on `VtCapabilityResponderOptions` for why an unnarrowed
+   * instance left running alongside it would double-answer.
+   */
+  narrowCapabilityResponder(): void {
+    this.capabilityResponder.setScope("osc-colors");
+    this.deferCapabilityReplies = true;
+  }
+
+  /**
+   * Reverses `narrowCapabilityResponder`. A `TerminalFrameSource` that has
+   * latched and exhausted its rebuild budget, found no geometry to rebuild
+   * against, or fallen back to a plain `TerminalScreen` (at spawn or on a
+   * rebuild) leaves no parser-boundary responder running — this session's own
+   * byte-level one is the only one there is again, at every scope it used to
+   * cover, or DA1/CPR/DECRQM/Kitty go unanswered for the rest of the run. See
+   * `TerminalManager.wireFrameQueries` and `.ensureLiveScreen` for the call
+   * sites. Flushes anything still held from while narrowed, so a reply that
+   * arrived just before the switch is not stranded.
+   */
+  widenCapabilityResponder(): void {
+    this.capabilityResponder.setScope("full");
+    this.deferCapabilityReplies = false;
+    this.flushCapabilityReplies();
+  }
+
+  /**
+   * Writes every OSC 10/11/12 reply queued since the last flush, in the order
+   * they were queued. Called from the frame source's own `onParsed` — the
+   * same parser-completion boundary its DA1/CPR/DECRQM replies fire from — so
+   * a batch's OSC replies leave no earlier than everything the parser already
+   * answered for that same batch. See `deferCapabilityReplies`.
+   */
+  flushCapabilityReplies(): void {
+    if (this.pendingCapabilityReplies.length === 0) return;
+    const data = this.pendingCapabilityReplies.join("");
+    this.pendingCapabilityReplies.length = 0;
+    this.write(data);
+  }
 
   private respondToCapabilityQueries(data: string): void {
+    if (this.deferCapabilityReplies) return;
     const replies = this.capabilityResponder.feed(data);
     if (replies === "") return;
+    if (this.deferCapabilityReplies) {
+      this.pendingCapabilityReplies.push(replies);
+      return;
+    }
     // Through the queue like every other writer: a reply written raw would be the one
     // thing that can land BETWEEN an injected line and its deferred CR, which is the
     // interleave `pty-submit.ts` exists to make impossible. It costs these replies
     // nothing in the case that matters — the queue is a synchronous pass-through while
-    // no submit is in flight, which is the whole startup burst these queries arrive in —
-    // and query protocols are FIFO, an order the queue preserves.
+    // no submit is in flight, which is the whole startup burst these queries arrive in.
     this.write(replies);
   }
 
@@ -1177,9 +1125,10 @@ export class TerminalSession {
    * (CTRL_BREAK to its pid answers ERROR_INVALID_PARAMETER), and the
    * AttachConsole + group-0 route reported success and delivered nothing, twice,
    * including against a non-ConPTY control child. What DOES arrive is a
-   * KEYSTROKE: a raw-mode reader receives 0x03 verbatim, a cooked-mode one
-   * receives nothing at all. That asymmetry is why only agent PTYs are asked —
-   * a build tool in a service or setup PTY could not see this if we sent it.
+   * KEYSTROKE: a raw-mode reader receives 0x03 verbatim. In cooked mode the
+   * console may handle Ctrl-C itself and terminate the process instead of
+   * delivering input, so the ask is reserved for agent PTYs whose TUI can
+   * interpret it as a request to leave.
    */
   private askToExit(pty: IPty): void {
     if (process.platform !== "win32") {

@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
-import { agentSpec } from "./agents/registry";
-import type { ResumableArgs } from "./agents/types";
+import { agentSpec } from "./agent-runtime";
+import type { ResumableArgs, AgentSpec } from "antgrid-agents/contracts";
 
 /**
  * Argv appended to a tool's base launch args to resume a specific agent-native
@@ -13,7 +13,7 @@ import type { ResumableArgs } from "./agents/types";
  * ordering (globals → subcommand) is preserved.
  */
 export function resumeArgv(tool: string, agentSessionId: string): string[] {
-  return agentSpec(tool)?.resume(agentSessionId) ?? [];
+  return agentSpec(tool)?.cli?.resume?.(agentSessionId) ?? [];
 }
 
 /**
@@ -35,17 +35,15 @@ export function sessionResumable(args: {
   tool: string;
   agentSessionId: string;
   agentTranscriptPath?: string;
-  codexHome?: string;
-  copilotHome?: string;
-}): boolean {
+  adapterOptions?: Record<string, Record<string, unknown>>;
+}, get: (id: string) => AgentSpec | undefined = agentSpec): boolean {
   const forSpec: ResumableArgs = {
+    ...args.adapterOptions?.[args.tool],
     agentSessionId: args.agentSessionId,
     transcriptPath: args.agentTranscriptPath,
-    codexHome: args.codexHome,
-    copilotHome: args.copilotHome,
   };
   if (forSpec.transcriptPath) return existsSync(forSpec.transcriptPath);
-  return agentSpec(args.tool)?.resumable?.(forSpec) ?? true;
+  return get(args.tool)?.resumable?.(forSpec) ?? true;
 }
 
 /**
@@ -67,14 +65,12 @@ export function sessionResumable(args: {
 export function agentSessionGone(args: {
   tool: string;
   agentSessionId: string;
-  codexHome?: string;
-  copilotHome?: string;
-}): boolean {
-  const spec = agentSpec(args.tool);
+  adapterOptions?: Record<string, Record<string, unknown>>;
+}, get: (id: string) => AgentSpec | undefined = agentSpec): boolean {
+  const spec = get(args.tool);
   if (!spec?.sessionStoreIsAuthoritative) return false;
   return spec.resumable?.({
+    ...args.adapterOptions?.[args.tool],
     agentSessionId: args.agentSessionId,
-    codexHome: args.codexHome,
-    copilotHome: args.copilotHome,
   }) === false;
 }

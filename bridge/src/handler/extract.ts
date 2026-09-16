@@ -10,7 +10,7 @@
 import { z } from "zod";
 import { clip, isTerminalStatus, oneLine, type InstructionItem } from "./backlog";
 import { extractJsonObject } from "./json-extract";
-import { unwrapEnvelope } from "../agents/usage-envelope";
+import { unwrapEnvelope } from "antgrid-agents/usage-envelope";
 
 // An item is one thing the user asked for, in their own words — a line, not a
 // document. MAX_BACKLOG_ITEMS bounds how MANY items renderBacklog interpolates
@@ -142,12 +142,14 @@ export function buildExtractPrompt(text: string, backlog: InstructionItem[] = []
     `- Emit at most ${MAX_ITEMS} items. If the user asked for one thing, one item is the right answer.`,
     `- Keep each item's \`text\` (and \`condition\`) under ${MAX_ITEM_CHARS} characters. Quote the user; do not restate them at length.`,
     "",
-    "DEPENDENCIES — the default is NONE:",
-    '- Emit `dependsOn` ONLY when the instruction contains an explicit ordering word: "after", "then", "once X is done", "before", "when X is finished".',
-    '- "and" is NOT an ordering word, and neither is the order the items happen to appear in.',
+    "DEPENDENCIES — the default is NONE, and getting one wrong is expensive:",
+    "- Emit `dependsOn` ONLY when the user said the second thing CANNOT START until the first is finished. The test: would the sentence still be true with the two in the other order? If yes, there is no dependency.",
+    '- Narrating the order of work is NOT a dependency. "then", "next", "after that", "finally", and the order the items happen to appear in, are how people list things — not how they gate them.',
+    '- "Add a pricing page. Then add an FAQ section. Finally run the production build." → THREE items, NONE depending on the others. The user listed them; they did not gate them.',
+    '- "run the tests after you update the docs" → the tests item depends on the docs item: running them before the docs exist is not what was asked for.',
+    '- "once the migration is done, deploy" → the deploy item depends on the migration item.',
     '- "update the docs and run the tests" → two items, NEITHER depending on the other.',
-    '- "run the tests after you update the docs" → the tests item depends on the docs item.',
-    "- A dependency you invent silently blocks work the user wanted done; a dependency you omit only means the work is not made to wait. When the text gives no signal, omit it.",
+    "- A dependency you invent marks work the user asked for as `blocked`, and nothing in this session can take it back — only the user can, by hand, in the app. A dependency you omit only means the work is not made to wait. When in doubt, omit it.",
     "",
     "REFS:",
     "- `ref` is a short label you invent for THIS response only, so one item can name another in `dependsOn`. It is discarded afterwards and is not an identifier of anything.",
@@ -155,7 +157,7 @@ export function buildExtractPrompt(text: string, backlog: InstructionItem[] = []
     "",
     "CONDITIONS:",
     '- `condition` holds what the user made an item conditional on: "if the build is red, file an issue" is one item, text "file an issue", condition "the build is red".',
-    '- A condition is not a dependency: use `condition` for "if", `dependsOn` for "after" and "then".',
+    '- A condition is not a dependency. `condition` is for "if" — something that may or may not turn out to be true. `dependsOn` is for work that cannot begin until other work on this same list has finished.',
     "",
     ...(amendable ? [
       "TAKING SOMETHING BACK:",
