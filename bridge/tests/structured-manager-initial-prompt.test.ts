@@ -6,7 +6,7 @@ function makeFakeDriver(overrides: Partial<StructuredDriver> = {}): StructuredDr
   const prompts: string[] = [];
   return {
     prompts,
-    start: async () => "agent-native-id",
+    start: async () => {},
     prompt: async (text: string) => { prompts.push(text); },
     cancel: async () => false,
     compact: async () => {},

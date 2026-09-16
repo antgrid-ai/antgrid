@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { opencodeResumeReplay } from "../src/agents/opencode/resume-replay";
+import { opencodeResumeReplay } from "../../packages/antgrid-agents/src/agents/opencode/resume-replay";
 
 // Message history shape mirrors client.session.messages: [{ info, parts }].
 const history = [

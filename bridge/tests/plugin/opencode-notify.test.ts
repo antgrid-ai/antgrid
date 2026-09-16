@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { AntgridSessionNamer } from "../../plugin/opencode/plugin";
+import { AntgridSessionNamer } from "../../../packages/antgrid-agents/assets/opencode/plugin";
 
 /** Port 0 lets the OS pick: a fixed port collides with whatever else the suite
  *  is listening on, and the loser fails to bind rather than failing an assert. */
@@ -65,4 +65,22 @@ test("a missing terminal id still notifies, without the field", async () => {
   const notify = hits.find((h) => h.path === "/notify");
   expect(notify).toBeDefined();
   expect(JSON.parse(notify!.body)).toEqual({ type: "error" });
+});
+
+test("native runtime posts carry the launching run ID", async () => {
+  const previous = process.env.ANTGRID_RUN_ID;
+  const { hits, server } = collector();
+  process.env.ANTGRID_API_PORT = String(server.port);
+  process.env.ANTGRID_TERMINAL_ID = "t1";
+  process.env.ANTGRID_RUN_ID = "run-2";
+  try {
+    const plugin = await AntgridSessionNamer({} as any);
+    await plugin.event!({ event: { type: "session.idle", properties: {} } } as any);
+    expect(hits).toHaveLength(2);
+    for (const hit of hits) expect(JSON.parse(hit.body).runId).toBe("run-2");
+  } finally {
+    server.stop(true);
+    if (previous === undefined) delete process.env.ANTGRID_RUN_ID;
+    else process.env.ANTGRID_RUN_ID = previous;
+  }
 });

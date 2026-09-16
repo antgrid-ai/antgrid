@@ -6,7 +6,7 @@ import { logger } from "./logger";
 import { resolveAbDir } from "./antgrid-dir";
 const log = logger.child({ component: "api-server" });
 import { createMessage, type AbMessage } from "./protocol";
-import { AGENTS, BY_HOOK_NAME } from "./agents/registry";
+import { AGENTS, BY_HOOK_NAME } from "./agent-runtime";
 import type { TerminalManager } from "./terminal-manager";
 import type { AbConfig } from "./config";
 import type { ProjectInfo } from "./file-watcher";
@@ -28,6 +28,7 @@ export interface CallerCheckout {
 }
 
 export interface AgentContext {
+  acceptsHookRun?: (terminalId: string | undefined, runId: string | undefined) => boolean;
   manager: () => TerminalManager | null;
   config: () => AbConfig;
   project: () => ProjectInfo;
@@ -110,6 +111,7 @@ const VERSION = "0.1.0";
 const HOOK_AGENT_NAMES = Object.keys(BY_HOOK_NAME) as [string, ...string[]];
 
 export const NotifyBodySchema = z.object({
+  runId: z.string().min(1).optional(),
   // Mirrors the notificationType enum in protocol.ts — validated here so the
   // bridge never emits a schema-invalid message onto the E2E channel. A member
   // present there and missing here is not a compile error: the post is answered
@@ -130,6 +132,7 @@ export const NotifyBodySchema = z.object({
 });
 
 export const SessionTitleSchema = z.object({
+  runId: z.string().min(1).optional(),
   terminalId: z.string().min(1),
   sessionId: z.string().min(1),
   /** The message the user just submitted, from an agent with a PRE-turn hook
@@ -144,6 +147,7 @@ export const SessionTitleSchema = z.object({
 export type SessionTitleBody = z.infer<typeof SessionTitleSchema>;
 
 const HandlerEventSchema = z.object({
+  runId: z.string().min(1).optional(),
   terminalId: z.string().min(1),
   agent: z.string().optional(),
   event: z.enum([
@@ -223,7 +227,7 @@ function intParam(url: URL, name: string, fallback: number): number {
 }
 
 // Cursor merges hook tiers, so a machine with both the project-tier entries
-// (plugin installer) and the user-tier entries (spawn augmenter) runs two
+// (integration installer) and the user-tier entries (spawn augmenter) runs two
 // identical hook processes per event, and both POST /notify. Collapse exact
 // duplicates inside a short window so the phone gets one notification.
 const NOTIFY_DEDUP_WINDOW_MS = 5_000;
@@ -392,6 +396,7 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
         }
         const parsed = NotifyBodySchema.safeParse(raw);
         if (!parsed.success) return json({ error: "Invalid body" }, 400);
+        if (ctx.acceptsHookRun?.(parsed.data.terminalId, parsed.data.runId) === false) return json({ ok: true, stale: true });
         // `awaiting_input` IS the notification hook's verdict that this is the
         // post-completion idle nudge — a live block classifies as
         // `permission_request` — so the type already carries the reading
@@ -438,6 +443,7 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
           const read = key ? AGENTS[key].notifyBodyFromTranscript : undefined;
           if (read) message = (await read(transcriptPath)) ?? undefined;
         }
+        if (ctx.acceptsHookRun?.(parsed.data.terminalId, parsed.data.runId) === false) return json({ ok: true, stale: true });
         // Read, don't resolve: the namer pipeline already owns this title, and it
         // comes from the transcript's HEAD while the body comes from its TAIL.
         // Stale on turn 1 only — /session-title races this post and resolves
@@ -462,17 +468,21 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
         // turn-end can't close it. Drained either way so the hook's POST doesn't
         // block on an unread body.
         let terminalId: string | undefined;
+        let runId: string | undefined;
         try {
-          const body = await req.json() as { terminalId?: unknown } | null;
+          const body = await req.json() as { terminalId?: unknown; runId?: unknown } | null;
           if (typeof body?.terminalId === "string") terminalId = body.terminalId;
+          if (typeof body?.runId === "string") runId = body.runId;
         } catch { /* empty/invalid body is fine */ }
+        if (ctx.acceptsHookRun?.(terminalId, runId) === false) return json({ ok: true, stale: true });
         ctx.onTurnStart?.(terminalId);
         return json({ ok: true });
       }
 
       if (req.method === "POST" && path === "/hook-alive") {
         try {
-          const body = await req.json() as { terminalId?: string };
+          const body = await req.json() as { terminalId?: string; runId?: string };
+          if (ctx.acceptsHookRun?.(body.terminalId, body.runId) === false) return json({ ok: true, stale: true });
           if (body.terminalId) ctx.onHookAlive?.(body.terminalId);
           return json({ ok: true });
         } catch {
@@ -489,6 +499,7 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
         }
         const parsed = SessionTitleSchema.safeParse(body);
         if (!parsed.success) return json({ error: "Invalid body" }, 400);
+        if (ctx.acceptsHookRun?.(parsed.data.terminalId, parsed.data.runId) === false) return json({ ok: true, stale: true });
         ctx.onSessionTitle?.(parsed.data);
         return json({ ok: true });
       }
@@ -498,6 +509,7 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
         try { body = await req.json(); } catch { return json({ error: "Invalid JSON body" }, 400); }
         const parsed = HandlerEventSchema.safeParse(body);
         if (!parsed.success) return json({ error: "Invalid body" }, 400);
+        if (ctx.acceptsHookRun?.(parsed.data.terminalId, parsed.data.runId) === false) return json({ ok: true, stale: true });
         // The agent's notification hook is stateless: it fires the identical
         // "waiting for your input" signal for a real mid-turn block and for its
         // idle nudge after the turn already ended. Only the host knows which,

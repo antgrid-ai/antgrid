@@ -94,7 +94,7 @@ app.*.map.json
 docs/superpowers/plans/
 docs/superpowers/specs/
 
-# Generated plugin configs (created by bridge/plugin/setup.ts).
+# Generated agent integration configs (created by bridge/integrations/setup.ts).
 # NOTE: .claude/settings.json and .mcp.json are intentionally TRACKED
 # (committed) so cloud sessions get enabledPlugins and the Dart MCP server at
 # clone time — nothing runs `npm run setup` there to generate them. The plugin

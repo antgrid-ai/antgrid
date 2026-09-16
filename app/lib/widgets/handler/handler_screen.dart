@@ -545,6 +545,15 @@ class _SessionCard extends StatelessWidget {
                   ),
                 ],
                 const SizedBox(height: AbTokens.space2),
+                if (session.observability != HandlerObservability.unsupported &&
+                    session.availability?.note != null)
+                  Text(
+                    session.availability!.note!,
+                    style: AbTokens.sansStyle(
+                      fontSize: AbTokens.fontXs,
+                      color: p.warning,
+                    ),
+                  ),
                 Text(
                   // A 1-tap arm legitimately has no goal until extraction
                   // resolves behind the handoff, so this is a normal state, and

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { TitleAttempts } from "../src/agents/title-attempts";
+import { TitleAttempts } from "../../packages/antgrid-agents/src/agents/title-attempts";
 
 const T = "term-1";
 const C = "conv-1";

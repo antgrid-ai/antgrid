@@ -14,10 +14,8 @@
     "qualify:terminal-frames": "bun run scripts/terminal-frame-qualify.ts"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "0.3.201",
     "@inquirer/prompts": "^8.4.2",
     "@modelcontextprotocol/sdk": "^1.12.1",
-    "@opencode-ai/sdk": "1.15.10",
     "@sentry/bun": "^10.70.0",
     "@xterm/addon-serialize": "^0.14.0",
     "@xterm/addon-unicode11": "0.9.0",
@@ -30,7 +28,8 @@
     "pino": "9.7.0",
     "yaml": "^2.8.2",
     "zod": "^4.3.6",
-    "@number0/iroh": "1.1.0"
+    "@number0/iroh": "1.1.0",
+    "antgrid-agents": "workspace:*"
   },
   "devDependencies": {
     "@types/bun": "^1.2.4",

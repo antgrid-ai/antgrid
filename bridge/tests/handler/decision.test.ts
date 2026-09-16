@@ -1,7 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import {
   HandlerDecisionSchema,
-  pickJudge,
+  pickJudge as selectJudge,
   buildDecidePrompt,
   buildRetryPrompt,
   buildShapeRetryPrompt,
@@ -10,6 +10,12 @@ import {
   MAX_BRIEF_CHARS,
   MAX_INSTRUCTIONS_CHARS,
 } from "../../src/handler/decision";
+function pickJudge(tool: string) {
+  const picked = selectJudge(tool);
+  if (!picked) return null;
+  if (!("cmd" in picked.command)) throw new Error("Expected a built-in CLI judge");
+  return { ...picked, command: picked.command };
+}
 // Typed rather than inline: the fixtures are what pin the two exported names,
 // since bun strips types and only the typecheck gate would notice them going.
 import type { DecisionAsk, DecisionAskOption } from "../../src/handler/decision";

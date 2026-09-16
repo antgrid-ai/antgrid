@@ -64,7 +64,7 @@ describe("setAgentSession persistence", () => {
     db.run("CREATE TABLE threads (id TEXT PRIMARY KEY)");
     db.query("INSERT INTO threads (id) VALUES (?)").run("real-thread");
     db.close();
-    const sm = mk(store, makeTm(), { codexHome: store });
+    const sm = mk(store, makeTm(), { adapterOptions: { codex: { codexHome: store } } });
     const s = sm.create("Codex", { tool: "codex" });
     sm.setAgentSession(s.id, "real-thread");
     sm.setAgentSession(s.id, "ephemeral-helper-thread");
@@ -82,7 +82,7 @@ describe("setAgentSession persistence", () => {
     db.run("CREATE TABLE threads (id TEXT PRIMARY KEY)");
     db.query("INSERT INTO threads (id) VALUES (?)").run("someone-elses-thread");
     db.close();
-    const sm = mk(store, makeTm(), { codexHome: store });
+    const sm = mk(store, makeTm(), { adapterOptions: { codex: { codexHome: store } } });
     const s = sm.create("Codex", { tool: "codex" });
     expect(sm.setAgentSession(s.id, "brand-new-thread")).toBe(true);
     expect((sm.get(s.id) as any).agentSessionId).toBe("brand-new-thread");
@@ -97,7 +97,7 @@ describe("setAgentSession persistence", () => {
     db.run("CREATE TABLE threads (id TEXT PRIMARY KEY)");
     db.query("INSERT INTO threads (id) VALUES (?)").run("real-thread");
     db.close();
-    const sm = mk(store, makeTm(), { codexHome: store });
+    const sm = mk(store, makeTm(), { adapterOptions: { codex: { codexHome: store } } });
     const s = sm.create("Codex", { tool: "codex" });
     expect(sm.setAgentSession(s.id, "real-thread")).toBe(true);
     expect(sm.setAgentSession(s.id, "real-thread")).toBe(true); // unchanged is still held
@@ -110,7 +110,7 @@ describe("setAgentSession persistence", () => {
   // new session with no identity at all.
   test("an unreadable codex store still accepts what the agent reports", () => {
     const store = newStore();
-    const sm = mk(store, makeTm(), { codexHome: join(store, "no-such-codex") });
+    const sm = mk(store, makeTm(), { adapterOptions: { codex: { codexHome: join(store, "no-such-codex") } } });
     const s = sm.create("Codex", { tool: "codex" });
     sm.setAgentSession(s.id, "thread-1");
     expect((sm.get(s.id) as any).agentSessionId).toBe("thread-1");
@@ -154,7 +154,7 @@ describe("start() resume wiring", () => {
     codexThreads(store, ["saved-thread"]);
     const tm = makeTm();
     const calls: Array<{ resumeId?: string }> = [];
-    const opts = { codexHome: store, onStartChat: (o: { resumeId?: string }) => calls.push(o) };
+    const opts = { adapterOptions: { codex: { codexHome: store } }, onStartChat: (o: { resumeId?: string }) => calls.push(o) };
     const sm = mk(store, tm, opts);
     const session = sm.create("Codex", { tool: "codex", mode });
     sm.setAgentSession(session.id, "saved-thread");
@@ -180,7 +180,7 @@ describe("start() resume wiring", () => {
     const threads = codexThreads(store, ["saved-thread"]);
     const tm = makeTm();
     const calls: Array<{ resumeId?: string }> = [];
-    const opts = { codexHome: store, onStartChat: (o: { resumeId?: string }) => calls.push(o) };
+    const opts = { adapterOptions: { codex: { codexHome: store } }, onStartChat: (o: { resumeId?: string }) => calls.push(o) };
     const sm = mk(store, tm, opts);
     const session = sm.create("Codex", { tool: "codex", mode });
     sm.setAgentSession(session.id, "saved-thread");
@@ -216,7 +216,7 @@ describe("start() resume wiring", () => {
   test("codex resume appends the subcommand AFTER the global -c flags", () => {
     const store = newStore();
     const tm = makeTm();
-    const sm = mk(store, tm, { codexHome: join(store, "no-such-codex") });
+    const sm = mk(store, tm, { adapterOptions: { codex: { codexHome: join(store, "no-such-codex") } } });
     const s = sm.create("Slot", { tool: "codex" });
     sm.setAgentSession(s.id, "uuid-1"); // no transcript path → codex preflight via codexHome
     sm.start(s.id);
@@ -262,7 +262,7 @@ describe("start() resume wiring", () => {
   test("codex resume subcommand lands AFTER per-session args in the folded path", () => {
     const store = newStore();
     const tm = makeTm();
-    const sm = mk(store, tm, { codexHome: join(store, "no-such-codex") });
+    const sm = mk(store, tm, { adapterOptions: { codex: { codexHome: join(store, "no-such-codex") } } });
     const s = sm.create("Slot", { tool: "codex", args: "--model gpt-5" });
     sm.setAgentSession(s.id, "uuid-1"); // no path → preflight via codexHome (null → optimistic)
     sm.start(s.id);

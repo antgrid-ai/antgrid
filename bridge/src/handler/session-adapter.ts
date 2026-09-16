@@ -1,4 +1,4 @@
-import type { CapCommand } from "../structured/chat-session";
+import type { CapCommand } from "antgrid-agents/structured/chat-session";
 
 // Transport seam: everything above this interface — goal + backlog, judge,
 // floors, runaway guard — is transport-agnostic. The PTY adapter writes to a

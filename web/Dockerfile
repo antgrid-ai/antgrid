@@ -7,8 +7,9 @@ COPY package.json bun.lock bunfig.toml ./
 
 # All workspace manifests must be present for bun to resolve the workspace graph
 COPY packages/antgrid-wire/package.json ./packages/antgrid-wire/
+COPY packages/antgrid-agents/package.json ./packages/antgrid-agents/
 COPY bridge/package.json ./bridge/
-COPY bridge/plugin/package.json ./bridge/plugin/
+COPY bridge/integrations/package.json ./bridge/integrations/
 COPY relay/package.json ./relay/
 COPY evals/package.json ./evals/
 COPY web/package.json ./web/

@@ -1,16 +1,10 @@
-// The bundled plugin assets are addressed by a path computed relative to a
-// source file, which is the one kind of breakage that leaves no trace: move the
-// file that computes it and the config still writes, the agent still spawns, and
-// the plugin named by that config simply never loads. These tests pin the anchor
-// against a path derived from THIS file, so they fail on the move rather than in
-// a user's session weeks later.
 import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { PLUGIN_ROOT, bundledPluginPath } from "../src/plugin-root";
-import { augmentAgentLaunch } from "../src/agent-launch-augmenter";
+import { materializeAgentAssets, bundledPluginPath } from "antgrid-agents/assets";
+import { augmentAgentLaunch } from "../src/agent-runtime";
 import type { HookCommand } from "../src/hook-command";
 
 const HOOK_COMMAND: HookCommand = { binary: "/opt/antgrid/antgrid-bridge", preargs: ["hook"] };
@@ -34,20 +28,14 @@ afterEach(() => {
 });
 
 describe("bundled plugin root", () => {
-  test("resolves to bridge/plugin no matter which src/ module asks", () => {
-    expect(PLUGIN_ROOT).toBe(join(import.meta.dir, "..", "plugin"));
-  });
-
-  test("hands back an asset that is actually on disk", () => {
-    const path = bundledPluginPath("opencode", "plugin.ts");
-    expect(path).toBe(join(import.meta.dir, "..", "plugin", "opencode", "plugin.ts"));
+  test("materializes a stable package asset outside the checkout", () => {
+    const dir = tmp();
+    const path = bundledPluginPath(dir, "opencode", "plugin.ts");
+    expect(path).toBe(join(materializeAgentAssets(dir), "opencode", "plugin.ts"));
     expect(existsSync(path)).toBe(true);
   });
-
-  test("throws on a missing asset instead of returning a path nobody can load", () => {
-    expect(() => bundledPluginPath("opencode", "not-shipped.ts")).toThrow(
-      /bundled plugin asset missing/,
-    );
+  test("rejects unknown assets", () => {
+    expect(() => bundledPluginPath(tmp(), "opencode", "not-shipped.ts")).toThrow(/Unknown bundled agent asset/);
   });
 });
 

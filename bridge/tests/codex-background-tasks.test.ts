@@ -1,6 +1,6 @@
 import { describe, it, expect } from "bun:test";
-import { CodexDriver, type CodexEndpoint } from "../src/agents/codex/chat-backend";
-import { mapThreadItem } from "../src/agents/codex/mapping";
+import { CodexDriver, type CodexEndpoint } from "../../packages/antgrid-agents/src/agents/codex/chat-backend";
+import { mapThreadItem } from "../../packages/antgrid-agents/src/agents/codex/mapping";
 import type { AbMessage } from "../src/protocol";
 
 // Minimal fake endpoint (same shape as codex-driver.test.ts's, kept local so

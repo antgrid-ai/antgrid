@@ -26,6 +26,7 @@ HandlerSessionState _session(
   int pendingEscalations = 0,
   String? parkKind,
   int? parkedUntil,
+  HandlerAvailability? availability,
   List<HandlerEscalation> escalations = const [],
 }) => HandlerSessionState(
   terminalId: terminalId,
@@ -37,6 +38,7 @@ HandlerSessionState _session(
   escalations: escalations,
   parkKind: parkKind,
   parkedUntil: parkedUntil,
+  availability: availability,
 );
 
 SessionEntry _entry(String id, {bool deleting = false}) => SessionEntry(
@@ -84,6 +86,37 @@ Future<void> _pump(
 }
 
 void main() {
+  testWidgets('temporary monitoring failure is distinct from unsupported', (
+    tester,
+  ) async {
+    await _pump(tester, {
+      't1': _session(
+        't1',
+        runState: HandlerRunState.watching,
+        availability: const HandlerAvailability(
+          HandlerAvailabilityState.unavailable,
+        ),
+      ),
+    });
+    expect(find.text('MONITORING UNAVAILABLE'), findsOneWidget);
+    expect(find.text('NOT WATCHED'), findsNothing);
+  });
+
+  testWidgets('unconfirmed integration waits for the agent signal', (
+    tester,
+  ) async {
+    await _pump(tester, {
+      't1': _session(
+        't1',
+        runState: HandlerRunState.watching,
+        availability: const HandlerAvailability(
+          HandlerAvailabilityState.unknown,
+        ),
+      ),
+    });
+    expect(find.text('WAITING FOR AGENT'), findsOneWidget);
+  });
+
   testWidgets('a parked session shows its wake time', (tester) async {
     final today = DateTime.now();
     final until = DateTime(today.year, today.month, today.day, 14, 5);
@@ -453,7 +486,10 @@ void main() {
           ),
         },
         focused: 't1',
-        escalations: [esc('t2', 0, urgency: 'high'), esc('t1', 0, at: 2)],
+        escalations: [
+          esc('t2', 0, urgency: 'high'),
+          esc('t1', 0, at: 2),
+        ],
         onReveal: () => revealed = true,
       );
 

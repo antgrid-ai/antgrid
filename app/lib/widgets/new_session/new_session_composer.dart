@@ -37,6 +37,7 @@ import '../../providers/new_session_start.dart';
 import '../../screens/upgrade_screen.dart';
 import '../../services/sessions_service.dart' show SessionOperationException;
 import '../../utils/platform_utils.dart';
+import '../../util/ab_log.dart';
 import '../../util/detached.dart';
 import '../ab_status_helpers.dart' show sessionRefusalCopy;
 import 'branch_menu.dart';
@@ -446,13 +447,18 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
           duration: const Duration(seconds: 8),
         );
       }
-    } catch (e) {
+    } catch (e, stack) {
       // A start the user stopped reports the cancel and nothing else: the
       // failure it raced is not an outcome they asked about.
       if (mounted && !_endedByCancel) {
+        AbLog.error(
+          'NewSessionComposer',
+          'session start failed',
+          fields: {'error': '$e', 'stack': '$stack'},
+        );
         showAbSnackBar(
           context,
-          'Failed to start session: $e',
+          'Couldn’t start the session. Check the selected agent and try again.',
           duration: const Duration(seconds: 8),
         );
       }
@@ -759,7 +765,7 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
                         readOnly: starting,
                         hintText: isCustom
                             ? 'Starts a terminal session — set the command in ⚙'
-                            : 'Describe a task or ask a question',
+                            : 'Describe a task or ask a question (optional)',
                         onChanged: (v) =>
                             ref.read(newSessionPromptProvider.notifier).set(v),
                       ),

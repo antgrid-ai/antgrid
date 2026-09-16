@@ -15,14 +15,33 @@ import {
 import "../modelwatch-log";
 import { killChildTree, stripInheritedCertOverrides } from "../terminal-session";
 import { detectInstalledTools } from "../tool-detector";
-import { AGENTS, agentSpec } from "./registry";
+import { AGENTS, agentSpec } from "../agent-runtime";
 import {
   pickHeadlessFrom,
-  type HeadlessCommand, type HeadlessNeed, type HeadlessReach,
+  type HeadlessImplementation as HeadlessCommand, type HeadlessNeed, type HeadlessReach,
   type HeadlessUsageCapture, type HeadlessUsageReading, type HeadlessUsageTokens,
-} from "./types";
+} from "antgrid-agents/contracts";
+import { createAgentRunScope } from "antgrid-agents/contracts";
 
 const log = logger.child({ component: "headless" });
+
+export async function executeHeadless(command: HeadlessCommand, prompt: string, model: string | undefined, opts: Parameters<typeof runHeadless>[1]): Promise<HeadlessResult | null> {
+  if ("cmd" in command) return runHeadless(command.cmd(prompt, model), { ...opts, env: command.env, scratchEnv: command.scratchEnv, usage: command.usage });
+  const scope = createAgentRunScope({ runId: crypto.randomUUID(), isCurrent: () => true, emit: () => {} });
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; scope.cancel(new Error("Headless operation timed out")); }, opts.timeoutMs);
+  try {
+    const result = await scope.track(command.run({ prompt, model, cwd: opts.cwd, scope }));
+    if (opts.call) noteCall(() => ({ ...opts.call!, phase: "end", usage: result.usage, actualModel: result.actualModel }));
+    return { stdout: result.text, code: timedOut ? null : result.failed ? 1 : 0, timedOut, usage: result.usage, actualModel: result.actualModel, vendorFailed: result.failed };
+  } catch (error) {
+    log.warn({ error }, "Headless operation failed");
+    return null;
+  } finally {
+    clearTimeout(timer);
+    await scope.dispose();
+  }
+}
 
 /** The tightest entry this agent declares that still satisfies `need`. */
 export function pickHeadless(
@@ -429,11 +448,11 @@ function makeScratchHome(vars?: string[]):
  *     opencode install their Antgrid hooks GLOBALLY, so this spawn fires them
  *     too; both no-op without that variable, which is the only thing keeping a
  *     one-shot call from posting /session-title and /notify for a conversation
- *     that does not exist (bridge/plugin/antigravity/post-title.js). It does
- *     NOT silence the project-tier hooks `antgrid plugin install` writes —
+ *     that does not exist (`antgrid-agents/assets/antigravity/post-title.js`).
+ *     It does NOT silence the project-tier hooks the integration installer writes —
  *     those resolve the port from `$ANTGRID_DIR/api.port` when the env is
  *     absent, so a call made inside a project that has them still fires one
- *     (bridge/plugin/hooks/on-stop).
+ *     (`antgrid-agents/assets/hooks/on-stop`).
  */
 function headlessEnv(overrides?: Record<string, string>): Record<string, string> {
   const { ANTGRID_TERMINAL_ID: _drop, ...inherited } = process.env;

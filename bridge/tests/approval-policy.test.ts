@@ -2,8 +2,8 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { resolveApprovalPolicy } from "../src/agent-approval-policy";
-import { AGENTS } from "../src/agents/registry";
+import { resolveApprovalPolicy } from "../../packages/antgrid-agents/src/agent-approval-policy";
+import { AGENTS } from "../../packages/antgrid-agents/src/agents/registry";
 import { SessionManager } from "../src/session-manager";
 
 const stores: string[] = [];

@@ -8,6 +8,7 @@ import 'package:antgrid/widgets/transcript/rows/prompt_marker_row.dart';
 import 'package:antgrid/widgets/transcript/rows/subtask_row.dart';
 import 'package:antgrid/widgets/transcript/rows/unknown_row.dart';
 import 'package:antgrid/widgets/transcript/transcript_rows.dart';
+import 'package:antgrid/widgets/agent_error_presentation.dart';
 
 Future<void> _pump(WidgetTester tester, Widget child) {
   return tester.pumpWidget(MaterialApp(home: Scaffold(body: child)));
@@ -15,22 +16,43 @@ Future<void> _pump(WidgetTester tester, Widget child) {
 
 void main() {
   group('ErrorBanner', () {
-    testWidgets('shows category chip and message', (tester) async {
+    test('maps every known category and falls back for unknown values', () {
+      const cases = {
+        'rate_limited': 'Rate limit reached',
+        'quota_exceeded': 'Usage limit reached',
+        'auth': 'Sign-in required',
+        'network': 'Connection interrupted',
+        'context_overflow': 'Conversation too long',
+        'server_error': 'Agent service error',
+        'aborted': 'Request stopped',
+        'future_category': 'Agent error',
+      };
+      for (final entry in cases.entries) {
+        expect(agentErrorCategoryLabel(entry.key), entry.value);
+      }
+    });
+
+    testWidgets('shows friendly category, provider, and provider message', (
+      tester,
+    ) async {
       final data = ErrorRowData(
         turnId: 't1',
         error: const AgentError(
           category: 'network',
           message: 'connection lost',
           retryable: false,
+          provider: 'OpenAI',
         ),
       );
       await _pump(tester, ErrorBanner(data: data, onDismiss: () {}));
 
-      expect(find.text('NETWORK'), findsOneWidget);
+      expect(find.text('CONNECTION INTERRUPTED'), findsOneWidget);
+      expect(find.text('OPENAI'), findsOneWidget);
       expect(find.text('connection lost'), findsOneWidget);
+      expect(find.textContaining('try again'), findsNothing);
     });
 
-    testWidgets('shows retryable · retry in 30s when retryAfterMs is 30000', (
+    testWidgets('shows a retry delay without internal retryable wording', (
       tester,
     ) async {
       final data = ErrorRowData(
@@ -44,10 +66,11 @@ void main() {
       );
       await _pump(tester, ErrorBanner(data: data, onDismiss: () {}));
 
-      expect(find.text('retryable · retry in 30s'), findsOneWidget);
+      expect(find.text('Try again in 30 seconds.'), findsOneWidget);
+      expect(find.textContaining('retryable'), findsNothing);
     });
 
-    testWidgets('shows just retryable when retryAfterMs is null', (
+    testWidgets('offers another attempt when no retry delay is provided', (
       tester,
     ) async {
       final data = ErrorRowData(
@@ -60,7 +83,24 @@ void main() {
       );
       await _pump(tester, ErrorBanner(data: data, onDismiss: () {}));
 
-      expect(find.text('retryable'), findsOneWidget);
+      expect(find.text('You can try again.'), findsOneWidget);
+    });
+
+    testWidgets('an empty provider message does not add a detail row', (
+      tester,
+    ) async {
+      final data = ErrorRowData(
+        turnId: 't1',
+        error: const AgentError(
+          category: 'auth',
+          message: '',
+          retryable: false,
+        ),
+      );
+      await _pump(tester, ErrorBanner(data: data, onDismiss: () {}));
+
+      expect(find.text('SIGN-IN REQUIRED'), findsOneWidget);
+      expect(find.text(''), findsNothing);
     });
 
     testWidgets('onDismiss fires when the close icon button is tapped', (

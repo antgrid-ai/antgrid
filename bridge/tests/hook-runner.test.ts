@@ -43,6 +43,12 @@ function harness(opts: {
 }
 
 describe("Claude hooks", () => {
+  test("all posts from an invocation carry the launching run identity", async () => {
+    const h = harness({ agent: "claude", event: "user-prompt", stdin: JSON.stringify({ session_id: "native", prompt: "hello" }), env: { ANTGRID_RUN_ID: "launch-2" } });
+    await h.run();
+    expect(h.posts.length).toBeGreaterThan(0);
+    for (const post of h.posts) expect(post.body.runId).toBe("launch-2");
+  });
   test("session-start captures session id and transcript", async () => {
     const h = harness({
       agent: "claude",

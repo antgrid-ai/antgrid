@@ -398,7 +398,9 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      await tester.pump(const Duration(milliseconds: 150));
+      await tester.pump(const Duration(milliseconds: 160));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 120));
 
       final resizes = h.transport.sent
           .where((m) => m['type'] == 'terminal:resize')
@@ -472,7 +474,9 @@ void main() {
 
       await tester.pumpWidget(atWidth(300));
       await tester.pumpAndSettle();
-      await tester.pump(const Duration(milliseconds: 200));
+      await tester.pump(const Duration(milliseconds: 160));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 120));
       final colsAt300 = tab.ghostty.cols;
       final requestedAt300 =
           h.transport.sent
@@ -498,6 +502,145 @@ void main() {
       debugDefaultTargetPlatformOverride = null;
     },
   );
+
+  testWidgets(
+    'session switch during pane movement sends only the settled grid',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+      final h = await _makeService(addTearDown);
+      h.service.setClientId(_myClientId);
+      final first = _tab(
+        id: 'moving-first',
+        cols: 80,
+        driverClientId: _myClientId,
+      );
+      final second = _tab(
+        id: 'moving-second',
+        cols: 80,
+        driverClientId: _myClientId,
+      );
+      final width = ValueNotifier<double>(400);
+      final selected = ValueNotifier<TerminalTab>(first);
+      addTearDown(() {
+        width.dispose();
+        selected.dispose();
+      });
+
+      await tester.pumpWidget(
+        _wrap(
+          AnimatedBuilder(
+            animation: Listenable.merge([width, selected]),
+            builder: (context, _) => Align(
+              alignment: Alignment.topLeft,
+              child: SizedBox(
+                width: width.value,
+                height: 400,
+                child: TerminalViewWrapper(
+                  key: ValueKey(selected.value.terminalId),
+                  tab: selected.value,
+                  terminalService: h.service,
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(milliseconds: 160));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 120));
+      final firstCols =
+          h.transport.sent
+                  .where((m) => m['type'] == 'terminal:resize')
+                  .last['cols']
+              as int;
+      h.transport.sent.clear();
+
+      selected.value = second;
+      width.value = 300;
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 50));
+      width.value = 450;
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 50));
+      width.value = 600;
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 120));
+      expect(
+        h.transport.sent.where((m) => m['type'] == 'terminal:resize'),
+        isEmpty,
+        reason: 'an intermediate pane width must not reach the new PTY',
+      );
+
+      await tester.pump(const Duration(milliseconds: 160));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 120));
+      final resizes = h.transport.sent
+          .where((m) => m['type'] == 'terminal:resize')
+          .toList();
+      expect(resizes, hasLength(1));
+      expect(resizes.single['terminalId'], second.terminalId);
+      expect(resizes.single['cols'], greaterThan(firstCols));
+
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
+
+  testWidgets('pane movement cancels a resize still in the debounce window', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    final h = await _makeService(addTearDown);
+    h.service.setClientId(_myClientId);
+    final tab = _tab(id: 'pending-move', cols: 80, driverClientId: _myClientId);
+    final width = ValueNotifier<double>(400);
+    addTearDown(width.dispose);
+
+    await tester.pumpWidget(
+      _wrap(
+        AnimatedBuilder(
+          animation: width,
+          builder: (context, _) => Align(
+            alignment: Alignment.topLeft,
+            child: SizedBox(
+              width: width.value,
+              height: 400,
+              child: TerminalViewWrapper(tab: tab, terminalService: h.service),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.pump(const Duration(milliseconds: 160));
+    await tester.pump();
+    await tester.pump();
+    expect(
+      h.transport.sent.where((m) => m['type'] == 'terminal:resize'),
+      isEmpty,
+      reason: 'the first settled size is booked but still debouncing',
+    );
+
+    width.value = 600;
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 120));
+    expect(
+      h.transport.sent.where((m) => m['type'] == 'terminal:resize'),
+      isEmpty,
+      reason: 'the old booked size was superseded before it reached the wire',
+    );
+
+    await tester.pump(const Duration(milliseconds: 160));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 120));
+    final resizes = h.transport.sent
+        .where((m) => m['type'] == 'terminal:resize')
+        .toList();
+    expect(resizes, hasLength(1));
+    expect(resizes.single['terminalId'], tab.terminalId);
+
+    debugDefaultTargetPlatformOverride = null;
+  });
 
   testWidgets(
     'desktop autofocus alone does not claim an already-driven terminal',
@@ -702,6 +845,7 @@ void main() {
       await tester.pumpAndSettle();
       await tester.pump(const Duration(milliseconds: 300));
       await tester.pumpAndSettle();
+      await tester.pump(const Duration(milliseconds: 120));
     }
 
     await show();
@@ -763,6 +907,7 @@ void main() {
       await tester.pumpAndSettle();
       await tester.pump(const Duration(milliseconds: 300));
       await tester.pumpAndSettle();
+      await tester.pump(const Duration(milliseconds: 120));
     }
 
     await show(a);

@@ -1,6 +1,6 @@
 import { describe, it, expect, setSystemTime } from "bun:test";
-import { ClaudeDriver, prettyModelName } from "../src/agents/claude-code/chat-backend";
-import type { ClaudeQueryLike, PromptStreamController } from "../src/agents/claude-code/spawn";
+import { ClaudeDriver, prettyModelName } from "../../packages/antgrid-agents/src/agents/claude-code/chat-backend";
+import type { ClaudeQueryLike, PromptStreamController } from "../../packages/antgrid-agents/src/agents/claude-code/spawn";
 import type { AbMessage } from "../src/protocol";
 
 describe("prettyModelName", () => {
@@ -121,7 +121,7 @@ describe("ClaudeDriver.start", () => {
   it("returns immediately from start() and surfaces session_id via onSessionId after init", async () => {
     const { driver, fake, sessionIds } = makeDriver();
     const id = await driver.start();       // must NOT hang — no init emitted yet
-    expect(id).toBe("");
+    expect(id).toBeUndefined();
     fake.emit({ type: "system", subtype: "init", session_id: "sess-1", model: "claude-opus-4-8",
       slash_commands: ["code-review", "compact"], skills: ["code-review"] });
     await flush();
@@ -135,7 +135,7 @@ describe("ClaudeDriver.start", () => {
       driver.start(),
       new Promise<string>((_r, rej) => setTimeout(() => rej(new Error("start() hung awaiting init")), 1000)),
     ]);
-    expect(id).toBe("");
+    expect(id).toBeUndefined();
   });
 
   it("emits agent:capabilities with commands from the init chunk", async () => {
@@ -495,7 +495,7 @@ describe("ClaudeDriver resume", () => {
     const h = makeDriver();
     const id = await h.driver.start("old-sess");
     // start() resolves immediately, before any init is emitted.
-    expect(id).toBe("");
+    expect(id).toBeUndefined();
     // SDK reports a fresh id (resume silently failed / forked)
     h.fake.emit({ type: "system", subtype: "init", session_id: "new-sess", model: "m", slash_commands: [], skills: [] });
     await flush();

@@ -1,3 +1,5 @@
+import "./agent-host";
+import { agentRuntime } from "./agent-runtime";
 import { z } from "zod";
 import { VERSION } from "./version";
 import { join } from "node:path";
@@ -34,8 +36,8 @@ import { displayStartupBanner } from "./banner";
 import { generateEphemeralKeypair, type EphemeralKeypair } from "./key-exchange";
 import { loadConfig, findConfigFile, projectName, type AbConfig } from "./config";
 import { buildConfigFromBootstrap, consoleBootstrapIO, writeConfigYaml } from "./bootstrap";
-import { resolveAgent, listKnownTools, oscTitleForNaming, isOscTitleUnusable } from "./known-agents";
-import { augmentAgentLaunch } from "./agent-launch-augmenter";
+import { resolveAgent, listKnownTools, oscTitleForNaming, isOscTitleUnusable } from "./agent-runtime";
+import { augmentAgentLaunch } from "./agent-runtime";
 import { AGENT_REACH_DEFAULT } from "./agent-reach-policy";
 import { createSessionBusApi, type SessionBusApi } from "./session-bus/api";
 import type { SessionDirectory } from "./session-bus/directory";
@@ -53,7 +55,7 @@ import { resolveAbDir } from "./antgrid-dir";
 import { computeProjectId } from "./project-id";
 import { loadPairedPhones, type PairedPhonesStore } from "./paired-phones";
 import { ConfigController } from "./config-controller";
-import { detectInstalledTools } from "./tool-detector";
+import { detectAvailableTools } from "./tool-detector";
 import { modelwatch } from "./modelwatch";
 import { SessionManager, isDefaultSessionName, type DeleteSessionOptions } from "./session-manager";
 import { WorktreeError } from "./worktrees/worktree-manager";
@@ -64,12 +66,11 @@ import { CheckoutRuntimeRegistry } from "./worktrees/checkout-runtime-registry";
 import type { CheckoutRecord, CheckoutSetupProgress } from "./worktrees/checkout-types";
 import { CheckoutSetupRunner, setupTerminalId } from "./worktrees/checkout-setup";
 import { SessionNamer } from "./session-namer";
-import { antigravityCliHome } from "./agents/antigravity/title";
-import { AntigravityTitleWatcher } from "./agents/antigravity/title-watcher";
-import { resolveStructuredTitle } from "./agents/title-dispatch";
+import { resolveStructuredTitle } from "./agent-runtime";
 import { buildTitleContext, generateTitleFromContext, type TitleGeneration } from "./agents/title-generate";
-import { TitleAttempts, type TitleOutcome } from "./agents/title-attempts";
-import { agentSpec, BY_HOOK_NAME, handlerObservable } from "./agents/registry";
+import { TitleAttempts, type TitleOutcome } from "antgrid-agents/title-attempts";
+import { AGENTS, agentSpec, BY_HOOK_NAME, handlerObservable } from "./agent-runtime";
+import { DEFAULT_AGENT } from "antgrid-agents/defaults";
 import { OpenAgentPrompts } from "./agents/open-prompts";
 import { HandlerEngine, type HandlerEvent } from "./handler/engine";
 import { createEntitlementReader, type TierClaimSource } from "./entitlement";
@@ -206,6 +207,7 @@ export function buildChatSpawnAugment(
   slotId: string,
   apiPort: number | null,
   abDir?: string,
+  runId?: string,
 ): { args: string[]; env: Record<string, string> } {
   const aug = augmentAgentLaunch(tool, { abDir });
   return {
@@ -213,6 +215,7 @@ export function buildChatSpawnAugment(
     env: {
       ...aug.env,
       ANTGRID_TERMINAL_ID: slotId,
+      ...(runId ? { ANTGRID_RUN_ID: runId } : {}),
       ...(apiPort != null ? { ANTGRID_API_PORT: String(apiPort) } : {}),
     },
   };
@@ -638,7 +641,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     const knownTools = new Set(listKnownTools());
     let command: string | undefined;
     if (tool && knownTools.has(tool)) {
-      command = resolveAgent(tool).bin;
+      command = agentSpec(tool)?.cli?.bin ?? "";
     } else if (config.agent?.command) {
       command = config.agent.command;
     } else if (tool) {
@@ -667,7 +670,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   function agentSpecForConfig(source: AbConfig): { command: string; name: string; args?: string[]; workingDir?: string } {
     const tool = source.agent?.tool;
     let command = source.agent?.command;
-    if (tool && new Set(listKnownTools()).has(tool)) command = resolveAgent(tool).bin;
+    if (tool && new Set(listKnownTools()).has(tool)) command = agentSpec(tool)?.cli?.bin ?? "";
     if (!command && tool) command = tool;
     return {
       command: command ?? "",
@@ -702,7 +705,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   let manager: TerminalManager | null = null;
   let sessions: SessionManager | null = null;
   let namer: SessionNamer | null = null;
-  let antigravityTitleWatcher: AntigravityTitleWatcher | null = null;
+  let titleObservers: Array<{ stop(): void }> = [];
   // Title-generation budget per conversation, per terminal. The /session-title
   // post repeats every turn, so without this a session whose agent never names
   // itself would pay a model call per turn, forever. Keyed by agent session
@@ -938,13 +941,15 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     const { runtime, externalId } = terminalOwner(terminalId);
     const session = msg.type === "terminal:notification" ? sessions?.get(terminalId) : undefined;
     const tool = session?.tool ?? (session?.command ? undefined : runtime.config.agent?.tool);
-    if (session && msg.type === "terminal:notification" && tool === "codex") {
-      // Codex's TUI is configured to emit approvals only. Use the hook's wire
-      // channel so mobile push and the work-status reducer also see the prompt,
-      // without a second terminal notification producing a duplicate toast.
+    const normalized = tool && msg.type === "terminal:notification"
+      ? agentSpec(tool)?.normalizeTerminalNotification?.(msg)
+      : undefined;
+    if (session && normalized) {
+      // Route semantic requests through the shared channel so push and work
+      // status observe the same prompt without a duplicate terminal toast.
       sendFromRuntime(runtime, createMessage("notification:push", {
-        notificationType: "permission_request",
-        message: msg.body ?? msg.title ?? "Codex needs approval",
+        notificationType: normalized.type,
+        message: normalized.message,
         sessionId: session.id,
         sessionTitle: session.name,
         projectId: project.id,
@@ -2053,9 +2058,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         break;
       }
       case "config:detect-tools": {
-        sendFromRuntime(runtime, createMessage("config:detect-tools-result", {
-          tools: detectInstalledTools(),
-        }));
+        void detectAvailableTools({ refresh: true }).then((tools) => {
+          sendFromRuntime(runtime, createMessage("config:detect-tools-result", { tools }));
+        }).catch((error) => log.error("Agent discovery failed: %s", error));
         break;
       }
       case "session:list": {
@@ -2504,8 +2509,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     sessions = null;
     namer?.dispose();
     namer = null;
-    antigravityTitleWatcher?.stop();
-    antigravityTitleWatcher = null;
+    for (const observer of titleObservers) observer.stop();
+    titleObservers = [];
     // Awaited with the rest, not voided: a chat runtime's dispose now waits out
     // its own soft ask (codex exits on stdin EOF) before it terminates, so a
     // discarded promise lets `process.exit` land first and leaves the
@@ -2579,7 +2584,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // one. Observability must NOT: reporting the default agent's hooks for a
   // binary we cannot identify is the "armed and quiet" lie observability exists
   // to end, so it answers from the real key and unknown reads as unsupported.
-  const toolFor = (terminalId?: string): string => agentKeyFor(terminalId) ?? "claude-code";
+  const toolFor = (terminalId?: string): string => agentKeyFor(terminalId) ?? DEFAULT_AGENT;
   // Named rather than inline in the engine's options because session-bus
   // delivery submits through the SAME adapter: one path into a session for
   // both, so a chat session never has a line written into a PTY it does not
@@ -2619,9 +2624,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // place the queued capabilities (devcontainer, …) get added.
     entitlement: createEntitlementReader(opts.tierClaim),
     observable: (terminalId) => handlerObservable(
-      agentKeyFor(terminalId),
-      sessions?.get(terminalId)?.mode === "chat" ? "chat" : "terminal",
+      agentKeyFor(terminalId), sessions?.get(terminalId)?.mode === "chat" ? "chat" : "terminal",
     ),
+    availability: (terminalId) => sessions?.handlerAvailability(terminalId) ?? { state: "unknown" },
     agentSessionId: (terminalId) => sessions?.get(terminalId)?.agentSessionId,
     abDir,
     adapter: busAdapter,
@@ -3863,7 +3868,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
 
     manager = new TerminalManager((msg: AbMessage) => sendTerminalFrame(msg), {
       onTerminalOutput: (id, data) => terminalOwner(id).runtime.portDetector?.feed(id, data),
-      onTerminalExited: (id) => {
+      onTerminalExited: (id, runId) => {
         terminalOwner(id).runtime.portDetector?.removeTerminal(id);
         // A setup transcript belongs to no session, so its exit settles the run
         // and takes none of the session-scoped cleanup below. Its owner row
@@ -3877,7 +3882,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // is reused by a same-id restart — a stale entry would silence the new
         // run's every block.
         openAgentPrompts.clear(id);
-        sessions?.noteExited(id);
+        sessions?.noteExited(id, runId);
         // Drop buffered title state so a stale title from this run can't leak
         // into a restarted same-id session (start() reuses the entry id). A
         // mode flip is exempt for the same reason the handler's arming is: the
@@ -4041,7 +4046,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         maybeGenerateTitle(tool, { terminalId: sessionId, prompt: text })
           .catch((err) => log.error("Title generation failed: %s", err));
       },
-      driverFactory: (sessionId, tool, send, _resumeId, approvalPolicy = "default") => {
+      driverFactory: (sessionId, tool, send, _resumeId, approvalPolicy = "default", run) => {
         // Chat mode is gated on isChatCapableTool, which IS "the spec has a
         // driver" — so an unreachable tool here means the two disagreed.
         const driver = agentSpec(tool)?.driver;
@@ -4052,15 +4057,18 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         chatTools.set(sessionId, tool);
         const sessionCheckoutId = sessions?.get(sessionId)?.checkoutId ?? "main";
         const sessionRuntime = checkoutRuntimes.runtime(sessionCheckoutId) ?? mainRuntime;
-        return driver({
+        const hookRunId = sessions?.hookRunId(sessionId);
+        return agentRuntime.createDriver(tool, {
+          scope: run!.scope,
           sessionId,
           send,
           projectPath: sessionRuntime.checkout.path,
           projectId: project.id,
           approvalPolicy,
-          chatAugment: () => buildChatSpawnAugment(tool, sessionId, apiServer?.port ?? null, abDir),
-          onAgentSession: (agentSessionId) => sessions?.setAgentSession(sessionId, agentSessionId),
+          chatAugment: () => buildChatSpawnAugment(tool, sessionId, apiServer?.port ?? null, abDir, hookRunId),
+          onAgentSession: run?.onAgentSession ?? ((agentSessionId) => sessions?.setAgentSession(sessionId, agentSessionId)),
           onLifecycle: (evt) => {
+            if (run && !run.isCurrent()) return;
             handlerEngine.handleEvent({ terminalId: sessionId, ...evt })
               .catch((err) => logger.error("Handler lifecycle event failed: %s", err));
           },
@@ -4076,6 +4084,20 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     mainRuntime.started = true;
     await checkoutRuntimes.prepare(mainCheckout, config, agentSpecFromConfig(), mainRuntime);
     sessions = new SessionManager({
+      agentRuntime,
+      onAgentEvent: (sessionId, event) => {
+        switch (event.type) {
+          case "title": namer?.onStructuredTitle(sessionId, event.title, event.kind); break;
+          case "turn-start": opts.onTurnStart?.(sessionId); break;
+          case "notification":
+            sendNotifying(createMessage("notification:push", { sessionId, projectId: project.id, notificationType: event.notificationType, message: event.message }));
+            break;
+          case "handler":
+            handlerEngine.handleEvent({ terminalId: sessionId, event: event.event, resetsAt: event.resetsAt, errorClass: event.errorClass })
+              .catch((error) => log.error("Agent lifecycle event failed: %s", error));
+            break;
+        }
+      },
       projectId: project.id,
       storeDir: abDir,
       projectPath: project.path,
@@ -4149,12 +4171,18 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       },
       sendMessage: (msg) => sendAb(msg as AbMessage),
       sessionWorkStatusFor: opts.sessionWorkStatusFor,
-      onStartChat: (opts) => {
+      onStartChat: async (opts) => {
         // startChat rejects on a non-chat-capable tool or a driver spawn/start
         // failure. Catch it — otherwise it's a silent unhandled rejection and the
         // app sees a chat session that never comes alive with no reason. Surface
         // it as agent:error so the transcript can show the failure.
-        structured?.startChat(opts).catch((err) => {
+        const runId = sessions?.hookRunId(opts.sessionId);
+        try {
+          if (!structured) throw new Error("Chat runtime is unavailable");
+          const outcome = await structured.startChat({ ...opts, runId });
+          if (outcome === "cancelled") throw new Error("Agent startup cancelled");
+        } catch (err) {
+          if (!sessions?.acceptsHookRun(opts.sessionId, runId)) return;
           sendAb(createMessage("agent:error", {
             sessionId: opts.sessionId,
             error: {
@@ -4163,7 +4191,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
               retryable: false,
             },
           }));
-        });
+          throw err;
+        }
       },
       onStopChat: (id) => {
         // Mirrors onTerminalExited for PTYs: reclaim guard + pending state and
@@ -4188,23 +4217,17 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       applyAutoName: (id, name, rank) => sessions?.applyAutoName(id, name, rank),
     });
 
-    // agy fires no hook on a `/rename`, so it would not reach the sidebar until
-    // the next turn. Watch its command log and route the rename through the
-    // namer (same debounce + precedence as every other title signal). No-ops if
-    // agy isn't installed.
-    antigravityTitleWatcher = new AntigravityTitleWatcher(
-      antigravityCliHome(),
-      (conversationId, title) => {
+    titleObservers = Object.entries(AGENTS).flatMap(([tool, spec]) => {
+      const observer = spec.observeTitles?.((conversationId, title, kind) => {
         const slot = sessions?.findSlotByAgentSession(conversationId);
-        // Always the user's own name: the watcher reports only `/rename` now,
-        // never agy's generated name and never the first-message fallback.
-        if (slot) namer?.onStructuredTitle(slot, title, "manual");
-      },
-    );
-    antigravityTitleWatcher.start();
+        if (slot && agentKeyFor(slot) === tool) namer?.onStructuredTitle(slot, title, kind);
+      });
+      return observer ? [observer] : [];
+    });
 
     sessions.onChange(() => {
       if (!sessions) return;
+      handlerEngine.emitStatus();
       sendAb(createMessage("session:updated", {
         sessions: sessions.list(true),
       }));
@@ -4244,10 +4267,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       const agent = session.hookAliveProbeAgent;
       if (!agent) return;
       const id = session.terminalId;
+      hookAlivePinged.delete(id);
       setTimeout(() => {
         if (!hookAlivePinged.has(id)) {
           session.enableOscNotifications();
           session.enableOscTitle();
+          if (session.isRunning) sessions?.invalidateHookObservation(id, "Agent monitoring did not respond");
           log.warn(
             "%s hooks did not ping /hook-alive for %s — trust fingerprint " +
             "may have drifted; re-enabled OSC scanner (notifications + title) as fallback",
@@ -4627,6 +4652,15 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
 
   // Start local API server for MCP/hook integration (works in both modes)
   apiServer = startApiServer({
+    acceptsHookRun: (terminalId, runId) => {
+      if (!terminalId) return true;
+      const accepted = sessions?.acceptsHookRun(terminalId, runId) ?? true;
+      if (!accepted && runId === undefined) {
+        manager?.enableHookFallback(terminalId);
+        sessions?.invalidateHookObservation(terminalId);
+      }
+      return accepted;
+    },
     manager: () => manager,
     config: () => config,
     project: () => project,
@@ -4665,6 +4699,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // the reused title plugin's hooks still POST here for claude/codex chat
       // spawns — drop those or every turn_end fires twice.
       if (sessions?.get(body.terminalId)?.mode === "chat") return;
+      sessions?.confirmHookRun(body.terminalId, body.runId);
       // A prompt that is over is not a pause to judge, and the engine's event
       // union carries no member for it: it retires the row the `question`
       // raised, by the id the agent gave that one tool call.
@@ -4755,6 +4790,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         sessionId: body.sessionId,
         transcriptPath: body.transcriptPath,
       });
+      if (sessions?.acceptsHookRun(body.terminalId, body.runId) === false) return;
       // Apply the native read first either way: a first-message title beats
       // "Session 3" while generation is in flight, and it is what we keep if
       // generation fails. Pass the kind through — the first-message signal
@@ -4763,7 +4799,11 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       if (resolved) namer?.onStructuredTitle(body.terminalId, resolved.title, resolved.kind);
       if (!resolved || resolved.kind === "first-message") nameFromHook(resolved?.title);
     },
-    onHookAlive: (terminalId) => { hookAlivePinged.add(terminalId); },
+    onHookAlive: (terminalId) => {
+      hookAlivePinged.add(terminalId);
+      manager?.confirmHookAlive(terminalId);
+      sessions?.confirmHookRun(terminalId, sessions.hookRunId(terminalId));
+    },
     onTurnStart: (terminalId) => {
       if (terminalId) openAgentPrompts.clear(terminalId);
       opts.onTurnStart?.(terminalId);

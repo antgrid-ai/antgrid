@@ -2,7 +2,15 @@
   "name": "antgrid",
   "version": "0.1.0",
   "private": true,
-  "workspaces": ["packages/antgrid-wire", "bridge", "bridge/plugin", "relay", "web", "evals"],
+  "workspaces": [
+    "packages/antgrid-wire",
+    "bridge",
+    "bridge/integrations",
+    "relay",
+    "web",
+    "evals",
+    "packages/antgrid-agents"
+  ],
   "scripts": {
     "postinstall": "bun run --filter antgrid-web prisma:generate",
     "setup": "bun run scripts/dev-setup.ts",

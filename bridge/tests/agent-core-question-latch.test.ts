@@ -5,13 +5,14 @@
 // core proves those edges exist, and the latch is a mechanism that SILENCES
 // notifications: a missed clear costs a genuinely blocked agent every push for
 // the rest of its run. Modelled on handler/dismiss-wire.test.ts.
-import { test, expect, beforeEach, afterEach, afterAll } from "bun:test";
+import { test, expect, beforeEach, afterEach, afterAll, spyOn } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildAgentCore, type AgentCore } from "../src/agent-core";
 import { MessageBus } from "../src/message-bus";
 import { createMessage, type AbMessage } from "../src/protocol";
+import { StructuredAgentManager } from "../src/structured/structured-manager";
 
 let prevAbDir: string | undefined;
 let abDir: string;
@@ -218,11 +219,24 @@ test("a chat slot latches too — the hooks reporting the prompt are the same on
   expect(created.ok).toBe(true);
   const slot = created.session!.id;
 
-  expect((await post(port, "/handler-event", question(slot, "toolu_1"))).status).toBe(200);
-  sent.length = 0;
-  expect(await (await post(port, "/notify", permission(slot, "AskUserQuestion", 1))).json())
-    .toEqual({ ok: true, suppressed: true });
-  expect(pushes(sent)).toHaveLength(0);
+  // Admit a real session run without allocating a provider backend: callbacks
+  // from a created-but-stopped slot must be rejected before the latch sees them.
+  let runId: string | undefined;
+  const start = spyOn(StructuredAgentManager.prototype, "startChat").mockImplementation(async (options) => {
+    runId = options.runId;
+    return "ready";
+  });
+  try {
+    bus.dispatchInbound(createMessage("session:start", { requestId: "start-chat", sessionId: slot }), "control", "loopback");
+    expect(await waitFor(() => !!runId)).toBe(true);
+    expect((await post(port, "/handler-event", { ...question(slot, "toolu_1"), runId })).status).toBe(200);
+    sent.length = 0;
+    expect(await (await post(port, "/notify", { ...permission(slot, "AskUserQuestion", 1), runId })).json())
+      .toEqual({ ok: true, suppressed: true });
+    expect(pushes(sent)).toHaveLength(0);
+  } finally {
+    start.mockRestore();
+  }
 });
 
 test("the armed-slot mirror follows every handler:status the engine emits", async () => {
