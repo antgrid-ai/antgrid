@@ -50,7 +50,7 @@ import type { QueuedLine } from "./session-bus/delivery-queue";
 import { CHECKOUT_VARIABLE_MESSAGE_TYPES, createMessage, HandlerAnswerWire, HandlerConfigureWire, HandlerDismissWire, HandlerInstructWire, HandlerUndoWire, PREVIEW_CHANNEL_MESSAGE_TYPES, type AbMessage, type RpcRequest, type SessionEntry, type WorkStatus } from "./protocol";
 import { parseTunnelMessage } from "./tunnel-protocol";
 import { startApiServer, type ApiServerHandle } from "./api-server";
-import { MessageBus, clientKeyOf, type ClientKey, type InboundSource } from "./message-bus";
+import { MessageBus, clientKeyOf, type Channel, type ClientKey, type InboundSource } from "./message-bus";
 import { resolveAbDir } from "./antgrid-dir";
 import { computeProjectId } from "./project-id";
 import { loadPairedPhones, type PairedPhonesStore } from "./paired-phones";
@@ -295,11 +295,18 @@ export interface AgentCore {
    *  so every question that used to be asked of "the" phone is asked of the
    *  device the frame came from.
    *
-   *  Its PRESENCE is also the remote-vs-local signal the mobile-access gate
-   *  reads: a wired provider means this core has a relay transport at all, so a
-   *  relay-origin frame rides the machine switch. Local mode never sets it and
-   *  the gate is skipped — the loopback socket + token is that trust boundary.
-   *  Pass `null` to clear it when the transport detaches. */
+   *  Wiring it for the first time also latches this core as relay-attached, and
+   *  that latch is STICKY: clearing the provider on detach does not undo it.
+   *  Two facts live here and must stay apart — whether this core faces the
+   *  relay at all (the latch, which is what `remoteFrameAllowed` reads) and what
+   *  one device may do (the lookup's return value). Reading the lookup's
+   *  PRESENCE for the first question hands a relay frame the local-core
+   *  carve-out the moment a provider is cleared on a warm core, while reading
+   *  its absence as "unknown device" refuses that same frame one gate later; a
+   *  miss on a latched core is a reportable fault, never a capability the
+   *  device failed to declare.
+   *
+   *  Pass `null` to clear the lookup when the transport detaches. */
   setPeerSessionProvider(fn: ((peerId: string) => PeerSessionView | null) | null): void;
   /** Every app session on this core's transport, for the questions that must be
    *  answered about ALL attached devices rather than the one that asked. Kept
@@ -543,6 +550,45 @@ const GIT_POLL_BASE_MS = 10_000;
  *  that a fan-out of arrivals is one push, narrow enough that a sheet open on
  *  that mailbox still re-reads while its reader is looking at it. */
 const BUS_ARRIVED_COALESCE_MS = 100;
+
+/** Whether a refused inbound verb must be answered on `session:result` rather
+ *  than `control:result`.
+ *
+ *  A reply only ends a wait if the caller is listening for it. `sessions_service.dart`
+ *  completes every pending session mutation off `session:result` + `requestId`
+ *  (`_pendingCreates`, `_pendingRefusableMutations`, `_pendingDeletes`,
+ *  `_pendingModeChanges`, `_pendingMutations`); its `control:result` handling is
+ *  a separate, uncorrelated surface, so a session verb answered there times out
+ *  anyway. Derived from the verb's shape rather than listed, so a new session
+ *  verb is covered by construction.
+ *
+ *  `session:list` is excluded on purpose: `session:list:result` carries only
+ *  `{requestId, sessions[]}`, with nowhere to put a refusal, so the only frame
+ *  available would report an empty session list — a project that looks empty
+ *  rather than refused. It keeps the uncorrelated `control:result`.
+ *  `session:focus` carries no `requestId`, and nothing awaits it. Both are
+ *  pinned in `agent-core-checkout-routing.test.ts`. */
+function answersOnSessionResult(msg: AbMessage): msg is AbMessage & { requestId: string } {
+  return msg.type.startsWith("session:")
+    && msg.type !== "session:list"
+    && typeof (msg as { requestId?: unknown }).requestId === "string";
+}
+
+/** One notice per (device, refusal) per cooldown for the two checkout-routing
+ *  refusal surfaces nothing correlates — the log line and a bare
+ *  `control:result`. A refused device keeps sending at keystroke rate
+ *  (`terminal:input`, `terminal:ack`), so both would otherwise fire once per
+ *  frame. Replies keyed to a `requestId` are never throttled: each ends one
+ *  specific wait. Same shape as the mux's `noticeDue`. */
+const CHECKOUT_REFUSAL_NOTICE_MS = 5_000;
+const CHECKOUT_REFUSAL_NOTICE_TTL_MS = 60_000;
+
+/** A settled refusal carries copy for the app; the transient one is dropped so
+ *  the app's own retry can heal it, and so carries none — see
+ *  `checkoutRoutingRefusal`. */
+type CheckoutRoutingRefusal =
+  | { code: "CHECKOUT_ROUTING_REQUIRED" | "CHECKOUT_ROUTING_UNAVAILABLE"; message: string; detail: string }
+  | { code: "CHECKOUT_ROUTING_PENDING"; detail: string };
 
 export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<AgentCore> {
   // The interactive bootstrap (`consoleBootstrapIO` → @inquirer/prompts) reads
@@ -987,8 +1033,15 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // Wired by the remote/promotion transports; unset (null) in local mode, where
   // there is no relay transport at all.
   let peerSessionProvider: ((peerId: string) => PeerSessionView | null) | null = null;
+  // Whether this core has EVER faced the relay. Sticky on purpose: a promotion
+  // handle's stop() and the wizard stream's detach both null the provider while
+  // leaving the core warm on its bus, and a core that then read itself as local
+  // would hand a relay-origin frame the loopback carve-out — ungated by the
+  // machine switch. A core that has faced the relay once stays gated for life.
+  let relayEverAttached = false;
   function setPeerSessionProvider(fn: ((peerId: string) => PeerSessionView | null) | null) {
     peerSessionProvider = fn;
+    if (fn) relayEverAttached = true;
   }
   // Every app session on the transport, for the questions about ALL of them.
   let establishedPeersProvider: (() => PeerSessionView[]) | null = null;
@@ -1021,13 +1074,13 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // drive this project only while the machine is mobile-reachable. A LOOPBACK
   // frame is never gated: local control's trust boundary is the loopback socket
   // + token, and the desktop must keep driving its own machine with mobile
-  // access off. The skip for a core with NO relay transport wired is the same
+  // access off. The skip for a core that has never faced the relay is the same
   // carve-out one step out — a local/bare/test core answers to no switch — and
   // is what the old "no phone pubkey right now" test always meant. Fail-closed
   // otherwise: an unwired host provider reads as disabled.
   function remoteFrameAllowed(source: InboundSource): boolean {
     if (source === "loopback") return true;
-    if (!peerSessionProvider) return true;
+    if (!relayEverAttached) return true;
     return remoteAccessEnabled();
   }
 
@@ -1056,17 +1109,161 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     }
     if (msg.contextId === msg.to.sessionId) return true;
     if (source === "loopback") return true;
-    if (!peerSessionProvider) return true;
+    if (!relayEverAttached) return true;
     return agentReachEnabled();
   }
 
-  // Fail-closed per device: a frame whose session has not declared the
-  // capability is refused while a sibling that has declared it is served. A
-  // brand-new device mid-handshake resolves to no session and so reads false,
-  // which is the direction this guard has to fail in.
-  function peerCanRouteCheckouts(peerId: string | undefined): boolean {
-    if (!peerId) return false;
-    return peerSessionProvider?.(peerId)?.checkoutRouting === true;
+  /** Why a frame may not address this project's checkouts, or `null` to admit
+   *  it. A reason rather than a boolean because the caller answers the app, and
+   *  the refusals want different answers.
+   *
+   *  This is the core's own copy of a gate the stream mux applies first
+   *  (`mayAcceptFrom`, wired in `project-core.ts`): on the real transport a
+   *  device that never declared `checkoutRouting`, or that resolves to no
+   *  session, is refused there and never reaches this bus. What remains for the
+   *  arms here is a frame the mux admitted that this core still cannot place —
+   *  its per-device lookup gone, or a transport that threaded no peer id — plus
+   *  the per-device answer restated for a bus attached without a mux.
+   *
+   *  `CHECKOUT_ROUTING_PENDING` is the one arm that is DROPPED rather than
+   *  answered. A peer id resolves to no session while a device is mid-handshake,
+   *  and again between an E2E session dying and the next one establishing; the
+   *  app's own retry heals both, and an answer would not — `_pullSnapshot`
+   *  (`machine_session.dart`) settles on any code but `E_TIMEOUT` — so a refusal
+   *  would turn a race that fixes itself into a workspace telling the user to
+   *  reconnect.
+   *
+   *  Fail-closed per device: a frame whose session has not declared the
+   *  capability is refused while a sibling that has declared it is served. */
+  function checkoutRoutingRefusal(peerId: string | undefined): CheckoutRoutingRefusal | null {
+    // Never faced the relay: no per-device session to consult and no remote app
+    // on the other end. The same carve-out `remoteFrameAllowed` makes, in the
+    // same direction.
+    if (!relayEverAttached) return null;
+    // A core that cannot answer for anyone is asked before the peer id, so this
+    // bridge's own inconsistency is never reported as a capability the device
+    // failed to declare.
+    if (!peerSessionProvider) {
+      return {
+        code: "CHECKOUT_ROUTING_UNAVAILABLE",
+        message: "This machine cannot route workspace traffic right now.",
+        detail: "core is relay-attached but its peer-session provider is unwired",
+      };
+    }
+    // Every production transport threads a peer id, so a missing one is a
+    // defect on this side of the wire — not something the app can reconnect
+    // away, which is why it is not REQUIRED with reconnect advice.
+    if (!peerId) {
+      return {
+        code: "CHECKOUT_ROUTING_UNAVAILABLE",
+        message: "This machine cannot route workspace traffic right now.",
+        detail: "frame carried no peer id",
+      };
+    }
+    const session = peerSessionProvider(peerId);
+    if (!session) {
+      return {
+        code: "CHECKOUT_ROUTING_PENDING",
+        detail: "no session for this peer id (transient — dropping so the app retries)",
+      };
+    }
+    if (session.checkoutRouting !== true) {
+      return {
+        code: "CHECKOUT_ROUTING_REQUIRED",
+        message: "Update the app to open a workspace with an isolated session.",
+        detail: "device did not declare checkoutRouting",
+      };
+    }
+    return null;
+  }
+
+  const refusalNoticeAt = new Map<string, number>();
+  function refusalNoticeDue(peerId: string | undefined, code: string): boolean {
+    const now = Date.now();
+    const key = `${peerId ?? "<none>"} ${code}`;
+    const last = refusalNoticeAt.get(key);
+    if (last !== undefined && now - last < CHECKOUT_REFUSAL_NOTICE_MS) return false;
+    for (const [k, at] of refusalNoticeAt) {
+      if (now - at >= CHECKOUT_REFUSAL_NOTICE_TTL_MS) refusalNoticeAt.delete(k);
+    }
+    refusalNoticeAt.set(key, now);
+    return true;
+  }
+
+  // UNAVAILABLE is this bridge's own inconsistency, which no reconnect clears,
+  // so it is the one arm that needs an operator's eye.
+  function logCheckoutRefusal(
+    action: string,
+    msgType: string,
+    refusal: CheckoutRoutingRefusal,
+    peerId: string | undefined,
+  ): void {
+    const line = `${action} %s: %s (project %s, peer %s, code %s)`;
+    const args = [msgType, refusal.detail, project.id, peerId ?? "<none>", refusal.code] as const;
+    if (refusal.code === "CHECKOUT_ROUTING_UNAVAILABLE") log.error(line, ...args);
+    else log.warn(line, ...args);
+  }
+
+  /** The checkout-routing gate for one inbound bus frame: true when the frame
+   *  must not proceed, having been logged and — for a settled refusal — answered
+   *  to the device that sent it. host-server.ts holds the rule: a rejected verb
+   *  returns `control:result {ok:false,error}`, never a silent drop. It matters
+   *  more here than anywhere, because `state.snapshot` is the only carrier of a
+   *  relay checkout's agent:status, so an unanswered pull reads as a dead
+   *  machine and retries for ~70s before giving up on frames it will never be
+   *  sent. */
+  function refuseCheckoutRouting(
+    bus: MessageBus,
+    msg: AbMessage,
+    channel: Channel,
+    source: InboundSource,
+    peerId: string | undefined,
+  ): boolean {
+    const refusal = checkoutRoutingRefusal(peerId);
+    if (!refusal) return false;
+    const due = refusalNoticeDue(peerId, refusal.code);
+    if (refusal.code === "CHECKOUT_ROUTING_PENDING") {
+      if (due) logCheckoutRefusal("Dropping inbound", msg.type, refusal, peerId);
+      return true;
+    }
+    if (due) logCheckoutRefusal("Refusing inbound", msg.type, refusal, peerId);
+    const error = { code: refusal.code, message: refusal.message };
+    // Addressed to the device that asked, never broadcast: the app writes a
+    // `session:result` error into its sessions state BEFORE matching the
+    // requestId (`sessions_service.dart`), so every other client would toast a
+    // refusal for a verb it never sent. Three carriers, because a refusal only
+    // ends a wait if it lands on the frame the caller is watching. An RPC answer
+    // rides the channel its request came in on, the way every other `response`
+    // here does; the other two are control-plane frames in every other emitter,
+    // and the refused frame may well have arrived on "preview", where a refusal
+    // would queue behind that channel's bulk.
+    if (msg.type === "request") {
+      bus.publishOnly(
+        createMessage("response", { requestId: msg.requestId, ok: false, error }),
+        channel, source, peerId,
+      );
+    } else if (answersOnSessionResult(msg)) {
+      bus.publishOnly(
+        createMessage("session:result", {
+          requestId: msg.requestId,
+          ok: false,
+          // Two fields, not the `{code, message}` object the other carriers
+          // take: `session:result` predates that shape and the app reads them
+          // apart.
+          error: refusal.message,
+          errorCode: refusal.code,
+        }),
+        "control", source, peerId,
+      );
+    } else if (due) {
+      // Nothing correlates a bare control:result, so it is a notice and shares
+      // the log line's cooldown rather than answering every keystroke.
+      bus.publishOnly(
+        createMessage("control:result", { ok: false, verb: msg.type, error }),
+        "control", source, peerId,
+      );
+    }
+    return true;
   }
 
   // Which app session a tunnel request came in on, keyed by the id its response
@@ -1375,9 +1572,15 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // Same per-device capability gate the bus dispatch applies, restated here
     // because this path bypasses the bus entirely: a tunnel proxies arbitrary
     // HTTP out of a checkout's dev server, so a session that may not address a
-    // checkout must not be answered with one's page either.
-    if (sessions?.hasIsolatedSessions() && !peerCanRouteCheckouts(peerId)) {
-      log.warn("Dropping tunnel %s: remote app lacks checkout routing (project %s)", msg.type, project.id);
+    // checkout must not be answered with one's page either. A drop, not a
+    // reply: the mux already answered a device it refused, and the arms that
+    // remain here are this bridge's own faults, which no tunnel error frame
+    // would help the preview recover from.
+    const tunnelRefusal = sessions?.hasIsolatedSessions() ? checkoutRoutingRefusal(peerId) : null;
+    if (tunnelRefusal) {
+      if (refusalNoticeDue(peerId, tunnelRefusal.code)) {
+        logCheckoutRefusal("Dropping tunnel", msg.type, tunnelRefusal, peerId);
+      }
       return;
     }
     const runtime = checkoutRuntimes.runtime(msg.checkoutId);
@@ -4919,8 +5122,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         );
         return;
       }
-      if (source !== "loopback" && sessions?.hasIsolatedSessions() && !peerCanRouteCheckouts(peerId)) {
-        log.warn("Dropping inbound %s: remote app lacks checkout routing (project %s)", msg.type, project.id);
+      if (
+        source !== "loopback" && sessions?.hasIsolatedSessions()
+        && refuseCheckoutRouting(bus, msg, channel, source, peerId)
+      ) {
         return;
       }
       if (!peerBusReachAllowed(msg, source)) {

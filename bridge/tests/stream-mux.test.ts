@@ -255,6 +255,57 @@ describe("StreamMux (unit, stub transport)", () => {
     expect(sent).toHaveLength(1);
   });
 
+  test("a refused request is also answered on its own requestId, unthrottled", () => {
+    // The addressed notice is uncorrelated and rate-limited, so on its own it
+    // ends no wait: the app's snapshot pull settles only on a `response` with
+    // its requestId, and an unanswered `state.snapshot` reads as a dead machine.
+    const { transport, sent, targets, peers } = makeTransport();
+    const mux = new StreamMux(transport);
+    peers.set("stale", peerView("stale", false));
+    const handle = mux.attach(new MessageBus(), { projectId: "p1", mayAcceptFrom: refuseIncapable });
+    const pull = (requestId: string) =>
+      JSON.stringify(createMessage("request", { requestId, method: "state.snapshot", params: {} }));
+
+    expect(mux.dispatchInbound(handle.streamId, pull("r1"), "control", "stale")).toBe(true);
+    expect(mux.dispatchInbound(handle.streamId, pull("r2"), "control", "stale")).toBe(true);
+
+    // One throttled notice, then one correlated answer per request.
+    const responses = sent.filter((s) => (s.msg as { type: string }).type === "response");
+    expect(sent.filter((s) => (s.msg as { type: string }).type === "control:result")).toHaveLength(1);
+    expect(responses).toEqual([
+      {
+        streamId: handle.streamId,
+        channel: "control",
+        msg: expect.objectContaining({
+          type: "response", requestId: "r1", ok: false,
+          error: { code: "UPDATE_REQUIRED", message: "update the app to use this project's isolated sessions" },
+        }),
+      },
+      {
+        streamId: handle.streamId,
+        channel: "control",
+        msg: expect.objectContaining({ type: "response", requestId: "r2", ok: false }),
+      },
+    ]);
+    expect(targets.every((t) => t?.kind === "peer" && t.peerId === "stale")).toBe(true);
+  });
+
+  test("a request from a peer that resolves to no session is refused but not answered", () => {
+    // Mid-handshake, a candidate's keys open the frame before the session is
+    // registered, so the gate sees no session at all. That is transient and
+    // the app's retry heals it; a correlated refusal would settle the pull for
+    // good. The notice still goes out, the `response` does not.
+    const { transport, sent } = makeTransport();
+    const mux = new StreamMux(transport);
+    const handle = mux.attach(new MessageBus(), { projectId: "p1", mayAcceptFrom: refuseIncapable });
+    const pull = JSON.stringify(createMessage("request", { requestId: "r1", method: "state.snapshot", params: {} }));
+
+    expect(mux.dispatchInbound(handle.streamId, pull, "control", "handshaking")).toBe(true);
+
+    expect(sent.filter((s) => (s.msg as { type: string }).type === "control:result")).toHaveLength(1);
+    expect(sent.filter((s) => (s.msg as { type: string }).type === "response")).toEqual([]);
+  });
+
   test("a refused session's tunnel frames never reach onTunnel", () => {
     // The tunnel route bypasses the bus entirely, which is why the per-device
     // gate had to sit ahead of both routes rather than inside the dispatch.
