@@ -33,7 +33,7 @@ const screen = {
   rows: 24,
   ansi: "\x1b[H\x1b[2Jhello",
   syncTimedOut: false,
-  history: { epoch: 0, firstRowId: 0, nextRowId: 12, status: "recording" as const },
+  history: { epoch: 0, firstRowId: 0, nextRowId: 12, status: "recording" as const, gapped: false },
 };
 
 const historyRow = {

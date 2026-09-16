@@ -120,6 +120,16 @@ class TerminalHistoryModel extends ChangeNotifier {
   /// scrollback that never arrives is worse than admitting there is none.
   bool get recording => _boundary?.status == 'recording';
 
+  /// Whether the archive has stopped being continuous: output the agent
+  /// dropped before parsing it. An archive that stopped accepting rows is
+  /// [recording] instead -- that loss is at an edge, not a hole in the middle.
+  ///
+  /// Read off the boundary rather than latched here, because the agent already
+  /// holds it for the epoch and restates it on every frame -- so a reconnect,
+  /// a resubscribe, or a reader opened long after the loss all see it, and a
+  /// history clear drops it with the epoch that owned it.
+  bool get gapped => _boundary?.gapped ?? false;
+
   /// Whether this run has archived anything, loaded or not.
   bool get hasHistory {
     final b = _boundary;
@@ -184,6 +194,7 @@ class TerminalHistoryModel extends ChangeNotifier {
     }
     final visiblyChanged =
         previous.status != next.status ||
+        previous.gapped != next.gapped ||
         (previous.nextRowId > previous.firstRowId) !=
             (next.nextRowId > next.firstRowId);
     if (visiblyChanged) notifyListeners();

@@ -2371,7 +2371,13 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           sendAbToItsChannel(createMessage("terminal:history:page", {
             checkoutId, terminalId: msg.terminalId, runId: msg.runId,
             attachmentId: msg.attachmentId, requestId: msg.requestId,
-            history: { epoch: msg.epoch, firstRowId: msg.beforeRowId, nextRowId: msg.beforeRowId, status: "disabled" },
+            // `gapped: false` is not a claim about the run's archive — this
+            // refuses a cursor into a run the caller does not own, so there is
+            // no archive here to describe. `expired` below is the whole answer.
+            history: {
+              epoch: msg.epoch, firstRowId: msg.beforeRowId, nextRowId: msg.beforeRowId,
+              status: "disabled", gapped: false,
+            },
             expired: true, beforeRowId: msg.beforeRowId, rows: [],
           }), client);
           break;

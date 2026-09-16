@@ -290,11 +290,26 @@ class TerminalHistoryBoundary {
   /// build; callers must treat an unrecognized value as not-recording.
   final String status;
 
+  /// Rows are missing from the MIDDLE of this epoch: output the agent dropped
+  /// before its parser saw it. An archive that stopped accepting rows is
+  /// [status] instead -- that loss is at an edge, where the rows simply stop.
+  ///
+  /// Not inferable from anything else here -- row ids stay contiguous across
+  /// the hole -- which is why the agent restates it on every boundary rather
+  /// than announcing it once. Sticky for the epoch, so it survives a reconnect
+  /// or a fresh subscribe; a new [epoch] is an archive started over and clears
+  /// it.
+  ///
+  /// Defaults false for an agent too old to send it, which is the same thing
+  /// that build meant by omitting it: nothing known to be lost.
+  final bool gapped;
+
   const TerminalHistoryBoundary({
     required this.epoch,
     required this.firstRowId,
     required this.nextRowId,
     required this.status,
+    this.gapped = false,
   });
 
   static TerminalHistoryBoundary? fromJson(Map<String, dynamic> json) {
@@ -313,6 +328,7 @@ class TerminalHistoryBoundary {
       firstRowId: firstRowId,
       nextRowId: nextRowId,
       status: status,
+      gapped: json['gapped'] == true,
     );
   }
 }
