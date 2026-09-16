@@ -157,14 +157,16 @@ describe("snapshot-only terminal prototype", () => {
     expect(delivery.pending).toBe(false);
   });
 
-  test("parser overload latches at feed and is raised at capture", () => {
+  test("parser overload is dropped at feed and never throws", () => {
     const host = source();
     // feed() is reached from the PTY flush timer, where a throw is an
     // uncaughtException that ends every terminal on the machine. An overload is
-    // a display failure, so it surfaces where a viewer owns it instead.
-    expect(() => host.feed("x".repeat(1_000_001))).not.toThrow();
+    // a burst the parser has not reached rather than damage, so it costs the
+    // refused chunk and leaves the run's display alone.
+    expect(() => host.feed("x".repeat(16_000_001))).not.toThrow();
     expect(() => host.feed("more")).not.toThrow();
-    expect(() => host.capture(0)).toThrow("backlog");
+    expect(host.failure).toBeUndefined();
+    expect(() => host.capture(0)).not.toThrow();
   });
 
   test("disk history retains lines skipped by every live frame, beyond the screen ring", async () => {

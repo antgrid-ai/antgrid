@@ -1093,8 +1093,15 @@ export class TerminalManager {
     const history = store.openRun(saved.runId);
     // A saved display is not PTY output and must never archive rows or replay
     // a history clear while reconstructing the stopped viewport.
+    // `noteGap` is a no-op rather than absent: replaying a saved screen loses
+    // nothing, and `TerminalFrameSource.archive` calls it from inside its own
+    // catch — a shim missing it would raise a TypeError out of the xterm parse
+    // loop and freeze the restored screen. `boundary` still forwards, so the
+    // stopped run's OWN gap reaches the app with the rest of its archive state:
+    // `gapped` is a column on the run, so the handle `openRun` rebuilt above
+    // carries it even though `disposeScreen` released the one that recorded it.
     const readOnlyHistory = {
-      runId: saved.runId, append: () => {}, clear: () => {},
+      runId: saved.runId, append: () => {}, clear: () => {}, noteGap: () => {},
       flush: () => history.flush(), boundary: () => history.boundary(),
     } as unknown as TerminalRunHistory;
     const source = new TerminalFrameSource(saved.frame?.cols ?? 80, saved.frame?.rows ?? 24, readOnlyHistory);

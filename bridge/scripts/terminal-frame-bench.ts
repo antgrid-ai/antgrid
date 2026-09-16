@@ -81,6 +81,17 @@ const MIN_SAMPLES_FOR_P95 = 20;
  *  what makes the raw baseline below priced the way the product actually sends
  *  it. Keep the two in lockstep. */
 const PTY_READ_BYTES = 4096;
+/** PTY reads in ONE uninterrupted drain, for the `drain` workload. bun-pty reads
+ *  in PTY_READ_BYTES units and its loop awaits only on an EMPTY read, so a guest
+ *  burst reaches the source as a run this long with nothing parsed in between —
+ *  the shape every other workload here cannot produce, because settling between
+ *  chunks is what lets the parser keep up. Sized at an ordinary build log rather
+ *  than at any limit: what the gate asks is whether a routine burst costs the
+ *  run its display, not where the ceiling is. A drain is atomic — the duration
+ *  window can only end between two of them — so a burst much longer than this
+ *  overshoots `--duration-ms` far enough that every rate in the report is one
+ *  sample. */
+const DRAIN_BURST_READS = 256;
 /** Legacy `terminal:output` coalescing window, mirrored from the same file. */
 const LEGACY_BATCH_INTERVAL_MS = 16;
 /** Repaint rate a fullscreen TUI drives itself at. The ACHIEVED rate is what
@@ -117,9 +128,9 @@ const GRIDS: Grid[] = [
   { name: "large", cols: 202, rows: 60 },
 ];
 
-type ContentKind = "idle" | "burst" | "tui" | "scrollback" | "evict";
+type ContentKind = "idle" | "burst" | "tui" | "scrollback" | "evict" | "drain";
 interface NamedWorkload { id: string; grid: Grid; content: ContentKind }
-const WORKLOADS: NamedWorkload[] = (["idle", "burst", "tui", "scrollback", "evict"] as const)
+const WORKLOADS: NamedWorkload[] = (["idle", "burst", "tui", "scrollback", "evict", "drain"] as const)
   .flatMap((content) => GRIDS.map((grid): NamedWorkload => ({ id: `${content}-${grid.name}`, grid, content })));
 
 /** A log-burst line: sustained output, no idle gap between chunks. */
@@ -195,7 +206,7 @@ class LegacyOutputBatcher {
 // four frames survived a full harness run reporting "all gates passed". Each
 // fault below deliberately breaks one property so the matching gate is SEEN to
 // fail; `--help` maps them.
-const FAULTS = ["no-ack", "idle-poke", "retire-mid", "fast-clock", "no-evict", "slow-page", "oversize"] as const;
+const FAULTS = ["no-ack", "idle-poke", "retire-mid", "fast-clock", "no-evict", "slow-page", "oversize", "flood"] as const;
 type Fault = (typeof FAULTS)[number];
 /** Enough to let the throttle admit roughly four times as many events per real
  *  second as the budget allows, while leaving TERMINAL_ACK_TIMEOUT_MS — scaled
@@ -223,6 +234,14 @@ let clockOrigin = 0;
 const capturedAt = new Map<number, number>();
 let slowPages = false;
 let forceOversize = false;
+let floodDrain = false;
+/** One chunk past `TerminalFrameSource`'s own backlog ceiling, for the `flood`
+ *  fault. That ceiling is private to source.ts on purpose — nothing outside it
+ *  may tune the drop — so it is pinned here as a literal and a change on either
+ *  side has to be a deliberate edit of both. Refused whole by `feed()`, so it
+ *  never reaches the parser and costs the run nothing but the drop path this
+ *  exists to make run. */
+const FLOOD_FAULT_CHARS = 16_000_001;
 
 /** The `oversize` fault has to move BOTH halves the delivery path reads — the
  *  null capture and the source's own flag — because `tick` asks the source
@@ -435,6 +454,9 @@ async function driveContent(
     return { writes: 0, windowMs: performance.now() - start };
   }
   if (workload.content === "tui") { feed("\x1b[?1049h\x1b[2J\x1b[H\x1b[?25l"); await source.settle(); }
+  // Straight to the source, not through `feed`: the legacy batcher prices what
+  // the old pipeline would have SENT, and this chunk exists only to trip a gate.
+  if (floodDrain && workload.content === "drain") source.feed("x".repeat(FLOOD_FAULT_CHARS));
 
   const tuiPeriodMs = 1000 / TUI_TARGET_WRITES_PER_SEC;
   let nextWriteAt = start + tuiPeriodMs;
@@ -448,10 +470,17 @@ async function driveContent(
       // one line per call starves the VT of work and prices the raw baseline at
       // an envelope per line, where the envelope outweighs the payload it
       // wraps — see `raw env%` in the report for what the shape actually costs.
-      const line = workload.content === "burst" ? burstLine : scrollbackLine;
-      let chunk = "";
-      while (chunk.length < PTY_READ_BYTES) chunk += line(seq++, rng);
-      feed(chunk);
+      const line = workload.content === "scrollback" || workload.content === "evict"
+        ? scrollbackLine : burstLine;
+      // `drain` feeds a whole bun-pty drain before the settle below; every other
+      // content feeds one read and lets the parser catch up.
+      const reads = workload.content === "drain" ? DRAIN_BURST_READS : 1;
+      for (let read = 0; read < reads; read++) {
+        let chunk = "";
+        while (chunk.length < PTY_READ_BYTES) chunk += line(seq++, rng);
+        feed(chunk);
+      }
+      writes += reads - 1;
     }
     writes++;
     // settle() is the real barrier: it also lets TerminalFrameHub's onParsed-
@@ -513,7 +542,7 @@ interface WorkloadResult {
    *  first seven left behind, and a per-workload delta taken from it says an
    *  idle terminal that fed nothing cost megabytes. */
   memory: { processRssPeakMb: number };
-  processing: { cpuUserMs: number; cpuSystemMs: number; parserBacklogCharsPeak: number };
+  processing: { cpuUserMs: number; cpuSystemMs: number; parserBacklogCharsPeak: number; historyGaps: number };
   lifecycle: {
     attachmentLiveAfterDrain: boolean; unexpectedRetirements: number;
     failureStatuses: string[]; endedAfterExit: boolean;
@@ -742,7 +771,10 @@ async function runWorkload(
         pageLatencyMs: pageLatency, evictedCursorExpired,
       },
       memory: { processRssPeakMb: rssSamples.length ? Math.max(...rssSamples) / (1024 * 1024) : 0 },
-      processing: { cpuUserMs: cpu.user / 1000, cpuSystemMs: cpu.system / 1000, parserBacklogCharsPeak },
+      processing: {
+        cpuUserMs: cpu.user / 1000, cpuSystemMs: cpu.system / 1000, parserBacklogCharsPeak,
+        historyGaps: source.historyStatus.gaps,
+      },
       lifecycle: {
         attachmentLiveAfterDrain, unexpectedRetirements, failureStatuses, endedAfterExit,
         finalRevisionDelivered, exitRevisionDelivered, probeFramesDelivered,
@@ -763,6 +795,18 @@ async function runWorkload(
         // can ever fail, and every delivery-side symptom of one reads as a
         // stall. This gate is the one that names the cause.
         screenWithinDisplayBudget: oversizeCaptures === 0,
+        // The `drain` workload's whole point: a burst that arrives with no turn
+        // of the event loop in it must cost neither of the two things a backlog
+        // can cost. BOTH halves are required and neither implies the other — a
+        // latched source has stopped parsing for the rest of the run (nothing
+        // rebuilds one under a PTY that never stopped), while a source that
+        // drops keeps going and silently stops describing the guest, and a
+        // ceiling low enough to do the second every time still leaves `failure`
+        // clear. `historyGaps` below says which, since every delivery-side
+        // symptom of either reads as a retirement and so as a stall.
+        displaySurvivesDrain: workload.content === "drain"
+          ? source.failure === undefined && !source.historyStatus.degraded
+          : null,
         sendGap: isIdle ? null : maxGapMs(inWindow.map((f) => f.atMs), outputWindowMs) <= MAX_SEND_GAP_MS,
         finalFrameDelivered: isIdle ? null : finalRevisionDelivered,
         exitFrameDelivered: endedAfterExit && exitRevisionDelivered,
@@ -903,8 +947,9 @@ async function main(): Promise<void> {
       "",
       "--fault deliberately breaks one property so the matching gate is seen to fail.",
       "A gate reads `-` where it does not apply to a workload, and a `-` is never",
-      "counted as a miss: idleQuiet/idleArmed off the idle workloads and",
-      "evictionEnforced off the evict ones, sendGap/finalFrameDelivered ON the idle",
+      "counted as a miss: idleQuiet/idleArmed off the idle workloads,",
+      "evictionEnforced off the evict ones and displaySurvivesDrain off the drain",
+      "ones, sendGap/finalFrameDelivered ON the idle",
       "workloads, pageLatency wherever the epoch retained no rows to page (idle, tui).",
       "",
       "  no-ack      viewer never acknowledges  -> sendGap, finalFrameDelivered, exitFrameDelivered",
@@ -921,6 +966,8 @@ async function main(): Promise<void> {
       "              idleArmed on the idle workloads and sendGap/finalFrameDelivered on",
       "              the rest: an oversize screen looks exactly like a stall from the",
       "              delivery side, which is why it needs a gate that names the cause",
+      "  flood       one chunk past the backlog ceiling on the drain workloads ->",
+      "              displaySurvivesDrain",
     ].join("\n"));
     return;
   }
@@ -940,6 +987,7 @@ async function main(): Promise<void> {
   if (fault && !FAULTS.includes(fault)) throw new Error(`unknown --fault=${fault}; choices: ${FAULTS.join(", ")}`);
   slowPages = fault === "slow-page";
   forceOversize = fault === "oversize";
+  floodDrain = fault === "flood";
   let selected = WORKLOADS;
   if (values.workload) {
     selected = WORKLOADS.filter((w) => w.id === values.workload);

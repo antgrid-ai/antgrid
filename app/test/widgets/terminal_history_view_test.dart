@@ -71,11 +71,13 @@ TerminalHistoryBoundary _boundary({
   int firstRowId = 0,
   int nextRowId = 1000,
   String status = 'recording',
+  bool gapped = false,
 }) => TerminalHistoryBoundary(
   epoch: epoch,
   firstRowId: firstRowId,
   nextRowId: nextRowId,
   status: status,
+  gapped: gapped,
 );
 
 /// A plain single-span row identified by its own id, for widget tests that
@@ -1382,6 +1384,38 @@ void main() {
         await tester.tap(find.byTooltip('Retry'));
         await tester.pump();
         expect(calls, before + 1);
+      },
+    );
+
+    testWidgets(
+      'a gap is named, and outranks the edge labels it would otherwise hide',
+      (tester) async {
+        if (_skipWithoutNative()) return;
+        // Recording stopped AND a hole: the reader can see for itself where
+        // the rows it holds start and stop, so the one thing it cannot infer
+        // is what gets said. Row ids run straight through a gap.
+        final gapped = _boundary(
+          nextRowId: 1000,
+          status: 'disabled',
+          gapped: true,
+        );
+        final m = TerminalHistoryModel()..applyBoundary(gapped);
+        m.markRequested('r1');
+        // The page carries the boundary too, and the agent builds both from
+        // the same archive -- so a page that said otherwise would be the agent
+        // contradicting itself, not a case this reader has to survive.
+        m.applyPage(
+          _page(requestId: 'r1', rows: _rowsBelow(1000), history: gapped),
+        );
+
+        await tester.pumpWidget(_wrap(_view(model: m)));
+        await tester.pump();
+
+        expect(
+          find.text('Output was dropped; this scrollback has a gap'),
+          findsOneWidget,
+        );
+        expect(find.text('History recording stopped'), findsNothing);
       },
     );
 
