@@ -35,6 +35,9 @@ COPY web/vite.config.ts ./web/
 # not enough — src/env.ts imports it on the startup path and the container
 # would build green and then fail to resolve the module at boot.
 COPY packages/antgrid-wire/src ./packages/antgrid-wire/src
+COPY packages/antgrid-wire/LICENSE ./packages/antgrid-wire/LICENSE
+COPY LICENSE.md LICENSING.md THIRD-PARTY.md SOURCE_OFFER.md ./
+COPY web/LICENSE.md ./web/LICENSE.md
 
 # Static assets served by app.ts.
 # public/build is excluded by .dockerignore (**/build)

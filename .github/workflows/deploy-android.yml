@@ -8,6 +8,14 @@ name: Deploy — Android (Play Store)
 # track that gains four builds a day is noise, and one publish per shipping day
 # is the cadence testers actually consume. See that file for the reasoning.
 #
+# Play is the only Android channel — this workflow attaches nothing to a GitHub
+# release. Play App Signing re-signs store installs with a key the CI upload key
+# cannot match, and Android takes an in-place update only between matching
+# certificates, so a direct APK alongside the store build would create two
+# install bases that can never update across. build-desktop.yml owns the
+# release assets and their SHA256SUMS.
+
+#
 # `schedule` only ever fires on the DEFAULT branch, so the nightly RUNS on
 # development and CHECKS OUT main — main is what reaches the internal track
 # (promote to alpha/beta/production by hand from the Play Console). A merge to
@@ -171,6 +179,7 @@ jobs:
             # HEAD, not GITHUB_SHA: the nightly fires on the default branch and
             # ships main, so GITHUB_SHA names a commit this build does not contain.
             echo "sha=$(git rev-parse --short=6 HEAD)"
+            echo "source_commit=$(git rev-parse HEAD)"
             echo "built=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           } >> "$GITHUB_OUTPUT"
 
@@ -190,6 +199,7 @@ jobs:
             --dart-define=SENTRY_DSN=${{ secrets.SENTRY_DSN }} \
             --dart-define=APP_VERSION=${{ steps.version.outputs.name }} \
             --dart-define=GIT_SHA=${{ steps.version.outputs.sha }} \
+            --dart-define=SOURCE_COMMIT=${{ steps.version.outputs.source_commit }} \
             --dart-define=BUILD_TIME=${{ steps.version.outputs.built }}
 
       - name: Verify 16 KB alignment

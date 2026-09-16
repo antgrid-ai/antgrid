@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 import { oauthProvider } from "@better-auth/oauth-provider";
 import { jwt } from "better-auth/plugins";
 import { provisionProductAccountForUser, activeSubscriptionForUser, resolveEntitlement } from "../models/subscription.js";

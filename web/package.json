@@ -1,6 +1,7 @@
 {
   "name": "antgrid-web",
   "version": "0.1.0",
+  "license": "LicenseRef-Elastic-2.0",
   "type": "module",
   "scripts": {
     "dev": "bun run build:assets && concurrently -k -n server,assets -c blue,magenta \"bun run dev:server\" \"bun run dev:assets\"",

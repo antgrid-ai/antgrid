@@ -51,11 +51,10 @@ implementations are `bridge/src/e2e/` (TypeScript),
 admission and routing.
 
 The Dart implementation and the wire protocol it speaks
-(`packages/antgrid_relay_client` and `packages/antgrid-wire`) are Apache-2.0, not
-ELv2, precisely so this claim can be checked: the licence lets you read, fork and
-reimplement that code, and publish your own work built on it, without asking us.
-That is a copyright grant and nothing more — the disclosure window above still
-applies to anything you find.
+(`packages/antgrid_relay_client` and `packages/antgrid-wire`) are MPL-2.0, and
+their source and cross-language vectors are public. That is a copyright grant
+and nothing more — the disclosure window above still applies to anything you
+find.
 
 **App to bridge traffic is end-to-end encrypted.** Session keys come from a fresh
 X25519 ephemeral Diffie-Hellman exchange on every handshake, authenticated in

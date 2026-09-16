@@ -1,6 +1,6 @@
 # Agent adapters
 
-This ELv2 workspace owns built-in agent definitions, provider implementations,
+This MPL-2.0 workspace owns built-in agent definitions, provider implementations,
 normalized event schemas, shared chat state, and external integration assets.
 The bridge owns account authorization, encrypted transport, checkout selection,
 process containment, and durable session state.

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 import { PrismaClient } from "../generated/prisma/client.js";
 import type { Prisma } from "../generated/prisma/client.js";
 import { PrismaPg } from "@prisma/adapter-pg";
