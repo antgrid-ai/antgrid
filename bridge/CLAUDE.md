@@ -100,9 +100,8 @@ invariant, which is why the reasoning lives beside the code rather than here.
 
 ## The session bus (`src/session-bus/`)
 
-The agent-to-agent plane: one session on one machine reaching another.
-`docs/session-messaging.md` is the spec; this is the set of invariants a future
-edit breaks silently.
+The agent-to-agent plane: one session on one machine reaching another. This is
+the set of invariants a future edit breaks silently.
 
 - **Outbound on the machine that opened the exchange goes to the loopback owner
   and nowhere else.** `ProjectCore.sendToOwner` is the only path, and
