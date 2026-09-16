@@ -360,6 +360,12 @@ export class ProjectCore {
     return this.core?.deleteSession(id, options) ?? false;
   }
 
+  /** Forward a session start to the live AgentCore. A no-op if not started —
+   *  the host only calls this for a project it already found warm. */
+  startSession(id: string): void {
+    this.core?.startSession(id);
+  }
+
   /** Forward the live session list (with true per-session `running`) to the
    *  control-plane `sessions.list` peek. Returns null if not started, so the
    *  caller can fall back to the on-disk persisted list. */
@@ -425,6 +431,10 @@ export class ProjectCore {
       // refuses AGENT_NOT_READY ahead of every other gate on a real bridge
       // while every in-process test that injects a directory stays green.
       ...(this.deps.sessionDirectory ? { sessionDirectory: this.deps.sessionDirectory } : {}),
+      // Host-injected for the same reason and forwarded the same way: a bridge
+      // with no host (evals, most of this file's own test callers) offers no
+      // wake at all, and the §7.3 refusal falls back to its unconditional shape.
+      ...(this.deps.startSession ? { startSession: this.deps.startSession } : {}),
       queueBusLine: (line: Omit<QueuedLine, "queuedAt">) => this.deliveries?.queue(line),
       forgetBusLines: (sessionId: string) => this.deliveries?.forget(sessionId),
       relayUrl: this.deps.relayUrl,

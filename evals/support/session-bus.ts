@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import type { AbMessage } from "../../bridge/src/protocol";
 import { renderNotify, renderReply } from "../../bridge/src/session-bus/delivery";
 import type { RelayClient } from "../helpers/relay-client";
@@ -12,18 +12,80 @@ import type { RelayClient } from "../helpers/relay-client";
  * frozen shared surface.
  */
 
+const RUN_HOOK_SCRIPT = resolve(import.meta.dir, "run-hook.ts");
+// This process IS the bun binary running the eval suite (`bun test`), so its
+// own execPath is a reliable absolute path to spawn a sibling `bun run` from —
+// unlike a bare "bun", which depends on the sink PTY's inherited PATH agreeing
+// with this one.
+const BUN_EXECUTABLE = process.execPath;
+
+// Framing for a simulated hook call written into the sink PTY's own stdin (see
+// `hookTriggerData`). Never appears in real delivered content — the delivery
+// templates are plain prose — so scanning the raw stdin stream for it is safe
+// alongside the sink's own verbatim logging.
+const HOOK_TRIGGER_MARKER = "ANTGRID_HOOK";
+
 // The receiving session's PTY is a stdin sink rather than an agent: these
 // scenarios assert WHEN a line reaches the terminal, so the guest only has to
 // record what it was given. Raw mode keeps the ConPTY line discipline from
 // holding the write back until a newline the bridge never sends on its own.
+//
+// It ALSO doubles as a hook trigger: a chunk containing `HOOK_TRIGGER_MARKER`
+// spawns `run-hook.ts` as ITS OWN child — inheriting this PTY's real
+// `ANTGRID_RUN_ID`/`ANTGRID_API_PORT`/`ANTGRID_TERMINAL_ID`, exactly as a real
+// agent's hook subprocess does — instead of a test faking the loopback POST
+// body directly, which `acceptsHookRun`'s runId-staleness gate now refuses
+// (see `hookTriggerData`'s doc).
 export const SINK_SCRIPT = `const fs = require("node:fs");
+const { spawn } = require("node:child_process");
 const sink = process.env.ANTGRID_EVAL_SINK;
+const MARKER = ${JSON.stringify(HOOK_TRIGGER_MARKER)};
+const RUN_HOOK = ${JSON.stringify(RUN_HOOK_SCRIPT)};
+const BUN_EXE = ${JSON.stringify(BUN_EXECUTABLE)};
 try { process.stdin.setRawMode(true); } catch {}
-process.stdin.on("data", (d) => { try { fs.appendFileSync(sink, d); } catch {} });
+process.stdin.on("data", (d) => {
+  try { fs.appendFileSync(sink, d); } catch {}
+  const text = d.toString("utf8");
+  const idx = text.indexOf(MARKER);
+  if (idx === -1) return;
+  try {
+    const spec = JSON.parse(text.slice(idx + MARKER.length));
+    const child = spawn(BUN_EXE, ["run", RUN_HOOK, spec.agent, spec.event], {
+      env: process.env,
+      stdio: ["ignore", "ignore", "ignore"],
+    });
+    child.unref();
+  } catch {}
+});
 process.stdin.resume();
 setInterval(() => {}, 1 << 30);
 `;
 export const SINK_SCRIPT_NAME = "antgrid-eval-sink.cjs";
+
+/**
+ * The `terminal:input` payload that simulates one real agent hook firing for
+ * the receiving sink session, written raw into its PTY's stdin.
+ *
+ * This is the faithful alternative to POSTing `/turn-start`/`/notify` on the
+ * loopback API directly: a bare loopback POST with no `runId` is exactly what
+ * `SessionManager.acceptsHookRun` exists to reject as stale, and a bare
+ * terminal-mode sink session has no real agent hook config to fire it for
+ * real. Routing the trigger through the sink's OWN stdin lets `run-hook.ts`
+ * spawn as that session's own child process, inheriting the correct
+ * `ANTGRID_RUN_ID` the bridge stamped on it at spawn.
+ */
+export function hookTriggerData(agent: string, event: string): string {
+  return `${HOOK_TRIGGER_MARKER}${JSON.stringify({ agent, event })}`;
+}
+
+/** The marker `run-hook.ts` appends to the sink once it has attempted its
+ *  simulated hook POST — not that the bridge accepted it, since hooks are
+ *  advisory and swallow their own failures, but enough to know the async spawn
+ *  chain (PTY → sink script → `run-hook.ts` → loopback POST) has actually run,
+ *  which no fixed sleep can promise across machines. */
+export function hookDoneMarker(event: string): string {
+  return `HOOK_DONE:${event}`;
+}
 
 /** The origin every bus project is given. A session is addressed through its
  *  repo key (spec 5.1), so two projects that must see each other need the SAME
