@@ -116,6 +116,8 @@ class BootstrapPayload {
           'x25519Pub': d.x25519Pub,
           'x25519Priv': d.x25519Priv,
           'deviceUuid': d.deviceUuid,
+          'userId': d.userId,
+          if (d.endpointSecret != null) 'endpointSecret': d.endpointSecret,
         },
       };
     }

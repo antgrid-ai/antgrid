@@ -1,3 +1,4 @@
+import { createHostPolicyFixture } from "./host-policy-fixture";
 // Task 13 security gates: the order in which a remote isolated-session request
 // is checked, and the fact that every filesystem coordinate is host-derived.
 //
@@ -51,7 +52,7 @@ describe("remote isolated-session security", () => {
     writeFileSync(join(repo, "readme.txt"), "v1\n");
     await git(repo, ["add", "."]);
     await git(repo, ["commit", "-m", "initial"]);
-    host = new HostServer({
+    host = createHostPolicyFixture({
       remote: fakeRemoteConfig(),
       remoteRuntimeFactory: () => Promise.resolve(fakeRuntime()),
     });

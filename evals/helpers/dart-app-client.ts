@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createMessage, type AbMessage } from "../../bridge/src/protocol";
 import { CONTROL_STREAM_ID } from "antgrid-wire";
+import { TERMINAL_PROTOCOL_VERSION, TerminalScreenFrameSchema } from "../../bridge/src/terminal-frames/protocol";
 
 // `URL.pathname` yields a leading-slash `/C:/…` form that is an invalid cwd on
 // Windows (uv_spawn rejects it with ENOENT). `fileURLToPath` gives a native path.
@@ -247,11 +248,11 @@ export class DartAppClient {
     );
   }
 
-  async connect(relayUrl: string, licenseToken: string): Promise<void> {
+  async connect(relayUrl: string, licenseToken: string, machineDeviceId?: string): Promise<void> {
     // Mandatory in v3: the app hello carries the account's own license token.
     // Omitting it makes the Dart CLI reject the command outright rather than
     // dial token-free, so this stays required here.
-    this.sendCommand({ action: "connect", relayUrl, licenseToken });
+    this.sendCommand({ action: "connect", relayUrl, licenseToken, machineDeviceId });
     await this.waitForState("authenticated");
   }
 
@@ -471,6 +472,46 @@ export class DartAppClient {
         e.data.data.includes(marker),
       timeoutMs,
     );
+  }
+
+  /** Frame-capable Dart sessions opt each visible terminal in explicitly and
+   * acknowledge every frame, including screens that precede the marker. */
+  async waitForTerminalFrameContaining(
+    streamId: string,
+    terminalId: string,
+    marker: string,
+    timeoutMs = 10_000,
+  ): Promise<DartEvent> {
+    const deadline = Date.now() + timeoutMs;
+    const remaining = () => Math.max(1, deadline - Date.now());
+    const requestId = crypto.randomUUID();
+    this.sendOnStream(streamId, createMessage("terminal:subscribe", {
+      terminalId, version: TERMINAL_PROTOCOL_VERSION, requestId,
+    }));
+    const subscribed = await this.waitForEvent((event) =>
+      event.event === "antgrid-message" && event.streamId === streamId &&
+      event.data?.type === "terminal:subscribed" && event.data.requestId === requestId,
+      remaining());
+    const { runId, attachmentId } = subscribed.data;
+    try {
+      while (Date.now() < deadline) {
+        const frame = await this.waitForEvent((event) =>
+          event.event === "antgrid-message" && event.streamId === streamId &&
+          event.data?.type === "terminal:frame" && event.data.terminalId === terminalId &&
+          event.data.runId === runId && event.data.attachmentId === attachmentId,
+          remaining());
+        const screen = TerminalScreenFrameSchema.parse(frame.data);
+        this.sendOnStream(streamId, createMessage("terminal:ack", {
+          terminalId, runId, attachmentId, sequence: frame.data.sequence,
+        }));
+        if (screen.ansi.includes(marker)) return frame;
+      }
+      throw new Error(`Timed out waiting for terminal frame marker (${timeoutMs}ms)`);
+    } finally {
+      this.sendOnStream(streamId, createMessage("terminal:unsubscribe", {
+        terminalId, runId, attachmentId,
+      }));
+    }
   }
 
   async disconnect(): Promise<void> {

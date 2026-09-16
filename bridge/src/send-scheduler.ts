@@ -39,7 +39,12 @@ export interface QueuedAppFrame {
 export interface SchedulerSink {
   /** Seal + write one frame NOW. Returns the sealed payload length that hit
    *  the wire, or null if it was dropped (no session, socket not open). */
-  send(frame: QueuedAppFrame): number | null;
+  send(frame: QueuedAppFrame): number | null | PendingSinkWrite;
+}
+
+export interface PendingSinkWrite {
+  bytes: number;
+  completed: Promise<boolean>;
 }
 
 /** `idle` — nothing left to write. `held` — parked by the test seam.
@@ -83,6 +88,7 @@ export class SendScheduler {
   /** Test seam for the resync clock. */
   now: () => number = Date.now;
   private draining = false;
+  private activeWrite: { frame: QueuedAppFrame; dropped: boolean } | null = null;
 
   /** When the channel's head first failed to fit; cleared once it fits or the
    *  queue empties. Read by the owner's stall log. */
@@ -136,6 +142,7 @@ export class SendScheduler {
     // that ever publishes back onto a bus would otherwise interleave two loops
     // and break per-channel order.
     if (this.draining) return "idle";
+    if (this.activeWrite) return "held";
     this.draining = true;
     try {
       for (;;) {
@@ -160,6 +167,24 @@ export class SendScheduler {
           continue;
         }
         const n = this.sink.send(frame);
+        if (n !== null && typeof n === "object") {
+          // Reserve credit before awaiting: the receiver can acknowledge bytes
+          // while the native binding is still completing its write promise.
+          this.sent[next] += n.bytes;
+          const write = { frame, dropped: false };
+          this.activeWrite = write;
+          void n.completed.catch(() => false).then((written) => {
+            if (!write.dropped) {
+              if (!written) this.uncharge(next, n.bytes);
+              frame.settle?.(written ? "sent" : "dropped");
+            }
+            if (this.activeWrite === write) {
+              this.activeWrite = null;
+              this.drain();
+            }
+          });
+          return "held";
+        }
         // A frame the sink dropped never reached the peer, so crediting it back
         // would be impossible: leave it out of the accounting entirely.
         if (n !== null) this.sent[next] += n;
@@ -245,6 +270,10 @@ export class SendScheduler {
   /** Drop everything; returns the dropped frames so the caller can record them. */
   clear(): QueuedAppFrame[] {
     const dropped: QueuedAppFrame[] = [];
+    if (this.activeWrite && !this.activeWrite.dropped) {
+      this.activeWrite.dropped = true;
+      dropped.push(this.activeWrite.frame);
+    }
     for (const ch of ["control", "preview"] as const) {
       dropped.push(...this.queues[ch]);
       this.queues[ch] = [];

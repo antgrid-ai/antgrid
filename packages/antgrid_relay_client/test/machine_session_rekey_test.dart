@@ -135,6 +135,45 @@ void main() {
   });
 
   group('session teardown fails in-flight RPCs', () {
+    test('peer restart fails pending actions and drops queued input', () async {
+      final relay = FakeLiveRelay();
+      final handshaker = FakeHandshaker.sequence([fixedKeys(1), fixedKeys(2)])
+        ..delayFor = (i) =>
+            i == 1 ? const Duration(milliseconds: 100) : Duration.zero;
+      final session = MachineSession(
+        relay: relay,
+        machineDeviceId: 'm1',
+        handshaker: handshaker,
+        channelWindowBytes: 64,
+      );
+      session.start();
+      await session.ensureEstablished();
+      final pending = session
+          .streamFor('project')
+          .request('config:read', timeout: const Duration(seconds: 30));
+      final failed = expectLater(
+        pending,
+        throwsA(
+          isA<RpcException>().having((e) => e.code, 'code', 'E_SESSION_DOWN'),
+        ),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      final queued = session.sendOnStream('project', {
+        'type': 'terminal:input',
+        'data': 'must-not-replay',
+      }, 'control');
+      expect(session.debugScheduler.queued('control').bytes, greaterThan(0));
+      relay.presence(false);
+      relay.presence(true);
+      await failed.timeout(const Duration(seconds: 2));
+      await queued.timeout(const Duration(seconds: 2));
+      expect(session.debugScheduler.queued('control').bytes, 0);
+      await Future<void>.delayed(const Duration(milliseconds: 150));
+      expect(session.isEstablished, isTrue);
+      await session.dispose();
+      await relay.closeStreams();
+    });
+
     test('a socket-down fails per-stream pending RPCs fast (no full-timeout '
         'hang)', () async {
       final relay = FakeLiveRelay();

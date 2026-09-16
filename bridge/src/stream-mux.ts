@@ -78,6 +78,10 @@ export interface StreamRefusal {
 }
 
 export interface AttachStreamOpts {
+  /** Host-owned binding, independent of central relay registration. */
+  streamId?: string;
+  /** Local dispatch is ready; this does not acknowledge WebSocket admission. */
+  onLocalReady?: (streamId: string) => void;
   /** The project this stream carries, named on a refusal so the app can fail the
    *  exact bind it is waiting on instead of guessing. */
   projectId?: string;
@@ -190,7 +194,10 @@ export class StreamMux {
 
   attach(bus: MessageBus, opts: AttachStreamOpts): StreamHandle {
     // 16 hex chars from 8 random bytes — opaque, allocated agent-side.
-    const streamId = randomBytes(8).toString("hex");
+    const streamId = opts.streamId ?? randomBytes(8).toString("hex");
+    if (!/^[0-9a-f]{16}$/.test(streamId) || this.streams.has(streamId)) {
+      throw new Error("Invalid or duplicate project stream id");
+    }
     // Gate at the send, not at attach/detach: the stream stays open and the core
     // keeps running, so flipping the switch back on resumes delivery with no
     // re-attach and no lost core. Dropping mid-flight can strand an RPC the phone
@@ -252,6 +259,7 @@ export class StreamMux {
       },
     });
     this.streams.set(streamId, entry);
+    opts.onLocalReady?.(streamId);
     this.transport.openStream(streamId);
     // A stream attached while the session is already established (drill-in) never
     // sees a fresh peer-online, so resume it now.

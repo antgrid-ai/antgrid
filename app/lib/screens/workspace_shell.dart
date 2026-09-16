@@ -3260,6 +3260,7 @@ bool _takesOverMidSession(BlockReason reason) => switch (reason) {
   BlockReason.sessionTakenOver ||
   BlockReason.superseded ||
   BlockReason.deviceRevoked ||
+  BlockReason.peerRejected ||
   BlockReason.licenseExpired => true,
   BlockReason.agentOffline || BlockReason.handshakeFailing => false,
 };
@@ -3360,6 +3361,11 @@ class _LocalLaunchErrorScreen extends StatelessWidget {
               'The agent answered but the E2E handshake kept failing — usually '
               'a host that re-provisioned its identity. Retry; if it persists, '
               'forget the machine and pair it again.',
+          retryLabel: 'retry',
+        ),
+        BlockReason.peerRejected => (
+          headline: 'the remote connection was rejected',
+          tip: 'Check device access and the remote machine before retrying.',
           retryLabel: 'retry',
         ),
       };

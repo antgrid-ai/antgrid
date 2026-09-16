@@ -20,7 +20,7 @@ void main() {
 
     test('with a device record, machine block carries auth + endpoints', () {
       final device = DeviceRecord(
-        userId: 'u-1', // required by DeviceRecord; NOT part of machine.auth
+        userId: 'u-1',
         deviceUuid: 'uuid-1',
         clientId: 'cid',
         clientSecret: 'csec',
@@ -28,6 +28,7 @@ void main() {
         ed25519Priv: 'e-priv',
         x25519Pub: 'x-pub',
         x25519Priv: 'x-priv',
+        endpointSecret: base64Encode(List<int>.filled(32, 7)),
       );
       final p = BootstrapPayload(
         projectId: 'p1',
@@ -45,9 +46,8 @@ void main() {
       expect(m['auth']['clientId'], 'cid');
       expect(m['auth']['deviceUuid'], 'uuid-1');
       expect(m['auth']['ed25519Priv'], 'e-priv');
-      // Regression: userId must never leak into machine.auth (the bridge
-      // AuthFields schema has no userId field).
-      expect((m['auth'] as Map).containsKey('userId'), isFalse);
+      expect(m['auth']['userId'], 'u-1');
+      expect(m['auth']['endpointSecret'], device.endpointSecret);
     });
 
     test(

@@ -69,6 +69,18 @@ class _StubRelay extends RelayService {
   }
 
   @override
+  Future<PeerSendOutcome> sendFrame(
+    String to,
+    String channel,
+    Uint8List payload, {
+    FrameKind kind = FrameKind.sealed,
+  }) async {
+    if (!isDispatchAllowed) return PeerSendOutcome.closed;
+    sendMessage(to, channel, payload, kind: kind);
+    return PeerSendOutcome.accepted;
+  }
+
+  @override
   void sendMessage(
     String to,
     String channel,
@@ -154,10 +166,11 @@ void main() {
   /// stub relay never completes a handshake, so there is no other way to get a
   /// key in there.
   Future<void> sealOneFrame(int fill) async {
-    await CngAesGcm().encrypt(
-      const <int>[1, 2, 3],
-      secretKey: SecretKeyData(Uint8List(32)..fillRange(0, 32, fill)),
-    );
+    await CngAesGcm().encrypt(const <int>[
+      1,
+      2,
+      3,
+    ], secretKey: SecretKeyData(Uint8List(32)..fillRange(0, 32, fill)));
   }
 
   group('native cipher key retirement', () {
@@ -187,34 +200,36 @@ void main() {
       );
     });
 
-    test('a dropped socket retires the keys, without disposing the session',
-        () async {
-      // The common case and the one the dispose sites miss entirely: the
-      // supervisor keeps the session for a reconnect, so nothing releases it.
-      // Left uncovered, a laptop that loses wifi and sits idle holds the
-      // session keys for the rest of the process.
-      final mech = build();
-      addTearDown(mech.release);
-      await mech.dial(
-        const ConnCoords(
-          relayUrl: 'ws://relay.test',
-          agentEd25519PubB64: _pinA,
-        ),
-        'tok',
-      );
-      await sealOneFrame(0x43);
-      expect(CngAesGcm.importedKeyCount, 1);
+    test(
+      'a dropped socket retires the keys, without disposing the session',
+      () async {
+        // The common case and the one the dispose sites miss entirely: the
+        // supervisor keeps the session for a reconnect, so nothing releases it.
+        // Left uncovered, a laptop that loses wifi and sits idle holds the
+        // session keys for the rest of the process.
+        final mech = build();
+        addTearDown(mech.release);
+        await mech.dial(
+          const ConnCoords(
+            relayUrl: 'ws://relay.test',
+            agentEd25519PubB64: _pinA,
+          ),
+          'tok',
+        );
+        await sealOneFrame(0x43);
+        expect(CngAesGcm.importedKeyCount, 1);
 
-      relay.disconnect();
-      await pumpEventQueue();
+        relay.disconnect();
+        await pumpEventQueue();
 
-      expect(CngAesGcm.importedKeyCount, 0);
-      expect(
-        mech.session,
-        isNotNull,
-        reason: 'the session must survive for the supervisor to reconnect it',
-      );
-    });
+        expect(CngAesGcm.importedKeyCount, 0);
+        expect(
+          mech.session,
+          isNotNull,
+          reason: 'the session must survive for the supervisor to reconnect it',
+        );
+      },
+    );
 
     test('replacing a stale-pinned session retires its keys too', () async {
       final mech = build();
@@ -288,22 +303,24 @@ void main() {
       expect(CngAesGcm.importedKeyCount, 0);
     });
 
-    test('a rekey that never confirmed retires the keys it tore down',
-        () async {
-      final mech = await established([_keys(0x20), null]);
-      await sealOneFrame(0x45);
-      expect(CngAesGcm.importedKeyCount, 1);
+    test(
+      'a rekey that never confirmed retires the keys it tore down',
+      () async {
+        final mech = await established([_keys(0x20), null]);
+        await sealOneFrame(0x45);
+        expect(CngAesGcm.importedKeyCount, 1);
 
-      // The agent bounces: coming back arms a rekey, and this attempt fails.
-      relay.presence(false);
-      relay.presence(true);
-      for (var i = 0; i < 50 && mech.session!.isEstablished; i++) {
-        await Future<void>.delayed(const Duration(milliseconds: 10));
-      }
-      expect(mech.session!.isEstablished, isFalse);
-      await pumpEventQueue();
+        // The agent bounces: coming back arms a rekey, and this attempt fails.
+        relay.presence(false);
+        relay.presence(true);
+        for (var i = 0; i < 50 && mech.session!.isEstablished; i++) {
+          await Future<void>.delayed(const Duration(milliseconds: 10));
+        }
+        expect(mech.session!.isEstablished, isFalse);
+        await pumpEventQueue();
 
-      expect(CngAesGcm.importedKeyCount, 0);
-    });
+        expect(CngAesGcm.importedKeyCount, 0);
+      },
+    );
   }, skip: Platform.isWindows ? false : 'CNG is the only cipher that caches');
 }

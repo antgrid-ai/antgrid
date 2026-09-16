@@ -7,10 +7,10 @@ name: Build — desktop (macOS / Windows / Linux)
 #                             the Microsoft Store (MSIX) instead of a direct
 #                             download. The site links releases/latest/download/
 #                             <asset> — the mac/linux asset filenames
-#                             (antgrid-macos.dmg / antgrid-linux.AppImage) are
+#                             (antgrid-macos-arm64.dmg / antgrid-linux.AppImage) are
 #                             load-bearing, never rename them. Same for
-#                             appcast.xml: the macOS app's Sparkle updater
-#                             fetches releases/latest/download/appcast.xml
+#                             appcast-macos-arm64.xml: the macOS app's Sparkle updater
+#                             fetches releases/latest/download/appcast-macos-arm64.xml
 #                             (see app/lib/update/macos_sparkle_update_service.dart).
 #                             And antgrid-linux.AppImage.zsync: the update
 #                             information embedded in every shipped AppImage
@@ -64,6 +64,8 @@ concurrency:
   cancel-in-progress: ${{ !inputs.release }}
 
 env:
+  # Upstream cargokit's Windows resolver cannot traverse hidden AppData folders.
+  PUB_CACHE: ${{ github.workspace }}/.pub-cache
   # Keep in lockstep with .github/actions/setup-android.
   #
   # The SDK install is deliberately NOT cached here (no `cache: true` on
@@ -229,6 +231,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Require Apple Silicon native build host
+        run: test "$(uname -m)" = arm64
+
       # `cache: true` is intentionally absent — it caches the SDK, not just pub,
       # and that is a losing trade against the 10 GB budget (see FLUTTER_VERSION
       # above). The pub cache below is kept explicitly.
@@ -251,47 +256,52 @@ jobs:
           # a lockfile bump dropped.
           key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
 
-      # The half of flutter-action's caching that is worth its bytes. Flutter
-      # puts PUB_CACHE at %LOCALAPPDATA%\Pub\Cache on Windows and ~/.pub-cache
-      # everywhere else; both are the SDK's own defaults, so this stays correct
-      # whether or not flutter-action exports PUB_CACHE itself.
+      # Cache the explicit workspace package directory used by native builds.
       - uses: actions/cache@v6
         with:
-          path: ${{ runner.os == 'Windows' && '~/AppData/Local/Pub/Cache' || '~/.pub-cache' }}
+          path: ${{ env.PUB_CACHE }}
           key: pub-${{ runner.os }}-${{ env.FLUTTER_VERSION }}-${{ hashFiles('**/pubspec.lock') }}
+
+      - name: Install Rust for native Flutter plugins
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: stable
 
       - name: Flutter pub get
         working-directory: app
-        run: flutter pub get
+        run: flutter pub get --enforce-lockfile
 
       - name: Install JS workspace deps
         # --ignore-scripts skips the root/web postinstall (Prisma client codegen
         # for the web service) — the desktop build never touches Postgres or web.
-        run: bun install --ignore-scripts
+        run: bun install --frozen-lockfile --ignore-scripts
+
+      - name: Verify pinned Iroh package sources
+        run: bun run scripts/check-iroh-packaging.ts
+
+      - name: Smoke compiled native host transport
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .tmp
+          bun build bridge/scripts/iroh-host-smoke.ts --compile --outfile .tmp/iroh-host-smoke.exe
+          ./.tmp/iroh-host-smoke.exe
 
       - name: Qualify native terminal frames
         working-directory: app
         run: flutter test -j 2 test/terminal_frame_prototype_test.dart
 
-      - name: Build bridge (universal macOS binary)
+      - name: Build bridge (Apple Silicon)
         run: |
           set -euo pipefail
           mkdir -p bridge/dist
           bun build bridge/src/index.ts --compile \
             --target bun-darwin-arm64 \
-            --outfile bridge/dist/antgrid-bridge-arm64 \
+            --outfile bridge/dist/antgrid-bridge \
             --define 'process.env.LICENSE_API_URL="${{ env.LICENSE_API_URL }}"' \
             --define 'process.env.SENTRY_DSN="${{ secrets.SENTRY_DSN_BRIDGE }}"' \
             --define 'process.env.ANTGRID_BRIDGE_COMPILED="1"'
-          bun build bridge/src/index.ts --compile \
-            --target bun-darwin-x64 \
-            --outfile bridge/dist/antgrid-bridge-x64 \
-            --define 'process.env.LICENSE_API_URL="${{ env.LICENSE_API_URL }}"' \
-            --define 'process.env.SENTRY_DSN="${{ secrets.SENTRY_DSN_BRIDGE }}"' \
-            --define 'process.env.ANTGRID_BRIDGE_COMPILED="1"'
-          lipo -create -output bridge/dist/antgrid-bridge \
-            bridge/dist/antgrid-bridge-arm64 \
-            bridge/dist/antgrid-bridge-x64
 
       - name: Smoke test compiled bridge hook
         run: bun run bridge/scripts/smoke-hook-binary.ts bridge/dist/antgrid-bridge
@@ -313,6 +323,9 @@ jobs:
             --dart-define=GIT_SHA=${{ needs.version.outputs.sha }} \
             --dart-define=BUILD_TIME=${{ needs.version.outputs.built }}
 
+      - name: Verify Iroh source lock remained unchanged
+        run: bun run scripts/check-iroh-packaging.ts
+
       - name: Copy bridge into .app bundle
         if: ${{ steps.build.outcome == 'success' }}
         run: |
@@ -320,6 +333,8 @@ jobs:
           MACOS_BIN="app/build/macos/Build/Products/$DEST/antgrid.app/Contents/MacOS"
           cp bridge/dist/antgrid-bridge "$MACOS_BIN/antgrid-bridge"
           chmod +x "$MACOS_BIN/antgrid-bridge"
+          test "$(lipo -archs "$MACOS_BIN/antgrid-bridge")" = arm64
+          test "$(lipo -archs "$MACOS_BIN/antgrid")" = arm64
 
       # Signing — runs only when the Apple secrets are present AND the build is
       # `release`. debug/profile bundles carry `get-task-allow` (which notarization
@@ -420,7 +435,7 @@ jobs:
             --icon "antgrid.app" 150 190 \
             --app-drop-link 450 190 \
             --no-internet-enable \
-            "antgrid-macos.dmg" \
+            "antgrid-macos-arm64.dmg" \
             "$APP"
 
       # Notarize + staple the DMG. Same gate as the sign step; stapling the dmg is
@@ -437,7 +452,7 @@ jobs:
           TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
-          codesign --force --timestamp --sign "$IDENTITY" "antgrid-macos.dmg"
+          codesign --force --timestamp --sign "$IDENTITY" "antgrid-macos-arm64.dmg"
           # --timeout is not optional on a 10x-billed runner: bare --wait polls
           # Apple's queue forever, and a stuck submission once held this job for
           # four hours. Exceeding it exits non-zero, so a slow notarization fails
@@ -448,14 +463,14 @@ jobs:
           # redden ordinary releases on a queue that was merely slow. The rest
           # of this job measures ~9.5 min, which keeps the worst case inside the
           # 45-minute job cap above — raise both together or neither.
-          xcrun notarytool submit "antgrid-macos.dmg" \
+          xcrun notarytool submit "antgrid-macos-arm64.dmg" \
             --apple-id "$APPLE_ID" --password "$APPLE_PW" --team-id "$TEAM_ID" \
             --wait --timeout 30m
-          xcrun stapler staple "antgrid-macos.dmg"
+          xcrun stapler staple "antgrid-macos-arm64.dmg"
 
       # Sparkle appcast for macOS in-app updates. Release paths only —
       # published as a release asset and fetched by the app at
-      # releases/latest/download/appcast.xml (so a prerelease tag's appcast is
+      # releases/latest/download/appcast-macos-arm64.xml (so a prerelease tag's appcast is
       # inert: prereleases never move `latest`). The enclosure URL pins the
       # TAG, not latest, so an already-fetched appcast keeps resolving after
       # the next release. The gate requires an Apple-signed dmg: shipped apps
@@ -502,15 +517,15 @@ jobs:
           # as unverifiable (nothing to compare); any OTHER fetch failure or
           # an unparseable appcast FAILS the build — treating it like the 404
           # case would silently disable this guard exactly when it matters.
-          APPCAST_URL="https://github.com/antgrid-ai/antgrid/releases/latest/download/appcast.xml"
-          HTTP_CODE="$(curl -sSL --retry 3 -o prev-appcast.xml -w '%{http_code}' "$APPCAST_URL")" || HTTP_CODE=000
+          APPCAST_URL="https://github.com/antgrid-ai/antgrid/releases/latest/download/appcast-macos-arm64.xml"
+          HTTP_CODE="$(curl -sSL --retry 3 -o prev-appcast-macos-arm64.xml -w '%{http_code}' "$APPCAST_URL")" || HTTP_CODE=000
           if [ "$HTTP_CODE" = "200" ]; then
             # Bind both reads to the SAME first <item> via xmllint (already a
             # dependency of this step) — two independent line-oriented scrapes
             # could pair values from different items once the feed carries
             # version history, silently disarming the guard.
-            PREV_BUILD="$(xmllint --xpath 'string(//item[1]/*[local-name()="version"])' prev-appcast.xml 2>/dev/null || true)"
-            PREV_VERSION="$(xmllint --xpath 'string(//item[1]/*[local-name()="shortVersionString"])' prev-appcast.xml 2>/dev/null || true)"
+            PREV_BUILD="$(xmllint --xpath 'string(//item[1]/*[local-name()="version"])' prev-appcast-macos-arm64.xml 2>/dev/null || true)"
+            PREV_VERSION="$(xmllint --xpath 'string(//item[1]/*[local-name()="shortVersionString"])' prev-appcast-macos-arm64.xml 2>/dev/null || true)"
             case "$PREV_BUILD" in
               ''|*[!0-9]*)
                 echo "::error::published appcast fetched but its sparkle:version is missing or non-numeric — refusing to skip the monotonic +build guard. Inspect $APPCAST_URL."
@@ -539,9 +554,9 @@ jobs:
             mkdir -p "$RUNNER_TEMP/sparkle"
             tar -xJf "$RUNNER_TEMP/sparkle.tar.xz" -C "$RUNNER_TEMP/sparkle"
             # sign_update emits the full attribute pair: sparkle:edSignature="..." length="..."
-            ENCLOSURE_ATTRS="$(printf '%s' "$SPARKLE_ED_PRIVATE_KEY" | "$RUNNER_TEMP/sparkle/bin/sign_update" --ed-key-file - antgrid-macos.dmg)"
+            ENCLOSURE_ATTRS="$(printf '%s' "$SPARKLE_ED_PRIVATE_KEY" | "$RUNNER_TEMP/sparkle/bin/sign_update" --ed-key-file - antgrid-macos-arm64.dmg)"
           else
-            ENCLOSURE_ATTRS="length=\"$(stat -f%z antgrid-macos.dmg)\""
+            ENCLOSURE_ATTRS="length=\"$(stat -f%z antgrid-macos-arm64.dmg)\""
           fi
           # minimumSystemVersion comes from the built app itself (Flutter sets
           # LSMinimumSystemVersion from MACOSX_DEPLOYMENT_TARGET) — a value
@@ -551,7 +566,7 @@ jobs:
           MIN_OS="$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' \
             "app/build/macos/Build/Products/$DEST/antgrid.app/Contents/Info.plist")"
           [ -n "$MIN_OS" ]
-          cat > appcast.xml <<XML
+          cat > appcast-macos-arm64.xml <<XML
           <?xml version="1.0" encoding="utf-8"?>
           <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
           <channel>
@@ -562,7 +577,7 @@ jobs:
           <sparkle:shortVersionString>${VERSION}</sparkle:shortVersionString>
           <sparkle:minimumSystemVersion>${MIN_OS}</sparkle:minimumSystemVersion>
           <sparkle:releaseNotesLink>https://github.com/antgrid-ai/antgrid/releases/tag/${TAG}</sparkle:releaseNotesLink>
-          <enclosure url="https://github.com/antgrid-ai/antgrid/releases/download/${TAG}/antgrid-macos.dmg" ${ENCLOSURE_ATTRS} type="application/octet-stream"/>
+          <enclosure url="https://github.com/antgrid-ai/antgrid/releases/download/${TAG}/antgrid-macos-arm64.dmg" ${ENCLOSURE_ATTRS} type="application/octet-stream"/>
           </item>
           </channel>
           </rss>
@@ -570,21 +585,21 @@ jobs:
           # The feed ships straight to installed apps with no other check —
           # a malformed sign_update output or an odd tag must fail here, not
           # brick every install's update check until the next release.
-          xmllint --noout appcast.xml
+          xmllint --noout appcast-macos-arm64.xml
 
       - uses: actions/upload-artifact@v7
         # Exactly "the generate step ran" — no re-derived gate to keep in sync.
         if: ${{ steps.appcast.outcome == 'success' }}
         with:
           name: antgrid-appcast
-          path: appcast.xml
+          path: appcast-macos-arm64.xml
           if-no-files-found: error
 
       - uses: actions/upload-artifact@v7
         if: ${{ always() && steps.build.outcome == 'success' }}
         with:
-          name: antgrid-macos-${{ env.BUILD_MODE }}
-          path: antgrid-macos.dmg
+          name: antgrid-macos-arm64-${{ env.BUILD_MODE }}
+          path: antgrid-macos-arm64.dmg
           if-no-files-found: error
 
   windows:
@@ -628,23 +643,37 @@ jobs:
           # a lockfile bump dropped.
           key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
 
-      # The half of flutter-action's caching that is worth its bytes. Flutter
-      # puts PUB_CACHE at %LOCALAPPDATA%\Pub\Cache on Windows and ~/.pub-cache
-      # everywhere else; both are the SDK's own defaults, so this stays correct
-      # whether or not flutter-action exports PUB_CACHE itself.
+      # Cache the explicit workspace package directory used by native builds.
       - uses: actions/cache@v6
         with:
-          path: ${{ runner.os == 'Windows' && '~/AppData/Local/Pub/Cache' || '~/.pub-cache' }}
+          path: ${{ env.PUB_CACHE }}
           key: pub-${{ runner.os }}-${{ env.FLUTTER_VERSION }}-${{ hashFiles('**/pubspec.lock') }}
+
+      - name: Install Rust for native Flutter plugins
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: stable
 
       - name: Flutter pub get
         working-directory: app
-        run: flutter pub get
+        run: flutter pub get --enforce-lockfile
 
       - name: Install JS workspace deps
         # --ignore-scripts skips the root/web postinstall (Prisma client codegen
         # for the web service) — the desktop build never touches Postgres or web.
-        run: bun install --ignore-scripts
+        run: bun install --frozen-lockfile --ignore-scripts
+
+      - name: Verify pinned Iroh package sources
+        run: bun run scripts/check-iroh-packaging.ts
+
+      - name: Smoke compiled native host transport
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .tmp
+          bun build bridge/scripts/iroh-host-smoke.ts --compile --outfile .tmp/iroh-host-smoke.exe
+          ./.tmp/iroh-host-smoke.exe
 
       - name: Qualify native terminal frames
         working-directory: app
@@ -681,6 +710,9 @@ jobs:
         id: build
         working-directory: app
         run: flutter build windows --${{ env.BUILD_MODE }} --build-name=${{ needs.version.outputs.build_name }} --build-number=${{ needs.version.outputs.build_number }} --dart-define=SENTRY_DSN=${{ secrets.SENTRY_DSN }} --dart-define=APP_VERSION=${{ needs.version.outputs.name }} --dart-define=GIT_SHA=${{ needs.version.outputs.sha }} --dart-define=BUILD_TIME=${{ needs.version.outputs.built }}
+
+      - name: Verify Iroh source lock remained unchanged
+        run: bun run scripts/check-iroh-packaging.ts
 
       - name: Copy bridge into output folder
         if: ${{ steps.build.outcome == 'success' }}
@@ -827,13 +859,10 @@ jobs:
           # a lockfile bump dropped.
           key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
 
-      # The half of flutter-action's caching that is worth its bytes. Flutter
-      # puts PUB_CACHE at %LOCALAPPDATA%\Pub\Cache on Windows and ~/.pub-cache
-      # everywhere else; both are the SDK's own defaults, so this stays correct
-      # whether or not flutter-action exports PUB_CACHE itself.
+      # Cache the explicit workspace package directory used by native builds.
       - uses: actions/cache@v6
         with:
-          path: ${{ runner.os == 'Windows' && '~/AppData/Local/Pub/Cache' || '~/.pub-cache' }}
+          path: ${{ env.PUB_CACHE }}
           key: pub-${{ runner.os }}-${{ env.FLUTTER_VERSION }}-${{ hashFiles('**/pubspec.lock') }}
 
       # Flutter's Linux desktop toolchain + this app's plugin deps:
@@ -858,14 +887,31 @@ jobs:
             libsecret-1-dev libayatana-appindicator3-dev \
             libcurl4-openssl-dev libfuse2 zsync
 
+      - name: Install Rust for native Flutter plugins
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: stable
+
       - name: Flutter pub get
         working-directory: app
-        run: flutter pub get
+        run: flutter pub get --enforce-lockfile
 
       - name: Install JS workspace deps
         # --ignore-scripts skips the root/web postinstall (Prisma client codegen
         # for the web service) — the desktop build never touches Postgres or web.
-        run: bun install --ignore-scripts
+        run: bun install --frozen-lockfile --ignore-scripts
+
+      - name: Verify pinned Iroh package sources
+        run: bun run scripts/check-iroh-packaging.ts
+
+      - name: Smoke compiled native host transport
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .tmp
+          bun build bridge/scripts/iroh-host-smoke.ts --compile --outfile .tmp/iroh-host-smoke.exe
+          ./.tmp/iroh-host-smoke.exe
 
       - name: Qualify native terminal frames
         working-directory: app
@@ -901,6 +947,9 @@ jobs:
             --dart-define=APP_VERSION=${{ needs.version.outputs.name }} \
             --dart-define=GIT_SHA=${{ needs.version.outputs.sha }} \
             --dart-define=BUILD_TIME=${{ needs.version.outputs.built }}
+
+      - name: Verify Iroh source lock remained unchanged
+        run: bun run scripts/check-iroh-packaging.ts
 
       - name: Copy bridge into the app bundle
         if: ${{ steps.build.outcome == 'success' }}
@@ -1022,19 +1071,19 @@ jobs:
           # the site's stable download URLs point there.
           prerelease=""
           case "$TAG" in *-*) prerelease="--prerelease" ;; esac
-          # appcast.xml is absent when the macos job skipped it (unsigned
+          # appcast-macos-arm64.xml is absent when the macos job skipped it (unsigned
           # build). Publishing a STABLE release without it is only safe while
           # no installed app polls the feed yet: once one appcast-bearing
           # release exists, a stable release without one would 404
-          # releases/latest/download/appcast.xml for every installed app —
+          # releases/latest/download/appcast-macos-arm64.xml for every installed app —
           # fail instead. Prerelease tags never move `latest`, so they may
           # always publish without an appcast. The probe fails CLOSED like
           # its sibling in the macos job: only a definitive 404 proves nobody
           # polls the feed yet — treating a transient error (or a redirect
           # target rejecting the request) as 404 would ship the fleet-wide
           # feed breakage this guard exists to prevent.
-          if [ ! -f appcast.xml ] && [ -z "$prerelease" ]; then
-            APPCAST_URL="https://github.com/antgrid-ai/antgrid/releases/latest/download/appcast.xml"
+          if [ ! -f appcast-macos-arm64.xml ] && [ -z "$prerelease" ]; then
+            APPCAST_URL="https://github.com/antgrid-ai/antgrid/releases/latest/download/appcast-macos-arm64.xml"
             HTTP_CODE="$(curl -sSL --retry 3 -o /dev/null -w '%{http_code}' "$APPCAST_URL")" || HTTP_CODE=000
             if [ "$HTTP_CODE" = "200" ]; then
               echo "::error::installed apps already poll an appcast, but this release has none (unsigned build?) — publishing would break the update feed."
@@ -1044,8 +1093,8 @@ jobs:
               exit 1
             fi
           fi
-          assets="antgrid-macos.dmg antgrid-linux.AppImage antgrid-linux.AppImage.zsync"
-          [ -f appcast.xml ] && assets="$assets appcast.xml"
+          assets="antgrid-macos-arm64.dmg antgrid-linux.AppImage antgrid-linux.AppImage.zsync"
+          [ -f appcast-macos-arm64.xml ] && assets="$assets appcast-macos-arm64.xml"
           # Runs inside the clone (it reads the tag graph); the redirect is
           # opened in the workspace root, where the assets already are.
           ( cd _repo && RELEASE_SHA="$SHA" RELEASE_BUILT="$BUILT" \

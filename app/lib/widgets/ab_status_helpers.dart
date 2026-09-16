@@ -44,6 +44,7 @@ String _blockReasonLabel(BlockReason reason) => switch (reason) {
   BlockReason.superseded => 'Superseded',
   BlockReason.deviceRevoked => 'Device revoked',
   BlockReason.handshakeFailing => 'Handshake failing',
+  BlockReason.peerRejected => 'Connection rejected',
 };
 
 /// Human copy for a structured bridge/relay refusal, keyed by error CODE —
@@ -155,7 +156,10 @@ AbStatusTone sessionStateTone(TerminalSessionState state) {
   // Callers with a SupervisorStatus in hand should prefer
   // connectionDisplayInfo's block reason, which names the specific block.
   CheckoutReadiness.blocked => (AbStatusTone.danger, 'Blocked'),
-  CheckoutReadiness.reachingMachine => (AbStatusTone.warning, 'Reaching machine'),
+  CheckoutReadiness.reachingMachine => (
+    AbStatusTone.warning,
+    'Reaching machine',
+  ),
   CheckoutReadiness.openingSession => (AbStatusTone.warning, 'Opening session'),
   CheckoutReadiness.loadingScreen => (AbStatusTone.warning, 'Loading terminal'),
   // Names the AGENT, not a terminal: this is "no agent:status ever arrived",

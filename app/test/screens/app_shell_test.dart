@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:antgrid_relay_client/antgrid_relay_client.dart';
+import 'package:antgrid/providers/relay_connection.dart';
 
 import 'package:antgrid/models/terminal_models.dart';
 import 'package:antgrid/models/file_tree_models.dart';
@@ -19,6 +21,13 @@ import '../helpers/prefs_test_mock.dart';
 
 const _testAgentDeviceId = 'agent-123.test-project';
 
+class _ResumeManager extends RelayConnectionManager {
+  _ResumeManager() : super(crypto: CryptoService());
+  int resumes = 0;
+  @override
+  void noteResume() => resumes++;
+}
+
 void main() {
   late TestStoreOverrides stores;
 
@@ -29,10 +38,15 @@ void main() {
 
   tearDown(() => stores.close());
 
-  Widget buildTestShell({required double width}) {
+  Widget buildTestShell({
+    required double width,
+    RelayConnectionManager? manager,
+  }) {
     return ProviderScope(
       overrides: [
         ...stores.overrides,
+        if (manager != null)
+          relayConnectionManagerProvider.overrideWithValue(manager),
         selectedRegistrationIdProvider.overrideWith(
           (ref) => _testAgentDeviceId,
         ),
@@ -62,6 +76,28 @@ void main() {
   }
 
   group('AppShell layout', () {
+    testWidgets(
+      'one foreground transition refreshes remote authorization once',
+      (tester) async {
+        final manager = _ResumeManager();
+        addTearDown(manager.disposeAll);
+        await tester.pumpWidget(buildTestShell(width: 400, manager: manager));
+        await tester.pump();
+        final binding = tester.binding;
+        binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+        binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+        binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+        binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+        await tester.pump();
+        expect(manager.resumes, 0);
+        binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+        binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+        await tester.pump();
+        expect(manager.resumes, 1);
+        await tester.pumpWidget(const SizedBox.shrink());
+      },
+    );
+
     testWidgets('renders WorkspaceShell when paired', (tester) async {
       await tester.pumpWidget(buildTestShell(width: 1000));
       await tester.pump();

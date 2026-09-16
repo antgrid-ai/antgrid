@@ -1,3 +1,4 @@
+import { createHostPolicyFixture } from "./host-policy-fixture";
 import { test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -93,7 +94,7 @@ function tempRemoteFolder(): string {
 }
 
 test("HostServer.open starts a local core, list reflects it, get returns connect info", async () => {
-  host = new HostServer({});
+  host = createHostPolicyFixture({});
   const folder = tempFolder();
   const projectId = computeProjectId(folder);
 
@@ -110,7 +111,7 @@ test("HostServer.open starts a local core, list reflects it, get returns connect
 });
 
 test("HostServer.open rejects an id that is not the folder's resolved project id", async () => {
-  host = new HostServer({});
+  host = createHostPolicyFixture({});
   const folder = tempFolder();
   // The linked-worktree case in miniature: a caller naming a folder under some
   // other id would otherwise get a second core over the same repository.
@@ -120,7 +121,7 @@ test("HostServer.open rejects an id that is not the folder's resolved project id
 });
 
 test("HostServer.open accepts the resolved id and canonicalizes the path", async () => {
-  host = new HostServer({});
+  host = createHostPolicyFixture({});
   const folder = tempFolder();
   const projectId = computeProjectId(folder);
   const opened = await host.open(projectId, folder, "local");
@@ -133,7 +134,7 @@ test("HostServer.open gives a user-made linked worktree its own project, not the
     const proc = Bun.spawn(["git", ...args], { cwd, stdout: "ignore", stderr: "pipe" });
     if (await proc.exited !== 0) throw new Error(await new Response(proc.stderr).text());
   };
-  host = new HostServer({});
+  host = createHostPolicyFixture({});
   const repo = tempFolder();
   await runGit(repo, ["init"]);
   await runGit(repo, ["config", "user.email", "test@antgrid.local"]);
@@ -159,7 +160,7 @@ test("HostServer.open gives a user-made linked worktree its own project, not the
 });
 
 test("concurrent open() of the same project coalesces into one core (no orphan)", async () => {
-  host = new HostServer({});
+  host = createHostPolicyFixture({});
   const folder = tempFolder();
   const projectId = computeProjectId(folder);
 
@@ -176,7 +177,7 @@ test("concurrent open() of the same project coalesces into one core (no orphan)"
 });
 
 test("warm re-open re-stamps lastActiveAt AND persists it to projects.json", async () => {
-  host = new HostServer({});
+  host = createHostPolicyFixture({});
   const folder = tempFolder();
   const projectId = computeProjectId(folder);
   const projectsJson = join(abDir!, "agents", "projects.json");
@@ -198,7 +199,7 @@ test("warm re-open re-stamps lastActiveAt AND persists it to projects.json", asy
 });
 
 test("HostServer.stop tears a core down and drops it from the catalog", async () => {
-  host = new HostServer({});
+  host = createHostPolicyFixture({});
   const folder = tempFolder();
   const projectId = computeProjectId(folder);
   await host.open(projectId, folder, "local");
@@ -209,7 +210,7 @@ test("HostServer.stop tears a core down and drops it from the catalog", async ()
 });
 
 test("a host with no machine config still opens a local core", async () => {
-  host = new HostServer({}); // no remote config at all
+  host = createHostPolicyFixture({}); // no remote config at all
   const folder = tempFolder();
   const id = computeProjectId(folder);
   const opened = await host.open(id, folder, "local");
@@ -218,14 +219,14 @@ test("a host with no machine config still opens a local core", async () => {
 });
 
 test("opening a remote core with no machine config throws", async () => {
-  host = new HostServer({}); // no remote config
+  host = createHostPolicyFixture({}); // no remote config
   const folder = tempFolder();
   await expect(host.open(computeProjectId(folder), folder, "remote")).rejects.toThrow(/remote/i);
 });
 
 test("remote open builds the runtime once via the factory and reports mode 'remote'", async () => {
   let builds = 0;
-  host = new HostServer({
+  host = createHostPolicyFixture({
     remote: fakeRemoteConfig(),
     remoteRuntimeFactory: async () => { builds++; return fakeRuntime(); },
   });
@@ -246,7 +247,7 @@ test("concurrent first remote opens of distinct projects share one runtime build
   let builds = 0;
   let release!: () => void;
   const gate = new Promise<void>((r) => { release = r; });
-  host = new HostServer({
+  host = createHostPolicyFixture({
     remote: fakeRemoteConfig(),
     // Block inside the factory so both opens reach ensureRemoteRuntime while the
     // build is in flight — exercising the single-flight coalesce. Without it,
@@ -265,7 +266,7 @@ test("concurrent first remote opens of distinct projects share one runtime build
 });
 
 test("list() reports each core's mode", async () => {
-  host = new HostServer({});
+  host = createHostPolicyFixture({});
   const folder = tempFolder();
   const id = computeProjectId(folder);
   await host.open(id, folder, "local");
@@ -273,7 +274,7 @@ test("list() reports each core's mode", async () => {
 });
 
 test("HostServer evicts the least-recently-opened core past the warm cap", async () => {
-  host = new HostServer({ warmCap: 2 });
+  host = createHostPolicyFixture({ warmCap: 2 });
   const f1 = tempFolder(), f2 = tempFolder(), f3 = tempFolder();
   const id1 = computeProjectId(f1), id2 = computeProjectId(f2), id3 = computeProjectId(f3);
 
@@ -288,7 +289,7 @@ test("HostServer evicts the least-recently-opened core past the warm cap", async
 });
 
 test("control plane: project:open then project:list round-trip over HTTP", async () => {
-  host = new HostServer({});
+  host = createHostPolicyFixture({});
   const cp = await host.startControlPlane();
   const folder = tempFolder();
   const projectId = computeProjectId(folder);
@@ -318,7 +319,7 @@ test("control plane: project:open then project:list round-trip over HTTP", async
 });
 
 test("control plane: project:sessions peeks a warm core's live session list", async () => {
-  host = new HostServer({});
+  host = createHostPolicyFixture({});
   const cp = await host.startControlPlane();
   const folder = tempFolder();
   const projectId = computeProjectId(folder);
@@ -343,7 +344,7 @@ test("control plane: project:sessions peeks a warm core's live session list", as
 });
 
 test("control plane: project:sessions rejects a malformed projectId", async () => {
-  host = new HostServer({});
+  host = createHostPolicyFixture({});
   const cp = await host.startControlPlane();
   const res = await fetch(`http://127.0.0.1:${cp.port}/control`, {
     method: "POST",
@@ -355,7 +356,7 @@ test("control plane: project:sessions rejects a malformed projectId", async () =
 });
 
 test("shares one paired-phones store across cores", async () => {
-  host = new HostServer({});
+  host = createHostPolicyFixture({});
   const folderA = tempFolder();
   const folderB = tempFolder();
   const idA = computeProjectId(folderA);
@@ -375,7 +376,7 @@ test("shares one paired-phones store across cores", async () => {
 });
 
 test("startControlPlane writes host.json with the control port + token", async () => {
-  host = new HostServer({});
+  host = createHostPolicyFixture({});
   const cp = await host.startControlPlane();
   const { readHostFile, hostFilePath } = await import("../src/host-discovery");
   const hf = readHostFile(hostFilePath());
@@ -390,7 +391,7 @@ test("host:shutdown returns ok and fires onShutdownRequested (after the response
   // before teardown killed the control listener. Whether the deferred callback
   // fires before or after fetch() resolves is event-loop scheduling, not
   // contract, so don't assert on that ordering.
-  host = new HostServer({ onShutdownRequested: () => { shutdownCalls++; void host?.shutdown(); } });
+  host = createHostPolicyFixture({ onShutdownRequested: () => { shutdownCalls++; void host?.shutdown(); } });
   const cp = await host.startControlPlane();
 
   const res = await fetch(`http://127.0.0.1:${cp.port}/control`, {
@@ -417,7 +418,7 @@ test("host:shutdown returns ok and fires onShutdownRequested (after the response
 // proves that cadence is now a real, owned, disposable timer.
 test("startControlPlane's remote control plane runs pushHeartbeat on an actual cadence, and shutdown clears the timer", async () => {
   let calls = 0;
-  host = new HostServer({
+  host = createHostPolicyFixture({
     remote: fakeRemoteConfig(),
     remoteRuntimeFactory: () => Promise.resolve(fakeRuntime()),
     heartbeatIntervalMs: 15,
@@ -447,7 +448,7 @@ test("startControlPlane's remote control plane runs pushHeartbeat on an actual c
 // trusted-peers.json (the E2E-admission inventory cache) never refreshes on
 // exactly the path the wizard creates.
 test("a wizard-promoted host (no opts.remote) actually pushes on the heartbeat cadence", async () => {
-  host = new HostServer({
+  host = createHostPolicyFixture({
     remoteRuntimeFactory: () => Promise.resolve(fakeRuntime()),
     relayClientFactory: () => stubRelayClient(),
     heartbeatIntervalMs: 15,
@@ -495,7 +496,7 @@ test("prunes seen-catalog entries whose folder no longer exists, on load", () =>
   );
 
   // Construction loads + prunes + reflushes.
-  host = new HostServer({});
+  host = createHostPolicyFixture({});
 
   const after = JSON.parse(readFileSync(projectsJson, "utf8"));
   expect(after.projects.live).toBeDefined();
@@ -521,7 +522,7 @@ async function waitFor(predicate: () => boolean, what: string, timeoutMs = 10_00
 test(
   "a session-bus frame carries the project's configured antgrid.yaml name, not its folder name",
   async () => {
-    host = new HostServer({
+    host = createHostPolicyFixture({
       remote: fakeRemoteConfig(),
       remoteRuntimeFactory: () => Promise.resolve(fakeRuntime()),
       relayClientFactory: () => stubRelayClient(),
@@ -641,7 +642,7 @@ function busCoordinatorOf(host: HostServer): SessionBusCoordinator {
 test(
   "a local post reaches the target's mailbox with the desktop disconnected and remote access off",
   async () => {
-    host = new HostServer({}); // no remote config at all: no relay, no control plane
+    host = createHostPolicyFixture({}); // no remote config at all: no relay, no control plane
     const { sessionId: sessionA } = await openLocalSession(host, tempFolder(), "session-a");
     const { projectId: projectIdB, sessionId: sessionB } = await openLocalSession(host, tempFolder(), "session-b");
     expect(host.controlPlaneRegistrationId).toBeNull();
@@ -673,7 +674,7 @@ test(
 test(
   "a local notify reaches the target's delivery queue with the desktop disconnected and remote access off",
   async () => {
-    host = new HostServer({});
+    host = createHostPolicyFixture({});
     const { sessionId: sessionA } = await openLocalSession(host, tempFolder(), "session-a");
     const { projectId: projectIdB, sessionId: sessionB } = await openLocalSession(host, tempFolder(), "session-b");
 
@@ -714,7 +715,7 @@ test(
 test(
   "a local send never writes an entry into the carrier route table",
   async () => {
-    host = new HostServer({});
+    host = createHostPolicyFixture({});
     const { sessionId: sessionA } = await openLocalSession(host, tempFolder(), "session-a");
     const { projectId: projectIdB, sessionId: sessionB } = await openLocalSession(host, tempFolder(), "session-b");
 
@@ -742,7 +743,7 @@ test(
 test(
   "the E6 ack for a local post lands with no route in the table",
   async () => {
-    host = new HostServer({});
+    host = createHostPolicyFixture({});
     const { sessionId: sessionA } = await openLocalSession(host, tempFolder(), "session-a");
     const { projectId: projectIdB, sessionId: sessionB } = await openLocalSession(host, tempFolder(), "session-b");
 
@@ -778,7 +779,7 @@ test(
 test(
   "a send naming a different machineId is refused outright without a relay identity, never folded locally",
   async () => {
-    host = new HostServer({});
+    host = createHostPolicyFixture({});
     const { sessionId: sessionA } = await openLocalSession(host, tempFolder(), "session-a");
     const { projectId: projectIdB, sessionId: sessionB } = await openLocalSession(host, tempFolder(), "session-b");
 
@@ -813,7 +814,7 @@ test(
 test(
   "a send naming a different machineId goes through deps.send once this machine has a relay identity",
   async () => {
-    host = new HostServer({});
+    host = createHostPolicyFixture({});
     const { sessionId: sessionA } = await openLocalSession(host, tempFolder(), "session-a");
     const { projectId: projectIdB, sessionId: sessionB } = await openLocalSession(host, tempFolder(), "session-b");
     withRegistration(host, "machine-registered");
@@ -841,7 +842,7 @@ test(
 test(
   "a pair that exchanged before this machine registered still reaches itself afterwards",
   async () => {
-    host = new HostServer({});
+    host = createHostPolicyFixture({});
     const { sessionId: sessionA } = await openLocalSession(host, tempFolder(), "session-a");
     const { projectId: projectIdB, sessionId: sessionB } = await openLocalSession(host, tempFolder(), "session-b");
 
@@ -880,7 +881,7 @@ test(
 test(
   "a send naming a local session whose project core is not loaded returns false and holds the frame",
   async () => {
-    host = new HostServer({});
+    host = createHostPolicyFixture({});
     const { projectId: projectIdA, sessionId: sessionA } = await openLocalSession(host, tempFolder(), "session-a");
     const folderB = tempFolder();
     const { projectId: projectIdB, sessionId: sessionB } = await openLocalSession(host, folderB, "session-b");
@@ -931,7 +932,7 @@ test(
     // the exact "relay connection down" state 6.1 has to survive, since
     // `self()`'s LOCAL_MACHINE_ID fallback is keyed on the registration id
     // being absent, never on whether `opts.remote` itself is set.
-    host = new HostServer({
+    host = createHostPolicyFixture({
       remote: fakeRemoteConfig(),
       remoteRuntimeFactory: () => Promise.resolve(fakeRuntime()),
     });

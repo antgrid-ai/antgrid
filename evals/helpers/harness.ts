@@ -2,7 +2,8 @@ import { type Subprocess } from "bun";
 import { resolve, join } from "node:path";
 import { mkdtempSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { generateKeyPairSync, randomUUID, createHmac } from "node:crypto";
+import { generateKeyPairSync, randomUUID, randomBytes, createHmac } from "node:crypto";
+import { PeerAuthorizationFixture } from "./peer-authorization-fixture";
 import { createTestProject } from "./fixtures";
 import { RelayClient, type PhoneIdentity } from "./relay-client";
 import { DartAppClient } from "./dart-app-client";
@@ -189,6 +190,8 @@ function fakeLicenseGate(): LicenseGate {
  * mints an access token from the fake license API (below).
  */
 export interface EvalAuth {
+  userId: string;
+  endpointSecret: string;
   clientId: string;
   clientSecret: string;
   deviceUuid: string;
@@ -208,6 +211,8 @@ export function generateEvalAuth(): EvalAuth {
   const ed = generateKeyPairSync("ed25519");
   const x = generateKeyPairSync("x25519");
   return {
+    userId: EVAL_USER_ID,
+    endpointSecret: randomBytes(32).toString("base64"),
     clientId: `eval-client-${randomUUID()}`,
     clientSecret: "eval-secret",
     deviceUuid: randomUUID(),
@@ -219,6 +224,7 @@ export function generateEvalAuth(): EvalAuth {
 }
 
 export interface FakeLicenseApi {
+  provision(auth: EvalAuth): void;
   url: string;
   stop(): void;
   /** Arm the NEXT `mintAppToken()` call to return an already-expired app
@@ -254,14 +260,17 @@ export interface FakeLicenseApi {
  * Minimal stand-in for `web`'s OAuth + heartbeat endpoints. The agent in
  * remote mode mints an access token (`POST /api/auth/oauth2/token`) before
  * connecting to the relay, then POSTs a heartbeat on authenticate. The relay's
- * `fakeLicenseGate` accepts any non-empty token, so we return a fixed one and
- * 200 everything else (the heartbeat is best-effort on the agent side).
+ * `fakeLicenseGate` accepts non-empty tokens. Spawned agents receive a
+ * credential-bound fixture token and exercise signed endpoint enrollment and
+ * authoritative leases; this fixture does not qualify production JWT auth.
  *
  * For account-trust admission, the agent fetches its account's enrolled
  * app-device set from `GET /account/devices/me/peers` over this same Bearer
  * channel (see `bridge/src/trusted-peers.ts`'s `TrustedPeersProvider`). Pass
  * `opts.accountDevices` to seed known peers; absent → empty set.
  */
+const fixtureAuthorities = new Map<string, PeerAuthorizationFixture>();
+
 export function startFakeLicenseApi(
   opts: {
     accountPeerKeys?: string[];
@@ -275,14 +284,17 @@ export function startFakeLicenseApi(
   // Mutable: addAccountDevice pushes onto this SAME array, so the next
   // /account/devices/me/peers poll (closure reads it live) sees the addition.
   const devices: TrustedPeer[] = opts.accountDevices ? [...opts.accountDevices] : [];
+  const authority = new PeerAuthorizationFixture(() => devices);
   let expireNext = false;
   const server = Bun.serve({
     port: 0,
-    fetch(req) {
+    async fetch(req) {
       const url = new URL(req.url);
+      const peerResponse = await authority.handle(req);
+      if (peerResponse) return peerResponse;
       if (url.pathname === "/api/auth/oauth2/token") {
         return Response.json({
-          access_token: TEST_LICENSE_TOKEN,
+          access_token: authority.token(req.headers.get("authorization")) ?? TEST_LICENSE_TOKEN,
           token_type: "Bearer",
           expires_in: 3600,
         });
@@ -299,9 +311,13 @@ export function startFakeLicenseApi(
       return Response.json({ ok: true });
     },
   });
+  const apiUrl = `http://localhost:${server.port}`;
+  fixtureAuthorities.set(apiUrl, authority);
   return {
-    url: `http://localhost:${server.port}`,
+    url: apiUrl,
+    provision(auth) { authority.provision(auth); },
     stop() {
+      fixtureAuthorities.delete(apiUrl);
       server.stop(true);
     },
     expireNextToken() {
@@ -322,6 +338,7 @@ export function startFakeLicenseApi(
       return { ...identity, deviceId };
     },
     async revokeDevice(deviceId: string): Promise<void> {
+      authority.revoke(deviceId);
       if (!opts.relayInternalUrl) {
         throw new Error(
           "FakeLicenseApi.revokeDevice requires relayInternalUrl (setupTestEnv wires this automatically)",
@@ -437,11 +454,14 @@ export async function spawnAgent(opts: {
   /** Extra env vars (e.g. ANTGRID_EVAL_TEST=1 for pair-flow test hooks). */
   env?: Record<string, string>;
 }): Promise<AgentHandle> {
+  fixtureAuthorities.get(opts.licenseApiUrl)?.provision(opts.auth);
   const payload = {
     machine: {
       relayUrl: opts.relayUrl,
       licenseApiUrl: opts.licenseApiUrl,
       auth: {
+        userId: opts.auth.userId,
+        endpointSecret: opts.auth.endpointSecret,
         clientId: opts.auth.clientId,
         clientSecret: opts.auth.clientSecret,
         ed25519Pub: opts.auth.ed25519Pub,
@@ -831,7 +851,7 @@ export async function setupDartTestEnv(opts: {
 
   // v3: app hello now carries a mandatory license token; the Dart
   // eval CLI forwards it to RelayService.connect.
-  await app.connect(relay.url, TEST_LICENSE_TOKEN);
+  await app.connect(relay.url, TEST_LICENSE_TOKEN, deviceUuid);
   // Pair-free: the phone addresses the agent by the coordinates it already
   // holds (bare machine deviceUuid + pinned Ed25519 pub), because nothing hands
   // it a peer id any more.

@@ -14,7 +14,7 @@ import { test, expect, type Page } from "@playwright/test";
 // The raw artifacts — what a click has to actually FETCH. These are what the
 // download page fires, and the only thing that counts as a download starting.
 const DOWNLOADS = {
-  macos: "https://github.com/antgrid-ai/antgrid/releases/latest/download/antgrid-macos.dmg",
+  macos: "https://github.com/antgrid-ai/antgrid/releases/latest/download/antgrid-macos-arm64.dmg",
   windows: "https://get.microsoft.com/installer/download/9N0P7ZRL4D9W?referrer=appbadge&cid=site",
   linux: "https://github.com/antgrid-ai/antgrid/releases/latest/download/antgrid-linux.AppImage",
 };

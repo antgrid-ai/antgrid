@@ -1,3 +1,4 @@
+import { createHostPolicyFixture } from "./host-policy-fixture";
 import { test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -42,7 +43,7 @@ beforeEach(async () => {
   worktreeDir = join(abDir, "worktrees", "p1", "wt1");
   mkdirSync(worktreeDir, { recursive: true });
 
-  host = new HostServer({ remote: fakeRemoteConfig(), remoteRuntimeFactory: () => Promise.resolve(fakeRuntime()) });
+  host = createHostPolicyFixture({ remote: fakeRemoteConfig(), remoteRuntimeFactory: () => Promise.resolve(fakeRuntime()) });
   seedCatalog(host, "p1", projectDir);
   await new CheckoutStore(abDir, "p1").put({
     id: "wt1",

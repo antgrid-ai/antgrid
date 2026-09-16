@@ -131,7 +131,7 @@ The desktop app bundles the bridge that runs your agents — there is nothing el
 install on the machine.
 
 - **Windows** — [Microsoft Store](https://get.microsoft.com/installer/download/9N0P7ZRL4D9W?referrer=appbadge&cid=site)
-- **macOS** — [`antgrid-macos.dmg`](https://github.com/antgrid-ai/antgrid/releases/latest/download/antgrid-macos.dmg)
+- **macOS (Apple Silicon)** — [`antgrid-macos-arm64.dmg`](https://github.com/antgrid-ai/antgrid/releases/latest/download/antgrid-macos-arm64.dmg)
 - **Linux** — [`antgrid-linux.AppImage`](https://github.com/antgrid-ai/antgrid/releases/latest/download/antgrid-linux.AppImage)
 
 Every build, with release notes:

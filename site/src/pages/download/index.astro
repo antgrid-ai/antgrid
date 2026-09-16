@@ -27,7 +27,7 @@ const SCRIPT_BUILDS = JSON.stringify(
 // but run it, and padding it out to match its siblings would invent a step.
 const INSTALL = {
   windows: { file: "the Microsoft Store installer", step: "Run it, then launch antgrid from the Start menu." },
-  macos: { file: "antgrid-macos.dmg", step: "Open it and drag antgrid into Applications." },
+  macos: { file: "antgrid-macos-arm64.dmg", step: "Open it and drag antgrid into Applications." },
   linux: { file: "antgrid-linux.AppImage", step: "Make it executable, then run it:" },
 };
 const BUILDS = PLATFORMS.map((p) => ({ ...p, ...INSTALL[p.id as keyof typeof INSTALL] }));

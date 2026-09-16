@@ -49,7 +49,16 @@ final deviceProvisioningProvider = Provider<DeviceProvisioning>((ref) {
 Future<DeviceRecord> ensureCurrentUserDeviceRecord(dynamic ref) async {
   final store = ref.read(keychainDeviceStoreProvider);
   final existingRecord = await store.read();
-  if (existingRecord != null) return existingRecord;
+  if (existingRecord != null) {
+    if (existingRecord.endpointSecret != null) return existingRecord;
+    return ref
+        .read(deviceProvisioningProvider)
+        .ensureProvisioned(
+          userId: existingRecord.userId,
+          displayName: await hostDisplayName(),
+          existingDeviceUuid: existingRecord.deviceUuid,
+        );
+  }
 
   final user = await ref.read(currentUserProvider.future);
   if (user == null) {
@@ -121,7 +130,7 @@ Future<DeviceRecord?> resolveDeviceRecord(
 }) async {
   final store = ref.read(keychainDeviceStoreProvider);
   DeviceRecord? device = await store.read();
-  if (device == null) {
+  if (device == null || device.endpointSecret == null) {
     try {
       // Await the future (not .value): a still-pending currentUserProvider
       // for a genuinely signed-in user would otherwise read as null and silently

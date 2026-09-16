@@ -90,13 +90,17 @@ describe.skipIf(!HAVE_CODEX)("chat-session (codex)", () => {
           (m: any) =>
             m._streamId === streamId &&
             m.sessionId === sessionId &&
-            (m.type === "agent:item-added" || m.type === "agent:turn-end"),
-          10_000,
+            (m.type === "agent:item-added" || m.type === "agent:turn-end" ||
+              m.type === "agent:error"),
+          deadline - Date.now(),
         );
+        if (msg.type === "agent:error") {
+          throw new Error(`Codex turn failed: ${msg.error?.message ?? "unknown driver error"}`);
+        }
         if (msg.type === "agent:item-added") itemCount++;
         else if (msg.type === "agent:turn-end") turnEnded = true;
-      } catch {
-        break;
+      } catch (error) {
+        throw new Error("Codex turn did not complete", { cause: error });
       }
     }
     expect(turnEnded).toBe(true);

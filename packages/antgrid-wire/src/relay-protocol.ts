@@ -153,6 +153,11 @@ export const PongMessage = z.object({
   type: z.literal("pong"),
 });
 
+export const PeerPolicyChangedMessage = z.object({
+  type: z.literal("peer-policy-changed"),
+  generation: z.string().regex(/^(0|[1-9][0-9]{0,18})$/),
+});
+
 // Relay → Client discriminated union. Used by clients (e.g. the bridge) to
 // validate inbound relay-control messages before dispatching.
 export const ServerMessage = z.discriminatedUnion("type", [
@@ -164,6 +169,7 @@ export const ServerMessage = z.discriminatedUnion("type", [
   PeerOfflineMessage,
   PushResultMessage,
   PongMessage,
+  PeerPolicyChangedMessage,
 ]);
 
 // --- Sealed stream envelope (endpoint-internal) ---
@@ -198,4 +204,5 @@ export type ErrorCode = z.infer<typeof ErrorCode>;
 export type PeerOfflineMessage = z.infer<typeof PeerOfflineMessage>;
 export type PeerOnlineMessage = z.infer<typeof PeerOnlineMessage>;
 export type PongMessage = z.infer<typeof PongMessage>;
+export type PeerPolicyChangedMessage = z.infer<typeof PeerPolicyChangedMessage>;
 export type ServerMessage = z.infer<typeof ServerMessage>;

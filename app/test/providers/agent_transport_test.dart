@@ -18,6 +18,7 @@ import 'package:flutter_riverpod/misc.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/providers/account_agents.dart';
 import 'package:antgrid/providers/agent_transport.dart';
+import 'package:antgrid/providers/peer_runtime.dart';
 import 'package:antgrid/providers/connection_identity.dart';
 import 'package:antgrid/providers/device_provisioning.dart';
 import 'package:antgrid/providers/providers.dart';
@@ -86,6 +87,18 @@ class _FakeRelayService extends RelayService {
   @override
   void dispose() {
     unawaited(_states.close());
+  }
+
+  @override
+  Future<PeerSendOutcome> sendFrame(
+    String to,
+    String channel,
+    Uint8List payload, {
+    FrameKind kind = FrameKind.sealed,
+  }) async {
+    if (!isDispatchAllowed) return PeerSendOutcome.closed;
+    sendMessage(to, channel, payload, kind: kind);
+    return PeerSendOutcome.accepted;
   }
 
   @override
@@ -190,6 +203,8 @@ void main() {
     }) {
       return [
         ...stores.overrides,
+        // These fixtures isolate coordinates and E2E identity from HTTP enrollment.
+        peerRuntimeProvider.overrideWith((_) async => null),
         // Override accountAgentsProvider directly (not the API layer) so the
         // cache is immediately populated. _buildRelayTransportFor uses
         // `.value` to avoid adding async latency for unresolved cases.
@@ -373,6 +388,8 @@ void main() {
       final container = ProviderContainer(
         overrides: [
           ...stores.overrides,
+          // These fixtures isolate coordinates and E2E identity from HTTP enrollment.
+          peerRuntimeProvider.overrideWith((_) async => null),
           accountAgentsProvider.overrideWith((_) async => inventory),
           localDeviceUuidProvider.overrideWith((_) async => _localUuid),
           connectionDeviceRecordProvider.overrideWith(

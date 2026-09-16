@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
+import 'bounded_http_request.dart';
 import 'cookie_api_client.dart';
 import 'devices_api_contract.dart';
 
@@ -33,7 +34,9 @@ class DevicesApi extends CookieApiClient implements DevicesApiCreator {
   Future<List<DeviceSummary>> list() async {
     final cookie = await cookieProvider();
     if (cookie == null) throw Exception('Not signed in');
-    final res = await client.get(
+    final res = await boundedHttpRequest(
+      client,
+      'GET',
       Uri.parse('$licenseApiUrl/account/devices'),
       headers: {'cookie': cookie},
     );
@@ -58,7 +61,9 @@ class DevicesApi extends CookieApiClient implements DevicesApiCreator {
   Future<bool> revoke(String id) async {
     final cookie = await cookieProvider();
     if (cookie == null) return false;
-    final res = await client.delete(
+    final res = await boundedHttpRequest(
+      client,
+      'DELETE',
       Uri.parse('$licenseApiUrl/account/devices/$id'),
       headers: {'cookie': cookie},
     );
@@ -80,7 +85,9 @@ class DevicesApi extends CookieApiClient implements DevicesApiCreator {
     }
     http.Response res;
     try {
-      res = await client.post(
+      res = await boundedHttpRequest(
+        client,
+        'POST',
         Uri.parse('$licenseApiUrl/account/devices'),
         headers: {'content-type': 'application/json', 'cookie': cookie},
         body: jsonEncode({

@@ -12,6 +12,8 @@ import 'models/relay_license_error.dart';
 import 'models/relay_message.dart';
 import 'crypto_service.dart';
 import 'frame.dart';
+import 'frag.dart';
+import 'peer_link.dart';
 import 'relay_auth.dart';
 
 /// Why a single [RelayService.connect] attempt did not reach `welcome`.
@@ -65,7 +67,7 @@ typedef RelayNetTap = void Function(Map<String, Object?> event);
 /// ONE attempt per [connect], never a retry: redial timing, backoff and give-up
 /// belong to the app's connection supervisor, so there is exactly one component
 /// deciding when to try again.
-class RelayService {
+class RelayService implements PeerLink {
   final CryptoService _crypto;
   final RelayLogger? _logger;
   RelayNetTap? _netTap;
@@ -123,6 +125,9 @@ class RelayService {
   final _stateController = StreamController<AppState>.broadcast();
   final _messageController = StreamController<IncomingRouteMessage>.broadcast();
   final _errorController = StreamController<ErrorMessage>.broadcast();
+  final _policyGenerationController = StreamController<BigInt>.broadcast(sync: true);
+  Stream<BigInt> get policyGenerationStream => _policyGenerationController.stream;
+
   final _peerPresenceController = StreamController<bool>.broadcast();
 
   AppState _currentState = const AppState();
@@ -143,6 +148,54 @@ class RelayService {
   Stream<bool> get peerPresenceStream => _peerPresenceController.stream;
 
   AppState get currentState => _currentState;
+
+  @override
+  bool get isDispatchAllowed =>
+      currentState.connectionState == RelayConnectionState.authenticated;
+
+  @override
+  Stream<PeerLinkState> get payloadStateStream => stateStream.map((state) {
+    switch (state.connectionState) {
+      case RelayConnectionState.authenticated:
+        return PeerLinkState.ready;
+      case RelayConnectionState.disconnected:
+        return PeerLinkState.closed;
+      default:
+        return PeerLinkState.connecting;
+    }
+  }).distinct();
+
+  @override
+  Stream<PeerPath> get pathStream =>
+      payloadStateStream.map((_) => PeerPath.websocket).distinct();
+
+  @override
+  Stream<PeerLinkFailure> get failureStream => errorStream.map(
+    (error) => PeerLinkFailure(
+      code: error.code,
+      retryable: error.retryable,
+      channel: error.channel,
+      bytes: error.bytes,
+    ),
+  );
+
+  @override
+  Stream<void> get peerRestartStream {
+    var wasOffline = false;
+    return peerPresenceStream.transform(StreamTransformer<bool, void>.fromHandlers(
+      handleData: (online, sink) {
+        if (!online) {
+          wasOffline = true;
+        } else if (wasOffline) {
+          wasOffline = false;
+          sink.add(null);
+        }
+      },
+    ));
+  }
+
+  @override
+  Future<void> close() async => disconnect();
 
   RelayService({
     required CryptoService crypto,
@@ -516,6 +569,10 @@ class RelayService {
       _completeConnect();
     } else if (msg is ErrorMessage) {
       _handleError(msg);
+    } else if (msg is PeerPolicyChangedMessage) {
+      if (!_policyGenerationController.isClosed) {
+        _policyGenerationController.add(msg.generation);
+      }
     } else if (msg is PeerOnlineMessage) {
       if (!_isThisMachine(msg.peerId)) return;
       // Presence only — the connection state describes OUR socket, and the agent
@@ -784,12 +841,30 @@ class RelayService {
   /// Send a routed frame to the machine peer. [kind] defaults to `sealed`
   /// (encrypted app traffic); the E2E handshake sends its plaintext
   /// client-hello as `handshake`.
+  @override
+  Future<PeerSendOutcome> sendFrame(
+    String to,
+    String channel,
+    Uint8List payload, {
+    FrameKind kind = FrameKind.sealed,
+  }) async => _sendFrame(to, channel, payload, kind: kind);
+
   void sendMessage(
     String to,
     String channel,
     Uint8List payload, {
     FrameKind kind = FrameKind.sealed,
   }) {
+    _sendFrame(to, channel, payload, kind: kind);
+  }
+
+  PeerSendOutcome _sendFrame(
+    String to,
+    String channel,
+    Uint8List payload, {
+    FrameKind kind = FrameKind.sealed,
+  }) {
+    if (payload.length > kMaxFramePayload) return PeerSendOutcome.tooLarge;
     // Every outbound frame passes here, the E2E handshake's included
     // (connection_handshake.dart sends both its kind-1 client-hello and its
     // sealed reply through this method) — which is why the capture sits at the
@@ -816,7 +891,7 @@ class RelayService {
         'dropping outbound frame — socket not open',
         fields: {'channel': channel, 'bytes': payload.length},
       );
-      return;
+      return PeerSendOutcome.closed;
     }
     try {
       final frame = encodeRouteFrame(
@@ -833,6 +908,7 @@ class RelayService {
         'bytes': payload.length,
         'frameId': frameId,
       });
+      return PeerSendOutcome.accepted;
     } on FrameException catch (e) {
       // Dropped — caller can retry with a smaller payload.
       tap?.call({
@@ -854,6 +930,9 @@ class RelayService {
           'why': e.reason.name,
         },
       );
+      return PeerSendOutcome.failed;
+    } on Object {
+      return PeerSendOutcome.failed;
     }
   }
 
@@ -997,5 +1076,6 @@ class RelayService {
     _messageController.close();
     _errorController.close();
     _peerPresenceController.close();
+    _policyGenerationController.close();
   }
 }

@@ -101,6 +101,21 @@ class ScriptedMechanisms implements ConnMechanisms {
   }
 }
 
+class CentralMechanisms extends ScriptedMechanisms
+    implements CentralControlMechanisms {
+  bool needsCentral = true;
+  int centralCalls = 0;
+  final centralGate = Completer<void>();
+  @override
+  bool get centralControlNeedsReconnect => needsCentral;
+  @override
+  Future<void> reconnectCentral(ConnCoords coords, String token) async {
+    centralCalls++;
+    await centralGate.future;
+    needsCentral = false;
+  }
+}
+
 /// Lets microtasks and zero-duration timers drain. Backoffs in these tests are
 /// either 0ms or a few ms, so nothing here waits on real network-scale delays.
 Future<void> settle([int rounds = 16]) async {
@@ -142,6 +157,57 @@ void main() {
     addTearDown(sup.dispose);
     return sup;
   }
+
+  test(
+    'peer rejection is sticky across central inputs until explicit retry',
+    () async {
+      mech.agentOnlineValue = true;
+      final sup = build();
+      sup.setWanted(true);
+      await settle();
+      sup.notePeerRejected();
+      sup.notePresence(true);
+      sup.noteFreshToken();
+      sup.noteCoordsChanged();
+      sup.noteResume();
+      await settle();
+      expect(sup.status, const Blocked(BlockReason.peerRejected));
+      expect(mech.establishCalls, 1);
+      sup.retry();
+      await settle();
+      expect(sup.status, const Connected());
+    },
+  );
+
+  test(
+    'central maintenance is single-flight without blocking payload recovery',
+    () async {
+      final central = CentralMechanisms()..agentOnlineValue = true;
+      final sup = ConnectionSupervisor(
+        central,
+        backoffBaseMs: 100,
+        backoffCapMs: 100,
+        jitter: (_) => 0,
+      );
+      addTearDown(sup.dispose);
+      sup.setWanted(true);
+      await settle();
+      expect(sup.status, const Connected());
+      expect(central.centralCalls, 1);
+      central.sessionEstablishedValue = false;
+      sup.noteSessionDown();
+      sup.noteResume();
+      await settle();
+      expect(central.establishCalls, 2);
+      expect(central.centralCalls, 1);
+      expect(sup.status, const Connected());
+      central.centralGate.complete();
+      await settle();
+      expect(central.needsCentral, isFalse);
+      expect(central.dialCalls, 1);
+      expect(central.releaseCalls, 0);
+    },
+  );
 
   test(
     'an agent that is simply not running reaches Blocked(agentOffline) on its '

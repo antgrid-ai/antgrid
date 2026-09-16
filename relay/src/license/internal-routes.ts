@@ -1,5 +1,6 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
+import { DecimalGenerationSchema } from "antgrid-wire";
 import type { ServerWebSocket } from "bun";
 import { logger } from "../logger.js";
 import type { LicenseCache } from "./cache.js";
@@ -20,6 +21,11 @@ const RevokeBody = z.object({
   userId: z.string().min(1).max(256).optional(),
 });
 const ExpireBody = z.object({ userId: z.string().min(1).max(256) });
+const PeerPolicyBody = z.strictObject({
+  userId: z.string().min(1).max(256),
+  generation: DecimalGenerationSchema,
+  issuedAt: z.number().int(),
+});
 const ListConnectionsBody = z.object({
   issuedAt: z.number().int(),
   userId: z.string().min(1).max(256).optional(),
@@ -157,4 +163,22 @@ export async function handleExpire(req: Request, deps: InternalRouteDeps): Promi
   }
   logger.info("license_expire", { userId, devicesRevoked: ids.length, wsClosed: closed });
   return Response.json({ ok: true });
+}
+
+export async function handlePeerPolicy(req: Request, deps: InternalRouteDeps): Promise<Response> {
+  const verified = await verifyAndParse(req, deps.relayInternalSecret, PeerPolicyBody);
+  if (!verified.ok) return verified.response;
+  const { userId, generation, issuedAt } = verified.data;
+  if (Math.abs(Date.now() - issuedAt) > CONNECTIONS_MAX_SKEW_MS) {
+    return Response.json({ error: "STALE_REQUEST" }, { status: 401 });
+  }
+  const message = JSON.stringify({ type: "peer-policy-changed", generation });
+  let failed = false;
+  for (const connection of deps.connections.getConnectionsForUser(userId)) {
+    if (connection.ws.readyState !== 1) continue;
+    try {
+      if (connection.ws.send(message) === 0) failed = true;
+    } catch { failed = true; }
+  }
+  return Response.json({ ok: !failed }, { status: failed ? 503 : 200 });
 }

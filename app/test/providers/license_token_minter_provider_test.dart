@@ -11,6 +11,7 @@ import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/providers/auth.dart';
 import 'package:antgrid/providers/device_provisioning.dart';
 import 'package:antgrid/providers/connection_identity.dart';
+import 'package:antgrid/providers/peer_runtime.dart';
 import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/providers/recent_agents.dart';
 import 'package:antgrid/providers/relay_connection.dart';
@@ -187,6 +188,8 @@ void main() {
           (ref) async => connectionMinter,
         ),
         licenseTokenMinterProvider.overrideWith((ref) async => mainMinter),
+        // This fixture observes credential selection without HTTP enrollment.
+        peerRuntimeProvider.overrideWith((_) async => null),
         recentAgentsStoreProvider.overrideWithValue(recentStore),
         // The record the socket authenticates AS — a different deviceUuid from the
         // main record, so a mix-up is a different DEVICE IDENTITY, not just a

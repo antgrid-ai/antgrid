@@ -4,13 +4,27 @@ import { Netwatch, netwatch, frameIdFor, __resetNetwatchForTest, type NetwatchEv
 import { ControlListener } from "../src/control-listener";
 import { RelayClient } from "../src/relay-client";
 import { createMessage } from "../src/protocol";
-import { runNetwatchCli } from "../src/cli/netwatch";
+import { runNetwatchCli, renderEvent } from "../src/cli/netwatch";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { installFakeSession } from "./fake-session";
 
 describe("Netwatch ring", () => {
+  it("keeps native lifecycle observations distinct from transmitted frames", () => {
+    const w = new Netwatch(4);
+    expect(w.ingestRemote([{ at: 1, seq: 1, dir: "event", kind: "lifecycle", transport: "iroh",
+      msgType: "transport:selected", detail: { elapsedMs: 5 }, body: "untrusted" }])).toBe(1);
+    const event = w.snapshot()[0]!;
+    expect(event.bytes).toBeUndefined();
+    expect(event.frameId).toBeUndefined();
+    expect(event.body).toBeUndefined();
+    const rendered = renderEvent(event);
+    expect(rendered).toContain("iroh");
+    expect(rendered).toContain("event");
+    expect(rendered).not.toContain("relay");
+    expect(w.ingestRemote([{ at: 2, dir: "event", kind: "sealed" }])).toBe(0);
+  });
   it("keeps the newest events, oldest first, and reports what it evicted", () => {
     const w = new Netwatch(3);
     for (let i = 0; i < 5; i++) {

@@ -27,9 +27,22 @@ class _RecordingRelay extends RelayService {
   @override
   Stream<IncomingRouteMessage> get messageStream => _messages.stream;
   @override
+  bool get isDispatchAllowed => true;
+  @override
   Stream<AppState> get stateStream => const Stream.empty();
   @override
   AppState get currentState => const AppState();
+
+  @override
+  Future<PeerSendOutcome> sendFrame(
+    String to,
+    String channel,
+    Uint8List payload, {
+    FrameKind kind = FrameKind.sealed,
+  }) async {
+    sendMessage(to, channel, payload, kind: kind);
+    return PeerSendOutcome.accepted;
+  }
 
   @override
   void sendMessage(

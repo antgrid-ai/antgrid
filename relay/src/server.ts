@@ -25,7 +25,7 @@ import { JwksCache } from "./license/jwks-cache.js";
 import { LicenseCache } from "./license/cache.js";
 import { createLicenseGate, type LicenseGate } from "./license/gate.js";
 import { deviceTokenIssuer } from "./license/verify.js";
-import { handleRevoke, handleExpire, handleListConnections } from "./license/internal-routes.js";
+import { handleRevoke, handleExpire, handleListConnections, handlePeerPolicy } from "./license/internal-routes.js";
 import { resolveClientIp, type ClientIpDegradation } from "antgrid-wire";
 
 const VERSION = "0.1.0";
@@ -677,6 +677,11 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
       if (url.pathname === "/internal/revoke") {
         if (req.method !== "POST") return new Response("Method Not Allowed", { status: 405 });
         return handleRevoke(req, { licenseCache, connections, relayInternalSecret: config.relayInternalSecret });
+      }
+
+      if (url.pathname === "/internal/peer-policy") {
+        if (req.method !== "POST") return new Response("Method Not Allowed", { status: 405 });
+        return handlePeerPolicy(req, { licenseCache, connections, relayInternalSecret: config.relayInternalSecret });
       }
 
       if (url.pathname === "/internal/connections") {

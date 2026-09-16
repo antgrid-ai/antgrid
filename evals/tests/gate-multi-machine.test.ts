@@ -479,6 +479,7 @@ test("a switch at either end stops a cross-machine send, and only the sender's o
   // host-server.ts), so the address taken before it is stale until the app
   // pushes rows again.
   await setMobileAccess(a.env.abDir, true);
+  await carrier.reestablishRemote("a");
   await pumpAndExpectRows(carrier);
   await peerRow(a, sessionA, b, sessionB);
 

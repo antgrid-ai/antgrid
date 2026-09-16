@@ -126,6 +126,8 @@ export interface Carrier {
   /** The app coming back. The bridge's outbox retries on its own timer, so
    *  what it held while the app was gone goes out shortly after this. */
   attachApp(machine: MachineName): Promise<void>;
+  /** Re-establish E2E and project routing after remote access retired the keys. */
+  reestablishRemote(machine: MachineName): Promise<void>;
   /**
    * One cycle of the app's remote-directory pump, in both directions.
    *
@@ -358,6 +360,14 @@ class TwoBridgeCarrier implements Carrier {
     this.unsubscribe[machine] = client.on((m) => this.observe(m, machine, "loopback"));
     this.loopbacks[machine] = client;
     await client.connect(connect, { capabilities: { sessionBusCarrier: true } });
+  }
+
+  async reestablishRemote(machine: MachineName): Promise<void> {
+    const env = this.machines[machine].env;
+    await handshakeWithoutPairing(this.relays[machine], env.agentDeviceId, env.agent.ed25519Pubkey);
+    this.relayStreams[machine] = await resolveStream(this.relays[machine], env.projectId);
+    await handshakeWithoutPairing(env.app, env.agentDeviceId, env.agent.ed25519Pubkey);
+    await resolveStream(env.app, env.projectId);
   }
 
   async pumpDirectory(): Promise<DirectoryPush[]> {

@@ -9,6 +9,7 @@ import {
   handshakeWithoutPairing,
   RELAY_INTERNAL_SECRET,
   spawnAgent,
+  setMobileAccess,
   startFakeLicenseApi,
   startRelay,
   type AgentHandle,
@@ -128,6 +129,7 @@ test("pair-free session: E2E handshake + control-plane round trip with no pair-r
       auth,
       env: { ANTGRID_EVAL_TEST: "1" },
     });
+    await setMobileAccess(abDir, true);
     const deviceUuid = auth.deviceUuid;
 
     app = await RelayClient.connectAndAuth(relayWsUrl, {
@@ -177,6 +179,7 @@ test("relay restart, no re-pair: pair-free session re-establishes and the contro
       auth,
       env: { ANTGRID_EVAL_TEST: "1" },
     });
+    await setMobileAccess(abDir, true);
     const deviceUuid = auth.deviceUuid;
 
     app = await RelayClient.connectAndAuth(relayWsUrl, {
@@ -304,6 +307,7 @@ test("app whose device id is absent from the account inventory cannot establish 
       auth,
       env: { ANTGRID_EVAL_TEST: "1" },
     });
+    await setMobileAccess(abDir, true);
     const deviceUuid = auth.deviceUuid;
 
     // 1) CONTROL: a registered identity is admitted on this same agent —

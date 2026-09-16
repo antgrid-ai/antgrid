@@ -1,3 +1,4 @@
+import { createHostPolicyFixture } from "./host-policy-fixture";
 import { test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -65,7 +66,7 @@ afterEach(async () => {
 // fresh credentials can help, which is not something this process can do.
 test("a revoke verdict during the BOOT mint does not reach the fatal handler", async () => {
   let fatal = 0;
-  host = new HostServer({
+  host = createHostPolicyFixture({
     remote: remoteConfig(() => fatal++),
     // Stands in for OAuthClient rejecting the boot mint as invalid_client.
     remoteRuntimeFactory: (cfg) => {
@@ -82,7 +83,7 @@ test("a revoke verdict during the BOOT mint does not reach the fatal handler", a
 test("a revoke verdict after boot still reaches the fatal handler", async () => {
   let fatal = 0;
   let cfgSeen: HostRemoteConfig | null = null;
-  host = new HostServer({
+  host = createHostPolicyFixture({
     remote: remoteConfig(() => fatal++),
     remoteRuntimeFactory: (cfg) => {
       cfgSeen = cfg;

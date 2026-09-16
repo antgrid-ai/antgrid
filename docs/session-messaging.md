@@ -1,6 +1,6 @@
 # Session Messaging — Feature Spec
 
-> **v0.1 — supersedes `multi-machine-session.md`.**
+> **v0.1 — supersedes the retired multi-machine session design.**
 > That spec built a *session that spans machines*. User interviews (Sept 9) found
 > the machine was never the thing people wanted to join: they want **sessions to
 > reach each other**, on one machine or several, across agents from different
@@ -74,7 +74,7 @@ session only within budget (§7.4), because an agent's turn is the scarce thing.
 
 ## 3. Disposition of the previous decision log
 
-The single most useful table for anyone who knows `multi-machine-session.md`.
+This table records which decisions from the retired multi-machine design still apply.
 
 | # | Decision | Status |
 |---|---|---|

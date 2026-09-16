@@ -17,6 +17,36 @@ const baseSource = {
 };
 
 describe("loadEnv", () => {
+  test("Iroh relay discovery is explicit HTTPS and private policy targets stay separate", () => {
+    expect(loadEnv(baseSource).IROH_RELAY_URLS).toEqual([]);
+    expect(loadEnv(baseSource).PEER_POLICY_TARGETS).toEqual([]);
+    expect(loadEnv({ ...baseSource, IROH_RELAY_URLS: "https://relay.example/" }).IROH_RELAY_URLS).toEqual(["https://relay.example/"]);
+    for (const url of ["http://relay.example/", "https://user:secret@relay.example/", "https://relay.example/?token=secret"]) {
+      expect(() => loadEnv({ ...baseSource, IROH_RELAY_URLS: url })).toThrow();
+    }
+  });
+  test("the dev escape hatch widens the scheme only, and only off production", () => {
+    const dev = { ...baseSource, ANTGRID_DEV_INSECURE_RELAY: "true" };
+    expect(loadEnv({ ...dev, IROH_RELAY_URLS: "http://127.0.0.1:3000/" }).IROH_RELAY_URLS)
+      .toEqual(["http://127.0.0.1:3000/"]);
+    // A LAN origin is the point: a phone or emulator has to reach the stack.
+    expect(loadEnv({ ...dev, IROH_RELAY_URLS: "http://192.168.1.10:3000/" }).IROH_RELAY_URLS)
+      .toEqual(["http://192.168.1.10:3000/"]);
+    // Everything the strict predicate rejects stays rejected: this widens the
+    // scheme within a network the developer controls, it does not stop
+    // validating the origin, and it never reaches a public host.
+    for (const url of ["http://user:secret@relay.example/", "http://relay.example/?token=secret",
+      "http://relay.example/path", "http://relay.example/", "http://8.8.8.8:3000/"]) {
+      expect(() => loadEnv({ ...dev, IROH_RELAY_URLS: url })).toThrow();
+    }
+    // A minted snapshot carries the origin to every peer, so staging and
+    // production refuse to boot with the flag rather than serving a downgrade.
+    for (const NODE_ENV of ["staging", "production"]) {
+      expect(() => loadEnv({ ...dev, NODE_ENV, IROH_RELAY_URLS: "https://relay.example/" })).toThrow();
+    }
+    expect(loadEnv({ ...baseSource, IROH_RELAY_URLS: "https://relay.example/" }).IROH_RELAY_URLS)
+      .toEqual(["https://relay.example/"]);
+  });
   test("parses a valid env", () => {
     const env = loadEnv({
       NODE_ENV: "test",

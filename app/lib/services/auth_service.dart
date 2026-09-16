@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
+import 'bounded_http_request.dart';
 import 'package:url_launcher/url_launcher.dart' as url_launcher;
 
 import '../config/build_info.dart';
@@ -321,7 +322,9 @@ class AuthService {
     // any failure the cookie stays unset and the failure is reported on
     // [oauthFailures] so the sign-in screen can offer a retry.
     try {
-      final res = await _http.post(
+      final res = await boundedHttpRequest(
+        _http,
+        'POST',
         Uri.parse('$licenseApiUrl/api/auth/one-time-token/verify'),
         headers: {'content-type': 'application/json'},
         body: jsonEncode({'token': token}),
@@ -352,7 +355,9 @@ class AuthService {
     // transport we skip the server round-trip but still clear it locally.
     if (cookie != null && _transportIsSecure) {
       try {
-        await _http.post(
+        await boundedHttpRequest(
+          _http,
+          'POST',
           Uri.parse('$licenseApiUrl/api/auth/sign-out'),
           headers: {'cookie': cookie},
         );
@@ -380,7 +385,9 @@ class AuthService {
     Map<String, Object?> body,
   ) async {
     try {
-      return await _http.post(
+      return await boundedHttpRequest(
+        _http,
+        'POST',
         Uri.parse('$licenseApiUrl$path'),
         headers: {
           'content-type': 'application/json',
@@ -513,7 +520,9 @@ class AuthService {
     _assertSecureTransport();
     final http.Response res;
     try {
-      res = await _http.post(
+      res = await boundedHttpRequest(
+        _http,
+        'POST',
         Uri.parse('$licenseApiUrl/api/auth/sign-in/cross-device/start'),
         headers: {
           'content-type': 'application/json',
@@ -700,7 +709,9 @@ class AuthService {
     _assertSecureTransport();
     final http.Response res;
     try {
-      res = await _http.get(
+      res = await boundedHttpRequest(
+        _http,
+        'GET',
         Uri.parse('$licenseApiUrl/api/auth/sign-in/cross-device/status'),
         headers: {'cookie': 'antgrid.cross_device_token=${session.bindCookie}'},
       );
@@ -763,7 +774,9 @@ class AuthService {
     // /account/me joins the Better-Auth session to the active subscription
     // so we get the tier in one round-trip; /api/auth/get-session doesn't
     // know about subscriptions.
-    final res = await _http.get(
+    final res = await boundedHttpRequest(
+      _http,
+      'GET',
       Uri.parse('$licenseApiUrl/account/me'),
       headers: {'cookie': cookie},
     );

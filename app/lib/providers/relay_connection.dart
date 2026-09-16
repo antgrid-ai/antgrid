@@ -144,6 +144,7 @@ class RelayConnection {
       _noteAuthCode(code);
       supervisor.noteRelayError(code, retryable: false);
     };
+    mechanisms.onTerminalPeerError = supervisor.notePeerRejected;
     mechanisms.onSessionTakenOver = supervisor.noteSessionTakenOver;
     mechanisms.onSessionDown = supervisor.noteSessionDown;
     mechanisms.onSessionReplaced = () {
@@ -154,11 +155,10 @@ class RelayConnection {
     _subs.add(
       relay.stateStream.listen((s) {
         supervisor.noteSocketState(
-          authenticated:
-              s.connectionState.index >=
-              RelayConnectionState.authenticated.index,
+          authenticated: mechanisms.socketAuthenticated,
         );
-        if (s.connectionState == RelayConnectionState.disconnected) {
+        if (s.connectionState == RelayConnectionState.disconnected &&
+            !mechanisms.socketAuthenticated) {
           supervisor.noteSessionDown();
         }
       }),
@@ -166,6 +166,9 @@ class RelayConnection {
     _subs.add(
       relay.errorStream.listen((e) {
         _noteAuthCode(e.code);
+        if (!e.retryable && e.code.startsWith('LICENSE_')) {
+          mechanisms.peerRuntime?.invalidate();
+        }
         supervisor.noteRelayError(e.code, retryable: e.retryable);
         // A dropped frame is not a connection fault — the socket stays open and
         // the ladder is unaffected. It reaches the session so services holding
@@ -188,7 +191,12 @@ class RelayConnection {
     _subs.add(
       relay.peerPresenceStream.listen((online) {
         mechanisms.notePresence(online);
-        supervisor.notePresence(online);
+        supervisor.notePresence(mechanisms.agentOnline);
+      }),
+    );
+    _subs.add(
+      relay.policyGenerationStream.listen((generation) {
+        mechanisms.peerRuntime?.notePolicyGeneration(generation);
       }),
     );
     // Replays the supervisor's current status first, so subscribers that were
@@ -245,6 +253,7 @@ class RelayConnection {
   /// then hand the supervisor a plain re-evaluate so a connection sitting on a
   /// long backgrounded backoff climbs without waiting for that frozen timer.
   void noteResume() {
+    _mechanisms?.noteResume();
     relay.onResume();
     _supervisor?.noteResume();
   }

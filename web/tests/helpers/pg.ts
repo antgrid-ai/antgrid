@@ -19,6 +19,10 @@ export type PgHandle = {
 };
 
 const APP_TABLES = [
+  "peer_authorization_outbox",
+  "peer_authorization_policies",
+  "peer_endpoint_challenges",
+  "peer_endpoint_registrations",
   "oauth_consent",
   "oauth_access_token",
   "oauth_refresh_token",

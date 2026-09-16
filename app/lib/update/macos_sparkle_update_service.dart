@@ -27,7 +27,7 @@ class MacosSparkleUpdateService implements UpdaterListener {
   /// makes this URL stable across versions (prereleases never move it).
   /// Derived so the releases owner/repo lives in exactly one Dart constant.
   static const String appcastUrl =
-      '${GithubReleaseUpdateService.latestDownloadPageUrl}/download/appcast.xml';
+      '${GithubReleaseUpdateService.latestDownloadPageUrl}/download/appcast-macos-arm64.xml';
 
   final _noUpdateFound = StreamController<void>.broadcast();
   bool _listening = false;

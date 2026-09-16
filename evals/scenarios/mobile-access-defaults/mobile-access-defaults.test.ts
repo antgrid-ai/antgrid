@@ -12,10 +12,8 @@
 //      individually. This is the disclosure consequence of the collapse: there
 //      is no per-project opt-in left to hold anything back.
 //   2. OFF (the fresh-install default, asserted rather than assumed) → the
-//      phone still connects and handshakes — off is authorization, not
-//      presence — but the advert is empty and `project:start` is refused
-//      NOT_ALLOWED, for a project that is genuinely open and running on the
-//      host.
+//      phone still authenticates centrally, but remote E2E admission is refused
+//      for a project genuinely open and running on the host.
 //
 // Known Windows test noise (NOT failures): fs.watch EPERM/EBUSY on teardown,
 // temp-dir cleanup races. Judge by pass/fail counts.
@@ -39,7 +37,6 @@ import {
 } from "../../helpers/harness";
 import { createTestProject, type TestProject } from "../../helpers/fixtures";
 import { computeProjectId } from "../../../bridge/src/project-id";
-import { createMessage } from "../../../bridge/src/protocol";
 import { RelayClient } from "../../helpers/relay-client";
 
 /** POST a control-plane verb over the loopback control port (see host.json's
@@ -59,8 +56,7 @@ interface Machine {
   abDir: string;
   relay: RelayHandle;
   projectId: string;
-  /** Connect a same-account phone and complete the pair-free E2E handshake. */
-  connectPhone(name: string): Promise<RelayClient>;
+  connectPhone(name: string, admission?: "allowed" | "denied"): Promise<RelayClient>;
 }
 
 /**
@@ -102,7 +98,7 @@ async function withMachine(label: string, body: (m: Machine) => Promise<void>): 
       abDir,
       relay,
       projectId: computeProjectId(project.dir),
-      async connectPhone(name) {
+      async connectPhone(name, admission = "allowed") {
         const phone = await RelayClient.connectAndAuth(relayUrl, {
           deviceType: "app",
           name,
@@ -110,7 +106,16 @@ async function withMachine(label: string, body: (m: Machine) => Promise<void>): 
           deviceId: appIdentity.deviceId,
         });
         phones.push(phone);
-        await handshakeWithoutPairing(phone, auth.deviceUuid, auth.ed25519Pub);
+        if (admission === "allowed") {
+          await handshakeWithoutPairing(phone, auth.deviceUuid, auth.ed25519Pub);
+        } else {
+          let refused = false;
+          try {
+            await handshakeWithoutPairing(phone, auth.deviceUuid, auth.ed25519Pub,
+              { attempts: 2, perAttemptTimeoutMs: 1_000, gapMs: 200 });
+          } catch { refused = true; }
+          expect(refused).toBe(true);
+        }
         return phone;
       },
     });
@@ -163,30 +168,19 @@ test(
 );
 
 test(
-  "switch off (the fresh-install default): the phone still connects, but the catalog is empty and project:start is refused",
+  "switch off (the fresh-install default): central presence remains but remote E2E admission is refused",
   async () => {
     await withMachine("mobile-access-off", async (m) => {
       // A machine nobody has enabled must not be mobile-reachable. Read it back
       // rather than assuming: this is the default the whole product leans on.
       expect((await loopbackControl(m.abDir, { id: "get", type: "mobile-access:get" })).enabled).toBe(false);
 
-      // Off is authorization, not presence — the handshake still completes.
-      const phone = await m.connectPhone("eval-phone-defaults-off");
+      await m.connectPhone("eval-phone-defaults-off", "denied");
+      expect(m.relay.connectionCount()).toBeGreaterThanOrEqual(2);
 
-      await phone.pullStateSnapshot();
-      const advert = await phone.waitForAbType("agent:projects", 10_000);
-      expect(advert.projects).toEqual([]);
-
-      // firstProject is genuinely open and running on the host, so an empty
-      // advert is the switch talking, not an empty machine — and naming the
-      // project directly gets refused all the same.
+      // A running project proves denial is the switch talking, not an empty machine.
       expect((await loopbackControl(m.abDir, { id: "list", type: "project:list" })).projects
         .map((p: any) => p.projectId)).toContain(m.projectId);
-
-      phone.sendEncrypted(createMessage("project:start", { projectId: m.projectId }));
-      const denied = await phone.waitForAbType("control:result", 10_000);
-      expect(denied.ok).toBe(false);
-      expect((denied as any).error.code).toBe("NOT_ALLOWED");
     });
   },
   120_000,

@@ -21,6 +21,7 @@ import type { ProjectSummary, ConnectInfo, PairedPhoneSummary, KnownProject } fr
 import { logger } from "./logger";
 const log = logger.child({ component: "host-server" });
 import { RelayClient, type RelayClientOptions } from "./relay-client";
+import { IrohRelayClient, TransportModeSchema } from "./peer/iroh-relay-client";
 import type { MachineRelaySession } from "./relay-promotion";
 import type { AgentEnableRelay } from "./protocol";
 import { MessageBus, type Channel } from "./message-bus";
@@ -165,7 +166,7 @@ export interface HostRemoteConfig {
   relayUrl: string;
   licenseApiUrl: string;
   identity: DeviceIdentity;
-  auth: { clientId: string; clientSecret: string; deviceUuid: string };
+  auth: { clientId: string; clientSecret: string; deviceUuid: string; userId?: string; endpointSecret?: string };
   /** Called when OAuth detects the credential was revoked (host exits). */
   onAuthRevoked: () => void;
 }
@@ -752,7 +753,8 @@ export class HostServer {
    *  port + token (also written to host.json). */
   async startControlPlane(): Promise<{ port: number; token: string }> {
     const token = randomBytes(32).toString("base64url");
-    const listener = new ControlListener({ token, handler: (req) => this.handleControl(req) });
+    const listener = new ControlListener({ token, handler: (req) => this.handleControl(req),
+      onPeerResume: () => this.notePeerResume() });
     await listener.start();
     this.control = listener;
     writeHostFile(hostFilePath(), {
@@ -793,6 +795,13 @@ export class HostServer {
     return { port: listener.port, token };
   }
 
+  notePeerResume(): void {
+    if (this.controlPlaneRelay instanceof IrohRelayClient) {
+      void this.controlPlaneRelay.noteResume().catch((error) =>
+        log.warn("host: peer authorization refresh after resume failed: %s", String(error)));
+    }
+  }
+
   /** Open the always-on, coreless control-plane RelayClient registered under the
    *  bare deviceUuid (no projectId → registrationId === deviceUuid). It carries
    *  no preview tunnel and owns no terminal; it advertises the project catalog
@@ -815,7 +824,20 @@ export class HostServer {
       });
     }
 
-    const buildClient = this.opts.relayClientFactory ?? ((o: RelayClientOptions) => new RelayClient(o));
+    const mode = TransportModeSchema.parse(process.env.ANTGRID_PEER_TRANSPORT ?? "websocket");
+    if (mode === "iroh-only" && process.env.ANTGRID_TEST_MODE !== "1") {
+      throw new Error("iroh-only is restricted to evaluations");
+    }
+    const buildClient = this.opts.relayClientFactory ?? ((o: RelayClientOptions) => {
+      if (!r.auth.userId || !r.auth.endpointSecret) {
+        throw new Error("Remote transport requires a secure endpoint enrollment; sign in again");
+      }
+      return new IrohRelayClient({ ...o, mode,
+        enrollment: { accountId: r.auth.userId, deviceId: r.auth.deviceUuid, enrollmentId: r.auth.clientId },
+        endpointSecret: r.auth.endpointSecret, licenseApiUrl: r.licenseApiUrl,
+        remoteAccessEnabled: () => this.remoteAccessPolicy.isEnabled(),
+      });
+    });
     const client = buildClient({
       url: joinRelayWsPath(r.relayUrl),
       // Bare deviceUuid: this is the ONLY registration shape in v3 — one socket
@@ -921,6 +943,8 @@ export class HostServer {
         clientId: auth.clientId,
         clientSecret: auth.clientSecret,
         deviceUuid: auth.deviceUuid,
+        userId: auth.userId,
+        endpointSecret: auth.endpointSecret,
       };
       // The identity travels WITH the auth block. A sign-out rotates the whole
       // account device, so keeping the old Ed25519 pair here would sign the
@@ -946,7 +970,8 @@ export class HostServer {
           ed25519PublicKey: auth.ed25519Pub,
           ed25519PrivateKey: auth.ed25519Priv,
         },
-        auth: { clientId: auth.clientId ?? "", clientSecret: auth.clientSecret ?? "", deviceUuid: auth.deviceUuid },
+        auth: { clientId: auth.clientId ?? "", clientSecret: auth.clientSecret ?? "", deviceUuid: auth.deviceUuid,
+          userId: auth.userId, endpointSecret: auth.endpointSecret },
         onAuthRevoked: () => {},
       };
     }
@@ -954,7 +979,7 @@ export class HostServer {
     if (!this.controlPlaneRelay) await this.startRemoteControlPlane();
     const client = this.controlPlaneRelay!;
     return {
-      attachStream: (bus, opts) => client.attachStream(bus, opts),
+      attachStream: (bus, opts) => client.attachStream(bus, { ...opts, streamId: randomBytes(8).toString("hex") }),
       establishedPeers: () => client.establishedPeers(),
       peerSession: (peerId) => client.peerSession(peerId),
       sendPushDeliver: (m) => client.sendPushDeliver(m),
@@ -1239,6 +1264,7 @@ export class HostServer {
       case "mobile-access:set": {
         const changed = this.remoteAccessPolicy.setEnabled(req.enabled);
         if (changed && !req.enabled) {
+          if (this.controlPlaneRelay instanceof IrohRelayClient) this.controlPlaneRelay.recheckAuthorization();
           this.demoteAllPromoted();
           // A second, independent clear: `handleRemoteDirectoryPush`'s own
           // refusal path already clears on its next ingest attempt, but that
@@ -2731,7 +2757,7 @@ export class HostServer {
     if (!client) throw new Error("HostServer: machine relay socket not started (call startRemoteControlPlane first)");
     return {
       attachStream: (bus, opts) => {
-        const handle = client.attachStream(bus, opts);
+        const handle = client.attachStream(bus, { ...opts, streamId: randomBytes(8).toString("hex") });
         this.streamIds.set(projectId, handle.streamId);
         return {
           streamId: handle.streamId,

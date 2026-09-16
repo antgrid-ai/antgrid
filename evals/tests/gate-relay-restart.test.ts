@@ -8,6 +8,7 @@ import {
   handshakeWithoutPairing,
   RELAY_INTERNAL_SECRET,
   spawnAgent,
+  setMobileAccess,
   startFakeLicenseApi,
   type AgentHandle,
   type FakeLicenseApi,
@@ -116,6 +117,7 @@ test("relay restart: agent reconnects unattended; account trust recovers with no
       auth,
       env: { ANTGRID_EVAL_TEST: "1" },
     });
+    await setMobileAccess(abDir, true);
     const deviceUuid = auth.deviceUuid;
 
     app = await RelayClient.connectAndAuth(relayWsUrl, {

@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
+import 'package:antgrid_peer_transport/antgrid_peer_transport.dart';
 
 import '../config/native_crypto.dart';
 import '../models/ab_message.dart';
@@ -8,6 +9,8 @@ import '../services/license_token_minter.dart';
 import '../util/ab_log.dart';
 import 'connection_supervisor.dart';
 import 'supervisor_state.dart';
+import 'peer_runtime.dart';
+import '../util/detached.dart';
 
 /// Thrown when the supervisor has stopped climbing on purpose, so a caller
 /// awaiting the connection fails with the reason instead of hanging.
@@ -31,7 +34,7 @@ const Duration _kEstablishTimeout = Duration(seconds: 20);
 ///
 /// Every member is a single attempt with no retry of its own — the supervisor
 /// is the only thing that decides when to try again.
-class RelayMechanisms implements ConnMechanisms {
+class RelayMechanisms implements ConnMechanisms, CentralControlMechanisms {
   RelayMechanisms({
     required RelayService relay,
     required CryptoService crypto,
@@ -43,6 +46,8 @@ class RelayMechanisms implements ConnMechanisms {
     required Future<ConnCoords?> Function() resolveCoords,
     required Future<String> Function() mintToken,
     SessionHandshaker Function(String agentEd25519PubB64)? buildHandshaker,
+    this.peerRuntime,
+    this.peerTransportMode,
   }) : _buildHandshaker = buildHandshaker,
        _relay = relay,
        _crypto = crypto,
@@ -53,6 +58,52 @@ class RelayMechanisms implements ConnMechanisms {
        _epoch = epoch,
        _resolveCoords = resolveCoords,
        _mintToken = mintToken;
+
+  final PeerRuntime? peerRuntime;
+
+  /// Overrides [configuredPeerTransportMode] for tests, and is forwarded to
+  /// [PeerRuntime.select] so the mode that picked the transport is the mode
+  /// that decides what a failure on it means.
+  final PeerTransportMode? peerTransportMode;
+  PeerTransportMode get _peerMode =>
+      peerTransportMode ?? configuredPeerTransportMode;
+  final _selector = PeerLinkSelector();
+  PeerLink? _payloadLink;
+  PeerLink? _sessionLink;
+  StreamSubscription<PeerLinkFailure>? _peerFailureSub;
+  bool _runtimeRetained = false;
+  int _dialGeneration = 0;
+  bool _independentPayload = false;
+  bool get hasIndependentPayload => _independentPayload;
+  PeerLink get payloadLink => _payloadLink ?? _relay;
+  void Function()? onTerminalPeerError;
+
+  void noteResume() {
+    final runtime = peerRuntime;
+    if (runtime != null) {
+      detached('PeerRuntime', 'resume authorization', () async {
+        await runtime.resume();
+      });
+    }
+  }
+
+  Future<void>? _centralPending;
+  @override
+  bool get centralControlNeedsReconnect =>
+      hasIndependentPayload &&
+      payloadLink.isDispatchAllowed &&
+      _relay.currentState.connectionState != RelayConnectionState.authenticated;
+  @override
+  Future<void> reconnectCentral(ConnCoords coords, String token) =>
+      _centralPending ??= _relay
+          .connect(
+            coords.relayUrl,
+            _identity,
+            licenseToken: token,
+            epoch: _epoch,
+            machineDeviceId: _machineDeviceId,
+          )
+          .whenComplete(() => _centralPending = null);
 
   final RelayService _relay;
   final CryptoService _crypto;
@@ -76,7 +127,7 @@ class RelayMechanisms implements ConnMechanisms {
   /// no event for. Tied to [_session]'s lifetime, not the relay's: the relay
   /// outlives any single session, so a subscription left behind would go on
   /// retiring keys on behalf of a session that no longer exists.
-  StreamSubscription<AppState>? _socketDownSub;
+  StreamSubscription<PeerLinkState>? _socketDownSub;
 
   /// The agent Ed25519 key [_session]'s handshaker was pinned against. The pin
   /// is fixed at construction, so this is what tells a redial whether the live
@@ -162,33 +213,84 @@ class RelayMechanisms implements ConnMechanisms {
 
   @override
   Future<void> dial(ConnCoords coords, String token) async {
+    final generation = ++_dialGeneration;
     _lastCoords = coords;
-    // The session must exist before the socket carries traffic: the agent's
-    // handshake frames arrive on it, and one constructed later would have
-    // missed them.
-    await _ensureSession(coords.agentEd25519PubB64);
-
-    // Completes on `welcome`, so `socketAuthenticated` already reads true when
-    // this returns — the contract the supervisor scores the step against.
-    await _relay.connect(
-      coords.relayUrl,
-      _identity,
-      licenseToken: token,
-      epoch: _epoch,
-      machineDeviceId: _machineDeviceId,
-    );
+    final runtime = peerRuntime;
+    if (generation != _dialGeneration) return;
+    if (runtime == null) await _ensureSession(coords.agentEd25519PubB64);
+    if (runtime != null && !_runtimeRetained) {
+      runtime.retain();
+      _runtimeRetained = true;
+    }
+    final prior = _payloadLink;
+    _payloadLink = null;
+    _independentPayload = false;
+    if (prior != null) await prior.close();
+    if (generation != _dialGeneration) return;
+    final centralReady = reconnectCentral(coords, token);
+    centralReady.ignore();
+    if (runtime == null) await centralReady;
+    if (generation != _dialGeneration) return;
+    if (runtime != null) {
+      try {
+        final selection = await runtime.select(
+          selector: _selector,
+          relay: _relay,
+          machineDeviceId: _machineDeviceId,
+          machinePublicKey: coords.agentEd25519PubB64,
+          mode: _peerMode,
+          centralReady: centralReady,
+        );
+        final link = selection.link;
+        if (generation != _dialGeneration) {
+          await link.close();
+          return;
+        }
+        _payloadLink = link;
+        _independentPayload = selection.independent;
+        await _peerFailureSub?.cancel();
+        if (generation != _dialGeneration) {
+          await link.close();
+          return;
+        }
+        _peerFailureSub = link.failureStream.listen((failure) {
+          // Only the payload link died, so the relay socket's state stream
+          // reports nothing and the ladder has to be woken from here.
+          // Blocking is for the mode with nowhere to fall back to: under
+          // irohPreferred the redial re-runs PeerLinkSelector, which drops
+          // to WebSocket rather than stranding the machine.
+          if (!failure.retryable && _peerMode == PeerTransportMode.irohOnly) {
+            onTerminalPeerError?.call();
+          } else {
+            onSessionDown?.call();
+          }
+        });
+        await _ensureSession(coords.agentEd25519PubB64);
+      } on PeerSelectionFailure catch (error) {
+        if (error.terminal) onTerminalPeerError?.call();
+        rethrow;
+      } on PeerAuthorizationDenied {
+        onTerminalPeerError?.call();
+        rethrow;
+      } on FormatException {
+        onTerminalPeerError?.call();
+        rethrow;
+      }
+    }
   }
 
   @override
-  bool get socketAuthenticated =>
-      _relay.currentState.connectionState.index >=
-      RelayConnectionState.authenticated.index;
+  bool get socketAuthenticated => peerRuntime == null
+      ? _relay.currentState.connectionState.index >=
+            RelayConnectionState.authenticated.index
+      : _payloadLink?.isDispatchAllowed == true;
 
   /// Fed by the relay's `peer-online`/`peer-offline` for THIS machine — the
   /// service already filters presence frames to `machineDeviceId`, and a socket
   /// drop feeds `false` even when no peer-offline frame ever arrives.
   @override
-  bool get agentOnline => _agentOnline;
+  bool get agentOnline =>
+      hasIndependentPayload ? payloadLink.isDispatchAllowed : _agentOnline;
 
   /// Level input, pushed by [RelayConnection] from the relay's presence stream.
   ///
@@ -217,8 +319,8 @@ class RelayMechanisms implements ConnMechanisms {
     // socket dies is what lets a drop mid-handshake redial now instead of at
     // the end of the handshake driver's own attempt timeout.
     final dropped = Completer<void>();
-    final socketSub = _relay.stateStream.listen((s) {
-      if (s.connectionState != RelayConnectionState.disconnected) return;
+    final socketSub = payloadLink.payloadStateStream.listen((s) {
+      if (s != PeerLinkState.closed) return;
       if (!dropped.isCompleted) {
         dropped.completeError(
           StateError('socket dropped before the E2E handshake completed'),
@@ -244,6 +346,19 @@ class RelayMechanisms implements ConnMechanisms {
 
   @override
   Future<void> release() async {
+    _dialGeneration++;
+    _selector.cancel();
+    await _peerFailureSub?.cancel();
+    _peerFailureSub = null;
+    final payload = _payloadLink;
+    _payloadLink = null;
+    _independentPayload = false;
+    _sessionLink = null;
+    if (payload != null) await payload.close();
+    if (_runtimeRetained) {
+      peerRuntime?.release();
+      _runtimeRetained = false;
+    }
     final session = _session;
     _session = null;
     _sessionPin = null;
@@ -266,9 +381,13 @@ class RelayMechanisms implements ConnMechanisms {
   }
 
   Future<MachineSession> _ensureSession(String agentEd25519PubB64) async {
+    final generation = _dialGeneration;
     final existing = _session;
     if (existing != null) {
-      if (_sessionPin == agentEd25519PubB64) return existing;
+      if (_sessionPin == agentEd25519PubB64 &&
+          identical(_sessionLink, payloadLink)) {
+        return existing;
+      }
       // The coords step came back with a different agent identity — the host
       // re-provisioned. [AppSessionHandshaker] pins the key at construction, so
       // keeping this session would verify every agent-hello against a key that
@@ -281,23 +400,27 @@ class RelayMechanisms implements ConnMechanisms {
       _socketDownSub = null;
       await existing.dispose();
       retireNativeE2eCipherKeys();
+      if (generation != _dialGeneration) {
+        throw StateError('Session attempt superseded');
+      }
       // After the dispose, so a listener that rebuilds a transport off this
       // signal cannot observe the half-torn-down session it is replacing.
       onSessionReplaced?.call();
     }
     final session = MachineSession(
-      relay: _relay,
+      relay: payloadLink,
       machineDeviceId: _machineDeviceId,
-      handshaker: _buildHandshaker?.call(agentEd25519PubB64) ??
+      handshaker:
+          _buildHandshaker?.call(agentEd25519PubB64) ??
           AppSessionHandshaker(
-        relay: _relay,
-        crypto: _crypto,
-        machineDeviceId: _machineDeviceId,
-        phoneDeviceId: _phoneDeviceId,
-        agentEd25519PubB64: agentEd25519PubB64,
-        phoneEd25519Seed: _phoneEd25519Seed,
-        logger: _logHandshake,
-      ),
+            relay: payloadLink,
+            crypto: _crypto,
+            machineDeviceId: _machineDeviceId,
+            phoneDeviceId: _phoneDeviceId,
+            agentEd25519PubB64: agentEd25519PubB64,
+            phoneEd25519Seed: _phoneEd25519Seed,
+            logger: _logHandshake,
+          ),
       projectStartMessageBuilder: (projectId) =>
           createAbMessage('project:start', {'projectId': projectId}),
       logger: _logMachineSession,
@@ -319,13 +442,15 @@ class RelayMechanisms implements ConnMechanisms {
     // tears down on exactly this transition (its `_onState`), so watching the
     // socket here is reading the same signal it does rather than guessing at a
     // proxy for it.
-    _socketDownSub = _relay.stateStream.listen((s) {
-      if (s.connectionState == RelayConnectionState.disconnected) {
+    _socketDownSub = payloadLink.payloadStateStream.listen((s) {
+      if (s == PeerLinkState.closed) {
         retireNativeE2eCipherKeys();
+        onSessionDown?.call();
       }
     });
     session.start();
     _sessionPin = agentEd25519PubB64;
+    _sessionLink = payloadLink;
     return _session = session;
   }
 }

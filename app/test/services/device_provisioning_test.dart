@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/services/device_provisioning.dart';
 import 'package:antgrid/services/devices_api.dart';
@@ -5,10 +6,12 @@ import 'package:antgrid/services/keychain_device_store.dart';
 
 class FakeStorage implements DeviceSecretStorage {
   String? v;
+  bool failWrites = false;
   @override
   Future<String?> read() async => v;
   @override
   Future<void> write(String s) async {
+    if (failWrites) throw StateError('secure storage unavailable');
     v = s;
   }
 
@@ -41,6 +44,106 @@ class FakeDevicesApi implements DevicesApiCreator {
 }
 
 void main() {
+  for (final controller in [false, true]) {
+    test(
+      'cached ${controller ? "controller" : "primary"} gains one persistent endpoint key without changing identity',
+      () async {
+        final primary = FakeStorage();
+        final secondary = FakeStorage();
+        final store = KeychainDeviceStore(
+          storage: primary,
+          controllerStorage: secondary,
+        );
+        final legacy = DeviceRecord(
+          userId: 'owner',
+          deviceUuid: 'device',
+          clientId: 'client',
+          clientSecret: 'credential-secret',
+          ed25519Pub: 'ed-pub',
+          ed25519Priv: 'ed-secret',
+          x25519Pub: 'x-pub',
+          x25519Priv: 'x-secret',
+        );
+        if (controller) {
+          await store.writeController(legacy);
+        } else {
+          await store.write(legacy);
+        }
+        final api = FakeDevicesApi();
+        final service = DeviceProvisioning(
+          api: api,
+          store: store,
+          platform: 'linux',
+        );
+        Future<DeviceRecord> ensure() => controller
+            ? service.ensureControllerProvisioned(
+                userId: 'owner',
+                displayName: 'controller',
+              )
+            : service.ensureProvisioned(userId: 'owner', displayName: 'host');
+        final records = await Future.wait([ensure(), ensure(), ensure()]);
+        expect(
+          records.map((record) => record.endpointSecret).toSet(),
+          hasLength(1),
+        );
+        expect(base64Decode(records.first.endpointSecret!), hasLength(32));
+        final identity = records.first.toJson()..remove('endpointSecret');
+        expect(identity, legacy.toJson());
+        final stored = controller
+            ? await store.readController()
+            : await store.read();
+        expect(stored!.endpointSecret, records.first.endpointSecret);
+        expect((await ensure()).endpointSecret, records.first.endpointSecret);
+        expect(api.callCount, 0);
+      },
+    );
+
+    test(
+      'failed ${controller ? "controller" : "primary"} endpoint storage never returns an ephemeral identity',
+      () async {
+        final storage = FakeStorage();
+        final store = KeychainDeviceStore(
+          storage: controller ? FakeStorage() : storage,
+          controllerStorage: controller ? storage : FakeStorage(),
+        );
+        final legacy = DeviceRecord(
+          userId: 'owner',
+          deviceUuid: 'device',
+          clientId: 'client',
+          clientSecret: 'secret',
+          ed25519Pub: 'ed-pub',
+          ed25519Priv: 'ed-secret',
+          x25519Pub: 'x-pub',
+          x25519Priv: 'x-secret',
+        );
+        if (controller) {
+          await store.writeController(legacy);
+        } else {
+          await store.write(legacy);
+        }
+        storage.failWrites = true;
+        final api = FakeDevicesApi();
+        final service = DeviceProvisioning(
+          api: api,
+          store: store,
+          platform: 'linux',
+        );
+        final pending = controller
+            ? service.ensureControllerProvisioned(
+                userId: 'owner',
+                displayName: 'controller',
+              )
+            : service.ensureProvisioned(userId: 'owner', displayName: 'host');
+        await expectLater(pending, throwsA(isA<ProvisioningException>()));
+        final stored = controller
+            ? await store.readController()
+            : await store.read();
+        expect(stored!.toJson(), legacy.toJson());
+        expect(api.callCount, 0);
+      },
+    );
+  }
+
   test(
     'first-time provisioning generates keys, calls API, stores in keychain',
     () async {
@@ -57,6 +160,9 @@ void main() {
       expect(stored, isNotNull);
       expect(stored!.userId, 'user-1');
       expect(stored.clientId, rec.clientId);
+      expect(base64Decode(rec.endpointSecret!), hasLength(32));
+      expect(stored.endpointSecret, rec.endpointSecret);
+      expect(rec.endpointSecret, isNot(rec.ed25519Priv));
     },
   );
 
@@ -67,8 +173,36 @@ void main() {
     final r1 = await svc.ensureProvisioned(userId: 'u', displayName: 'h');
     final r2 = await svc.ensureProvisioned(userId: 'u', displayName: 'h');
     expect(r2.clientId, r1.clientId);
+    expect(r2.endpointSecret, r1.endpointSecret);
     expect(api.callCount, 1);
   });
+
+  test(
+    'bridge and controller endpoint keys have distinct enrollment lifetimes',
+    () async {
+      final store = KeychainDeviceStore(
+        storage: FakeStorage(),
+        controllerStorage: FakeStorage(),
+      );
+      final svc = DeviceProvisioning(
+        api: FakeDevicesApi(),
+        store: store,
+        platform: 'linux',
+      );
+      final bridge = await svc.ensureProvisioned(
+        userId: 'owner',
+        displayName: 'host',
+      );
+      final controller = await svc.ensureControllerProvisioned(
+        userId: 'owner',
+        displayName: 'controller',
+      );
+      expect(controller.endpointSecret, isNot(bridge.endpointSecret));
+      await store.clearController();
+      expect((await store.read())!.endpointSecret, bridge.endpointSecret);
+      expect(await store.readController(), isNull);
+    },
+  );
 
   test('identity mismatch clears keychain and re-provisions', () async {
     final store = KeychainDeviceStore(storage: FakeStorage());

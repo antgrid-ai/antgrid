@@ -45,6 +45,7 @@ class DeviceRecord {
     required this.ed25519Priv,
     required this.x25519Pub,
     required this.x25519Priv,
+    this.endpointSecret,
   });
 
   final String userId;
@@ -55,6 +56,7 @@ class DeviceRecord {
   final String ed25519Priv;
   final String x25519Pub;
   final String x25519Priv;
+  final String? endpointSecret;
 
   Map<String, dynamic> toJson() => {
     'userId': userId,
@@ -65,6 +67,7 @@ class DeviceRecord {
     'ed25519Priv': ed25519Priv,
     'x25519Pub': x25519Pub,
     'x25519Priv': x25519Priv,
+    if (endpointSecret != null) 'endpointSecret': endpointSecret,
   };
 
   static DeviceRecord fromJson(Map<String, dynamic> j) => DeviceRecord(
@@ -76,6 +79,7 @@ class DeviceRecord {
     ed25519Priv: j['ed25519Priv'] as String,
     x25519Pub: j['x25519Pub'] as String,
     x25519Priv: j['x25519Priv'] as String,
+    endpointSecret: j['endpointSecret'] as String?,
   );
 }
 

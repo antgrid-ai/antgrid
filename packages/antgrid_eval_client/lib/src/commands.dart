@@ -113,6 +113,7 @@ class CommandHandler {
       relayUrl,
       _identity!,
       licenseToken: licenseToken,
+      machineDeviceId: cmd['machineDeviceId'] as String?,
       // One dial per (freshly keyed) process, so there is never a prior
       // connection instance of this deviceId for the relay to arbitrate
       // against — the counter has nothing to advance past.

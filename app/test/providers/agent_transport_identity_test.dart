@@ -18,6 +18,7 @@ import 'package:antgrid/connection/connection_supervisor.dart';
 import 'package:antgrid/connection/relay_mechanisms.dart';
 import 'package:antgrid/providers/account_agents.dart';
 import 'package:antgrid/providers/agent_transport.dart';
+import 'package:antgrid/providers/peer_runtime.dart';
 import 'package:antgrid/providers/connection_identity.dart';
 import 'package:antgrid/providers/device_provisioning.dart';
 import 'package:antgrid/providers/providers.dart';
@@ -81,6 +82,18 @@ class _RecordingRelay extends RelayService {
   void disconnect() {
     _cur = const AppState();
     _states.add(_cur);
+  }
+
+  @override
+  Future<PeerSendOutcome> sendFrame(
+    String to,
+    String channel,
+    Uint8List payload, {
+    FrameKind kind = FrameKind.sealed,
+  }) async {
+    if (!isDispatchAllowed) return PeerSendOutcome.closed;
+    sendMessage(to, channel, payload, kind: kind);
+    return PeerSendOutcome.accepted;
   }
 
   @override
@@ -184,6 +197,8 @@ void main() {
     _RecordingRelay? on,
   }) => [
     ...stores.overrides,
+    // These fixtures isolate coordinates and E2E identity from HTTP enrollment.
+    peerRuntimeProvider.overrideWith((_) async => null),
     accountAgentsProvider.overrideWith((_) async => inventory),
     localDeviceUuidProvider.overrideWith((_) async => 'this-device'),
     connectionDeviceRecordProvider.overrideWith((_) async => record),

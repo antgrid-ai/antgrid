@@ -192,6 +192,9 @@ jobs:
             --dart-define=GIT_SHA=${{ steps.version.outputs.sha }} \
             --dart-define=BUILD_TIME=${{ steps.version.outputs.built }}
 
+      - name: Verify Iroh source lock remained unchanged
+        run: bun run scripts/check-iroh-packaging.ts
+
       - name: Verify 16 KB alignment
         run: |
           READELF="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"

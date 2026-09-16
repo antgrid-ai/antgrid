@@ -7,6 +7,8 @@
     "build": "bun build src/index.ts --compile --outfile dist/antgrid --define 'process.env.LICENSE_API_URL=\"https://app.antgrid.ai\"' --define 'process.env.ANTGRID_BRIDGE_COMPILED=\"1\"'",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
+    "qualify:iroh-host": "bun run scripts/iroh-host-smoke.ts",
+    "qualify:iroh-interop": "bun run scripts/iroh-interop-smoke.ts",
     "prototype:terminal": "bun run scripts/terminal-frame-prototype.ts",
     "bench:terminal-frames": "bun run scripts/terminal-frame-bench.ts",
     "qualify:terminal-frames": "bun run scripts/terminal-frame-qualify.ts"
@@ -26,6 +28,7 @@
     "pino": "9.7.0",
     "yaml": "^2.8.2",
     "zod": "^4.3.6",
+    "@number0/iroh": "1.1.0",
     "antgrid-agents": "workspace:*"
   },
   "devDependencies": {

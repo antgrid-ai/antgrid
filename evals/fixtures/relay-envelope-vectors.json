@@ -263,6 +263,14 @@
       }
     },
     {
+      "name": "peer-policy-changed",
+      "dart": "parsed",
+      "json": {
+        "type": "peer-policy-changed",
+        "generation": "9007199254740993"
+      }
+    },
+    {
       "name": "push:result",
       "dart": "tolerated",
       "json": {

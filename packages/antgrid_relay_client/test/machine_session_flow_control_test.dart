@@ -149,7 +149,9 @@ void main() {
 
     // Unawaited: its head blocks the channel, which is the state being tested.
     unawaited(
-      session.sendOnStream(kControlStreamId, {'type': 'project:list'}, 'control'),
+      session.sendOnStream(kControlStreamId, {
+        'type': 'project:list',
+      }, 'control'),
     );
     // Backdate rather than idle out the real 5s.
     s.blockedSince['control'] = DateTime.now().subtract(
@@ -158,7 +160,8 @@ void main() {
     s.kick();
 
     await _waitUntil(
-      () => logged.any((l) => l.startsWith('warn: send gate stalled on control')),
+      () =>
+          logged.any((l) => l.startsWith('warn: send gate stalled on control')),
     );
   });
 
@@ -634,6 +637,9 @@ void main() {
     );
 
     s.hold = false;
+    relay.setState(
+      const AppState(connectionState: RelayConnectionState.authenticated),
+    );
     await session.ensureEstablished();
     final fresh = [
       for (var i = 6; i < 9; i++)
@@ -684,42 +690,48 @@ void main() {
     await Future.wait(sends.take(4));
   });
 
-  test('a frame that arrives across a key swap is opened with the new keys', () async {
-    final k2 = fixedKeys(2);
-    final read2 = _copyOf(k2);
-    handshaker = FakeHandshaker.sequence([fixedKeys(1), k2]);
-    final session = await establish();
+  test(
+    'a frame that arrives across a key swap is opened with the new keys',
+    () async {
+      final k2 = fixedKeys(2);
+      final read2 = _copyOf(k2);
+      handshaker = FakeHandshaker.sequence([fixedKeys(1), k2]);
+      final session = await establish();
 
-    // The agent swaps to the new keys before it confirms them, so the frames it
-    // writes next are sealed under a set this side does not hold yet. The
-    // inbound chain captures the keys as a frame ARRIVES and decrypts it
-    // several turns later, which is the gap this frame lands in — so the frame
-    // is sealed up front and handed over in the same turn as the rekey
-    // trigger, with nothing awaited in between. That microtask ordering is what
-    // makes the case bite: an await added anywhere between the injection here
-    // and the swap would let the chain capture the new keys and open the frame
-    // on the first try, and the assertion below would hold for free.
-    final acrossSwap = await _sealFromAgent(read2, jsonEncode({'type': 'ping'}));
-    relay.inject(
-      IncomingRouteMessage(
-        from: 'machine-1',
-        channel: 'control',
-        kind: FrameKind.sealed,
-        payload: acrossSwap,
-      ),
-    );
-    for (var i = 0; i < 3; i++) {
-      session.notifyRpcResult(timedOut: true);
-    }
+      // The agent swaps to the new keys before it confirms them, so the frames it
+      // writes next are sealed under a set this side does not hold yet. The
+      // inbound chain captures the keys as a frame ARRIVES and decrypts it
+      // several turns later, which is the gap this frame lands in — so the frame
+      // is sealed up front and handed over in the same turn as the rekey
+      // trigger, with nothing awaited in between. That microtask ordering is what
+      // makes the case bite: an await added anywhere between the injection here
+      // and the swap would let the chain capture the new keys and open the frame
+      // on the first try, and the assertion below would hold for free.
+      final acrossSwap = await _sealFromAgent(
+        read2,
+        jsonEncode({'type': 'ping'}),
+      );
+      relay.inject(
+        IncomingRouteMessage(
+          from: 'machine-1',
+          channel: 'control',
+          kind: FrameKind.sealed,
+          payload: acrossSwap,
+        ),
+      );
+      for (var i = 0; i < 3; i++) {
+        session.notifyRpcResult(timedOut: true);
+      }
 
-    await _waitUntil(
-      () => relay.sent.isNotEmpty,
-      within: const Duration(milliseconds: 500),
-    );
-    expect(
-      (await _sessionFrames(read2, relay.sent)).map((j) => j['type']),
-      contains('pong'),
-      reason: 'the retry with the live keys is what saves this frame',
-    );
-  });
+      await _waitUntil(
+        () => relay.sent.isNotEmpty,
+        within: const Duration(milliseconds: 500),
+      );
+      expect(
+        (await _sessionFrames(read2, relay.sent)).map((j) => j['type']),
+        contains('pong'),
+        reason: 'the retry with the live keys is what saves this frame',
+      );
+    },
+  );
 }

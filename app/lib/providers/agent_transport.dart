@@ -37,6 +37,7 @@ import 'provider_retry.dart';
 import 'providers.dart';
 import 'recent_agents.dart';
 import 'relay_connection.dart';
+import 'peer_runtime.dart';
 import 'relay_error_banner.dart';
 import 'value_controller.dart';
 
@@ -314,9 +315,12 @@ Future<AgentTransport?> _buildRelayTransportFor(
   final minterResolver = ref.read(connectionMinterResolverProvider);
   var resolveCalls = 0;
 
+  final peerRuntime = await ref.read(peerRuntimeProvider.future);
+  if (!ref.mounted) throw StateError('Transport provider disposed');
   conn.ensureStarted(
     mechanisms: RelayMechanisms(
       relay: conn.relay,
+      peerRuntime: peerRuntime,
       crypto: crypto,
       machineDeviceId: base,
       identity: identity,
@@ -328,8 +332,8 @@ Future<AgentTransport?> _buildRelayTransportFor(
         // the supervisor re-runs this step precisely when the last answer has
         // stopped being dialable — a host that moved relay or re-provisioned
         // its Ed25519 identity — and replaying the same values would make the
-        // re-resolve pointless. The first call reuses whatever the inventory
-        // already holds; later ones refresh it, because they only happen after
+        // re-resolve pointless. The first call uses the current inventory load;
+        // later ones refresh it, because they only happen after
         // the socket rung has failed against the previous answer.
         final refresh = resolveCalls++ > 0;
         return coordsResolver.resolve(
@@ -444,9 +448,20 @@ class ConnectionCoordsResolver {
             : null;
       }
     } else {
-      // Whatever the inventory already holds — the first resolve must not put a
-      // network round-trip in front of the very first dial.
-      inventory = _ref.read(accountAgentsProvider).value;
+      // A persisted key can predate a host re-enrollment. Resolve the inventory
+      // already loading at startup before comparing it to a fresh peer lease.
+      final current = _ref.read(accountAgentsProvider);
+      inventory = current.value;
+      if (current.isLoading || inventory == null) {
+        try {
+          inventory = await _ref
+              .read(accountAgentsProvider.future)
+              .timeout(_kCoordsInventoryTimeout);
+        } catch (_) {
+          // The cached key remains usable only if the authoritative lease
+          // subsequently confirms it.
+        }
+      }
     }
     if (!_ref.mounted) return fallback;
     final cached = _ref

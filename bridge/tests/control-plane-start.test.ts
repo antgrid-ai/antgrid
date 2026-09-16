@@ -1,3 +1,4 @@
+import { createHostPolicyFixture } from "./host-policy-fixture";
 import { test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -86,7 +87,7 @@ beforeEach(() => {
   prevAbDir = process.env.ANTGRID_DIR;
   abDir = mkdtempSync(join(tmpdir(), "antgrid-cp-start-abdir-"));
   process.env.ANTGRID_DIR = abDir;
-  host = new HostServer({
+  host = createHostPolicyFixture({
     remote: fakeRemoteConfig(),
     remoteRuntimeFactory: () => Promise.resolve(fakeRuntime()),
   });
@@ -154,7 +155,7 @@ test("open() throwing resolves to OPEN_FAILED (never rejects into the void calle
     JSON.stringify({ version: 1, projects: { boom: { path: tempFolder(), label: "boom" } } }),
   );
 
-  host = new HostServer({
+  host = createHostPolicyFixture({
     remote: fakeRemoteConfig(),
     remoteRuntimeFactory: () => Promise.reject(new Error("mint failed")),
   });
@@ -177,7 +178,7 @@ test("idempotent project:start on an already-promoted, relay-registered core re-
   // in REPLAY_TYPES), so the idempotent branch MUST publish it: a verb that
   // returns ok must emit the frame its caller awaits.
   await host?.shutdown();
-  host = new HostServer({
+  host = createHostPolicyFixture({
     remote: fakeRemoteConfig(),
     remoteRuntimeFactory: () => Promise.resolve(fakeRuntime()),
     relayClientFactory: makeAuthenticatingRelayFactory(),

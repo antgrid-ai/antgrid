@@ -52,6 +52,7 @@ const server: Array<{ name: string; dart: "parsed" | "tolerated"; json: unknown 
   { name: "peer-online", dart: "parsed", json: { type: "peer-online", peerId: AGENT_ID } },
   { name: "peer-offline", dart: "parsed", json: { type: "peer-offline", peerId: AGENT_ID } },
   { name: "pong", dart: "parsed", json: { type: "pong" } },
+  { name: "peer-policy-changed", dart: "parsed", json: { type: "peer-policy-changed", generation: "9007199254740993" } },
   {
     name: "push:result",
     dart: "tolerated",

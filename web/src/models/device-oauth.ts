@@ -1,4 +1,17 @@
 import type { Auth } from "../auth/better-auth.js";
+import { z } from "zod";
+
+const DeviceOAuthMetadata = z.object({
+  userId: z.string(), deviceUuid: z.string(), ed25519Pub: z.string(),
+});
+
+export function parseDeviceOAuthMetadata(value: unknown) {
+  // Better-Auth's JSON field adapter stores a JSON string in Prisma's Json column.
+  if (typeof value === "string") {
+    try { value = JSON.parse(value); } catch { value = null; }
+  }
+  return DeviceOAuthMetadata.safeParse(value);
+}
 
 /**
  * Create an OAuth client representing a Antgrid device. Stores
