@@ -42,14 +42,28 @@ jobs:
       - name: Outside patches must not touch the ELv2 boundary
         env:
           GH_TOKEN: ${{ github.token }}
-          # OWNER / MEMBER / COLLABORATOR are the inside set. Everything else —
+          # Pushing a branch to this repository requires write access, so a PR
+          # whose head branch lives here cannot be an outside patch. This is the
+          # load-bearing check.
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPO: ${{ github.event.pull_request.base.repo.full_name }}
+          # Only a fallback, for a maintainer working from a fork. OWNER /
+          # MEMBER / COLLABORATOR are the inside set and everything else —
           # CONTRIBUTOR, FIRST_TIME_CONTRIBUTOR, FIRST_TIMER, MANNEQUIN, NONE —
-          # is an outside author, including a first-time one with commit access
-          # pending.
+          # reads as outside. It is a DISPLAY attribute, not an authorization
+          # one: it answered CONTRIBUTOR for the repository owner on the first
+          # PR this ever ran against, which is why it cannot be the only gate.
           ASSOCIATION: ${{ github.event.pull_request.author_association }}
           PR: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
+
+          # Empty when the head fork has since been deleted; that falls through
+          # to the checks below rather than passing.
+          if [ -n "$HEAD_REPO" ] && [ "$HEAD_REPO" = "$BASE_REPO" ]; then
+            echo "Head branch is in $BASE_REPO — author has write access, nothing to enforce."
+            exit 0
+          fi
 
           case "$ASSOCIATION" in
             OWNER|MEMBER|COLLABORATOR)
