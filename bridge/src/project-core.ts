@@ -540,10 +540,10 @@ export class ProjectCore {
       // they see on a natively-remote core: `source` distinguishes the desktop's
       // loopback frames from relay frames after promotion, and `peerId` is what
       // every PER-DEVICE answer keys off (checkout routing, client generations,
-      // focus/read state). Dropping it collapsed every promoted phone onto the
-      // anonymous "relay" key and made `checkoutRoutingRefusal` read "frame
-      // carried no peer id" for all of them — a permanent refusal on any project
-      // holding an isolated session, which no reconnect can clear.
+      // focus/read state). Without it every promoted phone collapses onto the
+      // anonymous "relay" key and `checkoutRoutingRefusal` reads "frame carried
+      // no peer id" for all of them — a permanent refusal on any project holding
+      // an isolated session, which no reconnect can clear.
       coreInbound?.(msg, channel, source, peerId);
     });
   }
@@ -821,7 +821,6 @@ export class ProjectCore {
       try { this.bus?.publish(createMessage("agent:disconnecting", { reason }), "control"); } catch {}
       await new Promise((resolve) => setTimeout(resolve, 200));
     }
-    try { this.core?.setPeerSessionProvider(null); } catch {}
     // Remove the primary stream's push dispatcher (additive bus subscriber) before
     // detaching — deliver() would otherwise hand a frame to a torn-down stream.
     try { this.relayPushUnsub?.(); } catch {}
@@ -829,5 +828,11 @@ export class ProjectCore {
     try { await this.core?.shutdown(); } catch {}
     try { await this.listener?.stop(); } catch {}
     try { this.streamHandle?.detach(); } catch {}
+    // AFTER the detach, the order promote().stop() keeps: the core latches
+    // itself relay-attached for life, so a frame the still-attached stream
+    // admits while the lookup is already gone is refused
+    // CHECKOUT_ROUTING_UNAVAILABLE at error level — a routine close reading as a
+    // fault, once per frame the phone sends during the graceful PTY drain.
+    try { this.core?.setPeerSessionProvider(null); } catch {}
   }
 }
