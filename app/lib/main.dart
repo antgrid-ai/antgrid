@@ -123,6 +123,11 @@ Future<void> main() async {
       'JetBrains Mono NL',
     ], await rootBundle.loadString('assets/fonts/OFL.txt'));
   });
+  LicenseRegistry.addLicense(() async* {
+    yield LicenseEntryWithLineBreaks(const [
+      'Antgrid',
+    ], await rootBundle.loadString('assets/legal/LICENSE.md'));
+  });
   // Draw behind transparent system bars on mobile so the app's own dark
   // surfaces reach the screen edges (no opaque OS bar bands). Bar icon
   // brightness is applied per-palette via the AnnotatedRegion in AbApp.

@@ -1,14 +1,10 @@
 # Trademark policy
 
-Antgrid's source code is licensed under the [Elastic License 2.0](LICENSE.md).
-That licence covers copyright and patents. It does not grant any trademark
-rights — it says so directly, under **Limitations** ("Any use of the licensor's
-trademarks is subject to applicable law") and **No Other Rights** ("These terms
-do not imply any licenses other than those expressly granted in these terms").
-
-The two Apache-2.0 packages are no different: §6 of that licence excludes
-trademarks just as explicitly, and their `NOTICE` files say so. This policy
-applies to the whole project regardless of which licence a file falls under.
+Most Antgrid source code is licensed under [MPL-2.0](LICENSE.md), while
+`relay/` and `web/` remain ELv2. MPL section 2.1 expressly excludes rights in
+a contributor's trademarks, service marks, and logos; ELv2 likewise grants no
+broader trademark permission. Source availability therefore does not make the
+Antgrid product identity available for a fork.
 
 This file explains what that means in practice, so you do not have to guess.
 
@@ -70,13 +66,10 @@ ships a binary that tells the user it was published by Radha AI Products — wor
 than a name collision, because it is an affirmative claim of origin.
 
 These publisher strings identify **who distributed that binary**, which is why a
-fork must set its own. They are not the copyright notices ELv2 protects. That
-distinction matters: rebranding means replacing the marks that identify the
-product to users, and it does **not** mean stripping the licence. ELv2 separately
-requires you to keep the licensing and copyright notices intact, to pass these
-terms on to anyone who gets a copy from you, and to state prominently that you
-modified the software. Change the name, the icon and the publisher metadata;
-leave `LICENSE.md` and the source copyright headers alone.
+fork must set its own. They are not copyright notices. Rebranding means replacing
+the marks that identify the product to users; it does **not** mean stripping
+SPDX headers, licence texts, or notices. Change the name, icon, and publisher
+metadata; keep the licensing record intact.
 
 ## What needs permission
 

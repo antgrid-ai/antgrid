@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 import { raw } from "hono/html";
 // Same import-the-master rule as wordmark.tsx: the header and the URL handed
 // out for external brand use must not be able to drift.

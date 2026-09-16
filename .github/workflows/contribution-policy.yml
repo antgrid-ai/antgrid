@@ -1,0 +1,73 @@
+name: Contribution policy
+
+# Refuses outside patches to the Elastic-2.0 side of the licence boundary.
+#
+# GitHub ToS D.6 licenses a contribution under "the same terms" as the
+# repository's licence notice, and GitHub resolves that to ONE licence:
+# MPL-2.0, detected from the root LICENSE.md. A contribution to relay/ or web/
+# would therefore arrive under MPL-2.0 and land in an Elastic-2.0 file, carrying
+# MPL source-availability obligations into the two services ELv2 exists to
+# protect — and neither licence lets us relicense it afterwards.
+# packages/antgrid-wire is the same trap from the other side: both services
+# import it, so a contribution there is MPL-2.0 permanently.
+#
+# LICENSING.md and CONTRIBUTING.md carry the reasoning; .github/CODEOWNERS
+# routes the same paths to maintainer review. This is the half that does not
+# depend on anyone remembering.
+#
+# NOT paths-filtered on purpose: a required check that is skipped never reports,
+# and a PR waiting on a check that will never run cannot be merged. This runs on
+# every pull request and decides inside.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: contribution-policy-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  licence-boundary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # No checkout: the API answers which files the PR touches without one, and
+      # it is authoritative where a local diff would depend on picking the right
+      # merge base.
+      - name: Outside patches must not touch the ELv2 boundary
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # OWNER / MEMBER / COLLABORATOR are the inside set. Everything else —
+          # CONTRIBUTOR, FIRST_TIME_CONTRIBUTOR, FIRST_TIMER, MANNEQUIN, NONE —
+          # is an outside author, including a first-time one with commit access
+          # pending.
+          ASSOCIATION: ${{ github.event.pull_request.author_association }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          case "$ASSOCIATION" in
+            OWNER|MEMBER|COLLABORATOR)
+              echo "Author association is $ASSOCIATION — maintainer, nothing to enforce."
+              exit 0
+              ;;
+          esac
+
+          files=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}/files" \
+            --paginate --jq '.[].filename')
+          blocked=$(printf '%s\n' "$files" \
+            | grep -E '^(relay/|web/|packages/antgrid-wire/)' || true)
+
+          if [ -z "$blocked" ]; then
+            echo "No files under the ELv2 boundary — nothing to enforce."
+            exit 0
+          fi
+
+          echo "::error::This PR changes Elastic-2.0 licensed paths, which we cannot accept from outside contributors. See CONTRIBUTING.md — it is a licensing constraint, not a judgement on the change. Please open an issue instead."
+          printf '%s\n' "$blocked" | awk 'NR<=20'
+          exit 1

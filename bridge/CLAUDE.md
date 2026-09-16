@@ -8,7 +8,7 @@ What may be written in any `CLAUDE.md`, this one included, is governed by
 
 ## Agent adapters
 
-Agent definitions and runtime live in the ELv2 workspace package
+Agent definitions and runtime live in the MPL-2.0 workspace package
 `packages/antgrid-agents`. Its `src/agents/registry.ts` is the built-in registration
 entry point; `src/contracts.ts` and `package.json` describe the public interface.
 Bridge imports public package exports only. Provider invocation, storage knowledge,

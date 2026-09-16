@@ -48,6 +48,7 @@ import Wordmark from "./ui/Wordmark.astro";
         <div class="flex flex-col gap-2.5 text-note text-muted">
           <a href={links.privacy} class="hover:text-ink">Privacy</a>
           <a href={links.terms} class="hover:text-ink">Terms</a>
+          <a href={links.license} class="hover:text-ink">MPL-2.0 licence</a>
           <a href={links.refunds} class="hover:text-ink">Refunds</a>
         </div>
       </div>
@@ -64,6 +65,8 @@ import Wordmark from "./ui/Wordmark.astro";
       <a href={links.repo} class="inline-flex items-center gap-1.5 text-muted hover:text-ink">
         <Icon name="tabler:brand-github" width="13" height="13" />GitHub
       </a>
+      <span aria-hidden="true">·</span>
+      <a href={links.exactSource} class="text-muted hover:text-ink">Exact source</a>
       <span aria-hidden="true">·</span>
       <a href={links.company} class="group inline-flex items-center gap-1.5 text-muted hover:text-ink">
         <span>a product of</span>

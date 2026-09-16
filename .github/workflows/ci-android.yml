@@ -169,12 +169,12 @@ jobs:
       - name: Build release APK (arm64 only)
         if: steps.native.outputs.changed != 'true'
         working-directory: app
-        run: flutter build apk --release --target-platform android-arm64
+        run: flutter build apk --release --target-platform android-arm64 --dart-define=SOURCE_COMMIT=${{ github.sha }}
 
       - name: Build release AAB
         if: steps.native.outputs.changed == 'true'
         working-directory: app
-        run: flutter build appbundle --release
+        run: flutter build appbundle --release --dart-define=SOURCE_COMMIT=${{ github.sha }}
 
       # Gate the build: fail CI if any 64-bit lib regresses below 16 KB
       # alignment — e.g. a portable_pty repoint onto a prebuilt linked without

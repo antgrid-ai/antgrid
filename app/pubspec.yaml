@@ -247,6 +247,7 @@ flutter:
 
   assets:
     - assets/logo/
+    - assets/legal/
     # OFL 1.1 requires the licence travel with the font; bundling it as an
     # asset satisfies that, and main.dart feeds it to LicenseRegistry.
     - assets/fonts/OFL.txt

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 import { verify as edVerify } from "node:crypto";
 import type { ServerWebSocket } from "bun";
 import type { RelayConfig } from "./config.js";

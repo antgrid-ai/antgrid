@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 /**
  * Checkout client — billing modal on subscription page, then Paddle/Razorpay overlay.
  * Matches grisb-training: close wizard modal before opening payment SDK.

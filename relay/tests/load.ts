@@ -1,4 +1,7 @@
 #!/usr/bin/env bun
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 // v3-phase-R: this script still speaks the deleted v2 register/challenge
 // handshake and v2 RelayConfig shape (maxQueueMessages, stalePairTimeoutHours,
 // ...) — it will not run against the v3 relay. It's a manual perf harness, not
