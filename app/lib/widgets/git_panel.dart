@@ -13,6 +13,7 @@ import '../design/widgets/ab_confirm_dialog.dart';
 import '../design/widgets/ab_diff_stat.dart';
 import '../design/widgets/ab_disclosure_chevron.dart';
 import '../design/widgets/ab_empty_state.dart';
+import '../design/widgets/ab_fade_scroll.dart';
 import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_inline_banner.dart';
@@ -586,11 +587,11 @@ class _GitChangesHeader extends StatelessWidget {
   /// END, so Commit sits flush against the panel's right edge exactly as it
   /// did when this was a fixed-width row, and only overflows into a scroll
   /// — starting scrolled to Commit's end, never to Refresh's — once the
-  /// buttons genuinely don't fit. [_ScrollableActionsRow] fades whichever
-  /// edge is cut off, so a partly-hidden button reads as "scroll for more"
-  /// rather than a broken layout.
+  /// buttons genuinely don't fit. [AbFadeScroll] fades whichever edge is cut
+  /// off, so a partly-hidden button reads as "scroll for more" rather than a
+  /// broken layout.
   Widget _actionsCluster(BuildContext context) {
-    return _ScrollableActionsRow(children: _actions(context));
+    return AbFadeScroll(reverse: true, children: _actions(context));
   }
 
   /// The title half of the header. Everything in it except the title text is
@@ -760,99 +761,6 @@ class _GitChangesHeader extends StatelessWidget {
       // detector rather than absorbing), so hover still reaches the tooltip.
       triggerMode: TooltipTriggerMode.tap,
       child: button,
-    );
-  }
-}
-
-/// Wraps [_GitChangesHeader._actionsCluster]'s horizontal scroll with an edge
-/// fade on whichever side is currently cut off, tracked from the
-/// [ScrollController]'s own metrics rather than guessed from layout: a button
-/// clipped mid-glyph by the viewport boundary reads as a broken header, where
-/// a faded edge reads as "there's more, scroll for it".
-///
-/// `reverse: true` on the inner scroll view mirrors the metrics too —
-/// [ScrollMetrics.extentAfter] is what's hidden toward the row's leading
-/// (left) edge, where Refresh lives, and [ScrollMetrics.extentBefore] toward
-/// its trailing (Commit) edge.
-class _ScrollableActionsRow extends StatefulWidget {
-  const _ScrollableActionsRow({required this.children});
-
-  final List<Widget> children;
-
-  @override
-  State<_ScrollableActionsRow> createState() => _ScrollableActionsRowState();
-}
-
-class _ScrollableActionsRowState extends State<_ScrollableActionsRow> {
-  final _controller = ScrollController();
-  bool _fadeStart = false;
-  bool _fadeEnd = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller.addListener(_updateFades);
-    // Metrics don't exist until the first layout, and that first layout is
-    // exactly the "starts scrolled to Commit's end" case this exists to fix.
-    WidgetsBinding.instance.addPostFrameCallback((_) => _updateFades());
-  }
-
-  @override
-  void didUpdateWidget(covariant _ScrollableActionsRow oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    // The controller's own listener only fires on a scroll, so a rebuild that
-    // adds/removes an action (sync.hasRemote flipping, counts.hasChanges
-    // toggling Commit) needs its own nudge — same post-frame reasoning as
-    // initState's: this build's layout hasn't happened yet. Unconditional
-    // rather than diffing `children` (fresh, non-const widgets every build,
-    // so a diff would fire every time regardless) — `_updateFades` already
-    // no-ops via its own fadeStart/fadeEnd comparison when nothing changed.
-    WidgetsBinding.instance.addPostFrameCallback((_) => _updateFades());
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  void _updateFades() {
-    if (!_controller.hasClients) return;
-    final metrics = _controller.position;
-    final fadeStart = metrics.extentAfter > 0;
-    final fadeEnd = metrics.extentBefore > 0;
-    if (fadeStart == _fadeStart && fadeEnd == _fadeEnd) return;
-    setState(() {
-      _fadeStart = fadeStart;
-      _fadeEnd = fadeEnd;
-    });
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final scrollable = SingleChildScrollView(
-      controller: _controller,
-      scrollDirection: Axis.horizontal,
-      reverse: true,
-      child: Row(mainAxisSize: MainAxisSize.min, children: widget.children),
-    );
-    if (!_fadeStart && !_fadeEnd) return scrollable;
-    // dstIn keeps the row's own pixels and colors — the fade is purely an
-    // alpha mask, so it needs no knowledge of the panel's background color.
-    return ShaderMask(
-      blendMode: BlendMode.dstIn,
-      shaderCallback: (bounds) => LinearGradient(
-        begin: Alignment.centerLeft,
-        end: Alignment.centerRight,
-        colors: [
-          _fadeStart ? Colors.transparent : Colors.black,
-          Colors.black,
-          Colors.black,
-          _fadeEnd ? Colors.transparent : Colors.black,
-        ],
-        stops: const [0.0, 0.3, 0.7, 1.0],
-      ).createShader(bounds),
-      child: scrollable,
     );
   }
 }
@@ -1114,8 +1022,8 @@ class _SyncControl extends StatelessWidget {
     // what's being published, and the shorter label is what keeps this from
     // being the widest thing in the row — the header's actions cluster
     // anchors its scroll to the Commit end when everything doesn't fit
-    // (`_ScrollableActionsRow`), so the widest control here is the one most
-    // likely to end up scrolled mostly out of view.
+    // (`AbFadeScroll`), so the widest control here is the one most likely to
+    // end up scrolled mostly out of view.
     if (sync.canPublish) {
       return AbButton(
         label: 'Publish',

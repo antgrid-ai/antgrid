@@ -7,18 +7,20 @@ import '../../design/ab_tokens.dart';
 import '../../design/widgets/ab_button.dart';
 import '../../design/widgets/ab_chip.dart';
 import '../../design/widgets/ab_empty_state.dart';
+import '../../design/widgets/ab_fade_scroll.dart';
 import '../../design/widgets/ab_icon_button.dart';
 import '../../design/widgets/ab_inline_banner.dart';
 import '../../design/widgets/ab_label_chip.dart';
 import '../../design/widgets/ab_loading.dart';
+import '../../design/widgets/ab_menu.dart';
 import '../../design/widgets/ab_search_field.dart';
 import '../../design/widgets/ab_segmented.dart';
-import '../../design/widgets/ab_select_sheet.dart';
 import '../../design/widgets/ab_separator.dart';
 import '../../models/task.dart';
 import '../../providers/tasks.dart';
 import '../../services/tasks_api.dart';
 import '../../util/detached.dart';
+import '../new_session/environment_menu.dart' show PanelHint, PanelRow, PanelSectionHeader;
 import 'task_create_sheet.dart';
 import 'task_row.dart';
 import 'task_row_actions.dart';
@@ -118,18 +120,20 @@ class _ScopeBar extends ConsumerWidget {
           Expanded(
             // Five scopes overflow a narrow context panel, and a wrapped
             // primary control reads as two rows of unrelated chips. Scrolling
-            // keeps them one control.
-            child: SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              child: AbSegmented<TaskScope>(
-                segments: [
-                  for (final scope in TaskScope.values)
-                    AbSegment(value: scope, label: scope.label),
-                ],
-                selected: filter.scope,
-                onSelect: (scope) =>
-                    ref.read(taskFilterProvider.notifier).setScope(scope),
-              ),
+            // keeps them one control; the fade says there's more rather than
+            // letting DONE clip mid-glyph against the pane edge.
+            child: AbFadeScroll(
+              children: [
+                AbSegmented<TaskScope>(
+                  segments: [
+                    for (final scope in TaskScope.values)
+                      AbSegment(value: scope, label: scope.label),
+                  ],
+                  selected: filter.scope,
+                  onSelect: (scope) =>
+                      ref.read(taskFilterProvider.notifier).setScope(scope),
+                ),
+              ],
             ),
           ),
           const SizedBox(width: AbTokens.space8),
@@ -171,6 +175,11 @@ class _FilterBar extends ConsumerWidget {
         .where((l) => filter.labelIds.contains(l.id))
         .toList(growable: false);
 
+    // Repo scoping stays outside the compact-narrowing gate: it is how this
+    // list becomes the per-project view the drawer node used to be the only
+    // way to reach, so it must be reachable with zero other filters active.
+    final showStatusRow = !compact || filter.hasNarrowingFilters;
+
     return Padding(
       padding: const EdgeInsets.fromLTRB(
         AbTokens.space12,
@@ -188,52 +197,61 @@ class _FilterBar extends ConsumerWidget {
             onClear: () => controller.setQuery(''),
           ),
           const SizedBox(height: AbTokens.space6),
-          // Repo scoping stays outside the compact-narrowing gate below: it is
-          // how this list becomes the per-project view the drawer node used to
-          // be the only way to reach, so it must be reachable with zero other
-          // filters active.
-          const Align(
-            alignment: Alignment.centerLeft,
-            child: _RepoFilterChip(),
-          ),
-          if (!compact || filter.hasNarrowingFilters) ...[
-            const SizedBox(height: AbTokens.space6),
-            SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              child: Row(
-                children: [
-                  for (final status in TaskStatus.values)
-                    Padding(
-                      padding: const EdgeInsets.only(right: AbTokens.space4),
-                      child: AbChip.toggle(
-                        label: status.label,
-                        selected: filter.statuses.contains(status),
-                        onTap: () => controller.toggleStatus(status),
-                      ),
-                    ),
-                  // Only the labels already in the filter appear here; the rest
-                  // are reached from a row's chip or the detail's editor, which
-                  // is where the user is already looking at them.
-                  for (final label in activeLabels)
-                    Padding(
-                      padding: const EdgeInsets.only(right: AbTokens.space4),
-                      child: AbLabelChip(
-                        label: label.name,
-                        colorHex: label.color,
-                        selected: true,
-                        onTap: () => controller.toggleLabel(label.id),
-                      ),
-                    ),
-                  if (filter.hasNarrowingFilters)
-                    AbButton(
-                      label: 'Clear filters',
-                      compact: true,
-                      onTap: controller.clearFilters,
-                    ),
-                ],
+          // Repo, status and label chips share one scrollable row — folding
+          // what used to be two stacked rows into one buys the list back a
+          // full row of height without dropping any filter. "Clear filters"
+          // sits fixed at the trailing edge, outside the scroll: it's the
+          // only escape hatch once several chips are active, so it must stay
+          // reachable without scrolling past them to find it.
+          Row(
+            children: [
+              Expanded(
+                child: AbFadeScroll(
+                  children: [
+                    const _RepoFilterChip(),
+                    if (showStatusRow) ...[
+                      const SizedBox(width: AbTokens.space8),
+                      for (final status in TaskStatus.values)
+                        Padding(
+                          padding: const EdgeInsets.only(
+                            right: AbTokens.space4,
+                          ),
+                          child: AbChip.toggle(
+                            label: status.label,
+                            selected: filter.statuses.contains(status),
+                            onTap: () => controller.toggleStatus(status),
+                          ),
+                        ),
+                      // Only the labels already in the filter appear here;
+                      // the rest are reached from a row's chip or the
+                      // detail's editor, which is where the user is already
+                      // looking at them.
+                      for (final label in activeLabels)
+                        Padding(
+                          padding: const EdgeInsets.only(
+                            right: AbTokens.space4,
+                          ),
+                          child: AbLabelChip(
+                            label: label.name,
+                            colorHex: label.color,
+                            selected: true,
+                            onTap: () => controller.toggleLabel(label.id),
+                          ),
+                        ),
+                    ],
+                  ],
+                ),
               ),
-            ),
-          ],
+              if (filter.hasNarrowingFilters) ...[
+                const SizedBox(width: AbTokens.space6),
+                AbButton(
+                  label: 'Clear filters',
+                  compact: true,
+                  onTap: controller.clearFilters,
+                ),
+              ],
+            ],
+          ),
         ],
       ),
     );
@@ -246,6 +264,11 @@ class _FilterBar extends ConsumerWidget {
 /// server query: the fetch stays wide (see [TaskFilter.serverQuery]) so the
 /// drawer's per-project nodes are never emptied by a scope picked here, and
 /// this filter narrows the same client-side pass [visibleTasksProvider] does.
+///
+/// An anchored popup (`showAbPanel`), not a dialog — the same chrome the New
+/// Session composer's project picker uses (`widgets/new_session/project_menu.dart`'s
+/// `PanelRow` rows), so a handful of repo names doesn't cost a full-screen
+/// sheet.
 class _RepoFilterChip extends ConsumerWidget {
   const _RepoFilterChip();
 
@@ -268,23 +291,61 @@ class _RepoFilterChip extends ConsumerWidget {
     WidgetRef ref,
     Map<String, String> names,
   ) async {
-    final picked = await showAbSelect<String>(
-      context,
-      title: 'Repo',
-      single: true,
-      emptyMessage: 'No repos are bound to this account yet',
-      options: [
-        const AbSelectOption(value: '', label: 'All repos'),
-        for (final entry in names.entries)
-          AbSelectOption(value: entry.key, label: entry.value),
-      ],
-      selected: {ref.read(taskFilterProvider).projectId ?? ''},
+    final anchor = abMenuAnchorRect(context);
+    if (anchor == null) return;
+    final picked = await showAbPanel<Object?>(
+      context: context,
+      anchorRect: anchor,
+      builder: (_) => _RepoFilterPanel(
+        names: names,
+        selected: ref.read(taskFilterProvider).projectId,
+      ),
     );
-    final choice = picked?.firstOrNull;
-    if (choice == null) return;
+    // Dismissed (tap-outside / Esc) rather than a pick — leave the filter
+    // alone. Distinct from picking "All repos", which pops [_kAllRepos] to
+    // ask for a real clear.
+    if (picked == null) return;
     ref
         .read(taskFilterProvider.notifier)
-        .setProject(choice.isEmpty ? null : choice);
+        .setProject(identical(picked, _kAllRepos) ? null : picked as String);
+  }
+}
+
+/// Popped by the "All repos" row to mean "clear the filter" — distinct from
+/// the popup's own null-on-dismiss, which must leave the filter untouched.
+const Object _kAllRepos = Object();
+
+class _RepoFilterPanel extends StatelessWidget {
+  const _RepoFilterPanel({required this.names, required this.selected});
+
+  final Map<String, String> names;
+  final String? selected;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const PanelSectionHeader('Repo'),
+        PanelRow(
+          icon: AbIcons.folder,
+          label: 'All repos',
+          selected: selected == null,
+          onTap: () => Navigator.of(context).pop(_kAllRepos),
+        ),
+        if (names.isEmpty)
+          const PanelHint('No repos are bound to this account yet')
+        else
+          for (final entry in names.entries)
+            PanelRow(
+              icon: AbIcons.folder,
+              label: entry.value,
+              selected: entry.key == selected,
+              onTap: () => Navigator.of(context).pop(entry.key),
+            ),
+      ],
+    );
   }
 }
 
