@@ -152,7 +152,8 @@ describe("readRecentActivity", () => {
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, "handler-activity.jsonl"),
       `${JSON.stringify({ ...record(1), decision: "invented_later" })}\n`, "utf8");
-    expect(readRecentActivity(ab, "p1", 50).records[0]!.decision).toBe("invented_later");
+    const kind: string = readRecentActivity(ab, "p1", 50).records[0]!.decision;
+    expect(kind).toBe("invented_later");
   });
 
   it("reads only the tail of a log past the read window", () => {
