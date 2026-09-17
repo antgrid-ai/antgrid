@@ -171,19 +171,20 @@ Future<void> _pumpHalf(
   await tester.pump();
 }
 
-/// Chip labels render uppercased, so every finder here names them that way.
+/// Chip labels render as written (`AbChip.choice`), so finders name the
+/// phrase the user reads.
 AbChip _chip(WidgetTester tester, String label) =>
     tester.widget<AbChip>(find.widgetWithText(AbChip, label));
 
-const _ownChip = 'YOUR OWN';
+const _ownChip = 'Your own';
 
 /// Every chip the row offers when the machine has advertised all four presets.
 /// There is no chip for the unnamed default — the floor line carries that.
 const _allChips = [
-  'STAYS IN SCOPE',
-  'PROOF IT WORKS',
-  'WHAT COULD BREAK',
-  'READY TO SHIP',
+  'Stays in scope',
+  'Proof it works',
+  'What could break',
+  'Ready to ship',
   _ownChip,
 ];
 
@@ -362,8 +363,8 @@ void main() {
         value: _value(judgeTool: 'claude', lens: (roleId: 'pm', brief: null)),
       );
       final p = kDefaultPalette;
-      expect(_chip(tester, 'STAYS IN SCOPE').selected, isTrue);
-      expect(_chip(tester, 'STAYS IN SCOPE').color, p.accent);
+      expect(_chip(tester, 'Stays in scope').selected, isTrue);
+      expect(_chip(tester, 'Stays in scope').color, p.accent);
       // Exactly one: the accent is what says "this is what is running", and two
       // of them would be two answers to one question.
       final accented = tester
@@ -403,8 +404,8 @@ void main() {
       );
       // Still the user's choice to make — it starts working the moment the
       // judge is fixed — but it must not be painted as running.
-      expect(_chip(tester, 'PROOF IT WORKS').selected, isTrue);
-      expect(_chip(tester, 'PROOF IT WORKS').color, isNull);
+      expect(_chip(tester, 'Proof it works').selected, isTrue);
+      expect(_chip(tester, 'Proof it works').color, isNull);
       expect(find.text(handlerLensParkedBlurb), findsOneWidget);
       expect(find.textContaining(handlerJudgeParkedNotice('Codex')), findsOne);
     });
@@ -462,10 +463,10 @@ void main() {
         value: _value(judgeTool: 'claude'),
         lenses: const ['pm', 'qa'],
       );
-      expect(find.text('STAYS IN SCOPE'), findsOneWidget);
-      expect(find.text('PROOF IT WORKS'), findsOneWidget);
-      expect(find.text('WHAT COULD BREAK'), findsNothing);
-      expect(find.text('READY TO SHIP'), findsNothing);
+      expect(find.text('Stays in scope'), findsOneWidget);
+      expect(find.text('Proof it works'), findsOneWidget);
+      expect(find.text('What could break'), findsNothing);
+      expect(find.text('Ready to ship'), findsNothing);
       // No preset id, so unconditional regardless of what the machine
       // advertised (redesign spec §7).
       expect(find.text(_ownChip), findsOneWidget);
@@ -490,7 +491,7 @@ void main() {
 
       // One tap on any chip is what replaces it — the pick has to be a change
       // even though this app cannot say what it is replacing.
-      await tester.tap(find.text('STAYS IN SCOPE'));
+      await tester.tap(find.text('Stays in scope'));
       await tester.pump();
       expect(
         handlerSessionSettingsEdit(
@@ -519,7 +520,7 @@ void main() {
       final from = _value(judgeTool: 'claude');
       await _pump(tester, value: from, onChanged: (v) => sent = v);
 
-      await tester.tap(find.text('PROOF IT WORKS'));
+      await tester.tap(find.text('Proof it works'));
       await tester.pump();
 
       final edit = handlerSessionSettingsEdit(from, sent!);
@@ -644,12 +645,12 @@ void main() {
       // them it lands on — never a preset row plus a separate disclosure.
       await _pump(tester, value: _value(judgeTool: 'claude'));
 
-      await tester.tap(find.text('WHAT COULD BREAK'));
+      await tester.tap(find.text('What could break'));
       await tester.pump();
       for (final label in _allChips) {
         expect(
           _chip(tester, label).selected,
-          label == 'WHAT COULD BREAK',
+          label == 'What could break',
           reason: label,
         );
       }
@@ -665,7 +666,7 @@ void main() {
       // The floor line above the chips is what says a session with no lens is
       // still judged, so a chip restating it was a choice already made.
       await _pump(tester, value: _value(judgeTool: 'claude'));
-      expect(find.text('NOTHING EXTRA'), findsNothing);
+      expect(find.text('Nothing extra'), findsNothing);
       expect(find.byType(AbChip), findsNWidgets(_allChips.length));
       // The stored default: every chip unpicked rather than one standing in
       // for "none", and no blurb claiming a lens is running.
@@ -684,11 +685,11 @@ void main() {
       await _selectOwn(tester);
       expect(_ownField, findsOneWidget);
 
-      await tester.tap(find.text('READY TO SHIP'));
+      await tester.tap(find.text('Ready to ship'));
       await tester.pump();
       expect(_ownField, findsNothing);
 
-      await tester.tap(find.text('STAYS IN SCOPE'));
+      await tester.tap(find.text('Stays in scope'));
       await tester.pump();
       expect(_ownField, findsNothing);
     });
@@ -757,7 +758,7 @@ void main() {
         await tester.enterText(_ownField, 'watch the migrations');
         await tester.pump();
 
-        await tester.tap(find.text('STAYS IN SCOPE'));
+        await tester.tap(find.text('Stays in scope'));
         await tester.pump();
         expect(sent?.lens, (roleId: 'pm', brief: ''));
 

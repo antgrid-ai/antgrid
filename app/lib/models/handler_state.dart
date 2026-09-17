@@ -60,9 +60,9 @@ String handlerLensToWire(HandlerLens l) => switch (l) {
 };
 
 /// Picker label — the STANCE the preset takes, not the job title it used to be
-/// named for (a role name teaches nothing about what changes). Uppercased by
-/// `AbChip.toggle` at the call site, never here, so this stays the string a
-/// reader would actually say. Kept to 16 chars or under so the same word
+/// named for (a role name teaches nothing about what changes). Painted as
+/// written by `AbChip.choice` — the phrase is what the user reads to decide
+/// with, so nothing recases it. Kept to 16 chars or under so the same word
 /// serves the PA bar's tighter row (`handler_pa_bar.dart`) — one vocabulary,
 /// not a short set forked off this one.
 String handlerLensLabel(HandlerLens l) => switch (l) {
