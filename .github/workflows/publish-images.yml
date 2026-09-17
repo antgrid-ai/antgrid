@@ -105,6 +105,11 @@ jobs:
           tags: |
             ghcr.io/${{ steps.owner.outputs.owner }}/antgrid-${{ matrix.service }}:${{ steps.tag.outputs.tag }}
             ${{ steps.envname.outputs.env && format('ghcr.io/{0}/antgrid-{1}:{2}', steps.owner.outputs.owner, matrix.service, steps.envname.outputs.env) || '' }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}/tree/${{ github.sha }}
+            org.opencontainers.image.licenses=Elastic-2.0 AND MPL-2.0
+            org.opencontainers.image.documentation=https://github.com/${{ github.repository }}/blob/${{ github.sha }}/SOURCE_OFFER.md
           # Scoped per service, not per environment: main and development build
           # the same Dockerfile from the same lockfile, and splitting the scope
           # leaves the rarely-pushed prod half cold against GHA's 7-day eviction.

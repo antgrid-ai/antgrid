@@ -6,8 +6,8 @@ import { join } from "node:path";
 import {
   resolveCopilotSessionTitle,
   copilotSessionExistsSync,
-} from "../src/agents/github-copilot/title";
-import { resolveStructuredTitle } from "../src/agents/title-dispatch";
+} from "../../packages/antgrid-agents/src/agents/github-copilot/title";
+import { resolveStructuredTitle } from "../../packages/antgrid-agents/src/agents/title-dispatch";
 
 const dirs: string[] = [];
 

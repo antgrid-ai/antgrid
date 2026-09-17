@@ -107,13 +107,17 @@ interface IsolatedFixture {
 }
 
 /** Boot a core over the committed repo, attached to a fresh bus. `remote` boots
- *  it the way a relay-attached core runs, machine switch already on, so a refusal
- *  can only come from a per-device gate. */
-async function bootCore(remote = false): Promise<{ bus: MessageBus; sent: AbMessage[] }> {
+ *  it the way a relay-attached core runs, machine switch on unless the test
+ *  hands it a switch of its own, so a refusal can only come from a per-device
+ *  gate. */
+async function bootCore(
+  remote = false,
+  remoteAccessEnabled: () => boolean = () => true,
+): Promise<{ bus: MessageBus; sent: AbMessage[] }> {
   core = await buildAgentCore({
     folder: root,
     mode: remote ? "remote" : "local",
-    ...(remote ? { remoteAccessEnabled: () => true } : {}),
+    ...(remote ? { remoteAccessEnabled } : {}),
     worktreeSessionsSupported: true,
     identity: { deviceId: "agent", deviceName: "agent", createdAt: new Date().toISOString() },
   });
@@ -142,6 +146,21 @@ async function createSession(
   expect(result).toMatchObject({ type: "session:result", ok: true });
   if (result.type !== "session:result" || !result.session) throw new Error("session missing");
   return result.session;
+}
+
+/** Wire one attached device, resolving every peer id to a session that did or
+ *  did not declare `checkoutRouting`. This also latches the core as
+ *  relay-attached, so clearing the provider afterwards leaves it gated. */
+function attachDevice(checkoutRouting: boolean): void {
+  core!.setPeerSessionProvider((peerId) => ({
+    peerId, peerPubkey: "pub-app", checkoutRouting, reachable: true, pullsTree: false,
+  }));
+}
+
+const APP_PEER = "app-dev#machine-dev";
+
+function snapshotRequest(requestId: string): AbMessage {
+  return createMessage("request", { requestId, method: "state.snapshot", params: { types: ["*"] } });
 }
 
 async function checkoutPathOf(checkoutId: string): Promise<string> {
@@ -636,6 +655,177 @@ test.skipIf(process.platform === "win32")(
   },
   20000,
 );
+
+// A relay-attached core whose per-device lookup cannot answer must ANSWER, not
+// drop: `state.snapshot` is the only carrier of a relay checkout's agent:status,
+// so silence reads as a dead machine — a "session timeout" that is really a
+// refusal. A provider that always returns a session and merely toggles the
+// boolean cannot reach these arms, which is why each is driven explicitly.
+test("a refused RPC is answered, not dropped, when the device never declared checkoutRouting", async () => {
+  await initRepo();
+  const { bus, sent } = await bootCore(true);
+  await createSession(bus, sent, "Isolated", "worktree");
+  attachDevice(false);
+
+  sent.length = 0;
+  bus.dispatchInbound(snapshotRequest("snap-1"), "control", "relay", APP_PEER);
+
+  const answer = await waitFor(sent, (m) => m.type === "response" && m.requestId === "snap-1");
+  expect(answer).toMatchObject({
+    type: "response",
+    ok: false,
+    error: { code: "CHECKOUT_ROUTING_REQUIRED" },
+  });
+});
+
+test("a plain verb refused for checkout routing comes back as control:result", async () => {
+  await initRepo();
+  const { bus, sent } = await bootCore(true);
+  await createSession(bus, sent, "Isolated", "worktree");
+  attachDevice(false);
+
+  sent.length = 0;
+  bus.dispatchInbound(createMessage("config:read", {}), "control", "relay", APP_PEER);
+
+  const answer = await waitFor(sent, (m) => m.type === "control:result");
+  expect(answer).toMatchObject({
+    type: "control:result",
+    ok: false,
+    verb: "config:read",
+    error: { code: "CHECKOUT_ROUTING_REQUIRED" },
+  });
+});
+
+test("a refused session verb comes back as session:result, the frame its caller awaits", async () => {
+  // A reply on the wrong frame is not a reply: `sessions_service.dart` completes
+  // every pending session mutation off `session:result` + requestId, so a
+  // `control:result` here would leave the caller timing out exactly as a
+  // silent drop does.
+  await initRepo();
+  const { bus, sent } = await bootCore(true);
+  await createSession(bus, sent, "Isolated", "worktree");
+  attachDevice(false);
+
+  sent.length = 0;
+  bus.dispatchInbound(
+    createMessage("session:stop", { requestId: "stop-1", sessionId: "any" }),
+    "control", "relay", APP_PEER,
+  );
+
+  const answer = await waitFor(sent, (m) => m.type === "session:result" && m.requestId === "stop-1");
+  expect(answer).toMatchObject({ type: "session:result", ok: false, errorCode: "CHECKOUT_ROUTING_REQUIRED" });
+  expect(sent.filter((m) => m.type === "control:result")).toEqual([]);
+});
+
+test("session:list is refused on control:result, never as an empty session:list:result", async () => {
+  // The exclusion is the point: `session:list:result` carries only
+  // `{requestId, sessions[]}`, so the only refusal expressible on it is an empty
+  // list — a project that reads as HAVING no sessions rather than one that
+  // refused to answer. An uncorrelated reply beats a credible lie.
+  await initRepo();
+  const { bus, sent } = await bootCore(true);
+  await createSession(bus, sent, "Isolated", "worktree");
+  attachDevice(false);
+
+  sent.length = 0;
+  bus.dispatchInbound(createMessage("session:list", { requestId: "list-1" }), "control", "relay", APP_PEER);
+
+  const answer = await waitFor(sent, (m) => m.type === "control:result");
+  expect(answer).toMatchObject({ type: "control:result", ok: false, verb: "session:list" });
+  expect(sent.filter((m) => m.type === "session:list:result")).toEqual([]);
+});
+
+test("a refusal is addressed to the device that asked, and a bare control:result is throttled", async () => {
+  // Broadcast, a `session:result` error lands in every client's sessions state
+  // (`sessions_service.dart` writes it before matching the requestId), so the
+  // desktop toasts a refusal for a verb the phone sent. And nothing correlates
+  // a bare control:result, so a device sending at keystroke rate must not be
+  // answered once per frame — the correlated reply still is, every time.
+  await initRepo();
+  const { bus, sent } = await bootCore(true);
+  const loopbackOnly: AbMessage[] = [];
+  bus.subscribe({ audience: "loopback", deliver: (m) => loopbackOnly.push(m) });
+  await createSession(bus, sent, "Isolated", "worktree");
+  attachDevice(false);
+
+  sent.length = 0;
+  loopbackOnly.length = 0;
+  for (let i = 0; i < 3; i++) {
+    bus.dispatchInbound(
+      createMessage("terminal:input", { terminalId: "t", data: String(i), checkoutId: "main" }),
+      "control", "relay", APP_PEER,
+    );
+  }
+  bus.dispatchInbound(snapshotRequest("snap-5"), "control", "relay", APP_PEER);
+  bus.dispatchInbound(snapshotRequest("snap-6"), "control", "relay", APP_PEER);
+  await waitFor(sent, (m) => m.type === "response" && m.requestId === "snap-6");
+
+  expect(sent.filter((m) => m.type === "control:result")).toHaveLength(1);
+  expect(sent.filter((m) => m.type === "response")).toHaveLength(2);
+  expect(loopbackOnly.filter((m) => m.type === "control:result" || m.type === "response")).toEqual([]);
+});
+
+test("a peer id that resolves to no session is dropped, not refused, so the retry can heal it", async () => {
+  // Both a device mid-handshake and one whose E2E session has just died land on
+  // this arm, and both recover on the app's next attempt. Answering would end
+  // that: `_pullSnapshot` settles on any code but E_TIMEOUT, so a refusal turns
+  // a race that fixes itself into a workspace telling the user to reconnect.
+  await initRepo();
+  const { bus, sent } = await bootCore(true);
+  await createSession(bus, sent, "Isolated", "worktree");
+  core!.setPeerSessionProvider(() => null);
+
+  sent.length = 0;
+  bus.dispatchInbound(snapshotRequest("snap-4"), "control", "relay", APP_PEER);
+  await new Promise((resolve) => setTimeout(resolve, 200));
+
+  expect(sent.filter((m) => m.type === "response" || m.type === "control:result")).toEqual([]);
+});
+
+test("a relay-attached core whose provider was torn out answers UNAVAILABLE instead of going silent", async () => {
+  // A cleared provider on a warm core is a bridge-side fault nothing re-wires.
+  // Read as "unknown device" it fails closed in silence; read as "local core"
+  // by the mobile-access gate it is not gated at all. It must be neither.
+  await initRepo();
+  const { bus, sent } = await bootCore(true);
+  await createSession(bus, sent, "Isolated", "worktree");
+  attachDevice(true);
+  core!.setPeerSessionProvider(null);
+
+  sent.length = 0;
+  bus.dispatchInbound(snapshotRequest("snap-2"), "control", "relay", APP_PEER);
+
+  const answer = await waitFor(sent, (m) => m.type === "response" && m.requestId === "snap-2");
+  expect(answer).toMatchObject({
+    type: "response",
+    ok: false,
+    error: { code: "CHECKOUT_ROUTING_UNAVAILABLE" },
+  });
+});
+
+test("clearing the provider does not hand a relay frame the local-core carve-out", async () => {
+  // A core that has faced the relay stays gated for life. Proved on a project
+  // with NO isolated session, where nothing but the machine switch stands
+  // between a relay frame and dispatch: with mobile access off the pull goes
+  // unanswered, and with it on the same pull is served — so the switch, not a
+  // per-device refusal, is what decided.
+  await initRepo();
+  let mobileAccess = true;
+  const { bus, sent } = await bootCore(true, () => mobileAccess);
+  attachDevice(true);
+  core!.setPeerSessionProvider(null);
+  mobileAccess = false;
+
+  sent.length = 0;
+  bus.dispatchInbound(snapshotRequest("snap-3"), "control", "relay", APP_PEER);
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  expect(sent.filter((m) => m.type === "response" || m.type === "control:result")).toEqual([]);
+
+  mobileAccess = true;
+  bus.dispatchInbound(snapshotRequest("snap-3b"), "control", "relay", APP_PEER);
+  const served = await waitFor(sent, (m) => m.type === "response" && m.requestId === "snap-3b");
+  expect(served).toMatchObject({ type: "response", ok: true });
+});
 
 test("a tunnel request from a session that cannot route checkouts is refused, while a capable device's is proxied", async () => {
   // The tunnel route bypasses the bus, so the per-device capability check the

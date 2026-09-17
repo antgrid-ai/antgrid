@@ -51,6 +51,7 @@ jobs:
         working-directory: site
         env:
           PUBLIC_SALESIQ_WIDGET_URL: ${{ secrets.SALESIQ_WIDGET_URL }}
+          PUBLIC_SOURCE_COMMIT: ${{ github.sha }}
         run: |
           bun install --frozen-lockfile
           bun run check

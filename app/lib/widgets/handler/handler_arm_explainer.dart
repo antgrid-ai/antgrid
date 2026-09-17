@@ -323,9 +323,9 @@ class _ArmSheetState extends ConsumerState<_ArmSheet> {
             ),
           // Directly under the goal it continues, and above the lens control:
           // this box IS the act, and what the judge looks for is a setting
-          // subordinate to it. No autofocus — the sheet is a thing
-          // to read first, and a keyboard over it on a phone hides the copy
-          // that explains what arming does.
+          // subordinate to it — so the cursor opens here and the sheet can be
+          // answered without first aiming at it. The cost is a phone keyboard
+          // over the copy explaining what arming does; it scrolls back.
           Padding(
             padding: const EdgeInsets.fromLTRB(
               AbTokens.space16,
@@ -338,9 +338,11 @@ class _ArmSheetState extends ConsumerState<_ArmSheet> {
               controller: _instruction,
               hintText: hasGoal
                   ? 'Anything to add beyond that?'
-                  // The empty backlog's own invitation, verbatim: one act
-                  // worded one way wherever the user meets it.
-                  : "Add what you want done while you're away.",
+                  // The empty backlog's invitation with the clause the
+                  // section head above already carries taken out — the drawer
+                  // keeps the full sentence because nothing labels the box
+                  // there. Same verb either way: one act worded one way.
+                  : 'Add what you want done.',
               judge: (
                 judgeTool: _value.judgeTool,
                 judgeModel: _value.judgeModel,
@@ -353,6 +355,7 @@ class _ArmSheetState extends ConsumerState<_ArmSheet> {
                 ),
               ),
               judgeScopeNote: handlerJudgeScopeOnArm,
+              autofocus: true,
               // No send key: this sheet's one commit is [Arm Handler] below.
               send: null,
             ),

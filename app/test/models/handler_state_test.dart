@@ -26,6 +26,35 @@ HandlerEscalation _esc(String id, {required String urgency, required int at}) =>
     );
 
 void main() {
+  test('runtime availability preserves support and older bridge absence', () {
+    final wire = <String, dynamic>{
+      'terminalId': 't1',
+      'state': 'watching',
+      'pendingEscalations': 0,
+      'armedAt': 1,
+      'goal': 'goal',
+      'backlog': [],
+      'observability': 'full',
+    };
+    expect(HandlerSessionState.fromWire(wire)!.availability, isNull);
+    wire['availability'] = {
+      'state': 'unavailable',
+      'reason': 'Waiting for restart',
+    };
+    final session = HandlerSessionState.fromWire(wire)!;
+    expect(session.observability, HandlerObservability.full);
+    expect(session.availability!.state, HandlerAvailabilityState.unavailable);
+    expect(
+      session.availability!.note,
+      'Waiting for restart. Start or restart the agent to try again.',
+    );
+    expect(
+      session.copyWith(pendingEscalations: 1).availability,
+      same(session.availability),
+    );
+    wire['availability'] = {'state': 'future-value'};
+    expect(HandlerSessionState.fromWire(wire)!.availability, isNull);
+  });
   group('compareEscalations', () {
     test('urgent first, and oldest first inside each band', () {
       final ordered = [
@@ -1118,6 +1147,35 @@ void main() {
       expect(s.brief, isNull);
       expect(s.goal, 'ship it');
       expect(s.runState, HandlerRunState.watching);
+    });
+  });
+
+  group('the redesign spec copy (handler-arm-sheet-redesign-spec.md §7, §12)',
+      () {
+    test('the four presets read as a stance, not a job title', () {
+      expect(handlerLensLabel(HandlerLens.pm), 'Stays in scope');
+      expect(handlerLensLabel(HandlerLens.qa), 'Proof it works');
+      expect(handlerLensLabel(HandlerLens.critic), 'What could break');
+      expect(handlerLensLabel(HandlerLens.release), 'Ready to ship');
+    });
+
+    test('the sixth chip is neither a preset nor a wire id', () {
+      expect(handlerLensDefaultLabel, 'Nothing extra');
+      expect(handlerLensOwnLabel, 'Your own');
+      // Never a real lens: a user-authored pick has no [HandlerLens] value and
+      // must never round-trip through the wire the way a preset id does.
+      expect(handlerLensFromWire(handlerLensOwnLabel), isNull);
+    });
+
+    test('an unset lens blames the machine, not the session', () {
+      expect(
+        handlerLensUnsetBlurb,
+        'Runs as it was last set on this machine.',
+      );
+    });
+
+    test('the brief cap mirrors the bridge byte for byte (MAX_BRIEF_CHARS)', () {
+      expect(handlerMaxBriefChars, 1000);
     });
   });
 

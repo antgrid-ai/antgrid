@@ -1,8 +1,17 @@
 {
   "name": "antgrid",
   "version": "0.1.0",
+  "license": "MPL-2.0",
   "private": true,
-  "workspaces": ["packages/antgrid-wire", "bridge", "bridge/plugin", "relay", "web", "evals"],
+  "workspaces": [
+    "packages/antgrid-wire",
+    "bridge",
+    "bridge/integrations",
+    "relay",
+    "web",
+    "evals",
+    "packages/antgrid-agents"
+  ],
   "scripts": {
     "postinstall": "bun run --filter antgrid-web prisma:generate",
     "setup": "bun run scripts/dev-setup.ts",
@@ -26,6 +35,8 @@
     "aspire:mac:all": "bun run scripts/aspire-targets.ts macos,ios",
     "typecheck": "bun run --filter='*' typecheck",
     "check:font-tokens": "bash app/scripts/check_font_tokens.sh",
+    "check:licenses": "bun run scripts/check-licenses.ts",
+    "sync:legal": "bun run scripts/sync-legal-assets.ts",
     "dup-check": "jscpd",
     "test": "bun run --filter='*' test",
     "test:dev-protocol": "cd scripts && bun test windows-dev-protocol.test.ts",

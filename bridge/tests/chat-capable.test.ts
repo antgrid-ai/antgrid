@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { isChatCapableTool } from "../src/structured/chat-capable";
+import { isChatCapableTool } from "../../packages/antgrid-agents/src/structured/chat-capable";
 
 describe("isChatCapableTool", () => {
   it("is true for codex, opencode, and claude-code", () => {

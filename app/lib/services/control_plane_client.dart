@@ -342,12 +342,12 @@ class RepoCard {
 /// callers fall back to the persisted agent catalog in that case.
 class AdvertisedTool {
   final String tool;
-  final String path;
+  final String? path;
   final bool? chatCapable;
   final String? label;
   const AdvertisedTool({
     required this.tool,
-    required this.path,
+    this.path,
     this.chatCapable,
     this.label,
   });
@@ -355,10 +355,10 @@ class AdvertisedTool {
   static AdvertisedTool? fromJson(Map<String, dynamic> json) {
     final tool = json['tool'];
     final path = json['path'];
-    if (tool is! String || path is! String) return null;
+    if (tool is! String || (path != null && path is! String)) return null;
     return AdvertisedTool(
       tool: tool,
-      path: path,
+      path: path as String?,
       chatCapable: json['chatCapable'] as bool?,
       label: json['label'] as String?,
     );

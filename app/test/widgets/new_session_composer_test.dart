@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -180,7 +182,9 @@ Widget _host({
 }) {
   final composer = NewSessionComposer(
     onOpenFolder: onOpenFolder ?? () {},
-    submit: submit ?? (_, {allowActiveSessions = false, stashIfDirty = false}) async {},
+    submit:
+        submit ??
+        (_, {allowActiveSessions = false, stashIfDirty = false}) async {},
   );
   return ProviderScope(
     overrides: overrides,
@@ -197,6 +201,55 @@ Widget _host({
 }
 
 void main() {
+  testWidgets('empty prompt is explicitly optional and can start by button', (
+    tester,
+  ) async {
+    var submitCount = 0;
+    await tester.pumpWidget(
+      _host(
+        overrides: _baseOverrides(target: _project),
+        submit:
+            (ref, {allowActiveSessions = false, stashIfDirty = false}) async {
+              submitCount++;
+            },
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      find.text('Describe a task or ask a question (optional)'),
+      findsOneWidget,
+    );
+    final sendButton = tester.widget<ComposerSendButton>(
+      find.byKey(const Key('new-session-send-button')),
+    );
+    expect(sendButton.onTap, isNotNull);
+
+    await tester.tap(find.byKey(const Key('new-session-send-button')));
+    await tester.pumpAndSettle();
+    expect(submitCount, 1);
+  });
+
+  testWidgets('Enter starts a session with an empty prompt', (tester) async {
+    var submitCount = 0;
+    await tester.pumpWidget(
+      _host(
+        overrides: _baseOverrides(target: _project),
+        submit:
+            (ref, {allowActiveSessions = false, stashIfDirty = false}) async {
+              submitCount++;
+            },
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('new-session-prompt-field')));
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pumpAndSettle();
+
+    expect(submitCount, 1);
+  });
+
   testWidgets(
     'typing and pressing Enter writes prompt provider and triggers submit',
     (tester) async {
@@ -204,9 +257,10 @@ void main() {
       await tester.pumpWidget(
         _host(
           overrides: _baseOverrides(target: _project),
-          submit: (ref, {allowActiveSessions = false, stashIfDirty = false}) async {
-            submitCount++;
-          },
+          submit:
+              (ref, {allowActiveSessions = false, stashIfDirty = false}) async {
+                submitCount++;
+              },
         ),
       );
       await tester.pumpAndSettle();
@@ -237,9 +291,10 @@ void main() {
     await tester.pumpWidget(
       _host(
         overrides: _baseOverrides(target: _project),
-        submit: (ref, {allowActiveSessions = false, stashIfDirty = false}) async {
-          submitCount++;
-        },
+        submit:
+            (ref, {allowActiveSessions = false, stashIfDirty = false}) async {
+              submitCount++;
+            },
       ),
     );
     await tester.pumpAndSettle();
@@ -664,7 +719,12 @@ void main() {
                   builder: (context, ref, _) => ref.watch(_composerVisible)
                       ? NewSessionComposer(
                           onOpenFolder: () {},
-                          submit: (_, {allowActiveSessions = false, stashIfDirty = false}) async {},
+                          submit:
+                              (
+                                _, {
+                                allowActiveSessions = false,
+                                stashIfDirty = false,
+                              }) async {},
                         )
                       : const SizedBox.shrink(),
                 ),
@@ -937,15 +997,20 @@ void main() {
                 ),
               ),
             ],
-            submit: (ref, {allowActiveSessions = false, stashIfDirty = false}) async {
-              submitCalls.add(allowActiveSessions);
-              if (!allowActiveSessions) {
-                throw ActiveSessionsBranchSwitchException(
-                  targetId: _project.id,
-                  branch: 'dev',
-                );
-              }
-            },
+            submit:
+                (
+                  ref, {
+                  allowActiveSessions = false,
+                  stashIfDirty = false,
+                }) async {
+                  submitCalls.add(allowActiveSessions);
+                  if (!allowActiveSessions) {
+                    throw ActiveSessionsBranchSwitchException(
+                      targetId: _project.id,
+                      branch: 'dev',
+                    );
+                  }
+                },
           ),
         );
         await tester.pumpAndSettle();
@@ -988,16 +1053,17 @@ void main() {
               ),
             ),
           ],
-          submit: (ref, {allowActiveSessions = false, stashIfDirty = false}) async {
-            submitCalls.add(allowActiveSessions);
-            if (!allowActiveSessions) {
-              throw ActiveSessionsBranchSwitchException(
-                targetId: _project.id,
-                branch: 'dev',
-              );
-            }
-            throw StateError('checkout failed');
-          },
+          submit:
+              (ref, {allowActiveSessions = false, stashIfDirty = false}) async {
+                submitCalls.add(allowActiveSessions);
+                if (!allowActiveSessions) {
+                  throw ActiveSessionsBranchSwitchException(
+                    targetId: _project.id,
+                    branch: 'dev',
+                  );
+                }
+                throw StateError('checkout failed');
+              },
         ),
       );
       await tester.pumpAndSettle();
@@ -1013,7 +1079,13 @@ void main() {
       await tester.pump();
 
       expect(submitCalls, [false, true]);
-      expect(find.textContaining('Failed to start session'), findsOneWidget);
+      expect(
+        find.text(
+          'Couldn’t start the session. Check the selected agent and try again.',
+        ),
+        findsOneWidget,
+      );
+      expect(find.textContaining('StateError'), findsNothing);
       expect(tester.takeException(), isNull);
 
       await tester.pump(const Duration(seconds: 8));
@@ -1022,56 +1094,56 @@ void main() {
   });
 
   group('git checkout refusals', () {
-    testWidgets(
-      'DIRTY_WORKTREE offers to stash and retries on confirm',
-      (tester) async {
-        var submitCalls = <bool>[];
-        await tester.pumpWidget(
-          _host(
-            overrides: [
-              ..._baseOverrides(target: _project),
-              newSessionBranchSelectionProvider.overrideWith(
-                () => ValueController(
-                  const NewSessionBranchSelection(
-                    targetId: 'p-my-repo',
-                    branch: 'dev',
-                  ),
+    testWidgets('DIRTY_WORKTREE offers to stash and retries on confirm', (
+      tester,
+    ) async {
+      var submitCalls = <bool>[];
+      await tester.pumpWidget(
+        _host(
+          overrides: [
+            ..._baseOverrides(target: _project),
+            newSessionBranchSelectionProvider.overrideWith(
+              () => ValueController(
+                const NewSessionBranchSelection(
+                  targetId: 'p-my-repo',
+                  branch: 'dev',
                 ),
               ),
-            ],
-            submit: (ref, {allowActiveSessions = false, stashIfDirty = false}) async {
-              submitCalls.add(stashIfDirty);
-              if (!stashIfDirty) {
-                throw DirtyWorktreeBranchSwitchException(
-                  targetId: _project.id,
-                  branch: 'dev',
-                );
-              }
-            },
-          ),
-        );
-        await tester.pumpAndSettle();
+            ),
+          ],
+          submit:
+              (ref, {allowActiveSessions = false, stashIfDirty = false}) async {
+                submitCalls.add(stashIfDirty);
+                if (!stashIfDirty) {
+                  throw DirtyWorktreeBranchSwitchException(
+                    targetId: _project.id,
+                    branch: 'dev',
+                  );
+                }
+              },
+        ),
+      );
+      await tester.pumpAndSettle();
 
-        await tester.enterText(
-          find.byKey(const Key('new-session-prompt-field')),
-          'start session',
-        );
-        await tester.pump();
+      await tester.enterText(
+        find.byKey(const Key('new-session-prompt-field')),
+        'start session',
+      );
+      await tester.pump();
 
-        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
-        await tester.pump();
-        await tester.pump(const Duration(milliseconds: 300));
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
 
-        expect(submitCalls, [false]);
-        expect(find.text('Stash uncommitted changes?'), findsOneWidget);
+      expect(submitCalls, [false]);
+      expect(find.text('Stash uncommitted changes?'), findsOneWidget);
 
-        await tester.tap(find.text('Stash & switch'));
-        await tester.pump();
-        await tester.pump(const Duration(milliseconds: 300));
+      await tester.tap(find.text('Stash & switch'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
 
-        expect(submitCalls, [false, true]);
-      },
-    );
+      expect(submitCalls, [false, true]);
+    });
 
     // Only the TYPED DirtyWorktreeBranchSwitchException gets the stash offer
     // above — a bare HostControlException carrying the same code (e.g. from a
@@ -1095,13 +1167,18 @@ void main() {
                 ),
               ),
             ],
-            submit: (ref, {allowActiveSessions = false, stashIfDirty = false}) async {
-              throw HostControlException(
-                'DIRTY_WORKTREE',
-                'Switching to "dev" would overwrite uncommitted changes in: '
-                    'a.txt. Commit, stash, or discard them first.',
-              );
-            },
+            submit:
+                (
+                  ref, {
+                  allowActiveSessions = false,
+                  stashIfDirty = false,
+                }) async {
+                  throw HostControlException(
+                    'DIRTY_WORKTREE',
+                    'Switching to "dev" would overwrite uncommitted changes in: '
+                        'a.txt. Commit, stash, or discard them first.',
+                  );
+                },
           ),
         );
         await tester.pumpAndSettle();
@@ -1150,7 +1227,9 @@ void main() {
 
     Widget refusingHost(SessionOperationException refusal) => _host(
       overrides: _baseOverrides(target: _project),
-      submit: (ref, {allowActiveSessions = false, stashIfDirty = false}) async => throw refusal,
+      submit:
+          (ref, {allowActiveSessions = false, stashIfDirty = false}) async =>
+              throw refusal,
     );
 
     testWidgets('a mapped code replaces the bridge wording', (tester) async {
@@ -1230,6 +1309,57 @@ void main() {
       );
 
       await drainSnackBar(tester);
+    });
+
+    testWidgets('an unexpected launch failure uses generic actionable copy', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _host(
+          overrides: _baseOverrides(target: _project),
+          submit:
+              (ref, {allowActiveSessions = false, stashIfDirty = false}) async {
+                throw const FormatException('provider executable exploded');
+              },
+        ),
+      );
+      await tester.pumpAndSettle();
+      await submitPrompt(tester);
+
+      expect(
+        find.text(
+          'Couldn’t start the session. Check the selected agent and try again.',
+        ),
+        findsOneWidget,
+      );
+      expect(find.textContaining('FormatException'), findsNothing);
+      expect(find.textContaining('provider executable exploded'), findsNothing);
+
+      await drainSnackBar(tester);
+    });
+
+    testWidgets('a launch failure after disposal does not read widget ref', (
+      tester,
+    ) async {
+      final pendingStart = Completer<void>();
+      var started = false;
+      await tester.pumpWidget(
+        _host(
+          overrides: _baseOverrides(target: _project),
+          submit: (ref, {allowActiveSessions = false, stashIfDirty = false}) {
+            started = true;
+            return pendingStart.future;
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+      await submitPrompt(tester);
+      expect(started, isTrue);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      pendingStart.completeError(StateError('start failed after disposal'));
+      await tester.pump();
+      expect(tester.takeException(), isNull);
     });
   });
 
@@ -1338,9 +1468,10 @@ void main() {
       await tester.pumpWidget(
         _host(
           overrides: _baseOverrides(target: _project),
-          submit: (ref, {allowActiveSessions = false, stashIfDirty = false}) async {
-            submitCount++;
-          },
+          submit:
+              (ref, {allowActiveSessions = false, stashIfDirty = false}) async {
+                submitCount++;
+              },
         ),
       );
       await tester.pumpAndSettle();
@@ -1612,7 +1743,12 @@ void main() {
                   builder: (context, ref, _) => ref.watch(_composerVisible)
                       ? NewSessionComposer(
                           onOpenFolder: () {},
-                          submit: (_, {allowActiveSessions = false, stashIfDirty = false}) async {},
+                          submit:
+                              (
+                                _, {
+                                allowActiveSessions = false,
+                                stashIfDirty = false,
+                              }) async {},
                         )
                       : const SizedBox.shrink(),
                 ),

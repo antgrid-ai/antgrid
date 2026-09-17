@@ -377,8 +377,6 @@ function reachMachineClause(m: any): string {
 function reachLine(reach: any): string {
   if (reach.scope === "machine") {
     switch (reach.why) {
-      case "remote-access-off":
-        return "Reach: remote access is off on this machine, so only its own sessions are listed.";
       case "no-machine-id":
         return "Reach: this machine has no relay identity yet, so nothing on it can be addressed from elsewhere and only its own sessions are listed.";
       default:

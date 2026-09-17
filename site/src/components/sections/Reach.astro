@@ -1,78 +1,40 @@
 ---
-import { Icon } from "astro-icon/components";
-import Eyebrow from "../ui/Eyebrow.astro";
-import Chip from "../ui/Chip.astro";
-import Readout from "../ui/Readout.astro";
 import UseCase from "../ui/UseCase.astro";
 
-// This section owns REACH — where the code lives, and what crossing the network
-// normally costs. It deliberately does not argue encryption: Privacy.astro owns
-// who can read the stream, and the two sit close enough together that repeating
-// the claim here would read as padding. The relay is named only as the reason
-// there is no inbound port to open.
-const usual = [
-  "a static IP, or dynamic DNS",
-  "a router port forward",
-  "a VPN client on every device",
-  "SSH keys on every device",
-  "a firewall exception",
+const steps = [
+  "Install antgrid on your machine and phone",
+  "Sign in to the same account on both",
+  "Enable remote access on the machine",
 ];
-const ours = ["install antgrid on the machine", "sign in"];
 ---
-<section id="reach" class="reveal mx-auto max-w-shell px-6 py-24">
-  <div class="grid items-center gap-12 md:grid-cols-2">
+{/* Reach, Worktrees and Messaging are one chapter in three entries: the same
+    two columns, text left and record right, every time. Alternating the sides
+    would make three sections out of them; holding the line makes a list. This
+    one opens the chapter, so it carries no rule of its own — the Fleet band
+    above already closes on one. */}
+<section id="reach" class="mx-auto max-w-shell px-6 pt-16 md:pt-24">
+  <div class="grid gap-x-16 gap-y-10 md:grid-cols-2">
     <div>
-      <Eyebrow class="mb-5">Your machines</Eyebrow>
-      <h2 class="mb-5 font-display text-title font-semibold text-ink">Run agents where your code already is.</h2>
-      <p class="mb-4 max-w-xl text-lede text-muted">
-        The repo that matters is on the machine under your desk — with its uncommitted branches, its <span class="font-mono text-note text-ink2">.env</span>, its local database, the migration you half-applied on Friday. An agent in someone else's cloud gets a copy of none of that. antgrid runs the agent on the machine itself.
-      </p>
+      <h2 class="mb-6 font-display text-title font-bold text-ink">Run agents where your code already is.</h2>
       <p class="mb-6 max-w-xl text-lede text-muted">
-        Getting back to that machine is the part that normally costs you an afternoon. antgrid needs no inbound port: the machine dials out, your app dials out, and they meet at the relay. Corporate NAT, hotel wifi, a phone on cellular — <span class="text-ink2">it's the same connection every time</span>.
+        Your agent runs on your machine, with your existing repo, local database and development tools. Connect through antgrid without setting up a VPN or port forwarding.
       </p>
-      <div class="mb-6 flex flex-wrap gap-2">
-        <Chip>no VPN</Chip>
-        <Chip>no port forwarding</Chip>
-        <Chip>no SSH config</Chip>
-        <Chip>no inbound ports</Chip>
-      </div>
-
-      <UseCase class="max-w-xl">The machine under your desk, reachable from a train — same repo, same branches, nothing copied anywhere.</UseCase>
+      <UseCase class="max-w-xl">Away from your desk? Check the session running on your workstation and reply from your phone.</UseCase>
     </div>
 
-    <Readout source="reaching studio-workstation" state="connected" class="min-w-0">
-      <div class="grid gap-2.5 p-4 sm:grid-cols-2 md:p-5">
-        <div class="rounded border border-edge-inner bg-chrome px-3.5 py-3">
-          <div class="mb-2.5 font-mono text-marker uppercase tracking-[0.14em] text-faint">the usual way</div>
-          <div class="flex flex-col gap-1.5">
-            {usual.map((item) => (
-              <div class="flex items-start gap-2 font-mono text-marker leading-relaxed text-muted2">
-                <Icon name="tabler:x" class="mt-0.5 shrink-0 text-faint" width="12" height="12" />
-                <span>{item}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        <div class="rounded border border-signaldeep2 bg-signaldeep/25 px-3.5 py-3">
-          <div class="mb-2.5 font-mono text-marker uppercase tracking-[0.14em] text-signal2">with antgrid</div>
-          <div class="flex flex-col gap-1.5">
-            {ours.map((item) => (
-              <div class="flex items-start gap-2 font-mono text-marker leading-relaxed text-ink2">
-                <Icon name="tabler:check" class="mt-0.5 shrink-0 text-ok" width="12" height="12" />
-                <span>{item}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      <Fragment slot="foot">
-        <span class="flex items-start gap-2">
-          <Icon name="tabler:arrows-left-right" class="mt-0.5 shrink-0 text-faint" width="13" height="13" />
-          <span>both ends dial out — <span class="text-ink2">nothing listens</span> on your network</span>
-        </span>
-      </Fragment>
-    </Readout>
+    <div>
+      <p class="mb-3 text-note text-muted2">Connect from your phone</p>
+      {/* Numbered because it is a sequence: the account has to exist on both
+          devices before the switch on one of them means anything. */}
+      <ol class="ledger">
+        {steps.map((step, i) => (
+          <li class="flex items-baseline gap-5 py-3.5 text-note text-ink2">
+            <span class="w-6 shrink-0 font-display text-kicker font-bold text-muted2">{i + 1}</span>
+            <span>{step}</span>
+          </li>
+        ))}
+      </ol>
+      <p class="mt-4 text-meta leading-relaxed text-muted2">Both devices connect out to the relay. No inbound port required.</p>
+    </div>
   </div>
 </section>

@@ -1,7 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import {
   HandlerDecisionSchema,
-  pickJudge,
+  pickJudge as selectJudge,
   buildDecidePrompt,
   buildRetryPrompt,
   buildShapeRetryPrompt,
@@ -10,6 +10,12 @@ import {
   MAX_BRIEF_CHARS,
   MAX_INSTRUCTIONS_CHARS,
 } from "../../src/handler/decision";
+function pickJudge(tool: string) {
+  const picked = selectJudge(tool);
+  if (!picked) return null;
+  if (!("cmd" in picked.command)) throw new Error("Expected a built-in CLI judge");
+  return { ...picked, command: picked.command };
+}
 // Typed rather than inline: the fixtures are what pin the two exported names,
 // since bun strips types and only the typecheck gate would notice them going.
 import type { DecisionAsk, DecisionAskOption } from "../../src/handler/decision";
@@ -608,12 +614,49 @@ describe("the lens in the decide prompt", () => {
   });
 
   // A brief with no lens is a real state — the user can write one without picking
-  // a role — and it must bring the section with it.
+  // a role — and it must bring the section with it, headed by OWN_LENS_HEADER
+  // rather than the preset header, and with no preset rule text riding along.
   it("prints the section for a brief alone", () => {
     const p = build(undefined, "watch the migration path");
     expect(p).toContain("LENS");
     expect(p).toContain("watch the migration path");
+    expect(p).toContain("the user wrote this one themselves");
+    expect(p).not.toContain("what you look for and ask about, added on top of everything above");
     for (const rule of Object.values(LENS_RULES)) expect(p).not.toContain(rule);
+  });
+
+  // THE RATCHET, stated in the prompt itself: a user lens may only ask for more,
+  // never less. Pinned separately from the header split above because this is
+  // the load-bearing sentence the whole feature rests on.
+  it("grants a user lens only the stricter direction", () => {
+    const p = build(undefined, "watch the migration path");
+    expect(p).toContain(
+      "It may only make you STRICTER: ask more, accept less, escalate sooner, or hold an item open until a condition it names is met",
+    );
+  });
+
+  // The other half of the ratchet: what the judge does when a user lens asks
+  // for the loosening direction anyway. Printed beside the grant, never on its
+  // own, so no header can carry one without the other.
+  it("refuses the loosening direction alongside the grant", () => {
+    const p = build(undefined, "watch the migration path");
+    const grantAt = at(p, "It may only make you STRICTER");
+    const refusalAt = at(p, "It may never make you looser");
+    expect(grantAt).toBeGreaterThan(0);
+    expect(refusalAt).toBeGreaterThan(grantAt);
+    expect(p).toContain("you say in `reason` that you ignored it");
+  });
+
+  // Back-compat path for an older app: the new UI cannot send role AND a
+  // user-authored brief together, but if one ever does, the role wins the
+  // header and the section stays singular — never two LENS blocks.
+  it("lets the role win the header when a role and a brief both arrive", () => {
+    const p = build("qa", "watch the migration path");
+    expect(p.match(/LENS/g)).toHaveLength(1);
+    expect(p).toContain("what you look for and ask about, added on top of everything above");
+    expect(p).not.toContain("the user wrote this one themselves");
+    expect(p).toContain(LENS_RULES.qa);
+    expect(p).toContain("watch the migration path");
   });
 
   // Both retry legs append to the original prompt rather than rebuilding one, so

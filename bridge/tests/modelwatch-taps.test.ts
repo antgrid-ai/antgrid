@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 
 import { runHeadless } from "../src/agents/headless";
 import { generateTitleFromContext, type TitleGeneration } from "../src/agents/title-generate";
-import type { TitleOutcome } from "../src/agents/title-attempts";
+import type { TitleOutcome } from "../../packages/antgrid-agents/src/agents/title-attempts";
 import { runDecision, runExtraction } from "../src/handler/judge";
 import {
   armContextCapture, armPromptCapture, modelwatch, __resetModelwatchForTest,

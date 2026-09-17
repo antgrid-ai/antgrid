@@ -11,8 +11,9 @@ COPY package.json bun.lock bunfig.toml ./
 
 # All workspace manifests must be present for bun to resolve the workspace graph
 COPY packages/antgrid-wire/package.json ./packages/antgrid-wire/
+COPY packages/antgrid-agents/package.json ./packages/antgrid-agents/
 COPY bridge/package.json ./bridge/
-COPY bridge/plugin/package.json ./bridge/plugin/
+COPY bridge/integrations/package.json ./bridge/integrations/
 COPY relay/package.json ./relay/
 COPY evals/package.json ./evals/
 COPY web/package.json ./web/
@@ -27,6 +28,9 @@ COPY relay/tsconfig.json ./relay/
 
 # Shared workspace dep imported by relay/src at runtime (antgrid-wire -> ./src/index.ts).
 COPY packages/antgrid-wire/src ./packages/antgrid-wire/src
+COPY packages/antgrid-wire/LICENSE ./packages/antgrid-wire/LICENSE
+COPY LICENSE.md LICENSING.md THIRD-PARTY.md SOURCE_OFFER.md ./
+COPY relay/LICENSE.md ./relay/LICENSE.md
 
 WORKDIR /app/relay
 EXPOSE 8080

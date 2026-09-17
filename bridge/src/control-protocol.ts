@@ -166,13 +166,13 @@ export const ControlRequestSchema = z.discriminatedUnion("type", [
     checkoutId: z.string().min(1),
   }),
   // The asking half of the remote session directory: the app's pump hands
-  // over what it learned peeking peer capability cards this cycle. Unlike
-  // every verb above, this ONE is gated behind the remote-access switch at
-  // the handler (host-server.ts) — the rest of this plane is exempt because a
-  // loopback caller is this machine's own desktop asking about its own data;
-  // this verb instead hands ANOTHER machine's session inventory into this
-  // machine's agents' reach, which is precisely what the switch authorizes.
-  // The gate is on the data's provenance, not on the caller.
+  // over what it learned peeking peer capability cards this cycle. Exempt from
+  // the remote-access switch like every other verb on this plane (E15): the
+  // switch governs what may be done TO this machine, and every row here was
+  // offered by the peer that owns it, under that peer's own switch and its own
+  // agent-reach bit. What a machine may be TOLD about willing peers is not
+  // what the switch authorizes — only the handler's relay-identity check
+  // (host-server.ts) applies.
   //
   // `rows` is deliberately `z.unknown()`, not `RemoteDirectoryRowSchema` — a
   // strict per-row schema here would 400 the WHOLE push over one hostile or
@@ -244,7 +244,7 @@ export interface KnownProject {
  *  array (AgentDescriptor in protocol.ts). */
 export interface ToolSummary {
   tool: string;
-  path: string;
+  path?: string;
   chatCapable: boolean;
   /** Display name from the registry. The app prefers this over its own table,
    *  so adding an agent names it everywhere without an app release. */

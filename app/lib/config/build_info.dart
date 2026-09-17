@@ -19,6 +19,18 @@ abstract final class BuildInfo {
     defaultValue: 'local',
   );
 
+  /// Full immutable revision used by release source links.
+  static const String sourceCommit = String.fromEnvironment(
+    'SOURCE_COMMIT',
+    defaultValue: commit,
+  );
+
+  static String sourceUrlFor(String commit) => commit == 'local'
+      ? 'https://github.com/antgrid-ai/antgrid'
+      : 'https://github.com/antgrid-ai/antgrid/tree/$commit';
+
+  static String get sourceUrl => sourceUrlFor(sourceCommit);
+
   /// ISO-8601 UTC, empty for local builds.
   static const String builtAt = String.fromEnvironment('BUILD_TIME');
 

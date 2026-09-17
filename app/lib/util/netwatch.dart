@@ -18,8 +18,8 @@ import 'jsonl_sink.dart';
 /// is silent, and shows up only as a join that matches nothing.
 ///
 /// This lives in `app/` and NOT in `packages/antgrid_relay_client` on purpose.
-/// That package is Apache-2.0 and the boundary is one-way: the schema, the ring
-/// and the file all stay ELv2, and the package sees only an untyped
+/// That package is MPL-2.0, but transport and app diagnostics stay separate:
+/// the schema, the ring, and the file remain app-owned, and the package sees only an untyped
 /// [RelayNetTap] callback it may or may not have been given.
 class NetwatchEvent {
   NetwatchEvent({

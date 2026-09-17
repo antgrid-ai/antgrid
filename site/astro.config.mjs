@@ -33,9 +33,10 @@ import { satteri } from "@astrojs/markdown-satteri";
 //  2. The generated faces are PREPENDED to the list. They therefore win over the
 //     real families named after them — which is why naming Consolas did nothing
 //     while a "fallback: Courier New" face sat in front of it.
-const variant = (pkg, file, weight) => ({
+const variant = (pkg, file, weight, stretch) => ({
   weight,
   style: "normal",
+  ...(stretch ? { stretch } : {}),
   src: [`./node_modules/@fontsource-variable/${pkg}/files/${file}`],
 });
 
@@ -57,7 +58,12 @@ const fonts = [
     name: "Archivo Variable",
     cssVariable: "--font-archivo",
     fallbacks: ["Segoe UI", "Helvetica Neue", "Arial", "system-ui"],
-    options: { variants: [variant("archivo", "archivo-latin-wght-normal.woff2", "100 900")] },
+    // The two-axis file, not the weight-only one: the display face is set
+    // condensed (`--font-display--font-variation-settings` in global.css), and
+    // the wdth axis only exists in this build of the font. `stretch` declares
+    // the axis range on the @font-face so the browser does not synthesise or
+    // reject the width.
+    options: { variants: [variant("archivo", "archivo-latin-wdth-normal.woff2", "100 900", "62% 125%")] },
   },
   // Deliberately NOT terminated with a generic, which suppresses metric matching
   // entirely for this family. Both mono generics map to Courier New alone, and a

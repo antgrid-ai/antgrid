@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 import { describe, it, expect } from "bun:test";
 import type { ServerWebSocket } from "bun";
 import { Connections, type Connection, type WsData } from "../src/connections";

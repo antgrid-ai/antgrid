@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { buildChatSpawnAugment } from "../src/agent-core";
-import { codexNotifyOnlyArgs, codexUnifiedExecArgs } from "../src/agents/codex/driver";
+import { codexNotifyOnlyArgs, codexUnifiedExecArgs } from "../../packages/antgrid-agents/src/agents/codex/driver";
 
 describe("codex chat-mode augment", () => {
   it("slices out only the notify=[...] -c pair", () => {

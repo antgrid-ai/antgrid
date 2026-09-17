@@ -5,7 +5,7 @@ import {
   buildSpawnEnv,
   WINDOWS_SHUTDOWN_GRACE_MS,
 } from "./terminal-session";
-import type { GracefulExitAsk } from "./agents/types";
+import type { GracefulExitAsk } from "antgrid-agents/contracts";
 import { ScrollbackBuffer } from "./scrollback";
 import { submitPlan } from "./pty-submit";
 import { BRACKETED_PASTE, TerminalModeTracker } from "./terminal-modes";
@@ -161,6 +161,7 @@ export interface TerminalSpawnConfig {
   terminalId?: string;
   name?: string;
   command?: string;
+  invocationKind?: "exec" | "shell";
   args?: string[];
   cwd?: string;
   env?: Record<string, string>;
@@ -191,7 +192,7 @@ interface StoppedTerminalInfo {
 
 export interface TerminalManagerCallbacks {
   onTerminalOutput?: (terminalId: string, data: string) => void;
-  onTerminalExited?: (terminalId: string) => void;
+  onTerminalExited?: (terminalId: string, runId?: string) => void;
   onTerminalNotification?: (terminalId: string) => void;
   onTerminalTitle?: (terminalId: string, title: string) => void;
   /** This terminal is gone for good — not exited, FORGOTTEN: nothing will name
@@ -260,7 +261,16 @@ export function gracefulBudget(
 }
 
 export class TerminalManager {
+  enableHookFallback(terminalId: string): void {
+    const session = this.sessions.get(terminalId);
+    session?.enableOscNotifications();
+    session?.enableOscTitle();
+  }
+  confirmHookAlive(terminalId: string): void {
+    this.sessions.get(terminalId)?.confirmHookAlive();
+  }
   private sessions = new Map<string, TerminalSession>();
+  private agentRunIds = new WeakMap<TerminalSession, string>();
   private scrollbacks = new Map<string, ScrollbackBuffer>();
   /** Paired 1:1 with `scrollbacks` — the tail alone cannot carry mode state. */
   private modeTrackers = new Map<string, TerminalModeTracker>();
@@ -340,6 +350,7 @@ export class TerminalManager {
     const terminalId = config.terminalId ?? crypto.randomUUID();
 
     if (this.sessions.has(terminalId)) {
+      const previousRunId = this.agentRunIds.get(this.sessions.get(terminalId)!);
       log.warn(`Terminal "${terminalId}" already exists, killing first`);
       this.kill(terminalId);
       // The replaced run's exit lands later, on a slot this spawn now owns,
@@ -356,7 +367,7 @@ export class TerminalManager {
       // the ask and the exit is now seconds, which is long enough for the user
       // to press Stop and then Start (`SessionManager.stopTerminal` ->
       // `startNow`).
-      this.callbacks.onTerminalExited?.(terminalId);
+      this.callbacks.onTerminalExited?.(terminalId, previousRunId);
     }
 
     // Clear from stopped list since we're re-spawning
@@ -396,6 +407,7 @@ export class TerminalManager {
       terminalId,
       name: config.name,
       command: config.command,
+      invocationKind: config.invocationKind,
       args: config.args,
       cwd: config.cwd,
       env,
@@ -514,7 +526,7 @@ export class TerminalManager {
             this.dropAfterFinalFrame(terminalId, msg.exitCode);
           }
           this.connState.clearTerminal(terminalId);
-          this.callbacks.onTerminalExited?.(terminalId);
+          this.callbacks.onTerminalExited?.(terminalId, config.env?.ANTGRID_RUN_ID);
           return;
         }
 
@@ -578,6 +590,7 @@ export class TerminalManager {
     for (const fn of this.sessionObservers) {
       try { fn(session); } catch { /* ignore */ }
     }
+    if (config.env?.ANTGRID_RUN_ID) this.agentRunIds.set(session, config.env.ANTGRID_RUN_ID);
     session.spawn();
     log.info(`Terminal "${terminalId}" spawned (${config.name ?? "shell"})`);
     return terminalId;
@@ -1080,8 +1093,15 @@ export class TerminalManager {
     const history = store.openRun(saved.runId);
     // A saved display is not PTY output and must never archive rows or replay
     // a history clear while reconstructing the stopped viewport.
+    // `noteGap` is a no-op rather than absent: replaying a saved screen loses
+    // nothing, and `TerminalFrameSource.archive` calls it from inside its own
+    // catch — a shim missing it would raise a TypeError out of the xterm parse
+    // loop and freeze the restored screen. `boundary` still forwards, so the
+    // stopped run's OWN gap reaches the app with the rest of its archive state:
+    // `gapped` is a column on the run, so the handle `openRun` rebuilt above
+    // carries it even though `disposeScreen` released the one that recorded it.
     const readOnlyHistory = {
-      runId: saved.runId, append: () => {}, clear: () => {},
+      runId: saved.runId, append: () => {}, clear: () => {}, noteGap: () => {},
       flush: () => history.flush(), boundary: () => history.boundary(),
     } as unknown as TerminalRunHistory;
     const source = new TerminalFrameSource(saved.frame?.cols ?? 80, saved.frame?.rows ?? 24, readOnlyHistory);

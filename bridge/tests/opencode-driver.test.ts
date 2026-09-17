@@ -1,6 +1,6 @@
 import { describe, it, expect } from "bun:test";
-import { OpencodeDriver, type OpencodeClientLike, type OpencodeEvent } from "../src/agents/opencode/chat-backend";
-import type { DriverLifecycleEvent } from "../src/agents/types";
+import { OpencodeDriver, type OpencodeClientLike, type OpencodeEvent } from "../../packages/antgrid-agents/src/agents/opencode/chat-backend";
+import type { DriverLifecycleEvent } from "../../packages/antgrid-agents/src/agents/types";
 import type { AbMessage } from "../src/protocol";
 
 // Fake client: a manual event queue + recorded calls. events() yields whatever
@@ -456,7 +456,7 @@ describe("OpencodeDriver", () => {
     });
     const driver = new OpencodeDriver({ sessionId: "s1", client, sendMessage: (m) => sent.push(m) });
     const id = await driver.start("sess-abc");
-    expect(id).toBe("sess-abc");
+    expect(id).toBeUndefined();
     expect(created).toBe(0); // resume must NOT create a new session
     expect(messagesFor).toBe("sess-abc");
     // One batched frame, not a frame per item — see createTranscriptReplay.

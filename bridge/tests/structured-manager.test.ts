@@ -1,11 +1,11 @@
 import { describe, it, expect } from "bun:test";
 import { StructuredAgentManager, type StructuredDriver } from "../src/structured/structured-manager";
 import { createMessage, type AbMessage } from "../src/protocol";
-import { isChatCapableTool } from "../src/structured/chat-capable";
+import { isChatCapableTool } from "../../packages/antgrid-agents/src/structured/chat-capable";
 
-function makeFakeDriver(overrides: Partial<StructuredDriver> & { onStart?: () => Promise<string>; onDispose?: () => void } = {}): StructuredDriver {
+function makeFakeDriver(overrides: Partial<StructuredDriver> & { onStart?: () => Promise<void>; onDispose?: () => void } = {}): StructuredDriver {
   return {
-    start: overrides.start ?? (overrides.onStart ? overrides.onStart : async () => ""),
+    start: overrides.start ?? (overrides.onStart ? overrides.onStart : async () => {}),
     prompt: overrides.prompt ?? (async () => {}),
     cancel: overrides.cancel ?? (async () => false),
     compact: overrides.compact ?? (async () => {}),
@@ -157,7 +157,7 @@ describe("StructuredAgentManager", () => {
   it("routes agent:question-resolve to the existing driver", async () => {
     const calls: string[] = [];
     const factory = (_sessionId: string, _tool: string, _send: (m: AbMessage) => void, _resumeId?: string) => ({
-      start: async () => "",
+      start: async () => {},
       prompt: async () => {},
       cancel: async () => false, compact: async () => {},
       resolvePermission: () => {},
@@ -199,8 +199,8 @@ describe("StructuredAgentManager", () => {
     const mgr = new StructuredAgentManager({
       sendMessage: () => {},
       onAgentSession: (sid, aid) => captured.push([sid, aid]),
-      driverFactory: (sessionId, tool, send, resumeId) => makeFakeDriver({
-        onStart: async () => { started.push(`${sessionId}:${tool}:${resumeId ?? ""}`); return "agent-id-1"; },
+      driverFactory: (sessionId, tool, send, resumeId, _policy, run) => makeFakeDriver({
+        onStart: async () => { started.push(`${sessionId}:${tool}:${resumeId ?? ""}`); run?.onAgentSession("agent-id-1"); },
       }),
     });
     await mgr.startChat({ sessionId: "s1", tool: "codex", resumeId: "prev" });
@@ -254,7 +254,7 @@ describe("StructuredAgentManager", () => {
   it("persists a config change via onSetConfig when the app sets it", async () => {
     const persisted: Array<{ id: string; key: string; value: string }> = [];
     const mgr = new StructuredAgentManager({
-      driverFactory: (sessionId) => makeFakeDriver({ start: async () => sessionId }),
+      driverFactory: () => makeFakeDriver(),
       sendMessage: () => {},
       onAgentSession: () => {},
       onSetConfig: (id, key, value) => persisted.push({ id, key, value }),
@@ -335,7 +335,7 @@ describe("StructuredAgentManager", () => {
     const calls: Array<{ method: string; arg?: any }> = [];
     const mgr = new StructuredAgentManager({
       driverFactory: () => makeFakeDriver({
-        start: async () => { calls.push({ method: "start" }); return "s1"; },
+        start: async () => { calls.push({ method: "start" }); return; },
         setConfig: (key, value) => calls.push({ method: "setConfig", arg: { key, value } }),
       }),
       sendMessage: () => {},
@@ -365,7 +365,7 @@ describe("StructuredAgentManager", () => {
     const order: string[] = [];
     const mgr = new StructuredAgentManager({
       driverFactory: () => makeFakeDriver({
-        start: async () => "s1",
+        start: async () => {},
         setConfig: (key) => order.push(key),
       }),
       sendMessage: () => {},
@@ -385,7 +385,7 @@ describe("StructuredAgentManager", () => {
     let disposed = false;
     const mgr = new StructuredAgentManager({
       driverFactory: () => makeFakeDriver({
-        start: async () => "s1",
+        start: async () => {},
         setConfig: () => { throw new Error("boom"); },
         onDispose: () => { disposed = true; },
       }),
@@ -402,7 +402,7 @@ describe("StructuredAgentManager", () => {
     const calls: string[] = [];
     const mgr = new StructuredAgentManager({
       driverFactory: () => makeFakeDriver({
-        start: async () => { calls.push("start"); return "s1"; },
+        start: async () => { calls.push("start"); return; },
         setConfig: () => calls.push("setConfig"),
       }),
       sendMessage: () => {}, onAgentSession: () => {},
@@ -413,6 +413,48 @@ describe("StructuredAgentManager", () => {
 });
 
 describe("StructuredAgentManager cancel reconciliation", () => {
+  it("replaces an aborted startup after teardown even when the original start never resolves", async () => {
+    let created = 0;
+    let disposed = 0;
+    let release!: () => void;
+    const teardown = new Promise<void>((resolve) => { release = resolve; });
+    const mgr = new StructuredAgentManager({
+      driverFactory: () => {
+        created++;
+        return makeFakeDriver(created === 1 ? {
+          start: () => new Promise(() => {}),
+          dispose: async () => { await teardown; disposed++; },
+        } : {});
+      },
+      sendMessage: () => {}, onAgentSession: () => {},
+    });
+    const first = mgr.startChat({ sessionId: "race", tool: "codex" });
+    const stop = mgr.stopChat("race");
+    const replacement = mgr.startChat({ sessionId: "race", tool: "codex" });
+    await Promise.resolve();
+    expect(created).toBe(1);
+    release();
+    await Promise.all([first, stop, replacement]);
+    expect(created).toBe(2);
+    expect(disposed).toBe(1);
+    await mgr.stopChat("race");
+  });
+
+  it("releases resources and permits retry when teardown notifications throw", async () => {
+    let disposed = 0;
+    const mgr = new StructuredAgentManager({
+      driverFactory: () => makeFakeDriver({ dispose: () => { disposed++; } }),
+      sendMessage: () => { throw new Error("transport unavailable"); },
+      dropSessionReplay: () => { throw new Error("replay unavailable"); },
+      onAgentSession: () => {},
+    });
+    await mgr.startChat({ sessionId: "race", tool: "codex" });
+    await mgr.stopChat("race");
+    await mgr.startChat({ sessionId: "race", tool: "codex" });
+    await mgr.stopChat("race");
+    expect(disposed).toBe(2);
+  });
+
   it("answers agent:cancel with turn-end when the driver has no live turn, so a client showing a phantom turn can close it", async () => {
     const { mgr, sent } = makeManager();
     await mgr.startChat({ sessionId: "s1", tool: "codex" });

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 import { createHmac, timingSafeEqual } from "node:crypto";
 
 /** HMAC-SHA256(secret, value) returned as a Uint8Array<ArrayBuffer> — the strict

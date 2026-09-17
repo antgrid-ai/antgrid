@@ -31,6 +31,7 @@ import 'providers/analytics.dart';
 import 'providers/auth.dart';
 import 'providers/cached_sessions.dart';
 import 'providers/collapsed_drawer.dart';
+import 'providers/session_workspace_state.dart';
 import 'providers/demo_mode.dart';
 import 'providers/device_revocation.dart';
 import 'providers/drawer_order.dart';
@@ -62,6 +63,7 @@ import 'services/push_identity.dart';
 import 'providers/update_available.dart';
 import 'storage/cached_sessions_store.dart';
 import 'storage/drawer_collapsed_store.dart';
+import 'storage/session_layout_store.dart';
 import 'storage/drawer_order_store.dart';
 import 'storage/first_run_store.dart';
 import 'storage/pending_forgets_store.dart';
@@ -123,6 +125,11 @@ Future<void> main() async {
       'JetBrains Mono NL',
     ], await rootBundle.loadString('assets/fonts/OFL.txt'));
   });
+  LicenseRegistry.addLicense(() async* {
+    yield LicenseEntryWithLineBreaks(const [
+      'Antgrid',
+    ], await rootBundle.loadString('assets/legal/LICENSE.md'));
+  });
   // Draw behind transparent system bars on mobile so the app's own dark
   // surfaces reach the screen edges (no opaque OS bar bands). Bar icon
   // brightness is applied per-palette via the AnnotatedRegion in AbApp.
@@ -154,6 +161,7 @@ Future<void> main() async {
     recentAgentsStore,
     drawerOrderStore,
     drawerCollapsedStore,
+    sessionLayoutStore,
     cachedSessionsStore,
     firstRunStore,
     prefs,
@@ -163,6 +171,7 @@ Future<void> main() async {
     RecentAgentsStore.open(),
     DrawerOrderStore.open(),
     DrawerCollapsedStore.open(),
+    SessionLayoutStore.open(),
     CachedSessionsStore.open(),
     FirstRunStore.open(),
     openAppSettingsPrefs(),
@@ -212,6 +221,7 @@ Future<void> main() async {
       recentAgentsStoreProvider.overrideWithValue(recentAgentsStore),
       drawerOrderStoreProvider.overrideWithValue(drawerOrderStore),
       drawerCollapsedStoreProvider.overrideWithValue(drawerCollapsedStore),
+      sessionLayoutStoreProvider.overrideWithValue(sessionLayoutStore),
       cachedSessionsStoreProvider.overrideWithValue(cachedSessionsStore),
       firstRunStoreProvider.overrideWithValue(firstRunStore),
       appSettingsServiceProvider.overrideWith(

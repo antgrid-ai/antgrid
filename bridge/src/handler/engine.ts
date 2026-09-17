@@ -5,6 +5,7 @@ import {
   HandlerLensSchema,
   type AbMessage,
   type HandlerEntitlement,
+  type HandlerAvailability,
   type HandlerLens,
 } from "../protocol";
 import { classifyDestructive, describeWarning, type FloorWarning } from "./destructive-floor";
@@ -39,9 +40,9 @@ import {
   type InstructionItem, type ItemStatus, type RejectionCode,
 } from "./backlog";
 import { checkReplyShape, findCommand, oneLine, replyShape } from "./reply-shape";
-import type { CapCommand } from "../structured/chat-session";
+import type { CapCommand } from "antgrid-agents/structured/chat-session";
 import type { SessionAdapter } from "./session-adapter";
-import { handlerObservable, judgeCapable } from "../agents/registry";
+import { handlerObservable, judgeCapable } from "../agent-runtime";
 import { createEntitlementReader, type EntitlementReader } from "../entitlement";
 import { normalizeBrief, type DecisionAsk, type HandlerDecision } from "./decision";
 import {
@@ -696,6 +697,7 @@ export function quickChoicesFor(p: {
 }
 
 export interface HandlerEngineDeps {
+  availability?: (terminalId: string) => HandlerAvailability;
   projectId: string;
   // Per terminal, not per project: an isolated session runs in its own managed
   // worktree, and both the judge's cwd and the destructive floor's inside-project
@@ -1572,13 +1574,33 @@ export class HandlerEngine {
     // to the extraction behind it — an extraction that yields nothing still leaves
     // a sentence the user typed, and a restart must not lose it.
     pushInstruction(s.instructions, normalizeInstruction(text), this.now());
+    // The prompt the last verdict was reached against is not the prompt any more.
+    // Unconditional rather than folded into the supersede below: an instruction is
+    // new material whether or not it happened to retire a question, and it reaches
+    // the judge through the PROMPT while contextHash covers the transcript and the
+    // PTY alone. A session whose agent is idle moves neither, so the pass this
+    // instruction starts would otherwise return at the unmoved-context check
+    // having never read what the user typed.
+    s.lastJudgedContextHash = undefined;
+    // Mandatory: instruct runs off agent-core's switch, so a pass suspended in its
+    // judge call would re-bank its own stale hash and undo the clear above.
+    s.promptGen = (s.promptGen ?? 0) + 1;
+    // A human in the loop is the one thing the guard's closed-loop premise says
+    // cannot happen, and this is onUserReply's reset arriving by the other door: a
+    // sentence composed in the Handler box reaches the engine directly and never as
+    // a submitted keystroke, so nothing else on this path clears the circular-reply
+    // hashes. Without it the hashes outlive the intervention, and the judge's next
+    // attempt at the very reply the user just endorsed is refused a second time —
+    // which is how a session stays wedged on a guard_blocked report it was told to
+    // work past.
+    this.guard.reset(p.terminalId);
     // A sentence the user typed while a question of Handler's was standing IS the
     // answer to it, by the rule onUserReply already applies to a submitted line:
     // each pause supersedes the last, and the user has moved on. The three kinds a
     // typed line does not answer are excluded exactly as they are there — an ask is
     // a question aimed at the user, a resolve_in_session needs the chat RPC, and a
     // guard_blocked report was never a pause to supersede.
-    // `s.promptGen` below is what tells a pass ALREADY suspended in its judge call
+    // `s.promptGen` above is what tells a pass ALREADY suspended in its judge call
     // that its prompt is stale — but only the hash write-back at the far end of
     // that call checks it. A pass suspended past that check acts on its verdict
     // unconditionally, so it can re-mint the very row this supersede retires,
@@ -1604,11 +1626,6 @@ export class HandlerEngine {
       // path. Overwriting the state here would flip the pill off "PARKED · UNTIL
       // 14:05" while the countdown chip still renders that deadline.
       if (s.state !== "parked") s.state = restingState(s);
-      // The list the last verdict was reached against is not the list any more.
-      s.lastJudgedContextHash = undefined;
-      // Mandatory: instruct runs off agent-core's switch, so a pass suspended in its
-      // judge call would re-bank its own stale hash and undo the clear above.
-      s.promptGen = (s.promptGen ?? 0) + 1;
     }
     this.persist(p.terminalId, s, true);
     this.queueExtraction(p.terminalId, text, { fallbackText: p.fallbackText?.trim() || undefined });
@@ -1619,16 +1636,28 @@ export class HandlerEngine {
           : `Your instruction took the place of ${superseded} of Handler's questions`,
         previewForUser(first.question));
       this.emitStatus();
-      // Retiring the row alone is INERT and leaves the session worse than it was: an
-      // escalate injected nothing, so the agent is idle at a prompt and no event is
-      // coming to carry this instruction to a judge. The user would go from
-      // "stopped, with a question" to "watching, with nothing happening".
-      //
-      // Not on a parked session: the park's own wake (the timer's retryEvent, or
-      // limit_cleared for a self-resuming park) is a producer that is already coming,
-      // and firing here would burn a judge call on the very provider account the
-      // park exists to back off from — whose failure re-enters registerTransientFailure.
-      if (s.state !== "parked") this.maybeRelayNow(p.terminalId, s, "to pick up your instruction");
+    }
+    // Retiring the row alone is INERT and leaves the session worse than it was: an
+    // escalate injected nothing, so the agent is idle at a prompt and no event is
+    // coming to carry this instruction to a judge. The user would go from
+    // "stopped, with a question" to "watching, with nothing happening".
+    //
+    // A standing guard_blocked row is the same absent producer, arrived at from the
+    // other side, and gating on the supersede alone reached every case but that one:
+    // it is the single kind keptRows holds BACK from `gone`, so the escalation that
+    // injects nothing by construction — the guard refused the reply, so there is
+    // none — was also the only one an instruction could never wake. A session wedged
+    // that way stayed wedged until a human typed into the terminal itself, which is
+    // the door that resets the guard; the Handler box, which is where the user is
+    // already looking, was inert.
+    //
+    // Not on a parked session: the park's own wake (the timer's retryEvent, or
+    // limit_cleared for a self-resuming park) is a producer that is already coming,
+    // and firing here would burn a judge call on the very provider account the
+    // park exists to back off from — whose failure re-enters registerTransientFailure.
+    const wedged = s.escalations.some((e) => e.kind === "guard_blocked");
+    if (s.state !== "parked" && (superseded > 0 || wedged)) {
+      this.maybeRelayNow(p.terminalId, s, "to pick up your instruction");
     }
     return granted;
   }
@@ -3840,6 +3869,13 @@ export class HandlerEngine {
     }
     // No new activity kind: the `escalate` row is the durable trace of the
     // refusal, and a dismissal is the user acknowledging their own read.
+    //
+    // Deliberately NOT the wake `instruct` fires on this same row. Nothing here
+    // moved: the reply the guard refused is still the reply the same context
+    // produces, so a pass started from an acknowledgement re-derives it and the
+    // user's Dismiss answers itself with an identical report. What ends the wedge
+    // is new material — an instruction, or a line typed into the session — and
+    // both of those already carry their own wake.
     s.escalations = s.escalations.filter((e) => e !== esc);
     // A park is not over because a report was read: the timer is still armed and
     // parkKind/parkedUntil still describe the wait, so resting here would leave
@@ -3961,6 +3997,7 @@ export class HandlerEngine {
       // Re-derived on every emit rather than frozen at arm time: a slot's mode
       // and its judge pick both change under a live arm.
       observability: this.observabilityFor(terminalId),
+      availability: this.deps.availability?.(terminalId),
       // Omitted when unset, the way every optional field on this snapshot is: an
       // absent lens is the unnamed default, and a bridge that filled one in would
       // leave the app unable to tell a picked lens from no pick at all.

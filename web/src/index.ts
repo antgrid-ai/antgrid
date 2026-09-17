@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 import { buildApp } from "./app.js";
 import { loadEnv } from "./env.js";
 import { createDb } from "./db/index.js";

@@ -1,3 +1,5 @@
+import "./agent-host";
+import { agentRuntime } from "./agent-runtime";
 import { z } from "zod";
 import { VERSION } from "./version";
 import { join } from "node:path";
@@ -34,8 +36,8 @@ import { displayStartupBanner } from "./banner";
 import { generateEphemeralKeypair, type EphemeralKeypair } from "./key-exchange";
 import { loadConfig, findConfigFile, projectName, type AbConfig } from "./config";
 import { buildConfigFromBootstrap, consoleBootstrapIO, writeConfigYaml } from "./bootstrap";
-import { resolveAgent, listKnownTools, oscTitleForNaming, isOscTitleUnusable } from "./known-agents";
-import { augmentAgentLaunch } from "./agent-launch-augmenter";
+import { resolveAgent, listKnownTools, oscTitleForNaming, isOscTitleUnusable } from "./agent-runtime";
+import { augmentAgentLaunch } from "./agent-runtime";
 import { AGENT_REACH_DEFAULT } from "./agent-reach-policy";
 import { createSessionBusApi, type SessionBusApi } from "./session-bus/api";
 import type { SessionDirectory } from "./session-bus/directory";
@@ -45,15 +47,15 @@ import { lineForEvent } from "./session-bus/deliver-event";
 import { isRefusal } from "./session-bus/errors";
 import { neutralizeFenced } from "./session-bus/delivery";
 import type { QueuedLine } from "./session-bus/delivery-queue";
-import { CHECKOUT_VARIABLE_MESSAGE_TYPES, createMessage, HandlerAnswerWire, HandlerConfigureWire, HandlerDismissWire, HandlerInstructWire, HandlerUndoWire, PREVIEW_CHANNEL_MESSAGE_TYPES, type AbMessage, type RpcRequest, type SessionEntry, type WorkStatus } from "./protocol";
+import { CHECKOUT_VARIABLE_MESSAGE_TYPES, createMessage, HANDLER_HISTORY_RECORDS, HandlerAnswerWire, HandlerConfigureWire, HandlerDismissWire, HandlerHistoryRequestWire, HandlerInstructWire, HandlerUndoWire, PREVIEW_CHANNEL_MESSAGE_TYPES, type AbMessage, type RpcRequest, type SessionEntry, type WorkStatus } from "./protocol";
 import { parseTunnelMessage } from "./tunnel-protocol";
 import { startApiServer, type ApiServerHandle } from "./api-server";
-import { MessageBus, clientKeyOf, type ClientKey, type InboundSource } from "./message-bus";
+import { MessageBus, clientKeyOf, type Channel, type ClientKey, type InboundSource } from "./message-bus";
 import { resolveAbDir } from "./antgrid-dir";
 import { computeProjectId } from "./project-id";
 import { loadPairedPhones, type PairedPhonesStore } from "./paired-phones";
 import { ConfigController } from "./config-controller";
-import { detectInstalledTools } from "./tool-detector";
+import { detectAvailableTools } from "./tool-detector";
 import { modelwatch } from "./modelwatch";
 import { SessionManager, isDefaultSessionName, type DeleteSessionOptions } from "./session-manager";
 import { WorktreeError } from "./worktrees/worktree-manager";
@@ -64,13 +66,13 @@ import { CheckoutRuntimeRegistry } from "./worktrees/checkout-runtime-registry";
 import type { CheckoutRecord, CheckoutSetupProgress } from "./worktrees/checkout-types";
 import { CheckoutSetupRunner, setupTerminalId } from "./worktrees/checkout-setup";
 import { SessionNamer } from "./session-namer";
-import { antigravityCliHome } from "./agents/antigravity/title";
-import { AntigravityTitleWatcher } from "./agents/antigravity/title-watcher";
-import { resolveStructuredTitle } from "./agents/title-dispatch";
+import { resolveStructuredTitle } from "./agent-runtime";
 import { buildTitleContext, generateTitleFromContext, type TitleGeneration } from "./agents/title-generate";
-import { TitleAttempts, type TitleOutcome } from "./agents/title-attempts";
-import { agentSpec, BY_HOOK_NAME, handlerObservable } from "./agents/registry";
+import { TitleAttempts, type TitleOutcome } from "antgrid-agents/title-attempts";
+import { AGENTS, agentSpec, BY_HOOK_NAME, handlerObservable } from "./agent-runtime";
+import { DEFAULT_AGENT } from "antgrid-agents/defaults";
 import { OpenAgentPrompts } from "./agents/open-prompts";
+import { readRecentActivity } from "./handler/config";
 import { HandlerEngine, type HandlerEvent } from "./handler/engine";
 import { createEntitlementReader, type TierClaimSource } from "./entitlement";
 import { classifyTurnEndError } from "./handler/lifecycle-classify";
@@ -206,6 +208,7 @@ export function buildChatSpawnAugment(
   slotId: string,
   apiPort: number | null,
   abDir?: string,
+  runId?: string,
 ): { args: string[]; env: Record<string, string> } {
   const aug = augmentAgentLaunch(tool, { abDir });
   return {
@@ -213,6 +216,7 @@ export function buildChatSpawnAugment(
     env: {
       ...aug.env,
       ANTGRID_TERMINAL_ID: slotId,
+      ...(runId ? { ANTGRID_RUN_ID: runId } : {}),
       ...(apiPort != null ? { ANTGRID_API_PORT: String(apiPort) } : {}),
     },
   };
@@ -292,11 +296,18 @@ export interface AgentCore {
    *  so every question that used to be asked of "the" phone is asked of the
    *  device the frame came from.
    *
-   *  Its PRESENCE is also the remote-vs-local signal the mobile-access gate
-   *  reads: a wired provider means this core has a relay transport at all, so a
-   *  relay-origin frame rides the machine switch. Local mode never sets it and
-   *  the gate is skipped — the loopback socket + token is that trust boundary.
-   *  Pass `null` to clear it when the transport detaches. */
+   *  Wiring it for the first time also latches this core as relay-attached, and
+   *  that latch is STICKY: clearing the provider on detach does not undo it.
+   *  Two facts live here and must stay apart — whether this core faces the
+   *  relay at all (the latch, which is what `remoteFrameAllowed` reads) and what
+   *  one device may do (the lookup's return value). Reading the lookup's
+   *  PRESENCE for the first question hands a relay frame the local-core
+   *  carve-out the moment a provider is cleared on a warm core, while reading
+   *  its absence as "unknown device" refuses that same frame one gate later; a
+   *  miss on a latched core is a reportable fault, never a capability the
+   *  device failed to declare.
+   *
+   *  Pass `null` to clear the lookup when the transport detaches. */
   setPeerSessionProvider(fn: ((peerId: string) => PeerSessionView | null) | null): void;
   /** Every app session on this core's transport, for the questions that must be
    *  answered about ALL attached devices rather than the one that asked. Kept
@@ -323,6 +334,15 @@ export interface AgentCore {
    *  initialized yet (pre-handshake). The control-plane delete RPC calls this
    *  for a warm core so the on-disk file and in-memory state stay consistent. */
   deleteSession(id: string, options?: DeleteSessionOptions): boolean | Promise<boolean>;
+  /** Starts (or re-announces) a session this core owns, by id, with no initial
+   *  prompt — the same bare restart `session:start` drives. Fire-and-forget: a
+   *  caller that needs the outcome watches `session:updated` rather than
+   *  awaiting this. A no-op for an id this core does not hold, or one already
+   *  running. Exists for the session-bus wake path (§7.3's same-machine
+   *  carve-out) — `host-server.ts` resolves the owning core by session id and
+   *  calls through here, since only that core's own `SessionManager` can start
+   *  a session it persists. */
+  startSession(id: string): void;
   /** Live session list with true per-session `running` (via SessionManager's
    *  in-memory PTY/chat sets), for the control-plane `sessions.list` peek when a
    *  warm core owns the project — the disk-only `readPersisted` reports every
@@ -492,6 +512,16 @@ export interface BuildAgentCoreOptions {
    *  means `listSessions` is refused rather than narrowed — see
    *  `SessionBusApiDeps.directory`. */
   sessionDirectory?: SessionDirectory;
+  /** Host-level hook that starts a session THIS MACHINE holds, by id, wherever
+   *  it lives — this core's own project or a sibling one. Travels with
+   *  `sessionDirectory` and resolves the same way `deliverLocal` does
+   *  (`host-server.ts`'s `sessionIndex.lookup` → the owning warm core →
+   *  `ProjectCore.startSession`). Absent means the session-bus §7.3 wake never
+   *  fires — a bare core with no host, or a session on a project this host has
+   *  not warmed, cannot be started from here. Returns false when no warm core
+   *  holds that session (never throws); true only means the start was asked
+   *  for, not that it finished — see `SessionBusApiDeps.startSession`. */
+  startSession?: (sessionId: string) => boolean;
   /** Hand one rendered line to the turn-boundary queue that owns delivery
    *  (spec 5.2). Absent means there is no queue to hold it: the turn-open set
    *  lives in the reduction ABOVE this core, so a core built without one has
@@ -521,6 +551,45 @@ const GIT_POLL_BASE_MS = 10_000;
  *  that a fan-out of arrivals is one push, narrow enough that a sheet open on
  *  that mailbox still re-reads while its reader is looking at it. */
 const BUS_ARRIVED_COALESCE_MS = 100;
+
+/** Whether a refused inbound verb must be answered on `session:result` rather
+ *  than `control:result`.
+ *
+ *  A reply only ends a wait if the caller is listening for it. `sessions_service.dart`
+ *  completes every pending session mutation off `session:result` + `requestId`
+ *  (`_pendingCreates`, `_pendingRefusableMutations`, `_pendingDeletes`,
+ *  `_pendingModeChanges`, `_pendingMutations`); its `control:result` handling is
+ *  a separate, uncorrelated surface, so a session verb answered there times out
+ *  anyway. Derived from the verb's shape rather than listed, so a new session
+ *  verb is covered by construction.
+ *
+ *  `session:list` is excluded on purpose: `session:list:result` carries only
+ *  `{requestId, sessions[]}`, with nowhere to put a refusal, so the only frame
+ *  available would report an empty session list — a project that looks empty
+ *  rather than refused. It keeps the uncorrelated `control:result`.
+ *  `session:focus` carries no `requestId`, and nothing awaits it. Both are
+ *  pinned in `agent-core-checkout-routing.test.ts`. */
+function answersOnSessionResult(msg: AbMessage): msg is AbMessage & { requestId: string } {
+  return msg.type.startsWith("session:")
+    && msg.type !== "session:list"
+    && typeof (msg as { requestId?: unknown }).requestId === "string";
+}
+
+/** One notice per (device, refusal) per cooldown for the two checkout-routing
+ *  refusal surfaces nothing correlates — the log line and a bare
+ *  `control:result`. A refused device keeps sending at keystroke rate
+ *  (`terminal:input`, `terminal:ack`), so both would otherwise fire once per
+ *  frame. Replies keyed to a `requestId` are never throttled: each ends one
+ *  specific wait. Same shape as the mux's `noticeDue`. */
+const CHECKOUT_REFUSAL_NOTICE_MS = 5_000;
+const CHECKOUT_REFUSAL_NOTICE_TTL_MS = 60_000;
+
+/** A settled refusal carries copy for the app; the transient one is dropped so
+ *  the app's own retry can heal it, and so carries none — see
+ *  `checkoutRoutingRefusal`. */
+type CheckoutRoutingRefusal =
+  | { code: "CHECKOUT_ROUTING_REQUIRED" | "CHECKOUT_ROUTING_UNAVAILABLE"; message: string; detail: string }
+  | { code: "CHECKOUT_ROUTING_PENDING"; detail: string };
 
 export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<AgentCore> {
   // The interactive bootstrap (`consoleBootstrapIO` → @inquirer/prompts) reads
@@ -638,7 +707,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     const knownTools = new Set(listKnownTools());
     let command: string | undefined;
     if (tool && knownTools.has(tool)) {
-      command = resolveAgent(tool).bin;
+      command = agentSpec(tool)?.cli?.bin ?? "";
     } else if (config.agent?.command) {
       command = config.agent.command;
     } else if (tool) {
@@ -667,7 +736,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   function agentSpecForConfig(source: AbConfig): { command: string; name: string; args?: string[]; workingDir?: string } {
     const tool = source.agent?.tool;
     let command = source.agent?.command;
-    if (tool && new Set(listKnownTools()).has(tool)) command = resolveAgent(tool).bin;
+    if (tool && new Set(listKnownTools()).has(tool)) command = agentSpec(tool)?.cli?.bin ?? "";
     if (!command && tool) command = tool;
     return {
       command: command ?? "",
@@ -702,7 +771,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   let manager: TerminalManager | null = null;
   let sessions: SessionManager | null = null;
   let namer: SessionNamer | null = null;
-  let antigravityTitleWatcher: AntigravityTitleWatcher | null = null;
+  let titleObservers: Array<{ stop(): void }> = [];
   // Title-generation budget per conversation, per terminal. The /session-title
   // post repeats every turn, so without this a session whose agent never names
   // itself would pay a model call per turn, forever. Keyed by agent session
@@ -938,13 +1007,15 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     const { runtime, externalId } = terminalOwner(terminalId);
     const session = msg.type === "terminal:notification" ? sessions?.get(terminalId) : undefined;
     const tool = session?.tool ?? (session?.command ? undefined : runtime.config.agent?.tool);
-    if (session && msg.type === "terminal:notification" && tool === "codex") {
-      // Codex's TUI is configured to emit approvals only. Use the hook's wire
-      // channel so mobile push and the work-status reducer also see the prompt,
-      // without a second terminal notification producing a duplicate toast.
+    const normalized = tool && msg.type === "terminal:notification"
+      ? agentSpec(tool)?.normalizeTerminalNotification?.(msg)
+      : undefined;
+    if (session && normalized) {
+      // Route semantic requests through the shared channel so push and work
+      // status observe the same prompt without a duplicate terminal toast.
       sendFromRuntime(runtime, createMessage("notification:push", {
-        notificationType: "permission_request",
-        message: msg.body ?? msg.title ?? "Codex needs approval",
+        notificationType: normalized.type,
+        message: normalized.message,
         sessionId: session.id,
         sessionTitle: session.name,
         projectId: project.id,
@@ -963,8 +1034,15 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // Wired by the remote/promotion transports; unset (null) in local mode, where
   // there is no relay transport at all.
   let peerSessionProvider: ((peerId: string) => PeerSessionView | null) | null = null;
+  // Whether this core has EVER faced the relay. Sticky on purpose: a promotion
+  // handle's stop() and the wizard stream's detach both null the provider while
+  // leaving the core warm on its bus, and a core that then read itself as local
+  // would hand a relay-origin frame the loopback carve-out — ungated by the
+  // machine switch. A core that has faced the relay once stays gated for life.
+  let relayEverAttached = false;
   function setPeerSessionProvider(fn: ((peerId: string) => PeerSessionView | null) | null) {
     peerSessionProvider = fn;
+    if (fn) relayEverAttached = true;
   }
   // Every app session on the transport, for the questions about ALL of them.
   let establishedPeersProvider: (() => PeerSessionView[]) | null = null;
@@ -997,13 +1075,13 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // drive this project only while the machine is mobile-reachable. A LOOPBACK
   // frame is never gated: local control's trust boundary is the loopback socket
   // + token, and the desktop must keep driving its own machine with mobile
-  // access off. The skip for a core with NO relay transport wired is the same
+  // access off. The skip for a core that has never faced the relay is the same
   // carve-out one step out — a local/bare/test core answers to no switch — and
   // is what the old "no phone pubkey right now" test always meant. Fail-closed
   // otherwise: an unwired host provider reads as disabled.
   function remoteFrameAllowed(source: InboundSource): boolean {
     if (source === "loopback") return true;
-    if (!peerSessionProvider) return true;
+    if (!relayEverAttached) return true;
     return remoteAccessEnabled();
   }
 
@@ -1032,17 +1110,161 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     }
     if (msg.contextId === msg.to.sessionId) return true;
     if (source === "loopback") return true;
-    if (!peerSessionProvider) return true;
+    if (!relayEverAttached) return true;
     return agentReachEnabled();
   }
 
-  // Fail-closed per device: a frame whose session has not declared the
-  // capability is refused while a sibling that has declared it is served. A
-  // brand-new device mid-handshake resolves to no session and so reads false,
-  // which is the direction this guard has to fail in.
-  function peerCanRouteCheckouts(peerId: string | undefined): boolean {
-    if (!peerId) return false;
-    return peerSessionProvider?.(peerId)?.checkoutRouting === true;
+  /** Why a frame may not address this project's checkouts, or `null` to admit
+   *  it. A reason rather than a boolean because the caller answers the app, and
+   *  the refusals want different answers.
+   *
+   *  This is the core's own copy of a gate the stream mux applies first
+   *  (`mayAcceptFrom`, wired in `project-core.ts`): on the real transport a
+   *  device that never declared `checkoutRouting`, or that resolves to no
+   *  session, is refused there and never reaches this bus. What remains for the
+   *  arms here is a frame the mux admitted that this core still cannot place —
+   *  its per-device lookup gone, or a transport that threaded no peer id — plus
+   *  the per-device answer restated for a bus attached without a mux.
+   *
+   *  `CHECKOUT_ROUTING_PENDING` is the one arm that is DROPPED rather than
+   *  answered. A peer id resolves to no session while a device is mid-handshake,
+   *  and again between an E2E session dying and the next one establishing; the
+   *  app's own retry heals both, and an answer would not — `_pullSnapshot`
+   *  (`machine_session.dart`) settles on any code but `E_TIMEOUT` — so a refusal
+   *  would turn a race that fixes itself into a workspace telling the user to
+   *  reconnect.
+   *
+   *  Fail-closed per device: a frame whose session has not declared the
+   *  capability is refused while a sibling that has declared it is served. */
+  function checkoutRoutingRefusal(peerId: string | undefined): CheckoutRoutingRefusal | null {
+    // Never faced the relay: no per-device session to consult and no remote app
+    // on the other end. The same carve-out `remoteFrameAllowed` makes, in the
+    // same direction.
+    if (!relayEverAttached) return null;
+    // A core that cannot answer for anyone is asked before the peer id, so this
+    // bridge's own inconsistency is never reported as a capability the device
+    // failed to declare.
+    if (!peerSessionProvider) {
+      return {
+        code: "CHECKOUT_ROUTING_UNAVAILABLE",
+        message: "This machine cannot route workspace traffic right now.",
+        detail: "core is relay-attached but its peer-session provider is unwired",
+      };
+    }
+    // Every production transport threads a peer id, so a missing one is a
+    // defect on this side of the wire — not something the app can reconnect
+    // away, which is why it is not REQUIRED with reconnect advice.
+    if (!peerId) {
+      return {
+        code: "CHECKOUT_ROUTING_UNAVAILABLE",
+        message: "This machine cannot route workspace traffic right now.",
+        detail: "frame carried no peer id",
+      };
+    }
+    const session = peerSessionProvider(peerId);
+    if (!session) {
+      return {
+        code: "CHECKOUT_ROUTING_PENDING",
+        detail: "no session for this peer id (transient — dropping so the app retries)",
+      };
+    }
+    if (session.checkoutRouting !== true) {
+      return {
+        code: "CHECKOUT_ROUTING_REQUIRED",
+        message: "Update the app to open a workspace with an isolated session.",
+        detail: "device did not declare checkoutRouting",
+      };
+    }
+    return null;
+  }
+
+  const refusalNoticeAt = new Map<string, number>();
+  function refusalNoticeDue(peerId: string | undefined, code: string): boolean {
+    const now = Date.now();
+    const key = `${peerId ?? "<none>"} ${code}`;
+    const last = refusalNoticeAt.get(key);
+    if (last !== undefined && now - last < CHECKOUT_REFUSAL_NOTICE_MS) return false;
+    for (const [k, at] of refusalNoticeAt) {
+      if (now - at >= CHECKOUT_REFUSAL_NOTICE_TTL_MS) refusalNoticeAt.delete(k);
+    }
+    refusalNoticeAt.set(key, now);
+    return true;
+  }
+
+  // UNAVAILABLE is this bridge's own inconsistency, which no reconnect clears,
+  // so it is the one arm that needs an operator's eye.
+  function logCheckoutRefusal(
+    action: string,
+    msgType: string,
+    refusal: CheckoutRoutingRefusal,
+    peerId: string | undefined,
+  ): void {
+    const line = `${action} %s: %s (project %s, peer %s, code %s)`;
+    const args = [msgType, refusal.detail, project.id, peerId ?? "<none>", refusal.code] as const;
+    if (refusal.code === "CHECKOUT_ROUTING_UNAVAILABLE") log.error(line, ...args);
+    else log.warn(line, ...args);
+  }
+
+  /** The checkout-routing gate for one inbound bus frame: true when the frame
+   *  must not proceed, having been logged and — for a settled refusal — answered
+   *  to the device that sent it. host-server.ts holds the rule: a rejected verb
+   *  returns `control:result {ok:false,error}`, never a silent drop. It matters
+   *  more here than anywhere, because `state.snapshot` is the only carrier of a
+   *  relay checkout's agent:status, so an unanswered pull reads as a dead
+   *  machine and retries for ~70s before giving up on frames it will never be
+   *  sent. */
+  function refuseCheckoutRouting(
+    bus: MessageBus,
+    msg: AbMessage,
+    channel: Channel,
+    source: InboundSource,
+    peerId: string | undefined,
+  ): boolean {
+    const refusal = checkoutRoutingRefusal(peerId);
+    if (!refusal) return false;
+    const due = refusalNoticeDue(peerId, refusal.code);
+    if (refusal.code === "CHECKOUT_ROUTING_PENDING") {
+      if (due) logCheckoutRefusal("Dropping inbound", msg.type, refusal, peerId);
+      return true;
+    }
+    if (due) logCheckoutRefusal("Refusing inbound", msg.type, refusal, peerId);
+    const error = { code: refusal.code, message: refusal.message };
+    // Addressed to the device that asked, never broadcast: the app writes a
+    // `session:result` error into its sessions state BEFORE matching the
+    // requestId (`sessions_service.dart`), so every other client would toast a
+    // refusal for a verb it never sent. Three carriers, because a refusal only
+    // ends a wait if it lands on the frame the caller is watching. An RPC answer
+    // rides the channel its request came in on, the way every other `response`
+    // here does; the other two are control-plane frames in every other emitter,
+    // and the refused frame may well have arrived on "preview", where a refusal
+    // would queue behind that channel's bulk.
+    if (msg.type === "request") {
+      bus.publishOnly(
+        createMessage("response", { requestId: msg.requestId, ok: false, error }),
+        channel, source, peerId,
+      );
+    } else if (answersOnSessionResult(msg)) {
+      bus.publishOnly(
+        createMessage("session:result", {
+          requestId: msg.requestId,
+          ok: false,
+          // Two fields, not the `{code, message}` object the other carriers
+          // take: `session:result` predates that shape and the app reads them
+          // apart.
+          error: refusal.message,
+          errorCode: refusal.code,
+        }),
+        "control", source, peerId,
+      );
+    } else if (due) {
+      // Nothing correlates a bare control:result, so it is a notice and shares
+      // the log line's cooldown rather than answering every keystroke.
+      bus.publishOnly(
+        createMessage("control:result", { ok: false, verb: msg.type, error }),
+        "control", source, peerId,
+      );
+    }
+    return true;
   }
 
   // Which app session a tunnel request came in on, keyed by the id its response
@@ -1312,6 +1534,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // caller's slot resolves its own session; a service PTY names none and is
     // answered as having no bus surface at all.
     ...(opts.sessionDirectory ? { directory: opts.sessionDirectory } : {}),
+    ...(opts.startSession ? { startSession: opts.startSession } : {}),
     membership: (terminalId) => {
       const entry = sessions?.get(terminalId);
       if (!entry) return null;
@@ -1321,9 +1544,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       };
     },
     carrierPresent: () => opts.carrierPresent?.() ?? false,
-    // The same live read `remoteFrameAllowed` gates inbound frames with, so the
-    // switch answers one way for both directions at any instant.
-    remoteAccessEnabled,
   });
 
   /** A re-sync push reaches EVERY bus subscriber, so it may only be skipped when
@@ -1353,9 +1573,15 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // Same per-device capability gate the bus dispatch applies, restated here
     // because this path bypasses the bus entirely: a tunnel proxies arbitrary
     // HTTP out of a checkout's dev server, so a session that may not address a
-    // checkout must not be answered with one's page either.
-    if (sessions?.hasIsolatedSessions() && !peerCanRouteCheckouts(peerId)) {
-      log.warn("Dropping tunnel %s: remote app lacks checkout routing (project %s)", msg.type, project.id);
+    // checkout must not be answered with one's page either. A drop, not a
+    // reply: the mux already answered a device it refused, and the arms that
+    // remain here are this bridge's own faults, which no tunnel error frame
+    // would help the preview recover from.
+    const tunnelRefusal = sessions?.hasIsolatedSessions() ? checkoutRoutingRefusal(peerId) : null;
+    if (tunnelRefusal) {
+      if (refusalNoticeDue(peerId, tunnelRefusal.code)) {
+        logCheckoutRefusal("Dropping tunnel", msg.type, tunnelRefusal, peerId);
+      }
       return;
     }
     const runtime = checkoutRuntimes.runtime(msg.checkoutId);
@@ -1692,6 +1918,39 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           logger.warn("handler:answer rejected: malformed payload");
           handlerEngine.emitStatus();
         }
+        break;
+      }
+      case "handler:history:request": {
+        // Same re-parse discipline as the five above: parseMessageFast validated
+        // the type and nothing else.
+        const parsed = HandlerHistoryRequestWire.safeParse(msg);
+        if (!parsed.success) {
+          // No emitStatus here, unlike the verbs above: this one mutates
+          // nothing, so there is no state for the sender's UI to resync to. The
+          // request simply goes unanswered and the app's deadline names it.
+          logger.warn("handler:history:request rejected: malformed payload");
+          break;
+        }
+        // Read under the receiving core's OWN project id, never the one on the
+        // frame: the stream already resolved which project this peer reached,
+        // and honouring a different id here would hand it another project's log.
+        //
+        // Answered whatever the entitlement says. The gate stops Handler from
+        // RUNNING — judging, spending model calls — and these rows were written
+        // by the user's own agent onto their own disk. Refusing would lock them
+        // out of their own record rather than out of a paid capability.
+        const history = readRecentActivity(abDir, project.id, HANDLER_HISTORY_RECORDS);
+        // Answered to the CLIENT that asked, the way `terminal:history:request`
+        // answers: a page is up to HANDLER_HISTORY_RECORDS rows of prose, every
+        // attached app re-asks on each of its own reconnects, and a broadcast
+        // would spend that on every peer to be dropped by all but one on its
+        // requestId.
+        sendAbToItsChannel(createMessage("handler:history:page", {
+          projectId: project.id,
+          requestId: parsed.data.requestId,
+          records: history.records,
+          truncated: history.truncated,
+        }), client);
         break;
       }
       case "terminal:start": {
@@ -2053,9 +2312,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         break;
       }
       case "config:detect-tools": {
-        sendFromRuntime(runtime, createMessage("config:detect-tools-result", {
-          tools: detectInstalledTools(),
-        }));
+        void detectAvailableTools({ refresh: true }).then((tools) => {
+          sendFromRuntime(runtime, createMessage("config:detect-tools-result", { tools }));
+        }).catch((error) => log.error("Agent discovery failed: %s", error));
         break;
       }
       case "session:list": {
@@ -2349,7 +2608,13 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           sendAbToItsChannel(createMessage("terminal:history:page", {
             checkoutId, terminalId: msg.terminalId, runId: msg.runId,
             attachmentId: msg.attachmentId, requestId: msg.requestId,
-            history: { epoch: msg.epoch, firstRowId: msg.beforeRowId, nextRowId: msg.beforeRowId, status: "disabled" },
+            // `gapped: false` is not a claim about the run's archive — this
+            // refuses a cursor into a run the caller does not own, so there is
+            // no archive here to describe. `expired` below is the whole answer.
+            history: {
+              epoch: msg.epoch, firstRowId: msg.beforeRowId, nextRowId: msg.beforeRowId,
+              status: "disabled", gapped: false,
+            },
             expired: true, beforeRowId: msg.beforeRowId, rows: [],
           }), client);
           break;
@@ -2504,8 +2769,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     sessions = null;
     namer?.dispose();
     namer = null;
-    antigravityTitleWatcher?.stop();
-    antigravityTitleWatcher = null;
+    for (const observer of titleObservers) observer.stop();
+    titleObservers = [];
     // Awaited with the rest, not voided: a chat runtime's dispose now waits out
     // its own soft ask (codex exits on stdin EOF) before it terminates, so a
     // discarded promise lets `process.exit` land first and leaves the
@@ -2579,7 +2844,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // one. Observability must NOT: reporting the default agent's hooks for a
   // binary we cannot identify is the "armed and quiet" lie observability exists
   // to end, so it answers from the real key and unknown reads as unsupported.
-  const toolFor = (terminalId?: string): string => agentKeyFor(terminalId) ?? "claude-code";
+  const toolFor = (terminalId?: string): string => agentKeyFor(terminalId) ?? DEFAULT_AGENT;
   // Named rather than inline in the engine's options because session-bus
   // delivery submits through the SAME adapter: one path into a session for
   // both, so a chat session never has a line written into a PTY it does not
@@ -2619,9 +2884,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // place the queued capabilities (devcontainer, …) get added.
     entitlement: createEntitlementReader(opts.tierClaim),
     observable: (terminalId) => handlerObservable(
-      agentKeyFor(terminalId),
-      sessions?.get(terminalId)?.mode === "chat" ? "chat" : "terminal",
+      agentKeyFor(terminalId), sessions?.get(terminalId)?.mode === "chat" ? "chat" : "terminal",
     ),
+    availability: (terminalId) => sessions?.handlerAvailability(terminalId) ?? { state: "unknown" },
     agentSessionId: (terminalId) => sessions?.get(terminalId)?.agentSessionId,
     abDir,
     adapter: busAdapter,
@@ -3863,7 +4128,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
 
     manager = new TerminalManager((msg: AbMessage) => sendTerminalFrame(msg), {
       onTerminalOutput: (id, data) => terminalOwner(id).runtime.portDetector?.feed(id, data),
-      onTerminalExited: (id) => {
+      onTerminalExited: (id, runId) => {
         terminalOwner(id).runtime.portDetector?.removeTerminal(id);
         // A setup transcript belongs to no session, so its exit settles the run
         // and takes none of the session-scoped cleanup below. Its owner row
@@ -3877,7 +4142,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // is reused by a same-id restart — a stale entry would silence the new
         // run's every block.
         openAgentPrompts.clear(id);
-        sessions?.noteExited(id);
+        sessions?.noteExited(id, runId);
         // Drop buffered title state so a stale title from this run can't leak
         // into a restarted same-id session (start() reuses the entry id). A
         // mode flip is exempt for the same reason the handler's arming is: the
@@ -4041,7 +4306,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         maybeGenerateTitle(tool, { terminalId: sessionId, prompt: text })
           .catch((err) => log.error("Title generation failed: %s", err));
       },
-      driverFactory: (sessionId, tool, send, _resumeId, approvalPolicy = "default") => {
+      driverFactory: (sessionId, tool, send, _resumeId, approvalPolicy = "default", run) => {
         // Chat mode is gated on isChatCapableTool, which IS "the spec has a
         // driver" — so an unreachable tool here means the two disagreed.
         const driver = agentSpec(tool)?.driver;
@@ -4052,15 +4317,18 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         chatTools.set(sessionId, tool);
         const sessionCheckoutId = sessions?.get(sessionId)?.checkoutId ?? "main";
         const sessionRuntime = checkoutRuntimes.runtime(sessionCheckoutId) ?? mainRuntime;
-        return driver({
+        const hookRunId = sessions?.hookRunId(sessionId);
+        return agentRuntime.createDriver(tool, {
+          scope: run!.scope,
           sessionId,
           send,
           projectPath: sessionRuntime.checkout.path,
           projectId: project.id,
           approvalPolicy,
-          chatAugment: () => buildChatSpawnAugment(tool, sessionId, apiServer?.port ?? null, abDir),
-          onAgentSession: (agentSessionId) => sessions?.setAgentSession(sessionId, agentSessionId),
+          chatAugment: () => buildChatSpawnAugment(tool, sessionId, apiServer?.port ?? null, abDir, hookRunId),
+          onAgentSession: run?.onAgentSession ?? ((agentSessionId) => sessions?.setAgentSession(sessionId, agentSessionId)),
           onLifecycle: (evt) => {
+            if (run && !run.isCurrent()) return;
             handlerEngine.handleEvent({ terminalId: sessionId, ...evt })
               .catch((err) => logger.error("Handler lifecycle event failed: %s", err));
           },
@@ -4076,6 +4344,20 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     mainRuntime.started = true;
     await checkoutRuntimes.prepare(mainCheckout, config, agentSpecFromConfig(), mainRuntime);
     sessions = new SessionManager({
+      agentRuntime,
+      onAgentEvent: (sessionId, event) => {
+        switch (event.type) {
+          case "title": namer?.onStructuredTitle(sessionId, event.title, event.kind); break;
+          case "turn-start": opts.onTurnStart?.(sessionId); break;
+          case "notification":
+            sendNotifying(createMessage("notification:push", { sessionId, projectId: project.id, notificationType: event.notificationType, message: event.message }));
+            break;
+          case "handler":
+            handlerEngine.handleEvent({ terminalId: sessionId, event: event.event, resetsAt: event.resetsAt, errorClass: event.errorClass })
+              .catch((error) => log.error("Agent lifecycle event failed: %s", error));
+            break;
+        }
+      },
       projectId: project.id,
       storeDir: abDir,
       projectPath: project.path,
@@ -4149,12 +4431,18 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       },
       sendMessage: (msg) => sendAb(msg as AbMessage),
       sessionWorkStatusFor: opts.sessionWorkStatusFor,
-      onStartChat: (opts) => {
+      onStartChat: async (opts) => {
         // startChat rejects on a non-chat-capable tool or a driver spawn/start
         // failure. Catch it — otherwise it's a silent unhandled rejection and the
         // app sees a chat session that never comes alive with no reason. Surface
         // it as agent:error so the transcript can show the failure.
-        structured?.startChat(opts).catch((err) => {
+        const runId = sessions?.hookRunId(opts.sessionId);
+        try {
+          if (!structured) throw new Error("Chat runtime is unavailable");
+          const outcome = await structured.startChat({ ...opts, runId });
+          if (outcome === "cancelled") throw new Error("Agent startup cancelled");
+        } catch (err) {
+          if (!sessions?.acceptsHookRun(opts.sessionId, runId)) return;
           sendAb(createMessage("agent:error", {
             sessionId: opts.sessionId,
             error: {
@@ -4163,7 +4451,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
               retryable: false,
             },
           }));
-        });
+          throw err;
+        }
       },
       onStopChat: (id) => {
         // Mirrors onTerminalExited for PTYs: reclaim guard + pending state and
@@ -4188,23 +4477,17 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       applyAutoName: (id, name, rank) => sessions?.applyAutoName(id, name, rank),
     });
 
-    // agy fires no hook on a `/rename`, so it would not reach the sidebar until
-    // the next turn. Watch its command log and route the rename through the
-    // namer (same debounce + precedence as every other title signal). No-ops if
-    // agy isn't installed.
-    antigravityTitleWatcher = new AntigravityTitleWatcher(
-      antigravityCliHome(),
-      (conversationId, title) => {
+    titleObservers = Object.entries(AGENTS).flatMap(([tool, spec]) => {
+      const observer = spec.observeTitles?.((conversationId, title, kind) => {
         const slot = sessions?.findSlotByAgentSession(conversationId);
-        // Always the user's own name: the watcher reports only `/rename` now,
-        // never agy's generated name and never the first-message fallback.
-        if (slot) namer?.onStructuredTitle(slot, title, "manual");
-      },
-    );
-    antigravityTitleWatcher.start();
+        if (slot && agentKeyFor(slot) === tool) namer?.onStructuredTitle(slot, title, kind);
+      });
+      return observer ? [observer] : [];
+    });
 
     sessions.onChange(() => {
       if (!sessions) return;
+      handlerEngine.emitStatus();
       sendAb(createMessage("session:updated", {
         sessions: sessions.list(true),
       }));
@@ -4244,10 +4527,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       const agent = session.hookAliveProbeAgent;
       if (!agent) return;
       const id = session.terminalId;
+      hookAlivePinged.delete(id);
       setTimeout(() => {
         if (!hookAlivePinged.has(id)) {
           session.enableOscNotifications();
           session.enableOscTitle();
+          if (session.isRunning) sessions?.invalidateHookObservation(id, "Agent monitoring did not respond");
           log.warn(
             "%s hooks did not ping /hook-alive for %s — trust fingerprint " +
             "may have drifted; re-enabled OSC scanner (notifications + title) as fallback",
@@ -4627,6 +4912,15 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
 
   // Start local API server for MCP/hook integration (works in both modes)
   apiServer = startApiServer({
+    acceptsHookRun: (terminalId, runId) => {
+      if (!terminalId) return true;
+      const accepted = sessions?.acceptsHookRun(terminalId, runId) ?? true;
+      if (!accepted && runId === undefined) {
+        manager?.enableHookFallback(terminalId);
+        sessions?.invalidateHookObservation(terminalId);
+      }
+      return accepted;
+    },
     manager: () => manager,
     config: () => config,
     project: () => project,
@@ -4665,6 +4959,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // the reused title plugin's hooks still POST here for claude/codex chat
       // spawns — drop those or every turn_end fires twice.
       if (sessions?.get(body.terminalId)?.mode === "chat") return;
+      sessions?.confirmHookRun(body.terminalId, body.runId);
       // A prompt that is over is not a pause to judge, and the engine's event
       // union carries no member for it: it retires the row the `question`
       // raised, by the id the agent gave that one tool call.
@@ -4755,6 +5050,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         sessionId: body.sessionId,
         transcriptPath: body.transcriptPath,
       });
+      if (sessions?.acceptsHookRun(body.terminalId, body.runId) === false) return;
       // Apply the native read first either way: a first-message title beats
       // "Session 3" while generation is in flight, and it is what we keep if
       // generation fails. Pass the kind through — the first-message signal
@@ -4763,7 +5059,11 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       if (resolved) namer?.onStructuredTitle(body.terminalId, resolved.title, resolved.kind);
       if (!resolved || resolved.kind === "first-message") nameFromHook(resolved?.title);
     },
-    onHookAlive: (terminalId) => { hookAlivePinged.add(terminalId); },
+    onHookAlive: (terminalId) => {
+      hookAlivePinged.add(terminalId);
+      manager?.confirmHookAlive(terminalId);
+      sessions?.confirmHookRun(terminalId, sessions.hookRunId(terminalId));
+    },
     onTurnStart: (terminalId) => {
       if (terminalId) openAgentPrompts.clear(terminalId);
       opts.onTurnStart?.(terminalId);
@@ -4856,8 +5156,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         );
         return;
       }
-      if (source !== "loopback" && sessions?.hasIsolatedSessions() && !peerCanRouteCheckouts(peerId)) {
-        log.warn("Dropping inbound %s: remote app lacks checkout routing (project %s)", msg.type, project.id);
+      if (
+        source !== "loopback" && sessions?.hasIsolatedSessions()
+        && refuseCheckoutRouting(bus, msg, channel, source, peerId)
+      ) {
         return;
       }
       if (!peerBusReachAllowed(msg, source)) {
@@ -5076,6 +5378,17 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       };
       const result = sessions.delete(id, options);
       return result instanceof Promise ? result.then(sweep) : sweep(result);
+    },
+    startSession(id: string): void {
+      // Swallowed rather than surfaced: the caller (the session-bus wake path)
+      // has already answered its own caller before this settles, matching
+      // `runAgentUpdate`'s "one dead restart must not sink the rest" — a start
+      // that fails leaves the notify held exactly as it would be for a session
+      // whose real restart failed for any other reason.
+      try {
+        const result = sessions?.start(id);
+        if (result instanceof Promise) result.catch(() => {});
+      } catch { /* fire-and-forget */ }
     },
     listSessions(includeArchived: boolean): SessionEntry[] | null {
       return sessions ? sessions.list(includeArchived) : null;

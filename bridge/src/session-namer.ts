@@ -1,4 +1,4 @@
-import type { ResolvedTitle } from "./agents/types";
+import type { ResolvedTitle } from "antgrid-agents/contracts";
 
 export interface AutoNameSink {
   /** The signal the name came from, absent for the OSC fallback. Passed on so

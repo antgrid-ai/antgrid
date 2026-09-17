@@ -20,7 +20,7 @@ import { MAX_STORED, type StoredSnapshot } from "../../src/handler/snapshot-stor
 import { MAX_STORED_WRAPUPS } from "../../src/handler/wrap-up-store";
 import type { WrapUpRecord } from "../../src/handler/wrap-up";
 import type { InjectCommand } from "../../src/handler/session-adapter";
-import type { CapCommand } from "../../src/structured/chat-session";
+import type { CapCommand } from "../../../packages/antgrid-agents/src/structured/chat-session";
 import { planSnapshots, type SnapshotEntry, type SnapshotOutcome } from "../../src/handler/snapshot";
 
 const GOAL = "Migrate auth";
@@ -135,6 +135,7 @@ interface SessionSnapshot {
   pendingEscalations: number;
   goal: string; backlog: InstructionItem[];
   observability?: string;
+  availability?: { state: string; reason?: string };
 }
 function statusOf(sent: AbMessage[]): SessionSnapshot {
   const status = sent.filter((m) => m.type === "handler:status").at(-1) as never as {
@@ -546,7 +547,7 @@ test("the judge is handed the session's lens and brief, and nothing for a sessio
   await engine.handleEvent({ terminalId: "t2", event: "turn_end" });
   expect(calls[1]).toEqual({ role: undefined, brief: undefined });
 
-  engine.arm({ terminalId: "t3", goal: GOAL, brief: "x".repeat(600) });
+  engine.arm({ terminalId: "t3", goal: GOAL, brief: "x".repeat(MAX_BRIEF_CHARS + 200) });
   await engine.handleEvent({ terminalId: "t3", event: "turn_end" });
   expect(calls[2]?.brief).toHaveLength(MAX_BRIEF_CHARS);
 });
@@ -3313,6 +3314,26 @@ describe("guard-rejection reports (kind: guard_blocked)", () => {
     expect(circular!.floorRule).toBeUndefined();
   });
 
+  // A human in the loop is what the guard's closed-loop premise rules out, and an
+  // instruction composed in the Handler box is that human — it never reaches
+  // onUserReply, which is the only other door the reset sits behind. Without this,
+  // the circular hashes outlive the intervention and the judge's next attempt at
+  // the very reply the user endorsed is refused a second time, re-wedging the
+  // session the instruction just woke.
+  it("an instruction clears the circular-reply hashes, so the refused reply can go", async () => {
+    const { engine, injected } = makeEngine({
+      runDecisionFn: async () => decide({ decision: "handle", reply: "carry on" }),
+    });
+    engine.arm({ terminalId: "t1", goal: GOAL });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(injected).toEqual([["t1", "carry on"]]);
+
+    engine.instruct({ terminalId: "t1", text: "yes, that is what I want — send it" });
+    for (let i = 0; i < 8; i++) await new Promise<void>((r) => { setTimeout(r, 1); });
+    expect(injected).toEqual([["t1", "carry on"], ["t1", "carry on"]]);
+  });
+
   // The bug itself: an unrelated typed line took the report to disk with it, and
   // the user never learned Handler had wanted to act.
   it("a submitted line clears the reply rows beside a guard_blocked row and leaves it standing", async () => {
@@ -5801,6 +5822,23 @@ describe("undo", () => {
 });
 
 describe("observabilityFor", () => {
+  it("preserves implemented support when runtime monitoring is temporarily unavailable", () => {
+    let availability: import("../../src/protocol").HandlerAvailability = { state: "unavailable", reason: "Agent monitoring was not installed" };
+    const { engine, sent } = makeEngine({ observable: () => true, availability: () => availability });
+    engine.arm({ terminalId: "t1", goal: GOAL });
+    expect(statusOf(sent).observability).toBe("full");
+    expect(statusOf(sent).availability).toEqual(availability);
+    availability = { state: "available" };
+    engine.emitStatus();
+    expect(statusOf(sent).observability).toBe("full");
+    expect(statusOf(sent).availability).toEqual({ state: "available" });
+  });
+
+  it("does not infer runtime availability for a caller predating the field", () => {
+    const { engine, sent } = makeEngine();
+    engine.arm({ terminalId: "t1", goal: GOAL });
+    expect(statusOf(sent).availability).toBeUndefined();
+  });
   it("reports unsupported for a slot the engine cannot see, whatever its judge", () => {
     const { engine } = makeEngine({ observable: () => false });
     expect(engine.observabilityFor("t1")).toBe("unsupported");
@@ -6631,6 +6669,38 @@ describe("an instruction while a question is standing", () => {
     const rows = answeredRows(activity);
     expect(rows.some((r) => r.reason
       === "Handler started a pass to pick up your instruction, since no agent event was due")).toBe(true);
+  });
+
+  // The deadlock the supersede-only gate left open. A guard_blocked row is the
+  // one kind held back from `gone`, and the one escalation that injects nothing
+  // by construction — the guard refused the reply, so there is none — so the
+  // session it stops is exactly the session an instruction could never restart.
+  it("starts a pass for a session wedged on a guard_blocked report", async () => {
+    const judged = { n: 0 };
+    const { engine, activity } = armedWith([GUARD_BLOCKED], {}, {
+      runDecisionFn: async () => { judged.n++; return decide({}); },
+    });
+    engine.instruct({ terminalId: "t1", text: "send it anyway" });
+    await settle();
+    expect(judged.n).toBe(1);
+    expect(answeredRows(activity).some((r) => r.reason
+      === "Handler started a pass to pick up your instruction, since no agent event was due")).toBe(true);
+    // The report is not superseded by the instruction, and must still be there
+    // for the user to read once the session is moving again.
+    expect(session(engine).escalations.map((e) => e.kind)).toEqual(["guard_blocked"]);
+  });
+
+  it("leaves a parked session wedged on a guard_blocked report parked", async () => {
+    const judged = { n: 0 };
+    const { engine, sent } = armedWith([GUARD_BLOCKED], {
+      parkKind: "limit", parkedUntil: 1000 + 90_000,
+    }, {
+      runDecisionFn: async () => { judged.n++; return decide({}); },
+    });
+    engine.instruct({ terminalId: "t1", text: "send it anyway" });
+    await settle();
+    expect(statusOf(sent).state).toBe("parked");
+    expect(judged.n).toBe(0);
   });
 
   it("starts no pass when no question was standing", async () => {

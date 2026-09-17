@@ -18,10 +18,10 @@ import { parseTitleFromOutput } from "../src/agents/title-generate";
 import { parseDecisionFromOutput } from "../src/handler/decision";
 import { parseExtractionOutput } from "../src/handler/extract";
 import { extractJsonObject } from "../src/handler/json-extract";
-import { AGENTS } from "../src/agents/registry";
+import { AGENTS } from "../../packages/antgrid-agents/src/agents/registry";
 import {
   readClaudeCodeUsage, readCodexUsage, readCopilotUsage, readOpencodeUsage, unwrapEnvelope,
-} from "../src/agents/usage-envelope";
+} from "../../packages/antgrid-agents/src/agents/usage-envelope";
 import {
   armContextCapture, armPromptCapture, modelwatch, __resetModelwatchForTest,
   type ModelCallContext,

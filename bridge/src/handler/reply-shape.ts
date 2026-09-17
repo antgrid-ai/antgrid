@@ -1,5 +1,5 @@
 // bridge/src/handler/reply-shape.ts
-import type { CapCommand } from "../structured/chat-session";
+import type { CapCommand } from "antgrid-agents/structured/chat-session";
 import { oneLine } from "./backlog";
 import type { HandlerDecision } from "./decision";
 

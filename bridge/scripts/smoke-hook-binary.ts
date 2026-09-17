@@ -30,6 +30,7 @@ try {
       PATH: emptyPath,
       ANTGRID_API_PORT: String(server.port),
       ANTGRID_TERMINAL_ID: "compiled-hook-smoke",
+      ANTGRID_RUN_ID: "compiled-hook-run",
       ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}),
       ...(process.env.SYSTEMROOT ? { SYSTEMROOT: process.env.SYSTEMROOT } : {}),
     },
@@ -67,7 +68,8 @@ try {
   if (
     body.terminalId !== "compiled-hook-smoke" ||
     body.sessionId !== "smoke-session" ||
-    body.agent !== "cursor"
+    body.agent !== "cursor" ||
+    body.runId !== "compiled-hook-run"
   ) {
     throw new Error(`unexpected hook body: ${JSON.stringify(body)}`);
   }

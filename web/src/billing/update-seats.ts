@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 import type { DB } from "../db/index.js";
 import type { PlanRow } from "../models/plan.js";
 import type { SubscriptionRow } from "../models/subscription.js";

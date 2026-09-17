@@ -6,92 +6,33 @@ commands, and conventions — this file loads only when working under `bridge/`.
 What may be written in any `CLAUDE.md`, this one included, is governed by
 *Maintaining these files* in the root `CLAUDE.md`.
 
-## Adding an agent
+## Agent adapters
 
-**`src/agents/registry.ts` is the single entry point.** Add the key to
-`AgentKey` (`src/agents/types.ts`) and the compiler names every required field
-the new record is missing — a forgotten one is a build error, not a session that
-quietly lacks the feature. `AgentSpec`'s optional fields are capabilities;
-absence is the honest answer, never a default. Every per-agent module under
-`src/` lives in `src/agents/<key>/`: `hooks.ts` for a hook agent, `mcp.ts` for one
-pointed at the bridge's MCP server, `driver.ts`
-and the `chat-backend.ts` / `mapping.ts` / `spawn.ts` it wires for a chat agent,
-`title.ts` for one whose session name is read off disk. One thing lives outside
-it on purpose: the installed-side integration assets in `bridge/plugin/<agent>/`
-(the materialized hook scripts, and opencode's plugin, which runs inside
-opencode's own Bun runtime — this is why `hooks.posts` is declared rather than
-derived from `toPosts`). Nothing in `app/` changes: `BY_HOOK_NAME`, the tools advertisement, `isChatCapableTool`,
-`handlerObservable`, and the judge / transcript / title dispatch all derive from
-that one table.
+Agent definitions and runtime live in the MPL-2.0 workspace package
+`packages/antgrid-agents`. Its `src/agents/registry.ts` is the built-in registration
+entry point; `src/contracts.ts` and `package.json` describe the public interface.
+Bridge imports public package exports only. Provider invocation, storage knowledge,
+hooks, and SDK behavior belong in the package; bridge owns authorization, checkout
+selection, process containment, transport, and session persistence.
 
-Every field of `AgentSpec` and `HookProfile` is documented at its own declaration
-in `agents/types.ts`, which is where the rules a new entry must satisfy live —
-`headless` (verified argvs by reach; naming borrows, a judge never does),
-`gracefulExit` (narrows the default ask; see **Stopping an agent**), `posts` and
-`turnBoundaryEvents` (both REQUIRED so a profile cannot leave them unstated),
-`portFileFallback` (absence is a trust boundary), `augmentsDefaultSpec`,
-`resumeIsSubcommand`, `notifyBodyFromTranscript`, `update`. Two suites gate the
-table itself — `agent-hook-declarations.test.ts` checks each profile against the
-events the agent actually dispatches, and `agent-spec-characterization.test.ts`
-pins the resume/prompt argvs, the materialized hook files and codex's
-`trusted_hash` strings byte-for-byte. `headless.test.ts` covers reach selection
-and `judgeCapable`.
+Compose the registry and host services in `src/agent-host.ts`; bridge consumers
+use `src/agent-runtime.ts` for the resulting runtime.
+Hook command resolution stays in bridge because development and compiled entrypoints
+differ. Provider assets are embedded and materialized by `antgrid-agents/assets`;
+external agent runtimes require real files, not paths inside Bun's executable.
 
-Four things are NOT answered at any declaration:
+The tools advertisement still separates installed `tools[]` from the full
+`agents[]` catalog. The app uses the catalog to describe agents without a matching
+local probe. Keep persisted provider IDs and hook aliases stable across releases;
+hook aliases are part of existing trusted command fingerprints.
 
-**An agent's native session id is not stable across a resume**, so nothing may
-read a change of it as "a new conversation started". Measured on Claude Code:
-`--resume` copies the transcript into a NEW file and appends under a fresh id, so
-the same thread comes back wearing a different name. Every guard against
-re-naming is otherwise per-run — `SessionNamer` and `TitleAttempts` both die with
-the PTY — which is why the winning signal is also written to the session row as
-`autoTitleRank`, and why `SessionManager.noteConversationStart` records AT LAUNCH
-that a run continues the previous conversation. The first identity report spends
-that claim; every rotation after it is a real `/clear`. Get either half wrong and
-a stop/start pays another model spawn and renames the session — not back to the
-same title, since the transcript read returns the LAST few messages. Nothing
-tests this.
+Handler support and runtime readiness travel separately: the session fields in
+`src/protocol.ts` are mirrored in `app/lib/models/handler_state.dart`. Preserve
+missing availability for older peers instead of interpreting it as unsupported.
 
-**The `agent:tools` advert carries TWO arrays and the split is load-bearing.**
-`tools[]` is the PATH probe — what this machine can launch. `agents[]`
-(`agent-catalog.ts`, projected from the whole registry) is what each agent IS.
-The app needs the second for questions the probe structurally cannot answer —
-naming a cached session row from a machine that never probed, or offering a judge
-the current target lacks — so a new agent is named and capability-described in
-the app with no app release. Widening `tools[]` instead was rejected: an app
-predating the change would read every row as installed. `agents[]` is optional on
-the wire so an older bridge still parses, and each row is total.
-
-**`handlerObservable` has a SECOND reader and the two are not interchangeable.**
-`agents[].handler` describes an agent, so it is the only answer available before
-anything is armed; each `handler:status` snapshot carries `observability`
-(`HandlerEngine.observabilityFor`), which describes a SESSION and is re-derived on
-every emit. Optional on the wire, so its absence is "not reported", never
-`unsupported` — and `escalate_only` (watched, no headless judge) must stay
-distinct from `unsupported` (nothing reaches the engine), or an unwatchable arm
-looks armed-and-quiet.
-
-**Which sessions a self-update quiesces resolves through `agentKeyFor`, never
-`SessionEntry.tool`** — that field is set only when a session OVERRODE
-`agent.tool`, so reading it alone attributes every default-spec session to the
-wrong agent, leaving the processes that hold the binary running while it is
-replaced. `src/update/` owns the rest: `version.ts` is the injectable half,
-`specs.ts` derives the table off `AgentSpec.update`.
-
-A chat agent's `chat-backend.ts` subclasses `ChatSession`
-(`src/structured/chat-session.ts`), which owns everything that is not about one
-provider — turn open/close, the pending permission/question maps and their
-retraction, the capability state, the `setConfig` queue-then-validate path, item
-first-sighting, and the transcript-snapshot guards. **Every `agent:*` frame is
-built there**: a backend that emits one itself has forked the wire. What the
-backend declares is its `ChatSessionProfile`. Its own vocabulary is normalized in
-`mapping.ts` through `structured/tool-card.ts` and `structured/agent-error.ts` —
-the tables are per-agent, the shapes are not.
-
-`hookName` is deliberately a second vocabulary (`claude`, not `claude-code`) — it
-is baked into on-disk hook configs and into codex's `trusted_hash`, so renaming
-one to match its key silently un-trusts hooks in every install that already has
-them.
+Run package tests as well as bridge tests when changing adapters:
+`bun run --filter antgrid-agents test` and
+`bun run --filter antgrid-agents typecheck`.
 
 ## Component map
 
@@ -105,7 +46,7 @@ what is here is identity plus the contracts that span more than one of them.
   - `/turn-start` hook (Claude only) → `turnStart`: clears the block AND opens a turn.
   - chat resolve (`agent:permission-resolve`/`-question-resolve`) → `answerRequest`: same, but ONLY if something was actually pending — a resolve racing a retraction would otherwise open a turn no turn-end closes.
   - bare PTY keystroke → `userReply`: clears the block only. Typing in an idle session is not work.
-  - PTY keystroke that SUBMITTED (`isSubmitKeystroke` in `keystrokes.ts`: a trailing CR, but not `\x1b\r` — alt+enter inserts a newline and may never be sent) → `userReply({submitted:true})`: also opens a turn, but only for a session in `keystrokeTurnSessions` — an agent with turn-END hooks and no turn-start (codex/cursor/copilot; see `needsKeystrokeTurnStart` in `agents/registry.ts`, which reads it off each agent's own `hooks.turnBoundaryEvents`). Never for Claude (it has a real signal) nor for the hookless agents (opencode/antigravity/kilo/kimi/mistral-vibe — nothing would close the inferred turn).
+  - PTY keystroke that SUBMITTED (`isSubmitKeystroke` in `keystrokes.ts`: a trailing CR, but not `\x1b\r` — alt+enter inserts a newline and may never be sent) → `userReply({submitted:true})`: also opens a turn, but only for a session in `keystrokeTurnSessions` — an agent with turn-END hooks and no turn-start (codex/cursor/copilot; see `needsKeystrokeTurnStart` in `packages/antgrid-agents/src/agents/registry.ts`, which reads it off each agent's own `hooks.turnBoundaryEvents`). Never for Claude (it has a real signal) nor for the hookless agents (opencode/antigravity/kilo/kimi/mistral-vibe — nothing would close the inferred turn).
 
   Not every `terminal:input` frame is a keystroke. A viewer's VT engine answers
   the modes the guest turned on over the SAME channel, so a session with DEC
@@ -141,11 +82,11 @@ reason the ask exists is external to this repo, so it is stated here: Claude Cod
 withdraws its `fullscreenBootPending[pid]` canary from `~/.claude.json` in a
 `process.on("exit")` hook, and a stale entry silently disables the fullscreen
 renderer MACHINE-WIDE, for every project, until the file is hand-edited
-(`agents/registry.ts`). Neither `TerminateProcess` nor `SIGKILL` runs one.
+(`packages/antgrid-agents/src/agents/registry.ts`). Neither `TerminateProcess` nor `SIGKILL` runs one.
 
 The ladder itself is documented at each definition — `TerminalSession.close`
 (`terminal-session.ts`), `gracefulBudget` and the same-id respawn's exit
-bookkeeping (`terminal-manager.ts`), `AgentSpec.gracefulExit` (`agents/types.ts`),
+bookkeeping (`terminal-manager.ts`), `AgentSpec.gracefulExit` (`packages/antgrid-agents/src/agents/types.ts`),
 `snapshotDescendants` / `survivingProcesses` and their null contract
 (`win32-process.ts`), `AGENT_GRACE_MS` for how the budgets nest. Chat mode has no
 PTY and so no ladder: codex's ask is its stdin closing (`agents/codex/spawn.ts`).
@@ -159,9 +100,8 @@ invariant, which is why the reasoning lives beside the code rather than here.
 
 ## The session bus (`src/session-bus/`)
 
-The agent-to-agent plane: one session on one machine reaching another.
-`docs/session-messaging.md` is the spec; this is the set of invariants a future
-edit breaks silently.
+The agent-to-agent plane: one session on one machine reaching another. This is
+the set of invariants a future edit breaks silently.
 
 - **Outbound on the machine that opened the exchange goes to the loopback owner
   and nowhere else.** `ProjectCore.sendToOwner` is the only path, and
@@ -235,7 +175,7 @@ edit breaks silently.
   already trusted with every session on it. A session id is
   `crypto.randomUUID()` (`session-manager.ts`), so naming one is guessing a
   UUID, never enumerating a small keyspace. The `checkoutRouting` gate
-  (`peerCanRouteCheckouts`, same call site) does NOT follow the address: it
+  (`checkoutRoutingRefusal`, same call site) does NOT follow the address: it
   reads the ARRIVING core's own `hasIsolatedSessions()`, so a peer admitted to a
   project holding no isolated session passes it and may then name a session in
   a project that does — the one refusal the move genuinely widened, left to

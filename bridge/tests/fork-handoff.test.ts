@@ -2,10 +2,10 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { claudeForkHandoff, claudeNativeForkArgs } from "../src/agents/claude-code/fork";
-import { codexNativeForkArgs } from "../src/agents/codex/fork";
-import { opencodeNativeForkArgs } from "../src/agents/opencode/fork";
-import { terminalForkHandoff } from "../src/agents/fork-handoff";
+import { claudeForkHandoff, claudeNativeForkArgs } from "../../packages/antgrid-agents/src/agents/claude-code/fork";
+import { codexNativeForkArgs } from "../../packages/antgrid-agents/src/agents/codex/fork";
+import { opencodeNativeForkArgs } from "../../packages/antgrid-agents/src/agents/opencode/fork";
+import { terminalForkHandoff } from "../../packages/antgrid-agents/src/agents/fork-handoff";
 
 const dirs: string[] = [];
 

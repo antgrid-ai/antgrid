@@ -117,6 +117,37 @@ class TerminalService {
     _schedulePrefetch();
   }
 
+  /// Paint [terminalId]'s remembered screen into its engine NOW, before the
+  /// frame that mounts its pane.
+  ///
+  /// Switching sessions retires the outgoing terminal, and [_retireDisplay]
+  /// disposes its engine and leaves an empty replacement in the tab. The pane
+  /// that takes its place only claims a display lease from a post-frame
+  /// callback (`_syncDisplay`), so without this its first frame paints that
+  /// empty engine and the remembered screen lands a frame later — a black gap
+  /// on every switch. The agent terminal wears it worst: its pane is keyed by
+  /// terminal id, and the agent terminal's id IS the session id, so a session
+  /// change remounts it every time.
+  ///
+  /// Deliberately claims nothing. This runs from `initState`, where the pane
+  /// cannot yet read whether it is visible — that needs an InheritedWidget and
+  /// the app lifecycle — so a lease taken here would have to be refunded for a
+  /// pane that never paints, and on mobile the PageView builds neighbours that
+  /// never do. Leaving the frame in the cache means [setDisplayInterest] still
+  /// does the whole restore when the lease resolves; the cost is repainting
+  /// content that is already on screen, which nothing can observe.
+  void primeDisplay(String terminalId) {
+    if (_disposed ||
+        _visible(terminalId) ||
+        _framePaintedIds.contains(terminalId)) {
+      return;
+    }
+    final tab = _state.tabs[terminalId];
+    final cached = hiddenScreens.peek(this, terminalId);
+    if (tab == null || cached == null) return;
+    _paintFrame(tab, cached);
+  }
+
   void _retireDisplay(String id) {
     _unsubscribeFrame(id);
     if (_pendingExitCodes.containsKey(id)) {
@@ -1748,6 +1779,15 @@ class TerminalService {
         }),
       );
     });
+    return true;
+  }
+
+  /// A pane movement supersedes a resize still waiting in the debounce window.
+  /// The caller must also forget its local booking so returning to the same
+  /// rendered grid can re-offer a size the wire never received.
+  bool cancelPendingResize(String terminalId) {
+    if (!_resizeTimers.containsKey(terminalId)) return false;
+    _cancelQueuedResize(terminalId);
     return true;
   }
 

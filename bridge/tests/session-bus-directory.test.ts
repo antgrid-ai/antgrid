@@ -569,20 +569,22 @@ test("list() applies the local floor to the merged list, not just to an all-loca
   expect(survivingLocal.length).toBe(3);
 });
 
-test("reach says remote-access-off before it says no-carrier", async () => {
+test("reach says no-machine-id before it says no-carrier", async () => {
   const d = new SessionDirectory({
     repoKeys: { keyFor: () => KEY, probed: () => true, projectsSharing: () => ["caller"] },
     sessionIndex: { *sessionsIn(projectId) { if (projectId === "caller") yield { entry: session({ id: "me" }) }; } },
     projectPath: () => "/repos/caller",
-    machineId: () => "self-machine",
+    machineId: () => null,
     readBranch: async () => "main",
-    remoteAccessEnabled: () => false,
     // No `remoteDirectory` at all — both conditions are true at once, and the
-    // switch has to win, or a user with a perfectly good desktop app reads
-    // "no desktop app is carrying this" instead of the true reason.
+    // identity has to win: a machine that cannot be addressed back reads "no
+    // desktop app is carrying this" otherwise, and keeps reading it after the
+    // app attaches, which sends its user hunting the wrong thing. Since E15
+    // this is the FIRST arm — the machine's own remote-access switch is no
+    // longer consulted here at all.
   });
   const answer = served(await d.list({ projectId: "caller", sessionId: "me" }));
-  expect(answer.reach).toEqual({ scope: "machine", why: "remote-access-off" });
+  expect(answer.reach).toEqual({ scope: "machine", why: "no-machine-id" });
 });
 
 test("reach says no-machine-id rather than offering rows that cannot be sent to", async () => {

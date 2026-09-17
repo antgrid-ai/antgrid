@@ -59,18 +59,30 @@ String handlerLensToWire(HandlerLens l) => switch (l) {
   HandlerLens.release => 'release',
 };
 
-/// Picker label. PM and QA stay uppercase — they are how the roles are written,
-/// not sentences that happen to start with an abbreviation.
+/// Picker label — the STANCE the preset takes, not the job title it used to be
+/// named for (a role name teaches nothing about what changes). Painted as
+/// written by `AbChip.choice` — the phrase is what the user reads to decide
+/// with, so nothing recases it. Kept to 16 chars or under so the same word
+/// serves the PA bar's tighter row (`handler_pa_bar.dart`) — one vocabulary,
+/// not a short set forked off this one.
 String handlerLensLabel(HandlerLens l) => switch (l) {
-  HandlerLens.pm => 'PM',
-  HandlerLens.qa => 'QA',
-  HandlerLens.critic => 'Critic',
-  HandlerLens.release => 'Release manager',
+  HandlerLens.pm => 'Stays in scope',
+  HandlerLens.qa => 'Proof it works',
+  HandlerLens.critic => 'What could break',
+  HandlerLens.release => 'Ready to ship',
 };
 
-/// The default has no role name on purpose: it is the rules alone, so it is
-/// offered as what it does rather than as a fifth role.
-const String handlerLensDefaultLabel = 'Intent and completion';
+/// The default has no stance name on purpose: it is the floor every session
+/// judges under regardless of pick, so it is offered as what it adds — nothing
+/// — rather than as a fifth stance.
+const String handlerLensDefaultLabel = 'Nothing extra';
+
+/// The sixth chip: a user-authored stance, exclusive with the four presets and
+/// with [handlerLensDefaultLabel] (§9 of the redesign spec — the rules do not
+/// compose). Never a wire id: choosing it clears [HandlerLensPick.roleId] and
+/// carries the user's own text as [HandlerLensPick.brief] instead, so the bar
+/// and the sheet need this label for a pick no [HandlerLens] value can name.
+const String handlerLensOwnLabel = 'Your own';
 
 /// One line of what the judge additionally asks under a lens, shown beneath the
 /// picker; null is the unnamed default. Every line here describes QUESTIONS —
@@ -106,8 +118,7 @@ const String handlerLensUnreportedBlurb =
 /// What it says while this app has not been told which lens the session runs:
 /// a cold cache over a session the far end still holds one for. Never the
 /// default's own line — painting that would report a pick nobody stated.
-const String handlerLensUnsetBlurb =
-    'Runs as it was last set on this machine until you pick one.';
+const String handlerLensUnsetBlurb = 'Runs as it was last set on this machine.';
 
 /// What it says when the session runs an id this build cannot name — a newer
 /// machine's lens. The pick is real and is left alone until the user replaces
@@ -120,7 +131,7 @@ const String handlerLensUnknownBlurb =
 /// `MAX_BRIEF_CHARS` (`bridge/src/handler/decision.ts`). The bridge clips in
 /// UTF-16 code units and never refuses on length, so a field counting anything
 /// else can only cost an emoji-heavy brief its tail.
-const int handlerMaxBriefChars = 500;
+const int handlerMaxBriefChars = 1000;
 
 /// A session's lens and brief as a surface seeds from them.
 ///
@@ -249,6 +260,52 @@ class HandlerInstructionItem {
   };
 }
 
+enum HandlerAvailabilityState { unknown, preparing, available, unavailable }
+
+class HandlerAvailability {
+  final HandlerAvailabilityState state;
+  final String? reason;
+
+  const HandlerAvailability(this.state, {this.reason});
+
+  String? get note {
+    return switch (state) {
+      HandlerAvailabilityState.available => null,
+      HandlerAvailabilityState.preparing =>
+        'Waiting for the agent integration to connect.',
+      HandlerAvailabilityState.unknown =>
+        'Waiting for monitoring confirmation.',
+      HandlerAvailabilityState.unavailable => _unavailableNote,
+    };
+  }
+
+  String get _unavailableNote {
+    final detail = reason?.trim();
+    if (detail == null || detail.isEmpty) {
+      return 'Antgrid can\'t monitor this session. Start or restart the agent '
+          'to try again.';
+    }
+    final separator = RegExp(r'[.!?]$').hasMatch(detail) ? ' ' : '. ';
+    return '$detail${separator}Start or restart the agent to try again.';
+  }
+
+  static HandlerAvailability? fromWire(dynamic value) {
+    if (value is! Map) return null;
+    final state = switch (value['state']) {
+      'unknown' => HandlerAvailabilityState.unknown,
+      'preparing' => HandlerAvailabilityState.preparing,
+      'available' => HandlerAvailabilityState.available,
+      'unavailable' => HandlerAvailabilityState.unavailable,
+      _ => null,
+    };
+    if (state == null) return null;
+    return HandlerAvailability(
+      state,
+      reason: value['reason'] is String ? value['reason'] as String : null,
+    );
+  }
+}
+
 /// One armed handler session (per terminal). Mirrors the bridge's
 /// `HandlerSessionSnapshot` (`bridge/src/protocol.ts`).
 class HandlerSessionState {
@@ -315,6 +372,7 @@ class HandlerSessionState {
   /// `handlerChat`, and the two are not interchangeable: the catalog describes
   /// an agent, this describes a session (its live mode and its judge pick).
   final HandlerObservability? observability;
+  final HandlerAvailability? availability;
 
   /// Whether this bridge can be TOLD the answer to one of this session's asks —
   /// `handler:answer` for a tap, an escalationId-bearing `handler:instruct` for
@@ -368,6 +426,7 @@ class HandlerSessionState {
     this.parkedUntil,
     this.parkCause,
     this.observability,
+    this.availability,
     this.askAnswer = false,
     this.askAnswerPending = false,
     this.escalationAnswer = false,
@@ -410,9 +469,8 @@ class HandlerSessionState {
   /// [instructions] is actually populated — an older bridge's [goal] fallback
   /// has no retained-count concept of its own, so its total is simply how many
   /// sentences [askedFor] is showing.
-  int get askedForTotal => instructions.isNotEmpty
-      ? instructionsTotal
-      : askedFor.length;
+  int get askedForTotal =>
+      instructions.isNotEmpty ? instructionsTotal : askedFor.length;
 
   // Re-lists every field on purpose, and both callers make that dangerous:
   // `_applyEscalationFloors` and `_dropRows` (`handler_service.dart`) run
@@ -440,6 +498,7 @@ class HandlerSessionState {
     parkedUntil: parkedUntil,
     parkCause: parkCause,
     observability: observability,
+    availability: availability,
     askAnswer: askAnswer,
     askAnswerPending: askAnswerPending,
     escalationAnswer: escalationAnswer,
@@ -556,6 +615,7 @@ class HandlerSessionState {
       parkedUntil: parkedUntil is num ? parkedUntil.toInt() : null,
       parkCause: parkCause is String ? parkCause : null,
       observability: handlerObservabilityFromWire(json['observability']),
+      availability: HandlerAvailability.fromWire(json['availability']),
       askAnswer: askAnswer is bool ? askAnswer : false,
       askAnswerPending: askAnswerPending is bool ? askAnswerPending : false,
       escalationAnswer: escalationAnswer is bool ? escalationAnswer : false,
@@ -1307,6 +1367,20 @@ class HandlerState {
   final List<HandlerEscalation> escalations;
   final List<HandlerActivityRecord> activity;
 
+  /// Older activity rows exist that [activity] does not hold. Set from the
+  /// answer to a `handler:history:request`, which carries a bounded page.
+  ///
+  /// It has to be RENDERED, not merely carried: a feed showing the newest 50 of
+  /// 300 with nothing saying so presents a truncated history as a complete one.
+  final bool activityTruncated;
+
+  /// Why this project's activity history could not be fetched, or null.
+  ///
+  /// A stalled fetch and an empty log are indistinguishable on screen without
+  /// it — both render as no rows — so the feed would report a transport failure
+  /// as the settled fact that nothing ever happened.
+  final String? activityHistoryError;
+
   /// Undo offers for this project, oldest first. Not keyed by session — they
   /// survive the disarm of the session that took them.
   final List<HandlerSnapshot> snapshots;
@@ -1340,6 +1414,8 @@ class HandlerState {
     required this.sessions,
     required this.escalations,
     required this.activity,
+    this.activityTruncated = false,
+    this.activityHistoryError,
     this.snapshots = const [],
     this.wrapUps = const [],
     this.pendingUndo = const {},
@@ -1353,6 +1429,8 @@ class HandlerState {
       sessions = const {},
       escalations = const [],
       activity = const [],
+      activityTruncated = false,
+      activityHistoryError = null,
       snapshots = const [],
       wrapUps = const [],
       pendingUndo = const {},
@@ -1475,6 +1553,9 @@ class HandlerState {
     Map<String, HandlerSessionState>? sessions,
     List<HandlerEscalation>? escalations,
     List<HandlerActivityRecord>? activity,
+    bool? activityTruncated,
+    String? activityHistoryError,
+    bool clearActivityHistoryError = false,
     List<HandlerSnapshot>? snapshots,
     List<HandlerWrapUp>? wrapUps,
     Set<String>? pendingUndo,
@@ -1493,6 +1574,12 @@ class HandlerState {
       sessions: sessions ?? this.sessions,
       escalations: escalations ?? this.escalations,
       activity: activity ?? this.activity,
+      activityTruncated: activityTruncated ?? this.activityTruncated,
+      // Clearable because a retry that succeeds has to be able to take the
+      // banner down; a latch-on error would outlive the failure it describes.
+      activityHistoryError: clearActivityHistoryError
+          ? null
+          : (activityHistoryError ?? this.activityHistoryError),
       snapshots: snapshots ?? this.snapshots,
       wrapUps: wrapUps ?? this.wrapUps,
       pendingUndo: pendingUndo ?? this.pendingUndo,

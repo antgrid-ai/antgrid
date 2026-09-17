@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { Environment, Paddle, type Subscription } from "@paddle/paddle-node-sdk";
 import { z } from "zod";

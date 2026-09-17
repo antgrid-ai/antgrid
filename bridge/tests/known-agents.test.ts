@@ -8,8 +8,8 @@ import {
   listKnownTools,
   isOscTitleUnusable,
   titleSourceFor,
-} from "../src/known-agents";
-import { AGENTS } from "../src/agents/registry";
+} from "../../packages/antgrid-agents/src/known-agents";
+import { AGENTS } from "../../packages/antgrid-agents/src/agents/registry";
 
 describe("known-agents registry", () => {
   it("exposes entries for the known coding agents", () => {

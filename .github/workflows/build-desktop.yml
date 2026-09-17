@@ -206,6 +206,43 @@ jobs:
           git tag -a "$TAG" -m "Antgrid $TAG"
           git push origin "$TAG"
 
+  legal-artifacts:
+    needs: [version]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.14'
+
+      - name: Check licence map
+        run: bun run check:licenses
+
+      - name: Build corresponding source and SPDX artifacts
+        env:
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git archive --format=tar.gz --prefix="antgrid-${TAG}/" \
+            --output="antgrid-${TAG}-source.tar.gz" "${GITHUB_SHA}"
+          bun run scripts/generate-spdx-sbom.ts \
+            "antgrid-${TAG}.spdx.json" "${TAG}" "${GITHUB_SHA}"
+          sha256sum "antgrid-${TAG}-source.tar.gz" \
+            "antgrid-${TAG}.spdx.json" > SHA256SUMS
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: antgrid-legal-artifacts
+          path: |
+            antgrid-*-source.tar.gz
+            antgrid-*.spdx.json
+            SHA256SUMS
+          if-no-files-found: error
+
   macos:
     # Empty inputs = tag push = build everything.
     if: ${{ github.event_name == 'push' || inputs.platform == 'all' || inputs.platform == 'both' || inputs.platform == 'macos' }}
@@ -296,6 +333,8 @@ jobs:
       - name: Smoke test compiled bridge hook
         run: bun run bridge/scripts/smoke-hook-binary.ts bridge/dist/antgrid-bridge
 
+      - name: Smoke test compiled adapter assets
+        run: bun run --filter antgrid-agents smoke:assets
       - name: Smoke test compiled bridge mcp
         run: bun run bridge/scripts/smoke-mcp-binary.ts bridge/dist/antgrid-bridge
 
@@ -309,6 +348,7 @@ jobs:
             --dart-define=SENTRY_DSN=${{ secrets.SENTRY_DSN }} \
             --dart-define=APP_VERSION=${{ needs.version.outputs.name }} \
             --dart-define=GIT_SHA=${{ needs.version.outputs.sha }} \
+            --dart-define=SOURCE_COMMIT=${{ github.sha }} \
             --dart-define=BUILD_TIME=${{ needs.version.outputs.built }}
 
       - name: Copy bridge into .app bundle
@@ -669,6 +709,8 @@ jobs:
         shell: pwsh
         run: bun run bridge/scripts/smoke-hook-binary.ts bridge/dist/antgrid-bridge.exe
 
+      - name: Smoke test compiled adapter assets
+        run: bun run --filter antgrid-agents smoke:assets
       - name: Smoke test compiled bridge mcp
         shell: pwsh
         run: bun run bridge/scripts/smoke-mcp-binary.ts bridge/dist/antgrid-bridge.exe
@@ -676,7 +718,7 @@ jobs:
       - name: Build Windows app
         id: build
         working-directory: app
-        run: flutter build windows --${{ env.BUILD_MODE }} --build-name=${{ needs.version.outputs.build_name }} --build-number=${{ needs.version.outputs.build_number }} --dart-define=SENTRY_DSN=${{ secrets.SENTRY_DSN }} --dart-define=APP_VERSION=${{ needs.version.outputs.name }} --dart-define=GIT_SHA=${{ needs.version.outputs.sha }} --dart-define=BUILD_TIME=${{ needs.version.outputs.built }}
+        run: flutter build windows --${{ env.BUILD_MODE }} --build-name=${{ needs.version.outputs.build_name }} --build-number=${{ needs.version.outputs.build_number }} --dart-define=SENTRY_DSN=${{ secrets.SENTRY_DSN }} --dart-define=APP_VERSION=${{ needs.version.outputs.name }} --dart-define=GIT_SHA=${{ needs.version.outputs.sha }} --dart-define=SOURCE_COMMIT=${{ github.sha }} --dart-define=BUILD_TIME=${{ needs.version.outputs.built }}
 
       - name: Copy bridge into output folder
         if: ${{ steps.build.outcome == 'success' }}
@@ -684,6 +726,20 @@ jobs:
         run: |
           Copy-Item bridge/dist/antgrid-bridge.exe `
             "app/build/windows/x64/runner/$env:DEST/antgrid-bridge.exe"
+
+      - name: Package direct Windows ZIP
+        if: ${{ env.BUILD_MODE == 'release' && steps.build.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "app/build/windows/x64/runner/$env:DEST/*" `
+            -DestinationPath antgrid-windows-x64.zip
+
+      - uses: actions/upload-artifact@v7
+        if: ${{ env.BUILD_MODE == 'release' && steps.build.outcome == 'success' }}
+        with:
+          name: antgrid-windows-direct
+          path: antgrid-windows-x64.zip
+          if-no-files-found: error
 
       # Microsoft Store package (MSIX) — the Windows distribution package, for
       # manual upload to Partner Center (and auto-publish below on a v* tag). The
@@ -881,6 +937,8 @@ jobs:
       - name: Smoke test compiled bridge hook
         run: bun run bridge/scripts/smoke-hook-binary.ts bridge/dist/antgrid-bridge
 
+      - name: Smoke test compiled adapter assets
+        run: bun run --filter antgrid-agents smoke:assets
       - name: Smoke test compiled bridge mcp
         run: bun run bridge/scripts/smoke-mcp-binary.ts bridge/dist/antgrid-bridge
 
@@ -894,6 +952,7 @@ jobs:
             --dart-define=SENTRY_DSN=${{ secrets.SENTRY_DSN }} \
             --dart-define=APP_VERSION=${{ needs.version.outputs.name }} \
             --dart-define=GIT_SHA=${{ needs.version.outputs.sha }} \
+            --dart-define=SOURCE_COMMIT=${{ github.sha }} \
             --dart-define=BUILD_TIME=${{ needs.version.outputs.built }}
 
       - name: Copy bridge into the app bundle
@@ -966,7 +1025,7 @@ jobs:
     # ref_type alone would also fire for an artifact-only dispatch launched from
     # a tag ref, which is how you rebuild an old release without republishing it.
     if: ${{ (github.event_name == 'push' && github.ref_type == 'tag') || inputs.release }}
-    needs: [version, macos, linux]
+    needs: [version, legal-artifacts, macos, windows, linux]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # GITHUB_TOKEN writes the release; without this the default read-only
@@ -1038,8 +1097,10 @@ jobs:
               exit 1
             fi
           fi
-          assets="antgrid-macos.dmg antgrid-linux.AppImage antgrid-linux.AppImage.zsync"
+          assets="antgrid-windows-x64.zip antgrid-macos.dmg antgrid-linux.AppImage antgrid-linux.AppImage.zsync antgrid-${TAG}-source.tar.gz antgrid-${TAG}.spdx.json"
           [ -f appcast.xml ] && assets="$assets appcast.xml"
+          sha256sum $assets > SHA256SUMS
+          assets="$assets SHA256SUMS"
           # Runs inside the clone (it reads the tag graph); the redirect is
           # opened in the workspace root, where the assets already are.
           ( cd _repo && RELEASE_SHA="$SHA" RELEASE_BUILT="$BUILT" \

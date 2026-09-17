@@ -5,7 +5,7 @@ import { createMessage, type AbMessage } from "../src/protocol";
 function makeManager(opts?: { withStopTask?: boolean }) {
   const stopped: string[] = [];
   const driver: StructuredDriver = {
-    start: async () => "agent-1",
+    start: async () => {},
     prompt: async () => {},
     cancel: async () => false,
     compact: async () => {},

@@ -828,6 +828,15 @@ class HandlerHeaderControl extends ConsumerWidget {
           if (session.observability == HandlerObservability.unsupported) {
             pillLabel = 'NOT WATCHED';
             pillColor = p.warning;
+          } else if (session.availability?.state ==
+              HandlerAvailabilityState.unavailable) {
+            pillLabel = 'MONITORING UNAVAILABLE';
+            pillColor = p.warning;
+          } else if (session.availability?.state ==
+                  HandlerAvailabilityState.preparing ||
+              session.availability?.state == HandlerAvailabilityState.unknown) {
+            pillLabel = 'WAITING FOR AGENT';
+            pillColor = p.warning;
           }
           break;
         case HandlerRunState.handling:

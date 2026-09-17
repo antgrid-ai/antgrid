@@ -346,6 +346,35 @@ export class StreamMux {
     );
   }
 
+  /** A refused `request` is also answered on its own requestId. The addressed
+   *  notice is uncorrelated and rate-limited, so on its own it ends no wait: the
+   *  app's snapshot pull (`_pullSnapshot`, `machine_session.dart`) settles only
+   *  on a `response` carrying its requestId, and `state.snapshot` is the sole
+   *  carrier of a relay checkout's agent:status — left unanswered, a stale
+   *  device reads the machine as dead and retries for ~70s. Never throttled,
+   *  because each reply ends one specific wait; sent on the request's own
+   *  stream and channel, the way the core answers an admitted one. */
+  private answerRefusedRpc(
+    streamId: string,
+    mJson: string,
+    channel: Channel,
+    peerId: string,
+    refusal: StreamRefusal,
+  ): void {
+    const msg = parseMessageFast(mJson);
+    if (!msg || msg.type !== "request") return;
+    void this.transport.sendEnvelope(
+      streamId,
+      createMessage("response", {
+        requestId: msg.requestId,
+        ok: false,
+        error: { code: refusal.code, message: refusal.message },
+      }),
+      channel,
+      { kind: "peer", peerId },
+    );
+  }
+
   /** Rate limit shared by both addressed notices, swept so a long-lived host
    *  can't accumulate an entry per dead id. */
   private noticeDue(key: string): boolean {
@@ -371,9 +400,17 @@ export class StreamMux {
     // Per-sender gate ahead of BOTH routes below, because the tunnel route
     // bypasses the bus and would otherwise proxy arbitrary HTTP out of a
     // checkout for a device every other path on this stream refuses.
-    const refusal = entry.opts.mayAcceptFrom?.(this.transport.peerSession(peerId)) ?? null;
+    const peer = this.transport.peerSession(peerId);
+    const refusal = entry.opts.mayAcceptFrom?.(peer) ?? null;
     if (refusal) {
       this.notifyRefused(streamId, peerId, refusal, entry.opts.projectId);
+      // Answered only for a SETTLED refusal. A peer id that resolves to no
+      // session is a device mid-handshake — a candidate's keys open its frames
+      // before `app:ready` promotes it (`tryOpenPending`, relay-client.ts) —
+      // and the app's own retry heals that; a correlated refusal would not,
+      // because `_pullSnapshot` settles on any code but E_TIMEOUT, turning a
+      // race that fixes itself into a workspace telling the user to update.
+      if (peer) this.answerRefusedRpc(streamId, mJson, channel, peerId, refusal);
       return true;
     }
     // The peer is transmitting on this stream, so it holds a transport for it —

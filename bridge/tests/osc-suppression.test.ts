@@ -5,7 +5,7 @@
 // invisible: too eager and the session goes silent, too shy and every event
 // arrives twice.
 import { describe, expect, test } from "bun:test";
-import { suppressesOscNotifications, suppressesOscTitle } from "../src/known-agents";
+import { suppressesOscNotifications, suppressesOscTitle } from "../../packages/antgrid-agents/src/known-agents";
 
 /** Expected suppression for outcome [true, false, absent], in that order. */
 type ByOutcome = [boolean, boolean, boolean];

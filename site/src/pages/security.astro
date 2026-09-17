@@ -75,10 +75,10 @@ const gaps = [
 ];
 
 const sources = [
-  { label: "Repository", href: links.repo, note: "the whole product, source-available" },
+  { label: "Repository", href: links.repo, note: "MPL-2.0 source and exact releases" },
   { label: "SECURITY.md", href: links.securityPolicyFile, note: "scope, reporting, what to expect" },
-  { label: "packages/antgrid_relay_client", href: links.relayClient, note: "the client-side encryption, Apache-2.0" },
-  { label: "packages/antgrid-wire", href: links.wirePackage, note: "the wire protocol, Apache-2.0" },
+  { label: "packages/antgrid_relay_client", href: links.relayClient, note: "the client-side encryption, MPL-2.0" },
+  { label: "packages/antgrid-wire", href: links.wirePackage, note: "the wire protocol, MPL-2.0" },
   { label: "docs/protocol/e2e-handshake.md", href: links.handshakeSpec, note: "the handshake, specified to the byte" },
   { label: "e2e-handshake-vectors.json", href: links.handshakeVectors, note: "the vectors both implementations must pass" },
 ];
@@ -346,10 +346,10 @@ const sources = [
         <Eyebrow class="mb-5">Verify it</Eyebrow>
         <h2 class="mb-5 max-w-3xl font-display text-title font-semibold text-ink">Check the crypto claims yourself.</h2>
         <p class="mb-4 max-w-2xl text-lede text-muted">
-          The handshake is specified in public down to the byte layout of the signed transcript, with cross-language test vectors that both the TypeScript and the Dart implementation must pass. The wire protocol and the client-side encryption are Apache-2.0 and carry their own licence files, so you can read, reimplement and publish work built on them without asking us.
+          The handshake is specified in public down to the byte layout of the signed transcript, with cross-language test vectors that both the TypeScript and the Dart implementation must pass. The wire protocol and client-side encryption are MPL-2.0 and carry their own licence files.
         </p>
         <p class="mb-8 max-w-2xl text-note leading-relaxed text-muted2">
-          The rest of antgrid is source-available under the Elastic License 2.0. That is not OSI-approved open source and we do not call it that.
+          Antgrid's first-party distributed code is MPL-2.0, except the relay and web services, which remain Elastic-2.0. MPL applies to covered files, not to code you use Antgrid to work on.
         </p>
         <ul class="grid gap-x-10 gap-y-3 md:grid-cols-2">
           {sources.map((s) => (

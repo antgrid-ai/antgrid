@@ -6,6 +6,7 @@ import '../../../design/ab_tokens.dart';
 import '../../../design/widgets/ab_chip.dart';
 import '../../../design/widgets/ab_icon_button.dart';
 import '../../../design/widgets/ab_tap_target.dart';
+import '../../agent_error_presentation.dart';
 import '../transcript_rows.dart';
 
 /// Inline banner for a turn-level [ErrorRowData], with a dismiss affordance.
@@ -32,7 +33,10 @@ class ErrorBanner extends StatelessWidget {
           AbCompactTapTargets(
             child: Row(
               children: [
-                AbChip.system(label: error.category, color: c.error),
+                AbChip.system(
+                  label: agentErrorCategoryLabel(error.category),
+                  color: c.error,
+                ),
                 if (error.provider != null) ...[
                   const SizedBox(width: AbTokens.space6),
                   AbChip.system(label: error.provider!, color: c.textMuted),
@@ -46,19 +50,21 @@ class ErrorBanner extends StatelessWidget {
               ],
             ),
           ),
-          const SizedBox(height: AbTokens.space4),
-          Text(
-            error.message,
-            style: AbTokens.sansStyle(
-              fontSize: AbTokens.fontSm,
-              color: c.textPrimary,
-            ),
-          ),
-          if (error.retryable) ...[
+          if (error.message.trim().isNotEmpty) ...[
             const SizedBox(height: AbTokens.space4),
             Text(
-              'retryable${error.retryAfterMs != null ? ' · retry in ${(error.retryAfterMs! / 1000).round()}s' : ''}',
-              style: AbTokens.monoStyle(
+              error.message,
+              style: AbTokens.sansStyle(
+                fontSize: AbTokens.fontSm,
+                color: c.textPrimary,
+              ),
+            ),
+          ],
+          if (agentErrorRetryCopy(error) case final retryCopy?) ...[
+            const SizedBox(height: AbTokens.space4),
+            Text(
+              retryCopy,
+              style: AbTokens.sansStyle(
                 fontSize: AbTokens.fontXs,
                 color: c.textMuted,
               ),
