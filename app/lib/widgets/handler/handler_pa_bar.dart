@@ -377,6 +377,17 @@ class _HandlerPaBarState extends ConsumerState<HandlerPaBar> {
         : 'What Handler also asks about on this session';
 
     final detail = handlerPaStatusLabel(session, now: now);
+    // One centre line for the whole row. Start-alignment is what keeps the
+    // glyphs beside the title when the hint wraps under it, but on its own it
+    // hangs a 12px glyph and a 17px line from the TOP of a row the 24px chip
+    // has made taller — three centre lines on one strip, which is what the
+    // leading glyph reads as sitting too high against. The band is the chip's
+    // own box, the tallest thing on the line, floored by the title's line so a
+    // large text scaler grows the band instead of clipping the words.
+    final line = math.max(
+      AbTokens.iconButtonBox,
+      AbListRow.titleLineExtent(context),
+    );
 
     return Container(
       decoration: BoxDecoration(
@@ -396,68 +407,84 @@ class _HandlerPaBarState extends ConsumerState<HandlerPaBar> {
         // backlog behind the row, and painting a door in the run state's
         // colour left the tone as the only thing saying what the session was
         // doing — which is how the state went unworded for as long as it did.
-        leading: AbIcon(AbIcons.list, size: 12, color: p.textMuted),
+        leading: SizedBox(
+          height: line,
+          child: Center(
+            child: AbIcon(AbIcons.tasklist, size: 12, color: p.textMuted),
+          ),
+        ),
         // State first, in its own tone, then the detail. An ellipsis eats from
         // the tail, so the half that survives the narrowest panel is the half
         // that decides whether the user has to act at all.
-        title: Text.rich(
-          TextSpan(
-            children: [
+        title: SizedBox(
+          height: line,
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: Text.rich(
               TextSpan(
-                text: status.label,
-                style: TextStyle(
-                  color: status.tone,
-                  fontWeight: FontWeight.w600,
-                ),
+                children: [
+                  TextSpan(
+                    text: status.label,
+                    style: TextStyle(
+                      color: status.tone,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  if (detail != null) ...[
+                    TextSpan(text: ' · ', style: TextStyle(color: p.textMuted)),
+                    TextSpan(text: detail),
+                  ],
+                ],
               ),
-              if (detail != null) ...[
-                TextSpan(text: ' · ', style: TextStyle(color: p.textMuted)),
-                TextSpan(text: detail),
-              ],
-            ],
+            ),
           ),
         ),
         // Unstyled: AbListRow already renders a subtitle as muted chrome, and
         // restating it here would silently drop the row's line height.
         subtitle: hint == null ? null : Text(hint),
-        trailing: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            // The lens, always — including the default. This bar is on screen
-            // for the whole time a session is armed, and it is the only place
-            // the setting is visible at all; showing it only once it has been
-            // changed makes "no chip" a state the user has to know how to
-            // read. It costs width the title is already short of (see the
-            // subtitle note above), which is the trade.
-            //
-            // [AbStateChip] rather than a bare [AbChip]: this reports a state
-            // and opens the surface that changes it, which is that widget's
-            // whole contract. The chip it replaces drew the row's one control
-            // as read-only system data — no border, no hover, no focus ring
-            // and a tap target the height of 10px of text — while shouting the
-            // label in caps the sheet behind it does not use.
-            AbStateChip(
-              // The brief sits behind the same door as the lens it qualifies,
-              // so it marks that door rather than standing beside it: a mark
-              // the user cannot follow names something with nowhere to go and
-              // read it. Deliberately not [AbIcons.shield], which is Handler's
-              // arm/disarm mark everywhere else it appears — on a chip that
-              // opens a settings sheet it would offer the one action this
-              // control does not have.
-              icon: session.brief != null ? AbIcons.comment : AbIcons.settings,
-              label: lensLabel,
-              tone: inert ? p.warning : null,
-              active: inert,
-              tooltip: lensTooltip,
-              onTap: (chipContext) => detached(
-                'HandlerPaBar',
-                'open session settings',
-                () => showHandlerSessionSettingsSheet(chipContext, terminalId),
+        trailing: SizedBox(
+          height: line,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // The lens, always — including the default. This bar is on
+              // screen for the whole time a session is armed, and it is the
+              // only place the setting is visible at all; showing it only once
+              // it has been changed makes "no chip" a state the user has to
+              // know how to read. It costs width the title is already short of
+              // (see the subtitle note above), which is the trade.
+              //
+              // [AbStateChip] rather than a bare [AbChip]: this reports a state
+              // and opens the surface that changes it, which is that widget's
+              // whole contract. The chip it replaces drew the row's one control
+              // as read-only system data — no border, no hover, no focus ring
+              // and a tap target the height of 10px of text — while shouting
+              // the label in caps the sheet behind it does not use.
+              AbStateChip(
+                // The brief sits behind the same door as the lens it
+                // qualifies, so it marks that door rather than standing beside
+                // it: a mark the user cannot follow names something with
+                // nowhere to go and read it. Deliberately not [AbIcons.shield],
+                // which is Handler's arm/disarm mark everywhere else it appears
+                // — on a chip that opens a settings sheet it would offer the
+                // one action this control does not have.
+                icon: session.brief != null
+                    ? AbIcons.comment
+                    : AbIcons.settings,
+                label: lensLabel,
+                tone: inert ? p.warning : null,
+                active: inert,
+                tooltip: lensTooltip,
+                onTap: (chipContext) => detached(
+                  'HandlerPaBar',
+                  'open session settings',
+                  () => showHandlerSessionSettingsSheet(chipContext, terminalId),
+                ),
               ),
-            ),
-            const SizedBox(width: AbTokens.space6),
-            AbIcon(AbIcons.chevronUp, size: 12, color: p.textMuted),
-          ],
+              const SizedBox(width: AbTokens.space6),
+              AbIcon(AbIcons.chevronUp, size: 12, color: p.textMuted),
+            ],
+          ),
         ),
         onTap: () => openBacklog(terminalId),
       ),

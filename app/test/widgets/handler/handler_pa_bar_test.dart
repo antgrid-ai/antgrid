@@ -73,6 +73,15 @@ TextSpan _stateSpan(WidgetTester tester) {
   return (title.textSpan! as TextSpan).children!.first as TextSpan;
 }
 
+/// Everything that sits ON the row's one line, so a test can assert they share
+/// a centre rather than eyeballing a screenshot.
+List<Finder> _onTheLine() => [
+  find.byWidgetPredicate((w) => w is AbIcon && w.icon == AbIcons.tasklist),
+  find.byWidgetPredicate((w) => w is Text && w.textSpan != null),
+  find.byType(AbStateChip),
+  find.byWidgetPredicate((w) => w is AbIcon && w.icon == AbIcons.chevronUp),
+];
+
 /// The brief marker carries no text, so the icon it draws is the only thing
 /// that identifies it.
 final Finder _briefMarker = find.byWidgetPredicate(
@@ -385,6 +394,40 @@ void main() {
     // machine into a bar full of warnings.
     await _pump(tester, sessions: {'t1': _armed()});
     expect(_stateSpan(tester).text, 'Watching');
+  });
+
+  testWidgets('one line, one centre', (tester) async {
+    // The row is start-aligned so its glyphs stay beside the title when the
+    // hint wraps under it — and start alignment alone hangs a 12px glyph and a
+    // 17px line from the TOP of a row the 24px chip has made taller, while the
+    // chip's own contents centre 6px lower. Three centres on one strip is what
+    // reads as "the icon is too high", and it survived a redesign of the row
+    // because nothing here could fail for it.
+    await _pump(tester, sessions: {'t1': _armed()});
+    final centres = _onTheLine()
+        .map((f) => tester.getRect(f).center.dy)
+        .toSet();
+    expect(centres, hasLength(1));
+  });
+
+  testWidgets('the line keeps its centre once the hint wraps under it', (
+    tester,
+  ) async {
+    // The state the alignment exists for: a second line below the title must
+    // move nothing on the first one.
+    await _pump(
+      tester,
+      sessions: {
+        't1': _armed(
+          runState: HandlerRunState.needsYou,
+          escalations: [_escalation('e1')],
+        ),
+      },
+    );
+    final centres = _onTheLine()
+        .map((f) => tester.getRect(f).center.dy)
+        .toSet();
+    expect(centres, hasLength(1));
   });
 
   testWidgets('the bar offers no place to type of its own', (tester) async {
