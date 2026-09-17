@@ -1,7 +1,4 @@
 ---
-import { Icon } from "astro-icon/components";
-import Eyebrow from "../ui/Eyebrow.astro";
-import Readout from "../ui/Readout.astro";
 import UseCase from "../ui/UseCase.astro";
 
 const steps = [
@@ -10,34 +7,34 @@ const steps = [
   "Enable remote access on the machine",
 ];
 ---
-<section id="reach" class="reveal mx-auto max-w-shell px-6 py-16 md:py-20">
-  <div class="grid items-center gap-12 md:grid-cols-2">
+{/* Reach, Worktrees and Messaging are one chapter in three entries: the same
+    two columns, text left and record right, every time. Alternating the sides
+    would make three sections out of them; holding the line makes a list. This
+    one opens the chapter, so it carries no rule of its own — the Fleet band
+    above already closes on one. */}
+<section id="reach" class="mx-auto max-w-shell px-6 pt-16 md:pt-24">
+  <div class="grid gap-x-16 gap-y-10 md:grid-cols-2">
     <div>
-      <Eyebrow class="mb-5">Your machines</Eyebrow>
-      <h2 class="mb-5 font-display text-title font-semibold text-ink">Run agents where your code already is.</h2>
+      <h2 class="mb-6 font-display text-title font-bold text-ink">Run agents where your code already is.</h2>
       <p class="mb-6 max-w-xl text-lede text-muted">
         Your agent runs on your machine, with your existing repo, local database and development tools. Connect through antgrid without setting up a VPN or port forwarding.
       </p>
-
       <UseCase class="max-w-xl">Away from your desk? Check the session running on your workstation and reply from your phone.</UseCase>
     </div>
 
-    <Readout source="Connect from your phone" state="connected" class="min-w-0">
-      <ol class="flex flex-col gap-4 p-4 md:p-5">
+    <div>
+      <p class="mb-3 text-note text-muted2">Connect from your phone</p>
+      {/* Numbered because it is a sequence: the account has to exist on both
+          devices before the switch on one of them means anything. */}
+      <ol class="ledger">
         {steps.map((step, i) => (
-          <li class="flex items-start gap-3 text-note leading-relaxed text-ink2">
-            <span class="font-mono text-signal2">0{i + 1}</span>
+          <li class="flex items-baseline gap-5 py-3.5 text-note text-ink2">
+            <span class="w-6 shrink-0 font-display text-kicker font-bold text-muted2">{i + 1}</span>
             <span>{step}</span>
           </li>
         ))}
       </ol>
-
-      <Fragment slot="foot">
-        <span class="flex items-start gap-2">
-          <Icon name="tabler:arrows-left-right" class="mt-0.5 shrink-0 text-faint" width="13" height="13" />
-          <span>Both devices connect out to the relay. No inbound port required.</span>
-        </span>
-      </Fragment>
-    </Readout>
+      <p class="mt-4 text-meta leading-relaxed text-muted2">Both devices connect out to the relay. No inbound port required.</p>
+    </div>
   </div>
 </section>

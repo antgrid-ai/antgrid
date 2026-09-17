@@ -1,6 +1,5 @@
 ---
 import { Icon } from "astro-icon/components";
-import Eyebrow from "../ui/Eyebrow.astro";
 import Button from "../ui/Button.astro";
 import WorkspaceScene from "../shell/WorkspaceScene.astro";
 import { links, PLATFORMS, downloadUrlFor } from "../../config";
@@ -22,7 +21,7 @@ import { BETA_FREE, OFFER_ACTIVE, YEARLY_OFFER_USD, YEARLY_LIST_USD } from "../.
 {/* The proof loop is the argument, so it gets the stage rather than a column:
     full shell width under the headline, which also puts it just below the fold
     on a phone instead of a screen and a half down. */}
-<section class="relative overflow-hidden border-b border-edge-inner">
+<section class="relative overflow-hidden">
   <div class="pointer-events-none absolute inset-0 bg-gridfield" aria-hidden="true"></div>
   {/* The live machines. Delays are shuffled rather than sequential — stepping
       through them in reading order makes the rack sweep like a wave, which reads
@@ -54,9 +53,12 @@ import { BETA_FREE, OFFER_ACTIVE, YEARLY_OFFER_USD, YEARLY_LIST_USD } from "../.
       two change together across the md breakpoint and are meaningless apart. */}
   <div class="glow-hero pointer-events-none" aria-hidden="true"></div>
 
-  <div class="relative mx-auto max-w-shell px-6 pt-12 md:pt-18">
-    <div class="mb-7 flex flex-wrap items-center gap-x-5 gap-y-3">
-      <Eyebrow>Claude Code · Codex · Cursor</Eyebrow>
+  <div class="relative mx-auto max-w-shell px-6 pt-12 md:pt-16">
+    {/* The beta pill stands alone: it is a status, and the one line of the
+        hero that changes with pricing. The agent roster that used to sit beside
+        it lives under the window (Compat.astro), where "does it run mine?" is
+        asked. */}
+    <div class="mb-8 flex flex-wrap items-center gap-x-5 gap-y-3">
       {BETA_FREE ? (
         <a
           href={links.pricing}
@@ -84,26 +86,26 @@ import { BETA_FREE, OFFER_ACTIVE, YEARLY_OFFER_USD, YEARLY_LIST_USD } from "../.
       )}
     </div>
 
-    {/* inline-block per sentence so a line can only ever break BETWEEN
-        sentences. This is short-sentence copy at display size, where the default
-        wrap strands a two-word tail ("machine.") on its own line at some widths
-        and not others. A hard <br /> fixes the one width you tested and makes
-        narrow viewports worse. */}
-    <h1 class="mb-8 font-display text-display font-semibold text-ink">
+    {/* The headline takes the whole shell: at the display cap the first two
+        sentences fill one line of it almost exactly, which is what sets the
+        cap. inline-block per sentence so a line can only ever break BETWEEN
+        sentences — short-sentence copy at display size otherwise strands a
+        two-word tail at some widths and not others.
+
+        Beneath it, argument left and action right on one row, top-aligned.
+        The old objection to this split was that it only balanced when the CTA
+        was centred against a two-paragraph lede; pinned to the top it needs no
+        balance — the button sits at the headline's right edge, where the eye
+        lands after reading it, and the terms hang under the button they
+        qualify. */}
+    <h1 class="font-display text-display font-extrabold text-ink">
       <span class="inline-block">Your machines.</span>{" "}
       <span class="inline-block">Your agents.</span>{" "}
       <span class="inline-block">One control plane.</span>
     </h1>
 
-    {/* One column, not two. Argument-left/action-right asked the eye to leave
-        the lede mid-argument and come back for the terms, and it only balanced
-        because the CTA stack was vertically centred against a two-paragraph
-        column — a crutch that goes out of true the moment the copy changes
-        length. Stacked, the hero reads in the order it argues: claim, evidence,
-        action, terms. The 45rem cap stays: it is the measure the lede was
-        written against, and the rows below it are short enough not to need one
-        of their own. */}
-    <div class="max-w-[45rem]">
+    <div class="mt-10 grid gap-x-16 gap-y-8 md:grid-cols-[minmax(0,1fr)_auto] md:items-start">
+    <div class="max-w-[38rem]">
       {/* No inline-block on the sentences here, unlike the headline: at lede
           size in a 45rem column they still wrap mid-sentence, and forbidding
           a mid-sentence break only strands a short second line. */}
@@ -113,8 +115,10 @@ import { BETA_FREE, OFFER_ACTIVE, YEARLY_OFFER_USD, YEARLY_LIST_USD } from "../.
       <p class="mt-4 text-lede text-muted">
         Work with your agent, then tell <a href={links.features} class="text-signal2 hover:text-signal">Handler</a> what's left and when to ask you.
       </p>
+    </div>
 
-      <div class="mt-8 flex flex-wrap items-center gap-x-6 gap-y-3">
+    <div class="md:pt-1">
+      <div class="flex flex-wrap items-center gap-x-6 gap-y-3">
         {PLATFORMS.map((p) => (
           <Button href={downloadUrlFor(p.id)} variant="primary" class={`dl-os dl-${p.os}`}>
             <Icon name={p.icon} width="16" height="16" />Download for {p.name}
@@ -208,15 +212,15 @@ import { BETA_FREE, OFFER_ACTIVE, YEARLY_OFFER_USD, YEARLY_LIST_USD } from "../.
       {/* The two things a stranger has to believe before installing anything,
           promoted out of the footnote they used to share with the builds link.
           Terms, not features: they sit under the action. */}
-      <div class="mt-6 flex flex-wrap items-center gap-x-4 gap-y-2 text-meta text-muted2">
+      <div class="mt-5 flex flex-col gap-y-2 text-meta text-muted2">
         <span class="inline-flex items-center gap-2">
           <Icon name="tabler:lock" width="14" height="14" class="text-muted" />End-to-end encrypted
         </span>
-        <span class="hidden h-3 w-px bg-edge-inner sm:block" aria-hidden="true"></span>
         <span class="inline-flex items-center gap-2">
           <Icon name="tabler:database" width="14" height="14" class="text-muted" />Your machines, repos and agent subscriptions.
         </span>
       </div>
+    </div>
     </div>
   </div>
 
@@ -225,7 +229,7 @@ import { BETA_FREE, OFFER_ACTIVE, YEARLY_OFFER_USD, YEARLY_LIST_USD } from "../.
       SIBLING of the window, never a child — as a child it sits under the
       window's own border and leaves a bright hairline across the exact point
       the page is trying to dissolve. */}
-  <div class="relative mx-auto max-w-shell px-6 pt-10 md:pt-12">
+  <div class="relative mx-auto max-w-shell px-6 pt-12 md:pt-16">
     <div class="appwin-bleed -mb-16 min-w-0 md:-mb-20">
       <WorkspaceScene />
     </div>

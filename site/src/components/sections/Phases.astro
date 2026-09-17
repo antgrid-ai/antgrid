@@ -1,36 +1,48 @@
 ---
-import Eyebrow from "../ui/Eyebrow.astro";
+import UseCase from "../ui/UseCase.astro";
 
 // Claims verified against antgrid@583e988: bridge/src/handler/{evidence,decision,engine}.ts.
 // This example explains the mechanism without posing as a captured product run.
+//
+// A transcript, in order, with no ordinals: the three lines are a conversation
+// and the reader already knows conversations run top to bottom. The third is
+// the only one addressed to a human, and it is the only one that carries
+// amber — the same rule every scene on the page keeps.
 const handoff = [
-  { title: "You hand over", body: '“Implement the plan, then review. Show passing tests. Ask me before changing the API.”' },
-  { title: "Handler asks the agent", body: '“Show the test output before moving on.”' },
-  { title: "Handler asks you", body: '“The fix needs an API change. Approve it or keep the current API?”' },
+  { who: "You", body: "Implement the plan, then review. Show passing tests. Ask me before changing the API.", human: false },
+  { who: "Handler, to the agent", body: "Show the test output before moving on.", human: false },
+  { who: "Handler, to you", body: "The fix needs an API change. Approve it or keep the current API?", human: true },
 ];
-
 ---
-<section id="handler" class="reveal mx-auto max-w-shell px-6 py-16 md:py-20">
-  <Eyebrow class="mb-5">Hand over the follow-ups</Eyebrow>
-  <h2 class="mb-5 max-w-3xl font-display text-title font-semibold text-ink">Every phase has a checkpoint.<br />It doesn't have to be you.</h2>
-  <p class="mb-8 max-w-2xl text-lede text-muted">
-    Start a task with your coding agent. When you're ready, tell Handler what's left, how to proceed and when to ask you. It checks what the agent reports against your instructions and asks for evidence before moving on.
-  </p>
+<section id="handler" class="mx-auto max-w-shell px-6 py-16 md:py-24">
+  <div class="grid gap-x-16 gap-y-10 md:grid-cols-2">
+    <div>
+      <h2 class="mb-6 font-display text-title font-bold text-ink">Every phase has a checkpoint. It doesn't have to be you.</h2>
+      <p class="mb-6 max-w-xl text-lede text-muted">
+        Start a task with your coding agent. When you're ready, tell Handler what's left, how to proceed and when to ask you. It checks what the agent reports against your instructions and asks for evidence before moving on.
+      </p>
+      <UseCase class="max-w-xl">Hand over the follow-ups. Get asked only when a decision is yours.</UseCase>
+      {/* The limitation, on the page rather than in a code comment — a reader
+          who assumes autonomy here and discovers otherwise has been mis-sold. */}
+      <p class="mt-6 max-w-xl text-meta leading-relaxed text-muted2">
+        Handler works inside a session you arm. Review its decisions; its judgement can be wrong.
+      </p>
+      <a href="#download" class="mt-6 inline-block text-note font-medium text-signal2 underline decoration-signaldeep2 underline-offset-4 hover:text-signal hover:decoration-signal">Try one handoff</a>
+    </div>
 
-  <p class="mb-4 text-meta text-muted2">Example instructions and follow-ups</p>
-  <ol class="mb-7 grid gap-6 md:grid-cols-3">
-    {handoff.map((step, i) => (
-      <li class="card-lit rounded-lg border border-edge bg-group p-5">
-        <div class="mb-3 font-mono text-meta text-signal">0{i + 1}</div>
-        <h3 class="mb-2 text-note font-medium text-ink">{step.title}</h3>
-        <p class="text-note leading-relaxed text-muted">{step.body}</p>
-      </li>
-    ))}
-  </ol>
-  {/* The limitation, on the page rather than in a code comment — a reader who
-      assumes autonomy here and discovers otherwise has been mis-sold. */}
-  <p class="mt-4 max-w-2xl text-meta leading-relaxed text-muted2">
-    Handler works inside a session you arm. Review its decisions; its judgement can be wrong.
-  </p>
-  <a href="#download" class="mt-6 inline-flex items-center gap-2 text-note font-medium text-signal2 hover:text-signal">Try one handoff <span aria-hidden="true">↓</span></a>
+    <div>
+      <p class="mb-3 text-note text-muted2">An example handoff</p>
+      <ol class="ledger">
+        {handoff.map((line) => (
+          <li class="grid gap-1.5 py-5 sm:grid-cols-[11rem_minmax(0,1fr)] sm:gap-6">
+            <span class="flex items-start gap-2.5 text-note font-medium text-ink">
+              {line.human && <span class="mt-[0.55em] size-2 shrink-0 bg-amber" aria-hidden="true"></span>}
+              {line.who}
+            </span>
+            <p class="text-note leading-relaxed text-muted">“{line.body}”</p>
+          </li>
+        ))}
+      </ol>
+    </div>
+  </div>
 </section>

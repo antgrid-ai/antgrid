@@ -1,7 +1,5 @@
 ---
 import { Icon } from "astro-icon/components";
-import Eyebrow from "../ui/Eyebrow.astro";
-import Readout from "../ui/Readout.astro";
 import UseCase from "../ui/UseCase.astro";
 
 // A separate checkout separates edits; it is not an execution sandbox.
@@ -10,41 +8,33 @@ const sessions = [
   { branch: "checkout-tests", agent: "Codex", note: "ready for your review", state: "done" },
 ];
 ---
-{/* Column order is reversed against Reach on purpose — run the same way round
-    twice in a row and the two sections read as one repeated template. */}
-<section id="isolation" class="reveal mx-auto max-w-shell px-6 py-16 md:py-20">
-  <div class="grid items-center gap-12 md:grid-cols-2">
-    <div class="md:order-2">
-      <Eyebrow class="mb-5">Isolated sessions</Eyebrow>
-      <h2 class="mb-5 font-display text-title font-semibold text-ink">Give the session its own branch.</h2>
+<section id="isolation" class="mx-auto max-w-shell px-6 pt-14 md:pt-16">
+  <div class="grid gap-x-16 gap-y-10 border-t border-edge pt-14 md:grid-cols-2 md:pt-16">
+    <div>
+      <h2 class="mb-6 font-display text-title font-bold text-ink">Give the session its own branch.</h2>
       <p class="mb-6 max-w-xl text-lede text-muted">
         Start an isolated session in a Git repository. antgrid creates a separate checkout and branch for it. The session's files, diffs, terminal and preview follow that checkout, so you can review its changes before merging.
       </p>
-
       <UseCase class="max-w-xl">Let an agent work on a fix while you keep working in your own checkout.</UseCase>
     </div>
 
-    <Readout source="Illustrative isolated sessions" state="watching" label="own checkouts" class="min-w-0 md:order-1">
-      <div class="flex flex-col gap-1.5 p-4 md:p-5">
+    <div>
+      <p class="mb-3 text-note text-muted2">Two isolated sessions, illustrated</p>
+      <ul class="ledger">
         {sessions.map((s) => (
-          <div class="flex items-center gap-2.5 rounded border border-edge-inner bg-chrome px-3 py-2.5 font-mono text-row">
+          <li class="flex flex-wrap items-center gap-x-3 gap-y-1 py-3.5">
             {s.state === "done"
-              ? <Icon name="tabler:circle-check" class="shrink-0 text-ok" width="14" height="14" />
-              : <span class="size-2 shrink-0 rounded-full bg-signal animate-pulse-dot"></span>}
-            <Icon name="tabler:git-branch" class="shrink-0 text-muted2" width="13" height="13" />
-            <span class="shrink-0 text-ink2">{s.branch}</span>
-            <span class="rounded border border-edge px-1.5 py-0.5 text-marker text-muted2">{s.agent}</span>
-            <span class={`flex-1 truncate text-right ${s.state === "done" ? "text-ok" : "text-muted2"}`}>{s.note}</span>
-          </div>
+              ? <Icon name="tabler:circle-check" class="shrink-0 text-ok" width="15" height="15" />
+              : <span class="mx-0.5 size-2 shrink-0 rounded-full bg-signal animate-pulse-dot"></span>}
+            <span class="inline-flex items-center gap-1.5 font-mono text-row text-ink2">
+              <Icon name="tabler:git-branch" class="shrink-0 text-muted2" width="13" height="13" />{s.branch}
+            </span>
+            <span class="text-meta text-muted2">{s.agent}</span>
+            <span class={`ml-auto text-meta ${s.state === "done" ? "text-ok" : "text-muted2"}`}>{s.note}</span>
+          </li>
         ))}
-      </div>
-
-      <Fragment slot="foot">
-        <span class="flex items-center gap-2">
-          <Icon name="tabler:folder" class="shrink-0 text-faint" width="13" height="13" />
-          <span>Separate working files. <span class="text-ink2">Not a sandbox.</span></span>
-        </span>
-      </Fragment>
-    </Readout>
+      </ul>
+      <p class="mt-4 text-meta leading-relaxed text-muted2">Separate working files. <span class="text-ink2">Not a sandbox.</span></p>
+    </div>
   </div>
 </section>

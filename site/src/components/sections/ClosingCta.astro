@@ -1,63 +1,83 @@
 ---
 import { Icon } from "astro-icon/components";
-import Eyebrow from "../ui/Eyebrow.astro";
 import Button from "../ui/Button.astro";
 import { links, PLATFORMS, downloadUrlFor } from "../../config";
 import { BETA_FREE, FREE_WORKERS } from "../../data/pricing";
 
 // The same OS-matched button the hero leads with, through the same /download —
 // a closing CTA that ends on a doc link is a page that never asks for the thing
-// it spent nine sections arguing for. The setup guide keeps its place in the
-// line below, which is where a reader who wants to read first looks anyway.
+// it spent the page arguing for. The setup guide keeps its place in the row
+// below, which is where a reader who wants to read first looks anyway.
+//
+// This is the one surface on the site painted in signal. Everywhere above,
+// the accent is a mark on a dark field — a live dot, a button, a cell — so the
+// page closing on a whole band of it is the loudest thing it does, and it
+// happens once. Everything on the band is page ink: the pairing clears AA at
+// 4.5:1 (see the signalbtn note in global.css) and an opacity on it would not.
 ---
-<section id="download" class="reveal mx-auto max-w-shell px-6 py-16 md:py-20">
-  <div class="card-lit relative overflow-hidden rounded-xl border border-signaldeep2 bg-panel px-6 py-12 text-center md:px-9 md:py-14">
-    <div class="pointer-events-none absolute -top-48 left-1/2 h-105 w-160 -translate-x-1/2 glow-signal" aria-hidden="true"></div>
-    <div class="relative">
-    <Eyebrow class="mb-5 justify-center">Get started</Eyebrow>
-    <h2 class="mb-5 font-display text-title font-semibold text-ink">
-      Try one workflow.<br />Watch the handoff.
+<section id="download" class="bg-signalbtn text-page">
+  <div class="mx-auto max-w-shell px-6 py-14 md:py-16">
+    {/* The hero's composition, closed: headline across the shell, then the
+        argument left and the action at the right edge, top-aligned. */}
+    <h2 class="font-display text-display font-extrabold">
+      <span class="inline-block">Try one workflow.</span>{" "}
+      <span class="inline-block">Watch the handoff.</span>
     </h2>
-    <p class="mx-auto mb-8 max-w-md text-lede text-muted">
-      {BETA_FREE ? (
-        <><span class="text-ink2">Free during beta, with Handler included.</span> Use your existing repo and agent account.</>
-      ) : (
-        <>Start with remote control, free on {FREE_WORKERS} machine. Handler is included with Pro. <a href={links.pricing} class="text-signal2 hover:text-signal">See plans and trial details</a>.</>
-      )}
-    </p>
-    <div class="mb-3.5 flex flex-wrap items-center justify-center gap-3">
-      {PLATFORMS.map((p) => (
-        <Button href={downloadUrlFor(p.id)} variant="primary" class={`dl-os dl-${p.os}`}>
-          <Icon name={p.icon} width="16" height="16" />Download for {p.name}
-        </Button>
-      ))}
-    </div>
-    <p class="mb-2 text-meta text-muted2">{BETA_FREE ? "No card required. Your agent provider's usage charges or limits still apply." : "Remote control is included on the free plan."}</p>
-    {/* The escape hatch for the OS match: this band is where a reader on the
-        wrong machine — or downloading for one they are not sitting at — has to
-        be able to name their own build. Each goes through /download like every
-        other download on the site, so a build the reader's machine cannot run is
-        offered there rather than fired; the raw artifacts stay one layer down,
-        in the guide. */}
-    {/* Its own line rather than trailing the build list: the same middot cannot
-        separate three peers AND then a different sentence — run together, "Linux ·
-        First time?" reads as a fourth build for one beat, and the whole thing
-        clumps into three wrapped lines on a phone. */}
-    <p class="mb-1.5 text-meta text-muted2">
-      All builds: {PLATFORMS.map((p, i) => (
-        <>{i > 0 && <span class="text-faint"> · </span>}<a href={downloadUrlFor(p.id)} class="text-signal2 hover:text-signal">{p.name}</a></>
-      ))}
-    </p>
-    <p class="mb-8 text-meta text-muted2">
-      First time? Follow the <a href={links.getStarted} class="text-signal2 hover:text-signal">setup guide</a> to start a session.
-    </p>
 
-    {/* A sentence, not two dead store chips. Invites are open today — a page that
-        closes on "App Store — soon" tells a reader the phone half is unavailable,
-        which is both wrong and the half the product is for. */}
-    <p class="text-meta text-muted2">
-      Phone access is by invite during beta. <a href={links.mobileInvite} class="text-signal2 hover:text-signal">Request iOS or Android access</a>.
-    </p>
+    <div class="mt-7 grid gap-x-16 gap-y-6 md:grid-cols-[minmax(0,1fr)_auto] md:items-start">
+      <p class="max-w-[34rem] text-lede">
+        {BETA_FREE ? (
+          <>Free during beta, with Handler included. Use your existing repo and agent account.</>
+        ) : (
+          <>Start with remote control, free on {FREE_WORKERS} machine. Handler is included with Pro. <a href={links.pricing} class="underline underline-offset-4">See plans and trial details</a>.</>
+        )}
+      </p>
+
+      <div class="md:pt-1">
+        <div class="flex flex-wrap items-center gap-3">
+          {PLATFORMS.map((p) => (
+            <Button href={downloadUrlFor(p.id)} variant="inverse" class={`dl-os dl-${p.os}`}>
+              <Icon name={p.icon} width="16" height="16" />Download for {p.name}
+            </Button>
+          ))}
+        </div>
+        <p class="mt-3 max-w-[22rem] text-meta">{BETA_FREE ? "No card required. Your agent provider's usage charges or limits still apply." : "Remote control is included on the free plan."}</p>
+      </div>
+    </div>
+
+    {/* The small print as a ruled row across the shell, the device the setup
+        steps above use, so the band ends on structure rather than on three
+        loose lines parked in a corner. Rules are page ink at low alpha: on
+        the signal field a solid hairline reads as a box edge. */}
+    <div class="mt-10 grid border-t border-page/25 md:grid-cols-3 md:gap-x-10">
+      {/* The escape hatch for the OS match: this band is where a reader on
+          the wrong machine — or downloading for one they are not sitting at —
+          has to be able to name their own build. Each goes through /download
+          like every other download on the site, so a build the reader's
+          machine cannot run is offered there rather than fired. */}
+      <div class="border-t border-page/25 py-4 first:border-t-0 md:border-t-0 md:pb-0">
+        <p class="text-note font-medium">All builds</p>
+        <p class="mt-1 text-meta">
+          {PLATFORMS.map((p, i) => (
+            <>{i > 0 && ", "}<a href={downloadUrlFor(p.id)} class="underline underline-offset-4 hover:text-well">{p.name}</a></>
+          ))}
+        </p>
+      </div>
+      <div class="border-t border-page/25 py-4 first:border-t-0 md:border-t-0 md:pb-0">
+        <p class="text-note font-medium">First time here?</p>
+        <p class="mt-1 text-meta">
+          Follow the <a href={links.getStarted} class="underline underline-offset-4 hover:text-well">setup guide</a> to start a session.
+        </p>
+      </div>
+      {/* A sentence, not two dead store chips. Invites are open today — a
+          page that closes on "App Store — soon" tells a reader the phone half
+          is unavailable, which is both wrong and the half the product is for. */}
+      <div class="border-t border-page/25 py-4 first:border-t-0 md:border-t-0 md:pb-0">
+        <p class="text-note font-medium">On your phone</p>
+        <p class="mt-1 text-meta">
+          Access is by invite during beta. <a href={links.mobileInvite} class="underline underline-offset-4 hover:text-well">Request iOS or Android access</a>.
+        </p>
+      </div>
     </div>
   </div>
 </section>

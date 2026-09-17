@@ -1,38 +1,28 @@
 ---
-import { Icon } from "astro-icon/components";
-import Eyebrow from "../ui/Eyebrow.astro";
 import UseCase from "../ui/UseCase.astro";
 
 const steps = [
-  { n: 1, icon: "tabler:download", title: "Install on your machine", body: "Download the desktop app for Windows, macOS or Linux. Open a project on that machine.", accent: false },
-  { n: 2, icon: "tabler:terminal-2", title: "Start a session", body: "Run your installed coding agent in antgrid's terminal, using your existing agent account and prompts.", accent: false },
-  { n: 3, icon: "tabler:list-check", title: "Hand over when you're ready", body: "Tell Handler what's left, how to proceed and when to ask you. Arm it, then review its next decision.", accent: true },
+  { title: "Install on your machine", body: "Download the desktop app for Windows, macOS or Linux. Open a project on that machine." },
+  { title: "Start a session", body: "Run your installed coding agent in antgrid's terminal, using your existing agent account and prompts." },
+  { title: "Hand over when you're ready", body: "Tell Handler what's left, how to proceed and when to ask you. Arm it, then review its next decision." },
 ];
 ---
-{/* The page's quiet section, on purpose: it sits between two readout-heavy
-    bands and the closing CTA, so the steps are ruled rather than boxed. */}
-<section class="reveal mx-auto max-w-shell px-6 py-16 md:py-20">
-  <Eyebrow class="mb-5">Setup</Eyebrow>
-  <h2 class="mb-10 font-display text-title font-semibold text-ink">Start with one session.</h2>
+<section class="mx-auto max-w-shell px-6 py-16 md:py-24">
+  <h2 class="mb-10 font-display text-title font-bold text-ink">Start with one session.</h2>
 
   {/* Numbered because setup genuinely is ordered — you can't run an agent
-      through antgrid before installing it. */}
-  <div class="grid gap-y-9 border-t border-edge md:grid-cols-3 md:gap-x-0">
+      through antgrid before installing it. The ordinals are set in the display
+      face at ordinal size: the same signage as the headlines, used as a
+      graphic, which is what lets the columns stand without boxes. */}
+  <ol class="grid gap-y-8 md:grid-cols-3 md:gap-x-10">
     {steps.map((s, i) => (
-      <div class={`pt-6 md:px-8 ${i === 0 ? "md:pl-0" : "md:border-l md:border-edge-inner"} ${i === steps.length - 1 ? "md:pr-0" : ""}`}>
-        {/* Ordinal and icon, and no rule across the row. The grid's own top
-            border and dividers already rule this block; a third hairline per
-            column filled the row without saying anything, and three of them
-            plus the grid read as ruling for its own sake. */}
-        <div class="mb-4 flex items-center gap-2.5">
-          <span class="font-mono text-marker text-muted2">0{s.n}</span>
-          <Icon name={s.icon} class={s.accent ? "text-signal" : "text-muted2"} width="16" height="16" />
-        </div>
-        <div class="mb-2 text-note font-medium text-ink">{s.title}</div>
-        <div class="text-note leading-relaxed text-muted">{s.body}</div>
-      </div>
+      <li class="border-t border-edge-emph pt-5">
+        <span class="mb-5 block font-display text-ordinal font-bold text-muted2" aria-hidden="true">{i + 1}</span>
+        <h3 class="mb-2 text-note font-medium text-ink">{s.title}</h3>
+        <p class="text-note leading-relaxed text-muted">{s.body}</p>
+      </li>
     ))}
-  </div>
+  </ol>
 
-  <UseCase class="mt-7 max-w-2xl">For your first run, research and plan a new feature with your agent. Then ask Handler to guide it through implementation, code review, security review and smoke tests, compacting context between steps.</UseCase>
+  <UseCase class="mt-10 max-w-2xl">For your first run, research and plan a new feature with your agent. Then ask Handler to guide it through implementation, code review, security review and smoke tests, compacting context between steps.</UseCase>
 </section>
