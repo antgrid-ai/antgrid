@@ -48,6 +48,16 @@ export const TerminalHistoryBoundarySchema = z.object({
   firstRowId: counter,
   nextRowId: counter,
   status: z.enum(["recording", "disabled"]),
+  /** Rows missing from the MIDDLE of this epoch rather than from its edges:
+   *  output the agent dropped before its parser saw it. An archive that stopped
+   *  accepting rows is `status` above, not this — that loss is at an edge, and
+   *  a reader can see for itself where the rows stop. Durable state for the
+   *  epoch, not an event, which is why it rides every boundary instead of
+   *  being announced once: row ids stay contiguous across the hole, so nothing
+   *  a reader can measure reveals it, and a one-shot notice is missed by every
+   *  viewer that attaches or reconnects after the loss. Both shapes that carry
+   *  a boundary — the live frame and a history page — restate it. */
+  gapped: z.boolean(),
 });
 export const TerminalHistorySpanSchema = z.object({
   text: z.string(),

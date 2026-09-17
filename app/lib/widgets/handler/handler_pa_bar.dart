@@ -327,18 +327,22 @@ class _HandlerPaBarState extends ConsumerState<HandlerPaBar> {
     // as itself for the same reason — a newer machine's lens is a real pick,
     // and folding it into the default would report one the user never made.
     //
-    // "Default" is the bar's word for the unnamed lens: the picker's "Intent
-    // and completion" does not fit a row already short of width (see the
-    // subtitle note below), and a truncation like "Intent" would read as a
-    // fifth role. It is copy, never a value on the wire.
+    // Every chip label is ≤16 chars precisely so this row can reuse the same
+    // vocabulary the sheet chips use rather than fork a second short set (see
+    // the redesign spec §11) — no separate bar-only word for the unnamed
+    // default.
+    //
+    // `Your own` has no [roleId] of its own: a preset always clears the brief
+    // to `""` on pick (§6), so a non-null [HandlerSessionState.brief] with no
+    // [roleId] can only mean the user's own text is what is running.
     final role = session.role;
     final lensLabel = state?.lenses == null
         ? '—'
-        : session.roleId == null
-        ? 'Default'
-        : role == null
-        ? session.roleId!
-        : handlerLensLabel(role);
+        : session.roleId != null
+        ? (role == null ? session.roleId! : handlerLensLabel(role))
+        : session.brief != null
+        ? handlerLensOwnLabel
+        : handlerLensDefaultLabel;
     // Tinted where nothing is judging: the lens is stored and inert, and a bar
     // naming it in ordinary chrome while every pause escalates says the
     // opposite of what is happening.

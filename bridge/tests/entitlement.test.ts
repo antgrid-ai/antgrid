@@ -152,7 +152,7 @@ test("no module outside entitlement.ts compares against a tier label", () => {
 
 // A named landmine in the plan: web mints the label, the relay validates it
 // against a closed union, and the bridge now branches on it — three workspaces,
-// no shared type (the Apache/ELv2 boundary forbids hoisting one into a package).
+// no shared type (the MPL/ELv2 service boundary forbids hoisting one into a package).
 test("KNOWN_TIERS stays in lockstep with the relay's DEVICE_TIERS", () => {
   const verify = join(import.meta.dir, "..", "..", "relay", "src", "license", "verify.ts");
   expect(existsSync(verify)).toBe(true);

@@ -4,10 +4,15 @@ import { TerminalFrameSource, SYNC_OUTPUT_TIMEOUT_MS } from "../src/terminal-fra
 import { TERMINAL_FRAME_MAX_ANSI_BYTES, encodedJsonBytes } from "../src/terminal-frames/protocol";
 import type { TerminalRunHistory } from "../src/terminal-frames/history";
 
-/** The backlog ceiling `feed()` refuses at. Private to source.ts on purpose —
- *  nothing outside it may tune the latch — so it is pinned as a literal here and
- *  a change on either side has to be a deliberate edit of both. */
-const MAX_PENDING_CHARS = 1_000_000;
+/** The backlog ceiling `feed()` drops at. Private to source.ts on purpose —
+ *  nothing outside it may tune it — so it is pinned as a literal here and a
+ *  change on either side has to be a deliberate edit of both. */
+const MAX_PENDING_CHARS = 16_000_000;
+/** The size at which batched chunks are handed to one `term.write()`. Private
+ *  to source.ts for the same reason, and pinned here for the same reason: a
+ *  `revision` bound derived from it is the only assertion that can tell real
+ *  coalescing from a regression that merely pairs chunks up. */
+const MAX_WRITE_CHARS = 65_536;
 
 const sources: TerminalFrameSource[] = [];
 test("bells are parser events and never replayed by independent captures", async () => {
@@ -75,7 +80,11 @@ function failingHistory(fails: { append?: boolean; flush?: boolean }): TerminalR
     append(): void { if (fails.append) throw new Error("history append: disk gone"); },
     flush(): void { if (fails.flush) throw new Error("history flush: disk gone"); },
     clear(): void {},
-    boundary: () => ({ epoch: 0, firstRowId: 0, nextRowId: 0, status: "recording" as const }),
+    // Present because `TerminalFrameSource.archive` calls it from INSIDE its own
+    // catch: a handle missing it turns a recorded gap into a TypeError escaping
+    // the xterm parse loop, which freezes the parser for the rest of the run.
+    noteGap(): void {},
+    boundary: () => ({ epoch: 0, firstRowId: 0, nextRowId: 0, status: "recording" as const, gapped: false }),
   } as unknown as TerminalRunHistory;
 }
 /** Whether the parser drained at all. A callback that threw out of xterm's write
@@ -90,17 +99,40 @@ function settles(screen: TerminalFrameSource): Promise<boolean> {
 afterEach(() => { for (const screen of sources.splice(0)) screen.dispose(); });
 
 describe("terminal frame source", () => {
-  test("feed never throws, and the backlog it refuses is raised at capture", () => {
+  test("feed never throws, and a backlog is dropped rather than latched", async () => {
     const host = source();
     expect(() => host.feed("x".repeat(MAX_PENDING_CHARS + 1))).not.toThrow();
-    // Latched: every later chunk is dropped in silence rather than retried, and
-    // every later capture reports the same failure to whoever owns the viewer.
-    expect(() => host.feed("more")).not.toThrow();
-    expect(() => host.feed("x".repeat(MAX_PENDING_CHARS + 1))).not.toThrow();
-    expect(() => host.capture(0)).toThrow("backlog");
-    expect(() => host.capture(50)).toThrow("backlog");
-    expect(host.hasPendingTail).toBe(false);
-    expect(host.pendingTail()).toBe("");
+    // A burst the parser has not reached is not damage, so the run's display
+    // survives it: the refusal costs the dropped chunk and nothing else.
+    expect(host.failure).toBeUndefined();
+    expect(() => host.capture(0)).not.toThrow();
+    host.feed("after the drop");
+    await host.settle();
+    expect(host.capture(50)?.ansi).toContain("after the drop");
+    // Rows the dropped chunk would have scrolled into the archive do not exist,
+    // and the ones on either side of it do not join up.
+    expect(host.historyStatus.degraded).toBe(true);
+  });
+
+  test("a burst fed with no yield between chunks is coalesced, not dropped", async () => {
+    const host = source();
+    // The production shape. bun-pty's read loop awaits only on an EMPTY read, so
+    // it hands over a whole burst with no turn of the event loop in it and every
+    // chunk is still outstanding when the last arrives. Settling between chunks
+    // — what every other test here does — is the one shape that cannot
+    // reproduce it.
+    const chunks = 512;
+    const readChars = 4096;
+    for (let i = 0; i < chunks; i++) host.feed("y".repeat(readChars));
+    expect(host.hasPendingTail).toBe(true);
+    await host.settle();
+    expect(host.failure).toBeUndefined();
+    expect(host.historyStatus.degraded).toBe(false);
+    // Coalesced to MAX_WRITE_CHARS rather than left at one xterm write, callback
+    // and onParsed fan-out per 4 KB PTY read. Bounded against that size, not
+    // against the chunk count: anything short of the full bound still passes a
+    // `< chunks` assertion, so that one cannot see coalescing stop working.
+    expect(host.revision).toBeLessThanOrEqual(Math.ceil(chunks * readChars / MAX_WRITE_CHARS));
   });
 
   test("feed and capture stay quiet on a disposed source", () => {
@@ -112,14 +144,20 @@ describe("terminal frame source", () => {
     expect(host.capture(0)).toBeNull();
   });
 
-  test("a latched source raises at capture even after disposal", () => {
+  test("a resize failure latches, and raises at capture even after disposal", async () => {
     const host = source();
-    host.feed("x".repeat(MAX_PENDING_CHARS + 1));
+    // The one path left that can latch: a resize rewrites the grid and the row
+    // archive's geometry together, so a throw inside one leaves neither
+    // describing the guest. Backlog no longer does — see the drop test above.
+    term(host).resize = () => { throw new Error("resize: grid gone"); };
+    host.resize(100, 40);
+    await host.settle();
+    expect(host.failure?.message).toContain("resize");
     host.dispose();
-    expect(() => host.capture(0)).toThrow("backlog");
+    expect(() => host.capture(0)).toThrow("resize");
   });
 
-  test("ordinary large traffic never latches", async () => {
+  test("ordinary large traffic never drops", async () => {
     const host = source();
     // Each chunk is legal on its own and their SUM is far past the ceiling, so
     // this only passes while the pending counter is credited back on parse.
@@ -127,7 +165,7 @@ describe("terminal frame source", () => {
       host.feed("\x1b[H" + "y".repeat(MAX_PENDING_CHARS - 3));
       await host.settle();
     }
-    expect(host.revision).toBe(4);
+    expect(host.historyStatus.degraded).toBe(false);
     expect(() => host.capture(0)).not.toThrow();
     expect(host.capture(0)).not.toBeNull();
   }, 30_000);
@@ -262,17 +300,19 @@ describe("terminal frame source", () => {
     await host.settle();
     expect(host.revision).toBe(1);
 
+    // ONE write, and so one revision: chunks fed without a turn of the event
+    // loop between them are coalesced before they reach xterm.
     host.feed("two");
     host.feed("three");
     await host.settle();
-    expect(host.revision).toBe(3);
-    expect(parsed).toEqual([1, 2, 3]);
+    expect(host.revision).toBe(2);
+    expect(parsed).toEqual([1, 2]);
 
     detach();
     host.feed("four");
     await host.settle();
-    expect(host.revision).toBe(4);
-    expect(parsed).toEqual([1, 2, 3]);
+    expect(host.revision).toBe(3);
+    expect(parsed).toEqual([1, 2]);
   });
 
   test("a viewer that throws is isolated, and the parser survives it", async () => {

@@ -7,7 +7,8 @@
 // would ride on stops existing at the exact moment the report becomes worth
 // reading. The push lands at 3am and is read at 9, by an app that may have
 // restarted in between — and the activity feed cannot carry it, because the
-// feed's jsonl is never read back and `handler:activity` is not replayed.
+// feed's jsonl is read back only as a bounded newest-first page, which a busy
+// project pushes a 3am report out of, and `handler:activity` is not replayed.
 // Project-scoped rather than keyed by slot: a report outlives its session, and
 // the slot it names may be armed on something else by the time it is read.
 

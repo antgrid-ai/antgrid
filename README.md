@@ -6,7 +6,7 @@ Every CLI coding agent you run, on every machine you own, in one place — end-t
 encrypted, on hardware you control.
 
 [![CI](https://github.com/antgrid-ai/antgrid/actions/workflows/ci.yml/badge.svg)](https://github.com/antgrid-ai/antgrid/actions/workflows/ci.yml)
-[![License: Elastic License 2.0](https://img.shields.io/badge/license-Elastic%20License%202.0-4b5563?style=flat)](LICENSE.md)
+[![License: MPL 2.0](https://img.shields.io/badge/license-MPL%202.0-orange?style=flat)](LICENSE.md)
 [![Latest release](https://img.shields.io/github/v/release/antgrid-ai/antgrid?style=flat&logo=github&label=release)](https://github.com/antgrid-ai/antgrid/releases/latest)
 [![Stars](https://img.shields.io/github/stars/antgrid-ai/antgrid?style=flat&logo=github)](https://github.com/antgrid-ai/antgrid/stargazers)
 
@@ -32,8 +32,8 @@ Antgrid does not replace your agent and ships no model of its own.
 > [!NOTE]
 > **Pre-release, working towards v1.**
 >
-> **Licence** — source-available under [Elastic License 2.0](#licence): free to read,
-> fork, modify and self-host, including commercially. Not OSI open source.
+> **Licence** — first-party distributed code is open source under
+> [MPL-2.0](#licence), except the relay and web services, which remain ELv2.
 >
 > **Contributing** — bug reports are welcome; pull requests are not open yet
 > ([CONTRIBUTING.md](CONTRIBUTING.md)).
@@ -158,36 +158,23 @@ analysis commands are in [DEVELOPMENT.md](DEVELOPMENT.md).
 
 ### Contributing
 
-**Bug reports are welcome; pull requests are not open yet.** Antgrid's licence grant is
-non-sublicensable, so accepting outside patches needs a contributor licence agreement
-that does not exist yet — [CONTRIBUTING.md](CONTRIBUTING.md) explains the position and
-what does help in the meantime. Forking, modifying and self-hosting are unaffected and
-need no permission. Security vulnerabilities go through [SECURITY.md](SECURITY.md),
-never the public issue tracker.
+**Bug reports are welcome; pull requests are not open yet.** This is a project
+governance decision while the pre-v1 architecture is moving quickly, not a restriction
+of MPL-2.0. [CONTRIBUTING.md](CONTRIBUTING.md) explains what does help in the meantime.
+Security vulnerabilities go through [SECURITY.md](SECURITY.md), never the public issue
+tracker.
 
 ## Licence
 
-Antgrid is **source-available** under the [Elastic License 2.0](LICENSE.md). That is not
-an OSI-approved open-source licence, and the difference matters. In short:
+Antgrid's first-party source and documentation are licensed under the standard
+[Mozilla Public License 2.0](LICENSE.md), except `relay/` and `web/`, which remain
+under their scoped Elastic License 2.0 files. MPL is file-level copyleft: distributing
+changes to MPL-covered files requires making those files' source available under MPL,
+but it does not license or impose terms on your projects, prompts, separately written
+plugins, or independent larger works.
 
-- You may read, fork, modify, self-host and use the software for free — including inside
-  a company, for commercial work.
-- You may **not** provide it to third parties as a hosted or managed service that gives
-  them a substantial set of its features or functionality.
-- You may **not** move, change, disable or circumvent the licence-key functionality, or
-  remove the notices attached to it.
-
-Two packages are deliberate exceptions, licensed under **Apache-2.0**:
-[`packages/antgrid-wire`](packages/antgrid-wire) (the wire protocol) and
-[`packages/antgrid_relay_client`](packages/antgrid_relay_client) (the client-side
-end-to-end encryption). They are permissive so anyone can build an Antgrid client, and
-so the cryptography can be audited and reused without asking. Antgrid's own code
-elsewhere — the bridge included — is ELv2; vendored third-party code keeps its own
-licence. [LICENSING.md](LICENSING.md) maps every path to the licence that covers it.
-
-[LICENSE.md](LICENSE.md) is the authority; the bullets above are a summary, not legal
-advice. The Antgrid name and logo are not covered by that grant — see
-[TRADEMARK.md](TRADEMARK.md) if you intend to distribute a fork. Licences for the
-third-party code and assets Antgrid bundles are recorded in
-[THIRD-PARTY.md](THIRD-PARTY.md). Product, pricing and account management live at
-[antgrid.ai](https://antgrid.ai).
+[LICENSING.md](LICENSING.md) is the path-by-path map. Product-identifying artwork and
+application identifiers are reserved under [BRAND-ASSETS-LICENSE.md](BRAND-ASSETS-LICENSE.md)
+and [TRADEMARK.md](TRADEMARK.md); third-party code and assets retain the licences in
+[THIRD-PARTY.md](THIRD-PARTY.md). Every official build links to its exact source commit
+and includes the notices described in [SOURCE_OFFER.md](SOURCE_OFFER.md).

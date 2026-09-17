@@ -164,15 +164,15 @@ void main() {
     // user has to be taught to read.
     await _pump(tester, sessions: {'t1': _armed(roleId: 'qa')});
     final p = tester.element(find.byType(HandlerPaBar)).antgrid;
-    expect(_chip(tester, 'QA').color, p.textMuted);
+    expect(_chip(tester, 'PROOF IT WORKS').color, p.textMuted);
   });
 
-  testWidgets('the default is named as the default', (tester) async {
+  testWidgets('the default is named as nothing extra', (tester) async {
     // The unnamed lens is still a live setting, and the chip that opens the
     // sheet has to be on screen before the user has ever picked anything.
     await _pump(tester, sessions: {'t1': _armed()});
-    expect(find.text('DEFAULT'), findsOneWidget);
-    expect(find.text('QA'), findsNothing);
+    expect(find.text('NOTHING EXTRA'), findsOneWidget);
+    expect(find.text('PROOF IT WORKS'), findsNothing);
   });
 
   testWidgets('a lens this build cannot name shows as itself', (tester) async {
@@ -180,7 +180,18 @@ void main() {
     // Folding it into the default would report a pick the user never made.
     await _pump(tester, sessions: {'t1': _armed(roleId: 'ship-it')});
     expect(find.text('SHIP-IT'), findsOneWidget);
-    expect(find.text('DEFAULT'), findsNothing);
+    expect(find.text('NOTHING EXTRA'), findsNothing);
+  });
+
+  testWidgets('a brief with no role is shown as your own', (tester) async {
+    // Every preset clears the brief on pick (redesign spec §6), so a non-empty
+    // brief with no role id can only be the user's own lens.
+    await _pump(
+      tester,
+      sessions: {'t1': _armed(brief: 'watch the migrations')},
+    );
+    expect(find.text('YOUR OWN'), findsOneWidget);
+    expect(find.text('NOTHING EXTRA'), findsNothing);
   });
 
   testWidgets('a machine that never advertised lenses is a dash', (
@@ -190,7 +201,7 @@ void main() {
     // never named the lenses it reads is not a machine running the default,
     // and saying so here would advertise a control over nothing.
     await _pump(tester, sessions: {'t1': _armed()}, lenses: null);
-    expect(find.text('DEFAULT'), findsNothing);
+    expect(find.text('NOTHING EXTRA'), findsNothing);
     final p = tester.element(find.byType(HandlerPaBar)).antgrid;
     expect(_chip(tester, '—').color, p.textMuted);
   });
@@ -210,7 +221,7 @@ void main() {
       },
     );
     final p = tester.element(find.byType(HandlerPaBar)).antgrid;
-    expect(_chip(tester, 'CRITIC').color, p.warning);
+    expect(_chip(tester, 'WHAT COULD BREAK').color, p.warning);
   });
 
   testWidgets('a brief shows a marker beside the lens', (tester) async {
@@ -242,7 +253,7 @@ void main() {
       opener: (terminalId) => opened = terminalId,
     );
     final door = find.ancestor(
-      of: find.text('QA'),
+      of: find.text('PROOF IT WORKS'),
       matching: find.byType(GestureDetector),
     );
     expect(find.descendant(of: door, matching: _briefMarker), findsOneWidget);
@@ -261,7 +272,7 @@ void main() {
       sessions: {'t1': _armed(roleId: 'qa')},
       opener: (terminalId) => opened = terminalId,
     );
-    await tester.tap(find.text('QA'));
+    await tester.tap(find.text('PROOF IT WORKS'));
     await tester.pump();
     expect(opened, isNull);
   });

@@ -360,6 +360,12 @@ export class ProjectCore {
     return this.core?.deleteSession(id, options) ?? false;
   }
 
+  /** Forward a session start to the live AgentCore. A no-op if not started —
+   *  the host only calls this for a project it already found warm. */
+  startSession(id: string): void {
+    this.core?.startSession(id);
+  }
+
   /** Forward the live session list (with true per-session `running`) to the
    *  control-plane `sessions.list` peek. Returns null if not started, so the
    *  caller can fall back to the on-disk persisted list. */
@@ -425,6 +431,10 @@ export class ProjectCore {
       // refuses AGENT_NOT_READY ahead of every other gate on a real bridge
       // while every in-process test that injects a directory stays green.
       ...(this.deps.sessionDirectory ? { sessionDirectory: this.deps.sessionDirectory } : {}),
+      // Host-injected for the same reason and forwarded the same way: a bridge
+      // with no host (evals, most of this file's own test callers) offers no
+      // wake at all, and the §7.3 refusal falls back to its unconditional shape.
+      ...(this.deps.startSession ? { startSession: this.deps.startSession } : {}),
       queueBusLine: (line: Omit<QueuedLine, "queuedAt">) => this.deliveries?.queue(line),
       forgetBusLines: (sessionId: string) => this.deliveries?.forget(sessionId),
       relayUrl: this.deps.relayUrl,
@@ -524,11 +534,17 @@ export class ProjectCore {
       attach: (remote) => this.attachLocalStreamForWizard(core, bus, remote),
     });
     this.promotion = promotion;
-    bus.setInboundHandler((msg, channel, source) => {
+    bus.setInboundHandler((msg, channel, source, peerId) => {
       if (promotion.handleInbound(msg)) return;
-      // Thread `source` through so the core's gate still distinguishes the
-      // desktop's loopback frames from relay frames after promotion.
-      coreInbound?.(msg, channel, source);
+      // Thread `source` AND `peerId` through so the core's gates still see what
+      // they see on a natively-remote core: `source` distinguishes the desktop's
+      // loopback frames from relay frames after promotion, and `peerId` is what
+      // every PER-DEVICE answer keys off (checkout routing, client generations,
+      // focus/read state). Without it every promoted phone collapses onto the
+      // anonymous "relay" key and `checkoutRoutingRefusal` reads "frame carried
+      // no peer id" for all of them — a permanent refusal on any project holding
+      // an isolated session, which no reconnect can clear.
+      coreInbound?.(msg, channel, source, peerId);
     });
   }
 
@@ -805,7 +821,6 @@ export class ProjectCore {
       try { this.bus?.publish(createMessage("agent:disconnecting", { reason }), "control"); } catch {}
       await new Promise((resolve) => setTimeout(resolve, 200));
     }
-    try { this.core?.setPeerSessionProvider(null); } catch {}
     // Remove the primary stream's push dispatcher (additive bus subscriber) before
     // detaching — deliver() would otherwise hand a frame to a torn-down stream.
     try { this.relayPushUnsub?.(); } catch {}
@@ -813,5 +828,11 @@ export class ProjectCore {
     try { await this.core?.shutdown(); } catch {}
     try { await this.listener?.stop(); } catch {}
     try { this.streamHandle?.detach(); } catch {}
+    // AFTER the detach, the order promote().stop() keeps: the core latches
+    // itself relay-attached for life, so a frame the still-attached stream
+    // admits while the lookup is already gone is refused
+    // CHECKOUT_ROUTING_UNAVAILABLE at error level — a routine close reading as a
+    // fault, once per frame the phone sends during the graceful PTY drain.
+    try { this.core?.setPeerSessionProvider(null); } catch {}
   }
 }

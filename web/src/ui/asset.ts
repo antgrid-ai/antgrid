@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 import { readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 

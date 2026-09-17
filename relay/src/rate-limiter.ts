@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 export function pairKey(a: string, b: string): string {
   return a < b ? `${a}:${b}` : `${b}:${a}`;
 }

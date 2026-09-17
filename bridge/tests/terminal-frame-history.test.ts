@@ -664,3 +664,64 @@ describe("D1: a caller's onFailure cannot escape", () => {
     }
   });
 });
+
+describe("a gap outlives the handle that recorded it", () => {
+  test("noteGap survives releaseRun, a reopen and a fresh connection; clear() drops it", () => {
+    // The reader this flag exists for opens a stopped terminal's scrollback
+    // long after the loss, and is served by a handle `openRun` rebuilt after
+    // `releaseRun` retired the one that actually saw the drop.
+    const path = join(root, "gapped.sqlite");
+    const store = new TerminalHistoryStore(path);
+    const runId = crypto.randomUUID();
+    try {
+      const handle = store.openRun(runId);
+      handle.append(row(80, "before the drop"));
+      expect(handle.boundary().gapped).toBe(false);
+      handle.noteGap();
+      expect(handle.boundary().gapped).toBe(true);
+      store.releaseRun(runId);
+      expect(store.openRun(runId).boundary().gapped).toBe(true);
+    } finally {
+      store.close();
+    }
+
+    // A second connection holding nothing from the first: the only thing that
+    // can carry the gap across it is the run's own row.
+    const reopened = new TerminalHistoryStore(path);
+    try {
+      const handle = reopened.openRun(runId);
+      expect(handle.boundary().gapped).toBe(true);
+      // The new epoch archives from nothing, so the hole goes with the epoch
+      // that owned it — durably, not merely for the handle that cleared it.
+      handle.clear();
+      expect(handle.boundary().gapped).toBe(false);
+      reopened.releaseRun(runId);
+      expect(reopened.openRun(runId).boundary().gapped).toBe(false);
+    } finally {
+      reopened.close();
+    }
+  });
+
+  test("a run archived before the column existed reads back as nothing known lost", () => {
+    const path = join(root, "legacy.sqlite");
+    const legacy = new Database(path, { create: true, strict: true });
+    legacy.exec(`
+      CREATE TABLE terminal_runs (
+        runId TEXT PRIMARY KEY, epoch INTEGER NOT NULL DEFAULT 0,
+        nextRowId INTEGER NOT NULL DEFAULT 0, bytes INTEGER NOT NULL DEFAULT 0
+      );
+    `);
+    const runId = crypto.randomUUID();
+    legacy.query("INSERT INTO terminal_runs(runId) VALUES (?)").run(runId);
+    legacy.close();
+
+    // Opening must migrate rather than fail, and the runs it inherits must
+    // claim no gap: nothing was watching for one when they were written.
+    const store = new TerminalHistoryStore(path);
+    try {
+      expect(store.openRun(runId).boundary().gapped).toBe(false);
+    } finally {
+      store.close();
+    }
+  });
+});

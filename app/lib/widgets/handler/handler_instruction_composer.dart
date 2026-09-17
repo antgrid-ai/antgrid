@@ -62,6 +62,7 @@ class HandlerInstructionComposer extends ConsumerStatefulWidget {
     required this.onJudgeChanged,
     required this.judgeScopeNote,
     this.send,
+    this.autofocus = false,
   });
 
   final String terminalId;
@@ -82,6 +83,11 @@ class HandlerInstructionComposer extends ConsumerStatefulWidget {
   /// Null on a host that collects rather than sends — see
   /// [HandlerComposerSend].
   final HandlerComposerSend? send;
+
+  /// Whether the cursor starts here. For a host whose whole purpose is the
+  /// sentence typed into this box; on a phone it also raises the keyboard, so
+  /// a host that has copy to be read first leaves it false.
+  final bool autofocus;
 
   @override
   ConsumerState<HandlerInstructionComposer> createState() =>
@@ -106,6 +112,10 @@ class _HandlerInstructionComposerState
     _focus.addListener(_onFocusChanged);
     widget.controller.addListener(_onText);
     _canSend = _hasText;
+    // Requesting before any [Focus] has adopted this node is the supported
+    // order: the node holds the request until it is reparented, which is what
+    // this widget's own build then does.
+    if (widget.autofocus) _focus.requestFocus();
   }
 
   @override

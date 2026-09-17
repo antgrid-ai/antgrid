@@ -1,5 +1,6 @@
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { TerminalScreen } from "../terminal-screen";
+import { logger } from "../logger";
 import { TerminalModeTracker } from "../terminal-modes";
 import { XtermFrameAdapter, type TerminalArchiveSink } from "./xterm-adapter";
 import {
@@ -17,8 +18,36 @@ export type { TerminalScreenFrame };
  *  it; every new reader wants TerminalScreenFrame. */
 export type TerminalFrame = TerminalScreenFrame;
 
+const log = logger.child({ component: "terminal-frame-source" });
+
 export const SYNC_OUTPUT_TIMEOUT_MS = 1000;
-const MAX_PENDING_CHARS = 1_000_000;
+/**
+ * Characters accepted but not yet parsed, past which a chunk is DROPPED.
+ *
+ * Sized against memory rather than against parser throughput, because a backlog
+ * here is not a throughput deficit. bun-pty's read loop awaits only on an EMPTY
+ * read (`_startReadLoop` in its `terminal.ts`) and its Rust half buffers into an
+ * unbounded channel, while xterm drains its write buffer from a `setTimeout`. So
+ * one guest burst arrives as a single uninterrupted synchronous drain with no
+ * turn of the event loop in it, and this counter ends up equal to the whole
+ * burst, whatever the burst's rate was.
+ *
+ * Kept well under xterm's own 50M-character watermark, whose `write()` throw
+ * discards the chunk anyway: reaching that one first would put the same drop
+ * beyond this class's reach and out of the history status.
+ */
+const MAX_PENDING_CHARS = 16_000_000;
+/**
+ * Largest string handed to one `term.write()`.
+ *
+ * xterm checks its 12 ms slice BETWEEN write-buffer entries and never inside
+ * one, so a coalesced burst written as a single entry is parsed with no yield at
+ * all and every timer, heartbeat and socket read on this process waits out the
+ * whole parse. Splitting at this bound keeps that granularity while still
+ * cutting the entry count — and with it the per-write callback, revision bump
+ * and `onParsed` fan-out — down from one per 4 KB PTY read.
+ */
+const MAX_WRITE_CHARS = 65_536;
 const OSC_CLOSE = "\x1b]8;;\x1b\\";
 
 /** What the row archive could not record faithfully, for the epoch the source
@@ -48,6 +77,15 @@ export class TerminalFrameSource extends TerminalScreen {
   private readonly modes = new TerminalModeTracker();
   private readonly oscTerminators = new OscQueryTerminators();
   private pendingChars = 0;
+  /** Accepted from the guest, not yet handed to xterm — see `MAX_WRITE_CHARS`.
+   *  Distinct from the base class's `unparsed`, which is what xterm HOLDS; both
+   *  are unparsed, and the two tail accessors below report them in that order. */
+  private readonly batch: string[] = [];
+  private flushQueued = false;
+  /** Set while chunks are being dropped for backlog, so the episode logs once
+   *  at each end rather than once per refused chunk. */
+  private dropping = false;
+  private droppedChars = 0;
   private failed: Error | undefined;
   private _revision = 0;
   private _oversize = false;
@@ -134,27 +172,104 @@ export class TerminalFrameSource extends TerminalScreen {
    * process answers one by shutting down every project, PTY and agent on the
    * machine. A verbose build log must not be able to do that.
    *
-   * A parser this cannot keep fed is a DISPLAY failure, not a process failure.
-   * It latches here and is raised at `capture()`, where a viewer owns it and the
-   * hub can turn it into one attachment's `DISPLAY_FAILED` instead of silently
-   * shipping frames of a screen that no longer matches the guest.
+   * A backlog is DROPPED, never latched. What it describes is a burst the parser
+   * has not reached yet rather than damage — xterm will parse everything already
+   * queued — so the cost of refusing a chunk is a screen that is wrong until the
+   * guest next repaints, which for a TUI is immediate and for a scrolling log is
+   * one screenful. Latching instead spent the whole run's display on it, and a
+   * viewer cannot recover a run: `TerminalManager` has no path that rebuilds a
+   * source under a PTY that never stopped.
    */
   override feed(data: string): void {
     if (this.isDisposed || this.failed) return;
     if (this.pendingChars + data.length > MAX_PENDING_CHARS) {
-      this.fail(new Error("Terminal frame parser backlog exceeded; display unavailable"));
+      if (!this.dropping) {
+        this.dropping = true;
+        // The archive is fed from rows this chunk will now never scroll, so
+        // history stops describing the buffer at exactly this point.
+        this.noteHistoryGap();
+        log.warn("VT backlog %d + %d chars past %d, dropping until it drains",
+          this.pendingChars, data.length, MAX_PENDING_CHARS);
+      }
+      this.droppedChars += data.length;
       return;
     }
-    this.unparsed.push(data);
+    if (this.dropping) {
+      this.dropping = false;
+      log.warn("VT backlog drained, dropped %d chars; screen is stale until the guest repaints",
+        this.droppedChars);
+      this.droppedChars = 0;
+      // A drop that landed inside an OSC/DCS/APC string leaves the parser
+      // swallowing everything after it as that string's payload — a frozen
+      // screen rather than a lossy one. ST closes it, and is ignored in ground
+      // state, so it costs nothing when the drop fell on a clean boundary.
+      this.enqueue("\x1b\\");
+    }
+    this.enqueue(data);
+  }
+
+  /** Holds a chunk for the next flush. The PTY read loop hands over a whole
+   *  burst without yielding, so coalescing here is what turns one 4 KB read per
+   *  `term.write()` into one write per `MAX_WRITE_CHARS`. */
+  private enqueue(data: string): void {
+    this.batch.push(data);
     this.pendingChars += data.length;
+    if (this.flushQueued) return;
+    this.flushQueued = true;
+    // A microtask, not a timer: it runs the moment that read loop finally
+    // awaits, which is the earliest point at which xterm could parse anything.
+    queueMicrotask(() => this.flushBatch());
+  }
+
+  /** Hands everything batched to xterm. Safe to call with nothing queued, which
+   *  is what lets every barrier below call it unconditionally. */
+  private flushBatch(): void {
+    this.flushQueued = false;
+    if (!this.batch.length) return;
+    const queued = this.batch.splice(0);
+    if (this.isDisposed || this.failed) {
+      for (const chunk of queued) this.pendingChars -= chunk.length;
+      return;
+    }
+    // Grouped as it goes, never joined whole and then sliced: at the ceiling one
+    // join holds a SECOND full-size copy of the backlog alive for the length of
+    // this loop, and MAX_PENDING_CHARS is sized on the assumption of one. Only
+    // the chunk that straddles a bound is cut, which in production is none of
+    // them — a PTY read is far smaller than MAX_WRITE_CHARS.
+    let group: string[] = [];
+    let size = 0;
+    for (let i = 0; i < queued.length; i++) {
+      const chunk = queued[i]!;
+      // Dropped from `queued` as it is consumed, or the array pins every
+      // original for the length of the loop while the joins pile up beside
+      // them — the second full-size copy the grouping above exists to avoid.
+      queued[i] = "";
+      let at = 0;
+      while (at < chunk.length) {
+        const take = Math.min(MAX_WRITE_CHARS - size, chunk.length - at);
+        group.push(take === chunk.length ? chunk : chunk.slice(at, at + take));
+        size += take;
+        at += take;
+        if (size === MAX_WRITE_CHARS) {
+          this.write(group.join(""));
+          group = [];
+          size = 0;
+        }
+      }
+    }
+    if (size) this.write(group.join(""));
+  }
+
+  private write(chunk: string): void {
+    this.unparsed.push(chunk);
     try {
-      if (this.detachQueries) this.oscTerminators.feed(data);
-      this.term.write(data, () => {
+      if (this.detachQueries) this.oscTerminators.feed(chunk);
+      this.term.write(chunk, () => {
         if (this.failed) return;
         // FIFO: xterm parses writes in order and fires their callbacks in the
         // same order, so the head is always the chunk this callback is for.
         this.unparsed.shift();
-        this.pendingChars -= data.length;
+        this.pendingChars -= chunk.length;
         this._revision++;
         this.atBoundary = true;
         try {
@@ -164,14 +279,35 @@ export class TerminalFrameSource extends TerminalScreen {
       });
     } catch (error) {
       // `write()` throws before it queues anything, so the chunk this call just
-      // pushed is still the last one.
+      // pushed is still the last one. Its only throw is xterm's own watermark,
+      // which MAX_PENDING_CHARS keeps out of reach — arriving here means that
+      // bound moved, and a discarded chunk is still not worth the run's display.
       this.unparsed.pop();
-      this.pendingChars -= data.length;
-      this.fail(error instanceof Error ? error : new Error(String(error)));
+      this.pendingChars -= chunk.length;
+      this.noteHistoryGap();
+      log.warn("VT write dropped, screen is stale until the guest repaints: %s", error);
     }
   }
 
+  /** The base barrier is an empty write, which xterm would answer ahead of
+   *  anything still sitting in the batch. */
+  override settle(): Promise<void> {
+    this.flushBatch();
+    return super.settle();
+  }
+
+  override get hasPendingTail(): boolean {
+    return this.batch.length > 0 || super.hasPendingTail;
+  }
+
+  override pendingTail(): string {
+    return super.pendingTail() + this.batch.join("");
+  }
+
   override resize(cols: number, rows: number): void {
+    // Ahead of the barrier below, or the resize lands first and the batch is
+    // then parsed against a grid it was never written for.
+    this.flushBatch();
     this.term.write("", () => {
       if (this.isDisposed || this.failed) return;
       try {
@@ -231,7 +367,11 @@ export class TerminalFrameSource extends TerminalScreen {
    *  attachment, and the next screen clears it. Never a latch: a display-sized
    *  problem must not destroy the authoritative VT or the row archive. */
   get oversize(): boolean { return this._oversize; }
-  /** A parser failure is latched for the lifetime of its PTY run. */
+  /** Latched for the lifetime of its PTY run, and raised by `capture()` so the
+   *  hub turns it into one attachment's `DISPLAY_FAILED`. Only a resize can
+   *  reach it: a resize rewrites the grid and the archive's geometry together,
+   *  so a throw inside one leaves neither describing the guest. Backlog does
+   *  NOT — see `feed()`. */
   get failure(): Error | undefined { return this.failed; }
   get historyStatus(): TerminalHistoryStatus {
     return {
@@ -240,13 +380,26 @@ export class TerminalFrameSource extends TerminalScreen {
     };
   }
 
-  /** Records rows lost to something OUTSIDE this source's own archiving — the
-   *  only such case today is `TerminalManager`'s rebuild, which reconstructs a
-   *  replacement from a bounded scrollback tail and so cannot re-derive every
-   *  row the failed source had already passed. The count is unknowable there,
-   *  so this takes none: `degraded` is the signal that matters, and reporting
-   *  a made-up number would be worse than reporting one gap. */
-  noteHistoryGap(): void { this.gaps++; }
+  /** Records rows the archive will never hold, so the rows on either side of
+   *  the loss do not join up. The count is unknowable — a loss is measured in
+   *  characters, never in rows — so this takes none.
+   *
+   *  Only one of the three callers reaches here in practice: a chunk `feed()`
+   *  dropped for backlog, which never reaches the parser and so scrolls nothing
+   *  into the archive. The other two guard bounds that do not move today —
+   *  xterm's discard watermark sits above MAX_PENDING_CHARS, and a real
+   *  `TerminalRunHistory` disables itself rather than throwing out of `append`,
+   *  which the app reads as `status: "disabled"` and not as a gap.
+   *
+   *  Told to the archive handle as well as counted here, and that is the half
+   *  that reaches the app: `boundary()` restates it on every frame and every
+   *  history page, where `historyStatus` below is local to this process. Row
+   *  ids stay contiguous across a hole, so without it nothing a reader can
+   *  measure says the output it is looking at is not continuous. */
+  noteHistoryGap(): void {
+    this.gaps++;
+    this.history?.noteGap();
+  }
 
   onParsed(listener: () => void): () => void {
     this.listeners.add(listener);
@@ -327,7 +480,11 @@ export class TerminalFrameSource extends TerminalScreen {
     return {
       version: TERMINAL_PROTOCOL_VERSION, revision: this._revision, cols: this.term.cols, rows: this.term.rows,
       ansi, syncTimedOut,
-      history: this.history?.boundary() ?? { epoch: 0, firstRowId: 0, nextRowId: 0, status: "disabled" },
+      history: this.history?.boundary()
+        // No archive at all, so there is no epoch for a hole to be in: a run
+        // that records nothing is reported by `status`, and claiming a gap on
+        // top of it would name rows that were never going to exist.
+        ?? { epoch: 0, firstRowId: 0, nextRowId: 0, status: "disabled", gapped: false },
     };
   }
 
@@ -342,17 +499,32 @@ export class TerminalFrameSource extends TerminalScreen {
     try { work(); } catch { /* a viewer's failure is not the terminal's */ }
   }
 
+  /** A flood still dropping when its run ends never reaches `feed()` again, so
+   *  without this the opening line stands alone and the log never says how much
+   *  was lost — the shape that reads as a drop that never stopped. */
+  private closeDropEpisode(): void {
+    if (!this.dropping) return;
+    log.warn("VT backlog still dropping when the run ended, dropped %d chars", this.droppedChars);
+    this.dropping = false;
+    this.droppedChars = 0;
+  }
+
   private fail(error: Error): void {
     if (this.failed) return;
+    this.closeDropEpisode();
     this.failed = error;
     this._revision++;
     this.unparsed.length = 0;
+    this.batch.length = 0;
     this.pendingChars = 0;
     for (const listener of this.listeners) this.guarded(listener);
   }
 
   private archive(row: Omit<TerminalHistoryRow, "rowId">): void {
-    try { this.history?.append(row); } catch { this.gaps++; }
+    // Defence in depth, not the store-failure path: a real handle swallows its
+    // own failures and disables itself, which surfaces as `status`, never as a
+    // gap. This catch is for a `TerminalRunHistory` shim that does not.
+    try { this.history?.append(row); } catch { this.noteHistoryGap(); }
   }
 
 
@@ -404,6 +576,7 @@ export class TerminalFrameSource extends TerminalScreen {
   }
 
   override dispose(): void {
+    this.closeDropEpisode();
     this.detachQueries?.();
     this.detachArchive?.();
     this.listeners.clear();

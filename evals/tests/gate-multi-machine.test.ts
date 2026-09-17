@@ -10,9 +10,10 @@ import { setupTwoBridgeEnv, type BridgeMachine, type TwoBridgeEnv } from "../hel
 import {
   NOTIFY_MARKER,
   SINK_SCRIPT_NAME,
-  apiPort,
   busCall,
   countMarkers,
+  hookDoneMarker,
+  hookTriggerData,
   postJson,
   prepareBusProject,
   sessionVerb,
@@ -220,6 +221,37 @@ async function awaitReceipt(
   }
 }
 
+/**
+ * Simulate one real agent hook firing for [sessionId] on [machine] — a
+ * turn-start (`user-prompt`) or a turn-end (`stop`, which carries
+ * `task_complete`).
+ *
+ * Not a loopback `/turn-start`/`/notify` POST: those need a `runId` matching
+ * the session's own (`SessionManager.acceptsHookRun`), which only that
+ * session's own PTY environment holds. Writing `hookTriggerData` into the
+ * PTY's stdin over the STREAM (not loopback — [machine] may be the far end of
+ * the carrier) makes the sink script spawn `run-hook.ts` as its own child, so
+ * the real hook runner reads the correct `ANTGRID_RUN_ID` off its inherited
+ * environment — see `session-bus.ts`'s doc on `hookTriggerData`.
+ */
+async function fireHookOnMachine(
+  machine: BridgeMachine,
+  sessionId: string,
+  agent: string,
+  event: string,
+  sinkPath: string,
+): Promise<void> {
+  machine.env.app.sendOnStream(
+    machine.streamId,
+    createMessage("terminal:input", { terminalId: sessionId, data: hookTriggerData(agent, event) }),
+  );
+  await untilAsync(
+    async () => (sinkText(sinkPath).includes(hookDoneMarker(event)) ? true : undefined),
+    CROSS_TIMEOUT_MS,
+    `the simulated "${event}" hook to run for session ${sessionId} on machine ${machine.name}`,
+  );
+}
+
 async function agentReach(machine: BridgeMachine, enabled: boolean): Promise<void> {
   const res = await postJson(
     `http://127.0.0.1:${machine.host.controlPort}/control`,
@@ -288,11 +320,10 @@ test("a message crosses to the other machine, comes back receipted, and refuses 
   // notify does, and nothing downstream would report the difference.
   expect(countMarkers(sinkText(sinks.b), NOTIFY_MARKER)).toBe(0);
 
-  const portB = await apiPort(b.env.abDir);
   // A turn is opened on the receiver so the notify below has a boundary to wait
   // at: an idle session reaches one immediately, which would prove the frame
   // crossed but nothing about when it is allowed to speak.
-  await postJson(`http://127.0.0.1:${portB}/turn-start`, { terminalId: sessionB });
+  await fireHookOnMachine(b, sessionB, "claude", "user-prompt", sinks.b);
 
   const NOTIFY_SUMMARY = "Main is red on the same two tests; stop rebasing onto it.";
   const notified = await busCall(a.env.abDir, "notify", {
@@ -320,11 +351,7 @@ test("a message crosses to the other machine, comes back receipted, and refuses 
   expect(queued[0]!.kind).toBe("notify");
   expect(countMarkers(sinkText(sinks.b), NOTIFY_MARKER)).toBe(0);
 
-  await postJson(`http://127.0.0.1:${portB}/notify`, {
-    type: "task_complete",
-    terminalId: sessionB,
-    message: `turn closed ${randomUUID()}`,
-  });
+  await fireHookOnMachine(b, sessionB, "claude", "stop", sinks.b);
   await until(
     () => (countMarkers(sinkText(sinks.b), NOTIFY_MARKER) === 1 ? true : undefined),
     CROSS_TIMEOUT_MS,
@@ -374,7 +401,7 @@ test("a message crosses to the other machine, comes back receipted, and refuses 
   expect((await inbox(b, sessionB)).posts).toHaveLength(0);
 }, ROW_TIMEOUT_MS);
 
-test("a switch at either end stops a cross-machine send, and only the sender's own refuses where the agent can read it", async () => {
+test("the RECEIVING end's two switches decide a cross-machine send, and the sender's own has no say (E15)", async () => {
   const sinks = newSinks();
   env = await setupTwoBridgeEnv({
     prepareProject: prepareBusProject,
@@ -388,14 +415,14 @@ test("a switch at either end stops a cross-machine send, and only the sender's o
   await pumpAndExpectRows(carrier);
   const target = addressOf(await peerRow(a, sessionA, b, sessionB));
 
-  const body = (summary: string) => ({ to: target, summary, text: "Two switches, two answers." });
+  const body = (summary: string) => ({ to: target, summary, text: "Two switches, both on the far end." });
 
   /** Everything the sender can observe about a send nothing travelled back
    *  from: the verb's own answer, that the target's mailbox stayed empty, and
    *  that the thread never receipted.
    *
    *  An absent receipt is read against the delivered opener below, which takes
-   *  this same path with both switches on. */
+   *  this same path with the receiver open. */
   async function sendWithReceiverShut(summary: string): Promise<BusCall> {
     const answer = await busCall(a.env.abDir, "post", { terminalId: sessionA, body: body(summary) });
     await sleep(SETTLE_MS);
@@ -419,10 +446,11 @@ test("a switch at either end stops a cross-machine send, and only the sender's o
   expect(openerMail.posts[0].summary).toBe(OPENER);
   expect((await awaitReceipt(a, sessionA, opened.body.threadId, OPENER)).deliveredAt).toBeGreaterThan(0);
 
-  // §6.3's RECEIVING half, against a mirror that is still warm. Deliberately
-  // not pumped: a push in this window empties a's mirror, and the send would
-  // then be refused by machine a's own row lookup without the frame ever
-  // reaching machine b's inbound gate.
+  // The first of the receiving end's two switches (§8.1's subordinate bit),
+  // against a mirror that is still warm. Deliberately not pumped: b refuses
+  // the session-bearing card with reach off, so a push in this window empties
+  // a's rows for b, and the send would then be refused by machine a's own row
+  // lookup without the frame ever reaching machine b's inbound gate.
   //
   // Nothing travels back to say the frame was dropped, so the sender is told it
   // left — which is the whole failure this row exists to pin.
@@ -462,35 +490,39 @@ test("a switch at either end stops a cross-machine send, and only the sender's o
   await pumpAndExpectRows(carrier);
   await peerRow(a, sessionA, b, sessionB);
 
-  // Machine a stops letting anything leave. Deliberately NOT pumped in this
-  // window: a push into a machine with remote access off is refused AND empties
-  // its mirror, which would turn the answer below into UNKNOWN_PEER and hide
-  // the outbound gate this row exists to prove.
+  // Machine a shuts its OWN door — and keeps talking. E15: the switch governs
+  // what may be done TO a, never what a may do. The leg leaves over a's own
+  // loopback carrier, so nothing about it is the relay ingress the switch
+  // refuses, and b's switch is the one with a say in whether it is welcome.
   await setMobileAccess(a.env.abDir, false);
-  const blocked = await busCall(a.env.abDir, "post", { terminalId: sessionA, body: body("Nothing leaves this machine.") });
-  expect(blocked.status).toBe(403);
-  expect(blocked.body.code).toBe("REMOTE_ACCESS_OFF");
+  const DOOR_SHUT = "My own switch is off and this still leaves.";
+  const outbound = await busCall(a.env.abDir, "post", { terminalId: sessionA, body: body(DOOR_SHUT) });
+  expect(outbound.status).toBe(200);
+  expect(outbound.body.ok).toBe(true);
+  expect(outbound.body.sent).toBe(true);
 
-  await sleep(SETTLE_MS);
-  expect((await inbox(b, sessionB)).posts).toHaveLength(0);
+  const landed = await awaitPost(b, sessionB, `the post to reach session ${sessionB} with the SENDER's switch off`);
+  expect(landed.posts).toHaveLength(1);
+  expect(landed.posts[0].summary).toBe(DOOR_SHUT);
 
-  // Turning the switch back on restores nothing by itself: flipping it OFF
-  // empties this machine's mirror on the spot (`mobile-access:set`,
-  // host-server.ts), so the address taken before it is stale until the app
-  // pushes rows again.
+  // And the address it was sent to is still good with no fresh push: the flip
+  // no longer empties this machine's mirror, because a session here may still
+  // open an exchange and needs the row to address one.
+  await peerRow(a, sessionA, b, sessionB);
+
   await setMobileAccess(a.env.abDir, true);
   await pumpAndExpectRows(carrier);
   await peerRow(a, sessionA, b, sessionB);
 
-  const BOTH_ON = "Both switches on, and only then.";
-  const sent = await busCall(a.env.abDir, "post", { terminalId: sessionA, body: body(BOTH_ON) });
+  const RECEIVER_DECIDES = "The receiver's switch is the one that decides.";
+  const sent = await busCall(a.env.abDir, "post", { terminalId: sessionA, body: body(RECEIVER_DECIDES) });
   expect(sent.status).toBe(200);
   expect(sent.body.ok).toBe(true);
   expect(sent.body.sent).toBe(true);
 
-  const delivered = await awaitPost(b, sessionB, `the post to reach session ${sessionB} with both switches back on`);
+  const delivered = await awaitPost(b, sessionB, `the post to reach session ${sessionB} with both machines open`);
   expect(delivered.posts).toHaveLength(1);
-  expect(delivered.posts[0].summary).toBe(BOTH_ON);
+  expect(delivered.posts[0].summary).toBe(RECEIVER_DECIDES);
 
   // The receiver's OTHER switch, and last in this row because turning it off
   // tears down that machine's relay slots for good. Silent in the same way

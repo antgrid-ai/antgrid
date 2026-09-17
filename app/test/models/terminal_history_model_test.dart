@@ -16,11 +16,13 @@ TerminalHistoryBoundary _boundary({
   int firstRowId = 0,
   int nextRowId = 1000,
   String status = 'recording',
+  bool gapped = false,
 }) => TerminalHistoryBoundary(
   epoch: epoch,
   firstRowId: firstRowId,
   nextRowId: nextRowId,
   status: status,
+  gapped: gapped,
 );
 
 TerminalHistoryRow _row(int rowId) => TerminalHistoryRow(
@@ -506,6 +508,52 @@ void main() {
     expect(m.failure, 'timed out');
     expect(m.noteRequestFailed('archiving is off'), isTrue);
     expect(m.failure, 'archiving is off');
+  });
+
+  test('a gap is read off the boundary, notifies, and ends with its epoch', () {
+    final m = TerminalHistoryModel()..applyBoundary(_boundary());
+    expect(m.gapped, isFalse);
+
+    var notified = 0;
+    m.addListener(() => notified++);
+
+    // Nothing else on the boundary moves when output is dropped -- the ids run
+    // straight through the hole -- so this flag is the only thing that changes,
+    // and a reader that is not rebuilt for it never shows the loss.
+    m.applyBoundary(_boundary(gapped: true));
+    expect(m.gapped, isTrue);
+    expect(notified, 1);
+
+    // Restated on every frame, so the loss survives a reconnect or a viewer
+    // that attaches long afterwards, and repeating it is not a new event.
+    m.applyBoundary(_boundary(gapped: true));
+    expect(m.gapped, isTrue);
+    expect(notified, 1);
+
+    // A new epoch is the archive started over: it has no hole of its own.
+    m.applyBoundary(_boundary(epoch: 2, gapped: false));
+    expect(m.gapped, isFalse);
+  });
+
+  test('an agent too old to report a gap is read as nothing known lost', () {
+    final boundary = TerminalHistoryBoundary.fromJson(<String, dynamic>{
+      'epoch': 1,
+      'firstRowId': 0,
+      'nextRowId': 10,
+      'status': 'recording',
+    });
+    expect(boundary, isNotNull);
+    expect(boundary!.gapped, isFalse);
+    expect(
+      TerminalHistoryBoundary.fromJson(<String, dynamic>{
+        'epoch': 1,
+        'firstRowId': 0,
+        'nextRowId': 10,
+        'status': 'recording',
+        'gapped': true,
+      })!.gapped,
+      isTrue,
+    );
   });
 
   test('reset forgets the boundary as well as the rows', () {

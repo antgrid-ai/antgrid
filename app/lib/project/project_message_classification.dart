@@ -309,6 +309,11 @@ const Set<String> _heavyTypes = <String>{
   'file:search-done',
   'handler:escalation',
   'handler:activity',
+  // Beside handler:activity, whose rows it carries. Heavy rather than status
+  // because it is a page of feed rows, not a latest-wins snapshot — and
+  // HandlerService subscribes to both tiers for its whole life, so a page
+  // cannot be dropped for want of a listener.
+  'handler:history:page',
   'handler:snapshot',
   'agent:item-added',
   'agent:item-delta',

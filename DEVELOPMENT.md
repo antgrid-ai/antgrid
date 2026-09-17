@@ -14,8 +14,9 @@ for.
 
 This guide is for building and changing the code, whether you are working in a
 fork or on the project itself. [CONTRIBUTING.md](CONTRIBUTING.md) covers what to
-do with a change once you have one — currently: external pull requests are not
-open yet, and bug reports are the thing that helps.
+do with a change once you have one — briefly: docs and small corrections can go
+straight to a pull request, anything deeper wants an issue first, and `relay/`,
+`web/` and `packages/antgrid-wire` are closed to outside patches.
 
 ---
 
@@ -976,18 +977,17 @@ tracked. The edit is additive; keeping or reverting it are both fine.
 
 ## Licence
 
-Antgrid is source-available under the [Elastic License 2.0](LICENSE.md). It is
-not an OSI-approved open-source licence. You may read, modify, self-host and fork
-it; you may not offer it to third parties as a hosted service or circumvent the
-licence-key functionality.
+First-party source and documentation are MPL-2.0 except `relay/` and `web/`,
+which remain Elastic-2.0. [LICENSING.md](LICENSING.md) maps every path and
+`npm run check:licenses` enforces the SPDX/REUSE declarations. MPL obligations
+attach to covered files, not to user projects or independent larger works.
 
-`packages/antgrid-wire` and `packages/antgrid_relay_client` are Apache-2.0
-instead, so anyone can build an Antgrid client and audit the cryptography. Each
-carries its own `LICENSE` and `NOTICE`, and [LICENSING.md](LICENSING.md) maps
-every path to its licence. Apache code may be used inside an ELv2 component;
-never move code the other way.
+Do not add SPDX headers outside `relay/` and `web/` — MPL requires no per-file
+notice and `REUSE.toml` already declares the rest of the tree, so
+`check:licenses` fails on a stray header as well as on a missing one.
 
-External pull requests are not being accepted yet — ELv2's grant is
-non-sublicensable, so taking patches needs a contributor licence agreement that
-does not exist yet. [CONTRIBUTING.md](CONTRIBUTING.md) explains the position.
-Nothing about forking or self-hosting is affected.
+Outside patches to `relay/`, `web/` and `packages/antgrid-wire` are refused:
+those paths are Elastic-2.0, and a contribution arriving under the repository's
+MPL-2.0 notice could not be reconciled with the file it landed in.
+`.github/workflows/contribution-policy.yml` enforces it and
+[CONTRIBUTING.md](CONTRIBUTING.md) carries the reasoning.

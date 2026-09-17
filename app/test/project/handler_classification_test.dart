@@ -11,6 +11,13 @@ void main() {
     expect(classifyAbMessageByType('handler:activity'), MessageTier.heavy);
   });
 
+  test('handler:history:page routes to the heavy tier', () {
+    // Unclassified, the answer to a history request is dropped before
+    // HandlerService sees it and the feed stays empty — which is the bug the
+    // request exists to fix, reintroduced one layer up.
+    expect(classifyAbMessageByType('handler:history:page'), MessageTier.heavy);
+  });
+
   test('handler:snapshot routes to the heavy tier', () {
     // Unclassified, the undo advert is dropped before HandlerService sees it
     // and the offer only ever appears after a status replay.

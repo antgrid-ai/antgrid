@@ -4,7 +4,8 @@ import 'agent_event.dart' show parseAgentEvent;
 import 'agent_hello.dart';
 import 'file_tree_models.dart';
 import 'git_sync_state.dart';
-import 'handler_state.dart' show HandlerAskOption, HandlerEscalationChoice;
+import 'handler_state.dart'
+    show HandlerActivityRecord, HandlerAskOption, HandlerEscalationChoice;
 import 'layout_models.dart';
 import 'preview_models.dart';
 import 'service_status.dart';
@@ -290,11 +291,26 @@ class TerminalHistoryBoundary {
   /// build; callers must treat an unrecognized value as not-recording.
   final String status;
 
+  /// Rows are missing from the MIDDLE of this epoch: output the agent dropped
+  /// before its parser saw it. An archive that stopped accepting rows is
+  /// [status] instead -- that loss is at an edge, where the rows simply stop.
+  ///
+  /// Not inferable from anything else here -- row ids stay contiguous across
+  /// the hole -- which is why the agent restates it on every boundary rather
+  /// than announcing it once. Sticky for the epoch, so it survives a reconnect
+  /// or a fresh subscribe; a new [epoch] is an archive started over and clears
+  /// it.
+  ///
+  /// Defaults false for an agent too old to send it, which is the same thing
+  /// that build meant by omitting it: nothing known to be lost.
+  final bool gapped;
+
   const TerminalHistoryBoundary({
     required this.epoch,
     required this.firstRowId,
     required this.nextRowId,
     required this.status,
+    this.gapped = false,
   });
 
   static TerminalHistoryBoundary? fromJson(Map<String, dynamic> json) {
@@ -313,6 +329,7 @@ class TerminalHistoryBoundary {
       firstRowId: firstRowId,
       nextRowId: nextRowId,
       status: status,
+      gapped: json['gapped'] == true,
     );
   }
 }
@@ -662,6 +679,39 @@ class HandlerActivityMessage {
     required this.decision,
     required this.reason,
     this.detail,
+  });
+}
+
+/// The newest slice of a project's activity log, answering a
+/// `handler:history:request`.
+///
+/// The live `handler:activity` frame is the only other source of these rows and
+/// it is not replayed, so before this verb existed an app that was not attached
+/// when a row was emitted could never obtain it.
+class HandlerHistoryPageMessage {
+  final String id;
+  final int timestamp;
+  final String projectId;
+
+  /// Echoes the request this answers. An app discards a page whose id is not
+  /// the one it is waiting on: a reconnect re-asks, and the previous answer can
+  /// still be in flight.
+  final String requestId;
+
+  /// Newest first, matching the live buffer, which prepends arriving rows at
+  /// index 0.
+  final List<HandlerActivityRecord> records;
+
+  /// Older records exist that this page does not carry.
+  final bool truncated;
+
+  const HandlerHistoryPageMessage({
+    required this.id,
+    required this.timestamp,
+    required this.projectId,
+    required this.requestId,
+    required this.records,
+    required this.truncated,
   });
 }
 
@@ -2497,6 +2547,58 @@ Object? parseAbMessage(Map<String, dynamic> json) {
           decision: decision,
           reason: reason,
           detail: json['detail'] is String ? json['detail'] as String : null,
+        );
+      }
+
+    case 'handler:history:page':
+      {
+        final projectId = json['projectId'];
+        final requestId = json['requestId'];
+        final rawRecords = json['records'];
+        final truncated = json['truncated'];
+        if (projectId is! String ||
+            requestId is! String ||
+            rawRecords is! List ||
+            truncated is! bool) {
+          return null;
+        }
+        final records = <HandlerActivityRecord>[];
+        for (final raw in rawRecords) {
+          if (raw is! Map) continue;
+          final recordId = raw['recordId'];
+          final at = raw['at'];
+          final terminalId = raw['terminalId'];
+          final decision = raw['decision'];
+          final reason = raw['reason'];
+          // One malformed row is skipped rather than failing the page. These
+          // come off a log any past build may have appended to, and losing the
+          // whole history over a single unreadable line is the outcome this
+          // verb exists to prevent.
+          if (recordId is! String ||
+              at is! num ||
+              terminalId is! String ||
+              decision is! String ||
+              reason is! String) {
+            continue;
+          }
+          records.add(
+            HandlerActivityRecord(
+              recordId: recordId,
+              at: at.toInt(),
+              terminalId: terminalId,
+              decision: decision,
+              reason: reason,
+              detail: raw['detail'] is String ? raw['detail'] as String : null,
+            ),
+          );
+        }
+        return HandlerHistoryPageMessage(
+          id: id,
+          timestamp: timestamp,
+          projectId: projectId,
+          requestId: requestId,
+          records: records,
+          truncated: truncated,
         );
       }
 
