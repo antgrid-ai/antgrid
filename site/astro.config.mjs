@@ -2,6 +2,8 @@ import { defineConfig, fontProviders } from "astro/config";
 import tailwindcss from "@tailwindcss/vite";
 import icon from "astro-icon";
 import sitemap from "@astrojs/sitemap";
+import blogMarkdown from "./scripts/blog-markdown.mjs";
+import { satteri } from "@astrojs/markdown-satteri";
 
 // The local provider pointed at the installed @fontsource-variable packages,
 // not fontProviders.fontsource(): the hosted provider fetches at build time, so
@@ -81,6 +83,7 @@ const fonts = [
 // PUBLIC_SITE_URL kept in lockstep with Seo's PUBLIC_SITE_URL so canonical and sitemap never diverge.
 export default defineConfig({
   site: process.env.PUBLIC_SITE_URL ?? "https://antgrid.ai",
+  markdown: { processor: satteri({ features: { rawHtml: true }, hastPlugins: [blogMarkdown] }) },
   // There is no ClientRouter here, so every navigation is a full document load.
   // `hover` buys the one that matters back: the download CTAs are deliberate,
   // aimed clicks, and the page is fetched while the pointer is still travelling.

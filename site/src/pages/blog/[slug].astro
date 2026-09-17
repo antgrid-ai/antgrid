@@ -1,0 +1,13 @@
+---
+import { render } from "astro:content";
+import BlogPost from "../../layouts/BlogPost.astro";
+import { getPublishedPosts } from "../../data/blog";
+import { relatedPosts } from "../../data/blog-policy";
+export async function getStaticPaths() {
+  const posts = await getPublishedPosts();
+  return posts.map((post) => ({ params: { slug: post.id }, props: { post, related: relatedPosts(post, posts) } }));
+}
+const { post, related } = Astro.props;
+const { Content } = await render(post);
+---
+<BlogPost post={post} related={related}><Content /></BlogPost>

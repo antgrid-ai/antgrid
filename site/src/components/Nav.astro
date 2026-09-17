@@ -5,6 +5,8 @@ import Button from "./ui/Button.astro";
 import Mark from "./ui/Mark.astro";
 import Wordmark from "./ui/Wordmark.astro";
 import { BETA_FREE } from "../data/pricing";
+import { getPublishedPosts } from "../data/blog";
+import { showBlogNav } from "../data/blog-policy";
 
 // One list feeding both the bar and the drawer. Held apart, the two drifted —
 // an item added to the desktop bar is invisible to every phone until someone
@@ -16,7 +18,10 @@ import { BETA_FREE } from "../data/pricing";
 // Sign in went with it — the paid path is closed and the beta is free, so it was
 // a slot spent on the smallest audience the site has. Both are still in the
 // footer, which is where an escape hatch belongs.
-const navItems = [{ href: links.pricing, label: "Pricing" }];
+const navItems = [
+  { href: links.pricing, label: "Pricing" },
+  ...(showBlogNav(await getPublishedPosts()) ? [{ href: links.blog, label: "Blog" }] : []),
+];
 
 // Guards for whatever is added next, not for the list above: an anchor is a
 // scroll position rather than a location, and an off-origin href is never this
@@ -43,7 +48,7 @@ const isCurrent = (href: string) =>
         <span class="rounded-full bg-signalbtn px-1.5 py-px text-pip font-medium text-page">beta</span>
       )}
     </a>
-    <div class="hidden items-center gap-7 md:flex">
+    <div class="hidden items-center gap-7 lg:flex">
       {navItems.map((item) => (
         <a
           href={item.href}
@@ -87,7 +92,7 @@ const isCurrent = (href: string) =>
     </div>
     <button
       id="navToggle"
-      class="-m-1.5 inline-flex items-center rounded-md p-1.5 text-ink2 md:hidden"
+      class="-m-1.5 inline-flex items-center rounded-md p-1.5 text-ink2 lg:hidden"
       aria-label="Open menu"
       aria-controls="navMenu"
       aria-expanded="false"
@@ -96,7 +101,7 @@ const isCurrent = (href: string) =>
       <Icon id="navIconClose" name="tabler:x" width="22" height="22" class="hidden" />
     </button>
   </nav>
-  <div id="navMenu" class="hidden border-t border-edge-inner px-6 py-4 md:hidden">
+  <div id="navMenu" class="hidden border-t border-edge-inner px-6 py-4 lg:hidden">
     <div class="flex flex-col gap-4">
       {navItems.map((item) => (
         <a
