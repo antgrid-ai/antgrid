@@ -6,7 +6,6 @@ import 'package:antgrid/design/ab_tokens.dart';
 import 'package:antgrid/design/widgets/ab_button.dart';
 import 'package:antgrid/design/widgets/ab_empty_state.dart';
 import 'package:antgrid/design/widgets/ab_icon.dart';
-import 'package:antgrid/design/widgets/ab_icon_button.dart';
 import 'package:antgrid/design/widgets/ab_composer_send_button.dart';
 import 'package:antgrid/design/widgets/ab_menu.dart';
 import 'package:antgrid/design/widgets/ab_prompt_field.dart';
@@ -22,6 +21,7 @@ import 'package:antgrid/storage/first_run_store.dart';
 import 'package:antgrid/test_helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/handler/handler_backlog_drawer.dart';
 import 'package:antgrid/widgets/handler/handler_instruction_composer.dart';
+import 'package:antgrid/widgets/handler/handler_item_status.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -348,9 +348,10 @@ void main() {
     final session = await _armedSession([_tests, _commit, _pr]);
     await _pumpDrawer(tester, session);
 
-    // Two dependency rows, in dependsOn order — the second is 'commit the fix'.
-    await tester.tap(find.byTooltip('Remove this dependency').at(1));
-    await tester.pumpAndSettle();
+    // The third row waits on both rows above it, named by the numbers those
+    // rows are wearing. Dropping the second leaves the first.
+    await _openMenuFor(tester, 2);
+    await _pick(tester, 'Stop waiting on 2');
 
     final sent = _sentConfigure(session)['backlog'] as List;
     expect(_sentIds(session), ['i1', 'i2', 'i3']);
@@ -371,8 +372,8 @@ void main() {
     final session = await _armedSession([_tests, single]);
     await _pumpDrawer(tester, session);
 
-    await tester.tap(find.byTooltip('Remove this dependency'));
-    await tester.pumpAndSettle();
+    await _openMenuFor(tester, 1);
+    await _pick(tester, 'Stop waiting on 1');
 
     final edited = (_sentConfigure(session)['backlog'] as List).last as Map;
     expect(edited.containsKey('dependsOn'), isFalse);
@@ -442,16 +443,16 @@ void main() {
     final session = await _armedSession([failed, waiting]);
     await _pumpDrawer(tester, session);
 
-    // Dropping the dependency is the action that frees it, and it stays.
-    expect(find.byTooltip('Remove this dependency'), findsOneWidget);
     await _openMenuFor(tester, 1);
     // The bridge re-blocks anything waiting on failed work on its next pass, so
-    // requeueing here changes the word and nothing else.
+    // requeueing here changes the word and nothing else. Dropping the
+    // dependency is the action that frees it, and it stays.
     expect(_openMenuLabels(tester), isNot(contains('Requeue')));
+    expect(_openMenuLabels(tester), contains('Stop waiting on 1'));
     await _pick(tester, 'Delete');
   });
 
-  testWidgets('the waits-on line names a dependency that is itself stuck', (
+  testWidgets('the waits-on clause names a dependency that is itself stuck', (
     tester,
   ) async {
     const blockedDep = HandlerInstructionItem(
@@ -470,9 +471,20 @@ void main() {
     final session = await _armedSession([blockedDep, waiting]);
     await _pumpDrawer(tester, session);
 
-    // Both rows' own status columns, plus the waits-on line — which is the one
-    // saying why the item behind it is offered no requeue.
-    expect(find.text('blocked'), findsNWidgets(3));
+    // The waiting row says which row is holding it up, by the number that row
+    // is wearing, and what is wrong with it — which is what says why this item
+    // is offered no requeue.
+    expect(
+      find.textContaining('waits on 1 (blocked)', findRichText: true),
+      findsOneWidget,
+    );
+    // Both rows say what state they are in. Neither says it twice: the
+    // dependency's own text stands on the row it belongs to and nowhere else.
+    expect(
+      find.textContaining('blocked', findRichText: true),
+      findsNWidgets(2),
+    );
+    expect(find.text('run the tests'), findsOneWidget);
   });
 
   testWidgets('requeue is offered for skipped and blocked and no other status', (
@@ -550,14 +562,18 @@ void main() {
       expect(
         _openMenuLabels(tester),
         everyElement(
-          isIn([
-            'Edit',
-            'Move to top',
-            'Move up',
-            'Move down',
-            'Requeue',
-            'Delete',
-          ]),
+          anyOf(
+            isIn([
+              'Edit',
+              'Move to top',
+              'Move up',
+              'Move down',
+              'Requeue',
+              'Delete',
+            ]),
+            // A gate may be dropped, by the number of the row that holds it.
+            startsWith('Stop waiting on'),
+          ),
         ),
       );
       await _pick(tester, 'Delete');
@@ -587,12 +603,64 @@ void main() {
     final session = await _armedSession([finished, waiting]);
     await _pumpDrawer(tester, session);
 
-    expect(find.text('all 41 tests passed'), findsOneWidget);
+    // Status and outcome share the one line under the text: `done · all 41
+    // tests passed`.
+    expect(
+      find.textContaining('all 41 tests passed', findRichText: true),
+      findsOneWidget,
+    );
+    expect(
+      find.text('done · all 41 tests passed', findRichText: true),
+      findsOneWidget,
+    );
     // The gate is the question the outcome has already answered.
-    expect(find.textContaining('the branch is dirty'), findsNothing);
-    expect(find.text('only if the tests pass'), findsOneWidget);
+    expect(
+      find.textContaining('the branch is dirty', findRichText: true),
+      findsNothing,
+    );
+    expect(
+      find.textContaining('only if the tests pass', findRichText: true),
+      findsOneWidget,
+    );
     // Evidence backs the outcome; it is not a second subtitle.
-    expect(find.textContaining('41 passed, 0 failed'), findsNothing);
+    expect(
+      find.textContaining('41 passed, 0 failed', findRichText: true),
+      findsNothing,
+    );
+  });
+
+  testWidgets('a row is numbered by where it stands in the run order', (
+    tester,
+  ) async {
+    final session = await _armedSession([_tests, _commit, _pr]);
+    await _pumpDrawer(tester, session);
+
+    // Handler works from the top, so position is what says which item is next
+    // — and it is the only short name a dependency can be pointed at by.
+    expect(
+      tester
+          .widgetList<HandlerRunNumber>(find.byType(HandlerRunNumber))
+          .map((n) => n.number),
+      [1, 2, 3],
+    );
+    expect(
+      find.textContaining('waits on 1, 2', findRichText: true),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('a queued row spends no words on saying so', (tester) async {
+    final session = await _armedSession([_commit]);
+    await _pumpDrawer(tester, session);
+
+    // `queued` is every row on a fresh backlog, and printing it says nothing
+    // the progress line above it hasn't. The number is what says the row is
+    // there — the column it stands in used to be blank on every such row.
+    expect(find.textContaining('queued', findRichText: true), findsNothing);
+    expect(
+      tester.widget<HandlerRunNumber>(find.byType(HandlerRunNumber)).number,
+      1,
+    );
   });
 
   testWidgets('an empty backlog renders its own state, not a broken list', (
@@ -724,6 +792,47 @@ void main() {
         expect(find.text('fifth'), findsOneWidget);
       },
     );
+
+    testWidgets('a stack of sentences folds away over a list that wants the '
+        'room', (tester) async {
+      final session = await _armedSession(
+        [_tests, _commit],
+        instructions: (
+          total: 3,
+          items: ['ship the fix', 'and the changelog', 'and tag it'],
+        ),
+      );
+      await _pumpDrawer(tester, session);
+
+      // Nothing above the backlog's own Flexible scrolls, so the whole window
+      // of sentences comes out of the list's height on a keyboard-up phone.
+      // Entry #1 stays either way: it is what the session was opened to do.
+      expect(find.text('ship the fix'), findsOneWidget);
+      expect(find.text('and tag it'), findsNothing);
+      // And the count says there is more behind the heading than the one line
+      // under it.
+      expect(find.text('· 3'), findsOneWidget);
+
+      await tester.tap(find.text('WHAT YOU ASKED FOR'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('and tag it'), findsOneWidget);
+    });
+
+    testWidgets('with no list under them the sentences are the content', (
+      tester,
+    ) async {
+      final session = await _armedSession(
+        const [],
+        instructions: (
+          total: 3,
+          items: ['ship the fix', 'and the changelog', 'and tag it'],
+        ),
+      );
+      await _pumpDrawer(tester, session);
+
+      expect(find.text('and tag it'), findsOneWidget);
+    });
 
     testWidgets(
       'nothing asked for renders neither the heading nor a row',
@@ -1263,19 +1372,23 @@ void main() {
 
       await _sendInstruction(tester, 'Run Tests');
 
-      // Disabled outright rather than tinted disabled over a live control: the
-      // reason is standing above the list, so this button has nothing left to
-      // promise and must not offer a cursor, a hover fill or a focus ring.
-      final held = tester
-          .widgetList<AbIconButton>(find.byType(AbIconButton))
-          .where((b) => b.tooltip == oneOutstanding);
-      expect(held, isNotEmpty);
-      expect(held.every((b) => b.onTap == null), isTrue);
+      // One entry per gate, each held on the same terms as every other edit on
+      // the row — and each carrying the reason, since a shorter menu would
+      // answer "why can't I drop this" with nothing.
+      await _openMenuFor(tester, 2);
+      final held = _openMenuItems(
+        tester,
+      ).where((e) => e.label.startsWith('Stop waiting on'));
+      expect(held, hasLength(2));
+      for (final entry in held) {
+        expect(entry.enabled, isFalse, reason: entry.label);
+        expect(entry.disabledReason, oneOutstanding, reason: entry.label);
+      }
 
-      await tester.tap(find.byTooltip(oneOutstanding).first);
-      await tester.pumpAndSettle();
+      await _pick(tester, 'Stop waiting on 1');
 
       expect(configures(session), isEmpty);
+      await _drainSnackBar(tester);
     });
 
     testWidgets('two outstanding instructions are counted, not quoted', (

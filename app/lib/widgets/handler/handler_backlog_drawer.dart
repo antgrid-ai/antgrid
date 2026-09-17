@@ -8,12 +8,14 @@ import '../../design/ab_tokens.dart';
 import '../../design/widgets/ab_adaptive_sheet.dart';
 import '../../design/widgets/ab_button.dart';
 import '../../design/widgets/ab_dialog.dart';
+import '../../design/widgets/ab_disclosure_chevron.dart';
 import '../../design/widgets/ab_empty_state.dart';
-import '../../design/widgets/ab_icon.dart';
 import '../../design/widgets/ab_icon_button.dart';
 import '../../design/widgets/ab_list_row.dart';
 import '../../design/widgets/ab_menu.dart';
+import '../../design/widgets/ab_progress_rule.dart';
 import '../../design/widgets/ab_section_header.dart';
+import '../../design/widgets/ab_tap_target.dart';
 import '../../design/widgets/ab_text_field.dart';
 import '../../models/handler_state.dart';
 import '../../providers/first_run.dart';
@@ -71,6 +73,12 @@ class HandlerBacklogDrawer extends ConsumerWidget {
     // line resolves against this same list, so a backlog near the bridge's cap
     // otherwise walks it again for each one.
     final byId = {for (final i in backlog) i.id: i};
+    // A dependency is named by the number the row it points at is wearing, so
+    // the two come from one pass over one list rather than from two readings of
+    // it that a reorder could leave disagreeing.
+    final numbers = {
+      for (var i = 0; i < backlog.length; i++) backlog[i].id: i + 1,
+    };
     // Keyed by terminal, so a rebuild for a different terminalId cannot draw
     // one session's outstanding instruction under another's backlog.
     final pending =
@@ -98,23 +106,40 @@ class HandlerBacklogDrawer extends ConsumerWidget {
             askedFor: session.askedFor,
             askedForTotal: session.askedForTotal,
             pending: pending,
+            // Open only where the words are the whole content. With a list
+            // under them they are the context for it, and seven lines of
+            // context is seven lines the list does not get — nothing above its
+            // `Flexible` scrolls, so on a phone with the keyboard up they come
+            // straight out of the work.
+            initiallyExpanded: backlog.isEmpty,
           ),
-        if (session != null && backlog.isNotEmpty)
+        // The meter is the list's own header. It divides the user's words from
+        // the work they became AND says how much of that work is left: a
+        // hairline would have said only the first, a sentence only the second,
+        // and the sentence on its own used to float between the two blocks
+        // reading as a fact about the one above it.
+        if (session != null && backlog.isNotEmpty) ...[
+          const SizedBox(height: AbTokens.space10),
+          AbProgressRule(
+            fraction: session.backlogTotal == 0
+                ? 0
+                : session.backlogDone / session.backlogTotal,
+          ),
+          const SizedBox(height: AbTokens.space6),
           Padding(
-            padding: const EdgeInsets.fromLTRB(
-              AbTokens.space16,
-              AbTokens.space4,
-              AbTokens.space16,
-              0,
-            ),
+            padding: const EdgeInsets.symmetric(horizontal: AbTokens.space16),
             child: Text(
               handlerProgressLabel(session),
+              // The tier the Handler card gives this same sentence. It reports
+              // the whole list; the muted tier filed the only summary on the
+              // sheet under chrome.
               style: AbTokens.sansStyle(
                 fontSize: AbTokens.fontXs,
-                color: p.textMuted,
+                color: p.textSecondary,
               ),
             ),
           ),
+        ],
         if (editLock != null) _EditLockNotice(reason: editLock),
         const SizedBox(height: AbTokens.space8),
         Flexible(
@@ -143,9 +168,10 @@ class HandlerBacklogDrawer extends ConsumerWidget {
                       : _BacklogRow(
                           terminalId: terminalId,
                           item: backlog[index],
+                          number: index + 1,
                           canMoveUp: index > 0,
                           canMoveDown: index < backlog.length - 1,
-                          labelFor: (id) => _dependencyLabel(byId, id),
+                          labelFor: (id) => _dependencyLabel(numbers, byId, id),
                           lockReason: editLock,
                         ),
                 ),
@@ -248,16 +274,25 @@ class _NothingQueued extends StatelessWidget {
 /// only place any of those later sentences can ever be seen again once the
 /// window scrolls past them.
 ///
-/// Renders the whole window and no more — a heading, entry #1 over two lines,
-/// an elision line and the newest four at one line each. That worst case is
-/// seven lines of `fontXs`, and it is a ceiling worth knowing: nothing above
-/// the backlog's own `Flexible` scrolls, so anything added here comes straight
-/// out of that list's height on a keyboard-up phone.
-class _AskedForHeader extends StatelessWidget {
+/// It is drawn as QUOTED SPEECH — a rail down its left edge, the secondary
+/// tier — because the sentence a user typed and the item the extractor made of
+/// it are often the same words, and in the one-instruction case they are the
+/// same words twice in a row. With nothing between them the sheet read as
+/// having said one thing twice; the rail is what makes this block speech and
+/// the rows under it work.
+///
+/// Everything past entry #1 sits behind a disclosure. The whole window is a
+/// heading, entry #1 over two lines, an elision line and the newest four at one
+/// line each — seven lines of `fontXs`, and nothing above the backlog's own
+/// `Flexible` scrolls, so on a keyboard-up phone those lines come out of the
+/// list. Closed, it still says how many sentences it holds and opens on one
+/// tap; it is never closed when there is nothing under it to read instead.
+class _AskedForHeader extends StatefulWidget {
   const _AskedForHeader({
     required this.askedFor,
     required this.askedForTotal,
     required this.pending,
+    required this.initiallyExpanded,
   });
 
   /// [HandlerSessionState.askedFor] — entry #1 first, then the newest up to
@@ -272,6 +307,11 @@ class _AskedForHeader extends StatelessWidget {
   /// row [_PendingInstructionRow] is still drawing for it below.
   final List<String> pending;
 
+  /// Read once, when this block is first built. A later change of heart from
+  /// the caller must not close a block the user opened, or reopen one they
+  /// closed, under their hands.
+  final bool initiallyExpanded;
+
   /// At most this many of the newest entries beyond entry #1 — the whole of
   /// what the wire window carries, which is the point: no other surface in the
   /// app renders a stacked sentence, so an entry this block drops is an entry
@@ -279,6 +319,13 @@ class _AskedForHeader extends StatelessWidget {
   /// `MAX_RECENT_INSTRUCTIONS` (`engine.ts`); a smaller number here quietly
   /// discards rows the bridge spent wire budget to send.
   static const _maxNewest = 4;
+
+  @override
+  State<_AskedForHeader> createState() => _AskedForHeaderState();
+}
+
+class _AskedForHeaderState extends State<_AskedForHeader> {
+  late bool _expanded = widget.initiallyExpanded;
 
   @override
   Widget build(BuildContext context) {
@@ -297,27 +344,27 @@ class _AskedForHeader extends StatelessWidget {
     // when the user restates the sentence they opened the session with — the
     // restatement is the newer entry, and it is the one the pending row is
     // drawing.
-    final unmatched = [...pending];
-    final hidden = List<bool>.filled(askedFor.length, false);
-    for (var i = askedFor.length - 1; i >= 0; i--) {
+    final unmatched = [...widget.pending];
+    final hidden = List<bool>.filled(widget.askedFor.length, false);
+    for (var i = widget.askedFor.length - 1; i >= 0; i--) {
       final match = unmatched.indexWhere(
-        (sent) => _looksSentAs(sent, askedFor[i]),
+        (sent) => _looksSentAs(sent, widget.askedFor[i]),
       );
       if (match < 0) continue;
       unmatched.removeAt(match);
       hidden[i] = true;
     }
     final visible = [
-      for (var i = 0; i < askedFor.length; i++)
-        if (!hidden[i]) askedFor[i],
+      for (var i = 0; i < widget.askedFor.length; i++)
+        if (!hidden[i]) widget.askedFor[i],
     ];
     if (visible.isEmpty) return const SizedBox.shrink();
 
     final first = visible.first;
     final rest = visible.skip(1).toList();
-    final newest = rest.length <= _maxNewest
+    final newest = rest.length <= _AskedForHeader._maxNewest
         ? rest
-        : rest.sublist(rest.length - _maxNewest);
+        : rest.sublist(rest.length - _AskedForHeader._maxNewest);
     // Sentences no row on this sheet accounts for: the ones the bridge left
     // out of the window, less any the filter above moved to a pending row
     // below rather than dropped. Counting a filtered entry as elided would
@@ -325,58 +372,101 @@ class _AskedForHeader extends StatelessWidget {
     // the filter only ever fires on the NEWEST sentences, it would also call
     // them "in between".
     final elided =
-        askedForTotal - (1 + newest.length) - (askedFor.length - visible.length);
+        widget.askedForTotal -
+        (1 + newest.length) -
+        (widget.askedFor.length - visible.length);
+
+    // A chevron over a block with nothing behind it is chrome that does
+    // nothing, and entry #1 alone is the ordinary case.
+    final collapsible = newest.isNotEmpty || elided > 0;
+    final open = _expanded || !collapsible;
 
     final rowStyle = AbTokens.sansStyle(
       fontSize: AbTokens.fontXs,
       color: p.textSecondary,
     );
+    final Widget header = Padding(
+      padding: const EdgeInsets.symmetric(vertical: AbTokens.space4),
+      child: AbSectionHeader(
+        label: 'What you asked for',
+        count: widget.askedForTotal,
+        padding: EdgeInsets.zero,
+        trailing: collapsible ? AbDisclosureChevron(expanded: open) : null,
+      ),
+    );
     return Padding(
       padding: const EdgeInsets.fromLTRB(
         AbTokens.space16,
-        AbTokens.space4,
+        0,
         AbTokens.space16,
         0,
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          AbSectionHeader(
-            label: 'What you asked for',
-            count: askedForTotal,
-            padding: EdgeInsets.zero,
-          ),
-          const SizedBox(height: AbTokens.space4),
-          Text(
-            first,
-            // Two lines for entry #1 alone: a sentence typed on the New
-            // Session canvas runs to whatever length suited the user, and one
-            // line clips most of a pasted one.
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-            style: rowStyle,
-          ),
-          if (elided > 0)
-            Padding(
-              padding: const EdgeInsets.only(top: AbTokens.space2),
-              child: Text(
-                elided == 1 ? '1 more in between' : '$elided more in between',
-                style: AbTokens.sansStyle(
-                  fontSize: AbTokens.fontXs,
-                  color: p.textMuted,
+          if (collapsible)
+            AbTapTarget(
+              // Shorter than the 44dp default. The target is the full width of
+              // the sheet rather than a square, and the height that floor adds
+              // on a phone comes out of the list this block exists to give room
+              // back to.
+              minSize: AbTokens.rowHeightSm,
+              onTap: () => setState(() => _expanded = !_expanded),
+              child: header,
+            )
+          else
+            header,
+          Container(
+            decoration: BoxDecoration(
+              border: Border(
+                left: BorderSide(
+                  color: p.borderStrong,
+                  width: AbTokens.space2,
                 ),
               ),
             ),
-          for (final item in newest)
-            Padding(
-              padding: const EdgeInsets.only(top: AbTokens.space2),
-              child: Text(
-                item,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: rowStyle,
-              ),
+            padding: const EdgeInsets.only(left: AbTokens.space8),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  first,
+                  // Two lines for entry #1 once the block is open: a sentence
+                  // typed on the New Session canvas runs to whatever length
+                  // suited the user, and one line clips most of a pasted one.
+                  // Closed, it is the preview of a block that opens on a tap.
+                  maxLines: open ? 2 : 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: rowStyle,
+                ),
+                if (open) ...[
+                  if (elided > 0)
+                    Padding(
+                      padding: const EdgeInsets.only(top: AbTokens.space2),
+                      child: Text(
+                        elided == 1
+                            ? '1 more in between'
+                            : '$elided more in between',
+                        style: AbTokens.sansStyle(
+                          fontSize: AbTokens.fontXs,
+                          color: p.textMuted,
+                        ),
+                      ),
+                    ),
+                  for (final item in newest)
+                    Padding(
+                      padding: const EdgeInsets.only(top: AbTokens.space2),
+                      child: Text(
+                        item,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: rowStyle,
+                      ),
+                    ),
+                ],
+              ],
             ),
+          ),
         ],
       ),
     );
@@ -781,7 +871,21 @@ class _Disclaimer extends ConsumerWidget {
   }
 }
 
-/// The one line under an item's text, and which of its two facts gets it.
+/// What a row says about itself past its own text, on the one line under it:
+/// the state it is in, what became of it or what it is gated on, and what it is
+/// still waiting for.
+///
+/// One line, not a stack. The three answer one question — why has this not
+/// happened yet — and a dependency drawn as a row of its own cost a line, an
+/// indent and a delete button per edge to repeat a sentence already on screen
+/// two rows up. Here it costs one digit, because the row it points at is
+/// wearing the number it points with.
+///
+/// The status word rides here rather than in the leading column for the same
+/// reason: the column was blank on every `queued` row — which is most rows for
+/// most of a session — and a word is only worth its width once there is
+/// something to report. `queued` still prints nothing; the number in the
+/// leading column is what says the row exists and where it stands.
 ///
 /// `outcome` outranks `condition` wherever both exist. The condition is the
 /// question "does this still need doing?" and the outcome is its answer, so
@@ -794,32 +898,111 @@ class _Disclaimer extends ConsumerWidget {
 /// quote backing the outcome, and this list is scanned for what happened rather
 /// than for what was said — putting the proof beside the claim would cost the
 /// claim the line it earned.
-Widget? _itemSubtitle(HandlerInstructionItem item) {
-  final outcome = item.outcome;
-  if (outcome != null && outcome.trim().isNotEmpty) return Text(outcome);
-  final condition = item.condition;
-  if (condition != null && condition.trim().isNotEmpty) {
-    return Text('only if $condition');
-  }
-  return null;
+Widget? _itemMeta(
+  BuildContext context,
+  HandlerInstructionItem item,
+  List<({int? number, String? status})> deps,
+) {
+  final p = context.antgrid;
+  final outcome = _trimmedOrNull(item.outcome);
+  final condition = _trimmedOrNull(item.condition);
+  final parts = <List<InlineSpan>>[
+    if (item.status != handlerDefaultItemStatus)
+      [
+        TextSpan(
+          text: item.status,
+          style: AbTokens.monoStyle(
+            fontSize: AbTokens.fontXxs,
+            color: handlerItemStatusColor(p, item.status),
+          ),
+        ),
+      ],
+    if (outcome != null)
+      [TextSpan(text: outcome)]
+    else if (condition != null)
+      [TextSpan(text: 'only if $condition')],
+    if (deps.isNotEmpty) _waitsOnSpans(p, deps),
+  ];
+  if (parts.isEmpty) return null;
+  return Text.rich(
+    TextSpan(
+      children: [
+        for (var i = 0; i < parts.length; i++) ...[
+          if (i > 0) const TextSpan(text: ' · '),
+          ...parts[i],
+        ],
+      ],
+    ),
+    style: AbTokens.sansStyle(fontSize: AbTokens.fontXs, color: p.textMuted),
+  );
 }
 
-/// What an item waits on, in the user's own words when the id still resolves to
-/// a live item — a bare id says nothing about what is holding the work up.
+/// What an item is waiting for, pointed at rather than quoted.
 ///
-/// [status] is the dependency's own, and is null exactly when the id resolves to
-/// nothing: an unresolved dependency is a state nobody can report on. It rides
-/// along because whether this item can move is a fact about the item it waits
-/// on, and the row is the only place holding both.
-({String text, bool resolved, String? status}) _dependencyLabel(
+/// The number is the one the row it names is wearing, and it is mono for the
+/// reason every other address in this app is: it is something the eye matches
+/// against a column, not something it reads.
+///
+/// A stalled dependency is named where it stands, because it is the fact that
+/// decides whether this item can be requeued at all — and the one the user has
+/// to go and act on somewhere else. Any other status leaves the wait
+/// self-explanatory.
+///
+/// An id that resolves to nothing is counted, not printed. A bare uuid says
+/// nothing a user can act on, and the menu entry that drops it names it the same
+/// way this line does.
+List<InlineSpan> _waitsOnSpans(
+  AbColors p,
+  List<({int? number, String? status})> deps,
+) {
+  final numbered = [
+    for (final d in deps)
+      if (d.number != null) d,
+  ];
+  final missing = deps.length - numbered.length;
+  return [
+    const TextSpan(text: 'waits on '),
+    for (var i = 0; i < numbered.length; i++) ...[
+      if (i > 0) const TextSpan(text: ', '),
+      TextSpan(
+        text: '${numbered[i].number}',
+        style: AbTokens.monoStyle(
+          fontSize: AbTokens.fontXxs,
+          color: p.textSecondary,
+        ),
+      ),
+      if (_stallingStatuses.contains(numbered[i].status))
+        TextSpan(
+          text: ' (${numbered[i].status})',
+          style: TextStyle(
+            color: handlerItemStatusColor(p, numbered[i].status!),
+          ),
+        ),
+    ],
+    if (missing > 0) ...[
+      if (numbered.isNotEmpty) const TextSpan(text: ', '),
+      TextSpan(
+        text: missing == 1
+            ? 'an item no longer on this list'
+            : '$missing items no longer on this list',
+      ),
+    ],
+  ];
+}
+
+/// What an item waits on, as the number the row it points at is wearing — a
+/// bare id says nothing about what is holding the work up, and the dependency's
+/// own text says it a second time.
+///
+/// [number] is null exactly when the id resolves to nothing: an item that is not
+/// on the list holds no place in its order. [status] is the dependency's own,
+/// and rides along because whether THIS item can move is a fact about the item
+/// it waits on, and the row is the only place holding both.
+({int? number, String? status}) _dependencyLabel(
+  Map<String, int> numbers,
   Map<String, HandlerInstructionItem> byId,
   String id,
-) {
-  final item = byId[id];
-  return item == null
-      ? (text: id, resolved: false, status: null)
-      : (text: item.text, resolved: true, status: item.status);
-}
+) => (number: numbers[id], status: byId[id]?.status);
 
 /// How much of the user's own sentence the lock reason quotes back. It has to
 /// fit a tooltip, and the sentence is however much the user felt like typing.
@@ -1054,9 +1237,17 @@ const _stallingStatuses = {'blocked', 'failed'};
 
 /// Statuses the item has already run to, whatever the answer was. A gate on one
 /// of these cannot fire again and the row prints the outcome in its place (see
-/// [_itemSubtitle]) — so the editor leaves the clause off for the same reason
+/// [_itemMeta]) — so the editor leaves the clause off for the same reason
 /// the menu leaves Requeue off: the action applies to nothing.
 const _finishedStatuses = {'done', 'failed'};
+
+/// Statuses whose work is over AND settled, so the row can step back and let
+/// the list be scanned for what still needs doing.
+///
+/// Deliberately not [_finishedStatuses]: `failed` is over too, and is the one
+/// thing on this sheet that must not recede — a failure the user's eye skips is
+/// a failure they find out about from somewhere else.
+const _settledStatuses = {'done', 'skipped'};
 
 /// Puts a stalled item back in the queue.
 List<HandlerInstructionItem> _withItemRequeued(
@@ -1157,8 +1348,25 @@ class _PendingInstructionRow extends StatelessWidget {
     final p = context.antgrid;
     return AbListRow(
       horizontalPadding: AbTokens.space16,
-      leading: const HandlerPendingLabel(),
+      // No number: the sentence holds no place in the order until the extractor
+      // has decided how many items it is. The column is held open anyway, so
+      // the sentence starts on the same edge as the rows it becomes.
+      leading: HandlerRunNumberGap(
+        lineExtent: AbListRow.titleLineExtent(context),
+      ),
       title: Text(text, style: AbTokens.sansStyle(color: p.textSecondary)),
+      // The user's own sentence, at whatever length they typed it.
+      titleMaxLines: 2,
+      // Where every other row's status word stands, in the same face: this row
+      // is reporting the one thing that is happening to it.
+      subtitle: Text(
+        handlerPendingInstructionLabel,
+        style: AbTokens.monoStyle(
+          fontSize: AbTokens.fontXxs,
+          color: p.textMuted,
+        ),
+      ),
+      crossAxisAlignment: CrossAxisAlignment.start,
     );
   }
 }
@@ -1167,6 +1375,7 @@ class _BacklogRow extends ConsumerWidget {
   const _BacklogRow({
     required this.terminalId,
     required this.item,
+    required this.number,
     required this.canMoveUp,
     required this.canMoveDown,
     required this.labelFor,
@@ -1175,10 +1384,14 @@ class _BacklogRow extends ConsumerWidget {
 
   final String terminalId;
   final HandlerInstructionItem item;
+
+  /// This row's place in the run order, 1-based — the name every dependency on
+  /// the sheet points at it by.
+  final int number;
+
   final bool canMoveUp;
   final bool canMoveDown;
-  final ({String text, bool resolved, String? status}) Function(String id)
-  labelFor;
+  final ({int? number, String? status}) Function(String id) labelFor;
 
   /// [handlerEditLockReason] for this session, non-null while every edit on
   /// this row is held.
@@ -1297,6 +1510,24 @@ class _BacklogRow extends ConsumerWidget {
               (b) => _withItemRequeued(b, item.id),
             ),
           ),
+        // Dropping a gate is an edit, so it sits where the other edits do. It
+        // used to be an ✕ on a dependency's own row — one mis-tap from a
+        // scroll, ungating work the user asked to be gated, on the one sheet
+        // that refuses to let a gate be written back. It names the dependency
+        // the way the row above it does, by number.
+        for (final id in item.dependsOn ?? const <String>[])
+          _entry(
+            label: switch (labelFor(id).number) {
+              final n? => 'Stop waiting on $n',
+              _ => 'Stop waiting on a missing item',
+            },
+            icon: AbIcons.link,
+            onTap: () => _sendEdit(
+              container,
+              terminalId,
+              (b) => _withoutDependency(b, item.id, id),
+            ),
+          ),
         const AbMenuDivider(),
         _entry(
           label: 'Delete',
@@ -1311,133 +1542,56 @@ class _BacklogRow extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final container = ref.container;
-    final dependsOn = item.dependsOn ?? const <String>[];
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        AbListRow(
-          horizontalPadding: AbTokens.space16,
-          leading: HandlerItemStatusLabel(status: item.status),
-          title: Text(item.text, style: AbTokens.sansStyle()),
-          // An item's text is bounded at MAX_ITEM_CHARS (400) and reaches it
-          // whenever extraction falls back to the raw sentence — a failed judge
-          // CLI, a rate-limited account, an agent that cannot judge headless.
-          // Nothing else on this row carries the text, so a single clipped line
-          // leaves the user reordering and deleting items they cannot read.
-          titleMaxLines: 2,
-          subtitle: _itemSubtitle(item),
-          // The outcome is a sentence the bridge wrote to a length nothing
-          // caps, and its verdict is as often at the end as the start
-          // ("committed the migration but the push was rejected") — one line
-          // clips exactly the half worth reading.
-          subtitleMaxLines: 2,
-          // Which puts the status word and the menu beside the first line
-          // rather than the middle of a two-line block.
-          crossAxisAlignment: CrossAxisAlignment.start,
-          // Every edit sits behind this menu rather than on the row: a delete
-          // one mis-tap away from a scroll would drop work the user asked for.
-          trailing: Builder(
-            builder: (buttonContext) => AbIconButton(
-              icon: AbIcons.more,
-              tooltip: 'Item actions',
-              onTap: () => _openMenu(buttonContext, container),
-            ),
-          ),
-        ),
-        for (final dep in dependsOn)
-          _DependencyRow(
-            label: labelFor(dep),
-            lockReason: lockReason,
-            onRemove: () => _sendEdit(
-              container,
-              terminalId,
-              (b) => _withoutDependency(b, item.id, dep),
-            ),
-          ),
-      ],
-    );
-  }
-}
-
-class _DependencyRow extends StatelessWidget {
-  const _DependencyRow({
-    required this.label,
-    required this.lockReason,
-    required this.onRemove,
-  });
-
-  final ({String text, bool resolved, String? status}) label;
-
-  /// [handlerEditLockReason] for this session, non-null while dropping the
-  /// dependency is held.
-  final String? lockReason;
-  final VoidCallback onRemove;
-
-  @override
-  Widget build(BuildContext context) {
     final p = context.antgrid;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(
-        AbTokens.space24,
-        0,
-        AbTokens.space16,
-        AbTokens.space4,
+    final container = ref.container;
+    final deps = [
+      for (final id in item.dependsOn ?? const <String>[]) labelFor(id),
+    ];
+    return AbListRow(
+      horizontalPadding: AbTokens.space16,
+      // Centred on the title's FIRST line rather than hung off the top of a
+      // block that may be two lines tall — the row is start-aligned, which is
+      // what keeps the number and the menu beside the text they belong to.
+      leading: HandlerRunNumber(
+        number: number,
+        status: item.status,
+        lineExtent: AbListRow.titleLineExtent(context),
       ),
-      child: Row(
-        children: [
-          AbIcon(AbIcons.link, size: 12, color: p.textMuted),
-          const SizedBox(width: AbTokens.space6),
-          Text(
-            'waits on',
-            style: AbTokens.sansStyle(
-              fontSize: AbTokens.fontXs,
-              color: p.textMuted,
-            ),
-          ),
-          const SizedBox(width: AbTokens.space4),
-          Expanded(
-            child: Text(
-              label.text,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              // An unresolved dependency shows the raw id, which is data.
-              style: label.resolved
-                  ? AbTokens.sansStyle(
-                      fontSize: AbTokens.fontXs,
-                      color: p.textSecondary,
-                    )
-                  : AbTokens.monoStyle(
-                      fontSize: AbTokens.fontXs,
-                      color: p.textSecondary,
-                    ),
-            ),
-          ),
-          // Named only while it is the thing holding this item up. Any other
-          // status leaves the wait self-explanatory, and repeating it here
-          // would put a second status column beside every row.
-          if (_stallingStatuses.contains(label.status)) ...[
-            const SizedBox(width: AbTokens.space6),
-            Text(
-              label.status!,
-              style: AbTokens.monoStyle(
-                fontSize: AbTokens.fontXs,
-                color: handlerItemStatusColor(p, label.status!),
-              ),
-            ),
-          ],
-          // Genuinely disabled while held — dimmed glyph, no hover fill, no
-          // focus ring, no click cursor — rather than a disabled tint over a
-          // control that still behaves pressable. Nothing is lost by it:
-          // [_EditLockNotice] stands above the list for the whole window, so
-          // the reason no longer has to ride on this tap.
-          AbIconButton(
-            icon: AbIcons.close,
-            tooltip: lockReason ?? 'Remove this dependency',
-            tone: AbIconButtonTone.muted,
-            onTap: lockReason == null ? onRemove : null,
-          ),
-        ],
+      title: Text(
+        item.text,
+        // Work that is over and settled recedes: this list is scanned for what
+        // is still moving. `failed` deliberately does NOT recede with it — it
+        // is over and unresolved, which is the one state here that wants the
+        // user's eye.
+        style: AbTokens.sansStyle(
+          color: _settledStatuses.contains(item.status)
+              ? p.textSecondary
+              : null,
+        ),
+      ),
+      // An item's text is bounded at MAX_ITEM_CHARS (400) and reaches it
+      // whenever extraction falls back to the raw sentence — a failed judge
+      // CLI, a rate-limited account, an agent that cannot judge headless.
+      // Nothing else on this row carries the text, so a single clipped line
+      // leaves the user reordering and deleting items they cannot read.
+      titleMaxLines: 2,
+      subtitle: _itemMeta(context, item, deps),
+      // The outcome is a sentence the bridge wrote to a length nothing caps,
+      // and its verdict is as often at the end as the start ("committed the
+      // migration but the push was rejected") — one line clips exactly the half
+      // worth reading.
+      subtitleMaxLines: 2,
+      // Which puts the number and the menu beside the first line rather than
+      // the middle of a two-line block.
+      crossAxisAlignment: CrossAxisAlignment.start,
+      // Every edit sits behind this menu rather than on the row: a delete one
+      // mis-tap away from a scroll would drop work the user asked for.
+      trailing: Builder(
+        builder: (buttonContext) => AbIconButton(
+          icon: AbIcons.more,
+          tooltip: 'Item actions',
+          onTap: () => _openMenu(buttonContext, container),
+        ),
       ),
     );
   }

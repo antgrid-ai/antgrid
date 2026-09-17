@@ -51,9 +51,13 @@ Widget _statusWord(String word, Color color) => Text(
   style: AbTokens.monoStyle(fontSize: AbTokens.fontXxs, color: color),
 );
 
-/// One backlog item's status, drawn identically on the Handler card and in the
-/// backlog drawer — the same item described two ways on two surfaces of one
-/// feature reads as two different items.
+/// One backlog item's status, in a column of its own — for the Handler card,
+/// where every item is one line and a column is the only place a second fact
+/// can stand. The backlog drawer gives each item a line under its text and puts
+/// the same word there, beside what happened; what stands in ITS leading column
+/// is [HandlerRunNumber]. The words and the colours are shared either way, which
+/// is what the surfaces owe each other — the same item described in two
+/// vocabularies reads as two different items.
 ///
 /// [handlerDefaultItemStatus] renders the column blank rather than writing the
 /// word: printing it fills the column with one repeated value while saying
@@ -80,20 +84,95 @@ class HandlerItemStatusLabel extends StatelessWidget {
 /// "adding" beside a countermand promises the opposite of.
 const handlerPendingInstructionLabel = 'sending';
 
-/// The same column, for a sentence the bridge has not turned into items yet.
+/// Floor for the run-order column, so every item's text starts on the same edge
+/// whether its number is 1 or 37. The number is a row's leading widget, and
+/// letting its own width set the indent lines up no two items.
 ///
-/// It lives beside the item vocabulary rather than in it: no item ever carries
-/// this word, and taking [handlerItemStatusColor] would file the user's own
-/// unextracted sentence under a status the bridge never wrote. What it does
-/// share is the column — the sentence has to start on the same edge as every
-/// real row's text, and that geometry is described here once.
-class HandlerPendingLabel extends StatelessWidget {
-  const HandlerPendingLabel({super.key});
+/// A floor, not a fixed width, for the reason [handlerStatusColumnWidth] is one:
+/// a backlog long enough to run past three digits widens its own row rather than
+/// clipping the one thing every dependency on the sheet points at.
+const handlerRunNumberWidth = 18.0;
+
+/// The run-order column, so a number and the gap a row without one leaves are
+/// one description of one thing. Right-aligned, so the digits sit against the
+/// text they number rather than across a gap from it.
+///
+/// [lineExtent] centres the column on ONE line of the text beside it. A host
+/// that start-aligns its leading — which is what keeps the number beside the
+/// FIRST line of a title that wraps — otherwise hangs a 10px numeral off the top
+/// of a 17px line (see `AbListRow.titleLineExtent`).
+Widget _runColumn(Widget child, double? lineExtent) {
+  final column = ConstrainedBox(
+    constraints: const BoxConstraints(minWidth: handlerRunNumberWidth),
+    child: Align(alignment: Alignment.centerRight, child: child),
+  );
+  return lineExtent == null
+      ? column
+      : SizedBox(height: lineExtent, child: Center(child: column));
+}
+
+/// Where one item stands in the run order, tinted by what became of it.
+///
+/// Position is the fact every row has, no two rows share, and the queue is built
+/// on: Handler works from the top, so the number says what it reaches next — and
+/// it is the only short name a dependency can be pointed at by. Naming one costs
+/// two digits here; naming it by its own text repeats a sentence already on
+/// screen two rows up.
+///
+/// The status WORD is deliberately elsewhere on this surface. It rides on the
+/// row's own line beside what happened, where a reader who wants it has room to
+/// read it — and where a row with nothing to report spends no width saying so.
+/// The column it used to stand in was blank on every `queued` row, which is most
+/// rows for most of a session.
+class HandlerRunNumber extends StatelessWidget {
+  const HandlerRunNumber({
+    super.key,
+    required this.number,
+    required this.status,
+    this.lineExtent,
+  });
+
+  /// 1-based, the way the list is read and the way a dependency names it.
+  final int number;
+
+  /// Colours the number, so the state of the row is legible before its text is.
+  /// Never spelled out here — see the class doc.
+  final String status;
+
+  /// One line of the text beside this, for a host that start-aligns its leading.
+  /// Null where the number and its text are close enough in size that the top
+  /// edge is the same edge.
+  final double? lineExtent;
 
   @override
-  Widget build(BuildContext context) => _statusColumn(
-    _statusWord(handlerPendingInstructionLabel, context.antgrid.textMuted),
+  Widget build(BuildContext context) => _runColumn(
+    Text(
+      '$number',
+      maxLines: 1,
+      softWrap: false,
+      style: AbTokens.monoStyle(
+        fontSize: AbTokens.fontXxs,
+        color: handlerItemStatusColor(context.antgrid, status),
+      ),
+    ),
+    lineExtent,
   );
+}
+
+/// The same column with nothing in it, for a row that has no place in the order
+/// yet. Held rather than skipped: a sentence still being extracted has to start
+/// on the same edge as the items it is about to become, and the word for what is
+/// happening to it ([handlerPendingInstructionLabel]) goes where every other
+/// row's status word goes.
+class HandlerRunNumberGap extends StatelessWidget {
+  const HandlerRunNumberGap({super.key, this.lineExtent});
+
+  /// As [HandlerRunNumber.lineExtent].
+  final double? lineExtent;
+
+  @override
+  Widget build(BuildContext context) =>
+      _runColumn(const SizedBox.shrink(), lineExtent);
 }
 
 /// What a run state is CALLED. `parked` is spoken as "Paused" everywhere — the
