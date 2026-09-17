@@ -1,5 +1,8 @@
+import 'package:antgrid/models/preferences_models.dart';
 import 'package:antgrid/models/workspace_view.dart';
+import 'package:antgrid/providers/providers.dart' show preferencesServiceProvider;
 import 'package:antgrid/providers/session_workspace_state.dart';
+import 'package:antgrid/services/preferences_service.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -61,5 +64,100 @@ void main() {
       container.read(sessionWorkspaceStateProvider(sibling)).panelMode,
       'contextHidden',
     );
+  });
+
+  group('seeding from the project layout', () {
+    Future<PreferencesService> serviceFor(
+      String projectId,
+      ProjectPreferences prefs,
+    ) async {
+      final service = PreferencesService();
+      // File IO is swallowed by the service, so this resolves to defaults on a
+      // host with no path_provider — all it has to establish is the project id.
+      await service.load(projectId);
+      service.update(prefs);
+      addTearDown(service.dispose);
+      return service;
+    }
+
+    ProviderContainer containerFor(PreferencesService service) {
+      final container = ProviderContainer(
+        overrides: [preferencesServiceProvider.overrideWithValue(service)],
+      );
+      addTearDown(container.dispose);
+      return container;
+    }
+
+    // THE regression this file exists for. The shell used to seed a newly
+    // selected session from a post-frame callback, so the switch's first frame
+    // painted the previous session's pane geometry and the remounted agent
+    // terminal pinned that stale width as its grid. Nothing is pumped here on
+    // purpose: the FIRST read must already be right, because that read happens
+    // during the switch's first build.
+    test('the first read of a fresh session is already seeded', () async {
+      final service = await serviceFor(
+        'project-a',
+        const ProjectPreferences(
+          workspaceViewIndex: 0,
+          panelMode: PanelModeNames.contextHidden,
+        ),
+      );
+      final container = containerFor(service);
+
+      final state = container.read(
+        sessionWorkspaceStateProvider((
+          entryId: 'project-a',
+          sessionId: 'never-read-before',
+        )),
+      );
+
+      expect(state.initialized, isTrue);
+      expect(state.panelMode, PanelModeNames.contextHidden);
+      expect(state.selectedView, WorkspaceView.values[0]);
+    });
+
+    // `contextExpanded` leaves no agent panel and no affordance to restore one
+    // but its own toggle, so it is a choice a session makes for itself and
+    // never a layout the next session inherits.
+    test('contextExpanded is downgraded on the way into a new session', () async {
+      final service = await serviceFor(
+        'project-a',
+        const ProjectPreferences(panelMode: PanelModeNames.contextExpanded),
+      );
+      final container = containerFor(service);
+
+      expect(
+        container
+            .read(
+              sessionWorkspaceStateProvider((
+                entryId: 'project-a',
+                sessionId: 's1',
+              )),
+            )
+            .panelMode,
+        PanelModeNames.normal,
+      );
+    });
+
+    // A session is selected while its own project's preference load is still in
+    // flight often enough to matter; seeding it from whatever project the
+    // service currently holds would copy the PREVIOUS project's layout in.
+    test('a session from another project is left unseeded', () async {
+      final service = await serviceFor(
+        'project-a',
+        const ProjectPreferences(panelMode: PanelModeNames.contextHidden),
+      );
+      final container = containerFor(service);
+
+      final state = container.read(
+        sessionWorkspaceStateProvider((
+          entryId: 'project-b',
+          sessionId: 's1',
+        )),
+      );
+
+      expect(state.initialized, isFalse);
+      expect(state.panelMode, isNull);
+    });
   });
 }

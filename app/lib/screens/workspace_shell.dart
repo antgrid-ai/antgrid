@@ -113,7 +113,7 @@ const double _kContextPanelMinWidth = 320.0;
 
 /// Desktop panel arrangement. Persisted by NAME as
 /// `ProjectPreferences.panelMode`, so reordering these is safe; renaming one
-/// drops that stored preference back to unchosen (see `_PanelModeNames` there).
+/// drops that stored preference back to unchosen (see `PanelModeNames` there).
 enum _PanelMode { normal, contextHidden, contextExpanded }
 
 /// The title an escalation is surfaced under — the in-app toast and the OS
@@ -149,22 +149,6 @@ String handlerEscalationTitle(HandlerEscalation esc) {
   // the user has been interrupted and has opened the Handler tab.
   return esc.nonBlocking ? 'Handler has a question' : 'Handler needs you';
 }
-
-/// Downgrades a stored/observed panel-mode name away from `contextExpanded`
-/// before it can seed anything other than the session that actually chose
-/// it — `normal` unchanged otherwise.
-///
-/// `contextExpanded` has no collapsed agent stub and no restore affordance
-/// but its own toggle (`_buildPanels`'s `contextExpanded` case) — a mode
-/// meant to be an explicit, momentary choice for the session that made it,
-/// not a layout to inherit. Without this, expanding the context panel in one
-/// session persists into `ProjectPreferences.panelMode` via [_updatePrefs],
-/// and every *other* uninitialized session in the project — notably a
-/// freshly started one — seeds itself from that same project default
-/// (`_applyPrefs`'s else-branch, and the `activeSessionUiKeyProvider`
-/// listener in `build()`) and opens with its agent panel already gone.
-String? _seedablePanelModeName(String? name) =>
-    name == _PanelMode.contextExpanded.name ? _PanelMode.normal.name : name;
 
 /// Root layout orchestrator.
 ///
@@ -715,54 +699,15 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
 
   // ── Preferences ──────────────────────────────────────────────────────
 
-  /// Apply preferences, updating the local values immediately. Provider state
-  /// initialization is deferred when this runs during build because Riverpod
-  /// forbids notifying listeners while the widget tree is being built.
+  /// Apply the project-wide half of the stored layout.
+  ///
+  /// The per-session half (selected view, panel mode, the touch tablet's pane
+  /// flags) is NOT applied here: `SessionWorkspaceController.build()` seeds
+  /// itself from these same preferences, and [_syncSessionUi] reads it back
+  /// during build. Seeding from both sides raced — this one runs once per
+  /// project load, that one once per session.
   void _applyPrefs(ProjectPreferences prefs) {
     _splitRatio = prefs.splitRatio;
-    // An unrecognized name resolves to null — unchosen, so the viewport default
-    // applies — rather than throwing on prefs written by a newer build.
-    final storedMode = prefs.panelMode;
-    _panelMode = storedMode == null
-        ? null
-        : _PanelMode.values.asNameMap()[storedMode];
-
-    // NOTE: workspaceViewIndex is a raw WorkspaceView ordinal persisted to
-    // disk, so adding/removing enum values shifts it. A stale index can restore
-    // the wrong tab after an upgrade — this bounds check only prevents an
-    // out-of-range crash, not a semantic mismatch (e.g. removing "Services"
-    // shifted later views down by one with no migration). When Services (or any
-    // view) is re-added, remap stored indices in ProjectPreferences.fromJson, or
-    // switch to persisting WorkspaceView.name, rather than relying on this guard.
-    final idx = prefs.workspaceViewIndex;
-    if (idx >= 0 && idx < WorkspaceView.values.length) {
-      _selectedView = _offeredOr(WorkspaceView.values[idx]);
-    }
-    final key = ref.read(activeSessionUiKeyProvider);
-    if (key != null) {
-      final saved = ref.read(sessionWorkspaceStateProvider(key));
-      if (saved.initialized) {
-        _restoreSessionUi(saved);
-      } else {
-        final selectedView = _selectedView;
-        final panelMode = _seedablePanelModeName(_panelMode?.name);
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (!mounted) return;
-          final current = ref.read(sessionWorkspaceStateProvider(key));
-          if (current.initialized) return;
-          ref
-              .read(sessionWorkspaceStateProvider(key).notifier)
-              .update(
-                (s) => s.copyWith(
-                  initialized: true,
-                  selectedView: selectedView,
-                  panelMode: panelMode,
-                ),
-              );
-        });
-      }
-      _sessionUiKey = key;
-    }
     _prefsApplied = true;
   }
 
@@ -778,13 +723,44 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
       ? view
       : WorkspaceView.files;
 
-  void _restoreSessionUi(SessionWorkspaceState state) {
-    _selectedView = _offeredOr(state.selectedView);
-    _panelMode = state.panelMode == null
+  /// Project the active session's stored layout onto this State's fields,
+  /// SYNCHRONOUSLY, from `build()`.
+  ///
+  /// This used to be a `ref.listen` on [activeSessionUiKeyProvider] that
+  /// deferred the whole restore to a post-frame `setState`, because a listener
+  /// fires during build and `setState` there throws. The cost was a real frame:
+  /// the switch's first build painted the PREVIOUS session's pane geometry, and
+  /// the agent terminal — keyed by `terminalId`, so REMOUNTED by the switch —
+  /// pinned that stale width as its grid before the correction arrived. Reading
+  /// the provider here instead makes the first frame the right one.
+  ///
+  /// Safe to re-run on every build: every mutation site writes through
+  /// [_updateSessionUi] before rebuilding, so the provider is always at least as
+  /// new as these fields and this only ever re-applies what is already there.
+  void _syncSessionUi() {
+    final key = ref.watch(activeSessionUiKeyProvider);
+    if (key == null) return;
+    final ui = ref.watch(sessionWorkspaceStateProvider(key));
+    final switched = _sessionUiKey != key;
+    _sessionUiKey = key;
+    _selectedView = _offeredOr(ui.selectedView);
+    // An unrecognized name resolves to null — unchosen, so the viewport default
+    // applies — rather than throwing on prefs written by a newer build.
+    _panelMode = ui.panelMode == null
         ? null
-        : _PanelMode.values.asNameMap()[state.panelMode];
-    _tabletEndDrawerOpen = state.tabletContextOpen;
-    _tabletContextPanelExpanded = state.tabletContextExpanded;
+        : _PanelMode.values.asNameMap()[ui.panelMode];
+    _tabletEndDrawerOpen = ui.tabletContextOpen;
+    _tabletContextPanelExpanded = ui.tabletContextExpanded;
+    if (!switched) return;
+    // The one piece that cannot move during build: the PageView is driven by a
+    // live controller with no clients until this frame has laid out.
+    final page = ui.mobilePage;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || ref.read(activeSessionUiKeyProvider) != key) return;
+      if (_pageController.hasClients && _pageController.page?.round() != page) {
+        _pageController.jumpToPage(page);
+      }
+    });
   }
 
   void _updateSessionUi(
@@ -810,11 +786,11 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
         // Null while unchosen, which copyWith reads as "leave alone" — so a
         // split-drag or tab switch never pins the derived default as if the
         // user had picked it. `contextExpanded` is downgraded to `normal`
-        // rather than passed straight through — see [_seedablePanelModeName]
+        // rather than passed straight through — see [seedablePanelModeName]
         // — so expanding THIS session's context panel can never become the
         // project-wide default a different, freshly started session opens
         // into with its agent panel already gone.
-        panelMode: _seedablePanelModeName(_panelMode?.name),
+        panelMode: seedablePanelModeName(_panelMode?.name),
       ),
     );
   }
@@ -1128,39 +1104,9 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
 
   @override
   Widget build(BuildContext context) {
-    ref.listen<SessionUiKey?>(activeSessionUiKeyProvider, (previous, next) {
-      if (next == null || next == previous) return;
-      _sessionUiKey = next;
-      var saved = ref.read(sessionWorkspaceStateProvider(next));
-      if (!saved.initialized) {
-        final prefsService = ref.read(preferencesServiceProvider);
-        // The session can be selected while this project's asynchronous
-        // preference load is still in flight. `_applyPrefs` will seed it once
-        // the load lands; using `current` here would copy the previous
-        // project's layout into the new session.
-        if (prefsService.projectId != next.entryId) return;
-        final prefs = prefsService.current;
-        final idx = prefs.workspaceViewIndex;
-        saved = saved.copyWith(
-          initialized: true,
-          selectedView: idx >= 0 && idx < WorkspaceView.values.length
-              ? _offeredOr(WorkspaceView.values[idx])
-              : WorkspaceView.files,
-          panelMode: _seedablePanelModeName(prefs.panelMode),
-        );
-        ref
-            .read(sessionWorkspaceStateProvider(next).notifier)
-            .update((_) => saved);
-      }
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted || ref.read(activeSessionUiKeyProvider) != next) return;
-        setState(() => _restoreSessionUi(saved));
-        if (_pageController.hasClients &&
-            _pageController.page?.round() != saved.mobilePage) {
-          _pageController.jumpToPage(saved.mobilePage);
-        }
-      });
-    });
+    // FIRST, before anything below reads a layout field: this is what makes a
+    // session switch land whole in one frame. See [_syncSessionUi].
+    _syncSessionUi();
 
     // Subsequent project switches (A → B while WorkspaceShell stays mounted)
     // bootstrap via this listener. The *initial* mount is handled by the

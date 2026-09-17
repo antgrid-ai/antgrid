@@ -5,10 +5,30 @@ import 'package:flutter/foundation.dart';
 /// what gets written. A drift here only breaks migration of pre-name prefs, and
 /// the shell resolves an unrecognized name to "unchosen", so the blast radius
 /// is a lost legacy preference rather than a crash.
-abstract final class _PanelModeNames {
+abstract final class PanelModeNames {
+  static const normal = 'normal';
   static const contextHidden = 'contextHidden';
   static const contextExpanded = 'contextExpanded';
 }
+
+/// Downgrades a stored panel-mode name away from `contextExpanded` before it
+/// can seed anything other than the session that actually chose it —
+/// unchanged otherwise.
+///
+/// `contextExpanded` has no collapsed agent stub and no restore affordance but
+/// its own toggle (`_buildPanels`'s `contextExpanded` case in
+/// `screens/workspace_shell.dart`) — a mode meant to be an explicit, momentary
+/// choice for the session that made it, not a layout to inherit. Without this,
+/// expanding the context panel in one session persists into
+/// [ProjectPreferences.panelMode] and every *other* session in the project
+/// seeds itself from that project default and opens with its agent panel
+/// already gone.
+///
+/// Lives here rather than in the shell because the seed is applied by
+/// `SessionWorkspaceController.build()` (`providers/session_workspace_state.dart`)
+/// — the shell is no longer the only reader.
+String? seedablePanelModeName(String? name) =>
+    name == PanelModeNames.contextExpanded ? PanelModeNames.normal : name;
 
 class ProjectPreferences {
   final double splitRatio;
@@ -86,17 +106,17 @@ class ProjectPreferences {
     // install. Same reasoning for both legacy bools reading false.
     String? panelMode = switch (json['panelMode']) {
       String s => s,
-      1 => _PanelModeNames.contextHidden,
-      2 => _PanelModeNames.contextExpanded,
+      1 => PanelModeNames.contextHidden,
+      2 => PanelModeNames.contextExpanded,
       _ => null,
     };
     if (panelMode == null) {
       final agentExp = json['agentPanelExpanded'] as bool? ?? false;
       final ctxExp = json['contextPanelExpanded'] as bool? ?? false;
       if (agentExp && !ctxExp) {
-        panelMode = _PanelModeNames.contextHidden;
+        panelMode = PanelModeNames.contextHidden;
       } else if (ctxExp && !agentExp) {
-        panelMode = _PanelModeNames.contextExpanded;
+        panelMode = PanelModeNames.contextExpanded;
       }
     }
 
