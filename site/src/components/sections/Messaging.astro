@@ -1,0 +1,58 @@
+---
+import { Icon } from "astro-icon/components";
+import Eyebrow from "../ui/Eyebrow.astro";
+import Readout from "../ui/Readout.astro";
+import UseCase from "../ui/UseCase.astro";
+
+// Claims verified against antgrid@583e988: bridge/src/mcp/server.ts (tool
+// descriptions: same git repository, this machine or a connected one,
+// messages and replies; remote access is required on the target),
+// docs/architecture.md (the desktop app is the only cross-machine carrier),
+// packages/antgrid-agents/src/agents/registry.ts (only claude-code and codex
+// carry an MCP module). "Session bus" is the code's name; it stays out of copy.
+//
+// The exchange below is illustrative, not a captured run.
+const exchange = [
+  { from: "auth-tokens", agent: "Claude Code", machine: "laptop", kind: "post", body: "The refresh endpoint now returns expiresAt. Update the test expectations." },
+  { from: "checkout-tests", agent: "Codex", machine: "desktop", kind: "reply", body: "Is expiresAt a Unix timestamp or an ISO string?" },
+  { from: "auth-tokens", agent: "Claude Code", machine: "laptop", kind: "reply", body: "ISO 8601, in UTC." },
+];
+---
+{/* Text left, readout right: Worktrees above runs the other way round, so the
+    two sections read as a pair rather than a repeated template. */}
+<section id="messaging" class="reveal mx-auto max-w-shell px-6 py-16 md:py-20">
+  <div class="grid items-center gap-12 md:grid-cols-2">
+    <div>
+      <Eyebrow class="mb-5">Session messaging</Eyebrow>
+      <h2 class="mb-5 font-display text-title font-semibold text-ink">One agent's finding. Another agent's next step.</h2>
+      <p class="mb-6 max-w-xl text-lede text-muted">
+        Your Claude Code and Codex sessions can share findings and ask each other questions while working on the same repository.
+      </p>
+
+      <UseCase class="max-w-xl">One agent changes an API. It tells the agent writing the tests what changed, without you copying messages between terminals.</UseCase>
+    </div>
+
+    <Readout source="Illustrative exchange" state="watching" label="same repository" class="min-w-0">
+      <div class="flex flex-col gap-1.5 p-4 md:p-5">
+        {exchange.map((m) => (
+          <div class="rounded border border-edge-inner bg-chrome px-3 py-2.5 font-mono text-row">
+            <div class="mb-1 flex items-center gap-2.5">
+              <Icon name={m.kind === "post" ? "tabler:mail" : "tabler:corner-down-left"} class="shrink-0 text-muted2" width="13" height="13" />
+              <span class="shrink-0 text-ink2">{m.from}</span>
+              <span class="rounded border border-edge px-1.5 py-0.5 text-marker text-muted2">{m.agent}</span>
+              <span class="flex-1 truncate text-right text-muted2">{m.machine}</span>
+            </div>
+            <p class="text-muted">{m.body}</p>
+          </div>
+        ))}
+      </div>
+
+      <Fragment slot="foot">
+        <span class="flex items-center gap-2">
+          <Icon name="tabler:devices" class="shrink-0 text-faint" width="13" height="13" />
+          <span>Across machines, keep the sending desktop app open and remote access enabled on the receiving machine.</span>
+        </span>
+      </Fragment>
+    </Readout>
+  </div>
+</section>

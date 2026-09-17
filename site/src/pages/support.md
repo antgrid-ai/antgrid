@@ -15,7 +15,7 @@ Need a hand? Email **[contact@radhaai.com](mailto:contact@radhaai.com)** and we'
 
 Antgrid lets you run AI coding agents such as **Claude Code**, **Codex**, and **Cursor** on your own computer, then monitor and control them from your phone, tablet, or desktop over an end-to-end encrypted connection. You can view terminal output, browse files and send instructions.
 
-Start a task with your coding agent. When you're ready, tell **Handler** what's left, how to proceed and when to ask you. It checks the agent's work against your instructions and asks for evidence before moving on. It notifies you when it needs your input or you've told it to check with you. Review its decisions; its judgement can be wrong. [Try Handler on your first task](/get-started#handler).
+Start a task with your coding agent. When you're ready, tell **Handler** what's left, how to proceed and when to ask you. It checks what the agent reports against your instructions and asks for evidence before moving on. It notifies you when it needs your input or you've told it to check with you. Review its decisions; its judgement can be wrong. [Try Handler on your first task](/get-started#handler).
 
 ## Supported platforms
 
