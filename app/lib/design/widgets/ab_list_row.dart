@@ -120,6 +120,21 @@ class AbListRow extends StatefulWidget {
   static double titleLineExtent(BuildContext context) =>
       MediaQuery.textScalerOf(context).scale(AbTokens.fontBody) * _titleHeight;
 
+  /// The title's line metrics, for a leading rendered as TEXT rather than as an
+  /// icon — a number, a rank, a key.
+  ///
+  /// [titleLineExtent] gives such a leading the right BAND; it cannot put the
+  /// glyph on the right line within it. Text of another size, in another family,
+  /// centred in that band lands its baseline wherever its own font's ascent and
+  /// descent happen to fall, which is never where the title's does — the smaller
+  /// face reads as floating above the words it belongs to. Applied as the
+  /// leading's `strutStyle`, this forces the two to share one baseline whatever
+  /// either font's metrics are.
+  static StrutStyle get titleStrut => StrutStyle.fromTextStyle(
+    AbTokens.sansStyle(height: _titleHeight),
+    forceStrutHeight: true,
+  );
+
   /// Overrides [leadingGap] for this row. For a leading that is a dot rather
   /// than a glyph, the default gap is measured against a slot the dot doesn't
   /// fill, so the text reads further away than it looks — see

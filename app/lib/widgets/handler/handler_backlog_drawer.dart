@@ -1351,9 +1351,7 @@ class _PendingInstructionRow extends StatelessWidget {
       // No number: the sentence holds no place in the order until the extractor
       // has decided how many items it is. The column is held open anyway, so
       // the sentence starts on the same edge as the rows it becomes.
-      leading: HandlerRunNumberGap(
-        lineExtent: AbListRow.titleLineExtent(context),
-      ),
+      leading: const HandlerRunNumberGap(),
       title: Text(text, style: AbTokens.sansStyle(color: p.textSecondary)),
       // The user's own sentence, at whatever length they typed it.
       titleMaxLines: 2,
@@ -1366,6 +1364,7 @@ class _PendingInstructionRow extends StatelessWidget {
           color: p.textMuted,
         ),
       ),
+      // Always two lines, so always the start-aligned case above.
       crossAxisAlignment: CrossAxisAlignment.start,
     );
   }
@@ -1547,16 +1546,10 @@ class _BacklogRow extends ConsumerWidget {
     final deps = [
       for (final id in item.dependsOn ?? const <String>[]) labelFor(id),
     ];
+    final meta = _itemMeta(context, item, deps);
     return AbListRow(
       horizontalPadding: AbTokens.space16,
-      // Centred on the title's FIRST line rather than hung off the top of a
-      // block that may be two lines tall — the row is start-aligned, which is
-      // what keeps the number and the menu beside the text they belong to.
-      leading: HandlerRunNumber(
-        number: number,
-        status: item.status,
-        lineExtent: AbListRow.titleLineExtent(context),
-      ),
+      leading: HandlerRunNumber(number: number, status: item.status),
       title: Text(
         item.text,
         // Work that is over and settled recedes: this list is scanned for what
@@ -1575,15 +1568,30 @@ class _BacklogRow extends ConsumerWidget {
       // Nothing else on this row carries the text, so a single clipped line
       // leaves the user reordering and deleting items they cannot read.
       titleMaxLines: 2,
-      subtitle: _itemMeta(context, item, deps),
+      subtitle: meta,
       // The outcome is a sentence the bridge wrote to a length nothing caps,
       // and its verdict is as often at the end as the start ("committed the
       // migration but the push was rejected") — one line clips exactly the half
       // worth reading.
       subtitleMaxLines: 2,
-      // Which puts the number and the menu beside the first line rather than
-      // the middle of a two-line block.
-      crossAxisAlignment: CrossAxisAlignment.start,
+      // Which line the number and the menu stand on, and it turns on whether
+      // this row has a second line at all.
+      //
+      // With one, the text block is taller than the menu button and start is
+      // what keeps both beside the line they qualify rather than adrift in the
+      // gap under it.
+      //
+      // With none, start is what the user sees as broken: the button is then
+      // the tallest thing in the row (24, and 44 once AbTapTarget applies its
+      // mobile floor), so the text hangs off the top of a box the button sized
+      // — eight pixels of air above a one-line item and fifteen below. Nothing
+      // in Flutter can give a widget a hit area taller than its layout box, so
+      // banding the button to the title's line would buy that balance with a
+      // tap target no thumb can find. Centring buys it for nothing, because on
+      // a row of one line the first line IS the centre.
+      crossAxisAlignment: meta == null
+          ? CrossAxisAlignment.center
+          : CrossAxisAlignment.start,
       // Every edit sits behind this menu rather than on the row: a delete one
       // mis-tap away from a scroll would drop work the user asked for.
       trailing: Builder(

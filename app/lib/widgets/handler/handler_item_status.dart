@@ -2,6 +2,7 @@ import 'package:flutter/widgets.dart';
 
 import '../../design/ab_colors.dart';
 import '../../design/ab_tokens.dart';
+import '../../design/widgets/ab_list_row.dart';
 import '../../models/handler_state.dart';
 
 /// The Handler surface's shared status vocabulary — the words and colours every
@@ -103,20 +104,10 @@ const handlerRunNumberWidth = 18.0;
 /// use. Close enough to read as a mistake rather than as a second column. The
 /// text edge is held straight by the column's own width, so nothing is bought
 /// by aligning the digits to each other instead.
-///
-/// [lineExtent] centres the column on ONE line of the text beside it. A host
-/// that start-aligns its leading — which is what keeps the number beside the
-/// FIRST line of a title that wraps — otherwise hangs a 10px numeral off the top
-/// of a 17px line (see `AbListRow.titleLineExtent`).
-Widget _runColumn(Widget child, double? lineExtent) {
-  final column = ConstrainedBox(
-    constraints: const BoxConstraints(minWidth: handlerRunNumberWidth),
-    child: Align(alignment: Alignment.centerLeft, child: child),
-  );
-  return lineExtent == null
-      ? column
-      : SizedBox(height: lineExtent, child: Center(child: column));
-}
+Widget _runColumn(Widget child) => ConstrainedBox(
+  constraints: const BoxConstraints(minWidth: handlerRunNumberWidth),
+  child: Align(alignment: Alignment.centerLeft, child: child),
+);
 
 /// Where one item stands in the run order, tinted by what became of it.
 ///
@@ -136,7 +127,6 @@ class HandlerRunNumber extends StatelessWidget {
     super.key,
     required this.number,
     required this.status,
-    this.lineExtent,
   });
 
   /// 1-based, the way the list is read and the way a dependency names it.
@@ -146,23 +136,22 @@ class HandlerRunNumber extends StatelessWidget {
   /// Never spelled out here — see the class doc.
   final String status;
 
-  /// One line of the text beside this, for a host that start-aligns its leading.
-  /// Null where the number and its text are close enough in size that the top
-  /// edge is the same edge.
-  final double? lineExtent;
-
   @override
   Widget build(BuildContext context) => _runColumn(
     Text(
       '$number',
       maxLines: 1,
       softWrap: false,
+      // On the title's baseline, not centred in its band. A 10px mono numeral
+      // and 14px sans prose are two faces at two sizes, and each finds its own
+      // baseline inside a box of the same height — leaving the number floating
+      // above the words it numbers by whatever the two fonts' metrics differ by.
+      strutStyle: AbListRow.titleStrut,
       style: AbTokens.monoStyle(
         fontSize: AbTokens.fontXxs,
         color: handlerItemStatusColor(context.antgrid, status),
       ),
     ),
-    lineExtent,
   );
 }
 
@@ -172,14 +161,10 @@ class HandlerRunNumber extends StatelessWidget {
 /// happening to it ([handlerPendingInstructionLabel]) goes where every other
 /// row's status word goes.
 class HandlerRunNumberGap extends StatelessWidget {
-  const HandlerRunNumberGap({super.key, this.lineExtent});
-
-  /// As [HandlerRunNumber.lineExtent].
-  final double? lineExtent;
+  const HandlerRunNumberGap({super.key});
 
   @override
-  Widget build(BuildContext context) =>
-      _runColumn(const SizedBox.shrink(), lineExtent);
+  Widget build(BuildContext context) => _runColumn(const SizedBox.shrink());
 }
 
 /// What a run state is CALLED. `parked` is spoken as "Paused" everywhere — the
