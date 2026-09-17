@@ -13,6 +13,7 @@ class SessionWorkspaceState {
     this.initialized = false,
     this.selectedView = WorkspaceView.files,
     this.panelMode,
+    this.splitRatio,
     this.mobilePage = 0,
     this.tabletContextOpen = false,
     this.tabletContextExpanded = false,
@@ -23,6 +24,20 @@ class SessionWorkspaceState {
   final bool initialized;
   final WorkspaceView selectedView;
   final String? panelMode;
+
+  /// Where this session's desktop divider sits, as a left-pane fraction.
+  ///
+  /// Per session, because the context panel is per session: a width chosen with
+  /// a diff open is the wrong width for a session running a full-screen TUI, and
+  /// sharing one made every switch resize the agent terminal. Seeded once from
+  /// `ProjectPreferences.splitRatio` and never written back — the project value
+  /// is a STATIC starting point for new sessions, not a running average of the
+  /// last drag anywhere.
+  ///
+  /// Null only while unseeded (see `SessionWorkspaceController.build()`); the
+  /// shell falls back to the project value there.
+  final double? splitRatio;
+
   final int mobilePage;
   final bool tabletContextOpen;
   final bool tabletContextExpanded;
@@ -33,6 +48,7 @@ class SessionWorkspaceState {
     bool? initialized,
     WorkspaceView? selectedView,
     String? panelMode,
+    double? splitRatio,
     int? mobilePage,
     bool? tabletContextOpen,
     bool? tabletContextExpanded,
@@ -44,6 +60,7 @@ class SessionWorkspaceState {
     initialized: initialized ?? this.initialized,
     selectedView: selectedView ?? this.selectedView,
     panelMode: panelMode ?? this.panelMode,
+    splitRatio: splitRatio ?? this.splitRatio,
     mobilePage: mobilePage ?? this.mobilePage,
     tabletContextOpen: tabletContextOpen ?? this.tabletContextOpen,
     tabletContextExpanded: tabletContextExpanded ?? this.tabletContextExpanded,
@@ -118,6 +135,7 @@ class SessionWorkspaceController extends Notifier<SessionWorkspaceState> {
           ? WorkspaceView.values[idx]
           : WorkspaceView.files,
       panelMode: seedablePanelModeName(prefs.panelMode),
+      splitRatio: prefs.splitRatio,
     );
   }
 

@@ -139,6 +139,28 @@ void main() {
       );
     });
 
+    // The divider is per session, and the project value is a STARTING point
+    // rather than a shared one: dragging in one session must leave every other
+    // session — and the project's own seed — exactly where they were. Sharing
+    // it is what made switching sessions resize the agent terminal.
+    test('a drag moves one session and neither its sibling nor the seed', () async {
+      final service = await serviceFor(
+        'project-a',
+        const ProjectPreferences(splitRatio: 0.5),
+      );
+      final container = containerFor(service);
+      const dragged = (entryId: 'project-a', sessionId: 'dragged');
+      const sibling = (entryId: 'project-a', sessionId: 'sibling');
+
+      container
+          .read(sessionWorkspaceStateProvider(dragged).notifier)
+          .update((s) => s.copyWith(splitRatio: 0.8));
+
+      expect(container.read(sessionWorkspaceStateProvider(dragged)).splitRatio, 0.8);
+      expect(container.read(sessionWorkspaceStateProvider(sibling)).splitRatio, 0.5);
+      expect(service.current.splitRatio, 0.5);
+    });
+
     // A session is selected while its own project's preference load is still in
     // flight often enough to matter; seeding it from whatever project the
     // service currently holds would copy the PREVIOUS project's layout in.

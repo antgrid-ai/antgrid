@@ -175,7 +175,20 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     with WidgetsBindingObserver {
   late PageController _pageController;
   WorkspaceView _selectedView = WorkspaceView.files;
+
+  /// The PROJECT's stored divider position — a static starting point handed to
+  /// each new session, never rewritten by a drag. See [_sessionSplitRatio].
   double _splitRatio = 0.5;
+
+  /// The ACTIVE session's own divider position, mirrored from
+  /// [SessionWorkspaceState.splitRatio] by [_syncSessionUi]. Null only before a
+  /// session has been seeded, where [_splitRatio] stands in.
+  ///
+  /// Per session because the context panel is: sharing one ratio meant every
+  /// switch between two sessions that had been sized differently resized the
+  /// agent terminal, and a width chosen for a diff is the wrong width for a
+  /// full-screen TUI.
+  double? _sessionSplitRatio;
 
   /// Null until the user picks a mode (or a stored pref supplies one), so
   /// [_effectivePanelMode] can keep re-deriving the viewport default. Resolving
@@ -749,6 +762,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     _panelMode = ui.panelMode == null
         ? null
         : _PanelMode.values.asNameMap()[ui.panelMode];
+    _sessionSplitRatio = ui.splitRatio;
     _tabletEndDrawerOpen = ui.tabletContextOpen;
     _tabletContextPanelExpanded = ui.tabletContextExpanded;
     if (!switched) return;
@@ -775,13 +789,17 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
 
   void _updatePrefs() {
     // `projectPreferencesProvider` skips the demo, so `PreferencesService` is
-    // still bound to the LAST REAL project — a split drag or tab switch inside
-    // the sample project would save the demo's layout over that project's.
+    // still bound to the LAST REAL project — a tab switch inside the sample
+    // project would save the demo's layout over that project's.
     if (ref.read(demoModeProvider)) return;
     final service = ref.read(preferencesServiceProvider);
     service.update(
       service.current.copyWith(
-        splitRatio: _splitRatio,
+        // `splitRatio` is deliberately absent — omitted, copyWith leaves the
+        // stored value alone. It is the STATIC seed each new session starts
+        // from; the live width belongs to the session (see
+        // [_sessionSplitRatio]), and writing a drag back here is what made one
+        // session's divider move every other session's.
         workspaceViewIndex: _selectedView.index,
         // Null while unchosen, which copyWith reads as "leave alone" — so a
         // split-drag or tab switch never pins the derived default as if the
@@ -2378,7 +2396,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     };
   }
 
-  /// Show/hide the context panel, preserving [_splitRatio] across the round
+  /// Show/hide the context panel, preserving [_sessionSplitRatio] across the round
   /// trip. Hiding from [_PanelMode.contextExpanded] is allowed — the agent
   /// panel comes back with it, which is the only sane restore for a mode whose
   /// own affordances are off screen.
@@ -2432,7 +2450,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
         return [
           Expanded(
             child: ResizablePane(
-              initialRatio: _splitRatio,
+              initialRatio: _sessionSplitRatio ?? _splitRatio,
               // Floors under the plain 0.2/0.8 ratio: AgentBar is a row of
               // fixed-size controls (mark, approval badge, breadcrumb, mode
               // control, handler control, menu button) that don't shrink
@@ -2443,10 +2461,12 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
               // stopping the drag.
               minLeftWidth: _kAgentPanelMinWidth,
               minRightWidth: _kContextPanelMinWidth,
-              onRatioChanged: (r) {
-                _splitRatio = r;
-                _updatePrefs();
-              },
+              // The session's width alone. The project's stored ratio is a seed
+              // for sessions that don't have one yet and is deliberately left
+              // where it is — writing it back here is what made a drag in one
+              // session resize the context panel in all of them.
+              onRatioChanged: (r) =>
+                  _updateSessionUi((s) => s.copyWith(splitRatio: r)),
               left: _agentPanel(),
               right: WorkspacePanel(
                 key: _contextPanelKey,
