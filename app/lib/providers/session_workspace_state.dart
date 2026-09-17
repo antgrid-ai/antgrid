@@ -2,9 +2,18 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/preferences_models.dart';
 import '../models/workspace_view.dart';
+import '../storage/session_layout_store.dart';
+import '../util/detached.dart';
 import 'agent_transport.dart';
 import 'providers.dart';
 import 'sessions.dart';
+
+/// Overridden in `main()` with the opened store. The default remembers for the
+/// launch and persists nothing — see [SessionLayoutStore.inMemory] for why this
+/// one degrades where the other stores throw.
+final sessionLayoutStoreProvider = Provider<SessionLayoutStore>(
+  (_) => SessionLayoutStore.inMemory(),
+);
 
 typedef SessionUiKey = ({String entryId, String sessionId});
 
@@ -96,6 +105,13 @@ class SessionWorkspaceController extends Notifier<SessionWorkspaceState> {
   /// changed in this session.
   @override
   SessionWorkspaceState build() {
+    _store = ref.read(sessionLayoutStoreProvider);
+    // What this session was last left at OUTRANKS the project seed, and needs
+    // no project load to answer — so a restart restores the real layout on the
+    // first frame rather than flashing the project default first.
+    final remembered = _store.read(key.entryId, key.sessionId);
+    if (remembered != null) return _restore(remembered);
+
     final prefs = ref.read(preferencesServiceProvider);
     // Seed with a ONE-SHOT read, then listen WITHOUT fireImmediately — same
     // reason as `CollapsedDrawerIdsNotifier`: a fireImmediately callback runs
@@ -116,6 +132,26 @@ class SessionWorkspaceController extends Notifier<SessionWorkspaceState> {
     // The listener above picks it up when the load lands.
     if (prefs.projectId != key.entryId) return const SessionWorkspaceState();
     return _seed(prefs.current);
+  }
+
+  late SessionLayoutStore _store;
+
+  /// A layout this session was left at on a previous launch. Only the fields
+  /// the user arranged are stored, so everything else takes its default — see
+  /// [SessionLayout].
+  SessionWorkspaceState _restore(SessionLayout layout) {
+    final idx = layout.workspaceViewIndex;
+    return SessionWorkspaceState(
+      initialized: true,
+      selectedView: idx != null && idx >= 0 && idx < WorkspaceView.values.length
+          ? WorkspaceView.values[idx]
+          : WorkspaceView.files,
+      // Not downgraded on the way out: `contextExpanded` is refused as an
+      // INHERITED default, but this is the session that chose it, coming back
+      // to the layout it was left in.
+      panelMode: layout.panelMode,
+      splitRatio: layout.splitRatio,
+    );
   }
 
   SessionWorkspaceState _seed(ProjectPreferences prefs) {
@@ -140,8 +176,30 @@ class SessionWorkspaceController extends Notifier<SessionWorkspaceState> {
   }
 
   void update(SessionWorkspaceState Function(SessionWorkspaceState) change) {
-    state = change(state);
+    final next = change(state);
+    final persistable = _layoutOf(next);
+    final changed = persistable != _layoutOf(state);
+    state = next;
+    // A terminal pin or a mobile page turn moves `state` without moving
+    // anything persisted; writing on every update would rewrite the whole map
+    // for changes this store does not hold.
+    if (!changed) return;
+    // Fire-and-forget through `detached`: `update` is called from `setState`
+    // bodies and tap handlers, which discard the future, so a rejected write
+    // would otherwise reach PlatformDispatcher.onError as a fatal with no
+    // in-app frames to point at.
+    detached(
+      'SessionWorkspaceController',
+      'session layout write failed',
+      () => _store.write(key.entryId, key.sessionId, persistable),
+    );
   }
+
+  static SessionLayout _layoutOf(SessionWorkspaceState s) => SessionLayout(
+    panelMode: s.panelMode,
+    splitRatio: s.splitRatio,
+    workspaceViewIndex: s.selectedView.index,
+  );
 }
 
 final sessionWorkspaceStateProvider =
@@ -165,5 +223,14 @@ void clearSessionWorkspaceState(
 ) {
   ref.invalidate(
     sessionWorkspaceStateProvider((entryId: entryId, sessionId: sessionId)),
+  );
+  // The session is gone, so its remembered layout names nothing and nothing
+  // else will ever prune it — this is the only bound on the store other than
+  // its cap.
+  final store = ref.read(sessionLayoutStoreProvider);
+  detached(
+    'clearSessionWorkspaceState',
+    'session layout forget failed',
+    () => store.forget(entryId, sessionId),
   );
 }

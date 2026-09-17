@@ -3,6 +3,7 @@ import 'package:antgrid/models/workspace_view.dart';
 import 'package:antgrid/providers/providers.dart' show preferencesServiceProvider;
 import 'package:antgrid/providers/session_workspace_state.dart';
 import 'package:antgrid/services/preferences_service.dart';
+import 'package:antgrid/storage/session_layout_store.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -80,9 +81,16 @@ void main() {
       return service;
     }
 
-    ProviderContainer containerFor(PreferencesService service) {
+    ProviderContainer containerFor(
+      PreferencesService service, {
+      SessionLayoutStore? store,
+    }) {
       final container = ProviderContainer(
-        overrides: [preferencesServiceProvider.overrideWithValue(service)],
+        overrides: [
+          preferencesServiceProvider.overrideWithValue(service),
+          if (store != null)
+            sessionLayoutStoreProvider.overrideWithValue(store),
+        ],
       );
       addTearDown(container.dispose);
       return container;
@@ -159,6 +167,80 @@ void main() {
       expect(container.read(sessionWorkspaceStateProvider(dragged)).splitRatio, 0.8);
       expect(container.read(sessionWorkspaceStateProvider(sibling)).splitRatio, 0.5);
       expect(service.current.splitRatio, 0.5);
+    });
+
+    // A remembered layout is the one the user themselves arranged, so it beats
+    // the project seed outright — and it has to be readable SYNCHRONOUSLY, or
+    // the restart flashes the project default before correcting, which is the
+    // same one-frame lag the switch used to have.
+    test('a remembered layout outranks the project seed', () async {
+      final service = await serviceFor(
+        'project-a',
+        const ProjectPreferences(
+          splitRatio: 0.5,
+          panelMode: PanelModeNames.normal,
+        ),
+      );
+      final store = SessionLayoutStore.inMemory();
+      await store.write(
+        'project-a',
+        's1',
+        const SessionLayout(
+          panelMode: PanelModeNames.contextHidden,
+          splitRatio: 0.72,
+        ),
+      );
+
+      final state = containerFor(service, store: store).read(
+        sessionWorkspaceStateProvider((entryId: 'project-a', sessionId: 's1')),
+      );
+
+      expect(state.initialized, isTrue);
+      expect(state.splitRatio, 0.72);
+      expect(state.panelMode, PanelModeNames.contextHidden);
+    });
+
+    // `contextExpanded` is refused as an INHERITED default (see above), but a
+    // session coming back to the layout it was itself left in is not
+    // inheriting anything.
+    test('a session restores its own contextExpanded', () async {
+      final service = await serviceFor('project-a', const ProjectPreferences());
+      final store = SessionLayoutStore.inMemory();
+      await store.write(
+        'project-a',
+        's1',
+        const SessionLayout(panelMode: PanelModeNames.contextExpanded),
+      );
+
+      expect(
+        containerFor(service, store: store)
+            .read(
+              sessionWorkspaceStateProvider((
+                entryId: 'project-a',
+                sessionId: 's1',
+              )),
+            )
+            .panelMode,
+        PanelModeNames.contextExpanded,
+      );
+    });
+
+    // Nothing else walks this store against a live session list, so a delete
+    // that does not prune leaks an entry that can never be matched again.
+    test('deleting a session forgets its stored layout', () async {
+      final service = await serviceFor('project-a', const ProjectPreferences());
+      final store = SessionLayoutStore.inMemory();
+      await store.write(
+        'project-a',
+        'doomed',
+        const SessionLayout(splitRatio: 0.3),
+      );
+      final container = containerFor(service, store: store);
+
+      clearSessionWorkspaceState(container, 'project-a', 'doomed');
+      await pumpEventQueue();
+
+      expect(store.read('project-a', 'doomed'), isNull);
     });
 
     // A session is selected while its own project's preference load is still in
