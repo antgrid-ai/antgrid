@@ -94,8 +94,15 @@ const handlerPendingInstructionLabel = 'sending';
 const handlerRunNumberWidth = 18.0;
 
 /// The run-order column, so a number and the gap a row without one leaves are
-/// one description of one thing. Right-aligned, so the digits sit against the
-/// text they number rather than across a gap from it.
+/// one description of one thing.
+///
+/// LEFT-aligned, against the instinct to hang numerals in a right-aligned
+/// gutter: every other line on this sheet — the section heading, the progress
+/// label, the composer — starts on the same margin, and a number pushed to the
+/// right edge of its column starts one pixel off the rail the quoted sentences
+/// use. Close enough to read as a mistake rather than as a second column. The
+/// text edge is held straight by the column's own width, so nothing is bought
+/// by aligning the digits to each other instead.
 ///
 /// [lineExtent] centres the column on ONE line of the text beside it. A host
 /// that start-aligns its leading — which is what keeps the number beside the
@@ -104,7 +111,7 @@ const handlerRunNumberWidth = 18.0;
 Widget _runColumn(Widget child, double? lineExtent) {
   final column = ConstrainedBox(
     constraints: const BoxConstraints(minWidth: handlerRunNumberWidth),
-    child: Align(alignment: Alignment.centerRight, child: child),
+    child: Align(alignment: Alignment.centerLeft, child: child),
   );
   return lineExtent == null
       ? column
