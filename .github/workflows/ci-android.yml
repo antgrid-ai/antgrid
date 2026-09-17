@@ -6,10 +6,13 @@ name: CI — android
 # runs nightly and never on PRs, so the toolchain is set up once per PR, not
 # twice. Shared setup lives in .github/actions/setup-android.
 #
-# The AAB build is half the wall-clock of this workflow and is skipped on PRs
-# that leave the native surface alone (see the `native` step). It stays
-# unconditional on push to main: deploy-android.yml no longer fires there, so
-# this is the only thing standing between main and an unverified release build.
+# The AAB build is half the wall-clock of this workflow, and only the runs that
+# can change its outcome pay for it (see the `release_build` step): a PR into
+# main, which IS the release candidate, and any diff that reaches the native
+# surface. A Dart-only PR into development runs analyze and test alone. The
+# build stays unconditional on push to main: deploy-android.yml no longer fires
+# there, so this is the last thing standing between main and an unverified
+# release build.
 
 on:
   pull_request:
@@ -45,20 +48,19 @@ jobs:
         with:
           fetch-depth: 0
 
-      # Splits the release build in two. The 4-ABI AAB costs ~11 of this
-      # workflow's ~23 minutes, and most of that is Rust and bundle packaging
-      # that only the paths below can affect — so a Dart-only PR builds a
-      # single-ABI release APK instead (see the two build steps). That keeps the
-      # part that DOES depend on app/lib and packages/ — Dart AOT via
-      # gen_snapshot, tree-shaking, R8 and manifest merge, none of which
-      # `flutter test` exercises because it runs on the JIT VM — while dropping
-      # three ABIs' worth of native compilation nothing in the diff can reach.
+      # Decides whether this run pays for the release build. The 4-ABI AAB
+      # costs ~11 of this workflow's ~23 minutes, and what it proves — Dart AOT
+      # via gen_snapshot, tree-shaking, R8 and manifest merge, none of which
+      # `flutter test` reaches because it runs on the JIT VM — is re-proved on
+      # the way into main before any of it can ship. So a Dart-only PR into
+      # development skips it and answers in roughly half the time.
       #
-      # Anything that is not a pull_request — push to main above — always builds
-      # the full AAB, and so does any case this step cannot resolve: a gate that
-      # gave up must never be the reason a release build went unverified.
-      - name: Does this change touch the native surface?
-        id: native
+      # It runs for: a PR into main, any diff touching the native surface,
+      # anything that is not a pull_request (push to main above), and any case
+      # this step cannot resolve — a gate that gave up must never be the reason
+      # a release build went unverified.
+      - name: Does this run need the release build?
+        id: release_build
         run: |
           set -euo pipefail
           # -f disables globbing so NATIVE_PATHS word-splits into pathspecs git
@@ -69,10 +71,17 @@ jobs:
           NATIVE_PATHS='app/android app/pubspec.yaml app/pubspec.lock
             .github/actions/setup-android .github/workflows/ci-android.yml'
 
-          full() { echo "$1 — building the full AAB."; echo "changed=true" >> "$GITHUB_OUTPUT"; exit 0; }
+          full() { echo "$1 — building the full AAB."; echo "run=true" >> "$GITHUB_OUTPUT"; exit 0; }
 
           [ "${GITHUB_EVENT_NAME}" = pull_request ] || full "Not a pull request"
           [ -n "${GITHUB_BASE_REF:-}" ] || full "Event carries no base ref"
+
+          # A PR into main is the release candidate, and the ruleset on main
+          # admits no other way in (pull_request + non_fast_forward). GitHub
+          # builds the MERGE commit for a pull_request event, so this is the
+          # last look at the exact tree that becomes main — and the reason a
+          # development PR may skip the build without shipping it unverified.
+          [ "${GITHUB_BASE_REF}" != main ] || full "Pull request targets main"
 
           # The fork point, deliberately NOT github.event.pull_request.base.sha:
           # that is the base tip recorded when the PR was OPENED and it never
@@ -89,11 +98,11 @@ jobs:
 
           touched=$(git diff --name-only "$base" HEAD -- $NATIVE_PATHS)
           if [ -z "$touched" ]; then
-            echo "Native surface untouched — skipping the release AAB build."
-            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Native surface untouched on a development PR — analyze and test only."
+            echo "run=false" >> "$GITHUB_OUTPUT"
           else
             echo "$touched" | awk 'NR<=20'
-            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "run=true" >> "$GITHUB_OUTPUT"
           fi
 
       # The release AAB builds super_native_extensions (Rust) for 4 ABIs plus
@@ -102,6 +111,7 @@ jobs:
       # this build never uses — deliberately NOT touching the Android SDK/NDK,
       # Java, or the Flutter toolcache (hostedtoolcache) that setup-android needs.
       - name: Free disk space
+        if: steps.release_build.outputs.run == 'true'
         run: |
           sudo rm -rf /usr/share/dotnet /usr/share/swift /usr/local/.ghcup \
             /opt/ghc /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
@@ -163,16 +173,8 @@ jobs:
         working-directory: app
         run: flutter test
 
-      # The cheap half of the split: no native input moved, so one ABI proves
-      # the release toolchain as well as four would. 16 KB alignment is NOT
-      # checked here — the libs are the prebuilt ones this diff cannot touch.
-      - name: Build release APK (arm64 only)
-        if: steps.native.outputs.changed != 'true'
-        working-directory: app
-        run: flutter build apk --release --target-platform android-arm64 --dart-define=SOURCE_COMMIT=${{ github.sha }}
-
       - name: Build release AAB
-        if: steps.native.outputs.changed == 'true'
+        if: steps.release_build.outputs.run == 'true'
         working-directory: app
         run: flutter build appbundle --release --dart-define=SOURCE_COMMIT=${{ github.sha }}
 
@@ -181,7 +183,7 @@ jobs:
       # the max-page-size flags. 32-bit armeabi-v7a is exempt: 16 KB pages are a
       # 64-bit-only feature.
       - name: Verify 16 KB alignment
-        if: steps.native.outputs.changed == 'true'
+        if: steps.release_build.outputs.run == 'true'
         run: |
           READELF="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
           unzip -o app/build/app/outputs/bundle/release/app-release.aab 'base/lib/*/*.so' -d /tmp/aab
@@ -198,7 +200,7 @@ jobs:
           exit $fail
 
       - uses: actions/upload-artifact@v7
-        if: steps.native.outputs.changed == 'true'
+        if: steps.release_build.outputs.run == 'true'
         with:
           name: app-release-aab
           path: app/build/app/outputs/bundle/release/app-release.aab

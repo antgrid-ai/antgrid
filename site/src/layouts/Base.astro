@@ -13,8 +13,10 @@ interface Props {
   ogImageAlt?: string;
   path?: string;
   robots?: string;
+  article?: { publishedAt: string; updatedAt?: string; author: string };
+  rss?: boolean;
 }
-const { title, description, ogImage, ogImageAlt, path, robots } = Astro.props;
+const { title, description, ogImage, ogImageAlt, path, robots, article, rss } = Astro.props;
 ---
 <html lang="en">
   <head>
@@ -28,7 +30,7 @@ const { title, description, ogImage, ogImageAlt, path, robots } = Astro.props;
     <Font cssVariable="--font-archivo" preload />
     <Font cssVariable="--font-inter" preload />
     <Font cssVariable="--font-jetbrains" preload />
-    <Seo title={title} description={description} ogImage={ogImage} ogImageAlt={ogImageAlt} path={path} robots={robots} />
+    <Seo title={title} description={description} ogImage={ogImage} ogImageAlt={ogImageAlt} path={path} robots={robots} article={article} rss={rss} />
     {/* Two things follow the reader's own OS off this one attribute: the
         mockup's window chrome, because the app's does (Windows paints its own
         caption buttons, macOS keeps the real NSWindow traffic lights —
