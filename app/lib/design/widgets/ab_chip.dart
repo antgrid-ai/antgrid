@@ -4,7 +4,7 @@ import '../ab_tokens.dart';
 import '../ab_colors.dart';
 import 'ab_focus_ring.dart';
 
-enum _AbChipVariant { system, label, toggle }
+enum _AbChipVariant { system, label, toggle, choice }
 
 enum AbChipSize { sm, md }
 
@@ -19,9 +19,20 @@ enum AbChipSize { sm, md }
 /// - [AbChip.toggle] — mono uppercase inside a bordered pill, with
 ///   interactive selected/hover/focus states. For boolean toggles
 ///   (search options, filter chips).
+/// - [AbChip.choice] — sans, as-written casing, inside a bordered pill.
+///   For a one-of-N pick whose options are human-language phrases.
+///
+/// [toggle] and [choice] share the pill and differ only in how the label is
+/// set, because they answer different questions. A toggle's label is a flag
+/// name the user already knows (`CASE`, `REGEX`) and is legible as a shape at
+/// 10px; uppercasing it costs nothing. A choice's label is a phrase the user
+/// is reading to decide with, and uppercase plus letter-spacing flattens the
+/// word shapes that make a phrase scannable — so it keeps its own casing, its
+/// own size, and a text color that clears AA on the surfaces the pill sits on.
+/// Picking [toggle] for a multi-word phrase is the mistake this exists to stop.
 ///
 /// The two-axis split (font × chrome) is intentional: callers should not
-/// have to mix-and-match independent flags. If you reach for a 4th
+/// have to mix-and-match independent flags. If you reach for a 5th
 /// variant, that's the signal for a new named constructor.
 ///
 /// Disabled-state contract:
@@ -59,6 +70,20 @@ class AbChip extends StatefulWidget {
     this.enabled = true,
   }) : _variant = _AbChipVariant.toggle;
 
+  /// [color] accents the CHOSEN cell only. Left null, an unselected cell still
+  /// paints at [AbColors.textSecondary] rather than dimming with it — every
+  /// option in a one-of-N row has to stay readable, since the ones not taken
+  /// are what the user is deciding between.
+  const AbChip.choice({
+    super.key,
+    required this.label,
+    required this.selected,
+    required this.onTap,
+    this.color,
+    this.size = AbChipSize.md,
+    this.enabled = true,
+  }) : _variant = _AbChipVariant.choice;
+
   final String label;
   final Color? color;
   final AbChipSize size;
@@ -81,6 +106,7 @@ class _AbChipState extends State<AbChip> {
       _AbChipVariant.system => _buildMonoText(c),
       _AbChipVariant.label => _buildSansText(c),
       _AbChipVariant.toggle => _buildPill(c, filled: widget.selected),
+      _AbChipVariant.choice => _buildChoicePill(context),
     };
 
     final interactive = widget.enabled && widget.onTap != null;
@@ -91,7 +117,9 @@ class _AbChipState extends State<AbChip> {
 
     return Semantics(
       button: true,
-      selected: widget._variant == _AbChipVariant.toggle
+      selected:
+          widget._variant == _AbChipVariant.toggle ||
+              widget._variant == _AbChipVariant.choice
           ? widget.selected
           : null,
       child: FocusableActionDetector(
@@ -168,6 +196,43 @@ class _AbChipState extends State<AbChip> {
           fontWeight: FontWeight.w600,
           color: c,
         ).copyWith(letterSpacing: 0.8),
+      ),
+    );
+  }
+
+  Widget _buildChoicePill(BuildContext context) {
+    final p = context.antgrid;
+    // Unselected falls back to [AbColors.textSecondary], not [textMuted]:
+    // muted measures 3.1-3.7:1 on the surfaces these rows sit on, under the
+    // 4.5:1 AA floor for text this size, and an option nobody can read is not
+    // an option. A caller passing [color] is naming the chosen cell's accent,
+    // so the same fallback also carries the chosen-but-parked state, where the
+    // fill says "picked" while the neutral tone withholds "in effect".
+    final c = widget.color ?? p.textSecondary;
+    final (hPad, vPad, fs) = switch (widget.size) {
+      AbChipSize.sm => (AbTokens.space8, AbTokens.space4, AbTokens.fontXs),
+      AbChipSize.md => (AbTokens.space10, AbTokens.space4, AbTokens.fontSm),
+    };
+    return Container(
+      padding: EdgeInsets.symmetric(horizontal: hPad, vertical: vPad),
+      decoration: BoxDecoration(
+        color: widget.selected ? c.withAlpha(38) : null,
+        // An unselected edge stays neutral whatever the accent is: five borders
+        // in the accent would read as five chosen cells.
+        border: Border.all(
+          color: widget.selected ? c : p.borderStrong,
+          width: 1,
+        ),
+        borderRadius: AbTokens.borderRadius3,
+      ),
+      child: Text(
+        widget.label,
+        style: AbTokens.sansStyle(
+          fontSize: fs,
+          fontWeight: widget.selected ? FontWeight.w600 : FontWeight.w500,
+          color: c,
+          height: 1.2,
+        ),
       ),
     );
   }

@@ -2,6 +2,7 @@ import 'package:flutter/widgets.dart';
 
 import '../../design/ab_colors.dart';
 import '../../design/ab_tokens.dart';
+import '../../design/widgets/ab_list_row.dart';
 import '../../models/handler_state.dart';
 
 /// The Handler surface's shared status vocabulary — the words and colours every
@@ -51,9 +52,13 @@ Widget _statusWord(String word, Color color) => Text(
   style: AbTokens.monoStyle(fontSize: AbTokens.fontXxs, color: color),
 );
 
-/// One backlog item's status, drawn identically on the Handler card and in the
-/// backlog drawer — the same item described two ways on two surfaces of one
-/// feature reads as two different items.
+/// One backlog item's status, in a column of its own — for the Handler card,
+/// where every item is one line and a column is the only place a second fact
+/// can stand. The backlog drawer gives each item a line under its text and puts
+/// the same word there, beside what happened; what stands in ITS leading column
+/// is [HandlerRunNumber]. The words and the colours are shared either way, which
+/// is what the surfaces owe each other — the same item described in two
+/// vocabularies reads as two different items.
 ///
 /// [handlerDefaultItemStatus] renders the column blank rather than writing the
 /// word: printing it fills the column with one repeated value while saying
@@ -80,20 +85,86 @@ class HandlerItemStatusLabel extends StatelessWidget {
 /// "adding" beside a countermand promises the opposite of.
 const handlerPendingInstructionLabel = 'sending';
 
-/// The same column, for a sentence the bridge has not turned into items yet.
+/// Floor for the run-order column, so every item's text starts on the same edge
+/// whether its number is 1 or 37. The number is a row's leading widget, and
+/// letting its own width set the indent lines up no two items.
 ///
-/// It lives beside the item vocabulary rather than in it: no item ever carries
-/// this word, and taking [handlerItemStatusColor] would file the user's own
-/// unextracted sentence under a status the bridge never wrote. What it does
-/// share is the column — the sentence has to start on the same edge as every
-/// real row's text, and that geometry is described here once.
-class HandlerPendingLabel extends StatelessWidget {
-  const HandlerPendingLabel({super.key});
+/// A floor, not a fixed width, for the reason [handlerStatusColumnWidth] is one:
+/// a backlog long enough to run past three digits widens its own row rather than
+/// clipping the one thing every dependency on the sheet points at.
+const handlerRunNumberWidth = 18.0;
+
+/// The run-order column, so a number and the gap a row without one leaves are
+/// one description of one thing.
+///
+/// LEFT-aligned, against the instinct to hang numerals in a right-aligned
+/// gutter: every other line on this sheet — the section heading, the progress
+/// label, the composer — starts on the same margin, and a number pushed to the
+/// right edge of its column starts one pixel off the rail the quoted sentences
+/// use. Close enough to read as a mistake rather than as a second column. The
+/// text edge is held straight by the column's own width, so nothing is bought
+/// by aligning the digits to each other instead.
+Widget _runColumn(Widget child) => ConstrainedBox(
+  constraints: const BoxConstraints(minWidth: handlerRunNumberWidth),
+  child: Align(alignment: Alignment.centerLeft, child: child),
+);
+
+/// Where one item stands in the run order, tinted by what became of it.
+///
+/// Position is the fact every row has, no two rows share, and the queue is built
+/// on: Handler works from the top, so the number says what it reaches next — and
+/// it is the only short name a dependency can be pointed at by. Naming one costs
+/// two digits here; naming it by its own text repeats a sentence already on
+/// screen two rows up.
+///
+/// The status WORD is deliberately elsewhere on this surface. It rides on the
+/// row's own line beside what happened, where a reader who wants it has room to
+/// read it — and where a row with nothing to report spends no width saying so.
+/// The column it used to stand in was blank on every `queued` row, which is most
+/// rows for most of a session.
+class HandlerRunNumber extends StatelessWidget {
+  const HandlerRunNumber({
+    super.key,
+    required this.number,
+    required this.status,
+  });
+
+  /// 1-based, the way the list is read and the way a dependency names it.
+  final int number;
+
+  /// Colours the number, so the state of the row is legible before its text is.
+  /// Never spelled out here — see the class doc.
+  final String status;
 
   @override
-  Widget build(BuildContext context) => _statusColumn(
-    _statusWord(handlerPendingInstructionLabel, context.antgrid.textMuted),
+  Widget build(BuildContext context) => _runColumn(
+    Text(
+      '$number',
+      maxLines: 1,
+      softWrap: false,
+      // On the title's baseline, not centred in its band. A 10px mono numeral
+      // and 14px sans prose are two faces at two sizes, and each finds its own
+      // baseline inside a box of the same height — leaving the number floating
+      // above the words it numbers by whatever the two fonts' metrics differ by.
+      strutStyle: AbListRow.titleStrut,
+      style: AbTokens.monoStyle(
+        fontSize: AbTokens.fontXxs,
+        color: handlerItemStatusColor(context.antgrid, status),
+      ),
+    ),
   );
+}
+
+/// The same column with nothing in it, for a row that has no place in the order
+/// yet. Held rather than skipped: a sentence still being extracted has to start
+/// on the same edge as the items it is about to become, and the word for what is
+/// happening to it ([handlerPendingInstructionLabel]) goes where every other
+/// row's status word goes.
+class HandlerRunNumberGap extends StatelessWidget {
+  const HandlerRunNumberGap({super.key});
+
+  @override
+  Widget build(BuildContext context) => _runColumn(const SizedBox.shrink());
 }
 
 /// What a run state is CALLED. `parked` is spoken as "Paused" everywhere — the
@@ -133,6 +204,55 @@ Color handlerRunStateColor(
   HandlerRunState.needsYou => asksOnly ? p.textSecondary : p.accent,
   HandlerRunState.parked => p.warning,
 };
+
+/// The word one armed session is reported with on a surface that stays on
+/// screen, and the tone it is painted in.
+///
+/// [handlerRunStateLabel] answers for the run state alone, and for three
+/// sessions that answer is a lie. An agent that reports nothing the handler can
+/// act on, and one whose monitoring has not come up or has gone down, both sit
+/// at `watching` for as long as they stay armed — and "Watching" over a session
+/// nobody is watching is the exact claim [HandlerObservability] and
+/// [HandlerAvailability] exist to retire. The overrides live with the word
+/// rather than at whichever surface remembered them.
+///
+/// Only `watching` is overridden, because the other three report something that
+/// has already happened: a session cannot be handling a pause that never
+/// reached the handler, so a coverage caveat there would describe its past
+/// instead of its present.
+({String label, Color tone}) handlerSessionStatusWord(
+  AbColors p,
+  HandlerSessionState session,
+) {
+  // `asksOnly` reads the rows the capability gate has already been over, so a
+  // question this app has no way to answer keeps the loud word.
+  final asksOnly = session.asksOnly;
+  if (session.runState != HandlerRunState.watching) {
+    return (
+      label: handlerRunStateLabel(session.runState, asksOnly: asksOnly),
+      tone: handlerRunStateColor(p, session.runState, asksOnly: asksOnly),
+    );
+  }
+  if (session.observability == HandlerObservability.unsupported) {
+    return (label: 'Not watched', tone: p.warning);
+  }
+  return switch (session.availability?.state) {
+    // Null is "nobody said" and keeps the ordinary word: an older bridge that
+    // never reports availability must not read as a broken one.
+    null || HandlerAvailabilityState.available => (
+      label: handlerRunStateLabel(HandlerRunState.watching),
+      tone: handlerRunStateColor(p, HandlerRunState.watching),
+    ),
+    HandlerAvailabilityState.unavailable => (
+      label: 'Monitoring unavailable',
+      tone: p.warning,
+    ),
+    HandlerAvailabilityState.preparing || HandlerAvailabilityState.unknown => (
+      label: 'Waiting for agent',
+      tone: p.warning,
+    ),
+  };
+}
 
 /// What a park is BLAMED on, in the words every surface that names one uses.
 ///

@@ -655,9 +655,12 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      await tester.tap(find.text('PROOF IT WORKS'));
+      await tester.tap(find.text('Proof it works'));
       await tester.pumpAndSettle();
-      await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
+      final armButton = find.widgetWithText(AbButton, 'Arm Handler');
+      await tester.ensureVisible(armButton);
+      await tester.pumpAndSettle();
+      await tester.tap(armButton);
       await tester.pumpAndSettle();
 
       expect(armFrame(transport)['role'], 'qa');
@@ -687,9 +690,9 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      await tester.tap(find.text('WHAT COULD BREAK'));
+      await tester.tap(find.text('What could break'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('STAYS IN SCOPE'));
+      await tester.tap(find.text('Stays in scope'));
       await tester.pumpAndSettle();
       final armButton = find.widgetWithText(AbButton, 'Arm Handler');
       await tester.ensureVisible(armButton);
@@ -720,13 +723,13 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('NOTHING EXTRA'), findsNothing);
+      expect(find.text('Nothing extra'), findsNothing);
       for (final label in const [
-        'STAYS IN SCOPE',
-        'PROOF IT WORKS',
-        'WHAT COULD BREAK',
-        'READY TO SHIP',
-        'YOUR OWN',
+        'Stays in scope',
+        'Proof it works',
+        'What could break',
+        'Ready to ship',
+        'Your own',
       ]) {
         expect(find.text(label), findsOneWidget, reason: label);
       }
@@ -780,7 +783,7 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      await tester.tap(find.text('YOUR OWN'));
+      await tester.tap(find.text('Your own'));
       await tester.pumpAndSettle();
       await tester.enterText(
         find.byKey(const ValueKey('handlerOwnLensField')),
@@ -834,7 +837,7 @@ void main() {
       await tester.pumpAndSettle();
       // "Your own" reveals the panel — the free-text field is no longer always
       // on screen (redesign spec §3, §6).
-      await tester.tap(find.text('YOUR OWN'));
+      await tester.tap(find.text('Your own'));
       await tester.pumpAndSettle();
       await tester.enterText(
         find.byType(AbTextField),

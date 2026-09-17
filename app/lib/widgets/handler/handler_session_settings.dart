@@ -425,9 +425,8 @@ class _HandlerLensControlState extends ConsumerState<HandlerLensControl> {
           (isOwn
               ? _ownSelected
               : !_ownSelected && pick != null && pick.roleId == id);
-      return AbChip.toggle(
+      return AbChip.choice(
         label: label,
-        size: AbChipSize.md,
         selected: selected,
         // The accent marks the one lens actually running. A parked chip keeps
         // the muted default with its fill: chosen, and not in effect.
@@ -486,6 +485,9 @@ class _HandlerLensControlState extends ConsumerState<HandlerLensControl> {
           // Chips rather than a segmented control: the row is five stances —
           // the four presets and "Your own" — and none of
           // them fits a control built for two or three closed options.
+          // [AbChip.choice] rather than [AbChip.toggle]: these labels are
+          // phrases the user reads to decide with, not flag names they already
+          // know, so they keep their casing and a size that can be read.
           child: Wrap(
             spacing: AbTokens.space6,
             runSpacing: AbTokens.space6,
@@ -535,8 +537,8 @@ class _FloorLine extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Text(
-    "Always: whether each step serves what you asked for, and whether an "
-    "item's evidence closes it. On top of that:",
+    "Always: your goal, and whether an item's evidence closes it. "
+    'A lens adds one question:',
     style: AbTokens.sansStyle(
       fontSize: AbTokens.fontXs,
       color: context.antgrid.textSecondary,
@@ -633,8 +635,12 @@ class _OwnLensPanelState extends State<_OwnLensPanel> {
         Padding(
           padding: const EdgeInsets.only(bottom: AbTokens.space6),
           child: Text(
-            'Write how Handler should judge. It can only make Handler '
-            'stricter, never looser.',
+            // Carries the one-rule-per-line format, which the hint used to
+            // teach by being three lines long. A hint cannot hold a format
+            // rule: it is gone on the first keystroke, which is the moment the
+            // rule starts to matter.
+            'One rule per line. They can only make Handler stricter, never '
+            'looser.',
             style: AbTokens.sansStyle(
               fontSize: AbTokens.fontXs,
               color: context.antgrid.textSecondary,
@@ -649,13 +655,11 @@ class _OwnLensPanelState extends State<_OwnLensPanel> {
           minLines: 3,
           maxLines: 6,
           showClearButton: true,
-          // One example per line, so the shape teaches ONE RULE PER LINE by
-          // showing it rather than saying it (redesign spec §7) — a reader who
-          // has started typing already has it.
-          hintText:
-              'not done until the tests pass\n'
-              'dig deeper, no single-pass answers\n'
-              'ask before touching the payment path',
+          // One line, not three: a hint as tall as [minLines] fills the box,
+          // so an empty field reads as one already written in. The register is
+          // what one example still earns its place for — a rule is a short
+          // lowercase condition, not a paragraph.
+          hintText: 'not done until the tests pass',
           // The bridge clips a longer brief rather than refusing it, so this
           // is a courtesy bound and not a gate: it shows the user where the
           // prompt stops.
