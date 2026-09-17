@@ -1,9 +1,12 @@
 import { afterAll, test, expect } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readTranscriptTail, TAIL_BYTES } from "../src/transcript-tail";
-import { lastAssistantText } from "../../packages/antgrid-agents/src/agents/claude-code/transcript";
+import { readTailUntil, readTranscriptTail, TAIL_BYTES, TAIL_WINDOW_BYTES } from "../src/transcript-tail";
+import {
+  lastAssistantText,
+  readLastClaudeMessages,
+} from "../../packages/antgrid-agents/src/agents/claude-code/transcript";
 
 const tempDirs: string[] = [];
 
@@ -150,4 +153,63 @@ test("reads only the tail of an oversized file and drops the partial leading lin
 test("string content (not a parts array) is read", async () => {
   const path = fixture([JSON.stringify({ type: "assistant", message: { content: "plain string body" } })]);
   expect(await lastAssistantText(path)).toBe("plain string body");
+});
+
+// A reader that wants N MESSAGES widens its window until it has them. The fixed
+// TAIL_BYTES window was the handler judge's whole corpus, and a transcript's
+// tool traffic shares its lines with its prose, so the window it filled held
+// almost none of what the reader keeps.
+function toolResult(bytes: number): string {
+  return JSON.stringify({
+    type: "user",
+    message: { content: [{ type: "tool_result", tool_use_id: "t", content: "z".repeat(bytes) }] },
+  });
+}
+
+test("widens past the first window when it yields fewer messages than asked for", async () => {
+  const lines: string[] = [];
+  for (let i = 0; i < 30; i++) {
+    lines.push(toolResult(40_000));
+    lines.push(assistant(`msg-${i}`));
+  }
+  const path = fixture(lines);
+
+  // The regression this closes: one TAIL_BYTES window is nowhere near twenty.
+  const inFirstWindow = (await readTranscriptTail(path))
+    .split("\n")
+    .filter((l) => l.includes('"text"')).length;
+  expect(inFirstWindow).toBeLessThan(20);
+
+  const msgs = await readLastClaudeMessages(path, 20);
+  expect(msgs.length).toBe(20);
+  expect(msgs[msgs.length - 1]).toBe("msg-29");
+  expect(msgs[0]).toBe("msg-10");
+});
+
+// Widening has to terminate on a short file as well as on a satisfied count, or
+// every read of a small transcript pays for the whole ladder.
+test("stops at the file's start and returns what is there", async () => {
+  const path = fixture([assistant("one"), assistant("two"), assistant("three")]);
+  expect(await readLastClaudeMessages(path, 20)).toEqual(["one", "two", "three"]);
+});
+
+test("a window that already holds enough is the only one read", async () => {
+  const path = fixture([assistant("a"), assistant("b"), assistant("c")]);
+  expect(await readLastClaudeMessages(path, 2)).toEqual(["b", "c"]);
+});
+
+// The ceiling is the point of the ladder: a wider bound, never no bound. Without
+// it, twenty enormous messages would be an unbounded read on the judge's hot path.
+test("never reads past the widest window", async () => {
+  const path = join(tempDir("tt-"), "huge.jsonl");
+  const line = `${toolResult(64 * 1024)}\n`;
+  const chunk = Buffer.from(line.repeat(16), "utf8"); // ~1MB
+  writeFileSync(path, "");
+  for (let i = 0; i < 6; i++) appendFileSync(path, chunk);
+
+  const seen: number[] = [];
+  const out = await readTailUntil(path, 20, (raw) => { seen.push(raw.length); return []; });
+  expect(out).toEqual([]);
+  expect(seen.length).toBe(TAIL_WINDOW_BYTES.length);
+  expect(Math.max(...seen)).toBeLessThanOrEqual(TAIL_WINDOW_BYTES[TAIL_WINDOW_BYTES.length - 1]!);
 });
