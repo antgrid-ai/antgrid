@@ -175,12 +175,26 @@ Future<void> _pumpHalf(
 AbChip _chip(WidgetTester tester, String label) =>
     tester.widget<AbChip>(find.widgetWithText(AbChip, label));
 
-const _defaultChip = 'NOTHING EXTRA';
 const _ownChip = 'YOUR OWN';
+
+/// Every chip the row offers when the machine has advertised all four presets.
+/// There is no chip for the unnamed default — the floor line carries that.
+const _allChips = [
+  'STAYS IN SCOPE',
+  'PROOF IT WORKS',
+  'WHAT COULD BREAK',
+  'READY TO SHIP',
+  _ownChip,
+];
 
 /// The "Your own" panel's field, keyed rather than positional: it only mounts
 /// once that chip is selected, unlike the always-on field this replaced.
 Finder get _ownField => find.byKey(const ValueKey('handlerOwnLensField'));
+
+/// Whether the cursor is in the "Your own" field. Read off the node the panel
+/// hands the field, so it answers for the field the user would type into.
+bool _ownFocus(WidgetTester tester) =>
+    tester.widget<AbTextField>(_ownField).focusNode?.hasFocus ?? false;
 
 /// Selects the sixth chip so the panel (and its field) mount.
 Future<void> _selectOwn(WidgetTester tester) async {
@@ -343,20 +357,19 @@ void main() {
     testWidgets('a healthy judge marks the running lens and nothing else', (
       tester,
     ) async {
-      await _pump(tester, value: _value(judgeTool: 'claude'));
+      await _pump(
+        tester,
+        value: _value(judgeTool: 'claude', lens: (roleId: 'pm', brief: null)),
+      );
       final p = kDefaultPalette;
-      expect(_chip(tester, _defaultChip).selected, isTrue);
-      expect(_chip(tester, _defaultChip).color, p.accent);
+      expect(_chip(tester, 'STAYS IN SCOPE').selected, isTrue);
+      expect(_chip(tester, 'STAYS IN SCOPE').color, p.accent);
       // Exactly one: the accent is what says "this is what is running", and two
       // of them would be two answers to one question.
       final accented = tester
           .widgetList<AbChip>(find.byType(AbChip))
           .where((c) => c.color == p.accent);
       expect(accented, hasLength(1));
-      // "Nothing extra" is one of the two picks whose caption is empty — the
-      // floor line above the chips already says it (§7) — so neither the old
-      // null-branch blurb nor the parked one may render.
-      expect(find.text(handlerLensBlurb(null)), findsNothing);
       expect(find.text(handlerLensParkedBlurb), findsNothing);
     });
 
@@ -432,7 +445,7 @@ void main() {
         expect(chip.enabled, isFalse);
         expect(chip.selected, isFalse);
       }
-      // "Your own" is one of the disabled six — nothing here can be picked,
+      // "Your own" is disabled with the rest — nothing here can be picked,
       // including the panel a tap on it would otherwise reveal.
       expect(find.text(_ownChip), findsOneWidget);
       expect(_ownField, findsNothing);
@@ -453,8 +466,7 @@ void main() {
       expect(find.text('PROOF IT WORKS'), findsOneWidget);
       expect(find.text('WHAT COULD BREAK'), findsNothing);
       expect(find.text('READY TO SHIP'), findsNothing);
-      expect(find.text(_defaultChip), findsOneWidget);
-      // Neither preset id, so unconditional regardless of what the machine
+      // No preset id, so unconditional regardless of what the machine
       // advertised (redesign spec §7).
       expect(find.text(_ownChip), findsOneWidget);
     });
@@ -476,15 +488,16 @@ void main() {
       }
       expect(find.text(handlerLensUnknownBlurb), findsOneWidget);
 
-      // One tap on the default is what replaces it.
-      await tester.tap(find.text(_defaultChip));
+      // One tap on any chip is what replaces it — the pick has to be a change
+      // even though this app cannot say what it is replacing.
+      await tester.tap(find.text('STAYS IN SCOPE'));
       await tester.pump();
       expect(
         handlerSessionSettingsEdit(
           _value(judgeTool: 'claude', lens: (roleId: 'ship-it', brief: null)),
           sent!,
         ).role,
-        '',
+        'pm',
       );
     });
 
@@ -626,23 +639,14 @@ void main() {
       expect(sent?.judgeModel, isNull);
     });
 
-    testWidgets('the six chips are one radio group', (tester) async {
+    testWidgets('the chips are one radio group', (tester) async {
       // Redesign spec §3.2, §9: one selection lives at a time, whichever of
-      // the six it lands on — never a preset row plus a separate disclosure.
-      const sixLabels = [
-        'NOTHING EXTRA',
-        'STAYS IN SCOPE',
-        'PROOF IT WORKS',
-        'WHAT COULD BREAK',
-        'READY TO SHIP',
-        'YOUR OWN',
-      ];
+      // them it lands on — never a preset row plus a separate disclosure.
       await _pump(tester, value: _value(judgeTool: 'claude'));
-      expect(_chip(tester, 'NOTHING EXTRA').selected, isTrue);
 
       await tester.tap(find.text('WHAT COULD BREAK'));
       await tester.pump();
-      for (final label in sixLabels) {
+      for (final label in _allChips) {
         expect(
           _chip(tester, label).selected,
           label == 'WHAT COULD BREAK',
@@ -652,9 +656,23 @@ void main() {
 
       await tester.tap(find.text(_ownChip));
       await tester.pump();
-      for (final label in sixLabels) {
+      for (final label in _allChips) {
         expect(_chip(tester, label).selected, label == _ownChip, reason: label);
       }
+    });
+
+    testWidgets('the row offers no chip for adding nothing', (tester) async {
+      // The floor line above the chips is what says a session with no lens is
+      // still judged, so a chip restating it was a choice already made.
+      await _pump(tester, value: _value(judgeTool: 'claude'));
+      expect(find.text('NOTHING EXTRA'), findsNothing);
+      expect(find.byType(AbChip), findsNWidgets(_allChips.length));
+      // The stored default: every chip unpicked rather than one standing in
+      // for "none", and no blurb claiming a lens is running.
+      for (final chip in tester.widgetList<AbChip>(find.byType(AbChip))) {
+        expect(chip.selected, isFalse);
+      }
+      expect(find.text(handlerLensBlurb(null)), findsNothing);
     });
 
     testWidgets('the own-lens panel shows only while its chip is picked', (
@@ -670,9 +688,57 @@ void main() {
       await tester.pump();
       expect(_ownField, findsNothing);
 
-      await tester.tap(find.text(_defaultChip));
+      await tester.tap(find.text('STAYS IN SCOPE'));
       await tester.pump();
       expect(_ownField, findsNothing);
+    });
+
+    testWidgets('picking "Your own" puts the cursor in the field', (
+      tester,
+    ) async {
+      // Typing is the only reason that chip reveals a field, so the tap that
+      // reveals it is the tap that should land in it.
+      await _pump(tester, value: _value(judgeTool: 'claude'));
+      await _selectOwn(tester);
+      await tester.pump();
+
+      expect(_ownFocus(tester), isTrue);
+    });
+
+    testWidgets('tapping the chip already picked focuses the field again', (
+      tester,
+    ) async {
+      await _pump(tester, value: _value(judgeTool: 'claude'));
+      await _selectOwn(tester);
+      await tester.pump();
+
+      tester.widget<AbTextField>(_ownField).focusNode!.unfocus();
+      await tester.pump();
+      expect(_ownFocus(tester), isFalse);
+
+      // Nothing remounts on this tap — the panel was already there — so the
+      // mount-time request cannot be what answers it.
+      await _selectOwn(tester);
+      await tester.pump();
+      expect(_ownFocus(tester), isTrue);
+    });
+
+    testWidgets('a stored own lens opens the panel without taking focus', (
+      tester,
+    ) async {
+      // No tap happened here: the sheet was opened to READ, and taking focus
+      // would raise the keyboard over what the user came to look at.
+      await _pump(
+        tester,
+        value: _value(
+          judgeTool: 'claude',
+          lens: (roleId: null, brief: 'watch the migrations'),
+        ),
+      );
+      await tester.pump();
+
+      expect(_ownField, findsOneWidget);
+      expect(_ownFocus(tester), isFalse);
     });
 
     testWidgets(

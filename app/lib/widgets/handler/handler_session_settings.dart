@@ -206,13 +206,15 @@ class HandlerSessionSettings extends StatelessWidget {
   );
 }
 
-/// What Handler holds every session to, the six-way pick for what it adds on
-/// top of that, and the lines that qualify it: the per-preset caption, the
-/// "Your own" panel, and the parked notice when the judge can't run headless.
+/// What Handler holds every session to, the pick for what it adds on top of
+/// that, and the lines that qualify it: the per-preset caption, the "Your own"
+/// panel, and the parked notice when the judge can't run headless.
 ///
-/// The four presets, [handlerLensDefaultLabel] and the user-authored
-/// [handlerLensOwnLabel] are ONE radio group — six chips behaving identically,
-/// never five plus a disclosure (redesign spec §2, §3.2). A lens ADDS
+/// The four presets and the user-authored [handlerLensOwnLabel] are ONE radio
+/// group — chips behaving identically, never presets plus a disclosure
+/// (redesign spec §2, §3.2). There is no chip for adding NOTHING: that is the
+/// floor line's own subject and the state a session starts in, so a chip for it
+/// offered the user a choice that was already made. A lens ADDS
 /// questions and nothing else — the bridge's rules own where handling gives
 /// way to escalating — so nothing here may read as a dial over how much the
 /// session decides alone.
@@ -284,6 +286,15 @@ class _HandlerLensControlState extends ConsumerState<HandlerLensControl> {
   /// never hands this straight to [HandlerLensControl.onChanged]; it sends the
   /// `"; "`-joined string instead (§8, [handlerJoinOwnLensLines]).
   late final TextEditingController _ownController;
+
+  /// Bumped on every tap of the sixth chip, which is what moves the cursor into
+  /// the panel's field. A counter rather than an autofocus flag for two
+  /// reasons: the chip stays tappable once selected, and a second tap arrives
+  /// with the field already mounted, where nothing would fire again; and a
+  /// panel mounted by a STORED user lens (`_ownSelected` true from
+  /// [initState]) must not steal focus and raise the keyboard on a sheet the
+  /// user only opened to read.
+  int _ownFocusTaps = 0;
 
   static bool _picksOwn(HandlerLensPick? pick) =>
       pick != null && pick.roleId == null && (pick.brief?.isNotEmpty ?? false);
@@ -363,10 +374,9 @@ class _HandlerLensControlState extends ConsumerState<HandlerLensControl> {
 
     // Only the intersection of what this build knows and what this machine
     // named, so a newer app can never send an id the far end would refuse.
-    // "Nothing extra" and "Your own" are unconditional: neither is a wire role
-    // id, so neither is gated by what the bridge advertised.
+    // "Your own" is unconditional: it is no wire role id, so nothing the bridge
+    // advertised gates it.
     final offered = <(String, String?)>[
-      (handlerLensDefaultLabel, null),
       for (final lens in HandlerLens.values)
         if (advertised?.contains(handlerLensToWire(lens)) ?? false)
           (handlerLensLabel(lens), handlerLensToWire(lens)),
@@ -394,7 +404,10 @@ class _HandlerLensControlState extends ConsumerState<HandlerLensControl> {
 
     void selectOwn() {
       widget.onRoleTapped?.call();
-      setState(() => _ownSelected = true);
+      setState(() {
+        _ownSelected = true;
+        _ownFocusTaps++;
+      });
       widget.onChanged((
         judgeTool: widget.value.judgeTool,
         judgeModel: widget.value.judgeModel,
@@ -443,7 +456,9 @@ class _HandlerLensControlState extends ConsumerState<HandlerLensControl> {
     } else {
       nextPassEligible = true;
       caption = pick.roleId == null
-          ? null // "Nothing extra" — the floor line above already says it
+          // Nothing on top of the floor, which the line above already states —
+          // and with no chip standing for it, no chip paints as chosen either.
+          ? null
           : handlerLensBlurb(handlerLensFromWire(pick.roleId));
     }
     if (nextPassEligible && widget.appliesNextPass) {
@@ -468,8 +483,8 @@ class _HandlerLensControlState extends ConsumerState<HandlerLensControl> {
         ),
         Padding(
           padding: _gutter,
-          // Chips rather than a segmented control: the row is six stances —
-          // "Nothing extra", the four presets and "Your own" — and none of
+          // Chips rather than a segmented control: the row is five stances —
+          // the four presets and "Your own" — and none of
           // them fits a control built for two or three closed options.
           child: Wrap(
             spacing: AbTokens.space6,
@@ -484,6 +499,7 @@ class _HandlerLensControlState extends ConsumerState<HandlerLensControl> {
         if (_ownSelected)
           _OwnLensPanel(
             controller: _ownController,
+            focusTaps: _ownFocusTaps,
             enabled: !unreported,
             commitOnEdit: widget.commitBriefOnEdit,
             onEdited: widget.onBriefEdited,
@@ -534,6 +550,7 @@ class _FloorLine extends StatelessWidget {
 class _OwnLensPanel extends StatefulWidget {
   const _OwnLensPanel({
     required this.controller,
+    required this.focusTaps,
     required this.enabled,
     required this.commitOnEdit,
     required this.onCommit,
@@ -541,6 +558,12 @@ class _OwnLensPanel extends StatefulWidget {
   });
 
   final TextEditingController controller;
+
+  /// How many times the "Your own" chip has been tapped. Every increase —
+  /// including the one that mounted this panel — puts the cursor in the field;
+  /// see [_HandlerLensControlState._ownFocusTaps] for why it is a count.
+  final int focusTaps;
+
   final bool enabled;
 
   /// See [HandlerLensControl.commitBriefOnEdit].
@@ -561,6 +584,23 @@ class _OwnLensPanelState extends State<_OwnLensPanel> {
   // Owned rather than passed in: focus is this panel's own ephemera, not part
   // of the draft that survives a preset switch — unlike [widget.controller].
   late final FocusNode _focusNode = FocusNode()..addListener(_onFocusChanged);
+
+  @override
+  void initState() {
+    super.initState();
+    // The tap that mounted this panel. Requesting on a node no [Focus] has
+    // adopted yet is the supported order — [FocusNode] holds the request until
+    // it is reparented, which is exactly what happens when this builds.
+    if (widget.focusTaps > 0) _focusNode.requestFocus();
+  }
+
+  @override
+  void didUpdateWidget(_OwnLensPanel old) {
+    super.didUpdateWidget(old);
+    // A second tap on the chip already showing: the panel never unmounted, so
+    // this is the only thing left that can answer it.
+    if (widget.focusTaps != old.focusTaps) _focusNode.requestFocus();
+  }
 
   void _onFocusChanged() {
     // Losing focus is this multi-line field's "done": Enter has to insert a

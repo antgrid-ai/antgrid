@@ -669,12 +669,12 @@ void main() {
       await confirmArmed(tester, transport);
     });
 
-    testWidgets('a lens moved away from and back still rides the arm', (
+    testWidgets('the last lens tapped is the one that rides the arm', (
       tester,
     ) async {
-      // The default is a real answer, not the absence of one: the bridge may
-      // hold a lens this app has never been told about, so landing back on the
-      // rules alone has to go out as a clear.
+      // The row is a radio and the arm collects rather than commits, so only
+      // the final pick may reach the wire — an earlier one arriving instead
+      // would arm the session under a lens the user moved off.
       final (transport, container, context) = await pumpArm(tester);
       await advertiseLenses(tester, transport);
 
@@ -689,21 +689,24 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.text('WHAT COULD BREAK'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('NOTHING EXTRA'));
+      await tester.tap(find.text('STAYS IN SCOPE'));
       await tester.pumpAndSettle();
-      await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
+      final armButton = find.widgetWithText(AbButton, 'Arm Handler');
+      await tester.ensureVisible(armButton);
+      await tester.pumpAndSettle();
+      await tester.tap(armButton);
       await tester.pumpAndSettle();
 
-      expect(armFrame(transport)['role'], '');
+      expect(armFrame(transport)['role'], 'pm');
       await confirmArmed(tester, transport);
     });
 
-    testWidgets('the default picked over a cold cache goes out as a clear', (
+    testWidgets('the arm sheet offers no chip for adding nothing', (
       tester,
     ) async {
-      // Nothing is selected when this app has not been told what the session
-      // runs, so the one tap that says "the rules alone" is the only thing that
-      // can replace a lens the bridge is holding.
+      // A session with no lens is still judged — the floor line above the row
+      // says so — so a chip for it asked the user to choose the state they are
+      // already in.
       final (transport, container, context) = await pumpArm(tester);
       await advertiseLenses(tester, transport);
 
@@ -716,13 +719,44 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      await tester.tap(find.text('NOTHING EXTRA'));
-      await tester.pumpAndSettle();
-      await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
+
+      expect(find.text('NOTHING EXTRA'), findsNothing);
+      for (final label in const [
+        'STAYS IN SCOPE',
+        'PROOF IT WORKS',
+        'WHAT COULD BREAK',
+        'READY TO SHIP',
+        'YOUR OWN',
+      ]) {
+        expect(find.text(label), findsOneWidget, reason: label);
+      }
+    });
+
+    testWidgets('the arm sheet opens with the cursor in the instruction box', (
+      tester,
+    ) async {
+      // The sheet exists to be answered with a sentence; making the user aim
+      // at the box first is a step between them and the only act on it.
+      final (transport, container, context) = await pumpArm(tester);
+      await advertiseLenses(tester, transport);
+
+      unawaited(
+        armWithSheet(
+          context: context,
+          container: container,
+          terminalId: 't1',
+          agentObservable: true,
+        ),
+      );
       await tester.pumpAndSettle();
 
-      expect(armFrame(transport)['role'], '');
-      await confirmArmed(tester, transport);
+      expect(
+        tester
+            .widget<EditableText>(find.byType(EditableText).first)
+            .focusNode
+            .hasFocus,
+        isTrue,
+      );
     });
 
     testWidgets('a multi-line draft survives the sheet echoing it back', (
