@@ -1407,7 +1407,9 @@ const HandlerSnapshotMessage = BaseMessage.extend({
 // the snapshots are: the wrap-up is what DISARMS the session, so by the time the
 // report is worth reading its session is gone from `sessions` and nothing else on
 // this frame names it. The activity row that carries the same prose cannot stand
-// in — `handler:activity` is not replayed, and its jsonl is never read back.
+// in — `handler:activity` is not replayed, and the jsonl behind it is read back
+// only as the newest HANDLER_HISTORY_RECORDS of one project's feed, which a
+// finished session's report is not guaranteed to still be inside.
 //
 // What this shape freezes, deliberately: MAX_STORED_WRAPUPS (5) records, each up
 // to 4 outcome groups x 8 sampled items x 120 chars, plus 3 blocked reasons and a

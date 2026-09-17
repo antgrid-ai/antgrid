@@ -1940,12 +1940,17 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // by the user's own agent onto their own disk. Refusing would lock them
         // out of their own record rather than out of a paid capability.
         const history = readRecentActivity(abDir, project.id, HANDLER_HISTORY_RECORDS);
-        sendAb(createMessage("handler:history:page", {
+        // Answered to the CLIENT that asked, the way `terminal:history:request`
+        // answers: a page is up to HANDLER_HISTORY_RECORDS rows of prose, every
+        // attached app re-asks on each of its own reconnects, and a broadcast
+        // would spend that on every peer to be dropped by all but one on its
+        // requestId.
+        sendAbToItsChannel(createMessage("handler:history:page", {
           projectId: project.id,
           requestId: parsed.data.requestId,
           records: history.records,
           truncated: history.truncated,
-        }));
+        }), client);
         break;
       }
       case "terminal:start": {
