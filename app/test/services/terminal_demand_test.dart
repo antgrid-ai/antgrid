@@ -122,6 +122,32 @@ void main() {
     await session.close();
   });
 
+  // Retiring a display disposes the engine and leaves an empty replacement, so
+  // a pane that only claims its lease from a post-frame callback paints a blank
+  // terminal for one frame and restores the screen on the next -- a black gap
+  // on every session switch, worst on the agent terminal, whose pane is keyed
+  // by terminal id and so remounts whenever the session changes.
+  test('a remembered screen is painted before the lease is claimed', () async {
+    service.setDisplayInterest('pane', 'agent');
+    await accept('agent');
+    await frame('agent');
+    expect(service.currentState.tabs['agent']!.ghostty.plainText, contains('agent screen'));
+
+    service.setDisplayInterest('pane', null);
+    expect(TerminalService.hiddenScreens.contains(service, 'agent'), isTrue);
+    // The engine the next pane will mount against: a fresh one, holding
+    // nothing.
+    expect(service.currentState.tabs['agent']!.ghostty.plainText, isNot(contains('agent screen')));
+
+    service.primeDisplay('agent');
+
+    expect(service.currentState.tabs['agent']!.ghostty.plainText, contains('agent screen'));
+    // Painted, NOT claimed: the lease resolves a frame later and does the whole
+    // restore itself, so the frame has to still be there for it.
+    expect(TerminalService.hiddenScreens.contains(service, 'agent'), isTrue);
+    expect(messages('subscribe'), hasLength(1));
+  });
+
   test('discovery preserves metadata without screen demand', () {
     expect(service.currentState.tabs, hasLength(3));
     expect(messages('subscribe'), isEmpty);

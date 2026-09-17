@@ -34,6 +34,12 @@ class TerminalScreenCache {
     return frame;
   }
 
+  /// What [take] would return, left where it is.
+  ///
+  /// For a caller that wants to PAINT a remembered screen without claiming it:
+  /// the claim belongs to the display lease, which resolves a frame later.
+  TerminalFrameMessage? peek(Object owner, String id) => _frames[(owner, id)];
+
   void put(Object owner, String id, TerminalFrameMessage frame) {
     take(owner, id);
     final size = _size(frame);
