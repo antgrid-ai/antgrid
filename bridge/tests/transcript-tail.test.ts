@@ -186,6 +186,21 @@ test("widens past the first window when it yields fewer messages than asked for"
   expect(msgs[0]).toBe("msg-10");
 });
 
+// The worst case the ladder exists for, and the one a "stop on an empty window"
+// rule silently failed: a single tool result larger than the narrowest window
+// leaves it holding no line boundary at all, so the window yields "" and the
+// reader must widen rather than conclude the transcript is empty.
+test("widens past a window that landed inside one oversized line", async () => {
+  const lines: string[] = [];
+  for (let i = 0; i < 5; i++) lines.push(assistant(`msg-${i}`));
+  lines.push(toolResult(TAIL_BYTES + 50_000));
+  const path = fixture(lines);
+
+  expect(await readTranscriptTail(path)).toBe("");
+  expect(await readLastClaudeMessages(path, 20))
+    .toEqual(["msg-0", "msg-1", "msg-2", "msg-3", "msg-4"]);
+});
+
 // Widening has to terminate on a short file as well as on a satisfied count, or
 // every read of a small transcript pays for the whole ladder.
 test("stops at the file's start and returns what is there", async () => {

@@ -95,7 +95,16 @@ export async function readTailUntil<T>(
   let best: T[] = [];
   for (const bytes of TAIL_WINDOW_BYTES) {
     const { raw, fromStart } = await readTranscriptTailWindow(path, bytes);
-    if (!raw) break;
+    if (!raw) {
+      // Empty means one of two opposite things, and only `fromStart` separates
+      // them. A file that could not be read reports itself as `fromStart`, so
+      // there is nothing further back to find and the ladder stops. A window
+      // that did NOT reach the start is empty only because it landed inside a
+      // single line longer than itself — one oversized tool result — which is
+      // precisely the case this ladder exists to widen past, so it continues.
+      if (fromStart) break;
+      continue;
+    }
     const out = parse(raw);
     if (out.length > best.length) best = out;
     if (best.length >= want || fromStart) break;
