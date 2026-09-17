@@ -1367,6 +1367,20 @@ class HandlerState {
   final List<HandlerEscalation> escalations;
   final List<HandlerActivityRecord> activity;
 
+  /// Older activity rows exist that [activity] does not hold. Set from the
+  /// answer to a `handler:history:request`, which carries a bounded page.
+  ///
+  /// It has to be RENDERED, not merely carried: a feed showing the newest 50 of
+  /// 300 with nothing saying so presents a truncated history as a complete one.
+  final bool activityTruncated;
+
+  /// Why this project's activity history could not be fetched, or null.
+  ///
+  /// A stalled fetch and an empty log are indistinguishable on screen without
+  /// it — both render as no rows — so the feed would report a transport failure
+  /// as the settled fact that nothing ever happened.
+  final String? activityHistoryError;
+
   /// Undo offers for this project, oldest first. Not keyed by session — they
   /// survive the disarm of the session that took them.
   final List<HandlerSnapshot> snapshots;
@@ -1400,6 +1414,8 @@ class HandlerState {
     required this.sessions,
     required this.escalations,
     required this.activity,
+    this.activityTruncated = false,
+    this.activityHistoryError,
     this.snapshots = const [],
     this.wrapUps = const [],
     this.pendingUndo = const {},
@@ -1413,6 +1429,8 @@ class HandlerState {
       sessions = const {},
       escalations = const [],
       activity = const [],
+      activityTruncated = false,
+      activityHistoryError = null,
       snapshots = const [],
       wrapUps = const [],
       pendingUndo = const {},
@@ -1535,6 +1553,9 @@ class HandlerState {
     Map<String, HandlerSessionState>? sessions,
     List<HandlerEscalation>? escalations,
     List<HandlerActivityRecord>? activity,
+    bool? activityTruncated,
+    String? activityHistoryError,
+    bool clearActivityHistoryError = false,
     List<HandlerSnapshot>? snapshots,
     List<HandlerWrapUp>? wrapUps,
     Set<String>? pendingUndo,
@@ -1553,6 +1574,12 @@ class HandlerState {
       sessions: sessions ?? this.sessions,
       escalations: escalations ?? this.escalations,
       activity: activity ?? this.activity,
+      activityTruncated: activityTruncated ?? this.activityTruncated,
+      // Clearable because a retry that succeeds has to be able to take the
+      // banner down; a latch-on error would outlive the failure it describes.
+      activityHistoryError: clearActivityHistoryError
+          ? null
+          : (activityHistoryError ?? this.activityHistoryError),
       snapshots: snapshots ?? this.snapshots,
       wrapUps: wrapUps ?? this.wrapUps,
       pendingUndo: pendingUndo ?? this.pendingUndo,

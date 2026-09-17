@@ -1,5 +1,7 @@
 import 'dart:async';
 
+import 'package:uuid/uuid.dart';
+
 import '../models/ab_message.dart';
 import '../models/handler_state.dart';
 import '../project/project_session.dart';
@@ -37,6 +39,44 @@ class HandlerService {
   // outstanding for a terminal shares one entry (a baseline only ever moves on
   // a status frame, and every survivor is re-baselined against the same one).
   final Map<String, ({int backlog, int armedAt})> _instructBaselines = {};
+
+  // --- activity history ------------------------------------------------------
+  //
+  // `handler:activity` is a live broadcast and is not replayed, so an app that
+  // was not attached when a row was emitted can only obtain it by asking. The
+  // bridge writes its log BEFORE it emits the frame, so a page is never missing
+  // a row that arrived live within the same establishment.
+
+  /// Hydrator key. Registering it fires the fetch now and re-fires it on every
+  /// reconnect, which is both triggers this needs off one registration.
+  static const _historyHydratorKey = 'handler:activity-history';
+
+  /// The request this app is waiting on, or null. One at a time per project: a
+  /// second in flight would answer with a window overlapping the first for no
+  /// gain, and the merge would have to reason about which is newer.
+  String? _historyRequestId;
+
+  /// The last request whose deadline fired. Its answer is still applied if it
+  /// turns up: the page is late, not wrong, and dropping it would leave the
+  /// feed reporting a failure it has the data to correct.
+  String? _timedOutRequestId;
+  Timer? _historyDeadline;
+
+  /// How long a history request may go unanswered before the feed says so.
+  /// Injected so a test can reach the bound without waiting out the real one,
+  /// matching `TerminalService.snapshotAttachTimeout`.
+  final Duration historyTimeout;
+
+  /// The establishment the current [HandlerState.activity] was accumulated
+  /// under, or null when nothing has been accumulated.
+  ///
+  /// A buffer that spans a disconnect has an invisible hole: rows emitted while
+  /// the app was away are lost, and no bounded fetch can tell the app which
+  /// ones. Discarding it makes the hole unreachable instead of undetectable —
+  /// but only then, because discarding on a first fetch would throw away rows
+  /// the app legitimately watched arrive beyond the page's bound.
+  int? _activityEpoch;
+  bool _historyActive = false;
 
   // Terminals whose next status frame is already spent. Every bridge outcome
   // that records an instruction row emits a snapshot straight after it, and for
@@ -95,7 +135,10 @@ class HandlerService {
   HandlerState get currentState => _state;
   String get projectId => session.projectId;
 
-  HandlerService.fromSession(this.session) {
+  HandlerService.fromSession(
+    this.session, {
+    this.historyTimeout = const Duration(seconds: 15),
+  }) {
     _statusSub = session.statusStream.listen(_onStatusJson);
     _heavySub = session.heavyStream.listen(_onHeavyJson);
   }
@@ -461,17 +504,20 @@ class HandlerService {
                 msg.decision == 'instruction_dropped'
             ? _withOldestPendingRetired(msg.terminalId)
             : _state.pendingInstructions;
-        final next = <HandlerActivityRecord>[
-          HandlerActivityRecord(
-            recordId: msg.recordId,
-            at: msg.at,
-            terminalId: msg.terminalId,
-            decision: msg.decision,
-            reason: msg.reason,
-            detail: msg.detail,
-          ),
-          ..._state.activity,
-        ];
+        final record = HandlerActivityRecord(
+          recordId: msg.recordId,
+          at: msg.at,
+          terminalId: msg.terminalId,
+          decision: msg.decision,
+          reason: msg.reason,
+          detail: msg.detail,
+        );
+        // Which establishment this buffer belongs to is fixed by its FIRST row
+        // and only moved by a fetch: were it restamped here, a row arriving
+        // after a reconnect would relabel the pre-disconnect rows beside it as
+        // current and the hole between them would never be detected.
+        _activityEpoch ??= session.establishmentEpoch;
+        final next = <HandlerActivityRecord>[record, ..._state.activity];
         _emit(
           _state.copyWith(
             activity: next.length > _activityCap
@@ -481,7 +527,144 @@ class HandlerService {
           ),
         );
         break;
+      case 'handler:history:page':
+        final msg = parseAbMessage(json);
+        if (msg is! HandlerHistoryPageMessage) return;
+        _applyHistoryPage(msg);
+        break;
     }
+  }
+
+  /// Start fetching this project's activity history, and keep it fetched across
+  /// reconnects. Idempotent.
+  ///
+  /// Called when the Handler pane becomes visible rather than when the project
+  /// opens: `workspace_panel.dart` builds every tab eagerly through an
+  /// IndexedStack, so a hook on mount would put this request on the wire for
+  /// every project, for every app, whether or not anyone ever looks at Handler.
+  void activateHistory() {
+    if (_disposed) return;
+    if (_historyActive) {
+      // Already registered, so the hydrator will not fire again until a
+      // reconnect. Retry a fetch that failed, so leaving the pane and coming
+      // back is the recovery the banner otherwise has no path to.
+      if (_state.activityHistoryError != null) _requestActivityHistory();
+      return;
+    }
+    _historyActive = true;
+    unawaited(session.hydrate(_historyHydratorKey, _runHistoryHydrator));
+  }
+
+  /// Stop re-fetching on reconnect. The rows already held stay put — the pane
+  /// renders them again the moment it is visible, and [activateHistory]
+  /// refreshes them.
+  void deactivateHistory() {
+    if (!_historyActive) return;
+    _historyActive = false;
+    session.unhydrate(_historyHydratorKey);
+    _cancelHistoryRequest();
+  }
+
+  Future<void> _runHistoryHydrator() async {
+    if (_disposed) return;
+    final epoch = session.establishmentEpoch;
+    final spansGap = _activityEpoch != null && _activityEpoch != epoch;
+    _activityEpoch = epoch;
+    if (spansGap) {
+      // Everything held was accumulated under a previous establishment, with an
+      // unknown number of rows missing at the seam. See [_activityEpoch].
+      _cancelHistoryRequest();
+      _emit(_state.copyWith(activity: const [], activityTruncated: false));
+    }
+    _requestActivityHistory();
+  }
+
+  void _requestActivityHistory() {
+    if (_disposed || _historyRequestId != null) return;
+    final requestId = const Uuid().v4();
+    _historyRequestId = requestId;
+    // Armed BEFORE the send: the request reads as outstanding from the line
+    // above, so a send that throws would otherwise leave the pane waiting on a
+    // bound that was never armed.
+    _historyDeadline?.cancel();
+    _historyDeadline = Timer(historyTimeout, () {
+      if (_disposed || _historyRequestId != requestId) return;
+      _historyRequestId = null;
+      _timedOutRequestId = requestId;
+      _historyDeadline = null;
+      // Named rather than left silent: an unanswered fetch and a project that
+      // has never armed Handler both render as no rows, so without this the
+      // feed reports a stalled request as the settled fact that nothing
+      // happened.
+      _emit(
+        _state.copyWith(
+          activityHistoryError: "The agent didn't answer this history request.",
+        ),
+      );
+    });
+    session.send(
+      createAbMessage('handler:history:request', {
+        'projectId': session.projectId,
+        'requestId': requestId,
+      }),
+    );
+  }
+
+  void _cancelHistoryRequest() {
+    _historyDeadline?.cancel();
+    _historyDeadline = null;
+    _historyRequestId = null;
+  }
+
+  /// One answered `handler:history:request`.
+  ///
+  /// Touches the activity fields and NOTHING else. The live `handler:activity`
+  /// case above drives `_withOldestPendingRetired` off two decision kinds;
+  /// running historical rows through that would retire instructions that are
+  /// currently, legitimately in flight — corrupting live state from a read.
+  void _applyHistoryPage(HandlerHistoryPageMessage msg) {
+    // A reconnect re-asks, so the previous establishment's answer can still be
+    // in flight behind this one.
+    if (msg.requestId != _historyRequestId &&
+        msg.requestId != _timedOutRequestId) {
+      return;
+    }
+    _historyDeadline?.cancel();
+    _historyDeadline = null;
+    _historyRequestId = null;
+    _timedOutRequestId = null;
+
+    // Merged into what is held rather than replacing it. Within one
+    // establishment the buffer has no holes and can legitimately run to 200
+    // rows, well past the page's bound — replacing would throw away rows the
+    // user watched arrive. A buffer that DOES span a gap was already emptied
+    // before this request went out, so merging into it replaces it.
+    //
+    // Keyed by recordId, which the wire carries: keying on `at` would let two
+    // decisions in the same millisecond collapse into one.
+    final merged = <String, HandlerActivityRecord>{
+      for (final r in _state.activity) r.recordId: r,
+    };
+    for (final r in msg.records) {
+      merged.putIfAbsent(r.recordId, () => r);
+    }
+    final next = merged.values.toList()
+      // Never on `at` alone: two decisions can share a millisecond, and a
+      // comparator that called them equal would order them arbitrarily between
+      // rebuilds. The id breaks the tie deterministically.
+      ..sort((a, b) {
+        final byTime = b.at.compareTo(a.at);
+        return byTime != 0 ? byTime : b.recordId.compareTo(a.recordId);
+      });
+    _emit(
+      _state.copyWith(
+        activity: next.length > _activityCap
+            ? next.sublist(0, _activityCap)
+            : next,
+        activityTruncated: msg.truncated,
+        clearActivityHistoryError: true,
+      ),
+    );
   }
 
   /// Arm [terminalId]. Arming takes one tap and requires no payload, so [goal]
@@ -1137,6 +1320,7 @@ class HandlerService {
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
+    deactivateHistory();
     await _statusSub?.cancel();
     _statusSub = null;
     await _heavySub?.cancel();

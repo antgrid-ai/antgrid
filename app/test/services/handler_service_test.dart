@@ -1413,4 +1413,283 @@ void main() {
       await session.close();
     });
   });
+
+  group('activity history', () {
+    Map<String, dynamic> pageJson({
+      required String requestId,
+      List<Map<String, dynamic>> records = const [],
+      bool truncated = false,
+    }) => {
+      'projectId': 'p',
+      'requestId': requestId,
+      'records': records,
+      'truncated': truncated,
+    };
+
+    Map<String, dynamic> recordJson(
+      String recordId,
+      int at, {
+      String decision = 'continue',
+      String terminalId = 't1',
+    }) => {
+      'recordId': recordId,
+      'at': at,
+      'terminalId': terminalId,
+      'decision': decision,
+      'reason': 'reason $recordId',
+    };
+
+    String lastRequestId(FakeAgentTransport t) =>
+        t.sent.lastWhere((m) => m['type'] == 'handler:history:request')['requestId']
+            as String;
+
+    test('activateHistory asks once and fills the feed newest-first', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = HandlerService.fromSession(session);
+      final sub = session.heavyStream.listen((_) {});
+
+      svc.activateHistory();
+      await Future<void>.delayed(Duration.zero);
+      final requests = t.sent.where(
+        (m) => m['type'] == 'handler:history:request',
+      );
+      expect(requests, hasLength(1));
+      expect(requests.single['projectId'], 'p');
+
+      // Idempotent: a rebuild of the pane must not put a second request on the
+      // wire behind the first.
+      svc.activateHistory();
+      await Future<void>.delayed(Duration.zero);
+      expect(
+        t.sent.where((m) => m['type'] == 'handler:history:request'),
+        hasLength(1),
+      );
+
+      t.emit(
+        'handler:history:page',
+        pageJson(
+          requestId: lastRequestId(t),
+          records: [recordJson('r2', 20), recordJson('r1', 10)],
+          truncated: true,
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(svc.currentState.activity.map((a) => a.recordId), ['r2', 'r1']);
+      expect(svc.currentState.activityTruncated, isTrue);
+      expect(svc.currentState.activityHistoryError, isNull);
+
+      await sub.cancel();
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('a page never runs the live row side effect', () async {
+      // The single most likely way to ship a worse bug than the one being
+      // fixed: the live case retires a pending instruction off an
+      // `instruction_amended` row, and a historical one would retire a sentence
+      // that is currently, legitimately in flight.
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = HandlerService.fromSession(session);
+      final sub = session.heavyStream.listen((_) {});
+
+      t.emit('handler:status', {
+        'projectId': 'p',
+        'sessions': [_sessionJson(terminalId: 't1', pendingEscalations: 0)],
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(svc.instruct('t1', 'rerun the migration'), HandlerInstructResult.sent);
+      expect(svc.currentState.pendingInstructionsFor('t1'), hasLength(1));
+
+      svc.activateHistory();
+      await Future<void>.delayed(Duration.zero);
+      t.emit(
+        'handler:history:page',
+        pageJson(
+          requestId: lastRequestId(t),
+          records: [
+            recordJson('old-1', 5, decision: 'instruction_amended'),
+            recordJson('old-2', 4, decision: 'instruction_dropped'),
+          ],
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(svc.currentState.activity.map((a) => a.recordId), [
+        'old-1',
+        'old-2',
+      ]);
+      expect(svc.currentState.pendingInstructionsFor('t1'), hasLength(1));
+
+      await sub.cancel();
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('a page merges with rows the app watched arrive', () async {
+      // Within one establishment the buffer has no holes and can run well past
+      // the page's bound, so replacing it would discard rows the user saw.
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = HandlerService.fromSession(session);
+      final sub = session.heavyStream.listen((_) {});
+
+      t.emit('handler:activity', {
+        'projectId': 'p',
+        'recordId': 'live-1',
+        'at': 30,
+        'terminalId': 't1',
+        'decision': 'continue',
+        'reason': 'watched',
+      });
+      svc.activateHistory();
+      await Future<void>.delayed(Duration.zero);
+
+      // Arrives while the request is outstanding: strictly newer than the page.
+      t.emit('handler:activity', {
+        'projectId': 'p',
+        'recordId': 'live-2',
+        'at': 40,
+        'terminalId': 't1',
+        'decision': 'handle',
+        'reason': 'during the fetch',
+      });
+      t.emit(
+        'handler:history:page',
+        pageJson(
+          requestId: lastRequestId(t),
+          // The bridge appends before it emits, so the page re-states live-1.
+          records: [recordJson('live-1', 30), recordJson('r0', 10)],
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      // Deduped on recordId, not on `at`, and ordered newest first.
+      expect(svc.currentState.activity.map((a) => a.recordId), [
+        'live-2',
+        'live-1',
+        'r0',
+      ]);
+
+      await sub.cancel();
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('a reconnect discards the buffer and re-asks', () async {
+      // A buffer spanning a disconnect has an invisible hole: rows emitted
+      // while the app was away are gone, and no bounded fetch can say which.
+      // Discarding makes the hole unreachable rather than undetectable.
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = HandlerService.fromSession(session);
+      final sub = session.heavyStream.listen((_) {});
+
+      t.emit('handler:activity', {
+        'projectId': 'p',
+        'recordId': 'before-gap',
+        'at': 10,
+        'terminalId': 't1',
+        'decision': 'continue',
+        'reason': 'pre-disconnect',
+      });
+      svc.activateHistory();
+      await Future<void>.delayed(Duration.zero);
+      t.emit(
+        'handler:history:page',
+        pageJson(
+          requestId: lastRequestId(t),
+          records: [recordJson('before-gap', 10)],
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(svc.currentState.activity, hasLength(1));
+
+      t.redriveHydrators();
+      await Future<void>.delayed(Duration.zero);
+      // Dropped the moment the gap is seen, before the answer comes back.
+      expect(svc.currentState.activity, isEmpty);
+      expect(
+        t.sent.where((m) => m['type'] == 'handler:history:request'),
+        hasLength(2),
+      );
+
+      t.emit(
+        'handler:history:page',
+        pageJson(
+          requestId: lastRequestId(t),
+          records: [recordJson('after-gap', 90), recordJson('before-gap', 10)],
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(svc.currentState.activity.map((a) => a.recordId), [
+        'after-gap',
+        'before-gap',
+      ]);
+
+      await sub.cancel();
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('an answer to a superseded request is ignored', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = HandlerService.fromSession(session);
+      final sub = session.heavyStream.listen((_) {});
+
+      svc.activateHistory();
+      await Future<void>.delayed(Duration.zero);
+      final first = lastRequestId(t);
+      t.redriveHydrators();
+      await Future<void>.delayed(Duration.zero);
+
+      // The previous establishment's answer, arriving behind the reconnect.
+      t.emit(
+        'handler:history:page',
+        pageJson(requestId: first, records: [recordJson('stale', 1)]),
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(svc.currentState.activity, isEmpty);
+
+      await sub.cancel();
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('an unanswered request is named rather than left silent', () async {
+      // An empty log and a stalled fetch both render as no rows, so silence
+      // here reports a transport failure as a settled fact.
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = HandlerService.fromSession(
+        session,
+        historyTimeout: const Duration(milliseconds: 20),
+      );
+      final sub = session.heavyStream.listen((_) {});
+
+      svc.activateHistory();
+      await Future<void>.delayed(Duration.zero);
+      expect(svc.currentState.activityHistoryError, isNull);
+      await Future<void>.delayed(const Duration(milliseconds: 60));
+      expect(svc.currentState.activityHistoryError, isNotNull);
+
+      // A late answer is still applied, and takes the banner down with it: the
+      // page is late, not wrong, and dropping it would leave the feed
+      // reporting a failure it has the data to correct.
+      t.emit(
+        'handler:history:page',
+        pageJson(requestId: lastRequestId(t), records: [recordJson('r1', 1)]),
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(svc.currentState.activity.map((a) => a.recordId), ['r1']);
+      expect(svc.currentState.activityHistoryError, isNull);
+
+      await sub.cancel();
+      await svc.dispose();
+      await session.close();
+    });
+  });
 }
