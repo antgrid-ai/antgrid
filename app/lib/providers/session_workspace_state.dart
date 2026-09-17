@@ -80,6 +80,39 @@ class SessionWorkspaceState {
         ? null
         : (pushedTerminalId ?? this.pushedTerminalId),
   );
+
+  /// Value equality is LOAD-BEARING, not a convenience: Riverpod notifies on
+  /// `previous != next`, so without it every `update` — including one that
+  /// re-publishes the value already there — wakes every listener. `_buildMobile`
+  /// re-publishes `mobilePage` from an unconditional post-frame callback and
+  /// `WorkspaceShellState._syncSessionUi` watches this provider, which together
+  /// is a rebuild that schedules its own next rebuild, forever.
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is SessionWorkspaceState &&
+          other.initialized == initialized &&
+          other.selectedView == selectedView &&
+          other.panelMode == panelMode &&
+          other.splitRatio == splitRatio &&
+          other.mobilePage == mobilePage &&
+          other.tabletContextOpen == tabletContextOpen &&
+          other.tabletContextExpanded == tabletContextExpanded &&
+          other.pinnedTerminalId == pinnedTerminalId &&
+          other.pushedTerminalId == pushedTerminalId;
+
+  @override
+  int get hashCode => Object.hash(
+    initialized,
+    selectedView,
+    panelMode,
+    splitRatio,
+    mobilePage,
+    tabletContextOpen,
+    tabletContextExpanded,
+    pinnedTerminalId,
+    pushedTerminalId,
+  );
 }
 
 class SessionWorkspaceController extends Notifier<SessionWorkspaceState> {

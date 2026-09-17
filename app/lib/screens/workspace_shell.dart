@@ -752,7 +752,14 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
   /// new as these fields and this only ever re-applies what is already there.
   void _syncSessionUi() {
     final key = ref.watch(activeSessionUiKeyProvider);
-    if (key == null) return;
+    if (key == null) {
+      // Dropped too, not just left behind: [_updateSessionUi] falls back to
+      // this field, so a stale one lets a panel toggle after the last session
+      // is deleted re-create — and now re-PERSIST — the very layout
+      // [clearSessionWorkspaceState] just forgot.
+      _sessionUiKey = null;
+      return;
+    }
     final ui = ref.watch(sessionWorkspaceStateProvider(key));
     final switched = _sessionUiKey != key;
     _sessionUiKey = key;

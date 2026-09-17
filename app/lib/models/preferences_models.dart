@@ -47,7 +47,7 @@ class ProjectPreferences {
   /// A name rather than the enum ordinal, so reordering `_PanelMode` can't
   /// silently reinterpret stored preferences — the failure mode
   /// [workspaceViewIndex] has already shipped once (see the NOTE in
-  /// `WorkspaceShellState._applyPrefs`).
+  /// `SessionWorkspaceController._seed`, `providers/session_workspace_state.dart`).
   final String? panelMode;
 
   const ProjectPreferences({

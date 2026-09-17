@@ -140,14 +140,31 @@ class SessionLayoutStore {
     await _save();
   }
 
-  Future<void> _save() async {
+  /// Serializes the flushes rather than letting them race.
+  ///
+  /// Every caller is fire-and-forget through `detached`, and each flush writes
+  /// the WHOLE map under one key — so two in flight at once can complete in
+  /// either order and leave the older snapshot on disk. The damaging shape is
+  /// sign-out: a [write] started a moment before [clear] would put the previous
+  /// account's session ids straight back after the purge reported success.
+  Future<void> _saveQueue = Future<void>.value();
+
+  Future<void> _save() {
     final prefs = _prefs;
-    if (prefs == null) return;
-    await prefs.setString(
-      _key,
-      jsonEncode({
-        for (final e in _mem.entries) e.key: e.value.toJson(),
-      }),
+    if (prefs == null) return Future<void>.value();
+    // Encoded inside the chained callback, not before it, so a flush queued
+    // behind another writes the map as it stands when its turn comes.
+    final flush = _saveQueue.then(
+      (_) => prefs.setString(
+        _key,
+        jsonEncode({
+          for (final e in _mem.entries) e.key: e.value.toJson(),
+        }),
+      ),
     );
+    // The queue must not inherit a failure, or one rejected flush poisons every
+    // later one; the caller still sees it on [flush] and logs it.
+    _saveQueue = flush.catchError((Object _) {});
+    return flush;
   }
 }
