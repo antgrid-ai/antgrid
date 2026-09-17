@@ -1150,6 +1150,35 @@ void main() {
     });
   });
 
+  group('the redesign spec copy (handler-arm-sheet-redesign-spec.md §7, §12)',
+      () {
+    test('the four presets read as a stance, not a job title', () {
+      expect(handlerLensLabel(HandlerLens.pm), 'Stays in scope');
+      expect(handlerLensLabel(HandlerLens.qa), 'Proof it works');
+      expect(handlerLensLabel(HandlerLens.critic), 'What could break');
+      expect(handlerLensLabel(HandlerLens.release), 'Ready to ship');
+    });
+
+    test('the sixth chip is neither a preset nor a wire id', () {
+      expect(handlerLensDefaultLabel, 'Nothing extra');
+      expect(handlerLensOwnLabel, 'Your own');
+      // Never a real lens: a user-authored pick has no [HandlerLens] value and
+      // must never round-trip through the wire the way a preset id does.
+      expect(handlerLensFromWire(handlerLensOwnLabel), isNull);
+    });
+
+    test('an unset lens blames the machine, not the session', () {
+      expect(
+        handlerLensUnsetBlurb,
+        'Runs as it was last set on this machine.',
+      );
+    });
+
+    test('the brief cap mirrors the bridge byte for byte (MAX_BRIEF_CHARS)', () {
+      expect(handlerMaxBriefChars, 1000);
+    });
+  });
+
   group('the lenses a bridge advertises', () {
     Map<String, dynamic> status({Object? lenses}) => {
       'type': 'handler:status',

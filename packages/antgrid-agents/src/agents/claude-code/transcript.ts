@@ -1,6 +1,7 @@
 import {
   MAX_NOTIFICATION_BODY_LEN,
   closingSentences,
+  readTailUntil,
   readTranscriptTail,
 } from "../../transcript-tail";
 import type { TranscriptOpts } from "../types";
@@ -47,10 +48,7 @@ export async function lastAssistantText(
 // Mirrors ./title.ts's JSONL iteration, but collects a rolling window of the
 // last N message texts instead of title-specific fields. Every role is included:
 // the handler needs conversation context, not just the agent's turn.
-export async function readLastClaudeMessages(transcriptPath: string, n: number): Promise<string[]> {
-  if (n <= 0) return []; // slice(-0) === slice(0) — the whole array, not none
-  const raw = await readTranscriptTail(transcriptPath);
-  if (!raw) return [];
+function claudeMessagesIn(raw: string): string[] {
   const out: string[] = [];
   for (const line of raw.split("\n")) {
     if (!line.trim()) continue;
@@ -60,7 +58,17 @@ export async function readLastClaudeMessages(transcriptPath: string, n: number):
       if (text) out.push(text);
     } catch { /* skip malformed line */ }
   }
-  return out.slice(-n);
+  return out;
+}
+
+export async function readLastClaudeMessages(transcriptPath: string, n: number): Promise<string[]> {
+  if (n <= 0) return []; // slice(-0) === slice(0) — the whole array, not none
+  // Widened until it HAS n, rather than whatever one fixed byte window happened
+  // to hold: a Claude transcript carries its tool results inline, and
+  // messageText keeps only `text` parts, so the entries that fill the window are
+  // mostly the ones this drops. See TAIL_WINDOW_BYTES for what that cost the
+  // handler's judge before it was measured.
+  return (await readTailUntil(transcriptPath, n, claudeMessagesIn)).slice(-n);
 }
 
 /** The transcript path is the caller's own input echoed back — claude's hook

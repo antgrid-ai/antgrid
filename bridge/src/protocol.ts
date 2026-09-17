@@ -1407,7 +1407,9 @@ const HandlerSnapshotMessage = BaseMessage.extend({
 // the snapshots are: the wrap-up is what DISARMS the session, so by the time the
 // report is worth reading its session is gone from `sessions` and nothing else on
 // this frame names it. The activity row that carries the same prose cannot stand
-// in — `handler:activity` is not replayed, and its jsonl is never read back.
+// in — `handler:activity` is not replayed, and the jsonl behind it is read back
+// only as the newest HANDLER_HISTORY_RECORDS of one project's feed, which a
+// finished session's report is not guaranteed to still be inside.
 //
 // What this shape freezes, deliberately: MAX_STORED_WRAPUPS (5) records, each up
 // to 4 outcome groups x 8 sampled items x 120 chars, plus 3 blocked reasons and a
@@ -1660,6 +1662,77 @@ const HandlerActivityMessage = BaseMessage.extend({
   ]),
   reason: z.string(),
   detail: z.string().optional(),
+});
+
+/**
+ * How many records one `handler:history:page` carries.
+ *
+ * The app's own buffer caps at 200 and nothing establishes the feed is
+ * scrolled, so this is a single answer rather than the first of a series —
+ * `terminal:history:request` pages because scrollback is unbounded and people
+ * genuinely scroll it, which is not this feed. Adding `beforeRecordId` later
+ * keeps every field below, so nothing here has to be unpicked for it.
+ */
+export const HANDLER_HISTORY_RECORDS = 50;
+
+/**
+ * One record as `handler:history:page` carries it — the `handler:activity`
+ * payload minus `type`/`projectId`, which is also exactly the on-disk shape, so
+ * a page needs no transformation.
+ *
+ * `decision` is a bare string where the live frame's is an enum, and the
+ * difference is deliberate. A live frame is written by THIS build, so it can
+ * only hold a kind this build knows. A page is read off a log that any past or
+ * future build may have appended to, and that log is the only durable,
+ * decision-by-decision account of a finished session — so a kind not in the
+ * enum must still arrive. Rejecting it would drop the whole page over one old
+ * row. The app types the field as a String for the same reason and renders an
+ * unknown kind as that row's raw reason.
+ */
+const HandlerActivityRecordWire = z.object({
+  recordId: z.string(),
+  at: z.number(),
+  terminalId: z.string(),
+  decision: z.string(),
+  reason: z.string(),
+  detail: z.string().optional(),
+});
+
+/**
+ * Ask for the newest slice of a project's activity log.
+ *
+ * Project-scoped, not checkout-scoped, matching `handler:activity`: the bridge
+ * resolves the log from `projectId` alone, and a `checkoutId` here would be a
+ * second, conflicting answer to a question already settled.
+ */
+export const HandlerHistoryRequestWire = z.object({
+  requestId: z.string().uuid(),
+});
+
+const HandlerHistoryRequestMessage = BaseMessage.extend({
+  type: z.literal("handler:history:request"),
+  // Carried so the app can file the answer, and echoed back from the receiving
+  // core's OWN id rather than from this field — a frame naming another project
+  // must not read that project's log.
+  projectId: z.string(),
+}).extend(HandlerHistoryRequestWire.shape);
+
+const HandlerHistoryPageMessage = BaseMessage.extend({
+  type: z.literal("handler:history:page"),
+  projectId: z.string(),
+  requestId: z.string().uuid(),
+  /**
+   * Newest first, matching the app's buffer, which prepends live rows at index
+   * 0 and renders unreversed. The log is oldest-first, so the reader reverses
+   * it — a silent order flip renders a correct feed upside down.
+   */
+  records: z.array(HandlerActivityRecordWire).max(HANDLER_HISTORY_RECORDS),
+  /**
+   * Older records exist that this page does not carry. It must be RENDERED, not
+   * merely carried: a feed showing the newest 50 of 300 with nothing saying so
+   * presents a truncated history as a complete one.
+   */
+  truncated: z.boolean(),
 });
 
 const AgentHelloMessage = BaseMessage.extend({
@@ -2710,6 +2783,8 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   HandlerStatusMessage,
   HandlerEscalationMessage,
   HandlerActivityMessage,
+  HandlerHistoryRequestMessage,
+  HandlerHistoryPageMessage,
   HandlerSnapshotMessage,
   HandlerUndoMessage,
   HandlerDismissMessage,
@@ -2883,6 +2958,9 @@ export type HandlerStatusMsg = z.infer<typeof HandlerStatusMessage>;
 export type HandlerEntitlement = z.infer<typeof HandlerEntitlementWire>;
 export type HandlerEscalationMsg = z.infer<typeof HandlerEscalationMessage>;
 export type HandlerActivityMsg = z.infer<typeof HandlerActivityMessage>;
+export type HandlerActivityRecordPayload = z.infer<typeof HandlerActivityRecordWire>;
+export type HandlerHistoryRequestMsg = z.infer<typeof HandlerHistoryRequestMessage>;
+export type HandlerHistoryPageMsg = z.infer<typeof HandlerHistoryPageMessage>;
 export type HandlerSnapshotMsg = z.infer<typeof HandlerSnapshotMessage>;
 export type HandlerUndoMsg = z.infer<typeof HandlerUndoMessage>;
 export type HandlerDismissMsg = z.infer<typeof HandlerDismissMessage>;
@@ -3194,6 +3272,7 @@ const KNOWN_TYPES = new Set<string>([
   "agent:disconnecting", "agent:projects", "agent:tools", "stream-ready", "stream-invalid", "stream-unbound", "control:result", "app:ready",
   "command:run", "command:output", "command:done", "notification:push", "push:register",
   "handler:configure", "handler:instruct", "handler:status", "handler:escalation", "handler:activity",
+  "handler:history:request", "handler:history:page",
   "handler:snapshot", "handler:undo", "handler:dismiss", "handler:answer",
   "git:status", "git:diff", "git:diff-content",
   "git:list-branches", "git:branches", "git:checkout", "git:checkout-result",

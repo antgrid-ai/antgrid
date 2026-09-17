@@ -17,7 +17,9 @@ import '../../design/widgets/ab_section_header.dart';
 import '../../design/widgets/ab_state_chip.dart';
 import '../../design/widgets/ab_tooltip.dart';
 import '../../models/handler_state.dart';
+import '../../models/workspace_view.dart';
 import '../../providers/providers.dart';
+import '../../providers/visible_surface.dart';
 import '../../util/detached.dart';
 import '../../util/relative_time.dart';
 import 'handler_ask_footer.dart';
@@ -33,7 +35,36 @@ class HandlerScreen extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    _maybeFetchHistory(ref);
     return _body(context, ref, ref.watch(focusedSessionHandlerStateProvider));
+  }
+
+  /// Ask for the activity log the first time this tab is actually looked at.
+  ///
+  /// `workspace_panel.dart` mounts every tab through an IndexedStack, so this
+  /// widget is built on every project open whether or not anyone selects it —
+  /// which is why the trigger is the visible view rather than the mount. An
+  /// unconditional fetch here would put a request on the wire for every project
+  /// in every app, the eager-hydration shape that stalled the relay window once
+  /// already.
+  ///
+  /// Watched rather than read: the flag has to be recomputed when the tab comes
+  /// on screen, exactly as `git_panel.dart` does it. [HandlerService.
+  /// activateHistory] is idempotent, so repeated builds cost nothing, and the
+  /// tab going back off screen deliberately does NOT deactivate — a project
+  /// whose history the user has looked at once keeps it fresh across reconnects
+  /// for one bounded page, which is worth more than the request it saves.
+  void _maybeFetchHistory(WidgetRef ref) {
+    if (ref.watch(visibleWorkspaceViewProvider) != WorkspaceView.handler) {
+      return;
+    }
+    final service = serviceWhenReady(ref, handlerServiceProvider);
+    if (service == null) return;
+    // Out of the build phase: activateHistory emits state the moment a page
+    // lands, and a provider written to during build throws.
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => service.activateHistory(),
+    );
   }
 
   Widget _body(BuildContext context, WidgetRef ref, HandlerState state) {
@@ -253,19 +284,13 @@ class HandlerScreen extends ConsumerWidget {
           ),
         ],
         _section('Activity', null, p.textMuted, p),
-        if (state.activity.isEmpty)
-          SliverToBoxAdapter(
-            child: Padding(
-              padding: const EdgeInsets.symmetric(
-                horizontal: handlerGutter,
-                vertical: AbTokens.space16,
-              ),
-              child: Text(
-                'No activity yet.',
-                style: AbTokens.sansStyle(color: p.textMuted),
-              ),
-            ),
-          )
+        if (state.activityHistoryError != null)
+          // An unanswered history request and a project that has never armed
+          // Handler both render as no rows. Said plainly, so a fetch that
+          // stalled is not read as the settled fact that nothing happened.
+          _activityNote(state.activityHistoryError!, p.warning, p)
+        else if (state.activity.isEmpty)
+          _activityNote('No activity yet.', p.textMuted, p)
         else
           // Built lazily, unlike the ListView this replaced: the feed is capped
           // at 200 rows and a new one arrives on every judge decision, so
@@ -281,9 +306,25 @@ class HandlerScreen extends ConsumerWidget {
               );
             },
           ),
+        // Last, under the oldest row it has, because that is where the feed
+        // stops. Rendering it is the point: a page of the newest 50 out of 300
+        // with nothing saying so presents a truncated history as a whole one.
+        if (state.activityTruncated && state.activity.isNotEmpty)
+          _activityNote('Older activity is not shown.', p.textMuted, p),
       ],
     );
   }
+
+  Widget _activityNote(String text, Color color, AbColors p) =>
+      SliverToBoxAdapter(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(
+            horizontal: handlerGutter,
+            vertical: AbTokens.space16,
+          ),
+          child: Text(text, style: AbTokens.sansStyle(color: color)),
+        ),
+      );
 
   /// Pinned, because the activity feed runs to 200 rows and a boundary that
   /// scrolls away takes with it the only thing saying which section the row

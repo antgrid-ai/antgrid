@@ -47,7 +47,7 @@ import { lineForEvent } from "./session-bus/deliver-event";
 import { isRefusal } from "./session-bus/errors";
 import { neutralizeFenced } from "./session-bus/delivery";
 import type { QueuedLine } from "./session-bus/delivery-queue";
-import { CHECKOUT_VARIABLE_MESSAGE_TYPES, createMessage, HandlerAnswerWire, HandlerConfigureWire, HandlerDismissWire, HandlerInstructWire, HandlerUndoWire, PREVIEW_CHANNEL_MESSAGE_TYPES, type AbMessage, type RpcRequest, type SessionEntry, type WorkStatus } from "./protocol";
+import { CHECKOUT_VARIABLE_MESSAGE_TYPES, createMessage, HANDLER_HISTORY_RECORDS, HandlerAnswerWire, HandlerConfigureWire, HandlerDismissWire, HandlerHistoryRequestWire, HandlerInstructWire, HandlerUndoWire, PREVIEW_CHANNEL_MESSAGE_TYPES, type AbMessage, type RpcRequest, type SessionEntry, type WorkStatus } from "./protocol";
 import { parseTunnelMessage } from "./tunnel-protocol";
 import { startApiServer, type ApiServerHandle } from "./api-server";
 import { MessageBus, clientKeyOf, type Channel, type ClientKey, type InboundSource } from "./message-bus";
@@ -72,6 +72,7 @@ import { TitleAttempts, type TitleOutcome } from "antgrid-agents/title-attempts"
 import { AGENTS, agentSpec, BY_HOOK_NAME, handlerObservable } from "./agent-runtime";
 import { DEFAULT_AGENT } from "antgrid-agents/defaults";
 import { OpenAgentPrompts } from "./agents/open-prompts";
+import { readRecentActivity } from "./handler/config";
 import { HandlerEngine, type HandlerEvent } from "./handler/engine";
 import { createEntitlementReader, type TierClaimSource } from "./entitlement";
 import { classifyTurnEndError } from "./handler/lifecycle-classify";
@@ -1917,6 +1918,39 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           logger.warn("handler:answer rejected: malformed payload");
           handlerEngine.emitStatus();
         }
+        break;
+      }
+      case "handler:history:request": {
+        // Same re-parse discipline as the five above: parseMessageFast validated
+        // the type and nothing else.
+        const parsed = HandlerHistoryRequestWire.safeParse(msg);
+        if (!parsed.success) {
+          // No emitStatus here, unlike the verbs above: this one mutates
+          // nothing, so there is no state for the sender's UI to resync to. The
+          // request simply goes unanswered and the app's deadline names it.
+          logger.warn("handler:history:request rejected: malformed payload");
+          break;
+        }
+        // Read under the receiving core's OWN project id, never the one on the
+        // frame: the stream already resolved which project this peer reached,
+        // and honouring a different id here would hand it another project's log.
+        //
+        // Answered whatever the entitlement says. The gate stops Handler from
+        // RUNNING — judging, spending model calls — and these rows were written
+        // by the user's own agent onto their own disk. Refusing would lock them
+        // out of their own record rather than out of a paid capability.
+        const history = readRecentActivity(abDir, project.id, HANDLER_HISTORY_RECORDS);
+        // Answered to the CLIENT that asked, the way `terminal:history:request`
+        // answers: a page is up to HANDLER_HISTORY_RECORDS rows of prose, every
+        // attached app re-asks on each of its own reconnects, and a broadcast
+        // would spend that on every peer to be dropped by all but one on its
+        // requestId.
+        sendAbToItsChannel(createMessage("handler:history:page", {
+          projectId: project.id,
+          requestId: parsed.data.requestId,
+          records: history.records,
+          truncated: history.truncated,
+        }), client);
         break;
       }
       case "terminal:start": {
