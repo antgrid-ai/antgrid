@@ -10,7 +10,7 @@ const handoff = [
 ];
 
 ---
-<section id="handler" class="reveal mx-auto max-w-shell px-6 py-24">
+<section id="handler" class="reveal mx-auto max-w-shell px-6 py-16 md:py-20">
   <Eyebrow class="mb-5">Hand over the follow-ups</Eyebrow>
   <h2 class="mb-5 max-w-3xl font-display text-title font-semibold text-ink">Every phase has a checkpoint.<br />It doesn't have to be you.</h2>
   <p class="mb-8 max-w-2xl text-lede text-muted">
@@ -20,7 +20,7 @@ const handoff = [
   <p class="mb-4 text-meta text-muted2">Example instructions and follow-ups</p>
   <ol class="mb-7 grid gap-6 md:grid-cols-3">
     {handoff.map((step, i) => (
-      <li class="rounded-lg border border-edge bg-well p-5">
+      <li class="card-lit rounded-lg border border-edge bg-group p-5">
         <div class="mb-3 font-mono text-meta text-signal">0{i + 1}</div>
         <h3 class="mb-2 text-note font-medium text-ink">{step.title}</h3>
         <p class="text-note leading-relaxed text-muted">{step.body}</p>
