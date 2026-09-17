@@ -661,7 +661,11 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(armFrame(transport)['role'], 'qa');
-      expect(armFrame(transport).containsKey('brief'), isFalse);
+      // A preset is exclusive with the user's own stance (redesign spec §6), so
+      // it clears the brief explicitly rather than omitting it — an omitted
+      // field means "leave the stored one alone", which would run this preset
+      // on top of a user lens the sheet no longer shows.
+      expect(armFrame(transport)['brief'], '');
       await confirmArmed(tester, transport);
     });
 

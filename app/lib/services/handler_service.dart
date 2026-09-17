@@ -78,6 +78,18 @@ class HandlerService {
   int? _activityEpoch;
   bool _historyActive = false;
 
+  /// Consecutive unanswered history fetches, reset by a page landing and by
+  /// each (re)establishment.
+  ///
+  /// [activateHistory] runs from a post-frame callback on every build while
+  /// the pane is visible, and naming a failure is itself a state change that
+  /// schedules the next build — so an unconditional retry re-asks a bridge
+  /// that is not answering every [historyTimeout], for as long as the pane
+  /// stays open. The banner is what tells the user; the poll behind it buys
+  /// nothing.
+  int _historyFailures = 0;
+  static const _maxHistoryFailures = 3;
+
   // Terminals whose next status frame is already spent. Every bridge outcome
   // that records an instruction row emits a snapshot straight after it, and for
   // the two that also moved the backlog — an amendment, and a cap hit that still
@@ -523,6 +535,12 @@ class HandlerService {
             activity: next.length > _activityCap
                 ? next.sublist(0, _activityCap)
                 : next,
+            // The local cap shortens the feed exactly as the bridge's page
+            // bound does, and the note under it is the only thing that says
+            // so. A long session that pushed past _activityCap live would
+            // otherwise present its truncated feed as the whole record.
+            activityTruncated:
+                _state.activityTruncated || next.length > _activityCap,
             pendingInstructions: pendingInstructions,
           ),
         );
@@ -548,7 +566,10 @@ class HandlerService {
       // Already registered, so the hydrator will not fire again until a
       // reconnect. Retry a fetch that failed, so leaving the pane and coming
       // back is the recovery the banner otherwise has no path to.
-      if (_state.activityHistoryError != null) _requestActivityHistory();
+      if (_state.activityHistoryError != null &&
+          _historyFailures < _maxHistoryFailures) {
+        _requestActivityHistory();
+      }
       return;
     }
     _historyActive = true;
@@ -567,6 +588,9 @@ class HandlerService {
 
   Future<void> _runHistoryHydrator() async {
     if (_disposed) return;
+    // A fresh establishment is new evidence: whatever made the last attempts
+    // fail is not necessarily true of this connection.
+    _historyFailures = 0;
     final epoch = session.establishmentEpoch;
     final spansGap = _activityEpoch != null && _activityEpoch != epoch;
     _activityEpoch = epoch;
@@ -591,6 +615,7 @@ class HandlerService {
       if (_disposed || _historyRequestId != requestId) return;
       _historyRequestId = null;
       _timedOutRequestId = requestId;
+      _historyFailures++;
       _historyDeadline = null;
       // Named rather than left silent: an unanswered fetch and a project that
       // has never armed Handler both render as no rows, so without this the
@@ -633,6 +658,7 @@ class HandlerService {
     _historyDeadline = null;
     _historyRequestId = null;
     _timedOutRequestId = null;
+    _historyFailures = 0;
 
     // Merged into what is held rather than replacing it. Within one
     // establishment the buffer has no holes and can legitimately run to 200
@@ -661,7 +687,15 @@ class HandlerService {
         activity: next.length > _activityCap
             ? next.sublist(0, _activityCap)
             : next,
-        activityTruncated: msg.truncated,
+        // Three things shorten what this feed can show: the page's own bound,
+        // the local cap this merge overran, and a cap already hit while live.
+        // One note answers for all of them, and carrying the old flag forward
+        // is safe because the gap path clears it before re-requesting — so it
+        // can never outlive the rows it described.
+        activityTruncated:
+            _state.activityTruncated ||
+            msg.truncated ||
+            next.length > _activityCap,
         clearActivityHistoryError: true,
       ),
     );

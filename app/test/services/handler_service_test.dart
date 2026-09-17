@@ -1691,5 +1691,65 @@ void main() {
       await svc.dispose();
       await session.close();
     });
+
+    test('a bridge that never answers is asked a bounded number of times', () async {
+      // activateHistory runs from a post-frame callback on every build while
+      // the pane is visible, and naming a failure is itself a state change
+      // that schedules the next build. Without a cap that is a permanent
+      // poll of a bridge that is not answering.
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = HandlerService.fromSession(
+        session,
+        historyTimeout: const Duration(milliseconds: 10),
+      );
+      final sub = session.heavyStream.listen((_) {});
+
+      svc.activateHistory();
+      for (var i = 0; i < 10; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        svc.activateHistory();
+      }
+
+      expect(
+        t.sent.where((m) => m['type'] == 'handler:history:request'),
+        hasLength(3),
+      );
+      // The banner stays: giving up retrying is not the same as deciding the
+      // feed is empty.
+      expect(svc.currentState.activityHistoryError, isNotNull);
+
+      await sub.cancel();
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('the local row cap is reported as truncation', () async {
+      // The cap drops rows exactly as the bridge's page bound does, and the
+      // note under the feed is the only thing that says so.
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = HandlerService.fromSession(session);
+      final sub = session.heavyStream.listen((_) {});
+
+      for (var i = 0; i < 205; i++) {
+        t.emit('handler:activity', {
+          'projectId': 'p',
+          'recordId': 'r$i',
+          'at': i,
+          'terminalId': 't1',
+          'decision': 'continue',
+          'reason': 'reason $i',
+        });
+        await Future<void>.delayed(Duration.zero);
+      }
+
+      expect(svc.currentState.activity, hasLength(200));
+      expect(svc.currentState.activityTruncated, isTrue);
+
+      await sub.cancel();
+      await svc.dispose();
+      await session.close();
+    });
   });
 }
