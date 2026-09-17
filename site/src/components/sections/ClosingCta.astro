@@ -3,7 +3,7 @@ import { Icon } from "astro-icon/components";
 import Eyebrow from "../ui/Eyebrow.astro";
 import Button from "../ui/Button.astro";
 import { links, PLATFORMS, downloadUrlFor } from "../../config";
-import { BETA_FREE, FREE_WORKERS, PRO_WORKERS, YEARLY_OFFER_USD } from "../../data/pricing";
+import { BETA_FREE, FREE_WORKERS } from "../../data/pricing";
 
 // The same OS-matched button the hero leads with, through the same /download —
 // a closing CTA that ends on a doc link is a page that never asks for the thing
@@ -12,17 +12,17 @@ import { BETA_FREE, FREE_WORKERS, PRO_WORKERS, YEARLY_OFFER_USD } from "../../da
 ---
 <section id="download" class="reveal mx-auto max-w-shell px-6 py-20">
   <div class="card-lit relative overflow-hidden rounded-xl border border-signaldeep2 bg-[#17171e] px-9 py-14 text-center">
-    <div class="pointer-events-none absolute -top-48 left-1/2 h-[420px] w-[640px] -translate-x-1/2 glow-signal" aria-hidden="true"></div>
+    <div class="pointer-events-none absolute -top-48 left-1/2 h-105 w-160 -translate-x-1/2 glow-signal" aria-hidden="true"></div>
     <div class="relative">
     <Eyebrow class="mb-5 justify-center">Get started</Eyebrow>
     <h2 class="mb-5 font-display text-title font-semibold text-ink">
-      Let your agents run.<br />Check in when it matters.
+      Try one workflow.<br />Watch the handoff.
     </h2>
     <p class="mx-auto mb-8 max-w-md text-lede text-muted">
       {BETA_FREE ? (
-        <>Set up antgrid in a couple of minutes. <span class="text-ink2">Free while in beta — every feature included.</span> When plans arrive, Pro is priced per seat — one per person — and brings Handler, the built-in AI assistant.</>
+        <><span class="text-ink2">Free during beta, with Handler included.</span> Use your existing repo and agent account.</>
       ) : (
-        <>Set up antgrid in a couple of minutes. <span class="text-ink2">Free on {FREE_WORKERS} machine</span>, remote control included — Pro is ${YEARLY_OFFER_USD} per seat / year and adds Handler, the built-in AI assistant, plus {PRO_WORKERS} machines for everyone on it.</>
+        <>Start with remote control, free on {FREE_WORKERS} machine. Handler is included with Pro. <a href={links.pricing} class="text-signal2 hover:text-signal">See plans and trial details</a>.</>
       )}
     </p>
     <div class="mb-3.5 flex flex-wrap items-center justify-center gap-3">
@@ -32,7 +32,7 @@ import { BETA_FREE, FREE_WORKERS, PRO_WORKERS, YEARLY_OFFER_USD } from "../../da
         </Button>
       ))}
     </div>
-    <p class="mb-2 text-meta text-muted2">No card required · remote control on the free plan</p>
+    <p class="mb-2 text-meta text-muted2">{BETA_FREE ? "No card required. Your agent provider's usage charges or limits still apply." : "Remote control is included on the free plan."}</p>
     {/* The escape hatch for the OS match: this band is where a reader on the
         wrong machine — or downloading for one they are not sitting at — has to
         be able to name their own build. Each goes through /download like every
@@ -49,14 +49,14 @@ import { BETA_FREE, FREE_WORKERS, PRO_WORKERS, YEARLY_OFFER_USD } from "../../da
       ))}
     </p>
     <p class="mb-8 text-meta text-muted2">
-      First time? The <a href={links.getStarted} class="text-signal2 hover:text-signal">setup guide</a> walks you from install to your phone.
+      First time? Follow the <a href={links.getStarted} class="text-signal2 hover:text-signal">setup guide</a> to start a session.
     </p>
 
     {/* A sentence, not two dead store chips. Invites are open today — a page that
         closes on "App Store — soon" tells a reader the phone half is unavailable,
         which is both wrong and the half the product is for. */}
     <p class="text-meta text-muted2">
-      iOS &amp; Android are in private beta — <a href={links.mobileInvite} class="text-signal2 hover:text-signal">request an invite</a>.
+      Phone access is by invite during beta. <a href={links.mobileInvite} class="text-signal2 hover:text-signal">Request iOS or Android access</a>.
     </p>
     </div>
   </div>

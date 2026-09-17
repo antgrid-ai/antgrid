@@ -11,8 +11,9 @@ import { links, RELEASES_URL } from "../config";
 
   <p>
     antgrid is the command centre for the coding agents you already use. Setup is
-    three steps — install the desktop app, open a project, connect your phone —
-    and takes about five minutes. Free while in beta, no card required.
+    starts on desktop: install the app, open a project and run your agent. When
+    you're ready, tell Handler what's left and when to ask you. Connecting your phone is optional.
+    Free while in beta, no card required.
   </p>
 
   <h2>Before you start: bring a coding agent</h2>
@@ -99,7 +100,33 @@ import { links, RELEASES_URL } from "../config";
     </li>
   </ol>
 
-  <h2 id="phone">Step 3 — Connect your phone</h2>
+  <h2 id="handler">Try Handler on your first task</h2>
+
+  <ol>
+    <li>Start a task with your agent and work through as much as you want.</li>
+    <li>Tell Handler what's left, how to proceed and when to ask you. Arm it on
+      that running session.</li>
+    <li>Watch how it checks the agent's work against your instructions and asks
+      for evidence before moving on. Review its next instruction.</li>
+  </ol>
+  <p>For example, after researching and planning a small feature with your agent,
+    adapt these instructions to your project:</p>
+  <blockquote>
+    Implement the agreed plan and show passing test output. Then review the code,
+    followed by a security review. Report findings with file references and fix
+    issues within scope. Compact context between phases, preserving the plan and
+    remaining instructions. Finally, smoke-test the feature and show the results.
+    Ask me before changing the public API or going outside the plan. Stop with a
+    summary of checks and unresolved issues. Don't commit or deploy.
+  </blockquote>
+  <p>Handler asks the agent for missing details or evidence and notifies you when
+    it needs your input or you've told it to check with you. Work that needs your
+    answer waits; other listed work can continue. Its judgement can be wrong, so
+    review its decisions. Use commands your agent supports.</p>
+  <p>Handler is included free during beta. Your agent provider's usage charges
+    still apply. You don't need a phone to try it.</p>
+
+  <h2 id="phone">Optional: connect your phone</h2>
 
   <p>
     The mobile apps are in beta — iOS via TestFlight, Android via Google Play

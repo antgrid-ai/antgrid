@@ -89,13 +89,6 @@ import { BETA_FREE, OFFER_ACTIVE, YEARLY_OFFER_USD, YEARLY_LIST_USD } from "../.
         wrap strands a two-word tail ("machine.") on its own line at some widths
         and not others. A hard <br /> fixes the one width you tested and makes
         narrow viewports worse. */}
-    {/* This deliberately takes the overview claim BACK from Fleet.astro, which
-        was handed it while the headline carried the evidence gate. The gate is
-        not entitled to a headline: Handler is opt-in and it is on Pro, so "make
-        it prove it" was false on every free machine until someone armed it —
-        the one promise a stranger is asked to believe has to be true on a bare
-        install. This one is. Fleet.astro keeps the PROOF; the hero takes back
-        the CLAIM, and the ProofCard below still shows the gate doing its job. */}
     <h1 class="mb-8 font-display text-display font-semibold text-ink">
       <span class="inline-block">Your machines.</span>{" "}
       <span class="inline-block">Your agents.</span>{" "}
@@ -111,30 +104,14 @@ import { BETA_FREE, OFFER_ACTIVE, YEARLY_OFFER_USD, YEARLY_LIST_USD } from "../.
         written against, and the rows below it are short enough not to need one
         of their own. */}
     <div class="max-w-[45rem]">
-      {/* Two beats, and their order is the argument. The first opens on the
-          reader's own week before it claims anything, which is what lets a
-          stranger agree before being sold to, and lands on the product in
-          different words than the headline — "control everything from one app"
-          there would be the h1 restated in a weaker voice. The second names the
-          paid feature with a VERB — you arm it — because a reader who takes the
-          gate for a default will find it missing and conclude we lied. It links
-          rather than explains: Phases.astro is two sections down and makes the
-          whole case there.
-
-          Ownership used to close this paragraph AND fill the terms row under
-          the button, which put the same claim twice in one viewport and, with
-          the headline, ran "your/yours" to eleven above the fold — at that
-          density the word stops carrying the argument it exists to carry. The
-          claim now lives once, in the row, where a reader who skips the prose
-          still meets it at the moment of decision. */}
       {/* No inline-block on the sentences here, unlike the headline: at lede
           size in a 45rem column they still wrap mid-sentence, and forbidding
           a mid-sentence break only strands a short second line. */}
       <p class="text-lede text-muted">
-        Claude Code on your laptop, Codex on your workstation, another on a cloud box. One's been stuck since 2am. All of them in one app.
+        Run your coding agents on your own machines. Follow their sessions, review changes, and send instructions in one app. Start with one machine and add others when you need them.
       </p>
       <p class="mt-4 text-lede text-muted">
-        Arm <a href={links.features} class="text-signal2 hover:text-signal">Handler</a> to hand off a session on your instructions — it wakes you only when the call is truly yours.
+        Work with your agent, then tell <a href={links.features} class="text-signal2 hover:text-signal">Handler</a> what's left and when to ask you.
       </p>
 
       <div class="mt-8 flex flex-wrap items-center gap-x-6 gap-y-3">
@@ -230,24 +207,15 @@ import { BETA_FREE, OFFER_ACTIVE, YEARLY_OFFER_USD, YEARLY_LIST_USD } from "../.
 
       {/* The two things a stranger has to believe before installing anything,
           promoted out of the footnote they used to share with the builds link.
-          Terms, not features — so they read at meta weight under the action
-          rather than competing with the lede. The rule hides below sm, where
-          the pair has already wrapped to two lines and a divider between them
-          points across nothing.
-
-          The ownership half keeps the LEDE's old wording rather than the
-          abstract pair it replaced: "your repos, your subscriptions" names
-          things a reader can check against their own machine, where
-          "infrastructure"/"data" name categories, and "nothing rented from us"
-          is the business-model claim no competitor makes. It is the sharpest
-          sentence on the page — worth the extra few words at meta weight. */}
+          Terms, not features: they sit under the action. */}
+      <p class="mt-4 text-meta text-muted2">Start on desktop. Phone access is by invite during beta: <a href={links.mobileInvite} class="text-signal2 hover:text-signal">request an invite</a>.</p>
       <div class="mt-6 flex flex-wrap items-center gap-x-4 gap-y-2 text-meta text-muted2">
         <span class="inline-flex items-center gap-2">
           <Icon name="tabler:lock" width="14" height="14" class="text-muted" />End-to-end encrypted
         </span>
         <span class="hidden h-3 w-px bg-edge-inner sm:block" aria-hidden="true"></span>
         <span class="inline-flex items-center gap-2">
-          <Icon name="tabler:database" width="14" height="14" class="text-muted" />Your repos, your subscriptions. Nothing rented from us.
+          <Icon name="tabler:database" width="14" height="14" class="text-muted" />Your machines, repos and agent subscriptions.
         </span>
       </div>
     </div>

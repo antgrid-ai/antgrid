@@ -13,7 +13,9 @@ Need a hand? Email **[contact@radhaai.com](mailto:contact@radhaai.com)** and we'
 
 ## What is Antgrid?
 
-Antgrid lets you run AI coding agents such as **Claude Code**, **Codex**, and **Cursor** on your own computer, then monitor and control them from your phone, tablet, or desktop over an end-to-end encrypted connection. You see the agent's live terminal output, browse the project's files, and stay in control from anywhere — and Handler, the built-in assistant, marks nothing done without evidence.
+Antgrid lets you run AI coding agents such as **Claude Code**, **Codex**, and **Cursor** on your own computer, then monitor and control them from your phone, tablet, or desktop over an end-to-end encrypted connection. You can view terminal output, browse files and send instructions.
+
+Start a task with your coding agent. When you're ready, tell **Handler** what's left, how to proceed and when to ask you. It checks the agent's work against your instructions and asks for evidence before moving on. It notifies you when it needs your input or you've told it to check with you. Review its decisions; its judgement can be wrong. [Try Handler on your first task](/get-started#handler).
 
 ## Supported platforms
 
@@ -45,7 +47,7 @@ Antgrid supports four sign-in options:
 
 **Antgrid is currently free while in beta** — every feature is included, Handler and remote control alike, on the house. Paid plans activate when the beta ends; the prices on [Pricing](/pricing) are founding prices, below the list price at launch.
 
-Once plans are live: **Antgrid is free on one worker machine**, with end-to-end encrypted **remote control**, fleet view and browser preview included. **Pro is billed per seat — one seat per person** — and gives every person up to **10 worker machines** of their own, plus **Handler** — the AI assistant that watches your sessions, takes instructions mid-run, and judges every item against evidence — and priority support. Pro includes a **7-day free trial** and covers up to **25 seats**. Larger teams are **Enterprise**, where SSO, audit logs and IP allowlisting are on the roadmap — email us at [contact@radhaai.com](mailto:contact@radhaai.com). See [Pricing](/pricing) for current details.
+Once plans are live: **Antgrid is free on one worker machine**, with end-to-end encrypted **remote control**, fleet view and browser preview included. **Pro is billed per seat — one seat per person** — and gives every person up to **10 worker machines** of their own, plus **Handler** to guide your agent through the remaining work and ask you when needed, and priority support. Pro includes a **7-day free trial** and covers up to **25 seats**. Larger teams are **Enterprise**, where SSO, audit logs and IP allowlisting are on the roadmap — email us at [contact@radhaai.com](mailto:contact@radhaai.com). See [Pricing](/pricing) for current details.
 
 **Manage or cancel your subscription:**
 

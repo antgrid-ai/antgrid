@@ -1,17 +1,13 @@
 ---
 import { Icon } from "astro-icon/components";
 import Eyebrow from "../ui/Eyebrow.astro";
-import Chip from "../ui/Chip.astro";
 import Readout from "../ui/Readout.astro";
 import UseCase from "../ui/UseCase.astro";
 
-// Framed as safety for Handler autonomy, never as parallelism-at-scale — the
-// "N agents in parallel" axis is a competitor's headline and first-party table
-// stakes. The claim here is the blast radius: worktree = scope, evidence gate
-// = contract, main tree = untouched.
+// A separate checkout separates edits; it is not an execution sandbox.
 const sessions = [
-  { branch: "auth-tokens", agent: "Claude Code", note: "running — 2 of 3 proven", state: "working" },
-  { branch: "checkout-tests", agent: "Codex", note: "done on evidence — review the branch", state: "done" },
+  { branch: "auth-tokens", agent: "Claude Code", note: "running in its own checkout", state: "working" },
+  { branch: "checkout-tests", agent: "Codex", note: "ready for your review", state: "done" },
 ];
 ---
 {/* Column order is reversed against Reach on purpose — run the same way round
@@ -20,23 +16,15 @@ const sessions = [
   <div class="grid items-center gap-12 md:grid-cols-2">
     <div class="md:order-2">
       <Eyebrow class="mb-5">Isolated sessions</Eyebrow>
-      <h2 class="mb-5 font-display text-title font-semibold text-ink">Let it run. Your tree doesn't move.</h2>
-      <p class="mb-4 max-w-xl text-lede text-muted">
-        Start a session isolated and antgrid provisions a managed git worktree for it — its own checkout, its own branch. Everything you see from your phone follows that checkout: files, diffs, terminal, preview. Handler's judge reads its evidence from the same tree.
-      </p>
+      <h2 class="mb-5 font-display text-title font-semibold text-ink">Give the session its own branch.</h2>
       <p class="mb-6 max-w-xl text-lede text-muted">
-        An agent is only safe to walk away from when its blast radius is a branch. When the work proves out, review and merge it. When it doesn't, throw the worktree away — <span class="text-ink2">main never knew</span>.
+        Start an isolated session in a Git repository. antgrid creates a separate checkout and branch for it. The session's files, diffs, terminal and preview follow that checkout, so you can review its changes before merging.
       </p>
-      <div class="mb-6 flex flex-wrap gap-2">
-        <Chip>own checkout, own branch</Chip>
-        <Chip>your view follows the worktree</Chip>
-        <Chip>main stays clean</Chip>
-      </div>
 
-      <UseCase class="max-w-xl">Walk away from a running agent without wondering what state you'll find your tree in.</UseCase>
+      <UseCase class="max-w-xl">Let an agent work on a fix while you keep working in your own checkout.</UseCase>
     </div>
 
-    <Readout source="~/repos/api" state="clean" label="main · clean" class="min-w-0 md:order-1">
+    <Readout source="Illustrative isolated sessions" state="watching" label="own checkouts" class="min-w-0 md:order-1">
       <div class="flex flex-col gap-1.5 p-4 md:p-5">
         {sessions.map((s) => (
           <div class="flex items-center gap-2.5 rounded border border-edge-inner bg-chrome px-3 py-2.5 font-mono text-row">
@@ -54,7 +42,7 @@ const sessions = [
       <Fragment slot="foot">
         <span class="flex items-center gap-2">
           <Icon name="tabler:folder" class="shrink-0 text-faint" width="13" height="13" />
-          <span>working tree untouched — <span class="text-ink2">0 files changed</span> on main</span>
+          <span>Separate working files. <span class="text-ink2">Not a sandbox.</span></span>
         </span>
       </Fragment>
     </Readout>

@@ -1,53 +1,36 @@
 ---
 import Eyebrow from "../ui/Eyebrow.astro";
-import HandlerScene from "../shell/HandlerScene.astro";
-import UseCase from "../ui/UseCase.astro";
 
-// The phase-gated workflow (research → validate → plan → implement, a human
-// checkpoint between each) is the industry-standard agent loop — Anthropic's
-// explore/plan/code/commit, GitHub Spec Kit's specify/plan/tasks/implement.
-// This section names that loop and puts Handler at the gates. Honesty line:
-// Handler answers the agent within the session and holds items on conditions —
-// it never starts work on its own, so "implement" below is WAITING on the
-// human's pick, not auto-dispatched.
-// Three numbers, and the third changes register — the first two size the chore,
-// the last is the guarantee. Kept to figures the page can stand behind: 4 and 0
-// are the mechanism, ~30 min is stated as a human delay, not a measured metric.
-const stats = [
-  { value: "4", label: "phases in a serious run — research, validate, plan, implement", accent: false },
-  { value: "~30 min", label: "your delay at each gate, on the days you're at the desk", accent: false },
-  { value: "0", label: "phases advanced on the agent's say-so", accent: true },
+// Claims verified against antgrid@583e988: bridge/src/handler/{evidence,decision,engine}.ts.
+// This example explains the mechanism without posing as a captured product run.
+const handoff = [
+  { title: "You hand over", body: '“Implement the plan, then review. Show passing tests. Ask me before changing the API.”' },
+  { title: "Handler asks the agent", body: '“Show the test output before moving on.”' },
+  { title: "Handler asks you", body: '“The fix needs an API change. Approve it or keep the current API?”' },
 ];
 
 ---
 <section id="handler" class="reveal mx-auto max-w-shell px-6 py-24">
   <Eyebrow class="mb-5">Hand over the follow-ups</Eyebrow>
   <h2 class="mb-5 max-w-3xl font-display text-title font-semibold text-ink">Every phase has a checkpoint.<br />It doesn't have to be you.</h2>
-  <div class="mb-10 grid max-w-4xl gap-x-10 gap-y-4 md:grid-cols-2">
-    <p class="text-lede text-muted">
-      Research, validate, plan, implement — serious agent work moves in phases, and between each one someone reads the response, judges whether it's deep enough, and writes the next prompt. Usually that someone is you, on a thirty-minute delay.
-    </p>
-    <p class="text-lede text-muted">
-      Arm Handler with the sequence instead — in plain text, mid-session, after you've driven as much as you want to drive. It reads each response, pushes back when the answer is shallow, advances a phase only when its condition holds, and wakes you when the call is genuinely yours.
-    </p>
-  </div>
+  <p class="mb-8 max-w-2xl text-lede text-muted">
+    Start a task with your coding agent. When you're ready, tell Handler what's left, how to proceed and when to ask you. It checks the agent's work against your instructions and asks for evidence before moving on.
+  </p>
 
-  <div class="mb-11 flex flex-wrap gap-x-14 gap-y-7">
-    {stats.map((s) => (
-      <div>
-        <div class={`font-mono text-kicker ${s.accent ? "text-signal" : "text-ink"}`}>{s.value}</div>
-        <div class="mt-2 max-w-52 text-meta leading-relaxed text-muted2">{s.label}</div>
-      </div>
+  <p class="mb-4 text-meta text-muted2">Example instructions and follow-ups</p>
+  <ol class="mb-7 grid gap-6 md:grid-cols-3">
+    {handoff.map((step, i) => (
+      <li class="rounded-lg border border-edge bg-well p-5">
+        <div class="mb-3 font-mono text-meta text-signal">0{i + 1}</div>
+        <h3 class="mb-2 text-note font-medium text-ink">{step.title}</h3>
+        <p class="text-note leading-relaxed text-muted">{step.body}</p>
+      </li>
     ))}
-  </div>
-
-  <HandlerScene />
-
-  <UseCase class="mt-7 max-w-2xl">Type the sequence once, before you leave. You get woken for the call that's actually yours.</UseCase>
-
+  </ol>
   {/* The limitation, on the page rather than in a code comment — a reader who
       assumes autonomy here and discovers otherwise has been mis-sold. */}
   <p class="mt-4 max-w-2xl text-meta leading-relaxed text-muted2">
-    Handler answers the agent inside a running session and holds a phase until its condition is met. It never starts work on its own, and it never advances a phase on the agent's say-so.
+    Handler works inside a session you arm. Review its decisions; its judgement can be wrong.
   </p>
+  <a href="#download" class="mt-6 inline-flex items-center gap-2 text-note font-medium text-signal2 hover:text-signal">Try one handoff <span aria-hidden="true">↓</span></a>
 </section>

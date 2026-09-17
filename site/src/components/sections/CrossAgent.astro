@@ -4,27 +4,16 @@ import Eyebrow from "../ui/Eyebrow.astro";
 import UseCase from "../ui/UseCase.astro";
 
 const steps = [
-  { n: 1, icon: "tabler:download", title: "Install on your machine", body: "The desktop app runs your agents in real terminals and links them to your phone — Windows, macOS, Linux.", accent: false },
-  { n: 2, icon: "tabler:terminal-2", title: "Run any agent", body: "Start Claude Code, Codex or Cursor exactly how you do now — same flags, same prompts, in a real terminal.", accent: false },
-  // Deliberately the same length as the other two: three columns of one length
-  // and one of a paragraph reads as a step that went wrong. Handler's full case
-  // is Phases.astro's job, so this names it and stops.
-  { n: 3, icon: "tabler:device-mobile", title: "Take it with you", body: "Watch, steer and approve from your phone — or step away and let Handler answer, waking you only when a call needs a human.", accent: true },
+  { n: 1, icon: "tabler:download", title: "Install on your machine", body: "Download the desktop app for Windows, macOS or Linux. Open a project on that machine.", accent: false },
+  { n: 2, icon: "tabler:terminal-2", title: "Start a session", body: "Run your installed coding agent in antgrid's terminal, using your existing agent account and prompts.", accent: false },
+  { n: 3, icon: "tabler:list-check", title: "Hand over when you're ready", body: "Tell Handler what's left, how to proceed and when to ask you. Arm it, then review its next decision.", accent: true },
 ];
 ---
 {/* The page's quiet section, on purpose: it sits between two readout-heavy
     bands and the closing CTA, so the steps are ruled rather than boxed. */}
 <section class="reveal mx-auto max-w-shell px-6 py-24">
   <Eyebrow class="mb-5">Setup</Eyebrow>
-  <h2 class="mb-5 font-display text-title font-semibold text-ink">Running in about five minutes.</h2>
-  {/* Compatibility is answered in Compat.astro, directly under the hero: "does
-      this work with my agent" gates whether a reader keeps scrolling, so it
-      cannot be answered in section eight. What is left here is onboarding, and
-      a second section re-arguing the roster's point only reads as a page that
-      repeats itself. */}
-  <p class="mb-12 max-w-xl text-lede text-muted">
-    Install the desktop app, start your agent the way you always do, and pick it up on your phone. Nothing about how you work changes.
-  </p>
+  <h2 class="mb-10 font-display text-title font-semibold text-ink">Start with one session.</h2>
 
   {/* Numbered because setup genuinely is ordered — you can't run an agent
       through antgrid before installing it. */}
@@ -45,8 +34,5 @@ const steps = [
     ))}
   </div>
 
-  {/* Placed after the steps like every other UseCase on the page: it is the
-      "and therefore?" line for the mechanism above it, and one sitting ahead of
-      its mechanism reads as an aside nothing has earned yet. */}
-  <UseCase class="mt-7 max-w-2xl">No migration and no new CLI — install it and keep working exactly the way you did this morning.</UseCase>
+  <UseCase class="mt-7 max-w-2xl">For your first run, research and plan a new feature with your agent. Then ask Handler to guide it through implementation, code review, security review and smoke tests, compacting context between steps.</UseCase>
 </section>
