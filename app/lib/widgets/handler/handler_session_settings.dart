@@ -375,6 +375,12 @@ class _HandlerLensControlState extends ConsumerState<HandlerLensControl> {
 
     void selectPreset(String? id) {
       widget.onRoleTapped?.call();
+      // The brief moves with the pick, so the host has to hear that control was
+      // answered too. A host that collects rather than diffs (the arm sheet)
+      // sends an untouched brief as null — "leave the stored one alone" — and
+      // the bridge would then run this preset ON TOP of a user lens whose panel
+      // this tap has just hidden, which is the one state §6 says cannot exist.
+      widget.onBriefEdited?.call();
       setState(() => _ownSelected = false);
       widget.onChanged((
         judgeTool: widget.value.judgeTool,
