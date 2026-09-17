@@ -4,8 +4,8 @@
 // with nothing on either saying who receives it.
 import 'package:antgrid/design/ab_colors.dart';
 import 'package:antgrid/design/ab_icons.dart';
-import 'package:antgrid/design/widgets/ab_chip.dart';
 import 'package:antgrid/design/widgets/ab_icon.dart';
+import 'package:antgrid/design/widgets/ab_state_chip.dart';
 import 'package:antgrid/design/widgets/ab_text_field.dart';
 import 'package:antgrid/models/handler_state.dart';
 import 'package:antgrid/providers/first_run.dart';
@@ -38,6 +38,7 @@ HandlerSessionState _armed({
   String? roleId,
   String? brief,
   HandlerObservability? observability,
+  HandlerAvailability? availability,
 }) => HandlerSessionState(
   terminalId: 't1',
   runState: runState,
@@ -52,13 +53,25 @@ HandlerSessionState _armed({
   roleId: roleId,
   brief: brief,
   observability: observability,
+  availability: availability,
 );
 
-/// The chip's colour is the whole assertion, and the harness below mounts no
+/// The chip's tone is the whole assertion, and the harness below mounts no
 /// palette extension — so read the one the bar itself resolved rather than
 /// guessing which fallback is in force.
-AbChip _chip(WidgetTester tester, String label) =>
-    tester.widget<AbChip>(find.widgetWithText(AbChip, label));
+AbStateChip _chip(WidgetTester tester, String label) =>
+    tester.widget<AbStateChip>(find.widgetWithText(AbStateChip, label));
+
+/// The state word is the first span of a rich title, so its tone is only
+/// legible off the spans — a `Text` finder would hand back the whole line.
+/// The title is the one rich `Text` the bar builds; the subtitle and the chip
+/// label both carry plain `data`.
+TextSpan _stateSpan(WidgetTester tester) {
+  final title = tester.widget<Text>(
+    find.byWidgetPredicate((w) => w is Text && w.textSpan != null),
+  );
+  return (title.textSpan! as TextSpan).children!.first as TextSpan;
+}
 
 /// The brief marker carries no text, so the icon it draws is the only thing
 /// that identifies it.
@@ -162,25 +175,29 @@ void main() {
     // The bar is on screen for the whole time a session is armed and is the
     // only place the lens is visible at all, so "no chip" would be a state the
     // user has to be taught to read.
+    // As written, not shouted: the sheet this chip opens paints the same four
+    // phrases in the same casing, and one lens spelled two ways on two
+    // surfaces is read as two settings.
     await _pump(tester, sessions: {'t1': _armed(roleId: 'qa')});
-    final p = tester.element(find.byType(HandlerPaBar)).antgrid;
-    expect(_chip(tester, 'PROOF IT WORKS').color, p.textMuted);
+    final chip = _chip(tester, 'Proof it works');
+    expect(chip.active, isFalse);
+    expect(chip.tone, isNull);
   });
 
   testWidgets('the default is named as nothing extra', (tester) async {
     // The unnamed lens is still a live setting, and the chip that opens the
     // sheet has to be on screen before the user has ever picked anything.
     await _pump(tester, sessions: {'t1': _armed()});
-    expect(find.text('NOTHING EXTRA'), findsOneWidget);
-    expect(find.text('PROOF IT WORKS'), findsNothing);
+    expect(find.text('Nothing extra'), findsOneWidget);
+    expect(find.text('Proof it works'), findsNothing);
   });
 
   testWidgets('a lens this build cannot name shows as itself', (tester) async {
     // A newer machine's lens is a real pick this session is judging under.
     // Folding it into the default would report a pick the user never made.
     await _pump(tester, sessions: {'t1': _armed(roleId: 'ship-it')});
-    expect(find.text('SHIP-IT'), findsOneWidget);
-    expect(find.text('NOTHING EXTRA'), findsNothing);
+    expect(find.text('ship-it'), findsOneWidget);
+    expect(find.text('Nothing extra'), findsNothing);
   });
 
   testWidgets('a brief with no role is shown as your own', (tester) async {
@@ -190,8 +207,8 @@ void main() {
       tester,
       sessions: {'t1': _armed(brief: 'watch the migrations')},
     );
-    expect(find.text('YOUR OWN'), findsOneWidget);
-    expect(find.text('NOTHING EXTRA'), findsNothing);
+    expect(find.text('Your own'), findsOneWidget);
+    expect(find.text('Nothing extra'), findsNothing);
   });
 
   testWidgets('a machine that never advertised lenses is a dash', (
@@ -201,9 +218,8 @@ void main() {
     // never named the lenses it reads is not a machine running the default,
     // and saying so here would advertise a control over nothing.
     await _pump(tester, sessions: {'t1': _armed()}, lenses: null);
-    expect(find.text('NOTHING EXTRA'), findsNothing);
-    final p = tester.element(find.byType(HandlerPaBar)).antgrid;
-    expect(_chip(tester, '—').color, p.textMuted);
+    expect(find.text('Nothing extra'), findsNothing);
+    expect(_chip(tester, '—').active, isFalse);
   });
 
   testWidgets('the lens chip is tinted where nothing is being judged', (
@@ -221,7 +237,9 @@ void main() {
       },
     );
     final p = tester.element(find.byType(HandlerPaBar)).antgrid;
-    expect(_chip(tester, 'WHAT COULD BREAK').color, p.warning);
+    final chip = _chip(tester, 'What could break');
+    expect(chip.tone, p.warning);
+    expect(chip.active, isTrue);
   });
 
   testWidgets('a brief shows a marker beside the lens', (tester) async {
@@ -253,7 +271,7 @@ void main() {
       opener: (terminalId) => opened = terminalId,
     );
     final door = find.ancestor(
-      of: find.text('PROOF IT WORKS'),
+      of: find.text('Proof it works'),
       matching: find.byType(GestureDetector),
     );
     expect(find.descendant(of: door, matching: _briefMarker), findsOneWidget);
@@ -272,9 +290,101 @@ void main() {
       sessions: {'t1': _armed(roleId: 'qa')},
       opener: (terminalId) => opened = terminalId,
     );
-    await tester.tap(find.text('PROOF IT WORKS'));
+    await tester.tap(find.text('Proof it works'));
     await tester.pump();
     expect(opened, isNull);
+  });
+
+  testWidgets('the state leads the line in its own tone', (tester) async {
+    // The run state used to live only in the tint of a 12px glyph. The pill
+    // that carried the word — `HandlerHeaderControl` — is mounted nowhere, so
+    // an armed session had no surface at all saying what Handler was doing.
+    await _pump(tester, sessions: {'t1': _armed()});
+    final p = tester.element(find.byType(HandlerPaBar)).antgrid;
+    final word = _stateSpan(tester);
+    expect(word.text, 'Watching');
+    expect(word.style?.color, p.textMuted);
+  });
+
+  // `needs_you` is the bridge's one word for two situations, and the tone is
+  // the half a user takes in without reading — so it has to move with the
+  // word, or the bar reports a stopped agent over one that is still working.
+  testWidgets('a question the agent is working past is not a stopped agent', (
+    tester,
+  ) async {
+    await _pump(
+      tester,
+      sessions: {
+        't1': _armed(
+          runState: HandlerRunState.needsYou,
+          escalations: [_escalation('e1', nonBlocking: true)],
+        ),
+      },
+    );
+    final p = tester.element(find.byType(HandlerPaBar)).antgrid;
+    final asked = _stateSpan(tester);
+    expect(asked.text, 'Asked you');
+    expect(asked.style?.color, p.textSecondary);
+  });
+
+  testWidgets('a session that has actually stopped keeps the loud word', (
+    tester,
+  ) async {
+    await _pump(
+      tester,
+      sessions: {
+        't1': _armed(
+          runState: HandlerRunState.needsYou,
+          escalations: [_escalation('e1')],
+        ),
+      },
+    );
+    final p = tester.element(find.byType(HandlerPaBar)).antgrid;
+    final stopped = _stateSpan(tester);
+    expect(stopped.text, 'Needs you');
+    expect(stopped.style?.color, p.accent);
+  });
+
+  testWidgets('an unwatchable session never reads as watching', (tester) async {
+    // An armed session whose agent reports nothing sits at `watching` for as
+    // long as it stays armed, and this bar is on screen that whole time —
+    // "Watching" over a session nobody is watching is the exact claim
+    // observability exists to retire.
+    await _pump(
+      tester,
+      sessions: {'t1': _armed(observability: HandlerObservability.unsupported)},
+    );
+    final p = tester.element(find.byType(HandlerPaBar)).antgrid;
+    final word = _stateSpan(tester);
+    expect(word.text, 'Not watched');
+    expect(word.style?.color, p.warning);
+  });
+
+  testWidgets('monitoring that has not come up yet says so', (tester) async {
+    await _pump(
+      tester,
+      sessions: {
+        't1': _armed(
+          availability: const HandlerAvailability(
+            HandlerAvailabilityState.preparing,
+          ),
+        ),
+      },
+    );
+    final p = tester.element(find.byType(HandlerPaBar)).antgrid;
+    final word = _stateSpan(tester);
+    expect(word.text, 'Waiting for agent');
+    expect(word.style?.color, p.warning);
+  });
+
+  testWidgets('a bridge that reports no availability keeps the plain word', (
+    tester,
+  ) async {
+    // Null is "nobody said". A bridge that predates the field must not read as
+    // a broken one — that is the arm which would turn every un-upgraded
+    // machine into a bar full of warnings.
+    await _pump(tester, sessions: {'t1': _armed()});
+    expect(_stateSpan(tester).text, 'Watching');
   });
 
   testWidgets('the bar offers no place to type of its own', (tester) async {
@@ -288,7 +398,7 @@ void main() {
 
   testWidgets('nothing renders without an armed session', (tester) async {
     await _pump(tester, sessions: const {});
-    expect(find.text('Nothing queued'), findsNothing);
+    expect(find.text('Watching · Nothing queued'), findsNothing);
   });
 
   testWidgets('the status row reports the active item and its ordinal', (
@@ -307,7 +417,10 @@ void main() {
         ),
       },
     );
-    expect(find.text('Item 2/4: run integration tests'), findsOneWidget);
+    expect(
+      find.text('Watching · Item 2/4: run integration tests'),
+      findsOneWidget,
+    );
   });
 
   testWidgets('the status row opens the backlog drawer', (tester) async {
@@ -318,7 +431,7 @@ void main() {
       opener: (terminalId) => opened = terminalId,
     );
 
-    await tester.tap(find.text('Nothing queued'));
+    await tester.tap(find.text('Watching · Nothing queued'));
     await tester.pump();
 
     expect(opened, 't1');
@@ -333,7 +446,7 @@ void main() {
     // this row is now the ONLY way to reach the instruction composer.
     await _pump(tester, sessions: {'t1': _armed()});
 
-    await tester.tap(find.text('Nothing queued'));
+    await tester.tap(find.text('Watching · Nothing queued'));
     await tester.pumpAndSettle();
 
     expect(find.byType(HandlerBacklogDrawer), findsOneWidget);
@@ -355,7 +468,7 @@ void main() {
         ),
       },
     );
-    expect(find.textContaining('Paused (rate limit) · resumes in'), findsOne);
+    expect(find.textContaining('Paused · rate limit · resumes in'), findsOne);
 
     await tester.pump(const Duration(seconds: 1));
     // Tearing the tree down must take the ticker with it, or the test binding
@@ -487,7 +600,7 @@ void main() {
         ),
         now: now,
       ),
-      'Paused (rate limit) · resumes in 3m 40s',
+      'rate limit · resumes in 3m 40s',
     );
   });
 
@@ -498,7 +611,7 @@ void main() {
       handlerPaStatusLabel(
         _armed(runState: HandlerRunState.parked, parkKind: 'outage'),
       ),
-      'Paused (temporary failure)',
+      'temporary failure',
     );
   });
 
@@ -514,7 +627,7 @@ void main() {
           parkCause: 'judge_failure',
         ),
       ),
-      'Paused (judge unavailable)',
+      'judge unavailable',
     );
   });
 
@@ -527,7 +640,7 @@ void main() {
           parkCause: 'agent_failure',
         ),
       ),
-      'Paused (agent error)',
+      'agent error',
     );
   });
 
@@ -542,7 +655,7 @@ void main() {
           parkCause: 'solar_flare',
         ),
       ),
-      'Paused (rate limit)',
+      'rate limit',
     );
   });
 

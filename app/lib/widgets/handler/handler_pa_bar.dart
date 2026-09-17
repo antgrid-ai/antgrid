@@ -7,9 +7,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../design/ab_colors.dart';
 import '../../design/ab_icons.dart';
 import '../../design/ab_tokens.dart';
-import '../../design/widgets/ab_chip.dart';
 import '../../design/widgets/ab_icon.dart';
 import '../../design/widgets/ab_list_row.dart';
+import '../../design/widgets/ab_state_chip.dart';
 import '../../models/handler_state.dart';
 import '../../providers/providers.dart';
 import '../../providers/session_mode.dart';
@@ -34,8 +34,15 @@ final handlerBacklogOpenerProvider =
       HandlerBacklogOpener?
     >(() => ValueController(null));
 
-/// The bar's one-line progress readout for [session], e.g.
+/// What the bar says about [session] AFTER its state word, e.g.
 /// `Item 2/4: Running integration tests`.
+///
+/// Deliberately the detail half alone. The state itself is
+/// [handlerSessionStatusWord]'s, which is the vocabulary every other Handler
+/// surface reports a session with — a bar that phrased its own would be the
+/// second wording of one state, and one state described two ways reads as two
+/// sessions. Null where the state word is the whole answer, which is a park
+/// from a bridge that named neither a cause nor a deadline.
 ///
 /// The ordinal counts completions only, never the other closed states: a
 /// skipped or failed item ends without being achieved, and folding it into
@@ -46,9 +53,9 @@ final handlerBacklogOpenerProvider =
 /// desktop, and two wordings of one number read as two numbers.
 ///
 /// [now] is injectable so the parked countdown is deterministic in tests.
-String handlerPaStatusLabel(HandlerSessionState session, {DateTime? now}) {
+String? handlerPaStatusLabel(HandlerSessionState session, {DateTime? now}) {
   if (session.runState == HandlerRunState.parked) {
-    return _parkedLabel(session, now ?? DateTime.now());
+    return _parkedDetail(session, now ?? DateTime.now());
   }
   final total = session.backlogTotal;
   if (total == 0) return 'Nothing queued';
@@ -232,16 +239,21 @@ String _parkedHint(HandlerSessionState session, bool isChat) {
 
 /// A park always resumes on its own, so the wake time carries the message;
 /// without a deadline the bare reason is all we can honestly promise.
-String _parkedLabel(HandlerSessionState session, DateTime now) {
+///
+/// Says neither "Paused" nor "Parked": the state word already does, and a
+/// detail that repeated it would spend the narrowest surface's only spare
+/// characters saying the same thing twice.
+String? _parkedDetail(HandlerSessionState session, DateTime now) {
   final reason = handlerParkReason(session);
-  final head = reason == null ? 'Paused' : 'Paused ($reason)';
   final until = session.parkedUntil;
-  if (until == null) return head;
+  if (until == null) return reason;
   final left = DateTime.fromMillisecondsSinceEpoch(until).difference(now);
   // A deadline already behind us means the resume is in flight, not that the
   // session is overdue — counting into negative time would read as stuck.
-  if (left <= Duration.zero) return '$head · resuming';
-  return '$head · resumes in ${formatDuration(left)}';
+  final wake = left <= Duration.zero
+      ? 'resuming'
+      : 'resumes in ${formatDuration(left)}';
+  return reason == null ? wake : '$reason · $wake';
 }
 
 /// Whether a countdown is still counting towards something. A deadline already
@@ -309,7 +321,11 @@ class _HandlerPaBarState extends ConsumerState<HandlerPaBar> {
     _syncCountdownTicker(_hasLiveDeadline(session, now));
 
     final p = context.antgrid;
-    final tone = handlerRunStateColor(p, session.runState);
+    // Word and tone both from the shared vocabulary, including the overrides
+    // that outrank `watching`: this bar is the only surface an armed session
+    // has for the whole time it is armed, so a session nobody is watching
+    // must not read here as one that is.
+    final status = handlerSessionStatusWord(p, session);
     final openBacklog =
         ref.watch(handlerBacklogOpenerProvider) ??
         (id) => unawaited(showHandlerBacklogDrawer(context, id));
@@ -346,9 +362,21 @@ class _HandlerPaBarState extends ConsumerState<HandlerPaBar> {
     // Tinted where nothing is judging: the lens is stored and inert, and a bar
     // naming it in ordinary chrome while every pause escalates says the
     // opposite of what is happening.
-    final lensTone = session.observability == HandlerObservability.escalateOnly
-        ? p.warning
-        : p.textMuted;
+    final inert = session.observability == HandlerObservability.escalateOnly;
+    // The chip's own words say what the lens IS; the tooltip carries the one
+    // thing a two-word label cannot. Escalate-only borrows the sentence the
+    // Handler tab tooltips its own ESCALATE ONLY chip with — the two are on
+    // screen together on desktop, and one inert judge explained two ways reads
+    // as two different problems.
+    final lensTooltip = inert
+        ? escalateOnlyNotice
+        : state?.lenses == null
+        ? handlerLensUnreportedBlurb
+        : session.brief != null
+        ? 'Your own words are running under this lens'
+        : 'What Handler also asks about on this session';
+
+    final detail = handlerPaStatusLabel(session, now: now);
 
     return Container(
       decoration: BoxDecoration(
@@ -364,8 +392,31 @@ class _HandlerPaBarState extends ConsumerState<HandlerPaBar> {
         // rather than drifting to the middle of a wrapped block.
         subtitleMaxLines: 2,
         crossAxisAlignment: CrossAxisAlignment.start,
-        leading: AbIcon(AbIcons.list, size: 12, color: tone),
-        title: Text(handlerPaStatusLabel(session, now: now)),
+        // Untinted, unlike the state it used to carry: this glyph names the
+        // backlog behind the row, and painting a door in the run state's
+        // colour left the tone as the only thing saying what the session was
+        // doing — which is how the state went unworded for as long as it did.
+        leading: AbIcon(AbIcons.list, size: 12, color: p.textMuted),
+        // State first, in its own tone, then the detail. An ellipsis eats from
+        // the tail, so the half that survives the narrowest panel is the half
+        // that decides whether the user has to act at all.
+        title: Text.rich(
+          TextSpan(
+            children: [
+              TextSpan(
+                text: status.label,
+                style: TextStyle(
+                  color: status.tone,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              if (detail != null) ...[
+                TextSpan(text: ' · ', style: TextStyle(color: p.textMuted)),
+                TextSpan(text: detail),
+              ],
+            ],
+          ),
+        ),
         // Unstyled: AbListRow already renders a subtitle as muted chrome, and
         // restating it here would silently drop the row's line height.
         subtitle: hint == null ? null : Text(hint),
@@ -378,37 +429,30 @@ class _HandlerPaBarState extends ConsumerState<HandlerPaBar> {
             // changed makes "no chip" a state the user has to know how to
             // read. It costs width the title is already short of (see the
             // subtitle note above), which is the trade.
-            Builder(
-              builder: (chipContext) => GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onTap: () => detached(
-                  'HandlerPaBar',
-                  'open session settings',
-                  () =>
-                      showHandlerSessionSettingsSheet(chipContext, terminalId),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    AbChip.system(label: lensLabel, color: lensTone),
-                    // The brief sits behind the same door as the lens it
-                    // qualifies, so the marker is inside the gesture rather
-                    // than beside it: a mark the user cannot follow names
-                    // something with nowhere to go and read it.
-                    if (session.brief != null)
-                      Padding(
-                        padding: const EdgeInsets.only(left: AbTokens.space4),
-                        child: Semantics(
-                          label: 'Brief added',
-                          child: AbIcon(
-                            AbIcons.comment,
-                            size: 11,
-                            color: lensTone,
-                          ),
-                        ),
-                      ),
-                  ],
-                ),
+            //
+            // [AbStateChip] rather than a bare [AbChip]: this reports a state
+            // and opens the surface that changes it, which is that widget's
+            // whole contract. The chip it replaces drew the row's one control
+            // as read-only system data — no border, no hover, no focus ring
+            // and a tap target the height of 10px of text — while shouting the
+            // label in caps the sheet behind it does not use.
+            AbStateChip(
+              // The brief sits behind the same door as the lens it qualifies,
+              // so it marks that door rather than standing beside it: a mark
+              // the user cannot follow names something with nowhere to go and
+              // read it. Deliberately not [AbIcons.shield], which is Handler's
+              // arm/disarm mark everywhere else it appears — on a chip that
+              // opens a settings sheet it would offer the one action this
+              // control does not have.
+              icon: session.brief != null ? AbIcons.comment : AbIcons.settings,
+              label: lensLabel,
+              tone: inert ? p.warning : null,
+              active: inert,
+              tooltip: lensTooltip,
+              onTap: (chipContext) => detached(
+                'HandlerPaBar',
+                'open session settings',
+                () => showHandlerSessionSettingsSheet(chipContext, terminalId),
               ),
             ),
             const SizedBox(width: AbTokens.space6),

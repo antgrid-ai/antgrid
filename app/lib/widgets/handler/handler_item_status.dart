@@ -134,6 +134,55 @@ Color handlerRunStateColor(
   HandlerRunState.parked => p.warning,
 };
 
+/// The word one armed session is reported with on a surface that stays on
+/// screen, and the tone it is painted in.
+///
+/// [handlerRunStateLabel] answers for the run state alone, and for three
+/// sessions that answer is a lie. An agent that reports nothing the handler can
+/// act on, and one whose monitoring has not come up or has gone down, both sit
+/// at `watching` for as long as they stay armed — and "Watching" over a session
+/// nobody is watching is the exact claim [HandlerObservability] and
+/// [HandlerAvailability] exist to retire. The overrides live with the word
+/// rather than at whichever surface remembered them.
+///
+/// Only `watching` is overridden, because the other three report something that
+/// has already happened: a session cannot be handling a pause that never
+/// reached the handler, so a coverage caveat there would describe its past
+/// instead of its present.
+({String label, Color tone}) handlerSessionStatusWord(
+  AbColors p,
+  HandlerSessionState session,
+) {
+  // `asksOnly` reads the rows the capability gate has already been over, so a
+  // question this app has no way to answer keeps the loud word.
+  final asksOnly = session.asksOnly;
+  if (session.runState != HandlerRunState.watching) {
+    return (
+      label: handlerRunStateLabel(session.runState, asksOnly: asksOnly),
+      tone: handlerRunStateColor(p, session.runState, asksOnly: asksOnly),
+    );
+  }
+  if (session.observability == HandlerObservability.unsupported) {
+    return (label: 'Not watched', tone: p.warning);
+  }
+  return switch (session.availability?.state) {
+    // Null is "nobody said" and keeps the ordinary word: an older bridge that
+    // never reports availability must not read as a broken one.
+    null || HandlerAvailabilityState.available => (
+      label: handlerRunStateLabel(HandlerRunState.watching),
+      tone: handlerRunStateColor(p, HandlerRunState.watching),
+    ),
+    HandlerAvailabilityState.unavailable => (
+      label: 'Monitoring unavailable',
+      tone: p.warning,
+    ),
+    HandlerAvailabilityState.preparing || HandlerAvailabilityState.unknown => (
+      label: 'Waiting for agent',
+      tone: p.warning,
+    ),
+  };
+}
+
 /// What a park is BLAMED on, in the words every surface that names one uses.
 ///
 /// Reads [HandlerSessionState.parkCause] and never [HandlerSessionState.parkKind],
