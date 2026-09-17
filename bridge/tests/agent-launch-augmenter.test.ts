@@ -189,7 +189,7 @@ describe("augmentAgentLaunch", () => {
     });
   });
 
-  test("antigravity → merges PreInvocation+Stop hooks into the global hooks.json, sets GODEBUG fallback-roots", () => {
+  test("antigravity → merges PreInvocation+Stop+PreToolUse hooks into the global hooks.json, sets GODEBUG fallback-roots", () => {
     const abDir = abdir();
     const geminiConfigDir = abdir();
     const a = augmentAgentLaunch("antigravity", { abDir, geminiConfigDir, self: BRIDGE_SELF });
@@ -204,6 +204,12 @@ describe("augmentAgentLaunch", () => {
       /antigravity\/post-title\.js PreInvocation$/,
     );
     expect(group.Stop[0].command.replace(/\\/g, "/")).toMatch(/antigravity\/post-title\.js Stop$/);
+    // PreToolUse is the GROUPED shape (matcher + hooks wrapper), unlike the flat
+    // PreInvocation/Stop arrays — see global-hooks.ts.
+    expect(group.PreToolUse[0].matcher).toBe("*");
+    expect(group.PreToolUse[0].hooks[0].command.replace(/\\/g, "/")).toMatch(
+      /antigravity\/post-title\.js PreToolUse$/,
+    );
   });
 
   test("antigravity hooks.json merge is idempotent and preserves other top-level groups", () => {

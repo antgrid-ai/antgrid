@@ -1,5 +1,6 @@
 import 'package:flutter/widgets.dart';
 
+import '../../util/detached.dart';
 import '../ab_colors.dart';
 import '../ab_icons.dart';
 import '../ab_tokens.dart';
@@ -20,6 +21,7 @@ class AbSelectOption<T> {
     this.leading,
     this.detail,
     this.keywords = const [],
+    this.onDelete,
   });
 
   final T value;
@@ -35,6 +37,14 @@ class AbSelectOption<T> {
   /// Extra text the filter matches on, for rows whose label is not the only
   /// way a user would name them.
   final List<String> keywords;
+
+  /// When set, the row grows a trailing delete action. Returning true drops
+  /// the row from this sheet's own results (and from the selection, if it
+  /// was selected) without needing [showAbSelect]'s caller to re-open it —
+  /// the caller's own data source is refetched separately, on next open.
+  /// Returning false (a cancelled confirm, a refused delete) leaves the row
+  /// exactly as it was.
+  final Future<bool> Function(BuildContext context)? onDelete;
 
   bool matches(String query) {
     if (query.isEmpty) return true;
@@ -68,6 +78,8 @@ Future<Set<T>?> showAbSelect<T>(
   bool single = false,
   String? emptyMessage,
   String filterHint = 'Filter…',
+  String? createTooltip,
+  Future<T?> Function(BuildContext context)? onCreateNew,
 }) {
   return showAbAdaptiveSheet<Set<T>>(
     context,
@@ -78,6 +90,8 @@ Future<Set<T>?> showAbSelect<T>(
       single: single,
       emptyMessage: emptyMessage,
       filterHint: filterHint,
+      createTooltip: createTooltip,
+      onCreateNew: onCreateNew,
     ),
   );
 }
@@ -90,6 +104,8 @@ class _AbSelectSheet<T> extends StatefulWidget {
     required this.single,
     required this.filterHint,
     this.emptyMessage,
+    this.createTooltip,
+    this.onCreateNew,
   });
 
   final String title;
@@ -99,6 +115,17 @@ class _AbSelectSheet<T> extends StatefulWidget {
   final String filterHint;
   final String? emptyMessage;
 
+  /// Tooltip for the header's create affordance. The affordance itself is
+  /// gated on [onCreateNew] alone — this only names it once both are set.
+  final String? createTooltip;
+
+  /// When set, the header grows a "+" action. Creating a value closes this
+  /// sheet immediately with that value merged into the selection, the same
+  /// way picking the last option in single-select does — a created row has
+  /// nothing left to confirm, and re-deriving [options] here would need the
+  /// caller's own data source re-fetched mid-sheet.
+  final Future<T?> Function(BuildContext context)? onCreateNew;
+
   @override
   State<_AbSelectSheet<T>> createState() => _AbSelectSheetState<T>();
 }
@@ -106,6 +133,10 @@ class _AbSelectSheet<T> extends StatefulWidget {
 class _AbSelectSheetState<T> extends State<_AbSelectSheet<T>> {
   late Set<T> _selected = {...widget.initialSelection};
   String _query = '';
+
+  /// Rows whose [AbSelectOption.onDelete] returned true this session — held
+  /// here rather than mutating [widget.options], which the caller owns.
+  final _removed = <T>{};
 
   /// Ceiling on the results list. Below it the sheet sizes to its rows; above
   /// it the rows scroll, so a long label set never pushes Apply off a phone.
@@ -123,11 +154,30 @@ class _AbSelectSheetState<T> extends State<_AbSelectSheet<T>> {
     if (widget.single) Navigator.of(context).pop(_selected);
   }
 
+  Future<void> _createNew() async {
+    final onCreateNew = widget.onCreateNew;
+    if (onCreateNew == null) return;
+    final created = await onCreateNew(context);
+    if (created == null || !mounted) return;
+    Navigator.of(context).pop({..._selected, created});
+  }
+
+  Future<void> _delete(AbSelectOption<T> option) async {
+    final onDelete = option.onDelete;
+    if (onDelete == null) return;
+    final ok = await onDelete(context);
+    if (!ok || !mounted) return;
+    setState(() {
+      _removed.add(option.value);
+      _selected.remove(option.value);
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     final palette = context.antgrid;
     final visible = widget.options
-        .where((o) => o.matches(_query))
+        .where((o) => !_removed.contains(o.value) && o.matches(_query))
         .toList(growable: false);
 
     return Column(
@@ -152,6 +202,14 @@ class _AbSelectSheetState<T> extends State<_AbSelectSheet<T>> {
                   ),
                 ),
               ),
+              if (widget.onCreateNew != null) ...[
+                AbIconButton(
+                  icon: AbIcons.add,
+                  tooltip: widget.createTooltip ?? 'New',
+                  onTap: () => detached('ab-select', 'create new', _createNew),
+                ),
+                const SizedBox(width: AbTokens.space4),
+              ],
               AbIconButton(
                 icon: AbIcons.close,
                 tooltip: 'Close',
@@ -215,6 +273,17 @@ class _AbSelectSheetState<T> extends State<_AbSelectSheet<T>> {
                   subtitle: option.detail == null
                       ? null
                       : Text(option.detail!),
+                  trailing: option.onDelete == null
+                      ? null
+                      : AbIconButton(
+                          icon: AbIcons.trash,
+                          tooltip: 'Delete',
+                          onTap: () => detached(
+                            'ab-select',
+                            'delete option',
+                            () => _delete(option),
+                          ),
+                        ),
                 );
               },
             ),

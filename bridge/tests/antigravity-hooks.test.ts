@@ -43,6 +43,17 @@ test("mergeAntigravityHookEntries adds both entries under the named group on an 
   expect(JSON.stringify(merged)).not.toContain('"args"');
 });
 
+test("mergeAntigravityHookEntries wraps PreToolUse in the matcher/hooks group shape, unlike the flat PreInvocation/Stop arrays", () => {
+  const merged = mergeAntigravityHookEntries({}, [
+    { event: "PreToolUse", command: "node a.js PreToolUse", matcher: "*" },
+  ]);
+  expect(merged).toEqual({
+    [ANTIGRAVITY_HOOK_GROUP]: {
+      PreToolUse: [{ matcher: "*", hooks: [{ type: "command", command: "node a.js PreToolUse", timeout: 5 }] }],
+    },
+  });
+});
+
 test("mergeAntigravityHookEntries is idempotent and preserves other top-level groups", () => {
   const existing = {
     "some-other-plugin": { Stop: [{ type: "command", command: "echo mine", timeout: 5 }] },
@@ -63,6 +74,14 @@ test("mergeAntigravityHookEntries is idempotent and preserves other top-level gr
 
   const second = mergeAntigravityHookEntries(first, specs);
   expect(second).toBeNull(); // both entries already present, no-op
+});
+
+test("mergeAntigravityHookEntries treats a PreToolUse matcher change as a real diff, not a no-op", () => {
+  const spec = (matcher: string) => [{ event: "PreToolUse" as const, command: "node a.js PreToolUse", matcher }];
+  const first = mergeAntigravityHookEntries({}, spec("*"));
+  expect(mergeAntigravityHookEntries(first, spec("*"))).toBeNull(); // unchanged → no-op
+  const second = mergeAntigravityHookEntries(first, spec("run_command"));
+  expect(second[ANTIGRAVITY_HOOK_GROUP].PreToolUse[0].matcher).toBe("run_command");
 });
 
 test("asset upgrades replace accumulated managed hooks without mutating other groups", () => {

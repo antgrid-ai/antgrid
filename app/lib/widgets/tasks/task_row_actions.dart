@@ -14,6 +14,7 @@ import '../../design/widgets/ab_select_sheet.dart';
 import '../../design/widgets/ab_separator.dart';
 import '../../models/task.dart';
 import '../../providers/tasks.dart';
+import 'create_label_dialog.dart';
 import 'task_status_view.dart';
 
 /// Row actions on long-press.
@@ -121,6 +122,10 @@ Future<void> editTaskLabels(
 ) async {
   final all = await ref.read(taskLabelsProvider.future);
   if (!context.mounted) return;
+  // Filled by onCreateNew below — a label created mid-sheet isn't in [all],
+  // which was fetched before the sheet opened, so the picked-id -> TaskLabel
+  // lookup after close needs somewhere else to find it.
+  final justCreated = <TaskLabel>[];
   final picked = await showAbSelect<String>(
     context,
     title: 'Labels',
@@ -132,9 +137,16 @@ Future<void> editTaskLabels(
           label: label.name,
           detail: label.description,
           leading: _LabelDot(colorHex: label.color),
+          onDelete: (ctx) => confirmDeleteLabel(ctx, ref, label),
         ),
     ],
     selected: task.labels.map((l) => l.id).toSet(),
+    createTooltip: 'New label',
+    onCreateNew: (ctx) async {
+      final created = await showCreateLabelDialog(ctx);
+      if (created != null) justCreated.add(created);
+      return created?.id;
+    },
   );
   if (picked == null) return;
   final before = task.labels.map((l) => l.id).toSet();
@@ -143,7 +155,10 @@ Future<void> editTaskLabels(
       .read(taskListProvider.notifier)
       .setLabels(
         task.number,
-        all.where((l) => picked.contains(l.id)).toList(growable: false),
+        [
+          ...all,
+          ...justCreated,
+        ].where((l) => picked.contains(l.id)).toList(growable: false),
       );
 }
 

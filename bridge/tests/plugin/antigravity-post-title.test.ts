@@ -118,6 +118,67 @@ test("garbage stdin on Stop still fires /notify (it doesn't depend on conversati
   expect(hits[0]!.path).toBe("/notify");
 });
 
+test("PreToolUse posts /notify permission_request with the tool name and always resolves decision:ask", async () => {
+  const { res, server, hits } = run(
+    "PreToolUse",
+    JSON.stringify({ toolCall: { name: "run_command", args: { CommandLine: "npm test" } }, stepIdx: 3 }),
+  );
+  await Bun.sleep(150);
+  server.stop(true);
+  // "ask" is never {} — PreToolHookResult.decision is documented as required,
+  // and this must never accidentally allow/deny/force_ask on agy's behalf.
+  expect(res.stdout).toBe(JSON.stringify({ decision: "ask" }));
+  expect(hits).toHaveLength(1);
+  expect(hits[0]!.path).toBe("/notify");
+  expect(JSON.parse(hits[0]!.body)).toEqual({
+    type: "permission_request",
+    terminalId: "t1",
+    agent: "antigravity",
+    promptTool: "run_command",
+  });
+});
+
+test("PreToolUse never posts /session-title, even though its payload also carries conversationId", async () => {
+  const { server, hits } = run(
+    "PreToolUse",
+    JSON.stringify({ conversationId: "conv-1", toolCall: { name: "write_to_file" } }),
+  );
+  await Bun.sleep(150);
+  server.stop(true);
+  expect(hits).toHaveLength(1);
+  expect(hits[0]!.path).toBe("/notify");
+});
+
+test("PreToolUse with no toolCall.name posts nothing but still resolves decision:ask", async () => {
+  const { res, server, hits } = run("PreToolUse", JSON.stringify({ stepIdx: 1 }));
+  await Bun.sleep(150);
+  server.stop(true);
+  expect(res.stdout).toBe(JSON.stringify({ decision: "ask" }));
+  expect(hits).toHaveLength(0);
+});
+
+test("garbage stdin on PreToolUse never throws, posts nothing, and still resolves decision:ask", async () => {
+  const { res, server, hits } = run("PreToolUse", "not json");
+  await Bun.sleep(150);
+  server.stop(true);
+  expect(res.status).toBe(0);
+  expect(res.stdout).toBe(JSON.stringify({ decision: "ask" }));
+  expect(hits).toHaveLength(0);
+});
+
+test("missing ANTGRID_TERMINAL_ID on PreToolUse posts nothing but still resolves decision:ask", async () => {
+  const { res, hits, server } = run(
+    "PreToolUse",
+    JSON.stringify({ toolCall: { name: "run_command" } }),
+    { ANTGRID_TERMINAL_ID: "" },
+  );
+  await Bun.sleep(150);
+  server.stop(true);
+  expect(res.status).toBe(0);
+  expect(res.stdout).toBe(JSON.stringify({ decision: "ask" }));
+  expect(hits).toHaveLength(0);
+});
+
 test("snake_case conversation_id/transcript_path fallback is honored", async () => {
   const { server, hits } = run(
     "PreInvocation",

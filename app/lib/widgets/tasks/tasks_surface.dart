@@ -2,7 +2,6 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../constants/breakpoints.dart';
-import '../../design/ab_colors.dart';
 import '../../design/ab_icons.dart';
 import '../../design/widgets/ab_empty_state.dart';
 import '../../design/widgets/ab_icon_button.dart';
@@ -67,7 +66,13 @@ class _Split extends ConsumerWidget {
       children: [
         SizedBox(
           width: _listPaneWidth,
+          // The list pane is a fixed 380px column regardless of window size —
+          // phone-narrow, not desktop-wide — so it takes the same two-line row
+          // layout `_Stacked` uses below, rather than the dense single-line
+          // mode meant for a pane wide enough to fit title + full metadata on
+          // one line without clipping either.
           child: TaskListView(
+            compact: true,
             onOpen: (number) =>
                 ref.read(selectedTaskNumberProvider.notifier).select(number),
           ),

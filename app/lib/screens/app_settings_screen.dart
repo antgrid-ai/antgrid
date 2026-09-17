@@ -419,7 +419,9 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
                         ),
                         const SizedBox(height: AbTokens.space16),
                         Text(
-                          'Connect GitHub to import issues as tasks.',
+                          'Connect GitHub to import issues as tasks. This '
+                          'opens on the web, where you install the Antgrid '
+                          'GitHub App.',
                           style: AbTokens.sansStyle(
                             fontSize: AbTokens.fontXxs,
                             color: antgrid.textMuted,
@@ -431,7 +433,7 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
                           child: AbButton(
                             label: 'CONNECT GITHUB',
                             leading: AbIcon(
-                              AbIcons.link,
+                              AbIcons.openExternal,
                               size: 10,
                               color: antgrid.textSecondary,
                             ),

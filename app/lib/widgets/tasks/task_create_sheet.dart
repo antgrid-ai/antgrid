@@ -16,6 +16,7 @@ import '../../design/widgets/ab_text_field.dart';
 import '../../models/task.dart';
 import '../../providers/tasks.dart';
 import '../../util/detached.dart';
+import 'create_label_dialog.dart';
 import 'task_publish_sheet.dart';
 
 /// The create form. Returns the new task's number, or null if nothing was
@@ -73,6 +74,9 @@ class _TaskCreateSheetState extends ConsumerState<_TaskCreateSheet> {
 
   Future<void> _pickLabels() async {
     final all = ref.read(taskLabelsProvider).value ?? const <TaskLabel>[];
+    // Filled by onCreateNew below — see the matching comment in
+    // task_row_actions.dart's editTaskLabels, which has the same gap.
+    final justCreated = <TaskLabel>[];
     final picked = await showAbSelect<String>(
       context,
       title: 'Labels',
@@ -83,13 +87,23 @@ class _TaskCreateSheetState extends ConsumerState<_TaskCreateSheet> {
             value: label.id,
             label: label.name,
             leading: AbLabelChip(label: label.name, colorHex: label.color),
+            onDelete: (ctx) => confirmDeleteLabel(ctx, ref, label),
           ),
       ],
       selected: _labels.map((l) => l.id).toSet(),
+      createTooltip: 'New label',
+      onCreateNew: (ctx) async {
+        final created = await showCreateLabelDialog(ctx);
+        if (created != null) justCreated.add(created);
+        return created?.id;
+      },
     );
     if (picked == null || !mounted) return;
     setState(() {
-      _labels = all.where((l) => picked.contains(l.id)).toList(growable: false);
+      _labels = [
+        ...all,
+        ...justCreated,
+      ].where((l) => picked.contains(l.id)).toList(growable: false);
     });
   }
 

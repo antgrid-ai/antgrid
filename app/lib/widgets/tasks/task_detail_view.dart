@@ -256,6 +256,26 @@ class _LoadedState extends ConsumerState<_Loaded> {
         .setPriority(_task.number, choice < 0 ? null : choice);
   }
 
+  Future<void> _pickProject() async {
+    final names = ref.read(taskProjectNamesProvider);
+    final picked = await showAbSelect<String>(
+      context,
+      title: 'Project',
+      single: true,
+      options: [
+        const AbSelectOption(value: '', label: 'No project'),
+        for (final entry in names.entries)
+          AbSelectOption(value: entry.key, label: entry.value),
+      ],
+      selected: {_task.projectId ?? ''},
+    );
+    final choice = picked?.firstOrNull;
+    if (choice == null) return;
+    final next = choice.isEmpty ? null : choice;
+    if (next == _task.projectId) return;
+    await ref.read(taskListProvider.notifier).setProject(_task.number, next);
+  }
+
   /// The disabled button is the affordance; this guard is what makes it safe.
   /// A second tap can be delivered in the same frame as the first, before the
   /// rebuild that greys the button out.
@@ -662,22 +682,30 @@ class _LoadedState extends ConsumerState<_Loaded> {
               ),
             ),
           ),
-          if (_task.projectId != null)
-            _attribute(
-              context,
-              'Project',
-              child: Text(
-                projectName ?? _task.projectId!,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: projectName == null
-                    ? AbTokens.monoStyle(
-                        fontSize: AbTokens.fontXxs,
-                        color: palette.textMuted,
-                      )
-                    : AbTokens.sansStyle(fontSize: AbTokens.fontXs),
-              ),
-            ),
+          _attribute(
+            context,
+            'Project',
+            onTap: () => detached('tasks', 'pick project', _pickProject),
+            child: _task.projectId == null
+                ? Text(
+                    'None',
+                    style: AbTokens.sansStyle(
+                      fontSize: AbTokens.fontXs,
+                      color: palette.textMuted,
+                    ),
+                  )
+                : Text(
+                    projectName ?? _task.projectId!,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: projectName == null
+                        ? AbTokens.monoStyle(
+                            fontSize: AbTokens.fontXxs,
+                            color: palette.textMuted,
+                          )
+                        : AbTokens.sansStyle(fontSize: AbTokens.fontXs),
+                  ),
+          ),
         ],
       ),
     );
