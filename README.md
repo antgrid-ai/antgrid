@@ -18,14 +18,15 @@ file tree, git review with diffs, and a live browser preview. The same workspace
 a phone, over a relay that is end-to-end encrypted and cannot read a byte of what passes
 through it.
 
-Arm its supervisor on a session and it goes further: it watches the agent's attention
-signals, answers what it can, escalates what it can't, and calls a task done only on
-concrete evidence — test output, exit codes, a diff — rather than the agent's own report.
-That part is opt-in and it is the paid tier — `CAPABILITIES` in
-[`bridge/src/entitlement.ts`](bridge/src/entitlement.ts) is the whole capability gate. The
-only other paid line is how many machines one account may run agents on
-(`FREE_WORKER_LIMIT` in [`web/src/billing/plans.ts`](web/src/billing/plans.ts)); everything
-else is free.
+Start a task with your coding agent. When you're ready, tell Handler what's left,
+how to proceed and when to ask you. It checks the agent's work against your
+instructions and asks for evidence before moving on. It notifies you when it needs
+your input or your instructions say to
+check with you. Its judgement can be wrong; review its decisions and cited evidence.
+
+Handler is opt-in on a running session and included free during the beta. It is a Pro
+feature once paid plans are live. See [pricing](https://antgrid.ai/pricing) for current
+terms; your agent provider's usage charges still apply.
 
 Antgrid does not replace your agent and ships no model of its own.
 
@@ -40,11 +41,9 @@ Antgrid does not replace your agent and ships no model of its own.
 
 ## Features
 
-- **Supervisor** *(paid tier)*. Arm it on a session and it watches the agent's attention
-  signals, answers what it can, escalates what it can't, and calls a task done only on
-  concrete evidence — test output, exit codes — rather than the agent's own report. You
-  can also give it follow-up steps to carry out once the task is done; it works through
-  them in order and stays armed until each one is satisfied.
+- **Handler.** Tell it what your agent should do next and when to ask you. Handler
+  asks for evidence before moving on and brings questions to you when needed or
+  instructed. It doesn't start new sessions or jobs.
 - **Bring your own agent.** Claude Code, Codex, opencode, Cursor, GitHub Copilot,
   Antigravity, Kilo, Kimi and Mistral Vibe are wired for notifications and session naming
   — the current set is `AGENTS` in [`bridge/src/agents/registry.ts`](bridge/src/agents/registry.ts).

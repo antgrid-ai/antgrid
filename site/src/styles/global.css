@@ -15,26 +15,31 @@
      step needs ~6+ points of RGB to read as a distinct elevation — a 3-4 point
      step here is invisible even though the same step is obvious at mid-grey.
      Keep page off the #000 floor: ink-on-page above ~19:1 reads as glare. */
-  --color-page: #101015;
-  --color-panel: #1d1d24;
-  --color-chrome: #23232b;
-  --color-group: #17171d;
+  --color-page: #131110;
+  --color-panel: #211d19;
+  --color-chrome: #282320;
+  --color-group: #1a1715;
   /* The one surface BELOW page, for full-bleed bands that should read as inset
      rather than raised. Held above the #000 floor for the same glare reason as
      page — ink lands on it at ~18.9:1, just inside the ceiling noted above. */
-  --color-well: #0c0c10;
+  --color-well: #0d0c0b;
 
-  --color-edge: #2f2f38;
-  --color-edge-inner: #26262e;
-  --color-edge-emph: #474751;
+  /* Warm, not zinc. Every value in this ramp has R > G > B: the page is the
+     bench and the app windows (the `ab-` ramp below, zinc-neutral) are the
+     cool glass objects sitting on it. That temperature gap is what makes a
+     window read as the product rather than as another card — with both ramps
+     blue-black, as they were, the site had to fake it with borders. */
+  --color-edge: #35302b;
+  --color-edge-inner: #2b2724;
+  --color-edge-emph: #4d463f;
 
-  --color-ink: #f2f2f5;
-  --color-ink2: #d4d4d8;
-  --color-muted: #a1a1aa;
+  --color-ink: #f4f1ec;
+  --color-ink2: #d8d3cc;
+  --color-muted: #a6a098;
   /* muted2/faint are picked for contrast on --color-page, not panel: 4.5:1 (AA
      body) and 3:1 (AA UI) respectively. Darkening either drops muted2 below AA. */
-  --color-muted2: #7d7d86;
-  --color-faint: #5f5f68;
+  --color-muted2: #827b73;
+  --color-faint: #675f58;
 
   /* Signal, the brand accent. `signal` is the TEXT tier — it clears 4.5:1 on
      page, panel and chrome, which pure #d2542a does not (3.75:1 on chrome).
@@ -52,8 +57,8 @@
   --color-amber2: #fcd34d;
   /* Tinted surfaces, kept at panel luminance so `bg-amberbg/40` still reads as a
      raised highlight over --color-panel rather than dimming it. */
-  --color-amberbg: #201b10;
-  --color-amberbg2: #302719;
+  --color-amberbg: #231c10;
+  --color-amberbg2: #35291a;
   --color-ok: #4ade80;
 
   /* Three faces, three jobs, no overlap. Display carries the voice, sans carries
@@ -67,6 +72,11 @@
      be spelled out lives in the `fallbacks` array in astro.config.mjs instead.
      Keep these pointing at the cssVariable names declared there. */
   --font-display: var(--font-archivo);
+  /* Condensed, and only here. Archivo at 82% width and 700–800 weight is rack
+     signage — a label stencilled on a machine — which is the voice the page
+     borrows for every headline. Nothing else on the site is condensed; the
+     contrast with wide, quiet Inter beneath it is the whole effect. */
+  --font-display--font-variation-settings: "wdth" 82;
   --font-sans: var(--font-inter);
   --font-mono: var(--font-jetbrains);
 
@@ -74,19 +84,26 @@
      one-off `text-[12.5px]` literals is what kept the page from reading as a
      system. The three display steps are fluid, so mobile steps down on its own
      rather than needing a second set of breakpoint classes. */
-  --text-display: clamp(2.5rem, 1.5rem + 4.4vw, 4.25rem);
-  --text-display--line-height: 1.02;
-  --text-display--letter-spacing: -0.032em;
+  /* Condensed faces are already tight; the negative tracking Inter-style
+     display type needs would make these run together, so both steps are
+     tracked near zero and set solid. */
+  --text-display: clamp(2.75rem, 1.5rem + 4vw, 4.75rem);
+  --text-display--line-height: 0.94;
+  --text-display--letter-spacing: -0.008em;
 
-  --text-title: clamp(1.6875rem, 1.28rem + 1.75vw, 2.375rem);
-  --text-title--line-height: 1.1;
-  --text-title--letter-spacing: -0.026em;
+  --text-title: clamp(1.875rem, 1.3rem + 2vw, 2.75rem);
+  --text-title--line-height: 0.98;
+  --text-title--letter-spacing: -0.008em;
 
-  --text-kicker: clamp(1.0625rem, 0.95rem + 0.5vw, 1.3125rem);
+  /* Ordinals and the closing headline: display type used as a graphic. */
+  --text-ordinal: clamp(2rem, 1.75rem + 1.2vw, 2.5rem);
+  --text-ordinal--line-height: 1;
+
+  --text-kicker: clamp(1rem, 0.95rem + 0.3vw, 1.125rem);
   --text-kicker--line-height: 1.35;
   --text-kicker--letter-spacing: -0.012em;
 
-  --text-lede: 1.0625rem;
+  --text-lede: 1rem;
   --text-lede--line-height: 1.62;
 
   --text-note: 0.875rem;
@@ -195,7 +212,7 @@ body {
   position: absolute;
   inset: 0 0 auto 0;
   height: 340px;
-  background: radial-gradient(ellipse 150% 100% at 50% 0%, rgba(210, 84, 42, 0.11), transparent 72%);
+  background: radial-gradient(ellipse 150% 100% at 50% 0%, rgba(210, 84, 42, 0.13), transparent 72%);
 }
 @media (min-width: 48rem) {
   .glow-hero {
@@ -260,6 +277,18 @@ body {
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.05),
     0 24px 64px -24px rgba(0, 0, 0, 0.7);
+}
+
+/* ---- Ledger --------------------------------------------------------------
+   The landing page's one way of showing machine state outside an app window:
+   rows on hairlines, no box. A box says "widget"; a ruled list says "record",
+   and a record is what a control plane keeps. The head rule is heavier than
+   the row rules so the eye finds the top of the list before it reads it. */
+.ledger {
+  border-top: 1px solid var(--color-edge-emph);
+}
+.ledger > * + * {
+  border-top: 1px solid var(--color-edge-inner);
 }
 
 /* ---- Motion ------------------------------------------------------------ */

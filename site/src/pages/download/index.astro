@@ -10,12 +10,6 @@ import { links, offerUrlFor, PLATFORMS } from "../../config";
 // script needs the pair together to answer "did this URL ask for a build this
 // reader can actually run". Derived rather than written out, so an id still
 // only ever exists in config.ts.
-//
-// `<` is escaped on the way out because JSON.stringify does not escape it and
-// set:html inserts this verbatim: the HTML tokenizer ends a <script> at the
-// first `</script` in its raw text no matter what quoting it sits inside, so a
-// URL that ever contained one would close the tag and parse the rest of the
-// page's head as markup. < is the same character to a JS parser.
 const SCRIPT_BUILDS = JSON.stringify(
   Object.fromEntries(PLATFORMS.map((p) => [p.id, { os: p.os, url: p.url }]))
 ).replace(/</g, "\\u003c");
