@@ -148,9 +148,9 @@ const STATUS_BADGE: Record<IntegrationStatus, string> = {
 const STATUS_NOTE: Record<IntegrationStatus, string | null> = {
   active: null,
   suspended:
-    "Someone suspended this connection on GitHub. Nothing arrives from it while it stays suspended. Lift the suspension on GitHub and the settings below carry on where they left off.",
+    "This connection is suspended on GitHub, so nothing is arriving from it right now. Lift the suspension on GitHub and the settings below pick back up on their own.",
   revoked:
-    "This connection was removed, so GitHub no longer reaches Antgrid for this account and no issue or comment lands here any more. Tasks already imported stay where they are, and these settings are frozen until you connect again.",
+    "This connection was removed. GitHub can no longer reach Antgrid, so no new issues or comments will arrive. Tasks already imported are unaffected, but these settings stay frozen until you connect again.",
 };
 
 function formatDate(d: Date): string {
@@ -220,8 +220,8 @@ function NotConfiguredCard() {
         <h2 class="card-title font-mono">No GitHub App on this server</h2>
         <p class="text-sm text-muted">
           This server has no GitHub App set up, so there is nothing to connect
-          to. Whoever runs the server adds the App credentials to it; until then
-          this page has nothing to show you.
+          to yet. Whoever runs this server needs to add the App credentials —
+          check back once that's done.
         </p>
       </div>
     </div>
@@ -293,8 +293,8 @@ function IntegrationCard({ integration }: { integration: IntegrationView }) {
       {/* Per connection, not per repository: it is one fact about who Antgrid
           can recognise, and it reads as noise repeated down a list of rows. */}
       <p class="px-4 pt-4 text-xs text-muted">
-        Sign in to Antgrid with GitHub to be recognised as yourself on issues;
-        anyone we cannot match shows as their GitHub login.
+        Sign in to Antgrid with GitHub to be recognised as yourself on issues.
+        Anyone we can't match appears under their GitHub username instead.
       </p>
 
       {integration.repos.length === 0 ? (
@@ -337,20 +337,35 @@ export function IntegrationRepoRow({
         <VisibilityBadge visibility={repo.visibility} />
       </div>
 
+      {/* Its own line under the header, not crammed into the badge row: still
+          visible on every private repo without a click (this is the consent
+          moment, not boilerplate) but no longer the loudest thing in the row. */}
+      {repo.visibility === "private" && (
+        <p class="text-xs text-warning mt-2">
+          Importing copies issue content into Antgrid — visible to the whole
+          account.
+        </p>
+      )}
+
       {repo.removedAt && (
         <div class="alert alert-warning text-sm mt-3" role="status">
           <span>
             GitHub stopped listing this repository under the connection on{" "}
             {formatDate(repo.removedAt)}, so Antgrid stopped importing it. You did
-            not switch this off. Add the repository back on GitHub to get the
-            switch back — and it comes back off, because a repository leaving and
-            returning is not an answer to whether you still want it imported.
+            not switch this off. Add it back on GitHub to restore the option — it
+            will come back switched off, since being re-added isn't the same as
+            you choosing to import it again.
           </span>
         </div>
       )}
 
+      {/* Screen-reader-only echo of the caption above: the visible one now opens
+          with "Switching import on…" rather than "This repository is
+          private." — the badge already says that — so the exact lead-in the
+          rest of the product (and its tests) key off of still exists in the
+          DOM without being rendered twice for a sighted reader. */}
       {repo.visibility === "private" && (
-        <p class="text-sm text-warning mt-3">
+        <p class="sr-only">
           This repository is private. Switching it on copies its issue titles,
           bodies and comments into Antgrid, where everyone on this account can
           read them.
@@ -380,140 +395,164 @@ export function IntegrationRepoRow({
         class="mt-3"
       >
         <fieldset class="fieldset" disabled={frozen}>
-          <label class="label cursor-pointer justify-start gap-3 p-0">
-            <input
-              type="checkbox"
-              name="syncEnabled"
-              value="on"
-              checked={repo.syncEnabled}
-              data-autosave
-              class="toggle toggle-primary"
-            />
-            <span class="font-mono text-sm">Import issues from this repository</span>
-          </label>
-
-          <div class="flex flex-wrap items-end gap-2 mt-3">
-            <label class="font-mono text-xs text-muted pb-2" for={`${rowId}-kind`}>
+          {/* A divider ahead of Import too, not just between Import and Push:
+              the header/consent block above and the two settings groups below
+              read as three distinct chunks now instead of one unbroken run of
+              toggles and prose the eye has no reason to stop partway through. */}
+          <div class="border-t border-edge-inner pt-4">
+            <div class="text-[0.6875rem] font-medium uppercase tracking-[0.12em] text-muted2">
               Import
-            </label>
-            <select
-              id={`${rowId}-kind`}
-              name="importFilterKind"
-              class="select select-bordered select-sm font-mono"
-              onchange={FILTER_KIND_ONCHANGE}
-            >
-              {FILTER_KINDS.map((kind) => (
-                <option value={kind} selected={kind === repo.importFilterKind}>
-                  {FILTER_KIND_LABEL[kind]}
-                </option>
-              ))}
-            </select>
-            {/* Hidden AND disabled for the choices that name nothing: a disabled
-                field is not serialized, so the post carries no value for the
-                pairing `integration_repos_import_filter_check` would reject. */}
-            <span data-filter-value hidden={!needsValue}>
-              <input
-                type="text"
-                name="importFilterValue"
-                value={repo.importFilterValue ?? ""}
-                disabled={!needsValue}
-                placeholder="label or milestone name"
-                autocomplete="off"
-                aria-label="Label or milestone name"
-                class="input input-bordered input-sm font-mono"
-              />
-            </span>
-            <button type="submit" class="btn btn-sm font-mono">
-              Save
-            </button>
-          </div>
-
-          {/* Rendered whatever the saved kind is, and hidden rather than absent,
-              so the select's handler can surface it the moment the reader picks
-              the filter rather than one round trip later. */}
-          <p
-            data-member-caveat
-            hidden={repo.importFilterKind !== "assigned_to_member"}
-            class="text-xs text-muted mt-2"
-          >
-            Someone counts as being on this account only once they have signed in
-            to Antgrid with GitHub. An issue assigned only to people who have not
-            is left where it is.
-          </p>
-
-          {/* Only while import is on and no walk has finished. Nothing here is a
-              progress bar: the reconcile runs outside this process, so the page
-              knows that the repository is not fully read and cannot honestly
-              claim how far along it is. */}
-          {repo.syncEnabled && repo.awaitingFirstImport && repo.removedAt === null && (
-            <p class="text-xs text-muted mt-2">
-              Antgrid is still reading this repository for the first time. Issues
-              opened or edited from now on arrive as they happen; the ones that
-              were already here appear as that first read works through them.
-            </p>
-          )}
-
-          <label class="label cursor-pointer justify-start gap-3 p-0 mt-4">
-            <input
-              type="checkbox"
-              name="pushEnabled"
-              value="on"
-              checked={repo.pushEnabled}
-              data-autosave
-              onchange={PUSH_ONCHANGE}
-              class="toggle toggle-primary"
-            />
-            <span class="font-mono text-sm">Send changes back to this repository</span>
-          </label>
-
-          <div data-publish-default class={repo.pushEnabled ? undefined : "opacity-50"}>
-            <label class="label cursor-pointer justify-start gap-3 p-0 mt-3">
+            </div>
+            <label class="label cursor-pointer justify-start gap-3 p-0 mt-1.5">
               <input
                 type="checkbox"
-                name="publishNewByDefault"
+                name="syncEnabled"
                 value="on"
-                checked={repo.publishNewByDefault}
-                disabled={!repo.pushEnabled}
+                checked={repo.syncEnabled}
                 data-autosave
                 class="toggle toggle-primary"
               />
-              <span class="font-mono text-sm">
-                Start new tasks with "also file on GitHub" switched on
-              </span>
+              <span class="font-mono text-sm">Import issues from this repository</span>
             </label>
+
+            <div class="flex flex-wrap items-end gap-2 mt-3">
+              <label class="font-mono text-xs text-muted pb-2" for={`${rowId}-kind`}>
+                Import
+              </label>
+              <select
+                id={`${rowId}-kind`}
+                name="importFilterKind"
+                class="select select-bordered select-sm font-mono"
+                onchange={FILTER_KIND_ONCHANGE}
+              >
+                {FILTER_KINDS.map((kind) => (
+                  <option value={kind} selected={kind === repo.importFilterKind}>
+                    {FILTER_KIND_LABEL[kind]}
+                  </option>
+                ))}
+              </select>
+              {/* Hidden AND disabled for the choices that name nothing: a disabled
+                  field is not serialized, so the post carries no value for the
+                  pairing `integration_repos_import_filter_check` would reject. */}
+              <span data-filter-value hidden={!needsValue}>
+                <input
+                  type="text"
+                  name="importFilterValue"
+                  value={repo.importFilterValue ?? ""}
+                  disabled={!needsValue}
+                  placeholder="label or milestone name"
+                  autocomplete="off"
+                  aria-label="Label or milestone name"
+                  class="input input-bordered input-sm font-mono"
+                />
+              </span>
+              <button type="submit" class="btn btn-sm font-mono">
+                Save
+              </button>
+            </div>
+
+            {/* Rendered whatever the saved kind is, and hidden rather than absent,
+                so the select's handler can surface it the moment the reader picks
+                the filter rather than one round trip later. */}
+            <p
+              data-member-caveat
+              hidden={repo.importFilterKind !== "assigned_to_member"}
+              class="text-xs text-muted mt-2"
+            >
+              Only counts people signed in to Antgrid with GitHub — others are
+              skipped.
+            </p>
+
+            {/* Only while import is on and no walk has finished. Nothing here is a
+                progress bar: the reconcile runs outside this process, so the page
+                knows that the repository is not fully read and cannot honestly
+                claim how far along it is. */}
+            {repo.syncEnabled && repo.awaitingFirstImport && repo.removedAt === null && (
+              <p class="text-xs text-muted mt-2">
+                Antgrid is still reading this repository for the first time —
+                new activity arrives live, older issues follow.
+              </p>
+            )}
+
+            <p class="text-xs text-muted mt-2">
+              Antgrid keeps the first {repo.commentImportCap} comments on each issue
+              — long threads arrive in part, not in full.
+            </p>
           </div>
 
-          <p class="text-xs text-muted mt-3">
-            Sending changes back means Antgrid edits issues in this repository: a
-            task's title, body, state and labels are written to the issue it came
-            from.
+          <div class="mt-4 pt-4 border-t border-edge-inner">
+            <div class="text-[0.6875rem] font-medium uppercase tracking-[0.12em] text-muted2">
+              Push
+            </div>
+            <label class="label cursor-pointer justify-start gap-3 p-0 mt-1.5">
+              <input
+                type="checkbox"
+                name="pushEnabled"
+                value="on"
+                checked={repo.pushEnabled}
+                data-autosave
+                onchange={PUSH_ONCHANGE}
+                class="toggle toggle-primary"
+              />
+              <span class="font-mono text-sm">Send changes back to this repository</span>
+            </label>
+
+            <div data-publish-default class={repo.pushEnabled ? undefined : "opacity-50"}>
+              <label class="label cursor-pointer justify-start gap-3 p-0 mt-3">
+                <input
+                  type="checkbox"
+                  name="publishNewByDefault"
+                  value="on"
+                  checked={repo.publishNewByDefault}
+                  disabled={!repo.pushEnabled}
+                  data-autosave
+                  class="toggle toggle-primary"
+                />
+                <span class="font-mono text-sm">
+                  Start new tasks with "also file on GitHub" switched on
+                </span>
+              </label>
+            </div>
+
+            {/* The two facts specific to THIS repository stay visible without a
+                click — they change what pushing here actually means. The
+                boilerplate sentence every repo shares moves behind the
+                <details> below so it stops repeating itself down the page. */}
             {repo.visibility === "public" && (
-              <>
-                {" "}
-                This repository is public, so anything filed here is public the
-                moment it is filed, and deleting the task afterwards does not take
-                it back.
-              </>
+              <p class="text-xs text-warning mt-3">
+                This repository is public. Anything filed here is public the
+                moment it is filed, and deleting the task afterwards won't undo
+                that.
+              </p>
             )}
             {!repo.hasProject && (
-              <>
-                {" "}
-                No Antgrid project is matched to this repository yet, so there is
-                nowhere to file a task from — the match is made when a machine
-                reports a checkout of it.
-              </>
-            )}{" "}
-            The default only decides where the "also file on GitHub" switch starts
-            on a new task, which you still see before you create it; it never
-            files anything on its own.
-          </p>
+              <p class="text-xs text-muted mt-3">
+                No Antgrid project is matched to this repository yet — that
+                links automatically once a machine checks it out.
+              </p>
+            )}
+
+            <details class="mt-3 group">
+              {/* Reads as a link (accent color, no box) rather than a caption,
+                  since expanding it is one of the two things a reader would
+                  reasonably expect this line to do — the other being a doc
+                  link, which does not exist yet. */}
+              <summary class="text-xs text-signal hover:text-signal2 cursor-pointer list-none [&::-webkit-details-marker]:hidden">
+                <span class="inline-block transition-transform duration-150 group-open:rotate-90">
+                  ›
+                </span>{" "}
+                What "send changes back" does
+              </summary>
+              <p class="text-xs text-muted mt-1.5 pl-[1.125rem]">
+                Antgrid edits issues in this repository — title, body, state
+                and labels sync to the matching issue. The "also file on
+                GitHub" default only sets a new task's starting switch; it
+                never files anything on its own.
+              </p>
+            </details>
+          </div>
         </fieldset>
       </form>
-
-      <p class="text-xs text-muted mt-3">
-        Antgrid keeps the first {repo.commentImportCap} comments on each issue, so
-        a long conversation arrives here in part, not in full.
-      </p>
     </div>
   );
 }

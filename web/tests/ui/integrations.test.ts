@@ -128,7 +128,7 @@ describe("IntegrationsPage", () => {
     // Both halves matter: that the user did not do it, and that undoing it on
     // GitHub is not enough on its own.
     expect(html).toContain("You did not switch this off.");
-    expect(html).toContain("Add the repository back on GitHub to get the switch back");
+    expect(html).toContain("Add it back on GitHub to restore the option");
     // And the switch is genuinely gone while it is unreachable: offering it
     // would promise an import the connection cannot perform.
     expect(html).toContain("<fieldset class=\"fieldset\" disabled=\"\">");
@@ -144,8 +144,8 @@ describe("IntegrationsPage", () => {
       ],
     });
     expect(html).toContain("Disconnected");
-    expect(html).toContain("GitHub no longer reaches Antgrid for this account");
-    expect(html).toContain("Tasks already imported stay where they are");
+    expect(html).toContain("GitHub can no longer reach Antgrid");
+    expect(html).toContain("Tasks already imported are unaffected");
     expect(html).toContain("2026-07-04");
     // Frozen, not merely discouraged — the controls come back disabled.
     expect(html).toContain("<fieldset class=\"fieldset\" disabled=\"\"");
@@ -155,7 +155,7 @@ describe("IntegrationsPage", () => {
     const active = render({ integrations: [integration()] });
     const suspended = render({ integrations: [integration({ status: "suspended" })] });
     expect(suspended).toContain("Suspended on GitHub");
-    expect(suspended).toContain("Nothing arrives from it while it stays suspended");
+    expect(suspended).toContain("nothing is arriving from it right now");
     expect(active).not.toContain("Suspended on GitHub");
   });
 
@@ -260,7 +260,7 @@ describe("IntegrationsPage", () => {
     expect(html).toContain("it never files anything on its own");
     // Public is irreversible in a way deleting the task cannot undo, and that is
     // the half a reader cannot work out from the toggle.
-    expect(html).toContain("anything filed here is public the moment it is filed");
+    expect(html).toContain("Anything filed here is public the moment it is filed");
 
     const priv = render({
       integrations: [integration({ repos: [repo({ visibility: "private" })] })],
@@ -271,7 +271,7 @@ describe("IntegrationsPage", () => {
   test("a repository no project is matched to says there is nowhere to file from", () => {
     const unmatched = render({ integrations: [integration({ repos: [repo({ hasProject: false })] })] });
     expect(unmatched).toContain("No Antgrid project is matched to this repository yet");
-    expect(unmatched).toContain("a machine reports a checkout of it");
+    expect(unmatched).toContain("a machine checks it out");
 
     const matched = render({ integrations: [integration()] });
     expect(matched).not.toContain("No Antgrid project is matched to this repository yet");
@@ -293,7 +293,7 @@ describe("IntegrationsPage", () => {
   test("the whole account is told how an unmatched assignee will read", () => {
     const html = render({ integrations: [integration()] });
     expect(html).toContain("Sign in to Antgrid with GitHub to be recognised as yourself on issues");
-    expect(html).toContain("anyone we cannot match shows as their GitHub login");
+    expect(html).toContain("appears under their GitHub username instead");
   });
 
   test("a switched-on repository that has never been read to the end says so", () => {

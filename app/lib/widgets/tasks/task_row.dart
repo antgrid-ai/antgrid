@@ -53,7 +53,10 @@ class TaskRow extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final run = ref.watch(taskRunPresenceProvider)[task.number];
-    final meta = _meta(context, ref, run);
+    final labelBudget = twoLine ? 1 : _maxLabelChips;
+    final shownLabels = task.labels.take(labelBudget).toList(growable: false);
+    final labelOverflow = task.labels.length - shownLabels.length;
+    final meta = _meta(context, ref, run, shownLabels, labelOverflow);
 
     return AbListRow(
       density: AbRowDensity.md,
@@ -91,6 +94,14 @@ class TaskRow extends ConsumerWidget {
               ),
             ),
           ),
+          // The label and provenance mark trail the (possibly now truncated)
+          // title itself in the two-line layout, rather than sitting on the
+          // meta line below with who it's for and which project it's in —
+          // what a task IS belongs beside its title; who it's for is a
+          // different question, answered on the line built for it. The wide
+          // desktop row has no second line to split onto, so `_meta` keeps
+          // carrying both there, unchanged.
+          if (twoLine) ..._titleBadges(context, shownLabels, labelOverflow),
         ],
       ),
       subtitle: twoLine ? meta : null,
@@ -98,90 +109,150 @@ class TaskRow extends ConsumerWidget {
     );
   }
 
-  Widget _meta(BuildContext context, WidgetRef ref, TaskRunPresence? run) {
+  List<Widget> _titleBadges(
+    BuildContext context,
+    List<TaskLabel> shown,
+    int overflow,
+  ) {
+    final palette = context.antgrid;
+    return [
+      for (final label in shown) ...[
+        const SizedBox(width: AbTokens.space6),
+        ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: _labelChipMaxWidth),
+          child: AbLabelChip(label: label.name, colorHex: label.color),
+        ),
+      ],
+      if (overflow > 0) ...[
+        const SizedBox(width: AbTokens.space4),
+        Text(
+          '+$overflow',
+          style: AbTokens.sansStyle(
+            fontSize: AbTokens.fontXxs,
+            color: palette.textMuted,
+          ),
+        ),
+      ],
+      if (!task.isLocal) ...[
+        const SizedBox(width: AbTokens.space6),
+        TaskProvenanceMark(task: task),
+      ],
+      // Unassigned is a fact ABOUT the task, same standing as its provenance —
+      // not an answer to "who is this for" that belongs on the line built for
+      // that question. `_assignee` still renders it there for the wide
+      // desktop row, which has no second line to split it onto.
+      if (task.assignee == null) ...[
+        const SizedBox(width: AbTokens.space6),
+        AbIcon(
+          AbIcons.unassigned,
+          size: AbTokens.iconButtonGlyph,
+          color: palette.iconMuted,
+        ),
+      ],
+    ];
+  }
+
+  Widget _meta(
+    BuildContext context,
+    WidgetRef ref,
+    TaskRunPresence? run,
+    List<TaskLabel> shown,
+    int overflow,
+  ) {
     final palette = context.antgrid;
     final projectName = task.projectId == null
         ? null
         : ref.watch(taskProjectNamesProvider)[task.projectId] ??
               _shortId(task.projectId!);
-    final labelBudget = twoLine ? 1 : _maxLabelChips;
-    final shown = task.labels.take(labelBudget).toList(growable: false);
-    final overflow = task.labels.length - shown.length;
 
-    // AbListRow gives `title` an Expanded region and `trailing` (this row)
-    // whatever it asks for — with no cap here, provenance mark + labels +
-    // assignee + project can together exceed the row's width and squeeze the
-    // title's Expanded down to zero instead of just this row's own content
-    // ellipsizing. Capping the total, not just each piece, is what guarantees
-    // the title always keeps room; ClipRect is the fallback for whatever still
-    // doesn't fit at the cap (the project chip, being least essential, sits
-    // last and is what gets clipped first).
-    return ClipRect(
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: _metaMaxWidth),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            // Ahead of the labels rather than beside the title: the row must stay
-            // one line and the title must not shift by whether a task was
-            // imported, or the list stops being scannable down its left edge.
-            if (!task.isLocal) ...[
-              TaskProvenanceMark(task: task),
-              const SizedBox(width: AbTokens.space6),
-            ],
-            for (final label in shown) ...[
-              ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: _labelChipMaxWidth),
-                child: AbLabelChip(label: label.name, colorHex: label.color),
-              ),
-              const SizedBox(width: AbTokens.space4),
-            ],
-            if (overflow > 0) ...[
-              Text(
-                '+$overflow',
-                style: AbTokens.sansStyle(
-                  fontSize: AbTokens.fontXxs,
-                  color: palette.textMuted,
-                ),
-              ),
-              const SizedBox(width: AbTokens.space6),
-            ],
-            _assignee(context),
-            // A count, not an avatar stack: the row is a scanning surface and
-            // these are provider identities the account cannot even name. Who they
-            // are is the detail sheet's answer.
-            if (task.otherAssignees.isNotEmpty) ...[
-              const SizedBox(width: AbTokens.space4),
-              Text(
-                '+${task.otherAssignees.length}',
-                style: AbTokens.monoStyle(
-                  fontSize: AbTokens.fontXxs,
-                  color: palette.textMuted,
-                ),
-              ),
-            ],
-            if (run != null) ...[
-              const SizedBox(width: AbTokens.space8),
-              TaskRunMark(run: run),
-            ],
-            if (showProject && projectName != null) ...[
-              const SizedBox(width: AbTokens.space8),
-              ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: _projectMaxWidth),
-                child: Text(
-                  projectName,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: AbTokens.monoStyle(
-                    fontSize: AbTokens.fontXxs,
-                    color: palette.textMuted,
-                  ),
-                ),
-              ),
-            ],
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        // In the two-line layout the label and provenance mark already sit
+        // beside the title (see `_titleBadges`) — only the wide desktop row
+        // still carries them here, ahead of who the task is for, so the row
+        // stays one line and the title never shifts by whether a task was
+        // imported.
+        if (!twoLine) ...[
+          if (!task.isLocal) ...[
+            TaskProvenanceMark(task: task),
+            const SizedBox(width: AbTokens.space6),
           ],
-        ),
-      ),
+          for (final label in shown) ...[
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: _labelChipMaxWidth),
+              child: AbLabelChip(label: label.name, colorHex: label.color),
+            ),
+            const SizedBox(width: AbTokens.space4),
+          ],
+          if (overflow > 0) ...[
+            Text(
+              '+$overflow',
+              style: AbTokens.sansStyle(
+                fontSize: AbTokens.fontXxs,
+                color: palette.textMuted,
+              ),
+            ),
+            const SizedBox(width: AbTokens.space6),
+          ],
+        ],
+        // In the two-line layout an unassigned task already said so up on the
+        // title line (see `_titleBadges`); a real assignee still belongs down
+        // here regardless of layout.
+        if (!twoLine || task.assignee != null) _assignee(context),
+        // A count, not an avatar stack: the row is a scanning surface and
+        // these are provider identities the account cannot even name. Who they
+        // are is the detail sheet's answer.
+        if (task.otherAssignees.isNotEmpty) ...[
+          const SizedBox(width: AbTokens.space4),
+          Text(
+            '+${task.otherAssignees.length}',
+            style: AbTokens.monoStyle(
+              fontSize: AbTokens.fontXxs,
+              color: palette.textMuted,
+            ),
+          ),
+        ],
+        if (run != null) ...[
+          const SizedBox(width: AbTokens.space8),
+          TaskRunMark(run: run),
+        ],
+        if (showProject && projectName != null) ...[
+          // A `·`, not a bare gap, only where the two-line layout's second
+          // line already has something to its left — who it's for and where
+          // it lives are two different fields on the same line, and the dot
+          // is what tells them apart. The wide row keeps a plain gap: there
+          // provenance and labels always precede it, so the line never opens
+          // with the project chip the way an unassigned two-line row can.
+          if (twoLine &&
+              (task.assignee != null ||
+                  task.otherAssignees.isNotEmpty ||
+                  run != null)) ...[
+            const SizedBox(width: AbTokens.space6),
+            Text(
+              '·',
+              style: AbTokens.sansStyle(
+                fontSize: AbTokens.fontXxs,
+                color: palette.textMuted,
+              ),
+            ),
+            const SizedBox(width: AbTokens.space6),
+          ] else
+            const SizedBox(width: AbTokens.space8),
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: _projectMaxWidth),
+            child: Text(
+              projectName,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: AbTokens.monoStyle(
+                fontSize: AbTokens.fontXxs,
+                color: palette.textMuted,
+              ),
+            ),
+          ),
+        ],
+      ],
     );
   }
 
@@ -199,9 +270,9 @@ class TaskRow extends ConsumerWidget {
       ),
       // An imported provider identity with no Antgrid account: its login is the
       // only name there is, so it renders as one rather than as initials that
-      // would read like a member. Capped like the label chips and project
-      // text beside it — an unconstrained login can starve the title's
-      // Expanded region to zero width in the outer AbListRow Row.
+      // would read like a member. Capped: an unbounded login is what turned a
+      // two-line row's second line — assignee, then the project it's paired
+      // with — into a real overflow the moment both fields were long.
       TaskExternalAssignee() => ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: _assigneeMaxWidth),
         child: Text(
@@ -219,17 +290,11 @@ class TaskRow extends ConsumerWidget {
 
   /// Enough of a uuid to tell two projects apart without pretending it is a
   /// name. Mono, because it is an id.
-  static String _shortId(String id) => id.length <= 8 ? id : id.substring(0, 8);
+  static String _shortId(String id) =>
+      id.length <= 8 ? id : id.substring(0, 8);
 
   static const _avatarSize = 18.0;
-  static const _labelChipMaxWidth = 90.0;
-  static const _projectMaxWidth = 70.0;
-  static const _assigneeMaxWidth = 80.0;
-
-  /// Hard cap on this row's whole trailing block, so it can never starve the
-  /// title's Expanded region in the parent AbListRow — see the comment in
-  /// [_meta]. Sized for a label chip + assignee + provenance mark to fit
-  /// comfortably; the project chip is what clips first when a row also
-  /// carries one.
-  static const _metaMaxWidth = 210.0;
+  static const _assigneeMaxWidth = 140.0;
+  static const _labelChipMaxWidth = 110.0;
+  static const _projectMaxWidth = 90.0;
 }

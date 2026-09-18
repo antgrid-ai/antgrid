@@ -120,40 +120,55 @@ class TaskProvenanceBlock extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
+          // A `Wrap`, not a `Row` with `Spacer`: the block sits at whatever
+          // width the pane is, and a spacer stretched the button to the far
+          // edge, leaving a dead gap that fought the density this app is
+          // built around. Grouped tight on a wide pane, wrapped to its own
+          // line on a narrow one — never flung to an edge either way.
+          Wrap(
+            crossAxisAlignment: WrapCrossAlignment.center,
+            spacing: AbTokens.space8,
+            runSpacing: AbTokens.space6,
             children: [
-              AbIcon(
-                AbIcons.openExternal,
-                size: AbTokens.iconButtonGlyph,
-                color: palette.iconMuted,
-              ),
-              const SizedBox(width: AbTokens.space6),
-              Text(
-                'Imported from ${taskProviderLabel(task)}',
-                style: AbTokens.sansStyle(
-                  fontSize: AbTokens.fontXs,
-                  color: palette.textSecondary,
-                ),
-              ),
-              // `externalKey`, never `externalId`: the id is the provider's
-              // opaque handle and reads as line noise. An account service
-              // older than that field sends neither, and no key is better
-              // than the wrong one.
-              if (task.externalKey != null) ...[
-                const SizedBox(width: AbTokens.space8),
-                Flexible(
-                  child: Text(
-                    task.externalKey!,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: AbTokens.monoStyle(
-                      fontSize: AbTokens.fontXxs,
-                      color: palette.textMuted,
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  AbIcon(
+                    AbIcons.openExternal,
+                    size: AbTokens.iconButtonGlyph,
+                    color: palette.iconMuted,
+                  ),
+                  const SizedBox(width: AbTokens.space6),
+                  Text(
+                    'Imported from ${taskProviderLabel(task)}',
+                    style: AbTokens.sansStyle(
+                      fontSize: AbTokens.fontXs,
+                      color: palette.textSecondary,
                     ),
                   ),
-                ),
-              ],
-              const Spacer(),
+                  // `externalKey`, never `externalId`: the id is the
+                  // provider's opaque handle and reads as line noise. An
+                  // account service older than that field sends neither, and
+                  // no key is better than the wrong one.
+                  if (task.externalKey != null) ...[
+                    const SizedBox(width: AbTokens.space8),
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(
+                        maxWidth: _keyMaxWidth,
+                      ),
+                      child: Text(
+                        task.externalKey!,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: AbTokens.monoStyle(
+                          fontSize: AbTokens.fontXxs,
+                          color: palette.textMuted,
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
               // Absent, never disabled: a task can be linked to a provider
               // whose issue URL the import never carried, and a dead button
               // reads as a broken one.
@@ -238,3 +253,7 @@ class TaskProvenanceNotice extends StatelessWidget {
     );
   }
 }
+
+/// Long enough for a real repo slug + issue number, short enough that a
+/// pathological one still ellipsizes instead of stretching the header row.
+const _keyMaxWidth = 220.0;

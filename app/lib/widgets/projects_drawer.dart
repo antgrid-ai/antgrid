@@ -379,39 +379,58 @@ class _Body extends ConsumerWidget {
   }
 
   Widget _list(BuildContext context, WidgetRef ref) {
-    if (entries.isEmpty) {
-      // Point at the real entry points rather than a nonexistent "[+]". On
-      // desktop the New Session canvas (with its "Open local folder" / "Pair
-      // remote project" cards) sits right beside this drawer, so steer there;
-      // local folders aren't supported on mobile, so name only pairing.
-      //
-      // A scrollable (not a bare Center) so the pull-to-refresh gesture works
-      // with zero rows — overscroll needs something scrollable to grab.
-      return ListView(
-        physics: const AlwaysScrollableScrollPhysics(),
-        children: [
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: AbTokens.space24),
-            child:
-                // Mobile has no local folders — this drawer fills from machines
-                // on the account, so point there (the New Session canvas
-                // carries the full connect steps).
-                isMobilePlatform
-                ? const AbEmptyState(
-                    title: 'No projects yet',
-                    subtitle: 'Connect a machine to see its projects here.',
-                  )
-                // Desktop's real entry point is a local folder; offer it
-                // in place instead of describing where else to find it.
-                : const AbEmptyState(
-                    title: 'No projects yet',
-                    subtitle: 'Open a folder to get started.',
-                    action: OpenFolderButton(),
-                  ),
-          ),
-        ],
-      );
-    }
+    // TasksNavRow normally rides on the local band ("This machine"), which
+    // only exists when a local project is in the list. A drawer with no local
+    // entry at all — every mobile/remote-only client — never emits that band,
+    // which left Tasks completely unreachable there. Give it a standalone
+    // slot above the list in exactly that case; desktop (which always has a
+    // local band) is untouched.
+    final hasLocalBand = entries.any((e) => e.kind == EntryKind.local);
+    final body = entries.isEmpty
+        ? _emptyState(context)
+        : _entriesList(context, ref);
+    if (hasLocalBand) return body;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [const TasksNavRow(), Expanded(child: body)],
+    );
+  }
+
+  Widget _emptyState(BuildContext context) {
+    // Point at the real entry points rather than a nonexistent "[+]". On
+    // desktop the New Session canvas (with its "Open local folder" / "Pair
+    // remote project" cards) sits right beside this drawer, so steer there;
+    // local folders aren't supported on mobile, so name only pairing.
+    //
+    // A scrollable (not a bare Center) so the pull-to-refresh gesture works
+    // with zero rows — overscroll needs something scrollable to grab.
+    return ListView(
+      physics: const AlwaysScrollableScrollPhysics(),
+      children: [
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: AbTokens.space24),
+          child:
+              // Mobile has no local folders — this drawer fills from machines
+              // on the account, so point there (the New Session canvas
+              // carries the full connect steps).
+              isMobilePlatform
+              ? const AbEmptyState(
+                  title: 'No projects yet',
+                  subtitle: 'Connect a machine to see its projects here.',
+                )
+              // Desktop's real entry point is a local folder; offer it
+              // in place instead of describing where else to find it.
+              : const AbEmptyState(
+                  title: 'No projects yet',
+                  subtitle: 'Open a folder to get started.',
+                  action: OpenFolderButton(),
+                ),
+        ),
+      ],
+    );
+  }
+
+  Widget _entriesList(BuildContext context, WidgetRef ref) {
     // The band names ONE machine, so it is emitted once for the whole list —
     // at the first local project, wherever the persisted order happens to put
     // it. Derived from the list rather than from each row's neighbour: an
