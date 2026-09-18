@@ -9,11 +9,21 @@ interface ExtendedCell extends IBufferCell {
   isUnderlineColorRGB(): boolean;
   isUnderlineColorPalette(): boolean;
 }
+interface BufferLineInternals {
+  resize(cols: number, fillCellData: unknown): void;
+}
 interface BufferService {
-  buffers: { normal: {
-    ybase: number; ydisp: number;
-    lines: { trimStart(count: number): void };
-  } };
+  cols: number;
+  buffers: {
+    normal: {
+      ybase: number; ydisp: number;
+      lines: { trimStart(count: number): void };
+    };
+    alt: {
+      lines: { length: number; get(index: number): BufferLineInternals | undefined };
+      getNullCell(): unknown;
+    };
+  };
   buffer: { scrollTop: number; scrollBottom: number };
   scroll(...args: unknown[]): void;
 }
@@ -60,8 +70,11 @@ export class XtermFrameAdapter {
   constructor(private readonly term: Terminal) {
     this.core = (term as unknown as XtermInternals)._core;
     const buffer = this.core?._bufferService?.buffer;
+    const alt = this.core?._bufferService?.buffers?.alt;
     if (typeof this.core?._oscLinkService?.getLinkData !== "function" ||
         typeof this.core?._bufferService?.scroll !== "function" ||
+        typeof this.core?._bufferService?.cols !== "number" ||
+        typeof alt?.getNullCell !== "function" || typeof alt?.lines?.get !== "function" ||
         typeof buffer?.scrollTop !== "number" || typeof buffer?.scrollBottom !== "number") {
       throw new Error("Unsupported xterm frame adapter API");
     }
@@ -76,6 +89,28 @@ export class XtermFrameAdapter {
     const id = (cell as ExtendedCell).extended?.urlId;
     const uri = id ? this.core._oscLinkService.getLinkData(id)?.uri : undefined;
     return uri && uri.length <= 8192 && !/[\x00-\x1f\x7f-\x9f]/.test(uri) ? uri : undefined;
+  }
+
+  /**
+   * Truncates alternate-screen rows to the terminal's current width.
+   *
+   * xterm narrows the NORMAL buffer's rows on a column shrink and leaves the
+   * ALTERNATE buffer's at their old width (measured on 6.x). Nothing reads a
+   * row's width, so the divergence is invisible until a frame is serialized:
+   * the over-wide rows go out inside a frame stamped with the NEW geometry,
+   * the viewer wraps each one into rows the guest never drew, and the
+   * serializer's own wrap-forcing filler survives its erase — which is
+   * computed against the real column count and so clamps at the last column.
+   * A TUI then repaints against row arithmetic that no longer matches, so the
+   * damage accumulates instead of being overwritten. Discarding the off-screen
+   * columns is what a real terminal does to an alternate screen, which has no
+   * reflow to spend them on.
+   */
+  conformAlternateRows(): void {
+    const { buffers, cols } = this.core._bufferService;
+    for (let i = 0; i < buffers.alt.lines.length; i++) {
+      buffers.alt.lines.get(i)?.resize(cols, buffers.alt.getNullCell());
+    }
   }
 
   detachArchivedRows(): void {
