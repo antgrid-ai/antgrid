@@ -1,6 +1,6 @@
 ---
 title: "Your coding agent has a plan. Who runs the sequence?"
-description: "Start with your coding agent, then tell Handler what's left and when to ask you. It checks what the agent reports and asks for evidence before moving on."
+description: "Hand over the follow-ups on a long-running coding task. Handler checks the agent's responses, asks for evidence and notifies you when it needs your input."
 publishedAt: 2026-09-18
 topic: proof
 author: "Bharath Mohan"
@@ -9,13 +9,15 @@ featured: true
 claimsVerifiedAt: "583e988"
 ---
 
-A long agent task doesn't need you for the work. It needs you for the pauses.
+The hard part of a long-running agent task is staying available for every pause.
 
 Your coding agent says the implementation is finished. You read the response, check whether it did what you asked, and write the next prompt: "review the code, then run the tests". Sometimes you have to go back first: "you haven't checked the thing I asked you to check". Then you wait, and do it again.
 
-A good plan doesn't get you out of that. The plan says what comes next. Running the sequence is still yours: saying it, reading the answer, deciding whether it counts. That is babysitting, and it is the part worth handing over.
+For a quick task, you can reply yourself and move on. When the work stretches over hours, those occasional follow-ups keep you tied to the session. A good plan says what comes next, but you still have to be there to prompt it, read the answer and decide whether it counts.
 
-We built Handler in Antgrid to take on those follow-ups. Start a task with your coding agent. When you're ready, tell Handler what's left, how to proceed and when to ask you. It checks what the agent reports against your instructions and asks for evidence before moving on. It notifies you when it needs your input or you've told it to check with you.
+We built Antgrid for working with coding agents across long-running tasks. Its Handler feature takes on the follow-ups when you're ready to step away.
+
+Start the task with your coding agent and do as much as you want together. Then tell Handler what's left, how to proceed and when to ask you. It checks the agent's responses against your instructions, asks for missing evidence and guides the remaining work. It notifies you when it needs your input or reaches a checkpoint you've set.
 
 [Antgrid's desktop beta](https://antgrid.ai/download) is available for Windows, macOS and Linux, with Handler included free during the beta. The companion phone app is [available by invite](mailto:contact@radhaai.com?subject=Antgrid%20mobile%20invite), through TestFlight and Play internal testing.
 
@@ -137,4 +139,3 @@ Adapt the steps and checks to your task and the commands your agent supports. Wa
 Handler uses an installed agent CLI to judge the session on your own provider account. Your provider's usage charges or limits still apply. Handler will be a Pro feature once paid plans are live; see the [beta and pricing terms](https://antgrid.ai/pricing).
 
 We built Handler because the gap between phases kept bringing us back to the desk. Try one bounded handoff, inspect the evidence, and [tell us where its judgement held up or failed](https://antgrid.ai/support). The instruction you gave and the decision Handler made are the most useful things to share.
-

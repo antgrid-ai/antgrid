@@ -17,11 +17,11 @@ import UseCase from "../ui/UseCase.astro";
 <section id="handler" class="mx-auto max-w-shell px-6 py-16 md:py-24">
   <div class="grid gap-x-16 gap-y-10 md:grid-cols-2 md:items-center">
     <div>
-      <h2 class="mb-6 font-display text-title font-bold text-ink">Long-running agent tasks don't need a babysitter. Hand them to Handler.</h2>
+      <h2 class="mb-6 font-display text-title font-bold text-ink">Long-running task? Hand over the follow-ups.</h2>
       <p class="mb-6 max-w-xl text-lede text-muted">
-        Start a task with your coding agent. When you're ready, tell Handler what's left, how to proceed and when to ask you. It checks what the agent reports against your instructions and asks for evidence before moving on.
+        Start a task with your coding agent. When you're ready to step away, tell Handler what's left, how to proceed and when to ask you. It checks the agent's responses against your instructions, asks for missing evidence and guides the remaining work.
       </p>
-      <UseCase class="max-w-xl">Hand over the follow-ups. Get asked only when a decision is yours.</UseCase>
+      <UseCase class="max-w-xl">Research and plan together. Let Handler guide implementation and reviews, and notify you when it needs your input or reaches a checkpoint you set.</UseCase>
       {/* The limitation, on the page rather than in a code comment — a reader
           who assumes autonomy here and discovers otherwise has been mis-sold. */}
       <p class="mt-6 max-w-xl text-meta leading-relaxed text-muted2">
@@ -32,44 +32,45 @@ import UseCase from "../ui/UseCase.astro";
 
     <div>
       <p class="mb-3 text-note text-muted2">An example handoff</p>
-      {/* The clip draws the page background around its own pane, so it sits
-          on the section with no frame of its own. That gutter is 40px of the
-          1200px frame on every side; the negative margin hangs it outside the
-          column so the pane's edge, not the bitmap's, is what lines up with
-          the caption and the copy (solving w - 2m = column with m = w/30
-          gives m = column/28). width/height reserve the box before the
-          poster arrives. preload=none: the poster is the page until the
-          section is in view, and the video is fetched only then. H.264 only:
-          every browser the page targets plays it, so a WebM source would
-          never be picked and would only sit in the repo. */}
-      <div class="relative -m-[3.5714%]">
-      <video
-        data-handler-clip
-        class="block h-auto w-full"
-        width="1200"
-        height="1040"
-        muted
-        loop
-        playsinline
-        preload="none"
-        poster="/handler/terminal.png"
-        aria-label="A terminal session handed to Handler: it answers the agent from your plan, asks for evidence, and sends the one decision that is yours to your phone."
-      >
-        <source src="/handler/terminal.mp4" type="video/mp4" />
-      </video>
-      {/* Chrome leaves a dark hairline down the right and bottom edges of the
-          clip. The box is a fractional number of device pixels at every
-          desktop width: the shell caps the column, so nothing but zoom
-          changes its size, and 125% is where it lands clean. The hairline is
-          made at composite time, not in the file. The encode, the poster and
-          the frame decoded in the browser all read uniform to their last row
-          and column, a screenshot never captures it, and Firefox never draws
-          it. Taking the video off Chrome's overlay path with a border-radius
-          does not help, so this frame covers the strip in the page colour
-          instead, which holds whichever way Chrome rounds. It hides nothing:
-          the clip's outer thirtieth is page-coloured gutter, and the pane is
-          well inside it. */}
-      <span aria-hidden="true" class="pointer-events-none absolute -inset-px border-[3px] border-page"></span>
+      {/* The clip frames its own pane in 40px of page colour on every side
+          of a 1200px frame, and that gutter cannot hold #131110 through a
+          video encode: limited-range 8-bit loses a level of it before
+          quantisation starts, and rate control gives up more on the beats
+          with a dark scrim over the pane — while the Arm sheet is up the
+          bottom gutter decodes 12,10,8 against the page's 19,17,16, which
+          reads as a dark inset frame around the clip. So the page clips the
+          gutter off rather than trying to match it: this box is the column,
+          the clip is 1200/1120 of it and hangs out by half the difference on
+          all four sides, and what shows is exactly the pane. Anything else
+          embedded from creatives needs the same treatment.
+          width/height reserve the box before the poster arrives. preload=none:
+          the poster is the page until the section is in view, and the video is
+          fetched only then. H.264 only: every browser the page targets plays
+          it, so a WebM source would never be picked and would only sit in the
+          repo. */}
+      <div class="relative overflow-hidden rounded-lg">
+        <video
+          data-handler-clip
+          class="m-[-3.571429%] block h-auto w-[107.142857%] max-w-none"
+          width="1200"
+          height="1040"
+          muted
+          loop
+          playsinline
+          preload="none"
+          poster="/handler/terminal.png"
+          aria-label="A terminal session handed to Handler: it answers the agent from your plan, asks for evidence, and sends the one decision that is yours to your phone."
+        >
+          <source src="/handler/terminal.mp4" type="video/mp4" />
+        </video>
+        {/* The pane's edge is the clip's edge now, so this ring carries the
+            pane's border across the seam. It is the app's line colour, which
+            the site's warm ramp has no token for, and it also covers the dark
+            hairline Chrome draws down the right and bottom of a video whose
+            box is a fractional number of device pixels. That hairline is made
+            at composite time: no encode, poster or CSS colour reaches it, no
+            screenshot captures it, and Firefox never draws it. */}
+        <span aria-hidden="true" class="pointer-events-none absolute inset-0 rounded-lg border border-[#27272a]"></span>
       </div>
     </div>
   </div>
