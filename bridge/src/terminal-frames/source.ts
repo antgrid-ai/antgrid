@@ -353,6 +353,10 @@ export class TerminalFrameSource extends TerminalScreen {
             }
           }
         }
+        // After every branch, and after the archive work that only the second
+        // one does: xterm leaves the alternate screen's rows at their old
+        // width, and a frame serialized from them describes a grid nobody has.
+        this.adapter.conformAlternateRows();
       } catch (error) {
         this.fail(error instanceof Error ? error : new Error(String(error)));
       }
