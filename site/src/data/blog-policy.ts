@@ -42,7 +42,6 @@ export function publishedPosts<T extends BlogPost>(entries: T[]): T[] {
   return posts;
 }
 export const leadPost = <T extends BlogPost>(posts: T[]) => posts.find((post) => post.data.featured) ?? posts[0];
-export const showBlogNav = (posts: BlogPost[]) => posts.length >= 3;
 export const readingMinutes = (body = "") => Math.max(1, Math.ceil((body.match(/\S+/g)?.length ?? 0) / 200));
 export const postPath = (post: BlogPost) => `/blog/${post.id}`;
 export const formatDate = (date: Date) => new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "long", year: "numeric", timeZone: "UTC" }).format(date);

@@ -91,7 +91,7 @@ export const trial: PlanCardData = {
   unit: `/ ${TRIAL_DAYS} days`,
   note: `Full Pro for ${TRIAL_DAYS} days, then $${seatPriceUsd} per seat / year`,
   features: [
-    "Handler: guide your agent through what's left, with evidence checks and questions brought to you",
+    "Handler: hand over follow-ups on long-running tasks, with evidence checks and questions brought to you",
     `Up to ${TRIAL_WORKERS} worker machines`,
     "One seat — invite your team once the trial converts",
     "Everything in Free",
@@ -115,7 +115,7 @@ export const proYearly: PlanCardData = {
     ? "Free while the beta runs"
     : `${TRIAL_DAYS}-day free trial, then $${seatPriceUsd} per seat / year`,
   features: [
-    "Handler: guide your agent through what's left, with evidence checks and questions brought to you",
+    "Handler: hand over follow-ups on long-running tasks, with evidence checks and questions brought to you",
     `Up to ${PRO_WORKERS} worker machines per person`,
     "Invite your team — every seat brings its own machines",
     `Up to ${PRO_MAX_SEATS} seats · add or remove them any time`,

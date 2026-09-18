@@ -5,30 +5,42 @@ import Button from "./ui/Button.astro";
 import Mark from "./ui/Mark.astro";
 import Wordmark from "./ui/Wordmark.astro";
 import { BETA_FREE } from "../data/pricing";
-import { getPublishedPosts } from "../data/blog";
-import { showBlogNav } from "../data/blog-policy";
 
 // One list feeding both the bar and the drawer. Held apart, the two drifted —
 // an item added to the desktop bar is invisible to every phone until someone
 // notices, and nothing turns red.
 //
-// Down to the one destination. Features was a scroll link into the middle of one
-// of six home sections: on the home page it did what scrolling already does, and
-// from anywhere else it threw the reader back into the middle of another page.
-// Sign in went with it — the paid path is closed and the beta is free, so it was
-// a slot spent on the smallest audience the site has. Both are still in the
-// footer, which is where an escape hatch belongs.
+// Every item is a page of its own, and that is the bar for being here. Features
+// and Sign in clear it in the footer instead: Features was a scroll link into
+// the middle of one of six home sections, so on the home page it did what
+// scrolling already does and from anywhere else it threw the reader back into
+// the middle of another page; Sign in is a slot spent on the smallest audience
+// the site has for as long as the paid path is closed and the beta is free.
+//
+// Changelog and Blog are listed whatever is behind them at the time. Both are
+// asked for by name — a support reply or an update prompt sends a reader to one,
+// a link to a piece sends them to the other — and a slot that only appears once
+// enough has accumulated behind it is missing on exactly the days someone is
+// sent looking for it.
 const navItems = [
   { href: links.pricing, label: "Pricing" },
-  ...(showBlogNav(await getPublishedPosts()) ? [{ href: links.blog, label: "Blog" }] : []),
+  { href: links.changelog, label: "Changelog" },
+  { href: links.blog, label: "Blog" },
 ];
 
 // Guards for whatever is added next, not for the list above: an anchor is a
 // scroll position rather than a location, and an off-origin href is never this
 // page.
 const here = Astro.url.pathname.replace(/\/+$/, "") || "/";
-const isCurrent = (href: string) =>
-  href.startsWith("/") && !href.includes("#") && (href.replace(/\/+$/, "") || "/") === here;
+const isCurrent = (href: string) => {
+  if (!href.startsWith("/") || href.includes("#")) return false;
+  const path = href.replace(/\/+$/, "") || "/";
+  // An article is inside the section its item names, so Blog stays marked on
+  // /blog/<slug> — an item that goes dark the moment a reader follows it reads
+  // as having left the site. "/" is excluded because every path is under it;
+  // nothing else here nests, so exactly one item is still ever marked.
+  return here === path || (path !== "/" && here.startsWith(`${path}/`));
+};
 ---
 <header class="sticky top-0 z-50 border-b border-edge-inner bg-page/90 backdrop-blur">
   <nav aria-label="Main" class="mx-auto flex max-w-shell items-center justify-between px-6 py-3.5">

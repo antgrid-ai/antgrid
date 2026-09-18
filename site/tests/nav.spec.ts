@@ -104,3 +104,23 @@ test("the nav marks the page the reader is on, and never more than one", async (
   await expect(nav.getByRole("link", { name: "Download free" })).toHaveAttribute("aria-current", "page");
   await expect(nav.locator("[aria-current='page']")).toHaveCount(1);
 });
+
+// Blog is the one item naming a section rather than a page: a reader who follows
+// it spends almost all of their time on /blog/<slug>, and an item that goes dark
+// the moment it is used reads as having left the site. isCurrent matches the
+// section for that reason, which is exactly the change that can start lighting up
+// two items at once, hence the count assertion below it.
+test("the nav marks Blog on an article, not only on the index", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/blog");
+  const nav = page.locator("header nav");
+  await expect(nav.getByRole("link", { name: "Blog" })).toHaveAttribute("aria-current", "page");
+
+  // Whatever is published today, rather than a slug pinned here: the post this
+  // was written against will not be the newest one for long.
+  const article = await page.locator('main a[href^="/blog/"]').first().getAttribute("href");
+  expect(article, "no published article to follow").toBeTruthy();
+  await page.goto(article!);
+  await expect(nav.getByRole("link", { name: "Blog" })).toHaveAttribute("aria-current", "page");
+  await expect(nav.locator("[aria-current='page']")).toHaveCount(1);
+});

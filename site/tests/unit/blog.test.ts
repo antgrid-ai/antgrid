@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { getBlogImageOptions } from "../../scripts/blog-image-options.mjs";
-import { blogSchema, leadPost, publishedPosts, readingMinutes, relatedPosts, showBlogNav, type BlogPost } from "../../src/data/blog-policy";
+import { blogSchema, leadPost, publishedPosts, readingMinutes, relatedPosts, type BlogPost } from "../../src/data/blog-policy";
 
 const valid = { title: "Test", description: "Description", publishedAt: "2026-09-14", author: "Test Author", topic: "proof", draft: false };
 const post = (id: string, overrides = {}): BlogPost => ({ id, data: blogSchema.parse({ ...valid, ...overrides }) });
@@ -40,14 +40,11 @@ describe("blog publishing contract", () => {
     expect(() => publishedPosts([post("one", { featured: true }), post("two", { featured: true })])).toThrow("one, two");
   });
 
-  test("zero, one and three posts control the lead and main navigation", () => {
+  test("an empty collection has no lead, and a lone post leads without being featured", () => {
     expect(leadPost([])).toBeUndefined();
-    expect(showBlogNav([])).toBe(false);
     const one = publishedPosts([post("one")]);
     expect(leadPost(one)?.id).toBe("one");
     expect(one[0].data.featured).toBe(false);
-    expect(showBlogNav(one)).toBe(false);
-    expect(showBlogNav(publishedPosts([post("one"), post("two"), post("three")]))).toBe(true);
   });
 
   test("related posts favour topic before recency, without the current post", () => {
