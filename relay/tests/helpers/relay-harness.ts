@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 import { sign as edSign } from "node:crypto";
 import { startServer as startServerReal, type RelayServer, type RelayServerDeps } from "../../src/server.js";
 import { buildHelloSigBody, normalizeRelayHost, decodeRouteFrame } from "antgrid-wire";

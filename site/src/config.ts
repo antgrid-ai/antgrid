@@ -39,6 +39,7 @@ export const ANALYTICS = {
 // newest stable release's asset of that exact filename, so these URLs never
 // change across versions — cutting a release never requires a site deploy.
 export const RELEASES_URL = "https://github.com/antgrid-ai/antgrid";
+export const SOURCE_COMMIT = import.meta.env.PUBLIC_SOURCE_COMMIT?.trim() || "HEAD";
 
 export const links = {
   signIn: `${APP_URL}/login`,
@@ -79,12 +80,14 @@ export const links = {
   // own tag, so a support reply can point at the exact build a reader is
   // asking about rather than at the top of the list.
   changelog: "/changelog",
+  blog: "/blog",
   security: "/security",
   // Verification surfaces for /security. `HEAD` rather than a branch name:
   // GitHub resolves it to whatever the repo's default branch is, so renaming
   // that branch never turns these into 404s under a page whose whole argument
   // is that the reader can go and check.
   repo: RELEASES_URL,
+  exactSource: `${RELEASES_URL}/tree/${SOURCE_COMMIT}`,
   securityPolicyFile: `${RELEASES_URL}/blob/HEAD/SECURITY.md`,
   securityAdvisory: `${RELEASES_URL}/security/advisories/new`,
   handshakeSpec: `${RELEASES_URL}/blob/HEAD/docs/protocol/e2e-handshake.md`,
@@ -102,6 +105,7 @@ export const links = {
   mobileInvite: "mailto:contact@radhaai.com?subject=Antgrid%20mobile%20invite",
   privacy: "/privacy",
   terms: "/terms",
+  license: "https://github.com/antgrid-ai/antgrid/blob/HEAD/LICENSE.md",
   refunds: "/refunds",
   company: "https://radhaai.com",
   // Interest capture for founding pricing. Posted to by the inline script in

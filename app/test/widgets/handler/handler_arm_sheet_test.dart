@@ -113,10 +113,7 @@ void main() {
       await _pumpSheet(tester);
 
       expect(find.textContaining('Your backlog starts with'), findsNothing);
-      expect(
-        find.text("Add what you want done while you're away."),
-        findsOneWidget,
-      );
+      expect(find.text('Add what you want done.'), findsOneWidget);
     });
 
     testWidgets('is not a line of whitespace', (tester) async {
@@ -126,10 +123,7 @@ void main() {
       await _pumpSheet(tester, openingPrompt: '   \n  ');
 
       expect(find.textContaining('Your backlog starts with'), findsNothing);
-      expect(
-        find.text("Add what you want done while you're away."),
-        findsOneWidget,
-      );
+      expect(find.text('Add what you want done.'), findsOneWidget);
     });
 
     testWidgets('is trimmed of the whitespace around it', (tester) async {
@@ -161,10 +155,7 @@ void main() {
       );
       // And the composer stops asking what to add "beyond that", since the
       // sheet has named nothing for "that" to refer to.
-      expect(
-        find.text("Add what you want done while you're away."),
-        findsOneWidget,
-      );
+      expect(find.text('Add what you want done.'), findsOneWidget);
     });
   });
 }

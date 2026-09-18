@@ -77,8 +77,6 @@ function machine(opts: {
   /** Omitted is a bus with no host above it, which is what most of this file
    *  exercises; supplied is the machine-level directory a real host injects. */
   directory?: SessionDirectory;
-  /** Off refuses every off-machine leg at the verb layer (§6.3). */
-  remoteAccessEnabled?: boolean;
   /** No relay identity on the API's side, which is what a core with no host
    *  above it looks like: `machineId()` answers null there while the
    *  coordinator still names itself, because a key needs a machine and an
@@ -91,6 +89,10 @@ function machine(opts: {
    *  whole of what a carrier does. Absent records the frame and delivers it
    *  nowhere, which is the shape the artifact cases rely on. */
   link?: () => SessionBusCoordinator | null;
+  /** §7.3's same-machine wake hook. Absent is a host with no wake wired at
+   *  all, which is every other case in this file — a stopped target is then
+   *  refused NOT_RUNNING unconditionally, exactly as before the hook existed. */
+  startSession?: (sessionId: string) => boolean;
 }): Machine {
   const outbound: AbMessage[] = [];
   const routes: { contextId: string; role: string }[] = [];
@@ -126,8 +128,8 @@ function machine(opts: {
     machineId: () => (opts.localMode ? null : opts.machineId),
     membership: membershipOf,
     carrierPresent: () => opts.carrierPresent !== false,
-    remoteAccessEnabled: () => opts.remoteAccessEnabled !== false,
     ...(opts.directory ? { directory: opts.directory } : {}),
+    ...(opts.startSession ? { startSession: opts.startSession } : {}),
   });
   const ctx: AgentContext = {
     manager: () => null,
@@ -256,15 +258,15 @@ const TO_LEAD = { machineId: "m1", projectId: "p1", sessionId: LEAD_SESSION };
  *  here is the one an agent would read, and a success went out and came back
  *  acked. {@link pair} stays as it was: no directory, no link, no budget, which
  *  is what the artifact and `sessions` cases above are about. */
-function linkedPair(opts: { carrier?: boolean; remoteAccess?: boolean } = {}): {
+function linkedPair(opts: { carrier?: boolean; leadStartSession?: (id: string) => boolean } = {}): {
   lead: Machine;
   peer: Machine;
   peerRow: SessionDirectoryRow;
   leadRow: SessionDirectoryRow;
   /** The rows the LEAD's mirror holds, by reference. Emptying it is how a case
-   *  reaches the state a real machine is in whenever its remote access is off or
-   *  its desktop app is gone: both are what keep a mirror empty, so a seeded row
-   *  beside either of them exists only for the seconds after the flip. */
+   *  reaches the state a real machine is in once its desktop app is gone: the
+   *  app is what pushes the mirror, so a seeded row beside an absent carrier
+   *  outlives it only until the mirror ages out. */
   leadMirror: SessionDirectoryRow[];
   stop(): void;
 } {
@@ -280,8 +282,8 @@ function linkedPair(opts: { carrier?: boolean; remoteAccess?: boolean } = {}): {
     directory: mirrorDirectory("m1", "p1", leadMirror),
     pairBudget: budgetStore(),
     carrierPresent: opts.carrier !== false,
-    remoteAccessEnabled: opts.remoteAccess !== false,
     link: () => peerMachine?.coordinator ?? null,
+    ...(opts.leadStartSession ? { startSession: opts.leadStartSession } : {}),
   });
   const peer = machine({
     abDir: tempDir("bus-peer-"),
@@ -734,6 +736,85 @@ describe("the send verbs over the loopback route", () => {
     } finally { stop(); }
   });
 
+  test("a notify at a stopped SAME-MACHINE session wakes it instead of refusing, when startSession is wired", async () => {
+    const startCalls: string[] = [];
+    const target = { machineId: "m1", projectId: "p1", sessionId: "sibling-1" };
+    const stoppedRow: SessionDirectoryRow = {
+      machineId: "m1", projectId: "p1", sessionId: "sibling-1",
+      title: "sibling", branch: "main", activity: "stopped", lastActiveAt: 1, canReply: true,
+    };
+    const directory = {
+      rowFor: (_self: unknown, to: { sessionId: string }) => (to.sessionId === "sibling-1" ? stoppedRow : null),
+    } as unknown as SessionDirectory;
+    const lead = machine({
+      abDir: tempDir("bus-wake-"),
+      machineId: "m1",
+      projectId: "p1",
+      sessionIds: [LEAD_SESSION],
+      directory,
+      startSession: (id) => { startCalls.push(id); return true; },
+    });
+    try {
+      const res = await post(lead, "notify", LEAD_SESSION, { to: target, summary: "wake up", text: "ping" });
+      expect(res.status).toBe(200);
+      expect(res.body.ok).toBe(true);
+      expect(res.body.sent).toBe(true);
+      // The wake was asked for, addressed to the target it was refused for —
+      // not the caller, and not some other row the refusal never named.
+      expect(startCalls).toEqual(["sibling-1"]);
+    } finally { lead.stop(); }
+  });
+
+  test("a notify at a stopped same-machine session is still NOT_RUNNING when startSession refuses or is absent", async () => {
+    const target = { machineId: "m1", projectId: "p1", sessionId: "sibling-1" };
+    const stoppedRow: SessionDirectoryRow = {
+      machineId: "m1", projectId: "p1", sessionId: "sibling-1",
+      title: "sibling", branch: "main", activity: "stopped", lastActiveAt: 1, canReply: true,
+    };
+    const directory = {
+      rowFor: (_self: unknown, to: { sessionId: string }) => (to.sessionId === "sibling-1" ? stoppedRow : null),
+    } as unknown as SessionDirectory;
+    // No `startSession` at all — the shape every other case in this file is in,
+    // and the one a host with no wake wired still needs to answer correctly.
+    const noHook = machine({
+      abDir: tempDir("bus-wake-"), machineId: "m1", projectId: "p1", sessionIds: [LEAD_SESSION], directory,
+    });
+    try {
+      const res = await post(noHook, "notify", LEAD_SESSION, { to: target, summary: "s", text: "t" });
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe("NOT_RUNNING");
+    } finally { noHook.stop(); }
+
+    // Wired, but this host found no warm core for the session (a cold project,
+    // in production) — the hook answers false, same refusal as if it were absent.
+    const declines = machine({
+      abDir: tempDir("bus-wake-"), machineId: "m1", projectId: "p1", sessionIds: [LEAD_SESSION], directory,
+      startSession: () => false,
+    });
+    try {
+      const res = await post(declines, "notify", LEAD_SESSION, { to: target, summary: "s", text: "t" });
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe("NOT_RUNNING");
+    } finally { declines.stop(); }
+  });
+
+  test("a notify at a stopped CROSS-machine session stays refused even when startSession is wired", async () => {
+    // §7.3's boundary: `startSession` answering true is not enough on its own —
+    // waking is scoped to a same-machine target, so a host must never be asked
+    // to start a process on another machine's behalf just because it happens to
+    // have a hook wired for its own sessions.
+    const startCalls: string[] = [];
+    const { lead, peerRow, stop } = linkedPair({ leadStartSession: (id) => { startCalls.push(id); return true; } });
+    try {
+      peerRow.activity = "stopped";
+      const res = await post(lead, "notify", LEAD_SESSION, { to: TO_PEER, summary: "s", text: "t" });
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe("NOT_RUNNING");
+      // Never even asked: the machine check gates the call, not just the outcome.
+      expect(startCalls).toHaveLength(0);
+    } finally { stop(); }
+  });
+
   test("an over-ceiling notify is NOTIFY_RATE while a post to the same pair still lands", async () => {
     const { lead, peer, stop } = linkedPair();
     try {
@@ -762,15 +843,19 @@ describe("the send verbs over the loopback route", () => {
     } finally { stop(); }
   });
 
-  test("an off-machine target with remote access off is REMOTE_ACCESS_OFF while a row is still mirrored", async () => {
-    const { lead, stop } = linkedPair({ remoteAccess: false });
+  test("an off-machine send leaves without consulting this machine's own remote access (E15)", async () => {
+    // The api takes no remote-access dep at all any more: the switch governs
+    // what may be done TO a machine, and a send is refused by the TARGET's
+    // switch, on the target. The rung underneath it — the carrier — is what
+    // still refuses here, and has its own case next.
+    const { lead, peer, stop } = linkedPair();
     try {
       const res = await post(lead, "post", LEAD_SESSION, { to: TO_PEER, summary: "s", text: "t" });
-      expect(res.status).toBe(403);
-      expect(res.body.code).toBe("REMOTE_ACCESS_OFF");
-      // §6.3's send half is refused where the agent can read it, never queued
-      // behind a switch only a human at this machine can flip.
-      expect(lead.outbound).toHaveLength(0);
+      expect(res.status).toBe(200);
+      expect(res.body.sent).toBe(true);
+      expect(lead.outbound).toHaveLength(1);
+      const inbox = await get(peer, "inbox", PEER_SESSION);
+      expect(inbox.body.posts).toHaveLength(1);
     } finally { stop(); }
   });
 
@@ -1121,22 +1206,6 @@ describe("the send rungs in the state a machine is usually in", () => {
       });
       expect(sibling.status).toBe(200);
     } finally { m.stop(); }
-  });
-
-  test("remote access off is REMOTE_ACCESS_OFF once the mirror has emptied", async () => {
-    // The switch is itself what empties the mirror, so this is the state every
-    // send but the first few is in. Decided after the row read, the agent is
-    // told "no session with that address" instead: it re-reads the directory,
-    // finds nobody, and concludes the peer does not exist rather than naming the
-    // one switch a human at this machine can flip (§6.3).
-    const { lead, leadMirror, stop } = linkedPair({ remoteAccess: false });
-    try {
-      leadMirror.length = 0;
-      const res = await post(lead, "post", LEAD_SESSION, { to: TO_PEER, summary: "s", text: "t" });
-      expect(res.status).toBe(403);
-      expect(res.body.code).toBe("REMOTE_ACCESS_OFF");
-      expect(lead.outbound).toHaveLength(0);
-    } finally { stop(); }
   });
 
   test("a missing carrier is PEER_UNREACHABLE once the mirror has emptied", async () => {

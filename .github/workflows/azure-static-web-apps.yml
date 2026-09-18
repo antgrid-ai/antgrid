@@ -51,6 +51,7 @@ jobs:
         working-directory: site
         env:
           PUBLIC_SALESIQ_WIDGET_URL: ${{ secrets.SALESIQ_WIDGET_URL }}
+          PUBLIC_SOURCE_COMMIT: ${{ github.sha }}
         run: |
           bun install --frozen-lockfile
           bun run check
@@ -69,7 +70,9 @@ jobs:
         run: bunx playwright install --with-deps chromium
       - name: Test
         working-directory: site
-        run: bun run test
+        run: |
+          bun run test
+          bun run test:blog
       # Fork PRs are correctly denied AZURE_STATIC_WEB_APPS_API_TOKEN, so this
       # step would fail with a red X on every contributor PR. Same guard on
       # close_preview below.

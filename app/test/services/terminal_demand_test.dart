@@ -6,7 +6,27 @@ import 'package:antgrid/storage/cached_sessions_store.dart';
 import 'package:antgrid/test_helpers/fake_agent_transport.dart';
 import '../helpers/prefs_test_mock.dart';
 
+/// The minimum settling window. Assertions about what must NOT have happened
+/// need real time to have passed, so this stays a plain delay.
 Future<void> tick() => Future<void>.delayed(const Duration(milliseconds: 15));
+
+/// Waits past [tick] until [condition] holds, for the assertions that need a
+/// timer to HAVE fired.
+///
+/// The service drives prefetch, retirement and resize coalescing from real
+/// timers, so a fixed delay asserts only that a 5ms timer beat a 15ms sleep.
+/// That 10ms of wall clock is not something a loaded CI runner owes us, and
+/// betting on it is why this file failed on a tree that had already passed.
+/// Polling the condition drops the scheduling assumption without weakening
+/// anything: the delay above still elapses first, and the caller's own
+/// `expect` runs either way, so behaviour that never arrives still fails with
+/// its own message rather than as a timeout here.
+Future<void> settle(bool Function() condition) async {
+  final deadline = DateTime.now().add(const Duration(seconds: 5));
+  while (!condition() && DateTime.now().isBefore(deadline)) {
+    await Future<void>.delayed(const Duration(milliseconds: 5));
+  }
+}
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -35,6 +55,14 @@ void main() {
   }
 
   Future<void> accept(String id, {String? request, String run = 'run'}) async {
+    // A prefetch subscribe is emitted by a timer, so the message this
+    // acknowledges may not be on the wire yet. An explicit [request] is the
+    // caller pinning a subscribe it has already read, and needs no wait.
+    if (request == null) {
+      await settle(
+        () => messages('subscribe').any((m) => m['terminalId'] == id),
+      );
+    }
     transport.emit('terminal:subscribed', {
       'terminalId': id,
       'runId': run,
@@ -94,6 +122,32 @@ void main() {
     await session.close();
   });
 
+  // Retiring a display disposes the engine and leaves an empty replacement, so
+  // a pane that only claims its lease from a post-frame callback paints a blank
+  // terminal for one frame and restores the screen on the next -- a black gap
+  // on every session switch, worst on the agent terminal, whose pane is keyed
+  // by terminal id and so remounts whenever the session changes.
+  test('a remembered screen is painted before the lease is claimed', () async {
+    service.setDisplayInterest('pane', 'agent');
+    await accept('agent');
+    await frame('agent');
+    expect(service.currentState.tabs['agent']!.ghostty.plainText, contains('agent screen'));
+
+    service.setDisplayInterest('pane', null);
+    expect(TerminalService.hiddenScreens.contains(service, 'agent'), isTrue);
+    // The engine the next pane will mount against: a fresh one, holding
+    // nothing.
+    expect(service.currentState.tabs['agent']!.ghostty.plainText, isNot(contains('agent screen')));
+
+    service.primeDisplay('agent');
+
+    expect(service.currentState.tabs['agent']!.ghostty.plainText, contains('agent screen'));
+    // Painted, NOT claimed: the lease resolves a frame later and does the whole
+    // restore itself, so the frame has to still be there for it.
+    expect(TerminalService.hiddenScreens.contains(service, 'agent'), isTrue);
+    expect(messages('subscribe'), hasLength(1));
+  });
+
   test('discovery preserves metadata without screen demand', () {
     expect(service.currentState.tabs, hasLength(3));
     expect(messages('subscribe'), isEmpty);
@@ -145,6 +199,7 @@ void main() {
         service.setDisplayInterest('pane', 'agent');
         expect(service.sendResize('agent', 100, 30), isTrue);
         await Future<void>.delayed(const Duration(milliseconds: 120));
+        await settle(() => messages('resize').isNotEmpty);
         expect(messages('resize').single['cols'], 100);
         expect(messages('resize').single['rows'], 30);
       },
@@ -168,6 +223,7 @@ void main() {
   test('visible demand cancels speculation before its acceptance', () async {
     service.setPrefetchFocus('visit', {'a', 'b'});
     await tick();
+    await settle(() => messages('subscribe').isNotEmpty);
     final request = messages('subscribe').single['requestId'] as String;
     service.setDisplayInterest('pane', 'agent');
     await accept('a', request: request);
@@ -175,6 +231,7 @@ void main() {
     expect(messages('subscribe').map((m) => m['terminalId']), ['a', 'agent']);
     await accept('agent');
     await frame('agent');
+    await settle(() => messages('subscribe').length > 2);
     expect(messages('subscribe').last['terminalId'], 'b');
   });
 
@@ -223,10 +280,12 @@ void main() {
   test('prefetch is sequential and retires after its first frame', () async {
     service.setPrefetchFocus('visit', {'b', 'a'});
     await tick();
+    await settle(() => messages('subscribe').isNotEmpty);
     expect(messages('subscribe').map((m) => m['terminalId']), ['a']);
     await accept('a');
     expect(messages('subscribe'), hasLength(1));
     await frame('a');
+    await settle(() => messages('subscribe').length > 1);
     expect(messages('ack'), hasLength(1));
     expect(messages('unsubscribe'), hasLength(1));
     expect(messages('subscribe').last['terminalId'], 'b');
@@ -238,6 +297,7 @@ void main() {
   test('canceled acceptance is explicitly unsubscribed', () async {
     service.setPrefetchFocus('visit', {'a'});
     await tick();
+    await settle(() => messages('subscribe').isNotEmpty);
     final request = messages('subscribe').last['requestId'] as String;
     service.setPrefetchFocus(null, {});
     await accept('a', request: request);
@@ -249,6 +309,7 @@ void main() {
   test('visible demand promotes a pending speculative attachment', () async {
     service.setPrefetchFocus('visit', {'a'});
     await tick();
+    await settle(() => messages('subscribe').isNotEmpty);
     service.setDisplayInterest('pane', 'a');
     expect(messages('subscribe'), hasLength(1));
     await accept('a');

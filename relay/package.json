@@ -1,6 +1,7 @@
 {
   "name": "antgrid-relay",
   "version": "0.1.0",
+  "license": "LicenseRef-Elastic-2.0",
   "type": "module",
   "scripts": {
     "dev": "bun run src/index.ts",

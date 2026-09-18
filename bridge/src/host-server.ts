@@ -457,7 +457,6 @@ export class HostServer {
     projectPath: (projectId) => this.cores.get(projectId)?.path ?? this.seenProjects.get(projectId)?.path,
     machineId: () => this.controlPlaneRegistrationId ?? null,
     remoteDirectory: this.remoteDirectory,
-    remoteAccessEnabled: () => this.remoteAccessPolicy.isEnabled(),
     now: () => Date.now(),
   });
   // The same latches `agent-core.ts`'s per-core fallback keeps, moved here
@@ -626,6 +625,21 @@ export class HostServer {
     if (latch.has(contextId)) return false;
     if (latch.size >= MAX_BUS_ROUTES) latch.clear();
     latch.add(contextId);
+    return true;
+  }
+
+  /** The §7.3 same-machine wake: start a session this host holds, resolved the
+   *  same way `deliverLocal` resolves a delivery target — `sessionIndex` names
+   *  the owning project, and only a WARM core (`this.cores`) is asked. A cold
+   *  project (known but not open) answers false rather than being brought up:
+   *  bringing up an unrelated project over a notify is a bigger blast radius
+   *  than this wake was scoped to cover, so that case still falls through to
+   *  the ordinary `NOT_RUNNING` refusal. */
+  private startLocalSession(sessionId: string): boolean {
+    const projectId = this.sessionIndex.lookup(sessionId)?.projectId ?? null;
+    const entry = projectId ? this.cores.get(projectId) : undefined;
+    if (!entry) return false;
+    entry.core.startSession(sessionId);
     return true;
   }
 
@@ -1272,13 +1286,12 @@ export class HostServer {
       case "mobile-access:set": {
         const changed = this.remoteAccessPolicy.setEnabled(req.enabled);
         if (changed && !req.enabled) {
+          // The mirror deliberately SURVIVES this (E15): it holds what peers
+          // offered about themselves, and turning this machine's own door
+          // shut is not a reason to forget who is out there — a session here
+          // may still open an exchange, and dropping the rows would leave it
+          // reading `UNKNOWN_PEER` for peers that are answering perfectly.
           this.demoteAllPromoted();
-          // A second, independent clear: `handleRemoteDirectoryPush`'s own
-          // refusal path already clears on its next ingest attempt, but that
-          // is a reactive gate — it only fires when a push arrives. This one
-          // is what makes a flip to off empty the mirror immediately, with no
-          // push required, which is the property the test file pins.
-          this.remoteDirectory.clear("remote access turned off");
         }
         if (changed) {
           // The advert derives from the switch, and `Device.mobileAccessEnabled`
@@ -2250,22 +2263,15 @@ export class HostServer {
 
   /** The asking half of the remote directory's fill path: the app's pump
    *  hands over one cycle of what it learned peeking peer capability cards.
-   *  Gated on THIS machine's own remote-access switch even though the rest of
-   *  this plane is exempt from it — see the comment on this arm in
-   *  control-protocol.ts for why. `clear()` on both refusal branches is what
-   *  makes a switch flip take effect immediately rather than riding out the
-   *  mirror's TTL. */
+   *  Exempt from THIS machine's own remote-access switch, like the rest of this
+   *  plane (E15): every row here was offered by the peer that owns it, under
+   *  that peer's own switch, and mirroring one discloses nothing about this
+   *  machine. `clear()` on the refusal branch is what makes losing a relay
+   *  identity take effect immediately rather than riding out the mirror's
+   *  TTL. */
   private handleRemoteDirectoryPush(
     req: Extract<ControlRequest, { type: "session-bus:remote-directory" }>,
   ): ControlResponse {
-    if (!this.remoteAccessPolicy.isEnabled()) {
-      this.remoteDirectory.clear("remote access is off");
-      return {
-        id: req.id,
-        ok: false,
-        error: { code: "NOT_ALLOWED", message: "remote access is disabled on this machine, so it accepts no peer directory" },
-      };
-    }
     const selfMachineId = this.controlPlaneRegistrationId;
     if (selfMachineId === null) {
       // A row offered while this machine has no relay identity is
@@ -2418,6 +2424,10 @@ export class HostServer {
       // session index rather than this core's own id.
       sessionBus: this.sessionBus,
       sessionDirectory: this.sessionDirectory,
+      // §7.3's same-machine wake: resolves the OWNING core exactly as
+      // `deliverLocal` does, so it only ever starts a session this host
+      // already holds warm — a cold project is not brought up over a notify.
+      startSession: (sessionId) => this.startLocalSession(sessionId),
       ...(mode === "remote" ? { remote } : {}),
     });
     await core.start();

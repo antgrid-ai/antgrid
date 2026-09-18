@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 import type { ProductAccount } from "../generated/prisma/client.js";
 import type { Tx } from "../db/index.js";
 import { providerForCountry } from "../billing/routing.js";

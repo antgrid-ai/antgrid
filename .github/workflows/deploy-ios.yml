@@ -8,6 +8,15 @@ name: Deploy — iOS (TestFlight)
 # development / main -> TestFlight (same app record). Unlike Play's internal vs
 # production tracks, iOS has one upload target; the App Store submission is manual.
 #
+# Those are the ONLY iOS channels — this workflow attaches nothing to a GitHub
+# release. The export below is `method: app-store`: App Store Connect accepts
+# it and no device will install it, because it carries no provisioned devices.
+# Re-signing one to sideload rewrites the team ID, which breaks the
+# aps-environment entitlement and the App Group shared with the notification
+# service extension, so push dies. build-desktop.yml owns the release assets
+# and their SHA256SUMS.
+
+#
 # NOT on push. This job holds a macos runner for ~9 minutes, and macOS bills at
 # 10x — at ~4 merges a day it was over half of the repo's entire Actions spend,
 # to ship builds nobody installed one-per-merge. Nightly with a change gate
@@ -277,6 +286,7 @@ jobs:
             # HEAD, not GITHUB_SHA: the nightly fires on the default branch and
             # ships main, so GITHUB_SHA names a commit this build does not contain.
             echo "sha=$(git rev-parse --short=6 HEAD)"
+            echo "source_commit=$(git rev-parse HEAD)"
             echo "built=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           } >> "$GITHUB_OUTPUT"
 
@@ -295,6 +305,7 @@ jobs:
             --dart-define=SENTRY_DSN=${{ secrets.SENTRY_DSN }} \
             --dart-define=APP_VERSION=${{ steps.version.outputs.name }} \
             --dart-define=GIT_SHA=${{ steps.version.outputs.sha }} \
+            --dart-define=SOURCE_COMMIT=${{ steps.version.outputs.source_commit }} \
             --dart-define=BUILD_TIME=${{ steps.version.outputs.built }} \
             --export-options-plist="$RUNNER_TEMP/ExportOptions.plist"
 

@@ -15,7 +15,7 @@ export interface HistoryPage {
   rows: TerminalHistoryRow[];
 }
 
-interface RunRecord { epoch: number; nextRowId: number; bytes: number }
+interface RunRecord { epoch: number; nextRowId: number; bytes: number; gapped: number }
 interface StoredRow { payload: string; bytes: number; rowId: number; serial: number }
 
 // Room read() reserves per page for the envelope/boundary, plus the one-byte
@@ -49,7 +49,8 @@ export class TerminalHistoryStore {
       PRAGMA journal_size_limit = 1048576;
       CREATE TABLE IF NOT EXISTS terminal_runs (
         runId TEXT PRIMARY KEY, epoch INTEGER NOT NULL DEFAULT 0,
-        nextRowId INTEGER NOT NULL DEFAULT 0, bytes INTEGER NOT NULL DEFAULT 0
+        nextRowId INTEGER NOT NULL DEFAULT 0, bytes INTEGER NOT NULL DEFAULT 0,
+        gapped INTEGER NOT NULL DEFAULT 0
       );
       CREATE TABLE IF NOT EXISTS terminal_rows (
         serial INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -72,6 +73,12 @@ export class TerminalHistoryStore {
     const columns = this.db.query<{ name: string }, []>("PRAGMA table_info(terminal_owners)").all();
     if (!columns.some((column) => column.name === "storedBytes")) {
       this.db.exec("ALTER TABLE terminal_owners ADD COLUMN storedBytes INTEGER NOT NULL DEFAULT 0");
+    }
+    // A run archived before this column existed reads back 0, which is the only
+    // honest answer for it: nothing was watching for a gap, so none is claimed.
+    const runColumns = this.db.query<{ name: string }, []>("PRAGMA table_info(terminal_runs)").all();
+    if (!runColumns.some((column) => column.name === "gapped")) {
+      this.db.exec("ALTER TABLE terminal_runs ADD COLUMN gapped INTEGER NOT NULL DEFAULT 0");
     }
     this.db.exec(`
       UPDATE terminal_owners SET storedBytes = 128 + length(CAST(scope AS BLOB)) + length(CAST(terminalId AS BLOB))
@@ -97,7 +104,7 @@ export class TerminalHistoryStore {
 
   record(runId: string): RunRecord | null {
     return this.db.query<RunRecord, [string]>(
-      "SELECT epoch, nextRowId, bytes FROM terminal_runs WHERE runId = ?",
+      "SELECT epoch, nextRowId, bytes, gapped FROM terminal_runs WHERE runId = ?",
     ).get(runId);
   }
 
@@ -252,8 +259,14 @@ export class TerminalHistoryStore {
   clear(runId: string, epoch: number): void {
     this.db.transaction(() => {
       this.db.query("DELETE FROM terminal_rows WHERE runId = ?").run(runId);
-      this.db.query("UPDATE terminal_runs SET epoch = ?, nextRowId = 0 WHERE runId = ?").run(epoch, runId);
+      // `gapped` is zeroed with the epoch that owned it: the new one archives
+      // from nothing, so a hole in the abandoned epoch is not carried into it.
+      this.db.query("UPDATE terminal_runs SET epoch = ?, nextRowId = 0, gapped = 0 WHERE runId = ?").run(epoch, runId);
     })();
+  }
+
+  markGapped(runId: string): void {
+    this.db.query("UPDATE terminal_runs SET gapped = 1 WHERE runId = ?").run(runId);
   }
 
   firstRowId(runId: string, epoch: number, nextRowId: number): number {
@@ -316,13 +329,18 @@ export class TerminalRunHistory {
   private pendingBytes = 0;
   private disabled = false;
   private retired = false;
+  private gapped = false;
 
   constructor(
     private readonly store: TerminalHistoryStore,
     readonly runId: string,
     record: RunRecord,
     private readonly onFailure: (error: Error) => void,
-  ) { this.epoch = record.epoch; this.nextRowId = record.nextRowId; }
+  ) {
+    this.epoch = record.epoch;
+    this.nextRowId = record.nextRowId;
+    this.gapped = record.gapped !== 0;
+  }
 
   append(row: Omit<TerminalHistoryRow, "rowId">): void {
     if (this.retired || this.disabled) return;
@@ -351,12 +369,37 @@ export class TerminalRunHistory {
     });
   }
 
+  /** Rows this epoch will never hold, reported by whoever knows they were lost
+   *  — nothing in here can see a chunk that never reached the parser, which is
+   *  the only thing that calls this. A failure of this class's own never routes
+   *  here and is not a gap: `attempt` disables the handle, and `boundary()`
+   *  publishes that as `status`, a loss at the edge of the archive rather than
+   *  a hole in it. Sticky for the epoch and deliberately not a count: a loss is
+   *  measured in characters, never in rows, so the only honest thing to publish
+   *  is that the archive stopped being continuous.
+   *
+   *  Written through to the run's row rather than only held here, because this
+   *  handle dies with the run — `releaseRun` drops it — while the reader the
+   *  flag exists for is served by a handle rebuilt from disk long afterwards.
+   *  In-memory alone, a gap would be reported for the live run and then quietly
+   *  forgotten by the reopened scrollback that most needs it. */
+  noteGap(): void {
+    if (this.gapped) return;
+    this.gapped = true;
+    if (this.retired || this.disabled) return;
+    this.attempt(() => this.store.markGapped(this.runId));
+  }
+
   clear(): void {
     if (this.retired) return;
     this.pending = [];
     this.pendingBytes = 0;
     this.epoch++;
     this.nextRowId = 0;
+    // A fresh epoch is the app's discontinuity signal in its own right, and it
+    // archives from nothing — so the hole in the one being abandoned is not
+    // carried into it.
+    this.gapped = false;
     // In-memory epoch advances even on disk failure: cleared history must not
     // reappear through this handle just because a DELETE could not commit.
     this.attempt(() => this.store.clear(this.runId, this.epoch));
@@ -366,7 +409,10 @@ export class TerminalRunHistory {
     this.flush();
     let firstRowId = this.nextRowId;
     this.attempt(() => { firstRowId = this.store.firstRowId(this.runId, this.epoch, this.nextRowId); });
-    return { epoch: this.epoch, firstRowId, nextRowId: this.nextRowId, status: this.disabled ? "disabled" : "recording" };
+    return {
+      epoch: this.epoch, firstRowId, nextRowId: this.nextRowId,
+      status: this.disabled ? "disabled" : "recording", gapped: this.gapped,
+    };
   }
 
   page(epoch: number, beforeRowId: number): HistoryPage {

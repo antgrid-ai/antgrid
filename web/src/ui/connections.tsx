@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 import { Layout, type LayoutUser } from "./layout.js";
 import type { ConnectionSummary } from "../relay/push.js";
 import { fmtAge } from "./format.js";

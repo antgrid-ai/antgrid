@@ -206,19 +206,24 @@ class HandlerSessionSettings extends StatelessWidget {
   );
 }
 
-/// What the judge looks for and asks about, the free-text brief beneath it, and
-/// the lines that qualify both: the lens caption, and the parked notice when
-/// the judge can't run headless.
+/// What Handler holds every session to, the pick for what it adds on top of
+/// that, and the lines that qualify it: the per-preset caption, the "Your own"
+/// panel, and the parked notice when the judge can't run headless.
 ///
-/// A lens ADDS questions and nothing else — the bridge's rules own where
-/// handling gives way to escalating — so nothing here may read as a dial over
-/// how much the session decides alone.
+/// The four presets and the user-authored [handlerLensOwnLabel] are ONE radio
+/// group — chips behaving identically, never presets plus a disclosure
+/// (redesign spec §2, §3.2). There is no chip for adding NOTHING: that is the
+/// floor line's own subject and the state a session starts in, so a chip for it
+/// offered the user a choice that was already made. A lens ADDS
+/// questions and nothing else — the bridge's rules own where handling gives
+/// way to escalating — so nothing here may read as a dial over how much the
+/// session decides alone.
 ///
 /// The notice stays HERE rather than with the picker it names because it is an
 /// answer about the lens — why this control is stored and inert. Its copy
 /// never says "below", so it reads true whether the picker that fixes it sits
 /// under this block (the settings sheet) or above it (the arm sheet's chip).
-class HandlerLensControl extends ConsumerWidget {
+class HandlerLensControl extends ConsumerStatefulWidget {
   const HandlerLensControl({
     super.key,
     required this.terminalId,
@@ -237,29 +242,114 @@ class HandlerLensControl extends ConsumerWidget {
   /// See [HandlerSessionSettings.appliesNextPass].
   final bool appliesNextPass;
 
-  /// Whether a keystroke in the brief is a commit. True only for a host that
-  /// collects the value and sends it ONCE (the arm sheet). Every commit on the
-  /// settings sheet is a configure frame, and the bridge's edit path clears
-  /// `lastJudgedContextHash` unconditionally — so a per-keystroke commit there
-  /// buys a real judge pass per character.
+  /// Whether a keystroke in the "Your own" panel is a commit. True only for a
+  /// host that collects the value and sends it ONCE (the arm sheet). Every
+  /// commit on the settings sheet is a configure frame, and the bridge's edit
+  /// path clears `lastJudgedContextHash` unconditionally — so a per-keystroke
+  /// commit there buys a real judge pass per character.
   final bool commitBriefOnEdit;
 
-  /// Fired on every tap of a lens chip, including the one already selected, and
-  /// on every edit of the brief. A host whose seed may not be what the far end
-  /// holds needs to know a control was ANSWERED, which is not the same question
-  /// as whether the value ended up different — see the arm sheet's touch flags.
+  /// Fired on every tap of a lens chip, including the one already selected —
+  /// picking "Your own" counts too, since it is exclusive with the presets the
+  /// same way they are exclusive with each other (§9). A host whose seed may
+  /// not be what the far end holds needs to know a control was ANSWERED, which
+  /// is not the same question as whether the value ended up different — see
+  /// the arm sheet's touch flags.
   final VoidCallback? onRoleTapped;
+
+  /// Fired on every edit of the "Your own" panel's text.
   final VoidCallback? onBriefEdited;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<HandlerLensControl> createState() =>
+      _HandlerLensControlState();
+}
+
+/// Local, never-on-wire id for the sixth chip. A user lens has no
+/// [HandlerLens] value and no wire role id (redesign spec §13 — an id on the
+/// wire is what keeps a PRESET's text bridge-authored) so this control needs a
+/// marker of its own to route a tap; [handlerLensFromWire] must never resolve
+/// it to a real lens.
+const _ownChipId = '__own__';
+
+class _HandlerLensControlState extends ConsumerState<HandlerLensControl> {
+  /// Whether the sixth chip is the one showing, tracked apart from
+  /// [HandlerSessionSettingsValue.lens] because a freshly-picked "Your own"
+  /// with nothing typed yet is, on the wire, indistinguishable from
+  /// [handlerLensDefaultLabel] — both are `roleId: null, brief: ""`. Only
+  /// unambiguous external evidence (a real role id, or a brief that actually
+  /// arrived) is allowed to move this without a tap; see [didUpdateWidget].
+  late bool _ownSelected;
+
+  /// The user's own text, held across a preset switch (redesign spec §6: the
+  /// draft survives locally and only an explicit clear discards it) — a commit
+  /// never hands this straight to [HandlerLensControl.onChanged]; it sends the
+  /// `"; "`-joined string instead (§8, [handlerJoinOwnLensLines]).
+  late final TextEditingController _ownController;
+
+  /// Bumped on every tap of the sixth chip, which is what moves the cursor into
+  /// the panel's field. A counter rather than an autofocus flag for two
+  /// reasons: the chip stays tappable once selected, and a second tap arrives
+  /// with the field already mounted, where nothing would fire again; and a
+  /// panel mounted by a STORED user lens (`_ownSelected` true from
+  /// [initState]) must not steal focus and raise the keyboard on a sheet the
+  /// user only opened to read.
+  int _ownFocusTaps = 0;
+
+  static bool _picksOwn(HandlerLensPick? pick) =>
+      pick != null && pick.roleId == null && (pick.brief?.isNotEmpty ?? false);
+
+  @override
+  void initState() {
+    super.initState();
+    final pick = widget.value.lens;
+    _ownSelected = _picksOwn(pick);
+    _ownController = TextEditingController(text: pick?.brief ?? '');
+  }
+
+  @override
+  void didUpdateWidget(HandlerLensControl old) {
+    super.didUpdateWidget(old);
+    final pick = widget.value.lens;
+    if (pick == old.value.lens) return;
+    if (pick != null && pick.roleId != null) {
+      // A real or unknown role id is unambiguous evidence the sixth chip is
+      // not what is running.
+      _ownSelected = false;
+    } else if (_picksOwn(pick)) {
+      _ownSelected = true;
+      // Compared against what this field would COMMIT, never against the
+      // previous external value. Under [HandlerLensControl.commitBriefOnEdit]
+      // the host echoes back the JOINED form of the user's own keystroke, which
+      // never equals the draft it came from once a second line exists — so
+      // comparing the two external values rewrites their line breaks to "; "
+      // under the cursor, one keystroke behind. Only a brief this field could
+      // not have produced — the bridge having kept something else — is allowed
+      // to land on the controller.
+      if (pick!.brief != handlerJoinOwnLensLines(_ownController.text)) {
+        _ownController.text = pick.brief!;
+      }
+    }
+    // Else: roleId null with brief empty/null is ambiguous between "Nothing
+    // extra" and "Your own" with an untyped draft — a local tap already
+    // resolved that transition, so an external echo of it must not undo it.
+  }
+
+  @override
+  void dispose() {
+    _ownController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final p = context.antgrid;
     final catalog = ref.watch(agentCatalogProvider);
     // The tool that will actually run, which is what every claim below is about.
     final effectiveJudge = handlerEffectiveJudge(
       ref,
-      terminalId,
-      value.judgeTool,
+      widget.terminalId,
+      widget.value.judgeTool,
     );
     final judgeCapable = effectiveJudge == null
         ? null
@@ -276,7 +366,7 @@ class HandlerLensControl extends ConsumerWidget {
     // control goes inert rather than take one.
     final advertised = ref.watch(handlerStateProvider).value?.lenses;
     final unreported = advertised == null;
-    final pick = value.lens;
+    final pick = widget.value.lens;
     // A newer machine's lens. It is a real pick and stays in force untouched;
     // no chip in this row can name it, so none of them may paint as chosen.
     final unknownId =
@@ -284,161 +374,312 @@ class HandlerLensControl extends ConsumerWidget {
 
     // Only the intersection of what this build knows and what this machine
     // named, so a newer app can never send an id the far end would refuse.
+    // "Your own" is unconditional: it is no wire role id, so nothing the bridge
+    // advertised gates it.
     final offered = <(String, String?)>[
-      (handlerLensDefaultLabel, null),
       for (final lens in HandlerLens.values)
         if (advertised?.contains(handlerLensToWire(lens)) ?? false)
           (handlerLensLabel(lens), handlerLensToWire(lens)),
+      (handlerLensOwnLabel, _ownChipId),
     ];
 
+    void selectPreset(String? id) {
+      widget.onRoleTapped?.call();
+      // The brief moves with the pick, so the host has to hear that control was
+      // answered too. A host that collects rather than diffs (the arm sheet)
+      // sends an untouched brief as null — "leave the stored one alone" — and
+      // the bridge would then run this preset ON TOP of a user lens whose panel
+      // this tap has just hidden, which is the one state §6 says cannot exist.
+      widget.onBriefEdited?.call();
+      setState(() => _ownSelected = false);
+      widget.onChanged((
+        judgeTool: widget.value.judgeTool,
+        judgeModel: widget.value.judgeModel,
+        // Every preset clears the brief: two stances cannot both run (§6), so
+        // the draft rides only in [_ownController] until "Your own" comes
+        // back.
+        lens: (roleId: id, brief: ''),
+      ));
+    }
+
+    void selectOwn() {
+      widget.onRoleTapped?.call();
+      setState(() {
+        _ownSelected = true;
+        _ownFocusTaps++;
+      });
+      widget.onChanged((
+        judgeTool: widget.value.judgeTool,
+        judgeModel: widget.value.judgeModel,
+        lens: (
+          roleId: null,
+          brief: handlerJoinOwnLensLines(_ownController.text),
+        ),
+      ));
+    }
+
     Widget chip(String label, String? id) {
-      final selected = !unreported && pick != null && pick.roleId == id;
-      return AbChip.toggle(
+      final isOwn = id == _ownChipId;
+      final selected =
+          !unreported &&
+          (isOwn
+              ? _ownSelected
+              : !_ownSelected && pick != null && pick.roleId == id);
+      return AbChip.choice(
         label: label,
-        size: AbChipSize.md,
         selected: selected,
         // The accent marks the one lens actually running. A parked chip keeps
         // the muted default with its fill: chosen, and not in effect.
         color: selected && !parked ? p.accent : null,
         enabled: !unreported,
-        onTap: () {
-          onRoleTapped?.call();
-          onChanged((
-            judgeTool: value.judgeTool,
-            judgeModel: value.judgeModel,
-            lens: (roleId: id, brief: pick?.brief),
-          ));
-        },
+        onTap: isOwn ? selectOwn : () => selectPreset(id),
       );
+    }
+
+    String? caption;
+    // Whether "Takes effect on the next pass." may attach to [caption] — the
+    // special-case captions below (unreported/parked/unset/unknown) never take
+    // it, the precedence the "outranks" test pins.
+    var nextPassEligible = false;
+    if (unreported) {
+      caption = handlerLensUnreportedBlurb;
+    } else if (parked) {
+      caption = handlerLensParkedBlurb;
+    } else if (pick == null) {
+      caption = handlerLensUnsetBlurb;
+    } else if (_ownSelected) {
+      nextPassEligible = true;
+      caption = null; // the panel sits directly below and says it (§7)
+    } else if (unknownId) {
+      caption = handlerLensUnknownBlurb;
+    } else {
+      nextPassEligible = true;
+      caption = pick.roleId == null
+          // Nothing on top of the floor, which the line above already states —
+          // and with no chip standing for it, no chip paints as chosen either.
+          ? null
+          : handlerLensBlurb(handlerLensFromWire(pick.roleId));
+    }
+    if (nextPassEligible && widget.appliesNextPass) {
+      caption = caption == null
+          ? 'Takes effect on the next pass.'
+          : '$caption Takes effect on the next pass.';
     }
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
-        const _Head(label: 'What it looks for'),
+        const _Head(label: 'What Handler weighs'),
+        const Padding(
+          padding: EdgeInsets.fromLTRB(
+            AbTokens.space16,
+            0,
+            AbTokens.space16,
+            AbTokens.space10,
+          ),
+          child: _FloorLine(),
+        ),
         Padding(
           padding: _gutter,
-          // Chips rather than a segmented control: the row is the default plus
-          // however many lenses this machine names, and "Intent and completion"
-          // fits no cell in a control built for two or three closed options.
+          // Chips rather than a segmented control: the row is five stances —
+          // the four presets and "Your own" — and none of
+          // them fits a control built for two or three closed options.
+          // [AbChip.choice] rather than [AbChip.toggle]: these labels are
+          // phrases the user reads to decide with, not flag names they already
+          // know, so they keep their casing and a size that can be read.
           child: Wrap(
             spacing: AbTokens.space6,
             runSpacing: AbTokens.space6,
             children: [for (final (label, id) in offered) chip(label, id)],
           ),
         ),
-        _Caption(
-          text: unreported
-              ? handlerLensUnreportedBlurb
-              : parked
-              ? handlerLensParkedBlurb
-              : pick == null
-              ? handlerLensUnsetBlurb
-              : unknownId
-              ? handlerLensUnknownBlurb
-              : appliesNextPass
-              ? '${handlerLensBlurb(handlerLensFromWire(pick.roleId))} Takes effect on the next pass.'
-              : handlerLensBlurb(handlerLensFromWire(pick.roleId)),
-        ),
+        if (caption != null) _Caption(text: caption),
         // This is the one class of surface where the warning is actionable;
         // everywhere else it appears it only diagnoses.
         if (parked) _Notice(text: handlerJudgeParkedNotice(judgeLabel)),
-        const _Head(label: 'Brief', sub: true),
-        _BriefField(
-          brief: pick?.brief,
-          enabled: !unreported,
-          commitOnEdit: commitBriefOnEdit,
-          onEdited: onBriefEdited,
-          onCommit: (text) => onChanged((
-            judgeTool: value.judgeTool,
-            judgeModel: value.judgeModel,
-            lens: (roleId: pick?.roleId, brief: text.isEmpty ? null : text),
-          )),
-        ),
+        if (_ownSelected)
+          _OwnLensPanel(
+            controller: _ownController,
+            focusTaps: _ownFocusTaps,
+            enabled: !unreported,
+            commitOnEdit: widget.commitBriefOnEdit,
+            onEdited: widget.onBriefEdited,
+            onCommit: (raw) => widget.onChanged((
+              judgeTool: widget.value.judgeTool,
+              judgeModel: widget.value.judgeModel,
+              lens: (roleId: null, brief: handlerJoinOwnLensLines(raw)),
+            )),
+          ),
       ],
     );
   }
 }
 
-/// The user's own note under the lens — whatever else they want looked for.
-///
-/// A single line on purpose: the bridge collapses a brief to one line before
-/// printing it, so a box that wrapped would promise the prompt a structure it
-/// discards. It also leaves Enter as the submit action, which is the commit
-/// this field has.
-class _BriefField extends StatefulWidget {
-  const _BriefField({
-    required this.brief,
+/// Joins a multi-line draft into the one line the bridge actually stores.
+/// `oneLine` (`bridge/src/handler/decision.ts`) collapses a bare newline to a
+/// SPACE, so two rules typed on two lines would otherwise arrive as one fused,
+/// grammatical, WRONG sentence (redesign spec §8). Joining with `"; "` here
+/// keeps each line's boundary alive through that collapse; blank lines are
+/// dropped so a stray Enter costs nothing.
+String handlerJoinOwnLensLines(String raw) => raw
+    .split('\n')
+    .map((line) => line.trim())
+    .where((line) => line.isNotEmpty)
+    .join('; ');
+
+/// The permanent line under the section head — every session is judged on
+/// this regardless of pick, so it is prose rather than another eyebrow:
+/// a second [AbSectionHeader] here would rank as a sibling section instead of
+/// a continuation of the one above it (redesign spec §7).
+class _FloorLine extends StatelessWidget {
+  const _FloorLine();
+
+  @override
+  Widget build(BuildContext context) => Text(
+    "Always: your goal, and whether an item's evidence closes it. "
+    'A lens adds one question:',
+    style: AbTokens.sansStyle(
+      fontSize: AbTokens.fontXs,
+      color: context.antgrid.textSecondary,
+    ),
+  );
+}
+
+/// The user-authored stance: guidance, then the free-text field. Shown only
+/// while "Your own" is the selected chip — every other chip hides this and
+/// leaves [controller]'s draft untouched (redesign spec §6).
+class _OwnLensPanel extends StatefulWidget {
+  const _OwnLensPanel({
+    required this.controller,
+    required this.focusTaps,
     required this.enabled,
     required this.commitOnEdit,
     required this.onCommit,
     this.onEdited,
   });
 
-  final String? brief;
+  final TextEditingController controller;
+
+  /// How many times the "Your own" chip has been tapped. Every increase —
+  /// including the one that mounted this panel — puts the cursor in the field;
+  /// see [_HandlerLensControlState._ownFocusTaps] for why it is a count.
+  final int focusTaps;
+
   final bool enabled;
 
   /// See [HandlerLensControl.commitBriefOnEdit].
   final bool commitOnEdit;
 
-  /// The committed text: trimmed on submit, raw while typing. Trimming a
-  /// keystroke commit would rewrite the controller under the cursor and eat the
-  /// space the user is still typing after.
+  /// The raw, unjoined text as the field holds it — the caller applies the
+  /// `"; "` join (redesign spec §8, [handlerJoinOwnLensLines]).
   final ValueChanged<String> onCommit;
 
   /// See [HandlerLensControl.onBriefEdited].
   final VoidCallback? onEdited;
 
   @override
-  State<_BriefField> createState() => _BriefFieldState();
+  State<_OwnLensPanel> createState() => _OwnLensPanelState();
 }
 
-class _BriefFieldState extends State<_BriefField> {
-  late final TextEditingController _controller = TextEditingController(
-    text: widget.brief ?? '',
-  );
+class _OwnLensPanelState extends State<_OwnLensPanel> {
+  // Owned rather than passed in: focus is this panel's own ephemera, not part
+  // of the draft that survives a preset switch — unlike [widget.controller].
+  late final FocusNode _focusNode = FocusNode()..addListener(_onFocusChanged);
 
   @override
-  void didUpdateWidget(_BriefField old) {
-    super.didUpdateWidget(old);
-    // Only when the value moved underneath us — a status frame correcting what
-    // the bridge actually kept — and never on every rebuild, which would fight
-    // the user's cursor as they type.
-    if (widget.brief != old.brief && (widget.brief ?? '') != _controller.text) {
-      _controller.text = widget.brief ?? '';
-    }
+  void initState() {
+    super.initState();
+    // The tap that mounted this panel. Requesting on a node no [Focus] has
+    // adopted yet is the supported order — [FocusNode] holds the request until
+    // it is reparented, which is exactly what happens when this builds.
+    if (widget.focusTaps > 0) _focusNode.requestFocus();
   }
 
   @override
+  void didUpdateWidget(_OwnLensPanel old) {
+    super.didUpdateWidget(old);
+    // A second tap on the chip already showing: the panel never unmounted, so
+    // this is the only thing left that can answer it.
+    if (widget.focusTaps != old.focusTaps) _focusNode.requestFocus();
+  }
+
+  void _onFocusChanged() {
+    // Losing focus is this multi-line field's "done": Enter has to insert a
+    // line rather than submit, since the whole point is one rule per line.
+    if (!_focusNode.hasFocus) _commit();
+  }
+
+  void _commit() => widget.onCommit(widget.controller.text);
+
+  @override
   void dispose() {
-    _controller.dispose();
+    _focusNode
+      ..removeListener(_onFocusChanged)
+      ..dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) => Padding(
-    padding: _gutter,
-    child: AbTextField(
-      controller: _controller,
-      hintText: 'Anything else to look for or ask about',
-      enabled: widget.enabled,
-      showClearButton: true,
-      onClear: () {
-        widget.onEdited?.call();
-        widget.onCommit('');
-      },
-      // The bridge clips a longer brief rather than refusing it, so this is a
-      // courtesy bound and not a gate: it shows the user where the prompt stops.
-      inputFormatters: [LengthLimitingTextInputFormatter(handlerMaxBriefChars)],
-      onChanged: (text) {
-        widget.onEdited?.call();
-        if (widget.commitOnEdit) widget.onCommit(text);
-      },
-      onSubmitted: (text) {
-        widget.onEdited?.call();
-        widget.onCommit(text.trim());
-      },
+    padding: const EdgeInsets.fromLTRB(
+      AbTokens.space16,
+      AbTokens.space10,
+      AbTokens.space16,
+      0,
+    ),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(bottom: AbTokens.space6),
+          child: Text(
+            // Carries the one-rule-per-line format, which the hint used to
+            // teach by being three lines long. A hint cannot hold a format
+            // rule: it is gone on the first keystroke, which is the moment the
+            // rule starts to matter.
+            'One rule per line. They can only make Handler stricter, never '
+            'looser.',
+            style: AbTokens.sansStyle(
+              fontSize: AbTokens.fontXs,
+              color: context.antgrid.textSecondary,
+            ),
+          ),
+        ),
+        AbTextField(
+          key: const ValueKey('handlerOwnLensField'),
+          controller: widget.controller,
+          focusNode: _focusNode,
+          enabled: widget.enabled,
+          minLines: 3,
+          maxLines: 6,
+          showClearButton: true,
+          // One line, not three: a hint as tall as [minLines] fills the box,
+          // so an empty field reads as one already written in. The register is
+          // what one example still earns its place for — a rule is a short
+          // lowercase condition, not a paragraph.
+          hintText: 'not done until the tests pass',
+          // The bridge clips a longer brief rather than refusing it, so this
+          // is a courtesy bound and not a gate: it shows the user where the
+          // prompt stops.
+          inputFormatters: [
+            LengthLimitingTextInputFormatter(handlerMaxBriefChars),
+          ],
+          onClear: () {
+            widget.onEdited?.call();
+            _commit();
+          },
+          onChanged: (_) {
+            widget.onEdited?.call();
+            if (widget.commitOnEdit) _commit();
+          },
+          onSubmitted: (_) {
+            widget.onEdited?.call();
+            _commit();
+          },
+        ),
+      ],
     ),
   );
 }

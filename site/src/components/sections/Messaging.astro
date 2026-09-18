@@ -1,0 +1,49 @@
+---
+import { Icon } from "astro-icon/components";
+import UseCase from "../ui/UseCase.astro";
+
+// Claims verified against antgrid@583e988: bridge/src/mcp/server.ts (tool
+// descriptions: same git repository, this machine or a connected one,
+// messages and replies; remote access is required on the target),
+// docs/architecture.md (the desktop app is the only cross-machine carrier),
+// packages/antgrid-agents/src/agents/registry.ts (only claude-code and codex
+// carry an MCP module). "Session bus" is the code's name; it stays out of copy.
+//
+// The exchange below is illustrative, not a captured run.
+const exchange = [
+  { from: "auth-tokens", agent: "Claude Code", machine: "laptop", kind: "post", body: "The refresh endpoint now returns expiresAt. Update the test expectations." },
+  { from: "checkout-tests", agent: "Codex", machine: "desktop", kind: "reply", body: "Is expiresAt a Unix timestamp or an ISO string?" },
+  { from: "auth-tokens", agent: "Claude Code", machine: "laptop", kind: "reply", body: "ISO 8601, in UTC." },
+];
+---
+{/* Closes the chapter Reach opened, so it carries the chapter's bottom
+    padding as well as its own rule. */}
+<section id="messaging" class="mx-auto max-w-shell px-6 pt-14 pb-16 md:pt-16 md:pb-24">
+  <div class="grid gap-x-16 gap-y-10 border-t border-edge pt-14 md:grid-cols-2 md:pt-16">
+    <div>
+      <h2 class="mb-6 font-display text-title font-bold text-ink">One agent's finding. Another agent's next step.</h2>
+      <p class="mb-6 max-w-xl text-lede text-muted">
+        Your Claude Code and Codex sessions can share findings and ask each other questions while working on the same repository.
+      </p>
+      <UseCase class="max-w-xl">One agent changes an API. It tells the agent writing the tests what changed, without you copying messages between terminals.</UseCase>
+    </div>
+
+    <div>
+      <p class="mb-3 text-note text-muted2">An exchange, illustrated</p>
+      <ul class="ledger">
+        {exchange.map((m) => (
+          <li class="py-3.5">
+            <div class="mb-1 flex flex-wrap items-center gap-x-3 gap-y-1">
+              <Icon name={m.kind === "post" ? "tabler:mail" : "tabler:corner-down-left"} class="shrink-0 text-muted2" width="13" height="13" />
+              <span class="font-mono text-row text-ink2">{m.from}</span>
+              <span class="text-meta text-muted2">{m.agent}</span>
+              <span class="ml-auto text-meta text-muted2">{m.machine}</span>
+            </div>
+            <p class="text-note leading-relaxed text-muted">{m.body}</p>
+          </li>
+        ))}
+      </ul>
+      <p class="mt-4 text-meta leading-relaxed text-muted2">Across machines, keep the sending desktop app open and remote access enabled on the receiving machine.</p>
+    </div>
+  </div>
+</section>

@@ -264,15 +264,15 @@ describe("the session-bus tools", () => {
     expect(text).toContain("2 machines in your account are not connected to this desktop and were not asked");
   });
 
-  test("a machine-scope reach says which of the three reasons it was", async () => {
+  test("a machine-scope reach says which of the two reasons it was", async () => {
     stub(() => Response.json({
       sessions: [],
       truncated: 0,
       machineId: null,
-      reach: { scope: "machine", why: "remote-access-off" },
+      reach: { scope: "machine", why: "no-machine-id" },
     }));
     const text = (await callSessionBusTool("antgrid_list_sessions", {})).content[0]!.text;
-    expect(text).toContain("Reach: remote access is off on this machine");
+    expect(text).toContain("Reach: this machine has no relay identity yet");
     expect(text).not.toContain("desktop app");
   });
 

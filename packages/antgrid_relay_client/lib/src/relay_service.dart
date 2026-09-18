@@ -44,8 +44,8 @@ typedef RelayLogger =
 /// Frame-level capture hook, for debugging relay connection and delivery.
 ///
 /// Deliberately UNTYPED. The capture's event schema, its buffer and its file
-/// live in the app (`app/lib/util/netwatch.dart`), which is ELv2; this package
-/// is Apache-2.0 and the licence boundary is one-way, so nothing but the hook
+/// live in the app (`app/lib/util/netwatch.dart`); this package and the app
+/// are MPL-2.0, but the transport stays independent, so nothing but the hook
 /// itself belongs here. Two shapes, by the `op` key: `'frame'` records a frame
 /// (`dir`, `kind`, `channel`, `bytes`, `frameId`, `reason`, `detail`), and
 /// `'annotate'` fills in the `msgType`/`streamId` of an already-recorded

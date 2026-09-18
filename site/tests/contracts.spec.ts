@@ -101,6 +101,17 @@ test.beforeEach(async ({ page }) => {
   );
 });
 
+test("footer exposes the source revision used for this site build", async ({
+  page,
+}) => {
+  await page.goto("/");
+  const revision = process.env.PUBLIC_SOURCE_COMMIT?.trim() || "HEAD";
+  await expect(page.getByRole("link", { name: "Exact source" })).toHaveAttribute(
+    "href",
+    `https://github.com/antgrid-ai/antgrid/tree/${revision}`,
+  );
+});
+
 // The band routes through the download page like the hero, so what it must
 // guarantee is that every build is still REACHABLE from it and every route names
 // a platform that page has a URL for. A typo'd id renders and resolves and

@@ -832,14 +832,25 @@ class TerminalHistoryViewState extends State<TerminalHistoryView> {
             children: [
               Positioned.fill(child: _buildBody(context)),
               if (model.rows.isNotEmpty &&
-                  (model.loading || !model.recording || model.atOldest))
+                  (model.loading ||
+                      model.gapped ||
+                      !model.recording ||
+                      model.atOldest))
                 Positioned(
                   top: AbTokens.space8,
                   right: AbTokens.space24,
                   child: IgnorePointer(
                     child: Text(
+                      // A gap outranks the three below it because they all
+                      // describe an EDGE of the archive -- where it starts,
+                      // whether it is still growing -- and a reader can see
+                      // those for itself in the rows it holds. A hole in the
+                      // middle is the one thing it cannot: the ids run
+                      // straight through it.
                       model.loading
                           ? 'Loading...'
+                          : model.gapped
+                          ? 'Output was dropped; this scrollback has a gap'
                           : !model.recording
                           ? 'History recording stopped'
                           : (model.boundary!.firstRowId > 0

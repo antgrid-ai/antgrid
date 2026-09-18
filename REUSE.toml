@@ -1,0 +1,46 @@
+version = 1
+SPDX-PackageName = "Antgrid"
+SPDX-PackageSupplier = "Radha AI Products"
+SPDX-PackageDownloadLocation = "https://github.com/antgrid-ai/antgrid"
+
+[[annotations]]
+path = ["**"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 Radha AI Products"
+SPDX-License-Identifier = "MPL-2.0"
+
+[[annotations]]
+path = ["relay/**", "web/**"]
+precedence = "override"
+SPDX-FileCopyrightText = "2026 Radha AI Products"
+SPDX-License-Identifier = "LicenseRef-Elastic-2.0"
+
+[[annotations]]
+path = ["app/assets/icon/**", "app/assets/logo/**", "app/android/app/src/main/res/drawable*/android12splash.png", "app/android/app/src/main/res/drawable*/background.png", "app/android/app/src/main/res/drawable*/ic_launcher_foreground.png", "app/android/app/src/main/res/drawable*/launch_background.xml", "app/android/app/src/main/res/drawable*/splash.png", "app/android/app/src/main/res/mipmap-*/ic_launcher.png", "app/android/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml", "app/ios/Runner/Assets.xcassets/AppIcon.appiconset/**", "app/ios/Runner/Assets.xcassets/LaunchBackground.imageset/**", "app/ios/Runner/Assets.xcassets/LaunchImage.imageset/**", "app/linux/packaging/antgrid.png", "app/macos/Runner/Assets.xcassets/AppIcon.appiconset/**", "app/web/favicon.png", "app/web/icons/**", "app/windows/runner/resources/app_icon.ico", "site/public/favicon.ico", "site/public/logo/*.ico", "site/public/logo/*.png", "site/public/logo/*.svg", "web/public/logo/*.ico", "web/public/logo/*.png", "web/public/logo/*.svg", "web/public/og/antgrid-card.png"]
+precedence = "override"
+SPDX-FileCopyrightText = "2026 Radha AI Products"
+SPDX-License-Identifier = "LicenseRef-Antgrid-Brand"
+
+[[annotations]]
+path = ["app/assets/fonts/**"]
+precedence = "override"
+SPDX-FileCopyrightText = "2020 The JetBrains Mono Project Authors"
+SPDX-License-Identifier = "OFL-1.1"
+
+[[annotations]]
+path = ["app/.prebuilt/**"]
+precedence = "override"
+SPDX-FileCopyrightText = "Ghostty contributors"
+SPDX-License-Identifier = "MIT"
+
+[[annotations]]
+path = ["app/android/gradle/wrapper/**", "app/android/gradlew", "app/android/gradlew.bat"]
+precedence = "override"
+SPDX-FileCopyrightText = "Gradle authors"
+SPDX-License-Identifier = "Apache-2.0"
+
+[[annotations]]
+path = ["site/src/icons/**"]
+precedence = "override"
+SPDX-FileCopyrightText = "Respective trademark and artwork owners"
+SPDX-License-Identifier = "LicenseRef-Third-Party-Trademark"

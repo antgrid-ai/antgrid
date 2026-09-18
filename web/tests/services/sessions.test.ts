@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 import { describe, test, expect } from "bun:test";
 import { listUserSessions, runningSessionCount } from "../../src/services/sessions.js";
 import type { ConnectionSummary } from "../../src/relay/push.js";

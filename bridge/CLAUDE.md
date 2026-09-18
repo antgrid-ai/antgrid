@@ -8,7 +8,7 @@ What may be written in any `CLAUDE.md`, this one included, is governed by
 
 ## Agent adapters
 
-Agent definitions and runtime live in the ELv2 workspace package
+Agent definitions and runtime live in the MPL-2.0 workspace package
 `packages/antgrid-agents`. Its `src/agents/registry.ts` is the built-in registration
 entry point; `src/contracts.ts` and `package.json` describe the public interface.
 Bridge imports public package exports only. Provider invocation, storage knowledge,
@@ -100,9 +100,8 @@ invariant, which is why the reasoning lives beside the code rather than here.
 
 ## The session bus (`src/session-bus/`)
 
-The agent-to-agent plane: one session on one machine reaching another.
-`docs/session-messaging.md` is the spec; this is the set of invariants a future
-edit breaks silently.
+The agent-to-agent plane: one session on one machine reaching another. This is
+the set of invariants a future edit breaks silently.
 
 - **Outbound on the machine that opened the exchange goes to the loopback owner
   and nowhere else.** `ProjectCore.sendToOwner` is the only path, and
@@ -176,7 +175,7 @@ edit breaks silently.
   already trusted with every session on it. A session id is
   `crypto.randomUUID()` (`session-manager.ts`), so naming one is guessing a
   UUID, never enumerating a small keyspace. The `checkoutRouting` gate
-  (`peerCanRouteCheckouts`, same call site) does NOT follow the address: it
+  (`checkoutRoutingRefusal`, same call site) does NOT follow the address: it
   reads the ARRIVING core's own `hasIsolatedSessions()`, so a peer admitted to a
   project holding no isolated session passes it and may then name a session in
   a project that does — the one refusal the move genuinely widened, left to

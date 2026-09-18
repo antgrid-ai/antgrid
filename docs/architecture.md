@@ -190,7 +190,7 @@ Terminal qualification commands live in `bridge/package.json` and `evals/package
 
 ## Shared packages (`packages/`)
 
-- **`antgrid-agents`** - ELv2 Bun workspace for agent contracts, built-in adapters,
+- **`antgrid-agents`** - MPL-2.0 Bun workspace for agent contracts, built-in adapters,
   shared chat runtime, and integration assets. Bridge consumes public exports;
   this package never imports bridge. Terminal preparation accepts conversation
   intent and returns a complete invocation, while bridge retains checkout and

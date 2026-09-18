@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 import type { Child } from "hono/jsx";
 import { asset } from "./asset.js";
 import { BETA } from "../billing/plans.js";
