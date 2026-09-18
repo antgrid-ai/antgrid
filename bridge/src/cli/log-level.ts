@@ -6,13 +6,14 @@
 // the only thing that disarms on its own, which is why the host refuses an arm
 // without one.
 
+import { LOG_LEVELS } from "../logger";
 import { readHostFile, hostFilePath } from "../host-discovery";
 import { postControl } from "./watch-transport";
 
-/** Levels the host's own `log:level` schema admits. Kept as a literal list so a
- *  typo answers here, with the vocabulary printed, instead of as a BAD_REQUEST
- *  from a schema the caller cannot read. */
-const LEVELS = ["trace", "debug", "info", "warn", "error", "fatal"] as const;
+/** The same vocabulary the host's `log:level` schema is built from, so a typo
+ *  answers here with the list printed instead of as a BAD_REQUEST from a schema
+ *  the caller cannot read. */
+const LEVELS = LOG_LEVELS;
 
 /** Default window. Long enough to reproduce a delivery by hand on two machines,
  *  short enough that an operator who walks away leaves nothing recording. */

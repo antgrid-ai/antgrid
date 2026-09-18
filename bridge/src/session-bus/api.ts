@@ -29,7 +29,7 @@ import {
   MAX_SUMMARY_CHARS,
   MAX_UNEXPECTED_CHARS,
 } from "./constants";
-import { addressesSameSession, namesMachine } from "./address";
+import { addressesSameSession, isLeadContext, namesMachine } from "./address";
 import type { DirectoryReach, SessionDirectory, SessionDirectoryRow } from "./directory";
 import {
   addArtifact,
@@ -357,6 +357,17 @@ function notMember(): SessionBusRefusal {
   return refuse("NOT_MEMBER", "this terminal names no session on this bridge");
 }
 
+/** What a project with no repo key can be told, for the two verbs that reach
+ *  that fact by different routes — `sendMessage` by asking the directory,
+ *  `listSessions` by being refused one. The distinction is the deliverable: a
+ *  project mid-probe is a race that clears itself and must not be told it has
+ *  no remote, so the two answers may not drift apart. */
+function refuseUnkeyed(state: "no-remote" | "not-probed"): SessionBusRefusal {
+  return state === "no-remote"
+    ? refuse("NOT_ADDRESSABLE", "this project has no git remote, so no other session can name it and it can name none")
+    : refuse("AGENT_NOT_READY", "this project's git remote has not been read yet; it becomes addressable on its own");
+}
+
 function handleOf(rec: ArtifactRecord): ArtifactHandleView {
   return {
     artifactId: rec.artifactId,
@@ -568,14 +579,10 @@ export function createSessionBusApi(deps: SessionBusApiDeps): SessionBusApi {
     };
 
     const contextId = contextOf(m, thread);
-    // Which way this frame will actually leave, decided here the same way
-    // `SessionBusCoordinator.roleForContext` decides it on the other side of
-    // the loopback API: a session whose own id is the context opened the
-    // exchange and reaches out through its own desktop app; any other context
-    // is one this session was contacted on, and its way back is the carrier
-    // that brought it in. Duplicated by hand because the two live in different
-    // modules and neither can see the other's copy — keep them in lockstep.
-    const peerRole = contextId !== m.sessionId;
+    // Which way this frame will actually leave, needed HERE because the carrier
+    // rung below is about the loopback socket a lead frame uses and a peer frame
+    // does not — so it has to be known before the coordinator is called.
+    const peerRole = !isLeadContext(m.sessionId, contextId);
     const offMachine = !namesMachine(target.machineId, selfMachineId);
 
     // AHEAD of the row read, because it is a fact about THIS machine that needs
@@ -634,15 +641,9 @@ export function createSessionBusApi(deps: SessionBusApiDeps): SessionBusApi {
       // first line when this project has no repo key, so without this rung the
       // refusal names the address for a fact about the project doing the
       // asking, and an agent goes hunting for a peer that was never the
-      // problem. The same two answers `listSessions` gives, for the same fact
-      // read the same way — a project mid-probe is a race that clears itself
-      // and must not be told it has no remote.
+      // problem.
       const keyState = deps.directory.repoKeyState(deps.projectId);
-      if (keyState !== "keyed") {
-        return keyState === "no-remote"
-          ? refuse("NOT_ADDRESSABLE", "this project has no git remote, so no other session can name it and it can name none")
-          : refuse("AGENT_NOT_READY", "this project's git remote has not been read yet; it becomes addressable on its own");
-      }
+      if (keyState !== "keyed") return refuseUnkeyed(keyState);
       // The local half of `rowFor` is the live session index, not a mirror, so
       // a local miss is a fact rather than a gap: nothing is carrying that
       // address here and nothing is going to start.
@@ -871,11 +872,7 @@ export function createSessionBusApi(deps: SessionBusApiDeps): SessionBusApi {
         return refuse("AGENT_NOT_READY", "this bridge has no session directory, so it cannot say who else is reachable");
       }
       const answer = await deps.directory.list({ projectId: deps.projectId, sessionId: m.sessionId });
-      if (!answer.ok) {
-        return answer.reason === "no-remote"
-          ? refuse("NOT_ADDRESSABLE", "this project has no git remote, so no other session can name it and it can name none")
-          : refuse("AGENT_NOT_READY", "this project's git remote has not been read yet; it becomes addressable on its own");
-      }
+      if (!answer.ok) return refuseUnkeyed(answer.reason);
       // With the switch off, every off-machine row is one `send` has just been
       // taught to refuse. Listing them anyway is the same "renders as sendable,
       // refuses on use" failure the `no-machine-id` rung exists to prevent, one

@@ -524,6 +524,10 @@ export class HostServer {
       };
     },
     addressable: () => this.controlPlaneRegistrationId !== null,
+    // Read live, never captured, for the same reason every other read of this
+    // policy is: `mobile-access:set` has to take effect without restarting
+    // anything.
+    offMachineSendAllowed: () => this.remoteAccessPolicy.isEnabled(),
     // §6.1: a target on THIS host is handed straight into the SAME fold the
     // remote path folds through (`handleInbound`) — no relay, no carrier, no
     // route table — so wrapping, queueing and turn-boundary injection are

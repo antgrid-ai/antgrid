@@ -112,7 +112,10 @@ export function busDeliverable(state: WorkStatusState, sessionId: string): boole
   if (turnOpenFor(state.activeTurns, sessionId)) return false;
   if ((state.pendingRequests.get(sessionId)?.size ?? 0) > 0) return false;
   const own = state.notifications.get(sessionId);
-  return own !== "permission_request" && own !== "awaiting_input" && own !== "question";
+  // Read off `isCallToAction` rather than re-listed, minus the `error` the doc
+  // above carves out: a seventh blocking notification would otherwise be added
+  // there and silently miss here, parking a queue with no edge to release it.
+  return own === undefined || !isCallToAction(own) || own === "error";
 }
 
 /** Sessions that were blocked for a bus delivery and are not any more — the edge

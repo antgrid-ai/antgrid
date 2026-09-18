@@ -1,5 +1,12 @@
 import pino, { type Logger, type Level, type DestinationStream, type LogFn } from "pino";
 
+/** The level vocabulary, spelled once. The startup guard, the `log:level` wire
+ *  schema and the CLI's own guard all have to admit the same set, and only the
+ *  wire one fails loudly — a set that drifts anywhere else refuses a level the
+ *  host would have accepted, or accepts one it will not. Ordered as pino orders
+ *  them, so it also reads as the ladder. */
+export const LOG_LEVELS = ["trace", "debug", "info", "warn", "error", "fatal"] as const;
+
 /**
  * Build a pino logger. Default destination is stdout (fd 1); tests inject a
  * capture stream. `base: { pid }` drops pino's default `hostname` binding so

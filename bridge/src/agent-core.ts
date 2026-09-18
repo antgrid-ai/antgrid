@@ -42,6 +42,7 @@ import { augmentAgentLaunch } from "./agent-runtime";
 import { AGENT_REACH_DEFAULT } from "./agent-reach-policy";
 import { createSessionBusApi, type SessionBusApi } from "./session-bus/api";
 import type { SessionDirectory } from "./session-bus/directory";
+import { isLeadContext } from "./session-bus/address";
 import { removeSessionBusSession } from "./session-bus/store-fs";
 import { SessionBusCoordinator, type SessionBusEvent, type SessionBusSelf } from "./session-bus/coordinator";
 import { lineForEvent } from "./session-bus/deliver-event";
@@ -1084,16 +1085,16 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // otherwise: an unwired host provider reads as disabled.
   function remoteFrameAllowed(source: InboundSource): boolean {
     if (source === "loopback") return true;
-    if (!relayEverAttached) return true;
-    return remoteAccessEnabled();
+    return offMachineSendAllowed();
   }
 
   /** {@link remoteFrameAllowed}'s outbound twin: whether a session here may
-   *  send to another MACHINE. Same switch, same `relayEverAttached` carve-out,
-   *  deliberately no loopback one — the caller is always loopback (an agent
-   *  through the MCP surface), so the source says nothing about whether the
-   *  frame crosses a machine boundary; the destination does, and `api.ts` has
-   *  already decided that before it asks. */
+   *  send to another MACHINE — and, with the loopback exemption stripped off,
+   *  the switch itself, which is why the inbound gate above is written in terms
+   *  of it. Deliberately no loopback carve-out of its own: the caller is always
+   *  loopback (an agent through the MCP surface), so the source says nothing
+   *  about whether the frame crosses a machine boundary; the destination does,
+   *  and `api.ts` has already decided that before it asks. */
   function offMachineSendAllowed(): boolean {
     if (!relayEverAttached) return true;
     return remoteAccessEnabled();
@@ -1109,8 +1110,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
    *  Only a peer-INITIATED context is refused. A frame on a context this
    *  machine leads is the answer to something an agent here asked for, and
    *  refusing that would not be "nobody may interrupt me", it would be "my own
-   *  agents may not finish a sentence". `contextId === to.sessionId` is exactly
-   *  the lead test the coordinator's own `roleForContext` applies. */
+   *  agents may not finish a sentence". */
   function peerBusReachAllowed(msg: AbMessage, source: InboundSource): boolean {
     switch (msg.type) {
       case "session-bus:post":
@@ -1122,7 +1122,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       default:
         return true;
     }
-    if (msg.contextId === msg.to.sessionId) return true;
+    if (isLeadContext(msg.to.sessionId, msg.contextId)) return true;
     if (source === "loopback") return true;
     if (!relayEverAttached) return true;
     return agentReachEnabled();
@@ -1387,6 +1387,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     projectIdFor: () => project.id,
     self: sessionBusSelf,
     addressable: () => (opts.machineId?.() ?? null) !== null,
+    offMachineSendAllowed,
     // A session that opened a context hands every frame to its own desktop app;
     // one that was contacted answers on the session that carried the context in.
     // Neither path is the MessageBus. The route table itself lives on the

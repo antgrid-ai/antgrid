@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { LOG_LEVELS } from "./logger";
 import type { AgentDescriptor, SessionEntry } from "./protocol";
 import type { BranchRemoteStatus, StashEntry } from "./git-branches";
 import { MAX_CAPABILITY_CARD_PROJECTS, type OsCard, type RepoCard } from "./capability-card";
@@ -167,7 +168,7 @@ export const ControlRequestSchema = z.discriminatedUnion("type", [
   z.object({
     id: z.string().min(1),
     type: z.literal("log:level"),
-    level: z.enum(["trace", "debug", "info", "warn", "error", "fatal"]),
+    level: z.enum(LOG_LEVELS),
     // Optional and zero-admitting for netwatch:local's reason — a disarm has no
     // window to state. Positivity is the arming path's concern, enforced there.
     ttlMs: z.number().int().nonnegative().optional(),

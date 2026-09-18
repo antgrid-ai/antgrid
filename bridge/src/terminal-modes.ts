@@ -110,14 +110,18 @@ export class TerminalModeTracker {
 
     const scanned = this.carry + data;
     this.carry = "";
-    const changed = new Set<number>();
+    // Allocated on the first actual move, not per chunk: a live TUI paints
+    // escapes in nearly every frame and moves a tracked mode in almost none of
+    // them, so the fast path above covers the rare case and this covers the
+    // common one.
+    let changed: Set<number> | null = null;
 
     let consumed = 0;
     DECSET.lastIndex = 0;
     for (let m = DECSET.exec(scanned); m !== null; m = DECSET.exec(scanned)) {
       consumed = DECSET.lastIndex;
       if (m[2] === undefined) {
-        this.applyReset(m[0] === "\x1bc", changed);
+        changed = this.applyReset(m[0] === "\x1bc", changed);
         continue;
       }
       const set = m[2] === "h";
@@ -125,7 +129,7 @@ export class TerminalModeTracker {
         if (param === "") continue;
         const mode = Number(param);
         if (!TRACKED_MODES.has(mode)) continue;
-        if (this.isSet(mode) !== set) changed.add(mode);
+        if (this.isSet(mode) !== set) (changed ??= new Set<number>()).add(mode);
         // Deleted before re-inserting so the map's iteration order is
         // LAST-WRITE order, which is what the supplement replays. Several of
         // these modes share one slot in a VT engine — `?1000`/`?1002`/`?1003`
@@ -144,7 +148,7 @@ export class TerminalModeTracker {
     if (esc !== -1 && INCOMPLETE_DECSET.test(tail.slice(esc))) {
       this.carry = tail.slice(esc);
     }
-    return changed;
+    return changed ?? NO_MODES;
   }
 
   /**
@@ -156,13 +160,14 @@ export class TerminalModeTracker {
    * The supplement lands after the body, so the stale answer is the one that
    * wins.
    */
-  private applyReset(hard: boolean, changed: Set<number>): void {
+  private applyReset(hard: boolean, changed: Set<number> | null): Set<number> | null {
     for (const [mode, value] of RESET_STATE) {
       if (!hard && SOFT_RESET_PRESERVES.has(mode)) continue;
-      if (this.isSet(mode) !== value) changed.add(mode);
+      if (this.isSet(mode) !== value) (changed ??= new Set<number>()).add(mode);
       this.latched.delete(mode);
       this.latched.set(mode, value);
     }
+    return changed;
   }
 
   /**

@@ -2,7 +2,7 @@ import "./agent-host";
 import { Command } from "commander";
 import { join } from "node:path";
 import type { Level } from "pino";
-import { logger, setLogLevel } from "./logger";
+import { logger, setLogLevel, LOG_LEVELS } from "./logger";
 import { consoleBootstrapIO, writeConfigYaml, buildConfigFromBootstrap } from "./bootstrap";
 import { startPerfLog } from "./perf-log";
 import { readBootstrapPayload } from "./auth/credentials";
@@ -17,7 +17,7 @@ import { initCrashReporting, captureBridgeError, flushCrashReports } from "./cra
 // Component-tagged child for this module's own lifecycle logs.
 const log = logger.child({ component: "bridge" });
 
-const VALID_LEVELS = new Set<string>(["trace", "debug", "info", "warn", "error", "fatal"]);
+const VALID_LEVELS = new Set<string>(LOG_LEVELS);
 
 /** Ceiling on the whole teardown, from the first signal to `process.exit`.
  *  Sits above everything `HostServer.shutdown` budgets for itself — the 5s

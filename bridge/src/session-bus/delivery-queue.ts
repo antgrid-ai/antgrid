@@ -277,7 +277,7 @@ export class SessionBusDeliveryQueue {
     if (line.sentAt !== undefined) {
       const waitedMs = this.now() - line.sentAt;
       if (waitedMs < CONFIRM_TIMEOUT_MS) {
-        log.debug({ ...key, sessionId, waitedMs }, "bus drain: skipped, the last submit has not opened its turn yet");
+        log.debug({ ...key, id: line.id, sessionId, waitedMs }, "bus drain: skipped, the last submit has not opened its turn yet");
         return;
       }
       if ((line.attempts ?? 0) >= MAX_SUBMIT_ATTEMPTS) {
@@ -294,7 +294,7 @@ export class SessionBusDeliveryQueue {
       }
     }
     if (!this.deps.canDeliver(sessionId)) {
-      log.debug({ ...key, sessionId, heldMs: this.now() - line.queuedAt }, "bus drain: skipped, session not at a boundary");
+      log.debug({ ...key, id: line.id, sessionId, heldMs: this.now() - line.queuedAt }, "bus drain: skipped, session not at a boundary");
       return;
     }
     this.draining = true;

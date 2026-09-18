@@ -25,7 +25,7 @@ import {
   type SessionMemberKey,
   type SessionMemberRef,
 } from "../protocol";
-import { addressesSameSession, namesMachine } from "./address";
+import { addressesSameSession, isLeadContext, namesMachine } from "./address";
 import { listSessionBusSessions } from "./store-fs";
 import { artifactById, loadArtifacts, readArtifactContent, type ArtifactState } from "./artifact-store";
 import {
@@ -174,6 +174,19 @@ export interface CoordinatorDeps {
    *  caller until the host wires one, and those keep the ordinary send path for
    *  a same-machine target. */
   deliverLocal?: (frame: AbMessage, to: SessionMemberKey) => boolean;
+  /** Whether this machine may exchange frames with ANOTHER machine at all: its
+   *  remote-access switch, carve-outs and all.
+   *
+   *  Read in {@link SessionBusCoordinator.dispatch} rather than at the verbs,
+   *  because the verbs are not the only way out. A frame held while no carrier
+   *  was attached leaves through `flushHeld`, a slice request through `fetch`
+   *  and its answer through `fetch:result`, none of which pass the send path—s
+   *  own refusal. Gating the one chokepoint they share is what makes "the
+   *  switch governs both directions" true of the machine rather than of one
+   *  verb. Absent means allowed, so a bare coordinator answers to no switch.
+   *
+   *  A same-machine frame never reaches it. */
+  offMachineSendAllowed?: () => boolean;
   /** The per-pair budget (§7.4), read before a send and charged by every
    *  message this end sends OR receives — see `pair-budget.ts`'s header for why
    *  both halves have to land on this end's mirror.
@@ -805,6 +818,25 @@ export class SessionBusCoordinator {
     if (this.deps.deliverLocal && namesMachine(ctx.to.machineId, frame.from.machineId)) {
       return this.deps.deliverLocal(frame, ctx.to);
     }
+    // The machine boundary is re-tested rather than inferred from having fallen
+    // past the local arm: a coordinator with no `deliverLocal` wired reaches
+    // here for a same-machine target too, and that target is not what the
+    // switch is about.
+    if (
+      !namesMachine(ctx.to.machineId, frame.from.machineId) &&
+      this.deps.offMachineSendAllowed?.() === false
+    ) {
+      // Held, not dropped, and for the same reason a missing carrier holds:
+      // nothing here is a verdict about the exchange, only about this machine
+      // right now, and the switch coming back on is an event the outbox already
+      // retries against. The interactive verbs never get this far — `api.ts`
+      // refuses them up front, where the answer can carry a reason.
+      log.debug(
+        { type: frame.type, contextId: ctx.contextId, to: ctx.to.machineId },
+        "session bus: not sent, this machine's remote access is off",
+      );
+      return false;
+    }
     return this.deps.send(frame, ctx);
   }
 
@@ -1037,17 +1069,9 @@ export class SessionBusCoordinator {
    *
    *  Defaulting to "lead" instead is the misroute this exists to prevent: it
    *  posts the answer to THIS machine's own desktop app, which accepts it and
-   *  reports it sent.
-   *
-   *  DUPLICATED BY HAND in `session-bus/api.ts` (`const peerRole`), which has to
-   *  know which way a send will leave BEFORE it calls in here — the carrier rung
-   *  it gates is about the loopback socket a lead frame uses and a peer frame
-   *  does not. The two live in different modules and neither can see the other's
-   *  copy, no suite spans them, and a rule narrowed here alone leaves that rung
-   *  applied to the wrong set of sends. Keep them in lockstep, or promote this
-   *  to a shared helper the moment a third caller wants it. */
+   *  reports it sent. */
   private roleForContext(sessionId: string, contextId: string): BusRole {
-    return contextId === sessionId ? "lead" : "peer";
+    return isLeadContext(sessionId, contextId) ? "lead" : "peer";
   }
 
   /**

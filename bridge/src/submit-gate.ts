@@ -122,9 +122,23 @@ export class GuestReadiness {
       switch (state) {
         case "text": {
           if (c === "\x1b") { state = "esc"; break; }
-          const code = c.charCodeAt(0);
-          // C0 and DEL move the cursor or ring a bell; neither is a glyph.
-          if (code >= 0x20 && code !== 0x7f) painted = true;
+          // Answered a RUN at a time, not a byte: text carries no parser state,
+          // so the stretch up to the next escape either holds a glyph or does
+          // not, and once one is found the rest of the run says nothing new.
+          // This loop runs on every chunk for the life of the terminal — the
+          // mode can retire a paint at any point, so it cannot stop at the first
+          // one — and walking it byte by byte would put the full size of every
+          // frame a TUI draws on the PTY's own path.
+          const next = chunk.indexOf("\x1b", i);
+          const end = next === -1 ? chunk.length : next;
+          if (!painted) {
+            for (let j = i; j < end; j++) {
+              const code = chunk.charCodeAt(j);
+              // C0 and DEL move the cursor or ring a bell; neither is a glyph.
+              if (code >= 0x20 && code !== 0x7f) { painted = true; break; }
+            }
+          }
+          i = end - 1;
           break;
         }
         case "esc":
