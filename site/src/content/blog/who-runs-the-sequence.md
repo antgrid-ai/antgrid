@@ -9,17 +9,19 @@ featured: true
 claimsVerifiedAt: "583e988"
 ---
 
-Your coding agent says the implementation is finished. You read the response, check whether it did what you asked, and write the next prompt: "review the code, then run the tests". Sometimes you have to go back first: "you haven't checked the thing I asked you to check".
+A long agent task doesn't need you for the work. It needs you for the pauses.
 
-If you check each step before letting the agent continue, deciding what happens next is still your job. A good plan helps you make the call. You still have to be there to make it.
+Your coding agent says the implementation is finished. You read the response, check whether it did what you asked, and write the next prompt: "review the code, then run the tests". Sometimes you have to go back first: "you haven't checked the thing I asked you to check". Then you wait, and do it again.
+
+A good plan doesn't get you out of that. The plan says what comes next. Running the sequence is still yours: saying it, reading the answer, deciding whether it counts. That is babysitting, and it is the part worth handing over.
 
 We built Handler in Antgrid to take on those follow-ups. Start a task with your coding agent. When you're ready, tell Handler what's left, how to proceed and when to ask you. It checks what the agent reports against your instructions and asks for evidence before moving on. It notifies you when it needs your input or you've told it to check with you.
 
 [Antgrid's desktop beta](https://antgrid.ai/download) is available for Windows, macOS and Linux, with Handler included free during the beta. The companion phone app is [available by invite](mailto:contact@radhaai.com?subject=Antgrid%20mobile%20invite), through TestFlight and Play internal testing.
 
-## One handoff, end to end
+## A real run: checking before closing
 
-The useful question is what happens when the agent says it's finished and the evidence isn't there.
+The useful question is what happens when the agent says it's finished and the evidence isn't there. This run shows Handler asking for that evidence before closing an item. It doesn't show a separate checkpoint between every phase: the agent did the implementation, tests and documentation check in one turn.
 
 The task is a small TypeScript module with two known pieces of drift: `cartTotal` counts cart lines instead of summing money, and `checkout` throws bare `Error`s where the README promises a typed `CartError` naming the offending field.
 
@@ -27,9 +29,9 @@ I started the session, then armed Handler before typing anything, and wrote the 
 
 > Next: make `checkout()` raise a `CartError` naming the offending field instead of a bare `Error`, then cover both refusals with tests, then bring `README.md` in line with what the code actually does. Don't call an item done until you have run `bun test` and `bunx tsc --noEmit` and shown me both outputs. Ask me before you change anything outside `src/`, `tests/` and `README.md`.
 
-Handler turned that into an ordered backlog of five entries and ran with the "Proof it works" lens and Claude Code as judge. Three of the entries are phases; two are the conditions — the evidence rule, and the checkpoint asking to be consulted before anything outside those three directories changes.
+Handler turned that into five tracked entries: three steps and two conditions covering evidence and permission. I selected "Proof it works" as the lens and Claude Code as the judge.
 
-Then I gave the agent the first task. Handler runs at the agent's pauses, so its first pass came at the end of that turn, found nothing in the backlog it could close, and let the agent continue — which, with the task finished, meant nothing happened. It took one more line from me to produce the next pause. On that one Handler sent the whole sequence on to the agent itself, and I stopped typing.
+Then I gave the agent the first task. Handler didn't pick up the remaining sequence at the first pause. I sent one follow-up to produce another pause; Handler then sent the remaining instructions to the agent. I didn't type again. That extra nudge is a limitation of this run, not the handoff experience we're aiming for.
 
 <figure>
   <img src="./assets/who-runs-the-sequence/handoff-activity.png" alt="The Handler tab beside the agent's terminal at the end of the run. In the terminal, the agent reports that README.md already described the new behaviour, Handler replies asking it to quote the specific lines, the agent quotes README lines 5 to 7, Handler confirms the quote matches the implementation and asks for a commit, and the commit lands. The activity feed beside it lists the run newest first: wrapped up, the README item closed on the quote, the request for that quote, three more items closed with the evidence for each, a judge timeout and its retry, the instruction that started the work, and armed." />
@@ -60,30 +62,28 @@ The agent went and looked:
 > 7:  raising a `CartError` that names the offending field.
 > ```
 
-Handler closed the item on that, and said what to do next:
+The agent's original claim about the README turned out to be true; it was refused for being unevidenced, not for being wrong. Handler closed the item on the quoted lines:
 
 > Agent quoted README lines 5-7 which match the CartError/field behavior in `src/checkout.ts`, satisfying the review request.
 >
 > Confirmed, the README quote matches the implementation. Please commit these changes with a clear message.
 
-From that point Handler ran the sequence through to the wrap-up without me: five entries closed over three minutes, one judge call that timed out and retried thirty seconds later, and no question that needed answering. Two lines of mine started it — the task, and the nudge that produced the pause Handler acted on — and none after. The agent's original claim about the README turned out to be true; it was refused for being unevidenced, not for being wrong.
+The commit request needs scrutiny too. The instruction quoted above didn't ask Handler to commit, yet it requested a commit and the agent made one. The context shown here doesn't establish permission for that extra action, so we don't count it as a successful handoff. Checking evidence and staying within the requested scope are separate responsibilities.
 
-That is the handoff we want to make easier to leave with Handler. You set the condition in advance, then inspect how it was applied.
+The activity record shows five entries closed over three minutes, including one judge timeout followed by a retry thirty seconds later. After my initial task and follow-up, no further input was needed. That demonstrates an evidence check and a wrap-up, with rough edges visible. It isn't proof of a clean, phase-by-phase handoff.
 
 ## The workflow doesn't run itself
 
 You may already use plan mode, spec files, skills or a sequence of prompts. Those give the work a shape. Tests and hooks can check specific outcomes. Keep using them.
 
-The remaining job, when your workflow includes human review between phases, is deciding what the response means for the next step. Is the research sufficient to plan a change? Did the validation actually test the assumption? Does the result justify moving on?
-
-There are two questions at each boundary:
+If you review the work between steps, there are two different questions:
 
 1. Did the agent produce a response?
-2. Did that response satisfy the phase condition?
+2. Did it show what you required before the next step?
 
 A notification answers the first question. The second one is the job.
 
-In that workflow, you're the sequencer: you judge the result and decide what comes next. If the agent is waiting for your next instruction while you're in a meeting, the work waits too. Handler gives you a way to delegate those routine decisions while keeping calls about your intent or permission with you.
+You can put the whole sequence in your agent's prompt. Handler adds a separate judgement of what the agent reports against your instructions, with a record of the evidence it used. That judgement can be wrong too. The point is to make the follow-up check explicit and inspectable, not to replace your judgement with a guarantee.
 
 ## Tell Handler what's left
 
@@ -100,7 +100,7 @@ You choose which installed agent CLI does the judging. When the working agent pa
 
 Handler can ask both sides. It asks the agent for missing facts, evidence or options. It notifies you when it needs information only you can provide, a decision or permission. You can also set checkpoints of your own, such as "ask me before starting the security review". Instructions like that can only make Handler stricter, never looser. Work that depends on your answer waits; Handler can keep the agent working on other listed steps that don't depend on it.
 
-With the companion phone app, you can respond away from the desk. Everything between your devices is end-to-end encrypted, and the relay forwards ciphertext and holds no keys.
+With the companion phone app, you can respond away from the desk. Terminal output, prompts and file contents sent through the relay are end-to-end encrypted between your machine and connected devices. The relay forwards them without the keys to read them.
 
 When a phase closes, Handler tells the same running agent what's needed next. When every item is resolved and no question is waiting on you, it records a wrap-up and disarms.
 
@@ -112,13 +112,9 @@ This check has a specific limit: a real quotation can still be about the wrong t
 
 That's why we'd start with one bounded task and watch the first handoff. You should be able to compare its judgement with the call you would have made.
 
-Handler's judgement is a call to an agent CLI already on your machine, on your own provider account. There's no Antgrid model service judging your session, and the free beta doesn't make those calls free.
-
 Handler also limits consecutive replies without human input and escalates when that limit is reached or it repeats a reply. It doesn't have an unlimited conversation with the agent.
 
-An isolated session can give the work its own checkout and branch. It still uses the same machine, shell and credentials, so treat it as a separate workspace rather than a security sandbox.
-
-The [Handler implementation](https://github.com/antgrid-ai/antgrid/tree/583e988/bridge/src/handler) is available to inspect. The app, bridge, site and shared packages are MPL-2.0; the hosted relay and web service are ELv2.
+You can inspect the [Handler implementation](https://github.com/antgrid-ai/antgrid/tree/583e988/bridge/src/handler). The [licensing guide](https://github.com/antgrid-ai/antgrid/blob/583e988/LICENSING.md) explains the MPL-2.0 and ELv2 split.
 
 ## Try one handoff
 
@@ -126,15 +122,19 @@ Choose a small feature and start working on it with your agent in Antgrid. Do as
 
 Here's an example to adapt to your repository:
 
-> Implement the agreed plan. Show the changed files and passing test output before moving on. Then review the code against the plan, followed by a security review. For each review, report findings with file references, fix issues within scope and rerun the relevant tests. Compact context between phases, preserving the plan, progress and remaining instructions. Finally, smoke-test the feature and show the steps and results. Ask me before starting the security review or making decisions outside the plan. Stop with a summary of the changes, checks and anything unresolved; don't commit or deploy.
+> 1. Implement the agreed plan. Show the changed files and passing test output before moving on.
+> 2. Review the code against the plan. Report findings with file references, fix issues within scope and rerun the relevant tests.
+> 3. Ask me before starting the security review. Apply the same reporting, fixing and testing requirements to that review.
+> 4. Smoke-test the feature and show the steps and results.
+> 5. Stop with a summary of the changes, checks and anything unresolved. Don't commit or deploy.
+>
+> Between phases, compact context while preserving the plan, progress and remaining instructions. Ask me before making decisions outside the plan.
 
-Planning is just the handoff point in this example, not a requirement. Adapt the sequence and checks to your task and the commands your agent supports. Watch the first transition: does Handler ask for missing evidence and send the next instruction at the right point? Review the final record for the evidence behind each completed step and anything left unresolved.
+Adapt the steps and checks to your task and the commands your agent supports. Watch the first transition: does Handler ask for missing evidence, stay within your instructions and send the next instruction at the right point? Review the final record for anything left unresolved.
 
 [Download Antgrid for Windows, macOS or Linux](https://antgrid.ai/download). Handler is included free during the beta, with no card required. The [getting-started guide](https://antgrid.ai/get-started) covers setup.
 
-Handler will be a Pro feature once paid plans are live. Nothing switches off without warning, Pro starts with a free trial, and the free plan stays free. The current terms are on the [pricing page](https://antgrid.ai/pricing).
+Handler uses an installed agent CLI to judge the session on your own provider account. Your provider's usage charges or limits still apply. Handler will be a Pro feature once paid plans are live; see the [beta and pricing terms](https://antgrid.ai/pricing).
 
-We're still learning how well Handler's judgement holds up across other people's tasks. After your first run, [tell us how the handoff went](https://antgrid.ai/support). If it made the wrong call, the condition you set and the decision it made are the most useful things to share.
-
-We built Handler because the gap between phases kept bringing us back to the desk. Try it on one of those gaps in your own workflow.
+We built Handler because the gap between phases kept bringing us back to the desk. Try one bounded handoff, inspect the evidence, and [tell us where its judgement held up or failed](https://antgrid.ai/support). The instruction you gave and the decision Handler made are the most useful things to share.
 
