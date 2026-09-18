@@ -195,6 +195,29 @@ describe("the session-bus tools", () => {
     expect(text).toContain("only a session on it can use that address");
   });
 
+  // The address is real and the reach is not, so the machine id still prints:
+  // blanking it would say "local mode" about a machine one switch away from
+  // reachable, and a same-machine peer addresses it either way.
+  test("remote access off says the address does not travel, without withdrawing it", async () => {
+    stub(() => Response.json({
+      machineId: "self", projectId: "p1", sessionId: "4f2ac1", remoteAccess: false,
+    }));
+    const text = (await callSessionBusTool("antgrid_whoami", {})).content[0]!.text;
+    expect(text).toContain("self/p1/4f2ac1");
+    expect(text).toContain("remote access is OFF");
+    expect(text).toContain("cannot send to another machine");
+    expect(text).not.toContain("the machine of whoever reads it");
+  });
+
+  // Strictly `=== false`, so a bridge that predates the field is still read as
+  // reachable rather than silently told it is cut off.
+  test("an answer with no remote-access field is read as reachable", async () => {
+    stub(() => Response.json({ machineId: "self", projectId: "p1", sessionId: "4f2ac1" }));
+    const text = (await callSessionBusTool("antgrid_whoami", {})).content[0]!.text;
+    expect(text).toContain("one without a machine means the machine of whoever reads it");
+    expect(text).not.toContain("remote access is OFF");
+  });
+
   // The seam a live two-session test walked off: the row is the ONLY place a
   // caller is offered an address, and `to` is validated somewhere else, so a
   // field the schema demands and the row omits leaves an initiator guessing —
@@ -384,7 +407,7 @@ describe("the session-bus tools", () => {
         summary: "the codec diff broke",
       });
       expect(result.content[0]!.text).toBe(
-        "Opened thread th-9 (message m-1). It left this machine; whether it arrived shows as a receipt in antgrid_thread. Use antgrid_reply with that thread id to answer.",
+        "Opened thread th-9 (message m-1). It left this machine; antgrid_thread shows a receipt once the peer's bridge accepts it. Use antgrid_reply with that thread id to answer.",
       );
     });
 
@@ -522,7 +545,7 @@ describe("the session-bus tools", () => {
       const text = (await callSessionBusTool("antgrid_thread", { threadId: "th-1" })).content[0]!.text;
       expect(search).toContain("threadId=th-1");
       expect(text).toContain("Thread th-1 (3 messages, oldest first):");
-      expect(text).toContain("- -> you, 5m ago [delivered 4m ago] — asked");
+      expect(text).toContain("- -> you, 5m ago [peer bridge accepted it 4m ago] — asked");
       expect(text).toContain("  what broke?");
       expect(text).toContain("- <- peer/p2/9c11de, 3m ago — answered");
       expect(text).toContain("- -> you, 30s ago [no receipt yet] — thanks");

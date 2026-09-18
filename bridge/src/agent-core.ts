@@ -3,9 +3,10 @@ import { agentRuntime } from "./agent-runtime";
 import { z } from "zod";
 import { VERSION } from "./version";
 import { join } from "node:path";
-import { hostname } from "node:os";
 import { spawn, type ChildProcess } from "node:child_process";
 import { logger } from "./logger";
+import { errorName, lineKey } from "./line-key";
+import { selfMachineLabel, selfMachineName } from "./machine-label";
 const log = logger.child({ component: "agent-core" });
 // A machine's project streams share each physical viewer's terminal budget.
 const terminalConnectionBudgets = new Map<ClientKey, { bytes: number; users: number }>();
@@ -46,7 +47,7 @@ import { SessionBusCoordinator, type SessionBusEvent, type SessionBusSelf } from
 import { lineForEvent } from "./session-bus/deliver-event";
 import { isRefusal } from "./session-bus/errors";
 import { neutralizeFenced } from "./session-bus/delivery";
-import type { QueuedLine } from "./session-bus/delivery-queue";
+import type { BusInjectOutcome, QueuedLine } from "./session-bus/delivery-queue";
 import { CHECKOUT_VARIABLE_MESSAGE_TYPES, createMessage, HANDLER_HISTORY_RECORDS, HandlerAnswerWire, HandlerConfigureWire, HandlerDismissWire, HandlerHistoryRequestWire, HandlerInstructWire, HandlerUndoWire, PREVIEW_CHANNEL_MESSAGE_TYPES, type AbMessage, type RpcRequest, type SessionEntry, type WorkStatus } from "./protocol";
 import { parseTunnelMessage } from "./tunnel-protocol";
 import { startApiServer, type ApiServerHandle } from "./api-server";
@@ -69,7 +70,7 @@ import { SessionNamer } from "./session-namer";
 import { resolveStructuredTitle } from "./agent-runtime";
 import { buildTitleContext, generateTitleFromContext, type TitleGeneration } from "./agents/title-generate";
 import { TitleAttempts, type TitleOutcome } from "antgrid-agents/title-attempts";
-import { AGENTS, agentSpec, BY_HOOK_NAME, handlerObservable } from "./agent-runtime";
+import { AGENTS, agentSpec, BY_HOOK_NAME, handlerObservable, reportsTurnStart } from "./agent-runtime";
 import { DEFAULT_AGENT } from "antgrid-agents/defaults";
 import { OpenAgentPrompts } from "./agents/open-prompts";
 import { readRecentActivity } from "./handler/config";
@@ -261,10 +262,12 @@ export interface AgentCore {
    *  which is the honest state for a build whose delivery layer is absent. */
   setSessionBusListener(fn: ((event: SessionBusEvent) => void) | null): void;
   /** Submit one rendered session-bus line into a live session, through the same
-   *  adapter a Handler auto-reply uses. False means it did not go in — the
+   *  adapter a Handler auto-reply uses. `"refused"` means it did not go in — the
    *  session has no live agent — so the caller's queue keeps the line for the
-   *  next boundary rather than reporting a delivery that never happened. */
-  injectBusLine(sessionId: string, text: string): boolean;
+   *  next boundary rather than reporting a delivery that never happened, and
+   *  `"awaiting-turn"` means it went in but nothing yet says the agent read it
+   *  (see {@link BusInjectOutcome}). */
+  injectBusLine(sessionId: string, text: string): BusInjectOutcome;
   /** The owner's work reduction moved: re-emit `session:updated` so the
    *  `workStatus` stamped on each entry (from
    *  {@link BuildAgentCoreOptions.sessionWorkStatusFor}) is current. No-op
@@ -1085,6 +1088,17 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     return remoteAccessEnabled();
   }
 
+  /** {@link remoteFrameAllowed}'s outbound twin: whether a session here may
+   *  send to another MACHINE. Same switch, same `relayEverAttached` carve-out,
+   *  deliberately no loopback one — the caller is always loopback (an agent
+   *  through the MCP surface), so the source says nothing about whether the
+   *  frame crosses a machine boundary; the destination does, and `api.ts` has
+   *  already decided that before it asks. */
+  function offMachineSendAllowed(): boolean {
+    if (!relayEverAttached) return true;
+    return remoteAccessEnabled();
+  }
+
   /** E12's interruption half: whether an UNSOLICITED session-bus frame from a
    *  peer machine may reach a session here.
    *
@@ -1343,12 +1357,17 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     if (!machineId) return null;
     const entry = sessions?.get(sessionId);
     if (!entry) return null;
+    // Stamped here as well as on the host's own `self()`, because a core built
+    // without a host answers for its own sessions and its deliveries render
+    // from this ref — the same reason `projectLabel`/`sessionName` are here.
+    const machineLabel = selfMachineLabel();
     return {
       key: { machineId, projectId: project.id, sessionId },
       ref: {
         machineId,
         projectId: project.id,
         sessionId,
+        ...(machineLabel === undefined ? {} : { machineLabel }),
         projectLabel: project.name,
         sessionName: entry.name,
       },
@@ -1463,7 +1482,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // The coordinator has already folded and acked by the time it announces,
       // so throwing back into it would fail a settled fold over a rendering
       // problem that costs one delivery.
-      log.warn("could not render a session-bus delivery: %s", err);
+      // The name alone: the renderer holds the peer's own words, and a throw
+      // from it is the most likely place for one to reach a log line.
+      log.warn("could not render a session-bus delivery: %s", errorName(err));
       return;
     }
     // A notify leaves no mailbox row — it is rendered into the session instead
@@ -1496,13 +1517,35 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     injectBusLine(line.sessionId, line.text);
   }
 
+  /** Will a turn-open edge follow a submit into this session?
+   *
+   *  The live observation first: a session whose hook integration was
+   *  invalidated reports false however its spec reads, and a caller that waited
+   *  on its word would hold the line until the attempt cap dropped it. The spec
+   *  answers for a session the manager has not launched. */
+  function busSubmitIsConfirmable(sessionId: string): boolean {
+    const live = sessions?.terminalObservation(sessionId);
+    return live ? live.turnStart : reportsTurnStart(agentKeyFor(sessionId));
+  }
+
   /** Submit one line into a session, or report that it did not land.
    *
-   *  `injectReply` returns nothing, so "delivered" has to be decided here: a
+   *  `injectReply` returns nothing, so the outcome has to be decided here: a
    *  session with no live agent swallows the submit, and a queue told the line
-   *  went in would drop the only notice the other side is ever getting. */
-  function injectBusLine(sessionId: string, text: string): boolean {
-    if (!sessions?.get(sessionId)?.running) return false;
+   *  went in would drop the only notice the other side is ever getting. Even a
+   *  successful write is not evidence the agent read the text — it can sit
+   *  unsubmitted in a composer — so an agent that announces its turns is
+   *  reported `"awaiting-turn"` and left for its own turn-start to settle. */
+  function injectBusLine(sessionId: string, text: string): BusInjectOutcome {
+    const key = lineKey(text);
+    if (!sessions?.get(sessionId)?.running) {
+      // A refusal here is invisible everywhere else: the queue keeps the line
+      // at its head and retries quietly, the sender was acked long before, and
+      // no stage below is reached to say anything. `known` separates a session
+      // this core has never heard of from one it holds and is not running.
+      log.debug({ ...key, sessionId, known: sessions?.get(sessionId) !== undefined }, "bus inject: refused, session not running");
+      return "refused";
+    }
     // The last boundary before another machine's words become keystrokes. The
     // renderer already neutralized them, so a difference here is an upstream bug
     // rather than an expected input — hence the warn.
@@ -1517,10 +1560,18 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     }
     try {
       busAdapter.injectReply(sessionId, safe);
-      return true;
+      const confirmable = busSubmitIsConfirmable(sessionId);
+      // The sanitized key too when it differs, because that is the key every
+      // stage BELOW this one will carry, and a walk that stopped joining here
+      // would otherwise look like a delivery that never reached the PTY.
+      log.debug(
+        { ...key, sessionId, confirmable, ...(safe === text ? {} : { sanitizedSha: lineKey(safe).sha }) },
+        "bus inject: handed to the adapter",
+      );
+      return confirmable ? "awaiting-turn" : "submitted";
     } catch (err) {
-      log.warn("could not submit a session-bus line to %s: %s", sessionId, err);
-      return false;
+      log.warn({ ...key, sessionId, err: errorName(err) }, "bus inject: adapter threw");
+      return "refused";
     }
   }
 
@@ -1544,6 +1595,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       };
     },
     carrierPresent: () => opts.carrierPresent?.() ?? false,
+    remoteAccessEnabled: offMachineSendAllowed,
   });
 
   /** A re-sync push reaches EVERY bus subscriber, so it may only be skipped when
@@ -2852,7 +2904,11 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   const busAdapter = createDispatchAdapter({
     isChat: (id) => sessions?.get(id)?.mode === "chat",
     pty: createPtyAdapter({
-      submit: (terminalId, line) => manager?.submit(terminalId, line),
+      // The join key is attached here and nowhere above: everything arriving
+      // through this adapter is text a renderer produced, where a digest is a
+      // diagnostic. The other way into `manager.submit` is `terminal:input`,
+      // which is a human's own keystrokes and gets none.
+      submit: (terminalId, line) => manager?.submit(terminalId, line, lineKey(line).sha),
       getRecentOutput: (terminalId) => manager?.getScrollback(terminalId)?.text ?? "",
       getTranscriptPath: (terminalId) => sessions?.getAgentTranscriptPath(terminalId),
     }),
@@ -3698,7 +3754,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       createMessage("agent:status", {
         projectId: project.id,
         projectName: agentName,
-        hostMachineName: process.env.ANTGRID_HOST_NAME ?? hostname(),
+        hostMachineName: selfMachineName(),
         terminals: terminalsForApp,
         services: serviceStatus,
         commands: runtime.config.commands?.map((c) => ({

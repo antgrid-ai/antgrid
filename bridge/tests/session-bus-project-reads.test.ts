@@ -173,6 +173,7 @@ async function setUp(): Promise<Fixture> {
     membership: (terminalId) =>
       terminalId === sessionA || terminalId === sessionB ? { sessionId: terminalId } : null,
     carrierPresent: () => true,
+    remoteAccessEnabled: () => true,
   });
 
   return { bus, sent, sessionA, sessionB, agent };

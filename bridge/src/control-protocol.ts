@@ -155,6 +155,23 @@ export const ControlRequestSchema = z.discriminatedUnion("type", [
   // tab: which feed a link lands on is not carried in the ticket, so a caller
   // that wants the calls view has to say so on the page.
   z.object({ id: z.string().min(1), type: z.literal("modelwatch:ui") }),
+  // Raises THIS process's log level for a bounded window (`antgrid log-level`),
+  // answered in-process by `armLogLevel`.
+  //
+  // A ControlRequest and never an AbMessage, and that is not a style choice:
+  // `dispatchControlPlane` runs on account trust alone, BEFORE the machine's
+  // remote-access switch is consulted, so a wire verb for this would hand any
+  // account-trusted peer a lever on how much a machine writes to `host.log` —
+  // the one file on the machine the app asks users to send. This plane is bound
+  // to 127.0.0.1 behind host.json's bearer, which is the authorization.
+  z.object({
+    id: z.string().min(1),
+    type: z.literal("log:level"),
+    level: z.enum(["trace", "debug", "info", "warn", "error", "fatal"]),
+    // Optional and zero-admitting for netwatch:local's reason — a disarm has no
+    // window to state. Positivity is the arming path's concern, enforced there.
+    ttlMs: z.number().int().nonnegative().optional(),
+  }),
   // Discloses a checkout's absolute path to the caller. Deliberately confined
   // to THIS plane: checkout paths are host-local (checkout-types.ts) and the
   // loopback socket + token is the only transport that can reach this schema —
@@ -311,4 +328,10 @@ export type ControlResponse =
   | { id: string; ok: true; type: "modelwatch:arm"; prompts: boolean; context: boolean; ttlMs: number }
   /** The same fragment-carried ticket as netwatch:ui's, for the same document. */
   | { id: string; ok: true; type: "modelwatch:ui"; url: string; expiresInMs: number }
+  /** `level` is what the process is running at after this request — the armed
+   *  one, or the configured one a disarm restored — and `ttlMs` is the window
+   *  actually armed after the host's clamp, `0` while nothing is armed. Both
+   *  describe the state rather than echo the request, for the reason
+   *  netwatch:remote's `ttlMs` does. */
+  | { id: string; ok: true; type: "log:level"; level: string; ttlMs: number }
   | { id: string; ok: false; error: { code: string; message: string } };

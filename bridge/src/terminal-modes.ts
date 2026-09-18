@@ -84,28 +84,40 @@ const INCOMPLETE_DECSET = /^\x1b(\[[?!0-9;]*)?$/;
  */
 const DECSET = /\x1b(?:\[\?([0-9;]*)([hl])|\[!p|c)/g;
 
+/** Shared so the common chunk — the one with no escape in it at all — answers
+ *  without allocating on every write a PTY makes. */
+const NO_MODES: ReadonlySet<number> = new Set();
+
 export class TerminalModeTracker {
   private latched = new Map<number, boolean>();
   private carry = "";
 
   /**
-   * Feeds one raw PTY chunk. Chunk boundaries are honoured: a sequence split
-   * across two writes is carried and resolved on the next call, which matters
-   * because a TUI's startup burst is exactly where these modes are set and
-   * exactly where the PTY is most likely to fragment.
+   * Feeds one raw PTY chunk, and answers which tracked modes it MOVED.
+   *
+   * Chunk boundaries are honoured: a sequence split across two writes is
+   * carried and resolved on the next call, which matters because a TUI's
+   * startup burst is exactly where these modes are set and exactly where the
+   * PTY is most likely to fragment.
+   *
+   * Moved, not written: a TUI that restates a mode it already holds says
+   * nothing new about the guest, and a caller timing itself against the
+   * announcement (`GuestReadiness`) would otherwise re-open the question on
+   * every frame that restates one.
    */
-  feed(data: string): void {
-    if (this.carry === "" && !data.includes("\x1b")) return;
+  feed(data: string): ReadonlySet<number> {
+    if (this.carry === "" && !data.includes("\x1b")) return NO_MODES;
 
     const scanned = this.carry + data;
     this.carry = "";
+    const changed = new Set<number>();
 
     let consumed = 0;
     DECSET.lastIndex = 0;
     for (let m = DECSET.exec(scanned); m !== null; m = DECSET.exec(scanned)) {
       consumed = DECSET.lastIndex;
       if (m[2] === undefined) {
-        this.applyReset(m[0] === "\x1bc");
+        this.applyReset(m[0] === "\x1bc", changed);
         continue;
       }
       const set = m[2] === "h";
@@ -113,6 +125,7 @@ export class TerminalModeTracker {
         if (param === "") continue;
         const mode = Number(param);
         if (!TRACKED_MODES.has(mode)) continue;
+        if (this.isSet(mode) !== set) changed.add(mode);
         // Deleted before re-inserting so the map's iteration order is
         // LAST-WRITE order, which is what the supplement replays. Several of
         // these modes share one slot in a VT engine — `?1000`/`?1002`/`?1003`
@@ -131,6 +144,7 @@ export class TerminalModeTracker {
     if (esc !== -1 && INCOMPLETE_DECSET.test(tail.slice(esc))) {
       this.carry = tail.slice(esc);
     }
+    return changed;
   }
 
   /**
@@ -142,9 +156,10 @@ export class TerminalModeTracker {
    * The supplement lands after the body, so the stale answer is the one that
    * wins.
    */
-  private applyReset(hard: boolean): void {
+  private applyReset(hard: boolean, changed: Set<number>): void {
     for (const [mode, value] of RESET_STATE) {
       if (!hard && SOFT_RESET_PRESERVES.has(mode)) continue;
+      if (this.isSet(mode) !== value) changed.add(mode);
       this.latched.delete(mode);
       this.latched.set(mode, value);
     }

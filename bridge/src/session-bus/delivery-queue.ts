@@ -1,14 +1,15 @@
 // Turn-boundary delivery (spec 5.2). A rendered line waits here until the
-// session it is for has no open turn, and is submitted through the same
-// `SessionAdapter.injectReply` a Handler auto-reply uses.
+// session it is for is clear — no open turn, no unanswered block — and is
+// submitted through the same `SessionAdapter.injectReply` a Handler auto-reply
+// uses.
 //
 // Why a queue and not a direct submit: `PtySubmitQueue` orders writes per
 // terminal but knows nothing about turns, so an injected line lands wherever the
 // agent's cursor happens to be — inside a tool call, inside a permission prompt,
-// halfway through a plan. The turn-open set the work-status reduction already
-// maintains is the only thing on this bridge that knows when a line can be read
-// as a new instruction rather than as an answer to whatever the agent last
-// asked.
+// halfway through a plan. The work-status reduction is the only thing on this
+// bridge that knows when a line can be read as a new instruction rather than as
+// an answer to whatever the agent last asked, so the gate is its own predicate
+// (`busDeliverable`) rather than a second reading of its inputs.
 //
 // Why it is persisted: a queued line is the only trace an arrival leaves that
 // the receiving agent ever sees, and the wait for a turn boundary is unbounded.
@@ -24,10 +25,34 @@
 
 import { z } from "zod";
 import { logger } from "../logger";
+import { errorName, lineKey } from "../line-key";
+import { SUBMIT_READY_TIMEOUT_MS } from "../submit-gate";
 import { MAX_DELIVERY_CHARS } from "./delivery";
 import { readBusDb, readRecords, replaceRecords, withBusDb } from "./bus-db";
 
 const log = logger.child({ component: "session-bus" });
+
+/** What one submit attempt is worth.
+ *
+ *  `"submitted"` is a WRITE-side answer — the adapter took the text — and on an
+ *  agent that announces nothing it is the only answer available, so the line is
+ *  removed on it. `"awaiting-turn"` says the agent will announce the turn this
+ *  text opens, so the queue keeps the line until it does. */
+export type BusInjectOutcome = "refused" | "submitted" | "awaiting-turn";
+
+/** How long a line waits for the turn its own submit should have opened.
+ *
+ *  Derived from the submit gate rather than chosen, and the direction matters:
+ *  a cold-starting agent's keystrokes are held for up to
+ *  {@link SUBMIT_READY_TIMEOUT_MS} before a byte reaches its PTY, so any window
+ *  inside that would re-inject the first delivery of every cold start. */
+export const CONFIRM_TIMEOUT_MS = SUBMIT_READY_TIMEOUT_MS + 15_000;
+
+/** How many times one line may be handed to the adapter. The second attempt is
+ *  the retry this confirmation exists to make possible; without a bound, a line
+ *  no agent will ever confirm cycles at the head of its session's queue for
+ *  good, and every later arrival for that session waits behind it. */
+export const MAX_SUBMIT_ATTEMPTS = 2;
 
 /** Lines held across every session of one project. Small on purpose: past it the
  *  agent is not reading its queue at all, and a hundred stale arrivals delivered
@@ -52,6 +77,16 @@ export const QueuedLineSchema = z.object({
   kind: DeliveryKindSchema,
   text: z.string().max(MAX_DELIVERY_CHARS),
   queuedAt: z.number(),
+  /** When this line was last handed to the adapter, on a session whose agent
+   *  announces turn-starts. Set means "submitted, not yet confirmed". */
+  sentAt: z.number().optional(),
+  /** Submits attempted, bounded by {@link MAX_SUBMIT_ATTEMPTS}.
+   *
+   *  Optional, like `sentAt`, because `readRecords` drops a row whose parse
+   *  fails: a required field on a persisted row empties every session's queue on
+   *  the upgrade that adds it, and the lines it drops are the ones nothing
+   *  re-sends. */
+  attempts: z.number().optional(),
 });
 export type QueuedLine = z.infer<typeof QueuedLineSchema>;
 
@@ -97,6 +132,11 @@ export function removeLine(s: DeliveryQueueState, id: string): DeliveryQueueStat
   return lines.length === s.lines.length ? s : { lines };
 }
 
+/** Mark [id] as submitted and awaiting the turn it should open. */
+function stampSubmitted(s: DeliveryQueueState, id: string, at: number): DeliveryQueueState {
+  return { lines: s.lines.map((l) => (l.id === id ? { ...l, sentAt: at, attempts: (l.attempts ?? 0) + 1 } : l)) };
+}
+
 /** Drop everything held for a session that no longer exists. Reached only by a
  *  session delete that runs on a WARM core: a line for a deleted session can
  *  never be delivered, and keeping it would hold a slot against the cap
@@ -116,6 +156,28 @@ export function loadDeliveries(abDir: string, projectId: string): DeliveryQueueS
   );
 }
 
+/** Restore a persisted queue as one no submit is outstanding on.
+ *
+ *  `sentAt` means "in the agent's composer, waiting for the turn it opens", and
+ *  that composer died with the previous process's PTY. Carried across a restart
+ *  it is worse than useless: the confirm timer that would retry it lives in
+ *  memory and is gone, so nothing re-enters the drain inside the window, and the
+ *  next turn that session opens for ANY reason retires the line as read —
+ *  losing an arrival the sender was told had been sent. Cleared, the line goes
+ *  in again at the next boundary, which is the repeated-line cost this module
+ *  already prefers to a silent loss. `attempts` is kept: it bounds how many
+ *  times one line may be handed to an adapter, however many processes do it. */
+function asUnsubmitted(s: DeliveryQueueState): DeliveryQueueState {
+  if (!s.lines.some((l) => l.sentAt !== undefined)) return s;
+  return {
+    lines: s.lines.map((l) => {
+      if (l.sentAt === undefined) return l;
+      const { sentAt: _sentAt, ...rest } = l;
+      return rest;
+    }),
+  };
+}
+
 export function saveDeliveries(abDir: string, projectId: string, s: DeliveryQueueState): void {
   withBusDb(
     abDir,
@@ -127,12 +189,16 @@ export function saveDeliveries(abDir: string, projectId: string, s: DeliveryQueu
 export interface DeliveryQueueDeps {
   abDir: string;
   projectId: string;
-  /** The work-status reduction's turn-open set, asked live. A line queued while
-   *  this is true waits; the drain that follows the turn's close submits it. */
-  isTurnOpen: (sessionId: string) => boolean;
-  /** Submit one line into a session. False means it did not go in — no live
-   *  agent, or an adapter that refused — and the line stays queued at the head. */
-  inject: (line: QueuedLine) => boolean;
+  /** Is the session at a point where a line can be read as a new instruction?
+   *  Asked live of the work-status reduction (`busDeliverable`). A line queued
+   *  while this is false waits for the edge that makes it true; every condition
+   *  the predicate holds on has one, which is what keeps the wait finite
+   *  without a clock. */
+  canDeliver: (sessionId: string) => boolean;
+  /** Submit one line into a session. `"refused"` means it did not go in — no
+   *  live agent, or an adapter that refused — and the line stays queued at the
+   *  head. See {@link BusInjectOutcome} for why the other two differ. */
+  inject: (line: QueuedLine) => BusInjectOutcome;
   now?: () => number;
 }
 
@@ -149,10 +215,15 @@ export class SessionBusDeliveryQueue {
    *  re-enters `commitWork`. Draining from inside a drain would submit the same
    *  head line twice before the first return removed it. */
   private draining = false;
+  /** One per session holding a submitted-but-unconfirmed head. The confirmation
+   *  is an edge, and an edge that never arrives produces no event, so this is
+   *  the only thing that re-enters the drain for a line whose turn never
+   *  opened. */
+  private readonly confirmTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   constructor(private readonly deps: DeliveryQueueDeps) {
     this.now = deps.now ?? Date.now;
-    this.state = loadDeliveries(deps.abDir, deps.projectId);
+    this.state = asUnsubmitted(loadDeliveries(deps.abDir, deps.projectId));
   }
 
   /** What is currently held, for tests and for a caller reporting queue depth. */
@@ -169,9 +240,20 @@ export class SessionBusDeliveryQueue {
    * persisting after would cost the wake outright.
    */
   queue(line: Omit<QueuedLine, "queuedAt">): void {
+    // AHEAD of the dedup short-circuit below: an arrival that produced no queue
+    // row is otherwise indistinguishable from one that never reached this
+    // module.
+    const key = lineKey(line.text);
     const next = enqueueLine(this.state, { ...line, queuedAt: this.now() });
-    if (next === this.state) return;
-    this.commit(next);
+    if (next === this.state) {
+      log.debug({ ...key, id: line.id, sessionId: line.sessionId, kind: line.kind }, "bus queue: already held, not queued again");
+    } else {
+      log.debug({ ...key, id: line.id, sessionId: line.sessionId, kind: line.kind, depth: next.lines.length }, "bus queue: held");
+      this.commit(next);
+    }
+    // Drained on the duplicate path too. The head it would skip may be one that
+    // was submitted and never confirmed, and a redelivery is a chance to notice
+    // that — the outbox retrying is often the only event this session gets.
     this.drain(line.sessionId);
   }
 
@@ -183,27 +265,74 @@ export class SessionBusDeliveryQueue {
    * same pass lands mid-turn — the thing the queue exists to prevent. The rest
    * follow on the next closing edge, which is the turn this delivery started.
    *
-   * Called on that closing edge and again on every queue, so an idle session gets
-   * its line immediately and a busy one gets it the moment its turn ends.
+   * Called on every queue and on the edge where the session became deliverable
+   * again (`becameDeliverable`, work-status.ts), so an idle session gets its
+   * line immediately and a blocked one gets it the moment the block lifts.
    */
   drain(sessionId: string): void {
     if (this.draining) return;
-    if (this.deps.isTurnOpen(sessionId)) return;
     const line = linesFor(this.state, sessionId)[0];
     if (!line) return;
+    const key = lineKey(line.text);
+    if (line.sentAt !== undefined) {
+      const waitedMs = this.now() - line.sentAt;
+      if (waitedMs < CONFIRM_TIMEOUT_MS) {
+        log.debug({ ...key, sessionId, waitedMs }, "bus drain: skipped, the last submit has not opened its turn yet");
+        return;
+      }
+      if ((line.attempts ?? 0) >= MAX_SUBMIT_ATTEMPTS) {
+        // Dropped rather than retried forever: a line the agent never acts on
+        // blocks every later arrival for this session, and re-injecting it
+        // appends another copy behind the ones already sitting in the composer.
+        log.warn({ ...key, id: line.id, sessionId, attempts: line.attempts }, "bus drain: dropped, submitted to no effect");
+        this.commit(removeLine(this.state, line.id));
+        // The drop opens no turn and clears no block, so it produces none of the
+        // edges that re-enter this drain. Without the re-entry the line behind it
+        // waits for an unrelated event on a session that is already idle.
+        this.drain(sessionId);
+        return;
+      }
+    }
+    if (!this.deps.canDeliver(sessionId)) {
+      log.debug({ ...key, sessionId, heldMs: this.now() - line.queuedAt }, "bus drain: skipped, session not at a boundary");
+      return;
+    }
     this.draining = true;
-    let delivered = false;
+    let outcome: BusInjectOutcome = "refused";
     try {
-      delivered = this.deps.inject(line);
+      outcome = this.deps.inject(line);
     } catch (err) {
-      log.warn("could not deliver %s line to session %s: %s", line.kind, sessionId, err);
+      log.warn("could not deliver %s line to session %s: %s", line.kind, sessionId, errorName(err));
     } finally {
       this.draining = false;
     }
+    log.debug({ ...key, id: line.id, sessionId, kind: line.kind, outcome }, "bus drain: inject returned");
     // Held at the head rather than dropped or skipped: the next boundary retries
     // it, and delivering the line behind it first would hand the agent a result
     // for work it was never told to do.
-    if (!delivered) return;
+    if (outcome === "refused") return;
+    if (outcome === "submitted") {
+      this.commit(removeLine(this.state, line.id));
+      return;
+    }
+    this.commit(stampSubmitted(this.state, line.id, this.now()));
+    this.armConfirm(sessionId);
+  }
+
+  /**
+   * The session opened a turn, so the line it was submitted is being read.
+   *
+   * Driven from the turn-OPEN edge (`openedTurns`, work-status.ts) — the mirror
+   * of the closing edge {@link drain} rides. An unstamped head confirms nothing:
+   * the session simply started a turn of its own.
+   *
+   * No drain follows. A turn is open, so the next line is not deliverable
+   * anyway, and its boundary is the close of the turn this one just opened.
+   */
+  confirm(sessionId: string): void {
+    const line = linesFor(this.state, sessionId)[0];
+    if (!line || line.sentAt === undefined) return;
+    log.debug({ ...lineKey(line.text), id: line.id, sessionId, kind: line.kind }, "bus confirm: submitted line opened its turn");
     this.commit(removeLine(this.state, line.id));
   }
 
@@ -221,8 +350,41 @@ export class SessionBusDeliveryQueue {
     if (next !== this.state) this.commit(next);
   }
 
+  /** Drop every pending confirmation. The queue itself is on disk; what would
+   *  otherwise outlive the project is a timer holding the torn-down core it
+   *  would submit through. */
+  dispose(): void {
+    for (const timer of this.confirmTimers.values()) clearTimeout(timer);
+    this.confirmTimers.clear();
+  }
+
+  /** Keyed to the STAMP, not to the map being empty. A drain driven by anything
+   *  other than this timer can re-stamp the head just before the timer armed for
+   *  the previous attempt fires; keeping that one measures the fresh stamp
+   *  against a window already over, and its expiry then finds the wait too short
+   *  and schedules nothing at all. */
+  private armConfirm(sessionId: string): void {
+    const pending = this.confirmTimers.get(sessionId);
+    if (pending) clearTimeout(pending);
+    const timer = setTimeout(() => {
+      this.confirmTimers.delete(sessionId);
+      this.drain(sessionId);
+    }, CONFIRM_TIMEOUT_MS);
+    timer.unref?.();
+    this.confirmTimers.set(sessionId, timer);
+  }
+
   private commit(next: DeliveryQueueState): void {
     this.state = next;
+    // A stamped head can leave without its own timer firing — confirmed by a
+    // turn, dropped past the attempt cap, or evicted by the project-wide cap
+    // because a sibling session filled the queue. Clearing here is what keeps
+    // one from outliving the line it was armed for.
+    for (const [sessionId, timer] of this.confirmTimers) {
+      if (linesFor(next, sessionId)[0]?.sentAt !== undefined) continue;
+      clearTimeout(timer);
+      this.confirmTimers.delete(sessionId);
+    }
     try {
       saveDeliveries(this.deps.abDir, this.deps.projectId, next);
     } catch (err) {
@@ -232,14 +394,4 @@ export class SessionBusDeliveryQueue {
       log.warn("could not persist session-bus deliveries: %s", err);
     }
   }
-}
-
-/** Sessions whose turn closed between two work-status reductions — the edge a
- *  delivery waits on. Pure so `commitWork` can compute it before it swaps the
- *  state it is comparing against. */
-export function closedTurns(
-  prev: { activeTurns: ReadonlySet<string> },
-  next: { activeTurns: ReadonlySet<string> },
-): string[] {
-  return [...prev.activeTurns].filter((id) => !next.activeTurns.has(id));
 }

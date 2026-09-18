@@ -103,17 +103,23 @@ invariant, which is why the reasoning lives beside the code rather than here.
 The agent-to-agent plane: one session on one machine reaching another. This is
 the set of invariants a future edit breaks silently.
 
-- **Outbound on the machine that opened the exchange goes to the loopback owner
-  and nowhere else.** `ProjectCore.sendToOwner` is the only path, and
+- **Which way a bus frame leaves is decided by the CONTEXT, not by the
+  address.** A session whose own id is the context id opened the exchange and
+  reaches out through the loopback owner — `ProjectCore.sendToOwner`, and
   `local-listener.ts` hands a bus frame to an owner only if its hello declared
   `capabilities.sessionBusCarrier` (`ownerCarriesSessionBus`, surfaced to the
-  loopback API as `carrierPresent`). The desktop app is the carrier; no
-  attached carrier means the frame is HELD and retried by the coordinator, never
-  dropped, so a closed desktop is an indefinitely delayed exchange rather than a
-  failed one — on every path except the agent-initiated verbs, which read
-  `carrierPresent` up front and refuse `PEER_UNREACHABLE`
-  (`session-bus/api.ts`) rather than report a held frame to an agent that reads
-  every answer but a refusal as delivered.
+  loopback API as `carrierPresent`). Any other context is one this session was
+  contacted on, and its only way back is the route that brought the context in
+  (`routeFor` → `sendToAppSession`). No attached carrier means the frame is HELD
+  and retried by the coordinator, never dropped, so a closed desktop is an
+  indefinitely delayed exchange rather than a failed one — except on the
+  agent-initiated verbs, which refuse up front rather than report a held frame
+  to an agent that reads every answer but a refusal as delivered.
+- **The machine's remote-access switch gates the bus in BOTH directions, and the
+  two halves must stay in lockstep.** Outbound is `offMachineSendAllowed`, wired
+  into `session-bus/api.ts`; inbound is `remoteFrameAllowed` beside it in
+  `agent-core.ts`. Gating one and not the other ships a machine that can speak
+  and cannot be answered, because the peer's reply dies at our own inbound gate.
 - **The remote half of the directory arrives by loopback push and by nothing
   else.** The app peeks at control-plane sessions it already holds, asks each
   machine for a session-bearing `machine.capability-card`, and pushes the
@@ -201,11 +207,12 @@ the set of invariants a future edit breaks silently.
   entry that could retry it. A broadcast would additionally leak the whole
   exchange to the human's phone, which is the mirror of the sending-side
   invariant above.
-- **Every delivery into an agent is rendered, and lands at a TURN BOUNDARY.**
-  `session-bus/delivery.ts` wraps the other agent's content as fenced data —
-  never raw, never a bare instruction — and `delivery-queue.ts` holds the line
-  until the turn closes. `DeliveryKindSchema` there is the whole set of queued
-  kinds.
+- **Every delivery into an agent is rendered, and lands where a boundary is
+  observable.** `session-bus/delivery.ts` wraps the other agent's content as
+  fenced data — never raw, never a bare instruction — and `delivery-queue.ts`
+  holds the line until `busDeliverable` (`work-status.ts`) says the session is
+  clear. `DeliveryKindSchema` there is the whole set of queued kinds. An adapter
+  that declares no turn-start silently skips the turn half of that gate.
 - **The Capability Card travels on the address and may only ever be FENCED.**
   It is `SessionMemberCardSchema` on `SessionMemberRefSchema` (`protocol.ts`),
   observed by that machine's own bridge (`capability-card.ts`), and it is what
@@ -230,6 +237,11 @@ the set of invariants a future edit breaks silently.
   nothing and exists so the verb layer can order its own ladder (a halted pair
   aimed at a stopped session has to hear about the halt, which only a human
   lifts). It never replaces the check inside `message`.
+- **Nothing on the delivery path may log a character of what was said** — not
+  message text, not a summary, not a thrown adapter error's message. A log line
+  carries `lineKey`'s digest instead; why a digest and never a prefix is written
+  at `line-key.ts`. `session-bus-logging.test.ts` scans the path it drives, so a
+  new log site anywhere else is on you.
 - **`/session-bus/*` in `api-server.ts` is the loopback route table**, keyed off
   `?terminalId=` — which is what says whose session a request is about, and the
   same slot that resolves an isolated session's checkout. Bus frames route by

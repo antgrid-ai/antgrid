@@ -40,10 +40,59 @@ const root: Logger = createLogger({ destination: hub });
 // component-tagged child loggers created at module-eval time.
 const children = new Set<Logger>();
 
-/** Raise/lower the runtime level (index.ts wires `--verbose` / `--log-level`). */
-export function setLogLevel(level: Level): void {
+function applyLevel(level: Level): void {
   root.level = level;
   for (const c of children) c.level = level;
+}
+
+/** The level this process was configured to run at, which is what an armed
+ *  window lapses back to. Tracked separately from `root.level` because that one
+ *  holds whatever is in force right now, including a temporary arm. */
+let configuredLevel: Level = "info";
+let armTimer: (ReturnType<typeof setTimeout> & { unref?: () => void }) | null = null;
+
+/** Raise/lower the runtime level (index.ts wires `--verbose` / `--log-level`). */
+export function setLogLevel(level: Level): void {
+  configuredLevel = level;
+  applyLevel(level);
+}
+
+/**
+ * Run at `level` for at most `ttlMs`, then lapse back to the configured level.
+ *
+ * `--log-level` and `ANTGRID_LOG_LEVEL` are read once at startup, so reaching
+ * `debug` on a shipped bridge through them costs a restart — and a restart
+ * destroys the state under investigation. This is the way in that does not.
+ *
+ * The TTL is a dead man's switch, exactly as it is for `netwatch.armBodyCapture`
+ * and for the same reason: the only thing that ever disarms is whoever armed it,
+ * a CLI killed with SIGKILL sends no disarm, and `debug` on this bridge writes a
+ * line per queued delivery and per drain that is holding one — fine for ten
+ * minutes, wrong for a machine parked there for a week. So an arm with no expiry is the one request
+ * this refuses. Re-arming restarts the window; a `ttlMs <= 0` is the disarm and
+ * raises nothing at all.
+ */
+export function armLogLevel(level: Level, ttlMs: number): void {
+  if (armTimer) clearTimeout(armTimer);
+  armTimer = null;
+  if (!Number.isFinite(ttlMs) || ttlMs <= 0) {
+    applyLevel(configuredLevel);
+    return;
+  }
+  applyLevel(level);
+  armTimer = setTimeout(() => {
+    armTimer = null;
+    applyLevel(configuredLevel);
+  }, ttlMs) as ReturnType<typeof setTimeout> & { unref?: () => void };
+  // A diagnostic window must never be the reason the bridge outlives its work.
+  armTimer.unref?.();
+}
+
+/** What the process is writing at right now — the armed level while a window is
+ *  live, the configured one otherwise. Reported back to a caller rather than
+ *  echoing its own request, so a disarm says what it restored. */
+export function currentLogLevel(): Level {
+  return root.level as Level;
 }
 
 /**
@@ -106,5 +155,9 @@ export function redirectLogsToStderr(): void {
  */
 export function __setRootForTest(destination: DestinationStream, level: Level = "debug"): void {
   hub.target = destination;
+  // Bun shares the module cache across the whole suite, so an arm left live by
+  // one spec would lapse part-way through a later one and take the level that
+  // spec asked for with it.
+  armLogLevel("info", 0);
   setLogLevel(level);
 }

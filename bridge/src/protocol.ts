@@ -2470,8 +2470,10 @@ export const SessionBusFetchResultWire = z.object({
 /** The delivery receipt (E6), keyed by the id of the message it answers — the
  *  only honest witness that a frame arrived, since everything this side of the
  *  relay reports only that it left. It is fire-and-forget: an unacked ack is
- *  never retried, and `ok: false` is still a receipt — "this reached me", not
- *  "I liked it". No `seq`, because messages have none. */
+ *  never retried. `ok: false` is still a receipt — "this reached me", not "I
+ *  liked it" — but it stamps nothing here: the stamp renders as the peer having
+ *  taken the frame, so stamping a refusal would tell the sender the opposite of
+ *  what the peer said. No `seq`, because messages have none. */
 export const SessionBusAckWire = z.object({
   ...SessionBusBaseWire,
   messageId: z.string().min(1).max(200),
@@ -2575,7 +2577,7 @@ const SessionBusReachMachineSchema = z.object({
 const SessionBusDirectoryReachSchema = z.discriminatedUnion("scope", [
   z.object({
     scope: z.literal("machine"),
-    why: z.enum(["no-machine-id", "no-carrier"]),
+    why: z.enum(["no-machine-id", "no-carrier", "remote-access-off"]),
   }),
   z.object({
     scope: z.literal("network"),
@@ -2614,9 +2616,11 @@ const SessionBusThreadEntrySchema = z.object({
   peer: SessionMemberKeySchema,
   summary: z.string().max(MAX_SUMMARY_CHARS),
   text: z.array(z.string()),
-  /** Outbound entries only, and its absence is "no receipt yet" rather than a
-   *  failure: a receipt is fire-and-forget and an unacked message is never
-   *  retried. This read is the only surface that stamp is visible on. */
+  /** Outbound entries only: when a receipt saying the peer BRIDGE took the
+   *  frame arrived. Never that the peer's agent read it, and never that a
+   *  message from that peer can reach back here. Absent covers silence and a
+   *  refusing receipt alike — a receipt is fire-and-forget and an unacked
+   *  message is never retried. This read is the only surface it is visible on. */
   deliveredAt: z.number().optional(),
 });
 
