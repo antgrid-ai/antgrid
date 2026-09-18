@@ -2,26 +2,26 @@
 import UseCase from "../ui/UseCase.astro";
 
 // Claims verified against antgrid@583e988: bridge/src/handler/{evidence,decision,engine}.ts.
-// This example explains the mechanism without posing as a captured product run.
 //
-// A transcript, in order, with no ordinals: the three lines are a conversation
-// and the reader already knows conversations run top to bottom. The third is
-// the only one addressed to a human, and it is the only one that carries
-// amber — the same rule every scene on the page keeps.
-const handoff = [
-  { who: "You", body: "Implement the plan, then review. Show passing tests. Ask me before changing the API.", human: false },
-  { who: "Handler, to the agent", body: "Show the test output before moving on.", human: false },
-  { who: "Handler, to you", body: "The fix needs an API change. Approve it or keep the current API?", human: true },
-];
+// The right column is a mocked run drawn in the app's own idiom, not a
+// captured one: a task started normally, handed to Handler from the Arm sheet,
+// Handler doing the follow-ups, one question to the phone. It is rendered from
+// the creatives repo's HandlerTerminal composition, whose notes.md carries the
+// beat-by-beat script and the app symbols its strings are copied from; when
+// the app's Handler surfaces change, that clip is what goes stale.
+//
+// The poster is the frame with the one question to the phone: the still that
+// no-JS, prefers-reduced-motion and the OG screenshot get. Amber appears on
+// that card alone, the rule every scene on the page keeps.
 ---
 <section id="handler" class="mx-auto max-w-shell px-6 py-16 md:py-24">
-  <div class="grid gap-x-16 gap-y-10 md:grid-cols-2">
+  <div class="grid gap-x-16 gap-y-10 md:grid-cols-2 md:items-center">
     <div>
-      <h2 class="mb-6 font-display text-title font-bold text-ink">Every phase has a checkpoint. It doesn't have to be you.</h2>
+      <h2 class="mb-6 font-display text-title font-bold text-ink">Long-running task? Hand over the follow-ups.</h2>
       <p class="mb-6 max-w-xl text-lede text-muted">
-        Start a task with your coding agent. When you're ready, tell Handler what's left, how to proceed and when to ask you. It checks what the agent reports against your instructions and asks for evidence before moving on.
+        Start a task with your coding agent. When you're ready to step away, tell Handler what's left, how to proceed and when to ask you. It checks the agent's responses against your instructions, asks for missing evidence and guides the remaining work.
       </p>
-      <UseCase class="max-w-xl">Hand over the follow-ups. Get asked only when a decision is yours.</UseCase>
+      <UseCase class="max-w-xl">Research and plan together. Let Handler guide implementation and reviews, and notify you when it needs your input or reaches a checkpoint you set.</UseCase>
       {/* The limitation, on the page rather than in a code comment — a reader
           who assumes autonomy here and discovers otherwise has been mis-sold. */}
       <p class="mt-6 max-w-xl text-meta leading-relaxed text-muted2">
@@ -32,17 +32,69 @@ const handoff = [
 
     <div>
       <p class="mb-3 text-note text-muted2">An example handoff</p>
-      <ol class="ledger">
-        {handoff.map((line) => (
-          <li class="grid gap-1.5 py-5 sm:grid-cols-[11rem_minmax(0,1fr)] sm:gap-6">
-            <span class="flex items-start gap-2.5 text-note font-medium text-ink">
-              {line.human && <span class="mt-[0.55em] size-2 shrink-0 bg-amber" aria-hidden="true"></span>}
-              {line.who}
-            </span>
-            <p class="text-note leading-relaxed text-muted">“{line.body}”</p>
-          </li>
-        ))}
-      </ol>
+      {/* The clip frames its own pane in 40px of page colour on every side
+          of a 1200px frame, and that gutter cannot hold #131110 through a
+          video encode: limited-range 8-bit loses a level of it before
+          quantisation starts, and rate control gives up more on the beats
+          with a dark scrim over the pane — while the Arm sheet is up the
+          bottom gutter decodes 12,10,8 against the page's 19,17,16, which
+          reads as a dark inset frame around the clip. So the page clips the
+          gutter off rather than trying to match it: this box is the column,
+          the clip is 1200/1120 of it and hangs out by half the difference on
+          all four sides, and what shows is exactly the pane. Anything else
+          embedded from creatives needs the same treatment.
+          width/height reserve the box before the poster arrives. preload=none:
+          the poster is the page until the section is in view, and the video is
+          fetched only then. H.264 only: every browser the page targets plays
+          it, so a WebM source would never be picked and would only sit in the
+          repo. */}
+      <div class="relative overflow-hidden rounded-lg">
+        <video
+          data-handler-clip
+          class="m-[-3.571429%] block h-auto w-[107.142857%] max-w-none"
+          width="1200"
+          height="1040"
+          muted
+          loop
+          playsinline
+          preload="none"
+          poster="/handler/terminal.png"
+          aria-label="A terminal session handed to Handler: it answers the agent from your plan, asks for evidence, and sends the one decision that is yours to your phone."
+        >
+          <source src="/handler/terminal.mp4" type="video/mp4" />
+        </video>
+        {/* The pane's edge is the clip's edge now, so this ring carries the
+            pane's border across the seam. It is the app's line colour, which
+            the site's warm ramp has no token for, and it also covers the dark
+            hairline Chrome draws down the right and bottom of a video whose
+            box is a fractional number of device pixels. That hairline is made
+            at composite time: no encode, poster or CSS colour reaches it, no
+            screenshot captures it, and Firefox never draws it. */}
+        <span aria-hidden="true" class="pointer-events-none absolute inset-0 rounded-lg border border-[#27272a]"></span>
+      </div>
     </div>
   </div>
 </section>
+
+<script>
+  // Plays while the section is on screen and pauses when it leaves, so the
+  // loop costs nothing off-screen. Under reduced motion the poster stands;
+  // without JS there is no autoplay attribute, so the poster stands there too.
+  const clip = document.querySelector<HTMLVideoElement>("[data-handler-clip]");
+  const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (clip && !reduce) {
+    const io = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) {
+            clip.play().catch(() => {});
+          } else {
+            clip.pause();
+          }
+        }
+      },
+      { threshold: 0.25 },
+    );
+    io.observe(clip);
+  }
+</script>
