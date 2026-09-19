@@ -186,10 +186,12 @@ void main() {
         'attempt (rekey)', () async {
       final relay = FakeLiveRelay();
       final handshaker = FakeHandshaker.sequence([fixedKeys(1), fixedKeys(2)]);
+      final logged = <(String, Map<String, Object?>?)>[];
       final session = MachineSession(
         relay: relay,
         machineDeviceId: 'm1',
         handshaker: handshaker,
+        logger: (level, message, {fields}) => logged.add((message, fields)),
       );
       session.start();
       await session.ensureEstablished();
@@ -203,6 +205,13 @@ void main() {
         await Future<void>.delayed(const Duration(milliseconds: 10));
       }
       expect(handshaker.performCalls, 2);
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      // A rekey that succeeds otherwise looks like nothing happened; the
+      // reason is what separates this trigger from the other two.
+      final rekeys = logged.where((l) => l.$1 == 'E2E rekey started').toList();
+      expect(rekeys, hasLength(1));
+      expect(rekeys.single.$2?['reason'], 'peer-bounced');
 
       await session.dispose();
       await relay.closeStreams();
