@@ -413,7 +413,7 @@ force, which is a different and surprising answer. `--hidden` must accompany it
 or dotfiles stay invisible and the flag looks broken. (`git ls-files -o` without
 `--exclude-standard` does recurse into ignored directories — verified.)
 
-**Floor, applied on every call regardless of the flag (D9):** `--glob '!/.git/'`,
+**Floor, applied on every call regardless of the flag (D9):** `--glob '!/.git/**'`,
 the Antgrid state dir, and each config exclude — reusing `containedExcludes`
 (which explains why a worktree-rooted searcher must drop an exclude anchored
 above it), `escapeGlob`, and the leading-`/` anchor (without which `!state/`
@@ -578,7 +578,8 @@ until that directory is re-expanded, and present after.
    loaded directory as unloaded, or an unloaded one as empty. Same class as the
    `truncated` hazard already documented on that field.
 2. **`rg --files --no-ignore --hidden` walks `.git/`.** Tens of thousands of
-   objects. The `!/.git/` glob is not optional (D9).
+   objects. The `!/.git/**` glob is not optional (D9), and the `/**` is
+   load-bearing: a bare `!/.git/` is a silent no-op on ripgrep 14.
 3. **Subscription set that never shrinks.** Forget `dropSubscription` on peer
    disconnect or checkout teardown and the union is permanently everything —
    the filter appears to work and saves nothing.

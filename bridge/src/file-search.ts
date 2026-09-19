@@ -85,8 +85,8 @@ export function buildRipgrepArgs(opts: SearchOptions, projectPath: string, exclu
   // hide a `sub/state/` the project genuinely owns. The anchor alone is not
   // enough, though: on ripgrep 14, `!/X/` (and `!/X`) match NOTHING — silently
   // inert, measured four independent ways against this exact fixture (see
-  // file-find.ts's regression test and docs/file-tree-lazy-expansion-spec.md's
-  // scout report). `!/X/**` is the form that actually excludes. Do not
+  // file-find.ts's buildFindRipgrepArgs and its regression test).
+  // `!/X/**` is the form that actually excludes. Do not
   // "simplify" this back to a bare trailing slash — it compiles, it reads as
   // obviously correct, and it excludes nothing.
   for (const rel of excludes) args.push("--glob", `!/${escapeGlob(rel)}/**`);
