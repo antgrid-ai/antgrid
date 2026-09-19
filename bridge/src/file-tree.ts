@@ -1,4 +1,4 @@
-import { readdirSync, lstatSync, readFileSync, existsSync } from "node:fs";
+import { readdirSync, lstatSync, readFileSync, existsSync, realpathSync, type Dirent } from "node:fs";
 import { join, resolve, relative, extname, basename, sep } from "node:path";
 import ignore, { type Ignore } from "ignore";
 
@@ -24,6 +24,15 @@ const MAX_DEPTH = 10;
  * where it is and marks each directory it cut short; nothing already listed is
  * dropped or reordered. */
 export const MAX_TREE_NODES = 10_000;
+
+/** Entries a single `listDirectory` call may return, regardless of the
+ * budget it was handed — the per-directory ceiling under the on-demand
+ * listing model. */
+export const MAX_LISTING_ENTRIES = 2_000;
+/** Total entries a `listDirectoryBatch` call may return across every listing
+ * in the batch. See `allocateBudgets`. */
+export const MAX_BATCH_NODES = 10_000;
+
 const MAX_FILE_SIZE = 1_048_576; // 1MB
 const MAX_BINARY_FILE_SIZE = 10_485_760; // 10MB
 
@@ -118,19 +127,28 @@ function readGitignore(dir: string): Ignore | null {
  * whose patterns are anchored at that directory. A nested file is read on
  * first sight and kept for the life of the rules, exactly like the root's.
  * One deviation from Git, tolerated because it only ever hides: a nested
- * `!pattern` cannot re-include what an ancestor's rules excluded. */
+ * `!pattern` cannot re-include what an ancestor's rules excluded.
+ *
+ * `useGitignore: false` (the "show everything" variant, see D9/D10 in
+ * docs/file-tree-lazy-expansion-spec.md) turns off both the root and nested
+ * `.gitignore` consultation but keeps `DEFAULT_IGNORES` and config excludes.
+ * Nothing in `antgrid.yaml` produces config excludes today; the parameter
+ * stays because both `FileSearcher` constructions pass the Antgrid state dir
+ * through it. */
 export class IgnoreRules {
   private readonly nested = new Map<string, Ignore | null>();
 
   constructor(
     private readonly projectRoot: string,
     private readonly root: Ignore,
+    private readonly useGitignore: boolean = true,
   ) {}
 
   /** `relPath` is root-relative with `/` separators and never the root itself
    * (`ignore` throws rather than answer for "" or a path that escapes). */
   ignores(relPath: string): boolean {
     if (this.root.ignores(relPath)) return true;
+    if (!this.useGitignore) return false;
     const parts = relPath.split("/");
     for (let i = 1; i < parts.length; i++) {
       const rules = this.nestedFor(parts.slice(0, i).join("/"));
@@ -149,13 +167,39 @@ export class IgnoreRules {
   }
 }
 
-export function loadIgnoreRules(projectRoot: string, configExcludes: string[]): IgnoreRules {
+export type IgnoreRulesOptions = {
+  /** Default true. False is the tree's "show everything" variant: git's
+   * ignore rules (root AND nested) are skipped outright, not merely
+   * unconsulted — see IgnoreRules' doc comment.
+   *
+   * It is narrower than the spec's "show everything": `DEFAULT_IGNORES` still
+   * applies, so `node_modules`, `.venv`, `.next` and `.vscode` stay hidden
+   * under both variants. Splitting that list into a floor and a convenience
+   * set would change what `buildTree` — the whole-tree path every shipped app
+   * still uses — returns, so it waits for the wave that retires that path. */
+  gitignore?: boolean;
+};
+
+/** Each call re-reads the root `.gitignore` and builds a fresh matcher, and
+ * the result lives exactly as long as the caller that holds it. A
+ * process-global cache keyed by path would both outlive a deleted managed
+ * worktree and hand a rebuilt watcher the rules from before the user's last
+ * `.gitignore` edit — rebuilding the watcher is the only gesture that picks
+ * such an edit up. */
+export function loadIgnoreRules(
+  projectRoot: string,
+  configExcludes: string[],
+  opts: IgnoreRulesOptions = {},
+): IgnoreRules {
+  const gitignore = opts.gitignore !== false;
   const ig = ignore();
   ig.add(DEFAULT_IGNORES);
   if (configExcludes.length > 0) ig.add(configExcludes);
-  const rootGitignore = readGitignore(projectRoot);
-  if (rootGitignore) ig.add(rootGitignore);
-  return new IgnoreRules(projectRoot, ig);
+  if (gitignore) {
+    const rootGitignore = readGitignore(projectRoot);
+    if (rootGitignore) ig.add(rootGitignore);
+  }
+  return new IgnoreRules(projectRoot, ig, gitignore);
 }
 
 export function buildTree(
@@ -256,6 +300,236 @@ function walk(
   }
 
   return null;
+}
+
+export type DirectoryListing = {
+  path: string;
+  children: FileTreeNode[];
+  /** Cut at the caller-supplied budget — `children` is an ordered prefix, not
+   * the whole directory. See MAX_LISTING_ENTRIES / MAX_BATCH_NODES. */
+  truncated?: true;
+  /** The directory does not exist, or its resolved path escaped the
+   * checkout. Distinct from a genuinely empty directory, which answers
+   * `children: []` with no `missing` flag — collapsing the two leaves a
+   * deleted folder spinning forever in the app. */
+  missing?: true;
+};
+
+/** Entries one `listDirectory` call may EXAMINE before it gives up and marks
+ * the directory truncated. The budget bounds what a listing RETURNS, which is
+ * a different number the moment most of a directory is filtered out: a
+ * `__pycache__` holding thousands of `*.pyc` files returns nothing and would
+ * otherwise pay for every entry, once per path in the batch, on the same loop
+ * that carries PTY reads and relay pongs. */
+const MAX_LISTING_SCAN = 20_000;
+
+function containedBy(absPath: string, root: string): boolean {
+  // Case-folded on Windows, mirroring `FileWatcher.handleResolvePathRequest` —
+  // the only other containment check in the bridge that folds — because a
+  // checkout-relative path and the root it is checked against can arrive with
+  // different casing for the same drive letter.
+  const cmpPath = process.platform === "win32" ? absPath.toLowerCase() : absPath;
+  const cmpRoot = process.platform === "win32" ? root.toLowerCase() : root;
+  return cmpPath === cmpRoot || cmpPath.startsWith(cmpRoot + sep);
+}
+
+/** Resolves `relPath` (checkout-relative, `/`-separated; `""` is the root)
+ * against `projectRoot` and confirms containment, REJECTING anything that
+ * would resolve outside it rather than clamping it back in.
+ *
+ * Containment is decided on the REAL path, not only the lexical one:
+ * `resolve()` does not follow links and `lstat`'s symlink refusal inspects
+ * only a path's final component, so `vendor/etc` with `vendor` a link out of
+ * the checkout is lexically inside it and would enumerate whatever it points
+ * at — one directory per request, each reply naming the next. */
+function guardedAbsolutePath(relPath: string, projectRoot: string): string | null {
+  if (relPath.startsWith("/") || relPath.startsWith("\\") || /^[a-zA-Z]:/.test(relPath)) {
+    return null;
+  }
+  if (relPath.split(/[/\\]/).includes("..")) {
+    return null;
+  }
+
+  const normalizedRoot = resolve(projectRoot);
+  const absPath = relPath === "" ? normalizedRoot : resolve(normalizedRoot, relPath);
+  if (!containedBy(absPath, normalizedRoot)) return null;
+
+  try {
+    if (!containedBy(realpathSync.native(absPath), realpathSync.native(normalizedRoot))) return null;
+  } catch {
+    // A path that cannot be resolved cannot be vouched for either.
+    return null;
+  }
+
+  // The LEXICAL path is what the caller reads from: its entries' `relative()`
+  // spelling is the one the app asked about and will ask about again.
+  return absPath;
+}
+
+/** Depth-1 listing of one directory. There is no cross-call cache: every
+ * expand re-lists from disk, whether or not the caller already holds
+ * children for the path — the on-demand tree's only refresh gesture is
+ * collapse-then-expand, and a cache-hit branch here would remove it (see the
+ * spec's D2/D14 and Trap 10). */
+export function listDirectory(
+  relPath: string,
+  projectRoot: string,
+  rules: IgnoreRules,
+  budget: number = MAX_LISTING_ENTRIES,
+): DirectoryListing {
+  const absPath = guardedAbsolutePath(relPath, projectRoot);
+  if (absPath === null) {
+    return { path: relPath, children: [], missing: true };
+  }
+
+  let stat;
+  try {
+    stat = lstatSync(absPath);
+  } catch {
+    return { path: relPath, children: [], missing: true };
+  }
+  // A symlinked "directory" is refused the same way walk() refuses a
+  // symlinked file — never followed, never listed.
+  if (stat.isSymbolicLink() || !stat.isDirectory()) {
+    return { path: relPath, children: [], missing: true };
+  }
+
+  let entries: Dirent[];
+  try {
+    // withFileTypes so an entry the ignore rules are about to drop costs no
+    // stat at all: readdir already carries each entry's kind, and only an
+    // entry that survives every filter is ever stat'd, for its size.
+    entries = readdirSync(absPath, { withFileTypes: true });
+  } catch {
+    return { path: relPath, children: [], missing: true };
+  }
+
+  // Code-unit order first so a budget cut is deterministic and
+  // machine-independent — the same reason walk() sorts entries this way
+  // before its own cut. The display order (directories first, then
+  // localeCompare) is applied afterwards, over the surviving entries only.
+  entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+
+  const relDir = relative(projectRoot, absPath).replace(/\\/g, "/");
+  const relPrefix = relDir === "" ? "" : `${relDir}/`;
+  const cap = Math.min(Math.max(budget, 0), MAX_LISTING_ENTRIES);
+  const children: FileTreeNode[] = [];
+  let truncated = false;
+  let scanned = 0;
+
+  for (const entry of entries) {
+    if (scanned >= MAX_LISTING_SCAN) {
+      truncated = true;
+      break;
+    }
+    scanned++;
+    if (entry.isSymbolicLink()) continue;
+
+    const childRel = relPrefix + entry.name;
+    if (rules.ignores(childRel)) continue;
+
+    // The cap bites only once an entry has survived every filter, so a
+    // directory whose remaining entries were all going to be dropped anyway
+    // is not reported truncated — walk()'s depth probe draws the same line,
+    // and the app paints a "there is more here" affordance from this flag.
+    if (children.length >= cap) {
+      truncated = true;
+      break;
+    }
+
+    if (entry.isDirectory()) {
+      children.push({ name: entry.name, path: childRel, type: "directory" });
+      continue;
+    }
+    // A file needs its size, and an entry whose kind readdir declined to
+    // report (some filesystems answer UNKNOWN) needs its kind — one stat
+    // covers both, and only a surviving entry ever pays for it.
+    let childStat;
+    try {
+      childStat = lstatSync(join(absPath, entry.name));
+    } catch {
+      continue;
+    }
+    if (childStat.isSymbolicLink()) continue;
+    if (childStat.isDirectory()) {
+      children.push({ name: entry.name, path: childRel, type: "directory" });
+      continue;
+    }
+    if (!childStat.isFile()) continue;
+    children.push({
+      name: entry.name,
+      path: childRel,
+      type: "file",
+      size: childStat.size,
+      extension: extname(entry.name) || undefined,
+    });
+  }
+
+  children.sort((a, b) => {
+    if (a.type !== b.type) return a.type === "directory" ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
+
+  return {
+    path: relPath,
+    children,
+    ...(truncated ? { truncated: true as const } : {}),
+  };
+}
+
+/** Splits `total` fair-share-first across `pathCount` listings: each gets
+ * `floor(total / pathCount)`, floored back up to 1 so a batch bigger than the
+ * budget still returns something for every path rather than `pathCount`
+ * empty listings. This is only the fair-share half of the allocation — the
+ * remainder-by-need half (a listing that used less than its share handing
+ * the surplus to a listing the share cut, in request order) needs the
+ * listings' actual sizes and lives in `listDirectoryBatch`. */
+export function allocateBudgets(pathCount: number, total: number): number[] {
+  if (pathCount <= 0) return [];
+  const fairShare = Math.max(1, Math.floor(total / pathCount));
+  return new Array(pathCount).fill(fairShare);
+}
+
+/** Lists every DISTINCT path in `paths` under one shared `totalBudget`,
+ * fair-share first and remainder by need: first-come would let one huge
+ * directory starve the other 63 in a batch, so every listing starts with an
+ * equal share and a listing that finishes under its share hands the surplus
+ * to the next listing the share cut, walking the batch in REQUEST ORDER.
+ *
+ * Duplicates collapse before any of that: a path repeated n times would
+ * otherwise multiply the whole batch's cost by n for an answer the caller
+ * already holds. The result has one entry per DISTINCT path, not one per
+ * element of `paths`. */
+export function listDirectoryBatch(
+  paths: string[],
+  projectRoot: string,
+  rules: IgnoreRules,
+  totalBudget: number = MAX_BATCH_NODES,
+): DirectoryListing[] {
+  const unique = [...new Set(paths)];
+  const n = unique.length;
+  if (n === 0) return [];
+  const budgets = allocateBudgets(n, totalBudget);
+  const results = unique.map((p, i) => listDirectory(p, projectRoot, rules, budgets[i]));
+
+  let surplus = 0;
+  for (let i = 0; i < n; i++) {
+    if (!results[i].truncated) surplus += budgets[i] - results[i].children.length;
+  }
+  for (let i = 0; i < n && surplus > 0; i++) {
+    if (!results[i].truncated) continue;
+    // A listing already at the per-directory ceiling cannot return one more
+    // entry however much surplus it is offered, and re-listing it would pay a
+    // full readdir to hand back exactly what it already has.
+    const headroom = MAX_LISTING_ENTRIES - budgets[i];
+    if (headroom <= 0) continue;
+    const grant = Math.min(surplus, headroom);
+    const before = results[i].children.length;
+    results[i] = listDirectory(unique[i], projectRoot, rules, budgets[i] + grant);
+    surplus -= results[i].children.length - before;
+  }
+
+  return results;
 }
 
 const BINARY_CHECK_BYTES = 8192;

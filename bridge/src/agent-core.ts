@@ -963,6 +963,11 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     if (force) republishAb(stamped); else sendAb(stamped);
   }
 
+  // parseMessageFast validates the message TYPE alone, so file:tree:children:request's
+  // Zod `.max(64)` never runs on the live path — see git-log.ts's MAX_LOG_PAGE
+  // comment. Clamped here instead.
+  const MAX_CHILDREN_REQUEST_PATHS = 64;
+
   /** Stamps the checkout like [sendFromRuntime] but only seeds the replay
    *  cache — see MessageBus.retain. */
   function retainFromRuntime(runtime: CheckoutRuntime, msg: AbMessage): void {
@@ -1816,6 +1821,78 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       case "agent:session-action":
         void structured?.handleAgentMessage(msg);
         return;
+    }
+    // Answered here, before the `!manager` gate below: neither frame touches
+    // a PTY, and a request arriving in the gap before setupServices or after
+    // teardownServices must still get a reply — the app's `childrenLoading`
+    // has no backstop poll to fall back on the way the old whole-tree pull
+    // does, so a silent drop there spins forever.
+    if (msg.type === "file:tree:root:request" || msg.type === "file:tree:children:request") {
+      const runtime = runtimeFor(msg);
+      // Same wrong-checkout guard as file:tree:snapshot:request below:
+      // `runtimeFor` falls back to mainRuntime for an id with no runtime yet,
+      // and sendFromRuntime restamps the reply with the RESOLVED runtime's
+      // id — so a fallback answer is filtered out by the requester and
+      // force-pushes main's picture to everyone else instead.
+      if (runtime.checkout.id !== checkoutIdOf(msg)) return;
+      const fw = runtime.fileWatcher;
+      const includeIgnored = msg.includeIgnored !== false; // default TRUE (D10)
+      if (msg.type === "file:tree:root:request") {
+        if (!fw) {
+          sendFromRuntime(runtime, createMessage("file:tree:children", {
+            listings: [{ path: "", children: [], missing: true as const }],
+            seq: 0,
+          }));
+          return;
+        }
+        // `> 0` is not redundant. Seq 0 is both "this watch root has never
+        // flushed" and the seq the no-watcher answer above had to invent, so a
+        // caller holding 0 may be holding that empty root. Re-listing costs one
+        // depth-1 readdir; answering `unchanged` would leave the app empty
+        // until some unrelated edit happened to bump the seq.
+        if (msg.sinceSeq !== undefined && msg.sinceSeq > 0 && msg.sinceSeq === fw.currentSeq()) {
+          sendFromRuntime(runtime, createMessage("file:tree:unchanged", { seq: msg.sinceSeq }));
+        } else {
+          sendFromRuntime(runtime, createMessage("file:tree:children", {
+            listings: [fw.getRootListing(includeIgnored)],
+            seq: fw.currentSeq(),
+          }));
+        }
+        // Outside the branch above, same as file:tree:snapshot:request below:
+        // an unchanged tree says nothing about the decorations drawn on it.
+        trackGitRefresh(
+          runtime,
+          refreshGitStatusAttended(runtime)
+            .then(() => sendGitStatus(runtime, true))
+            .catch(() => {}),
+        );
+        return;
+      }
+      // file:tree:children:request. `paths` may be anything the wire sends —
+      // parseMessageFast never validated it (D-A) — so a non-array or a
+      // non-string entry must not reach listDirectoryBatch.
+      const asked = (Array.isArray(msg.paths) ? msg.paths : [])
+        .filter((p): p is string => typeof p === "string");
+      const distinct = [...new Set(asked)];
+      const paths = distinct.slice(0, MAX_CHILDREN_REQUEST_PATHS);
+      // Every path that survived the type filter gets a listing, even the ones
+      // the clamp refused: the reply carries no requestId and no echo of the
+      // request, so the app can only clear a path's loading flag by seeing that
+      // path named. A silently dropped path spins forever.
+      const refused = distinct.slice(MAX_CHILDREN_REQUEST_PATHS)
+        .map((p) => ({ path: p, children: [], missing: true as const }));
+      if (!fw) {
+        sendFromRuntime(runtime, createMessage("file:tree:children", {
+          listings: distinct.map((p) => ({ path: p, children: [], missing: true as const })),
+          seq: 0,
+        }));
+        return;
+      }
+      sendFromRuntime(runtime, createMessage("file:tree:children", {
+        listings: [...fw.getChildListings(paths, includeIgnored), ...refused],
+        seq: fw.currentSeq(),
+      }));
+      return;
     }
     if (!manager) return;
     const runtime = runtimeFor(msg);

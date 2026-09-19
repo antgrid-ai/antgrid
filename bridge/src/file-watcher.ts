@@ -9,7 +9,10 @@ import {
   buildTree,
   readFile,
   externalSafeImageMime,
+  listDirectory,
+  listDirectoryBatch,
   type FileTreeNode,
+  type DirectoryListing,
 } from "./file-tree";
 import type { ConnState } from "./conn-state";
 export interface ProjectInfo {
@@ -62,6 +65,11 @@ export class FileWatcher {
   private onFilesChanged?: () => void;
   private nativeWatcher: NodeFSWatcher | null = null;
   private ig: ReturnType<typeof loadIgnoreRules>;
+  /** The show-everything listing variant, built on first use. Held here and
+   *  not in a module-level cache so it dies with the watcher: a checkout's
+   *  rules must not outlive the worktree they describe, and a rebuilt watcher
+   *  is the only thing that picks up a `.gitignore` edit. */
+  private igShowAll: ReturnType<typeof loadIgnoreRules> | null = null;
   private pending: PendingChanges = {
     added: new Map(),
     modified: new Map(),
@@ -134,6 +142,28 @@ export class FileWatcher {
       opts.replayOnly ? "Cached" : "Sent",
       this.projectId,
     );
+  }
+
+  /** Ignore rules for a listing request. This is a listing-only distinction —
+   *  the watcher's own ignore prune (`handleNativeEvent`, chokidar's
+   *  `ignored`) never consults `includeIgnored` and must not start to (D14 in
+   *  docs/file-tree-lazy-expansion-spec.md). */
+  private ignoreRulesFor(includeIgnored: boolean): ReturnType<typeof loadIgnoreRules> {
+    if (!includeIgnored) return this.ig;
+    this.igShowAll ??= loadIgnoreRules(this.projectRoot, [], { gitignore: false });
+    return this.igShowAll;
+  }
+
+  /** Depth-1 listing of the checkout root, for `file:tree:root:request`. */
+  getRootListing(includeIgnored: boolean): DirectoryListing {
+    return listDirectory("", this.projectRoot, this.ignoreRulesFor(includeIgnored));
+  }
+
+  /** Depth-1 listings for a batch of paths, for `file:tree:children:request`.
+   *  Fair-share budget allocation across the batch is `listDirectoryBatch`'s
+   *  job — see file-tree.ts. */
+  getChildListings(paths: string[], includeIgnored: boolean): DirectoryListing[] {
+    return listDirectoryBatch(paths, this.projectRoot, this.ignoreRulesFor(includeIgnored));
   }
 
   startWatching(): void {
@@ -508,6 +538,17 @@ export class FileWatcher {
       // captured is incomplete at best, so send the real thing instead: the
       // same full tree a manual pull-to-refresh would rebuild.
       this.sendFullTree({ force: true });
+      // TODO(wave-6): drop the sendFullTree call above once every app speaks
+      // the on-demand listing protocol. A lazy-tree app acts on the frame
+      // below instead — it clears childrenLoaded and re-lists itself — but
+      // no app understands it yet this wave, so both go out side by side.
+      //
+      // Unforced, unlike its twin above, because `seq` was bumped earlier in
+      // this flush: consecutive resyncs therefore carry different payloads and
+      // clear the bus's payload-equality dedup on their own. Stop stamping
+      // `seq`, or move the bump below this branch, and the second resync in a
+      // row is deduped away — the apps that missed the first never learn.
+      this.sendMessage(createMessage("file:tree:invalidated", { seq }));
       log.debug("tree resync for project %s — watcher reported an unnamed change", this.projectId);
       return;
     }

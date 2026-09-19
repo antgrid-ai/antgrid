@@ -5,8 +5,12 @@ import {
   loadIgnoreRules,
   countNodes,
   externalSafeImageMime,
+  listDirectory,
+  listDirectoryBatch,
+  allocateBudgets,
+  MAX_BATCH_NODES,
 } from "../src/file-tree";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -219,6 +223,231 @@ describe("file-tree", () => {
 
       expect(node.children).toEqual([]);
       expect(node.truncated).toBeUndefined();
+    });
+  });
+
+  describe("listDirectory", () => {
+    it("returns only immediate entries — a grandchild is absent", () => {
+      mkdirSync(join(tempDir, "a", "sub"), { recursive: true });
+      writeFileSync(join(tempDir, "a", "sub", "deep.txt"), "");
+      writeFileSync(join(tempDir, "a", "shallow.txt"), "");
+
+      const listing = listDirectory("a", tempDir, loadIgnoreRules(tempDir, []));
+      expect(listing.children.map((c) => c.name)).toEqual(["sub", "shallow.txt"]);
+      // Depth-1: the "sub" entry names the directory but does not walk into it.
+      expect(listing.children.find((c) => c.name === "sub")!.children).toBeUndefined();
+    });
+
+    it("omits symlink entries entirely from a listing", () => {
+      writeFileSync(join(tempDir, "real.txt"), "");
+      const linkTarget = mkdtempSync(join(tmpdir(), "antgrid-tree-link-target-"));
+      symlinkSync(linkTarget, join(tempDir, "linked"), process.platform === "win32" ? "junction" : "dir");
+
+      const listing = listDirectory("", tempDir, loadIgnoreRules(tempDir, []));
+      expect(listing.children.map((c) => c.name)).toEqual(["real.txt"]);
+
+      rmSync(linkTarget, { recursive: true, force: true });
+    });
+
+    it("rejects a relPath containing .. segments outright", () => {
+      const listing = listDirectory("../outside", tempDir, loadIgnoreRules(tempDir, []));
+      expect(listing.missing).toBe(true);
+      expect(listing.children).toEqual([]);
+    });
+
+    it("rejects an absolute relPath outright", () => {
+      const listing = listDirectory("/etc", tempDir, loadIgnoreRules(tempDir, []));
+      expect(listing.missing).toBe(true);
+    });
+
+    it.skipIf(process.platform !== "win32")(
+      "rejects an escaping path even when the root is spelled with a different drive-letter case",
+      () => {
+        const upperRoot = tempDir.charAt(0).toUpperCase() + tempDir.slice(1);
+        const listing = listDirectory("../outside", upperRoot, loadIgnoreRules(tempDir, []));
+        expect(listing.missing).toBe(true);
+      },
+    );
+
+    it.skipIf(process.platform !== "win32")(
+      "does not mistake a path inside the checkout for outside because of drive-letter case",
+      () => {
+        writeFileSync(join(tempDir, "a.txt"), "");
+        const lowerRoot = tempDir.charAt(0).toLowerCase() + tempDir.slice(1);
+        const listing = listDirectory("", lowerRoot, loadIgnoreRules(tempDir, []));
+        expect(listing.missing).toBeUndefined();
+        expect(listing.children.map((c) => c.name)).toEqual(["a.txt"]);
+      },
+    );
+
+    it("answers missing for a directory that does not exist", () => {
+      const listing = listDirectory("does-not-exist", tempDir, loadIgnoreRules(tempDir, []));
+      expect(listing.missing).toBe(true);
+      expect(listing.children).toEqual([]);
+    });
+
+    it("answers an empty children array, with no missing flag, for a genuinely empty directory", () => {
+      mkdirSync(join(tempDir, "empty"));
+      const listing = listDirectory("empty", tempDir, loadIgnoreRules(tempDir, []));
+      expect(listing.children).toEqual([]);
+      expect(listing.missing).toBeUndefined();
+    });
+
+    it("matches buildTree's sort order for the same directory", () => {
+      mkdirSync(join(tempDir, "zeta"));
+      mkdirSync(join(tempDir, "Alpha"));
+      writeFileSync(join(tempDir, "beta.txt"), "");
+      writeFileSync(join(tempDir, "Aardvark.txt"), "");
+
+      const rules = loadIgnoreRules(tempDir, []);
+      const tree = buildTree(tempDir, tempDir, rules)!;
+      const listing = listDirectory("", tempDir, rules);
+
+      expect(listing.children.map((c) => c.name)).toEqual(tree.children!.map((c) => c.name));
+    });
+
+    it("includeIgnored true vs false differ exactly by the gitignored set, never by .git or .antgrid", () => {
+      writeFileSync(join(tempDir, ".gitignore"), "build\n");
+      mkdirSync(join(tempDir, "build"));
+      writeFileSync(join(tempDir, "build", "out.js"), "");
+      writeFileSync(join(tempDir, "src.ts"), "");
+      mkdirSync(join(tempDir, ".git"));
+      writeFileSync(join(tempDir, ".git", "HEAD"), "");
+      mkdirSync(join(tempDir, ".antgrid"));
+      writeFileSync(join(tempDir, ".antgrid", "state.json"), "");
+
+      const respecting = loadIgnoreRules(tempDir, [], { gitignore: true });
+      const showAll = loadIgnoreRules(tempDir, [], { gitignore: false });
+
+      const withGit = listDirectory("", tempDir, respecting).children.map((c) => c.name).sort();
+      const withoutGit = listDirectory("", tempDir, showAll).children.map((c) => c.name).sort();
+
+      // The only difference between the two variants is the gitignored "build".
+      expect(withoutGit).toEqual([...withGit, "build"].sort());
+      expect(withGit).not.toContain("build");
+
+      // DEFAULT_IGNORES applies under both flags, which is wider than the
+      // spec's floor — node_modules and friends stay hidden even in the
+      // show-everything variant. See IgnoreRulesOptions.gitignore.
+      for (const listing of [withGit, withoutGit]) {
+        expect(listing).not.toContain(".git");
+        expect(listing).not.toContain(".antgrid");
+      }
+    });
+
+    it("keeps hiding DEFAULT_IGNORES entries under the show-everything variant", () => {
+      mkdirSync(join(tempDir, "node_modules"));
+      writeFileSync(join(tempDir, "node_modules", "pkg.js"), "");
+      writeFileSync(join(tempDir, "src.ts"), "");
+
+      const showAll = loadIgnoreRules(tempDir, [], { gitignore: false });
+      const names = listDirectory("", tempDir, showAll).children.map((c) => c.name);
+      expect(names).toEqual(["src.ts"]);
+    });
+
+    it("refuses a path whose ANCESTOR is a symlink out of the checkout", () => {
+      const outside = mkdtempSync(join(tmpdir(), "antgrid-tree-outside-"));
+      mkdirSync(join(outside, "secrets"));
+      writeFileSync(join(outside, "secrets", "creds.txt"), "shh");
+      symlinkSync(outside, join(tempDir, "link"), process.platform === "win32" ? "junction" : "dir");
+
+      // The final component is a real directory and the path is lexically
+      // inside the root — only resolving the link catches it.
+      const listing = listDirectory("link/secrets", tempDir, loadIgnoreRules(tempDir, []));
+      expect(listing.missing).toBe(true);
+      expect(listing.children).toEqual([]);
+
+      rmSync(outside, { recursive: true, force: true });
+    });
+
+    it("does not report truncated when the entries past the cap were all ignored", () => {
+      writeFileSync(join(tempDir, ".gitignore"), "*.log\n");
+      mkdirSync(join(tempDir, "d"));
+      writeFileSync(join(tempDir, "d", "a.txt"), "");
+      writeFileSync(join(tempDir, "d", "b.log"), "");
+      writeFileSync(join(tempDir, "d", "c.log"), "");
+
+      // Budget 1, and the only surviving entry fits in it: everything after it
+      // was going to be dropped anyway, so the app must not draw a
+      // "there is more here" affordance over a complete listing.
+      const listing = listDirectory("d", tempDir, loadIgnoreRules(tempDir, []), 1);
+      expect(listing.children.map((c) => c.name)).toEqual(["a.txt"]);
+      expect(listing.truncated).toBeUndefined();
+    });
+
+    it("gitignore: false skips nested .gitignore files too, not just the root one", () => {
+      mkdirSync(join(tempDir, "a"));
+      writeFileSync(join(tempDir, "a", ".gitignore"), "*.log\n");
+      writeFileSync(join(tempDir, "a", "x.log"), "");
+      writeFileSync(join(tempDir, "a", "keep.ts"), "");
+
+      const showAll = loadIgnoreRules(tempDir, [], { gitignore: false });
+      const listing = listDirectory("a", tempDir, showAll);
+      expect(listing.children.map((c) => c.name).sort()).toEqual([".gitignore", "keep.ts", "x.log"]);
+    });
+  });
+
+  describe("allocateBudgets / listDirectoryBatch", () => {
+    it("gives every path at least one slot when paths outnumber the total budget", () => {
+      const budgets = allocateBudgets(20_000, MAX_BATCH_NODES);
+      expect(budgets).toHaveLength(20_000);
+      expect(budgets.every((b) => b >= 1)).toBe(true);
+    });
+
+    it("gives a single path the whole budget", () => {
+      expect(allocateBudgets(1, MAX_BATCH_NODES)).toEqual([MAX_BATCH_NODES]);
+    });
+
+    it("collapses a repeated path instead of listing it once per occurrence", () => {
+      mkdirSync(join(tempDir, "hot"));
+      writeFileSync(join(tempDir, "hot", "a.txt"), "");
+
+      const results = listDirectoryBatch(
+        new Array(64).fill("hot"),
+        tempDir,
+        loadIgnoreRules(tempDir, []),
+      );
+      expect(results).toHaveLength(1);
+      expect(results[0].children.map((c) => c.name)).toEqual(["a.txt"]);
+    });
+
+    it("allocates fair-share across a 64-path batch and redistributes surplus in request order", () => {
+      const dirs: string[] = [];
+      for (let i = 0; i < 64; i++) {
+        const name = `dir${i}`;
+        mkdirSync(join(tempDir, name));
+        dirs.push(name);
+      }
+      // dir0 needs far more than its fair share of a 64-unit budget (1 each);
+      // dir1 needs exactly its share; the other 62 need none of it.
+      for (let i = 0; i < 100; i++) {
+        writeFileSync(join(tempDir, "dir0", `f${i}.txt`), "");
+      }
+      writeFileSync(join(tempDir, "dir1", "only.txt"), "");
+
+      const rules = loadIgnoreRules(tempDir, []);
+      const results = listDirectoryBatch(dirs, tempDir, rules, 64);
+
+      expect(results).toHaveLength(64);
+
+      // dir1 fit inside its own fair share and is never marked truncated.
+      expect(results[1].truncated).toBeUndefined();
+      expect(results[1].children.map((c) => c.name)).toEqual(["only.txt"]);
+
+      // The 62 empty directories hand their whole share back as surplus.
+      for (let i = 2; i < 64; i++) {
+        expect(results[i].children).toEqual([]);
+        expect(results[i].truncated).toBeUndefined();
+      }
+
+      // dir0 receives every unit of surplus the other 63 listings did not
+      // need (63 units, on top of its own 1), but 100 real files still
+      // exceeds the 64 total the batch was given, so it stays truncated.
+      expect(results[0].truncated).toBe(true);
+      expect(results[0].children.length).toBe(63);
+
+      const total = results.reduce((sum, r) => sum + r.children.length, 0);
+      expect(total).toBeLessThanOrEqual(64);
     });
   });
 
