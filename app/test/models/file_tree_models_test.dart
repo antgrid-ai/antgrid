@@ -91,6 +91,79 @@ void main() {
       expect(FileNode.fromJson(json), isNull);
     });
 
+    test('a file always reads childrenLoaded true, regardless of the wire', () {
+      final node = FileNode.fromJson({
+        'name': 'foo.ts',
+        'path': 'src/foo.ts',
+        'type': 'file',
+      });
+      expect(node, isNotNull);
+      expect(node!.childrenLoaded, isTrue);
+    });
+
+    test(
+      'a directory whose json carried a children list reads childrenLoaded true, even when empty',
+      () {
+        final node = FileNode.fromJson({
+          'name': 'empty',
+          'path': 'empty',
+          'type': 'directory',
+          'children': <Map<String, dynamic>>[],
+        });
+        expect(node, isNotNull);
+        expect(node!.childrenLoaded, isTrue);
+        expect(node.children, isEmpty);
+      },
+    );
+
+    test(
+      'a directory whose json carried no children key reads childrenLoaded false',
+      () {
+        // Depth-1 listing shape: a subdirectory named as an entry but not
+        // itself recursed into.
+        final node = FileNode.fromJson({
+          'name': 'unexpanded',
+          'path': 'unexpanded',
+          'type': 'directory',
+        });
+        expect(node, isNotNull);
+        expect(node!.childrenLoaded, isFalse);
+        expect(node.children, isEmpty);
+      },
+    );
+
+    test('childrenLoading is never read from the wire', () {
+      final node = FileNode.fromJson({
+        'name': 'foo.ts',
+        'path': 'src/foo.ts',
+        'type': 'file',
+        'childrenLoading': true,
+      });
+      expect(node, isNotNull);
+      expect(node!.childrenLoading, isFalse);
+    });
+
+    test('reads the ignored flag', () {
+      final node = FileNode.fromJson({
+        'name': 'dist',
+        'path': 'dist',
+        'type': 'directory',
+        'ignored': true,
+      });
+      expect(node, isNotNull);
+      expect(node!.ignored, isTrue);
+    });
+
+    test('ignored defaults to false when absent', () {
+      final node = FileNode.fromJson({
+        'name': 'src',
+        'path': 'src',
+        'type': 'directory',
+      });
+      expect(node, isNotNull);
+      expect(node!.ignored, isFalse);
+    });
+
     test('sorts children: directories first, then alphabetical by name', () {
       final json = {
         'name': 'root',
@@ -113,6 +186,76 @@ void main() {
         'zebra.ts',
       ]);
     });
+  });
+
+  group('FileNode rebuild hazard', () {
+    // FileNode has no copyWith — every "rebuild" in the codebase (the merge
+    // helpers in FileService, the synthetic Git-changes tree in
+    // file_tree_view.dart) hand-writes `FileNode(...)` and must carry every
+    // field forward itself, or a rebuild silently resets it to the
+    // constructor default. This pins that a value CAN survive a hand rebuild
+    // when carried explicitly — the same contract truncated already relies
+    // on.
+    test(
+      'a hand rebuild that carries every field preserves childrenLoaded, childrenLoading, truncated and ignored',
+      () {
+        const original = FileNode(
+          name: 'dist',
+          path: 'dist',
+          type: FileNodeType.directory,
+          children: [],
+          truncated: true,
+          childrenLoaded: true,
+          childrenLoading: true,
+          ignored: true,
+        );
+
+        final rebuilt = FileNode(
+          name: original.name,
+          path: original.path,
+          type: original.type,
+          size: original.size,
+          extension: original.extension,
+          children: original.children,
+          truncated: original.truncated,
+          childrenLoaded: original.childrenLoaded,
+          childrenLoading: original.childrenLoading,
+          ignored: original.ignored,
+        );
+
+        expect(rebuilt.truncated, isTrue);
+        expect(rebuilt.childrenLoaded, isTrue);
+        expect(rebuilt.childrenLoading, isTrue);
+        expect(rebuilt.ignored, isTrue);
+      },
+    );
+
+    test(
+      'a hand rebuild that OMITS a field silently resets it to the constructor default',
+      () {
+        const original = FileNode(
+          name: 'dist',
+          path: 'dist',
+          type: FileNodeType.directory,
+          childrenLoaded: false,
+          childrenLoading: true,
+          ignored: true,
+        );
+
+        // Forgets childrenLoaded/childrenLoading/ignored — exactly the
+        // hazard this wave exists to make each call site avoid.
+        final rebuilt = FileNode(
+          name: original.name,
+          path: original.path,
+          type: original.type,
+          children: original.children,
+        );
+
+        expect(rebuilt.childrenLoaded, isTrue); // default, NOT original.false
+        expect(rebuilt.childrenLoading, isFalse); // default, NOT original.true
+        expect(rebuilt.ignored, isFalse); // default, NOT original.true
+      },
+    );
   });
 
   group('FileTreeState', () {

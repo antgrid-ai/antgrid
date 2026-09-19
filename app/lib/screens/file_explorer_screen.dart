@@ -30,6 +30,7 @@ import '../design/widgets/ab_loading.dart';
 import '../design/widgets/ab_search_field.dart';
 import '../design/widgets/ab_separator.dart';
 import '../design/widgets/ab_toolbar.dart';
+import '../util/detached.dart';
 
 /// The main file explorer screen with an inline search panel that can be
 /// toggled via a search icon. When search is inactive, shows the file tree.
@@ -292,7 +293,11 @@ class _FileExplorerBody extends ConsumerWidget {
         expandedPaths: state.expandedPaths,
         selectedFilePath: state.files.selectedFilePath,
         filterQuery: null,
-        onToggleExpanded: (path) => fileService.toggleExpanded(path),
+        onToggleExpanded: (path) => detached(
+          'FileExplorerScreen',
+          'expand folder',
+          () => fileService.toggleExpanded(path),
+        ),
         onFileSelected: (path) => fileService.selectFile(path),
       ),
     );

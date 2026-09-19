@@ -191,6 +191,12 @@ void main() {
       {'type': 'file:read', 'path': kDemoFileContents.keys.first},
       {'type': 'file:read', 'path': 'not/in/the/sample.ts'},
       {'type': 'file:tree:snapshot:request'},
+      {'type': 'file:tree:root:request', 'includeIgnored': true},
+      {
+        'type': 'file:tree:children:request',
+        'paths': <String>['src'],
+        'includeIgnored': true,
+      },
       {'type': 'preview:snapshot:request'},
       {
         'type': 'terminal:subscribe',

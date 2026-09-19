@@ -39,6 +39,19 @@ class FileService {
   final Set<Object> _treeOwners = {};
   bool get hasTreeInterest => _treeOwners.isNotEmpty;
 
+  /// The seq of the last `file:tree:children` listing this service applied
+  /// for each path (root included, under `''`), paired with the establishment
+  /// that issued it — the per-path freshness gate a rapid double-expand
+  /// needs. `file:tree:children:request` carries no id to echo, so the
+  /// bridge's own revision counter is the only thing that tells a reply's
+  /// request apart from an earlier one for the SAME path; see
+  /// [_isFreshListing]. The epoch is not optional: the counter is
+  /// per-agent-PROCESS and restarts at zero, so a seq compared across a
+  /// restart judges every listing the new agent sends as stale and freezes
+  /// the tree for the life of the service — the same hazard [_claimableSeq]
+  /// guards [_snapshotSeq] against.
+  final Map<String, ({int seq, int epoch})> _listingSeq = {};
+
   void setTreeInterest(Object owner, bool interested) {
     if (_disposed) return;
     final hadInterest = hasTreeInterest;
@@ -49,13 +62,13 @@ class FileService {
     }
     if (hadInterest == hasTreeInterest) return;
     if (hasTreeInterest) {
-      session.hydrateCheckout(checkoutId, _treeHydratorKey, _pullTree);
+      session.hydrateCheckout(checkoutId, _treeHydratorKey, _hydrateTree);
       // Background suppression drops deltas, so a visible tree must validate its
       // revision even when resuming did not establish a new transport.
       _resumeSub ??= session.focusResumed.listen(
         (_) =>
             detached('FileService', 'tree re-pull on focus resume', () async {
-              if (hasTreeInterest) await _pullTree();
+              if (hasTreeInterest) await _hydrateTree();
             }),
       );
     } else {
@@ -208,8 +221,88 @@ class FileService {
 
   Future<void> _requestTree({int? sinceSeq}) => session.sendForCheckout(
     checkoutId,
-    createAbMessage('file:tree:snapshot:request', {'sinceSeq': ?sinceSeq}),
+    createAbMessage('file:tree:root:request', {
+      'sinceSeq': ?sinceSeq,
+      // Never rely on the bridge's Zod default — parseMessageFast validates
+      // only the message TYPE, so an omitted field arrives as `undefined`,
+      // never `true` (D10: the tree shows git-ignored files by default).
+      'includeIgnored': true,
+    }),
   );
+
+  /// Tier-3 hydrator for the whole visible tree: re-confirms the root
+  /// revision via [_pullTree], then re-lists every directory the user
+  /// currently has open. Doubles as the recovery path for a directory whose
+  /// `file:tree:children:request` never got answered — a checkout torn down
+  /// mid-flight, a reconnect racing the reply, or a relay drop — since
+  /// nothing else ever clears [FileNode.childrenLoading]: the next
+  /// (re)establishment simply re-issues the request rather than leaving the
+  /// folder spinning forever.
+  Future<void> _hydrateTree() async {
+    await _pullTree();
+    await _fetchChildrenChunked(_state.expandedPaths);
+  }
+
+  static const int _childrenRequestBatchLimit = 64;
+
+  /// Fetches every path in [paths] in batches of at most 64, issued
+  /// concurrently and applied as each lands — restoring 100 remembered
+  /// folders costs 2 round trips, not 100. The limit matches the bridge's
+  /// own clamp (`MAX_CHILDREN_REQUEST_PATHS`): understating it here would
+  /// not cost more round trips, it would silently LOSE paths past the clamp.
+  ///
+  /// Shallowest-first, so a chunk's replies can be placed under parents that
+  /// are already on the spine — see [_handleChildrenMessage].
+  Future<void> _fetchChildrenChunked(Iterable<String> paths) {
+    final ordered = paths.toSet().toList()
+      ..sort((a, b) => _depthOf(a).compareTo(_depthOf(b)));
+    if (ordered.isEmpty) return Future.value();
+    _markLoading(ordered);
+    final sends = <Future<void>>[];
+    for (var i = 0; i < ordered.length; i += _childrenRequestBatchLimit) {
+      final end = i + _childrenRequestBatchLimit < ordered.length
+          ? i + _childrenRequestBatchLimit
+          : ordered.length;
+      sends.add(_requestChildren(ordered.sublist(i, end)));
+    }
+    return Future.wait(sends);
+  }
+
+  int _depthOf(String path) => path.isEmpty ? 0 : path.split('/').length;
+
+  /// Marks every directory about to be listed as pending, so the tree's
+  /// loading row covers the expanded-set restore, reveal, select and the
+  /// post-invalidation re-list — not just a manual expand. Without it an
+  /// expanded directory that has never been listed renders identically to an
+  /// empty one for the whole round trip, and indefinitely if the reply is
+  /// dropped. Cleared by [_applyListing].
+  void _markLoading(Iterable<String> paths) {
+    final current = _state.root;
+    if (current == null) return;
+    var root = current;
+    for (final path in paths) {
+      if (path.isEmpty) continue;
+      root = _updateAt(
+        root,
+        path,
+        (dir) => _rebuild(dir, childrenLoading: true),
+      );
+    }
+    if (!identical(root, current)) {
+      _setState(_state.copyWith(root: root));
+    }
+  }
+
+  Future<void> _requestChildren(List<String> paths) {
+    if (paths.isEmpty) return Future.value();
+    return session.sendForCheckout(
+      checkoutId,
+      createAbMessage('file:tree:children:request', {
+        'paths': paths,
+        'includeIgnored': true,
+      }),
+    );
+  }
 
   void _setState(FileTreeState state) {
     if (_disposed) return;
@@ -220,10 +313,14 @@ class FileService {
   void _onHeavyJson(Map<String, dynamic> json) {
     final parsed = parseAbMessage(json);
     if (parsed == null) return;
+    // TODO(wave-6): nothing here sends `file:tree:snapshot:request` any more
+    // (see [_requestTree]), but the bridge answers it on the BUS, so a
+    // second client still running the whole-tree build makes its reply
+    // arrive here. Applying it would swap the lazily-listed, show-all tree
+    // for the legacy ignore-respecting depth-capped one and move the seq
+    // claim with it. Delete alongside the bridge's
+    // `case "file:tree:snapshot:request"` and [_handleTreeFull].
     if (parsed is FileTreeSnapshotMessage) {
-      _treeRecoveryPending = false;
-      _rememberSeq(parsed.seq);
-      _setState(_state.copyWith(root: parsed.tree));
       return;
     }
     if (parsed is FileTreeUnchangedMessage) {
@@ -235,12 +332,20 @@ class FileService {
       }
       return;
     }
+    if (parsed is FileTreeChildrenMessage) {
+      _handleChildrenMessage(parsed);
+      return;
+    }
+    if (parsed is FileTreeInvalidatedMessage) {
+      _handleInvalidated(parsed);
+      return;
+    }
     if (parsed is TreeUpdateMessage) {
       final seq = parsed.seq;
       if (seq != null && _snapshotSeq >= 0 && seq <= _snapshotSeq) {
         return; // stale — drop
       }
-      _mergeTreeUpdate(parsed);
+      _applyTreeUpdate(parsed);
       // Only a CONTIGUOUS delta may advance the base. A gap means the agent
       // suppressed updates while this app was backgrounded and dropped them
       // (it keeps counting through a suppression window), so the tree here is
@@ -259,11 +364,6 @@ class FileService {
       return;
     }
     if (parsed is TreeFullMessage) {
-      _treeRecoveryPending = false;
-      final seq = parsed.seq;
-      if (seq != null && _snapshotSeq >= 0 && seq <= _snapshotSeq) {
-        return;
-      }
       _handleTreeFull(parsed);
       return;
     }
@@ -400,47 +500,381 @@ class FileService {
     );
   }
 
-  void _handleTreeFull(TreeFullMessage msg) {
-    final preserveExpanded = msg.projectId == _state.projectId;
-    // A re-sync push carries the revision it was built at, so the base moves
-    // with the tree it replaces. An agent too old to stamp one leaves the base
-    // where it was, which costs a full pull on the next resume and nothing else.
-    final seq = msg.seq;
-    if (seq != null && seq > _snapshotSeq) _rememberSeq(seq);
-    _setState(
-      _state.copyWith(
-        root: msg.root,
-        projectId: msg.projectId,
-        expandedPaths: preserveExpanded ? _state.expandedPaths : {},
-      ),
-    );
-  }
+  // TODO(wave-6): the bridge still force-resends the whole tree on watcher
+  // overflow; this app now reacts to the sibling `file:tree:invalidated`
+  // push instead (see [_handleInvalidated]) and ignores this one entirely.
+  // Remove the bridge's resend once every deployed app speaks
+  // file:tree:root, and delete this method then.
+  void _handleTreeFull(TreeFullMessage msg) {}
 
-  void _mergeTreeUpdate(TreeUpdateMessage msg) {
+  /// Applies an incremental `tree:update` delta using the same
+  /// identity-preserving spine copy [_handleChildrenMessage] uses — see
+  /// [_updateAt]. A delta into a directory this app has never fetched has
+  /// nothing to insert INTO (dropped); a delta into one whose listing was
+  /// TRUNCATED cannot be inserted locally either — `children` there is an
+  /// ordered PREFIX, and there is no way to know whether the changed node
+  /// belongs inside that prefix or past the cut the bridge already made — so
+  /// that directory is queued for [_fetchChildrenChunked] instead.
+  void _applyTreeUpdate(TreeUpdateMessage msg) {
     final currentRoot = _state.root;
     if (currentRoot == null) return;
 
-    var newRoot = _cloneNode(currentRoot);
+    var root = currentRoot;
+    final relist = <String>{};
 
     for (final removedPath in msg.removed) {
-      newRoot = _removeNode(newRoot, removedPath);
+      root = _applyToParent(root, removedPath, relist, (parent) {
+        final children = parent.children
+            .where((c) => c.path != removedPath)
+            .toList();
+        return _rebuild(parent, children: children);
+      });
     }
 
     for (final node in [...msg.added, ...msg.modified]) {
-      newRoot = _insertOrReplaceNode(newRoot, node);
+      root = _applyToParent(root, node.path, relist, (parent) {
+        FileNode? prior;
+        for (final child in parent.children) {
+          if (child.path == node.path) prior = child;
+        }
+        final children = _sorted([
+          ...parent.children.where((c) => c.path != node.path),
+          _deltaNode(node, prior),
+        ]);
+        return _rebuild(parent, children: children);
+      });
     }
 
     final viewingModified =
         _state.files.selectedFilePath != null &&
         msg.modified.any((node) => node.path == _state.files.selectedFilePath);
 
-    _setState(
-      _state.copyWith(
-        root: newRoot,
-        files: viewingModified
-            ? _state.files.copyWith(fileModifiedExternally: true)
-            : _state.files,
+    if (!identical(root, currentRoot) || viewingModified) {
+      _setState(
+        _state.copyWith(
+          root: root,
+          files: viewingModified
+              ? _state.files.copyWith(fileModifiedExternally: true)
+              : _state.files,
+        ),
+      );
+    }
+
+    if (relist.isNotEmpty) {
+      detached(
+        'FileService',
+        're-list truncated directory after a delta',
+        () => _fetchChildrenChunked(relist),
+      );
+    }
+  }
+
+  /// Reconciles one `tree:update` entry with what the app already holds at
+  /// that path.
+  ///
+  /// A delta entry for a DIRECTORY is not a listing. `FileWatcher.onDirAdded`
+  /// emits `children: []` without ever reading the directory — and on Windows
+  /// and macOS the native recursive watcher raises a directory event for the
+  /// parent of every file write — so [FileNode.fromJson]'s "a `children` key
+  /// means the bridge listed it" rule reads it as an authoritative empty and
+  /// blanks whatever was expanded there. Neither the carried-over state nor
+  /// the unloaded fallback can be wrong: the bridge did not look inside.
+  FileNode _deltaNode(FileNode node, FileNode? prior) {
+    if (node.type != FileNodeType.directory) return node;
+    if (prior == null || prior.type != FileNodeType.directory) {
+      return _rebuild(node, children: const [], childrenLoaded: false);
+    }
+    return _rebuild(
+      node,
+      children: prior.children,
+      truncated: prior.truncated,
+      childrenLoaded: prior.childrenLoaded,
+      childrenLoading: prior.childrenLoading,
+    );
+  }
+
+  /// Routes one `tree:update` entry (add/modify/remove, named by
+  /// [targetPath]) to its parent directory and applies [edit] to it — or, if
+  /// the parent is not loaded or is truncated, leaves [root] untouched (and
+  /// for a truncated parent, records it in [relist]). See
+  /// [_applyTreeUpdate]'s doc for why those two cases cannot apply locally.
+  FileNode _applyToParent(
+    FileNode root,
+    String targetPath,
+    Set<String> relist,
+    FileNode Function(FileNode parent) edit,
+  ) {
+    final parts = targetPath.split('/');
+    final parentPath = parts.length <= 1
+        ? ''
+        : parts.sublist(0, parts.length - 1).join('/');
+    final parent = _findNode(root, parentPath);
+    if (parent == null || !parent.childrenLoaded) return root;
+    if (parent.truncated) {
+      // A re-list already in flight covers every delta that lands while it
+      // is out — without this a directory under a build's churn re-lists up
+      // to 2000 nodes on every 6 Hz flush, which is the traffic this whole
+      // change exists to cut.
+      if (!parent.childrenLoading) relist.add(parentPath);
+      return root;
+    }
+    return _updateAt(root, parentPath, edit);
+  }
+
+  /// Read-only lookup by path — the root's own path is `''`.
+  FileNode? _findNode(FileNode node, String path) {
+    if (node.path == path) return node;
+    if (node.type != FileNodeType.directory) return null;
+    for (final child in node.children) {
+      if (path == child.path || path.startsWith('${child.path}/')) {
+        return _findNode(child, path);
+      }
+    }
+    return null;
+  }
+
+  /// Rebuilds only the spine from [root] down to the directory at [dirPath],
+  /// applying [fn] to it and reusing every sibling subtree BY REFERENCE. The
+  /// merge path this replaced deep-cloned the whole tree on every delta — at
+  /// up to 6 Hz, on the UI thread — for a change that in practice touches
+  /// one directory a few levels deep. A
+  /// [dirPath] this service has never listed has no node on the spine to
+  /// find, and the walk below simply returns [root] unchanged for it — the
+  /// "drop a delta into an unloaded directory" contract [_applyToParent]
+  /// relies on for the shallower unloaded-parent case, and load-bearing on
+  /// its own wherever a caller passes a path with no live caller-side check.
+  FileNode _updateAt(
+    FileNode root,
+    String dirPath,
+    FileNode Function(FileNode dir) fn,
+  ) {
+    if (root.path == dirPath) return fn(root);
+    if (root.type != FileNodeType.directory) return root;
+    for (var i = 0; i < root.children.length; i++) {
+      final child = root.children[i];
+      if (dirPath == child.path || dirPath.startsWith('${child.path}/')) {
+        final newChild = _updateAt(child, dirPath, fn);
+        if (identical(newChild, child)) return root;
+        final newChildren = List<FileNode>.of(root.children);
+        newChildren[i] = newChild;
+        return _rebuild(root, children: newChildren);
+      }
+    }
+    return root;
+  }
+
+  /// Rebuilds [node] with the given fields overridden, everything else
+  /// (including [FileNode.ignored], which nothing here ever sets — wave 5)
+  /// carried over unchanged. The one node constructor every spine-copy site
+  /// below goes through, so a field added to [FileNode] only has to be
+  /// threaded here.
+  FileNode _rebuild(
+    FileNode node, {
+    List<FileNode>? children,
+    bool? truncated,
+    bool? childrenLoaded,
+    bool? childrenLoading,
+  }) => FileNode(
+    name: node.name,
+    path: node.path,
+    type: node.type,
+    size: node.size,
+    extension: node.extension,
+    children: children ?? node.children,
+    truncated: truncated ?? node.truncated,
+    childrenLoaded: childrenLoaded ?? node.childrenLoaded,
+    childrenLoading: childrenLoading ?? node.childrenLoading,
+    ignored: node.ignored,
+  );
+
+  List<FileNode> _sorted(List<FileNode> nodes) {
+    final sorted = List<FileNode>.of(nodes);
+    sorted.sort((a, b) {
+      if (a.type == FileNodeType.directory &&
+          b.type != FileNodeType.directory) {
+        return -1;
+      }
+      if (a.type != FileNodeType.directory &&
+          b.type == FileNodeType.directory) {
+        return 1;
+      }
+      return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+    });
+    return sorted;
+  }
+
+  /// Reply to both `file:tree:root:request` and `file:tree:children:request`
+  /// — the two are told apart by whether [FileTreeChildrenMessage.listings]
+  /// carries a `path: ""` entry, never by message type.
+  void _handleChildrenMessage(FileTreeChildrenMessage msg) {
+    // Shallowest-first whatever order the bridge answered in: a listing can
+    // only be placed under a parent already on the spine, so applying a
+    // child's listing before its parent's is the one order guaranteed to
+    // lose it.
+    final ordered = msg.listings.toList()
+      ..sort((a, b) => _depthOf(a.path).compareTo(_depthOf(b.path)));
+
+    var root = _state.root;
+    for (final listing in ordered) {
+      if (listing.path.isEmpty) {
+        // A root the bridge could not answer — its FileWatcher is not up yet
+        // — is a NON-answer, not an empty project. Applying it would erase
+        // the tree and mark it authoritatively loaded with nothing left to
+        // retry from. `missing` on a SUBDIRECTORY still folds into an
+        // ordinary empty listing; see [_applyListing].
+        if (listing.missing) continue;
+        // The root's own listing plays the role `file:tree:snapshot` used
+        // to: the revision this reply reflects, claimable on the next root
+        // pull via sinceSeq. A children-only reply (an ordinary folder
+        // expand) never touches the claim — it answers a different directory
+        // entirely. A claim that is no longer believable is REPLACED rather
+        // than raised: a restarted agent counts from zero, and refusing to
+        // walk back would leave a dead process's seq claimable until the new
+        // one caught up to it.
+        _treeRecoveryPending = false;
+        if (_claimableSeq() == null || msg.seq > _snapshotSeq) {
+          _rememberSeq(msg.seq);
+        }
+      } else if (root == null || _findNode(root, listing.path) == null) {
+        // Nothing on the spine to place it under: the directory went away
+        // between the request and the reply. Deliberately not re-requested
+        // (the re-request would find it gone too) and deliberately not
+        // recorded, so a later listing for the same path is not judged
+        // against a watermark set by a reply that was never applied.
+        continue;
+      }
+      if (!_isFreshListing(listing.path, msg.seq)) continue;
+      _recordListing(listing.path, msg.seq);
+      root = _applyListing(root, listing);
+    }
+    if (!identical(root, _state.root)) {
+      _setState(_state.copyWith(root: root));
+    }
+  }
+
+  /// Applies one directory's listing into [root]. `listing.missing` folds
+  /// into an ordinary empty, loaded listing — there is no `FileNode.missing`
+  /// to carry the distinction yet, so this stops the directory spinning
+  /// forever rather than leaving it pending indefinitely. (The root is the
+  /// exception, filtered out by [_handleChildrenMessage] before it gets
+  /// here.)
+  FileNode? _applyListing(FileNode? root, DirectoryListing listing) {
+    if (listing.path.isEmpty) {
+      return FileNode(
+        name: root?.name ?? '',
+        path: '',
+        type: FileNodeType.directory,
+        children: _sorted(_carryLoaded(listing.children, root)),
+        truncated: listing.truncated,
+        childrenLoaded: true,
+        childrenLoading: false,
+        ignored: root?.ignored ?? false,
+      );
+    }
+    if (root == null) return root;
+    return _updateAt(
+      root,
+      listing.path,
+      (dir) => _rebuild(
+        dir,
+        children: _sorted(_carryLoaded(listing.children, dir)),
+        truncated: listing.truncated,
+        childrenLoaded: true,
+        childrenLoading: false,
       ),
+    );
+  }
+
+  /// Carries an already-loaded subtree across a re-listing of its parent.
+  ///
+  /// A depth-1 listing names a subdirectory without recursing into it, so
+  /// that entry parses `childrenLoaded: false` with no children. Installing
+  /// it bare would discard everything the app had fetched below it, and
+  /// nothing would ask again: the row stays in `expandedPaths` and renders
+  /// expanded, empty and with no loading state — indistinguishable from a
+  /// genuinely empty folder, permanently. Every root pull and every
+  /// collapse-then-expand of an ancestor would flatten the tree beneath it.
+  ///
+  /// Matching by path is safe: a rename yields a different path, and a
+  /// delete-then-recreate is repaired by the expand gesture, which always
+  /// re-lists from disk (D2).
+  List<FileNode> _carryLoaded(List<FileNode> incoming, FileNode? previous) {
+    if (previous == null || previous.children.isEmpty) return incoming;
+    final held = <String, FileNode>{
+      for (final child in previous.children) child.path: child,
+    };
+    final merged = <FileNode>[];
+    for (final node in incoming) {
+      final prior = held[node.path];
+      final carry =
+          node.type == FileNodeType.directory &&
+          !node.childrenLoaded &&
+          prior != null &&
+          prior.type == FileNodeType.directory;
+      merged.add(
+        carry
+            ? _rebuild(
+                node,
+                children: prior.children,
+                truncated: prior.truncated,
+                childrenLoaded: prior.childrenLoaded,
+                childrenLoading: prior.childrenLoading,
+              )
+            : node,
+      );
+    }
+    return merged;
+  }
+
+  /// True iff [seq] is at least as new as the last listing this service
+  /// applied for [path]. `file:tree:children:request` carries no id to
+  /// echo, so two rapid expands of the same path can only be told apart by
+  /// the bridge's own revision counter — a later SEND cannot come back with
+  /// a lower seq than an earlier one UNLESS nothing on disk changed between
+  /// the two requests, in which case the two replies' content is identical
+  /// anyway and applying either is correct. See spec trap 11.
+  ///
+  /// A seq issued under a different establishment is not comparable at all
+  /// (see [_listingSeq]), so it is always fresh. Does NOT record — a listing
+  /// that turns out to be unplaceable must not move the watermark; see
+  /// [_recordListing].
+  bool _isFreshListing(String path, int seq) {
+    final last = _listingSeq[path];
+    if (last == null) return true;
+    if (last.epoch != session.establishmentEpoch) return true;
+    return seq >= last.seq;
+  }
+
+  void _recordListing(String path, int seq) {
+    _listingSeq[path] = (seq: seq, epoch: session.establishmentEpoch);
+  }
+
+  /// Pushed when the watcher overflowed and gave up tracking incremental
+  /// changes. Clears what every directory believes it has loaded, then
+  /// re-lists the root and every expanded directory itself — see
+  /// [_hydrateTree].
+  void _handleInvalidated(FileTreeInvalidatedMessage msg) {
+    final root = _state.root;
+    if (root == null) return;
+    // The watermarks describe listings of a tree this frame just declared
+    // untrustworthy, and every path is about to be asked for again.
+    _listingSeq.clear();
+    _setState(_state.copyWith(root: _clearAllLoaded(root)));
+    detached(
+      'FileService',
+      're-list after file:tree:invalidated',
+      _hydrateTree,
+    );
+  }
+
+  FileNode _clearAllLoaded(FileNode node) {
+    if (node.type != FileNodeType.directory) return node;
+    final children = node.children.map(_clearAllLoaded).toList();
+    return _rebuild(
+      node,
+      children: children,
+      childrenLoaded: false,
+      childrenLoading: false,
     );
   }
 
@@ -673,100 +1107,6 @@ class FileService {
     _setState(_state.copyWith(git: _state.git.copyWith(diffLoading: false)));
   }
 
-  FileNode _cloneNode(FileNode node) {
-    return FileNode(
-      name: node.name,
-      path: node.path,
-      type: node.type,
-      size: node.size,
-      extension: node.extension,
-      children: node.children.map(_cloneNode).toList(),
-      truncated: node.truncated,
-    );
-  }
-
-  FileNode _removeNode(FileNode root, String targetPath) {
-    if (root.type != FileNodeType.directory) return root;
-    final newChildren = <FileNode>[];
-    for (final child in root.children) {
-      if (child.path == targetPath) continue;
-      newChildren.add(_removeNode(child, targetPath));
-    }
-    return FileNode(
-      name: root.name,
-      path: root.path,
-      type: root.type,
-      size: root.size,
-      extension: root.extension,
-      children: newChildren,
-      truncated: root.truncated,
-    );
-  }
-
-  FileNode _insertOrReplaceNode(FileNode root, FileNode node) {
-    final parts = node.path.split('/');
-    if (parts.length <= 1) {
-      return _insertChildInto(root, node);
-    }
-    final parentPath = parts.sublist(0, parts.length - 1).join('/');
-    return _insertAtPath(root, parentPath, node);
-  }
-
-  FileNode _insertAtPath(FileNode current, String parentPath, FileNode node) {
-    if (current.path == parentPath && current.type == FileNodeType.directory) {
-      return _insertChildInto(current, node);
-    }
-    if (current.type != FileNodeType.directory) return current;
-    final newChildren = current.children.map((child) {
-      return _insertAtPath(child, parentPath, node);
-    }).toList();
-    return FileNode(
-      name: current.name,
-      path: current.path,
-      type: current.type,
-      size: current.size,
-      extension: current.extension,
-      children: newChildren,
-      truncated: current.truncated,
-    );
-  }
-
-  FileNode _insertChildInto(FileNode parent, FileNode node) {
-    final newChildren = <FileNode>[];
-    bool replaced = false;
-    for (final child in parent.children) {
-      if (child.path == node.path) {
-        newChildren.add(node);
-        replaced = true;
-      } else {
-        newChildren.add(child);
-      }
-    }
-    if (!replaced) {
-      newChildren.add(node);
-    }
-    newChildren.sort((a, b) {
-      if (a.type == FileNodeType.directory &&
-          b.type != FileNodeType.directory) {
-        return -1;
-      }
-      if (a.type != FileNodeType.directory &&
-          b.type == FileNodeType.directory) {
-        return 1;
-      }
-      return a.name.toLowerCase().compareTo(b.name.toLowerCase());
-    });
-    return FileNode(
-      name: parent.name,
-      path: parent.path,
-      type: parent.type,
-      size: parent.size,
-      extension: parent.extension,
-      children: newChildren,
-      truncated: parent.truncated,
-    );
-  }
-
   void applyPreferences(ProjectPreferences prefs) {
     final selected = prefs.selectedFilePath;
     _setState(
@@ -787,30 +1127,71 @@ class FileService {
     } else {
       session.unhydrateCheckout(checkoutId, 'file:selected');
     }
+    // The persisted expanded set just replaced whatever was in state — if a
+    // tree hydrator is already registered (some feature holds a
+    // TreeInterest lease), re-register it so it reads the fresh set right
+    // away rather than waiting for the next reconnect. If nothing holds
+    // interest yet, [_hydrateTree] reads `_state.expandedPaths` at CALL
+    // time, not at registration time, so whichever feature registers it
+    // first still restores this set — nothing here is lost by skipping the
+    // send.
+    if (hasTreeInterest) {
+      session.hydrateCheckout(checkoutId, _treeHydratorKey, _hydrateTree);
+    }
   }
 
-  void toggleExpanded(String path) {
+  /// Expands or collapses [path].
+  ///
+  /// Expanding is deliberately NOT cached — every call sends a fresh
+  /// `file:tree:children:request`, even when [FileNode.childrenLoaded] is
+  /// already true. Git-ignored content is never live-watched, so a
+  /// collapse-then-expand is the tree's only per-directory refresh gesture
+  /// (D2 in docs/file-tree-lazy-expansion-spec.md) — an early return on
+  /// `childrenLoaded` here would remove it. Existing children stay on
+  /// screen for the round trip; see [_handleChildrenMessage].
+  Future<void> toggleExpanded(String path) async {
     final expanded = Set<String>.from(_state.expandedPaths);
-    if (expanded.contains(path)) {
-      expanded.remove(path);
+    final expanding = !expanded.remove(path);
+    if (expanding) expanded.add(path);
+
+    final root = _state.root;
+    if (root != null && !expanding) {
+      // A collapse leaves `children` as stale leftovers on purpose — see
+      // FileNode.childrenLoaded's doc — so only the flags move here.
+      final newRoot = _updateAt(
+        root,
+        path,
+        (dir) => _rebuild(dir, childrenLoaded: false, childrenLoading: false),
+      );
+      _setState(_state.copyWith(root: newRoot, expandedPaths: expanded));
     } else {
-      expanded.add(path);
+      _setState(_state.copyWith(expandedPaths: expanded));
     }
-    _setState(_state.copyWith(expandedPaths: expanded));
+
+    // The pending mark rides [_fetchChildrenChunked] rather than being
+    // stamped here, so every path that asks for a listing gets one.
+    if (expanding) {
+      await _fetchChildrenChunked([path]);
+    }
   }
 
   /// Expands [path] and every ancestor directory so it is visible in the
-  /// tree. Used to reveal a folder a terminal link pointed at, which — unlike
-  /// a file — has no `selectedFilePath` of its own to make it visible.
-  void revealDirectory(String path) {
+  /// tree, fetching each newly-expanded directory's children so the chain
+  /// actually renders rather than sitting on stale or empty content — unlike
+  /// [toggleExpanded]'s single directory, nothing else will ever ask for
+  /// these. Used to reveal a folder a terminal link pointed at, which —
+  /// unlike a file — has no `selectedFilePath` of its own to make it visible.
+  Future<void> revealDirectory(String path) async {
     final segments = path.split('/').where((s) => s.isNotEmpty);
     final expanded = Set<String>.from(_state.expandedPaths);
+    final newlyExpanded = <String>[];
     var acc = '';
     for (final segment in segments) {
       acc = acc.isEmpty ? segment : '$acc/$segment';
-      expanded.add(acc);
+      if (expanded.add(acc)) newlyExpanded.add(acc);
     }
     _setState(_state.copyWith(expandedPaths: expanded));
+    await _fetchChildrenChunked(newlyExpanded);
   }
 
   /// Resolves a path a terminal program printed (an OSC 8 `file://` hyperlink
@@ -842,6 +1223,10 @@ class FileService {
     // also hit by session-restore, fragment recovery, git "view file", and
     // refresh, none of which is a user opening a file from the explorer.
     session.analytics?.track(AnalyticsEvents.fileOpened);
+    final expandedWithAncestors = _expandedWithAncestorsOf(path);
+    final newlyExpanded = expandedWithAncestors.difference(
+      _state.expandedPaths,
+    );
     _setState(
       _state.copyWith(
         files: _state.files.copyWith(
@@ -853,13 +1238,26 @@ class FileService {
           clearSearchLine: searchLine == null,
           clearSearchQuery: searchQuery == null,
         ),
-        expandedPaths: _expandedWithAncestorsOf(path),
+        expandedPaths: expandedWithAncestors,
       ),
     );
     // Register (fires now if established) rather than sending inline — see
     // [_hydrateSelectedFile]. Re-registering under the same key supersedes, so
     // opening a new file replaces the prior file's hydrator.
     session.hydrateCheckout(checkoutId, 'file:selected', _hydrateSelectedFile);
+    if (newlyExpanded.isNotEmpty) {
+      // Fire-and-forget, unlike [revealDirectory]'s await: this method has
+      // many synchronous callers (search results, git "view file", terminal
+      // links) and opening the file itself must not wait on the tree's own
+      // catch-up. The newly-expanded ancestor rows show their existing
+      // (possibly stale or empty) content until this lands, same as any
+      // other expand.
+      detached(
+        'FileService',
+        'list ancestors of a selected file',
+        () => _fetchChildrenChunked(newlyExpanded),
+      );
+    }
   }
 
   /// Ancestor directories of [path], folded into the current expanded set —
@@ -938,11 +1336,23 @@ class FileService {
   }
 
   void requestFullTree() {
-    _setState(_state.copyWith(expandedPaths: {}));
-    // Deliberately claims nothing, unlike [_pullTree]: this is the user asking
-    // for the tree to be rebuilt from disk, and `file:tree:unchanged` would
-    // answer that refresh by doing visibly nothing.
-    unawaited(_requestTree());
+    final root = _state.root;
+    if (root != null) {
+      _listingSeq.clear();
+      _setState(_state.copyWith(root: _clearAllLoaded(root)));
+    }
+    // Deliberately claims nothing, unlike [_pullTree]: this is the user
+    // asking for the tree to be rebuilt from disk, and `file:tree:unchanged`
+    // would answer that refresh by doing visibly nothing. Keeps
+    // expandedPaths, unlike the old whole-tree push this replaced — a lazy
+    // tree can no longer leave a folder's stale children on screen forever,
+    // so there is nothing left for a wipe to protect against, and folding
+    // every open folder on every manual refresh would cost the user their
+    // place in the tree for nothing.
+    detached('FileService', 'full tree refresh', () async {
+      await _requestTree();
+      await _fetchChildrenChunked(_state.expandedPaths);
+    });
   }
 
   void setFilterQuery(String? query) {
@@ -1485,6 +1895,7 @@ class FileService {
       latch.settle();
     }
     _commitFilesLatches.clear();
+    _listingSeq.clear();
     final resolves = _pendingResolves.values.toList();
     _pendingResolves.clear();
     for (final pending in resolves) {

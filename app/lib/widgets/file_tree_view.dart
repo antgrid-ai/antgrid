@@ -9,6 +9,7 @@ import '../design/widgets/ab_diff_stat.dart';
 import '../design/widgets/ab_empty_state.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_list_row.dart';
+import '../design/widgets/ab_loading.dart';
 import '../design/widgets/ab_status_dot.dart';
 import '../design/widgets/ab_swipe_actions.dart';
 import '../models/ab_message.dart' show GitFileStatusEntry;
@@ -136,7 +137,9 @@ class _FileTreeViewState extends State<FileTreeView> {
     _rowExtent = extent;
     final index = _lastFlatList.indexWhere(
       (entry) =>
-          !entry.truncationNotice && entry.node.path == widget.selectedFilePath,
+          !entry.truncationNotice &&
+          !entry.loadingNotice &&
+          entry.node.path == widget.selectedFilePath,
     );
     if (index < 0) return;
     final position = _scrollController.position;
@@ -222,10 +225,17 @@ class _FileTreeViewState extends State<FileTreeView> {
         controller: _scrollController,
         itemCount: flatList.length,
         itemBuilder: (context, index) {
-          final (:node, :depth, :truncationNotice) = flatList[index];
+          final (:node, :depth, :truncationNotice, :loadingNotice) =
+              flatList[index];
           if (truncationNotice) {
             return _TruncationRow(
               key: ValueKey(('truncated', node.path)),
+              depth: depth,
+            );
+          }
+          if (loadingNotice) {
+            return _LoadingRow(
+              key: ValueKey(('loading', node.path)),
               depth: depth,
             );
           }
@@ -270,8 +280,16 @@ class _FileTreeViewState extends State<FileTreeView> {
 
 /// One rendered row. A [truncationNotice] row stands in for the entries the
 /// bridge did not send: it carries the directory that was CUT, at the depth
-/// that directory's children occupy.
-typedef _TreeRow = ({FileNode node, int depth, bool truncationNotice});
+/// that directory's children occupy. A [loadingNotice] row stands in for a
+/// directory whose `file:tree:children:request` is in flight — its own
+/// [FileNode.childrenLoading] — at the depth its children will occupy once
+/// the reply lands.
+typedef _TreeRow = ({
+  FileNode node,
+  int depth,
+  bool truncationNotice,
+  bool loadingNotice,
+});
 
 /// Flatten the tree into a list of rows for rendering.
 /// When filterQuery is active, show ALL matching files regardless of
@@ -297,7 +315,12 @@ List<_TreeRow> _flattenVisibleNodes(
     // The root has no row of its own to hang this off, and it is the directory
     // the node budget cuts first on a wide repo.
     if (root.truncated) {
-      result.add((node: root, depth: 0, truncationNotice: true));
+      result.add((
+        node: root,
+        depth: 0,
+        truncationNotice: true,
+        loadingNotice: false,
+      ));
     }
   }
 
@@ -310,16 +333,37 @@ void _flattenNormal(
   Set<String> expandedPaths,
   List<_TreeRow> result,
 ) {
-  result.add((node: node, depth: depth, truncationNotice: false));
+  result.add((
+    node: node,
+    depth: depth,
+    truncationNotice: false,
+    loadingNotice: false,
+  ));
 
   if (node.type == FileNodeType.directory &&
       expandedPaths.contains(node.path)) {
     for (final child in node.children) {
       _flattenNormal(child, depth + 1, expandedPaths, result);
     }
+    // A round trip is in flight and nothing has landed yet — existing
+    // (possibly stale) children stay on screen above this row while it
+    // waits; see FileService.toggleExpanded.
+    if (node.childrenLoading && node.children.isEmpty) {
+      result.add((
+        node: node,
+        depth: depth + 1,
+        truncationNotice: false,
+        loadingNotice: true,
+      ));
+    }
     // After the children, where the missing ones would have been.
     if (node.truncated) {
-      result.add((node: node, depth: depth + 1, truncationNotice: true));
+      result.add((
+        node: node,
+        depth: depth + 1,
+        truncationNotice: true,
+        loadingNotice: false,
+      ));
     }
   }
 }
@@ -332,7 +376,12 @@ void _flattenFiltered(
 ) {
   if (node.type == FileNodeType.file) {
     if (node.name.toLowerCase().contains(query)) {
-      result.add((node: node, depth: 0, truncationNotice: false));
+      result.add((
+        node: node,
+        depth: 0,
+        truncationNotice: false,
+        loadingNotice: false,
+      ));
     }
     return;
   }
@@ -386,7 +435,12 @@ List<_TreeRow> _flattenChangesOnly(
       ...node.children.where((c) => !holdsConflict(c)),
     ];
     for (final child in children) {
-      result.add((node: child, depth: depth, truncationNotice: false));
+      result.add((
+        node: child,
+        depth: depth,
+        truncationNotice: false,
+        loadingNotice: false,
+      ));
       if (child.type == FileNodeType.directory &&
           !collapsedPaths.contains(child.path)) {
         walk(child, depth + 1);
@@ -459,6 +513,9 @@ class _ChangesDir {
       path: path,
       type: FileNodeType.directory,
       children: children,
+      // Built whole, right here — never a directory this app is still
+      // waiting on a listing for, unlike the real file tree.
+      childrenLoaded: true,
     );
   }
 }
@@ -518,6 +575,54 @@ class _TruncationRow extends StatelessWidget {
       // listing, not an entry in it.
       title: Text(
         'more items not shown',
+        style: AbTokens.sansStyle(
+          fontSize: AbTokens.fontXs,
+          color: context.antgrid.textMuted,
+        ),
+        overflow: TextOverflow.ellipsis,
+      ),
+    );
+  }
+}
+
+/// Stands in for a directory whose `file:tree:children:request` has not
+/// answered yet. Existing (possibly stale) children, if any, render above
+/// this row rather than being cleared for the round trip — see
+/// `FileService.toggleExpanded`.
+class _LoadingRow extends StatelessWidget {
+  final int depth;
+
+  const _LoadingRow({super.key, required this.depth});
+
+  @override
+  Widget build(BuildContext context) {
+    return AbListRow(
+      density: AbRowDensity.sm,
+      leading: Padding(
+        padding: EdgeInsets.only(left: depth * AbTokens.space16),
+        // Every other row's leading is TEXT at [AbTokens.fontXxs] and takes
+        // its band from that face's metrics; a bare dot is a fixed 12px box,
+        // which renders this row shorter than the ones around it. The blank
+        // glyph reinstates the band from the same metrics rather than a
+        // literal that only holds for one font — the equal-row-height rule
+        // [_FileTreeViewState._revealSelected] multiplies by a row index.
+        child: Stack(
+          alignment: Alignment.center,
+          children: [
+            const Text(' ', style: TextStyle(fontSize: AbTokens.fontXxs)),
+            AbLoadingDot(color: context.antgrid.textMuted),
+          ],
+        ),
+      ),
+      // Sans, not the mono every other row uses: this is a notice about the
+      // listing, not an entry in it — same reasoning as [_TruncationRow].
+      //
+      // Strutted because the leading is a fixed-size DOT, not text: without
+      // it the row's content band collapses to this title's own metrics and
+      // the row renders a pixel shorter than every other one — which
+      // [_FileTreeViewState._revealSelected] multiplies by the row index.
+      title: Text(
+        'Loading…',
         style: AbTokens.sansStyle(
           fontSize: AbTokens.fontXs,
           color: context.antgrid.textMuted,

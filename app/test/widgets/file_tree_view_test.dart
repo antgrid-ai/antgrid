@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/design/widgets/ab_empty_state.dart';
+import 'package:antgrid/design/widgets/ab_list_row.dart';
 import 'package:antgrid/design/widgets/ab_status_dot.dart';
 import 'package:antgrid/design/widgets/ab_swipe_actions.dart';
 import 'package:antgrid/models/ab_message.dart';
@@ -1349,5 +1350,178 @@ void main() {
 
       expect(find.text('more items not shown'), findsNothing);
     });
+
+    testWidgets(
+      'a truncated directory still carries its notice beside a loading one',
+      (tester) async {
+        // Two directories, one cut and one still fetching — the loading row
+        // must not crowd out or get confused with the truncation row.
+        const tree = FileNode(
+          name: 'project',
+          path: 'project',
+          type: FileNodeType.directory,
+          children: [
+            FileNode(
+              name: 'lib',
+              path: 'project/lib',
+              type: FileNodeType.directory,
+              truncated: true,
+              children: [
+                FileNode(
+                  name: 'main.dart',
+                  path: 'project/lib/main.dart',
+                  type: FileNodeType.file,
+                ),
+              ],
+            ),
+            FileNode(
+              name: 'src',
+              path: 'project/src',
+              type: FileNodeType.directory,
+              childrenLoaded: false,
+              childrenLoading: true,
+            ),
+          ],
+        );
+
+        await tester.pumpWidget(
+          buildTestWidget(
+            root: tree,
+            expandedPaths: const {'project/lib', 'project/src'},
+          ),
+        );
+
+        expect(find.text('more items not shown'), findsOneWidget);
+        expect(find.text('Loading…'), findsOneWidget);
+      },
+    );
+
+    // _FileTreeViewState._revealSelected jumps to an off-screen row by
+    // multiplying ONE measured row extent by a flat index, so a notice row
+    // that renders at a different height puts every row below it out by that
+    // difference per notice. The loading row's leading is a fixed-size dot
+    // where every other row's is text, which is exactly how it drifts.
+    testWidgets('every row renders at the same height', (tester) async {
+      const tree = FileNode(
+        name: 'project',
+        path: 'project',
+        type: FileNodeType.directory,
+        children: [
+          FileNode(
+            name: 'lib',
+            path: 'project/lib',
+            type: FileNodeType.directory,
+            truncated: true,
+            children: [
+              FileNode(
+                name: 'main.dart',
+                path: 'project/lib/main.dart',
+                type: FileNodeType.file,
+              ),
+            ],
+          ),
+          FileNode(
+            name: 'src',
+            path: 'project/src',
+            type: FileNodeType.directory,
+            childrenLoaded: false,
+            childrenLoading: true,
+          ),
+        ],
+      );
+
+      await tester.pumpWidget(
+        buildTestWidget(
+          root: tree,
+          expandedPaths: const {'project/lib', 'project/src'},
+        ),
+      );
+
+      final rows = find.byType(AbListRow);
+      final count = rows.evaluate().length;
+      expect(count, greaterThan(4));
+      final heights = <double>{
+        for (var i = 0; i < count; i++) tester.getSize(rows.at(i)).height,
+      };
+      expect(heights, hasLength(1));
+    });
+  });
+
+  group('loading notice', () {
+    const expandingDirectory = FileNode(
+      name: 'project',
+      path: 'project',
+      type: FileNodeType.directory,
+      children: [
+        FileNode(
+          name: 'lib',
+          path: 'project/lib',
+          type: FileNodeType.directory,
+          childrenLoaded: false,
+          childrenLoading: true,
+        ),
+      ],
+    );
+
+    testWidgets(
+      'an expanded directory with a request in flight and no children shows a loading row',
+      (tester) async {
+        await tester.pumpWidget(
+          buildTestWidget(
+            root: expandingDirectory,
+            expandedPaths: const {'project/lib'},
+          ),
+        );
+
+        expect(find.text('Loading…'), findsOneWidget);
+      },
+    );
+
+    testWidgets('a collapsed loading directory carries no loading row', (
+      tester,
+    ) async {
+      await tester.pumpWidget(buildTestWidget(root: expandingDirectory));
+
+      expect(find.text('Loading…'), findsNothing);
+    });
+
+    testWidgets(
+      'stale children stay on screen instead of being replaced by a loading row',
+      (tester) async {
+        // A collapse-then-re-expand re-requests even an already-loaded
+        // directory (D2) — while that round trip is in flight the OLD
+        // children keep rendering rather than being cleared for it.
+        const staleWhileRefetching = FileNode(
+          name: 'project',
+          path: 'project',
+          type: FileNodeType.directory,
+          children: [
+            FileNode(
+              name: 'lib',
+              path: 'project/lib',
+              type: FileNodeType.directory,
+              childrenLoading: true,
+              children: [
+                FileNode(
+                  name: 'main.dart',
+                  path: 'project/lib/main.dart',
+                  type: FileNodeType.file,
+                ),
+              ],
+            ),
+          ],
+        );
+
+        await tester.pumpWidget(
+          buildTestWidget(
+            root: staleWhileRefetching,
+            expandedPaths: const {'project/lib'},
+          ),
+        );
+
+        expect(find.text('main.dart'), findsOneWidget);
+        expect(find.text('Loading…'), findsNothing);
+      },
+    );
   });
 }

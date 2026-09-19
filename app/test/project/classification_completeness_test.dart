@@ -45,6 +45,8 @@ const Map<String, List<String>> serviceWireTypes = {
   'FileService': [
     // heavy
     'file:tree:snapshot',
+    'file:tree:children',
+    'file:tree:invalidated',
     'tree:update',
     'tree:full',
     'file:content',

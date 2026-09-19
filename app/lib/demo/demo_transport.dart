@@ -244,6 +244,65 @@ class DemoTransport extends BufferedAgentTransport {
   /// through to nothing while its caller waits is the one failure mode a demo
   /// cannot recover from on its own, so the mutating session verbs answer with
   /// a refusal rather than silence.
+  /// One `file:tree:children` frame answering [paths] out of [kDemoTreeRoot].
+  ///
+  /// The listings are DEPTH-1, as a real bridge's are: a subdirectory entry
+  /// carries no `children` key, so the app reads it as unlisted and asks for
+  /// it when the user expands it. Handing back the nested fixture whole would
+  /// make the demo the one client whose tree never exercises the expand path.
+  /// The seq is constant because nothing in the demo ever changes on disk.
+  Map<String, Object?> _childrenFrame(List<String> paths) {
+    return <String, Object?>{
+      'type': 'file:tree:children',
+      'checkoutId': 'main',
+      'seq': 1,
+      'listings': <Map<String, Object?>>[
+        for (final path in paths) _listingAt(path),
+      ],
+    };
+  }
+
+  Map<String, Object?> _listingAt(String path) {
+    final dir = _demoDirAt(path);
+    if (dir == null) {
+      return <String, Object?>{
+        'path': path,
+        'children': const <Map<String, Object?>>[],
+        'missing': true,
+      };
+    }
+    final children =
+        (dir['children'] as List?)?.whereType<Map<String, Object?>>() ??
+        const <Map<String, Object?>>[];
+    return <String, Object?>{
+      'path': path,
+      'children': <Map<String, Object?>>[
+        for (final child in children)
+          <String, Object?>{
+            for (final field in child.entries)
+              if (field.key != 'children') field.key: field.value,
+          },
+      ],
+    };
+  }
+
+  Map<String, Object?>? _demoDirAt(String path) {
+    var node = kDemoTreeRoot;
+    if (path.isEmpty) return node;
+    for (final segment in path.split('/')) {
+      final children = (node['children'] as List?)
+          ?.whereType<Map<String, Object?>>();
+      if (children == null) return null;
+      Map<String, Object?>? next;
+      for (final child in children) {
+        if (child['name'] == segment) next = child;
+      }
+      if (next == null || next['type'] != 'directory') return null;
+      node = next;
+    }
+    return node;
+  }
+
   List<Map<String, Object?>> _repliesFor(Map<String, dynamic> message) {
     final type = message['type'] as String?;
     final requestId = message['requestId'] as String?;
@@ -281,6 +340,8 @@ class DemoTransport extends BufferedAgentTransport {
       case 'file:read':
         return <Map<String, Object?>>[_fileContent(message['path'] as String?)];
 
+      // TODO(wave-6): nothing in the app sends this any more — it goes with
+      // the bridge's own `file:tree:snapshot:request` case.
       case 'file:tree:snapshot:request':
         return <Map<String, Object?>>[
           <String, Object?>{
@@ -290,6 +351,16 @@ class DemoTransport extends BufferedAgentTransport {
             'tree': kDemoTreeRoot,
           },
         ];
+
+      case 'file:tree:root:request':
+        return <Map<String, Object?>>[_childrenFrame(const <String>[''])];
+
+      case 'file:tree:children:request':
+        final paths =
+            (message['paths'] as List?)?.whereType<String>().toList() ??
+            const <String>[];
+        if (paths.isEmpty) return const [];
+        return <Map<String, Object?>>[_childrenFrame(paths)];
 
       case 'preview:snapshot:request':
         return <Map<String, Object?>>[kDemoPreviewSnapshot, kDemoPortsUpdate];

@@ -18,6 +18,29 @@ class FileNode {
   /// every rebuild below, or a tree:update silently repairs a partial tree.
   final bool truncated;
 
+  /// Directories only — for a [FileNodeType.file] this is always `true` and
+  /// carries no meaning (a file has nothing to load, so nothing may treat it
+  /// as pending). For a directory, `false` means [children] is NOT the
+  /// directory's contents: it has not been fetched by a
+  /// `file:tree:children:request`, and any entries already sitting in
+  /// [children] are stale leftovers from before a collapse. `true` with an
+  /// EMPTY [children] is a directory the bridge listed and found nothing in
+  /// — collapsing that with the unfetched case leaves a genuinely empty
+  /// folder rendering as loading forever. Must survive every rebuild below,
+  /// the same hazard [truncated] already names.
+  final bool childrenLoaded;
+
+  /// True while a `file:tree:children:request` for this directory is in
+  /// flight. Never arrives over the wire — [fromJson] always reads `false` —
+  /// set and cleared by [FileService] around the round trip.
+  final bool childrenLoading;
+
+  /// Set by the bridge when this entry is present only because the request
+  /// that listed it asked to include git-ignored files (D10 in
+  /// docs/file-tree-lazy-expansion-spec.md). The tree view dims it. Must
+  /// survive every rebuild below, the same hazard [truncated] already names.
+  final bool ignored;
+
   const FileNode({
     required this.name,
     required this.path,
@@ -26,6 +49,9 @@ class FileNode {
     this.extension,
     this.children = const [],
     this.truncated = false,
+    this.childrenLoaded = true,
+    this.childrenLoading = false,
+    this.ignored = false,
   });
 
   static FileNode? fromJson(Map<String, dynamic> json) {
@@ -46,8 +72,13 @@ class FileNode {
     }
 
     final childrenJson = json['children'];
+    // Present (even as an empty list) means the bridge fetched this
+    // directory's contents; absent means a depth-1 listing named this
+    // directory as an entry but did not recurse into it — the distinction
+    // [childrenLoaded] exists to carry.
+    final hasListedChildren = childrenJson is List;
     final children = <FileNode>[];
-    if (childrenJson is List) {
+    if (hasListedChildren) {
       for (final c in childrenJson) {
         if (c is Map<String, dynamic>) {
           final child = FileNode.fromJson(c);
@@ -77,6 +108,10 @@ class FileNode {
       extension: json['extension'] as String?,
       children: children,
       truncated: json['truncated'] == true,
+      // A file has nothing to load, so it reads as always-loaded; a
+      // directory is loaded exactly when this node carried a `children` key.
+      childrenLoaded: type == FileNodeType.file || hasListedChildren,
+      ignored: json['ignored'] == true,
     );
   }
 }
