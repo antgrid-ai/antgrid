@@ -140,11 +140,15 @@ class _ScopeBar extends ConsumerWidget {
           AbIconButton(
             icon: AbIcons.refresh,
             tooltip: 'Refresh tasks',
-            onTap: () => detached(
-              'tasks',
-              'refresh list',
-              () => ref.read(taskListProvider.notifier).refresh(),
-            ),
+            // Projects alongside the tasks: `taskProjectsProvider` is fetched
+            // once at sign-in and otherwise never refetched, so a project
+            // bound after that (a newly opened repo, a fresh GitHub link)
+            // stays invisible to every picker fed by it until something
+            // invalidates it. A manual refresh is that something.
+            onTap: () => detached('tasks', 'refresh list', () {
+              ref.invalidate(taskProjectsProvider);
+              return ref.read(taskListProvider.notifier).refresh();
+            }),
           ),
           AbIconButton(
             icon: AbIcons.add,

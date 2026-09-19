@@ -1,4 +1,5 @@
-import 'package:flutter/material.dart' show MaterialPageRoute, Navigator;
+import 'package:flutter/material.dart'
+    show MaterialPageRoute, Navigator, Scaffold;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -1602,9 +1603,9 @@ Future<void> _openTaskFileDiff(
   fileService.requestDiff(path);
   return Navigator.of(context).push(
     MaterialPageRoute<void>(
-      builder: (routeContext) => ColoredBox(
-        color: routeContext.antgrid.bgDeepest,
-        child: SafeArea(
+      builder: (routeContext) => Scaffold(
+        backgroundColor: routeContext.antgrid.bgDeepest,
+        body: SafeArea(
           child: Consumer(
             builder: (consumerContext, consumerRef, _) {
               final state = consumerRef
@@ -1659,9 +1660,11 @@ Future<void> _openTaskFileDiff(
 Future<void> showTaskDetail(BuildContext context, int number) {
   return Navigator.of(context).push(
     MaterialPageRoute<void>(
-      builder: (context) => ColoredBox(
-        color: context.antgrid.bgDeepest,
-        child: SafeArea(
+      // A Scaffold, not a ColoredBox: a pushed route has no Material above it,
+      // so bare Text falls back to the debug yellow-underline style.
+      builder: (context) => Scaffold(
+        backgroundColor: context.antgrid.bgDeepest,
+        body: SafeArea(
           child: TaskDetailView(
             number: number,
             onClose: () => Navigator.of(context).pop(),

@@ -481,6 +481,65 @@ describe("per-repo consents", () => {
   });
 });
 
+describe("project auto-match", () => {
+  test("discovery links to a Project with the same repoKey when the caller names no project", async () => {
+    const a = await makeAccount();
+    const integration = await connect(a);
+    const project = await pg.db.project.create({
+      data: { accountId: a.accountId, repoKey: "github.com/acme/relay", displayName: "relay" },
+      select: { id: true },
+    });
+
+    const repo = await addRepo(a, integration.id);
+
+    expect(repo.projectId).toBe(project.id);
+  });
+
+  test("re-discovery picks up a Project created after the repo was first recorded", async () => {
+    const a = await makeAccount();
+    const integration = await connect(a);
+    const repo = await addRepo(a, integration.id, { externalRepoId: "gh-1" });
+    expect(repo.projectId).toBeNull();
+
+    const project = await pg.db.project.create({
+      data: { accountId: a.accountId, repoKey: "github.com/acme/relay", displayName: "relay" },
+      select: { id: true },
+    });
+    const refreshed = await addRepo(a, integration.id, { externalRepoId: "gh-1" });
+
+    expect(refreshed.projectId).toBe(project.id);
+  });
+
+  test("an explicit null is not overridden by auto-match, on create or re-discovery", async () => {
+    const a = await makeAccount();
+    const integration = await connect(a);
+    await pg.db.project.create({
+      data: { accountId: a.accountId, repoKey: "github.com/acme/relay", displayName: "relay" },
+      select: { id: true },
+    });
+
+    const created = await addRepo(a, integration.id, { externalRepoId: "gh-1", projectId: null });
+    expect(created.projectId).toBeNull();
+
+    const refreshed = await addRepo(a, integration.id, { externalRepoId: "gh-1", projectId: null });
+    expect(refreshed.projectId).toBeNull();
+  });
+
+  test("auto-match never crosses accounts", async () => {
+    const a = await makeAccount();
+    const b = await makeAccount();
+    const integration = await connect(a);
+    await pg.db.project.create({
+      data: { accountId: b.accountId, repoKey: "github.com/acme/relay", displayName: "relay" },
+      select: { id: true },
+    });
+
+    const repo = await addRepo(a, integration.id);
+
+    expect(repo.projectId).toBeNull();
+  });
+});
+
 describe("tasks.integration_repo_id", () => {
   test("unlinking a repository nulls the column instead of deleting the tasks", async () => {
     const a = await makeAccount();

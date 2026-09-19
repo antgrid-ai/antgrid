@@ -162,6 +162,7 @@ function repoRowId(repoId: string): string {
 }
 
 export function IntegrationsPage(props: IntegrationsPageProps) {
+  const manageUrl = props.githubApp.configured ? props.githubApp.connectUrl : "";
   return (
     <Layout title="Integrations" user={props.user}>
       {props.notice && (
@@ -174,7 +175,7 @@ export function IntegrationsPage(props: IntegrationsPageProps) {
       )}
 
       <div class="mb-6">
-        <h1 class="font-mono text-2xl font-semibold">Integrations</h1>
+        <h1 class="text-2xl font-semibold">Integrations</h1>
         <p class="text-sm text-muted mt-1">
           Bring issues in from GitHub as tasks. Whatever arrives is readable by
           everyone on this account.
@@ -184,29 +185,19 @@ export function IntegrationsPage(props: IntegrationsPageProps) {
       {!props.githubApp.configured ? (
         <NotConfiguredCard />
       ) : props.integrations.length === 0 ? (
-        <EmptyCard connectUrl={props.githubApp.connectUrl} />
+        <EmptyCard connectUrl={manageUrl} />
       ) : (
         <>
           {props.integrations.map((integration) => (
-            <IntegrationCard integration={integration} />
+            <IntegrationCard
+              integration={integration}
+              connectUrl={manageUrl}
+            />
           ))}
-          <div class="card bg-panel border border-edge mt-6">
-            <div class="card-body">
-              <h2 class="card-title font-mono">Add or remove repositories</h2>
-              <p class="text-sm text-muted">
-                Which repositories Antgrid can see is decided on GitHub, not
-                here. Add or drop them there, then switch on the ones you want.
-              </p>
-              <div>
-                <a
-                  href={props.githubApp.connectUrl}
-                  class="btn btn-quiet btn-sm font-mono mt-2"
-                >
-                  Manage on GitHub
-                </a>
-              </div>
-            </div>
-          </div>
+          <p class="text-sm text-muted mt-4">
+            Which repositories Antgrid can see is decided on GitHub, not here.
+            Add or drop them there, then switch on the ones you want.
+          </p>
         </>
       )}
     </Layout>
@@ -217,7 +208,7 @@ function NotConfiguredCard() {
   return (
     <div class="card bg-panel border border-edge">
       <div class="card-body">
-        <h2 class="card-title font-mono">No GitHub App on this server</h2>
+        <h2 class="card-title">No GitHub App on this server</h2>
         <p class="text-sm text-muted">
           This server has no GitHub App set up, so there is nothing to connect
           to yet. Whoever runs this server needs to add the App credentials —
@@ -232,7 +223,7 @@ function EmptyCard({ connectUrl }: { connectUrl: string }) {
   return (
     <div class="card bg-panel border border-edge">
       <div class="card-body">
-        <h2 class="card-title font-mono">Connect GitHub</h2>
+        <h2 class="card-title">Connect GitHub</h2>
         <p class="text-sm text-muted">
           Antgrid can read issues from the repositories you choose and keep them
           beside your tasks.
@@ -253,7 +244,7 @@ function EmptyCard({ connectUrl }: { connectUrl: string }) {
           </li>
         </ul>
         <div>
-          <a href={connectUrl} class="btn btn-primary font-mono mt-4">
+          <a href={connectUrl} class="btn btn-primary mt-4">
             Connect GitHub
           </a>
         </div>
@@ -262,7 +253,13 @@ function EmptyCard({ connectUrl }: { connectUrl: string }) {
   );
 }
 
-function IntegrationCard({ integration }: { integration: IntegrationView }) {
+function IntegrationCard({
+  integration,
+  connectUrl,
+}: {
+  integration: IntegrationView;
+  connectUrl: string;
+}) {
   const note = STATUS_NOTE[integration.status];
   // Frozen rather than merely pointless: a revoked connection routes nothing,
   // so a live toggle on it would promise an import that cannot happen.
@@ -271,15 +268,16 @@ function IntegrationCard({ integration }: { integration: IntegrationView }) {
   return (
     <div class="card bg-panel border border-edge mt-6 overflow-hidden">
       <div class="p-4 border-b border-edge flex flex-wrap items-center gap-3">
-        <h2 class="font-mono text-base font-semibold">{integration.displayName}</h2>
-        <span class={`${STATUS_BADGE[integration.status]} font-mono`}>
-          {STATUS_LABEL[integration.status]}
-        </span>
+        <h2 class="text-base font-semibold">{integration.displayName}</h2>
+        <span class={STATUS_BADGE[integration.status]}>{STATUS_LABEL[integration.status]}</span>
         {integration.revokedAt && (
           <span class="font-mono text-xs text-muted2">
             {formatDate(integration.revokedAt)}
           </span>
         )}
+        <a href={connectUrl} class="btn btn-quiet btn-sm ml-auto">
+          Manage on GitHub
+        </a>
       </div>
 
       {note && (
@@ -292,7 +290,7 @@ function IntegrationCard({ integration }: { integration: IntegrationView }) {
 
       {/* Per connection, not per repository: it is one fact about who Antgrid
           can recognise, and it reads as noise repeated down a list of rows. */}
-      <p class="px-4 pt-4 text-xs text-muted">
+      <p class="px-4 pt-3 pb-1 text-sm text-muted">
         Sign in to Antgrid with GitHub to be recognised as yourself on issues.
         Anyone we can't match appears under their GitHub username instead.
       </p>
@@ -399,7 +397,8 @@ export function IntegrationRepoRow({
               the header/consent block above and the two settings groups below
               read as three distinct chunks now instead of one unbroken run of
               toggles and prose the eye has no reason to stop partway through. */}
-          <div class="border-t border-edge-inner pt-4">
+          <div class="grid gap-x-10 gap-y-5 border-t border-edge-inner pt-4 md:grid-cols-2">
+          <div>
             <div class="text-[0.6875rem] font-medium uppercase tracking-[0.12em] text-muted2">
               Import
             </div>
@@ -412,17 +411,17 @@ export function IntegrationRepoRow({
                 data-autosave
                 class="toggle toggle-primary"
               />
-              <span class="font-mono text-sm">Import issues from this repository</span>
+              <span class="text-sm">Import issues from this repository</span>
             </label>
 
             <div class="flex flex-wrap items-end gap-2 mt-3">
-              <label class="font-mono text-xs text-muted pb-2" for={`${rowId}-kind`}>
-                Import
+              <label class="text-xs text-muted pb-2" for={`${rowId}-kind`}>
+                Which issues
               </label>
               <select
                 id={`${rowId}-kind`}
                 name="importFilterKind"
-                class="select select-bordered select-sm font-mono"
+                class="select select-bordered select-sm"
                 onchange={FILTER_KIND_ONCHANGE}
               >
                 {FILTER_KINDS.map((kind) => (
@@ -446,7 +445,7 @@ export function IntegrationRepoRow({
                   class="input input-bordered input-sm font-mono"
                 />
               </span>
-              <button type="submit" class="btn btn-sm font-mono">
+              <button type="submit" class="btn btn-sm">
                 Save
               </button>
             </div>
@@ -480,7 +479,7 @@ export function IntegrationRepoRow({
             </p>
           </div>
 
-          <div class="mt-4 pt-4 border-t border-edge-inner">
+          <div>
             <div class="text-[0.6875rem] font-medium uppercase tracking-[0.12em] text-muted2">
               Push
             </div>
@@ -494,7 +493,7 @@ export function IntegrationRepoRow({
                 onchange={PUSH_ONCHANGE}
                 class="toggle toggle-primary"
               />
-              <span class="font-mono text-sm">Send changes back to this repository</span>
+              <span class="text-sm">Send changes back to this repository</span>
             </label>
 
             <div data-publish-default class={repo.pushEnabled ? undefined : "opacity-50"}>
@@ -508,7 +507,7 @@ export function IntegrationRepoRow({
                   data-autosave
                   class="toggle toggle-primary"
                 />
-                <span class="font-mono text-sm">
+                <span class="text-sm">
                   Start new tasks with "also file on GitHub" switched on
                 </span>
               </label>
@@ -551,6 +550,7 @@ export function IntegrationRepoRow({
               </p>
             </details>
           </div>
+          </div>
         </fieldset>
       </form>
     </div>
@@ -560,10 +560,10 @@ export function IntegrationRepoRow({
 function VisibilityBadge({ visibility }: { visibility: RepoVisibility }) {
   if (visibility === "private") {
     return (
-      <span class="badge badge-warning badge-lg font-mono font-semibold uppercase tracking-wide">
+      <span class="badge badge-warning badge-lg badge-soft text-xs font-medium uppercase tracking-wider">
         Private
       </span>
     );
   }
-  return <span class="badge badge-ghost badge-sm font-mono">Public</span>;
+  return <span class="badge badge-ghost badge-sm">Public</span>;
 }

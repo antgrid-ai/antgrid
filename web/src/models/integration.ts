@@ -284,6 +284,9 @@ export type UpsertIntegrationRepoArgs = {
   integrationId: string;
   repoKey: string;
   externalRepoId: string;
+  /** Omit to auto-match against an existing `Project` with the same
+   *  `[accountId, repoKey]` (re-derived on every call, create or update).
+   *  Pass a uuid or `null` only to override that match explicitly. */
   projectId?: string | null;
   visibility: RepoVisibility;
   /** Applied on create only — see the note on the function. */
@@ -344,14 +347,29 @@ export async function upsertIntegrationRepo(
   const integration = await getIntegration(db, args.accountId, args.integrationId);
   if (!integration) return { kind: "integration_not_found" };
 
-  const projectId = args.projectId ?? null;
-  if (projectId !== null) {
-    if (!isUuid(projectId)) return { kind: "project_not_found" };
-    const project = await db.project.findFirst({
-      where: { id: projectId, accountId: args.accountId },
+  // `repoKey` is the whole mechanism by which a provider repository and a
+  // checkout on a developer's machine resolve to one project (see the doc
+  // comment on `IntegrationRepo.repoKey` in schema.prisma) — this is where
+  // that join actually runs, rather than staying merely documented. Only
+  // when the caller hasn't named a project explicitly: an explicit `null`
+  // must still mean "unlinked", never "let auto-match decide".
+  let projectId: string | null;
+  if (args.projectId !== undefined) {
+    projectId = args.projectId;
+    if (projectId !== null) {
+      if (!isUuid(projectId)) return { kind: "project_not_found" };
+      const project = await db.project.findFirst({
+        where: { id: projectId, accountId: args.accountId },
+        select: { id: true },
+      });
+      if (!project) return { kind: "project_not_found" };
+    }
+  } else {
+    const matched = await db.project.findFirst({
+      where: { accountId: args.accountId, repoKey: args.repoKey },
       select: { id: true },
     });
-    if (!project) return { kind: "project_not_found" };
+    projectId = matched?.id ?? null;
   }
 
   const filter = args.importFilter;
@@ -392,7 +410,7 @@ export async function upsertIntegrationRepo(
       update: {
         repoKey: args.repoKey,
         visibility: visibility.data,
-        ...(args.projectId === undefined ? {} : { projectId }),
+        projectId,
         // Rediscovering the repository is proof it is reachable again, and that
         // is the only fact this clears. `syncEnabled` stays where it is: a
         // repository leaving the installation and coming back is not consent to

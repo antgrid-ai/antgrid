@@ -61,6 +61,15 @@ export async function bindLocalProject(
     select: { id: true },
   });
 
+  // The other half of the repoKey join `upsertIntegrationRepo` performs: a
+  // GitHub repo discovered before any machine reported this checkout has no
+  // project to auto-match against yet, so catch it up now that one exists.
+  // `projectId: null` keeps this from clobbering an explicit manual link.
+  await tx.integrationRepo.updateMany({
+    where: { integration: { accountId }, repoKey, projectId: null },
+    data: { projectId: project.id },
+  });
+
   const now = new Date();
   const binding = await tx.projectBinding.upsert({
     where: { deviceId_localProjectId: { deviceId, localProjectId } },
