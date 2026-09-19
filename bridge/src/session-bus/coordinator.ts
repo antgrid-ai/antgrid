@@ -16,6 +16,7 @@
 
 import { randomUUID } from "node:crypto";
 import { logger } from "../logger";
+import { errorName } from "../line-key";
 import {
   createMessage,
   type AbMessage,
@@ -24,7 +25,7 @@ import {
   type SessionMemberKey,
   type SessionMemberRef,
 } from "../protocol";
-import { addressesSameSession, namesMachine } from "./address";
+import { addressesSameSession, isLeadContext, namesMachine } from "./address";
 import { listSessionBusSessions } from "./store-fs";
 import { artifactById, loadArtifacts, readArtifactContent, type ArtifactState } from "./artifact-store";
 import {
@@ -68,6 +69,7 @@ import {
 import {
   appendPost,
   emptyMailbox,
+  expireOldPosts,
   loadMailbox,
   markRead,
   saveMailbox,
@@ -75,6 +77,7 @@ import {
 } from "./mailbox";
 import {
   emptyThreads,
+  expireThreads,
   loadThreads,
   saveThreads,
   upsertThread,
@@ -165,10 +168,25 @@ export interface CoordinatorDeps {
   /** Hand a frame straight to the session it names on THIS machine, bypassing
    *  the relay, the carrier and the route table entirely (§6.1). False means it
    *  could not be delivered in process — the target's project is not loaded, or
-   *  a store write failed — and the frame takes the ordinary send path so it is
-   *  held rather than lost. Absent means this coordinator has no local path at
-   *  all, which is every caller until the host wires one. */
+   *  a store write failed — and the frame is HELD, never offered to the carrier
+   *  instead: see {@link SessionBusCoordinator.dispatch} for what that costs.
+   *  Absent means this coordinator has no local path at all, which is every
+   *  caller until the host wires one, and those keep the ordinary send path for
+   *  a same-machine target. */
   deliverLocal?: (frame: AbMessage, to: SessionMemberKey) => boolean;
+  /** Whether this machine may exchange frames with ANOTHER machine at all: its
+   *  remote-access switch, carve-outs and all.
+   *
+   *  Read in {@link SessionBusCoordinator.dispatch} rather than at the verbs,
+   *  because the verbs are not the only way out. A frame held while no carrier
+   *  was attached leaves through `flushHeld`, a slice request through `fetch`
+   *  and its answer through `fetch:result`, none of which pass the send path—s
+   *  own refusal. Gating the one chokepoint they share is what makes "the
+   *  switch governs both directions" true of the machine rather than of one
+   *  verb. Absent means allowed, so a bare coordinator answers to no switch.
+   *
+   *  A same-machine frame never reaches it. */
+  offMachineSendAllowed?: () => boolean;
   /** The per-pair budget (§7.4), read before a send and charged by every
    *  message this end sends OR receives — see `pair-budget.ts`'s header for why
    *  both halves have to land on this end's mirror.
@@ -567,12 +585,29 @@ export class SessionBusCoordinator {
     return this.stateFor(sessionId).log;
   }
 
+  /**
+   * Both getters age their store on the way out, not only their loader.
+   *
+   * `stateFor` loads once and caches for the life of the process, so a
+   * coordinator that never restarts would otherwise hand back mail and threads
+   * the TTL retired days ago — which makes "threads age out, so open a new one"
+   * a sentence that is only true across a restart, and leaves every argument
+   * bounded by `MAILBOX_TTL_MS` with no bound at all on a long-lived bridge.
+   * A thread row is one half of a send-path security bound, so this expiry is
+   * what makes that bound real rather than nominal.
+   */
   mailbox(sessionId: string): MailboxState {
-    return this.stateFor(sessionId).mailbox;
+    const s = this.stateFor(sessionId);
+    const mailbox = expireOldPosts(s.mailbox, this.now());
+    if (mailbox !== s.mailbox) this.commit(sessionId, { mailbox });
+    return mailbox;
   }
 
   threads(sessionId: string): ThreadState {
-    return this.stateFor(sessionId).threads;
+    const s = this.stateFor(sessionId);
+    const threads = expireThreads(s.threads, this.now());
+    if (threads !== s.threads) this.commit(sessionId, { threads });
+    return threads;
   }
 
   /** Mark what a reader was just handed. Separate from {@link mailbox} because
@@ -759,16 +794,49 @@ export class SessionBusCoordinator {
    *
    * A target on this machine is handed straight to it (§6.1): no relay, no
    * carrier, no route table, and nothing that can fail for transport reasons.
-   * Local delivery that does not take the frame FALLS THROUGH to the ordinary
-   * send rather than reporting failure, so a target whose project is not loaded
-   * leaves the frame held and retried instead of dropped.
+   * Local delivery that DECLINES is the whole answer — the frame is held and
+   * retried, so a target whose project is cold gets it once that project is
+   * warm again.
+   *
+   * It must not fall through to the carrier, however inviting that reads. A
+   * local decline means the target's project is not loaded here; the carrier
+   * below is this machine's own desktop app, which takes a lead-role frame,
+   * returns true, and reports the send as having left — and the app then
+   * classifies it inbound-but-uncarried and drops it in silence. That is
+   * `{sent:true, held:false}` for a message nothing delivered, with no mailbox
+   * row, no held row and no retry.
+   *
+   * A caller with NO `deliverLocal` wired at all is a different case and keeps
+   * falling through: a bare bus, or a single-project core with no host above
+   * it, has no local arm to decline in the first place.
    */
   private dispatch(frame: BusFrame, ctx: { contextId: string; role: BusRole; to: SessionMemberKey }): boolean {
     // `namesMachine`, not plain equality, for the reason its own doc gives; a
     // peer that stamps the sentinel itself reaches nothing by it, because
-    // `deliverLocal` still resolves the target through this bridge's own
-    // session index and falls through to the carrier when it cannot.
-    if (namesMachine(ctx.to.machineId, frame.from.machineId) && this.deps.deliverLocal?.(frame, ctx.to)) return true;
+    // `deliverLocal` resolves the target through this bridge's own session
+    // index and declines when it cannot.
+    if (this.deps.deliverLocal && namesMachine(ctx.to.machineId, frame.from.machineId)) {
+      return this.deps.deliverLocal(frame, ctx.to);
+    }
+    // The machine boundary is re-tested rather than inferred from having fallen
+    // past the local arm: a coordinator with no `deliverLocal` wired reaches
+    // here for a same-machine target too, and that target is not what the
+    // switch is about.
+    if (
+      !namesMachine(ctx.to.machineId, frame.from.machineId) &&
+      this.deps.offMachineSendAllowed?.() === false
+    ) {
+      // Held, not dropped, and for the same reason a missing carrier holds:
+      // nothing here is a verdict about the exchange, only about this machine
+      // right now, and the switch coming back on is an event the outbox already
+      // retries against. The interactive verbs never get this far — `api.ts`
+      // refuses them up front, where the answer can carry a reason.
+      log.debug(
+        { type: frame.type, contextId: ctx.contextId, to: ctx.to.machineId },
+        "session bus: not sent, this machine's remote access is off",
+      );
+      return false;
+    }
     return this.deps.send(frame, ctx);
   }
 
@@ -863,6 +931,15 @@ export class SessionBusCoordinator {
       return "dropped";
     }
     const sessionId = msg.to.sessionId;
+    // The head of the walk. The message id is the join key here and at `emit`
+    // because it is what `lineForEvent` uses as the QueuedLine's own id, so a
+    // frame can be followed from admission to the queue row it becomes, and the
+    // queue row's sha takes it from there. `boundRoute` is the other half of
+    // this line's value: whether a receipt and a reply have a way home at all.
+    log.debug(
+      { type: msg.type, sessionId, msgId: "envelope" in msg ? msg.envelope.messageId : undefined, boundRoute: onAccepted !== undefined },
+      "bus inbound: accepted",
+    );
     onAccepted?.();
     this.warnIfProjectDrifted(self, msg.to);
     switch (msg.type) {
@@ -879,7 +956,7 @@ export class SessionBusCoordinator {
         );
         return "applied";
       case "session-bus:ack":
-        this.onAck(sessionId, msg.messageId);
+        this.onAck(sessionId, msg);
         return "applied";
       case "session-bus:fetch":
         this.onFetch(sessionId, self, msg);
@@ -994,7 +1071,7 @@ export class SessionBusCoordinator {
    *  posts the answer to THIS machine's own desktop app, which accepts it and
    *  reports it sent. */
   private roleForContext(sessionId: string, contextId: string): BusRole {
-    return contextId === sessionId ? "lead" : "peer";
+    return isLeadContext(sessionId, contextId) ? "lead" : "peer";
   }
 
   /**
@@ -1013,6 +1090,21 @@ export class SessionBusCoordinator {
   private flushHeld(sessionId: string, now: number): void {
     const s = this.stateFor(sessionId);
     const live = expireHeld(s.held, now);
+    // A hold is a delay the sender was never told about: the send answered
+    // `{sent:false, held:true}`, which every surface renders as on its way, and
+    // six hours later the row simply vanishes. Said once per message, at warn,
+    // because it is the only moment anything can name what was lost — and ids
+    // only, never the envelope: `host.log` is a file users are asked to send.
+    if (live !== s.held) {
+      const survived = new Set(live.held.map((h) => h.messageId));
+      for (const m of s.held.held) {
+        if (survived.has(m.messageId)) continue;
+        log.warn(
+          "session bus: held message %s from session %s to %s on context %s expired without ever leaving; it will not be delivered",
+          m.messageId, sessionId, m.to.sessionId, m.contextId,
+        );
+      }
+    }
     const sent: string[] = [];
     const refused = new Set<string>();
     for (const m of live.held) {
@@ -1120,12 +1212,29 @@ export class SessionBusCoordinator {
    *
    *  Nothing to stamp is not a failure: a message already trimmed out of the
    *  ring, or a second receipt for one already stamped, both leave the log where
-   *  it was. The receipt says the frame arrived; the log is a rendering aid and
-   *  is allowed to have moved on. */
-  private onAck(sessionId: string, messageId: string): void {
+   *  it was. The stamp says the peer bridge took the frame; the log is a
+   *  rendering aid and is allowed to have moved on.
+   *
+   *  A refusing receipt is still a receipt, but it is not that, so it leaves the
+   *  entry unstamped and says so in the log where a human can read the reason.
+   *  Strictly `false`: nothing Zod-validates an inbound bus frame — it is
+   *  admitted on its type tag alone — so a peer whose body omits the field must
+   *  still have its receipt believed. */
+  private onAck(sessionId: string, msg: Extract<AbMessage, { type: "session-bus:ack" }>): void {
+    if (msg.ok === false) {
+      // Clipped here, not trusted from the wire: nothing Zod-validates an
+      // inbound bus frame, so `SessionBusAckWire`'s bound on this field never
+      // runs and a peer decides what lands in a file users are asked to send.
+      const reason = typeof msg.error === "string" ? msg.error.slice(0, 200) : undefined;
+      log.warn(
+        { sessionId, messageId: msg.messageId, error: reason },
+        "bus ack: the peer would not take the frame; the entry stays unacknowledged",
+      );
+      return;
+    }
     const s = this.stateFor(sessionId);
-    const log = markDelivered(s.log, messageId, this.now());
-    if (log !== s.log) this.commit(sessionId, { log });
+    const logState = markDelivered(s.log, msg.messageId, this.now());
+    if (logState !== s.log) this.commit(sessionId, { log: logState });
   }
 
   private onFetch(sessionId: string, self: SessionBusSelf, msg: Extract<AbMessage, { type: "session-bus:fetch" }>): void {
@@ -1187,11 +1296,22 @@ export class SessionBusCoordinator {
       // handing every event to whichever project happened to register would
       // deliver into the wrong project silently — see setListener.
       const projectId = this.deps.projectIdFor(event.sessionId);
+      // The store has already committed by the time this runs, so a listener
+      // that is absent is the difference between a message that was kept and
+      // one that was kept AND read: a session whose project is cold has an
+      // owner in the index and no listener here, and nothing downstream says so.
+      log.debug(
+        { kind: event.kind, sessionId: event.sessionId, msgId: event.envelope.messageId, projectId, listener: projectId !== null && this.listeners.has(projectId) },
+        "bus emit: event fanned",
+      );
       if (projectId !== null) this.listeners.get(projectId)?.(event);
     } catch (err) {
       // A consumer that throws must not cost the store write that already
       // landed.
-      log.error({ err, kind: event.kind }, "session-bus: event consumer threw");
+      // The name alone, never the error: the consumer on the other end of this
+      // renders the peer's own words, so its message is as much a delivery leak
+      // as the line itself would be.
+      log.error({ err: errorName(err), kind: event.kind }, "session-bus: event consumer threw");
     }
   }
 }

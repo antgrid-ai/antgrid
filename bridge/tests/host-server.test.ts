@@ -604,12 +604,18 @@ function withRegistration(host: HostServer, deviceId: string): void {
  *  above does — then closes the socket. `session:create` alone never starts a
  *  PTY (machine-level suite's own comment), so the returned session is
  *  registered but not "running", and the closed socket leaves no owner able
- *  to carry a bus frame anywhere. */
+ *  to carry a bus frame anywhere.
+ *
+ *  `carrier: true` instead leaves the socket OPEN and declares
+ *  `sessionBusCarrier` — an ordinary desktop, and the only configuration in
+ *  which a same-machine send that could not be delivered can be accepted by
+ *  something and reported as having left the machine. */
 async function openLocalSession(
   host: HostServer,
   folder: string,
   name: string,
-): Promise<{ projectId: string; sessionId: string }> {
+  opts: { carrier?: boolean } = {},
+): Promise<{ projectId: string; sessionId: string; owner?: WebSocket; ownerInbox?: unknown[] }> {
   const projectId = computeProjectId(folder);
   const opened = await host.open(projectId, folder, "local");
   if (!opened.connect) throw new Error("expected a loopback connect info");
@@ -620,7 +626,17 @@ async function openLocalSession(
   });
   const inbox: any[] = [];
   ws.onmessage = (ev) => inbox.push(JSON.parse(String(ev.data)));
-  ws.send(JSON.stringify({ type: "hello", token: opened.connect.token, appPid: 1, appVersion: "test" }));
+  ws.send(JSON.stringify({
+    type: "hello",
+    token: opened.connect.token,
+    appPid: 1,
+    appVersion: "test",
+    // Off by default, because most cases here are about a machine with nothing
+    // that could carry a frame anywhere. Declaring it is the NORMAL desktop
+    // state and the one configuration a same-machine miss can be reported as a
+    // successful send in — so a case that means to exercise that has to ask.
+    ...(opts.carrier ? { capabilities: { sessionBusCarrier: true } } : {}),
+  }));
   await waitFor(() => inbox.some((m) => m.type === "ready"), `${name} loopback ready`);
   const requestId = crypto.randomUUID();
   ws.send(JSON.stringify(createMessage("session:create", { requestId, name })));
@@ -630,8 +646,11 @@ async function openLocalSession(
   );
   const result = inbox.find((m) => m.type === "session:result" && m.requestId === requestId);
   const sessionId = result.session.id as string;
-  ws.close();
-  return { projectId, sessionId };
+  if (!opts.carrier) {
+    ws.close();
+    return { projectId, sessionId };
+  }
+  return { projectId, sessionId, owner: ws, ownerInbox: inbox };
 }
 
 function busCoordinatorOf(host: HostServer): SessionBusCoordinator {
@@ -952,6 +971,49 @@ test(
     if (!("ok" in res) || !res.ok) throw new Error(`message refused: ${JSON.stringify(res)}`);
     expect(res.sent).toBe(true);
     expect(sessionBus.mailbox(sessionB).posts).toHaveLength(1);
+  },
+  20_000,
+);
+
+test(
+  "a cold local target is held even with a bus carrier attached, not handed to the desktop",
+  async () => {
+    // The case the rest of this family could not reach. Every other test here
+    // runs an owner that never declares `sessionBusCarrier`, so `deps.send`
+    // finds no carrier and holds for the wrong reason — which means the whole
+    // same-machine-cold-project family was gated only in the configuration
+    // where the failure cannot happen. With a carrier attached, a fall-through
+    // reaches the SENDER's own desktop as a lead-role frame, is accepted, and
+    // is reported `{sent:true, held:false}`; the app then classifies it
+    // inbound-but-uncarried and drops it with nothing anywhere to say so.
+    host = new HostServer({});
+    const a = await openLocalSession(host, tempFolder(), "session-a", { carrier: true });
+    const folderB = tempFolder();
+    const b = await openLocalSession(host, folderB, "session-b");
+    await host.stop(b.projectId);
+
+    const sessionBus = busCoordinatorOf(host);
+    const res = sessionBus.message({
+      sessionId: a.sessionId,
+      verb: "post",
+      threadId: null,
+      to: { machineId: LOCAL_MACHINE_ID, projectId: b.projectId, sessionId: b.sessionId },
+      summary: "hi",
+      parts: [{ kind: "text", text: "hi" }],
+    });
+    if (!("ok" in res) || !res.ok) throw new Error(`message refused: ${JSON.stringify(res)}`);
+    expect(res.sent).toBe(false);
+    expect(res.held).toBe(true);
+    // The carrier is the half that has to be proven, not inferred: a frame the
+    // owner never saw is the difference between held and silently dropped.
+    expect((a.ownerInbox ?? []).some((m: any) => String(m.type).startsWith("session-bus:"))).toBe(false);
+
+    // Still a delay rather than a loss: the retry takes the same decision and
+    // the local arm delivers once that project is warm again.
+    await host.open(b.projectId, folderB, "local");
+    sessionBus.pump();
+    expect(sessionBus.mailbox(b.sessionId).posts).toHaveLength(1);
+    a.owner?.close();
   },
   20_000,
 );

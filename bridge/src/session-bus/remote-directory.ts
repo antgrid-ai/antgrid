@@ -299,9 +299,14 @@ export class RemoteDirectoryCache {
     return { accepted, dropped, unservedReads };
   }
 
-  /** Empty the mirror. Called on the loopback gate's refusal path (remote
-   *  access turned off, or this machine has no relay identity) so a switch
-   *  flipped off takes effect immediately rather than riding out the TTL —
+  /** Empty the mirror. Called on the one refusal this plane still makes — this
+   *  machine has no relay identity, so nothing mirrored could be messaged
+   *  anyway (E15 retired the remote-access refusal here, and it stays retired:
+   *  a peer's row discloses nothing about this machine, the mirror is filled
+   *  over loopback by our own app, and keeping it warm is what lets reach
+   *  return the instant the switch does. The SEND is gated instead, at
+   *  `api.ts` — so do not read this as the switch being inbound-only, which is
+   *  the generalisation that shipped a one-way channel). Immediate rather than riding out the TTL —
    *  `lastPushAt` goes to null with it, so a read right after reports
    *  `no-carrier` rather than a stale "just pushed, nothing in it". The
    *  unserved-read counter and the wanted-repo-key list are cleared too: both

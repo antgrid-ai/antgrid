@@ -60,8 +60,42 @@ the next hello, so removal only clears the local record (label, `lastSeenAt`,
 push token). Cutting a phone off means turning the machine's remote-access
 switch off (all phones) or signing that device out of the account.
 
+That switch also governs whether agents on this machine exchange session-bus
+messages with agents on **another** machine, in both directions: with it off,
+an inbound frame is refused and a send to another machine answers
+`REMOTE_ACCESS_OFF`, while messaging between sessions on this machine is
+unaffected. `antgrid_whoami` and `antgrid_list_sessions` both say so rather than
+offering an address that cannot be reached.
+
 The CLI resolves `ANTGRID_DIR` from its own shell env, so it only sees a dev
 host's store if that env matches how the host was launched.
+
+**Log level, temporarily:** `antgrid log-level <level> [--ttl <ms>]`
+(`bridge/src/cli/log-level.ts`) raises the *already-running* host's verbosity
+over the same loopback plane `watch` uses. `--log-level`/`ANTGRID_LOG_LEVEL` are
+read once at startup, so reaching `debug` through them costs a restart — which
+destroys whatever was being investigated. The window lapses back to whatever the
+host was configured with; it is mandatory (the host refuses an arm without one)
+and the host clamps it. Naming no level at all is the disarm.
+
+```bash
+antgrid log-level debug --ttl 600000   # ten minutes of the delivery-path walk
+antgrid log-level                      # back to the configured level, now
+antgrid log-level debug --dir ~/.antgrid-dev
+```
+
+Following one session-bus delivery: every stage prints the same 12-hex `sha`
+(`bridge/src/line-key.ts`), so `grep` it in `host.log`. In order:
+`bus queue: held` → `bus inject: …` → `submit gate: wait ended` (only when the
+gate had to wait for the TUI) → `submit: writing to the pty` → `bus drain:
+inject returned`.
+
+That last line is the drain's *outcome*, printed after the injection it reports
+on, so it is a closing bracket rather than a stage — read its `outcome` field,
+then take the last `sha`-carrying line above it: that one names the segment
+where the delivery stopped. No `bus drain: inject returned` at all means the drain
+never ran — and a `bus drain: skipped, …` line, which carries the same `sha`,
+says why. The message text is never written down at any level.
 
 **Network watcher:** `antgrid watch` (`bridge/src/cli/netwatch.ts`) streams every
 frame crossing the machine relay socket — direction, channel, stream, size, the

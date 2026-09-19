@@ -266,7 +266,7 @@ export function withLocalFloor(
  *  reasons mean no network read was attempted at all; `"network"` means one
  *  was, and names what it found. */
 export type DirectoryReach =
-  | { scope: "machine"; why: "no-machine-id" | "no-carrier" }
+  | { scope: "machine"; why: "no-machine-id" | "no-carrier" | "remote-access-off" }
   | { scope: "network"; lastPushAgoMs: number; machines: ReachMachine[]; staleMachines: number; notConnected: number };
 
 /**
@@ -354,6 +354,27 @@ export class SessionDirectory {
   }
 
   /**
+   * §5.1's fail-closed bound about the CALLER, read on its own, so a refusal
+   * can tell "this project can address nobody" from "that address resolves to
+   * nobody".
+   *
+   * {@link rowFor} folds the two together: it returns null on its first line
+   * for a keyless caller, which leaves a refusal naming the PEER for a fact
+   * about the CALLER. Three states rather than a boolean for the reason
+   * {@link list} already answers three: a key that has not been PROBED yet is a
+   * startup race that clears on its own — every restarted bridge is briefly in
+   * it — and telling that caller "this project has no git remote" is a second
+   * wrong answer in place of the first.
+   *
+   * Narrow on purpose: it speaks only about the asking side, and touches
+   * neither the mirror nor the session index.
+   */
+  repoKeyState(projectId: string): "keyed" | "no-remote" | "not-probed" {
+    if (this.deps.repoKeys.keyFor(projectId) !== null) return "keyed";
+    return this.deps.repoKeys.probed(projectId) ? "no-remote" : "not-probed";
+  }
+
+  /**
    * The one row a send needs, resolved with no branch probe and no git spawn —
    * `list()` is documented as the bus's one async read precisely so a send
    * never goes through it. `branch` is always null here: §5.3 makes branch a
@@ -410,11 +431,14 @@ export class SessionDirectory {
    * are or are not any. The three checks run in exactly this order, and the
    * order is the point — see each arm.
    *
-   * THIS machine's own remote-access switch is deliberately not among them
-   * (E15). Reading a peer's row discloses nothing about this machine, and the
-   * peer whose row it is decided for itself whether to offer it; a switch that
-   * governs what may be done TO this machine has no say in what this machine
-   * may be told.
+   * THIS machine's own remote-access switch is deliberately not among them.
+   * Reading a peer's row discloses nothing about this machine, and the peer
+   * whose row it is decided for itself whether to offer it — so the mirror
+   * stays warm and reach returns the instant the switch does. The narrowing
+   * happens one layer out, at `api.ts`'s `listSessions`, which drops the
+   * off-machine rows and reports `remote-access-off`: a caller that cannot be
+   * sent to must not be offered, but that is a fact about the ANSWER, not about
+   * what this half is allowed to know.
    */
   private remoteHalfFor(
     repoKey: string,

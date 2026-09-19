@@ -143,7 +143,8 @@ async function peerRow(
 
 /** The address a send names, taken from the row rather than assembled from what
  *  the harness believes: a target the directory does not actually offer refuses
- *  `UNKNOWN_PEER`, which reads as a routing bug rather than a wrong address. */
+ *  `PEER_UNREACHABLE`, which reads as a routing bug rather than a wrong
+ *  address. */
 function addressOf(row: any): { machineId: string; projectId: string; sessionId: string } {
   return { machineId: row.machineId, projectId: row.projectId, sessionId: row.sessionId };
 }
@@ -263,8 +264,9 @@ async function agentReach(machine: BridgeMachine, enabled: boolean): Promise<voi
 }
 
 /** Both machines' rows into the other's mirror, asserted rather than assumed:
- *  an empty mirror refuses every cross-machine send `UNKNOWN_PEER`, which is
- *  also what half the rows below assert on purpose. */
+ *  an empty mirror refuses every cross-machine send that OPENS an exchange with
+ *  `PEER_UNREACHABLE`, which is also what half the rows below assert on
+ *  purpose. */
 async function pumpAndExpectRows(carrier: TwoBridgeEnv["carrier"]): Promise<void> {
   const pushes = await carrier.pumpDirectory();
   expect(pushes).toHaveLength(2);
@@ -359,6 +361,16 @@ test("a message crosses to the other machine, comes back receipted, and refuses 
   );
   await sleep(SETTLE_MS);
   expect(countMarkers(sinkText(sinks.b), NOTIFY_MARKER)).toBe(1);
+
+  // Claude retires a submitted line on the turn that line opens, not on the
+  // write, so machine b's queue is still holding it until one is announced. The
+  // rest of this test runs long enough for an unretired line to be retried.
+  await fireHookOnMachine(b, sessionB, "claude", "user-prompt", sinks.b);
+  await until(
+    () => (loadDeliveries(b.env.abDir, b.env.projectId).lines.some((l) => l.sessionId === sessionB) ? undefined : true),
+    CROSS_TIMEOUT_MS,
+    `the submitted notify to be retired by the turn it opened on session ${sessionB}`,
+  );
 
   const receipt = await awaitReceipt(a, sessionA, threadId, NOTIFY_SUMMARY);
   expect(receipt.deliveredAt).toBeGreaterThan(0);
@@ -473,9 +485,13 @@ test("the RECEIVING end's two switches decide a cross-machine send, and the send
   expect(intoA.rows).toHaveLength(0);
   expect(intoA.ack.ok).toBe(true);
 
+  // A NEW exchange, which is what needs a row: the send names an address and no
+  // thread, so there is nothing recorded for it to route by. The code is about
+  // this machine's knowledge of b rather than about b existing, and it says so
+  // — an answer on a thread b had already opened would still leave.
   const unknown = await busCall(a.env.abDir, "post", { terminalId: sessionA, body: body("Nobody to address.") });
-  expect(unknown.status).toBe(404);
-  expect(unknown.body.code).toBe("UNKNOWN_PEER");
+  expect(unknown.status).toBe(503);
+  expect(unknown.body.code).toBe("PEER_UNREACHABLE");
 
   // The refusal alone would send the agent hunting for a wrong address, so the
   // directory has to name the machine and say which switch it was.
@@ -490,25 +506,30 @@ test("the RECEIVING end's two switches decide a cross-machine send, and the send
   await pumpAndExpectRows(carrier);
   await peerRow(a, sessionA, b, sessionB);
 
-  // Machine a shuts its OWN door — and keeps talking. E15: the switch governs
-  // what may be done TO a, never what a may do. The leg leaves over a's own
-  // loopback carrier, so nothing about it is the relay ingress the switch
-  // refuses, and b's switch is the one with a say in whether it is welcome.
+  // Machine a shuts its OWN door, and stops talking with it. This reverses E15,
+  // which held that the switch governs only what may be done TO a: the leg did
+  // leave over a's own loopback carrier, but b's reply came back through a's
+  // relay ingress, which the same switch refuses — so what E15 actually shipped
+  // was a machine that could speak and could not be answered.
   await setMobileAccess(a.env.abDir, false);
-  const DOOR_SHUT = "My own switch is off and this still leaves.";
+  const DOOR_SHUT = "My own switch is off, so this does not leave.";
   const outbound = await busCall(a.env.abDir, "post", { terminalId: sessionA, body: body(DOOR_SHUT) });
-  expect(outbound.status).toBe(200);
-  expect(outbound.body.ok).toBe(true);
-  expect(outbound.body.sent).toBe(true);
+  expect(outbound.status).toBe(403);
+  expect(outbound.body.code).toBe("REMOTE_ACCESS_OFF");
+  expect(outbound.body.ok).toBeUndefined();
 
-  const landed = await awaitPost(b, sessionB, `the post to reach session ${sessionB} with the SENDER's switch off`);
-  expect(landed.posts).toHaveLength(1);
-  expect(landed.posts[0].summary).toBe(DOOR_SHUT);
+  // The listing narrows with it, and names the switch rather than the carrier —
+  // b's row is still in the mirror, and is deliberately not offered.
+  const shutDir = await directory(a, sessionA);
+  expect(shutDir.reach).toEqual({ scope: "machine", why: "remote-access-off" });
+  expect((shutDir.sessions ?? []).some((r: any) => r.sessionId === sessionB)).toBe(false);
 
-  // And the address it was sent to is still good with no fresh push: the flip
-  // no longer empties this machine's mirror, because a session here may still
-  // open an exchange and needs the row to address one.
+  // The mirror itself still survives the flip, so turning the switch back on
+  // restores the address with no fresh push — which is what the next line
+  // proves by finding the row again before any pump has run.
+  await setMobileAccess(a.env.abDir, true);
   await peerRow(a, sessionA, b, sessionB);
+  await setMobileAccess(a.env.abDir, false);
 
   await setMobileAccess(a.env.abDir, true);
   await pumpAndExpectRows(carrier);
