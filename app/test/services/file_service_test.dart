@@ -43,6 +43,19 @@ void _emitRootTree(FakeAgentTransport t, Map<String, dynamic> payload) {
 List<Map<String, dynamic>> _treeRequests(FakeAgentTransport t) =>
     t.sent.where((m) => m['type'] == 'file:tree:root:request').toList();
 
+/// Drains pending microtasks WITHOUT a real `Timer` — unlike
+/// `Future<void>.delayed(Duration.zero)`, which schedules through the OS
+/// timer queue and can take far longer than zero under load. Used between
+/// the two triggers in the D6 coalescing test below, where the assertion
+/// depends on real elapsed wall time staying well under the implementation's
+/// 50ms coalescing window; a `Duration.zero` delay there is exactly what made
+/// that test race and occasionally send two frames instead of one.
+Future<void> _pump([int hops = 3]) async {
+  for (var i = 0; i < hops; i++) {
+    await Future<void>.value();
+  }
+}
+
 Future<ProjectSession> _newSession(
   FakeAgentTransport t, {
   String projectId = 'p',
@@ -896,6 +909,300 @@ void main() {
       expect(requests, hasLength(2));
 
       await svc.dispose();
+      await session.close();
+    });
+  });
+
+  group('file:tree:subscribe (D6)', () {
+    // Timing notes for this whole group. Triggers are separated by `_pump()`
+    // (pure microtask draining) rather than `Future<void>.delayed(...)` —
+    // even `Duration.zero` goes through the OS timer queue and can take far
+    // longer than the implementation's 50ms coalescing window under load.
+    // Nothing here asserts that ZERO frames have gone out at a given instant:
+    // the service announces itself on construction (an account is what lets
+    // the bridge filter at all), and any assertion of that shape would go red
+    // on a 50ms stall rather than on a code change. Assert the LAST frame's
+    // paths, and — for coalescing — that a burst of N triggers produced fewer
+    // than N frames.
+    // Per the `session.fileService` comment further down the file: a second,
+    // independently-constructed `FileService` on the same session reacts to
+    // the same broadcast frames and doubles every send counted here — drive
+    // the session's own instance instead.
+    List<Map<String, dynamic>> subscribes(FakeAgentTransport t) =>
+        t.sent.where((m) => m['type'] == 'file:tree:subscribe').toList();
+
+    test('announces itself with no tree interest and nothing loaded', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      await _pump();
+
+      // A device parked on the terminal tab must still say "nothing", or the
+      // bridge cannot filter for the device that IS looking at a tree.
+      expect(subscribes(t), isNotEmpty);
+      expect(subscribes(t).last['paths'], isEmpty);
+
+      await session.close();
+    });
+
+    test(
+      'claims a directory when the request is ISSUED, not when the reply '
+      'lands',
+      () async {
+        final t = FakeAgentTransport();
+        final session = await _newSession(t);
+        final svc = session.fileService;
+
+        t.emit('file:tree:children', {
+          'listings': [
+            {
+              'path': '',
+              'children': [
+                {'name': 'dirA', 'path': 'dirA', 'type': 'directory'},
+              ],
+            },
+          ],
+          'seq': 1,
+        });
+        await _pump();
+        t.clearSent();
+
+        // Expand and then answer NOTHING: the bridge's listing is a snapshot
+        // taken at request time, so anything written in the round trip would
+        // be filtered away for good if the claim waited for the reply.
+        unawaited(svc.toggleExpanded('dirA'));
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+
+        expect(subscribes(t), isNotEmpty);
+        expect(subscribes(t).last['paths'], ['dirA']);
+
+        await session.close();
+      },
+    );
+
+    test('coalesces a burst of expands into fewer frames than triggers', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = session.fileService;
+
+      t.emit('file:tree:children', {
+        'listings': [
+          {
+            'path': '',
+            'children': [
+              {'name': 'dirA', 'path': 'dirA', 'type': 'directory'},
+              {'name': 'dirB', 'path': 'dirB', 'type': 'directory'},
+            ],
+          },
+        ],
+        'seq': 1,
+      });
+      await _pump();
+      t.clearSent();
+
+      // Four triggers: two expand requests and two applied listings.
+      unawaited(svc.toggleExpanded('dirA'));
+      await _pump();
+      t.emit('file:tree:children', {
+        'listings': [
+          {
+            'path': 'dirA',
+            'children': [_file('a.txt', 'dirA/a.txt')],
+          },
+        ],
+        'seq': 2,
+      });
+      await _pump();
+      unawaited(svc.toggleExpanded('dirB'));
+      await _pump();
+      t.emit('file:tree:children', {
+        'listings': [
+          {
+            'path': 'dirB',
+            'children': [_file('b.txt', 'dirB/b.txt')],
+          },
+        ],
+        'seq': 3,
+      });
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+
+      expect(subscribes(t), isNotEmpty);
+      expect(
+        subscribes(t).length,
+        lessThan(4),
+        reason: 'four triggers inside one window must not be four frames',
+      );
+      expect(subscribes(t).last['paths'], unorderedEquals(['dirA', 'dirB']));
+
+      t.clearSent();
+      unawaited(svc.toggleExpanded('dirA')); // collapse
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+      expect(subscribes(t).last['paths'], ['dirB']);
+
+      await session.close();
+    });
+
+    test(
+      'keeps announcing after tree interest is dropped, and re-announces '
+      'on reconnect',
+      () async {
+        final t = FakeAgentTransport();
+        final session = await _newSession(t);
+        final svc = session.fileService..setTreeInterest('files-test', true);
+        await _pump();
+
+        t.emit('file:tree:children', {
+          'listings': [
+            {
+              'path': '',
+              'children': [
+                {'name': 'dirA', 'path': 'dirA', 'type': 'directory'},
+              ],
+            },
+          ],
+          'seq': 1,
+        });
+        await _pump();
+
+        unawaited(svc.toggleExpanded('dirA'));
+        await _pump();
+        t.emit('file:tree:children', {
+          'listings': [
+            {
+              'path': 'dirA',
+              'children': [_file('a.txt', 'dirA/a.txt')],
+            },
+          ],
+          'seq': 2,
+        });
+        await Future<void>.delayed(const Duration(milliseconds: 250));
+        t.clearSent();
+
+        // The bridge's subscription store is per-connection — a reconnect
+        // must re-announce the set with no further user action.
+        t.redriveHydrators();
+        await _pump();
+        expect(subscribes(t), isNotEmpty);
+        expect(subscribes(t).last['paths'], ['dirA']);
+
+        // Closing the Files tab does NOT stop this client accounting for
+        // itself: the tree is still held and its deltas still applied, and a
+        // silent client turns the filter off for every other device.
+        svc.setTreeInterest('files-test', false);
+        t.clearSent();
+        t.redriveHydrators();
+        await _pump();
+        expect(subscribes(t), isNotEmpty);
+        expect(subscribes(t).last['paths'], ['dirA']);
+
+        await session.close();
+      },
+    );
+
+    test(
+      'an invalidated tree never announces the empty set it is about to '
+      'reload',
+      () async {
+        final t = FakeAgentTransport();
+        final session = await _newSession(t);
+        final svc = session.fileService..setTreeInterest('files-test', true);
+        await _pump();
+
+        t.emit('file:tree:children', {
+          'listings': [
+            {
+              'path': '',
+              'children': [
+                {'name': 'dirA', 'path': 'dirA', 'type': 'directory'},
+              ],
+            },
+          ],
+          'seq': 1,
+        });
+        await _pump();
+
+        unawaited(svc.toggleExpanded('dirA'));
+        await _pump();
+        t.emit('file:tree:children', {
+          'listings': [
+            {
+              'path': 'dirA',
+              'children': [_file('a.txt', 'dirA/a.txt')],
+            },
+          ],
+          'seq': 2,
+        });
+        await Future<void>.delayed(const Duration(milliseconds: 250));
+        t.clearSent();
+
+        // Invalidation clears every childrenLoaded flag and kicks off its own
+        // re-list. The old claim is a superset of what is about to be
+        // reloaded, so withdrawing it first would only open a window in which
+        // dirA's deltas are filtered away with no gap for the app to notice.
+        t.emit('file:tree:invalidated', {'seq': 3});
+        await Future<void>.delayed(const Duration(milliseconds: 250));
+        for (final frame in subscribes(t)) {
+          expect(
+            frame['paths'],
+            ['dirA'],
+            reason: 'must never withdraw a directory it is re-listing',
+          );
+        }
+        expect(subscribes(t), isNotEmpty);
+
+        await session.close();
+      },
+    );
+
+    test('keeps the open file directory claimed after its folder is collapsed', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = session.fileService;
+
+      t.emit('file:tree:children', {
+        'listings': [
+          {
+            'path': '',
+            'children': [
+              {'name': 'dirA', 'path': 'dirA', 'type': 'directory'},
+            ],
+          },
+        ],
+        'seq': 1,
+      });
+      await _pump();
+      unawaited(svc.toggleExpanded('dirA'));
+      await _pump();
+      t.emit('file:tree:children', {
+        'listings': [
+          {
+            'path': 'dirA',
+            'children': [_file('a.txt', 'dirA/a.txt')],
+          },
+        ],
+        'seq': 2,
+      });
+      await _pump();
+      svc.selectFile('dirA/a.txt');
+      await _pump();
+
+      // Collapsing dirA drops it from the loaded set, but `_applyTreeUpdate`
+      // still reads `modified` for the open file — the viewer's "changed on
+      // disk" banner is the only warning the user gets.
+      unawaited(svc.toggleExpanded('dirA'));
+      t.clearSent();
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+      expect(subscribes(t).last['paths'], ['dirA']);
+
+      t.emit('tree:update', {
+        'projectId': 'p',
+        'added': <Map<String, dynamic>>[],
+        'modified': [_file('a.txt', 'dirA/a.txt')],
+        'removed': <String>[],
+        'seq': 3,
+      });
+      await _pump();
+      expect(svc.currentState.files.fileModifiedExternally, isTrue);
+
       await session.close();
     });
   });

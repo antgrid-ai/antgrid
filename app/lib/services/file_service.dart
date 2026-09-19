@@ -9,6 +9,7 @@ import '../models/preferences_models.dart';
 import '../models/ab_message.dart';
 import '../models/git_sync_state.dart';
 import '../project/project_session.dart';
+import '../util/ab_log.dart';
 import '../util/detached.dart';
 import 'pending_reply.dart';
 import 'reply_latch.dart';
@@ -171,6 +172,19 @@ class FileService {
     // chrome for every checkout, not just the one on screen — see
     // [ProjectSession.setActiveCheckouts].
     session.hydrateCheckout(checkoutId, _syncHydratorKey, _hydrateSyncState);
+    // Eager and ungated by tree interest, unlike [_treeHydratorKey]. The
+    // bridge's D6 filter only engages once EVERY attached client has stated
+    // what it wants, so a device that never opens the Files tab and therefore
+    // never speaks would turn the filter off for the device that IS looking
+    // at a tree — a phone parked on the terminal is exactly the client D6
+    // exists to spare, and it would instead be handed the full unfiltered
+    // delta stream. Saying "nothing" out loud is an account; staying silent
+    // is not.
+    session.hydrateCheckout(
+      checkoutId,
+      _subscriptionHydratorKey,
+      _sendSubscription,
+    );
     // History is deliberately NOT hydrated here the way sync state is: it has
     // no consumer besides the Git panel (every FileService exists whether or
     // not that panel is ever opened), so eager-on-construct hydration would
@@ -180,6 +194,14 @@ class FileService {
   }
 
   static const _treeHydratorKey = 'file:tree';
+
+  /// D6's delta-bandwidth subscription (docs/file-tree-lazy-expansion-spec.md)
+  /// — registered in the constructor because the bridge's subscription store
+  /// is per-connection and does not survive a reconnect on its own (trap 3,
+  /// the app-side half): without a hydrator, a reconnected app keeps the
+  /// bridge's D6 filter believing it has nothing open until the next expand
+  /// or collapse.
+  static const _subscriptionHydratorKey = 'file:tree:sub';
   static const _syncHydratorKey = 'git:sync-state';
 
   /// Restores selected-file and preview pulls independently of full-tree demand.
@@ -283,6 +305,13 @@ class FileService {
       ..sort((a, b) => _depthOf(a).compareTo(_depthOf(b)));
     if (ordered.isEmpty) return Future.value();
     _markLoading(ordered);
+    // Claimed when the request is ISSUED, not when the reply is applied —
+    // see [_loadedDirectoryPaths] for the delta window that closes. Sent
+    // without the coalescing window, and before the request frames below:
+    // the window opens the moment the bridge takes its listing snapshot, so
+    // deferring the claim by 50ms would reopen exactly the gap it exists to
+    // cover.
+    _sendSubscriptionNow();
     final sends = <Future<void>>[];
     for (var i = 0; i < ordered.length; i += _childrenRequestBatchLimit) {
       final end = i + _childrenRequestBatchLimit < ordered.length
@@ -736,6 +765,179 @@ class FileService {
     return sorted;
   }
 
+  Timer? _subscriptionSendTimer;
+
+  /// When the currently-pending [_subscriptionSendTimer] was FIRST asked for,
+  /// so a run of triggers cannot defer the send indefinitely — see
+  /// [_subscriptionMaxDefer].
+  DateTime? _subscriptionSendRequestedAt;
+
+  /// True once a non-empty set has gone out, so [dispose] knows whether the
+  /// bridge is still holding directories for a client that no longer exists.
+  bool _subscriptionClaimed = false;
+
+  /// Coalescing window for `file:tree:subscribe` sends — opening five
+  /// folders in one gesture (a chunked restore, a multi-select expand) must
+  /// not put one frame on the wire per directory.
+  static const Duration _subscriptionCoalesceWindow = Duration(
+    milliseconds: 50,
+  );
+
+  /// Ceiling on [_subscriptionCoalesceWindow]'s restart-on-every-trigger.
+  /// Without it the window is a debounce rather than a coalesce: a chunked
+  /// restore whose listings land under 50ms apart keeps pushing the send out
+  /// for the whole burst. Nothing is lost while it waits — every site that
+  /// can ADD a directory sends immediately — but the bridge goes on paying
+  /// delta bandwidth for a claim the user has already collapsed.
+  static const Duration _subscriptionMaxDefer = Duration(milliseconds: 250);
+
+  /// Client-side mirror of the bridge's own clamp (`MAX_SUBSCRIBED_PATHS` in
+  /// file-watcher.ts). Past the cap the tail is not merely un-live: those
+  /// directories keep `childrenLoaded`, stay rendered, and the app keeps
+  /// advancing `_snapshotSeq` from the filtered `tree:update` frames it does
+  /// receive — so the next `file:tree:root:request {sinceSeq}` is answered
+  /// `file:tree:unchanged` and nothing rebuilds them. They are stale until
+  /// re-expanded or invalidated. The truncation is logged for that reason,
+  /// and ordered so the cut falls on directories under a COLLAPSED ancestor
+  /// before anything the user has open.
+  static const int _maxSubscribedPaths = 512;
+
+  /// Schedules a coalesced `file:tree:subscribe` reflecting whatever
+  /// [_loadedDirectoryPaths] returns when the timer actually fires — not a
+  /// snapshot taken now.
+  ///
+  /// Called from the sites that can only SHRINK the claim, or leave it
+  /// unchanged ([toggleExpanded]'s collapse branch, [_handleChildrenMessage]);
+  /// a site that adds a directory sends through [_sendSubscriptionNow]
+  /// instead. `_applyTreeUpdate`'s own removals are left to the next scheduled
+  /// send on purpose: they can only leave the claim naming a directory that no
+  /// longer exists, which over-claims and so is harmless.
+  void _scheduleSubscriptionSend() {
+    if (_disposed) return;
+    final now = DateTime.now();
+    final requestedAt = _subscriptionSendRequestedAt;
+    if (_subscriptionSendTimer != null &&
+        requestedAt != null &&
+        now.difference(requestedAt) >= _subscriptionMaxDefer) {
+      // Already deferred as long as it may be — let the pending timer run.
+      return;
+    }
+    _subscriptionSendTimer?.cancel();
+    _subscriptionSendRequestedAt = requestedAt ?? now;
+    _subscriptionSendTimer = Timer(_subscriptionCoalesceWindow, () {
+      _subscriptionSendTimer = null;
+      _subscriptionSendRequestedAt = null;
+      detached('FileService', 'send file:tree:subscribe', _sendSubscription);
+    });
+  }
+
+  /// Sends the claim now, superseding any pending coalesced send — the frame
+  /// carries the whole set, so the one it replaces had nothing else in it.
+  void _sendSubscriptionNow() {
+    if (_disposed) return;
+    _subscriptionSendTimer?.cancel();
+    _subscriptionSendTimer = null;
+    _subscriptionSendRequestedAt = null;
+    detached('FileService', 'send file:tree:subscribe', _sendSubscription);
+  }
+
+  /// The directories this app currently holds — or has just asked for — a
+  /// listing of: the D6 subscription set
+  /// (docs/file-tree-lazy-expansion-spec.md). Derived from the tree on every
+  /// send rather than tracked in a separate mutable field, so it can never
+  /// drift from what the tree actually has: a mirrored field would need
+  /// updating at every site that flips the flag (collapse,
+  /// `file:tree:invalidated`, a full-tree refresh), and missing one would
+  /// either bill the bridge for deltas this app no longer renders or — the
+  /// worse direction — leave it filtering out deltas for a directory the app
+  /// genuinely still has open. Root is never included: the bridge treats it
+  /// as subscribed unconditionally (D6's `dirname(path) ∈ subscribed ∪ {""}`).
+  Set<String> _loadedDirectoryPaths() {
+    final root = _state.root;
+    if (root == null) return const {};
+    final paths = <String>{};
+    // Recurses regardless of THIS node's own flag — invalidation clears
+    // every directory's `childrenLoaded` at once (root included), and a
+    // child can be independently re-listed before the root's own listing is
+    // reconfirmed. Bailing out the moment an ancestor reads unloaded would
+    // miss exactly that child, undercounting the very set this exists to
+    // get right (see the doc above on why under-claiming is the worse
+    // direction). `node.children` stays a valid list to walk either way —
+    // collapsing or invalidating never truncates it, only flips flags.
+    void walk(FileNode node) {
+      if (node.type != FileNodeType.directory) return;
+      // `childrenLoading` counts, not just `childrenLoaded`: the bridge's
+      // listing is a snapshot taken when the request ARRIVES, so a change
+      // landing between that snapshot and this claim would be filtered out
+      // and never re-sent — there is no per-directory gap detector, and the
+      // emptied `tree:update` still carries a contiguous seq. Claiming a
+      // directory whose listing never arrives only over-claims.
+      if ((node.childrenLoaded || node.childrenLoading) &&
+          node.path.isNotEmpty) {
+        paths.add(node.path);
+      }
+      for (final child in node.children) {
+        walk(child);
+      }
+    }
+    walk(root);
+    // `_applyTreeUpdate` marks the open file externally modified straight off
+    // `msg.modified`, without going through the loaded-parent check every
+    // other delta passes — so the viewer's "changed on disk" banner needs
+    // that file's directory in the claim even after the user collapses it.
+    final selected = _state.files.selectedFilePath;
+    if (selected != null) {
+      final cut = selected.lastIndexOf('/');
+      if (cut > 0) paths.add(selected.substring(0, cut));
+    }
+    return paths;
+  }
+
+  /// Sends the current claimed-directory set. `file:tree:subscribe` REPLACES
+  /// the bridge's whole record of what this client wants (not a diff), so
+  /// this is safe to call as often as needed. Also registered directly as
+  /// [_subscriptionHydratorKey] — the bridge's subscription store is
+  /// per-connection, so a reconnect must re-announce it or the D6 filter
+  /// falls back to believing this client has nothing open until the next
+  /// expand or collapse (trap 3, the app-side half).
+  Future<void> _sendSubscription() {
+    if (_disposed) return Future.value();
+    final expanded = _state.expandedPaths;
+    // Visible-first, then shallowest-first. Depth alone would cut the
+    // directories the user just opened; a collapsed ancestor's leftovers
+    // (`toggleExpanded` clears the flag on the collapsed node alone, so its
+    // descendants stay claimed and must — re-expanding re-lists depth 1 only
+    // and `_carryLoaded` carries the stale subtree back in) are what should
+    // go first.
+    final paths = _loadedDirectoryPaths().toList()
+      ..sort((a, b) {
+        final byVisibility =
+            (expanded.contains(a) ? 0 : 1) - (expanded.contains(b) ? 0 : 1);
+        if (byVisibility != 0) return byVisibility;
+        return _depthOf(a).compareTo(_depthOf(b));
+      });
+    final capped = paths.length > _maxSubscribedPaths
+        ? paths.sublist(0, _maxSubscribedPaths)
+        : paths;
+    if (capped.length < paths.length) {
+      AbLog.warn(
+        'FileService',
+        'file:tree:subscribe truncated — the dropped directories stop '
+            'receiving deltas until re-expanded',
+        fields: {
+          'kept': '${capped.length}',
+          'loaded': '${paths.length}',
+          'checkoutId': checkoutId,
+        },
+      );
+    }
+    _subscriptionClaimed = capped.isNotEmpty;
+    return session.sendForCheckout(
+      checkoutId,
+      createAbMessage('file:tree:subscribe', {'paths': capped}),
+    );
+  }
+
   /// Reply to both `file:tree:root:request` and `file:tree:children:request`
   /// — the two are told apart by whether [FileTreeChildrenMessage.listings]
   /// carries a `path: ""` entry, never by message type.
@@ -782,6 +984,7 @@ class FileService {
     }
     if (!identical(root, _state.root)) {
       _setState(_state.copyWith(root: root));
+      _scheduleSubscriptionSend();
     }
   }
 
@@ -893,6 +1096,11 @@ class FileService {
     // untrustworthy, and every path is about to be asked for again.
     _listingSeq.clear();
     _setState(_state.copyWith(root: _clearAllLoaded(root)));
+    // Deliberately does NOT announce the now-empty set: the re-list below
+    // asks for exactly what was already claimed, so shrinking first would
+    // only open a window in which every delta for those directories is
+    // filtered away. The old claim is a superset; `_fetchChildrenChunked`
+    // re-states it.
     detached(
       'FileService',
       're-list after file:tree:invalidated',
@@ -1197,6 +1405,7 @@ class FileService {
         (dir) => _rebuild(dir, childrenLoaded: false, childrenLoading: false),
       );
       _setState(_state.copyWith(root: newRoot, expandedPaths: expanded));
+      _scheduleSubscriptionSend();
     } else {
       _setState(_state.copyWith(expandedPaths: expanded));
     }
@@ -1464,6 +1673,8 @@ class FileService {
     if (root != null) {
       _listingSeq.clear();
       _setState(_state.copyWith(root: _clearAllLoaded(root)));
+      // No subscription shrink here either — same reason as
+      // [_handleInvalidated]: the re-list below re-asks for the same set.
     }
     // Deliberately claims nothing, unlike [_pullTree]: this is the user
     // asking for the tree to be rebuilt from disk, and `file:tree:unchanged`
@@ -1998,6 +2209,23 @@ class FileService {
 
   Future<void> dispose() async {
     if (_disposed) return;
+    // Before `_disposed` is set, so [_sendSubscription]'s own guard lets it
+    // through. Nothing else withdraws the claim: the bridge's store is keyed
+    // by client, not by checkout bundle, so a disposed service's directories
+    // would otherwise stay in the union — widening it for every attached
+    // device — until the connection itself drops. Only worth a frame if
+    // something was actually claimed.
+    if (_subscriptionClaimed) {
+      _subscriptionClaimed = false;
+      detached(
+        'FileService',
+        'withdraw file:tree:subscribe on dispose',
+        () => session.sendForCheckout(
+          checkoutId,
+          createAbMessage('file:tree:subscribe', {'paths': const <String>[]}),
+        ),
+      );
+    }
     _disposed = true;
     // Resolve any in-flight git:diff action so its timeout timer is cancelled.
     _diffLatch?.settle();
@@ -2026,8 +2254,11 @@ class FileService {
     session.unhydrateCheckout(checkoutId, 'file:selected');
     session.unhydrateCheckout(checkoutId, 'file:preview');
     session.unhydrateCheckout(checkoutId, _treeHydratorKey);
+    session.unhydrateCheckout(checkoutId, _subscriptionHydratorKey);
     session.unhydrateCheckout(checkoutId, _syncHydratorKey);
     session.unhydrateCheckout(checkoutId, _stashHydratorKey);
+    _subscriptionSendTimer?.cancel();
+    _subscriptionSendTimer = null;
     await _heavySub?.cancel();
     _heavySub = null;
     await _statusSub?.cancel();

@@ -2398,6 +2398,21 @@ const FileTreeInvalidatedMessage = BaseMessage.extend({
   ...CheckoutScoped,
 });
 
+// ── Delta-bandwidth subscription (docs/file-tree-lazy-expansion-spec.md,
+// wave 4, D6) ── Purely a hint for which directories flushBatch's
+// tree:update filters down to; it never reaches the watcher's own ignore
+// rules or what it watches (D14). Same parseMessageFast caveat as every
+// frame above — file-watcher.ts hand-validates `paths` itself.
+
+const FileTreeSubscribeMessage = BaseMessage.extend({
+  type: z.literal("file:tree:subscribe"),
+  /** REPLACES the sender's whole set — idempotent, so a reconnect hydrator
+   *  can just re-send it. Empty array unsubscribes. Checkout-relative,
+   *  `/`-separated; "" is the root. No reply, no ack. */
+  paths: z.array(z.string()).max(512),
+  ...CheckoutScoped,
+});
+
 // ── Path search (docs/file-tree-lazy-expansion-spec.md, wave 3) ── Backs
 // @-mentions and the tree's filter box. No file:find-cancel: supersede by
 // requestId, killing the previous process the way FileSearcher.search does,
@@ -2977,6 +2992,7 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   FileTreeChildrenRequestMessage,
   FileTreeChildrenMessage,
   FileTreeInvalidatedMessage,
+  FileTreeSubscribeMessage,
   FileFindMessage,
   FileFindResultMessage,
   PreviewSnapshotRequestMessage,
@@ -3186,6 +3202,7 @@ export type FileTreeRootRequest = z.infer<typeof FileTreeRootRequestMessage>;
 export type FileTreeChildrenRequest = z.infer<typeof FileTreeChildrenRequestMessage>;
 export type FileTreeChildren = z.infer<typeof FileTreeChildrenMessage>;
 export type FileTreeInvalidated = z.infer<typeof FileTreeInvalidatedMessage>;
+export type FileTreeSubscribe = z.infer<typeof FileTreeSubscribeMessage>;
 export type FileFind = z.infer<typeof FileFindMessage>;
 export type FileFindResult = z.infer<typeof FileFindResultMessage>;
 export type PreviewSnapshotRequest = z.infer<typeof PreviewSnapshotRequestMessage>;
@@ -3300,6 +3317,7 @@ export const CHECKOUT_VARIABLE_MESSAGE_TYPES = new Set<string>([
   "config:read", "config:read-result", "config:write", "config:write-result", "config:changed", "config:detect-tools", "config:detect-tools-result",
   "ports:update", "port:detected", "preview:url", "file:tree:snapshot:request", "file:tree:snapshot", "file:tree:unchanged", "preview:snapshot:request", "preview:snapshot",
   "file:tree:root:request", "file:tree:children:request", "file:tree:children", "file:tree:invalidated",
+  "file:tree:subscribe",
   "file:find", "file:find-result",
   "session:result", "control:result",
 ]);
@@ -3428,6 +3446,7 @@ const KNOWN_TYPES = new Set<string>([
   "terminal:unsubscribe", "terminal:history:request", "terminal:history:page", "terminal:display:status",
   "file:tree:snapshot:request", "file:tree:snapshot", "file:tree:unchanged",
   "file:tree:root:request", "file:tree:children:request", "file:tree:children", "file:tree:invalidated",
+  "file:tree:subscribe",
   "file:find", "file:find-result",
   "preview:snapshot:request", "preview:snapshot",
   "request", "response",

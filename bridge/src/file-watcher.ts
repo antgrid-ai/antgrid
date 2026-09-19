@@ -1,5 +1,5 @@
 import chokidar, { type FSWatcher } from "chokidar";
-import { relative, resolve, sep, extname, basename, join, isAbsolute } from "node:path";
+import { relative, resolve, sep, extname, basename, join, isAbsolute, dirname } from "node:path";
 import { statSync, watch as fsWatch, type FSWatcher as NodeFSWatcher } from "node:fs";
 import { logger } from "./logger";
 const log = logger.child({ component: "file-watcher" });
@@ -15,6 +15,7 @@ import {
   type DirectoryListing,
 } from "./file-tree";
 import type { ConnState } from "./conn-state";
+import type { ClientKey } from "./message-bus";
 export interface ProjectInfo {
   path: string;
   id: string;
@@ -41,6 +42,43 @@ const CHURN_GRACE_MS = 150;
 /** Uninterrupted windows before widening. Two adjacent saves are not a storm;
  *  a real one runs for minutes, so it widens almost immediately anyway. */
 const CHURN_RUN_TO_WIDEN = 3;
+
+/** Hand-validated bounds for file:tree:subscribe's `paths` — parseMessageFast
+ *  never runs this frame's Zod schema on the wire (see the comment above
+ *  FileTreeRootRequestMessage in protocol.ts), so a real inbound `paths` can
+ *  be anything the sender claims: not an array, non-string entries, tens of
+ *  thousands of them, or one megabytes long. Mirrors MAX_LOG_PAGE's reasoning
+ *  in git-log.ts. */
+const MAX_SUBSCRIBED_PATHS = 512;
+const MAX_SUBSCRIBED_PATH_LEN = 4096;
+
+/** dirname("foo.ts") is ".", not the wire contract's "" for the root. Every
+ *  D6 filter comparison goes through this rather than a bare `dirname` call,
+ *  or every root-level change is silently dropped from every subscription. */
+function dirnameKeyOf(p: string): string {
+  const d = dirname(p);
+  return d === "." ? "" : d;
+}
+
+/** Normalises one subscribed directory into the exact form [dirnameKeyOf]
+ *  produces, so a path sent with a trailing slash or a stray backslash still
+ *  lines up with what a delta reports — proven against flushBatch, not
+ *  assumed: see the D6 filter below. `paths` is hand-validated (see
+ *  [MAX_SUBSCRIBED_PATHS]), so this also never throws on a hostile string. */
+function normalizeSubscribedDir(raw: string): string {
+  const forwardSlash = raw.replace(/\\/g, "/");
+  const noTrailingSlash =
+    forwardSlash.length > 1 && forwardSlash.endsWith("/")
+      ? forwardSlash.slice(0, -1)
+      : forwardSlash;
+  // "./a" folds to "a" for the same reason "." folds to the root: a relative
+  // prefix a delta path never carries would otherwise be stored as a key
+  // nothing can ever match, silently subscribing that client to nothing.
+  const noDotPrefix = noTrailingSlash.startsWith("./")
+    ? noTrailingSlash.slice(2)
+    : noTrailingSlash;
+  return noDotPrefix === "." || noDotPrefix === "/" ? "" : noDotPrefix;
+}
 
 /** The watcher's one outbound hook. Both flags are honoured only by senders
  *  that publish through the replaying bus; a plain sender may ignore them and
@@ -84,19 +122,156 @@ export class FileWatcher {
    *  see [startNativeRecursiveWatch] — so [flushBatch] falls back to a full
    *  resync instead of sending an incremental batch it knows is incomplete. */
   private needsFullResync = false;
+  /** Directory paths one client currently has open, for the D6 delta filter
+   *  in [flushBatch]. An entry — even an empty Set, which is the wire
+   *  contract's unsubscribe — means that client has STATED what it wants and
+   *  counts toward "every attached client subscribed" in [everySubscribed];
+   *  a client with no entry is unaccounted for and turns the filter off for
+   *  everyone (D6), which is where an unreadable frame lands too (see
+   *  [setSubscription]). Cleared wholesale in [stop] — the checkout-teardown
+   *  half of keeping the union from growing forever; [dropSubscription] is
+   *  the peer-disconnect half, driven from agent-core.ts's `noteClientGone`,
+   *  and [everySubscribed] reconciles against the live roster for the
+   *  departures that hook does not see. */
+  private subscriptions = new Map<ClientKey, Set<string>>();
+  /** Core-wide roster of currently attached clients, injected because this
+   *  watcher is per-checkout and the roster is not (agent-core.ts's
+   *  `attachedClients`). Never derived from `this.subscriptions`'s own size
+   *  — a client that attached and sent nothing would then be invisible
+   *  rather than unaccounted-for, which is the one case the D6 filter most
+   *  needs to fail open on. */
+  private attachedClients?: () => ClientKey[];
 
   constructor(
     project: ProjectInfo,
     sendMessage: SendTreeMessage,
     connState: ConnState,
     onFilesChanged?: () => void,
+    attachedClients?: () => ClientKey[],
   ) {
     this.projectRoot = project.path;
     this.projectId = project.id;
     this.sendMessage = sendMessage;
     this.connState = connState;
     this.onFilesChanged = onFilesChanged;
+    this.attachedClients = attachedClients;
     this.ig = loadIgnoreRules(this.projectRoot, []);
+  }
+
+  /** REPLACES clientKey's whole subscribed set — file:tree:subscribe is
+   *  idempotent by design (see the wire contract in protocol.ts), so a
+   *  reconnect hydrator can just resend it; an empty array unsubscribes with
+   *  no separate verb.
+   *
+   *  Hand-validated: parseMessageFast (protocol.ts) checks the frame's TYPE
+   *  alone, so `paths` reaches here exactly as the sender wrote it — see
+   *  [MAX_SUBSCRIBED_PATHS]'s comment. None of that may throw: this runs on
+   *  the bus dispatch path with no caller to catch it, and a throw here would
+   *  take the whole core down. */
+  setSubscription(clientKey: ClientKey, paths: unknown): void {
+    if (!Array.isArray(paths)) {
+      // UNACCOUNTED-for, not subscribed-to-nothing. A frame whose `paths`
+      // cannot be read is the strongest available statement that this
+      // client's intent is unknown, and D6's answer to an unknown client is
+      // to stop filtering for everyone — the same direction
+      // `everyClientPullsTrees` fails in. Storing the empty Set instead would
+      // count the client as fully accounted for AND contributing nothing,
+      // narrowing the union to the root for every device on the bus.
+      this.subscriptions.delete(clientKey);
+      log.warn(
+        "file:tree:subscribe from %s carried a non-array `paths` — leaving it unsubscribed (project %s)",
+        clientKey,
+        this.projectId,
+      );
+      return;
+    }
+    const dirs = new Set<string>();
+    let dropped = 0;
+    for (let i = 0; i < paths.length; i++) {
+      if (dirs.size >= MAX_SUBSCRIBED_PATHS) {
+        dropped += paths.length - i;
+        break;
+      }
+      const p = paths[i];
+      if (typeof p !== "string" || p.length > MAX_SUBSCRIBED_PATH_LEN) {
+        dropped++;
+        continue;
+      }
+      dirs.add(normalizeSubscribedDir(p));
+    }
+    if (paths.length > 0 && dirs.size === 0) {
+      // Same reasoning as the non-array case: the sender asked for something
+      // and none of it survived, which is a broken encoder rather than an
+      // unsubscribe. An empty ARRAY is the unsubscribe, and it lands below.
+      this.subscriptions.delete(clientKey);
+      log.warn(
+        "file:tree:subscribe from %s carried %d unusable paths and nothing else — leaving it unsubscribed (project %s)",
+        clientKey,
+        paths.length,
+        this.projectId,
+      );
+      return;
+    }
+    if (dropped > 0) {
+      // A truncated subscription reads downstream as "the tree stopped
+      // updating there", with nothing on the wire to tell it apart from a
+      // client that simply asked for less.
+      log.warn(
+        "file:tree:subscribe from %s: dropped %d of %d paths (project %s)",
+        clientKey,
+        dropped,
+        paths.length,
+        this.projectId,
+      );
+    }
+    this.subscriptions.set(clientKey, dirs);
+  }
+
+  /** The peer-disconnect half of Trap 3
+   *  (docs/file-tree-lazy-expansion-spec.md) — the checkout-teardown half is
+   *  [stop] clearing the whole map. */
+  dropSubscription(clientKey: ClientKey): void {
+    this.subscriptions.delete(clientKey);
+  }
+
+  /** [dirPath] in the [dirnameKeyOf] form. The root is unconditionally
+   *  subscribed (D6: "∪ {\"\"}").
+   *
+   *  Closure under removal is ENFORCED at the removal filter below rather
+   *  than inherited from "you cannot subscribe to a child without its
+   *  parent": the app's collapse clears `childrenLoaded` on the collapsed
+   *  node alone, so it can legitimately hold `a/b` with no `a`, and then a
+   *  removal of `a/b` keys on the unsubscribed `a`. */
+  isSubscribed(dirPath: string): boolean {
+    if (dirPath === "") return true;
+    for (const dirs of this.subscriptions.values()) {
+      if (dirs.has(dirPath)) return true;
+    }
+    return false;
+  }
+
+  /** Fail-open the same shape as `everyClientPullsTrees` in agent-core.ts:
+   *  no client accounted for at all — a bare watcher under test, or a core
+   *  whose transport has named no client yet — means nobody has vouched for
+   *  a narrower union, so the filter stays off rather than risk dropping a
+   *  delta a silent client still needed. */
+  private everySubscribed(): boolean {
+    const roster = this.attachedClients?.() ?? [];
+    if (roster.length === 0) return false;
+    // A relay socket close tears down no per-device session
+    // (relay-client.ts's `cleanup` leaves `this.sessions` standing), so
+    // `noteClientGone` does NOT fire per device on the common disconnect
+    // path and a departed device's directories would otherwise widen this
+    // union for the life of the core — Trap 3. The roster IS re-asked on
+    // every flush, so reconciling against it here is the one sweep that
+    // always runs, whatever the transport forgot to call.
+    if (this.subscriptions.size > 0) {
+      const live = new Set(roster);
+      for (const key of this.subscriptions.keys()) {
+        if (!live.has(key)) this.subscriptions.delete(key);
+      }
+    }
+    return roster.every((c) => this.subscriptions.has(c));
   }
 
   /** The revision [getTreeSnapshot] would stamp, without walking the tree — so
@@ -422,6 +597,10 @@ export class FileWatcher {
     this.pending.added.clear();
     this.pending.modified.clear();
     this.pending.removed.clear();
+    // The checkout-teardown half of Trap 3 — every client that had THIS
+    // checkout open loses its subscription here, in one place, rather than
+    // needing its own per-checkout drop from agent-core.ts's teardown paths.
+    this.subscriptions.clear();
     const closed = this.watcher?.close();
     this.watcher = null;
     this.nativeWatcher?.close();
@@ -553,21 +732,59 @@ export class FileWatcher {
       return;
     }
 
+    // D6: filtered to the union of every attached client's subscribed
+    // directories, but ONLY once every attached client has sent one —
+    // see [everySubscribed]. An old app that never subscribes is therefore
+    // never filtered (Trap 4), and a fresh flush with no client accounted
+    // for at all sends everything, same as `everyClientPullsTrees`.
+    let outAdded = added;
+    let outModified = modified;
+    let outRemoved = removed;
+    if (this.everySubscribed()) {
+      outAdded = added.filter((n) => this.isSubscribed(dirnameKeyOf(n.path)));
+      outModified = modified.filter((n) => this.isSubscribed(dirnameKeyOf(n.path)));
+      // `|| isSubscribed(p)` is the enforced half of closure under removal: a
+      // directory a client explicitly named is by definition one whose own
+      // disappearance it must be told about, and its dirname need not be
+      // subscribed — the app's collapse clears `childrenLoaded` on the
+      // collapsed node alone, so it can hold `a/b` without `a`.
+      outRemoved = removed.filter(
+        (p) => this.isSubscribed(dirnameKeyOf(p)) || this.isSubscribed(p),
+      );
+      const total = added.length + modified.length + removed.length;
+      const kept = outAdded.length + outModified.length + outRemoved.length;
+      if (kept < total) {
+        // A count, not the paths: a silently over-filtering tree is the
+        // failure mode that reads as "the watcher stopped working", and the
+        // count is what tells a future reader which half is wrong.
+        log.debug(
+          "tree:update — subscription filter dropped %d of %d entries for %s",
+          total - kept,
+          total,
+          this.projectId,
+        );
+      }
+    }
+
+    // Sent even when the filter above drops everything: `seq` was already
+    // bumped, so suppressing the frame here would still leave a receiver's
+    // `sinceSeq` compare wondering whether it missed one, for the cost of one
+    // small empty frame.
     this.sendMessage(
       createMessage("tree:update", {
         projectId: this.projectId,
-        added,
-        modified,
-        removed,
+        added: outAdded,
+        modified: outModified,
+        removed: outRemoved,
         seq,
       }),
     );
 
     log.debug(
       "tree:update — added: %d, modified: %d, removed: %d",
-      added.length,
-      modified.length,
-      removed.length,
+      outAdded.length,
+      outModified.length,
+      outRemoved.length,
     );
   }
 

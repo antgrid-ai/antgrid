@@ -871,6 +871,24 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
    *  whoever reconnects under that same client key. */
   const clientGenerations = new Map<ClientKey, number>();
 
+  /** Every ClientKey that has reached this core's inbound dispatch and has not
+   *  since gone (`noteClientGone`). Core-wide, unlike a watcher's own
+   *  per-checkout subscription map, so it is injected into every checkout's
+   *  FileWatcher as the D6 delta filter's attached-client roster: no client
+   *  accounted for here means nobody has vouched for a narrower union, and a
+   *  watcher with an empty roster sends every delta unfiltered — the same
+   *  fail-open direction as `everyClientPullsTrees` below.
+   *
+   *  Deliberately NOT derived from `establishedPeersProvider` the way that
+   *  function's peer half is: nothing in `bridge/src` calls
+   *  `setEstablishedPeersProvider`, so in production it answers with no peers
+   *  at all and a roster built from it would omit every phone — turning the
+   *  filter on for a device that never declared what it wanted, which is the
+   *  one outcome D6 exists to prevent. Fed from the inbound choke point in
+   *  `attachTransport` instead, so an RPC-only client (`state.snapshot`
+   *  returns above `handleAbMessage`) still counts. */
+  const attachedClients = new Set<ClientKey>();
+
   function dropViewerConnection(source: ClientKey): void {
     if (!viewerConnections.has(source)) return;
     viewerConnections.get(source)?.close();
@@ -1895,6 +1913,21 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         listings: [...fw.getChildListings(paths, includeIgnored), ...refused],
         seq: fw.currentSeq(),
       }));
+      return;
+    }
+    // No reply and no ack (wire contract) — answered here, before `manager`,
+    // for the same reason as the pair above: there being nothing to hand
+    // back is what makes that safe rather than merely convenient. `client`
+    // is the D6 subscription's key (message-bus.ts's ClientKey — already the
+    // "loopback" sentinel for the desktop owner and a peerId for everyone
+    // else, so no new identity space is needed here).
+    if (msg.type === "file:tree:subscribe") {
+      const runtime = runtimeFor(msg);
+      // Same wrong-checkout guard as the pair above: a fallback answer would
+      // apply this client's subscription to mainRuntime's watcher instead of
+      // the checkout it actually asked about.
+      if (runtime.checkout.id !== checkoutIdOf(msg)) return;
+      runtime.fileWatcher?.setSubscription(client, msg.paths);
       return;
     }
     // Same reasoning as the file:tree:*:request pair above: a mention popup's
@@ -4025,6 +4058,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       },
       connState,
       () => scheduleGitRefresh(runtime),
+      () => [...attachedClients],
     );
     runtime.fileWatcher = fw;
     runtime.fileSearcher = new FileSearcher(runtime.checkout.path, project.id, send, [abDir]);
@@ -4911,6 +4945,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       },
       connState,
       () => scheduleGitRefresh(mainRuntime),
+      () => [...attachedClients],
     );
     fileWatchers.set(project.id, fw);
     mainRuntime.fileWatcher = fw;
@@ -5369,6 +5404,13 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         );
         return;
       }
+      // Past every gate that could refuse this frame, so the client really is
+      // one this core answers. Recorded HERE rather than in `handleAbMessage`
+      // because the `request` arm below returns without reaching it: a client
+      // whose traffic is only `state.snapshot` still receives every broadcast
+      // `tree:update`, and the D6 roster must account for it (see
+      // [attachedClients]).
+      attachedClients.add(clientKeyOf(source, peerId));
       if (msg.type === "request") {
         if (msg.method === "state.snapshot" && snapshotAsksFor(msg.params, ["agent:status"])) {
           // The snapshot is the app's PULL, and for a relay app it is the only
@@ -5602,6 +5644,29 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       return sessions?.isMainCheckoutSession(id) ?? true;
     },
     noteClientGone(client: ClientKey): void {
+      // The peer-disconnect half of Trap 3
+      // (docs/file-tree-lazy-expansion-spec.md) — a client that vanishes
+      // while holding hundreds of expanded directories must not pin every
+      // checkout's D6 union at "everything" forever. `checkoutRuntimes` plus
+      // `fileWatchers` (main's only entry, despite the plural name) is the
+      // same pair `teardownServices` walks to stop every watcher.
+      //
+      // `"relay"` is swept WIDE, not as one key: it is the anonymous fallback
+      // key, and its only producer is the transport's peer-offline hook —
+      // which means no relay device is reachable at all. Per-device is not
+      // enough on its own, because a ws close runs `RelayClient.cleanup`,
+      // which leaves `this.sessions` standing and so fires
+      // `notifyPeerSessionOffline` for nobody; without this arm a phone that
+      // dropped with the socket would hold its directories in every union for
+      // the life of the core.
+      const gone: ClientKey[] = client === "relay"
+        ? [...attachedClients].filter((c) => c !== "loopback")
+        : [client];
+      for (const key of gone) {
+        attachedClients.delete(key);
+        for (const runtime of checkoutRuntimes.values()) runtime.fileWatcher?.dropSubscription(key);
+        for (const fw of fileWatchers.values()) fw.dropSubscription(key);
+      }
       focusedSessionByClient.delete(client);
       // A departed device declares nothing. Leaving its "paused" behind would
       // hold the core paused for good once the last unpaused sibling leaves,

@@ -135,6 +135,7 @@ const Set<String> kCheckoutVariableMessageTypes = <String>{
   'file:tree:children:request',
   'file:tree:children',
   'file:tree:invalidated',
+  'file:tree:subscribe',
   'file:find',
   'file:find-result',
   'preview:snapshot:request',
