@@ -1288,7 +1288,6 @@ class _GitPanelBody extends ConsumerWidget {
         root: state.root,
         expandedPaths: state.expandedPaths,
         selectedFilePath: state.git.diffPath ?? state.git.viewingPath,
-        filterQuery: null,
         gitFileEntries: state.gitFileEntries,
         changesOnly: true,
         collapsedPaths: state.git.collapsedPaths,

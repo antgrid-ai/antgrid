@@ -11,10 +11,12 @@ import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/project/project_session_registry.dart';
 import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/screens/file_explorer_screen.dart';
+import 'package:antgrid/services/file_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import 'package:antgrid/test_helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/file_content_viewer.dart';
 import 'package:antgrid/widgets/file_tree_view.dart';
+import 'package:antgrid/widgets/file_search_bar.dart';
 import '../helpers/prefs_test_mock.dart';
 
 Future<ProjectSession> _buildFakeSession() async {
@@ -273,6 +275,183 @@ void main() {
 
       // In wide mode the back button is not rendered.
       expect(find.byTooltip('Back to file tree'), findsNothing);
+    });
+  });
+  group('FileExplorerScreen filter box', () {
+    /// Same readiness overrides as [buildTestWidget], but the transport is
+    /// handed back so a test can read the outbound `file:find` and answer it.
+    Future<(FakeAgentTransport, Widget)> buildFilterWidget() async {
+      useInMemoryPrefs();
+      final t = FakeAgentTransport();
+      final cache = await CachedSessionsStore.open();
+      final session = ProjectSession(
+        projectId: 'test',
+        transport: t,
+        mode: ProjectSessionMode.local,
+        cachedSessionsStore: cache,
+        onClose: () async => t.dispose(),
+      );
+      const tree = FileNode(
+        name: '',
+        path: '',
+        type: FileNodeType.directory,
+        children: [
+          FileNode(name: 'lib', path: 'lib', type: FileNodeType.directory),
+        ],
+      );
+      return (
+        t,
+        ProviderScope(
+          overrides: [
+            ..._readySessionOverrides(session),
+            fileTreeStateProvider.overrideWith(
+              (ref) => Stream.value(const FileTreeState(root: tree)),
+            ),
+            fileServiceProvider.overrideWithValue(session.fileService),
+          ],
+          child: const MaterialApp(
+            home: Scaffold(
+              body: SizedBox(width: 800, child: FileExplorerScreen()),
+            ),
+          ),
+        ),
+      );
+    }
+
+    Finder filterInput() => find.descendant(
+      of: find.byType(FileSearchBar),
+      matching: find.byType(EditableText),
+    );
+
+    Future<Map<String, dynamic>> typeFilter(
+      WidgetTester tester,
+      FakeAgentTransport t,
+      String query,
+    ) async {
+      await tester.enterText(filterInput(), query);
+      // Only FileService.findDebounce: FileSearchBar is mounted with
+      // Duration.zero so the two debounces do not stack.
+      await tester.pump(FileService.findDebounce + const Duration(milliseconds: 20));
+      return t.sent.lastWhere((m) => m['type'] == 'file:find');
+    }
+
+    testWidgets(
+      'sends includeIgnored: true so the filter agrees with the tree it filters',
+      (tester) async {
+        final (t, widget) = await buildFilterWidget();
+        await tester.pumpWidget(widget);
+        await tester.pump();
+
+        final sent = await typeFilter(tester, t, 'need');
+        expect(sent['query'], 'need');
+        // D10's deliberate asymmetry: @-mentions send false, the tree's own
+        // filter sends true. Nothing else pins this direction.
+        expect(sent['includeIgnored'], isTrue);
+        // Answered, or the PendingReply timeout outlives the widget tree.
+        t.emit('file:find-result', {
+          'projectId': 'test',
+          'requestId': sent['requestId'],
+          'entries': const [],
+          'truncated': false,
+          'engine': 'git-ls-files',
+        });
+        await tester.pumpAndSettle();
+      },
+    );
+
+    testWidgets('renders Searching…, then the ranked rows', (tester) async {
+      final (t, widget) = await buildFilterWidget();
+      await tester.pumpWidget(widget);
+      await tester.pump();
+
+      await tester.enterText(filterInput(), 'need');
+      await tester.pump();
+      expect(find.text('Searching…'), findsOneWidget);
+
+      await tester.pump(FileService.findDebounce + const Duration(milliseconds: 20));
+      final sent = t.sent.lastWhere((m) => m['type'] == 'file:find');
+      t.emit('file:find-result', {
+        'projectId': 'test',
+        'requestId': sent['requestId'],
+        'entries': [
+          {'path': 'lib/needle.dart', 'isDir': false},
+        ],
+        'truncated': false,
+        'engine': 'git-ls-files',
+      });
+      await tester.pumpAndSettle();
+
+      expect(find.text('lib/needle.dart'), findsOneWidget);
+      expect(find.text('Searching…'), findsNothing);
+    });
+
+    testWidgets('an empty answer says so; an errored one says it failed', (
+      tester,
+    ) async {
+      final (t, widget) = await buildFilterWidget();
+      await tester.pumpWidget(widget);
+      await tester.pump();
+
+      var sent = await typeFilter(tester, t, 'nope');
+      t.emit('file:find-result', {
+        'projectId': 'test',
+        'requestId': sent['requestId'],
+        'entries': const [],
+        'truncated': false,
+        'engine': 'git-ls-files',
+      });
+      await tester.pumpAndSettle();
+      expect(find.text('No matching files'), findsOneWidget);
+
+      sent = await typeFilter(tester, t, 'boom');
+      t.emit('file:find-result', {
+        'projectId': 'test',
+        'requestId': sent['requestId'],
+        'entries': const [],
+        'truncated': true,
+        'engine': 'none',
+        'error': 'file listing timed out',
+      });
+      await tester.pumpAndSettle();
+      // A killed listing answers with zero entries too — rendering it as
+      // "No matching files" had the user retrying a search that broke.
+      expect(find.text('No matching files'), findsNothing);
+      expect(
+        find.textContaining('file listing timed out'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a directory row reveals it in the tree and clears the filter', (
+      tester,
+    ) async {
+      final (t, widget) = await buildFilterWidget();
+      await tester.pumpWidget(widget);
+      await tester.pump();
+
+      final sent = await typeFilter(tester, t, 'lib');
+      t.emit('file:find-result', {
+        'projectId': 'test',
+        'requestId': sent['requestId'],
+        'entries': [
+          {'path': 'lib/models', 'isDir': true},
+        ],
+        'truncated': false,
+        'engine': 'git-ls-files',
+      });
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('lib/models'));
+      await tester.pumpAndSettle();
+
+      final revealed = t.sent
+          .where((m) => m['type'] == 'file:tree:children:request')
+          .expand((m) => (m['paths'] as List).cast<String>())
+          .toSet();
+      expect(revealed, containsAll(<String>['lib', 'lib/models']));
+      // The results list is gone — the tree is back.
+      expect(find.text('lib/models'), findsNothing);
+      expect(find.byType(FileTreeView), findsOneWidget);
     });
   });
 }

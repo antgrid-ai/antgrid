@@ -449,7 +449,6 @@ class PreviewPaneState {
 class FileTreeState {
   final FileNode? root;
   final Set<String> expandedPaths;
-  final String? filterQuery;
   final String? projectId;
   final Map<String, String> gitFileStatuses; // path → M/A/D/R/U/! (deduped)
   /// Raw per-entry list (a path can appear twice — once staged, once
@@ -471,7 +470,6 @@ class FileTreeState {
   const FileTreeState({
     this.root,
     this.expandedPaths = const {},
-    this.filterQuery,
     this.projectId,
     this.gitFileStatuses = const {},
     this.gitFileEntries = const [],
@@ -486,8 +484,6 @@ class FileTreeState {
   FileTreeState copyWith({
     FileNode? root,
     Set<String>? expandedPaths,
-    String? filterQuery,
-    bool clearFilterQuery = false,
     String? projectId,
     Map<String, String>? gitFileStatuses,
     List<GitFileStatusEntry>? gitFileEntries,
@@ -501,7 +497,6 @@ class FileTreeState {
     return FileTreeState(
       root: root ?? this.root,
       expandedPaths: expandedPaths ?? this.expandedPaths,
-      filterQuery: clearFilterQuery ? null : (filterQuery ?? this.filterQuery),
       projectId: projectId ?? this.projectId,
       gitFileStatuses: gitFileStatuses ?? this.gitFileStatuses,
       gitFileEntries: gitFileEntries ?? this.gitFileEntries,
@@ -608,5 +603,50 @@ class FileResolvePathResultMessage {
     this.relPath,
     this.isDirectory = false,
     this.externalImagePath,
+  });
+}
+
+/// One path returned by `file:find` — a project-relative POSIX path plus
+/// whether it is a directory. Directories are derived bridge-side from file
+/// path prefixes (D15), so an empty directory never appears.
+class FileFindEntry {
+  final String path;
+  final bool isDir;
+
+  const FileFindEntry({required this.path, required this.isDir});
+
+  static FileFindEntry? fromJson(Map<String, dynamic> json) {
+    final path = json['path'];
+    final isDir = json['isDir'];
+    if (path is! String || isDir is! bool) return null;
+    return FileFindEntry(path: path, isDir: isDir);
+  }
+}
+
+/// Reply to `file:find` — already matched and ranked bridge-side (basename
+/// match beats path-only, then shallow-first, then alpha; see the bridge's
+/// `matchFindEntries`), capped at the request's `limit`. [truncated] means the
+/// underlying listing itself hit the bridge's scan cap, not that the match set
+/// was cut down to `limit`. [error] is set only on a listing failure (e.g. a
+/// killed process); [entries] is empty in that case.
+class FileFindResultMessage {
+  final String id;
+  final int timestamp;
+  final String projectId;
+  final String requestId;
+  final List<FileFindEntry> entries;
+  final bool truncated;
+  final String engine; // 'ripgrep' | 'git-ls-files' | 'walk'
+  final String? error;
+
+  const FileFindResultMessage({
+    required this.id,
+    required this.timestamp,
+    required this.projectId,
+    required this.requestId,
+    this.entries = const [],
+    this.truncated = false,
+    required this.engine,
+    this.error,
   });
 }

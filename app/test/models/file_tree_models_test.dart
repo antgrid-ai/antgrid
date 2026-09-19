@@ -266,7 +266,6 @@ void main() {
       expect(state.files.selectedFilePath, isNull);
       expect(state.files.viewingFile, isNull);
       expect(state.files.isLoading, isFalse);
-      expect(state.filterQuery, isNull);
       expect(state.projectId, isNull);
     });
 
@@ -289,12 +288,10 @@ void main() {
           isLoading: true,
           selectedFilePath: 'foo.ts',
         ),
-        filterQuery: 'test',
         projectId: 'proj-1',
       );
       expect(updated.files.isLoading, isTrue);
       expect(updated.files.selectedFilePath, 'foo.ts');
-      expect(updated.filterQuery, 'test');
       expect(updated.projectId, 'proj-1');
     });
   });

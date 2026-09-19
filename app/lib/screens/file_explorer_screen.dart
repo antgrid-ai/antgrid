@@ -25,12 +25,15 @@ import '../design/ab_tokens.dart';
 import '../design/ab_colors.dart';
 import '../design/widgets/ab_chip.dart';
 import '../design/widgets/ab_empty_state.dart';
+import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_icon_button.dart';
+import '../design/widgets/ab_list_row.dart';
 import '../design/widgets/ab_loading.dart';
 import '../design/widgets/ab_search_field.dart';
 import '../design/widgets/ab_separator.dart';
 import '../design/widgets/ab_toolbar.dart';
 import '../util/detached.dart';
+import '../widgets/file_search_bar.dart';
 
 /// The main file explorer screen with an inline search panel that can be
 /// toggled via a search icon. When search is inactive, shows the file tree.
@@ -51,6 +54,78 @@ class _FileExplorerScreenState extends ConsumerState<FileExplorerScreen> {
   }
 
   bool _searchOpen = false;
+
+  // The tree's name filter (D-A1: a real filter box, backed by `file:find`
+  // with includeIgnored: true — must agree with the tree's own show-all
+  // default). Null/empty means "browsing normally"; anything else swaps the
+  // tree for a flat, bridge-ranked results list. Lives here rather than in
+  // [_FileExplorerBody] because that widget is stateless (a plain
+  // [ConsumerWidget]) and a debounced async search needs somewhere to keep
+  // its in-flight generation.
+  String? _filterQuery;
+  List<FileFindEntry> _filterResults = const [];
+  bool _filterLoading = false;
+  String? _filterError;
+  int _filterGen = 0;
+
+  /// Stops this surface's spinner when the reply it was waiting for will
+  /// never arrive. Guarded on the generation so a stale closure cannot clear
+  /// the flag a newer keystroke just set.
+  void _endFilterWait(int gen, {String? error}) {
+    if (!mounted || gen != _filterGen) return;
+    setState(() {
+      _filterLoading = false;
+      _filterError = error;
+    });
+  }
+
+  void _onFilterQueryChanged(String? query) {
+    final active = query != null && query.isNotEmpty;
+    setState(() {
+      _filterQuery = query;
+      _filterResults = const [];
+      _filterError = null;
+      _filterLoading = active;
+    });
+    if (!active) return;
+    final gen = ++_filterGen;
+    detached('FileExplorerScreen', 'filter files by name', () async {
+      // Resolved fresh rather than captured from build(): this runs outside
+      // it, and the façade throws while the focused project's session is
+      // unresolved (see focusedCheckoutServiceOrNull's doc).
+      final fileService = focusedCheckoutServiceOrNull(
+        ref.container,
+        (s) => s.fileService,
+      );
+      if (fileService == null) {
+        _endFilterWait(gen);
+        return;
+      }
+      FileFindResultMessage result;
+      try {
+        result = await fileService.find(query, includeIgnored: true);
+      } on FileFindSuperseded {
+        // NOT always a keystroke of our own: the @-mention panel resolves the
+        // same FileService, [FileService.find] keeps one wanted call for the
+        // whole service, and both surfaces are mounted at once on desktop. A
+        // bare return left this spinner up for good when the composer was the
+        // one that superseded us.
+        _endFilterWait(gen);
+        return;
+      } catch (_) {
+        _endFilterWait(gen, error: 'Search failed');
+        return;
+      }
+      if (!mounted || gen != _filterGen) return;
+      setState(() {
+        _filterResults = result.entries;
+        _filterLoading = false;
+        // A killed or timed-out listing also answers with zero entries —
+        // without this it reads as "this file does not exist".
+        _filterError = result.error;
+      });
+    });
+  }
 
   @override
   void initState() {
@@ -110,6 +185,11 @@ class _FileExplorerScreenState extends ConsumerState<FileExplorerScreen> {
             searchOpen: _searchOpen,
             onToggleSearch: () => setState(() => _searchOpen = !_searchOpen),
             onCloseSearch: () => setState(() => _searchOpen = false),
+            filterQuery: _filterQuery,
+            filterResults: _filterResults,
+            filterLoading: _filterLoading,
+            filterError: _filterError,
+            onFilterQueryChanged: _onFilterQueryChanged,
           ),
         ),
       ),
@@ -197,6 +277,11 @@ class _FileExplorerBody extends ConsumerWidget {
   final bool searchOpen;
   final VoidCallback onToggleSearch;
   final VoidCallback onCloseSearch;
+  final String? filterQuery;
+  final List<FileFindEntry> filterResults;
+  final bool filterLoading;
+  final String? filterError;
+  final void Function(String?) onFilterQueryChanged;
 
   const _FileExplorerBody({
     required this.state,
@@ -204,6 +289,11 @@ class _FileExplorerBody extends ConsumerWidget {
     required this.searchOpen,
     required this.onToggleSearch,
     required this.onCloseSearch,
+    required this.filterQuery,
+    required this.filterResults,
+    required this.filterLoading,
+    required this.filterError,
+    required this.onFilterQueryChanged,
   });
 
   @override
@@ -283,23 +373,56 @@ class _FileExplorerBody extends ConsumerWidget {
   }
 
   Widget _buildBrowseContent(BuildContext context) {
-    return RefreshIndicator(
-      onRefresh: () async {
-        fileService.requestFullTree();
-        await Future.delayed(const Duration(milliseconds: 500));
-      },
-      child: FileTreeView(
-        root: state.root,
-        expandedPaths: state.expandedPaths,
-        selectedFilePath: state.files.selectedFilePath,
-        filterQuery: null,
-        onToggleExpanded: (path) => detached(
-          'FileExplorerScreen',
-          'expand folder',
-          () => fileService.toggleExpanded(path),
+    final filtering = filterQuery != null && filterQuery!.isNotEmpty;
+    return Column(
+      children: [
+        FileSearchBar(
+          currentQuery: filterQuery,
+          // Zero here on purpose: [FileService.find] debounces already, and
+          // stacking the two put the first request ~550ms after the last
+          // keystroke while the @-mention panel paid only 250ms for the same
+          // search.
+          debounce: Duration.zero,
+          onQueryChanged: onFilterQueryChanged,
         ),
-        onFileSelected: (path) => fileService.selectFile(path),
-      ),
+        Expanded(
+          child: filtering
+              ? _FileFilterResults(
+                  entries: filterResults,
+                  loading: filterLoading,
+                  error: filterError,
+                  onTapFile: (path) {
+                    fileService.selectFile(path);
+                    onFilterQueryChanged(null);
+                  },
+                  onTapDirectory: (path) {
+                    detached(
+                      'FileExplorerScreen',
+                      'reveal filtered directory',
+                      () => fileService.revealDirectory(path),
+                    );
+                    onFilterQueryChanged(null);
+                  },
+                )
+              : RefreshIndicator(
+                  onRefresh: () async {
+                    fileService.requestFullTree();
+                    await Future.delayed(const Duration(milliseconds: 500));
+                  },
+                  child: FileTreeView(
+                    root: state.root,
+                    expandedPaths: state.expandedPaths,
+                    selectedFilePath: state.files.selectedFilePath,
+                    onToggleExpanded: (path) => detached(
+                      'FileExplorerScreen',
+                      'expand folder',
+                      () => fileService.toggleExpanded(path),
+                    ),
+                    onFileSelected: (path) => fileService.selectFile(path),
+                  ),
+                ),
+        ),
+      ],
     );
   }
 
@@ -380,6 +503,69 @@ class _FileExplorerBody extends ConsumerWidget {
         ),
         Expanded(child: _buildContentArea()),
       ],
+    );
+  }
+}
+
+/// Flat, bridge-ranked results for the tree's name filter — `file:find`
+/// returns files and directories interleaved by relevance (basename match
+/// first, then path-only, then shallow-first), not nested, so this renders a
+/// flat list rather than reusing [FileTreeView]'s expand/collapse rows.
+class _FileFilterResults extends StatelessWidget {
+  final List<FileFindEntry> entries;
+  final bool loading;
+  final String? error;
+  final void Function(String path) onTapFile;
+  final void Function(String path) onTapDirectory;
+
+  const _FileFilterResults({
+    required this.entries,
+    required this.loading,
+    required this.error,
+    required this.onTapFile,
+    required this.onTapDirectory,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    if (entries.isEmpty) {
+      // A failed listing and a genuine zero-match one both arrive as an empty
+      // list; rendering them alike had the user retrying a search that broke.
+      final failure = error;
+      if (failure != null && !loading) {
+        return AbEmptyState.error(title: 'Search failed: $failure');
+      }
+      return AbEmptyState(
+        icon: AbIcons.search,
+        title: loading ? 'Searching…' : 'No matching files',
+      );
+    }
+    return ListView.builder(
+      itemCount: entries.length,
+      itemBuilder: (context, index) {
+        final entry = entries[index];
+        return AbListRow(
+          density: AbRowDensity.sm,
+          onTap: entry.isDir
+              ? () => onTapDirectory(entry.path)
+              : () => onTapFile(entry.path),
+          leading: entry.isDir
+              ? AbIcon(
+                  AbIcons.folder,
+                  size: AbTokens.fontSm,
+                  color: context.antgrid.textMuted,
+                )
+              : const SizedBox(width: AbTokens.fontSm),
+          title: Text(
+            entry.path,
+            style: AbTokens.monoStyle(
+              fontSize: AbTokens.fontSm,
+              color: context.antgrid.textPrimary,
+            ),
+            overflow: TextOverflow.ellipsis,
+          ),
+        );
+      },
     );
   }
 }

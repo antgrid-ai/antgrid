@@ -2037,4 +2037,214 @@ void main() {
       await session.close();
     });
   });
+
+  group('find (file:find)', () {
+    test('debounces, then sends includeIgnored/kinds/limit explicitly', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = FileService.fromSession(session);
+
+      final future = svc.find('foo', includeIgnored: false);
+      // Still inside the debounce window — nothing sent yet.
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(t.sent.where((m) => m['type'] == 'file:find'), isEmpty);
+
+      await Future<void>.delayed(FileService.findDebounce);
+      final sent = t.sent.singleWhere((m) => m['type'] == 'file:find');
+      expect(sent['query'], 'foo');
+      // Never rely on the bridge's Zod default (F1) — every field the wire
+      // contract declares a default for is sent explicitly.
+      expect(sent['includeIgnored'], isFalse);
+      expect(sent['kinds'], 'both');
+      expect(sent['limit'], 100);
+
+      t.emit('file:find-result', {
+        'projectId': 'p',
+        'requestId': sent['requestId'],
+        'entries': [
+          {'path': 'foo.txt', 'isDir': false},
+        ],
+        'truncated': false,
+        'engine': 'ripgrep',
+      });
+      final result = await future;
+      expect(result.entries, hasLength(1));
+      expect(result.entries.single.path, 'foo.txt');
+      expect(result.entries.single.isDir, isFalse);
+      expect(result.error, isNull);
+      expect(result.truncated, isFalse);
+
+      await svc.dispose();
+      await session.close();
+    });
+
+    test(
+      'a later call still debouncing supersedes the earlier one',
+      () async {
+        final t = FakeAgentTransport();
+        final session = await _newSession(t);
+        final svc = FileService.fromSession(session);
+
+        final first = svc.find('f', includeIgnored: false);
+        expect(first, throwsA(isA<FileFindSuperseded>()));
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+        final second = svc.find('fo', includeIgnored: false);
+
+        await Future<void>.delayed(FileService.findDebounce);
+        final sends = t.sent.where((m) => m['type'] == 'file:find').toList();
+        expect(sends, hasLength(1));
+        expect(sends.single['query'], 'fo');
+
+        t.emit('file:find-result', {
+          'projectId': 'p',
+          'requestId': sends.single['requestId'],
+          'entries': const [],
+          'truncated': false,
+          'engine': 'ripgrep',
+        });
+        await second;
+
+        await svc.dispose();
+        await session.close();
+      },
+    );
+
+    test(
+      'a later call supersedes one already answered by the bridge — the '
+      'stale reply is dropped rather than resolving the new call',
+      () async {
+        final t = FakeAgentTransport();
+        final session = await _newSession(t);
+        final svc = FileService.fromSession(session);
+
+        final first = svc.find('f', includeIgnored: true);
+        expect(first, throwsA(isA<FileFindSuperseded>()));
+        await Future<void>.delayed(FileService.findDebounce);
+        final firstSent = t.sent.singleWhere((m) => m['type'] == 'file:find');
+
+        final second = svc.find('fo', includeIgnored: true);
+        // There is no file:find-cancel; the bridge answers the superseded
+        // request anyway. Its reply must be a silent no-op.
+        t.emit('file:find-result', {
+          'projectId': 'p',
+          'requestId': firstSent['requestId'],
+          'entries': [
+            {'path': 'stale.txt', 'isDir': false},
+          ],
+          'truncated': false,
+          'engine': 'ripgrep',
+        });
+        await Future<void>.delayed(Duration.zero);
+
+        await Future<void>.delayed(FileService.findDebounce);
+        final secondSent = t.sent.lastWhere((m) => m['type'] == 'file:find');
+        expect(secondSent['requestId'], isNot(firstSent['requestId']));
+        t.emit('file:find-result', {
+          'projectId': 'p',
+          'requestId': secondSent['requestId'],
+          'entries': [
+            {'path': 'fo.txt', 'isDir': false},
+          ],
+          'truncated': false,
+          'engine': 'ripgrep',
+        });
+        final result = await second;
+        expect(result.entries.single.path, 'fo.txt');
+
+        await svc.dispose();
+        await session.close();
+      },
+    );
+
+    test('dispose fails a still-debouncing call', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = FileService.fromSession(session);
+
+      final debouncing = svc.find('f', includeIgnored: false);
+      // Registered BEFORE dispose, not after: dispose's own cleanup spans
+      // more than one microtask, and a Future that completes with an error
+      // before anything is listening reports itself unhandled to the zone —
+      // this is exactly the shape [FileFindSuperseded] exists to avoid.
+      expect(debouncing, throwsA(isA<FileFindSuperseded>()));
+      await svc.dispose();
+
+      await session.close();
+    });
+
+    test(
+      'dispose fails a call already sent and awaiting the bridge — supersede '
+      'runs before the pending-reply drain, so the caller sees the same '
+      'FileFindSuperseded either way',
+      () async {
+        final t = FakeAgentTransport();
+        final session = await _newSession(t);
+        final svc = FileService.fromSession(session);
+
+        final inFlight = svc.find('f', includeIgnored: false);
+        await Future<void>.delayed(FileService.findDebounce);
+        expect(t.sent.where((m) => m['type'] == 'file:find'), hasLength(1));
+        // Registered BEFORE dispose — see the still-debouncing test above for
+        // why the order matters here, not just style.
+        expect(inFlight, throwsA(isA<FileFindSuperseded>()));
+        await svc.dispose();
+
+        await session.close();
+      },
+    );
+
+    test(
+      'a reply carrying an error still resolves the call — it arrives on the '
+      'status tier, not the heavy one',
+      () async {
+        // classifyAbMessage coerces ANY envelope with an `error` field to
+        // MessageTier.status, which beats `file:find-result`'s place in the
+        // heavy set. Handled on the heavy stream alone, every failure the
+        // bridge can report (no finder, checkout deleting, a killed or
+        // timed-out engine) was parsed and then dropped, and the caller sat
+        // out its 8s timeout instead.
+        final t = FakeAgentTransport();
+        final session = await _newSession(t);
+        final svc = FileService.fromSession(session);
+
+        final future = svc.find('x', includeIgnored: false);
+        await Future<void>.delayed(FileService.findDebounce);
+        final sent = t.sent.singleWhere((m) => m['type'] == 'file:find');
+        t.emit('file:find-result', {
+          'projectId': 'p',
+          'requestId': sent['requestId'],
+          'entries': const [],
+          'truncated': true,
+          'engine': 'none',
+          'error': 'file listing timed out',
+        });
+
+        final result = await future;
+        expect(result.error, 'file listing timed out');
+        expect(result.entries, isEmpty);
+        expect(result.truncated, isTrue);
+
+        await svc.dispose();
+        await session.close();
+      },
+    );
+
+    test('checkout-scoped find carries checkoutId', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = FileService.fromSession(session, checkoutId: 'wt-1');
+
+      final future = svc.find('x', includeIgnored: false);
+      // dispose() below supersedes this call — catch it rather than
+      // `unawaited`, which does not stop a Future that completes with an
+      // error before anything is listening from reporting itself unhandled.
+      expect(future, throwsA(isA<FileFindSuperseded>()));
+      await Future<void>.delayed(FileService.findDebounce);
+      final sent = t.sent.singleWhere((m) => m['type'] == 'file:find');
+      expect(sent['checkoutId'], 'wt-1');
+
+      await svc.dispose();
+      await session.close();
+    });
+  });
 }

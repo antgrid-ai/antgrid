@@ -17,7 +17,11 @@ import '../models/file_tree_models.dart';
 import '../utils/platform_utils.dart';
 
 /// A widget that renders a file tree with expand/collapse, file selection,
-/// directory-first sorting, and optional name filtering.
+/// and directory-first sorting. Name filtering is no longer this widget's
+/// job — it moved to a bridge-backed `file:find` (subsequence match, not a
+/// local substring pass over whatever this tree has loaded); the file
+/// explorer swaps this whole widget out for a flat results list while a
+/// filter query is active instead.
 ///
 /// [gitFileEntries] is optional decoration: pass it (with
 /// [onStage]/[onUnstage]/[onDiscard]/[onResolveConflict]) from the Git tab to
@@ -38,7 +42,6 @@ class FileTreeView extends StatefulWidget {
   final FileNode? root;
   final Set<String> expandedPaths;
   final String? selectedFilePath;
-  final String? filterQuery;
   final List<GitFileStatusEntry> gitFileEntries;
   final bool changesOnly;
 
@@ -64,7 +67,6 @@ class FileTreeView extends StatefulWidget {
     required this.root,
     required this.expandedPaths,
     this.selectedFilePath,
-    this.filterQuery,
     this.gitFileEntries = const [],
     this.changesOnly = false,
     this.collapsedPaths = const {},
@@ -200,17 +202,13 @@ class _FileTreeViewState extends State<FileTreeView> {
             dirsWithConflicts,
             widget.collapsedPaths,
           )
-        : _flattenVisibleNodes(
-            widget.root!,
-            widget.expandedPaths,
-            widget.filterQuery,
-          );
+        : _flattenVisibleNodes(widget.root!, widget.expandedPaths);
     _lastFlatList = flatList;
 
     if (flatList.isEmpty) {
       return AbEmptyState(
-        icon: widget.changesOnly ? AbIcons.check : AbIcons.search,
-        title: widget.changesOnly ? 'No changed files' : 'No matching files',
+        icon: widget.changesOnly ? AbIcons.check : AbIcons.folder,
+        title: widget.changesOnly ? 'No changed files' : 'This folder is empty',
       );
     }
 
@@ -292,36 +290,22 @@ typedef _TreeRow = ({
 });
 
 /// Flatten the tree into a list of rows for rendering.
-/// When filterQuery is active, show ALL matching files regardless of
-/// directory expand state.
-List<_TreeRow> _flattenVisibleNodes(
-  FileNode root,
-  Set<String> expandedPaths,
-  String? filterQuery,
-) {
+List<_TreeRow> _flattenVisibleNodes(FileNode root, Set<String> expandedPaths) {
   final result = <_TreeRow>[];
-  final query = filterQuery?.toLowerCase().trim();
 
-  if (query != null && query.isNotEmpty) {
-    // A filter walks the whole tree, so it can only search what arrived; the
-    // notice rows below are anchored to a directory row the filter does not
-    // render, and there is nowhere honest to put them here.
-    _flattenFiltered(root, 0, query, result);
-  } else {
-    // Root node itself is the project directory; show its children at depth 0
-    for (final child in root.children) {
-      _flattenNormal(child, 0, expandedPaths, result);
-    }
-    // The root has no row of its own to hang this off, and it is the directory
-    // the node budget cuts first on a wide repo.
-    if (root.truncated) {
-      result.add((
-        node: root,
-        depth: 0,
-        truncationNotice: true,
-        loadingNotice: false,
-      ));
-    }
+  // Root node itself is the project directory; show its children at depth 0
+  for (final child in root.children) {
+    _flattenNormal(child, 0, expandedPaths, result);
+  }
+  // The root has no row of its own to hang this off, and it is the directory
+  // the node budget cuts first on a wide repo.
+  if (root.truncated) {
+    result.add((
+      node: root,
+      depth: 0,
+      truncationNotice: true,
+      loadingNotice: false,
+    ));
   }
 
   return result;
@@ -365,30 +349,6 @@ void _flattenNormal(
         loadingNotice: false,
       ));
     }
-  }
-}
-
-void _flattenFiltered(
-  FileNode node,
-  int depth,
-  String query,
-  List<_TreeRow> result,
-) {
-  if (node.type == FileNodeType.file) {
-    if (node.name.toLowerCase().contains(query)) {
-      result.add((
-        node: node,
-        depth: 0,
-        truncationNotice: false,
-        loadingNotice: false,
-      ));
-    }
-    return;
-  }
-
-  // Directory: recurse into children
-  for (final child in node.children) {
-    _flattenFiltered(child, depth + 1, query, result);
   }
 }
 

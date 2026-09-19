@@ -50,6 +50,7 @@ const Map<String, List<String>> serviceWireTypes = {
     'tree:update',
     'tree:full',
     'file:content',
+    'file:find-result',
     // status
     'git:status',
     'git:diff-content',

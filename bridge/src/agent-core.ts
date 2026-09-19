@@ -29,6 +29,7 @@ import type { PeerSessionView, SendTarget } from "./stream-mux";
 import { FileWatcher } from "./file-watcher";
 import { FileUploadManager } from "./file-upload";
 import { FileSearcher } from "./file-search";
+import { FileFinder } from "./file-find";
 import { PortDetector } from "./port-detector";
 import { TunnelManager } from "./tunnel-manager";
 import type { SendOutcome } from "./send-scheduler";
@@ -129,6 +130,7 @@ interface CheckoutRuntime {
   configController: ConfigController;
   fileWatcher: FileWatcher | null;
   fileSearcher: FileSearcher | null;
+  fileFinder: FileFinder | null;
   uploadManager: FileUploadManager | null;
   portDetector: PortDetector | null;
   tunnelManager: TunnelManager | null;
@@ -921,6 +923,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         : new ConfigController(join(checkout.path, "antgrid.yaml")),
       fileWatcher: null,
       fileSearcher: null,
+      fileFinder: null,
       uploadManager: null,
       portDetector: null,
       tunnelManager: null,
@@ -1892,6 +1895,52 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         listings: [...fw.getChildListings(paths, includeIgnored), ...refused],
         seq: fw.currentSeq(),
       }));
+      return;
+    }
+    // Same reasoning as the file:tree:*:request pair above: a mention popup's
+    // loading state has no backstop poll either, so file:find must answer even
+    // in the setup/teardown gap where `manager` is absent.
+    if (msg.type === "file:find") {
+      const runtime = runtimeFor(msg);
+      if (runtime.checkout.id !== checkoutIdOf(msg)) return;
+      const requestId = typeof msg.requestId === "string" ? msg.requestId : "";
+      const projectId = typeof msg.projectId === "string" ? msg.projectId : "";
+      // `disposed` is set by teardownCheckoutRuntime while the registry row
+      // deliberately survives until the sweep's last line, so without this a
+      // find fired from a still-open popup spawns a fresh engine process
+      // holding a worktree `git worktree remove` is about to delete.
+      if (runtime.disposed) {
+        sendFromRuntime(runtime, createMessage("file:find-result", {
+          projectId,
+          requestId,
+          entries: [],
+          truncated: true,
+          engine: "none" as const,
+          error: "checkout is being deleted",
+        }));
+        return;
+      }
+      if (!runtime.fileFinder) {
+        sendFromRuntime(runtime, createMessage("file:find-result", {
+          projectId,
+          requestId,
+          entries: [],
+          truncated: true,
+          engine: "none" as const,
+          error: "file search unavailable",
+        }));
+        return;
+      }
+      void runtime.fileFinder.find(msg).catch((err: unknown) => {
+        sendFromRuntime(runtime, createMessage("file:find-result", {
+          projectId,
+          requestId,
+          entries: [],
+          truncated: true,
+          engine: "none" as const,
+          error: err instanceof Error ? err.message : String(err),
+        }));
+      });
       return;
     }
     if (!manager) return;
@@ -3979,6 +4028,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     );
     runtime.fileWatcher = fw;
     runtime.fileSearcher = new FileSearcher(runtime.checkout.path, project.id, send, [abDir]);
+    runtime.fileFinder = new FileFinder(runtime.checkout.path, project.id, send, [abDir], () => fw.currentSeq());
     runtime.uploadManager = new FileUploadManager({
       projectId: project.id,
       projectPath: runtime.checkout.path,
@@ -4162,6 +4212,14 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   function stopCheckoutServices(runtime: CheckoutRuntime): Promise<void> {
     runtime.configController.stopWatch();
     const watcherClosed = runtime.fileWatcher?.stop() ?? Promise.resolve();
+    // Both spawn with the checkout as cwd, and `deleteManaged` runs
+    // `git worktree remove` the moment the sweep resolves — on Windows a
+    // surviving child is enough to abort it mid-tree and strand the session
+    // undeletable, the same hazard [trackGitRefresh] exists for. A find fires
+    // on a 250ms debounce from an open @-mention popup, so it is the likelier
+    // of the two to still be listing when the user deletes the session.
+    const findStopped = runtime.fileFinder?.stop() ?? Promise.resolve();
+    const searchStopped = runtime.fileSearcher?.stop() ?? Promise.resolve();
     runtime.uploadManager?.stop();
     runtime.portDetector?.stop();
     runtime.tunnelManager?.stop();
@@ -4171,7 +4229,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     runtime.gitAutofetchInterval = null;
     if (runtime.gitRefreshTimer) clearTimeout(runtime.gitRefreshTimer);
     runtime.gitRefreshTimer = null;
-    return watcherClosed;
+    return Promise.all([watcherClosed, findStopped, searchStopped]).then(() => {});
   }
 
   function teardownCheckoutRuntime(checkoutId: string): Promise<void> {
@@ -4880,6 +4938,13 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     );
     fileSearchers.set(project.id, mainSearcher);
     mainRuntime.fileSearcher = mainSearcher;
+    mainRuntime.fileFinder = new FileFinder(
+      project.path,
+      project.id,
+      (msg) => sendFromRuntime(mainRuntime, msg),
+      [abDir],
+      () => fw.currentSeq(),
+    );
   }
 
   // Emit current config validity as a config:read-result. Mirrors the

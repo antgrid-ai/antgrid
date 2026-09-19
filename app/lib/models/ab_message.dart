@@ -1761,6 +1761,34 @@ Object? parseAbMessage(Map<String, dynamic> json) {
         externalImagePath: json['externalImagePath'] as String?,
       );
 
+    case 'file:find-result':
+      final projectId = json['projectId'];
+      final requestId = json['requestId'];
+      final engine = json['engine'];
+      if (projectId is! String || requestId is! String || engine is! String) {
+        return null;
+      }
+      final entries = <FileFindEntry>[];
+      final entriesJson = json['entries'];
+      if (entriesJson is List) {
+        for (final e in entriesJson) {
+          if (e is Map<String, dynamic>) {
+            final entry = FileFindEntry.fromJson(e);
+            if (entry != null) entries.add(entry);
+          }
+        }
+      }
+      return FileFindResultMessage(
+        id: id,
+        timestamp: timestamp,
+        projectId: projectId,
+        requestId: requestId,
+        entries: entries,
+        truncated: json['truncated'] as bool? ?? false,
+        engine: engine,
+        error: json['error'] as String?,
+      );
+
     case 'ports:update':
       final projectId = json['projectId'];
       if (projectId is! String) return null;

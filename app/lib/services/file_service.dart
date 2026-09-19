@@ -13,6 +13,16 @@ import '../util/detached.dart';
 import 'pending_reply.dart';
 import 'reply_latch.dart';
 
+/// Raised on a [FileService.find] call's Future when a later call supersedes
+/// it before the bridge answered (see [FileService.find]'s own comment for
+/// why this exists instead of a `file:find-cancel` wire message).
+class FileFindSuperseded implements Exception {
+  const FileFindSuperseded();
+
+  @override
+  String toString() => 'A newer file:find superseded this one.';
+}
+
 /// Per-project file tree + git status + viewing-file service.
 ///
 /// Constructed at [ProjectSession] creation time. Subscribes to both the
@@ -25,6 +35,11 @@ import 'reply_latch.dart';
 class FileService {
   final ProjectSession session;
   final String checkoutId;
+
+  /// How long [find] waits for a pause in calls before it actually sends —
+  /// shared by @-mentions and the tree filter box, the two callers typing
+  /// drives it from.
+  static const Duration findDebounce = Duration(milliseconds: 250);
 
   StreamSubscription<Map<String, dynamic>>? _heavySub;
   StreamSubscription<Map<String, dynamic>>? _statusSub;
@@ -129,6 +144,16 @@ class FileService {
   /// answer lands.
   final Map<String, PendingReply<FileResolvePathResultMessage>>
   _pendingResolves = {};
+
+  /// In-flight `file:find` round trips, keyed by requestId. Unlike
+  /// [_pendingResolves] there is at most one WANTED entry at a time — see
+  /// [find] — but the map stays keyed the same way so a superseded call's
+  /// late reply is a plain no-op lookup miss rather than needing its own
+  /// tombstone set.
+  final Map<String, PendingReply<FileFindResultMessage>> _pendingFinds = {};
+  Timer? _findDebounceTimer;
+  Completer<FileFindResultMessage>? _activeFindCompleter;
+  String? _activeFindRequestId;
 
   FileService.fromSession(
     this.session, {
@@ -375,11 +400,19 @@ class FileService {
       _pendingResolves.remove(parsed.requestId)?.complete(parsed);
       return;
     }
+    if (_completeFind(parsed)) return;
   }
 
   void _onStatusJson(Map<String, dynamic> json) {
     final parsed = parseAbMessage(json);
     if (parsed == null) return;
+    // Also here, not only on the heavy tier: `classifyAbMessage` coerces ANY
+    // envelope carrying an `error` to `MessageTier.status`, and every failure
+    // `file:find` can produce carries one — the bridge's "no finder" and
+    // "checkout is being deleted" refusals, and a killed or timed-out engine.
+    // Handled on one tier only, those replies were parsed and then dropped,
+    // and the caller waited out its 8s timeout instead.
+    if (_completeFind(parsed)) return;
     if (parsed is GitStatusMessage) {
       _handleGitStatus(parsed);
       return;
@@ -1218,6 +1251,97 @@ class FileService {
     return pending.future;
   }
 
+  /// Debounced `file:find` — the search engine behind @-mentions and the
+  /// tree's filter box (bridge-side ripgrep/git-ls-files/walk; see
+  /// `bridge/src/file-find.ts`). [includeIgnored] and [kinds] have no default
+  /// on the wire itself (`parseMessageFast` validates only the message TYPE,
+  /// so an omitted field never reaches the bridge's Zod default — F1); both
+  /// are required or explicit here so a caller can't accidentally inherit
+  /// whatever the bridge happens to default to.
+  ///
+  /// Resolves to the whole reply rather than to [FileFindResultMessage.entries]
+  /// alone: a listing the bridge aborted (a killed engine, the find timeout)
+  /// comes back with an empty `entries`, `truncated: true` and an `error`, and
+  /// a caller that saw only the list would render it as a confident
+  /// "no matching files".
+  ///
+  /// Only one call is ever WANTED at a time: a call still waiting out the
+  /// debounce, or still waiting on the bridge, is superseded by the next
+  /// one — its Future throws [FileFindSuperseded] rather than hang until an
+  /// 8s timeout, since a caller re-invoking this on every keystroke (there is
+  /// no `file:find-cancel` to tell the bridge to stop working on a stale one;
+  /// its eventual reply is just dropped on arrival, matched against nothing).
+  Future<FileFindResultMessage> find(
+    String query, {
+    required bool includeIgnored,
+    String kinds = 'both',
+    int limit = 100,
+  }) {
+    _supersedeActiveFind();
+    final requestId = const Uuid().v4();
+    final completer = Completer<FileFindResultMessage>();
+    _activeFindRequestId = requestId;
+    _activeFindCompleter = completer;
+    _findDebounceTimer = Timer(findDebounce, () {
+      if (_disposed || _activeFindRequestId != requestId) return;
+      final pending = session.newPending<FileFindResultMessage>(
+        timeout: const Duration(seconds: 8),
+        onAbandon: () => _pendingFinds.remove(requestId),
+      );
+      _pendingFinds[requestId] = pending;
+      session.sendForCheckout(
+        checkoutId,
+        createAbMessage('file:find', {
+          'projectId': projectId,
+          'requestId': requestId,
+          'query': query,
+          'includeIgnored': includeIgnored,
+          'kinds': kinds,
+          'limit': limit,
+        }),
+      );
+      pending.future.then(
+        (msg) {
+          if (_activeFindRequestId == requestId) {
+            _activeFindRequestId = null;
+            _activeFindCompleter = null;
+          }
+          if (!completer.isCompleted) completer.complete(msg);
+        },
+        onError: (Object error, StackTrace stack) {
+          if (_activeFindRequestId == requestId) {
+            _activeFindRequestId = null;
+            _activeFindCompleter = null;
+          }
+          if (!completer.isCompleted) completer.completeError(error, stack);
+        },
+      );
+    });
+    return completer.future;
+  }
+
+  /// Resolves the round trip a `file:find-result` answers, whichever tier it
+  /// arrived on. Returns whether [parsed] was one.
+  bool _completeFind(Object? parsed) {
+    if (parsed is! FileFindResultMessage) return false;
+    _pendingFinds.remove(parsed.requestId)?.complete(parsed);
+    return true;
+  }
+
+  /// Fails whatever [find] call is currently wanted (debouncing or in
+  /// flight), if any, and cancels its timer — called both by [find] itself
+  /// (the next call always supersedes the last) and by [dispose].
+  void _supersedeActiveFind() {
+    _findDebounceTimer?.cancel();
+    _findDebounceTimer = null;
+    final active = _activeFindCompleter;
+    if (active != null && !active.isCompleted) {
+      active.completeError(const FileFindSuperseded());
+    }
+    _activeFindCompleter = null;
+    _activeFindRequestId = null;
+  }
+
   void selectFile(String path, {int? searchLine, String? searchQuery}) {
     // Fire here, not in requestFileContent — the latter is a shared chokepoint
     // also hit by session-restore, fragment recovery, git "view file", and
@@ -1353,14 +1477,6 @@ class FileService {
       await _requestTree();
       await _fetchChildrenChunked(_state.expandedPaths);
     });
-  }
-
-  void setFilterQuery(String? query) {
-    if (query == null) {
-      _setState(_state.copyWith(clearFilterQuery: true));
-    } else {
-      _setState(_state.copyWith(filterQuery: query));
-    }
   }
 
   void clearViewingFile() {
@@ -1899,6 +2015,12 @@ class FileService {
     final resolves = _pendingResolves.values.toList();
     _pendingResolves.clear();
     for (final pending in resolves) {
+      pending.fail(StateError('FileService disposed'));
+    }
+    _supersedeActiveFind();
+    final finds = _pendingFinds.values.toList();
+    _pendingFinds.clear();
+    for (final pending in finds) {
       pending.fail(StateError('FileService disposed'));
     }
     session.unhydrateCheckout(checkoutId, 'file:selected');

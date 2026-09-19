@@ -51,7 +51,6 @@ void main() {
     FileNode? root,
     Set<String> expandedPaths = const {},
     String? selectedFilePath,
-    String? filterQuery,
     List<GitFileStatusEntry> gitFileEntries = const [],
     bool changesOnly = false,
     Set<String> collapsedPaths = const {},
@@ -68,7 +67,6 @@ void main() {
           root: root,
           expandedPaths: expandedPaths,
           selectedFilePath: selectedFilePath,
-          filterQuery: filterQuery,
           gitFileEntries: gitFileEntries,
           changesOnly: changesOnly,
           collapsedPaths: collapsedPaths,
@@ -151,16 +149,24 @@ void main() {
       expect(find.text('utils.dart'), findsOneWidget);
     });
 
-    testWidgets('filter shows matching files across all directories', (
+    testWidgets('an empty directory (root with no children) says so', (
       tester,
     ) async {
-      final tree = makeTree();
-      await tester.pumpWidget(buildTestWidget(root: tree, filterQuery: 'main'));
+      // Distinct from `root: null` above: this is a real, loaded listing
+      // that came back empty, not "nothing has arrived yet". Name filtering
+      // moved out of this widget (see file_explorer_screen.dart's
+      // _FileFilterResults) — a bridge-backed `file:find`, not a local
+      // substring pass over whatever this tree has loaded — so this is the
+      // only way this empty state is reached now.
+      const tree = FileNode(
+        name: 'project',
+        path: 'project',
+        type: FileNodeType.directory,
+        children: [],
+      );
+      await tester.pumpWidget(buildTestWidget(root: tree));
 
-      expect(find.text('main.dart'), findsOneWidget);
-      // Non-matching files should not appear
-      expect(find.text('utils.dart'), findsNothing);
-      expect(find.text('README.md'), findsNothing);
+      expect(find.text('This folder is empty'), findsOneWidget);
     });
 
     testWidgets('selecting a file off the current viewport scrolls to reveal it', (

@@ -6,11 +6,15 @@ import '../design/widgets/ab_search_field.dart';
 /// A compact search bar for filtering the file tree by filename.
 class FileSearchBar extends StatefulWidget {
   final String? currentQuery;
+  /// Coalescing window before [onQueryChanged] fires. A mount whose callback
+  /// already debounces passes [Duration.zero] rather than paying both.
+  final Duration debounce;
   final void Function(String?) onQueryChanged;
 
   const FileSearchBar({
     super.key,
     this.currentQuery,
+    this.debounce = const Duration(milliseconds: 300),
     required this.onQueryChanged,
   });
 
@@ -57,7 +61,7 @@ class _FileSearchBarState extends State<FileSearchBar> {
       child: AbSearchField(
         controller: _controller,
         hint: 'Filter files...',
-        debounce: const Duration(milliseconds: 300),
+        debounce: widget.debounce,
         onChanged: _onChanged,
       ),
     );

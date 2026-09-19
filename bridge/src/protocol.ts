@@ -2398,6 +2398,44 @@ const FileTreeInvalidatedMessage = BaseMessage.extend({
   ...CheckoutScoped,
 });
 
+// ── Path search (docs/file-tree-lazy-expansion-spec.md, wave 3) ── Backs
+// @-mentions and the tree's filter box. No file:find-cancel: supersede by
+// requestId, killing the previous process the way FileSearcher.search does,
+// and let the app drop replies for a requestId it no longer wants. Same
+// parseMessageFast caveat as the wave-1 frames above — handlers clamp by hand.
+
+const FileFindMessage = BaseMessage.extend({
+  type: z.literal("file:find"),
+  projectId: z.string(),
+  requestId: z.string(),
+  query: z.string().max(256),
+  /** FALSE by default — the opposite of the tree's frames (D10): find hands a
+   *  path to an agent, and node_modules is noise there. */
+  includeIgnored: z.boolean().default(false),
+  /** Directories are DERIVED from file path prefixes (D15); an empty one is
+   *  invisible to find even though the tree shows it. */
+  kinds: z.enum(["files", "dirs", "both"]).default("both"),
+  limit: z.number().int().positive().max(500).default(100),
+  ...CheckoutScoped,
+});
+
+const FileFindResultMessage = BaseMessage.extend({
+  type: z.literal("file:find-result"),
+  projectId: z.string(),
+  requestId: z.string(),
+  entries: z.array(z.object({ path: z.string(), isDir: z.boolean() })),
+  /** The scan hit its cap — entries is the best-scoring prefix. */
+  truncated: z.boolean(),
+  /** `"none"` when no engine ran at all — a listing that was superseded,
+   *  timed out, or was refused before a finder existed. Without that member
+   *  every error path had to claim `"walk"`, which sent anyone debugging an
+   *  empty result toward the readdir fallback on machines that have both
+   *  binaries and never touched it. */
+  engine: z.enum(["ripgrep", "git-ls-files", "walk", "none"]),
+  error: z.string().optional(),
+  ...CheckoutScoped,
+});
+
 const PreviewSnapshotRequestMessage = BaseMessage.extend({
   type: z.literal("preview:snapshot:request"),
   ...CheckoutScoped,
@@ -2939,6 +2977,8 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   FileTreeChildrenRequestMessage,
   FileTreeChildrenMessage,
   FileTreeInvalidatedMessage,
+  FileFindMessage,
+  FileFindResultMessage,
   PreviewSnapshotRequestMessage,
   PreviewSnapshotMessage,
   RequestMessage,
@@ -3146,6 +3186,8 @@ export type FileTreeRootRequest = z.infer<typeof FileTreeRootRequestMessage>;
 export type FileTreeChildrenRequest = z.infer<typeof FileTreeChildrenRequestMessage>;
 export type FileTreeChildren = z.infer<typeof FileTreeChildrenMessage>;
 export type FileTreeInvalidated = z.infer<typeof FileTreeInvalidatedMessage>;
+export type FileFind = z.infer<typeof FileFindMessage>;
+export type FileFindResult = z.infer<typeof FileFindResultMessage>;
 export type PreviewSnapshotRequest = z.infer<typeof PreviewSnapshotRequestMessage>;
 export type PreviewSnapshot = z.infer<typeof PreviewSnapshotMessage>;
 export type PreviewUrlEntry = z.infer<typeof PreviewUrlEntrySchema>;
@@ -3258,6 +3300,7 @@ export const CHECKOUT_VARIABLE_MESSAGE_TYPES = new Set<string>([
   "config:read", "config:read-result", "config:write", "config:write-result", "config:changed", "config:detect-tools", "config:detect-tools-result",
   "ports:update", "port:detected", "preview:url", "file:tree:snapshot:request", "file:tree:snapshot", "file:tree:unchanged", "preview:snapshot:request", "preview:snapshot",
   "file:tree:root:request", "file:tree:children:request", "file:tree:children", "file:tree:invalidated",
+  "file:find", "file:find-result",
   "session:result", "control:result",
 ]);
 
@@ -3385,6 +3428,7 @@ const KNOWN_TYPES = new Set<string>([
   "terminal:unsubscribe", "terminal:history:request", "terminal:history:page", "terminal:display:status",
   "file:tree:snapshot:request", "file:tree:snapshot", "file:tree:unchanged",
   "file:tree:root:request", "file:tree:children:request", "file:tree:children", "file:tree:invalidated",
+  "file:find", "file:find-result",
   "preview:snapshot:request", "preview:snapshot",
   "request", "response",
   "agent:turn-start", "agent:session-reset", "agent:turn-end",
