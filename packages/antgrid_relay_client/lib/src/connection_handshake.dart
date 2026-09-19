@@ -110,6 +110,11 @@ class ConnectionHandshake {
     SessionKeys? derivedKeys;
     Future<SessionKeys?>? keysFuture;
     var appReadySent = false;
+    // How far the conversation got, for the timeout line: a bridge that never
+    // answers the client-hello and one that drops our app:ready both surface
+    // as the same null return, and only the phase tells them apart.
+    var agentHelloSeen = false;
+    final startedAt = DateTime.now();
 
     final sub = _relay.messageStream.listen((msg) async {
       if (msg.channel != 'control') return;
@@ -124,6 +129,7 @@ class ConnectionHandshake {
         }
         if (j['type'] != 'handshake:agent-hello') return;
         if (j['attemptId'] != attemptId) return;
+        agentHelloSeen = true;
         final pubkey = j['pubkey'] as String?;
         final sig = j['sig'] as String?;
         if (pubkey == null || sig == null) return;
@@ -255,6 +261,21 @@ class ConnectionHandshake {
       if (_cancelled) return null;
       return keys;
     } on TimeoutException {
+      if (!_cancelled) {
+        _log(
+          HandshakeLogLevel.debug,
+          'attempt timed out',
+          fields: {
+            'awaiting': appReadySent
+                ? 'established'
+                : agentHelloSeen
+                ? 'agent-ready'
+                : 'agent-hello',
+            'timeoutMs': _attemptTimeout.inMilliseconds,
+            'elapsedMs': DateTime.now().difference(startedAt).inMilliseconds,
+          },
+        );
+      }
       return null;
     } catch (e, st) {
       _log(

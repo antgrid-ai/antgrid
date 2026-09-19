@@ -659,7 +659,7 @@ class MachineSession {
         _established &&
         !_handshakeInFlight) {
       _consecutiveTimeouts = 0;
-      unawaited(_rekey());
+      unawaited(_rekey(reason: 'rpc-timeouts'));
     }
   }
 
@@ -715,7 +715,9 @@ class MachineSession {
     }
     if (_peerWasOffline) {
       _peerWasOffline = false;
-      if (_established && !_handshakeInFlight) unawaited(_rekey());
+      if (_established && !_handshakeInFlight) {
+        unawaited(_rekey(reason: 'peer-bounced'));
+      }
     }
   }
 
@@ -764,8 +766,12 @@ class MachineSession {
 
   // --- handshake / rekey ----------------------------------------------------
 
-  Future<void> _rekey() async {
+  Future<void> _rekey({required String reason}) async {
     if (_disposed || !_established) return;
+    // Every trigger is a symptom the session is already dead; without the
+    // reason here the first visible trace is "send dropped" after the attempt
+    // fails, which reads as though the session vanished for no reason.
+    _log(RelayLogLevel.info, 'E2E rekey started', fields: {'reason': reason});
     await _runHandshake();
   }
 
@@ -792,20 +798,38 @@ class MachineSession {
   /// ONE attempt, no retry: the app's connection supervisor owns backoff and
   /// give-up, so a loop here would nest inside its backoff and multiply it.
   Future<void> _handshakeAttempt() async {
+    final wasEstablished = _established;
+    final startedAt = DateTime.now();
     final newKeys = await _handshaker.perform();
     if (_disposed) {
       newKeys?.zeroize();
       return;
     }
+    final elapsedMs = DateTime.now().difference(startedAt).inMilliseconds;
     if (newKeys == null) {
       // A rekey only ever runs because the session already looks dead
       // (missed pongs, repeated RPC timeouts, a peer that bounced), so keeping
       // the old keys after a failed attempt preserves a session the peer has
       // most likely already dropped — and, with `_established` still true,
       // leaves nothing able to notice.
+      if (wasEstablished) {
+        // The initial-attempt failure is the supervisor's to report; this is
+        // the one transition nothing above this layer sees, and it is what
+        // turns every later send into a "send dropped".
+        _log(
+          RelayLogLevel.warn,
+          'E2E session torn down — rekey attempt failed',
+          fields: {'elapsedMs': elapsedMs},
+        );
+      }
       _teardownSession();
       return;
     }
+    _log(
+      RelayLogLevel.info,
+      'E2E session established',
+      fields: {'rekey': wasEstablished, 'elapsedMs': elapsedMs},
+    );
     // Make-before-break: swap AFTER the new attempt confirmed, then zeroize
     // the superseded keys (no dropped traffic on the old keys).
     final old = _keys;
@@ -928,7 +952,7 @@ class MachineSession {
       );
       // Session declared dead at the E2E layer → rekey on the live socket.
       _stopLiveness();
-      unawaited(_rekey());
+      unawaited(_rekey(reason: 'liveness'));
       return;
     }
     _missedPongs++;
@@ -1106,12 +1130,7 @@ class MachineSession {
     try {
       json = jsonDecode(plaintext) as Map<String, dynamic>;
     } catch (_) {
-      _dropped(
-        'rx',
-        'plaintext-not-json',
-        channel: channel,
-        frameId: frameId,
-      );
+      _dropped('rx', 'plaintext-not-json', channel: channel, frameId: frameId);
       return;
     }
     final type = json['type'];
@@ -1123,7 +1142,12 @@ class MachineSession {
       return;
     }
     if (!json.containsKey('m')) {
-      _dropped('rx', 'unrecognized-plaintext', channel: channel, frameId: frameId);
+      _dropped(
+        'rx',
+        'unrecognized-plaintext',
+        channel: channel,
+        frameId: frameId,
+      );
       return;
     }
     final env = StreamEnvelope.fromJson(json);
