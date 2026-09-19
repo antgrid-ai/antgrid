@@ -80,13 +80,11 @@ function normalizeSubscribedDir(raw: string): string {
   return noDotPrefix === "." || noDotPrefix === "/" ? "" : noDotPrefix;
 }
 
-/** The watcher's one outbound hook. Both flags are honoured only by senders
- *  that publish through the replaying bus; a plain sender may ignore them and
- *  deliver, which is the old behaviour rather than a break. */
-type SendTreeMessage = (
-  msg: AbMessage,
-  opts?: { force?: boolean; replayOnly?: boolean },
-) => void;
+/** The watcher's one outbound hook: a plain send, with no send-mode flags.
+ *  Nothing this class emits needs to bypass the bus's payload-equality dedup —
+ *  every frame it sends carries a `seq` that has already been bumped, so
+ *  consecutive sends differ on their own. See [flushBatch]. */
+type SendTreeMessage = (msg: AbMessage) => void;
 
 type PendingChanges = {
   added: Map<string, FileTreeNode>;
@@ -173,8 +171,7 @@ export class FileWatcher {
       // UNACCOUNTED-for, not subscribed-to-nothing. A frame whose `paths`
       // cannot be read is the strongest available statement that this
       // client's intent is unknown, and D6's answer to an unknown client is
-      // to stop filtering for everyone — the same direction
-      // `everyClientPullsTrees` fails in. Storing the empty Set instead would
+      // to stop filtering for everyone. Storing the empty Set instead would
       // count the client as fully accounted for AND contributing nothing,
       // narrowing the union to the root for every device on the bus.
       this.subscriptions.delete(clientKey);
@@ -250,11 +247,15 @@ export class FileWatcher {
     return false;
   }
 
-  /** Fail-open the same shape as `everyClientPullsTrees` in agent-core.ts:
-   *  no client accounted for at all — a bare watcher under test, or a core
-   *  whose transport has named no client yet — means nobody has vouched for
-   *  a narrower union, so the filter stays off rather than risk dropping a
-   *  delta a silent client still needed. */
+  /** Whether every attached client has named the directories it wants.
+   *
+   *  Fail-OPEN, and the direction is the whole point: no client accounted for
+   *  at all — a bare watcher under test, or a core whose transport has named
+   *  no client yet ([attachedClients] in agent-core.ts is the roster) — means
+   *  nobody has vouched for a narrower union, so the filter stays off rather
+   *  than risk dropping a delta a silent client still needed. Returning true
+   *  for an empty roster reads tidier and silently starves every client that
+   *  never subscribed. */
   private everySubscribed(): boolean {
     const roster = this.attachedClients?.() ?? [];
     if (roster.length === 0) return false;
@@ -280,6 +281,12 @@ export class FileWatcher {
     return this.connState.fileSeq(this.projectRoot);
   }
 
+  /** The whole checkout in one frame, for `file:tree:snapshot:request` alone —
+   *  the verb an app that predates the on-demand listing protocol hydrates
+   *  from, and the only caller left. `buildTree` bounds it at MAX_TREE_NODES /
+   *  MAX_DEPTH and marks what it cut; that cap is the reason a phone
+   *  foregrounding against a 20k-file worktree does not spend the relay's whole
+   *  credit window on one reply per bound checkout. */
   getTreeSnapshot(): { tree: FileTreeNode; seq: number } {
     const root = buildTree(this.projectRoot, this.projectRoot, this.ig);
     if (!root) {
@@ -289,34 +296,6 @@ export class FileWatcher {
       };
     }
     return { tree: root, seq: this.currentSeq() };
-  }
-
-  /** [opts.force] bypasses the bus's payload-equality dedup — for the re-sync
-   *  paths, where an unchanged tree is exactly what has to reach the wire.
-   *  [opts.replayOnly] caches the tree for replay without delivering it, for
-   *  the open-time build: no client reads that push (each pulls its own tree
-   *  with `file:tree:snapshot:request`), and it went out before any of them
-   *  had a stream to receive it — see the open path in agent-core.ts. */
-  sendFullTree(opts: { force?: boolean; replayOnly?: boolean } = {}): void {
-    const root = buildTree(this.projectRoot, this.projectRoot, this.ig);
-    if (!root) {
-      log.error("Failed to build file tree for %s", this.projectRoot);
-      return;
-    }
-
-    this.sendMessage(
-      createMessage("tree:full", {
-        projectId: this.projectId,
-        root,
-        seq: this.currentSeq(),
-      }),
-      opts,
-    );
-    log.info(
-      "%s full file tree for project %s",
-      opts.replayOnly ? "Cached" : "Sent",
-      this.projectId,
-    );
   }
 
   /** Ignore rules for a listing request. This is a listing-only distinction —
@@ -419,6 +398,11 @@ export class FileWatcher {
     this.watcher = chokidar.watch(this.projectRoot, {
       ignoreInitial: true,
       followSymlinks: false,
+      // Kept equal to MAX_DEPTH in file-tree.ts: a whole-tree snapshot must not
+      // list an entry this watcher can never emit a delta for. On-demand
+      // listings have no depth cap, so a Linux client that expands past level
+      // 10 sees that directory only when it re-lists it — the native recursive
+      // watch macOS and Windows use has no such limit.
       depth: 10,
       ignored: ignoredFn,
     });
@@ -732,19 +716,21 @@ export class FileWatcher {
     if (fullResync) {
       // The watcher lost track of what actually changed (see the null-filename
       // branch above) — whatever named add/modify/remove this same tick also
-      // captured is incomplete at best, so send the real thing instead: the
-      // same full tree a manual pull-to-refresh would rebuild.
-      this.sendFullTree({ force: true });
-      // TODO(wave-6): drop the sendFullTree call above once every app speaks
-      // the on-demand listing protocol. A lazy-tree app acts on the frame
-      // below instead — it clears childrenLoaded and re-lists itself — but
-      // no app understands it yet this wave, so both go out side by side.
+      // captured is incomplete at best, so the delta is abandoned and the app
+      // clears `childrenLoaded` on the invalidation and re-lists itself.
       //
-      // Unforced, unlike its twin above, because `seq` was bumped earlier in
-      // this flush: consecutive resyncs therefore carry different payloads and
-      // clear the bus's payload-equality dedup on their own. Stop stamping
-      // `seq`, or move the bump below this branch, and the second resync in a
-      // row is deduped away — the apps that missed the first never learn.
+      // The one path in this method that sends no `tree:update`, deliberately.
+      // An app that predates this frame cannot parse it and so learns nothing
+      // here — it self-heals on the NEXT delta, whose `seq` is then two ahead
+      // of its base, which is exactly what drives its gap-recovery pull. An
+      // empty `tree:update` alongside would be contiguous, so that app would
+      // advance its base over the gap and never recover at all.
+      //
+      // Unforced: `seq` was bumped earlier in this flush, so consecutive
+      // resyncs carry different payloads and clear the bus's payload-equality
+      // dedup on their own. Stop stamping `seq`, or move the bump below this
+      // branch, and the second resync in a row is deduped away — the apps
+      // that missed the first never learn.
       this.sendMessage(createMessage("file:tree:invalidated", { seq }));
       log.debug("tree resync for project %s — watcher reported an unnamed change", this.projectId);
       return;
@@ -754,7 +740,7 @@ export class FileWatcher {
     // directories, but ONLY once every attached client has sent one —
     // see [everySubscribed]. An old app that never subscribes is therefore
     // never filtered (Trap 4), and a fresh flush with no client accounted
-    // for at all sends everything, same as `everyClientPullsTrees`.
+    // for at all sends everything.
     let outAdded = added;
     let outModified = modified;
     let outRemoved = removed;

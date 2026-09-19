@@ -57,12 +57,13 @@ describe("dart-client-e2e", () => {
     expect(output.data.data).toContain("EVAL_READY");
   }, 25_000);
 
-  test("receives file tree via Dart client", async () => {
-    const tree = await env.app.waitForFileTree(env.streamId, 10_000);
-    expect(tree.data.type).toBe("tree:full");
-    expect(tree.data.root).toBeDefined();
-    expect(tree.data.root.type).toBe("directory");
-    const names = tree.data.root.children.map((e: any) => e.name);
+  test("receives the root directory listing via Dart client", async () => {
+    const reply = await env.app.fetchRootListing(env.streamId, 10_000);
+    expect(reply.data.type).toBe("file:tree:children");
+    const listing = reply.data.listings.find((l: any) => l.path === "");
+    expect(listing).toBeDefined();
+    expect(listing.missing).toBeUndefined();
+    const names = listing.children.map((e: any) => e.name);
     expect(names).toContain("README.md");
   }, 15_000);
 

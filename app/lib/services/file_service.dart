@@ -407,13 +407,12 @@ class FileService {
   void _onHeavyJson(Map<String, dynamic> json) {
     final parsed = parseAbMessage(json);
     if (parsed == null) return;
-    // TODO(wave-6): nothing here sends `file:tree:snapshot:request` any more
-    // (see [_requestTree]), but the bridge answers it on the BUS, so a
-    // second client still running the whole-tree build makes its reply
-    // arrive here. Applying it would swap the lazily-listed, show-all tree
-    // for the legacy ignore-respecting depth-capped one and move the seq
-    // claim with it. Delete alongside the bridge's
-    // `case "file:tree:snapshot:request"` and [_handleTreeFull].
+    // Nothing here sends `file:tree:snapshot:request` any more (see
+    // [_requestTree]), but the bridge still answers it on the bus for an old
+    // app, so a second client still running the whole-tree build makes its
+    // reply arrive here. Applying it would swap the lazily-listed, show-all
+    // tree for the legacy ignore-respecting depth-capped one and move the seq
+    // claim with it — so it stays a deliberate no-op.
     if (parsed is FileTreeSnapshotMessage) {
       return;
     }
@@ -457,10 +456,9 @@ class FileService {
       }
       return;
     }
-    if (parsed is TreeFullMessage) {
-      _handleTreeFull(parsed);
-      return;
-    }
+    // `tree:full` has no handler: an old bridge's watcher-overflow resend
+    // (superseded by `file:tree:invalidated`, see [_handleInvalidated]) falls
+    // through every branch here and is a harmless no-op, not an exception.
     if (parsed is FileContentMessage) {
       _handleFileContent(parsed);
       return;
@@ -601,13 +599,6 @@ class FileService {
       _state.copyWith(gitOpFeedback: message, gitOpFeedbackSeq: ++_gitOpSeq),
     );
   }
-
-  // TODO(wave-6): the bridge still force-resends the whole tree on watcher
-  // overflow; this app now reacts to the sibling `file:tree:invalidated`
-  // push instead (see [_handleInvalidated]) and ignores this one entirely.
-  // Remove the bridge's resend once every deployed app speaks
-  // file:tree:root, and delete this method then.
-  void _handleTreeFull(TreeFullMessage msg) {}
 
   /// Applies an incremental `tree:update` delta using the same
   /// identity-preserving spine copy [_handleChildrenMessage] uses — see

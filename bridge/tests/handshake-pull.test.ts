@@ -312,9 +312,11 @@ test("a session carries pullsTree false for a wrong-typed capability", () => {
 });
 
 test("a torn-down session takes its pullsTree with it — the capability does not outlive the app", () => {
-  // The "nobody is attached" answer is no longer this file's to give: with N
-  // devices the question is whether EVERY established one pulls, which
-  // `everyClientPullsTrees` in agent-core asks of an empty roster.
+  // The app DECLARES pullsTree and this bridge reads it into the session;
+  // nothing in agent-core resolves it any more, but it is parsed and kept so a
+  // bridge that dropped it cannot leave an old app treeless (see the TODO on
+  // `AppReadyMessage.capabilities.pullsTree`). A torn-down session must still
+  // drop its own claim rather than leave it stale.
   const { client } = establishSession({
     agentEd: ed25519Pair(), phoneEd: ed25519Pair(), attemptId: "attempt-a",
     capabilities: { checkoutRouting: true, pullsTree: true },

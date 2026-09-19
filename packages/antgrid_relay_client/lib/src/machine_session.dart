@@ -1666,22 +1666,12 @@ class StreamTransport extends BufferedAgentTransport {
   /// not carry (session list, config, the reopened file, the transcript). This
   /// is the per-stream reconciliation checkpoint.
   ///
-  /// The pull carries every durable frame but the file tree, and for a relay
-  /// app it is the ONLY carrier of a checkout's `agent:status` — the frame its
-  /// terminal tabs are built from: `terminal:started` is not durable, the
-  /// bridge republishes a checkout's status on nothing an app can trigger
-  /// short of starting a session that is already running, and the next
-  /// establishment is the only other re-pull. `tree:full` is left out on
-  /// purpose, and not pulled separately either: it is the one unbounded frame
-  /// (every checkout's whole tree, megabytes for a project with several
-  /// worktrees), and the hydrators below already ask the bridge for each
-  /// checkout's tree on every establishment — pulling it here as well sent the
-  /// same megabytes two and three times over on every connect, and on a slow
-  /// uplink that backlog starved the bridge's relay pongs until the relay
-  /// closed its socket, so the session dropped and the whole cycle re-ran.
-  /// While the tree rode in this reply at all, a slow link or one lost
-  /// fragment cost the terminal its tab — a running session opened afterwards
-  /// sat on "waiting for agent" with nothing left to deliver it.
+  /// The pull carries every durable frame but [_kLegacyOnlyReplayTypes], and
+  /// for a relay app it is the ONLY carrier of a checkout's `agent:status` —
+  /// the frame its terminal tabs are built from: `terminal:started` is not
+  /// durable, the bridge republishes a checkout's status on nothing an app can
+  /// trigger short of starting a session that is already running, and the next
+  /// establishment is the only other re-pull.
   ///
   /// The pull is retried on timeout, since a reply that lands after the wait
   /// is discarded like any late RPC response. Only the first attempt is
@@ -1698,12 +1688,11 @@ class StreamTransport extends BufferedAgentTransport {
   /// [refreshSnapshot] exists for a (re)establishment, where the view-state the
   /// snapshot does not carry is stale too. A user asking one checkout to try
   /// attaching again is not that: the hydrator replay re-asks every ACTIVE
-  /// checkout for its whole `tree:full`, so routing a tap through it would
-  /// answer one stalled workspace with megabytes for every workspace on
-  /// screen beside it. This carries the frame
-  /// that tap is actually after — the bridge recomputes each checkout's
-  /// `agent:status` while serving the pull, so the reply is no older than the
-  /// tap.
+  /// checkout for its full listing state, so routing a tap through it would
+  /// answer one stalled workspace with extra round trips for every workspace
+  /// on screen beside it. This carries the frame that tap is actually after —
+  /// the bridge recomputes each checkout's `agent:status` while serving the
+  /// pull, so the reply is no older than the tap.
   ///
   /// Shares [_fetchSnapshot]'s generation stamp, so a pull already airborne is
   /// superseded rather than duplicated. The returned future completes when the
@@ -1752,7 +1741,7 @@ class StreamTransport extends BufferedAgentTransport {
     const method = 'state.snapshot';
     const params = <String, dynamic>{
       'types': ['*'],
-      'exclude': _kHeavyReplayTypes,
+      'exclude': _kLegacyOnlyReplayTypes,
     };
     try {
       // Only the first attempt counts toward the session's consecutive-timeout
@@ -1820,7 +1809,21 @@ class StreamTransport extends BufferedAgentTransport {
   }
 }
 
-/// Durable frames the snapshot pull leaves out: the only unbounded ones the
-/// bridge caches, each delivered by a per-checkout hydrator instead — see
-/// [StreamTransport.refreshSnapshot].
-const _kHeavyReplayTypes = <String>['tree:full'];
+/// Durable frames only a bridge older than this app still caches, kept out of
+/// the welcome-replay reply.
+///
+/// Inert against a current bridge: the file tree is listed per directory on
+/// demand and no whole-tree frame is retained, so there is nothing under this
+/// type to exclude. An older bridge retains one `tree:full` PER CHECKOUT at
+/// open — measured at ~2 MB for a project with several managed worktrees — and
+/// this app has no handler for one, so a pull of everything would decrypt and
+/// discard those megabytes on every establishment; on a slow uplink that
+/// backlog starved the bridge's relay pongs until the relay closed the socket,
+/// dropping the session and re-running the whole cycle.
+///
+/// The app and the bridge ship on separate release trains, so new-app /
+/// old-bridge is the ordinary rollout window rather than a corner case — the
+/// mirror of the `pullsTree` deferral, and dropped in the same release as it.
+/// TODO(bharath): drop with `pullsTree`, once no bridge in the field caches a
+/// tree.
+const _kLegacyOnlyReplayTypes = <String>['tree:full'];

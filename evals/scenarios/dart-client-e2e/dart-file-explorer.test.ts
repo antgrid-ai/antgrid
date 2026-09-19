@@ -23,15 +23,20 @@ describe("dart-file-explorer", () => {
     await env?.teardown();
   });
 
-  test("receives full file tree via Dart client", async () => {
-    const tree = await env.app.waitForFileTree(env.streamId, 10_000);
-    expect(tree.data.projectId).toBe(env.projectId);
-    expect(tree.data.root.type).toBe("directory");
+  test("lists the root, then lazily expands a subdirectory, via Dart client", async () => {
+    const root = await env.app.fetchRootListing(env.streamId, 10_000);
+    const rootListing = root.data.listings.find((l: any) => l.path === "");
+    expect(rootListing).toBeDefined();
+    const rootNames = rootListing.children.map((n: any) => n.name);
+    expect(rootNames).toContain("README.md");
+    expect(rootNames).toContain("src");
 
-    const flatNames = flattenTree(tree.data.root);
-    expect(flatNames).toContain("README.md");
-    expect(flatNames).toContain("index.ts");
-    expect(flatNames).toContain("utils.ts");
+    const children = await env.app.fetchChildListings(env.streamId, ["src"], 10_000);
+    const srcListing = children.data.listings.find((l: any) => l.path === "src");
+    expect(srcListing).toBeDefined();
+    const srcNames = srcListing.children.map((n: any) => n.name);
+    expect(srcNames).toContain("index.ts");
+    expect(srcNames).toContain("utils.ts");
   }, 15_000);
 
   test("reads file content via Dart client", async () => {
@@ -51,8 +56,9 @@ describe("dart-file-explorer", () => {
   // temp-dir root) emits no add events for a cross-process write inside the
   // long-running agent on Windows, even with polling — yet identical standalone
   // chokidar detects it. A Bun+chokidar runtime quirk in this eval setup, not a
-  // protocol issue (tree:full + file:read pass). Real project dirs watch fine
-  // in production. Re-enable once incremental watching is reliable here.
+  // protocol issue (the listing + file:read requests above pass). Real project
+  // dirs watch fine in production. Re-enable once incremental watching is
+  // reliable here.
   test.skip("receives incremental tree update on file creation", async () => {
     writeFileSync(join(env.projectDir, "dart-created.txt"), "created during dart eval");
 
@@ -64,14 +70,3 @@ describe("dart-file-explorer", () => {
     expect(addedNames).toContain("dart-created.txt");
   }, 15_000);
 });
-
-function flattenTree(node: any): string[] {
-  const names: string[] = [];
-  if (node.name) names.push(node.name);
-  if (node.children) {
-    for (const child of node.children) {
-      names.push(...flattenTree(child));
-    }
-  }
-  return names;
-}

@@ -6,11 +6,12 @@
 // and stop retrying once the reply lands, once the failure is one a retry
 // cannot change, or once the transport is gone.
 //
-// It also leaves the file tree out — the one unbounded frame — and does not
-// pull it in a round trip of its own either: the per-checkout hydrators ask
-// for it, and a second carrier sent the same megabytes again on every connect,
-// enough on a slow uplink to starve the bridge's relay pongs and drop the
-// socket the pull had just come up on.
+// It also leaves `tree:full` out, and does not pull it in a round trip of its
+// own either. Only a bridge older than this app caches one — this app lists
+// the tree per directory on demand and has no handler for a whole-tree frame —
+// and an old bridge caches one PER CHECKOUT, so a pull of everything spent
+// megabytes on frames the app drops, enough on a slow uplink to starve the
+// bridge's relay pongs and drop the socket the pull had just come up on.
 import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
@@ -238,8 +239,7 @@ void main() {
     expect(
       hydrated,
       1,
-      reason:
-          'a checkout retry must not fan a tree:full out to every checkout',
+      reason: 'a checkout retry must not re-drive every hydrator',
     );
 
     unawaited(st.refreshSnapshot());
@@ -255,7 +255,7 @@ void main() {
     );
   });
 
-  group('the tree is left to the hydrators', () {
+  group('an older bridge\'s cached tree is excluded', () {
     const stream = 's-42';
 
     Map<String, dynamic> reply(

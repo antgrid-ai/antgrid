@@ -194,10 +194,10 @@ void main() {
     },
   );
 
-  // Superseded by file:tree:root/children — the bridge still force-resends
+  // Superseded by file:tree:root/children — an old bridge still force-resends
   // tree:full on watcher overflow (paired with file:tree:invalidated, which
   // this app reacts to instead), so it must land as a pure no-op rather than
-  // reviving the whole-tree push. See _handleTreeFull's TODO(wave-6).
+  // reviving the whole-tree push.
   test('tree:full is ignored', () async {
     final t = FakeAgentTransport();
     final session = await _newSession(t);
@@ -1828,8 +1828,9 @@ void main() {
   group('tree hydration', () {
     // A managed checkout's tree:full is pushed while its runtime is prepared —
     // before the session list that makes the app build the bundle. The push
-    // itself is now ignored (see _handleTreeFull's TODO), so a bundle built
-    // afterward has to pull its own tree rather than rely on it.
+    // itself is ignored (no handler — see file_service.dart's `tree:full`
+    // comment), so a bundle built afterward has to pull its own tree rather
+    // than rely on it.
     test('a bundle built after the push pulls its own tree', () async {
       final t = FakeAgentTransport();
       final session = await _newSession(t);

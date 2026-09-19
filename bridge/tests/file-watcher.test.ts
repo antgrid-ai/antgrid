@@ -24,43 +24,6 @@ describe("FileWatcher", () => {
     rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it("sends full tree on sendFullTree()", () => {
-    const messages: AbMessage[] = [];
-    const watcher = new FileWatcher(
-      { id: "test", name: "Test", path: tempDir },
-      (msg) => messages.push(msg),
-      createConnState(),
-    );
-
-    watcher.sendFullTree();
-
-    expect(messages.length).toBe(1);
-    expect(messages[0].type).toBe("tree:full");
-    if (messages[0].type === "tree:full") {
-      expect(messages[0].root.type).toBe("directory");
-      expect(messages[0].root.children!.length).toBeGreaterThan(0);
-    }
-
-    watcher.stop();
-  });
-
-  it("passes replayOnly through to the sender", () => {
-    const seen: Array<{ force?: boolean; replayOnly?: boolean } | undefined> = [];
-    const watcher = new FileWatcher(
-      { id: "test", name: "Test", path: tempDir },
-      (_msg, opts) => seen.push(opts),
-      createConnState(),
-    );
-
-    // The watcher does not decide whether a tree reaches the wire; the sender
-    // it was handed does. A sender with no bus (this one) delivers regardless,
-    // which is the old behaviour rather than a break.
-    watcher.sendFullTree({ replayOnly: true });
-
-    expect(seen).toEqual([{ replayOnly: true }]);
-    watcher.stop();
-  });
-
   it("detects file additions", async () => {
     const messages: AbMessage[] = [];
     const watcher = new FileWatcher(
@@ -113,18 +76,16 @@ describe("FileWatcher", () => {
 
     await new Promise((r) => setTimeout(r, 200));
 
-    expect(messages.some((m) => m.type === "tree:full")).toBe(true);
+    expect(messages.some((m) => m.type === "file:tree:invalidated")).toBe(true);
     expect(messages.some((m) => m.type === "tree:update")).toBe(false);
 
     watcher.stop();
   });
 
-  // The invalidation frame is what a lazy-tree app resyncs from, and it is
-  // only useful if its seq is the one the accompanying tree carries: a frame
-  // stamped one revision behind sends the app back with a stale `sinceSeq`,
-  // which answers `file:tree:unchanged` and leaves the pre-overflow tree on
-  // screen.
-  it("stamps file:tree:invalidated with the same seq as the resync tree", async () => {
+  // The invalidation frame is what a lazy-tree app resyncs from — its seq must
+  // move on every unnamed-change resync, or the bus's payload-equality dedup
+  // swallows the second one and the app never learns the tree it holds is stale.
+  it("bumps file:tree:invalidated's seq on every resync", async () => {
     const messages: AbMessage[] = [];
     const watcher = new FileWatcher(
       { id: "test", name: "Test", path: tempDir },
@@ -135,13 +96,11 @@ describe("FileWatcher", () => {
     watcher.handleNativeEvent(null);
     await new Promise((r) => setTimeout(r, 200));
 
-    const full = messages.find((m) => m.type === "tree:full");
     const invalidated = messages.find((m) => m.type === "file:tree:invalidated");
-    if (full?.type !== "tree:full" || invalidated?.type !== "file:tree:invalidated") {
-      throw new Error("expected both a tree:full and a file:tree:invalidated");
+    if (invalidated?.type !== "file:tree:invalidated") {
+      throw new Error("expected a file:tree:invalidated");
     }
-    expect(full.seq).toBeGreaterThan(0);
-    expect(invalidated.seq).toBe(full.seq!);
+    expect(invalidated.seq).toBeGreaterThan(0);
 
     // Consecutive resyncs must differ, or the bus's payload-equality dedup
     // swallows the second — the frame is sent unforced and leans on that.
@@ -178,7 +137,7 @@ describe("FileWatcher", () => {
     connState.appFocusPaused = false;
     watcher.handleNativeEvent(null);
     await new Promise((r) => setTimeout(r, 200));
-    expect(messages.some((m) => m.type === "tree:full")).toBe(true);
+    expect(messages.some((m) => m.type === "file:tree:invalidated")).toBe(true);
 
     watcher.stop();
   });

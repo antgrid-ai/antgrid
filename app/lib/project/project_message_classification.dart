@@ -40,7 +40,6 @@ const Set<String> kCheckoutDurableReplayTypes = <String>{
   'agent:status',
   'git:status',
   'git:sync-state',
-  'tree:full',
 };
 
 /// Authoritative app-side mirror of the bridge checkout-variable contract.

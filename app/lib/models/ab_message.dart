@@ -1415,8 +1415,8 @@ class FileTreeChildrenMessage {
 }
 
 /// Pushed when the watcher overflowed and gave up tracking incremental
-/// changes. The bridge also force-resends `tree:full` for the same reason,
-/// which [FileService] ignores (see `_handleTreeFull`'s TODO) — this is what
+/// changes. An old bridge also force-resends `tree:full` for the same reason,
+/// which [FileService] has no handler for (a harmless no-op) — this is what
 /// it acts on instead, re-listing the root and every expanded directory
 /// itself.
 class FileTreeInvalidatedMessage {

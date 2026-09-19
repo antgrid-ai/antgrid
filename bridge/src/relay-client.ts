@@ -207,8 +207,10 @@ interface PeerSession {
   rxFlow: { consumed: Record<Channel, number>; credited: Record<Channel, number> };
   /** One stall log per stalled channel, cleared when a credit advances. */
   stallWarned: Partial<Record<Channel, true>>;
-  /** Whether THIS device pulls trees on demand. Per-session because the bridge
-   *  may only stop pushing `tree:full` when every attached device pulls. */
+  /** Whether THIS device pulls trees on demand. Parsed and retained for
+   *  backward compatibility only — nothing in this bridge reads it, since the
+   *  `tree:full` push it used to gate no longer exists. See the TODO on
+   *  `AppReadyMessage.capabilities.pullsTree` in protocol.ts. */
   pullsTree: boolean;
   terminalFramesV1: boolean;
 }

@@ -12,8 +12,10 @@ import { createMessage, type AbMessage } from "../../bridge/src/protocol";
  * must be tagged with the project's `streamId`. `setupTestEnv` admits the app,
  * turns the machine's mobile-access switch on and pulls the control-plane
  * snapshot, which seeds the `agent:projects` advert but NOT the per-project
- * state — so a migrated scenario resolves the firstProject's stream from that
- * advert and drives verbs over it via `sendOnStream` / `waitForStreamAbType`.
+ * state (nor the file tree, which is fetched lazily per directory via
+ * `file:tree:root:request`/`file:tree:children:request`) — so a migrated
+ * scenario resolves the firstProject's stream from that advert and drives
+ * verbs over it via `sendOnStream` / `waitForStreamAbType`.
  *
  * These live outside `evals/helpers/` because the harness is a shared,
  * frozen surface (the gate agent consumes it too); this is additive test glue.
@@ -36,7 +38,8 @@ export async function firstProjectStream(
 
 /**
  * Pull the per-project `state.snapshot` over the stream and return the cached
- * frames (agent:status, tree:full, git:status, …). Mirrors what a
+ * frames (agent:status, git:status, …) — the file tree is no longer among
+ * them (fetched lazily per directory instead). Mirrors what a
  * `ProjectSession` does on bind — the frames live in the RPC response, so a test
  * that asserts project state reads them from here rather than awaiting a live,
  * de-duped push.

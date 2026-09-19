@@ -1042,8 +1042,9 @@ class TerminalService {
   /// Re-drives ONE terminal's screen pull.
   ///
   /// Deliberately not `StreamTransport.refreshSnapshot()`, which re-drives every
-  /// hydrator on the stream — including a per-checkout `tree:full` for every
-  /// checkout — and would turn a user's tap into a multi-megabyte fan-out.
+  /// hydrator on the stream — including a per-checkout tree re-list (root plus
+  /// every expanded directory) for every checkout — and would turn a user's
+  /// tap into a multi-request fan-out.
   void retryAttach(String terminalId) {
     if (_disposed || !_state.tabs.containsKey(terminalId)) return;
     _attachTerminal(terminalId);

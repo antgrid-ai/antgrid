@@ -79,8 +79,9 @@ const FileTreeNodeSchema: z.ZodType<{
     size: z.number().optional(),
     extension: z.string().optional(),
     children: z.array(FileTreeNodeSchema).optional(),
-    // The directory's listing was cut at the tree's node budget — see
-    // MAX_TREE_NODES in file-tree.ts.
+    // The directory's listing was cut at a budget — MAX_TREE_NODES for a
+    // whole-tree walk, MAX_LISTING_ENTRIES / MAX_BATCH_NODES for an on-demand
+    // listing. See file-tree.ts.
     truncated: z.literal(true).optional(),
     // Git ignores this entry but includeIgnored was true for the request
     // that listed it (D14) — set by listDirectory/listDirectoryBatch's
@@ -177,6 +178,16 @@ const AppReadyMessage = BaseMessage.extend({
   // the bridge honour it; the reads are hand-written on both transports.
   capabilities: z.object({
     checkoutRouting: z.literal(true).optional(),
+    /** Parsed and ignored. Nothing in `bridge/src` reads it any more — the
+     *  whole-tree push it used to select is gone, and every app lists the tree
+     *  per directory on demand. It is kept, along with `LocalListener.ownerPullsTree`,
+     *  `PeerSession.pullsTree` and `ownerPullsTreeProvider`, only because an
+     *  app that still declares it would go treeless with no error against a
+     *  bridge that dropped it — the app's hello literals are hand-mirrored
+     *  across the licence boundary and no suite spans the two sides.
+     *  TODO(bharath): drop the whole chain, with the Dart clients'
+     *  `exclude: ['tree:full']`, once no app in the field predates the
+     *  on-demand listing protocol. */
     pullsTree: z.literal(true).optional(),
     // The app can render `terminal:frame` display mode. Absent means it cannot,
     // and the read of it MUST fail closed (unknown peer reads false) or an old

@@ -876,12 +876,11 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
    *  per-checkout subscription map, so it is injected into every checkout's
    *  FileWatcher as the D6 delta filter's attached-client roster: no client
    *  accounted for here means nobody has vouched for a narrower union, and a
-   *  watcher with an empty roster sends every delta unfiltered — the same
-   *  fail-open direction as `everyClientPullsTrees` below.
+   *  watcher with an empty roster sends every delta unfiltered — fail open
+   *  rather than silently starve a client nobody has heard from yet.
    *
-   *  Deliberately NOT derived from `establishedPeersProvider` the way that
-   *  function's peer half is: nothing in `bridge/src` calls
-   *  `setEstablishedPeersProvider`, so in production it answers with no peers
+   *  Deliberately NOT derived from `establishedPeersProvider`: nothing in
+   *  `bridge/src` calls `setEstablishedPeersProvider`, so in production it answers with no peers
    *  at all and a roster built from it would omit every phone — turning the
    *  filter on for a device that never declared what it wanted, which is the
    *  one outcome D6 exists to prevent. Fed from the inbound choke point in
@@ -1003,12 +1002,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // comment. Clamped here instead.
   const MAX_CHILDREN_REQUEST_PATHS = 64;
 
-  /** Stamps the checkout like [sendFromRuntime] but only seeds the replay
-   *  cache — see MessageBus.retain. */
-  function retainFromRuntime(runtime: CheckoutRuntime, msg: AbMessage): void {
-    retainAb({ ...msg, checkoutId: runtime.checkout.id } as AbMessage);
-  }
-
   function internalTerminalId(runtime: CheckoutRuntime, terminalId: string): string {
     if (sessions?.get(terminalId) || runtime.checkout.id === "main") return terminalId;
     const computed = runtime.configuredTerminalIds.get(terminalId)
@@ -1089,12 +1082,17 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     if (fn) relayEverAttached = true;
   }
   // Every app session on the transport, for the questions about ALL of them.
+  // Assigned by nothing today: its sole reader asked whether every attached
+  // client pulled its own file tree, and that fork in behaviour is gone.
+  // TODO(bharath): drop with `AppReadyMessage.capabilities.pullsTree` (see its
+  // TODO in protocol.ts) unless a new all-peers question claims it first.
   let establishedPeersProvider: (() => PeerSessionView[]) | null = null;
   function setEstablishedPeersProvider(fn: (() => PeerSessionView[]) | null) {
     establishedPeersProvider = fn;
   }
   // The loopback owner is not a peer, so its tree-pull answer has nowhere to
-  // live in a PeerSessionView.
+  // live in a PeerSessionView. Written by project-core.ts and read by nothing —
+  // held for the same release as the capability itself; see protocol.ts.
   let ownerPullsTreeProvider: (() => boolean) | null = null;
   let peerTerminalFramesV1Provider: (() => boolean) | null = null;
   let ownerTerminalFramesV1Provider: (() => boolean) | null = null;
@@ -1638,19 +1636,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     carrierPresent: () => opts.carrierPresent?.() ?? false,
     remoteAccessEnabled: offMachineSendAllowed,
   });
-
-  /** A re-sync push reaches EVERY bus subscriber, so it may only be skipped when
-   *  every attached client pulls the tree for itself. No client accounted for at
-   *  all means the core is driven by something that named no capability (a bare
-   *  bus, as in the unit tests) — that client gets the push. Every ESTABLISHED
-   *  peer is asked, not just the one that triggered the re-sync: a second device
-   *  on the same machine subscribes to the same bus and would go treeless. */
-  function everyClientPullsTrees(): boolean {
-    const answers: boolean[] = [];
-    if (ownerPullsTreeProvider) answers.push(ownerPullsTreeProvider());
-    for (const peer of establishedPeersProvider?.() ?? []) answers.push(peer.pullsTree);
-    return answers.length > 0 && answers.every((a) => a);
-  }
 
   function handleTunnelMessage(raw: unknown, peerId?: string) {
     const msg = parseTunnelMessage(raw as string | object);
@@ -3012,9 +2997,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   /** Same wire as [sendAb] but bypasses the bus's payload-equality dedup. Only
    *  the explicit re-sync paths use it — see MessageBus.republish. */
   let republishAb: (msg: AbMessage) => void = (_m) => {};
-  /** Same bus as [sendAb] but caches for replay WITHOUT delivering — see
-   *  MessageBus.retain. */
-  let retainAb: (msg: AbMessage) => void = (_m) => {};
   let sendPlain: (data: object) => Promise<SendOutcome> = async () => "dropped";
   /** Terminal replies belong to the subscribing app, including when several
    *  authenticated apps share the relay transport. */
@@ -3987,27 +3969,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       );
     }
 
-    // Re-send the file tree, but only for a client that cannot pull it. An app
-    // advertising `pullsTree` asks per checkout with `file:tree:snapshot:request`
-    // on every establishment, so the push is the largest frame the bridge
-    // produces spent on bytes already in flight the other way — ahead of that
-    // app's replies in the same FIFO.
-    //
-    // Forced, for the same reason as the status/git pair above: an idle
-    // project's tree is byte-identical to the cached one, so the ordinary dedup
-    // would drop the very re-push this branch exists to perform.
-    if (!everyClientPullsTrees()) {
-      for (const runtime of checkoutRuntimes.values()) {
-        await yieldToEventLoop();
-        // Re-tested after the yield, not just on entry: `sendFullTree` walks the
-        // whole tree synchronously and `stop()` does not disable it, so a
-        // teardown that started during the yield would be walking a directory
-        // Git is removing.
-        if (runtime.disposed) continue;
-        runtime.fileWatcher?.sendFullTree({ force: true });
-      }
-    }
-
     // Re-emit the detected-port list. ports:update is only pushed on change,
     // so a phone that binds after detection would otherwise never see ports
     // found before it connected (preview:snapshot only covers config-declared
@@ -4066,10 +4027,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
 
     const fw = new FileWatcher(
       { id: project.id, path: runtime.checkout.path, name: project.name },
-      (msg, opts) => {
-        if (opts?.replayOnly) retainFromRuntime(runtime, msg);
-        else sendFromRuntime(runtime, msg, opts?.force);
-      },
+      (msg) => sendFromRuntime(runtime, msg),
       connState,
       () => scheduleGitRefresh(runtime),
       () => [...attachedClients],
@@ -4088,12 +4046,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // by this point it has already nulled `manager`. The delete path cannot:
     // [withCheckoutRuntimeLock] holds teardown behind this whole function.
     if (runtime.disposed || !manager) return;
-    // Cached, not pushed. Nothing reads an open-time tree: every client pulls
-    // its own with `file:tree:snapshot:request`, and this one is built before
-    // any app has a stream bound to receive it — so the push was discarded on
-    // arrival while holding half the control channel's window (see
-    // MessageBus.retain).
-    fw.sendFullTree({ replayOnly: true });
     fw.startWatching();
 
     runtime.configController.watch((result, diff) => {
@@ -4952,11 +4904,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
 
     const fw = new FileWatcher(
       project,
-      (msg: AbMessage, opts) => {
-        if (opts?.replayOnly) retainAb(msg);
-        else if (opts?.force) republishAb(msg);
-        else sendAb(msg);
-      },
+      (msg: AbMessage) => sendAb(msg),
       connState,
       () => scheduleGitRefresh(mainRuntime),
       () => [...attachedClients],
@@ -4971,12 +4919,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     uploadManager.startSweeper();
     mainRuntime.uploadManager = uploadManager;
     await yieldToEventLoop();
-    // Cached, not pushed. Nothing reads an open-time tree: every client pulls
-    // its own with `file:tree:snapshot:request`, and this one is built before
-    // any app has a stream bound to receive it — so the push was discarded on
-    // arrival while holding half the control channel's window (see
-    // MessageBus.retain).
-    fw.sendFullTree({ replayOnly: true });
     fw.startWatching();
 
     const mainSearcher = new FileSearcher(
@@ -5369,7 +5311,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   function attachTransport(bus: MessageBus) {
     sendAb = (m) => bus.publish(m, "control");
     republishAb = (m) => bus.republish(m, "control");
-    retainAb = (m) => bus.retain(m, "control");
     sendAbTo = (m, only) => bus.publishOnly(m, "control", only === "loopback" ? "loopback" : "relay", only === "loopback" || only === "relay" ? undefined : only);
     sendTerminalTo = (m, only, signal) => bus.deliverTo(m,
       PREVIEW_CHANNEL_MESSAGE_TYPES.has(m.type) ? "preview" : "control", only === "loopback" ? "loopback" : "relay", signal, only === "loopback" || only === "relay" ? undefined : only);

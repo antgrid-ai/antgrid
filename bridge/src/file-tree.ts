@@ -10,7 +10,8 @@ export type FileTreeNode = {
   extension?: string;
   children?: FileTreeNode[];
   /** The listing stopped early: `children` is a complete, ordered prefix of
-   * the directory, not the whole of it. See MAX_TREE_NODES. */
+   * the directory, not the whole of it. See MAX_TREE_NODES for the whole-tree
+   * walk, MAX_LISTING_ENTRIES / MAX_BATCH_NODES for on-demand listings. */
   truncated?: true;
   /** Present only because the listing that produced it used the show-all
    * variant AND git would have excluded it. See `listDirectory`'s
@@ -20,13 +21,19 @@ export type FileTreeNode = {
 
 const MAX_DEPTH = 10;
 
-/** Nodes one tree may carry. Every checkout's tree is replayed to every app
- * that binds the project, so the largest checkout sets the cost of every
- * connect — and a worktree that grew a 20k-file data directory made that reply
- * megabytes, enough on a phone's uplink to hold the bridge's own relay pongs
- * behind it until the relay closed the socket. Past the budget the walk stops
- * where it is and marks each directory it cut short; nothing already listed is
- * dropped or reordered. */
+/** Nodes one whole-tree walk may carry. A worktree that grew a 20k-file data
+ * directory made that reply megabytes, enough on a phone's uplink to hold the
+ * bridge's own relay pongs behind it until the relay closed the socket. Past
+ * the budget the walk stops where it is and marks each directory it cut short;
+ * nothing already listed is dropped or reordered.
+ *
+ * Survives the lazy-listing redesign even though the open-time push it was
+ * written for is gone: `file:tree:snapshot:request` keeps meaning the whole
+ * tree forever (D1 in docs/file-tree-lazy-expansion-spec.md), and the clients
+ * that still send it are the OLD ones — the population that cannot be fixed by
+ * shipping a new bridge, and the one that re-asks every bound checkout at once
+ * on every foreground. On-demand listings are bounded separately; neither
+ * `listDirectory` nor `listDirectoryBatch` goes through this walk. */
 export const MAX_TREE_NODES = 10_000;
 
 /** Entries a single `listDirectory` call may return, regardless of the

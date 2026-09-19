@@ -1,7 +1,7 @@
 // The re-sync paths exist because a client just told us it has nothing — so an
 // UNCHANGED payload is precisely the one that still has to reach the wire. The
 // bus's payload-equality dedup is what silently swallowed them: an idle
-// project's status, git and tree are byte-identical to the cached frames, so
+// project's status and git state are byte-identical to the cached frames, so
 // nothing was delivered and the client had no second way to ask.
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -73,83 +73,6 @@ async function bootCore(): Promise<{ bus: MessageBus; sent: AbMessage[] }> {
 }
 
 const countOf = (sent: AbMessage[], type: string) => sent.filter((m) => m.type === type).length;
-
-test("a resync re-sends the file tree even when nothing about it changed", async () => {
-  const { bus, sent } = await bootCore();
-  // The precondition is a CACHED tree, not a delivered one: the open-time build
-  // is retained rather than pushed (MessageBus.retain), and what this test is
-  // about is the dedup having a byte-identical frame to swallow the resync
-  // against.
-  await waitFor(
-    () => bus.getSnapshot(["tree:full"]).length > 0,
-    "a tree:full in the replay cache",
-  );
-  // The open-time build reaches the cache and nothing else. Pushing it spent
-  // the largest frame the bridge produces on a client that pulls its own copy
-  // regardless — and, over a relay, before that client had a stream bound to
-  // receive it.
-  expect(countOf(sent, "tree:full")).toBe(0);
-  const before = countOf(sent, "tree:full");
-
-  // A second handshake is a reconnected app: its whole point is that the app
-  // believes it has nothing, while the project sat idle and every frame it
-  // needs is identical to what the replay cache holds.
-  core!.onHandshakeComplete();
-
-  await waitFor(() => countOf(sent, "tree:full") > before, "the re-synced tree:full");
-  await waitFor(() => countOf(sent, "agent:status") > 1, "the re-synced agent:status");
-});
-
-test("a resync skips the tree for a client that pulls it, and re-sends everything else", async () => {
-  const { bus, sent } = await bootCore();
-  core!.setOwnerPullsTreeProvider(() => true);
-  await waitFor(
-    () => bus.getSnapshot(["tree:full"]).length > 0,
-    "a tree:full in the replay cache",
-  );
-  const before = countOf(sent, "tree:full");
-  const statusBefore = countOf(sent, "git:status");
-
-  core!.onHandshakeComplete();
-
-  // Positive evidence the resync ran at all, before trusting the negative below.
-  await waitFor(() => countOf(sent, "agent:status") > 1, "the re-synced agent:status");
-  await waitFor(() => countOf(sent, "git:status") > statusBefore, "the re-synced git:status");
-  expect(countOf(sent, "tree:full")).toBe(before);
-});
-
-test("a resync still pushes the tree for a client that does not pull it", async () => {
-  const { bus, sent } = await bootCore();
-  core!.setOwnerPullsTreeProvider(() => false);
-  await waitFor(
-    () => bus.getSnapshot(["tree:full"]).length > 0,
-    "a tree:full in the replay cache",
-  );
-  const before = countOf(sent, "tree:full");
-
-  core!.onHandshakeComplete();
-
-  await waitFor(() => countOf(sent, "tree:full") > before, "the re-synced tree:full");
-});
-
-test("a resync pushes the tree when the peer half of the guard is the one that doesn't pull", async () => {
-  // Both providers must agree, not just the owner: a modern desktop reconnected
-  // over loopback while a legacy phone is still established on the relay slot.
-  const { bus, sent } = await bootCore();
-  core!.setOwnerPullsTreeProvider(() => true);
-  core!.setEstablishedPeersProvider(() => [
-    { peerId: "legacy#machine", peerPubkey: "pk-legacy", checkoutRouting: true, reachable: true, pullsTree: false },
-  ]);
-  await waitFor(
-    () => bus.getSnapshot(["tree:full"]).length > 0,
-    "a tree:full in the replay cache",
-  );
-  const before = countOf(sent, "tree:full");
-
-  core!.onHandshakeComplete();
-
-  await waitFor(() => countOf(sent, "tree:full") > before, "the re-synced tree:full");
-});
 
 test("a tree snapshot request re-sends an UNCHANGED git status", async () => {
   const { bus, sent } = await bootCore();
