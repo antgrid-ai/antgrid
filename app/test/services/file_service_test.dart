@@ -2122,6 +2122,139 @@ void main() {
     );
   });
 
+  group('includeIgnored override', () {
+    test(
+      'defaults to including git-ignored files, sent explicitly on the wire',
+      () async {
+        final t = FakeAgentTransport();
+        final session = await _newSession(t);
+        final svc = FileService.fromSession(session)
+          ..activate()
+          ..setTreeInterest('files-test', true);
+        await Future<void>.delayed(Duration.zero);
+
+        // D10: the tree shows everything out of the box — the decision most
+        // likely to be "tidied" into the opposite by someone who finds a
+        // show-everything tree surprising.
+        expect(svc.includeIgnoredInTree, isTrue);
+        expect(_treeRequests(t).last['includeIgnored'], isTrue);
+
+        await svc.dispose();
+        await session.close();
+      },
+    );
+
+    test(
+      'setIncludeIgnoredInTree changes what the tree requests and re-lists '
+      'rather than leaving stale rows',
+      () async {
+        final t = FakeAgentTransport();
+        final session = await _newSession(t);
+        final svc = FileService.fromSession(session)
+          ..activate()
+          ..setTreeInterest('files-test', true);
+        await Future<void>.delayed(Duration.zero);
+
+        _emitRootTree(t, {
+          'tree': _rootNode(
+            children: [
+              {'name': 'dirA', 'path': 'dirA', 'type': 'directory'},
+            ],
+          ),
+          'seq': 1,
+        });
+        await Future<void>.delayed(Duration.zero);
+
+        await svc.toggleExpanded('dirA');
+        t.emit('file:tree:children', {
+          'listings': [
+            {
+              'path': 'dirA',
+              'children': [_file('ghost.log', 'dirA/ghost.log')],
+            },
+          ],
+          'seq': 2,
+        });
+        await Future<void>.delayed(Duration.zero);
+        expect(svc.currentState.root!.children.first.childrenLoaded, isTrue);
+
+        t.clearSent();
+        svc.setIncludeIgnoredInTree(false);
+        // Cleared synchronously, before either reply lands — a rebuild right
+        // after the toggle must not still show the old includeIgnored:true
+        // listing as loaded.
+        expect(svc.currentState.root!.childrenLoaded, isFalse);
+        expect(svc.currentState.root!.children.first.childrenLoaded, isFalse);
+
+        await Future<void>.delayed(Duration.zero);
+        expect(_treeRequests(t).last['includeIgnored'], isFalse);
+        // Same as a manual refresh, never a claimed pull — see
+        // [FileService.requestFullTree]: toggling this doesn't move the
+        // bridge's watcher revision, so a claimed pull could come back
+        // `file:tree:unchanged` and silently no-op the toggle.
+        expect(_treeRequests(t).last.containsKey('sinceSeq'), isFalse);
+
+        final childrenRequests = t.sent.where(
+          (m) =>
+              m['type'] == 'file:tree:children:request' &&
+              (m['paths'] as List).contains('dirA'),
+        );
+        expect(childrenRequests, isNotEmpty);
+        expect(childrenRequests.last['includeIgnored'], isFalse);
+
+        t.emit('file:tree:children', {
+          'listings': [
+            {
+              'path': 'dirA',
+              'children': [_file('a.txt', 'dirA/a.txt')],
+            },
+          ],
+          'seq': 3,
+        });
+        await Future<void>.delayed(Duration.zero);
+        expect(svc.currentState.root!.children.first.childrenLoaded, isTrue);
+        expect(
+          svc.currentState.root!.children.first.children
+              .map((c) => c.name)
+              .toList(),
+          ['a.txt'],
+        );
+
+        await svc.dispose();
+        await session.close();
+      },
+    );
+
+    test(
+      'toggling it never touches an explicit find() call — the @-mention '
+      'path stays on its own includeIgnored (D10)',
+      () async {
+        final t = FakeAgentTransport();
+        final session = await _newSession(t);
+        final svc = FileService.fromSession(session);
+
+        svc.setIncludeIgnoredInTree(false);
+        final future = svc.find('needle', includeIgnored: true);
+        await Future<void>.delayed(FileService.findDebounce);
+        final sent = t.sent.lastWhere((m) => m['type'] == 'file:find');
+        // find()'s caller decides, not the tree's override — an @-mention
+        // caller passing true here is not downstream of the tree at all.
+        expect(sent['includeIgnored'], isTrue);
+        t.emit('file:find-result', {
+          'projectId': 'p',
+          'requestId': sent['requestId'],
+          'entries': const [],
+          'truncated': false,
+          'engine': 'git-ls-files',
+        });
+        await future;
+
+        await svc.dispose();
+        await session.close();
+      },
+    );
+  });
+
   group('git:diff bounded by tier-2 action', () {
     test('requestDiff whose content never arrives clears diffLoading after '
         'the timeout', () async {

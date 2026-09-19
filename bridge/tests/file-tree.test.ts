@@ -335,6 +335,168 @@ describe("file-tree", () => {
       }
     });
 
+    it("marks a gitignored entry ignored: true; a tracked sibling carries no ignored key at all", () => {
+      writeFileSync(join(tempDir, ".gitignore"), "build\n");
+      mkdirSync(join(tempDir, "build"));
+      writeFileSync(join(tempDir, "build", "out.js"), "");
+      writeFileSync(join(tempDir, "src.ts"), "");
+
+      const respecting = loadIgnoreRules(tempDir, [], { gitignore: true });
+      const showAll = loadIgnoreRules(tempDir, [], { gitignore: false });
+
+      const listing = listDirectory("", tempDir, showAll, undefined, respecting);
+      const byName = Object.fromEntries(listing.children.map((c) => [c.name, c]));
+
+      expect(byName.build?.ignored).toBe(true);
+      // Absent, not `false` — the schema is z.literal(true).optional(), and
+      // the spread-conditional in listDirectory never emits the key otherwise.
+      expect(byName["src.ts"]?.ignored).toBeUndefined();
+      expect(Object.keys(byName["src.ts"]!)).not.toContain("ignored");
+    });
+
+    it("never marks .git or .antgrid — the floor is excluded under both flags, not merely ignored", () => {
+      writeFileSync(join(tempDir, ".gitignore"), "build\n");
+      mkdirSync(join(tempDir, "build"));
+      mkdirSync(join(tempDir, ".git"));
+      writeFileSync(join(tempDir, ".git", "HEAD"), "");
+      mkdirSync(join(tempDir, ".antgrid"));
+      writeFileSync(join(tempDir, ".antgrid", "state.json"), "");
+
+      const respecting = loadIgnoreRules(tempDir, [], { gitignore: true });
+      const showAll = loadIgnoreRules(tempDir, [], { gitignore: false });
+      const listing = listDirectory("", tempDir, showAll, undefined, respecting);
+      const names = listing.children.map((c) => c.name);
+
+      // The floor (D9) is in BOTH rule sets, so these two are never present to
+      // begin with — asserting absence, not an unmarked/dimmed row.
+      expect(names).not.toContain(".git");
+      expect(names).not.toContain(".antgrid");
+      expect(listing.children.find((c) => c.name === "build")?.ignored).toBe(true);
+    });
+
+    it("marks every child of an ignored directory too, and picks up a file created after the fact", () => {
+      writeFileSync(join(tempDir, ".gitignore"), "build\n");
+      mkdirSync(join(tempDir, "build"));
+      writeFileSync(join(tempDir, "build", "old.js"), "");
+
+      const respecting = loadIgnoreRules(tempDir, [], { gitignore: true });
+      const showAll = loadIgnoreRules(tempDir, [], { gitignore: false });
+
+      // Expanding "build" itself, exactly as the app would after seeing its
+      // row dimmed in the parent listing.
+      const first = listDirectory("build", tempDir, showAll, undefined, respecting);
+      expect(first.children.map((c) => c.name)).toEqual(["old.js"]);
+      expect(first.children.every((c) => c.ignored === true)).toBe(true);
+
+      // Decision: a file under an ignored directory is marked too — nothing
+      // special-cased, since gitignore's directory pattern already matches
+      // every path beneath "build" (verified: markAgainst.ignores(childRel)
+      // alone accounts for it). D14's refresh gesture is collapse-then-expand
+      // — listDirectory has no cache, so a second call is the whole refresh,
+      // with no watcher involved.
+      writeFileSync(join(tempDir, "build", "new.js"), "");
+      const second = listDirectory("build", tempDir, showAll, undefined, respecting);
+      expect(second.children.map((c) => c.name)).toEqual(["new.js", "old.js"]);
+      expect(second.children.every((c) => c.ignored === true)).toBe(true);
+    });
+
+    it("marks nothing when markAgainst is omitted — the includeIgnored: false path pays for no check", () => {
+      writeFileSync(join(tempDir, ".gitignore"), "build\n");
+      mkdirSync(join(tempDir, "build"));
+      writeFileSync(join(tempDir, "src.ts"), "");
+
+      const respecting = loadIgnoreRules(tempDir, [], { gitignore: true });
+      // No markAgainst: "build" is filtered out by `rules` itself (the
+      // ignore-respecting variant), so nothing ignored ever survives to be
+      // checked against anything.
+      const listing = listDirectory("", tempDir, respecting);
+      expect(listing.children.map((c) => c.name).sort()).toEqual([".gitignore", "src.ts"]);
+      expect(listing.children.every((c) => c.ignored === undefined)).toBe(true);
+    });
+
+    // `build/` — the form the stock Node/Flutter/Python templates and most of
+    // this repo's own .gitignore use. `ignore` answers FALSE for a bare
+    // "build" against it and TRUE for "build/out.js", so a verdict taken
+    // without the entry's kind leaves the folder undimmed above a subtree
+    // where every child is dimmed.
+    it("marks a directory ignored by a trailing-slash pattern, not only its children", () => {
+      writeFileSync(join(tempDir, ".gitignore"), "build/\n");
+      mkdirSync(join(tempDir, "build"));
+      writeFileSync(join(tempDir, "build", "out.js"), "");
+      writeFileSync(join(tempDir, "src.ts"), "");
+
+      const respecting = loadIgnoreRules(tempDir, [], { gitignore: true });
+      const showAll = loadIgnoreRules(tempDir, [], { gitignore: false });
+
+      const root = listDirectory("", tempDir, showAll, undefined, respecting);
+      expect(root.children.find((c) => c.name === "build")?.ignored).toBe(true);
+      expect(root.children.find((c) => c.name === "src.ts")?.ignored).toBeUndefined();
+
+      const inside = listDirectory("build", tempDir, showAll, undefined, respecting);
+      expect(inside.children.find((c) => c.name === "out.js")?.ignored).toBe(true);
+    });
+
+    it("marks a directory a NESTED .gitignore excludes with a trailing-slash pattern", () => {
+      mkdirSync(join(tempDir, "a"));
+      writeFileSync(join(tempDir, "a", ".gitignore"), "sub/\n");
+      mkdirSync(join(tempDir, "a", "sub"));
+      writeFileSync(join(tempDir, "a", "sub", "x.txt"), "");
+      writeFileSync(join(tempDir, "a", "keep.txt"), "");
+
+      const respecting = loadIgnoreRules(tempDir, [], { gitignore: true });
+      const showAll = loadIgnoreRules(tempDir, [], { gitignore: false });
+
+      const listing = listDirectory("a", tempDir, showAll, undefined, respecting);
+      expect(listing.children.find((c) => c.name === "sub")?.ignored).toBe(true);
+      expect(listing.children.find((c) => c.name === "keep.txt")?.ignored).toBeUndefined();
+    });
+
+    it("filters a trailing-slash-ignored directory out of the git-respecting listing entirely", () => {
+      writeFileSync(join(tempDir, ".gitignore"), "build/\n");
+      mkdirSync(join(tempDir, "build"));
+      writeFileSync(join(tempDir, "build", "out.js"), "");
+      writeFileSync(join(tempDir, "src.ts"), "");
+
+      const respecting = loadIgnoreRules(tempDir, [], { gitignore: true });
+      const listing = listDirectory("", tempDir, respecting);
+      // Absent, not present-and-empty: an empty folder the app renders as
+      // genuinely empty is indistinguishable from one it is hiding the
+      // contents of, which is what "Hide git-ignored files" promises not to do.
+      expect(listing.children.map((c) => c.name)).not.toContain("build");
+      expect(listing.children.map((c) => c.name)).toContain("src.ts");
+    });
+
+    it("keeps the ignored flag on an entry that survives a per-call truncation", () => {
+      writeFileSync(join(tempDir, ".gitignore"), "*.log\n");
+      mkdirSync(join(tempDir, "d"));
+      writeFileSync(join(tempDir, "d", "a.log"), "");
+      writeFileSync(join(tempDir, "d", "z.txt"), "");
+
+      const respecting = loadIgnoreRules(tempDir, [], { gitignore: true });
+      const showAll = loadIgnoreRules(tempDir, [], { gitignore: false });
+
+      // Budget 2 keeps both; both must still carry the right verdict.
+      const listing = listDirectory("d", tempDir, showAll, 2, respecting);
+      const byName = Object.fromEntries(listing.children.map((c) => [c.name, c]));
+      expect(byName["a.log"]?.ignored).toBe(true);
+      expect(byName["z.txt"]?.ignored).toBeUndefined();
+    });
+
+    it("keeps the ignored flag on the entry a batch-budget cut leaves behind", () => {
+      writeFileSync(join(tempDir, ".gitignore"), "*.log\n");
+      mkdirSync(join(tempDir, "d"));
+      writeFileSync(join(tempDir, "d", "a.log"), ""); // code-unit-first, survives budget 1
+      writeFileSync(join(tempDir, "d", "z.txt"), "");
+
+      const respecting = loadIgnoreRules(tempDir, [], { gitignore: true });
+      const showAll = loadIgnoreRules(tempDir, [], { gitignore: false });
+
+      const [listing] = listDirectoryBatch(["d"], tempDir, showAll, 1, respecting);
+      expect(listing.truncated).toBe(true);
+      expect(listing.children.map((c) => c.name)).toEqual(["a.log"]);
+      expect(listing.children[0]?.ignored).toBe(true);
+    });
+
     it("keeps hiding DEFAULT_IGNORES entries under the show-everything variant", () => {
       mkdirSync(join(tempDir, "node_modules"));
       writeFileSync(join(tempDir, "node_modules", "pkg.js"), "");

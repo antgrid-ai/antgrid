@@ -306,6 +306,75 @@ test("includeIgnored omitted behaves as true, explicit false as false", async ()
   const respecting = await waitFor(sent, (m) => m.type === "file:tree:children");
   if (respecting.type !== "file:tree:children") throw new Error("wrong frame");
   expect(respecting.listings[0]?.children.map((c) => c.name) ?? []).not.toContain("ignored-dir");
+  // Nothing survives to be checked when the rules already respect git —
+  // never a dimmed row on the includeIgnored: false path.
+  expect(respecting.listings[0]?.children.every((c) => c.ignored === undefined)).toBe(true);
+});
+
+test("includeIgnored: true marks the ignored entry; its tracked sibling carries no ignored key", async () => {
+  writeFileSync(join(root, ".gitignore"), "ignored-dir\n");
+  mkdirSync(join(root, "ignored-dir"));
+  writeFileSync(join(root, "ignored-dir", "secret.txt"), "shh\n");
+  await initRepo();
+  const { bus, sent } = await bootCore();
+
+  sent.length = 0;
+  bus.dispatchInbound(createMessage("file:tree:root:request", {}), "control", "loopback");
+
+  const frame = await waitFor(sent, (m) => m.type === "file:tree:children");
+  if (frame.type !== "file:tree:children") throw new Error("wrong frame");
+  const children = frame.listings[0]?.children ?? [];
+  const dirNode = children.find((c) => c.name === "ignored-dir");
+  const yamlNode = children.find((c) => c.name === "antgrid.yaml");
+  expect(dirNode?.ignored).toBe(true);
+  expect(yamlNode?.ignored).toBeUndefined();
+});
+
+test(".git is absent from the tree under both includeIgnored flags, and never marked", async () => {
+  await initRepo();
+  const { bus, sent } = await bootCore();
+
+  sent.length = 0;
+  bus.dispatchInbound(createMessage("file:tree:root:request", {}), "control", "loopback");
+  const showAll = await waitFor(sent, (m) => m.type === "file:tree:children");
+  if (showAll.type !== "file:tree:children") throw new Error("wrong frame");
+  expect(showAll.listings[0]?.children.map((c) => c.name) ?? []).not.toContain(".git");
+
+  sent.length = 0;
+  bus.dispatchInbound(
+    createMessage("file:tree:root:request", { includeIgnored: false }),
+    "control",
+    "loopback",
+  );
+  const respecting = await waitFor(sent, (m) => m.type === "file:tree:children");
+  if (respecting.type !== "file:tree:children") throw new Error("wrong frame");
+  expect(respecting.listings[0]?.children.map((c) => c.name) ?? []).not.toContain(".git");
+});
+
+// includeIgnored is a per-install app setting, so two clients legitimately ask
+// for different pictures of the same directory. The reply carries neither a
+// requestId nor an echo of the flag, so a broadcast one is indistinguishable
+// from a listing this client asked for and silently rewrites its tree.
+test("a listing answers only the client that asked", async () => {
+  writeFileSync(join(root, ".gitignore"), "ignored-dir\n");
+  mkdirSync(join(root, "ignored-dir"));
+  await initRepo();
+  const { bus, sent } = await bootCore();
+
+  const toRelay: AbMessage[] = [];
+  bus.subscribe({ audience: "relay", deliver: (message) => toRelay.push(message) });
+
+  sent.length = 0;
+  bus.dispatchInbound(createMessage("file:tree:root:request", {}), "control", "loopback");
+  await waitFor(sent, (m) => m.type === "file:tree:children");
+  expect(toRelay.some((m) => m.type === "file:tree:children")).toBe(false);
+
+  bus.dispatchInbound(
+    createMessage("file:tree:children:request", { paths: ["ignored-dir"] }),
+    "control",
+    "relay",
+  );
+  await waitFor(toRelay, (m) => m.type === "file:tree:children");
 });
 
 test("a request for a bogus checkout id does not get main's answer", async () => {

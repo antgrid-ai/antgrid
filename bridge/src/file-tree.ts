@@ -12,6 +12,10 @@ export type FileTreeNode = {
   /** The listing stopped early: `children` is a complete, ordered prefix of
    * the directory, not the whole of it. See MAX_TREE_NODES. */
   truncated?: true;
+  /** Present only because the listing that produced it used the show-all
+   * variant AND git would have excluded it. See `listDirectory`'s
+   * `markAgainst` parameter. */
+  ignored?: true;
 };
 
 const MAX_DEPTH = 10;
@@ -145,14 +149,25 @@ export class IgnoreRules {
   ) {}
 
   /** `relPath` is root-relative with `/` separators and never the root itself
-   * (`ignore` throws rather than answer for "" or a path that escapes). */
-  ignores(relPath: string): boolean {
-    if (this.root.ignores(relPath)) return true;
+   * (`ignore` throws rather than answer for "" or a path that escapes).
+   *
+   * `isDirectory` is not optional information: a pattern ending in `/`
+   * (`build/`, `.dart_tool/` — the form the stock Node, Flutter and Python
+   * templates use, and the form ~28 of this repo's own patterns take) matches
+   * only a path presented WITH a trailing slash, so asking about a bare
+   * `build` answers FALSE while every path beneath it answers true. Pass the
+   * entry's kind and the slash is appended for you — never append it at the
+   * call site, because `"a/b/".split("/")` ends in an empty segment and
+   * `ignore` throws on an empty path. */
+  ignores(relPath: string, isDirectory = false): boolean {
+    const asked = isDirectory ? `${relPath}/` : relPath;
+    if (this.root.ignores(asked)) return true;
     if (!this.useGitignore) return false;
     const parts = relPath.split("/");
     for (let i = 1; i < parts.length; i++) {
       const rules = this.nestedFor(parts.slice(0, i).join("/"));
-      if (rules?.ignores(parts.slice(i).join("/"))) return true;
+      const suffix = parts.slice(i).join("/");
+      if (rules?.ignores(isDirectory ? `${suffix}/` : suffix)) return true;
     }
     return false;
   }
@@ -232,8 +247,10 @@ function walk(
   const relPath = relative(projectRoot, absPath).replace(/\\/g, "/");
   const name = absPath === projectRoot ? "" : basename(absPath);
 
-  // Check ignore rules (skip for the root itself)
-  if (relPath && relPath !== "." && rules.ignores(relPath)) {
+  // Check ignore rules (skip for the root itself). The kind matters: without
+  // it a `build/`-style pattern excludes every descendant but not the folder,
+  // which is then emitted with an empty `children` array.
+  if (relPath && relPath !== "." && rules.ignores(relPath, stat.isDirectory())) {
     return null;
   }
 
@@ -370,12 +387,27 @@ function guardedAbsolutePath(relPath: string, projectRoot: string): string | nul
  * expand re-lists from disk, whether or not the caller already holds
  * children for the path — the on-demand tree's only refresh gesture is
  * collapse-then-expand, and a cache-hit branch here would remove it (see the
- * spec's D2/D14 and Trap 10). */
+ * spec's D2/D14 and Trap 10).
+ *
+ * `markAgainst`, when given, is a SECOND, stricter rule set consulted only
+ * for entries that already survived `rules` — i.e. `rules` is the show-all
+ * variant and `markAgainst` is the git-respecting one. An entry `rules` let
+ * through but `markAgainst` would have excluded is present only because the
+ * caller asked to see everything, and is returned with `ignored: true`
+ * (never `false`: the field is omitted otherwise). Omit `markAgainst`
+ * whenever `rules` already respects git (`includeIgnored: false`): nothing
+ * ignored can survive `rules` in that case, so there is nothing to check and
+ * the caller pays nothing for the second verdict. A child of an entry
+ * `markAgainst` already excludes is marked the same way, with no separate
+ * case needed — gitignore's patterns match every path beneath a directory
+ * they exclude. The directory row itself is NOT covered by that and needs
+ * the entry's kind passed through; see `IgnoreRules.ignores`. */
 export function listDirectory(
   relPath: string,
   projectRoot: string,
   rules: IgnoreRules,
   budget: number = MAX_LISTING_ENTRIES,
+  markAgainst?: IgnoreRules,
 ): DirectoryListing {
   const absPath = guardedAbsolutePath(relPath, projectRoot);
   if (absPath === null) {
@@ -426,7 +458,11 @@ export function listDirectory(
     if (entry.isSymbolicLink()) continue;
 
     const childRel = relPrefix + entry.name;
-    if (rules.ignores(childRel)) continue;
+    // Both verdicts take the entry's kind, so a `build/`-style pattern
+    // excludes the FOLDER and not merely everything under it. readdir answers
+    // UNKNOWN on some filesystems, which is why the lstat branch below asks a
+    // second time for an entry this one could not classify.
+    if (rules.ignores(childRel, entry.isDirectory())) continue;
 
     // The cap bites only once an entry has survived every filter, so a
     // directory whose remaining entries were all going to be dropped anyway
@@ -437,8 +473,14 @@ export function listDirectory(
       break;
     }
 
+    // The second verdict — see listDirectory's doc comment. Cheap when
+    // markAgainst is undefined (includeIgnored: false): the optional-chain
+    // short-circuits to undefined with no method call.
+    const markIfIgnored = (isDirectory: boolean) =>
+      markAgainst?.ignores(childRel, isDirectory) ? { ignored: true as const } : {};
+
     if (entry.isDirectory()) {
-      children.push({ name: entry.name, path: childRel, type: "directory" });
+      children.push({ name: entry.name, path: childRel, type: "directory", ...markIfIgnored(true) });
       continue;
     }
     // A file needs its size, and an entry whose kind readdir declined to
@@ -452,7 +494,8 @@ export function listDirectory(
     }
     if (childStat.isSymbolicLink()) continue;
     if (childStat.isDirectory()) {
-      children.push({ name: entry.name, path: childRel, type: "directory" });
+      if (rules.ignores(childRel, true)) continue;
+      children.push({ name: entry.name, path: childRel, type: "directory", ...markIfIgnored(true) });
       continue;
     }
     if (!childStat.isFile()) continue;
@@ -462,6 +505,7 @@ export function listDirectory(
       type: "file",
       size: childStat.size,
       extension: extname(entry.name) || undefined,
+      ...markIfIgnored(false),
     });
   }
 
@@ -499,18 +543,23 @@ export function allocateBudgets(pathCount: number, total: number): number[] {
  * Duplicates collapse before any of that: a path repeated n times would
  * otherwise multiply the whole batch's cost by n for an answer the caller
  * already holds. The result has one entry per DISTINCT path, not one per
- * element of `paths`. */
+ * element of `paths`.
+ *
+ * `markAgainst` passes straight through to every `listDirectory` call this
+ * makes — see that function's doc comment for what it does and when to omit
+ * it. */
 export function listDirectoryBatch(
   paths: string[],
   projectRoot: string,
   rules: IgnoreRules,
   totalBudget: number = MAX_BATCH_NODES,
+  markAgainst?: IgnoreRules,
 ): DirectoryListing[] {
   const unique = [...new Set(paths)];
   const n = unique.length;
   if (n === 0) return [];
   const budgets = allocateBudgets(n, totalBudget);
-  const results = unique.map((p, i) => listDirectory(p, projectRoot, rules, budgets[i]));
+  const results = unique.map((p, i) => listDirectory(p, projectRoot, rules, budgets[i], markAgainst));
 
   let surplus = 0;
   for (let i = 0; i < n; i++) {
@@ -525,7 +574,7 @@ export function listDirectoryBatch(
     if (headroom <= 0) continue;
     const grant = Math.min(surplus, headroom);
     const before = results[i].children.length;
-    results[i] = listDirectory(unique[i], projectRoot, rules, budgets[i] + grant);
+    results[i] = listDirectory(unique[i], projectRoot, rules, budgets[i] + grant, markAgainst);
     surplus -= results[i].children.length - before;
   }
 

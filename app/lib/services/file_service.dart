@@ -68,6 +68,34 @@ class FileService {
   /// guards [_snapshotSeq] against.
   final Map<String, ({int seq, int epoch})> _listingSeq = {};
 
+  /// The tree's own `includeIgnored` (D10: the tree defaults to showing
+  /// everything, unlike `file:find`'s @-mention path). Overridden by the
+  /// "Hide git-ignored files" app setting — see [setIncludeIgnoredInTree].
+  bool _includeIgnoredInTree = true;
+  bool get includeIgnoredInTree => _includeIgnoredInTree;
+
+  /// Applies the app-wide "Hide git-ignored files" setting to this checkout's
+  /// tree requests. Scoped to the tree ONLY (D10) — [find]'s @-mention path
+  /// always passes its own `includeIgnored: false` and never reads this.
+  ///
+  /// A changed setting invalidates every listing already applied, so this
+  /// re-lists the same way a manual refresh does ([requestFullTree]) rather
+  /// than the invalidated-push path ([_handleInvalidated]): that path claims
+  /// a `sinceSeq`, and toggling this doesn't move the bridge's watcher
+  /// revision, so a claimed pull would come back `file:tree:unchanged` and
+  /// silently no-op the toggle. [_forgetSeq] closes the same hole for the
+  /// pulls that come AFTER: the re-list below is fire-and-forget, and a root
+  /// request that never lands would otherwise leave the pre-toggle seq
+  /// claimable for the rest of the establishment — and the root is the one
+  /// directory the per-path children requests cannot repair.
+  void setIncludeIgnoredInTree(bool include) {
+    if (_disposed || _includeIgnoredInTree == include) return;
+    _includeIgnoredInTree = include;
+    _forgetSeq();
+    if (_state.root == null && !hasTreeInterest) return;
+    requestFullTree();
+  }
+
   void setTreeInterest(Object owner, bool interested) {
     if (_disposed) return;
     final hadInterest = hasTreeInterest;
@@ -266,14 +294,26 @@ class FileService {
     _snapshotEpoch = session.establishmentEpoch;
   }
 
+  /// Gives up the claim, for when the held tree stops being a correct answer
+  /// at that revision for a reason the bridge's counter cannot express — it
+  /// moves on filesystem change, not on a change to what this app ASKED for.
+  /// Without this, a later [_pullTree] would claim the seq, be answered
+  /// `file:tree:unchanged`, and confirm a tree built under the old request.
+  void _forgetSeq() {
+    _snapshotSeq = -1;
+    _snapshotEpoch = -1;
+  }
+
   Future<void> _requestTree({int? sinceSeq}) => session.sendForCheckout(
     checkoutId,
     createAbMessage('file:tree:root:request', {
       'sinceSeq': ?sinceSeq,
       // Never rely on the bridge's Zod default — parseMessageFast validates
       // only the message TYPE, so an omitted field arrives as `undefined`,
-      // never `true` (D10: the tree shows git-ignored files by default).
-      'includeIgnored': true,
+      // never the schema's default. Sent explicitly from
+      // [_includeIgnoredInTree], which itself defaults to true (D10: the
+      // tree shows git-ignored files by default).
+      'includeIgnored': _includeIgnoredInTree,
     }),
   );
 
@@ -353,7 +393,7 @@ class FileService {
       checkoutId,
       createAbMessage('file:tree:children:request', {
         'paths': paths,
-        'includeIgnored': true,
+        'includeIgnored': _includeIgnoredInTree,
       }),
     );
   }
@@ -725,8 +765,8 @@ class FileService {
     return root;
   }
 
-  /// Rebuilds [node] with the given fields overridden, everything else
-  /// (including [FileNode.ignored], which nothing here ever sets — wave 5)
+  /// Rebuilds [node] with the given fields overridden, everything else —
+  /// [FileNode.ignored] included, which only a bridge listing ever sets —
   /// carried over unchanged. The one node constructor every spine-copy site
   /// below goes through, so a field added to [FileNode] only has to be
   /// threaded here.

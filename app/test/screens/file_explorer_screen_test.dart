@@ -280,7 +280,12 @@ void main() {
   group('FileExplorerScreen filter box', () {
     /// Same readiness overrides as [buildTestWidget], but the transport is
     /// handed back so a test can read the outbound `file:find` and answer it.
-    Future<(FakeAgentTransport, Widget)> buildFilterWidget() async {
+    /// [includeIgnoredInTree] simulates the "Hide git-ignored files" setting
+    /// having already been applied to the tree's FileService (A5: the filter
+    /// reads the tree's effective setting, not a constant).
+    Future<(FakeAgentTransport, Widget)> buildFilterWidget({
+      bool includeIgnoredInTree = true,
+    }) async {
       useInMemoryPrefs();
       final t = FakeAgentTransport();
       final cache = await CachedSessionsStore.open();
@@ -291,6 +296,7 @@ void main() {
         cachedSessionsStore: cache,
         onClose: () async => t.dispose(),
       );
+      session.fileService.setIncludeIgnoredInTree(includeIgnoredInTree);
       const tree = FileNode(
         name: '',
         path: '',
@@ -348,6 +354,28 @@ void main() {
         // filter sends true. Nothing else pins this direction.
         expect(sent['includeIgnored'], isTrue);
         // Answered, or the PendingReply timeout outlives the widget tree.
+        t.emit('file:find-result', {
+          'projectId': 'test',
+          'requestId': sent['requestId'],
+          'entries': const [],
+          'truncated': false,
+          'engine': 'git-ls-files',
+        });
+        await tester.pumpAndSettle();
+      },
+    );
+
+    testWidgets(
+      'follows the tree when "Hide git-ignored files" is on (A5)',
+      (tester) async {
+        final (t, widget) = await buildFilterWidget(
+          includeIgnoredInTree: false,
+        );
+        await tester.pumpWidget(widget);
+        await tester.pump();
+
+        final sent = await typeFilter(tester, t, 'need');
+        expect(sent['includeIgnored'], isFalse);
         t.emit('file:find-result', {
           'projectId': 'test',
           'requestId': sent['requestId'],

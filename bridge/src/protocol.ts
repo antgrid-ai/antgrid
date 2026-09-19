@@ -82,11 +82,11 @@ const FileTreeNodeSchema: z.ZodType<{
     // The directory's listing was cut at the tree's node budget — see
     // MAX_TREE_NODES in file-tree.ts.
     truncated: z.literal(true).optional(),
-    // Reserved for the row-dimming wave: git ignores this entry but
-    // includeIgnored was true for the request that listed it. NO PRODUCER
-    // EMITS IT YET — listDirectory filters with one rule set and has no
-    // second, non-filtering verdict to report, so do not wire a UI to it
-    // before the wave that computes it.
+    // Git ignores this entry but includeIgnored was true for the request
+    // that listed it (D14) — set by listDirectory/listDirectoryBatch's
+    // markAgainst second verdict (file-tree.ts). The watcher's own ignore
+    // prune never consults this and never updates a marked entry live: an
+    // ignored row goes stale until the directory is re-listed.
     ignored: z.literal(true).optional(),
   }),
 );
@@ -2438,7 +2438,14 @@ const FileFindResultMessage = BaseMessage.extend({
   type: z.literal("file:find-result"),
   projectId: z.string(),
   requestId: z.string(),
-  entries: z.array(z.object({ path: z.string(), isDir: z.boolean() })),
+  entries: z.array(z.object({
+    path: z.string(),
+    isDir: z.boolean(),
+    // Same meaning as FileTreeNodeSchema's `ignored`, and set only when the
+    // request carried includeIgnored: true — the filter box replaces the tree
+    // on screen, so a path both surfaces can show must read the same in both.
+    ignored: z.literal(true).optional(),
+  })),
   /** The scan hit its cap — entries is the best-scoring prefix. */
   truncated: z.boolean(),
   /** `"none"` when no engine ran at all — a listing that was superseded,

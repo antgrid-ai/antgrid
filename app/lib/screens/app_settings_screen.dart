@@ -61,6 +61,7 @@ extension SettingsSectionUI on SettingsSection {
     SettingsSection.appearance => 'APPEARANCE',
     SettingsSection.uiSize => 'UI SIZE',
     SettingsSection.accessibility => 'ACCESSIBILITY',
+    SettingsSection.files => 'FILES',
     SettingsSection.privacy => 'PRIVACY',
     SettingsSection.help => 'HELP',
     SettingsSection.account => 'ACCOUNT',
@@ -188,7 +189,8 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
             // Not a ListView: scroll-to-section resolves its target through the
             // section's key context, and a lazy sliver has built no element for
             // a section below the fold — null exactly for the sections a link
-            // is most useful for. Nine cheap blocks are affordable eagerly.
+            // is most useful for. A handful of cheap blocks is affordable
+            // eagerly.
             child: SingleChildScrollView(
               padding: const EdgeInsets.all(AbTokens.space12),
               child: Column(
@@ -362,6 +364,24 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
                         enabled: settings.reduceMotion,
                         onTap: () =>
                             service.setReduceMotion(!settings.reduceMotion),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: AbTokens.space12),
+                  _Section(
+                    section: SettingsSection.files,
+                    body: [
+                      const SizedBox(height: AbTokens.space8),
+                      _ToggleRow(
+                        title: 'Hide git-ignored files',
+                        caption:
+                            'Applies to the file tree and its filter box — '
+                            '@-mentions always skip ignored files, whatever '
+                            'this is set to.',
+                        enabled: settings.hideGitIgnoredFiles,
+                        onTap: () => service.setHideGitIgnoredFiles(
+                          !settings.hideGitIgnoredFiles,
+                        ),
                       ),
                     ],
                   ),

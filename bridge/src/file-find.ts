@@ -26,6 +26,11 @@ export type FindEngineKind = "ripgrep" | "git-ls-files" | "walk" | "none";
 export interface FindEntry {
   path: string;
   isDir: boolean;
+  /** Same meaning as `FileTreeNode.ignored`: git excludes this path, and it is
+   *  in the answer only because `includeIgnored` was true. The filter box
+   *  replaces the tree on screen, so a result the tree would dim has to arrive
+   *  dimmable or the same path reads two different ways in two surfaces. */
+  ignored?: true;
 }
 
 export interface FindOptions {
@@ -185,7 +190,10 @@ class IgnorePrune {
       const dir = rel.slice(0, slash);
       let verdict = this.dirVerdict.get(dir);
       if (verdict === undefined) {
-        verdict = this.rules.ignores(dir);
+        // Asked as a directory, or a `build/`-style pattern answers false for
+        // every ancestor and the memo saves nothing on exactly the paths it
+        // exists to refuse in bulk.
+        verdict = this.rules.ignores(dir, true);
         this.dirVerdict.set(dir, verdict);
       }
       if (verdict) return false;
@@ -258,7 +266,7 @@ export async function walkFiles(root: string, rules: IgnoreRules, opts: WalkOpti
       if (scanned % yieldEvery === 0) await yieldFn();
       if (entry.isSymbolicLink()) continue;
       const rel = relDir === "" ? entry.name : `${relDir}/${entry.name}`;
-      if (rules.ignores(rel)) continue;
+      if (rules.ignores(rel, entry.isDirectory())) continue;
       if (entry.isDirectory()) {
         await visit(join(absDir, entry.name), rel);
       } else if (entry.isFile()) {
@@ -570,7 +578,20 @@ export class FileFinder {
     if (kinds !== "dirs") sources.push(listed.files);
     if (kinds !== "files") sources.push(listed.dirs);
     const entries = await this.match(sources, query, limit);
-    this.reply(projectId, requestId, entries, listed.truncated, listed.engine);
+    this.reply(projectId, requestId, this.marked(entries, includeIgnored), listed.truncated, listed.engine);
+  }
+
+  /** The second verdict, the same one `listDirectory`'s `markAgainst` gives a
+   *  tree listing. Only the matched prefix is judged — at most `limit` paths,
+   *  against a listing that can be tens of thousands — and only when the
+   *  caller asked to see ignored paths at all, since nothing ignored survived
+   *  the engine otherwise. */
+  private marked(entries: FindEntry[], includeIgnored: boolean): FindEntry[] {
+    if (!includeIgnored || entries.length === 0) return entries;
+    const gitRules = loadIgnoreRules(this.projectRoot, this.excludes, { gitignore: true });
+    return entries.map((e) =>
+      gitRules.ignores(e.path, e.isDir) ? { ...e, ignored: true as const } : e,
+    );
   }
 
   /** Chunked for the same reason the walk is (D13): this is the one piece of

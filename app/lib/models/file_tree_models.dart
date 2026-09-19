@@ -613,13 +613,28 @@ class FileFindEntry {
   final String path;
   final bool isDir;
 
-  const FileFindEntry({required this.path, required this.isDir});
+  /// Git excludes this path and the request asked to see ignored paths anyway
+  /// — the same mark [FileNode.ignored] carries, and it must render the same
+  /// way: the filter box REPLACES the tree on screen, so a path that reads as
+  /// project content in the results and as throwaway in the tree is the app
+  /// contradicting itself about one file.
+  final bool ignored;
+
+  const FileFindEntry({
+    required this.path,
+    required this.isDir,
+    this.ignored = false,
+  });
 
   static FileFindEntry? fromJson(Map<String, dynamic> json) {
     final path = json['path'];
     final isDir = json['isDir'];
     if (path is! String || isDir is! bool) return null;
-    return FileFindEntry(path: path, isDir: isDir);
+    return FileFindEntry(
+      path: path,
+      isDir: isDir,
+      ignored: json['ignored'] == true,
+    );
   }
 }
 

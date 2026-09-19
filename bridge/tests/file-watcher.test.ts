@@ -522,6 +522,28 @@ describe("FileWatcher pause", () => {
     watcher.stop();
   });
 
+  // D8/D14: the watcher's own ignore prune is unconditional and never
+  // consults includeIgnored — a git-ignored path produces no delta at all,
+  // not a delta the app then filters out. The refresh is collapse-then-expand
+  // (D2), never the watcher.
+  it("produces no delta for a git-ignored path", async () => {
+    writeFileSync(join(tempDir, ".gitignore"), "*.log\n");
+    const messages: AbMessage[] = [];
+    const watcher = new FileWatcher(
+      { id: "test", name: "Test", path: tempDir },
+      (msg) => messages.push(msg),
+      createConnState(),
+    );
+
+    writeFileSync(join(tempDir, "debug.log"), "noise");
+    watcher.handleNativeEvent("debug.log");
+    await new Promise((r) => setTimeout(r, 250));
+
+    expect(messages).toEqual([]);
+
+    watcher.stop();
+  });
+
   it("getTreeSnapshot returns current tree + fileSeq", () => {
     const connState = createConnState();
     const fw = new FileWatcher(

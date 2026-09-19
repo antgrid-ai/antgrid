@@ -984,6 +984,20 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     if (force) republishAb(stamped); else sendAb(stamped);
   }
 
+  /** [sendFromRuntime] for a reply that answers ONE client's request rather
+   *  than describing the project.
+   *
+   *  A directory listing is computed against the `includeIgnored` the
+   *  REQUESTER asked for, and that flag is a per-install setting, so a
+   *  broadcast reply rewrites every other client's tree with a picture built
+   *  to someone else's preference — the frame carries no requestId and no echo
+   *  of the flag, so nothing downstream can tell the two apart. Safe to target
+   *  only because listings are not a replayed type: the replay cache is keyed
+   *  by type, not by audience (see MessageBus.publishOnly). */
+  function sendFromRuntimeTo(runtime: CheckoutRuntime, msg: AbMessage, only: ClientKey): void {
+    sendAbTo({ ...msg, checkoutId: runtime.checkout.id } as AbMessage, only);
+  }
+
   // parseMessageFast validates the message TYPE alone, so file:tree:children:request's
   // Zod `.max(64)` never runs on the live path — see git-log.ts's MAX_LOG_PAGE
   // comment. Clamped here instead.
@@ -1852,7 +1866,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       const runtime = runtimeFor(msg);
       // Same wrong-checkout guard as file:tree:snapshot:request below:
       // `runtimeFor` falls back to mainRuntime for an id with no runtime yet,
-      // and sendFromRuntime restamps the reply with the RESOLVED runtime's
+      // and sendFromRuntimeTo restamps the reply with the RESOLVED runtime's
       // id — so a fallback answer is filtered out by the requester and
       // force-pushes main's picture to everyone else instead.
       if (runtime.checkout.id !== checkoutIdOf(msg)) return;
@@ -1860,10 +1874,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       const includeIgnored = msg.includeIgnored !== false; // default TRUE (D10)
       if (msg.type === "file:tree:root:request") {
         if (!fw) {
-          sendFromRuntime(runtime, createMessage("file:tree:children", {
+          sendFromRuntimeTo(runtime, createMessage("file:tree:children", {
             listings: [{ path: "", children: [], missing: true as const }],
             seq: 0,
-          }));
+          }), client);
           return;
         }
         // `> 0` is not redundant. Seq 0 is both "this watch root has never
@@ -1872,12 +1886,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // depth-1 readdir; answering `unchanged` would leave the app empty
         // until some unrelated edit happened to bump the seq.
         if (msg.sinceSeq !== undefined && msg.sinceSeq > 0 && msg.sinceSeq === fw.currentSeq()) {
-          sendFromRuntime(runtime, createMessage("file:tree:unchanged", { seq: msg.sinceSeq }));
+          sendFromRuntimeTo(runtime, createMessage("file:tree:unchanged", { seq: msg.sinceSeq }), client);
         } else {
-          sendFromRuntime(runtime, createMessage("file:tree:children", {
+          sendFromRuntimeTo(runtime, createMessage("file:tree:children", {
             listings: [fw.getRootListing(includeIgnored)],
             seq: fw.currentSeq(),
-          }));
+          }), client);
         }
         // Outside the branch above, same as file:tree:snapshot:request below:
         // an unchanged tree says nothing about the decorations drawn on it.
@@ -1903,16 +1917,16 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       const refused = distinct.slice(MAX_CHILDREN_REQUEST_PATHS)
         .map((p) => ({ path: p, children: [], missing: true as const }));
       if (!fw) {
-        sendFromRuntime(runtime, createMessage("file:tree:children", {
+        sendFromRuntimeTo(runtime, createMessage("file:tree:children", {
           listings: distinct.map((p) => ({ path: p, children: [], missing: true as const })),
           seq: 0,
-        }));
+        }), client);
         return;
       }
-      sendFromRuntime(runtime, createMessage("file:tree:children", {
+      sendFromRuntimeTo(runtime, createMessage("file:tree:children", {
         listings: [...fw.getChildListings(paths, includeIgnored), ...refused],
         seq: fw.currentSeq(),
-      }));
+      }), client);
       return;
     }
     // No reply and no ack (wire contract) — answered here, before `manager`,

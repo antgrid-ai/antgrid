@@ -102,6 +102,52 @@ describe("FileFinder", () => {
     expect(revealed.some((p) => p === ".git" || p.startsWith(".git/"))).toBe(false);
   });
 
+  // The filter box replaces the tree on screen, so a result the tree would dim
+  // has to arrive dimmable — see FindEntry.ignored.
+  test("includeIgnored:true marks the ignored entry and leaves a tracked one unmarked; includeIgnored:false marks nothing", async () => {
+    await finder.find({
+      projectId: "test-project",
+      requestId: "req-marked",
+      query: "",
+      includeIgnored: true,
+      kinds: "files",
+      limit: 100,
+    });
+    const marked = findResults(messages, "req-marked").entries;
+    expect(marked.find((e) => e.path === "ignored.txt")?.ignored).toBe(true);
+    expect(marked.find((e) => e.path === "tracked.txt")?.ignored).toBeUndefined();
+
+    await finder.find({
+      projectId: "test-project",
+      requestId: "req-unmarked",
+      query: "",
+      includeIgnored: false,
+      kinds: "files",
+      limit: 100,
+    });
+    // Nothing ignored survived the engine, so there is nothing to mark and no
+    // second rule set is built at all.
+    const unmarked = findResults(messages, "req-unmarked").entries;
+    expect(unmarked.every((e) => e.ignored === undefined)).toBe(true);
+  });
+
+  test("marks a directory result ignored by a trailing-slash pattern", async () => {
+    writeFileSync(join(TEST_DIR, ".gitignore"), "ignored.txt\nbuilt/\n");
+    mkdirSync(join(TEST_DIR, "built"), { recursive: true });
+    writeFileSync(join(TEST_DIR, "built", "out.js"), "x\n");
+
+    await finder.find({
+      projectId: "test-project",
+      requestId: "req-dir-mark",
+      query: "built",
+      includeIgnored: true,
+      kinds: "dirs",
+      limit: 100,
+    });
+    const entries = findResults(messages, "req-dir-mark").entries;
+    expect(entries.find((e) => e.path === "built")?.ignored).toBe(true);
+  });
+
   test("cache serves a stale list within the TTL even after seq moves, and re-lists once the TTL has elapsed", async () => {
     let seq = 1;
     let now = 0;

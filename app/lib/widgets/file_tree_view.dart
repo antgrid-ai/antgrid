@@ -771,6 +771,11 @@ class _FileTreeRowState extends State<_FileTreeRow> {
             fontWeight: isDirectory ? FontWeight.w500 : FontWeight.normal,
             color: widget.isSelected
                 ? context.antgrid.accent
+                // Present only because includeIgnored asked for it (D14) — a
+                // still-selected ignored row keeps reading as selected above
+                // this, so the dim only applies once selection is ruled out.
+                : widget.node.ignored
+                ? context.antgrid.textMuted
                 : isDirectory
                 ? context.antgrid.textSecondary
                 : context.antgrid.textPrimary,

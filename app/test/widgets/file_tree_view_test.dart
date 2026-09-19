@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/design/widgets/ab_empty_state.dart';
 import 'package:antgrid/design/widgets/ab_list_row.dart';
 import 'package:antgrid/design/widgets/ab_status_dot.dart';
@@ -10,6 +11,12 @@ import 'package:antgrid/models/file_tree_models.dart';
 import 'package:antgrid/widgets/file_tree_view.dart';
 
 import '../helpers/hover.dart';
+
+/// The rendered color of the row's name label — reads the actual [Text]
+/// style rather than inspecting [FileNode.ignored] directly, since the
+/// dimming this pins lives entirely in how the widget renders that flag.
+Color _labelColor(WidgetTester tester, String name) =>
+    tester.widget<Text>(find.text(name)).style!.color!;
 
 void main() {
   FileNode makeTree() {
@@ -956,6 +963,128 @@ void main() {
           expect(find.byTooltip('Mark Resolved'), findsNothing);
         },
       );
+    });
+  });
+
+  group('ignored rows', () {
+    testWidgets(
+      'an ignored node renders with the muted token and a normal sibling does not',
+      (tester) async {
+        const tree = FileNode(
+          name: 'project',
+          path: 'project',
+          type: FileNodeType.directory,
+          children: [
+            FileNode(
+              name: 'kept.dart',
+              path: 'project/kept.dart',
+              type: FileNodeType.file,
+            ),
+            FileNode(
+              name: 'build.log',
+              path: 'project/build.log',
+              // Present only because includeIgnored asked for it (D14).
+              ignored: true,
+              type: FileNodeType.file,
+            ),
+          ],
+        );
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: ThemeData(extensions: const [kDefaultPalette]),
+            home: Scaffold(
+              body: FileTreeView(
+                root: tree,
+                expandedPaths: const {},
+                onToggleExpanded: (_) {},
+                onFileSelected: (_) {},
+              ),
+            ),
+          ),
+        );
+
+        expect(_labelColor(tester, 'build.log'), kDefaultPalette.textMuted);
+        expect(
+          _labelColor(tester, 'kept.dart'),
+          isNot(kDefaultPalette.textMuted),
+        );
+      },
+    );
+
+    // A directory's UNDIMMED colour is textSecondary, not textPrimary, so the
+    // step this pins is secondary→muted. Asserted positively on both rows: an
+    // `isNot(textMuted)` on the sibling would hold even if the ignored arm
+    // were never reached for a directory at all.
+    testWidgets('an ignored directory dims from textSecondary to textMuted', (
+      tester,
+    ) async {
+      const tree = FileNode(
+        name: 'project',
+        path: 'project',
+        type: FileNodeType.directory,
+        children: [
+          FileNode(name: 'lib', path: 'project/lib', type: FileNodeType.directory),
+          FileNode(
+            name: 'build',
+            path: 'project/build',
+            ignored: true,
+            type: FileNodeType.directory,
+          ),
+        ],
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: ThemeData(extensions: const [kDefaultPalette]),
+          home: Scaffold(
+            body: FileTreeView(
+              root: tree,
+              expandedPaths: const {},
+              onToggleExpanded: (_) {},
+              onFileSelected: (_) {},
+            ),
+          ),
+        ),
+      );
+
+      expect(_labelColor(tester, 'build'), kDefaultPalette.textMuted);
+      expect(_labelColor(tester, 'lib'), kDefaultPalette.textSecondary);
+    });
+
+    // Selection outranks the dim. Swapping the two arms of the ternary leaves
+    // every other assertion in this group green while a selected ignored row
+    // silently stops reading as selected.
+    testWidgets('a selected ignored row still reads as selected', (
+      tester,
+    ) async {
+      const tree = FileNode(
+        name: 'project',
+        path: 'project',
+        type: FileNodeType.directory,
+        children: [
+          FileNode(
+            name: 'build.log',
+            path: 'project/build.log',
+            ignored: true,
+            type: FileNodeType.file,
+          ),
+        ],
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: ThemeData(extensions: const [kDefaultPalette]),
+          home: Scaffold(
+            body: FileTreeView(
+              root: tree,
+              expandedPaths: const {},
+              selectedFilePath: 'project/build.log',
+              onToggleExpanded: (_) {},
+              onFileSelected: (_) {},
+            ),
+          ),
+        ),
+      );
+
+      expect(_labelColor(tester, 'build.log'), kDefaultPalette.accent);
     });
   });
 

@@ -34,6 +34,7 @@ import 'recent_agents.dart';
 import 'sessions.dart' show activeSessionIdProvider, focusedCheckoutIdProvider;
 import '../models/file_tree_models.dart';
 import '../models/preview_models.dart';
+import '../services/app_settings_service.dart';
 import '../services/file_service.dart';
 import '../services/preview_service.dart';
 import '../services/terminal_service.dart';
@@ -650,6 +651,32 @@ final fileTreeStateProvider = StreamProvider<FileTreeState>((ref) {
         .watch(_prefsBindingProvider)
         .bind(service, ref.read(preferencesServiceProvider));
   }
+  // Scoped to the tree only (D10) — applying the "Hide git-ignored files"
+  // setting here, rather than at the settings screen, keeps it live across a
+  // focus switch: this provider re-resolves the focused FileService, so the
+  // override reaches whichever checkout is on screen without a listener of
+  // its own.
+  //
+  // The catch covers the READ alone. appSettingsServiceProvider throws until
+  // main.dart overrides it with a prefs-seeded instance (see its doc), and a
+  // narrow test ProviderScope that wires only the file tree carries no such
+  // override — this provider was reachable without one before this binding
+  // existed, and a test scope exercising the tree alone must keep getting the
+  // tree's own default (D10: show everything) rather than that unrelated
+  // provider's error. Applying it sits OUTSIDE, because
+  // setIncludeIgnoredInTree is not a pure setter: it re-lists the tree, and a
+  // throw from there swallowed here would leave the flag changed, the listings
+  // cleared and nothing re-requested — indistinguishable from the missing
+  // override this catch is for.
+  var hideIgnored = false;
+  try {
+    hideIgnored = ref.watch(
+      appSettingsServiceProvider.select((s) => s.hideGitIgnoredFiles),
+    );
+  } catch (_) {
+    // No settings service in scope: keep the tree's own default.
+  }
+  service.setIncludeIgnoredInTree(!hideIgnored);
   return seededStream(() => service.currentState, service.stateStream);
   // retry: a tree-load error must surface to the screen's error state, not spin
   // in Riverpod 3's default retry loop (which would leave the UI on "loading").

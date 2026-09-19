@@ -329,16 +329,34 @@ export class FileWatcher {
     return this.igShowAll;
   }
 
-  /** Depth-1 listing of the checkout root, for `file:tree:root:request`. */
+  /** Depth-1 listing of the checkout root, for `file:tree:root:request`.
+   *
+   *  `includeIgnored` selects the show-all rules AND, in the same branch,
+   *  supplies `this.ig` (the git-respecting rules) as the second verdict
+   *  that marks each entry `ignored: true`. The `false` path passes no
+   *  second rule set — nothing ignored can appear there, so nothing needs
+   *  checking. */
   getRootListing(includeIgnored: boolean): DirectoryListing {
-    return listDirectory("", this.projectRoot, this.ignoreRulesFor(includeIgnored));
+    return listDirectory(
+      "",
+      this.projectRoot,
+      this.ignoreRulesFor(includeIgnored),
+      undefined,
+      includeIgnored ? this.ig : undefined,
+    );
   }
 
   /** Depth-1 listings for a batch of paths, for `file:tree:children:request`.
    *  Fair-share budget allocation across the batch is `listDirectoryBatch`'s
-   *  job — see file-tree.ts. */
+   *  job — see file-tree.ts. Same `ignored`-marking rule as [getRootListing]. */
   getChildListings(paths: string[], includeIgnored: boolean): DirectoryListing[] {
-    return listDirectoryBatch(paths, this.projectRoot, this.ignoreRulesFor(includeIgnored));
+    return listDirectoryBatch(
+      paths,
+      this.projectRoot,
+      this.ignoreRulesFor(includeIgnored),
+      undefined,
+      includeIgnored ? this.ig : undefined,
+    );
   }
 
   startWatching(): void {

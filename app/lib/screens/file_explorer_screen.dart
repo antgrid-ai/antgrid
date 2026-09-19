@@ -55,9 +55,11 @@ class _FileExplorerScreenState extends ConsumerState<FileExplorerScreen> {
 
   bool _searchOpen = false;
 
-  // The tree's name filter (D-A1: a real filter box, backed by `file:find`
-  // with includeIgnored: true — must agree with the tree's own show-all
-  // default). Null/empty means "browsing normally"; anything else swaps the
+  // The tree's name filter (D-A1: a real filter box, backed by `file:find`,
+  // reading the tree's OWN includeIgnored setting rather than a constant —
+  // A5's amendment — because it filters the tree and must keep agreeing with
+  // what the tree shows even after the "Hide git-ignored files" override
+  // flips it. Null/empty means "browsing normally"; anything else swaps the
   // tree for a flat, bridge-ranked results list. Lives here rather than in
   // [_FileExplorerBody] because that widget is stateless (a plain
   // [ConsumerWidget]) and a debounced async search needs somewhere to keep
@@ -103,7 +105,13 @@ class _FileExplorerScreenState extends ConsumerState<FileExplorerScreen> {
       }
       FileFindResultMessage result;
       try {
-        result = await fileService.find(query, includeIgnored: true);
+        // Tracks the tree's effective setting (A5) — unlike the @-mention
+        // path (agent_transcript_view.dart), which always passes false and
+        // is deliberately not downstream of this toggle (D10).
+        result = await fileService.find(
+          query,
+          includeIgnored: fileService.includeIgnoredInTree,
+        );
       } on FileFindSuperseded {
         // NOT always a keystroke of our own: the @-mention panel resolves the
         // same FileService, [FileService.find] keeps one wanted call for the
@@ -141,6 +149,13 @@ class _FileExplorerScreenState extends ConsumerState<FileExplorerScreen> {
   @override
   Widget build(BuildContext context) {
     final fileService = serviceWhenReady(ref, fileServiceProvider);
+    // Read BEFORE the lease below, and that order is load-bearing: taking the
+    // lease registers the tree hydrator, which on an established transport
+    // fires its root request immediately. `fileTreeStateProvider`'s build is
+    // what applies the "Hide git-ignored files" setting to this FileService,
+    // so a lease taken first sends that request under the wrong flag and the
+    // setting then re-lists the whole tree to correct it.
+    final treeStateAsync = ref.watch(fileTreeStateProvider);
     _treeInterest.update(
       fileService,
       ref.watch(visibleWorkspaceViewProvider) == WorkspaceView.files &&
@@ -161,7 +176,6 @@ class _FileExplorerScreenState extends ConsumerState<FileExplorerScreen> {
     if (fileService == null) {
       return const AbLoading(message: 'loading files...');
     }
-    final treeStateAsync = ref.watch(fileTreeStateProvider);
     // watch, not the `ref.read` in [_onScreen]: the registered `active` flags
     // below have to be recomputed when this tab goes on or off screen.
     final onScreen =
@@ -560,7 +574,12 @@ class _FileFilterResults extends StatelessWidget {
             entry.path,
             style: AbTokens.monoStyle(
               fontSize: AbTokens.fontSm,
-              color: context.antgrid.textPrimary,
+              // Same token the tree dims an ignored row with — this list
+              // stands in for the tree while a query is active, so the two
+              // must agree about what a path is.
+              color: entry.ignored
+                  ? context.antgrid.textMuted
+                  : context.antgrid.textPrimary,
             ),
             overflow: TextOverflow.ellipsis,
           ),
