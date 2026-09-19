@@ -6,8 +6,8 @@ import { createRelayPromotion, type RelayPromotionController, type RelayPromotio
 import type { AttachStreamOpts, PeerSessionView, StreamHandle } from "./stream-mux";
 import { createMessage, type AbMessage, type SessionEntry, type WorkStatus } from "./protocol";
 import type { DeleteSessionOptions } from "./session-manager";
-import { answerRequest, clientFocusState, clientGone, closeTurn, initialWorkStatus, isStaleIdleNudge, reduceWorkStatus, sessionFocus, turnOpenFor, turnStart, UNATTRIBUTED_TURN, userReply, type WorkStatusState } from "./work-status";
-import { SessionBusDeliveryQueue, closedTurns, type QueuedLine } from "./session-bus/delivery-queue";
+import { answerRequest, becameDeliverable, busDeliverable, clientFocusState, clientGone, closeTurn, initialWorkStatus, isStaleIdleNudge, openedTurns, reduceWorkStatus, sessionFocus, turnStart, UNATTRIBUTED_TURN, userReply, type WorkStatusState } from "./work-status";
+import { SessionBusDeliveryQueue, type QueuedLine } from "./session-bus/delivery-queue";
 import { logger } from "./logger";
 const log = logger.child({ component: "project-core" });
 import { createPushDispatcher } from "./push/push-dispatcher";
@@ -240,11 +240,16 @@ export class ProjectCore {
       || next.runningCount !== this._work.runningCount
       || perSessionChanged;
     // Computed against the OLD state and drained against the new one: the
-    // closing edge is the whole delivery boundary, and reading it after the
+    // releasing edge is the whole delivery boundary, and reading it after the
     // swap would compare the new state with itself.
-    const closed = closedTurns(this._work, next);
+    const released = becameDeliverable(this._work, next);
+    // The other half of the same edge pair: a line already submitted is retired
+    // by the turn it opened, which is the only evidence this bridge gets that
+    // the agent read it rather than left it sitting in its composer.
+    const opened = openedTurns(this._work, next);
     this._work = next;
-    for (const sessionId of closed) {
+    for (const sessionId of opened) this.deliveries?.confirm(sessionId);
+    for (const sessionId of released) {
       // An agent with no per-session turn reporting closes the UNATTRIBUTED_TURN
       // key instead of its own id (see work-status.ts), and that close is a real
       // boundary for every session in the project — the same reading `statusFor`
@@ -446,11 +451,11 @@ export class ProjectCore {
     this.deliveries = new SessionBusDeliveryQueue({
       abDir: core.abDir,
       projectId: core.projectId,
-      // The reduction's own predicate, not a second reading of the same set: an
+      // The reduction's own predicate, not a second reading of its inputs: an
       // agent that cannot attribute its turn-starts records them under
       // UNATTRIBUTED_TURN, and a delivery submitted against one lands mid-turn.
-      isTurnOpen: (sessionId) => turnOpenFor(this._work.activeTurns, sessionId),
-      inject: (line) => this.core?.injectBusLine(line.sessionId, line.text) ?? false,
+      canDeliver: (sessionId) => busDeliverable(this._work, sessionId),
+      inject: (line) => this.core?.injectBusLine(line.sessionId, line.text) ?? "refused",
     });
     const bus = new MessageBus();
     this.bus = bus;
@@ -825,7 +830,12 @@ export class ProjectCore {
     // detaching — deliver() would otherwise hand a frame to a torn-down stream.
     try { this.relayPushUnsub?.(); } catch {}
     this.relayPushUnsub = null;
+    // After the core, not before: the bus subscriber stays attached for the
+    // bus's lifetime, and the `session:updated` frames a shutdown emits as
+    // sessions stop reach `drainAll` — which arms a fresh timer on a queue that
+    // has just been disposed.
     try { await this.core?.shutdown(); } catch {}
+    try { this.deliveries?.dispose(); } catch {}
     try { await this.listener?.stop(); } catch {}
     try { this.streamHandle?.detach(); } catch {}
     // AFTER the detach, the order promote().stop() keeps: the core latches

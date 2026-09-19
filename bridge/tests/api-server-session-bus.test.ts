@@ -12,7 +12,12 @@ import { createSessionBusApi, type SessionMembership } from "../src/session-bus/
 import { SessionDirectory, type SessionDirectoryRow } from "../src/session-bus/directory";
 import { SessionBusCoordinator, type SessionBusEvent } from "../src/session-bus/coordinator";
 import { pairKey, upsertPairBudget, type PairBudgetState } from "../src/session-bus/pair-budget";
-import { MAX_NOTIFIES_PER_PAIR_HOUR, NO_PROGRESS_EXCHANGES } from "../src/session-bus/constants";
+import {
+  BUS_ROUTE_TTL_MS,
+  MAILBOX_TTL_MS,
+  MAX_NOTIFIES_PER_PAIR_HOUR,
+  NO_PROGRESS_EXCHANGES,
+} from "../src/session-bus/constants";
 import { busDbPath } from "../src/session-bus/bus-db";
 import { Database } from "bun:sqlite";
 import type { AbConfig } from "../src/config";
@@ -31,6 +36,9 @@ afterAll(() => {
 
 const LEAD_SESSION = "lead-1";
 const PEER_SESSION = "peer-1";
+/** A second session on the LEAD machine, so a listing narrowed to "this
+ *  machine" has a local row to keep that is not the caller itself. */
+const LEAD_SIBLING = "lead-2";
 
 /** One machine's half of the pair: its own coordinator, the API over it, and a
  *  loopback API server. Nothing here stands up a relay — a frame is handed
@@ -39,7 +47,17 @@ const PEER_SESSION = "peer-1";
 interface Machine {
   coordinator: SessionBusCoordinator;
   abDir: string;
+  projectId: string;
+  /** The relay slot the OTHER end knows this machine's carrier by — what its
+   *  coordinator records as the way home for a context this machine opened.
+   *  Production learns it from the frame's peer id; here it is a constant,
+   *  because what the route has to be is stable and resolvable, not real. */
+  carrierPeerId: string;
   port: number;
+  /** Flip this machine's remote-access switch mid-test. Live rather than
+   *  construction-time because the state that matters is an exchange opened
+   *  while it was on and answered after it went off. */
+  setRemoteAccess(on: boolean): void;
   stop(): void;
   outbound: AbMessage[];
   /** The routing decision behind each frame this machine tried to send. The
@@ -71,6 +89,10 @@ function machine(opts: {
   projectId: string;
   sessionIds: string[];
   carrierPresent?: boolean;
+  /** This machine's remote-access switch. Defaults ON, which is also what a
+   *  core that has never faced a relay gets in production; the cross-machine
+   *  gate is exercised by the cases that pass it false. */
+  remoteAccess?: boolean;
   /** False makes every send fail, which is what a machine with no carrier route
    *  looks like from inside the coordinator. */
   deliverable?: boolean;
@@ -85,10 +107,13 @@ function machine(opts: {
   /** The host's per-pair ceilings (§7.4). Absent is an unbudgeted bus, which is
    *  what a core with no host above it is. */
   pairBudget?: BudgetStore;
-  /** The other machine's coordinator, handed every frame this one sends — the
-   *  whole of what a carrier does. Absent records the frame and delivers it
-   *  nowhere, which is the shape the artifact cases rely on. */
-  link?: () => SessionBusCoordinator | null;
+  /** The other machine, handed every frame this one sends — the whole of what a
+   *  carrier does. Absent records the frame and delivers it nowhere, which is
+   *  the shape the artifact cases rely on. */
+  link?: () => Machine | null;
+  /** Injectable clock for the coordinator, so a case can age a carrier route
+   *  past `BUS_ROUTE_TTL_MS` without waiting six hours. */
+  now?: () => number;
   /** §7.3's same-machine wake hook. Absent is a host with no wake wired at
    *  all, which is every other case in this file — a stopped target is then
    *  refused NOT_RUNNING unconditionally, exactly as before the hook existed. */
@@ -96,6 +121,7 @@ function machine(opts: {
 }): Machine {
   const outbound: AbMessage[] = [];
   const routes: { contextId: string; role: string }[] = [];
+  const carrierPeerId = `app-${opts.machineId}`;
   const coordinator = new SessionBusCoordinator({
     abDir: opts.abDir,
     projectIdFor: () => opts.projectId,
@@ -109,17 +135,38 @@ function machine(opts: {
     send: (frame, ctx) => {
       routes.push({ contextId: ctx.contextId, role: ctx.role });
       if (opts.deliverable === false) return false;
+      // The peer-role lookup production does (`host-server.ts`'s own `send`):
+      // a frame on a context this session did not open leaves on the carrier
+      // that brought that context in, and refuses when none is live. A harness
+      // that skipped it could never show a reply failing for want of a route,
+      // which is exactly what a lapsed route costs.
+      if (ctx.role === "peer" && !coordinator.routeFor(ctx.contextId)) return false;
       outbound.push(frame);
-      // Handed on inside this very call, exactly as a local delivery and a live
-      // carrier both are: the coordinator writes its log before it sends for
-      // that reason, and a receipt arriving back here has to find the entry.
-      opts.link?.()?.handleInbound(frame);
+      const far = opts.link?.();
+      if (far) {
+        // The hook production passes (`agent-core.ts`'s relay inbound), and
+        // without it the receiving coordinator learns no way home at all: every
+        // send it then makes resolves as a lead, and nothing here ever drives a
+        // peer-role send through a route lookup.
+        //
+        // Handed on inside this very call, exactly as a local delivery and a
+        // live carrier both are: the coordinator writes its log before it sends
+        // for that reason, and a receipt arriving back here has to find the
+        // entry.
+        far.coordinator.handleInbound(frame, () =>
+          far.coordinator.noteRoute(ctx.contextId, carrierPeerId, far.projectId),
+        );
+      }
       return true;
     },
     ...(opts.pairBudget ? { pairBudget: opts.pairBudget } : {}),
+    ...(opts.now ? { now: opts.now } : {}),
   });
   const busEvents: SessionBusEvent[] = [];
   coordinator.setListener(opts.projectId, (event) => busEvents.push(event));
+  // Mutable so a case can flip the switch mid-exchange, which is the only way
+  // to reach the state that matters: a thread opened while it was on.
+  let remoteAccess = opts.remoteAccess !== false;
   const api = createSessionBusApi({
     coordinator,
     abDir: opts.abDir,
@@ -128,8 +175,10 @@ function machine(opts: {
     machineId: () => (opts.localMode ? null : opts.machineId),
     membership: membershipOf,
     carrierPresent: () => opts.carrierPresent !== false,
+    remoteAccessEnabled: () => remoteAccess,
     ...(opts.directory ? { directory: opts.directory } : {}),
     ...(opts.startSession ? { startSession: opts.startSession } : {}),
+    ...(opts.now ? { now: opts.now } : {}),
   });
   const ctx: AgentContext = {
     manager: () => null,
@@ -142,11 +191,16 @@ function machine(opts: {
   return {
     coordinator,
     abDir: opts.abDir,
+    projectId: opts.projectId,
+    carrierPeerId,
     port: server.port,
     outbound,
     routes,
     busEvents,
     budget: opts.pairBudget ?? null,
+    setRemoteAccess(on: boolean) {
+      remoteAccess = on;
+    },
     stop() {
       coordinator.stop();
       server.stop();
@@ -223,15 +277,32 @@ function mirroredRow(machineId: string, projectId: string, sessionId: string): S
 
 /** A directory whose only peers are mirrored ones. `rows` is handed back by
  *  reference on every read, so a case that needs the target to stop writes to
- *  the row it was given — which is what the peer's own next push would do. */
-function mirrorDirectory(machineId: string, projectId: string, rows: SessionDirectoryRow[]): SessionDirectory {
+ *  the row it was given — which is what the peer's own next push would do.
+ *
+ *  `keyless` is a project with no git remote, which `rowFor` answers null for
+ *  on its first line — before it has looked at the address at all. */
+function mirrorDirectory(
+  machineId: string,
+  projectId: string,
+  rows: SessionDirectoryRow[],
+  opts: { keyless?: boolean; localSessions?: string[] } = {},
+): SessionDirectory {
   return new SessionDirectory({
     repoKeys: {
-      keyFor: (id) => (id === projectId ? REPO_KEY : null),
+      keyFor: (id) => (!opts.keyless && id === projectId ? REPO_KEY : null),
       probed: () => true,
       projectsSharing: (key) => (key === REPO_KEY ? [projectId] : []),
     },
-    sessionIndex: { *sessionsIn() {} },
+    // A real directory answers with this machine's OWN rows beside the mirror's,
+    // so a double that yields none cannot see a filter drop them.
+    sessionIndex: {
+      *sessionsIn(id) {
+        if (id !== projectId) return;
+        for (const s of opts.localSessions ?? []) {
+          yield { entry: { id: s, name: s, running: true, archived: false, deleting: false, lastUsedAt: 1, tool: "claude-code" } as any };
+        }
+      },
+    },
     projectPath: () => "/repo",
     machineId: () => machineId,
     readBranch: async () => "main",
@@ -258,7 +329,21 @@ const TO_LEAD = { machineId: "m1", projectId: "p1", sessionId: LEAD_SESSION };
  *  here is the one an agent would read, and a success went out and came back
  *  acked. {@link pair} stays as it was: no directory, no link, no budget, which
  *  is what the artifact and `sessions` cases above are about. */
-function linkedPair(opts: { carrier?: boolean; leadStartSession?: (id: string) => boolean } = {}): {
+function linkedPair(
+  opts: {
+    carrier?: boolean;
+    /** The LEAD's own remote-access switch. Off makes it a machine that takes
+     *  no part in cross-machine messaging in either direction. */
+    leadRemoteAccess?: boolean;
+    leadStartSession?: (id: string) => boolean;
+    /** Both coordinators' clock, so a case can age a route out from under a
+     *  thread that is still live. */
+    now?: () => number;
+    /** The LEAD's own project has no git remote — a fact about the caller, not
+     *  about anything it addresses. */
+    keylessLead?: boolean;
+  } = {},
+): {
   lead: Machine;
   peer: Machine;
   peerRow: SessionDirectoryRow;
@@ -268,34 +353,94 @@ function linkedPair(opts: { carrier?: boolean; leadStartSession?: (id: string) =
    *  app is what pushes the mirror, so a seeded row beside an absent carrier
    *  outlives it only until the mirror ages out. */
   leadMirror: SessionDirectoryRow[];
+  /** The PEER's mirror, by reference and for the same reason — it is what has
+   *  to be empty for a machine whose remote access is off: it publishes no row
+   *  anywhere, so nobody holding a thread with it can resolve one. */
+  peerMirror: SessionDirectoryRow[];
   stop(): void;
 } {
   const peerRow = mirroredRow("m2", "p2", PEER_SESSION);
   const leadRow = mirroredRow("m1", "p1", LEAD_SESSION);
   const leadMirror = [peerRow];
+  const peerMirror = [leadRow];
   let peerMachine: Machine | undefined;
   const lead = machine({
     abDir: tempDir("bus-lead-"),
     machineId: "m1",
     projectId: "p1",
     sessionIds: [LEAD_SESSION],
-    directory: mirrorDirectory("m1", "p1", leadMirror),
+    directory: mirrorDirectory("m1", "p1", leadMirror, {
+      keyless: opts.keylessLead === true,
+      // A sibling beside the caller: `list` excludes whoever is asking, so a
+      // filter that dropped every local row would be invisible without one.
+      localSessions: [LEAD_SESSION, LEAD_SIBLING],
+    }),
     pairBudget: budgetStore(),
     carrierPresent: opts.carrier !== false,
-    link: () => peerMachine?.coordinator ?? null,
+    remoteAccess: opts.leadRemoteAccess !== false,
+    link: () => peerMachine ?? null,
     ...(opts.leadStartSession ? { startSession: opts.leadStartSession } : {}),
+    ...(opts.now ? { now: opts.now } : {}),
   });
   const peer = machine({
     abDir: tempDir("bus-peer-"),
     machineId: "m2",
     projectId: "p2",
     sessionIds: [PEER_SESSION],
-    directory: mirrorDirectory("m2", "p2", [leadRow]),
+    directory: mirrorDirectory("m2", "p2", peerMirror),
     pairBudget: budgetStore(),
-    link: () => lead.coordinator,
+    link: () => lead,
+    ...(opts.now ? { now: opts.now } : {}),
   });
   peerMachine = peer;
-  return { lead, peer, peerRow, leadRow, leadMirror, stop: () => { lead.stop(); peer.stop(); } };
+  return { lead, peer, peerRow, leadRow, leadMirror, peerMirror, stop: () => { lead.stop(); peer.stop(); } };
+}
+
+/** One inbound notify, hand-built. Nothing Zod-validates an inbound bus frame —
+ *  `parseMessageFast` admits it on the type tag alone — so this is exactly the
+ *  shape a carrier hands `handleInbound`, and building it here is how a case
+ *  reaches a thread row and a route without a second machine behind them. */
+function inboundNotify(opts: {
+  from: { machineId: string; projectId: string; sessionId: string };
+  to: { machineId: string; projectId: string; sessionId: string };
+  threadId: string;
+  contextId: string;
+}): AbMessage {
+  return {
+    type: "session-bus:notify",
+    from: opts.from,
+    to: opts.to,
+    contextId: opts.contextId,
+    threadId: opts.threadId,
+    envelope: {
+      messageId: `mid-${opts.threadId}`,
+      threadId: opts.threadId,
+      contextId: opts.contextId,
+      parts: [{ kind: "text", text: "one" }],
+      metadata: { peer: opts.from, summary: "asking", timestamp: 1 },
+    },
+  } as unknown as AbMessage;
+}
+
+/** One inbound receipt, hand-built for the same reason {@link inboundNotify} is.
+ *  `ok` is omitted rather than defaulted when a case wants an older bridge's
+ *  body: the field is never Zod-validated on the way in, so "absent" is a shape
+ *  that really reaches `handleInbound`. */
+function inboundAck(opts: {
+  from: { machineId: string; projectId: string; sessionId: string };
+  to: { machineId: string; projectId: string; sessionId: string };
+  contextId: string;
+  messageId: string;
+  ok?: boolean;
+}): AbMessage {
+  return {
+    type: "session-bus:ack",
+    from: opts.from,
+    to: opts.to,
+    contextId: opts.contextId,
+    messageId: opts.messageId,
+    ...(opts.ok === undefined ? {} : { ok: opts.ok }),
+  } as unknown as AbMessage;
 }
 
 /** The pair key `pair-budget.ts` files a lead↔peer record under. Machine and
@@ -573,6 +718,25 @@ describe("GET /session-bus/sessions", () => {
       expect(res.body.reach).toEqual({ scope: "machine", why: "no-carrier" });
     } finally { m.stop(); }
   });
+
+  test("with remote access off the listing keeps only this machine and says which fact narrowed it", async () => {
+    // The blaming matters as much as the narrowing: `no-carrier` would send
+    // someone after a desktop app, and reattaching it would not widen this
+    // listing by one row.
+    const { lead, stop } = linkedPair({ leadRemoteAccess: false });
+    try {
+      const res = await get(lead, "sessions", LEAD_SESSION);
+      expect(res.status).toBe(200);
+      expect(res.body.reach).toEqual({ scope: "machine", why: "remote-access-off" });
+      // Narrowed, NOT emptied — the failure mode this guards is a filter that
+      // drops this machine's own rows along with the peer's, which would read
+      // as "you are alone here" on a machine full of sessions.
+      expect(res.body.sessions.some((r: SessionDirectoryRow) => r.sessionId === LEAD_SIBLING)).toBe(true);
+      expect(res.body.sessions.every((r: SessionDirectoryRow) => r.machineId === "m1")).toBe(true);
+      // The peer the mirror still holds a row for is exactly what was dropped.
+      expect(res.body.sessions.some((r: SessionDirectoryRow) => r.sessionId === PEER_SESSION)).toBe(false);
+    } finally { stop(); }
+  });
 });
 
 // The one read that answers about the CALLER. Everything else on the bus names
@@ -668,7 +832,7 @@ describe("the send verbs over the loopback route", () => {
     } finally { stop(); }
   });
 
-  test("a target the directory does not offer is UNKNOWN_PEER, and no send is attempted", async () => {
+  test("an off-machine target the directory does not offer is PEER_UNREACHABLE, and no send is attempted", async () => {
     const { lead, stop } = linkedPair();
     try {
       // The control: this machine can deliver, so the refusal below is the
@@ -681,8 +845,12 @@ describe("the send verbs over the loopback route", () => {
         to: { machineId: "m2", projectId: "p2", sessionId: "no-such-session" },
         summary: "s", text: "t",
       });
-      expect(res.status).toBe(404);
-      expect(res.body.code).toBe("UNKNOWN_PEER");
+      expect(res.status).toBe(503);
+      expect(res.body.code).toBe("PEER_UNREACHABLE");
+      // The status alone says "try again", and this one never resolves by
+      // trying again: the mirror is the only thing that could offer this row,
+      // and an address that was never in it will not appear in it.
+      expect(res.body.error).toContain("retrying");
       expect(lead.routes).toHaveLength(attempted);
     } finally { stop(); }
   });
@@ -843,11 +1011,7 @@ describe("the send verbs over the loopback route", () => {
     } finally { stop(); }
   });
 
-  test("an off-machine send leaves without consulting this machine's own remote access (E15)", async () => {
-    // The api takes no remote-access dep at all any more: the switch governs
-    // what may be done TO a machine, and a send is refused by the TARGET's
-    // switch, on the target. The rung underneath it — the carrier — is what
-    // still refuses here, and has its own case next.
+  test("an off-machine send leaves while this machine's remote access is on", async () => {
     const { lead, peer, stop } = linkedPair();
     try {
       const res = await post(lead, "post", LEAD_SESSION, { to: TO_PEER, summary: "s", text: "t" });
@@ -857,6 +1021,66 @@ describe("the send verbs over the loopback route", () => {
       const inbox = await get(peer, "inbox", PEER_SESSION);
       expect(inbox.body.posts).toHaveLength(1);
     } finally { stop(); }
+  });
+
+  test("an off-machine send is refused while this machine's remote access is off", async () => {
+    // Reverses E15, which read the switch as inbound-only and shipped a machine
+    // that could speak and could not be answered: the peer's reply dies at our
+    // own `remoteFrameAllowed`, so the leg that still left was the useless one.
+    const { lead, peer, stop } = linkedPair({ leadRemoteAccess: false });
+    try {
+      const res = await post(lead, "post", LEAD_SESSION, { to: TO_PEER, summary: "s", text: "t" });
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe("REMOTE_ACCESS_OFF");
+      // Nothing left the machine, and nothing was held pretending it would.
+      expect(lead.outbound).toHaveLength(0);
+      expect(res.body.ok).toBeUndefined();
+      expect(res.body.held).toBeUndefined();
+      const inbox = await get(peer, "inbox", PEER_SESSION);
+      expect(inbox.body.posts).toHaveLength(0);
+    } finally { stop(); }
+  });
+
+  test("with remote access off the answer names the switch, not the missing app", async () => {
+    // Both rungs fail at once and the switch has to win: a user sent after a
+    // detached desktop app would be chasing the wrong thing, and reattaching it
+    // would not make the send leave.
+    const { lead, stop } = linkedPair({ leadRemoteAccess: false, carrier: false });
+    try {
+      const res = await post(lead, "post", LEAD_SESSION, { to: TO_PEER, summary: "s", text: "t" });
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe("REMOTE_ACCESS_OFF");
+    } finally { stop(); }
+  });
+
+  test("a same-machine send is untouched by the switch", async () => {
+    // The scope that makes the gate defensible: "remote access off" means this
+    // machine talks only to itself, not that its agents stop talking. A sibling
+    // session is reached without the relay, the carrier or the directory mirror
+    // being involved at all.
+    const target = { machineId: "m1", projectId: "p1", sessionId: "sibling-1" };
+    const siblingRow: SessionDirectoryRow = {
+      machineId: "m1", projectId: "p1", sessionId: "sibling-1",
+      title: "sibling", branch: "main", activity: "idle", lastActiveAt: 1, canReply: true,
+    };
+    const directory = {
+      probed: () => true,
+      repoKeyState: () => "keyed" as const,
+      rowFor: (_self: unknown, to: { sessionId: string }) => (to.sessionId === "sibling-1" ? siblingRow : null),
+    } as unknown as SessionDirectory;
+    const lead = machine({
+      abDir: tempDir("bus-same-machine-"),
+      machineId: "m1",
+      projectId: "p1",
+      sessionIds: [LEAD_SESSION, "sibling-1"],
+      directory,
+      remoteAccess: false,
+    });
+    try {
+      const res = await post(lead, "post", LEAD_SESSION, { to: target, summary: "s", text: "t" });
+      expect(res.status).toBe(200);
+      expect(res.body.sent).toBe(true);
+    } finally { lead.stop(); }
   });
 
   test("an off-machine target with no carrier is PEER_UNREACHABLE while a row is still mirrored", async () => {
@@ -1103,6 +1327,51 @@ describe("threads, replies and the mailbox over the loopback route", () => {
     } finally { stop(); }
   });
 
+  /** A machine whose frames leave and are answered by nobody, so the only receipt
+   *  an entry ever gets is the one a case hands it. */
+  function unlinkedLead(): Machine {
+    return machine({
+      abDir: tempDir("bus-ack-"),
+      machineId: "m1",
+      projectId: "p1",
+      sessionIds: [LEAD_SESSION],
+      directory: mirrorDirectory("m1", "p1", [mirroredRow("m2", "p2", PEER_SESSION)]),
+    });
+  }
+
+  test("a receipt that refuses the frame leaves the entry unacknowledged", async () => {
+    const m = unlinkedLead();
+    try {
+      const opened = await post(m, "post", LEAD_SESSION, { to: TO_PEER, summary: "asking", text: "one" });
+      expect(opened.status).toBe(200);
+      m.coordinator.handleInbound(inboundAck({
+        from: TO_PEER, to: TO_LEAD, contextId: LEAD_SESSION, messageId: opened.body.messageId, ok: false,
+      }));
+
+      const res = await get(m, `thread?threadId=${opened.body.threadId}`, LEAD_SESSION);
+      // The stamp attests to the peer bridge taking the frame, and this receipt
+      // says it would not, so a reader that saw one here would read a refusal as
+      // a success.
+      expect(res.body.entries[0].deliveredAt).toBeUndefined();
+    } finally { m.stop(); }
+  });
+
+  test("a receipt from a bridge whose body omits ok is still believed", async () => {
+    // The whole reason the branch above tests `=== false` rather than `!ok`:
+    // nothing Zod-validates an inbound bus frame, so an older peer's receipt
+    // arrives with no such field and must not be read as a refusal.
+    const m = unlinkedLead();
+    try {
+      const opened = await post(m, "post", LEAD_SESSION, { to: TO_PEER, summary: "asking", text: "one" });
+      m.coordinator.handleInbound(inboundAck({
+        from: TO_PEER, to: TO_LEAD, contextId: LEAD_SESSION, messageId: opened.body.messageId,
+      }));
+
+      const res = await get(m, `thread?threadId=${opened.body.threadId}`, LEAD_SESSION);
+      expect(typeof res.body.entries[0].deliveredAt).toBe("number");
+    } finally { m.stop(); }
+  });
+
   test("an unknown thread id is refused on the read, the same way it is on a send", async () => {
     const { lead, stop } = linkedPair();
     try {
@@ -1208,6 +1477,43 @@ describe("the send rungs in the state a machine is usually in", () => {
     } finally { m.stop(); }
   });
 
+  test("a same-machine session in an unrelated repository is UNKNOWN_PEER even on an open thread", async () => {
+    // The bound a threaded fallback must not widen. §8.2's cross-repo rule is
+    // enforced by `rowFor` and by nothing else on the send path, so the one
+    // case that could quietly lose it is a send holding everything the
+    // fallback asks for — a thread row, a live route, a frame that came back
+    // from that peer on the context — and aimed at a session on THIS machine.
+    // The fallback is scoped to off-machine targets
+    // precisely so the local bound survives; this is what proves it did.
+    const m = machine({
+      abDir: tempDir("bus-local-thread-scope-"),
+      machineId: "m1",
+      projectId: "p1",
+      sessionIds: [LEAD_SESSION],
+      directory: localDirectory("m1", {
+        p1: { key: REPO_KEY, sessions: [LEAD_SESSION] },
+        unrelated: { key: "github.com/other/thing", sessions: ["s-elsewhere"] },
+      }),
+    });
+    try {
+      const stranger = { machineId: "m1", projectId: "unrelated", sessionId: "s-elsewhere" };
+      // Both halves, honestly obtained: the frame clears the address check, so
+      // the fold mints the thread row and the hook notes the route, exactly as
+      // production would for a peer that reached this session.
+      m.coordinator.handleInbound(
+        inboundNotify({ from: stranger, to: { machineId: "m1", projectId: "p1", sessionId: LEAD_SESSION }, threadId: "t-open", contextId: "s-elsewhere" }),
+        () => m.coordinator.noteRoute("s-elsewhere", m.carrierPeerId, "p1"),
+      );
+      expect(m.coordinator.routeFor("s-elsewhere")).not.toBeNull();
+
+      const before = m.outbound.length;
+      const res = await post(m, "reply", LEAD_SESSION, { threadId: "t-open", summary: "s", text: "t" });
+      expect(res.status).toBe(404);
+      expect(res.body.code).toBe("UNKNOWN_PEER");
+      expect(m.outbound).toHaveLength(before);
+    } finally { m.stop(); }
+  });
+
   test("a missing carrier is PEER_UNREACHABLE once the mirror has emptied", async () => {
     // Same shape as the switch: the desktop app is what pushes the mirror, so a
     // machine without one has an empty mirror by definition. "No session with
@@ -1295,6 +1601,228 @@ describe("the send rungs in the state a machine is usually in", () => {
       expect(res.body.error).toBe("Invalid body");
       expect(res.body.code).toBeUndefined();
       expect(lead.outbound).toHaveLength(0);
+    } finally { stop(); }
+  });
+});
+
+// A row outlives nothing: the mirror is pull-filled and ages out, and it stops
+// being refilled the moment a correspondent's desktop app goes away — so a peer
+// holds a thread with a session it can no longer resolve while the exchange
+// itself is perfectly alive. (Its own remote-access switch is NOT the way in
+// here any more: a machine with that off cannot open the exchange in the first
+// place, which is what the REMOTE_ACCESS_OFF cases above pin.)
+// Every case here is that state: the row is gone and the exchange is not, and
+// what decides whether an answer leaves is the CONTEXT — the thread the peer
+// opened and the carrier route that thread's frames arrived on — rather than a
+// mirror that was never going to be refilled.
+describe("a peer may finish a sentence it did not start", () => {
+  /** Open an exchange FROM the peer, so the lead below holds a thread it did
+   *  not open and a route noted from the frame that opened it — the two things
+   *  a reply falls back on, both obtained the only way they can be. */
+  async function peerOpensThread(lead: Machine, peer: Machine): Promise<string> {
+    const opened = await post(peer, "post", PEER_SESSION, { to: TO_LEAD, summary: "asking", text: "one" });
+    expect(opened.status).toBe(200);
+    expect(lead.coordinator.routeFor(PEER_SESSION)).not.toBeNull();
+    return opened.body.threadId as string;
+  }
+
+  test("a reply answers a peer-opened thread after that peer's row left the mirror", async () => {
+    const { lead, peer, leadMirror, stop } = linkedPair();
+    try {
+      const threadId = await peerOpensThread(lead, peer);
+      // The state a switched-off machine leaves its correspondent in: nothing
+      // pushes a row for it, so the mirror empties and never refills.
+      leadMirror.length = 0;
+
+      const before = peer.busEvents.length;
+      const replied = await post(lead, "reply", LEAD_SESSION, { threadId, summary: "answering", text: "two" });
+      expect(replied.status).toBe(200);
+      expect(replied.body).toMatchObject({ ok: true, sent: true, held: false });
+      // The receipt is not the claim. What has to be true is that the frame
+      // reached the peer's own consumer — the thing that renders a line into
+      // its session — because the ack rides the same route the frame did and
+      // would arrive either way.
+      expect(peer.busEvents.slice(before).map((e) => e.kind)).toEqual(["notify"]);
+    } finally { stop(); }
+  });
+
+  test("a reply leaves although this machine's desktop app is gone, while a new exchange still refuses", async () => {
+    // `carrierPresent` is the loopback owner this machine's own sends go out
+    // through, and a reply does not use it: it leaves on whichever project's
+    // stream brought the context in. Gating both on one boolean is what left a
+    // bridge refusing PEER_UNREACHABLE on an answer whose transport was intact.
+    const { lead, peer, stop } = linkedPair({ carrier: false });
+    try {
+      const threadId = await peerOpensThread(lead, peer);
+
+      const before = peer.busEvents.length;
+      const replied = await post(lead, "reply", LEAD_SESSION, { threadId, summary: "answering", text: "two" });
+      expect(replied.status).toBe(200);
+      expect(peer.busEvents.slice(before).map((e) => e.kind)).toEqual(["notify"]);
+
+      // The half that must NOT relax: opening an exchange still needs the
+      // socket this machine's own outbound frames leave on.
+      const opened = await post(lead, "post", LEAD_SESSION, { to: TO_PEER, summary: "new", text: "one" });
+      expect(opened.status).toBe(503);
+      expect(opened.body.code).toBe("PEER_UNREACHABLE");
+    } finally { stop(); }
+  });
+
+  test("this machine's own switch closes the fallback too, in both directions at once", async () => {
+    // The fallback is scoped by the CONTEXT, not by the switch. Turning remote
+    // access off is the one thing that stops a reply as well as a first
+    // contact: half an open exchange is the one-way channel the switch was
+    // turned off to prevent, and the peer's own answer would already be dying
+    // at `remoteFrameAllowed` on the way back in.
+    const { lead, peer, stop } = linkedPair();
+    try {
+      const threadId = await peerOpensThread(lead, peer);
+      lead.setRemoteAccess(false);
+
+      const before = peer.busEvents.length;
+      const replied = await post(lead, "reply", LEAD_SESSION, { threadId, summary: "answering", text: "two" });
+      expect(replied.status).toBe(403);
+      expect(replied.body.code).toBe("REMOTE_ACCESS_OFF");
+      expect(peer.busEvents.slice(before)).toHaveLength(0);
+
+      // And it is a switch, not a latch: flipping it back restores the same
+      // thread, so the refusal never cost the correspondence.
+      lead.setRemoteAccess(true);
+      const again = await post(lead, "reply", LEAD_SESSION, { threadId, summary: "answering", text: "two" });
+      expect(again.status).toBe(200);
+      expect(peer.busEvents.slice(before).map((e) => e.kind)).toEqual(["notify"]);
+    } finally { stop(); }
+  });
+
+  test("a thread whose route has lapsed is PEER_UNREACHABLE, not UNKNOWN_PEER", async () => {
+    // The route is the half that bounds the fallback in time. A thread row
+    // lives on the mailbox's clock (days); a route is re-proven by traffic and
+    // lapses at `BUS_ROUTE_TTL_MS`, so a thread nobody has written to since is
+    // no longer evidence that anything on the other end is listening.
+    let clock = 1_000;
+    const { lead, peer, leadMirror, stop } = linkedPair({ now: () => clock });
+    try {
+      const threadId = await peerOpensThread(lead, peer);
+      leadMirror.length = 0;
+      clock += BUS_ROUTE_TTL_MS + 1;
+
+      const before = lead.outbound.length;
+      const res = await post(lead, "reply", LEAD_SESSION, { threadId, summary: "answering", text: "two" });
+      expect(res.status).toBe(503);
+      expect(res.body.code).toBe("PEER_UNREACHABLE");
+      expect(res.body.error).toContain("retrying");
+      expect(lead.outbound).toHaveLength(before);
+      // The thread itself outlived the route, which is what makes this a
+      // refusal about reachability rather than about the id.
+      expect(lead.coordinator.threads(LEAD_SESSION).threads).toHaveLength(1);
+    } finally { stop(); }
+  });
+
+  test("one correspondent's traffic does not vouch for a peer that has gone dark", async () => {
+    // Every exchange a session OPENS carries its own id as the context, and
+    // `noteRoute` keys by context alone — so all of them share one route entry,
+    // and whoever answered last restamps it for the rest. A probe that read the
+    // route by itself would admit a send to a machine that has said nothing for
+    // longer than the TTL, on the strength of an unrelated peer's reply, and
+    // then report it sent: a lead-role frame leaves through the desktop carrier,
+    // which never consults the route it was admitted on.
+    const DARK = { machineId: "m3", projectId: "p3", sessionId: "s-dark" };
+    const { lead, peer, leadMirror, stop } = linkedPair();
+    leadMirror.push(mirroredRow(DARK.machineId, DARK.projectId, DARK.sessionId));
+    try {
+      const withPeer = await post(lead, "post", LEAD_SESSION, { to: TO_PEER, summary: "asking m2", text: "one" });
+      expect(withPeer.status).toBe(200);
+      const withDark = await post(lead, "post", LEAD_SESSION, { to: DARK, summary: "asking m3", text: "one" });
+      expect(withDark.status).toBe(200);
+
+      // Only m2 answers. m3 is linked to nothing and never will.
+      const answered = await post(peer, "reply", PEER_SESSION, {
+        threadId: withPeer.body.threadId, summary: "answering", text: "two",
+      });
+      expect(answered.status).toBe(200);
+      // Both threads now route on the same entry, which is the whole trap.
+      expect(lead.coordinator.routeFor(LEAD_SESSION)).not.toBeNull();
+
+      // Neither machine publishes a row any more, so both sends fall back.
+      leadMirror.length = 0;
+
+      const before = lead.outbound.length;
+      const toDark = await post(lead, "post", LEAD_SESSION, { threadId: withDark.body.threadId, summary: "again", text: "three" });
+      expect(toDark.status).toBe(503);
+      expect(toDark.body.code).toBe("PEER_UNREACHABLE");
+      expect(lead.outbound).toHaveLength(before);
+
+      // The contrast that says the refusal is about that peer and not about the
+      // fallback closing: the exchange m2 actually answered still goes out.
+      const toPeer = await post(lead, "post", LEAD_SESSION, { threadId: withPeer.body.threadId, summary: "again", text: "three" });
+      expect(toPeer.status).toBe(200);
+      expect(toPeer.body).toMatchObject({ ok: true, sent: true, held: false });
+    } finally { stop(); }
+  });
+
+  test("an explicit `to` with no threadId still needs a row, even where a live route exists", async () => {
+    // A route is a way back along one exchange, never a general addressing
+    // capability. Without this the fallback would let an agent name any
+    // machine it has ever corresponded with and open a fresh exchange on it —
+    // which is exactly the "may not start one" half of the policy.
+    const { lead, peer, leadMirror, stop } = linkedPair();
+    try {
+      await peerOpensThread(lead, peer);
+      leadMirror.length = 0;
+
+      const before = lead.outbound.length;
+      const res = await post(lead, "post", LEAD_SESSION, { to: TO_PEER, summary: "new", text: "one" });
+      expect(res.status).toBe(503);
+      expect(res.body.code).toBe("PEER_UNREACHABLE");
+      expect(res.body.error).toContain("threadId");
+      expect(lead.outbound).toHaveLength(before);
+      // Still live, and still unusable for this: the refusal is about what the
+      // caller asked for, not about the route having gone.
+      expect(lead.coordinator.routeFor(PEER_SESSION)).not.toBeNull();
+    } finally { stop(); }
+  });
+
+  test("a threaded off-machine send from a project with no git remote is NOT_ADDRESSABLE", async () => {
+    // `rowFor` falls out on its first line for a keyless caller, before it has
+    // looked at the address at all — so without a rung of its own the refusal
+    // names the PEER for a fact about the caller's own project, and an agent
+    // goes hunting for a session that was never missing.
+    const { lead, peer, stop } = linkedPair({ keylessLead: true });
+    try {
+      const threadId = await peerOpensThread(lead, peer);
+
+      const before = lead.outbound.length;
+      const res = await post(lead, "reply", LEAD_SESSION, { threadId, summary: "answering", text: "two" });
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe("NOT_ADDRESSABLE");
+      expect(res.body.error).toContain("git remote");
+      expect(lead.outbound).toHaveLength(before);
+    } finally { stop(); }
+  });
+
+  test("threads and mail age out on a coordinator that never restarts", async () => {
+    // `stateFor` loads once and caches for the life of the process, so an
+    // expiry that ran only in the loader would make "threads age out" true
+    // across a restart and false everywhere else — and a send path that leans
+    // on a thread row would be leaning on one with no bound behind it.
+    let clock = 1_000;
+    const { lead, peer, stop } = linkedPair({ now: () => clock });
+    try {
+      const threadId = await peerOpensThread(lead, peer);
+      expect((await get(lead, "inbox", LEAD_SESSION)).body.posts).toHaveLength(1);
+
+      clock += MAILBOX_TTL_MS + 1;
+
+      const stale = await post(lead, "reply", LEAD_SESSION, { threadId, summary: "answering", text: "two" });
+      expect(stale.status).toBe(404);
+      expect(stale.body.code).toBe("UNKNOWN_PEER");
+      expect(stale.body.error).toContain("age out");
+
+      const inbox = await get(lead, "inbox", LEAD_SESSION);
+      expect(inbox.body.posts).toEqual([]);
+      // Counted rather than merely gone: a reader that cannot tell an empty
+      // inbox from an emptied one has been told the wrong thing.
+      expect(inbox.body.dropped).toBe(1);
     } finally { stop(); }
   });
 });

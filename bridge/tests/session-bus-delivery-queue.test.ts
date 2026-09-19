@@ -8,10 +8,11 @@ import { existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  CONFIRM_TIMEOUT_MS,
   DeliveryKindSchema,
   MAX_QUEUED_LINES,
+  MAX_SUBMIT_ATTEMPTS,
   SessionBusDeliveryQueue,
-  closedTurns,
   emptyDeliveries,
   enqueueLine,
   forgetSession,
@@ -19,6 +20,7 @@ import {
   loadDeliveries,
   removeLine,
   saveDeliveries,
+  type BusInjectOutcome,
   type QueuedLine,
 } from "../src/session-bus/delivery-queue";
 import { UNATTRIBUTED_TURN, turnOpenFor } from "../src/work-status";
@@ -41,31 +43,38 @@ function line(over: Partial<QueuedLine> = {}): Omit<QueuedLine, "queuedAt"> {
   return { id: "l-1", sessionId: SESSION, kind: "notify", text: "a line", ...over };
 }
 
-/** The queue plus the two things `ProjectCore` supplies it: the turn-open set
+/** The queue plus the two things `ProjectCore` supplies it: the delivery gate
  *  from the work-status reduction, and a submit that reports whether the line
  *  actually went into a session. */
-function harness(abDir: string, opts: { live?: boolean } = {}) {
+function harness(abDir: string, opts: { live?: boolean; confirmable?: boolean } = {}) {
   const openTurns = new Set<string>();
   const injected: QueuedLine[] = [];
   let live = opts.live !== false;
+  // Default false: five of the six agents announce nothing, so that is the
+  // ordinary session, and a write is the only answer one gives.
+  const confirmable = opts.confirmable === true;
+  let now = 1_000;
   const queue = new SessionBusDeliveryQueue({
     abDir,
     projectId: PROJECT,
-    // The predicate ProjectCore hands the real queue, not a re-reading of the
-    // same set: the unattributed key is what makes the two differ.
-    isTurnOpen: (id) => turnOpenFor(openTurns, id),
+    // Only the turn half of the real gate: what else holds a line is
+    // `busDeliverable`'s business and is covered in work-status.test.ts. The
+    // unattributed key stays, because it is what makes this differ from a
+    // membership check.
+    canDeliver: (id) => !turnOpenFor(openTurns, id),
     inject: (l) => {
-      if (!live) return false;
+      if (!live) return "refused";
       injected.push(l);
-      return true;
+      return confirmable ? "awaiting-turn" : "submitted";
     },
-    now: () => 1_000,
+    now: () => now,
   });
   return {
     queue,
     injected,
     openTurns,
     setLive(v: boolean) { live = v; },
+    advance(ms: number) { now += ms; },
   };
 }
 
@@ -118,21 +127,6 @@ describe("the delivery queue folds", () => {
     expect(forgetSession(s, "s2").lines.map((l) => l.id)).toEqual(["a"]);
     // An unchanged fold returns the same object, so a caller can skip the write.
     expect(removeLine(s, "nope")).toBe(s);
-  });
-
-  test("closedTurns names only the sessions whose turn ended", () => {
-    const prev = { activeTurns: new Set(["a", "b"]) };
-    const next = { activeTurns: new Set(["b", "c"]) };
-    expect(closedTurns(prev, next)).toEqual(["a"]);
-  });
-
-  test("the unattributed key survives the diff, because it is a boundary for every session", () => {
-    // An agent that cannot attribute its turn-starts records them under the
-    // empty-string key, and a falsy-filter here would drop the only edge those
-    // agents ever produce. `ProjectCore.commitWork` turns it into a drainAll.
-    const prev = { activeTurns: new Set([UNATTRIBUTED_TURN]) };
-    const next = { activeTurns: new Set<string>() };
-    expect(closedTurns(prev, next)).toEqual([UNATTRIBUTED_TURN]);
   });
 });
 
@@ -202,11 +196,11 @@ describe("turn-boundary delivery", () => {
     const queue = new SessionBusDeliveryQueue({
       abDir,
       projectId: PROJECT,
-      isTurnOpen: () => false,
-      inject: (l) => {
+      canDeliver: () => true,
+      inject: (l): BusInjectOutcome => {
         if (throwing) throw new Error("the adapter is gone");
         injected.push(l);
-        return true;
+        return "submitted";
       },
     });
     queue.queue(line());
@@ -249,6 +243,120 @@ describe("turn-boundary delivery", () => {
     h.queue.queue(line({ id: "b", sessionId: "other" }));
     h.queue.forget(SESSION);
     expect(h.queue.lines.map((l) => l.id)).toEqual(["b"]);
+  });
+
+  test("a line submitted into an agent that announces nothing is removed on the write", () => {
+    // Five of the six adapters declare `observation.turnStart: false`, so no
+    // edge is ever coming for them. Holding the line would time out and
+    // re-inject on every delivery to every one of them.
+    const h = harness(tempDir());
+    h.queue.queue(line());
+    expect(h.queue.lines).toHaveLength(0);
+  });
+
+  test("a line submitted into a session that announces its turns is held until the turn opens", () => {
+    const abDir = tempDir();
+    const h = harness(abDir, { confirmable: true });
+    h.queue.queue(line());
+    expect(h.injected).toHaveLength(1);
+    // Still held: the adapter took the text, which is not the same as the agent
+    // having read it — that is the whole defect.
+    expect(h.queue.lines.map((l) => l.id)).toEqual(["l-1"]);
+    expect(h.queue.lines[0]!.sentAt).toBe(1_000);
+
+    // No second copy while the window is open, whatever re-enters the drain.
+    h.queue.drain(SESSION);
+    h.queue.drainAll();
+    expect(h.injected).toHaveLength(1);
+
+    h.queue.confirm(SESSION);
+    expect(h.queue.lines).toHaveLength(0);
+    expect(loadDeliveries(abDir, PROJECT).lines).toHaveLength(0);
+  });
+
+  test("a confirm on a head that was never submitted leaves it queued", () => {
+    // A session opening a turn of its own is not a delivery confirmation, and
+    // reading it as one would drop a line that never reached the agent at all.
+    const h = harness(tempDir(), { live: false });
+    h.queue.queue(line());
+    h.queue.confirm(SESSION);
+    expect(h.queue.lines.map((l) => l.id)).toEqual(["l-1"]);
+  });
+
+  test("a submit whose turn never opens is retried once, then dropped rather than cycling forever", () => {
+    const h = harness(tempDir(), { confirmable: true });
+    h.queue.queue(line());
+    expect(h.injected).toHaveLength(1);
+
+    h.advance(CONFIRM_TIMEOUT_MS);
+    h.queue.drain(SESSION);
+    expect(h.injected).toHaveLength(MAX_SUBMIT_ATTEMPTS);
+
+    // Past the cap the line goes: every later arrival for this session queues
+    // behind it, and each retry appends another copy into the composer holding
+    // the ones before it.
+    h.advance(CONFIRM_TIMEOUT_MS);
+    h.queue.drain(SESSION);
+    expect(h.injected).toHaveLength(MAX_SUBMIT_ATTEMPTS);
+    expect(h.queue.lines).toHaveLength(0);
+  });
+
+  test("the line behind a dropped head goes in on the same drain", () => {
+    // A drop opens no turn and clears no block, so it produces none of the edges
+    // that re-enter the drain: the rest of the queue would sit behind it on a
+    // session that is already idle until something unrelated happened.
+    const h = harness(tempDir(), { confirmable: true });
+    h.queue.queue(line({ id: "head" }));
+    h.queue.queue(line({ id: "behind" }));
+    expect(h.injected.map((l) => l.id)).toEqual(["head"]);
+
+    h.advance(CONFIRM_TIMEOUT_MS);
+    h.queue.drain(SESSION);
+    expect(h.injected.map((l) => l.id)).toEqual(["head", "head"]);
+
+    h.advance(CONFIRM_TIMEOUT_MS);
+    h.queue.drain(SESSION);
+    expect(h.injected.map((l) => l.id)).toEqual(["head", "head", "behind"]);
+    expect(h.queue.lines.map((l) => l.id)).toEqual(["behind"]);
+  });
+
+  test("a redelivery of an already-held line re-drains it rather than short-circuiting on the id", () => {
+    // The sender's outbox retries until acked, and for a session whose stamped
+    // head went stale that redelivery may be the only event it gets.
+    const h = harness(tempDir(), { confirmable: true });
+    h.queue.queue(line());
+    expect(h.injected).toHaveLength(1);
+
+    h.advance(CONFIRM_TIMEOUT_MS);
+    h.queue.queue(line());
+    expect(h.injected).toHaveLength(2);
+    expect(h.queue.lines).toHaveLength(1);
+  });
+
+  test("a row persisted before the confirmation fields existed still loads", () => {
+    // `readRecords` drops a row whose parse fails and reports nothing, so a
+    // required field here empties every session's queue on upgrade — and the
+    // lines it drops are the ones nothing re-sends.
+    const abDir = tempDir();
+    saveDeliveries(abDir, PROJECT, { lines: [{ ...line(), queuedAt: 1 }] });
+    expect(loadDeliveries(abDir, PROJECT).lines.map((l) => l.id)).toEqual(["l-1"]);
+  });
+
+  test("a submit stamp does not survive the process that made it", () => {
+    // The stamp says the text is in the agent's composer, and that composer
+    // died with the previous process's PTY. Carried across, nothing re-enters
+    // the drain inside the confirm window — the timer is in memory — and the
+    // next turn the session opens for any reason retires the line as read.
+    const abDir = tempDir();
+    saveDeliveries(abDir, PROJECT, { lines: [{ ...line(), queuedAt: 1, sentAt: 1, attempts: 1 }] });
+
+    const h = harness(abDir, { confirmable: true });
+    // Re-submitted at once rather than waited on, and the attempt bound is the
+    // one thing that DOES carry over.
+    expect(h.injected.map((l) => l.id)).toEqual([]);
+    h.queue.drainAll();
+    expect(h.injected.map((l) => l.id)).toEqual(["l-1"]);
+    expect(h.queue.lines[0]!.attempts).toBe(2);
   });
 
   test("two projects on one machine keep distinct queues and never see each other's lines", () => {

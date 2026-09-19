@@ -36,6 +36,14 @@ const HOOK_TRIGGER_MARKER = "ANTGRID_HOOK";
 // agent's hook subprocess does — instead of a test faking the loopback POST
 // body directly, which `acceptsHookRun`'s runId-staleness gate now refuses
 // (see `hookTriggerData`'s doc).
+//
+// It also announces itself the way a mounted TUI does — bracketed paste and
+// then a glyph, which is what `GuestReadiness` (bridge/src/submit-gate.ts) reads
+// as a guest that is reading. A sink that writes nothing never latches, so every
+// submit in every bus scenario would wait out `SUBMIT_READY_TIMEOUT_MS` and then
+// take the unheld path — leaving the gated path with no coverage at all. One
+// write, because readiness credits paint by its POSITION relative to the mode:
+// whether ConPTY delivers this as one read or ten changes nothing.
 export const SINK_SCRIPT = `const fs = require("node:fs");
 const { spawn } = require("node:child_process");
 const sink = process.env.ANTGRID_EVAL_SINK;
@@ -43,6 +51,7 @@ const MARKER = ${JSON.stringify(HOOK_TRIGGER_MARKER)};
 const RUN_HOOK = ${JSON.stringify(RUN_HOOK_SCRIPT)};
 const BUN_EXE = ${JSON.stringify(BUN_EXECUTABLE)};
 try { process.stdin.setRawMode(true); } catch {}
+process.stdout.write("\\u001b[?2004h.");
 process.stdin.on("data", (d) => {
   try { fs.appendFileSync(sink, d); } catch {}
   const text = d.toString("utf8");
@@ -119,11 +128,10 @@ async function git(cwd: string, args: string[]): Promise<void> {
  * repository the Capability Card can normalise into a match key.
  *
  * Both halves are load-bearing and neither is obvious from a failure. Without
- * the remote the directory refuses outright (`NOT_ADDRESSABLE`) and every send
- * answers `UNKNOWN_PEER`, on ONE machine as much as two — a repo key is how a
- * row is offered at all, not only how two machines match. Pass this as
- * `prepareProject`, which runs before the agent boots: repository identity is
- * resolved once at startup.
+ * the remote the directory and every send alike refuse `NOT_ADDRESSABLE`, on
+ * ONE machine as much as two — a repo key is how a row is offered at all, not
+ * only how two machines match. Pass this as `prepareProject`, which runs before
+ * the agent boots: repository identity is resolved once at startup.
  */
 export async function prepareBusProject(dir: string): Promise<void> {
   writeFileSync(join(dir, SINK_SCRIPT_NAME), SINK_SCRIPT);

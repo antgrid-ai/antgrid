@@ -24,9 +24,9 @@ nowhere else (`ProjectCore.sendToOwner`), and only to an owner that declared
 app is the only carrier, and it forwards the frame verbatim onto the target
 machine's own relay connection. The receiving bridge answers on the one app
 session that carried the exchange in (`ProjectCore.sendToAppSession`), never by
-broadcast, so the traffic is invisible to the human's phone by design. The spec
-is `docs/session-messaging.md`; the host-side invariants are in
-`bridge/CLAUDE.md`.
+broadcast, so the traffic is invisible to the human's phone by design. There is
+no separate spec document: the host-side invariants are in `bridge/CLAUDE.md`,
+and the rest is documented at its definitions under `bridge/src/session-bus/`.
 
 ## Checkout-scoped routing
 

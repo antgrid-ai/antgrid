@@ -30,9 +30,9 @@ import { RelayClient, type PhoneIdentity } from "./relay-client";
  * initiates too, and its own app carries that leg):
  *
  * - a LOOPBACK owner socket on each machine. It is what `carrierPresent()`
- *   reads, so a machine without one refuses every off-machine send with
- *   `PEER_UNREACHABLE`, and it is the socket a bridge hands its own outbound
- *   frames to (lead-role dispatch, `sendToOwner`).
+ *   reads, so a machine without one refuses every off-machine send that OPENS
+ *   an exchange with `PEER_UNREACHABLE`, and it is the socket a bridge hands
+ *   its own outbound frames to (lead-role dispatch, `sendToOwner`).
  * - a RELAY app session on each machine's project stream. It is how a frame
  *   OPENING an exchange enters the other bridge, and the only way in that
  *   leaves a route home: `noteRoute` is fed the app session that carried the
@@ -92,7 +92,7 @@ export interface DirectoryPush {
    *  took the push, `error.code` when it refused it. Never reduced to a
    *  boolean — a push that was accepted and mirrored NOTHING is a different
    *  failure from one the bridge would not take, and both end as
-   *  `UNKNOWN_PEER` at the next send. */
+   *  `PEER_UNREACHABLE` at the next send that opens an exchange. */
   ack: any;
   /** Why this card read as `unreachable`, when it did. Three unlike failures
    *  share that outcome and only this separates them. */
@@ -120,8 +120,9 @@ export interface Carrier {
    */
   stop(): void;
   /** The desktop app on one machine quitting: its loopback socket closes, so
-   *  that machine's own off-machine sends refuse `PEER_UNREACHABLE` and frames
-   *  addressed INTO it have nowhere to land. */
+   *  that machine's own off-machine sends refuse `PEER_UNREACHABLE` — unless
+   *  they answer a thread on a live route, which leaves down the carrier that
+   *  context arrived on — and frames addressed INTO it have nowhere to land. */
   detachApp(machine: MachineName): void;
   /** The app coming back. The bridge's outbox retries on its own timer, so
    *  what it held while the app was gone goes out shortly after this. */
@@ -129,9 +130,10 @@ export interface Carrier {
   /**
    * One cycle of the app's remote-directory pump, in both directions.
    *
-   * Without it each machine's mirror is empty and EVERY cross-machine send
-   * answers `UNKNOWN_PEER`: a bridge cannot ask another bridge what sessions
-   * it holds, so the only thing that ever fills the mirror is this push. The
+   * Without it each machine's mirror is empty and every cross-machine send
+   * that OPENS an exchange answers `PEER_UNREACHABLE`: a bridge cannot ask
+   * another bridge what sessions it holds, so the only thing that ever fills
+   * the mirror is this push. The
    * push is also the carrier heartbeat the mirror ages out on, so a long row
    * pumps again rather than once (`REMOTE_CARRIER_SILENCE_MS`).
    *

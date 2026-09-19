@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { answerRequest, attentionEdges, clientFocusState, clientGone, closeTurn, initialWorkStatus, isStaleIdleNudge, reduceWorkStatus, sessionFocus, turnOpenFor, turnStart, UNATTRIBUTED_TURN, userReply, type WorkStatusState } from "../src/work-status";
+import { answerRequest, attentionEdges, becameDeliverable, busDeliverable, clientFocusState, clientGone, closeTurn, initialWorkStatus, isStaleIdleNudge, openedTurns, reduceWorkStatus, sessionFocus, turnOpenFor, turnStart, UNATTRIBUTED_TURN, userReply, type WorkStatusState } from "../src/work-status";
 import type { InboundSource } from "../src/message-bus";
 
 /** The two client classes the read state distinguishes: the phone reaches a core
@@ -954,7 +954,7 @@ test("a new session does NOT clear an active question on a sibling", () => {
 });
 
 // The producer of `waiting-on: human` on a peer machine (spec 5.3). Read BEFORE
-// the state is swapped, like closedTurns, or the comparison is against itself.
+// the state is swapped, like becameDeliverable, or the comparison is against itself.
 test("attentionEdges names only the sessions whose human-blocked state flipped", () => {
   const at = (...ids: string[]) =>
     ({ sessionStatuses: new Map(ids.map((id) => [id, "attention" as const])) });
@@ -993,4 +993,85 @@ test("an unattributed turn is open for every session, and closing it opens none"
   expect(turnOpenFor(new Set(["r0"]), "r0")).toBe(true);
   expect(turnOpenFor(new Set(["r1"]), "r0")).toBe(false);
   expect(turnOpenFor(new Set(), "r0")).toBe(false);
+});
+
+test("the bus delivery gate holds on an open turn, an unanswered request and the session's own block", () => {
+  const idle = fold([sessions(2)]);
+  expect(busDeliverable(idle, "r0")).toBe(true);
+
+  expect(busDeliverable(turnStart(idle, "r0"), "r0")).toBe(false);
+  // The unattributed fan-out is kept for TURNS: a project mid-turn under the
+  // anonymous key cannot say which session is busy, so none of them is clear.
+  expect(busDeliverable(turnStart(idle), "r0")).toBe(false);
+
+  expect(busDeliverable(fold([sessions(2), permission("r0")]), "r0")).toBe(false);
+  expect(busDeliverable(fold([sessions(2), question("r0")]), "r0")).toBe(false);
+  for (const n of ["permission_request", "awaiting_input", "question"]) {
+    expect(busDeliverable(fold([sessions(2), push(n, "r0")]), "r0")).toBe(false);
+  }
+
+  // A sibling's block is the sibling's; only an unattributed TURN fans out.
+  expect(busDeliverable(fold([sessions(2), permission("r1")]), "r0")).toBe(true);
+  expect(busDeliverable(fold([sessions(2), push("permission_request", "r1")]), "r0")).toBe(true);
+});
+
+test("the bus delivery gate reads neither the unattributed notification nor error", () => {
+  const anon = fold([sessions(1), push("permission_request")]);
+  expect(anon.sessionStatuses.get("r0")).toBe("attention");
+  expect(busDeliverable(anon, "r0")).toBe(true);
+
+  const failed = fold([sessions(1), push("error", "r0")]);
+  expect(failed.sessionStatuses.get("r0")).toBe("error");
+  expect(busDeliverable(failed, "r0")).toBe(true);
+});
+
+test("the release edge names a session whose turn closed", () => {
+  const working = fold([sessions(2), turnStartFrame("r0"), turnStartFrame("r1")]);
+  expect(becameDeliverable(working, fold([turnEndFrame("r0")], working))).toEqual(["r0"]);
+  expect(becameDeliverable(working, working)).toEqual([]);
+});
+
+test("the unattributed key survives the release diff, because it is a boundary for every session", () => {
+  // An agent that cannot attribute its turn-starts records them under the empty
+  // key, and a falsy filter here would drop the only edge those agents ever
+  // produce. `ProjectCore.commitWork` turns it into a drainAll.
+  const anon = turnStart(fold([sessions(1)]));
+  expect(becameDeliverable(anon, closeTurn(anon, UNATTRIBUTED_TURN))).toEqual([UNATTRIBUTED_TURN]);
+});
+
+test("a block that lifts without a turn to close is still a release edge", () => {
+  // The case a turn-close edge alone misses: a terminal session carrying a
+  // permission_request with nothing in activeTurns — reachable after a restart,
+  // whose turn set is in-memory only — is cleared by an Esc, which touches the
+  // notification and not the turn.
+  const blocked = fold([sessions(2), push("permission_request", "r0")]);
+  expect(blocked.activeTurns.size).toBe(0);
+  expect(busDeliverable(blocked, "r0")).toBe(false);
+  expect(becameDeliverable(blocked, closeTurn(blocked, "r0"))).toEqual(["r0"]);
+
+  const pending = fold([sessions(2), permission("r0")]);
+  expect(pending.activeTurns.size).toBe(0);
+  expect(becameDeliverable(pending, fold([retracted("r0", { permissionId: "p1" })], pending))).toEqual(["r0"]);
+});
+
+test("the confirmation edge names a session whose turn opened, and never the unattributed one", () => {
+  const idle = fold([sessions(2)]);
+  expect(openedTurns(idle, fold([turnStartFrame("r1")], idle))).toEqual(["r1"]);
+  // A turn already open is not a new edge: re-reporting it would retire a line
+  // submitted into a session that was busy the whole time.
+  const working = fold([turnStartFrame("r1")], idle);
+  expect(openedTurns(working, fold([turnStartFrame("r1")], working))).toEqual([]);
+
+  // The asymmetry with the release edge: an anonymous CLOSE is a boundary for
+  // every session and costs at most a delayed line, where an anonymous OPEN read
+  // as confirmation would retire every session's unconfirmed line against a turn
+  // none of them may have started.
+  expect(openedTurns(idle, turnStart(idle))).toEqual([]);
+});
+
+test("a session still blocked on a second condition is not released", () => {
+  const both = fold([sessions(2), permission("r0"), push("permission_request", "r0")]);
+  const answered = fold([retracted("r0", { permissionId: "p1" })], both);
+  expect(busDeliverable(answered, "r0")).toBe(false);
+  expect(becameDeliverable(both, answered)).toEqual([]);
 });

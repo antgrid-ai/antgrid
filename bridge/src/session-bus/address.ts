@@ -25,6 +25,23 @@ export function namesMachine(machineId: string, selfMachineId: string): boolean 
 }
 
 /**
+ * Whether [contextId] names an exchange [sessionId] itself opened.
+ *
+ * A context is named by the session that opened it, which is also what decides
+ * which way a frame on it leaves: its own id means it reaches out through this
+ * machine's carrier, any other id means it was contacted and its only way home
+ * is the route that brought the context in.
+ *
+ * One function because three gates in three modules read it — the coordinator's
+ * routing, the send path's carrier rung, and the interruption gate in
+ * `agent-core.ts` — and a rule narrowed in one of them alone applies the other
+ * two to the wrong set of frames.
+ */
+export function isLeadContext(sessionId: string, contextId: string): boolean {
+  return contextId === sessionId;
+}
+
+/**
  * Identity, and only identity. The labels beside an address are display text
  * that changes under a rename, so folding them in would make the same session
  * compare unequal to itself.

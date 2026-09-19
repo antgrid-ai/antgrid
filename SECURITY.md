@@ -102,9 +102,10 @@ In scope. These are the claims worth attacking:
   man-in-the-middle, or route frames between devices on different accounts.
 - **The command-execution authorization path.** Any way a remote device runs
   commands, reads files, opens a terminal, or reaches a preview tunnel on a
-  machine whose remote-access switch is off; any way to reach a project outside
-  the host's catalog; any way to be treated as account-trusted without being on
-  the account.
+  machine whose remote-access switch is off; any way an agent on such a machine
+  exchanges session-bus messages with another machine, in either direction; any
+  way to reach a project outside the host's catalog; any way to be treated as
+  account-trusted without being on the account.
 - **The licence and relay gate.** Connecting to the relay without a valid device
   token, with a revoked or expired one, or with a token bound to a different
   device's key.

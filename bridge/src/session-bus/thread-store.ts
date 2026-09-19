@@ -10,8 +10,21 @@
 // and sends to THIS machine's desktop app — which accepts it and reports it
 // sent. The misroute is silent on both ends.
 //
+// A ROW HERE IS PART OF A SECURITY BOUND, not only a routing hint. The send
+// path lets a session answer an off-machine peer whose directory row this
+// machine cannot resolve, and a thread row is one of the three things it
+// requires (the others are a live carrier route for the context and a frame
+// from that peer on it inside the route TTL). What makes that safe is that a row
+// is unforgeable by the agent that benefits from it: both mint sites run
+// post-admission — one on an outbound send this session itself made, one on an
+// inbound frame that already cleared `handleInbound`'s address check — and
+// `upsertThread` freezes `contextId`, `peer` and `openedByPeer` so no later
+// frame can re-point an existing row at somewhere else. Keep both properties.
+//
 // Aged on the mailbox's clock, because §4.2's "a thread is garbage once both
-// sides stop writing" needs a moment to point at and `lastAt` is it.
+// sides stop writing" needs a moment to point at and `lastAt` is it. The
+// coordinator applies that expiry on the warm path too, so the TTL bounds a
+// long-lived bridge and not merely a restart.
 
 import { z } from "zod";
 import { MAILBOX_TTL_MS, MAX_THREADS_PER_SESSION } from "./constants";

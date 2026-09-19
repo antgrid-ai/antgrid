@@ -94,6 +94,70 @@ export function turnOpenFor(activeTurns: ReadonlySet<string>, sessionId: string)
   return activeTurns.has(sessionId) || activeTurns.has(UNATTRIBUTED_TURN);
 }
 
+/** May a session-bus line be submitted into [sessionId] right now?
+ *
+ *  Two deliberate divergences from {@link statusFor}:
+ *
+ *  - The {@link UNATTRIBUTED_TURN} notification fallback is not read. A hook
+ *    installed without `ANTGRID_TERMINAL_ID` files every notification under the
+ *    anonymous key, which would park one project's whole queue on one config
+ *    error with nothing to clear it. The same fallback IS kept for turns via
+ *    {@link turnOpenFor}, where the wrong answer costs one delayed line rather
+ *    than a permanent hold.
+ *  - `error` does not block. It is a turn END, so no answer is coming to lift
+ *    it, and a line held on one would wait for an edge nothing is going to
+ *    produce instead of going in at a boundary that is already clear.
+ */
+export function busDeliverable(state: WorkStatusState, sessionId: string): boolean {
+  if (turnOpenFor(state.activeTurns, sessionId)) return false;
+  if ((state.pendingRequests.get(sessionId)?.size ?? 0) > 0) return false;
+  const own = state.notifications.get(sessionId);
+  // Read off `isCallToAction` rather than re-listed, minus the `error` the doc
+  // above carves out: a seventh blocking notification would otherwise be added
+  // there and silently miss here, parking a queue with no edge to release it.
+  return own === undefined || !isCallToAction(own) || own === "error";
+}
+
+/** Sessions that were blocked for a bus delivery and are not any more — the edge
+ *  a held line waits on. Pure so `commitWork` can compute it before it swaps the
+ *  state it is comparing against.
+ *
+ *  Every condition {@link busDeliverable} holds on has to appear here or a line
+ *  held on it waits for an edge nothing produces: clearing a permission prompt
+ *  or answering a request leaves `activeTurns` untouched, so a turn-close edge
+ *  alone would never release either. This is what bounds the hold, in place of
+ *  a clock nothing would wind.
+ *
+ *  {@link UNATTRIBUTED_TURN} is reported as ITSELF rather than resolved: a
+ *  project whose anonymous turn closed is at a boundary for every session in it,
+ *  and only the caller knows which sessions those are. It is reported on the
+ *  turn alone — the anonymous NOTIFICATION key is deliberately not a block (see
+ *  {@link busDeliverable}), so it is not a release either. */
+export function becameDeliverable(prev: WorkStatusState, next: WorkStatusState): string[] {
+  const touched = new Set<string>([
+    ...prev.activeTurns,
+    ...prev.pendingRequests.keys(),
+    ...prev.notifications.keys(),
+  ]);
+  return [...touched].filter((id) =>
+    id === UNATTRIBUTED_TURN
+      ? prev.activeTurns.has(id) && !next.activeTurns.has(id)
+      : !busDeliverable(prev, id) && busDeliverable(next, id));
+}
+
+/** Sessions whose turn just OPENED — the edge a submitted session-bus line
+ *  waits on to know it was actually read (`delivery-queue.ts`).
+ *
+ *  {@link UNATTRIBUTED_TURN} is excluded HERE rather than at the caller, because
+ *  the two directions are not symmetric. An anonymous CLOSE releases every
+ *  session in the project and costs at most a delayed line; an anonymous OPEN
+ *  fanned out would retire every session's unconfirmed line against a turn none
+ *  of them may have started, which is the silent loss the confirmation exists to
+ *  end. */
+export function openedTurns(prev: WorkStatusState, next: WorkStatusState): string[] {
+  return [...next.activeTurns].filter((id) => id !== UNATTRIBUTED_TURN && !prev.activeTurns.has(id));
+}
+
 /** Shared empty set for every session-id set on the state — turns, running
  *  sessions, keystroke/typed markers. */
 const EMPTY_IDS: ReadonlySet<string> = new Set();
@@ -221,8 +285,7 @@ function deriveUnread(i: WorkInputs, raw: ReadonlyMap<string, WorkStatus>, prev?
  * `attention` is this reduction's word for an unanswered permission request or
  * question, which is the only thing on a bridge that says its own human is what
  * the work waits on. Pure, so a caller can read the edge BEFORE it swaps the
- * state it is comparing against, for the reason closedTurns (delivery-queue.ts)
- * is.
+ * state it is comparing against, for the reason {@link becameDeliverable} is.
  *
  * A session that left the map stopped waiting on anyone: only a running session
  * carries a status, and a stopped agent is blocked on nothing.
