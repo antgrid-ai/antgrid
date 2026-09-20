@@ -86,6 +86,7 @@ import { snapshotAsksFor } from "./rpc/state-snapshot";
 import { StructuredAgentManager } from "./structured/structured-manager";
 import { TOOL_UPDATE_SPECS, createToolUpdateChecker, execToolUpdate, execToolVersion, parseAgentVersion, runAgentUpdate, updateSpecFor } from "./update/specs";
 import { forgetGitScanMemos, getGitStatus, gitCommit, gitDiscard, gitStage, gitUnstage, type GitFileEntry } from "./git";
+import { runGit } from "./git-spawn";
 import { listLocalBranches, checkoutLocalBranch, checkBranchAgainstRemote, listStashes, stashPop, stashDrop } from "./git-branches";
 import { getGitLog, getCommitFiles, getCommitFileDiff } from "./git-log";
 import { gitPull, gitPush, readSyncState, fetchRemote, EMPTY_SYNC_STATE, type GitSyncState } from "./git-sync";
@@ -3176,14 +3177,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
 
   async function refreshGitBranch(runtime: CheckoutRuntime = mainRuntime): Promise<void> {
     try {
-      const proc = Bun.spawn(["git", "rev-parse", "--abbrev-ref", "HEAD"], {
-        cwd: runtime.checkout.path,
-        stdout: "pipe",
-        stderr: "ignore",
-      });
-      const output = await new Response(proc.stdout).text();
-      const exitCode = await proc.exited;
-      runtime.cachedGitBranch = exitCode === 0 ? output.trim() || null : null;
+      const { exitCode, stdout } = await runGit(runtime.checkout.path, [
+        "rev-parse",
+        "--abbrev-ref",
+        "HEAD",
+      ]);
+      runtime.cachedGitBranch = exitCode === 0 ? stdout.trim() || null : null;
     } catch {
       runtime.cachedGitBranch = null;
     }
@@ -3774,13 +3773,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       const args = isUntracked
         ? ["diff", "--no-index", "--", "/dev/null", path]
         : ["diff", "HEAD", "--relative", "--", path];
-      const proc = Bun.spawn(["git", "-c", "core.quotepath=false", ...args], {
-        cwd: runtime.checkout.path,
-        stdout: "pipe",
-        stderr: "ignore",
-      });
-      const output = await new Response(proc.stdout).text();
-      const exitCode = await proc.exited;
+      const { exitCode, stdout: output } = await runGit(runtime.checkout.path, args);
       if (isUntracked ? exitCode > 1 : exitCode !== 0) {
         sendFromRuntime(runtime, createMessage("git:diff-content", {
           projectId,

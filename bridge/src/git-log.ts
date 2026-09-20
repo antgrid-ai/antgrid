@@ -2,29 +2,11 @@
 // Commit history: the paginated log the History tab scrolls through, and the
 // per-commit file list + diff it drills into. Kept apart from `git.ts`
 // (working-tree status/diff/commit) and `git-branches.ts` (branch catalog +
-// checkout) — a third, read-only concern with its own small git-invocation
-// helper, matching how those two modules are already split.
+// checkout) — a third, read-only concern, matching how those two modules are
+// already split. Every verb here reads, and none of them matches on git's
+// prose, so the shared runner's defaults are the whole of what it needs.
 
-async function runGit(
-  cwd: string,
-  args: string[],
-): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-  // core.quotepath=false and GIT_OPTIONAL_LOCKS: see git.ts's [runGit] — same
-  // non-ASCII-path and `index.lock` contention reasons. Every verb in this
-  // module is read-only, so nothing here wanted the lock in the first place.
-  const proc = Bun.spawn(["git", "-c", "core.quotepath=false", ...args], {
-    cwd,
-    env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [stdout, stderr] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-  ]);
-  const exitCode = await proc.exited;
-  return { exitCode, stdout, stderr };
-}
+import { runGit } from "./git-spawn";
 
 export interface GitLogEntry {
   sha: string;
