@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/design/widgets/ab_loading.dart';
+import 'package:antgrid/design/widgets/ab_toolbar.dart';
 import 'package:antgrid/models/file_tree_models.dart';
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/providers/agent_transport.dart';
@@ -341,6 +342,25 @@ void main() {
       return t.sent.lastWhere((m) => m['type'] == 'file:find');
     }
 
+    testWidgets('the filter shares the action row rather than taking its own', (
+      tester,
+    ) async {
+      final (_, widget) = await buildFilterWidget();
+      await tester.pumpWidget(widget);
+      await tester.pump();
+
+      // Stacked, the filter's magnifier sat directly under the toolbar's own
+      // — which searches file CONTENTS, not names — and the tree lost a row
+      // of height to say it twice.
+      expect(
+        find.descendant(
+          of: find.byType(AbToolbar),
+          matching: find.byType(FileSearchBar),
+        ),
+        findsOneWidget,
+      );
+    });
+
     testWidgets(
       'sends includeIgnored: true so the filter agrees with the tree it filters',
       (tester) async {
@@ -467,6 +487,14 @@ void main() {
         'truncated': false,
         'engine': 'git-ls-files',
       });
+      await tester.pumpAndSettle();
+
+      // The filter field sits in the action row directly above these results,
+      // so the caret handle `enterText` leaves behind is painted over the
+      // first one and swallows the tap. It reaches further right here than on
+      // a device — the test font gives every glyph the same wide advance — so
+      // it lands on the row's centre rather than beside it.
+      FocusManager.instance.primaryFocus?.unfocus();
       await tester.pumpAndSettle();
 
       await tester.tap(find.text('lib/models'));

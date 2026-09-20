@@ -331,6 +331,22 @@ class _FileExplorerBody extends ConsumerWidget {
 
   Widget _buildActionBar(BuildContext context) {
     return AbToolbar.actions(
+      // The filter shares this row rather than taking one of its own beneath
+      // it: stacked, the two put a pair of magnifiers directly above each
+      // other, one filtering names and one searching contents. Dropped while
+      // the content-search panel is open — that panel carries its own field,
+      // and the tree this one filters is not on screen behind it.
+      center: searchOpen
+          ? null
+          : FileSearchBar(
+              currentQuery: filterQuery,
+              // Zero here on purpose: [FileService.find] debounces already,
+              // and stacking the two put the first request ~550ms after the
+              // last keystroke while the @-mention panel paid only 250ms for
+              // the same search.
+              debounce: Duration.zero,
+              onQueryChanged: onFilterQueryChanged,
+            ),
       trailing: [
         AbIconButton(
           icon: AbIcons.refresh,
@@ -388,56 +404,41 @@ class _FileExplorerBody extends ConsumerWidget {
 
   Widget _buildBrowseContent(BuildContext context) {
     final filtering = filterQuery != null && filterQuery!.isNotEmpty;
-    return Column(
-      children: [
-        FileSearchBar(
-          currentQuery: filterQuery,
-          // Zero here on purpose: [FileService.find] debounces already, and
-          // stacking the two put the first request ~550ms after the last
-          // keystroke while the @-mention panel paid only 250ms for the same
-          // search.
-          debounce: Duration.zero,
-          onQueryChanged: onFilterQueryChanged,
-        ),
-        Expanded(
-          child: filtering
-              ? _FileFilterResults(
-                  entries: filterResults,
-                  loading: filterLoading,
-                  error: filterError,
-                  onTapFile: (path) {
-                    fileService.selectFile(path);
-                    onFilterQueryChanged(null);
-                  },
-                  onTapDirectory: (path) {
-                    detached(
-                      'FileExplorerScreen',
-                      'reveal filtered directory',
-                      () => fileService.revealDirectory(path),
-                    );
-                    onFilterQueryChanged(null);
-                  },
-                )
-              : RefreshIndicator(
-                  onRefresh: () async {
-                    fileService.requestFullTree();
-                    await Future.delayed(const Duration(milliseconds: 500));
-                  },
-                  child: FileTreeView(
-                    root: state.root,
-                    expandedPaths: state.expandedPaths,
-                    selectedFilePath: state.files.selectedFilePath,
-                    onToggleExpanded: (path) => detached(
-                      'FileExplorerScreen',
-                      'expand folder',
-                      () => fileService.toggleExpanded(path),
-                    ),
-                    onFileSelected: (path) => fileService.selectFile(path),
-                  ),
-                ),
-        ),
-      ],
-    );
+    return filtering
+        ? _FileFilterResults(
+            entries: filterResults,
+            loading: filterLoading,
+            error: filterError,
+            onTapFile: (path) {
+              fileService.selectFile(path);
+              onFilterQueryChanged(null);
+            },
+            onTapDirectory: (path) {
+              detached(
+                'FileExplorerScreen',
+                'reveal filtered directory',
+                () => fileService.revealDirectory(path),
+              );
+              onFilterQueryChanged(null);
+            },
+          )
+        : RefreshIndicator(
+            onRefresh: () async {
+              fileService.requestFullTree();
+              await Future.delayed(const Duration(milliseconds: 500));
+            },
+            child: FileTreeView(
+              root: state.root,
+              expandedPaths: state.expandedPaths,
+              selectedFilePath: state.files.selectedFilePath,
+              onToggleExpanded: (path) => detached(
+                'FileExplorerScreen',
+                'expand folder',
+                () => fileService.toggleExpanded(path),
+              ),
+              onFileSelected: (path) => fileService.selectFile(path),
+            ),
+          );
   }
 
   void _goBackFromViewer() {

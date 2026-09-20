@@ -4,6 +4,10 @@ import '../design/ab_tokens.dart';
 import '../design/widgets/ab_search_field.dart';
 
 /// A compact search bar for filtering the file tree by filename.
+///
+/// Carries no padding and sizes itself to a dense action row: it is mounted
+/// in the file tree's [AbToolbar.actions] centre slot, which owns the inset
+/// and the row height.
 class FileSearchBar extends StatefulWidget {
   final String? currentQuery;
   /// Coalescing window before [onQueryChanged] fires. A mount whose callback
@@ -53,17 +57,12 @@ class _FileSearchBarState extends State<FileSearchBar> {
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(
-        horizontal: AbTokens.space12,
-        vertical: AbTokens.space8,
-      ),
-      child: AbSearchField(
-        controller: _controller,
-        hint: 'Filter files...',
-        debounce: widget.debounce,
-        onChanged: _onChanged,
-      ),
+    return AbSearchField(
+      controller: _controller,
+      hint: 'Filter files...',
+      height: AbTokens.rowHeightXs,
+      debounce: widget.debounce,
+      onChanged: _onChanged,
     );
   }
 }
