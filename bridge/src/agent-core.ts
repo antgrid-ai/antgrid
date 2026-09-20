@@ -4115,6 +4115,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // [stopCheckoutServices] clears before the teardown wait is unchanged.
       if (!shouldRunPollTick(runtime.gitPoll)) return;
       if (runtime.disposed) return;
+      // Rides this tick rather than owning a timer, so it inherits the same
+      // attended/idle ladder and the one-interval-per-runtime teardown shape.
+      // Synchronous and off the git refresh's promise chain: it must run even
+      // on a tick whose git spawn fails. See
+      // FileWatcher.revalidateSubscribedDirs.
+      runtime.fileWatcher?.revalidateSubscribedDirs();
       const branch = runtime.cachedGitBranch;
       const files = runtime.gitFilesFingerprint;
       const sync = runtime.gitSyncFingerprint;
@@ -4875,6 +4881,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     mainRuntime.gitBranchInterval = setInterval(() => {
       if (!shouldRunPollTick(mainRuntime.gitPoll)) return;
       if (mainRuntime.disposed) return;
+      // Rides this tick rather than owning a timer, so it inherits the same
+      // attended/idle ladder and the one-interval-per-runtime teardown shape.
+      // Synchronous and off the git refresh's promise chain: it must run even
+      // on a tick whose git spawn fails. See
+      // FileWatcher.revalidateSubscribedDirs.
+      mainRuntime.fileWatcher?.revalidateSubscribedDirs();
       const prevBranch = mainRuntime.cachedGitBranch;
       const prevFiles = mainRuntime.gitFilesFingerprint;
       const prevSync = mainRuntime.gitSyncFingerprint;

@@ -43,6 +43,11 @@ const CHURN_GRACE_MS = 150;
  *  a real one runs for minutes, so it widens almost immediately anyway. */
 const CHURN_RUN_TO_WIDEN = 3;
 
+/** Stand-in mtime for a swept directory that could not be stat'd — see
+ *  [FileWatcher.revalidateSubscribedDirs]. Distinct from every real mtime, so
+ *  a directory that disappears reports once and then stays quiet. */
+const MISSING_DIR_MTIME = -1;
+
 /** Hand-validated bounds for file:tree:subscribe's `paths` — parseMessageFast
  *  never runs this frame's Zod schema on the wire (see the comment above
  *  FileTreeRootRequestMessage in protocol.ts), so a real inbound `paths` can
@@ -132,6 +137,12 @@ export class FileWatcher {
    *  and [everySubscribed] reconciles against the live roster for the
    *  departures that hook does not see. */
   private subscriptions = new Map<ClientKey, Set<string>>();
+  /** Last-seen mtime of each directory in the subscribed union, for
+   *  [revalidateSubscribedDirs]. Keyed exactly as [subscriptions] is — "" is
+   *  the root. Rebuilt from the union on every sweep so a collapsed
+   *  directory's entry leaves with it, and cleared with the subscriptions in
+   *  [stop]. */
+  private dirMtimes = new Map<string, number>();
   /** Core-wide roster of currently attached clients, injected because this
    *  watcher is per-checkout and the roster is not (agent-core.ts's
    *  `attachedClients`). Never derived from `this.subscriptions`'s own size
@@ -275,6 +286,100 @@ export class FileWatcher {
     return roster.every((c) => this.subscriptions.has(c));
   }
 
+  /** Every directory some client has open, plus the root — the set whose
+   *  CONTENTS a client is currently rendering, and so the only set where a
+   *  missed change is visible. */
+  private subscribedUnion(): Set<string> {
+    const union = new Set<string>([""]);
+    for (const dirs of this.subscriptions.values()) {
+      for (const dir of dirs) union.add(dir);
+    }
+    return union;
+  }
+
+  /** Record a directory's mtime as of a moment its contents were just
+   *  reported truthfully — a delta this watcher flushed, or a listing it
+   *  served. Without it [revalidateSubscribedDirs] cannot tell a change this
+   *  watcher DELIVERED from one it lost: an ordinary save moves its
+   *  directory's mtime too, so every save would read as a missed event and
+   *  invalidate the whole tree, re-listing every open directory — the traffic
+   *  the on-demand tree exists to avoid. */
+  private noteDirFresh(dirKey: string): void {
+    const abs = dirKey === "" ? this.projectRoot : join(this.projectRoot, dirKey);
+    try {
+      this.dirMtimes.set(dirKey, statSync(abs).mtimeMs);
+    } catch {
+      this.dirMtimes.set(dirKey, MISSING_DIR_MTIME);
+    }
+  }
+
+  /**
+   * Ask the DISK whether any directory a client has open changed behind the
+   * watcher's back, and drive the same recovery an OS overflow report drives.
+   *
+   * A recursive watch is lossy by contract on Windows — ReadDirectoryChangesW
+   * discards events when its kernel buffer overflows — and the overflow report
+   * that exists to say so cannot be relied on either: one host was measured
+   * losing every event below the checkout root while reporting no overflow at
+   * all. Nothing pull-based recovers from that. The app's own focus-resume
+   * re-pull claims a `sinceSeq`, and a lost event never moved `seq`, so the
+   * bridge answers `file:tree:unchanged` and CONFIRMS the stale tree. Only the
+   * disk knows, and only the bridge can ask it.
+   *
+   * One `stat` per open directory, never a readdir: a directory's mtime moves
+   * when an entry is added, removed or renamed — exactly the changes that
+   * alter what a client draws for it — and deliberately NOT when a file's
+   * contents change, which moves no row in the tree but would otherwise make
+   * every save look like a missed event. A change inside a CHILD directory
+   * moves only that child's mtime, which is why the union is what is swept: a
+   * directory nobody has expanded renders nothing that could be stale.
+   *
+   * Cheap enough to ride the git backstop tick (agent-core.ts) rather than own
+   * a timer: the union is capped at MAX_SUBSCRIBED_PATHS per client and is a
+   * handful of directories in practice.
+   */
+  revalidateSubscribedDirs(): void {
+    // Nothing attached, nothing to repair — a bare watcher under test and a
+    // headless core must not pay for a sweep no client reads.
+    if ((this.attachedClients?.() ?? []).length === 0) return;
+
+    let changed = false;
+    const next = new Map<string, number>();
+    for (const dir of this.subscribedUnion()) {
+      // D14 parity: this sweep's view is what the WATCHER should have seen,
+      // not what the client rendered. A client browsing in show-everything
+      // mode can have `node_modules` expanded and subscribed, and sweeping it
+      // would invalidate the tree on every `npm install` write — the exact
+      // churn the unconditional ignore prune keeps out.
+      if (dir !== "" && this.ig.ignores(dir, true)) continue;
+      const abs = dir === "" ? this.projectRoot : join(this.projectRoot, dir);
+      let mtime: number;
+      try {
+        mtime = statSync(abs).mtimeMs;
+      } catch {
+        mtime = MISSING_DIR_MTIME;
+      }
+      const prev = this.dirMtimes.get(dir);
+      // First sighting is RECORDED, not reported: the sweep that follows a
+      // client expanding a tree would otherwise invalidate it wholesale.
+      if (prev !== undefined && prev !== mtime) changed = true;
+      next.set(dir, mtime);
+    }
+    this.dirMtimes = next;
+    if (!changed) return;
+
+    log.debug(
+      "tree revalidation for %s — a subscribed directory moved with no watcher event",
+      this.projectId,
+    );
+    // The same recovery the null-filename overflow branch drives: flushBatch
+    // bumps `seq` and sends `file:tree:invalidated`, and the app re-lists the
+    // root and everything it has expanded. Deliberately not a synthesized
+    // delta — this knows THAT a directory moved, never what within it.
+    this.needsFullResync = true;
+    this.scheduleBatch();
+  }
+
   /** The revision [getTreeSnapshot] would stamp, without walking the tree — so
    *  a `sinceSeq` request that turns out to be current costs no walk. */
   currentSeq(): number {
@@ -316,6 +421,10 @@ export class FileWatcher {
    *  second rule set — nothing ignored can appear there, so nothing needs
    *  checking. */
   getRootListing(includeIgnored: boolean): DirectoryListing {
+    // Before the read, never after: the other order can record an mtime newer
+    // than the listing it accompanies, and a change landing in between would
+    // then be hidden for good rather than costing one redundant sweep hit.
+    this.noteDirFresh("");
     return listDirectory(
       "",
       this.projectRoot,
@@ -329,6 +438,8 @@ export class FileWatcher {
    *  Fair-share budget allocation across the batch is `listDirectoryBatch`'s
    *  job — see file-tree.ts. Same `ignored`-marking rule as [getRootListing]. */
   getChildListings(paths: string[], includeIgnored: boolean): DirectoryListing[] {
+    // See [getRootListing] for why this precedes the read.
+    for (const path of paths) this.noteDirFresh(path);
     return listDirectoryBatch(
       paths,
       this.projectRoot,
@@ -603,6 +714,7 @@ export class FileWatcher {
     // checkout open loses its subscription here, in one place, rather than
     // needing its own per-checkout drop from agent-core.ts's teardown paths.
     this.subscriptions.clear();
+    this.dirMtimes.clear();
     const closed = this.watcher?.close();
     this.watcher = null;
     this.nativeWatcher?.close();
@@ -731,6 +843,12 @@ export class FileWatcher {
       // dedup on their own. Stop stamping `seq`, or move the bump below this
       // branch, and the second resync in a row is deduped away — the apps
       // that missed the first never learn.
+      // Everything open is about to be re-listed, so record where each
+      // directory stands now — otherwise the next sweep re-reports the same
+      // movement and invalidates a tree that just healed.
+      if (this.dirMtimes.size > 0) {
+        for (const dir of this.subscribedUnion()) this.noteDirFresh(dir);
+      }
       this.sendMessage(createMessage("file:tree:invalidated", { seq }));
       log.debug("tree resync for project %s — watcher reported an unnamed change", this.projectId);
       return;
@@ -768,6 +886,20 @@ export class FileWatcher {
           this.projectId,
         );
       }
+    }
+
+    // Read off the UNFILTERED delta: what this watcher saw is what it is now
+    // current for, whatever D6 then dropped from the frame. Residual it cannot
+    // close — a change LOST from a directory in the same window as one
+    // delivered from it is hidden by the delivered one's refresh, and waits
+    // for the next movement in that directory.
+    if (this.dirMtimes.size > 0) {
+      const union = this.subscribedUnion();
+      const touched = new Set<string>();
+      for (const node of added) touched.add(dirnameKeyOf(node.path));
+      for (const node of modified) touched.add(dirnameKeyOf(node.path));
+      for (const path of removed) touched.add(dirnameKeyOf(path));
+      for (const dir of touched) if (union.has(dir)) this.noteDirFresh(dir);
     }
 
     // Sent even when the filter above drops everything: `seq` was already
