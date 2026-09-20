@@ -48,6 +48,7 @@ class AbTextField extends StatefulWidget {
     this.contentPadding,
     this.prefixIconSize,
     this.prefixIconWidth,
+    this.prefixGap = 0,
     this.suffixSlotWidth,
     this.border = true,
   });
@@ -135,6 +136,18 @@ class AbTextField extends StatefulWidget {
 
   /// Prefix-icon slot width. Defaults to [AbTokens.iconButtonBox] (24).
   final double? prefixIconWidth;
+
+  /// Gap between the prefix slot and the text, for a slot squared to the glyph
+  /// itself. A full-height slot centres its glyph and so carries the gap in its
+  /// own margins; one narrowed to align the glyph with a column outside the
+  /// field has none left to give, and the text would start against it. Zero by
+  /// default so every field that takes the full-height slot is unaffected.
+  ///
+  /// It has to sit HERE, between the slot and the text, and not in
+  /// [contentPadding]: that is [AbControlBox]'s padding and wraps the whole
+  /// row, prefix included, so widening it moves the glyph instead of freeing
+  /// the text from it.
+  final double prefixGap;
 
   /// When set, the clear button is centred inside a square slot of this width
   /// (instead of sitting flush). Pass the field [height] to give the suffix
@@ -293,6 +306,8 @@ class _AbTextFieldState extends State<AbTextField> {
                   ),
                 ),
               ),
+            if (widget.prefixIcon != null && widget.prefixGap > 0)
+              SizedBox(width: widget.prefixGap),
             Expanded(
               child: TextField(
                 controller: _controller,

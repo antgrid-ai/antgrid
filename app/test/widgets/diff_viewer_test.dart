@@ -1,6 +1,7 @@
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:antgrid/design/widgets/ab_button.dart';
 import 'package:antgrid/widgets/code_syntax.dart';
 import 'package:antgrid/widgets/diff_viewer.dart';
 
@@ -347,27 +348,91 @@ void main() {
       );
     });
 
-    testWidgets('binary diffs still short-circuit to the empty state', (
-      tester,
-    ) async {
+    Future<int> pumpBinary(WidgetTester tester, {double width = 600}) async {
+      var viewed = 0;
       await tester.pumpWidget(
         MaterialApp(
           home: Scaffold(
-            body: DiffViewer(
-              path: 'assets/logo.png',
-              diff: 'Binary files a/assets/logo.png and b/... differ',
-              additions: 0,
-              deletions: 0,
-              onViewFile: () {},
-              onClose: () {},
-              onSendToAgent: (context, message) async {},
+            body: SizedBox(
+              width: width,
+              height: 400,
+              child: DiffViewer(
+                path: 'assets/logo.png',
+                gitStatus: 'M',
+                diff: 'Binary files a/assets/logo.png and b/... differ',
+                additions: 0,
+                deletions: 0,
+                onViewFile: () => viewed++,
+                onClose: () {},
+                onSendToAgent: (context, message) async {},
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      return viewed;
+    }
+
+    testWidgets('binary diffs still short-circuit to the empty state', (
+      tester,
+    ) async {
+      await pumpBinary(tester);
+
+      expect(find.text('Binary file changed: logo.png'), findsOneWidget);
+    });
+
+    // The regression this guards is the whole reason a changed image was
+    // unreachable: the placeholder used to be returned INSTEAD of the header,
+    // and the header is where `View file` lives.
+    testWidgets('binary diffs keep the header that routes to the file', (
+      tester,
+    ) async {
+      await pumpBinary(tester);
+
+      expect(find.text('assets/logo.png'), findsOneWidget);
+      expect(find.text('View file'), findsWidgets);
+    });
+
+    testWidgets('the binary placeholder action opens the file', (
+      tester,
+    ) async {
+      var viewed = 0;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SizedBox(
+              width: 600,
+              height: 400,
+              child: DiffViewer(
+                path: 'assets/logo.png',
+                diff: 'Binary files a/assets/logo.png and b/... differ',
+                additions: 0,
+                deletions: 0,
+                onViewFile: () => viewed++,
+                onClose: () {},
+                onSendToAgent: (context, message) async {},
+              ),
             ),
           ),
         ),
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('Binary file changed: logo.png'), findsOneWidget);
+      await tester.tap(find.widgetWithText(AbButton, 'View file'));
+      await tester.pumpAndSettle();
+
+      expect(viewed, 1);
+    });
+
+    // A phone collapses the header's written link to a bare icon, so the
+    // placeholder's own action is the only labelled route left.
+    testWidgets('the placeholder action survives a compact header', (
+      tester,
+    ) async {
+      await pumpBinary(tester, width: 300);
+
+      expect(find.widgetWithText(AbButton, 'View file'), findsOneWidget);
     });
   });
 }

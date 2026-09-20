@@ -7,6 +7,7 @@ import 'package:flutter/rendering.dart' show SelectedContent;
 import '../design/ab_icons.dart';
 import '../design/ab_tokens.dart';
 import '../design/ab_colors.dart';
+import '../design/widgets/ab_button.dart';
 import '../design/widgets/ab_diff_stat.dart';
 import '../design/widgets/ab_empty_state.dart';
 import '../design/widgets/ab_icon_button.dart';
@@ -342,12 +343,31 @@ class _DiffViewerState extends State<DiffViewer> {
 
   @override
   Widget build(BuildContext context) {
-    // Check for binary diff
+    // Git prints one line and no content for a binary change, so there are no
+    // rows to lay out — but the header is not part of the diff. It carries the
+    // path, the status letter, the way out of this pane, and `View file`,
+    // which for a changed image is the one control that shows you the change
+    // at all. Returning the placeholder ALONE skipped it, stranding every
+    // binary change on a dead end; the action below repeats the same callback
+    // so the route survives a header that narrows away on a phone.
     if (widget.diff.contains('Binary files') &&
         widget.diff.contains('differ')) {
-      return AbEmptyState(
-        icon: AbIcons.fileBinary,
-        title: 'Binary file changed: ${widget.path.split('/').last}',
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _buildHeader(context),
+          Expanded(
+            child: AbEmptyState(
+              icon: AbIcons.fileBinary,
+              title: 'Binary file changed: ${widget.path.split('/').last}',
+              action: AbButton(
+                label: 'View file',
+                compact: true,
+                onTap: widget.onViewFile,
+              ),
+            ),
+          ),
+        ],
       );
     }
 
