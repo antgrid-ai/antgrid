@@ -7,6 +7,7 @@ import 'package:flutter/rendering.dart' show SelectedContent;
 import '../design/ab_icons.dart';
 import '../design/ab_tokens.dart';
 import '../design/ab_colors.dart';
+import '../design/widgets/ab_button.dart';
 import '../design/widgets/ab_diff_stat.dart';
 import '../design/widgets/ab_empty_state.dart';
 import '../design/widgets/ab_icon_button.dart';
@@ -238,6 +239,7 @@ class _DiffViewerState extends State<DiffViewer> {
   late List<_DiffRow> _rows;
   late List<_DiffHunk> _hunks;
   late double _codeWidth;
+  late bool _isBinary;
   CodeLineHighlighter? _highlighter;
 
   /// The scaler the rows will actually be painted with. Rows render through
@@ -280,6 +282,18 @@ class _DiffViewerState extends State<DiffViewer> {
   }
 
   void _parse() {
+    // Git prints one line and no content for a binary change, so there is
+    // nothing to lay out — and parsing it anyway would run a TextPainter over
+    // every line to size a body that is never built.
+    _isBinary =
+        widget.diff.contains('Binary files') && widget.diff.contains('differ');
+    if (_isBinary) {
+      _hunks = const [];
+      _rows = const [];
+      _highlighter = null;
+      _codeWidth = 0;
+      return;
+    }
     final hunks = _parseDiff(widget.diff);
     _hunks = hunks;
     _rows = [
@@ -342,25 +356,28 @@ class _DiffViewerState extends State<DiffViewer> {
 
   @override
   Widget build(BuildContext context) {
-    // Check for binary diff
-    if (widget.diff.contains('Binary files') &&
-        widget.diff.contains('differ')) {
-      return AbEmptyState(
-        icon: AbIcons.fileBinary,
-        title: 'Binary file changed: ${widget.path.split('/').last}',
-      );
-    }
+    // The header is not part of the diff: it carries the path, the status
+    // letter, the way out of the pane, and `View file`, which for a changed
+    // image is the one control that shows the change at all. The placeholder
+    // repeats that callback because a narrow header collapses the written link
+    // to a bare icon.
+    final Widget body = _isBinary
+        ? AbEmptyState(
+            icon: AbIcons.fileBinary,
+            title: 'Binary file changed: ${widget.path.split('/').last}',
+            action: AbButton(
+              label: 'View file',
+              compact: true,
+              onTap: widget.onViewFile,
+            ),
+          )
+        : _rows.isEmpty
+        ? const AbEmptyState.compact(title: 'No changes')
+        : _buildBody(context);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        _buildHeader(context),
-        Expanded(
-          child: _rows.isEmpty
-              ? const AbEmptyState.compact(title: 'No changes')
-              : _buildBody(context),
-        ),
-      ],
+      children: [_buildHeader(context), Expanded(child: body)],
     );
   }
 

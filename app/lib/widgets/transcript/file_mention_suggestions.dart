@@ -2,87 +2,18 @@ import 'package:flutter/widgets.dart';
 
 import '../../design/ab_colors.dart';
 import '../../design/ab_tokens.dart';
-import '../../models/file_tree_models.dart';
 import 'suggestion_panel.dart';
 
 /// A candidate for @-mention completion: a project-relative POSIX path plus
 /// whether it is a directory (dirs display and insert with a trailing '/').
+///
+/// Matching and ranking both happen bridge-side now (`file:find`, backing
+/// [FileService.find] — basename-subsequence match beats path-only, then
+/// shallow-first, then alpha; see the bridge's `matchFindEntries`). There is
+/// no client-side re-filter: the bridge already matched [query] fuzzily
+/// (subsequence, not substring), so re-testing `path.contains(query)` here
+/// would silently drop entries it matched that this simpler test would not.
 typedef FileMention = ({String path, bool isDir});
-
-/// Depth-first flatten of the synced tree into mention candidates. Skips the
-/// root node itself (path == '' — it stands for the project directory, not a
-/// mentionable path). O(n); callers cache per root identity.
-List<FileMention> flattenFileTree(FileNode? root) {
-  if (root == null) return const [];
-  final out = <FileMention>[];
-  void visit(FileNode node) {
-    if (node.path.isNotEmpty) {
-      out.add((path: node.path, isDir: node.type == FileNodeType.directory));
-    }
-    for (final child in node.children) {
-      visit(child);
-    }
-  }
-
-  visit(root);
-  return out;
-}
-
-/// Case-insensitive filter + rank for the @-mention panel. Match = [query] is
-/// a substring of the path. Rank tiers: 0 filename starts with query,
-/// 1 filename contains it, 2 only the full path does. Sort:
-/// (isDir, rank, depth, pathLower) — all files strictly before all dirs, then
-/// rank, then shallow-first, then alpha. An empty query matches everything at
-/// rank 0, degenerating to a files-first shallow-first browse list.
-List<FileMention> filterFileMentions(
-  List<FileMention> all,
-  String query, {
-  int limit = 50,
-}) {
-  final q = query.toLowerCase();
-  final ranked = <({FileMention m, int rank, int depth, String pathLower})>[];
-  for (final m in all) {
-    final pathLower = m.path.toLowerCase();
-    if (!pathLower.contains(q)) continue;
-    final nameLower = pathLower.split('/').last;
-    final rank = nameLower.startsWith(q)
-        ? 0
-        : nameLower.contains(q)
-        ? 1
-        : 2;
-    ranked.add((
-      m: m,
-      rank: rank,
-      depth: '/'.allMatches(m.path).length,
-      pathLower: pathLower,
-    ));
-  }
-  ranked.sort((a, b) {
-    if (a.m.isDir != b.m.isDir) return a.m.isDir ? 1 : -1;
-    if (a.rank != b.rank) return a.rank - b.rank;
-    if (a.depth != b.depth) return a.depth - b.depth;
-    return a.pathLower.compareTo(b.pathLower);
-  });
-  if (ranked.length <= limit) return [for (final r in ranked) r.m];
-  // Over the cap: files sort ahead of every directory, so a plain take(limit)
-  // can crowd folders out entirely — `@src` in a subtree of >limit files would
-  // truncate `src` itself, the folder the user is most likely reaching for.
-  // Reserve a slice of the cap for directories so a matched folder stays
-  // reachable; files still lead the display order.
-  final dirReserve = limit < 10 ? limit : 10;
-  final files = [
-    for (final r in ranked)
-      if (!r.m.isDir) r.m,
-  ];
-  final dirs = [
-    for (final r in ranked)
-      if (r.m.isDir) r.m,
-  ];
-  final dirSlots = dirs.length < dirReserve ? dirs.length : dirReserve;
-  final chosenFiles = files.take(limit - dirSlots).toList();
-  final chosenDirs = dirs.take(limit - chosenFiles.length).toList();
-  return [...chosenFiles, ...chosenDirs];
-}
 
 /// @-mention panel rendered directly above the composer input while a mention
 /// token is being typed. Pure display + tap, same contract as
@@ -94,14 +25,43 @@ class FileMentionSuggestions extends StatelessWidget {
     required this.entries,
     required this.selectedIndex,
     required this.onPick,
+    this.visible = true,
+    this.loading = false,
+    this.error,
   });
 
   final List<FileMention> entries;
   final int selectedIndex;
   final void Function(FileMention entry) onPick;
 
+  /// Whether an @-mention token is active at all. Distinct from [entries]
+  /// being empty: an inactive/dismissed token renders nothing (matching
+  /// [SuggestionPanel]'s own empty collapse), while an ACTIVE token with no
+  /// entries yet must still say something — a still-loading or genuinely
+  /// no-match search rendering nothing would look identical to the panel
+  /// simply not being open.
+  final bool visible;
+
+  /// True while the `file:find` backing [entries] is in flight for the
+  /// CURRENT query — distinguishes "still searching" from "searched, no
+  /// matches" while [entries] is empty either way.
+  final bool loading;
+
+  /// Set when the search itself failed (a killed or timed-out engine, a
+  /// dropped reply). [entries] is empty in that case too, which is why the
+  /// third state has to be carried rather than inferred.
+  final String? error;
+
   @override
   Widget build(BuildContext context) {
+    if (!visible) return const SizedBox.shrink();
+    if (entries.isEmpty) {
+      final failure = error;
+      if (failure != null && !loading) {
+        return _StatusRow(text: 'Search failed: $failure');
+      }
+      return _StatusRow(text: loading ? 'Searching…' : 'No matching files');
+    }
     return SuggestionPanel<FileMention>(
       items: entries,
       selectedIndex: selectedIndex,
@@ -119,6 +79,44 @@ class FileMentionSuggestions extends StatelessWidget {
           ),
         );
       },
+    );
+  }
+}
+
+/// A single-line, non-interactive row matching [SuggestionPanel]'s chrome —
+/// used only for the loading/no-match states, which have no item to select
+/// or tap.
+class _StatusRow extends StatelessWidget {
+  const _StatusRow({required this.text});
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.antgrid;
+    return Container(
+      margin: const EdgeInsets.fromLTRB(
+        AbTokens.space8,
+        0,
+        AbTokens.space8,
+        AbTokens.space4,
+      ),
+      decoration: BoxDecoration(
+        color: colors.bgRaised,
+        border: Border.all(color: colors.borderSubtle),
+        borderRadius: AbTokens.borderRadius5,
+      ),
+      padding: const EdgeInsets.symmetric(
+        horizontal: AbTokens.space8,
+        vertical: AbTokens.space4,
+      ),
+      child: Text(
+        text,
+        style: AbTokens.sansStyle(
+          fontSize: AbTokens.fontSm,
+          color: colors.textMuted,
+        ),
+      ),
     );
   }
 }

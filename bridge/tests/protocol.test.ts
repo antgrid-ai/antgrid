@@ -353,27 +353,40 @@ describe("terminal:snapshot", () => {
   });
 });
 
-describe("file:tree:snapshot", () => {
-  it("request shape (no params)", () => {
+describe("file:tree listings", () => {
+  it("root request shape (no params)", () => {
     const msg = {
       id: "015d4fbe-076e-4968-81b4-3cd6172805f1",
       timestamp: Date.now(),
-      type: "file:tree:snapshot:request",
+      type: "file:tree:root:request",
     };
-    expect(parseMessage(JSON.stringify(msg))?.type).toBe("file:tree:snapshot:request");
+    expect(parseMessage(JSON.stringify(msg))?.type).toBe("file:tree:root:request");
   });
 
-  it("reply carries tree and seq", () => {
+  it("reply carries listings and seq", () => {
     const msg = {
       id: "263a9c68-db7d-4b17-a919-6c62f1331b50",
       timestamp: Date.now(),
-      type: "file:tree:snapshot",
-      tree: { name: "root", path: "", type: "directory", children: [] },
+      type: "file:tree:children",
+      listings: [{ path: "", children: [] }],
       seq: 7,
     };
     const parsed = parseMessage(JSON.stringify(msg));
-    expect(parsed?.type).toBe("file:tree:snapshot");
-    if (parsed?.type !== "file:tree:snapshot") throw new Error("unreachable");
+    expect(parsed?.type).toBe("file:tree:children");
+    if (parsed?.type !== "file:tree:children") throw new Error("unreachable");
+    expect(parsed.seq).toBe(7);
+  });
+
+  it("unchanged carries the confirmed seq alone", () => {
+    const msg = {
+      id: "7a4a1f0e-2f2f-4a55-9a2f-2c1f0d9a6b31",
+      timestamp: Date.now(),
+      type: "file:tree:unchanged",
+      seq: 7,
+    };
+    const parsed = parseMessage(JSON.stringify(msg));
+    expect(parsed?.type).toBe("file:tree:unchanged");
+    if (parsed?.type !== "file:tree:unchanged") throw new Error("unreachable");
     expect(parsed.seq).toBe(7);
   });
 });

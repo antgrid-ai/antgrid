@@ -2,6 +2,7 @@
 import { existsSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { join } from "node:path";
+import { runGit } from "./git-spawn";
 
 export type GitFileStatusCode = "M" | "A" | "D" | "R" | "U" | "!";
 
@@ -442,28 +443,6 @@ export function unresolvedConflictError(paths: string[]): string {
 
 export interface GitCommitResult extends GitOpResult {
   sha?: string;
-}
-
-async function runGit(
-  cwd: string,
-  args: string[],
-): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-  // `core.quotepath=false` keeps non-ASCII paths verbatim (UTF-8) instead of
-  // git's default C-quoted/octal-escaped form (e.g. "caf\303\251.txt"). The
-  // quoted form is a *literal* string that no longer matches the real file, so
-  // status paths would round-trip into `add`/`restore`/`clean` pathspecs that
-  // match nothing. Harmless for the pathspec-input verbs; load-bearing here.
-  const proc = Bun.spawn(["git", "-c", "core.quotepath=false", ...args], {
-    cwd,
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [stdout, stderr] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-  ]);
-  const exitCode = await proc.exited;
-  return { exitCode, stdout, stderr };
 }
 
 /**

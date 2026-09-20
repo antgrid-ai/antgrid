@@ -30,37 +30,14 @@ void main() {
   /// Pumps the panel with [files] as the project's git status. Entries are the
   /// raw `git:status` shape, so a path with both a staged and an unstaged
   /// change is expressed the way the bridge sends it: twice.
-  Map<String, dynamic> dir(String name, String path, List<Object> children) => {
-    'name': name,
-    'path': path,
-    'type': 'directory',
-    'children': children,
-  };
-  Map<String, dynamic> file(String name, String path) => {
-    'name': name,
-    'path': path,
-    'type': 'file',
-  };
-
-  /// The tree the fold tests need. Most tests here leave it out: without a
-  /// `tree:full` the panel falls back to flat full-path rows (its documented
-  /// unhydrated behaviour), which is enough to exercise the header but has no
-  /// folder rows to fold.
-  Map<String, dynamic> nestedTree() => dir('p', 'p', [
-    dir('app', 'app', [
-      dir('lib', 'app/lib', [file('a.dart', 'app/lib/a.dart')]),
-    ]),
-    dir('bridge', 'bridge', [
-      dir('src', 'bridge/src', [file('b.ts', 'bridge/src/b.ts')]),
-    ]),
-    file('README.md', 'README.md'),
-  ]);
-
+  ///
+  /// No file tree is fed in, and the fold tests below do not need one: the
+  /// changes list builds its folder rows from the changed-file PATHS alone
+  /// (`_ChangesDir.build`), never from the synced tree.
   Future<void> pumpWithStatus(
     WidgetTester tester,
     List<Map<String, dynamic>> files, {
     double width = 800,
-    Map<String, dynamic>? tree,
   }) async {
     useInMemoryPrefs();
     transport = FakeAgentTransport();
@@ -111,9 +88,6 @@ void main() {
       'skip': 0,
       'hasMore': false,
     });
-    if (tree != null) {
-      transport.emit('tree:full', {'projectId': 'p', 'root': tree});
-    }
     transport.emit('git:status', {'projectId': 'p', 'files': files});
     await tester.pump();
     await tester.pump();
@@ -569,7 +543,7 @@ void main() {
       {'path': 'bridge/src/b.ts', 'status': 'M', 'staged': false},
       // Root-level: contributes no folder row at all.
       {'path': 'README.md', 'status': 'M', 'staged': false},
-    ], tree: nestedTree());
+    ]);
 
     await tester.tap(find.byTooltip('Collapse All Folders'));
     await tester.pumpAndSettle();
@@ -589,7 +563,7 @@ void main() {
   ) async {
     await pumpWithStatus(tester, [
       {'path': 'app/lib/a.dart', 'status': 'M', 'staged': false},
-    ], tree: nestedTree());
+    ]);
 
     await tester.tap(find.byTooltip('Collapse All Folders'));
     await tester.pumpAndSettle();
@@ -642,7 +616,7 @@ void main() {
     await pumpWithStatus(tester, [
       {'path': 'app/lib/a.dart', 'status': '!', 'staged': false},
       {'path': 'bridge/src/b.ts', 'status': 'M', 'staged': false},
-    ], tree: nestedTree());
+    ]);
 
     await tester.tap(find.byTooltip('Collapse All Folders'));
     await tester.pumpAndSettle();

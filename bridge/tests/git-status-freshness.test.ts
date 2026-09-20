@@ -134,22 +134,22 @@ test("a tree snapshot request answers with git status too", async () => {
   await new Promise((resolve) => setTimeout(resolve, 500));
   expect(stagedPaths(sent)).not.toContain("changed-while-away.ts");
 
-  // The app asks for a tree snapshot on every reconnect and on a
-  // pull-to-refresh — because it doubts what it holds. Answering with the tree
-  // alone left the changes list on whatever the replay cache last had.
+  // The app re-lists the root on every reconnect and on a pull-to-refresh —
+  // because it doubts what it holds. Answering with the listing alone left the
+  // changes list on whatever the replay cache last had.
   bus.dispatchInbound(
-    createMessage("file:tree:snapshot:request", {}),
+    createMessage("file:tree:root:request", {}),
     "control",
     "loopback",
   );
 
   await waitFor(
-    () => sent.some((m) => m.type === "file:tree:snapshot"),
-    "the tree snapshot",
+    () => sent.some((m) => m.type === "file:tree:children"),
+    "the root listing",
   );
   await waitFor(
     () => stagedPaths(sent).includes("changed-while-away.ts"),
-    "the staged file in git:status after the snapshot request",
+    "the staged file in git:status after the root request",
   );
 });
 

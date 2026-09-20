@@ -1,7 +1,7 @@
 // The re-sync paths exist because a client just told us it has nothing — so an
 // UNCHANGED payload is precisely the one that still has to reach the wire. The
 // bus's payload-equality dedup is what silently swallowed them: an idle
-// project's status, git and tree are byte-identical to the cached frames, so
+// project's status and git state are byte-identical to the cached frames, so
 // nothing was delivered and the client had no second way to ask.
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -74,83 +74,6 @@ async function bootCore(): Promise<{ bus: MessageBus; sent: AbMessage[] }> {
 
 const countOf = (sent: AbMessage[], type: string) => sent.filter((m) => m.type === type).length;
 
-test("a resync re-sends the file tree even when nothing about it changed", async () => {
-  const { bus, sent } = await bootCore();
-  // The precondition is a CACHED tree, not a delivered one: the open-time build
-  // is retained rather than pushed (MessageBus.retain), and what this test is
-  // about is the dedup having a byte-identical frame to swallow the resync
-  // against.
-  await waitFor(
-    () => bus.getSnapshot(["tree:full"]).length > 0,
-    "a tree:full in the replay cache",
-  );
-  // The open-time build reaches the cache and nothing else. Pushing it spent
-  // the largest frame the bridge produces on a client that pulls its own copy
-  // regardless — and, over a relay, before that client had a stream bound to
-  // receive it.
-  expect(countOf(sent, "tree:full")).toBe(0);
-  const before = countOf(sent, "tree:full");
-
-  // A second handshake is a reconnected app: its whole point is that the app
-  // believes it has nothing, while the project sat idle and every frame it
-  // needs is identical to what the replay cache holds.
-  core!.onHandshakeComplete();
-
-  await waitFor(() => countOf(sent, "tree:full") > before, "the re-synced tree:full");
-  await waitFor(() => countOf(sent, "agent:status") > 1, "the re-synced agent:status");
-});
-
-test("a resync skips the tree for a client that pulls it, and re-sends everything else", async () => {
-  const { bus, sent } = await bootCore();
-  core!.setOwnerPullsTreeProvider(() => true);
-  await waitFor(
-    () => bus.getSnapshot(["tree:full"]).length > 0,
-    "a tree:full in the replay cache",
-  );
-  const before = countOf(sent, "tree:full");
-  const statusBefore = countOf(sent, "git:status");
-
-  core!.onHandshakeComplete();
-
-  // Positive evidence the resync ran at all, before trusting the negative below.
-  await waitFor(() => countOf(sent, "agent:status") > 1, "the re-synced agent:status");
-  await waitFor(() => countOf(sent, "git:status") > statusBefore, "the re-synced git:status");
-  expect(countOf(sent, "tree:full")).toBe(before);
-});
-
-test("a resync still pushes the tree for a client that does not pull it", async () => {
-  const { bus, sent } = await bootCore();
-  core!.setOwnerPullsTreeProvider(() => false);
-  await waitFor(
-    () => bus.getSnapshot(["tree:full"]).length > 0,
-    "a tree:full in the replay cache",
-  );
-  const before = countOf(sent, "tree:full");
-
-  core!.onHandshakeComplete();
-
-  await waitFor(() => countOf(sent, "tree:full") > before, "the re-synced tree:full");
-});
-
-test("a resync pushes the tree when the peer half of the guard is the one that doesn't pull", async () => {
-  // Both providers must agree, not just the owner: a modern desktop reconnected
-  // over loopback while a legacy phone is still established on the relay slot.
-  const { bus, sent } = await bootCore();
-  core!.setOwnerPullsTreeProvider(() => true);
-  core!.setEstablishedPeersProvider(() => [
-    { peerId: "legacy#machine", peerPubkey: "pk-legacy", checkoutRouting: true, reachable: true, pullsTree: false },
-  ]);
-  await waitFor(
-    () => bus.getSnapshot(["tree:full"]).length > 0,
-    "a tree:full in the replay cache",
-  );
-  const before = countOf(sent, "tree:full");
-
-  core!.onHandshakeComplete();
-
-  await waitFor(() => countOf(sent, "tree:full") > before, "the re-synced tree:full");
-});
-
 test("a tree snapshot request re-sends an UNCHANGED git status", async () => {
   const { bus, sent } = await bootCore();
   await waitFor(() => sent.some((m) => m.type === "git:status"), "the first git:status");
@@ -159,21 +82,33 @@ test("a tree snapshot request re-sends an UNCHANGED git status", async () => {
   await new Promise((resolve) => setTimeout(resolve, 800));
   const before = countOf(sent, "git:status");
 
-  bus.dispatchInbound(createMessage("file:tree:snapshot:request", {}), "control", "loopback");
+  bus.dispatchInbound(createMessage("file:tree:root:request", {}), "control", "loopback");
 
-  await waitFor(() => sent.some((m) => m.type === "file:tree:snapshot"), "the tree snapshot");
+  await waitFor(() => sent.some((m) => m.type === "file:tree:children"), "the root listing");
   await waitFor(() => countOf(sent, "git:status") > before, "git:status after the request");
 });
 
-test("a tree request naming the current revision is answered without the tree", async () => {
+test("a tree request naming the current revision is answered without a listing", async () => {
   const { bus, sent } = await bootCore();
-  bus.dispatchInbound(createMessage("file:tree:snapshot:request", {}), "control", "loopback");
-  await waitFor(() => sent.some((m) => m.type === "file:tree:snapshot"), "the first tree snapshot");
-  const first = sent.find((m) => m.type === "file:tree:snapshot");
-  const seq = first?.type === "file:tree:snapshot" ? first.seq : -1;
+
+  // The seq has to be past 0 before `unchanged` is reachable at all: seq 0 is
+  // also what the no-watcher answer invents, so the handler re-lists it on
+  // purpose rather than confirming a root the caller may never have had.
+  // Writing until the watcher flushes is the only way to get off zero.
+  let seq = 0;
+  for (let probe = 0; seq === 0; probe++) {
+    if (probe > 100) throw new Error("the file watcher never bumped its seq");
+    writeFileSync(join(root, `probe-${probe}.txt`), "probe\n");
+    bus.dispatchInbound(createMessage("file:tree:root:request", {}), "control", "loopback");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const listings = sent.filter((m) => m.type === "file:tree:children");
+    const last = listings[listings.length - 1];
+    seq = last?.type === "file:tree:children" ? last.seq : 0;
+  }
+  const listingsBefore = countOf(sent, "file:tree:children");
 
   bus.dispatchInbound(
-    createMessage("file:tree:snapshot:request", { sinceSeq: seq }),
+    createMessage("file:tree:root:request", { sinceSeq: seq }),
     "control",
     "loopback",
   );
@@ -181,23 +116,23 @@ test("a tree request naming the current revision is answered without the tree", 
   await waitFor(() => sent.some((m) => m.type === "file:tree:unchanged"), "the unchanged answer");
   const unchanged = sent.find((m) => m.type === "file:tree:unchanged");
   expect(unchanged?.type === "file:tree:unchanged" ? unchanged.seq : -1).toBe(seq);
-  // The point of the whole exchange: the tree crossed once, not twice.
-  expect(countOf(sent, "file:tree:snapshot")).toBe(1);
+  // The point of the whole exchange: no listing crossed for the second ask.
+  expect(countOf(sent, "file:tree:children")).toBe(listingsBefore);
 });
 
-test("a tree request naming an unrecognised revision still gets the tree", async () => {
+test("a tree request naming an unrecognised revision still gets a listing", async () => {
   const { bus, sent } = await bootCore();
 
   // Equality, never "at least": an agent that restarted is counting from zero
   // again, so a client claim from the previous process is exactly the one that
-  // must be answered with the tree rather than confirmed.
+  // must be answered with a listing rather than confirmed.
   bus.dispatchInbound(
-    createMessage("file:tree:snapshot:request", { sinceSeq: 9999 }),
+    createMessage("file:tree:root:request", { sinceSeq: 9999 }),
     "control",
     "loopback",
   );
 
-  await waitFor(() => sent.some((m) => m.type === "file:tree:snapshot"), "the tree snapshot");
+  await waitFor(() => sent.some((m) => m.type === "file:tree:children"), "the root listing");
   expect(countOf(sent, "file:tree:unchanged")).toBe(0);
 });
 

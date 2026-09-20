@@ -317,16 +317,14 @@ export class DartAppClient {
   /**
    * Pull-then-replay durable state for a stream, mirroring what a
    * `ProjectSession` does on bind. Issues the `state.snapshot` RPC; the client
-   * fans the cached frames (agent:status/tree:full/git:status on a project
-   * stream, `agent:projects` on the control plane) out as `antgrid-message`
-   * events, then emits `snapshot-complete`. Without this the welcome-state
-   * waiters race the agent's de-duped live burst and time out
-   * non-deterministically.
+   * fans the cached frames (agent:status/git:status on a project stream,
+   * `agent:projects` on the control plane) out as `antgrid-message` events,
+   * then emits `snapshot-complete`. Without this the welcome-state waiters
+   * race the agent's de-duped live burst and time out non-deterministically.
    *
-   * The production pull excludes `tree:full` (the app's own tree hydrator
-   * carries it), so on a project stream this client asks for the heavy types
-   * separately before it reports complete — see `_handleSnapshot` in
-   * `packages/antgrid_eval_client`.
+   * The file tree is not among the cached frames — it is fetched lazily per
+   * directory (see {@link fetchRootListing} / {@link fetchChildListings})
+   * rather than replayed at connect time.
    */
   async pullStateSnapshot(streamId = CONTROL_STREAM_ID, timeoutMs = 15_000): Promise<void> {
     const done = this.waitForEvent(
@@ -401,14 +399,23 @@ export class DartAppClient {
     return done;
   }
 
-  /** The open-time tree is retained for replay, never pushed — every client
-   *  pulls its own (see MessageBus.retain and `state-snapshot.ts`) — so ask for
-   *  it the way a `ProjectSession` does rather than await a push that no longer
-   *  comes. The waiter is armed BEFORE the pull so the fanned frame cannot land
-   *  in the gap between them. */
-  async waitForFileTree(streamId: string, timeoutMs = 10_000): Promise<DartEvent> {
-    const waiting = this.waitForStreamAbMessage(streamId, "tree:full", timeoutMs);
-    await this.pullStateSnapshot(streamId, timeoutMs);
+  /** Request the checkout root's directory listing and return the
+   *  `file:tree:children` reply (its `listings` carries one entry, `path:
+   *  ""`). Direct request/response — unlike the retired whole-tree push,
+   *  nothing is cached, so each call re-lists from disk. The waiter is armed
+   *  BEFORE the request so a reply that lands ahead of a slow event-loop tick
+   *  cannot be missed. */
+  async fetchRootListing(streamId: string, timeoutMs = 10_000): Promise<DartEvent> {
+    const waiting = this.waitForStreamAbMessage(streamId, "file:tree:children", timeoutMs);
+    this.sendOnStream(streamId, createMessage("file:tree:root:request", {}));
+    return waiting;
+  }
+
+  /** Request depth-1 listings for `paths` (checkout-relative, `/`-separated;
+   *  `""` is the root) and return the `file:tree:children` reply. */
+  async fetchChildListings(streamId: string, paths: string[], timeoutMs = 10_000): Promise<DartEvent> {
+    const waiting = this.waitForStreamAbMessage(streamId, "file:tree:children", timeoutMs);
+    this.sendOnStream(streamId, createMessage("file:tree:children:request", { paths }));
     return waiting;
   }
 

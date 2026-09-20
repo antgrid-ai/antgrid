@@ -1,6 +1,9 @@
+import 'dart:async';
+
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:antgrid/models/preferences_models.dart';
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/services/file_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
@@ -18,6 +21,40 @@ Map<String, dynamic> _file(String name, String path) => {
   'path': path,
   'type': 'file',
 };
+
+/// Seeds the tree the way production does: the root's own depth-1 listing,
+/// carried on `file:tree:children`. Takes a whole-`tree` shape and flattens it
+/// to depth 1, so a fixture can keep declaring the tree it means.
+void _emitRootTree(FakeAgentTransport t, Map<String, dynamic> payload) {
+  final root = payload['tree'] as Map<String, dynamic>;
+  t.emit('file:tree:children', {
+    if (payload['checkoutId'] != null) 'checkoutId': payload['checkoutId'],
+    'listings': [
+      {
+        'path': '',
+        'children': root['children'] ?? const <Map<String, dynamic>>[],
+        if (root['truncated'] == true) 'truncated': true,
+      },
+    ],
+    'seq': payload['seq'],
+  });
+}
+
+List<Map<String, dynamic>> _treeRequests(FakeAgentTransport t) =>
+    t.sent.where((m) => m['type'] == 'file:tree:root:request').toList();
+
+/// Drains pending microtasks WITHOUT a real `Timer` — unlike
+/// `Future<void>.delayed(Duration.zero)`, which schedules through the OS
+/// timer queue and can take far longer than zero under load. Used between
+/// the two triggers in the subscribe-coalescing test below, where the assertion
+/// depends on real elapsed wall time staying well under the implementation's
+/// 50ms coalescing window; a `Duration.zero` delay there is exactly what made
+/// that test race and occasionally send two frames instead of one.
+Future<void> _pump([int hops = 3]) async {
+  for (var i = 0; i < hops; i++) {
+    await Future<void>.value();
+  }
+}
 
 Future<ProjectSession> _newSession(
   FakeAgentTransport t, {
@@ -51,7 +88,7 @@ void main() {
       svc.activate();
       await Future<void>.delayed(Duration.zero);
       List<Map<String, dynamic>> requests() => t.sent
-          .where((m) => m['type'] == 'file:tree:snapshot:request')
+          .where((m) => m['type'] == 'file:tree:root:request')
           .toList();
       expect(requests(), isEmpty);
       svc.setTreeInterest('files', true);
@@ -87,7 +124,7 @@ void main() {
       session.setLifecyclePaused(false);
       await Future<void>.delayed(Duration.zero);
       expect(
-        t.sent.where((m) => m['type'] == 'file:tree:snapshot:request'),
+        t.sent.where((m) => m['type'] == 'file:tree:root:request'),
         hasLength(1),
       );
       svc.setTreeInterest('picker', false);
@@ -97,7 +134,7 @@ void main() {
       session.setLifecyclePaused(false);
       await Future<void>.delayed(Duration.zero);
       expect(
-        t.sent.where((m) => m['type'] == 'file:tree:snapshot:request'),
+        t.sent.where((m) => m['type'] == 'file:tree:root:request'),
         isEmpty,
       );
       await session.close();
@@ -110,7 +147,7 @@ void main() {
       final t = FakeAgentTransport();
       final session = await _newSession(t);
       final svc = session.fileService;
-      t.emit('file:tree:snapshot', {'tree': _rootNode(), 'seq': 5});
+      _emitRootTree(t, {'tree': _rootNode(), 'seq': 5});
       await Future<void>.delayed(Duration.zero);
       t.emit('tree:update', {
         'projectId': 'p',
@@ -121,7 +158,7 @@ void main() {
       });
       await Future<void>.delayed(Duration.zero);
       expect(
-        t.sent.where((m) => m['type'] == 'file:tree:snapshot:request'),
+        t.sent.where((m) => m['type'] == 'file:tree:root:request'),
         isEmpty,
       );
       t.emit('file:tree:unchanged', {'seq': 5});
@@ -129,7 +166,7 @@ void main() {
       svc.setTreeInterest('picker', true);
       await Future<void>.delayed(Duration.zero);
       final request = t.sent.lastWhere(
-        (m) => m['type'] == 'file:tree:snapshot:request',
+        (m) => m['type'] == 'file:tree:root:request',
       );
       expect(request.containsKey('sinceSeq'), isFalse);
       await session.close();
@@ -157,7 +194,11 @@ void main() {
     },
   );
 
-  test('tree:full updates state', () async {
+  // Superseded by file:tree:root/children — an old bridge still force-resends
+  // tree:full on watcher overflow (paired with file:tree:invalidated, which
+  // this app reacts to instead), so it must land as a pure no-op rather than
+  // reviving the whole-tree push.
+  test('tree:full is ignored', () async {
     final t = FakeAgentTransport();
     final session = await _newSession(t);
     final svc = FileService.fromSession(session);
@@ -172,9 +213,7 @@ void main() {
     });
     await Future<void>.delayed(Duration.zero);
 
-    expect(svc.currentState.root, isNotNull);
-    expect(svc.currentState.root!.children, hasLength(1));
-    expect(svc.currentState.root!.children[0].path, 'a.txt');
+    expect(svc.currentState.root, isNull);
 
     await svc.dispose();
     await session.close();
@@ -185,7 +224,7 @@ void main() {
     final session = await _newSession(t);
     final svc = FileService.fromSession(session);
 
-    t.emit('file:tree:snapshot', {
+    _emitRootTree(t, {
       'tree': _rootNode(children: [_file('a.txt', 'a.txt')]),
       'seq': 5,
     });
@@ -212,61 +251,960 @@ void main() {
     await session.close();
   });
 
-  // Every rebuild site in the merge path reconstructs nodes field by field, so
-  // a flag left off one of them quietly repairs a partial tree on the first
-  // file save — and the explorer goes back to looking complete.
-  test('a tree:update preserves a truncation it did not touch', () async {
+  // A truncated directory's `children` is an ordered PREFIX, not the whole
+  // of it — a local insert cannot know whether the added node belongs inside
+  // that prefix or past the cut the bridge already made, so a delta into one
+  // must force a re-list instead of repairing the tree in place.
+  test(
+    'a tree:update into a truncated directory triggers a re-list, not a local insert',
+    () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      // The re-list this test asserts on fires from `_applyTreeUpdate`
+      // unconditionally (it isn't gated on tree interest, matching the old
+      // merge behaviour) — a second, independently-constructed FileService
+      // on the same session would react to the same broadcast frames and
+      // double the send. Drive the session's own instance instead.
+      final svc = session.fileService;
+
+      _emitRootTree(t, {
+        'tree': {
+          ..._rootNode(
+            children: [
+              {
+                'name': 'big',
+                'path': 'big',
+                'type': 'directory',
+                'children': [_file('a.txt', 'big/a.txt')],
+                'truncated': true,
+              },
+            ],
+          ),
+        },
+        'seq': 5,
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      expect(svc.currentState.root!.children[0].truncated, isTrue);
+      t.clearSent();
+
+      t.emitJson({
+        'id': 'u-cut',
+        'timestamp': 0,
+        'type': 'tree:update',
+        'projectId': 'p',
+        'seq': 6,
+        'added': [_file('b.txt', 'big/b.txt')],
+        'modified': const <Map<String, dynamic>>[],
+        'removed': const <String>[],
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      final big = svc.currentState.root!.children.firstWhere(
+        (c) => c.path == 'big',
+      );
+      expect(big.children.map((c) => c.path), isNot(contains('big/b.txt')));
+      expect(big.truncated, isTrue);
+
+      final relist = t.sent.where(
+        (m) =>
+            m['type'] == 'file:tree:children:request' &&
+            (m['paths'] as List).contains('big'),
+      );
+      expect(relist, hasLength(1));
+
+      await session.close();
+    },
+  );
+
+  // A directory this app has never fetched has nothing on the spine to
+  // insert into — the delta is dropped rather than fabricating a listing
+  // out of a single added/modified node.
+  test('a tree:update into an unloaded directory is dropped', () async {
     final t = FakeAgentTransport();
     final session = await _newSession(t);
     final svc = FileService.fromSession(session);
 
-    t.emitJson({
-      'id': 'tf-cut',
-      'timestamp': 0,
-      'type': 'tree:full',
-      'projectId': 'p',
-      'root': {
+    _emitRootTree(t, {
+      'tree': {
         ..._rootNode(
           children: [
-            {
-              'name': 'big',
-              'path': 'big',
-              'type': 'directory',
-              'children': [_file('a.txt', 'big/a.txt')],
-              'truncated': true,
-            },
+            {'name': 'dirA', 'path': 'dirA', 'type': 'directory'},
           ],
         ),
-        'truncated': true,
       },
       'seq': 5,
     });
     await Future<void>.delayed(Duration.zero);
 
-    expect(svc.currentState.root!.truncated, isTrue);
-    expect(svc.currentState.root!.children[0].truncated, isTrue);
+    expect(svc.currentState.root!.children[0].childrenLoaded, isFalse);
 
     t.emitJson({
-      'id': 'u-cut',
+      'id': 'u-unloaded',
       'timestamp': 0,
       'type': 'tree:update',
       'projectId': 'p',
       'seq': 6,
-      'added': [_file('b.txt', 'big/b.txt')],
+      'added': [_file('x.txt', 'dirA/x.txt')],
       'modified': const <Map<String, dynamic>>[],
       'removed': const <String>[],
     });
     await Future<void>.delayed(Duration.zero);
 
-    final big = svc.currentState.root!.children.firstWhere(
-      (c) => c.path == 'big',
+    final dirA = svc.currentState.root!.children.firstWhere(
+      (c) => c.path == 'dirA',
     );
-    expect(big.children.map((c) => c.path), contains('big/b.txt'));
-    expect(big.truncated, isTrue);
-    expect(svc.currentState.root!.truncated, isTrue);
+    expect(dirA.children, isEmpty);
 
     await svc.dispose();
     await session.close();
+  });
+
+  // The spine copy behind both file:tree:children and tree:update must reuse
+  // every subtree it did not touch BY REFERENCE — the whole point of
+  // replacing the old whole-tree clone (a 6 Hz deep copy on the UI thread).
+  test(
+    '_updateAt leaves an untouched sibling subtree identical by reference',
+    () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = FileService.fromSession(session)
+        ..activate()
+        ..setTreeInterest('files-test', true);
+      await Future<void>.delayed(Duration.zero);
+
+      t.emit('file:tree:children', {
+        'listings': [
+          {
+            'path': '',
+            'children': [
+              {'name': 'dirA', 'path': 'dirA', 'type': 'directory'},
+              {'name': 'dirB', 'path': 'dirB', 'type': 'directory'},
+            ],
+          },
+        ],
+        'seq': 1,
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      final dirBBefore = svc.currentState.root!.children.firstWhere(
+        (c) => c.path == 'dirB',
+      );
+
+      unawaited(svc.toggleExpanded('dirA'));
+      await Future<void>.delayed(Duration.zero);
+      t.emit('file:tree:children', {
+        'listings': [
+          {
+            'path': 'dirA',
+            'children': [_file('a.txt', 'dirA/a.txt')],
+          },
+        ],
+        'seq': 2,
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      final dirBAfter = svc.currentState.root!.children.firstWhere(
+        (c) => c.path == 'dirB',
+      );
+      expect(identical(dirBBefore, dirBAfter), isTrue);
+
+      await svc.dispose();
+      await session.close();
+    },
+  );
+
+  group('lazy expansion', () {
+    test('collapse then expand always issues a fresh request', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = FileService.fromSession(session);
+
+      t.emit('file:tree:children', {
+        'listings': [
+          {
+            'path': '',
+            'children': [
+              {'name': 'dirA', 'path': 'dirA', 'type': 'directory'},
+            ],
+          },
+        ],
+        'seq': 1,
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      await svc.toggleExpanded('dirA');
+      t.emit('file:tree:children', {
+        'listings': [
+          {
+            'path': 'dirA',
+            'children': [_file('a.txt', 'dirA/a.txt')],
+          },
+        ],
+        'seq': 2,
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(
+        svc.currentState.root!.children.first.childrenLoaded,
+        isTrue,
+      );
+
+      await svc.toggleExpanded('dirA'); // collapse
+      t.clearSent();
+      await svc.toggleExpanded('dirA'); // re-expand — no cache-hit branch
+
+      final requests = t.sent.where(
+        (m) =>
+            m['type'] == 'file:tree:children:request' &&
+            (m['paths'] as List).contains('dirA'),
+      );
+      expect(requests, hasLength(1));
+
+      await svc.dispose();
+      await session.close();
+    });
+
+    test(
+      'a stale out-of-order reply for the same path is discarded',
+      () async {
+        final t = FakeAgentTransport();
+        final session = await _newSession(t);
+        final svc = FileService.fromSession(session);
+
+        t.emit('file:tree:children', {
+          'listings': [
+            {
+              'path': '',
+              'children': [
+                {'name': 'dirA', 'path': 'dirA', 'type': 'directory'},
+              ],
+            },
+          ],
+          'seq': 1,
+        });
+        await Future<void>.delayed(Duration.zero);
+
+        // Two overlapping requests for the same path: expand (request A),
+        // collapse, expand again (request B) — every expand sends a fresh request,
+        // every expand, so this is the realistic shape of "the user tapped
+        // twice before the first reply landed".
+        unawaited(svc.toggleExpanded('dirA'));
+        await Future<void>.delayed(Duration.zero);
+        unawaited(svc.toggleExpanded('dirA'));
+        await Future<void>.delayed(Duration.zero);
+        unawaited(svc.toggleExpanded('dirA'));
+        await Future<void>.delayed(Duration.zero);
+
+        // B's reply (the newer request) lands first, A's (older) second.
+        t.emit('file:tree:children', {
+          'listings': [
+            {
+              'path': 'dirA',
+              'children': [_file('b.txt', 'dirA/b.txt')],
+            },
+          ],
+          'seq': 10,
+        });
+        await Future<void>.delayed(Duration.zero);
+        t.emit('file:tree:children', {
+          'listings': [
+            {
+              'path': 'dirA',
+              'children': [_file('a.txt', 'dirA/a.txt')],
+            },
+          ],
+          'seq': 5,
+        });
+        await Future<void>.delayed(Duration.zero);
+
+        final dirA = svc.currentState.root!.children.firstWhere(
+          (c) => c.path == 'dirA',
+        );
+        expect(dirA.children.map((c) => c.path), ['dirA/b.txt']);
+
+        await svc.dispose();
+        await session.close();
+      },
+    );
+
+    // The bridge's revision counter is per-agent-PROCESS and restarts at
+    // zero, while this service outlives the restart. Judging the new
+    // process's listings against the dead one's watermark drops every one of
+    // them, and the tree on screen never moves again.
+    test('a restarted agent\'s lower-seq listings are still applied', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = FileService.fromSession(session)
+        ..activate()
+        ..setTreeInterest('files-test', true);
+      await Future<void>.delayed(Duration.zero);
+
+      _emitRootTree(t, {
+        'tree': _rootNode(
+          children: [
+            {'name': 'dirA', 'path': 'dirA', 'type': 'directory'},
+          ],
+        ),
+        'seq': 900,
+      });
+      await Future<void>.delayed(Duration.zero);
+      await svc.toggleExpanded('dirA');
+      t.emit('file:tree:children', {
+        'listings': [
+          {
+            'path': 'dirA',
+            'children': [_file('old.txt', 'dirA/old.txt')],
+          },
+        ],
+        'seq': 901,
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      // The agent process restarts; the app reconnects on a new epoch and
+      // the replacement counts from zero.
+      t.redriveHydrators();
+      await Future<void>.delayed(Duration.zero);
+      expect(_treeRequests(t).last.containsKey('sinceSeq'), isFalse);
+
+      t.emit('file:tree:children', {
+        'listings': [
+          {
+            'path': '',
+            'children': [
+              {'name': 'dirA', 'path': 'dirA', 'type': 'directory'},
+              {'name': 'dirB', 'path': 'dirB', 'type': 'directory'},
+            ],
+          },
+        ],
+        'seq': 3,
+      });
+      t.emit('file:tree:children', {
+        'listings': [
+          {
+            'path': 'dirA',
+            'children': [_file('new.txt', 'dirA/new.txt')],
+          },
+        ],
+        'seq': 4,
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      final root = svc.currentState.root!;
+      expect(root.children.map((c) => c.path), ['dirA', 'dirB']);
+      final dirA = root.children.firstWhere((c) => c.path == 'dirA');
+      expect(dirA.children.map((c) => c.path), ['dirA/new.txt']);
+      expect(dirA.childrenLoading, isFalse);
+      // The dead process's claim must not survive either, or the bridge
+      // answers `file:tree:unchanged` once the new one counts back up to it.
+      expect(_treeRequests(t).last.containsKey('sinceSeq'), isFalse);
+      t.redriveHydrators();
+      await Future<void>.delayed(Duration.zero);
+      expect(_treeRequests(t).last.containsKey('sinceSeq'), isFalse);
+
+      await svc.dispose();
+      await session.close();
+    });
+
+    // A depth-1 listing names a subdirectory without recursing into it, so
+    // installing the wire node bare would discard everything already loaded
+    // beneath it — and nothing re-asks: the row stays expanded, empty and
+    // without a spinner, indistinguishable from a genuinely empty folder.
+    test('re-listing a parent keeps an expanded descendant loaded', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = FileService.fromSession(session);
+
+      t.emit('file:tree:children', {
+        'listings': [
+          {
+            'path': '',
+            'children': [
+              {'name': 'dirA', 'path': 'dirA', 'type': 'directory'},
+            ],
+          },
+        ],
+        'seq': 1,
+      });
+      await Future<void>.delayed(Duration.zero);
+      await svc.toggleExpanded('dirA');
+      t.emit('file:tree:children', {
+        'listings': [
+          {
+            'path': 'dirA',
+            'children': [
+              {'name': 'sub', 'path': 'dirA/sub', 'type': 'directory'},
+            ],
+          },
+        ],
+        'seq': 2,
+      });
+      await Future<void>.delayed(Duration.zero);
+      await svc.toggleExpanded('dirA/sub');
+      t.emit('file:tree:children', {
+        'listings': [
+          {
+            'path': 'dirA/sub',
+            'children': [_file('deep.txt', 'dirA/sub/deep.txt')],
+          },
+        ],
+        'seq': 3,
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      // The refresh gesture: collapse dirA and re-expand it.
+      await svc.toggleExpanded('dirA');
+      await svc.toggleExpanded('dirA');
+      t.emit('file:tree:children', {
+        'listings': [
+          {
+            'path': 'dirA',
+            'children': [
+              {'name': 'sub', 'path': 'dirA/sub', 'type': 'directory'},
+            ],
+          },
+        ],
+        'seq': 4,
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      final sub = svc.currentState.root!.children
+          .firstWhere((c) => c.path == 'dirA')
+          .children
+          .firstWhere((c) => c.path == 'dirA/sub');
+      expect(sub.childrenLoaded, isTrue);
+      expect(sub.children.map((c) => c.path), ['dirA/sub/deep.txt']);
+
+      // And the same for a root pull, which rebuilds the whole top level.
+      t.emit('file:tree:children', {
+        'listings': [
+          {
+            'path': '',
+            'children': [
+              {'name': 'dirA', 'path': 'dirA', 'type': 'directory'},
+            ],
+          },
+        ],
+        'seq': 5,
+      });
+      await Future<void>.delayed(Duration.zero);
+      final subAfterRootPull = svc.currentState.root!.children
+          .firstWhere((c) => c.path == 'dirA')
+          .children
+          .firstWhere((c) => c.path == 'dirA/sub');
+      expect(subAfterRootPull.children, hasLength(1));
+
+      await svc.dispose();
+      await session.close();
+    });
+
+    // A listing can only be placed under a parent already on the spine, so
+    // one frame carrying both must be applied parents-first whatever order
+    // it arrived in.
+    test('listings are applied shallowest-first within a frame', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = FileService.fromSession(session);
+
+      t.emit('file:tree:children', {
+        'listings': [
+          {
+            'path': 'dirA/sub',
+            'children': [_file('deep.txt', 'dirA/sub/deep.txt')],
+          },
+          {
+            'path': 'dirA',
+            'children': [
+              {'name': 'sub', 'path': 'dirA/sub', 'type': 'directory'},
+            ],
+          },
+          {
+            'path': '',
+            'children': [
+              {'name': 'dirA', 'path': 'dirA', 'type': 'directory'},
+            ],
+          },
+        ],
+        'seq': 7,
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      final sub = svc.currentState.root!.children
+          .firstWhere((c) => c.path == 'dirA')
+          .children
+          .firstWhere((c) => c.path == 'dirA/sub');
+      expect(sub.children.map((c) => c.path), ['dirA/sub/deep.txt']);
+
+      await svc.dispose();
+      await session.close();
+    });
+
+    // `missing` on a subdirectory folds into an empty, loaded listing so a
+    // deleted folder stops spinning. At the ROOT the same frame means the
+    // bridge could not answer at all — the FileWatcher is not up yet — and
+    // applying it would erase the tree with nothing left to retry from.
+    test('a missing root listing leaves the tree standing', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = FileService.fromSession(session)
+        ..activate()
+        ..setTreeInterest('files-test', true);
+      await Future<void>.delayed(Duration.zero);
+
+      // The first pull of a session, where no seq gate stands behind this.
+      t.emit('file:tree:children', {
+        'listings': [
+          {'path': '', 'children': <Map<String, dynamic>>[], 'missing': true},
+        ],
+        'seq': 0,
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(svc.currentState.root, isNull);
+
+      _emitRootTree(t, {
+        'tree': _rootNode(children: [_file('a.txt', 'a.txt')]),
+        'seq': 5,
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(svc.currentState.root!.children, hasLength(1));
+
+      t.emit('file:tree:children', {
+        'listings': [
+          {'path': '', 'children': <Map<String, dynamic>>[], 'missing': true},
+        ],
+        'seq': 6,
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(svc.currentState.root!.children, hasLength(1));
+      // The non-answer must not move the claim either.
+      expect(_treeRequests(t).last['sinceSeq'], isNot(6));
+
+      await svc.dispose();
+      await session.close();
+    });
+
+    // The watcher emits `children: []` for a directory event without ever
+    // reading the directory, and on Windows and macOS a file write raises
+    // one for the parent — so trusting it as a listing blanks whatever is
+    // expanded there.
+    test('a tree:update directory entry does not blank a loaded folder', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = FileService.fromSession(session);
+
+      t.emit('file:tree:children', {
+        'listings': [
+          {
+            'path': '',
+            'children': [
+              {'name': 'src', 'path': 'src', 'type': 'directory'},
+            ],
+          },
+        ],
+        'seq': 1,
+      });
+      await Future<void>.delayed(Duration.zero);
+      await svc.toggleExpanded('src');
+      t.emit('file:tree:children', {
+        'listings': [
+          {
+            'path': 'src',
+            'children': [
+              _file('one.ts', 'src/one.ts'),
+              _file('two.ts', 'src/two.ts'),
+            ],
+          },
+        ],
+        'seq': 2,
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      t.emitJson({
+        'id': 'u-dir',
+        'timestamp': 0,
+        'type': 'tree:update',
+        'projectId': 'p',
+        'seq': 3,
+        'added': [
+          {
+            'name': 'src',
+            'path': 'src',
+            'type': 'directory',
+            'children': <Map<String, dynamic>>[],
+          },
+          _file('foo.ts', 'src/foo.ts'),
+        ],
+        'modified': const <Map<String, dynamic>>[],
+        'removed': const <String>[],
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      final src = svc.currentState.root!.children.firstWhere(
+        (c) => c.path == 'src',
+      );
+      expect(src.childrenLoaded, isTrue);
+      expect(src.children.map((c) => c.path), [
+        'src/foo.ts',
+        'src/one.ts',
+        'src/two.ts',
+      ]);
+
+      await svc.dispose();
+      await session.close();
+    });
+
+    // The loading row is the only thing that tells an unlisted directory
+    // apart from an empty one, and the restore path is where a user is most
+    // likely to be staring at one.
+    test('every fetch path marks its directories pending', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = FileService.fromSession(session)
+        ..activate()
+        ..setTreeInterest('files-test', true);
+      await Future<void>.delayed(Duration.zero);
+
+      t.emit('file:tree:children', {
+        'listings': [
+          {
+            'path': '',
+            'children': [
+              {'name': 'dirA', 'path': 'dirA', 'type': 'directory'},
+            ],
+          },
+        ],
+        'seq': 1,
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      svc.applyPreferences(
+        ProjectPreferences(expandedPaths: <String>{'dirA'}),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(
+        svc.currentState.root!.children.single.childrenLoading,
+        isTrue,
+      );
+
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('restoring 100 expanded paths issues 2 requests, not 100', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = FileService.fromSession(session)
+        ..activate()
+        ..setTreeInterest('files-test', true);
+      await Future<void>.delayed(Duration.zero);
+      t.clearSent();
+
+      final hundred = List.generate(100, (i) => 'dir$i');
+      svc.applyPreferences(ProjectPreferences(expandedPaths: hundred.toSet()));
+      await Future<void>.delayed(Duration.zero);
+
+      final requests = t.sent.where(
+        (m) => m['type'] == 'file:tree:children:request',
+      );
+      expect(requests, hasLength(2));
+
+      await svc.dispose();
+      await session.close();
+    });
+  });
+
+  group('file:tree:subscribe', () {
+    // Timing notes for this whole group. Triggers are separated by `_pump()`
+    // (pure microtask draining) rather than `Future<void>.delayed(...)` —
+    // even `Duration.zero` goes through the OS timer queue and can take far
+    // longer than the implementation's 50ms coalescing window under load.
+    // Nothing here asserts that ZERO frames have gone out at a given instant:
+    // the service announces itself on construction (an account is what lets
+    // the bridge filter at all), and any assertion of that shape would go red
+    // on a 50ms stall rather than on a code change. Assert the LAST frame's
+    // paths, and — for coalescing — that a burst of N triggers produced fewer
+    // than N frames.
+    // Per the `session.fileService` comment further down the file: a second,
+    // independently-constructed `FileService` on the same session reacts to
+    // the same broadcast frames and doubles every send counted here — drive
+    // the session's own instance instead.
+    List<Map<String, dynamic>> subscribes(FakeAgentTransport t) =>
+        t.sent.where((m) => m['type'] == 'file:tree:subscribe').toList();
+
+    test('announces itself with no tree interest and nothing loaded', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      await _pump();
+
+      // A device parked on the terminal tab must still say "nothing", or the
+      // bridge cannot filter for the device that IS looking at a tree.
+      expect(subscribes(t), isNotEmpty);
+      expect(subscribes(t).last['paths'], isEmpty);
+
+      await session.close();
+    });
+
+    test(
+      'claims a directory when the request is ISSUED, not when the reply '
+      'lands',
+      () async {
+        final t = FakeAgentTransport();
+        final session = await _newSession(t);
+        final svc = session.fileService;
+
+        t.emit('file:tree:children', {
+          'listings': [
+            {
+              'path': '',
+              'children': [
+                {'name': 'dirA', 'path': 'dirA', 'type': 'directory'},
+              ],
+            },
+          ],
+          'seq': 1,
+        });
+        await _pump();
+        t.clearSent();
+
+        // Expand and then answer NOTHING: the bridge's listing is a snapshot
+        // taken at request time, so anything written in the round trip would
+        // be filtered away for good if the claim waited for the reply.
+        unawaited(svc.toggleExpanded('dirA'));
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+
+        expect(subscribes(t), isNotEmpty);
+        expect(subscribes(t).last['paths'], ['dirA']);
+
+        await session.close();
+      },
+    );
+
+    test('coalesces a burst of expands into fewer frames than triggers', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = session.fileService;
+
+      t.emit('file:tree:children', {
+        'listings': [
+          {
+            'path': '',
+            'children': [
+              {'name': 'dirA', 'path': 'dirA', 'type': 'directory'},
+              {'name': 'dirB', 'path': 'dirB', 'type': 'directory'},
+            ],
+          },
+        ],
+        'seq': 1,
+      });
+      await _pump();
+      t.clearSent();
+
+      // Four triggers: two expand requests and two applied listings.
+      unawaited(svc.toggleExpanded('dirA'));
+      await _pump();
+      t.emit('file:tree:children', {
+        'listings': [
+          {
+            'path': 'dirA',
+            'children': [_file('a.txt', 'dirA/a.txt')],
+          },
+        ],
+        'seq': 2,
+      });
+      await _pump();
+      unawaited(svc.toggleExpanded('dirB'));
+      await _pump();
+      t.emit('file:tree:children', {
+        'listings': [
+          {
+            'path': 'dirB',
+            'children': [_file('b.txt', 'dirB/b.txt')],
+          },
+        ],
+        'seq': 3,
+      });
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+
+      expect(subscribes(t), isNotEmpty);
+      expect(
+        subscribes(t).length,
+        lessThan(4),
+        reason: 'four triggers inside one window must not be four frames',
+      );
+      expect(subscribes(t).last['paths'], unorderedEquals(['dirA', 'dirB']));
+
+      t.clearSent();
+      unawaited(svc.toggleExpanded('dirA')); // collapse
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+      expect(subscribes(t).last['paths'], ['dirB']);
+
+      await session.close();
+    });
+
+    test(
+      'keeps announcing after tree interest is dropped, and re-announces '
+      'on reconnect',
+      () async {
+        final t = FakeAgentTransport();
+        final session = await _newSession(t);
+        final svc = session.fileService..setTreeInterest('files-test', true);
+        await _pump();
+
+        t.emit('file:tree:children', {
+          'listings': [
+            {
+              'path': '',
+              'children': [
+                {'name': 'dirA', 'path': 'dirA', 'type': 'directory'},
+              ],
+            },
+          ],
+          'seq': 1,
+        });
+        await _pump();
+
+        unawaited(svc.toggleExpanded('dirA'));
+        await _pump();
+        t.emit('file:tree:children', {
+          'listings': [
+            {
+              'path': 'dirA',
+              'children': [_file('a.txt', 'dirA/a.txt')],
+            },
+          ],
+          'seq': 2,
+        });
+        await Future<void>.delayed(const Duration(milliseconds: 250));
+        t.clearSent();
+
+        // The bridge's subscription store is per-connection — a reconnect
+        // must re-announce the set with no further user action.
+        t.redriveHydrators();
+        await _pump();
+        expect(subscribes(t), isNotEmpty);
+        expect(subscribes(t).last['paths'], ['dirA']);
+
+        // Closing the Files tab does NOT stop this client accounting for
+        // itself: the tree is still held and its deltas still applied, and a
+        // silent client turns the filter off for every other device.
+        svc.setTreeInterest('files-test', false);
+        t.clearSent();
+        t.redriveHydrators();
+        await _pump();
+        expect(subscribes(t), isNotEmpty);
+        expect(subscribes(t).last['paths'], ['dirA']);
+
+        await session.close();
+      },
+    );
+
+    test(
+      'an invalidated tree never announces the empty set it is about to '
+      'reload',
+      () async {
+        final t = FakeAgentTransport();
+        final session = await _newSession(t);
+        final svc = session.fileService..setTreeInterest('files-test', true);
+        await _pump();
+
+        t.emit('file:tree:children', {
+          'listings': [
+            {
+              'path': '',
+              'children': [
+                {'name': 'dirA', 'path': 'dirA', 'type': 'directory'},
+              ],
+            },
+          ],
+          'seq': 1,
+        });
+        await _pump();
+
+        unawaited(svc.toggleExpanded('dirA'));
+        await _pump();
+        t.emit('file:tree:children', {
+          'listings': [
+            {
+              'path': 'dirA',
+              'children': [_file('a.txt', 'dirA/a.txt')],
+            },
+          ],
+          'seq': 2,
+        });
+        await Future<void>.delayed(const Duration(milliseconds: 250));
+        t.clearSent();
+
+        // Invalidation clears every childrenLoaded flag and kicks off its own
+        // re-list. The old claim is a superset of what is about to be
+        // reloaded, so withdrawing it first would only open a window in which
+        // dirA's deltas are filtered away with no gap for the app to notice.
+        t.emit('file:tree:invalidated', {'seq': 3});
+        await Future<void>.delayed(const Duration(milliseconds: 250));
+        for (final frame in subscribes(t)) {
+          expect(
+            frame['paths'],
+            ['dirA'],
+            reason: 'must never withdraw a directory it is re-listing',
+          );
+        }
+        expect(subscribes(t), isNotEmpty);
+
+        await session.close();
+      },
+    );
+
+    test('keeps the open file directory claimed after its folder is collapsed', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = session.fileService;
+
+      t.emit('file:tree:children', {
+        'listings': [
+          {
+            'path': '',
+            'children': [
+              {'name': 'dirA', 'path': 'dirA', 'type': 'directory'},
+            ],
+          },
+        ],
+        'seq': 1,
+      });
+      await _pump();
+      unawaited(svc.toggleExpanded('dirA'));
+      await _pump();
+      t.emit('file:tree:children', {
+        'listings': [
+          {
+            'path': 'dirA',
+            'children': [_file('a.txt', 'dirA/a.txt')],
+          },
+        ],
+        'seq': 2,
+      });
+      await _pump();
+      svc.selectFile('dirA/a.txt');
+      await _pump();
+
+      // Collapsing dirA drops it from the loaded set, but `_applyTreeUpdate`
+      // still reads `modified` for the open file — the viewer's "changed on
+      // disk" banner is the only warning the user gets.
+      unawaited(svc.toggleExpanded('dirA'));
+      t.clearSent();
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+      expect(subscribes(t).last['paths'], ['dirA']);
+
+      t.emit('tree:update', {
+        'projectId': 'p',
+        'added': <Map<String, dynamic>>[],
+        'modified': [_file('a.txt', 'dirA/a.txt')],
+        'removed': <String>[],
+        'seq': 3,
+      });
+      await _pump();
+      expect(svc.currentState.files.fileModifiedExternally, isTrue);
+
+      await session.close();
+    });
   });
 
   test('fresh tree:update applied after snapshot', () async {
@@ -274,7 +1212,7 @@ void main() {
     final session = await _newSession(t);
     final svc = FileService.fromSession(session);
 
-    t.emit('file:tree:snapshot', {
+    _emitRootTree(t, {
       'tree': _rootNode(children: [_file('a.txt', 'a.txt')]),
       'seq': 5,
     });
@@ -324,7 +1262,7 @@ void main() {
 
     await svc.dispose();
 
-    t.emit('file:tree:snapshot', {
+    _emitRootTree(t, {
       'tree': _rootNode(children: [_file('after.txt', 'after.txt')]),
       'seq': 99,
     });
@@ -889,8 +1827,10 @@ void main() {
 
   group('tree hydration', () {
     // A managed checkout's tree:full is pushed while its runtime is prepared —
-    // before the session list that makes the app build the bundle — so a bundle
-    // that waited for the push showed an empty tree for the whole session.
+    // before the session list that makes the app build the bundle. The push
+    // itself is ignored (no handler — see file_service.dart's `tree:full`
+    // comment), so a bundle built afterward has to pull its own tree rather
+    // than rely on it.
     test('a bundle built after the push pulls its own tree', () async {
       final t = FakeAgentTransport();
       final session = await _newSession(t);
@@ -906,11 +1846,11 @@ void main() {
         ..setTreeInterest('files-test', true);
       await Future<void>.delayed(Duration.zero);
       final request = t.sent.lastWhere(
-        (m) => m['type'] == 'file:tree:snapshot:request',
+        (m) => m['type'] == 'file:tree:root:request',
       );
       expect(request['checkoutId'], 'wt-1');
 
-      t.emit('file:tree:snapshot', {
+      _emitRootTree(t, {
         'checkoutId': 'wt-1',
         'seq': 1,
         'tree': _rootNode(children: [_file('a.txt', 'a.txt')]),
@@ -934,7 +1874,7 @@ void main() {
       await Future<void>.delayed(Duration.zero);
       var requests = t.sent.where(
         (m) =>
-            m['type'] == 'file:tree:snapshot:request' &&
+            m['type'] == 'file:tree:root:request' &&
             m['checkoutId'] == 'wt-1',
       );
       expect(requests, hasLength(2));
@@ -944,7 +1884,7 @@ void main() {
       await Future<void>.delayed(Duration.zero);
       requests = t.sent.where(
         (m) =>
-            m['type'] == 'file:tree:snapshot:request' &&
+            m['type'] == 'file:tree:root:request' &&
             m['checkoutId'] == 'wt-1',
       );
       expect(requests, hasLength(2));
@@ -965,9 +1905,6 @@ void main() {
       await Future<void>.delayed(Duration.zero);
     }
 
-    List<Map<String, dynamic>> treeRequests(FakeAgentTransport t) =>
-        t.sent.where((m) => m['type'] == 'file:tree:snapshot:request').toList();
-
     test(
       'a resume claims the snapshot seq; a hydrator run claims none',
       () async {
@@ -977,23 +1914,23 @@ void main() {
           ..activate()
           ..setTreeInterest('files-test', true);
         await Future<void>.delayed(Duration.zero);
-        expect(treeRequests(t).last.containsKey('sinceSeq'), isFalse);
+        expect(_treeRequests(t).last.containsKey('sinceSeq'), isFalse);
 
-        t.emit('file:tree:snapshot', {
+        _emitRootTree(t, {
           'tree': _rootNode(children: [_file('a.txt', 'a.txt')]),
           'seq': 5,
         });
         await Future<void>.delayed(Duration.zero);
 
         await resume(session);
-        expect(treeRequests(t).last['sinceSeq'], 5);
+        expect(_treeRequests(t).last['sinceSeq'], 5);
 
         // A hydrator run means the transport re-established, and the agent behind
         // it may be a new process counting from zero — a claim there could be
         // confirmed by coincidence against a tree this app no longer holds.
         t.redriveHydrators();
         await Future<void>.delayed(Duration.zero);
-        expect(treeRequests(t).last.containsKey('sinceSeq'), isFalse);
+        expect(_treeRequests(t).last.containsKey('sinceSeq'), isFalse);
 
         await svc.dispose();
         await session.close();
@@ -1013,7 +1950,7 @@ void main() {
         ..setTreeInterest('files-test', true);
       await Future<void>.delayed(Duration.zero);
 
-      t.emit('file:tree:snapshot', {
+      _emitRootTree(t, {
         'tree': _rootNode(children: [_file('a.txt', 'a.txt')]),
         'seq': 5,
       });
@@ -1024,7 +1961,7 @@ void main() {
       svc.activate();
       svc.setTreeInterest('files-test', true);
       await Future<void>.delayed(Duration.zero);
-      expect(treeRequests(t).last['sinceSeq'], 5);
+      expect(_treeRequests(t).last['sinceSeq'], 5);
 
       await svc.dispose();
       await session.close();
@@ -1041,7 +1978,7 @@ void main() {
         ..setTreeInterest('files-test', true);
       await Future<void>.delayed(Duration.zero);
 
-      t.emit('file:tree:snapshot', {
+      _emitRootTree(t, {
         'tree': _rootNode(children: [_file('a.txt', 'a.txt')]),
         'seq': 5,
       });
@@ -1054,7 +1991,7 @@ void main() {
       svc.activate();
       svc.setTreeInterest('files-test', true);
       await Future<void>.delayed(Duration.zero);
-      expect(treeRequests(t).last.containsKey('sinceSeq'), isFalse);
+      expect(_treeRequests(t).last.containsKey('sinceSeq'), isFalse);
 
       await svc.dispose();
       await session.close();
@@ -1070,7 +2007,7 @@ void main() {
         ..setTreeInterest('files-test', true);
       await Future<void>.delayed(Duration.zero);
 
-      t.emit('file:tree:snapshot', {
+      _emitRootTree(t, {
         'tree': _rootNode(children: [_file('a.txt', 'a.txt')]),
         'seq': 5,
       });
@@ -1078,7 +2015,7 @@ void main() {
 
       svc.requestFullTree();
       await Future<void>.delayed(Duration.zero);
-      expect(treeRequests(t).last.containsKey('sinceSeq'), isFalse);
+      expect(_treeRequests(t).last.containsKey('sinceSeq'), isFalse);
 
       await svc.dispose();
       await session.close();
@@ -1091,7 +2028,7 @@ void main() {
         ..activate()
         ..setTreeInterest('files-test', true);
 
-      t.emit('file:tree:snapshot', {
+      _emitRootTree(t, {
         'tree': _rootNode(children: [_file('a.txt', 'a.txt')]),
         'seq': 5,
       });
@@ -1103,7 +2040,7 @@ void main() {
 
       expect(svc.currentState.root!.children.single.path, 'a.txt');
       await resume(session);
-      expect(treeRequests(t).last['sinceSeq'], 5);
+      expect(_treeRequests(t).last['sinceSeq'], 5);
 
       await svc.dispose();
       await session.close();
@@ -1116,7 +2053,7 @@ void main() {
         ..activate()
         ..setTreeInterest('files-test', true);
 
-      t.emit('file:tree:snapshot', {
+      _emitRootTree(t, {
         'tree': _rootNode(children: [_file('a.txt', 'a.txt')]),
         'seq': 5,
       });
@@ -1136,7 +2073,7 @@ void main() {
       update(6, 'b.txt');
       await Future<void>.delayed(Duration.zero);
       await resume(session);
-      expect(treeRequests(t).last['sinceSeq'], 6);
+      expect(_treeRequests(t).last['sinceSeq'], 6);
 
       // A gap is the agent having suppressed and DROPPED updates while this app
       // was backgrounded: the tree here is missing whatever those carried, so
@@ -1144,14 +2081,14 @@ void main() {
       update(9, 'c.txt');
       await Future<void>.delayed(Duration.zero);
       await resume(session);
-      expect(treeRequests(t).last['sinceSeq'], isNull);
+      expect(_treeRequests(t).last['sinceSeq'], isNull);
 
       await svc.dispose();
       await session.close();
     });
 
     test(
-      'a re-synced tree:full moves the claim with the tree it replaces',
+      'a forced tree:full push moves neither the tree nor the claim',
       () async {
         final t = FakeAgentTransport();
         final session = await _newSession(t);
@@ -1159,7 +2096,7 @@ void main() {
           ..activate()
           ..setTreeInterest('files-test', true);
 
-        t.emit('file:tree:snapshot', {
+        _emitRootTree(t, {
           'tree': _rootNode(children: [_file('a.txt', 'a.txt')]),
           'seq': 5,
         });
@@ -1172,8 +2109,146 @@ void main() {
         });
         await Future<void>.delayed(Duration.zero);
 
+        expect(
+          svc.currentState.root!.children.any((c) => c.path == 'b.txt'),
+          isFalse,
+        );
+
         await resume(session);
-        expect(treeRequests(t).last['sinceSeq'], 11);
+        expect(_treeRequests(t).last['sinceSeq'], 5);
+
+        await svc.dispose();
+        await session.close();
+      },
+    );
+  });
+
+  group('includeIgnored override', () {
+    test(
+      'defaults to including git-ignored files, sent explicitly on the wire',
+      () async {
+        final t = FakeAgentTransport();
+        final session = await _newSession(t);
+        final svc = FileService.fromSession(session)
+          ..activate()
+          ..setTreeInterest('files-test', true);
+        await Future<void>.delayed(Duration.zero);
+
+        // The tree shows everything out of the box — the decision most
+        // likely to be "tidied" into the opposite by someone who finds a
+        // show-everything tree surprising.
+        expect(svc.includeIgnoredInTree, isTrue);
+        expect(_treeRequests(t).last['includeIgnored'], isTrue);
+
+        await svc.dispose();
+        await session.close();
+      },
+    );
+
+    test(
+      'setIncludeIgnoredInTree changes what the tree requests and re-lists '
+      'rather than leaving stale rows',
+      () async {
+        final t = FakeAgentTransport();
+        final session = await _newSession(t);
+        final svc = FileService.fromSession(session)
+          ..activate()
+          ..setTreeInterest('files-test', true);
+        await Future<void>.delayed(Duration.zero);
+
+        _emitRootTree(t, {
+          'tree': _rootNode(
+            children: [
+              {'name': 'dirA', 'path': 'dirA', 'type': 'directory'},
+            ],
+          ),
+          'seq': 1,
+        });
+        await Future<void>.delayed(Duration.zero);
+
+        await svc.toggleExpanded('dirA');
+        t.emit('file:tree:children', {
+          'listings': [
+            {
+              'path': 'dirA',
+              'children': [_file('ghost.log', 'dirA/ghost.log')],
+            },
+          ],
+          'seq': 2,
+        });
+        await Future<void>.delayed(Duration.zero);
+        expect(svc.currentState.root!.children.first.childrenLoaded, isTrue);
+
+        t.clearSent();
+        svc.setIncludeIgnoredInTree(false);
+        // Cleared synchronously, before either reply lands — a rebuild right
+        // after the toggle must not still show the old includeIgnored:true
+        // listing as loaded.
+        expect(svc.currentState.root!.childrenLoaded, isFalse);
+        expect(svc.currentState.root!.children.first.childrenLoaded, isFalse);
+
+        await Future<void>.delayed(Duration.zero);
+        expect(_treeRequests(t).last['includeIgnored'], isFalse);
+        // Same as a manual refresh, never a claimed pull — see
+        // [FileService.requestFullTree]: toggling this doesn't move the
+        // bridge's watcher revision, so a claimed pull could come back
+        // `file:tree:unchanged` and silently no-op the toggle.
+        expect(_treeRequests(t).last.containsKey('sinceSeq'), isFalse);
+
+        final childrenRequests = t.sent.where(
+          (m) =>
+              m['type'] == 'file:tree:children:request' &&
+              (m['paths'] as List).contains('dirA'),
+        );
+        expect(childrenRequests, isNotEmpty);
+        expect(childrenRequests.last['includeIgnored'], isFalse);
+
+        t.emit('file:tree:children', {
+          'listings': [
+            {
+              'path': 'dirA',
+              'children': [_file('a.txt', 'dirA/a.txt')],
+            },
+          ],
+          'seq': 3,
+        });
+        await Future<void>.delayed(Duration.zero);
+        expect(svc.currentState.root!.children.first.childrenLoaded, isTrue);
+        expect(
+          svc.currentState.root!.children.first.children
+              .map((c) => c.name)
+              .toList(),
+          ['a.txt'],
+        );
+
+        await svc.dispose();
+        await session.close();
+      },
+    );
+
+    test(
+      'toggling it never touches an explicit find() call — the @-mention '
+      'path stays on its own includeIgnored',
+      () async {
+        final t = FakeAgentTransport();
+        final session = await _newSession(t);
+        final svc = FileService.fromSession(session);
+
+        svc.setIncludeIgnoredInTree(false);
+        final future = svc.find('needle', includeIgnored: true);
+        await Future<void>.delayed(FileService.findDebounce);
+        final sent = t.sent.lastWhere((m) => m['type'] == 'file:find');
+        // find()'s caller decides, not the tree's override — an @-mention
+        // caller passing true here is not downstream of the tree at all.
+        expect(sent['includeIgnored'], isTrue);
+        t.emit('file:find-result', {
+          'projectId': 'p',
+          'requestId': sent['requestId'],
+          'entries': const [],
+          'truncated': false,
+          'engine': 'git-ls-files',
+        });
+        await future;
 
         await svc.dispose();
         await session.close();
@@ -1398,6 +2473,216 @@ void main() {
       // commit scope.
       svc.requestDiff('b.txt');
       expect(svc.currentState.git.diffCommitSha, isNull);
+
+      await svc.dispose();
+      await session.close();
+    });
+  });
+
+  group('find (file:find)', () {
+    test('debounces, then sends includeIgnored/kinds/limit explicitly', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = FileService.fromSession(session);
+
+      final future = svc.find('foo', includeIgnored: false);
+      // Still inside the debounce window — nothing sent yet.
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(t.sent.where((m) => m['type'] == 'file:find'), isEmpty);
+
+      await Future<void>.delayed(FileService.findDebounce);
+      final sent = t.sent.singleWhere((m) => m['type'] == 'file:find');
+      expect(sent['query'], 'foo');
+      // Never rely on the bridge's Zod default (F1) — every field the wire
+      // contract declares a default for is sent explicitly.
+      expect(sent['includeIgnored'], isFalse);
+      expect(sent['kinds'], 'both');
+      expect(sent['limit'], 100);
+
+      t.emit('file:find-result', {
+        'projectId': 'p',
+        'requestId': sent['requestId'],
+        'entries': [
+          {'path': 'foo.txt', 'isDir': false},
+        ],
+        'truncated': false,
+        'engine': 'ripgrep',
+      });
+      final result = await future;
+      expect(result.entries, hasLength(1));
+      expect(result.entries.single.path, 'foo.txt');
+      expect(result.entries.single.isDir, isFalse);
+      expect(result.error, isNull);
+      expect(result.truncated, isFalse);
+
+      await svc.dispose();
+      await session.close();
+    });
+
+    test(
+      'a later call still debouncing supersedes the earlier one',
+      () async {
+        final t = FakeAgentTransport();
+        final session = await _newSession(t);
+        final svc = FileService.fromSession(session);
+
+        final first = svc.find('f', includeIgnored: false);
+        expect(first, throwsA(isA<FileFindSuperseded>()));
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+        final second = svc.find('fo', includeIgnored: false);
+
+        await Future<void>.delayed(FileService.findDebounce);
+        final sends = t.sent.where((m) => m['type'] == 'file:find').toList();
+        expect(sends, hasLength(1));
+        expect(sends.single['query'], 'fo');
+
+        t.emit('file:find-result', {
+          'projectId': 'p',
+          'requestId': sends.single['requestId'],
+          'entries': const [],
+          'truncated': false,
+          'engine': 'ripgrep',
+        });
+        await second;
+
+        await svc.dispose();
+        await session.close();
+      },
+    );
+
+    test(
+      'a later call supersedes one already answered by the bridge — the '
+      'stale reply is dropped rather than resolving the new call',
+      () async {
+        final t = FakeAgentTransport();
+        final session = await _newSession(t);
+        final svc = FileService.fromSession(session);
+
+        final first = svc.find('f', includeIgnored: true);
+        expect(first, throwsA(isA<FileFindSuperseded>()));
+        await Future<void>.delayed(FileService.findDebounce);
+        final firstSent = t.sent.singleWhere((m) => m['type'] == 'file:find');
+
+        final second = svc.find('fo', includeIgnored: true);
+        // There is no file:find-cancel; the bridge answers the superseded
+        // request anyway. Its reply must be a silent no-op.
+        t.emit('file:find-result', {
+          'projectId': 'p',
+          'requestId': firstSent['requestId'],
+          'entries': [
+            {'path': 'stale.txt', 'isDir': false},
+          ],
+          'truncated': false,
+          'engine': 'ripgrep',
+        });
+        await Future<void>.delayed(Duration.zero);
+
+        await Future<void>.delayed(FileService.findDebounce);
+        final secondSent = t.sent.lastWhere((m) => m['type'] == 'file:find');
+        expect(secondSent['requestId'], isNot(firstSent['requestId']));
+        t.emit('file:find-result', {
+          'projectId': 'p',
+          'requestId': secondSent['requestId'],
+          'entries': [
+            {'path': 'fo.txt', 'isDir': false},
+          ],
+          'truncated': false,
+          'engine': 'ripgrep',
+        });
+        final result = await second;
+        expect(result.entries.single.path, 'fo.txt');
+
+        await svc.dispose();
+        await session.close();
+      },
+    );
+
+    test('dispose fails a still-debouncing call', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = FileService.fromSession(session);
+
+      final debouncing = svc.find('f', includeIgnored: false);
+      // Registered BEFORE dispose, not after: dispose's own cleanup spans
+      // more than one microtask, and a Future that completes with an error
+      // before anything is listening reports itself unhandled to the zone —
+      // this is exactly the shape [FileFindSuperseded] exists to avoid.
+      expect(debouncing, throwsA(isA<FileFindSuperseded>()));
+      await svc.dispose();
+
+      await session.close();
+    });
+
+    test(
+      'dispose fails a call already sent and awaiting the bridge — supersede '
+      'runs before the pending-reply drain, so the caller sees the same '
+      'FileFindSuperseded either way',
+      () async {
+        final t = FakeAgentTransport();
+        final session = await _newSession(t);
+        final svc = FileService.fromSession(session);
+
+        final inFlight = svc.find('f', includeIgnored: false);
+        await Future<void>.delayed(FileService.findDebounce);
+        expect(t.sent.where((m) => m['type'] == 'file:find'), hasLength(1));
+        // Registered BEFORE dispose — see the still-debouncing test above for
+        // why the order matters here, not just style.
+        expect(inFlight, throwsA(isA<FileFindSuperseded>()));
+        await svc.dispose();
+
+        await session.close();
+      },
+    );
+
+    test(
+      'a reply carrying an error still resolves the call — it arrives on the '
+      'status tier, not the heavy one',
+      () async {
+        // classifyAbMessage coerces ANY envelope with an `error` field to
+        // MessageTier.status, which beats `file:find-result`'s place in the
+        // heavy set. Handled on the heavy stream alone, every failure the
+        // bridge can report (no finder, checkout deleting, a killed or
+        // timed-out engine) was parsed and then dropped, and the caller sat
+        // out its 8s timeout instead.
+        final t = FakeAgentTransport();
+        final session = await _newSession(t);
+        final svc = FileService.fromSession(session);
+
+        final future = svc.find('x', includeIgnored: false);
+        await Future<void>.delayed(FileService.findDebounce);
+        final sent = t.sent.singleWhere((m) => m['type'] == 'file:find');
+        t.emit('file:find-result', {
+          'projectId': 'p',
+          'requestId': sent['requestId'],
+          'entries': const [],
+          'truncated': true,
+          'engine': 'none',
+          'error': 'file listing timed out',
+        });
+
+        final result = await future;
+        expect(result.error, 'file listing timed out');
+        expect(result.entries, isEmpty);
+        expect(result.truncated, isTrue);
+
+        await svc.dispose();
+        await session.close();
+      },
+    );
+
+    test('checkout-scoped find carries checkoutId', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = FileService.fromSession(session, checkoutId: 'wt-1');
+
+      final future = svc.find('x', includeIgnored: false);
+      // dispose() below supersedes this call — catch it rather than
+      // `unawaited`, which does not stop a Future that completes with an
+      // error before anything is listening from reporting itself unhandled.
+      expect(future, throwsA(isA<FileFindSuperseded>()));
+      await Future<void>.delayed(FileService.findDebounce);
+      final sent = t.sent.singleWhere((m) => m['type'] == 'file:find');
+      expect(sent['checkoutId'], 'wt-1');
 
       await svc.dispose();
       await session.close();

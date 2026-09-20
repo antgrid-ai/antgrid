@@ -18,49 +18,29 @@ import { cp, lstat, mkdir, readdir, rm } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { dirname, join, relative, resolve } from "node:path";
 import { resolveAbDir } from "../antgrid-dir";
+import { runGit, type GitRun } from "../git-spawn";
 import { classifyDestructive } from "./destructive-floor";
 
 // ---------------------------------------------------------------------------
 // git invocation
 // ---------------------------------------------------------------------------
 
-export interface GitRun {
-  exitCode: number;
-  stdout: string;
-  stderr: string;
-}
+export type { GitRun };
 
 /** Injectable so tests can drive the parse/record paths without a real repo. */
 export type GitRunner = (cwd: string, args: string[]) => Promise<GitRun>;
 
 // A snapshot runs inline on the act path, so a git call that blocks forever
-// blocks the supervised session. `ls-remote` can sit on a credential prompt or a
-// dead network, hence both the kill timer and GIT_TERMINAL_PROMPT.
+// blocks the supervised session. `ls-remote` can sit on a dead network for as
+// long as the transport allows, which is what this deadline bounds.
 const GIT_TIMEOUT_MS = 20_000;
 
-/**
- * Mirrors `src/git.ts`'s runner (same spawn shape, same `core.quotepath=false`
- * so non-ASCII paths stay verbatim rather than C-quoted). It is a separate copy
- * only because this one must not hang and must parse English git prose:
- * `git clean -n` output is localized, so LC_ALL pins it.
- */
+/** The shared runner with this module's two requirements named: it must not
+ *  hang, because a snapshot runs inline on the act path, and it must read
+ *  English, because `git clean -n`'s listing is localized and the parse here
+ *  matches on it. */
 async function defaultRunGit(cwd: string, args: string[]): Promise<GitRun> {
-  const proc = Bun.spawn(["git", "-c", "core.quotepath=false", ...args], {
-    cwd,
-    stdout: "pipe",
-    stderr: "pipe",
-    env: { ...process.env, LC_ALL: "C", GIT_TERMINAL_PROMPT: "0" },
-  });
-  const kill = setTimeout(() => proc.kill(), GIT_TIMEOUT_MS);
-  try {
-    const [stdout, stderr] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-    ]);
-    return { exitCode: await proc.exited, stdout, stderr };
-  } finally {
-    clearTimeout(kill);
-  }
+  return runGit(cwd, args, { englishProse: true, timeoutMs: GIT_TIMEOUT_MS });
 }
 
 // ---------------------------------------------------------------------------

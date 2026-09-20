@@ -101,11 +101,11 @@ decides whether this app may be routed checkout-scoped frames at all. An app
 that does not advertise `checkoutRouting` is refused a project holding a managed
 session rather than shown main's workspace beside an isolated agent (root
 `CLAUDE.md`, "Checkout-scoped routing"). `pullsTree` is the opposite kind of
-flag — a bandwidth hint, never a gate: an app that advertises it pulls each
-checkout's file tree itself (`file:tree:snapshot:request`), so the agent skips
-the `tree:full` push in its re-sync and falls back to pushing for any client
-that stays silent. Both flags are `=== true` checks on the agent side; a wrong
-type reads as absent.
+flag — a bandwidth hint that is now parsed and ignored: it used to mean the app
+pulled each checkout's file tree itself, so the agent could skip the `tree:full`
+push in its re-sync. Neither the push nor the pull exists any more; every app
+lists per directory on demand. `checkoutRouting` is an `=== true` check on the
+agent side; a wrong type reads as absent.
 
 Messages 3–5 are sealed with the session transport keys (§7). Messages 3 and 4
 are sealed under **candidate** keys — the session is not confirmed yet. The

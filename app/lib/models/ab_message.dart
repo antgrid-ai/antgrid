@@ -1314,39 +1314,94 @@ class TerminalSnapshotMessage {
   });
 }
 
-class FileTreeSnapshotRequestMessage {
-  final String id;
-  final int timestamp;
-
-  const FileTreeSnapshotRequestMessage({
-    required this.id,
-    required this.timestamp,
-  });
-}
-
-class FileTreeSnapshotMessage {
-  final String id;
-  final int timestamp;
-  final FileNode tree;
-  final int seq;
-
-  const FileTreeSnapshotMessage({
-    required this.id,
-    required this.timestamp,
-    required this.tree,
-    required this.seq,
-  });
-}
-
-/// The agent confirming the revision a `file:tree:snapshot:request` claimed:
-/// the tree has not moved, so none was sent. Carries no tree by design — see
-/// the schema note on `FileTreeUnchangedMessage` in the bridge's protocol.ts.
+/// The agent confirming the revision a `file:tree:root:request` claimed: the
+/// tree has not moved, so no listing was sent. Carries nothing else by design
+/// — see the schema note on `FileTreeUnchangedMessage` in the bridge's
+/// protocol.ts.
 class FileTreeUnchangedMessage {
   final String id;
   final int timestamp;
   final int seq;
 
   const FileTreeUnchangedMessage({
+    required this.id,
+    required this.timestamp,
+    required this.seq,
+  });
+}
+
+/// One directory's listing inside a `file:tree:children` reply — the root's
+/// own answer (`path: ""`, from a `file:tree:root:request`) or one of the
+/// paths a `file:tree:children:request` asked for.
+class DirectoryListing {
+  final String path;
+  final List<FileNode> children;
+  final bool truncated;
+
+  /// Set when the bridge could not answer this path at all (deleted since the
+  /// request was made, or past the request's 64-path clamp). There is no
+  /// `FileNode.missing` to carry this distinctly yet, so [FileService] folds
+  /// it into an ordinary empty, loaded listing rather than leaving the
+  /// directory spinning forever.
+  final bool missing;
+
+  const DirectoryListing({
+    required this.path,
+    required this.children,
+    this.truncated = false,
+    this.missing = false,
+  });
+
+  static DirectoryListing? fromJson(Map<String, dynamic> json) {
+    final path = json['path'];
+    if (path is! String) return null;
+    final childrenJson = json['children'];
+    final children = <FileNode>[];
+    if (childrenJson is List) {
+      for (final c in childrenJson) {
+        if (c is Map<String, dynamic>) {
+          final child = FileNode.fromJson(c);
+          if (child != null) children.add(child);
+        }
+      }
+    }
+    return DirectoryListing(
+      path: path,
+      children: children,
+      truncated: json['truncated'] == true,
+      missing: json['missing'] == true,
+    );
+  }
+}
+
+/// Reply to both `file:tree:root:request` and `file:tree:children:request` —
+/// the two are told apart by whether [listings] contains a `path: ""` entry,
+/// not by message type. [seq] is the bridge's revision at reply time.
+class FileTreeChildrenMessage {
+  final String id;
+  final int timestamp;
+  final List<DirectoryListing> listings;
+  final int seq;
+
+  const FileTreeChildrenMessage({
+    required this.id,
+    required this.timestamp,
+    required this.listings,
+    required this.seq,
+  });
+}
+
+/// Pushed when the watcher overflowed and gave up tracking incremental
+/// changes. An old bridge also force-resends `tree:full` for the same reason,
+/// which [FileService] has no handler for (a harmless no-op) — this is what
+/// it acts on instead, re-listing the root and every expanded directory
+/// itself.
+class FileTreeInvalidatedMessage {
+  final String id;
+  final int timestamp;
+  final int seq;
+
+  const FileTreeInvalidatedMessage({
     required this.id,
     required this.timestamp,
     required this.seq,
@@ -1681,6 +1736,34 @@ Object? parseAbMessage(Map<String, dynamic> json) {
         relPath: json['relPath'] as String?,
         isDirectory: json['isDirectory'] as bool? ?? false,
         externalImagePath: json['externalImagePath'] as String?,
+      );
+
+    case 'file:find-result':
+      final projectId = json['projectId'];
+      final requestId = json['requestId'];
+      final engine = json['engine'];
+      if (projectId is! String || requestId is! String || engine is! String) {
+        return null;
+      }
+      final entries = <FileFindEntry>[];
+      final entriesJson = json['entries'];
+      if (entriesJson is List) {
+        for (final e in entriesJson) {
+          if (e is Map<String, dynamic>) {
+            final entry = FileFindEntry.fromJson(e);
+            if (entry != null) entries.add(entry);
+          }
+        }
+      }
+      return FileFindResultMessage(
+        id: id,
+        timestamp: timestamp,
+        projectId: projectId,
+        requestId: requestId,
+        entries: entries,
+        truncated: json['truncated'] as bool? ?? false,
+        engine: engine,
+        error: json['error'] as String?,
       );
 
     case 'ports:update':
@@ -2351,22 +2434,6 @@ Object? parseAbMessage(Map<String, dynamic> json) {
         exitCode: exitCode is int ? exitCode : null,
       );
 
-    case 'file:tree:snapshot:request':
-      return FileTreeSnapshotRequestMessage(id: id, timestamp: timestamp);
-
-    case 'file:tree:snapshot':
-      final treeJson = json['tree'];
-      final seq = json['seq'];
-      if (treeJson is! Map<String, dynamic> || seq is! int) return null;
-      final tree = FileNode.fromJson(treeJson);
-      if (tree == null) return null;
-      return FileTreeSnapshotMessage(
-        id: id,
-        timestamp: timestamp,
-        tree: tree,
-        seq: seq,
-      );
-
     case 'file:tree:unchanged':
       final unchangedSeq = json['seq'];
       if (unchangedSeq is! int) return null;
@@ -2374,6 +2441,33 @@ Object? parseAbMessage(Map<String, dynamic> json) {
         id: id,
         timestamp: timestamp,
         seq: unchangedSeq,
+      );
+
+    case 'file:tree:children':
+      final listingsJson = json['listings'];
+      final childrenSeq = json['seq'];
+      if (listingsJson is! List || childrenSeq is! int) return null;
+      final listings = <DirectoryListing>[];
+      for (final l in listingsJson) {
+        if (l is Map<String, dynamic>) {
+          final listing = DirectoryListing.fromJson(l);
+          if (listing != null) listings.add(listing);
+        }
+      }
+      return FileTreeChildrenMessage(
+        id: id,
+        timestamp: timestamp,
+        listings: listings,
+        seq: childrenSeq,
+      );
+
+    case 'file:tree:invalidated':
+      final invalidatedSeq = json['seq'];
+      if (invalidatedSeq is! int) return null;
+      return FileTreeInvalidatedMessage(
+        id: id,
+        timestamp: timestamp,
+        seq: invalidatedSeq,
       );
 
     case 'preview:snapshot:request':

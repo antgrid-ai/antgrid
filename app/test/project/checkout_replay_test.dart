@@ -117,7 +117,15 @@ void main() {
       expect(services.terminalService.currentState.tabs.keys, ['fresh']);
     });
 
-    test('heavy-tier frames seed a late subscriber too', () async {
+    // `tree:full` was the last heavy-tier type in `kCheckoutDurableReplayTypes`
+    // — the lazy-tree redesign made the tree pull-only and dropped it from the
+    // durable set, so [MessageRouter.replayFor]'s heavy-tier branch (which
+    // filters generically by [classifyAbMessageByType], never by a hardcoded
+    // tier) currently has no live example seeding a late subscriber. Pinning
+    // the negative here: a type still classified heavy but no longer durable
+    // must NOT survive for one, or a future edit that re-adds it to only one
+    // of the two sets silently reopens the drift this wave closed.
+    test('a delisted type is not replayed to a late heavy subscriber', () async {
       final t = FakeAgentTransport();
       final session = await openSession(t);
       addTearDown(session.close);
@@ -141,7 +149,7 @@ void main() {
       await Future<void>.delayed(Duration.zero);
       await sub.cancel();
 
-      expect(seen, contains('tree:full'));
+      expect(seen, isNot(contains('tree:full')));
     });
 
     test('a swept checkout stops seeding new subscribers', () async {
