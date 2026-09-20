@@ -453,8 +453,14 @@ async function runGit(
   // quoted form is a *literal* string that no longer matches the real file, so
   // status paths would round-trip into `add`/`restore`/`clean` pathspecs that
   // match nothing. Harmless for the pathspec-input verbs; load-bearing here.
+  //
+  // `GIT_OPTIONAL_LOCKS=0` stops the status poll refreshing the index on disk,
+  // so a background read cannot lose — or win — a race for `index.lock`
+  // against the agent's own git in the same checkout. A no-op for the write
+  // verbs here, which need the lock rather than taking it opportunistically.
   const proc = Bun.spawn(["git", "-c", "core.quotepath=false", ...args], {
     cwd,
+    env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
     stdout: "pipe",
     stderr: "pipe",
   });

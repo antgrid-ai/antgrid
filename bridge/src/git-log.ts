@@ -9,9 +9,12 @@ async function runGit(
   cwd: string,
   args: string[],
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-  // core.quotepath=false: see git.ts's [runGit] — same non-ASCII-path reason.
+  // core.quotepath=false and GIT_OPTIONAL_LOCKS: see git.ts's [runGit] — same
+  // non-ASCII-path and `index.lock` contention reasons. Every verb in this
+  // module is read-only, so nothing here wanted the lock in the first place.
   const proc = Bun.spawn(["git", "-c", "core.quotepath=false", ...args], {
     cwd,
+    env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
     stdout: "pipe",
     stderr: "pipe",
   });
