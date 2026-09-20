@@ -841,14 +841,19 @@ const ControlResultMessage = BaseMessage.extend({
 });
 
 // File tree & code viewer messages
+
+/** Nothing in `bridge/src` produces this any more — apps list per directory on
+ *  demand and hydrate through `file:tree:snapshot`. The type stays declared
+ *  because the Dart clients name it in their replay `exclude` to suppress an
+ *  OLDER bridge's per-checkout full tree; it retires with `pullsTree`
+ *  (see AppReadyMessage). */
 const TreeFullMessage = BaseMessage.extend({
   type: z.literal("tree:full"),
   projectId: z.string(),
   root: FileTreeNodeSchema,
-  // Which revision of the watcher's tree this is. A resync push is the only
-  // full tree that still reaches an app unasked, and an app that cannot name
-  // the revision it holds cannot ask "still this one?" on the next resume —
-  // see `sinceSeq` below. Optional so a pre-seq bridge still parses.
+  // Which revision of the watcher's tree this is, so an app that holds one
+  // from an older bridge can ask "still this one?" on the next resume — see
+  // `sinceSeq` below. Optional so a pre-seq bridge still parses.
   seq: z.number().int().nonnegative().optional(),
   ...CheckoutScoped,
 });

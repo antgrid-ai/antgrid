@@ -197,8 +197,9 @@ export type IgnoreRulesOptions = {
    * It is narrower than the spec's "show everything": `DEFAULT_IGNORES` still
    * applies, so `node_modules`, `.venv`, `.next` and `.vscode` stay hidden
    * under both variants. Splitting that list into a floor and a convenience
-   * set would change what `buildTree` — the whole-tree path every shipped app
-   * still uses — returns, so it waits for the wave that retires that path. */
+   * set would change what `buildTree` returns, and `buildTree` now serves a
+   * single caller: `file:tree:snapshot:request`, the hydration verb for apps
+   * predating on-demand listing. The split waits for that verb's retirement. */
   gitignore?: boolean;
 };
 
