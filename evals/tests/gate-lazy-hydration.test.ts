@@ -8,13 +8,13 @@
 // (2) the listing protocol itself is genuinely shallow — requesting the root
 // returns depth-1 entries only (a subdirectory comes back with no `children`),
 // and a subdirectory's contents arrive only once it is asked for by path;
-// (3) `file:tree:snapshot:request`, the one verb that still means the whole
-// tree (kept for an app that predates this protocol), is never answered
-// unsolicited and is answered exactly once, for the checkout that asked.
+// (3) `file:tree:snapshot:request` — the whole-tree pull, now retired — is
+// INERT: sending one produces no answer at all.
 //
-// (3) is the half the `tree:full`-absence assertions cannot carry: nothing
-// produces that type any more, so the surviving verb is the only thing left
-// that can still violate this gate.
+// (3) is asserted over a hand-built envelope rather than `createMessage`,
+// because the type no longer exists in the protocol to construct. That is the
+// point: a bridge that re-grows a whole-tree reply fails here, and nothing
+// else would catch it now that neither frame type has a schema.
 //
 // Only a LOOPBACK owner (re)connect triggers `resyncState` — a relay stream
 // attach or re-handshake runs no resync at all. So the trigger here is a
@@ -184,32 +184,22 @@ test("a project resync never pushes a whole tree, and the listing protocol stays
     expect(srcNames).toContain("index.ts");
     expect(srcNames).toContain("utils.ts");
 
-    // --- `file:tree:snapshot:request` is the one surviving whole-tree path ---
-    // --- (D1 keeps it for an app that predates this protocol), so the gate ---
-    // --- has to watch it too: nothing may produce one UNSOLICITED, and one ---
-    // --- that is asked for must still be answered exactly once, for the    ---
-    // --- checkout that asked. A frame type with no producer left cannot    ---
-    // --- carry that on its own.                                           ---
+    // --- the retired whole-tree pull is inert ---
+    // Hand-built: the type has no schema any more, so `createMessage` cannot
+    // name it. The bridge must neither answer it nor fall back to any other
+    // whole-tree frame.
+    env.app.sendOnStream(streamId, {
+      id: crypto.randomUUID(),
+      timestamp: Date.now(),
+      type: "file:tree:snapshot:request",
+      checkoutId: one.checkoutId,
+    } as any);
+    await Bun.sleep(1000);
     expect(env.app.queuedCount(
       (m: any) => m.type === "file:tree:snapshot" && m._streamId === streamId,
     )).toBe(0);
-    const snapP = env.app.waitFor(
-      (m: any) => m._streamId === streamId
-        && m.type === "file:tree:snapshot"
-        && m.checkoutId === one.checkoutId,
-      10_000,
-    );
-    env.app.sendOnStream(streamId, createMessage("file:tree:snapshot:request", {
-      checkoutId: one.checkoutId,
-    }));
-    const snap = await snapP;
-    expect(snap.tree.type).toBe("directory");
-    // `waitFor` CONSUMES the frame it matched, so anything still queued after
-    // a settling window is a second answer — a duplicate, or one restamped
-    // onto a checkout that was not asked.
-    await Bun.sleep(500);
     expect(env.app.queuedCount(
-      (m: any) => m.type === "file:tree:snapshot" && m._streamId === streamId,
+      (m: any) => m.type === "tree:full" && m._streamId === streamId,
     )).toBe(0);
   } finally {
     local?.close();

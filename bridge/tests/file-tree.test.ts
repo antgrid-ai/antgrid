@@ -1,9 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import {
-  buildTree,
   readFile,
   loadIgnoreRules,
-  countNodes,
   externalSafeImageMime,
   listDirectory,
   listDirectoryBatch,
@@ -25,81 +23,6 @@ describe("file-tree", () => {
     rmSync(tempDir, { recursive: true, force: true });
   });
 
-  describe("buildTree", () => {
-    it("builds a tree from a directory", () => {
-      writeFileSync(join(tempDir, "file1.txt"), "hello");
-      mkdirSync(join(tempDir, "subdir"));
-      writeFileSync(join(tempDir, "subdir", "file2.ts"), "world");
-
-      const ig = loadIgnoreRules(tempDir, []);
-      const tree = buildTree(tempDir, tempDir, ig);
-
-      expect(tree).not.toBeNull();
-      expect(tree!.type).toBe("directory");
-      expect(tree!.children).toBeDefined();
-      expect(tree!.children!.length).toBe(2);
-
-      // Directories first, then files
-      expect(tree!.children![0].name).toBe("subdir");
-      expect(tree!.children![0].type).toBe("directory");
-      expect(tree!.children![1].name).toBe("file1.txt");
-      expect(tree!.children![1].type).toBe("file");
-    });
-
-    it("respects ignore rules", () => {
-      writeFileSync(join(tempDir, "keep.ts"), "keep");
-      mkdirSync(join(tempDir, "node_modules"));
-      writeFileSync(join(tempDir, "node_modules", "pkg.js"), "pkg");
-
-      const ig = loadIgnoreRules(tempDir, []);
-      const tree = buildTree(tempDir, tempDir, ig);
-
-      expect(tree!.children!.length).toBe(1);
-      expect(tree!.children![0].name).toBe("keep.ts");
-    });
-
-    it("respects custom exclude patterns", () => {
-      writeFileSync(join(tempDir, "keep.ts"), "keep");
-      writeFileSync(join(tempDir, "ignore.log"), "log");
-
-      const ig = loadIgnoreRules(tempDir, ["*.log"]);
-      const tree = buildTree(tempDir, tempDir, ig);
-
-      expect(tree!.children!.length).toBe(1);
-      expect(tree!.children![0].name).toBe("keep.ts");
-    });
-
-    it("respects depth limit", () => {
-      let dir = tempDir;
-      for (let i = 0; i < 12; i++) {
-        dir = join(dir, `level${i}`);
-        mkdirSync(dir);
-        writeFileSync(join(dir, "file.txt"), "deep");
-      }
-
-      const ig = loadIgnoreRules(tempDir, []);
-      const tree = buildTree(tempDir, tempDir, ig);
-
-      // Count depth — should stop at MAX_DEPTH (10)
-      let node = tree;
-      let depth = 0;
-      while (node?.children?.length) {
-        depth++;
-        node = node.children.find((c) => c.type === "directory") ?? null;
-      }
-      expect(depth).toBeLessThanOrEqual(11);
-    });
-
-    it("includes file extensions", () => {
-      writeFileSync(join(tempDir, "app.tsx"), "react");
-
-      const ig = loadIgnoreRules(tempDir, []);
-      const tree = buildTree(tempDir, tempDir, ig);
-
-      expect(tree!.children![0].extension).toBe(".tsx");
-    });
-  });
-
   describe("nested .gitignore", () => {
     it("applies a directory's own .gitignore, anchored at that directory", () => {
       mkdirSync(join(tempDir, "a", "sub"), { recursive: true });
@@ -113,21 +36,17 @@ describe("file-tree", () => {
       writeFileSync(join(tempDir, "b", "local-only"), "");
 
       const rules = loadIgnoreRules(tempDir, []);
-      const tree = buildTree(tempDir, tempDir, rules)!;
-      const paths = new Set<string>();
-      const visit = (n: { path: string; children?: any[] }) => {
-        paths.add(n.path);
-        n.children?.forEach(visit);
-      };
-      visit(tree);
+      // Listed per directory, the way every caller reaches these rules now.
+      const names = (rel: string) =>
+        listDirectory(rel, tempDir, rules).children.map((c) => c.name);
 
-      expect(paths.has("a/keep.ts")).toBe(true);
-      expect(paths.has("a/x.log")).toBe(false);
-      expect(paths.has("a/sub/y.log")).toBe(false);
+      expect(names("a")).toContain("keep.ts");
+      expect(names("a")).not.toContain("x.log");
+      expect(names("a/sub")).not.toContain("y.log");
       // Anchored: `/local-only` means a/local-only, not b/local-only.
-      expect(paths.has("a/local-only")).toBe(false);
-      expect(paths.has("b/local-only")).toBe(true);
-      expect(paths.has("b/x.log")).toBe(true);
+      expect(names("a")).not.toContain("local-only");
+      expect(names("b")).toContain("local-only");
+      expect(names("b")).toContain("x.log");
 
       // The same rules answer the watcher's per-path question identically.
       expect(rules.ignores("a/sub/y.log")).toBe(true);
@@ -141,91 +60,10 @@ describe("file-tree", () => {
       mkdirSync(join(tempDir, "node_modules"));
       writeFileSync(join(tempDir, "src.ts"), "");
 
-      const tree = buildTree(tempDir, tempDir, loadIgnoreRules(tempDir, []))!;
-      expect(tree.children!.map((c) => c.name)).toEqual([".gitignore", "src.ts"]);
+      const listing = listDirectory("", tempDir, loadIgnoreRules(tempDir, []));
+      expect(listing.children.map((c) => c.name)).toEqual([".gitignore", "src.ts"]);
     });
   });
-
-  describe("node budget", () => {
-    it("stops the listing at the budget and marks the directory it cut", () => {
-      for (const f of ["a.txt", "b.txt", "c.txt", "d.txt", "e.txt"]) {
-        writeFileSync(join(tempDir, f), "");
-      }
-
-      // Root + three files.
-      const tree = buildTree(tempDir, tempDir, loadIgnoreRules(tempDir, []), 4)!;
-      expect(tree.truncated).toBe(true);
-      expect(tree.children!.map((c) => c.name)).toEqual(["a.txt", "b.txt", "c.txt"]);
-      expect(countNodes(tree)).toBe(4);
-    });
-
-    it("marks every directory left unfinished, and none that completed", () => {
-      mkdirSync(join(tempDir, "first"));
-      writeFileSync(join(tempDir, "first", "1.txt"), "");
-      mkdirSync(join(tempDir, "second"));
-      writeFileSync(join(tempDir, "second", "1.txt"), "");
-      writeFileSync(join(tempDir, "second", "2.txt"), "");
-      mkdirSync(join(tempDir, "third"));
-
-      // Root, first, first/1.txt, second, second/1.txt — then the cut.
-      const tree = buildTree(tempDir, tempDir, loadIgnoreRules(tempDir, []), 5)!;
-      const byName = Object.fromEntries(tree.children!.map((c) => [c.name, c]));
-      expect(byName.first.truncated).toBeUndefined();
-      expect(byName.second.truncated).toBe(true);
-      expect(byName.second.children!.map((c) => c.name)).toEqual(["1.txt"]);
-      expect(byName.third).toBeUndefined();
-      expect(tree.truncated).toBe(true);
-    });
-
-    it("a tree within budget carries no marker", () => {
-      writeFileSync(join(tempDir, "a.txt"), "");
-      const tree = buildTree(tempDir, tempDir, loadIgnoreRules(tempDir, []), 2)!;
-      expect(tree.truncated).toBeUndefined();
-      expect(JSON.stringify(tree)).not.toContain("truncated");
-    });
-
-    // The depth guard drops children without the parent ever learning why, so
-    // the cap has to mark its own cut or it is the one truncation nothing
-    // reports — on the wire or in the app.
-    it("marks the directory the depth cap cut", () => {
-      let dir = tempDir;
-      for (let i = 0; i < 12; i++) {
-        dir = join(dir, `level${i}`);
-        mkdirSync(dir);
-        writeFileSync(join(dir, "file.txt"), "deep");
-      }
-
-      let node = buildTree(tempDir, tempDir, loadIgnoreRules(tempDir, []))!;
-      let deepest = node;
-      while (true) {
-        const next = node.children?.find((c) => c.type === "directory");
-        if (!next) break;
-        node = next;
-        deepest = node;
-      }
-
-      expect(deepest.children).toEqual([]);
-      expect(deepest.truncated).toBe(true);
-    });
-
-    it("does not mark a capped directory whose entries were all ignored", () => {
-      let dir = tempDir;
-      for (let i = 0; i < 10; i++) {
-        dir = join(dir, `level${i}`);
-        mkdirSync(dir);
-      }
-      mkdirSync(join(dir, "node_modules"));
-
-      let node = buildTree(tempDir, tempDir, loadIgnoreRules(tempDir, []))!;
-      for (let i = 0; i < 10; i++) {
-        node = node.children!.find((c) => c.name === `level${i}`)!;
-      }
-
-      expect(node.children).toEqual([]);
-      expect(node.truncated).toBeUndefined();
-    });
-  });
-
   describe("listDirectory", () => {
     it("returns only immediate entries — a grandchild is absent", () => {
       mkdirSync(join(tempDir, "a", "sub"), { recursive: true });
@@ -293,17 +131,22 @@ describe("file-tree", () => {
       expect(listing.missing).toBeUndefined();
     });
 
-    it("matches buildTree's sort order for the same directory", () => {
+    it("sorts directories before files, case-insensitively within each group", () => {
       mkdirSync(join(tempDir, "zeta"));
       mkdirSync(join(tempDir, "Alpha"));
       writeFileSync(join(tempDir, "beta.txt"), "");
       writeFileSync(join(tempDir, "Aardvark.txt"), "");
 
-      const rules = loadIgnoreRules(tempDir, []);
-      const tree = buildTree(tempDir, tempDir, rules)!;
-      const listing = listDirectory("", tempDir, rules);
+      const listing = listDirectory("", tempDir, loadIgnoreRules(tempDir, []));
 
-      expect(listing.children.map((c) => c.name)).toEqual(tree.children!.map((c) => c.name));
+      // Spelled out rather than compared against another implementation: this
+      // was pinned to the whole-tree walk's order, and that walk is gone.
+      expect(listing.children.map((c) => c.name)).toEqual([
+        "Alpha",
+        "zeta",
+        "Aardvark.txt",
+        "beta.txt",
+      ]);
     });
 
     it("includeIgnored true vs false differ exactly by the gitignored set, never by .git or .antgrid", () => {
@@ -777,20 +620,6 @@ describe("file-tree", () => {
       expect(externalSafeImageMime("a.svg")).toBeUndefined();
       expect(externalSafeImageMime("a.pdf")).toBeUndefined();
       expect(externalSafeImageMime("a.ico")).toBeUndefined();
-    });
-  });
-
-  describe("countNodes", () => {
-    it("counts all nodes in a tree", () => {
-      writeFileSync(join(tempDir, "a.txt"), "a");
-      writeFileSync(join(tempDir, "b.txt"), "b");
-      mkdirSync(join(tempDir, "sub"));
-      writeFileSync(join(tempDir, "sub", "c.txt"), "c");
-
-      const ig = loadIgnoreRules(tempDir, []);
-      const tree = buildTree(tempDir, tempDir, ig)!;
-      // root + sub + a.txt + b.txt + c.txt = 5
-      expect(countNodes(tree)).toBe(5);
     });
   });
 });

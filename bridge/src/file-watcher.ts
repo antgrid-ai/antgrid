@@ -6,7 +6,6 @@ const log = logger.child({ component: "file-watcher" });
 import { createMessage, type AbMessage } from "./protocol";
 import {
   loadIgnoreRules,
-  buildTree,
   readFile,
   externalSafeImageMime,
   listDirectory,
@@ -380,27 +379,10 @@ export class FileWatcher {
     this.scheduleBatch();
   }
 
-  /** The revision [getTreeSnapshot] would stamp, without walking the tree — so
-   *  a `sinceSeq` request that turns out to be current costs no walk. */
+  /** The revision a listing would stamp, without touching disk — so a
+   *  `sinceSeq` request that turns out to be current costs no readdir. */
   currentSeq(): number {
     return this.connState.fileSeq(this.projectRoot);
-  }
-
-  /** The whole checkout in one frame, for `file:tree:snapshot:request` alone —
-   *  the verb an app that predates the on-demand listing protocol hydrates
-   *  from, and the only caller left. `buildTree` bounds it at MAX_TREE_NODES /
-   *  MAX_DEPTH and marks what it cut; that cap is the reason a phone
-   *  foregrounding against a 20k-file worktree does not spend the relay's whole
-   *  credit window on one reply per bound checkout. */
-  getTreeSnapshot(): { tree: FileTreeNode; seq: number } {
-    const root = buildTree(this.projectRoot, this.projectRoot, this.ig);
-    if (!root) {
-      return {
-        tree: { name: "", path: "", type: "directory", children: [] },
-        seq: this.currentSeq(),
-      };
-    }
-    return { tree: root, seq: this.currentSeq() };
   }
 
   /** Ignore rules for a listing request. This is a listing-only distinction —
@@ -509,11 +491,12 @@ export class FileWatcher {
     this.watcher = chokidar.watch(this.projectRoot, {
       ignoreInitial: true,
       followSymlinks: false,
-      // Kept equal to MAX_DEPTH in file-tree.ts: a whole-tree snapshot must not
-      // list an entry this watcher can never emit a delta for. On-demand
-      // listings have no depth cap, so a Linux client that expands past level
-      // 10 sees that directory only when it re-lists it — the native recursive
-      // watch macOS and Windows use has no such limit.
+      // Bounds chokidar's own cost on Linux, which is the only platform that
+      // reaches this branch. On-demand listings have no depth cap, so a client
+      // that expands past level 10 sees that directory only when it re-lists
+      // it — the native recursive watch macOS and Windows use has no such
+      // limit. (This used to be kept equal to file-tree.ts's MAX_DEPTH, which
+      // retired with the whole-tree walk.)
       depth: 10,
       ignored: ignoredFn,
     });

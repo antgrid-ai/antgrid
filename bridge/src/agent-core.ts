@@ -1849,7 +1849,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // does, so a silent drop there spins forever.
     if (msg.type === "file:tree:root:request" || msg.type === "file:tree:children:request") {
       const runtime = runtimeFor(msg);
-      // Same wrong-checkout guard as file:tree:snapshot:request below:
+      // Answer only the checkout that ASKED.
       // `runtimeFor` falls back to mainRuntime for an id with no runtime yet,
       // and sendFromRuntimeTo restamps the reply with the RESOLVED runtime's
       // id — so a fallback answer is filtered out by the requester and
@@ -1878,8 +1878,17 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
             seq: fw.currentSeq(),
           }), client);
         }
-        // Outside the branch above, same as file:tree:snapshot:request below:
-        // an unchanged tree says nothing about the decorations drawn on it.
+        // Outside the branch above on purpose: staging, a branch move and a
+        // commit all change the decorations without touching a watched path,
+        // so an unchanged tree says nothing about the status drawn on it.
+        // The app asks for this on every (re)connect and on a pull-to-refresh,
+        // and the git decorations belong to the same picture as the tree —
+        // answering with a listing alone left the changes list showing
+        // whatever the replay cache last held. Forced, not merely
+        // unconditional: the request means the app doubts what it has, and a
+        // doubted status is usually byte-identical to the cached one — which
+        // the bus's dedup drops before any subscriber, leaving a
+        // pull-to-refresh with no answer and no way to ever get one.
         trackGitRefresh(
           runtime,
           refreshGitStatusAttended(runtime)
@@ -2849,49 +2858,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         }), client);
         break;
       }
-      case "file:tree:snapshot:request": {
-        // Answer only the checkout that ASKED. `runtimeFor` falls back to
-        // mainRuntime for an id with no runtime yet (an isolated session's
-        // bundle is built before its runtime is prepared), and sendFromRuntime
-        // restamps the reply with the RESOLVED runtime's id — so a fallback
-        // answer is filtered out by the requester and force-pushes main's
-        // picture to everyone else instead.
-        if (runtime.checkout.id !== checkoutIdOf(msg)) break;
-        const fw = runtime.fileWatcher;
-        if (!fw) break;
-        // A caller that names the revision it holds, and is still right about
-        // it, is told so instead of being sent the tree again. A phone
-        // foregrounding re-asks EVERY bound checkout at once and nothing else
-        // gates that, so on an idle project every one of those answers was a
-        // byte-identical megabyte. `currentSeq` reads the counter without
-        // walking the tree, so the confirmation costs no disk either.
-        if (msg.sinceSeq !== undefined && msg.sinceSeq === fw.currentSeq()) {
-          sendFromRuntime(runtime, createMessage("file:tree:unchanged", { seq: msg.sinceSeq }));
-        } else {
-          const { tree, seq } = fw.getTreeSnapshot();
-          sendFromRuntime(runtime, createMessage("file:tree:snapshot", { tree, seq }));
-        }
-        // Outside the branch above on purpose: staging, a branch move and a
-        // commit all change the decorations without touching a watched path,
-        // so an unchanged tree says nothing about the status drawn on it.
-        // The app asks for this on every (re)connect and on a pull-to-refresh,
-        // and the git decorations belong to the same picture as the tree —
-        // answering with a tree alone left the changes list showing whatever
-        // the replay cache last held. Forced, not merely unconditional: the
-        // request means the app doubts what it has, and a doubted status is
-        // usually byte-identical to the cached one — which the bus's dedup
-        // drops before any subscriber, leaving a pull-to-refresh with no answer
-        // and no way to ever get one.
-        trackGitRefresh(
-          runtime,
-          refreshGitStatusAttended(runtime)
-            .then(() => sendGitStatus(runtime, true))
-            .catch(() => {}),
-        );
-        break;
-      }
       case "preview:snapshot:request": {
-        // Same wrong-checkout guard as the tree request above.
+        // Same wrong-checkout guard as the file:tree:root:request handler.
         if (runtime.checkout.id !== checkoutIdOf(msg)) break;
         if (!runtime.tunnelManager) break;
         sendFromRuntime(runtime, createMessage("preview:snapshot", {

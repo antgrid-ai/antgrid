@@ -340,20 +340,6 @@ class DemoTransport extends BufferedAgentTransport {
       case 'file:read':
         return <Map<String, Object?>>[_fileContent(message['path'] as String?)];
 
-      // Nothing in this app sends this any more — it lists per directory
-      // below. Answered anyway, in step with the bridge's own surviving case:
-      // the verb keeps meaning the whole tree for an app that predates the
-      // listing protocol, and demo mode is the contract's stand-in for it.
-      case 'file:tree:snapshot:request':
-        return <Map<String, Object?>>[
-          <String, Object?>{
-            'type': 'file:tree:snapshot',
-            'checkoutId': 'main',
-            'seq': 1,
-            'tree': kDemoTreeRoot,
-          },
-        ];
-
       case 'file:tree:root:request':
         return <Map<String, Object?>>[_childrenFrame(const <String>[''])];
 

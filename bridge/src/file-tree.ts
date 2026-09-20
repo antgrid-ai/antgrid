@@ -10,31 +10,14 @@ export type FileTreeNode = {
   extension?: string;
   children?: FileTreeNode[];
   /** The listing stopped early: `children` is a complete, ordered prefix of
-   * the directory, not the whole of it. See MAX_TREE_NODES for the whole-tree
-   * walk, MAX_LISTING_ENTRIES / MAX_BATCH_NODES for on-demand listings. */
+   * the directory, not the whole of it. See MAX_LISTING_ENTRIES /
+   * MAX_BATCH_NODES. */
   truncated?: true;
   /** Present only because the listing that produced it used the show-all
    * variant AND git would have excluded it. See `listDirectory`'s
    * `markAgainst` parameter. */
   ignored?: true;
 };
-
-const MAX_DEPTH = 10;
-
-/** Nodes one whole-tree walk may carry. A worktree that grew a 20k-file data
- * directory made that reply megabytes, enough on a phone's uplink to hold the
- * bridge's own relay pongs behind it until the relay closed the socket. Past
- * the budget the walk stops where it is and marks each directory it cut short;
- * nothing already listed is dropped or reordered.
- *
- * Survives the lazy-listing redesign even though the open-time push it was
- * written for is gone: `file:tree:snapshot:request` keeps meaning the whole
- * tree forever (D1 in docs/file-tree-lazy-expansion-spec.md), and the clients
- * that still send it are the OLD ones — the population that cannot be fixed by
- * shipping a new bridge, and the one that re-asks every bound checkout at once
- * on every foreground. On-demand listings are bounded separately; neither
- * `listDirectory` nor `listDirectoryBatch` goes through this walk. */
-export const MAX_TREE_NODES = 10_000;
 
 /** Entries a single `listDirectory` call may return, regardless of the
  * budget it was handed — the per-directory ceiling under the on-demand
@@ -196,10 +179,11 @@ export type IgnoreRulesOptions = {
    *
    * It is narrower than the spec's "show everything": `DEFAULT_IGNORES` still
    * applies, so `node_modules`, `.venv`, `.next` and `.vscode` stay hidden
-   * under both variants. Splitting that list into a floor and a convenience
-   * set would change what `buildTree` returns, and `buildTree` now serves a
-   * single caller: `file:tree:snapshot:request`, the hydration verb for apps
-   * predating on-demand listing. The split waits for that verb's retirement. */
+   * under both variants.
+   * TODO(bharath): split that list into a floor and a convenience set, so
+   * "show everything" can mean it. This was blocked on the whole-tree walk,
+   * which is now gone — every caller is a depth-1 listing, so the split's
+   * blast radius is one directory at a time. */
   gitignore?: boolean;
 };
 
@@ -223,108 +207,6 @@ export function loadIgnoreRules(
     if (rootGitignore) ig.add(rootGitignore);
   }
   return new IgnoreRules(projectRoot, ig, gitignore);
-}
-
-export function buildTree(
-  absPath: string,
-  projectRoot: string,
-  rules: IgnoreRules,
-  budget = MAX_TREE_NODES,
-): FileTreeNode | null {
-  return walk(absPath, projectRoot, rules, 0, { left: budget });
-}
-
-function walk(
-  absPath: string,
-  projectRoot: string,
-  rules: IgnoreRules,
-  depth: number,
-  budget: { left: number },
-): FileTreeNode | null {
-  if (depth > MAX_DEPTH) return null;
-
-  let stat;
-  try {
-    stat = lstatSync(absPath);
-  } catch {
-    return null;
-  }
-
-  if (stat.isSymbolicLink()) return null;
-
-  const relPath = relative(projectRoot, absPath).replace(/\\/g, "/");
-  const name = absPath === projectRoot ? "" : basename(absPath);
-
-  // Check ignore rules (skip for the root itself). The kind matters: without
-  // it a `build/`-style pattern excludes every descendant but not the folder,
-  // which is then emitted with an empty `children` array.
-  if (relPath && relPath !== "." && rules.ignores(relPath, stat.isDirectory())) {
-    return null;
-  }
-
-  if (stat.isFile()) {
-    budget.left--;
-    return {
-      name,
-      path: relPath,
-      type: "file",
-      size: stat.size,
-      extension: extname(name) || undefined,
-    };
-  }
-
-  if (stat.isDirectory()) {
-    let entries: string[];
-    try {
-      entries = readdirSync(absPath);
-    } catch {
-      return null;
-    }
-    budget.left--;
-
-    // Walk in name order so a budget cut is deterministic: what survives is
-    // always the same leading run of the listing, not whatever the filesystem
-    // happened to enumerate first. Code-unit order, not `localeCompare`: this
-    // runs once per directory of every full tree build, and the collator is
-    // both far slower and dependent on the host's ICU data — which would make
-    // the cut differ between machines.
-    entries.sort();
-    const children: FileTreeNode[] = [];
-    let truncated = false;
-    // The depth guard at the top of this function drops every child of a
-    // directory sitting at the cap and cannot say WHY it returned null, so the
-    // cut is marked here, where the cap is still in view. An ignored entry is
-    // not a cut — it was never going to be sent.
-    if (depth === MAX_DEPTH) {
-      truncated = entries.some((entry) =>
-        !rules.ignores(relative(projectRoot, join(absPath, entry)).replace(/\\/g, "/")),
-      );
-    }
-    for (const entry of entries) {
-      if (budget.left <= 0) {
-        truncated = true;
-        break;
-      }
-      const child = walk(join(absPath, entry), projectRoot, rules, depth + 1, budget);
-      if (child) children.push(child);
-    }
-
-    // Sort: directories first, then files, alphabetical within each group
-    children.sort((a, b) => {
-      if (a.type !== b.type) return a.type === "directory" ? -1 : 1;
-      return a.name.localeCompare(b.name);
-    });
-
-    return {
-      name: name || basename(projectRoot),
-      path: relPath || ".",
-      type: "directory",
-      children,
-      ...(truncated ? { truncated: true as const } : {}),
-    };
-  }
-
-  return null;
 }
 
 export type DirectoryListing = {
@@ -688,14 +570,4 @@ export function readFile(
     }
     return { content: null, size: 0, error: `Read error: ${code || String(err)}` };
   }
-}
-
-export function countNodes(node: FileTreeNode): number {
-  let count = 1;
-  if (node.children) {
-    for (const child of node.children) {
-      count += countNodes(child);
-    }
-  }
-  return count;
 }

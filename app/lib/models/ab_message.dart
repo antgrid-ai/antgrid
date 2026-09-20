@@ -1314,33 +1314,10 @@ class TerminalSnapshotMessage {
   });
 }
 
-class FileTreeSnapshotRequestMessage {
-  final String id;
-  final int timestamp;
-
-  const FileTreeSnapshotRequestMessage({
-    required this.id,
-    required this.timestamp,
-  });
-}
-
-class FileTreeSnapshotMessage {
-  final String id;
-  final int timestamp;
-  final FileNode tree;
-  final int seq;
-
-  const FileTreeSnapshotMessage({
-    required this.id,
-    required this.timestamp,
-    required this.tree,
-    required this.seq,
-  });
-}
-
-/// The agent confirming the revision a `file:tree:snapshot:request` claimed:
-/// the tree has not moved, so none was sent. Carries no tree by design — see
-/// the schema note on `FileTreeUnchangedMessage` in the bridge's protocol.ts.
+/// The agent confirming the revision a `file:tree:root:request` claimed: the
+/// tree has not moved, so no listing was sent. Carries nothing else by design
+/// — see the schema note on `FileTreeUnchangedMessage` in the bridge's
+/// protocol.ts.
 class FileTreeUnchangedMessage {
   final String id;
   final int timestamp;
@@ -2455,22 +2432,6 @@ Object? parseAbMessage(Map<String, dynamic> json) {
         message: message,
         finalSequence: finalSequence is int ? finalSequence : null,
         exitCode: exitCode is int ? exitCode : null,
-      );
-
-    case 'file:tree:snapshot:request':
-      return FileTreeSnapshotRequestMessage(id: id, timestamp: timestamp);
-
-    case 'file:tree:snapshot':
-      final treeJson = json['tree'];
-      final seq = json['seq'];
-      if (treeJson is! Map<String, dynamic> || seq is! int) return null;
-      final tree = FileNode.fromJson(treeJson);
-      if (tree == null) return null;
-      return FileTreeSnapshotMessage(
-        id: id,
-        timestamp: timestamp,
-        tree: tree,
-        seq: seq,
       );
 
     case 'file:tree:unchanged':

@@ -112,7 +112,7 @@ void main() {
     await Future<void>.delayed(Duration.zero);
     await Future<void>.delayed(Duration.zero);
 
-    expect(_sentOf(t, 'file:tree:snapshot:request'), isEmpty);
+    expect(_sentOf(t, 'file:tree:root:request'), isEmpty);
     expect(_sentOf(t, 'config:read'), isEmpty);
     expect(_sentOf(t, 'preview:snapshot:request'), isEmpty);
     expect(_sentOf(t, 'git:sync-status').map((m) => m['checkoutId']).toSet(), {

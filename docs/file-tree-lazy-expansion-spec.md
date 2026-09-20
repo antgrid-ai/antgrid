@@ -1,6 +1,17 @@
 # On-demand file tree + `file:find` — implementer spec
 
-Status: proposed, not started. Code wins where this and the tree disagree.
+Status: built, then amended. Code wins where this and the tree disagree.
+
+**Amendment (supersedes D1 and one non-goal).** The whole-tree PULL is gone
+too. `file:tree:snapshot:request` / `file:tree:snapshot`, `FileWatcher.getTreeSnapshot`,
+`buildTree`/`walk` and the `MAX_TREE_NODES` / `MAX_DEPTH` budgets are all
+removed, so an app predating this protocol now gets no tree rather than a large
+one. Everywhere below that says the verb "keeps meaning the whole tree forever"
+is superseded. `file:tree:unchanged` survives — the lazy
+`file:tree:root:request` answers with it on a matching `sinceSeq`. `tree:full`
+also survives, schema-only: it guards the OPPOSITE skew (a new app against an
+OLD bridge that still replays a per-checkout full tree), so it retires with
+`pullsTree`, separately.
 
 Anchors below name files and symbols, never line numbers — grep the symbol.
 

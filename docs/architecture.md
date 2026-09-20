@@ -55,9 +55,10 @@ to go stale. The bridge pushes no whole tree under any condition. A watcher over
 sends `file:tree:invalidated` rather than a resend; the app clears what it loaded and
 re-lists. Incremental `tree:update` deltas still arrive, narrowed to the directories
 each client named with `file:tree:subscribe`, and Git status, badges, selected-file
-reads, and notifications remain independent. `file:tree:snapshot:request` still
-answers with the whole tree, bounded by `MAX_TREE_NODES`, for an app that predates
-this protocol — it is the only surviving whole-tree path.
+reads, and notifications remain independent. There is no whole-tree path left at
+all: the `file:tree:snapshot:request` pull and the `buildTree` walk behind it are
+removed, so an app that predates this protocol gets no tree rather than a large
+one.
 
 The app's capability literals live in the relay-client package
 (`connection_handshake.dart`, `local_transport.dart`) and are mirrored by hand against

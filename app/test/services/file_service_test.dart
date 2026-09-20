@@ -23,8 +23,8 @@ Map<String, dynamic> _file(String name, String path) => {
 };
 
 /// Seeds the tree the way production does: the root's own depth-1 listing,
-/// carried on `file:tree:children`. Takes the `tree`/`seq` shape the
-/// superseded `file:tree:snapshot` seed used so a fixture reads the same.
+/// carried on `file:tree:children`. Takes a whole-`tree` shape and flattens it
+/// to depth 1, so a fixture can keep declaring the tree it means.
 void _emitRootTree(FakeAgentTransport t, Map<String, dynamic> payload) {
   final root = payload['tree'] as Map<String, dynamic>;
   t.emit('file:tree:children', {

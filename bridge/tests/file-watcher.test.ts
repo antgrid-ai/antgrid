@@ -503,15 +503,14 @@ describe("FileWatcher pause", () => {
     watcher.stop();
   });
 
-  it("getTreeSnapshot returns current tree + fileSeq", () => {
+  it("getRootListing returns the root's children at the current fileSeq", () => {
     const connState = createConnState();
     const fw = new FileWatcher(
       { path: tempDir, id: "p1" },
       () => {},
       connState,
     );
-    const snap = fw.getTreeSnapshot();
-    expect(snap.tree).toBeDefined();
-    expect(snap.seq).toBe(connState.fileSeq(tempDir));
+    expect(fw.getRootListing(true).children).toBeDefined();
+    expect(fw.currentSeq()).toBe(connState.fileSeq(tempDir));
   });
 });

@@ -407,15 +407,6 @@ class FileService {
   void _onHeavyJson(Map<String, dynamic> json) {
     final parsed = parseAbMessage(json);
     if (parsed == null) return;
-    // Nothing here sends `file:tree:snapshot:request` any more (see
-    // [_requestTree]), but the bridge still answers it on the bus for an old
-    // app, so a second client still running the whole-tree build makes its
-    // reply arrive here. Applying it would swap the lazily-listed, show-all
-    // tree for the legacy ignore-respecting depth-capped one and move the seq
-    // claim with it — so it stays a deliberate no-op.
-    if (parsed is FileTreeSnapshotMessage) {
-      return;
-    }
     if (parsed is FileTreeUnchangedMessage) {
       // Nothing to apply — the agent is confirming the revision we claimed.
       // Guarded anyway so a confirmation that raced an applied delta cannot
@@ -989,9 +980,9 @@ class FileService {
         // retry from. `missing` on a SUBDIRECTORY still folds into an
         // ordinary empty listing; see [_applyListing].
         if (listing.missing) continue;
-        // The root's own listing plays the role `file:tree:snapshot` used
-        // to: the revision this reply reflects, claimable on the next root
-        // pull via sinceSeq. A children-only reply (an ordinary folder
+        // The root's own listing is what carries the revision: the one
+        // this reply reflects, claimable on the next root pull via
+        // sinceSeq. A children-only reply (an ordinary folder
         // expand) never touches the claim — it answers a different directory
         // entirely. A claim that is no longer believable is REPLACED rather
         // than raised: a restarted agent counts from zero, and refusing to
