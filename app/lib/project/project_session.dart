@@ -322,7 +322,7 @@ class ProjectSession {
   /// The seed is what keeps an isolated session's bundle recoverable. Bundles
   /// are built from the session list, which lands a round trip AFTER the
   /// connect-time `state.snapshot` has already replayed that checkout's
-  /// `agent:status` / `tree:full` / `git:status` — a plain `.where()` over the
+  /// `agent:status` / `git:status` — a plain `.where()` over the
   /// broadcast tier dropped them for want of a subscriber, and nothing re-sends
   /// them, so the session sat on "waiting for agent" until the next reconnect.
   ///

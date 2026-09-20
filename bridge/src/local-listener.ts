@@ -82,9 +82,13 @@ export class LocalListener implements TransportSubscriber {
     return this.ownerSocket?.data.sessionBusCarrier === true;
   }
 
-  /** Whether the loopback owner pulls its own file tree (`file:tree:snapshot:request`),
-   *  so a re-sync push would only duplicate it. True with no owner attached —
-   *  there is then nothing the push could reach. */
+  /** Whether the loopback owner pulls its own file tree. Read by nothing in
+   *  this bridge: the re-sync push it used to suppress is gone, and every app
+   *  lists the tree per directory on demand. Retained for backward
+   *  compatibility — see the TODO on `AppReadyMessage.capabilities.pullsTree`
+   *  in protocol.ts. True with no owner attached, the fail-OPEN direction,
+   *  which is why {@link ownerSupportsTerminalFramesV1} below says it is the
+   *  opposite of its own. */
   get ownerPullsTree(): boolean {
     return this.ownerSocket === null || this.ownerSocket.data.pullsTree === true;
   }

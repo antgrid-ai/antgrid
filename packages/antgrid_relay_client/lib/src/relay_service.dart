@@ -518,11 +518,23 @@ class RelayService {
       _handleError(msg);
     } else if (msg is PeerOnlineMessage) {
       if (!_isThisMachine(msg.peerId)) return;
+      // The relay's word, not ours: the machine re-authenticated. A rekey and
+      // an unblocked handshake ladder both key off this, and neither says why.
+      _log(
+        RelayLogLevel.info,
+        'peer online',
+        fields: {'machineSlot': _relaySlotId},
+      );
       // Presence only — the connection state describes OUR socket, and the agent
       // showing up does not change it.
       if (!_peerPresenceController.isClosed) _peerPresenceController.add(true);
     } else if (msg is PeerOfflineMessage) {
       if (!_isThisMachine(msg.peerId)) return;
+      _log(
+        RelayLogLevel.info,
+        'peer offline',
+        fields: {'machineSlot': _relaySlotId},
+      );
       // v3: the machine's socket dropped but ours stays open (no cascade close).
       if (!_peerPresenceController.isClosed) _peerPresenceController.add(false);
       _setState(_currentState.copyWith(error: 'Peer offline'));
@@ -538,6 +550,20 @@ class RelayService {
       _machineDeviceId != null && peerId == _machineDeviceId;
 
   void _handleError(ErrorMessage msg) {
+    // The relay's only channel for "your frame did not go where you sent it".
+    // Its listeners act on a handful of codes and drop the rest on the floor,
+    // so an unlisted code was invisible from the log.
+    _log(
+      RelayLogLevel.warn,
+      'relay error frame',
+      fields: {
+        'code': msg.code,
+        'retryable': msg.retryable,
+        if (msg.ref != null) 'ref': msg.ref,
+        if (msg.channel != null) 'channel': msg.channel,
+        'message': msg.message,
+      },
+    );
     if (!_errorController.isClosed) _errorController.add(msg);
 
     // Clock-skew AUTH_FAILED (retryable): record the offset and let the socket

@@ -64,7 +64,6 @@ const REPLAY_TYPES: ReadonlySet<string> = new Set([
   // Latest-wins ahead/behind. Without the replay a reconnecting app shows a
   // synced branch until the next op, which is the exact wrong answer.
   "git:sync-state",
-  "tree:full",
   // Latest per-project handler snapshot (armed sessions + open escalations).
   // Must be cached: the app rebuilds its escalation list from the status
   // replay after a restart/reconnect — without this, an escalation raised
@@ -118,19 +117,6 @@ export class MessageBus {
     this.emit(msg, channel, {});
   }
 
-  /** Cache for replay WITHOUT delivering to subscribers.
-   *
-   *  For a durable frame that every client pulls for itself: the cache still
-   *  has to hold it (`state.snapshot` is how a client that asks for it by name
-   *  gets one), but pushing it costs the wire a copy nobody reads. The one
-   *  frame this is for today is the open-time file tree, which is also the
-   *  largest the bridge ever produces — it went out before any app had a
-   *  stream bound to receive it, so it was discarded on arrival AND held half
-   *  the control channel's credit window while the bind waited behind it. */
-  retain(msg: AbMessage, channel: Channel): void {
-    this.emit(msg, channel, { deliver: false });
-  }
-
   /** Publish, bypassing the payload-equality dedup below.
    *
    *  For the explicit re-sync paths ONLY (`resyncState`, `announceCheckoutRuntime`):
@@ -178,10 +164,9 @@ export class MessageBus {
   private emit(
     msg: AbMessage,
     channel: Channel,
-    { force = false, deliver = true, audience, peerId }: {
+    { force = false, audience, peerId }: {
       peerId?: string;
       force?: boolean;
-      deliver?: boolean;
       audience?: { only?: InboundSource; except?: ReadonlySet<InboundSource> };
     },
   ): void {
@@ -189,10 +174,9 @@ export class MessageBus {
     if (key !== null) {
       const prev = this.replayCache.get(key);
       // Payload-equality dedup: identical re-publishes (token-refresh poll
-      // returns the same auth, FileWatcher re-emits an unchanged tree)
-      // become no-ops to both existing subscribers and the replay cache.
-      // `createMessage` stamps a fresh `id`/`timestamp` per call, so we
-      // strip those before comparing.
+      // returns the same auth) become no-ops to both existing subscribers and
+      // the replay cache. `createMessage` stamps a fresh `id`/`timestamp` per
+      // call, so we strip those before comparing.
       if (!force && prev && payloadEquals(prev.msg, msg)) return;
       this.replayCache.set(key, { msg, channel });
     }
@@ -201,7 +185,6 @@ export class MessageBus {
     // a log. The one subscriber that must NOT abort the emit — the best-effort
     // push dispatcher — wraps its own deliver at the subscribe site (see
     // project-core.ts attachRelayStream).
-    if (!deliver) return;
     for (const s of this.subs) {
       // PTY bytes remain observable internally; app displays are frame-only.
       if (s.audience !== undefined &&
@@ -221,10 +204,10 @@ export class MessageBus {
     }
     if (!REPLAY_TYPES.has(msg.type)) return null;
     // Checkout-scoped for the same reason the types above are session-scoped:
-    // every checkout runtime publishes its own tree:full / git:status /
-    // agent:status, so one frame per TYPE let an isolated session's worktree
-    // evict the primary checkout's — and the app, which filters replayed frames
-    // by checkoutId, then had nothing left to draw the main file tree from.
+    // every checkout runtime publishes its own git:status / agent:status, so
+    // one frame per TYPE let an isolated session's worktree evict the primary
+    // checkout's — and the app, which filters replayed frames by checkoutId,
+    // then had nothing left to draw the main status from.
     const checkoutId = (msg as { checkoutId?: string }).checkoutId ?? "main";
     return `${msg.type} ${checkoutId}`;
   }

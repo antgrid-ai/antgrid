@@ -70,6 +70,7 @@ const FileTreeNodeSchema: z.ZodType<{
   extension?: string;
   children?: any[];
   truncated?: true;
+  ignored?: true;
 }> = z.lazy(() =>
   z.object({
     name: z.string(),
@@ -78,9 +79,15 @@ const FileTreeNodeSchema: z.ZodType<{
     size: z.number().optional(),
     extension: z.string().optional(),
     children: z.array(FileTreeNodeSchema).optional(),
-    // The directory's listing was cut at the tree's node budget — see
-    // MAX_TREE_NODES in file-tree.ts.
+    // The directory's listing was cut at a budget — MAX_LISTING_ENTRIES for a
+    // single listing, MAX_BATCH_NODES across a batch. See file-tree.ts.
     truncated: z.literal(true).optional(),
+    // Git ignores this entry but includeIgnored was true for the request
+    // that listed it — set by listDirectory/listDirectoryBatch's
+    // markAgainst second verdict (file-tree.ts). The watcher's own ignore
+    // prune never consults this and never updates a marked entry live: an
+    // ignored row goes stale until the directory is re-listed.
+    ignored: z.literal(true).optional(),
   }),
 );
 
@@ -170,6 +177,16 @@ const AppReadyMessage = BaseMessage.extend({
   // the bridge honour it; the reads are hand-written on both transports.
   capabilities: z.object({
     checkoutRouting: z.literal(true).optional(),
+    /** Parsed and ignored. Nothing in `bridge/src` reads it any more — the
+     *  whole-tree push it used to select is gone, and every app lists the tree
+     *  per directory on demand. It is kept, along with `LocalListener.ownerPullsTree`,
+     *  `PeerSession.pullsTree` and `ownerPullsTreeProvider`, only because an
+     *  app that still declares it would go treeless with no error against a
+     *  bridge that dropped it — the app's hello literals are hand-mirrored
+     *  across the licence boundary and no suite spans the two sides.
+     *  TODO(bharath): drop the whole chain, with the Dart clients'
+     *  `exclude: ['tree:full']`, once no app in the field predates the
+     *  on-demand listing protocol. */
     pullsTree: z.literal(true).optional(),
     // The app can render `terminal:frame` display mode. Absent means it cannot,
     // and the read of it MUST fail closed (unknown peer reads false) or an old
@@ -823,14 +840,21 @@ const ControlResultMessage = BaseMessage.extend({
 });
 
 // File tree & code viewer messages
+
+/** Nothing in `bridge/src` produces this any more — apps list per directory on
+ *  demand. The type stays declared for the OPPOSITE skew to the one the rest
+ *  of this file guards: the Dart clients name it in their replay `exclude` to
+ *  suppress an OLDER BRIDGE's per-checkout full tree, which that bridge still
+ *  caches and replays on `state.snapshot`. Dropping the schema drops the
+ *  suppression, so this outlives the whole-tree pull and retires with
+ *  `pullsTree` (see AppReadyMessage). */
 const TreeFullMessage = BaseMessage.extend({
   type: z.literal("tree:full"),
   projectId: z.string(),
   root: FileTreeNodeSchema,
-  // Which revision of the watcher's tree this is. A resync push is the only
-  // full tree that still reaches an app unasked, and an app that cannot name
-  // the revision it holds cannot ask "still this one?" on the next resume —
-  // see `sinceSeq` below. Optional so a pre-seq bridge still parses.
+  // Which revision of the watcher's tree this is, so an app that holds one
+  // from an older bridge can ask "still this one?" on the next resume — see
+  // `sinceSeq` below. Optional so a pre-seq bridge still parses.
   seq: z.number().int().nonnegative().optional(),
   ...CheckoutScoped,
 });
@@ -2300,32 +2324,137 @@ const TerminalDisplayStatusMessage = BaseMessage.extend({
   ...CheckoutScoped,
 });
 
-const FileTreeSnapshotRequestMessage = BaseMessage.extend({
-  type: z.literal("file:tree:snapshot:request"),
-  /** The revision the caller's tree is already at. Matched against the
-   *  watcher's current seq: still equal means the caller is current and is
-   *  answered `file:tree:unchanged` instead of the whole tree. Only a caller
-   *  that can vouch the seq came from THIS agent process may send it — a
-   *  restarted agent counts from zero again, so a stale claim would be
-   *  confirmed rather than corrected (see file_service.dart). */
-  sinceSeq: z.number().int().nonnegative().optional(),
-  ...CheckoutScoped,
-});
-
-const FileTreeSnapshotMessage = BaseMessage.extend({
-  type: z.literal("file:tree:snapshot"),
-  tree: FileTreeNodeSchema,
-  seq: z.number().int().nonnegative(),
-  ...CheckoutScoped,
-});
-
 /** The cheap answer to a `sinceSeq` request the watcher has not moved past.
- *  Its own type rather than a tree-less `file:tree:snapshot`: a snapshot whose
- *  tree is sometimes absent puts a "when is this null?" question on every
- *  future reader of the frame that normally carries the tree. */
+ *  Its own type rather than a tree-less `file:tree:children`: a listing whose
+ *  payload is sometimes absent puts a "when is this null?" question on every
+ *  future reader of the frame that normally carries it. */
 const FileTreeUnchangedMessage = BaseMessage.extend({
   type: z.literal("file:tree:unchanged"),
   seq: z.number().int().nonnegative(),
+  ...CheckoutScoped,
+});
+
+// ── On-demand file tree listings ── Depth-1 directory listings fetched when
+// a folder is opened; the only way a client gets a tree. Every
+// default and bound below is documentation only: parseMessageFast (the
+// encrypted/local hot path) validates the message TYPE alone, so a real
+// inbound frame's Zod defaults and bounds never run — see the MAX_LOG_PAGE
+// comment in git-log.ts. The handlers in agent-core.ts clamp by hand.
+
+const FileTreeRootRequestMessage = BaseMessage.extend({
+  type: z.literal("file:tree:root:request"),
+  /** The revision the caller's tree is already at. Matched against the
+   *  watcher's current seq: still equal means the caller is current and is
+   *  answered `file:tree:unchanged` instead of a listing. Only a caller that
+   *  can vouch the seq came from THIS agent process may send it — a restarted
+   *  agent counts from zero again, so a stale claim would be confirmed rather
+   *  than corrected (see file_service.dart). */
+  sinceSeq: z.number().int().nonnegative().optional(),
+  /** Omitted reads as TRUE here and as FALSE on file:find (a later wave) —
+   *  the tree browses and wants to show everything, find hands a path to an
+   *  agent and wants to hide node_modules. Declared `.optional()` rather than
+   *  `.default(true)` because the default would never fire on the wire yet
+   *  would make the field REQUIRED in `MessagePayload`, forcing every sender
+   *  to spell out the value the default exists to supply. */
+  includeIgnored: z.boolean().optional(),
+  ...CheckoutScoped,
+});
+
+const FileTreeChildrenRequestMessage = BaseMessage.extend({
+  type: z.literal("file:tree:children:request"),
+  /** Checkout-relative, `/`-separated. "" is the root. */
+  paths: z.array(z.string()).min(1).max(64),
+  /** Omitted reads as TRUE — see FileTreeRootRequestMessage. */
+  includeIgnored: z.boolean().optional(),
+  ...CheckoutScoped,
+});
+
+const DirectoryListingSchema = z.object({
+  path: z.string(),
+  children: z.array(FileTreeNodeSchema),
+  /** Cut at the per-listing cap or the batch budget — `children` is an
+   *  ordered prefix, not the whole directory. See MAX_LISTING_ENTRIES /
+   *  MAX_BATCH_NODES in file-tree.ts. */
+  truncated: z.literal(true).optional(),
+  /** The directory no longer exists, or its resolved path escaped the
+   *  checkout. Distinct from a genuinely empty directory, which answers
+   *  `children: []` with no `missing` — collapsing the two leaves a deleted
+   *  folder spinning forever in the app. */
+  missing: z.literal(true).optional(),
+});
+
+const FileTreeChildrenMessage = BaseMessage.extend({
+  type: z.literal("file:tree:children"),
+  listings: z.array(DirectoryListingSchema),
+  seq: z.number().int().nonnegative(),
+  ...CheckoutScoped,
+});
+
+/** Replaces a forced tree(-full) resend: the app clears childrenLoaded
+ *  everywhere and re-lists the root plus its subscribed set itself, rather
+ *  than being pushed a tree it may not want at whole-checkout size. */
+const FileTreeInvalidatedMessage = BaseMessage.extend({
+  type: z.literal("file:tree:invalidated"),
+  seq: z.number().int().nonnegative(),
+  ...CheckoutScoped,
+});
+
+// ── Delta-bandwidth subscription ── Purely a hint for which directories
+// flushBatch's tree:update filters down to; it never reaches the watcher's
+// own ignore rules or what it watches. Same parseMessageFast caveat as every
+// frame above — file-watcher.ts hand-validates `paths` itself.
+
+const FileTreeSubscribeMessage = BaseMessage.extend({
+  type: z.literal("file:tree:subscribe"),
+  /** REPLACES the sender's whole set — idempotent, so a reconnect hydrator
+   *  can just re-send it. Empty array unsubscribes. Checkout-relative,
+   *  `/`-separated; "" is the root. No reply, no ack. */
+  paths: z.array(z.string()).max(512),
+  ...CheckoutScoped,
+});
+
+// ── Path search ── Backs
+// @-mentions and the tree's filter box. No file:find-cancel: supersede by
+// requestId, killing the previous process the way FileSearcher.search does,
+// and let the app drop replies for a requestId it no longer wants. Same
+// parseMessageFast caveat as the listing frames above — handlers clamp by hand.
+
+const FileFindMessage = BaseMessage.extend({
+  type: z.literal("file:find"),
+  projectId: z.string(),
+  requestId: z.string(),
+  query: z.string().max(256),
+  /** FALSE by default — the opposite of the tree's frames: find hands a
+   *  path to an agent, and node_modules is noise there. */
+  includeIgnored: z.boolean().default(false),
+  /** Directories are DERIVED from file path prefixes; an empty one is
+   *  invisible to find even though the tree shows it. */
+  kinds: z.enum(["files", "dirs", "both"]).default("both"),
+  limit: z.number().int().positive().max(500).default(100),
+  ...CheckoutScoped,
+});
+
+const FileFindResultMessage = BaseMessage.extend({
+  type: z.literal("file:find-result"),
+  projectId: z.string(),
+  requestId: z.string(),
+  entries: z.array(z.object({
+    path: z.string(),
+    isDir: z.boolean(),
+    // Same meaning as FileTreeNodeSchema's `ignored`, and set only when the
+    // request carried includeIgnored: true — the filter box replaces the tree
+    // on screen, so a path both surfaces can show must read the same in both.
+    ignored: z.literal(true).optional(),
+  })),
+  /** The scan hit its cap — entries is the best-scoring prefix. */
+  truncated: z.boolean(),
+  /** `"none"` when no engine ran at all — a listing that was superseded,
+   *  timed out, or was refused before a finder existed. Without that member
+   *  every error path had to claim `"walk"`, which sent anyone debugging an
+   *  empty result toward the readdir fallback on machines that have both
+   *  binaries and never touched it. */
+  engine: z.enum(["ripgrep", "git-ls-files", "walk", "none"]),
+  error: z.string().optional(),
   ...CheckoutScoped,
 });
 
@@ -2863,9 +2992,14 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   TerminalHistoryRequestMessage,
   TerminalHistoryPageMessage,
   TerminalDisplayStatusMessage,
-  FileTreeSnapshotRequestMessage,
-  FileTreeSnapshotMessage,
   FileTreeUnchangedMessage,
+  FileTreeRootRequestMessage,
+  FileTreeChildrenRequestMessage,
+  FileTreeChildrenMessage,
+  FileTreeInvalidatedMessage,
+  FileTreeSubscribeMessage,
+  FileFindMessage,
+  FileFindResultMessage,
   PreviewSnapshotRequestMessage,
   PreviewSnapshotMessage,
   RequestMessage,
@@ -3066,9 +3200,14 @@ export type TerminalUnsubscribe = z.infer<typeof TerminalUnsubscribeMessage>;
 export type TerminalHistoryRequest = z.infer<typeof TerminalHistoryRequestMessage>;
 export type TerminalHistoryPage = z.infer<typeof TerminalHistoryPageMessage>;
 export type TerminalDisplayStatus = z.infer<typeof TerminalDisplayStatusMessage>;
-export type FileTreeSnapshotRequest = z.infer<typeof FileTreeSnapshotRequestMessage>;
-export type FileTreeSnapshot = z.infer<typeof FileTreeSnapshotMessage>;
 export type FileTreeUnchanged = z.infer<typeof FileTreeUnchangedMessage>;
+export type FileTreeRootRequest = z.infer<typeof FileTreeRootRequestMessage>;
+export type FileTreeChildrenRequest = z.infer<typeof FileTreeChildrenRequestMessage>;
+export type FileTreeChildren = z.infer<typeof FileTreeChildrenMessage>;
+export type FileTreeInvalidated = z.infer<typeof FileTreeInvalidatedMessage>;
+export type FileTreeSubscribe = z.infer<typeof FileTreeSubscribeMessage>;
+export type FileFind = z.infer<typeof FileFindMessage>;
+export type FileFindResult = z.infer<typeof FileFindResultMessage>;
 export type PreviewSnapshotRequest = z.infer<typeof PreviewSnapshotRequestMessage>;
 export type PreviewSnapshot = z.infer<typeof PreviewSnapshotMessage>;
 export type PreviewUrlEntry = z.infer<typeof PreviewUrlEntrySchema>;
@@ -3179,7 +3318,10 @@ export const CHECKOUT_VARIABLE_MESSAGE_TYPES = new Set<string>([
   "git:sync", "git:sync-result", "git:sync-status", "git:sync-state",
   "command:run", "command:output", "command:done",
   "config:read", "config:read-result", "config:write", "config:write-result", "config:changed", "config:detect-tools", "config:detect-tools-result",
-  "ports:update", "port:detected", "preview:url", "file:tree:snapshot:request", "file:tree:snapshot", "file:tree:unchanged", "preview:snapshot:request", "preview:snapshot",
+  "ports:update", "port:detected", "preview:url", "file:tree:unchanged", "preview:snapshot:request", "preview:snapshot",
+  "file:tree:root:request", "file:tree:children:request", "file:tree:children", "file:tree:invalidated",
+  "file:tree:subscribe",
+  "file:find", "file:find-result",
   "session:result", "control:result",
 ]);
 
@@ -3305,7 +3447,10 @@ const KNOWN_TYPES = new Set<string>([
   "terminal:snapshot:request", "terminal:snapshot",
   "terminal:subscribe", "terminal:subscribed", "terminal:frame", "terminal:ack",
   "terminal:unsubscribe", "terminal:history:request", "terminal:history:page", "terminal:display:status",
-  "file:tree:snapshot:request", "file:tree:snapshot", "file:tree:unchanged",
+  "file:tree:unchanged",
+  "file:tree:root:request", "file:tree:children:request", "file:tree:children", "file:tree:invalidated",
+  "file:tree:subscribe",
+  "file:find", "file:find-result",
   "preview:snapshot:request", "preview:snapshot",
   "request", "response",
   "agent:turn-start", "agent:session-reset", "agent:turn-end",

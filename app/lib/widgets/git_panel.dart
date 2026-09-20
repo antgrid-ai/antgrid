@@ -595,7 +595,7 @@ class _GitChangesHeader extends StatelessWidget {
 
   /// Re-pulls everything the panel shows: the file tree (which, server-side,
   /// forces a fresh git-status read alongside it — see the bridge's
-  /// `file:tree:snapshot:request` handler), the ahead/behind sync counts, and
+  /// `file:tree:root:request` handler), the ahead/behind sync counts, and
   /// the commit log. One button for all three: from here they read as one
   /// picture of the repository, not three independently-stale ones.
   void _refresh() {
@@ -1288,7 +1288,6 @@ class _GitPanelBody extends ConsumerWidget {
         root: state.root,
         expandedPaths: state.expandedPaths,
         selectedFilePath: state.git.diffPath ?? state.git.viewingPath,
-        filterQuery: null,
         gitFileEntries: state.gitFileEntries,
         changesOnly: true,
         collapsedPaths: state.git.collapsedPaths,

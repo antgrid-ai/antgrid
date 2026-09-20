@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { FileSearcher } from "../src/file-search";
+import { FileSearcher, buildRipgrepArgs } from "../src/file-search";
 import type { AbMessage } from "../src/protocol";
 import { mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
@@ -138,6 +138,33 @@ describe("FileSearcher", () => {
       .flatMap((m) => (m.type === "file:search-result" ? m.matches.map((x) => x.path) : []));
     expect(paths.some((p) => p.includes("isolated.txt"))).toBe(false);
     expect(paths.some((p) => p.includes("own.txt"))).toBe(true);
+  });
+
+  test("the ripgrep exclude glob is anchored with /** — a bare trailing slash is inert on ripgrep 14", () => {
+    // This is a shape assertion, not a presence assertion: a test that only
+    // checked "--glob" was passed at all would have let the original `!/x/`
+    // form (which ripgrep 14 silently ignores — measured, see the comment on
+    // buildRipgrepArgs) ship green. This machine has no `rg` reachable by
+    // Bun.spawn (see F3 in the wave-3 codemap), so the shape is all a local
+    // run can verify; the exclude actually working is covered by the git-grep
+    // path in the tests above.
+    const args = buildRipgrepArgs(
+      {
+        projectId: "p",
+        query: "needle",
+        caseSensitive: false,
+        regex: false,
+        wholeWord: false,
+        requestId: "req",
+      },
+      "/root",
+      ["state", "nested/dir"],
+    );
+    const globIndex = (rel: string) => args.indexOf(`!/${rel}/**`);
+    expect(globIndex("state")).toBeGreaterThan(-1);
+    expect(globIndex("nested/dir")).toBeGreaterThan(-1);
+    expect(args).not.toContain("!/state/");
+    expect(args).not.toContain("!/nested/dir/");
   });
 
   test("an exclude outside the search root leaves the search intact", async () => {

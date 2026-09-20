@@ -167,7 +167,7 @@ void main() {
     await Future<void>.delayed(Duration.zero);
 
     final pulled = t.sent.map((m) => m['type']).toSet();
-    expect(pulled, contains('file:tree:snapshot:request'));
+    expect(pulled, contains('file:tree:root:request'));
     expect(pulled, contains('preview:snapshot:request'));
 
     await session.close();

@@ -62,7 +62,7 @@ const GIT_GREP_CONTEXT_RE = /^(.+?)-(\d+)-(.*)$/;
  * at a managed worktree lives UNDER the Antgrid state dir, and anchoring an
  * exclude at an ancestor would blank its own results.
  */
-function containedExcludes(root: string, excludeDirs: readonly string[]): string[] {
+export function containedExcludes(root: string, excludeDirs: readonly string[]): string[] {
   const rels: string[] = [];
   for (const dir of excludeDirs) {
     const rel = relative(root, dir);
@@ -74,16 +74,22 @@ function containedExcludes(root: string, excludeDirs: readonly string[]): string
 
 /** globset treats these as syntax, so a state dir spelled with one would
  *  otherwise exclude a pattern instead of the directory the user named. */
-function escapeGlob(path: string): string {
+export function escapeGlob(path: string): string {
   return path.replace(/[\\*?\[\]{}]/g, (ch) => `\\${ch}`);
 }
 
-function buildRipgrepArgs(opts: SearchOptions, projectPath: string, excludes: readonly string[]): string[] {
+export function buildRipgrepArgs(opts: SearchOptions, projectPath: string, excludes: readonly string[]): string[] {
   const args = ["rg", "--json", "-n", "--column", "-C", "2"];
   // A leading `/` anchors the glob at ripgrep's WORKING directory, which the
   // spawn below pins to projectPath — without the anchor `!state/` would also
-  // hide a `sub/state/` the project genuinely owns.
-  for (const rel of excludes) args.push("--glob", `!/${escapeGlob(rel)}/`);
+  // hide a `sub/state/` the project genuinely owns. The anchor alone is not
+  // enough, though: on ripgrep 14, `!/X/` (and `!/X`) match NOTHING — silently
+  // inert, measured four independent ways against this exact fixture (see
+  // file-find.ts's buildFindRipgrepArgs and its regression test).
+  // `!/X/**` is the form that actually excludes. Do not
+  // "simplify" this back to a bare trailing slash — it compiles, it reads as
+  // obviously correct, and it excludes nothing.
+  for (const rel of excludes) args.push("--glob", `!/${escapeGlob(rel)}/**`);
   if (!opts.caseSensitive) args.push("-i");
   if (opts.wholeWord) args.push("-w");
   if (!opts.regex) args.push("-F");
@@ -135,6 +141,21 @@ export class FileSearcher {
       this.activeProcess = null;
       this.activeRequestId = null;
     }
+  }
+
+  /** Kill whatever search is running, whoever asked for it, and resolve only
+   *  once the process is actually gone. The spawn holds the checkout as its
+   *  cwd, so a caller about to run `git worktree remove` has to WAIT — see
+   *  stopCheckoutServices in agent-core.ts. */
+  async stop(): Promise<void> {
+    const proc = this.activeProcess;
+    this.activeProcess = null;
+    this.activeRequestId = null;
+    if (!proc) return;
+    proc.kill();
+    try {
+      await proc.exited;
+    } catch {}
   }
 
   async search(opts: SearchOptions): Promise<void> {

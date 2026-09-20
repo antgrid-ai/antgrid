@@ -37,8 +37,7 @@ import '../providers/providers.dart';
 import '../providers/sessions.dart';
 import '../providers/visible_surface.dart';
 import '../services/agent_session_service.dart';
-import '../services/tree_interest.dart';
-import '../providers/ui_attention_providers.dart';
+import '../services/file_service.dart';
 import '../services/attach_hydration.dart';
 import '../services/clipboard_image_reader.dart';
 import '../services/upload_service.dart';
@@ -86,7 +85,6 @@ class AgentTranscriptView extends ConsumerStatefulWidget {
 }
 
 class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
-  final _treeInterest = TreeInterest();
   late final ComposerController _input;
   final _scroll = ScrollController();
   final _panelFocus = FocusNode();
@@ -118,11 +116,23 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
   List<FileMention> _mentionSuggestions = const [];
   int _mentionIndex = 0;
   bool _mentionDismissed = false;
-  // Identity-cached flatten of the synced tree (same pattern as _cachedRows):
-  // the root object is replaced wholesale on every tree update, so identity
-  // is the correct (and cheapest) invalidation key.
-  List<FileMention> _mentionCandidates = const [];
-  FileNode? _mentionCacheRoot;
+  // True while a `file:find` this mention token issued is in flight — gates
+  // the panel's "Searching…" row so an empty [_mentionSuggestions] mid-fetch
+  // never reads as "no matches" (see [_maybeFindMentions]).
+  bool _mentionLoading = false;
+  // Set from `file:find-result.error` (or a transport failure): a listing the
+  // bridge aborted answers with zero entries too, so without it a search that
+  // never ran renders as "No matching files".
+  String? _mentionError;
+  // The query [_maybeFindMentions] last issued a find for, so a listener tick
+  // that changed only the caret (not the token text) doesn't restart the
+  // debounce and delay every result forever.
+  String? _mentionIssuedQuery;
+  // Bumped on every issued find; a callback that lands after a newer one has
+  // already been issued for a DIFFERENT query drops its result instead of
+  // clobbering the fresher one — belt-and-suspenders alongside
+  // [FileService.find]'s own supersede-by-requestId.
+  int _mentionRequestGen = 0;
   AgentCapabilities? _capabilities;
   // Signature of the last catalog persisted for this session, so the post-frame
   // remember runs once per distinct catalog rather than on every rebuild.
@@ -225,7 +235,6 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
 
   @override
   void dispose() {
-    _treeInterest.dispose();
     // Stop re-pulling this session's transcript on every reconnect now that its
     // view is gone — the view is keyed per session id, so this fires exactly
     // when the user navigates off / switches to another session.
@@ -560,6 +569,84 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
       _suggestionsDismissed = false;
       _mentionDismissed = false;
     });
+    _maybeFindMentions();
+  }
+
+  /// Kicks a debounced `file:find` for the active @-mention token, if any.
+  /// No-ops when the token's query text hasn't actually changed since the
+  /// last issue (a pure caret move re-notifies the composer too) or when no
+  /// checkout-scoped [FileService] is resolvable yet.
+  void _maybeFindMentions() {
+    final token = _input.mentionToken;
+    if (token == null) {
+      _mentionIssuedQuery = null;
+      _mentionError = null;
+      return;
+    }
+    if (_mentionDismissed || token.query == _mentionIssuedQuery) return;
+    // Resolved fresh rather than read through `fileServiceProvider`: this runs
+    // outside build(), where that façade throws while the focused project's
+    // session is unresolved. Both are checkout-scoped.
+    final fileService = focusedCheckoutServiceOrNull(
+      ref.container,
+      (s) => s.fileService,
+    );
+    // The watermark records only queries that actually went out. Set above
+    // this guard it latched a token the service was still unresolved for, and
+    // the equality check then blocked every retry for that exact text.
+    if (fileService == null) return;
+    _mentionIssuedQuery = token.query;
+    final gen = ++_mentionRequestGen;
+    setState(() {
+      _mentionLoading = true;
+      _mentionError = null;
+    });
+    detached('AgentTranscriptView', 'find mention candidates', () async {
+      FileFindResultMessage result;
+      try {
+        // Mentions hand a path to the agent, so ignored files (build
+        // output, node_modules) are noise here — unlike the tree's own
+        // browse default.
+        result = await fileService.find(
+          token.query,
+          includeIgnored: false,
+          kinds: 'both',
+        );
+      } on FileFindSuperseded {
+        // NOT necessarily a keystroke of our own: the file explorer's filter
+        // box resolves the same FileService, which keeps one wanted call for
+        // the whole service, and both surfaces are mounted at once on
+        // desktop. Clearing the watermark too is what lets the next composer
+        // notification re-issue for the same token text.
+        if (mounted && gen == _mentionRequestGen) {
+          setState(() {
+            _mentionLoading = false;
+            _mentionIssuedQuery = null;
+          });
+        }
+        return;
+      } catch (_) {
+        if (mounted && gen == _mentionRequestGen) {
+          setState(() {
+            _mentionLoading = false;
+            _mentionError = 'Search failed';
+          });
+        }
+        return;
+      }
+      if (!mounted || gen != _mentionRequestGen) return;
+      setState(() {
+        _mentionLoading = false;
+        // A killed or timed-out listing answers with zero entries too, so
+        // without this the panel says "No matching files" for a search that
+        // never ran.
+        _mentionError = result.error;
+        _mentionSuggestions = [
+          for (final e in result.entries) (path: e.path, isDir: e.isDir),
+        ];
+        if (_mentionIndex >= _mentionSuggestions.length) _mentionIndex = 0;
+      });
+    });
   }
 
   List<AgentCapabilityCommand> _deriveSuggestions() {
@@ -575,13 +662,6 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
     // into the args, the popup would fight normal typing.
     if (line.caret > tokenEnd) return const [];
     return filterSlashCommands(caps.commands, line.text.substring(1, tokenEnd));
-  }
-
-  List<FileMention> _deriveMentionSuggestions() {
-    if (_mentionDismissed || _mentionCandidates.isEmpty) return const [];
-    final token = _input.mentionToken;
-    if (token == null) return const [];
-    return filterFileMentions(_mentionCandidates, token.query);
   }
 
   KeyEventResult _onComposerKey(FocusNode node, KeyEvent event) {
@@ -600,7 +680,11 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
         onDismiss: () => setState(() => _suggestionsDismissed = true),
       );
     }
-    if (_mentionSuggestions.isNotEmpty) {
+    // `_mentionLoading`, not just a non-empty list: the panel is open and
+    // says "Searching…" for the debounce plus a round trip, and an Enter in
+    // that window used to fall through to smart-enter and SEND the raw
+    // `@token` as literal text with no file attached.
+    if (_mentionLoading || _mentionSuggestions.isNotEmpty) {
       return _panelNav(
         event,
         count: _mentionSuggestions.length,
@@ -622,15 +706,18 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
     required VoidCallback onDismiss,
   }) {
     final key = event.logicalKey;
+    final navigable = count > 0;
     // Full length, not capped at the panel's visible-row max: the panel
     // windows its display around selectedIndex, so nav must be able to reach
-    // every match.
+    // every match. An open-but-empty panel (a find still in flight) consumes
+    // the key without moving anything — letting it through would move the
+    // caret or send the message instead.
     if (key == LogicalKeyboardKey.arrowDown) {
-      onIndex((index + 1) % count);
+      if (navigable) onIndex((index + 1) % count);
       return KeyEventResult.handled;
     }
     if (key == LogicalKeyboardKey.arrowUp) {
-      onIndex((index - 1 + count) % count);
+      if (navigable) onIndex((index - 1 + count) % count);
       return KeyEventResult.handled;
     }
     // numpadEnter parity: smart-enter treats it as a send key too, so an open
@@ -639,7 +726,7 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
     if (key == LogicalKeyboardKey.tab ||
         key == LogicalKeyboardKey.enter ||
         key == LogicalKeyboardKey.numpadEnter) {
-      onAccept();
+      if (navigable) onAccept();
       return KeyEventResult.handled;
     }
     if (key == LogicalKeyboardKey.escape) {
@@ -911,27 +998,17 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
     );
     _suggestions = _deriveSuggestions();
     if (_suggestionIndex >= _suggestions.length) _suggestionIndex = 0;
-    // `.select` on the root shields this widget from unrelated FileTreeState
-    // churn (git statuses, pane state, expansion sets).
-    final treeRoot = ref.watch(
-      fileTreeStateProvider.select((s) => s.value?.root),
-    );
-    _treeInterest.update(
-      serviceWhenReady(ref, fileServiceProvider),
-      !_mentionDismissed &&
-          _input.mentionToken != null &&
-          ref.watch(agentSurfaceVisibleProvider) &&
-          ref.watch(appLifecycleStateProvider) == AppLifecycleState.resumed,
-    );
-    if (!identical(treeRoot, _mentionCacheRoot)) {
-      _mentionCacheRoot = treeRoot;
-      _mentionCandidates = flattenFileTree(treeRoot);
-    }
     // Slash wins; the two triggers are naturally mutually exclusive (a slash
     // token is whitespace-free on line 0, so no '@'-after-whitespace fits it).
-    _mentionSuggestions = _suggestions.isNotEmpty
-        ? const []
-        : _deriveMentionSuggestions();
+    // [_mentionSuggestions] itself is populated asynchronously by
+    // [_maybeFindMentions] (a `file:find` round trip, not a synced tree read —
+    // mentions no longer hold a [TreeInterest] lease at all) — this only
+    // clears it when it must not be SHOWN, same discipline as the old
+    // synchronous derivation, so a result that lands while still valid is
+    // never clobbered by a build it didn't cause.
+    final mentionVisible =
+        _suggestions.isEmpty && !_mentionDismissed && _input.mentionToken != null;
+    if (!mentionVisible) _mentionSuggestions = const [];
     if (_mentionIndex >= _mentionSuggestions.length) _mentionIndex = 0;
     final displayCaps = _capabilities;
 
@@ -1017,6 +1094,9 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
               entries: _mentionSuggestions,
               selectedIndex: _mentionIndex,
               onPick: _acceptMention,
+              visible: mentionVisible,
+              loading: _mentionLoading,
+              error: _mentionError,
             ),
             Padding(
               padding: const EdgeInsets.all(AbTokens.space8),

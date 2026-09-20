@@ -166,15 +166,19 @@ describe.skip("central-relay-e2e", () => {
     expect(found).toBe(true);
   }, 20_000);
 
-  test("receives file tree through relay", async () => {
-    const tree = await app.waitForAbType("tree:full", 10_000);
-    expect(tree.type).toBe("tree:full");
-    expect(tree.root).toBeDefined();
-    expect(tree.root.type).toBe("directory");
-    // Root should have children containing our test files
-    expect(tree.root.children).toBeDefined();
-    expect(tree.root.children!.length).toBeGreaterThan(0);
-    const names = tree.root.children!.map((e: any) => e.name);
+  test("receives the root directory listing through relay", async () => {
+    // The whole-tree push this used to await no longer exists — the bridge
+    // answers a listing request instead.
+    const { createMessage } = await import("../../../bridge/src/protocol");
+    const waiting = app.waitForAbType("file:tree:children", 10_000);
+    app.sendEncrypted(createMessage("file:tree:root:request", {}));
+    const reply = await waiting;
+    expect(reply.type).toBe("file:tree:children");
+    const listing = reply.listings.find((l: any) => l.path === "");
+    expect(listing).toBeDefined();
+    expect(listing!.missing).toBeUndefined();
+    expect(listing!.children.length).toBeGreaterThan(0);
+    const names = listing!.children.map((e: any) => e.name);
     expect(names).toContain("README.md");
   }, 15_000);
 });

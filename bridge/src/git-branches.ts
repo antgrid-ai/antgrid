@@ -1,3 +1,5 @@
+import { runGit as runGitShared } from "./git-spawn";
+
 export interface GitBranchCatalog {
   isRepository: boolean;
   current: string | null;
@@ -86,13 +88,8 @@ function dirtyWorktreeError(branch: string, files: string[]): string {
 
 export async function listLocalBranches(projectPath: string): Promise<GitBranchCatalog> {
   // Check if inside work tree
-  const revParseProc = Bun.spawn(["git", "rev-parse", "--is-inside-work-tree"], {
-    cwd: projectPath,
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const revParseExit = await revParseProc.exited;
-  if (revParseExit !== 0) {
+  const revParse = await runGit(projectPath, ["rev-parse", "--is-inside-work-tree"]);
+  if (revParse.exitCode !== 0) {
     return {
       isRepository: false,
       current: null,
@@ -102,25 +99,13 @@ export async function listLocalBranches(projectPath: string): Promise<GitBranchC
   }
 
   // Concurrent reads
-  const currentProc = Bun.spawn(["git", "branch", "--show-current"], {
-    cwd: projectPath,
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const refsProc = Bun.spawn(["git", "for-each-ref", "--format=%(refname:short)", "refs/heads"], {
-    cwd: projectPath,
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-
-  const [currentText, refsText] = await Promise.all([
-    new Response(currentProc.stdout).text(),
-    new Response(refsProc.stdout).text(),
+  const [currentRun, refsRun] = await Promise.all([
+    runGit(projectPath, ["branch", "--show-current"]),
+    runGit(projectPath, ["for-each-ref", "--format=%(refname:short)", "refs/heads"]),
   ]);
+  const refsText = refsRun.stdout;
 
-  await Promise.all([currentProc.exited, refsProc.exited]);
-
-  const rawCurrent = currentText.trim();
+  const rawCurrent = currentRun.stdout.trim();
   const current = rawCurrent.length > 0 ? rawCurrent : null;
 
   const rawBranches = refsText
@@ -267,13 +252,8 @@ export async function checkoutLocalBranch(
  *  after a successful stash is one of the two ways the user's work was left
  *  stashed with only a "checkout failed" to explain it. */
 async function verifyCurrentBranch(projectPath: string, branch: string): Promise<void> {
-  const verifyProc = Bun.spawn(["git", "branch", "--show-current"], {
-    cwd: projectPath,
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const verifyText = (await new Response(verifyProc.stdout).text()).trim();
-  await verifyProc.exited;
+  const verify = await runGit(projectPath, ["branch", "--show-current"]);
+  const verifyText = verify.stdout.trim();
 
   if (verifyText !== branch) {
     throw new GitHelperError("CHECKOUT_FAILED", `Verification failed: expected branch '${branch}', got '${verifyText}'`);
@@ -284,8 +264,7 @@ async function verifyCurrentBranch(projectPath: string, branch: string): Promise
  *  deadline rather than a bare spawn: its `LC_ALL=C` is what makes every prose
  *  matcher here — [parseStashSubject]'s `WIP on`/`On`, [isDirtyWorktreeRefusal]'s
  *  `would be overwritten by` — a fact rather than a guess about the user's
- *  locale, and `GIT_OPTIONAL_LOCKS=0` keeps a read from contending with the
- *  agent's own git for `index.lock`. */
+ *  locale. */
 async function runGit(
   cwd: string,
   args: string[],
@@ -421,48 +400,17 @@ export interface BranchRemoteStatus {
 const LS_REMOTE_TIMEOUT_MS = 6_000;
 
 /**
- * `ls-remote` reaches the network, so it can sit forever on a credential prompt
- * or a black-holed host. GIT_TERMINAL_PROMPT=0 turns the prompt into a failure
- * and the kill timer bounds the rest. Same shape as handler/snapshot.ts.
+ * `ls-remote` reaches the network, so it can sit indefinitely on a black-holed
+ * host; the deadline is the only thing that bounds it. Kept as a named entry
+ * point because [runGit] below is defined as "this, without a deadline" — the
+ * locale pin both of them need is the same either way.
  */
 export async function runGitRemote(
   cwd: string,
   args: string[],
   timeoutMs?: number,
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-  const proc = Bun.spawn(["git", ...args], {
-    cwd,
-    stdout: "pipe",
-    stderr: "pipe",
-    env: { ...process.env, LC_ALL: "C", GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0" },
-  });
-  const settled = (async () => {
-    const [stdout, stderr] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-    ]);
-    return { exitCode: await proc.exited, stdout, stderr };
-  })();
-  if (!timeoutMs) return settled;
-
-  // The deadline races the READS, not just the process. Killing git alone does
-  // not end them: `ls-remote` over ssh hands its stdout/stderr pipes to a child
-  // `ssh`, which keeps the write ends open — and against a black-holed host
-  // that child outlives the timer by ssh's own connect timeout, so awaiting the
-  // pipes here would blow the UI deadline this exists to hold.
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const deadline = new Promise<null>((resolve) => {
-    timer = setTimeout(() => {
-      proc.kill();
-      resolve(null);
-    }, timeoutMs);
-  });
-  // The loser keeps running with nobody awaiting it; it never rejects, but the
-  // handler is what keeps that from being reported as an unhandled rejection.
-  settled.catch(() => undefined);
-  const won = await Promise.race([settled, deadline]);
-  clearTimeout(timer);
-  return won ?? { exitCode: 124, stdout: "", stderr: `git ${args[0]} exceeded ${timeoutMs}ms` };
+  return runGitShared(cwd, args, { englishProse: true, timeoutMs });
 }
 
 /** Short branch name this branch pushes to, from tracking config; falls back to
