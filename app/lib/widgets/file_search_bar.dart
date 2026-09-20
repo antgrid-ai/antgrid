@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../design/ab_colors.dart';
 import '../design/ab_tokens.dart';
 import '../design/widgets/ab_search_field.dart';
 
@@ -61,6 +62,17 @@ class _FileSearchBarState extends State<FileSearchBar> {
       controller: _controller,
       hint: 'Filter files...',
       height: AbTokens.rowHeightXs,
+      // Chrome, not a control. The action row already bounds it, so an
+      // outline and a fill of its own would draw a box inside a box; taking
+      // both away leaves the row reading as one surface.
+      border: false,
+      fillColor: context.antgrid.bgDeep,
+      // Drops the magnifier into the column the tree's disclosure chevrons
+      // occupy directly below. Both start at the same inset by construction:
+      // the row's own is AbTokens.space12, and the toolbar's padding plus its
+      // centre-slot gap come to the same, so squaring the prefix slot to the
+      // glyph is all the alignment needs.
+      prefixIconWidth: AbTokens.iconButtonGlyph,
       debounce: widget.debounce,
       onChanged: _onChanged,
     );

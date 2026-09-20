@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/design/widgets/ab_loading.dart';
+import 'package:antgrid/design/widgets/ab_icon.dart';
 import 'package:antgrid/design/widgets/ab_toolbar.dart';
 import 'package:antgrid/models/file_tree_models.dart';
 import 'package:antgrid/project/project_session.dart';
@@ -341,6 +342,28 @@ void main() {
       await tester.pump(FileService.findDebounce + const Duration(milliseconds: 20));
       return t.sent.lastWhere((m) => m['type'] == 'file:find');
     }
+
+    testWidgets('the filter glyph starts in the chevron column of the tree', (
+      tester,
+    ) async {
+      final (_, widget) = await buildFilterWidget();
+      await tester.pumpWidget(widget);
+      await tester.pump();
+
+      // LEFT edges, not centres: the two glyphs are different widths, and a
+      // chevron is text whose advance the test font exaggerates, so a centre
+      // comparison would assert the font rather than the layout. The inset
+      // itself is what has to agree — AbListRow's own horizontal padding on
+      // one side, the toolbar's padding plus its centre-slot gap on the other.
+      final icon = find.descendant(
+        of: find.byType(FileSearchBar),
+        matching: find.byType(AbIcon),
+      );
+      expect(
+        tester.getTopLeft(icon.first).dx,
+        tester.getTopLeft(find.text('▶ ').first).dx,
+      );
+    });
 
     testWidgets('the filter shares the action row rather than taking its own', (
       tester,

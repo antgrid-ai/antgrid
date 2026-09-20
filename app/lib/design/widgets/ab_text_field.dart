@@ -49,6 +49,7 @@ class AbTextField extends StatefulWidget {
     this.prefixIconSize,
     this.prefixIconWidth,
     this.suffixSlotWidth,
+    this.border = true,
   });
 
   final TextEditingController? controller;
@@ -139,6 +140,9 @@ class AbTextField extends StatefulWidget {
   /// (instead of sitting flush). Pass the field [height] to give the suffix
   /// glyph the same margins on all four sides as a matching prefix slot.
   final double? suffixSlotWidth;
+
+  /// Draws the box outline. See [AbControlBox.border].
+  final bool border;
 
   @override
   State<AbTextField> createState() => _AbTextFieldState();
@@ -264,6 +268,7 @@ class _AbTextFieldState extends State<AbTextField> {
         minHeight: wraps ? effHeight : null,
         focused: _focusNode.hasFocus,
         fillColor: widget.fillColor,
+        border: widget.border,
         padding:
             widget.contentPadding ??
             (wraps

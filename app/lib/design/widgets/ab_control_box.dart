@@ -22,6 +22,7 @@ class AbControlBox extends StatelessWidget {
     this.focused = false,
     this.fillColor,
     this.padding,
+    this.border = true,
   });
 
   /// Box contents (typically a [Row]). Vertically centred within [height].
@@ -48,6 +49,12 @@ class AbControlBox extends StatelessWidget {
   /// Inner padding. Defaults to horizontal [AbTokens.space8].
   final EdgeInsetsGeometry? padding;
 
+  /// Draws the 1px outline. False for a control that is already bounded by
+  /// the chrome it sits in — a field inside a toolbar row, where the outline
+  /// would box a box. It takes the focus ring with it, so only a control whose
+  /// caret or fill already shows focus may turn it off.
+  final bool border;
+
   @override
   Widget build(BuildContext context) {
     return Container(
@@ -60,11 +67,13 @@ class AbControlBox extends StatelessWidget {
       decoration: BoxDecoration(
         color: fillColor ?? context.antgrid.bgSurface,
         borderRadius: AbTokens.borderRadius5,
-        border: Border.all(
-          color: focused
-              ? context.antgrid.accent
-              : context.antgrid.borderDefault,
-        ),
+        border: border
+            ? Border.all(
+                color: focused
+                    ? context.antgrid.accent
+                    : context.antgrid.borderDefault,
+              )
+            : null,
       ),
       child: child,
     );
