@@ -651,7 +651,7 @@ final fileTreeStateProvider = StreamProvider<FileTreeState>((ref) {
         .watch(_prefsBindingProvider)
         .bind(service, ref.read(preferencesServiceProvider));
   }
-  // Scoped to the tree only (D10) — applying the "Hide git-ignored files"
+  // Scoped to the tree only — applying the "Hide git-ignored files"
   // setting here, rather than at the settings screen, keeps it live across a
   // focus switch: this provider re-resolves the focused FileService, so the
   // override reaches whichever checkout is on screen without a listener of
@@ -662,7 +662,7 @@ final fileTreeStateProvider = StreamProvider<FileTreeState>((ref) {
   // narrow test ProviderScope that wires only the file tree carries no such
   // override — this provider was reachable without one before this binding
   // existed, and a test scope exercising the tree alone must keep getting the
-  // tree's own default (D10: show everything) rather than that unrelated
+  // tree's own default (show everything) rather than that unrelated
   // provider's error. Applying it sits OUTSIDE, because
   // setIncludeIgnoredInTree is not a pure setter: it re-lists the tree, and a
   // throw from there swallowed here would leave the flag changed, the listings

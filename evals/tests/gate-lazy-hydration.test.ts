@@ -1,6 +1,5 @@
-// The merge-gate suite for docs/file-tree-lazy-expansion-spec.md: opening a
-// project (or resyncing an already-open one) must never pull a whole file
-// tree. The whole-tree push and the `pullsTree`-keyed fork in behaviour it
+// The merge gate for on-demand file trees: opening a project (or resyncing
+// an already-open one) must never pull a whole file tree. The whole-tree push and the `pullsTree`-keyed fork in behaviour it
 // used to guard directly are gone — there is no longer a "legacy path" that
 // still gets a push, for any client. What replaces it is asserted here three
 // ways: (1) a resync, run across several checkouts and observed by two

@@ -1,5 +1,4 @@
-// Wave 1 of docs/file-tree-lazy-expansion-spec.md: the four listing frames'
-// handler layer in agent-core.ts. file-tree.ts's own listDirectory/batch
+// The four listing frames' handler layer in agent-core.ts. file-tree.ts's own listDirectory/batch
 // behavior (budgets, truncation, the path guard) is covered by
 // file-tree.test.ts; this file is about the wire-facing handler — checkout
 // scoping, the D-A hand-clamps (parseMessageFast validates the message TYPE
@@ -291,7 +290,7 @@ test("includeIgnored omitted behaves as true, explicit false as false", async ()
 
   const frame = await waitFor(sent, (m) => m.type === "file:tree:children");
   if (frame.type !== "file:tree:children") throw new Error("wrong frame");
-  // Omitted, not explicit false — the wire default (D10) is TRUE, so the
+  // Omitted, not explicit false — the wire default is TRUE, so the
   // ignored directory must still be listed. `.default(true)` in the schema
   // would not have done this: parseMessageFast never runs Zod, so the handler
   // reads the absent field by hand.

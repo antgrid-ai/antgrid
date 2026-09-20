@@ -46,7 +46,7 @@ List<Map<String, dynamic>> _treeRequests(FakeAgentTransport t) =>
 /// Drains pending microtasks WITHOUT a real `Timer` — unlike
 /// `Future<void>.delayed(Duration.zero)`, which schedules through the OS
 /// timer queue and can take far longer than zero under load. Used between
-/// the two triggers in the D6 coalescing test below, where the assertion
+/// the two triggers in the subscribe-coalescing test below, where the assertion
 /// depends on real elapsed wall time staying well under the implementation's
 /// 50ms coalescing window; a `Duration.zero` delay there is exactly what made
 /// that test race and occasionally send two frames instead of one.
@@ -485,7 +485,7 @@ void main() {
         await Future<void>.delayed(Duration.zero);
 
         // Two overlapping requests for the same path: expand (request A),
-        // collapse, expand again (request B) — D2 sends a fresh request on
+        // collapse, expand again (request B) — every expand sends a fresh request,
         // every expand, so this is the realistic shape of "the user tapped
         // twice before the first reply landed".
         unawaited(svc.toggleExpanded('dirA'));
@@ -913,7 +913,7 @@ void main() {
     });
   });
 
-  group('file:tree:subscribe (D6)', () {
+  group('file:tree:subscribe', () {
     // Timing notes for this whole group. Triggers are separated by `_pump()`
     // (pure microtask draining) rather than `Future<void>.delayed(...)` —
     // even `Duration.zero` goes through the OS timer queue and can take far
@@ -2134,7 +2134,7 @@ void main() {
           ..setTreeInterest('files-test', true);
         await Future<void>.delayed(Duration.zero);
 
-        // D10: the tree shows everything out of the box — the decision most
+        // The tree shows everything out of the box — the decision most
         // likely to be "tidied" into the opposite by someone who finds a
         // show-everything tree surprising.
         expect(svc.includeIgnoredInTree, isTrue);
@@ -2228,7 +2228,7 @@ void main() {
 
     test(
       'toggling it never touches an explicit find() call — the @-mention '
-      'path stays on its own includeIgnored (D10)',
+      'path stays on its own includeIgnored',
       () async {
         final t = FakeAgentTransport();
         final session = await _newSession(t);

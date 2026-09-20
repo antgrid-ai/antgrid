@@ -57,7 +57,8 @@ const MAX_SUBSCRIBED_PATHS = 512;
 const MAX_SUBSCRIBED_PATH_LEN = 4096;
 
 /** dirname("foo.ts") is ".", not the wire contract's "" for the root. Every
- *  D6 filter comparison goes through this rather than a bare `dirname` call,
+ *  subscription filter comparison goes through this rather than a bare
+ *  `dirname` call,
  *  or every root-level change is silently dropped from every subscription. */
 function dirnameKeyOf(p: string): string {
   const d = dirname(p);
@@ -67,7 +68,7 @@ function dirnameKeyOf(p: string): string {
 /** Normalises one subscribed directory into the exact form [dirnameKeyOf]
  *  produces, so a path sent with a trailing slash or a stray backslash still
  *  lines up with what a delta reports — proven against flushBatch, not
- *  assumed: see the D6 filter below. `paths` is hand-validated (see
+ *  assumed: see the subscription filter below. `paths` is hand-validated (see
  *  [MAX_SUBSCRIBED_PATHS]), so this also never throws on a hostile string. */
 function normalizeSubscribedDir(raw: string): string {
   const forwardSlash = raw.replace(/\\/g, "/");
@@ -124,12 +125,12 @@ export class FileWatcher {
    *  see [startNativeRecursiveWatch] — so [flushBatch] falls back to a full
    *  resync instead of sending an incremental batch it knows is incomplete. */
   private needsFullResync = false;
-  /** Directory paths one client currently has open, for the D6 delta filter
+  /** Directory paths one client currently has open, for the delta filter
    *  in [flushBatch]. An entry — even an empty Set, which is the wire
    *  contract's unsubscribe — means that client has STATED what it wants and
    *  counts toward "every attached client subscribed" in [everySubscribed];
    *  a client with no entry is unaccounted for and turns the filter off for
-   *  everyone (D6), which is where an unreadable frame lands too (see
+   *  everyone, which is where an unreadable frame lands too (see
    *  [setSubscription]). Cleared wholesale in [stop] — the checkout-teardown
    *  half of keeping the union from growing forever; [dropSubscription] is
    *  the peer-disconnect half, driven from agent-core.ts's `noteClientGone`,
@@ -146,7 +147,7 @@ export class FileWatcher {
    *  watcher is per-checkout and the roster is not (agent-core.ts's
    *  `attachedClients`). Never derived from `this.subscriptions`'s own size
    *  — a client that attached and sent nothing would then be invisible
-   *  rather than unaccounted-for, which is the one case the D6 filter most
+   *  rather than unaccounted-for, which is the one case the delta filter most
    *  needs to fail open on. */
   private attachedClients?: () => ClientKey[];
 
@@ -180,7 +181,7 @@ export class FileWatcher {
     if (!Array.isArray(paths)) {
       // UNACCOUNTED-for, not subscribed-to-nothing. A frame whose `paths`
       // cannot be read is the strongest available statement that this
-      // client's intent is unknown, and D6's answer to an unknown client is
+      // client's intent is unknown, and the filter's answer to an unknown client is
       // to stop filtering for everyone. Storing the empty Set instead would
       // count the client as fully accounted for AND contributing nothing,
       // narrowing the union to the root for every device on the bus.
@@ -234,15 +235,15 @@ export class FileWatcher {
     this.subscriptions.set(clientKey, dirs);
   }
 
-  /** The peer-disconnect half of Trap 3
-   *  (docs/file-tree-lazy-expansion-spec.md) — the checkout-teardown half is
-   *  [stop] clearing the whole map. */
+  /** The peer-disconnect half of keeping the subscribed union from growing
+   *  for the life of the core — the checkout-teardown half is [stop]
+   *  clearing the whole map. */
   dropSubscription(clientKey: ClientKey): void {
     this.subscriptions.delete(clientKey);
   }
 
   /** [dirPath] in the [dirnameKeyOf] form. The root is unconditionally
-   *  subscribed (D6: "∪ {\"\"}").
+   *  subscribed (the filter's "∪ {\"\"}").
    *
    *  Closure under removal is ENFORCED at the removal filter below rather
    *  than inherited from "you cannot subscribe to a child without its
@@ -273,7 +274,7 @@ export class FileWatcher {
     // (relay-client.ts's `cleanup` leaves `this.sessions` standing), so
     // `noteClientGone` does NOT fire per device on the common disconnect
     // path and a departed device's directories would otherwise widen this
-    // union for the life of the core — Trap 3. The roster IS re-asked on
+    // union for the life of the core. The roster IS re-asked on
     // every flush, so reconciling against it here is the one sweep that
     // always runs, whatever the transport forgot to call.
     if (this.subscriptions.size > 0) {
@@ -345,7 +346,7 @@ export class FileWatcher {
     let changed = false;
     const next = new Map<string, number>();
     for (const dir of this.subscribedUnion()) {
-      // D14 parity: this sweep's view is what the WATCHER should have seen,
+      // Ignore-prune parity: this sweep's view is what the WATCHER should have seen,
       // not what the client rendered. A client browsing in show-everything
       // mode can have `node_modules` expanded and subscribed, and sweeping it
       // would invalidate the tree on every `npm install` write — the exact
@@ -387,8 +388,9 @@ export class FileWatcher {
 
   /** Ignore rules for a listing request. This is a listing-only distinction —
    *  the watcher's own ignore prune (`handleNativeEvent`, chokidar's
-   *  `ignored`) never consults `includeIgnored` and must not start to (D14 in
-   *  docs/file-tree-lazy-expansion-spec.md). */
+   *  `ignored`) never consults `includeIgnored` and must not start to —
+   *  watching ignored paths would put every `bun install` back on the event
+   *  stream. */
   private ignoreRulesFor(includeIgnored: boolean): ReturnType<typeof loadIgnoreRules> {
     if (!includeIgnored) return this.ig;
     this.igShowAll ??= loadIgnoreRules(this.projectRoot, [], { gitignore: false });
@@ -693,9 +695,10 @@ export class FileWatcher {
     this.pending.added.clear();
     this.pending.modified.clear();
     this.pending.removed.clear();
-    // The checkout-teardown half of Trap 3 — every client that had THIS
-    // checkout open loses its subscription here, in one place, rather than
-    // needing its own per-checkout drop from agent-core.ts's teardown paths.
+    // The checkout-teardown half of the subscription drop — every client
+    // that had THIS checkout open loses its subscription here, in one place,
+    // rather than needing its own per-checkout drop from agent-core.ts's
+    // teardown paths.
     this.subscriptions.clear();
     this.dirMtimes.clear();
     const closed = this.watcher?.close();
@@ -837,10 +840,10 @@ export class FileWatcher {
       return;
     }
 
-    // D6: filtered to the union of every attached client's subscribed
+    // Filtered to the union of every attached client's subscribed
     // directories, but ONLY once every attached client has sent one —
     // see [everySubscribed]. An old app that never subscribes is therefore
-    // never filtered (Trap 4), and a fresh flush with no client accounted
+    // never filtered, and a fresh flush with no client accounted
     // for at all sends everything.
     let outAdded = added;
     let outModified = modified;
@@ -872,7 +875,7 @@ export class FileWatcher {
     }
 
     // Read off the UNFILTERED delta: what this watcher saw is what it is now
-    // current for, whatever D6 then dropped from the frame. Residual it cannot
+    // current for, whatever the filter then dropped from the frame. Residual it cannot
     // close — a change LOST from a directory in the same window as one
     // delivered from it is hidden by the delivered one's refresh, and waits
     // for the next movement in that directory.

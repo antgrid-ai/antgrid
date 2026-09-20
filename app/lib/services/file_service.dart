@@ -68,14 +68,14 @@ class FileService {
   /// guards [_snapshotSeq] against.
   final Map<String, ({int seq, int epoch})> _listingSeq = {};
 
-  /// The tree's own `includeIgnored` (D10: the tree defaults to showing
+  /// The tree's own `includeIgnored` (the tree defaults to showing
   /// everything, unlike `file:find`'s @-mention path). Overridden by the
   /// "Hide git-ignored files" app setting — see [setIncludeIgnoredInTree].
   bool _includeIgnoredInTree = true;
   bool get includeIgnoredInTree => _includeIgnoredInTree;
 
   /// Applies the app-wide "Hide git-ignored files" setting to this checkout's
-  /// tree requests. Scoped to the tree ONLY (D10) — [find]'s @-mention path
+  /// tree requests. Scoped to the tree ONLY — [find]'s @-mention path
   /// always passes its own `includeIgnored: false` and never reads this.
   ///
   /// A changed setting invalidates every listing already applied, so this
@@ -201,11 +201,11 @@ class FileService {
     // [ProjectSession.setActiveCheckouts].
     session.hydrateCheckout(checkoutId, _syncHydratorKey, _hydrateSyncState);
     // Eager and ungated by tree interest, unlike [_treeHydratorKey]. The
-    // bridge's D6 filter only engages once EVERY attached client has stated
+    // bridge's delta filter only engages once EVERY attached client has stated
     // what it wants, so a device that never opens the Files tab and therefore
     // never speaks would turn the filter off for the device that IS looking
-    // at a tree — a phone parked on the terminal is exactly the client D6
-    // exists to spare, and it would instead be handed the full unfiltered
+    // at a tree — a phone parked on the terminal is exactly the client the
+    // filter exists to spare, and it would instead be handed the full unfiltered
     // delta stream. Saying "nothing" out loud is an account; staying silent
     // is not.
     session.hydrateCheckout(
@@ -223,12 +223,11 @@ class FileService {
 
   static const _treeHydratorKey = 'file:tree';
 
-  /// D6's delta-bandwidth subscription (docs/file-tree-lazy-expansion-spec.md)
-  /// — registered in the constructor because the bridge's subscription store
-  /// is per-connection and does not survive a reconnect on its own (trap 3,
-  /// the app-side half): without a hydrator, a reconnected app keeps the
-  /// bridge's D6 filter believing it has nothing open until the next expand
-  /// or collapse.
+  /// The delta-bandwidth subscription — registered in the constructor
+  /// because the bridge's subscription store is per-connection and does not
+  /// survive a reconnect on its own: without a hydrator, a reconnected app
+  /// keeps the bridge's delta filter believing it has nothing open until the
+  /// next expand or collapse.
   static const _subscriptionHydratorKey = 'file:tree:sub';
   static const _syncHydratorKey = 'git:sync-state';
 
@@ -311,8 +310,8 @@ class FileService {
       // Never rely on the bridge's Zod default — parseMessageFast validates
       // only the message TYPE, so an omitted field arrives as `undefined`,
       // never the schema's default. Sent explicitly from
-      // [_includeIgnoredInTree], which itself defaults to true (D10: the
-      // tree shows git-ignored files by default).
+      // [_includeIgnoredInTree], which itself defaults to true (the tree
+      // shows git-ignored files by default).
       'includeIgnored': _includeIgnoredInTree,
     }),
   );
@@ -864,16 +863,15 @@ class FileService {
   }
 
   /// The directories this app currently holds — or has just asked for — a
-  /// listing of: the D6 subscription set
-  /// (docs/file-tree-lazy-expansion-spec.md). Derived from the tree on every
-  /// send rather than tracked in a separate mutable field, so it can never
-  /// drift from what the tree actually has: a mirrored field would need
+  /// listing of: the delta-bandwidth subscription set. Derived from the tree
+  /// on every send rather than tracked in a separate mutable field, so it can
+  /// never drift from what the tree actually has: a mirrored field would need
   /// updating at every site that flips the flag (collapse,
   /// `file:tree:invalidated`, a full-tree refresh), and missing one would
   /// either bill the bridge for deltas this app no longer renders or — the
   /// worse direction — leave it filtering out deltas for a directory the app
   /// genuinely still has open. Root is never included: the bridge treats it
-  /// as subscribed unconditionally (D6's `dirname(path) ∈ subscribed ∪ {""}`).
+  /// as subscribed unconditionally (`dirname(path) ∈ subscribed ∪ {""}`).
   Set<String> _loadedDirectoryPaths() {
     final root = _state.root;
     if (root == null) return const {};
@@ -919,9 +917,9 @@ class FileService {
   /// the bridge's whole record of what this client wants (not a diff), so
   /// this is safe to call as often as needed. Also registered directly as
   /// [_subscriptionHydratorKey] — the bridge's subscription store is
-  /// per-connection, so a reconnect must re-announce it or the D6 filter
+  /// per-connection, so a reconnect must re-announce it or the delta filter
   /// falls back to believing this client has nothing open until the next
-  /// expand or collapse (trap 3, the app-side half).
+  /// expand or collapse.
   Future<void> _sendSubscription() {
     if (_disposed) return Future.value();
     final expanded = _state.expandedPaths;
@@ -1055,7 +1053,7 @@ class FileService {
   ///
   /// Matching by path is safe: a rename yields a different path, and a
   /// delete-then-recreate is repaired by the expand gesture, which always
-  /// re-lists from disk (D2).
+  /// re-lists from disk.
   List<FileNode> _carryLoaded(List<FileNode> incoming, FileNode? previous) {
     if (previous == null || previous.children.isEmpty) return incoming;
     final held = <String, FileNode>{
@@ -1090,7 +1088,7 @@ class FileService {
   /// the bridge's own revision counter — a later SEND cannot come back with
   /// a lower seq than an earlier one UNLESS nothing on disk changed between
   /// the two requests, in which case the two replies' content is identical
-  /// anyway and applying either is correct. See spec trap 11.
+  /// anyway and applying either is correct.
   ///
   /// A seq issued under a different establishment is not comparable at all
   /// (see [_listingSeq]), so it is always fresh. Does NOT record — a listing
@@ -1408,10 +1406,9 @@ class FileService {
   /// Expanding is deliberately NOT cached — every call sends a fresh
   /// `file:tree:children:request`, even when [FileNode.childrenLoaded] is
   /// already true. Git-ignored content is never live-watched, so a
-  /// collapse-then-expand is the tree's only per-directory refresh gesture
-  /// (D2 in docs/file-tree-lazy-expansion-spec.md) — an early return on
-  /// `childrenLoaded` here would remove it. Existing children stay on
-  /// screen for the round trip; see [_handleChildrenMessage].
+  /// collapse-then-expand is the tree's only per-directory refresh gesture —
+  /// an early return on `childrenLoaded` here would remove it. Existing
+  /// children stay on screen for the round trip; see [_handleChildrenMessage].
   Future<void> toggleExpanded(String path) async {
     final expanded = Set<String>.from(_state.expandedPaths);
     final expanding = !expanded.remove(path);

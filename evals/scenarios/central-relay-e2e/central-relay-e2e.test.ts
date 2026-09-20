@@ -168,7 +168,7 @@ describe.skip("central-relay-e2e", () => {
 
   test("receives the root directory listing through relay", async () => {
     // The whole-tree push this used to await no longer exists — the bridge
-    // answers a listing request instead (see docs/file-tree-lazy-expansion-spec.md).
+    // answers a listing request instead.
     const { createMessage } = await import("../../../bridge/src/protocol");
     const waiting = app.waitForAbType("file:tree:children", 10_000);
     app.sendEncrypted(createMessage("file:tree:root:request", {}));

@@ -83,7 +83,7 @@ const FileTreeNodeSchema: z.ZodType<{
     // single listing, MAX_BATCH_NODES across a batch. See file-tree.ts.
     truncated: z.literal(true).optional(),
     // Git ignores this entry but includeIgnored was true for the request
-    // that listed it (D14) — set by listDirectory/listDirectoryBatch's
+    // that listed it — set by listDirectory/listDirectoryBatch's
     // markAgainst second verdict (file-tree.ts). The watcher's own ignore
     // prune never consults this and never updates a marked entry live: an
     // ignored row goes stale until the directory is re-listed.
@@ -2334,9 +2334,8 @@ const FileTreeUnchangedMessage = BaseMessage.extend({
   ...CheckoutScoped,
 });
 
-// ── On-demand file tree listings (docs/file-tree-lazy-expansion-spec.md,
-// wave 1) ── Depth-1 directory listings fetched when a folder is opened; the
-// only way a client gets a tree. Every
+// ── On-demand file tree listings ── Depth-1 directory listings fetched when
+// a folder is opened; the only way a client gets a tree. Every
 // default and bound below is documentation only: parseMessageFast (the
 // encrypted/local hot path) validates the message TYPE alone, so a real
 // inbound frame's Zod defaults and bounds never run — see the MAX_LOG_PAGE
@@ -2400,10 +2399,9 @@ const FileTreeInvalidatedMessage = BaseMessage.extend({
   ...CheckoutScoped,
 });
 
-// ── Delta-bandwidth subscription (docs/file-tree-lazy-expansion-spec.md,
-// wave 4, D6) ── Purely a hint for which directories flushBatch's
-// tree:update filters down to; it never reaches the watcher's own ignore
-// rules or what it watches (D14). Same parseMessageFast caveat as every
+// ── Delta-bandwidth subscription ── Purely a hint for which directories
+// flushBatch's tree:update filters down to; it never reaches the watcher's
+// own ignore rules or what it watches. Same parseMessageFast caveat as every
 // frame above — file-watcher.ts hand-validates `paths` itself.
 
 const FileTreeSubscribeMessage = BaseMessage.extend({
@@ -2415,21 +2413,21 @@ const FileTreeSubscribeMessage = BaseMessage.extend({
   ...CheckoutScoped,
 });
 
-// ── Path search (docs/file-tree-lazy-expansion-spec.md, wave 3) ── Backs
+// ── Path search ── Backs
 // @-mentions and the tree's filter box. No file:find-cancel: supersede by
 // requestId, killing the previous process the way FileSearcher.search does,
 // and let the app drop replies for a requestId it no longer wants. Same
-// parseMessageFast caveat as the wave-1 frames above — handlers clamp by hand.
+// parseMessageFast caveat as the listing frames above — handlers clamp by hand.
 
 const FileFindMessage = BaseMessage.extend({
   type: z.literal("file:find"),
   projectId: z.string(),
   requestId: z.string(),
   query: z.string().max(256),
-  /** FALSE by default — the opposite of the tree's frames (D10): find hands a
+  /** FALSE by default — the opposite of the tree's frames: find hands a
    *  path to an agent, and node_modules is noise there. */
   includeIgnored: z.boolean().default(false),
-  /** Directories are DERIVED from file path prefixes (D15); an empty one is
+  /** Directories are DERIVED from file path prefixes; an empty one is
    *  invisible to find even though the tree shows it. */
   kinds: z.enum(["files", "dirs", "both"]).default("both"),
   limit: z.number().int().positive().max(500).default(100),

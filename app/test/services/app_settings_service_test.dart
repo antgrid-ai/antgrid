@@ -237,7 +237,7 @@ void main() {
 
       final settings = AppSettings.fromPrefs(prefs);
 
-      // D10: the tree shows everything out of the box — the decision most
+      // The tree shows everything out of the box — the decision most
       // likely to be "tidied" into the opposite by someone who finds a
       // show-everything tree surprising.
       expect(settings.hideGitIgnoredFiles, isFalse);

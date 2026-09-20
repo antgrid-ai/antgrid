@@ -75,10 +75,10 @@ class AppSettings {
   /// every switch.
   final bool sidebarHidden;
 
-  /// Overrides the file tree's own `includeIgnored` default (D10 in
-  /// docs/file-tree-lazy-expansion-spec.md). Off means the tree shows
-  /// everything, which is the out-of-the-box behavior — the tree, unlike
-  /// `file:find`'s @-mention path, defaults to showing git-ignored entries.
+  /// Overrides the file tree's own `includeIgnored` default. Off means the
+  /// tree shows everything, which is the out-of-the-box behavior — the tree,
+  /// unlike `file:find`'s @-mention path, defaults to showing git-ignored
+  /// entries.
   ///
   /// Machine-wide rather than per-project: it is a statement about how this
   /// person browses, not about a repository, so a `ProjectPreferences` entry

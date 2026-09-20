@@ -604,7 +604,7 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
     detached('AgentTranscriptView', 'find mention candidates', () async {
       FileFindResultMessage result;
       try {
-        // D10: mentions hand a path to the agent, so ignored files (build
+        // Mentions hand a path to the agent, so ignored files (build
         // output, node_modules) are noise here — unlike the tree's own
         // browse default.
         result = await fileService.find(

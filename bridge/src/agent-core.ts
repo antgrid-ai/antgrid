@@ -874,7 +874,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   /** Every ClientKey that has reached this core's inbound dispatch and has not
    *  since gone (`noteClientGone`). Core-wide, unlike a watcher's own
    *  per-checkout subscription map, so it is injected into every checkout's
-   *  FileWatcher as the D6 delta filter's attached-client roster: no client
+   *  FileWatcher as the delta filter's attached-client roster: no client
    *  accounted for here means nobody has vouched for a narrower union, and a
    *  watcher with an empty roster sends every delta unfiltered — fail open
    *  rather than silently starve a client nobody has heard from yet.
@@ -883,7 +883,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
    *  `bridge/src` calls `setEstablishedPeersProvider`, so in production it answers with no peers
    *  at all and a roster built from it would omit every phone — turning the
    *  filter on for a device that never declared what it wanted, which is the
-   *  one outcome D6 exists to prevent. Fed from the inbound choke point in
+   *  one outcome the filter exists to prevent. Fed from the inbound choke point in
    *  `attachTransport` instead, so an RPC-only client (`state.snapshot`
    *  returns above `handleAbMessage`) still counts. */
   const attachedClients = new Set<ClientKey>();
@@ -1856,7 +1856,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // force-pushes main's picture to everyone else instead.
       if (runtime.checkout.id !== checkoutIdOf(msg)) return;
       const fw = runtime.fileWatcher;
-      const includeIgnored = msg.includeIgnored !== false; // default TRUE (D10)
+      const includeIgnored = msg.includeIgnored !== false; // default TRUE: the tree browses
       if (msg.type === "file:tree:root:request") {
         if (!fw) {
           sendFromRuntimeTo(runtime, createMessage("file:tree:children", {
@@ -1926,7 +1926,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // No reply and no ack (wire contract) — answered here, before `manager`,
     // for the same reason as the pair above: there being nothing to hand
     // back is what makes that safe rather than merely convenient. `client`
-    // is the D6 subscription's key (message-bus.ts's ClientKey — already the
+    // is the subscription's key (message-bus.ts's ClientKey — already the
     // "loopback" sentinel for the desktop owner and a peerId for everyone
     // else, so no new identity space is needed here).
     if (msg.type === "file:tree:subscribe") {
@@ -5343,7 +5343,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // one this core answers. Recorded HERE rather than in `handleAbMessage`
       // because the `request` arm below returns without reaching it: a client
       // whose traffic is only `state.snapshot` still receives every broadcast
-      // `tree:update`, and the D6 roster must account for it (see
+      // `tree:update`, and the delta filter's roster must account for it (see
       // [attachedClients]).
       attachedClients.add(clientKeyOf(source, peerId));
       if (msg.type === "request") {
@@ -5579,10 +5579,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       return sessions?.isMainCheckoutSession(id) ?? true;
     },
     noteClientGone(client: ClientKey): void {
-      // The peer-disconnect half of Trap 3
-      // (docs/file-tree-lazy-expansion-spec.md) — a client that vanishes
-      // while holding hundreds of expanded directories must not pin every
-      // checkout's D6 union at "everything" forever. `checkoutRuntimes` plus
+      // The peer-disconnect half of keeping the subscribed union from
+      // growing for the life of the core — a client that vanishes while
+      // holding hundreds of expanded directories must not pin every
+      // checkout's union at "everything" forever. `checkoutRuntimes` plus
       // `fileWatchers` (main's only entry, despite the plural name) is the
       // same pair `teardownServices` walks to stop every watcher.
       //

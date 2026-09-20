@@ -9,14 +9,13 @@ import { setLogLevel } from "../src/logger";
 
 setLogLevel("error");
 
-// D6 (docs/file-tree-lazy-expansion-spec.md, wave 4): the delta filter in
-// flushBatch is a union of every attached client's subscribed directories,
+// The delta filter in flushBatch is a union of every attached client's subscribed directories,
 // applied only once every attached client has sent file:tree:subscribe at
 // least once. These tests exercise the subscription store directly
 // (setSubscription/dropSubscription/isSubscribed — fast, no filesystem) and,
 // separately, the filter's effect on a real flushBatch (slower — a debounce
 // window has to elapse, same style as file-watcher.test.ts).
-describe("FileWatcher — D6 subscription filter", () => {
+describe("FileWatcher — subscription filter", () => {
   let tempDir: string;
 
   beforeEach(() => {
@@ -95,7 +94,7 @@ describe("FileWatcher — D6 subscription filter", () => {
     watcher.stop();
   });
 
-  it("stop() clears every subscription — the checkout-teardown half of Trap 3", () => {
+  it("stop() clears every subscription — the checkout-teardown half", () => {
     const { watcher } = makeWatcher();
     watcher.setSubscription("A", ["src"]);
     watcher.setSubscription("B", ["docs"]);
@@ -257,7 +256,7 @@ describe("FileWatcher — D6 subscription filter", () => {
     watcher.stop();
   });
 
-  // F3/Trap 4: an app that never speaks file:tree:subscribe (or simply
+  // An app that never speaks file:tree:subscribe (or simply
   // hasn't yet) must never have deltas silently withheld from it.
   it("sends every delta unfiltered while any attached client has not subscribed", async () => {
     const { messages, watcher } = makeWatcher(() => ["A", "B"]);

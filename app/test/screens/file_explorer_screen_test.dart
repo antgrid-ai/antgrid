@@ -393,7 +393,7 @@ void main() {
 
         final sent = await typeFilter(tester, t, 'need');
         expect(sent['query'], 'need');
-        // D10's deliberate asymmetry: @-mentions send false, the tree's own
+        // The deliberate asymmetry: @-mentions send false, the tree's own
         // filter sends true. Nothing else pins this direction.
         expect(sent['includeIgnored'], isTrue);
         // Answered, or the PendingReply timeout outlives the widget tree.

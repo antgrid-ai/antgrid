@@ -105,9 +105,9 @@ class _FileExplorerScreenState extends ConsumerState<FileExplorerScreen> {
       }
       FileFindResultMessage result;
       try {
-        // Tracks the tree's effective setting (A5) — unlike the @-mention
-        // path (agent_transcript_view.dart), which always passes false and
-        // is deliberately not downstream of this toggle (D10).
+        // Tracks the tree's effective setting — unlike the @-mention path
+        // (agent_transcript_view.dart), which always passes false and is
+        // deliberately not downstream of this toggle.
         result = await fileService.find(
           query,
           includeIgnored: fileService.includeIgnoredInTree,

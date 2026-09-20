@@ -481,10 +481,10 @@ describe("FileWatcher pause", () => {
     watcher.stop();
   });
 
-  // D8/D14: the watcher's own ignore prune is unconditional and never
-  // consults includeIgnored — a git-ignored path produces no delta at all,
-  // not a delta the app then filters out. The refresh is collapse-then-expand
-  // (D2), never the watcher.
+  // The watcher's own ignore prune is unconditional and never consults
+  // includeIgnored — a git-ignored path produces no delta at all, not a
+  // delta the app then filters out. The refresh is collapse-then-expand,
+  // never the watcher.
   it("produces no delta for a git-ignored path", async () => {
     writeFileSync(join(tempDir, ".gitignore"), "*.log\n");
     const messages: AbMessage[] = [];

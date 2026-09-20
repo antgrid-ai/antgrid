@@ -210,7 +210,7 @@ describe("file-tree", () => {
       const listing = listDirectory("", tempDir, showAll, undefined, respecting);
       const names = listing.children.map((c) => c.name);
 
-      // The floor (D9) is in BOTH rule sets, so these two are never present to
+      // The floor is in BOTH rule sets, so these two are never present to
       // begin with — asserting absence, not an unmarked/dimmed row.
       expect(names).not.toContain(".git");
       expect(names).not.toContain(".antgrid");
@@ -234,7 +234,7 @@ describe("file-tree", () => {
       // Decision: a file under an ignored directory is marked too — nothing
       // special-cased, since gitignore's directory pattern already matches
       // every path beneath "build" (verified: markAgainst.ignores(childRel)
-      // alone accounts for it). D14's refresh gesture is collapse-then-expand
+      // alone accounts for it). The refresh gesture is collapse-then-expand
       // — listDirectory has no cache, so a second call is the whole refresh,
       // with no watcher involved.
       writeFileSync(join(tempDir, "build", "new.js"), "");

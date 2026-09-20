@@ -12,7 +12,7 @@ const log = logger.child({ component: "file-find" });
 // import the other way would be circular. Hand the event loop one full turn —
 // `setImmediate` fires in libuv's check phase (after poll), so pending
 // loopback accepts and reads are serviced before we resume; a microtask
-// (`await Promise.resolve()`) would not be. See D13/guard 8: an unignored
+// (`await Promise.resolve()`) would not be. An unignored
 // walk is 40k-300k stats, and a synchronous one reproduces the block that
 // made the app reap a healthy host mid-open.
 const yieldToEventLoop = () => new Promise<void>((r) => setImmediate(r));
@@ -57,17 +57,17 @@ const MAX_LIMIT = 500;
  *  marks itself truncated — independent of `limit`, which bounds the MATCHED
  *  result, not the raw scan. */
 const MAX_SCANNED = 100_000;
-/** D12: re-list only when `seq` has moved AND this TTL has elapsed since the
+/** Re-list only when `seq` has moved AND this TTL has elapsed since the
  *  last list — `bumpFileSeq` fires on every watcher flush (100-750ms), so a
  *  seq-only cache is cold on nearly every keystroke during an agent run,
  *  which is exactly when mentions are used. */
 const FIND_CACHE_MIN_TTL_MS = 2_000;
 /** Short on purpose: file-search.ts's TIMEOUT_MS (30s) would hold an
  *  @-mention popup open for half a minute on a hang. A full unignored listing
- *  of this repo measures ~80ms (docs/file-tree-lazy-expansion-spec.md's scout
- *  report) — 5s is generous, not tight. */
+ *  of this repo measures ~80ms — 5s is generous, not tight. */
 const FIND_TIMEOUT_MS = 5_000;
-/** Entries examined in the `walk` fallback between yields — see D13. */
+/** Entries examined in the `walk` fallback between yields, so an unignored
+ *  walk cannot block the event loop. */
 const WALK_YIELD_EVERY = 200;
 /** Entries scored between yields. The match runs on every debounced keystroke
  *  and, unlike the walk, on a cache hit too, so it is the one piece of work
@@ -117,7 +117,7 @@ async function detectFindEngine(): Promise<Exclude<FindEngineKind, "none">> {
 export function buildFindRipgrepArgs(includeIgnored: boolean, excludes: readonly string[]): string[] {
   const args = ["rg", "--files", "--hidden"];
   if (includeIgnored) args.push("--no-ignore");
-  // Floor (D9), every call and BOTH flag values — `--no-ignore` is precisely
+  // Floor, every call and BOTH flag values — `--no-ignore` is precisely
   // what makes rg descend into a real `.git/` directory (5,026 extra paths in
   // the main checkout, measured), so moving this inside the `if` is the
   // regression to guard against. `!/X/` is a silent no-op on ripgrep 14 — see
@@ -132,7 +132,7 @@ export function buildFindRipgrepArgs(includeIgnored: boolean, excludes: readonly
 }
 
 /** `false` -> `--exclude-standard` (git's normal ignore rules), `true` ->
- *  omitted (D9/D10's "show everything" — `-o` without `--exclude-standard`
+ *  omitted ("show everything" — `-o` without `--exclude-standard`
  *  recurses into ignored directories too, verified). Needs no `.git` floor:
  *  `git ls-files` never emits `.git` in any form, in any mode — verified. */
 export function buildFindGitArgs(includeIgnored: boolean, excludes: readonly string[]): string[] {
@@ -221,7 +221,7 @@ export interface WalkResult {
   complete: boolean;
 }
 
-/** `readdirSync` fallback for a machine with neither `rg` nor `git` (D13).
+/** `readdirSync` fallback for a machine with neither `rg` nor `git`.
  *  Chunked with `yieldFn` (real `yieldToEventLoop` in production) — an
  *  unignored walk is 40k-300k stats, and running it synchronously reproduces
  *  the ~10.9s block that made the app reap a healthy host mid-open (see the
@@ -279,7 +279,7 @@ export async function walkFiles(root: string, rules: IgnoreRules, opts: WalkOpti
   return { paths: out, truncated, complete: !cancelled };
 }
 
-/** D15: neither `rg --files` nor `git ls-files` (nor the walk fallback, which
+/** Neither `rg --files` nor `git ls-files` (nor the walk fallback, which
  *  only ever pushes files) emits a directory — verified. Directories are
  *  derived from the path prefixes of the files that survived. Consequence
  *  accepted knowingly: an empty directory is invisible to `file:find`. */
@@ -417,7 +417,7 @@ interface FreshListing {
   /** The listing ran to its own end. A superseded, timed-out or killed run
    *  returns `false` and is neither cached nor reported as an answer — the
    *  cache write used to be guarded only against a SUPERSEDE, so a timeout
-   *  wrote its empty result and D12's `seq`-equality clause then served it
+   *  wrote its empty result and the cache's `seq`-equality clause then served it
    *  for as long as no file changed on disk. */
   complete: boolean;
 }
@@ -452,11 +452,10 @@ interface ActiveFind {
   timedOut: boolean;
 }
 
-/** Bridge-side path search backing @-mentions and the tree's filter box (see
- *  docs/file-tree-lazy-expansion-spec.md). One instance per checkout, same
- *  lifetime as its FileWatcher/FileSearcher siblings — `getSeq` is that
- *  checkout's `FileWatcher.currentSeq`, which is what D12's cache keys
- *  freshness on. */
+/** Bridge-side path search backing @-mentions and the tree's filter box. One
+ *  instance per checkout, same lifetime as its FileWatcher/FileSearcher
+ *  siblings — `getSeq` is that checkout's `FileWatcher.currentSeq`, which is
+ *  what the path-list cache keys freshness on. */
 export class FileFinder {
   private projectRoot: string;
   private projectId: string;
@@ -527,7 +526,7 @@ export class FileFinder {
 
     const projectId = clampId(opts.projectId) || this.projectId;
     const query = typeof opts.query === "string" ? opts.query.slice(0, MAX_QUERY_LEN) : "";
-    // Default FALSE — the opposite of the tree's frames (D10): find hands a
+    // Default FALSE — the opposite of the tree's frames: find hands a
     // path to an agent, and node_modules is noise there.
     const includeIgnored = opts.includeIgnored === true;
     const kinds: "files" | "dirs" | "both" =
@@ -594,7 +593,7 @@ export class FileFinder {
     );
   }
 
-  /** Chunked for the same reason the walk is (D13): this is the one piece of
+  /** Chunked for the same reason the walk is: this is the one piece of
    *  per-find work a cache hit cannot skip, and it runs at the app's 250ms
    *  debounce cadence while the user types. */
   private async match(sources: readonly IndexedEntry[][], query: string, limit: number): Promise<FindEntry[]> {

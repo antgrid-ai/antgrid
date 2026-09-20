@@ -71,7 +71,7 @@ describe("FileFinder", () => {
     const paths = result.entries.map((e) => e.path);
     expect(paths).toContain("sub");
     // git never tracks an empty directory, so "emptydir" has no file beneath
-    // it to derive it from (D15) — the tree shows it, find cannot.
+    // it to derive it from — the tree shows it, find cannot.
     expect(paths).not.toContain("emptydir");
     expect(result.entries.every((e) => e.isDir)).toBe(true);
   });
@@ -291,7 +291,7 @@ describe("FileFinder", () => {
   test("a timed-out listing answers with an error and is never cached as an empty result", async () => {
     // The regression: the timeout killed the engine but left activeRequestId
     // intact, so the killed run's empty listing passed the cache guard, was
-    // stamped with an unchanged seq, and D12's `cached.seq === seq` clause
+    // stamped with an unchanged seq, and the cache's `cached.seq === seq` clause
     // then served zero entries for as long as no file changed on disk.
     let fire: (() => void) | null = null;
     const timed = new FileFinder(

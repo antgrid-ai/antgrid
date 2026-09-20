@@ -983,7 +983,7 @@ void main() {
             FileNode(
               name: 'build.log',
               path: 'project/build.log',
-              // Present only because includeIgnored asked for it (D14).
+              // Present only because includeIgnored asked for it.
               ignored: true,
               type: FileNodeType.file,
             ),
@@ -1624,7 +1624,7 @@ void main() {
       'stale children stay on screen instead of being replaced by a loading row',
       (tester) async {
         // A collapse-then-re-expand re-requests even an already-loaded
-        // directory (D2) — while that round trip is in flight the OLD
+        // directory — while that round trip is in flight the OLD
         // children keep rendering rather than being cleared for it.
         const staleWhileRefetching = FileNode(
           name: 'project',

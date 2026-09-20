@@ -36,9 +36,9 @@ class FileNode {
   final bool childrenLoading;
 
   /// Set by the bridge when this entry is present only because the request
-  /// that listed it asked to include git-ignored files (D10 in
-  /// docs/file-tree-lazy-expansion-spec.md). The tree view dims it. Must
-  /// survive every rebuild below, the same hazard [truncated] already names.
+  /// that listed it asked to include git-ignored files. The tree view dims
+  /// it. Must survive every rebuild below, the same hazard [truncated]
+  /// already names.
   final bool ignored;
 
   const FileNode({
@@ -608,7 +608,7 @@ class FileResolvePathResultMessage {
 
 /// One path returned by `file:find` — a project-relative POSIX path plus
 /// whether it is a directory. Directories are derived bridge-side from file
-/// path prefixes (D15), so an empty directory never appears.
+/// path prefixes, so an empty directory never appears.
 class FileFindEntry {
   final String path;
   final bool isDir;

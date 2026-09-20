@@ -123,9 +123,9 @@ function readGitignore(dir: string): Ignore | null {
  * One deviation from Git, tolerated because it only ever hides: a nested
  * `!pattern` cannot re-include what an ancestor's rules excluded.
  *
- * `useGitignore: false` (the "show everything" variant, see D9/D10 in
- * docs/file-tree-lazy-expansion-spec.md) turns off both the root and nested
- * `.gitignore` consultation but keeps `DEFAULT_IGNORES` and config excludes.
+ * `useGitignore: false` (the "show everything" variant) turns off both the
+ * root and nested `.gitignore` consultation but keeps `DEFAULT_IGNORES` and
+ * config excludes.
  * Nothing in `antgrid.yaml` produces config excludes today; the parameter
  * stays because both `FileSearcher` constructions pass the Antgrid state dir
  * through it. */
@@ -276,8 +276,9 @@ function guardedAbsolutePath(relPath: string, projectRoot: string): string | nul
 /** Depth-1 listing of one directory. There is no cross-call cache: every
  * expand re-lists from disk, whether or not the caller already holds
  * children for the path — the on-demand tree's only refresh gesture is
- * collapse-then-expand, and a cache-hit branch here would remove it (see the
- * spec's D2/D14 and Trap 10).
+ * collapse-then-expand, and a cache-hit branch here would remove it. Ignored
+ * content is never live-watched, so those directories would then never update
+ * at all.
  *
  * `markAgainst`, when given, is a SECOND, stricter rule set consulted only
  * for entries that already survived `rules` — i.e. `rules` is the show-all

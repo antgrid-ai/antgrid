@@ -42,7 +42,7 @@ void main() {
         .fileService;
   }
 
-  test('a fresh install browses everything (D10)', () async {
+  test('a fresh install browses everything', () async {
     final container = await demoContainer();
     final fileService = await boundFileService(container);
 
