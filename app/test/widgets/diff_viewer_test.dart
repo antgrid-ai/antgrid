@@ -37,7 +37,11 @@ ${List.generate(30, (i) => ' const filler = $i;').join('\n')}
 Widget _host({
   double width = 320,
   double height = 400,
+  String path = 'lib/a.dart',
   String? diff,
+  int additions = 1,
+  int deletions = 1,
+  VoidCallback? onViewFile,
   TextScaler textScaler = TextScaler.noScaling,
 }) => MaterialApp(
   home: Scaffold(
@@ -48,12 +52,12 @@ Widget _host({
           width: width,
           height: height,
           child: DiffViewer(
-            path: 'lib/a.dart',
+            path: path,
             gitStatus: 'M',
             diff: diff ?? _diff,
-            additions: 1,
-            deletions: 1,
-            onViewFile: () {},
+            additions: additions,
+            deletions: deletions,
+            onViewFile: onViewFile ?? () {},
             onClose: () {},
             onSendToAgent: (context, message) async {},
           ),
@@ -348,36 +352,24 @@ void main() {
       );
     });
 
-    Future<int> pumpBinary(WidgetTester tester, {double width = 600}) async {
-      var viewed = 0;
-      await tester.pumpWidget(
-        MaterialApp(
-          home: Scaffold(
-            body: SizedBox(
-              width: width,
-              height: 400,
-              child: DiffViewer(
-                path: 'assets/logo.png',
-                gitStatus: 'M',
-                diff: 'Binary files a/assets/logo.png and b/... differ',
-                additions: 0,
-                deletions: 0,
-                onViewFile: () => viewed++,
-                onClose: () {},
-                onSendToAgent: (context, message) async {},
-              ),
-            ),
-          ),
-        ),
-      );
-      await tester.pumpAndSettle();
-      return viewed;
-    }
+    /// The whole of what git emits for a changed image: one line, no content.
+    const binaryDiff = 'Binary files a/assets/logo.png and b/... differ';
+
+    Widget binaryHost({required double width, VoidCallback? onViewFile}) =>
+        _host(
+          width: width,
+          path: 'assets/logo.png',
+          diff: binaryDiff,
+          additions: 0,
+          deletions: 0,
+          onViewFile: onViewFile,
+        );
 
     testWidgets('binary diffs still short-circuit to the empty state', (
       tester,
     ) async {
-      await pumpBinary(tester);
+      await tester.pumpWidget(binaryHost(width: 600));
+      await tester.pumpAndSettle();
 
       expect(find.text('Binary file changed: logo.png'), findsOneWidget);
     });
@@ -388,10 +380,10 @@ void main() {
     testWidgets('binary diffs keep the header that routes to the file', (
       tester,
     ) async {
-      await pumpBinary(tester);
+      await tester.pumpWidget(binaryHost(width: 600));
+      await tester.pumpAndSettle();
 
       expect(find.text('assets/logo.png'), findsOneWidget);
-      expect(find.text('View file'), findsWidgets);
     });
 
     testWidgets('the binary placeholder action opens the file', (
@@ -399,23 +391,7 @@ void main() {
     ) async {
       var viewed = 0;
       await tester.pumpWidget(
-        MaterialApp(
-          home: Scaffold(
-            body: SizedBox(
-              width: 600,
-              height: 400,
-              child: DiffViewer(
-                path: 'assets/logo.png',
-                diff: 'Binary files a/assets/logo.png and b/... differ',
-                additions: 0,
-                deletions: 0,
-                onViewFile: () => viewed++,
-                onClose: () {},
-                onSendToAgent: (context, message) async {},
-              ),
-            ),
-          ),
-        ),
+        binaryHost(width: 600, onViewFile: () => viewed++),
       );
       await tester.pumpAndSettle();
 
@@ -426,12 +402,20 @@ void main() {
     });
 
     // A phone collapses the header's written link to a bare icon, so the
-    // placeholder's own action is the only labelled route left.
+    // placeholder's own action is the only labelled route left. Asserting both
+    // widths is what makes this a test of the collapse rather than of the
+    // placeholder, which is present either way.
     testWidgets('the placeholder action survives a compact header', (
       tester,
     ) async {
-      await pumpBinary(tester, width: 300);
+      await tester.pumpWidget(binaryHost(width: 600));
+      await tester.pumpAndSettle();
+      final wide = find.text('View file').evaluate().length;
 
+      await tester.pumpWidget(binaryHost(width: 300));
+      await tester.pumpAndSettle();
+
+      expect(wide, greaterThan(find.text('View file').evaluate().length));
       expect(find.widgetWithText(AbButton, 'View file'), findsOneWidget);
     });
   });

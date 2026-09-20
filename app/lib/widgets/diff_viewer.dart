@@ -239,6 +239,7 @@ class _DiffViewerState extends State<DiffViewer> {
   late List<_DiffRow> _rows;
   late List<_DiffHunk> _hunks;
   late double _codeWidth;
+  late bool _isBinary;
   CodeLineHighlighter? _highlighter;
 
   /// The scaler the rows will actually be painted with. Rows render through
@@ -281,6 +282,18 @@ class _DiffViewerState extends State<DiffViewer> {
   }
 
   void _parse() {
+    // Git prints one line and no content for a binary change, so there is
+    // nothing to lay out — and parsing it anyway would run a TextPainter over
+    // every line to size a body that is never built.
+    _isBinary =
+        widget.diff.contains('Binary files') && widget.diff.contains('differ');
+    if (_isBinary) {
+      _hunks = const [];
+      _rows = const [];
+      _highlighter = null;
+      _codeWidth = 0;
+      return;
+    }
     final hunks = _parseDiff(widget.diff);
     _hunks = hunks;
     _rows = [
@@ -343,44 +356,28 @@ class _DiffViewerState extends State<DiffViewer> {
 
   @override
   Widget build(BuildContext context) {
-    // Git prints one line and no content for a binary change, so there are no
-    // rows to lay out — but the header is not part of the diff. It carries the
-    // path, the status letter, the way out of this pane, and `View file`,
-    // which for a changed image is the one control that shows you the change
-    // at all. Returning the placeholder ALONE skipped it, stranding every
-    // binary change on a dead end; the action below repeats the same callback
-    // so the route survives a header that narrows away on a phone.
-    if (widget.diff.contains('Binary files') &&
-        widget.diff.contains('differ')) {
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          _buildHeader(context),
-          Expanded(
-            child: AbEmptyState(
-              icon: AbIcons.fileBinary,
-              title: 'Binary file changed: ${widget.path.split('/').last}',
-              action: AbButton(
-                label: 'View file',
-                compact: true,
-                onTap: widget.onViewFile,
-              ),
+    // The header is not part of the diff: it carries the path, the status
+    // letter, the way out of the pane, and `View file`, which for a changed
+    // image is the one control that shows the change at all. The placeholder
+    // repeats that callback because a narrow header collapses the written link
+    // to a bare icon.
+    final Widget body = _isBinary
+        ? AbEmptyState(
+            icon: AbIcons.fileBinary,
+            title: 'Binary file changed: ${widget.path.split('/').last}',
+            action: AbButton(
+              label: 'View file',
+              compact: true,
+              onTap: widget.onViewFile,
             ),
-          ),
-        ],
-      );
-    }
+          )
+        : _rows.isEmpty
+        ? const AbEmptyState.compact(title: 'No changes')
+        : _buildBody(context);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        _buildHeader(context),
-        Expanded(
-          child: _rows.isEmpty
-              ? const AbEmptyState.compact(title: 'No changes')
-              : _buildBody(context),
-        ),
-      ],
+      children: [_buildHeader(context), Expanded(child: body)],
     );
   }
 

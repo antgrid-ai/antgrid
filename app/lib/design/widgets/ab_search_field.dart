@@ -106,15 +106,6 @@ class _AbSearchFieldState extends State<AbSearchField> {
     // actually has an icon — a bare side keeps the standard [space8] inset so
     // text never runs flush to the border.
     final hasPrefix = widget.prefixIcon != null;
-    // ...while the square is WIDER than the glyph it centres. A caller aligning
-    // the glyph to a column outside the field squares the slot to the glyph
-    // itself, which leaves no margin on either side of it, and the text starts
-    // against the glyph. The gap then has to be its own child of the row — see
-    // [AbTextField.prefixGap] for why the box padding cannot supply it — at the
-    // same space8 [AbListRow.leadingGap] puts a row's label from its chevron,
-    // so a field aligned to a list reads as part of it.
-    final squareCarriesTheGap =
-        (widget.prefixIconWidth ?? widget.height) > AbTokens.iconButtonGlyph;
     return AbTextField(
       controller: widget.controller,
       focusNode: widget.focusNode,
@@ -127,7 +118,6 @@ class _AbSearchFieldState extends State<AbSearchField> {
       border: widget.border,
       prefixIconSize: AbTokens.iconButtonGlyph,
       prefixIconWidth: widget.prefixIconWidth ?? widget.height,
-      prefixGap: squareCarriesTheGap ? 0 : AbTokens.space8,
       suffixSlotWidth: widget.height,
       contentPadding: EdgeInsets.only(
         left: hasPrefix ? 0 : AbTokens.space8,

@@ -48,7 +48,6 @@ class AbTextField extends StatefulWidget {
     this.contentPadding,
     this.prefixIconSize,
     this.prefixIconWidth,
-    this.prefixGap = 0,
     this.suffixSlotWidth,
     this.border = true,
   });
@@ -136,18 +135,6 @@ class AbTextField extends StatefulWidget {
 
   /// Prefix-icon slot width. Defaults to [AbTokens.iconButtonBox] (24).
   final double? prefixIconWidth;
-
-  /// Gap between the prefix slot and the text, for a slot squared to the glyph
-  /// itself. A full-height slot centres its glyph and so carries the gap in its
-  /// own margins; one narrowed to align the glyph with a column outside the
-  /// field has none left to give, and the text would start against it. Zero by
-  /// default so every field that takes the full-height slot is unaffected.
-  ///
-  /// It has to sit HERE, between the slot and the text, and not in
-  /// [contentPadding]: that is [AbControlBox]'s padding and wraps the whole
-  /// row, prefix included, so widening it moves the glyph instead of freeing
-  /// the text from it.
-  final double prefixGap;
 
   /// When set, the clear button is centred inside a square slot of this width
   /// (instead of sitting flush). Pass the field [height] to give the suffix
@@ -273,6 +260,15 @@ class _AbTextFieldState extends State<AbTextField> {
     // text + hint, so it sizes to its text line and is vertically centred by
     // the Row. Prefix icon and clear button are Row children (the collapsed
     // decoration doesn't support prefixes/suffixes).
+    final prefixSlot = widget.prefixIconWidth ?? AbTokens.iconButtonBox;
+    final prefixGlyph = widget.prefixIconSize ?? AbTokens.iconButtonGlyph;
+    // A slot wider than the glyph it centres already leaves margin either side
+    // of it; one squared to the glyph, to align it with a column outside the
+    // field, has none to give and the text would start against it. The gap
+    // cannot come from [contentPadding] — that is [AbControlBox]'s padding and
+    // wraps the prefix too, so widening it moves the glyph instead.
+    final prefixGap = prefixSlot > prefixGlyph ? 0.0 : AbTokens.space8;
+
     final box = GestureDetector(
       behavior: HitTestBehavior.opaque,
       onTap: enabled ? _focusNode.requestFocus : null,
@@ -296,18 +292,19 @@ class _AbTextFieldState extends State<AbTextField> {
               : CrossAxisAlignment.center,
           children: [
             if (widget.prefixIcon != null)
-              SizedBox(
-                width: widget.prefixIconWidth ?? AbTokens.iconButtonBox,
-                child: Center(
-                  child: AbIcon(
-                    widget.prefixIcon!,
-                    size: widget.prefixIconSize ?? AbTokens.iconButtonGlyph,
-                    color: context.antgrid.textMuted,
+              Padding(
+                padding: EdgeInsets.only(right: prefixGap),
+                child: SizedBox(
+                  width: prefixSlot,
+                  child: Center(
+                    child: AbIcon(
+                      widget.prefixIcon!,
+                      size: prefixGlyph,
+                      color: context.antgrid.textMuted,
+                    ),
                   ),
                 ),
               ),
-            if (widget.prefixIcon != null && widget.prefixGap > 0)
-              SizedBox(width: widget.prefixGap),
             Expanded(
               child: TextField(
                 controller: _controller,
