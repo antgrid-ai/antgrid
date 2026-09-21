@@ -326,6 +326,18 @@ live socket) on any of: missed sealed pongs (§8.5), a run of consecutive RPC
 timeouts while established, or peer-online following a peer-offline. Owned by
 `MachineSession`.
 
+The phone **sends nothing under the old keys while its rekey is in flight**: the
+app queue is held and ping/pong/credit are skipped until `established`. The
+usual trigger is the agent's own socket redial (peer-offline → peer-online),
+and a redial ends every session on the agent before the relay can report the
+new socket, so the old keys are in general already gone at the far end; a frame
+sealed under them is a silent loss reported to its sender as sent. The agent
+covers the frames the phone sealed *before* it learned of the redial: a redial
+retires each dropped session's keys receive-only for `RETIRED_KEYS_MS` (§8.6)
+and tries them last in `handleSealedFrame`, routing app traffic and dropping
+session frames (a credit or pong against a window the redial discarded). Only a
+redial retires — a takeover or liveness death still zeroizes at once.
+
 ### 8.4 Rekey and capacity
 
 An agent holds **one session per app device**, keyed by the route address, over
@@ -380,7 +392,8 @@ persisted to disk, logs, or closures. `ss` is zeroized immediately after
 
 | Trigger | Path |
 |---|---|
-| Socket loss / client teardown | `resetE2eState` — every session and attempt |
+| Socket loss (redial) | `resetE2eState` — every attempt now; every session's keys retired receive-only, zeroized after `RETIRED_KEYS_MS` (§8.3) |
+| Client teardown (`close`) | `resetE2eState` plus every retired set — no redial follows |
 | Rekey confirmed | swap, then zeroize the superseded set |
 | Capacity eviction | `dropSession` after the notice; `tearDownPending` for a half-open evictee |
 | Half-open attempt expiry | `tearDownPending` — candidate keys only |
@@ -405,6 +418,7 @@ Values live in code and move; these are the names to look up. Agent side is
 | Constant | Home | Bounds |
 |---|---|---|
 | `HALF_OPEN_MS` | agent | How long a half-open attempt (client-hello seen, `app:ready` never arrived) holds candidate keys |
+| `RETIRED_KEYS_MS` | agent | How long a redial keeps each dropped session's keys receive-only (§8.3) |
 | `PING_SILENCE_MS` / `kPingSilenceSeconds` | both | Sealed-receive silence before a sealed `ping` |
 | `MAX_MISSED_PONGS` / `kMaxMissedPongs` | both | Unanswered pings before the session is declared dead |
 | `_kConsecutiveTimeoutsToRekey` | phone | Consecutive RPC timeouts on an established session before a rekey |
@@ -432,9 +446,10 @@ most `CHANNEL_WINDOW_BYTES` of sealed payload in flight on a channel beyond what
 the peer has credited, and at most `SOCKET_INFLIGHT_BYTES` across both channels;
 neither side can read its socket buffer, so this self-accounting is the only
 bound on what a liveness frame is written behind. App frames queue per channel
-in FIFO order and are sealed only when dequeued (a frame queued across a rekey
-goes out under the keys live at that moment); a channel whose window is full
-does not block the other.
+in FIFO order and are sealed only when dequeued (the phone holds its queue for
+the whole of a rekey, so a frame queued across one goes out under the new keys;
+the agent, which never initiates, seals under whatever keys are live at that
+moment); a channel whose window is full does not block the other.
 
 The receiver counts the sealed payload bytes of every kind-0 frame the
 established keys opened or nothing opened — decrypt failures included, so a bad

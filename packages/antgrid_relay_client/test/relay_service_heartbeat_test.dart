@@ -143,6 +143,35 @@ void main() {
   });
 
   test(
+    'an unanswered probe closes the socket after the probe timeout, '
+    'not at the next tick',
+    () async {
+      // A tick far longer than the timeout: if the close still waited for a
+      // tick, it would land seconds late — the 25 s-or-50 s jitter the three
+      // durations exist to remove.
+      relay.debugSetHeartbeatTiming(
+        tick: const Duration(seconds: 5),
+        silence: const Duration(milliseconds: 20),
+        timeout: const Duration(milliseconds: 60),
+      );
+      final attempt = await dial();
+      attempt.connection.sendJson(_welcome());
+      await attempt.connect;
+
+      await Future<void>.delayed(const Duration(milliseconds: 30));
+      relay.onResume();
+      expect(await attempt.connection.nextJson(), {'type': 'ping'});
+      final elapsed = Stopwatch()..start();
+      await attempt.connection.done.timeout(const Duration(seconds: 1));
+      expect(elapsed.elapsedMilliseconds, lessThan(500));
+      expect(
+        relay.currentState.connectionState,
+        RelayConnectionState.disconnected,
+      );
+    },
+  );
+
+  test(
     'resume leaves fresh sockets alone and probes stale sockets immediately',
     () async {
       final attempt = await dial();

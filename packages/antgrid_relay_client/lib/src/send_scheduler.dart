@@ -80,8 +80,9 @@ class SendScheduler {
   /// past it is refused whole by [enqueue].
   int maxQueuedBytes;
 
-  /// Test-only seam: the drain loop parks while true and resumes on [kick].
-  /// Not part of the supported API.
+  /// The drain loop parks while true and resumes on [kick]. Set by the session
+  /// for the duration of a rekey, so nothing is sealed under keys the peer is
+  /// in the middle of replacing; frames enqueued meanwhile simply wait.
   bool hold = false;
 
   static const _channels = ['control', 'preview'];

@@ -103,6 +103,9 @@ class _FakeHandshaker implements SessionHandshaker {
 
   @override
   void abort() {}
+
+  @override
+  void cancelInFlight() {}
 }
 
 SessionKeys _keys(int fill) => SessionKeys(
