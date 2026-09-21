@@ -88,24 +88,51 @@ class FakeHandshaker implements SessionHandshaker {
 
   final List<SessionKeys?> _sequence;
   int performCalls = 0;
+  int cancelInFlightCalls = 0;
   bool aborted = false;
 
   /// Optional per-call delay, keyed by call index (0-based) — lets a test hold
   /// a rekey "in flight" to observe make-before-break behavior.
   Duration Function(int callIndex)? delayFor;
 
+  /// The delay of the call currently in flight; [cancelInFlight] ends it early
+  /// and the call resolves null, as the real handshaker's does on cancel.
+  Completer<void>? _inFlight;
+  bool _cancelledCurrent = false;
+
   @override
   Future<SessionKeys?> perform() async {
     final idx = performCalls;
     performCalls++;
     final delay = delayFor?.call(idx);
-    if (delay != null) await Future<void>.delayed(delay);
+    if (delay != null) {
+      final gate = _inFlight = Completer<void>();
+      final timer = Timer(delay, () {
+        if (!gate.isCompleted) gate.complete();
+      });
+      await gate.future;
+      timer.cancel();
+      if (identical(_inFlight, gate)) _inFlight = null;
+      if (_cancelledCurrent) {
+        _cancelledCurrent = false;
+        return null;
+      }
+    }
     if (idx < _sequence.length) return _sequence[idx];
     return _sequence.isEmpty ? null : _sequence.last;
   }
 
   @override
   void abort() => aborted = true;
+
+  @override
+  void cancelInFlight() {
+    cancelInFlightCalls++;
+    final gate = _inFlight;
+    if (gate == null || gate.isCompleted) return;
+    _cancelledCurrent = true;
+    gate.complete();
+  }
 }
 
 /// A fresh all-`seed`-valued 32-byte SessionKeys triple, distinguishable by
