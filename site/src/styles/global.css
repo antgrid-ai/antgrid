@@ -390,6 +390,16 @@ body {
 
 /* ---- Motion ------------------------------------------------------------ */
 
+/* The footer's scheme toggle does nothing without its script, so it is shown
+   only once the reveal script below has marked the document. Unlayered for the
+   same reason as the app-shell rules: no utility can half-win against it. */
+[data-theme-toggle] {
+  display: none;
+}
+html.js [data-theme-toggle] {
+  display: inline-flex;
+}
+
 /* Scroll reveal: only hidden once JS has confirmed it can reveal again. */
 html.js .reveal {
   opacity: 0;

@@ -74,6 +74,26 @@ import Wordmark from "./ui/Wordmark.astro";
         <img src="/logo/radhaai-mark.svg" alt="" width="13" height="13" class="rounded-[2px]" />
         <span class="group-hover:text-ink">Radha AI Products</span>
       </a>
+      {/* The colour-scheme override, and the only place on the site it lives.
+          The page follows the OS by itself, so this is a preference control
+          rather than a feature, and it sits with the other small print. Hidden
+          until JS has run (global.css keys it on html.js) because without the
+          script it is three buttons that do nothing. `aria-pressed` is the
+          state; the pressed style hangs off it so the two cannot disagree. */}
+      <div role="group" aria-label="Colour scheme" data-theme-toggle class="ml-auto overflow-hidden rounded border border-edge">
+        {([["system", "System"], ["light", "Light"], ["dark", "Dark"]] as const).map(([choice, label]) => (
+          <button
+            type="button"
+            data-theme-choice={choice}
+            aria-pressed={choice === "system" ? "true" : "false"}
+            class="px-2 py-1 text-muted transition-colors hover:text-ink aria-pressed:bg-chrome aria-pressed:text-ink motion-reduce:transition-none"
+          >{label}</button>
+        ))}
+      </div>
     </div>
   </div>
 </footer>
+<script>
+  import { mountThemeToggle } from "../scripts/theme";
+  mountThemeToggle();
+</script>
