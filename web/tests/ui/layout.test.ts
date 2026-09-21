@@ -4,10 +4,66 @@
 import { describe, test, expect } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { Layout } from "../../src/ui/layout.js";
+import { Hono } from "hono";
+import { contextStorage } from "hono/context-storage";
+import { Layout, type LayoutUser } from "../../src/ui/layout.js";
 import { setPublicOrigin } from "../../src/ui/origin.js";
 import { setSalesIqWidgetUrl } from "../../src/ui/salesiq.js";
 import { BETA } from "../../src/billing/plans.js";
+
+/** Renders Layout inside a request, the way a route does, so `currentTheme()`
+ *  has a context to read the cookie from. */
+async function renderWithCookie(cookie: string | undefined, user?: LayoutUser): Promise<string> {
+  const app = new Hono();
+  app.use(contextStorage());
+  app.get("/", (c) => c.html(Layout({ title: "Test", user, children: "x" }).toString()));
+  const res = await app.request("/", { headers: cookie ? { cookie } : {} });
+  return res.text();
+}
+
+describe("Layout colour scheme", () => {
+  const gita = { id: "user-1", email: "gita@example.com" };
+
+  test("renders the stored override onto <html> before any script runs", async () => {
+    expect(await renderWithCookie("antgrid-theme=light")).toContain('<html lang="en" data-theme="light">');
+    expect(await renderWithCookie("antgrid-theme=dark")).toContain('<html lang="en" data-theme="dark">');
+  });
+
+  test("with no cookie the attribute is absent, so the OS decides", async () => {
+    expect(await renderWithCookie(undefined)).toContain('<html lang="en">');
+    // Rendered outside any request at all (as every other test here does).
+    expect(Layout({ title: "Test", children: "x" }).toString()).toContain('<html lang="en">');
+  });
+
+  test("an unknown cookie value is ignored rather than rendered", async () => {
+    const html = await renderWithCookie("antgrid-theme=blue");
+    expect(html).toContain('<html lang="en">');
+    expect(html).not.toContain("data-theme=");
+  });
+
+  test("an override flips the theme-color metas by media, not by order", async () => {
+    const html = await renderWithCookie("antgrid-theme=dark");
+    const light = html.indexOf('media="not all" content="#f5f5f7" data-scheme="light"');
+    const dark = html.indexOf('media="all" content="#101015" data-scheme="dark"');
+    expect(light).toBeGreaterThan(-1);
+    expect(dark).toBeGreaterThan(-1);
+    expect(light).toBeLessThan(dark);
+  });
+
+  test("the toggle lives in the account menu and nowhere else", async () => {
+    const signedIn = await renderWithCookie("antgrid-theme=dark", gita);
+    expect(signedIn.match(/data-theme-choice="/g)).toHaveLength(3);
+    // The pressed state is rendered from the cookie, so the menu opens already
+    // agreeing with the page.
+    expect(signedIn).toContain('data-theme-choice="dark" aria-pressed="true"');
+    expect(signedIn).toContain('data-theme-choice="system" aria-pressed="false"');
+    expect(signedIn).toContain('var COOKIE = "antgrid-theme"');
+
+    const signedOut = await renderWithCookie("antgrid-theme=dark");
+    expect(signedOut).not.toContain("data-theme-choice");
+    expect(signedOut).not.toContain('var COOKIE = "antgrid-theme"');
+  });
+});
 
 describe("Layout", () => {
   test("theme-color metas are the two halves of --color-page", () => {
