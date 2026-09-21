@@ -3339,6 +3339,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // to appear after the agent finished writing — worst on a phone or tablet,
   // where the Git view is opened deliberately, right after the agent stops.
   function scheduleGitRefresh(runtime: CheckoutRuntime) {
+    // A watcher event queued before teardown still lands after it — deleting the
+    // tree is itself one — and the timer armed here outlives the shutdown drain,
+    // which has already snapshotted the pending set. It then spawns `git` with a
+    // cwd the caller may have removed the moment shutdown resolved. Same guard,
+    // and the same reason, as the one [refreshFocusedCheckout] takes.
+    if (runtime.disposed) return;
     // Reset on the SIGNAL, not on the coalesced run: a checkout the watcher is
     // still firing on is a checkout under active work, and it must never drift
     // into a slow tier while a build is writing into it.
