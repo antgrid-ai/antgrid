@@ -3,9 +3,8 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { ProjectCore, type ProjectCoreRemoteDeps } from "../src/project-core";
-import { MessageBus } from "../src/message-bus";
-import type { AttachStreamOpts, PeerSessionView, SendTarget, StreamHandle } from "../src/stream-mux";
+import { ProjectCore, type ProjectCoreDeps, type ProjectCoreRemoteDeps } from "../src/project-core";
+import type { PeerSessionView, SendTarget, StreamHandle } from "../src/stream-mux";
 import type { MachineRelaySession } from "../src/relay-promotion";
 import { createMessage } from "../src/protocol";
 
@@ -44,94 +43,59 @@ function busReplyFrame() {
   });
 }
 
-/** Like project-core.test.ts's stub, but with a LIVE peer session and a sendTo
- *  that records — the two things a bus reply needs to actually leave. */
-function remoteDepsWithPeer(): {
-  deps: ProjectCoreRemoteDeps;
-  calls: Array<{ bus: MessageBus; opts: AttachStreamOpts }>;
-  sent: Array<{ target?: SendTarget }>;
-} {
-  const calls: Array<{ bus: MessageBus; opts: AttachStreamOpts }> = [];
-  const sent: Array<{ target?: SendTarget }> = [];
-  const deps: ProjectCoreRemoteDeps = {
-    attachStream: (bus, opts) => {
-      calls.push({ bus, opts });
-      const handle: StreamHandle = {
-        streamId: "stream-1",
-        detach: () => {},
-        sendTunnel: async () => "sent" as const,
-        sendTo: async (_msg, _channel, target) => { sent.push({ target }); return "sent" as const; },
-      };
-      return handle;
-    },
+/** A live peer session and a `sendTo` that records — the two things a bus reply
+ *  needs to actually leave. One object serves both doors onto the same slot:
+ *  `ProjectCoreRemoteDeps` for `promote`, `MachineRelaySession` for the wizard,
+ *  which differ only in how they name this machine's device id. */
+function peerStreamStub() {
+  const sent: Array<SendTarget | undefined> = [];
+  const stub = {
+    attachStream: (): StreamHandle => ({
+      streamId: "stream-1",
+      detach: () => {},
+      sendTunnel: async () => "sent" as const,
+      sendTo: async (_msg, _channel, target) => { sent.push(target); return "sent" as const; },
+    }),
     establishedPeers: () => [viewFor(PEER)],
-    peerSession: (peerId) => (peerId === PEER ? viewFor(peerId) : null),
-    machineDeviceId: () => "machine-uuid",
+    peerSession: (peerId: string) => (peerId === PEER ? viewFor(peerId) : null),
     sendPushDeliver: () => {},
+    machineDeviceId: () => "machine-uuid",
+    agentDeviceId: "machine-uuid",
   };
-  return { deps, calls, sent };
+  return {
+    deps: stub satisfies ProjectCoreRemoteDeps,
+    session: stub satisfies MachineRelaySession,
+    sent,
+  };
+}
+
+function localCore(prefix: string, deps: Partial<ProjectCoreDeps> = {}): ProjectCore {
+  const folder = mkdtempSync(join(tmpdir(), prefix));
+  writeFileSync(join(folder, "antgrid.yaml"), "");
+  const core = new ProjectCore({
+    folder,
+    mode: "local",
+    identity: { deviceId: randomUUID(), deviceName: "local", createdAt: new Date().toISOString() },
+    ...deps,
+  });
+  cleanup.push(() => core.shutdown());
+  return core;
 }
 
 test("a promoted local-mode core can answer a session-bus message addressed at the app session that carried it in", async () => {
-  const folder = mkdtempSync(join(tmpdir(), "antgrid-pc-busreply-"));
-  writeFileSync(join(folder, "antgrid.yaml"), "");
-
-  const core = new ProjectCore({
-    folder,
-    mode: "local",
-    identity: { deviceId: randomUUID(), deviceName: "local", createdAt: new Date().toISOString() },
-  });
-  cleanup.push(() => core.shutdown());
+  const core = localCore("antgrid-pc-busreply-");
   await core.start();
 
-  const { deps, calls, sent } = remoteDepsWithPeer();
-  const promoted = core.promote(deps);
-  calls[0].opts.onAdmitted?.("stream-1");
-  expect(core.isRelayRegistered()).toBe(true);
+  const { deps, sent } = peerStreamStub();
+  core.promote(deps);
 
   expect(core.sendToAppSession(PEER, busReplyFrame())).toBe(true);
-  expect(sent).toHaveLength(1);
-  expect(sent[0].target).toEqual({ kind: "peer", peerId: PEER });
-
-  // Torn down here rather than only in `cleanup`, so the slot and the core are
-  // both gone before the next test in this file starts.
-  promoted.stop();
-  await core.shutdown();
+  expect(sent).toEqual([{ kind: "peer", peerId: PEER }]);
 });
 
-/** The wizard promotion path (`agent:enableRelay` over loopback) attaches the
- *  same relay slot through a different door, so it needs the same bookkeeping:
- *  without it the reply is refused against a null handle and held, exactly as
- *  the promote() path did. */
-function machineSessionWithPeer(): { session: MachineRelaySession; sent: Array<{ target?: SendTarget }> } {
-  const sent: Array<{ target?: SendTarget }> = [];
-  const session: MachineRelaySession = {
-    attachStream: () => ({
-      streamId: "wizard-stream",
-      detach: () => {},
-      sendTunnel: async () => "sent" as const,
-      sendTo: async (_msg, _channel, target) => { sent.push({ target }); return "sent" as const; },
-    }),
-    establishedPeers: () => [viewFor(PEER)],
-    peerSession: (peerId) => (peerId === PEER ? viewFor(peerId) : null),
-    sendPushDeliver: () => {},
-    agentDeviceId: "machine-uuid",
-  };
-  return { session, sent };
-}
-
 test("a core promoted by the desktop enable-relay wizard can answer one too", async () => {
-  const folder = mkdtempSync(join(tmpdir(), "antgrid-pc-wizreply-"));
-  writeFileSync(join(folder, "antgrid.yaml"), "");
-
-  const { session, sent } = machineSessionWithPeer();
-  const core = new ProjectCore({
-    folder,
-    mode: "local",
-    identity: { deviceId: randomUUID(), deviceName: "local", createdAt: new Date().toISOString() },
-    ensureMachineRelay: async () => session,
-  });
-  cleanup.push(() => core.shutdown());
+  const { session, sent } = peerStreamStub();
+  const core = localCore("antgrid-pc-wizreply-", { ensureMachineRelay: async () => session });
   await core.start();
 
   const connect = core.localConnectInfo!;
@@ -165,11 +129,9 @@ test("a core promoted by the desktop enable-relay wizard can answer one too", as
   await attached;
 
   expect(core.sendToAppSession(PEER, busReplyFrame())).toBe(true);
-  expect(sent).toHaveLength(1);
-  expect(sent[0].target).toEqual({ kind: "peer", peerId: PEER });
+  expect(sent).toEqual([{ kind: "peer", peerId: PEER }]);
 
   // The owner goes away before the core does, in that order: closing the socket
   // after shutdown would race the listener's own teardown.
   await new Promise<void>((resolve) => { ws.addEventListener("close", () => resolve()); ws.close(); });
-  await core.shutdown();
 });

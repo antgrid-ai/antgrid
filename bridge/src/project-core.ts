@@ -96,16 +96,14 @@ export class ProjectCore {
   private bus: MessageBus | null = null;
   private listener: LocalListener | null = null;
   private promotion: RelayPromotionController | null = null;
-  /** This core's stream on the machine socket: the primary slot for a
-   *  remote-mode core, and the promoted slot for a local-mode one. Both kinds
-   *  must land here, because {@link sendToAppSession} is how a session-bus
-   *  exchange is ANSWERED and it has no other way to reach the wire. */
-  private streamHandle: StreamHandle | null = null;
-  /** The remote deps behind a promoted slot. A local-mode core is constructed
-   *  without `deps.remote` (`host-server.ts` passes it only for mode
-   *  "remote"), so they arrive at promotion instead and have to be kept: the
-   *  peer-session lookup in {@link sendToAppSession} reads them. */
-  private promotedRemote: ProjectCoreRemoteDeps | null = null;
+  /** This core's stream on the machine socket, with the deps that own it: the
+   *  primary slot for a remote-mode core, the promoted one for a local-mode
+   *  core. {@link sendToAppSession} reads both halves and has no other way to
+   *  reach the wire, so they are one field — a handle without its deps is not a
+   *  usable slot, and `deps.remote` cannot stand in for them (it is a
+   *  construction input, and a local-mode core is built without it). Written
+   *  only by {@link attachRelayStream}. */
+  private slot: { handle: StreamHandle; remote: ProjectCoreRemoteDeps } | null = null;
   /** Unsubscribe for the primary (remote-mode) stream's push dispatcher bus
    *  subscription. Torn down in shutdown() alongside the stream. The promote()
    *  slot owns its own unsub in its PromotionHandle.stop() instead. */
@@ -167,9 +165,9 @@ export class ProjectCore {
     // the caller has to decide whether to hold it. "The session is live" is the
     // strongest fact available synchronously and is exactly what the boolean
     // used to mean.
-    const remote = this.deps.remote ?? this.promotedRemote;
-    if (!this.streamHandle || !remote?.peerSession(peerId)) return false;
-    void this.streamHandle.sendTo(msg, "control", { kind: "peer", peerId });
+    const slot = this.slot;
+    if (!slot || !slot.remote.peerSession(peerId)) return false;
+    void slot.handle.sendTo(msg, "control", { kind: "peer", peerId });
     return true;
   }
   hasIsolatedSessions(): boolean { return this.core?.hasIsolatedSessions() ?? false; }
@@ -571,7 +569,6 @@ export class ProjectCore {
     await this.bindLoopback(core, bus);
 
     const slot = this.attachRelayStream(core, bus, remote);
-    this.streamHandle = slot.handle;
     this.relayPushUnsub = slot.unsubscribePush;
     this.relayFirstRegister = slot.firstRegister;
   }
@@ -587,7 +584,13 @@ export class ProjectCore {
     core: AgentCore,
     bus: MessageBus,
     remote: ProjectCoreRemoteDeps,
-  ): { handle: StreamHandle; firstRegister: Promise<RegisterOutcome>; unsubscribePush: () => void } {
+  ): {
+    handle: StreamHandle;
+    firstRegister: Promise<RegisterOutcome>;
+    unsubscribePush: () => void;
+    /** Gives the slot back, if this handle still holds it. Idempotent. */
+    releaseSlot: () => void;
+  } {
     // Settle on the FIRST admission outcome only (onPeerOnline re-fires on every
     // rekey; a recoverable state must not pre-empt a later success), so the host
     // can gate the running advert / surface a terminal rejection. Never rejects —
@@ -762,7 +765,17 @@ export class ProjectCore {
       },
     });
 
-    return { handle, firstRegister, unsubscribePush };
+    // Claimed here rather than by the caller: this is the one place a relay
+    // stream is attached, and an attach that leaves the slot unset can carry a
+    // session-bus exchange IN and never answer it — the reply is held against a
+    // null, retried against the same null, and expires at the TTL with the send
+    // having reported itself on its way.
+    this.slot = { handle, remote };
+    // Identity-checked: by the time a slot is released a re-attach may already
+    // own it, and clearing blind would mute a stream that is live.
+    const releaseSlot = () => { if (this.slot?.handle === handle) this.slot = null; };
+
+    return { handle, firstRegister, unsubscribePush, releaseSlot };
   }
 
   /** Attach the local core as a stream for the desktop wizard promotion path,
@@ -774,24 +787,13 @@ export class ProjectCore {
     bus: MessageBus,
     remote: ProjectCoreRemoteDeps,
   ): { handle: StreamHandle; detach: () => void } {
-    const { handle, unsubscribePush } = this.attachRelayStream(core, bus, remote);
-    // Same slot bookkeeping `promote` does, for the same reason: this is the
-    // core's only relay stream, and `sendToAppSession` cannot find it any other
-    // way. Leaving it unset makes a session-bus exchange arrive and be
-    // unanswerable — held, retried against the null, expired six hours later.
-    this.streamHandle = handle;
-    this.promotedRemote = remote;
+    const { handle, unsubscribePush, releaseSlot } = this.attachRelayStream(core, bus, remote);
     return {
       handle,
       detach: () => {
         try { unsubscribePush(); } catch { /* best-effort */ }
         try { handle.detach(); } catch { /* best-effort */ }
-        // Identity-checked: a re-attach owns the slot once this one is gone, and
-        // clearing it blind would mute a stream that is live.
-        if (this.streamHandle === handle) {
-          this.streamHandle = null;
-          this.promotedRemote = null;
-        }
+        releaseSlot();
         try { core.setPlainHook(null); } catch { /* best-effort */ }
         try { core.setPeerSessionProvider(null); } catch { /* best-effort */ }
       },
@@ -816,14 +818,7 @@ export class ProjectCore {
     const bus = this.bus;
     if (!core || !bus) throw new Error("ProjectCore.promote: core not started (call start() first)");
 
-    const { handle, firstRegister, unsubscribePush } = this.attachRelayStream(core, bus, remoteDeps);
-    // A promoted core's ONLY relay slot, and the sole reason these two are
-    // fields rather than closure state: `sendToAppSession` reads both, so a
-    // promotion that leaves them unset can carry a session-bus exchange IN and
-    // never answer it — held, retried against the same null, and expired six
-    // hours later with the send having reported itself on its way.
-    this.streamHandle = handle;
-    this.promotedRemote = remoteDeps;
+    const { handle, firstRegister, unsubscribePush, releaseSlot } = this.attachRelayStream(core, bus, remoteDeps);
 
     let stopped = false;
     return {
@@ -838,15 +833,9 @@ export class ProjectCore {
         this.relayRegistered = false;
         try { unsubscribePush(); } catch {}
         try { handle.detach(); } catch {}
-        // After the detach: the slot is gone, so `sendToAppSession` must go
-        // back to refusing rather than reporting a send onto a dead stream.
-        // Identity-checked for the same reason the host guards `e?.promotion
-        // === handle`: a re-promote owns the slot after this one was torn down,
-        // and clearing it blind would mute a stream that is live.
-        if (this.streamHandle === handle) {
-          this.streamHandle = null;
-          this.promotedRemote = null;
-        }
+        // After the detach, so `sendToAppSession` goes back to refusing rather
+        // than reporting a send onto a dead stream.
+        releaseSlot();
         try { core.setPlainHook(null); } catch {}
         try { core.setPeerSessionProvider(null); } catch {}
       },
@@ -856,7 +845,7 @@ export class ProjectCore {
   /** Tear down transport + subsystems. */
   async shutdown(reason?: string): Promise<void> {
     try { this.promotion?.stop(); } catch {}
-    if (this.deps.mode === "remote" && this.streamHandle) {
+    if (this.deps.mode === "remote" && this.slot) {
       // Publish over the bus so the disconnecting notice rides this core's stream.
       // Best-effort: a notice still queued in the relay client when the socket
       // closes is dropped, and the phone learns of the shutdown by liveness.
@@ -874,7 +863,10 @@ export class ProjectCore {
     try { await this.core?.shutdown(); } catch {}
     try { this.deliveries?.dispose(); } catch {}
     try { await this.listener?.stop(); } catch {}
-    try { this.streamHandle?.detach(); } catch {}
+    try { this.slot?.handle.detach(); } catch {}
+    // Match promote().stop(): a detached handle left in the slot would have
+    // `sendToAppSession` still answering true onto a dead stream.
+    this.slot = null;
     // AFTER the detach, the order promote().stop() keeps: the core latches
     // itself relay-attached for life, so a frame the still-attached stream
     // admits while the lookup is already gone is refused
