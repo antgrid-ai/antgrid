@@ -775,11 +775,23 @@ export class ProjectCore {
     remote: ProjectCoreRemoteDeps,
   ): { handle: StreamHandle; detach: () => void } {
     const { handle, unsubscribePush } = this.attachRelayStream(core, bus, remote);
+    // Same slot bookkeeping `promote` does, for the same reason: this is the
+    // core's only relay stream, and `sendToAppSession` cannot find it any other
+    // way. Leaving it unset makes a session-bus exchange arrive and be
+    // unanswerable — held, retried against the null, expired six hours later.
+    this.streamHandle = handle;
+    this.promotedRemote = remote;
     return {
       handle,
       detach: () => {
         try { unsubscribePush(); } catch { /* best-effort */ }
         try { handle.detach(); } catch { /* best-effort */ }
+        // Identity-checked: a re-attach owns the slot once this one is gone, and
+        // clearing it blind would mute a stream that is live.
+        if (this.streamHandle === handle) {
+          this.streamHandle = null;
+          this.promotedRemote = null;
+        }
         try { core.setPlainHook(null); } catch { /* best-effort */ }
         try { core.setPeerSessionProvider(null); } catch { /* best-effort */ }
       },
@@ -828,8 +840,13 @@ export class ProjectCore {
         try { handle.detach(); } catch {}
         // After the detach: the slot is gone, so `sendToAppSession` must go
         // back to refusing rather than reporting a send onto a dead stream.
-        this.streamHandle = null;
-        this.promotedRemote = null;
+        // Identity-checked for the same reason the host guards `e?.promotion
+        // === handle`: a re-promote owns the slot after this one was torn down,
+        // and clearing it blind would mute a stream that is live.
+        if (this.streamHandle === handle) {
+          this.streamHandle = null;
+          this.promotedRemote = null;
+        }
         try { core.setPlainHook(null); } catch {}
         try { core.setPeerSessionProvider(null); } catch {}
       },
