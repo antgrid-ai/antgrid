@@ -18,6 +18,7 @@ import { resolveApprovalPolicy } from "./agent-runtime";
 // triple) right below.
 import type { AgentSpec as RegistryAgentSpec } from "antgrid-agents/contracts";
 import type { ApprovalPolicy, TerminalObservationAvailability } from "antgrid-agents/contracts";
+import { NO_OBSERVATION } from "antgrid-agents/launch-inject";
 import { stripAnsi } from "./handler/context";
 import { agentSessionGone, resumeArgv, sessionResumable } from "./agent-resume";
 import { isChatCapableTool } from "./agent-runtime";
@@ -499,7 +500,17 @@ export class SessionManager {
   private terminalControllers = new Map<string, AbortController>();
   private terminalCleanup = new Map<string, Promise<void>>();
   private terminalDisposers = new Map<string, () => void | Promise<void>>();
+  /** What the LAUNCH declared this terminal could observe. Held as the launch
+   *  gave it and never overwritten, because recomputing it from the spec would
+   *  be a different answer: the launch's own injection outcome is folded in
+   *  there and cannot be derived again afterwards. What the terminal can observe
+   *  RIGHT NOW is this plus {@link blindedTerminals}, never a second copy — two
+   *  maps to keep in lockstep is how a restore silently puts back the wrong
+   *  answer. */
   private terminalObservations = new Map<string, TerminalObservationAvailability>();
+  /** Terminals whose injected hooks have been written off
+   *  ({@link invalidateHookObservation}) and not yet vindicated by a ping. */
+  private blindedTerminals = new Set<string>();
   private handlerAvailabilities = new Map<string, HandlerAvailability>();
 
   handlerAvailability(id: string): HandlerAvailability {
@@ -516,16 +527,32 @@ export class SessionManager {
   }
 
   terminalObservation(id: string): TerminalObservationAvailability | undefined {
+    if (this.blindedTerminals.has(id)) return NO_OBSERVATION;
     return this.terminalObservations.get(id);
   }
 
   invalidateHookObservation(id: string, reason = "Agent integration needs to restart"): void {
     if (!this.entries.has(id)) return;
     this.handlerAvailabilities.set(id, { state: "unavailable", reason });
-    this.terminalObservations.set(id, {
-      notifications: false, titles: false, handler: false,
-      turnStart: false, turnEnd: false, hookAlive: false,
-    });
+    this.blindedTerminals.add(id);
+    this.changed();
+  }
+
+  /** The hooks checked in after {@link invalidateHookObservation} wrote them
+   *  off — put the launch's own observation back.
+   *
+   *  The invalidation is a GUESS about a channel that had not spoken yet; a
+   *  `/hook-alive` ping is proof it works. Without this the guess was permanent:
+   *  nothing else ever re-reads the launch's answer, so a session marked blind
+   *  stayed blind — no structured titles, no plugin notifications, Handler
+   *  reported unavailable — for as long as it ran. Handler availability is not
+   *  restored here; `confirmHookRun` owns it and the same ping calls it. */
+  restoreHookObservation(id: string): void {
+    // A launch that declared nothing has nothing to put back, and the ping
+    // cannot invent one — the terminal stays written off, as it did before
+    // anything reconsidered an invalidation at all.
+    if (!this.terminalObservations.has(id) || !this.entries.has(id)) return;
+    if (!this.blindedTerminals.delete(id)) return;
     this.changed();
   }
 
@@ -533,6 +560,7 @@ export class SessionManager {
     this.terminalControllers.get(id)?.abort();
     this.terminalControllers.delete(id);
     this.terminalObservations.delete(id);
+    this.blindedTerminals.delete(id);
     this.terminalRunIds.delete(id);
     this.handlerAvailabilities.delete(id);
     const dispose = this.terminalDisposers.get(id);
@@ -2161,6 +2189,9 @@ export class SessionManager {
       }
       this.noteConversationStart(entry, launch.resumed);
       const notificationsInjected = launch.observation ?? launch.notificationsInjected;
+      // A fresh launch is not bound by the last one's verdict — the previous
+      // session's hooks being written off says nothing about this one's.
+      this.blindedTerminals.delete(id);
       if (launch.observation) this.terminalObservations.set(id, launch.observation);
       this.handlerAvailabilities.set(id, launch.observation?.handler === false
         ? { state: "unavailable", reason: "Agent monitoring was not installed" }

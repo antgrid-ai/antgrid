@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { answerRequest, attentionEdges, becameDeliverable, busDeliverable, clientFocusState, clientGone, closeTurn, initialWorkStatus, isStaleIdleNudge, openedTurns, reduceWorkStatus, sessionFocus, turnOpenFor, turnStart, UNATTRIBUTED_TURN, userReply, type WorkStatusState } from "../src/work-status";
+import { answerRequest, attentionEdges, becameDeliverable, busDeliverable, clientFocusState, clientGone, closeTurn, hookTurnEnd, initialWorkStatus, isStaleIdleNudge, noteHookChannelLost, noteHookChannelRestored, openedTurns, reduceWorkStatus, sessionFocus, turnOpenFor, turnStart, UNATTRIBUTED_TURN, userReply, type WorkStatusState } from "../src/work-status";
 import type { InboundSource } from "../src/message-bus";
 
 /** The two client classes the read state distinguishes: the phone reaches a core
@@ -739,6 +739,87 @@ test("a session's own tool still overrides the project default", () => {
   // though the project default would have put it in.
   const s = fold([hello, sessions(1, { tool: "claude-code" })]);
   expect(s.keystrokeTurnSessions.has("r0")).toBe(false);
+});
+
+// ── The second turn-end channel, and losing both ─────────────────────────────
+
+const submitInto = (s: WorkStatusState, id = "r0") =>
+  userReply(s, id, { typed: true, submitted: true });
+
+test("a hook turn-end closes an inferred turn on its own", () => {
+  // codex fires its `notify` argv and its Stop hook independently, so a session
+  // that reaches only one of them must still leave "working". With one closer,
+  // an enter that dismissed a TUI menu opened a turn nothing could ever close.
+  const working = submitInto(fold([sessions(1, { tool: "codex" })]));
+  expect(working.status).toBe("working");
+  expect(hookTurnEnd(working, "r0").status).toBe("done");
+});
+
+test("a hook turn-end leaves the notifications map alone", () => {
+  // It arrives AFTER the paired task_complete (measured: codex posts /notify,
+  // then /handler-event ~0.4s later). Clearing it would erase the only record
+  // isStaleIdleNudge reads, and every post-completion nudge would then be
+  // forwarded to the Handler as a live block. closeTurn — the Esc path — does
+  // clear it, which is why this is not that.
+  const ended = reduceWorkStatus(
+    submitInto(fold([sessions(1, { tool: "codex" })])),
+    push("task_complete", "r0"),
+  );
+  const after = hookTurnEnd(ended, "r0");
+  expect(isStaleIdleNudge(after, "r0")).toBe(true);
+  expect(closeTurn(ended, "r0").notifications.has("r0")).toBe(false);
+});
+
+test("a hook turn-end with nothing open is a no-op (SAME object)", () => {
+  const idle = fold([sessions(1, { tool: "codex" })]);
+  expect(hookTurnEnd(idle, "r0")).toBe(idle);
+});
+
+test("a session whose hook channel died stops inferring turn starts", () => {
+  // The set is recomputed from the agent's STATIC spec on every session list, so
+  // without a durable mark the bridge kept inferring starts for a session whose
+  // only closer it had just written off.
+  const live = fold([sessions(1, { tool: "codex" })]);
+  const dead = noteHookChannelLost(live, "r0");
+  expect(dead.keystrokeTurnSessions.has("r0")).toBe(false);
+  expect(submitInto(dead).status).toBe("done");
+  // ...and the mark survives the next session list, which is where the spec
+  // would otherwise put it straight back.
+  const relisted = reduceWorkStatus(dead, sessions(1, { tool: "codex" }));
+  expect(relisted.keystrokeTurnSessions.has("r0")).toBe(false);
+});
+
+test("losing the hook channel closes the turn that channel was going to close", () => {
+  const working = submitInto(fold([sessions(1, { tool: "codex" })]));
+  expect(noteHookChannelLost(working, "r0").status).toBe("done");
+});
+
+test("losing the hook channel does NOT close a turn the agent announced itself", () => {
+  // Only a keystroke-inferred turn was opened on the strength of the dead
+  // channel. Claude's is a real /turn-start, and calling that work finished on
+  // the word of a probe would be the bridge inventing an end.
+  const working = fold([sessions(1, { tool: "claude-code" }), turnStartFrame("r0")]);
+  expect(working.status).toBe("working");
+  expect(noteHookChannelLost(working, "r0").status).toBe("working");
+});
+
+test("a hook-alive ping after the fact restores the inference", () => {
+  const dead = noteHookChannelLost(fold([sessions(1, { tool: "codex" })]), "r0");
+  const back = noteHookChannelRestored(dead, "r0");
+  // Not reinstated here — the state keeps no per-session tool to reinstate it
+  // from. The session list that follows the restore is what recomputes it.
+  const relisted = reduceWorkStatus(back, sessions(1, { tool: "codex" }));
+  expect(relisted.keystrokeTurnSessions.has("r0")).toBe(true);
+  expect(submitInto(relisted).status).toBe("working");
+});
+
+test("hook channel marks are pure and pruned with their session", () => {
+  const live = fold([sessions(1, { tool: "codex" })]);
+  expect(noteHookChannelRestored(live, "r0")).toBe(live);
+  const dead = noteHookChannelLost(live, "r0");
+  expect(noteHookChannelLost(dead, "r0")).toBe(dead);
+  // Nothing keyed by a session may outlive it.
+  expect(reduceWorkStatus(dead, sessions(0)).deadHookSessions.size).toBe(0);
 });
 
 // ── Notification attribution ────────────────────────────────────────────────

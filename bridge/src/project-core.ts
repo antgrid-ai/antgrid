@@ -6,7 +6,7 @@ import { createRelayPromotion, type RelayPromotionController, type RelayPromotio
 import type { AttachStreamOpts, PeerSessionView, StreamHandle } from "./stream-mux";
 import { createMessage, type AbMessage, type SessionEntry, type WorkStatus } from "./protocol";
 import type { DeleteSessionOptions } from "./session-manager";
-import { answerRequest, becameDeliverable, busDeliverable, clientFocusState, clientGone, closeTurn, initialWorkStatus, isStaleIdleNudge, openedTurns, reduceWorkStatus, sessionFocus, turnStart, UNATTRIBUTED_TURN, userReply, type WorkStatusState } from "./work-status";
+import { answerRequest, becameDeliverable, busDeliverable, clientFocusState, clientGone, closeTurn, hookTurnEnd, initialWorkStatus, isStaleIdleNudge, noteHookChannelLost, noteHookChannelRestored, openedTurns, reduceWorkStatus, sessionFocus, turnStart, UNATTRIBUTED_TURN, userReply, type WorkStatusState } from "./work-status";
 import { SessionBusDeliveryQueue, type QueuedLine } from "./session-bus/delivery-queue";
 import { logger } from "./logger";
 const log = logger.child({ component: "project-core" });
@@ -341,6 +341,25 @@ export class ProjectCore {
     this.commitWork(closeTurn(this._work, sessionId));
   }
 
+  /** An injected hook reported [sessionId]'s turn as over on a channel that
+   *  files no notification of its own — the backstop for the single turn-end
+   *  notification a terminal session otherwise depends on. See
+   *  {@link hookTurnEnd}. */
+  noteHookTurnEnd(sessionId: string): void {
+    this.commitWork(hookTurnEnd(this._work, sessionId));
+  }
+
+  /** [sessionId]'s injected hooks have been written off, so nothing is left to
+   *  close a turn inferred from a keystroke. See {@link noteHookChannelLost}. */
+  noteHookChannelLost(sessionId: string): void {
+    this.commitWork(noteHookChannelLost(this._work, sessionId));
+  }
+
+  /** ...and they answered after all. See {@link noteHookChannelRestored}. */
+  noteHookChannelRestored(sessionId: string): void {
+    this.commitWork(noteHookChannelRestored(this._work, sessionId));
+  }
+
   /** First register outcome of a REMOTE-mode core's primary relay slot (null in
    *  local mode, or before start()). Lets the host gate the phone-facing
    *  `running:true` advert on a real register and surface a terminal rejection
@@ -403,6 +422,9 @@ export class ProjectCore {
       onUserReply: (sessionId, replyOpts) => this.noteUserReply(sessionId, replyOpts),
       onAnswer: (sessionId, requestId) => this.noteAnswer(sessionId, requestId),
       onInterrupt: (sessionId) => this.noteInterrupt(sessionId),
+      onHookTurnEnd: (sessionId) => this.noteHookTurnEnd(sessionId),
+      onHookChannelLost: (sessionId) => this.noteHookChannelLost(sessionId),
+      onHookChannelRestored: (sessionId) => this.noteHookChannelRestored(sessionId),
       onSessionFocus: (sessionId, client) => this.noteSessionFocus(sessionId, client),
       onClientFocusState: (paused, client) => this.noteClientFocusState(paused, client),
       // The single source of per-session work status: SessionManager stamps it
