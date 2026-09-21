@@ -97,7 +97,7 @@ export function Layout({ title, user, section, children }: LayoutProps) {
               <Mark />
               <Wordmark />
               {BETA && (
-                <span class="rounded-full bg-signalbtn px-1.5 py-px text-[0.59375rem] font-medium text-page">
+                <span class="rounded-full bg-signalbtn px-1.5 py-px text-[0.59375rem] font-medium text-signalink">
                   beta
                 </span>
               )}
@@ -185,7 +185,7 @@ function AccountMenu({ user }: { user: LayoutUser }) {
         </span>
         <ChevronIcon />
       </summary>
-      <div class="absolute right-0 top-full z-20 mt-2 w-64 overflow-hidden rounded-box border border-edge bg-panel shadow-lg shadow-black/40">
+      <div class="absolute right-0 top-full z-20 mt-2 w-64 overflow-hidden rounded-box border border-edge bg-panel shadow-menu">
         <div class="border-b border-edge-inner px-3.5 py-2.5">
           <div class="text-[0.6875rem] font-medium uppercase tracking-[0.12em] text-muted2">
             Signed in as
