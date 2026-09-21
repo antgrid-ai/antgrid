@@ -20,7 +20,7 @@ import { setLogLevel } from "../src/logger";
 import { createMessage, type AbMessage, type SessionEntry, type SessionMemberRef } from "../src/protocol";
 import { SessionBusCoordinator } from "../src/session-bus/coordinator";
 import { SessionBusSessionIndex } from "../src/session-bus/session-index";
-import type { PeerSessionView } from "../src/stream-mux";
+import { peerView } from "./relay-stubs";
 
 setLogLevel("error");
 
@@ -180,8 +180,8 @@ test("agent-reach:get reports what the machine actually holds", async () => {
 
 const REMOTE: SessionMemberRef = { machineId: "m-remote", projectId: "p-remote", sessionId: "s-remote" };
 
-function peerSession(): PeerSessionView {
-  return { peerId: "app-1", peerPubkey: "pub", checkoutRouting: true, reachable: true, pullsTree: true };
+function peerSession() {
+  return peerView({ peerId: "app-1" });
 }
 
 async function waitFor(predicate: () => boolean, what: string, timeoutMs = 20_000): Promise<void> {
