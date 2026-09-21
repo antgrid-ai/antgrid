@@ -741,12 +741,10 @@ class MachineSession {
     // of which are gated on a live session.
     _established = false;
     _stopLiveness();
-    // An attempt still running here is talking over the socket that just died:
-    // its `established` can never arrive, and left alone it runs to its full
-    // timeout while the supervisor's re-drive on the NEW socket joins it
-    // instead of starting fresh (`_runHandshake` publishes one attempt at a
-    // time). Ending it now is what lets the replacement socket handshake the
-    // moment it authenticates.
+    // An attempt still running was talking over the socket that just died.
+    // Left alone it runs to its timeout, and the supervisor's re-drive on the
+    // NEW socket joins it (`_runHandshake` is single-flight) instead of
+    // starting fresh.
     _handshaker.cancelInFlight();
     _scheduler.hold = false;
     _keys?.zeroize();
@@ -813,14 +811,10 @@ class MachineSession {
   Future<void> _handshakeAttempt() async {
     final wasEstablished = _established;
     final startedAt = DateTime.now();
-    // A rekey holds the outbound queue for its duration. The agent may already
-    // have destroyed the keys this side still holds — its own socket redial
-    // zeroizes every session before the relay can even report it back online —
-    // so anything sealed under them from here on is undecryptable at the far
-    // end and silently lost, while the sender is told it went out. Held frames
-    // seal under the NEW keys the moment they land (`kick` below); the cost is
-    // one handshake's latency on traffic that would otherwise have vanished.
-    // The initial handshake holds nothing: with no keys there is no queue.
+    // A rekey holds the outbound queue: the agent's own socket redial zeroizes
+    // every session before the relay can report it back online, so anything
+    // sealed under the keys this side still holds is lost silently at the far
+    // end. Held frames seal under the new keys once they land (`kick` below).
     if (wasEstablished) _scheduler.hold = true;
     final newKeys = await _handshaker.perform();
     if (_disposed) {
@@ -834,21 +828,14 @@ class MachineSession {
       // the old keys after a failed attempt preserves a session the peer has
       // most likely already dropped — and, with `_established` still true,
       // leaves nothing able to notice.
+      // The initial-attempt failure is the supervisor's to report; this is
+      // the one transition nothing above this layer sees, and it is what
+      // turns every later send into a "send dropped". Not logged when the
+      // socket died under the attempt: `_teardownSession` already ran.
       if (wasEstablished && _established) {
-        // The initial-attempt failure is the supervisor's to report; this is
-        // the one transition nothing above this layer sees, and it is what
-        // turns every later send into a "send dropped".
         _log(
           RelayLogLevel.warn,
           'E2E session torn down — rekey attempt failed',
-          fields: {'elapsedMs': elapsedMs},
-        );
-      } else if (wasEstablished) {
-        // `_teardownSession` already ran under this attempt (the socket
-        // dropped) and cancelled it; the teardown is the event, not this.
-        _log(
-          RelayLogLevel.info,
-          'E2E rekey abandoned — session torn down mid-attempt',
           fields: {'elapsedMs': elapsedMs},
         );
       }
@@ -1527,16 +1514,11 @@ class MachineSession {
     final keys = _keys;
     final type = obj['type'] as String?;
     if (keys != null && _handshakeInFlight) {
-      // Same hold as the app queue during a rekey (see `_handshakeAttempt`),
-      // for the same reason: these seal directly under the live keys and never
-      // pass through the scheduler, so the queue hold alone leaves pong and
-      // credit going out under keys the agent may already have destroyed.
-      // Skipped rather than queued — a stale credit is meaningless against the
-      // session the establishment resets, and the agent's liveness tolerates
-      // it: it declares a session dead after two unanswered pings 20 s apart
-      // (`PING_SILENCE_MS`/`MAX_MISSED_PONGS` in bridge/src/relay-client.ts),
-      // and an attempt is bounded by a 10 s timeout, so at most one pong is
-      // ever missed this way.
+      // Same hold as the app queue during a rekey (see `_handshakeAttempt`):
+      // these bypass the scheduler. Skipped, not queued — a credit is
+      // meaningless against the session the establishment resets, and the
+      // agent kills a session only after two unanswered pings 20 s apart
+      // (bridge/src/relay-client.ts), so a 10 s attempt costs at most one pong.
       _dropped('tx', 'rekey-in-flight', channel: 'control', msgType: type);
       return;
     }

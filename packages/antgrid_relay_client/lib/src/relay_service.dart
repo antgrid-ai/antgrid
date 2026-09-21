@@ -90,28 +90,17 @@ class RelayService {
   Timer? _connectTimeout;
   Duration _connectTimeoutDuration = const Duration(seconds: 15);
 
-  /// The heartbeat has three durations, and they are deliberately not one:
-  /// the tick is how often the socket is looked at, the silence is how long
-  /// without inbound before a probe goes out, and the timeout is how long an
-  /// unanswered probe is tolerated. With one shared period the probe was only
-  /// ever checked at the next tick, so the same dead socket took either one or
-  /// two periods to notice depending on where in the period it died — measured
-  /// as 25 s or 50 s on the same day, for the same fault.
-  ///
-  /// A stalled socket here is silent in ONE direction: this side's frames keep
-  /// reaching the relay (the relay logs the eventual close within a second) and
-  /// nothing comes back, so the relay's own liveness — refreshed by exactly the
-  /// pings this side keeps sending — never reaps it. Detection is this side's
-  /// alone, which is why the probe timeout is short: the relay answers a ping
-  /// in milliseconds, and a socket that has not in 10 s is not going to.
-  Duration _heartbeatTick = const Duration(seconds: 10);
-  Duration _heartbeatSilence = const Duration(seconds: 10);
-  Duration _heartbeatTimeout = const Duration(seconds: 10);
-  Timer? _heartbeatTimer;
+  /// Inbound silence before a probe goes out, and the tick that looks for it.
+  Duration _heartbeatInterval = const Duration(seconds: 10);
 
-  /// Armed per probe, so the timeout fires at [_heartbeatTimeout] after the
-  /// probe went out rather than at whatever tick comes after that. The
-  /// periodic tick still re-checks the age, for a timer the OS froze.
+  /// How long an unanswered probe is tolerated. Its own timer, not the next
+  /// tick: checked only at ticks, the same dead socket took one or two periods
+  /// to notice depending on where in the period it died. A stalled socket here
+  /// is silent in ONE direction — this side's pings still reach the relay and
+  /// keep refreshing the relay's liveness — so detection is this side's alone,
+  /// and the relay answers a ping in milliseconds.
+  Duration _probeTimeout = const Duration(seconds: 10);
+  Timer? _heartbeatTimer;
   Timer? _probeTimeoutTimer;
   DateTime? _socketOpenedAt;
 
@@ -425,23 +414,9 @@ class RelayService {
       _connectTimeoutDuration = timeout;
 
   /// Test-only seam: shorten the heartbeat without changing production timing.
-  /// One duration for tick, silence and timeout alike.
-  void debugSetHeartbeatInterval(Duration interval) =>
-      debugSetHeartbeatTiming(
-        tick: interval,
-        silence: interval,
-        timeout: interval,
-      );
-
-  /// Test-only seam: set the three heartbeat durations independently.
-  void debugSetHeartbeatTiming({
-    Duration? tick,
-    Duration? silence,
-    Duration? timeout,
-  }) {
-    if (tick != null) _heartbeatTick = tick;
-    if (silence != null) _heartbeatSilence = silence;
-    if (timeout != null) _heartbeatTimeout = timeout;
+  void debugSetHeartbeatInterval(Duration interval, {Duration? probeTimeout}) {
+    _heartbeatInterval = interval;
+    _probeTimeout = probeTimeout ?? interval;
   }
 
   /// Test-only seam: model an OS-frozen periodic timer before a resume event.
@@ -958,9 +933,7 @@ class RelayService {
     if (_currentState.connectionState != RelayConnectionState.authenticated) {
       return;
     }
-    // Re-aligned only when a probe went out: a fresh socket keeps its tick, and
-    // a closed one must not get a new timer nothing cancels until the next dial.
-    if (_heartbeatCheck(DateTime.now().toUtc())) _scheduleHeartbeat();
+    _heartbeatCheck(DateTime.now().toUtc());
   }
 
   void _startHeartbeat() {
@@ -971,7 +944,7 @@ class RelayService {
 
   void _scheduleHeartbeat() {
     _heartbeatTimer?.cancel();
-    _heartbeatTimer = Timer.periodic(_heartbeatTick, (_) {
+    _heartbeatTimer = Timer.periodic(_heartbeatInterval, (_) {
       if (_currentState.connectionState != RelayConnectionState.authenticated) {
         return;
       }
@@ -979,33 +952,24 @@ class RelayService {
     });
   }
 
-  /// One look at the socket: an outstanding probe past its timeout closes it,
-  /// an outstanding probe within it is left alone, and silence past
-  /// [_heartbeatSilence] sends one. Returns whether a probe was sent.
-  bool _heartbeatCheck(DateTime now) {
-    final probe = _probeSentAt;
-    if (probe != null) {
-      if (now.difference(probe) >= _heartbeatTimeout) {
-        _closeForHeartbeatTimeout(now);
-      }
-      return false;
-    }
+  /// Sends a probe after [_heartbeatInterval] of inbound silence; an
+  /// outstanding probe is left to its own timer.
+  void _heartbeatCheck(DateTime now) {
+    if (_probeSentAt != null) return;
     final inbound = _lastInboundAt;
-    if (inbound != null && now.difference(inbound) < _heartbeatSilence) {
-      return false;
-    }
+    if (inbound != null && now.difference(inbound) < _heartbeatInterval) return;
     _sendHeartbeatProbe(now);
-    return true;
   }
 
   void _sendHeartbeatProbe(DateTime now) {
     _probeSentAt = now;
     _probeTimeoutTimer?.cancel();
-    _probeTimeoutTimer = Timer(_heartbeatTimeout, () {
-      if (_currentState.connectionState != RelayConnectionState.authenticated) {
+    _probeTimeoutTimer = Timer(_probeTimeout, () {
+      if (_probeSentAt == null ||
+          _currentState.connectionState != RelayConnectionState.authenticated) {
         return;
       }
-      _heartbeatCheck(DateTime.now().toUtc());
+      _closeForHeartbeatTimeout(DateTime.now().toUtc());
     });
     _log(
       RelayLogLevel.debug,

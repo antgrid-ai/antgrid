@@ -146,19 +146,17 @@ void main() {
     'an unanswered probe closes the socket after the probe timeout, '
     'not at the next tick',
     () async {
-      // A tick far longer than the timeout: if the close still waited for a
-      // tick, it would land seconds late — the 25 s-or-50 s jitter the three
-      // durations exist to remove.
-      relay.debugSetHeartbeatTiming(
-        tick: const Duration(seconds: 5),
-        silence: const Duration(milliseconds: 20),
-        timeout: const Duration(milliseconds: 60),
+      // The tick is paused, so only the probe's own timer can close the socket.
+      relay.debugSetHeartbeatInterval(
+        const Duration(milliseconds: 100),
+        probeTimeout: const Duration(milliseconds: 60),
       );
       final attempt = await dial();
       attempt.connection.sendJson(_welcome());
       await attempt.connect;
+      relay.debugPauseHeartbeat();
 
-      await Future<void>.delayed(const Duration(milliseconds: 30));
+      await Future<void>.delayed(const Duration(milliseconds: 110));
       relay.onResume();
       expect(await attempt.connection.nextJson(), {'type': 'ping'});
       final elapsed = Stopwatch()..start();

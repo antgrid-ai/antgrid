@@ -85,11 +85,8 @@ class ConnectionHandshake {
   StreamSubscription<IncomingRouteMessage>? _messageSub;
   Timer? _appReadyTimer;
 
-  /// The attempt's own completion, held so [cancel] can end the wait for
-  /// `established` now rather than letting it run to [_attemptTimeout]: the
-  /// socket this attempt was talking over is usually already gone, and every
-  /// second spent waiting on it is a second the supervisor cannot spend on the
-  /// replacement.
+  /// Held so [cancel] ends the wait for `established` now rather than at
+  /// [_attemptTimeout]: the socket this attempt used is usually already gone.
   Completer<SessionKeys>? _established;
 
   void cancel() {
@@ -100,7 +97,7 @@ class ConnectionHandshake {
     _appReadyTimer = null;
     final established = _established;
     if (established != null && !established.isCompleted) {
-      established.completeError(const _HandshakeCancelled());
+      established.completeError(StateError('cancelled'));
     }
   }
 
@@ -118,17 +115,12 @@ class ConnectionHandshake {
     var phoneX25519PrivScrubbed = false;
     final phoneX25519PubB64 = base64.encode(phoneX25519Pub);
     final established = _established = Completer<SessionKeys>();
-    // The error a cancel completes it with lands in the await below; without
-    // this a cancel that races the caller's own await would be reported as an
-    // unhandled error out of a future nobody is listening to any more.
+    // A cancel before the await below is reached would otherwise surface as an
+    // unhandled error.
     established.future.ignore();
     SessionKeys? derivedKeys;
     Future<SessionKeys?>? keysFuture;
     var appReadySent = false;
-    // Set only where the keys are returned to the caller, which takes
-    // ownership. Every other exit — timeout, cancel, a cancel that landed after
-    // `established` completed — leaves the derived keys here to be zeroized.
-    var handedOff = false;
     // How far the conversation got, for the timeout line: a bridge that never
     // answers the client-hello and one that drops our app:ready both surface
     // as the same null return, and only the phase tells them apart.
@@ -278,12 +270,7 @@ class ConnectionHandshake {
 
       final keys = await established.future.timeout(_attemptTimeout);
       if (_cancelled) return null;
-      handedOff = true;
       return keys;
-    } on _HandshakeCancelled {
-      // Not a failure of the conversation: the session that owned this attempt
-      // was torn down under it, and it is what logs that.
-      return null;
     } on TimeoutException {
       if (!_cancelled) {
         _log(
@@ -302,6 +289,8 @@ class ConnectionHandshake {
       }
       return null;
     } catch (e, st) {
+      // A cancel is the session's event to log, not a failure of this attempt.
+      if (_cancelled) return null;
       _log(
         HandshakeLogLevel.error,
         'run error',
@@ -319,8 +308,9 @@ class ConnectionHandshake {
       if (keysFuture == null && !phoneX25519PrivScrubbed) {
         phoneX25519Priv.fillRange(0, phoneX25519Priv.length, 0);
       }
-      // Zeroize the derived keys unless the caller (MachineSession) took them.
-      if (!handedOff) derivedKeys?.zeroize();
+      // Zeroize the derived keys unless the caller (MachineSession) took them:
+      // only the uncancelled, completed path above returns them.
+      if (_cancelled || !established.isCompleted) derivedKeys?.zeroize();
     }
   }
 
@@ -448,9 +438,4 @@ class AppSessionHandshaker implements SessionHandshaker {
     _current?.cancel();
     _current = null;
   }
-}
-
-/// Completes an attempt's `established` wait from [ConnectionHandshake.cancel].
-class _HandshakeCancelled implements Exception {
-  const _HandshakeCancelled();
 }

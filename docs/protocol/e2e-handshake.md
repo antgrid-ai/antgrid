@@ -328,15 +328,13 @@ timeouts while established, or peer-online following a peer-offline. Owned by
 
 The phone **sends nothing under the old keys while its rekey is in flight**: the
 app queue is held and ping/pong/credit are skipped until `established`. The
-usual trigger is the agent's own socket redial (peer-offline → peer-online),
-and a redial ends every session on the agent before the relay can report the
-new socket, so the old keys are in general already gone at the far end; a frame
-sealed under them is a silent loss reported to its sender as sent. The agent
-covers the frames the phone sealed *before* it learned of the redial: a redial
-retires each dropped session's keys receive-only for `RETIRED_KEYS_MS` (§8.6)
-and tries them last in `handleSealedFrame`, routing app traffic and dropping
-session frames (a credit or pong against a window the redial discarded). Only a
-redial retires — a takeover or liveness death still zeroizes at once.
+usual trigger is the agent's own socket redial, which ends every session on the
+agent before the relay can report the new socket, so a frame sealed under the
+old keys is a silent loss reported to its sender as sent. For the frames the
+phone sealed *before* it learned of the redial, the agent retires each dropped
+session's keys receive-only for `RETIRED_KEYS_MS` (§8.6) and tries them last:
+app traffic is routed, session frames are dropped. Only a redial retires; a
+takeover or liveness death still zeroizes at once.
 
 ### 8.4 Rekey and capacity
 

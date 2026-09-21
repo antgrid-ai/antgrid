@@ -102,16 +102,13 @@ const MAX_BACKOFF = 30_000;
 /** A half-open handshake attempt (client-hello seen, app:ready never arrived)
  *  is discarded after this. Live sessions are unaffected. */
 const HALF_OPEN_MS = 30_000;
-/** How long a redial keeps each dropped session's keys, receive-only, after
- *  `resetE2eState`. The app does not learn of this side's redial until the
- *  relay reports the new socket online, and keeps its keys through the rekey
- *  that follows, so frames it sealed under them arrive here for a second or
- *  two after the new socket is up — measured at ~1 s past the new session's
- *  `established`. Zeroizing at the redial made every one of them a silent
- *  drop. The bound is the redial's own budget: first backoff plus dial plus
- *  the app's rekey is a few seconds; a redial that takes longer than this has
- *  had the relay report the app's frames undeliverable, which the app is told
- *  about. Keys past it are dead weight. */
+/** How long a redial keeps each dropped session's keys receive-only. The app
+ *  learns of this side's redial only when the relay reports the new socket, and
+ *  keeps sealing under the old keys until its own rekey confirms — measured at
+ *  ~1 s past the new session's `established`. Zeroizing at the redial made
+ *  every one of those frames a silent drop. Backoff plus dial plus the app's
+ *  rekey is a few seconds; past this the relay has reported the app's frames
+ *  undeliverable and the keys are dead weight. */
 const RETIRED_KEYS_MS = 20_000;
 /** Send a sealed ping after this much sealed-receive silence. */
 const PING_SILENCE_MS = 20_000;
@@ -190,9 +187,8 @@ interface PendingAttempt {
 }
 
 /** A session's keys kept receive-only across this side's redial (see
- *  `RETIRED_KEYS_MS`). It owns no queue, no window and no reassembler: it exists
- *  to open the app frames still in flight under keys the redial retired, and
- *  nothing it opens is answered under them. */
+ *  `RETIRED_KEYS_MS`). No queue, window or reassembler: it only opens the app
+ *  frames still in flight, and nothing is answered under it. */
 interface RetiredSession {
   transport: E2eTransport;
   sessionKeys: SessionKeys;
@@ -1097,9 +1093,7 @@ export class RelayClient {
    * Each device keeps at most two receive contexts while its socket lives
    * (make-before-break): its established session, and its own in-flight rekey
    * candidate. Across THIS side's redial there is a third, tried last: the
-   * session the redial retired, for `RETIRED_KEYS_MS` — the app keeps sealing
-   * under those keys until its own rekey confirms, and a frame that opens under
-   * them is one it was told went out.
+   * session the redial retired, for `RETIRED_KEYS_MS`.
    */
   private handleSealedFrame(
     payload: Buffer,
@@ -1177,14 +1171,12 @@ export class RelayClient {
   }
 
   /** A frame the app sealed before it learned this side redialled. App traffic
-   *  is routed as it would have been a moment earlier; a session frame is not —
-   *  a credit or pong against a window and a liveness the redial already
-   *  discarded means nothing, and a ping answered under retired keys would be a
-   *  frame written under keys this side has agreed are gone. Nothing is
-   *  credited either: the app resets its windows at the establishment it is
-   *  already driving. A fragment is dropped for want of a reassembler; a
-   *  transfer straddling the redial is re-pulled after establishment like every
-   *  other snapshot. */
+   *  is routed as it would have been a moment earlier. Session frames are not:
+   *  the window and liveness they address died with the redial, and answering
+   *  a ping would mean sealing under keys this side has given up. Nothing is
+   *  credited either — the app resets its windows at the establishment it is
+   *  already driving. A fragment has no reassembler; the transfer is re-pulled
+   *  after establishment like any other snapshot. */
   private tryOpenRetired(
     old: RetiredSession,
     payload: Buffer,
@@ -2228,9 +2220,8 @@ export class RelayClient {
    *  every other session are untouched.
    *
    *  `retire` keeps the keys receive-only for `RETIRED_KEYS_MS` instead of
-   *  zeroizing them now. Only a redial passes it: a takeover or a liveness
-   *  death ends a session the app has itself abandoned or been evicted from,
-   *  and frames under those keys are ones that must not be routed. */
+   *  zeroizing now. Only a redial passes it: after a takeover or a liveness
+   *  death, frames under the old keys must not be routed. */
   private dropSession(peerId: string, retire = false): void {
     const session = this.sessions.get(peerId);
     if (!session) return;
@@ -2276,9 +2267,8 @@ export class RelayClient {
 
   /** Every session and candidate is gone (socket close / redial): the relay has
    *  forgotten our routes, so nothing sealed FOR them could be delivered. What
-   *  was sealed TO them can — the app learns of the redial only when the relay
-   *  reports the new socket, and keeps sending under the old keys until its own
-   *  rekey confirms — so each session's keys are retired, not zeroized. */
+   *  was sealed TO them still arrives (see `RETIRED_KEYS_MS`), so each
+   *  session's keys are retired, not zeroized. */
   private resetE2eState(): void {
     for (const peerId of [...this.sessions.keys()]) this.dropSession(peerId, true);
     for (const peerId of [...this.pending.keys()]) this.tearDownPending(peerId);
