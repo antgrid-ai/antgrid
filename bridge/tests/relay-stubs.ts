@@ -1,10 +1,6 @@
-// The relay-facing seams a ProjectCore is built on, stubbed: one established app
-// session, the host deps behind a stream, and the machine session the desktop
-// wizard attaches to. Shared for the reason `fake-session.ts` states — these
-// shapes are wide and every field is required, so a per-file copy compiles until
-// the interface gains a member and then goes stale in whichever file nobody
-// remembered. A caller that cares about one field passes it as an override and
-// inherits the rest.
+// The relay-facing seams a ProjectCore is built on, stubbed. Shared for the
+// reason `fake-session.ts` states: these shapes are wide, so a per-file copy
+// goes stale in whichever file nobody remembered to update.
 
 import type { MessageBus } from "../src/message-bus";
 import type { ProjectCoreRemoteDeps } from "../src/project-core";
@@ -37,9 +33,8 @@ export function fakeStreamHandle(over: Partial<StreamHandle> = {}): StreamHandle
   };
 }
 
-/** `attachStream` captures the bus + opts it was called with instead of
- *  reaching a live machine socket — the seam v3 uses in place of the deleted
- *  per-core `makeRelayClient`/RelayClientOptions hook. */
+/** `attachStream` captures the bus + opts instead of reaching a live machine
+ *  socket — the seam v3 uses in place of the deleted `makeRelayClient` hook. */
 export function fakeRemoteDeps(over: Partial<ProjectCoreRemoteDeps> = {}): {
   deps: ProjectCoreRemoteDeps;
   calls: Array<{ bus: MessageBus; opts: AttachStreamOpts }>;
@@ -61,9 +56,8 @@ export function fakeRemoteDeps(over: Partial<ProjectCoreRemoteDeps> = {}): {
   };
 }
 
-/** The host's half of the wizard promotion path. Same surface as
- *  {@link fakeRemoteDeps}'s deps but for `agentDeviceId`, which is where the
- *  two interfaces disagree on naming this machine. */
+/** The host's half of the wizard promotion path — {@link fakeRemoteDeps}'s
+ *  surface but for `agentDeviceId`, where the two interfaces disagree. */
 export function fakeMachineSession(over: Partial<MachineRelaySession> = {}): MachineRelaySession {
   return {
     attachStream: () => fakeStreamHandle(),

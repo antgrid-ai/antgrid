@@ -3340,10 +3340,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // where the Git view is opened deliberately, right after the agent stops.
   function scheduleGitRefresh(runtime: CheckoutRuntime) {
     // A watcher event queued before teardown still lands after it — deleting the
-    // tree is itself one — and the timer armed here outlives the shutdown drain,
-    // which has already snapshotted the pending set. It then spawns `git` with a
-    // cwd the caller may have removed the moment shutdown resolved. Same guard,
-    // and the same reason, as the one [refreshFocusedCheckout] takes.
+    // tree is itself one — and the timer it arms outlives the shutdown drain, then
+    // spawns `git` with a cwd the caller has removed.
     if (runtime.disposed) return;
     // Reset on the SIGNAL, not on the coalesced run: a checkout the watcher is
     // still firing on is a checkout under active work, and it must never drift
