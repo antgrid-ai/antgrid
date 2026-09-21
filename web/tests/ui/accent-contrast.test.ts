@@ -151,9 +151,10 @@ describe("Signal accent ramp", () => {
 
   // The override block used to be keyed on `[data-theme="dark"]`, which is
   // only present when a reader pinned a scheme: under the system default it
-  // never matched and daisyUI's own indigo showed through.
+  // never matched and daisyUI's own indigo showed through. Anchored to the
+  // line start so the `html[data-theme="dark"]` scheme pin stays allowed.
   test("the daisyUI override is not keyed on the override attribute", () => {
-    expect(css.web).not.toMatch(/\[data-theme="dark"\]\s*\{/);
+    expect(css.web).not.toMatch(/^\[data-theme="dark"\]\s*\{/m);
   });
 
   // The accent alone. Surfaces diverged on purpose (#149): the site is warm so

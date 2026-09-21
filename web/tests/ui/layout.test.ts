@@ -10,6 +10,27 @@ import { setSalesIqWidgetUrl } from "../../src/ui/salesiq.js";
 import { BETA } from "../../src/billing/plans.js";
 
 describe("Layout", () => {
+  test("theme-color metas are the two halves of --color-page", () => {
+    // Literals in the markup: the browser paints them before any CSS lands,
+    // so they cannot read the token and only this keeps them equal to it.
+    const css = readFileSync(resolve(import.meta.dir, "../../src/ui/styles.css"), "utf8");
+    const pair = css.match(
+      /--color-page:\s*light-dark\(\s*(#[0-9a-f]{6})\s*,\s*(#[0-9a-f]{6})\s*\)\s*;/,
+    );
+    expect(pair).not.toBeNull();
+    const html = Layout({ title: "Test", children: "x" }).toString();
+    const light = html.indexOf(
+      `<meta name="theme-color" media="(prefers-color-scheme: light)" content="${pair![1]}" data-scheme="light"`,
+    );
+    const dark = html.indexOf(
+      `<meta name="theme-color" media="(prefers-color-scheme: dark)" content="${pair![2]}" data-scheme="dark"`,
+    );
+    expect(light).toBeGreaterThan(-1);
+    expect(dark).toBeGreaterThan(-1);
+    // Chrome takes the first meta whose media matches, so light must lead.
+    expect(light).toBeLessThan(dark);
+  });
+
   test("renders the wordmark in the header", () => {
     const html = Layout({ title: "Test", children: "x" }).toString();
     // The brand must be surfaced visibly in the header, not only as a

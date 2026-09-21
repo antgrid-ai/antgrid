@@ -245,10 +245,19 @@
   }
 }
 
+/* The scheme follows the OS unless the override attribute pins it. This is
+   what resolves every light-dark() pair above, so it must stay unlayered and
+   on html: nothing above it in the tree can be asked. */
 html {
-  color-scheme: dark;
+  color-scheme: light dark;
   background-color: var(--color-page);
   scroll-behavior: smooth;
+}
+html[data-theme="light"] {
+  color-scheme: light;
+}
+html[data-theme="dark"] {
+  color-scheme: dark;
 }
 body {
   background-color: var(--color-page);
@@ -316,6 +325,16 @@ body {
     linear-gradient(to bottom, var(--color-gridline) 1px, transparent 1px);
   background-size: 960px 960px, 32px 32px, 32px 32px;
   mask-image: radial-gradient(130% 85% at 50% 8%, black 8%, transparent 72%);
+  /* The cells are baked into an SVG data URI, so they cannot take a
+     light-dark() fill the way the hairlines do; the same rects in ink instead
+     of white. Must be a scheme variant, not a media query: a reader who pinned
+     a scheme on the opposite OS setting would get the wrong cells. */
+  @variant light {
+    background-image:
+      url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='960' height='960'%3E%3Cg fill='rgba(0,0,0,0.05)'%3E%3Crect x='32' y='64' width='64' height='32'/%3E%3Crect x='256' y='32' width='32' height='32'/%3E%3Crect x='512' y='128' width='96' height='32'/%3E%3Crect x='800' y='64' width='32' height='32'/%3E%3Crect x='128' y='224' width='32' height='32'/%3E%3Crect x='416' y='256' width='64' height='32'/%3E%3Crect x='672' y='192' width='32' height='32'/%3E%3Crect x='896' y='288' width='64' height='32'/%3E%3Crect x='192' y='416' width='96' height='32'/%3E%3Crect x='544' y='480' width='32' height='32'/%3E%3Crect x='320' y='544' width='64' height='32'/%3E%3Crect x='736' y='512' width='96' height='32'/%3E%3Crect x='64' y='672' width='64' height='32'/%3E%3Crect x='448' y='704' width='32' height='32'/%3E%3Crect x='864' y='640' width='32' height='32'/%3E%3Crect x='224' y='800' width='64' height='32'/%3E%3Crect x='608' y='864' width='96' height='32'/%3E%3Crect x='384' y='928' width='32' height='32'/%3E%3C/g%3E%3Cg fill='rgba(0,0,0,0.09)'%3E%3Crect x='352' y='160' width='32' height='32'/%3E%3Crect x='704' y='352' width='64' height='32'/%3E%3Crect x='128' y='576' width='32' height='32'/%3E%3Crect x='832' y='736' width='64' height='32'/%3E%3Crect x='288' y='672' width='96' height='32'/%3E%3Crect x='576' y='256' width='32' height='32'/%3E%3Crect x='640' y='96' width='32' height='32'/%3E%3Crect x='96' y='320' width='64' height='32'/%3E%3Crect x='768' y='608' width='32' height='32'/%3E%3Crect x='416' y='832' width='64' height='32'/%3E%3C/g%3E%3C/svg%3E"),
+      linear-gradient(to right, var(--color-gridline) 1px, transparent 1px),
+      linear-gradient(to bottom, var(--color-gridline) 1px, transparent 1px);
+  }
 }
 
 /* The only motion in the hero background, and it is ambient rather than

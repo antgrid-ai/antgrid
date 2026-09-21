@@ -348,9 +348,18 @@ body:has(#zsiq_chat_wrap.chat-iframe-open) .support-launcher-icon-close {
   }
 }
 
+/* The scheme follows the OS unless the override attribute pins it. This is
+   what resolves every light-dark() pair above; unlayered so it outranks the
+   `color-scheme: dark` daisyUI puts on :root in @layer base. */
 html {
-  color-scheme: dark;
+  color-scheme: light dark;
   background-color: var(--color-page);
+}
+html[data-theme="light"] {
+  color-scheme: light;
+}
+html[data-theme="dark"] {
+  color-scheme: dark;
 }
 body {
   font-family: var(--font-sans);

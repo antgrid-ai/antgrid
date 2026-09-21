@@ -51,10 +51,13 @@ export function Layout({ title, user, section, children }: LayoutProps) {
       <head>
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
-        {/* --color-page. The browser paints this around and behind the document
-            before any CSS lands, so a value that is not the page's own is a
-            visible band on mobile. */}
-        <meta name="theme-color" content="#101015" />
+        {/* The two halves of --color-page in styles.css; tests/ui/layout.test.ts
+            holds them together. The browser paints this around and behind the
+            document before any CSS lands, so a value that is not the page's
+            own is a visible band on mobile. Light FIRST: Chrome takes the first
+            meta whose `media` matches. */}
+        <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f5f5f7" data-scheme="light" />
+        <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#101015" data-scheme="dark" />
         <title>{title} · Antgrid</title>
         <link rel="icon" href="/logo/favicon.ico" sizes="any" />
         <link rel="icon" type="image/svg+xml" href="/logo/antgrid-favicon.svg" />

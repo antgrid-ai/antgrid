@@ -4,7 +4,9 @@ import { Font } from "astro:assets";
 import ProofCard from "../components/sections/ProofCard.astro";
 import Wordmark from "../components/ui/Wordmark.astro";
 ---
-<html lang="en">
+{/* Pinned dark: the card is a still, shot once and served to every scraper,
+    and there is one of it. scripts/shoot-og.mjs pins the browser too. */}
+<html lang="en" data-theme="dark">
   <head>
     <meta charset="utf-8" />
     <meta name="robots" content="noindex" />
