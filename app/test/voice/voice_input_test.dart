@@ -12,6 +12,46 @@ const b = (project: 'machine.project', session: 'b', surface: 'terminal');
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  for (final correction in [true, false]) {
+    testWidgets('handoff preserves preview edits: correction=$correction', (
+      tester,
+    ) async {
+      final c = ComposerController(
+        document: ParchmentDocument.fromJson([
+          {'insert': 'Before old after\n'},
+        ]),
+      );
+      c.fleather.updateSelection(
+        const TextSelection(baseOffset: 7, extentOffset: 10),
+      );
+      late VoiceComposerBinding binding;
+      binding = VoiceComposerBinding(c, () => binding.finish(keep: true));
+      binding.update('river pod');
+      c.appendText('incoming handoff');
+      if (correction) {
+        binding.preview.fleather.replaceText(7, 9, 'Riverpod');
+      } else {
+        binding.preview.fleather.replaceText(0, 6, 'Updated');
+      }
+      expect(
+        c.toMarkdown(),
+        contains(
+          correction ? 'Before Riverpod after' : 'Updated river pod after',
+        ),
+      );
+      expect(c.toMarkdown(), contains('incoming handoff'));
+      expect(c.toMarkdown(), isNot(contains('old')));
+      expect(
+        c.fleather.document.toDelta().toJson().toString(),
+        isNot(contains('underline')),
+      );
+      binding.update('late result');
+      expect(c.toMarkdown(), isNot(contains('late result')));
+      await tester.pump(const Duration(milliseconds: 600));
+      binding.dispose();
+      c.dispose();
+    });
+  }
   testWidgets('settings and restart cannot erase a pending terminal draft', (
     tester,
   ) async {

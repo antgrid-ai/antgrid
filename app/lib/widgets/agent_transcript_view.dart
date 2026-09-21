@@ -90,6 +90,7 @@ class AgentTranscriptView extends ConsumerStatefulWidget {
 class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
   late final VoiceInputController _voice;
   late final VoiceTarget _voiceTarget;
+  bool get _voiceBusy => _voice.draft(_voiceTarget).busy;
   void _voiceChanged() {
     if (mounted) setState(() {});
   }
@@ -668,6 +669,7 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
   }
 
   List<AgentCapabilityCommand> _deriveSuggestions() {
+    if (_voiceBusy) return const [];
     final caps = _capabilities;
     if (caps == null || _suggestionsDismissed) return const [];
     final line = _input.firstLine;
@@ -687,7 +689,7 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
       final result = handleVoiceKey(_voice, _voiceTarget, event);
       if (result != KeyEventResult.ignored) return result;
     }
-    if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
+    if (_voiceBusy || (event is! KeyDownEvent && event is! KeyRepeatEvent)) {
       return KeyEventResult.ignored;
     }
     // At most one panel is non-empty (mention derivation is gated on the
@@ -759,11 +761,13 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
   }
 
   void _acceptSuggestion(AgentCapabilityCommand c) {
+    if (_voiceBusy) return;
     _input.acceptCommand(c.name);
     setState(() => _suggestionIndex = 0);
   }
 
   void _acceptMention(FileMention m) {
+    if (_voiceBusy) return;
     _input.acceptMention(m.isDir ? '${m.path}/' : m.path);
     setState(() => _mentionIndex = 0);
   }
@@ -1032,6 +1036,7 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
     // synchronous derivation, so a result that lands while still valid is
     // never clobbered by a build it didn't cause.
     final mentionVisible =
+        !_voiceBusy &&
         _suggestions.isEmpty &&
         !_mentionDismissed &&
         _input.mentionToken != null;

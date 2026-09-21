@@ -16,6 +16,7 @@ import 'package:antgrid/services/agent_session_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import 'package:antgrid/test_helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/agent_transcript_view.dart';
+import 'package:antgrid/voice/voice_input.dart';
 import 'package:antgrid/widgets/transcript/composer/rich_composer.dart';
 import 'package:antgrid/widgets/transcript/composer_selectors.dart';
 import 'package:antgrid/widgets/transcript/context_meter.dart';
@@ -203,6 +204,86 @@ Future<void> _pump(WidgetTester tester, AgentSessionState state) {
 }
 
 void main() {
+  for (final token in ['/co', '@file']) {
+    testWidgets('voice suspends suggestion acceptance for $token', (
+      tester,
+    ) async {
+      final voice = VoiceInputController()
+        ..ready = true
+        ..permission = true;
+      addTearDown(voice.dispose);
+      final transport = await _pumpWithService(
+        tester,
+        const AgentSessionState(capabilities: _capsFixture),
+        extraOverrides: [voiceInputProvider.overrideWithValue(voice)],
+      );
+      await _typeIntoComposer(tester, token);
+      final original = tester.widget<RichComposer>(find.byType(RichComposer));
+      final slash = tester.widget<SlashSuggestions>(
+        find.byType(SlashSuggestions),
+      );
+      final mentions = tester.widget<FileMentionSuggestions>(
+        find.byType(FileMentionSuggestions),
+      );
+      const target = (project: 'p', session: _sessionId, surface: 'chat');
+      voice.start(target);
+      if (token.startsWith('@')) {
+        transport.emit('file:find-result', {
+          'projectId': 'p',
+          'requestId': transport.sent.lastWhere(
+            (m) => m['type'] == 'file:find',
+          )['requestId'],
+          'entries': [
+            {'path': 'file.dart', 'isDir': false},
+          ],
+          'engine': 'ripgrep',
+        });
+      }
+      // Exercise stale callbacks before the frame hides the original popup.
+      slash.onPick(_capsFixture.commands.first);
+      mentions.onPick((path: 'file.dart', isDir: false));
+      final focus = FocusNode();
+      addTearDown(focus.dispose);
+      for (final key in [LogicalKeyboardKey.tab, LogicalKeyboardKey.enter]) {
+        expect(
+          original.keyEventPrelude!(
+            focus,
+            KeyDownEvent(
+              physicalKey: key == LogicalKeyboardKey.tab
+                  ? PhysicalKeyboardKey.tab
+                  : PhysicalKeyboardKey.enter,
+              logicalKey: key,
+              timeStamp: Duration.zero,
+            ),
+          ),
+          KeyEventResult.ignored,
+        );
+      }
+      expect(original.controller.toMarkdown(), token);
+      await tester.pump();
+      expect(
+        tester.widget<SlashSuggestions>(find.byType(SlashSuggestions)).commands,
+        isEmpty,
+      );
+      expect(
+        tester
+            .widget<FileMentionSuggestions>(find.byType(FileMentionSuggestions))
+            .visible,
+        false,
+      );
+      voice.stop(target);
+      await tester.pump();
+      expect(
+        tester
+            .widget<FileMentionSuggestions>(find.byType(FileMentionSuggestions))
+            .visible,
+        false,
+      );
+      voice.cancel(target);
+      await tester.pump();
+      await _disposeTree(tester);
+    });
+  }
   TestWidgetsFlutterBinding.ensureInitialized();
   setUp(useInMemoryPrefs);
 
@@ -596,8 +677,10 @@ void main() {
     // of a synced tree fixture: find the outbound `file:find`, answer it with
     // `file:find-result`, then pump for the reply to land.
 
-    Map<String, dynamic> entry(String path, {bool isDir = false}) =>
-        {'path': path, 'isDir': isDir};
+    Map<String, dynamic> entry(String path, {bool isDir = false}) => {
+      'path': path,
+      'isDir': isDir,
+    };
 
     String lastFindRequestId(FakeAgentTransport t) =>
         (t.sent.lastWhere((m) => m['type'] == 'file:find')['requestId']

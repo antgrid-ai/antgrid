@@ -22,7 +22,6 @@ class VoiceComposerBinding {
   bool _finished = false;
   int _length = 0;
   int _markedStart = 0;
-  String _transcript = '';
   Delta? _last;
   int get _start => selection.isValid
       ? selection.start
@@ -31,7 +30,6 @@ class VoiceComposerBinding {
 
   void update(String text) {
     if (_finished) return;
-    _transcript = text;
     _internal = true;
     final body = before
         .toList()
@@ -95,12 +93,6 @@ class VoiceComposerBinding {
     if (_finished) return;
     _finished = true;
     if (!keep) return;
-    // The original controller may receive an independent handoff while recording.
-    // Preserve it rather than applying offsets from a stale snapshot.
-    if (original.fleather.document.toDelta() != before) {
-      original.appendText(_transcript);
-      return;
-    }
     if (_length > 0 && _markedStart < preview.fleather.document.length - 1) {
       preview.fleather.formatText(
         _markedStart,
@@ -108,9 +100,25 @@ class VoiceComposerBinding {
         ParchmentAttribute.underline.unset,
       );
     }
+    final edits = before.diff(preview.fleather.document.toDelta());
+    final incoming = before.diff(original.fleather.document.toDelta());
+    // Rebase the entire edited preview, not just the recognition hypothesis,
+    // so an independent handoff cannot erase manual corrections.
+    final rebased = incoming.transform(edits, true);
+    final incomingOnPreview = edits.transform(incoming, false);
+    final caret = preview.fleather.selection;
     original.fleather.compose(
-      before.diff(preview.fleather.document.toDelta()),
-      selection: preview.fleather.selection,
+      rebased,
+      selection: caret.isValid
+          ? TextSelection(
+              baseOffset: incomingOnPreview.transformPosition(caret.baseOffset),
+              extentOffset: incomingOnPreview.transformPosition(
+                caret.extentOffset,
+              ),
+              affinity: caret.affinity,
+              isDirectional: caret.isDirectional,
+            )
+          : caret,
     );
   }
 
