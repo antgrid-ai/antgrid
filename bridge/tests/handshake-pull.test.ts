@@ -205,7 +205,7 @@ function handshakeOn(args: {
 /** Drive a full acked handshake (client-hello → agent-hello → agent-ready →
  *  app:ready → established) on a fresh forTest client and return the pieces a
  *  test needs to keep driving the session. */
-function establishSession(opts: { agentEd: ReturnType<typeof ed25519Pair>; phoneEd: ReturnType<typeof ed25519Pair>; attemptId: string; onHandshakeComplete?: () => void; capabilities?: object }): Handshaked {
+function establishSession(opts: { agentEd: ReturnType<typeof ed25519Pair>; phoneEd: ReturnType<typeof ed25519Pair>; attemptId: string; onHandshakeComplete?: () => void; capabilities?: object; retiredKeysMs?: number }): Handshaked {
   const sent: Array<string | Buffer> = [];
   const client = RelayClient.forTest({
     generateKeypair: generateEphemeralKeypair,
@@ -214,6 +214,7 @@ function establishSession(opts: { agentEd: ReturnType<typeof ed25519Pair>; phone
     deviceId: AGENT_DEVICE_ID,
     agentEd25519PrivB64: opts.agentEd.seedB64,
     phoneEd25519PubB64: opts.phoneEd.pubB64,
+    retiredKeysMs: opts.retiredKeysMs,
   });
   clients.push(client);
   if (opts.onHandshakeComplete) (client as any).opts.onHandshakeComplete = opts.onHandshakeComplete;
@@ -312,9 +313,11 @@ test("a session carries pullsTree false for a wrong-typed capability", () => {
 });
 
 test("a torn-down session takes its pullsTree with it — the capability does not outlive the app", () => {
-  // The "nobody is attached" answer is no longer this file's to give: with N
-  // devices the question is whether EVERY established one pulls, which
-  // `everyClientPullsTrees` in agent-core asks of an empty roster.
+  // The app DECLARES pullsTree and this bridge reads it into the session;
+  // nothing in agent-core resolves it any more, but it is parsed and kept so a
+  // bridge that dropped it cannot leave an old app treeless (see the TODO on
+  // `AppReadyMessage.capabilities.pullsTree`). A torn-down session must still
+  // drop its own claim rather than leave it stale.
   const { client } = establishSession({
     agentEd: ed25519Pair(), phoneEd: ed25519Pair(), attemptId: "attempt-a",
     capabilities: { checkoutRouting: true, pullsTree: true },
@@ -626,6 +629,62 @@ test("rekey mid-session: old keys decrypt until the new confirm, then swap + zer
   expect(seenMsgs.length).toBe(1);
 
   void keysA; // kept for symmetry/documentation of what phoneA was derived from
+});
+
+test("redial: frames the app sealed under the previous keys still route for a bounded window, then the keys die", async () => {
+  // The app learns of this side's redial only when the relay reports the new
+  // socket, and keeps sealing under the old keys until its own rekey confirms.
+  // Measured live: two frames a second after the NEW session established,
+  // undecryptable and dropped, while the app had been told they went out.
+  const agentEd = ed25519Pair();
+  const phoneEd = ed25519Pair();
+  const { client, phoneTransport, sent } = establishSession({ agentEd, phoneEd, attemptId: "attempt-a", retiredKeysMs: 80 });
+  const oldSession = (client as any).sessions.get(PHONE_ID) as { sessionKeys: { a2p: Buffer } };
+
+  // What doConnect does first on every redial.
+  (client as any).resetE2eState();
+  expect((client as any).sessions.size).toBe(0);
+  expect(client._handshakeComplete()).toBe(false);
+  expect(oldSession.sessionKeys.a2p.every((b) => b === 0)).toBe(false);
+
+  const seen: unknown[] = [];
+  (client as any).opts.onMessage = (m: unknown) => seen.push(m);
+  injectFrame(client, FrameKind.sealed, phoneTransport.seal(JSON.stringify({ m: { type: "pong", id: "p", timestamp: 0 } })));
+  expect(seen.length).toBe(1);
+
+  // A session frame under retired keys is consumed, never answered: the pong
+  // would be sealed under keys this side has agreed are gone.
+  const before = (client as any).sendPayload;
+  const answered: unknown[] = [];
+  (client as any).sendPayload = (p: unknown) => { answered.push(p); return true; };
+  injectFrame(client, FrameKind.sealed, phoneTransport.seal(JSON.stringify({ type: "ping" })));
+  expect(answered.length).toBe(0);
+  (client as any).sendPayload = before;
+
+  // The rekey that follows the redial establishes a NEW session for the same
+  // device alongside the retired keys, which keep opening until they expire.
+  const { transport: phoneB } = handshakeOn({ client, sent, phoneEd, attemptId: "attempt-b", nonce: Buffer.from([2, 2, 2, 2, 2, 2, 2, 2]) });
+  expect(client._handshakeComplete()).toBe(true);
+  injectFrame(client, FrameKind.sealed, phoneTransport.seal(JSON.stringify({ m: { type: "pong", id: "p2", timestamp: 0 } })));
+  injectFrame(client, FrameKind.sealed, phoneB.seal(JSON.stringify({ m: { type: "pong", id: "p3", timestamp: 0 } })));
+  expect(seen.length).toBe(3);
+
+  await new Promise((r) => setTimeout(r, 120));
+  expect(oldSession.sessionKeys.a2p.every((b) => b === 0)).toBe(true);
+  injectFrame(client, FrameKind.sealed, phoneTransport.seal(JSON.stringify({ m: { type: "pong", id: "p4", timestamp: 0 } })));
+  expect(seen.length).toBe(3);
+  injectFrame(client, FrameKind.sealed, phoneB.seal(JSON.stringify({ m: { type: "pong", id: "p5", timestamp: 0 } })));
+  expect(seen.length).toBe(4);
+});
+
+test("takeover and liveness death still zeroize at once — only a redial retires keys", () => {
+  const agentEd = ed25519Pair();
+  const phoneEd = ed25519Pair();
+  const { client } = establishSession({ agentEd, phoneEd, attemptId: "attempt-a" });
+  const oldSession = (client as any).sessions.get(PHONE_ID) as { sessionKeys: { a2p: Buffer } };
+  (client as any).dropSession(PHONE_ID);
+  expect(oldSession.sessionKeys.a2p.every((b) => b === 0)).toBe(true);
+  expect((client as any).retired.size).toBe(0);
 });
 
 test("a different device's verified client-hello is admitted ALONGSIDE the live session, displacing nobody", () => {

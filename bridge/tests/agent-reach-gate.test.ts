@@ -20,7 +20,7 @@ import { setLogLevel } from "../src/logger";
 import { createMessage, type AbMessage, type SessionEntry, type SessionMemberRef } from "../src/protocol";
 import { SessionBusCoordinator } from "../src/session-bus/coordinator";
 import { SessionBusSessionIndex } from "../src/session-bus/session-index";
-import type { PeerSessionView } from "../src/stream-mux";
+import { peerView } from "./relay-stubs";
 
 setLogLevel("error");
 
@@ -180,8 +180,8 @@ test("agent-reach:get reports what the machine actually holds", async () => {
 
 const REMOTE: SessionMemberRef = { machineId: "m-remote", projectId: "p-remote", sessionId: "s-remote" };
 
-function peerSession(): PeerSessionView {
-  return { peerId: "app-1", peerPubkey: "pub", checkoutRouting: true, reachable: true, pullsTree: true };
+function peerSession() {
+  return peerView({ peerId: "app-1" });
 }
 
 async function waitFor(predicate: () => boolean, what: string, timeoutMs = 20_000): Promise<void> {
@@ -318,9 +318,10 @@ test("an answer on a context this machine LEADS still lands while agent reach is
 }, 30_000);
 
 test("remote access off still drops a peer opening an exchange, agent reach notwithstanding (E15)", async () => {
-  // The boundary E15 did NOT move. Outbound stopped answering to this machine's
-  // own switch; inbound did not. `remoteFrameAllowed` runs first and is
-  // unconditional, so the subordinate bit being ON buys a peer nothing here.
+  // `remoteFrameAllowed` runs first and is unconditional, so the subordinate
+  // agent-reach bit being ON buys a peer nothing here. This half is what E15
+  // left alone and what the switch has always done; the outbound half now
+  // matches it (`REMOTE_ACCESS_OFF` in api.ts) rather than diverging from it.
   const { bus, sessionId, sessionBus } = await bootReachable(() => true, () => false);
 
   bus.dispatchInbound(inbound(sessionId, REMOTE.sessionId, "while-off"), "control", "relay", "app-1");
@@ -329,12 +330,18 @@ test("remote access off still drops a peer opening an exchange, agent reach notw
 }, 30_000);
 
 test("with remote access off a lead context is answered over loopback, not over the relay (E15)", async () => {
-  // Why sending out with the switch off is safe rather than one-way: the
-  // carrier is this machine's OWN desktop app over loopback, so a peer's answer
-  // comes home down the loopback socket, which no gate on this plane reads.
-  // `remoteFrameAllowed` has deliberately NOT grown E12's lead carve-out — a
-  // relay-origin frame is refused whatever context it names, and it does not
-  // need the carve-out, because that is not the path an answer takes.
+  // `remoteFrameAllowed` has deliberately NOT grown E12's lead carve-out: a
+  // relay-origin frame is refused whatever context it names, while the answer
+  // on this machine's OWN carrier comes home down the loopback socket, which no
+  // gate on this plane reads.
+  //
+  // This asymmetry was once read as "so sending out with the switch off is safe
+  // rather than one-way". It is not, and that reading is what E15 shipped: the
+  // loopback answer it describes is the bridge's own ACK, which rides the route
+  // the frame arrived on, while the peer AGENT's reply resolves a directory a
+  // switched-off machine publishes no row into. One leg came home and the one
+  // that mattered did not. The send is gated now, so this test pins the inbound
+  // fact alone.
   const { bus, sessionId, sessionBus } = await bootReachable(() => true, () => false);
 
   bus.dispatchInbound(inbound(sessionId, sessionId, "relay-reply"), "control", "relay", "app-1");

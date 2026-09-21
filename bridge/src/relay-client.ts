@@ -91,6 +91,9 @@ export interface RelayClientOptions {
   /** Test seam: overrides the half-open handshake-attempt expiry (see
    *  `HALF_OPEN_MS`). Production never sets this. */
   halfOpenMs?: number;
+  /** Test seam: overrides how long a redial keeps the previous session's keys
+   *  receive-only (see `RETIRED_KEYS_MS`). Production never sets this. */
+  retiredKeysMs?: number;
 }
 
 const HEARTBEAT_INTERVAL = 25_000;
@@ -99,6 +102,14 @@ const MAX_BACKOFF = 30_000;
 /** A half-open handshake attempt (client-hello seen, app:ready never arrived)
  *  is discarded after this. Live sessions are unaffected. */
 const HALF_OPEN_MS = 30_000;
+/** How long a redial keeps each dropped session's keys receive-only. The app
+ *  learns of this side's redial only when the relay reports the new socket, and
+ *  keeps sealing under the old keys until its own rekey confirms — measured at
+ *  ~1 s past the new session's `established`. Zeroizing at the redial made
+ *  every one of those frames a silent drop. Backoff plus dial plus the app's
+ *  rekey is a few seconds; past this the relay has reported the app's frames
+ *  undeliverable and the keys are dead weight. */
+const RETIRED_KEYS_MS = 20_000;
 /** Send a sealed ping after this much sealed-receive silence. */
 const PING_SILENCE_MS = 20_000;
 /** Consecutive unanswered pings before the E2E session is declared dead. */
@@ -175,6 +186,16 @@ interface PendingAttempt {
   expiry: ReturnType<typeof setTimeout> | null;
 }
 
+/** A session's keys kept receive-only across this side's redial (see
+ *  `RETIRED_KEYS_MS`). No queue, window or reassembler: it only opens the app
+ *  frames still in flight, and nothing is answered under it. */
+interface RetiredSession {
+  transport: E2eTransport;
+  sessionKeys: SessionKeys;
+  peerId: string;
+  expiry: ReturnType<typeof setTimeout>;
+}
+
 /** One confirmed E2E session with one app device. Everything a session owns is
  *  here rather than on the client, because the client now holds several. */
 interface PeerSession {
@@ -207,8 +228,10 @@ interface PeerSession {
   rxFlow: { consumed: Record<Channel, number>; credited: Record<Channel, number> };
   /** One stall log per stalled channel, cleared when a credit advances. */
   stallWarned: Partial<Record<Channel, true>>;
-  /** Whether THIS device pulls trees on demand. Per-session because the bridge
-   *  may only stop pushing `tree:full` when every attached device pulls. */
+  /** Whether THIS device pulls trees on demand. Parsed and retained for
+   *  backward compatibility only — nothing in this bridge reads it, since the
+   *  `tree:full` push it used to gate no longer exists. See the TODO on
+   *  `AppReadyMessage.capabilities.pullsTree` in protocol.ts. */
   pullsTree: boolean;
   terminalFramesV1: boolean;
 }
@@ -322,6 +345,8 @@ export class RelayClient {
   // Both are keyed by device so one device's rekey cannot disturb another's.
   private readonly sessions = new Map<string, PeerSession>();
   private readonly pending = new Map<string, PendingAttempt>();
+  /** Keys a redial retired, still able to open (see {@link RetiredSession}). */
+  private readonly retired = new Map<string, RetiredSession>();
   /** One reassembly ceiling for the whole machine, shared by every session's
    *  reassembler — N devices must not each be handed the full budget. */
   private reassemblyBudget: SharedByteBudget = { used: 0, limit: GLOBAL_REASSEMBLY_BUDGET };
@@ -1065,8 +1090,10 @@ export class RelayClient {
    * one failed open per attached device, and there are at most
    * {@link MAX_APP_SESSIONS} of them.
    *
-   * Each device keeps at most two receive contexts (make-before-break): its
-   * established session, and its own in-flight rekey candidate.
+   * Each device keeps at most two receive contexts while its socket lives
+   * (make-before-break): its established session, and its own in-flight rekey
+   * candidate. Across THIS side's redial there is a third, tried last: the
+   * session the redial retired, for `RETIRED_KEYS_MS`.
    */
   private handleSealedFrame(
     payload: Buffer,
@@ -1088,6 +1115,12 @@ export class RelayClient {
     for (const attempt of this.pending.values()) {
       if (attempt === hintedPending) continue;
       if (this.tryOpenPending(attempt, payload, channel, frameId, bytes)) return;
+    }
+    const hintedRetired = this.retired.get(from);
+    if (hintedRetired && this.tryOpenRetired(hintedRetired, payload, channel, frameId, bytes)) return;
+    for (const old of this.retired.values()) {
+      if (old === hintedRetired) continue;
+      if (this.tryOpenRetired(old, payload, channel, frameId, bytes)) return;
     }
     // Undecryptable, but the sender charged it. Credited to the ROUTING HINT:
     // no key opened the frame, so nothing better names its sender, and crediting
@@ -1134,6 +1167,42 @@ export class RelayClient {
     // Candidate keys precede the peer's window reset by definition, so the
     // sender never charged these bytes and crediting them would inflate it.
     this.onSealedPlaintext(pt, channel, attempt.peerId, null, frameId, bytes);
+    return true;
+  }
+
+  /** A frame the app sealed before it learned this side redialled. App traffic
+   *  is routed as it would have been a moment earlier. Session frames are not:
+   *  the window and liveness they address died with the redial, and answering
+   *  a ping would mean sealing under keys this side has given up. Nothing is
+   *  credited either — the app resets its windows at the establishment it is
+   *  already driving. A fragment has no reassembler; the transfer is re-pulled
+   *  after establishment like any other snapshot. */
+  private tryOpenRetired(
+    old: RetiredSession,
+    payload: Buffer,
+    channel: Channel,
+    frameId?: string,
+    bytes?: number,
+  ): boolean {
+    const pt = old.transport.open(payload);
+    if (pt === null) return false;
+    let obj: unknown;
+    try {
+      obj = JSON.parse(pt);
+    } catch {
+      obj = null;
+    }
+    const isEnvelope = !!obj && typeof obj === "object" && "m" in (obj as object) && !("__frag" in (obj as object));
+    if (!isEnvelope) {
+      log.debug("Dropping sealed frame opened under retired keys from %s: not app traffic", old.peerId);
+      netwatch.record({
+        dir: "rx", kind: "drop", transport: "relay", channel,
+        frameId, bytes, reason: "retired-keys-not-routable",
+      });
+      return true;
+    }
+    log.debug("Opened sealed frame under retired keys from %s (sealed before the app saw the redial)", old.peerId);
+    this.routeAppEnvelope(obj as { s?: string; m: unknown }, channel, old.peerId, frameId, bytes);
     return true;
   }
 
@@ -2136,6 +2205,9 @@ export class RelayClient {
     this.mux.detachAll();
     this.stopFragSweep();
     this.cleanup();
+    // No redial follows an intentional close, so nothing sealed under retired
+    // keys can still be on its way to a socket that will exist.
+    for (const peerId of [...this.retired.keys()]) this.discardRetired(peerId);
     this.ws?.close();
     this.ws = null;
   }
@@ -2145,8 +2217,12 @@ export class RelayClient {
   /** End ONE device's session: zeroize its keys, release whatever it was
    *  reassembling, and tell the cores that device is gone. The coarse
    *  peer-offline follows only if it was the last reachable one. The socket and
-   *  every other session are untouched. */
-  private dropSession(peerId: string): void {
+   *  every other session are untouched.
+   *
+   *  `retire` keeps the keys receive-only for `RETIRED_KEYS_MS` instead of
+   *  zeroizing now. Only a redial passes it: after a takeover or a liveness
+   *  death, frames under the old keys must not be routed. */
+  private dropSession(peerId: string, retire = false): void {
     const session = this.sessions.get(peerId);
     if (!session) return;
     this.sessions.delete(peerId);
@@ -2155,11 +2231,29 @@ export class RelayClient {
     // the peer has already forgotten. The windows die with the struct.
     this.recordQueueDrop("session-torn-down", session.scheduler.clear());
     session.frag.dispose();
-    zeroizeSessionKeys(session.sessionKeys);
-    session.transport.zeroize();
+    if (retire) {
+      this.discardRetired(peerId);
+      const expiry = setTimeout(() => {
+        if (this.retired.get(peerId)?.expiry === expiry) this.discardRetired(peerId);
+      }, this.opts.retiredKeysMs ?? RETIRED_KEYS_MS);
+      expiry.unref?.();
+      this.retired.set(peerId, { transport: session.transport, sessionKeys: session.sessionKeys, peerId, expiry });
+    } else {
+      zeroizeSessionKeys(session.sessionKeys);
+      session.transport.zeroize();
+    }
     if (this.sessions.size === 0) this.stopLiveness();
     this.mux.notifyPeerSessionOffline(peerId);
     this.notifyOfflineIfLast();
+  }
+
+  private discardRetired(peerId: string): void {
+    const old = this.retired.get(peerId);
+    if (!old) return;
+    this.retired.delete(peerId);
+    clearTimeout(old.expiry);
+    zeroizeSessionKeys(old.sessionKeys);
+    old.transport.zeroize();
   }
 
   private tearDownPending(peerId: string): void {
@@ -2172,9 +2266,11 @@ export class RelayClient {
   }
 
   /** Every session and candidate is gone (socket close / redial): the relay has
-   *  forgotten our routes, so nothing sealed for them could be delivered. */
+   *  forgotten our routes, so nothing sealed FOR them could be delivered. What
+   *  was sealed TO them still arrives (see `RETIRED_KEYS_MS`), so each
+   *  session's keys are retired, not zeroized. */
   private resetE2eState(): void {
-    for (const peerId of [...this.sessions.keys()]) this.dropSession(peerId);
+    for (const peerId of [...this.sessions.keys()]) this.dropSession(peerId, true);
     for (const peerId of [...this.pending.keys()]) this.tearDownPending(peerId);
     this.stopLiveness();
   }
@@ -2331,6 +2427,9 @@ export class RelayClient {
     /** Test seam: overrides the half-open handshake-attempt expiry so rekey/expiry
      *  tests don't wait out the real 30s default. */
     halfOpenMs?: number;
+    /** Test seam: how long a redial keeps retired keys, so a test can watch
+     *  them expire without waiting out `RETIRED_KEYS_MS`. */
+    retiredKeysMs?: number;
     /** Test seam: shrinks the consumed-byte threshold that triggers a credit so
      *  a window test does not have to push 512 KiB through the receive path. */
     creditBatchBytes?: number;
@@ -2340,6 +2439,7 @@ export class RelayClient {
       generateKeypair: opts.generateKeypair,
       identity: { deviceId: opts.deviceId ?? "test-device", deviceName: "test", createdAt: "", ed25519PrivateKey: opts.agentEd25519PrivB64 },
       halfOpenMs: opts.halfOpenMs,
+      retiredKeysMs: opts.retiredKeysMs,
     };
     (c as unknown as { sendPayload: (p: string | Buffer, ...rest: unknown[]) => boolean }).sendPayload = (p) => {
       opts.sendPayload(p);
@@ -2347,6 +2447,7 @@ export class RelayClient {
     };
     (c as unknown as { sessions: Map<string, PeerSession> }).sessions = new Map();
     (c as unknown as { pending: Map<string, PendingAttempt> }).pending = new Map();
+    (c as unknown as { retired: Map<string, RetiredSession> }).retired = new Map();
     (c as unknown as { reassemblyBudget: SharedByteBudget }).reassemblyBudget = {
       used: 0,
       limit: GLOBAL_REASSEMBLY_BUDGET,

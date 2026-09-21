@@ -249,10 +249,12 @@ void main() {
   ConnectionHandshake buildHandshake({
     Duration attemptTimeout = const Duration(seconds: 5),
     Duration appReadyRetransmit = const Duration(milliseconds: 150),
+    HandshakeLogger? logger,
   }) {
     return ConnectionHandshake(
       relay: relay,
       crypto: CryptoService(),
+      logger: logger,
       machineDeviceId: _machineDeviceId,
       phoneDeviceId: _phoneDeviceId,
       agentEd25519PubB64: base64.encode(agentPub),
@@ -399,6 +401,58 @@ void main() {
 
     final keys = await runFuture.timeout(const Duration(seconds: 5));
     expect(keys, isNotNull);
+  });
+
+  test(
+    'a timed-out attempt logs which message it was still waiting for',
+    () async {
+      // An unanswered client-hello and a dropped app:ready both come back as
+      // null; the phase on the timeout line is the only thing that separates a
+      // bridge that never heard us from one that stopped mid-conversation.
+      final logged = <(String, Map<String, Object?>?)>[];
+      final hs = buildHandshake(
+        attemptTimeout: const Duration(milliseconds: 300),
+        logger: (level, message, {fields}) => logged.add((message, fields)),
+      );
+
+      // No fake agent at all: nothing ever answers.
+      final keys = await hs.run();
+      expect(keys, isNull);
+
+      final timeout = logged.where((l) => l.$1 == 'attempt timed out').toList();
+      expect(timeout, hasLength(1));
+      expect(timeout.single.$2?['awaiting'], 'agent-hello');
+      expect(timeout.single.$2?['timeoutMs'], 300);
+    },
+  );
+
+  test('a tampered agent-ready leaves the attempt waiting for a good '
+      'agent-ready, not for established', () async {
+    final logged = <(String, Map<String, Object?>?)>[];
+    final hs = buildHandshake(
+      attemptTimeout: const Duration(milliseconds: 300),
+      logger: (level, message, {fields}) => logged.add((message, fields)),
+    );
+    final runFuture = hs.run();
+    await _runFakeAgentUpToReady(
+      relay,
+      agentSeed: agentSeed,
+      agentPub: agentPub,
+      machineDeviceId: _machineDeviceId,
+      phoneDeviceId: _phoneDeviceId,
+      tamperConfirmTag: true,
+    );
+    expect(await runFuture, isNull);
+
+    final timeout = logged.where((l) => l.$1 == 'attempt timed out').toList();
+    expect(timeout, hasLength(1));
+    expect(
+      timeout.single.$2?['awaiting'],
+      'agent-ready',
+      reason:
+          'app:ready was never sent, so the attempt was not waiting for '
+          'established',
+    );
   });
 
   test('run() rejects an agent-hello signed by a different key (no '

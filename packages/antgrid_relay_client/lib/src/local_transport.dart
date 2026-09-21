@@ -62,9 +62,13 @@ class LocalTransport extends BufferedAgentTransport {
   /// The agent gates behaviour on individual flags in it, so a caller that can
   /// do more than the default says so here rather than growing a constructor
   /// flag per capability. A caller that passes its own map REPLACES the
-  /// default, so it owes every key the default carries: dropping `pullsTree`
-  /// fails silently and puts the bridge back to pushing every checkout's
-  /// `tree:full` at each reconnect, the flood pull-first exists to prevent.
+  /// default, so it owes every key the default carries — Zod strips a key the
+  /// bridge's schema does not declare and nothing spans the two sides.
+  /// `pullsTree` is carried for an older bridge alone: this bridge no longer
+  /// pushes a whole tree under any condition, but one that predates the
+  /// on-demand listing protocol resumes pushing every checkout's `tree:full`
+  /// at each reconnect without it. See the TODO on
+  /// `AppReadyMessage.capabilities.pullsTree` in `bridge/src/protocol.ts`.
   final Map<String, Object?> capabilities;
 
   IOWebSocketChannel? _ch;
@@ -347,12 +351,15 @@ class LocalTransport extends BufferedAgentTransport {
         'state.snapshot',
         params: {
           'types': ['*'],
-          // The relay path excludes the same type for the same reason
-          // (`_kHeavyReplayTypes` in machine_session.dart): the agent caches a
-          // `tree:full` per checkout at open, so a replay of everything hands a
-          // local project one full tree per managed worktree — measured at
-          // ~2 MB for a project with several — and no reader wants them.
-          // FileService pulls the tree for the checkout on screen itself.
+          // Inert against a current bridge, which caches no whole-tree frame
+          // at all — the file tree is listed per directory on demand. Held for
+          // an OLDER bridge, which still retains a `tree:full` per checkout at
+          // open (~2 MB for a project with several managed worktrees): this app
+          // has no handler for one, so a replay of everything would decrypt
+          // megabytes to discard them, and on a slow link that backlog starved
+          // the bridge's relay pongs until the relay closed the socket.
+          // TODO(bharath): drop in the same release as the `pullsTree`
+          // capability, once no bridge in the field caches a tree.
           'exclude': const ['tree:full'],
         },
         timeout: const Duration(seconds: 5),

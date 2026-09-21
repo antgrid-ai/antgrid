@@ -49,6 +49,7 @@ class AbTextField extends StatefulWidget {
     this.prefixIconSize,
     this.prefixIconWidth,
     this.suffixSlotWidth,
+    this.border = true,
   });
 
   final TextEditingController? controller;
@@ -139,6 +140,9 @@ class AbTextField extends StatefulWidget {
   /// (instead of sitting flush). Pass the field [height] to give the suffix
   /// glyph the same margins on all four sides as a matching prefix slot.
   final double? suffixSlotWidth;
+
+  /// Draws the box outline. See [AbControlBox.border].
+  final bool border;
 
   @override
   State<AbTextField> createState() => _AbTextFieldState();
@@ -256,6 +260,15 @@ class _AbTextFieldState extends State<AbTextField> {
     // text + hint, so it sizes to its text line and is vertically centred by
     // the Row. Prefix icon and clear button are Row children (the collapsed
     // decoration doesn't support prefixes/suffixes).
+    final prefixSlot = widget.prefixIconWidth ?? AbTokens.iconButtonBox;
+    final prefixGlyph = widget.prefixIconSize ?? AbTokens.iconButtonGlyph;
+    // A slot wider than the glyph it centres already leaves margin either side
+    // of it; one squared to the glyph, to align it with a column outside the
+    // field, has none to give and the text would start against it. The gap
+    // cannot come from [contentPadding] — that is [AbControlBox]'s padding and
+    // wraps the prefix too, so widening it moves the glyph instead.
+    final prefixGap = prefixSlot > prefixGlyph ? 0.0 : AbTokens.space8;
+
     final box = GestureDetector(
       behavior: HitTestBehavior.opaque,
       onTap: enabled ? _focusNode.requestFocus : null,
@@ -264,6 +277,7 @@ class _AbTextFieldState extends State<AbTextField> {
         minHeight: wraps ? effHeight : null,
         focused: _focusNode.hasFocus,
         fillColor: widget.fillColor,
+        border: widget.border,
         padding:
             widget.contentPadding ??
             (wraps
@@ -278,13 +292,16 @@ class _AbTextFieldState extends State<AbTextField> {
               : CrossAxisAlignment.center,
           children: [
             if (widget.prefixIcon != null)
-              SizedBox(
-                width: widget.prefixIconWidth ?? AbTokens.iconButtonBox,
-                child: Center(
-                  child: AbIcon(
-                    widget.prefixIcon!,
-                    size: widget.prefixIconSize ?? AbTokens.iconButtonGlyph,
-                    color: context.antgrid.textMuted,
+              Padding(
+                padding: EdgeInsets.only(right: prefixGap),
+                child: SizedBox(
+                  width: prefixSlot,
+                  child: Center(
+                    child: AbIcon(
+                      widget.prefixIcon!,
+                      size: prefixGlyph,
+                      color: context.antgrid.textMuted,
+                    ),
                   ),
                 ),
               ),

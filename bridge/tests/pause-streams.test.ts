@@ -49,19 +49,19 @@ describe("pause-streams end-to-end", () => {
     // races INTO that set and is never reported. Keep writing fresh probes until
     // one lands after the walk and bumps the seq; that is the only proof the
     // watcher is live. b.txt written before this point would vanish the same
-    // way, and `getTreeSnapshot` rebuilds from disk, so the tree would still
+    // way, and a listing reads from disk, so the tree would still
     // show it and only the seq would betray the loss.
-    for (let probe = 0; fw.getTreeSnapshot().seq === 0; probe++) {
+    for (let probe = 0; fw.currentSeq() === 0; probe++) {
       if (probe > 100) throw new Error("file watcher never went live");
       writeFileSync(join(root, `warmup-${probe}.txt`), "warmup\n");
       await new Promise((r) => setTimeout(r, 50));
     }
     // Drain the warmup batch, so a late flush of it can't later be mistaken for
     // the watcher having seen b.txt.
-    let settled = fw.getTreeSnapshot().seq;
+    let settled = fw.currentSeq();
     for (;;) {
       await new Promise((r) => setTimeout(r, 200));
-      const now = fw.getTreeSnapshot().seq;
+      const now = fw.currentSeq();
       if (now === settled) break;
       settled = now;
     }
@@ -93,7 +93,7 @@ describe("pause-streams end-to-end", () => {
       (tm.getScrollback(terminalId)?.text ?? "").includes("PAUSED_MARK"),
     );
     await waitFor("the paused file write to reach the watcher", () =>
-      fw.getTreeSnapshot().seq > seqBeforePause,
+      fw.currentSeq() > seqBeforePause,
     );
 
     const heavyTypes = new Set(["terminal:output", "tree:update", "preview:url"]);
@@ -109,11 +109,10 @@ describe("pause-streams end-to-end", () => {
     expect(termSnap!.seq).toBeGreaterThan(termSeqBeforePause);
     expect(termSnap!.text).toContain("PAUSED_MARK");
 
-    // The seq is the load-bearing half: `tree` is rebuilt from disk on every
+    // The seq is the load-bearing half: a listing reads from disk on every
     // call, so it would show b.txt even if the watcher had missed the write.
-    const fileSnap = fw.getTreeSnapshot();
-    expect(fileSnap.seq).toBeGreaterThan(seqBeforePause);
-    const childNames = (fileSnap.tree.children ?? []).map((c) => c.name);
+    expect(fw.currentSeq()).toBeGreaterThan(seqBeforePause);
+    const childNames = fw.getRootListing(true).children.map((c) => c.name);
     expect(childNames).toContain("b.txt");
 
     const previewSnap = tunnel.getPreviewSnapshot();

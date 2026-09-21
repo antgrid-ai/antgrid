@@ -257,7 +257,7 @@ export const SESSION_BUS_TOOLS: McpTool[] = [
   },
   {
     name: "antgrid_thread",
-    description: "Read one exchange end to end — both directions, oldest first. Each message you sent says whether the other side acknowledged it, which is the only confirmation in this design that anything arrived.",
+    description: "Read one exchange end to end — both directions, oldest first. Each message you sent says whether the peer's BRIDGE accepted the frame, which is the only confirmation in this design that anything left the wire. It is not the peer's agent having read it, and it is not evidence that a message from that peer can reach you back.",
     inputSchema: {
       type: "object",
       properties: {
@@ -332,8 +332,9 @@ function machineName(m: { machineLabel?: string; machineId: string }): string {
  *  the same here as on a thread — and it carries the project id because
  *  `sendTargetSchema` REQUIRES one and no other surface prints it: a row a
  *  caller cannot copy into `to` leaves them deriving the id by hand, and a
- *  wrong guess answers UNKNOWN_PEER, which reads as "that peer is gone" rather
- *  than "your address is malformed". The bracketed machine is the human's name
+ *  wrong guess is refused for a reason that never names the guess: UNKNOWN_PEER
+ *  for a local address, PEER_UNREACHABLE for one on another machine, neither of
+ *  which reads as "your address is malformed". The bracketed machine is the human's name
  *  for where, which is not what addresses it; the title makes the row
  *  judgeable, not addressable. */
 function sessionLine(row: any, selfMachineId: string | null): string {
@@ -379,6 +380,8 @@ function reachLine(reach: any): string {
     switch (reach.why) {
       case "no-machine-id":
         return "Reach: this machine has no relay identity yet, so nothing on it can be addressed from elsewhere and only its own sessions are listed.";
+      case "remote-access-off":
+        return "Reach: this machine's remote access is off, so it exchanges messages only with sessions on itself. Only its own sessions are listed, and sending to another machine is refused until someone turns remote access on here.";
       default:
         return "Reach: no desktop app is carrying a cross-machine read for this machine, so only its own sessions are listed.";
     }
@@ -425,6 +428,12 @@ function selfLines(data: any): string[] {
       "This machine has no bus identity, so only a session on it can use that address.",
     ];
   }
+  if (data.remoteAccess === false) {
+    return [
+      `You are ${title}, addressable as ${data.machineId}/${data.projectId}/${data.sessionId}.`,
+      "This machine's remote access is OFF, so that address works only from sessions on this machine: nothing elsewhere can reach you, and you cannot send to another machine until someone turns it on here.",
+    ];
+  }
   return [
     `You are ${title}, addressable as ${data.machineId}/${data.projectId}/${data.sessionId}.`,
     "Pass that address on exactly as written: one without a machine means the machine of whoever reads it.",
@@ -433,12 +442,13 @@ function selfLines(data: any): string[] {
 
 /** What a send owes its caller. The thread id because §4.3 makes it
  *  bridge-owned — an agent never told it cannot answer on the exchange it just
- *  opened — and whether the frame LEFT this machine, which is never a claim
- *  that it arrived: the receipt on antgrid_thread is the only witness to that. */
+ *  opened — and whether the frame LEFT this machine, which is never a claim that
+ *  it arrived: the receipt on antgrid_thread is the only witness that the peer's
+ *  bridge took it, and there is none at all for the peer's agent reading it. */
 function sendLine(data: any): string {
   const opened = data.opensThread ? "Opened thread" : "On thread";
   const left = data.sent
-    ? "It left this machine; whether it arrived shows as a receipt in antgrid_thread."
+    ? "It left this machine; antgrid_thread shows a receipt once the peer's bridge accepts it."
     : "It is held on this machine and has not left yet; it goes when the link is back.";
   return `${opened} ${data.threadId} (message ${data.messageId}). ${left} Use antgrid_reply with that thread id to answer.`;
 }
@@ -465,7 +475,7 @@ function threadEntryLine(entry: any, now: number): string {
     ? ""
     : entry.deliveredAt === undefined
       ? " [no receipt yet]"
-      : ` [delivered ${seconds(now - entry.deliveredAt)} ago]`;
+      : ` [peer bridge accepted it ${seconds(now - entry.deliveredAt)} ago]`;
   const lines = [`- ${arrow} ${who}, ${seconds(now - entry.at)} ago${receipt} — ${entry.summary}`];
   for (const text of entry.text ?? []) lines.push(`  ${text}`);
   return lines.join("\n");

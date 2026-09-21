@@ -89,8 +89,19 @@ class RelayService {
   Completer<void>? _connect;
   Timer? _connectTimeout;
   Duration _connectTimeoutDuration = const Duration(seconds: 15);
-  Duration _heartbeatInterval = const Duration(seconds: 25);
+
+  /// Inbound silence before a probe goes out, and the tick that looks for it.
+  Duration _heartbeatInterval = const Duration(seconds: 10);
+
+  /// How long an unanswered probe is tolerated. Its own timer, not the next
+  /// tick: checked only at ticks, the same dead socket took one or two periods
+  /// to notice depending on where in the period it died. A stalled socket here
+  /// is silent in ONE direction — this side's pings still reach the relay and
+  /// keep refreshing the relay's liveness — so detection is this side's alone,
+  /// and the relay answers a ping in milliseconds.
+  Duration _probeTimeout = const Duration(seconds: 10);
   Timer? _heartbeatTimer;
+  Timer? _probeTimeoutTimer;
   DateTime? _socketOpenedAt;
 
   /// Stamped at `welcome`, where [_socketOpenedAt] is stamped at dial. A connect
@@ -403,8 +414,10 @@ class RelayService {
       _connectTimeoutDuration = timeout;
 
   /// Test-only seam: shorten the heartbeat without changing production timing.
-  void debugSetHeartbeatInterval(Duration interval) =>
-      _heartbeatInterval = interval;
+  void debugSetHeartbeatInterval(Duration interval, {Duration? probeTimeout}) {
+    _heartbeatInterval = interval;
+    _probeTimeout = probeTimeout ?? interval;
+  }
 
   /// Test-only seam: model an OS-frozen periodic timer before a resume event.
   void debugPauseHeartbeat() {
@@ -518,11 +531,23 @@ class RelayService {
       _handleError(msg);
     } else if (msg is PeerOnlineMessage) {
       if (!_isThisMachine(msg.peerId)) return;
+      // The relay's word, not ours: the machine re-authenticated. A rekey and
+      // an unblocked handshake ladder both key off this, and neither says why.
+      _log(
+        RelayLogLevel.info,
+        'peer online',
+        fields: {'machineSlot': _relaySlotId},
+      );
       // Presence only — the connection state describes OUR socket, and the agent
       // showing up does not change it.
       if (!_peerPresenceController.isClosed) _peerPresenceController.add(true);
     } else if (msg is PeerOfflineMessage) {
       if (!_isThisMachine(msg.peerId)) return;
+      _log(
+        RelayLogLevel.info,
+        'peer offline',
+        fields: {'machineSlot': _relaySlotId},
+      );
       // v3: the machine's socket dropped but ours stays open (no cascade close).
       if (!_peerPresenceController.isClosed) _peerPresenceController.add(false);
       _setState(_currentState.copyWith(error: 'Peer offline'));
@@ -538,6 +563,20 @@ class RelayService {
       _machineDeviceId != null && peerId == _machineDeviceId;
 
   void _handleError(ErrorMessage msg) {
+    // The relay's only channel for "your frame did not go where you sent it".
+    // Its listeners act on a handful of codes and drop the rest on the floor,
+    // so an unlisted code was invisible from the log.
+    _log(
+      RelayLogLevel.warn,
+      'relay error frame',
+      fields: {
+        'code': msg.code,
+        'retryable': msg.retryable,
+        if (msg.ref != null) 'ref': msg.ref,
+        if (msg.channel != null) 'channel': msg.channel,
+        'message': msg.message,
+      },
+    );
     if (!_errorController.isClosed) _errorController.add(msg);
 
     // Clock-skew AUTH_FAILED (retryable): record the offset and let the socket
@@ -894,18 +933,7 @@ class RelayService {
     if (_currentState.connectionState != RelayConnectionState.authenticated) {
       return;
     }
-    final now = DateTime.now().toUtc();
-    final probe = _probeSentAt;
-    if (probe != null) {
-      if (now.difference(probe) >= _heartbeatInterval) {
-        _closeForHeartbeatTimeout(now);
-      }
-      return;
-    }
-    final inbound = _lastInboundAt;
-    if (inbound != null && now.difference(inbound) < _heartbeatInterval) return;
-    _sendHeartbeatProbe(now);
-    _scheduleHeartbeat();
+    _heartbeatCheck(DateTime.now().toUtc());
   }
 
   void _startHeartbeat() {
@@ -920,20 +948,29 @@ class RelayService {
       if (_currentState.connectionState != RelayConnectionState.authenticated) {
         return;
       }
-      final now = DateTime.now().toUtc();
-      final probe = _probeSentAt;
-      if (probe != null) {
-        if (now.difference(probe) >= _heartbeatInterval) {
-          _closeForHeartbeatTimeout(now);
-        }
-        return;
-      }
-      _sendHeartbeatProbe(now);
+      _heartbeatCheck(DateTime.now().toUtc());
     });
+  }
+
+  /// Sends a probe after [_heartbeatInterval] of inbound silence; an
+  /// outstanding probe is left to its own timer.
+  void _heartbeatCheck(DateTime now) {
+    if (_probeSentAt != null) return;
+    final inbound = _lastInboundAt;
+    if (inbound != null && now.difference(inbound) < _heartbeatInterval) return;
+    _sendHeartbeatProbe(now);
   }
 
   void _sendHeartbeatProbe(DateTime now) {
     _probeSentAt = now;
+    _probeTimeoutTimer?.cancel();
+    _probeTimeoutTimer = Timer(_probeTimeout, () {
+      if (_probeSentAt == null ||
+          _currentState.connectionState != RelayConnectionState.authenticated) {
+        return;
+      }
+      _closeForHeartbeatTimeout(DateTime.now().toUtc());
+    });
     _log(
       RelayLogLevel.debug,
       'relay heartbeat probe sent',
@@ -945,6 +982,8 @@ class RelayService {
   void _markInboundHealthy() {
     _lastInboundAt = DateTime.now().toUtc();
     _probeSentAt = null;
+    _probeTimeoutTimer?.cancel();
+    _probeTimeoutTimer = null;
   }
 
   void _closeForHeartbeatTimeout(DateTime now) {
@@ -963,6 +1002,8 @@ class RelayService {
     );
     _heartbeatTimer?.cancel();
     _heartbeatTimer = null;
+    _probeTimeoutTimer?.cancel();
+    _probeTimeoutTimer = null;
     // Publish the drop synchronously. A half-open peer may never complete the
     // WebSocket close handshake, and waiting for onDone would strand the
     // supervisor behind the dead socket it is responsible for replacing.
@@ -973,6 +1014,8 @@ class RelayService {
   void _resetHeartbeat() {
     _heartbeatTimer?.cancel();
     _heartbeatTimer = null;
+    _probeTimeoutTimer?.cancel();
+    _probeTimeoutTimer = null;
     _lastInboundAt = null;
     _probeSentAt = null;
     _socketOpenedAt = null;

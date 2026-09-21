@@ -1,6 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
-import { hostname } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { ProjectCore, type ProjectCoreDeps, type ProjectCoreRemoteDeps, type PromotionHandle, type RegisterOutcome } from "./project-core";
 import { OAuthClient, startTokenMaintenance } from "./auth/oauth-client";
@@ -20,7 +19,8 @@ import { VERSION } from "./version";
 import type { DeviceIdentity } from "./device";
 import type { TierClaim } from "./entitlement";
 import type { ProjectSummary, ConnectInfo, PairedPhoneSummary, KnownProject } from "./control-protocol";
-import { logger } from "./logger";
+import { logger, armLogLevel, currentLogLevel } from "./logger";
+import { selfMachineLabel, selfMachineName } from "./machine-label";
 const log = logger.child({ component: "host-server" });
 import { RelayClient, type RelayClientOptions } from "./relay-client";
 import type { MachineRelaySession } from "./relay-promotion";
@@ -506,18 +506,32 @@ export class HostServer {
       // it is the fallback here, never the first answer: preferring it
       // unconditionally is the Wave 1 regression this resolves.
       const projectLabel = this.cores.get(entry.projectId)?.core.projectName || entry.projectLabel;
+      // Labels travel because the other machine cannot look them up (E4), and
+      // this one has to travel on a LOCAL exchange too: `deliverLocal` folds
+      // through the same `handleInbound`, so a same-machine delivery renders
+      // from this ref exactly as a cross-machine one does. Sourced through
+      // `machine-label.ts` so it is the same string the heartbeat puts in the
+      // account inventory, which is where the app reads a peer machine's name
+      // from — anything computed separately here would make this machine render
+      // under one name on a session card and another in a delivery wrapper.
+      const machineLabel = selfMachineLabel();
       return {
         key: { machineId, projectId: entry.projectId, sessionId },
         ref: {
           machineId,
           projectId: entry.projectId,
           sessionId,
+          ...(machineLabel === undefined ? {} : { machineLabel }),
           projectLabel,
           sessionName: entry.sessionName,
         },
       };
     },
     addressable: () => this.controlPlaneRegistrationId !== null,
+    // Read live, never captured, for the same reason every other read of this
+    // policy is: `mobile-access:set` has to take effect without restarting
+    // anything.
+    offMachineSendAllowed: () => this.remoteAccessPolicy.isEnabled(),
     // §6.1: a target on THIS host is handed straight into the SAME fold the
     // remote path folds through (`handleInbound`) — no relay, no carrier, no
     // route table — so wrapping, queueing and turn-boundary injection are
@@ -525,10 +539,10 @@ export class HostServer {
     // confines this to a same-machine context (`ctx.to.machineId ===
     // frame.from.machineId`); this only adds "and a core for it is actually
     // loaded here right now" — a session this host merely KNOWS about (a cold
-    // project in the catalog) cannot be folded into in process, and falling
-    // through to `send` below holds the frame, which `flushHeld` then retries
-    // through this same decision — so a project that comes back warm delivers
-    // what was held for it, rather than offering it to a carrier forever.
+    // project in the catalog) cannot be folded into in process, and a false
+    // return here HOLDS the frame rather than offering it to the carrier, so
+    // `flushHeld` delivers it through this same decision once that project is
+    // warm again.
     //
     // `handleInbound` can throw on a session-store write failure, and it is
     // called RE-ENTRANTLY — the receipt `onMessage` dispatches back out
@@ -989,7 +1003,7 @@ export class HostServer {
         licenseApiUrl: msg.licenseApiUrl ?? "",
         identity: {
           deviceId: auth.deviceUuid,
-          deviceName: process.env.ANTGRID_HOST_NAME ?? hostname(),
+          deviceName: selfMachineName(),
           createdAt: new Date().toISOString(),
           ed25519PublicKey: auth.ed25519Pub,
           ed25519PrivateKey: auth.ed25519Priv,
@@ -1290,8 +1304,10 @@ export class HostServer {
           // The mirror deliberately SURVIVES this (E15): it holds what peers
           // offered about themselves, and turning this machine's own door
           // shut is not a reason to forget who is out there — a session here
-          // may still open an exchange, and dropping the rows would leave it
-          // reading `UNKNOWN_PEER` for peers that are answering perfectly.
+          // may still open an exchange, and OPENING one is the half no thread
+          // and no carrier route can stand in for (`session-bus/api.ts`), so
+          // dropping the rows would leave it refused `PEER_UNREACHABLE` for
+          // peers that are answering perfectly.
           this.demoteAllPromoted();
         }
         if (changed) {
@@ -2239,6 +2255,31 @@ export class HostServer {
           expiresInMs: TICKET_TTL_MS,
         };
       }
+      case "log:level": {
+        // An EXPLICIT zero is how a caller says "stop early"; the level beside
+        // it is ignored, because what a disarm restores is the level this
+        // process was configured with. Admitted here rather than refused for
+        // the same reason netwatch:local admits it: a caller spelling "off"
+        // must not be rejected over a field it was not arming with.
+        if (req.ttlMs === 0) {
+          armLogLevel(req.level, 0);
+          return { id: req.id, ok: true, type: "log:level", level: currentLogLevel(), ttlMs: 0 };
+        }
+        // The same refusal netwatch:local makes of itself, for the same reason
+        // applied to verbosity: the TTL is the dead man's switch, so an arm
+        // without one is the single request that cannot be honoured — a CLI
+        // killed with SIGKILL sends no disarm, and this host would then write a
+        // debug line per delivery and per turn close for the rest of its life
+        // with nothing able to stop it. Answered here rather than left to
+        // armLogLevel's own refusal, which is silent and would read to the
+        // caller as a raised level.
+        if (req.ttlMs === undefined) {
+          return { id: req.id, ok: false, error: { code: "TTL_REQUIRED", message: "raising the log level requires a positive ttlMs" } };
+        }
+        const ttlMs = clampCaptureTtl(req.ttlMs);
+        armLogLevel(req.level, ttlMs);
+        return { id: req.id, ok: true, type: "log:level", level: currentLogLevel(), ttlMs };
+      }
     }
   }
 
@@ -2595,7 +2636,7 @@ export class HostServer {
       deviceUuid: r.auth.deviceUuid,
       mobileAccessEnabled: this.remoteAccessPolicy.isEnabled(),
       relayUrl: r.relayUrl,
-      machineName: process.env.ANTGRID_HOST_NAME ?? hostname(),
+      machineName: selfMachineName(),
     }).then((ok) => {
       if (!ok) log.warn("heartbeat POST failed (non-2xx or network error)", { deviceUuid: r.auth.deviceUuid });
     });

@@ -85,12 +85,20 @@ class ConnectionHandshake {
   StreamSubscription<IncomingRouteMessage>? _messageSub;
   Timer? _appReadyTimer;
 
+  /// Held so [cancel] ends the wait for `established` now rather than at
+  /// [_attemptTimeout]: the socket this attempt used is usually already gone.
+  Completer<SessionKeys>? _established;
+
   void cancel() {
     _cancelled = true;
     _messageSub?.cancel();
     _messageSub = null;
     _appReadyTimer?.cancel();
     _appReadyTimer = null;
+    final established = _established;
+    if (established != null && !established.isCompleted) {
+      established.completeError(StateError('cancelled'));
+    }
   }
 
   /// Runs one handshake attempt (fresh `attemptId`). Returns the confirmed
@@ -106,10 +114,18 @@ class ConnectionHandshake {
         .generateX25519KeyPair();
     var phoneX25519PrivScrubbed = false;
     final phoneX25519PubB64 = base64.encode(phoneX25519Pub);
-    final established = Completer<SessionKeys>();
+    final established = _established = Completer<SessionKeys>();
+    // A cancel before the await below is reached would otherwise surface as an
+    // unhandled error.
+    established.future.ignore();
     SessionKeys? derivedKeys;
     Future<SessionKeys?>? keysFuture;
     var appReadySent = false;
+    // How far the conversation got, for the timeout line: a bridge that never
+    // answers the client-hello and one that drops our app:ready both surface
+    // as the same null return, and only the phase tells them apart.
+    var agentHelloSeen = false;
+    final startedAt = DateTime.now();
 
     final sub = _relay.messageStream.listen((msg) async {
       if (msg.channel != 'control') return;
@@ -124,6 +140,7 @@ class ConnectionHandshake {
         }
         if (j['type'] != 'handshake:agent-hello') return;
         if (j['attemptId'] != attemptId) return;
+        agentHelloSeen = true;
         final pubkey = j['pubkey'] as String?;
         final sig = j['sig'] as String?;
         if (pubkey == null || sig == null) return;
@@ -255,8 +272,25 @@ class ConnectionHandshake {
       if (_cancelled) return null;
       return keys;
     } on TimeoutException {
+      if (!_cancelled) {
+        _log(
+          HandshakeLogLevel.debug,
+          'attempt timed out',
+          fields: {
+            'awaiting': appReadySent
+                ? 'established'
+                : agentHelloSeen
+                ? 'agent-ready'
+                : 'agent-hello',
+            'timeoutMs': _attemptTimeout.inMilliseconds,
+            'elapsedMs': DateTime.now().difference(startedAt).inMilliseconds,
+          },
+        );
+      }
       return null;
     } catch (e, st) {
+      // A cancel is the session's event to log, not a failure of this attempt.
+      if (_cancelled) return null;
       _log(
         HandshakeLogLevel.error,
         'run error',
@@ -267,6 +301,7 @@ class ConnectionHandshake {
       _appReadyTimer?.cancel();
       _appReadyTimer = null;
       if (identical(_messageSub, sub)) _messageSub = null;
+      if (identical(_established, established)) _established = null;
       await sub.cancel();
       // Scrub the ephemeral X25519 private key ONLY when no DH ran on it (see
       // the DH future above, which scrubs immediately after the shared secret).
@@ -274,8 +309,8 @@ class ConnectionHandshake {
         phoneX25519Priv.fillRange(0, phoneX25519Priv.length, 0);
       }
       // Zeroize the derived keys unless the caller (MachineSession) took them:
-      // on a completed established they are returned and owned by the caller.
-      if (!established.isCompleted) derivedKeys?.zeroize();
+      // only the uncancelled, completed path above returns them.
+      if (_cancelled || !established.isCompleted) derivedKeys?.zeroize();
     }
   }
 
@@ -394,6 +429,12 @@ class AppSessionHandshaker implements SessionHandshaker {
   @override
   void abort() {
     _aborted = true;
+    _current?.cancel();
+    _current = null;
+  }
+
+  @override
+  void cancelInFlight() {
     _current?.cancel();
     _current = null;
   }

@@ -11,6 +11,7 @@ import {
   type StreamMuxTransport, type PeerSessionView, type SendTarget,
 } from "../src/stream-mux";
 import { MessageBus, type Channel } from "../src/message-bus";
+import { peerView as basePeerView } from "./relay-stubs";
 import { createMessage } from "../src/protocol";
 import { RelayClient } from "../src/relay-client";
 import { generateEphemeralKeypair, deriveSharedSecret } from "../src/key-exchange";
@@ -40,7 +41,7 @@ function makeTransport(peers: Map<string, PeerSessionView> = new Map()) {
 }
 
 function peerView(peerId: string, checkoutRouting: boolean): PeerSessionView {
-  return { peerId, peerPubkey: `pub-${peerId}`, checkoutRouting, reachable: true, pullsTree: true };
+  return basePeerView({ peerId, peerPubkey: `pub-${peerId}`, checkoutRouting });
 }
 
 describe("StreamMux (unit, stub transport)", () => {

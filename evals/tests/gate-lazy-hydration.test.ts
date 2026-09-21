@@ -1,15 +1,26 @@
-// D-B4 end to end: a client that pulls its own file tree
-// (`file:tree:snapshot:request`) must not also receive the bridge's resync
-// tree:full push, while everything else the resync re-sends still arrives; a
-// client that does NOT advertise pulling it keeps getting the push (legacy
-// path preserved).
+// The merge gate for on-demand file trees: opening a project (or resyncing
+// an already-open one) must never pull a whole file tree. The whole-tree push and the `pullsTree`-keyed fork in behaviour it
+// used to guard directly are gone — there is no longer a "legacy path" that
+// still gets a push, for any client. What replaces it is asserted here three
+// ways: (1) a resync, run across several checkouts and observed by two
+// differently-configured clients, produces no tree data at all unless asked;
+// (2) the listing protocol itself is genuinely shallow — requesting the root
+// returns depth-1 entries only (a subdirectory comes back with no `children`),
+// and a subdirectory's contents arrive only once it is asked for by path;
+// (3) `file:tree:snapshot:request` — the whole-tree pull, now retired — is
+// INERT: sending one produces no answer at all.
 //
-// Only a LOOPBACK owner hello triggers `resyncState` (see D-B4's brief, §0a) —
-// a relay stream attach or re-handshake runs no resync at all. So the trigger
-// here is a `LocalTestClient` connected against the SAME project core the
-// relay app (`env.app`) is bound to; the relay app's stream is one of the two
-// surfaces asserted on (the other is the loopback socket itself), since a
-// resync push reaches every bus subscriber.
+// (3) is asserted over a hand-built envelope rather than `createMessage`,
+// because the type no longer exists in the protocol to construct. That is the
+// point: a bridge that re-grows a whole-tree reply fails here, and nothing
+// else would catch it now that neither frame type has a schema.
+//
+// Only a LOOPBACK owner (re)connect triggers `resyncState` — a relay stream
+// attach or re-handshake runs no resync at all. So the trigger here is a
+// `LocalTestClient` connected against the SAME project core the relay app
+// (`env.app`) is bound to; the relay app's stream is one of the surfaces
+// asserted on, since a push (if one existed) would reach every bus
+// subscriber, not just the loopback socket that triggered it.
 //
 // Known Windows test noise (NOT a failure): fs.watch EPERM/EBUSY on teardown
 // (see drill-in.test.ts / gate-flow-control.test.ts).
@@ -75,7 +86,19 @@ async function waitFor(predicate: () => boolean, what: string, timeoutMs: number
   throw new Error(`timed out waiting for ${what}`);
 }
 
-test("a pulling client is not re-sent the tree on resync, but a non-pulling one still is", async () => {
+/** True once `frames` carries a `git:sync-state` for every id in `checkoutIds`
+ *  — the resync's positive evidence, forced per runtime ahead of anything
+ *  tree-related in program order, so seeing it all here is what makes the
+ *  negative tree assertions below trustworthy rather than merely "nothing
+ *  arrived yet". */
+function hasSyncStateForEveryCheckout(frames: AbMessage[], checkoutIds: string[]): boolean {
+  const covered = new Set(
+    frames.filter((m) => m.type === "git:sync-state").map((m: any) => m.checkoutId),
+  );
+  return checkoutIds.every((id) => covered.has(id));
+}
+
+test("a project resync never pushes a whole tree, and the listing protocol stays shallow", async () => {
   const env = await setupTestEnv({ fixtureName: "basic", prepareProject: initRepo });
   let local: LocalTestClient | null = null;
   let legacy: LocalTestClient | null = null;
@@ -90,80 +113,116 @@ test("a pulling client is not re-sent the tree on resync, but a non-pulling one 
       id: "connect", type: "project:start", projectId: env.projectId,
     })).connect;
 
-    // --- Row 1: a pulling owner connects, triggering resyncState. ---
-    env.app.drainQueued("tree:full"); // nothing stale from setup should count below.
+    // --- A pulling owner connects, triggering resyncState. ---
+    env.app.drainQueued("tree:full");
     const seen: AbMessage[] = [];
     local = new LocalTestClient();
     local.on((m) => seen.push(m));
-    await local.connect(conn); // pullsTree defaults on.
+    await local.connect(conn); // pullsTree defaults on, and is now ignored either way.
 
-    // Wait for the resync's POSITIVE evidence (git:sync-state is forced per
-    // runtime, ahead of the tree loop in program order) before trusting the
-    // negative tree:full assertion below.
     await waitFor(
-      () => new Set(
-        seen.filter((m) => m.type === "git:sync-state").map((m: any) => m.checkoutId),
-      ).size >= checkoutIds.length,
+      () => hasSyncStateForEveryCheckout(seen, checkoutIds),
       "git:sync-state for every checkout",
       20_000,
     );
 
+    // No `tree:full` — the whole-tree push this gate used to name — from the
+    // resync. (`tree:update`, the live delta channel, is a different
+    // mechanism a resync never drove even before this wave, and freshly
+    // creating a worktree can legitimately fire one of its own as the new
+    // checkout's watcher catches up — asserting its absence here would be
+    // asserting something this test never guaranteed.)
     expect(seen.filter((m) => m.type === "tree:full")).toHaveLength(0);
     // The relay app's stream is the other surface a push would have reached.
     expect(env.app.queuedCount((m: any) => m.type === "tree:full" && m._streamId === streamId)).toBe(0);
 
-    // --- Row 2: a pull is answered once, and a reply right behind it on the ---
-    // --- same stream is not stuck behind a tree push. ---
-    const listId = "lazy-list-1";
-    env.app.sendOnStream(streamId, createMessage("file:tree:snapshot:request", {
-      checkoutId: one.checkoutId,
-    }));
-    const t0 = Date.now();
-    env.app.sendOnStream(streamId, createMessage("session:list", { requestId: listId } as never));
-    const reply = await env.app.waitFor(
-      (m: any) => m._streamId === streamId && m.type === "session:list:result" && m.requestId === listId,
-      20_000,
-    );
-    const elapsed = Date.now() - t0;
-    expect(reply.sessions).toBeDefined();
-    // The product bar is one second; asserted generously here (5s) so a loaded
-    // Windows box with three real worktrees and a real relay never flakes on
-    // scheduling noise unrelated to the fix. The eval's link is loopback-fast,
-    // so a pass here is weak evidence by construction — it would have failed
-    // with four tree:full pushes ahead of it in the same FIFO, but does not
-    // prove a slow link stays under the real one-second bar.
-    expect(elapsed).toBeLessThan(5_000);
-
-    const snaps = env.app.queuedCount((m: any) =>
-      (m.type === "file:tree:snapshot" || m.type === "file:tree:unchanged")
-      && m.checkoutId === one.checkoutId && m._streamId === streamId);
-    expect(snaps).toBe(1);
-
-    // Widen row 1's negative window cheaply now that more time has passed.
-    expect(seen.filter((m) => m.type === "tree:full")).toHaveLength(0);
-
-    // --- Row 3: a client that does NOT advertise pullsTree still gets the ---
-    // --- legacy push (this owner supersedes `local`, firing a fresh resync). ---
+    // --- A second, differently-configured client connects (superseding ---
+    // --- `local`), firing a fresh resync. `pullsTree: false` used to select ---
+    // --- the OTHER behaviour (a forced tree:full per checkout); today the ---
+    // --- capability is parsed-and-ignored (spec Deferred) and both clients ---
+    // --- get the identical, tree-free resync. ---
     const legacySeen: AbMessage[] = [];
     legacy = new LocalTestClient();
     legacy.on((m) => legacySeen.push(m));
     await legacy.connect(conn, { pullsTree: false });
 
     await waitFor(
-      () => new Set(
-        legacySeen.filter((m) => m.type === "tree:full").map((m: any) => m.checkoutId),
-      ).size >= checkoutIds.length,
-      "a tree:full per checkout",
-      30_000,
+      () => hasSyncStateForEveryCheckout(legacySeen, checkoutIds),
+      "git:sync-state for every checkout (legacy)",
+      20_000,
     );
-    // A concurrent filesystem change could add an extra tree:full for a
-    // checkout at any moment, so this asserts the SET of checkouts covered,
-    // never an exact frame count.
-    expect(new Set(legacySeen.filter((m) => m.type === "tree:full").map((m: any) => m.checkoutId)))
-      .toEqual(new Set(checkoutIds));
+    expect(legacySeen.filter((m) => m.type === "tree:full")).toHaveLength(0);
+
+    // Widen the first client's negative window cheaply now that more time has
+    // passed and a second resync has run.
+    expect(seen.filter((m) => m.type === "tree:full")).toHaveLength(0);
+
+    // --- The listing protocol itself is shallow: the root reply's directory ---
+    // --- entries carry no `children` — proving the request walked ONE level, ---
+    // --- not the whole checkout — and a nested file is invisible until its ---
+    // --- own directory is asked for by path. ---
+    const rootReply = await requestListing(env.app, streamId, one.checkoutId);
+    const rootListing = rootReply.listings.find((l: any) => l.path === "");
+    expect(rootListing).toBeDefined();
+    expect(rootListing.missing).toBeUndefined();
+    const rootNames = rootListing.children.map((n: any) => n.name);
+    expect(rootNames).toContain("README.md");
+    expect(rootNames).toContain("src");
+    const srcEntry = rootListing.children.find((n: any) => n.name === "src");
+    expect(srcEntry.type).toBe("directory");
+    // The whole-tree walk this replaces would have nested src's contents
+    // right here; the lazy listing leaves it unexpanded.
+    expect(srcEntry.children).toBeUndefined();
+    expect(rootNames).not.toContain("index.ts");
+    expect(rootNames).not.toContain("utils.ts");
+
+    const srcReply = await requestListing(env.app, streamId, one.checkoutId, ["src"]);
+    const srcListing = srcReply.listings.find((l: any) => l.path === "src");
+    expect(srcListing).toBeDefined();
+    const srcNames = srcListing.children.map((n: any) => n.name);
+    expect(srcNames).toContain("index.ts");
+    expect(srcNames).toContain("utils.ts");
+
+    // --- the retired whole-tree pull is inert ---
+    // Hand-built: the type has no schema any more, so `createMessage` cannot
+    // name it. The bridge must neither answer it nor fall back to any other
+    // whole-tree frame.
+    env.app.sendOnStream(streamId, {
+      id: crypto.randomUUID(),
+      timestamp: Date.now(),
+      type: "file:tree:snapshot:request",
+      checkoutId: one.checkoutId,
+    } as any);
+    await Bun.sleep(1000);
+    expect(env.app.queuedCount(
+      (m: any) => m.type === "file:tree:snapshot" && m._streamId === streamId,
+    )).toBe(0);
+    expect(env.app.queuedCount(
+      (m: any) => m.type === "tree:full" && m._streamId === streamId,
+    )).toBe(0);
   } finally {
     local?.close();
     legacy?.close();
     await env.teardown();
   }
 }, 180_000);
+
+/** Send a root (no `paths`) or children (`paths`) listing request for
+ *  `checkoutId` and return the `file:tree:children` reply. */
+async function requestListing(
+  app: StreamApp,
+  streamId: string,
+  checkoutId: string,
+  paths?: string[],
+): Promise<any> {
+  const replyP = app.waitFor(
+    (m: any) => m._streamId === streamId && m.type === "file:tree:children" && m.checkoutId === checkoutId,
+    10_000,
+  );
+  if (paths) {
+    app.sendOnStream(streamId, createMessage("file:tree:children:request", { paths, checkoutId }));
+  } else {
+    app.sendOnStream(streamId, createMessage("file:tree:root:request", { checkoutId }));
+  }
+  return replyP;
+}

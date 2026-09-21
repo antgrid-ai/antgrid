@@ -58,6 +58,11 @@ abstract class SessionHandshaker {
 
   /// Abort any in-flight [perform] (session teardown / supersession).
   void abort();
+
+  /// End the in-flight [perform], if any, so it resolves null promptly. Unlike
+  /// [abort] a later [perform] must still run: this is the socket dying under
+  /// one attempt, not the session going away.
+  void cancelInFlight();
 }
 
 /// Thrown by [MachineSession.ensureEstablished] when the one handshake attempt
@@ -659,7 +664,7 @@ class MachineSession {
         _established &&
         !_handshakeInFlight) {
       _consecutiveTimeouts = 0;
-      unawaited(_rekey());
+      unawaited(_rekey(reason: 'rpc-timeouts'));
     }
   }
 
@@ -715,7 +720,9 @@ class MachineSession {
     }
     if (_peerWasOffline) {
       _peerWasOffline = false;
-      if (_established && !_handshakeInFlight) unawaited(_rekey());
+      if (_established && !_handshakeInFlight) {
+        unawaited(_rekey(reason: 'peer-bounced'));
+      }
     }
   }
 
@@ -734,6 +741,12 @@ class MachineSession {
     // of which are gated on a live session.
     _established = false;
     _stopLiveness();
+    // An attempt still running was talking over the socket that just died.
+    // Left alone it runs to its timeout, and the supervisor's re-drive on the
+    // NEW socket joins it (`_runHandshake` is single-flight) instead of
+    // starting fresh.
+    _handshaker.cancelInFlight();
+    _scheduler.hold = false;
     _keys?.zeroize();
     _keys = null;
     // Fail every in-flight RPC now: their replies can never arrive on a dead
@@ -764,8 +777,12 @@ class MachineSession {
 
   // --- handshake / rekey ----------------------------------------------------
 
-  Future<void> _rekey() async {
+  Future<void> _rekey({required String reason}) async {
     if (_disposed || !_established) return;
+    // Every trigger is a symptom the session is already dead; without the
+    // reason here the first visible trace is "send dropped" after the attempt
+    // fails, which reads as though the session vanished for no reason.
+    _log(RelayLogLevel.info, 'E2E rekey started', fields: {'reason': reason});
     await _runHandshake();
   }
 
@@ -792,20 +809,44 @@ class MachineSession {
   /// ONE attempt, no retry: the app's connection supervisor owns backoff and
   /// give-up, so a loop here would nest inside its backoff and multiply it.
   Future<void> _handshakeAttempt() async {
+    final wasEstablished = _established;
+    final startedAt = DateTime.now();
+    // A rekey holds the outbound queue: the agent's own socket redial zeroizes
+    // every session before the relay can report it back online, so anything
+    // sealed under the keys this side still holds is lost silently at the far
+    // end. Held frames seal under the new keys once they land (`kick` below).
+    if (wasEstablished) _scheduler.hold = true;
     final newKeys = await _handshaker.perform();
     if (_disposed) {
       newKeys?.zeroize();
       return;
     }
+    final elapsedMs = DateTime.now().difference(startedAt).inMilliseconds;
     if (newKeys == null) {
       // A rekey only ever runs because the session already looks dead
       // (missed pongs, repeated RPC timeouts, a peer that bounced), so keeping
       // the old keys after a failed attempt preserves a session the peer has
       // most likely already dropped — and, with `_established` still true,
       // leaves nothing able to notice.
+      // The initial-attempt failure is the supervisor's to report; this is
+      // the one transition nothing above this layer sees, and it is what
+      // turns every later send into a "send dropped". Not logged when the
+      // socket died under the attempt: `_teardownSession` already ran.
+      if (wasEstablished && _established) {
+        _log(
+          RelayLogLevel.warn,
+          'E2E session torn down — rekey attempt failed',
+          fields: {'elapsedMs': elapsedMs},
+        );
+      }
       _teardownSession();
       return;
     }
+    _log(
+      RelayLogLevel.info,
+      'E2E session established',
+      fields: {'rekey': wasEstablished, 'elapsedMs': elapsedMs},
+    );
     // Make-before-break: swap AFTER the new attempt confirmed, then zeroize
     // the superseded keys (no dropped traffic on the old keys).
     final old = _keys;
@@ -821,13 +862,14 @@ class MachineSession {
     if (!_readyCompleter.isCompleted) _readyCompleter.complete();
     if (!_established$.isClosed) _established$.add(null);
     // A new session credits from zero. The QUEUE deliberately survives a rekey:
-    // frames dequeued from here on seal under the new keys, and the agent
-    // swapped before it confirmed, so nothing straddles the change in this
-    // direction — where dropping them would strand every pending RPC until its
-    // timeout.
+    // it was held for the attempt's duration, so every frame in it seals under
+    // the new keys from here on, and the agent swapped before it confirmed —
+    // nothing straddles the change in this direction, where dropping them
+    // would strand every pending RPC until its timeout.
     _sessionEpoch++;
     _scheduler.resetWindows();
     _resetRxFlow();
+    _scheduler.hold = false;
     _scheduler.kick();
     // The agent un-mutes EVERY stream on a fresh session (`notifyPeerOnline` in
     // bridge/src/stream-mux.ts), so a throttle carried across the boundary
@@ -928,7 +970,7 @@ class MachineSession {
       );
       // Session declared dead at the E2E layer → rekey on the live socket.
       _stopLiveness();
-      unawaited(_rekey());
+      unawaited(_rekey(reason: 'liveness'));
       return;
     }
     _missedPongs++;
@@ -1106,12 +1148,7 @@ class MachineSession {
     try {
       json = jsonDecode(plaintext) as Map<String, dynamic>;
     } catch (_) {
-      _dropped(
-        'rx',
-        'plaintext-not-json',
-        channel: channel,
-        frameId: frameId,
-      );
+      _dropped('rx', 'plaintext-not-json', channel: channel, frameId: frameId);
       return;
     }
     final type = json['type'];
@@ -1123,7 +1160,12 @@ class MachineSession {
       return;
     }
     if (!json.containsKey('m')) {
-      _dropped('rx', 'unrecognized-plaintext', channel: channel, frameId: frameId);
+      _dropped(
+        'rx',
+        'unrecognized-plaintext',
+        channel: channel,
+        frameId: frameId,
+      );
       return;
     }
     final env = StreamEnvelope.fromJson(json);
@@ -1471,6 +1513,15 @@ class MachineSession {
   Future<void> _sendSessionFrame(Map<String, dynamic> obj) async {
     final keys = _keys;
     final type = obj['type'] as String?;
+    if (keys != null && _handshakeInFlight) {
+      // Same hold as the app queue during a rekey (see `_handshakeAttempt`):
+      // these bypass the scheduler. Skipped, not queued — a credit is
+      // meaningless against the session the establishment resets, and the
+      // agent kills a session only after two unanswered pings 20 s apart
+      // (bridge/src/relay-client.ts), so a 10 s attempt costs at most one pong.
+      _dropped('tx', 'rekey-in-flight', channel: 'control', msgType: type);
+      return;
+    }
     if (keys == null) {
       _dropped('tx', 'no-e2e-session', channel: 'control', msgType: type);
       // This path carries ping, pong and credit — the frames the peer reads as
@@ -1666,22 +1717,12 @@ class StreamTransport extends BufferedAgentTransport {
   /// not carry (session list, config, the reopened file, the transcript). This
   /// is the per-stream reconciliation checkpoint.
   ///
-  /// The pull carries every durable frame but the file tree, and for a relay
-  /// app it is the ONLY carrier of a checkout's `agent:status` — the frame its
-  /// terminal tabs are built from: `terminal:started` is not durable, the
-  /// bridge republishes a checkout's status on nothing an app can trigger
-  /// short of starting a session that is already running, and the next
-  /// establishment is the only other re-pull. `tree:full` is left out on
-  /// purpose, and not pulled separately either: it is the one unbounded frame
-  /// (every checkout's whole tree, megabytes for a project with several
-  /// worktrees), and the hydrators below already ask the bridge for each
-  /// checkout's tree on every establishment — pulling it here as well sent the
-  /// same megabytes two and three times over on every connect, and on a slow
-  /// uplink that backlog starved the bridge's relay pongs until the relay
-  /// closed its socket, so the session dropped and the whole cycle re-ran.
-  /// While the tree rode in this reply at all, a slow link or one lost
-  /// fragment cost the terminal its tab — a running session opened afterwards
-  /// sat on "waiting for agent" with nothing left to deliver it.
+  /// The pull carries every durable frame but [_kLegacyOnlyReplayTypes], and
+  /// for a relay app it is the ONLY carrier of a checkout's `agent:status` —
+  /// the frame its terminal tabs are built from: `terminal:started` is not
+  /// durable, the bridge republishes a checkout's status on nothing an app can
+  /// trigger short of starting a session that is already running, and the next
+  /// establishment is the only other re-pull.
   ///
   /// The pull is retried on timeout, since a reply that lands after the wait
   /// is discarded like any late RPC response. Only the first attempt is
@@ -1698,12 +1739,11 @@ class StreamTransport extends BufferedAgentTransport {
   /// [refreshSnapshot] exists for a (re)establishment, where the view-state the
   /// snapshot does not carry is stale too. A user asking one checkout to try
   /// attaching again is not that: the hydrator replay re-asks every ACTIVE
-  /// checkout for its whole `tree:full`, so routing a tap through it would
-  /// answer one stalled workspace with megabytes for every workspace on
-  /// screen beside it. This carries the frame
-  /// that tap is actually after — the bridge recomputes each checkout's
-  /// `agent:status` while serving the pull, so the reply is no older than the
-  /// tap.
+  /// checkout for its full listing state, so routing a tap through it would
+  /// answer one stalled workspace with extra round trips for every workspace
+  /// on screen beside it. This carries the frame that tap is actually after —
+  /// the bridge recomputes each checkout's `agent:status` while serving the
+  /// pull, so the reply is no older than the tap.
   ///
   /// Shares [_fetchSnapshot]'s generation stamp, so a pull already airborne is
   /// superseded rather than duplicated. The returned future completes when the
@@ -1752,7 +1792,7 @@ class StreamTransport extends BufferedAgentTransport {
     const method = 'state.snapshot';
     const params = <String, dynamic>{
       'types': ['*'],
-      'exclude': _kHeavyReplayTypes,
+      'exclude': _kLegacyOnlyReplayTypes,
     };
     try {
       // Only the first attempt counts toward the session's consecutive-timeout
@@ -1820,7 +1860,21 @@ class StreamTransport extends BufferedAgentTransport {
   }
 }
 
-/// Durable frames the snapshot pull leaves out: the only unbounded ones the
-/// bridge caches, each delivered by a per-checkout hydrator instead — see
-/// [StreamTransport.refreshSnapshot].
-const _kHeavyReplayTypes = <String>['tree:full'];
+/// Durable frames only a bridge older than this app still caches, kept out of
+/// the welcome-replay reply.
+///
+/// Inert against a current bridge: the file tree is listed per directory on
+/// demand and no whole-tree frame is retained, so there is nothing under this
+/// type to exclude. An older bridge retains one `tree:full` PER CHECKOUT at
+/// open — measured at ~2 MB for a project with several managed worktrees — and
+/// this app has no handler for one, so a pull of everything would decrypt and
+/// discard those megabytes on every establishment; on a slow uplink that
+/// backlog starved the bridge's relay pongs until the relay closed the socket,
+/// dropping the session and re-running the whole cycle.
+///
+/// The app and the bridge ship on separate release trains, so new-app /
+/// old-bridge is the ordinary rollout window rather than a corner case — the
+/// mirror of the `pullsTree` deferral, and dropped in the same release as it.
+/// TODO(bharath): drop with `pullsTree`, once no bridge in the field caches a
+/// tree.
+const _kLegacyOnlyReplayTypes = <String>['tree:full'];

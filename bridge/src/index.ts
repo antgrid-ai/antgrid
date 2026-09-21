@@ -2,7 +2,7 @@ import "./agent-host";
 import { Command } from "commander";
 import { join } from "node:path";
 import type { Level } from "pino";
-import { logger, setLogLevel } from "./logger";
+import { logger, setLogLevel, LOG_LEVELS } from "./logger";
 import { consoleBootstrapIO, writeConfigYaml, buildConfigFromBootstrap } from "./bootstrap";
 import { startPerfLog } from "./perf-log";
 import { readBootstrapPayload } from "./auth/credentials";
@@ -17,7 +17,7 @@ import { initCrashReporting, captureBridgeError, flushCrashReports } from "./cra
 // Component-tagged child for this module's own lifecycle logs.
 const log = logger.child({ component: "bridge" });
 
-const VALID_LEVELS = new Set<string>(["trace", "debug", "info", "warn", "error", "fatal"]);
+const VALID_LEVELS = new Set<string>(LOG_LEVELS);
 
 /** Ceiling on the whole teardown, from the first signal to `process.exit`.
  *  Sits above everything `HostServer.shutdown` budgets for itself — the 5s
@@ -364,6 +364,26 @@ program
       process.exit(1);
     }
     process.exit(await runModelwatchCli({ ...opts, limit }));
+  });
+
+// antgrid log-level subcommand. `--log-level`/`ANTGRID_LOG_LEVEL` above are read
+// once at startup, so they reach nothing already running — see cli/log-level.ts.
+program
+  .command("log-level")
+  .description("Raise the running host's log level for a bounded window (delivery-path debugging)")
+  .argument("[level]", "trace | debug | info | warn | error | fatal (omit to restore the configured level)")
+  .option("--ttl <ms>", "How long to stay there before lapsing back (default 600000; 0 restores now)")
+  .option("--dir <path>", "ANTGRID_DIR of the target host (debug builds use ~/.antgrid-dev)")
+  .action(async (level: string | undefined, opts: { ttl?: string; dir?: string }) => {
+    const { runLogLevelCli } = await import("./cli/log-level");
+    const ttlMs = opts.ttl === undefined ? undefined : Number(opts.ttl);
+    // Zero is admitted and means it: it is how an operator ends a window early
+    // rather than waiting it out.
+    if (ttlMs !== undefined && (!Number.isFinite(ttlMs) || ttlMs < 0)) {
+      console.error("antgrid log-level: --ttl must be zero or a positive number of milliseconds");
+      process.exit(1);
+    }
+    process.exit(await runLogLevelCli({ ...(level === undefined ? {} : { level }), ...(ttlMs === undefined ? {} : { ttlMs }), ...(opts.dir === undefined ? {} : { dir: opts.dir }) }));
   });
 
 // antgrid phones subcommand — inspect and drop local phone records. Whether a

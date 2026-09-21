@@ -101,11 +101,11 @@ decides whether this app may be routed checkout-scoped frames at all. An app
 that does not advertise `checkoutRouting` is refused a project holding a managed
 session rather than shown main's workspace beside an isolated agent (root
 `CLAUDE.md`, "Checkout-scoped routing"). `pullsTree` is the opposite kind of
-flag — a bandwidth hint, never a gate: an app that advertises it pulls each
-checkout's file tree itself (`file:tree:snapshot:request`), so the agent skips
-the `tree:full` push in its re-sync and falls back to pushing for any client
-that stays silent. Both flags are `=== true` checks on the agent side; a wrong
-type reads as absent.
+flag — a bandwidth hint that is now parsed and ignored: it used to mean the app
+pulled each checkout's file tree itself, so the agent could skip the `tree:full`
+push in its re-sync. Neither the push nor the pull exists any more; every app
+lists per directory on demand. `checkoutRouting` is an `=== true` check on the
+agent side; a wrong type reads as absent.
 
 Messages 3–5 are sealed with the session transport keys (§7). Messages 3 and 4
 are sealed under **candidate** keys — the session is not confirmed yet. The
@@ -326,6 +326,16 @@ live socket) on any of: missed sealed pongs (§8.5), a run of consecutive RPC
 timeouts while established, or peer-online following a peer-offline. Owned by
 `MachineSession`.
 
+The phone **sends nothing under the old keys while its rekey is in flight**: the
+app queue is held and ping/pong/credit are skipped until `established`. The
+usual trigger is the agent's own socket redial, which ends every session on the
+agent before the relay can report the new socket, so a frame sealed under the
+old keys is a silent loss reported to its sender as sent. For the frames the
+phone sealed *before* it learned of the redial, the agent retires each dropped
+session's keys receive-only for `RETIRED_KEYS_MS` (§8.6) and tries them last:
+app traffic is routed, session frames are dropped. Only a redial retires; a
+takeover or liveness death still zeroizes at once.
+
 ### 8.4 Rekey and capacity
 
 An agent holds **one session per app device**, keyed by the route address, over
@@ -380,7 +390,8 @@ persisted to disk, logs, or closures. `ss` is zeroized immediately after
 
 | Trigger | Path |
 |---|---|
-| Socket loss / client teardown | `resetE2eState` — every session and attempt |
+| Socket loss (redial) | `resetE2eState` — every attempt now; every session's keys retired receive-only, zeroized after `RETIRED_KEYS_MS` (§8.3) |
+| Client teardown (`close`) | `resetE2eState` plus every retired set — no redial follows |
 | Rekey confirmed | swap, then zeroize the superseded set |
 | Capacity eviction | `dropSession` after the notice; `tearDownPending` for a half-open evictee |
 | Half-open attempt expiry | `tearDownPending` — candidate keys only |
@@ -405,6 +416,7 @@ Values live in code and move; these are the names to look up. Agent side is
 | Constant | Home | Bounds |
 |---|---|---|
 | `HALF_OPEN_MS` | agent | How long a half-open attempt (client-hello seen, `app:ready` never arrived) holds candidate keys |
+| `RETIRED_KEYS_MS` | agent | How long a redial keeps each dropped session's keys receive-only (§8.3) |
 | `PING_SILENCE_MS` / `kPingSilenceSeconds` | both | Sealed-receive silence before a sealed `ping` |
 | `MAX_MISSED_PONGS` / `kMaxMissedPongs` | both | Unanswered pings before the session is declared dead |
 | `_kConsecutiveTimeoutsToRekey` | phone | Consecutive RPC timeouts on an established session before a rekey |
@@ -432,9 +444,10 @@ most `CHANNEL_WINDOW_BYTES` of sealed payload in flight on a channel beyond what
 the peer has credited, and at most `SOCKET_INFLIGHT_BYTES` across both channels;
 neither side can read its socket buffer, so this self-accounting is the only
 bound on what a liveness frame is written behind. App frames queue per channel
-in FIFO order and are sealed only when dequeued (a frame queued across a rekey
-goes out under the keys live at that moment); a channel whose window is full
-does not block the other.
+in FIFO order and are sealed only when dequeued (the phone holds its queue for
+the whole of a rekey, so a frame queued across one goes out under the new keys;
+the agent, which never initiates, seals under whatever keys are live at that
+moment); a channel whose window is full does not block the other.
 
 The receiver counts the sealed payload bytes of every kind-0 frame the
 established keys opened or nothing opened — decrypt failures included, so a bad

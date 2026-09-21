@@ -28,7 +28,7 @@ import 'package:antgrid/widgets/transcript/slash_suggestions.dart';
 import 'package:antgrid/design/widgets/ab_composer_send_button.dart';
 import 'package:antgrid/design/widgets/ab_icon_button.dart';
 import 'package:antgrid/design/widgets/ab_loading.dart';
-import 'package:antgrid/models/file_tree_models.dart';
+import 'package:antgrid/services/file_service.dart';
 import 'package:antgrid/widgets/transcript/file_mention_suggestions.dart';
 import 'package:flutter/services.dart';
 import '../../helpers/prefs_test_mock.dart';
@@ -590,38 +590,42 @@ void main() {
   });
 
   group('file mentions', () {
-    FileNode file(String path) => FileNode(
-      name: path.split('/').last,
-      path: path,
-      type: FileNodeType.file,
-    );
-    final treeRoot = FileNode(
-      name: '',
-      path: '',
-      type: FileNodeType.directory,
-      children: [
-        file('README.md'),
-        FileNode(
-          name: 'lib',
-          path: 'lib',
-          type: FileNodeType.directory,
-          children: [
-            file('lib/main.dart'),
-            FileNode(
-              name: 'src',
-              path: 'lib/src',
-              type: FileNodeType.directory,
-              children: [file('lib/src/util.dart')],
-            ),
-          ],
-        ),
-      ],
-    );
-    final treeOverrides = <Override>[
-      fileTreeStateProvider.overrideWith(
-        (ref) => Stream.value(FileTreeState(projectId: 'p', root: treeRoot)),
-      ),
-    ];
+    // Matching and ranking both moved bridge-side (`file:find`, driven by
+    // FileService.find — see file_mention_suggestions.dart's [FileMention]
+    // doc). These tests drive the round trip over the fake transport instead
+    // of a synced tree fixture: find the outbound `file:find`, answer it with
+    // `file:find-result`, then pump for the reply to land.
+
+    Map<String, dynamic> entry(String path, {bool isDir = false}) =>
+        {'path': path, 'isDir': isDir};
+
+    String lastFindRequestId(FakeAgentTransport t) =>
+        (t.sent.lastWhere((m) => m['type'] == 'file:find')['requestId']
+            as String);
+
+    // Landing the reply crosses a real async gap FileService's own dispose
+    // tests settle with `Future.delayed(Duration.zero)`: the debounced find()
+    // completer resolves through PendingReply.complete's `.then()` before
+    // _maybeFindMentions's `await fileService.find(...)` resumes and calls
+    // setState — two microtask hops after the emit, not one. A single
+    // `tester.pump()` schedules and runs a frame but doesn't itself wait out
+    // that chain, so the first pump can land before setState fires and the
+    // rebuild it triggers needs a second pump to be observed.
+    Future<void> answerFind(
+      WidgetTester tester,
+      FakeAgentTransport t,
+      String requestId,
+      List<Map<String, dynamic>> entries,
+    ) async {
+      t.emit('file:find-result', {
+        'projectId': 'p',
+        'requestId': requestId,
+        'entries': entries,
+        'engine': 'ripgrep',
+      });
+      await tester.pump();
+      await tester.pump();
+    }
 
     String composerText(WidgetTester tester) => tester
         .widget<RichComposer>(find.byType(RichComposer))
@@ -630,41 +634,65 @@ void main() {
         .document
         .toPlainText();
 
-    testWidgets('typing @ opens a files-first shallow-first browse list', (
+    testWidgets('typing @ opens a panel from the bridge-ranked results', (
       tester,
     ) async {
-      await _pumpWithService(
-        tester,
-        const AgentSessionState(),
-        extraOverrides: treeOverrides,
-      );
+      final t = await _pumpWithService(tester, const AgentSessionState());
+      // _typeIntoComposer settles past FileService.findDebounce (250ms), so
+      // the debounced `file:find` has already been sent by the time it
+      // returns.
       await _typeIntoComposer(tester, '@');
       expect(find.byType(FileMentionSuggestions), findsOneWidget);
+      // Searching…, before the bridge has answered.
+      expect(find.text('Searching…'), findsOneWidget);
+
+      await answerFind(tester, t, lastFindRequestId(t), [
+        entry('README.md'),
+        entry('lib/main.dart'),
+        entry('lib', isDir: true),
+      ]);
+
       expect(find.text('README.md'), findsOneWidget);
       expect(find.text('lib/main.dart'), findsOneWidget);
       expect(find.text('lib/'), findsOneWidget); // dir marker
       await _disposeTree(tester);
     });
 
-    testWidgets('typing @ut filters to matching paths', (tester) async {
-      await _pumpWithService(
-        tester,
-        const AgentSessionState(),
-        extraOverrides: treeOverrides,
-      );
+    testWidgets('an empty answer says so, not "no panel"', (tester) async {
+      final t = await _pumpWithService(tester, const AgentSessionState());
+      await _typeIntoComposer(tester, '@zzz-nope');
+      await answerFind(tester, t, lastFindRequestId(t), const []);
+
+      expect(find.byType(FileMentionSuggestions), findsOneWidget);
+      expect(find.text('No matching files'), findsOneWidget);
+    });
+
+    testWidgets('typing @ut sends the query verbatim to file:find', (
+      tester,
+    ) async {
+      final t = await _pumpWithService(tester, const AgentSessionState());
       await _typeIntoComposer(tester, '@ut');
+      final sent = t.sent.lastWhere((m) => m['type'] == 'file:find');
+      expect(sent['query'], 'ut');
+      // D10: mentions hand a path to the agent, so ignored files are noise —
+      // unlike the tree's own browse default.
+      expect(sent['includeIgnored'], isFalse);
+
+      await answerFind(tester, t, sent['requestId'] as String, [
+        entry('lib/src/util.dart'),
+      ]);
       expect(find.text('lib/src/util.dart'), findsOneWidget);
       expect(find.text('README.md'), findsNothing);
       await _disposeTree(tester);
     });
 
     testWidgets('tapping a file row inserts the mention', (tester) async {
-      await _pumpWithService(
-        tester,
-        const AgentSessionState(),
-        extraOverrides: treeOverrides,
-      );
+      final t = await _pumpWithService(tester, const AgentSessionState());
       await _typeIntoComposer(tester, '@ma');
+      await answerFind(tester, t, lastFindRequestId(t), [
+        entry('lib/main.dart'),
+      ]);
+
       await tester.tap(find.text('lib/main.dart'));
       await tester.pump();
       expect(composerText(tester), '@lib/main.dart \n');
@@ -675,12 +703,12 @@ void main() {
     testWidgets('tapping a dir row inserts a trailing-slash mention', (
       tester,
     ) async {
-      await _pumpWithService(
-        tester,
-        const AgentSessionState(),
-        extraOverrides: treeOverrides,
-      );
+      final t = await _pumpWithService(tester, const AgentSessionState());
       await _typeIntoComposer(tester, '@li');
+      await answerFind(tester, t, lastFindRequestId(t), [
+        entry('lib', isDir: true),
+      ]);
+
       await tester.tap(find.text('lib/'));
       await tester.pump();
       expect(composerText(tester), '@lib/ \n');
@@ -689,12 +717,13 @@ void main() {
 
     testWidgets('arrow down + enter accepts the second entry; Esc closes '
         'and an edit reopens', (tester) async {
-      await _pumpWithService(
-        tester,
-        const AgentSessionState(),
-        extraOverrides: treeOverrides,
-      );
+      final t = await _pumpWithService(tester, const AgentSessionState());
       await _typeIntoComposer(tester, '@');
+      await answerFind(tester, t, lastFindRequestId(t), [
+        entry('README.md'),
+        entry('lib/main.dart'),
+      ]);
+
       // Key events route through the composer FocusNode's onKeyEvent — it
       // must actually hold focus for sendKeyEvent to reach it.
       final composer = tester.widget<RichComposer>(find.byType(RichComposer));
@@ -705,18 +734,20 @@ void main() {
       await tester.pump();
       await tester.sendKeyEvent(LogicalKeyboardKey.enter);
       await tester.pump();
-      // Browse order: README.md, lib/main.dart, lib/src/util.dart, dirs…
       expect(composerText(tester), '@lib/main.dart \n');
 
       // Reopen on the completed mention's tail? No token (space closed it) —
-      // type a fresh @, Esc-dismiss, then edit to re-arm.
+      // type a fresh @. Accepting cleared the issued-query watermark (see
+      // _maybeFindMentions), so this fires its own file:find even though the
+      // query text ('') is the same as the very first one.
       composer.controller.fleather.replaceText(
         '@lib/main.dart '.length,
         0,
         '@',
         selection: TextSelection.collapsed(offset: '@lib/main.dart @'.length),
       );
-      await tester.pump();
+      await tester.pump(FileService.findDebounce);
+      await answerFind(tester, t, lastFindRequestId(t), [entry('README.md')]);
       expect(find.text('README.md'), findsOneWidget);
 
       await tester.sendKeyEvent(LogicalKeyboardKey.escape);
@@ -729,7 +760,8 @@ void main() {
         'r',
         selection: TextSelection.collapsed(offset: '@lib/main.dart @r'.length),
       );
-      await tester.pump();
+      await tester.pump(FileService.findDebounce);
+      await answerFind(tester, t, lastFindRequestId(t), [entry('README.md')]);
       expect(find.text('README.md'), findsOneWidget);
       await _disposeTree(tester);
     });
@@ -737,26 +769,30 @@ void main() {
     testWidgets('@ after a slash command shows mentions, not slash rows', (
       tester,
     ) async {
-      await _pumpWithService(
+      final t = await _pumpWithService(
         tester,
         const AgentSessionState(capabilities: _capsFixture),
-        extraOverrides: treeOverrides,
       );
       await _typeIntoComposer(tester, '/review @ut');
+      await answerFind(tester, t, lastFindRequestId(t), [
+        entry('lib/src/util.dart'),
+      ]);
       expect(find.text('lib/src/util.dart'), findsOneWidget);
       expect(find.text('/review'), findsNothing);
       await _disposeTree(tester);
     });
 
-    testWidgets('email-like a@b shows no panel', (tester) async {
-      await _pumpWithService(
-        tester,
-        const AgentSessionState(),
-        extraOverrides: treeOverrides,
-      );
+    testWidgets('email-like a@b shows no panel and sends no find', (
+      tester,
+    ) async {
+      final t = await _pumpWithService(tester, const AgentSessionState());
       await _typeIntoComposer(tester, 'a@b');
-      expect(find.text('README.md'), findsNothing);
-      expect(find.text('lib/main.dart'), findsNothing);
+      // The widget itself always mounts (visible: mentionVisible gates its
+      // OWN content, not whether it's in the tree) — assert on content
+      // instead of the type.
+      expect(find.text('Searching…'), findsNothing);
+      expect(find.text('No matching files'), findsNothing);
+      expect(t.sent.where((m) => m['type'] == 'file:find'), isEmpty);
       await _disposeTree(tester);
     });
   });

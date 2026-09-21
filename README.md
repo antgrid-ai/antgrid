@@ -18,8 +18,10 @@ file tree, git review with diffs, and a live browser preview. The same workspace
 a phone, over a relay that is end-to-end encrypted and cannot read a byte of what passes
 through it.
 
-Start a task with your coding agent. When you're ready, tell Handler what's left,
-how to proceed and when to ask you. It checks the agent's work against your
+Antgrid's Handler feature takes on the follow-ups for long-running coding tasks.
+Start with your agent and do as much as you want together. When you're ready to
+step away, tell Handler what's left, how to proceed and when to ask you.
+It checks the agent's responses against your
 instructions and asks for evidence before moving on. It notifies you when it needs
 your input or your instructions say to
 check with you. Its judgement can be wrong; review its decisions and cited evidence.
@@ -41,7 +43,8 @@ Antgrid does not replace your agent and ships no model of its own.
 
 ## Features
 
-- **Handler.** Tell it what your agent should do next and when to ask you. Handler
+- **Handler.** Hand over the follow-ups on long-running tasks. Tell it what's left,
+  how to proceed and when to ask you. Handler
   asks for evidence before moving on and brings questions to you when needed or
   instructed. It doesn't start new sessions or jobs.
 - **Bring your own agent.** Claude Code, Codex, opencode, Cursor, GitHub Copilot,

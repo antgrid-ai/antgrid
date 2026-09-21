@@ -269,6 +269,11 @@ describe("viewer routes", () => {
       // session exists to be narrowed away from.
       "machine:capability-card": { id: "a", type: "machine:capability-card", projects: [] },
       "session-bus:remote-directory": { id: "a", type: "session-bus:remote-directory", machines: [] },
+      // An arm, but not this viewer's: what it turns up is the HOST's own log
+      // file, which the page cannot read and which is not the capture ring a
+      // viewer session is scoped to. Its ticket travels in a URL fragment, so
+      // the reach it buys stays the narrowest thing that serves the document.
+      "log:level": { id: "a", type: "log:level", level: "debug", ttlMs: 1000 },
     };
     // The two maps are exhaustive over the union by hand, which nothing but
     // this line keeps true: a verb added to the schema without a decision here

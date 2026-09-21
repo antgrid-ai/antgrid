@@ -24,43 +24,6 @@ describe("FileWatcher", () => {
     rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it("sends full tree on sendFullTree()", () => {
-    const messages: AbMessage[] = [];
-    const watcher = new FileWatcher(
-      { id: "test", name: "Test", path: tempDir },
-      (msg) => messages.push(msg),
-      createConnState(),
-    );
-
-    watcher.sendFullTree();
-
-    expect(messages.length).toBe(1);
-    expect(messages[0].type).toBe("tree:full");
-    if (messages[0].type === "tree:full") {
-      expect(messages[0].root.type).toBe("directory");
-      expect(messages[0].root.children!.length).toBeGreaterThan(0);
-    }
-
-    watcher.stop();
-  });
-
-  it("passes replayOnly through to the sender", () => {
-    const seen: Array<{ force?: boolean; replayOnly?: boolean } | undefined> = [];
-    const watcher = new FileWatcher(
-      { id: "test", name: "Test", path: tempDir },
-      (_msg, opts) => seen.push(opts),
-      createConnState(),
-    );
-
-    // The watcher does not decide whether a tree reaches the wire; the sender
-    // it was handed does. A sender with no bus (this one) delivers regardless,
-    // which is the old behaviour rather than a break.
-    watcher.sendFullTree({ replayOnly: true });
-
-    expect(seen).toEqual([{ replayOnly: true }]);
-    watcher.stop();
-  });
-
   it("detects file additions", async () => {
     const messages: AbMessage[] = [];
     const watcher = new FileWatcher(
@@ -113,8 +76,41 @@ describe("FileWatcher", () => {
 
     await new Promise((r) => setTimeout(r, 200));
 
-    expect(messages.some((m) => m.type === "tree:full")).toBe(true);
+    expect(messages.some((m) => m.type === "file:tree:invalidated")).toBe(true);
     expect(messages.some((m) => m.type === "tree:update")).toBe(false);
+
+    watcher.stop();
+  });
+
+  // The invalidation frame is what a lazy-tree app resyncs from — its seq must
+  // move on every unnamed-change resync, or the bus's payload-equality dedup
+  // swallows the second one and the app never learns the tree it holds is stale.
+  it("bumps file:tree:invalidated's seq on every resync", async () => {
+    const messages: AbMessage[] = [];
+    const watcher = new FileWatcher(
+      { id: "test", name: "Test", path: tempDir },
+      (msg) => messages.push(msg),
+      createConnState(),
+    );
+
+    watcher.handleNativeEvent(null);
+    await new Promise((r) => setTimeout(r, 200));
+
+    const invalidated = messages.find((m) => m.type === "file:tree:invalidated");
+    if (invalidated?.type !== "file:tree:invalidated") {
+      throw new Error("expected a file:tree:invalidated");
+    }
+    expect(invalidated.seq).toBeGreaterThan(0);
+
+    // Consecutive resyncs must differ, or the bus's payload-equality dedup
+    // swallows the second — the frame is sent unforced and leans on that.
+    watcher.handleNativeEvent(null);
+    await new Promise((r) => setTimeout(r, 200));
+    const seqs = messages
+      .filter((m) => m.type === "file:tree:invalidated")
+      .map((m) => (m.type === "file:tree:invalidated" ? m.seq : -1));
+    expect(seqs).toHaveLength(2);
+    expect(seqs[1]).toBeGreaterThan(seqs[0]);
 
     watcher.stop();
   });
@@ -141,7 +137,7 @@ describe("FileWatcher", () => {
     connState.appFocusPaused = false;
     watcher.handleNativeEvent(null);
     await new Promise((r) => setTimeout(r, 200));
-    expect(messages.some((m) => m.type === "tree:full")).toBe(true);
+    expect(messages.some((m) => m.type === "file:tree:invalidated")).toBe(true);
 
     watcher.stop();
   });
@@ -485,15 +481,36 @@ describe("FileWatcher pause", () => {
     watcher.stop();
   });
 
-  it("getTreeSnapshot returns current tree + fileSeq", () => {
+  // The watcher's own ignore prune is unconditional and never consults
+  // includeIgnored — a git-ignored path produces no delta at all, not a
+  // delta the app then filters out. The refresh is collapse-then-expand,
+  // never the watcher.
+  it("produces no delta for a git-ignored path", async () => {
+    writeFileSync(join(tempDir, ".gitignore"), "*.log\n");
+    const messages: AbMessage[] = [];
+    const watcher = new FileWatcher(
+      { id: "test", name: "Test", path: tempDir },
+      (msg) => messages.push(msg),
+      createConnState(),
+    );
+
+    writeFileSync(join(tempDir, "debug.log"), "noise");
+    watcher.handleNativeEvent("debug.log");
+    await new Promise((r) => setTimeout(r, 250));
+
+    expect(messages).toEqual([]);
+
+    watcher.stop();
+  });
+
+  it("getRootListing returns the root's children at the current fileSeq", () => {
     const connState = createConnState();
     const fw = new FileWatcher(
       { path: tempDir, id: "p1" },
       () => {},
       connState,
     );
-    const snap = fw.getTreeSnapshot();
-    expect(snap.tree).toBeDefined();
-    expect(snap.seq).toBe(connState.fileSeq(tempDir));
+    expect(fw.getRootListing(true).children).toBeDefined();
+    expect(fw.currentSeq()).toBe(connState.fileSeq(tempDir));
   });
 });

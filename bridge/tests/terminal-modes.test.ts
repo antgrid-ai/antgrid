@@ -16,6 +16,20 @@ describe("TerminalModeTracker", () => {
     expect(t.isSet(BRACKETED_PASTE)).toBe(false);
   });
 
+  test("feed answers which modes the chunk moved", () => {
+    // A caller timing itself against the announcement has to tell the chunk
+    // that turned a mode on from the frames that merely restate it.
+    const t = new TerminalModeTracker();
+    expect([...t.feed(`${ESC}[?2004h`)]).toEqual([BRACKETED_PASTE]);
+    expect([...t.feed(`${ESC}[?2004h painting`)]).toEqual([]);
+    expect([...t.feed("plain output")]).toEqual([]);
+    expect([...t.feed(`${ESC}[?2004l`)]).toEqual([BRACKETED_PASTE]);
+    // A reset invalidates latches wholesale, and the modes it lands on moved
+    // just as surely as if the guest had reset them one at a time.
+    t.feed(`${ESC}[?1006h`);
+    expect([...t.feed(`${ESC}c`)]).toContain(1006);
+  });
+
   test("latches the modes a TUI sets at startup", () => {
     const t = new TerminalModeTracker();
     t.feed(`${ESC}[?1049h${ESC}[?1000h${ESC}[?1006h${ESC}[?2004h`);

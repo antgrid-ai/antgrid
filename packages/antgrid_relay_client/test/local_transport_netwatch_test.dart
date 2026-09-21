@@ -104,12 +104,15 @@ void main() {
   setUp(() async => agent = await _FakeAgent.start());
   tearDown(() => agent.stop());
 
-  // The agent caches a `tree:full` per checkout at open time, so a replay of
-  // everything hands a local project one full tree per managed worktree. The
-  // relay path already excludes it (`_kHeavyReplayTypes`); this is the loopback
-  // half, and nothing else fails if it goes missing — the trees simply arrive
-  // and are thrown away.
-  test('the welcome replay excludes the cached full trees', () async {
+  // A bridge older than this app caches a `tree:full` per checkout at open, so
+  // a replay of everything hands a local project one full tree per managed
+  // worktree — and this app has no handler for one, so every byte is decrypted
+  // and discarded. The relay path excludes the same type for the same reason
+  // (`_kLegacyOnlyReplayTypes` in machine_session.dart); this is the loopback
+  // half. Against a current bridge the key is inert, which is why it can be
+  // held for a release rather than raced against the rollout.
+  test('the welcome replay excludes an older bridge\'s cached full trees',
+      () async {
     final t = LocalTransport(port: agent.port, token: _token, appPid: 1);
     addTearDown(t.dispose);
     await t.connect();

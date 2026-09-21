@@ -555,9 +555,10 @@ test("ingest is accepted while this machine's own remote access is off (E15)", a
 });
 
 test("turning remote access off leaves the mirror intact (E15)", async () => {
-  // Dropping the rows on the flip would leave a session here reading
-  // UNKNOWN_PEER for peers that are answering perfectly — it may still open an
-  // exchange with one, and it needs the row to address it.
+  // Dropping the rows on the flip would leave a session here refused
+  // PEER_UNREACHABLE for peers that are answering perfectly — it may still open
+  // an exchange with one, and opening is the half a thread and a live carrier
+  // route cannot stand in for, so nothing but the row addresses it.
   const h = host!;
   giveMachineIdentity(h, "self-machine");
   await setMobileAccess(h, true);

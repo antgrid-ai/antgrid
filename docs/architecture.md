@@ -24,9 +24,9 @@ nowhere else (`ProjectCore.sendToOwner`), and only to an owner that declared
 app is the only carrier, and it forwards the frame verbatim onto the target
 machine's own relay connection. The receiving bridge answers on the one app
 session that carried the exchange in (`ProjectCore.sendToAppSession`), never by
-broadcast, so the traffic is invisible to the human's phone by design. The spec
-is `docs/session-messaging.md`; the host-side invariants are in
-`bridge/CLAUDE.md`.
+broadcast, so the traffic is invisible to the human's phone by design. There is
+no separate spec document: the host-side invariants are in `bridge/CLAUDE.md`,
+and the rest is documented at its definitions under `bridge/src/session-bus/`.
 
 ## Checkout-scoped routing
 
@@ -46,21 +46,27 @@ itself never crosses the wire. An app must advertise the `checkoutRouting` capab
 managed session, rather than shown main's workspace beside an isolated agent.
 `WORKTREE_SESSIONS_SUPPORTED` (`bridge/src/worktree-capability.ts`) is the kill switch.
 
-Tree state flows pull-first. `FileService.setTreeInterest` registers one tree
-hydrator while Files is visible or a feature needs tree data, such as file
-mention suggestions. Checkout activation alone does not request a tree. Multiple
-consumers share the hydrator and the last release removes automatic refresh.
-The cached tree survives, with sequence-based unchanged responses on renewed
-demand. A gap invalidates the cached base; recovery waits for demand if no
-consumer is present. Incremental broadcasts still arrive, and Git status,
-badges, selected-file reads, and notifications remain independent. The app
-advertises `pullsTree` on both hellos, so the bridge's re-sync
-(`everyClientPullsTrees` in `bridge/src/agent-core.ts`) skips its `tree:full` push
-whenever every attached client pulls; a client that does not advertise it still gets
-the push. The app's capability literals live in the relay-client package
+Tree state flows pull-first, one directory at a time. `FileService.setTreeInterest`
+registers one tree hydrator while Files is visible; checkout activation alone does
+not request a tree. The app asks for the root (`file:tree:root:request`) and for a
+directory's contents as it is expanded (`file:tree:children:request` →
+`file:tree:children`), and re-lists from disk on every expand, so there is no cache
+to go stale. The bridge pushes no whole tree under any condition. A watcher overflow
+sends `file:tree:invalidated` rather than a resend; the app clears what it loaded and
+re-lists. Incremental `tree:update` deltas still arrive, narrowed to the directories
+each client named with `file:tree:subscribe`, and Git status, badges, selected-file
+reads, and notifications remain independent. There is no whole-tree path left at
+all: the `file:tree:snapshot:request` pull and the `buildTree` walk behind it are
+removed, so an app that predates this protocol gets no tree rather than a large
+one.
+
+The app's capability literals live in the relay-client package
 (`connection_handshake.dart`, `local_transport.dart`) and are mirrored by hand against
 `AppReadyMessage.capabilities` in `bridge/src/protocol.ts` — Zod strips a key the
-schema does not declare, and the fail direction is a silent return of the flood.
+schema does not declare, no suite spans the two sides, and the fail direction is
+silent. `pullsTree` is now parsed and ignored on the bridge, kept for one release so
+a bridge that drops it cannot leave an older app treeless; `checkoutRouting` is the
+live example of a capability that still gates behaviour.
 
 ## Terminal frames and history
 

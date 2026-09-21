@@ -258,8 +258,8 @@ async function startSession(bridge: LocalBridge, sessionId: string): Promise<voi
  *
  * §5.1 resolves the repo key by spawning git, so for the first moments after a
  * boot the project is addressable-but-not-yet-read and every send answers
- * `UNKNOWN_PEER`. Gating on the directory answering keeps that startup race out
- * of every assertion below it.
+ * `AGENT_NOT_READY`. Gating on the directory answering keeps that startup race
+ * out of every assertion below it.
  */
 async function awaitAddressable(bridge: LocalBridge, terminalId: string): Promise<BusCall> {
   const deadline = Date.now() + 30_000;
@@ -336,17 +336,14 @@ test("a post reaches a sibling session's mailbox on a bridge with no relay ident
       summary: "off-machine probe",
       text: "probe",
     };
-    // The switch is deliberately left OFF across both of these (E15): it
-    // governs what may be done TO this machine, so it is not on the send path
-    // at all any more, and the carrier — which IS — answers for both.
+    // The switch is turned ON for this probe. It now gates the send path AHEAD
+    // of the carrier, so leaving it off would witness `REMOTE_ACCESS_OFF` and
+    // prove nothing about the carrier rung this block exists to pin. (That
+    // precedence has its own case in `api-server-session-bus.test.ts`.)
+    await setMobileAccess(bridge.abDir, true);
     const noCarrier = await busCall(bridge.abDir, "post", { terminalId: sender, body: offMachine });
     expect(noCarrier.status).toBe(503);
     expect(noCarrier.body.code).toBe("PEER_UNREACHABLE");
-
-    await setMobileAccess(bridge.abDir, true);
-    const stillNoCarrier = await busCall(bridge.abDir, "post", { terminalId: sender, body: offMachine });
-    expect(stillNoCarrier.status).toBe(503);
-    expect(stillNoCarrier.body.code).toBe("PEER_UNREACHABLE");
     await setMobileAccess(bridge.abDir, false);
 
     const posted = await busCall(bridge.abDir, "post", {
@@ -439,7 +436,17 @@ test("a notify waits for the target's next turn boundary and arrives there exact
     // than fail anything.
     await sleep(NOT_YET_MS);
     expect(countMarkers(sinkText(bridge.sinkPath), NOTIFY_MARKER)).toBe(1);
-    expect(heldFor(bridge, target)).toHaveLength(0);
+
+    // Claude announces the turn a submitted line opens, and that announcement —
+    // not the write — is what retires the line. Until it arrives the queue is
+    // holding a line it has already submitted, which is the state that lets a
+    // line sitting unsubmitted in a composer be retried instead of lost.
+    await fireHook(bridge, target, "claude", "user-prompt");
+    await untilAsync(
+      async () => (heldFor(bridge, target).length === 0 ? true : undefined),
+      20_000,
+      "the submitted notify to be retired by the turn it opened",
+    );
   } finally {
     await bridge.teardown();
   }
@@ -474,7 +481,12 @@ test("a notify to a stopped same-machine session wakes it and the line arrives o
       30_000,
       "the notify line once the woken session settles idle",
     );
-    expect(heldFor(bridge, target)).toHaveLength(0);
+    await fireHook(bridge, target, "claude", "user-prompt");
+    await untilAsync(
+      async () => (heldFor(bridge, target).length === 0 ? true : undefined),
+      20_000,
+      "the submitted notify to be retired by the turn it opened",
+    );
 
     const after = await busCall(bridge.abDir, "sessions", { terminalId: sender });
     expect(after.body.sessions.find((s: { sessionId: string }) => s.sessionId === target)?.activity).not.toBe("stopped");
@@ -624,9 +636,13 @@ test("the pair budget refuses through the real verbs, survives a restart, and li
         terminalId: sender,
         body: { to: localTarget(bridge, haltTarget), summary: "round after restart", text: "round after restart" },
       });
+      // Two startup races, both answered before the pair is ever consulted —
+      // the row read runs ahead of `pairRefusal`, so either one wins the poll.
       // The fresh process has to re-read the repo key before it can resolve any
-      // address at all; until it has, the refusal is about the row, not the pair.
-      return answer.body.code === "UNKNOWN_PEER" ? undefined : answer;
+      // address at all (AGENT_NOT_READY), and the target session has to be back
+      // in the host's index before a local row for it exists (UNKNOWN_PEER).
+      // Both clear on their own; neither is an answer about the halt.
+      return answer.body.code === "AGENT_NOT_READY" || answer.body.code === "UNKNOWN_PEER" ? undefined : answer;
     }, 30_000, "the restarted bridge to answer about the pair");
     expect(afterRestart.status).toBe(429);
     expect(afterRestart.body.code).toBe("NO_PROGRESS");

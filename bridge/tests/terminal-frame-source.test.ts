@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import type { Terminal } from "@xterm/headless";
+import { Terminal } from "@xterm/headless";
 import { TerminalFrameSource, SYNC_OUTPUT_TIMEOUT_MS } from "../src/terminal-frames/source";
 import { TERMINAL_FRAME_MAX_ANSI_BYTES, encodedJsonBytes } from "../src/terminal-frames/protocol";
 import type { TerminalRunHistory } from "../src/terminal-frames/history";
@@ -370,4 +370,34 @@ describe("terminal frame source", () => {
     expect(() => host.dispose()).not.toThrow();
     expect(host.isDisposed).toBe(true);
   });
+});
+
+
+test("a frame taken after a column shrink still describes the alternate screen", async () => {
+  // xterm narrows the NORMAL buffer's rows on a shrink and leaves the
+  // ALTERNATE buffer's at their old width, so a TUI holding the alt screen
+  // across a context-panel restore serialized rows wider than the geometry
+  // the same frame declares. The viewer wrapped each into rows the guest never
+  // drew and the guest's own repaint never erased them, so they accumulated.
+  // Replaying into a fresh terminal is the only assertion that sees it: every
+  // count taken on this side agrees with itself.
+  const host = source(202, 20);
+  host.feed("\x1b[?1049h\x1b[2J\x1b[H");
+  for (let i = 0; i < 10; i++) host.feed(`row ${i} `.padEnd(202, ".") + "\r\n");
+  await host.settle();
+
+  host.resize(99, 20);
+  await host.settle();
+
+  const frame = host.capture(0)!;
+  const replay = new Terminal({ cols: frame.cols, rows: frame.rows, allowProposedApi: true });
+  try {
+    await new Promise<void>((done) => replay.write(frame.ansi, () => done()));
+    const buffer = replay.buffer.active;
+    const painted = Array.from({ length: frame.rows }, (_, row) =>
+      buffer.getLine(buffer.baseY + row)?.translateToString(true).trimEnd() ?? "");
+    expect(painted).toEqual(host.visibleLines().map((line) => line.trimEnd()));
+  } finally {
+    replay.dispose();
+  }
 });
