@@ -36,6 +36,7 @@ import '../providers/demo_mode.dart';
 import '../providers/providers.dart';
 import '../providers/sessions.dart';
 import '../providers/visible_surface.dart';
+import '../providers/ui_attention_providers.dart';
 import '../services/agent_session_service.dart';
 import '../services/file_service.dart';
 import '../services/attach_hydration.dart';
@@ -46,6 +47,8 @@ import '../util/ab_log.dart';
 import '../util/detached.dart';
 import '../util/image_thumbnail.dart';
 import '../utils/platform_utils.dart';
+import '../voice/voice_input.dart';
+import '../voice/voice_widgets.dart';
 import 'transcript/background_tasks_strip.dart';
 import 'transcript/composer/composer_attachments.dart';
 import 'transcript/composer/composer_controller.dart';
@@ -85,6 +88,12 @@ class AgentTranscriptView extends ConsumerStatefulWidget {
 }
 
 class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
+  late final VoiceInputController _voice;
+  late final VoiceTarget _voiceTarget;
+  void _voiceChanged() {
+    if (mounted) setState(() {});
+  }
+
   late final ComposerController _input;
   final _scroll = ScrollController();
   final _panelFocus = FocusNode();
@@ -151,6 +160,13 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
   @override
   void initState() {
     super.initState();
+    _voice = ref.read(voiceInputProvider);
+    _voiceTarget = (
+      project: ref.read(selectedRegistrationIdProvider) ?? '',
+      session: widget.sessionId,
+      surface: 'chat',
+    );
+    _voice.addListener(_voiceChanged);
     // Pinned, not re-read in dispose: at app teardown the ProviderScope above
     // is disposed before this State is, and reading a provider from a dead
     // container throws.
@@ -235,6 +251,7 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
 
   @override
   void dispose() {
+    _voice.removeListener(_voiceChanged);
     // Stop re-pulling this session's transcript on every reconnect now that its
     // view is gone — the view is keyed per session id, so this fires exactly
     // when the user navigates off / switches to another session.
@@ -303,6 +320,7 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
   // True when there is something to send and nothing still in flight. Shared by
   // the send button's enabled state and _submit so the two never drift.
   bool get _canSubmit =>
+      !_voice.draft(_voiceTarget).busy &&
       !_attachments.any((a) => a.status == AttachmentStatus.uploading) &&
       (!_input.isEmpty ||
           _attachments.any((a) => a.status == AttachmentStatus.done));
@@ -665,6 +683,10 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
   }
 
   KeyEventResult _onComposerKey(FocusNode node, KeyEvent event) {
+    if (ref.read(voicePreviewEnabledProvider)) {
+      final result = handleVoiceKey(_voice, _voiceTarget, event);
+      if (result != KeyEventResult.ignored) return result;
+    }
     if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
       return KeyEventResult.ignored;
     }
@@ -748,6 +770,9 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
 
   @override
   Widget build(BuildContext context) {
+    ref.listen(agentSurfaceVisibleProvider, (_, visible) {
+      if (!visible) _voice.preserve(_voiceTarget, deferNotification: true);
+    });
     _armHydration();
     // Watched, not listened: the capture is parked as a VALUE precisely
     // because this view may not have been mounted when it was made (a session
@@ -1007,7 +1032,9 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
     // synchronous derivation, so a result that lands while still valid is
     // never clobbered by a build it didn't cause.
     final mentionVisible =
-        _suggestions.isEmpty && !_mentionDismissed && _input.mentionToken != null;
+        _suggestions.isEmpty &&
+        !_mentionDismissed &&
+        _input.mentionToken != null;
     if (!mentionVisible) _mentionSuggestions = const [];
     if (_mentionIndex >= _mentionSuggestions.length) _mentionIndex = 0;
     final displayCaps = _capabilities;
@@ -1172,13 +1199,17 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
                   ),
                   const SizedBox(width: AbTokens.space8),
                   Expanded(
-                    child: RichComposer(
+                    child: VoiceChatEditor(
+                      target: _voiceTarget,
                       controller: _input,
-                      focusNode: _inputFocus,
-                      hintText: 'Send a message…',
-                      keyEventPrelude: _onComposerKey,
-                      onSend: _submit,
-                      onImagePasted: _onImagePasted,
+                      builder: (controller) => RichComposer(
+                        controller: controller,
+                        focusNode: _inputFocus,
+                        hintText: 'Send a message…',
+                        keyEventPrelude: _onComposerKey,
+                        onSend: _submit,
+                        onImagePasted: _onImagePasted,
+                      ),
                     ),
                   ),
                 ],
@@ -1190,6 +1221,7 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
               onRetry: _runUpload,
               onPreview: _onPreviewAttachment,
             ),
+            VoicePanel(target: _voiceTarget),
             Padding(
               padding: const EdgeInsets.fromLTRB(
                 AbTokens.space10,
@@ -1204,6 +1236,8 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
                     tooltip: 'Attach file',
                     onTap: _pickAndAttach,
                   ),
+                  VoiceMic(target: _voiceTarget),
+                  VoiceSettingsButton(target: _voiceTarget),
                   if (usage != null) ...[
                     const SizedBox(width: AbTokens.space6),
                     ContextMeter(usage: usage),

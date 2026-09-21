@@ -8,6 +8,8 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../voice/voice_input.dart';
+import '../voice/voice_widgets.dart';
 import 'package:ghostty_vte_flutter/ghostty_vte_flutter.dart';
 
 import '../design/ab_icons.dart';
@@ -146,6 +148,18 @@ class TerminalViewWrapper extends ConsumerStatefulWidget {
 }
 
 class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
+  VoiceTarget get _voiceTarget => (
+    project: widget.terminalService.projectId,
+    session: widget.tab.terminalId,
+    surface: 'terminal',
+  );
+  bool _insertDictation(String text) {
+    if (_historyOpen) _closeHistory();
+    final sent = widget.terminalService.sendInput(widget.tab.terminalId, text);
+    if (!sent && mounted) showSendRefusedSnackBar(context);
+    return sent;
+  }
+
   TerminalService? _displayService;
   int _displayUpdate = 0;
 
@@ -918,6 +932,14 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   /// path passes `sanitizePaste: true`, which silently drops multi-line
   /// or control-char-bearing payloads. Pasting raw bytes preserves them.
   KeyEventResult _handleEarlyKey(KeyEvent event) {
+    if (_focusScope.hasFocus && ref.read(voicePreviewEnabledProvider)) {
+      final result = handleVoiceKey(
+        ref.read(voiceInputProvider),
+        _voiceTarget,
+        event,
+      );
+      if (result != KeyEventResult.ignored) return result;
+    }
     if (event.logicalKey == LogicalKeyboardKey.shiftLeft ||
         event.logicalKey == LogicalKeyboardKey.shiftRight) {
       final shift = HardwareKeyboard.instance.isShiftPressed;
@@ -1337,6 +1359,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
                 ),
         ),
 
+        VoicePanel(target: _voiceTarget, onInsert: _insertDictation),
         // Keeping this row mounted preserves terminal geometry while browsing.
         if (!_hasPhysicalKeyboard && !showStoppedView)
           ValueListenableBuilder<AttachProgress?>(
@@ -1832,6 +1855,14 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         if (showAttachButton)
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              VoiceMic(target: _voiceTarget),
+                              VoiceSettingsButton(target: _voiceTarget),
+                            ],
+                          ),
+                        if (showAttachButton)
                           TerminalAttachOverlayButton(
                             pick: pickUploadFile,
                             onPicked: (picked) => _dropAttach(
@@ -2136,6 +2167,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   /// Keep the key strip mounted so entering history cannot resize the PTY.
   Widget _buildQuickActions(bool uploadBusy) {
     final bar = TerminalQuickActionsBar(
+      voiceControl: VoiceMic(target: _voiceTarget),
       softKeyboardController: _historyOpen
           ? _historySoftKeyboardController
           : _softKeyboardController,

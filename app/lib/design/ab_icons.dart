@@ -3,6 +3,7 @@ import 'package:iconify_flutter/icons/mdi.dart';
 
 /// Icon constants using VS Code Codicons via Iconify (SVG-rendered).
 abstract final class AbIcons {
+  static const microphone = Mdi.microphone;
   static const preview = Codicon.browser;
   static const files = Codicon.files;
   static const git = Codicon.source_control;

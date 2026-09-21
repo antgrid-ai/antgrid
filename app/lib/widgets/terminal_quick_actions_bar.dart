@@ -27,6 +27,7 @@ class TerminalQuickActionsBar extends StatelessWidget {
     required this.onZoomOut,
     required this.onZoomIn,
     required this.onZoomReset,
+    this.voiceControl,
   });
 
   final GhosttyTerminalSoftKeyboardController softKeyboardController;
@@ -44,6 +45,7 @@ class TerminalQuickActionsBar extends StatelessWidget {
   final VoidCallback onZoomOut;
   final VoidCallback onZoomIn;
   final VoidCallback onZoomReset;
+  final Widget? voiceControl;
 
   @override
   Widget build(BuildContext context) {
@@ -101,6 +103,7 @@ class TerminalQuickActionsBar extends StatelessWidget {
           // kept OUT of the horizontal scroll so it never slides off-screen.
           // Taps no longer summon the IME (showKeyboardOnInteraction false), so
           // this is the one way in — `toggle` also dismisses it on a 2nd press.
+          ?voiceControl,
           _KeyboardToggleButton(controller: softKeyboardController),
         ],
       ),
