@@ -8,8 +8,9 @@ import mark from "../../public/logo/antgrid-mark-full.svg" with { type: "text" }
 
 // The four-agent mark, NOT antgrid-mark-transparent.svg, which carries the same
 // art: that one adapts through `prefers-color-scheme`, which keys off the
-// reader's OS rather than the page, and this app forces dark -- an inlined copy
-// would flip the wrong way for a light-OS visitor.
+// reader's OS rather than the page, and the page's scheme is the `data-theme`
+// override when one is set -- an inlined copy would flip the wrong way for a
+// reader who pinned the other.
 //
 // h-9 against the wordmark's h-7 is the kit's lockup proportion -- the mark box
 // runs 4/3 of the type size -- and it is also the size the four agents need

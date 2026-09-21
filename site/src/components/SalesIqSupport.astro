@@ -3,6 +3,9 @@ import { SALESIQ_WIDGET_URL } from "../config";
 
 const parsed = URL.canParse(SALESIQ_WIDGET_URL) ? new URL(SALESIQ_WIDGET_URL) : null;
 const widgetUrl = parsed?.protocol === "https:" ? parsed.toString() : "";
+// Only the launcher below follows the page's colour scheme. The chat window
+// Zoho opens is an iframe styled from the SalesIQ dashboard, and nothing on
+// this side can tell it which scheme the reader is in.
 ---
 
 <aside class="support-chat" data-salesiq-support data-widget-url={widgetUrl} aria-label="Support">
