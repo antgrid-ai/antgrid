@@ -466,4 +466,248 @@ describe("GET /account/projects", () => {
     const res = await app.request("/account/projects");
     expect(res.status).toBe(401);
   });
+
+  describe("unlinkedRepos", () => {
+    async function installation(
+      caller: { accountId: string; user: { id: string } },
+      opts: { revoked?: boolean } = {}
+    ) {
+      return pg.db.integration.create({
+        data: {
+          accountId: caller.accountId,
+          provider: "github",
+          externalAccountId: crypto.randomUUID(),
+          installationId: crypto.randomUUID(),
+          displayName: "acme",
+          status: "active",
+          installedBy: caller.user.id,
+          revokedAt: opts.revoked ? new Date() : null,
+        },
+        select: { id: true },
+      });
+    }
+
+    function repo(
+      integrationId: string,
+      repoKey: string,
+      extra: { projectId?: string; removedAt?: Date } = {}
+    ) {
+      return pg.db.integrationRepo.create({
+        data: {
+          integrationId,
+          repoKey,
+          externalRepoId: crypto.randomUUID(),
+          visibility: "private",
+          syncEnabled: false,
+          ...extra,
+        },
+      });
+    }
+
+    test("lists installed repos no checkout is bound to, and not the bound ones", async () => {
+      const { app } = buildTestApp(pg.db, pg.url);
+      const caller = await makeCaller("unlinked-owner@example.com");
+      const inst = await installation(caller);
+      const project = await pg.db.project.create({
+        data: { accountId: caller.accountId, repoKey: "github.com/acme/bound", displayName: "bound" },
+      });
+      await repo(inst.id, "github.com/acme/bound", { projectId: project.id });
+      await repo(inst.id, "github.com/acme/zeta");
+      await repo(inst.id, "github.com/acme/alpha");
+
+      const res = await list(app, { cookie: caller.cookie });
+      expect(res.status).toBe(200);
+      expect(res.body.unlinkedRepos).toEqual([
+        { id: expect.any(String), repoKey: "github.com/acme/alpha" },
+        { id: expect.any(String), repoKey: "github.com/acme/zeta" },
+      ]);
+    });
+
+    test("a repo whose key already has a project is not offered, even unlinked", async () => {
+      const { app } = buildTestApp(pg.db, pg.url);
+      const caller = await makeCaller("unlinked-bound@example.com");
+      const inst = await installation(caller);
+      await pg.db.project.create({
+        data: { accountId: caller.accountId, repoKey: "github.com/acme/twin", displayName: "twin" },
+      });
+      await repo(inst.id, "github.com/acme/twin");
+
+      const res = await list(app, { cookie: caller.cookie });
+      expect(res.body.unlinkedRepos).toEqual([]);
+    });
+
+    test("a revoked installation and a removed repo offer nothing", async () => {
+      const { app } = buildTestApp(pg.db, pg.url);
+      const caller = await makeCaller("unlinked-revoked@example.com");
+      const live = await installation(caller);
+      const dead = await installation(caller, { revoked: true });
+      await repo(dead.id, "github.com/acme/revoked");
+      await repo(live.id, "github.com/acme/removed", { removedAt: new Date() });
+
+      const res = await list(app, { cookie: caller.cookie });
+      expect(res.body.unlinkedRepos).toEqual([]);
+    });
+
+    test("another account's repos are never listed", async () => {
+      const { app } = buildTestApp(pg.db, pg.url);
+      const caller = await makeCaller("unlinked-mine@example.com");
+      const stranger = await makeCaller("unlinked-theirs@example.com");
+      await repo((await installation(stranger)).id, "github.com/acme/theirs");
+
+      const res = await list(app, { cookie: caller.cookie });
+      expect(res.body.unlinkedRepos).toEqual([]);
+    });
+  });
+});
+
+/**
+ * Filing a task against a repository the GitHub App can see but no machine has
+ * opened. The write mints a project, so the tenancy and liveness assertions are
+ * the point: a repo id belonging to another account, a revoked installation, or
+ * a repo GitHub stopped listing must never produce one.
+ */
+describe("POST /account/projects/from-repo", () => {
+  async function makeCaller(email: string) {
+    const user = await createTestUser(pg.db, email);
+    await createTestSubscription(pg.db, user.id, { tier: "pro" });
+    const { cookie } = await createTestSession(pg.db, user.id);
+    const account = await pg.db.productAccount.findUniqueOrThrow({ where: { userId: user.id } });
+    return { user, cookie, accountId: account.id };
+  }
+
+  async function installedRepo(
+    caller: { accountId: string; user: { id: string } },
+    repoKey: string,
+    opts: { revoked?: boolean; removed?: boolean } = {}
+  ) {
+    const integration = await pg.db.integration.create({
+      data: {
+        accountId: caller.accountId,
+        provider: "github",
+        externalAccountId: crypto.randomUUID(),
+        installationId: crypto.randomUUID(),
+        displayName: "acme",
+        status: "active",
+        installedBy: caller.user.id,
+        revokedAt: opts.revoked ? new Date() : null,
+      },
+      select: { id: true },
+    });
+    return pg.db.integrationRepo.create({
+      data: {
+        integrationId: integration.id,
+        repoKey,
+        externalRepoId: crypto.randomUUID(),
+        visibility: "private",
+        syncEnabled: false,
+        removedAt: opts.removed ? new Date() : null,
+      },
+    });
+  }
+
+  function post(
+    app: ReturnType<typeof buildTestApp>["app"],
+    cookie: string,
+    body: unknown
+  ) {
+    return app.request("/account/projects/from-repo", {
+      method: "POST",
+      headers: { cookie, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  }
+
+  test("creates the project, links the repo, and names it by the repo", async () => {
+    const { app } = buildTestApp(pg.db, pg.url);
+    const caller = await makeCaller("from-repo-owner@example.com");
+    const repo = await installedRepo(caller, "github.com/acme/angular-main");
+
+    const res = await post(app, caller.cookie, { repoId: repo.id });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { project: { id: string; repoKey: string; displayName: string } };
+    expect(body.project).toEqual({
+      id: expect.any(String),
+      repoKey: "github.com/acme/angular-main",
+      displayName: "angular-main",
+    });
+
+    const linked = await pg.db.integrationRepo.findUniqueOrThrow({ where: { id: repo.id } });
+    expect(linked.projectId).toBe(body.project.id);
+    // Nothing is switched on by being filed against.
+    expect(linked.syncEnabled).toBe(false);
+    expect(linked.pushEnabled).toBe(false);
+  });
+
+  test("is idempotent: a second call answers the same project", async () => {
+    const { app } = buildTestApp(pg.db, pg.url);
+    const caller = await makeCaller("from-repo-twice@example.com");
+    const repo = await installedRepo(caller, "github.com/acme/twice");
+
+    const first = (await (await post(app, caller.cookie, { repoId: repo.id })).json()) as {
+      project: { id: string };
+    };
+    const second = (await (await post(app, caller.cookie, { repoId: repo.id })).json()) as {
+      project: { id: string };
+    };
+    expect(second.project.id).toBe(first.project.id);
+    expect(await pg.db.project.count({ where: { accountId: caller.accountId } })).toBe(1);
+  });
+
+  test("reuses a project a machine already made for the same repo key", async () => {
+    const { app } = buildTestApp(pg.db, pg.url);
+    const caller = await makeCaller("from-repo-existing@example.com");
+    const existing = await pg.db.project.create({
+      data: { accountId: caller.accountId, repoKey: "github.com/acme/shared", displayName: "Their Name" },
+    });
+    const repo = await installedRepo(caller, "github.com/acme/shared");
+
+    const res = await post(app, caller.cookie, { repoId: repo.id });
+    const body = (await res.json()) as { project: { id: string; displayName: string } };
+    expect(body.project.id).toBe(existing.id);
+    // A label a machine chose is not overwritten by opening the repo here.
+    expect(body.project.displayName).toBe("Their Name");
+  });
+
+  test("another account's repo, a revoked installation and a removed repo are not found", async () => {
+    const { app } = buildTestApp(pg.db, pg.url);
+    const caller = await makeCaller("from-repo-mine@example.com");
+    const stranger = await makeCaller("from-repo-theirs@example.com");
+    const theirs = await installedRepo(stranger, "github.com/acme/theirs");
+    const revoked = await installedRepo(caller, "github.com/acme/revoked", { revoked: true });
+    const removed = await installedRepo(caller, "github.com/acme/removed", { removed: true });
+
+    for (const repo of [theirs, revoked, removed]) {
+      const res = await post(app, caller.cookie, { repoId: repo.id });
+      expect(res.status).toBe(404);
+    }
+    expect(await pg.db.project.count()).toBe(0);
+  });
+
+  test("a malformed body is a 400, and no session is a 401", async () => {
+    const { app } = buildTestApp(pg.db, pg.url);
+    const caller = await makeCaller("from-repo-bad@example.com");
+
+    expect((await post(app, caller.cookie, { repoId: "not-a-uuid" })).status).toBe(400);
+    const anon = await app.request("/account/projects/from-repo", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ repoId: crypto.randomUUID() }),
+    });
+    expect(anon.status).toBe(401);
+  });
+
+  test("a machine's device token cannot mint projects", async () => {
+    const { app } = buildTestApp(pg.db, pg.url);
+    const caller = await makeCaller("from-repo-bridge@example.com");
+    const { token } = await provisionAndMintToken(app, caller.cookie);
+    const repo = await installedRepo(caller, "github.com/acme/bridge");
+
+    const res = await app.request("/account/projects/from-repo", {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ repoId: repo.id }),
+    });
+    expect(res.status).toBe(401);
+    expect(await pg.db.project.count()).toBe(0);
+  });
 });

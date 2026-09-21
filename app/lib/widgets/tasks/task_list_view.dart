@@ -20,7 +20,8 @@ import '../../models/task.dart';
 import '../../providers/tasks.dart';
 import '../../services/tasks_api.dart';
 import '../../util/detached.dart';
-import '../new_session/environment_menu.dart' show PanelHint, PanelRow, PanelSectionHeader;
+import '../new_session/environment_menu.dart'
+    show PanelHint, PanelRow, PanelSectionHeader;
 import 'task_create_sheet.dart';
 import 'task_row.dart';
 import 'task_row_actions.dart';
@@ -147,6 +148,7 @@ class _ScopeBar extends ConsumerWidget {
             // invalidates it. A manual refresh is that something.
             onTap: () => detached('tasks', 'refresh list', () {
               ref.invalidate(taskProjectsProvider);
+              ref.invalidate(taskUnlinkedReposProvider);
               return ref.read(taskListProvider.notifier).refresh();
             }),
           ),
@@ -280,6 +282,9 @@ class _RepoFilterChip extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final repoId = ref.watch(taskFilterProvider.select((f) => f.projectId));
     final names = ref.watch(taskProjectNamesProvider);
+    // Watched only to have it loaded by the time the panel opens — the panel
+    // reads it once, and a FutureProvider nobody watches never fetches.
+    ref.watch(taskUnlinkedReposProvider);
     final label = repoId == null
         ? 'All repos'
         : (names[repoId] ?? 'Unknown repo');
@@ -302,6 +307,7 @@ class _RepoFilterChip extends ConsumerWidget {
       anchorRect: anchor,
       builder: (_) => _RepoFilterPanel(
         names: names,
+        unlinked: ref.read(taskUnlinkedReposProvider).value ?? const [],
         selected: ref.read(taskFilterProvider).projectId,
       ),
     );
@@ -320,9 +326,18 @@ class _RepoFilterChip extends ConsumerWidget {
 const Object _kAllRepos = Object();
 
 class _RepoFilterPanel extends StatelessWidget {
-  const _RepoFilterPanel({required this.names, required this.selected});
+  const _RepoFilterPanel({
+    required this.names,
+    required this.unlinked,
+    required this.selected,
+  });
 
   final Map<String, String> names;
+
+  /// Repos the GitHub App can see with no folder opened for them yet. Shown
+  /// inert: a filter on one could only ever be empty, but knowing it is there
+  /// is what tells the user which folder to open next.
+  final List<UnlinkedRepo> unlinked;
   final String? selected;
 
   @override
@@ -338,7 +353,7 @@ class _RepoFilterPanel extends StatelessWidget {
           selected: selected == null,
           onTap: () => Navigator.of(context).pop(_kAllRepos),
         ),
-        if (names.isEmpty)
+        if (names.isEmpty && unlinked.isEmpty)
           const PanelHint('No repos are bound to this account yet')
         else
           for (final entry in names.entries)
@@ -348,6 +363,18 @@ class _RepoFilterPanel extends StatelessWidget {
               selected: entry.key == selected,
               onTap: () => Navigator.of(context).pop(entry.key),
             ),
+        if (unlinked.isNotEmpty) ...[
+          const PanelSectionHeader('No folder yet'),
+          for (final repo in unlinked)
+            // A null onTap is the row's disabled state, not a missing handler.
+            PanelRow(
+              icon: AbIcons.folder,
+              label: repo.name,
+              selected: false,
+              onTap: null,
+            ),
+          const PanelHint('Open or clone a repo to file tasks against it'),
+        ],
       ],
     );
   }

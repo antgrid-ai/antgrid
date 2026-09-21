@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:antgrid/design/ab_theme.dart';
 import 'package:antgrid/models/agent_work_status.dart';
+import 'package:antgrid/models/task.dart';
 import 'package:antgrid/providers/tasks.dart';
 import 'package:antgrid/services/tasks_api.dart';
 import 'package:antgrid/widgets/tasks/task_list_view.dart';
@@ -96,6 +97,7 @@ Future<void> _pump(
 }
 
 void main() {
+  unlinkedRepoTests();
   testWidgets('a fetch in flight shows loading, never the empty state', (
     tester,
   ) async {
@@ -555,5 +557,100 @@ void main() {
     expect(find.text('Four renamed'), findsOneWidget);
     expect(find.text('Five'), findsOneWidget);
     expect(find.text('Five renamed'), findsNothing);
+  });
+}
+
+void unlinkedRepoTests() {
+  MockClient serving({Object? unlinked}) => MockClient((req) async {
+    if (req.url.path == '/labels') {
+      return http.Response(jsonEncode({'labels': const []}), 200);
+    }
+    if (req.url.path == '/account/projects') {
+      return http.Response(
+        jsonEncode({
+          'projects': [
+            {
+              'id': 'p-1',
+              'repoKey': 'github.com/acme/bound',
+              'displayName': 'bound',
+            },
+          ],
+          'unlinkedRepos': ?unlinked,
+        }),
+        200,
+      );
+    }
+    return http.Response(jsonEncode({'tasks': const []}), 200);
+  });
+
+  group('repos the GitHub App can see but no folder is open for', () {
+    test('the model reads the wire shape and names the repo', () {
+      final repo = UnlinkedRepo.fromJson({
+        'id': 'r-1',
+        'repoKey': 'github.com/acme/primengscraper',
+      });
+      expect(repo?.name, 'primengscraper');
+      expect(UnlinkedRepo.fromJson({'id': 'r-1'}), isNull);
+      expect(UnlinkedRepo.fromJson('nope'), isNull);
+    });
+
+    test('a server that predates the field reads as none', () async {
+      final api = TasksApi(
+        licenseApiUrl: 'https://api.test',
+        cookieProvider: () async => 'session=abc',
+        httpClient: serving(),
+      );
+      expect(await api.listUnlinkedRepos(), isEmpty);
+    });
+
+    testWidgets(
+      'the filter lists them, greyed out, and they cannot be picked',
+      (tester) async {
+        final container = _container(
+          client: serving(
+            unlinked: [
+              {'id': 'r-1', 'repoKey': 'github.com/acme/primengscraper'},
+              {'id': 'r-2', 'repoKey': 'github.com/acme/angular-main'},
+            ],
+          ),
+        );
+        await _pump(tester, container);
+        await tester.pumpAndSettle();
+
+        await tester.tap(find.text('ALL REPOS'));
+        await tester.pumpAndSettle();
+
+        expect(find.text('bound'), findsOneWidget);
+        expect(find.text('primengscraper'), findsOneWidget);
+        expect(find.text('angular-main'), findsOneWidget);
+        expect(
+          find.text('Open or clone a repo to file tasks against it'),
+          findsOneWidget,
+        );
+
+        // Inert: the filter stays where it was and the panel stays open.
+        await tester.tap(find.text('primengscraper'));
+        await tester.pumpAndSettle();
+        expect(container.read(taskFilterProvider).projectId, isNull);
+        expect(find.text('angular-main'), findsOneWidget);
+      },
+    );
+
+    testWidgets('with none unlinked the panel has no such section', (
+      tester,
+    ) async {
+      final container = _container(client: serving(unlinked: const []));
+      await _pump(tester, container);
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('ALL REPOS'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('bound'), findsOneWidget);
+      expect(
+        find.text('Open or clone a repo to file tasks against it'),
+        findsNothing,
+      );
+    });
   });
 }

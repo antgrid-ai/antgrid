@@ -137,6 +137,7 @@ MockClient _serving(
 }
 
 void main() {
+  main_projectResolution();
   testWidgets('a fetch in flight shows loading, not "no longer exists"', (
     tester,
   ) async {
@@ -245,10 +246,7 @@ void main() {
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await tester.pumpAndSettle();
 
-    expect(
-      seen.where((s) => s.startsWith('PATCH /tasks/42')),
-      isNotEmpty,
-    );
+    expect(seen.where((s) => s.startsWith('PATCH /tasks/42')), isNotEmpty);
     expect(seen.last, contains('"title":"Renamed"'));
   });
 
@@ -540,7 +538,9 @@ void main() {
       // Both halves of the guard: the button goes dead on the frame after the
       // press, and the handler refuses a tap already delivered behind it.
       expect(
-        tester.widget<AbButton>(find.widgetWithText(AbButton, 'Keep mine')).onTap,
+        tester
+            .widget<AbButton>(find.widgetWithText(AbButton, 'Keep mine'))
+            .onTap,
         isNull,
       );
       await tester.tap(find.text('Keep mine'), warnIfMissed: false);
@@ -565,11 +565,14 @@ void main() {
         labelRemoveWins: const ['needs-triage'],
       );
       final container = _container(
-        _serving(task, on: (req) {
-          if (req.url.path == '/tasks/42/conflict/resolve') {
-            resolves.add(req.body);
-          }
-        }),
+        _serving(
+          task,
+          on: (req) {
+            if (req.url.path == '/tasks/42/conflict/resolve') {
+              resolves.add(req.body);
+            }
+          },
+        ),
       );
       await _pump(tester, container);
       await tester.pumpAndSettle();
@@ -632,10 +635,7 @@ void main() {
 
       expect(find.text('Title'), findsOneWidget);
       // Named from the provider, never a hardcoded GitHub.
-      expect(
-        find.textContaining('stopped reaching GitHub'),
-        findsOneWidget,
-      );
+      expect(find.textContaining('stopped reaching GitHub'), findsOneWidget);
       expect(
         find.textContaining('The last 3 attempts changed nothing there'),
         findsOneWidget,
@@ -783,9 +783,7 @@ void main() {
     // broken one, and there is nothing the user could do to enable it.
     testWidgets('a task with no project offers no publish', (tester) async {
       _tall(tester);
-      final container = _container(
-        _serving(_task(), targets: const [target]),
-      );
+      final container = _container(_serving(_task(), targets: const [target]));
       await _pump(tester, container);
       await tester.pumpAndSettle();
 
@@ -1105,4 +1103,98 @@ class _BlockedLauncher extends TaskLauncher {
 
   @override
   Future<void> start(task) async {}
+}
+
+class _OpenLauncher extends TaskLauncher {
+  @override
+  String? unavailableReason(task) => null;
+
+  @override
+  Future<void> start(task) async {}
+}
+
+/// Serves [task] as usual but answers the account project list with [projects],
+/// so a test can hold it pending or fail it.
+MockClient _servingProjects(
+  Map<String, Object?> task,
+  Future<http.Response> Function() projects,
+) {
+  final inner = _serving(task);
+  return MockClient((req) async {
+    if (req.url.path == '/account/projects') return projects();
+    return inner.get(req.url);
+  });
+}
+
+void _startIsDisabled(WidgetTester tester) {
+  final start = tester.widget<AbButton>(
+    find.widgetWithText(AbButton, 'Start session'),
+  );
+  expect(start.onTap, isNull);
+}
+
+void main_projectResolution() {
+  // Registered from the end of the file so the launch tests above keep their
+  // own harness; see the call in main().
+  group('a task filed against a project', () {
+    testWidgets(
+      'while the project list loads, Start waits instead of guessing',
+      (tester) async {
+        final pending = Completer<http.Response>();
+        final container = _container(
+          _servingProjects(_task(projectId: 'proj-1'), () => pending.future),
+          overrides: [taskLauncherProvider.overrideWithValue(_OpenLauncher())],
+        );
+        await _pump(tester, container);
+        await tester.pump();
+        await tester.pump();
+
+        // A launcher that would happily start in the focused project — which is
+        // exactly the wrong repository — must not be reachable yet.
+        expect(find.text('Loading this task’s project…'), findsOneWidget);
+        _startIsDisabled(tester);
+        pending.complete(http.Response('{"projects":[]}', 200));
+        await tester.pumpAndSettle();
+      },
+    );
+
+    testWidgets('a project list that fails blocks Start and offers a retry', (
+      tester,
+    ) async {
+      final container = _container(
+        _servingProjects(
+          _task(projectId: 'proj-1'),
+          () async => http.Response('{"error":"boom"}', 500),
+        ),
+        overrides: [taskLauncherProvider.overrideWithValue(_OpenLauncher())],
+      );
+      await _pump(tester, container);
+      await tester.pumpAndSettle();
+
+      expect(
+        find.textContaining('Couldn’t load this task’s project'),
+        findsOneWidget,
+      );
+      expect(find.widgetWithText(AbButton, 'Retry'), findsOneWidget);
+      _startIsDisabled(tester);
+      // Riverpod retries a failed fetch on a timer; drop the container so no
+      // retry outlives the test.
+      await tester.pumpWidget(const SizedBox());
+      container.dispose();
+    });
+
+    testWidgets('a task with no project is unaffected', (tester) async {
+      final container = _container(
+        _serving(_task()),
+        overrides: [taskLauncherProvider.overrideWithValue(_OpenLauncher())],
+      );
+      await _pump(tester, container);
+      await tester.pumpAndSettle();
+
+      final start = tester.widget<AbButton>(
+        find.widgetWithText(AbButton, 'Start session'),
+      );
+      expect(start.onTap, isNotNull);
+    });
+  });
 }

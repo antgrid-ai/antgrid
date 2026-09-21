@@ -252,6 +252,47 @@ class TasksApi extends CookieApiClient {
         .toList(growable: false);
   }
 
+  /// Repositories the account's GitHub App can see that no checkout is bound to.
+  ///
+  /// The same route as [listProjects], read for its second field. A server that
+  /// predates the field simply omits it, which reads as none — the filter loses
+  /// its inert rows and nothing else.
+  Future<List<UnlinkedRepo>> listUnlinkedRepos() async {
+    final body = await _send(
+      'GET',
+      _uri('/account/projects'),
+      subject: _Subject.task,
+    );
+    final raw = body['unlinkedRepos'];
+    if (raw is! List) return const [];
+    return raw
+        .map(UnlinkedRepo.fromJson)
+        .whereType<UnlinkedRepo>()
+        .toList(growable: false);
+  }
+
+  /// The account project for a repository the GitHub App can see but no machine
+  /// has opened, created if it does not exist yet.
+  ///
+  /// Idempotent, so a repeated pick answers the same project. It enables nothing:
+  /// import and push stay off until switched on for the repo.
+  Future<TaskProject> createProjectFromRepo(String repoId) async {
+    final body = await _send(
+      'POST',
+      _uri('/account/projects/from-repo'),
+      subject: _Subject.task,
+      payload: {'repoId': repoId},
+    );
+    final project = TaskProject.fromJson(body['project']);
+    if (project == null) {
+      throw const TaskApiException(
+        TaskApiError.unknown,
+        'The account service answered with a project this app could not read.',
+      );
+    }
+    return project;
+  }
+
   Future<List<TaskLabel>> listLabels({String? projectId}) async {
     final body = await _send(
       'GET',
@@ -561,8 +602,7 @@ String _message(TaskApiError error, _Subject subject) => switch (error) {
   TaskApiError.notLinked =>
     'This task is not linked to GitHub, so there is nothing to unlink. It may '
         'have been unlinked already, or on another device.',
-  TaskApiError.invalidLabelName =>
-    'A label name has to be 1 to 50 characters.',
+  TaskApiError.invalidLabelName => 'A label name has to be 1 to 50 characters.',
   TaskApiError.invalidLabelColor =>
     'A label colour has to be six hex digits, like `d73a4a`.',
   TaskApiError.badRequest =>

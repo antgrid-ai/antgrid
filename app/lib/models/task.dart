@@ -239,9 +239,9 @@ class TaskConflict {
               .toList(growable: false)
         : const <TaskConflictField>[];
     final labels = raw['labelRemoveWins'] is List
-        ? (raw['labelRemoveWins'] as List)
-              .whereType<String>()
-              .toList(growable: false)
+        ? (raw['labelRemoveWins'] as List).whereType<String>().toList(
+            growable: false,
+          )
         : const <String>[];
     if (fields.isEmpty && labels.isEmpty) return null;
     return TaskConflict(fields: fields, labelRemoveWins: labels);
@@ -422,7 +422,9 @@ class Task {
       title: raw['title'] is String ? raw['title'] as String : '',
       body: raw['body'] is String ? raw['body'] as String : '',
       status: status,
-      priority: raw['priority'] is num ? (raw['priority'] as num).toInt() : null,
+      priority: raw['priority'] is num
+          ? (raw['priority'] as num).toInt()
+          : null,
       projectId: raw['projectId'] is String ? raw['projectId'] as String : null,
       sortKey: raw['sortKey'] is String ? raw['sortKey'] as String : '',
       source: raw['source'] is String ? raw['source'] as String : 'local',
@@ -583,7 +585,8 @@ class TaskPublishTarget {
   }
 
   @override
-  bool operator ==(Object other) => other is TaskPublishTarget && other.id == id;
+  bool operator ==(Object other) =>
+      other is TaskPublishTarget && other.id == id;
 
   @override
   int get hashCode => id.hashCode;
@@ -651,5 +654,34 @@ class TaskProject {
       // that arrived without one falls back to the repo it came from.
       displayName: name.isNotEmpty ? name : repoKey,
     );
+  }
+}
+
+/// A repository the account's GitHub App can see but no checkout is bound to.
+///
+/// Not a [TaskProject]: nothing can be filed against it until a machine opens a
+/// folder whose origin is this repository, so the task surfaces show it inert.
+/// [repoKey] is the normalized origin remote (`host/owner/repo`, lowercase).
+class UnlinkedRepo {
+  const UnlinkedRepo({required this.id, required this.repoKey});
+
+  final String id;
+  final String repoKey;
+
+  /// The last path segment, which is what the repo is called on its host. It is
+  /// the lowercased form: the key is normalized, so the original capitalisation
+  /// is not on the wire.
+  String get name {
+    final tail = repoKey.split('/').last;
+    return tail.isEmpty ? repoKey : tail;
+  }
+
+  static UnlinkedRepo? fromJson(Object? raw) {
+    if (raw is! Map) return null;
+    final id = raw['id'];
+    final repoKey = raw['repoKey'];
+    if (id is! String || id.isEmpty) return null;
+    if (repoKey is! String || repoKey.isEmpty) return null;
+    return UnlinkedRepo(id: id, repoKey: repoKey);
   }
 }

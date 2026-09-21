@@ -5,9 +5,9 @@ import type { Auth } from "../auth/better-auth.js";
 import type { Env } from "../env.js";
 import type { AuthVars } from "../auth/middleware.js";
 import { requireBearerJwt } from "../auth/jwt-bearer.js";
-import { requireUserOrBearer } from "../auth/middleware.js";
+import { requireUser, requireUserOrBearer } from "../auth/middleware.js";
 import { findActiveMembership } from "../models/account-member.js";
-import { bindLocalProject } from "../models/project.js";
+import { bindLocalProject, projectFromIntegrationRepo } from "../models/project.js";
 import { isValidRepoKey } from "../util/repo-key.js";
 
 // `displayName` is optional because the bridge has nothing better to send than a
@@ -19,6 +19,8 @@ const BindProjectBody = z.object({
   repoKey: z.string().min(1).max(512),
   displayName: z.string().min(1).max(200).optional(),
 });
+
+const FromRepoBody = z.object({ repoId: z.string().uuid() });
 
 export function projectRoutes(deps: { db: DB; auth: Auth; env: Env }) {
   const r = new Hono<{ Variables: AuthVars }>();
@@ -60,7 +62,50 @@ export function projectRoutes(deps: { db: DB; auth: Auth; env: Env }) {
       orderBy: { displayName: "asc" },
       select: { id: true, repoKey: true, displayName: true },
     });
-    return c.json({ projects });
+
+    // Repositories the account's GitHub App can see that no checkout has been
+    // bound to yet. They are not projects — a task cannot be filed against one —
+    // so they travel beside the list rather than in it; the app shows them
+    // inert, so a repo added on GitHub is visible before anyone opens a folder.
+    // Scoped by the same membership, and a revoked installation or a repo GitHub
+    // stopped listing offers nothing.
+    const unlinked = await deps.db.integrationRepo.findMany({
+      where: {
+        projectId: null,
+        removedAt: null,
+        integration: { accountId: membership.accountId, revokedAt: null },
+      },
+      orderBy: { repoKey: "asc" },
+      select: { id: true, repoKey: true },
+    });
+    const bound = new Set(projects.map((p) => p.repoKey));
+    const unlinkedRepos = unlinked.filter((repo) => !bound.has(repo.repoKey));
+
+    return c.json({ projects, unlinkedRepos });
+  });
+
+  /**
+   * File a task against a repository no machine has opened yet.
+   *
+   * The app's project picker offers the repos the GitHub App can see, not only
+   * the ones with a checkout; choosing one of those lands here so the task has a
+   * project to belong to. A session cookie only: a machine's device token is
+   * for reporting checkouts, and nothing it does should mint projects.
+   */
+  r.use("/account/projects/from-repo", requireUser({ auth: deps.auth }));
+  r.post("/account/projects/from-repo", async (c) => {
+    const parsed = FromRepoBody.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: "BAD_REQUEST", issues: parsed.error.issues }, 400);
+
+    const membership = await findActiveMembership(deps.db, c.get("userId"));
+    if (!membership) return c.json({ error: "NO_ACCOUNT" }, 403);
+
+    const result = await projectFromIntegrationRepo(deps.db, {
+      accountId: membership.accountId,
+      repoId: parsed.data.repoId,
+    });
+    if (result.kind !== "ok") return c.json({ error: "REPO_NOT_FOUND" }, 404);
+    return c.json({ project: result.project });
   });
 
   r.post("/account/projects/bindings", async (c) => {

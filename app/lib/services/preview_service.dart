@@ -727,6 +727,30 @@ class PreviewService {
     );
   }
 
+  /// Like [openTab], but for a link the user explicitly clicked: an already-
+  /// open tab is sent to [path] and reloaded instead of merely focused, since
+  /// the tab may have followed in-page links away from the page the link names.
+  Future<SelectPortResult> openTabAtLink(
+    int port, {
+    String scheme = 'http',
+    required String path,
+  }) {
+    final existing = _tabByPort(port);
+    final current = existing?.currentUrl;
+    if (existing == null || existing.scheme != scheme || current == null) {
+      return openTab(port, scheme: scheme, path: path);
+    }
+    final origin = Uri.parse(current).origin;
+    _upsertTab(
+      existing.copyWith(
+        currentUrl: '$origin${path == '/' ? '' : path}',
+        navRevision: existing.navRevision + 1,
+      ),
+      focus: true,
+    );
+    return Future.value(SelectPortResult.opened);
+  }
+
   /// Resolves an address-bar navigation through the tab's actual origin,
   /// including an ephemeral proxy port when the target is remote.
   Uri? existingTabNavigationUrl(

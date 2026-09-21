@@ -379,20 +379,18 @@ class _Body extends ConsumerWidget {
   }
 
   Widget _list(BuildContext context, WidgetRef ref) {
-    // TasksNavRow normally rides on the local band ("This machine"), which
-    // only exists when a local project is in the list. A drawer with no local
-    // entry at all — every mobile/remote-only client — never emits that band,
-    // which left Tasks completely unreachable there. Give it a standalone
-    // slot above the list in exactly that case; desktop (which always has a
-    // local band) is untouched.
-    final hasLocalBand = entries.any((e) => e.kind == EntryKind.local);
+    // Tasks is account-level, not a property of any machine, so it heads the
+    // drawer in every layout: above the "This machine" band on desktop, and the
+    // only way in on a mobile/remote-only client that has no local band at all.
     final body = entries.isEmpty
         ? _emptyState(context)
         : _entriesList(context, ref);
-    if (hasLocalBand) return body;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [const TasksNavRow(), Expanded(child: body)],
+      children: [
+        const TasksNavRow(),
+        Expanded(child: body),
+      ],
     );
   }
 
@@ -558,10 +556,7 @@ class _EntryWithSessions extends ConsumerWidget {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        if (showLocalBand) ...[
-          LocalMachineBand(showRule: showRule),
-          const TasksNavRow(),
-        ],
+        if (showLocalBand) LocalMachineBand(showRule: showRule),
         entryRowWrapped,
         if (expanded)
           machineUuid != null

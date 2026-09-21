@@ -22,10 +22,16 @@ import '../../design/widgets/ab_text_field.dart';
 import '../../design/widgets/ab_multiline_field.dart';
 import '../../models/ab_message.dart' show GitFileStatusEntry;
 import '../../models/task.dart';
+import '../../navigation/nav_controller.dart' show recordProjectFocus;
 import '../../providers/agent_transport.dart'
-    show selectedRegistrationIdProvider;
+    show selectProject, selectedRegistrationIdProvider;
+import '../../providers/new_session_action.dart'
+    show openRemoteProjectForActivation;
+import '../../util/device_id.dart' show baseDeviceUuid, baseProjectId;
+import '../../providers/task_launcher.dart' show pendingTaskLaunchProvider;
 import '../../providers/providers.dart'
     show checkoutFileTreeStateProvider, checkoutServiceOrNull;
+import '../../providers/task_project_source.dart';
 import '../../providers/tasks.dart';
 import '../../services/tasks_api.dart';
 import '../../util/detached.dart';
@@ -36,6 +42,7 @@ import '../file_viewer_router.dart';
 import '../send_capture_to_agent.dart';
 import '../transcript/markdown_body.dart';
 import 'task_launch_sheet.dart';
+import 'task_project_missing.dart';
 import 'task_provenance_view.dart';
 import 'task_publish_sheet.dart';
 import 'task_row_actions.dart';
@@ -151,6 +158,31 @@ class _LoadedState extends ConsumerState<_Loaded> {
   var _unlinking = false;
 
   @override
+  void initState() {
+    super.initState();
+    // Focusing a project can swap the route under this view, so the launch it
+    // queued may be picked up by the NEW instance rather than the one that
+    // queued it.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _refetchProjectsIfUnresolved();
+      _launchIfQueued();
+    });
+  }
+
+  /// The account's project list is fetched once at sign-in and a failed fetch
+  /// stays failed, so a task opened after that would otherwise sit on
+  /// "couldn't load" until the user finds the refresh button.
+  void _refetchProjectsIfUnresolved() {
+    if (!mounted) return;
+    final phase = ref
+        .read(taskProjectResolutionProvider(_task.projectId))
+        .phase;
+    if (phase == TaskProjectPhase.unresolved) {
+      ref.invalidate(taskProjectsProvider);
+    }
+  }
+
+  @override
   void dispose() {
     _title.dispose();
     _body.dispose();
@@ -158,6 +190,73 @@ class _LoadedState extends ConsumerState<_Loaded> {
   }
 
   Task get _task => widget.task;
+
+  /// True while a remote machine is being woken for this task's Start.
+  var _focusing = false;
+  String? _focusError;
+
+  /// Focus the task's own project — a local folder or a project on another
+  /// machine — then open the launch sheet once that focus has landed; see
+  /// [_launchIfQueued].
+  ///
+  /// [registrationId] is a bare project id for a local folder, or the compound
+  /// `<machineUuid>.<projectId>` for a remote one, which has to be woken and
+  /// dialled first and so can take a while and can fail.
+  Future<void> _focusThenLaunch(String registrationId) async {
+    final container = ref.container;
+    // Queued BEFORE the focus moves: focusing a project can replace the screen
+    // this view lives on, and the instance that mounts next is the one that
+    // opens the sheet.
+    container.read(pendingTaskLaunchProvider.notifier).set(_task.number);
+
+    if (!registrationId.contains('.')) {
+      selectProject(container, registrationId);
+      _launchIfQueued();
+      return;
+    }
+
+    setState(() {
+      _focusing = true;
+      _focusError = null;
+    });
+    try {
+      await openRemoteProjectForActivation(
+        container,
+        machineUuid: baseDeviceUuid(registrationId),
+        projectId: baseProjectId(registrationId),
+      );
+      recordProjectFocus(container);
+    } catch (e) {
+      if (container.read(pendingTaskLaunchProvider) == _task.number) {
+        container.read(pendingTaskLaunchProvider.notifier).set(null);
+      }
+      if (mounted) {
+        setState(() {
+          _focusing = false;
+          _focusError = 'Couldn’t reach that machine — is it online?';
+        });
+      }
+      return;
+    }
+    if (!mounted) return;
+    setState(() => _focusing = false);
+    _launchIfQueued();
+  }
+
+  void _launchIfQueued() {
+    if (!mounted) return;
+    if (ref.read(pendingTaskLaunchProvider) != _task.number) return;
+    final wanted =
+        ref.read(taskProjectSourceProvider(_task.projectId))?.targetIds ??
+        const <String>[];
+    if (!wanted.contains(ref.read(selectedRegistrationIdProvider))) return;
+    ref.read(pendingTaskLaunchProvider.notifier).set(null);
+    detached(
+      'tasks',
+      'start session',
+      () => showTaskLaunchSheet(context, _task),
+    );
+  }
 
   void _beginTitle() {
     _title.text = _task.title;
@@ -519,13 +618,41 @@ class _LoadedState extends ConsumerState<_Loaded> {
   Widget _header(BuildContext context) {
     final palette = context.antgrid;
     final launcher = ref.watch(taskLauncherProvider);
-    final blockedReason =
-        launcher?.unavailableReason(_task) ??
-        // No launcher at all is a build-time state, not a user error: say what
-        // is missing rather than leaving a dead button with no explanation.
-        (launcher == null
-            ? 'Starting a session from a task is not wired up yet.'
-            : null);
+    // The task's repository is known but no opened folder is it: the fix is
+    // to open or clone it, which replaces the generic "no project" sentence.
+    final resolution = ref.watch(
+      taskProjectResolutionProvider(_task.projectId),
+    );
+    final source = resolution.source;
+    // A task filed against a project must never fall back to "whichever project
+    // is focused" just because the account's project list has not arrived: the
+    // session would start in the wrong repository, silently.
+    final projectUnknown = resolution.blocksLaunch && !_task.status.isClosed;
+    // Neither a local folder nor a project on an open machine is this repo.
+    final projectMissing =
+        source != null && !source.reachable && !_task.status.isClosed;
+    // The task's own repo is reachable — here or on another machine — but is
+    // not the focused project: Start focuses it first rather than refusing, or
+    // worse, launching into whichever unrelated project happens to be focused.
+    final targets = source?.targetIds ?? const <String>[];
+    final needsFocus =
+        targets.isNotEmpty &&
+        !targets.contains(ref.watch(selectedRegistrationIdProvider)) &&
+        !_task.status.isClosed;
+    final blockedReason = projectUnknown
+        ? (resolution.phase == TaskProjectPhase.loading
+              ? 'Loading this task’s project…'
+              : 'Couldn’t load this task’s project, so Antgrid can’t tell '
+                    'which repository to start in.')
+        : projectMissing || needsFocus
+        ? null
+        : launcher?.unavailableReason(_task) ??
+              // No launcher at all is a build-time state, not a user error: say
+              // what is missing rather than leaving a dead button with no
+              // explanation.
+              (launcher == null
+                  ? 'Starting a session from a task is not wired up yet.'
+                  : null);
 
     return Padding(
       padding: const EdgeInsets.all(AbTokens.space12),
@@ -578,37 +705,81 @@ class _LoadedState extends ConsumerState<_Loaded> {
               ),
             ),
           const SizedBox(height: AbTokens.space12),
-          Row(
-            children: [
-              AbButton(
-                label: 'Start session',
-                variant: AbButtonVariant.primary,
-                // The sheet, never the launch directly: [TaskLauncher.start]
-                // takes no context, and a start has two things it must show
-                // before and after — which project the session lands in, and
-                // the bridge's reason when it refuses.
-                onTap: blockedReason != null || launcher == null
-                    ? null
-                    : () => detached(
-                        'tasks',
-                        'start session',
-                        () => showTaskLaunchSheet(context, _task),
+          if (projectMissing)
+            TaskProjectMissing(source: source)
+          else
+            Row(
+              children: [
+                AbButton(
+                  label: _focusing ? 'Opening machine…' : 'Start session',
+                  variant: AbButtonVariant.primary,
+                  // The sheet, never the launch directly: [TaskLauncher.start]
+                  // takes no context, and a start has two things it must show
+                  // before and after — which project the session lands in, and
+                  // the bridge's reason when it refuses.
+                  onTap:
+                      _focusing ||
+                          projectUnknown ||
+                          blockedReason != null ||
+                          launcher == null
+                      ? null
+                      : needsFocus
+                      ? () => detached(
+                          'tasks',
+                          'focus project for task',
+                          () => _focusThenLaunch(targets.first),
+                        )
+                      : () => detached(
+                          'tasks',
+                          'start session',
+                          () => showTaskLaunchSheet(context, _task),
+                        ),
+                ),
+                if (blockedReason != null) ...[
+                  const SizedBox(width: AbTokens.space8),
+                  Expanded(
+                    child: Text(
+                      blockedReason,
+                      style: AbTokens.sansStyle(
+                        fontSize: AbTokens.fontXxs,
+                        color: palette.textMuted,
                       ),
-              ),
-              if (blockedReason != null) ...[
-                const SizedBox(width: AbTokens.space8),
-                Expanded(
-                  child: Text(
-                    blockedReason,
-                    style: AbTokens.sansStyle(
-                      fontSize: AbTokens.fontXxs,
-                      color: palette.textMuted,
                     ),
                   ),
-                ),
+                  if (resolution.phase == TaskProjectPhase.unresolved &&
+                      projectUnknown) ...[
+                    const SizedBox(width: AbTokens.space8),
+                    AbButton(
+                      label: 'Retry',
+                      compact: true,
+                      onTap: () => ref.invalidate(taskProjectsProvider),
+                    ),
+                  ],
+                ],
               ],
-            ],
-          ),
+            ),
+          if (_focusError != null) ...[
+            const SizedBox(height: AbTokens.space6),
+            Text(
+              _focusError!,
+              style: AbTokens.sansStyle(
+                fontSize: AbTokens.fontXxs,
+                color: palette.error,
+              ),
+            ),
+          ] else if (needsFocus && targets.first.contains('.')) ...[
+            // The session will run on another machine; say so before the tap,
+            // since the sheet only names the project.
+            const SizedBox(height: AbTokens.space6),
+            Text(
+              'Starts on another of your machines: '
+              '${source!.remote.firstWhere((r) => r.registrationId == targets.first).label}.',
+              style: AbTokens.sansStyle(
+                fontSize: AbTokens.fontXxs,
+                color: palette.textMuted,
+              ),
+            ),
+          ],
         ],
       ),
     );

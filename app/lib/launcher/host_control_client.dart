@@ -307,7 +307,9 @@ class RemoteDirectoryAck {
     }
     final rawKeys = json['wantedRepoKeys'];
     final wantedRepoKeys = <String>[
-      if (rawKeys is List) for (final k in rawKeys) if (k is String) k,
+      if (rawKeys is List)
+        for (final k in rawKeys)
+          if (k is String) k,
     ];
     final lastReadAt = json['lastReadAt'];
     return RemoteDirectoryAck(
@@ -695,6 +697,32 @@ class HostControlClient {
         'malformed git:branches response: $e',
       );
     }
+  }
+
+  /// Clones [url] into `<parentDir>/<dirName ?? repo name>` and returns the new
+  /// checkout's path. The bridge refuses an existing target rather than cloning
+  /// into it, and a long timeout is the point: a clone is minutes, not the
+  /// seconds the other git verbs get.
+  Future<String> gitClone({
+    required String url,
+    required String parentDir,
+    String? dirName,
+    Duration timeout = const Duration(minutes: 11),
+  }) async {
+    final m = await _post({
+      'type': 'git:clone',
+      'url': url,
+      'parentDir': parentDir,
+      'dirName': ?dirName,
+    }, timeout: timeout);
+    final path = m['path'];
+    if (path is! String || path.isEmpty) {
+      throw HostControlException(
+        'BAD_RESPONSE',
+        'malformed git:clone response',
+      );
+    }
+    return path;
   }
 
   /// Reaches the network on the bridge side (`git ls-remote`), so it carries a

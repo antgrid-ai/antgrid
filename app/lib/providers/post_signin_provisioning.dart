@@ -78,6 +78,7 @@ final postSignInProvisioningProvider = Provider<void>((ref) {
         // switch and reads as "this account has none" forever.
         ref.invalidate(taskListProvider);
         ref.invalidate(taskProjectsProvider);
+        ref.invalidate(taskUnlinkedReposProvider);
         ref.invalidate(taskLabelsProvider);
         prefetchSubscriptionCache(ref);
       } on ProvisioningException catch (e) {
@@ -129,6 +130,7 @@ Future<void> retryDeviceProvisioning(WidgetRef ref) async {
   ref.invalidate(localDeviceUuidProvider);
   ref.invalidate(taskListProvider);
   ref.invalidate(taskProjectsProvider);
+  ref.invalidate(taskUnlinkedReposProvider);
   ref.invalidate(taskLabelsProvider);
   prefetchSubscriptionCache(ref);
 }

@@ -61,11 +61,70 @@ final taskLaunchPromptProvider =
       () => ValueController(''),
     );
 
+/// Number of the task whose Start is waiting on its project taking focus.
+///
+/// Focusing a project can replace the screen the tap came from (the tasks
+/// surface is hosted by a different shell with and without one), so the view
+/// that queued the launch may not be the one still alive when the focus lands.
+/// Whoever mounts a task with this number opens the sheet and clears it.
+final pendingTaskLaunchProvider = NotifierProvider<ValueController<int?>, int?>(
+  () => ValueController(null),
+);
+
 void resetTaskLaunchForm(ProviderContainer ref) {
   ref.read(taskLaunchToolProvider.notifier).set(null);
   ref.read(taskLaunchIsolatedProvider.notifier).set(true);
   ref.read(taskLaunchPromptProvider.notifier).set('');
 }
+
+/// Pre-selects the agent when the focused project has none of its own.
+///
+/// "Project default" means whatever `antgrid.yaml` names, and a project with no
+/// such file — every fresh clone — has nothing to name, so the bridge refuses
+/// the start with "agent.tool or agent.command not configured". New Session
+/// never hits that because it always sends a tool; this gives the task sheet
+/// the same fallback while leaving a project that DOES configure an agent on
+/// its own default.
+///
+/// Best effort: any failure to read the config leaves the choice on "Project
+/// default", which is exactly what happened before this existed.
+Future<void> seedTaskLaunchAgent(ProviderContainer container) async {
+  final entryId = container.read(selectedRegistrationIdProvider);
+  if (entryId == null) return;
+  final config = await warmServiceFor(
+    container,
+    entryId,
+    (s) => s.configService,
+  );
+  if (config == null) return;
+  // A null read is either "no antgrid.yaml" (the bridge answers ok:false with
+  // no detail) or "the file is broken" / "nobody answered" (both leave an error
+  // on the service). A broken file may well configure an agent, so only a
+  // missing one, or one that parsed and names none, is evidence of no default.
+  final parsed = await config.read().catchError((_) => null);
+  final state = config.currentState;
+  if (parsed == null && (state.rawOnError != null || state.error != null)) {
+    return;
+  }
+  final agent = parsed?.agent;
+  final hasDefault =
+      (agent?.tool?.isNotEmpty ?? false) ||
+      (agent?.command?.isNotEmpty ?? false);
+  if (hasDefault) return;
+  // The user may have picked something while the config was loading.
+  if (container.read(taskLaunchToolProvider) != null) return;
+  container
+      .read(taskLaunchToolProvider.notifier)
+      .set(kDefaultSessionAgent.toolKey);
+}
+
+/// Seam for [seedTaskLaunchAgent]: a widget test pins it rather than letting the
+/// sheet read a config through a fake project, which leaves a reply timer
+/// running past the test.
+final taskLaunchAgentSeederProvider =
+    Provider<Future<void> Function(ProviderContainer)>(
+      (_) => seedTaskLaunchAgent,
+    );
 
 /// Git catalog for the FOCUSED project.
 ///

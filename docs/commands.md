@@ -29,6 +29,9 @@ cd web && bun run drain:task-sync
 # newly switched-on repository already had, and any delivery lost to an outage.
 # Claims each repository under a try-lock, so running it beside itself is safe.
 cd web && bun run poll:github
+# Local dev: one loop that runs all three of the above every 30s. `npm run dev`
+# starts it for you; under Aspire or a bare `bun run dev:server`, run it yourself.
+cd web && bun run dev:sync
 ```
 
 ## Worktrees

@@ -980,6 +980,12 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
       // Session page or double-start. See the per-session-agent design.
       if (!isCurrent()) return;
       if (ref.read(newSessionStartInFlightProvider)) return;
+      // Only from the workspace itself. An empty project is focused the moment
+      // it is cloned or opened, and the user's next tap is often Tasks or
+      // Settings; forcing New Session here would silently undo that overlay.
+      if (ref.read(workbenchSurfaceProvider) != WorkbenchSurface.workspace) {
+        return;
+      }
       ref
           .read(workbenchSurfaceProvider.notifier)
           .set(WorkbenchSurface.newSession);

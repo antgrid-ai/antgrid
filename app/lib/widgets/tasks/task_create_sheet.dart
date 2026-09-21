@@ -15,6 +15,7 @@ import '../../design/widgets/ab_switch.dart';
 import '../../design/widgets/ab_text_field.dart';
 import '../../models/task.dart';
 import '../../providers/tasks.dart';
+import '../../services/tasks_api.dart' show TaskApiException;
 import '../../util/detached.dart';
 import 'create_label_dialog.dart';
 import 'task_publish_sheet.dart';
@@ -59,10 +60,23 @@ class _TaskCreateSheetState extends ConsumerState<_TaskCreateSheet> {
   /// applies to a project chosen before there was anything to publish.
   var _projectChosenWithEmptyBody = true;
 
+  /// Whether the title is blank, which is what the Create button answers to:
+  /// a task with no title is refused by the server, so the button says so up
+  /// front instead of accepting the tap and doing nothing.
+  var _titleBlank = true;
+
   @override
   void initState() {
     super.initState();
     _projectId = ref.read(taskFilterProvider).projectId;
+    _title.addListener(_onTitleChanged);
+  }
+
+  void _onTitleChanged() {
+    final blank = _title.text.trim().isEmpty;
+    // Only when the answer flips: every keystroke would otherwise rebuild the
+    // whole form for a value that has not changed.
+    if (blank != _titleBlank) setState(() => _titleBlank = blank);
   }
 
   @override
@@ -107,7 +121,19 @@ class _TaskCreateSheetState extends ConsumerState<_TaskCreateSheet> {
     });
   }
 
-  Future<void> _pickProject(Map<String, String> names) async {
+  /// Prefix marking a picker value as a repo with no project yet rather than a
+  /// project id — the two share one list and must never be mistaken for each
+  /// other.
+  static const _repoPrefix = 'repo:';
+
+  /// True while a repo with no project yet is being turned into one.
+  var _creatingProject = false;
+  String? _projectError;
+
+  Future<void> _pickProject(
+    Map<String, String> names,
+    List<UnlinkedRepo> unlinked,
+  ) async {
     final picked = await showAbSelect<String>(
       context,
       title: 'Project',
@@ -116,13 +142,30 @@ class _TaskCreateSheetState extends ConsumerState<_TaskCreateSheet> {
         const AbSelectOption(value: '', label: 'No project'),
         for (final entry in names.entries)
           AbSelectOption(value: entry.key, label: entry.value),
+        // Repos the GitHub App can see that no machine has opened. Choosing one
+        // creates its project, so a task can be filed against it before anyone
+        // has a checkout.
+        for (final repo in unlinked)
+          AbSelectOption(
+            value: '$_repoPrefix${repo.id}',
+            label: repo.name,
+            detail: 'GitHub repo, not opened on a machine yet',
+          ),
       ],
       selected: {_projectId ?? ''},
     );
     final choice = picked?.firstOrNull;
     if (choice == null || !mounted) return;
+
+    var chosen = choice.isEmpty ? null : choice;
+    if (chosen != null && chosen.startsWith(_repoPrefix)) {
+      chosen = await _materialize(chosen.substring(_repoPrefix.length));
+      // A failure keeps the previous choice and says why; nothing to apply.
+      if (chosen == null || !mounted) return;
+    }
     setState(() {
-      _projectId = choice.isEmpty ? null : choice;
+      _projectError = null;
+      _projectId = chosen;
       // Both derived state, and both must fall back to nothing chosen: a repo
       // belongs to the project it came from, and the switch's position was an
       // answer about a different destination.
@@ -130,6 +173,38 @@ class _TaskCreateSheetState extends ConsumerState<_TaskCreateSheet> {
       _publishChoice = null;
       _projectChosenWithEmptyBody = _body.text.trim().isEmpty;
     });
+  }
+
+  /// Turns a repo the account can see into a project, and refreshes the lists
+  /// that feed the picker so it is offered as a project from now on.
+  ///
+  /// Returns the project id, or null after recording why it could not.
+  Future<String?> _materialize(String repoId) async {
+    setState(() {
+      _creatingProject = true;
+      _projectError = null;
+    });
+    try {
+      final project = await ref
+          .read(tasksApiProvider)
+          .createProjectFromRepo(repoId);
+      // Refreshed and awaited, so the button can name the project the moment it
+      // is chosen instead of flashing a placeholder while the list reloads.
+      ref.invalidate(taskUnlinkedReposProvider);
+      ref.invalidate(taskProjectsProvider);
+      await ref.read(taskProjectsProvider.future);
+      return project.id;
+    } on TaskApiException catch (e) {
+      if (mounted) setState(() => _projectError = e.message);
+      return null;
+    } catch (_) {
+      if (mounted) {
+        setState(() => _projectError = 'Couldn’t set up that repo. Try again.');
+      }
+      return null;
+    } finally {
+      if (mounted) setState(() => _creatingProject = false);
+    }
   }
 
   Future<void> _pickRepo(List<TaskPublishTarget> targets) async {
@@ -168,7 +243,7 @@ class _TaskCreateSheetState extends ConsumerState<_TaskCreateSheet> {
 
   Future<void> _submit(List<TaskPublishTarget> targets) async {
     final title = _title.text.trim();
-    if (title.isEmpty || _submitting) return;
+    if (title.isEmpty || _submitting || _creatingProject) return;
     setState(() => _submitting = true);
     final publish = _publishOn(targets);
     final task = await ref
@@ -198,6 +273,8 @@ class _TaskCreateSheetState extends ConsumerState<_TaskCreateSheet> {
   Widget build(BuildContext context) {
     final candidates = ref.watch(taskAssigneeCandidatesProvider);
     final projectNames = ref.watch(taskProjectNamesProvider);
+    final unlinkedRepos =
+        ref.watch(taskUnlinkedReposProvider).value ?? const <UnlinkedRepo>[];
     final projectId = _projectId;
     final targets = projectId == null
         ? const <TaskPublishTarget>[]
@@ -268,7 +345,9 @@ class _TaskCreateSheetState extends ConsumerState<_TaskCreateSheet> {
                   const SizedBox(width: AbTokens.space8),
                   if (candidates.isNotEmpty)
                     AbButton(
-                      label: _assignee == null ? 'Unassigned' : 'Assigned to me',
+                      label: _assignee == null
+                          ? 'Unassigned'
+                          : 'Assigned to me',
                       compact: true,
                       onTap: () => setState(
                         () => _assignee = _assignee == null
@@ -279,22 +358,36 @@ class _TaskCreateSheetState extends ConsumerState<_TaskCreateSheet> {
                   // Absent where the app cannot name a single project: an
                   // empty picker is a dead end, and a task with no project is
                   // the state this form has always produced.
-                  if (projectNames.isNotEmpty) ...[
+                  if (projectNames.isNotEmpty || unlinkedRepos.isNotEmpty) ...[
                     const SizedBox(width: AbTokens.space8),
                     AbButton(
-                      label: projectId == null
+                      label: _creatingProject
+                          ? 'Setting up…'
+                          : projectId == null
                           ? 'No project'
                           : projectNames[projectId] ?? 'Project',
                       compact: true,
-                      onTap: () => detached(
-                        'tasks',
-                        'pick project',
-                        () => _pickProject(projectNames),
-                      ),
+                      onTap: _creatingProject
+                          ? null
+                          : () => detached(
+                              'tasks',
+                              'pick project',
+                              () => _pickProject(projectNames, unlinkedRepos),
+                            ),
                     ),
                   ],
                 ],
               ),
+              if (_projectError != null) ...[
+                const SizedBox(height: AbTokens.space8),
+                Text(
+                  _projectError!,
+                  style: AbTokens.sansStyle(
+                    fontSize: AbTokens.fontXxs,
+                    color: palette.error,
+                  ),
+                ),
+              ],
               if (_labels.isNotEmpty) ...[
                 const SizedBox(height: AbTokens.space8),
                 Wrap(
@@ -341,7 +434,7 @@ class _TaskCreateSheetState extends ConsumerState<_TaskCreateSheet> {
                         ? 'Create task and issue'
                         : 'Create task',
                     variant: AbButtonVariant.primary,
-                    onTap: _submitting
+                    onTap: _submitting || _creatingProject || _titleBlank
                         ? null
                         : () => detached(
                             'tasks',

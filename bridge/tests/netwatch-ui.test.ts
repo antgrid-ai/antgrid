@@ -258,6 +258,7 @@ describe("viewer routes", () => {
       "agent-reach:get": { id: "a", type: "agent-reach:get" },
       "agent-reach:set": { id: "a", type: "agent-reach:set", enabled: true },
       "git:branches": { id: "a", type: "git:branches", projectId: "p", projectPath: "/x" },
+      "git:clone": { id: "a", type: "git:clone", url: "https://github.com/o/r.git", parentDir: "/x" },
       "git:remote-state": { id: "a", type: "git:remote-state", projectId: "p", projectPath: "/x", branch: "main" },
       "git:checkout": { id: "a", type: "git:checkout", projectId: "p", projectPath: "/x", branch: "main" },
       "netwatch:ui": { id: "a", type: "netwatch:ui" },

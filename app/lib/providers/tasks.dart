@@ -811,6 +811,16 @@ final taskProjectsProvider = FutureProvider<List<TaskProject>>((ref) async {
   return ref.watch(tasksApiProvider).listProjects();
 });
 
+/// Repositories the GitHub App can see that no folder has been opened for yet.
+///
+/// Read-only context for the repo filter; failing to load it costs the filter
+/// its inert rows and nothing else, so consumers read `.value ?? const []`.
+final taskUnlinkedReposProvider = FutureProvider<List<UnlinkedRepo>>((
+  ref,
+) async {
+  return ref.watch(tasksApiProvider).listUnlinkedRepos();
+});
+
 /// Repository identity → the account project filed against it.
 ///
 /// The join the drawer needs: a project row knows its `repoKey` (the host folds

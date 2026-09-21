@@ -1,4 +1,4 @@
-import type { Tx } from "../db/index.js";
+import type { DB, Tx } from "../db/index.js";
 
 export type BindLocalProjectArgs = {
   /** Resolved from the caller, never from the request body. */
@@ -85,4 +85,58 @@ export async function bindLocalProject(
   });
 
   return { kind: "ok", projectId: project.id, bindingId: binding.id };
+}
+
+export type ProjectFromRepoResult =
+  | { kind: "ok"; project: { id: string; repoKey: string; displayName: string } }
+  | { kind: "repo_not_found" };
+
+/**
+ * The account project for a repository its GitHub App can see, created if no
+ * machine has reported a checkout of it yet.
+ *
+ * This is the same resolve-or-create `bindLocalProject` performs — keyed on
+ * `[accountId, repoKey]`, so a machine that opens the folder later lands on the
+ * row made here rather than a second one — minus the machine, which is exactly
+ * what is missing. It records no binding and enables nothing: import and push
+ * stay off until the user switches them on, so this changes what a task may be
+ * filed against and no more.
+ *
+ * Scoped to the caller's account through the integration, and a repository of a
+ * revoked installation, or one GitHub stopped listing, is not found: naming
+ * somebody else's repo id, or a dead one, must not mint a project.
+ */
+export async function projectFromIntegrationRepo(
+  db: DB,
+  args: { accountId: string; repoId: string }
+): Promise<ProjectFromRepoResult> {
+  return db.$transaction(async (tx): Promise<ProjectFromRepoResult> => {
+    const repo = await tx.integrationRepo.findFirst({
+      where: {
+        id: args.repoId,
+        removedAt: null,
+        integration: { accountId: args.accountId, revokedAt: null },
+      },
+      select: { id: true, repoKey: true, projectId: true },
+    });
+    if (!repo) return { kind: "repo_not_found" };
+
+    // The label a person would give it: the last segment of the normalised key.
+    const displayName = repo.repoKey.split("/").pop() || repo.repoKey;
+
+    const project = await tx.project.upsert({
+      where: { accountId_repoKey: { accountId: args.accountId, repoKey: repo.repoKey } },
+      create: { accountId: args.accountId, repoKey: repo.repoKey, displayName },
+      update: {},
+      select: { id: true, repoKey: true, displayName: true },
+    });
+
+    // `projectId: null` in the filter keeps an explicit manual link intact.
+    await tx.integrationRepo.updateMany({
+      where: { id: repo.id, projectId: null },
+      data: { projectId: project.id },
+    });
+
+    return { kind: "ok", project };
+  });
 }

@@ -5,7 +5,9 @@
 import 'dart:convert';
 
 import 'package:antgrid/design/ab_theme.dart';
+import 'package:antgrid/design/widgets/ab_button.dart';
 import 'package:antgrid/design/widgets/ab_switch.dart';
+import 'package:antgrid/models/task.dart';
 import 'package:antgrid/providers/tasks.dart';
 import 'package:antgrid/services/tasks_api.dart';
 import 'package:antgrid/util/detached.dart';
@@ -65,6 +67,7 @@ ProviderContainer _container(
   MockClient client, {
   String? projectId = 'p-1',
   Map<String, String> projectNames = const {},
+  List<UnlinkedRepo> unlinked = const [],
 }) {
   final container = ProviderContainer(
     overrides: [
@@ -77,6 +80,7 @@ ProviderContainer _container(
       ),
       taskAssigneeCandidatesProvider.overrideWithValue(const []),
       taskProjectNamesProvider.overrideWithValue(projectNames),
+      taskUnlinkedReposProvider.overrideWith((ref) async => unlinked),
     ],
   );
   addTearDown(container.dispose);
@@ -177,31 +181,37 @@ void main() {
     expect(body.containsKey('publishRepoId'), isFalse);
   });
 
-  testWidgets('the repo default positions the switch, and says it is a setting', (
-    tester,
-  ) async {
-    final seen = <http.Request>[];
-    final container = _container(
-      _serving([_target(byDefault: true)], on: seen.add),
-    );
-    await _open(tester, container);
+  testWidgets(
+    'the repo default positions the switch, and says it is a setting',
+    (tester) async {
+      final seen = <http.Request>[];
+      final container = _container(
+        _serving([_target(byDefault: true)], on: seen.add),
+      );
+      await _open(tester, container);
 
-    expect(_publishSwitch(tester).value, isTrue);
-    expect(find.textContaining('On by default for antgrid/antgrid'), findsOneWidget);
-    // The ON state carries the weight: the destination and its visibility are
-    // both on screen beside the switch.
-    expect(find.text('Will be created in'), findsOneWidget);
-    expect(
-      find.textContaining('This repo is public, so the issue will be public.'),
-      findsOneWidget,
-    );
+      expect(_publishSwitch(tester).value, isTrue);
+      expect(
+        find.textContaining('On by default for antgrid/antgrid'),
+        findsOneWidget,
+      );
+      // The ON state carries the weight: the destination and its visibility are
+      // both on screen beside the switch.
+      expect(find.text('Will be created in'), findsOneWidget);
+      expect(
+        find.textContaining(
+          'This repo is public, so the issue will be public.',
+        ),
+        findsOneWidget,
+      );
 
-    await _create(tester);
-    final body = _createBody(seen);
-    expect(body['publish'], isTrue);
-    expect(body['publishRepoId'], 'repo-1');
-    expect(body['projectId'], 'p-1');
-  });
+      await _create(tester);
+      final body = _createBody(seen);
+      expect(body['publish'], isTrue);
+      expect(body['publishRepoId'], 'repo-1');
+      expect(body['projectId'], 'p-1');
+    },
+  );
 
   testWidgets('turning the default off publishes nothing', (tester) async {
     final seen = <http.Request>[];
@@ -310,5 +320,169 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(_publishSwitch(tester).value, isTrue);
+  });
+
+  group('the Create button', () {
+    AbButton createButton(WidgetTester tester) => tester.widget<AbButton>(
+      find.ancestor(
+        of: find.textContaining('Create task'),
+        matching: find.byType(AbButton),
+      ),
+    );
+
+    testWidgets('is disabled while nothing is filled in', (tester) async {
+      final container = _container(_serving(const []));
+      await _open(tester, container);
+
+      expect(createButton(tester).onTap, isNull);
+    });
+
+    testWidgets(
+      'enables once there is a title, and disables again if cleared',
+      (tester) async {
+        final container = _container(_serving(const []));
+        await _open(tester, container);
+
+        await tester.enterText(find.byType(EditableText).first, 'Fix it');
+        await tester.pump();
+        expect(createButton(tester).onTap, isNotNull);
+
+        await tester.enterText(find.byType(EditableText).first, '');
+        await tester.pump();
+        expect(createButton(tester).onTap, isNull);
+      },
+    );
+
+    testWidgets('a whitespace-only title does not count', (tester) async {
+      final container = _container(_serving(const []));
+      await _open(tester, container);
+
+      await tester.enterText(find.byType(EditableText).first, '    ');
+      await tester.pump();
+      expect(createButton(tester).onTap, isNull);
+    });
+
+    testWidgets(
+      'a description alone is not enough — the title is what is required',
+      (tester) async {
+        final container = _container(_serving(const []));
+        await _open(tester, container);
+
+        await tester.enterText(find.byType(EditableText).last, 'Only a body');
+        await tester.pump();
+        expect(createButton(tester).onTap, isNull);
+      },
+    );
+  });
+
+  group('repos the GitHub App can see but no machine has opened', () {
+    const repo = UnlinkedRepo(
+      id: 'r-7',
+      repoKey: 'github.com/acme/angular-main',
+    );
+
+    MockClient serving(List<http.Request> seen, {int fromRepoStatus = 200}) {
+      return MockClient((req) async {
+        seen.add(req);
+        if (req.url.path == '/account/projects/from-repo') {
+          if (fromRepoStatus != 200) {
+            return http.Response('{"error":"REPO_NOT_FOUND"}', fromRepoStatus);
+          }
+          return http.Response(
+            jsonEncode({
+              'project': {
+                'id': 'p-9',
+                'repoKey': 'github.com/acme/angular-main',
+                'displayName': 'angular-main',
+              },
+            }),
+            200,
+          );
+        }
+        if (req.url.path == '/account/projects') {
+          return http.Response('{"projects":[]}', 200);
+        }
+        if (req.url.path == '/labels') {
+          return http.Response('{"labels":[]}', 200);
+        }
+        if (req.url.path == '/tasks/publish-targets') {
+          return http.Response('{"targets":[]}', 200);
+        }
+        if (req.method == 'GET' && req.url.path == '/tasks') {
+          return http.Response('{"tasks":[]}', 200);
+        }
+        return http.Response(jsonEncode({'task': _taskJson}), 200);
+      });
+    }
+
+    testWidgets(
+      'the picker lists them, and choosing one files the task there',
+      (tester) async {
+        final seen = <http.Request>[];
+        final container = _container(
+          serving(seen),
+          projectNames: const {'p-1': 'antgrid'},
+          unlinked: const [repo],
+        );
+        await _open(tester, container);
+
+        await tester.tap(find.text('antgrid'));
+        await tester.pumpAndSettle();
+        expect(find.text('angular-main'), findsOneWidget);
+        expect(
+          find.text('GitHub repo, not opened on a machine yet'),
+          findsOneWidget,
+        );
+
+        await tester.tap(find.text('angular-main'));
+        await tester.pumpAndSettle();
+
+        // The project was made from THIS repo, by its id — never a name.
+        final made = seen.singleWhere(
+          (r) => r.url.path == '/account/projects/from-repo',
+        );
+        expect(jsonDecode(made.body), {'repoId': 'r-7'});
+
+        await _create(tester);
+        expect(_createBody(seen)['projectId'], 'p-9');
+      },
+    );
+
+    testWidgets('a failure keeps the earlier project and says so', (
+      tester,
+    ) async {
+      final seen = <http.Request>[];
+      final container = _container(
+        serving(seen, fromRepoStatus: 404),
+        projectNames: const {'p-1': 'antgrid'},
+        unlinked: const [repo],
+      );
+      await _open(tester, container);
+
+      await tester.tap(find.text('antgrid'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('angular-main'));
+      await tester.pumpAndSettle();
+
+      await _create(tester);
+      // Still filed where it was, not against a project that was never made.
+      expect(_createBody(seen)['projectId'], 'p-1');
+    });
+
+    testWidgets('with only unlinked repos the picker is still offered', (
+      tester,
+    ) async {
+      final container = _container(
+        serving(<http.Request>[]),
+        projectId: null,
+        unlinked: const [repo],
+      );
+      await _open(tester, container);
+
+      expect(find.text('No project'), findsOneWidget);
+      await tester.tap(find.text('No project'));
+      await tester.pumpAndSettle();
+      expect(find.text('angular-main'), findsOneWidget);
+    });
   });
 }

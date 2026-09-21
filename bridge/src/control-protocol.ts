@@ -68,6 +68,15 @@ export const ControlRequestSchema = z.discriminatedUnion("type", [
     projectId: z.string().min(1),
     projectPath: z.string().min(1),
   }),
+  // Loopback-only like every verb here: the desktop names the parent folder it
+  // picked, and nothing on the relay plane can reach this.
+  z.object({
+    id: z.string().min(1),
+    type: z.literal("git:clone"),
+    url: z.string().min(1).max(2048),
+    parentDir: z.string().min(1),
+    dirName: z.string().min(1).max(255).optional(),
+  }),
   z.object({
     id: z.string().min(1),
     type: z.literal("git:remote-state"),
@@ -291,6 +300,7 @@ export type ControlResponse =
   | { id: string; ok: true; type: "agent-reach:set"; enabled: boolean }
   | { id: string; ok: true; type: "machine:capability-card"; os: OsCard; projects: Record<string, RepoCard> }
   | { id: string; ok: true; type: "git:branches"; isRepository: boolean; current: string | null; branches: string[]; worktreeSessionsSupported: boolean }
+  | { id: string; ok: true; type: "git:clone"; path: string }
   | { id: string; ok: true; type: "git:remote-state"; status: BranchRemoteStatus }
   | { id: string; ok: true; type: "git:checkout"; current: string; stashed?: StashEntry }
   | { id: string; ok: true; type: "checkout:path"; path: string }

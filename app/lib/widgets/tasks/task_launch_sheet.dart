@@ -34,11 +34,20 @@ Future<void> showTaskLaunchSheet(BuildContext context, Task task) {
   // Reset from the tap that opens the sheet, not from the sheet's own
   // initState: initState runs inside the tree's build phase, which is the one
   // place a provider write is forbidden.
-  resetTaskLaunchForm(ProviderScope.containerOf(context, listen: false));
-  return showAbAdaptiveSheet<void>(
+  final container = ProviderScope.containerOf(context, listen: false);
+  resetTaskLaunchForm(container);
+  final shown = showAbAdaptiveSheet<void>(
     context,
     child: _TaskLaunchSheet(task: task),
   );
+  // After the sheet is up, never before: the config read can wait on a cold
+  // project, and the sheet must not sit unopened behind it.
+  detached(
+    'tasks',
+    'seed launch agent',
+    () => container.read(taskLaunchAgentSeederProvider)(container),
+  );
+  return shown;
 }
 
 class _TaskLaunchSheet extends ConsumerStatefulWidget {
@@ -76,8 +85,7 @@ class _TaskLaunchSheetState extends ConsumerState<_TaskLaunchSheet> {
     // Read, not watch: the tool advert costs a control-plane round trip (a
     // loopback `tools:list` for a local project), and the sheet must not pay it
     // just to render a label.
-    final wire =
-        (await ref.read(focusedMachineToolsProvider.future)).labels;
+    final wire = (await ref.read(focusedMachineToolsProvider.future)).labels;
     final catalog = ref.read(agentCatalogProvider);
     if (!mounted) return;
     final keys = <String>{...wire.keys, ...catalog.keys};

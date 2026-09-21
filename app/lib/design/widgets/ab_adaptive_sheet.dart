@@ -34,8 +34,12 @@ Future<T?> showAbAdaptiveSheet<T>(
   }
   return showDialog<T>(
     context: context,
-    builder: (_) => Dialog(
-      backgroundColor: context.antgrid.bgSurface,
+    // The BUILDER's context, not the caller's: the dialog rebuilds for as long
+    // as it is open, and the screen that opened it can be replaced underneath
+    // (focusing a project swaps the shell), which leaves the caller's context
+    // deactivated and every later theme lookup on it an assertion.
+    builder: (dialogContext) => Dialog(
+      backgroundColor: dialogContext.antgrid.bgSurface,
       child: ConstrainedBox(
         constraints: BoxConstraints(maxWidth: maxWidth),
         child: child,

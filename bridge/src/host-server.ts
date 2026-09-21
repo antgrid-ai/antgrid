@@ -64,6 +64,7 @@ import {
 import { isSafeProjectId } from "./project-id";
 import { listLocalBranches, checkoutLocalBranch, checkBranchAgainstRemote } from "./git-branches";
 import type { BranchRemoteStatus } from "./git-branches";
+import { cloneRepository } from "./git-clone";
 import {
   MAX_CAPABILITY_CARD_PROJECTS,
   readCapabilityCard,
@@ -2040,6 +2041,18 @@ export class HostServer {
             branches: catalog.branches,
             worktreeSessionsSupported: catalog.isRepository && WORKTREE_SESSIONS_SUPPORTED,
           };
+        } catch (err: any) {
+          return {
+            id: req.id,
+            ok: false,
+            error: { code: err.code || "UNKNOWN_ERROR", message: err.message || String(err) },
+          };
+        }
+      }
+      case "git:clone": {
+        try {
+          const path = await cloneRepository({ url: req.url, parentDir: req.parentDir, dirName: req.dirName });
+          return { id: req.id, ok: true, type: "git:clone", path };
         } catch (err: any) {
           return {
             id: req.id,

@@ -191,6 +191,7 @@ void main() {
           // loopback host, and a widget test must not spawn a bridge to answer
           // a capability question.
           taskLaunchIsolationReadyProvider.overrideWithValue(isolationReady),
+          taskLaunchAgentSeederProvider.overrideWithValue((_) async {}),
           taskLauncherProvider.overrideWith(
             (ref) => launcher ?? ref.watch(appTaskLauncherProvider),
           ),
@@ -342,6 +343,81 @@ void main() {
       await tester.pumpAndSettle();
     });
 
+    Future<String?> seededTool(
+      WidgetTester tester,
+      Map<String, dynamic> reply,
+    ) async {
+      final container = await pumpSheet(tester, _task());
+      final seeding = seedTaskLaunchAgent(container);
+      await tester.pump();
+      await tester.pump();
+      transport.emit('config:read-result', reply);
+      await tester.pump();
+      await seeding;
+      return container.read(taskLaunchToolProvider);
+    }
+
+    Map<String, dynamic> parsed(Map<String, dynamic> config) => {
+      'ok': true,
+      'config': config,
+    };
+
+    testWidgets('a parsed config that names no agent opens on the default', (
+      tester,
+    ) async {
+      expect(await seededTool(tester, parsed({})), 'claude-code');
+    });
+
+    testWidgets('a project with no antgrid.yaml opens on the default agent', (
+      tester,
+    ) async {
+      // The bridge answers a missing file with a bare ok:false — no raw, no
+      // error — which is the case a fresh clone is in.
+      expect(await seededTool(tester, {'ok': false}), 'claude-code');
+    });
+
+    testWidgets('a broken antgrid.yaml is left on Project default', (
+      tester,
+    ) async {
+      // It may well configure an agent; guessing over it would be wrong.
+      expect(
+        await seededTool(tester, {
+          'ok': false,
+          'raw': 'agent: [oops',
+          'error': 'bad yaml',
+        }),
+        isNull,
+      );
+    });
+
+    testWidgets('a project that configures its own agent keeps its default', (
+      tester,
+    ) async {
+      expect(
+        await seededTool(
+          tester,
+          parsed({
+            'agent': {'tool': 'codex'},
+          }),
+        ),
+        isNull,
+      );
+    });
+
+    testWidgets('a configured launch command counts as a default too', (
+      tester,
+    ) async {
+      expect(
+        await seededTool(
+          tester,
+          parsed({
+            'agent': {'command': 'my-agent'},
+          }),
+        ),
+        isNull,
+      );
+    });
+
     testWidgets('a refusal is shown in the sheet and does not escape', (
       tester,
     ) async {
@@ -391,10 +467,7 @@ void main() {
       await tester.pump(const Duration(seconds: 20));
       await tester.pumpAndSettle();
 
-      expect(
-        find.textContaining('try again in a moment'),
-        findsOneWidget,
-      );
+      expect(find.textContaining('try again in a moment'), findsOneWidget);
       expect(find.text('Try again'), findsOneWidget);
       expect(find.text('Start'), findsOneWidget);
     });
