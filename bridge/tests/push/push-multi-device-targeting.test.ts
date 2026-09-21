@@ -10,6 +10,7 @@ import { generateEphemeralKeypair } from "../../src/key-exchange";
 import { createMessage } from "../../src/protocol";
 import type { MessageBus } from "../../src/message-bus";
 import type { PeerSessionView } from "../../src/stream-mux";
+import { peerView } from "../relay-stubs";
 
 // A machine holds one E2E session per attached app device, so "the connected
 // phone" no longer names anyone. These drive the REAL project-core push wiring
@@ -50,10 +51,7 @@ function registerPhone(store: PairedPhonesStore, phonePubkey: string, pushToken:
 function session(peerPubkey: string): PeerSessionView {
   // Unreachable: the sessions survive a relay presence drop with their keys, which
   // is exactly the window push exists to cover.
-  return {
-    peerId: `${peerPubkey.toLowerCase()}#machine`, peerPubkey,
-    checkoutRouting: true, reachable: false, pullsTree: true,
-  };
+  return peerView({ peerId: `${peerPubkey.toLowerCase()}#machine`, peerPubkey, reachable: false });
 }
 
 /** A remote core whose transport reports [peers] as established. onPeerOnline is
@@ -148,9 +146,7 @@ test("a push-incapable sibling holding a live session does not suppress the away
   // registers no push token, so "some session is established" silenced the
   // fallback entirely — the desktop is backgrounded, the phone's session was
   // reaped, and nothing reached the user at all.
-  const desktop: PeerSessionView = {
-    peerId: "desktop#machine", peerPubkey: "PK_DESKTOP", checkoutRouting: true, reachable: true, pullsTree: true,
-  };
+  const desktop = peerView({ peerId: "desktop#machine", peerPubkey: "PK_DESKTOP" });
   const { notify, delivered, focus } = await startCore(
     [desktop],
     (store) => registerPhone(store, "PK_PHONE", "TOKEN_PHONE", "fcm"),
@@ -167,12 +163,8 @@ test("a push-incapable sibling holding a live session does not suppress the away
 test("a phone whose own session is reachable and unpaused is not pushed to while a backgrounded sibling opens the fallback", async () => {
   // The per-device half of the same question: the fallback is machine-wide, but
   // a device that can read the frame on its live stream must not also be buzzed.
-  const held: PeerSessionView = {
-    peerId: "pk_held#machine", peerPubkey: "PK_HELD", checkoutRouting: true, reachable: true, pullsTree: true,
-  };
-  const pocketed: PeerSessionView = {
-    peerId: "pk_pocket#machine", peerPubkey: "PK_POCKET", checkoutRouting: true, reachable: true, pullsTree: true,
-  };
+  const held = peerView({ peerId: "pk_held#machine", peerPubkey: "PK_HELD" });
+  const pocketed = peerView({ peerId: "pk_pocket#machine", peerPubkey: "PK_POCKET" });
   const { notify, delivered, focus } = await startCore(
     [held, pocketed],
     (store) => {

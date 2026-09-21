@@ -1,27 +1,18 @@
 import { test, expect, afterEach } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { ProjectCore, type ProjectCoreDeps, type ProjectCoreRemoteDeps } from "../src/project-core";
-import type { PeerSessionView, SendTarget, StreamHandle } from "../src/stream-mux";
+import type { SendTarget } from "../src/stream-mux";
 import type { MachineRelaySession } from "../src/relay-promotion";
+import { fakeStreamHandle, peerView } from "./relay-stubs";
 import { createMessage } from "../src/protocol";
 
 let cleanup: Array<() => void | Promise<unknown>> = [];
 afterEach(async () => { for (const fn of cleanup.splice(0).reverse()) try { await fn(); } catch {} });
 
 const PEER = "app-device#machine-uuid";
-
-// Neither test removes its temp folder, on purpose. Deleting it is itself what
-// arms the last git refresh: the watcher sees the tree vanish and schedules a
-// debounced `rev-parse`, which outlives `shutdown`'s drain and then spawns with
-// a cwd that is gone. That rejection surfaces against whatever test is running
-// 250ms later — in another file — so the folder is left for the OS to reap.
-
-function viewFor(peerId: string): PeerSessionView {
-  return { peerId, peerPubkey: "pub", checkoutRouting: true, reachable: true, pullsTree: true };
-}
 
 /** Fully typed, no cast: `envelope.metadata` is mandatory on the wire, so a
  *  fixture that elides it is a frame this bridge would refuse — and the cast
@@ -50,14 +41,11 @@ function busReplyFrame() {
 function peerStreamStub() {
   const sent: Array<SendTarget | undefined> = [];
   const stub = {
-    attachStream: (): StreamHandle => ({
-      streamId: "stream-1",
-      detach: () => {},
-      sendTunnel: async () => "sent" as const,
+    attachStream: () => fakeStreamHandle({
       sendTo: async (_msg, _channel, target) => { sent.push(target); return "sent" as const; },
     }),
-    establishedPeers: () => [viewFor(PEER)],
-    peerSession: (peerId: string) => (peerId === PEER ? viewFor(peerId) : null),
+    establishedPeers: () => [peerView({ peerId: PEER })],
+    peerSession: (peerId: string) => (peerId === PEER ? peerView({ peerId }) : null),
     sendPushDeliver: () => {},
     machineDeviceId: () => "machine-uuid",
     agentDeviceId: "machine-uuid",
@@ -71,6 +59,7 @@ function peerStreamStub() {
 
 function localCore(prefix: string, deps: Partial<ProjectCoreDeps> = {}): ProjectCore {
   const folder = mkdtempSync(join(tmpdir(), prefix));
+  cleanup.push(() => rmSync(folder, { recursive: true, force: true }));
   writeFileSync(join(folder, "antgrid.yaml"), "");
   const core = new ProjectCore({
     folder,
