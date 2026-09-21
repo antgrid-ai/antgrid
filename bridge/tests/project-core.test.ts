@@ -3,10 +3,9 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { ProjectCore, type ProjectCoreRemoteDeps } from "../src/project-core";
+import { ProjectCore } from "../src/project-core";
 import { computeProjectId } from "../src/project-id";
-import { MessageBus } from "../src/message-bus";
-import type { AttachStreamOpts, StreamHandle } from "../src/stream-mux";
+import { fakeRemoteDeps, MACHINE_UUID } from "./relay-stubs";
 import type { ConnState } from "../src/conn-state";
 import { createMessage, type AbMessage } from "../src/protocol";
 import { SessionDirectory } from "../src/session-bus/directory";
@@ -16,30 +15,6 @@ let cleanup: Array<() => void | Promise<unknown>> = [];
 // project folder they watch is rm'd — FIFO deleted the folder under a live
 // chokidar watcher, which throws asynchronously between tests.
 afterEach(async () => { for (const fn of cleanup.splice(0).reverse()) try { await fn(); } catch {} });
-
-/** A ProjectCoreRemoteDeps stub whose `attachStream` captures the bus + opts
- *  it was called with (instead of a live machine socket) — the seam v3 uses
- *  in place of the deleted per-core `makeRelayClient`/RelayClientOptions hook. */
-function fakeRemoteDeps(): { deps: ProjectCoreRemoteDeps; calls: Array<{ bus: MessageBus; opts: AttachStreamOpts }> } {
-  const calls: Array<{ bus: MessageBus; opts: AttachStreamOpts }> = [];
-  const deps: ProjectCoreRemoteDeps = {
-    attachStream: (bus, opts) => {
-      calls.push({ bus, opts });
-      const handle: StreamHandle = {
-        streamId: "stream-1",
-        detach: () => {},
-        sendTunnel: async () => "sent" as const,
-        sendTo: async () => "sent" as const,
-      };
-      return handle;
-    },
-    establishedPeers: () => [],
-    peerSession: () => null,
-    machineDeviceId: () => "machine-uuid",
-    sendPushDeliver: () => {},
-  };
-  return { deps, calls };
-}
 
 test("local ProjectCore.start binds a listener and exposes connect info", async () => {
   const folder = mkdtempSync(join(tmpdir(), "antgrid-pc-"));
@@ -340,7 +315,10 @@ test("a core built with sessionDirectory deps answers session-bus:directory inst
       },
     },
     projectPath: () => undefined,
-    machineId: () => "machine-uuid",
+    // The same id the core's remote deps report: with remote access off,
+    // listSessions narrows the answer to rows naming THIS machine, so a
+    // directory stamping any other id answers an empty list.
+    machineId: () => MACHINE_UUID,
   });
 
   const core = new ProjectCore({

@@ -10,11 +10,11 @@ import { createMessage, type AbMessage } from "../src/protocol";
 import { RelayClient } from "../src/relay-client";
 import { createRelayPromotion, type MachineRelaySession } from "../src/relay-promotion";
 import type { PeerSessionView } from "../src/stream-mux";
+import { peerView } from "./relay-stubs";
 import { generateEphemeralKeypair } from "../src/key-exchange";
 
-/** One established app session, as the relay transport would report it. */
 function session(peerPubkey: string, peerId = "app-dev#machine-dev"): PeerSessionView {
-  return { peerId, peerPubkey, checkoutRouting: true, reachable: true, pullsTree: true };
+  return peerView({ peerId, peerPubkey });
 }
 
 function tunnelResponses(frames: object[]): object[] {

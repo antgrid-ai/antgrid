@@ -58,6 +58,11 @@ abstract class SessionHandshaker {
 
   /// Abort any in-flight [perform] (session teardown / supersession).
   void abort();
+
+  /// End the in-flight [perform], if any, so it resolves null promptly. Unlike
+  /// [abort] a later [perform] must still run: this is the socket dying under
+  /// one attempt, not the session going away.
+  void cancelInFlight();
 }
 
 /// Thrown by [MachineSession.ensureEstablished] when the one handshake attempt
@@ -736,6 +741,12 @@ class MachineSession {
     // of which are gated on a live session.
     _established = false;
     _stopLiveness();
+    // An attempt still running was talking over the socket that just died.
+    // Left alone it runs to its timeout, and the supervisor's re-drive on the
+    // NEW socket joins it (`_runHandshake` is single-flight) instead of
+    // starting fresh.
+    _handshaker.cancelInFlight();
+    _scheduler.hold = false;
     _keys?.zeroize();
     _keys = null;
     // Fail every in-flight RPC now: their replies can never arrive on a dead
@@ -800,6 +811,11 @@ class MachineSession {
   Future<void> _handshakeAttempt() async {
     final wasEstablished = _established;
     final startedAt = DateTime.now();
+    // A rekey holds the outbound queue: the agent's own socket redial zeroizes
+    // every session before the relay can report it back online, so anything
+    // sealed under the keys this side still holds is lost silently at the far
+    // end. Held frames seal under the new keys once they land (`kick` below).
+    if (wasEstablished) _scheduler.hold = true;
     final newKeys = await _handshaker.perform();
     if (_disposed) {
       newKeys?.zeroize();
@@ -812,10 +828,11 @@ class MachineSession {
       // the old keys after a failed attempt preserves a session the peer has
       // most likely already dropped — and, with `_established` still true,
       // leaves nothing able to notice.
-      if (wasEstablished) {
-        // The initial-attempt failure is the supervisor's to report; this is
-        // the one transition nothing above this layer sees, and it is what
-        // turns every later send into a "send dropped".
+      // The initial-attempt failure is the supervisor's to report; this is
+      // the one transition nothing above this layer sees, and it is what
+      // turns every later send into a "send dropped". Not logged when the
+      // socket died under the attempt: `_teardownSession` already ran.
+      if (wasEstablished && _established) {
         _log(
           RelayLogLevel.warn,
           'E2E session torn down — rekey attempt failed',
@@ -845,13 +862,14 @@ class MachineSession {
     if (!_readyCompleter.isCompleted) _readyCompleter.complete();
     if (!_established$.isClosed) _established$.add(null);
     // A new session credits from zero. The QUEUE deliberately survives a rekey:
-    // frames dequeued from here on seal under the new keys, and the agent
-    // swapped before it confirmed, so nothing straddles the change in this
-    // direction — where dropping them would strand every pending RPC until its
-    // timeout.
+    // it was held for the attempt's duration, so every frame in it seals under
+    // the new keys from here on, and the agent swapped before it confirmed —
+    // nothing straddles the change in this direction, where dropping them
+    // would strand every pending RPC until its timeout.
     _sessionEpoch++;
     _scheduler.resetWindows();
     _resetRxFlow();
+    _scheduler.hold = false;
     _scheduler.kick();
     // The agent un-mutes EVERY stream on a fresh session (`notifyPeerOnline` in
     // bridge/src/stream-mux.ts), so a throttle carried across the boundary
@@ -1495,6 +1513,15 @@ class MachineSession {
   Future<void> _sendSessionFrame(Map<String, dynamic> obj) async {
     final keys = _keys;
     final type = obj['type'] as String?;
+    if (keys != null && _handshakeInFlight) {
+      // Same hold as the app queue during a rekey (see `_handshakeAttempt`):
+      // these bypass the scheduler. Skipped, not queued — a credit is
+      // meaningless against the session the establishment resets, and the
+      // agent kills a session only after two unanswered pings 20 s apart
+      // (bridge/src/relay-client.ts), so a 10 s attempt costs at most one pong.
+      _dropped('tx', 'rekey-in-flight', channel: 'control', msgType: type);
+      return;
+    }
     if (keys == null) {
       _dropped('tx', 'no-e2e-session', channel: 'control', msgType: type);
       // This path carries ping, pong and credit — the frames the peer reads as

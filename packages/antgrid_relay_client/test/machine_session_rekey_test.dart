@@ -6,6 +6,7 @@
 // cases that exercised `RelayTransport.updateAgent` (send/receive silently
 // gated on key presence, keys hot-swapped) — that hot-swap now lives in
 // MachineSession's `_runHandshake`.
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -16,6 +17,34 @@ import 'support/fake_live_relay.dart';
 
 Future<Uint8List> _sealFromAgent(SessionKeys keys, String plaintext) =>
     E2eTransportDart(sendKey: keys.a2p, recvKey: keys.p2a).seal(plaintext);
+
+/// Opens a phone→agent frame the way the agent would.
+Future<String?> _openAsAgent(SessionKeys keys, Uint8List sealed) =>
+    E2eTransportDart(sendKey: keys.a2p, recvKey: keys.p2a).open(sealed);
+
+/// A session established on [handshaker] with a rekey already in flight: the
+/// handshaker's second attempt is delayed by its `delayFor`, so the test can
+/// act inside that window.
+Future<MachineSession> _rekeyInFlight(
+  FakeLiveRelay relay,
+  FakeHandshaker handshaker,
+) async {
+  final session = MachineSession(
+    relay: relay,
+    machineDeviceId: 'm1',
+    handshaker: handshaker,
+  );
+  session.start();
+  await session.ensureEstablished();
+  relay.sent.clear();
+  relay.presence(false);
+  relay.presence(true);
+  for (var i = 0; i < 50 && handshaker.performCalls < 2; i++) {
+    await Future<void>.delayed(const Duration(milliseconds: 5));
+  }
+  expect(handshaker.performCalls, 2, reason: 'the rekey must be in flight');
+  return session;
+}
 
 bool _isZeroized(SessionKeys keys) {
   bool allZero(Uint8List b) => b.every((x) => x == 0);
@@ -367,6 +396,146 @@ void main() {
         );
         await Future<void>.delayed(const Duration(milliseconds: 30));
         expect(seen.map((j) => j['type']), ['new-keys']);
+
+        await sub.cancel();
+        await session.dispose();
+        await relay.closeStreams();
+      },
+    );
+  });
+
+  // The agent's own socket redial zeroizes every session before the relay can
+  // report it back online, so anything this side seals under the old keys
+  // between peer-online and the swap is undecryptable at the far end — and the
+  // sender is told it went out. Holding both outbound paths for the attempt's
+  // duration is what makes "nothing straddles the change" true.
+  group('a rekey holds outbound traffic until the new keys are confirmed', () {
+    test(
+      'an app frame sent while a rekey is in flight goes out under the NEW '
+      'keys, after establishment',
+      () async {
+        final relay = FakeLiveRelay();
+        final oldKeys = fixedKeys(1);
+        final newKeys = fixedKeys(9);
+        final handshaker = FakeHandshaker.sequence([oldKeys, newKeys])
+          ..delayFor = (i) =>
+              i == 1 ? const Duration(milliseconds: 150) : Duration.zero;
+        final session = await _rekeyInFlight(relay, handshaker);
+
+        unawaited(
+          session.sendOnStream(kControlStreamId, {
+            'type': 'session:list',
+          }, 'control'),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 30));
+        expect(
+          relay.sent,
+          isEmpty,
+          reason:
+              'sealed now it would be under keys the agent may already have '
+              'destroyed',
+        );
+
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+        expect(relay.sent, hasLength(1));
+        final opened = await _openAsAgent(newKeys, relay.sent.single.payload);
+        expect(opened, isNotNull, reason: 'sealed under the new keys');
+        expect(
+          (jsonDecode(opened!) as Map<String, dynamic>)['m']['type'],
+          'session:list',
+        );
+
+        await session.dispose();
+        await relay.closeStreams();
+      },
+    );
+
+    test(
+      'pong is not sealed under the old keys while a rekey is in flight, and '
+      'liveness resumes under the new ones',
+      () async {
+        final relay = FakeLiveRelay();
+        final oldKeys = fixedKeys(1);
+        final newKeys = fixedKeys(9);
+        final handshaker = FakeHandshaker.sequence([oldKeys, newKeys])
+          ..delayFor = (i) =>
+              i == 1 ? const Duration(milliseconds: 150) : Duration.zero;
+        final session = await _rekeyInFlight(relay, handshaker);
+
+        // Session frames bypass the queue, so the queue hold alone would let
+        // this pong out under the old keys.
+        relay.inject(
+          IncomingRouteMessage(
+            from: 'm1',
+            channel: 'control',
+            kind: FrameKind.sealed,
+            payload: await _sealFromAgent(oldKeys, jsonEncode({'type': 'ping'})),
+          ),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 30));
+        expect(relay.sent, isEmpty);
+
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+        relay.sent.clear();
+        relay.inject(
+          IncomingRouteMessage(
+            from: 'm1',
+            channel: 'control',
+            kind: FrameKind.sealed,
+            payload: await _sealFromAgent(newKeys, jsonEncode({'type': 'ping'})),
+          ),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 30));
+        expect(relay.sent, hasLength(1));
+        final pong = await _openAsAgent(newKeys, relay.sent.single.payload);
+        expect(pong, isNotNull);
+        expect((jsonDecode(pong!) as Map<String, dynamic>)['type'], 'pong');
+
+        await session.dispose();
+        await relay.closeStreams();
+      },
+    );
+
+    test(
+      'a socket drop under an in-flight rekey ends the attempt now, so the '
+      'replacement socket handshakes at once',
+      () async {
+        // Measured on a live socket stall: the rekey started on the dead socket
+        // ran to its full 10 s timeout, and the supervisor's re-drive on the
+        // new socket joined it instead of starting fresh.
+        final relay = FakeLiveRelay();
+        final handshaker =
+            FakeHandshaker.sequence([fixedKeys(1), fixedKeys(2), fixedKeys(3)])
+              ..delayFor = (i) =>
+                  i == 1 ? const Duration(seconds: 5) : Duration.zero;
+        final session = await _rekeyInFlight(relay, handshaker);
+        var downs = 0;
+        final sub = session.sessionDownEvents.listen((_) => downs++);
+
+        relay.setState(
+          const AppState(connectionState: RelayConnectionState.disconnected),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        expect(handshaker.cancelInFlightCalls, greaterThan(0));
+        expect(session.isEstablished, isFalse);
+        expect(
+          downs,
+          1,
+          reason: 'the supervisor hears the attempt is over now, not in 5 s',
+        );
+
+        relay.setState(
+          const AppState(connectionState: RelayConnectionState.authenticated),
+        );
+        await session.ensureEstablished().timeout(
+          const Duration(milliseconds: 500),
+        );
+        expect(
+          handshaker.performCalls,
+          3,
+          reason: 'a fresh attempt, not the one stranded on the dead socket',
+        );
+        expect(session.isEstablished, isTrue);
 
         await sub.cancel();
         await session.dispose();

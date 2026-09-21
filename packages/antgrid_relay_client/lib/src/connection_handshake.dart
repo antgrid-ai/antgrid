@@ -85,12 +85,20 @@ class ConnectionHandshake {
   StreamSubscription<IncomingRouteMessage>? _messageSub;
   Timer? _appReadyTimer;
 
+  /// Held so [cancel] ends the wait for `established` now rather than at
+  /// [_attemptTimeout]: the socket this attempt used is usually already gone.
+  Completer<SessionKeys>? _established;
+
   void cancel() {
     _cancelled = true;
     _messageSub?.cancel();
     _messageSub = null;
     _appReadyTimer?.cancel();
     _appReadyTimer = null;
+    final established = _established;
+    if (established != null && !established.isCompleted) {
+      established.completeError(StateError('cancelled'));
+    }
   }
 
   /// Runs one handshake attempt (fresh `attemptId`). Returns the confirmed
@@ -106,7 +114,10 @@ class ConnectionHandshake {
         .generateX25519KeyPair();
     var phoneX25519PrivScrubbed = false;
     final phoneX25519PubB64 = base64.encode(phoneX25519Pub);
-    final established = Completer<SessionKeys>();
+    final established = _established = Completer<SessionKeys>();
+    // A cancel before the await below is reached would otherwise surface as an
+    // unhandled error.
+    established.future.ignore();
     SessionKeys? derivedKeys;
     Future<SessionKeys?>? keysFuture;
     var appReadySent = false;
@@ -278,6 +289,8 @@ class ConnectionHandshake {
       }
       return null;
     } catch (e, st) {
+      // A cancel is the session's event to log, not a failure of this attempt.
+      if (_cancelled) return null;
       _log(
         HandshakeLogLevel.error,
         'run error',
@@ -288,6 +301,7 @@ class ConnectionHandshake {
       _appReadyTimer?.cancel();
       _appReadyTimer = null;
       if (identical(_messageSub, sub)) _messageSub = null;
+      if (identical(_established, established)) _established = null;
       await sub.cancel();
       // Scrub the ephemeral X25519 private key ONLY when no DH ran on it (see
       // the DH future above, which scrubs immediately after the shared secret).
@@ -295,8 +309,8 @@ class ConnectionHandshake {
         phoneX25519Priv.fillRange(0, phoneX25519Priv.length, 0);
       }
       // Zeroize the derived keys unless the caller (MachineSession) took them:
-      // on a completed established they are returned and owned by the caller.
-      if (!established.isCompleted) derivedKeys?.zeroize();
+      // only the uncancelled, completed path above returns them.
+      if (_cancelled || !established.isCompleted) derivedKeys?.zeroize();
     }
   }
 
@@ -415,6 +429,12 @@ class AppSessionHandshaker implements SessionHandshaker {
   @override
   void abort() {
     _aborted = true;
+    _current?.cancel();
+    _current = null;
+  }
+
+  @override
+  void cancelInFlight() {
     _current?.cancel();
     _current = null;
   }
