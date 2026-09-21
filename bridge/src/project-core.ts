@@ -96,8 +96,16 @@ export class ProjectCore {
   private bus: MessageBus | null = null;
   private listener: LocalListener | null = null;
   private promotion: RelayPromotionController | null = null;
-  /** The primary (remote-mode) core's stream on the machine socket. */
+  /** This core's stream on the machine socket: the primary slot for a
+   *  remote-mode core, and the promoted slot for a local-mode one. Both kinds
+   *  must land here, because {@link sendToAppSession} is how a session-bus
+   *  exchange is ANSWERED and it has no other way to reach the wire. */
   private streamHandle: StreamHandle | null = null;
+  /** The remote deps behind a promoted slot. A local-mode core is constructed
+   *  without `deps.remote` (`host-server.ts` passes it only for mode
+   *  "remote"), so they arrive at promotion instead and have to be kept: the
+   *  peer-session lookup in {@link sendToAppSession} reads them. */
+  private promotedRemote: ProjectCoreRemoteDeps | null = null;
   /** Unsubscribe for the primary (remote-mode) stream's push dispatcher bus
    *  subscription. Torn down in shutdown() alongside the stream. The promote()
    *  slot owns its own unsub in its PromotionHandle.stop() instead. */
@@ -159,7 +167,8 @@ export class ProjectCore {
     // the caller has to decide whether to hold it. "The session is live" is the
     // strongest fact available synchronously and is exactly what the boolean
     // used to mean.
-    if (!this.streamHandle || !this.deps.remote?.peerSession(peerId)) return false;
+    const remote = this.deps.remote ?? this.promotedRemote;
+    if (!this.streamHandle || !remote?.peerSession(peerId)) return false;
     void this.streamHandle.sendTo(msg, "control", { kind: "peer", peerId });
     return true;
   }
@@ -796,6 +805,13 @@ export class ProjectCore {
     if (!core || !bus) throw new Error("ProjectCore.promote: core not started (call start() first)");
 
     const { handle, firstRegister, unsubscribePush } = this.attachRelayStream(core, bus, remoteDeps);
+    // A promoted core's ONLY relay slot, and the sole reason these two are
+    // fields rather than closure state: `sendToAppSession` reads both, so a
+    // promotion that leaves them unset can carry a session-bus exchange IN and
+    // never answer it — held, retried against the same null, and expired six
+    // hours later with the send having reported itself on its way.
+    this.streamHandle = handle;
+    this.promotedRemote = remoteDeps;
 
     let stopped = false;
     return {
@@ -810,6 +826,10 @@ export class ProjectCore {
         this.relayRegistered = false;
         try { unsubscribePush(); } catch {}
         try { handle.detach(); } catch {}
+        // After the detach: the slot is gone, so `sendToAppSession` must go
+        // back to refusing rather than reporting a send onto a dead stream.
+        this.streamHandle = null;
+        this.promotedRemote = null;
         try { core.setPlainHook(null); } catch {}
         try { core.setPeerSessionProvider(null); } catch {}
       },
