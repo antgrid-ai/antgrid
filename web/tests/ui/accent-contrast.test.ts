@@ -87,18 +87,13 @@ describe("Signal accent ramp", () => {
     expect(css.web).toContain("--color-primary-content: var(--color-page)");
   });
 
-  // Only the tokens both sheets define; the site adds a third tint and a
-  // second deep that this service has no surface for.
-  test("both sheets ship the same ramp", () => {
-    for (const name of [
-      "page",
-      "panel",
-      "chrome",
-      "signal",
-      "signal2",
-      "signalbtn",
-      "signaldeep",
-    ]) {
+  // The accent alone. Surfaces diverged on purpose (#149): the site is warm so
+  // its zinc app windows read as objects on a bench, while this service has no
+  // windows and stays zinc. The signal ramp is the contract a reader carries
+  // across the sign-in crossing, so only it is held byte-identical. The site's
+  // third tint and second deep have no surface here.
+  test("both sheets ship the same accent ramp", () => {
+    for (const name of ["signal", "signal2", "signalbtn", "signaldeep"]) {
       expect(`${name}=${token("web", name)}`).toBe(
         `${name}=${token("site", name)}`,
       );

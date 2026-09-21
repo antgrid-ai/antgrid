@@ -135,10 +135,12 @@
 }
 
 /* ---- Tokens ------------------------------------------------------------
-   Surfaces, ink ramp and accents are the marketing site's values verbatim
+   The Signal accent ramp is the marketing site's verbatim
    (site/src/styles/global.css) — the two are one product and a user crosses
-   between them mid sign-in. The rationale for each value lives there; keep
-   them in lockstep rather than re-deriving.
+   between them mid sign-in, and tests/ui/accent-contrast.test.ts holds the two
+   copies together. Surfaces are NOT shared: the site went warm so its zinc app
+   windows read as objects on a bench; this service draws no windows, so its
+   surfaces stay zinc-neutral and are tuned here.
 
    Three faces, three jobs, no overlap: display carries the voice, sans carries
    the reading, mono carries anything a machine produced (device names,
