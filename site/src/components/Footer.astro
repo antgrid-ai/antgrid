@@ -76,30 +76,38 @@ import Wordmark from "./ui/Wordmark.astro";
       </a>
       {/* The colour-scheme override, and the only place on the site it lives.
           The page follows the OS by itself, so this is a preference control
-          rather than a feature, and it sits with the other small print. Hidden
-          until JS has run (global.css keys it on html.js) because without the
-          script it is three buttons that do nothing. `aria-pressed` is the
-          state; the pressed style hangs off it so the two cannot disagree.
+          rather than a feature, and it is set in the same small print as the
+          links beside it -- dot-separated, no chrome of its own, so it adds
+          nothing to this row's height. Hidden until JS has run (global.css
+          keys it on html.js) because without the script it is three buttons
+          that do nothing. `aria-pressed` is the state; the pressed style hangs
+          off it so the two cannot disagree.
 
-          The buttons need ~24px of height to stay tappable, which is 10px more
-          than this row's 11px line box. From `md` up the control sits inline
-          with the copyright and that 10px would set the row's height, so it is
-          pulled back out of the row's own `pt-4.5`; below `md` the control
-          wraps onto its own line, where the full height is what you want and a
-          negative margin would lap over the line above.
+          Hover and selected have to differ, or hovering an unselected choice
+          makes it look chosen: hover only reaches `ink`, selection adds the
+          accent rule under it.
 
-          `ml-auto` is also `md`-only: below it the control wraps to its own
-          line, and pushed right it lands under the fixed support launcher in
-          the same corner, which made Dark unreachable on a phone. Flowing left
-          keeps it clear of that launcher. */}
-      <div role="group" aria-label="Colour scheme" data-theme-toggle class="overflow-hidden rounded border border-edge md:-my-1.5 md:ml-auto">
-        {([["system", "System"], ["light", "Light"], ["dark", "Dark"]] as const).map(([choice, label]) => (
-          <button
-            type="button"
-            data-theme-choice={choice}
-            aria-pressed={choice === "system" ? "true" : "false"}
-            class="px-2 py-1 text-muted transition-colors hover:text-ink aria-pressed:bg-chrome aria-pressed:text-ink motion-reduce:transition-none"
-          >{label}</button>
+          These are 16px tall, under the 24px target minimum, which they are
+          allowed to be only because they are inline text whose size is set by
+          the line-height around them -- the same exemption the sibling links
+          rely on. That is why the type treatment, not padding, has to carry
+          the selected state: padding would forfeit it.
+
+          `ml-auto` is `md`-only. Below that the control wraps to its own line,
+          and pushed right it lands under the fixed support launcher in the
+          same corner, which made Dark unreachable on a phone. */}
+      <div role="group" aria-label="Colour scheme" data-theme-toggle class="items-center gap-x-2 md:ml-auto">
+        <span aria-hidden="true">Theme</span>
+        {([["system", "System"], ["light", "Light"], ["dark", "Dark"]] as const).map(([choice, label], i) => (
+          <>
+            {i > 0 && <span aria-hidden="true">·</span>}
+            <button
+              type="button"
+              data-theme-choice={choice}
+              aria-pressed={choice === "system" ? "true" : "false"}
+              class="text-muted transition-colors hover:text-ink aria-pressed:text-ink aria-pressed:underline aria-pressed:decoration-signal aria-pressed:underline-offset-4 motion-reduce:transition-none"
+            >{label}</button>
+          </>
         ))}
       </div>
     </div>
