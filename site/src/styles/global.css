@@ -53,11 +53,14 @@
   --color-ink: light-dark(#131110, #f4f1ec);
   --color-ink2: light-dark(#2e2926, #d8d3cc);
   --color-muted: light-dark(#5c554e, #a6a098);
-  /* muted2/faint are picked for contrast on --color-page, not panel: 4.5:1 (AA
-     body) and 3:1 (AA UI) respectively, in both halves. Pulling either towards
-     page drops muted2 below AA. */
-  --color-muted2: light-dark(#6f675f, #827b73);
-  --color-faint: light-dark(#8f877e, #675f58);
+  /* Every tier below `muted` clears 4.5:1 on the DARKEST surface it lands on
+     (`well`), not just on page, so the same token is safe wherever it is used.
+     That compresses the ramp -- muted/muted2/faint sit at roughly 6.7/5.9/5.1
+     on page -- and the separation between them is carried by size, weight and
+     letter-spacing, which these tiers already vary. There is only one AA-legal
+     step below body text, so contrast cannot also pay for hierarchy. */
+  --color-muted2: light-dark(#655d56, #9b958e);
+  --color-faint: light-dark(#6e6760, #938980);
 
   /* Signal, the brand accent. `signal` is the TEXT tier — it clears 4.5:1 on
      page, panel and chrome, which pure #d2542a does not (3.75:1 on dark chrome).
@@ -201,8 +204,14 @@
   --color-ab-line-strong: light-dark(#bdbdbd, #3f3f46);
   --color-ab-text: light-dark(#18181b, #e4e4e7);
   --color-ab-text2: light-dark(#3f3f46, #a1a1aa);
-  --color-ab-mute: #71717a;
-  --color-ab-dim: light-dark(#a1a1aa, #52525b);
+  /* `mute` and `dim` are the two ramp entries that deliberately DIVERGE from
+     the app (tests/unit/ab-ramp.test.ts pins the divergence and its floor).
+     The app's textMuted #71717a and textDisabled #a1a1aa/#52525b run 2.1-4.4:1
+     on these surfaces: legible in a dense native window the reader works in,
+     not on a page they scan once. Both also paint ICONS, so an -ink text tier
+     like the status hues below could not have fixed them. */
+  --color-ab-mute: light-dark(#5a5a62, #95959c);
+  --color-ab-dim: light-dark(#676772, #878793);
   /* Status tones. `attn` is the app's statusAttention and it means what amber
      means everywhere else on this site: a human is needed. Nothing else in a
      scene may take it. The app keeps the same three hues in its light preset
@@ -211,7 +220,9 @@
   --color-ab-think: #e2c792;
   --color-ab-attn: #e5a055;
   --color-ab-ok: light-dark(#15803d, #22c55e);
-  --color-ab-err: light-dark(#dc2626, #f87171);
+  /* Light half nudged off the app's #dc2626, 4.43:1 on ab-deep -- it carries
+     diff counts, which are data rather than decoration. */
+  --color-ab-err: light-dark(#d62323, #f87171);
   /* Site-only TEXT tiers for the two status hues that carry words in a scene
      ("Needs you", "Remote on"): on white, attn is 2.21:1 and run is 1.79:1.
      Dots, icons and the tinted chips keep the app hue above; only the words

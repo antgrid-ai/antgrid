@@ -41,13 +41,22 @@ const MAP: Record<string, string> = {
   "line-strong": "borderStrong",
   text: "textPrimary",
   text2: "textSecondary",
-  mute: "textMuted",
-  dim: "textDisabled",
   ok: "success",
-  err: "error",
   run: "statusRunning",
   think: "statusThinking",
   attn: "statusAttention",
+};
+
+// The ramp entries that deliberately DIVERGE from the app, and the app value
+// each one replaces. The app tunes these for a dense native window the reader
+// is working in; the site paints them at 9.5-13px on a page that is scanned
+// once, where the app value runs 2.1-4.4:1. They are held to a contrast floor
+// here instead of to the Dart literal, so a drift is still caught -- what is
+// no longer asserted is only the equality the site cannot afford.
+const LIFTED: Record<string, string> = {
+  mute: "textMuted",
+  dim: "textDisabled",
+  err: "error",
 };
 
 function token(name: string): string {
@@ -72,6 +81,25 @@ describe("ab-* ramp mirrors the app palette", () => {
     const names = [...css.matchAll(/--color-ab-([\w-]+):/g)]
       .map((m) => m[1])
       .filter((n) => !n.endsWith("-ink"));
-    expect(names.sort()).toEqual(Object.keys(MAP).sort());
+    expect(names.sort()).toEqual([...Object.keys(MAP), ...Object.keys(LIFTED)].sort());
   });
+});
+
+describe("ab-* tiers lifted off the app palette", () => {
+  for (const [name, field] of Object.entries(LIFTED)) {
+    // Equality is what the mirrored set asserts; here the point is the
+    // opposite -- if one of these ever matches the app again it has silently
+    // dropped back below the floor the site needs.
+    test(`ab-${name} no longer equals the app's ${field}`, () => {
+      const l = light[field];
+      const d = dark[field];
+      expect(l).toBeDefined();
+      expect(d).toBeDefined();
+      expect(token(name)).not.toBe(l === d ? l : `light-dark(${l},${d})`);
+    });
+
+    test(`ab-${name} is a light-dark pair`, () => {
+      expect(token(name)).toMatch(/^light-dark\(#[0-9a-f]{6},#[0-9a-f]{6}\)$/);
+    });
+  }
 });

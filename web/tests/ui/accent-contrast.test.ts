@@ -95,11 +95,29 @@ describe("Signal accent ramp", () => {
         expect(ratio(sheet, scheme, "signal", "signaldeep")).toBeGreaterThanOrEqual(4.5);
       });
 
-      // muted2 is the quietest text tier (AA body) and faint the quietest
-      // UI tier (AA non-text), both picked against page.
-      test(`${t}: muted2 and faint clear their floors on page`, () => {
-        expect(ratio(sheet, scheme, "muted2", "page")).toBeGreaterThanOrEqual(4.5);
-        expect(ratio(sheet, scheme, "faint", "page")).toBeGreaterThanOrEqual(3);
+      // Every tier below `muted` carries words somewhere -- footnotes, kickers,
+      // ordinals, timestamps -- at 11-13px, so each owes the AA body floor on
+      // the DARKEST surface it can land on, not merely on page. `faint` used to
+      // be held to 3:1 here, which is the non-text floor, and that is exactly
+      // how a full sentence on /pricing ended up at 3.22:1.
+      const quietest = sheet === "web" ? ["page", "panel", "chrome", "group"]
+                                       : ["page", "panel", "chrome", "group", "well"];
+      for (const tier of ["muted", "muted2", "faint"]) {
+        test(`${t}: ${tier} reads as text on every surface it lands on`, () => {
+          for (const surface of quietest) {
+            expect(ratio(sheet, scheme, tier, surface)).toBeGreaterThanOrEqual(4.5);
+          }
+        });
+      }
+
+      // The ramp still has to be ordered, or the tiers are only noise: three
+      // greys that measure the same are worse than two that differ.
+      test(`${t}: the text ramp is strictly ordered`, () => {
+        const steps = ["ink", "ink2", "muted", "muted2", "faint"]
+          .map((n) => ratio(sheet, scheme, n, "page"));
+        for (let i = 1; i < steps.length; i++) {
+          expect(steps[i - 1]).toBeGreaterThan(steps[i]);
+        }
       });
 
       // Semantic hues are used as TEXT on page (a green "connected", an amber
@@ -132,6 +150,25 @@ describe("Signal accent ramp", () => {
     test(`site/${scheme}: status ink tiers read on ab-surface`, () => {
       for (const ink of ["ab-attn-ink", "ab-run-ink"]) {
         expect(ratio("site", scheme, ink, "ab-surface")).toBeGreaterThanOrEqual(4.5);
+      }
+    });
+
+    // The mock window's own quiet tiers. These are the entries LIFTED off the
+    // app palette in site/tests/unit/ab-ramp.test.ts; that file proves they no
+    // longer match the app, and this one says what they were lifted TO.
+    test(`site/${scheme}: the mock's quiet tiers read on its surfaces`, () => {
+      for (const tier of ["ab-mute", "ab-dim", "ab-err"]) {
+        for (const surface of ["ab-surface", "ab-deep", "ab-deepest"]) {
+          expect(ratio("site", scheme, tier, surface)).toBeGreaterThanOrEqual(4.5);
+        }
+      }
+    });
+
+    test(`site/${scheme}: the mock's text ramp is strictly ordered`, () => {
+      const steps = ["ab-text", "ab-text2", "ab-mute", "ab-dim"]
+        .map((n) => ratio("site", scheme, n, "ab-deep"));
+      for (let i = 1; i < steps.length; i++) {
+        expect(steps[i - 1]).toBeGreaterThan(steps[i]);
       }
     });
 

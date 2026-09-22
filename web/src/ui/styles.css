@@ -171,8 +171,11 @@
   --color-ink: light-dark(#131116, #f2f2f5);
   --color-ink2: light-dark(#2c2c33, #d4d4d8);
   --color-muted: light-dark(#5b5b64, #a1a1aa);
-  --color-muted2: light-dark(#6d6d76, #7d7d86);
-  --color-faint: light-dark(#8b8b94, #5f5f68);
+  /* Both tiers below `muted` clear 4.5:1 on the darkest surface they land
+     on (chrome), not just on page, so one token is safe anywhere. Kept in
+     step with the site's ramp -- same floors, zinc hue. */
+  --color-muted2: light-dark(#62626b, #95959c);
+  --color-faint: light-dark(#6b6b74, #898993);
 
   /* Signal, the brand accent. `signal` is the TEXT tier — it clears 4.5:1 on
      page, panel and chrome, which pure #d2542a does not (3.75:1 on dark
