@@ -376,6 +376,18 @@ export interface AgentCore {
    *  because it is what puts the session's dot on "needs you" and what the
    *  attached app renders in band. */
   isHandlerArmed(terminalId: string): boolean;
+  /** True when the Handler on [terminalId] is the one that will announce this
+   *  work finishing, so the agent's own per-turn `task_complete` is noise. An
+   *  armed session runs turns the user was never meant to be woken for, and the
+   *  wrap-up push is the "done" they are actually waiting on.
+   *
+   *  Narrower than {@link AgentCore.isHandlerArmed} because that wrap-up is not
+   *  unconditional: `allTerminal` (handler/backlog.ts) is false for an EMPTY
+   *  backlog, so a 1-tap arm that has not been given a goal yet never reaches
+   *  the wrap-up push at all. Suppressing its turn-end would leave that session
+   *  with no completion signal from anyone, which is the one direction this must
+   *  not fail in. */
+  handlerOwnsCompletion(terminalId: string): boolean;
   /** True when a work-status key is bound to the main checkout (or is not a
    *  session at all). Pre-handshake this answers true — nothing is isolated
    *  yet, so no guard should be narrowed away. */
@@ -1087,6 +1099,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         sessionId: session.id,
         sessionTitle: session.name,
         projectId: project.id,
+        origin: "agent",
       }));
       return;
     }
@@ -3116,7 +3129,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // cannot fall behind, unlike one kept by watching the verbs that reach us.
       if (msg.type === "handler:status") {
         handlerArmedSlots.clear();
-        for (const s of msg.sessions) handlerArmedSlots.add(s.terminalId);
+        for (const s of msg.sessions) handlerArmedSlots.set(s.terminalId, s.backlog.length > 0);
       }
       sendAb(msg);
     },
@@ -3176,8 +3189,13 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
    *  bus drops a re-publish whose payload is unchanged, so a subscriber that
    *  attaches after the arm can wait indefinitely for a frame that never comes.
    *
-   *  Read by {@link AgentCore.isHandlerArmed}; see it for what depends on it. */
-  const handlerArmedSlots = new Set<string>();
+   *  Read by {@link AgentCore.isHandlerArmed}; see it for what depends on it.
+   *
+   *  The value is whether that slot's backlog holds any items, which is all
+   *  {@link AgentCore.handlerOwnsCompletion} needs and rides on this same frame.
+   *  Asking the engine for it separately would be a second copy of one fact,
+   *  able to disagree with the set it sits beside. */
+  const handlerArmedSlots = new Map<string, boolean>();
 
   function registerSetupTerminal(checkoutId: string, terminalId: string): void {
     checkoutRuntimes.runtime(checkoutId)?.configuredTerminalIds.set(terminalId, terminalId);
@@ -4595,7 +4613,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           case "title": namer?.onStructuredTitle(sessionId, event.title, event.kind); break;
           case "turn-start": opts.onTurnStart?.(sessionId); break;
           case "notification":
-            sendNotifying(createMessage("notification:push", { sessionId, projectId: project.id, notificationType: event.notificationType, message: event.message }));
+            sendNotifying(createMessage("notification:push", { sessionId, projectId: project.id, notificationType: event.notificationType, message: event.message, origin: "agent" }));
             break;
           case "handler":
             handlerEngine.handleEvent({ terminalId: sessionId, event: event.event, resetsAt: event.resetsAt, errorClass: event.errorClass })
@@ -5649,6 +5667,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     },
     isHandlerArmed(terminalId: string): boolean {
       return handlerArmedSlots.has(terminalId);
+    },
+    handlerOwnsCompletion(terminalId: string): boolean {
+      return handlerArmedSlots.get(terminalId) === true;
     },
     isMainCheckoutSession(id: string): boolean {
       return sessions?.isMainCheckoutSession(id) ?? true;

@@ -453,6 +453,7 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
           notificationType: type,
           message,
           sessionTitle,
+          origin: "agent",
           // Unresolved on purpose: this is whatever slot the hook was stamped
           // with, and only the SessionManager knows which ids are sessions.
           sessionId: terminalId,

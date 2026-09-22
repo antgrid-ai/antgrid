@@ -260,6 +260,24 @@ test("the armed-slot mirror follows every handler:status the engine emits", asyn
   expect(core!.isHandlerArmed("t1")).toBe(false);
 });
 
+test("owning a session's completion needs a backlog, not just an arm", async () => {
+  // The push dispatcher drops the agent's own turn-end only for a slot whose
+  // Handler will announce the work finishing itself. That announcement is the
+  // wrap-up, and `allTerminal` is false for an EMPTY backlog — so the 1-tap arm
+  // below, still waiting for its goal, never reaches one. Answering on the arm
+  // alone would leave such a session silent for the rest of its life.
+  const { bus, sent } = await wire();
+  await arm(bus, sent, "t1");
+  expect(core!.isHandlerArmed("t1")).toBe(true);
+  expect(core!.handlerOwnsCompletion("t1")).toBe(false);
+
+  bus.dispatchInbound(createMessage("handler:configure", {
+    projectId: core!.projectId, terminalId: "t1", armed: true,
+    backlog: [{ id: "i1", text: "ship it", status: "queued", createdAt: 1 }],
+  }), "control", "loopback");
+  expect(await waitFor(() => core!.handlerOwnsCompletion("t1"))).toBe(true);
+});
+
 test("prompt_answered retires the escalation its id names, and says the block is over", async () => {
   // The two halves of the branch below the chat guard. Neither is reachable from
   // the latch tests above — those assert only that a later push lands — so

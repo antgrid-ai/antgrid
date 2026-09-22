@@ -38,6 +38,12 @@ export interface PushDispatcherDeps {
    *  sentence. Absent means unarmed, which keeps the notification — for an
    *  unarmed session it is the only thing that ever says what was asked. */
   isHandlerArmed?: (terminalId: string) => boolean;
+  /** True when the Handler on that slot will announce the work finishing itself,
+   *  via the wrap-up push. The agent's per-turn `task_complete` is then a buzz
+   *  for a turn the user was never in the loop for — the Handler reads it,
+   *  decides, and sends the agent straight back to work. Absent means nobody
+   *  else will say it, which keeps the notification. */
+  handlerOwnsCompletion?: (terminalId: string) => boolean;
   seal: (json: string, recipientPushPubkeyB64: string) => { epk: string; box: string };
   deliver: (token: string, provider: "fcm" | "apns", blob: { epk: string; box: string }) => void;
 }
@@ -63,6 +69,34 @@ export function createPushDispatcher(deps: PushDispatcherDeps) {
         && msg.sessionId
         && deps.isHandlerArmed?.(msg.sessionId)) {
         log.debug("push: question notification not sent — the Handler is escalating it");
+        return;
+      }
+      // The same "one event, one push" call for the other end of a turn, and the
+      // reason arming exists: a supervised session runs many turns to reach one
+      // outcome, and the user asked not to be in the loop for them. The Handler's
+      // own producers cover every way that outcome can land — the wrap-up push,
+      // an escalation, or the park notice — so nothing is lost by dropping this.
+      //
+      // Gated on `handlerOwnsCompletion`, NOT on armed alone: the wrap-up needs a
+      // non-empty backlog (`allTerminal` in handler/backlog.ts), so a 1-tap arm
+      // still waiting for its goal has no wrap-up coming and must keep the
+      // agent's own turn-end. Silence is the one failure this must not have.
+      //
+      // `origin` is what keeps this off the Handler's own voice: its wrap-up push
+      // and its park notice are `task_complete` on the very slot it is armed on,
+      // so matching the type alone would drop the announcement this suppression
+      // exists to make room for. "Workspace is ready" is the same shape again.
+      //
+      // Not extended to `permission_request`/`awaiting_input`, which look alike:
+      // api-server drops some of those from the /handler-event channel while
+      // still pushing them, so suppressing here could bury a block the Handler
+      // was never told about.
+      if (msg.type === "notification:push"
+        && msg.notificationType === "task_complete"
+        && msg.origin === "agent"
+        && msg.sessionId
+        && deps.handlerOwnsCompletion?.(msg.sessionId)) {
+        log.debug("push: turn-end notification not sent — the Handler owns this session's completion");
         return;
       }
       const composed = composePush(msg);

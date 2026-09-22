@@ -1069,6 +1069,19 @@ const NotificationPushMessage = BaseMessage.extend({
   // (notification_routing.dart).
   sessionId: z.string().optional(),
   projectId: z.string().optional(),
+  // WHO reported this — the agent itself, as opposed to the bridge speaking
+  // about the agent. The two are indistinguishable by shape: the Handler's
+  // wrap-up and its park notice are both `task_complete` on the armed slot, as
+  // is "Workspace is ready". Only the agent's own turn-end may be dropped when
+  // the Handler has taken over announcing the work (see push-dispatcher.ts), and
+  // absent must mean "keep it", so this marks the suppressible half rather than
+  // its exceptions: a producer added later and never marked stays audible.
+  //
+  // Deliberately NOT hand-mirrored into the app's NotificationPushMessage,
+  // unlike `sessionTitle`/`sessionId` above — nothing on the wire's far side
+  // reads it, and the push layer that does runs before the frame is sealed.
+  // Appended LAST so every key an older app already reads keeps its position.
+  origin: z.literal("agent").optional(),
 });
 
 /** The app encodes its persistent X25519 push key as standard base64 of the raw
