@@ -5,7 +5,6 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../providers/demo_mode.dart';
 import '../providers/agent_transport.dart';
 import '../providers/sessions.dart';
 
@@ -336,6 +335,6 @@ final voiceInputProvider = Provider<VoiceInputController>((ref) {
   return controller;
 });
 
-final voicePreviewEnabledProvider = Provider<bool>(
-  (ref) => kDebugMode || ref.watch(demoModeProvider),
-);
+// Debug builds only: the setup sheet is still the scenario harness, and the
+// offline demo is reachable from the sign-in screen in every build.
+final voicePreviewEnabledProvider = Provider<bool>((ref) => kDebugMode);

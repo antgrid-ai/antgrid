@@ -156,7 +156,13 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   bool _insertDictation(String text) {
     if (_historyOpen) _closeHistory();
     final sent = widget.terminalService.sendInput(widget.tab.terminalId, text);
-    if (!sent && mounted) showSendRefusedSnackBar(context);
+    if (!mounted) return sent;
+    if (!sent) {
+      showSendRefusedSnackBar(context);
+    } else {
+      // The shelf vanishes on insert and no Return was sent on purpose.
+      showAbSnackBar(context, 'inserted — press ⏎ to run it');
+    }
     return sent;
   }
 
@@ -1854,7 +1860,10 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
                       mainAxisSize: MainAxisSize.min,
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        if (showAttachButton)
+                        // Desktop's only voice route, for LOCAL sessions too:
+                        // mobile has the mic in the quick-actions bar, and
+                        // attach's relay-only gate does not apply here.
+                        if (_hasPhysicalKeyboard)
                           Row(
                             mainAxisSize: MainAxisSize.min,
                             children: [

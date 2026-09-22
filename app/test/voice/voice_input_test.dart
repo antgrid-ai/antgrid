@@ -109,7 +109,7 @@ void main() {
   });
 
   testWidgets(
-    'hold release finalizes and Escape cancels without terminal keys',
+    'hold release finalizes and Escape keeps the text without terminal keys',
     (tester) async {
       final c = VoiceInputController()
         ..ready = true
@@ -152,11 +152,39 @@ void main() {
         KeyEventResult.handled,
       );
       await tester.pump(const Duration(seconds: 1));
-      expect(c.draft(a).phase, VoicePhase.idle);
-      expect(c.draft(a).text, isEmpty);
+      expect(c.draft(a).phase, VoicePhase.review);
+      expect(c.draft(a).text, isNotEmpty);
       c.dispose();
     },
   );
+
+  testWidgets('Escape while listening stops and keeps the text', (
+    tester,
+  ) async {
+    final c = VoiceInputController()
+      ..ready = true
+      ..permission = true;
+    c.start(a);
+    await tester.pump(const Duration(seconds: 2));
+    expect(c.draft(a).text, isNotEmpty);
+    expect(
+      handleVoiceKey(
+        c,
+        a,
+        const KeyDownEvent(
+          physicalKey: PhysicalKeyboardKey.escape,
+          logicalKey: LogicalKeyboardKey.escape,
+          timeStamp: Duration.zero,
+        ),
+      ),
+      KeyEventResult.handled,
+    );
+    expect(c.draft(a).phase, VoicePhase.finalizing);
+    await tester.pump(const Duration(seconds: 1));
+    expect(c.draft(a).phase, VoicePhase.review);
+    expect(c.draft(a).text, SimulatedSpeechBackend.sample);
+    c.dispose();
+  });
   VoiceInputController ready() => VoiceInputController()
     ..ready = true
     ..permission = true;

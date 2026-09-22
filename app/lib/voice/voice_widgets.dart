@@ -72,11 +72,23 @@ class VoicePanel extends ConsumerStatefulWidget {
 
 class _VoicePanelState extends ConsumerState<VoicePanel> {
   final _text = TextEditingController();
+  final _live = ScrollController();
+  String _shown = '';
   late final VoiceInputController _voice;
   @override
   void initState() {
     super.initState();
     _voice = ref.read(voiceInputProvider);
+  }
+
+  /// Partials append at the bottom of a height-capped shelf, so without this a
+  /// long prompt hides exactly the words being recognized right now.
+  void _followLiveText(String text) {
+    if (text == _shown) return;
+    _shown = text;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_live.hasClients) _live.jumpTo(_live.position.maxScrollExtent);
+    });
   }
 
   @override
@@ -91,6 +103,7 @@ class _VoicePanelState extends ConsumerState<VoicePanel> {
   void dispose() {
     _voice.preserve(widget.target, deferNotification: true);
     _text.dispose();
+    _live.dispose();
     super.dispose();
   }
 
@@ -115,6 +128,7 @@ class _VoicePanelState extends ConsumerState<VoicePanel> {
             selection: TextSelection.collapsed(offset: d.text.length),
           );
         }
+        if (d.busy) _followLiveText(d.text);
         final status = switch (d.phase) {
           VoicePhase.listening =>
             'Listening… ${d.seconds ~/ 60}:${(d.seconds % 60).toString().padLeft(2, '0')}',
@@ -145,6 +159,7 @@ class _VoicePanelState extends ConsumerState<VoicePanel> {
                       maxHeight: AbTokens.rowHeightXl * 3,
                     ),
                     child: SingleChildScrollView(
+                      controller: _live,
                       child: Text(
                         d.text.isEmpty ? 'Speak your prompt…' : d.text,
                         style: AbTokens.monoStyle(),
@@ -182,7 +197,11 @@ class _VoicePanelState extends ConsumerState<VoicePanel> {
                         : 'Dismiss',
                     onTap: () => _voice.cancel(widget.target),
                   ),
-                  if (d.phase == VoicePhase.listening)
+                  // The terminal shelf is the only control surface near the
+                  // transcript; the chat composer already has the stop icon
+                  // and its own settings gear in the footer row.
+                  if (d.phase == VoicePhase.listening &&
+                      widget.onInsert != null)
                     AbButton(
                       label: 'Stop',
                       onTap: () => _voice.stop(widget.target),
@@ -207,7 +226,8 @@ class _VoicePanelState extends ConsumerState<VoicePanel> {
                       ),
                     ),
                   ],
-                  VoiceSettingsButton(target: widget.target),
+                  if (widget.onInsert != null)
+                    VoiceSettingsButton(target: widget.target),
                 ],
               ),
             ],
@@ -530,8 +550,11 @@ KeyEventResult handleVoiceKey(
   VoiceTarget target,
   KeyEvent event,
 ) {
+  // Escape ends capture and KEEPS the text, matching host OS dictation; the
+  // only discard is the explicit button, so a reflex Escape cannot lose a long
+  // prompt. Still swallowed while finalizing so it never reaches the terminal.
   if (event.logicalKey == LogicalKeyboardKey.escape && c.draft(target).busy) {
-    if (event is KeyDownEvent) c.cancel(target);
+    if (event is KeyDownEvent) c.stop(target);
     return KeyEventResult.handled;
   }
   if (event.logicalKey != c.shortcut || !c.ready || !c.permission) {
