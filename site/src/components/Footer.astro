@@ -79,8 +79,20 @@ import Wordmark from "./ui/Wordmark.astro";
           rather than a feature, and it sits with the other small print. Hidden
           until JS has run (global.css keys it on html.js) because without the
           script it is three buttons that do nothing. `aria-pressed` is the
-          state; the pressed style hangs off it so the two cannot disagree. */}
-      <div role="group" aria-label="Colour scheme" data-theme-toggle class="ml-auto overflow-hidden rounded border border-edge">
+          state; the pressed style hangs off it so the two cannot disagree.
+
+          The buttons need ~24px of height to stay tappable, which is 10px more
+          than this row's 11px line box. From `md` up the control sits inline
+          with the copyright and that 10px would set the row's height, so it is
+          pulled back out of the row's own `pt-4.5`; below `md` the control
+          wraps onto its own line, where the full height is what you want and a
+          negative margin would lap over the line above.
+
+          `ml-auto` is also `md`-only: below it the control wraps to its own
+          line, and pushed right it lands under the fixed support launcher in
+          the same corner, which made Dark unreachable on a phone. Flowing left
+          keeps it clear of that launcher. */}
+      <div role="group" aria-label="Colour scheme" data-theme-toggle class="overflow-hidden rounded border border-edge md:-my-1.5 md:ml-auto">
         {([["system", "System"], ["light", "Light"], ["dark", "Dark"]] as const).map(([choice, label]) => (
           <button
             type="button"
