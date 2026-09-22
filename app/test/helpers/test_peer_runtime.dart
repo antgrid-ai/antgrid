@@ -33,22 +33,18 @@ class TestPeerRuntime extends PeerRuntime {
   @override
   Future<PeerLink> connect({
     required PeerConnectionAttempt attempt,
-    required RelayService relay,
+    PeerLinkDiagnostic? diagnostic,
     required String machineDeviceId,
     required String machinePublicKey,
-  }) async {
-    return _RelayPayloadAdapter(relay);
-  }
+  }) async => _TestPayloadLink(diagnostic);
 }
 
-class _RelayPayloadAdapter implements PeerLink {
-  _RelayPayloadAdapter(this.relay);
-  final RelayService relay;
+class _TestPayloadLink implements PeerLink {
+  _TestPayloadLink(this.netTap);
   @override
   bool get isDispatchAllowed => true;
   @override
-  Stream<IncomingRouteMessage> get messageStream =>
-      (relay as dynamic).messageStream as Stream<IncomingRouteMessage>;
+  Stream<IncomingRouteMessage> get messageStream => const Stream.empty();
   @override
   Stream<PeerLinkState> get payloadStateStream => const Stream.empty();
   @override
@@ -58,16 +54,14 @@ class _RelayPayloadAdapter implements PeerLink {
   @override
   Stream<PeerLinkFailure> get failureStream => const Stream.empty();
   @override
-  PeerLinkDiagnostic? get netTap => relay.netTap;
+  final PeerLinkDiagnostic? netTap;
   @override
   Future<PeerSendOutcome> sendFrame(
     String to,
     String channel,
     Uint8List payload, {
     FrameKind kind = FrameKind.sealed,
-  }) =>
-      (relay as dynamic).sendFrame(to, channel, payload, kind: kind)
-          as Future<PeerSendOutcome>;
+  }) async => PeerSendOutcome.accepted;
   @override
   Future<void> close() async {}
 }

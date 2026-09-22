@@ -4,29 +4,28 @@ import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../connection/connection_supervisor.dart';
-import '../connection/relay_mechanisms.dart';
+import '../connection/peer_connection.dart';
 import '../connection/supervisor_state.dart';
 import '../util/ab_log.dart';
 import '../util/device_id.dart';
 import '../util/netwatch.dart';
+import 'seeded_stream.dart';
 import 'device_revocation.dart';
 import 'providers.dart';
 
 /// Owns one machine's independent central-control [RelayService], required
 /// native payload, and E2E [MachineSession]. Projects share host-owned streams
 /// on that native session; the central socket carries authentication, presence,
-/// policy and revocation only. There is one [RelayConnection] per bare machine
+/// policy and revocation only. There is one [MachineConnection] per bare machine
 /// `deviceUuid`, never one per project.
 ///
-/// Callers do not establish either path directly: [ConnectionSupervisor] owns
-/// native connection and retry policy while maintaining central control beside
-/// it. Callers declare wantedness with [ensureStarted] and await the usable E2E
-/// session with [awaitSession].
-class RelayConnection {
+/// Callers do not establish either path directly. Independent supervisors own
+/// central control and native retry policy.
+class MachineConnection {
   final String machineDeviceId;
   final RelayService relay;
 
-  RelayConnection({
+  MachineConnection({
     required this.machineDeviceId,
     required CryptoService crypto,
     this.onDeviceRevoked,
@@ -52,9 +51,12 @@ class RelayConnection {
   final void Function()? onDeviceRevoked;
 
   PeerConnectionMechanisms? _mechanisms;
-  ConnectionSupervisor? _supervisor;
+  NativeConnectionSupervisor? _nativeSupervisor;
+  CentralControlSupervisor? _centralSupervisor;
   final List<StreamSubscription<dynamic>> _subs = [];
   bool _disposed = false;
+  Future<NativeStopResult>? _disposePending;
+  NativeStopResult? _disposeResult;
 
   final StreamController<SupervisorStatus?> _statuses =
       StreamController<SupervisorStatus?>.broadcast();
@@ -79,7 +81,9 @@ class RelayConnection {
   MachineSession? get session => _mechanisms?.session;
 
   /// The policy engine driving this machine, or null before [ensureStarted].
-  ConnectionSupervisor? get supervisor => _supervisor;
+  NativeConnectionSupervisor? get nativeSupervisor => _nativeSupervisor;
+  CentralControlSupervisor? get centralSupervisor => _centralSupervisor;
+  NativeConnectionSupervisor? get supervisor => _nativeSupervisor;
 
   /// Connection-owned status surface, valid to subscribe to from construction —
   /// BEFORE [ensureStarted] has built a supervisor.
@@ -94,38 +98,15 @@ class RelayConnection {
   /// [Released] on [dispose] so nothing retains a live-looking status for a
   /// connection whose central and native resources have been released.
   Stream<SupervisorStatus?> get statusStream =>
-      Stream<SupervisorStatus?>.multi((controller) {
-        controller.add(_status);
-        if (_statuses.isClosed) {
-          controller.close();
-          return;
-        }
-        final sub = _statuses.stream.listen(
-          controller.add,
-          onError: controller.addError,
-          onDone: controller.close,
-        );
-        controller.onCancel = sub.cancel;
-      }, isBroadcast: true);
+      seededStream(() => _status, _statuses.stream);
 
   void _publishStatus(SupervisorStatus? status) {
     _status = status;
     if (!_statuses.isClosed) _statuses.add(status);
   }
 
-  Stream<bool> get centralConflictStream => Stream<bool>.multi((controller) {
-    controller.add(_centralConflict);
-    if (_centralConflicts.isClosed) {
-      controller.close();
-      return;
-    }
-    final sub = _centralConflicts.stream.listen(
-      controller.add,
-      onError: controller.addError,
-      onDone: controller.close,
-    );
-    controller.onCancel = sub.cancel;
-  }, isBroadcast: true);
+  Stream<bool> get centralConflictStream =>
+      seededStream(() => _centralConflict, _centralConflicts.stream);
 
   void _publishCentralConflict(bool conflict) {
     _centralConflict = conflict;
@@ -150,24 +131,49 @@ class RelayConnection {
   ///
   /// [mechanisms] is typed concretely because the connection exposes the
   /// adapter's [MachineSession] — the streams every project binds to.
-  void ensureStarted({required PeerConnectionMechanisms mechanisms}) {
-    if (_disposed || _supervisor != null) return;
+  void ensureStarted({
+    required PeerConnectionMechanisms mechanisms,
+    CentralControlContract? central,
+  }) {
+    if (_disposed || _nativeSupervisor != null) return;
     _mechanisms = mechanisms;
-    final supervisor = _supervisor = ConnectionSupervisor(mechanisms);
-    mechanisms.onTerminalAuthError = (code) {
-      _noteAuthCode(code);
-      supervisor.noteRelayError(code, retryable: false);
-    };
-    mechanisms.onTerminalPeerError = supervisor.notePeerRejected;
-    mechanisms.onSessionTakenOver = supervisor.noteSessionTakenOver;
-    mechanisms.onSessionDown = supervisor.noteSessionDown;
-    mechanisms.onSessionReplaced = () {
-      if (!_sessionReplacements.isClosed) _sessionReplacements.add(null);
-    };
+    final centralMechanisms = central ?? _NoopCentralControl();
+    final centralSupervisor = _centralSupervisor = CentralControlSupervisor(
+      centralMechanisms,
+    );
+    final supervisor = _nativeSupervisor = NativeConnectionSupervisor(
+      mechanisms,
+      onCoordsResolved: centralSupervisor.noteCoords,
+    );
+    _subs.add(
+      mechanisms.events.listen((event) {
+        switch (event) {
+          case PeerTerminalAuthError(:final code):
+            _noteAuthCode(code);
+            supervisor.noteAuthError(code);
+          case PeerTerminalError():
+            supervisor.notePeerRejected();
+          case PeerSessionTakenOver():
+            supervisor.noteSessionTakenOver();
+          case PeerSessionDown():
+            supervisor.noteSessionDown();
+          case PeerSessionReplaced():
+            if (!_sessionReplacements.isClosed) {
+              _sessionReplacements.add(null);
+            }
+        }
+      }),
+    );
+    _subs.add(
+      centralMechanisms.authErrorStream.listen((code) {
+        _noteAuthCode(code);
+        supervisor.noteAuthError(code);
+      }),
+    );
     // Level-triggered inputs: each one only tells the supervisor that something
     // changed, never what to do about it.
     _subs.add(
-      relay.stateStream.listen((_) => supervisor.noteCentralStateChanged()),
+      relay.stateStream.listen((_) => centralSupervisor.noteStateChanged()),
     );
     _subs.add(
       relay.errorStream.listen((e) {
@@ -175,7 +181,8 @@ class RelayConnection {
         if (!e.retryable && e.code.startsWith('LICENSE_')) {
           mechanisms.peerRuntime.invalidate();
         }
-        supervisor.noteRelayError(e.code, retryable: e.retryable);
+        if (e.code.startsWith('LICENSE_')) supervisor.noteAuthError(e.code);
+        centralSupervisor.noteRelayError(e.code);
       }),
     );
     _subs.add(
@@ -191,7 +198,8 @@ class RelayConnection {
     // Replays the supervisor's current status first, so subscribers that were
     // already listening to [statusStream] pick the ladder up here.
     _subs.add(supervisor.statusStream.listen(_publishStatus));
-    _subs.add(supervisor.centralConflictStream.listen(_publishCentralConflict));
+    _subs.add(centralSupervisor.conflictStream.listen(_publishCentralConflict));
+    centralSupervisor.setWanted(true);
     supervisor.setWanted(true);
   }
 
@@ -203,7 +211,7 @@ class RelayConnection {
   Future<MachineSession> awaitSession({
     Duration timeout = const Duration(seconds: 90),
   }) async {
-    final supervisor = _supervisor;
+    final supervisor = _nativeSupervisor;
     if (supervisor == null) {
       throw StateError('awaitSession before ensureStarted');
     }
@@ -245,37 +253,63 @@ class RelayConnection {
   void noteResume() {
     _mechanisms?.noteResume();
     relay.onResume();
-    _supervisor?.noteResume();
+    _centralSupervisor?.noteStateChanged();
+    _nativeSupervisor?.noteResume();
   }
 
-  Future<void> dispose() {
+  void retry() {
+    _centralSupervisor?.retry();
+    _nativeSupervisor?.retry();
+  }
+
+  Future<NativeStopResult> dispose() {
+    final existing = _disposePending;
+    if (existing != null) return existing;
     _disposed = true;
-    for (final sub in _subs) {
-      unawaited(sub.cancel());
-    }
-    _subs.clear();
-    _publishStatus(const Released());
-    unawaited(_statuses.close());
-    unawaited(_centralConflicts.close());
-    unawaited(_sessionReplacements.close());
-    final supervisor = _supervisor;
-    _supervisor = null;
-    supervisor?.setWanted(false);
-    final mechanisms = _mechanisms;
-    _mechanisms = null;
-    return _teardown(supervisor, mechanisms);
+    final native = _nativeSupervisor;
+    final central = _centralSupervisor;
+    return _disposePending = _teardown(native, central);
   }
 
-  Future<void> _teardown(
-    ConnectionSupervisor? supervisor,
-    PeerConnectionMechanisms? mechanisms,
+  Future<NativeStopResult> _teardown(
+    NativeConnectionSupervisor? native,
+    CentralControlSupervisor? central,
   ) async {
-    if (supervisor != null) await supervisor.dispose();
-    if (mechanisms != null) await mechanisms.release();
-    relay.dispose();
+    final nativeStop =
+        native?.stop() ??
+        Future<NativeStopResult>.value(NativeStopResult.stopped);
+    await Future.wait([for (final sub in _subs) sub.cancel()]);
+    _subs.clear();
+    await central?.stop();
+    final result = await nativeStop;
+    _disposeResult = result;
+    if (result == NativeStopResult.stopped) {
+      _nativeSupervisor = null;
+      _centralSupervisor = null;
+      _mechanisms = null;
+      _publishStatus(const Released());
+      relay.dispose();
+      unawaited(_statuses.close());
+      unawaited(_centralConflicts.close());
+      unawaited(_sessionReplacements.close());
+    }
+    return result;
   }
 
   bool get isDisposed => _disposed;
+  bool get cleanupIncomplete =>
+      _disposeResult == NativeStopResult.cleanupIncomplete;
+}
+
+class _NoopCentralControl implements CentralControlContract {
+  @override
+  Stream<String> get authErrorStream => const Stream.empty();
+  @override
+  bool get needsReconnect => false;
+  @override
+  Future<void> connect(ConnCoords coords) async {}
+  @override
+  void disconnect() {}
 }
 
 void _logRelayService(
@@ -296,20 +330,23 @@ void _logRelayService(
   }
 }
 
-/// Holds one [RelayConnection] per bare machine `deviceUuid`. Each connection
+/// Holds one [MachineConnection] per bare machine `deviceUuid`. Each connection
 /// maintains its own central-control socket and native payload; project streams
 /// multiplex over the machine's E2E session on that payload.
-class RelayConnectionManager {
+class MachineConnectionManager {
   final CryptoService _crypto;
-  final Map<String, RelayConnection> _connections = {};
+  final Map<String, MachineConnection> _connections = {};
   final _changesController = StreamController<int>.broadcast();
   int _changeSeq = 0;
+  bool _newWorkBlocked = false;
 
-  RelayConnectionManager({required CryptoService crypto, this.onDeviceRevoked})
-    : _crypto = crypto;
+  MachineConnectionManager({
+    required CryptoService crypto,
+    this.onDeviceRevoked,
+  }) : _crypto = crypto;
 
   /// Handed to every connection this manager builds — see
-  /// [RelayConnection.onDeviceRevoked]. Any machine's central control can carry the
+  /// [MachineConnection.onDeviceRevoked]. Any machine's central control can carry the
   /// verdict, since it is our own device that was revoked, not theirs.
   final void Function()? onDeviceRevoked;
 
@@ -326,14 +363,17 @@ class RelayConnectionManager {
     if (!_changesController.isClosed) _changesController.add(++_changeSeq);
   }
 
-  RelayConnection connectionFor(String machineDeviceId) {
+  MachineConnection connectionFor(String machineDeviceId) {
     // Normalize here, not at call sites: the map key IS the v3 invariant (one
     // connection per machine), so a compound `<uuid>.<projectId>` id must land
     // on the same slot as its bare machine uuid no matter who dials.
     final key = baseDeviceUuid(machineDeviceId);
     final existing = _connections[key];
     if (existing != null) return existing;
-    final conn = RelayConnection(
+    if (_newWorkBlocked) {
+      throw StateError('Machine connection manager is blocking new work');
+    }
+    final conn = MachineConnection(
       machineDeviceId: key,
       crypto: _crypto,
       onDeviceRevoked: onDeviceRevoked,
@@ -343,8 +383,19 @@ class RelayConnectionManager {
     return conn;
   }
 
-  RelayConnection? peek(String machineDeviceId) =>
+  MachineConnection? peek(String machineDeviceId) =>
       _connections[baseDeviceUuid(machineDeviceId)];
+
+  void blockNewWork() {
+    _newWorkBlocked = true;
+  }
+
+  bool get newWorkBlocked => _newWorkBlocked;
+
+  Set<String> get cleanupIncompleteIds => {
+    for (final entry in _connections.entries)
+      if (entry.value.cleanupIncomplete) entry.key,
+  };
 
   /// App resume: re-evaluate every live machine's ladder. Level-triggered, so
   /// this only says "something may have changed", never what to do about it.
@@ -369,7 +420,7 @@ class RelayConnectionManager {
   /// it never earned back. Never call this from inside
   /// the central control reconnect path, which mints a fresh token for each attempt and
   /// would reset that rung's backoff before the dial it belongs to is scored
-  /// (see `ConnectionSupervisor.noteFreshToken`'s doc comment).
+  /// (see [NativeConnectionSupervisor.noteFreshToken]).
   void noteFreshTokenEverywhere() {
     for (final c in _connections.values) {
       if (c.supervisor?.status == const Blocked(BlockReason.licenseExpired)) {
@@ -384,31 +435,48 @@ class RelayConnectionManager {
   List<String> openControlPlaneIds() =>
       _connections.keys.toList(growable: false);
 
-  void release(String machineDeviceId) {
-    final removed = _connections.remove(baseDeviceUuid(machineDeviceId));
-    if (removed != null) {
-      unawaited(removed.dispose());
-      _notifyChanged();
+  Future<NativeStopResult?> release(String machineDeviceId) async {
+    final key = baseDeviceUuid(machineDeviceId);
+    final connection = _connections[key];
+    if (connection != null) {
+      final result = await connection.dispose();
+      if (result == NativeStopResult.stopped &&
+          identical(_connections[key], connection)) {
+        _connections.remove(key);
+        _notifyChanged();
+      }
+      return result;
     }
+    return null;
   }
 
-  void disposeAll() {
-    for (final c in _connections.values) {
-      unawaited(c.dispose());
+  Future<Map<String, NativeStopResult>> disposeAll() async {
+    blockNewWork();
+    final ids = _connections.keys.toList(growable: false);
+    final outcomes = await Future.wait([
+      for (final id in ids) release(id).then((result) => (id, result)),
+    ]);
+    final results = <String, NativeStopResult>{
+      for (final outcome in outcomes)
+        if (outcome.$2 != null) outcome.$1: outcome.$2!,
+    };
+    if (_connections.isEmpty && !_changesController.isClosed) {
+      await _changesController.close();
     }
-    _connections.clear();
-    _changesController.close();
+    return results;
   }
 }
 
-final relayConnectionManagerProvider = Provider<RelayConnectionManager>((ref) {
-  final mgr = RelayConnectionManager(
+final relayConnectionManagerProvider = Provider<MachineConnectionManager>((
+  ref,
+) {
+  final mgr = MachineConnectionManager(
     crypto: ref.read(cryptoServiceProvider),
     // `ref.container`, not `ref`: the sign-out teardown outlives this callback
     // and reads providers across several awaits.
     onDeviceRevoked: () => unawaited(handleDeviceRevoked(ref.container)),
   );
-  ref.onDispose(mgr.disposeAll);
+  ref.onDispose(() => unawaited(mgr.disposeAll().then<void>((_) {})));
   return mgr;
 });
 

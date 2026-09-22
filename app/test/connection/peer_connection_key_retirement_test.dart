@@ -16,7 +16,7 @@ import 'dart:typed_data';
 
 import 'package:antgrid/config/cng_aes_gcm.dart';
 import 'package:antgrid/connection/connection_supervisor.dart';
-import 'package:antgrid/connection/relay_mechanisms.dart';
+import 'package:antgrid/connection/peer_connection.dart';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -141,15 +141,6 @@ SessionKeys _keys(int fill) => SessionKeys(
   confirm: Uint8List(32)..fillRange(0, 32, fill + 2),
 );
 
-DeviceIdentity _identity() => DeviceIdentity(
-  deviceId: 'phone-1',
-  name: 'Test Phone',
-  ed25519PrivateKey: Uint8List(64),
-  ed25519PublicKey: Uint8List(32),
-  x25519PrivateKey: Uint8List(32),
-  x25519PublicKey: Uint8List(32),
-);
-
 const _pinA = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
 const _pinB = 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=';
 
@@ -167,19 +158,15 @@ void main() {
         buildHandshaker: handshakes == null
             ? null
             : (_) => _FakeHandshaker(handshakes),
-        relay: relay,
         peerRuntime: FixedPeerConnector(relay),
         crypto: CryptoService(),
         machineDeviceId: 'M',
-        identity: _identity(),
         phoneDeviceId: 'phone-1',
         phoneEd25519Seed: List<int>.filled(32, 7),
-        epoch: 1,
         resolveCoords: () async => const ConnCoords(
           relayUrl: 'ws://relay.test',
           agentEd25519PubB64: _pinA,
         ),
-        mintToken: () async => 'tok',
       );
 
   /// Puts key material in the cipher's cache the way a live session would: the

@@ -973,7 +973,7 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
 /// release implementation detail to ever learn it was torn down on purpose.
 @visibleForTesting
 List<String> reconcileControlPlaneWantedness({
-  required RelayConnectionManager mgr,
+  required MachineConnectionManager mgr,
   required Set<String> alive,
   required Set<String> openProjects,
 }) {

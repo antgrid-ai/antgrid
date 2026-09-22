@@ -7,7 +7,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:antgrid/connection/connection_supervisor.dart';
-import 'package:antgrid/connection/relay_mechanisms.dart';
+import 'package:antgrid/connection/peer_connection.dart';
 import 'package:antgrid/providers/account_agents.dart';
 import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/providers/auth.dart';
@@ -42,7 +42,7 @@ class _MemStorage implements DeviceSecretStorage {
 
 /// Captures the [PeerConnectionMechanisms] the transport builder hands the connection —
 /// and deliberately never constructs a supervisor, so nothing dials.
-class _CapturingConnection extends RelayConnection {
+class _CapturingConnection extends MachineConnection {
   _CapturingConnection(RelayService relay)
     : super(
         machineDeviceId: 'M',
@@ -50,16 +50,19 @@ class _CapturingConnection extends RelayConnection {
         relayOverride: relay,
       );
 
-  final Completer<PeerConnectionMechanisms> _first =
-      Completer<PeerConnectionMechanisms>();
+  final Completer<CentralControlContract> _first =
+      Completer<CentralControlContract>();
 
   /// Resolves with the first mechanisms handed over, so the test awaits the
   /// event itself rather than polling the wall clock for it.
-  Future<PeerConnectionMechanisms> get firstMechanisms => _first.future;
+  Future<CentralControlContract> get firstMechanisms => _first.future;
 
   @override
-  void ensureStarted({required PeerConnectionMechanisms mechanisms}) {
-    if (!_first.isCompleted) _first.complete(mechanisms);
+  void ensureStarted({
+    required PeerConnectionMechanisms mechanisms,
+    CentralControlContract? central,
+  }) {
+    if (!_first.isCompleted && central != null) _first.complete(central);
   }
 }
 
@@ -84,14 +87,14 @@ class _TokenCapturingRelay extends RelayService {
   }
 }
 
-class _CapturingManager extends RelayConnectionManager {
+class _CapturingManager extends MachineConnectionManager {
   _CapturingManager(this.conn) : super(crypto: CryptoService());
   final _CapturingConnection conn;
 
   @override
-  RelayConnection connectionFor(String machineDeviceId) => conn;
+  MachineConnection connectionFor(String machineDeviceId) => conn;
   @override
-  RelayConnection? peek(String machineDeviceId) => conn;
+  MachineConnection? peek(String machineDeviceId) => conn;
 }
 
 DeviceRecord _record(String uuid) => DeviceRecord(
@@ -255,7 +258,7 @@ void main() {
       onTimeout: () => throw TestFailure('the relay path must have been built'),
     );
 
-    await mech.reconnectCentral(
+    await mech.connect(
       const ConnCoords(
         relayUrl: 'wss://relay.test',
         agentEd25519PubB64: 'agent',
@@ -267,7 +270,7 @@ void main() {
 
     // Fresh per attempt, never a cached token: one minted before a long backoff
     // is already expired by the time its dial runs.
-    await mech.reconnectCentral(
+    await mech.connect(
       const ConnCoords(
         relayUrl: 'wss://relay.test',
         agentEd25519PubB64: 'agent',

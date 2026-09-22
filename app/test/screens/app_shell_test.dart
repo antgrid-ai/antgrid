@@ -21,7 +21,7 @@ import '../helpers/prefs_test_mock.dart';
 
 const _testAgentDeviceId = 'agent-123.test-project';
 
-class _ResumeManager extends RelayConnectionManager {
+class _ResumeManager extends MachineConnectionManager {
   _ResumeManager() : super(crypto: CryptoService());
   int resumes = 0;
   @override
@@ -40,7 +40,7 @@ void main() {
 
   Widget buildTestShell({
     required double width,
-    RelayConnectionManager? manager,
+    MachineConnectionManager? manager,
   }) {
     return ProviderScope(
       overrides: [

@@ -1,40 +1,28 @@
-import 'dart:typed_data';
-
 import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
-import 'package:antgrid/connection/relay_mechanisms.dart';
+import 'package:antgrid/connection/connection_supervisor.dart';
+import 'package:antgrid/connection/peer_connection.dart';
 import 'package:antgrid/connection/supervisor_state.dart';
 import 'package:antgrid/providers/relay_connection.dart';
 import '../helpers/fixed_peer_connector.dart';
 
 PeerConnectionMechanisms _mechanismsFor(
-  RelayConnection conn,
+  MachineConnection conn,
   String machineId,
 ) => PeerConnectionMechanisms(
-  relay: conn.relay,
   peerRuntime: FixedPeerConnector.stub(),
   crypto: CryptoService(),
   machineDeviceId: machineId,
-  identity: DeviceIdentity(
-    deviceId: 'phone-1',
-    name: 'Test Phone',
-    ed25519PrivateKey: Uint8List(64),
-    ed25519PublicKey: Uint8List(32),
-    x25519PrivateKey: Uint8List(32),
-    x25519PublicKey: Uint8List(32),
-  ),
   phoneDeviceId: 'phone-1',
   phoneEd25519Seed: List<int>.filled(32, 7),
-  epoch: 1,
   // Never resolves — these tests only need a live supervisor to ping, not
   // a real climb to Connected.
   resolveCoords: () async => null,
-  mintToken: () async => 'tok',
 );
 
 void main() {
   test('returns one connection per machine, memoized across compound ids', () {
-    final mgr = RelayConnectionManager(crypto: CryptoService());
+    final mgr = MachineConnectionManager(crypto: CryptoService());
     addTearDown(mgr.disposeAll);
 
     final a1 = mgr.connectionFor('uuid');
@@ -67,11 +55,11 @@ void main() {
     );
   });
 
-  test('release disposes and drops a single connection', () {
-    final mgr = RelayConnectionManager(crypto: CryptoService());
+  test('release disposes and drops a single connection', () async {
+    final mgr = MachineConnectionManager(crypto: CryptoService());
     addTearDown(mgr.disposeAll);
     final a = mgr.connectionFor('uuid');
-    mgr.release('uuid');
+    expect(await mgr.release('uuid'), NativeStopResult.stopped);
     final a2 = mgr.connectionFor('uuid');
     expect(identical(a, a2), isFalse, reason: 'released → rebuilt fresh');
   });
@@ -80,7 +68,7 @@ void main() {
       'connection — the provider-wiring half of "one MachineSession per '
       'machine" (the session/RelayService itself is proven at '
       'relay_connection_open_test.dart)', () {
-    final mgr = RelayConnectionManager(crypto: CryptoService());
+    final mgr = MachineConnectionManager(crypto: CryptoService());
     addTearDown(mgr.disposeAll);
 
     final projectA = mgr.connectionFor('uuid.proj-a');
@@ -102,20 +90,29 @@ void main() {
   test(
     'central supersession conflicts immediately and Retry clears it',
     () async {
-      final mgr = RelayConnectionManager(crypto: CryptoService());
+      final mgr = MachineConnectionManager(crypto: CryptoService());
       addTearDown(mgr.disposeAll);
       final connection = mgr.connectionFor('m');
       connection.ensureStarted(mechanisms: _mechanismsFor(connection, 'm'));
 
-      connection.supervisor!.noteRelayError('SUPERSEDED', retryable: false);
-      expect(connection.supervisor!.centralConflict, isTrue);
-      expect(connection.supervisor!.status, isNot(isA<Blocked>()));
+      connection.centralSupervisor!.noteRelayError('SUPERSEDED');
+      expect(connection.centralSupervisor!.conflict, isTrue);
+      expect(connection.nativeSupervisor!.status, isNot(isA<Blocked>()));
 
-      connection.supervisor!.noteFreshToken();
-      expect(connection.supervisor!.centralConflict, isTrue);
+      connection.nativeSupervisor!.noteFreshToken();
+      expect(connection.centralSupervisor!.conflict, isTrue);
 
-      connection.supervisor!.retry();
-      expect(connection.supervisor!.centralConflict, isFalse);
+      connection.retry();
+      expect(connection.centralSupervisor!.conflict, isFalse);
     },
   );
+
+  test('disposeAll blocks new slots and returns typed outcomes', () async {
+    final mgr = MachineConnectionManager(crypto: CryptoService());
+    mgr.connectionFor('m');
+
+    expect(await mgr.disposeAll(), {'m': NativeStopResult.stopped});
+    expect(mgr.newWorkBlocked, isTrue);
+    expect(() => mgr.connectionFor('other'), throwsStateError);
+  });
 }

@@ -4,6 +4,7 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
+import 'package:antgrid/connection/connection_supervisor.dart';
 import 'package:antgrid/project/project_session_registry.dart';
 import 'package:antgrid/providers/account_agents.dart';
 import 'package:antgrid/providers/agent_transport.dart';
@@ -27,7 +28,7 @@ import '../helpers/test_store_overrides.dart';
 /// Records release calls and advertises a fixed set of open control-plane
 /// sockets, so the reaper's reconcile decisions are observable without real
 /// relay connections.
-class _RecordingManager extends RelayConnectionManager {
+class _RecordingManager extends MachineConnectionManager {
   _RecordingManager(this._openIds) : super(crypto: CryptoService());
 
   final List<String> _openIds;
@@ -38,9 +39,10 @@ class _RecordingManager extends RelayConnectionManager {
   List<String> openControlPlaneIds() => List.of(_openIds);
 
   @override
-  void release(String registrationId) {
+  Future<NativeStopResult?> release(String registrationId) async {
     released.add(registrationId);
     _openIds.remove(registrationId);
+    return NativeStopResult.stopped;
   }
 
   /// Base class's real controller is private to it; this stand-in lets a test

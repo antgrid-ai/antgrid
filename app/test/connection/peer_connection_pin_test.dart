@@ -9,7 +9,7 @@ import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:antgrid/connection/connection_supervisor.dart';
-import 'package:antgrid/connection/relay_mechanisms.dart';
+import 'package:antgrid/connection/peer_connection.dart';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -86,15 +86,6 @@ class _StubRelay extends RelayService implements PeerLink {
   }
 }
 
-DeviceIdentity _identity() => DeviceIdentity(
-  deviceId: 'phone-1',
-  name: 'Test Phone',
-  ed25519PrivateKey: Uint8List(64),
-  ed25519PublicKey: Uint8List(32),
-  x25519PrivateKey: Uint8List(32),
-  x25519PublicKey: Uint8List(32),
-);
-
 const _pinA = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
 const _pinB = 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=';
 
@@ -106,21 +97,17 @@ void main() {
 
   PeerConnectionMechanisms build({ConnCoords Function()? coords}) =>
       PeerConnectionMechanisms(
-        relay: relay,
         peerRuntime: FixedPeerConnector(relay),
         crypto: CryptoService(),
         machineDeviceId: 'M',
-        identity: _identity(),
         phoneDeviceId: 'phone-1',
         phoneEd25519Seed: List<int>.filled(32, 7),
-        epoch: 1,
         resolveCoords: () async =>
             coords?.call() ??
             const ConnCoords(
               relayUrl: 'ws://relay.test',
               agentEd25519PubB64: _pinA,
             ),
-        mintToken: () async => 'tok',
       );
 
   test('a dial at the same pin reuses the live session', () async {

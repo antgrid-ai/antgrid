@@ -127,7 +127,7 @@ void main() {
     test(
       'dials targets without a connection, skips machines with one',
       () async {
-        final manager = RelayConnectionManager(crypto: CryptoService());
+        final manager = MachineConnectionManager(crypto: CryptoService());
         addTearDown(manager.disposeAll);
         // M already has a connection (however unhealthy): its supervisor owns
         // recovery, so the kick must not dial it again.
@@ -160,7 +160,7 @@ void main() {
     );
 
     test('no-op when disabled (desktop)', () async {
-      final manager = RelayConnectionManager(crypto: CryptoService());
+      final manager = MachineConnectionManager(crypto: CryptoService());
       addTearDown(manager.disposeAll);
       final dialed = <String>[];
       final c = ProviderContainer(
@@ -183,7 +183,7 @@ void main() {
     test(
       'a settled cached rejection behind a live connection is repaired',
       () async {
-        final manager = RelayConnectionManager(crypto: CryptoService());
+        final manager = MachineConnectionManager(crypto: CryptoService());
         addTearDown(manager.disposeAll);
         // The failed-at-launch shape: the dial materialized M's connection
         // before the provider chain settled on a rejection — a bare peek-skip
@@ -223,7 +223,7 @@ void main() {
     );
 
     test('a stale failed attempt is invalidated so the kick redials', () async {
-      final manager = RelayConnectionManager(crypto: CryptoService());
+      final manager = MachineConnectionManager(crypto: CryptoService());
       addTearDown(manager.disposeAll);
       var builds = 0;
       final c = ProviderContainer(

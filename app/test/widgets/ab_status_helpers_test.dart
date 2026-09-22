@@ -1,8 +1,28 @@
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:antgrid/connection/supervisor_state.dart';
 import 'package:antgrid/widgets/ab_status_helpers.dart';
 
 void main() {
+  test('BlockReason presentation is complete and owns interruption policy', () {
+    for (final reason in BlockReason.values) {
+      final presentation = blockReasonPresentation(reason);
+      expect(presentation.statusLabel, isNotEmpty);
+      expect(presentation.connectFailure, startsWith('Connect failed:'));
+      expect(presentation.workspaceHeadline, isNotEmpty);
+      expect(presentation.workspaceTip, isNotEmpty);
+      expect(presentation.retryLabel, isNotEmpty);
+    }
+    expect(
+      blockReasonPresentation(BlockReason.handshakeFailing).interruptsWorkspace,
+      isFalse,
+    );
+    expect(
+      blockReasonPresentation(BlockReason.sessionTakenOver).interruptsWorkspace,
+      isTrue,
+    );
+  });
+
   group('sessionRefusalCopy', () {
     test('dedicated copy outranks the bridge\'s own wording', () {
       // The whole point of an arm in friendlyErrorCopy is that the bridge's

@@ -5,7 +5,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../connection/relay_mechanisms.dart' show ConnectionBlockedException;
+import '../connection/peer_connection.dart' show ConnectionBlockedException;
 import '../connection/supervisor_state.dart';
 import '../design/ab_icons.dart';
 import '../design/ab_status_tone.dart';
@@ -857,18 +857,9 @@ String removeLocalProjectBody(ProviderContainer container, String projectId) {
 /// detail for the same reason — the connection error screen is where a reason
 /// belongs, and it has one.
 String connectFailureMessage(Object error) => switch (error) {
-  ConnectionBlockedException(reason: final r) => switch (r) {
-    BlockReason.licenseExpired =>
-      'Connect failed: this machine needs an active plan or a sign-in.',
-    BlockReason.deviceRevoked =>
-      "Connect failed: this device's access was revoked.",
-    BlockReason.sessionTakenOver =>
-      'Connect failed: another device took over this machine.',
-    BlockReason.handshakeFailing =>
-      'Connect failed: could not verify that machine.',
-    BlockReason.peerRejected =>
-      'Connect failed: remote access or the peer connection was rejected.',
-  },
+  ConnectionBlockedException(reason: final reason) => blockReasonPresentation(
+    reason,
+  ).connectFailure,
   _ => 'Connect failed.',
 };
 
@@ -926,11 +917,7 @@ Future<bool> ensureRemoteOnline(
   if (status is! Blocked) return true;
   // A block is sticky. This user action is the explicit Retry that clears it;
   // rebuilding the provider alone would only replay the same verdict.
-  ref
-      .read(relayConnectionManagerProvider)
-      .peek(registrationId)
-      ?.supervisor
-      ?.retry();
+  ref.read(relayConnectionManagerProvider).peek(registrationId)?.retry();
   ref.invalidate(agentTransportForProvider(registrationId));
   try {
     // Null is a machine no source can name coordinates for (dropped from the
@@ -1270,11 +1257,8 @@ class _MachineOnlineDot extends ConsumerWidget {
         icon: AbIcons.refresh,
         tone: AbIconButtonTone.danger,
         tooltip: 'Control connection conflict — Retry',
-        onTap: () => ref
-            .read(relayConnectionManagerProvider)
-            .peek(machineUuid)
-            ?.supervisor
-            ?.retry(),
+        onTap: () =>
+            ref.read(relayConnectionManagerProvider).peek(machineUuid)?.retry(),
       );
     }
     final status = ref.watch(supervisorStatusProvider(machineUuid)).value;

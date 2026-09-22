@@ -14,7 +14,10 @@ import '../project/checkout_readiness.dart';
     // that is up but whose checkout has not painted anything yet.
     Connected() => (AbStatusTone.success, 'Machine linked'),
     Climbing(:final rung) => (AbStatusTone.warning, _rungLabel(rung)),
-    Blocked(:final reason) => (AbStatusTone.danger, _blockReasonLabel(reason)),
+    Blocked(:final reason) => (
+      AbStatusTone.danger,
+      blockReasonPresentation(reason).statusLabel,
+    ),
     Released() => (AbStatusTone.disabled, 'Disconnected'),
   };
 }
@@ -33,15 +36,79 @@ String _rungLabel(ConnRung rung) => switch (rung) {
   ConnRung.established => 'Connecting',
 };
 
-String _blockReasonLabel(BlockReason reason) => switch (reason) {
-  // LICENSE_EXPIRED is the relay's verdict for "no active plan", which an
-  // account that never subscribed hits too — the label must not presume a
-  // lapsed subscription.
-  BlockReason.licenseExpired => 'Plan or sign-in needed',
-  BlockReason.sessionTakenOver => 'Taken over',
-  BlockReason.deviceRevoked => 'Device revoked',
-  BlockReason.handshakeFailing => 'Handshake failing',
-  BlockReason.peerRejected => 'Connection rejected',
+class BlockReasonPresentation {
+  const BlockReasonPresentation({
+    required this.statusLabel,
+    required this.connectFailure,
+    required this.workspaceHeadline,
+    required this.workspaceTip,
+    required this.retryLabel,
+    required this.interruptsWorkspace,
+  });
+
+  final String statusLabel;
+  final String connectFailure;
+  final String workspaceHeadline;
+  final String workspaceTip;
+  final String retryLabel;
+  final bool interruptsWorkspace;
+}
+
+BlockReasonPresentation blockReasonPresentation(
+  BlockReason reason,
+) => switch (reason) {
+  BlockReason.licenseExpired => const BlockReasonPresentation(
+    statusLabel: 'Plan or sign-in needed',
+    connectFailure:
+        'Connect failed: this machine needs an active plan or a sign-in.',
+    workspaceHeadline: 'this account can\'t reach machines remotely',
+    workspaceTip:
+        'The relay declined this connection\'s access token. Sign in '
+        'again on this device to mint a fresh one, or check that your '
+        'plan includes remote access, then Retry.',
+    retryLabel: 'retry',
+    interruptsWorkspace: true,
+  ),
+  BlockReason.sessionTakenOver => const BlockReasonPresentation(
+    statusLabel: 'Taken over',
+    connectFailure: 'Connect failed: another device took over this machine.',
+    workspaceHeadline: 'another device took over this agent',
+    workspaceTip: 'Another of your devices took over this agent.',
+    retryLabel: 'take back',
+    interruptsWorkspace: true,
+  ),
+  BlockReason.deviceRevoked => const BlockReasonPresentation(
+    statusLabel: 'Device revoked',
+    connectFailure: "Connect failed: this device's access was revoked.",
+    workspaceHeadline: 'the relay would not accept this device',
+    workspaceTip:
+        'The relay rejected this device\'s access token — it was revoked, '
+        'it no longer matches your plan, or this build is pointed at a '
+        'different server. Check you are signed in on the right account, '
+        'then sign out and back in to re-provision this device and Retry.',
+    retryLabel: 'retry',
+    interruptsWorkspace: true,
+  ),
+  BlockReason.handshakeFailing => const BlockReasonPresentation(
+    statusLabel: 'Handshake failing',
+    connectFailure: 'Connect failed: could not verify that machine.',
+    workspaceHeadline: 'the encrypted session could not be established',
+    workspaceTip:
+        'The agent answered but the E2E handshake kept failing — usually '
+        'a host that re-provisioned its identity. Retry; if it persists, '
+        'forget the machine and pair it again.',
+    retryLabel: 'retry',
+    interruptsWorkspace: false,
+  ),
+  BlockReason.peerRejected => const BlockReasonPresentation(
+    statusLabel: 'Connection rejected',
+    connectFailure:
+        'Connect failed: remote access or the peer connection was rejected.',
+    workspaceHeadline: 'the remote connection was rejected',
+    workspaceTip: 'Check device access and the remote machine before retrying.',
+    retryLabel: 'retry',
+    interruptsWorkspace: true,
+  ),
 };
 
 /// Human copy for a structured bridge/relay refusal, keyed by error CODE —
@@ -55,7 +122,7 @@ String? friendlyErrorCopy(String? code) => switch (code) {
   'NOT_ALLOWED' =>
     'Remote access is off on this machine. Turn it on in Antgrid on that '
         'computer — the Remote chip in the title bar.',
-  // Same never-subscribed caveat as _blockReasonLabel's licenseExpired arm.
+  // Same never-subscribed caveat as the centralized licenseExpired presentation.
   'LICENSE_EXPIRED' =>
     'This account can\'t reach machines remotely right now. Sign in again, '
         'or check your plan.',

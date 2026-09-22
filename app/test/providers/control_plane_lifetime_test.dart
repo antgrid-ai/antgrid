@@ -151,7 +151,7 @@ void main() {
               () => ValueController(WorkbenchSurface.workspace),
             ),
             eagerControlPlanesEnabledProvider.overrideWithValue(false),
-            ],
+          ],
         );
         addTearDown(c.dispose);
 
@@ -256,7 +256,7 @@ void main() {
               () => ValueController(WorkbenchSurface.workspace),
             ),
             eagerControlPlanesEnabledProvider.overrideWithValue(false),
-            ],
+          ],
         );
         addTearDown(c.dispose);
 
@@ -376,7 +376,7 @@ void main() {
     test(
       'drops a stale manager connection before retrying a machine',
       () async {
-        final manager = RelayConnectionManager(crypto: CryptoService());
+        final manager = MachineConnectionManager(crypto: CryptoService());
         addTearDown(manager.disposeAll);
         final stale = manager.connectionFor('M');
 
@@ -401,7 +401,7 @@ void main() {
     test(
       'keeps a healthy manager connection and refreshes its current client',
       () async {
-        final manager = RelayConnectionManager(crypto: CryptoService());
+        final manager = MachineConnectionManager(crypto: CryptoService());
         addTearDown(manager.disposeAll);
         final existing = manager.connectionFor('M');
         final transport = FakeAgentTransport()
@@ -437,7 +437,7 @@ void main() {
         // keeps its last agent:projects advert and refresh()'s snapshot RPC just
         // times out — the machine read as online. The refresh must clear the
         // stale advert (→ offline) while keeping the socket for auto-recovery.
-        final manager = RelayConnectionManager(crypto: CryptoService());
+        final manager = MachineConnectionManager(crypto: CryptoService());
         addTearDown(manager.disposeAll);
         final existing = manager.connectionFor('M');
         final transport = FakeAgentTransport()

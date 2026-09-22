@@ -984,7 +984,7 @@ class MachineConnectionNotifier extends Notifier<void> {
           .where((id) => baseDeviceUuid(id) == machineUuid),
     );
     for (final id in forgottenIds) {
-      mgr.release(id);
+      await mgr.release(id);
       // `AndSettle` (awaited) before purge: eviction's `onEvict` writes the
       // status cache that `purgeEntryState` then deletes — ordering matters.
       await registry.forceEvictAndSettle(id);
@@ -1032,7 +1032,7 @@ class MachineConnectionNotifier extends Notifier<void> {
 
   /// User-initiated retry from the boot panel or the connection-error screen.
   ///
-  /// Hands the machine's [ConnectionSupervisor] its `retry()` input — clearing
+  /// Hands the machine connection its `retry()` input — clearing
   /// the block and the backoff — rather than dialling here: a second component
   /// deciding when to reconnect is exactly what the supervisor replaced.
   ///
@@ -1056,11 +1056,7 @@ class MachineConnectionNotifier extends Notifier<void> {
       'retry → supervisor',
       fields: {'target': registrationId},
     );
-    ref
-        .read(relayConnectionManagerProvider)
-        .peek(registrationId)
-        ?.supervisor
-        ?.retry();
+    ref.read(relayConnectionManagerProvider).peek(registrationId)?.retry();
     ref.invalidate(agentTransportForProvider(registrationId));
   }
 }

@@ -1,11 +1,11 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io' show File, Platform;
+import 'dart:typed_data';
 
 import 'package:antgrid_peer_transport/antgrid_peer_transport.dart';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:cryptography/cryptography.dart';
-import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:iroh_flutter/iroh_flutter.dart' as iroh;
 import 'package:path/path.dart' as path;
@@ -55,7 +55,7 @@ abstract interface class PeerConnector {
   void notePolicyGeneration(BigInt generation);
   Future<PeerLink> connect({
     required PeerConnectionAttempt attempt,
-    required RelayService relay,
+    PeerLinkDiagnostic? diagnostic,
     required String machineDeviceId,
     required String machinePublicKey,
   });
@@ -146,11 +146,14 @@ class PeerRuntime implements PeerConnector {
   late final AuthorizationLease lease;
   Future<void>? _preparing;
   Future<NativeEndpointOwner>? _native;
+  NativeEndpointOwner? _nativeOwner;
   void Function()? _retireInitialization;
   String? _nativeRelayPolicy;
   Future<bool>? _resuming;
   int _users = 0;
   bool _disposed = false;
+  Future<void>? _leaseDisposal;
+  Future<bool>? _disposeAttempt;
 
   @override
   void retain() {
@@ -232,14 +235,13 @@ class PeerRuntime implements PeerConnector {
   @override
   Future<PeerLink> connect({
     required PeerConnectionAttempt attempt,
-    required RelayService relay,
+    PeerLinkDiagnostic? diagnostic,
     required String machineDeviceId,
     required String machinePublicKey,
   }) async {
     final generation = attempt.generation;
     final requestTimer = Stopwatch()..start();
     const requestedTransport = 'iroh';
-    void diagnostic(Map<String, Object?> event) => relay.netTap?.call(event);
     emitPeerLifecycle(
       diagnostic,
       'peer:connection-request',
@@ -302,7 +304,7 @@ class PeerRuntime implements PeerConnector {
           localDeviceId: relaySlotId(record.deviceUuid, machineDeviceId),
           peerDeviceId: machineDeviceId,
           authorized: authorized,
-          diagnostic: (event) => relay.netTap?.call(event),
+          diagnostic: diagnostic,
         );
       },
     );
@@ -346,7 +348,7 @@ class PeerRuntime implements PeerConnector {
             try {
               previousOwner = await previous;
             } catch (_) {}
-            if (previousOwner != null) await previousOwner.close();
+            if (previousOwner != null) await _closeOwner(previousOwner);
           }
           if (_disposed) {
             throw const PeerConnectionFailure('DISPOSED', terminal: true);
@@ -357,8 +359,9 @@ class PeerRuntime implements PeerConnector {
             approvedRelays: urls,
             initializeNative: _initializeBundledIroh,
           );
+          _nativeOwner = native;
           if (_disposed || retired || _nativeRelayPolicy != policy) {
-            await native.close();
+            await _closeOwner(native);
             throw const PeerConnectionFailure(
               'SUPERSEDED',
               terminal: false,
@@ -391,19 +394,66 @@ class PeerRuntime implements PeerConnector {
     );
   }
 
-  Future<void> dispose() async {
-    if (_disposed) return;
-    _disposed = true;
-    lease.invalidate();
-    _endpointSecret.fillRange(0, _endpointSecret.length, 0);
-    _deviceSecret.fillRange(0, _deviceSecret.length, 0);
-    _http.close();
-    await lease.dispose();
-    final native = _native;
-    if (native != null) {
+  Future<void> _closeOwner(NativeEndpointOwner owner) async {
+    await owner.close();
+    if (identical(_nativeOwner, owner)) _nativeOwner = null;
+  }
+
+  /// Fences the runtime immediately and confirms endpoint destruction within
+  /// two bounded close windows. A false result keeps ownership locked so a
+  /// later cleanup attempt can observe a late initializer and close it.
+  Future<bool> dispose() => _disposeAttempt ??= _disposeOnce().whenComplete(() {
+    _disposeAttempt = null;
+  });
+
+  Future<bool> _disposeOnce() async {
+    if (!_disposed) {
+      _disposed = true;
+      _retireInitialization?.call();
+      lease.invalidate();
+      _endpointSecret.fillRange(0, _endpointSecret.length, 0);
+      _deviceSecret.fillRange(0, _deviceSecret.length, 0);
+      _http.close();
+      _leaseDisposal = lease.dispose();
+    }
+    await _leaseDisposal;
+
+    final pending = _native;
+    var owner = _nativeOwner;
+    if (owner == null && pending != null) {
       try {
-        await (await native).close();
-      } catch (_) {}
+        owner = await pending.timeout(const Duration(seconds: 5));
+      } on TimeoutException {
+        _retireInitialization?.call();
+        try {
+          owner = await pending.timeout(const Duration(seconds: 5));
+        } on TimeoutException {
+          return false;
+        } catch (_) {
+          owner = _nativeOwner;
+        }
+      } catch (_) {
+        owner = _nativeOwner;
+      }
+    }
+    if (owner == null) return true;
+
+    final graceful = _closeOwner(owner);
+    try {
+      await graceful.timeout(const Duration(seconds: 5));
+      return true;
+    } on TimeoutException {
+      try {
+        await Future.wait<void>([
+          graceful,
+          _closeOwner(owner),
+        ]).timeout(const Duration(seconds: 5));
+        return true;
+      } catch (_) {
+        return false;
+      }
+    } catch (_) {
+      return false;
     }
   }
 }

@@ -272,7 +272,7 @@ Future<void> refreshMachineInventoryAndControlPlanes(
       // live connection anyway, so only a not-connected machine is torn down
       // for its fresh attempt.
       if (relayManager.peek(uuid)?.supervisor?.status is! Connected) {
-        relayManager.release(uuid);
+        await relayManager.release(uuid);
       }
       invalidateControlPlaneProviders(ref, uuid);
       await refreshControlPlanes(ref, [
@@ -319,7 +319,7 @@ Future<void> kickEagerControlPlaneDials(RefreshRef ref) async {
         // isLoading covers a rebuild in flight — Riverpod retains the previous
         // error while refreshing, so hasError alone would misread it as stale.
         if (cached.isLoading || !cached.hasError) return;
-        if (existing.supervisor?.status is! Connected) mgr.release(uuid);
+        if (existing.supervisor?.status is! Connected) await mgr.release(uuid);
       }
       invalidateControlPlaneProviders(ref, uuid);
       try {

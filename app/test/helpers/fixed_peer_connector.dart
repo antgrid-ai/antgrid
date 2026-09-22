@@ -21,7 +21,7 @@ class FixedPeerConnector implements PeerConnector {
   @override
   Future<PeerLink> connect({
     required PeerConnectionAttempt attempt,
-    required RelayService relay,
+    PeerLinkDiagnostic? diagnostic,
     required String machineDeviceId,
     required String machinePublicKey,
   }) async => link;

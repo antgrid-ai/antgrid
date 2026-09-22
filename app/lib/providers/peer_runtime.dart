@@ -31,6 +31,10 @@ final peerRuntimeProvider = FutureProvider<PeerRuntime>((ref) async {
     licenseApiUrl: ref.watch(licenseApiUrlProvider),
     mintToken: minter.mint,
   );
-  ref.onDispose(() => detached('PeerRuntime', 'dispose', runtime.dispose));
+  ref.onDispose(
+    () => detached('PeerRuntime', 'dispose', () async {
+      await runtime.dispose();
+    }),
+  );
   return runtime;
 }, retry: noProviderRetry);

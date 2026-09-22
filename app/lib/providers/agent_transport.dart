@@ -8,7 +8,7 @@ import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 
 import '../analytics/events.dart';
 import '../connection/connection_supervisor.dart';
-import '../connection/relay_mechanisms.dart';
+import '../connection/peer_connection.dart';
 import '../demo/demo_identity.dart';
 import '../demo/demo_transport.dart';
 import '../launcher/local_agent_launcher.dart';
@@ -311,49 +311,45 @@ Future<AgentTransport?> _buildRelayTransportFor(
 
   final peerRuntime = await ref.read(peerRuntimeProvider.future);
   if (!ref.mounted) throw StateError('Transport provider disposed');
+  Future<ConnCoords?> resolveConnectionCoords() {
+    final refresh = resolveCalls++ > 0;
+    return coordsResolver.resolve(
+      base: base,
+      refreshInventory: refresh,
+      fallback: ConnCoords(
+        relayUrl: relayUrl,
+        agentEd25519PubB64: r.agentEd25519PubB64,
+      ),
+    );
+  }
+
+  Future<String> mintConnectionToken() async {
+    final live = await minterResolver.resolve(tokenMinter);
+    if (live == null) {
+      throw ProvisioningException(
+        'AUTH',
+        'Device credentials are required for remote connections',
+      );
+    }
+    return live.mint();
+  }
+
   conn.ensureStarted(
     mechanisms: PeerConnectionMechanisms(
-      relay: conn.relay,
       peerRuntime: peerRuntime,
+      diagnostic: conn.relay.netTap,
       crypto: crypto,
       machineDeviceId: base,
-      identity: identity,
       phoneDeviceId: phoneDeviceId,
       phoneEd25519Seed: phoneEd25519Seed,
+      resolveCoords: resolveConnectionCoords,
+    ),
+    central: RelayCentralControlDialer(
+      relay: conn.relay,
+      machineDeviceId: base,
+      identity: identity,
       epoch: epoch,
-      resolveCoords: () {
-        // Re-read on every call, never a closure over the build-time answer:
-        // the supervisor re-runs this step precisely when the last answer has
-        // stopped being dialable — a host that moved relay or re-provisioned
-        // its Ed25519 identity — and replaying the same values would make the
-        // re-resolve pointless. The first call uses the current inventory load;
-        // later ones refresh it, because they only happen after
-        // the socket rung has failed against the previous answer.
-        final refresh = resolveCalls++ > 0;
-        return coordsResolver.resolve(
-          base: base,
-          refreshInventory: refresh,
-          fallback: ConnCoords(
-            relayUrl: relayUrl,
-            agentEd25519PubB64: r.agentEd25519PubB64,
-          ),
-        );
-      },
-      mintToken: () async {
-        // Through the container-lifetime resolver, never this element's `ref`,
-        // for the same reason as the coords step — see
-        // [ConnectionMinterResolver].
-        final live = await minterResolver.resolve(tokenMinter);
-        // Fresh per attempt, never a cached token: one minted before a long
-        // backoff is already expired by the time its dial runs.
-        if (live == null) {
-          throw ProvisioningException(
-            'AUTH',
-            'Device credentials are required for remote connections',
-          );
-        }
-        return live.mint();
-      },
+      mintToken: mintConnectionToken,
     ),
   );
   // A changed agent pin makes the mechanisms swap the whole MachineSession,

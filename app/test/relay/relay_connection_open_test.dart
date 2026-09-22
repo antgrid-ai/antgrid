@@ -15,7 +15,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:antgrid/connection/connection_supervisor.dart';
-import 'package:antgrid/connection/relay_mechanisms.dart';
+import 'package:antgrid/connection/peer_connection.dart';
 import 'package:antgrid/providers/relay_connection.dart';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:cryptography/cryptography.dart';
@@ -301,27 +301,32 @@ PeerConnectionMechanisms _mechanisms(
   _RecordingRelay relay, {
   required Uint8List agentPub,
 }) => PeerConnectionMechanisms(
-  relay: relay,
   peerRuntime: FixedPeerConnector(relay),
   crypto: CryptoService(),
   machineDeviceId: _machineId,
-  identity: _identity(),
   phoneDeviceId: _phoneId,
   phoneEd25519Seed: List<int>.filled(32, 3),
-  epoch: 1,
   resolveCoords: () async => ConnCoords(
     relayUrl: 'ws://relay.test',
     agentEd25519PubB64: base64.encode(agentPub),
   ),
-  mintToken: () async => 'license-token',
 );
+
+RelayCentralControlDialer _central(_RecordingRelay relay) =>
+    RelayCentralControlDialer(
+      relay: relay,
+      machineDeviceId: _machineId,
+      identity: _identity(),
+      epoch: 1,
+      mintToken: () async => 'license-token',
+    );
 
 /// Brings the connection up against the fake agent and returns both the
 /// resulting session and the derived [SessionKeys], so a caller can seal
 /// further control-plane traffic (e.g. a `stream-ready` advert) as the agent
 /// would.
 Future<(MachineSession, SessionKeys)> _openConnectionWithKeys(
-  RelayConnection conn, {
+  MachineConnection conn, {
   required List<int> agentSeed,
   required Uint8List agentPub,
 }) async {
@@ -332,14 +337,17 @@ Future<(MachineSession, SessionKeys)> _openConnectionWithKeys(
     machineDeviceId: _machineId,
     phoneDeviceId: _phoneId,
   );
-  conn.ensureStarted(mechanisms: _mechanisms(relay, agentPub: agentPub));
+  conn.ensureStarted(
+    mechanisms: _mechanisms(relay, agentPub: agentPub),
+    central: _central(relay),
+  );
   final session = await conn.awaitSession();
   final keys = await agentFuture;
   return (session, keys);
 }
 
 Future<MachineSession> _openConnection(
-  RelayConnection conn, {
+  MachineConnection conn, {
   required List<int> agentSeed,
   required Uint8List agentPub,
 }) async {
@@ -369,7 +377,7 @@ void main() {
 
   test('the supervisor drives dial → presence → E2E handshake and resolves '
       'a usable MachineSession', () async {
-    final conn = RelayConnection(
+    final conn = MachineConnection(
       machineDeviceId: _machineId,
       crypto: CryptoService(),
       relayOverride: relay,
@@ -389,7 +397,7 @@ void main() {
 
   test('a central hello failure does not poison the native session and is '
       'retried independently', () async {
-    final conn = RelayConnection(
+    final conn = MachineConnection(
       machineDeviceId: _machineId,
       crypto: CryptoService(),
       relayOverride: relay,
@@ -408,7 +416,10 @@ void main() {
       phoneDeviceId: _phoneId,
       timeout: const Duration(seconds: 15),
     );
-    conn.ensureStarted(mechanisms: _mechanisms(relay, agentPub: agentPub));
+    conn.ensureStarted(
+      mechanisms: _mechanisms(relay, agentPub: agentPub),
+      central: _central(relay),
+    );
 
     final session = await conn.awaitSession();
     await agentFuture;
@@ -428,7 +439,7 @@ void main() {
   test('two projects on the SAME machine share the ONE MachineSession — a '
       'second bring-up reuses the running supervisor with no second '
       'dial/handshake', () async {
-    final conn = RelayConnection(
+    final conn = MachineConnection(
       machineDeviceId: _machineId,
       crypto: CryptoService(),
       relayOverride: relay,
@@ -445,7 +456,10 @@ void main() {
     // agentTransportForProvider calls ensureStarted/awaitSession again for
     // every project id; the machine's supervisor must already be running and
     // must not re-dial.
-    conn.ensureStarted(mechanisms: _mechanisms(relay, agentPub: agentPub));
+    conn.ensureStarted(
+      mechanisms: _mechanisms(relay, agentPub: agentPub),
+      central: _central(relay),
+    );
     final session2 = await conn.awaitSession();
 
     expect(relay.connectCalls, 1);
@@ -462,7 +476,7 @@ void main() {
 
   test('drill-in binds via a control-plane stream-ready advert at 0 RTT — no '
       'new project:start once the streamId is already known', () async {
-    final conn = RelayConnection(
+    final conn = MachineConnection(
       machineDeviceId: _machineId,
       crypto: CryptoService(),
       relayOverride: relay,

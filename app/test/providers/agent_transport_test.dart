@@ -112,16 +112,16 @@ class _FakeRelayService extends RelayService {
 
 /// Hands every machine a connection whose socket is the fake above, so the
 /// supervisor's dial never touches a real WebSocket.
-class _FakeConnectionManager extends RelayConnectionManager {
+class _FakeConnectionManager extends MachineConnectionManager {
   _FakeConnectionManager(this._relay) : super(crypto: CryptoService());
 
   final RelayService _relay;
-  final Map<String, RelayConnection> _conns = {};
+  final Map<String, MachineConnection> _conns = {};
 
   @override
-  RelayConnection connectionFor(String machineDeviceId) => _conns.putIfAbsent(
+  MachineConnection connectionFor(String machineDeviceId) => _conns.putIfAbsent(
     machineDeviceId,
-    () => RelayConnection(
+    () => MachineConnection(
       machineDeviceId: machineDeviceId,
       crypto: CryptoService(),
       relayOverride: _relay,
@@ -129,7 +129,7 @@ class _FakeConnectionManager extends RelayConnectionManager {
   );
 
   @override
-  RelayConnection? peek(String machineDeviceId) => _conns[machineDeviceId];
+  MachineConnection? peek(String machineDeviceId) => _conns[machineDeviceId];
 }
 
 // ---------------------------------------------------------------------------

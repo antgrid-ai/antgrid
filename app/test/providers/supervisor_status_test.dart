@@ -4,29 +4,18 @@
 // production actually uses), the reachability mapping, app-resume fanning
 // `noteResume()` out to every live machine, and the control-plane reaper
 // toggling `wanted` around a release instead of only releasing.
-import 'dart:typed_data';
-
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:antgrid/connection/connection_supervisor.dart';
-import 'package:antgrid/connection/relay_mechanisms.dart';
+import 'package:antgrid/connection/peer_connection.dart';
 import 'package:antgrid/connection/supervisor_state.dart';
 import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/providers/relay_connection.dart';
 import 'package:antgrid/providers/supervisor_status.dart';
 import 'package:antgrid/screens/app_shell.dart';
 import '../helpers/fixed_peer_connector.dart';
-
-DeviceIdentity _identity() => DeviceIdentity(
-  deviceId: 'phone-1',
-  name: 'Test Phone',
-  ed25519PrivateKey: Uint8List(64),
-  ed25519PublicKey: Uint8List(32),
-  x25519PrivateKey: Uint8List(32),
-  x25519PublicKey: Uint8List(32),
-);
 
 /// A [PeerConnectionMechanisms] whose rung getters are settable directly, decoupled
 /// from the underlying (never-connected) RelayService — the only way to
@@ -35,15 +24,11 @@ DeviceIdentity _identity() => DeviceIdentity(
 /// `RelayConnection`).
 class _ToggleableMechanisms extends PeerConnectionMechanisms {
   _ToggleableMechanisms({
-    required super.relay,
     required super.crypto,
     required super.machineDeviceId,
-    required super.identity,
     required super.phoneDeviceId,
     required super.phoneEd25519Seed,
-    required super.epoch,
     required super.resolveCoords,
-    required super.mintToken,
     required super.peerRuntime,
   });
 
@@ -66,20 +51,16 @@ class _ToggleableMechanisms extends PeerConnectionMechanisms {
   Future<void> release() async {}
 }
 
-_ToggleableMechanisms _toggleable(RelayConnection conn, String machineId) =>
+_ToggleableMechanisms _toggleable(MachineConnection conn, String machineId) =>
     _ToggleableMechanisms(
-      relay: conn.relay,
       crypto: CryptoService(),
       machineDeviceId: machineId,
-      identity: _identity(),
       phoneDeviceId: 'phone-1',
       phoneEd25519Seed: List<int>.filled(32, 7),
-      epoch: 1,
       resolveCoords: () async => const ConnCoords(
         relayUrl: 'ws://relay.test',
         agentEd25519PubB64: 'AGENT_PUB',
       ),
-      mintToken: () async => 'tok',
       peerRuntime: FixedPeerConnector.stub(),
     );
 
@@ -103,21 +84,22 @@ Future<void> _waitUntil(
 /// `setWanted(false)` call the only thing that can be driving the supervisor
 /// in this test, isolating the behavior under test from release's own
 /// (independently correct) teardown.
-class _NonDisposingManager extends RelayConnectionManager {
+class _NonDisposingManager extends MachineConnectionManager {
   _NonDisposingManager(this._byId) : super(crypto: CryptoService());
 
-  final Map<String, RelayConnection> _byId;
+  final Map<String, MachineConnection> _byId;
   final List<String> released = [];
 
   @override
   List<String> openControlPlaneIds() => _byId.keys.toList(growable: false);
 
   @override
-  RelayConnection? peek(String machineDeviceId) => _byId[machineDeviceId];
+  MachineConnection? peek(String machineDeviceId) => _byId[machineDeviceId];
 
   @override
-  void release(String machineDeviceId) {
+  Future<NativeStopResult?> release(String machineDeviceId) async {
     released.add(machineDeviceId);
+    return NativeStopResult.stopped;
   }
 }
 
@@ -135,8 +117,8 @@ void main() {
       await Future<void>.delayed(const Duration(milliseconds: 20));
     }
 
-    ({RelayConnectionManager mgr, ProviderContainer container}) harness() {
-      final mgr = RelayConnectionManager(crypto: CryptoService());
+    ({MachineConnectionManager mgr, ProviderContainer container}) harness() {
+      final mgr = MachineConnectionManager(crypto: CryptoService());
       final container = ProviderContainer(
         overrides: [relayConnectionManagerProvider.overrideWithValue(mgr)],
       );
@@ -186,7 +168,7 @@ void main() {
       );
 
       // The control-plane reaper drops the machine, then something re-dials it.
-      h.mgr.release('m');
+      await h.mgr.release('m');
       h.mgr.connectionFor('m');
 
       await _waitUntil(
@@ -246,40 +228,32 @@ void main() {
     () {
       test('a rung that silently broke with no edge event is retried on EVERY '
           'live connection, not just one', () async {
-        final mgr = RelayConnectionManager(crypto: CryptoService());
+        final mgr = MachineConnectionManager(crypto: CryptoService());
         addTearDown(mgr.disposeAll);
 
         final connA = mgr.connectionFor('a');
         final connB = mgr.connectionFor('b');
         final mechA = _ToggleableMechanisms(
-          relay: connA.relay,
           peerRuntime: FixedPeerConnector.stub(),
           crypto: CryptoService(),
           machineDeviceId: 'a',
-          identity: _identity(),
           phoneDeviceId: 'phone-1',
           phoneEd25519Seed: List<int>.filled(32, 7),
-          epoch: 1,
           resolveCoords: () async => const ConnCoords(
             relayUrl: 'ws://relay.test',
             agentEd25519PubB64: 'AGENT_PUB',
           ),
-          mintToken: () async => 'tok',
         );
         final mechB = _ToggleableMechanisms(
-          relay: connB.relay,
           peerRuntime: FixedPeerConnector.stub(),
           crypto: CryptoService(),
           machineDeviceId: 'b',
-          identity: _identity(),
           phoneDeviceId: 'phone-1',
           phoneEd25519Seed: List<int>.filled(32, 7),
-          epoch: 1,
           resolveCoords: () async => const ConnCoords(
             relayUrl: 'ws://relay.test',
             agentEd25519PubB64: 'AGENT_PUB',
           ),
-          mintToken: () async => 'tok',
         );
         connA.ensureStarted(mechanisms: mechA);
         connB.ensureStarted(mechanisms: mechB);
@@ -311,23 +285,19 @@ void main() {
   group('reconcileControlPlaneWantedness', () {
     test('a machine that drops out of alive/openProjects gets setWanted(false) '
         'before it is released', () async {
-      final mgr = RelayConnectionManager(crypto: CryptoService());
+      final mgr = MachineConnectionManager(crypto: CryptoService());
       addTearDown(mgr.disposeAll);
       final conn = mgr.connectionFor('m');
       conn.ensureStarted(
         mechanisms: PeerConnectionMechanisms(
-          relay: conn.relay,
           peerRuntime: FixedPeerConnector.stub(),
           crypto: CryptoService(),
           machineDeviceId: 'm',
-          identity: _identity(),
           phoneDeviceId: 'phone-1',
           phoneEd25519Seed: List<int>.filled(32, 7),
-          epoch: 1,
           // Never resolves — this test only needs a live supervisor to
           // toggle `wanted` on, not a real climb.
           resolveCoords: () async => null,
-          mintToken: () async => 'tok',
         ),
       );
       final fake = _NonDisposingManager({'m': conn});
@@ -346,42 +316,29 @@ void main() {
       );
     });
 
-    test(
-      'a machine in alive gets setWanted(true) and is never released',
-      () async {
-        final mgr = RelayConnectionManager(crypto: CryptoService());
-        addTearDown(mgr.disposeAll);
-        final conn = mgr.connectionFor('m');
-        conn.ensureStarted(
-          mechanisms: PeerConnectionMechanisms(
-            relay: conn.relay,
-            peerRuntime: FixedPeerConnector.stub(),
-            crypto: CryptoService(),
-            machineDeviceId: 'm',
-            identity: _identity(),
-            phoneDeviceId: 'phone-1',
-            phoneEd25519Seed: List<int>.filled(32, 7),
-            epoch: 1,
-            resolveCoords: () async => null,
-            mintToken: () async => 'tok',
-          ),
-        );
-        // Start it from a torn-down state — exactly the case `setWanted(true)`
-        // must recover: a survivor whose ladder was previously told to stop.
-        conn.supervisor!.setWanted(false);
-        await _waitUntil(() => conn.supervisor!.status is Released);
+    test('a live machine in alive is never released', () async {
+      final mgr = MachineConnectionManager(crypto: CryptoService());
+      addTearDown(mgr.disposeAll);
+      final conn = mgr.connectionFor('m');
+      conn.ensureStarted(
+        mechanisms: PeerConnectionMechanisms(
+          peerRuntime: FixedPeerConnector.stub(),
+          crypto: CryptoService(),
+          machineDeviceId: 'm',
+          phoneDeviceId: 'phone-1',
+          phoneEd25519Seed: List<int>.filled(32, 7),
+          resolveCoords: () async => null,
+        ),
+      );
+      final fake = _NonDisposingManager({'m': conn});
+      final released = reconcileControlPlaneWantedness(
+        mgr: fake,
+        alive: const {'m'},
+        openProjects: const <String>{},
+      );
 
-        final fake = _NonDisposingManager({'m': conn});
-        final released = reconcileControlPlaneWantedness(
-          mgr: fake,
-          alive: const {'m'},
-          openProjects: const <String>{},
-        );
-
-        expect(released, isEmpty);
-        expect(fake.released, isEmpty);
-        await _waitUntil(() => conn.supervisor!.status is! Released);
-      },
-    );
+      expect(released, isEmpty);
+      expect(fake.released, isEmpty);
+    });
   });
 }

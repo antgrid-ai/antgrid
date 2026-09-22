@@ -18,7 +18,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:antgrid/connection/connection_supervisor.dart';
-import 'package:antgrid/connection/relay_mechanisms.dart';
+import 'package:antgrid/connection/peer_connection.dart';
 import 'package:antgrid/providers/account_agents.dart';
 import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/providers/peer_runtime.dart';
@@ -132,16 +132,16 @@ class _RecordingRelay extends RelayService implements PeerLink {
   ];
 }
 
-class _FakeConnectionManager extends RelayConnectionManager {
+class _FakeConnectionManager extends MachineConnectionManager {
   _FakeConnectionManager(this._relay) : super(crypto: CryptoService());
 
   final RelayService _relay;
-  final Map<String, RelayConnection> _conns = {};
+  final Map<String, MachineConnection> _conns = {};
 
   @override
-  RelayConnection connectionFor(String machineDeviceId) => _conns.putIfAbsent(
+  MachineConnection connectionFor(String machineDeviceId) => _conns.putIfAbsent(
     machineDeviceId,
-    () => RelayConnection(
+    () => MachineConnection(
       machineDeviceId: machineDeviceId,
       crypto: CryptoService(),
       relayOverride: _relay,
@@ -149,7 +149,7 @@ class _FakeConnectionManager extends RelayConnectionManager {
   );
 
   @override
-  RelayConnection? peek(String machineDeviceId) => _conns[machineDeviceId];
+  MachineConnection? peek(String machineDeviceId) => _conns[machineDeviceId];
 }
 
 Future<DeviceRecord> _connectionRecord() async {
@@ -354,16 +354,12 @@ void main() {
       agentEd25519PubB64: _agentPubB64,
     );
     final mech = PeerConnectionMechanisms(
-      relay: relay,
       peerRuntime: FixedPeerConnector(relay),
       crypto: CryptoService(),
       machineDeviceId: _machine,
-      identity: connectionIdentityFor(record, machineDeviceId: _machine),
       phoneDeviceId: record.deviceUuid,
       phoneEd25519Seed: base64Decode(record.ed25519Priv),
-      epoch: 1,
       resolveCoords: () async => coords,
-      mintToken: () async => 'tok',
     );
     addTearDown(mech.release);
 

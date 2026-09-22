@@ -12,7 +12,7 @@ import 'relay_connection.dart';
 /// `RelayConnectionState`, which stopped being able to say "the agent showed
 /// up" once the pairing rung was deleted.
 ///
-/// Subscribes to [RelayConnection.statusStream], never to `supervisor` — the
+/// Subscribes to [MachineConnection.statusStream], never to `supervisor` — the
 /// supervisor is built several awaits after the connection appears, so a
 /// one-shot peek at it would dead-end on the normal cold-launch ordering.
 final supervisorStatusProvider = StreamProvider.autoDispose

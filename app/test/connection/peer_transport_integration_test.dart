@@ -4,7 +4,7 @@ import 'dart:typed_data';
 
 import 'package:antgrid/connection/connection_supervisor.dart';
 import 'package:antgrid/connection/peer_runtime.dart';
-import 'package:antgrid/connection/relay_mechanisms.dart';
+import 'package:antgrid/connection/peer_connection.dart';
 import 'package:antgrid/connection/supervisor_state.dart';
 import 'package:antgrid/providers/relay_connection.dart';
 import 'package:antgrid/services/keychain_device_store.dart';
@@ -76,7 +76,7 @@ class _Runtime extends PeerRuntime {
   @override
   Future<PeerLink> connect({
     required PeerConnectionAttempt attempt,
-    required RelayService relay,
+    PeerLinkDiagnostic? diagnostic,
     required String machineDeviceId,
     required String machinePublicKey,
   }) async {
@@ -154,8 +154,18 @@ PeerConnectionMechanisms _mechanisms(
   _Runtime runtime,
   _Handshake handshake,
 ) => PeerConnectionMechanisms(
-  relay: relay,
   crypto: CryptoService(),
+  machineDeviceId: 'machine',
+  phoneDeviceId: 'phone',
+  phoneEd25519Seed: Uint8List(32),
+  resolveCoords: () async =>
+      const ConnCoords(relayUrl: 'wss://relay.test', agentEd25519PubB64: 'pin'),
+  peerRuntime: runtime,
+  buildHandshaker: (_) => handshake,
+);
+
+RelayCentralControlDialer _central(_Relay relay) => RelayCentralControlDialer(
+  relay: relay,
   machineDeviceId: 'machine',
   identity: DeviceIdentity(
     deviceId: 'phone',
@@ -165,14 +175,8 @@ PeerConnectionMechanisms _mechanisms(
     x25519PrivateKey: Uint8List(32),
     x25519PublicKey: Uint8List(32),
   ),
-  phoneDeviceId: 'phone',
-  phoneEd25519Seed: Uint8List(32),
   epoch: 1,
-  resolveCoords: () async =>
-      const ConnCoords(relayUrl: 'wss://relay.test', agentEd25519PubB64: 'pin'),
   mintToken: () async => 'token',
-  peerRuntime: runtime,
-  buildHandshaker: (_) => handshake,
 );
 
 void main() {
@@ -182,6 +186,13 @@ void main() {
       final relay = _Relay();
       final runtime = _Runtime(_Payload());
       final mech = _mechanisms(relay, runtime, _Handshake());
+      final central = _central(relay);
+      final supervisor = CentralControlSupervisor(
+        central,
+        backoffBaseMs: 0,
+        backoffCapMs: 0,
+        jitter: (_) => 0,
+      );
       const old = ConnCoords(
         relayUrl: 'wss://old.test',
         agentEd25519PubB64: 'pin',
@@ -190,12 +201,14 @@ void main() {
         relayUrl: 'wss://new.test',
         agentEd25519PubB64: 'pin',
       );
-      await mech.reconnectCentral(old);
+      supervisor.noteCoords(old);
+      supervisor.setWanted(true);
+      await _settle();
       await mech.connectPayload(next);
-      expect(mech.centralControlNeedsReconnect, isTrue);
-      await mech.reconnectCentral(next);
-      expect(mech.centralControlNeedsReconnect, isFalse);
+      supervisor.noteCoords(next);
+      await _settle();
       expect(relay.dials, 2);
+      await supervisor.stop();
       await mech.release();
       relay.dispose();
       await runtime.dispose();
@@ -209,13 +222,14 @@ void main() {
       final payload = _Payload();
       final runtime = _Runtime(payload);
       final handshake = _Handshake();
-      final connection = RelayConnection(
+      final connection = MachineConnection(
         machineDeviceId: 'machine',
         crypto: CryptoService(),
         relayOverride: relay,
       );
       connection.ensureStarted(
         mechanisms: _mechanisms(relay, runtime, handshake),
+        central: _central(relay),
       );
       await _settle();
       final session = connection.session;
@@ -266,10 +280,8 @@ void main() {
         final payload = _Payload();
         final runtime = _Runtime(payload);
         final mechanisms = _mechanisms(relay, runtime, _Handshake());
-        var blocked = false;
-        var woken = false;
-        mechanisms.onTerminalPeerError = () => blocked = true;
-        mechanisms.onSessionDown = () => woken = true;
+        final events = <PeerConnectionEvent>[];
+        final eventsSub = mechanisms.events.listen(events.add);
         await mechanisms.connectPayload(
           const ConnCoords(
             relayUrl: 'wss://relay.test',
@@ -283,7 +295,11 @@ void main() {
           ),
         );
         await _settle();
-        final outcome = (blocked: blocked, woken: woken);
+        final outcome = (
+          blocked: events.any((event) => event is PeerTerminalError),
+          woken: events.any((event) => event is PeerSessionDown),
+        );
+        await eventsSub.cancel();
         await mechanisms.release();
         relay.dispose();
         await runtime.dispose();

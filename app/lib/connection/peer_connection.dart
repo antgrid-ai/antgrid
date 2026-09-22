@@ -29,48 +29,44 @@ class ConnectionBlockedException implements Exception {
 /// the whole ladder.
 const Duration _kEstablishTimeout = Duration(seconds: 20);
 
-/// Native payload and independent central-control mechanisms for one machine.
+/// Native payload mechanisms and central-control dialer for one machine.
 /// A required, enrollment-scoped [PeerConnector] establishes the payload;
-/// [MachineSession] owns E2E and host project streams, while fresh token minting
-/// authenticates the separate central-control connection.
+/// [MachineSession] owns E2E and host project streams.
 ///
 /// Every member is a single attempt with no retry of its own — the supervisor
 /// is the only thing that decides when to try again.
-class PeerConnectionMechanisms
-    implements PeerConnectionContract, CentralControlMechanisms {
+class PeerConnectionMechanisms implements PeerConnectionContract {
   PeerConnectionMechanisms({
-    required RelayService relay,
     required CryptoService crypto,
     required String machineDeviceId,
-    required DeviceIdentity identity,
     required String phoneDeviceId,
     required List<int> phoneEd25519Seed,
-    required int epoch,
     required Future<ConnCoords?> Function() resolveCoords,
-    required Future<String> Function() mintToken,
     SessionHandshaker Function(String agentEd25519PubB64)? buildHandshaker,
+    this.diagnostic,
     required this.peerRuntime,
   }) : _buildHandshaker = buildHandshaker,
-       _relay = relay,
        _crypto = crypto,
        _machineDeviceId = machineDeviceId,
-       _identity = identity,
        _phoneDeviceId = phoneDeviceId,
        _phoneEd25519Seed = phoneEd25519Seed,
-       _epoch = epoch,
-       _resolveCoords = resolveCoords,
-       _mintToken = mintToken;
+       _resolveCoords = resolveCoords;
 
   final PeerConnector peerRuntime;
+  final PeerLinkDiagnostic? diagnostic;
   final _attempt = PeerConnectionAttempt();
+  final _events = StreamController<PeerConnectionEvent>.broadcast(sync: true);
+  Future<void>? _releasePending;
   PeerLink? _payloadLink;
+  PeerLink? _closingPayloadLink;
   PeerLink? _sessionLink;
   StreamSubscription<PeerLinkFailure>? _peerFailureSub;
   bool _runtimeRetained = false;
   int _dialGeneration = 0;
   PeerLink get payloadLink =>
       _payloadLink ?? (throw StateError("Native payload is not connected"));
-  void Function()? onTerminalPeerError;
+  @override
+  Stream<PeerConnectionEvent> get events => _events.stream;
 
   void noteResume() {
     detached('PeerRuntime', 'resume authorization', () async {
@@ -78,39 +74,11 @@ class PeerConnectionMechanisms
     });
   }
 
-  Future<void>? _centralPending;
-  String? _centralUrl;
-  @override
-  bool get centralControlNeedsReconnect =>
-      _relay.currentState.connectionState !=
-          RelayConnectionState.authenticated ||
-      _centralUrl != _lastCoords?.relayUrl;
-  @override
-  Future<void> reconnectCentral(ConnCoords coords) async {
-    final token = await _mintFreshToken();
-    final pending = _centralPending;
-    if (pending != null) return pending;
-    _centralUrl = coords.relayUrl;
-    await (_centralPending = _relay
-        .connect(
-          coords.relayUrl,
-          _identity,
-          licenseToken: token,
-          epoch: _epoch,
-          machineDeviceId: _machineDeviceId,
-        )
-        .whenComplete(() => _centralPending = null));
-  }
-
-  final RelayService _relay;
   final CryptoService _crypto;
   final String _machineDeviceId;
-  final DeviceIdentity _identity;
   final String _phoneDeviceId;
   final List<int> _phoneEd25519Seed;
-  final int _epoch;
   final Future<ConnCoords?> Function() _resolveCoords;
-  final Future<String> Function() _mintToken;
 
   /// A test seam — production passes nothing and gets [AppSessionHandshaker].
   /// Exists because the handshake is the only way to reach the teardowns that
@@ -141,45 +109,42 @@ class PeerConnectionMechanisms
   ConnCoords? _lastCoords;
 
   /// Reports a relay-shaped error code that no rung failure can express, so the
-  /// owner of the policy can block on it. Wired by [RelayConnection] to the
+  /// owner of the policy can block on it. Wired by `MachineConnection` to the
   /// supervisor's `noteRelayError`; unset until then.
   ///
   /// A step that throws is scored as an ordinary rung failure, and rung
   /// failures are only ever backed off. Without this, a verdict raised OUTSIDE
   /// the native ladder (a token mint the account rejected) is retried on the 30s cap
   /// forever and the caller waiting on the session sees only a timeout.
-  void Function(String code)? onTerminalAuthError;
 
   /// The agent handed this machine's E2E session to another device (sealed
-  /// `session-takeover`). Wired by [RelayConnection] to the supervisor's
+  /// `session-takeover`). Wired by `MachineConnection` to the supervisor's
   /// `noteSessionTakenOver`; unset until then.
   ///
   /// Without it the ladder would see only "session down", re-handshake, and the
   /// two devices would evict each other forever.
-  void Function()? onSessionTakenOver;
 
   /// The [MachineSession] was REPLACED (not merely torn down) because the
   /// coords step came back with a different agent pin. Wired by
-  /// [RelayConnection] to its `sessionReplacements` stream; unset until then.
+  /// `MachineConnection` to its `sessionReplacements` stream; unset until then.
   ///
   /// Disposing the old session disposes every [StreamTransport] hanging off it
   /// — i.e. exactly the objects the transport provider handed to each project
   /// on this machine. Nothing else observes the swap: the connection is neither
   /// added nor removed, so `connectionChanges` stays silent, and
-  /// `onSessionDown` goes only to the supervisor. Without this the focused
+  /// The typed session-down event goes only to the supervisor. Without this
+  /// the focused
   /// project recovers on Retry (which invalidates its own family entry) while
   /// every other warm project on the machine keeps a disposed transport whose
   /// RPCs can never complete.
-  void Function()? onSessionReplaced;
 
   /// The E2E session died under a still-live native payload (a rekey the agent never
-  /// confirmed). Wired by [RelayConnection] to the supervisor's
+  /// confirmed). Wired by `MachineConnection` to the supervisor's
   /// `noteSessionDown`; unset until then.
   ///
   /// Nothing else reports it: the native payload stays connected, so no
   /// state event fires, and without this the `established` rung would keep
   /// reading satisfied off a session that has already been torn down.
-  void Function()? onSessionDown;
 
   /// The machine's single E2E session, or null before the first payload connection / after a
   /// [release]. Deliberately survives a central reconnect: the project [StreamTransport]s
@@ -193,15 +158,6 @@ class PeerConnectionMechanisms
     final coords = await _resolveCoords();
     if (coords != null) _lastCoords = coords;
     return coords;
-  }
-
-  Future<String> _mintFreshToken() async {
-    try {
-      return await _mintToken();
-    } on DeviceRevokedException {
-      onTerminalAuthError?.call('LICENSE_REVOKED');
-      rethrow;
-    }
   }
 
   @override
@@ -222,7 +178,7 @@ class PeerConnectionMechanisms
       try {
         final link = await runtime.connect(
           attempt: _attempt,
-          relay: _relay,
+          diagnostic: diagnostic,
           machineDeviceId: _machineDeviceId,
           machinePublicKey: coords.agentEd25519PubB64,
         );
@@ -240,9 +196,9 @@ class PeerConnectionMechanisms
           // Only the native payload died, so the central relay's state stream
           // reports nothing and the ladder has to be woken from here.
           if (!failure.retryable) {
-            onTerminalPeerError?.call();
+            _emit(const PeerTerminalError());
           } else {
-            onSessionDown?.call();
+            _emit(const PeerSessionDown());
           }
         });
         await _ensureSession(coords.agentEd25519PubB64);
@@ -250,13 +206,13 @@ class PeerConnectionMechanisms
         if (error.cancelled || generation != _dialGeneration) {
           throw ConnectionAttemptCancelled();
         }
-        if (error.terminal) onTerminalPeerError?.call();
+        if (error.terminal) _emit(const PeerTerminalError());
         rethrow;
       } on PeerAuthorizationDenied {
-        onTerminalPeerError?.call();
+        _emit(const PeerTerminalError());
         rethrow;
       } on FormatException {
-        onTerminalPeerError?.call();
+        _emit(const PeerTerminalError());
         rethrow;
       }
     }
@@ -307,16 +263,38 @@ class PeerConnectionMechanisms
   @override
   bool get sessionEstablished => _session?.isEstablished ?? false;
 
+  void _emit(PeerConnectionEvent event) {
+    if (!_events.isClosed) _events.add(event);
+  }
+
   @override
-  Future<void> release() async {
+  void fenceDispatch() {
     _dialGeneration++;
     _attempt.cancel();
+    final payload = _payloadLink;
+    if (payload != null) unawaited(payload.close());
+  }
+
+  @override
+  Future<void> release() => _releasePending ??= _release().whenComplete(() {
+    unawaited(_events.close());
+  });
+
+  Future<void> _release() async {
+    fenceDispatch();
     await _peerFailureSub?.cancel();
     _peerFailureSub = null;
     final payload = _payloadLink;
     _payloadLink = null;
+    _closingPayloadLink = payload;
     _sessionLink = null;
-    if (payload != null) await payload.close();
+    try {
+      if (payload != null) await payload.close();
+    } finally {
+      if (identical(_closingPayloadLink, payload)) {
+        _closingPayloadLink = null;
+      }
+    }
     if (_runtimeRetained) {
       peerRuntime.release();
       _runtimeRetained = false;
@@ -327,7 +305,6 @@ class PeerConnectionMechanisms
     await _payloadDownSub?.cancel();
     _payloadDownSub = null;
     _lastCoords = null;
-    _centralUrl = null;
     if (session != null) {
       await session.dispose();
       // dispose() zeroizes the Dart-side keys; the installed native cipher
@@ -336,10 +313,12 @@ class PeerConnectionMechanisms
     }
     // Guarded, not merely idempotent: `disconnect()` emits a state event, which
     // feeds another evaluation, which releases again — an unguarded call loops.
-    if (_relay.currentState.connectionState !=
-        RelayConnectionState.disconnected) {
-      _relay.disconnect();
-    }
+  }
+
+  @override
+  Future<void> forceClose() async {
+    fenceDispatch();
+    await (_payloadLink ?? _closingPayloadLink)?.close();
   }
 
   Future<MachineSession> _ensureSession(String agentEd25519PubB64) async {
@@ -367,7 +346,7 @@ class PeerConnectionMechanisms
       }
       // After the dispose, so a listener that rebuilds a transport off this
       // signal cannot observe the half-torn-down session it is replacing.
-      onSessionReplaced?.call();
+      _emit(const PeerSessionReplaced());
     }
     final session = MachineSession(
       relay: payloadLink,
@@ -394,11 +373,11 @@ class PeerConnectionMechanisms
     // copy is reachable from here or nowhere.
     session.takeoverEvents.listen((_) {
       retireNativeE2eCipherKeys();
-      onSessionTakenOver?.call();
+      _emit(const PeerSessionTakenOver());
     });
     session.sessionDownEvents.listen((_) {
       retireNativeE2eCipherKeys();
-      onSessionDown?.call();
+      _emit(const PeerSessionDown());
     });
     // The common one, and the only one with no event of its own: the session
     // tears down on exactly this transition (its `_onState`), so watching the
@@ -407,13 +386,66 @@ class PeerConnectionMechanisms
     _payloadDownSub = payloadLink.payloadStateStream.listen((s) {
       if (s == PeerLinkState.closed) {
         retireNativeE2eCipherKeys();
-        onSessionDown?.call();
+        _emit(const PeerSessionDown());
       }
     });
     session.start();
     _sessionPin = agentEd25519PubB64;
     _sessionLink = payloadLink;
     return _session = session;
+  }
+}
+
+class RelayCentralControlDialer implements CentralControlContract {
+  RelayCentralControlDialer({
+    required this.relay,
+    required this.machineDeviceId,
+    required this.identity,
+    required this.epoch,
+    required this.mintToken,
+  });
+
+  final RelayService relay;
+  final String machineDeviceId;
+  final DeviceIdentity identity;
+  final int epoch;
+  final Future<String> Function() mintToken;
+  final _authErrors = StreamController<String>.broadcast(sync: true);
+  String? _connectedUrl;
+
+  @override
+  Stream<String> get authErrorStream => _authErrors.stream;
+
+  @override
+  bool get needsReconnect =>
+      relay.currentState.connectionState != RelayConnectionState.authenticated;
+
+  @override
+  Future<void> connect(ConnCoords coords) async {
+    final String token;
+    try {
+      token = await mintToken();
+    } on DeviceRevokedException {
+      if (!_authErrors.isClosed) _authErrors.add('LICENSE_REVOKED');
+      rethrow;
+    }
+    _connectedUrl = coords.relayUrl;
+    await relay.connect(
+      coords.relayUrl,
+      identity,
+      licenseToken: token,
+      epoch: epoch,
+      machineDeviceId: machineDeviceId,
+    );
+    if (_connectedUrl != coords.relayUrl) {
+      throw ConnectionAttemptCancelled();
+    }
+  }
+
+  @override
+  void disconnect() {
+    _connectedUrl = null;
+    relay.disconnect();
   }
 }
 

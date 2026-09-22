@@ -1,4 +1,4 @@
-import 'package:antgrid/connection/relay_mechanisms.dart'
+import 'package:antgrid/connection/peer_connection.dart'
     show ConnectionBlockedException;
 import 'package:antgrid/connection/supervisor_state.dart';
 import 'package:antgrid/screens/workspace_shell.dart'

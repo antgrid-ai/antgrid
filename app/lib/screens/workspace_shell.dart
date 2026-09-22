@@ -13,7 +13,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart'
     show LocalTransportHandshakeException, RelayConnectionState, RpcException;
 
-import '../connection/relay_mechanisms.dart' show ConnectionBlockedException;
+import '../connection/peer_connection.dart' show ConnectionBlockedException;
 import '../connection/supervisor_state.dart'
     show BlockReason, Blocked, SupervisorStatus;
 import '../constants/breakpoints.dart';
@@ -61,6 +61,7 @@ import '../services/sessions_service.dart'
 import '../util/ab_log.dart';
 import '../util/detached.dart';
 import '../utils/notification_routing.dart';
+import '../widgets/ab_status_helpers.dart';
 import '../utils/platform_utils.dart';
 import '../widgets/agent_panel.dart';
 import '../widgets/handler/handler_why.dart' show handlerFallbackQuestion;
@@ -3246,13 +3247,8 @@ Object? workspaceBlockingError({
 /// A block reached while the providers were still resolving is unaffected: it
 /// arrives as a thrown [ConnectionBlockedException] above, where there is no
 /// established workspace to preserve and every reason must be stated.
-bool _takesOverMidSession(BlockReason reason) => switch (reason) {
-  BlockReason.sessionTakenOver ||
-  BlockReason.deviceRevoked ||
-  BlockReason.peerRejected ||
-  BlockReason.licenseExpired => true,
-  BlockReason.handshakeFailing => false,
-};
+bool _takesOverMidSession(BlockReason reason) =>
+    blockReasonPresentation(reason).interruptsWorkspace;
 
 /// Shown for whatever [workspaceBlockingError] returns, which is EITHER of two
 /// sources — a reader who checks only the first will conclude this screen
@@ -3292,52 +3288,12 @@ class _LocalLaunchErrorScreen extends StatelessWidget {
     // one has a different user action, so none of them may collapse into the
     // generic "agent failed to start" bucket below.
     if (e is ConnectionBlockedException) {
-      return switch (e.reason) {
-        BlockReason.deviceRevoked => (
-          headline: 'the relay would not accept this device',
-          // LICENSE_INVALID covers far more than a revoked device: a token the
-          // relay cannot verify (wrong issuer — a build pointed at the wrong
-          // LICENSE_API_URL) and a malformed one land here alongside
-          // LICENSE_REVOKED. So the copy has to be true for every cause while
-          // still naming the one action that fixes the common ones.
-          tip:
-              'The relay rejected this device\'s access token — it was '
-              'revoked, it no longer matches your plan, or this build is '
-              'pointed at a different server. Check you are signed in on the '
-              'right account, then sign out and back in to re-provision this '
-              'device and Retry.',
-          retryLabel: 'retry',
-        ),
-        BlockReason.licenseExpired => (
-          // LICENSE_EXPIRED is the relay's verdict for "no active plan", which
-          // an account that never subscribed hits too — so no "renew your
-          // subscription" framing.
-          headline: 'this account can\'t reach machines remotely',
-          tip:
-              'The relay declined this connection\'s access token. Sign in '
-              'again on this device to mint a fresh one, or check that your '
-              'plan includes remote access, then Retry.',
-          retryLabel: 'retry',
-        ),
-        BlockReason.sessionTakenOver => (
-          headline: 'another device took over this agent',
-          tip: 'Another of your devices took over this agent.',
-          retryLabel: 'take back',
-        ),
-        BlockReason.handshakeFailing => (
-          headline: 'the encrypted session could not be established',
-          tip:
-              'The agent answered but the E2E handshake kept failing — usually '
-              'a host that re-provisioned its identity. Retry; if it persists, '
-              'forget the machine and pair it again.',
-          retryLabel: 'retry',
-        ),
-        BlockReason.peerRejected => (
-          headline: 'the remote connection was rejected',
-          tip: 'Check device access and the remote machine before retrying.',
-          retryLabel: 'retry',
-        ),
-      };
+      final presentation = blockReasonPresentation(e.reason);
+      return (
+        headline: presentation.workspaceHeadline,
+        tip: presentation.workspaceTip,
+        retryLabel: presentation.retryLabel,
+      );
     }
     // A bridge that answered and refused the verb. NOT_ALLOWED is the blanket
     // refusal while the machine's remote-access switch is off — only that
