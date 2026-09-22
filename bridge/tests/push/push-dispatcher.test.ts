@@ -209,8 +209,7 @@ test("arming one slot never silences another", () => {
     notificationType: "question", message: "Which env?", sessionId: "t2", projectId: "p1",
   }));
   // Not `origin: "agent"`, so this one is the bridge speaking — "Workspace is
-  // ready" and the Handler's own wrap-up have exactly this shape, and an armed
-  // slot must not swallow either.
+  // ready" has exactly this shape and an armed slot must not swallow it.
   d.onOutbound(createMessage("notification:push", {
     notificationType: "task_complete", message: "done", sessionId: "t1", projectId: "p1",
   }));
@@ -219,11 +218,8 @@ test("arming one slot never silences another", () => {
 });
 
 // ── An armed session's turn ends belong to the Handler ──
-// Arming means the user asked to be out of the loop turn by turn. The agent's own
-// task_complete fires on EVERY turn of a supervised run, so forwarding it buzzes
-// the phone for each step of work nobody wanted stepwise, and then again with the
-// wrap-up. The Handler's producers — wrap-up, escalation, park notice — cover
-// every way the run can actually end.
+// The agent's task_complete fires on EVERY turn of a supervised run; the
+// Handler's wrap-up, escalation and park notice cover every way one can end.
 
 const turnEnd = (over: Record<string, unknown> = {}) => createMessage("notification:push", {
   notificationType: "task_complete", message: "built", sessionId: "t1", projectId: "p1",
@@ -245,21 +241,16 @@ test("an unarmed slot keeps its turn end", () => {
 });
 
 test("an armed slot with an empty backlog keeps its turn end", () => {
-  // The 1-tap arm before a goal is stated. `allTerminal` is false for an empty
-  // backlog, so maybeWrapUp never fires and no wrap-up push is coming — dropping
-  // this one would leave the session silent for good, which is the one failure
-  // this suppression must not have. `handlerOwnsCompletion` is exactly that
-  // distinction, which is why it is not `isHandlerArmed`.
+  // The 1-tap arm before a goal is stated: `allTerminal` is false for an empty
+  // backlog, so no wrap-up is coming and dropping this would silence it for good.
   const { d, delivered } = harness({ isHandlerArmed: () => true, handlerOwnsCompletion: () => false });
   d.onOutbound(turnEnd());
   expect(delivered).toHaveLength(1);
 });
 
 test("the Handler's own pushes survive on the slot they are armed on", () => {
-  // Both ride `notification:push` as `task_complete` on the armed terminalId,
-  // exactly like the agent's turn end (engine.ts sendPush). `origin` is the only
-  // thing separating them, so a suppression keyed on the type alone would delete
-  // the wrap-up and the park notice — the two announcements arming promises.
+  // Both ride `notification:push` as `task_complete` on the armed terminalId, so
+  // `origin` is the only thing keeping a type-keyed drop off the wrap-up itself.
   const { d, delivered } = harness({ handlerOwnsCompletion: () => true });
   d.onOutbound(createMessage("notification:push", {
     notificationType: "task_complete", message: "Every item resolved.", sessionId: "t1", projectId: "p1",
@@ -276,9 +267,8 @@ test("suppression is per slot and leaves the other kinds alone", () => {
     handlerOwnsCompletion: (id) => { asked.push(id); return id === "t1"; },
   });
   d.onOutbound(turnEnd({ sessionId: "t2" }));
-  // A block is NOT suppressed here: api-server already drops some of these from
-  // the /handler-event channel while still pushing them, so the Handler may never
-  // have been told, and dropping it would bury the block outright.
+  // Blocks are NOT suppressed: api-server drops some from the /handler-event
+  // channel while still pushing them, so the Handler may never have been told.
   d.onOutbound(turnEnd({ notificationType: "awaiting_input", message: "Approve?" }));
   expect(asked).toEqual(["t2"]);
   expect(delivered).toHaveLength(2);

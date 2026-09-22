@@ -261,11 +261,8 @@ test("the armed-slot mirror follows every handler:status the engine emits", asyn
 });
 
 test("owning a session's completion needs a backlog, not just an arm", async () => {
-  // The push dispatcher drops the agent's own turn-end only for a slot whose
-  // Handler will announce the work finishing itself. That announcement is the
-  // wrap-up, and `allTerminal` is false for an EMPTY backlog — so the 1-tap arm
-  // below, still waiting for its goal, never reaches one. Answering on the arm
-  // alone would leave such a session silent for the rest of its life.
+  // The turn-end drop needs a wrap-up to be coming, and `allTerminal` is false
+  // for an EMPTY backlog — so a 1-tap arm must not answer true.
   const { bus, sent } = await wire();
   await arm(bus, sent, "t1");
   expect(core!.isHandlerArmed("t1")).toBe(true);

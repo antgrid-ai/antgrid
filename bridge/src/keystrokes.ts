@@ -63,31 +63,11 @@ export function hasTypedContent(data: string): boolean {
   return data.replace(/\r$/, "").length > 0;
 }
 
-/** The prefix every agent CLI reserves for its own commands. */
-const COMMAND_PREFIX = "/";
-
-/**
- * Whether a `terminal:input` payload OPENS one of the agent CLI's own commands
- * rather than a prompt — its content begins with `/`.
- *
- * A CLI answers `/compact`, `/clear`, `/new`, `/model`, `/status` and their
- * siblings ITSELF, running no model turn, so none of the turn-END hooks the
- * keystroke inference is paired with ever fires for one. Measured, not assumed:
- * codex fires neither its `notify` argv nor its Stop hook for `/compact`,
- * `/new` or `/status`, while an ordinary prompt fires both. Inferring a start
- * from one opened a turn nothing could ever close.
- *
- * Only the FIRST content frame of a composer line can answer this — a PTY
- * delivers one keystroke per frame, so every frame after it carries the middle
- * of a line. work-status.ts classifies the line once, on that frame, and keeps
- * the answer until the line is submitted (see `typedSessions`). The cost of
- * reading only the opening character is a line that STARTED `/` and was then
- * edited into a prompt: it stays classified as a command, so its turn goes
- * unlit until the turn-end arrives — the cheap direction, and the reason the
- * classification is never revisited mid-line.
- */
+/** Whether the payload opens one of the CLI's own `/` commands rather than a
+ *  prompt: the CLI answers those itself, running no model turn, so no turn-end
+ *  hook ever fires to close a turn inferred from one. */
 export function opensCommandLine(data: string): boolean {
-  return !isTerminalReport(data) && data.startsWith(COMMAND_PREFIX);
+  return data.startsWith("/");
 }
 
 /**

@@ -294,10 +294,8 @@ export class ProjectCore {
   }
 
   /** The user typed into [sessionId]'s PTY — the only "I answered" signal a
-   *  terminal-mode session has. Clears its block; claims a turn only for an
-   *  agent that can't report its own turn starts, and only when the session has
-   *  a typed PROMPT to submit — one of the CLI's own `/` commands runs no model
-   *  turn and so has no turn-end to close what it opened. See {@link userReply}. */
+   *  terminal-mode session has. Claims a turn only for an agent that cannot
+   *  report its own starts, and only for a typed PROMPT. See {@link userReply}. */
   noteUserReply(
     sessionId: string,
     opts: { submitted: boolean; typed: boolean; command?: boolean },
@@ -345,10 +343,8 @@ export class ProjectCore {
     this.commitWork(closeTurn(this._work, sessionId));
   }
 
-  /** An injected hook reported [sessionId]'s turn as over on a channel that
-   *  files no notification of its own — the backstop for the single turn-end
-   *  notification a terminal session otherwise depends on. See
-   *  {@link hookTurnEnd}. */
+  /** A hook reported [sessionId]'s turn over on a channel that files no
+   *  notification — the second closer. See {@link hookTurnEnd}. */
   noteHookTurnEnd(sessionId: string): void {
     this.commitWork(hookTurnEnd(this._work, sessionId));
   }

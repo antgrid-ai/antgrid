@@ -5,7 +5,7 @@ import { z } from "zod";
 import { logger } from "./logger";
 import { resolveAbDir } from "./antgrid-dir";
 const log = logger.child({ component: "api-server" });
-import { createMessage, type AbMessage } from "./protocol";
+import { agentNotification, createMessage, type AbMessage } from "./protocol";
 import { AGENTS, BY_HOOK_NAME } from "./agent-runtime";
 import type { TerminalManager } from "./terminal-manager";
 import type { AbConfig } from "./config";
@@ -449,11 +449,10 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
         // Stale on turn 1 only — /session-title races this post and resolves
         // async, but the title is conversation-level and stable from turn 2 on.
         const sessionTitle = terminalId ? ctx.sessionName?.(terminalId) : undefined;
-        ctx.sendAb(createMessage("notification:push", {
+        ctx.sendAb(agentNotification({
           notificationType: type,
           message,
           sessionTitle,
-          origin: "agent",
           // Unresolved on purpose: this is whatever slot the hook was stamped
           // with, and only the SessionManager knows which ids are sessions.
           sessionId: terminalId,

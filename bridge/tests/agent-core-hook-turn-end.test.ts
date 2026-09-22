@@ -1,12 +1,6 @@
-// A terminal session's turn is opened by keystroke inference and was closed by
-// exactly one thing: a turn-end NOTIFICATION. codex's other turn-end channel —
-// the `notify` argv, which posts /handler-event turn_end and fires
-// independently of its Stop hook — reached the Handler engine and nothing else,
-// so an enter that dismissed a TUI menu rather than starting a model turn opened
-// a turn nothing would ever close and the session read "working" until it
-// stopped. Every unit around this passes against a stubbed callback; only a real
-// core proves the api-server's event reaches the work reduction at all.
-// Modelled on agent-core-question-latch.test.ts.
+// Every unit around this passes against a stubbed callback; only a real core
+// proves the api-server's turn_end reaches the work reduction and not just the
+// Handler engine. Modelled on agent-core-question-latch.test.ts.
 import { test, expect, beforeEach, afterEach, afterAll } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -64,9 +58,8 @@ async function waitFor(pred: () => boolean, timeoutMs = 3000): Promise<boolean> 
   return pred();
 }
 
-/** Every `onHookTurnEnd` / `onHookChannelLost` the core raised. Recorded rather
- *  than asserted through a work status because the callbacks ARE the wiring
- *  under test; a fake slot has no `session:updated` to read a status off. */
+/** Every `onHookTurnEnd` / `onHookChannelLost` the core raised — the callbacks
+ *  ARE the wiring under test, and a fake slot has no status to read instead. */
 async function wire(): Promise<{ turnEnds: string[]; lost: string[]; port: number }> {
   const folder = mkdtempSync(join(tmpdir(), "antgrid-hook-turn-end-proj-"));
   writeFileSync(join(folder, "antgrid.yaml"), "name: test-hook-turn-end\nagent:\n  tool: codex\n");
@@ -106,9 +99,8 @@ test("a turn_end hook event reaches the work reduction, not just the Handler", a
 });
 
 test("turn_failed does NOT close the turn", async () => {
-  // A transient StopFailure is claude parking for the Handler to nudge it, and
-  // it withholds its notification for exactly that reason (claudeStopFailureEvent).
-  // Closing here would take the dot down on a session still being managed.
+  // A transient StopFailure is claude parking for the Handler to nudge it, so
+  // closing here would take the dot down on a session still being managed.
   const { turnEnds, port } = await wire();
   expect((await post(port, { terminalId: "t1", agent: "claude", event: "turn_failed" })).status).toBe(200);
   // Ordered behind a turn_end for the same slot, so this cannot pass merely by
@@ -119,10 +111,8 @@ test("turn_failed does NOT close the turn", async () => {
 });
 
 test("a runId-less post from an UNKNOWN slot is not a channel loss", async () => {
-  // `acceptsHookRun` refuses a runId-less post only from a slot the manager
-  // holds; an unknown one never had an identity (a service PTY, a config
-  // `terminals:` entry). Writing its hooks off would mark a session blind on
-  // the strength of a post that was never about a session.
+  // An unknown slot never had an identity (a service PTY, a config `terminals:`
+  // entry), so writing its hooks off would blind a session on a post about none.
   const { lost, turnEnds, port } = await wire();
   expect((await post(port, { terminalId: "t1", agent: "codex", event: "turn_end" })).status).toBe(200);
   expect(await waitFor(() => turnEnds.includes("t1"))).toBe(true);

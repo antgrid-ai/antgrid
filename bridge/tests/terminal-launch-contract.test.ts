@@ -78,10 +78,8 @@ describe("terminal adapter launch contract", () => {
   });
 
   it("a /hook-alive ping undoes an invalidation the probe only guessed at", async () => {
-    // The drift probe writes a session off before its hooks have necessarily
-    // had any reason to run. A ping is proof they do, and nothing else ever
-    // reconsiders — left as-is the session stayed marked blind (no titles, no
-    // notifications, Handler unavailable) for as long as it ran.
+    // The probe writes a session off before its hooks have had reason to run. A
+    // ping is proof they do, and nothing else ever reconsiders one.
     const f = fixture();
     const observation = { notifications: true, titles: true, handler: true, turnStart: false, turnEnd: true, hookAlive: true };
     prepare = () => ({ command: "owned-runtime", invocationKind: "exec", args: [], env: {}, resumed: false,

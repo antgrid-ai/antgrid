@@ -727,11 +727,9 @@ test("a submitted prompt on an already-working session is a no-op (SAME object)"
 // ── The CLI's own commands are not prompts ───────────────────────────────────
 
 test("a submitted slash command does NOT open a turn", () => {
-  // `/compact`, `/clear`, `/new`, `/model`… are answered by the CLI itself and
-  // run no model turn, so neither turn-end channel ever fires for one. Measured
-  // against a real codex: an ordinary prompt fires its `notify` argv, `/compact`,
-  // `/new` and `/status` fire nothing. Inferring a start from one wedged the
-  // session on "working" for the rest of its life.
+  // Measured against a real codex: an ordinary prompt fires its `notify` argv,
+  // `/compact`, `/new` and `/status` fire nothing, so a start inferred from one
+  // wedged the session on "working" for the rest of its life.
   const idle = fold([sessions(1, { tool: "codex" })]);
   // One keystroke per frame: the `/` that opens the line, then the rest of it.
   const slash = userReply(idle, "r0", { typed: true, command: true });
@@ -840,8 +838,7 @@ test("a hook turn-end with nothing open is a no-op (SAME object)", () => {
 
 test("a session whose hook channel died stops inferring turn starts", () => {
   // The set is recomputed from the agent's STATIC spec on every session list, so
-  // without a durable mark the bridge kept inferring starts for a session whose
-  // only closer it had just written off.
+  // without a durable mark the loss is undone by the next one.
   const live = fold([sessions(1, { tool: "codex" })]);
   const dead = noteHookChannelLost(live, "r0");
   expect(dead.keystrokeTurnSessions.has("r0")).toBe(false);
@@ -858,9 +855,8 @@ test("losing the hook channel closes the turn that channel was going to close", 
 });
 
 test("losing the hook channel does NOT close a turn the agent announced itself", () => {
-  // Only a keystroke-inferred turn was opened on the strength of the dead
-  // channel. Claude's is a real /turn-start, and calling that work finished on
-  // the word of a probe would be the bridge inventing an end.
+  // Only a keystroke-inferred turn rode on the dead channel; claude's is a real
+  // /turn-start, and ending it on a probe's word would be inventing an end.
   const working = fold([sessions(1, { tool: "claude-code" }), turnStartFrame("r0")]);
   expect(working.status).toBe("working");
   expect(noteHookChannelLost(working, "r0").status).toBe("working");

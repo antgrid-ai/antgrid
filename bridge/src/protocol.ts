@@ -1069,18 +1069,11 @@ const NotificationPushMessage = BaseMessage.extend({
   // (notification_routing.dart).
   sessionId: z.string().optional(),
   projectId: z.string().optional(),
-  // WHO reported this — the agent itself, as opposed to the bridge speaking
-  // about the agent. The two are indistinguishable by shape: the Handler's
-  // wrap-up and its park notice are both `task_complete` on the armed slot, as
-  // is "Workspace is ready". Only the agent's own turn-end may be dropped when
-  // the Handler has taken over announcing the work (see push-dispatcher.ts), and
-  // absent must mean "keep it", so this marks the suppressible half rather than
-  // its exceptions: a producer added later and never marked stays audible.
-  //
-  // Deliberately NOT hand-mirrored into the app's NotificationPushMessage,
-  // unlike `sessionTitle`/`sessionId` above — nothing on the wire's far side
-  // reads it, and the push layer that does runs before the frame is sealed.
-  // Appended LAST so every key an older app already reads keeps its position.
+  // WHO reported this: the agent itself, not the bridge speaking about it — the
+  // two are one shape, and the Handler's wrap-up is `task_complete` on the slot
+  // it is armed on (see push-dispatcher.ts). Absent must mean "keep it", so this
+  // marks the suppressible half. Stamped by {@link agentNotification}, not by
+  // hand. Not mirrored in the app — nothing on the far side reads it.
   origin: z.literal("agent").optional(),
 });
 
@@ -3383,6 +3376,15 @@ export function createMessage<T extends AbMessage["type"]>(
     ...(CHECKOUT_VARIABLE_MESSAGE_TYPES.has(type) && !("checkoutId" in payload) ? { checkoutId: "main" } : {}),
     ...payload,
   } as Extract<AbMessage, { type: T }>;
+}
+
+/** A `notification:push` the AGENT reported about itself (see `origin` on
+ *  NotificationPushMessage). A constructor rather than a stamped field because
+ *  forgetting the field fails silently — safely, but with no test to catch it. */
+export function agentNotification(
+  payload: Omit<MessagePayload<"notification:push">, "origin">,
+): Extract<AbMessage, { type: "notification:push" }> {
+  return createMessage("notification:push", { ...payload, origin: "agent" });
 }
 
 /**

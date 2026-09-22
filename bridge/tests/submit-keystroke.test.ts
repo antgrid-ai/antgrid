@@ -178,9 +178,8 @@ test("a slash anywhere but the front is ordinary content", () => {
   expect(opensCommandLine("\x1b[A")).toBe(false);
 });
 
-// Same exclusion hasTypedContent makes, for the same reason: the viewer's VT
-// engine writes on this channel too, and nothing it wrote is a line the user
-// opened.
+// The viewer's VT engine writes on this channel too, and nothing it wrote is a
+// line the user opened.
 test("a pointer report never opens a command line", () => {
   expect(opensCommandLine("\x1b[<0;12;5M")).toBe(false);
   expect(opensCommandLine("\x1b[I")).toBe(false);
