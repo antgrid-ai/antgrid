@@ -16,8 +16,10 @@ export class AuthorizationLease {
   private generation = 0;
   private policyGeneration = -1n;
   private pending: Promise<boolean> | null = null;
-  private timer: ReturnType<typeof setTimeout> | null = null;
+  private cancelExpiry: (() => void) | null = null;
+  private cancelRefresh: (() => void) | null = null;
   private stopped = false;
+  private transientFailures = 0;
 
   constructor(
     private readonly identity: EnrollmentIdentity,
@@ -25,6 +27,12 @@ export class AuthorizationLease {
     private readonly onInvalidated: (reason: LeaseFailure) => void,
     private readonly onSnapshot: (snapshot: PeerAuthorizationSnapshot) => void = () => {},
     private readonly now: () => number = () => performance.now(),
+    private readonly random: () => number = Math.random,
+    private readonly schedule: (callback: () => void, ms: number) => () => void = (callback, ms) => {
+      const timer = setTimeout(callback, ms);
+      timer.unref?.();
+      return () => clearTimeout(timer);
+    },
   ) {}
 
   get current(): PeerAuthorizationSnapshot | null {
@@ -47,6 +55,8 @@ export class AuthorizationLease {
   refresh(): Promise<boolean> {
     if (this.stopped) return Promise.resolve(false);
     if (this.pending) return this.pending;
+    this.cancelRefresh?.();
+    this.cancelRefresh = null;
     const generation = this.generation;
     const started = this.now();
     const operation = (async () => {
@@ -54,7 +64,31 @@ export class AuthorizationLease {
       // that enrolls for an origin and then refuses every snapshot carrying it
       // kills its own transport at startup, and a rejected parse surfaces as a
       // Zod dump under PEER_TRANSPORT_UNAVAILABLE rather than a scheme refusal.
-      const parsed = AcceptedAuthorizationSnapshotSchema.parse(await this.request());
+      const remaining = this.snapshot ? Math.max(0, this.deadline - started) : 10_000;
+      const timeoutMs = Math.min(10_000, remaining);
+      if (timeoutMs <= 0) {
+        this.invalidate("expired");
+        return false;
+      }
+      let cancelTimeout: () => void = () => {};
+      let response: unknown;
+      try {
+        response = await Promise.race([
+          this.request(),
+          new Promise<never>((_, reject) => {
+            cancelTimeout = this.schedule(() => reject(new Error("AUTHORIZATION_TIMEOUT")), timeoutMs);
+          }),
+        ]);
+      } catch (error) {
+        if (this.stopped || generation !== this.generation) return false;
+        const valid = this.snapshot !== null && this.now() < this.deadline;
+        if (valid) this.scheduleTransientRetry();
+        if (valid) return true;
+        throw error;
+      } finally {
+        cancelTimeout();
+      }
+      const parsed = AcceptedAuthorizationSnapshotSchema.parse(response);
       if (this.stopped || generation !== this.generation) return false;
       if (parsed.accountId !== this.identity.accountId || parsed.deviceId !== this.identity.deviceId ||
           parsed.enrollmentId !== this.identity.enrollmentId) {
@@ -81,9 +115,15 @@ export class AuthorizationLease {
       }
       this.snapshot = parsed;
       this.deadline = deadline;
-      if (this.timer) clearTimeout(this.timer);
-      this.timer = setTimeout(() => this.invalidate("expired"), Math.max(0, deadline - this.now()));
-      this.timer.unref?.();
+      this.transientFailures = 0;
+      this.cancelExpiry?.();
+      this.cancelExpiry = this.schedule(() => this.invalidate("expired"), Math.max(0, deadline - this.now()));
+      const acceptedDuration = deadline - started;
+      const refreshAt = started + acceptedDuration / 3 * (0.9 + this.random() * 0.2);
+      this.cancelRefresh = this.schedule(() => {
+        this.cancelRefresh = null;
+        void this.refresh().catch(() => {});
+      }, Math.max(0, refreshAt - this.now()));
       // Session owners synchronously recheck each peer before dispatch resumes.
       this.onSnapshot(parsed);
       return true;
@@ -103,9 +143,26 @@ export class AuthorizationLease {
     this.generation++;
     this.snapshot = null;
     this.deadline = 0;
-    if (this.timer) clearTimeout(this.timer);
-    this.timer = null;
+    this.cancelExpiry?.();
+    this.cancelExpiry = null;
+    this.cancelRefresh?.();
+    this.cancelRefresh = null;
     if (reason === "closed") this.stopped = true;
     this.onInvalidated(reason);
+  }
+
+  private scheduleTransientRetry(): void {
+    const ceiling = Math.min(5_000, 500 * 2 ** this.transientFailures++);
+    const delay = ceiling / 2 + this.random() * ceiling / 2;
+    const remaining = this.deadline - this.now();
+    if (remaining <= 0) {
+      this.invalidate("expired");
+      return;
+    }
+    this.cancelRefresh?.();
+    this.cancelRefresh = this.schedule(() => {
+      this.cancelRefresh = null;
+      void this.refresh().catch(() => {});
+    }, Math.min(delay, remaining));
   }
 }

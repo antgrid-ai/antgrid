@@ -7,7 +7,7 @@ export interface RemoteHostConnection extends Pick<PeerSessionOwner,
   "hasEstablishedSession" | "anySessionSupportsCheckoutRouting" | "sendOnChannel" |
   "noteStreamBound" | "send"> {
   connect(): void;
-  close(): void;
+  close(): Promise<void>;
   redialWithFreshToken(): void;
   sendPushDeliver(message: Parameters<CentralControlClient["sendPushDeliver"]>[0]): void;
   noteResume(): Promise<boolean>;

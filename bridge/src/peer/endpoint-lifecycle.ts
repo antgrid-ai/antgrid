@@ -26,6 +26,7 @@ export class EndpointLifecycle<T> {
   private backoff = 1_000;
   private readyAt = 0;
   private retiring: Promise<void> | null = null;
+  private stopping: Promise<void> | null = null;
   private restartRequested = false;
 
   constructor(private readonly options: EndpointLifecycleOptions<T>) {}
@@ -61,14 +62,20 @@ export class EndpointLifecycle<T> {
     this.restart();
   }
 
-  stop(): void {
+  stop(): Promise<void> {
+    if (this.stopping) return this.stopping;
     this.wanted = false;
     this.generation++;
     this.restartRequested = false;
     this.cancelRetry?.();
     this.cancelRetry = null;
     this.setState("stopped");
-    void this.retire().catch(() => {});
+    const running = this.running;
+    this.stopping = Promise.all([
+      this.retire(),
+      running ?? Promise.resolve(),
+    ]).then(() => undefined);
+    return this.stopping;
   }
 
   private setState(state: EndpointState, reason?: string): void {

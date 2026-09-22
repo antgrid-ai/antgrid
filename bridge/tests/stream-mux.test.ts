@@ -38,7 +38,7 @@ function makeTransport(peers: Map<string, PeerSessionView> = new Map()) {
 }
 
 function peerView(peerId: string, checkoutRouting: boolean): PeerSessionView {
-  return { peerId, peerPubkey: `pub-${peerId}`, checkoutRouting, reachable: true, pullsTree: true };
+  return { peerId, peerPubkey: `pub-${peerId}`, checkoutRouting, pullsTree: true };
 }
 
 describe("StreamMux (unit, stub transport)", () => {
@@ -420,17 +420,15 @@ function establish(): { client: TestPeerSessionOwner; sent: Array<string | Buffe
   const phoneEd = ed25519Pair();
   const sent: Array<string | Buffer> = [];
   const client = new TestPeerSessionOwner({
-    url: "ws://127.0.0.1:1",
     identity: {
       deviceId: AGENT_DEVICE_ID, deviceName: "agent", createdAt: new Date().toISOString(),
       ed25519PublicKey: "unused", ed25519PrivateKey: agentEd.seedB64,
     },
     generateKeypair: generateEphemeralKeypair,
-    getLicenseToken: () => "tok",
   });
   clients.push(client);
   (client as any).phoneEd25519ByDeviceId.set(PHONE_ID, phoneEd.pubB64);
-  (client as any).sendPayload = (p: string | Buffer) => sent.push(p);
+  client.setNativeWriter((p) => { sent.push(p); return true; });
   (client as any).ws = { readyState: WebSocket.OPEN, send: (d: string) => sent.push(d), close: () => {} };
 
   const app = generateEphemeralKeypair();

@@ -22,7 +22,6 @@ export function installFakeSession(
     sessionKeys: { a2p: Buffer.alloc(32), p2a: Buffer.alloc(32), confirm: Buffer.alloc(32) },
     peerId,
     checkoutRouting: false,
-    reachable: true,
     unreachableSince: 0,
     lastSealedRecvAt: Date.now(),
     missedPongs: 0,

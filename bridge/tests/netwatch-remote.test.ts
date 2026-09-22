@@ -86,7 +86,6 @@ describe("Netwatch.ingestRemote", () => {
 /** A paired, handshake-complete client whose socket and seal are inert. */
 function makeClient(open: () => string | null, onMessage?: (m: AbMessage) => void): TestPeerSessionOwner {
   const c = new TestPeerSessionOwner({
-    url: "ws://127.0.0.1:1",
     identity: {
       deviceId: "dev-1",
       deviceName: "machine",
@@ -97,7 +96,6 @@ function makeClient(open: () => string | null, onMessage?: (m: AbMessage) => voi
     generateKeypair: () => {
       throw new Error("not used");
     },
-    getLicenseToken: () => "token",
     onMessage,
   });
   installFakeSession(c, "phone-1", {

@@ -3,6 +3,7 @@ import type { Channel } from "../src/message-bus";
 import type { RemoteHostConnection } from "../src/remote-host-connection";
 import type { NativeHostOptions } from "../src/peer/native-host-connection";
 import type { EphemeralKeypair } from "../src/key-exchange";
+import type { QueuedAppFrame, PendingSinkWrite } from "../src/send-scheduler";
 import {
   PeerSessionOwner,
   type PeerSession,
@@ -13,9 +14,25 @@ import {
 /** Native-neutral E2E fixture. It exercises the payload/session layer directly;
  * central WebSocket behavior belongs in CentralControlClient tests. */
 export class TestPeerSessionOwner extends PeerSessionOwner {
-  constructor(opts: PeerSessionOwnerOptions | NativeHostOptions) { super(opts); }
+  private writer: ((payload: string | Buffer, to: string, channel?: Channel, kind?: FrameKind,
+    diagnosticType?: string, streamId?: string) => boolean) = () => false;
 
-  protected override payloadTransport(): "iroh" { return "iroh"; }
+  constructor(opts: PeerSessionOwnerOptions) { super(opts); }
+
+  protected override sendNativePayload(payload: string | Buffer, to: string, channel?: Channel, kind?: FrameKind,
+    diagnosticType?: string, streamId?: string): boolean {
+    return this.writer(payload, to, channel, kind, diagnosticType, streamId);
+  }
+
+  protected override sendNativeScheduled(sealed: Buffer, peerId: string, _frame: QueuedAppFrame): number | null | PendingSinkWrite {
+    return this.writer(sealed, peerId, _frame.channel, FrameKind.sealed, _frame.type, _frame.streamId)
+      ? sealed.length : null;
+  }
+
+  setNativeWriter(writer: (payload: string | Buffer, to: string, channel?: Channel, kind?: FrameKind,
+    diagnosticType?: string, streamId?: string) => boolean): void {
+    this.writer = writer;
+  }
 
   injectRoutedFrame(
     payload: Uint8Array,
@@ -41,33 +58,14 @@ export class TestPeerSessionOwner extends PeerSessionOwner {
   markPeerOnline(peerId: string): void {
     if (this.isForeignSlot(peerId)) return;
     this.backfillPeerPubkey(peerId);
-    const session = this.sessions.get(peerId);
-    if (session) {
-      session.reachable = true;
-      session.unreachableSince = 0;
-      session.lastSealedRecvAt = Date.now();
-      session.missedPongs = 0;
-      this.mux.notifyPeerOnline();
-    }
-    this.opts.onPeerOnline?.(peerId);
   }
 
   markPeerOffline(peerId: string): void {
     if (this.isForeignSlot(peerId)) return;
-    const session = this.sessions.get(peerId);
-    if (session) {
-      this.recordQueueDrop("peer-offline", session.scheduler.clear(), peerId);
-      if (session.reachable) {
-        session.reachable = false;
-        session.unreachableSince = Date.now();
-      }
-    }
-    this.mux.notifyPeerSessionOffline(peerId);
-    this.notifyOfflineIfLast();
-    this.opts.onPeerOffline?.(peerId);
+    this.dropSession(peerId);
   }
 
-  close(): void { this.disposeSessions(); }
+  async close(): Promise<void> { this.disposeSessions(); }
 
   static forTest(opts: {
     generateKeypair: () => EphemeralKeypair;
@@ -91,8 +89,7 @@ export class TestPeerSessionOwner extends PeerSessionOwner {
       halfOpenMs: opts.halfOpenMs,
       ...opts.options,
     });
-    (client as unknown as { sendPayload: (payload: string | Buffer, to: string) => boolean }).sendPayload =
-      (payload, to) => { opts.sendPayload(payload, to); return true; };
+    client.setNativeWriter((payload, to) => { opts.sendPayload(payload, to); return true; });
     if (opts.creditBatchBytes !== undefined) {
       (client as unknown as { creditBatchBytes: number }).creditBatchBytes = opts.creditBatchBytes;
     }
@@ -106,11 +103,18 @@ export class TestPeerSessionOwner extends PeerSessionOwner {
 
 
 export class TestRemoteHostConnection extends TestPeerSessionOwner implements RemoteHostConnection {
+  readonly hostOptions?: NativeHostOptions;
+
+  constructor(options: PeerSessionOwnerOptions | NativeHostOptions) {
+    super("native" in options ? options.native : options);
+    if ("native" in options) this.hostOptions = options;
+  }
+
   connect(): void {}
   redialWithFreshToken(): void {}
   sendPushDeliver(): void {}
   noteResume(): Promise<boolean> { return Promise.resolve(false); }
   recheckAuthorization(): void {}
 }
-export { fragmentForSend, MAX_APP_SESSIONS, UNREACHABLE_SESSION_TTL_MS } from "../src/peer-session-owner";
+export { fragmentForSend, MAX_APP_SESSIONS } from "../src/peer-session-owner";
 export type { PeerSession, PendingAttempt };

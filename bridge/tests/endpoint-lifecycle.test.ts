@@ -29,7 +29,12 @@ test("stop fences late creation without starting a listener", async () => {
   const pending = Promise.withResolvers<number>(); let closed = 0, listening = 0;
   const owner = new EndpointLifecycle({ create: () => pending.promise, listen: async () => { listening++; },
     retire: async () => { closed++; }, terminal: () => false });
-  owner.start(); owner.start(); owner.stop(); pending.resolve(1); await flush();
+  owner.start(); owner.start();
+  const stopped = owner.stop();
+  expect(owner.stop()).toBe(stopped);
+  let settled = false; void stopped.then(() => { settled = true; });
+  await flush(); expect(settled).toBe(false);
+  pending.resolve(1); await stopped;
   expect(closed).toBe(1); expect(listening).toBe(0); expect(owner.state).toBe("stopped");
 });
 test("restart retires previous listener before replacement and terminal failure blocks", async () => {

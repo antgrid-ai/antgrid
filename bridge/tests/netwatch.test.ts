@@ -84,7 +84,6 @@ function makeClient(
   overrides: { open?: (b: Buffer) => string | null; readyState?: number } = {},
 ): TestPeerSessionOwner {
   const c = new TestPeerSessionOwner({
-    url: "ws://127.0.0.1:1",
     identity: {
       deviceId: "dev-1",
       deviceName: "machine",
@@ -95,7 +94,6 @@ function makeClient(
     generateKeypair: () => {
       throw new Error("not used");
     },
-    getLicenseToken: () => "token",
   });
   installFakeSession(c, "phone-1", {
     transport: {

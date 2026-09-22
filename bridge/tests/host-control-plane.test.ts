@@ -99,7 +99,7 @@ test("control plane heartbeats the current relayUrl on authenticate (keeps inven
     // Invoke the onAuthenticated closure built in startRemoteControlPlane.
     const client = (host as any).controlPlaneRelay;
     expect(client).not.toBeNull();
-    await client.opts.onAuthenticated();
+    await client.hostOptions.central.onAuthenticated();
 
     const hb = calls.find((c) => c.url.endsWith("/account/devices/me/heartbeat"));
     expect(hb).toBeDefined();
@@ -148,14 +148,9 @@ test("mobile-access:set immediately pushes a heartbeat reflecting the new state"
   }
 });
 
-test("onPeerOnline re-advertises to a revived session (no fresh handshake fires)", async () => {
-  // Regression test: a peer that goes away and comes back keeps its session —
-  // it is marked unreachable and revived on `peer-online`, so it never resends
-  // client-hello and onHandshakeComplete doesn't re-fire. Any
-  // readvertiseToControlPlane() call that raced the unreachable window used to
-  // silently no-op, with nothing to correct it until an unrelated project:start
-  // forced a full recompute. onPeerOnline re-advertises the moment the session
-  // is reachable again, closing that window.
+test("native handshake re-advertises to the established session", async () => {
+  // The native handshake is the first point at which the app can consume the
+  // advert, so it must trigger a fresh snapshot for that session.
   host = createHostPolicyFixture({
     remote: fakeRemoteConfig(),
     remoteRuntimeFactory: () => Promise.resolve(fakeRuntime()),
@@ -180,7 +175,9 @@ test("onPeerOnline re-advertises to a revived session (no fresh handshake fires)
   // again (→ phonePubkey via phoneEd25519ByDeviceId) before the callback fires.
   installFakeSession(client, "phone-1");
   (client as any).phoneEd25519ByDeviceId.set("phone-1", "pub-1");
-  client.opts.onPeerOnline?.("phone-1");
+  client.hostOptions.native.onHandshakeComplete?.({
+    checkoutRouting: true, pullsTree: true, terminalFramesV1: true, peerId: "phone-1",
+  });
 
   const advert = delivered.find((m) => m.type === "agent:projects");
   expect(advert).toBeDefined();

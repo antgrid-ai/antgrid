@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { FrameKind, MAX_FRAME_PAYLOAD, PEER_ALPN, PEER_REFRESH_MS, RouteHeader, decodeRouteFrame, encodeRouteFrame } from "antgrid-wire";
+import { FrameKind, MAX_FRAME_PAYLOAD, PEER_ALPN, RouteHeader, decodeRouteFrame, encodeRouteFrame } from "antgrid-wire";
 import type { Connection, Endpoint, Incoming } from "@number0/iroh";
 import { CentralControlClient, type CentralControlOptions } from "../central-control-client";
 import { baseSlotDeviceId } from "../relay-slot";
@@ -13,12 +13,24 @@ import { PeerSessionOwner, type PeerSessionOwnerOptions, MAX_APP_SESSIONS } from
 import { EndpointLifecycle, EndpointFailure } from "./endpoint-lifecycle";
 import type { RemoteHostConnection } from "../remote-host-connection";
 import { frameIdFor } from "../netwatch";
+import { AdmissionRegistry, type AdmissionReservation } from "./admission-registry";
 
-export interface NativeHostOptions extends PeerSessionOwnerOptions, CentralControlOptions {
+export interface NativePeerOptions extends PeerSessionOwnerOptions {
   enrollment: EnrollmentIdentity;
   endpointSecret: string;
   licenseApiUrl: string;
+  getLicenseToken: () => Promise<string> | string;
   remoteAccessEnabled: () => boolean;
+  lifecycle?: {
+    now?: () => number;
+    random?: () => number;
+    schedule?: (callback: () => void, ms: number) => () => void;
+  };
+}
+
+export interface NativeHostOptions {
+  central: CentralControlOptions;
+  native: NativePeerOptions;
 }
 
 export function evalIrohBindAddress(
@@ -31,34 +43,32 @@ export function evalIrohBindAddress(
   }
   return value;
 }
-interface NativePeer {
+interface NativePeerContext {
   connection: Connection;
   endpointId: string;
   registrationGeneration: string;
-  records: PeerRecords;
-  handshakeTimer: ReturnType<typeof setTimeout>;
+  records?: PeerRecords;
+  handshakeTimer?: ReturnType<typeof setTimeout>;
+  authorizedHello?: { attemptId: string; admitted: boolean };
+  retired: boolean;
   acceptedAt: number;
 }
 
 /** Central inventory and native payloads share host-owned project bindings. */
 export class NativePeerSessions extends PeerSessionOwner {
-  private readonly nativePeers = new Map<string, NativePeer>();
-  private readonly authorizedHellos = new Map<string, { attemptId: string; admitted: boolean }>();
+  private readonly nativePeers = new Map<string, NativePeerContext>();
   private readonly lifecycle: EndpointLifecycle<Endpoint>;
-  private readonly admittingPeers = new Set<string>();
+  private readonly admissions = new AdmissionRegistry(4);
   private readonly enrollment: EndpointEnrollment;
   private readonly lease: AuthorizationLease;
-  private refreshTimer: ReturnType<typeof setInterval> | null = null;
   private lifetime = 0;
   private stopped = false;
-  private pendingAdmissions = 0;
   private admissionGeneration = 0;
   private approvedRelays = "";
+  private closing: Promise<void> | null = null;
 
-  constructor(private readonly nativeOpts: NativeHostOptions) {
+  constructor(private readonly nativeOpts: NativePeerOptions) {
     super(nativeOpts);
-    nativeOpts.payloadSink = { send: (...args) => this.sendNativePayload(...args),
-      sendScheduled: (...args) => this.sendNativeScheduled(...args) };
     if (!nativeOpts.identity.ed25519PrivateKey) throw new Error("Endpoint enrollment requires device identity");
     this.lifecycle = new EndpointLifecycle({
       create: () => this.startEndpoint(),
@@ -72,6 +82,7 @@ export class NativePeerSessions extends PeerSessionOwner {
         error instanceof z.ZodError || error instanceof EndpointApiError && [401, 403, 409].includes(error.status),
       changed: (state, reason) => this.recordDiagnostic({ dir: "event", kind: "lifecycle", transport: "iroh",
         msgType: "peer:endpoint-state", detail: { state, ...(reason ? { reason } : {}) } }),
+      ...nativeOpts.lifecycle,
     });
     this.enrollment = new EndpointEnrollment(nativeOpts.enrollment, nativeOpts.endpointSecret,
       nativeOpts.identity.ed25519PrivateKey, nativeOpts.licenseApiUrl, nativeOpts.getLicenseToken);
@@ -85,7 +96,7 @@ export class NativePeerSessions extends PeerSessionOwner {
       (reason) => this.invalidatePeerConnections(reason), () => {
         this.recheckAuthorization();
         this.reconcileRelays();
-      });
+      }, nativeOpts.lifecycle?.now, nativeOpts.lifecycle?.random, nativeOpts.lifecycle?.schedule);
   }
 
   connect(): void {
@@ -100,11 +111,6 @@ export class NativePeerSessions extends PeerSessionOwner {
       this.lease.invalidate("rotated");
       throw new EndpointFailure("LOCAL_ENDPOINT_ROTATED", true);
     }
-    if (this.refreshTimer) clearInterval(this.refreshTimer);
-    this.refreshTimer = setInterval(() => {
-      if (this.sessions.size || this.nativePeers.size) void this.lease.refresh().catch(() => {});
-    }, PEER_REFRESH_MS);
-    this.refreshTimer.unref?.();
     const native = await import("@number0/iroh/index.js");
     if (this.stopped) throw new EndpointFailure("ENDPOINT_STOPPED");
     const builder = native.Endpoint.builder();
@@ -140,46 +146,48 @@ export class NativePeerSessions extends PeerSessionOwner {
       const incoming = await endpoint.acceptNext();
       if (!incoming) return;
       if (this.stopped || lifetime !== this.lifetime || !this.nativeOpts.remoteAccessEnabled() ||
-          this.nativePeers.size >= MAX_APP_SESSIONS || this.pendingAdmissions >= 4) {
+          this.nativePeers.size >= MAX_APP_SESSIONS) {
         await incoming.refuse(); continue;
       }
-      void this.admitIncoming(incoming, lifetime);
+      const reservation = this.admissions.reserve();
+      if (!reservation) { await incoming.refuse(); continue; }
+      void this.admitIncoming(incoming, lifetime, reservation);
     }
   }
 
   private recordAdmissionCounts(): void {
     this.recordDiagnostic({ dir: "event", kind: "lifecycle", transport: "iroh", msgType: "peer:admissions",
-      detail: { pending: this.pendingAdmissions, active: this.nativePeers.size, generation: this.admissionGeneration } });
+      detail: { pending: this.admissions.size, active: this.nativePeers.size, generation: this.admissions.currentGeneration } });
   }
 
-  private async admitIncoming(incoming: Incoming, lifetime: number): Promise<void> {
-    this.pendingAdmissions++;
+  private async admitIncoming(incoming: Incoming, lifetime: number, reservation: AdmissionReservation): Promise<void> {
     this.recordAdmissionCounts();
     const generation = this.admissionGeneration;
     let retired = false;
     let connection: Connection | undefined;
     const connecting = Promise.resolve().then(() => incoming.accept()).then((accepting) => accepting.connect()).then((value) => {
-      if (retired || this.stopped || generation !== this.admissionGeneration || lifetime !== this.lifetime) {
+      if (retired || !reservation.current || this.stopped || generation !== this.admissionGeneration || lifetime !== this.lifetime) {
         value.close(1n, []);
         throw new EndpointFailure("ADMISSION_RETIRED");
       }
       return value;
     });
     try {
-      connection = await deadline(connecting, () => { retired = true; });
+      connection = await deadline(connecting, () => { retired = true; }, this.nativeOpts.lifecycle?.schedule);
       await this.acceptPeer(connection);
     } catch (error) {
       connection?.close(error instanceof EndpointApiError && [401, 403].includes(error.status) ? 3n : 1n, []);
     } finally {
       // Uncancellable Connecting futures continue occupying their bounded slot.
       await connecting.catch(() => {});
-      this.pendingAdmissions--;
+      reservation.release();
       this.recordAdmissionCounts();
     }
   }
 
   private async acceptPeer(connection: Connection): Promise<void> {
-    const startedAt = performance.now();
+    const now = this.nativeOpts.lifecycle?.now ?? performance.now.bind(performance);
+    const startedAt = now();
     const generation = this.admissionGeneration;
     const close = () => connection.close(3n, []);
     if (!Buffer.from(connection.alpn()).equals(Buffer.from(PEER_ALPN))) { connection.close(2n, []); return; }
@@ -189,25 +197,33 @@ export class NativePeerSessions extends PeerSessionOwner {
     if (!device || !this.nativeOpts.remoteAccessEnabled()) { close(); return; }
     const peerId = `${device.deviceId}#${this.deviceId}`;
     // A concurrent native connection must not create a second session writer.
-    if (this.sessions.has(peerId) || this.pending.has(peerId) || this.nativePeers.has(peerId) || this.admittingPeers.has(peerId) ||
-        this.nativePeers.size + this.admittingPeers.size >= MAX_APP_SESSIONS) { connection.close(1n, []); return; }
-    this.admittingPeers.add(peerId);
+    if (this.sessions.has(peerId) || this.pending.has(peerId) || this.nativePeers.has(peerId) ||
+        this.nativePeers.size >= MAX_APP_SESSIONS) { connection.close(1n, []); return; }
+    const peer: NativePeerContext = { connection, endpointId, registrationGeneration: device.endpoint!.generation,
+      retired: false, acceptedAt: now() };
+    this.nativePeers.set(peerId, peer);
+    let stream;
     try {
-    const stream = await deadline(connection.acceptBi(), () => connection.close(1n, []));
+      stream = await deadline(connection.acceptBi(), () => connection.close(1n, []), this.nativeOpts.lifecycle?.schedule);
+    } catch (error) {
+      this.retirePeer(peerId, "connection-lost");
+      throw error;
+    }
     if (this.stopped || generation !== this.admissionGeneration || !this.nativeOpts.remoteAccessEnabled() || !this.lease.allows(device.deviceId, endpointId) ||
-        this.sessions.has(peerId) || this.pending.has(peerId) || this.nativePeers.has(peerId)) { close(); return; }
+        this.sessions.has(peerId) || this.pending.has(peerId) || this.nativePeers.get(peerId) !== peer) {
+      this.retirePeer(peerId, "connection-lost"); return;
+    }
     const records = new PeerRecords(stream, () => this.authorized(peerId, endpointId), (reason) => {
-      if (this.nativePeers.get(peerId)?.records === records) this.dropNativePeer(peerId, reason);
+      if (this.nativePeers.get(peerId)?.records === records) this.retirePeer(peerId, reason);
     });
     const handshakeTimer = setTimeout(() => {
       if (!this.sessions.has(peerId)) records.close();
     }, 30_000);
     handshakeTimer.unref?.();
-    const peer: NativePeer = { connection, endpointId, registrationGeneration: device.endpoint!.generation, records, handshakeTimer,
-      acceptedAt: performance.now() };
-    this.nativePeers.set(peerId, peer);
+    peer.records = records;
+    peer.handshakeTimer = handshakeTimer;
     this.recordDiagnostic({ dir: "event", kind: "lifecycle", transport: "iroh", msgType: "peer:native-accepted",
-      detail: { elapsedMs: performance.now() - startedAt } });
+      detail: { elapsedMs: now() - startedAt } });
     void connection.acceptBi().then(() => records.close("protocol-violation"), () => {});
     void connection.acceptUni().then(() => records.close("protocol-violation"), () => {});
     void connection.closed().then(() => {
@@ -225,7 +241,6 @@ export class NativePeerSessions extends PeerSessionOwner {
         }
       } catch { records.close("protocol-violation"); }
     })();
-    } finally { this.admittingPeers.delete(peerId); }
   }
 
   private authorized(peerId: string, endpointId?: string): boolean {
@@ -247,9 +262,7 @@ export class NativePeerSessions extends PeerSessionOwner {
   recheckAuthorization(): void {
     for (const peerId of new Set([...this.sessions.keys(), ...this.pending.keys(), ...this.nativePeers.keys()])) {
       if (!this.authorized(peerId, this.nativePeers.get(peerId)?.endpointId)) {
-        this.dropNativePeer(peerId, "unauthorized");
-        this.dropSession(peerId);
-        this.tearDownPending(peerId);
+        this.retirePeer(peerId, "unauthorized");
       }
     }
   }
@@ -261,21 +274,22 @@ export class NativePeerSessions extends PeerSessionOwner {
     });
   }
 
-  private dropNativePeer(peerId: string, reason: PeerRecordFailure = "connection-lost"): void {
+  private retirePeer(peerId: string, reason: PeerRecordFailure = "connection-lost"): void {
     const peer = this.nativePeers.get(peerId);
-    if (!peer) return;
+    if (!peer || peer.retired) return;
+    peer.retired = true;
     this.nativePeers.delete(peerId);
-    clearTimeout(peer.handshakeTimer);
+    if (peer.handshakeTimer) clearTimeout(peer.handshakeTimer);
     peer.connection.close(reason === "unauthorized" ? 3n : reason === "protocol-violation" ? 2n : 1n, []);
-    peer.records.close(reason);
-    this.dropSession(peerId, "iroh");
+    peer.records?.close(reason);
+    super.dropSession(peerId, "iroh");
     this.tearDownPending(peerId);
   }
 
   private dropAllPeers(reason: PeerRecordFailure = "unauthorized"): void {
     this.admissionGeneration++;
-    this.authorizedHellos.clear();
-    for (const peerId of [...this.nativePeers.keys()]) this.dropNativePeer(peerId, reason);
+    this.admissions.retireGeneration();
+    for (const peerId of [...this.nativePeers.keys()]) this.retirePeer(peerId, reason);
     for (const peerId of [...this.sessions.keys()]) this.dropSession(peerId);
     for (const peerId of [...this.pending.keys()]) this.tearDownPending(peerId);
   }
@@ -285,13 +299,11 @@ export class NativePeerSessions extends PeerSessionOwner {
     this.dropAllPeers(reason === "resume" ? "connection-lost" : "unauthorized");
   }
 
-  protected override payloadTransport(_peerId?: string): "iroh" { return "iroh"; }
-
   protected override onSessionEstablished(peerId: string): void {
     const peer = this.nativePeers.get(peerId);
     if (!peer) return;
     this.recordDiagnostic({ dir: "event", kind: "lifecycle", transport: "iroh", msgType: "peer:e2e-established",
-      detail: { elapsedMs: performance.now() - peer.acceptedAt } });
+      detail: { elapsedMs: (this.nativeOpts.lifecycle?.now ?? performance.now.bind(performance))() - peer.acceptedAt } });
   }
 
   protected override receiveRoutedFrame(payload: Uint8Array, from: string, channel: Channel, kind: FrameKind): void {
@@ -308,17 +320,17 @@ export class NativePeerSessions extends PeerSessionOwner {
       hello = z.object({ type: z.literal("handshake:client-hello"), attemptId: z.string().min(1).max(256) })
         .parse(JSON.parse(Buffer.from(payload).toString("utf8")));
     } catch { return; }
-    const previous = this.authorizedHellos.get(from);
+    const nativePeer = this.nativePeers.get(from);
+    if (!nativePeer || nativePeer.retired) return;
+    const previous = nativePeer.authorizedHello;
     if (previous?.attemptId === hello.attemptId) {
       if (previous.admitted) super.handleHandshakeFrame(payload, from, frameId, bytes);
       return;
     }
-    if (!previous && this.authorizedHellos.size >= 4) return;
     const attempt = { attemptId: hello.attemptId, admitted: false };
-    const nativePeer = this.nativePeers.get(from);
-    this.authorizedHellos.set(from, attempt);
+    nativePeer.authorizedHello = attempt;
     void this.lease.refresh().then((allowed) => {
-      if (!allowed || this.stopped || this.authorizedHellos.get(from) !== attempt ||
+      if (!allowed || this.stopped || nativePeer.authorizedHello !== attempt ||
           this.nativePeers.get(from) !== nativePeer || !this.authorized(from, nativePeer?.endpointId)) return;
       attempt.admitted = true;
       super.handleHandshakeFrame(payload, from, frameId, bytes);
@@ -326,8 +338,7 @@ export class NativePeerSessions extends PeerSessionOwner {
   }
 
   protected override dropSession(peerId: string, transport = this.payloadTransport(peerId)): void {
-    if (this.nativePeers.has(peerId)) { this.dropNativePeer(peerId); return; }
-    this.authorizedHellos.delete(peerId);
+    if (this.nativePeers.has(peerId)) { this.retirePeer(peerId); return; }
     super.dropSession(peerId, transport);
   }
 
@@ -336,10 +347,10 @@ export class NativePeerSessions extends PeerSessionOwner {
     return { pub: peer && verify(peer.ed25519Pub) ? peer.ed25519Pub : undefined, known: peer ? 1 : 0 };
   }
 
-  private sendNativeScheduled(sealed: Buffer, peerId: string, frame: QueuedAppFrame): number | null | PendingSinkWrite {
+  protected override sendNativeScheduled(sealed: Buffer, peerId: string, frame: QueuedAppFrame): number | null | PendingSinkWrite {
     if (!this.authorized(peerId, this.nativePeers.get(peerId)?.endpointId)) return null;
     const peer = this.nativePeers.get(peerId);
-    if (!peer) return null;
+    if (!peer?.records) return null;
     const session = this.sessions.get(peerId);
     const record = encodeRouteFrame({ type: "message", to: peerId, channel: frame.channel }, sealed, FrameKind.sealed);
     return { bytes: sealed.length, completed: peer.records.send(record, () =>
@@ -350,11 +361,11 @@ export class NativePeerSessions extends PeerSessionOwner {
     }) };
   }
 
-  private sendNativePayload(data: Buffer | string, to: string, channel: Channel = "control", kind: FrameKind = FrameKind.sealed,
+  protected override sendNativePayload(data: Buffer | string, to: string, channel: Channel = "control", kind: FrameKind = FrameKind.sealed,
     diagnosticType = "transport", streamId?: string): boolean {
     if (!this.authorized(to, this.nativePeers.get(to)?.endpointId)) return false;
     const peer = this.nativePeers.get(to);
-    if (!peer) return false;
+    if (!peer?.records) return false;
     const payload = typeof data === "string" ? Buffer.from(data) : data;
     const record = encodeRouteFrame({ type: "message", to, channel }, payload, kind);
     void peer.records.send(record).then((outcome) => {
@@ -370,15 +381,15 @@ export class NativePeerSessions extends PeerSessionOwner {
       detail: { routeBytes, recordBytes: routeBytes + 4, lengthPrefixBytes: 4 } });
   }
 
-  close(): void {
+  close(): Promise<void> {
+    if (this.closing) return this.closing;
     this.stopped = true;
     this.lifetime++;
-    if (this.refreshTimer) clearInterval(this.refreshTimer);
-    this.refreshTimer = null;
     this.lease.invalidate("closed");
     this.enrollment.close();
-    this.lifecycle.stop();
     this.disposeSessions();
+    this.closing = this.lifecycle.stop();
+    return this.closing;
   }
 }
 
@@ -388,19 +399,21 @@ export class NativeHostConnection implements RemoteHostConnection {
   readonly peers: NativePeerSessions;
   readonly central: CentralControlClient;
   constructor(options: NativeHostOptions) {
-    this.peers = new NativePeerSessions(options);
+    this.peers = new NativePeerSessions(options.native);
     this.central = new CentralControlClient({
-      url: options.url, identity: options.identity, abDir: options.abDir,
-      getLicenseToken: options.getLicenseToken, pairedPhones: options.pairedPhones,
-      autoReconnect: options.autoReconnect, onError: options.onError,
-      onAuthenticated: options.onAuthenticated, onDisconnected: options.onDisconnected,
+      ...options.central,
       onPeerPolicyChanged: (generation) => this.peers.notePolicyGeneration(generation),
-      onAuthRevoked: () => { this.peers.invalidateAuthorization(); options.onAuthRevoked?.(); },
+      onAuthRevoked: () => { this.peers.invalidateAuthorization(); options.central.onAuthRevoked?.(); },
     });
   }
   get deviceId() { return this.peers.deviceId; }
   connect(): void { if (this.closed) return; this.central.connect(); this.peers.connect(); }
-  close(): void { if (this.closed) return; this.closed = true; this.peers.close(); this.central.close(); }
+  close(): Promise<void> {
+    if (this.closed) return this.peers.close();
+    this.closed = true;
+    this.central.close();
+    return this.peers.close();
+  }
   redialWithFreshToken(): void { this.central.redialWithFreshToken(); }
   sendPushDeliver(message: Parameters<CentralControlClient["sendPushDeliver"]>[0]): void { this.central.sendPushDeliver(message); }
   setBus(...args: Parameters<NativePeerSessions["setBus"]>) { return this.peers.setBus(...args); }
@@ -416,12 +429,14 @@ export class NativeHostConnection implements RemoteHostConnection {
   recheckAuthorization(): void { this.peers.recheckAuthorization(); }
 }
 
-async function deadline<T>(operation: Promise<T>, cancel: () => void): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
+async function deadline<T>(operation: Promise<T>, cancel: () => void,
+  schedule: (callback: () => void, ms: number) => () => void = (callback, ms) => {
+    const timer = setTimeout(callback, ms); timer.unref?.(); return () => clearTimeout(timer);
+  }): Promise<T> {
+  let cancelTimer: (() => void) | undefined;
   try {
     return await Promise.race([operation, new Promise<never>((_, reject) => {
-      timer = setTimeout(() => { cancel(); reject(new Error("Native admission timed out")); }, 5_000);
-      timer.unref?.();
+      cancelTimer = schedule(() => { cancel(); reject(new Error("Native admission timed out")); }, 5_000);
     })]);
-  } finally { if (timer) clearTimeout(timer); }
+  } finally { cancelTimer?.(); }
 }

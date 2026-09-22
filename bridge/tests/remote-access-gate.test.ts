@@ -14,7 +14,7 @@ import { generateEphemeralKeypair } from "../src/key-exchange";
 
 /** One established app session, as the relay transport would report it. */
 function session(peerPubkey: string, peerId = "app-dev#machine-dev"): PeerSessionView {
-  return { peerId, peerPubkey, checkoutRouting: true, reachable: true, pullsTree: true };
+  return { peerId, peerPubkey, checkoutRouting: true, pullsTree: true };
 }
 
 function tunnelResponses(frames: object[]): object[] {
@@ -357,10 +357,8 @@ test("peer-online backfills the peer pubkey from the phone store (empty map)", a
   // A fresh TestPeerSessionOwner simulates the post-restart state: phoneEd25519ByDeviceId
   // starts empty (it's in-memory, never persisted).
   const client = new TestPeerSessionOwner({
-    url: "ws://127.0.0.1:1",
     identity: { deviceId: "agent-dev", deviceName: "agent-dev", createdAt: new Date().toISOString() },
     generateKeypair: () => generateEphemeralKeypair(),
-    getLicenseToken: () => "tok",
     pairedPhones: store,
   });
 

@@ -21,9 +21,8 @@ export interface ProjectCoreRemoteDeps {
    *  peer sessions and allocate its streamId. */
   attachStream(bus: MessageBus, opts: AttachStreamOpts): StreamHandle;
   /** Every app device that currently holds an E2E session with this machine —
-   *  the push dispatcher's live-device list, and the fan-out this stream feeds.
-   *  A session outlives its relay presence (see {@link PeerSessionView.reachable}),
-   *  which is what keeps push aimed at the device that just walked away. */
+   *  the push dispatcher's authorized-device list, and the fan-out this stream
+   *  feeds. Central presence does not own or mutate these native sessions. */
   establishedPeers(): PeerSessionView[];
   /** One device's session by route address, or null when it holds none. The
    *  core asks this of the device a frame ARRIVED on, so every per-device answer
@@ -628,7 +627,7 @@ export class ProjectCore {
     const dispatcher = createPushDispatcher({
       projectId: core.projectId,
       machineUuid: () => remote.machineDeviceId(),
-      // Fire when NO attached client can receive in-band: no reachable session
+      // Fire when NO attached client can receive in-band: no native session
       // at all, OR every client that has declared a focus state is backgrounded
       // (`appFocusPaused` is that conjunction, so one device in the user's hand
       // keeps push quiet while its backgrounded sibling would not). NOT
@@ -641,9 +640,9 @@ export class ProjectCore {
       isHandlerArmed: (terminalId) => core.isHandlerArmed(terminalId),
       // Target every registered phone that CANNOT receive this in band right
       // now, which is the question push actually answers. A device is in band
-      // only while it holds a reachable session AND that session's client has
-      // not backgrounded itself; anything else — no session, an unreachable one,
-      // a reaped one, a backgrounded one — is a push target. Asking it per
+      // only while it holds an established native session AND that session's
+      // client has not backgrounded itself; anything else — no session, a
+      // retired one, a backgrounded one — is a push target. Asking it per
       // device is what keeps a sibling from suppressing the fallback: a desktop
       // app establishes a session exactly like a phone but registers no push
       // token, so "some session exists" would silence the phone in the user's
@@ -659,7 +658,7 @@ export class ProjectCore {
         if (!(this.deps.remoteAccessEnabled?.() ?? false)) return [];
         const inBand = new Set(
           remote.establishedPeers()
-            .filter((p) => p.reachable && core.clientFocusPaused(p.peerId) !== true)
+            .filter((p) => core.clientFocusPaused(p.peerId) !== true)
             .map((p) => p.peerPubkey),
         );
         const paired = core.pairedPhones.list();

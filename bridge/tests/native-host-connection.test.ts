@@ -21,11 +21,18 @@ test("eval native bind seam accepts loopback only and is inert outside evals", (
 function fixture() {
   let allowed = true;
   const client = new NativeHostConnection({
-    url: "ws://localhost:1", identity: { deviceId: vector.challenge.deviceId, deviceName: "test", createdAt: "",
-      ed25519PublicKey: vector.devicePublic, ed25519PrivateKey: vector.deviceSeed },
-    enrollment: vector.challenge, endpointSecret: vector.endpointSeed, licenseApiUrl: "https://backend.invalid",
-    getLicenseToken: () => "test-only", generateKeypair: generateEphemeralKeypair,
-    remoteAccessEnabled: () => allowed,
+    central: {
+      url: "ws://localhost:1", identity: { deviceId: vector.challenge.deviceId, deviceName: "test", createdAt: "",
+        ed25519PublicKey: vector.devicePublic, ed25519PrivateKey: vector.deviceSeed },
+      getLicenseToken: () => "test-only",
+    },
+    native: {
+      identity: { deviceId: vector.challenge.deviceId, deviceName: "test", createdAt: "",
+        ed25519PublicKey: vector.devicePublic, ed25519PrivateKey: vector.deviceSeed },
+      enrollment: vector.challenge, endpointSecret: vector.endpointSeed, licenseApiUrl: "https://backend.invalid",
+      getLicenseToken: () => "test-only", generateKeypair: generateEphemeralKeypair,
+      remoteAccessEnabled: () => allowed,
+    },
   });
   const endpointId = "a".repeat(64);
   const peerId = "11111111-1111-4111-8111-111111111111";
@@ -103,10 +110,10 @@ test("native write diagnostics await acceptance and separate payload from record
     const slot = `${f.peerId}#${f.client.deviceId}`;
     const payload = Buffer.from("private-test-payload");
     const access = f.client.peers as unknown as {
-      sendPayload: (data: Buffer, to: string, channel: "control", kind: FrameKind, type: string) => boolean;
-      sendScheduledPayload: (data: Buffer, to: string, frame: QueuedAppFrame) => PendingSinkWrite;
+      sendNativePayload: (data: Buffer, to: string, channel: "control", kind: FrameKind, type: string) => boolean;
+      sendNativeScheduled: (data: Buffer, to: string, frame: QueuedAppFrame) => PendingSinkWrite;
     };
-    expect(access.sendPayload(payload, slot, "control", FrameKind.handshake, "handshake:agent-hello")).toBe(true);
+    expect(access.sendNativePayload(payload, slot, "control", FrameKind.handshake, "handshake:agent-hello")).toBe(true);
     expect(events.filter((event) => event.dir === "tx")).toHaveLength(0);
     written.resolve();
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -117,7 +124,7 @@ test("native write diagnostics await acceptance and separate payload from record
     const route = encodeRouteFrame({ type: "message", to: slot, channel: "control" }, payload, FrameKind.handshake);
     expect(tx[0].detail).toEqual({ routeBytes: route.length, recordBytes: route.length + 4, lengthPrefixBytes: 4 });
     expect(JSON.stringify(events)).not.toContain("private-test-payload");
-    const scheduled = access.sendScheduledPayload(Buffer.alloc(48, 7), slot, {
+    const scheduled = access.sendNativeScheduled(Buffer.alloc(48, 7), slot, {
       channel: "control", streamId: "project-stream", type: "file:content", plaintext: "private-file",
       plaintextBytes: 12,
     });
@@ -256,15 +263,15 @@ test("missing native carrier never writes payloads to central WebSocket", async 
   const access = f.client.peers as unknown as {
     ws: WebSocket | null;
     lease: { refresh(): Promise<boolean> };
-    sendPayload(data: Buffer, to: string): boolean;
-    sendScheduledPayload(data: Buffer, to: string, frame: QueuedAppFrame): unknown;
+    sendNativePayload(data: Buffer, to: string): boolean;
+    sendNativeScheduled(data: Buffer, to: string, frame: QueuedAppFrame): unknown;
     sendJson(data: object): void;
   };
   try {
     await access.lease.refresh();
     f.client.central.ws = { readyState: WebSocket.OPEN, send: (data: unknown) => sent.push(data) } as unknown as WebSocket;
-    expect(access.sendPayload(Buffer.from("payload"), f.peerId)).toBe(false);
-    expect(access.sendScheduledPayload(Buffer.from("sealed"), f.peerId, {
+    expect(access.sendNativePayload(Buffer.from("payload"), f.peerId)).toBe(false);
+    expect(access.sendNativeScheduled(Buffer.from("sealed"), f.peerId, {
       channel: "control", streamId: "0", type: "terminal:input", plaintext: "input", plaintextBytes: 5,
     })).toBeNull();
     expect(sent).toEqual([]);
@@ -299,10 +306,10 @@ test("slow admission does not block a second authorized device", async () => {
     const endpoint = { acceptNext: async () => incoming.shift() ?? null };
     await access.acceptConnections(endpoint, access.lifetime);
     await new Promise((r) => setTimeout(r, 0));
-    expect(f.access.nativePeers.size).toBe(1); expect(access.pendingAdmissions).toBe(1);
+    expect(f.access.nativePeers.size).toBe(2); expect(access.admissions.size).toBe(1);
     slow.resolve({ send: { writeAll: async () => {} }, recv: { readExact: () => new Promise(() => {}) } });
     await new Promise((r) => setTimeout(r, 0));
-    expect(f.access.nativePeers.size).toBe(2); expect(access.pendingAdmissions).toBe(0);
+    expect(f.access.nativePeers.size).toBe(2); expect(access.admissions.size).toBe(0);
   } finally { f.client.close(); }
 });
 
@@ -314,11 +321,11 @@ test("pending native admissions are bounded and late arrivals are retired after 
   const incoming = [...pending.map((p) => ({ accept: async () => ({ connect: () => p.promise }), refuse: async () => { refused++; } })),
     { accept: async () => { throw new Error("overflow must not be accepted"); }, refuse: async () => { refused++; } }];
   await access.acceptConnections({ acceptNext: async () => incoming.shift() ?? null }, access.lifetime);
-  expect(access.pendingAdmissions).toBe(4); expect(refused).toBe(1);
+  expect(access.admissions.size).toBe(4); expect(refused).toBe(1);
   f.client.close();
   const peers = pending.map(() => connection(f.endpointId));
   pending.forEach((p, i) => p.resolve(peers[i]!.native));
   await new Promise((r) => setTimeout(r, 0));
-  expect(access.pendingAdmissions).toBe(0);
+  expect(access.admissions.size).toBe(0);
   expect(peers.every((p) => p.closes() === 1)).toBe(true);
 });

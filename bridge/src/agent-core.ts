@@ -1395,6 +1395,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // which tracks what each client has on screen separately. Everything else in
   // here is authorized at the bus handler and does not care.
   function handleAbMessage(msg: AbMessage, client: ClientKey, peerId?: string, clientGeneration = clientGenerations.get(client) ?? 0) {
+    if ((clientGenerations.get(client) ?? 0) !== clientGeneration) return;
+    if (client !== "loopback" && !remoteFrameAllowed("relay")) return;
     switch (msg.type) {
       // A remote bus frame is relayed by an app session between two bridges that
       // cannot dial each other, so this bridge is an endpoint, never a hop: the
@@ -4872,7 +4874,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     sendPlain = (data) =>
       busPlainHook?.(data, tunnelTargetFor(data)) ?? Promise.resolve<SendOutcome>("dropped");
     bus.setInboundHandler((msg, channel, source, peerId) => {
-      const generation = clientGenerations.get(clientKeyOf(source, peerId)) ?? 0;
+      const client = clientKeyOf(source, peerId);
+      const generation = clientGenerations.get(client) ?? 0;
+      const stillAuthorized = () =>
+        (clientGenerations.get(client) ?? 0) === generation &&
+        remoteFrameAllowed(source) &&
+        peerBusReachAllowed(msg, source);
       // Mobile-access gate: the single chokepoint through which both RPC
       // requests and plain Ab messages enter the core dispatch. Drops EVERY
       // inbound verb while the machine is not mobile-reachable, so an
@@ -4951,6 +4958,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
             .then((res) => bus.publish(res, channel));
           return;
         }
+        if (!stillAuthorized()) return;
         void dispatchRpc(bus, msg).then((res) => bus.publish(res, channel));
         return;
       }
@@ -4993,11 +5001,11 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           // await would otherwise have its checkout re-prepared right here.
           if (refuseDeleting()) return;
           if (checkoutId !== "main") await prepareCheckoutRuntime(checkout);
-          handleAbMessage({ ...msg, checkoutId } as AbMessage, clientKeyOf(source, peerId), peerId, generation);
+          handleAbMessage({ ...msg, checkoutId } as AbMessage, client, peerId, generation);
         }).catch((error) => log.warn("Checkout lookup failed for %s: %s", checkoutId, error));
         return;
       }
-      handleAbMessage(msg, clientKeyOf(source, peerId), peerId, generation);
+      handleAbMessage(msg, client, peerId, generation);
     });
   }
 

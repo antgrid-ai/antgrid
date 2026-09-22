@@ -651,7 +651,7 @@ test("a tunnel request from a session that cannot route checkouts is refused, wh
   core!.setPlainHook(async (frame) => { plain.push(frame); return "sent"; });
   let checkoutRouting = false;
   core!.setPeerSessionProvider((peerId) => ({
-    peerId, peerPubkey: "pub-app", checkoutRouting, reachable: true, pullsTree: false,
+    peerId, peerPubkey: "pub-app", checkoutRouting, pullsTree: false,
   }));
   const responses = () => plain.filter((frame) => (frame as { type?: string }).type === "tunnel:http-start");
   const request = (requestId: string) => core!.handleTunnelMessage({

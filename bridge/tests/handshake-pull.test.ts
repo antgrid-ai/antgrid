@@ -574,7 +574,7 @@ test("rekey mid-session: old keys decrypt until the new confirm, then swap + zer
   const app2 = generateEphemeralKeypair();
   const nonce2 = Buffer.from([2, 2, 2, 2, 2, 2, 2, 2]);
   const rekeySent: Array<string | Buffer> = [];
-  (client as any).sendPayload = (p: string | Buffer) => rekeySent.push(p);
+  client.setNativeWriter((p) => { rekeySent.push(p); return true; });
 
   injectFrame(
     client,
@@ -641,7 +641,7 @@ test("a different device's verified client-hello is admitted ALONGSIDE the live 
   (client as any).phoneEd25519ByDeviceId.set(PHONE_2_ID, phoneBEd.pubB64);
 
   const bSent: Array<string | Buffer> = [];
-  (client as any).sendPayload = (p: string | Buffer) => bSent.push(p);
+  client.setNativeWriter((p) => { bSent.push(p); return true; });
   handshakeOn({ client, sent: bSent, phoneEd: phoneBEd, attemptId: "attempt-b", from: PHONE_2_ID, nonce: Buffer.from([7, 7, 7, 7, 7, 7, 7, 7]) });
 
   // Phone A's session object, keys and receive context are all untouched: a
@@ -664,7 +664,7 @@ test("same-device rekey does NOT send a session-takeover notice", () => {
   const app2 = generateEphemeralKeypair();
   const nonce2 = Buffer.from([3, 3, 3, 3, 3, 3, 3, 3]);
   const rekeySent: Array<string | Buffer> = [];
-  (client as any).sendPayload = (p: string | Buffer) => rekeySent.push(p);
+  client.setNativeWriter((p) => { rekeySent.push(p); return true; });
 
   injectFrame(
     client,
@@ -692,7 +692,7 @@ test("each admitted device opens only its own inbound frames, and the sender's p
   (client as any).phoneEd25519ByDeviceId.set(PHONE_2_ID, phoneBEd.pubB64);
 
   const bSent: Array<string | Buffer> = [];
-  (client as any).sendPayload = (p: string | Buffer) => bSent.push(p);
+  client.setNativeWriter((p) => { bSent.push(p); return true; });
   const { transport: phoneB } = handshakeOn({ client, sent: bSent, phoneEd: phoneBEd, attemptId: "attempt-b", from: PHONE_2_ID, nonce: Buffer.from([7, 7, 7, 7, 7, 7, 7, 7]) });
 
   const seen: Array<{ requestId: unknown; peerId: string }> = [];
@@ -722,11 +722,11 @@ test("an outbound broadcast is sealed once per established session â€” each
   (client as any).phoneEd25519ByDeviceId.set(PHONE_2_ID, phoneBEd.pubB64);
 
   const bSent: Array<string | Buffer> = [];
-  (client as any).sendPayload = (p: string | Buffer) => bSent.push(p);
+  client.setNativeWriter((p) => { bSent.push(p); return true; });
   const { transport: phoneB } = handshakeOn({ client, sent: bSent, phoneEd: phoneBEd, attemptId: "attempt-b", from: PHONE_2_ID, nonce: Buffer.from([7, 7, 7, 7, 7, 7, 7, 7]) });
 
   const frames: Array<{ payload: string | Buffer; to: string }> = [];
-  (client as any).sendPayload = (p: string | Buffer, to: string) => frames.push({ payload: p, to });
+  client.setNativeWriter((p, to) => { frames.push({ payload: p, to }); return true; });
 
   const msg = { type: "pong", id: "1", timestamp: 0 };
   client.send(msg as any);
@@ -741,7 +741,7 @@ test("an outbound broadcast is sealed once per established session â€” each
   expect(phoneB.open(forA)).toBeNull();
 });
 
-test("peer-offline for one device suppresses that session alone; the coarse peer-offline waits for the last", () => {
+test("native loss retires one session; the coarse peer-offline waits for the last", () => {
   const agentEd = ed25519Pair();
   const phoneAEd = ed25519Pair();
   const phoneBEd = ed25519Pair();
@@ -749,7 +749,7 @@ test("peer-offline for one device suppresses that session alone; the coarse peer
   (client as any).phoneEd25519ByDeviceId.set(PHONE_2_ID, phoneBEd.pubB64);
 
   const bSent: Array<string | Buffer> = [];
-  (client as any).sendPayload = (p: string | Buffer) => bSent.push(p);
+  client.setNativeWriter((p) => { bSent.push(p); return true; });
   handshakeOn({ client, sent: bSent, phoneEd: phoneBEd, attemptId: "attempt-b", from: PHONE_2_ID, nonce: Buffer.from([7, 7, 7, 7, 7, 7, 7, 7]) });
 
   const mux = (client as any).mux;
@@ -762,10 +762,9 @@ test("peer-offline for one device suppresses that session alone; the coarse peer
 
   expect(sessionGone).toEqual([PHONE_ID]);
   expect(coarseOffline).toBe(0); // phone B is still driving the machine
-  expect(client.peerSession(PHONE_ID)?.reachable).toBe(false);
-  expect(client.peerSession(PHONE_2_ID)?.reachable).toBe(true);
-  // Keys are KEPT while the device is merely unreachable â€” push targeting and a
-  // quick reconnect both need them; UNREACHABLE_SESSION_TTL_MS reaps them.
+  expect(client.peerSession(PHONE_ID)).toBeNull();
+  expect(client.peerSession(PHONE_2_ID)).not.toBeNull();
+  // The remaining native session keeps the machine-level handshake state live.
   expect(client._handshakeComplete()).toBe(true);
 
   client.markPeerOffline(PHONE_2_ID);
@@ -782,7 +781,7 @@ test("a session declared dead by liveness fires the coarse peer-offline only whe
   (client as any).phoneEd25519ByDeviceId.set(PHONE_2_ID, phoneBEd.pubB64);
 
   const bSent: Array<string | Buffer> = [];
-  (client as any).sendPayload = (p: string | Buffer) => bSent.push(p);
+  client.setNativeWriter((p) => { bSent.push(p); return true; });
   handshakeOn({ client, sent: bSent, phoneEd: phoneBEd, attemptId: "attempt-b", from: PHONE_2_ID, nonce: Buffer.from([7, 7, 7, 7, 7, 7, 7, 7]) });
 
   const mux = (client as any).mux;
@@ -824,7 +823,7 @@ test("admitting past MAX_APP_SESSIONS evicts the least recently active device an
   const last = MAX_APP_SESSIONS;
   (client as any).phoneEd25519ByDeviceId.set(routeIds[last]!, phoneEds[last]!.pubB64);
   const evictionSent: Array<string | Buffer> = [];
-  (client as any).sendPayload = (p: string | Buffer) => evictionSent.push(p);
+  client.setNativeWriter((p) => { evictionSent.push(p); return true; });
   handshakeOn({
     client, sent: evictionSent, phoneEd: phoneEds[last]!, attemptId: `attempt-${last}`, from: routeIds[last]!,
     nonce: Buffer.from([last, last, last, last, last, last, last, last]),
@@ -948,7 +947,7 @@ test("a client-hello from a per-machine slot admits against the bare account ide
 // one phone holding N machines open reaches each agent once per slot. Acting on
 // a sibling slot would revive (or suppress) a session on the word of a socket
 // that is not the one our keys belong to.
-test("presence for a slot scoped at another machine never moves our session's reachability", () => {
+test("loss for a slot scoped at another machine never retires our session", () => {
   const agentEd = ed25519Pair();
   const phoneEd = ed25519Pair();
   const sent: Array<string | Buffer> = [];
@@ -957,28 +956,28 @@ test("presence for a slot scoped at another machine never moves our session's re
 
   const foreign = `${PHONE_ID}#some-other-agent`;
   client.markPeerOffline(foreign);
-  expect(client.peerSession(PHONE_SLOT)?.reachable).toBe(true);
+  expect(client.peerSession(PHONE_SLOT)).not.toBeNull();
 
   client.markPeerOffline(PHONE_SLOT);
-  expect(client.peerSession(PHONE_SLOT)?.reachable).toBe(false);
+  expect(client.peerSession(PHONE_SLOT)).toBeNull();
 
   client.markPeerOnline(foreign);
-  expect(client.peerSession(PHONE_SLOT)?.reachable).toBe(false);
+  expect(client.peerSession(PHONE_SLOT)).toBeNull();
 
   client.markPeerOnline(PHONE_SLOT);
-  expect(client.peerSession(PHONE_SLOT)?.reachable).toBe(true);
+  expect(client.peerSession(PHONE_SLOT)).toBeNull();
 });
 
 // An unscoped id carries no claim about who it is for, and every pre-slot
 // client sends one â€” it must never be read as another machine's.
-test("presence for an unscoped peer id is never foreign", () => {
+test("loss for an unscoped peer id retires its native session", () => {
   const { client } = establishSession({ agentEd: ed25519Pair(), phoneEd: ed25519Pair(), attemptId: "attempt-a" });
 
   client.markPeerOffline(PHONE_ID);
-  expect(client.peerSession(PHONE_ID)?.reachable).toBe(false);
+  expect(client.peerSession(PHONE_ID)).toBeNull();
 
   client.markPeerOnline(PHONE_ID);
-  expect(client.peerSession(PHONE_ID)?.reachable).toBe(true);
+  expect(client.peerSession(PHONE_ID)).toBeNull();
 });
 
 // The nastier half of the same fan-out: peer-offline suppresses the heavy

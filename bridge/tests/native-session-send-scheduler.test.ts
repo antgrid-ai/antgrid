@@ -1,6 +1,6 @@
-// The send scheduler as the TestPeerSessionOwner wires it: what bypasses the queue
-// (sealed session frames, relay JSON verbs) and what clears it. Sealing is the
-// identity function here so a queued frame can be read straight off the wire.
+// The send scheduler as the TestPeerSessionOwner wires it: what bypasses the
+// queue and what clears it. Sealing is the identity function here so a queued
+// frame can be read straight off the wire.
 import { afterEach, describe, expect, it } from "bun:test";
 import { decodeRouteFrame, encodeRouteFrame, FrameKind } from "antgrid-wire";
 import { TestPeerSessionOwner } from "./test-peer-session-owner";
@@ -26,7 +26,6 @@ afterEach(() => { for (const c of clients.splice(0)) try { c.close(); } catch {}
 function makeClient(): Harness {
   const sent: Array<string | Uint8Array> = [];
   const client = new TestPeerSessionOwner({
-    url: "ws://127.0.0.1:1",
     identity: {
       deviceId: "dev-1",
       deviceName: "machine",
@@ -35,19 +34,13 @@ function makeClient(): Harness {
       ed25519PrivateKey: "sk",
     },
     generateKeypair: () => { throw new Error("not used"); },
-    getLicenseToken: () => "token",
   });
   clients.push(client);
   const session = installFakeSession(client, PHONE_ID);
-  (client as any).sendPayload = (data: string | Buffer, to: string, channel = "control", kind = FrameKind.sealed) => {
+  client.setNativeWriter((data, to, channel = "control", kind = FrameKind.sealed) => {
     sent.push(encodeRouteFrame({ type: "message", to, channel }, Buffer.from(data), kind));
     return true;
-  };
-  (client as any).ws = {
-    readyState: WebSocket.OPEN,
-    send: (d: string | Uint8Array) => sent.push(d),
-    close: () => {},
-  };
+  });
   return { client, sent, s: session.scheduler as SendScheduler };
 }
 
@@ -116,7 +109,7 @@ describe("TestPeerSessionOwner send scheduler", () => {
     expect(drained.map((d) => JSON.parse(d.text).m.requestId)).toEqual(["r1", "r2", "r3"]);
   });
 
-  it("drops the queue when the socket closes", () => {
+  it("drops the queue when the native session owner closes", () => {
     const { client, sent, s } = makeClient();
     s.hold = true;
     for (const id of ["r1", "r2", "r3"]) void client.sendTunnel(tunnelChunk(id));
@@ -145,7 +138,7 @@ describe("TestPeerSessionOwner send scheduler", () => {
     expect(sent).toEqual([]);
   });
 
-  it("drops the queue when the peer goes offline, keeping the session", () => {
+  it("drops the queue when the native peer session is retired", () => {
     const { client, s } = makeClient();
     s.hold = true;
     void client.sendTunnel(tunnelChunk("r1"));
@@ -155,7 +148,7 @@ describe("TestPeerSessionOwner send scheduler", () => {
     client.markPeerOffline(PHONE_ID);
 
     expect(s.queued("preview").frames).toBe(0);
-    expect(client.hasEstablishedSession()).toBe(true);
+    expect(client.hasEstablishedSession()).toBe(false);
   });
 
   // The pacing contract the tunnel's chunk loop rides on: the promise says when

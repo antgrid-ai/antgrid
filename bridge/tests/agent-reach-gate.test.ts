@@ -182,7 +182,7 @@ test("agent-reach:get reports what the machine actually holds", async () => {
 const REMOTE: SessionMemberRef = { machineId: "m-remote", projectId: "p-remote", sessionId: "s-remote" };
 
 function peerSession(): PeerSessionView {
-  return { peerId: "app-1", peerPubkey: "pub", checkoutRouting: true, reachable: true, pullsTree: true };
+  return { peerId: "app-1", peerPubkey: "pub", checkoutRouting: true, pullsTree: true };
 }
 
 async function waitFor(predicate: () => boolean, what: string, timeoutMs = 20_000): Promise<void> {

@@ -739,7 +739,8 @@ export class HostServer {
     this.controlPlaneRelay = {
       hasEstablishedSession: () => true,
       anySessionSupportsCheckoutRouting: () => false,
-      close: () => {},
+      close: async () => {},
+      recheckAuthorization: () => {},
     } as unknown as RemoteHostConnection;
     this.readvertiseToControlPlane();
   }
@@ -829,7 +830,19 @@ export class HostServer {
     }
     const buildClient = this.opts.remoteHostFactory ??
       ((options: NativeHostOptions) => new NativeHostConnection(options));
+    const identity = { ...r.identity, deviceId: r.auth.deviceUuid };
+    const getLicenseToken = () => Promise.resolve(rt.maint.getToken());
     const client = buildClient({
+      central: {
+        url: joinRelayWsPath(r.relayUrl),
+        identity,
+        abDir,
+        onAuthRevoked: () => this.requireRemoteConfig().onAuthRevoked(),
+        getLicenseToken,
+        pairedPhones: this.pairedPhonesStore,
+        onAuthenticated: () => this.pushHeartbeat(),
+      },
+      native: {
       enrollment: {
         accountId: r.auth.userId,
         deviceId: r.auth.deviceUuid,
@@ -838,15 +851,12 @@ export class HostServer {
       endpointSecret: r.auth.endpointSecret,
       licenseApiUrl: r.licenseApiUrl,
       remoteAccessEnabled: () => this.remoteAccessPolicy.isEnabled(),
-      url: joinRelayWsPath(r.relayUrl),
       // Bare deviceUuid: one central control identity and one native endpoint
       // per machine; project cores attach as host-local native streams.
-      identity: { ...r.identity, deviceId: r.auth.deviceUuid },
-      abDir,
+      identity,
       // A terminal relay LICENSE verdict tells the user to
       // re-enroll (index.ts writes auth_revoked + exits). SUPERSEDED never does.
-      onAuthRevoked: () => this.requireRemoteConfig().onAuthRevoked(),
-      getLicenseToken: () => Promise.resolve(rt.maint.getToken()),
+      getLicenseToken,
       pairedPhones: this.pairedPhonesStore,
       trustedPeers: this.trustedPeers,
       generateKeypair: () => generateEphemeralKeypair(),
@@ -858,16 +868,15 @@ export class HostServer {
       // then dials the wrong address → AGENT_OFFLINE). The central client
       // fires onAuthenticated on every (re)connect, so this re-publishes the
       // current relayUrl each time the control plane comes up.
-      onAuthenticated: () => this.pushHeartbeat(),
       onHandshakeComplete: () => {
         this.sendProjectsAdvertisement(bus);
         void this.sendToolsAdvertisement(bus);
+        this.readvertiseToControlPlane();
       },
       // Native peer admission can complete without a fresh central event. Re-advertise
       // after the peer is reachable so a catalog update that raced native reconnect
       // is not left stale. Central reconnect and presence never close or rekey
       // an otherwise healthy native session.
-      onPeerOnline: () => this.readvertiseToControlPlane(),
       // No peer-disconnect hook is wired on purpose. A transient native disconnect is
       // NOT a revocation, and multiple apps hold independent peer sessions on this
       // host, so demoting here would tear down project bindings that OTHER
@@ -875,6 +884,7 @@ export class HostServer {
       // by turning mobile access off (mobile-access:set → demoteAllPromoted) and
       // core lifecycle (stop / evict / shutdown). The native peer lifecycle owns
       // its bounded queues and reconnects independently of central control.
+      },
     });
 
     bus.setInboundHandler((msg, channel, _source, peerId) => {
@@ -2654,7 +2664,7 @@ export class HostServer {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
     }
-    this.controlPlaneRelay?.close();
+    await this.controlPlaneRelay?.close();
     this.controlPlaneRelay = null;
     this.controlPlaneBus = null;
     this.remoteRuntime?.maint.stop();

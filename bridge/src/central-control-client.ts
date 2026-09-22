@@ -9,7 +9,8 @@ import { prunePushToken } from "./push/prune";
 import { nextEpoch } from "./relay-epoch";
 import { netwatch } from "./netwatch";
 
-import type { PeerSessionOwnerOptions } from "./peer-session-owner";
+import type { DeviceIdentity } from "./device";
+import type { PairedPhonesStore } from "./paired-phones";
 const HEARTBEAT_INTERVAL = 25_000;
 const INITIAL_BACKOFF = 1_000;
 const MAX_BACKOFF = 30_000;
@@ -49,7 +50,11 @@ function signEd25519(seedB64: string, data: Uint8Array): string {
   });
   return sign(null, data, key).toString("base64");
 }
-export interface CentralControlOptions extends Pick<PeerSessionOwnerOptions, "identity" | "pairedPhones" | "onError" | "onDisconnected"> {
+export interface CentralControlOptions {
+  identity: DeviceIdentity;
+  pairedPhones?: PairedPhonesStore;
+  onError?: (code: string, message: string) => void;
+  onDisconnected?: () => void;
   onConnecting?: () => void;
   onControl?: (message: ServerMessage) => void;
   onPeerPolicyChanged?: (generation: string) => void;

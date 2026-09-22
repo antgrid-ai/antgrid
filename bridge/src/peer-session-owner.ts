@@ -16,21 +16,13 @@ import { StreamMux, type AttachStreamOpts, type PeerSessionView, type SendTarget
 import { netwatch, frameIdFor, isRemoteIngestArmed } from "./netwatch";
 import { SendScheduler, type QueuedAppFrame, type SendOutcome, type PendingSinkWrite } from "./send-scheduler";
 
-const log = logger.child({ component: "relay-client" });
-
-export interface PeerPayloadSink {
-  send(data: Buffer | string, to: string, channel?: Channel, kind?: FrameKind, diagnosticType?: string, streamId?: string): boolean;
-  sendScheduled(sealed: Buffer, peerId: string, frame: QueuedAppFrame): number | null | PendingSinkWrite;
-}
+const log = logger.child({ component: "native-session" });
 
 export interface PeerSessionOwnerOptions {
-  payloadSink?: PeerPayloadSink;
   diagnostics?: Pick<typeof log, "debug" | "info" | "warn" | "error">;
   identity: DeviceIdentity;
   /** Called on each (re)handshake to get a fresh ephemeral keypair for E2E. */
   generateKeypair: () => EphemeralKeypair;
-  onPeerOnline?: (peerId: string) => void;
-  onPeerOffline?: (peerId: string) => void;
   /** One app device's E2E session established (its app:ready confirm verified).
    *  Fires once per DEVICE, so a machine with two apps attached reports twice —
    *  `peerId` says which, and a joining device needs its own state replay even
@@ -70,23 +62,6 @@ const MAX_MISSED_PONGS = 2;
  *  the least useful session is evicted so a device can always get in. */
 export const MAX_APP_SESSIONS = 4;
 
-/** How long a session whose device the relay reports offline is kept before its
- *  keys are dropped. It is kept at all so a screen-lock or a tunnel flap comes
- *  back without a rekey, and so push targeting can still name the device; past
- *  this the app has plainly gone and the keys are dead weight. */
-export const UNREACHABLE_SESSION_TTL_MS = 300_000;
-
-// Relay rate limiting uses a one-second pair window. Keep a little extra local
-// history so the diagnostic still includes the earliest sends after the error
-// frame makes the round trip through a busy local event loop.
-const RATE_DIAGNOSTIC_WINDOW_MS = 1_500;
-
-const RATE_LIMIT_BURST_MS = 1_000;
-
-const MAX_OUTBOUND_DIAGNOSTIC_FRAMES = 4_096;
-
-const MAX_DIAGNOSTIC_TYPES = 8;
-
 /** At most one unknown-streamId warn per stream per this interval. */
 const UNKNOWN_STREAM_LOG_INTERVAL_MS = 30_000;
 
@@ -100,33 +75,6 @@ let fragIdCounter = 0;
 export type FragmentForSendResult =
   | { ok: true; frames: string[] }
   | { ok: false; error: { code: "MESSAGE_TOO_LARGE"; message: string } };
-
-export interface OutboundFrameDiagnostic {
-  at: number;
-  type: string;
-  channel: Channel;
-  bytes: number;
-}
-
-export interface RateLimitBurst {
-  /** The FIRST REJECTION, not the first send of the burst that provoked it:
-   *  the outbound sample ring keeps only RATE_DIAGNOSTIC_WINDOW_MS of history,
-   *  so how long this sender had been sending before the relay pushed back is
-   *  not recoverable here. The summary reports `rejectionWindowMs` to say so. */
-  firstRejectionAt: number;
-  /** The most recent rejection counted into `errors`. Paired with
-   *  `firstRejectionAt` so the summary reports the span the rejections actually
-   *  occupy: ending at Date.now() would report the coalescing timer's fixed
-   *  window instead, and 340 rejections inside 5ms would read as 340 per
-   *  second. */
-  lastRejectionAt: number;
-  errors: number;
-  timer: ReturnType<typeof setTimeout>;
-  outboundAtOnset: string;
-  /** The relay error code that opened the burst, so the summary says which
-   *  ceiling was hit (rate limiter vs recipient backpressure). */
-  code: string;
-}
 
 /** A half-open handshake attempt: keys derived, the app's confirm not yet seen.
  *  Receive-only until it is promoted (make-before-break). */
@@ -151,10 +99,6 @@ export interface PeerSession {
   peerId: string;
   /** Session-scoped: a rekey must not inherit the previous app's guarantee. */
   checkoutRouting: boolean;
-  /** Relay presence. An unreachable session keeps its keys (see
-   *  {@link UNREACHABLE_SESSION_TTL_MS}) but is not counted as live. */
-  reachable: boolean;
-  unreachableSince: number;
   lastSealedRecvAt: number;
   missedPongs: number;
   /** Fragments are per-session: two devices interleave transfers on one socket,
@@ -175,12 +119,6 @@ export interface PeerSession {
    *  may only stop pushing `tree:full` when every attached device pulls. */
   pullsTree: boolean;
   terminalFramesV1: boolean;
-}
-
-function formatDiagnosticBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes}B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KiB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)}MiB`;
 }
 
 export function fragmentForSend(json: string, type?: string, key?: string): FragmentForSendResult {
@@ -213,7 +151,22 @@ export abstract class PeerSessionOwner {
     return this.opts.diagnostics ?? log;
   }
 
-  protected payloadTransport(_peerId?: string): "relay" | "iroh" { return "relay"; }
+  protected abstract sendNativePayload(
+    data: Buffer | string,
+    to: string,
+    channel?: Channel,
+    kind?: FrameKind,
+    diagnosticType?: string,
+    streamId?: string,
+  ): boolean;
+
+  protected abstract sendNativeScheduled(
+    sealed: Buffer,
+    peerId: string,
+    frame: QueuedAppFrame,
+  ): number | null | PendingSinkWrite;
+
+  protected payloadTransport(_peerId?: string): "iroh" { return "iroh"; }
 
   protected recordDiagnostic(event: Parameters<typeof netwatch.record>[0]): void {
     try { netwatch.record(event); } catch { /* Observers cannot break admission or delivery. */ }
@@ -260,19 +213,11 @@ export abstract class PeerSessionOwner {
 
   protected fragSweep: ReturnType<typeof setInterval> | null = null;
 
-  protected outboundFrameDiagnostics: OutboundFrameDiagnostic[] = [];
-
-  protected rateLimitBurst: RateLimitBurst | null = null;
-
   /** Unknown-stream drop throttle: last log time and frames suppressed since,
    *  per streamId (see {@link logUnknownStreamDrop}). */
   protected unknownStreamLoggedAt = new Map<string, number>();
 
   protected unknownStreamSuppressed = new Map<string, number>();
-
-  protected droppedFrames = 0;
-
-  protected droppedFramesAt = 0;
 
   /** The bare device id this client authenticates as (machine deviceUuid). */
   get deviceId(): string {
@@ -315,64 +260,19 @@ export abstract class PeerSessionOwner {
     return this.phoneEd25519ByDeviceId.get(peerId) ?? null;
   }
 
-  /** @deprecated One machine now has several attached apps, so "the" peer is not
-   *  a question with an answer. Reads the FIRST established session, which is
-   *  right only for callers asking "is anything remote attached at all"; every
-   *  caller that acts on WHICH device must take the peerId threaded to it and
-   *  use {@link peerPubkeyFor}. */
-  currentPeerPubkey(): string | null {
-    for (const session of this.sessions.values()) {
-      const pub = this.phoneEd25519ByDeviceId.get(session.peerId);
-      if (pub) return pub;
-    }
-    return null;
-  }
-
-  /** @deprecated Capability is per device — see
-   *  {@link anySessionSupportsCheckoutRouting}, which this forwards to. */
-  get peerSupportsCheckoutRouting(): boolean {
-    return this.anySessionSupportsCheckoutRouting();
-  }
-
-  /** Attached devices for a diagnostic line. A relay error or a rate limit is
-   *  now a question about several sessions, so naming only one would point the
-   *  operator at the wrong device as often as not. */
-  protected describePeers(): string {
-    if (this.sessions.size === 0) return "none";
-    return [...this.sessions.values()]
-      .map((s) => (s.reachable ? s.peerId : `${s.peerId}(offline)`))
-      .join(",");
-  }
-
   protected viewOf(session: PeerSession): PeerSessionView {
     return {
       peerId: session.peerId,
       peerPubkey: this.phoneEd25519ByDeviceId.get(session.peerId) ?? "",
       checkoutRouting: session.checkoutRouting,
-      reachable: session.reachable,
       pullsTree: session.pullsTree,
       terminalFramesV1: session.terminalFramesV1,
     };
   }
 
-  /** True while at least one session's device is reachable over the relay. The
-   *  coarse `peerOnline` the mux and the cores run on. */
-  protected hasReachableSession(): boolean {
-    for (const session of this.sessions.values()) {
-      if (session.reachable) return true;
-    }
-    return false;
-  }
-
-  /** Fire the coarse peer-offline exactly when the LAST reachable session goes.
-   *  Idempotent in the mux, so every path that can lose a session calls it. */
-  protected notifyOfflineIfLast(): void {
-    if (!this.hasReachableSession()) this.mux.notifyPeerOffline();
-  }
-
   /** Ensure `phoneEd25519ByDeviceId` has an entry for `peerId` by recovering it
    *  from the persistent phone registry. Used on a trusted reconnect
-   *  (peer-online with no fresh handshake) so `currentPeerPubkey()` still
+   *  after a trusted reconnect so per-peer authorization still
    *  resolves after an agent restart — without it the control-plane dispatch
    *  drops every frame (`if (!pk) return`). No-op when already known or
    *  unregistered. */
@@ -467,15 +367,9 @@ export abstract class PeerSessionOwner {
           return null;
         }
         const sealed = session.transport.seal(f.plaintext);
-        return this.sendScheduledPayload(sealed, peerId, f);
+        return this.sendNativeScheduled(sealed, peerId, f);
       },
     }, (m) => this.diagnostics.warn(m));
-  }
-
-  protected sendScheduledPayload(sealed: Buffer, peerId: string, frame: QueuedAppFrame): number | null | PendingSinkWrite {
-    if (this.opts.payloadSink) return this.opts.payloadSink.sendScheduled(sealed, peerId, frame);
-    return this.sendPayload(sealed, peerId, frame.channel, FrameKind.sealed, frame.type, frame.streamId)
-      ? sealed.length : null;
   }
 
   /** The single place a queued frame reaches the wire. */
@@ -998,7 +892,7 @@ export abstract class PeerSessionOwner {
     const phoneEd25519PubB64 = resolved.pub;
 
     // Cache the verified identity for POST-handshake authorization
-    // (currentPeerPubkey/backfillPeerPubkey): a trust-only phone (account
+    // (including backfillPeerPubkey): a trust-only phone (account
     // inventory, no pair-request ever sent) has no paired-phones row for
     // backfillPeerPubkey to recover from, so without this the control-plane
     // dispatch gate (`if (!pk) return`) drops every frame from it forever.
@@ -1065,7 +959,7 @@ export abstract class PeerSessionOwner {
     this.startHalfOpenTimer(attempt);
 
     const agentSig = signTranscript(agentTranscript, Buffer.from(seedB64, "base64"));
-    this.sendPayload(
+    this.sendNativePayload(
       Buffer.from(JSON.stringify({ type: "handshake:agent-hello", attemptId, pubkey: agentPubkey.toString("base64"), sig: agentSig }), "utf8"),
       peerId,
       "control",
@@ -1082,12 +976,7 @@ export abstract class PeerSessionOwner {
     this.diagnostics.info("E2E handshake keys derived for %s (attempt %s), waiting for app:ready", peerId, attemptId);
   }
 
-  /** Make room for a device that holds neither a session nor a candidate. The
-   *  unreachable go first (their device is already gone); otherwise the session
-   *  that has been silent longest. Only a REACHABLE evictee is told — a
-   *  session-takeover sealed for a device the relay says is offline reaches
-   *  nobody, and the frame is the one thing that keeps a displaced app from
-   *  rekeying straight back into the same eviction. */
+  /** Make room for a device that holds neither a session nor a candidate. */
   protected evictForCapacity(peerId: string): void {
     if (this.sessions.has(peerId) || this.pending.has(peerId)) return;
     while (this.sessions.size + this.pending.size >= MAX_APP_SESSIONS) {
@@ -1107,26 +996,17 @@ export abstract class PeerSessionOwner {
         victim.peerId,
         peerId,
       );
-      if (victim.reachable) {
-        try {
-          this.sendSessionFrame({ type: "session-takeover" }, victim.transport, victim.peerId);
-        } catch {
-          // evictee unreachable — teardown proceeds regardless
-        }
-      }
+      try { this.sendSessionFrame({ type: "session-takeover" }, victim.transport, victim.peerId); }
+      catch { /* Teardown is authoritative even when the carrier is already gone. */ }
       this.dropSession(victim.peerId);
     }
   }
 
-  /** Unreachable sessions first, then the least recently active. */
+  /** Evict the least recently active established session. */
   protected pickEvictable(): PeerSession | null {
     let worst: PeerSession | null = null;
     for (const session of this.sessions.values()) {
       if (!worst) { worst = session; continue; }
-      if (worst.reachable !== session.reachable) {
-        if (!session.reachable) worst = session;
-        continue;
-      }
       if (session.lastSealedRecvAt < worst.lastSealedRecvAt) worst = session;
     }
     return worst;
@@ -1169,8 +1049,6 @@ export abstract class PeerSessionOwner {
         sessionKeys: attempt.sessionKeys,
         peerId,
         checkoutRouting: obj.capabilities?.checkoutRouting === true,
-        reachable: true,
-        unreachableSince: 0,
         lastSealedRecvAt: now,
         missedPongs: 0,
         // Reuse the replaced session's reassembler: a rekey is the same device
@@ -1380,10 +1258,7 @@ export abstract class PeerSessionOwner {
     return settled.finally(() => signal?.removeEventListener("abort", abort));
   }
 
-  /** Which sessions a {@link SendTarget} selects. An unreachable session is
-   *  still a recipient: the relay queues nothing, but a device coming back from
-   *  a brief flap opens what it missed, and dropping the send instead is how a
-   *  screen-lock used to lose an answer outright. */
+  /** Which established native sessions a {@link SendTarget} selects. */
   protected resolveRecipients(target: SendTarget): PeerSession[] {
     if (target.kind === "peer") {
       const session = this.sessions.get(target.peerId);
@@ -1449,7 +1324,7 @@ export abstract class PeerSessionOwner {
     if (!transport) return;
     const type = (obj as { type?: string }).type ?? "session";
     const sealed = transport.seal(JSON.stringify(obj));
-    if (!this.sendPayload(sealed, to, "control", FrameKind.sealed, type)) return;
+    if (!this.sendNativePayload(sealed, to, "control", FrameKind.sealed, type)) return;
     // Exempt from the gate, not from the accounting: a relay drop report names
     // only a channel and a length, so bytes written outside the window would
     // un-charge something that was never charged. Charge the session whose keys
@@ -1476,118 +1351,10 @@ export abstract class PeerSessionOwner {
     this.bus = null;
   }
 
-  protected recordOutboundFrame(type: string, channel: Channel, bytes: number): void {
-    const now = Date.now();
-    const cutoff = now - RATE_DIAGNOSTIC_WINDOW_MS;
-    let stale = 0;
-    while (
-      stale < this.outboundFrameDiagnostics.length &&
-      this.outboundFrameDiagnostics[stale].at < cutoff
-    ) {
-      stale++;
-    }
-    if (stale > 0) this.outboundFrameDiagnostics.splice(0, stale);
-    if (this.droppedFramesAt < cutoff) {
-      this.droppedFrames = 0;
-      this.droppedFramesAt = 0;
-    }
-
-    if (this.outboundFrameDiagnostics.length >= MAX_OUTBOUND_DIAGNOSTIC_FRAMES) {
-      const discarded = this.outboundFrameDiagnostics.splice(0, MAX_OUTBOUND_DIAGNOSTIC_FRAMES / 2);
-      this.droppedFrames += discarded.length;
-      this.droppedFramesAt = discarded[discarded.length - 1]!.at;
-    }
-    this.outboundFrameDiagnostics.push({ at: now, type, channel, bytes });
-  }
-
-  protected formatOutboundRateDiagnostic(now = Date.now()): string {
-    const cutoff = now - RATE_DIAGNOSTIC_WINDOW_MS;
-    const grouped = new Map<string, { type: string; channel: Channel; frames: number; bytes: number }>();
-    let totalFrames = 0;
-    let totalBytes = 0;
-
-    for (const sample of this.outboundFrameDiagnostics) {
-      if (sample.at < cutoff) continue;
-      totalFrames++;
-      totalBytes += sample.bytes;
-      const key = `${sample.type}\u0000${sample.channel}`;
-      const entry = grouped.get(key) ?? {
-        type: sample.type,
-        channel: sample.channel,
-        frames: 0,
-        bytes: 0,
-      };
-      entry.frames++;
-      entry.bytes += sample.bytes;
-      grouped.set(key, entry);
-    }
-
-    const dropped = this.droppedFramesAt >= cutoff ? this.droppedFrames : 0;
-    if (totalFrames === 0 && dropped === 0) return "no outbound frames captured";
-
-    const ranked = [...grouped.values()].sort(
-      (a, b) => b.frames - a.frames || b.bytes - a.bytes,
-    );
-    const shown = ranked.slice(0, MAX_DIAGNOSTIC_TYPES);
-    const byType = shown
-      .map((entry) =>
-        `${entry.type}/${entry.channel}=${entry.frames} frame(s),${formatDiagnosticBytes(entry.bytes)}`
-      )
-      .join("; ");
-    const more = ranked.length - shown.length;
-    const elided = more > 0 ? `; +${more} more type(s)` : "";
-    const truncated = dropped > 0
-      ? ` dropped=${dropped} frame(s) past the ${MAX_OUTBOUND_DIAGNOSTIC_FRAMES}-sample cap — counts below are a floor;`
-      : "";
-    return `total=${totalFrames} frame(s),${formatDiagnosticBytes(totalBytes)};${truncated} byType=[${byType}${elided}]`;
-  }
-
-  /** A relay that discards routed frames discards them in bursts, and one
-   *  `this.diagnostics.error` per frame buries the outbound sample that says which sender
-   *  caused it. Coalesce the burst and report the sample taken at its onset. */
-  protected handleDroppedFrameError(code: string, message: string): void {
-    const now = Date.now();
-    if (this.rateLimitBurst && now - this.rateLimitBurst.firstRejectionAt < RATE_LIMIT_BURST_MS) {
-      this.rateLimitBurst.errors++;
-      this.rateLimitBurst.lastRejectionAt = now;
-      return;
-    }
-    if (this.rateLimitBurst) this.finishRateLimitBurst();
-
-    const outboundAtOnset = this.formatOutboundRateDiagnostic(now);
-    this.diagnostics.error(
-      `Relay dropped frames: device=${this.opts.identity.deviceId} peers=${this.describePeers()} ` +
-      `code=${code} message="${message}" recentOutbound(${RATE_DIAGNOSTIC_WINDOW_MS}ms)={${outboundAtOnset}}`,
-    );
-
-    const timer = setTimeout(() => this.finishRateLimitBurst(), RATE_LIMIT_BURST_MS);
-    timer.unref?.();
-    this.rateLimitBurst = { firstRejectionAt: now, lastRejectionAt: now, errors: 1, timer, outboundAtOnset, code };
-
-    this.opts.onError?.(code, message);
-  }
-
-  protected finishRateLimitBurst(): void {
-    const burst = this.rateLimitBurst;
-    if (!burst) return;
-    clearTimeout(burst.timer);
-    this.rateLimitBurst = null;
-    if (burst.errors <= 1) return;
-
-    this.diagnostics.error(
-      `Relay dropped-frame burst summary: device=${this.opts.identity.deviceId} ` +
-      `code=${burst.code} rejectedFrames=${burst.errors} duplicateCallbacksSuppressed=${burst.errors - 1} ` +
-      `rejectionWindowMs=${burst.lastRejectionAt - burst.firstRejectionAt} ` +
-      `outboundAtOnset(${RATE_DIAGNOSTIC_WINDOW_MS}ms)={${burst.outboundAtOnset}}`,
-    );
-  }
-
   // --- E2E state teardown + timers ---
 
   /** End ONE device's session: zeroize its keys, release whatever it was
-   *  reassembling, and tell the cores that device is gone. The coarse
-   *  peer-offline follows only if it was the last reachable one. The socket and
-   *  every other session are untouched. */
+   *  reassembling, and tell the cores that device is gone. */
   protected dropSession(peerId: string, transport = this.payloadTransport(peerId)): void {
     const session = this.sessions.get(peerId);
     if (!session) return;
@@ -1601,7 +1368,7 @@ export abstract class PeerSessionOwner {
     session.transport.zeroize();
     if (this.sessions.size === 0) this.stopLiveness();
     this.mux.notifyPeerSessionOffline(peerId);
-    this.notifyOfflineIfLast();
+    if (this.sessions.size === 0) this.mux.notifyPeerOffline();
   }
 
   protected tearDownPending(peerId: string): void {
@@ -1659,15 +1426,6 @@ export abstract class PeerSessionOwner {
   protected checkLiveness(): void {
     const now = Date.now();
     for (const session of [...this.sessions.values()]) {
-      if (!session.reachable) {
-        // Pinging a device the relay says is offline probes nothing. Keep its
-        // keys for the reconnect/push window, then let them go.
-        if (now - session.unreachableSince >= UNREACHABLE_SESSION_TTL_MS) {
-          this.diagnostics.info("Dropping keys for %s — offline past the session TTL", session.peerId);
-          this.dropSession(session.peerId);
-        }
-        continue;
-      }
       // Unconditional, every tick: a credit the relay dropped is re-sent within
       // one silence window carrying the same cumulative ground truth, and since
       // it is a sealed frame under this session's keys it also refreshes the
@@ -1696,9 +1454,5 @@ export abstract class PeerSessionOwner {
     this.mux.detachAll();
     this.resetE2eState();
     this.stopFragSweep();
-    this.finishRateLimitBurst();
-  }
-  protected sendPayload(data: Buffer | string, to: string, channel?: Channel, kind?: FrameKind, diagnosticType?: string, streamId?: string): boolean {
-    return this.opts.payloadSink?.send(data, to, channel, kind, diagnosticType, streamId) ?? false;
   }
 }

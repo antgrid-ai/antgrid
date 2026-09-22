@@ -46,7 +46,6 @@ export interface PeerSessionView {
   readonly peerId: string;
   readonly peerPubkey: string;
   readonly checkoutRouting: boolean;
-  readonly reachable: boolean;
   /** Whether this device pulls trees on demand rather than being pushed them.
    *  Per-device: the bridge may only stop pushing when EVERY attached one does. */
   readonly pullsTree: boolean;
@@ -87,14 +86,14 @@ export interface AttachStreamOpts {
   projectId?: string;
   /** Host-local binding is ready for native peer sessions. */
   onAdmitted?: (streamId: string) => void;
-  /** The machine's paired phone became reachable (session established / peer
-   *  online). Also fired at attach time when the session is already established,
+  /** A native app session was established. Also fired at attach time when a
+   *  session is already established,
    *  so a drill-in stream resumes immediately. */
   onPeerOnline?: () => void;
   onPeerOffline?: () => void;
   /** One app session ended (liveness, presence, eviction, socket close) while
    *  others may still be attached. Distinct from `onPeerOffline`, which fires
-   *  only when the LAST reachable session is gone: a device that quit must stop
+   *  only when the LAST session is gone: a device that quit must stop
    *  vouching for the focus and unread state it had on screen even though a
    *  sibling device is still driving the machine. */
   onPeerSessionGone?: (peerId: string) => void;

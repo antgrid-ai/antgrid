@@ -139,7 +139,7 @@ test("dropped from a remote phone while mobile access is off — no response at 
   core.attachTransport(bus);
   core.setPeerSessionProvider(() => ({
     peerId: "phone-dev-terminal-snap-rpc#agent-dev", peerPubkey: pk1, checkoutRouting: true,
-    reachable: true, pullsTree: false,
+    pullsTree: false,
   }));
   core.onHandshakeComplete();
   await waitFor(sent, (m) => m.type === "agent:status", "agent:status");

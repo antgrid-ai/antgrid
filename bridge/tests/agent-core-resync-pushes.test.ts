@@ -138,7 +138,7 @@ test("a resync pushes the tree when the peer half of the guard is the one that d
   const { bus, sent } = await bootCore();
   core!.setOwnerPullsTreeProvider(() => true);
   core!.setEstablishedPeersProvider(() => [
-    { peerId: "legacy#machine", peerPubkey: "pk-legacy", checkoutRouting: true, reachable: true, pullsTree: false },
+    { peerId: "legacy#machine", peerPubkey: "pk-legacy", checkoutRouting: true, pullsTree: false },
   ]);
   await waitFor(
     () => bus.getSnapshot(["tree:full"]).length > 0,
