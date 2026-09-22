@@ -38,6 +38,9 @@ export interface PushDispatcherDeps {
    *  sentence. Absent means unarmed, which keeps the notification — for an
    *  unarmed session it is the only thing that ever says what was asked. */
   isHandlerArmed?: (terminalId: string) => boolean;
+  /** True when the Handler will announce this slot's work finishing itself, so
+   *  the agent's per-turn `task_complete` is noise. Absent keeps the push. */
+  handlerOwnsCompletion?: (terminalId: string) => boolean;
   seal: (json: string, recipientPushPubkeyB64: string) => { epk: string; box: string };
   deliver: (token: string, provider: "fcm" | "apns", blob: { epk: string; box: string }) => void;
 }
@@ -63,6 +66,17 @@ export function createPushDispatcher(deps: PushDispatcherDeps) {
         && msg.sessionId
         && deps.isHandlerArmed?.(msg.sessionId)) {
         log.debug("push: question notification not sent — the Handler is escalating it");
+        return;
+      }
+      // An armed session's per-turn "done" is noise; the Handler's wrap-up is the
+      // one the user waits on. `origin` spares the Handler's own same-shaped
+      // pushes. Blocks are left alone — the Handler may never have been told.
+      if (msg.type === "notification:push"
+        && msg.notificationType === "task_complete"
+        && msg.origin === "agent"
+        && msg.sessionId
+        && deps.handlerOwnsCompletion?.(msg.sessionId)) {
+        log.debug("push: turn-end notification not sent — the Handler owns this session's completion");
         return;
       }
       const composed = composePush(msg);

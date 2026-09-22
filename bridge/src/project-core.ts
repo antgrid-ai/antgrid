@@ -6,7 +6,7 @@ import { createRelayPromotion, type RelayPromotionController, type RelayPromotio
 import type { AttachStreamOpts, PeerSessionView, StreamHandle } from "./stream-mux";
 import { createMessage, type AbMessage, type SessionEntry, type WorkStatus } from "./protocol";
 import type { DeleteSessionOptions } from "./session-manager";
-import { answerRequest, becameDeliverable, busDeliverable, clientFocusState, clientGone, closeTurn, initialWorkStatus, isStaleIdleNudge, openedTurns, reduceWorkStatus, sessionFocus, turnStart, UNATTRIBUTED_TURN, userReply, type WorkStatusState } from "./work-status";
+import { answerRequest, becameDeliverable, busDeliverable, clientFocusState, clientGone, closeTurn, hookTurnEnd, initialWorkStatus, isStaleIdleNudge, noteHookChannelLost, noteHookChannelRestored, openedTurns, reduceWorkStatus, sessionFocus, turnStart, UNATTRIBUTED_TURN, userReply, type WorkStatusState } from "./work-status";
 import { SessionBusDeliveryQueue, type QueuedLine } from "./session-bus/delivery-queue";
 import { logger } from "./logger";
 const log = logger.child({ component: "project-core" });
@@ -304,10 +304,12 @@ export class ProjectCore {
   }
 
   /** The user typed into [sessionId]'s PTY — the only "I answered" signal a
-   *  terminal-mode session has. Clears its block; claims a turn only for an
-   *  agent that can't report its own turn starts, and only when the session has
-   *  typed content to submit. See {@link userReply}. */
-  noteUserReply(sessionId: string, opts: { submitted: boolean; typed: boolean }): void {
+   *  terminal-mode session has. Claims a turn only for an agent that cannot
+   *  report its own starts, and only for a typed PROMPT. See {@link userReply}. */
+  noteUserReply(
+    sessionId: string,
+    opts: { submitted: boolean; typed: boolean; command?: boolean },
+  ): void {
     this.commitWork(userReply(this._work, sessionId, opts));
   }
 
@@ -349,6 +351,23 @@ export class ProjectCore {
    *  interrupt. See {@link closeTurn}. */
   noteInterrupt(sessionId: string): void {
     this.commitWork(closeTurn(this._work, sessionId));
+  }
+
+  /** A hook reported [sessionId]'s turn over on a channel that files no
+   *  notification — the second closer. See {@link hookTurnEnd}. */
+  noteHookTurnEnd(sessionId: string): void {
+    this.commitWork(hookTurnEnd(this._work, sessionId));
+  }
+
+  /** [sessionId]'s injected hooks have been written off, so nothing is left to
+   *  close a turn inferred from a keystroke. See {@link noteHookChannelLost}. */
+  noteHookChannelLost(sessionId: string): void {
+    this.commitWork(noteHookChannelLost(this._work, sessionId));
+  }
+
+  /** ...and they answered after all. See {@link noteHookChannelRestored}. */
+  noteHookChannelRestored(sessionId: string): void {
+    this.commitWork(noteHookChannelRestored(this._work, sessionId));
   }
 
   /** First register outcome of a REMOTE-mode core's primary relay slot (null in
@@ -413,6 +432,9 @@ export class ProjectCore {
       onUserReply: (sessionId, replyOpts) => this.noteUserReply(sessionId, replyOpts),
       onAnswer: (sessionId, requestId) => this.noteAnswer(sessionId, requestId),
       onInterrupt: (sessionId) => this.noteInterrupt(sessionId),
+      onHookTurnEnd: (sessionId) => this.noteHookTurnEnd(sessionId),
+      onHookChannelLost: (sessionId) => this.noteHookChannelLost(sessionId),
+      onHookChannelRestored: (sessionId) => this.noteHookChannelRestored(sessionId),
       onSessionFocus: (sessionId, client) => this.noteSessionFocus(sessionId, client),
       onClientFocusState: (paused, client) => this.noteClientFocusState(paused, client),
       // The single source of per-session work status: SessionManager stamps it
@@ -701,6 +723,7 @@ export class ProjectCore {
       // Read live, never captured: a slot is armed and disarmed under a stream
       // that outlives both.
       isHandlerArmed: (terminalId) => core.isHandlerArmed(terminalId),
+      handlerOwnsCompletion: (terminalId) => core.handlerOwnsCompletion(terminalId),
       // Target every registered phone that CANNOT receive this in band right
       // now, which is the question push actually answers. A device is in band
       // only while it holds a reachable session AND that session's client has

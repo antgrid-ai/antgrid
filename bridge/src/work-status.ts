@@ -2,6 +2,10 @@ import { needsKeystrokeTurnStart } from "./agent-runtime";
 import type { ClientKey } from "./message-bus";
 import type { AbMessage, NotificationType, WorkStatus } from "./protocol";
 
+/** What a session's half-typed composer line will be if submitted: a prompt the
+ *  agent answers with a model turn, or one of the CLI's own `/` commands. */
+export type TypedLine = "prompt" | "command";
+
 /** Reduced work status for the control-plane advert, folded from a core's
  *  OUTBOUND bus frames plus the inbound turn-start/answer hooks.
  *
@@ -33,11 +37,16 @@ export interface WorkStatusState {
    *  submitted keystroke is the only thing that can open their turn — see
    *  {@link needsKeystrokeTurnStart} and {@link userReply}. */
   readonly keystrokeTurnSessions: ReadonlySet<string>;
-  /** Sessions that have received PTY input carrying more than the submitting CR
-   *  since their last inferred turn. The evidence half of the keystroke
-   *  inference: without it a bare enter — on an empty prompt, or to dismiss a
-   *  TUI menu — opened a turn no stop hook was ever going to close. */
-  readonly typedSessions: ReadonlySet<string>;
+  /** Running sessions whose hook channel has been declared dead. Subtracted from
+   *  {@link keystrokeTurnSessions} on every fold, which recomputes from the agent's
+   *  STATIC spec — so without this the bridge goes on inferring starts that
+   *  nothing can close. See {@link noteHookChannelLost}. */
+  readonly deadHookSessions: ReadonlySet<string>;
+  /** What is sitting in each session's composer since its last inferred turn,
+   *  classified by the first thing typed on it. The evidence half of the keystroke
+   *  inference: a bare enter and a `/` command both start no turn, so neither has
+   *  a turn-end coming. See `opensCommandLine` in keystrokes.ts. */
+  readonly typedSessions: ReadonlyMap<string, TypedLine>;
   /** What each client has ON SCREEN — at most one session per client, since a
    *  client shows one at a time. Keyed by {@link ClientKey} because that is the
    *  honest granularity: the desktop owner reaches a core over loopback while
@@ -163,6 +172,7 @@ export function openedTurns(prev: WorkStatusState, next: WorkStatusState): strin
 const EMPTY_IDS: ReadonlySet<string> = new Set();
 const EMPTY_NOTIFICATIONS: ReadonlyMap<string, NotificationType> = new Map();
 const EMPTY_REQUESTS: ReadonlyMap<string, ReadonlySet<string>> = new Map();
+const EMPTY_TYPED: ReadonlyMap<string, TypedLine> = new Map();
 const EMPTY_FOCUS: ReadonlyMap<ClientKey, string> = new Map();
 
 /** The mutable inputs {@link build} folds into a state; everything else on
@@ -174,7 +184,8 @@ interface WorkInputs {
   activeTurns: ReadonlySet<string>;
   pendingTurns: ReadonlySet<string>;
   keystrokeTurnSessions: ReadonlySet<string>;
-  typedSessions: ReadonlySet<string>;
+  deadHookSessions: ReadonlySet<string>;
+  typedSessions: ReadonlyMap<string, TypedLine>;
   focusedSessions: ReadonlyMap<ClientKey, string>;
   readTracking: boolean;
   unreadSessions: ReadonlySet<string>;
@@ -344,6 +355,7 @@ function build(i: WorkInputs, prev?: WorkStatusState): WorkStatusState {
     activeTurns: i.activeTurns,
     pendingTurns: i.pendingTurns,
     keystrokeTurnSessions: i.keystrokeTurnSessions,
+    deadHookSessions: i.deadHookSessions,
     typedSessions: i.typedSessions,
     defaultTool: i.defaultTool,
     status,
@@ -359,6 +371,7 @@ function inputsOf(s: WorkStatusState): WorkInputs {
     activeTurns: s.activeTurns,
     pendingTurns: s.pendingTurns,
     keystrokeTurnSessions: s.keystrokeTurnSessions,
+    deadHookSessions: s.deadHookSessions,
     typedSessions: s.typedSessions,
     focusedSessions: s.focusedSessions,
     readTracking: s.readTracking,
@@ -374,7 +387,8 @@ export const initialWorkStatus: WorkStatusState = build({
   activeTurns: EMPTY_IDS,
   pendingTurns: EMPTY_IDS,
   keystrokeTurnSessions: EMPTY_IDS,
-  typedSessions: EMPTY_IDS,
+  deadHookSessions: EMPTY_IDS,
+  typedSessions: EMPTY_TYPED,
   focusedSessions: EMPTY_FOCUS,
   readTracking: false,
   unreadSessions: EMPTY_IDS,
@@ -535,21 +549,11 @@ export function answerRequest(
  *  whatever it was really doing (working if its turn is still open, done if
  *  not). Typing in an idle session must not read as work.
  *
- *  [submitted] (the input carried a carriage return) additionally OPENS the turn,
- *  but only for a session in `keystrokeTurnSessions` — an agent that reports turn
- *  ends and no turn starts. Those sessions would otherwise read "done" for the
- *  whole turn, and inferring the start is safe precisely because their stop hook
- *  will close it. Agents with a real turn-start signal are left to it: guessing
- *  from keystrokes there could only be wrong.
- *
- *  ...and only once [typed] has reported content for this session. A PTY sends
- *  one keystroke per frame, so the submitting CR normally arrives alone and
- *  `submitted` alone cannot distinguish a prompt from enter on an empty prompt or
- *  on a TUI menu. Those start no turn, so the stop hook the inference relies on
- *  never fires and the session hangs on "working" until some LATER turn ends.
- *  Requiring typed content since the last inferred turn is the evidence that a
- *  prompt existed at all; the marker is consumed when the turn opens, so the next
- *  bare enter has to earn its own.
+ *  [submitted] additionally OPENS the turn, but only for a session in
+ *  `keystrokeTurnSessions` (an agent reporting turn ends and no starts), and only
+ *  on a line [typed] recorded as a PROMPT: a bare enter and a `/` command both
+ *  fire no turn-end, so either would open a turn nothing could close. The submit
+ *  consumes the line either way, so the next one classifies itself afresh.
  *
  *  Otherwise deliberately narrower than {@link turnStart}: a bare keystroke is
  *  weaker evidence than a submitted prompt, so it never clears the UNATTRIBUTED
@@ -558,20 +562,31 @@ export function answerRequest(
 export function userReply(
   prev: WorkStatusState,
   sessionId: string,
-  opts: { submitted?: boolean; typed?: boolean } = {},
+  opts: { submitted?: boolean; typed?: boolean; command?: boolean } = {},
 ): WorkStatusState {
   const own = prev.notifications.get(sessionId);
   const blocked = own !== undefined && isCallToAction(own);
   const pending = prev.pendingRequests.has(sessionId);
-  // Content in THIS frame counts toward this same submit: a paste (or the app's
-  // send-to-agent composer) delivers "prompt text\r" as one chunk.
-  const typed = opts.typed === true || prev.typedSessions.has(sessionId);
+  // What a line this frame OPENS would be — a paste delivers "prompt text\r" as
+  // one chunk, so its content counts toward its own submit.
+  const opening: TypedLine | undefined = opts.typed === true
+    ? (opts.command === true ? "command" : "prompt")
+    : undefined;
+  // A line already in the composer wins: what opened it is what classifies it,
+  // and every frame after the first carries the middle of a line.
+  const held = prev.typedSessions.get(sessionId);
+  const line = held ?? opening;
   const opens = opts.submitted === true
-    && typed
+    && line === "prompt"
     && prev.keystrokeTurnSessions.has(sessionId)
     && !prev.activeTurns.has(sessionId);
-  const recordTyped = opts.typed === true && !prev.typedSessions.has(sessionId);
-  if (!blocked && !pending && !opens && !recordTyped) return prev;
+  // A frame that both types and submits (a paste) leaves nothing behind: the
+  // line it opens is the line the same frame consumes.
+  const recordTyped = opening !== undefined && held === undefined && opts.submitted !== true;
+  // The submit takes the line either way: a classification latched past its own
+  // submit would mean one `/compact` silenced the session for good.
+  const clearsLine = opts.submitted === true && held !== undefined;
+  if (!blocked && !pending && !opens && !recordTyped && !clearsLine) return prev;
   let notifications = prev.notifications;
   // Opening the turn means clearing the session's turn-end notification too:
   // statusFor reads notifications BEFORE activeTurns, so a leftover
@@ -582,10 +597,12 @@ export function userReply(
     notifications = next;
   }
   let typedSessions = prev.typedSessions;
-  if (opens) {
-    typedSessions = withoutTurn(typedSessions, sessionId);
-  } else if (recordTyped) {
-    typedSessions = new Set(typedSessions).add(sessionId);
+  if (clearsLine) {
+    const next = new Map(prev.typedSessions);
+    next.delete(sessionId);
+    typedSessions = next;
+  } else if (recordTyped && opening !== undefined) {
+    typedSessions = new Map(typedSessions).set(sessionId, opening);
   }
   return build({
     ...inputsOf(prev),
@@ -596,6 +613,28 @@ export function userReply(
   }, prev);
 }
 
+/** The three maps a turn's end empties, whichever channel reported it. Shared by
+ *  {@link closeTurn}, {@link hookTurnEnd} and {@link foldNotification} so a
+ *  fourth one added here reaches all of them; [changed] is the SAME-object test. */
+function withTurnEnded(prev: WorkStatusState, sessionId: string): {
+  activeTurns: ReadonlySet<string>;
+  pendingTurns: ReadonlySet<string>;
+  pendingRequests: ReadonlyMap<string, ReadonlySet<string>>;
+  changed: boolean;
+} {
+  const activeTurns = withoutTurn(prev.activeTurns, sessionId);
+  const pendingTurns = withoutTurn(prev.pendingTurns, sessionId);
+  const pendingRequests = clearRequests(prev.pendingRequests, sessionId);
+  return {
+    activeTurns,
+    pendingTurns,
+    pendingRequests,
+    changed: activeTurns !== prev.activeTurns
+      || pendingTurns !== prev.pendingTurns
+      || pendingRequests !== prev.pendingRequests,
+  };
+}
+
 /** The turn on [sessionId] is over — its turn-end frame, a chat cancel, or a
  *  hook-based session's Esc interrupt (see {@link isInterruptKeystroke} in
  *  keystrokes.ts, dispatched from agent-core.ts, the only other
@@ -603,9 +642,7 @@ export function userReply(
  *  when there was nothing open to close, so a
  *  second Esc — or one after the real turn-end already landed — is a no-op. */
 export function closeTurn(prev: WorkStatusState, sessionId: string): WorkStatusState {
-  const activeTurns = withoutTurn(prev.activeTurns, sessionId);
-  const pendingTurns = withoutTurn(prev.pendingTurns, sessionId);
-  const pendingRequests = clearRequests(prev.pendingRequests, sessionId);
+  const { changed, ...ended } = withTurnEnded(prev, sessionId);
   // A chat session's block lives in pendingRequests; a terminal-mode session's
   // lives in notifications (the hook's permission_request/awaiting_input/
   // question) —
@@ -615,13 +652,47 @@ export function closeTurn(prev: WorkStatusState, sessionId: string): WorkStatusS
   // for the same reason: it also drops the UNATTRIBUTED fallback, since nothing
   // is left running THIS session's block against once its turn is gone.
   const notifications = clearNotifications(prev.notifications, sessionId);
-  if (activeTurns === prev.activeTurns
-    && pendingTurns === prev.pendingTurns
-    && pendingRequests === prev.pendingRequests
-    && notifications === prev.notifications) {
-    return prev;
-  }
-  return build({ ...inputsOf(prev), activeTurns, pendingTurns, pendingRequests, notifications }, prev);
+  if (!changed && notifications === prev.notifications) return prev;
+  return build({ ...inputsOf(prev), ...ended, notifications }, prev);
+}
+
+/** A hook reported [sessionId]'s turn over on a channel carrying no notification
+ *  (codex's `notify` argv) — the second closer, so an inferred turn does not hang
+ *  when the other channel is silent. NOT {@link closeTurn}: it must leave the
+ *  notifications map alone, or {@link isStaleIdleNudge} loses its only record and
+ *  every post-completion idle nudge reads as a live block. Pure. */
+export function hookTurnEnd(prev: WorkStatusState, sessionId: string): WorkStatusState {
+  const { changed, ...ended } = withTurnEnded(prev, sessionId);
+  if (!changed) return prev;
+  return build({ ...inputsOf(prev), ...ended }, prev);
+}
+
+/** [sessionId]'s hook channel has been written off, so stop inferring turn STARTS
+ *  for it and close the one it may already have inferred. The close is scoped to
+ *  {@link keystrokeTurnSessions} — a turn the agent announced for itself is real
+ *  work, not something a probe may call finished. Pure. */
+export function noteHookChannelLost(prev: WorkStatusState, sessionId: string): WorkStatusState {
+  if (prev.deadHookSessions.has(sessionId)) return prev;
+  const inferred = prev.keystrokeTurnSessions.has(sessionId);
+  const keystrokeTurnSessions = withoutTurn(prev.keystrokeTurnSessions, sessionId);
+  return build({
+    ...inputsOf(prev),
+    deadHookSessions: new Set(prev.deadHookSessions).add(sessionId),
+    keystrokeTurnSessions,
+    activeTurns: inferred ? withoutTurn(prev.activeTurns, sessionId) : prev.activeTurns,
+    pendingTurns: inferred ? withoutTurn(prev.pendingTurns, sessionId) : prev.pendingTurns,
+  }, prev);
+}
+
+/** [sessionId]'s hooks pinged after all. Drops the mark and nothing else — the
+ *  inference comes back with the next `session:updated`, which recomputes the set
+ *  from each entry's own tool rather than guessing off `defaultTool`. Pure. */
+export function noteHookChannelRestored(prev: WorkStatusState, sessionId: string): WorkStatusState {
+  if (!prev.deadHookSessions.has(sessionId)) return prev;
+  return build({
+    ...inputsOf(prev),
+    deadHookSessions: withoutTurn(prev.deadHookSessions, sessionId),
+  }, prev);
 }
 
 /** Replace one client's focus entry, or drop it when [sessionId] is undefined.
@@ -762,14 +833,9 @@ function foldNotification(
   let pendingTurns = prev.pendingTurns;
   let pendingRequests = prev.pendingRequests;
   // A turn-end notification closes the turn even when the reduction ignores the
-  // notification itself (below): the hook path is the ONLY turn-end signal a
-  // terminal-mode session has, so dropping it would leave the turn open forever
-  // and the session stuck on "working". Anything it was blocked on died with
-  // the turn.
+  // notification itself (below) — the primary closer; hookTurnEnd only backs it up.
   if (endsTurn(msg.notificationType)) {
-    activeTurns = withoutTurn(activeTurns, raw);
-    pendingTurns = withoutTurn(pendingTurns, raw);
-    pendingRequests = clearRequests(pendingRequests, raw);
+    ({ activeTurns, pendingTurns, pendingRequests } = withTurnEnded(prev, raw));
   }
   const own = prev.notifications.get(key);
   // "awaiting_input" fires from the same idle-timeout signal whether the agent
@@ -819,9 +885,16 @@ function foldSessions(
   const running = entries.filter((s) => s.running && !s.archived);
   const live = new Set(running.map((s) => s.id));
   const grew = live.size > prev.runningSessions.size;
+  const deadHookSessions = new Set<string>();
+  for (const id of prev.deadHookSessions) if (live.has(id)) deadHookSessions.add(id);
+  // The spec says which agents can't report a turn START; the dead set says which
+  // sessions can't report the matching END, and inferring without one wedges the
+  // dot on "working" — see {@link noteHookChannelLost}.
   const keystrokeTurnSessions = new Set(
     running
-      .filter((s) => s.mode !== "chat" && needsKeystrokeTurnStart(s.tool ?? prev.defaultTool))
+      .filter((s) => s.mode !== "chat"
+        && !deadHookSessions.has(s.id)
+        && needsKeystrokeTurnStart(s.tool ?? prev.defaultTool))
       .map((s) => s.id),
   );
 
@@ -848,8 +921,8 @@ function foldSessions(
   for (const [id, n] of prev.notifications) {
     if (id === UNATTRIBUTED_TURN ? live.size > 0 : live.has(id)) notifications.set(id, n);
   }
-  const typedSessions = new Set<string>();
-  for (const id of prev.typedSessions) if (live.has(id)) typedSessions.add(id);
+  const typedSessions = new Map<string, TypedLine>();
+  for (const [id, line] of prev.typedSessions) if (live.has(id)) typedSessions.set(id, line);
   // A newly-started session is a fresh turn of work — clear a stale done-type
   // UNATTRIBUTED notification so a turn-start on the new session isn't masked by
   // a fallback that predates it. The call-to-action signals ({@link
@@ -868,6 +941,7 @@ function foldSessions(
     && prev.pendingTurns.size === 0
     && pendingRequests.size === prev.pendingRequests.size
     && notifications.size === prev.notifications.size
+    && deadHookSessions.size === prev.deadHookSessions.size
     && typedSessions.size === prev.typedSessions.size) {
     return prev;
   }
@@ -877,6 +951,7 @@ function foldSessions(
     activeTurns,
     pendingTurns: EMPTY_IDS,
     keystrokeTurnSessions,
+    deadHookSessions,
     typedSessions,
     pendingRequests,
     notifications,
