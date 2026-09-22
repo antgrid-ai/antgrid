@@ -16,6 +16,18 @@ beforeAll(async () => { pg = await startTestPg(); });
 afterAll(async () => { await pg.stop(); });
 beforeEach(async () => { await pg.truncate(); });
 
+describe("colour-scheme cookie through the real app", () => {
+  // Proves contextStorage() is mounted ahead of the UI routes: Layout reads
+  // the cookie through tryGetContext(), which answers undefined — and the unit
+  // tests stay green — if a route is ever mounted above the middleware.
+  test("a stored override reaches <html> on a signed-out page", async () => {
+    const { app } = buildTestApp(pg.db, pg.url);
+    const res = await app.request("/login", { headers: { cookie: "antgrid-theme=dark" } });
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain('<html lang="en" data-theme="dark">');
+  });
+});
+
 describe("GET /account", () => {
   test("renders for a signed-in user and shows the delete control", async () => {
     const { app } = buildTestApp(pg.db, pg.url);

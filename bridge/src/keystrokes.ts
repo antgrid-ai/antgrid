@@ -63,6 +63,13 @@ export function hasTypedContent(data: string): boolean {
   return data.replace(/\r$/, "").length > 0;
 }
 
+/** Whether the payload opens one of the CLI's own `/` commands rather than a
+ *  prompt: the CLI answers those itself, running no model turn, so no turn-end
+ *  hook ever fires to close a turn inferred from one. */
+export function opensCommandLine(data: string): boolean {
+  return data.startsWith("/");
+}
+
 /**
  * The prompt inside a `terminal:input` frame that submitted one, CR stripped —
  * or null when the frame is not that shape.

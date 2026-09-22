@@ -9,6 +9,13 @@ import { Mark } from "./mark.js";
 import { absoluteUrl } from "./origin.js";
 import { SALESIQ_CONTROLLER_SCRIPT, salesIqSupportLauncher } from "./salesiq.js";
 import { Analytics } from "./analytics.js";
+import {
+  THEME_CHOICES,
+  THEME_TOGGLE_SCRIPT,
+  currentTheme,
+  themeColorMedia,
+  type Theme,
+} from "./theme.js";
 
 /** Which nav entry the current page IS, so it can be marked. Pages without an
  *  entry of their own (account, sign-in, checkout) pass nothing. */
@@ -46,15 +53,23 @@ const NAV: { section: NavSection; href: string; label: string }[] = [
 ];
 
 export function Layout({ title, user, section, children }: LayoutProps) {
+  // Rendered into the markup rather than applied by a script: the first frame
+  // is then already the reader's scheme, with nothing to flash. Absent when
+  // there is no override, and hono/jsx omits an undefined attribute, so the
+  // page follows the OS through `color-scheme: light dark`.
+  const theme = currentTheme();
   return (
-    <html lang="en" data-theme="dark">
+    <html lang="en" data-theme={theme}>
       <head>
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
-        {/* --color-page. The browser paints this around and behind the document
-            before any CSS lands, so a value that is not the page's own is a
-            visible band on mobile. */}
-        <meta name="theme-color" content="#101015" />
+        {/* The two halves of --color-page in styles.css; tests/ui/layout.test.ts
+            holds them together. The browser paints this around and behind the
+            document before any CSS lands, so a value that is not the page's
+            own is a visible band on mobile. Light FIRST: Chrome takes the first
+            meta whose `media` matches. */}
+        <meta name="theme-color" media={themeColorMedia("light", theme)} content="#f5f5f7" data-scheme="light" />
+        <meta name="theme-color" media={themeColorMedia("dark", theme)} content="#101015" data-scheme="dark" />
         <title>{title} · Antgrid</title>
         <link rel="icon" href="/logo/favicon.ico" sizes="any" />
         <link rel="icon" type="image/svg+xml" href="/logo/antgrid-favicon.svg" />
@@ -97,7 +112,7 @@ export function Layout({ title, user, section, children }: LayoutProps) {
               <Mark />
               <Wordmark />
               {BETA && (
-                <span class="rounded-full bg-signalbtn px-1.5 py-px text-[0.59375rem] font-medium text-page">
+                <span class="rounded-full bg-signalbtn px-1.5 py-px text-[0.59375rem] font-medium text-signalink">
                   beta
                 </span>
               )}
@@ -133,7 +148,7 @@ export function Layout({ title, user, section, children }: LayoutProps) {
             )}
             <div class="flex-1" />
             {user ? (
-              <AccountMenu user={user} />
+              <AccountMenu user={user} theme={theme} />
             ) : user === null ? (
               // `null` = a product page being read signed out, where this is the
               // way in. `undefined` = an auth page, which IS the way in — there
@@ -149,7 +164,10 @@ export function Layout({ title, user, section, children }: LayoutProps) {
         {salesIqSupportLauncher(user ?? undefined)}
         <script dangerouslySetInnerHTML={{ __html: SALESIQ_CONTROLLER_SCRIPT }} />
         {user && (
-          <script dangerouslySetInnerHTML={{ __html: ACCOUNT_MENU_SCRIPT }} />
+          <>
+            <script dangerouslySetInnerHTML={{ __html: ACCOUNT_MENU_SCRIPT }} />
+            <script dangerouslySetInnerHTML={{ __html: THEME_TOGGLE_SCRIPT }} />
+          </>
         )}
         <Analytics />
       </body>
@@ -172,7 +190,7 @@ export function Layout({ title, user, section, children }: LayoutProps) {
  * twice. Here it is also on phones, where the trigger has always been the
  * avatar alone.
  */
-function AccountMenu({ user }: { user: LayoutUser }) {
+function AccountMenu({ user, theme }: { user: LayoutUser; theme: Theme | undefined }) {
   const email = user.email;
   return (
     <details class="group relative shrink-0" data-account-menu>
@@ -185,7 +203,7 @@ function AccountMenu({ user }: { user: LayoutUser }) {
         </span>
         <ChevronIcon />
       </summary>
-      <div class="absolute right-0 top-full z-20 mt-2 w-64 overflow-hidden rounded-box border border-edge bg-panel shadow-lg shadow-black/40">
+      <div class="absolute right-0 top-full z-20 mt-2 w-64 overflow-hidden rounded-box border border-edge bg-panel shadow-menu">
         <div class="border-b border-edge-inner px-3.5 py-2.5">
           <div class="text-[0.6875rem] font-medium uppercase tracking-[0.12em] text-muted2">
             Signed in as
@@ -205,6 +223,33 @@ function AccountMenu({ user }: { user: LayoutUser }) {
             <PersonIcon />
             Account
           </a>
+        </div>
+        {/* The colour-scheme override, and the only place in this service it
+            lives: the page follows the OS by itself, and a signed-out reader
+            set theirs on the marketing site, whose cookie this reads. The
+            pressed state is rendered from that cookie, so the menu opens
+            already agreeing with the page. */}
+        <div class="border-t border-edge-inner px-3.5 py-2.5">
+          <div class="text-[0.6875rem] font-medium uppercase tracking-[0.12em] text-muted2">
+            Colour scheme
+          </div>
+          <div
+            role="group"
+            aria-label="Colour scheme"
+            data-theme-toggle
+            class="mt-1.5 inline-flex overflow-hidden rounded-field border border-edge font-mono text-xs"
+          >
+            {THEME_CHOICES.map(([choice, label]) => (
+              <button
+                type="button"
+                data-theme-choice={choice}
+                aria-pressed={choice === (theme ?? "system") ? "true" : "false"}
+                class="px-2.5 py-1 text-muted hover:text-ink aria-pressed:bg-chrome aria-pressed:text-ink"
+              >
+                {label}
+              </button>
+            ))}
+          </div>
         </div>
         <form method="post" action="/logout" class="border-t border-edge-inner p-1" data-salesiq-logout="true">
           {/* Not permanently red. Signing out is routine and reversible; danger
