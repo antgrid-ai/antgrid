@@ -113,11 +113,10 @@ export async function handleRevoke(req: Request, deps: InternalRouteDeps): Promi
   //
   // Then narrowed to the revoking account: a deviceId is unique per ACCOUNT,
   // not globally, so the same one can be live under a second user who revoked
-  // nothing (see RevokeBody). Connections past hello always carry `claims`;
-  // one without them has no proven account, so it cannot be the target.
+  // nothing (see RevokeBody).
   const conns = deps.connections
     .getByAccountDevice(deviceId)
-    .filter((c) => userId === undefined || c.claims?.uid === userId);
+    .filter((c) => userId === undefined || c.uid === userId);
   let closed = 0;
   for (const conn of conns) {
     if (closeWithLicense(conn, "LICENSE_REVOKED")) closed += 1;

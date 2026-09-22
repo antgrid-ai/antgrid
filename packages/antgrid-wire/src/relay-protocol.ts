@@ -60,11 +60,8 @@ export const WelcomeMessage = z.object({
 
 export const ErrorCode = z.enum([
   "AUTH_FAILED",
-  "MAX_CONNECTIONS",
-  "RATE_LIMITED",
   "INVALID_MESSAGE",
   "NOT_AUTHENTICATED",
-  "WRONG_DEVICE_TYPE",
   "MESSAGE_RATE_LIMITED",
   "LICENSE_INVALID",
   "LICENSE_EXPIRED",
@@ -73,9 +70,6 @@ export const ErrorCode = z.enum([
   // License verification infrastructure (JWKS) unreachable — the client's
   // credentials may be fine; retryable, unlike the LICENSE_* verdicts above.
   "LICENSE_UNAVAILABLE",
-  "UNKNOWN_PHONE",
-  "NONCE_MISMATCH",
-  "APPROVAL_EXPIRED",
   "SUPERSEDED", // epoch arbitration lost to a newer connection; retryable: false
   "PROTOCOL_VIOLATION", // malformed/unexpected frame incl. non-hello first frame; retryable: false
 ]);

@@ -8,6 +8,8 @@ import {
   defaultConfig,
   connect,
   makeHello,
+  makeFakeLicenseGate,
+  waitForClose,
   waitForMessage,
   type RelayServer,
 } from "./helpers/relay-harness.js";
@@ -132,4 +134,68 @@ test("app hello without a licenseToken fails schema -> PROTOCOL_VIOLATION", asyn
   const err = await first;
   expect(err).toMatchObject({ type: "error", code: "PROTOCOL_VIOLATION", retryable: false });
   expect(await closed).toBe(1008);
+});
+
+test("closing during delayed verification never inserts a connection", async () => {
+  let releaseVerification!: () => void;
+  let verificationStarted!: () => void;
+  const blocked = new Promise<void>((resolve) => { releaseVerification = resolve; });
+  const started = new Promise<void>((resolve) => { verificationStarted = resolve; });
+  const base = makeFakeLicenseGate();
+  const gate: LicenseGate = {
+    async verify(token, deviceId, publicKey) {
+      verificationStarted();
+      await blocked;
+      return base.verify(token, deviceId, publicKey);
+    },
+    async verifyAppToken(token) {
+      verificationStarted();
+      await blocked;
+      return base.verifyAppToken(token);
+    },
+  };
+  relay = startServer(defaultConfig, { licenseGate: gate });
+  const { hello } = await makeHello(relay, { deviceId: "agent-close-during-auth" });
+  const ws = await connect(relay);
+  ws.send(JSON.stringify(hello));
+  await started;
+  const closed = waitForClose(ws);
+  ws.close();
+  await closed;
+  releaseVerification();
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  expect(relay.connections.getConnectionCount()).toBe(0);
+});
+
+test("a concurrent hello fences the in-flight authentication result", async () => {
+  let releaseVerification!: () => void;
+  let verificationStarted!: () => void;
+  const blocked = new Promise<void>((resolve) => { releaseVerification = resolve; });
+  const started = new Promise<void>((resolve) => { verificationStarted = resolve; });
+  const base = makeFakeLicenseGate();
+  const gate: LicenseGate = {
+    async verify(token, deviceId, publicKey) {
+      verificationStarted();
+      await blocked;
+      return base.verify(token, deviceId, publicKey);
+    },
+    async verifyAppToken(token) {
+      verificationStarted();
+      await blocked;
+      return base.verifyAppToken(token);
+    },
+  };
+  relay = startServer(defaultConfig, { licenseGate: gate });
+  const { hello } = await makeHello(relay, { deviceId: "agent-concurrent-hello" });
+  const ws = await connect(relay);
+  const error = waitForMessage(ws);
+  const closed = waitForClose(ws);
+  ws.send(JSON.stringify(hello));
+  await started;
+  ws.send(JSON.stringify(hello));
+  expect(await error).toMatchObject({ type: "error", code: "PROTOCOL_VIOLATION" });
+  expect(await closed).toBe(1008);
+  releaseVerification();
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  expect(relay.connections.getConnectionCount()).toBe(0);
 });

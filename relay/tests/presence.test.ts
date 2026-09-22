@@ -20,7 +20,7 @@ afterEach(() => {
 });
 
 // Presence is account-scoped discovery and requires no pairing or payload route.
-test("same-account, no grant: bidirectional peer-online when the agent connects after the app", async () => {
+test("agent connection notifies an existing same-account app only", async () => {
   const sharedToken = "presence-shared-hello";
   const gate = makeFakeLicenseGate({ agentUid: () => `user-app-${sharedToken}` });
   relay = startServer(defaultConfig, { licenseGate: gate });
@@ -41,13 +41,48 @@ test("same-account, no grant: bidirectional peer-online when the agent connects 
   // listener.
   const { hello } = await makeHello(relay, { deviceId: agentId, deviceType: "agent", licenseToken: sharedToken });
   const agentWs = await connect(relay);
-  const agentMessages = waitForMessages(agentWs, 2);
+  const agentPresence: Record<string, unknown>[] = [];
+  agentWs.addEventListener("message", (e) => {
+    const message = decodeMessage((e as MessageEvent).data);
+    if (message.type === "peer-online" || message.type === "peer-offline") agentPresence.push(message);
+  });
+  const agentMessages = waitForMessages(agentWs, 1);
   agentWs.send(JSON.stringify(hello));
-  const [welcome, agentPeerOnline] = await agentMessages;
+  const [welcome] = await agentMessages;
 
   expect(welcome.type).toBe("welcome");
-  expect(agentPeerOnline).toEqual({ type: "peer-online", peerId: appId });
   expect(await appPeerOnline).toEqual({ type: "peer-online", peerId: agentId });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  expect(agentPresence).toEqual([]);
+});
+
+test("new app receives online same-account agents without notifying agents", async () => {
+  const sharedToken = "presence-app-joins";
+  const gate = makeFakeLicenseGate({ agentUid: () => `user-app-${sharedToken}` });
+  relay = startServer(defaultConfig, { licenseGate: gate });
+
+  const agent = await connectHello(relay, {
+    deviceId: "presence-agent-existing",
+    deviceType: "agent",
+    licenseToken: sharedToken,
+  });
+  const agentPresence: Record<string, unknown>[] = [];
+  agent.ws.addEventListener("message", (e) => agentPresence.push(decodeMessage((e as MessageEvent).data)));
+
+  const { hello } = await makeHello(relay, {
+    deviceId: "presence-app-new",
+    deviceType: "app",
+    licenseToken: sharedToken,
+  });
+  const app = await connect(relay);
+  const messages = waitForMessages(app, 2);
+  app.send(JSON.stringify(hello));
+  const [welcome, online] = await messages;
+
+  expect(welcome.type).toBe("welcome");
+  expect(online).toEqual({ type: "peer-online", peerId: "presence-agent-existing" });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  expect(agentPresence).toEqual([]);
 });
 
 test("same-account, no grant: agent close -> app gets peer-offline", async () => {

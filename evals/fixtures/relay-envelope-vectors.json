@@ -23,26 +23,6 @@
       }
     },
     {
-      "name": "error:MAX_CONNECTIONS",
-      "dart": "parsed",
-      "json": {
-        "type": "error",
-        "code": "MAX_CONNECTIONS",
-        "message": "sample MAX_CONNECTIONS",
-        "retryable": false
-      }
-    },
-    {
-      "name": "error:RATE_LIMITED",
-      "dart": "parsed",
-      "json": {
-        "type": "error",
-        "code": "RATE_LIMITED",
-        "message": "sample RATE_LIMITED",
-        "retryable": true
-      }
-    },
-    {
       "name": "error:INVALID_MESSAGE",
       "dart": "parsed",
       "json": {
@@ -59,16 +39,6 @@
         "type": "error",
         "code": "NOT_AUTHENTICATED",
         "message": "sample NOT_AUTHENTICATED",
-        "retryable": false
-      }
-    },
-    {
-      "name": "error:WRONG_DEVICE_TYPE",
-      "dart": "parsed",
-      "json": {
-        "type": "error",
-        "code": "WRONG_DEVICE_TYPE",
-        "message": "sample WRONG_DEVICE_TYPE",
         "retryable": false
       }
     },
@@ -130,36 +100,6 @@
         "code": "LICENSE_UNAVAILABLE",
         "message": "sample LICENSE_UNAVAILABLE",
         "retryable": true
-      }
-    },
-    {
-      "name": "error:UNKNOWN_PHONE",
-      "dart": "parsed",
-      "json": {
-        "type": "error",
-        "code": "UNKNOWN_PHONE",
-        "message": "sample UNKNOWN_PHONE",
-        "retryable": false
-      }
-    },
-    {
-      "name": "error:NONCE_MISMATCH",
-      "dart": "parsed",
-      "json": {
-        "type": "error",
-        "code": "NONCE_MISMATCH",
-        "message": "sample NONCE_MISMATCH",
-        "retryable": false
-      }
-    },
-    {
-      "name": "error:APPROVAL_EXPIRED",
-      "dart": "parsed",
-      "json": {
-        "type": "error",
-        "code": "APPROVAL_EXPIRED",
-        "message": "sample APPROVAL_EXPIRED",
-        "retryable": false
       }
     },
     {

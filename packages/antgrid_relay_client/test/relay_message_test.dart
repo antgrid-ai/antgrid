@@ -160,37 +160,4 @@ void main() {
     });
   });
 
-  group('RelayErrorCode', () {
-    test('round-trips all v3 wire codes', () {
-      const wires = [
-        'AUTH_FAILED',
-        'MAX_CONNECTIONS',
-        'RATE_LIMITED',
-        'INVALID_MESSAGE',
-        'NOT_AUTHENTICATED',
-        'WRONG_DEVICE_TYPE',
-        'MESSAGE_RATE_LIMITED',
-        'LICENSE_UNAVAILABLE',
-        'UNKNOWN_PHONE',
-        'NONCE_MISMATCH',
-        'APPROVAL_EXPIRED',
-        'SUPERSEDED',
-        'PROTOCOL_VIOLATION',
-      ];
-      for (final w in wires) {
-        final code = RelayErrorCode.fromWire(w);
-        expect(code, isNotNull, reason: 'fromWire($w) should resolve');
-        expect(code!.wireValue, w);
-      }
-    });
-
-    test('removed PARENT_AGENT_DISCONNECTED no longer resolves', () {
-      expect(RelayErrorCode.fromWire('PARENT_AGENT_DISCONNECTED'), isNull);
-    });
-
-    test('returns null for unknown code', () {
-      expect(RelayErrorCode.fromWire('SOMETHING_ELSE'), isNull);
-      expect(RelayErrorCode.fromWire(null), isNull);
-    });
-  });
 }

@@ -19,7 +19,6 @@ const AGENT_ID = "33333333-3333-4333-8333-333333333333";
 
 // Sample retryable flags only — realistic, but the relay decides for real.
 const RETRYABLE_SAMPLE = new Set([
-  "RATE_LIMITED",
   "MESSAGE_RATE_LIMITED",
   "LICENSE_UNAVAILABLE",
 ]);

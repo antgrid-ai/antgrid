@@ -1,4 +1,5 @@
 import { parseTrustedProxies, type Cidr } from "antgrid-wire";
+import { z } from "zod/v4";
 
 export interface RelayConfig {
   port: number;
@@ -57,89 +58,94 @@ export interface RelayConfig {
   apnsProduction?: boolean;
 }
 
-function requireEnv(name: string): string {
-  const value = process.env[name];
-  if (!value || value.length === 0) {
-    throw new Error(`Missing required env var: ${name}`);
-  }
-  return value;
-}
+const positiveInt = (fallback: string) => z.string()
+  .regex(/^[0-9]+$/, "must be a positive integer")
+  .default(fallback)
+  .transform(Number)
+  .pipe(z.number().int().positive());
 
-function requireEnvMinLength(name: string, minLength: number): string {
-  const value = requireEnv(name);
-  if (value.length < minLength) {
-    throw new Error(`Env var ${name} must be at least ${minLength} characters`);
+const optionalText = z.string().min(1).optional();
+const RelayEnvironment = z.object({
+  PORT: positiveInt("8080").pipe(z.number().max(65535)),
+  MAX_CONNECTIONS: positiveInt("10000"),
+  RATE_LIMIT_CONN_PER_IP: positiveInt("10"),
+  RATE_LIMIT_PUSH_PER_SEC: positiveInt("100"),
+  JSON_RATE_LIMIT_PER_SEC: positiveInt("10"),
+  JSON_RATE_LIMIT_BURST: positiveInt("30"),
+  CLOCK_SKEW_MS: positiveInt("120000"),
+  REPLAY_TTL_MS: positiveInt("300000"),
+  PING_INTERVAL_MS: positiveInt("30000"),
+  PONG_TIMEOUT_MS: positiveInt("10000"),
+  TRUSTED_PROXY_IPS: z.string().optional().transform((value, ctx) => {
+    try {
+      return parseTrustedProxies(value);
+    } catch (error) {
+      ctx.addIssue({ code: "custom", message: `invalid trusted proxy list: ${String(error)}` });
+      return z.NEVER;
+    }
+  }),
+  LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
+  LICENSE_API_URL: z.url(),
+  LICENSE_API_JWKS_PATH: optionalText,
+  LICENSE_ISSUER_URL: z.url().optional(),
+  RELAY_INTERNAL_SECRET: z.string().min(16),
+  LICENSE_CACHE_MAX_ENTRIES: positiveInt("100000"),
+  FCM_PROJECT_ID: optionalText,
+  FCM_CLIENT_EMAIL: z.email().optional(),
+  FCM_PRIVATE_KEY: optionalText,
+  APNS_KEY_ID: optionalText,
+  APNS_TEAM_ID: optionalText,
+  APNS_PRIVATE_KEY: optionalText,
+  APNS_BUNDLE_ID: optionalText,
+  APNS_PRODUCTION: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
+}).superRefine((env, ctx) => {
+  if (env.REPLAY_TTL_MS < 2 * env.CLOCK_SKEW_MS) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["REPLAY_TTL_MS"],
+      message: "must be at least 2 * CLOCK_SKEW_MS",
+    });
   }
-  return value;
-}
-
-/**
- * Validate the FCM push credentials as a unit at load, so a half-configured or
- * malformed relay fails fast at startup instead of either silently answering
- * every push "unconfigured" (partial config) or throwing deep in `importPKCS8`
- * on the first push under load (garbage private key). Push stays OPTIONAL: all
- * three unset is valid (push disabled). Returns the (possibly undefined) triple.
- */
-function loadFcmConfig(): Pick<RelayConfig, "fcmProjectId" | "fcmClientEmail" | "fcmPrivateKey"> {
-  const fcmProjectId = process.env.FCM_PROJECT_ID || undefined;
-  const fcmClientEmail = process.env.FCM_CLIENT_EMAIL || undefined;
-  const fcmPrivateKey = process.env.FCM_PRIVATE_KEY || undefined;
-
-  const present = [fcmProjectId, fcmClientEmail, fcmPrivateKey].filter(Boolean).length;
-  if (present === 0) return {}; // push disabled — valid
-  if (present !== 3) {
-    throw new Error(
-      "FCM push is partially configured: FCM_PROJECT_ID, FCM_CLIENT_EMAIL and FCM_PRIVATE_KEY " +
-        `must all be set together (or all unset). Got ${present}/3.`,
-    );
+  const fcm = [env.FCM_PROJECT_ID, env.FCM_CLIENT_EMAIL, env.FCM_PRIVATE_KEY];
+  if (fcm.filter(Boolean).length !== 0 && fcm.filter(Boolean).length !== fcm.length) {
+    ctx.addIssue({ code: "custom", path: ["FCM_PROJECT_ID"], message: "FCM credentials must all be set together" });
   }
-  // Env stores the PEM with literal "\n"; the same restore server-side does
-  // before importing. Fail fast on a value that plainly isn't a PKCS#8 key.
-  const pem = fcmPrivateKey!.replace(/\\n/g, "\n");
-  if (!pem.includes("-----BEGIN PRIVATE KEY-----")) {
-    throw new Error(
-      "FCM_PRIVATE_KEY is not a PKCS#8 PEM (missing '-----BEGIN PRIVATE KEY-----' header).",
-    );
+  if (env.FCM_PRIVATE_KEY && !env.FCM_PRIVATE_KEY.replace(/\\n/g, "\n").includes("-----BEGIN PRIVATE KEY-----")) {
+    ctx.addIssue({ code: "custom", path: ["FCM_PRIVATE_KEY"], message: "must be a PKCS#8 private key" });
   }
-  return { fcmProjectId, fcmClientEmail, fcmPrivateKey };
-}
+  const apns = [env.APNS_KEY_ID, env.APNS_TEAM_ID, env.APNS_PRIVATE_KEY, env.APNS_BUNDLE_ID];
+  if (apns.filter(Boolean).length !== 0 && apns.filter(Boolean).length !== apns.length) {
+    ctx.addIssue({ code: "custom", path: ["APNS_KEY_ID"], message: "APNs credentials must all be set together" });
+  }
+});
 
 export function loadConfig(): RelayConfig {
-  const clockSkewMs = parseInt(process.env.CLOCK_SKEW_MS || "120000", 10);
-  const replayTtlMs = parseInt(process.env.REPLAY_TTL_MS || "300000", 10);
-  // A replayable hello is only accepted inside ±clockSkewMs of its signed `ts`,
-  // so the replay cache must retain a seen nonce for at least that full window
-  // on both sides. If REPLAY_TTL_MS < 2·CLOCK_SKEW_MS a nonce can TTL-expire
-  // while its `ts` is still inside the accept window, re-opening plain replay.
-  if (replayTtlMs < 2 * clockSkewMs) {
-    throw new Error(
-      `REPLAY_TTL_MS (${replayTtlMs}) must be >= 2 * CLOCK_SKEW_MS (${2 * clockSkewMs}) ` +
-        `or a hello nonce can expire from the replay cache while still inside its accept window`,
-    );
-  }
+  const env = RelayEnvironment.parse(process.env);
   return {
-    port: parseInt(process.env.PORT || "8080", 10),
-    maxConnections: parseInt(process.env.MAX_CONNECTIONS || "10000", 10),
-    rateLimitConnPerIp: parseInt(process.env.RATE_LIMIT_CONN_PER_IP || "10", 10),
-    pushRateLimitPerSec: parseInt(process.env.RATE_LIMIT_PUSH_PER_SEC || "100", 10),
-    jsonRateLimitPerSec: parseInt(process.env.JSON_RATE_LIMIT_PER_SEC || "10", 10),
-    jsonRateLimitBurst: parseInt(process.env.JSON_RATE_LIMIT_BURST || "30", 10),
-    clockSkewMs,
-    replayTtlMs,
-    pingIntervalMs: parseInt(process.env.PING_INTERVAL_MS || "30000", 10),
-    pongTimeoutMs: parseInt(process.env.PONG_TIMEOUT_MS || "10000", 10),
-    trustedProxyIps: parseTrustedProxies(process.env.TRUSTED_PROXY_IPS),
-    logLevel: (process.env.LOG_LEVEL as RelayConfig["logLevel"]) || "info",
-    licenseApiUrl: requireEnv("LICENSE_API_URL"),
-    licenseApiJwksPath: process.env.LICENSE_API_JWKS_PATH || undefined,
-    licenseIssuerUrl: process.env.LICENSE_ISSUER_URL || undefined,
-    relayInternalSecret: requireEnvMinLength("RELAY_INTERNAL_SECRET", 16),
-    licenseCacheMaxEntries: parseInt(process.env.LICENSE_CACHE_MAX_ENTRIES || "100000", 10),
-    ...loadFcmConfig(),
-    apnsKeyId: process.env.APNS_KEY_ID || undefined,
-    apnsTeamId: process.env.APNS_TEAM_ID || undefined,
-    apnsPrivateKey: process.env.APNS_PRIVATE_KEY || undefined,
-    apnsBundleId: process.env.APNS_BUNDLE_ID || undefined,
-    apnsProduction: process.env.APNS_PRODUCTION === "true",
+    port: env.PORT,
+    maxConnections: env.MAX_CONNECTIONS,
+    rateLimitConnPerIp: env.RATE_LIMIT_CONN_PER_IP,
+    pushRateLimitPerSec: env.RATE_LIMIT_PUSH_PER_SEC,
+    jsonRateLimitPerSec: env.JSON_RATE_LIMIT_PER_SEC,
+    jsonRateLimitBurst: env.JSON_RATE_LIMIT_BURST,
+    clockSkewMs: env.CLOCK_SKEW_MS,
+    replayTtlMs: env.REPLAY_TTL_MS,
+    pingIntervalMs: env.PING_INTERVAL_MS,
+    pongTimeoutMs: env.PONG_TIMEOUT_MS,
+    trustedProxyIps: env.TRUSTED_PROXY_IPS,
+    logLevel: env.LOG_LEVEL,
+    licenseApiUrl: env.LICENSE_API_URL,
+    licenseApiJwksPath: env.LICENSE_API_JWKS_PATH,
+    licenseIssuerUrl: env.LICENSE_ISSUER_URL,
+    relayInternalSecret: env.RELAY_INTERNAL_SECRET,
+    licenseCacheMaxEntries: env.LICENSE_CACHE_MAX_ENTRIES,
+    fcmProjectId: env.FCM_PROJECT_ID,
+    fcmClientEmail: env.FCM_CLIENT_EMAIL,
+    fcmPrivateKey: env.FCM_PRIVATE_KEY,
+    apnsKeyId: env.APNS_KEY_ID,
+    apnsTeamId: env.APNS_TEAM_ID,
+    apnsPrivateKey: env.APNS_PRIVATE_KEY,
+    apnsBundleId: env.APNS_BUNDLE_ID,
+    apnsProduction: env.APNS_PRODUCTION,
   };
 }

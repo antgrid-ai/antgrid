@@ -17,18 +17,7 @@ export interface WsData {
    */
   relayHost: string;
   deviceId?: string;
-  phase: "awaiting-hello" | "ready";
-  /** License credential id (`azp`) — lets /internal/revoke find the socket. */
-  jti?: string;
-}
-
-/** Verified identity carried by a live connection past hello. */
-export interface ConnectionClaims {
-  /** Account id (`claims.uid`) used for presence and policy fan-out. */
-  uid: string;
-  tier?: string;
-  /** License credential id (`azp`) for revocation lookup. */
-  jti?: string;
+  phase: "awaiting-hello" | "authenticating" | "ready" | "closed";
 }
 
 /** A live connection — an entry exists iff a socket is open and past hello. */
@@ -36,7 +25,7 @@ export interface Connection {
   connectionId: string;
   deviceId: string;
   deviceType: "agent" | "app";
-  name: string;
+  uid: string;
   publicKey: string;
   epoch: number;
   /**
@@ -53,11 +42,9 @@ export interface Connection {
   helloNonce: string;
   helloTs: number;
   ws: ServerWebSocket<WsData>;
-  ip: string;
   connectedAt: number;
   /** Transport diagnostics only — NEVER consulted for arbitration. */
   lastSeen: number;
-  claims?: ConnectionClaims;
 }
 
 /**
@@ -82,23 +69,19 @@ export interface ConnectionSummary {
 export class Connections {
   private readonly byConnectionId = new Map<string, Connection>();
   private readonly byDeviceId = new Map<string, Connection>();
-  // Per-account index so same-account fan-out (presencePeers) is O(peers), not
+  // Per-account index so same-account presence fan-out is O(peers), not
   // an O(n) scan of every live connection on every hello/disconnect.
   private readonly byUid = new Map<string, Set<Connection>>();
-  private readonly ipCounts = new Map<string, number>();
 
   insert(conn: Connection): void {
     this.byConnectionId.set(conn.connectionId, conn);
     this.byDeviceId.set(conn.deviceId, conn);
-    const uid = conn.claims?.uid;
-    if (uid !== undefined) {
-      let set = this.byUid.get(uid);
-      if (!set) {
-        set = new Set<Connection>();
-        this.byUid.set(uid, set);
-      }
-      set.add(conn);
+    let set = this.byUid.get(conn.uid);
+    if (!set) {
+      set = new Set<Connection>();
+      this.byUid.set(conn.uid, set);
     }
+    set.add(conn);
   }
 
   /**
@@ -110,13 +93,10 @@ export class Connections {
     if (this.byDeviceId.get(conn.deviceId) === conn) {
       this.byDeviceId.delete(conn.deviceId);
     }
-    const uid = conn.claims?.uid;
-    if (uid !== undefined) {
-      const set = this.byUid.get(uid);
-      if (set) {
-        set.delete(conn);
-        if (set.size === 0) this.byUid.delete(uid);
-      }
+    const set = this.byUid.get(conn.uid);
+    if (set) {
+      set.delete(conn);
+      if (set.size === 0) this.byUid.delete(conn.uid);
     }
   }
 
@@ -160,22 +140,6 @@ export class Connections {
     if (c) c.lastSeen = Date.now();
   }
 
-  incrementIpCount(ip: string): number {
-    const count = (this.ipCounts.get(ip) ?? 0) + 1;
-    this.ipCounts.set(ip, count);
-    return count;
-  }
-
-  decrementIpCount(ip: string): void {
-    const count = this.ipCounts.get(ip) ?? 0;
-    if (count <= 1) this.ipCounts.delete(ip);
-    else this.ipCounts.set(ip, count - 1);
-  }
-
-  getConnectionCountByIp(ip: string): number {
-    return this.ipCounts.get(ip) ?? 0;
-  }
-
   getConnectionCount(): number {
     return this.byDeviceId.size;
   }
@@ -196,7 +160,7 @@ export class Connections {
   listConnectionsForUser(userId: string): ConnectionSummary[] {
     const out: ConnectionSummary[] = [];
     for (const c of this.byDeviceId.values()) {
-      if (c.claims?.uid === userId) out.push(this.toSummary(c));
+      if (c.uid === userId) out.push(this.toSummary(c));
     }
     return out;
   }
@@ -205,7 +169,6 @@ export class Connections {
     this.byConnectionId.clear();
     this.byDeviceId.clear();
     this.byUid.clear();
-    this.ipCounts.clear();
     logger.debug("connections cleared");
   }
 }

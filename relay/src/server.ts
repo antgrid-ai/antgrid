@@ -14,6 +14,7 @@ import { createLicenseGate, type LicenseGate } from "./license/gate.js";
 import { deviceTokenIssuer } from "./license/verify.js";
 import { handleRevoke, handleExpire, handleListConnections, handlePeerPolicy } from "./license/internal-routes.js";
 import { resolveClientIp, type ClientIpDegradation } from "antgrid-wire";
+import { SocketAdmissions } from "./socket-admissions.js";
 
 const VERSION = "0.1.0";
 const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
@@ -72,6 +73,7 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
   });
 
   const connections = new Connections();
+  const admissions = new SocketAdmissions(config.maxConnections, config.rateLimitConnPerIp);
   const replayCache = new ReplayCache({ ttlMs: config.replayTtlMs });
   const pushRateLimiter = new MessageRateLimiter(config.pushRateLimitPerSec);
   const jsonRateLimiter = new TokenBucketRateLimiter(config.jsonRateLimitPerSec, config.jsonRateLimitBurst);
@@ -139,6 +141,7 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
     opts: ErrorOpts = {},
   ): void {
     sendError(ws, code, message, retryable, opts);
+    ws.data.phase = "closed";
     try { ws.close(closeCode, code); } catch { /* already closing */ }
   }
 
@@ -146,7 +149,7 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
    *  connections of the OPPOSITE device type, deduped. Cross-type only — the
    *  app's presence handler treats any frame on a machine's socket as that
    *  machine's presence, so sibling-app noise must never reach it. */
-  function presencePeers(conn: Connection): Connection[] {
+  function sameAccountPeers(conn: Connection, deviceType: Connection["deviceType"]): Connection[] {
     const seen = new Set<string>();
     const out: Connection[] = [];
     const add = (peer: Connection | undefined) => {
@@ -155,17 +158,15 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
       seen.add(peer.deviceId);
       out.push(peer);
     };
-    const uid = conn.claims?.uid;
-    if (uid !== undefined) {
-      for (const peer of connections.getConnectionsForUser(uid)) {
-        if (peer.deviceType !== conn.deviceType) add(peer);
-      }
+    for (const peer of connections.getConnectionsForUser(conn.uid)) {
+      if (peer.deviceType === deviceType) add(peer);
     }
     return out;
   }
 
-  function fanOutPeerPresence(conn: Connection, event: "peer-online" | "peer-offline"): void {
-    for (const peer of presencePeers(conn)) {
+  function fanOutAgentPresence(conn: Connection, event: "peer-online" | "peer-offline"): void {
+    if (conn.deviceType !== "agent") return;
+    for (const peer of sameAccountPeers(conn, "app")) {
       sendJson(peer.ws, { type: event, peerId: conn.deviceId });
     }
   }
@@ -230,7 +231,7 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
     }
 
     // (5) License gate.
-    let claims: Connection["claims"];
+    let uid: string;
     if (hello.deviceType === "agent") {
       const gateResult = await licenseGate.verify(hello.licenseToken, hello.deviceId, hello.publicKey);
       if (!gateResult.ok) {
@@ -240,11 +241,7 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
         sendErrorAndClose(ws, gateResult.code, `license: ${gateResult.code}`, retryable, 1008);
         return;
       }
-      claims = {
-        uid: gateResult.entry.userId,
-        tier: gateResult.entry.tier,
-        jti: gateResult.entry.jti,
-      };
+      uid = gateResult.entry.userId;
     } else {
       const gateResult = await licenseGate.verifyAppToken(hello.licenseToken);
       if (!gateResult.ok) {
@@ -252,12 +249,10 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
         sendErrorAndClose(ws, gateResult.code, `license: ${gateResult.code}`, retryable, 1008);
         return;
       }
-      claims = {
-        uid: gateResult.entry.userId,
-        tier: gateResult.entry.tier,
-        jti: gateResult.entry.jti,
-      };
+      uid = gateResult.entry.userId;
     }
+
+    if (ws.data.phase !== "authenticating" || ws.readyState !== 1) return;
 
     // (6) Epoch arbitration.
     const existing = connections.getByDeviceId(hello.deviceId);
@@ -307,21 +302,18 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
       connectionId: ws.data.connectionId,
       deviceId: hello.deviceId,
       deviceType: hello.deviceType,
-      name: hello.name,
+      uid,
       publicKey: hello.publicKey,
       epoch: hello.epoch,
       helloNonce: hello.nonce,
       helloTs: tsMs,
       ws,
-      ip: ws.data.ip,
       connectedAt: now,
       lastSeen: now,
-      claims,
     };
     connections.insert(conn);
     liveness.add(conn.connectionId, now);
     ws.data.deviceId = hello.deviceId;
-    ws.data.jti = claims?.jti;
     ws.data.phase = "ready";
     clearHelloTimer(ws.data.connectionId);
 
@@ -332,12 +324,14 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
       serverTime: new Date(now).toISOString(),
     });
 
-    // A reconnecting device with a live same-account peer is immediately
-    // reachable — tell both sides so a mid-session phone can trigger its
-    // rekey.
-    for (const peer of presencePeers(conn)) {
-      sendJson(peer.ws, { type: "peer-online", peerId: conn.deviceId });
-      sendJson(ws, { type: "peer-online", peerId: peer.deviceId });
+    // Apps discover already-online agents on admission; agents only publish
+    // their own availability to apps.
+    if (conn.deviceType === "agent") {
+      fanOutAgentPresence(conn, "peer-online");
+    } else {
+      for (const agent of sameAccountPeers(conn, "agent")) {
+        sendJson(ws, { type: "peer-online", peerId: agent.deviceId });
+      }
     }
   }
 
@@ -496,20 +490,23 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
       if (url.pathname === "/ws") {
         const peerIp = srv.requestIP(req)?.address || "unknown";
         const ip = resolveClientIp(peerIp, req.headers.get("x-forwarded-for"), config.trustedProxyIps, warnIpDegraded);
-        if (connections.getConnectionCountByIp(ip) >= config.rateLimitConnPerIp) {
+        const connectionId = crypto.randomUUID();
+        const rejected = admissions.reserve(connectionId, ip);
+        if (rejected === "ip") {
           return Response.json({ type: "error", code: "RATE_LIMITED", message: "Too many connections from this IP" }, { status: 429 });
         }
-        if (connections.getConnectionCount() >= config.maxConnections) {
+        if (rejected === "global") {
           return Response.json({ type: "error", code: "MAX_CONNECTIONS", message: "Server at capacity" }, { status: 503 });
         }
         const relayHost = normalizeHostHeader(req.headers.get("host") ?? "");
         const data: WsData = {
-          connectionId: crypto.randomUUID(),
+          connectionId,
           ip,
           relayHost,
           phase: "awaiting-hello",
         };
         if (!srv.upgrade(req, { data })) {
+          admissions.release(connectionId);
           return new Response("WebSocket upgrade failed", { status: 400 });
         }
         return undefined;
@@ -521,9 +518,8 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
       // Accept the retired frame size long enough to send its typed 1008 rejection.
       maxPayloadLength: PEER_MAX_RECORD_BYTES,
       open(ws) {
-        connections.incrementIpCount(ws.data.ip);
         const timer = setTimeout(() => {
-          if (ws.data.phase === "awaiting-hello") {
+          if (ws.data.phase === "awaiting-hello" || ws.data.phase === "authenticating") {
             sendErrorAndClose(ws, "AUTH_FAILED", "hello timeout", true, 1008);
           }
         }, HELLO_TIMEOUT_MS);
@@ -539,9 +535,15 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
             sendErrorAndClose(ws, "PROTOCOL_VIOLATION", "First frame must be a hello", false, 1008);
             return;
           }
+          ws.data.phase = "authenticating";
           await handleHello(ws, message);
           return;
         }
+        if (ws.data.phase === "authenticating") {
+          sendErrorAndClose(ws, "PROTOCOL_VIOLATION", "authentication already in progress", false, 1008);
+          return;
+        }
+        if (ws.data.phase === "closed") return;
         if (typeof message === "string") {
           await handleControlMessage(ws, message);
         } else {
@@ -550,7 +552,8 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
       },
       close(ws) {
         const { connectionId, ip, deviceId } = ws.data;
-        connections.decrementIpCount(ip);
+        ws.data.phase = "closed";
+        admissions.release(connectionId);
         clearHelloTimer(connectionId);
 
         const conn = connections.getByConnectionId(connectionId);
@@ -566,7 +569,7 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
         // offline to us. Must pass the Connection object, not
         // deviceId — connections.remove(conn) already ran above, so a
         // re-lookup here would find nothing.
-        fanOutPeerPresence(conn, "peer-offline");
+        fanOutAgentPresence(conn, "peer-offline");
         logger.info("WebSocket disconnected", { ip, deviceId: conn.deviceId });
       },
       pong(ws) {
@@ -587,6 +590,7 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
       for (const t of helloTimers.values()) clearTimeout(t);
       helloTimers.clear();
       connections.clear();
+      admissions.clear();
       replayCache.destroy();
       pushRateLimiter.destroy();
       jsonRateLimiter.destroy();

@@ -13,7 +13,6 @@ export 'src/relay_auth.dart';
 export 'src/relay_slot.dart';
 export 'src/models/connection_state.dart';
 export 'src/models/device_identity.dart';
-export 'src/models/relay_error_code.dart';
 export 'src/models/relay_license_error.dart';
 export 'src/models/relay_message.dart';
 export 'src/models/stream_envelope.dart';

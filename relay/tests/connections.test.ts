@@ -11,16 +11,14 @@ function makeConn(overrides: Partial<Connection> = {}): Connection {
     connectionId: overrides.connectionId ?? `conn-${seq}`,
     deviceId: overrides.deviceId ?? `dev-${seq}`,
     deviceType: overrides.deviceType ?? "agent",
-    name: overrides.name ?? "test",
+    uid: overrides.uid ?? "user-test",
     publicKey: overrides.publicKey ?? "pk",
     epoch: overrides.epoch ?? 1,
     helloNonce: overrides.helloNonce ?? `nonce-${seq}`,
     helloTs: overrides.helloTs ?? Date.now(),
     ws: overrides.ws ?? ws,
-    ip: overrides.ip ?? "127.0.0.1",
     connectedAt: overrides.connectedAt ?? Date.now(),
     lastSeen: overrides.lastSeen ?? Date.now(),
-    claims: overrides.claims,
   };
 }
 
@@ -62,37 +60,11 @@ describe("Connections indexing", () => {
 });
 
 
-describe("Connections IP counting", () => {
-  it("increments and decrements per IP, clamping at zero", () => {
-    const c = new Connections();
-    expect(c.getConnectionCountByIp("1.2.3.4")).toBe(0);
-    c.incrementIpCount("1.2.3.4");
-    c.incrementIpCount("1.2.3.4");
-    expect(c.getConnectionCountByIp("1.2.3.4")).toBe(2);
-    c.decrementIpCount("1.2.3.4");
-    expect(c.getConnectionCountByIp("1.2.3.4")).toBe(1);
-    c.decrementIpCount("1.2.3.4");
-    expect(c.getConnectionCountByIp("1.2.3.4")).toBe(0);
-    // Further decrements below zero are a no-op, not negative.
-    c.decrementIpCount("1.2.3.4");
-    expect(c.getConnectionCountByIp("1.2.3.4")).toBe(0);
-  });
-
-  it("tracks distinct IPs independently", () => {
-    const c = new Connections();
-    c.incrementIpCount("1.1.1.1");
-    c.incrementIpCount("2.2.2.2");
-    c.incrementIpCount("2.2.2.2");
-    expect(c.getConnectionCountByIp("1.1.1.1")).toBe(1);
-    expect(c.getConnectionCountByIp("2.2.2.2")).toBe(2);
-  });
-});
-
 describe("Connections user-scoped views", () => {
   it("getConnectionsForUser returns only that uid's live connections", () => {
     const c = new Connections();
-    const a = makeConn({ deviceId: "a", claims: { uid: "u1" } });
-    const b = makeConn({ deviceId: "b", claims: { uid: "u2" } });
+    const a = makeConn({ deviceId: "a", uid: "u1" });
+    const b = makeConn({ deviceId: "b", uid: "u2" });
     c.insert(a);
     c.insert(b);
     expect(c.getConnectionsForUser("u1")).toEqual([a]);
@@ -100,12 +72,12 @@ describe("Connections user-scoped views", () => {
 
   it("listConnections/listConnectionsForUser project identity-free summaries", () => {
     const c = new Connections();
-    const a = makeConn({ deviceId: "a", claims: { uid: "u1" }, publicKey: "secret-pk" });
+    const a = makeConn({ deviceId: "a", uid: "u1", publicKey: "secret-pk" });
     c.insert(a);
     const [summary] = c.listConnections();
     expect(summary).toMatchObject({ deviceId: "a", deviceType: "agent" });
     expect(summary).not.toHaveProperty("publicKey");
-    expect(summary).not.toHaveProperty("claims");
+    expect(summary).not.toHaveProperty("uid");
 
     const [scoped] = c.listConnectionsForUser("u1");
     expect(scoped.deviceId).toBe("a");
@@ -115,14 +87,12 @@ describe("Connections user-scoped views", () => {
 });
 
 describe("Connections.clear", () => {
-  it("empties both indexes and IP counts", () => {
+  it("empties both indexes", () => {
     const c = new Connections();
     c.insert(makeConn({ connectionId: "c1", deviceId: "d1" }));
-    c.incrementIpCount("1.2.3.4");
     c.clear();
     expect(c.getConnectionCount()).toBe(0);
     expect(c.getByConnectionId("c1")).toBeUndefined();
-    expect(c.getConnectionCountByIp("1.2.3.4")).toBe(0);
   });
 });
 
