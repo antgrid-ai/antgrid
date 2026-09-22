@@ -34,7 +34,11 @@ const Duration _kEstablishTimeout = Duration(seconds: 20);
 ///
 /// Every member is a single attempt with no retry of its own — the supervisor
 /// is the only thing that decides when to try again.
-class RelayMechanisms implements ConnMechanisms, CentralControlMechanisms {
+class RelayMechanisms
+    implements
+        ConnMechanisms,
+        CentralControlMechanisms,
+        PayloadConnectionMechanisms {
   RelayMechanisms({
     required RelayService relay,
     required CryptoService crypto,
@@ -47,7 +51,6 @@ class RelayMechanisms implements ConnMechanisms, CentralControlMechanisms {
     required Future<String> Function() mintToken,
     SessionHandshaker Function(String agentEd25519PubB64)? buildHandshaker,
     this.peerRuntime,
-    this.peerTransportMode,
   }) : _buildHandshaker = buildHandshaker,
        _relay = relay,
        _crypto = crypto,
@@ -59,23 +62,15 @@ class RelayMechanisms implements ConnMechanisms, CentralControlMechanisms {
        _resolveCoords = resolveCoords,
        _mintToken = mintToken;
 
-  final PeerRuntime? peerRuntime;
-
-  /// Overrides [configuredPeerTransportMode] for tests, and is forwarded to
-  /// [PeerRuntime.select] so the mode that picked the transport is the mode
-  /// that decides what a failure on it means.
-  final PeerTransportMode? peerTransportMode;
-  PeerTransportMode get _peerMode =>
-      peerTransportMode ?? configuredPeerTransportMode;
-  final _selector = PeerLinkSelector();
+  final PeerConnector? peerRuntime;
+  final _attempt = PeerConnectionAttempt();
   PeerLink? _payloadLink;
   PeerLink? _sessionLink;
   StreamSubscription<PeerLinkFailure>? _peerFailureSub;
   bool _runtimeRetained = false;
   int _dialGeneration = 0;
-  bool _independentPayload = false;
-  bool get hasIndependentPayload => _independentPayload;
-  PeerLink get payloadLink => _payloadLink ?? _relay;
+  PeerLink get payloadLink =>
+      _payloadLink ?? (throw StateError("Native payload is not connected"));
   void Function()? onTerminalPeerError;
 
   void noteResume() {
@@ -88,22 +83,28 @@ class RelayMechanisms implements ConnMechanisms, CentralControlMechanisms {
   }
 
   Future<void>? _centralPending;
+  String? _centralUrl;
   @override
   bool get centralControlNeedsReconnect =>
-      hasIndependentPayload &&
-      payloadLink.isDispatchAllowed &&
-      _relay.currentState.connectionState != RelayConnectionState.authenticated;
+      peerRuntime != null &&
+      (_relay.currentState.connectionState !=
+              RelayConnectionState.authenticated ||
+          _centralUrl != _lastCoords?.relayUrl);
   @override
-  Future<void> reconnectCentral(ConnCoords coords, String token) =>
-      _centralPending ??= _relay
-          .connect(
-            coords.relayUrl,
-            _identity,
-            licenseToken: token,
-            epoch: _epoch,
-            machineDeviceId: _machineDeviceId,
-          )
-          .whenComplete(() => _centralPending = null);
+  Future<void> reconnectCentral(ConnCoords coords, String token) {
+    final pending = _centralPending;
+    if (pending != null) return pending;
+    _centralUrl = coords.relayUrl;
+    return _centralPending = _relay
+        .connect(
+          coords.relayUrl,
+          _identity,
+          licenseToken: token,
+          epoch: _epoch,
+          machineDeviceId: _machineDeviceId,
+        )
+        .whenComplete(() => _centralPending = null);
+  }
 
   final RelayService _relay;
   final CryptoService _crypto;
@@ -142,7 +143,6 @@ class RelayMechanisms implements ConnMechanisms, CentralControlMechanisms {
   /// relay leaves the socket authenticated, so the lowest broken rung after the
   /// coords re-resolve is `established`, not `socket`.
   ConnCoords? _lastCoords;
-  bool _agentOnline = false;
 
   /// Reports a relay-shaped error code that no rung failure can express, so the
   /// owner of the policy can block on it. Wired by [RelayConnection] to the
@@ -212,61 +212,62 @@ class RelayMechanisms implements ConnMechanisms, CentralControlMechanisms {
   }
 
   @override
+  Future<void> connectPayload(ConnCoords coords) => dial(coords, '');
+
+  @override
   Future<void> dial(ConnCoords coords, String token) async {
     final generation = ++_dialGeneration;
     _lastCoords = coords;
     final runtime = peerRuntime;
-    if (generation != _dialGeneration) return;
-    if (runtime == null) await _ensureSession(coords.agentEd25519PubB64);
-    if (runtime != null && !_runtimeRetained) {
+    if (generation != _dialGeneration) throw ConnectionAttemptCancelled();
+    if (runtime == null) {
+      onTerminalPeerError?.call();
+      throw const PeerConnectionFailure(
+        "ENDPOINT_ENROLLMENT_REQUIRED",
+        terminal: true,
+      );
+    }
+    if (!_runtimeRetained) {
       runtime.retain();
       _runtimeRetained = true;
     }
     final prior = _payloadLink;
     _payloadLink = null;
-    _independentPayload = false;
     if (prior != null) await prior.close();
-    if (generation != _dialGeneration) return;
-    final centralReady = reconnectCentral(coords, token);
-    centralReady.ignore();
-    if (runtime == null) await centralReady;
-    if (generation != _dialGeneration) return;
-    if (runtime != null) {
+    if (generation != _dialGeneration) throw ConnectionAttemptCancelled();
+    if (generation != _dialGeneration) throw ConnectionAttemptCancelled();
+    {
       try {
-        final selection = await runtime.select(
-          selector: _selector,
+        final link = await runtime.connect(
+          attempt: _attempt,
           relay: _relay,
           machineDeviceId: _machineDeviceId,
           machinePublicKey: coords.agentEd25519PubB64,
-          mode: _peerMode,
-          centralReady: centralReady,
         );
-        final link = selection.link;
         if (generation != _dialGeneration) {
           await link.close();
-          return;
+          throw ConnectionAttemptCancelled();
         }
         _payloadLink = link;
-        _independentPayload = selection.independent;
         await _peerFailureSub?.cancel();
         if (generation != _dialGeneration) {
           await link.close();
-          return;
+          throw ConnectionAttemptCancelled();
         }
         _peerFailureSub = link.failureStream.listen((failure) {
           // Only the payload link died, so the relay socket's state stream
           // reports nothing and the ladder has to be woken from here.
-          // Blocking is for the mode with nowhere to fall back to: under
-          // irohPreferred the redial re-runs PeerLinkSelector, which drops
-          // to WebSocket rather than stranding the machine.
-          if (!failure.retryable && _peerMode == PeerTransportMode.irohOnly) {
+          if (!failure.retryable) {
             onTerminalPeerError?.call();
           } else {
             onSessionDown?.call();
           }
         });
         await _ensureSession(coords.agentEd25519PubB64);
-      } on PeerSelectionFailure catch (error) {
+      } on PeerConnectionFailure catch (error) {
+        if (error.cancelled || generation != _dialGeneration) {
+          throw ConnectionAttemptCancelled();
+        }
         if (error.terminal) onTerminalPeerError?.call();
         rethrow;
       } on PeerAuthorizationDenied {
@@ -280,27 +281,12 @@ class RelayMechanisms implements ConnMechanisms, CentralControlMechanisms {
   }
 
   @override
-  bool get socketAuthenticated => peerRuntime == null
-      ? _relay.currentState.connectionState.index >=
-            RelayConnectionState.authenticated.index
-      : _payloadLink?.isDispatchAllowed == true;
+  bool get socketAuthenticated => _payloadLink?.isDispatchAllowed == true;
 
-  /// Fed by the relay's `peer-online`/`peer-offline` for THIS machine — the
-  /// service already filters presence frames to `machineDeviceId`, and a socket
-  /// drop feeds `false` even when no peer-offline frame ever arrives.
   @override
-  bool get agentOnline =>
-      hasIndependentPayload ? payloadLink.isDispatchAllowed : _agentOnline;
+  bool get agentOnline => socketAuthenticated;
 
-  /// Level input, pushed by [RelayConnection] from the relay's presence stream.
-  ///
-  /// Deliberately not a subscription of our own: the supervisor re-derives the
-  /// whole ladder synchronously inside its own `notePresence`, so this value
-  /// has to be written by the SAME listener, before that call. A second
-  /// subscriber on the broadcast stream is one microtask late, which the
-  /// supervisor reads as "still offline" and pays for with a full routable
-  /// stall on every agent-return.
-  void notePresence(bool online) => _agentOnline = online;
+  void notePresence(bool online) {}
 
   @override
   Future<void> establishSession() async {
@@ -347,12 +333,11 @@ class RelayMechanisms implements ConnMechanisms, CentralControlMechanisms {
   @override
   Future<void> release() async {
     _dialGeneration++;
-    _selector.cancel();
+    _attempt.cancel();
     await _peerFailureSub?.cancel();
     _peerFailureSub = null;
     final payload = _payloadLink;
     _payloadLink = null;
-    _independentPayload = false;
     _sessionLink = null;
     if (payload != null) await payload.close();
     if (_runtimeRetained) {
@@ -365,7 +350,7 @@ class RelayMechanisms implements ConnMechanisms, CentralControlMechanisms {
     await _socketDownSub?.cancel();
     _socketDownSub = null;
     _lastCoords = null;
-    _agentOnline = false;
+    _centralUrl = null;
     if (session != null) {
       await session.dispose();
       // dispose() zeroizes the Dart-side keys; the installed native cipher

@@ -5,6 +5,12 @@ import '../util/ab_log.dart';
 import '../util/detached.dart';
 import 'supervisor_state.dart';
 
+class ConnectionAttemptCancelled implements Exception {}
+
+abstract interface class PayloadConnectionMechanisms {
+  Future<void> connectPayload(ConnCoords coords);
+}
+
 const String _component = 'ConnectionSupervisor';
 
 /// Where a machine lives right now: relay endpoint plus the agent identity the
@@ -247,7 +253,13 @@ class ConnectionSupervisor {
 
   /// The relay admitted this epoch, so whatever the socket rung collected on
   /// the way here was transient by definition.
-  void _noteSocketAdmitted() => _resetSocketAdmissionCounters();
+  void _noteSocketAdmitted() {
+    if (_mech is PayloadConnectionMechanisms) {
+      _socketFailuresSinceCoords = 0;
+    } else {
+      _resetSocketAdmissionCounters();
+    }
+  }
 
   /// Everything the socket rung accumulates on its way to being admitted.
   void _resetSocketAdmissionCounters() {
@@ -329,6 +341,7 @@ class ConnectionSupervisor {
     // A new token is new information — dial now rather than serving out the
     // backoff earned by the stale one.
     _backoff[ConnRung.socket]!.reset();
+    _centralBackoff.reset();
     _kick();
   }
 
@@ -409,6 +422,7 @@ class ConnectionSupervisor {
       return;
     }
 
+    _maintainCentral();
     final rung = _lowestBrokenRung();
     if (rung == null) {
       _cancelTimer();
@@ -442,7 +456,9 @@ class ConnectionSupervisor {
           // Minted per attempt and never stored: a cached token outlives its
           // TTL across a long backoff and every later dial fails on a token
           // that was valid when the first one was made.
-          final token = await _mech.mintToken();
+          final token = _mech is PayloadConnectionMechanisms
+              ? null
+              : await _mech.mintToken();
           final coords = _coords;
           if (coords == null) {
             // noteCoordsChanged() landed mid-mint: the endpoint this dial was
@@ -452,13 +468,19 @@ class ConnectionSupervisor {
             _rerun = true;
             return;
           }
-          await _mech.dial(coords, token);
+          if (_mech is PayloadConnectionMechanisms) {
+            await (_mech as PayloadConnectionMechanisms).connectPayload(coords);
+          } else {
+            await _mech.dial(coords, token!);
+          }
         case ConnRung.established:
           await _mech.establishSession();
         case ConnRung.wanted:
         case ConnRung.routable:
           return;
       }
+    } on ConnectionAttemptCancelled {
+      return;
     } catch (e) {
       // Swallowing the exception is deliberate — the backoff, not the caller,
       // decides what happens next — but swallowing it SILENTLY left a failing
@@ -520,6 +542,7 @@ class ConnectionSupervisor {
         final token = await _mech.mintToken();
         if (_disposed ||
             !_wanted ||
+            !identical(_coords, coords) ||
             _status is Blocked ||
             !mechanisms.centralControlNeedsReconnect) {
           return;
@@ -529,6 +552,8 @@ class ConnectionSupervisor {
           throw StateError('Central reconnect not admitted');
         }
         _centralBackoff.reset();
+        _supersededRejections = 0;
+        _lastSocketErrorSuperseded = false;
       } catch (_) {
         _centralBackoff.nextAttemptAt = DateTime.now().add(
           Duration(milliseconds: _backoffMs(_centralBackoff.attempt++)),
@@ -642,6 +667,7 @@ class ConnectionSupervisor {
   void _kick() {
     scheduleMicrotask(() {
       if (_disposed) return;
+      _maintainCentral();
       unawaited(evaluate());
     });
   }

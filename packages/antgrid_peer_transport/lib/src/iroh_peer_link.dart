@@ -6,7 +6,7 @@ import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:iroh_quic/iroh_quic.dart' as iroh;
 
 import 'relay_origin.dart';
-import 'selection.dart';
+import 'connection_attempt.dart';
 
 const peerAlpn = 'antgrid/peer/1';
 const maxPeerRecordBytes = kMaxFramePayload + 1028;
@@ -31,7 +31,7 @@ class NativeEndpointOwner {
   }) async {
     for (final url in approvedRelays) {
       if (!isApprovedRelayOrigin(url)) {
-        throw const PeerSelectionFailure('UNAPPROVED_RELAY', terminal: true);
+        throw const PeerConnectionFailure('UNAPPROVED_RELAY', terminal: true);
       }
     }
     await (initializeNative ?? iroh.Iroh.init)();
@@ -64,7 +64,7 @@ class NativeEndpointOwner {
   }) async {
     final timer = Stopwatch()..start();
     if (!authorized())
-      throw const PeerSelectionFailure('AUTHORIZATION_DENIED', terminal: true);
+      throw const PeerConnectionFailure('AUTHORIZATION_DENIED', terminal: true);
     iroh.Connection connection;
     try {
       connection = await endpoint.connect(
@@ -76,10 +76,9 @@ class NativeEndpointOwner {
         utf8.encode(peerAlpn),
       );
     } catch (_) {
-      // Same rule as _fail: only a provable rejection is terminal. Left
-      // terminal, an unreachable relay or a dead route denies irohPreferred
-      // the WebSocket fallback PeerLinkSelector exists to provide.
-      throw const PeerSelectionFailure(
+      // The binding does not distinguish unreachable routes here. Let the
+      // supervisor retry Iroh; authorization is checked again on each attempt.
+      throw const PeerConnectionFailure(
         'NATIVE_CONNECT_UNCLASSIFIED',
         terminal: false,
       );
@@ -88,7 +87,7 @@ class NativeEndpointOwner {
         connection.remoteId.toHex() != endpointId ||
         utf8.decode(connection.alpn, allowMalformed: true) != peerAlpn) {
       connection.close(errorCode: 1);
-      throw const PeerSelectionFailure(
+      throw const PeerConnectionFailure(
         'AUTHENTICATED_ENDPOINT_MISMATCH',
         terminal: true,
       );
@@ -96,7 +95,7 @@ class NativeEndpointOwner {
     try {
       final (send, recv) = await connection.openBi();
       if (!authorized())
-        throw const PeerSelectionFailure(
+        throw const PeerConnectionFailure(
           'AUTHORIZATION_DENIED',
           terminal: true,
         );

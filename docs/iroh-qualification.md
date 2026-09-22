@@ -1,6 +1,10 @@
 # Iroh qualification
 
-Checkpoint: 2026-09-15. **Release remains unqualified; WebSocket is the default.**
+Historical checkpoint: 2026-09-15. **Release remains unqualified.**
+
+Current remote payloads require Iroh. WebSocket payload selection/fallback has
+been removed; older WebSocket-only peers require an upgrade. Historical
+WebSocket evidence below does not qualify the native-only runtime.
 Implementation and regression history live in the [task ledger](iroh-migration-ledger.md).
 The [approved plan](iroh-migration-plan.md) defines acceptance criteria;
 [operations](iroh-operations.md) covers staging, rollout and rollback.
@@ -127,3 +131,5 @@ results, plus the superseded integration/packaging/upstream reviews, remain in G
 at `9ed88a01`. The retired prototype path was `scripts/iroh-qualification/`.
 Current implementation evidence belongs above and in the ledger; local captures
 remain ignored artifacts.
+
+The ownership simplification results and outstanding qualification are recorded in `iroh-simplification-ledger.md`. Native initialization uses a provisional 30-second budget and dialing uses 15 seconds; neither value constitutes WAN or forced-relay performance qualification.

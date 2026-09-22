@@ -1,3 +1,7 @@
+> Current decision: remote payloads use Iroh only. Earlier references below to
+> WebSocket payload defaults, rollout modes and fallback are superseded. The
+> central WebSocket remains for discovery, presence and revocation.
+
 # Iroh migration implementation plan
 
 Source: user-approved implementation plan, 2026-09-14. This branch implements

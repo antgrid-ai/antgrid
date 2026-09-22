@@ -105,12 +105,8 @@ console.log(
     : `[apphost] relay and mobile web targets use ${lanHost} (override with ANTGRID_LAN_IP)`,
 );
 
-const peerTransport = process.env.ANTGRID_PEER_TRANSPORT?.trim() || "websocket";
-if (!["websocket", "iroh-preferred", "iroh-only"].includes(peerTransport)) {
-  throw new Error(`Invalid ANTGRID_PEER_TRANSPORT: ${peerTransport}`);
-}
-const peerStack = peerTransport === "websocket" ? undefined : preparePeerStack(resolve(aspireDir, ".."), process.env, lanHost);
-console.log(`[apphost] payload transport: ${peerTransport}`);
+const peerStack = preparePeerStack(resolve(aspireDir, ".."), process.env, lanHost);
+console.log("[apphost] payload transport: iroh");
 
 // Sets one env var on a resource to an Aspire reference expression (connection
 // string, allocated endpoint, …) or to a literal. Used by the callbacks below
@@ -375,12 +371,10 @@ for (const target of appTargets) {
     // ANTGRID_AGENT_* match scripts/dev.ts so LocalAgentLauncher finds bun +
     // the agent entrypoint for projects opened in the desktop app.
     app = app
-      .withEnvironment("ANTGRID_PEER_TRANSPORT", peerTransport)
       // The bridge host inherits this from the app that spawns it; the app's own
       // Dart transport reads the --dart-define below instead, which is
       // compile-time so a release build cannot pick it up from a stray env var.
       .withEnvironment("ANTGRID_DEV_INSECURE_RELAY", peerStack?.insecure ? "true" : "false")
-      .withEnvironment("ANTGRID_TEST_MODE", peerTransport === "iroh-only" ? "1" : "0")
       .withEnvironment("ANTGRID_AGENT_BIN", bunBin)
       .withEnvironment("ANTGRID_AGENT_PREARGS", agentScript)
       // Isolate the dev stack's Antgrid home (pairing, relay-epoch, sessions,
@@ -423,7 +417,6 @@ for (const target of appTargets) {
       } else {
         await args.add(refExpr`--dart-define=RELAY_URL=http://${lanHost}:${relayPort}`);
       }
-      await args.add(refExpr`--dart-define=ANTGRID_PEER_TRANSPORT=${peerTransport}`);
       if (peerStack?.insecure) {
         await args.add(refExpr`--dart-define=ANTGRID_DEV_INSECURE_RELAY=true`);
       }

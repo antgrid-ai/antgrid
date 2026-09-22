@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
@@ -7,7 +7,7 @@ import { TERMINAL_PROTOCOL_VERSION } from "../src/terminal-frames/protocol";
 import { startSmokeFixture } from "./iroh-smoke-fixture";
 
 // Cross-binding gate: a real Dart `IrohPeerLink` over `iroh_quic` against a real
-// `IrohRelayClient` host over `@number0/iroh`. The two bindings are different
+// `NativeHostConnection` host over `@number0/iroh`. The two bindings are different
 // implementations at different versions, so every gate that binds `@number0/iroh`
 // on both ends — iroh-host-smoke included — leaves this pairing unproven.
 // Authorization is the same fixture the host smoke uses; this is transport and
@@ -91,6 +91,7 @@ try {
     appId: appDeviceId,
     projects: fixture.projects,
     terminalProtocolVersion: TERMINAL_PROTOCOL_VERSION,
+    resumeCycles: 3,
   }) + "\n");
   await child.stdin.flush();
 
@@ -109,6 +110,16 @@ try {
   const pass = await next("interop-pass");
   assert.equal(pass.projects, fixture.projects.length);
 
+  const resumeRecoveryMs: number[] = [];
+  for (let cycle = 0; cycle < 3; cycle++) {
+    for (const project of fixture.projects) writeFileSync(join(fixture.root, project.name, "proof.txt"), `${project.name}:resume:${cycle}`);
+    const started = performance.now();
+    fixture.host.notePeerResume();
+    const resumed = await next("resume-verified");
+    assert.equal(resumed.cycle, cycle);
+    resumeRecoveryMs.push(performance.now() - started);
+  }
+
   await fixture.host.handleRemoteAccessVerb({ id: "disable", type: "mobile-access:set", enabled: false });
   await next("closed-on-revocation");
   assert.equal(await child.exited, 0, "Dart app must exit cleanly");
@@ -116,7 +127,7 @@ try {
     result: "pass", gate: "cross-binding", appBinding: pass.appBinding, hostBinding: "@number0/iroh",
     authorization: "fixture", native: "real", host: "real", e2e: "real",
     projects: pass.projects, centralOutage: true, remoteAccessOffClosed: true,
-    terminalInputOutput: true, managedCheckoutGit: true,
+    terminalInputOutput: true, managedCheckoutGit: true, resumeCycles: 3, resumeRecoveryMs,
   }));
 } finally {
   clearTimeout(timeout);

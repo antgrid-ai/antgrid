@@ -105,12 +105,14 @@ class CentralMechanisms extends ScriptedMechanisms
     implements CentralControlMechanisms {
   bool needsCentral = true;
   int centralCalls = 0;
+  int centralFailures = 0;
   final centralGate = Completer<void>();
   @override
   bool get centralControlNeedsReconnect => needsCentral;
   @override
   Future<void> reconnectCentral(ConnCoords coords, String token) async {
     centralCalls++;
+    if (centralFailures-- > 0) throw StateError('central offline');
     await centralGate.future;
     needsCentral = false;
   }
@@ -135,6 +137,28 @@ Future<void> waitUntil(bool Function() condition) async {
 }
 
 void main() {
+  test('central reconnect progresses while native dialing is parked', () async {
+    final central = CentralMechanisms()
+      ..dialGate = Completer<void>()
+      ..centralFailures = 1
+      ..agentOnlineValue = true;
+    final sup = ConnectionSupervisor(
+      central,
+      backoffBaseMs: 2,
+      backoffCapMs: 2,
+      jitter: (_) => 0,
+    );
+    addTearDown(sup.dispose);
+    central.centralGate.complete();
+    sup.setWanted(true);
+    await waitUntil(() => central.centralCalls == 2 && !central.needsCentral);
+    expect(central.socketAuthenticatedValue, isFalse);
+    expect(central.dialCalls, 1);
+    central.dialGate!.complete();
+    await settle();
+    expect(sup.status, const Connected());
+  });
+
   late ScriptedMechanisms mech;
 
   setUp(() {

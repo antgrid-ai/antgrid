@@ -1,3 +1,4 @@
+import '../helpers/fixed_peer_connector.dart';
 // A native transport cipher caches per-key state so that the stateless
 // `E2eTransportDart` does not pay key setup per frame. `SessionKeys.zeroize`
 // cannot reach that copy, and the cache evicts by USE — so once a session is
@@ -149,6 +150,7 @@ void main() {
         ? null
         : (_) => _FakeHandshaker(handshakes),
     relay: relay,
+    peerRuntime: FixedPeerConnector(relay),
     crypto: CryptoService(),
     machineDeviceId: 'M',
     identity: _identity(),

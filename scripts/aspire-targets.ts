@@ -24,7 +24,6 @@ const child = spawn("aspire", ["run"], {
   env: {
     ...process.env,
     ANTGRID_APP_TARGETS: targets,
-    ...(process.argv[3] ? { ANTGRID_PEER_TRANSPORT: process.env.ANTGRID_PEER_TRANSPORT || process.argv[3] } : {}),
   },
   shell: process.platform === "win32",
 });

@@ -62,7 +62,7 @@ function makeClient(overrides: Partial<{ getLicenseToken: () => string; onError:
     onError: overrides.onError,
   });
   clients.push(client);
-  (client as any).ws = { readyState: WebSocket.OPEN, send: (d: string) => sent.push(d), close: () => {} };
+  (client as any).central.ws = { readyState: WebSocket.OPEN, send: (d: string) => sent.push(d), close: () => {} };
   return { client, sent };
 }
 
@@ -79,7 +79,7 @@ test("buildHelloSigBody + signing reproduces the cross-language golden vector", 
 
 test("hello is the first (and only) frame sent on socket open, with a valid Ed25519 sig", async () => {
   const { client, sent } = makeClient();
-  await (client as any).sendHello();
+  await (client as any).central.sendHello();
 
   expect(sent.length).toBe(1);
   const hello = JSON.parse(sent[0]);
@@ -108,31 +108,31 @@ test("hello is the first (and only) frame sent on socket open, with a valid Ed25
 test("welcome authenticates and resets backoff (reset happens ONLY on welcome, not on socket open)", () => {
   const { client } = makeClient();
   let authenticated = false;
-  (client as any).opts.onAuthenticated = () => { authenticated = true; };
+  (client as any).central.opts.onAuthenticated = () => { authenticated = true; };
 
   // Simulate a doubled-up backoff from a prior failed attempt — welcome must
   // reset it back to INITIAL_BACKOFF (1000ms), not merely leave it alone.
-  (client as any).backoff = 8000;
+  (client as any).central.backoff = 8000;
 
-  (client as any).handleTextMessage(JSON.stringify({
+  (client as any).central.handleTextMessage(JSON.stringify({
     type: "welcome", deviceId: vector.fields.deviceId, epoch: 1, serverTime: new Date().toISOString(),
   }));
 
   expect(authenticated).toBe(true);
-  expect((client as any).backoff).toBe(1000);
+  expect((client as any).central.backoff).toBe(1000);
 });
 
 test("clock-skew AUTH_FAILED learns the offset and applies it once to the next hello", async () => {
   const { client, sent } = makeClient();
   const serverTime = new Date(Date.now() + 5 * 60_000).toISOString(); // 5 minutes ahead
 
-  (client as any).handleTextMessage(JSON.stringify({
+  (client as any).central.handleTextMessage(JSON.stringify({
     type: "error", code: "AUTH_FAILED", message: "clock skew", retryable: true, serverTime,
   }));
-  expect((client as any).clockOffsetMs).toBeGreaterThan(4 * 60_000);
-  expect((client as any).clockOffsetApplied).toBe(true);
+  expect((client as any).central.clockOffsetMs).toBeGreaterThan(4 * 60_000);
+  expect((client as any).central.clockOffsetApplied).toBe(true);
 
-  await (client as any).sendHello();
+  await (client as any).central.sendHello();
   const hello = JSON.parse(sent[0]);
   const skewMs = Date.parse(hello.ts) - Date.now();
   // The hello's `ts` should reflect the learned offset, not wall-clock now.
@@ -140,52 +140,52 @@ test("clock-skew AUTH_FAILED learns the offset and applies it once to the next h
 
   // A second AUTH_FAILED with the SAME offset (within 1s) must NOT re-apply —
   // it falls through to normal retryable reconnect instead of thrashing.
-  const appliedBefore = (client as any).clockOffsetMs;
-  (client as any).handleTextMessage(JSON.stringify({
+  const appliedBefore = (client as any).central.clockOffsetMs;
+  (client as any).central.handleTextMessage(JSON.stringify({
     type: "error", code: "AUTH_FAILED", message: "clock skew again", retryable: true, serverTime,
   }));
-  expect((client as any).clockOffsetMs).toBe(appliedBefore);
+  expect((client as any).central.clockOffsetMs).toBe(appliedBefore);
 
   // welcome resets clockOffsetApplied so a FUTURE skew can re-apply.
-  (client as any).handleTextMessage(JSON.stringify({
+  (client as any).central.handleTextMessage(JSON.stringify({
     type: "welcome", deviceId: vector.fields.deviceId, epoch: 1, serverTime: new Date().toISOString(),
   }));
-  expect((client as any).clockOffsetApplied).toBe(false);
+  expect((client as any).central.clockOffsetApplied).toBe(false);
 });
 
 test("close after a retryable:false error frame does NOT schedule a reconnect", () => {
   const { client } = makeClient();
   let scheduled = false;
-  const origSchedule = (client as any).scheduleReconnect.bind(client);
-  (client as any).scheduleReconnect = () => { scheduled = true; origSchedule(); };
+  const origSchedule = (client as any).central.scheduleReconnect.bind(client);
+  (client as any).central.scheduleReconnect = () => { scheduled = true; origSchedule(); };
 
-  (client as any).handleTextMessage(JSON.stringify({
+  (client as any).central.handleTextMessage(JSON.stringify({
     type: "error", code: "PROTOCOL_VIOLATION", message: "bad frame", retryable: false,
   }));
-  expect((client as any).lastError).toEqual({ code: "PROTOCOL_VIOLATION", retryable: false });
+  expect((client as any).central.lastError).toEqual({ code: "PROTOCOL_VIOLATION", retryable: false });
 
   // Drive the close handler's reconnect decision directly (mirrors the real
   // ws "close" listener body without needing an actual socket close event).
-  const terminal = (client as any).lastError?.retryable === false;
+  const terminal = (client as any).central.lastError?.retryable === false;
   expect(terminal).toBe(true);
-  if (!(client as any).intentionalClose && terminal === false) (client as any).scheduleReconnect();
+  if (!(client as any).central.intentionalClose && terminal === false) (client as any).central.scheduleReconnect();
   expect(scheduled).toBe(false);
 });
 
 test("close after a retryable:true error (or no error at all) schedules a jittered reconnect", () => {
   const { client } = makeClient();
   const delays: number[] = [];
-  (client as any).scheduleReconnect = () => {
-    const delay = (client as any).backoff / 2 + Math.random() * ((client as any).backoff / 2);
+  (client as any).central.scheduleReconnect = () => {
+    const delay = (client as any).central.backoff / 2 + Math.random() * ((client as any).central.backoff / 2);
     delays.push(delay);
   };
 
-  (client as any).handleTextMessage(JSON.stringify({
+  (client as any).central.handleTextMessage(JSON.stringify({
     type: "error", code: "PEER_OFFLINE", message: "peer gone", retryable: true,
   }));
-  const terminal = (client as any).lastError?.retryable === false;
+  const terminal = (client as any).central.lastError?.retryable === false;
   expect(terminal).toBe(false);
-  (client as any).scheduleReconnect();
+  (client as any).central.scheduleReconnect();
   expect(delays.length).toBe(1);
   // Equal jitter: the delay is uniform in [backoff/2, backoff] around the
   // deterministic stored backoff (INITIAL_BACKOFF = 1000ms here).
@@ -194,20 +194,20 @@ test("close after a retryable:true error (or no error at all) schedules a jitter
 
   // No error frame at all also reconnects (lastError stays null after a fresh
   // connection attempt — doConnect() resets it).
-  (client as any).lastError = null;
-  const terminalNoError = (client as any).lastError?.retryable === false;
+  (client as any).central.lastError = null;
+  const terminalNoError = (client as any).central.lastError?.retryable === false;
   expect(terminalNoError).toBe(false);
 });
 
 test("SUPERSEDED stops reconnecting (retryable:false) WITHOUT firing onAuthRevoked", () => {
   let revoked = false;
   const { client } = makeClient();
-  (client as any).opts.onAuthRevoked = () => { revoked = true; };
+  (client as any).central.opts.onAuthRevoked = () => { revoked = true; };
 
-  (client as any).handleErrorFrame({ code: "SUPERSEDED", message: "newer instance", retryable: false });
+  (client as any).central.handleErrorFrame({ code: "SUPERSEDED", message: "newer instance", retryable: false });
 
   expect(revoked).toBe(false);
-  expect((client as any).lastError).toEqual({ code: "SUPERSEDED", retryable: false });
+  expect((client as any).central.lastError).toEqual({ code: "SUPERSEDED", retryable: false });
 });
 
 // Identity-dead verdicts stay terminal-exit (onAuthRevoked → re-enroll). EXPIRED
@@ -216,9 +216,9 @@ for (const code of ["LICENSE_INVALID", "LICENSE_REVOKED"]) {
   test(`${code} fires onAuthRevoked (terminal identity verdicts)`, () => {
     let revoked = false;
     const { client } = makeClient();
-    (client as any).opts.onAuthRevoked = () => { revoked = true; };
+    (client as any).central.opts.onAuthRevoked = () => { revoked = true; };
 
-    (client as any).handleErrorFrame({ code, message: "terminal license verdict", retryable: false });
+    (client as any).central.handleErrorFrame({ code, message: "terminal license verdict", retryable: false });
 
     expect(revoked).toBe(true);
   });
@@ -227,15 +227,15 @@ for (const code of ["LICENSE_INVALID", "LICENSE_REVOKED"]) {
 test("LICENSE_EXPIRED does NOT fire onAuthRevoked — it stops reconnect and waits for a fresh mint", () => {
   let revoked = false;
   const { client } = makeClient();
-  (client as any).opts.onAuthRevoked = () => { revoked = true; };
+  (client as any).central.opts.onAuthRevoked = () => { revoked = true; };
 
-  (client as any).handleErrorFrame({ code: "LICENSE_EXPIRED", message: "expired", retryable: false });
+  (client as any).central.handleErrorFrame({ code: "LICENSE_EXPIRED", message: "expired", retryable: false });
 
   // Recoverable by time: never tells the user to re-enroll...
   expect(revoked).toBe(false);
   // ...but still terminal-for-socket — retryable:false stops the reconnect at
   // the close handler (mirrors the SUPERSEDED stop above).
-  expect((client as any).lastError).toEqual({ code: "LICENSE_EXPIRED", retryable: false });
+  expect((client as any).central.lastError).toEqual({ code: "LICENSE_EXPIRED", retryable: false });
 });
 
 test("redialWithFreshToken after LICENSE_EXPIRED clears the stop and reconnects with a fresh token fetch", async () => {
@@ -245,8 +245,8 @@ test("redialWithFreshToken after LICENSE_EXPIRED clears the stop and reconnects 
   });
 
   // Enter the expired-stop, then simulate the socket having closed underneath us.
-  (client as any).handleErrorFrame({ code: "LICENSE_EXPIRED", message: "expired", retryable: false });
-  (client as any).ws = null;
+  (client as any).central.handleErrorFrame({ code: "LICENSE_EXPIRED", message: "expired", retryable: false });
+  (client as any).central.ws = null;
 
   const realWS = globalThis.WebSocket;
   FakeWS.instances.length = 0;
@@ -258,8 +258,8 @@ test("redialWithFreshToken after LICENSE_EXPIRED clears the stop and reconnects 
     expect(FakeWS.instances.length).toBe(1);
     expect(FakeWS.instances[0].url).toBe("ws://relay.antgrid.ai:8443/ws");
     // The stop is cleared and backoff reset (INITIAL_BACKOFF = 1000ms).
-    expect((client as any).lastError).toBeNull();
-    expect((client as any).backoff).toBe(1000);
+    expect((client as any).central.lastError).toBeNull();
+    expect((client as any).central.backoff).toBe(1000);
 
     // Fire open → sendHello fetches a FRESH token and writes the hello frame.
     FakeWS.instances[0].fireOpen();
@@ -276,7 +276,7 @@ test("redialWithFreshToken after LICENSE_EXPIRED clears the stop and reconnects 
 test("redialWithFreshToken is a no-op when not expired-stopped", () => {
   const { client } = makeClient();
   // Fresh client: lastError is null (never received an expired verdict).
-  (client as any).ws = null;
+  (client as any).central.ws = null;
 
   const realWS = globalThis.WebSocket;
   FakeWS.instances.length = 0;
@@ -291,7 +291,7 @@ test("redialWithFreshToken is a no-op when not expired-stopped", () => {
 
 test("redialWithFreshToken is a no-op when the socket is already open", () => {
   const { client } = makeClient(); // makeClient stubs ws OPEN
-  (client as any).handleErrorFrame({ code: "LICENSE_EXPIRED", message: "expired", retryable: false });
+  (client as any).central.handleErrorFrame({ code: "LICENSE_EXPIRED", message: "expired", retryable: false });
 
   const realWS = globalThis.WebSocket;
   FakeWS.instances.length = 0;
@@ -307,9 +307,9 @@ test("redialWithFreshToken is a no-op when the socket is already open", () => {
 test("SUPERSEDED (retryable:false) does NOT fire onAuthRevoked — only the license codes do", () => {
   let revoked = false;
   const { client } = makeClient();
-  (client as any).opts.onAuthRevoked = () => { revoked = true; };
+  (client as any).central.opts.onAuthRevoked = () => { revoked = true; };
 
-  (client as any).handleErrorFrame({ code: "SUPERSEDED", message: "newer connection", retryable: false });
+  (client as any).central.handleErrorFrame({ code: "SUPERSEDED", message: "newer connection", retryable: false });
 
   expect(revoked).toBe(false);
 });
@@ -321,7 +321,7 @@ test("a stream-open rejection (ref===streamId) is routed to the mux and never re
     onRejected: (code: string, message: string) => rejected.push({ code, message }),
   });
 
-  (client as any).handleErrorFrame({
+  (client as any).central.handleErrorFrame({
     code: "SESSION_LIMIT_EXCEEDED", message: "cap reached", retryable: false, ref: handle.streamId,
   });
 
@@ -329,5 +329,5 @@ test("a stream-open rejection (ref===streamId) is routed to the mux and never re
   // The load-bearing assertion: lastError must stay null so an unrelated
   // later close doesn't read this stream rejection's retryable:false and wrongly
   // stop reconnecting the whole socket.
-  expect((client as any).lastError).toBeNull();
+  expect((client as any).central.lastError).toBeNull();
 });

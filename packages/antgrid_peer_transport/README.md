@@ -11,10 +11,10 @@ Create one `NativeEndpointOwner` per active enrollment with only the relay
 origins in its authoritative snapshot. Close individual links during reconnect;
 upstream FRB runtime disposal is process-final teardown only.
 
-`PeerLinkSelector` supports WebSocket, Iroh preferred and evaluation-only Iroh
-selection. E2E starts after selection. The app owns reconnect policy and must
-refresh authorization on startup and resume. `LeasedPeerLink` applies the same
-dispatch fence to upgraded WebSocket sessions.
+`PeerConnectionAttempt` bounds a native dial, distinguishes cancellation from failure, and disposes late links. Unsettled native calls retain their slot, preventing retries from accumulating uncancellable work.
+E2E starts after connection. The app owns reconnect policy and must refresh
+authorization on startup and resume. `LeasedPeerLink` fences native dispatch.
+Iroh handles direct and relayed connectivity; there is no WebSocket payload fallback.
 
 Approved relay origins must be `https`. `isApprovedRelayOrigin` widens that to
 `http` only when the binary was compiled with
@@ -50,16 +50,15 @@ by the bridge, never run directly:
 bun run --filter antgrid-bridge qualify:iroh-interop
 ```
 
-It dials a real `IrohRelayClient` host binding `@number0/iroh` while this side
+It dials a real `NativeHostConnection` host binding `@number0/iroh` while this side
 binds `iroh_quic`, so it is the only gate covering the pairing the product
-actually ships; every other native gate binds one implementation on both ends.
+actually ships. It also exercises three host-resume cycles with fresh native/E2E sessions and stable project bindings on the shared app endpoint.
 Set `IROH_INTEROP_NATIVE_LIBRARY` when the library is not on the default search
 path, and `IROH_INTEROP_DART` to choose the Dart executable. `IROH_SMOKE_LOG_LEVEL`
 surfaces host logs, which are the only account of why a host dropped a peer.
 
 Current release limitations and security evidence are in
 [the migration ledger](../../docs/iroh-migration-ledger.md) and
-[qualification](../../docs/iroh-qualification.md). WebSocket remains the
-production default. Unknown native close causes remain terminal until upstream
-bindings provide a classification that cannot turn authorization rejection into
-fallback.
+[qualification](../../docs/iroh-qualification.md). Native release qualification
+remains incomplete. Unknown native close causes remain terminal until upstream
+bindings provide a verified retry classification.

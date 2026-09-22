@@ -1,3 +1,4 @@
+import '../helpers/fixed_peer_connector.dart';
 // Every terminal condition the connection ladder can hit must land as an
 // explicit `Blocked(reason)`, with a producer wired for its documented
 // unblock — not a side channel the app happens to also listen to. This drives
@@ -128,6 +129,7 @@ class _ScriptedRelay extends RelayService {
 class _EstablishStubbed extends RelayMechanisms {
   _EstablishStubbed({
     required super.relay,
+    super.peerRuntime,
     required super.crypto,
     required super.machineDeviceId,
     required super.identity,
@@ -161,6 +163,7 @@ class _EstablishStubbed extends RelayMechanisms {
 class _EstablishAlwaysFails extends RelayMechanisms {
   _EstablishAlwaysFails({
     required super.relay,
+    super.peerRuntime,
     required super.crypto,
     required super.machineDeviceId,
     required super.identity,
@@ -223,6 +226,7 @@ void main() {
 
   _EstablishStubbed climbableMech() => _EstablishStubbed(
     relay: relay,
+    peerRuntime: FixedPeerConnector(relay),
     crypto: CryptoService(),
     machineDeviceId: 'M',
     identity: _identity(),
@@ -436,6 +440,7 @@ void main() {
       're-dialling the socket', () async {
     final mech = _EstablishAlwaysFails(
       relay: relay,
+      peerRuntime: FixedPeerConnector(relay),
       crypto: CryptoService(),
       machineDeviceId: 'M',
       identity: _identity(),

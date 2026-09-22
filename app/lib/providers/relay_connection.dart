@@ -170,24 +170,12 @@ class RelayConnection {
           mechanisms.peerRuntime?.invalidate();
         }
         supervisor.noteRelayError(e.code, retryable: e.retryable);
-        // A dropped frame is not a connection fault — the socket stays open and
-        // the ladder is unaffected. It reaches the session so services holding
-        // re-issuable work can recover it instead of waiting out a timeout.
-        // Both codes the relay uses for a discarded ROUTED frame: the rate
-        // limiter's, and `ROUTE_FAILED` for a recipient whose socket refused
-        // the write. Keep in lockstep with `handleDroppedFrameError` in the
-        // bridge's relay-client.ts.
+        // Central routing errors cannot describe loss on the native payload link.
         if (e.code == 'MESSAGE_RATE_LIMITED' || e.code == 'ROUTE_FAILED') {
           _noteDroppedFrame();
-          mechanisms.session?.noteFramesDropped();
         }
       }),
     );
-    // One listener, mechanism first: the supervisor re-derives the ladder
-    // synchronously inside notePresence and reads `mechanisms.agentOnline`
-    // while doing it. Two separate subscriptions would let it read the level
-    // one microtask stale and charge a full routable stall to every return of
-    // an agent that is already back.
     _subs.add(
       relay.peerPresenceStream.listen((online) {
         mechanisms.notePresence(online);

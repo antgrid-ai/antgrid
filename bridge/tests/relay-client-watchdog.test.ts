@@ -74,10 +74,10 @@ function makeClient(url: string) {
 async function connectToWelcome(relayOpts: { answerPing?: boolean } = {}) {
   const relay = startStubRelay(relayOpts);
   const client = makeClient(`ws://127.0.0.1:${relay.server.port}`);
-  const welcomed = new Promise<void>((resolve) => { (client as any).opts.onAuthenticated = resolve; });
+  const welcomed = new Promise<void>((resolve) => { (client as any).central.opts.onAuthenticated = resolve; });
   client.connect();
   await welcomed;
-  const advanceHeartbeat = () => (client as any).heartbeatTick();
+  const advanceHeartbeat = () => (client as any).central.heartbeatTick();
   return { client, relay, advanceHeartbeat };
 }
 
@@ -88,28 +88,28 @@ test("heartbeat sends a json ping and arms the watchdog", async () => {
   advanceHeartbeat();
 
   expect(await nextMsg).toBe(JSON.stringify({ type: "ping" }));
-  expect((client as any).awaitingPong).toBe(true);
+  expect((client as any).central.awaitingPong).toBe(true);
 });
 
 test("missed pong for a full interval force-closes the socket, and the close handler schedules reconnect", async () => {
   const { client, advanceHeartbeat } = await connectToWelcome({ answerPing: false });
   let scheduled = false;
-  (client as any).scheduleReconnect = () => { scheduled = true; };
-  const disconnected = new Promise<void>((resolve) => { (client as any).opts.onDisconnected = resolve; });
+  (client as any).central.scheduleReconnect = () => { scheduled = true; };
+  const disconnected = new Promise<void>((resolve) => { (client as any).central.opts.onDisconnected = resolve; });
 
   advanceHeartbeat(); // ping sent, awaitingPong = true
   advanceHeartbeat(); // no pong arrived since -> force close
   await disconnected; // real "close" listener ran synchronously before this resolves
 
-  expect((client as any).ws?.readyState).not.toBe(WebSocket.OPEN);
+  expect((client as any).central.ws?.readyState).not.toBe(WebSocket.OPEN);
   expect(scheduled).toBe(true);
 });
 
 test("a pong (or any inbound frame) clears the pending watchdog", async () => {
   const { client, advanceHeartbeat } = await connectToWelcome(); // answerPing defaults true
   const gotPong = new Promise<void>((resolve) => {
-    const orig = (client as any).handleTextMessage.bind(client);
-    (client as any).handleTextMessage = (raw: string) => {
+    const orig = (client as any).central.handleTextMessage.bind(client);
+    (client as any).central.handleTextMessage = (raw: string) => {
       orig(raw);
       if (raw.includes('"pong"')) resolve();
     };
@@ -117,10 +117,10 @@ test("a pong (or any inbound frame) clears the pending watchdog", async () => {
 
   advanceHeartbeat(); // ping sent, awaitingPong = true
   await gotPong;
-  expect((client as any).awaitingPong).toBe(false);
+  expect((client as any).central.awaitingPong).toBe(false);
 
   advanceHeartbeat(); // watchdog cleared -> this just sends another ping, no close
-  expect((client as any).ws?.readyState).toBe(WebSocket.OPEN);
+  expect((client as any).central.ws?.readyState).toBe(WebSocket.OPEN);
 });
 
 test("a decoded binary frame clears the pending watchdog, not just JSON traffic", () => {
@@ -139,7 +139,7 @@ test("a decoded binary frame clears the pending watchdog, not just JSON traffic"
     deviceId: "agent-1",
   });
   clients.push(client);
-  (client as any).awaitingPong = true;
+  (client as any).central.awaitingPong = true;
 
   const frame = encodeRouteFrame(
     { type: "message", from: "phone-1", channel: "control" },
@@ -148,5 +148,5 @@ test("a decoded binary frame clears the pending watchdog, not just JSON traffic"
   );
   (client as any).handleBinaryFrame(Buffer.from(frame));
 
-  expect((client as any).awaitingPong).toBe(false);
+  expect((client as any).central.awaitingPong).toBe(false);
 });

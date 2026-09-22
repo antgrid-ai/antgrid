@@ -13,7 +13,7 @@ import 'package:iroh_quic/src/rust/frb_generated.dart' show RustLib;
 /// `bridge/scripts/iroh-interop-smoke.ts`. Every layer below the fixture
 /// authorization callback is production code: `NativeEndpointOwner` dials over
 /// `iroh_quic`, and unchanged `MachineSession`/`AppSessionHandshaker` carry E2E
-/// and project traffic. The peer is a real `IrohRelayClient` host binding
+/// and project traffic. The peer is a real `NativeHostConnection` host binding
 /// `@number0/iroh`, which is the boundary this gate exists to cross.
 
 class _MemoryKeys implements EndpointKeyStore {
@@ -67,7 +67,8 @@ class _Inbox {
                 'runId': json['runId'],
                 'attachmentId': json['attachmentId'],
                 'sequence': json['sequence'],
-                if (json['checkoutId'] != null) 'checkoutId': json['checkoutId'],
+                if (json['checkoutId'] != null)
+                  'checkoutId': json['checkoutId'],
               }),
               'control',
             )
@@ -82,7 +83,10 @@ class _Inbox {
   final String _streamId;
   late final StreamSubscription<InboundMessage> _sub;
   final _buffered = <Map<String, dynamic>>[];
-  final _waiters = <(bool Function(Map<String, dynamic>), Completer<Map<String, dynamic>>)>[];
+  final _waiters =
+      <
+        (bool Function(Map<String, dynamic>), Completer<Map<String, dynamic>>)
+      >[];
 
   void _drain() {
     for (final waiter in List.of(_waiters)) {
@@ -146,50 +150,58 @@ Future<void> main(List<String> args) async {
     final machineId = config['machineId'] as String;
     final appId = config['appId'] as String;
 
-    final active = link = await client.dial(
-      endpointId: config['endpointId'] as String,
-      // Transport address only, and scoped per machine exactly as
-      // `PeerRuntime` dials. The handshake below binds the bare `appId`, which
-      // is what the E2E transcript and the host's identity lookup are keyed by.
-      localDeviceId: relaySlotId(appId, machineId),
-      peerDeviceId: machineId,
-      authorized: () => true,
-      ipAddresses: (config['addresses'] as List).cast<String>(),
-    );
-    final closed = active.payloadStateStream
-        .firstWhere((state) => state == PeerLinkState.closed)
-        .then((_) {});
-    // Nothing awaits this until the very end; without a listener now the
-    // close that arrives mid-run would surface as an unhandled error.
-    closed.ignore();
+    Future<(PeerLink, MachineSession, Future<void>)> establish() async {
+      final active = link = await client.dial(
+        endpointId: config['endpointId'] as String,
+        // Transport address only, and scoped per machine exactly as
+        // `PeerRuntime` dials. The handshake below binds the bare `appId`, which
+        // is what the E2E transcript and the host's identity lookup are keyed by.
+        localDeviceId: relaySlotId(appId, machineId),
+        peerDeviceId: machineId,
+        authorized: () => true,
+        ipAddresses: (config['addresses'] as List).cast<String>(),
+      );
+      final closed = active.payloadStateStream
+          .firstWhere((state) => state == PeerLinkState.closed)
+          .then((_) {});
+      // Nothing awaits this until the very end; without a listener now the
+      // close that arrives mid-run would surface as an unhandled error.
+      closed.ignore();
 
-    final live = session = MachineSession(
-      relay: active,
-      machineDeviceId: machineId,
-      handshaker: AppSessionHandshaker(
+      final live = session = MachineSession(
         relay: active,
-        crypto: crypto,
         machineDeviceId: machineId,
-        phoneDeviceId: appId,
-        agentEd25519PubB64: config['machinePublic'] as String,
-        phoneEd25519Seed: seed,
-        logger: (level, text, {fields}) =>
-            stderr.writeln('handshake[$level]: $text ${fields ?? ''}'),
-      ),
-      projectStartMessageBuilder: (projectId) =>
-          _message('project:start', {'projectId': projectId}),
-    );
-    live.start();
-    await live.ensureEstablished();
+        handshaker: AppSessionHandshaker(
+          relay: active,
+          crypto: crypto,
+          machineDeviceId: machineId,
+          phoneDeviceId: appId,
+          agentEd25519PubB64: config['machinePublic'] as String,
+          phoneEd25519Seed: seed,
+          logger: (level, text, {fields}) =>
+              stderr.writeln('handshake[$level]: $text ${fields ?? ''}'),
+        ),
+        projectStartMessageBuilder: (projectId) =>
+            _message('project:start', {'projectId': projectId}),
+      );
+      live.start();
+      await live.ensureEstablished();
+      return (active, live, closed);
+    }
+
+    var (active, live, closed) = await establish();
+    final streamIds = <String, String>{};
     _emit({'check': 'established'});
 
-    for (final raw in (config['projects'] as List).cast<Map<String, dynamic>>()) {
+    for (final raw
+        in (config['projects'] as List).cast<Map<String, dynamic>>()) {
       final projectId = raw['id'] as String;
       final name = raw['name'] as String;
       final streamId = await live.bindProject(
         projectId,
         _message('project:start', {'projectId': projectId}),
       );
+      streamIds[projectId] = streamId;
       final inbox = _Inbox(live, streamId);
       inboxes.add(inbox);
       await inbox.send(
@@ -244,8 +256,7 @@ Future<void> main(List<String> args) async {
         }),
       );
       await inbox.waitFor(
-        (m) =>
-            m['type'] == 'terminal:started' && m['terminalId'] == terminalId,
+        (m) => m['type'] == 'terminal:started' && m['terminalId'] == terminalId,
       );
       final subscribeId = _uuid();
       await inbox.send(
@@ -257,8 +268,7 @@ Future<void> main(List<String> args) async {
       );
       await inbox.waitFor(
         (m) =>
-            m['type'] == 'terminal:subscribed' &&
-            m['requestId'] == subscribeId,
+            m['type'] == 'terminal:subscribed' && m['requestId'] == subscribeId,
       );
       await inbox.send(
         _message('terminal:input', {
@@ -290,6 +300,42 @@ Future<void> main(List<String> args) async {
       'appBinding': 'iroh_quic',
       'transport': 'IrohPeerLink',
     });
+    for (
+      var cycle = 0;
+      cycle < (config['resumeCycles'] as int? ?? 0);
+      cycle++
+    ) {
+      await closed.timeout(const Duration(seconds: 20));
+      for (final inbox in inboxes) {
+        await inbox.close();
+      }
+      inboxes.clear();
+      await live.dispose();
+      await active.close();
+      (active, live, closed) = await establish();
+      for (final raw
+          in (config['projects'] as List).cast<Map<String, dynamic>>()) {
+        final id = raw['id'] as String;
+        final name = raw['name'] as String;
+        final streamId = await live.bindProject(
+          id,
+          _message('project:start', {'projectId': id}),
+        );
+        if (streamId != streamIds[id])
+          throw StateError('Resume changed host-owned project binding');
+        final inbox = _Inbox(live, streamId);
+        inboxes.add(inbox);
+        await inbox.send(
+          _message('file:read', {'projectId': id, 'path': 'proof.txt'}),
+        );
+        final proof = await inbox.waitFor(
+          (m) => m['type'] == 'file:content' && m['projectId'] == id,
+        );
+        if (proof['content'] != '$name:resume:$cycle')
+          throw StateError('Resume returned stale project content');
+      }
+      _emit({'check': 'resume-verified', 'cycle': cycle});
+    }
     // The host flips remote access off once it sees the pass line; a revoked
     // peer must lose the native connection, not merely stop being served.
     await closed.timeout(const Duration(seconds: 20));

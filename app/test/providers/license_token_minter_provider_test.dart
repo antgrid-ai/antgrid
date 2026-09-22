@@ -1,3 +1,4 @@
+import '../helpers/test_peer_runtime.dart';
 import 'dart:async';
 import 'dart:convert';
 
@@ -189,7 +190,11 @@ void main() {
         ),
         licenseTokenMinterProvider.overrideWith((ref) async => mainMinter),
         // This fixture observes credential selection without HTTP enrollment.
-        peerRuntimeProvider.overrideWith((_) async => null),
+        peerRuntimeProvider.overrideWith((ref) async {
+          final runtime = TestPeerRuntime();
+          ref.onDispose(runtime.dispose);
+          return runtime;
+        }),
         recentAgentsStoreProvider.overrideWithValue(recentStore),
         // The record the socket authenticates AS — a different deviceUuid from the
         // main record, so a mix-up is a different DEVICE IDENTITY, not just a

@@ -1,3 +1,4 @@
+import '../helpers/test_peer_runtime.dart';
 // The coords step must keep answering from the LIVE account inventory for as
 // long as the ladder runs — including after a user Retry, which disposes and
 // rebuilds the transport element while the connection it started keeps running.
@@ -245,7 +246,11 @@ void main() {
       overrides: [
         ...stores.overrides,
         // These fixtures isolate coordinates and E2E identity from HTTP enrollment.
-        peerRuntimeProvider.overrideWith((_) async => null),
+        peerRuntimeProvider.overrideWith((ref) async {
+          final runtime = TestPeerRuntime();
+          ref.onDispose(runtime.dispose);
+          return runtime;
+        }),
         accountAgentsProvider.overrideWith((_) async => inventory),
         localDeviceUuidProvider.overrideWith((_) async => 'this-device'),
         connectionDeviceRecordProvider.overrideWith((_) async => record),

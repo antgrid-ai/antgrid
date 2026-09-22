@@ -5,7 +5,7 @@ import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 
 import 'authorization.dart';
 
-/// Applies the same authoritative lease to Iroh and upgraded WebSocket peers.
+/// Fences native payload dispatch with the authoritative enrollment lease.
 class LeasedPeerLink implements PeerLink {
   LeasedPeerLink(
     this.inner,

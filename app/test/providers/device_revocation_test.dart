@@ -1,3 +1,4 @@
+import '../helpers/fixed_peer_connector.dart';
 // Revoking a device from the web must sign THIS app out — the relay kicks the
 // socket while it is live, and the token mint answers 401 once it isn't. These
 // pin the three properties the feature rests on: the teardown runs exactly once
@@ -256,6 +257,7 @@ void main() {
       conn.ensureStarted(
         mechanisms: RelayMechanisms(
           relay: relay,
+          peerRuntime: FixedPeerConnector(relay),
           crypto: CryptoService(),
           machineDeviceId: 'M',
           identity: _identity(),

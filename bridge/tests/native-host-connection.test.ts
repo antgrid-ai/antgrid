@@ -1,7 +1,7 @@
 import { expect, test, spyOn } from "bun:test";
 import { netwatch } from "../src/netwatch";
 import type { Connection } from "@number0/iroh";
-import { IrohRelayClient } from "../src/peer/iroh-relay-client";
+import { NativeHostConnection } from "../src/peer/native-host-connection";
 import { generateEphemeralKeypair } from "../src/key-exchange";
 import vector from "../../evals/fixtures/endpoint-registration-vectors.json";
 import { FrameKind, encodeRouteFrame } from "antgrid-wire";
@@ -10,12 +10,12 @@ import type { PendingSinkWrite, QueuedAppFrame } from "../src/send-scheduler";
 
 function fixture() {
   let allowed = true;
-  const client = new IrohRelayClient({
+  const client = new NativeHostConnection({
     url: "ws://localhost:1", identity: { deviceId: vector.challenge.deviceId, deviceName: "test", createdAt: "",
       ed25519PublicKey: vector.devicePublic, ed25519PrivateKey: vector.deviceSeed },
     enrollment: vector.challenge, endpointSecret: vector.endpointSeed, licenseApiUrl: "https://backend.invalid",
     getLicenseToken: () => "test-only", generateKeypair: generateEphemeralKeypair,
-    mode: "iroh-preferred", remoteAccessEnabled: () => allowed,
+    remoteAccessEnabled: () => allowed,
   });
   const endpointId = "a".repeat(64);
   const peerId = "11111111-1111-4111-8111-111111111111";
@@ -23,7 +23,7 @@ function fixture() {
     enrollmentId: vector.challenge.enrollmentId, policyGeneration: "1", registrationGeneration: "1",
     allowed: true, leaseMs: 60_000, endpoint: { endpointId: vector.challenge.endpointId, generation: "1" },
     peers: [{ deviceId: peerId, ed25519Pub: vector.devicePublic, endpoint: { endpointId, generation: "1" } }], relayUrls: [] };
-  const access = client as unknown as {
+  const access = client.peers as unknown as {
     enrollment: { authorization: () => Promise<unknown> };
     acceptPeer: (connection: Connection) => Promise<void>;
     nativePeers: Map<string, unknown>;
@@ -63,19 +63,19 @@ test("native endpoint identity must be present in authoritative peer inventory",
   } finally { f.client.close(); }
 });
 
-test("peer payload diagnostics classify native and relay frames independently", async () => {
+test("peer payload diagnostics classify all production payload frames as native", async () => {
   const f = fixture();
   const events: Parameters<typeof netwatch.record>[0][] = [];
   const observer = spyOn(netwatch, "record").mockImplementation((event) => { events.push(event); });
   try {
     await f.access.acceptPeer(connection(f.endpointId).native);
-    const access = f.client as unknown as {
+    const access = f.client.peers as unknown as {
       onSealedPlaintext: (text: string, channel: "control", peerId: string, session: null) => void;
     };
     access.onSealedPlaintext("{}", "control", `${f.peerId}#${f.client.deviceId}`, null);
     access.onSealedPlaintext("{}", "control", "websocket-peer", null);
     expect(events.filter((event) => event.reason === "unrecognized-plaintext").map((event) => event.transport))
-      .toEqual(["iroh", "relay"]);
+      .toEqual(["iroh", "iroh"]);
     expect(events.some((event) => event.kind === "lifecycle" && event.msgType === "peer:native-accepted")).toBe(true);
   } finally { observer.mockRestore(); f.client.close(); }
 });
@@ -92,7 +92,7 @@ test("native write diagnostics await acceptance and separate payload from record
     })).native);
     const slot = `${f.peerId}#${f.client.deviceId}`;
     const payload = Buffer.from("private-test-payload");
-    const access = f.client as unknown as {
+    const access = f.client.peers as unknown as {
       sendPayload: (data: Buffer, to: string, channel: "control", kind: FrameKind, type: string) => boolean;
       sendScheduledPayload: (data: Buffer, to: string, frame: QueuedAppFrame) => PendingSinkWrite;
     };
@@ -157,41 +157,18 @@ test("resume closes native peers synchronously and fences pre-resume stream admi
   } finally { f.client.close(); }
 });
 
-test("resume signals WebSocket peers immediately while fresh authorization is pending", async () => {
-  const f = fixture();
-  const refreshed = Promise.withResolvers<unknown>();
-  const closes: number[] = [];
-  const access = f.client as unknown as {
-    ws: WebSocket | null;
-    authorizedHellos: Map<string, { attemptId: string; admitted: boolean }>;
-    lease: { current: unknown; refresh(): Promise<boolean> };
-  };
-  try {
-    await access.lease.refresh();
-    access.authorizedHellos.set(f.peerId, { attemptId: "ws-attempt", admitted: true });
-    access.ws = { readyState: WebSocket.OPEN, close: (code: number) => { closes.push(code); } } as unknown as WebSocket;
-    f.access.enrollment.authorization = () => refreshed.promise;
-    const resumed = f.client.noteResume();
-    expect(access.lease.current).toBeNull();
-    expect(access.authorizedHellos.size).toBe(0);
-    expect(closes).toEqual([1012]);
-    refreshed.resolve(f.snapshot);
-    expect(await resumed).toBe(true);
-  } finally { refreshed.resolve(f.snapshot); access.ws = null; f.client.close(); }
-});
-
 test("native-only resume does not churn the central control connection", async () => {
   const f = fixture();
   let centralCloses = 0;
-  const access = f.client as unknown as { ws: WebSocket | null };
+  const access = f.client.peers as unknown as { ws: WebSocket | null };
   try {
     const peer = connection(f.endpointId);
     await f.access.acceptPeer(peer.native);
-    access.ws = { readyState: WebSocket.OPEN, close: () => centralCloses++ } as unknown as WebSocket;
+    f.client.central.ws = { readyState: WebSocket.OPEN, close: () => centralCloses++ } as unknown as WebSocket;
     await f.client.noteResume();
     expect(peer.closes()).toBe(1);
     expect(centralCloses).toBe(0);
-  } finally { access.ws = null; f.client.close(); }
+  } finally { f.client.central.ws = null; f.client.close(); }
 });
 
 test("a revoked local endpoint cannot admit a peer using an otherwise allowed device lease", async () => {
@@ -205,14 +182,14 @@ test("a revoked local endpoint cannot admit a peer using an otherwise allowed de
   } finally { f.client.close(); }
 });
 
-test("a local project awaits native E2E readiness rather than a central acknowledgement", async () => {
+test("local project readiness does not wait for a peer or central acknowledgement", async () => {
   const f = fixture();
   try {
     let admitted = 0;
     const handle = f.client.attachStream(new MessageBus(), { onAdmitted: () => { admitted++; } });
-    expect(admitted).toBe(0);
+    expect(admitted).toBe(1);
     await f.access.acceptPeer(connection(f.endpointId).native);
-    expect(admitted).toBe(0);
+    expect(admitted).toBe(1);
     f.access.onSessionEstablished(`${f.peerId}#${f.client.deviceId}`);
     expect(admitted).toBe(1);
     f.access.onSessionEstablished(`${f.peerId}#${f.client.deviceId}`);
@@ -221,15 +198,15 @@ test("a local project awaits native E2E readiness rather than a central acknowle
   } finally { f.client.close(); }
 });
 
-test("selected WebSocket hello retires a late native carrier before native E2E starts", async () => {
+test("central binary hello cannot replace a native carrier", async () => {
   const f = fixture();
   try {
     const peer = connection(f.endpointId);
     await f.access.acceptPeer(peer.native);
-    f.access.handleBinaryFrame(Buffer.from(encodeRouteFrame({ type: "message", from: `${f.peerId}#${f.client.deviceId}`, channel: "control" },
+    f.client.central.handleBinaryFrame(Buffer.from(encodeRouteFrame({ type: "message", from: `${f.peerId}#${f.client.deviceId}`, channel: "control" },
       Buffer.from(JSON.stringify({ type: "handshake:client-hello", attemptId: "selected-websocket" })), FrameKind.handshake)));
-    expect(f.access.nativePeers.size).toBe(0);
-    expect(peer.closes()).toBe(1);
+    expect(f.access.nativePeers.size).toBe(1);
+    expect(peer.closes()).toBe(0);
   } finally { f.client.close(); }
 });
 
@@ -240,8 +217,8 @@ test("central presence/reconnect preserves native selection; remote-access-off c
     await f.access.acceptPeer(peer.native);
     const slot = `${f.peerId}#${f.client.deviceId}`;
     expect(f.access.nativePeers.has(slot)).toBe(true);
-    f.access.handleTextMessage(JSON.stringify({ type: "peer-offline", peerId: slot }));
-    f.access.resetE2eState();
+    f.client.central.handleTextMessage(JSON.stringify({ type: "peer-offline", peerId: slot }));
+    f.client.central.handleTextMessage(JSON.stringify({ type: "welcome", deviceId: f.client.deviceId, epoch: 1 }));
     expect(f.access.nativePeers.has(slot)).toBe(true);
     f.setAllowed(false);
     f.client.recheckAuthorization();
@@ -265,4 +242,77 @@ test("revocation while the first stream is pending refuses the late native strea
     expect(peer.closes()).toBe(1);
     expect(f.access.nativePeers.size).toBe(0);
   } finally { f.client.close(); }
+});
+
+test("missing native carrier never writes payloads to central WebSocket", async () => {
+  const f = fixture();
+  const sent: unknown[] = [];
+  const access = f.client.peers as unknown as {
+    ws: WebSocket | null;
+    lease: { refresh(): Promise<boolean> };
+    sendPayload(data: Buffer, to: string): boolean;
+    sendScheduledPayload(data: Buffer, to: string, frame: QueuedAppFrame): unknown;
+    sendJson(data: object): void;
+  };
+  try {
+    await access.lease.refresh();
+    f.client.central.ws = { readyState: WebSocket.OPEN, send: (data: unknown) => sent.push(data) } as unknown as WebSocket;
+    expect(access.sendPayload(Buffer.from("payload"), f.peerId)).toBe(false);
+    expect(access.sendScheduledPayload(Buffer.from("sealed"), f.peerId, {
+      channel: "control", streamId: "0", type: "terminal:input", plaintext: "input", plaintextBytes: 5,
+    })).toBeNull();
+    expect(sent).toEqual([]);
+    f.client.central.sendJson({ type: "ping" });
+    expect(sent).toEqual([JSON.stringify({ type: "ping" })]);
+  } finally { f.client.central.ws = null; f.client.close(); }
+});
+
+
+test("a slow first stream cannot admit a duplicate peer writer", async () => {
+  const f = fixture(); const stream = Promise.withResolvers<any>();
+  try {
+    const first = connection(f.endpointId, stream.promise);
+    const pending = f.access.acceptPeer(first.native);
+    await new Promise((r) => setTimeout(r, 0));
+    const duplicate = connection(f.endpointId); await f.access.acceptPeer(duplicate.native);
+    expect(duplicate.closes()).toBe(1);
+    stream.resolve({ send: { writeAll: async () => {} }, recv: { readExact: () => new Promise(() => {}) } });
+    await pending; expect(f.access.nativePeers.size).toBe(1);
+  } finally { f.client.close(); }
+});
+
+test("slow admission does not block a second authorized device", async () => {
+  const f = fixture(); const slow = Promise.withResolvers<any>();
+  const endpointId = "b".repeat(64);
+  f.snapshot.peers.push({ deviceId: "22222222-2222-4222-8222-222222222222", ed25519Pub: vector.devicePublic,
+    endpoint: { endpointId, generation: "1" } });
+  const access = f.client.peers as any;
+  try {
+    const first = connection(f.endpointId, slow.promise), second = connection(endpointId);
+    const incoming = [first, second].map((p) => ({ accept: async () => ({ connect: async () => p.native }), refuse: async () => {} }));
+    const endpoint = { acceptNext: async () => incoming.shift() ?? null };
+    await access.acceptConnections(endpoint, access.lifetime);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(f.access.nativePeers.size).toBe(1); expect(access.pendingAdmissions).toBe(1);
+    slow.resolve({ send: { writeAll: async () => {} }, recv: { readExact: () => new Promise(() => {}) } });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(f.access.nativePeers.size).toBe(2); expect(access.pendingAdmissions).toBe(0);
+  } finally { f.client.close(); }
+});
+
+
+test("pending native admissions are bounded and late arrivals are retired after close", async () => {
+  const f = fixture(); const access = f.client.peers as any;
+  const pending = Array.from({ length: 4 }, () => Promise.withResolvers<Connection>());
+  let refused = 0;
+  const incoming = [...pending.map((p) => ({ accept: async () => ({ connect: () => p.promise }), refuse: async () => { refused++; } })),
+    { accept: async () => { throw new Error("overflow must not be accepted"); }, refuse: async () => { refused++; } }];
+  await access.acceptConnections({ acceptNext: async () => incoming.shift() ?? null }, access.lifetime);
+  expect(access.pendingAdmissions).toBe(4); expect(refused).toBe(1);
+  f.client.close();
+  const peers = pending.map(() => connection(f.endpointId));
+  pending.forEach((p, i) => p.resolve(peers[i]!.native));
+  await new Promise((r) => setTimeout(r, 0));
+  expect(access.pendingAdmissions).toBe(0);
+  expect(peers.every((p) => p.closes() === 1)).toBe(true);
 });

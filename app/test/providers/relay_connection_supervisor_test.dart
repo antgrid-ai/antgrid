@@ -1,3 +1,4 @@
+import '../helpers/fixed_peer_connector.dart';
 // The production wiring of Task 7's ConnectionSupervisor: `RelayConnection`
 // hands the supervisor a `RelayMechanisms` adapter and the supervisor becomes
 // the ONE thing that decides when to dial. These tests pin the two properties
@@ -111,6 +112,7 @@ class _ScriptedRelay extends RelayService {
 class _EstablishStubbed extends RelayMechanisms {
   _EstablishStubbed({
     required super.relay,
+    super.peerRuntime,
     required super.crypto,
     required super.machineDeviceId,
     required super.identity,
@@ -196,6 +198,7 @@ void main() {
   RelayMechanisms mechanisms({Future<String> Function()? mintToken}) =>
       RelayMechanisms(
         relay: relay,
+        peerRuntime: FixedPeerConnector(relay),
         crypto: CryptoService(),
         machineDeviceId: 'M',
         identity: _identity(),
@@ -212,6 +215,7 @@ void main() {
   /// Same wiring, but the ladder can actually reach [Connected].
   _EstablishStubbed climbable() => _EstablishStubbed(
     relay: relay,
+    peerRuntime: FixedPeerConnector(relay),
     crypto: CryptoService(),
     machineDeviceId: 'M',
     identity: _identity(),
@@ -515,33 +519,15 @@ void main() {
     expect(relay.dialedTokens, isEmpty);
   });
 
-  // ------------------------------------------------------------------ I3
-  test('an agent that never announces presence keeps the socket and reaches '
-      'Blocked(agentOffline)', () async {
-    // The socket authenticates fine; the machine on the other end is simply
-    // not running, so no peer-online ever arrives.
+  test('native payload readiness does not require central presence', () async {
     relay.announcePeer = false;
     final conn = connection();
-    conn.ensureStarted(mechanisms: mechanisms());
-
-    // Three routable stalls at the 2s default is the real production timing.
-    await _waitUntil(
-      () => conn.supervisor!.status is Blocked,
-      timeout: const Duration(seconds: 20),
-      reason: 'the ladder must fall through to the routable rung and stall',
-    );
-    expect(conn.supervisor!.status, const Blocked(BlockReason.agentOffline));
-    expect(
-      relay.disconnectCalls,
-      0,
-      reason:
-          'the socket is up and only the PEER is missing — tearing it down '
-          'would charge the socket backoff for an offline agent',
-    );
-    expect(
-      relay.dialedTokens,
-      hasLength(1),
-      reason: 'a stalled routable rung must not re-dial the socket',
-    );
+    final mech = climbable();
+    conn.ensureStarted(mechanisms: mech);
+    await _waitUntil(() => conn.supervisor!.status is Connected);
+    relay.announce(false);
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(conn.supervisor!.status, const Connected());
+    expect(mech.establishCalls, 1);
   });
 }

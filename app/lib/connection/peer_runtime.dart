@@ -13,16 +13,6 @@ import 'package:path/path.dart' as path;
 import '../services/keychain_device_store.dart';
 import '../services/license_token_minter.dart';
 
-const _transportMode = String.fromEnvironment(
-  'ANTGRID_PEER_TRANSPORT',
-  defaultValue: 'websocket',
-);
-PeerTransportMode get configuredPeerTransportMode => switch (_transportMode) {
-  'iroh-preferred' => PeerTransportMode.irohPreferred,
-  'iroh-only' when !kReleaseMode => PeerTransportMode.irohOnly,
-  _ => PeerTransportMode.websocket,
-};
-
 Future<void>? _bundledIrohInitialization;
 
 Future<void> _initializeBundledIroh() {
@@ -57,13 +47,21 @@ Future<void> _loadBundledIroh() {
   return iroh.Iroh.init();
 }
 
-class SelectedPeerLink {
-  const SelectedPeerLink(this.link, {required this.independent});
-  final PeerLink link;
-  final bool independent;
+abstract interface class PeerConnector {
+  void retain();
+  void release();
+  Future<bool> resume();
+  void invalidate();
+  void notePolicyGeneration(BigInt generation);
+  Future<PeerLink> connect({
+    required PeerConnectionAttempt attempt,
+    required RelayService relay,
+    required String machineDeviceId,
+    required String machinePublicKey,
+  });
 }
 
-class PeerRuntime {
+class PeerRuntime implements PeerConnector {
   PeerRuntime({
     required this.record,
     required String licenseApiUrl,
@@ -76,39 +74,62 @@ class PeerRuntime {
       accountId: record.userId,
       deviceId: record.deviceUuid,
       enrollmentId: record.clientId,
-      request: (method, path, body) async {
-        final String token;
-        try {
-          token = await mintToken();
-        } on DeviceRevokedException {
-          throw const PeerAuthorizationDenied();
-        }
-        final uri = Uri.parse(
-          '${licenseApiUrl.replaceAll(RegExp(r'/+$'), '')}$path',
+      request: (method, path, body) {
+        var expired = false;
+        return (() async {
+          final String token;
+          try {
+            token = await mintToken();
+          } on DeviceRevokedException {
+            throw const PeerAuthorizationDenied();
+          }
+          if (expired || _disposed) {
+            throw TimeoutException('Authorization request retired');
+          }
+          final uri = Uri.parse(
+            '${licenseApiUrl.replaceAll(RegExp(r'/+$'), '')}$path',
+          );
+          final headers = {
+            'authorization': 'Bearer $token',
+            'content-type': 'application/json',
+          };
+          final response =
+              await (method == 'GET'
+                      ? _http.get(uri, headers: headers)
+                      : _http.post(
+                          uri,
+                          headers: headers,
+                          body: jsonEncode(body),
+                        ))
+                  .timeout(const Duration(seconds: 15));
+          if (response.statusCode == 401 || response.statusCode == 403) {
+            throw const PeerAuthorizationDenied();
+          }
+          if (response.statusCode == 409) {
+            throw const PeerConnectionFailure(
+              'STALE_ENROLLMENT',
+              terminal: true,
+            );
+          }
+          if (response.statusCode < 200 || response.statusCode >= 300) {
+            throw StateError('Peer authorization HTTP ${response.statusCode}');
+          }
+          try {
+            return jsonDecode(response.body) as Map<String, dynamic>;
+          } catch (_) {
+            throw const FormatException('Invalid peer authorization response');
+          }
+        })().timeout(
+          const Duration(seconds: 15),
+          onTimeout: () {
+            expired = true;
+            throw const PeerConnectionFailure(
+              'AUTHORIZATION_TIMEOUT',
+              terminal: false,
+              stage: PeerConnectionStage.authorization,
+            );
+          },
         );
-        final headers = {
-          'authorization': 'Bearer $token',
-          'content-type': 'application/json',
-        };
-        final response =
-            await (method == 'GET'
-                    ? _http.get(uri, headers: headers)
-                    : _http.post(uri, headers: headers, body: jsonEncode(body)))
-                .timeout(const Duration(seconds: 15));
-        if (response.statusCode == 401 || response.statusCode == 403) {
-          throw const PeerAuthorizationDenied();
-        }
-        if (response.statusCode == 409) {
-          throw const PeerSelectionFailure('STALE_ENROLLMENT', terminal: true);
-        }
-        if (response.statusCode < 200 || response.statusCode >= 300) {
-          throw StateError('Peer authorization HTTP ${response.statusCode}');
-        }
-        try {
-          return jsonDecode(response.body) as Map<String, dynamic>;
-        } catch (_) {
-          throw const FormatException('Invalid peer authorization response');
-        }
       },
     );
     lease = AuthorizationLease(
@@ -125,31 +146,37 @@ class PeerRuntime {
   late final AuthorizationLease lease;
   Future<void>? _preparing;
   Future<NativeEndpointOwner>? _native;
+  void Function()? _retireInitialization;
   String? _nativeRelayPolicy;
   Future<bool>? _resuming;
   int _users = 0;
   bool _disposed = false;
 
+  @override
   void retain() {
     _users++;
     lease.startRefreshing();
   }
 
+  @override
   void release() {
     if (_users > 0) _users--;
     if (_users == 0) lease.stopRefreshing();
   }
 
+  @override
   void notePolicyGeneration(BigInt generation) =>
       lease.notePolicyGeneration(generation);
+  @override
   void invalidate() => lease.invalidate();
+  @override
   Future<bool> resume() =>
       _resuming ??= lease.refreshFresh().whenComplete(() => _resuming = null);
 
   AuthorizationSnapshot _currentSnapshot() {
     final snapshot = lease.snapshot;
     if (_disposed || snapshot == null) {
-      throw const PeerSelectionFailure('LEASE_EXPIRED', terminal: false);
+      throw const PeerConnectionFailure('LEASE_EXPIRED', terminal: false);
     }
     return snapshot;
   }
@@ -157,10 +184,12 @@ class PeerRuntime {
   Future<void> prepare() =>
       _preparing ??= _prepare().whenComplete(() => _preparing = null);
   Future<void> _prepare() async {
-    if (_disposed) throw const PeerSelectionFailure('DISPOSED', terminal: true);
+    if (_disposed) {
+      throw const PeerConnectionFailure('DISPOSED', terminal: true);
+    }
     if (!await lease.refresh()) {
       final error = lease.lastRefreshFailure;
-      throw PeerSelectionFailure(
+      throw PeerConnectionFailure(
         'AUTHORIZATION_UNAVAILABLE',
         terminal: error is PeerAuthorizationDenied || error is FormatException,
       );
@@ -171,6 +200,12 @@ class PeerRuntime {
         .map((byte) => byte.toRadixString(16).padLeft(2, '0'))
         .join();
     final snapshot = _currentSnapshot();
+    if (snapshot.endpoint != null && snapshot.endpoint?.endpointId != id) {
+      throw const PeerConnectionFailure(
+        'LOCAL_ENDPOINT_ROTATED',
+        terminal: true,
+      );
+    }
     if (snapshot.endpoint?.endpointId != id) {
       await enrollment.register(
         deviceSecret: _deviceSecret,
@@ -179,7 +214,7 @@ class PeerRuntime {
       );
       if (!await lease.refresh()) {
         final error = lease.lastRefreshFailure;
-        throw PeerSelectionFailure(
+        throw PeerConnectionFailure(
           'AUTHORIZATION_UNAVAILABLE',
           terminal:
               error is PeerAuthorizationDenied || error is FormatException,
@@ -187,26 +222,23 @@ class PeerRuntime {
       }
     }
     if (_currentSnapshot().endpoint?.endpointId != id) {
-      throw const PeerSelectionFailure(
+      throw const PeerConnectionFailure(
         'LOCAL_ENDPOINT_ROTATED',
         terminal: true,
       );
     }
   }
 
-  Future<SelectedPeerLink> select({
-    required PeerLinkSelector selector,
+  @override
+  Future<PeerLink> connect({
+    required PeerConnectionAttempt attempt,
     required RelayService relay,
     required String machineDeviceId,
     required String machinePublicKey,
-    PeerTransportMode? mode,
-    Future<void>? centralReady,
   }) async {
+    final generation = attempt.generation;
     final requestTimer = Stopwatch()..start();
-    final selectedMode = mode ?? configuredPeerTransportMode;
-    final requestedTransport = selectedMode == PeerTransportMode.websocket
-        ? 'relay'
-        : 'iroh';
+    const requestedTransport = 'iroh';
     void diagnostic(Map<String, Object?> event) => relay.netTap?.call(event);
     emitPeerLifecycle(
       diagnostic,
@@ -215,6 +247,7 @@ class PeerRuntime {
       elapsedMs: 0,
     );
     await prepare();
+    attempt.checkCurrent(generation);
     emitPeerLifecycle(
       diagnostic,
       'peer:authorization-ready',
@@ -226,12 +259,18 @@ class PeerRuntime {
       if (value.deviceId == machineDeviceId) peer = value;
     }
     if (peer == null) {
-      throw const PeerSelectionFailure('PEER_IDENTITY_DENIED', terminal: true);
+      throw const PeerConnectionFailure('PEER_IDENTITY_DENIED', terminal: true);
     }
     if (peer.ed25519Pub != machinePublicKey) {
-      throw const PeerSelectionFailure('PEER_KEY_MISMATCH', terminal: true);
+      throw const PeerConnectionFailure('PEER_KEY_MISMATCH', terminal: true);
     }
     final registration = peer.endpoint;
+    if (registration == null) {
+      throw const PeerConnectionFailure(
+        'PEER_ENDPOINT_REQUIRED',
+        terminal: true,
+      );
+    }
     final local = _currentSnapshot().endpoint;
     final relayPolicy = _relayPolicy(_currentSnapshot().relayUrls);
     bool authorized() {
@@ -248,27 +287,16 @@ class PeerRuntime {
           ) &&
           lease.permits(
             machineDeviceId,
-            endpointId: registration?.endpointId,
-            generation: registration?.generation,
+            endpointId: registration.endpointId,
+            generation: registration.generation,
           );
     }
 
-    final selected = await selector.select(
+    final native = await _nativeFor(_currentSnapshot().relayUrls);
+    attempt.checkCurrent(generation);
+    final selected = await attempt.connect(
       diagnostic: diagnostic,
-      mode: selectedMode,
-      websocket: () async {
-        await centralReady;
-        return relay;
-      },
       iroh: () async {
-        if (registration == null) {
-          throw const PeerSelectionFailure('LEGACY_PEER', terminal: false);
-        }
-        final native = await _nativeFor(_currentSnapshot().relayUrls);
-        if (_disposed) {
-          await native.close();
-          throw const PeerSelectionFailure('DISPOSED', terminal: true);
-        }
         return native.dial(
           endpointId: registration.endpointId,
           localDeviceId: relaySlotId(record.deviceUuid, machineDeviceId),
@@ -280,43 +308,48 @@ class PeerRuntime {
     );
     if (!authorized()) {
       await selected.close();
-      throw PeerSelectionFailure(
+      throw PeerConnectionFailure(
         _disposed
-            ? 'DISPOSED_AFTER_SELECTION'
-            : 'AUTHORIZATION_CHANGED_DURING_SELECTION',
+            ? 'DISPOSED_AFTER_CONNECT'
+            : 'AUTHORIZATION_CHANGED_DURING_CONNECT',
         terminal: true,
       );
     }
-    return SelectedPeerLink(
-      LeasedPeerLink(
-        selected,
-        lease,
-        peerId: machineDeviceId,
-        endpointId: registration?.endpointId,
-        registrationGeneration: registration?.generation,
-      ),
-      independent: selected is IrohPeerLink,
+    return LeasedPeerLink(
+      selected,
+      lease,
+      peerId: machineDeviceId,
+      endpointId: registration.endpointId,
+      registrationGeneration: registration.generation,
     );
   }
 
   static String _relayPolicy(List<String> urls) =>
       (urls.toList()..sort()).join('\n');
 
-  Future<NativeEndpointOwner> _nativeFor(List<String> urls) {
+  Future<NativeEndpointOwner> _nativeFor(List<String> urls) async {
     final policy = _relayPolicy(urls);
-    if (_native != null && _nativeRelayPolicy == policy) return _native!;
+    if (_native != null && _nativeRelayPolicy == policy) {
+      return _awaitNative(_native!, _retireInitialization!);
+    }
     final previous = _native;
+    _retireInitialization?.call();
+    var retired = false;
+    void retire() => retired = true;
+    _retireInitialization = retire;
     _nativeRelayPolicy = policy;
     late final Future<NativeEndpointOwner> pending;
     pending =
         (() async {
           if (previous != null) {
+            NativeEndpointOwner? previousOwner;
             try {
-              await (await previous).close();
+              previousOwner = await previous;
             } catch (_) {}
+            if (previousOwner != null) await previousOwner.close();
           }
           if (_disposed) {
-            throw const PeerSelectionFailure('DISPOSED', terminal: true);
+            throw const PeerConnectionFailure('DISPOSED', terminal: true);
           }
           final native = await NativeEndpointOwner.create(
             enrollmentId: record.clientId,
@@ -324,11 +357,12 @@ class PeerRuntime {
             approvedRelays: urls,
             initializeNative: _initializeBundledIroh,
           );
-          if (_disposed || _nativeRelayPolicy != policy) {
+          if (_disposed || retired || _nativeRelayPolicy != policy) {
             await native.close();
-            throw const PeerSelectionFailure(
-              'ENDPOINT_SUPERSEDED',
-              terminal: true,
+            throw const PeerConnectionFailure(
+              'SUPERSEDED',
+              terminal: false,
+              stage: PeerConnectionStage.initialization,
             );
           }
           return native;
@@ -336,7 +370,25 @@ class PeerRuntime {
           if (identical(_native, pending)) _native = null;
           Error.throwWithStackTrace(error, stack);
         });
-    return _native = pending;
+    _native = pending;
+    return _awaitNative(pending, retire);
+  }
+
+  Future<NativeEndpointOwner> _awaitNative(
+    Future<NativeEndpointOwner> pending,
+    void Function() retire,
+  ) {
+    return pending.timeout(
+      const Duration(seconds: 30),
+      onTimeout: () {
+        retire();
+        throw const PeerConnectionFailure(
+          'ENDPOINT_INIT_TIMEOUT',
+          terminal: false,
+          stage: PeerConnectionStage.initialization,
+        );
+      },
+    );
   }
 
   Future<void> dispose() async {

@@ -30,7 +30,7 @@
     "aspire:android": "bun run scripts/aspire-targets.ts android",
     "aspire:ios": "bun run scripts/aspire-targets.ts ios",
     "aspire:macos": "bun run scripts/aspire-targets.ts macos",
-    "aspire:all": "bun run scripts/aspire-targets.ts windows,android iroh-only",
+    "aspire:all": "bun run scripts/aspire-targets.ts windows,android",
     "aspire:mac:all": "bun run scripts/aspire-targets.ts macos,ios",
     "typecheck": "bun run --filter='*' typecheck",
     "check:font-tokens": "bash app/scripts/check_font_tokens.sh",

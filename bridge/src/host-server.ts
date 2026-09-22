@@ -1,3 +1,4 @@
+import type { RemoteHostConnection } from "./remote-host-connection";
 import { randomBytes, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { hostname } from "node:os";
@@ -21,7 +22,7 @@ import type { ProjectSummary, ConnectInfo, PairedPhoneSummary, KnownProject } fr
 import { logger } from "./logger";
 const log = logger.child({ component: "host-server" });
 import { RelayClient, type RelayClientOptions } from "./relay-client";
-import { IrohRelayClient, TransportModeSchema } from "./peer/iroh-relay-client";
+import { NativeHostConnection } from "./peer/native-host-connection";
 import type { MachineRelaySession } from "./relay-promotion";
 import type { AgentEnableRelay } from "./protocol";
 import { MessageBus, type Channel } from "./message-bus";
@@ -146,9 +147,9 @@ export interface HostServerOptions {
    *  Defaults to {@link buildRemoteRuntime} (real OAuth + token maintenance). */
   remoteRuntimeFactory?: (r: HostRemoteConfig, onMinted?: () => void) => Promise<RemoteRuntime>;
   /** Test seam: builds the single machine {@link RelayClient}. Defaults to a
-   *  real `new RelayClient(opts)` — overridden in tests to observe stream
+   *  real `new NativeHostConnection(opts)` — overridden in tests to observe stream
    *  admission (onAdmitted/onRejected) without a live relay socket. */
-  relayClientFactory?: (opts: RelayClientOptions) => RelayClient;
+  relayClientFactory?: (opts: RelayClientOptions) => RemoteHostConnection;
   /** Test seam: override the pushHeartbeat() cadence. Defaults to
    *  {@link HEARTBEAT_REFRESH_INTERVAL_MS} (60s). */
   heartbeatIntervalMs?: number;
@@ -632,7 +633,7 @@ export class HostServer {
   // mobile-access-gated project verbs from a paired phone. Opened only when remote
   // config is present; one phone at a time on this registration (concurrent
   // multi-phone control is out of scope). null until startRemoteControlPlane().
-  private controlPlaneRelay: RelayClient | null = null;
+  private controlPlaneRelay: RemoteHostConnection | null = null;
   // retained to prevent GC of the bus before shutdown
   private controlPlaneBus: MessageBus | null = null;
   // Account device inventory, the primary E2E-admission trust source.
@@ -796,7 +797,7 @@ export class HostServer {
   }
 
   notePeerResume(): void {
-    if (this.controlPlaneRelay instanceof IrohRelayClient) {
+    if (this.controlPlaneRelay?.noteResume) {
       void this.controlPlaneRelay.noteResume().catch((error) =>
         log.warn("host: peer authorization refresh after resume failed: %s", String(error)));
     }
@@ -824,15 +825,11 @@ export class HostServer {
       });
     }
 
-    const mode = TransportModeSchema.parse(process.env.ANTGRID_PEER_TRANSPORT ?? "websocket");
-    if (mode === "iroh-only" && process.env.ANTGRID_TEST_MODE !== "1") {
-      throw new Error("iroh-only is restricted to evaluations");
-    }
     const buildClient = this.opts.relayClientFactory ?? ((o: RelayClientOptions) => {
       if (!r.auth.userId || !r.auth.endpointSecret) {
         throw new Error("Remote transport requires a secure endpoint enrollment; sign in again");
       }
-      return new IrohRelayClient({ ...o, mode,
+      return new NativeHostConnection({ ...o,
         enrollment: { accountId: r.auth.userId, deviceId: r.auth.deviceUuid, enrollmentId: r.auth.clientId },
         endpointSecret: r.auth.endpointSecret, licenseApiUrl: r.licenseApiUrl,
         remoteAccessEnabled: () => this.remoteAccessPolicy.isEnabled(),
@@ -1264,7 +1261,7 @@ export class HostServer {
       case "mobile-access:set": {
         const changed = this.remoteAccessPolicy.setEnabled(req.enabled);
         if (changed && !req.enabled) {
-          if (this.controlPlaneRelay instanceof IrohRelayClient) this.controlPlaneRelay.recheckAuthorization();
+          this.controlPlaneRelay?.recheckAuthorization?.();
           this.demoteAllPromoted();
           // A second, independent clear: `handleRemoteDirectoryPush`'s own
           // refusal path already clears on its next ingest attempt, but that

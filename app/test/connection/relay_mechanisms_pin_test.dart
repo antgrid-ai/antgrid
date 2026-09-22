@@ -1,3 +1,4 @@
+import '../helpers/fixed_peer_connector.dart';
 // `AppSessionHandshaker` pins the agent's Ed25519 key at construction, so a
 // [MachineSession] can only ever verify one agent identity. When the coords
 // step comes back with a DIFFERENT pin — the host re-provisioned its identity —
@@ -96,6 +97,7 @@ void main() {
 
   RelayMechanisms build({ConnCoords Function()? coords}) => RelayMechanisms(
     relay: relay,
+    peerRuntime: FixedPeerConnector(relay),
     crypto: CryptoService(),
     machineDeviceId: 'M',
     identity: _identity(),

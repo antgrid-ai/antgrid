@@ -105,9 +105,7 @@ export async function startSmokeFixture(options: SmokeFixtureOptions): Promise<S
   });
   const root = mkdtempSync(join(tmpdir(), `antgrid-${options.label}-`));
   const previousDirectory = process.env.ANTGRID_DIR;
-  const previousMode = process.env.ANTGRID_PEER_TRANSPORT;
   process.env.ANTGRID_DIR = join(root, "state");
-  process.env.ANTGRID_PEER_TRANSPORT = "iroh-preferred";
   const host = new HostServer({ remote: {
     relayUrl: `ws://127.0.0.1:${backend.port}`, licenseApiUrl: `http://127.0.0.1:${backend.port}`,
     identity: { deviceId: machine.id, deviceName: options.label, createdAt: "",
@@ -137,7 +135,7 @@ export async function startSmokeFixture(options: SmokeFixtureOptions): Promise<S
     machine, projects, root, host,
     async nativeAddress() {
       const endpoint = await until(() =>
-        (host as unknown as { controlPlaneRelay?: { endpoint?: Endpoint } }).controlPlaneRelay?.endpoint);
+        (host as unknown as { controlPlaneRelay?: { peers?: { lifecycle?: { endpoint?: Endpoint } } } }).controlPlaneRelay?.peers?.lifecycle?.endpoint);
       return {
         endpointId: endpoint.id().toString(),
         // The host binds a wildcard socket; the app dials loopback in-process.
@@ -155,8 +153,6 @@ export async function startSmokeFixture(options: SmokeFixtureOptions): Promise<S
       backend.stop(true);
       if (previousDirectory === undefined) delete process.env.ANTGRID_DIR;
       else process.env.ANTGRID_DIR = previousDirectory;
-      if (previousMode === undefined) delete process.env.ANTGRID_PEER_TRANSPORT;
-      else process.env.ANTGRID_PEER_TRANSPORT = previousMode;
       rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     },
   };

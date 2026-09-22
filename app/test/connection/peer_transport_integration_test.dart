@@ -74,17 +74,15 @@ class _Runtime extends PeerRuntime {
   @override
   void release() {}
   @override
-  Future<SelectedPeerLink> select({
-    required PeerLinkSelector selector,
+  Future<PeerLink> connect({
+    required PeerConnectionAttempt attempt,
     required RelayService relay,
     required String machineDeviceId,
     required String machinePublicKey,
-    PeerTransportMode? mode,
-    Future<void>? centralReady,
   }) async {
     selecting = true;
     await gate?.future;
-    return SelectedPeerLink(payload, independent: true);
+    return payload;
   }
 }
 
@@ -153,10 +151,9 @@ Future<void> _settle() async {
 
 RelayMechanisms _mechanisms(
   _Relay relay,
-  _Runtime runtime,
-  _Handshake handshake, {
-  PeerTransportMode? mode,
-}) => RelayMechanisms(
+  _Runtime? runtime,
+  _Handshake handshake,
+) => RelayMechanisms(
   relay: relay,
   crypto: CryptoService(),
   machineDeviceId: 'machine',
@@ -175,11 +172,60 @@ RelayMechanisms _mechanisms(
       const ConnCoords(relayUrl: 'wss://relay.test', agentEd25519PubB64: 'pin'),
   mintToken: () async => 'token',
   peerRuntime: runtime,
-  peerTransportMode: mode,
   buildHandshaker: (_) => handshake,
 );
 
 void main() {
+  test(
+    'changed central URL is reconciled without using payload failure',
+    () async {
+      final relay = _Relay();
+      final runtime = _Runtime(_Payload());
+      final mech = _mechanisms(relay, runtime, _Handshake());
+      const old = ConnCoords(
+        relayUrl: 'wss://old.test',
+        agentEd25519PubB64: 'pin',
+      );
+      const next = ConnCoords(
+        relayUrl: 'wss://new.test',
+        agentEd25519PubB64: 'pin',
+      );
+      await mech.reconnectCentral(old, 'token');
+      await mech.dial(next, 'token');
+      expect(mech.centralControlNeedsReconnect, isTrue);
+      await mech.reconnectCentral(next, 'token');
+      expect(mech.centralControlNeedsReconnect, isFalse);
+      expect(relay.dials, 2);
+      await mech.release();
+      relay.dispose();
+      await runtime.dispose();
+    },
+  );
+
+  test(
+    'missing native runtime cannot use the central socket for payloads',
+    () async {
+      final relay = _Relay();
+      final mechanisms = _mechanisms(relay, null, _Handshake());
+      var blocked = false;
+      mechanisms.onTerminalPeerError = () => blocked = true;
+      await expectLater(
+        mechanisms.dial(
+          const ConnCoords(
+            relayUrl: 'wss://relay.test',
+            agentEd25519PubB64: 'pin',
+          ),
+          'token',
+        ),
+        throwsA(isA<PeerConnectionFailure>()),
+      );
+      expect(blocked, isTrue);
+      expect(relay.dials, 0);
+      expect(mechanisms.session, isNull);
+      await mechanisms.release();
+      relay.dispose();
+    },
+  );
   test(
     'central reconnect and path changes preserve the native E2E session',
     () async {
@@ -231,41 +277,47 @@ void main() {
     expect(runtime.selecting, isTrue);
     await mechanisms.release();
     runtime.gate!.complete();
-    await dialing;
+    await expectLater(dialing, throwsA(isA<ConnectionAttemptCancelled>()));
     expect(payload.closed, isTrue);
     expect(mechanisms.session, isNull);
     relay.dispose();
     await runtime.dispose();
   });
-  test('a dead payload link wakes the ladder unless the mode cannot fall back', () async {
-    Future<({bool blocked, bool woken})> run(PeerTransportMode mode) async {
-      final relay = _Relay();
-      final payload = _Payload();
-      final runtime = _Runtime(payload);
-      final mechanisms = _mechanisms(relay, runtime, _Handshake(), mode: mode);
-      var blocked = false;
-      var woken = false;
-      mechanisms.onTerminalPeerError = () => blocked = true;
-      mechanisms.onSessionDown = () => woken = true;
-      await mechanisms.dial(
-        const ConnCoords(relayUrl: 'wss://relay.test', agentEd25519PubB64: 'pin'),
-        'token',
-      );
-      payload.failures.add(
-        const PeerLinkFailure(code: 'NATIVE_CLOSE_UNCLASSIFIED', retryable: false),
-      );
-      await _settle();
-      final outcome = (blocked: blocked, woken: woken);
-      await mechanisms.release();
-      relay.dispose();
-      await runtime.dispose();
-      return outcome;
-    }
+  test(
+    'terminal native failure blocks; retryable failure wakes the ladder',
+    () async {
+      Future<({bool blocked, bool woken})> run(bool retryable) async {
+        final relay = _Relay();
+        final payload = _Payload();
+        final runtime = _Runtime(payload);
+        final mechanisms = _mechanisms(relay, runtime, _Handshake());
+        var blocked = false;
+        var woken = false;
+        mechanisms.onTerminalPeerError = () => blocked = true;
+        mechanisms.onSessionDown = () => woken = true;
+        await mechanisms.dial(
+          const ConnCoords(
+            relayUrl: 'wss://relay.test',
+            agentEd25519PubB64: 'pin',
+          ),
+          'token',
+        );
+        payload.failures.add(
+          PeerLinkFailure(
+            code: 'NATIVE_CLOSE_UNCLASSIFIED',
+            retryable: retryable,
+          ),
+        );
+        await _settle();
+        final outcome = (blocked: blocked, woken: woken);
+        await mechanisms.release();
+        relay.dispose();
+        await runtime.dispose();
+        return outcome;
+      }
 
-    expect(
-      await run(PeerTransportMode.irohPreferred),
-      (blocked: false, woken: true),
-    );
-    expect(await run(PeerTransportMode.irohOnly), (blocked: true, woken: false));
-  });
+      expect(await run(true), (blocked: false, woken: true));
+      expect(await run(false), (blocked: true, woken: false));
+    },
+  );
 }

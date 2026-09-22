@@ -1,7 +1,7 @@
 import { z } from "zod";
-import { CONTROL_STREAM_ID, FrameKind, MAX_FRAME_PAYLOAD, PEER_ALPN, PEER_REFRESH_MS, RouteHeader, ServerMessage, decodeRouteFrame, encodeRouteFrame } from "antgrid-wire";
+import { FrameKind, MAX_FRAME_PAYLOAD, PEER_ALPN, PEER_REFRESH_MS, RouteHeader, decodeRouteFrame, encodeRouteFrame } from "antgrid-wire";
 import type { Connection, Endpoint, Incoming } from "@number0/iroh";
-import { RelayClient, type RelayClientOptions } from "../relay-client";
+import { CentralControlClient, type CentralControlOptions } from "../central-control-client";
 import { baseSlotDeviceId } from "../relay-slot";
 import type { Channel, MessageBus } from "../message-bus";
 import type { AttachStreamOpts, StreamHandle } from "../stream-mux";
@@ -9,16 +9,15 @@ import type { PendingSinkWrite, QueuedAppFrame } from "../send-scheduler";
 import { AuthorizationLease, type EnrollmentIdentity, type LeaseFailure } from "./authorization-lease";
 import { EndpointApiError, EndpointEnrollment } from "./enrollment";
 import { PeerRecords, type PeerRecordFailure } from "./records";
+import { PeerSessionOwner, type PeerSessionOwnerOptions, MAX_APP_SESSIONS } from "../peer-session-owner";
+import { EndpointLifecycle, EndpointFailure } from "./endpoint-lifecycle";
+import type { RemoteHostConnection } from "../remote-host-connection";
 import { frameIdFor } from "../netwatch";
 
-export const TransportModeSchema = z.enum(["websocket", "iroh-preferred", "iroh-only"]);
-export type TransportMode = z.infer<typeof TransportModeSchema>;
-
-export interface IrohRelayOptions extends RelayClientOptions {
+export interface NativeHostOptions extends PeerSessionOwnerOptions, CentralControlOptions {
   enrollment: EnrollmentIdentity;
   endpointSecret: string;
   licenseApiUrl: string;
-  mode: TransportMode;
   remoteAccessEnabled: () => boolean;
 }
 
@@ -32,12 +31,11 @@ interface NativePeer {
 }
 
 /** Central inventory and native payloads share host-owned project bindings. */
-export class IrohRelayClient extends RelayClient {
+export class NativePeerSessions extends PeerSessionOwner {
   private readonly nativePeers = new Map<string, NativePeer>();
-  private readonly centralStreams = new Set<string>();
-  private readonly localAdmissions = new Map<string, () => void>();
   private readonly authorizedHellos = new Map<string, { attemptId: string; admitted: boolean }>();
-  private endpoint: Endpoint | null = null;
+  private readonly lifecycle: EndpointLifecycle<Endpoint>;
+  private readonly admittingPeers = new Set<string>();
   private readonly enrollment: EndpointEnrollment;
   private readonly lease: AuthorizationLease;
   private refreshTimer: ReturnType<typeof setInterval> | null = null;
@@ -47,9 +45,24 @@ export class IrohRelayClient extends RelayClient {
   private admissionGeneration = 0;
   private approvedRelays = "";
 
-  constructor(private readonly nativeOpts: IrohRelayOptions) {
+  constructor(private readonly nativeOpts: NativeHostOptions) {
     super(nativeOpts);
+    nativeOpts.payloadSink = { send: (...args) => this.sendNativePayload(...args),
+      sendScheduled: (...args) => this.sendNativeScheduled(...args) };
     if (!nativeOpts.identity.ed25519PrivateKey) throw new Error("Endpoint enrollment requires device identity");
+    this.lifecycle = new EndpointLifecycle({
+      create: () => this.startEndpoint(),
+      listen: (endpoint) => this.acceptConnections(endpoint, this.lifetime),
+      retire: async (endpoint) => {
+        this.lifetime++;
+        this.dropAllPeers("connection-lost");
+        await endpoint.close();
+      },
+      terminal: (error) => error instanceof EndpointFailure && error.terminal ||
+        error instanceof z.ZodError || error instanceof EndpointApiError && [401, 403, 409].includes(error.status),
+      changed: (state, reason) => this.recordDiagnostic({ dir: "event", kind: "lifecycle", transport: "iroh",
+        msgType: "peer:endpoint-state", detail: { state, ...(reason ? { reason } : {}) } }),
+    });
     this.enrollment = new EndpointEnrollment(nativeOpts.enrollment, nativeOpts.endpointSecret,
       nativeOpts.identity.ed25519PrivateKey, nativeOpts.licenseApiUrl, nativeOpts.getLicenseToken);
     this.lease = new AuthorizationLease(nativeOpts.enrollment, async () => {
@@ -65,98 +78,92 @@ export class IrohRelayClient extends RelayClient {
       });
   }
 
-  override connect(): void {
-    super.connect();
-    const lifetime = ++this.lifetime;
-    void this.startEndpoint(lifetime).catch((error) => {
-      if (error instanceof EndpointApiError && (error.status === 401 || error.status === 403)) this.lease.invalidate("denied");
-      this.opts.onError?.("PEER_TRANSPORT_UNAVAILABLE", String(error));
-    });
+  connect(): void {
+    this.lifecycle.start();
   }
 
-  private async startEndpoint(lifetime: number): Promise<void> {
+  private async startEndpoint(): Promise<Endpoint> {
     await this.enrollment.register();
-    if (this.stopped || lifetime !== this.lifetime) return;
+    if (this.stopped) throw new EndpointFailure("ENDPOINT_STOPPED");
     if (!await this.lease.refresh()) throw new Error("Peer lease refused");
     if (this.lease.current?.endpoint?.endpointId !== this.enrollment.endpointId) {
       this.lease.invalidate("rotated");
-      throw new Error("Local endpoint registration is no longer active");
+      throw new EndpointFailure("LOCAL_ENDPOINT_ROTATED", true);
     }
-    if (this.stopped || lifetime !== this.lifetime) return;
     if (this.refreshTimer) clearInterval(this.refreshTimer);
     this.refreshTimer = setInterval(() => {
       if (this.sessions.size || this.nativePeers.size) void this.lease.refresh().catch(() => {});
     }, PEER_REFRESH_MS);
     this.refreshTimer.unref?.();
-    if (this.nativeOpts.mode === "websocket") return;
     const native = await import("@number0/iroh/index.js");
+    if (this.stopped) throw new EndpointFailure("ENDPOINT_STOPPED");
     const builder = native.Endpoint.builder();
     builder.applyMinimal();
     builder.secretKey(this.enrollment.seedBytes());
     builder.alpns([Array.from(Buffer.from(PEER_ALPN))]);
     const relays = this.lease.current?.relayUrls;
-    if (!relays?.length) throw new Error("No approved Iroh relay configured");
+    if (!relays?.length) throw new EndpointFailure("NO_APPROVED_RELAY", true);
     builder.relayMode(native.RelayMode.customFromUrls(relays));
     const endpoint = await builder.bind();
-    if (this.stopped || lifetime !== this.lifetime) { await endpoint.close(); return; }
     if (relays.slice().sort().join("\n") !== this.lease.current?.relayUrls.slice().sort().join("\n")) {
       await endpoint.close();
       throw new Error("Relay policy changed while binding endpoint");
     }
     if (endpoint.id().toString() !== this.enrollment.endpointId) {
       await endpoint.close();
-      throw new Error("Native endpoint identity mismatch");
+      throw new EndpointFailure("ENDPOINT_IDENTITY_MISMATCH", true);
     }
-    this.endpoint = endpoint;
     this.approvedRelays = relays.slice().sort().join("\n");
-    void this.acceptConnections(endpoint, lifetime);
+    return endpoint;
   }
 
   private reconcileRelays(): void {
-    const endpoint = this.endpoint;
-    if (!endpoint || this.lease.current?.relayUrls.slice().sort().join("\n") === this.approvedRelays) return;
-    this.endpoint = null;
-    const lifetime = ++this.lifetime;
-    for (const peerId of [...this.nativePeers.keys()]) this.dropNativePeer(peerId);
-    void endpoint.close().then(() => {
-      if (!this.stopped && lifetime === this.lifetime) return this.startEndpoint(lifetime);
-    }).catch((error) => this.opts.onError?.("PEER_TRANSPORT_UNAVAILABLE", String(error)));
-  }
-
-  private async acceptConnections(endpoint: Endpoint, lifetime: number): Promise<void> {
-    try {
-      while (!this.stopped && lifetime === this.lifetime) {
-        const incoming = await endpoint.acceptNext();
-        if (!incoming) return;
-        if (!this.nativeOpts.remoteAccessEnabled() || this.nativePeers.size + this.pendingAdmissions >= 4) { await incoming.refuse(); continue; }
-        let connection: Connection;
-        try { connection = await this.connectIncoming(incoming); }
-        catch { continue; }
-        if (this.stopped || lifetime !== this.lifetime) { connection.close(1n, []); return; }
-        try { await this.acceptPeer(connection); }
-        catch (error) {
-          connection.close(error instanceof EndpointApiError && (error.status === 401 || error.status === 403) ? 3n : 1n, []);
-        }
-      }
-    } catch {
-      if (!this.stopped && lifetime === this.lifetime) this.dropAllPeers("connection-lost");
+    if (this.lifecycle.state === "ready" && this.lease.current?.relayUrls.slice().sort().join("\n") !== this.approvedRelays) {
+      this.lifecycle.restart();
     }
   }
 
-  private async connectIncoming(incoming: Incoming): Promise<Connection> {
-    const generation = this.admissionGeneration;
-    this.pendingAdmissions++;
-    let retired = false;
-    const operation = incoming.accept().then((accepting) => accepting.connect()).then((connection) => {
-      if (retired || this.stopped || generation !== this.admissionGeneration) {
-        connection.close(1n, []);
-        throw new Error("Retired native admission");
+  private async acceptConnections(endpoint: Endpoint, lifetime: number): Promise<void> {
+    while (!this.stopped && lifetime === this.lifetime) {
+      const incoming = await endpoint.acceptNext();
+      if (!incoming) return;
+      if (this.stopped || lifetime !== this.lifetime || !this.nativeOpts.remoteAccessEnabled() ||
+          this.nativePeers.size >= MAX_APP_SESSIONS || this.pendingAdmissions >= 4) {
+        await incoming.refuse(); continue;
       }
-      return connection;
-    }).finally(() => { this.pendingAdmissions--; });
-    // The binding cannot cancel Connecting. A timed-out future retains one
-    // bounded admission slot until it settles, and its late connection is closed.
-    return deadline(operation, () => { retired = true; });
+      void this.admitIncoming(incoming, lifetime);
+    }
+  }
+
+  private recordAdmissionCounts(): void {
+    this.recordDiagnostic({ dir: "event", kind: "lifecycle", transport: "iroh", msgType: "peer:admissions",
+      detail: { pending: this.pendingAdmissions, active: this.nativePeers.size, generation: this.admissionGeneration } });
+  }
+
+  private async admitIncoming(incoming: Incoming, lifetime: number): Promise<void> {
+    this.pendingAdmissions++;
+    this.recordAdmissionCounts();
+    const generation = this.admissionGeneration;
+    let retired = false;
+    let connection: Connection | undefined;
+    const connecting = Promise.resolve().then(() => incoming.accept()).then((accepting) => accepting.connect()).then((value) => {
+      if (retired || this.stopped || generation !== this.admissionGeneration || lifetime !== this.lifetime) {
+        value.close(1n, []);
+        throw new EndpointFailure("ADMISSION_RETIRED");
+      }
+      return value;
+    });
+    try {
+      connection = await deadline(connecting, () => { retired = true; });
+      await this.acceptPeer(connection);
+    } catch (error) {
+      connection?.close(error instanceof EndpointApiError && [401, 403].includes(error.status) ? 3n : 1n, []);
+    } finally {
+      // Uncancellable Connecting futures continue occupying their bounded slot.
+      await connecting.catch(() => {});
+      this.pendingAdmissions--;
+      this.recordAdmissionCounts();
+    }
   }
 
   private async acceptPeer(connection: Connection): Promise<void> {
@@ -169,9 +176,11 @@ export class IrohRelayClient extends RelayClient {
     const device = this.lease.current?.peers.find((peer) => peer.endpoint?.endpointId === endpointId);
     if (!device || !this.nativeOpts.remoteAccessEnabled()) { close(); return; }
     const peerId = `${device.deviceId}#${this.deviceId}`;
-    // The app selects before E2E. A late native connection cannot replace a
-    // WebSocket handshake or create a second writer for that selection.
-    if (this.sessions.has(peerId) || this.pending.has(peerId) || this.nativePeers.has(peerId)) { connection.close(1n, []); return; }
+    // A concurrent native connection must not create a second session writer.
+    if (this.sessions.has(peerId) || this.pending.has(peerId) || this.nativePeers.has(peerId) || this.admittingPeers.has(peerId) ||
+        this.nativePeers.size + this.admittingPeers.size >= MAX_APP_SESSIONS) { connection.close(1n, []); return; }
+    this.admittingPeers.add(peerId);
+    try {
     const stream = await deadline(connection.acceptBi(), () => connection.close(1n, []));
     if (this.stopped || generation !== this.admissionGeneration || !this.nativeOpts.remoteAccessEnabled() || !this.lease.allows(device.deviceId, endpointId) ||
         this.sessions.has(peerId) || this.pending.has(peerId) || this.nativePeers.has(peerId)) { close(); return; }
@@ -204,6 +213,7 @@ export class IrohRelayClient extends RelayClient {
         }
       } catch { records.close("protocol-violation"); }
     })();
+    } finally { this.admittingPeers.delete(peerId); }
   }
 
   private authorized(peerId: string, endpointId?: string): boolean {
@@ -214,6 +224,12 @@ export class IrohRelayClient extends RelayClient {
     if (peer && peer.registrationGeneration !== authorized?.endpoint?.generation) return false;
     const establishedKey = this.peerPubkeyFor(peerId);
     return !this.sessions.has(peerId) || !establishedKey || establishedKey === authorized?.ed25519Pub;
+  }
+
+  invalidateAuthorization(): void { this.lease.invalidate("denied"); }
+  notePolicyGeneration(generation: string): void {
+    this.lease.observePolicyGeneration(generation);
+    void this.lease.refresh().catch(() => {});
   }
 
   recheckAuthorization(): void {
@@ -227,7 +243,10 @@ export class IrohRelayClient extends RelayClient {
   }
 
   noteResume(): Promise<boolean> {
-    return this.lease.resume();
+    return this.lease.resume().then((allowed) => {
+      if (allowed && this.lifecycle.state === "blocked") this.lifecycle.retry();
+      return allowed;
+    });
   }
 
   private dropNativePeer(peerId: string, reason: PeerRecordFailure = "connection-lost"): void {
@@ -250,66 +269,17 @@ export class IrohRelayClient extends RelayClient {
   }
 
   private invalidatePeerConnections(reason: LeaseFailure): void {
-    const websocketPeers = new Set([...this.sessions.keys(), ...this.pending.keys(), ...this.authorizedHellos.keys()]);
-    const hasWebsocketPeer = [...websocketPeers].some((peerId) => !this.nativePeers.has(peerId));
+    if (reason === "denied" || reason === "rotated") this.lifecycle.block(reason);
     this.dropAllPeers(reason === "resume" ? "connection-lost" : "unauthorized");
-    // Erasing WS keys alone leaves the app sending until its E2E liveness timer
-    // expires. Central offline/online transitions already drive a fresh handshake.
-    // Native-only sessions have their own connection-close signal.
-    if (hasWebsocketPeer && reason !== "closed" && this.ws?.readyState === WebSocket.OPEN) {
-      this.recordDiagnostic({ dir: "event", kind: "lifecycle", transport: "relay",
-        msgType: "peer:authorization-invalidated", detail: { reason } });
-      this.ws.close(1012, "Peer authorization invalidated");
-    }
   }
 
-  protected override centralControlsPeer(peerId: string): boolean { return !this.nativePeers.has(peerId); }
-  protected override payloadTransport(peerId?: string): "relay" | "iroh" {
-    return peerId && this.nativePeers.has(peerId) ? "iroh" : "relay";
-  }
-
-  protected override handleTextMessage(raw: string): void {
-    try {
-      const parsed = ServerMessage.safeParse(JSON.parse(raw));
-      if (parsed.success && parsed.data.type === "peer-policy-changed") {
-        this.lease.observePolicyGeneration(parsed.data.generation);
-        void this.lease.refresh().catch(() => {});
-      }
-      if (parsed.success && parsed.data.type === "stream-opened") this.centralStreams.add(parsed.data.streamId);
-    } catch { /* The central decoder reports malformed control messages. */ }
-    super.handleTextMessage(raw);
-  }
-
-  protected override resetE2eState(): void {
-    this.centralStreams.clear();
-    for (const peerId of this.authorizedHellos.keys()) if (this.centralControlsPeer(peerId)) this.authorizedHellos.delete(peerId);
-    for (const peerId of [...this.sessions.keys()]) if (this.centralControlsPeer(peerId)) this.dropSession(peerId);
-    for (const peerId of [...this.pending.keys()]) if (this.centralControlsPeer(peerId)) this.tearDownPending(peerId);
-  }
+  protected override payloadTransport(_peerId?: string): "iroh" { return "iroh"; }
 
   override attachStream(bus: MessageBus, opts: AttachStreamOpts): StreamHandle {
-    const startedAt = performance.now();
-    let admitted = false;
-    const admit = (id: string, transport: "relay" | "iroh" = "relay") => {
-      if (admitted) return;
-      admitted = true;
-      this.localAdmissions.delete(id);
-      if (transport === "iroh") this.recordDiagnostic({ dir: "event", kind: "lifecycle", transport,
-        msgType: "peer:project-local-admitted", streamId: id, detail: { elapsedMs: performance.now() - startedAt } });
+    return super.attachStream(bus, { ...opts, onLocalReady: (id) => {
+      opts.onLocalReady?.(id);
       opts.onAdmitted?.(id);
-    };
-    const handle = super.attachStream(bus, { ...opts, onAdmitted: admit,
-      onLocalReady: (id) => {
-        opts.onLocalReady?.(id);
-        this.localAdmissions.set(id, () => admit(id, "iroh"));
-        if ([...this.nativePeers.keys()].some((peerId) => this.sessions.has(peerId))) admit(id, "iroh");
-      },
-    });
-    return { ...handle, detach: () => {
-      this.localAdmissions.delete(handle.streamId);
-      this.centralStreams.delete(handle.streamId);
-      handle.detach();
-    } };
+    } });
   }
 
   protected override onSessionEstablished(peerId: string): void {
@@ -317,23 +287,6 @@ export class IrohRelayClient extends RelayClient {
     if (!peer) return;
     this.recordDiagnostic({ dir: "event", kind: "lifecycle", transport: "iroh", msgType: "peer:e2e-established",
       detail: { elapsedMs: performance.now() - peer.acceptedAt } });
-    for (const admit of [...this.localAdmissions.values()]) admit();
-  }
-
-  protected override handleBinaryFrame(buf: Buffer): void {
-    try {
-      const frame = decodeRouteFrame(buf);
-      const header = frame.header;
-      if (typeof header === "object" && header && "from" in header && this.nativePeers.has(String(header.from))) {
-        const from = String(header.from);
-        const hello = frame.kind === FrameKind.handshake && JSON.parse(Buffer.from(frame.payload).toString("utf8"));
-        if (hello?.type !== "handshake:client-hello" || this.sessions.has(from) || this.pending.has(from) || this.authorizedHellos.has(from)) return;
-        // Selection timed out before native E2E began. Retire only that empty
-        // native carrier so the selected WebSocket hello is not silently lost.
-        this.dropNativePeer(from);
-      }
-    } catch { return; }
-    if (this.nativeOpts.mode !== "iroh-only") super.handleBinaryFrame(buf);
   }
 
   protected override receiveRoutedFrame(payload: Uint8Array, from: string, channel: Channel, kind: FrameKind): void {
@@ -378,10 +331,10 @@ export class IrohRelayClient extends RelayClient {
     return { pub: peer && verify(peer.ed25519Pub) ? peer.ed25519Pub : undefined, known: peer ? 1 : 0 };
   }
 
-  protected override sendScheduledPayload(sealed: Buffer, peerId: string, frame: QueuedAppFrame): number | null | PendingSinkWrite {
+  private sendNativeScheduled(sealed: Buffer, peerId: string, frame: QueuedAppFrame): number | null | PendingSinkWrite {
     if (!this.authorized(peerId, this.nativePeers.get(peerId)?.endpointId)) return null;
     const peer = this.nativePeers.get(peerId);
-    if (!peer) return super.sendScheduledPayload(sealed, peerId, frame);
+    if (!peer) return null;
     const session = this.sessions.get(peerId);
     const record = encodeRouteFrame({ type: "message", to: peerId, channel: frame.channel }, sealed, FrameKind.sealed);
     return { bytes: sealed.length, completed: peer.records.send(record, () =>
@@ -392,14 +345,11 @@ export class IrohRelayClient extends RelayClient {
     }) };
   }
 
-  protected override sendPayload(data: Buffer | string, to: string, channel: Channel = "control", kind = FrameKind.sealed,
+  private sendNativePayload(data: Buffer | string, to: string, channel: Channel = "control", kind: FrameKind = FrameKind.sealed,
     diagnosticType = "transport", streamId?: string): boolean {
     if (!this.authorized(to, this.nativePeers.get(to)?.endpointId)) return false;
     const peer = this.nativePeers.get(to);
-    if (!peer) {
-      if (streamId && streamId !== CONTROL_STREAM_ID && !this.centralStreams.has(streamId)) return false;
-      return this.nativeOpts.mode !== "iroh-only" && super.sendPayload(data, to, channel, kind, diagnosticType, streamId);
-    }
+    if (!peer) return false;
     const payload = typeof data === "string" ? Buffer.from(data) : data;
     const record = encodeRouteFrame({ type: "message", to, channel }, payload, kind);
     void peer.records.send(record).then((outcome) => {
@@ -415,17 +365,50 @@ export class IrohRelayClient extends RelayClient {
       detail: { routeBytes, recordBytes: routeBytes + 4, lengthPrefixBytes: 4 } });
   }
 
-  override close(): void {
+  close(): void {
     this.stopped = true;
     this.lifetime++;
     if (this.refreshTimer) clearInterval(this.refreshTimer);
     this.refreshTimer = null;
     this.lease.invalidate("closed");
     this.enrollment.close();
-    void this.endpoint?.close();
-    this.endpoint = null;
-    super.close();
+    this.lifecycle.stop();
+    this.disposeSessions();
   }
+}
+
+/** Central control has no reference to peer keys, queues or project readiness. */
+export class NativeHostConnection implements RemoteHostConnection {
+  private closed = false;
+  readonly peers: NativePeerSessions;
+  readonly central: CentralControlClient;
+  constructor(options: NativeHostOptions) {
+    this.peers = new NativePeerSessions(options);
+    this.central = new CentralControlClient({
+      url: options.url, identity: options.identity, abDir: options.abDir,
+      getLicenseToken: options.getLicenseToken, pairedPhones: options.pairedPhones,
+      autoReconnect: options.autoReconnect, onError: options.onError,
+      onAuthenticated: options.onAuthenticated, onDisconnected: options.onDisconnected,
+      onPeerPolicyChanged: (generation) => this.peers.notePolicyGeneration(generation),
+      onAuthRevoked: () => { this.peers.invalidateAuthorization(); options.onAuthRevoked?.(); },
+    });
+  }
+  get deviceId() { return this.peers.deviceId; }
+  connect(): void { if (this.closed) return; this.central.connect(); this.peers.connect(); }
+  close(): void { if (this.closed) return; this.closed = true; this.peers.close(); this.central.close(); }
+  redialWithFreshToken(): void { this.central.redialWithFreshToken(); }
+  sendPushDeliver(message: Parameters<CentralControlClient["sendPushDeliver"]>[0]): void { this.central.sendPushDeliver(message); }
+  setBus(...args: Parameters<NativePeerSessions["setBus"]>) { return this.peers.setBus(...args); }
+  attachStream(...args: Parameters<NativePeerSessions["attachStream"]>) { return this.peers.attachStream(...args); }
+  establishedPeers() { return this.peers.establishedPeers(); }
+  peerSession(...args: Parameters<NativePeerSessions["peerSession"]>) { return this.peers.peerSession(...args); }
+  hasEstablishedSession() { return this.peers.hasEstablishedSession(); }
+  anySessionSupportsCheckoutRouting() { return this.peers.anySessionSupportsCheckoutRouting(); }
+  send(...args: Parameters<NativePeerSessions["send"]>) { return this.peers.send(...args); }
+  sendOnChannel(...args: Parameters<NativePeerSessions["sendOnChannel"]>) { return this.peers.sendOnChannel(...args); }
+  noteStreamBound(...args: Parameters<NativePeerSessions["noteStreamBound"]>) { return this.peers.noteStreamBound(...args); }
+  noteResume(): Promise<boolean> { return this.peers.noteResume(); }
+  recheckAuthorization(): void { this.peers.recheckAuthorization(); }
 }
 
 async function deadline<T>(operation: Promise<T>, cancel: () => void): Promise<T> {

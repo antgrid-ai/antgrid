@@ -46,8 +46,8 @@ the encrypted session from establishing.
 
 ## Run
 
-`bun run aspire:all` selects test-only `iroh-only` for Windows and Android.
-In that mode Aspire starts web, central relay, `iroh-relay` and `relay-gateway`.
+All Aspire launchers start web, central relay, `iroh-relay` and `relay-gateway`.
+`bun run aspire:all` launches Windows and Android with Iroh payloads.
 Both apps share one origin on port 3000: `/ws` routes to central control on
 3001; `/relay`, `/ping` and `/generate_204` route to the Rust listener on
 loopback 443, or loopback 3443 when it serves cleartext (below).
@@ -116,10 +116,9 @@ defines or host environment. `apphost.ts` is read once when the AppHost process
 starts, so editing it needs that process restarted — restarting a resource from
 the dashboard re-runs the old callbacks and looks like the edit did nothing. Restarting the desktop interrupts hosted sessions.
 Verify native establishment through netwatch `transport: "iroh"` events; central
-WebSocket traffic is still expected. To explicitly return to WebSocket, set
-`$env:ANTGRID_PEER_TRANSPORT = "websocket"` before launch. This omits the native
-service/gateway and restores the original HTTP relay on 3000. Other Aspire
-commands retain WebSocket unless that variable is set.
+WebSocket control traffic is still expected. Remote payloads require Iroh;
+`ANTGRID_PEER_TRANSPORT` no longer selects a transport. Iroh itself handles
+direct and relayed paths.
 
 Gateway tests run with `npm test` from this directory. They cover the cleartext
 routing mode, which is what an unconfigured stack serves; the TLS mode is a

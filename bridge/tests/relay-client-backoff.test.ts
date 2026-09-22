@@ -43,13 +43,13 @@ function captureSchedule<T>(fn: (calls: Array<{ cb: () => void; ms: number }>) =
 
 test("a `welcome` frame resets backoff", () => {
   const client = makeClient("ws://127.0.0.1:1");
-  (client as any).backoff = 16_000;
+  (client as any).central.backoff = 16_000;
 
-  (client as any).handleTextMessage(
+  (client as any).central.handleTextMessage(
     JSON.stringify({ type: "welcome", deviceId: "dev", epoch: 1, serverTime: new Date().toISOString() }),
   );
 
-  expect((client as any).backoff).toBe(1_000);
+  expect((client as any).central.backoff).toBe(1_000);
 });
 
 test("a socket that opens but never authenticates does NOT reset backoff", async () => {
@@ -65,15 +65,15 @@ test("a socket that opens but never authenticates does NOT reset backoff", async
 
   try {
     const client = makeClient(`ws://127.0.0.1:${server.port}`);
-    (client as any).backoff = 8_000;
+    (client as any).central.backoff = 8_000;
 
     const disconnected = new Promise<void>((resolve) => {
-      (client as any).opts.onDisconnected = resolve;
+      (client as any).central.opts.onDisconnected = resolve;
     });
     client.connect();
     await disconnected;
 
-    expect((client as any).backoff).toBe(8_000);
+    expect((client as any).central.backoff).toBe(8_000);
   } finally {
     server.stop(true);
   }
@@ -81,13 +81,13 @@ test("a socket that opens but never authenticates does NOT reset backoff", async
 
 test("each reconnect cycle doubles backoff up to the cap", () => {
   const client = makeClient("ws://127.0.0.1:1");
-  (client as any).doConnect = () => {};
+  (client as any).central.doConnect = () => {};
 
   const seen = captureSchedule((calls) => {
     const growth: number[] = [];
     for (let i = 0; i < 8; i++) {
-      growth.push((client as any).backoff);
-      (client as any).scheduleReconnect();
+      growth.push((client as any).central.backoff);
+      (client as any).central.scheduleReconnect();
       calls.pop()!.cb();
     }
     return growth;
@@ -98,10 +98,10 @@ test("each reconnect cycle doubles backoff up to the cap", () => {
 
 test("the scheduled delay is jittered into [backoff/2, backoff]", () => {
   const client = makeClient("ws://127.0.0.1:1");
-  (client as any).backoff = 8_000;
+  (client as any).central.backoff = 8_000;
 
   const delays = captureSchedule((calls) => {
-    for (let i = 0; i < 50; i++) (client as any).scheduleReconnect();
+    for (let i = 0; i < 50; i++) (client as any).central.scheduleReconnect();
     return calls.map((c) => c.ms);
   });
 

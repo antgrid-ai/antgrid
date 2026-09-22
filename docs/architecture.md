@@ -6,32 +6,34 @@ only the cross-cutting shape.
 
 ## Message flow
 
-WebSocket remains the default payload transport. This branch also implements
-opt-in Iroh payload transport behind the same E2E session boundary; release remains
-unqualified. See [the task ledger](iroh-migration-ledger.md) and
+Remote payloads use Iroh with application E2E encryption. Iroh handles direct
+and relayed connectivity; there is no application-level WebSocket fallback.
+The central WebSocket remains for discovery, presence and revocation. Release
+remains unqualified. See [the task ledger](iroh-migration-ledger.md) and
 [qualification checkpoint](iroh-qualification.md) for evidence and release gates.
 
 ```
-App (Flutter) <--E2E encrypted--> Relay (WS router) <--E2E encrypted--> Agent (Bun)
+App (Flutter) <--E2E over Iroh (direct or relayed)--> Agent (Bun)
 ```
 
-The relay authenticates devices via a single signed `hello` frame (Ed25519
-proof-of-possession) but cannot decrypt payloads. Two WS channels: `control`
+The central relay authenticates devices via a signed `hello` frame (Ed25519
+proof-of-possession). The encrypted payload protocol has two channels: `control`
 (terminal, files, status) and `preview` (HTTP tunnel, streamed as start/chunk/end
 frames under the credit window).
 
-### Optional native peer payloads
+### Native peer payloads
 
 The authenticated central WebSocket retains inventory, presence and policy
 invalidation. The Apache Dart `PeerLink` interface separates that control
 connection from payload lifecycle. `MachineSession` and handshake drivers consume
-the selected link; feature services retain their existing interfaces. Native
+the native link; feature services retain their existing interfaces. Native
 implementation and authoritative lease handling live in the ELv2
 `packages/antgrid_peer_transport` package, shared with its standalone CLI smoke.
 
 The bridge's `PeerSessionOwner` owns E2E, fragmentation, scheduling, credits and
-liveness. `RelayClient` retains central authentication and WebSocket routing;
-`IrohRelayClient` reuses the peer session machinery for authenticated native
+liveness. `CentralControlClient` owns central authentication and reconnect;
+`RelayClient` composes it with a WebSocket payload adapter for legacy evaluations.
+`NativeHostConnection` composes central control, endpoint lifecycle recovery and peer sessions for authenticated native
 connections. Native requests keep remote command authorization, project catalog
 checks and checkout routing. Host-assigned stream readiness is independent of
 WebSocket stream admission, allowing native project use during a leased central
@@ -371,3 +373,5 @@ contract, which wins over the inherited environment.
 
 Host-side lifecycle — the one PTY the run lives in, the deferred `services`, the
 start gate and what survives a restart — is in `bridge/CLAUDE.md`.
+
+Native endpoint recovery and central reconnect have separate owners. The bridge endpoint lifecycle serializes creation/retirement, retries transient listener failures with bounded backoff, and bounds concurrent admissions. Native project readiness uses host-local bindings; central stream acknowledgements apply only to the legacy evaluation adapter. On the app, `PeerRuntime` owns the enrollment endpoint and `ConnectionSupervisor` owns per-machine retry. Endpoint initialization and peer dialing have separate deadlines; neither central presence nor Iroh path transitions establish a new E2E epoch.

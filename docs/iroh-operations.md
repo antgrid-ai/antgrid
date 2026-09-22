@@ -1,6 +1,7 @@
 # Iroh staging and operations
 
-Release status: **unqualified**. WebSocket remains the default. The authenticated
+Release status: **unqualified**. Remote payloads require Iroh; the central
+WebSocket remains for control only. The authenticated
 self-hosted Iroh relay service under `iroh-relay/` is being integrated using
 upstream public APIs. Admission, revocation fencing and resource controls passed
 local gates documented in [qualification](iroh-qualification.md);
@@ -109,7 +110,7 @@ transitional universal release is planned. Signing/notarization remains in the
 desktop build workflow. macOS, Linux and physical mobile packaging must be
 verified on their actual runners/devices; Windows smoke does not cover them.
 
-Collect payload-free connection-stage timings, selected transport/fallback
+Collect payload-free connection-stage timings, native connection failure
 reason, direct/relay bytes, CPU and memory. Native path telemetry is currently
 conservative (`unknown` where bindings do not provide a verified classification).
 No dashboard may turn missing samples into zero latency or zero server bytes.
@@ -117,8 +118,8 @@ Run the matched workload and sample sizes in [the plan](iroh-migration-plan.md),
 including forced relay, blocked UDP, WAN, mobile resume and reconnect storms.
 
 Promote only after security/platform/performance gates pass: internal, 1%, 10%,
-50%, 100%, at least 48 healthy hours each. No production preference change is
-authorized by this document. Roll back by restoring WebSocket preference for
-new connections, reconnect affected sessions without replaying commands, and
-retain additive database fields/history. Legacy payload removal is a later
-change; central WebSocket control remains.
+50%, 100%, at least 48 healthy hours each. No production deployment is
+authorized by this document. There is no WebSocket payload preference switch.
+Rollback requires redeploying a previously qualified compatible client/bridge
+release; retain additive database fields/history and never replay commands.
+Central WebSocket control remains.

@@ -1,3 +1,5 @@
+import '../helpers/fixed_peer_connector.dart';
+import '../helpers/test_peer_runtime.dart';
 // Task 9 cutover: the remote transport connects and signs AS the app's own
 // `kind:"app"` DeviceRecord on every resolve path.
 //
@@ -198,7 +200,11 @@ void main() {
   }) => [
     ...stores.overrides,
     // These fixtures isolate coordinates and E2E identity from HTTP enrollment.
-    peerRuntimeProvider.overrideWith((_) async => null),
+    peerRuntimeProvider.overrideWith((ref) async {
+      final runtime = TestPeerRuntime();
+      ref.onDispose(runtime.dispose);
+      return runtime;
+    }),
     accountAgentsProvider.overrideWith((_) async => inventory),
     localDeviceUuidProvider.overrideWith((_) async => 'this-device'),
     connectionDeviceRecordProvider.overrideWith((_) async => record),
@@ -330,55 +336,33 @@ void main() {
     timeout: const Timeout(Duration(seconds: 60)),
   );
 
-  test(
-    'the routable rung is fed by peer presence, not by a paired grant',
-    () async {
-      const coords = ConnCoords(
-        relayUrl: 'wss://relay.example/ws',
-        agentEd25519PubB64: _agentPubB64,
-      );
-      final mech = RelayMechanisms(
-        relay: relay,
-        crypto: CryptoService(),
-        machineDeviceId: _machine,
-        identity: connectionIdentityFor(record, machineDeviceId: _machine),
-        phoneDeviceId: record.deviceUuid,
-        phoneEd25519Seed: base64Decode(record.ed25519Priv),
-        epoch: 1,
-        resolveCoords: () async => coords,
-        mintToken: () async => 'tok',
-      );
-      addTearDown(mech.release);
+  test('native readiness remains independent of central presence', () async {
+    const coords = ConnCoords(
+      relayUrl: 'wss://relay.example/ws',
+      agentEd25519PubB64: _agentPubB64,
+    );
+    final mech = RelayMechanisms(
+      relay: relay,
+      peerRuntime: FixedPeerConnector(relay),
+      crypto: CryptoService(),
+      machineDeviceId: _machine,
+      identity: connectionIdentityFor(record, machineDeviceId: _machine),
+      phoneDeviceId: record.deviceUuid,
+      phoneEd25519Seed: base64Decode(record.ed25519Priv),
+      epoch: 1,
+      resolveCoords: () async => coords,
+      mintToken: () async => 'tok',
+    );
+    addTearDown(mech.release);
 
-      expect(mech.agentOnline, isFalse, reason: 'nothing dialled yet');
+    expect(mech.agentOnline, isFalse, reason: 'nothing dialled yet');
 
-      // The socket only ever reaches `authenticated` — there is no grant and no
-      // `paired` state to gate on. `RelayMechanisms` doesn't self-subscribe to
-      // presence (see `notePresence`'s doc comment); production feeds it from
-      // `RelayConnection.ensureStarted`'s `peerPresenceStream` listener, so the
-      // fixture reproduces that wiring directly here.
-      await mech.dial(coords, 'tok');
-      await Future<void>.delayed(const Duration(milliseconds: 20));
-      expect(
-        relay.currentState.connectionState,
-        RelayConnectionState.authenticated,
-      );
-      expect(
-        mech.socketAuthenticated,
-        isTrue,
-        reason: 'socket auth alone must not make the peer routable',
-      );
-      expect(mech.agentOnline, isFalse);
-
-      mech.notePresence(true);
-      expect(
-        mech.agentOnline,
-        isTrue,
-        reason: 'peer-online for this machine makes it routable',
-      );
-
-      mech.notePresence(false);
-      expect(mech.agentOnline, isFalse, reason: 'peer-offline unroutes it');
-    },
-  );
+    await mech.dial(coords, 'tok');
+    expect(mech.socketAuthenticated, isTrue);
+    expect(mech.agentOnline, isTrue);
+    mech.notePresence(true);
+    expect(mech.agentOnline, isTrue);
+    mech.notePresence(false);
+    expect(mech.agentOnline, isTrue);
+  });
 }

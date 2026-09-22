@@ -1,3 +1,4 @@
+import '../helpers/test_peer_runtime.dart';
 import 'dart:convert';
 
 import 'package:antgrid/providers/agent_transport.dart';
@@ -78,7 +79,11 @@ void main() {
           ),
           connectionTokenMinterProvider.overrideWith((_) async => null),
           // Machine routing is independent of endpoint enrollment.
-          peerRuntimeProvider.overrideWith((_) async => null),
+          peerRuntimeProvider.overrideWith((ref) async {
+            final runtime = TestPeerRuntime();
+            ref.onDispose(runtime.dispose);
+            return runtime;
+          }),
         ],
       );
       addTearDown(c.dispose);
@@ -119,7 +124,11 @@ void main() {
           (_) async => _connectionRecord(),
         ),
         connectionTokenMinterProvider.overrideWith((_) async => null),
-        peerRuntimeProvider.overrideWith((_) async => null),
+        peerRuntimeProvider.overrideWith((ref) async {
+          final runtime = TestPeerRuntime();
+          ref.onDispose(runtime.dispose);
+          return runtime;
+        }),
       ],
     );
     addTearDown(c.dispose);

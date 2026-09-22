@@ -1,3 +1,4 @@
+import '../helpers/fixed_peer_connector.dart';
 // End-to-end coverage for supervisor-driven `RelayConnection` bring-up against
 // the REAL v3 crypto handshake (via a fake agent responder, mirroring
 // antgrid_relay_client's connection_handshake_test.dart harness).
@@ -294,6 +295,7 @@ RelayMechanisms _mechanisms(
   required Uint8List agentPub,
 }) => RelayMechanisms(
   relay: relay,
+  peerRuntime: FixedPeerConnector(relay),
   crypto: CryptoService(),
   machineDeviceId: _machineId,
   identity: _identity(),
@@ -516,44 +518,38 @@ void main() {
     );
   });
 
-  // The relay discards a routed frame for two different reasons and names a
-  // different code for each: the rate limiter's, and a recipient whose socket
-  // refused the write. Both are the sender losing an outbound frame nobody will
-  // ever resend on its own, so both have to reach the streams — a service
-  // holding re-issuable work recovers on this signal instead of waiting out its
-  // timeout.
   for (final code in ['MESSAGE_RATE_LIMITED', 'ROUTE_FAILED']) {
-    test('a relay $code report reaches the project streams as a dropped '
-        'frame', () async {
-      final conn = RelayConnection(
-        machineDeviceId: _machineId,
-        crypto: CryptoService(),
-        relayOverride: relay,
-      );
-      addTearDown(conn.dispose);
+    test(
+      'a central $code report does not report native payload loss',
+      () async {
+        final conn = RelayConnection(
+          machineDeviceId: _machineId,
+          crypto: CryptoService(),
+          relayOverride: relay,
+        );
+        addTearDown(conn.dispose);
 
-      final session = await _openConnection(
-        conn,
-        agentSeed: agentSeed,
-        agentPub: agentPub,
-      );
-      final drops = <void>[];
-      session.streamFor('stream-a').droppedFrames.listen(drops.add);
+        final session = await _openConnection(
+          conn,
+          agentSeed: agentSeed,
+          agentPub: agentPub,
+        );
+        final drops = <void>[];
+        session.streamFor('stream-a').droppedFrames.listen(drops.add);
 
-      relay.injectError(
-        ErrorMessage(
-          code: code,
-          message: 'discarded',
-          retryable: true,
-          channel: 'control',
-          bytes: 4096,
-        ),
-      );
+        relay.injectError(
+          ErrorMessage(
+            code: code,
+            message: 'discarded',
+            retryable: true,
+            channel: 'control',
+            bytes: 4096,
+          ),
+        );
 
-      for (var i = 0; i < 100 && drops.isEmpty; i++) {
-        await Future<void>.delayed(const Duration(milliseconds: 5));
-      }
-      expect(drops, hasLength(1));
-    });
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        expect(drops, isEmpty);
+      },
+    );
   }
 }

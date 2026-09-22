@@ -18,7 +18,13 @@ import { SendScheduler, type QueuedAppFrame, type SendOutcome, type PendingSinkW
 
 const log = logger.child({ component: "relay-client" });
 
+export interface PeerPayloadSink {
+  send(data: Buffer | string, to: string, channel?: Channel, kind?: FrameKind, diagnosticType?: string, streamId?: string): boolean;
+  sendScheduled(sealed: Buffer, peerId: string, frame: QueuedAppFrame): number | null | PendingSinkWrite;
+}
+
 export interface PeerSessionOwnerOptions {
+  payloadSink?: PeerPayloadSink;
   diagnostics?: Pick<typeof log, "debug" | "info" | "warn" | "error">;
   identity: DeviceIdentity;
   /** Called on each (re)handshake to get a fresh ephemeral keypair for E2E. */
@@ -46,6 +52,7 @@ export interface PeerSessionOwnerOptions {
   /** Test seam: overrides the half-open handshake-attempt expiry (see
    *  `HALF_OPEN_MS`). Production never sets this. */
   halfOpenMs?: number;
+  streamRegistration?: { open: (streamId: string) => void; close: (streamId: string) => void };
 }
 
 /** A half-open handshake attempt (client-hello seen, app:ready never arrived)
@@ -397,7 +404,7 @@ export abstract class PeerSessionOwner {
 
   constructor(protected opts: PeerSessionOwnerOptions) {
     this.mux = new StreamMux({
-      openStream: (id) => this.sendJson({ type: "stream-open", streamId: id }),
+      openStream: (id) => this.opts.streamRegistration?.open(id),
       closeStream: (id) => {
         // A detached stream's backlog must not sit in the send queue occupying
         // room the streams that are still live need — in every device's queue,
@@ -405,7 +412,7 @@ export abstract class PeerSessionOwner {
         for (const s of this.sessions.values()) {
           this.recordQueueDrop("stream-detached", s.scheduler.dropStream(id), s.peerId);
         }
-        this.sendJson({ type: "stream-close", streamId: id });
+        this.opts.streamRegistration?.close(id);
       },
       sendEnvelope: (id, msg, channel, target, signal, authorized) => this.sendAppEnvelope(id, msg, channel, target, signal, authorized),
       peerSession: (peerId) => this.peerSession(peerId),
@@ -469,6 +476,7 @@ export abstract class PeerSessionOwner {
   }
 
   protected sendScheduledPayload(sealed: Buffer, peerId: string, frame: QueuedAppFrame): number | null | PendingSinkWrite {
+    if (this.opts.payloadSink) return this.opts.payloadSink.sendScheduled(sealed, peerId, frame);
     return this.sendPayload(sealed, peerId, frame.channel, FrameKind.sealed, frame.type, frame.streamId)
       ? sealed.length : null;
   }
@@ -1686,6 +1694,14 @@ export abstract class PeerSessionOwner {
   _handshakeComplete(): boolean {
     return this.sessions.size > 0;
   }
-  protected abstract sendJson(data: object): void;
-  protected abstract sendPayload(data: Buffer | string, to: string, channel?: Channel, kind?: FrameKind, diagnosticType?: string, streamId?: string): boolean;
+  disposeSessions(): void {
+    this.clearBus();
+    this.mux.detachAll();
+    this.resetE2eState();
+    this.stopFragSweep();
+    this.finishRateLimitBurst();
+  }
+  protected sendPayload(data: Buffer | string, to: string, channel?: Channel, kind?: FrameKind, diagnosticType?: string, streamId?: string): boolean {
+    return this.opts.payloadSink?.send(data, to, channel, kind, diagnosticType, streamId) ?? false;
+  }
 }

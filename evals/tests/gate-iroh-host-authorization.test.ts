@@ -66,9 +66,7 @@ test("real backend enrollment authorizes native host projects and revocation clo
     });
     const root = mkdtempSync(join(tmpdir(), "antgrid-native-host-smoke-"));
     const previousDirectory = process.env.ANTGRID_DIR;
-    const previousMode = process.env.ANTGRID_PEER_TRANSPORT;
     process.env.ANTGRID_DIR = join(root, "state");
-    process.env.ANTGRID_PEER_TRANSPORT = "iroh-preferred";
     const host = new HostServer({ remote: {
       relayUrl: `ws://127.0.0.1:${backend.port}`, licenseApiUrl: authorization.origin,
       identity: { deviceId: machine.id, deviceName: "native-host-smoke", createdAt: "",
@@ -93,7 +91,7 @@ test("real backend enrollment authorizes native host projects and revocation clo
         await host.open(id, folder, name === "alpha" ? "remote" : "local");
         projects.push({ id, name });
       }
-      const endpoint = await until(() => (host as unknown as { controlPlaneRelay?: { endpoint?: Endpoint } }).controlPlaneRelay?.endpoint);
+      const endpoint = await until(() => (host as unknown as { controlPlaneRelay?: { peers?: { lifecycle?: { endpoint?: Endpoint } } } }).controlPlaneRelay?.peers?.lifecycle?.endpoint);
       assert.equal((await authorization.request("/account/devices/me/heartbeat", { token: machineDevice.token,
         body: { deviceUuid: machine.id, mobileAccessEnabled: true } })).status, 200);
       const appSnapshot = await authorization.snapshot(appDevice);
@@ -162,7 +160,7 @@ test("real backend enrollment authorizes native host projects and revocation clo
       assert.equal(timedOut, false, "Revocation must close the pair without the test watchdog");
       const revocationLatencyMs = performance.now() - revokedAt;
       assert.ok(revocationLatencyMs < 60_000);
-      const nativePeers = (host as unknown as { controlPlaneRelay: { nativePeers: Map<string, unknown> } }).controlPlaneRelay.nativePeers;
+      const nativePeers = (host as unknown as { controlPlaneRelay: { peers: { nativePeers: Map<string, unknown> } } }).controlPlaneRelay.peers.nativePeers;
       assert.equal(nativePeers.size, 0);
       console.log(JSON.stringify({ result: "pass", authorization: "real-http-oauth-prisma", centralControl: "fixture",
         native: "real-direct-loopback", host: "real", e2e: "real", projects: projects.length,
@@ -174,7 +172,6 @@ test("real backend enrollment authorizes native host projects and revocation clo
       await app.close();
       backend.stop(true);
       if (previousDirectory === undefined) delete process.env.ANTGRID_DIR; else process.env.ANTGRID_DIR = previousDirectory;
-      if (previousMode === undefined) delete process.env.ANTGRID_PEER_TRANSPORT; else process.env.ANTGRID_PEER_TRANSPORT = previousMode;
       rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     }
   } finally { await authorization.stop(); }

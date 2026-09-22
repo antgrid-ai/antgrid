@@ -1,3 +1,4 @@
+import '../helpers/test_peer_runtime.dart';
 // Resolution coverage for `_buildRelayTransportFor`: which source supplies a
 // machine's dial coordinates, and when the provider declines the machine
 // entirely and falls through to the local path.
@@ -204,7 +205,11 @@ void main() {
       return [
         ...stores.overrides,
         // These fixtures isolate coordinates and E2E identity from HTTP enrollment.
-        peerRuntimeProvider.overrideWith((_) async => null),
+        peerRuntimeProvider.overrideWith((ref) async {
+          final runtime = TestPeerRuntime();
+          ref.onDispose(runtime.dispose);
+          return runtime;
+        }),
         // Override accountAgentsProvider directly (not the API layer) so the
         // cache is immediately populated. _buildRelayTransportFor uses
         // `.value` to avoid adding async latency for unresolved cases.
@@ -389,7 +394,11 @@ void main() {
         overrides: [
           ...stores.overrides,
           // These fixtures isolate coordinates and E2E identity from HTTP enrollment.
-          peerRuntimeProvider.overrideWith((_) async => null),
+          peerRuntimeProvider.overrideWith((ref) async {
+            final runtime = TestPeerRuntime();
+            ref.onDispose(runtime.dispose);
+            return runtime;
+          }),
           accountAgentsProvider.overrideWith((_) async => inventory),
           localDeviceUuidProvider.overrideWith((_) async => _localUuid),
           connectionDeviceRecordProvider.overrideWith(

@@ -36,15 +36,15 @@ Run package tests as well as bridge tests when changing adapters:
 
 ## Component map
 
-`peer-session-owner.ts` owns E2E sessions, fragments, credit scheduling and peer
-liveness; `relay-client.ts` supplies central authentication and WebSocket sinks.
-`peer/iroh-relay-client.ts` adds the leased native carrier while preserving the
-remote source used by command authorization. `auth/credentials.ts`'s optional
-`userId` and `endpointSecret` mirror the app's secure `DeviceRecord` and stdin
-bootstrap: the controller and local bridge have distinct records, and neither
-endpoint seed may be written to an ordinary bridge file. `HostServer` selects
-the transport through `ANTGRID_PEER_TRANSPORT`; platform qualification lives in
-`docs/iroh-qualification.md`.
+`peer-session-owner.ts` owns E2E sessions, fragments, scheduling and peer liveness.
+`central-control-client.ts` owns central authentication and reconnect; it cannot
+reset native payload sessions. `peer/native-host-connection.ts` composes these
+boundaries with `peer/endpoint-lifecycle.ts`, and preserves remote command
+source semantics. Project readiness is local; central stream registration is
+only used by the legacy WebSocket test/evaluation adapter.
+The controller and local bridge retain distinct protected enrollment records;
+endpoint seeds must never be written to an ordinary bridge file. Native
+platform qualification lives in `docs/iroh-qualification.md`.
 Desktop lifecycle resume notifies the existing host through owner-bearer
 `POST /peer-resume` (`control-listener.ts`), with no body; its 202 acknowledges
 synchronous remote-session fencing, while authorization refresh runs separately.

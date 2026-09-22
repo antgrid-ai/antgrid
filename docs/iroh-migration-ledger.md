@@ -214,3 +214,38 @@ input and frames, central outage and remote-access-off closing the native link;
 Loopback with relays disabled, fixture authorization, and the prebuilt CLI
 library rather than the Flutter source build. WAN, forced relay, Flutter-built
 libraries and performance acceptance remain unqualified.
+
+
+## Native-only remote payloads — 2026-09-22
+
+User decision supersedes the original WebSocket payload default/fallback plan.
+The app has no transport-mode switch or WebSocket factory in its peer dial path.
+Missing native enrollment fails closed; terminal failures block and retryable
+failures return to ConnectionSupervisor for another Iroh attempt. Late/cancelled
+dials still dispose their links. Iroh owns direct versus relayed connectivity.
+The bridge always starts its native endpoint, rejects central binary payloads,
+and never writes application frames to the central socket. JSON control remains.
+The shared legacy RelayService/RelayClient adapters remain for protocol fixtures;
+production remote composition no longer selects them as payload carriers.
+
+All Aspire launchers now provision the existing native relay and gateway, as
+explicitly approved. The retired ANTGRID_PEER_TRANSPORT setting is ignored.
+No running Aspire instance was restarted, no deployment or commit performed.
+
+Verification:
+- Pure-Dart transport tests: 20 passed; Dart analysis passed.
+- Focused bridge native/lease/enrollment/record tests: 25 passed.
+- Bridge typecheck and Aspire TypeScript build passed.
+- Aspire gateway: 2 passed, TLS fixture case skipped without certificates.
+- Flutter connection/provider regression run: 101 passed, 2 fixture failures;
+  corrected explicit fake runtime (it must not wait forever on failed fake
+  authentication). Both affected suites then passed (9 tests), and remaining
+  shared-runtime consumers passed (8 tests). Final Flutter analysis passed.
+- Real native host smoke passed: two projects, central outage, terminal I/O and
+  frame ACKs, managed-checkout Git, immediate remote-access-off.
+- Real Dart-to-Bun native interop passed: signed E2E, two projects, central
+  outage, terminal I/O, managed-checkout Git and remote-access-off.
+
+Native smokes use authorization fixtures and loopback direct paths. They do not
+qualify forced relay, WAN, physical mobile platforms or production deployment.
+Older WebSocket-only clients cannot connect to this remote payload runtime.
