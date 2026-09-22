@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { encodeRouteFrame, FrameKind } from "antgrid-wire";
 import { Netwatch, netwatch, frameIdFor, __resetNetwatchForTest, type NetwatchEvent } from "../src/netwatch";
 import { ControlListener } from "../src/control-listener";
-import { RelayClient } from "../src/relay-client";
+import { TestPeerSessionOwner } from "./test-peer-session-owner";
 import { createMessage } from "../src/protocol";
 import { runNetwatchCli, renderEvent } from "../src/cli/netwatch";
 import { mkdtempSync, writeFileSync } from "node:fs";
@@ -32,7 +32,7 @@ describe("Netwatch ring", () => {
     }
     expect(w.snapshot().map((e) => e.msgType)).toEqual(["m2", "m3", "m4"]);
     expect(w.recorded).toBe(5);
-    // The blind spot has to be reportable — a capture that silently starts in
+    // The blind spot has to be reportable â€” a capture that silently starts in
     // the middle reads as "nothing was sent before this".
     expect(w.evicted).toBe(2);
   });
@@ -78,12 +78,12 @@ describe("frameIdFor", () => {
   });
 });
 
-/** A paired, handshake-complete client whose socket and seal are inert — the
+/** A paired, handshake-complete client whose socket and seal are inert â€” the
  *  same seam relay-client-rate-diagnostics.test.ts uses. */
 function makeClient(
   overrides: { open?: (b: Buffer) => string | null; readyState?: number } = {},
-): RelayClient {
-  const c = new RelayClient({
+): TestPeerSessionOwner {
+  const c = new TestPeerSessionOwner({
     url: "ws://127.0.0.1:1",
     identity: {
       deviceId: "dev-1",
@@ -114,37 +114,14 @@ function makeClient(
 
 const events = (): NetwatchEvent[] => netwatch.snapshot();
 
-describe("RelayClient netwatch taps", () => {
-  let client: RelayClient | null = null;
+describe("TestPeerSessionOwner netwatch taps", () => {
+  let client: TestPeerSessionOwner | null = null;
 
   beforeEach(() => __resetNetwatchForTest());
   afterEach(() => {
     client?.close();
     client = null;
     __resetNetwatchForTest();
-  });
-
-  it("records an outbound frame with its type, channel and nonce", () => {
-    client = makeClient();
-    client.sendOnChannel(createMessage("agent:turn-start", { sessionId: "s1", turnId: "t1" }), "control");
-
-    const tx = events().filter((e) => e.dir === "tx" && e.kind === "sealed");
-    expect(tx).toHaveLength(1);
-    expect(tx[0].msgType).toBe("agent:turn-start");
-    expect(tx[0].channel).toBe("control");
-    expect(tx[0].transport).toBe("relay");
-    expect(tx[0].bytes).toBeGreaterThan(0);
-    expect(tx[0].frameId).toHaveLength(24);
-  });
-
-  it("records the send that logs nothing today: socket not open", () => {
-    client = makeClient({ readyState: WebSocket.CLOSED });
-    client.sendOnChannel(createMessage("agent:turn-start", { sessionId: "s1", turnId: "t1" }), "control");
-
-    const drops = events().filter((e) => e.kind === "drop");
-    expect(drops).toHaveLength(1);
-    expect(drops[0].reason).toBe("socket-not-open");
-    expect(drops[0].msgType).toBe("agent:turn-start");
   });
 
   it("records a send dropped for want of an E2E session", () => {
@@ -169,7 +146,7 @@ describe("RelayClient netwatch taps", () => {
       payload,
       FrameKind.sealed,
     );
-    (client as any).handleBinaryFrame(Buffer.from(frame));
+    client.injectRouteFrame(Buffer.from(frame));
 
     const rx = events().filter((e) => e.dir === "rx" && e.kind === "sealed");
     expect(rx).toHaveLength(1);
@@ -186,29 +163,12 @@ describe("RelayClient netwatch taps", () => {
       payload,
       FrameKind.sealed,
     );
-    (client as any).handleBinaryFrame(Buffer.from(frame));
+    client.injectRouteFrame(Buffer.from(frame));
 
     const drops = events().filter((e) => e.kind === "drop");
     expect(drops).toHaveLength(1);
     expect(drops[0].reason).toBe("decrypt-failed");
     expect(drops[0].frameId).toBe("01".repeat(12));
-  });
-
-  it("keeps the relay's own verbs, with the code that explains the stall", () => {
-    client = makeClient();
-    (client as any).handleTextMessage(
-      JSON.stringify({
-        type: "error",
-        code: "MESSAGE_RATE_LIMITED",
-        message: "slow down",
-        retryable: true,
-      }),
-    );
-
-    const control = events().filter((e) => e.kind === "control");
-    expect(control).toHaveLength(1);
-    expect(control[0].msgType).toBe("error");
-    expect(control[0].detail).toMatchObject({ code: "MESSAGE_RATE_LIMITED", retryable: true });
   });
 });
 
@@ -341,7 +301,7 @@ describe("antgrid watch summary", () => {
     }
 
     // The summary prints AFTER the rows have scrolled by, onto a terminal the
-    // operator is reading — an OSC here retitles their window, a CSI repaints it.
+    // operator is reading â€” an OSC here retitles their window, a CSI repaints it.
     expect(printed).not.toContain(`${ESC}]`);
     expect(printed).not.toContain(`${ESC}[2K`);
     // Still counted, and still legible as the frame it was.

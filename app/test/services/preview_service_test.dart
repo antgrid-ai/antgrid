@@ -70,7 +70,8 @@ String _encodeSlice(String data, bool gzipped) {
   return base64Encode(gzipped ? gzip.encode(bytes) : bytes);
 }
 
-List<Map<String, dynamic>> _cancelsFor(FakeAgentTransport t, String id) => t.sent
+List<Map<String, dynamic>> _cancelsFor(FakeAgentTransport t, String id) => t
+    .sent
     .where((m) => m['type'] == 'tunnel:http-cancel' && m['requestId'] == id)
     .toList();
 
@@ -102,35 +103,68 @@ void main() {
   });
 
   group('PreviewService.fromSession', () {
-    test('explicit navigation preserves paths on an existing local tab', () async {
-      final session = await _newSession(_LocalFakeTransport());
-      addTearDown(session.close);
-      final svc = session.previewService;
-      await svc.openTab(3000, scheme: 'https', path: '/dashboard');
-      expect(
-        svc.existingTabNavigationUrl(3000, scheme: 'https', path: '/login?q=1#form').toString(),
-        'https://localhost:3000/login?q=1#form',
-      );
-      expect(svc.existingTabNavigationUrl(3000, scheme: 'https', path: '/').toString(),
-          'https://localhost:3000/');
-      expect(svc.existingTabNavigationUrl(3000, scheme: 'http', path: '/'), isNull);
-      expect(svc.existingTabNavigationUrl(4000, scheme: 'https', path: '/'), isNull);
-      await svc.openTab(3000, scheme: 'https');
-      expect(svc.currentState.activeTab!.currentUrl, 'https://localhost:3000/dashboard');
-    });
+    test(
+      'explicit navigation preserves paths on an existing local tab',
+      () async {
+        final session = await _newSession(_LocalFakeTransport());
+        addTearDown(session.close);
+        final svc = session.previewService;
+        await svc.openTab(3000, scheme: 'https', path: '/dashboard');
+        expect(
+          svc
+              .existingTabNavigationUrl(
+                3000,
+                scheme: 'https',
+                path: '/login?q=1#form',
+              )
+              .toString(),
+          'https://localhost:3000/login?q=1#form',
+        );
+        expect(
+          svc
+              .existingTabNavigationUrl(3000, scheme: 'https', path: '/')
+              .toString(),
+          'https://localhost:3000/',
+        );
+        expect(
+          svc.existingTabNavigationUrl(3000, scheme: 'http', path: '/'),
+          isNull,
+        );
+        expect(
+          svc.existingTabNavigationUrl(4000, scheme: 'https', path: '/'),
+          isNull,
+        );
+        await svc.openTab(3000, scheme: 'https');
+        expect(
+          svc.currentState.activeTab!.currentUrl,
+          'https://localhost:3000/dashboard',
+        );
+      },
+    );
 
-    test('explicit navigation uses the existing fallback proxy origin', () async {
-      final occupied = await ServerSocket.bind('localhost', 0);
-      addTearDown(occupied.close);
-      final session = await _newSession(FakeAgentTransport());
-      addTearDown(session.close);
-      final svc = session.previewService;
-      await svc.selectPortWithFallback(occupied.port, scheme: 'https');
-      final proxyPort = svc.currentState.activeTab!.localProxyPort;
-      expect(proxyPort, isNot(occupied.port));
-      expect(svc.existingTabNavigationUrl(occupied.port, scheme: 'https', path: '/login?q=1#form').toString(),
-          'http://localhost:$proxyPort/login?q=1#form');
-    });
+    test(
+      'explicit navigation uses the existing fallback proxy origin',
+      () async {
+        final occupied = await ServerSocket.bind('localhost', 0);
+        addTearDown(occupied.close);
+        final session = await _newSession(FakeAgentTransport());
+        addTearDown(session.close);
+        final svc = session.previewService;
+        await svc.selectPortWithFallback(occupied.port, scheme: 'https');
+        final proxyPort = svc.currentState.activeTab!.localProxyPort;
+        expect(proxyPort, isNot(occupied.port));
+        expect(
+          svc
+              .existingTabNavigationUrl(
+                occupied.port,
+                scheme: 'https',
+                path: '/login?q=1#form',
+              )
+              .toString(),
+          'http://localhost:$proxyPort/login?q=1#form',
+        );
+      },
+    );
 
     test('preview:snapshot (heavy) populates state.ports', () async {
       final t = FakeAgentTransport();
@@ -410,44 +444,46 @@ void main() {
       await session.close();
     });
 
-    test('no chunk within the idle timeout aborts the body and cancels',
-        () async {
-      final t = FakeAgentTransport();
-      final session = await _newSession(t);
-      final svc = session.previewService;
+    test(
+      'no chunk within the idle timeout aborts the body and cancels',
+      () async {
+        final t = FakeAgentTransport();
+        final session = await _newSession(t);
+        final svc = session.previewService;
 
-      final started = DateTime.now();
-      final future = svc.proxyRequest(
-        TunnelHttpRequest(
-          requestId: 'req-idle',
-          port: 3000,
-          method: 'GET',
-          path: '/a.js',
-          headers: {},
-        ),
-        chunkIdleTimeout: const Duration(milliseconds: 60),
-      );
-      _start(t, 'req-idle', data: 'a');
-      final response = await future;
-      final reading = expectLater(
-        utf8.decodeStream(response.body),
-        throwsA(isA<TunnelStreamException>()),
-      );
+        final started = DateTime.now();
+        final future = svc.proxyRequest(
+          TunnelHttpRequest(
+            requestId: 'req-idle',
+            port: 3000,
+            method: 'GET',
+            path: '/a.js',
+            headers: {},
+          ),
+          chunkIdleTimeout: const Duration(milliseconds: 60),
+        );
+        _start(t, 'req-idle', data: 'a');
+        final response = await future;
+        final reading = expectLater(
+          utf8.decodeStream(response.body),
+          throwsA(isA<TunnelStreamException>()),
+        );
 
-      // The clock is per chunk, not per request: a chunk at 40ms buys another
-      // full window.
-      await Future<void>.delayed(const Duration(milliseconds: 40));
-      _chunk(t, 'req-idle', 1, 'b');
-      await reading;
+        // The clock is per chunk, not per request: a chunk at 40ms buys another
+        // full window.
+        await Future<void>.delayed(const Duration(milliseconds: 40));
+        _chunk(t, 'req-idle', 1, 'b');
+        await reading;
 
-      expect(
-        DateTime.now().difference(started).inMilliseconds,
-        greaterThan(90),
-      );
-      expect(_cancelsFor(t, 'req-idle'), hasLength(1));
+        expect(
+          DateTime.now().difference(started).inMilliseconds,
+          greaterThan(90),
+        );
+        expect(_cancelsFor(t, 'req-idle'), hasLength(1));
 
-      await session.close();
-    });
+        await session.close();
+      },
+    );
 
     test('an undecodable chunk aborts the body', () async {
       final t = FakeAgentTransport();
@@ -569,40 +605,42 @@ void main() {
       await session.close();
     });
 
-    test('a lost start on the re-sent run recovers once more, then fails',
-        () async {
-      final t = FakeAgentTransport();
-      final session = await _newSession(t);
-      final svc = session.previewService;
+    test(
+      'a lost start on the re-sent run recovers once more, then fails',
+      () async {
+        final t = FakeAgentTransport();
+        final session = await _newSession(t);
+        final svc = session.previewService;
 
-      final future = svc.proxyRequest(
-        TunnelHttpRequest(
-          requestId: 'req-r0',
-          port: 3000,
-          method: 'GET',
-          path: '/app.js',
-          headers: {},
-        ),
-      );
-      final failing = expectLater(
-        future,
-        throwsA(isA<TunnelStreamException>()),
-      );
+        final future = svc.proxyRequest(
+          TunnelHttpRequest(
+            requestId: 'req-r0',
+            port: 3000,
+            method: 'GET',
+            path: '/app.js',
+            headers: {},
+          ),
+        );
+        final failing = expectLater(
+          future,
+          throwsA(isA<TunnelStreamException>()),
+        );
 
-      _chunk(t, 'req-r0', 1, 'x');
-      await Future<void>.delayed(Duration.zero);
-      final id2 = _requests(t)[1]['requestId'] as String;
-      _chunk(t, id2, 1, 'x');
-      await Future<void>.delayed(Duration.zero);
-      final id3 = _requests(t)[2]['requestId'] as String;
-      _chunk(t, id3, 1, 'x');
+        _chunk(t, 'req-r0', 1, 'x');
+        await Future<void>.delayed(Duration.zero);
+        final id2 = _requests(t)[1]['requestId'] as String;
+        _chunk(t, id2, 1, 'x');
+        await Future<void>.delayed(Duration.zero);
+        final id3 = _requests(t)[2]['requestId'] as String;
+        _chunk(t, id3, 1, 'x');
 
-      await failing;
-      expect(_requests(t), hasLength(3));
-      expect(_allCancels(t), hasLength(3));
+        await failing;
+        expect(_requests(t), hasLength(3));
+        expect(_allCancels(t), hasLength(3));
 
-      await session.close();
-    });
+        await session.close();
+      },
+    );
 
     test('a head timeout after a re-key cancels the fresh id and leaves '
         'nothing pending', () async {
@@ -669,100 +707,106 @@ void main() {
       await session.close();
     });
 
-    test('a frame for an id nobody waits on is answered with one cancel',
-        () async {
-      final t = FakeAgentTransport();
-      final session = await _newSession(t);
-      // Touch the service so it subscribes before any frame is emitted.
-      session.previewService;
+    test(
+      'a frame for an id nobody waits on is answered with one cancel',
+      () async {
+        final t = FakeAgentTransport();
+        final session = await _newSession(t);
+        // Touch the service so it subscribes before any frame is emitted.
+        session.previewService;
 
-      _chunk(t, 'ghost', 1, 'x');
-      await Future<void>.delayed(Duration.zero);
-      expect(_cancelsFor(t, 'ghost'), hasLength(1));
-      _chunk(t, 'ghost', 2, 'x');
-      _end(t, 'ghost', 2);
-      await Future<void>.delayed(Duration.zero);
-      expect(_cancelsFor(t, 'ghost'), hasLength(1));
+        _chunk(t, 'ghost', 1, 'x');
+        await Future<void>.delayed(Duration.zero);
+        expect(_cancelsFor(t, 'ghost'), hasLength(1));
+        _chunk(t, 'ghost', 2, 'x');
+        _end(t, 'ghost', 2);
+        await Future<void>.delayed(Duration.zero);
+        expect(_cancelsFor(t, 'ghost'), hasLength(1));
 
-      _start(t, 'ghost-2', data: 'x', last: true);
-      await Future<void>.delayed(Duration.zero);
-      expect(_cancelsFor(t, 'ghost-2'), hasLength(1));
-      _start(t, 'ghost-2', data: 'x', last: true);
-      await Future<void>.delayed(Duration.zero);
-      expect(_cancelsFor(t, 'ghost-2'), hasLength(1));
+        _start(t, 'ghost-2', data: 'x', last: true);
+        await Future<void>.delayed(Duration.zero);
+        expect(_cancelsFor(t, 'ghost-2'), hasLength(1));
+        _start(t, 'ghost-2', data: 'x', last: true);
+        await Future<void>.delayed(Duration.zero);
+        expect(_cancelsFor(t, 'ghost-2'), hasLength(1));
 
-      // The memory is capped, so a burst of distinct ids eventually evicts the
-      // oldest and it is cancelled again. One repeat cancel is a no-op at the
-      // bridge.
-      for (var i = 0; i < 65; i++) {
-        _chunk(t, 'burst-$i', 1, 'x');
-      }
-      await Future<void>.delayed(Duration.zero);
-      _chunk(t, 'ghost', 3, 'x');
-      await Future<void>.delayed(Duration.zero);
-      expect(_cancelsFor(t, 'ghost'), hasLength(2));
+        // The memory is capped, so a burst of distinct ids eventually evicts the
+        // oldest and it is cancelled again. One repeat cancel is a no-op at the
+        // bridge.
+        for (var i = 0; i < 65; i++) {
+          _chunk(t, 'burst-$i', 1, 'x');
+        }
+        await Future<void>.delayed(Duration.zero);
+        _chunk(t, 'ghost', 3, 'x');
+        await Future<void>.delayed(Duration.zero);
+        expect(_cancelsFor(t, 'ghost'), hasLength(2));
 
-      await session.close();
-    });
+        await session.close();
+      },
+    );
 
-    test('cancelling the body subscription cancels the request exactly once',
-        () async {
-      final t = FakeAgentTransport();
-      final session = await _newSession(t);
-      final svc = session.previewService;
+    test(
+      'cancelling the body subscription cancels the request exactly once',
+      () async {
+        final t = FakeAgentTransport();
+        final session = await _newSession(t);
+        final svc = session.previewService;
 
-      final future = svc.proxyRequest(
-        TunnelHttpRequest(
-          requestId: 'req-cancel',
-          port: 3000,
-          method: 'GET',
-          path: '/big.js',
-          headers: {},
-        ),
-      );
-      _start(t, 'req-cancel', data: 'a');
-      final response = await future;
-      final sub = response.body.listen((_) {});
-      await sub.cancel();
-      await Future<void>.delayed(Duration.zero);
+        final future = svc.proxyRequest(
+          TunnelHttpRequest(
+            requestId: 'req-cancel',
+            port: 3000,
+            method: 'GET',
+            path: '/big.js',
+            headers: {},
+          ),
+        );
+        _start(t, 'req-cancel', data: 'a');
+        final response = await future;
+        final sub = response.body.listen((_) {});
+        await sub.cancel();
+        await Future<void>.delayed(Duration.zero);
 
-      expect(_cancelsFor(t, 'req-cancel'), hasLength(1));
-      _end(t, 'req-cancel', 0);
-      await Future<void>.delayed(Duration.zero);
-      expect(_cancelsFor(t, 'req-cancel'), hasLength(1));
+        expect(_cancelsFor(t, 'req-cancel'), hasLength(1));
+        _end(t, 'req-cancel', 0);
+        await Future<void>.delayed(Duration.zero);
+        expect(_cancelsFor(t, 'req-cancel'), hasLength(1));
 
-      await session.close();
-    });
+        await session.close();
+      },
+    );
 
-    test('a completed body sends no cancel when its subscription ends',
-        () async {
-      final t = FakeAgentTransport();
-      final session = await _newSession(t);
-      final svc = session.previewService;
+    test(
+      'a completed body sends no cancel when its subscription ends',
+      () async {
+        final t = FakeAgentTransport();
+        final session = await _newSession(t);
+        final svc = session.previewService;
 
-      final future = svc.proxyRequest(
-        TunnelHttpRequest(
-          requestId: 'req-done-body',
-          port: 3000,
-          method: 'GET',
-          path: '/a.js',
-          headers: {},
-        ),
-      );
-      _start(t, 'req-done-body', data: 'a');
-      final response = await future;
-      final collected = utf8.decodeStream(response.body);
-      _chunk(t, 'req-done-body', 1, 'b');
-      _end(t, 'req-done-body', 1);
+        final future = svc.proxyRequest(
+          TunnelHttpRequest(
+            requestId: 'req-done-body',
+            port: 3000,
+            method: 'GET',
+            path: '/a.js',
+            headers: {},
+          ),
+        );
+        _start(t, 'req-done-body', data: 'a');
+        final response = await future;
+        final collected = utf8.decodeStream(response.body);
+        _chunk(t, 'req-done-body', 1, 'b');
+        _end(t, 'req-done-body', 1);
 
-      expect(await collected, 'ab');
-      await Future<void>.delayed(Duration.zero);
-      // The entry is removed before the close, so the `onCancel` that follows
-      // the delivered done finds nothing to cancel.
-      expect(_cancelsFor(t, 'req-done-body'), isEmpty);
+        expect(await collected, 'ab');
+        await Future<void>.delayed(Duration.zero);
+        // The entry is removed before the close, so the `onCancel` that follows
+        // the delivered done finds nothing to cancel.
+        expect(_cancelsFor(t, 'req-done-body'), isEmpty);
 
-      await session.close();
-    });
+        await session.close();
+      },
+    );
 
     test('a duplicate start is ignored', () async {
       final t = FakeAgentTransport();
@@ -793,102 +837,103 @@ void main() {
       await session.close();
     });
 
-    test('does not re-send a request whose body is already streaming',
-        () async {
-      final t = FakeAgentTransport();
-      final session = await _newSession(t);
-      final svc = session.previewService;
+    test(
+      'does not re-send a request whose body is already streaming',
+      () async {
+        final t = FakeAgentTransport();
+        final session = await _newSession(t);
+        final svc = session.previewService;
 
-      final future = svc.proxyRequest(
-        TunnelHttpRequest(
-          requestId: 'req-streaming',
-          port: 3000,
-          method: 'GET',
-          path: '/a.js',
-          headers: {},
-        ),
-      );
-      _start(t, 'req-streaming', data: 'a');
-      final response = await future;
-      final reading = expectLater(
-        utf8.decodeStream(response.body),
-        throwsA(isA<TunnelStreamException>()),
-      );
+        final future = svc.proxyRequest(
+          TunnelHttpRequest(
+            requestId: 'req-streaming',
+            port: 3000,
+            method: 'GET',
+            path: '/a.js',
+            headers: {},
+          ),
+        );
+        _start(t, 'req-streaming', data: 'a');
+        final response = await future;
+        final reading = expectLater(
+          utf8.decodeStream(response.body),
+          throwsA(isA<TunnelStreamException>()),
+        );
 
-      // Bytes are already in the browser; nothing can be spliced on.
-      t.emitDroppedFrame();
-      await Future<void>.delayed(const Duration(milliseconds: 750));
-      expect(_requests(t), hasLength(1));
+        // Bytes are already in the browser; nothing can be spliced on.
 
-      await session.close();
-      await reading;
-    });
+        await session.close();
+        await reading;
+      },
+    );
 
-    test('re-establishment aborts started bodies and re-sends headless GETs',
-        () async {
-      final t = FakeAgentTransport();
-      final session = await _newSession(t);
-      final svc = session.previewService;
+    test(
+      're-establishment aborts started bodies and re-sends headless GETs',
+      () async {
+        final t = FakeAgentTransport();
+        final session = await _newSession(t);
+        final svc = session.previewService;
 
-      final streaming = svc.proxyRequest(
-        TunnelHttpRequest(
-          requestId: 'req-live',
-          port: 3000,
-          method: 'GET',
-          path: '/a.js',
-          headers: {},
-        ),
-      );
-      _start(t, 'req-live', data: 'a');
-      final response = await streaming;
-      final reading = expectLater(
-        utf8.decodeStream(response.body),
-        throwsA(isA<TunnelStreamException>()),
-      );
+        final streaming = svc.proxyRequest(
+          TunnelHttpRequest(
+            requestId: 'req-live',
+            port: 3000,
+            method: 'GET',
+            path: '/a.js',
+            headers: {},
+          ),
+        );
+        _start(t, 'req-live', data: 'a');
+        final response = await streaming;
+        final reading = expectLater(
+          utf8.decodeStream(response.body),
+          throwsA(isA<TunnelStreamException>()),
+        );
 
-      final headlessGet = svc.proxyRequest(
-        TunnelHttpRequest(
-          requestId: 'req-headless',
-          port: 3000,
-          method: 'GET',
-          path: '/b.js',
-          headers: {},
-        ),
-      );
-      final headlessPost = svc.proxyRequest(
-        TunnelHttpRequest(
-          requestId: 'req-post',
-          port: 3000,
-          method: 'POST',
-          path: '/api',
-          headers: {},
-          body: '{}',
-        ),
-      );
+        final headlessGet = svc.proxyRequest(
+          TunnelHttpRequest(
+            requestId: 'req-headless',
+            port: 3000,
+            method: 'GET',
+            path: '/b.js',
+            headers: {},
+          ),
+        );
+        final headlessPost = svc.proxyRequest(
+          TunnelHttpRequest(
+            requestId: 'req-post',
+            port: 3000,
+            method: 'POST',
+            path: '/api',
+            headers: {},
+            body: '{}',
+          ),
+        );
 
-      t.setEstablished(false);
-      t.setEstablished(true);
-      await Future<void>.delayed(Duration.zero);
+        t.setEstablished(false);
+        t.setEstablished(true);
+        await Future<void>.delayed(Duration.zero);
 
-      await reading;
-      expect(_cancelsFor(t, 'req-live'), hasLength(1));
-      // Same id: the bridge replays from its outbox or joins the live run.
-      expect(
-        _requests(t).where((m) => m['requestId'] == 'req-headless'),
-        hasLength(2),
-      );
-      expect(
-        _requests(t).where((m) => m['requestId'] == 'req-post'),
-        hasLength(1),
-      );
+        await reading;
+        expect(_cancelsFor(t, 'req-live'), hasLength(1));
+        // Same id: the bridge replays from its outbox or joins the live run.
+        expect(
+          _requests(t).where((m) => m['requestId'] == 'req-headless'),
+          hasLength(2),
+        );
+        expect(
+          _requests(t).where((m) => m['requestId'] == 'req-post'),
+          hasLength(1),
+        );
 
-      _start(t, 'req-headless', data: 'ok', last: true);
-      await headlessGet;
-      _start(t, 'req-post', data: 'ok', last: true);
-      await headlessPost;
+        _start(t, 'req-headless', data: 'ok', last: true);
+        await headlessGet;
+        _start(t, 'req-post', data: 'ok', last: true);
+        await headlessPost;
 
-      await session.close();
-    });
+        await session.close();
+      },
+    );
 
     test('an inbound tunnel:ws-close carries a forwardable code to the '
         'browser socket', () async {
@@ -901,11 +946,10 @@ void main() {
       addTearDown(() async => svc.closeTab(port));
 
       final ws = await WebSocket.connect('ws://localhost:$port/_hmr');
-      await _waitUntil(
-        () => t.sent.any((m) => m['type'] == 'tunnel:ws-open'),
-      );
-      final tunnelId = t.sent
-          .firstWhere((m) => m['type'] == 'tunnel:ws-open')['tunnelId'];
+      await _waitUntil(() => t.sent.any((m) => m['type'] == 'tunnel:ws-open'));
+      final tunnelId = t.sent.firstWhere(
+        (m) => m['type'] == 'tunnel:ws-open',
+      )['tunnelId'];
 
       t.emitJson({
         'type': 'tunnel:ws-close',
@@ -931,11 +975,10 @@ void main() {
       addTearDown(() async => svc.closeTab(port));
 
       final ws = await WebSocket.connect('ws://localhost:$port/_hmr');
-      await _waitUntil(
-        () => t.sent.any((m) => m['type'] == 'tunnel:ws-open'),
-      );
-      final tunnelId = t.sent
-          .firstWhere((m) => m['type'] == 'tunnel:ws-open')['tunnelId'];
+      await _waitUntil(() => t.sent.any((m) => m['type'] == 'tunnel:ws-open'));
+      final tunnelId = t.sent.firstWhere(
+        (m) => m['type'] == 'tunnel:ws-open',
+      )['tunnelId'];
 
       // The sink throws an ArgumentError for anything outside 1000 and
       // 3000-4999, which would take the transport subscription down with it;
@@ -962,17 +1005,13 @@ void main() {
       addTearDown(() async => svc.closeTab(port));
 
       final ws = await WebSocket.connect('ws://localhost:$port/_hmr');
-      await _waitUntil(
-        () => t.sent.any((m) => m['type'] == 'tunnel:ws-open'),
-      );
+      await _waitUntil(() => t.sent.any((m) => m['type'] == 'tunnel:ws-open'));
 
       ws.add('x' * (1024 * 1024 + 1));
       await ws.drain<void>().timeout(const Duration(seconds: 2));
 
       expect(t.sent.any((m) => m['type'] == 'tunnel:ws-data'), isFalse);
-      await _waitUntil(
-        () => t.sent.any((m) => m['type'] == 'tunnel:ws-close'),
-      );
+      await _waitUntil(() => t.sent.any((m) => m['type'] == 'tunnel:ws-close'));
     });
 
     test('the queue ceiling counts UTF-8 bytes, not UTF-16 units', () async {
@@ -985,9 +1024,7 @@ void main() {
       addTearDown(() async => svc.closeTab(port));
 
       final ws = await WebSocket.connect('ws://localhost:$port/_hmr');
-      await _waitUntil(
-        () => t.sent.any((m) => m['type'] == 'tunnel:ws-open'),
-      );
+      await _waitUntil(() => t.sent.any((m) => m['type'] == 'tunnel:ws-open'));
 
       // 400k three-byte characters is 1.2 MB on the wire and 400k UTF-16
       // units: a length-based ceiling would wave it through.
@@ -1103,28 +1140,31 @@ void main() {
       expect(t.tunnelFrames[2]['data'], 'AAEC/w==');
     });
 
-    test('a tunnel whose open cannot be delivered closes the browser socket', () async {
-      final t = _GateFirstWsSendTransport();
-      final session = await _newSession(t);
-      addTearDown(() async => session.close());
-      final svc = session.previewService;
-      final port = await freePort();
-      expect(await svc.openTab(port), SelectPortResult.opened);
-      addTearDown(() async => svc.closeTab(port));
+    test(
+      'a tunnel whose open cannot be delivered closes the browser socket',
+      () async {
+        final t = _GateFirstWsSendTransport();
+        final session = await _newSession(t);
+        addTearDown(() async => session.close());
+        final svc = session.previewService;
+        final port = await freePort();
+        expect(await svc.openTab(port), SelectPortResult.opened);
+        addTearDown(() async => svc.closeTab(port));
 
-      // A send with no session keys installed completes SUCCESSFULLY and
-      // delivers nothing — the state a relay reconnect passes through, and
-      // exactly when a previewed page's own socket reconnects.
-      t.setEstablished(false);
+        // A send with no session keys installed completes SUCCESSFULLY and
+        // delivers nothing — the state a relay reconnect passes through, and
+        // exactly when a previewed page's own socket reconnects.
+        t.setEstablished(false);
 
-      final ws = await WebSocket.connect('ws://localhost:$port/_blazor');
-      // The browser must see a real close it can reconnect from, rather than
-      // holding a socket against a tunnel the bridge never heard of. Drained
-      // rather than awaiting `done`: the close frame is only processed once
-      // something reads the stream.
-      await ws.drain<void>().timeout(const Duration(seconds: 2));
-      expect(t.sent.any((m) => m['type'] == 'tunnel:ws-open'), isFalse);
-    });
+        final ws = await WebSocket.connect('ws://localhost:$port/_blazor');
+        // The browser must see a real close it can reconnect from, rather than
+        // holding a socket against a tunnel the bridge never heard of. Drained
+        // rather than awaiting `done`: the close frame is only processed once
+        // something reads the stream.
+        await ws.drain<void>().timeout(const Duration(seconds: 2));
+        expect(t.sent.any((m) => m['type'] == 'tunnel:ws-open'), isFalse);
+      },
+    );
 
     test(
       'openTab (relay) with a path lands the tab there behind the proxy',
@@ -1164,32 +1204,29 @@ void main() {
       await session.close();
     });
 
-    test(
-      'openTab re-detecting an already-open port is a no-op',
-      () async {
-        final t = FakeAgentTransport();
-        final session = await _newSession(t);
-        final svc = session.previewService;
+    test('openTab re-detecting an already-open port is a no-op', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = session.previewService;
 
-        final port = await freePort();
-        await svc.openTab(port);
-        final tabBefore = svc.currentState.activeTab;
+      final port = await freePort();
+      await svc.openTab(port);
+      final tabBefore = svc.currentState.activeTab;
 
-        // Same port, same scheme — must not rebind the proxy or replace the
-        // tab (the whole point of the no-op: no reload on re-detection).
-        final result = await svc.openTab(port);
+      // Same port, same scheme — must not rebind the proxy or replace the
+      // tab (the whole point of the no-op: no reload on re-detection).
+      final result = await svc.openTab(port);
 
-        expect(result, SelectPortResult.opened);
-        expect(svc.currentState.tabs, hasLength(1));
-        expect(
-          svc.currentState.activeTab?.localProxyPort,
-          tabBefore?.localProxyPort,
-        );
+      expect(result, SelectPortResult.opened);
+      expect(svc.currentState.tabs, hasLength(1));
+      expect(
+        svc.currentState.activeTab?.localProxyPort,
+        tabBefore?.localProxyPort,
+      );
 
-        await svc.closeTab(port);
-        await session.close();
-      },
-    );
+      await svc.closeTab(port);
+      await session.close();
+    });
 
     test(
       'selectPortWithFallback binds a different local port when taken',
@@ -1217,40 +1254,37 @@ void main() {
       },
     );
 
-    test(
-      'openTab portInUse keeps the previously-opened tab live',
-      () async {
-        final t = FakeAgentTransport();
-        final session = await _newSession(t);
-        final svc = session.previewService;
+    test('openTab portInUse keeps the previously-opened tab live', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = session.previewService;
 
-        // Open port A successfully (exact bind).
-        final portA = await freePort();
-        final r1 = await svc.openTab(portA);
-        expect(r1, SelectPortResult.opened);
-        expect(svc.currentState.activeTab?.localProxyPort, portA);
+      // Open port A successfully (exact bind).
+      final portA = await freePort();
+      final r1 = await svc.openTab(portA);
+      expect(r1, SelectPortResult.opened);
+      expect(svc.currentState.activeTab?.localProxyPort, portA);
 
-        // Attempt an in-use port B → portInUse. Backgrounded so it can't steal
-        // focus from A even on success.
-        final blocker = await ServerSocket.bind('localhost', 0);
-        addTearDown(() async => blocker.close());
-        final r2 = await svc.openTab(blocker.port, focus: false);
+      // Attempt an in-use port B → portInUse. Backgrounded so it can't steal
+      // focus from A even on success.
+      final blocker = await ServerSocket.bind('localhost', 0);
+      addTearDown(() async => blocker.close());
+      final r2 = await svc.openTab(blocker.port, focus: false);
 
-        expect(r2, SelectPortResult.portInUse);
-        // Port A's tab must remain open AND its proxy still live.
-        expect(svc.currentState.activeTabId, portA);
-        expect(svc.currentState.tabs, hasLength(1));
-        expect(svc.currentState.activeTab?.localProxyPort, portA);
-        // Proof the A proxy is still bound: an external bind of portA fails.
-        await expectLater(
-          ServerSocket.bind('localhost', portA),
-          throwsA(isA<SocketException>()),
-        );
+      expect(r2, SelectPortResult.portInUse);
+      // Port A's tab must remain open AND its proxy still live.
+      expect(svc.currentState.activeTabId, portA);
+      expect(svc.currentState.tabs, hasLength(1));
+      expect(svc.currentState.activeTab?.localProxyPort, portA);
+      // Proof the A proxy is still bound: an external bind of portA fails.
+      await expectLater(
+        ServerSocket.bind('localhost', portA),
+        throwsA(isA<SocketException>()),
+      );
 
-        await svc.closeTab(portA);
-        await session.close();
-      },
-    );
+      await svc.closeTab(portA);
+      await session.close();
+    });
 
     test('two detected ports open two tabs; the first focuses, the second '
         'backgrounds', () async {
@@ -1378,31 +1412,28 @@ void main() {
       await session.close();
     });
 
-    test(
-      'ports:update does not auto-open a port with no declared onDetect '
-      "field the same as 'notify'",
-      () async {
-        final t = _LocalFakeTransport();
-        final session = await _newSession(t);
-        final svc = session.previewService;
-        final sub = session.heavyStream.listen((_) {});
+    test('ports:update does not auto-open a port with no declared onDetect '
+        "field the same as 'notify'", () async {
+      final t = _LocalFakeTransport();
+      final session = await _newSession(t);
+      final svc = session.previewService;
+      final sub = session.heavyStream.listen((_) {});
 
-        t.emit('ports:update', {
-          'projectId': 'p',
-          'ports': [
-            {'port': 3000, 'scheme': 'http'},
-          ],
-        });
-        await Future<void>.delayed(Duration.zero);
+      t.emit('ports:update', {
+        'projectId': 'p',
+        'ports': [
+          {'port': 3000, 'scheme': 'http'},
+        ],
+      });
+      await Future<void>.delayed(Duration.zero);
 
-        expect(svc.currentState.tabs, hasLength(1));
-        expect(svc.currentState.activeTabId, 3000);
+      expect(svc.currentState.tabs, hasLength(1));
+      expect(svc.currentState.activeTabId, 3000);
 
-        await svc.closeTab(3000);
-        await sub.cancel();
-        await session.close();
-      },
-    );
+      await svc.closeTab(3000);
+      await sub.cancel();
+      await session.close();
+    });
 
     test('ports:update never auto-opens a silent or ignored port', () async {
       final t = _LocalFakeTransport();
@@ -1426,8 +1457,7 @@ void main() {
       await session.close();
     });
 
-    test('ports:update never reopens a port the user already closed',
-        () async {
+    test('ports:update never reopens a port the user already closed', () async {
       final t = _LocalFakeTransport();
       final session = await _newSession(t);
       final svc = session.previewService;
@@ -1460,8 +1490,7 @@ void main() {
       await session.close();
     });
 
-    test('closing the active tab reassigns focus to a remaining tab',
-        () async {
+    test('closing the active tab reassigns focus to a remaining tab', () async {
       final t = FakeAgentTransport();
       final session = await _newSession(t);
       final svc = session.previewService;
@@ -1547,128 +1576,6 @@ void main() {
       expect(_cancelsFor(t, 'req-live'), hasLength(1));
       expect(_cancelsFor(t, 'req-stalled'), hasLength(1));
       expect(_cancelsFor(t, 'req-d'), isEmpty);
-    });
-  });
-
-  group('PreviewService dropped-frame recovery', () {
-    /// Longer than [PreviewService]'s 600ms retry grace, which is real elapsed
-    /// time (a wall-clock Timer, not a fake async zone).
-    const pastGrace = Duration(milliseconds: 750);
-
-    List<Map<String, dynamic>> tunnelSends(FakeAgentTransport t, String id) => t
-        .sent
-        .where(
-          (m) => m['type'] == 'tunnel:http-request' && m['requestId'] == id,
-        )
-        .toList();
-
-    void respond(FakeAgentTransport t, String id) =>
-        _start(t, id, data: 'ok', last: true);
-
-    test('re-sends a stalled GET under its original requestId', () async {
-      final t = FakeAgentTransport();
-      final session = await _newSession(t);
-      final svc = session.previewService;
-
-      final future = svc.proxyRequest(
-        TunnelHttpRequest(
-          requestId: 'req-drop',
-          port: 3000,
-          method: 'GET',
-          path: '/app.js',
-          headers: {},
-        ),
-      );
-      expect(tunnelSends(t, 'req-drop'), hasLength(1));
-
-      t.emitDroppedFrame();
-      await Future<void>.delayed(pastGrace);
-
-      // Same id, so the bridge replays from its outbox instead of re-fetching.
-      expect(tunnelSends(t, 'req-drop'), hasLength(2));
-
-      respond(t, 'req-drop');
-      expect((await future).status, 200);
-      await session.close();
-    });
-
-    test('does not re-send a non-idempotent method', () async {
-      final t = FakeAgentTransport();
-      final session = await _newSession(t);
-      final svc = session.previewService;
-
-      final future = svc.proxyRequest(
-        TunnelHttpRequest(
-          requestId: 'req-post',
-          port: 3000,
-          method: 'POST',
-          path: '/api/save',
-          headers: {},
-          body: '{}',
-        ),
-      );
-
-      t.emitDroppedFrame();
-      await Future<void>.delayed(pastGrace);
-
-      expect(tunnelSends(t, 'req-post'), hasLength(1));
-
-      respond(t, 'req-post');
-      await future;
-      await session.close();
-    });
-
-    test('stops re-sending after the retry cap', () async {
-      final t = FakeAgentTransport();
-      final session = await _newSession(t);
-      final svc = session.previewService;
-
-      final future = svc.proxyRequest(
-        TunnelHttpRequest(
-          requestId: 'req-cap',
-          port: 3000,
-          method: 'GET',
-          path: '/chunk.js',
-          headers: {},
-        ),
-      );
-
-      for (var i = 0; i < 3; i++) {
-        t.emitDroppedFrame();
-        await Future<void>.delayed(pastGrace);
-      }
-
-      // Original + 2 retries. A link that keeps dropping frames must not be
-      // handed an unbounded amplification of the same request.
-      expect(tunnelSends(t, 'req-cap'), hasLength(3));
-
-      respond(t, 'req-cap');
-      await future;
-      await session.close();
-    });
-
-    test('does not re-send a request that already answered', () async {
-      final t = FakeAgentTransport();
-      final session = await _newSession(t);
-      final svc = session.previewService;
-
-      final future = svc.proxyRequest(
-        TunnelHttpRequest(
-          requestId: 'req-done',
-          port: 3000,
-          method: 'GET',
-          path: '/index.html',
-          headers: {},
-        ),
-      );
-      respond(t, 'req-done');
-      await future;
-
-      t.emitDroppedFrame();
-      await Future<void>.delayed(pastGrace);
-
-      expect(tunnelSends(t, 'req-done'), hasLength(1));
-      await session.close();
     });
   });
 }

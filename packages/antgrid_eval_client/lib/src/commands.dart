@@ -1,7 +1,11 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
+import 'package:antgrid_peer_transport/antgrid_peer_transport.dart';
+import 'package:iroh_quic/iroh_quic.dart' as iroh;
 import 'package:uuid/uuid.dart';
 
 typedef EmitFn = void Function(Map<String, dynamic> response);
@@ -14,11 +18,33 @@ typedef EmitFn = void Function(Map<String, dynamic> response);
 /// `RelayConnection` does. This handler is only a translation layer between
 /// stdin JSON actions and that object graph — anything it reimplements is a
 /// place where an eval could pass against code the app does not ship.
+class _MemoryEndpointKeys implements EndpointKeyStore {
+  Uint8List? value;
+
+  @override
+  Future<Uint8List?> read(String enrollmentId) async =>
+      value == null ? null : Uint8List.fromList(value!);
+
+  @override
+  Future<void> write(String enrollmentId, Uint8List secret) async {
+    value = Uint8List.fromList(secret);
+  }
+
+  @override
+  Future<void> delete(String enrollmentId) async {
+    value?.fillRange(0, value!.length, 0);
+    value = null;
+  }
+}
+
 class CommandHandler {
   final EmitFn _emit;
 
   CryptoService? _crypto;
   RelayService? _relay;
+  NativeEndpointOwner? _endpoint;
+  PeerLink? _payload;
+  final _endpointKeys = _MemoryEndpointKeys();
   DeviceIdentity? _identity;
   MachineSession? _session;
   AppSessionHandshaker? _handshaker;
@@ -73,6 +99,14 @@ class CommandHandler {
       x25519PublicKey: x25519Public,
     );
 
+    _endpoint = await NativeEndpointOwner.create(
+      enrollmentId: deviceId,
+      keyStore: _endpointKeys,
+      approvedRelays: const [],
+      initializeNative: () => iroh.Iroh.init(
+        libraryPath: Platform.environment['IROH_INTEROP_NATIVE_LIBRARY'],
+      ),
+    );
     _relay = RelayService(crypto: _crypto!);
     _stateSub = _relay!.stateStream.listen((state) {
       final out = <String, dynamic>{
@@ -89,18 +123,17 @@ class CommandHandler {
       'deviceId': deviceId,
       'publicKey': base64.encode(ed25519Public),
       'x25519PublicKey': base64.encode(x25519Public),
+      'endpointId': _endpoint!.endpoint.id.toHex(),
     });
   }
 
   Future<void> _handleConnect(Map<String, dynamic> cmd) async {
     final relayUrl = cmd['relayUrl'] as String?;
-    // v3 admission: every app hello carries its own account license token.
-    // There is no token-free app dial to fall back to, so a missing token is
-    // a caller bug, not a mode.
     final licenseToken = cmd['licenseToken'] as String?;
     if (relayUrl == null ||
         licenseToken == null ||
         _relay == null ||
+        _endpoint == null ||
         _identity == null) {
       _emit({
         'event': 'error',
@@ -114,21 +147,121 @@ class CommandHandler {
       _identity!,
       licenseToken: licenseToken,
       machineDeviceId: cmd['machineDeviceId'] as String?,
-      // One dial per (freshly keyed) process, so there is never a prior
-      // connection instance of this deviceId for the relay to arbitrate
-      // against — the counter has nothing to advance past.
       epoch: cmd['epoch'] as int? ?? 1,
+    );
+    await _connectPayload(cmd);
+    _emit({'event': 'native-connected'});
+  }
+
+  Future<void> _connectPayload(Map<String, dynamic> cmd) async {
+    final baseUrl = cmd['licenseApiUrl'] as String?;
+    final accountId = cmd['accountId'] as String?;
+    final enrollmentId = cmd['enrollmentId'] as String?;
+    final clientSecret = cmd['clientSecret'] as String?;
+    final machineDeviceId = cmd['machineDeviceId'] as String?;
+    final addresses = (cmd['nativeAddresses'] as List?)?.cast<String>();
+    if (baseUrl == null ||
+        accountId == null ||
+        enrollmentId == null ||
+        clientSecret == null ||
+        machineDeviceId == null ||
+        addresses == null ||
+        addresses.isEmpty) {
+      throw ArgumentError('Native enrollment coordinates are required');
+    }
+
+    Future<Map<String, dynamic>> request(
+      String method,
+      String path,
+      Map<String, dynamic>? body,
+    ) async {
+      final client = HttpClient();
+      try {
+        final tokenRequest = await client.postUrl(
+          Uri.parse('$baseUrl/api/auth/oauth2/token'),
+        );
+        tokenRequest.headers.set(
+          HttpHeaders.authorizationHeader,
+          'Basic ${base64Encode(utf8.encode('$enrollmentId:$clientSecret'))}',
+        );
+        final tokenResponse = await tokenRequest.close();
+        final tokenText = await utf8.decodeStream(tokenResponse);
+        if (tokenResponse.statusCode < 200 || tokenResponse.statusCode >= 300) {
+          throw HttpException(
+            'Endpoint token failed: ${tokenResponse.statusCode}',
+          );
+        }
+        final token =
+            (jsonDecode(tokenText) as Map<String, dynamic>)['access_token']
+                as String;
+        final peerRequest = await client.openUrl(
+          method,
+          Uri.parse('$baseUrl$path'),
+        );
+        peerRequest.headers.set(
+          HttpHeaders.authorizationHeader,
+          'Bearer $token',
+        );
+        if (body != null) {
+          peerRequest.headers.contentType = ContentType.json;
+          peerRequest.write(jsonEncode(body));
+        }
+        final response = await peerRequest.close();
+        final responseText = await utf8.decodeStream(response);
+        if (response.statusCode < 200 || response.statusCode >= 300) {
+          throw HttpException(
+            'Peer authorization failed: ${response.statusCode} $responseText',
+          );
+        }
+        return (jsonDecode(responseText) as Map).cast<String, dynamic>();
+      } finally {
+        client.close(force: true);
+      }
+    }
+
+    final enrollment = EndpointEnrollmentClient(
+      request: request,
+      accountId: accountId,
+      deviceId: _identity!.deviceId,
+      enrollmentId: enrollmentId,
+    );
+    var snapshot = await enrollment.fetchSnapshot();
+    final endpointSecret = await _endpointKeys.read(enrollmentId);
+    if (endpointSecret == null) throw StateError('Native endpoint key missing');
+    if (snapshot.endpoint == null) {
+      await enrollment.register(
+        deviceSecret: _identity!.ed25519PrivateKey,
+        endpointSecret: endpointSecret,
+        expectedGeneration: snapshot.registrationGeneration,
+      );
+    }
+    PeerRegistration? target;
+    for (var attempt = 0; attempt < 100 && target == null; attempt++) {
+      snapshot = await enrollment.fetchSnapshot();
+      for (final peer in snapshot.peers) {
+        if (peer.deviceId == machineDeviceId) target = peer.endpoint;
+      }
+      if (target == null)
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+    }
+    if (target == null)
+      throw StateError('Machine did not publish a native endpoint');
+    await _payload?.close();
+    _payload = await _endpoint!.dial(
+      endpointId: target.endpointId,
+      localDeviceId: relaySlotId(_identity!.deviceId, machineDeviceId),
+      peerDeviceId: machineDeviceId,
+      authorized: () => true,
+      ipAddresses: addresses,
     );
   }
 
   /// Establish the E2E session with the machine at [cmd]`['machineDeviceId']`.
   ///
-  /// The agent is addressed explicitly: with pairing gone there is no
-  /// relay-supplied peer id to infer it from, and the app has the same problem
-  /// — it dials coordinates it already holds (`RecentAgent` / the account
-  /// inventory) rather than learning them from the relay.
+  /// The agent is addressed explicitly: native coordinates come from the
+  /// authenticated account inventory, independently of central presence.
   Future<void> _handleHandshake(Map<String, dynamic> cmd) async {
-    if (_relay == null || _identity == null || _crypto == null) {
+    if (_payload == null || _identity == null || _crypto == null) {
       _emit({'event': 'error', 'message': 'Must init before handshake'});
       return;
     }
@@ -167,7 +300,7 @@ class CommandHandler {
     // the one the app ships — a second copy here is exactly the drift these
     // scenarios exist to catch.
     final handshaker = _handshaker = AppSessionHandshaker(
-      relay: _relay!,
+      relay: _payload!,
       crypto: _crypto!,
       machineDeviceId: machineDeviceId,
       phoneDeviceId: _identity!.deviceId,
@@ -187,7 +320,7 @@ class CommandHandler {
           : Duration(milliseconds: attemptTimeoutMs),
     );
     final session = _session = MachineSession(
-      relay: _relay!,
+      relay: _payload!,
       machineDeviceId: machineDeviceId,
       handshaker: handshaker,
       projectStartMessageBuilder: (projectId) =>
@@ -348,6 +481,11 @@ class CommandHandler {
     _stateSub = null;
     _relay?.dispose();
     _relay = null;
+    await _payload?.close();
+    _payload = null;
+    await _endpoint?.close();
+    _endpoint = null;
+    await _endpointKeys.delete(_identity?.deviceId ?? '');
     _crypto = null;
     _identity = null;
     _emit({'event': 'disconnected'});

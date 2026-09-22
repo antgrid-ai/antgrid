@@ -1,8 +1,6 @@
-/**
- * Identity record passed into RelayClient. With the OAuth migration these
- * fields no longer live on disk — they're populated from the stdin bootstrap
- * payload (see `auth/credentials.ts`) and held in memory only.
- */
+/** Identity used by central authentication and native E2E sessions. These
+ * credentials are provisioned by the web service; the private seed never
+ * leaves the machine. */
 export interface DeviceIdentity {
   deviceId: string;
   deviceName: string;

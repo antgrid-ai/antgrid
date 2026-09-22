@@ -1688,7 +1688,7 @@ const PortDetectedMessage = BaseMessage.extend({
 //
 // The App (already account-authenticated) triggers promotion via
 // `agent:enableRelay`, passing the signed-in device's credentials. The agent
-// stands up a RelayClient with them and responds with the lifecycle messages
+// stands up the enrolled native remote host with them and responds with the lifecycle messages
 // below. Disabling tears the relay client down without touching the local
 // loopback session.
 // Mirror of the validators in auth/credentials.ts (kept inline to avoid an

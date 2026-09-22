@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { generateKeyPairSync } from "node:crypto";
 import { encodeRouteFrame, FrameKind } from "antgrid-wire";
-import { RelayClient } from "../src/relay-client";
+import { TestPeerSessionOwner } from "./test-peer-session-owner";
 import { generateEphemeralKeypair, deriveSharedSecret } from "../src/key-exchange";
 import { buildTranscript, deriveSessionKeys, phoneConfirmTag, E2eTransport, signTranscript } from "../src/e2e";
 
@@ -16,16 +16,16 @@ function ed25519Pair(): { seedB64: string; pubB64: string } {
   };
 }
 
-function injectFrame(client: RelayClient, kind: FrameKind, payload: Buffer, channel: "control" | "preview" = "control"): void {
+function injectFrame(client: TestPeerSessionOwner, kind: FrameKind, payload: Buffer, channel: "control" | "preview" = "control"): void {
   const frame = encodeRouteFrame({ type: "message", from: PHONE_ID, channel }, payload, kind);
-  (client as any).handleBinaryFrame(Buffer.from(frame));
+  client.injectRouteFrame(Buffer.from(frame));
 }
 
 /** Establish a real E2E session on a forTest client. */
-function establish(sent: Array<string | Buffer>): { client: RelayClient; phoneTransport: E2eTransport } {
+function establish(sent: Array<string | Buffer>): { client: TestPeerSessionOwner; phoneTransport: E2eTransport } {
   const agentEd = ed25519Pair();
   const phoneEd = ed25519Pair();
-  const client = RelayClient.forTest({
+  const client = TestPeerSessionOwner.forTest({
     generateKeypair: generateEphemeralKeypair,
     sendPayload: (p) => sent.push(p),
     peerId: PHONE_ID,
@@ -63,7 +63,7 @@ function establish(sent: Array<string | Buffer>): { client: RelayClient; phoneTr
   return { client, phoneTransport };
 }
 
-describe("RelayClient.sendTunnel", () => {
+describe("TestPeerSessionOwner.sendTunnel", () => {
   it("seals the tunnel message in the control-plane envelope and sends it on the preview channel", async () => {
     const sent: Array<string | Buffer> = [];
     const { client, phoneTransport } = establish(sent);
@@ -83,7 +83,7 @@ describe("RelayClient.sendTunnel", () => {
     const sentBefore = sent.length;
 
     // Body large enough that the JSON envelope exceeds MAX_TRANSFER_BYTES (32 MiB),
-    // so fragmentForSend rejects it. The outcome is the answer now — the caller
+    // so fragmentForSend rejects it. The outcome is the answer now â€” the caller
     // (TunnelManager) ends its stream on it rather than the send path
     // synthesising a reply it cannot attribute to a checkout.
     const huge = "a".repeat(34 * 1024 * 1024);
@@ -100,20 +100,20 @@ describe("RelayClient.sendTunnel", () => {
 
   it("drops the tunnel message when the E2E session is not established", async () => {
     const sent: unknown[] = [];
-    const client = RelayClient.forTest({
+    const client = TestPeerSessionOwner.forTest({
       generateKeypair: () => {
         throw new Error("not used");
       },
       sendPayload: (data: Buffer | string) => sent.push(data),
       peerId: "phone-1",
     });
-    // No handshake → no established session.
+    // No handshake â†’ no established session.
     expect(await client.sendTunnel({ type: "tunnel:http-end", requestId: "r1", chunks: 0 })).toBe("dropped");
     expect(sent).toEqual([]);
   });
 });
 
-describe("RelayClient receive: a malformed sealed preview frame never reaches onTunnelMessage", () => {
+describe("TestPeerSessionOwner receive: a malformed sealed preview frame never reaches onTunnelMessage", () => {
   it("drops a frame the established transport fails to decrypt", () => {
     const sent: Array<string | Buffer> = [];
     const { client } = establish(sent);
@@ -121,7 +121,7 @@ describe("RelayClient receive: a malformed sealed preview frame never reaches on
     (client as any).opts.onTunnelMessage = (m: unknown) => tunnelSeen.push(m);
 
     // Garbage ciphertext (well-formed frame, but not sealed under the
-    // established transport) — must fail to decrypt and never dispatch.
+    // established transport) â€” must fail to decrypt and never dispatch.
     injectFrame(client, FrameKind.sealed, Buffer.alloc(40, 7), "preview");
 
     expect(tunnelSeen).toEqual([]);

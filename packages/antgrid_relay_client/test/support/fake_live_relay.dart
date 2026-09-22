@@ -1,12 +1,5 @@
-// Not a `_test.dart` file — shared fakes for MachineSession-level tests.
-//
-// A fake RelayService that starts on a live (`authenticated`) socket and
-// records every outbound sendMessage call, plus an instant
-// [SessionHandshaker] that resolves to fixed
-// [SessionKeys] with no real crypto exchange — these tests are about
-// MachineSession's envelope/fragmentation/stream-demux/rekey plumbing, not the
-// E2E handshake itself (that lives in app/lib/relay/connection_handshake.dart
-// and is covered by app-side tests against the real crypto).
+// Not a `_test.dart` file - shared PeerLink and handshaker fakes for
+// MachineSession protocol tests.
 import 'dart:async';
 import 'dart:typed_data';
 
@@ -20,34 +13,36 @@ class SentFrame {
   SentFrame(this.to, this.channel, this.payload, this.kind);
 }
 
-class FakeLiveRelay extends RelayService {
-  // `netTap` is forwarded to the real RelayService because MachineSession reads
-  // the hook back off its socket (`relay.netTap`) rather than holding its own —
-  // without this passthrough a capture is unreachable from a faked relay.
+class FakeLiveRelay implements PeerLink {
   FakeLiveRelay({
     RelayConnectionState initial = RelayConnectionState.authenticated,
-    RelayNetTap? netTap,
-  }) : super(crypto: CryptoService(), netTap: netTap) {
-    _current = AppState(connectionState: initial);
-  }
+    this.netTap,
+  }) : _state = initial == RelayConnectionState.authenticated
+           ? PeerLinkState.ready
+           : PeerLinkState.connecting;
 
   final _messages = StreamController<IncomingRouteMessage>.broadcast();
-  final _states = StreamController<AppState>.broadcast();
-  final _presence = StreamController<bool>.broadcast();
-  final _errors = StreamController<ErrorMessage>.broadcast();
+  final _states = StreamController<PeerLinkState>.broadcast();
+  final _restarts = StreamController<void>.broadcast();
+  final _errors = StreamController<PeerLinkFailure>.broadcast();
   final sent = <SentFrame>[];
-  late AppState _current;
+  PeerLinkState _state;
+  bool _wasOffline = false;
 
   @override
   Stream<IncomingRouteMessage> get messageStream => _messages.stream;
   @override
-  Stream<AppState> get stateStream => _states.stream;
+  Stream<PeerLinkState> get payloadStateStream => _states.stream;
   @override
-  Stream<bool> get peerPresenceStream => _presence.stream;
+  Stream<PeerPath> get pathStream => const Stream.empty();
   @override
-  Stream<ErrorMessage> get errorStream => _errors.stream;
+  Stream<void> get peerRestartStream => _restarts.stream;
   @override
-  AppState get currentState => _current;
+  Stream<PeerLinkFailure> get failureStream => _errors.stream;
+  @override
+  bool get isDispatchAllowed => _state == PeerLinkState.ready;
+  @override
+  final RelayNetTap? netTap;
 
   @override
   Future<PeerSendOutcome> sendFrame(
@@ -56,39 +51,41 @@ class FakeLiveRelay extends RelayService {
     Uint8List payload, {
     FrameKind kind = FrameKind.sealed,
   }) async {
-    sendMessage(to, channel, payload, kind: kind);
-    return PeerSendOutcome.accepted;
-  }
-
-  @override
-  void sendMessage(
-    String to,
-    String channel,
-    Uint8List payload, {
-    FrameKind kind = FrameKind.sealed,
-  }) {
     sent.add(SentFrame(to, channel, payload, kind));
+    return PeerSendOutcome.accepted;
   }
 
   void inject(IncomingRouteMessage msg) => _messages.add(msg);
 
-  void setState(AppState s) {
-    _current = s;
-    _states.add(s);
+  void setState(AppState state) {
+    _state = switch (state.connectionState) {
+      RelayConnectionState.authenticated => PeerLinkState.ready,
+      RelayConnectionState.disconnected => PeerLinkState.closed,
+      _ => PeerLinkState.connecting,
+    };
+    _states.add(_state);
   }
 
-  void presence(bool online) => _presence.add(online);
+  void presence(bool online) {
+    if (!online) {
+      _wasOffline = true;
+    } else if (_wasOffline) {
+      _wasOffline = false;
+      _restarts.add(null);
+    }
+  }
 
-  /// A typed relay error as the socket would deliver it — a routed-frame drop
-  /// report carries the discarded frame's `channel` and `bytes`.
-  void injectError(ErrorMessage e) => _errors.add(e);
+  void injectError(PeerLinkFailure error) => _errors.add(error);
 
   Future<void> closeStreams() async {
     await _messages.close();
     await _states.close();
-    await _presence.close();
+    await _restarts.close();
     await _errors.close();
   }
+
+  @override
+  Future<void> close() => closeStreams();
 }
 
 /// Resolves [keys] (or each of [sequence] in turn, one per call) with no real

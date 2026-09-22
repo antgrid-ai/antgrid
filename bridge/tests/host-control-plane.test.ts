@@ -16,7 +16,7 @@ function fakeRemoteConfig(): HostRemoteConfig {
     relayUrl: "ws://127.0.0.1:1",
     licenseApiUrl: "http://127.0.0.1:1",
     identity: { deviceId: "dev-1", deviceName: "dev-1", createdAt: "2026-01-01T00:00:00.000Z" },
-    auth: { clientId: "cid", clientSecret: "secret", deviceUuid: "uuid-1" },
+    auth: { clientId: "cid", clientSecret: "secret", deviceUuid: "uuid-1", userId: "user-1", endpointSecret: Buffer.alloc(32, 1).toString("base64") },
     onAuthRevoked: () => {},
   };
 }

@@ -1,3 +1,4 @@
+import '../helpers/test_license_token_minter.dart';
 import '../helpers/test_peer_runtime.dart';
 // The coords step must keep answering from the LIVE account inventory for as
 // long as the ladder runs — including after a user Retry, which disposes and
@@ -5,7 +6,7 @@ import '../helpers/test_peer_runtime.dart';
 //
 // `retryAgentConnection()` calls `supervisor.retry()` and then
 // `ref.invalidate(agentTransportForProvider(id))` without releasing the
-// connection. The rebuilt element's freshly-built `RelayMechanisms` is
+// connection. The rebuilt element's freshly-built `PeerConnectionMechanisms` is
 // discarded by `ensureStarted` (the supervisor already exists), so whatever
 // owns the coords resolution has to outlive the element that first built it.
 import 'dart:async';
@@ -48,7 +49,6 @@ class _DialRecordingRelay extends RelayService {
   final dialedUrls = <String>[];
   final AppState _cur = const AppState();
 
-  @override
   Stream<IncomingRouteMessage> get messageStream => const Stream.empty();
   @override
   Stream<AppState> get stateStream => _states.stream;
@@ -69,7 +69,7 @@ class _DialRecordingRelay extends RelayService {
   }) async {
     dialedUrls.add(relayUrl);
     throw RelayConnectException(
-      code: 'PEER_OFFLINE',
+      code: 'NATIVE_CONNECT_FAILED',
       retryable: true,
       message: 'nothing listening',
     );
@@ -78,19 +78,16 @@ class _DialRecordingRelay extends RelayService {
   @override
   void disconnect() {}
 
-  @override
   Future<PeerSendOutcome> sendFrame(
     String to,
     String channel,
     Uint8List payload, {
     FrameKind kind = FrameKind.sealed,
   }) async {
-    if (!isDispatchAllowed) return PeerSendOutcome.closed;
     sendMessage(to, channel, payload, kind: kind);
     return PeerSendOutcome.accepted;
   }
 
-  @override
   void sendMessage(
     String to,
     String channel,
@@ -254,7 +251,9 @@ void main() {
         accountAgentsProvider.overrideWith((_) async => inventory),
         localDeviceUuidProvider.overrideWith((_) async => 'this-device'),
         connectionDeviceRecordProvider.overrideWith((_) async => record),
-        connectionTokenMinterProvider.overrideWith((_) async => null),
+        connectionTokenMinterProvider.overrideWith(
+          (_) async => TestLicenseTokenMinter(),
+        ),
         cryptoServiceProvider.overrideWith((_) => CryptoService()),
         relayConnectionManagerProvider.overrideWithValue(
           _FakeConnectionManager(relay),

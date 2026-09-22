@@ -1,22 +1,18 @@
-/// Wire codes for non-license `ErrorMessage`s sent by the relay during
-/// pairing/protocol exchanges. License-related codes live in
-/// `RelayLicenseErrorCode` because they trigger different client behavior
-/// (no auto-reconnect).
+/// Non-license relay control errors understood by the app.
 enum RelayErrorCode {
-  agentOffline('AGENT_OFFLINE'),
-  pairRejected('PAIR_REJECTED'),
+  authFailed('AUTH_FAILED'),
+  maxConnections('MAX_CONNECTIONS'),
+  rateLimited('RATE_LIMITED'),
+  invalidMessage('INVALID_MESSAGE'),
+  notAuthenticated('NOT_AUTHENTICATED'),
+  wrongDeviceType('WRONG_DEVICE_TYPE'),
+  messageRateLimited('MESSAGE_RATE_LIMITED'),
+  licenseUnavailable('LICENSE_UNAVAILABLE'),
   unknownPhone('UNKNOWN_PHONE'),
-  pairingWindowClosed('PAIRING_WINDOW_CLOSED'),
   nonceMismatch('NONCE_MISMATCH'),
   approvalExpired('APPROVAL_EXPIRED'),
   superseded('SUPERSEDED'),
-  peerOffline('PEER_OFFLINE'),
-  protocolViolation('PROTOCOL_VIOLATION'),
-  expired('EXPIRED'),
-  notAuthorized('NOT_AUTHORIZED'),
-  peerReplaced('PEER_REPLACED'),
-  sessionLimitExceeded('SESSION_LIMIT_EXCEEDED'),
-  streamLimitExceeded('STREAM_LIMIT_EXCEEDED');
+  protocolViolation('PROTOCOL_VIOLATION');
 
   final String wireValue;
   const RelayErrorCode(this.wireValue);

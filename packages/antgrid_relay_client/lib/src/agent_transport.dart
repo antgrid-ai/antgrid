@@ -1,8 +1,7 @@
 /// Transport-agnostic interface for sending and receiving agent messages.
 ///
-/// Two implementations are expected: a relay-backed transport (existing
-/// `RelayService`-style WebSocket + E2E encryption) and a local-mode
-/// transport that talks directly to a co-located agent. Higher-level
+/// Two implementations are expected: a native remote transport with E2E
+/// encryption and a local-mode transport that talks directly to a co-located agent. Higher-level
 /// services (terminal, file, preview, command) consume this interface so
 /// they don't care which transport is in use.
 ///
@@ -30,18 +29,6 @@ abstract class AgentTransport {
 
   /// Stream of state transitions. Emits each time [currentState] changes.
   Stream<TransportState> get stateChanges;
-
-  /// Emits when the relay reports that it DROPPED a frame on this transport's
-  /// socket (`MESSAGE_RATE_LIMITED`).
-  ///
-  /// The relay tells only the SENDER and identifies no frame — the route header
-  /// carries no message id — so a listener learns that something in flight died,
-  /// never which one. It is therefore a hint to re-issue work that is safe to
-  /// repeat, not a per-request failure: a service that cannot re-issue safely
-  /// must ignore it. Recovering here is what keeps a dropped frame from costing
-  /// a full request timeout. Never fires on a local transport — no relay, so
-  /// nothing to drop.
-  Stream<void> get droppedFrames;
 
   /// Latest known state (synchronous snapshot).
   TransportState get currentState;

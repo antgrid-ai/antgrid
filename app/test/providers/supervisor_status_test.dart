@@ -17,6 +17,7 @@ import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/providers/relay_connection.dart';
 import 'package:antgrid/providers/supervisor_status.dart';
 import 'package:antgrid/screens/app_shell.dart';
+import '../helpers/fixed_peer_connector.dart';
 
 DeviceIdentity _identity() => DeviceIdentity(
   deviceId: 'phone-1',
@@ -27,12 +28,12 @@ DeviceIdentity _identity() => DeviceIdentity(
   x25519PublicKey: Uint8List(32),
 );
 
-/// A [RelayMechanisms] whose rung getters are settable directly, decoupled
+/// A [PeerConnectionMechanisms] whose rung getters are settable directly, decoupled
 /// from the underlying (never-connected) RelayService — the only way to
 /// simulate a rung silently breaking with NO edge event to notice it, which is
 /// exactly the case `noteResume()` exists for (see its doc comment on
 /// `RelayConnection`).
-class _ToggleableMechanisms extends RelayMechanisms {
+class _ToggleableMechanisms extends PeerConnectionMechanisms {
   _ToggleableMechanisms({
     required super.relay,
     required super.crypto,
@@ -43,24 +44,22 @@ class _ToggleableMechanisms extends RelayMechanisms {
     required super.epoch,
     required super.resolveCoords,
     required super.mintToken,
+    required super.peerRuntime,
   });
 
-  bool socketOk = false;
+  bool payloadOk = false;
   int dialCalls = 0;
 
   @override
-  bool get socketAuthenticated => socketOk;
-
-  @override
-  bool get agentOnline => true;
+  bool get payloadConnected => payloadOk;
 
   @override
   bool get sessionEstablished => true;
 
   @override
-  Future<void> dial(ConnCoords coords, String token) async {
+  Future<void> connectPayload(ConnCoords coords) async {
     dialCalls++;
-    socketOk = true;
+    payloadOk = true;
   }
 
   @override
@@ -81,6 +80,7 @@ _ToggleableMechanisms _toggleable(RelayConnection conn, String machineId) =>
         agentEd25519PubB64: 'AGENT_PUB',
       ),
       mintToken: () async => 'tok',
+      peerRuntime: FixedPeerConnector.stub(),
     );
 
 Future<void> _waitUntil(
@@ -208,22 +208,14 @@ void main() {
       );
     });
 
-    test('Blocked(agentOffline) -> offline', () {
-      expect(
-        reachabilityForStatus(const Blocked(BlockReason.agentOffline)),
-        AgentReachability.offline,
-      );
-    });
-
     test('every other Blocked reason stays connecting, never offline', () {
       for (final reason in BlockReason.values) {
-        if (reason == BlockReason.agentOffline) continue;
         expect(
           reachabilityForStatus(Blocked(reason)),
           AgentReachability.connecting,
           reason:
               '$reason must not collapse into the "not reachable" bucket — '
-              'only agentOffline means a bare reconnect is pointless',
+              'native payload failures remain retry-controlled',
         );
       }
     });
@@ -261,6 +253,7 @@ void main() {
         final connB = mgr.connectionFor('b');
         final mechA = _ToggleableMechanisms(
           relay: connA.relay,
+          peerRuntime: FixedPeerConnector.stub(),
           crypto: CryptoService(),
           machineDeviceId: 'a',
           identity: _identity(),
@@ -275,6 +268,7 @@ void main() {
         );
         final mechB = _ToggleableMechanisms(
           relay: connB.relay,
+          peerRuntime: FixedPeerConnector.stub(),
           crypto: CryptoService(),
           machineDeviceId: 'b',
           identity: _identity(),
@@ -300,8 +294,8 @@ void main() {
         // armed for this fresh break (it was reset to null on reaching
         // Connected) means the ladder is just waiting for someone to ask it
         // to look again.
-        mechA.socketOk = false;
-        mechB.socketOk = false;
+        mechA.payloadOk = false;
+        mechB.payloadOk = false;
 
         mgr.noteResume();
 
@@ -321,8 +315,9 @@ void main() {
       addTearDown(mgr.disposeAll);
       final conn = mgr.connectionFor('m');
       conn.ensureStarted(
-        mechanisms: RelayMechanisms(
+        mechanisms: PeerConnectionMechanisms(
           relay: conn.relay,
+          peerRuntime: FixedPeerConnector.stub(),
           crypto: CryptoService(),
           machineDeviceId: 'm',
           identity: _identity(),
@@ -358,8 +353,9 @@ void main() {
         addTearDown(mgr.disposeAll);
         final conn = mgr.connectionFor('m');
         conn.ensureStarted(
-          mechanisms: RelayMechanisms(
+          mechanisms: PeerConnectionMechanisms(
             relay: conn.relay,
+            peerRuntime: FixedPeerConnector.stub(),
             crypto: CryptoService(),
             machineDeviceId: 'm',
             identity: _identity(),

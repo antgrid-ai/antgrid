@@ -1,3 +1,4 @@
+import '../helpers/test_license_token_minter.dart';
 import '../helpers/test_peer_runtime.dart';
 import 'dart:convert';
 
@@ -77,8 +78,10 @@ void main() {
           connectionDeviceRecordProvider.overrideWith(
             (_) async => _connectionRecord(),
           ),
-          connectionTokenMinterProvider.overrideWith((_) async => null),
-          // Machine routing is independent of endpoint enrollment.
+          connectionTokenMinterProvider.overrideWith(
+            (_) async => TestLicenseTokenMinter(),
+          ),
+          // Machine routing is independent of which enrolled native endpoint connects.
           peerRuntimeProvider.overrideWith((ref) async {
             final runtime = TestPeerRuntime();
             ref.onDispose(runtime.dispose);
@@ -123,7 +126,9 @@ void main() {
         connectionDeviceRecordProvider.overrideWith(
           (_) async => _connectionRecord(),
         ),
-        connectionTokenMinterProvider.overrideWith((_) async => null),
+        connectionTokenMinterProvider.overrideWith(
+          (_) async => TestLicenseTokenMinter(),
+        ),
         peerRuntimeProvider.overrideWith((ref) async {
           final runtime = TestPeerRuntime();
           ref.onDispose(runtime.dispose);

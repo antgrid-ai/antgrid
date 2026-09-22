@@ -89,7 +89,7 @@ export class DartAppClient {
       cwd: DART_CLIENT_DIR,
       stdin: "pipe",
       stdout: "pipe",
-      stderr: "ignore",
+      stderr: "inherit",
     });
 
     const procStdin = proc.stdin as import("bun").FileSink;
@@ -112,17 +112,21 @@ export class DartAppClient {
       const timer = setTimeout(() => {
         const i = earlyWaiters.findIndex((w) => w.timer === timer);
         if (i !== -1) earlyWaiters.splice(i, 1);
-        reject(new Error("Timed out waiting for Dart client initialized event (15s)"));
-      }, 15_000);
+        reject(new Error("Timed out waiting for Dart client initialized event (30s)"));
+      }, 30_000);
 
       earlyWaiters.push({
-        match: (e) => e.event === "initialized",
+        match: (e) => e.event === "initialized" || e.event === "error",
         resolve,
         reject,
         timer,
       });
     });
 
+    if (initEvent.event === "error") {
+      proc.kill();
+      throw new Error(`Dart client init failed: ${String(initEvent.message)}`);
+    }
     const client = new DartAppClient(
       proc,
       procStdin,
@@ -248,14 +252,32 @@ export class DartAppClient {
     );
   }
 
-  async connect(relayUrl: string, licenseToken: string, machineDeviceId?: string): Promise<void> {
-    // Mandatory in v3: the app hello carries the account's own license token.
-    // Omitting it makes the Dart CLI reject the command outright rather than
-    // dial token-free, so this stays required here.
-    this.sendCommand({ action: "connect", relayUrl, licenseToken, machineDeviceId });
-    await this.waitForState("authenticated");
+  async connect(
+    relayUrl: string,
+    licenseToken: string,
+    machineDeviceId: string,
+    native: {
+      licenseApiUrl: string;
+      accountId: string;
+      enrollmentId: string;
+      clientSecret: string;
+      addresses: string[];
+    },
+  ): Promise<void> {
+    const connected = this.waitForEvent((e) => e.event === "native-connected", 30_000);
+    this.sendCommand({
+      action: "connect",
+      relayUrl,
+      licenseToken,
+      machineDeviceId,
+      licenseApiUrl: native.licenseApiUrl,
+      accountId: native.accountId,
+      enrollmentId: native.enrollmentId,
+      clientSecret: native.clientSecret,
+      nativeAddresses: native.addresses,
+    });
+    await connected;
   }
-
   /**
    * Drive the pull-model E2E handshake to `established`. The eval-client
    * (phone) signs its client-hello and verifies the agent's signed agent-hello

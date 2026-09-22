@@ -26,9 +26,8 @@ import '../project/checkout_readiness.dart';
 /// exists to distinguish from socket auth.
 String _rungLabel(ConnRung rung) => switch (rung) {
   ConnRung.wanted => 'Locating agent',
-  ConnRung.coords => 'Authenticating',
-  ConnRung.socket => 'Waiting for agent',
-  ConnRung.routable => 'Establishing session',
+  ConnRung.coords => 'Connecting to peer',
+  ConnRung.payload => 'Establishing session',
   // No rung above `established`: the supervisor emits Connected once it is
   // satisfied, so this arm is unreachable and must not claim a specific step.
   ConnRung.established => 'Connecting',
@@ -39,9 +38,7 @@ String _blockReasonLabel(BlockReason reason) => switch (reason) {
   // account that never subscribed hits too — the label must not presume a
   // lapsed subscription.
   BlockReason.licenseExpired => 'Plan or sign-in needed',
-  BlockReason.agentOffline => 'Agent offline',
   BlockReason.sessionTakenOver => 'Taken over',
-  BlockReason.superseded => 'Superseded',
   BlockReason.deviceRevoked => 'Device revoked',
   BlockReason.handshakeFailing => 'Handshake failing',
   BlockReason.peerRejected => 'Connection rejected',

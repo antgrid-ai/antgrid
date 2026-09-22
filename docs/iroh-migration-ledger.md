@@ -225,8 +225,7 @@ failures return to ConnectionSupervisor for another Iroh attempt. Late/cancelled
 dials still dispose their links. Iroh owns direct versus relayed connectivity.
 The bridge always starts its native endpoint, rejects central binary payloads,
 and never writes application frames to the central socket. JSON control remains.
-The shared legacy RelayService/RelayClient adapters remain for protocol fixtures;
-production remote composition no longer selects them as payload carriers.
+The shared Dart RelayService is control-only and the bridge's legacy RelayClient has been removed. Protocol fixtures use explicit in-memory peer links; neither production nor evaluations can select WebSocket payload carriage.
 
 All Aspire launchers now provision the existing native relay and gateway, as
 explicitly approved. The retired ANTGRID_PEER_TRANSPORT setting is ignored.

@@ -29,18 +29,18 @@ This file provides guidance to Coding Agents (like Claude, Codex, etc) when work
 
 ## Project Overview
 
-Antgrid is a modern agent-first IDE, focused as coding agent (Claude Code, Codex, etc.) command centre with remote control. Remote control is fully E2E-encrypted platform for monitoring and controlling AI coding agents from mobile/desktop. All agent↔app traffic is end-to-end encrypted (X25519 ECDH + AES-256-GCM); the relay is zero-knowledge and only sees opaque blobs.
+Antgrid is a modern agent-first IDE, focused as coding agent (Claude Code, Codex, etc.) command centre with remote control. Remote control is a fully E2E-encrypted platform for monitoring and controlling AI coding agents from mobile/desktop. All agent↔app payload traffic uses native Iroh connections and is end-to-end encrypted (X25519 ECDH + AES-256-GCM). The central WebSocket is control-only and never accepts application payloads.
 
 The app should feel agent command centre, not a web dashboard. It prioritizes information density, fast scanning, and keyboard/gesture efficiency. The agent's terminal output is the primary view; files, git, and preview are supporting context.
 
 | Component | Path | Stack | Role |
 |---|---|---|---|
 | **Bridge** | `bridge/` | TypeScript/Bun | Runs on dev machine: terminals (PTY), file watching, port scanning, HTTP tunneling. Entry: `src/index.ts`. |
-| **Relay** | `relay/` | TypeScript/Bun | Zero-knowledge WebSocket router. Never reads payloads. Entry: `src/index.ts`. |
+| **Relay** | `relay/` | TypeScript/Bun | Central WebSocket control plane for authentication, presence, policy, heartbeat and encrypted push delivery. Rejects application payloads. Entry: `src/index.ts`. |
 | **App** | `app/` | Flutter/Dart + Riverpod | Mobile/desktop UI: terminal viewer, file explorer, browser preview. |
 | **Web** | `web/` | TS/Bun + Hono + Postgres | Licensing, subscriptions, OAuth device-flow, Ed25519 JWT minting, Better-Auth sign-in. Entry: `src/index.ts`. |
 
-Shared packages in `packages/`: **`antgrid-agents`** (ELv2 TypeScript agent contracts, built-in adapters, runtime and integration assets; bridge consumes its public exports), **`antgrid_relay_client`** (pure Dart relay/crypto client and `PeerLink`, no Flutter), **`antgrid_peer_transport`** (ELv2 native transport and authorization leases, shared by app/CLI; keep it outside the Apache boundary), **`antgrid_eval_client`** (E2E eval fixtures), **`antgrid-wire`** (TS: route-frame codec + relay control-envelope Zod schemas, shared by bridge/relay/web/evals; source of truth for `FRAME_VERSION`, and the Dart client mirrors it **by hand**). Full breakdown, the message flow and the `antgrid.yaml` schema: `docs/architecture.md`.
+Shared packages in `packages/`: **`antgrid-agents`** (ELv2 TypeScript agent contracts, built-in adapters, runtime and integration assets; bridge consumes its public exports), **`antgrid_relay_client`** (pure Dart central-control client plus E2E/session protocol over an injected native `PeerLink`, no Flutter), **`antgrid_peer_transport`** (ELv2 native transport and authorization leases, shared by app/CLI; keep it outside the Apache boundary), **`antgrid_eval_client`** (E2E eval fixtures), **`antgrid-wire`** (TS: route-frame codec + relay control-envelope Zod schemas, shared by bridge/relay/web/evals; source of truth for `FRAME_VERSION`, and the Dart client mirrors it **by hand**). Full breakdown, the message flow and the `antgrid.yaml` schema: `docs/architecture.md`.
 
 ## Gotchas (read before editing)
 
@@ -119,7 +119,7 @@ analyzer is per-session and retained, where `flutter analyze` is transient.
 - **NEVER make encryption optional.** All agent↔app messages are encrypted after handshake; the relay never holds decryption keys.
 - **The repo is dual-licensed and the boundary is one-way.** `packages/antgrid-wire` and `packages/antgrid_relay_client` are Apache-2.0 and carry their own `LICENSE`; everything else Antgrid owns is ELv2 (`LICENSING.md` is the map). Apache code may be used inside an ELv2 component — **never move a file the other way**. Hoisting a shared helper out of `bridge/`, `relay/`, `web/` or `app/` into either package relicenses it permissively, and once published that cannot be undone. It compiles, CI stays green, and nothing warns you.
 - **Platform-aware code** — port scanning, shell detection, clipboard all branch per OS (Linux/macOS/Windows). Keep all three branches working.
-- **Eval harness** — E2E tests use `setupTestEnv()` (starts in-process relay with a fake license gate, spawns a real agent, connects `RelayClient` as an account-trusted app — no pairing frame, no QR); `createTestProject()` makes temp projects with antgrid.yaml + sample files. Project verbs run on the firstProject STREAM (`openProjectStream`/`sendOnStream`, helpers in `evals/support/`), not the control plane, and state comes from `pullStateSnapshot()` — v3 dedups welcome-replayed adverts, so never await a live `agent:projects` push. The v3 merge-gate suites live at `evals/tests/gate-*.test.ts`; `test:evals` runs `scenarios/` + `tests/`.
+- **Eval harness** — E2E tests use `setupTestEnv()`: it starts an in-process control relay with a fake license gate, spawns a real bridge with an explicit loopback Iroh endpoint, enrolls an account-trusted app endpoint, and establishes native payload + E2E (no pairing frame or WebSocket payload fallback). `createTestProject()` makes temporary projects with antgrid.yaml and sample files. Project verbs run on the host-owned project stream (`openProjectStream`/`sendOnStream`, helpers in `evals/support/`), and state comes from `pullStateSnapshot()`; never race a live `agent:projects` push. Central authentication tests may use the WebSocket alone. The merge-gate suites live at `evals/tests/gate-*.test.ts`; `test:evals` runs `scenarios/` + `tests/`.
 
 ## Design Rules (app UI)
 

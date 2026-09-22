@@ -7,7 +7,6 @@ import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 class FakeAgentTransport implements AgentTransport {
   final _msgCtrl = StreamController<InboundMessage>.broadcast();
   final _stateCtrl = StreamController<TransportState>.broadcast();
-  final _dropCtrl = StreamController<void>.broadcast();
   final List<Map<String, dynamic>> sent = [];
 
   /// Recorded RPCs issued via [request], in order. [timeout] is recorded too:
@@ -45,12 +44,6 @@ class FakeAgentTransport implements AgentTransport {
 
   @override
   Stream<TransportState> get stateChanges => _stateCtrl.stream;
-
-  @override
-  Stream<void> get droppedFrames => _dropCtrl.stream;
-
-  /// Test control: simulate the relay reporting `MESSAGE_RATE_LIMITED`.
-  void emitDroppedFrame() => _dropCtrl.add(null);
 
   @override
   TransportState get currentState => _state;
@@ -191,9 +184,7 @@ class FakeAgentTransport implements AgentTransport {
         onError: (Object error, StackTrace stack) {
           if (completer.isCompleted) return;
           completer.completeError(
-            error is RpcException
-                ? error
-                : RpcException('E_HANDLER', '$error'),
+            error is RpcException ? error : RpcException('E_HANDLER', '$error'),
             stack,
           );
         },
@@ -225,7 +216,6 @@ class FakeAgentTransport implements AgentTransport {
     }
     await _msgCtrl.close();
     await _stateCtrl.close();
-    await _dropCtrl.close();
   }
 
   /// Push a raw JSON map onto the inbound stream on the given channel.

@@ -18,6 +18,7 @@ import '../models/session_target.dart';
 import '../navigation/nav_controller.dart';
 import '../services/account_agents_api.dart';
 import '../services/app_settings_service.dart';
+import '../services/devices_api.dart';
 import '../services/keychain_device_store.dart';
 import '../services/license_token_minter.dart';
 import '../storage/recent_agents_store.dart';
@@ -289,21 +290,14 @@ Future<AgentTransport?> _buildRelayTransportFor(
   final conn = mgr.connectionFor(base);
 
   final epoch = await ref.read(relayEpochProvider.future);
-  // Resolved once because it holds CREDENTIALS, not a token — every dial still
-  // mints. Failing to resolve one is deliberately not fatal: the dial then
-  // presents an empty token and the relay's license verdict is what tells the
-  // user to sign in, which is the same feedback the pre-supervisor flow gave.
-  LicenseTokenMinter? minter;
-  try {
-    minter = await ref.read(connectionTokenMinterProvider.future);
-  } catch (e) {
-    AbLog.warn(
-      'AgentTransport',
-      'no license-token minter',
-      fields: {'machine': base, 'error': '$e'},
+  // Enrollment and its credentials are required before a remote connection is constructed.
+  final tokenMinter = await ref.read(connectionTokenMinterProvider.future);
+  if (tokenMinter == null) {
+    throw ProvisioningException(
+      'AUTH',
+      'Device credentials are required for remote connections',
     );
   }
-  final tokenMinter = minter;
   // Freshness-first, same polarity as the pubkey: the inventory-resolved
   // endpoint wins over the one pinned on the cached machine row, which is
   // exactly the value that goes stale when a host moves relay.
@@ -318,7 +312,7 @@ Future<AgentTransport?> _buildRelayTransportFor(
   final peerRuntime = await ref.read(peerRuntimeProvider.future);
   if (!ref.mounted) throw StateError('Transport provider disposed');
   conn.ensureStarted(
-    mechanisms: RelayMechanisms(
+    mechanisms: PeerConnectionMechanisms(
       relay: conn.relay,
       peerRuntime: peerRuntime,
       crypto: crypto,
@@ -352,7 +346,13 @@ Future<AgentTransport?> _buildRelayTransportFor(
         final live = await minterResolver.resolve(tokenMinter);
         // Fresh per attempt, never a cached token: one minted before a long
         // backoff is already expired by the time its dial runs.
-        return live == null ? '' : live.mint();
+        if (live == null) {
+          throw ProvisioningException(
+            'AUTH',
+            'Device credentials are required for remote connections',
+          );
+        }
+        return live.mint();
       },
     ),
   );

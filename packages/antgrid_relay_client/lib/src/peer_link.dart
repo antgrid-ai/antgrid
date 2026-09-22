@@ -6,24 +6,17 @@ import 'models/relay_message.dart';
 
 enum PeerLinkState { connecting, ready, closed }
 
-enum PeerPath { unknown, websocket, direct, relay }
+enum PeerPath { unknown, direct, relay }
 
 enum PeerSendOutcome { accepted, closed, tooLarge, backpressured, failed }
 
 typedef PeerLinkDiagnostic = void Function(Map<String, Object?> event);
 
 class PeerLinkFailure {
-  const PeerLinkFailure({
-    required this.code,
-    required this.retryable,
-    this.channel,
-    this.bytes,
-  });
+  const PeerLinkFailure({required this.code, required this.retryable});
 
   final String code;
   final bool retryable;
-  final String? channel;
-  final int? bytes;
 }
 
 /// Payload transport only. Central inventory/presence belongs to its own client.

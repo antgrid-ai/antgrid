@@ -30,28 +30,12 @@ export const HelloMessage = z.object({
   sig: z.string().min(1).max(256), // base64 Ed25519 over buildHelloSigBody
 });
 
-export const StreamOpenMessage = z.object({
-  type: z.literal("stream-open"),
-  streamId: z.string().min(1).max(64),
-});
-
-export const StreamCloseMessage = z.object({
-  type: z.literal("stream-close"),
-  streamId: z.string().min(1).max(64),
-});
-
 export const RouteHeader = z.object({
   type: z.literal("message"),
   to: DEVICE_ID,
   channel: z.enum(["control", "preview"]),
 });
 
-export const RouteHeaderOutbound = z.object({
-  type: z.literal("message"),
-  from: z.string().min(1).max(128),
-  channel: z.enum(["control", "preview"]),
-  ts: z.number().int(),
-});
 
 // App-layer liveness probe: protocol-level WS pongs are unobservable from
 // browser-style client APIs, so clients probe here (see bridge watchdog).
@@ -61,8 +45,6 @@ export const PingMessage = z.object({
 
 export const ClientMessage = z.discriminatedUnion("type", [
   HelloMessage,
-  StreamOpenMessage,
-  StreamCloseMessage,
   PushDeliverMessage,
   PingMessage,
 ]);
@@ -76,16 +58,6 @@ export const WelcomeMessage = z.object({
   serverTime: z.string().datetime(),
 });
 
-export const StreamOpenedMessage = z.object({
-  type: z.literal("stream-opened"),
-  streamId: z.string(),
-});
-
-export const StreamClosedMessage = z.object({
-  type: z.literal("stream-closed"),
-  streamId: z.string(),
-});
-
 export const ErrorCode = z.enum([
   "AUTH_FAILED",
   "MAX_CONNECTIONS",
@@ -93,7 +65,6 @@ export const ErrorCode = z.enum([
   "INVALID_MESSAGE",
   "NOT_AUTHENTICATED",
   "WRONG_DEVICE_TYPE",
-  "ROUTE_FAILED",
   "MESSAGE_RATE_LIMITED",
   "LICENSE_INVALID",
   "LICENSE_EXPIRED",
@@ -102,22 +73,10 @@ export const ErrorCode = z.enum([
   // License verification infrastructure (JWKS) unreachable — the client's
   // credentials may be fine; retryable, unlike the LICENSE_* verdicts above.
   "LICENSE_UNAVAILABLE",
-  // RETIRED: the relay no longer meters open streams and never emits this.
-  // Reserved (not removed) because bridge and app still decode it from relays
-  // predating the worker-limit change, and because reusing the name for a new
-  // meaning would silently mis-handle those older relays' rejections.
-  "SESSION_LIMIT_EXCEEDED",
-  // Per-CONNECTION structural ceiling on `openStreams`, deliberately not a
-  // revival of the retired quota above: streams are not a metered axis, but the
-  // set still may not grow without limit. Sized so no legitimate client reaches
-  // it, so treat it as a bug signal rather than something to back off and retry
-  // — hence retryable: false.
-  "STREAM_LIMIT_EXCEEDED",
   "UNKNOWN_PHONE",
   "NONCE_MISMATCH",
   "APPROVAL_EXPIRED",
   "SUPERSEDED", // epoch arbitration lost to a newer connection; retryable: false
-  "PEER_OFFLINE", // routed frame, peer not connected; retryable: true
   "PROTOCOL_VIOLATION", // malformed/unexpected frame incl. non-hello first frame; retryable: false
 ]);
 
@@ -129,14 +88,7 @@ export const ErrorMessage = z.object({
   // client may retry the same action unchanged. Terminal-vs-retryable
   // classification lives HERE, not in per-client code lists.
   retryable: z.boolean(),
-  ref: z.string().optional(), // echoes the rejected streamId
   serverTime: z.string().datetime().optional(), // clock-skew AUTH_FAILED only
-  // Routed-frame drops only (PEER_OFFLINE, MESSAGE_RATE_LIMITED, ROUTE_FAILED):
-  // the discarded frame's channel and payload length. A sender charges its
-  // flow-control window at write time and can only un-charge what it is told
-  // about; without these a relay drop shrinks that window for the session.
-  channel: z.enum(["control", "preview"]).optional(),
-  bytes: z.number().int().nonnegative().optional(),
 });
 
 export const PeerOfflineMessage = z.object({
@@ -162,8 +114,6 @@ export const PeerPolicyChangedMessage = z.object({
 // validate inbound relay-control messages before dispatching.
 export const ServerMessage = z.discriminatedUnion("type", [
   WelcomeMessage,
-  StreamOpenedMessage,
-  StreamClosedMessage,
   ErrorMessage,
   PeerOnlineMessage,
   PeerOfflineMessage,
@@ -190,15 +140,10 @@ export const CONTROL_STREAM_ID = "0";
 // --- Type exports ---
 
 export type HelloMessage = z.infer<typeof HelloMessage>;
-export type StreamOpenMessage = z.infer<typeof StreamOpenMessage>;
-export type StreamCloseMessage = z.infer<typeof StreamCloseMessage>;
 export type PingMessage = z.infer<typeof PingMessage>;
 export type RouteHeader = z.infer<typeof RouteHeader>;
-export type RouteHeaderOutbound = z.infer<typeof RouteHeaderOutbound>;
 export type ClientMessage = z.infer<typeof ClientMessage>;
 export type WelcomeMessage = z.infer<typeof WelcomeMessage>;
-export type StreamOpenedMessage = z.infer<typeof StreamOpenedMessage>;
-export type StreamClosedMessage = z.infer<typeof StreamClosedMessage>;
 export type ErrorMessage = z.infer<typeof ErrorMessage>;
 export type ErrorCode = z.infer<typeof ErrorCode>;
 export type PeerOfflineMessage = z.infer<typeof PeerOfflineMessage>;

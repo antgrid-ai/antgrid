@@ -116,8 +116,6 @@ export interface RelayHandle {
   /** Live relay connection count (past hello). X3's drill-in test asserts zero
    *  additional connections; the multi-stream test asserts one per side. */
   connectionCount(): number;
-  /** Open project streams across all eval agent connections. */
-  streamCount(): number;
   stop(): void;
 }
 
@@ -144,7 +142,7 @@ const EXPIRED_APP_TOKEN = "eval-license-token-EXPIRED";
  *  relay config instead of `startRelay`. */
 export const RELAY_INTERNAL_SECRET = "x".repeat(16);
 
-/** Fixed account id every eval device shares — `streamCount()` and routing
+/** Fixed account id every eval device shares — routing
  *  authorization both key off it. */
 const EVAL_USER_ID = "eval-user";
 
@@ -369,10 +367,6 @@ export async function startRelay(opts: {
    *  JSON-flood test lowers it to force MESSAGE_RATE_LIMITED). */
   jsonRateLimitPerSec?: number;
   jsonRateLimitBurst?: number;
-  /** Per-(pair, channel) binary/message frame rate (default generous). */
-  rateLimitMsgPerSec?: number;
-  /** Burst allowance over [rateLimitMsgPerSec] (default generous). */
-  rateLimitMsgBurst?: number;
 }): Promise<RelayHandle> {
   // Static specifier, not `import(resolve(ROOT, ...))`: a computed specifier
   // types `startServer` as `any`, which silently stops type-checking BOTH the
@@ -383,12 +377,9 @@ export async function startRelay(opts: {
     port: opts.port,
     maxConnections: 100,
     rateLimitConnPerIp: 10,
-    rateLimitMsgPerSec: opts.rateLimitMsgPerSec ?? 100,
-    rateLimitMsgBurst: opts.rateLimitMsgBurst ?? 200,
     pushRateLimitPerSec: 100,
     jsonRateLimitPerSec: opts.jsonRateLimitPerSec ?? 100,
     jsonRateLimitBurst: opts.jsonRateLimitBurst ?? 200,
-    maxStreamsPerConnection: 1024,
     clockSkewMs: opts.clockSkewMs ?? 120_000,
     replayTtlMs: opts.replayTtlMs ?? 300_000,
     pingIntervalMs: 30_000,
@@ -427,11 +418,6 @@ export async function startRelay(opts: {
     },
     connectionCount() {
       return server.connections.getConnectionCount();
-    },
-    streamCount() {
-      // All eval devices share one account id, so counting that user's open
-      // agent streams is the whole open-stream count.
-      return server.connections.countOpenStreamsForUser(EVAL_USER_ID);
     },
     stop() {
       server.stop();
@@ -487,7 +473,7 @@ export async function spawnAgent(opts: {
         cwd: opts.projectDir,
         stdin: "pipe",
         stdout: "ignore",
-        stderr: "ignore",
+        stderr: "inherit",
         env: {
           ...process.env,
           LOG_LEVEL: "error",
@@ -647,7 +633,13 @@ export interface TestEnv {
    *  are stable across a restart, so existing references stay valid); a
    *  caller that needs the fresh process handle's other fields should not
    *  rely on this method for that. */
-  restartAgent(): Promise<void>;
+  /** Open another scenario client through its own enrolled native endpoint. */
+  connectNativeApp(opts: {
+    identity: PhoneIdentity;
+    accountDeviceId: string;
+    helloDeviceId?: string;
+    name?: string;
+  }): Promise<RelayClient>;  restartAgent(): Promise<void>;
   teardown(): Promise<void>;
 }
 
@@ -693,6 +685,15 @@ export async function setupTestEnv(opts: {
     relayInternalUrl: relay.httpUrl,
   });
   const auth = generateEvalAuth();
+  const appAuth: EvalAuth = {
+    ...generateEvalAuth(),
+    userId: auth.userId,
+    deviceUuid: appIdentity.deviceId,
+    ed25519Pub: appIdentity.publicKeyBase64,
+    ed25519Priv: appIdentity.privateKeySeed.toString("base64"),
+  };
+  licenseApi.provision(appAuth);
+  const nativePort = allocatePort();
 
   const project = createTestProject(opts.fixtureName, {
     "__RELAY_URL__": relay.url.replace(/\/ws$/, ""),
@@ -706,7 +707,7 @@ export async function setupTestEnv(opts: {
     abDir,
     projectDir: project.dir,
     auth,
-    env: { ANTGRID_EVAL_TEST: "1", ...opts.env },
+    env: { ANTGRID_EVAL_TEST: "1", ANTGRID_EVAL_IROH_BIND_ADDR: `127.0.0.1:${nativePort}`, ...opts.env },
   });
 
   const projectId = computeProjectId(project.dir);
@@ -725,15 +726,24 @@ export async function setupTestEnv(opts: {
     deviceId: appIdentity.deviceId,
   });
   app.setPeerId(deviceUuid);
+  await app.connectNative({
+    licenseApiUrl: licenseApi.url,
+    accountId: appAuth.userId,
+    enrollmentId: appAuth.clientId,
+    clientSecret: appAuth.clientSecret,
+    endpointSecret: appAuth.endpointSecret,
+    machineDeviceId: deviceUuid,
+    addresses: [`127.0.0.1:${nativePort}`],
+  });
   await handshakeWithoutPairing(app, deviceUuid, auth.ed25519Pub);
 
   // Welcome-replay: pull the cached snapshot (agent:status/tree:full/git:status)
   // like the production app, instead of racing the agent's de-duped live burst.
   //
   // `state.snapshot` recomputes `agent:projects` fresh (host-server.ts's
-  // `dispatchControlPlaneInbound`), but firstProject's auto-start (making its
-  // core a registered relay stream, which is what makes it "dialable" and
-  // gives it a streamId) is asynchronous and can still be in flight for a beat
+  // `dispatchControlPlaneInbound`), but firstProject's auto-start (creating its
+  // host-owned native stream and assigning its streamId) is asynchronous and
+  // can still be in flight for a beat
   // after the E2E handshake establishes. The old pair-request round trip (and
   // its own AGENT_OFFLINE retries) incidentally absorbed this; the pair-free
   // path is fast enough to win the race and land before the project registers
@@ -766,7 +776,7 @@ export async function setupTestEnv(opts: {
     throw new Error(
       `no streamId advertised for project ${projectId} after ${STREAM_ADVERT_ATTEMPTS} attempts ` +
         `(~${STREAM_ADVERT_ATTEMPTS * (STREAM_ADVERT_WAIT_MS + STREAM_ADVERT_GAP_MS)}ms) — the agent's ` +
-        `project stream never registered as dialable`,
+        `native project stream never became ready`,
     );
   }
   app.drainQueued("agent:projects");
@@ -786,7 +796,34 @@ export async function setupTestEnv(opts: {
     // mutates `agent.process` in place instead of rebinding the closure-local
     // `agent` variable, so the `agent` this env object already captured stays
     // live instead of going stale after a restart.
-    restartAgent() {
+    async connectNativeApp(options) {
+      const credential: EvalAuth = {
+        ...generateEvalAuth(),
+        userId: auth.userId,
+        deviceUuid: options.accountDeviceId,
+        ed25519Pub: options.identity.publicKeyBase64,
+        ed25519Priv: options.identity.privateKeySeed.toString("base64"),
+      };
+      licenseApi.provision(credential);
+      const client = await RelayClient.connectAndAuth(relay.url, {
+        deviceType: "app",
+        name: options.name ?? "eval-native-app",
+        identity: options.identity,
+        deviceId: options.helloDeviceId ?? options.accountDeviceId,
+        transcriptDeviceId: options.accountDeviceId,
+      });
+      client.setPeerId(deviceUuid);
+      await client.connectNative({
+        licenseApiUrl: licenseApi.url,
+        accountId: credential.userId,
+        enrollmentId: credential.clientId,
+        clientSecret: credential.clientSecret,
+        endpointSecret: credential.endpointSecret,
+        machineDeviceId: deviceUuid,
+        addresses: [`127.0.0.1:${nativePort}`],
+      });
+      return client;
+    },    restartAgent() {
       return agent.restart();
     },
     async teardown() {
@@ -827,6 +864,14 @@ export async function setupDartTestEnv(opts: {
   const licenseApi = startFakeLicenseApi({
     accountDevices: [{ deviceId: app.deviceId, ed25519Pub: app.ed25519PublicKey }],
   });
+  const appAuth: EvalAuth = {
+    ...generateEvalAuth(),
+    userId: auth.userId,
+    deviceUuid: app.deviceId,
+    ed25519Pub: app.ed25519PublicKey,
+  };
+  licenseApi.provision(appAuth);
+  const nativePort = allocatePort();
 
   const project = createTestProject(opts.fixtureName, {
     "__RELAY_URL__": `ws://localhost:${relayPort}`,
@@ -839,7 +884,7 @@ export async function setupDartTestEnv(opts: {
     abDir,
     projectDir: project.dir,
     auth,
-    env: { ANTGRID_EVAL_TEST: "1" },
+    env: { ANTGRID_EVAL_TEST: "1", ANTGRID_EVAL_IROH_BIND_ADDR: `127.0.0.1:${nativePort}` },
   });
 
   const projectId = computeProjectId(project.dir);
@@ -851,7 +896,13 @@ export async function setupDartTestEnv(opts: {
 
   // v3: app hello now carries a mandatory license token; the Dart
   // eval CLI forwards it to RelayService.connect.
-  await app.connect(relay.url, TEST_LICENSE_TOKEN, deviceUuid);
+  await app.connect(relay.url, TEST_LICENSE_TOKEN, deviceUuid, {
+    licenseApiUrl: licenseApi.url,
+    accountId: appAuth.userId,
+    enrollmentId: appAuth.clientId,
+    clientSecret: appAuth.clientSecret,
+    addresses: [`127.0.0.1:${nativePort}`],
+  });
   // Pair-free: the phone addresses the agent by the coordinates it already
   // holds (bare machine deviceUuid + pinned Ed25519 pub), because nothing hands
   // it a peer id any more.

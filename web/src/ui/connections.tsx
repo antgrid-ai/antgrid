@@ -40,7 +40,6 @@ export function ConnectionsPage(props: {
               <tr class="text-muted2">
                 <th>Device ID</th>
                 <th>Type</th>
-                <th>Streams</th>
                 <th>Connected</th>
                 <th>Last seen</th>
               </tr>
@@ -50,12 +49,6 @@ export function ConnectionsPage(props: {
                 <tr>
                   <td class="break-all">{c.deviceId}</td>
                   <td>{c.deviceType}</td>
-                  {/* Apps cannot hold streams at all (the relay answers an app's
-                      stream-open with WRONG_DEVICE_TYPE), so a zero there is
-                      "not applicable", not "dropped". */}
-                  <td class={c.openStreamCount === 0 ? "text-faint" : "text-success"}>
-                    {c.deviceType === "app" ? "—" : c.openStreamCount}
-                  </td>
                   <td class="text-muted">{fmtAge(c.connectedAt, now)} ago</td>
                   <td class="text-muted">{fmtAge(c.lastSeen, now)} ago</td>
                 </tr>

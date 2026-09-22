@@ -29,17 +29,16 @@ class ConnectionBlockedException implements Exception {
 /// the whole ladder.
 const Duration _kEstablishTimeout = Duration(seconds: 20);
 
-/// The production [ConnMechanisms] for ONE machine: real relay socket, real
-/// [MachineSession], real token minting.
+/// Native payload and independent central-control mechanisms for one machine.
+/// A required, enrollment-scoped [PeerConnector] establishes the payload;
+/// [MachineSession] owns E2E and host project streams, while fresh token minting
+/// authenticates the separate central-control connection.
 ///
 /// Every member is a single attempt with no retry of its own — the supervisor
 /// is the only thing that decides when to try again.
-class RelayMechanisms
-    implements
-        ConnMechanisms,
-        CentralControlMechanisms,
-        PayloadConnectionMechanisms {
-  RelayMechanisms({
+class PeerConnectionMechanisms
+    implements PeerConnectionContract, CentralControlMechanisms {
+  PeerConnectionMechanisms({
     required RelayService relay,
     required CryptoService crypto,
     required String machineDeviceId,
@@ -50,7 +49,7 @@ class RelayMechanisms
     required Future<ConnCoords?> Function() resolveCoords,
     required Future<String> Function() mintToken,
     SessionHandshaker Function(String agentEd25519PubB64)? buildHandshaker,
-    this.peerRuntime,
+    required this.peerRuntime,
   }) : _buildHandshaker = buildHandshaker,
        _relay = relay,
        _crypto = crypto,
@@ -62,7 +61,7 @@ class RelayMechanisms
        _resolveCoords = resolveCoords,
        _mintToken = mintToken;
 
-  final PeerConnector? peerRuntime;
+  final PeerConnector peerRuntime;
   final _attempt = PeerConnectionAttempt();
   PeerLink? _payloadLink;
   PeerLink? _sessionLink;
@@ -74,28 +73,25 @@ class RelayMechanisms
   void Function()? onTerminalPeerError;
 
   void noteResume() {
-    final runtime = peerRuntime;
-    if (runtime != null) {
-      detached('PeerRuntime', 'resume authorization', () async {
-        await runtime.resume();
-      });
-    }
+    detached('PeerRuntime', 'resume authorization', () async {
+      await peerRuntime.resume();
+    });
   }
 
   Future<void>? _centralPending;
   String? _centralUrl;
   @override
   bool get centralControlNeedsReconnect =>
-      peerRuntime != null &&
-      (_relay.currentState.connectionState !=
-              RelayConnectionState.authenticated ||
-          _centralUrl != _lastCoords?.relayUrl);
+      _relay.currentState.connectionState !=
+          RelayConnectionState.authenticated ||
+      _centralUrl != _lastCoords?.relayUrl;
   @override
-  Future<void> reconnectCentral(ConnCoords coords, String token) {
+  Future<void> reconnectCentral(ConnCoords coords) async {
+    final token = await _mintFreshToken();
     final pending = _centralPending;
     if (pending != null) return pending;
     _centralUrl = coords.relayUrl;
-    return _centralPending = _relay
+    await (_centralPending = _relay
         .connect(
           coords.relayUrl,
           _identity,
@@ -103,7 +99,7 @@ class RelayMechanisms
           epoch: _epoch,
           machineDeviceId: _machineDeviceId,
         )
-        .whenComplete(() => _centralPending = null);
+        .whenComplete(() => _centralPending = null));
   }
 
   final RelayService _relay;
@@ -124,11 +120,11 @@ class RelayMechanisms
 
   MachineSession? _session;
 
-  /// Watches the socket for the one key retirement [MachineSession] publishes
+  /// Watches the native payload for the one key retirement [MachineSession] publishes
   /// no event for. Tied to [_session]'s lifetime, not the relay's: the relay
   /// outlives any single session, so a subscription left behind would go on
   /// retiring keys on behalf of a session that no longer exists.
-  StreamSubscription<PeerLinkState>? _socketDownSub;
+  StreamSubscription<PeerLinkState>? _payloadDownSub;
 
   /// The agent Ed25519 key [_session]'s handshaker was pinned against. The pin
   /// is fixed at construction, so this is what tells a redial whether the live
@@ -138,10 +134,10 @@ class RelayMechanisms
   /// The most recent answer the coords step gave — the agent identity the
   /// session has to be pinned against right now.
   ///
-  /// Kept because the ladder does not always pass through [dial] on its way to
+  /// Kept because the ladder does not always reconnect the payload on its way to
   /// a fresh pin: a host that re-provisions its Ed25519 identity without moving
-  /// relay leaves the socket authenticated, so the lowest broken rung after the
-  /// coords re-resolve is `established`, not `socket`.
+  /// a host can retain its payload path, so the lowest broken rung after the
+  /// coords re-resolve is `established`, not `payload`.
   ConnCoords? _lastCoords;
 
   /// Reports a relay-shaped error code that no rung failure can express, so the
@@ -150,7 +146,7 @@ class RelayMechanisms
   ///
   /// A step that throws is scored as an ordinary rung failure, and rung
   /// failures are only ever backed off. Without this, a verdict raised OUTSIDE
-  /// the socket (a token mint the account rejected) is retried on the 30s cap
+  /// the native ladder (a token mint the account rejected) is retried on the 30s cap
   /// forever and the caller waiting on the session sees only a timeout.
   void Function(String code)? onTerminalAuthError;
 
@@ -176,18 +172,18 @@ class RelayMechanisms
   /// RPCs can never complete.
   void Function()? onSessionReplaced;
 
-  /// The E2E session died under a still-live socket (a rekey the agent never
+  /// The E2E session died under a still-live native payload (a rekey the agent never
   /// confirmed). Wired by [RelayConnection] to the supervisor's
   /// `noteSessionDown`; unset until then.
   ///
-  /// Nothing else reports it: the relay socket stays authenticated, so no
+  /// Nothing else reports it: the native payload stays connected, so no
   /// state event fires, and without this the `established` rung would keep
   /// reading satisfied off a session that has already been torn down.
   void Function()? onSessionDown;
 
-  /// The machine's single E2E session, or null before the first dial / after a
-  /// [release]. Deliberately survives a redial: the project [StreamTransport]s
-  /// handed to services hang off it, and recreating it on every socket blip
+  /// The machine's single E2E session, or null before the first payload connection / after a
+  /// [release]. Deliberately survives a central reconnect: the project [StreamTransport]s
+  /// handed to services hang off it, and recreating it on every control-plane blip
   /// would orphan them. The one exception is coords carrying a different agent
   /// Ed25519 pin — see [_ensureSession].
   MachineSession? get session => _session;
@@ -199,34 +195,21 @@ class RelayMechanisms
     return coords;
   }
 
-  @override
-  Future<String> mintToken() async {
+  Future<String> _mintFreshToken() async {
     try {
       return await _mintToken();
     } on DeviceRevokedException {
-      // Same verdict the relay would return had the token reached it, raised
-      // one layer earlier — the mint endpoint rejected the credentials.
       onTerminalAuthError?.call('LICENSE_REVOKED');
       rethrow;
     }
   }
 
   @override
-  Future<void> connectPayload(ConnCoords coords) => dial(coords, '');
-
-  @override
-  Future<void> dial(ConnCoords coords, String token) async {
+  Future<void> connectPayload(ConnCoords coords) async {
     final generation = ++_dialGeneration;
     _lastCoords = coords;
     final runtime = peerRuntime;
     if (generation != _dialGeneration) throw ConnectionAttemptCancelled();
-    if (runtime == null) {
-      onTerminalPeerError?.call();
-      throw const PeerConnectionFailure(
-        "ENDPOINT_ENROLLMENT_REQUIRED",
-        terminal: true,
-      );
-    }
     if (!_runtimeRetained) {
       runtime.retain();
       _runtimeRetained = true;
@@ -234,7 +217,6 @@ class RelayMechanisms
     final prior = _payloadLink;
     _payloadLink = null;
     if (prior != null) await prior.close();
-    if (generation != _dialGeneration) throw ConnectionAttemptCancelled();
     if (generation != _dialGeneration) throw ConnectionAttemptCancelled();
     {
       try {
@@ -255,7 +237,7 @@ class RelayMechanisms
           throw ConnectionAttemptCancelled();
         }
         _peerFailureSub = link.failureStream.listen((failure) {
-          // Only the payload link died, so the relay socket's state stream
+          // Only the native payload died, so the central relay's state stream
           // reports nothing and the ladder has to be woken from here.
           if (!failure.retryable) {
             onTerminalPeerError?.call();
@@ -281,12 +263,7 @@ class RelayMechanisms
   }
 
   @override
-  bool get socketAuthenticated => _payloadLink?.isDispatchAllowed == true;
-
-  @override
-  bool get agentOnline => socketAuthenticated;
-
-  void notePresence(bool online) {}
+  bool get payloadConnected => _payloadLink?.isDispatchAllowed == true;
 
   @override
   Future<void> establishSession() async {
@@ -295,21 +272,21 @@ class RelayMechanisms
       throw StateError('establishSession before the coords step ran');
     }
     // Deliberately routed through [_ensureSession] rather than reading
-    // [_session]: this rung, not the socket rung, is where a re-provisioned
-    // host is met, because its socket never dropped. Reusing the session here
+    // [_session]: this rung, not the payload rung, is where a re-provisioned
+    // host is met, because its payload never dropped. Reusing the session here
     // would verify every agent-hello against the retired key and make the
     // user's Retry inert.
     final session = await _ensureSession(coords.agentEd25519PubB64);
     // A step runs under the supervisor's single-flight guard, so anything this
     // waits out is time the ladder cannot use to react. Failing the instant the
-    // socket dies is what lets a drop mid-handshake redial now instead of at
+    // payload dies is what lets a drop mid-handshake reconnect now instead of at
     // the end of the handshake driver's own attempt timeout.
     final dropped = Completer<void>();
-    final socketSub = payloadLink.payloadStateStream.listen((s) {
+    final payloadSub = payloadLink.payloadStateStream.listen((s) {
       if (s != PeerLinkState.closed) return;
       if (!dropped.isCompleted) {
         dropped.completeError(
-          StateError('socket dropped before the E2E handshake completed'),
+          StateError('payload dropped before the E2E handshake completed'),
         );
       }
     });
@@ -322,7 +299,7 @@ class RelayMechanisms
         dropped.future,
       ]).timeout(_kEstablishTimeout);
     } finally {
-      await socketSub.cancel();
+      await payloadSub.cancel();
       if (!dropped.isCompleted) dropped.complete();
     }
   }
@@ -341,14 +318,14 @@ class RelayMechanisms
     _sessionLink = null;
     if (payload != null) await payload.close();
     if (_runtimeRetained) {
-      peerRuntime?.release();
+      peerRuntime.release();
       _runtimeRetained = false;
     }
     final session = _session;
     _session = null;
     _sessionPin = null;
-    await _socketDownSub?.cancel();
-    _socketDownSub = null;
+    await _payloadDownSub?.cancel();
+    _payloadDownSub = null;
     _lastCoords = null;
     _centralUrl = null;
     if (session != null) {
@@ -381,8 +358,8 @@ class RelayMechanisms
       // was derived under.
       _session = null;
       _sessionPin = null;
-      await _socketDownSub?.cancel();
-      _socketDownSub = null;
+      await _payloadDownSub?.cancel();
+      _payloadDownSub = null;
       await existing.dispose();
       retireNativeE2eCipherKeys();
       if (generation != _dialGeneration) {
@@ -412,7 +389,7 @@ class RelayMechanisms
     );
     // A session retires its keys on four paths and is DISPOSED on only two of
     // them, so the dispose sites alone leave the involuntary majority — a
-    // dropped socket above all — holding key material in the native cipher.
+    // dropped payload above all — holding key material in the native cipher.
     // `MachineSession` zeroizes its own buffers on each of these; the cipher's
     // copy is reachable from here or nowhere.
     session.takeoverEvents.listen((_) {
@@ -425,9 +402,9 @@ class RelayMechanisms
     });
     // The common one, and the only one with no event of its own: the session
     // tears down on exactly this transition (its `_onState`), so watching the
-    // socket here is reading the same signal it does rather than guessing at a
+    // payload here is reading the same signal it does rather than guessing at a
     // proxy for it.
-    _socketDownSub = payloadLink.payloadStateStream.listen((s) {
+    _payloadDownSub = payloadLink.payloadStateStream.listen((s) {
       if (s == PeerLinkState.closed) {
         retireNativeE2eCipherKeys();
         onSessionDown?.call();

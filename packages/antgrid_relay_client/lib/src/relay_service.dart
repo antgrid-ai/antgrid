@@ -11,9 +11,6 @@ import 'models/device_identity.dart';
 import 'models/relay_license_error.dart';
 import 'models/relay_message.dart';
 import 'crypto_service.dart';
-import 'frame.dart';
-import 'frag.dart';
-import 'peer_link.dart';
 import 'relay_auth.dart';
 
 /// Why a single [RelayService.connect] attempt did not reach `welcome`.
@@ -58,28 +55,23 @@ typedef RelayLogger =
 /// instrumented path then costs one null check.
 typedef RelayNetTap = void Function(Map<String, Object?> event);
 
-/// One machine↔relay WebSocket for one phone identity. v3: authenticates with a
-/// single signed `hello` frame (proof-of-possession over `buildHelloSigBody`),
-/// the relay answers `welcome` (→ authenticated) or a typed `error`. There is
-/// no register/challenge/response round trip and no per-project socket — a
-/// single [MachineSession] multiplexes project streams over this one socket.
+/// One machine-to-relay control WebSocket for one phone identity.
+///
+/// v3 authenticates with a single signed `hello` frame; the relay answers
+/// `welcome` (authenticated) or a typed `error`. Payloads use a separate
+/// native payload link. This socket carries authentication, presence, policy,
+/// heartbeat, and push control messages only.
 ///
 /// ONE attempt per [connect], never a retry: redial timing, backoff and give-up
 /// belong to the app's connection supervisor, so there is exactly one component
 /// deciding when to try again.
-class RelayService implements PeerLink {
+class RelayService {
   final CryptoService _crypto;
   final RelayLogger? _logger;
   RelayNetTap? _netTap;
 
-  /// The capture hook, for the layers above this one ([MachineSession]) to
-  /// annotate frames they can name but not identify. Null when unarmed.
-  ///
-  /// Settable, and null is the load-bearing default: nothing may pay for a
-  /// capture nobody asked for, and every tap site is guarded on this being
-  /// non-null — including the id computation, which is the only per-frame cost.
-  /// A capture can be armed long after the socket opened (a remote request
-  /// arrives over the socket itself), so it cannot be fixed at construction.
+  /// Diagnostic hook for central control frames. Native payload links expose
+  /// their own hook through `PeerLink.netTap`.
   RelayNetTap? get netTap => _netTap;
   set netTap(RelayNetTap? tap) => _netTap = tap;
 
@@ -123,17 +115,18 @@ class RelayService implements PeerLink {
   int? _appliedSkewMs;
 
   final _stateController = StreamController<AppState>.broadcast();
-  final _messageController = StreamController<IncomingRouteMessage>.broadcast();
   final _errorController = StreamController<ErrorMessage>.broadcast();
-  final _policyGenerationController = StreamController<BigInt>.broadcast(sync: true);
-  Stream<BigInt> get policyGenerationStream => _policyGenerationController.stream;
+  final _policyGenerationController = StreamController<BigInt>.broadcast(
+    sync: true,
+  );
+  Stream<BigInt> get policyGenerationStream =>
+      _policyGenerationController.stream;
 
   final _peerPresenceController = StreamController<bool>.broadcast();
 
   AppState _currentState = const AppState();
 
   Stream<AppState> get stateStream => _stateController.stream;
-  Stream<IncomingRouteMessage> get messageStream => _messageController.stream;
 
   /// Every typed relay `error` frame. The `retryable`/`ref` fields
   /// are the failure-signalling contract the Dart client cannot get from WS
@@ -149,52 +142,6 @@ class RelayService implements PeerLink {
 
   AppState get currentState => _currentState;
 
-  @override
-  bool get isDispatchAllowed =>
-      currentState.connectionState == RelayConnectionState.authenticated;
-
-  @override
-  Stream<PeerLinkState> get payloadStateStream => stateStream.map((state) {
-    switch (state.connectionState) {
-      case RelayConnectionState.authenticated:
-        return PeerLinkState.ready;
-      case RelayConnectionState.disconnected:
-        return PeerLinkState.closed;
-      default:
-        return PeerLinkState.connecting;
-    }
-  }).distinct();
-
-  @override
-  Stream<PeerPath> get pathStream =>
-      payloadStateStream.map((_) => PeerPath.websocket).distinct();
-
-  @override
-  Stream<PeerLinkFailure> get failureStream => errorStream.map(
-    (error) => PeerLinkFailure(
-      code: error.code,
-      retryable: error.retryable,
-      channel: error.channel,
-      bytes: error.bytes,
-    ),
-  );
-
-  @override
-  Stream<void> get peerRestartStream {
-    var wasOffline = false;
-    return peerPresenceStream.transform(StreamTransformer<bool, void>.fromHandlers(
-      handleData: (online, sink) {
-        if (!online) {
-          wasOffline = true;
-        } else if (wasOffline) {
-          wasOffline = false;
-          sink.add(null);
-        }
-      },
-    ));
-  }
-
-  @override
   Future<void> close() async => disconnect();
 
   RelayService({
@@ -431,13 +378,7 @@ class RelayService implements PeerLink {
   }
 
   void _onMessage(dynamic data) {
-    if (data is String) {
-      _handleText(data);
-    } else if (data is Uint8List) {
-      _handleBinary(data);
-    } else if (data is List<int>) {
-      _handleBinary(Uint8List.fromList(data));
-    }
+    if (data is String) _handleText(data);
   }
 
   /// Test-only seam: feed a raw relay frame through the same path a socket
@@ -479,7 +420,6 @@ class RelayService implements PeerLink {
       'retryable',
       'ref',
       'peerId',
-      'streamId',
       'epoch',
       'ok',
       'reason',
@@ -521,10 +461,7 @@ class RelayService implements PeerLink {
         'bytes': utf8.encode(data).length,
         'reason': 'unknown-control',
       });
-      // Includes the type the relay used: a forward-compat message from a newer
-      // relay and a genuinely malformed one are indistinguishable without it,
-      // and this is the path an `error` (MESSAGE_RATE_LIMITED — the relay saying
-      // it threw our frame away) would vanish down.
+      // Preserve the unknown type in diagnostics so malformed and forward-compatible control frames can be distinguished.
       _log(
         RelayLogLevel.warn,
         'dropping unrecognised relay control message',
@@ -533,12 +470,7 @@ class RelayService implements PeerLink {
       return;
     }
 
-    // Relay CONTROL json, not a sealed frame — the agent's half records the
-    // same class, and without this one the app is blind to everything the relay
-    // says to it. `error` with MESSAGE_RATE_LIMITED is the relay telling this
-    // sender it threw a frame away, which is the exact question a capture is
-    // opened to answer, and it would otherwise show as an idle app beside an
-    // agent that saw the socket stall.
+    // Relay control JSON, not a native payload frame.
     tap?.call({
       'op': 'frame',
       'dir': 'rx',
@@ -671,104 +603,6 @@ class RelayService implements PeerLink {
     _clockOffset = offset;
   }
 
-  void _handleBinary(Uint8List data) {
-    final tap = _netTap;
-    ({Map<String, dynamic> header, Uint8List payload, FrameKind kind}) decoded;
-    try {
-      decoded = decodeRouteFrame(data);
-    } on FrameException catch (e) {
-      tap?.call({
-        'op': 'frame',
-        'dir': 'rx',
-        'kind': 'drop',
-        'bytes': data.length,
-        'reason': 'bad-frame',
-        'detail': {'why': e.reason.name},
-      });
-      // Returns BEFORE _markInboundHealthy, so a sustained failure here is bytes
-      // arriving while liveness is never marked — the heartbeat then reaps a
-      // socket that is still delivering. Tap-only, that was observable solely
-      // while a netwatch capture happened to be armed, which over a fault
-      // arriving a few times a day means never.
-      _log(
-        RelayLogLevel.warn,
-        'dropping undecodable inbound frame',
-        fields: {
-          'reason': 'bad-frame',
-          'why': e.reason.name,
-          'bytes': data.length,
-        },
-      );
-      return;
-    }
-    // Computed here and nowhere else: this is the last point at which the
-    // payload is still sealed, and the nonce that identifies it is readable.
-    // The plaintext type arrives four layers later, past a real await — so the
-    // layers name the same frame by this id rather than threading it.
-    final frameId = tap == null
-        ? null
-        : frameIdOf(decoded.payload, decoded.kind);
-    final channel = decoded.header['channel'];
-    final msg = IncomingRouteMessage.fromFrameHeader(
-      decoded.header,
-      decoded.payload,
-      decoded.kind,
-    );
-    if (msg == null) {
-      tap?.call({
-        'op': 'frame',
-        'dir': 'rx',
-        'kind': 'drop',
-        'channel': channel is String ? channel : null,
-        'bytes': decoded.payload.length,
-        'frameId': frameId,
-        'reason': 'bad-route-header',
-      });
-      // The other half of the same blind spot as the bad-frame return above.
-      _log(
-        RelayLogLevel.warn,
-        'dropping inbound frame with an unusable route header',
-        fields: {
-          'reason': 'bad-route-header',
-          'channel': channel is String ? channel : null,
-          'bytes': decoded.payload.length,
-        },
-      );
-      return;
-    }
-    tap?.call({
-      'op': 'frame',
-      'dir': 'rx',
-      'kind': decoded.kind == FrameKind.handshake ? 'handshake' : 'sealed',
-      'channel': msg.channel,
-      'bytes': decoded.payload.length,
-      'frameId': frameId,
-    });
-    _markInboundHealthy();
-    if (_messageController.isClosed) {
-      tap?.call({
-        'op': 'frame',
-        'dir': 'rx',
-        'kind': 'drop',
-        'channel': msg.channel,
-        'bytes': decoded.payload.length,
-        'frameId': frameId,
-        'reason': 'message-stream-closed',
-      });
-      // debug, not warn: this is the routine teardown race — frames still in
-      // flight when the controller closes. It earns a line only because a
-      // SUSTAINED run of it means inbound is being discarded by a service
-      // nobody noticed had shut down.
-      _log(
-        RelayLogLevel.debug,
-        'dropping inbound frame after the message stream closed',
-        fields: {'channel': msg.channel, 'bytes': decoded.payload.length},
-      );
-      return;
-    }
-    _messageController.add(msg);
-  }
-
   void _onDisconnected([Object? error]) {
     if (error != null) {
       developer.log(
@@ -838,104 +672,6 @@ class RelayService implements PeerLink {
     if (c != null && !c.isCompleted) c.completeError(e);
   }
 
-  /// Send a routed frame to the machine peer. [kind] defaults to `sealed`
-  /// (encrypted app traffic); the E2E handshake sends its plaintext
-  /// client-hello as `handshake`.
-  @override
-  Future<PeerSendOutcome> sendFrame(
-    String to,
-    String channel,
-    Uint8List payload, {
-    FrameKind kind = FrameKind.sealed,
-  }) async => _sendFrame(to, channel, payload, kind: kind);
-
-  void sendMessage(
-    String to,
-    String channel,
-    Uint8List payload, {
-    FrameKind kind = FrameKind.sealed,
-  }) {
-    _sendFrame(to, channel, payload, kind: kind);
-  }
-
-  PeerSendOutcome _sendFrame(
-    String to,
-    String channel,
-    Uint8List payload, {
-    FrameKind kind = FrameKind.sealed,
-  }) {
-    if (payload.length > kMaxFramePayload) return PeerSendOutcome.tooLarge;
-    // Every outbound frame passes here, the E2E handshake's included
-    // (connection_handshake.dart sends both its kind-1 client-hello and its
-    // sealed reply through this method) — which is why the capture sits at the
-    // wire and not at the callers: a connection that never establishes is the
-    // case you most need it for, and it produces no stream traffic at all.
-    final tap = _netTap;
-    final frameId = tap == null ? null : frameIdOf(payload, kind);
-    if (_channel?.sink == null) {
-      tap?.call({
-        'op': 'frame',
-        'dir': 'tx',
-        'kind': 'drop',
-        'channel': channel,
-        'bytes': payload.length,
-        'frameId': frameId,
-        'reason': 'socket-not-open',
-      });
-      // sendMessage returns void, so the caller believes this frame went out.
-      // It is the same contract the send-queue drop got a line for one layer
-      // up, and it is the drop a connection that never establishes produces
-      // most of — the case with no stream traffic to diagnose from.
-      _log(
-        RelayLogLevel.warn,
-        'dropping outbound frame — socket not open',
-        fields: {'channel': channel, 'bytes': payload.length},
-      );
-      return PeerSendOutcome.closed;
-    }
-    try {
-      final frame = encodeRouteFrame(
-        {'type': 'message', 'to': to, 'channel': channel},
-        payload,
-        kind,
-      );
-      _channel!.sink.add(frame);
-      tap?.call({
-        'op': 'frame',
-        'dir': 'tx',
-        'kind': kind == FrameKind.handshake ? 'handshake' : 'sealed',
-        'channel': channel,
-        'bytes': payload.length,
-        'frameId': frameId,
-      });
-      return PeerSendOutcome.accepted;
-    } on FrameException catch (e) {
-      // Dropped — caller can retry with a smaller payload.
-      tap?.call({
-        'op': 'frame',
-        'dir': 'tx',
-        'kind': 'drop',
-        'channel': channel,
-        'bytes': payload.length,
-        'frameId': frameId,
-        'reason': 'frame-encode-failed',
-        'detail': {'why': e.reason.name},
-      });
-      _log(
-        RelayLogLevel.warn,
-        'dropping outbound frame — encode failed',
-        fields: {
-          'channel': channel,
-          'bytes': payload.length,
-          'why': e.reason.name,
-        },
-      );
-      return PeerSendOutcome.failed;
-    } on Object {
-      return PeerSendOutcome.failed;
-    }
-  }
-
   /// Drop the socket. Idempotent; callers own whether/when to dial again.
   void disconnect() {
     _failConnect(
@@ -954,7 +690,6 @@ class RelayService implements PeerLink {
       'dir': 'tx',
       'kind': 'control',
       'msgType': data['type'] as String?,
-      'streamId': data['streamId'] as String?,
       'bytes': utf8.encode(json).length,
     });
     _channel?.sink.add(json);
@@ -1073,7 +808,6 @@ class RelayService implements PeerLink {
   void dispose() {
     disconnect();
     _stateController.close();
-    _messageController.close();
     _errorController.close();
     _peerPresenceController.close();
     _policyGenerationController.close();

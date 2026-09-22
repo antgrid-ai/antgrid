@@ -37,6 +37,37 @@ class TestPeerRuntime extends PeerRuntime {
     required String machineDeviceId,
     required String machinePublicKey,
   }) async {
-    return relay;
+    return _RelayPayloadAdapter(relay);
   }
+}
+
+class _RelayPayloadAdapter implements PeerLink {
+  _RelayPayloadAdapter(this.relay);
+  final RelayService relay;
+  @override
+  bool get isDispatchAllowed => true;
+  @override
+  Stream<IncomingRouteMessage> get messageStream =>
+      (relay as dynamic).messageStream as Stream<IncomingRouteMessage>;
+  @override
+  Stream<PeerLinkState> get payloadStateStream => const Stream.empty();
+  @override
+  Stream<PeerPath> get pathStream => const Stream.empty();
+  @override
+  Stream<void> get peerRestartStream => const Stream.empty();
+  @override
+  Stream<PeerLinkFailure> get failureStream => const Stream.empty();
+  @override
+  PeerLinkDiagnostic? get netTap => relay.netTap;
+  @override
+  Future<PeerSendOutcome> sendFrame(
+    String to,
+    String channel,
+    Uint8List payload, {
+    FrameKind kind = FrameKind.sealed,
+  }) =>
+      (relay as dynamic).sendFrame(to, channel, payload, kind: kind)
+          as Future<PeerSendOutcome>;
+  @override
+  Future<void> close() async {}
 }

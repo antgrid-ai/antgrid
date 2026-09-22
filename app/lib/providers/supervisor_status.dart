@@ -27,3 +27,17 @@ final supervisorStatusProvider = StreamProvider.autoDispose
       }
       yield* conn.statusStream;
     });
+
+/// Central slot conflict is deliberately separate from native payload health.
+final centralControlConflictProvider = StreamProvider.autoDispose
+    .family<bool, String>((ref, bareDeviceUuid) async* {
+      ref.watch(relayConnectionChangesProvider);
+      final conn = ref
+          .read(relayConnectionManagerProvider)
+          .peek(bareDeviceUuid);
+      if (conn == null) {
+        yield false;
+        return;
+      }
+      yield* conn.centralConflictStream;
+    });

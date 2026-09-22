@@ -84,8 +84,6 @@ test("one phone socket carries control + two project streams, isolated, on a sin
     // The v3 point: exactly ONE relay connection per side (agent + phone = 2),
     // even though three logical planes (control + projA + projB) are in flight.
     expect(env.relay.connectionCount()).toBe(2);
-    // The agent multiplexes both project streams over its single socket.
-    expect(env.relay.streamCount()).toBeGreaterThanOrEqual(2);
   } finally {
     await env.teardown();
     try { projBdir.cleanup(); } catch { /* Windows EBUSY teardown race */ }

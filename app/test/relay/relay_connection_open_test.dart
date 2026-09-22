@@ -23,12 +23,20 @@ import 'package:flutter_test/flutter_test.dart';
 
 // ---------------------------------------------------------------------------
 // Fakes (same shape as antgrid_relay_client's connection_handshake_test.dart harness, plus a
-// settable state stream and a peer-presence controller: the routable rung is
-// fed by the relay's peer-online, which it emits right after welcome for a
-// same-account agent).
+// settable control state and an explicit payload double for the native link).
 // ---------------------------------------------------------------------------
 
-class _RecordingRelay extends RelayService {
+class _RecordingRelay extends RelayService implements PeerLink {
+  @override
+  bool get isDispatchAllowed => true;
+  @override
+  Stream<PeerLinkState> get payloadStateStream => const Stream.empty();
+  @override
+  Stream<PeerPath> get pathStream => const Stream.empty();
+  @override
+  Stream<PeerLinkFailure> get failureStream => const Stream.empty();
+  @override
+  Stream<void> get peerRestartStream => const Stream.empty();
   _RecordingRelay() : super(crypto: CryptoService());
 
   final _messages = StreamController<IncomingRouteMessage>.broadcast();
@@ -95,7 +103,6 @@ class _RecordingRelay extends RelayService {
     return PeerSendOutcome.accepted;
   }
 
-  @override
   void sendMessage(
     String to,
     String channel,
@@ -290,10 +297,10 @@ DeviceIdentity _identity() => DeviceIdentity(
 
 /// The production mechanisms adapter over the fake relay. No pair step: trust
 /// is account-derived, so the ladder is dial -> presence -> E2E handshake.
-RelayMechanisms _mechanisms(
+PeerConnectionMechanisms _mechanisms(
   _RecordingRelay relay, {
   required Uint8List agentPub,
-}) => RelayMechanisms(
+}) => PeerConnectionMechanisms(
   relay: relay,
   peerRuntime: FixedPeerConnector(relay),
   crypto: CryptoService(),
@@ -380,8 +387,8 @@ void main() {
     expect(conn.session, same(session));
   });
 
-  test('a dial that fails once is retried by the supervisor, not left '
-      'poisoned for the lifetime of the connection', () async {
+  test('a central hello failure does not poison the native session and is '
+      'retried independently', () async {
     final conn = RelayConnection(
       machineDeviceId: _machineId,
       crypto: CryptoService(),
@@ -405,11 +412,14 @@ void main() {
 
     final session = await conn.awaitSession();
     await agentFuture;
+    for (var i = 0; i < 200 && relay.connectCalls < 2; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+    }
 
     expect(
       relay.connectCalls,
       2,
-      reason: 'the supervisor re-dialled on its own',
+      reason: 'central control retries without rebuilding the payload',
     );
     expect(session.isEstablished, isTrue);
     expect(conn.session, same(session));
@@ -517,39 +527,4 @@ void main() {
           'machine session — no new socket/handshake',
     );
   });
-
-  for (final code in ['MESSAGE_RATE_LIMITED', 'ROUTE_FAILED']) {
-    test(
-      'a central $code report does not report native payload loss',
-      () async {
-        final conn = RelayConnection(
-          machineDeviceId: _machineId,
-          crypto: CryptoService(),
-          relayOverride: relay,
-        );
-        addTearDown(conn.dispose);
-
-        final session = await _openConnection(
-          conn,
-          agentSeed: agentSeed,
-          agentPub: agentPub,
-        );
-        final drops = <void>[];
-        session.streamFor('stream-a').droppedFrames.listen(drops.add);
-
-        relay.injectError(
-          ErrorMessage(
-            code: code,
-            message: 'discarded',
-            retryable: true,
-            channel: 'control',
-            bytes: 4096,
-          ),
-        );
-
-        await Future<void>.delayed(const Duration(milliseconds: 20));
-        expect(drops, isEmpty);
-      },
-    );
-  }
 }

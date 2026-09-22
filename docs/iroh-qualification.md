@@ -92,7 +92,7 @@ cause fallback. Upstream-owned key-copy zeroization and precise path-byte teleme
 remain unsupported or unverified. FRB runtime disposal is process-final, never
 per-peer cleanup. Endpoint history prohibits revoked seed reuse; reseeding and
 re-enrollment UX still needs qualification. Upgraded local software must provision
-protected keys or fail closed, including on WebSocket.
+protected keys or fail closed, even while central control is unavailable.
 
 Qualify real Dart/app-to-bridge QUIC/E2E over direct WAN and the self-hosted forced
 relay; multiple machines/apps/projects, all feature services and checkout-safe

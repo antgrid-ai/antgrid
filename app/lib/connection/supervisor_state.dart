@@ -1,6 +1,6 @@
 /// Ladder rungs, lowest first. streamsBound/hydrated stay OUTSIDE the
 /// supervisor (StreamTransport + the tier-2/3 hydrate contract own them).
-enum ConnRung { wanted, coords, socket, routable, established }
+enum ConnRung { wanted, coords, payload, established }
 
 /// Why the supervisor stopped climbing on its own.
 ///
@@ -9,12 +9,10 @@ enum ConnRung { wanted, coords, socket, routable, established }
 /// terminal condition from being retried in a hot loop.
 enum BlockReason {
   licenseExpired, // unblocks: noteFreshToken()
-  agentOffline, // unblocks: notePresence(true) or noteCoordsChanged()
   sessionTakenOver, // unblocks: retry() only (prevents two-device ping-pong)
   peerRejected, // unblocks: explicit retry() after fresh authorization
-  superseded, // unblocks: retry()
   deviceRevoked, // unblocks: retry() (after re-provision)
-  handshakeFailing, // unblocks: retry() or notePresence(true)
+  handshakeFailing, // unblocks: retry()
 }
 
 /// Statuses carry value equality so the supervisor can suppress duplicate

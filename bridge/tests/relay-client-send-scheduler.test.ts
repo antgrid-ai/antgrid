@@ -1,9 +1,9 @@
-// The send scheduler as the RelayClient wires it: what bypasses the queue
+// The send scheduler as the TestPeerSessionOwner wires it: what bypasses the queue
 // (sealed session frames, relay JSON verbs) and what clears it. Sealing is the
 // identity function here so a queued frame can be read straight off the wire.
 import { afterEach, describe, expect, it } from "bun:test";
-import { decodeRouteFrame, FrameKind } from "antgrid-wire";
-import { RelayClient } from "../src/relay-client";
+import { decodeRouteFrame, encodeRouteFrame, FrameKind } from "antgrid-wire";
+import { TestPeerSessionOwner } from "./test-peer-session-owner";
 import { MessageBus } from "../src/message-bus";
 import { createMessage } from "../src/protocol";
 import type { SendScheduler } from "../src/send-scheduler";
@@ -12,12 +12,12 @@ import { installFakeSession } from "./fake-session";
 const PHONE_ID = "phone-1";
 
 interface Harness {
-  client: RelayClient;
+  client: TestPeerSessionOwner;
   sent: Array<string | Uint8Array>;
   s: SendScheduler;
 }
 
-let clients: RelayClient[] = [];
+let clients: TestPeerSessionOwner[] = [];
 afterEach(() => { for (const c of clients.splice(0)) try { c.close(); } catch {} });
 
 /** A paired, handshake-complete client whose socket collects frames and whose
@@ -25,7 +25,7 @@ afterEach(() => { for (const c of clients.splice(0)) try { c.close(); } catch {}
  *  plaintext. */
 function makeClient(): Harness {
   const sent: Array<string | Uint8Array> = [];
-  const client = new RelayClient({
+  const client = new TestPeerSessionOwner({
     url: "ws://127.0.0.1:1",
     identity: {
       deviceId: "dev-1",
@@ -39,6 +39,10 @@ function makeClient(): Harness {
   });
   clients.push(client);
   const session = installFakeSession(client, PHONE_ID);
+  (client as any).sendPayload = (data: string | Buffer, to: string, channel = "control", kind = FrameKind.sealed) => {
+    sent.push(encodeRouteFrame({ type: "message", to, channel }, Buffer.from(data), kind));
+    return true;
+  };
   (client as any).ws = {
     readyState: WebSocket.OPEN,
     send: (d: string | Uint8Array) => sent.push(d),
@@ -63,7 +67,7 @@ function tunnelChunk(requestId: string): object {
   };
 }
 
-describe("RelayClient send scheduler", () => {
+describe("TestPeerSessionOwner send scheduler", () => {
   it("cancels only the addressed viewer's queued terminal frame", async () => {
     const { client, sent, s } = makeClient();
     const second = installFakeSession(client, "phone-2").scheduler as SendScheduler;
@@ -112,18 +116,6 @@ describe("RelayClient send scheduler", () => {
     expect(drained.map((d) => JSON.parse(d.text).m.requestId)).toEqual(["r1", "r2", "r3"]);
   });
 
-  it("writes the relay JSON heartbeat without touching the sealed queue", () => {
-    const { client, sent, s } = makeClient();
-    s.hold = true;
-    void client.sendTunnel(tunnelChunk("r1"));
-    void client.sendTunnel(tunnelChunk("r2"));
-
-    (client as any).heartbeatTick();
-
-    expect(sent).toEqual([JSON.stringify({ type: "ping" })]);
-    expect(s.queued("preview").frames).toBe(2);
-  });
-
   it("drops the queue when the socket closes", () => {
     const { client, sent, s } = makeClient();
     s.hold = true;
@@ -150,7 +142,7 @@ describe("RelayClient send scheduler", () => {
     handle.detach();
 
     expect(s.queued("control").frames).toBe(0);
-    expect(sent).toEqual([JSON.stringify({ type: "stream-close", streamId: handle.streamId })]);
+    expect(sent).toEqual([]);
   });
 
   it("drops the queue when the peer goes offline, keeping the session", () => {
@@ -160,7 +152,7 @@ describe("RelayClient send scheduler", () => {
     void client.sendTunnel(tunnelChunk("r2"));
     expect(s.queued("preview").frames).toBe(2);
 
-    (client as any).handleTextMessage(JSON.stringify({ type: "peer-offline", peerId: PHONE_ID }));
+    client.markPeerOffline(PHONE_ID);
 
     expect(s.queued("preview").frames).toBe(0);
     expect(client.hasEstablishedSession()).toBe(true);

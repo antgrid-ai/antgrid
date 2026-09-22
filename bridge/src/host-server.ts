@@ -3,7 +3,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { hostname } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { ProjectCore, type ProjectCoreDeps, type ProjectCoreRemoteDeps, type PromotionHandle, type RegisterOutcome } from "./project-core";
+import { ProjectCore, type ProjectCoreDeps, type ProjectCoreRemoteDeps, type PromotionHandle } from "./project-core";
 import { OAuthClient, startTokenMaintenance } from "./auth/oauth-client";
 import { sendHeartbeat } from "./heartbeat";
 import { ControlListener } from "./control-listener";
@@ -21,8 +21,7 @@ import type { TierClaim } from "./entitlement";
 import type { ProjectSummary, ConnectInfo, PairedPhoneSummary, KnownProject } from "./control-protocol";
 import { logger } from "./logger";
 const log = logger.child({ component: "host-server" });
-import { RelayClient, type RelayClientOptions } from "./relay-client";
-import { NativeHostConnection } from "./peer/native-host-connection";
+import { NativeHostConnection, type NativeHostOptions } from "./peer/native-host-connection";
 import type { MachineRelaySession } from "./relay-promotion";
 import type { AgentEnableRelay } from "./protocol";
 import { MessageBus, type Channel } from "./message-bus";
@@ -146,10 +145,10 @@ export interface HostServerOptions {
   /** Test seam: builds the lazy machine OAuth runtime on the first remote open.
    *  Defaults to {@link buildRemoteRuntime} (real OAuth + token maintenance). */
   remoteRuntimeFactory?: (r: HostRemoteConfig, onMinted?: () => void) => Promise<RemoteRuntime>;
-  /** Test seam: builds the single machine {@link RelayClient}. Defaults to a
-   *  real `new NativeHostConnection(opts)` — overridden in tests to observe stream
-   *  admission (onAdmitted/onRejected) without a live relay socket. */
-  relayClientFactory?: (opts: RelayClientOptions) => RemoteHostConnection;
+  /** Test seam: builds the single native machine host. Defaults to a
+   *  real `new NativeHostConnection(opts)` — overridden in tests to observe native stream
+   *  binding without live central or native endpoints. */
+  remoteHostFactory?: (opts: NativeHostOptions) => RemoteHostConnection;
   /** Test seam: override the pushHeartbeat() cadence. Defaults to
    *  {@link HEARTBEAT_REFRESH_INTERVAL_MS} (60s). */
   heartbeatIntervalMs?: number;
@@ -192,7 +191,7 @@ async function buildRemoteRuntime(r: HostRemoteConfig, onMinted?: () => void): P
     onAuthRevoked: r.onAuthRevoked,
   });
   const initial = await oauth.mint();
-  // onMinted redials the machine socket after a LICENSE_EXPIRED stop (recoverable
+  // onMinted redials the central control socket after a LICENSE_EXPIRED stop (recoverable
   // by time); the initial mint deliberately doesn't fire it.
   const maint = startTokenMaintenance(oauth, initial, { onMinted });
   return { maint };
@@ -203,8 +202,8 @@ interface CatalogEntry {
   path: string;
   mode: "local" | "remote";
   lastFocusedMs: number;
-  // Set when an already-open LOCAL core has been promoted onto the relay (an
-  // additive relay slot on its existing bus). Absence means not-yet-promoted;
+  // Set when an already-open LOCAL core has gained remote access (an
+  // additive native project binding on its existing bus). Absence means not-yet-promoted;
   // presence makes a re-issued project:start idempotent. Distinct from the
   // legacy per-project promotion in project-core.ts (relay-promotion.ts).
   promotion?: PromotionHandle;
@@ -628,11 +627,11 @@ export class HostServer {
     return true;
   }
 
-  // The always-on, coreless control-plane relay registered under the BARE
-  // deviceUuid (no projectId), used to advertise the project catalog and accept
-  // mobile-access-gated project verbs from a paired phone. Opened only when remote
-  // config is present; one phone at a time on this registration (concurrent
-  // multi-phone control is out of scope). null until startRemoteControlPlane().
+  // The host-owned NativeHostConnection uses the BARE deviceUuid for its central
+  // control identity (no projectId), advertises the project catalog there, and accepts
+  // mobile-access-gated project verbs over its native control stream. Opened when remote
+  // config is present; each authorized app has its own native E2E session (concurrent
+  // devices are supported). null until startRemoteControlPlane().
   private controlPlaneRelay: RemoteHostConnection | null = null;
   // retained to prevent GC of the bus before shutdown
   private controlPlaneBus: MessageBus | null = null;
@@ -647,12 +646,12 @@ export class HostServer {
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   // Machine remote config synthesized from the desktop wizard's `agent:enableRelay`
   // credentials when the host was launched WITHOUT remote config (local-only). Lets
-  // `requireRemoteConfig()` bring the one machine socket up on demand.
+  // `requireRemoteConfig()` bring the native host connection up on demand.
   private wizardRemote: HostRemoteConfig | null = null;
   // Whether an `invalid_client` verdict may kill the process. Disarmed for the
   // duration of the boot-time control-plane start only — see start().
   private fatalRevokeArmed = true;
-  // projectId → the streamId its relay data-plane stream was allocated. Read by
+  // projectId → the streamId its host-local native project stream was allocated. Read by
   // buildProjectsAdvertisement (per-project streamId) and stream-ready. Populated
   // when a core attaches (remoteDepsFor's wrapper), cleared on detach.
   private readonly streamIds = new Map<string, string>();
@@ -734,14 +733,14 @@ export class HostServer {
   /** TEST SEAM: install a control-plane bus + a fake connected peer, then run
    *  the exact re-advertise the file-watch callback runs. Lets the
    *  policy/catalog-change → re-advertise path be verified without standing up a
-   *  live relay (the fake relay URL never connects, so no real peer exists). */
+   *  live remote transport (the test fixture admits no real native peer). */
   readvertiseForTest(bus: MessageBus): void {
     this.controlPlaneBus = bus;
     this.controlPlaneRelay = {
       hasEstablishedSession: () => true,
       anySessionSupportsCheckoutRouting: () => false,
       close: () => {},
-    } as unknown as RelayClient;
+    } as unknown as RemoteHostConnection;
     this.readvertiseToControlPlane();
   }
 
@@ -797,16 +796,16 @@ export class HostServer {
   }
 
   notePeerResume(): void {
-    if (this.controlPlaneRelay?.noteResume) {
+    if (this.controlPlaneRelay) {
       void this.controlPlaneRelay.noteResume().catch((error) =>
         log.warn("host: peer authorization refresh after resume failed: %s", String(error)));
     }
   }
 
-  /** Open the always-on, coreless control-plane RelayClient registered under the
-   *  bare deviceUuid (no projectId → registrationId === deviceUuid). It carries
-   *  no preview tunnel and owns no terminal; it advertises the project catalog
-   *  and dispatches mobile-access-gated project verbs. */
+  /** Open the host-owned NativeHostConnection using the
+   *  bare deviceUuid for central authentication and native enrollment. It owns
+   *  native E2E payload sessions and project/preview streams. Its machine-level
+   *  bus advertises the project catalog and dispatches mobile-access-gated verbs. */
   private async startRemoteControlPlane(): Promise<void> {
     const r = this.requireRemoteConfig();
     await this.ensureRemoteRuntime();
@@ -825,20 +824,23 @@ export class HostServer {
       });
     }
 
-    const buildClient = this.opts.relayClientFactory ?? ((o: RelayClientOptions) => {
-      if (!r.auth.userId || !r.auth.endpointSecret) {
-        throw new Error("Remote transport requires a secure endpoint enrollment; sign in again");
-      }
-      return new NativeHostConnection({ ...o,
-        enrollment: { accountId: r.auth.userId, deviceId: r.auth.deviceUuid, enrollmentId: r.auth.clientId },
-        endpointSecret: r.auth.endpointSecret, licenseApiUrl: r.licenseApiUrl,
-        remoteAccessEnabled: () => this.remoteAccessPolicy.isEnabled(),
-      });
-    });
+    if (!r.auth.userId || !r.auth.endpointSecret) {
+      throw new Error("Remote transport requires a secure endpoint enrollment; sign in again");
+    }
+    const buildClient = this.opts.remoteHostFactory ??
+      ((options: NativeHostOptions) => new NativeHostConnection(options));
     const client = buildClient({
+      enrollment: {
+        accountId: r.auth.userId,
+        deviceId: r.auth.deviceUuid,
+        enrollmentId: r.auth.clientId,
+      },
+      endpointSecret: r.auth.endpointSecret,
+      licenseApiUrl: r.licenseApiUrl,
+      remoteAccessEnabled: () => this.remoteAccessPolicy.isEnabled(),
       url: joinRelayWsPath(r.relayUrl),
-      // Bare deviceUuid: this is the ONLY registration shape in v3 — one socket
-      // per machine, project cores attach as multiplexed streams.
+      // Bare deviceUuid: one central control identity and one native endpoint
+      // per machine; project cores attach as host-local native streams.
       identity: { ...r.identity, deviceId: r.auth.deviceUuid },
       abDir,
       // A terminal relay LICENSE verdict tells the user to
@@ -848,12 +850,12 @@ export class HostServer {
       pairedPhones: this.pairedPhonesStore,
       trustedPeers: this.trustedPeers,
       generateKeypair: () => generateEphemeralKeypair(),
-      onTunnelMessage: () => {}, // no preview tunnel on the control plane
+      onTunnelMessage: () => {}, // machine-level control has no tunnel handler; project streams install theirs
       // The always-on control plane is the registration a phone's autoOpen dials,
       // so it MUST keep the account inventory's relay_url/machine_name fresh —
       // otherwise the only writers are incidental promotion/remote-core heartbeats,
       // and a machine whose LAN IP changed advertises a dead relay_url (the phone
-      // then dials the wrong address → AGENT_OFFLINE → never pairs). RelayClient
+      // then dials the wrong address → AGENT_OFFLINE). The central client
       // fires onAuthenticated on every (re)connect, so this re-publishes the
       // current relayUrl each time the control plane comes up.
       onAuthenticated: () => this.pushHeartbeat(),
@@ -861,25 +863,18 @@ export class HostServer {
         this.sendProjectsAdvertisement(bus);
         void this.sendToolsAdvertisement(bus);
       },
-      // A bridge-side reconnect to the RELAY (heartbeat lapse, network blip on
-      // this machine — NOT the phone dropping) marks the sessions unreachable
-      // for the gap; `peer-online` revives them with NO fresh E2E handshake in
-      // between (the phone never saw a disconnect, so it never re-sends
-      // client-hello — see relay-client.ts's post-establishment lockout). Any
-      // `readvertiseToControlPlane()` call that raced that gap (e.g. a desktop
-      // mobile-access toggle) silently no-opped on the then-empty session set
-      // with no retry. Re-advertising here — after the revival, before this
-      // callback runs — closes that window instead of leaving the phone stuck
-      // on a stale catalog until an unrelated project:start forces a full
-      // recompute.
+      // Native peer admission can complete without a fresh central event. Re-advertise
+      // after the peer is reachable so a catalog update that raced native reconnect
+      // is not left stale. Central reconnect and presence never close or rekey
+      // an otherwise healthy native session.
       onPeerOnline: () => this.readvertiseToControlPlane(),
-      // No peer-disconnect hook is wired on purpose. A transient disconnect is
-      // NOT a revocation, and multiple phones share this one control-plane
-      // registration, so demoting here would tear down promoted slots that OTHER
+      // No peer-disconnect hook is wired on purpose. A transient native disconnect is
+      // NOT a revocation, and multiple apps hold independent peer sessions on this
+      // host, so demoting here would tear down project bindings that OTHER
       // still-connected phones are actively using. Promotions are torn down only
       // by turning mobile access off (mobile-access:set → demoteAllPromoted) and
-      // core lifecycle (stop / evict / shutdown). The promoted slot is a bounded
-      // idle outbound socket meanwhile; it reconnects with the core.
+      // core lifecycle (stop / evict / shutdown). The native peer lifecycle owns
+      // its bounded queues and reconnects independently of central control.
     });
 
     bus.setInboundHandler((msg, channel, _source, peerId) => {
@@ -895,7 +890,7 @@ export class HostServer {
     this.controlPlaneRelay = client;
     this.controlPlaneBus = bus;
     client.connect();
-    log.info("host: remote control plane relay opened (device=%s)", client.deviceId);
+    log.info("host: native remote connection opened (device=%s)", client.deviceId);
 
     // pushHeartbeat() was previously event-triggered only (onAuthenticated +
     // mobile-access mutations), so a long-lived, stably-connected bridge never
@@ -908,9 +903,9 @@ export class HostServer {
     }
   }
 
-  /** Bring the machine relay socket up (from the desktop wizard's credentials if
-   *  the host was launched local-only) and return its stream-attach surface.
-   *  Idempotent: reuses the live control-plane socket when present. */
+  /** Bring the NativeHostConnection up (from the desktop wizard's credentials if
+   *  the host was launched local-only) and return its native project-stream surface.
+   *  Idempotent: reuses the host-owned connection when present. */
   async ensureMachineRelay(msg: AgentEnableRelay): Promise<MachineRelaySession> {
     const auth = msg.auth;
     if (!auth?.deviceUuid || !auth.ed25519Pub || !auth.ed25519Priv) {
@@ -920,7 +915,7 @@ export class HostServer {
     if (!relayBase) throw new Error("no relay URL configured");
     // The host's boot credentials arrive once, on stdin, and are never re-read.
     // If that pair was already dead when the host started, its mint failed and
-    // nothing came up — no token maintenance, no machine socket. Adopt the
+    // nothing came up — no token maintenance or native host connection. Adopt the
     // caller's freshly-authenticated pair instead of retrying a client the web
     // has deleted. Deliberately gated on "nothing is live and nothing is being
     // built": swapping under a live runtime would orphan its token maintenance,
@@ -996,15 +991,12 @@ export class HostServer {
    *  account-trusted phone sees the same list; the machine switch is the only
    *  thing that varies, which is why this takes no phone identity.
    *
-   *  `running` here means "has an admitted relay data-plane slot" (the core's
+   *  `running` here means "has a host-local native project binding" (the core's
    *  {@link ProjectCore.isRelayRegistered}), NOT merely "warm/open on the host".
-   *  A desktop-open project that was never promoted is warm but has NO relay
-   *  slot — advertising it `running:true` made the phone dial a slot the relay
-   *  never admitted, looping AGENT_OFFLINE. So a warm-but-unpromoted core reads
-   *  `running:false` until project:start promotes it and the slot registers; the
-   *  phone's awaitProjectRunning then keys correctly off the post-register advert
-   *  (and off the rejection control:result, which current relays never send —
-   *  the retired SESSION_LIMIT_EXCEEDED came from older ones). The
+   *  A desktop-open project that was never promoted is warm but has NO native project
+   *  binding — advertising it `running:true` made the app wait on a stream the host
+   *  never bound. So a warm-but-unpromoted core reads
+   *  `running:false` until project:start promotes it and the binding is ready. The
    *  visibility filter still includes warm cores, so the project is listed — it's
    *  just flagged not-yet-dialable. (The desktop hub advertises plain warmth via
    *  `knownProjectsForHub`, which is a different question; keep them distinct.) */
@@ -1128,8 +1120,8 @@ export class HostServer {
   /** Route one inbound control-plane frame from the paired phone: either the
    *  welcome-replay `state.snapshot` RPC or a project verb. Extracted from the
    *  bus inbound handler so the request/verb split is unit-testable without a
-   *  live relay. `channel` is the bus channel the frame arrived on (always
-   *  "control" for the control plane), echoed back on the RPC response. */
+   *  native machine-control stream. `channel` is the bus channel the frame arrived
+   *  on (always "control" here), echoed back on the RPC response. */
   dispatchControlPlaneInbound(
     msg: AbMessage,
     channel: Channel,
@@ -1250,8 +1242,8 @@ export class HostServer {
    *  The bridge is the single writer of mobile-access-policy.json, and this
    *  verb is its only mutation path (the store has no fs watcher).
    *
-   *  Turning it OFF is machine-wide and immediate: every promoted relay slot is
-   *  torn down, so no project is left dialable. The socket itself stays
+   *  Turning it OFF is machine-wide and immediate: every promoted native project binding is
+   *  torn down, so no project is left dialable. The central control socket stays
    *  registered — this switch is authorization, not presence — but the catalog
    *  goes empty and every project verb is rejected. */
   async handleRemoteAccessVerb(req: ControlRequest): Promise<ControlResponse> {
@@ -1261,7 +1253,7 @@ export class HostServer {
       case "mobile-access:set": {
         const changed = this.remoteAccessPolicy.setEnabled(req.enabled);
         if (changed && !req.enabled) {
-          this.controlPlaneRelay?.recheckAuthorization?.();
+          this.controlPlaneRelay?.recheckAuthorization();
           this.demoteAllPromoted();
           // A second, independent clear: `handleRemoteDirectoryPush`'s own
           // refusal path already clears on its next ingest attempt, but that
@@ -1311,7 +1303,7 @@ export class HostServer {
 
   /** Answer the drawer's `sessions.list` control-plane RPC: a gated, core-free
    *  session-list peek. Reads the persisted sessions.json directly — no
-   *  project:start, no data-plane socket, no side effect of running a stopped
+   *  project:start, no native payload connection, no side effect of running a stopped
    *  project's startup terminals. Returns a `response` envelope mirroring
    *  dispatchRpc's shape so the app correlates by requestId unchanged. */
   async handleSessionsListRpc(req: RpcRequest): Promise<AbMessage> {
@@ -1750,7 +1742,7 @@ export class HostServer {
       }
       const entry = this.cores.get(verb.projectId);
       // An already-open LOCAL core (desktop attached over loopback) gets PROMOTED:
-      // an additive relay slot is wired onto its EXISTING bus — no close+reopen,
+      // an additive native project binding is wired onto its EXISTING bus — no close+reopen,
       // the live local session is undisturbed. ensureRemoteRuntime FIRST because a
       // local-opened core never built the machine runtime, and remoteDepsFor()
       // throws when remoteRuntime is null. Wrapped like the open() path so a mint
@@ -1766,17 +1758,7 @@ export class HostServer {
           return { ok: false, error: { code: "OPEN_FAILED", message: (err as Error)?.message ?? String(err) } };
         }
         entry.promotion = handle;
-        // Gate the phone-facing running advert on a REAL relay register and
-        // surface a terminal rejection (only the retired SESSION_LIMIT_EXCEEDED,
-        // from a relay predating the worker-limit change). project:start
-        // itself returns ok immediately — the outcome is pushed asynchronously.
-        this.reportFirstRegister(handle.firstRegister, projectId, bus, () => {
-          // Tear the rejected slot down so a later retry can re-promote, and so
-          // the core reads not-promoted again.
-          try { handle.stop(); } catch {}
-          const e = this.cores.get(projectId);
-          if (e?.promotion === handle) e.promotion = undefined;
-        });
+        this.reportFirstRegister(handle.firstRegister, projectId, bus);
         return { ok: true };
       } else if (!entry) {
         // Not open at all → fresh remote open. open() can throw (runtime mint
@@ -1790,17 +1772,7 @@ export class HostServer {
         const coreRef = this.cores.get(projectId)?.core;
         const firstRegister = coreRef?.whenRelayRegistered();
         if (firstRegister) {
-          this.reportFirstRegister(firstRegister, projectId, bus, () => {
-            // A fresh remote core's relay slot IS its primary session — a rejected
-            // register leaves it unreachable, so close it for a clean retry. Guard
-            // on identity (like the promote path's `e?.promotion === handle`): a
-            // concurrent evict/stop/reopen may have replaced this core's slot
-            // between project:start and the async rejection — don't tear down a
-            // newer, unrelated core that now holds the same projectId.
-            if (this.cores.get(projectId)?.core === coreRef) {
-              void this.stop(projectId).catch(() => {});
-            }
-          });
+          this.reportFirstRegister(firstRegister, projectId, bus);
           return { ok: true };
         }
       }
@@ -1827,60 +1799,38 @@ export class HostServer {
     return { ok: false, error: { code: "UNKNOWN_VERB", message: `unsupported control-plane verb: ${verb.type}` } };
   }
 
-  /** Report a relay slot's FIRST register outcome to the requesting phone over
-   *  the control plane. On success, advertise `running:true` ONLY now — so the
-   *  phone never dials a data-plane slot the gate hasn't admitted (the empty-slot
-   *  AGENT_OFFLINE loop). On a terminal rejection, run `onFatal` (tear the dead
-   *  slot down) and push a structured `control:result` so the phone surfaces the
-   *  real reason instead of retrying.
-   *  Non-blocking + never throws into the caller. */
+  /** Advertise a host-local project binding once it is ready. */
   private reportFirstRegister(
-    firstRegister: Promise<RegisterOutcome>,
+    firstRegister: Promise<void>,
     projectId: string,
     bus: MessageBus,
-    onFatal: () => void,
   ): void {
     void firstRegister
-      .then((outcome) => {
-        if (outcome.ok) {
-          // Advertise the streamId binding so the phone can attach its
-          // ProjectSession services without a fresh project:start.
-          const streamId = this.streamIds.get(projectId);
-          if (streamId) {
-            this.controlPlaneRelay?.noteStreamBound(streamId);
-            bus.publish(createMessage("stream-ready", { projectId, streamId }), "control");
-          }
-          this.sendProjectsAdvertisement(bus);
-          return;
+      .then(() => {
+        const streamId = this.streamIds.get(projectId);
+        if (streamId) {
+          this.controlPlaneRelay?.noteStreamBound(streamId);
+          bus.publish(createMessage("stream-ready", { projectId, streamId }), "control");
         }
-        onFatal();
-        bus.publish(
-          createMessage("control:result", {
-            ok: false,
-            verb: "project:start",
-            projectId,
-            error: { code: outcome.code, message: outcome.message },
-          }),
-          "control",
-        );
+        this.sendProjectsAdvertisement(bus);
       })
       .catch((e) => log.warn("reportFirstRegister threw for %s: %s", projectId, e));
   }
 
-  /** True once an already-open core has been promoted onto the relay (additive
-   *  relay slot). Diagnostic/test seam for the promote path. */
+  /** True once an already-open core has gained an additive native project
+   *  binding. Diagnostic/test seam for the promote path. */
   isPromoted(id: string): boolean {
     return !!this.cores.get(id)?.promotion;
   }
 
-  /** Tear down every active relay slot (PromotionHandle) and return each core
+  /** Tear down every promoted native project binding and return each core
    *  to loopback-only. Called when `mobile-access:set` turns the machine off:
    *  the switch is machine-wide, so no project may be left dialable. NOT wired
    *  to phone disconnect, which must not demote (a transient drop is not a
    *  revocation). Idempotent: safe to call when no core is promoted. The core
    *  itself — and its live loopback session — is left ENTIRELY untouched; only
-   *  the additive relay slot is stopped. Public so tests can invoke it directly
-   *  without standing up a real relay connection. */
+   *  the additive native binding is stopped. Public so tests can invoke it directly
+   *  without standing up a real native peer connection. */
   demoteAllPromoted(): void {
     for (const [projectId, entry] of this.cores) {
       if (!entry.promotion) continue;
@@ -1889,14 +1839,14 @@ export class HostServer {
       } catch (e) {
         // PromotionHandle.stop() isolates each teardown sub-step internally; an
         // unexpected throw escaping those inner catches must be reported, never
-        // dropped silently. The slot is still cleared below.
+        // dropped silently. The binding is still cleared below.
         log.warn("Failed to demote promoted core %s: %s", projectId, e instanceof Error ? e.message : String(e));
       }
       entry.promotion = undefined;
     }
   }
 
-  /** Test/diagnostic seam: the control-plane relay device id (bare deviceUuid),
+  /** Test/diagnostic seam: the native host connection's device id (bare deviceUuid),
    *  or null if the control plane was not started. */
   get controlPlaneRegistrationId(): string | null {
     return this.controlPlaneRelay?.deviceId ?? null;
@@ -1942,7 +1892,7 @@ export class HostServer {
       case "project:start": {
         // Re-advertises an already-open core. `connect` is the loopback
         // port+token for all modes — every core binds a listener regardless of
-        // whether it also holds a relay slot. Starting a known-but-stopped
+        // whether it also holds a native project binding. Starting a known-but-stopped
         // project by id (no path) needs a persisted catalog and is deferred to
         // the app-launcher unit.
         const existing = this.get(req.projectId);
@@ -2258,15 +2208,15 @@ export class HostServer {
     }
     const selfMachineId = this.controlPlaneRegistrationId;
     if (selfMachineId === null) {
-      // A row offered while this machine has no relay identity is
+      // A row offered while this machine has no remote device identity is
       // un-messageable (SessionBusCoordinator.message -> self() refuses
       // AGENT_NOT_READY on a null machine id), so mirroring it would hand
       // agents a directory that lies about what it can reach.
-      this.remoteDirectory.clear("no relay identity");
+      this.remoteDirectory.clear("no remote device identity");
       return {
         id: req.id,
         ok: false,
-        error: { code: "NOT_ADDRESSABLE", message: "this machine has no relay identity yet, so it cannot accept a peer directory" },
+        error: { code: "NOT_ADDRESSABLE", message: "this machine has no remote device identity yet, so it cannot accept a peer directory" },
       };
     }
     // unservedReads comes off replace()'s own return, not a follow-up
@@ -2367,7 +2317,7 @@ export class HostServer {
     let relayUrl: string | undefined;
     if (mode === "remote") {
       await this.ensureRemoteRuntime();
-      // A remote core attaches to the ONE machine socket; ensure it
+      // A remote core attaches to the host-owned native connection; ensure it
       // is up (startControlPlane already opened it when launched with remote
       // config — this guards the wizard-bootstrapped path).
       if (!this.controlPlaneRelay) await this.startRemoteControlPlane();
@@ -2475,7 +2425,7 @@ export class HostServer {
       },
     };
     const build = this.opts.remoteRuntimeFactory ?? buildRemoteRuntime;
-    // Late binding: the machine RelayClient is constructed AFTER the runtime (its
+    // Late binding: the native host connection is constructed AFTER the runtime (its
     // token maintenance) in startRemoteControlPlane/startCore, so this closure
     // reads controlPlaneRelay lazily at each re-mint. A LICENSE_EXPIRED stop keeps
     // maintenance re-minting; the first fresh mint redials the stopped socket. The
@@ -2586,9 +2536,9 @@ export class HostServer {
     if (!entry) return;
     this.noteColdSnapshot(entry);
     this.cores.delete(projectId);
-    // A promoted local core holds a relay slot separate from its loopback session
-    // (core.shutdown only closes the core's own `this.relay`, which a local core
-    // never set). Stop the slot explicitly so it doesn't leak past teardown.
+    // A promoted local core holds a native project binding separate from its loopback session
+    // (core.shutdown only closes the primary binding, which a local core
+    // never set). Stop the promoted binding explicitly so it cannot outlive teardown.
     try { entry.promotion?.stop(); } catch (e) { log.warn("Failed to stop promotion for %s: %s", projectId, e instanceof Error ? e.message : String(e)); }
     await entry.core.shutdown();
   }
@@ -2598,7 +2548,7 @@ export class HostServer {
    *  AUTHORITATIVE session list (the app merely caches it), so without this a
    *  removed project's sessions reload on the next open. Each step is
    *  best-effort — a failure in one must never strand the others:
-   *    1. stop a warm core (kills its PTYs + any relay slot),
+   *    1. stop a warm core (kills its PTYs + any native project binding),
    *    2. reclaim the project's managed worktrees,
    *    3. delete the on-disk store dir (`agents/<id>/`, holding sessions.json),
    *    4. drop what the project owns that step 3's disk delete cannot reach:
@@ -2746,12 +2696,12 @@ export class HostServer {
   }
 
   /** Stream-attach surface for a project core: it attaches its bus to the ONE
-   *  machine socket rather than owning a RelayClient. The wrapper
+   *  native host connection rather than owning a peer connection. The wrapper
    *  records the allocated streamId under `projectId` (for the advertisement +
    *  stream-ready) and clears it on detach. */
   private remoteDepsFor(projectId: string): ProjectCoreRemoteDeps {
     const client = this.controlPlaneRelay;
-    if (!client) throw new Error("HostServer: machine relay socket not started (call startRemoteControlPlane first)");
+    if (!client) throw new Error("HostServer: native remote connection not started (call startRemoteControlPlane first)");
     return {
       attachStream: (bus, opts) => {
         const handle = client.attachStream(bus, { ...opts, streamId: randomBytes(8).toString("hex") });
@@ -2929,10 +2879,10 @@ export class HostServer {
       await entry?.core.shutdown("evicted").catch(() => {});
       evictedAny = true;
     }
-    // A phone's picker shows running:true for warm cores; an evicted core must
-    // flip back to running:false there. The data socket drops on its own (the
-    // core's RelayClient closes), but the control-plane advertisement is the
-    // picker-facing signal. The app-side warm cap (kWarmCapRelay) can exceed this
+    // A phone's picker shows running:true for native-bound warm cores; an evicted
+    // core must flip back to running:false there. Its native binding closes with the core,
+    // but the control-plane advertisement is the picker-facing signal. The
+    // app-side warm cap (kWarmCapRelay) can exceed this
     // host cap, so without this re-advertise the app may still believe an evicted
     // project is warm.
     if (evictedAny) this.readvertiseToControlPlane();

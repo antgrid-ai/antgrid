@@ -154,7 +154,6 @@ class MachineSession {
   StreamSubscription<IncomingRouteMessage>? _msgSub;
   StreamSubscription<PeerLinkState>? _stateSub;
   StreamSubscription<void>? _presenceSub;
-  StreamSubscription<PeerLinkFailure>? _errorSub;
   Timer? _fragSweep;
   Timer? _livenessTimer;
 
@@ -334,7 +333,6 @@ class MachineSession {
     _msgSub = relay.messageStream.listen(_onRouted);
     _stateSub = relay.payloadStateStream.listen(_onState);
     _presenceSub = relay.peerRestartStream.listen((_) => _onPeerRestart());
-    _errorSub = relay.failureStream.listen(_onRelayError);
     _fragSweep = Timer.periodic(
       const Duration(seconds: 2),
       (_) => _reassembler.sweep(),
@@ -620,7 +618,7 @@ class MachineSession {
       // with N unrelated ids. Naming every one with the parent type is what
       // keeps a large transfer from reading as a burst of anonymous frames.
       // After the send, not before: the tap records the wire event inside
-      // sendMessage, and this names the event it just made.
+      // sendFrame, and this names the event it just made.
       _annotate(_frameId(sealed), msgType: f.msgType, streamId: f.streamId);
       return sealed.length;
     } catch (e) {
@@ -674,30 +672,6 @@ class MachineSession {
   void removeStream(String streamId) {
     _streams.remove(streamId);
     _scheduler.dropStream(streamId);
-  }
-
-  /// The relay dropped a routed frame on this socket (`MESSAGE_RATE_LIMITED`).
-  ///
-  /// Fanned out to every attached stream because the error names no frame and
-  /// no stream — the drop happens before the relay ever sees the sealed
-  /// envelope, so it cannot know which stream the frame belonged to.
-  void noteFramesDropped() {
-    for (final s in _streams.values) {
-      s.noteFramesDropped();
-    }
-  }
-
-  /// A relay error naming a channel and a byte count is a report that a frame
-  /// this session had already charged to its send window was discarded before
-  /// the agent saw it. Those bytes can never turn up in a credit, so without
-  /// giving them back every drop shrinks that channel's window for the rest of
-  /// the session. Errors that name no frame are somebody else's business — the
-  /// app fans them out to the streams through [noteFramesDropped].
-  void _onRelayError(PeerLinkFailure e) {
-    final channel = e.channel;
-    final bytes = e.bytes;
-    if (bytes == null || (channel != 'control' && channel != 'preview')) return;
-    _scheduler.uncharge(channel!, bytes);
   }
 
   // --- socket / presence transitions ---------------------------------------
@@ -1346,8 +1320,7 @@ class MachineSession {
     } else if (type == 'control:result' &&
         m['ok'] == false &&
         m['verb'] == 'project:start') {
-      // A rejected project:start (NOT_ALLOWED / OPEN_FAILED, or the retired
-      // SESSION_LIMIT_EXCEEDED from a pre-worker-limit relay) — fail the
+      // A rejected project:start (for example NOT_ALLOWED / OPEN_FAILED) — fail the
       // pending bind with the real reason
       // instead of letting it run out its blind timeout. The `verb` match is
       // load-bearing: the bridge echoes `projectId` on EVERY failed
@@ -1537,7 +1510,6 @@ class MachineSession {
     await _msgSub?.cancel();
     await _stateSub?.cancel();
     await _presenceSub?.cancel();
-    await _errorSub?.cancel();
     for (final s in List<StreamTransport>.of(_streams.values)) {
       await s.dispose();
     }
@@ -1599,10 +1571,6 @@ class StreamTransport extends BufferedAgentTransport {
   /// the envelope of every frame built before the re-point, and it exercises
   /// the self-heal that has to work anyway.
   void _retarget(String newStreamId) => streamId = newStreamId;
-
-  void noteFramesDropped() {
-    if (!droppedFrameController.isClosed) droppedFrameController.add(null);
-  }
 
   @override
   bool get isLocal => false;
@@ -1832,7 +1800,6 @@ class StreamTransport extends BufferedAgentTransport {
     session.removeStream(streamId);
     await outbound.close();
     await stateController.close();
-    await droppedFrameController.close();
   }
 }
 

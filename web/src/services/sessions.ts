@@ -1,14 +1,11 @@
 import { fetchUserConnections, type RelayPushConfig } from "../relay/push.js";
 import type { DeviceRow } from "../models/device.js";
 
-/** A live agent machine owned by the signed-in user, with its running-session count. */
+/** A live agent machine owned by the signed-in user. */
 export type UserSession = {
   deviceUuid: string;
   displayName: string;
   connectedAt: number;
-  /** Open project streams on this machine. Liveness only — nothing is billed
-   *  against it; the paid axis is the worker (agent machine) count. */
-  openStreamCount: number;
 };
 
 /**
@@ -42,16 +39,7 @@ export async function listUserSessions(
       deviceUuid: c.deviceId,
       displayName: uuidToName.get(c.deviceId) ?? c.deviceId,
       connectedAt: c.connectedAt,
-      openStreamCount: c.openStreamCount,
     });
   }
   return sessions;
-}
-
-/**
- * Streams summed across every live agent connection, NOT the machine count.
- * Display-only: no cap is enforced against it anywhere.
- */
-export function runningSessionCount(sessions: UserSession[]): number {
-  return sessions.reduce((n, s) => n + s.openStreamCount, 0);
 }

@@ -6,7 +6,8 @@ import { join } from "node:path";
 import { HostServer, type HostRemoteConfig, type RemoteRuntime } from "../src/host-server";
 import { computeProjectId } from "../src/project-id";
 import { MessageBus } from "../src/message-bus";
-import type { RelayClient, RelayClientOptions } from "../src/relay-client";
+import type { RemoteHostConnection } from "../src/remote-host-connection";
+import type { NativeHostOptions } from "../src/peer/native-host-connection";
 import type { AttachStreamOpts } from "../src/stream-mux";
 
 // --- shared fakes (mirror control-plane-start.test.ts) ---------------------
@@ -16,7 +17,7 @@ function fakeRemoteConfig(): HostRemoteConfig {
     relayUrl: "ws://127.0.0.1:1",
     licenseApiUrl: "http://127.0.0.1:1",
     identity: { deviceId: "dev-1", deviceName: "dev-1", createdAt: "2026-01-01T00:00:00.000Z" },
-    auth: { clientId: "cid", clientSecret: "secret", deviceUuid: "uuid-1" },
+    auth: { clientId: "cid", clientSecret: "secret", deviceUuid: "uuid-1", userId: "user-1", endpointSecret: "endpoint-secret" },
     onAuthRevoked: () => {},
   };
 }
@@ -38,37 +39,12 @@ function makeCountingFactory(): { factory: () => Promise<RemoteRuntime>; tokenCa
   };
 }
 
-// A machine-relay-client stub whose promoted stream is rejected by the relay
-// gate the instant it attaches — the account is at its concurrent remote-agent
-// cap. Mirrors the real relay `error{ref}` (server.ts) → StreamMux `onRejected`
-// (a rejected stream-open leaves the socket and every other
-// stream live — there is no more per-registration terminal-close outcome).
-function makeSessionLimitedRelayFactory(code = "SESSION_LIMIT_EXCEEDED") {
-  return (_opts: RelayClientOptions): RelayClient =>
-    ({
-      deviceId: "control-plane-dev",
-      hasEstablishedSession: () => false,
-      anySessionSupportsCheckoutRouting: () => false,
-      establishedPeers: () => [],
-      peerSession: () => null,
-      setBus: () => {},
-      connect: () => {},
-      close: () => {},
-      attachStream: (_bus: MessageBus, streamOpts: AttachStreamOpts) => {
-        streamOpts.onRejected?.(code, "Concurrent remote agent limit reached (0). Close another session or upgrade your plan.");
-        return { streamId: "s1", detach: () => {}, sendTunnel: () => {} };
-      },
-      noteStreamBound: () => {},
-      sendPushDeliver: () => {},
-    }) as unknown as RelayClient;
-}
-
 // A machine-relay-client stub whose promoted stream is admitted the instant it
 // attaches — the relay gate accepted the stream-open. Mirrors StreamMux firing
 // `onAdmitted` on `stream-opened`, which is what flips ProjectCore's
 // isRelayRegistered() true.
 function makeAuthenticatingRelayFactory() {
-  return (_opts: RelayClientOptions): RelayClient =>
+  return (_opts: NativeHostOptions): RemoteHostConnection =>
     ({
       deviceId: "control-plane-dev",
       hasEstablishedSession: () => false,
@@ -84,7 +60,7 @@ function makeAuthenticatingRelayFactory() {
       },
       noteStreamBound: () => {},
       sendPushDeliver: () => {},
-    }) as unknown as RelayClient;
+    }) as unknown as RemoteHostConnection;
 }
 
 let host: HostServer | null = null;
@@ -173,50 +149,12 @@ test("project:start promotes an already-open LOCAL core via the ONE shared runti
   expect(factoryCalls).toBe(1);
 });
 
-test("project:start reports a SESSION_LIMIT_EXCEEDED register rejection to the phone and tears the slot down", async () => {
-  const { factory } = makeCountingFactory();
-  host = createHostPolicyFixture({
-    remote: fakeRemoteConfig(),
-    remoteRuntimeFactory: factory,
-    relayClientFactory: makeSessionLimitedRelayFactory(),
-  });
-  const h = host;
-
-  await openAs(h, "projX", "local");
-  await setMobileAccess(h, true);
-
-  const bus = new MessageBus();
-  bus.setInboundHandler(() => {});
-  const out: any[] = [];
-  bus.subscribe({ deliver: (m) => out.push(m) });
-
-  // project:start returns ok immediately — the register rejection is asynchronous
-  // and pushed to the phone over the control plane once it lands.
-  const res = await h.handleControlPlaneVerb({ type: "project:start", projectId: proj("projX") } as any, bus);
-  expect(res.ok).toBe(true);
-
-  // Let the firstRegister rejection propagate.
-  await new Promise((r) => setTimeout(r, 20));
-
-  // (a) A structured control:result error reaches the phone — NOT a silent
-  //     running:true advert that would send it dialing an empty data-plane slot.
-  const err = out.find((m) => m.type === "control:result" && m.ok === false);
-  expect(err).toBeDefined();
-  expect(err.verb).toBe("project:start");
-  expect(err.error.code).toBe("SESSION_LIMIT_EXCEEDED");
-  // (b) No running:true advert was emitted for the rejected slot.
-  const advert = out.find((m) => m.type === "agent:projects");
-  expect(advert?.projects?.some((p: any) => p.projectId === proj("projX") && p.running)).not.toBe(true);
-  // (c) The dead slot is torn down so a later retry (after upgrade) can re-promote.
-  expect(h.isPromoted(proj("projX"))).toBe(false);
-});
-
 test("advert running=false for a warm-but-unpromoted local core; flips true after project:start registers the slot", async () => {
   const { factory } = makeCountingFactory();
   host = createHostPolicyFixture({
     remote: fakeRemoteConfig(),
     remoteRuntimeFactory: factory,
-    relayClientFactory: makeAuthenticatingRelayFactory(),
+    remoteHostFactory: makeAuthenticatingRelayFactory(),
   });
   const h = host;
 

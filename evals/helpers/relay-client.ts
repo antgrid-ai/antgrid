@@ -1,4 +1,7 @@
 import { randomBytes } from "node:crypto";
+import { Endpoint, EndpointAddr, EndpointId, type Connection } from "@number0/iroh/index.js";
+import { EndpointEnrollment } from "../../bridge/src/peer/enrollment";
+import { PeerRecords } from "../../bridge/src/peer/records";
 import { generateEphemeralKeypair, deriveSharedSecret } from "../../bridge/src/key-exchange";
 import {
   buildTranscript,
@@ -17,6 +20,8 @@ import {
   decodeRouteFrame,
   FrameKind,
   CONTROL_STREAM_ID,
+  PEER_ALPN,
+  type PeerAuthorizationSnapshot,
   buildHelloSigBody,
   normalizeRelayHost,
   TRANSFER_TIMEOUT_MS,
@@ -97,6 +102,11 @@ interface E2eContext {
 }
 
 export class RelayClient {
+  private nativeEndpoint: Endpoint | null = null;
+  private nativeConnection: Connection | null = null;
+  private nativeRecords: PeerRecords | null = null;
+  private nativeTarget: { endpointId: string; addresses: string[] } | null = null;
+  private nativeGeneration = 0;
   private ws: WebSocket | null = null;
   private messageQueue: any[] = [];
   private waiters: Array<{
@@ -384,6 +394,101 @@ export class RelayClient {
     this.ws?.send(raw);
   }
 
+  /** Enroll this app endpoint and dial the machine over a real Iroh connection.
+   *  The central socket remains control-only; all route frames use this link. */
+  async connectNative(options: {
+    licenseApiUrl: string;
+    accountId: string;
+    enrollmentId: string;
+    clientSecret: string;
+    endpointSecret: string;
+    machineDeviceId: string;
+    addresses: string[];
+  }): Promise<void> {
+    const token = async (): Promise<string> => {
+      const response = await fetch(`${options.licenseApiUrl.replace(/\/$/, "")}/api/auth/oauth2/token`, {
+        method: "POST",
+        headers: { authorization: `Basic ${Buffer.from(`${options.enrollmentId}:${options.clientSecret}`).toString("base64")}` },
+      });
+      if (!response.ok) throw new Error(`Eval endpoint token failed: ${response.status}`);
+      const body = await response.json() as { access_token?: string };
+      if (!body.access_token) throw new Error("Eval endpoint token response omitted access_token");
+      return body.access_token;
+    };
+    const enrollment = new EndpointEnrollment({
+      accountId: options.accountId,
+      deviceId: this.transcriptDeviceId,
+      enrollmentId: options.enrollmentId,
+    }, options.endpointSecret, this.privateKeySeed.toString("base64"), options.licenseApiUrl, token);
+    try {
+      await enrollment.register();
+      let target: { endpointId: string; generation: string } | null = null;
+      for (let attempt = 0; attempt < 100 && !target; attempt++) {
+        const snapshot = await enrollment.authorization() as PeerAuthorizationSnapshot;
+        target = snapshot.peers.find((peer) => peer.deviceId === options.machineDeviceId)?.endpoint ?? null;
+        if (!target) await Bun.sleep(100);
+      }
+      if (!target) throw new Error(`Machine ${options.machineDeviceId} did not publish a native endpoint`);
+      const builder = Endpoint.builder();
+      builder.applyMinimal();
+      builder.secretKey(enrollment.seedBytes());
+      builder.bindAddr("127.0.0.1:0");
+      this.nativeEndpoint = await builder.bind();
+      this.nativeTarget = { endpointId: target.endpointId, addresses: options.addresses };
+      await this.dialNative();
+    } finally {
+      enrollment.close();
+    }
+  }
+
+  private async dialNative(): Promise<void> {
+    const endpoint = this.nativeEndpoint;
+    const target = this.nativeTarget;
+    if (!endpoint || !target) throw new Error("Native endpoint is not configured");
+    const generation = ++this.nativeGeneration;
+    this.nativeRecords?.close();
+    this.nativeConnection?.close(1n, []);
+    let connection: Connection | null = null;
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 50 && !connection; attempt++) {
+      try {
+        connection = await endpoint.connect(
+          new EndpointAddr(EndpointId.fromString(target.endpointId), undefined, target.addresses),
+          Array.from(Buffer.from(PEER_ALPN)),
+        );
+      } catch (error) {
+        lastError = error;
+        await Bun.sleep(100);
+      }
+    }
+    if (!connection) throw new Error(`Native dial failed: ${String(lastError)}`);
+    const stream = await connection.openBi();
+    const records = new PeerRecords(stream, () => generation === this.nativeGeneration,
+      () => connection.close(1n, []));
+    this.nativeConnection = connection;
+    this.nativeRecords = records;
+    void (async () => {
+      try {
+        while (generation === this.nativeGeneration) this.handleBinaryFrame(await records.read());
+      } catch {
+        if (generation === this.nativeGeneration) this.nativeRecords = null;
+      }
+    })();
+  }
+
+  /** Redial the configured native endpoint with fresh E2E state after peer failure. */
+  async reconnectNative(): Promise<void> {
+    this.resetE2e();
+    await this.dialNative();
+  }
+  /** Interrupt only the native payload path; the central control socket stays authenticated. */
+  dropNative(): void {
+    this.nativeGeneration++;
+    this.nativeRecords?.close();
+    this.nativeRecords = null;
+    this.nativeConnection?.close(1n, []);
+    this.nativeConnection = null;
+  }
   /** Resolve once the underlying socket has closed (true), or false on timeout.
    *  Observes relay-initiated supersession/close. */
   waitForClose(timeoutMs = 5_000): Promise<boolean> {
@@ -983,9 +1088,9 @@ export class RelayClient {
     this.sendBinary(encodeRouteFrame({ type: "message", to, channel }, bytes, FrameKind.sealed));
   }
 
-  /** Send an OPAQUE payload to a peer as a sealed-kind route frame. The relay
-   *  forwards it verbatim; used by low-level routing/isolation tests (the payload
-   *  is not real ciphertext, so the peer will drop it). */
+  /** Send an OPAQUE payload to a peer as a sealed-kind native route frame.
+   *  Used by low-level routing/isolation tests; the payload is not real
+   *  ciphertext, so the peer will drop it. */
   sendMessage(to: string, channel: string, payload: string | Uint8Array | Buffer): void {
     const payloadBytes =
       typeof payload === "string"
@@ -997,7 +1102,7 @@ export class RelayClient {
     this.sendBinary(encodeRouteFrame({ type: "message", to, channel: ch }, payloadBytes, FrameKind.sealed));
   }
 
-  /** Send raw JSON to the relay (control messages, e.g. `stream-open`/`stream-close`). */
+  /** Send raw JSON to the central relay, including retired verbs in rejection tests. */
   sendRaw(data: any): void {
     if (!this.ws) throw new Error("Not connected");
     const raw = JSON.stringify(data);
@@ -1006,8 +1111,9 @@ export class RelayClient {
   }
 
   private sendBinary(data: Uint8Array): void {
-    if (!this.ws) throw new Error("Not connected");
-    this.ws.send(data);
+    if (!this.nativeRecords) throw new Error("Native payload is not connected");
+    void this.nativeRecords.send(data).catch((error) =>
+      this.deliver({ type: "error", code: "NATIVE_SEND_FAILED", message: String(error) }));
   }
 
   // --- Phone-side liveness ---
@@ -1266,6 +1372,7 @@ export class RelayClient {
     this.resetE2e();
     this._pairedPeerId = pairedPeerId;
     await this.connectAndAuthenticate(relayUrl);
+    if (this.nativeTarget) await this.dialNative();
   }
 
   private resetE2e(): void {
@@ -1292,5 +1399,9 @@ export class RelayClient {
     this._pairedPeerId = null;
     this.ws?.close();
     this.ws = null;
+    this.dropNative();
+    await this.nativeEndpoint?.close();
+    this.nativeEndpoint = null;
+    this.nativeTarget = null;
   }
 }

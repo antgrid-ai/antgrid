@@ -1,11 +1,11 @@
-// Credit windows as the RelayClient runs them: what the gate holds back, what
+// Credit windows as the TestPeerSessionOwner runs them: what the gate holds back, what
 // a cumulative credit releases, what the receive path counts, and what a relay
 // drop report reopens. Real E2E keys throughout, so every byte count asserted
 // here is the count that goes on the wire.
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { generateKeyPairSync, randomBytes } from "node:crypto";
 import { encodeRouteFrame, FrameKind, WINDOW_RESYNC_AGE_MS } from "antgrid-wire";
-import { RelayClient } from "../src/relay-client";
+import { TestPeerSessionOwner } from "./test-peer-session-owner";
 import { createMessage } from "../src/protocol";
 import { generateEphemeralKeypair, deriveSharedSecret } from "../src/key-exchange";
 import {
@@ -28,7 +28,7 @@ const BODY = 50_000;
 
 type Frame = string | Buffer;
 
-let clients: RelayClient[] = [];
+let clients: TestPeerSessionOwner[] = [];
 let logLines: string[] = [];
 
 beforeEach(() => {
@@ -48,20 +48,20 @@ function ed25519Pair(): { seedB64: string; pubB64: string } {
 }
 
 function injectFrame(
-  client: RelayClient,
+  client: TestPeerSessionOwner,
   kind: FrameKind,
   payload: Buffer,
   channel: "control" | "preview" = "control",
   from: string = PHONE_ID,
 ): void {
   const frame = encodeRouteFrame({ type: "message", from, channel }, payload, kind);
-  (client as any).handleBinaryFrame(Buffer.from(frame));
+  client.injectRouteFrame(Buffer.from(frame));
 }
 
-/** Seal one plaintext as the phone and feed it in. Returns the sealed length —
+/** Seal one plaintext as the phone and feed it in. Returns the sealed length â€”
  *  exactly the number the receiver counts and the sender charged. */
 function injectSealed(
-  client: RelayClient,
+  client: TestPeerSessionOwner,
   phone: E2eTransport,
   plaintext: string,
   channel: "control" | "preview" = "control",
@@ -81,7 +81,7 @@ function open(phone: E2eTransport, frame: Frame): any {
 /** Drive one client-hello, agent-hello, app:ready exchange and return the
  *  phone-side transport for the session it establishes. */
 function handshake(
-  client: RelayClient,
+  client: TestPeerSessionOwner,
   sent: Frame[],
   opts: { attemptId: string; phoneEd: { seedB64: string }; phoneId: string; nonce: Buffer },
 ): E2eTransport {
@@ -133,7 +133,7 @@ function handshake(
 }
 
 interface Harness {
-  client: RelayClient;
+  client: TestPeerSessionOwner;
   sent: Frame[];
   phone: E2eTransport;
   /** The LIVE session's queue. A rekey builds a fresh one, so this is read
@@ -144,7 +144,7 @@ interface Harness {
   phoneEd: { seedB64: string; pubB64: string };
 }
 
-function sessionOf(client: RelayClient, peerId = PHONE_ID): any {
+function sessionOf(client: TestPeerSessionOwner, peerId = PHONE_ID): any {
   return (client as any).sessions.get(peerId);
 }
 
@@ -160,7 +160,7 @@ function establish(): Harness {
   const agentEd = ed25519Pair();
   const phoneEd = ed25519Pair();
   const sent: Frame[] = [];
-  const client = RelayClient.forTest({
+  const client = TestPeerSessionOwner.forTest({
     generateKeypair: generateEphemeralKeypair,
     sendPayload: (p) => sent.push(p),
     peerId: PHONE_ID,
@@ -211,7 +211,7 @@ function fillWindow(h: Harness): { at: number; written: Buffer[] } {
 
 const sum = (frames: Buffer[]): number => frames.reduce((n, f) => n + f.length, 0);
 
-describe("RelayClient credit windows", () => {
+describe("TestPeerSessionOwner credit windows", () => {
   it("stops at the window and resumes on a cumulative credit", () => {
     const h = establish();
     const { at, written } = fillWindow(h);
@@ -308,12 +308,8 @@ describe("RelayClient credit windows", () => {
     h.session.lastSealedRecvAt = Date.now();
     (h.client as any).checkLiveness();
     expect((h.sent.slice(at) as Buffer[]).map((f) => open(h.phone, f))).toEqual(expected);
-
-    (h.client as any).awaitingPong = true;
     h.session.lastSealedRecvAt = 0;
     injectSealed(h.client, h.phone, JSON.stringify({ type: "credit", channel: "preview", consumed: 1 }));
-
-    expect((h.client as any).awaitingPong).toBe(false);
     expect(Date.now() - h.session.lastSealedRecvAt).toBeLessThan(1000);
   });
 
@@ -330,37 +326,6 @@ describe("RelayClient credit windows", () => {
     expect(written.map((f) => open(h.phone, f).type)).toContain("ping");
     expect(h.s.unacked("control") - before).toBe(sum(written));
     expect(h.s.queued("preview").frames).toBe(2);
-  });
-
-  it("reopens the window when the relay reports a dropped frame", () => {
-    const h = establish();
-    const { written } = fillWindow(h);
-
-    (h.client as any).handleTextMessage(JSON.stringify({
-      type: "error",
-      code: "MESSAGE_RATE_LIMITED",
-      message: "Message rate limit exceeded",
-      retryable: true,
-      channel: "preview",
-      bytes: written[0].length,
-    }));
-
-    expect(h.s.queued("preview").frames).toBe(1);
-  });
-
-  it("coalesces a burst of routing failures into one report", () => {
-    const h = establish();
-    const surfaced: string[] = [];
-    (h.client as any).opts.onError = (code: string) => surfaced.push(code);
-
-    for (let i = 0; i < 3; i++) {
-      (h.client as any).handleTextMessage(JSON.stringify({
-        type: "error", code: "ROUTE_FAILED", message: "Recipient backlogged", retryable: true,
-      }));
-    }
-
-    expect(surfaced).toEqual(["ROUTE_FAILED"]);
-    expect(logLines.filter((l) => l.includes("Relay dropped frames"))).toHaveLength(1);
   });
 
   it("logs a stalled channel once", () => {

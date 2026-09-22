@@ -21,6 +21,16 @@ export interface NativeHostOptions extends PeerSessionOwnerOptions, CentralContr
   remoteAccessEnabled: () => boolean;
 }
 
+export function evalIrohBindAddress(
+  env: Record<string, string | undefined> = process.env,
+): string | undefined {
+  const value = env.ANTGRID_EVAL_TEST === "1" ? env.ANTGRID_EVAL_IROH_BIND_ADDR : undefined;
+  if (!value) return undefined;
+  if (!/^127\.0\.0\.1:(?:[1-9][0-9]{0,4})$/.test(value) || Number(value.slice(10)) > 65_535) {
+    throw new EndpointFailure("INVALID_EVAL_BIND_ADDR", true);
+  }
+  return value;
+}
 interface NativePeer {
   connection: Connection;
   endpointId: string;
@@ -101,6 +111,8 @@ export class NativePeerSessions extends PeerSessionOwner {
     builder.applyMinimal();
     builder.secretKey(this.enrollment.seedBytes());
     builder.alpns([Array.from(Buffer.from(PEER_ALPN))]);
+    const evalBind = evalIrohBindAddress();
+    if (evalBind) builder.bindAddr(evalBind);
     const relays = this.lease.current?.relayUrls;
     if (!relays?.length) throw new EndpointFailure("NO_APPROVED_RELAY", true);
     builder.relayMode(native.RelayMode.customFromUrls(relays));
@@ -274,13 +286,6 @@ export class NativePeerSessions extends PeerSessionOwner {
   }
 
   protected override payloadTransport(_peerId?: string): "iroh" { return "iroh"; }
-
-  override attachStream(bus: MessageBus, opts: AttachStreamOpts): StreamHandle {
-    return super.attachStream(bus, { ...opts, onLocalReady: (id) => {
-      opts.onLocalReady?.(id);
-      opts.onAdmitted?.(id);
-    } });
-  }
 
   protected override onSessionEstablished(peerId: string): void {
     const peer = this.nativePeers.get(peerId);

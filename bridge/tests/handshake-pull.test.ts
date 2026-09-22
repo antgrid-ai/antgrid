@@ -1,5 +1,5 @@
 // v3 E2E session state machine: reactive, acked, make-before-break, and one
-// session PER APP DEVICE. Replaces the v2 pull-model handshake suite — the
+// session PER APP DEVICE. Replaces the v2 pull-model handshake suite â€” the
 // wire dispatch is now kind-byte (handshake vs sealed) rather than try-parse,
 // every handshake message carries an `attemptId`, a fresh client-hello from the
 // SAME device triggers a REKEY (a new candidate attempt) even while a session is
@@ -9,7 +9,7 @@ import { test, expect, afterEach } from "bun:test";
 import { generateKeyPairSync } from "node:crypto";
 import { encodeRouteFrame, FrameKind } from "antgrid-wire";
 import { generateEphemeralKeypair, deriveSharedSecret } from "../src/key-exchange";
-import { RelayClient, MAX_APP_SESSIONS } from "../src/relay-client";
+import { TestPeerSessionOwner, MAX_APP_SESSIONS } from "./test-peer-session-owner";
 import { MessageBus } from "../src/message-bus";
 import {
   buildTranscript, deriveSessionKeys, phoneConfirmTag, agentConfirmTag,
@@ -20,10 +20,10 @@ const AGENT_DEVICE_ID = "agent-1";
 const PHONE_ID = "phone-1";
 const PHONE_2_ID = "phone-2";
 
-let clients: RelayClient[] = [];
+let clients: TestPeerSessionOwner[] = [];
 afterEach(() => { for (const c of clients.splice(0)) try { c.close(); } catch {} });
 
-/** The account device behind a per-machine relay slot — what the transcript and
+/** The account device behind a per-machine relay slot â€” what the transcript and
  *  every identity lookup are keyed by (mirrors `baseSlotDeviceId`). */
 function baseOf(routeId: string): string {
   const hash = routeId.indexOf("#");
@@ -43,11 +43,11 @@ function ed25519Pair(): { seedB64: string; pubB64: string } {
 }
 
 /** Feed a binary route frame straight into the client's dispatch, exactly as
- *  `handleBinaryFrame` receives it off the socket — exercises the real
+ *  `handleBinaryFrame` receives it off the socket â€” exercises the real
  *  kind-byte dispatch (kind 1 = handshake plaintext, kind 0 = sealed). */
-function injectFrame(client: RelayClient, kind: FrameKind, payload: Buffer, channel: "control" | "preview" = "control", from: string = PHONE_ID): void {
+function injectFrame(client: TestPeerSessionOwner, kind: FrameKind, payload: Buffer, channel: "control" | "preview" = "control", from: string = PHONE_ID): void {
   const frame = encodeRouteFrame({ type: "message", from, channel }, payload, kind);
-  (client as any).handleBinaryFrame(Buffer.from(frame));
+  client.injectRouteFrame(Buffer.from(frame));
 }
 
 /** Build a phone-signed client-hello (empty agent-pub slot, per pull-model
@@ -111,7 +111,7 @@ function buildPhoneTransport(args: {
 }
 
 interface Handshaked {
-  client: RelayClient;
+  client: TestPeerSessionOwner;
   sent: Array<string | Buffer>;
   attemptId: string;
   phoneTransport: E2eTransport;
@@ -124,8 +124,8 @@ function freshClient(args: {
   phoneEd: ReturnType<typeof ed25519Pair>;
   peerId: string;
   sent: Array<string | Buffer>;
-}): RelayClient {
-  const client = RelayClient.forTest({
+}): TestPeerSessionOwner {
+  const client = TestPeerSessionOwner.forTest({
     generateKeypair: generateEphemeralKeypair,
     sendPayload: (p) => args.sent.push(p),
     peerId: args.peerId,
@@ -142,7 +142,7 @@ function freshClient(args: {
  *  route address the frames arrive on; the caller owns the outbound sink and
  *  must have taught the client this device's pinned Ed25519 key. */
 function handshakeOn(args: {
-  client: RelayClient;
+  client: TestPeerSessionOwner;
   sent: Array<string | Buffer>;
   phoneEd: ReturnType<typeof ed25519Pair>;
   attemptId: string;
@@ -202,12 +202,12 @@ function handshakeOn(args: {
   return { transport, keys };
 }
 
-/** Drive a full acked handshake (client-hello → agent-hello → agent-ready →
- *  app:ready → established) on a fresh forTest client and return the pieces a
+/** Drive a full acked handshake (client-hello â†’ agent-hello â†’ agent-ready â†’
+ *  app:ready â†’ established) on a fresh forTest client and return the pieces a
  *  test needs to keep driving the session. */
 function establishSession(opts: { agentEd: ReturnType<typeof ed25519Pair>; phoneEd: ReturnType<typeof ed25519Pair>; attemptId: string; onHandshakeComplete?: () => void; capabilities?: object }): Handshaked {
   const sent: Array<string | Buffer> = [];
-  const client = RelayClient.forTest({
+  const client = TestPeerSessionOwner.forTest({
     generateKeypair: generateEphemeralKeypair,
     sendPayload: (p) => sent.push(p),
     peerId: PHONE_ID,
@@ -275,7 +275,7 @@ test("duplicate app:ready for the live attemptId is idempotent: single establish
   expect(handshakeDone).toBe(1);
   const sentBefore = sent.length;
 
-  // The phone retransmits app:ready every 2s until it sees `established` —
+  // The phone retransmits app:ready every 2s until it sees `established` â€”
   // a duplicate for the already-live attempt must not re-run the swap or
   // re-fire onHandshakeComplete, just re-ack.
   const appReadyJson = JSON.stringify({ type: "app:ready", attemptId, confirm: phoneConfirmTag(phoneKeys.confirm).toString("base64") });
@@ -311,7 +311,7 @@ test("a session carries pullsTree false for a wrong-typed capability", () => {
   expect(client.peerSession(PHONE_ID)?.pullsTree).toBe(false);
 });
 
-test("a torn-down session takes its pullsTree with it — the capability does not outlive the app", () => {
+test("a torn-down session takes its pullsTree with it â€” the capability does not outlive the app", () => {
   // The "nobody is attached" answer is no longer this file's to give: with N
   // devices the question is whether EVERY established one pulls, which
   // `everyClientPullsTrees` in agent-core asks of an empty roster.
@@ -349,7 +349,7 @@ test("peerSupportsTerminalFramesV1 is false for a wrong-typed capability", () =>
   expect(client.peerSession(PHONE_ID)?.terminalFramesV1).toBe(false);
 });
 
-test("peerSupportsTerminalFramesV1 reads false once the session is torn down — no app cannot render frames", () => {
+test("peerSupportsTerminalFramesV1 reads false once the session is torn down â€” no app cannot render frames", () => {
   const { client } = establishSession({
     agentEd: ed25519Pair(), phoneEd: ed25519Pair(), attemptId: "attempt-a",
     capabilities: { checkoutRouting: true, terminalFramesV1: true },
@@ -375,7 +375,7 @@ test("agent rejects a client-hello with an invalid transcript signature", () => 
   const agentEd = ed25519Pair();
   const phoneEd = ed25519Pair();
   const sent: Array<string | Buffer> = [];
-  const client = RelayClient.forTest({
+  const client = TestPeerSessionOwner.forTest({
     generateKeypair: generateEphemeralKeypair,
     sendPayload: (p) => sent.push(p),
     peerId: PHONE_ID,
@@ -406,7 +406,7 @@ test("agent rejects a client-hello signed by the wrong phone key", () => {
   const phoneEd = ed25519Pair();
   const attackerEd = ed25519Pair();
   const sent: Array<string | Buffer> = [];
-  const client = RelayClient.forTest({
+  const client = TestPeerSessionOwner.forTest({
     generateKeypair: generateEphemeralKeypair,
     sendPayload: (p) => sent.push(p),
     peerId: PHONE_ID,
@@ -433,7 +433,7 @@ test("kind-1 garbage is dropped: non-JSON payload and a non-client-hello type", 
   const agentEd = ed25519Pair();
   const phoneEd = ed25519Pair();
   const sent: Array<string | Buffer> = [];
-  const client = RelayClient.forTest({
+  const client = TestPeerSessionOwner.forTest({
     generateKeypair: generateEphemeralKeypair,
     sendPayload: (p) => sent.push(p),
     peerId: PHONE_ID,
@@ -455,7 +455,7 @@ test("send() drops app messages (never plaintext) when no E2E session is establi
   const agentEd = ed25519Pair();
   const phoneEd = ed25519Pair();
   const sent: Array<string | Buffer> = [];
-  const client = RelayClient.forTest({
+  const client = TestPeerSessionOwner.forTest({
     generateKeypair: generateEphemeralKeypair,
     sendPayload: (p) => sent.push(p),
     peerId: PHONE_ID,
@@ -475,7 +475,7 @@ test("sealed app envelope on the preview channel is routed to onTunnelMessage af
   const { client, phoneTransport } = establishSession({ agentEd: ed25519Pair(), phoneEd: ed25519Pair(), attemptId: "attempt-a" });
   (client as any).opts.onTunnelMessage = (m: unknown) => tunnelMsgs.push(m);
 
-  // App traffic is always the `{ m }` envelope now — even
+  // App traffic is always the `{ m }` envelope now â€” even
   // non-AbMessage tunnel-protocol frames, which fall through parseMessageFast
   // to parseTunnelMessage inside dispatchControlPlane.
   const tunnelReq = { type: "tunnel:http-request", requestId: "req-1", port: 3000, method: "GET", path: "/" };
@@ -523,12 +523,12 @@ test("a stale half-open handshake attempt expires without disturbing the live es
   const agentEd = ed25519Pair();
   const phoneEd = ed25519Pair();
   const { client, sent, phoneTransport } = establishSession({ agentEd, phoneEd, attemptId: "attempt-a" });
-  // Test seam (justified src change, see report): the real HALF_OPEN_MS is 30s —
+  // Test seam (justified src change, see report): the real HALF_OPEN_MS is 30s â€”
   // override it so the expiry fires within the test's lifetime.
   (client as any).opts.halfOpenMs = 20;
 
   // A second client-hello arrives but the phone never completes it with
-  // app:ready — a stale/abandoned attempt. It must NOT disturb the live
+  // app:ready â€” a stale/abandoned attempt. It must NOT disturb the live
   // established session (attempt-a).
   const app2 = generateEphemeralKeypair();
   injectFrame(
@@ -567,7 +567,7 @@ test("rekey mid-session: old keys decrypt until the new confirm, then swap + zer
   const probeA = phoneA.seal(JSON.stringify({ type: "ping" }));
   expect(oldSession.transport.open(probeA)).not.toBeNull();
 
-  // Reactive rekey: a fresh client-hello arrives WHILE established — the agent
+  // Reactive rekey: a fresh client-hello arrives WHILE established â€” the agent
   // must run the handshake again rather than dropping it. Re-point the
   // outbound sink (an instance field on the forTest client) to a fresh array
   // so the rekey's agent-hello/agent-ready are observable in isolation.
@@ -651,7 +651,7 @@ test("a different device's verified client-hello is admitted ALONGSIDE the live 
   expect(sessionA.transport.open(phoneA.seal(JSON.stringify({ type: "ping" })))).not.toBeNull();
   expect(client.establishedPeers().map((p) => p.peerId)).toEqual([PHONE_ID, PHONE_2_ID]);
 
-  // Nothing at all was sealed for phone A — no session-takeover, no teardown
+  // Nothing at all was sealed for phone A â€” no session-takeover, no teardown
   // notice. Every sealed frame here belongs to phone B's admission.
   for (const p of bSent) if (typeof p !== "string") expect(phoneA.open(p as Buffer)).toBeNull();
 });
@@ -706,7 +706,7 @@ test("each admitted device opens only its own inbound frames, and the sender's p
   injectFrame(client, FrameKind.sealed, phoneA.seal(req("from-a")), "preview", PHONE_ID);
   injectFrame(client, FrameKind.sealed, phoneB.seal(req("from-b")), "preview", PHONE_2_ID);
 
-  // Identity comes from the session whose keys opened the frame — the auth tag
+  // Identity comes from the session whose keys opened the frame â€” the auth tag
   // is the proof; the relay's `from` is only the lookup hint.
   expect(seen).toEqual([
     { requestId: "from-a", peerId: PHONE_ID },
@@ -714,7 +714,7 @@ test("each admitted device opens only its own inbound frames, and the sender's p
   ]);
 });
 
-test("an outbound broadcast is sealed once per established session — each device opens only its own copy", () => {
+test("an outbound broadcast is sealed once per established session â€” each device opens only its own copy", () => {
   const agentEd = ed25519Pair();
   const phoneAEd = ed25519Pair();
   const phoneBEd = ed25519Pair();
@@ -758,17 +758,17 @@ test("peer-offline for one device suppresses that session alone; the coarse peer
   mux.notifyPeerSessionOffline = (peerId: string) => sessionGone.push(peerId);
   mux.notifyPeerOffline = () => { coarseOffline++; };
 
-  (client as any).handleTextMessage(JSON.stringify({ type: "peer-offline", peerId: PHONE_ID }));
+  client.markPeerOffline(PHONE_ID);
 
   expect(sessionGone).toEqual([PHONE_ID]);
   expect(coarseOffline).toBe(0); // phone B is still driving the machine
   expect(client.peerSession(PHONE_ID)?.reachable).toBe(false);
   expect(client.peerSession(PHONE_2_ID)?.reachable).toBe(true);
-  // Keys are KEPT while the device is merely unreachable — push targeting and a
+  // Keys are KEPT while the device is merely unreachable â€” push targeting and a
   // quick reconnect both need them; UNREACHABLE_SESSION_TTL_MS reaps them.
   expect(client._handshakeComplete()).toBe(true);
 
-  (client as any).handleTextMessage(JSON.stringify({ type: "peer-offline", peerId: PHONE_2_ID }));
+  client.markPeerOffline(PHONE_2_ID);
 
   expect(sessionGone).toEqual([PHONE_ID, PHONE_2_ID]);
   expect(coarseOffline).toBe(1); // fired exactly once, on the last one
@@ -833,7 +833,7 @@ test("admitting past MAX_APP_SESSIONS evicts the least recently active device an
   // The oldest-silent session went, the newcomer took its place, everyone else
   // is untouched.
   expect(client.establishedPeers().map((p) => p.peerId)).toEqual(routeIds.slice(1));
-  // The evictee learns explicitly — without the sealed notice it would rekey
+  // The evictee learns explicitly â€” without the sealed notice it would rekey
   // straight back into the same eviction.
   const notice = evictionSent.find((p) => {
     if (typeof p === "string") return false;
@@ -848,15 +848,15 @@ test("a sibling peer-online creates no session and leaves the live one untouched
   const { client } = establishSession({ agentEd: ed25519Pair(), phoneEd: ed25519Pair(), attemptId: "attempt-a" });
   expect(client.establishedPeers().map((p) => p.peerId)).toEqual([PHONE_ID]);
 
-  // A same-account sibling comes online — presence, NOT a handshake.
-  (client as any).handleTextMessage(JSON.stringify({ type: "peer-online", peerId: PHONE_2_ID }));
+  // A same-account sibling comes online â€” presence, NOT a handshake.
+  client.markPeerOnline(PHONE_2_ID);
 
   expect(client.establishedPeers().map((p) => p.peerId)).toEqual([PHONE_ID]);
   expect(client._handshakeComplete()).toBe(true);
 });
 
-test("peer-online alone establishes nothing — presence is not a handshake", () => {
-  const client = RelayClient.forTest({
+test("peer-online alone establishes nothing â€” presence is not a handshake", () => {
+  const client = TestPeerSessionOwner.forTest({
     generateKeypair: generateEphemeralKeypair,
     sendPayload: () => {},
     peerId: PHONE_ID,
@@ -865,42 +865,16 @@ test("peer-online alone establishes nothing — presence is not a handshake", ()
   clients.push(client);
   expect(client.hasEstablishedSession()).toBe(false);
 
-  (client as any).handleTextMessage(JSON.stringify({ type: "peer-online", peerId: PHONE_2_ID }));
+  client.markPeerOnline(PHONE_2_ID);
 
   expect(client.hasEstablishedSession()).toBe(false);
   expect(client.establishedPeers()).toEqual([]);
 });
 
-// `pair-connected` no longer parses as a ServerMessage, so `handleTextMessage`
-// drops the frame before it ever reaches the switch. The relay never emits it
-// — admission is account-derived trust resolved at client-hello time, not
-// this presence notification. Either way, it must neither disturb a live
-// session nor create one.
-test("pair-connected never touches a session, live or idle", () => {
-  const { client } = establishSession({ agentEd: ed25519Pair(), phoneEd: ed25519Pair(), attemptId: "attempt-a" });
-
-  (client as any).handleTextMessage(JSON.stringify({ type: "pair-connected", peerId: PHONE_2_ID, peerName: "phone-2", peerType: "app" }));
-
-  expect(client.establishedPeers().map((p) => p.peerId)).toEqual([PHONE_ID]);
-  expect(client._handshakeComplete()).toBe(true);
-
-  const idle = RelayClient.forTest({
-    generateKeypair: generateEphemeralKeypair,
-    sendPayload: () => {},
-    peerId: PHONE_ID,
-    deviceId: AGENT_DEVICE_ID,
-  });
-  clients.push(idle);
-
-  (idle as any).handleTextMessage(JSON.stringify({ type: "pair-connected", peerId: PHONE_2_ID, peerName: "phone-2", peerType: "app" }));
-
-  expect(idle.hasEstablishedSession()).toBe(false);
-});
-
 // Per-machine relay slots: the app addresses each machine on its own
 // `<accountDeviceUuid>#<machineDeviceUuid>` slot so it can hold several
 // machines open at once (the relay arbitrates per `hello.deviceId` and
-// supersedes an equal epoch). The slot is a TRANSPORT address — identity
+// supersedes an equal epoch). The slot is a TRANSPORT address â€” identity
 // resolution and the transcript stay on the bare account device.
 const PHONE_SLOT = `${PHONE_ID}#${AGENT_DEVICE_ID}`;
 
@@ -908,7 +882,7 @@ test("a client-hello from a per-machine slot admits against the bare account ide
   const agentEd = ed25519Pair();
   const phoneEd = ed25519Pair();
   const sent: Array<string | Buffer> = [];
-  const client = RelayClient.forTest({
+  const client = TestPeerSessionOwner.forTest({
     generateKeypair: generateEphemeralKeypair,
     sendPayload: (p) => sent.push(p),
     peerId: PHONE_SLOT,
@@ -965,7 +939,7 @@ test("a client-hello from a per-machine slot admits against the bare account ide
   );
 
   expect(client._handshakeComplete()).toBe(true);
-  // The session is keyed by the SLOT — that is the socket the phone is on, and
+  // The session is keyed by the SLOT â€” that is the socket the phone is on, and
   // every frame sealed for it is addressed there.
   expect(client.establishedPeers().map((p) => p.peerId)).toEqual([PHONE_SLOT]);
 });
@@ -982,28 +956,28 @@ test("presence for a slot scoped at another machine never moves our session's re
   handshakeOn({ client, sent, phoneEd, attemptId: "attempt-slot", from: PHONE_SLOT });
 
   const foreign = `${PHONE_ID}#some-other-agent`;
-  (client as any).handleTextMessage(JSON.stringify({ type: "peer-offline", peerId: foreign }));
+  client.markPeerOffline(foreign);
   expect(client.peerSession(PHONE_SLOT)?.reachable).toBe(true);
 
-  (client as any).handleTextMessage(JSON.stringify({ type: "peer-offline", peerId: PHONE_SLOT }));
+  client.markPeerOffline(PHONE_SLOT);
   expect(client.peerSession(PHONE_SLOT)?.reachable).toBe(false);
 
-  (client as any).handleTextMessage(JSON.stringify({ type: "peer-online", peerId: foreign }));
+  client.markPeerOnline(foreign);
   expect(client.peerSession(PHONE_SLOT)?.reachable).toBe(false);
 
-  (client as any).handleTextMessage(JSON.stringify({ type: "peer-online", peerId: PHONE_SLOT }));
+  client.markPeerOnline(PHONE_SLOT);
   expect(client.peerSession(PHONE_SLOT)?.reachable).toBe(true);
 });
 
 // An unscoped id carries no claim about who it is for, and every pre-slot
-// client sends one — it must never be read as another machine's.
+// client sends one â€” it must never be read as another machine's.
 test("presence for an unscoped peer id is never foreign", () => {
   const { client } = establishSession({ agentEd: ed25519Pair(), phoneEd: ed25519Pair(), attemptId: "attempt-a" });
 
-  (client as any).handleTextMessage(JSON.stringify({ type: "peer-offline", peerId: PHONE_ID }));
+  client.markPeerOffline(PHONE_ID);
   expect(client.peerSession(PHONE_ID)?.reachable).toBe(false);
 
-  (client as any).handleTextMessage(JSON.stringify({ type: "peer-online", peerId: PHONE_ID }));
+  client.markPeerOnline(PHONE_ID);
   expect(client.peerSession(PHONE_ID)?.reachable).toBe(true);
 });
 
@@ -1021,14 +995,10 @@ test("peer-offline for a slot scoped at another machine does not suppress our st
   let suppressed = false;
   mux.notifyPeerOffline = () => { suppressed = true; };
 
-  (client as any).handleTextMessage(
-    JSON.stringify({ type: "peer-offline", peerId: `${PHONE_ID}#some-other-agent` }),
-  );
+  client.markPeerOffline(`${PHONE_ID}#some-other-agent`);
   expect(suppressed).toBe(false);
 
-  // …but our own machine's slot going offline still suppresses it.
-  (client as any).handleTextMessage(
-    JSON.stringify({ type: "peer-offline", peerId: PHONE_SLOT }),
-  );
+  // â€¦but our own machine's slot going offline still suppresses it.
+  client.markPeerOffline(PHONE_SLOT);
   expect(suppressed).toBe(true);
 });

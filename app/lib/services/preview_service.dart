@@ -63,15 +63,7 @@ class PreviewService {
   /// which the bridge treats as a no-op.
   static const _maxCancelledIds = 64;
 
-  StreamSubscription<void>? _dropSub;
   StreamSubscription<void>? _resumeSub;
-  Timer? _retrySweep;
-
-  /// Grace period between learning a frame was dropped and re-sending. It is
-  /// also the discriminator: the relay names no frame, so anything still
-  /// in-flight after a normal round trip is the plausible casualty, while
-  /// healthy requests have already answered and are gone from the map.
-  static const _retryGrace = Duration(milliseconds: 600);
 
   /// Bounds amplification — a re-send costs frames on a link that just proved
   /// it has none to spare. Counted across every re-send path, so a request
@@ -124,9 +116,6 @@ class PreviewService {
       _onReestablished,
     );
     _txSub = session.transport.messages.listen(_onTransportMessage);
-    _dropSub = session.transport.droppedFrames.listen(
-      (_) => _onFramesDropped(),
-    );
   }
 
   static const _snapshotHydratorKey = 'preview:snapshot';
@@ -320,7 +309,10 @@ class PreviewService {
           ? const <int>[]
           : decodeTunnelSlice(msg.data, msg.bodyEncoding);
     } catch (e) {
-      _failHead(entry, TunnelStreamException(entry.requestId, 'undecodable start: $e'));
+      _failHead(
+        entry,
+        TunnelStreamException(entry.requestId, 'undecodable start: $e'),
+      );
       _sendCancel(msg.requestId);
       return;
     }
@@ -372,10 +364,7 @@ class PreviewService {
       return;
     }
     if (msg.seq != body.nextSeq) {
-      _abortBody(
-        entry,
-        'chunk ${msg.seq} arrived, expected ${body.nextSeq}',
-      );
+      _abortBody(entry, 'chunk ${msg.seq} arrived, expected ${body.nextSeq}');
       return;
     }
     List<int> bytes;
@@ -409,10 +398,7 @@ class PreviewService {
     }
     final received = body.nextSeq - 1;
     if (msg.chunks != received) {
-      _abortBody(
-        entry,
-        'end after ${msg.chunks} chunk(s), received $received',
-      );
+      _abortBody(entry, 'end after ${msg.chunks} chunk(s), received $received');
       return;
     }
     body.idle?.cancel();
@@ -438,8 +424,7 @@ class PreviewService {
     _sendCancel(oldId);
 
     final method = entry.request.method.toUpperCase();
-    if ((method == 'GET' || method == 'HEAD') &&
-        entry.attempts < _maxRetries) {
+    if ((method == 'GET' || method == 'HEAD') && entry.attempts < _maxRetries) {
       entry.request = entry.request.copyWith(requestId: _newRequestId());
       entry.attempts++;
       entry.sentAt = DateTime.now();
@@ -579,45 +564,6 @@ class PreviewService {
     _statsCompleted = 0;
     _statsRetried = 0;
     _statsTimedOut = 0;
-  }
-
-  // --- Dropped-frame recovery ---
-
-  /// The relay dropped a routed frame. It identifies neither the frame nor the
-  /// direction, so a request whose reply never arrives is indistinguishable
-  /// from one that is merely slow — hence [_retryGrace] before acting, and
-  /// GET/HEAD only. A re-send that is not safe to repeat is worse than the
-  /// head timeout it would save.
-  ///
-  /// A request whose head has landed is never re-sent: bytes may already be in
-  /// the browser and nothing can be spliced onto a partly delivered body. A
-  /// drop inside a body surfaces through the `seq` check or the idle timer as
-  /// a truncated response instead.
-  void _onFramesDropped() {
-    // A burst of drops arrives as a burst of errors; one sweep covers them all.
-    _retrySweep ??= Timer(_retryGrace, () {
-      _retrySweep = null;
-      _resendStalledRequests();
-    });
-  }
-
-  void _resendStalledRequests() {
-    if (_disposed) return;
-    final now = DateTime.now();
-    for (final entry in _pendingRequests.values.toList()) {
-      final method = entry.request.method.toUpperCase();
-      if (method != 'GET' && method != 'HEAD') continue;
-      if (entry.body != null) continue;
-      if (entry.attempts >= _maxRetries) continue;
-      // The sweep is scheduled off the DROP, not off any one request, so
-      // without this the map's youngest entries — a page load keeps adding
-      // them — are duplicated while still well inside a normal round trip.
-      if (now.difference(entry.sentAt) < _retryGrace) continue;
-      entry.attempts++;
-      entry.sentAt = now;
-      _statsRetried++;
-      _sendTunnelRequest(entry.request);
-    }
   }
 
   void _sendTunnelRequest(TunnelHttpRequest request) {
@@ -1010,9 +956,6 @@ class PreviewService {
     session.unhydrateCheckout(checkoutId, _snapshotHydratorKey);
     session.unhydrateCheckout(checkoutId, _reestablishHydratorKey);
 
-    _retrySweep?.cancel();
-    _retrySweep = null;
-
     // Before the proxies stop, and never in place of this loop: a stalled
     // body's subscription only learns the socket died on its next write, so
     // `HttpServer.close(force: true)` alone never reaches its `onCancel` and
@@ -1043,8 +986,6 @@ class PreviewService {
     _statusSub = null;
     await _txSub?.cancel();
     _txSub = null;
-    await _dropSub?.cancel();
-    _dropSub = null;
     await _resumeSub?.cancel();
     _resumeSub = null;
 
@@ -1135,6 +1076,7 @@ class _WsOutboundQueue {
   /// upstream, so both directions end.
   static const _maxQueuedFrames = 64;
   static const _maxQueuedBytes = 1024 * 1024;
+
   /// A send resolves at hand-off to the socket, so this bounds the wait for
   /// the channel ahead of this frame. Hitting it aborts the tunnel, which is
   /// the right surface for a preview channel that has stopped draining: a WS

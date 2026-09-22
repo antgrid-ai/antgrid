@@ -8,12 +8,8 @@
  *  written behind a full preview window waits ≤ 2 MiB of link time. */
 export const CHANNEL_WINDOW_BYTES = 2_097_152;
 
-/** Sealed bytes a sender may have in flight PER SOCKET (both channels
- *  together). Bounds what a liveness frame written now sits behind, since
- *  neither client can read its socket buffer (Bun's client `bufferedAmount`
- *  reads 0; dart:io exposes nothing). Window + 1 MiB so control still flows
- *  while preview is full. Per peer: the relay→bridge socket fans in every app
- *  of the account, so k apps can hold k × this toward one bridge. */
+/** Sealed bytes a sender may have in flight across both channels on one peer
+ * connection. Window + 1 MiB leaves headroom for control while preview is full. */
 export const SOCKET_INFLIGHT_BYTES = 3_145_728;
 
 /** Receiver credits once this many uncredited bytes arrived on a channel.
@@ -22,7 +18,7 @@ export const CREDIT_BATCH_BYTES = 524_288;
 
 /** How old a credit-time anchor must be before bytes it saw written, and the
  *  peer has still not counted, are presumed lost. Two liveness ticks: the peer
- *  credits at least once per tick and the relay delivers a channel in order,
+ *  credits at least once per tick and the the native record stream is ordered,
  *  so a credit generated this long after a write has counted it if it ever
  *  arrived. Time rather than a credit count, because byte-triggered credits
  *  land milliseconds apart on a fast link. */

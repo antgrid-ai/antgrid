@@ -1,26 +1,13 @@
 import { verify as edVerify } from "node:crypto";
 import type { ServerWebSocket } from "bun";
 import type { RelayConfig } from "./config.js";
-import { mayRoute } from "./authz.js";
 import { Connections, type WsData, type Connection } from "./connections.js";
 import { ReplayCache } from "./replay-cache.js";
-import {
-  ClientMessage,
-  HelloMessage,
-  RouteHeader,
-  type RouteHeaderOutbound,
-} from "./protocol.js";
-import { MessageRateLimiter, TokenBucketRateLimiter, pairKey } from "./rate-limiter.js";
+import { ClientMessage, HelloMessage } from "./protocol.js";
+import { MessageRateLimiter, TokenBucketRateLimiter } from "./rate-limiter.js";
 import { logger, setLogLevel } from "./logger.js";
 import { ConnectionLivenessTracker } from "./connection-liveness.js";
-import {
-  buildHelloSigBody,
-  encodeRouteFrame,
-  decodeRouteFrame,
-  FrameError,
-  MAX_FRAME_PAYLOAD,
-  type FrameKind,
-} from "antgrid-wire";
+import { buildHelloSigBody, PEER_MAX_RECORD_BYTES } from "antgrid-wire";
 import { JwksCache } from "./license/jwks-cache.js";
 import { LicenseCache } from "./license/cache.js";
 import { createLicenseGate, type LicenseGate } from "./license/gate.js";
@@ -86,7 +73,6 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
 
   const connections = new Connections();
   const replayCache = new ReplayCache({ ttlMs: config.replayTtlMs });
-  const routeRateLimiter = new TokenBucketRateLimiter(config.rateLimitMsgPerSec, config.rateLimitMsgBurst);
   const pushRateLimiter = new MessageRateLimiter(config.pushRateLimitPerSec);
   const jsonRateLimiter = new TokenBucketRateLimiter(config.jsonRateLimitPerSec, config.jsonRateLimitBurst);
   const licenseCache = deps.licenseCache ?? new LicenseCache({ maxEntries: config.licenseCacheMaxEntries });
@@ -124,63 +110,6 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
     }
   }
 
-  const MSG_WINDOW_MS = 10000;
-  const messageTimes: number[] = [];
-  let msgHead = 0;
-  /** Monotonic since start: frames the recipient's socket refused because it
-   *  was already backlogged. The only vantage point from which account fan-in
-   *  toward one bridge is visible. */
-  let backpressureDrops = 0;
-  /** Monotonic since start: ROUTED frames refused by the per-(pair, channel)
-   *  token bucket. Scoped to routing deliberately — the control-plane and push
-   *  limiters reject under the same `MESSAGE_RATE_LIMITED` code and are not
-   *  counted here, so this is not a total. Kept apart from `backpressureDrops`
-   *  because the two name different faults — a sender outrunning its budget
-   *  versus a recipient that cannot keep up — and a storm of one reads as zero
-   *  on the other. */
-  let routeRateLimitDrops = 0;
-
-  function recordMessage(): void {
-    const now = Date.now();
-    messageTimes.push(now);
-    const cutoff = now - MSG_WINDOW_MS;
-    while (msgHead < messageTimes.length && messageTimes[msgHead] <= cutoff) msgHead++;
-    if (msgHead > messageTimes.length / 2 && msgHead > 1000) {
-      messageTimes.splice(0, msgHead);
-      msgHead = 0;
-    }
-  }
-
-  // A drop is reported to the SENDER alone, so neither peer can see the other
-  // direction's loss and neither can size a page load's real damage. The relay
-  // is the one vantage point that sees both directions, which is why the count
-  // lives here rather than in the bridge's or the app's own drop handler.
-  // Coalesced: an overrun arrives as a burst, and a line per frame would be the
-  // flood rather than the diagnosis.
-  const DROP_LOG_WINDOW_MS = 1000;
-  const droppedByBucket = new Map<string, number>();
-  let dropFlushTimer: ReturnType<typeof setTimeout> | null = null;
-
-  function recordDroppedFrame(bucket: string): void {
-    droppedByBucket.set(bucket, (droppedByBucket.get(bucket) ?? 0) + 1);
-    if (dropFlushTimer) return;
-    dropFlushTimer = setTimeout(() => {
-      dropFlushTimer = null;
-      let total = 0;
-      const buckets: Record<string, number> = {};
-      for (const [k, n] of droppedByBucket) {
-        total += n;
-        buckets[k] = n;
-      }
-      droppedByBucket.clear();
-      logger.warn("Routed frames dropped", {
-        total,
-        windowMs: DROP_LOG_WINDOW_MS,
-        buckets,
-      });
-    }, DROP_LOG_WINDOW_MS);
-    dropFlushTimer.unref?.();
-  }
 
   function sendJson(ws: ServerWebSocket<WsData>, data: unknown): void {
     if (ws.readyState !== 1) return;
@@ -188,14 +117,7 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
   }
 
   interface ErrorOpts {
-    ref?: string;
     serverTime?: string;
-    /** Routed-frame drops only. The route header carries no message id, so the
-     *  channel and the payload length are all the sender can be told; that is
-     *  exactly what it needs to un-charge the flow-control window it had
-     *  already committed to those bytes. */
-    channel?: "control" | "preview";
-    bytes?: number;
   }
   function sendError(
     ws: ServerWebSocket<WsData>,
@@ -370,9 +292,8 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
         // hasn't reaped yet. Rejecting it strands the device: SUPERSEDED is
         // retryable:false, and clients rightly stop reconnecting on it.
         //
-        // Release the superseded connection (dropping its openStreams) BEFORE
-        // inserting the successor, so one device is never counted twice across
-        // a restart.
+        // Remove the superseded socket before admitting its successor so the
+        // identity always has exactly one live holder.
         connections.remove(existing);
         liveness.remove(existing.connectionId);
         sendErrorAndClose(existing.ws, "SUPERSEDED", "replaced by a newer connection", false, 1008);
@@ -396,7 +317,6 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
       connectedAt: now,
       lastSeen: now,
       claims,
-      openStreams: new Set<string>(),
     };
     connections.insert(conn);
     liveness.add(conn.connectionId, now);
@@ -422,18 +342,29 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
   }
 
   async function handleControlMessage(ws: ServerWebSocket<WsData>, raw: string): Promise<void> {
-    // JSON control messages are rate-limited per connection —
-    // dropped, never closed, so a pairing burst degrades gracefully.
-    if (!jsonRateLimiter.allow(ws.data.connectionId)) {
-      sendError(ws, "MESSAGE_RATE_LIMITED", "control message rate limit exceeded", true);
-      return;
-    }
-
     let parsed: unknown;
     try {
       parsed = JSON.parse(raw);
     } catch {
-      sendError(ws, "INVALID_MESSAGE", "Invalid JSON", false);
+      if (!jsonRateLimiter.allow(ws.data.connectionId)) {
+        sendError(ws, "MESSAGE_RATE_LIMITED", "control message rate limit exceeded", true);
+      } else {
+        sendError(ws, "INVALID_MESSAGE", "Invalid JSON", false);
+      }
+      return;
+    }
+    if (
+      parsed !== null &&
+      typeof parsed === "object" &&
+      "type" in parsed &&
+      ((parsed as { type?: unknown }).type === "stream-open" ||
+        (parsed as { type?: unknown }).type === "stream-close")
+    ) {
+      sendErrorAndClose(ws, "PROTOCOL_VIOLATION", "Central relay streams are retired", false, 1008);
+      return;
+    }
+    if (!jsonRateLimiter.allow(ws.data.connectionId)) {
+      sendError(ws, "MESSAGE_RATE_LIMITED", "control message rate limit exceeded", true);
       return;
     }
     const result = ClientMessage.safeParse(parsed);
@@ -447,12 +378,11 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
       // Past hello per WsData but no live entry — the socket is being torn down.
       return;
     }
-    liveness.noteAuthenticatedInbound(conn.connectionId, Date.now());
 
     switch (msg.type) {
       case "hello":
         // A second hello on a ready socket is a protocol violation.
-        sendError(ws, "PROTOCOL_VIOLATION", "already past hello on this connection", false);
+        sendErrorAndClose(ws, "PROTOCOL_VIOLATION", "already past hello on this connection", false, 1008);
         return;
 
       case "ping":
@@ -462,50 +392,6 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
         ws.send(JSON.stringify({ type: "pong" }));
         return;
 
-      case "stream-open": {
-        if (conn.deviceType !== "agent") {
-          sendError(ws, "WRONG_DEVICE_TYPE", "Only agents can open streams", false);
-          return;
-        }
-        // Structural ceiling, NOT a return of the retired per-account quota:
-        // streams stay unmetered, but the set is attacker-growable (ids are
-        // client-chosen and nothing expires them until the socket dies), so it
-        // needs a bound that no real client can reach. Re-opening an id already
-        // held is exempt — it cannot grow the set, and the mux re-opens every
-        // attached stream on each `welcome`.
-        //
-        // Admission MUST stay await-free. The event loop is single-threaded, so
-        // with no yield between the checks and the add, concurrent opens cannot
-        // interleave past the ceiling or into an inconsistent stream table. Any
-        // future check added here must observe the same discipline — inserting
-        // an `await` reopens a check→admit TOCTOU.
-        if (
-          !conn.openStreams.has(msg.streamId) &&
-          conn.openStreams.size >= config.maxStreamsPerConnection
-        ) {
-          sendError(
-            ws,
-            "STREAM_LIMIT_EXCEEDED",
-            `Too many open streams on this connection (${config.maxStreamsPerConnection})`,
-            false,
-            { ref: msg.streamId },
-          );
-          return;
-        }
-        conn.openStreams.add(msg.streamId);
-        sendJson(ws, { type: "stream-opened", streamId: msg.streamId });
-        return;
-      }
-
-      case "stream-close": {
-        if (conn.deviceType !== "agent") {
-          sendError(ws, "WRONG_DEVICE_TYPE", "Only agents can close streams", false);
-          return;
-        }
-        conn.openStreams.delete(msg.streamId);
-        sendJson(ws, { type: "stream-closed", streamId: msg.streamId });
-        return;
-      }
 
       case "push:deliver": {
         if (conn.deviceType !== "agent") {
@@ -547,91 +433,12 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
     }
   }
 
-  function handleBinaryFrame(ws: ServerWebSocket<WsData>, buf: Buffer): void {
-    let decoded: { header: unknown; payload: Uint8Array; kind: FrameKind };
-    try {
-      decoded = decodeRouteFrame(buf);
-    } catch (e) {
-      if (e instanceof FrameError) {
-        sendErrorAndClose(ws, "PROTOCOL_VIOLATION", `Frame error: ${e.reason}`, false, 1008);
-        return;
-      }
-      throw e;
-    }
-
-    const headerResult = RouteHeader.safeParse(decoded.header);
-    if (!headerResult.success) {
-      sendErrorAndClose(ws, "PROTOCOL_VIOLATION", "Invalid route header", false, 1008);
-      return;
-    }
-    const header = headerResult.data;
-
-    const sender = connections.getByConnectionId(ws.data.connectionId);
-    if (!sender) {
-      sendErrorAndClose(ws, "NOT_AUTHENTICATED", "Must be authenticated to route", false, 1008);
-      return;
-    }
-    liveness.noteAuthenticatedInbound(sender.connectionId, Date.now());
-
-    // Authorization: account-derived and nothing else. Uniform
-    // PEER_OFFLINE for deny-and-offline alike — an unauthorized sender must not
-    // learn liveness (no presence oracle).
-    const target = connections.getByDeviceId(header.to);
-    if (!target || target.ws.readyState !== 1 || !mayRoute(sender, target)) {
-      sendError(ws, "PEER_OFFLINE", "Recipient not connected", true, {
-        channel: header.channel,
-        bytes: decoded.payload.length,
-      });
-      return;
-    }
-
-    // Keyed per (pair, channel), not per pair: `pairKey` sorts, so one bucket
-    // per pair is shared by BOTH directions and every channel — a preview page
-    // load and the terminal output arriving beside it draw on the same budget
-    // and starve each other. The channel is in the cleartext route header, so
-    // this costs no visibility into the sealed payload.
-    const key = `${pairKey(sender.deviceId, header.to)}|${header.channel}`;
-    if (!routeRateLimiter.allow(key)) {
-      recordDroppedFrame(key);
-      routeRateLimitDrops++;
-      sendError(ws, "MESSAGE_RATE_LIMITED", "Message rate limit exceeded", true, {
-        channel: header.channel,
-        bytes: decoded.payload.length,
-      });
-      return;
-    }
-
-    connections.updateLastSeen(sender.deviceId);
-
-    const outHeader: RouteHeaderOutbound = {
-      type: "message",
-      from: sender.deviceId,
-      channel: header.channel,
-      ts: Date.now(),
-    };
-    // Forward verbatim: the kind byte and sealed payload are opaque to us.
-    // Bun returns 0 when it discarded the message — the socket closed under us,
-    // or the recipient is past its backpressure limit. Ignoring that turns a
-    // drop into a hole the peer can only observe as a frag abort or a tunnel
-    // timeout minutes later, so it is reported like any other routed drop.
-    const status = target.ws.send(encodeRouteFrame(outHeader, decoded.payload, decoded.kind));
-    if (status === 0) {
-      recordDroppedFrame(`${key}|backpressure`);
-      backpressureDrops++;
-      sendError(ws, "ROUTE_FAILED", "Recipient backlogged", true, {
-        channel: header.channel,
-        bytes: decoded.payload.length,
-      });
-      return;
-    }
-    recordMessage();
-  }
 
   const pingInterval = config.pingIntervalMs > 0 ? setInterval(() => {
     const t = Date.now();
     const windowMs = config.pingIntervalMs + config.pongTimeoutMs;
     for (const live of connections.getAll()) {
-      if (liveness.isTimedOut(live.connectionId, t, windowMs, live.ws.getBufferedAmount())) {
+      if (liveness.isTimedOut(live.connectionId, t, windowMs)) {
         logger.info("Device timed out (no pong)", {
           connectionId: live.connectionId,
           deviceId: live.deviceId,
@@ -660,17 +467,9 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
       }
 
       if (url.pathname === "/metrics") {
-        const t = Date.now();
-        const cutoff = t - MSG_WINDOW_MS;
-        while (msgHead < messageTimes.length && messageTimes[msgHead] <= cutoff) msgHead++;
-        const activeCount = messageTimes.length - msgHead;
-        const messagesPerSec = activeCount / (MSG_WINDOW_MS / 1000);
         return Response.json({
           activeConnections: connections.getConnectionCount(),
-          messagesPerSec: Math.round(messagesPerSec * 100) / 100,
-          backpressureDrops,
-          routeRateLimitDrops,
-          uptime: Math.floor((t - startTime) / 1000),
+          uptime: Math.floor((Date.now() - startTime) / 1000),
         });
       }
 
@@ -719,14 +518,8 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
       return new Response("Not Found", { status: 404 });
     },
     websocket: {
-      // Bun's default `backpressureLimit` (16 MiB, measured — the docs' 1 MB
-      // line is stale) applies PER SOCKET, and a sender honouring
-      // SOCKET_INFLIGHT_BYTES keeps one peer well under it. The relay→bridge
-      // socket fans in every app of the account, though, so k uploading apps
-      // can hold k × that budget toward a single bridge; raising the limit only
-      // moves the drop, so it stays at the default and `backpressureDrops` in
-      // /metrics is the observable when fan-in actually bites.
-      maxPayloadLength: MAX_FRAME_PAYLOAD,
+      // Accept the retired frame size long enough to send its typed 1008 rejection.
+      maxPayloadLength: PEER_MAX_RECORD_BYTES,
       open(ws) {
         connections.incrementIpCount(ws.data.ip);
         const timer = setTimeout(() => {
@@ -752,7 +545,7 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
         if (typeof message === "string") {
           await handleControlMessage(ws, message);
         } else {
-          handleBinaryFrame(ws, Buffer.from(message));
+          sendErrorAndClose(ws, "PROTOCOL_VIOLATION", "Binary frames are not accepted by the control relay", false, 1008);
         }
       },
       close(ws) {
@@ -793,11 +586,8 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
       if (pingInterval) clearInterval(pingInterval);
       for (const t of helloTimers.values()) clearTimeout(t);
       helloTimers.clear();
-      if (dropFlushTimer) clearTimeout(dropFlushTimer);
-      dropFlushTimer = null;
       connections.clear();
       replayCache.destroy();
-      routeRateLimiter.destroy();
       pushRateLimiter.destroy();
       jsonRateLimiter.destroy();
       licenseCache.destroy();

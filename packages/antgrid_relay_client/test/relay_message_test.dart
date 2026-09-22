@@ -37,36 +37,18 @@ void main() {
       );
     });
 
-    test('parses stream-opened and stream-closed', () {
-      final opened = parseRelayMessage({
-        'type': 'stream-opened',
-        'streamId': 's1',
-      });
-      expect(opened, isA<StreamOpenedMessage>());
-      expect((opened as StreamOpenedMessage).streamId, 's1');
-
-      final closed = parseRelayMessage({
-        'type': 'stream-closed',
-        'streamId': 's1',
-      });
-      expect(closed, isA<StreamClosedMessage>());
-      expect((closed as StreamClosedMessage).streamId, 's1');
-    });
-
-    test('parses error with retryable/ref/serverTime', () {
+    test('parses error with retryable/serverTime', () {
       final msg = parseRelayMessage({
         'type': 'error',
         'code': 'PEER_OFFLINE',
         'message': 'peer not connected',
         'retryable': true,
-        'ref': 's1',
         'serverTime': '2026-07-16T00:00:00.000Z',
       });
       expect(msg, isA<ErrorMessage>());
       final e = msg as ErrorMessage;
       expect(e.code, 'PEER_OFFLINE');
       expect(e.retryable, isTrue);
-      expect(e.ref, 's1');
       expect(e.serverTime, '2026-07-16T00:00:00.000Z');
     });
 
@@ -93,7 +75,7 @@ void main() {
       );
     });
 
-    test('error omits optional ref/serverTime when absent', () {
+    test('error omits optional serverTime when absent', () {
       final msg =
           parseRelayMessage({
                 'type': 'error',
@@ -103,46 +85,7 @@ void main() {
               })
               as ErrorMessage;
       expect(msg.retryable, isFalse);
-      expect(msg.ref, isNull);
       expect(msg.serverTime, isNull);
-    });
-
-    test('parses a routed-frame drop report with channel and bytes', () {
-      // The only path a flow-control un-charge takes in production: socket text
-      // → parseRelayMessage → errorStream → MachineSession. A dropped field
-      // here shrinks the sender's window for the rest of the session, silently.
-      final msg =
-          parseRelayMessage({
-                'type': 'error',
-                'code': 'MESSAGE_RATE_LIMITED',
-                'message': 'too many frames',
-                'retryable': true,
-                'channel': 'preview',
-                'bytes': 1234,
-              })
-              as ErrorMessage;
-      expect(msg.channel, 'preview');
-      expect(msg.bytes, 1234);
-    });
-
-    test('error drops an unusable byte count rather than the whole frame', () {
-      ErrorMessage parse(Map<String, dynamic> extra) =>
-          parseRelayMessage({
-                'type': 'error',
-                'code': 'PROTOCOL_VIOLATION',
-                'message': 'bad frame',
-                'retryable': false,
-                ...extra,
-              })
-              as ErrorMessage;
-
-      final plain = parse({});
-      expect(plain.channel, isNull);
-      expect(plain.bytes, isNull);
-
-      expect(parse({'bytes': -1}).bytes, isNull);
-      expect(parse({'bytes': '1234'}).bytes, isNull);
-      expect(parse({'channel': 7}).channel, isNull);
     });
 
     test('parses peer-online, peer-offline', () {
@@ -154,29 +97,6 @@ void main() {
         parseRelayMessage({'type': 'peer-offline', 'peerId': 'a'}),
         isA<PeerOfflineMessage>(),
       );
-    });
-
-    test('retired types no longer dispatch', () {
-      // The pairing ceremony is gone from the current relay, but a client can
-      // be pointed at an older relay binary that still emits its frames: they
-      // must parse to null (ignored), never throw.
-      // relay_legacy_pair_frames_test.dart pins the socket-level consequence.
-      const retired = [
-        'challenge',
-        'authenticated',
-        'pair-disconnected',
-        'pair-connected',
-        'pair-approval',
-        'pair-rejected',
-        'grant-revoked',
-      ];
-      for (final t in retired) {
-        expect(
-          parseRelayMessage({'type': t}),
-          isNull,
-          reason: '$t should not resolve in v3',
-        );
-      }
     });
 
     test('returns null for unknown type', () {
@@ -212,17 +132,6 @@ void main() {
       });
     });
 
-    test('StreamOpen/StreamClose toJson', () {
-      expect(const StreamOpenMessage(streamId: 's1').toJson(), {
-        'type': 'stream-open',
-        'streamId': 's1',
-      });
-      expect(const StreamCloseMessage(streamId: 's1').toJson(), {
-        'type': 'stream-close',
-        'streamId': 's1',
-      });
-    });
-
     test('PingMessage.toJson', () {
       expect(const PingMessage().toJson(), {'type': 'ping'});
     });
@@ -254,19 +163,19 @@ void main() {
   group('RelayErrorCode', () {
     test('round-trips all v3 wire codes', () {
       const wires = [
-        'AGENT_OFFLINE',
-        'PAIR_REJECTED',
+        'AUTH_FAILED',
+        'MAX_CONNECTIONS',
+        'RATE_LIMITED',
+        'INVALID_MESSAGE',
+        'NOT_AUTHENTICATED',
+        'WRONG_DEVICE_TYPE',
+        'MESSAGE_RATE_LIMITED',
+        'LICENSE_UNAVAILABLE',
         'UNKNOWN_PHONE',
-        'PAIRING_WINDOW_CLOSED',
         'NONCE_MISMATCH',
         'APPROVAL_EXPIRED',
         'SUPERSEDED',
-        'PEER_OFFLINE',
         'PROTOCOL_VIOLATION',
-        'EXPIRED',
-        'NOT_AUTHORIZED',
-        'PEER_REPLACED',
-        'SESSION_LIMIT_EXCEEDED',
       ];
       for (final w in wires) {
         final code = RelayErrorCode.fromWire(w);

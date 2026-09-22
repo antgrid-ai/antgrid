@@ -7,7 +7,7 @@ import { buildAgentCore, type AgentCore } from "../src/agent-core";
 import { MessageBus } from "../src/message-bus";
 import { loadPairedPhones } from "../src/paired-phones";
 import { createMessage, type AbMessage } from "../src/protocol";
-import { RelayClient } from "../src/relay-client";
+import { TestPeerSessionOwner } from "./test-peer-session-owner";
 import { createRelayPromotion, type MachineRelaySession } from "../src/relay-promotion";
 import type { PeerSessionView } from "../src/stream-mux";
 import { generateEphemeralKeypair } from "../src/key-exchange";
@@ -74,7 +74,7 @@ afterEach(async () => {
   // cleaned once at the end of the suite (afterAll), after all watchers are gone.
   // 30s, not the 5s Bun gives a hook by default: a core holding a managed
   // worktree drains git children that still have the checkout as their cwd
-  // before shutdown() returns, and an overrun hook is not cancelled — its body
+  // before shutdown() returns, and an overrun hook is not cancelled â€” its body
   // would resume inside the NEXT test, against the already-reassigned abDir.
 }, 30_000);
 
@@ -102,7 +102,7 @@ function statusListsTerminal(frames: AbMessage[], terminalId: string): boolean {
 }
 
 /** Wait until the bus has emitted an agent:status frame listing `terminalId`,
- *  or the timeout elapses. Used for the honored path, where spawn → sendStatus
+ *  or the timeout elapses. Used for the honored path, where spawn â†’ sendStatus
  *  is async relative to the inbound dispatch (local-mode setupServices defers
  *  manager creation). */
 async function waitForTerminal(frames: AbMessage[], terminalId: string, timeoutMs = 2000): Promise<boolean> {
@@ -214,7 +214,7 @@ test("does NOT gate when no relay transport is wired (local/loopback transport)"
   const sent: AbMessage[] = [];
   bus.subscribe({ deliver: (m) => sent.push(m) });
   core.attachTransport(bus);
-  // Local transport never sets a provider → no relay transport → not gated.
+  // Local transport never sets a provider â†’ no relay transport â†’ not gated.
 
   core.onHandshakeComplete();
   await waitForServices(sent);
@@ -231,7 +231,7 @@ test("does NOT gate when no relay transport is wired (local/loopback transport)"
 // REGRESSION: after a local core is promoted onto the relay, the loopback
 // session and the relay slot share ONE bus + inbound handler. The desktop's own
 // loopback frames (source "loopback") must NEVER be gated by the machine switch
-// — even with mobile access off — or the user's local typing would be silently
+// â€” even with mobile access off â€” or the user's local typing would be silently
 // dropped. Relay-origin frames must still be gated.
 test("loopback frames bypass the gate even when mobile access is off", async () => {
   const folder = tempFolder();
@@ -276,8 +276,8 @@ test("loopback frames bypass the gate even when mobile access is off", async () 
   expect(await waitForTerminal(sent, tLoop)).toBe(true);
 });
 
-// CRITICAL #1: tunnel:* frames bypass the bus (they route via onTunnelMessage →
-// core.handleTunnelMessage → TunnelManager's localhost HTTP proxy). A phone must
+// CRITICAL #1: tunnel:* frames bypass the bus (they route via onTunnelMessage â†’
+// core.handleTunnelMessage â†’ TunnelManager's localhost HTTP proxy). A phone must
 // NOT be able to read a project's dev-server data through them with the machine
 // switch off.
 test("drops tunnel:http-request while mobile access is off, honors it once on", async () => {
@@ -305,7 +305,7 @@ test("drops tunnel:http-request while mobile access is off, honors it once on", 
   core.onHandshakeComplete();
   await waitForServices(sent);
 
-  // --- Off: the proxy must NOT run → no tunnel:http-start. ---
+  // --- Off: the proxy must NOT run â†’ no tunnel:http-start. ---
   plain.length = 0;
   core.handleTunnelMessage({
     type: "tunnel:http-request",
@@ -328,7 +328,7 @@ test("drops tunnel:http-request while mobile access is off, honors it once on", 
     method: "GET",
     path: "/secret",
   });
-  // Poll for the async fetch → response.
+  // Poll for the async fetch â†’ response.
   const deadline = Date.now() + 2000;
   while (Date.now() < deadline && tunnelResponses(plain).length === 0) {
     await new Promise((r) => setTimeout(r, 15));
@@ -340,7 +340,7 @@ test("drops tunnel:http-request while mobile access is off, honors it once on", 
 // SOFT CONCERN: on a trusted reconnect the relay sends peer-online (NOT a fresh
 // pair-request), so onApproved never repopulates the pubkey map. After an agent
 // RESTART the map starts empty, so nothing could name the device behind a route
-// address — and push, which seals to a phone's registry row, has no row to find.
+// address â€” and push, which seals to a phone's registry row, has no row to find.
 // The peer-online handler must backfill the pubkey from the persistent
 // pairedPhones store.
 test("peer-online backfills the peer pubkey from the phone store (empty map)", async () => {
@@ -354,9 +354,9 @@ test("peer-online backfills the peer pubkey from the phone store (empty map)", a
     lastSeenAt: new Date().toISOString(),
   });
 
-  // A fresh RelayClient simulates the post-restart state: phoneEd25519ByDeviceId
+  // A fresh TestPeerSessionOwner simulates the post-restart state: phoneEd25519ByDeviceId
   // starts empty (it's in-memory, never persisted).
-  const client = new RelayClient({
+  const client = new TestPeerSessionOwner({
     url: "ws://127.0.0.1:1",
     identity: { deviceId: "agent-dev", deviceName: "agent-dev", createdAt: new Date().toISOString() },
     generateKeypair: () => generateEphemeralKeypair(),
@@ -368,9 +368,7 @@ test("peer-online backfills the peer pubkey from the phone store (empty map)", a
   expect(client.peerPubkeyFor(phoneDeviceId)).toBe(null);
 
   // Drive the real peer-online server message (the reconnect-restore path).
-  (client as unknown as { handleTextMessage(raw: string): void }).handleTextMessage(
-    JSON.stringify({ type: "peer-online", peerId: phoneDeviceId }),
-  );
+  client.markPeerOnline(phoneDeviceId);
 
   // The gate can now identify the reconnected phone even though no fresh
   // pair-request (and thus no onApproved) ran this process.
@@ -379,14 +377,14 @@ test("peer-online backfills the peer pubkey from the phone store (empty map)", a
   client.close();
 });
 
-// CRITICAL #2: a local→relay-promoted connection must be gated too. In v3
-// relay-promotion.ts no longer builds its own RelayClient — it asks the host
+// CRITICAL #2: a localâ†’relay-promoted connection must be gated too. In v3
+// relay-promotion.ts no longer builds its own TestPeerSessionOwner â€” it asks the host
 // to bring the ONE machine socket up (ensureMachineRelay) and hands the result
 // to ProjectCore's `attach` (which owns the real setPeerSessionProvider wiring;
 // see project-core.ts's attachRelayStream). This test stubs `attach` the same
-// way ProjectCore really implements it, so the load-bearing assertion —
+// way ProjectCore really implements it, so the load-bearing assertion â€”
 // enabling relay wires the gate to the promoted session's attached devices, and
-// disabling clears it — still holds under the new dependency split.
+// disabling clears it â€” still holds under the new dependency split.
 test("promotion wires (and clears) the gate's session provider", async () => {
   const bus = new MessageBus();
   bus.setInboundHandler(() => {});
@@ -401,7 +399,7 @@ test("promotion wires (and clears) the gate's session provider", async () => {
   };
 
   // Stub machine relay session whose attached device is observable through the
-  // wired provider — mirrors what HostServer.ensureMachineRelay() returns.
+  // wired provider â€” mirrors what HostServer.ensureMachineRelay() returns.
   const promoted = session("promoted-phone-pk", "promoted-phone#machine-dev");
   const machineSession: MachineRelaySession = {
     attachStream: () => ({ streamId: "s1", detach: () => {}, sendTunnel: async () => "sent" as const, sendTo: async () => "sent" as const }),

@@ -1,3 +1,4 @@
+import '../helpers/test_license_token_minter.dart';
 import '../helpers/fixed_peer_connector.dart';
 import '../helpers/test_peer_runtime.dart';
 // Task 9 cutover: the remote transport connects and signs AS the app's own
@@ -43,7 +44,17 @@ const _agentPubB64 = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
 /// Records what the transport actually put on the wire. `connect` authenticates
 /// instantly and announces the agent as present, which is what lets the
 /// supervisor climb all the way to the E2E-handshake rung.
-class _RecordingRelay extends RelayService {
+class _RecordingRelay extends RelayService implements PeerLink {
+  @override
+  bool get isDispatchAllowed => true;
+  @override
+  Stream<PeerLinkState> get payloadStateStream => const Stream.empty();
+  @override
+  Stream<PeerPath> get pathStream => const Stream.empty();
+  @override
+  Stream<PeerLinkFailure> get failureStream => const Stream.empty();
+  @override
+  Stream<void> get peerRestartStream => const Stream.empty();
   _RecordingRelay() : super(crypto: CryptoService());
 
   final _states = StreamController<AppState>.broadcast();
@@ -98,7 +109,6 @@ class _RecordingRelay extends RelayService {
     return PeerSendOutcome.accepted;
   }
 
-  @override
   void sendMessage(
     String to,
     String channel,
@@ -208,7 +218,9 @@ void main() {
     accountAgentsProvider.overrideWith((_) async => inventory),
     localDeviceUuidProvider.overrideWith((_) async => 'this-device'),
     connectionDeviceRecordProvider.overrideWith((_) async => record),
-    connectionTokenMinterProvider.overrideWith((_) async => null),
+    connectionTokenMinterProvider.overrideWith(
+      (_) async => TestLicenseTokenMinter(),
+    ),
     cryptoServiceProvider.overrideWith((_) => CryptoService()),
     relayConnectionManagerProvider.overrideWithValue(
       _FakeConnectionManager(on ?? relay),
@@ -341,7 +353,7 @@ void main() {
       relayUrl: 'wss://relay.example/ws',
       agentEd25519PubB64: _agentPubB64,
     );
-    final mech = RelayMechanisms(
+    final mech = PeerConnectionMechanisms(
       relay: relay,
       peerRuntime: FixedPeerConnector(relay),
       crypto: CryptoService(),
@@ -355,14 +367,9 @@ void main() {
     );
     addTearDown(mech.release);
 
-    expect(mech.agentOnline, isFalse, reason: 'nothing dialled yet');
+    expect(mech.payloadConnected, isFalse, reason: 'nothing dialled yet');
 
-    await mech.dial(coords, 'tok');
-    expect(mech.socketAuthenticated, isTrue);
-    expect(mech.agentOnline, isTrue);
-    mech.notePresence(true);
-    expect(mech.agentOnline, isTrue);
-    mech.notePresence(false);
-    expect(mech.agentOnline, isTrue);
+    await mech.connectPayload(coords);
+    expect(mech.payloadConnected, isTrue);
   });
 }

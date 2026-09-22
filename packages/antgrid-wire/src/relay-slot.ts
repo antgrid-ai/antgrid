@@ -4,9 +4,9 @@
  *
  * The relay arbitrates per `hello.deviceId` and supersedes an equal epoch, so
  * an app holding several machines open at once needs one slot per machine.
- * A slot is a TRANSPORT address: it is what frames are routed to, and nothing
- * else. Everything keyed by the ACCOUNT device — the E2E transcript, the
- * bridge's trusted-peers/paired-phones lookups, the relay's revocation
+ * A slot identifies the app's machine-scoped control connection and native
+ * route. Everything keyed by the ACCOUNT device — the E2E transcript, the
+ * bridge's trusted-peers/paired-phones lookups, and central revocation
  * lookup — goes through `baseSlotDeviceId` first.
  *
  * Stripping the scope cannot admit anyone: on the bridge every identity the

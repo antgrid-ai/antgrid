@@ -69,6 +69,11 @@ deployment, `promtool` validation and live dashboard queries remain staging work
 6. Exercise a central outage with healthy native peers, then restore central
    service. Check project bindings, terminal continuity, no duplicate writers,
    and no command replay. Genuine peer failure requires fresh E2E/hydration.
+7. Force an epoch replacement. The superseded central socket must stop retrying,
+   expose a control conflict, and leave healthy leased native sessions intact.
+   Only an explicit Retry may clear the conflict and reconnect control.
+8. Send a binary frame and each retired stream-registration verb after central
+   authentication. Each must receive PROTOCOL_VIOLATION and close code 1008.
 
 Backend registration and lease code is not evidence that an upstream relay has
 enforced admission. The latter needs independent service race tests before

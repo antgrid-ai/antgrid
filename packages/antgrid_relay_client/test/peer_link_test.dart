@@ -40,23 +40,6 @@ class _Peer implements PeerLink {
 }
 
 void main() {
-  test('WebSocket admission reports closed and oversized frames', () async {
-    final relay = RelayService(crypto: CryptoService());
-    expect(
-      await relay.sendFrame('machine', 'control', Uint8List(10)),
-      PeerSendOutcome.closed,
-    );
-    expect(
-      await relay.sendFrame(
-        'machine',
-        'control',
-        Uint8List(kMaxFramePayload + 1),
-      ),
-      PeerSendOutcome.tooLarge,
-    );
-    relay.dispose();
-  });
-
   test('session consumes a non-relay link and ignores path changes', () async {
     final peer = _Peer();
     final keys = fixedKeys(12);

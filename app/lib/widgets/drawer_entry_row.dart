@@ -41,7 +41,7 @@ import '../providers/collapsed_drawer.dart';
 import '../providers/drawer_expansion.dart';
 import '../providers/host_status.dart';
 import '../providers/new_session_action.dart'
-    show SessionLimitExceededException, openRemoteProjectForActivation;
+    show openRemoteProjectForActivation;
 import '../providers/new_session_picker.dart'
     show
         enterNewSession,
@@ -53,7 +53,6 @@ import '../providers/providers.dart';
 import '../providers/recent_agents.dart';
 import '../providers/sessions.dart';
 import '../providers/supervisor_status.dart';
-import '../screens/upgrade_screen.dart';
 import 'ab_status_helpers.dart';
 import 'agent_work_status_dot.dart';
 import 'session_isolation_badge.dart' show sessionIsIsolated;
@@ -861,13 +860,10 @@ String connectFailureMessage(Object error) => switch (error) {
   ConnectionBlockedException(reason: final r) => switch (r) {
     BlockReason.licenseExpired =>
       'Connect failed: this machine needs an active plan or a sign-in.',
-    BlockReason.agentOffline => 'Connect failed: that machine is offline.',
     BlockReason.deviceRevoked =>
       "Connect failed: this device's access was revoked.",
     BlockReason.sessionTakenOver =>
       'Connect failed: another device took over this machine.',
-    BlockReason.superseded =>
-      'Connect failed: a newer connection replaced this one.',
     BlockReason.handshakeFailing =>
       'Connect failed: could not verify that machine.',
     BlockReason.peerRejected =>
@@ -926,14 +922,10 @@ Future<bool> ensureRemoteOnline(
   ProviderContainer ref,
   String registrationId,
 ) async {
-  if (ref.read(agentReachabilityProvider) != AgentReachability.offline) {
-    return true;
-  }
-  // `offline` is reachable ONLY from a Blocked(agentOffline) ladder, so the
-  // transport element is already settled in an error that `noProviderRetry`
-  // guarantees Riverpod will never re-run: awaiting `.future` alone replays the
-  // original exception without dialling anything. BOTH halves are required, for
-  // the reasons `MachineConnectionNotifier.retryAgentConnection` sets out.
+  final status = ref.read(supervisorStatusProvider(registrationId)).value;
+  if (status is! Blocked) return true;
+  // A block is sticky. This user action is the explicit Retry that clears it;
+  // rebuilding the provider alone would only replay the same verdict.
   ref
       .read(relayConnectionManagerProvider)
       .peek(registrationId)
@@ -1143,15 +1135,6 @@ Future<bool> _openColdRemoteProject(
     );
     recordProjectFocus(ref);
     return true;
-  } on SessionLimitExceededException catch (e) {
-    // A legacy relay's retired cap, not a transient connect failure — retrying
-    // won't clear it, so say what will and show the plan the account is on.
-    ref.read(selectedTargetProvider.notifier).set(priorTarget);
-    if (context.mounted) {
-      showAbSnackBar(context, e.userMessage);
-      await openUpgrade(context, ref);
-    }
-    return false;
   } catch (e) {
     ref.read(selectedTargetProvider.notifier).set(priorTarget);
     if (context.mounted) {
@@ -1280,6 +1263,20 @@ class _MachineOnlineDot extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final conflict =
+        ref.watch(centralControlConflictProvider(machineUuid)).value ?? false;
+    if (conflict) {
+      return AbIconButton(
+        icon: AbIcons.refresh,
+        tone: AbIconButtonTone.danger,
+        tooltip: 'Control connection conflict — Retry',
+        onTap: () => ref
+            .read(relayConnectionManagerProvider)
+            .peek(machineUuid)
+            ?.supervisor
+            ?.retry(),
+      );
+    }
     final status = ref.watch(supervisorStatusProvider(machineUuid)).value;
     if (status == null) return const SizedBox.shrink();
     final (tone, label) = connectionDisplayInfo(status);

@@ -4,34 +4,12 @@ export interface RelayConfig {
   port: number;
   maxConnections: number;
   rateLimitConnPerIp: number;
-  /**
-   * Sustained refill rate (frames/s) of the routed-frame bucket, keyed per
-   * (device pair, channel). Sized for a preview page load, which issues one
-   * frame per asset request AND one per response: a dev server serving
-   * unbundled modules puts hundreds of those through in a burst, and a budget
-   * that clamps it silently drops frames the app then waits 30s on.
-   */
-  rateLimitMsgPerSec: number;
-  /** Burst capacity of the routed-frame bucket. */
-  rateLimitMsgBurst: number;
-  /**
-   * Per-agent push-delivery budget. Separate from [rateLimitMsgPerSec] so
-   * widening the preview path never widens push, which fans out to third-party
-   * providers and wants to stay tight.
-   */
+  /** Per-agent push-delivery budget for third-party provider fan-out. */
   pushRateLimitPerSec: number;
   /** Sustained refill rate (msg/s) of the per-connection JSON-control bucket. */
   jsonRateLimitPerSec: number;
   /** Burst capacity of the per-connection JSON-control bucket. */
   jsonRateLimitBurst: number;
-  /**
-   * Structural ceiling on ONE connection's `openStreams`, not a metered quota —
-   * the paid axis is the worker cap web enforces at registration. Real machines
-   * hold single digits (a project each), so this sits orders of magnitude above
-   * legitimate use and exists solely so an agent cannot grow the set until the
-   * relay runs out of memory. Raise it freely; it is not a product limit.
-   */
-  maxStreamsPerConnection: number;
   /** ± window a hello `ts` may deviate from server time (step 2). */
   clockSkewMs: number;
   /** How long a `(deviceId, nonce)` hello pair is remembered (replay guard). */
@@ -143,12 +121,9 @@ export function loadConfig(): RelayConfig {
     port: parseInt(process.env.PORT || "8080", 10),
     maxConnections: parseInt(process.env.MAX_CONNECTIONS || "10000", 10),
     rateLimitConnPerIp: parseInt(process.env.RATE_LIMIT_CONN_PER_IP || "10", 10),
-    rateLimitMsgPerSec: parseInt(process.env.RATE_LIMIT_MSG_PER_SEC || "1200", 10),
-    rateLimitMsgBurst: parseInt(process.env.RATE_LIMIT_MSG_BURST || "2400", 10),
     pushRateLimitPerSec: parseInt(process.env.RATE_LIMIT_PUSH_PER_SEC || "100", 10),
     jsonRateLimitPerSec: parseInt(process.env.JSON_RATE_LIMIT_PER_SEC || "10", 10),
     jsonRateLimitBurst: parseInt(process.env.JSON_RATE_LIMIT_BURST || "30", 10),
-    maxStreamsPerConnection: parseInt(process.env.MAX_STREAMS_PER_CONNECTION || "1024", 10),
     clockSkewMs,
     replayTtlMs,
     pingIntervalMs: parseInt(process.env.PING_INTERVAL_MS || "30000", 10),

@@ -187,17 +187,15 @@ async function connectSlotted(
   account: string,
   machineDeviceId: string,
 ): Promise<RelayClient> {
-  const client = await RelayClient.connectAndAuth(env.relay.url, {
-    deviceType: "app",
-    name: "two-bridge-carrier",
+  const client = await env.connectNativeApp({
     identity,
-    deviceId: relaySlotId(account, machineDeviceId),
-    transcriptDeviceId: account,
+    accountDeviceId: account,
+    helloDeviceId: relaySlotId(account, machineDeviceId),
+    name: "two-bridge-carrier",
   });
   await handshakeWithoutPairing(client, env.agentDeviceId, env.agent.ed25519Pubkey);
   return client;
 }
-
 /**
  * Drill into a project's stream on a freshly handshaked client.
  *
@@ -364,8 +362,10 @@ class TwoBridgeCarrier implements Carrier {
 
   async reestablishRemote(machine: MachineName): Promise<void> {
     const env = this.machines[machine].env;
+    await this.relays[machine].reconnectNative();
     await handshakeWithoutPairing(this.relays[machine], env.agentDeviceId, env.agent.ed25519Pubkey);
     this.relayStreams[machine] = await resolveStream(this.relays[machine], env.projectId);
+    await env.app.reconnectNative();
     await handshakeWithoutPairing(env.app, env.agentDeviceId, env.agent.ed25519Pubkey);
     await resolveStream(env.app, env.projectId);
   }

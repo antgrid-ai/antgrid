@@ -1,4 +1,5 @@
 import { createHostPolicyFixture } from "./host-policy-fixture";
+import { TestRemoteHostConnection } from "./test-peer-session-owner";
 import { test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -6,20 +7,20 @@ import { join } from "node:path";
 import { HostServer, type HostRemoteConfig, type RemoteRuntime } from "../src/host-server";
 import { computeProjectId } from "../src/project-id";
 import { createMessage, type AgentEnableRelay } from "../src/protocol";
-import type { RelayClient } from "../src/relay-client";
+import type { RemoteHostConnection } from "../src/remote-host-connection";
 import type { SessionBusCoordinator } from "../src/session-bus/coordinator";
 import { loadHeld } from "../src/session-bus/held-store";
 import { LOCAL_MACHINE_ID } from "../src/session-bus/constants";
 
 // A remote config pointing at unreachable endpoints. The OAuth mint is never hit
-// because these tests inject `remoteRuntimeFactory`; RelayClient.connect() is
+// because these tests inject `remoteRuntimeFactory`; RemoteHostConnection.connect() is
 // fire-and-forget so the bogus relayUrl just backs off in the background.
 function fakeRemoteConfig(): HostRemoteConfig {
   return {
     relayUrl: "ws://127.0.0.1:1",
     licenseApiUrl: "http://127.0.0.1:1",
     identity: { deviceId: "dev-1", deviceName: "dev-1", createdAt: "2026-01-01T00:00:00.000Z" },
-    auth: { clientId: "cid", clientSecret: "secret", deviceUuid: "uuid-1" },
+    auth: { clientId: "cid", clientSecret: "secret", deviceUuid: "uuid-1", userId: "user-1", endpointSecret: "endpoint-secret" },
     onAuthRevoked: () => {},
   };
 }
@@ -29,7 +30,7 @@ function fakeRuntime(): RemoteRuntime {
 }
 
 // Inert machine relay client: keeps startRemoteControlPlane off a real socket.
-function stubRelayClient(): RelayClient {
+function stubRemoteHostConnection(): RemoteHostConnection {
   return {
     deviceId: "control-plane-dev",
     hasEstablishedSession: () => false,
@@ -42,7 +43,7 @@ function stubRelayClient(): RelayClient {
     attachStream: () => ({ streamId: "s1", detach: () => {}, sendTunnel: () => {} }),
     noteStreamBound: () => {},
     sendPushDeliver: () => {},
-  } as unknown as RelayClient;
+  } as unknown as RemoteHostConnection;
 }
 
 let host: HostServer | null = null;
@@ -450,7 +451,7 @@ test("startControlPlane's remote control plane runs pushHeartbeat on an actual c
 test("a wizard-promoted host (no opts.remote) actually pushes on the heartbeat cadence", async () => {
   host = createHostPolicyFixture({
     remoteRuntimeFactory: () => Promise.resolve(fakeRuntime()),
-    relayClientFactory: () => stubRelayClient(),
+    remoteHostFactory: () => stubRemoteHostConnection(),
     heartbeatIntervalMs: 15,
   });
 
@@ -465,6 +466,8 @@ test("a wizard-promoted host (no opts.remote) actually pushes on the heartbeat c
       ed25519Priv: "cHJpdg==",
       clientId: "cid",
       clientSecret: "secret",
+      userId: "user-1",
+      endpointSecret: Buffer.alloc(32, 1).toString("base64"),
     },
   } as AgentEnableRelay);
 
@@ -525,7 +528,7 @@ test(
     host = createHostPolicyFixture({
       remote: fakeRemoteConfig(),
       remoteRuntimeFactory: () => Promise.resolve(fakeRuntime()),
-      relayClientFactory: () => stubRelayClient(),
+      remoteHostFactory: () => stubRemoteHostConnection(),
     });
     const folder = tempFolder();
     writeFileSync(join(folder, "antgrid.yaml"), "name: configured-project-name\nagent:\n  tool: claude-code\n");
@@ -593,10 +596,11 @@ test(
  *  name mid-run, which is exactly what a late `startRemoteControlPlane()` does
  *  to a bridge that had been answering locally all along. */
 function withRegistration(host: HostServer, deviceId: string): void {
-  (host as unknown as { controlPlaneRelay: { deviceId: string; close: () => void } | null }).controlPlaneRelay = {
-    deviceId,
-    close: () => {},
-  };
+  const remote = new TestRemoteHostConnection({
+    identity: { deviceId, deviceName: "test", createdAt: "" },
+    generateKeypair: () => { throw new Error("not used"); },
+  });
+  (host as any).controlPlaneRelay = remote;
   expect(host.controlPlaneRegistrationId).toBe(deviceId);
 }
 

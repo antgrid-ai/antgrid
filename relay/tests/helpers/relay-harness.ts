@@ -1,6 +1,6 @@
 import { sign as edSign } from "node:crypto";
 import { startServer as startServerReal, type RelayServer, type RelayServerDeps } from "../../src/server.js";
-import { buildHelloSigBody, normalizeRelayHost, decodeRouteFrame } from "antgrid-wire";
+import { buildHelloSigBody, normalizeRelayHost } from "antgrid-wire";
 import type { RelayConfig } from "../../src/config.js";
 import type { LicenseGate } from "../../src/license/gate.js";
 
@@ -14,9 +14,7 @@ export function rawSeedToPkcs8(seed: Uint8Array): Buffer {
 const fakeJtiByDevice = new Map<string, string>();
 
 export interface FakeLicenseGateOptions {
-  /** Derive the account uid an agent's token carries — lets tests put two agent
-   *  connections under one account (same-account routing, cross-connection
-   *  stream counting). */
+  /** Derive the account uid an agent's token carries for presence tests. */
   agentUid?: (deviceId: string) => string;
 }
 
@@ -70,12 +68,9 @@ export const defaultConfig: RelayConfig = {
   port: 0,
   maxConnections: 100,
   rateLimitConnPerIp: 10,
-  rateLimitMsgPerSec: 100,
-  rateLimitMsgBurst: 100,
   pushRateLimitPerSec: 100,
   jsonRateLimitPerSec: 10,
   jsonRateLimitBurst: 30,
-  maxStreamsPerConnection: 1024,
   clockSkewMs: 120000,
   replayTtlMs: 300000,
   pingIntervalMs: 0, // disabled in tests
@@ -106,17 +101,10 @@ export async function connect(relay: RelayServer): Promise<WebSocket> {
 }
 
 export function decodeMessage(data: unknown): Record<string, unknown> {
-  if (typeof data === "string") {
-    return JSON.parse(data);
+  if (typeof data !== "string") {
+    throw new Error("Expected a JSON control frame");
   }
-  const buf = data instanceof Buffer ? data : Buffer.from(data as ArrayBuffer);
-  const decoded = decodeRouteFrame(buf);
-  const header = decoded.header as Record<string, unknown>;
-  return {
-    ...header,
-    kind: decoded.kind,
-    payload: new TextDecoder().decode(decoded.payload),
-  };
+  return JSON.parse(data);
 }
 
 export function waitForMessage(ws: WebSocket): Promise<Record<string, unknown>> {

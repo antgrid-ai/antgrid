@@ -1,18 +1,17 @@
 /**
- * Binary route-frame envelope shared by every relay peer (bridge, relay, evals).
+ * Binary route-frame envelope shared by native payload peers and evaluations.
  *
  * Wire layout: `[version: u8][kind: u8][header length: u16 BE][header JSON][payload]`.
  *
  * `FRAME_VERSION` is the SINGLE SOURCE OF TRUTH for the envelope byte layout.
- * It is intentionally distinct from the relay *message* protocol version
+ * It is intentionally distinct from the central relay control-protocol version
  * (`protocolVersion` in the `hello` message) — the two version different
  * layers and bump independently. Do not copy this constant into a workspace;
  * import it from `antgrid-wire` so a bump can never silently diverge and
  * produce spurious `BAD_VERSION` rejections.
  *
- * The kind byte is meaningful to the two ENDPOINTS only: the relay forwards
- * route frames opaquely (it parses the header for `to`/`channel` and never
- * interprets `kind`). Endpoints dispatch on it instead of try-parsing payload
+ * The kind byte is meaningful to the two payload endpoints. The native transport
+ * carries complete records; endpoints dispatch on kind instead of try-parsing payload
  * plaintext — `handshake` admits exactly the two E2E handshake messages,
  * everything else must arrive `sealed`.
  */
@@ -79,8 +78,8 @@ export function encodeRouteFrame(
  * Callers that consume the payload synchronously (encode + forward, decrypt
  * + dispatch) can use `decoded.payload` directly without copying.
  *
- * This avoids the performance cost of an unnecessary copy on the hot forward
- * path while documenting the contract clearly for consumers that need
+ * This avoids an unnecessary copy on the hot receive path while documenting
+ * the contract clearly for consumers that need
  * persistence.
  */
 export function decodeRouteFrame(buf: Uint8Array): {

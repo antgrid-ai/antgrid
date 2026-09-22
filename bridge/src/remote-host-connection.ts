@@ -10,6 +10,6 @@ export interface RemoteHostConnection extends Pick<PeerSessionOwner,
   close(): void;
   redialWithFreshToken(): void;
   sendPushDeliver(message: Parameters<CentralControlClient["sendPushDeliver"]>[0]): void;
-  noteResume?(): Promise<boolean>;
-  recheckAuthorization?(): void;
+  noteResume(): Promise<boolean>;
+  recheckAuthorization(): void;
 }

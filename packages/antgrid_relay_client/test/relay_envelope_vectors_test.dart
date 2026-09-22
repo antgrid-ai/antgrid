@@ -47,25 +47,17 @@ void main() {
             expect(m.serverTime, json['serverTime']);
           case 'pong':
             expect(parsed, isA<PongMessage>());
-          case 'stream-opened':
-            expect(
-              (parsed as StreamOpenedMessage?)!.streamId,
-              json['streamId'],
-            );
-          case 'stream-closed':
-            expect(
-              (parsed as StreamClosedMessage?)!.streamId,
-              json['streamId'],
-            );
           case 'error':
             final m = parsed as ErrorMessage?;
             expect(m!.code, json['code']);
             expect(m.message, json['message']);
             expect(m.retryable, json['retryable']);
-            expect(m.ref, json['ref']);
             expect(m.serverTime, json['serverTime']);
           case 'peer-policy-changed':
-            expect((parsed as PeerPolicyChangedMessage).generation.toString(), json['generation']);
+            expect(
+              (parsed as PeerPolicyChangedMessage).generation.toString(),
+              json['generation'],
+            );
           case 'peer-online':
             expect((parsed as PeerOnlineMessage?)!.peerId, json['peerId']);
           case 'peer-offline':
@@ -97,12 +89,6 @@ void main() {
             ts: json['ts'] as String,
             nonce: json['nonce'] as String,
             sig: json['sig'] as String,
-          ).toJson(),
-          'stream-open' => StreamOpenMessage(
-            streamId: json['streamId'] as String,
-          ).toJson(),
-          'stream-close' => StreamCloseMessage(
-            streamId: json['streamId'] as String,
           ).toJson(),
           'ping' => const PingMessage().toJson(),
           _ => fail(

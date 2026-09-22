@@ -1,13 +1,23 @@
 import { expect, test, spyOn } from "bun:test";
 import { netwatch } from "../src/netwatch";
 import type { Connection } from "@number0/iroh";
-import { NativeHostConnection } from "../src/peer/native-host-connection";
+import { NativeHostConnection, evalIrohBindAddress } from "../src/peer/native-host-connection";
 import { generateEphemeralKeypair } from "../src/key-exchange";
 import vector from "../../evals/fixtures/endpoint-registration-vectors.json";
 import { FrameKind, encodeRouteFrame } from "antgrid-wire";
 import { MessageBus } from "../src/message-bus";
 import type { PendingSinkWrite, QueuedAppFrame } from "../src/send-scheduler";
 
+test("eval native bind seam accepts loopback only and is inert outside evals", () => {
+  expect(evalIrohBindAddress({ ANTGRID_EVAL_TEST: "1", ANTGRID_EVAL_IROH_BIND_ADDR: "127.0.0.1:19001" }))
+    .toBe("127.0.0.1:19001");
+  expect(evalIrohBindAddress({ ANTGRID_EVAL_TEST: "0", ANTGRID_EVAL_IROH_BIND_ADDR: "0.0.0.0:19001" }))
+    .toBeUndefined();
+  expect(() => evalIrohBindAddress({ ANTGRID_EVAL_TEST: "1", ANTGRID_EVAL_IROH_BIND_ADDR: "0.0.0.0:19001" }))
+    .toThrow("INVALID_EVAL_BIND_ADDR");
+  expect(() => evalIrohBindAddress({ ANTGRID_EVAL_TEST: "1", ANTGRID_EVAL_IROH_BIND_ADDR: "127.0.0.1:65536" }))
+    .toThrow("INVALID_EVAL_BIND_ADDR");
+});
 function fixture() {
   let allowed = true;
   const client = new NativeHostConnection({
@@ -198,15 +208,11 @@ test("local project readiness does not wait for a peer or central acknowledgemen
   } finally { f.client.close(); }
 });
 
-test("central binary hello cannot replace a native carrier", async () => {
+test("central control client exposes no binary payload entry point", () => {
   const f = fixture();
   try {
-    const peer = connection(f.endpointId);
-    await f.access.acceptPeer(peer.native);
-    f.client.central.handleBinaryFrame(Buffer.from(encodeRouteFrame({ type: "message", from: `${f.peerId}#${f.client.deviceId}`, channel: "control" },
-      Buffer.from(JSON.stringify({ type: "handshake:client-hello", attemptId: "selected-websocket" })), FrameKind.handshake)));
-    expect(f.access.nativePeers.size).toBe(1);
-    expect(peer.closes()).toBe(0);
+    expect("handleBinaryFrame" in f.client.central).toBe(false);
+    expect("sendBinary" in f.client.central).toBe(false);
   } finally { f.client.close(); }
 });
 

@@ -6,6 +6,7 @@ import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 /// Explicit carrier for session tests; central presence never owns its lifecycle.
 class FixedPeerConnector implements PeerConnector {
   FixedPeerConnector(PeerLink link) : link = TestPayloadLink(link);
+  FixedPeerConnector.stub() : link = _NoopPayloadLink();
   final PeerLink link;
   @override
   void retain() {}
@@ -50,6 +51,32 @@ class TestPayloadLink implements PeerLink {
     Uint8List payload, {
     FrameKind kind = FrameKind.sealed,
   }) => carrier.sendFrame(to, channel, payload, kind: kind);
+  @override
+  Future<void> close() async {}
+}
+
+class _NoopPayloadLink implements PeerLink {
+  @override
+  bool get isDispatchAllowed => true;
+  @override
+  Stream<IncomingRouteMessage> get messageStream => const Stream.empty();
+  @override
+  Stream<PeerLinkState> get payloadStateStream => const Stream.empty();
+  @override
+  Stream<PeerPath> get pathStream => const Stream.empty();
+  @override
+  Stream<void> get peerRestartStream => const Stream.empty();
+  @override
+  Stream<PeerLinkFailure> get failureStream => const Stream.empty();
+  @override
+  PeerLinkDiagnostic? get netTap => null;
+  @override
+  Future<PeerSendOutcome> sendFrame(
+    String to,
+    String channel,
+    Uint8List payload, {
+    FrameKind kind = FrameKind.sealed,
+  }) async => PeerSendOutcome.accepted;
   @override
   Future<void> close() async {}
 }

@@ -759,7 +759,7 @@ included, correlated only by `requestId` at the client. Not a new class of
 disclosure — `sessions.list` already hands `SessionEntry.name` to the same set,
 though on the remote-access gate alone (§8.1) rather than this one — but it was
 an oversight rather than a decision, and the asking `peerId` is already threaded
-into the control-plane dispatch, where `RelayClient.sendOnChannel` takes a
+into the control-plane dispatch, where `PeerSessionOwner.sendOnChannel` takes a
 `SendTarget`.
 
 The fallback is the bus, and *only* when the asker cannot be named: a loopback

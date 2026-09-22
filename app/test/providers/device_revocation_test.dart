@@ -255,9 +255,9 @@ void main() {
       );
       addTearDown(conn.dispose);
       conn.ensureStarted(
-        mechanisms: RelayMechanisms(
+        mechanisms: PeerConnectionMechanisms(
           relay: relay,
-          peerRuntime: FixedPeerConnector(relay),
+          peerRuntime: FixedPeerConnector.stub(),
           crypto: CryptoService(),
           machineDeviceId: 'M',
           identity: _identity(),

@@ -32,13 +32,12 @@ final _coordinatorProvider = Provider<_PruneCoordinator>(
 /// correct name and dials on tap — so it is indistinguishable from a machine
 /// that is merely switched off.
 ///
-/// **`GET /account/devices` is the only honest source for this.** The relay
-/// deliberately collapses "not connected", "dead socket" and "different
-/// account" into one retryable `PEER_OFFLINE` so an unauthorized sender cannot
-/// use it as a presence oracle, and it holds live connections with no
-/// tombstones — so no dial failure, at any layer, can distinguish revoked from
-/// powered-off. `/account/agents` is the wrong list for the opposite reason: it
-/// filters on `mobileAccessEnabled`, so a machine whose remote-access switch is
+/// **`GET /account/devices` is the only honest source for this.** Central
+/// presence is bounded discovery information, while native authorization
+/// failures also cover remote access being disabled or a lease awaiting
+/// renewal. Neither control nor payload failures prove account removal.
+/// /account/agents is the wrong list for the opposite reason: it filters on
+/// mobileAccessEnabled, so a machine whose remote-access switch is
 /// off vanishes from it while remaining on the account.
 ///
 /// Three guards keep an absence from ever being read out of a reply that
@@ -102,12 +101,14 @@ Future<void> pruneRemovedMachines(ProviderContainer ref) async {
 
     final focused = ref.read(selectedRegistrationIdProvider);
     final focusedBase = focused == null ? null : baseDeviceUuid(focused);
-    final gone = <String>{
-      for (final r in ref.read(recentAgentsStoreProvider).list())
-        baseDeviceUuid(r.agentDeviceId),
-    }..removeWhere(
-      (uuid) => live.contains(uuid) || uuid == focusedBase || uuid == localUuid,
-    );
+    final gone =
+        <String>{
+          for (final r in ref.read(recentAgentsStoreProvider).list())
+            baseDeviceUuid(r.agentDeviceId),
+        }..removeWhere(
+          (uuid) =>
+              live.contains(uuid) || uuid == focusedBase || uuid == localUuid,
+        );
     if (gone.isEmpty) return;
 
     AbLog.info('MachinePrune', 'forgetting ${gone.length} removed machine(s)');

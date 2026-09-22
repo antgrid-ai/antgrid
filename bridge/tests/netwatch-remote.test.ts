@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { encodeRouteFrame, FrameKind } from "antgrid-wire";
 import { Netwatch, netwatch, armRemoteIngest, __resetNetwatchForTest } from "../src/netwatch";
-import { RelayClient } from "../src/relay-client";
+import { TestPeerSessionOwner } from "./test-peer-session-owner";
 import type { AbMessage } from "../src/protocol";
 import { runNetwatchCli } from "../src/cli/netwatch";
 import { installFakeSession } from "./fake-session";
@@ -34,7 +34,7 @@ describe("Netwatch.ingestRemote", () => {
 
     const remote = w.snapshot().find((e) => e.origin === "app")!;
     // Renumbering would destroy the only signal that the app's uploader hit its
-    // own budget — a gap there is the app saying so.
+    // own budget â€” a gap there is the app saying so.
     expect(remote.seq).toBe(7);
     expect(remote.msgType).toBe("terminal:input");
     expect(w.snapshot().find((e) => e.msgType === "local")!.origin).toBeUndefined();
@@ -84,8 +84,8 @@ describe("Netwatch.ingestRemote", () => {
 });
 
 /** A paired, handshake-complete client whose socket and seal are inert. */
-function makeClient(open: () => string | null, onMessage?: (m: AbMessage) => void): RelayClient {
-  const c = new RelayClient({
+function makeClient(open: () => string | null, onMessage?: (m: AbMessage) => void): TestPeerSessionOwner {
+  const c = new TestPeerSessionOwner({
     url: "ws://127.0.0.1:1",
     identity: {
       deviceId: "dev-1",
@@ -107,7 +107,7 @@ function makeClient(open: () => string | null, onMessage?: (m: AbMessage) => voi
   return c;
 }
 
-function deliverControlPlane(client: RelayClient, m: unknown): void {
+function deliverControlPlane(client: TestPeerSessionOwner, m: unknown): void {
   const payload = Buffer.concat([Buffer.alloc(12, 0x7f), Buffer.from("sealed")]);
   (client as any).sessions.get("phone-1").transport.open = () => JSON.stringify({ m });
   const frame = encodeRouteFrame(
@@ -115,11 +115,11 @@ function deliverControlPlane(client: RelayClient, m: unknown): void {
     payload,
     FrameKind.sealed,
   );
-  (client as any).handleBinaryFrame(Buffer.from(frame));
+  client.injectRouteFrame(Buffer.from(frame));
 }
 
-describe("RelayClient netwatch:events ingest", () => {
-  let client: RelayClient | null = null;
+describe("TestPeerSessionOwner netwatch:events ingest", () => {
+  let client: TestPeerSessionOwner | null = null;
 
   beforeEach(() => __resetNetwatchForTest());
   afterEach(() => {
@@ -165,7 +165,7 @@ describe("RelayClient netwatch:events ingest", () => {
     const seen: AbMessage[] = [];
     client = makeClient(() => null, (m) => seen.push(m));
     // Account trust alone reaches dispatchControlPlane, and that runs BEFORE
-    // the bus gate where the machine's remote-access switch lives — so an
+    // the bus gate where the machine's remote-access switch lives â€” so an
     // unarmed ingest is a peer writing into the operator's ring through the one
     // plane meant to be inert for it, evicting the traffic they attached to
     // read and putting peer-chosen rows in front of them as ground truth.
@@ -186,7 +186,7 @@ describe("RelayClient netwatch:events ingest", () => {
     armRemoteIngest(true, 60_000);
     client = makeClient(() => null);
     // The app's own event has no `body` field, so one here was not captured on
-    // the app's side of the socket — it is a payload the peer chose to put in
+    // the app's side of the socket â€” it is a payload the peer chose to put in
     // the operator's ring, past the `--bodies` gate that is all they armed.
     deliverControlPlane(client, {
       type: "netwatch:events",

@@ -45,28 +45,6 @@ class HelloMessage {
   };
 }
 
-class StreamOpenMessage {
-  final String streamId;
-
-  const StreamOpenMessage({required this.streamId});
-
-  Map<String, dynamic> toJson() => {
-    'type': 'stream-open',
-    'streamId': streamId,
-  };
-}
-
-class StreamCloseMessage {
-  final String streamId;
-
-  const StreamCloseMessage({required this.streamId});
-
-  Map<String, dynamic> toJson() => {
-    'type': 'stream-close',
-    'streamId': streamId,
-  };
-}
-
 class PingMessage {
   const PingMessage();
 
@@ -112,30 +90,6 @@ class PongMessage {
   }
 }
 
-class StreamOpenedMessage {
-  final String streamId;
-
-  const StreamOpenedMessage({required this.streamId});
-
-  static StreamOpenedMessage? fromJson(Map<String, dynamic> json) {
-    final streamId = json['streamId'];
-    if (streamId is! String) return null;
-    return StreamOpenedMessage(streamId: streamId);
-  }
-}
-
-class StreamClosedMessage {
-  final String streamId;
-
-  const StreamClosedMessage({required this.streamId});
-
-  static StreamClosedMessage? fromJson(Map<String, dynamic> json) {
-    final streamId = json['streamId'];
-    if (streamId is! String) return null;
-    return StreamClosedMessage(streamId: streamId);
-  }
-}
-
 class ErrorMessage {
   final String code;
   final String message;
@@ -145,25 +99,14 @@ class ErrorMessage {
   /// lives on the wire, not in per-client code lists.
   final bool retryable;
 
-  /// Echoes the streamId the error refers to.
-  final String? ref;
-
   /// Server clock, present on clock-skew AUTH_FAILED only.
   final String? serverTime;
-
-  /// Routed-frame drops only: the channel and payload length of the frame the
-  /// relay discarded, so the sender can un-charge its flow-control window.
-  final String? channel;
-  final int? bytes;
 
   const ErrorMessage({
     required this.code,
     required this.message,
     required this.retryable,
-    this.ref,
     this.serverTime,
-    this.channel,
-    this.bytes,
   });
 
   static ErrorMessage? fromJson(Map<String, dynamic> json) {
@@ -173,18 +116,12 @@ class ErrorMessage {
     if (code is! String || message is! String || retryable is! bool) {
       return null;
     }
-    final ref = json['ref'];
     final serverTime = json['serverTime'];
-    final channel = json['channel'];
-    final bytes = json['bytes'];
     return ErrorMessage(
       code: code,
       message: message,
       retryable: retryable,
-      ref: ref is String ? ref : null,
       serverTime: serverTime is String ? serverTime : null,
-      channel: channel is String ? channel : null,
-      bytes: bytes is int && bytes >= 0 ? bytes : null,
     );
   }
 }
@@ -257,7 +194,8 @@ class PeerPolicyChangedMessage {
   final BigInt generation;
   static PeerPolicyChangedMessage? fromJson(Map<String, dynamic> json) {
     final value = json['generation'];
-    if (value is! String || !RegExp(r'^(0|[1-9][0-9]{0,18})$').hasMatch(value)) return null;
+    if (value is! String || !RegExp(r'^(0|[1-9][0-9]{0,18})$').hasMatch(value))
+      return null;
     final generation = BigInt.parse(value);
     if (generation > BigInt.parse('9223372036854775807')) return null;
     return PeerPolicyChangedMessage(generation);
@@ -267,10 +205,8 @@ class PeerPolicyChangedMessage {
 /// Parses a relay message JSON map into the appropriate typed message.
 /// Returns null if the type is unrecognized or the message is malformed.
 ///
-/// Returning null (rather than throwing) is the tolerance contract: an
-/// un-upgraded relay still sending the deleted pairing frames — `pair-connected`,
-/// `grant-revoked`, `pair-*` — must be ignorable by a v3 app, not fatal to its
-/// socket.
+/// Returning null rather than throwing preserves forward compatibility with
+/// control messages this client does not yet understand.
 Object? parseRelayMessage(Map<String, dynamic> json) {
   final type = json['type'] as String?;
   switch (type) {
@@ -278,10 +214,6 @@ Object? parseRelayMessage(Map<String, dynamic> json) {
       return WelcomeMessage.fromJson(json);
     case 'pong':
       return PongMessage.fromJson(json);
-    case 'stream-opened':
-      return StreamOpenedMessage.fromJson(json);
-    case 'stream-closed':
-      return StreamClosedMessage.fromJson(json);
     case 'error':
       return ErrorMessage.fromJson(json);
     case 'peer-policy-changed':

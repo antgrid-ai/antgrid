@@ -26,12 +26,6 @@ abstract class BufferedAgentTransport implements AgentTransport {
 
   final stateController = StreamController<TransportState>.broadcast();
 
-  /// Fires [droppedFrames]. Only a relay-backed transport ever adds to it.
-  final droppedFrameController = StreamController<void>.broadcast();
-
-  @override
-  Stream<void> get droppedFrames => droppedFrameController.stream;
-
   /// In-flight RPCs keyed by `requestId`, completed by [dispatchDecoded].
   final pending = <String, Completer<Map<String, dynamic>>>{};
 
@@ -139,7 +133,7 @@ abstract class BufferedAgentTransport implements AgentTransport {
 
   /// A `response` arrived for a request that is already gone — it timed out and
   /// dropped its completer, so the reply is discarded (never leaked to the
-  /// public stream). Default no-op; a relay-backed transport overrides it to
+  /// public stream). Default no-op; a remote transport overrides it to
   /// record the frame, because "the RPC timed out and the answer landed 200ms
   /// later" is otherwise invisible at BOTH endpoints — the timeout is local,
   /// and the agent only ever saw a request it answered.

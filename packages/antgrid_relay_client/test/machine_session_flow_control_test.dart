@@ -665,31 +665,6 @@ void main() {
     await Future.wait(fresh);
   });
 
-  test('a relay drop report naming a channel and a byte count reopens that '
-      'much of the window', () async {
-    final (_, sends) = await withFullPreviewWindow();
-
-    relay.injectError(
-      ErrorMessage(
-        code: 'MESSAGE_RATE_LIMITED',
-        message: 'too many frames',
-        retryable: true,
-        channel: 'preview',
-        bytes: relay.sent.first.payload.length,
-      ),
-    );
-    await _waitUntil(
-      () => relay.sent.length >= 4,
-      within: const Duration(milliseconds: 300),
-    );
-    expect(
-      relay.sent,
-      hasLength(4),
-      reason: 'exactly the un-charged frame worth of room came back',
-    );
-    await Future.wait(sends.take(4));
-  });
-
   test(
     'a frame that arrives across a key swap is opened with the new keys',
     () async {

@@ -6,12 +6,9 @@ import type { ProjectCoreRemoteDeps } from "./project-core";
 type EnableMsg = Extract<AbMessage, { type: "agent:enableRelay" }>;
 
 /**
- * The machine relay socket surface the wizard promotion path needs. Provided by
- * HostServer (which owns the single {@link RelayClient}): the wizard never builds
- * a relay client of its own — it brings the machine socket up (from the
- * app-supplied credentials if it isn't already) and attaches the local core as a
- * stream.
- */
+ * The machine remote-session surface the wizard promotion path needs. Provided
+ * by HostServer: the wizard never builds a transport of its own; it brings the
+ * enrolled native host up and attaches the local core as a host-owned stream. */
 export interface MachineRelaySession {
   attachStream(bus: MessageBus, opts: AttachStreamOpts): StreamHandle;
   establishedPeers(): PeerSessionView[];

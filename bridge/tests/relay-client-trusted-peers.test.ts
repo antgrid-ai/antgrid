@@ -3,7 +3,7 @@
 // store -> noteMiss() + undefined. These tests cover the inventory step and
 // its ordering relative to the explicit-map and paired-phones sources.
 import { test, expect } from "bun:test";
-import { RelayClient } from "../src/relay-client";
+import { TestPeerSessionOwner } from "./test-peer-session-owner";
 import { generateEphemeralKeypair } from "../src/key-exchange";
 import type { PairedPhonesStore } from "../src/paired-phones";
 import type { TrustedPeersProvider } from "../src/trusted-peers";
@@ -25,7 +25,7 @@ function fakePairedPhones(phoneDeviceId: string, phonePubkey: string): PairedPho
 type Resolution = { pub: string | undefined; known: number };
 
 function resolveResult(
-  client: RelayClient,
+  client: TestPeerSessionOwner,
   deviceId: string,
   verify: (candidate: string) => boolean = () => true,
 ): Resolution {
@@ -35,7 +35,7 @@ function resolveResult(
 }
 
 function resolve(
-  client: RelayClient,
+  client: TestPeerSessionOwner,
   deviceId: string,
   verify: (candidate: string) => boolean = () => true,
 ): string | undefined {
@@ -43,7 +43,7 @@ function resolve(
 }
 
 test("resolvePhoneEd25519PubB64: inventory hit when absent from map and paired-phones store", () => {
-  const client = RelayClient.forTest({ generateKeypair: generateEphemeralKeypair, sendPayload: () => {}, peerId: "other-peer" });
+  const client = TestPeerSessionOwner.forTest({ generateKeypair: generateEphemeralKeypair, sendPayload: () => {}, peerId: "other-peer" });
   const trustedPeers = fakeTrustedPeers({ "phone-inventory": "inventory-pubkey" });
   (client as unknown as { opts: { trustedPeers: TrustedPeersProvider; pairedPhones: PairedPhonesStore } }).opts.trustedPeers = trustedPeers;
   (client as unknown as { opts: { trustedPeers: TrustedPeersProvider; pairedPhones: PairedPhonesStore } }).opts.pairedPhones = fakePairedPhones("someone-else", "someone-else-pubkey");
@@ -53,7 +53,7 @@ test("resolvePhoneEd25519PubB64: inventory hit when absent from map and paired-p
 });
 
 test("resolvePhoneEd25519PubB64: inventory takes priority over the paired-phones store", () => {
-  const client = RelayClient.forTest({ generateKeypair: generateEphemeralKeypair, sendPayload: () => {}, peerId: "other-peer" });
+  const client = TestPeerSessionOwner.forTest({ generateKeypair: generateEphemeralKeypair, sendPayload: () => {}, peerId: "other-peer" });
   const trustedPeers = fakeTrustedPeers({ "phone-both": "inventory-pubkey" });
   (client as unknown as { opts: { trustedPeers: TrustedPeersProvider; pairedPhones: PairedPhonesStore } }).opts.trustedPeers = trustedPeers;
   (client as unknown as { opts: { trustedPeers: TrustedPeersProvider; pairedPhones: PairedPhonesStore } }).opts.pairedPhones = fakePairedPhones("phone-both", "store-pubkey");
@@ -62,7 +62,7 @@ test("resolvePhoneEd25519PubB64: inventory takes priority over the paired-phones
 });
 
 test("resolvePhoneEd25519PubB64: falls back to the paired-phones store on an inventory miss", () => {
-  const client = RelayClient.forTest({ generateKeypair: generateEphemeralKeypair, sendPayload: () => {}, peerId: "other-peer" });
+  const client = TestPeerSessionOwner.forTest({ generateKeypair: generateEphemeralKeypair, sendPayload: () => {}, peerId: "other-peer" });
   const trustedPeers = fakeTrustedPeers({});
   (client as unknown as { opts: { trustedPeers: TrustedPeersProvider; pairedPhones: PairedPhonesStore } }).opts.trustedPeers = trustedPeers;
   (client as unknown as { opts: { trustedPeers: TrustedPeersProvider; pairedPhones: PairedPhonesStore } }).opts.pairedPhones = fakePairedPhones("phone-store-only", "store-pubkey");
@@ -72,7 +72,7 @@ test("resolvePhoneEd25519PubB64: falls back to the paired-phones store on an inv
 });
 
 test("resolvePhoneEd25519PubB64: total miss returns undefined and records exactly one noteMiss call", () => {
-  const client = RelayClient.forTest({ generateKeypair: generateEphemeralKeypair, sendPayload: () => {}, peerId: "other-peer" });
+  const client = TestPeerSessionOwner.forTest({ generateKeypair: generateEphemeralKeypair, sendPayload: () => {}, peerId: "other-peer" });
   const trustedPeers = fakeTrustedPeers({});
   (client as unknown as { opts: { trustedPeers: TrustedPeersProvider; pairedPhones: PairedPhonesStore } }).opts.trustedPeers = trustedPeers;
   (client as unknown as { opts: { trustedPeers: TrustedPeersProvider; pairedPhones: PairedPhonesStore } }).opts.pairedPhones = fakePairedPhones("someone-else", "someone-else-pubkey");
@@ -87,7 +87,7 @@ test("resolvePhoneEd25519PubB64: total miss returns undefined and records exactl
 // re-validated, so a stale entry has to fall through to the inventory instead
 // of shadowing it forever.
 test("resolvePhoneEd25519PubB64: falls back to inventory when the cached key fails verification (stale cache after re-key)", () => {
-  const client = RelayClient.forTest({
+  const client = TestPeerSessionOwner.forTest({
     generateKeypair: generateEphemeralKeypair,
     sendPayload: () => {},
     peerId: "other-peer",
@@ -101,13 +101,13 @@ test("resolvePhoneEd25519PubB64: falls back to inventory when the cached key fai
 
   const verify = (candidate: string) => candidate === "fresh-inventory-pubkey";
   expect(resolve(client, "phone-rekeyed", verify)).toBe("fresh-inventory-pubkey");
-  // The stale cache is a known-unknown, not an unknown-unknown — no refresh
+  // The stale cache is a known-unknown, not an unknown-unknown â€” no refresh
   // needed since the inventory already had the answer.
   expect(trustedPeers.noteMissCalls).toBe(0);
 });
 
 test("resolvePhoneEd25519PubB64: warms the inventory refresh when NO candidate verifies (cache and inventory both stale)", () => {
-  const client = RelayClient.forTest({
+  const client = TestPeerSessionOwner.forTest({
     generateKeypair: generateEphemeralKeypair,
     sendPayload: () => {},
     peerId: "other-peer",
@@ -128,7 +128,7 @@ test("resolvePhoneEd25519PubB64: warms the inventory refresh when NO candidate v
 // doesn't verify"), so a rejection reports how many identities were tried and
 // handleClientHello logs them as separate lines.
 test("resolvePhoneEd25519PubB64: a rejection distinguishes an unknown peer from a failed signature", () => {
-  const client = RelayClient.forTest({ generateKeypair: generateEphemeralKeypair, sendPayload: () => {}, peerId: "other-peer" });
+  const client = TestPeerSessionOwner.forTest({ generateKeypair: generateEphemeralKeypair, sendPayload: () => {}, peerId: "other-peer" });
   (client as unknown as { phoneEd25519ByDeviceId: Map<string, string> }).phoneEd25519ByDeviceId.set(
     "phone-known",
     "cached-pubkey",
@@ -143,11 +143,11 @@ test("resolvePhoneEd25519PubB64: a rejection distinguishes an unknown peer from 
 // Per-machine relay slots (`<accountDeviceUuid>#<machineDeviceUuid>`): the
 // route id the phone reaches us on is a transport address. Neither persistent
 // store has ever heard of one, so both are looked up by the base account id.
-// This widens the CANDIDATE list only — `verify` still has to pass, so a client
+// This widens the CANDIDATE list only â€” `verify` still has to pass, so a client
 // claiming `<victim>#x` is handed the victim's pubkey and then fails the
 // signature.
 test("resolvePhoneEd25519PubB64: a slot route id resolves against the base-keyed inventory", () => {
-  const client = RelayClient.forTest({ generateKeypair: generateEphemeralKeypair, sendPayload: () => {}, peerId: "other-peer" });
+  const client = TestPeerSessionOwner.forTest({ generateKeypair: generateEphemeralKeypair, sendPayload: () => {}, peerId: "other-peer" });
   const trustedPeers = fakeTrustedPeers({ "phone-a": "inventory-pubkey" });
   (client as unknown as { opts: { trustedPeers: TrustedPeersProvider } }).opts.trustedPeers = trustedPeers;
 
@@ -156,7 +156,7 @@ test("resolvePhoneEd25519PubB64: a slot route id resolves against the base-keyed
 });
 
 test("resolvePhoneEd25519PubB64: a slot route id resolves against the base-keyed paired-phones store", () => {
-  const client = RelayClient.forTest({ generateKeypair: generateEphemeralKeypair, sendPayload: () => {}, peerId: "other-peer" });
+  const client = TestPeerSessionOwner.forTest({ generateKeypair: generateEphemeralKeypair, sendPayload: () => {}, peerId: "other-peer" });
   (client as unknown as { opts: { trustedPeers: TrustedPeersProvider; pairedPhones: PairedPhonesStore } }).opts.trustedPeers = fakeTrustedPeers({});
   (client as unknown as { opts: { trustedPeers: TrustedPeersProvider; pairedPhones: PairedPhonesStore } }).opts.pairedPhones = fakePairedPhones("phone-b", "store-pubkey");
 
@@ -166,7 +166,7 @@ test("resolvePhoneEd25519PubB64: a slot route id resolves against the base-keyed
 // The in-memory cache is the reply-address map, so it stays keyed by the full
 // route id: two machines' slots for one phone are different sockets.
 test("resolvePhoneEd25519PubB64: the in-memory cache is keyed by the full slot, not the base id", () => {
-  const client = RelayClient.forTest({ generateKeypair: generateEphemeralKeypair, sendPayload: () => {}, peerId: "other-peer" });
+  const client = TestPeerSessionOwner.forTest({ generateKeypair: generateEphemeralKeypair, sendPayload: () => {}, peerId: "other-peer" });
   (client as unknown as { phoneEd25519ByDeviceId: Map<string, string> }).phoneEd25519ByDeviceId.set(
     "phone-c#machine-1",
     "cached-pubkey",
@@ -180,11 +180,11 @@ test("resolvePhoneEd25519PubB64: the in-memory cache is keyed by the full slot, 
 // Stripping must not admit a slot whose base id resolves to somebody else's
 // key: the signature is the gate, exactly as it is for a bare id today.
 test("resolvePhoneEd25519PubB64: a slot claiming another account's base id still fails verification", () => {
-  const client = RelayClient.forTest({ generateKeypair: generateEphemeralKeypair, sendPayload: () => {}, peerId: "other-peer" });
+  const client = TestPeerSessionOwner.forTest({ generateKeypair: generateEphemeralKeypair, sendPayload: () => {}, peerId: "other-peer" });
   const trustedPeers = fakeTrustedPeers({ "victim-device": "victim-pubkey" });
   (client as unknown as { opts: { trustedPeers: TrustedPeersProvider } }).opts.trustedPeers = trustedPeers;
 
-  // The victim's key IS offered as a candidate — and is rejected, because the
+  // The victim's key IS offered as a candidate â€” and is rejected, because the
   // caller cannot produce a transcript signature under it.
   expect(resolveResult(client, "victim-device#attacker-machine", () => false)).toEqual({ pub: undefined, known: 1 });
 });

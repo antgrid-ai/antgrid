@@ -1,25 +1,12 @@
-export function pairKey(a: string, b: string): string {
-  return a < b ? `${a}:${b}` : `${b}:${a}`;
-}
-
 interface WindowEntry {
   count: number;
   windowStart: number;
 }
 
-/** Cap on distinct live keys. No key family has explicit removal — a pair key
- *  outlives the disconnect that ended the pair, and per-device push keys are
- *  never cleaned — so both limiters bound their map defensively, evicting
- *  entries indistinguishable from a fresh one when it overflows. */
+/** Cap on distinct live limiter keys. Both limiter maps evict stale entries defensively. */
 const MAX_KEYS = 10_000;
 
-/**
- * Fixed 1-second window. Guards push delivery, where the budget is a flat
- * per-agent ceiling and burst tolerance would only widen a fan-out to
- * third-party providers. Traffic with a bursty shape (routed frames) uses
- * [TokenBucketRateLimiter] instead — a fixed window cannot absorb a burst
- * that is legitimate in aggregate.
- */
+/** Fixed 1-second window for per-agent push delivery. */
 export class MessageRateLimiter {
   private windows = new Map<string, WindowEntry>();
   private maxPerSec: number;
@@ -72,9 +59,8 @@ interface Bucket {
 /**
  * Per-key token bucket: a sustained `refillPerSec` with a `burst` allowance, so
  * traffic that is bursty by nature never trips on its shape alone while a
- * sustained flood is still throttled. Guards both JSON control messages
- * (keyed per connection) and routed binary frames (keyed per device pair AND
- * channel, so a preview page load cannot starve terminal output or vice versa).
+ * sustained flood is still throttled. Guards JSON control messages keyed per
+ * connection.
  */
 export class TokenBucketRateLimiter {
   private readonly buckets = new Map<string, Bucket>();

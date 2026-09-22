@@ -6,7 +6,7 @@ import 'auth.dart';
 import 'connection_identity.dart';
 import 'provider_retry.dart';
 
-final peerRuntimeProvider = FutureProvider<PeerRuntime?>((ref) async {
+final peerRuntimeProvider = FutureProvider<PeerRuntime>((ref) async {
   final record = await ref.watch(connectionDeviceRecordProvider.future);
   if (record.endpointSecret == null) {
     throw ProvisioningException(
@@ -23,7 +23,9 @@ final peerRuntimeProvider = FutureProvider<PeerRuntime?>((ref) async {
       'Device credentials are required for remote connections',
     );
   }
-  if (!ref.mounted) return null;
+  if (!ref.mounted) {
+    throw StateError('Peer runtime provider disposed during provisioning');
+  }
   final runtime = PeerRuntime(
     record: record,
     licenseApiUrl: ref.watch(licenseApiUrlProvider),

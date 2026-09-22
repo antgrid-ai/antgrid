@@ -2791,13 +2791,9 @@ class _WorkspaceBootStatusState extends ConsumerState<_WorkspaceBootStatus> {
         ? -1
         : _stateOrder.indexOf(conn);
 
-    final pairFailed = reach == AgentReachability.offline;
     _PhaseStatus pairStatus;
     String pairDetail;
-    if (pairFailed) {
-      pairStatus = _PhaseStatus.failed;
-      pairDetail = 'not reachable';
-    } else if (reach == AgentReachability.online) {
+    if (reach == AgentReachability.online) {
       // Only the supervisor's Connected — not mere socket auth — proves the
       // agent actually answered (see agentReachabilityProvider).
       pairStatus = _PhaseStatus.done;
@@ -3245,24 +3241,17 @@ Object? workspaceBlockingError({
 /// Whether [reason], reached on an ALREADY-established workspace, is worth
 /// unmounting that workspace for.
 ///
-/// Only the reasons that stay blocked until the user acts. `agentOffline` and
-/// `handshakeFailing` clear themselves on `notePresence(true)`, and the routable
-/// rung reaches `agentOffline` about 6s after a peer-offline (3 ×
-/// `routableStallMs`) — so taking the screen over for them would blow the
-/// terminal, file tree and panes away on every host restart and rebuild them
-/// from scratch seconds later. Those two already have their own non-destructive
-/// surface in `agentReachabilityProvider`.
+/// Only reasons requiring user action take over an established workspace.
 ///
 /// A block reached while the providers were still resolving is unaffected: it
 /// arrives as a thrown [ConnectionBlockedException] above, where there is no
 /// established workspace to preserve and every reason must be stated.
 bool _takesOverMidSession(BlockReason reason) => switch (reason) {
   BlockReason.sessionTakenOver ||
-  BlockReason.superseded ||
   BlockReason.deviceRevoked ||
   BlockReason.peerRejected ||
   BlockReason.licenseExpired => true,
-  BlockReason.agentOffline || BlockReason.handshakeFailing => false,
+  BlockReason.handshakeFailing => false,
 };
 
 /// Shown for whatever [workspaceBlockingError] returns, which is EITHER of two
@@ -3328,26 +3317,6 @@ class _LocalLaunchErrorScreen extends StatelessWidget {
               'The relay declined this connection\'s access token. Sign in '
               'again on this device to mint a fresh one, or check that your '
               'plan includes remote access, then Retry.',
-          retryLabel: 'retry',
-        ),
-        BlockReason.agentOffline => (
-          headline: 'agent is not running',
-          tip:
-              'The relay could not route to this machine — its antgrid host '
-              'is not connected. Start it on the host, then Retry.',
-          retryLabel: 'retry',
-        ),
-        BlockReason.superseded => (
-          headline: 'the relay is holding this connection for another session',
-          // Reached only after the ladder has already retried long enough for
-          // the relay to drop a stale entry of our own, so by this point it is
-          // genuinely someone else's — and Retry cannot evict them: this app
-          // dials with one epoch per launch, which the relay refuses against
-          // an equal-or-higher live holder.
-          tip:
-              'Another session of this app is connected as the same device. '
-              'Close it, or restart this app to connect with a fresh session, '
-              'then Retry.',
           retryLabel: 'retry',
         ),
         BlockReason.sessionTakenOver => (

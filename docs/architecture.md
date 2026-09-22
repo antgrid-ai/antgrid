@@ -31,12 +31,12 @@ implementation and authoritative lease handling live in the ELv2
 `packages/antgrid_peer_transport` package, shared with its standalone CLI smoke.
 
 The bridge's `PeerSessionOwner` owns E2E, fragmentation, scheduling, credits and
-liveness. `CentralControlClient` owns central authentication and reconnect;
-`RelayClient` composes it with a WebSocket payload adapter for legacy evaluations.
-`NativeHostConnection` composes central control, endpoint lifecycle recovery and peer sessions for authenticated native
-connections. Native requests keep remote command authorization, project catalog
+liveness over Iroh. `CentralControlClient` owns central authentication,
+presence, policy invalidation and push delivery; it has no binary payload API.
+`NativeHostConnection` composes those independent owners with endpoint
+lifecycle recovery for authenticated native connections. Native requests keep remote command authorization, project catalog
 checks and checkout routing. Host-assigned stream readiness is independent of
-WebSocket stream admission, allowing native project use during a leased central
+central stream admission, allowing native project use during a leased central
 outage.
 
 Each enrollment has a distinct protected endpoint seed. Device-bound OAuth
@@ -374,4 +374,4 @@ contract, which wins over the inherited environment.
 Host-side lifecycle — the one PTY the run lives in, the deferred `services`, the
 start gate and what survives a restart — is in `bridge/CLAUDE.md`.
 
-Native endpoint recovery and central reconnect have separate owners. The bridge endpoint lifecycle serializes creation/retirement, retries transient listener failures with bounded backoff, and bounds concurrent admissions. Native project readiness uses host-local bindings; central stream acknowledgements apply only to the legacy evaluation adapter. On the app, `PeerRuntime` owns the enrollment endpoint and `ConnectionSupervisor` owns per-machine retry. Endpoint initialization and peer dialing have separate deadlines; neither central presence nor Iroh path transitions establish a new E2E epoch.
+Native endpoint recovery and central reconnect have separate owners. The bridge endpoint lifecycle serializes creation/retirement, retries transient listener failures with bounded backoff, and bounds concurrent admissions. Native project readiness uses host-local bindings; the central protocol has no stream registration or payload acknowledgements. On the app, `PeerRuntime` owns the enrollment endpoint and `ConnectionSupervisor` owns per-machine retry. Endpoint initialization and peer dialing have separate deadlines; neither central presence nor Iroh path transitions establish a new E2E epoch.

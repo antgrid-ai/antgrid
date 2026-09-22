@@ -16,7 +16,17 @@ import 'package:flutter_test/flutter_test.dart';
 /// Authenticates instantly; records nothing else. The E2E handshake never
 /// completes against it, which is irrelevant here — only which session object
 /// a dial binds to is under test.
-class _StubRelay extends RelayService {
+class _StubRelay extends RelayService implements PeerLink {
+  @override
+  bool get isDispatchAllowed => true;
+  @override
+  Stream<PeerLinkState> get payloadStateStream => const Stream.empty();
+  @override
+  Stream<PeerPath> get pathStream => const Stream.empty();
+  @override
+  Stream<PeerLinkFailure> get failureStream => const Stream.empty();
+  @override
+  Stream<void> get peerRestartStream => const Stream.empty();
   _StubRelay() : super(crypto: CryptoService());
 
   final _states = StreamController<AppState>.broadcast();
@@ -60,7 +70,6 @@ class _StubRelay extends RelayService {
     FrameKind kind = FrameKind.sealed,
   }) async => PeerSendOutcome.accepted;
 
-  @override
   void sendMessage(
     String to,
     String channel,
@@ -95,38 +104,37 @@ void main() {
   setUp(() => relay = _StubRelay());
   tearDown(() async => relay.closeStreams());
 
-  RelayMechanisms build({ConnCoords Function()? coords}) => RelayMechanisms(
-    relay: relay,
-    peerRuntime: FixedPeerConnector(relay),
-    crypto: CryptoService(),
-    machineDeviceId: 'M',
-    identity: _identity(),
-    phoneDeviceId: 'phone-1',
-    phoneEd25519Seed: List<int>.filled(32, 7),
-    epoch: 1,
-    resolveCoords: () async =>
-        coords?.call() ??
-        const ConnCoords(
-          relayUrl: 'ws://relay.test',
-          agentEd25519PubB64: _pinA,
-        ),
-    mintToken: () async => 'tok',
-  );
+  PeerConnectionMechanisms build({ConnCoords Function()? coords}) =>
+      PeerConnectionMechanisms(
+        relay: relay,
+        peerRuntime: FixedPeerConnector(relay),
+        crypto: CryptoService(),
+        machineDeviceId: 'M',
+        identity: _identity(),
+        phoneDeviceId: 'phone-1',
+        phoneEd25519Seed: List<int>.filled(32, 7),
+        epoch: 1,
+        resolveCoords: () async =>
+            coords?.call() ??
+            const ConnCoords(
+              relayUrl: 'ws://relay.test',
+              agentEd25519PubB64: _pinA,
+            ),
+        mintToken: () async => 'tok',
+      );
 
   test('a dial at the same pin reuses the live session', () async {
     final mech = build();
     addTearDown(mech.release);
 
-    await mech.dial(
+    await mech.connectPayload(
       const ConnCoords(relayUrl: 'ws://relay.test', agentEd25519PubB64: _pinA),
-      'tok',
     );
     final first = mech.session;
     expect(first, isNotNull);
 
-    await mech.dial(
+    await mech.connectPayload(
       const ConnCoords(relayUrl: 'ws://relay.test', agentEd25519PubB64: _pinA),
-      'tok',
     );
     expect(
       identical(mech.session, first),
@@ -140,9 +148,8 @@ void main() {
     final mech = build();
     addTearDown(mech.release);
 
-    await mech.dial(
+    await mech.connectPayload(
       const ConnCoords(relayUrl: 'ws://relay.test', agentEd25519PubB64: _pinA),
-      'tok',
     );
     final first = mech.session!;
     var oldDisposed = false;
@@ -151,9 +158,8 @@ void main() {
     // stale-pinned session was actually torn down rather than merely dropped.
     first.takeoverEvents.listen(null, onDone: () => oldDisposed = true);
 
-    await mech.dial(
+    await mech.connectPayload(
       const ConnCoords(relayUrl: 'ws://relay.test', agentEd25519PubB64: _pinB),
-      'tok',
     );
 
     expect(
@@ -189,11 +195,11 @@ void main() {
     final first = await mech.resolveCoords();
     expect(first!.agentEd25519PubB64, _pinA);
     // Rung 2: socket.
-    await mech.dial(first, 'tok');
+    await mech.connectPayload(first);
     final stale = mech.session!;
     var staleDisposed = false;
     stale.takeoverEvents.listen(null, onDone: () => staleDisposed = true);
-    expect(mech.socketAuthenticated, isTrue);
+    expect(mech.payloadConnected, isTrue);
 
     // The host re-provisions. The user presses Retry, which drops the cached
     // coordinates, so the coords step runs again — but nothing dropped the
@@ -201,7 +207,7 @@ void main() {
     pin = _pinB;
     await mech.resolveCoords();
     expect(
-      mech.socketAuthenticated,
+      mech.payloadConnected,
       isTrue,
       reason:
           'the socket rung must still be satisfied, or this is not the '

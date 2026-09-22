@@ -45,22 +45,12 @@ export async function pushRevoke(
   }
 }
 
-/**
- * Identity-free liveness row returned by the relay's /internal/connections.
- * Keep in lockstep with relay's `src/connections.ts` ConnectionSummary.
- *
- * `openStreamCount` is liveness telemetry, not a billed quantity — the paid
- * axis is the worker (agent machine) count. An agent holds ONE socket under its
- * bare account `deviceUuid` and multiplexes projects as sealed streams, so the
- * deviceId alone says nothing about how many sessions are running. The relay
- * cannot resolve those streams to projects, so only the count exists.
- */
+/** Identity-free liveness row returned by the relay's control-only connection table. */
 const ConnectionSummarySchema = z.object({
   deviceId: z.string(),
   deviceType: z.enum(["agent", "app"]),
   connectedAt: z.number(),
   lastSeen: z.number(),
-  openStreamCount: z.number().int().nonnegative(),
 });
 const ConnectionsResponseSchema = z.object({
   connections: z.array(ConnectionSummarySchema).default([]),
@@ -85,11 +75,9 @@ async function postConnections(
     signal: AbortSignal.timeout(RELAY_PUSH_TIMEOUT_MS),
   });
   if (!res.ok) throw new Error(`relay connections fetch failed: ${res.status}`);
-  // Validated, not cast: this projection is the relay's shape, versioned by the
-  // relay's deploy, and both callers now do arithmetic on `openStreamCount`. A
-  // relay that predates the field would otherwise sum to NaN and render a
-  // confident wrong number — throwing here routes to the caller's honest
-  // "couldn't reach the relay" state until the deploys converge.
+  // Validate the operator snapshot at the service boundary so a partial or
+  // mismatched central deployment produces the caller's honest unavailable
+  // state instead of rendering invented connection data.
   const parsed = ConnectionsResponseSchema.safeParse(await res.json());
   if (!parsed.success) throw new Error(`relay connections shape rejected: ${parsed.error.message}`);
   return parsed.data.connections;

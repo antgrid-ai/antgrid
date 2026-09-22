@@ -7,9 +7,13 @@ test("eval authority binds enrollment to a device credential and denies revoked 
   const ed = generateKeyPairSync("ed25519");
   const raw = (key: typeof ed.publicKey, type: "spki" | "pkcs8") => key.export({ format: "der", type }).subarray(-32).toString("base64");
   const auth = { clientId: "fixture-client", clientSecret: "secret", deviceUuid: randomUUID(), userId: "fixture-account", ed25519Pub: raw(ed.publicKey, "spki") };
-  const peer = { deviceId: randomUUID(), ed25519Pub: raw(generateKeyPairSync("ed25519").publicKey, "spki") };
+  const peerEd = generateKeyPairSync("ed25519");
+  const peer = { deviceId: randomUUID(), ed25519Pub: raw(peerEd.publicKey, "spki") };
+  const peerAuth = { clientId: "fixture-peer", clientSecret: "peer-secret", deviceUuid: peer.deviceId,
+    userId: auth.userId, ed25519Pub: peer.ed25519Pub };
   const authority = new PeerAuthorizationFixture(() => [peer]);
   authority.provision(auth);
+  authority.provision(peerAuth);
   expect(authority.token(`Basic ${Buffer.from("fixture-client:wrong").toString("base64")}`)).toBeNull();
   const token = authority.token(`Basic ${Buffer.from("fixture-client:secret").toString("base64")}`)!;
   const claims = JSON.parse(Buffer.from(token.split(".")[1]!, "base64url").toString());
@@ -31,6 +35,14 @@ test("eval authority binds enrollment to a device credential and denies revoked 
     expect(snapshot.endpoint.endpointId).toBe(enrollment.endpointId);
     expect(snapshot.registrationGeneration).toBe("1");
     expect(snapshot.peers).toEqual([{ ...peer, endpoint: null }]);
+    const peerToken = authority.token(`Basic ${Buffer.from("fixture-peer:peer-secret").toString("base64")}`)!;
+    const peerEnrollment = new EndpointEnrollment({ accountId: auth.userId, deviceId: peer.deviceId,
+      enrollmentId: peerAuth.clientId }, randomBytes(32).toString("base64"), raw(peerEd.privateKey, "pkcs8"),
+      "https://fixture.invalid", () => peerToken, request);
+    await peerEnrollment.register();
+    const withEndpoint = await enrollment.authorization() as any;
+    expect(withEndpoint.peers[0]?.endpoint?.endpointId).toBe(peerEnrollment.endpointId);
+    peerEnrollment.close();
     authority.revoke(peer.deviceId);
     expect((await enrollment.authorization() as any).peers).toEqual([]);
     authority.revoke(auth.deviceUuid);

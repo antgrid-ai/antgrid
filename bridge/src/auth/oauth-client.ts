@@ -37,7 +37,7 @@ function isInvalidClient(body: string): boolean {
 /**
  * Thin OAuth `client_credentials` minter. No persistence — caller holds the
  * returned [MintedToken] in memory and pushes its `accessToken` into
- * RelayClient's `getLicenseToken` callback.
+ * CentralControlClient's `getLicenseToken` callback.
  *
  * The `resource` parameter is required: Better-Auth's oauth-provider only
  * emits a JWT (vs opaque token) when `resource` matches the auth base URL.
@@ -122,7 +122,7 @@ export class OAuthClient {
 
 /**
  * Maintain an always-fresh access token. Re-mints at 80% of TTL. Returns a
- * synchronous `getToken` suitable for RelayClient's `getLicenseToken`, and a
+ * synchronous `getToken` suitable for CentralControlClient's `getLicenseToken`, and a
  * `getTier` reading the server-signed product line off that same token. Caller
  * invokes `stop()` on shutdown to cancel the timer.
  */
@@ -131,7 +131,7 @@ export function startTokenMaintenance(
   initial: MintedToken,
   opts?: {
     /** Fired after every successful RE-mint (never the caller-supplied initial
-     *  token). Lets the machine RelayClient redial after a LICENSE_EXPIRED stop
+     *  token). Lets the machine central-control client redial after a LICENSE_EXPIRED stop
      *  the instant a renewed subscription's token lands. */
     onMinted?: () => void;
   },

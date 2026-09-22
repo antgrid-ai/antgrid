@@ -287,31 +287,6 @@ void main() {
   });
 
   group('throwProjectStartFailure', () {
-    test('legacy relay SESSION_LIMIT_EXCEEDED → SessionLimitExceededException, '
-        'surfaced with the legacy-relay copy', () {
-      expect(
-        () => throwProjectStartFailure(
-          'p1',
-          'M',
-          const ControlPlaneError(
-            code: 'SESSION_LIMIT_EXCEEDED',
-            message: 'Concurrent remote agent limit reached (0).',
-          ),
-        ),
-        throwsA(
-          isA<SessionLimitExceededException>()
-              .having((e) => e.message, 'message', contains('limit reached'))
-              // The relay's own string names a cap that no longer exists, so
-              // the UI must never render it verbatim.
-              .having(
-                (e) => e.userMessage,
-                'userMessage',
-                contains('older relay'),
-              ),
-        ),
-      );
-    });
-
     test('any other control-plane error → generic StateError', () {
       expect(
         () => throwProjectStartFailure(
@@ -544,23 +519,20 @@ void main() {
       },
     );
 
-    test(
-      'the transport going down during create aborts with sessionDown, '
-      'not a bare timeout',
-      () async {
-        final h = await harness(throwOnCreate: const SessionDownException());
+    test('the transport going down during create aborts with sessionDown, '
+        'not a bare timeout', () async {
+      final h = await harness(throwOnCreate: const SessionDownException());
 
-        await startNewSession(h.container);
+      await startNewSession(h.container);
 
-        expect(
-          h.container.read(newSessionStartAbortProvider)?.reason,
-          NewSessionStartAbortReason.sessionDown,
-        );
-        // create's own throw happens before start is ever issued.
-        expect(h.service.started, isEmpty);
-        expect(h.container.read(newSessionStartInFlightProvider), isFalse);
-      },
-    );
+      expect(
+        h.container.read(newSessionStartAbortProvider)?.reason,
+        NewSessionStartAbortReason.sessionDown,
+      );
+      // create's own throw happens before start is ever issued.
+      expect(h.service.started, isEmpty);
+      expect(h.container.read(newSessionStartInFlightProvider), isFalse);
+    });
 
     test('a success with the user still on the canvas navigates', () async {
       final h = await harness();

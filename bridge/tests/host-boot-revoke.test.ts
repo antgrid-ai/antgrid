@@ -4,7 +4,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HostServer, type HostRemoteConfig, type RemoteRuntime } from "../src/host-server";
-import type { RelayClient, RelayClientOptions } from "../src/relay-client";
+import type { RemoteHostConnection } from "../src/remote-host-connection";
+import type { NativeHostOptions } from "../src/peer/native-host-connection";
 
 // index.ts wires HostRemoteConfig.onAuthRevoked to `process.exit(4)`, so
 // whether it fires at boot decides whether the host survives. These tests pin
@@ -15,7 +16,7 @@ function remoteConfig(onAuthRevoked: () => void): HostRemoteConfig {
     relayUrl: "ws://127.0.0.1:1",
     licenseApiUrl: "http://127.0.0.1:1",
     identity: { deviceId: "dev-1", deviceName: "dev-1", createdAt: "2026-01-01T00:00:00.000Z" },
-    auth: { clientId: "cid", clientSecret: "secret", deviceUuid: "uuid-1" },
+    auth: { clientId: "cid", clientSecret: "secret", deviceUuid: "uuid-1", userId: "user-1", endpointSecret: "endpoint-secret" },
     onAuthRevoked,
   };
 }
@@ -24,12 +25,12 @@ function fakeRuntime(): RemoteRuntime {
   return { maint: { getToken: () => "tok", stop: () => {} } };
 }
 
-// A real RelayClient against the unreachable fake URL would leave reconnect
+// A real RemoteHostConnection against the unreachable fake URL would leave reconnect
 // timers running past shutdown, and a sibling suite that swaps globalThis.setTimeout
 // captures whichever callback lands first — cross-file flake with no bearing on
 // what this file asserts. Stub it out; these tests never touch the socket.
 function stubRelayFactory() {
-  return (_opts: RelayClientOptions): RelayClient =>
+  return (_opts: NativeHostOptions): RemoteHostConnection =>
     ({
       deviceId: "dev-1",
       hasEstablishedSession: () => false,
@@ -39,7 +40,7 @@ function stubRelayFactory() {
       setBus: () => {},
       connect: () => {},
       close: () => {},
-    }) as unknown as RelayClient;
+    }) as unknown as RemoteHostConnection;
 }
 
 let host: HostServer | null = null;
@@ -89,7 +90,7 @@ test("a revoke verdict after boot still reaches the fatal handler", async () => 
       cfgSeen = cfg;
       return Promise.resolve(fakeRuntime());
     },
-    relayClientFactory: stubRelayFactory(),
+    remoteHostFactory: stubRelayFactory(),
   });
   await host.startControlPlane();
   expect(fatal).toBe(0);

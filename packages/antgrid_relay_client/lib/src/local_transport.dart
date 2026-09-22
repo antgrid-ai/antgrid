@@ -417,6 +417,5 @@ class LocalTransport extends BufferedAgentTransport {
     await _ch?.sink.close();
     await outbound.close();
     await stateController.close();
-    await droppedFrameController.close();
   }
 }

@@ -1,20 +1,20 @@
 // Account-trust admission has no pair-request, so the
 // client-hello path is the ONLY place a same-account phone's row can be created.
-// The row grants nothing — authorization is the machine's mobile-access switch —
+// The row grants nothing â€” authorization is the machine's mobile-access switch â€”
 // but without it a fully connected phone is invisible to `antgrid phones list`
 // and unreachable by push.
 import { test, expect, afterEach } from "bun:test";
 import { generateKeyPairSync } from "node:crypto";
 import { encodeRouteFrame, FrameKind } from "antgrid-wire";
 import { generateEphemeralKeypair } from "../src/key-exchange";
-import { RelayClient } from "../src/relay-client";
+import { TestPeerSessionOwner } from "./test-peer-session-owner";
 import type { PairedPhone, PairedPhonesStore } from "../src/paired-phones";
 import { buildTranscript, signTranscript } from "../src/e2e";
 
 const AGENT_DEVICE_ID = "agent-1";
 const PHONE_ID = "phone-1";
 
-let clients: RelayClient[] = [];
+let clients: TestPeerSessionOwner[] = [];
 afterEach(() => { for (const c of clients.splice(0)) try { c.close(); } catch {} });
 
 function ed25519Pair(): { seedB64: string; pubB64: string } {
@@ -73,8 +73,8 @@ function clientHello(args: { attemptId: string; appX25519PubB64: string; phoneSe
   }));
 }
 
-function makeClient(store: PairedPhonesStore, phoneEd: { pubB64: string }, agentEd: { seedB64: string }): RelayClient {
-  const client = RelayClient.forTest({
+function makeClient(store: PairedPhonesStore, phoneEd: { pubB64: string }, agentEd: { seedB64: string }): TestPeerSessionOwner {
+  const client = TestPeerSessionOwner.forTest({
     generateKeypair: generateEphemeralKeypair,
     sendPayload: () => {},
     peerId: PHONE_ID,
@@ -88,11 +88,11 @@ function makeClient(store: PairedPhonesStore, phoneEd: { pubB64: string }, agent
   return client;
 }
 
-function sendHello(client: RelayClient, phoneSeedB64: string, attemptId: string, sign = true): void {
+function sendHello(client: TestPeerSessionOwner, phoneSeedB64: string, attemptId: string, sign = true): void {
   const app = generateEphemeralKeypair();
   const payload = clientHello({ attemptId, appX25519PubB64: app.publicKey.toString("base64"), phoneSeedB64, sign });
   const frame = encodeRouteFrame({ type: "message", from: PHONE_ID, channel: "control" }, payload, FrameKind.handshake);
-  (client as unknown as { handleBinaryFrame: (b: Buffer) => void }).handleBinaryFrame(Buffer.from(frame));
+  client.injectRouteFrame(Buffer.from(frame));
 }
 
 test("a verified client-hello registers an unknown account-trusted phone", () => {
@@ -106,7 +106,7 @@ test("a verified client-hello registers an unknown account-trusted phone", () =>
   ]);
 });
 
-test("registration seeds no per-project grants — the row is identity only", () => {
+test("registration seeds no per-project grants â€” the row is identity only", () => {
   const agentEd = ed25519Pair();
   const phoneEd = ed25519Pair();
   const store = fakeStore();
@@ -115,7 +115,7 @@ test("registration seeds no per-project grants — the row is identity only", ()
   expect(store.upserts[0]).not.toHaveProperty("allowedProjects");
 });
 
-test("a rekey does not rewrite the row — one write, not one per handshake", () => {
+test("a rekey does not rewrite the row â€” one write, not one per handshake", () => {
   const agentEd = ed25519Pair();
   const phoneEd = ed25519Pair();
   const store = fakeStore();
@@ -140,7 +140,7 @@ test("an admission against an existing row refreshes lastSeenAt (not frozen at c
 
   expect(store.touches).toEqual([phoneEd.pubB64]);
   expect(store.list()[0]!.lastSeenAt).not.toBe("2026-01-01T00:00:00.000Z");
-  // The refresh must NOT come from a row rewrite — that is what re-flushes the
+  // The refresh must NOT come from a row rewrite â€” that is what re-flushes the
   // file and trips the watcher on every rekey.
   expect(store.upserts.length).toBe(0);
 });

@@ -18,20 +18,26 @@ import 'package:test/test.dart';
 // Fakes
 // ---------------------------------------------------------------------------
 
-class _RecordingRelay extends RelayService {
-  _RecordingRelay() : super(crypto: CryptoService());
-
+class _RecordingRelay implements PeerLink {
   final _messages = StreamController<IncomingRouteMessage>.broadcast();
   final sent = <({Uint8List payload, FrameKind kind})>[];
 
   @override
   Stream<IncomingRouteMessage> get messageStream => _messages.stream;
   @override
+  Stream<PeerLinkState> get payloadStateStream =>
+      const Stream<PeerLinkState>.empty();
+  @override
+  Stream<PeerPath> get pathStream => const Stream<PeerPath>.empty();
+  @override
+  Stream<PeerLinkFailure> get failureStream =>
+      const Stream<PeerLinkFailure>.empty();
+  @override
+  Stream<void> get peerRestartStream => const Stream<void>.empty();
+  @override
   bool get isDispatchAllowed => true;
   @override
-  Stream<AppState> get stateStream => const Stream.empty();
-  @override
-  AppState get currentState => const AppState();
+  PeerLinkDiagnostic? get netTap => null;
 
   @override
   Future<PeerSendOutcome> sendFrame(
@@ -40,23 +46,16 @@ class _RecordingRelay extends RelayService {
     Uint8List payload, {
     FrameKind kind = FrameKind.sealed,
   }) async {
-    sendMessage(to, channel, payload, kind: kind);
-    return PeerSendOutcome.accepted;
-  }
-
-  @override
-  void sendMessage(
-    String to,
-    String channel,
-    Uint8List payload, {
-    FrameKind kind = FrameKind.sealed,
-  }) {
     if (channel == 'control') sent.add((payload: payload, kind: kind));
+    return PeerSendOutcome.accepted;
   }
 
   void inject(IncomingRouteMessage msg) => _messages.add(msg);
 
   Future<void> closeStreams() => _messages.close();
+
+  @override
+  Future<void> close() => closeStreams();
 }
 
 Future<(List<int> seed, Uint8List pub)> _agentEd25519Keypair([

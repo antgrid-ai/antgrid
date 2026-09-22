@@ -23,10 +23,22 @@ import 'package:flutter_test/flutter_test.dart';
 
 /// Authenticates instantly and routes nothing: only which sessions get disposed
 /// is under test here.
-class _StubRelay extends RelayService {
+class _StubRelay extends RelayService implements PeerLink {
+  @override
+  bool get isDispatchAllowed => true;
+  @override
+  Stream<PeerLinkState> get payloadStateStream => _payloadStates.stream;
+  @override
+  Stream<PeerPath> get pathStream => const Stream.empty();
+  @override
+  Stream<PeerLinkFailure> get failureStream => const Stream.empty();
+  @override
+  Stream<void> get peerRestartStream => _peerRestarts.stream;
   _StubRelay() : super(crypto: CryptoService());
 
   final _states = StreamController<AppState>.broadcast();
+  final _payloadStates = StreamController<PeerLinkState>.broadcast();
+  final _peerRestarts = StreamController<void>.broadcast();
   final _presence = StreamController<bool>.broadcast();
   final _messages = StreamController<IncomingRouteMessage>.broadcast();
   AppState _cur = const AppState();
@@ -35,6 +47,10 @@ class _StubRelay extends RelayService {
   void presence(bool online) {
     if (!_presence.isClosed) _presence.add(online);
   }
+
+  void dropPayload() => _payloadStates.add(PeerLinkState.closed);
+
+  void restartPayload() => _peerRestarts.add(null);
 
   void inject(IncomingRouteMessage msg) {
     if (!_messages.isClosed) _messages.add(msg);
@@ -81,7 +97,6 @@ class _StubRelay extends RelayService {
     return PeerSendOutcome.accepted;
   }
 
-  @override
   void sendMessage(
     String to,
     String channel,
@@ -96,6 +111,8 @@ class _StubRelay extends RelayService {
     if (!_states.isClosed) await _states.close();
     if (!_presence.isClosed) await _presence.close();
     if (!_messages.isClosed) await _messages.close();
+    if (!_payloadStates.isClosed) await _payloadStates.close();
+    if (!_peerRestarts.isClosed) await _peerRestarts.close();
   }
 }
 
@@ -145,24 +162,25 @@ void main() {
     CngAesGcm.evictImportedKeys();
   });
 
-  RelayMechanisms build({List<SessionKeys?>? handshakes}) => RelayMechanisms(
-    buildHandshaker: handshakes == null
-        ? null
-        : (_) => _FakeHandshaker(handshakes),
-    relay: relay,
-    peerRuntime: FixedPeerConnector(relay),
-    crypto: CryptoService(),
-    machineDeviceId: 'M',
-    identity: _identity(),
-    phoneDeviceId: 'phone-1',
-    phoneEd25519Seed: List<int>.filled(32, 7),
-    epoch: 1,
-    resolveCoords: () async => const ConnCoords(
-      relayUrl: 'ws://relay.test',
-      agentEd25519PubB64: _pinA,
-    ),
-    mintToken: () async => 'tok',
-  );
+  PeerConnectionMechanisms build({List<SessionKeys?>? handshakes}) =>
+      PeerConnectionMechanisms(
+        buildHandshaker: handshakes == null
+            ? null
+            : (_) => _FakeHandshaker(handshakes),
+        relay: relay,
+        peerRuntime: FixedPeerConnector(relay),
+        crypto: CryptoService(),
+        machineDeviceId: 'M',
+        identity: _identity(),
+        phoneDeviceId: 'phone-1',
+        phoneEd25519Seed: List<int>.filled(32, 7),
+        epoch: 1,
+        resolveCoords: () async => const ConnCoords(
+          relayUrl: 'ws://relay.test',
+          agentEd25519PubB64: _pinA,
+        ),
+        mintToken: () async => 'tok',
+      );
 
   /// Puts key material in the cipher's cache the way a live session would: the
   /// stub relay never completes a handshake, so there is no other way to get a
@@ -183,12 +201,11 @@ void main() {
 
     test('release() retires the cipher keys with the session', () async {
       final mech = build();
-      await mech.dial(
+      await mech.connectPayload(
         const ConnCoords(
           relayUrl: 'ws://relay.test',
           agentEd25519PubB64: _pinA,
         ),
-        'tok',
       );
       await sealOneFrame(0x41);
       expect(CngAesGcm.importedKeyCount, 1);
@@ -211,17 +228,16 @@ void main() {
         // session keys for the rest of the process.
         final mech = build();
         addTearDown(mech.release);
-        await mech.dial(
+        await mech.connectPayload(
           const ConnCoords(
             relayUrl: 'ws://relay.test',
             agentEd25519PubB64: _pinA,
           ),
-          'tok',
         );
         await sealOneFrame(0x43);
         expect(CngAesGcm.importedKeyCount, 1);
 
-        relay.disconnect();
+        relay.dropPayload();
         await pumpEventQueue();
 
         expect(CngAesGcm.importedKeyCount, 0);
@@ -236,24 +252,22 @@ void main() {
     test('replacing a stale-pinned session retires its keys too', () async {
       final mech = build();
       addTearDown(mech.release);
-      await mech.dial(
+      await mech.connectPayload(
         const ConnCoords(
           relayUrl: 'ws://relay.test',
           agentEd25519PubB64: _pinA,
         ),
-        'tok',
       );
       await sealOneFrame(0x42);
       expect(CngAesGcm.importedKeyCount, 1);
 
       // The host re-provisioned: the old session is disposed mid-flight rather
       // than released, a path that zeroizes its keys just the same.
-      await mech.dial(
+      await mech.connectPayload(
         const ConnCoords(
           relayUrl: 'ws://relay.test',
           agentEd25519PubB64: _pinB,
         ),
-        'tok',
       );
 
       expect(CngAesGcm.importedKeyCount, 0);
@@ -261,14 +275,16 @@ void main() {
 
     /// Drives a real session to `established` through the handshaker seam, which
     /// is the only way to reach a teardown that does not dispose the session.
-    Future<RelayMechanisms> established(List<SessionKeys?> handshakes) async {
+    Future<PeerConnectionMechanisms> established(
+      List<SessionKeys?> handshakes,
+    ) async {
       final mech = build(handshakes: handshakes);
       addTearDown(mech.release);
       const coords = ConnCoords(
         relayUrl: 'ws://relay.test',
         agentEd25519PubB64: _pinA,
       );
-      await mech.dial(coords, 'tok');
+      await mech.connectPayload(coords);
       await mech.resolveCoords();
       await mech.establishSession();
       expect(mech.session!.isEstablished, isTrue);
@@ -313,8 +329,7 @@ void main() {
         expect(CngAesGcm.importedKeyCount, 1);
 
         // The agent bounces: coming back arms a rekey, and this attempt fails.
-        relay.presence(false);
-        relay.presence(true);
+        relay.restartPayload();
         for (var i = 0; i < 50 && mech.session!.isEstablished; i++) {
           await Future<void>.delayed(const Duration(milliseconds: 10));
         }

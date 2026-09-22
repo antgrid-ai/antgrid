@@ -28,7 +28,7 @@ export type PushDeliverMessage = z.infer<typeof PushDeliverMessage>;
  * "unconfigured" (relay has no FCM credential), or "error" (transient send
  * failure). Carries the opaque pushToken so the bridge maps the result back to
  * the phone whose token to prune (Task 7). Keep in lockstep with the relay
- * emitter in relay/src/server.ts and the consumer in bridge/src/relay-client.ts.
+ * emitter in relay/src/server.ts and the consumer in bridge/src/central-control-client.ts.
  */
 export const PushResultMessage = z.object({
   type: z.literal("push:result"),

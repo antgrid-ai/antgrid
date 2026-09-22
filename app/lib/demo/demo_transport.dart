@@ -141,7 +141,6 @@ class DemoTransport extends BufferedAgentTransport {
     snapshotCache.clear();
     await outbound.close();
     await stateController.close();
-    await droppedFrameController.close();
   }
 
   // ── canned state ──

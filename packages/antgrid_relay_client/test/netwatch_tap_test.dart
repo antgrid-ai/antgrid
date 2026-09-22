@@ -1,12 +1,4 @@
-// Frame-capture hook coverage: the wire taps in RelayService, the type
-// annotations MachineSession adds on top of them, and the drops that until now
-// returned silently.
-//
-// Split deliberately across two harnesses. FakeLiveRelay OVERRIDES
-// `sendMessage`, so the real body — where the outbound wire tap lives — never
-// runs under it; the wire taps are asserted against a real RelayService via its
-// `debugHandleFrame` seam instead, and only the annotations are asserted at the
-// MachineSession level.
+// Frame-capture coverage for central control frames and native PeerLink annotations.
 import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
@@ -48,17 +40,20 @@ void main() {
       );
     });
 
-    test('falls back to a hash for a plaintext frame, which carries no nonce', () {
-      final id = frameIdOf(
-        Uint8List.fromList(utf8.encode('{"type":"handshake:client-hello"}')),
-        FrameKind.handshake,
-      );
-      // Pinned, not merely well-formed. The SAME bytes are hashed by
-      // `frameIdFor` in bridge/src/netwatch.ts and asserted against this exact
-      // string there — the pair is hand-mirrored, so a silent divergence would
-      // otherwise surface only as a `--join` that matches nothing.
-      expect(id, '59e7c7d96c01d53688b362a9');
-    });
+    test(
+      'falls back to a hash for a plaintext frame, which carries no nonce',
+      () {
+        final id = frameIdOf(
+          Uint8List.fromList(utf8.encode('{"type":"handshake:client-hello"}')),
+          FrameKind.handshake,
+        );
+        // Pinned, not merely well-formed. The SAME bytes are hashed by
+        // `frameIdFor` in bridge/src/netwatch.ts and asserted against this exact
+        // string there — the pair is hand-mirrored, so a silent divergence would
+        // otherwise surface only as a `--join` that matches nothing.
+        expect(id, '59e7c7d96c01d53688b362a9');
+      },
+    );
 
     test('a short sealed payload cannot yield a nonce and is hashed', () {
       final id = frameIdOf(Uint8List.fromList([1, 2, 3]), FrameKind.sealed);
@@ -66,85 +61,9 @@ void main() {
     });
   });
 
-  group('RelayService wire taps', () {
-    late _Capture capture;
-    late RelayService relay;
-
-    setUp(() {
-      capture = _Capture();
-      relay = RelayService(crypto: CryptoService(), netTap: capture.tap);
-    });
-
-    tearDown(() => relay.dispose());
-
-    test('records the send that logs nothing today: no socket', () {
-      relay.sendMessage('machine-1', 'control', _sealedLookingPayload(0x11));
-
-      final drop = capture.drops.single;
-      expect(drop['reason'], 'socket-not-open');
-      expect(drop['dir'], 'tx');
-      expect(drop['channel'], 'control');
-      expect(drop['frameId'], '11' * 12);
-      expect(drop['bytes'], isA<int>());
-    });
-
-    test('records an inbound sealed frame with its nonce and channel', () {
-      relay.debugHandleFrame(
-        encodeRouteFrame(
-          {'type': 'message', 'from': 'machine-1', 'channel': 'control'},
-          _sealedLookingPayload(0x7f),
-          FrameKind.sealed,
-        ),
-      );
-
-      final rx = capture.frames.single;
-      expect(rx['dir'], 'rx');
-      expect(rx['kind'], 'sealed');
-      expect(rx['channel'], 'control');
-      expect(rx['frameId'], '7f' * 12);
-    });
-
-    test('records an inbound handshake frame as its own kind', () {
-      final payload = Uint8List.fromList(utf8.encode('{"type":"x"}'));
-      relay.debugHandleFrame(
-        encodeRouteFrame(
-          {'type': 'message', 'from': 'machine-1', 'channel': 'control'},
-          payload,
-          FrameKind.handshake,
-        ),
-      );
-
-      final rx = capture.frames.single;
-      expect(rx['kind'], 'handshake');
-      // Hashed, not nonce-prefixed: a kind-1 frame is plaintext.
-      expect(rx['frameId'], frameIdOf(payload, FrameKind.handshake));
-    });
-
-    test('records a frame that never decoded', () {
-      relay.debugHandleFrame(Uint8List.fromList([0xff, 0x00, 0x00, 0x00]));
-
-      final drop = capture.drops.single;
-      expect(drop['dir'], 'rx');
-      expect(drop['reason'], 'bad-frame');
-      expect((drop['detail']! as Map)['why'], 'badVersion');
-    });
-
-    test('stays silent when no capture is armed', () {
-      final quiet = RelayService(crypto: CryptoService());
-      // The gate is the null hook itself: nothing to assert but that this
-      // neither throws nor needs a capture to exist.
-      expect(
-        () => quiet.sendMessage('m', 'control', _sealedLookingPayload(1)),
-        returnsNormally,
-      );
-      quiet.dispose();
-    });
-  });
-
-  // The common case needs a socket that is actually open, which RelayService
-  // only ever opens itself — hence the loopback server rather than the debug
+  // RelayService opens its control socket itself — hence the loopback server rather than the debug
   // seams above.
-  group('RelayService tx over a live socket', () {
+  group('RelayService control capture over a live socket', () {
     late FakeRelayWsServer server;
     late _Capture capture;
     late RelayService relay;
@@ -163,82 +82,44 @@ void main() {
       await server.close();
     });
 
-    test('records an outbound frame with its channel, size and nonce', () async {
-      final connect = relay.connect(
-        server.wsUrl,
-        DeviceIdentity(
-          deviceId: 'phone-1#machine-1',
-          name: 'Test Phone',
-          ed25519PrivateKey: Uint8List(32),
-          ed25519PublicKey: Uint8List(32),
-          x25519PrivateKey: Uint8List(32),
-          x25519PublicKey: Uint8List(32),
-        ),
-        licenseToken: 'tok',
-        epoch: 1,
-        machineDeviceId: 'machine-1',
-      );
-      expect(await connections.moveNext(), isTrue);
-      connections.current.sendJson({
-        'type': 'welcome',
-        'deviceId': 'phone-1#machine-1',
-        'epoch': 1,
-        'serverTime': DateTime.now().toUtc().toIso8601String(),
-      });
-      await connect;
+    test(
+      'records the relay control json crossing in both directions',
+      () async {
+        final connect = relay.connect(
+          server.wsUrl,
+          DeviceIdentity(
+            deviceId: 'phone-1#machine-1',
+            name: 'Test Phone',
+            ed25519PrivateKey: Uint8List(32),
+            ed25519PublicKey: Uint8List(32),
+            x25519PrivateKey: Uint8List(32),
+            x25519PublicKey: Uint8List(32),
+          ),
+          licenseToken: 'tok',
+          epoch: 1,
+          machineDeviceId: 'machine-1',
+        );
+        expect(await connections.moveNext(), isTrue);
+        connections.current.sendJson({
+          'type': 'welcome',
+          'deviceId': 'phone-1#machine-1',
+          'epoch': 1,
+          'serverTime': DateTime.now().toUtc().toIso8601String(),
+        });
+        await connect;
 
-      relay.sendMessage('machine-1', 'preview', _sealedLookingPayload(0x5a));
-
-      // By `kind`, not by `dir` alone: the socket's own control json — this
-      // connection's `hello`, and the `welcome` answering it — is captured too.
-      final tx = capture.frames.singleWhere(
-        (e) => e['dir'] == 'tx' && e['kind'] == 'sealed',
-      );
-      expect(tx['channel'], 'preview');
-      expect(tx['frameId'], '5a' * 12);
-      expect(tx['bytes'], 22);
-      expect(capture.drops, isEmpty);
-    });
-
-    test('records the relay control json crossing in both directions', () async {
-      final connect = relay.connect(
-        server.wsUrl,
-        DeviceIdentity(
-          deviceId: 'phone-1#machine-1',
-          name: 'Test Phone',
-          ed25519PrivateKey: Uint8List(32),
-          ed25519PublicKey: Uint8List(32),
-          x25519PrivateKey: Uint8List(32),
-          x25519PublicKey: Uint8List(32),
-        ),
-        licenseToken: 'tok',
-        epoch: 1,
-        machineDeviceId: 'machine-1',
-      );
-      expect(await connections.moveNext(), isTrue);
-      connections.current.sendJson({
-        'type': 'welcome',
-        'deviceId': 'phone-1#machine-1',
-        'epoch': 1,
-        'serverTime': DateTime.now().toUtc().toIso8601String(),
-      });
-      await connect;
-
-      final control = capture.frames.where((e) => e['kind'] == 'control');
-      // The agent's half records this same class, so a capture missing it shows
-      // an idle app beside an agent that saw the socket answer — and an `error`
-      // here (MESSAGE_RATE_LIMITED) is the relay saying it threw a frame away,
-      // which is the question a capture is usually opened to answer.
-      expect(
-        control.where((e) => e['dir'] == 'tx').map((e) => e['msgType']),
-        contains('hello'),
-      );
-      final welcome = control.singleWhere((e) => e['dir'] == 'rx');
-      expect(welcome['msgType'], 'welcome');
-      expect(welcome['bytes'], isPositive);
-      expect((welcome['detail']! as Map)['epoch'], 1);
-      expect(capture.drops, isEmpty);
-    });
+        final control = capture.frames.where((e) => e['kind'] == 'control');
+        expect(
+          control.where((e) => e['dir'] == 'tx').map((e) => e['msgType']),
+          contains('hello'),
+        );
+        final welcome = control.singleWhere((e) => e['dir'] == 'rx');
+        expect(welcome['msgType'], 'welcome');
+        expect(welcome['bytes'], isPositive);
+        expect((welcome['detail']! as Map)['epoch'], 1);
+        expect(capture.drops, isEmpty);
+      },
+    );
   });
 
   group('MachineSession annotations', () {
@@ -276,18 +157,20 @@ void main() {
       await relay.closeStreams();
     });
 
-    test('names an outbound frame with the type the wire could not see', () async {
-      await session.sendOnStream(
-        'proj-1',
-        {'type': 'terminal:input', 'data': 'x'},
-        'control',
-      );
+    test(
+      'names an outbound frame with the type the wire could not see',
+      () async {
+        await session.sendOnStream('proj-1', {
+          'type': 'terminal:input',
+          'data': 'x',
+        }, 'control');
 
-      final sealed = relay.sent.single.payload;
-      final note = capture.annotationFor(frameIdOf(sealed, FrameKind.sealed));
-      expect(note['msgType'], 'terminal:input');
-      expect(note['streamId'], 'proj-1');
-    });
+        final sealed = relay.sent.single.payload;
+        final note = capture.annotationFor(frameIdOf(sealed, FrameKind.sealed));
+        expect(note['msgType'], 'terminal:input');
+        expect(note['streamId'], 'proj-1');
+      },
+    );
 
     test('records the send dropped for want of an E2E session', () async {
       // A fresh session has installed no keys, so this is the pre-establishment

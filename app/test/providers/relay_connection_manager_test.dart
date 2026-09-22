@@ -2,32 +2,35 @@ import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
-import 'package:antgrid/connection/connection_supervisor.dart';
 import 'package:antgrid/connection/relay_mechanisms.dart';
 import 'package:antgrid/connection/supervisor_state.dart';
 import 'package:antgrid/providers/relay_connection.dart';
+import '../helpers/fixed_peer_connector.dart';
 
-RelayMechanisms _mechanismsFor(RelayConnection conn, String machineId) =>
-    RelayMechanisms(
-      relay: conn.relay,
-      crypto: CryptoService(),
-      machineDeviceId: machineId,
-      identity: DeviceIdentity(
-        deviceId: 'phone-1',
-        name: 'Test Phone',
-        ed25519PrivateKey: Uint8List(64),
-        ed25519PublicKey: Uint8List(32),
-        x25519PrivateKey: Uint8List(32),
-        x25519PublicKey: Uint8List(32),
-      ),
-      phoneDeviceId: 'phone-1',
-      phoneEd25519Seed: List<int>.filled(32, 7),
-      epoch: 1,
-      // Never resolves — these tests only need a live supervisor to ping, not
-      // a real climb to Connected.
-      resolveCoords: () async => null,
-      mintToken: () async => 'tok',
-    );
+PeerConnectionMechanisms _mechanismsFor(
+  RelayConnection conn,
+  String machineId,
+) => PeerConnectionMechanisms(
+  relay: conn.relay,
+  peerRuntime: FixedPeerConnector.stub(),
+  crypto: CryptoService(),
+  machineDeviceId: machineId,
+  identity: DeviceIdentity(
+    deviceId: 'phone-1',
+    name: 'Test Phone',
+    ed25519PrivateKey: Uint8List(64),
+    ed25519PublicKey: Uint8List(32),
+    x25519PrivateKey: Uint8List(32),
+    x25519PublicKey: Uint8List(32),
+  ),
+  phoneDeviceId: 'phone-1',
+  phoneEd25519Seed: List<int>.filled(32, 7),
+  epoch: 1,
+  // Never resolves — these tests only need a live supervisor to ping, not
+  // a real climb to Connected.
+  resolveCoords: () async => null,
+  mintToken: () async => 'tok',
+);
 
 void main() {
   test('returns one connection per machine, memoized across compound ids', () {
@@ -96,40 +99,23 @@ void main() {
     expect(mgr.openControlPlaneIds(), ['uuid']);
   });
 
-  test('noteFreshTokenEverywhere() pings every live machine supervisor, not '
-      'just one, and only unblocks licenseExpired', () {
-    final mgr = RelayConnectionManager(crypto: CryptoService());
-    addTearDown(mgr.disposeAll);
+  test(
+    'central supersession conflicts immediately and Retry clears it',
+    () async {
+      final mgr = RelayConnectionManager(crypto: CryptoService());
+      addTearDown(mgr.disposeAll);
+      final connection = mgr.connectionFor('m');
+      connection.ensureStarted(mechanisms: _mechanismsFor(connection, 'm'));
 
-    final a = mgr.connectionFor('m-a');
-    final b = mgr.connectionFor('m-b');
-    a.ensureStarted(mechanisms: _mechanismsFor(a, 'm-a'));
-    b.ensureStarted(mechanisms: _mechanismsFor(b, 'm-b'));
+      connection.supervisor!.noteRelayError('SUPERSEDED', retryable: false);
+      expect(connection.supervisor!.centralConflict, isTrue);
+      expect(connection.supervisor!.status, isNot(isA<Blocked>()));
 
-    a.supervisor!.noteRelayError('LICENSE_EXPIRED', retryable: false);
-    // A different terminal block, so noteFreshTokenEverywhere's filter (not
-    // a broad retry()) is what's under test. SUPERSEDED is retried for as long
-    // as the relay may still be holding a stale entry of ours, so reaching the
-    // block takes the whole budget.
-    for (var i = 0; i < kMaxSupersededRetries; i++) {
-      b.supervisor!.noteRelayError('SUPERSEDED', retryable: false);
-    }
-    expect(a.supervisor!.status, const Blocked(BlockReason.licenseExpired));
-    expect(b.supervisor!.status, const Blocked(BlockReason.superseded));
-    expect(mgr.hasLicenseExpiredBlock, isTrue);
+      connection.supervisor!.noteFreshToken();
+      expect(connection.supervisor!.centralConflict, isTrue);
 
-    mgr.noteFreshTokenEverywhere();
-
-    expect(
-      a.supervisor!.status,
-      isNot(isA<Blocked>()),
-      reason: 'every live machine must be pinged, not just one',
-    );
-    expect(
-      b.supervisor!.status,
-      const Blocked(BlockReason.superseded),
-      reason: 'only licenseExpired is a re-mint-recoverable block',
-    );
-    expect(mgr.hasLicenseExpiredBlock, isFalse);
-  });
+      connection.supervisor!.retry();
+      expect(connection.supervisor!.centralConflict, isFalse);
+    },
+  );
 }

@@ -149,11 +149,11 @@ Future<void> _settle() async {
   }
 }
 
-RelayMechanisms _mechanisms(
+PeerConnectionMechanisms _mechanisms(
   _Relay relay,
-  _Runtime? runtime,
+  _Runtime runtime,
   _Handshake handshake,
-) => RelayMechanisms(
+) => PeerConnectionMechanisms(
   relay: relay,
   crypto: CryptoService(),
   machineDeviceId: 'machine',
@@ -190,10 +190,10 @@ void main() {
         relayUrl: 'wss://new.test',
         agentEd25519PubB64: 'pin',
       );
-      await mech.reconnectCentral(old, 'token');
-      await mech.dial(next, 'token');
+      await mech.reconnectCentral(old);
+      await mech.connectPayload(next);
       expect(mech.centralControlNeedsReconnect, isTrue);
-      await mech.reconnectCentral(next, 'token');
+      await mech.reconnectCentral(next);
       expect(mech.centralControlNeedsReconnect, isFalse);
       expect(relay.dials, 2);
       await mech.release();
@@ -202,30 +202,6 @@ void main() {
     },
   );
 
-  test(
-    'missing native runtime cannot use the central socket for payloads',
-    () async {
-      final relay = _Relay();
-      final mechanisms = _mechanisms(relay, null, _Handshake());
-      var blocked = false;
-      mechanisms.onTerminalPeerError = () => blocked = true;
-      await expectLater(
-        mechanisms.dial(
-          const ConnCoords(
-            relayUrl: 'wss://relay.test',
-            agentEd25519PubB64: 'pin',
-          ),
-          'token',
-        ),
-        throwsA(isA<PeerConnectionFailure>()),
-      );
-      expect(blocked, isTrue);
-      expect(relay.dials, 0);
-      expect(mechanisms.session, isNull);
-      await mechanisms.release();
-      relay.dispose();
-    },
-  );
   test(
     'central reconnect and path changes preserve the native E2E session',
     () async {
@@ -269,9 +245,8 @@ void main() {
     final payload = _Payload();
     final runtime = _Runtime(payload)..gate = Completer<void>();
     final mechanisms = _mechanisms(relay, runtime, _Handshake());
-    final dialing = mechanisms.dial(
+    final dialing = mechanisms.connectPayload(
       const ConnCoords(relayUrl: 'wss://relay.test', agentEd25519PubB64: 'pin'),
-      'token',
     );
     await _settle();
     expect(runtime.selecting, isTrue);
@@ -295,12 +270,11 @@ void main() {
         var woken = false;
         mechanisms.onTerminalPeerError = () => blocked = true;
         mechanisms.onSessionDown = () => woken = true;
-        await mechanisms.dial(
+        await mechanisms.connectPayload(
           const ConnCoords(
             relayUrl: 'wss://relay.test',
             agentEd25519PubB64: 'pin',
           ),
-          'token',
         );
         payload.failures.add(
           PeerLinkFailure(

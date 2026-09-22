@@ -58,12 +58,21 @@ export class PeerAuthorizationFixture {
     const existing = this.registrations.get(auth.clientId);
     const identity = { accountId: auth.userId, deviceId: auth.deviceUuid, enrollmentId: auth.clientId };
     if (route === "authorization" && req.method === "GET") {
+      const accountPeers = new Map(this.peers().map((peer) => [peer.deviceId, peer]));
+      for (const credential of this.credentials.values()) {
+        if (credential.userId !== auth.userId) continue;
+        accountPeers.set(credential.deviceUuid, { deviceId: credential.deviceUuid, ed25519Pub: credential.ed25519Pub });
+      }
       return Response.json(PeerAuthorizationSnapshotSchema.parse({
         ...identity, allowed, leaseMs: allowed ? 60_000 : 0,
         policyGeneration: String(this.generation), registrationGeneration: existing?.generation ?? "0",
-        endpoint: allowed ? existing ?? null : null, relayUrls: [],
-        peers: this.peers().filter((peer) => peer.deviceId !== auth.deviceUuid && !this.revoked.has(peer.deviceId))
-          .map((peer) => ({ ...peer, endpoint: null })),
+        endpoint: allowed ? existing ?? null : null, relayUrls: ["https://relay.invalid/"],
+        peers: [...accountPeers.values()].filter((peer) => peer.deviceId !== auth.deviceUuid && !this.revoked.has(peer.deviceId))
+          .map((peer) => {
+            const credential = [...this.credentials.values()].find((value) =>
+              value.userId === auth.userId && value.deviceUuid === peer.deviceId);
+            return { ...peer, endpoint: credential ? this.registrations.get(credential.clientId) ?? null : null };
+          }),
       }));
     }
     if (!allowed) return Response.json({ error: "revoked" }, { status: 403 });

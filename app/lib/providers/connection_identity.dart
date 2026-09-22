@@ -92,7 +92,7 @@ final connectionTokenMinterProvider = FutureProvider<LicenseTokenMinter?>((
 /// [machineDeviceId] scopes the relay slot this identity dials with, so the app
 /// can hold one socket per machine open at once — see [relaySlotId]. It changes
 /// the transport address ONLY: the E2E transcript is signed with the bare
-/// `deviceUuid` (`phoneDeviceId` in `RelayMechanisms`), which is what the agent
+/// `deviceUuid` (`phoneDeviceId` in `PeerConnectionMechanisms`), which is what the agent
 /// resolves us by in the account peers inventory.
 DeviceIdentity connectionIdentityFor(
   DeviceRecord r, {

@@ -1,7 +1,7 @@
 // v3 stream multiplexing: one machine socket, project
 // cores attach as opaque streamId-tagged streams. Two layers are covered here:
-// StreamMux in isolation (against a stub transport — no crypto, no socket),
-// and the real RelayClient wiring the envelope through seal/fragment/send so
+// StreamMux in isolation (against a stub transport â€” no crypto, no socket),
+// and the real TestPeerSessionOwner wiring the envelope through seal/fragment/send so
 // `s` provably survives the wire.
 import { describe, test, expect, afterEach } from "bun:test";
 import { generateKeyPairSync } from "node:crypto";
@@ -12,7 +12,7 @@ import {
 } from "../src/stream-mux";
 import { MessageBus, type Channel } from "../src/message-bus";
 import { createMessage } from "../src/protocol";
-import { RelayClient } from "../src/relay-client";
+import { TestPeerSessionOwner } from "./test-peer-session-owner";
 import { generateEphemeralKeypair, deriveSharedSecret } from "../src/key-exchange";
 import {
   buildTranscript, deriveSessionKeys, phoneConfirmTag,
@@ -20,14 +20,12 @@ import {
 } from "../src/e2e";
 
 function makeTransport(peers: Map<string, PeerSessionView> = new Map()) {
-  const opened: string[] = [];
   const closed: string[] = [];
   const sent: Array<{ streamId: string; msg: unknown; channel: Channel }> = [];
   // Kept beside `sent` rather than in it so the existing exact-shape assertions
   // stay readable; index-aligned with it.
   const targets: Array<SendTarget | undefined> = [];
   const transport: StreamMuxTransport = {
-    openStream: (id) => opened.push(id),
     closeStream: (id) => closed.push(id),
     sendEnvelope: (id, msg, channel, target) => {
       targets.push(target);
@@ -36,7 +34,7 @@ function makeTransport(peers: Map<string, PeerSessionView> = new Map()) {
     },
     peerSession: (peerId) => peers.get(peerId) ?? null,
   };
-  return { transport, opened, closed, sent, targets, peers };
+  return { transport, closed, sent, targets, peers };
 }
 
 function peerView(peerId: string, checkoutRouting: boolean): PeerSessionView {
@@ -44,41 +42,26 @@ function peerView(peerId: string, checkoutRouting: boolean): PeerSessionView {
 }
 
 describe("StreamMux (unit, stub transport)", () => {
-  test("host binding becomes locally ready before relay admission and survives re-registration", () => {
-    const { transport, opened } = makeTransport();
+  test("host binding is admitted locally and keeps its opaque id", () => {
+    const { transport } = makeTransport();
     const mux = new StreamMux(transport);
     const events: string[] = [];
     const streamId = "0123456789abcdef";
     const handle = mux.attach(new MessageBus(), {
       streamId,
       onLocalReady: (id) => events.push(`local:${id}`),
-      onAdmitted: (id) => events.push(`relay:${id}`),
+      onAdmitted: (id) => events.push(`admitted:${id}`),
     });
     expect(handle.streamId).toBe(streamId);
-    expect(events).toEqual([`local:${streamId}`]);
-    mux.onOpened(streamId);
-    mux.reopenAll();
-    expect(events).toEqual([`local:${streamId}`, `relay:${streamId}`]);
-    expect(opened).toEqual([streamId, streamId]);
+    expect(events).toEqual([`local:${streamId}`, `admitted:${streamId}`]);
     expect(() => mux.attach(new MessageBus(), { streamId })).toThrow("duplicate");
     handle.detach();
   });
-  test("attach allocates a 16-hex streamId and sends stream-open", () => {
-    const { transport, opened } = makeTransport();
-    const mux = new StreamMux(transport);
-    const handle = mux.attach(new MessageBus(), {});
-    expect(handle.streamId).toMatch(/^[0-9a-f]{16}$/);
-    expect(opened).toEqual([handle.streamId]);
-  });
 
-  test("onOpened resolves onAdmitted exactly once", () => {
+  test("attach allocates a 16-hex streamId", () => {
     const { transport } = makeTransport();
     const mux = new StreamMux(transport);
-    let admitted = 0;
-    const handle = mux.attach(new MessageBus(), { onAdmitted: () => admitted++ });
-    mux.onOpened(handle.streamId);
-    mux.onOpened(handle.streamId); // already settled — no-op
-    expect(admitted).toBe(1);
+    expect(mux.attach(new MessageBus(), {}).streamId).toMatch(/^[0-9a-f]{16}$/);
   });
 
   test("outbound bus traffic is tagged with this stream's id", () => {
@@ -93,7 +76,7 @@ describe("StreamMux (unit, stub transport)", () => {
 
   test("mayDeliver gates outbound bus AND tunnel frames, and is re-read on every send", async () => {
     // The outbound half of the machine mobile-access gate. Read live, not
-    // captured: flipping the switch back on must resume the SAME stream — the
+    // captured: flipping the switch back on must resume the SAME stream â€” the
     // whole point of gating at the send rather than detaching.
     const { transport, sent } = makeTransport();
     const mux = new StreamMux(transport);
@@ -103,7 +86,7 @@ describe("StreamMux (unit, stub transport)", () => {
 
     bus.publish(createMessage("pong", {}), "control");
     // "gated", NOT "dropped": the one consumer that awaits this must be able to
-    // tell a closed machine switch from a cleared queue — a WS tunnel survives
+    // tell a closed machine switch from a cleared queue â€” a WS tunnel survives
     // the first and not the second.
     expect(await handle.sendTunnel({ t: "tunnel:http-start" })).toBe("gated");
     expect(sent).toEqual([]);
@@ -190,11 +173,11 @@ describe("StreamMux (unit, stub transport)", () => {
   // Regression: a bridge restart re-attaches every project under fresh random
   // ids, so the phone's cached id is dead forever. The old behaviour dropped +
   // warned only, which stranded the phone on the dead id until it was force
-  // quit — backing out of the project and re-entering never renegotiated.
+  // quit â€” backing out of the project and re-entering never renegotiated.
   test("a phone replaying on a dead streamId after a host restart is told the stream is invalid", () => {
     const { transport, sent } = makeTransport();
     const restarted = new StreamMux(transport);
-    // The fresh process's stream for the same project — a different id.
+    // The fresh process's stream for the same project â€” a different id.
     const live = restarted.attach(new MessageBus(), {});
     const deadId = "aaaabbbbccccdddd";
     expect(deadId).not.toBe(live.streamId);
@@ -207,12 +190,12 @@ describe("StreamMux (unit, stub transport)", () => {
       channel: "control",
       msg: expect.objectContaining({ type: "stream-invalid", streamId: deadId }),
     }]);
-    // The live stream is untouched — stream-scoped, like the relay's error{ref}.
+    // The live stream is untouched â€” stream-scoped, like the relay's error{ref}.
     const msg = createMessage("pong", {});
     expect(restarted.dispatchInbound(live.streamId, JSON.stringify(msg), "control", "phone-1")).toBe(true);
   });
 
-  test("stream-invalid is rate-limited per dead id — a burst of replays yields one notice, each dead id its own", () => {
+  test("stream-invalid is rate-limited per dead id â€” a burst of replays yields one notice, each dead id its own", () => {
     let now = 1_000_000;
     const { transport, sent } = makeTransport();
     const mux = new StreamMux(transport, () => now);
@@ -225,7 +208,7 @@ describe("StreamMux (unit, stub transport)", () => {
     mux.dispatchInbound("beefdeadbeefdead", body, "control", "phone-1");
     expect(sent).toHaveLength(2);
 
-    // Still stranded past the cooldown → say it again rather than go quiet.
+    // Still stranded past the cooldown â†’ say it again rather than go quiet.
     now += INVALID_NOTICE_COOLDOWN_MS + 1;
     mux.dispatchInbound("deadbeefdeadbeef", body, "control", "phone-1");
     expect(sent).toHaveLength(3);
@@ -292,7 +275,7 @@ describe("StreamMux (unit, stub transport)", () => {
     expect(tunnels).toEqual([]);
   });
 
-  test("the refusal is rate-limited per (session, stream) — a retry loop cannot flood the control plane", () => {
+  test("the refusal is rate-limited per (session, stream) â€” a retry loop cannot flood the control plane", () => {
     let now = 1_000_000;
     const { transport, sent, peers } = makeTransport();
     const mux = new StreamMux(transport, () => now);
@@ -308,13 +291,13 @@ describe("StreamMux (unit, stub transport)", () => {
     mux.dispatchInbound(handle.streamId, body, "control", "older");
     expect(sent).toHaveLength(2);
 
-    // Still refused past the cooldown → say it again rather than go quiet.
+    // Still refused past the cooldown â†’ say it again rather than go quiet.
     now += INVALID_NOTICE_COOLDOWN_MS + 1;
     mux.dispatchInbound(handle.streamId, body, "control", "stale");
     expect(sent).toHaveLength(3);
   });
 
-  test("stream-unbound mutes only that stream, and only outbound — a re-open reuses the id, so it must never detach", () => {
+  test("stream-unbound mutes only that stream, and only outbound â€” a re-open reuses the id, so it must never detach", () => {
     // The mirror of stream-invalid. Without it a core whose peer restarted
     // streams a live PTY at an app that binds nothing, one frame per frame.
     const { transport, sent, closed } = makeTransport();
@@ -339,7 +322,7 @@ describe("StreamMux (unit, stub transport)", () => {
     const bus = new MessageBus();
     const handle = mux.attach(bus, {});
 
-    // Inbound on the stream is the peer proving it holds a transport — the one
+    // Inbound on the stream is the peer proving it holds a transport â€” the one
     // retraction that needs no cooperation from whoever muted it.
     mux.markUnbound(handle.streamId);
     expect(mux.dispatchInbound(handle.streamId, JSON.stringify(createMessage("pong", {})), "control", "phone-1")).toBe(true);
@@ -365,28 +348,6 @@ describe("StreamMux (unit, stub transport)", () => {
     expect(() => mux.markBound("deadbeefdeadbeef")).not.toThrow();
   });
 
-  test("a stream-open rejection (SESSION_LIMIT_EXCEEDED) settles onRejected for that stream only — the transport and every other stream stay live", () => {
-    const { transport, closed } = makeTransport();
-    const mux = new StreamMux(transport);
-    const rejectedA: Array<{ code: string; message: string }> = [];
-    const admittedB: string[] = [];
-    const a = mux.attach(new MessageBus(), { onRejected: (code, message) => rejectedA.push({ code, message }) });
-    const b = mux.attach(new MessageBus(), { onAdmitted: (id) => admittedB.push(id) });
-
-    expect(mux.onError(a.streamId, "SESSION_LIMIT_EXCEEDED", "cap reached")).toBe(true);
-    expect(rejectedA).toEqual([{ code: "SESSION_LIMIT_EXCEEDED", message: "cap reached" }]);
-
-    // Stream b is untouched — it can still be admitted independently, and
-    // neither stream was closed as a side effect of the rejection.
-    mux.onOpened(b.streamId);
-    expect(admittedB).toEqual([b.streamId]);
-    expect(closed).toEqual([]);
-
-    // An id that isn't a live stream (e.g. a pair-request nonce) isn't ours —
-    // the caller falls back to normal error handling.
-    expect(mux.onError("not-a-stream-id", "SOME_CODE", "x")).toBe(false);
-  });
-
   test("detach is idempotent", () => {
     const { transport, closed } = makeTransport();
     const mux = new StreamMux(transport);
@@ -394,16 +355,6 @@ describe("StreamMux (unit, stub transport)", () => {
     handle.detach();
     handle.detach();
     expect(closed).toEqual([handle.streamId]);
-  });
-
-  test("reopenAll re-sends stream-open for every attached stream (post-reconnect re-admission)", () => {
-    const { transport, opened } = makeTransport();
-    const mux = new StreamMux(transport);
-    const a = mux.attach(new MessageBus(), {});
-    const b = mux.attach(new MessageBus(), {});
-    opened.length = 0;
-    mux.reopenAll();
-    expect(opened.sort()).toEqual([a.streamId, b.streamId].sort());
   });
 
   test("notifyPeerOnline/Offline broadcast to every attached stream; a late attach inherits an already-online session", () => {
@@ -436,7 +387,7 @@ describe("StreamMux (unit, stub transport)", () => {
   });
 });
 
-// --- Integration: the real RelayClient driving the envelope over the wire ---
+// --- Integration: the real TestPeerSessionOwner driving the envelope over the wire ---
 
 const AGENT_DEVICE_ID = "agent-1";
 const PHONE_ID = "phone-1";
@@ -449,26 +400,26 @@ function ed25519Pair(): { seedB64: string; pubB64: string } {
   };
 }
 
-function injectFrame(client: RelayClient, kind: FrameKind, payload: Buffer, channel: Channel = "control"): void {
+function injectFrame(client: TestPeerSessionOwner, kind: FrameKind, payload: Buffer, channel: Channel = "control"): void {
   const frame = encodeRouteFrame({ type: "message", from: PHONE_ID, channel }, payload, kind);
-  (client as any).handleBinaryFrame(Buffer.from(frame));
+  client.injectRouteFrame(Buffer.from(frame));
 }
 
-let clients: RelayClient[] = [];
+let clients: TestPeerSessionOwner[] = [];
 afterEach(() => { for (const c of clients.splice(0)) try { c.close(); } catch {} });
 
-/** Establish a real E2E session on a REAL (non-forTest) RelayClient and return
- *  the phone-side transport the test drives against it. Unlike forTest() —
- *  which stubs the mux to a no-op for handshake-only tests — this needs the
+/** Establish a real E2E session on a REAL (non-forTest) TestPeerSessionOwner and return
+ *  the phone-side transport the test drives against it. Unlike forTest() â€”
+ *  which stubs the mux to a no-op for handshake-only tests â€” this needs the
  *  real StreamMux wired to real sendJson/sendAppEnvelope, so it constructs the
  *  client normally and overrides `sendPayload` (same shadowing trick forTest
  *  uses) plus a stubbed OPEN socket so `sendJson`'s stream-open/close land in
  *  the same observable `sent` array as sealed application traffic. */
-function establish(): { client: RelayClient; sent: Array<string | Buffer>; phoneTransport: E2eTransport } {
+function establish(): { client: TestPeerSessionOwner; sent: Array<string | Buffer>; phoneTransport: E2eTransport } {
   const agentEd = ed25519Pair();
   const phoneEd = ed25519Pair();
   const sent: Array<string | Buffer> = [];
-  const client = new RelayClient({
+  const client = new TestPeerSessionOwner({
     url: "ws://127.0.0.1:1",
     identity: {
       deviceId: AGENT_DEVICE_ID, deviceName: "agent", createdAt: new Date().toISOString(),
@@ -511,18 +462,13 @@ function establish(): { client: RelayClient; sent: Array<string | Buffer>; phone
   return { client, sent, phoneTransport };
 }
 
-describe("StreamMux over a live RelayClient (wire-level envelope tagging)", () => {
-  test("attach opens a stream and onAdmitted resolves on stream-opened", () => {
-    const { client, sent } = establish();
+describe("StreamMux over a live TestPeerSessionOwner (wire-level envelope tagging)", () => {
+  test("attach admits the host-local binding immediately", () => {
+    const { client } = establish();
     const admitted: string[] = [];
-    const handle = client.attachStream(new MessageBus(), { onAdmitted: (id) => admitted.push(id) });
-
-    // attachStream sent a plaintext-JSON `stream-open` control message directly
-    // on the socket (not sealed app traffic) — the mux's own wire frame.
-    const openMsg = JSON.parse(sent.find((s) => typeof s === "string" && s.includes("stream-open")) as string);
-    expect(openMsg).toEqual({ type: "stream-open", streamId: handle.streamId });
-
-    (client as any).handleTextMessage(JSON.stringify({ type: "stream-opened", streamId: handle.streamId }));
+    const handle = client.attachStream(new MessageBus(), {
+      onAdmitted: (id) => admitted.push(id),
+    });
     expect(admitted).toEqual([handle.streamId]);
   });
 
@@ -567,7 +513,7 @@ describe("StreamMux over a live RelayClient (wire-level envelope tagging)", () =
 
     expect(received).toEqual([]);
     // The notice rides the control plane (`s` omitted), so the phone reads it
-    // without a stream binding — which is the whole point: it has none.
+    // without a stream binding â€” which is the whole point: it has none.
     const sealedReplies = sent.filter((s): s is Buffer => Buffer.isBuffer(s));
     expect(sealedReplies).toHaveLength(1);
     const envelope = JSON.parse(phoneTransport.open(sealedReplies[0]!)!);
@@ -597,19 +543,5 @@ describe("StreamMux over a live RelayClient (wire-level envelope tagging)", () =
     expect(received).toEqual([bigMsg]);
   });
 
-  test("SESSION_LIMIT_EXCEEDED on one stream leaves the socket and a sibling stream fully live", () => {
-    const { client } = establish();
-    const rejected: Array<{ code: string; message: string }> = [];
-    const admitted: string[] = [];
-    const limited = client.attachStream(new MessageBus(), { onRejected: (code, message) => rejected.push({ code, message }) });
-    const sibling = client.attachStream(new MessageBus(), { onAdmitted: (id) => admitted.push(id) });
 
-    (client as any).handleErrorFrame({ code: "SESSION_LIMIT_EXCEEDED", message: "cap reached", retryable: false, ref: limited.streamId });
-    (client as any).handleTextMessage(JSON.stringify({ type: "stream-opened", streamId: sibling.streamId }));
-
-    expect(rejected).toEqual([{ code: "SESSION_LIMIT_EXCEEDED", message: "cap reached" }]);
-    expect(admitted).toEqual([sibling.streamId]);
-    // The rejection must not be recorded as the socket-level lastError.
-    expect((client as any).lastError).toBeNull();
-  });
 });

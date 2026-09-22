@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
+import 'package:antgrid/connection/connection_supervisor.dart';
 import 'package:antgrid/connection/relay_mechanisms.dart';
 import 'package:antgrid/providers/account_agents.dart';
 import 'package:antgrid/providers/agent_transport.dart';
@@ -39,20 +40,47 @@ class _MemStorage implements DeviceSecretStorage {
   }
 }
 
-/// Captures the [RelayMechanisms] the transport builder hands the connection —
+/// Captures the [PeerConnectionMechanisms] the transport builder hands the connection —
 /// and deliberately never constructs a supervisor, so nothing dials.
 class _CapturingConnection extends RelayConnection {
-  _CapturingConnection() : super(machineDeviceId: 'M', crypto: CryptoService());
+  _CapturingConnection(RelayService relay)
+    : super(
+        machineDeviceId: 'M',
+        crypto: CryptoService(),
+        relayOverride: relay,
+      );
 
-  final Completer<RelayMechanisms> _first = Completer<RelayMechanisms>();
+  final Completer<PeerConnectionMechanisms> _first =
+      Completer<PeerConnectionMechanisms>();
 
   /// Resolves with the first mechanisms handed over, so the test awaits the
   /// event itself rather than polling the wall clock for it.
-  Future<RelayMechanisms> get firstMechanisms => _first.future;
+  Future<PeerConnectionMechanisms> get firstMechanisms => _first.future;
 
   @override
-  void ensureStarted({required RelayMechanisms mechanisms}) {
+  void ensureStarted({required PeerConnectionMechanisms mechanisms}) {
     if (!_first.isCompleted) _first.complete(mechanisms);
+  }
+}
+
+class _TokenCapturingRelay extends RelayService {
+  _TokenCapturingRelay() : super(crypto: CryptoService());
+  final tokens = <String>[];
+  AppState _state = const AppState();
+  @override
+  AppState get currentState => _state;
+  @override
+  Future<void> connect(
+    String url,
+    DeviceIdentity identity, {
+    required String licenseToken,
+    required int epoch,
+    String? machineDeviceId,
+  }) async {
+    tokens.add(licenseToken);
+    _state = const AppState(
+      connectionState: RelayConnectionState.authenticated,
+    );
   }
 }
 
@@ -132,7 +160,7 @@ void main() {
   // `claims.deviceUuid` — so one minter shared across two device records
   // silently widens revoking either into revoking both.
   //
-  // Driving the real `RelayMechanisms.mintToken` closure is the only way to see
+  // Driving the real central reconnect path is the only way to see
   // which provider it reads: the two minters below return distinguishable
   // tokens. (This assertion previously rode `PairingService.tokenProvider`,
   // deleted in Task 10 — same guarantee, re-anchored on the surviving carrier:
@@ -176,7 +204,8 @@ void main() {
       ),
     );
 
-    final conn = _CapturingConnection();
+    final relay = _TokenCapturingRelay();
+    final conn = _CapturingConnection(relay);
     addTearDown(conn.dispose);
 
     final container = ProviderContainer(
@@ -226,13 +255,25 @@ void main() {
       onTimeout: () => throw TestFailure('the relay path must have been built'),
     );
 
-    expect(await mech.mintToken(), 'CONN-1');
+    await mech.reconnectCentral(
+      const ConnCoords(
+        relayUrl: 'wss://relay.test',
+        agentEd25519PubB64: 'agent',
+      ),
+    );
+    expect(relay.tokens.single, 'CONN-1');
     expect(connectionMints, 1);
     expect(mainRecordMints, 0, reason: 'the MAIN record must not be used');
 
     // Fresh per attempt, never a cached token: one minted before a long backoff
     // is already expired by the time its dial runs.
-    expect(await mech.mintToken(), 'CONN-2');
+    await mech.reconnectCentral(
+      const ConnCoords(
+        relayUrl: 'wss://relay.test',
+        agentEd25519PubB64: 'agent',
+      ),
+    );
+    expect(relay.tokens.last, 'CONN-2');
     expect(connectionMints, 2);
     expect(mainRecordMints, 0);
   }, timeout: const Timeout(Duration(seconds: 30)));

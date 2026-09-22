@@ -14,7 +14,7 @@ const HEARTBEAT_INTERVAL = 25_000;
 const INITIAL_BACKOFF = 1_000;
 const MAX_BACKOFF = 30_000;
 const LICENSE_AUTH_DEAD = new Set(["LICENSE_INVALID", "LICENSE_REVOKED"]);
-const log = logger.child({ component: "relay-client" });
+const log = logger.child({ component: "central-control-client" });
 
 /**
  * The fields of a relay control verb worth keeping in a capture: the ones that
@@ -26,15 +26,13 @@ function netwatchControlDetail(
   msg: ServerMessage,
 ): Record<string, string | number | boolean> | undefined {
   const m = msg as {
-    code?: string; retryable?: boolean; ref?: string; peerId?: string;
-    streamId?: string; epoch?: number; ok?: boolean; reason?: string;
+    code?: string; retryable?: boolean; peerId?: string;
+    epoch?: number; ok?: boolean; reason?: string;
   };
   const detail: Record<string, string | number | boolean> = {};
   if (m.code !== undefined) detail.code = m.code;
   if (m.retryable !== undefined) detail.retryable = m.retryable;
-  if (m.ref !== undefined) detail.ref = m.ref;
   if (m.peerId !== undefined) detail.peerId = m.peerId;
-  if (m.streamId !== undefined) detail.streamId = m.streamId;
   if (m.epoch !== undefined) detail.epoch = m.epoch;
   if (m.ok !== undefined) detail.ok = m.ok;
   if (m.reason !== undefined) detail.reason = m.reason;
@@ -54,8 +52,6 @@ function signEd25519(seedB64: string, data: Uint8Array): string {
 export interface CentralControlOptions extends Pick<PeerSessionOwnerOptions, "identity" | "pairedPhones" | "onError" | "onDisconnected"> {
   onConnecting?: () => void;
   onControl?: (message: ServerMessage) => void;
-  onBinary?: (bytes: Buffer) => void;
-  consumePayloadError?: (message: RelayError) => boolean;
   onPeerPolicyChanged?: (generation: string) => void;
   url: string;
   /** Machine dir for the persistent connection-epoch counter. */
@@ -77,7 +73,7 @@ export interface CentralControlOptions extends Pick<PeerSessionOwnerOptions, "id
   getLicenseToken: () => Promise<string> | string;
 }
 
-export interface RelayError { type: "error"; code: string; message: string; retryable: boolean; ref?: string; serverTime?: string; channel?: string; bytes?: number; }
+export interface RelayError { type: "error"; code: string; message: string; retryable: boolean; serverTime?: string; }
 
 export class CentralControlClient {
 
@@ -171,11 +167,9 @@ export class CentralControlClient {
       if (typeof event.data === "string") {
         this.handleTextMessage(event.data);
       } else {
-        const buf =
-          event.data instanceof ArrayBuffer
-            ? Buffer.from(event.data)
-            : Buffer.from(event.data as Uint8Array);
-        this.handleBinaryFrame(buf);
+        this.lastError = { code: "PROTOCOL_VIOLATION", retryable: false };
+        log.warn("Central relay sent an unexpected binary frame");
+        ws.close(1008, "PROTOCOL_VIOLATION");
       }
     });
 
@@ -315,8 +309,6 @@ export class CentralControlClient {
         log.info("Authenticated with relay as %s (epoch %d)", msg.deviceId, msg.epoch);
         this.opts.onAuthenticated?.();
         break;
-      case "stream-opened":
-      case "stream-closed":
       case "peer-online":
       case "peer-offline":
         this.opts.onControl?.(msg);
@@ -350,8 +342,7 @@ export class CentralControlClient {
     }
   }
 
-  handleErrorFrame(msg: { code: string; message: string; retryable: boolean; ref?: string; serverTime?: string; channel?: string; bytes?: number }): void {
-    if (this.opts.consumePayloadError?.({ type: "error", ...msg })) return;
+  handleErrorFrame(msg: { code: string; message: string; retryable: boolean; serverTime?: string }): void {
     this.lastError = { code: msg.code, retryable: msg.retryable };
 
     // Clock-skew self-heal: learn the offset and let the retryable reconnect
@@ -387,40 +378,20 @@ export class CentralControlClient {
     log.warn("Relay clock skew detected; applying %dms offset to the next hello", offset);
   }
 
-  // --- Binary frame receive path (kind-byte dispatch) ---
-
-  handleBinaryFrame(buf: Buffer): void {
-    this.opts.onBinary?.(buf);
-  }
-
   /** Send a push:deliver control frame to the relay (blind FCM/APNs forward). A
    *  top-level control message on OUR socket — the relay itself consumes it. */
   sendPushDeliver(msg: { pushToken: string; provider: "fcm" | "apns"; blob: { epk: string; box: string } }): void {
     this.sendJson({ type: "push:deliver", ...msg });
   }
 
-  sendBinary(frame: Uint8Array<ArrayBuffer>): boolean {
-    if (this.ws?.readyState !== WebSocket.OPEN) return false;
-    this.ws.send(frame);
-    return true;
-  }
-
-  /**
-   * Every outbound relay control verb goes through here — `hello`, `ping`,
-   * `stream-open`/`stream-close`, `push:deliver` — so it is recorded for the
-   * same reason the inbound half is. A capture showing a `pong` with no `ping`,
-   * or an `unknown-stream` drop with no `stream-open` to say whether this
-   * bridge ever opened that stream, cannot answer the question the streamId
-   * column exists for. Only the verb and its size are kept: `hello` carries
-   * auth material and `push:deliver` carries a payload, and neither belongs in
-   * a capture.
-   */
+  /** Record each outbound control verb without capturing authentication
+   * material or encrypted push content. */
   sendJson(data: object): void {
-    const { type: msgType, streamId } = data as { type?: string; streamId?: string };
+    const { type: msgType } = data as { type?: string };
     if (this.ws?.readyState !== WebSocket.OPEN) {
       netwatch.record({
         dir: "tx", kind: "drop", transport: "relay",
-        msgType, streamId, reason: "socket-not-open",
+        msgType, reason: "socket-not-open",
         detail: { readyState: this.ws?.readyState ?? -1 },
       });
       return;
@@ -428,7 +399,7 @@ export class CentralControlClient {
     const json = JSON.stringify(data);
     netwatch.record({
       dir: "tx", kind: "control", transport: "relay",
-      msgType, streamId, bytes: Buffer.byteLength(json, "utf8"),
+      msgType, bytes: Buffer.byteLength(json, "utf8"),
     });
     this.ws.send(json);
   }

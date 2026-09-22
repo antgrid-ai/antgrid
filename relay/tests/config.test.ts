@@ -96,18 +96,6 @@ describe("loadConfig", () => {
     expect(cfg.replayTtlMs).toBe(300_000);
     expect(cfg.jsonRateLimitPerSec).toBe(10);
     expect(cfg.jsonRateLimitBurst).toBe(30);
-    expect(cfg.maxStreamsPerConnection).toBe(1024);
-  });
-
-  test("maxStreamsPerConnection respects its env override", () => {
-    process.env.LICENSE_API_URL = "http://localhost:8787";
-    process.env.RELAY_INTERNAL_SECRET = VALID_SECRET;
-    process.env.MAX_STREAMS_PER_CONNECTION = "64";
-    try {
-      expect(loadConfig().maxStreamsPerConnection).toBe(64);
-    } finally {
-      delete process.env.MAX_STREAMS_PER_CONNECTION;
-    }
   });
 
   test("v3 keys respect env overrides", () => {
@@ -184,6 +172,15 @@ describe("loadConfig", () => {
     expect(() => loadConfig()).toThrow(/TRUSTED_PROXY_IPS/);
   });
 
+  test("payload routing configuration is gone", () => {
+    process.env.LICENSE_API_URL = "http://localhost:8787";
+    process.env.RELAY_INTERNAL_SECRET = VALID_SECRET;
+    const cfg = loadConfig() as unknown as Record<string, unknown>;
+    for (const removed of ["rateLimitMsgPerSec", "rateLimitMsgBurst", "maxStreamsPerConnection"]) {
+      expect(cfg).not.toHaveProperty(removed);
+    }
+  });
+
   // R1 deletes the v2 offline-queue and stale-pair-timeout knobs outright —
   // pin their absence so a reintroduction doesn't slip back in unnoticed.
   test("v2 offline-queue / stale-pair knobs are gone", () => {
@@ -206,9 +203,7 @@ describe("loadConfig", () => {
     }
   });
 
-  // Task 4 deletes the grant table outright (mayRoute is the only routing
-  // authority) — pin absence of its config knob so a reintroduction doesn't
-  // slip back in unnoticed.
+  // The grant table is gone; pin absence so it cannot silently return.
   test("grant sweeper knob is gone", () => {
     process.env.LICENSE_API_URL = "http://localhost:8787";
     process.env.RELAY_INTERNAL_SECRET = VALID_SECRET;

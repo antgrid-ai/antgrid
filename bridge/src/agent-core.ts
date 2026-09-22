@@ -229,7 +229,7 @@ export interface AgentCore {
    *  Returns the number of terminals that were closed. */
   shutdown(): Promise<number>;
   /** Identity + transport configuration the caller uses to construct a
-   *  RelayClient (or other transports). */
+   *  the native peer-session owner (or another transport). */
   readonly relayUrl: string | null;
   readonly identity: DeviceIdentity;
   readonly projectId: string;

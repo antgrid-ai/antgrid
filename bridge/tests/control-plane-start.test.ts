@@ -7,7 +7,8 @@ import { HostServer, type HostRemoteConfig, type RemoteRuntime } from "../src/ho
 import { computeProjectId } from "../src/project-id";
 import { MessageBus } from "../src/message-bus";
 import { ProjectStartMessage, parseMessage } from "../src/protocol";
-import type { RelayClient, RelayClientOptions } from "../src/relay-client";
+import type { RemoteHostConnection } from "../src/remote-host-connection";
+import type { NativeHostOptions } from "../src/peer/native-host-connection";
 import type { AttachStreamOpts } from "../src/stream-mux";
 
 // --- shared fakes (mirror host-control-plane.test.ts) ----------------------
@@ -17,7 +18,7 @@ function fakeRemoteConfig(): HostRemoteConfig {
     relayUrl: "ws://127.0.0.1:1",
     licenseApiUrl: "http://127.0.0.1:1",
     identity: { deviceId: "dev-1", deviceName: "dev-1", createdAt: "2026-01-01T00:00:00.000Z" },
-    auth: { clientId: "cid", clientSecret: "secret", deviceUuid: "uuid-1" },
+    auth: { clientId: "cid", clientSecret: "secret", deviceUuid: "uuid-1", userId: "user-1", endpointSecret: "endpoint-secret" },
     onAuthRevoked: () => {},
   };
 }
@@ -30,7 +31,7 @@ function fakeRuntime(): RemoteRuntime {
 // attaches (mirrors host-promotion.test.ts) — flips isRelayRegistered() true
 // and records the streamId in host.streamIds via remoteDepsFor's wrapper.
 function makeAuthenticatingRelayFactory() {
-  return (_opts: RelayClientOptions): RelayClient =>
+  return (_opts: NativeHostOptions): RemoteHostConnection =>
     ({
       deviceId: "control-plane-dev",
       hasEstablishedSession: () => false,
@@ -46,7 +47,7 @@ function makeAuthenticatingRelayFactory() {
       },
       noteStreamBound: () => {},
       sendPushDeliver: () => {},
-    }) as unknown as RelayClient;
+    }) as unknown as RemoteHostConnection;
 }
 
 let host: HostServer | null = null;
@@ -181,7 +182,7 @@ test("idempotent project:start on an already-promoted, relay-registered core re-
   host = createHostPolicyFixture({
     remote: fakeRemoteConfig(),
     remoteRuntimeFactory: () => Promise.resolve(fakeRuntime()),
-    relayClientFactory: makeAuthenticatingRelayFactory(),
+    remoteHostFactory: makeAuthenticatingRelayFactory(),
   });
   const h = host;
 

@@ -901,11 +901,11 @@ migrations. A `postgres:16-alpine` container is enough.
 | Path | What it is |
 |---|---|
 | `bridge/` | TypeScript/Bun. Runs on your machine: agent terminals (PTY), file watching, git, port scanning, HTTP tunnelling. Ships inside the desktop app. |
-| `relay/` | TypeScript/Bun. Zero-knowledge WebSocket router — authenticates devices, forwards encrypted frames, reads no payloads. |
+| `relay/` | TypeScript/Bun. Central WebSocket control plane — authenticates devices and carries presence, policy, heartbeat and encrypted push delivery; rejects application payloads. |
 | `app/` | Flutter/Dart + Riverpod. Desktop and mobile UI: terminal viewer, file explorer, git review, browser preview. |
 | `web/` | TypeScript/Bun + Hono + Postgres. Accounts and sign-in, subscriptions, device registration, Ed25519 JWT minting for the relay's gate. |
 | `packages/antgrid-wire` | TypeScript. Frame codec, relay control-envelope schemas, `FRAME_VERSION`, shared client-IP resolver. Consumed by bridge, relay, web and evals. |
-| `packages/antgrid_relay_client` | Pure Dart relay and crypto client, no Flutter. The app's transport layer. |
+| `packages/antgrid_relay_client` | Pure Dart central-control, E2E and session protocol, no Flutter. Native payload links are injected by the ELv2 peer transport. |
 | `packages/antgrid_eval_client` | Dart end-to-end test fixtures. |
 | `site/` | Astro. The static marketing site at `antgrid.ai`. Its own Bun project, **not** a root workspace — `bun install` from the root does not cover it. |
 | `evals/` | End-to-end suite: real bridge processes, an in-process relay, real PTYs. |

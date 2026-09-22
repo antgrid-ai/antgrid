@@ -49,13 +49,9 @@ const int _nonceLength = 12;
 
 /// A frame's cross-endpoint identity.
 ///
-/// A sealed payload opens with a per-seal RANDOM nonce, and the relay forwards
-/// the payload byte-for-byte, so that nonce is already a unique id for this
-/// exact frame that BOTH endpoints can compute — no wire change, no header
-/// space, no key material. It is what lets a capture taken here be joined
-/// against one taken on the agent, closing the gap `AgentTransport.droppedFrames`
-/// documents: the route header carries no message id, so a dropped frame is
-/// otherwise unidentifiable.
+/// A sealed payload opens with a per-seal random nonce, and the native
+/// payload link forwards it byte-for-byte. Both endpoints can therefore
+/// identify the exact frame without changing the route framing.
 ///
 /// Plaintext frames (kind-1 handshake) carry no nonce and are rare enough that
 /// hashing them costs nothing.

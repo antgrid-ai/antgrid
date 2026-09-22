@@ -85,13 +85,8 @@ export interface AttachStreamOpts {
   /** The project this stream carries, named on a refusal so the app can fail the
    *  exact bind it is waiting on instead of guessing. */
   projectId?: string;
-  /** Relay acked the stream-open (data-plane slot admitted). */
+  /** Host-local binding is ready for native peer sessions. */
   onAdmitted?: (streamId: string) => void;
-  /** Relay rejected the stream-open; the socket and every other stream stay
-   *  live. Current relays admit every stream — the only rejection code we still
-   *  decode, `SESSION_LIMIT_EXCEEDED`, is retired and reaches us only from a
-   *  relay predating the worker-limit change. */
-  onRejected?: (code: string, message: string) => void;
   /** The machine's paired phone became reachable (session established / peer
    *  online). Also fired at attach time when the session is already established,
    *  so a drill-in stream resumes immediately. */
@@ -131,10 +126,9 @@ export interface AttachStreamOpts {
   mayAcceptFrom?: (peer: PeerSessionView | null) => StreamRefusal | null;
 }
 
-/** The slice of the machine {@link RelayClient} the mux drives. Kept minimal so
- *  the mux is unit-testable against a stub. */
+/** The slice of the machine's native peer-session owner that the mux drives.
+ *  Kept minimal so the mux is unit-testable against a stub. */
 export interface StreamMuxTransport {
-  openStream(streamId: string): void;
   closeStream(streamId: string): void;
   /** Seal + fragment + send one stream-tagged app envelope on `channel`, once
    *  per session `target` selects (absent = every established session).
@@ -158,7 +152,6 @@ interface StreamEntry {
   bus: MessageBus;
   unsub: () => void;
   opts: AttachStreamOpts;
-  settled: boolean;
   /** The app answered `stream-unbound` for this id: it holds no transport, so
    *  every frame we push is discarded on arrival. Muted rather than detached —
    *  the core stays running for its loopback owner, the advert stays dialable,
@@ -169,13 +162,10 @@ interface StreamEntry {
 }
 
 /**
- * Multiplexes project streams over the single machine relay socket.
- * Owned by the machine {@link RelayClient}: it allocates opaque stream ids,
- * drives stream-open/close admission, tags outbound bus traffic with the
- * stream's id, and routes inbound `{s, m}` envelopes back to the right project
- * bus. Control-plane traffic (`s` omitted / `"0"`) is handled by the RelayClient
- * directly, never here.
- */
+ * Multiplexes host-owned project streams over established native peer sessions.
+ * The mux allocates opaque local IDs, tags outbound bus traffic, and routes
+ * inbound `{s, m}` envelopes to the owning project bus. Machine control traffic
+ * (`s` omitted / `"0"`) is handled by the peer-session owner, never here. */
 export class StreamMux {
   private readonly streams = new Map<string, StreamEntry>();
   /** Last broadcast peer state, so a stream attached mid-session inherits it. */
@@ -235,7 +225,6 @@ export class StreamMux {
       bus,
       unsub: () => {},
       opts,
-      settled: false,
       unboundAtPeer: false,
     };
     entry.unsub = bus.subscribe({
@@ -260,7 +249,7 @@ export class StreamMux {
     });
     this.streams.set(streamId, entry);
     opts.onLocalReady?.(streamId);
-    this.transport.openStream(streamId);
+    opts.onAdmitted?.(streamId);
     // A stream attached while the session is already established (drill-in) never
     // sees a fresh peer-online, so resume it now.
     if (this.peerOnline) opts.onPeerOnline?.();
@@ -289,29 +278,6 @@ export class StreamMux {
     this.streams.delete(streamId);
     try { entry.unsub(); } catch { /* bus already gone */ }
     this.transport.closeStream(streamId);
-  }
-
-  /** Relay acked `stream-opened`. */
-  onOpened(streamId: string): void {
-    const entry = this.streams.get(streamId);
-    if (!entry || entry.settled) return;
-    entry.settled = true;
-    entry.opts.onAdmitted?.(streamId);
-  }
-
-  /** A relay `error{ref}` — routed here iff `ref` is a live streamId (a
-   *  stream-open rejection: `STREAM_LIMIT_EXCEEDED` from a current relay, or
-   *  the retired `SESSION_LIMIT_EXCEEDED` from an older one). Returns false when
-   *  `ref` is not one of our streams so the caller keeps normal error handling
-   *  (a streamId is the only kind of `ref` the relay ever sends). */
-  onError(ref: string, code: string, message: string): boolean {
-    const entry = this.streams.get(ref);
-    if (!entry) return false;
-    if (!entry.settled) {
-      entry.settled = true;
-      entry.opts.onRejected?.(code, message);
-    }
-    return true;
   }
 
   /** Tell the phone a streamId is dead so it renegotiates instead of replaying
@@ -450,14 +416,6 @@ export class StreamMux {
   /** One session ended while others may remain. Never touches the coarse flag. */
   notifyPeerSessionOffline(peerId: string): void {
     for (const entry of this.streams.values()) entry.opts.onPeerSessionGone?.(peerId);
-  }
-
-  /** Re-send `stream-open` for every attached stream. Called on `welcome` after
-   *  a reconnect: the relay dropped its openStreams on the disconnect, so every
-   *  stream must be re-admitted before app traffic resumes.
-   *  Already-settled streams keep their firstRegister outcome (onOpened no-ops). */
-  reopenAll(): void {
-    for (const streamId of this.streams.keys()) this.transport.openStream(streamId);
   }
 
   /** Tear every stream down (socket close / client shutdown). */

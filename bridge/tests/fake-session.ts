@@ -2,13 +2,13 @@
 // past the handshake without running one. Everything flow-control reads lives
 // ON the session now, so a hand-built one that omits a field fails deep inside
 // `sendAppEnvelope` rather than at the seam — this keeps the shape in one place.
-import type { RelayClient } from "../src/relay-client";
+import type { PeerSessionOwner } from "../src/peer-session-owner";
 
 /** Install a session for `peerId` whose seal is the identity, so a queued frame
  *  reads straight off the wire. The scheduler and the rx window are built by the
  *  client's own factories: a test that stubbed them would be testing itself. */
 export function installFakeSession(
-  client: RelayClient,
+  client: PeerSessionOwner,
   peerId: string,
   over: Record<string, unknown> = {},
 ): Record<string, unknown> {

@@ -12,22 +12,6 @@
       }
     },
     {
-      "name": "stream-opened",
-      "dart": "parsed",
-      "json": {
-        "type": "stream-opened",
-        "streamId": "s-7"
-      }
-    },
-    {
-      "name": "stream-closed",
-      "dart": "parsed",
-      "json": {
-        "type": "stream-closed",
-        "streamId": "s-7"
-      }
-    },
-    {
       "name": "error:AUTH_FAILED",
       "dart": "parsed",
       "json": {
@@ -85,16 +69,6 @@
         "type": "error",
         "code": "WRONG_DEVICE_TYPE",
         "message": "sample WRONG_DEVICE_TYPE",
-        "retryable": false
-      }
-    },
-    {
-      "name": "error:ROUTE_FAILED",
-      "dart": "parsed",
-      "json": {
-        "type": "error",
-        "code": "ROUTE_FAILED",
-        "message": "sample ROUTE_FAILED",
         "retryable": false
       }
     },
@@ -159,27 +133,6 @@
       }
     },
     {
-      "name": "error:SESSION_LIMIT_EXCEEDED",
-      "dart": "parsed",
-      "json": {
-        "type": "error",
-        "code": "SESSION_LIMIT_EXCEEDED",
-        "message": "sample SESSION_LIMIT_EXCEEDED",
-        "retryable": false,
-        "ref": "s-7"
-      }
-    },
-    {
-      "name": "error:STREAM_LIMIT_EXCEEDED",
-      "dart": "parsed",
-      "json": {
-        "type": "error",
-        "code": "STREAM_LIMIT_EXCEEDED",
-        "message": "sample STREAM_LIMIT_EXCEEDED",
-        "retryable": false
-      }
-    },
-    {
       "name": "error:UNKNOWN_PHONE",
       "dart": "parsed",
       "json": {
@@ -217,16 +170,6 @@
         "code": "SUPERSEDED",
         "message": "sample SUPERSEDED",
         "retryable": false
-      }
-    },
-    {
-      "name": "error:PEER_OFFLINE",
-      "dart": "parsed",
-      "json": {
-        "type": "error",
-        "code": "PEER_OFFLINE",
-        "message": "sample PEER_OFFLINE",
-        "retryable": true
       }
     },
     {
@@ -297,22 +240,6 @@
         "ts": "2026-07-16T00:00:00.000Z",
         "nonce": "BwcHBwcHBwcHBwcHBwcHBw==",
         "sig": "ORt1T7qaueHx0g0ap3NMClaJ9w8PNPExKuLAdj/7vyM4NWy4hPKZHTnjyrAjl9g0++0HxsOTD2QowObKBZlNBg=="
-      }
-    },
-    {
-      "name": "stream-open",
-      "dartEmits": true,
-      "json": {
-        "type": "stream-open",
-        "streamId": "s-7"
-      }
-    },
-    {
-      "name": "stream-close",
-      "dartEmits": true,
-      "json": {
-        "type": "stream-close",
-        "streamId": "s-7"
       }
     },
     {

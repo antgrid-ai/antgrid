@@ -91,7 +91,7 @@ test("promoting a LOCAL core attaches its bus as a stream and reflects the admis
   // v3: promote() no longer builds its own RelayClient with a machine identity
   // — it attaches the core's EXISTING bus as a stream on the host's
   // one machine socket via ProjectCoreRemoteDeps.attachStream. isRelayRegistered()
-  // and firstRegister must track that stream's onAdmitted/onRejected outcome.
+  // and firstRegister tracks host-local admission.
   const folder = mkdtempSync(join(tmpdir(), "antgrid-pc-promo-"));
   cleanup.push(() => rmSync(folder, { recursive: true, force: true }));
   writeFileSync(join(folder, "antgrid.yaml"), "");
@@ -112,31 +112,10 @@ test("promoting a LOCAL core attaches its bus as a stream and reflects the admis
   calls[0].opts.onAdmitted?.("stream-1");
 
   expect(core.isRelayRegistered()).toBe(true);
-  await expect(handle.firstRegister).resolves.toEqual({ ok: true });
+  await expect(handle.firstRegister).resolves.toBeUndefined();
 
   handle.stop();
   expect(core.isRelayRegistered()).toBe(false);
-});
-
-test("a rejected stream-open (e.g. SESSION_LIMIT_EXCEEDED) resolves firstRegister with the typed rejection", async () => {
-  const folder = mkdtempSync(join(tmpdir(), "antgrid-pc-promo-reject-"));
-  cleanup.push(() => rmSync(folder, { recursive: true, force: true }));
-  writeFileSync(join(folder, "antgrid.yaml"), "");
-
-  const core = new ProjectCore({
-    folder,
-    mode: "local",
-    identity: { deviceId: randomUUID(), deviceName: "local", createdAt: new Date().toISOString() },
-  });
-  cleanup.push(() => core.shutdown());
-  await core.start();
-
-  const { deps, calls } = fakeRemoteDeps();
-  const handle = core.promote(deps);
-  calls[0].opts.onRejected?.("SESSION_LIMIT_EXCEEDED", "cap reached");
-
-  expect(core.isRelayRegistered()).toBe(false);
-  await expect(handle.firstRegister).resolves.toEqual({ ok: false, code: "SESSION_LIMIT_EXCEEDED", message: "cap reached" });
 });
 
 test("promote() throws for a remote-mode core (its relay slot is already the primary session)", async () => {

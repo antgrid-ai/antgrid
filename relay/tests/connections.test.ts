@@ -21,7 +21,6 @@ function makeConn(overrides: Partial<Connection> = {}): Connection {
     connectedAt: overrides.connectedAt ?? Date.now(),
     lastSeen: overrides.lastSeen ?? Date.now(),
     claims: overrides.claims,
-    openStreams: overrides.openStreams ?? new Set<string>(),
   };
 }
 
@@ -62,36 +61,6 @@ describe("Connections indexing", () => {
   });
 });
 
-// `countOpenStreamsForUser` has no production caller — stream admission is
-// uncapped. It survives as the assertion helper epochs.test.ts uses to prove a
-// superseded connection releases its streams, so these cases pin the helper's
-// own semantics, not an admission rule.
-describe("Connections.countOpenStreamsForUser", () => {
-  it("sums openStreams across agent connections for one uid, ignoring apps and other users", () => {
-    const c = new Connections();
-    const a1 = makeConn({ deviceId: "a1", deviceType: "agent", claims: { uid: "u1" }, openStreams: new Set(["s1", "s2"]) });
-    const a2 = makeConn({ deviceId: "a2", deviceType: "agent", claims: { uid: "u1" }, openStreams: new Set(["s3"]) });
-    const otherUser = makeConn({ deviceId: "a3", deviceType: "agent", claims: { uid: "u2" }, openStreams: new Set(["s4", "s5"]) });
-    const app = makeConn({ deviceId: "p1", deviceType: "app", claims: { uid: "u1" }, openStreams: new Set(["ignored"]) });
-    for (const conn of [a1, a2, otherUser, app]) c.insert(conn);
-
-    expect(c.countOpenStreamsForUser("u1")).toBe(3);
-    expect(c.countOpenStreamsForUser("u2")).toBe(2);
-    expect(c.countOpenStreamsForUser("nobody")).toBe(0);
-  });
-
-  it("reflects live removal — release-before-insert never double counts", () => {
-    const c = new Connections();
-    const old = makeConn({ deviceId: "a1", deviceType: "agent", claims: { uid: "u1" }, openStreams: new Set(["s1"]) });
-    c.insert(old);
-    expect(c.countOpenStreamsForUser("u1")).toBe(1);
-
-    c.remove(old); // supersession: drop old (and its openStreams) before inserting the new epoch
-    const fresh = makeConn({ deviceId: "a1", deviceType: "agent", claims: { uid: "u1" }, openStreams: new Set() });
-    c.insert(fresh);
-    expect(c.countOpenStreamsForUser("u1")).toBe(0);
-  });
-});
 
 describe("Connections IP counting", () => {
   it("increments and decrements per IP, clamping at zero", () => {
@@ -134,7 +103,7 @@ describe("Connections user-scoped views", () => {
     const a = makeConn({ deviceId: "a", claims: { uid: "u1" }, publicKey: "secret-pk" });
     c.insert(a);
     const [summary] = c.listConnections();
-    expect(summary).toMatchObject({ deviceId: "a", deviceType: "agent", openStreamCount: 0 });
+    expect(summary).toMatchObject({ deviceId: "a", deviceType: "agent" });
     expect(summary).not.toHaveProperty("publicKey");
     expect(summary).not.toHaveProperty("claims");
 
@@ -143,25 +112,6 @@ describe("Connections user-scoped views", () => {
     expect(c.listConnectionsForUser("nobody")).toEqual([]);
   });
 
-  // Web bills on this number — an agent's bare deviceId says nothing about how
-  // many projects it is multiplexing, so the summary must carry the count.
-  it("projects the open-stream count without leaking the stream ids", () => {
-    const c = new Connections();
-    c.insert(makeConn({ deviceId: "a", claims: { uid: "u1" }, openStreams: new Set(["s1", "s2"]) }));
-    const [summary] = c.listConnectionsForUser("u1");
-    expect(summary.openStreamCount).toBe(2);
-    expect(JSON.stringify(summary)).not.toContain("s1");
-  });
-
-  it("tracks stream open/close through the summary", () => {
-    const c = new Connections();
-    const conn = makeConn({ deviceId: "a", claims: { uid: "u1" } });
-    c.insert(conn);
-    conn.openStreams.add("s1");
-    expect(c.listConnectionsForUser("u1")[0]!.openStreamCount).toBe(1);
-    conn.openStreams.delete("s1");
-    expect(c.listConnectionsForUser("u1")[0]!.openStreamCount).toBe(0);
-  });
 });
 
 describe("Connections.clear", () => {

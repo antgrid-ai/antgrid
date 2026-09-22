@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { generateKeyPairSync } from "node:crypto";
 import { buildFragments, isFragEnvelope, MAX_FRAME_PAYLOAD, encodeRouteFrame, FrameKind } from "antgrid-wire";
-import { fragmentForSend, RelayClient } from "../src/relay-client";
+import { fragmentForSend, TestPeerSessionOwner } from "./test-peer-session-owner";
 import { createMessage } from "../src/protocol";
 import { generateEphemeralKeypair, deriveSharedSecret } from "../src/key-exchange";
 import { buildTranscript, deriveSessionKeys, phoneConfirmTag, E2eTransport, signTranscript } from "../src/e2e";
@@ -98,11 +98,11 @@ function ed25519Pair(): { seedB64: string; pubB64: string } {
 /** Establish a real E2E session (see handshake-pull.test.ts / stream-mux.test.ts
  *  for the full-coverage versions of this helper) and return the phone-side
  *  transport to seal control-plane traffic with. */
-function establish(): { client: RelayClient; phoneTransport: E2eTransport } {
+function establish(): { client: TestPeerSessionOwner; phoneTransport: E2eTransport } {
   const agentEd = ed25519Pair();
   const phoneEd = ed25519Pair();
   const sent: Array<string | Buffer> = [];
-  const client = RelayClient.forTest({
+  const client = TestPeerSessionOwner.forTest({
     generateKeypair: generateEphemeralKeypair,
     sendPayload: (p) => sent.push(p),
     peerId: PHONE_ID,
@@ -123,7 +123,7 @@ function establish(): { client: RelayClient; phoneTransport: E2eTransport } {
     Buffer.from(JSON.stringify({ type: "handshake:client-hello", attemptId: "a1", pubkey: app.publicKey.toString("base64"), nonce: nonce.toString("base64"), sig })),
     FrameKind.handshake,
   );
-  (client as any).handleBinaryFrame(Buffer.from(frame));
+  client.injectRouteFrame(Buffer.from(frame));
 
   const agentHello = JSON.parse(sent[0] as string);
   const agentPubkey = Buffer.from(agentHello.pubkey, "base64");
@@ -140,13 +140,13 @@ function establish(): { client: RelayClient; phoneTransport: E2eTransport } {
     phoneTransport.seal(JSON.stringify({ type: "app:ready", attemptId: "a1", confirm: phoneConfirmTag(keys.confirm).toString("base64") })),
     FrameKind.sealed,
   );
-  (client as any).handleBinaryFrame(Buffer.from(appReadyFrame));
+  client.injectRouteFrame(Buffer.from(appReadyFrame));
   expect(client._handshakeComplete()).toBe(true);
 
   return { client, phoneTransport };
 }
 
-describe("RelayClient receive fragmentation seam", () => {
+describe("TestPeerSessionOwner receive fragmentation seam", () => {
   it("reassembles decrypted fragments before dispatching control-plane messages", () => {
     const { client, phoneTransport } = establish();
     const seen: unknown[] = [];
@@ -165,7 +165,7 @@ describe("RelayClient receive fragmentation seam", () => {
 
     const inject = (frag: string) => {
       const wire = encodeRouteFrame({ type: "message", from: PHONE_ID, channel: "control" }, phoneTransport.seal(frag), FrameKind.sealed);
-      (client as any).handleBinaryFrame(Buffer.from(wire));
+      client.injectRouteFrame(Buffer.from(wire));
     };
 
     inject(frames[1]);

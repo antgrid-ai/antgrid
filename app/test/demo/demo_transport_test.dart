@@ -386,7 +386,6 @@ void main() {
       expect(transport.snapshotCache, isEmpty);
       expect(transport.outbound.isClosed, isTrue);
       expect(transport.stateController.isClosed, isTrue);
-      expect(transport.droppedFrameController.isClosed, isTrue);
       // A second dispose is what an evicted-then-disposed project does; it must
       // not throw on the already-closed controllers.
       await transport.dispose();

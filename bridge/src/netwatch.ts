@@ -365,11 +365,10 @@ export class Netwatch {
 }
 
 /**
- * Process-global, because the bridge holds exactly ONE machine relay socket
- * (host-server.ts builds the single RelayClient; promoted project cores attach
- * to it as streams rather than opening their own). Threading a recorder through
- * every construction site would buy nothing and be missed by the next one.
- */
+ * Process-global because HostServer owns one NativeHostConnection for the
+ * machine and project cores attach host-owned native streams to it. Threading a
+ * recorder through every construction site would buy nothing and be missed by
+ * the next one. */
 export const netwatch = new Netwatch();
 
 /**

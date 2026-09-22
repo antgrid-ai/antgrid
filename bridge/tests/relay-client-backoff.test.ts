@@ -2,16 +2,16 @@
 // `welcome` (not v2 `authenticated`) is the only reset point, and the schedule
 // keeps equal jitter over a deterministic doubling curve.
 import { test, expect, afterEach } from "bun:test";
-import { RelayClient } from "../src/relay-client";
+import { CentralControlClient } from "../src/central-control-client";
 import vector from "../../evals/fixtures/relay-hello-vector.json";
 
-let clients: RelayClient[] = [];
+let clients: CentralControlClient[] = [];
 afterEach(() => { for (const c of clients.splice(0)) try { c.close(); } catch {} });
 
-function makeClient(url: string): RelayClient {
+function makeClient(url: string): CentralControlClient {
   // Real Ed25519 material: v3 signs `hello` on socket open, so fake keys
   // would throw inside sendHello before the backoff path is ever exercised.
-  const client = new RelayClient({
+  const client = new CentralControlClient({
     url,
     identity: {
       deviceId: vector.fields.deviceId,
@@ -20,7 +20,6 @@ function makeClient(url: string): RelayClient {
       ed25519PublicKey: vector.fields.publicKey,
       ed25519PrivateKey: Buffer.from(vector.ed25519.seedHex, "hex").toString("base64"),
     },
-    generateKeypair: () => { throw new Error("not used"); },
     getLicenseToken: () => "tok",
     autoReconnect: false,
   });
@@ -43,13 +42,13 @@ function captureSchedule<T>(fn: (calls: Array<{ cb: () => void; ms: number }>) =
 
 test("a `welcome` frame resets backoff", () => {
   const client = makeClient("ws://127.0.0.1:1");
-  (client as any).central.backoff = 16_000;
+  (client as any).backoff = 16_000;
 
-  (client as any).central.handleTextMessage(
+  (client as any).handleTextMessage(
     JSON.stringify({ type: "welcome", deviceId: "dev", epoch: 1, serverTime: new Date().toISOString() }),
   );
 
-  expect((client as any).central.backoff).toBe(1_000);
+  expect((client as any).backoff).toBe(1_000);
 });
 
 test("a socket that opens but never authenticates does NOT reset backoff", async () => {
@@ -65,15 +64,15 @@ test("a socket that opens but never authenticates does NOT reset backoff", async
 
   try {
     const client = makeClient(`ws://127.0.0.1:${server.port}`);
-    (client as any).central.backoff = 8_000;
+    (client as any).backoff = 8_000;
 
     const disconnected = new Promise<void>((resolve) => {
-      (client as any).central.opts.onDisconnected = resolve;
+      (client as any).opts.onDisconnected = resolve;
     });
     client.connect();
     await disconnected;
 
-    expect((client as any).central.backoff).toBe(8_000);
+    expect((client as any).backoff).toBe(8_000);
   } finally {
     server.stop(true);
   }
@@ -81,13 +80,13 @@ test("a socket that opens but never authenticates does NOT reset backoff", async
 
 test("each reconnect cycle doubles backoff up to the cap", () => {
   const client = makeClient("ws://127.0.0.1:1");
-  (client as any).central.doConnect = () => {};
+  (client as any).doConnect = () => {};
 
   const seen = captureSchedule((calls) => {
     const growth: number[] = [];
     for (let i = 0; i < 8; i++) {
-      growth.push((client as any).central.backoff);
-      (client as any).central.scheduleReconnect();
+      growth.push((client as any).backoff);
+      (client as any).scheduleReconnect();
       calls.pop()!.cb();
     }
     return growth;
@@ -98,10 +97,10 @@ test("each reconnect cycle doubles backoff up to the cap", () => {
 
 test("the scheduled delay is jittered into [backoff/2, backoff]", () => {
   const client = makeClient("ws://127.0.0.1:1");
-  (client as any).central.backoff = 8_000;
+  (client as any).backoff = 8_000;
 
   const delays = captureSchedule((calls) => {
-    for (let i = 0; i < 50; i++) (client as any).central.scheduleReconnect();
+    for (let i = 0; i < 50; i++) (client as any).scheduleReconnect();
     return calls.map((c) => c.ms);
   });
 

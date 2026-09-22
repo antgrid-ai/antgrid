@@ -1,11 +1,6 @@
-// ConnectionSupervisor.noteRelayError classifies relay verdicts by matching
-// the wire `error.code` STRINGS (LICENSE_* → Blocked(license…), SUPERSEDED →
-// Blocked(superseded)). Nothing type-checks those strings against the wire
-// enum — the envelope-vector fixture is regenerated from antgrid-wire's
-// ErrorCode source of truth, so asserting membership here means a wire-side
-// rename/removal breaks this test instead of silently un-classifying license
-// errors on devices (a user whose license expired would just see a
-// connection that never climbs).
+// Pins the relay verdict strings the supervisor classifies. License verdicts
+// stop the native session through enrollment invalidation; SUPERSEDED only
+// stops central-control retries and leaves a healthy leased payload intact.
 import 'dart:convert';
 import 'dart:io';
 

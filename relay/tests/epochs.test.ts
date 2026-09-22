@@ -18,7 +18,7 @@ afterEach(() => {
   relay = undefined;
 });
 
-test("higher epoch supersedes: old socket gets SUPERSEDED then close, its streams are released", async () => {
+test("higher epoch supersedes: old socket gets SUPERSEDED then close", async () => {
   relay = startServer(defaultConfig);
   const deviceId = "epoch-agent";
   const identity = await generateKeyPair();
@@ -31,11 +31,9 @@ test("higher epoch supersedes: old socket gets SUPERSEDED then close, its stream
   });
   const oldClosePromise = new Promise<number>((resolve) => { old.ws.onclose = (e) => resolve(e.code); });
 
-  // Occupy a stream slot on the old connection.
-  const openedOld = waitForType(old.ws, "stream-opened");
-  old.ws.send(JSON.stringify({ type: "stream-open", streamId: "s-old" }));
+  const openedOld = waitForType(old.ws, "pong");
+  old.ws.send(JSON.stringify({ type: "ping" }));
   await openedOld;
-  expect(relay.connections.countOpenStreamsForUser(`user-${deviceId}`)).toBe(1);
 
   const oldErr = waitForType(old.ws, "error");
   const fresh = await connectHello(relay, {
@@ -50,13 +48,10 @@ test("higher epoch supersedes: old socket gets SUPERSEDED then close, its stream
   expect(err).toMatchObject({ type: "error", code: "SUPERSEDED", retryable: false });
   expect(await oldClosePromise).toBe(1008);
 
-  // The old connection's stream was released BEFORE the new one was inserted
-  // — the count never double-charges one device across a restart.
-  expect(relay.connections.countOpenStreamsForUser(`user-${deviceId}`)).toBe(0);
-  const openedNew = waitForType(fresh.ws, "stream-opened");
-  fresh.ws.send(JSON.stringify({ type: "stream-open", streamId: "s-new" }));
+
+  const openedNew = waitForType(fresh.ws, "pong");
+  fresh.ws.send(JSON.stringify({ type: "ping" }));
   await openedNew;
-  expect(relay.connections.countOpenStreamsForUser(`user-${deviceId}`)).toBe(1);
 });
 
 test("lower epoch is rejected: new socket gets SUPERSEDED, old connection is untouched", async () => {
@@ -86,8 +81,8 @@ test("lower epoch is rejected: new socket gets SUPERSEDED, old connection is unt
 
   // The original connection is still the live holder and fully functional.
   expect(relay.connections.getByDeviceId(deviceId)).toBeDefined();
-  const stillOpened = waitForType(old.ws, "stream-opened");
-  old.ws.send(JSON.stringify({ type: "stream-open", streamId: "still-alive" }));
+  const stillOpened = waitForType(old.ws, "pong");
+  old.ws.send(JSON.stringify({ type: "ping" }));
   await stillOpened;
 });
 
@@ -119,8 +114,8 @@ test("equal epoch under the same key admits: a redial evicts its own zombie", as
   expect(await zombieClosed).toBe(1008);
 
   // The redial is the live holder and fully functional.
-  const opened = waitForType(redial.ws, "stream-opened");
-  redial.ws.send(JSON.stringify({ type: "stream-open", streamId: "post-redial" }));
+  const opened = waitForType(redial.ws, "pong");
+  redial.ws.send(JSON.stringify({ type: "ping" }));
   await opened;
 });
 
@@ -157,8 +152,8 @@ test("a replayed hello cannot evict the connection it admitted", async () => {
 
   // The live connection is untouched and still usable.
   expect(relay.connections.getByDeviceId(deviceId)).toBeDefined();
-  const stillOpened = waitForType(live.ws, "stream-opened");
-  live.ws.send(JSON.stringify({ type: "stream-open", streamId: "survived-replay" }));
+  const stillOpened = waitForType(live.ws, "pong");
+  live.ws.send(JSON.stringify({ type: "ping" }));
   await stillOpened;
 });
 
@@ -200,8 +195,8 @@ test("an older captured hello cannot evict the live holder on a replay-cache mis
   expect(await closed2).toBe(1008);
 
   expect(relay.connections.getByDeviceId(deviceId)).toBeDefined();
-  const stillOpened = waitForType(live.ws, "stream-opened");
-  live.ws.send(JSON.stringify({ type: "stream-open", streamId: "survived-stale-replay" }));
+  const stillOpened = waitForType(live.ws, "pong");
+  live.ws.send(JSON.stringify({ type: "ping" }));
   await stillOpened;
 });
 
@@ -222,8 +217,8 @@ test("pubkey mismatch against a live holder is rejected regardless of epoch", as
   expect(await closed2).toBe(1008);
 
   // The original connection is untouched.
-  const stillOpened = waitForType(original.ws, "stream-opened");
-  original.ws.send(JSON.stringify({ type: "stream-open", streamId: "untouched" }));
+  const stillOpened = waitForType(original.ws, "pong");
+  original.ws.send(JSON.stringify({ type: "ping" }));
   await stillOpened;
 });
 
