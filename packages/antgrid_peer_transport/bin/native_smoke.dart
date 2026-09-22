@@ -58,8 +58,6 @@ Future<void> main(List<String> args) async {
       final link = await client
           .dial(
             endpointId: server.id.toHex(),
-            localDeviceId: 'app',
-            peerDeviceId: 'machine',
             authorized: () => allowed,
             ipAddresses: addresses,
           )
@@ -71,7 +69,6 @@ Future<void> main(List<String> args) async {
       final failure = link.failureStream.first;
       failure.ignore();
       final sent = await link.sendFrame(
-        'machine',
         'control',
         Uint8List.fromList([1, 2, 3]),
         kind: FrameKind.handshake,
@@ -81,11 +78,14 @@ Future<void> main(List<String> args) async {
       final (send, recv) = await stream;
       final prefix = await recv.readExact(4);
       final size = ByteData.sublistView(prefix).getUint32(0, Endian.big);
-      final frame = decodeRouteFrame(await recv.readExact(size));
-      if (frame.header['to'] != 'machine') throw StateError('route mismatch');
+      final frame = decodePeerFrame(await recv.readExact(size));
+      if (frame.header['type'] != 'message' ||
+          frame.header['channel'] != 'control') {
+        throw StateError('peer frame mismatch');
+      }
       if (scenario == 'echo') {
-        final response = encodeRouteFrame(
-          {'type': 'message', 'to': 'app', 'channel': 'control'},
+        final response = encodePeerFrame(
+          {'type': 'message', 'channel': 'control'},
           frame.payload,
           FrameKind.handshake,
         );
@@ -115,7 +115,7 @@ Future<void> main(List<String> args) async {
           throw StateError('extra stream accepted');
       } else {
         allowed = false;
-        if (await link.sendFrame('machine', 'control', Uint8List(1)) !=
+        if (await link.sendFrame('control', Uint8List(1)) !=
             PeerSendOutcome.closed)
           throw StateError('revoked write admitted');
       }

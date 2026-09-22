@@ -40,7 +40,7 @@ class _StubRelay extends RelayService implements PeerLink {
   final _payloadStates = StreamController<PeerLinkState>.broadcast();
   final _peerRestarts = StreamController<void>.broadcast();
   final _presence = StreamController<bool>.broadcast();
-  final _messages = StreamController<IncomingRouteMessage>.broadcast();
+  final _messages = StreamController<IncomingPeerFrame>.broadcast();
   AppState _cur = const AppState();
 
   /// The agent going away and coming back is what arms a rekey.
@@ -52,12 +52,12 @@ class _StubRelay extends RelayService implements PeerLink {
 
   void restartPayload() => _peerRestarts.add(null);
 
-  void inject(IncomingRouteMessage msg) {
+  void inject(IncomingPeerFrame msg) {
     if (!_messages.isClosed) _messages.add(msg);
   }
 
   @override
-  Stream<IncomingRouteMessage> get messageStream => _messages.stream;
+  Stream<IncomingPeerFrame> get messageStream => _messages.stream;
   @override
   Stream<AppState> get stateStream => _states.stream;
   @override
@@ -87,18 +87,16 @@ class _StubRelay extends RelayService implements PeerLink {
 
   @override
   Future<PeerSendOutcome> sendFrame(
-    String to,
     String channel,
     Uint8List payload, {
     FrameKind kind = FrameKind.sealed,
   }) async {
     if (!isDispatchAllowed) return PeerSendOutcome.closed;
-    sendMessage(to, channel, payload, kind: kind);
+    sendMessage(channel, payload, kind: kind);
     return PeerSendOutcome.accepted;
   }
 
   void sendMessage(
-    String to,
     String channel,
     Uint8List payload, {
     FrameKind kind = FrameKind.sealed,
@@ -288,8 +286,7 @@ void main() {
       expect(CngAesGcm.importedKeyCount, 1);
 
       relay.inject(
-        IncomingRouteMessage(
-          from: 'M',
+        IncomingPeerFrame(
           channel: 'control',
           kind: FrameKind.sealed,
           payload: await E2eTransportDart(

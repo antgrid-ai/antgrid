@@ -301,8 +301,6 @@ class PeerRuntime implements PeerConnector {
       iroh: () async {
         return native.dial(
           endpointId: registration.endpointId,
-          localDeviceId: relaySlotId(record.deviceUuid, machineDeviceId),
-          peerDeviceId: machineDeviceId,
           authorized: authorized,
           diagnostic: diagnostic,
         );

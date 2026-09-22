@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { generateKeyPairSync } from "node:crypto";
-import { buildFragments, isFragEnvelope, MAX_FRAME_PAYLOAD, encodeRouteFrame, FrameKind } from "antgrid-wire";
+import { buildFragments, isFragEnvelope, MAX_FRAME_PAYLOAD, encodePeerFrame, FrameKind } from "antgrid-wire";
 import { fragmentForSend, TestPeerSessionOwner } from "./test-peer-session-owner";
 import { createMessage } from "../src/protocol";
 import { generateEphemeralKeypair, deriveSharedSecret } from "../src/key-exchange";
@@ -118,12 +118,12 @@ function establish(): { client: TestPeerSessionOwner; phoneTransport: E2eTranspo
     agentX25519Pub: Buffer.alloc(0), phoneX25519Pub: app.publicKey, nonce,
   });
   const sig = signTranscript(phoneTranscript, Buffer.from(phoneEd.seedB64, "base64"));
-  const frame = encodeRouteFrame(
-    { type: "message", from: PHONE_ID, channel: "control" },
+  const frame = encodePeerFrame(
+    { type: "message", channel: "control" },
     Buffer.from(JSON.stringify({ type: "handshake:client-hello", attemptId: "a1", pubkey: app.publicKey.toString("base64"), nonce: nonce.toString("base64"), sig })),
     FrameKind.handshake,
   );
-  client.injectRouteFrame(Buffer.from(frame));
+  client.injectPeerFrame(Buffer.from(frame), PHONE_ID);
 
   const agentHello = JSON.parse(sent[0] as string);
   const agentPubkey = Buffer.from(agentHello.pubkey, "base64");
@@ -135,12 +135,12 @@ function establish(): { client: TestPeerSessionOwner; phoneTransport: E2eTranspo
   const keys = deriveSessionKeys(sharedSecret, agentTranscript);
   const phoneTransport = new E2eTransport({ sendKey: keys.p2a, recvKey: keys.a2p });
 
-  const appReadyFrame = encodeRouteFrame(
-    { type: "message", from: PHONE_ID, channel: "control" },
+  const appReadyFrame = encodePeerFrame(
+    { type: "message", channel: "control" },
     phoneTransport.seal(JSON.stringify({ type: "app:ready", attemptId: "a1", confirm: phoneConfirmTag(keys.confirm).toString("base64") })),
     FrameKind.sealed,
   );
-  client.injectRouteFrame(Buffer.from(appReadyFrame));
+  client.injectPeerFrame(Buffer.from(appReadyFrame), PHONE_ID);
   expect(client._handshakeComplete()).toBe(true);
 
   return { client, phoneTransport };
@@ -164,8 +164,8 @@ describe("TestPeerSessionOwner receive fragmentation seam", () => {
     const frames = buildFragments(json, "rx-1", { type: "file:content", key: "a.txt" }, 1000);
 
     const inject = (frag: string) => {
-      const wire = encodeRouteFrame({ type: "message", from: PHONE_ID, channel: "control" }, phoneTransport.seal(frag), FrameKind.sealed);
-      client.injectRouteFrame(Buffer.from(wire));
+      const wire = encodePeerFrame({ type: "message", channel: "control" }, phoneTransport.seal(frag), FrameKind.sealed);
+      client.injectPeerFrame(Buffer.from(wire), PHONE_ID);
     };
 
     inject(frames[1]);

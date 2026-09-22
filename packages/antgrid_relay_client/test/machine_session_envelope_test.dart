@@ -18,7 +18,7 @@ Future<String?> _openFromPhone(SessionKeys keys, Uint8List payload) =>
     E2eTransportDart(sendKey: keys.a2p, recvKey: keys.p2a).open(payload);
 
 /// Seals a plaintext as if it came from the agent (a2p) — what an inbound
-/// IncomingRouteMessage's payload must look like for MachineSession to accept
+/// IncomingPeerFrame's payload must look like for MachineSession to accept
 /// it (`_decryptAndDispatch` decrypts with recvKey: a2p).
 Future<Uint8List> _sealFromAgent(SessionKeys keys, String plaintext) =>
     E2eTransportDart(sendKey: keys.a2p, recvKey: keys.p2a).seal(plaintext);
@@ -54,7 +54,6 @@ void main() {
         await session.sendOnStream('proj-1', {'type': 'ping'}, 'control');
         expect(relay.sent, hasLength(1));
         final frame = relay.sent.single;
-        expect(frame.to, 'machine-1');
         expect(frame.kind, FrameKind.sealed);
 
         final plaintext = await _openFromPhone(keys, frame.payload);
@@ -135,8 +134,7 @@ void main() {
       final sub2 = s2.messages.listen((m) => seen2.add(m.json));
 
       relay.inject(
-        IncomingRouteMessage(
-          from: 'machine-1',
+        IncomingPeerFrame(
           channel: 'control',
           kind: FrameKind.sealed,
           payload: await _sealFromAgent(
@@ -149,8 +147,7 @@ void main() {
         ),
       );
       relay.inject(
-        IncomingRouteMessage(
-          from: 'machine-1',
+        IncomingPeerFrame(
           channel: 'control',
           kind: FrameKind.sealed,
           payload: await _sealFromAgent(
@@ -180,8 +177,7 @@ void main() {
 
       // `s` absent entirely.
       relay.inject(
-        IncomingRouteMessage(
-          from: 'machine-1',
+        IncomingPeerFrame(
           channel: 'control',
           kind: FrameKind.sealed,
           payload: await _sealFromAgent(
@@ -194,8 +190,7 @@ void main() {
       );
       // `s` explicitly "0".
       relay.inject(
-        IncomingRouteMessage(
-          from: 'machine-1',
+        IncomingPeerFrame(
           channel: 'control',
           kind: FrameKind.sealed,
           payload: await _sealFromAgent(
@@ -237,8 +232,7 @@ void main() {
 
         for (final frag in fragments) {
           relay.inject(
-            IncomingRouteMessage(
-              from: 'machine-1',
+            IncomingPeerFrame(
               channel: 'control',
               kind: FrameKind.sealed,
               payload: await _sealFromAgent(keys, frag),
@@ -278,16 +272,14 @@ void main() {
         });
 
         relay.inject(
-          IncomingRouteMessage(
-            from: 'machine-1',
+          IncomingPeerFrame(
             channel: 'control',
             kind: FrameKind.sealed,
             payload: await _sealFromAgent(keys, frame0),
           ),
         );
         relay.inject(
-          IncomingRouteMessage(
-            from: 'machine-1',
+          IncomingPeerFrame(
             channel: 'control',
             kind: FrameKind.sealed,
             payload: await _sealFromAgent(keys, frame1),

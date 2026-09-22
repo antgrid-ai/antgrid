@@ -3,10 +3,11 @@ export {
   MAX_HEADER_LEN,
   FrameError,
   FrameKind,
-  encodeRouteFrame,
-  decodeRouteFrame,
+  FIXED_PREFIX,
+  encodePeerFrame,
+  decodePeerFrame,
   type FrameErrorReason,
-} from "./frame";
+} from "./peer-frame";
 
 export * from "./client-ip";
 export * from "./relay-protocol";
@@ -16,3 +17,4 @@ export * from "./frag";
 export * from "./flow";
 export * from "./push-protocol";
 export * from "./peer-authorization";
+export * from "./peer-protocol";

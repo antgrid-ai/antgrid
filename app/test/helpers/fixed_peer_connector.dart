@@ -33,7 +33,7 @@ class TestPayloadLink implements PeerLink {
   @override
   bool get isDispatchAllowed => true;
   @override
-  Stream<IncomingRouteMessage> get messageStream => carrier.messageStream;
+  Stream<IncomingPeerFrame> get messageStream => carrier.messageStream;
   @override
   Stream<PeerLinkState> get payloadStateStream => carrier.payloadStateStream;
   @override
@@ -46,11 +46,10 @@ class TestPayloadLink implements PeerLink {
   PeerLinkDiagnostic? get netTap => carrier.netTap;
   @override
   Future<PeerSendOutcome> sendFrame(
-    String to,
     String channel,
     Uint8List payload, {
     FrameKind kind = FrameKind.sealed,
-  }) => carrier.sendFrame(to, channel, payload, kind: kind);
+  }) => carrier.sendFrame(channel, payload, kind: kind);
   @override
   Future<void> close() async {}
 }
@@ -59,7 +58,7 @@ class _NoopPayloadLink implements PeerLink {
   @override
   bool get isDispatchAllowed => true;
   @override
-  Stream<IncomingRouteMessage> get messageStream => const Stream.empty();
+  Stream<IncomingPeerFrame> get messageStream => const Stream.empty();
   @override
   Stream<PeerLinkState> get payloadStateStream => const Stream.empty();
   @override
@@ -72,7 +71,6 @@ class _NoopPayloadLink implements PeerLink {
   PeerLinkDiagnostic? get netTap => null;
   @override
   Future<PeerSendOutcome> sendFrame(
-    String to,
     String channel,
     Uint8List payload, {
     FrameKind kind = FrameKind.sealed,

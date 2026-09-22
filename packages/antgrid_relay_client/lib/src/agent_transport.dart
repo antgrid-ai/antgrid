@@ -15,6 +15,70 @@ library;
 /// Lifecycle states an [AgentTransport] can be in.
 enum TransportState { connecting, connected, disconnected, error }
 
+/// Whether an RPC only observes authoritative state or may change it.
+///
+/// Classification is allowlist-based: a method added by a newer bridge is
+/// treated as mutating until this client explicitly proves it is safe to
+/// retry as a read.
+enum RemoteRequestKind { readOnly, mutating }
+
+const readOnlyRemoteRequestMethods = <String>{
+  'state.snapshot',
+  'sessions.list',
+  'machine.capability-card',
+  'git.branches',
+  'git.remote-state',
+  'session.transcriptSnapshot',
+};
+
+RemoteRequestKind classifyRemoteRequest(String method) =>
+    readOnlyRemoteRequestMethods.contains(method)
+    ? RemoteRequestKind.readOnly
+    : RemoteRequestKind.mutating;
+
+/// What this process can truthfully say about one mutating remote request.
+enum RemoteCommandOutcome { notSent, confirmed, outcomeUnknown }
+
+/// A remote request result whose transport outcome is explicit.
+class RemoteRequestResult<T> {
+  final RemoteCommandOutcome outcome;
+  final T? _value;
+
+  const RemoteRequestResult._(this.outcome, this._value);
+  const RemoteRequestResult.notSent()
+    : this._(RemoteCommandOutcome.notSent, null);
+  const RemoteRequestResult.confirmed(T value)
+    : this._(RemoteCommandOutcome.confirmed, value);
+  const RemoteRequestResult.outcomeUnknown()
+    : this._(RemoteCommandOutcome.outcomeUnknown, null);
+
+  T get value {
+    if (outcome != RemoteCommandOutcome.confirmed) {
+      throw StateError('A $outcome request has no confirmed result');
+    }
+    return _value as T;
+  }
+}
+
+const remoteCommandOutcomeUnknownMessage =
+    'Connection lost; execution could not be confirmed';
+
+/// Raised by the compatibility [AgentTransport.request] API when a mutation
+/// may have executed but no application response arrived.
+class RemoteCommandOutcomeException extends RpcException {
+  final RemoteCommandOutcome outcome;
+
+  RemoteCommandOutcomeException(this.outcome)
+    : super(
+        outcome == RemoteCommandOutcome.notSent
+            ? 'E_NOT_SENT'
+            : 'E_OUTCOME_UNKNOWN',
+        outcome == RemoteCommandOutcome.notSent
+            ? 'The request was not sent. Reconnect and try again.'
+            : remoteCommandOutcomeUnknownMessage,
+      );
+}
+
 /// A decoded inbound message routed off a specific channel.
 class InboundMessage {
   final String channel;
@@ -65,6 +129,17 @@ abstract class AgentTransport {
   /// the re-establish re-drives the same pull, and the loop never breaks. `LocalTransport` and
   /// `FakeAgentTransport` accept and ignore it (no rekey counter to feed).
   Future<Map<String, dynamic>> request(
+    String method, {
+    Map<String, dynamic>? params,
+    Duration timeout = const Duration(seconds: 10),
+    bool countsTowardHealth = true,
+  });
+
+  /// Sends one RPC while preserving the distinction between a request that
+  /// never left, an application-confirmed result, and an interrupted mutation
+  /// whose execution cannot be determined. The method name is classified by
+  /// [classifyRemoteRequest]; callers cannot opt a mutation into read retries.
+  Future<RemoteRequestResult<Map<String, dynamic>>> requestWithOutcome(
     String method, {
     Map<String, dynamic>? params,
     Duration timeout = const Duration(seconds: 10),

@@ -51,7 +51,7 @@ class _FakeRelayService extends RelayService {
 
   AppState _cur = const AppState();
 
-  Stream<IncomingRouteMessage> get messageStream => const Stream.empty();
+  Stream<IncomingPeerFrame> get messageStream => const Stream.empty();
 
   @override
   Stream<AppState> get stateStream => _states.stream;
@@ -91,17 +91,15 @@ class _FakeRelayService extends RelayService {
   }
 
   Future<PeerSendOutcome> sendFrame(
-    String to,
     String channel,
     Uint8List payload, {
     FrameKind kind = FrameKind.sealed,
   }) async {
-    sendMessage(to, channel, payload, kind: kind);
+    sendMessage(channel, payload, kind: kind);
     return PeerSendOutcome.accepted;
   }
 
   void sendMessage(
-    String to,
     String channel,
     Uint8List payload, {
     FrameKind kind = FrameKind.sealed,

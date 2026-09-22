@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { FrameKind, MAX_FRAME_PAYLOAD, PEER_ALPN, RouteHeader, decodeRouteFrame, encodeRouteFrame } from "antgrid-wire";
+import { FrameKind, MAX_FRAME_PAYLOAD, PEER_ALPN, decodePeerFrame, encodePeerFrame } from "antgrid-wire";
 import type { Connection, Endpoint, Incoming } from "@number0/iroh";
 import { CentralControlClient, type CentralControlOptions } from "../central-control-client";
 import { baseSlotDeviceId } from "../relay-slot";
@@ -232,12 +232,11 @@ export class NativePeerSessions extends PeerSessionOwner {
     void (async () => {
       try {
         while (this.nativePeers.get(peerId) === peer) {
-          const frame = decodeRouteFrame(await records.read());
-          if (frame.payload.length > MAX_FRAME_PAYLOAD) throw new Error("Invalid route payload length");
-          const header = RouteHeader.parse(frame.header);
-          if (header.to !== this.deviceId) throw new Error("Invalid route destination");
+          const frame = decodePeerFrame(await records.read());
+          if (frame.payload.length > MAX_FRAME_PAYLOAD) throw new Error("Invalid peer payload length");
+          const header = frame.header;
           if (this.nativePeers.get(peerId) !== peer) return;
-          this.receiveRoutedFrame(frame.payload, peerId, header.channel, frame.kind);
+          this.receivePeerFrame(frame.payload, peerId, header.channel, frame.kind);
         }
       } catch { records.close("protocol-violation"); }
     })();
@@ -306,12 +305,12 @@ export class NativePeerSessions extends PeerSessionOwner {
       detail: { elapsedMs: (this.nativeOpts.lifecycle?.now ?? performance.now.bind(performance))() - peer.acceptedAt } });
   }
 
-  protected override receiveRoutedFrame(payload: Uint8Array, from: string, channel: Channel, kind: FrameKind): void {
+  protected override receivePeerFrame(payload: Uint8Array, from: string, channel: Channel, kind: FrameKind): void {
     if (!this.authorized(from, this.nativePeers.get(from)?.endpointId)) {
       void this.lease.refresh().catch(() => {});
       return;
     }
-    super.receiveRoutedFrame(payload, from, channel, kind);
+    super.receivePeerFrame(payload, from, channel, kind);
   }
 
   protected override handleHandshakeFrame(payload: Uint8Array, from: string, frameId?: string, bytes?: number): void {
@@ -352,7 +351,7 @@ export class NativePeerSessions extends PeerSessionOwner {
     const peer = this.nativePeers.get(peerId);
     if (!peer?.records) return null;
     const session = this.sessions.get(peerId);
-    const record = encodeRouteFrame({ type: "message", to: peerId, channel: frame.channel }, sealed, FrameKind.sealed);
+    const record = encodePeerFrame({ type: "message", channel: frame.channel }, sealed, FrameKind.sealed);
     return { bytes: sealed.length, completed: peer.records.send(record, () =>
       this.sessions.get(peerId) === session && !frame.signal?.aborted && frame.authorized?.() !== false,
     ).then((outcome) => {
@@ -367,18 +366,18 @@ export class NativePeerSessions extends PeerSessionOwner {
     const peer = this.nativePeers.get(to);
     if (!peer?.records) return false;
     const payload = typeof data === "string" ? Buffer.from(data) : data;
-    const record = encodeRouteFrame({ type: "message", to, channel }, payload, kind);
+    const record = encodePeerFrame({ type: "message", channel }, payload, kind);
     void peer.records.send(record).then((outcome) => {
       if (outcome === "sent") this.recordNativeWrite(payload, record.length, channel, kind, diagnosticType, streamId);
     });
     return true;
   }
 
-  private recordNativeWrite(payload: Uint8Array, routeBytes: number, channel: Channel, kind: FrameKind,
+  private recordNativeWrite(payload: Uint8Array, peerFrameBytes: number, channel: Channel, kind: FrameKind,
     msgType: string, streamId?: string): void {
     this.recordDiagnostic({ dir: "tx", kind: kind === FrameKind.handshake ? "handshake" : "sealed", transport: "iroh",
       channel, msgType, streamId, bytes: payload.length, frameId: frameIdFor(payload, kind === FrameKind.sealed),
-      detail: { routeBytes, recordBytes: routeBytes + 4, lengthPrefixBytes: 4 } });
+      detail: { peerFrameBytes, recordBytes: peerFrameBytes + 4, lengthPrefixBytes: 4 } });
   }
 
   close(): Promise<void> {

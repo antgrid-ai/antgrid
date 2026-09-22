@@ -198,8 +198,7 @@ void main() {
         }),
       );
       relay.inject(
-        IncomingRouteMessage(
-          from: 'machine-1',
+        IncomingPeerFrame(
           channel: 'control',
           kind: FrameKind.sealed,
           payload: payload,
@@ -216,8 +215,7 @@ void main() {
 
     test('records an inbound frame that would not decrypt', () async {
       relay.inject(
-        IncomingRouteMessage(
-          from: 'machine-1',
+        IncomingPeerFrame(
           channel: 'control',
           kind: FrameKind.sealed,
           payload: _sealedLookingPayload(0x01),
@@ -239,8 +237,7 @@ void main() {
         }),
       );
       relay.inject(
-        IncomingRouteMessage(
-          from: 'machine-1',
+        IncomingPeerFrame(
           channel: 'control',
           kind: FrameKind.sealed,
           payload: payload,
@@ -267,8 +264,7 @@ void main() {
           }),
         );
         relay.inject(
-          IncomingRouteMessage(
-            from: 'machine-1',
+          IncomingPeerFrame(
             channel: 'control',
             kind: FrameKind.sealed,
             payload: payload,

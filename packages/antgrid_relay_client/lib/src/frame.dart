@@ -3,13 +3,14 @@ import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 
-const int _frameVersion = 0x02;
-const int _fixedPrefix = 4; // version byte + kind byte + u16 header length
-const int _maxHeaderLen = 1024;
+import 'frag.dart';
 
-/// Route-frame kind byte. Meaningful to the two ENDPOINTS only: the relay
-/// forwards route frames opaquely (it parses the header for `to`/`channel` and
-/// never interprets `kind`). Endpoints dispatch on it instead of try-parsing
+const int peerFrameVersion = 0x03;
+const int peerFrameFixedPrefix = 4;
+const int maxPeerFrameHeaderBytes = 1024;
+
+/// Peer-frame kind byte. Meaningful to the two authenticated endpoints only.
+/// Endpoints dispatch on it instead of try-parsing
 /// payload plaintext — `handshake` admits exactly the two E2E handshake
 /// messages, everything else must arrive `sealed`.
 enum FrameKind {
@@ -32,7 +33,9 @@ enum FrameErrorReason {
   badKind,
   truncated,
   headerTooLarge,
+  payloadTooLarge,
   badJson,
+  badHeader,
 }
 
 class FrameException implements Exception {
@@ -73,41 +76,52 @@ String frameIdOf(Uint8List payload, FrameKind kind) {
 // `kind` is deliberately required (no default): every call site must state
 // what it is sending — a `sealed` default would let a future handshake path
 // silently mislabel its frames.
-Uint8List encodeRouteFrame(
+Uint8List encodePeerFrame(
   Map<String, dynamic> header,
   Uint8List payload,
   FrameKind kind,
 ) {
-  final headerBytes = utf8.encode(jsonEncode(header));
-  if (headerBytes.length > _maxHeaderLen) {
+  final parsedHeader = _validatePeerHeader(header);
+  if (payload.length > kMaxFramePayload) {
     throw FrameException(
-      FrameErrorReason.headerTooLarge,
-      'Header ${headerBytes.length} bytes > $_maxHeaderLen',
+      FrameErrorReason.payloadTooLarge,
+      'Payload ${payload.length} bytes > $kMaxFramePayload',
     );
   }
-  final total = _fixedPrefix + headerBytes.length + payload.length;
+  final headerBytes = utf8.encode(jsonEncode(parsedHeader));
+  if (headerBytes.length > maxPeerFrameHeaderBytes) {
+    throw FrameException(
+      FrameErrorReason.headerTooLarge,
+      'Header ${headerBytes.length} bytes > $maxPeerFrameHeaderBytes',
+    );
+  }
+  final total = peerFrameFixedPrefix + headerBytes.length + payload.length;
   final frame = Uint8List(total);
-  frame[0] = _frameVersion;
+  frame[0] = peerFrameVersion;
   frame[1] = kind.wireValue;
   ByteData.view(frame.buffer).setUint16(2, headerBytes.length, Endian.big);
-  frame.setRange(_fixedPrefix, _fixedPrefix + headerBytes.length, headerBytes);
-  frame.setRange(_fixedPrefix + headerBytes.length, total, payload);
+  frame.setRange(
+    peerFrameFixedPrefix,
+    peerFrameFixedPrefix + headerBytes.length,
+    headerBytes,
+  );
+  frame.setRange(peerFrameFixedPrefix + headerBytes.length, total, payload);
   return frame;
 }
 
-/// Decodes a binary route frame.
+/// Decodes a binary peer frame.
 ///
 /// The returned `payload` is a copy (via `sublist`), safe to retain past the
 /// current tick.
 ({Map<String, dynamic> header, Uint8List payload, FrameKind kind})
-decodeRouteFrame(Uint8List buf) {
-  if (buf.length < _fixedPrefix) {
+decodePeerFrame(Uint8List buf) {
+  if (buf.length < peerFrameFixedPrefix) {
     throw FrameException(
       FrameErrorReason.truncated,
-      'Frame shorter than $_fixedPrefix bytes',
+      'Frame shorter than $peerFrameFixedPrefix bytes',
     );
   }
-  if (buf[0] != _frameVersion) {
+  if (buf[0] != peerFrameVersion) {
     throw FrameException(
       FrameErrorReason.badVersion,
       'Unknown frame version: 0x${buf[0].toRadixString(16)}',
@@ -122,32 +136,59 @@ decodeRouteFrame(Uint8List buf) {
   }
   final view = ByteData.view(buf.buffer, buf.offsetInBytes);
   final headerLen = view.getUint16(2, Endian.big);
-  if (headerLen > _maxHeaderLen) {
+  if (headerLen > maxPeerFrameHeaderBytes) {
     throw FrameException(
       FrameErrorReason.headerTooLarge,
-      'Header length $headerLen > $_maxHeaderLen',
+      'Header length $headerLen > $maxPeerFrameHeaderBytes',
     );
   }
-  if (_fixedPrefix + headerLen > buf.length) {
+  if (peerFrameFixedPrefix + headerLen > buf.length) {
     throw FrameException(
       FrameErrorReason.truncated,
       'Header extends past frame end',
     );
   }
-  final headerBytes = buf.sublist(_fixedPrefix, _fixedPrefix + headerLen);
+  final payloadLength = buf.length - peerFrameFixedPrefix - headerLen;
+  if (payloadLength > kMaxFramePayload) {
+    throw FrameException(
+      FrameErrorReason.payloadTooLarge,
+      'Payload $payloadLength bytes > $kMaxFramePayload',
+    );
+  }
+  final headerBytes = buf.sublist(
+    peerFrameFixedPrefix,
+    peerFrameFixedPrefix + headerLen,
+  );
   Map<String, dynamic> header;
   try {
     final decoded = jsonDecode(utf8.decode(headerBytes));
     if (decoded is! Map<String, dynamic>) {
       throw const FormatException('Header is not a JSON object');
     }
-    header = decoded;
+    header = _validatePeerHeader(decoded);
+  } on FrameException {
+    rethrow;
   } catch (e) {
     throw FrameException(
       FrameErrorReason.badJson,
       'Header JSON parse failed: $e',
     );
   }
-  final payload = Uint8List.fromList(buf.sublist(_fixedPrefix + headerLen));
+  final payload = Uint8List.fromList(
+    buf.sublist(peerFrameFixedPrefix + headerLen),
+  );
   return (header: header, payload: payload, kind: kind);
+}
+
+Map<String, dynamic> _validatePeerHeader(Map<String, dynamic> header) {
+  final channel = header['channel'];
+  if (header.length != 2 ||
+      header['type'] != 'message' ||
+      (channel != 'control' && channel != 'preview')) {
+    throw FrameException(
+      FrameErrorReason.badHeader,
+      'Invalid peer frame header',
+    );
+  }
+  return {'type': 'message', 'channel': channel};
 }

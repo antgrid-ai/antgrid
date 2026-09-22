@@ -1,0 +1,113 @@
+import { describe, expect, it } from "bun:test";
+import {
+  decodePeerFrame,
+  encodePeerFrame,
+  FRAME_VERSION,
+  FrameError,
+  FrameKind,
+  MAX_FRAME_PAYLOAD,
+} from "../src/index";
+
+const header = { type: "message", channel: "control" } as const;
+
+describe("encodePeerFrame", () => {
+  it("produces the v3 prefix, peer header, and payload", () => {
+    const payload = new Uint8Array([0xde, 0xad, 0xbe, 0xef]);
+    const frame = encodePeerFrame(header, payload, FrameKind.sealed);
+
+    expect(frame[0]).toBe(0x03);
+    expect(frame[0]).toBe(FRAME_VERSION);
+    expect(frame[1]).toBe(FrameKind.sealed);
+    const headerLen = (frame[2] << 8) | frame[3];
+    expect(JSON.parse(Buffer.from(frame.subarray(4, 4 + headerLen)).toString("utf8")))
+      .toEqual(header);
+    expect(Array.from(frame.subarray(4 + headerLen))).toEqual([...payload]);
+  });
+
+  it("rejects peer identity in the record header", () => {
+    expect(() => encodePeerFrame(
+      { ...header, to: "agent-1" } as typeof header,
+      new Uint8Array(),
+      FrameKind.sealed,
+    )).toThrow(expect.objectContaining({ reason: "BAD_HEADER" }));
+    expect(() => encodePeerFrame(
+      { ...header, from: "app-1" } as typeof header,
+      new Uint8Array(),
+      FrameKind.sealed,
+    )).toThrow(expect.objectContaining({ reason: "BAD_HEADER" }));
+  });
+
+  it("rejects payloads beyond the record bound", () => {
+    expect(() => encodePeerFrame(
+      header,
+      new Uint8Array(MAX_FRAME_PAYLOAD + 1),
+      FrameKind.sealed,
+    )).toThrow(expect.objectContaining({ reason: "PAYLOAD_TOO_LARGE" }));
+  });
+});
+
+describe("decodePeerFrame", () => {
+  it("round-trips both frame kinds and returns a payload view", () => {
+    for (const kind of [FrameKind.sealed, FrameKind.handshake]) {
+      const payload = new Uint8Array([1, 2, 3, 4, 5]);
+      const frame = encodePeerFrame(header, payload, kind);
+      const decoded = decodePeerFrame(frame);
+
+      expect(decoded.header).toEqual(header);
+      expect([...decoded.payload]).toEqual([...payload]);
+      expect(decoded.kind).toBe(kind);
+      frame[frame.length - 1] = 9;
+      expect(decoded.payload[decoded.payload.length - 1]).toBe(9);
+    }
+  });
+
+  it("rejects v2 and unknown versions", () => {
+    for (const version of [0x02, 0x99]) {
+      expect(() => decodePeerFrame(
+        new Uint8Array([version, FrameKind.sealed, 0, 0]),
+      )).toThrow(expect.objectContaining({ reason: "BAD_VERSION" }));
+    }
+  });
+
+  it("rejects truncated, unknown-kind, and oversized-header records", () => {
+    expect(() => decodePeerFrame(new Uint8Array([0x03, 0, 0])))
+      .toThrow(expect.objectContaining({ reason: "TRUNCATED" }));
+    expect(() => decodePeerFrame(new Uint8Array([0x03, 0x7f, 0, 0])))
+      .toThrow(expect.objectContaining({ reason: "BAD_KIND" }));
+    expect(() => decodePeerFrame(new Uint8Array([0x03, 0, 0x04, 0x01])))
+      .toThrow(expect.objectContaining({ reason: "HEADER_TOO_LARGE" }));
+    expect(() => decodePeerFrame(new Uint8Array([0x03, 0, 0, 2, 0x7b])))
+      .toThrow(expect.objectContaining({ reason: "TRUNCATED" }));
+  });
+
+  it("rejects malformed and non-peer headers", () => {
+    const record = (json: string) => {
+      const encoded = Buffer.from(json);
+      return new Uint8Array([
+        0x03,
+        FrameKind.sealed,
+        encoded.length >> 8,
+        encoded.length & 0xff,
+        ...encoded,
+      ]);
+    };
+    expect(() => decodePeerFrame(record("{")))
+      .toThrow(expect.objectContaining({ reason: "BAD_JSON" }));
+    for (const value of [
+      { type: "message", channel: "unknown" },
+      { type: "other", channel: "control" },
+      { type: "message", channel: "control", from: "app-1" },
+    ]) {
+      expect(() => decodePeerFrame(record(JSON.stringify(value))))
+        .toThrow(expect.objectContaining({ reason: "BAD_HEADER" }));
+    }
+  });
+
+  it("uses a bounded header and exposes typed errors", () => {
+    expect(FrameError).toBeDefined();
+    const decoded = decodePeerFrame(
+      encodePeerFrame(header, new Uint8Array(), FrameKind.sealed),
+    );
+    expect(decoded.payload).toHaveLength(0);
+  });
+});

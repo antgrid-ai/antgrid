@@ -7,7 +7,7 @@
 // rather than displacing anyone.
 import { test, expect, afterEach } from "bun:test";
 import { generateKeyPairSync } from "node:crypto";
-import { encodeRouteFrame, FrameKind } from "antgrid-wire";
+import { encodePeerFrame, FrameKind } from "antgrid-wire";
 import { generateEphemeralKeypair, deriveSharedSecret } from "../src/key-exchange";
 import { TestPeerSessionOwner, MAX_APP_SESSIONS } from "./test-peer-session-owner";
 import { MessageBus } from "../src/message-bus";
@@ -42,12 +42,12 @@ function ed25519Pair(): { seedB64: string; pubB64: string } {
   return { seedB64, pubB64 };
 }
 
-/** Feed a binary route frame straight into the client's dispatch, exactly as
+/** Feed a binary peer frame straight into the client's dispatch, exactly as
  *  `handleBinaryFrame` receives it off the socket â€” exercises the real
  *  kind-byte dispatch (kind 1 = handshake plaintext, kind 0 = sealed). */
 function injectFrame(client: TestPeerSessionOwner, kind: FrameKind, payload: Buffer, channel: "control" | "preview" = "control", from: string = PHONE_ID): void {
-  const frame = encodeRouteFrame({ type: "message", from, channel }, payload, kind);
-  client.injectRouteFrame(Buffer.from(frame));
+  const frame = encodePeerFrame({ type: "message", channel }, payload, kind);
+  client.injectPeerFrame(Buffer.from(frame), from);
 }
 
 /** Build a phone-signed client-hello (empty agent-pub slot, per pull-model

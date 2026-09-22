@@ -195,8 +195,7 @@ void main() {
         final sub = session.takeoverEvents.listen(takeovers.add);
 
         relay.inject(
-          IncomingRouteMessage(
-            from: 'm1',
+          IncomingPeerFrame(
             channel: 'control',
             kind: FrameKind.sealed,
             payload: await _sealFromAgent(

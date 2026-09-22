@@ -699,7 +699,7 @@ void main() {
   // The bridge's removal work is unbounded (measured 12.5s and 14.2s), so
   // silence cannot mean failure — and must not be called one at 15s, which a
   // successful delete routinely outlives.
-  test('an unanswered delete is accepted, and stays silent past 15s', () async {
+  test('an unanswered delete becomes outcomeUnknown at its bound', () async {
     final t = FakeAgentTransport();
     final session = await makeSession(t);
     final cache = await CachedSessionsStore.open();
@@ -721,14 +721,14 @@ void main() {
 
       async.elapse(kSessionDeleteAckTimeout);
       async.flushMicrotasks();
-      expect(outcome, SessionDeleteAck.accepted);
+      expect(outcome, SessionDeleteAck.outcomeUnknown);
     });
 
     await svc.dispose();
     await session.close();
   });
 
-  test('a reconnect landing inside the delete window is accepted, not a '
+  test('a reconnect landing inside the delete window is unknown, not a '
       'thrown SessionDownException', () async {
     final t = FakeAgentTransport();
     final session = await makeSession(t);
@@ -738,7 +738,7 @@ void main() {
     final future = svc.delete('sess-1');
     t.emitState(TransportState.disconnected);
 
-    expect(await future, SessionDeleteAck.accepted);
+    expect(await future, SessionDeleteAck.outcomeUnknown);
 
     await svc.dispose();
     await session.close();

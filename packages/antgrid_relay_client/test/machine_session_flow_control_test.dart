@@ -362,8 +362,7 @@ void main() {
 
   Future<void> injectFromAgent(String channel, String plaintext) async {
     relay.inject(
-      IncomingRouteMessage(
-        from: 'machine-1',
+      IncomingPeerFrame(
         channel: channel,
         kind: FrameKind.sealed,
         payload: await _sealFromAgent(readKeys, plaintext),
@@ -460,8 +459,7 @@ void main() {
       final payload = await _sealFromAgent(sealedWith ?? readKeys, plaintext);
       preview += payload.length;
       relay.inject(
-        IncomingRouteMessage(
-          from: 'machine-1',
+        IncomingPeerFrame(
           channel: 'preview',
           kind: FrameKind.sealed,
           payload: payload,
@@ -500,8 +498,7 @@ void main() {
       final payload = await _sealFromAgent(readKeys, plaintext);
       control += payload.length;
       relay.inject(
-        IncomingRouteMessage(
-          from: 'machine-1',
+        IncomingPeerFrame(
           channel: 'control',
           kind: FrameKind.sealed,
           payload: payload,
@@ -541,8 +538,7 @@ void main() {
     );
     final payload = await _sealFromAgent(readKeys, filler(10000));
     relay.inject(
-      IncomingRouteMessage(
-        from: 'machine-1',
+      IncomingPeerFrame(
         channel: 'preview',
         kind: FrameKind.sealed,
         payload: payload,
@@ -687,8 +683,7 @@ void main() {
         jsonEncode({'type': 'ping'}),
       );
       relay.inject(
-        IncomingRouteMessage(
-          from: 'machine-1',
+        IncomingPeerFrame(
           channel: 'control',
           kind: FrameKind.sealed,
           payload: acrossSwap,

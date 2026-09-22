@@ -1,7 +1,3 @@
-import 'dart:typed_data';
-
-import '../frame.dart';
-
 // --- Client → Relay ---
 
 /// First (and only) auth frame: proof-of-possession over `buildHelloSigBody`
@@ -147,45 +143,6 @@ class PeerOfflineMessage {
     final peerId = json['peerId'];
     if (peerId is! String) return null;
     return PeerOfflineMessage(peerId: peerId);
-  }
-}
-
-class IncomingRouteMessage {
-  final String from;
-  final String channel;
-  final Uint8List payload;
-  final int? ts;
-
-  /// The route-frame kind byte. `handshake` (0x01) carries plaintext
-  /// client/agent-hello; `sealed` (0x00) carries every ciphertext payload
-  /// (session frames and stream traffic). Endpoints dispatch on this instead of
-  /// try-parsing the payload as plaintext JSON.
-  final FrameKind kind;
-
-  const IncomingRouteMessage({
-    required this.from,
-    required this.channel,
-    required this.payload,
-    required this.kind,
-    this.ts,
-  });
-
-  /// Build from a decoded frame header + payload bytes + kind byte.
-  static IncomingRouteMessage? fromFrameHeader(
-    Map<String, dynamic> header,
-    Uint8List payload,
-    FrameKind kind,
-  ) {
-    final from = header['from'];
-    final channel = header['channel'];
-    if (from is! String || channel is! String) return null;
-    return IncomingRouteMessage(
-      from: from,
-      channel: channel,
-      payload: payload,
-      kind: kind,
-      ts: header['ts'] as int?,
-    );
   }
 }
 

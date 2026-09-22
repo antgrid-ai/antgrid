@@ -1,8 +1,8 @@
 // The send scheduler as the TestPeerSessionOwner wires it: what bypasses the
 // queue and what clears it. Sealing is the identity function here so a queued
-// frame can be read straight off the wire.
+// peer frame can be read straight off the wire.
 import { afterEach, describe, expect, it } from "bun:test";
-import { decodeRouteFrame, encodeRouteFrame, FrameKind } from "antgrid-wire";
+import { decodePeerFrame, encodePeerFrame, FrameKind } from "antgrid-wire";
 import { TestPeerSessionOwner } from "./test-peer-session-owner";
 import { MessageBus } from "../src/message-bus";
 import { createMessage } from "../src/protocol";
@@ -21,7 +21,7 @@ let clients: TestPeerSessionOwner[] = [];
 afterEach(() => { for (const c of clients.splice(0)) try { c.close(); } catch {} });
 
 /** A paired, handshake-complete client whose socket collects frames and whose
- *  seal is the identity, so `sent` holds real route frames over readable
+ *  seal is the identity, so `sent` holds real peer frames over readable
  *  plaintext. */
 function makeClient(): Harness {
   const sent: Array<string | Uint8Array> = [];
@@ -38,16 +38,15 @@ function makeClient(): Harness {
   clients.push(client);
   const session = installFakeSession(client, PHONE_ID);
   client.setNativeWriter((data, to, channel = "control", kind = FrameKind.sealed) => {
-    sent.push(encodeRouteFrame({ type: "message", to, channel }, Buffer.from(data), kind));
+    sent.push(encodePeerFrame({ type: "message", channel }, Buffer.from(data), kind));
     return true;
   });
   return { client, sent, s: session.scheduler as SendScheduler };
 }
 
 function decode(frame: string | Uint8Array): { channel: string; text: string } {
-  const decoded = decodeRouteFrame(Buffer.from(frame as Uint8Array));
-  const header = decoded.header as { channel?: string };
-  return { channel: header.channel ?? "control", text: Buffer.from(decoded.payload).toString("utf8") };
+  const decoded = decodePeerFrame(Buffer.from(frame as Uint8Array));
+  return { channel: decoded.header.channel, text: Buffer.from(decoded.payload).toString("utf8") };
 }
 
 function tunnelChunk(requestId: string): object {

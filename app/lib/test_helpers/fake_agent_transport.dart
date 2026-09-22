@@ -199,6 +199,34 @@ class FakeAgentTransport implements AgentTransport {
   }
 
   @override
+  Future<RemoteRequestResult<Map<String, dynamic>>> requestWithOutcome(
+    String method, {
+    Map<String, dynamic>? params,
+    Duration timeout = const Duration(seconds: 10),
+    bool countsTowardHealth = true,
+  }) async {
+    final mutating =
+        classifyRemoteRequest(method) == RemoteRequestKind.mutating;
+    if (mutating && !isEstablished) {
+      return const RemoteRequestResult.notSent();
+    }
+    try {
+      final value = await request(
+        method,
+        params: params,
+        timeout: timeout,
+        countsTowardHealth: countsTowardHealth,
+      );
+      return RemoteRequestResult.confirmed(value);
+    } on RpcException catch (error) {
+      if (mutating && _transportFailureCodes.contains(error.code)) {
+        return const RemoteRequestResult.outcomeUnknown();
+      }
+      rethrow;
+    }
+  }
+
+  @override
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
@@ -235,3 +263,12 @@ class FakeAgentTransport implements AgentTransport {
 
   void clearSent() => sent.clear();
 }
+
+const _transportFailureCodes = <String>{
+  'E_TIMEOUT',
+  'E_SEND_FAILED',
+  'E_SESSION_DOWN',
+  'E_DISPOSED',
+  'E_SOCKET_CLOSED',
+  'E_SUPERSEDED',
+};

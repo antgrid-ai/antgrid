@@ -39,7 +39,7 @@ class _RecordingRelay extends RelayService implements PeerLink {
   Stream<void> get peerRestartStream => const Stream.empty();
   _RecordingRelay() : super(crypto: CryptoService());
 
-  final _messages = StreamController<IncomingRouteMessage>.broadcast();
+  final _messages = StreamController<IncomingPeerFrame>.broadcast();
   final _states = StreamController<AppState>.broadcast();
   final _presence = StreamController<bool>.broadcast();
   final _errors = StreamController<ErrorMessage>.broadcast();
@@ -50,7 +50,7 @@ class _RecordingRelay extends RelayService implements PeerLink {
   int failNextConnects = 0;
 
   @override
-  Stream<IncomingRouteMessage> get messageStream => _messages.stream;
+  Stream<IncomingPeerFrame> get messageStream => _messages.stream;
   @override
   Stream<AppState> get stateStream => _states.stream;
   @override
@@ -93,18 +93,16 @@ class _RecordingRelay extends RelayService implements PeerLink {
 
   @override
   Future<PeerSendOutcome> sendFrame(
-    String to,
     String channel,
     Uint8List payload, {
     FrameKind kind = FrameKind.sealed,
   }) async {
     if (!isDispatchAllowed) return PeerSendOutcome.closed;
-    sendMessage(to, channel, payload, kind: kind);
+    sendMessage(channel, payload, kind: kind);
     return PeerSendOutcome.accepted;
   }
 
   void sendMessage(
-    String to,
     String channel,
     Uint8List payload, {
     FrameKind kind = FrameKind.sealed,
@@ -112,7 +110,7 @@ class _RecordingRelay extends RelayService implements PeerLink {
     if (channel == 'control') sent.add((payload: payload, kind: kind));
   }
 
-  void inject(IncomingRouteMessage msg) => _messages.add(msg);
+  void inject(IncomingPeerFrame msg) => _messages.add(msg);
 
   void setState(AppState s) {
     _cur = s;
@@ -215,8 +213,7 @@ Future<SessionKeys> _completeFakeAgentHandshake(
   final keys = await deriveSessionKeysV2(ss, agentTranscript);
 
   relay.inject(
-    IncomingRouteMessage(
-      from: machineDeviceId,
+    IncomingPeerFrame(
       channel: 'control',
       kind: FrameKind.handshake,
       payload: Uint8List.fromList(
@@ -234,8 +231,7 @@ Future<SessionKeys> _completeFakeAgentHandshake(
 
   final t = E2eTransportDart(sendKey: keys.a2p, recvKey: keys.p2a);
   relay.inject(
-    IncomingRouteMessage(
-      from: machineDeviceId,
+    IncomingPeerFrame(
       channel: 'control',
       kind: FrameKind.sealed,
       payload: await t.seal(
@@ -268,8 +264,7 @@ Future<SessionKeys> _completeFakeAgentHandshake(
   }
 
   relay.inject(
-    IncomingRouteMessage(
-      from: machineDeviceId,
+    IncomingPeerFrame(
       channel: 'control',
       kind: FrameKind.sealed,
       payload: await t.seal(
@@ -494,8 +489,7 @@ void main() {
     // exactly as MachineSession's own outbound traffic is.
     final agentSend = E2eTransportDart(sendKey: keys.a2p, recvKey: keys.p2a);
     relay.inject(
-      IncomingRouteMessage(
-        from: _machineId,
+      IncomingPeerFrame(
         channel: 'control',
         kind: FrameKind.sealed,
         payload: await agentSend.seal(

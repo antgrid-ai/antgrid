@@ -2,13 +2,24 @@ import 'dart:async';
 import 'dart:typed_data';
 
 import 'frame.dart';
-import 'models/relay_message.dart';
 
 enum PeerLinkState { connecting, ready, closed }
 
 enum PeerPath { unknown, direct, relay }
 
 enum PeerSendOutcome { accepted, closed, tooLarge, backpressured, failed }
+
+class IncomingPeerFrame {
+  const IncomingPeerFrame({
+    required this.channel,
+    required this.payload,
+    required this.kind,
+  });
+
+  final String channel;
+  final Uint8List payload;
+  final FrameKind kind;
+}
 
 typedef PeerLinkDiagnostic = void Function(Map<String, Object?> event);
 
@@ -23,7 +34,7 @@ class PeerLinkFailure {
 /// Implementations must bound queued bytes, fence writes by connection generation
 /// and complete sends on admission or rejection, never wait for remote delivery.
 abstract interface class PeerLink {
-  Stream<IncomingRouteMessage> get messageStream;
+  Stream<IncomingPeerFrame> get messageStream;
   Stream<PeerLinkState> get payloadStateStream;
   Stream<PeerPath> get pathStream;
   Stream<PeerLinkFailure> get failureStream;
@@ -40,7 +51,6 @@ abstract interface class PeerLink {
   /// Accepted means handed to the local transport, never delivered to the peer.
   /// No failed outcome may be retried by the link itself.
   Future<PeerSendOutcome> sendFrame(
-    String to,
     String channel,
     Uint8List payload, {
     FrameKind kind = FrameKind.sealed,

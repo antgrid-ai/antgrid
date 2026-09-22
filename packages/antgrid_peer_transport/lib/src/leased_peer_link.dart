@@ -69,7 +69,7 @@ class LeasedPeerLink implements PeerLink {
       lease.snapshot?.endpoint?.endpointId == _localEndpoint &&
       lease.snapshot?.endpoint?.generation == _localGeneration;
   @override
-  Stream<IncomingRouteMessage> get messageStream =>
+  Stream<IncomingPeerFrame> get messageStream =>
       inner.messageStream.where((_) => isDispatchAllowed);
   @override
   Stream<PeerLinkState> get payloadStateStream {
@@ -89,13 +89,12 @@ class LeasedPeerLink implements PeerLink {
   PeerLinkDiagnostic? get netTap => inner.netTap;
   @override
   Future<PeerSendOutcome> sendFrame(
-    String to,
     String channel,
     Uint8List payload, {
     FrameKind kind = FrameKind.sealed,
   }) async {
     if (!isDispatchAllowed) return PeerSendOutcome.closed;
-    return inner.sendFrame(to, channel, payload, kind: kind);
+    return inner.sendFrame(channel, payload, kind: kind);
   }
 
   @override

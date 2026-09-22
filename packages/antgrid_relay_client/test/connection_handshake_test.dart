@@ -19,11 +19,11 @@ import 'package:test/test.dart';
 // ---------------------------------------------------------------------------
 
 class _RecordingRelay implements PeerLink {
-  final _messages = StreamController<IncomingRouteMessage>.broadcast();
+  final _messages = StreamController<IncomingPeerFrame>.broadcast();
   final sent = <({Uint8List payload, FrameKind kind})>[];
 
   @override
-  Stream<IncomingRouteMessage> get messageStream => _messages.stream;
+  Stream<IncomingPeerFrame> get messageStream => _messages.stream;
   @override
   Stream<PeerLinkState> get payloadStateStream =>
       const Stream<PeerLinkState>.empty();
@@ -41,7 +41,6 @@ class _RecordingRelay implements PeerLink {
 
   @override
   Future<PeerSendOutcome> sendFrame(
-    String to,
     String channel,
     Uint8List payload, {
     FrameKind kind = FrameKind.sealed,
@@ -50,7 +49,7 @@ class _RecordingRelay implements PeerLink {
     return PeerSendOutcome.accepted;
   }
 
-  void inject(IncomingRouteMessage msg) => _messages.add(msg);
+  void inject(IncomingPeerFrame msg) => _messages.add(msg);
 
   Future<void> closeStreams() => _messages.close();
 
@@ -175,8 +174,7 @@ Future<_FakeAgentSession> _runFakeAgentUpToReady(
   final keys = await deriveSessionKeysV2(ss, agentTranscript);
 
   relay.inject(
-    IncomingRouteMessage(
-      from: machineDeviceId,
+    IncomingPeerFrame(
       channel: 'control',
       kind: FrameKind.handshake,
       payload: Uint8List.fromList(
@@ -205,8 +203,7 @@ Future<_FakeAgentSession> _runFakeAgentUpToReady(
         }),
       );
   relay.inject(
-    IncomingRouteMessage(
-      from: machineDeviceId,
+    IncomingPeerFrame(
       channel: 'control',
       kind: FrameKind.sealed,
       payload: agentReadySealed,
@@ -226,8 +223,7 @@ Future<void> _sendEstablished(
     recvKey: fa.keys.p2a,
   ).seal(jsonEncode({'type': 'established', 'attemptId': fa.attemptId}));
   relay.inject(
-    IncomingRouteMessage(
-      from: machineDeviceId,
+    IncomingPeerFrame(
       channel: 'control',
       kind: FrameKind.sealed,
       payload: sealed,

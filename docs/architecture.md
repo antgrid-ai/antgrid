@@ -248,16 +248,19 @@ Terminal qualification commands live in `bridge/package.json` and `evals/package
 
 - **`antgrid_relay_client`** — pure Dart relay/crypto client, no Flutter.
 - **`antgrid_eval_client`** — E2E eval fixtures.
-- **`antgrid-wire`** — TS Bun workspace holding the binary route-frame codec
+- **`antgrid-wire`** — TS Bun workspace holding the binary peer-frame codec
   **and** the relay control-envelope Zod schemas (`hello`/`welcome`/`stream-*`/
   `error`, the `ClientMessage`/`ServerMessage` unions, `ErrorCode`), plus the
   spoof-safe client-IP/XFF resolver (`client-ip.ts`) used by relay and web.
   Shared by bridge/relay/web/evals.
 
-  Single source of truth for `FRAME_VERSION`, which is distinct from the relay
-  message `protocolVersion`. `relay/src/protocol.ts` is a thin re-export shim of
-  this package; the Dart `antgrid_relay_client` mirrors these schemas by hand,
-  so the two drifting apart is silent.
+  Single source of truth for peer `FRAME_VERSION`, which is distinct from the
+  central relay message `protocolVersion`. Peer-frame v3 carries message type,
+  channel, kind, and payload; the authenticated native connection supplies peer
+  identity. `relay/src/protocol.ts` is a thin re-export shim of this package;
+  the Dart clients mirror these schemas by hand, so drift is silent. Shared
+  fixtures under `evals/fixtures/` pin both control envelopes and peer transport
+  bytes and constants across TypeScript and Dart.
 
 Other dirs: `docs/` (design notes), `scripts/dev.ts` (fallback dev runner),
 `aspire/` (default dev launcher).

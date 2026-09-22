@@ -1,5 +1,5 @@
 import 'package:antgrid_relay_client/antgrid_relay_client.dart'
-    show RpcException;
+    show RemoteCommandOutcome, RemoteRequestResult, RpcException;
 import 'package:collection/collection.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -400,10 +400,9 @@ Future<void> openRecentSession(
 }
 
 /// Outcome of a [deleteRecentSession] call — distinguishes an offline machine
-/// (block, don't delete locally, reconcile on reconnect) and an accepted but
-/// unanswered request from an outright failure, so the caller can message each
-/// case accurately.
-enum RecentSessionDeleteOutcome { deleted, accepted, offline, failed }
+/// (block and do not send), an unresolved dispatched request, and an outright
+/// failure so the caller can message each case accurately.
+enum RecentSessionDeleteOutcome { deleted, outcomeUnknown, offline, failed }
 
 /// The codes `BufferedAgentTransport` mints for itself when a request never
 /// reaches the bridge or never comes back. Everything else on an `RpcException`
@@ -470,7 +469,7 @@ Future<RecentSessionDeleteOutcome> deleteRecentSession(
         force: force,
         deleteBranch: deleteBranch,
       );
-      // Only a CONFIRMED removal drops the draft. An accepted-but-unanswered
+      // Only a CONFIRMED removal drops the draft. An outcome-unknown
       // delete can still fail at the bridge, and a draft discarded for a
       // session that survives is not recoverable — a draft left behind for one
       // that does not is merely stale under an id that never comes back.
@@ -480,7 +479,8 @@ Future<RecentSessionDeleteOutcome> deleteRecentSession(
       }
       return switch (ack) {
         SessionDeleteAck.deleted => RecentSessionDeleteOutcome.deleted,
-        SessionDeleteAck.accepted => RecentSessionDeleteOutcome.accepted,
+        SessionDeleteAck.outcomeUnknown =>
+          RecentSessionDeleteOutcome.outcomeUnknown,
       };
     } on SessionOperationException {
       rethrow;
@@ -493,9 +493,9 @@ Future<RecentSessionDeleteOutcome> deleteRecentSession(
     controlPlaneClientForProvider(o.machineUuid!).future,
   );
   if (cp == null) return RecentSessionDeleteOutcome.offline;
-  final bool ok;
+  final RemoteRequestResult<bool> result;
   try {
-    ok = await cp.deleteSession(
+    result = await cp.deleteSessionWithOutcome(
       o.projectId,
       row.session.id,
       force: force,
@@ -506,15 +506,6 @@ Future<RecentSessionDeleteOutcome> deleteRecentSession(
     // string ("request sessions.delete timed out", or an exception dump), while
     // the ladder falls back to printing `message` verbatim — so they never
     // reach the user as themselves.
-    if (e.code == 'E_TIMEOUT') {
-      // We lost the answer, not the request. Reconcile by an idempotent read
-      // instead of guessing: if the bridge really did remove it, the re-peek's
-      // write-through prunes the row; if it did not, the row stays and is still
-      // deletable. Detached because nothing here may wait out a delete that has
-      // already outlived its own reply.
-      _repeekRemoteSessions(ref, o.machineUuid!, o.projectId, o.registrationId);
-      return RecentSessionDeleteOutcome.accepted;
-    }
     if (_kTransportRpcCodes.contains(e.code)) {
       return RecentSessionDeleteOutcome.failed;
     }
@@ -525,7 +516,17 @@ Future<RecentSessionDeleteOutcome> deleteRecentSession(
   } catch (_) {
     return RecentSessionDeleteOutcome.failed;
   }
-  if (!ok) return RecentSessionDeleteOutcome.failed;
+  if (result.outcome == RemoteCommandOutcome.notSent) {
+    return RecentSessionDeleteOutcome.offline;
+  }
+  if (result.outcome == RemoteCommandOutcome.outcomeUnknown) {
+    // Reconcile through a fresh read. The mutation itself is never replayed:
+    // only the bridge's authoritative session list may decide whether the row
+    // disappears.
+    _repeekRemoteSessions(ref, o.machineUuid!, o.projectId, o.registrationId);
+    return RecentSessionDeleteOutcome.outcomeUnknown;
+  }
+  if (!result.value) return RecentSessionDeleteOutcome.failed;
   // Control-plane delete has no automatic cache write-through; prune locally
   // so the row disappears immediately. Flush immediately (not the usual
   // debounced write) so a disconnect/app-kill right after can't resurrect the
@@ -542,14 +543,14 @@ Future<RecentSessionDeleteOutcome> deleteRecentSession(
 }
 
 /// Re-read one remote project's session list into the cache. The reconciliation
-/// half of an accepted-but-unanswered delete: the row disappears because the
+/// half of an outcome-unknown delete: the row disappears because the
 /// bridge stopped listing it, never because the app assumed it had.
 void _repeekRemoteSessions(
   ProviderContainer ref,
   String machineUuid,
   String projectId,
   String registrationId,
-) => detached('RecentSessions', 're-peek after accepted delete', () async {
+) => detached('RecentSessions', 're-peek after unknown delete', () async {
   final cp = await ref.read(controlPlaneClientForProvider(machineUuid).future);
   if (cp == null) return;
   final sessions = await cp.listSessions(projectId);

@@ -1,5 +1,5 @@
 // A remote Recents delete cannot see the bridge's `deleting` flag, so the only
-// thing that can strand its row is the app guessing. `accepted` guesses
+// thing that can strand its row is the app guessing. `outcomeUnknown` guesses
 // nothing: it re-reads the list and lets the bridge's own answer prune the row.
 import 'package:antgrid_relay_client/antgrid_relay_client.dart'
     show RpcException;
@@ -85,7 +85,7 @@ void main() {
 
   // A lost answer says nothing about whether the removal happened, so the row
   // is reconciled by an idempotent re-read rather than pruned on a guess.
-  test('a lost answer is accepted and reconciled by a re-peek', () async {
+  test('a lost answer is unresolved and reconciled by a re-peek', () async {
     var calls = 0;
     transport.requestHandler = (method, params) {
       calls++;
@@ -94,7 +94,7 @@ void main() {
     };
 
     final outcome = await deleteRecentSession(container, _row());
-    expect(outcome, RecentSessionDeleteOutcome.accepted);
+    expect(outcome, RecentSessionDeleteOutcome.outcomeUnknown);
 
     // The re-peek is detached; let it land.
     await Future<void>.delayed(Duration.zero);
@@ -120,7 +120,7 @@ void main() {
 
     expect(
       await deleteRecentSession(container, _row()),
-      RecentSessionDeleteOutcome.accepted,
+      RecentSessionDeleteOutcome.outcomeUnknown,
     );
     await Future<void>.delayed(Duration.zero);
     await Future<void>.delayed(Duration.zero);
@@ -131,19 +131,20 @@ void main() {
   });
 
   // The request never left, which is a different answer entirely.
-  test('a send failure stays a failure and re-peeks nothing', () async {
+  test('a pre-send disconnect stays offline and re-peeks nothing', () async {
     var calls = 0;
+    transport.setEstablished(false);
     transport.requestHandler = (method, params) {
       calls++;
-      throw RpcException('E_SEND_FAILED', 'no socket');
+      return {'deleted': true};
     };
 
     expect(
       await deleteRecentSession(container, _row()),
-      RecentSessionDeleteOutcome.failed,
+      RecentSessionDeleteOutcome.offline,
     );
     await Future<void>.delayed(Duration.zero);
-    expect(calls, 1);
+    expect(calls, 0);
   });
 
   test('a bridge refusal is still re-typed for the confirm ladder', () async {

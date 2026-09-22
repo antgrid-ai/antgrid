@@ -15,6 +15,8 @@ const ROOT = resolve(import.meta.dir, "../..");
  *   hand-mirrored Dart parser; pinned by
  *   packages/antgrid-wire/tests/relay-envelope-vectors.test.ts and
  *   packages/antgrid_relay_client/test/relay_envelope_vectors_test.dart.
+ * - peer-transport-vectors.json: peer-frame bytes plus native, flow-control,
+ *   and authorization constants shared by the TS and Dart implementations.
  *
  * `git status --porcelain` on purpose, not plain `git diff`: plain diff is
  * blind to a regenerated fixture that was already `git add`ed AND to an
@@ -25,6 +27,7 @@ const ROOT = resolve(import.meta.dir, "../..");
 const PINNED_FIXTURES = [
   "evals/fixtures/e2e-handshake-vectors.json",
   "evals/fixtures/relay-envelope-vectors.json",
+  "evals/fixtures/peer-transport-vectors.json",
 ];
 
 for (const fixture of PINNED_FIXTURES) {

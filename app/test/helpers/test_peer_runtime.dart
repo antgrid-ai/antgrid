@@ -9,8 +9,9 @@ import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 /// Uses each test's in-memory relay as an explicit payload double, without
 /// provisioning native libraries or making HTTP authorization requests.
 class TestPeerRuntime extends PeerRuntime {
-  TestPeerRuntime()
-    : super(
+  TestPeerRuntime({PeerLink? payloadLink})
+    : _payloadLink = payloadLink,
+      super(
         record: DeviceRecord(
           userId: 'test',
           deviceUuid: 'test',
@@ -26,6 +27,8 @@ class TestPeerRuntime extends PeerRuntime {
         mintToken: () async => 'test',
       );
 
+  final PeerLink? _payloadLink;
+
   @override
   void retain() {}
   @override
@@ -36,7 +39,7 @@ class TestPeerRuntime extends PeerRuntime {
     PeerLinkDiagnostic? diagnostic,
     required String machineDeviceId,
     required String machinePublicKey,
-  }) async => _TestPayloadLink(diagnostic);
+  }) async => _payloadLink ?? _TestPayloadLink(diagnostic);
 }
 
 class _TestPayloadLink implements PeerLink {
@@ -44,7 +47,7 @@ class _TestPayloadLink implements PeerLink {
   @override
   bool get isDispatchAllowed => true;
   @override
-  Stream<IncomingRouteMessage> get messageStream => const Stream.empty();
+  Stream<IncomingPeerFrame> get messageStream => const Stream.empty();
   @override
   Stream<PeerLinkState> get payloadStateStream => const Stream.empty();
   @override
@@ -57,7 +60,6 @@ class _TestPayloadLink implements PeerLink {
   final PeerLinkDiagnostic? netTap;
   @override
   Future<PeerSendOutcome> sendFrame(
-    String to,
     String channel,
     Uint8List payload, {
     FrameKind kind = FrameKind.sealed,

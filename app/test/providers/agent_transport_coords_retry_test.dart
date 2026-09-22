@@ -49,7 +49,7 @@ class _DialRecordingRelay extends RelayService {
   final dialedUrls = <String>[];
   final AppState _cur = const AppState();
 
-  Stream<IncomingRouteMessage> get messageStream => const Stream.empty();
+  Stream<IncomingPeerFrame> get messageStream => const Stream.empty();
   @override
   Stream<AppState> get stateStream => _states.stream;
   @override
@@ -79,17 +79,15 @@ class _DialRecordingRelay extends RelayService {
   void disconnect() {}
 
   Future<PeerSendOutcome> sendFrame(
-    String to,
     String channel,
     Uint8List payload, {
     FrameKind kind = FrameKind.sealed,
   }) async {
-    sendMessage(to, channel, payload, kind: kind);
+    sendMessage(channel, payload, kind: kind);
     return PeerSendOutcome.accepted;
   }
 
   void sendMessage(
-    String to,
     String channel,
     Uint8List payload, {
     FrameKind kind = FrameKind.sealed,

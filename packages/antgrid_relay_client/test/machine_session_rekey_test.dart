@@ -72,11 +72,10 @@ void main() {
       final sub = control.messages.listen((m) => seen.add(m.json));
 
       // Seal under keys the session doesn't have yet (arbitrary keys) —
-      // MachineSession has no `_keys` installed, so `_onRouted` must drop
+      // MachineSession has no `_keys` installed, so `_onPeerFrame` must drop
       // this on the floor without even attempting a decrypt.
       relay.inject(
-        IncomingRouteMessage(
-          from: 'm1',
+        IncomingPeerFrame(
           channel: 'control',
           kind: FrameKind.sealed,
           payload: await _sealFromAgent(
@@ -342,8 +341,7 @@ void main() {
         // While the new handshake is still in flight, traffic sealed under
         // the OLD keys must still decrypt and dispatch.
         relay.inject(
-          IncomingRouteMessage(
-            from: 'm1',
+          IncomingPeerFrame(
             channel: 'control',
             kind: FrameKind.sealed,
             payload: await _sealFromAgent(
@@ -383,8 +381,7 @@ void main() {
         // no longer decrypt anything (they're zero bytes).
         seen.clear();
         relay.inject(
-          IncomingRouteMessage(
-            from: 'm1',
+          IncomingPeerFrame(
             channel: 'control',
             kind: FrameKind.sealed,
             payload: await _sealFromAgent(

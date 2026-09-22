@@ -718,17 +718,37 @@ class ControlPlaneClient {
   /// The only verb here that overrides the transport's 10s default: removing an
   /// isolated checkout is unbounded work on the bridge (see
   /// [kSessionDeleteAckTimeout]), so inheriting a fast-read default made every
-  /// slow-but-successful delete arrive as a timeout. The return type stays a
-  /// bool — a lapse still surfaces as `RpcException('E_TIMEOUT')`, and telling
-  /// an accepted delete from a failed one belongs where the transport's own
-  /// codes are already separated from the bridge's.
+  /// slow-but-successful delete arrive as a timeout. The compatibility return
+  /// type stays a bool; callers that reconcile uncertainty use
+  /// [deleteSessionWithOutcome].
   Future<bool> deleteSession(
     String projectId,
     String sessionId, {
     bool? force,
     bool? deleteBranch,
   }) async {
-    final res = await transport.request(
+    final result = await deleteSessionWithOutcome(
+      projectId,
+      sessionId,
+      force: force,
+      deleteBranch: deleteBranch,
+    );
+    if (result.outcome != RemoteCommandOutcome.confirmed) {
+      throw RemoteCommandOutcomeException(result.outcome);
+    }
+    return result.value;
+  }
+
+  /// Delete with an explicit local transport outcome. A bridge refusal still
+  /// raises [RpcException], because that is an application-confirmed answer;
+  /// only loss before/after dispatch is represented by the result enum.
+  Future<RemoteRequestResult<bool>> deleteSessionWithOutcome(
+    String projectId,
+    String sessionId, {
+    bool? force,
+    bool? deleteBranch,
+  }) async {
+    final result = await transport.requestWithOutcome(
       'sessions.delete',
       params: {
         'projectId': projectId,
@@ -738,7 +758,14 @@ class ControlPlaneClient {
       },
       timeout: kSessionDeleteAckTimeout,
     );
-    return res['deleted'] == true;
+    return switch (result.outcome) {
+      RemoteCommandOutcome.confirmed => RemoteRequestResult.confirmed(
+        result.value['deleted'] == true,
+      ),
+      RemoteCommandOutcome.notSent => const RemoteRequestResult.notSent(),
+      RemoteCommandOutcome.outcomeUnknown =>
+        const RemoteRequestResult.outcomeUnknown(),
+    };
   }
 
   /// Read the machine's Capability Card — its OS plus one repo entry per

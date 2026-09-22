@@ -156,8 +156,6 @@ Future<void> main(List<String> args) async {
         // Transport address only, and scoped per machine exactly as
         // `PeerRuntime` dials. The handshake below binds the bare `appId`, which
         // is what the E2E transcript and the host's identity lookup are keyed by.
-        localDeviceId: relaySlotId(appId, machineId),
-        peerDeviceId: machineId,
         authorized: () => true,
         ipAddresses: (config['addresses'] as List).cast<String>(),
       );

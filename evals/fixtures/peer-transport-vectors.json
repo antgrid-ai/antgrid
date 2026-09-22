@@ -1,0 +1,68 @@
+{
+  "comment": "Peer transport v3 cross-language pin. Regenerate: cd packages/antgrid-wire && bun run gen:peer-vectors",
+  "framing": {
+    "version": 3,
+    "fixedPrefixBytes": 4,
+    "maxHeaderBytes": 1024,
+    "maxPayloadBytes": 1500000,
+    "maxRecordBytes": 1501028,
+    "kinds": {
+      "sealed": 0,
+      "handshake": 1
+    },
+    "samples": [
+      {
+        "name": "sealed-control",
+        "header": {
+          "type": "message",
+          "channel": "control"
+        },
+        "kind": 0,
+        "payloadHex": "deadbeef",
+        "frameHex": "030000267b2274797065223a226d657373616765222c226368616e6e656c223a22636f6e74726f6c227ddeadbeef"
+      },
+      {
+        "name": "handshake-preview",
+        "header": {
+          "type": "message",
+          "channel": "preview"
+        },
+        "kind": 1,
+        "payloadHex": "000102ff",
+        "frameHex": "030100267b2274797065223a226d657373616765222c226368616e6e656c223a2270726576696577227d000102ff"
+      }
+    ]
+  },
+  "native": {
+    "alpn": "antgrid/peer/1",
+    "leaseMs": 60000,
+    "refreshMs": 20000,
+    "selectionMs": 5000,
+    "endpointChallengeMs": 120000
+  },
+  "fragmentation": {
+    "thresholdBytes": 1400000,
+    "dataBudgetBytes": 1400000,
+    "maxTransferBytes": 33554432,
+    "transferTimeoutMs": 10000,
+    "globalReassemblyBudgetBytes": 67108864,
+    "maxRerequests": 1,
+    "maxFragmentCount": 1024
+  },
+  "flowControl": {
+    "channelWindowBytes": 2097152,
+    "socketInflightBytes": 3145728,
+    "creditBatchBytes": 524288,
+    "maxSendQueueBytes": 67108864,
+    "sealOverheadBytes": 28,
+    "windowResyncAgeMs": 40000,
+    "windowStallWarnMs": 5000
+  },
+  "authorization": {
+    "identityMaxChars": 256,
+    "maxAuthorizedPeers": 1024,
+    "maxRelayUrls": 16,
+    "maxGeneration": "9223372036854775807",
+    "maxLeaseMs": 60000
+  }
+}

@@ -89,8 +89,7 @@ void main() {
 
   Future<void> injectControl(Map<String, dynamic> m, {String? stream}) async {
     relay.inject(
-      IncomingRouteMessage(
-        from: 'machine-1',
+      IncomingPeerFrame(
         channel: 'control',
         kind: FrameKind.sealed,
         payload: await _sealFromAgent(
@@ -227,7 +226,11 @@ void main() {
     await st.hydrate('probe', () async {
       hydrated++;
     });
-    expect(hydrated, 1, reason: 'hydrate runs once immediately when established');
+    expect(
+      hydrated,
+      1,
+      reason: 'hydrate runs once immediately when established',
+    );
 
     unawaited(st.refreshDurableState());
     await Future<void>.delayed(const Duration(milliseconds: 10));
@@ -238,8 +241,7 @@ void main() {
     expect(
       hydrated,
       1,
-      reason:
-          'a checkout retry must not fan a tree:full out to every checkout',
+      reason: 'a checkout retry must not fan a tree:full out to every checkout',
     );
 
     unawaited(st.refreshSnapshot());
@@ -314,7 +316,10 @@ void main() {
       await Future<void>.delayed(const Duration(milliseconds: 10));
       final sent = await snapshotRequests(stream: stream);
       // A bridge that predates `exclude` answers with the tree in it too.
-      await injectControl(reply(sent.single.id, [status, tree]), stream: stream);
+      await injectControl(
+        reply(sent.single.id, [status, tree]),
+        stream: stream,
+      );
       await Future<void>.delayed(const Duration(milliseconds: 10));
       expect(seen, ['agent:status', 'tree:full']);
 

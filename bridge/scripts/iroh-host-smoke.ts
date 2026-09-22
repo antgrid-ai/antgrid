@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { randomBytes, randomUUID } from "node:crypto";
 import { Endpoint, EndpointAddr, EndpointId } from "@number0/iroh/index.js";
-import { FrameKind, decodeRouteFrame, encodeRouteFrame } from "antgrid-wire";
+import { FrameKind, decodePeerFrame, encodePeerFrame } from "antgrid-wire";
 import { PeerRecords } from "../src/peer/records";
 import { generateEphemeralKeypair, deriveSharedSecret } from "../src/key-exchange";
 import { buildTranscript, deriveSessionKeys, E2eTransport, phoneConfirmTag, signTranscript } from "../src/e2e";
@@ -39,20 +39,20 @@ try {
   const attemptId = randomUUID();
   const transcript = { registrationId: machine.id, agentDeviceId: machine.id, phoneDeviceId: phone.id,
     phoneX25519Pub: ephemeral.publicKey, nonce };
-  await records.send(encodeRouteFrame({ type: "message", to: machine.id, channel: "control" }, Buffer.from(JSON.stringify({
+  await records.send(encodePeerFrame({ type: "message", channel: "control" }, Buffer.from(JSON.stringify({
     type: "handshake:client-hello", attemptId, pubkey: ephemeral.publicKey.toString("base64"), nonce: nonce.toString("base64"),
     sig: signTranscript(buildTranscript({ ...transcript, role: "phone", agentX25519Pub: Buffer.alloc(0) }), Buffer.from(phone.secret, "base64")),
   })), FrameKind.handshake));
-  const hello = JSON.parse(Buffer.from(decodeRouteFrame(await records.read()).payload).toString());
+  const hello = JSON.parse(Buffer.from(decodePeerFrame(await records.read()).payload).toString());
   assert.equal(hello.type, "handshake:agent-hello");
   const agentPub = Buffer.from(hello.pubkey, "base64");
   const keys = deriveSessionKeys(deriveSharedSecret(ephemeral.privateKey, agentPub),
     buildTranscript({ ...transcript, role: "agent", agentX25519Pub: agentPub }));
   const e2e = new E2eTransport({ sendKey: keys.p2a, recvKey: keys.a2p });
-  const send = (value: object) => records!.send(encodeRouteFrame({ type: "message", to: machine.id, channel: "control" }, e2e.seal(JSON.stringify(value)), FrameKind.sealed));
+  const send = (value: object) => records!.send(encodePeerFrame({ type: "message", channel: "control" }, e2e.seal(JSON.stringify(value)), FrameKind.sealed));
   const read = async (predicate: (value: any) => boolean): Promise<any> => {
     for (;;) {
-      const frame = decodeRouteFrame(await records!.read());
+      const frame = decodePeerFrame(await records!.read());
       const clear = e2e.open(Buffer.from(frame.payload));
       assert.notEqual(clear, null);
       const value = JSON.parse(clear!);

@@ -34,7 +34,7 @@ class _StubRelay extends RelayService implements PeerLink {
   AppState _cur = const AppState();
 
   @override
-  Stream<IncomingRouteMessage> get messageStream => const Stream.empty();
+  Stream<IncomingPeerFrame> get messageStream => const Stream.empty();
   @override
   Stream<AppState> get stateStream => _states.stream;
   @override
@@ -64,7 +64,6 @@ class _StubRelay extends RelayService implements PeerLink {
 
   @override
   Future<PeerSendOutcome> sendFrame(
-    String to,
     String channel,
     Uint8List payload, {
     FrameKind kind = FrameKind.sealed,

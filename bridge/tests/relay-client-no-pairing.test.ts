@@ -7,7 +7,7 @@
 // tear down a live E2E session if a stale or hostile relay sends one anyway.
 import { test, expect, afterEach } from "bun:test";
 import { generateKeyPairSync } from "node:crypto";
-import { encodeRouteFrame, FrameKind, ServerMessage } from "antgrid-wire";
+import { encodePeerFrame, FrameKind, ServerMessage } from "antgrid-wire";
 import { TestPeerSessionOwner } from "./test-peer-session-owner";
 import { generateEphemeralKeypair, deriveSharedSecret } from "../src/key-exchange";
 import {
@@ -56,8 +56,8 @@ function ed25519Pair(): { seedB64: string; pubB64: string } {
 }
 
 function injectFrame(client: TestPeerSessionOwner, kind: FrameKind, payload: Buffer): void {
-  const frame = encodeRouteFrame({ type: "message", from: PHONE_ID, channel: "control" }, payload, kind);
-  client.injectRouteFrame(Buffer.from(frame));
+  const frame = encodePeerFrame({ type: "message", channel: "control" }, payload, kind);
+  client.injectPeerFrame(Buffer.from(frame), PHONE_ID);
 }
 
 /** Drive a full acked handshake on a fresh `forTest` client, same shape as

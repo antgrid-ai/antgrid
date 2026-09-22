@@ -4,7 +4,7 @@ import { PushDeliverMessage, PushResultMessage } from "./push-protocol";
 // An AGENT's device id is its bare machine `deviceUuid` (no compound
 // `deviceUuid.projectId` registrations, though '.' remains a legal character).
 // An APP's is a per-machine relay slot, `<accountDeviceUuid>#<machineDeviceUuid>`
-// — see relay-slot.ts — so '#' is legal here and in a route header's `to`.
+// — see relay-slot.ts — so '#' is legal here.
 // 128 leaves room for two UUIDs and the separator.
 const DEVICE_ID = z.string().min(1).max(128).regex(/^[a-zA-Z0-9_.#-]+$/);
 
@@ -29,13 +29,6 @@ export const HelloMessage = z.object({
   nonce: z.string().min(20).max(64), // base64, ≥16 random bytes
   sig: z.string().min(1).max(256), // base64 Ed25519 over buildHelloSigBody
 });
-
-export const RouteHeader = z.object({
-  type: z.literal("message"),
-  to: DEVICE_ID,
-  channel: z.enum(["control", "preview"]),
-});
-
 
 // App-layer liveness probe: protocol-level WS pongs are unobservable from
 // browser-style client APIs, so clients probe here (see bridge watchdog).
@@ -116,26 +109,10 @@ export const ServerMessage = z.discriminatedUnion("type", [
   PeerPolicyChangedMessage,
 ]);
 
-// --- Sealed stream envelope (endpoint-internal) ---
-//
-// Wraps every sealed payload as `{ s?, m }` so one machine socket multiplexes
-// project streams. The relay NEVER sees this — it lives inside the ciphertext.
-// `m` is an AbMessage (bridge/src/protocol.ts), which antgrid-wire must not
-// depend on; only the field names are shared here.
-
-/** Sealed-payload stream envelope. `s` absent or "0" = machine control plane. */
-export interface StreamEnvelope {
-  s?: string;
-  m: unknown;
-}
-
-export const CONTROL_STREAM_ID = "0";
-
 // --- Type exports ---
 
 export type HelloMessage = z.infer<typeof HelloMessage>;
 export type PingMessage = z.infer<typeof PingMessage>;
-export type RouteHeader = z.infer<typeof RouteHeader>;
 export type ClientMessage = z.infer<typeof ClientMessage>;
 export type WelcomeMessage = z.infer<typeof WelcomeMessage>;
 export type ErrorMessage = z.infer<typeof ErrorMessage>;

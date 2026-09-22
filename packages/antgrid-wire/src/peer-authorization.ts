@@ -1,15 +1,20 @@
 import { z } from "zod";
-import { MAX_HEADER_LEN } from "./frame";
+import { FIXED_PREFIX, MAX_HEADER_LEN } from "./peer-frame";
 import { MAX_FRAME_PAYLOAD } from "./frag";
 
 export const PEER_ALPN = "antgrid/peer/1";
-export const PEER_MAX_RECORD_BYTES = MAX_FRAME_PAYLOAD + MAX_HEADER_LEN + 4;
+export const PEER_MAX_RECORD_BYTES =
+  MAX_FRAME_PAYLOAD + MAX_HEADER_LEN + FIXED_PREFIX;
 export const PEER_LEASE_MS = 60_000;
 export const PEER_REFRESH_MS = 20_000;
 export const PEER_SELECTION_MS = 5_000;
 export const ENDPOINT_CHALLENGE_MS = 120_000;
+export const PEER_IDENTITY_MAX_CHARS = 256;
+export const PEER_MAX_AUTHORIZED_PEERS = 1024;
+export const PEER_MAX_RELAY_URLS = 16;
+export const PEER_MAX_GENERATION = "9223372036854775807";
 export const DecimalGenerationSchema = z.string().regex(/^(0|[1-9][0-9]{0,18})$/)
-  .refine((value) => /^[0-9]{1,19}$/.test(value) && BigInt(value) <= 9223372036854775807n);
+  .refine((value) => /^[0-9]{1,19}$/.test(value) && BigInt(value) <= BigInt(PEER_MAX_GENERATION));
 export const EndpointIdSchema = z.string().regex(/^[0-9a-f]{64}$/);
 const PublicKeySchema = z.string().regex(/^[A-Za-z0-9+/]{43}=$/);
 const SignatureSchema = z.string().regex(/^[A-Za-z0-9+/]{86}==$/);
@@ -21,9 +26,9 @@ export const EndpointChallengeSchema = EndpointChallengeRequestSchema.extend({
   challengeId: z.string().uuid(),
   challenge: PublicKeySchema,
   // Transport account ownership is the device's userId, not its billing account.
-  accountId: z.string().min(1).max(256),
+  accountId: z.string().min(1).max(PEER_IDENTITY_MAX_CHARS),
   deviceId: z.string().uuid(),
-  enrollmentId: z.string().min(1).max(256),
+  enrollmentId: z.string().min(1).max(PEER_IDENTITY_MAX_CHARS),
 });
 export type EndpointChallenge = z.infer<typeof EndpointChallengeSchema>;
 export const EndpointRegistrationRequestSchema = z.strictObject({
@@ -66,12 +71,12 @@ const relayUrlsSchema = (allowInsecureRelay: boolean) => z.array(z.url().refine(
   const scheme = url.protocol === "https:" ||
     (allowInsecureRelay && url.protocol === "http:" && isLocalRelayHost(url.hostname));
   return scheme && !url.username && !url.password && !url.search && !url.hash && url.pathname === "/";
-})).max(16);
+})).max(PEER_MAX_RELAY_URLS);
 
 export const peerAuthorizationSnapshotSchema = (allowInsecureRelay: boolean) => z.strictObject({
-  accountId: z.string().min(1).max(256),
+  accountId: z.string().min(1).max(PEER_IDENTITY_MAX_CHARS),
   deviceId: z.string().uuid(),
-  enrollmentId: z.string().min(1).max(256),
+  enrollmentId: z.string().min(1).max(PEER_IDENTITY_MAX_CHARS),
   policyGeneration: DecimalGenerationSchema,
   registrationGeneration: DecimalGenerationSchema,
   allowed: z.boolean(),
@@ -81,7 +86,7 @@ export const peerAuthorizationSnapshotSchema = (allowInsecureRelay: boolean) => 
     deviceId: z.string().uuid(),
     ed25519Pub: PublicKeySchema,
     endpoint: EndpointRegistrationSchema.nullable(),
-  })).max(1024),
+  })).max(PEER_MAX_AUTHORIZED_PEERS),
   relayUrls: relayUrlsSchema(allowInsecureRelay),
 });
 export const PeerAuthorizationSnapshotSchema = peerAuthorizationSnapshotSchema(false);
@@ -100,9 +105,9 @@ export const PeerRelayAdmissionResponseSchema = z.discriminatedUnion("allowed", 
     allowed: z.literal(true),
     requestId: z.string().uuid(),
     endpointId: EndpointIdSchema,
-    userId: z.string().min(1).max(256),
+    userId: z.string().min(1).max(PEER_IDENTITY_MAX_CHARS),
     deviceId: z.string().uuid(),
-    enrollmentId: z.string().min(1).max(256),
+    enrollmentId: z.string().min(1).max(PEER_IDENTITY_MAX_CHARS),
     registrationGeneration: DecimalGenerationSchema,
     policyGeneration: DecimalGenerationSchema,
     leaseMs: z.number().int().positive().max(PEER_LEASE_MS),

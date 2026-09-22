@@ -11,7 +11,6 @@ import 'e2e/transcript.dart';
 import 'e2e/transport.dart';
 import 'frame.dart';
 import 'machine_session.dart';
-import 'models/relay_message.dart';
 import 'peer_link.dart';
 
 /// Severity for [HandshakeLogger]. Only two levels exist because only two
@@ -82,7 +81,7 @@ class ConnectionHandshake {
   final Duration _appReadyRetransmit;
 
   bool _cancelled = false;
-  StreamSubscription<IncomingRouteMessage>? _messageSub;
+  StreamSubscription<IncomingPeerFrame>? _messageSub;
   Timer? _appReadyTimer;
 
   void cancel() {
@@ -119,8 +118,7 @@ class ConnectionHandshake {
     var appReadySent = false;
 
     final sub = _relay.messageStream.listen((msg) async {
-      if (!active() || msg.channel != 'control' || msg.from != _machineDeviceId)
-        return;
+      if (!active() || msg.channel != 'control') return;
 
       if (msg.kind == FrameKind.handshake) {
         // Kind-1 plaintext: the only expected type here is agent-hello.
@@ -272,7 +270,6 @@ class ConnectionHandshake {
         'sig': clientHelloSig,
       };
       final outcome = await _relay.sendFrame(
-        _machineDeviceId,
         'control',
         Uint8List.fromList(utf8.encode(jsonEncode(clientHello))),
         kind: FrameKind.handshake,
@@ -338,7 +335,7 @@ class ConnectionHandshake {
           }),
         );
         if (!active()) return;
-        await _relay.sendFrame(_machineDeviceId, 'control', sealed);
+        await _relay.sendFrame('control', sealed);
       } catch (e) {
         _log(
           HandshakeLogLevel.error,

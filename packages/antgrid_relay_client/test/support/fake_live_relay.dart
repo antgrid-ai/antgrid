@@ -6,11 +6,10 @@ import 'dart:typed_data';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 
 class SentFrame {
-  final String to;
   final String channel;
   final Uint8List payload;
   final FrameKind kind;
-  SentFrame(this.to, this.channel, this.payload, this.kind);
+  SentFrame(this.channel, this.payload, this.kind);
 }
 
 class FakeLiveRelay implements PeerLink {
@@ -21,7 +20,7 @@ class FakeLiveRelay implements PeerLink {
            ? PeerLinkState.ready
            : PeerLinkState.connecting;
 
-  final _messages = StreamController<IncomingRouteMessage>.broadcast();
+  final _messages = StreamController<IncomingPeerFrame>.broadcast();
   final _states = StreamController<PeerLinkState>.broadcast();
   final _restarts = StreamController<void>.broadcast();
   final _errors = StreamController<PeerLinkFailure>.broadcast();
@@ -30,7 +29,7 @@ class FakeLiveRelay implements PeerLink {
   bool _wasOffline = false;
 
   @override
-  Stream<IncomingRouteMessage> get messageStream => _messages.stream;
+  Stream<IncomingPeerFrame> get messageStream => _messages.stream;
   @override
   Stream<PeerLinkState> get payloadStateStream => _states.stream;
   @override
@@ -46,16 +45,15 @@ class FakeLiveRelay implements PeerLink {
 
   @override
   Future<PeerSendOutcome> sendFrame(
-    String to,
     String channel,
     Uint8List payload, {
     FrameKind kind = FrameKind.sealed,
   }) async {
-    sent.add(SentFrame(to, channel, payload, kind));
+    sent.add(SentFrame(channel, payload, kind));
     return PeerSendOutcome.accepted;
   }
 
-  void inject(IncomingRouteMessage msg) => _messages.add(msg);
+  void inject(IncomingPeerFrame msg) => _messages.add(msg);
 
   void setState(AppState state) {
     _state = switch (state.connectionState) {

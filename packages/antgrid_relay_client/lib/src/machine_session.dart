@@ -10,7 +10,6 @@ import 'e2e/transport.dart';
 import 'flow.dart';
 import 'frag.dart';
 import 'frame.dart';
-import 'models/relay_message.dart';
 import 'models/stream_envelope.dart';
 import 'relay_service.dart';
 import 'peer_link.dart';
@@ -151,7 +150,7 @@ class MachineSession {
   SessionKeys? _keys;
   final Map<String, StreamTransport> _streams = {};
 
-  StreamSubscription<IncomingRouteMessage>? _msgSub;
+  StreamSubscription<IncomingPeerFrame>? _msgSub;
   StreamSubscription<PeerLinkState>? _stateSub;
   StreamSubscription<void>? _presenceSub;
   Timer? _fragSweep;
@@ -186,7 +185,7 @@ class MachineSession {
       StreamController<({String projectId, String streamId})>.broadcast();
 
   /// channel → the decrypt-and-dispatch chain currently draining for it. See
-  /// [_onRouted]; an entry lives only while that channel has work in flight.
+  /// [_onPeerFrame]; an entry lives only while that channel has work in flight.
   final Map<String, Future<void>> _inboundTails = {};
 
   /// Sealed bytes allowed in flight per channel and across the socket before
@@ -330,7 +329,7 @@ class MachineSession {
   /// having two components decide when to handshake is what the level-triggered
   /// supervisor replaced.
   void start() {
-    _msgSub = relay.messageStream.listen(_onRouted);
+    _msgSub = relay.messageStream.listen(_onPeerFrame);
     _stateSub = relay.payloadStateStream.listen(_onState);
     _presenceSub = relay.peerRestartStream.listen((_) => _onPeerRestart());
     _fragSweep = Timer.periodic(
@@ -610,7 +609,7 @@ class MachineSession {
         return null;
       }
       if (!relay.isDispatchAllowed) return null;
-      final outcome = await relay.sendFrame(machineDeviceId, f.channel, sealed);
+      final outcome = await relay.sendFrame(f.channel, sealed);
       if (outcome != PeerSendOutcome.accepted || !identical(keys, _keys)) {
         return null;
       }
@@ -971,7 +970,7 @@ class MachineSession {
 
   // --- inbound dispatch -----------------------------------------------------
 
-  void _onRouted(IncomingRouteMessage msg) {
+  void _onPeerFrame(IncomingPeerFrame msg) {
     if (_disposed || !relay.isDispatchAllowed) return;
     // Kind-1 (handshake) plaintext frames belong to the handshake driver, which
     // subscribes to the same messageStream and does its own dispatch.
@@ -1006,7 +1005,7 @@ class MachineSession {
   }
 
   Future<void> _decryptAndDispatch(
-    IncomingRouteMessage msg,
+    IncomingPeerFrame msg,
     SessionKeys keys,
     int epoch,
   ) async {
@@ -1489,7 +1488,7 @@ class MachineSession {
       return;
     }
     if (!relay.isDispatchAllowed) return;
-    final outcome = await relay.sendFrame(machineDeviceId, 'control', ct);
+    final outcome = await relay.sendFrame('control', ct);
     if (outcome != PeerSendOutcome.accepted || !identical(keys, _keys)) return;
     // Exempt from the GATE, never from the accounting: a relay drop report
     // names only a channel and a byte count, so a frame written without being

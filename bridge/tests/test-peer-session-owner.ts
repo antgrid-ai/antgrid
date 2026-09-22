@@ -1,4 +1,4 @@
-import { decodeRouteFrame, FrameKind } from "antgrid-wire";
+import { decodePeerFrame, FrameKind } from "antgrid-wire";
 import type { Channel } from "../src/message-bus";
 import type { RemoteHostConnection } from "../src/remote-host-connection";
 import type { NativeHostOptions } from "../src/peer/native-host-connection";
@@ -34,23 +34,21 @@ export class TestPeerSessionOwner extends PeerSessionOwner {
     this.writer = writer;
   }
 
-  injectRoutedFrame(
+  injectPeerPayload(
     payload: Uint8Array,
     from: string,
     channel: Channel = "control",
     kind: FrameKind = FrameKind.sealed,
   ): void {
-    this.receiveRoutedFrame(payload, from, channel, kind);
+    this.receivePeerFrame(payload, from, channel, kind);
   }
 
-  injectRouteFrame(frame: Uint8Array): void {
-    const decoded = decodeRouteFrame(frame);
-    const header = decoded.header as { type?: string; from?: string; channel?: string };
-    if (header.type !== "message" || !header.from || !header.channel) return;
-    this.receiveRoutedFrame(
+  injectPeerFrame(frame: Uint8Array, authenticatedPeerId: string): void {
+    const decoded = decodePeerFrame(frame);
+    this.receivePeerFrame(
       decoded.payload,
-      header.from,
-      header.channel === "preview" ? "preview" : "control",
+      authenticatedPeerId,
+      decoded.header.channel,
       decoded.kind,
     );
   }

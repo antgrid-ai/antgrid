@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { encodeRouteFrame, FrameKind } from "antgrid-wire";
+import { encodePeerFrame, FrameKind } from "antgrid-wire";
 import { Netwatch, netwatch, armRemoteIngest, __resetNetwatchForTest } from "../src/netwatch";
 import { TestPeerSessionOwner } from "./test-peer-session-owner";
 import type { AbMessage } from "../src/protocol";
@@ -108,12 +108,12 @@ function makeClient(open: () => string | null, onMessage?: (m: AbMessage) => voi
 function deliverControlPlane(client: TestPeerSessionOwner, m: unknown): void {
   const payload = Buffer.concat([Buffer.alloc(12, 0x7f), Buffer.from("sealed")]);
   (client as any).sessions.get("phone-1").transport.open = () => JSON.stringify({ m });
-  const frame = encodeRouteFrame(
-    { type: "message", from: "phone-1", channel: "control", ts: Date.now() },
+  const frame = encodePeerFrame(
+    { type: "message", channel: "control" },
     payload,
     FrameKind.sealed,
   );
-  client.injectRouteFrame(Buffer.from(frame));
+  client.injectPeerFrame(Buffer.from(frame), "phone-1");
 }
 
 describe("TestPeerSessionOwner netwatch:events ingest", () => {

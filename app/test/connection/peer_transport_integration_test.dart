@@ -20,7 +20,7 @@ class _Payload implements PeerLink {
   @override
   bool get isDispatchAllowed => !closed;
   @override
-  Stream<IncomingRouteMessage> get messageStream => const Stream.empty();
+  Stream<IncomingPeerFrame> get messageStream => const Stream.empty();
   @override
   Stream<PeerLinkState> get payloadStateStream => states.stream;
   @override
@@ -33,7 +33,6 @@ class _Payload implements PeerLink {
   PeerLinkDiagnostic? get netTap => null;
   @override
   Future<PeerSendOutcome> sendFrame(
-    String to,
     String channel,
     Uint8List payload, {
     FrameKind kind = FrameKind.sealed,

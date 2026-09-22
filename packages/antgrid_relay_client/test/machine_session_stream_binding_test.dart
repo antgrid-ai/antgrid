@@ -72,8 +72,7 @@ void main() {
 
   Future<void> injectControl(Map<String, dynamic> m) async {
     relay.inject(
-      IncomingRouteMessage(
-        from: 'machine-1',
+      IncomingPeerFrame(
         channel: 'control',
         kind: FrameKind.sealed,
         payload: await _sealFromAgent(keys, jsonEncode({'m': m})),
@@ -273,8 +272,7 @@ void main() {
 
       // Inbound: a frame on s-new reaches the migrated transport.
       relay.inject(
-        IncomingRouteMessage(
-          from: 'machine-1',
+        IncomingPeerFrame(
           channel: 'control',
           kind: FrameKind.sealed,
           payload: await _sealFromAgent(
@@ -563,8 +561,7 @@ void main() {
       await Future<void>.delayed(const Duration(milliseconds: 20));
 
       coldRelay.inject(
-        IncomingRouteMessage(
-          from: 'machine-3',
+        IncomingPeerFrame(
           channel: 'control',
           kind: FrameKind.sealed,
           payload: await _sealFromAgent(

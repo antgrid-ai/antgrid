@@ -70,6 +70,39 @@ abstract class BufferedAgentTransport implements AgentTransport {
     Map<String, dynamic>? params,
     Duration timeout = const Duration(seconds: 10),
     bool countsTowardHealth = true,
+  }) => _requestRaw(method, params: params, timeout: timeout);
+
+  @override
+  Future<RemoteRequestResult<Map<String, dynamic>>> requestWithOutcome(
+    String method, {
+    Map<String, dynamic>? params,
+    Duration timeout = const Duration(seconds: 10),
+    bool countsTowardHealth = true,
+  }) async {
+    final kind = classifyRemoteRequest(method);
+    if (kind == RemoteRequestKind.mutating && !isEstablished) {
+      return const RemoteRequestResult.notSent();
+    }
+    try {
+      final value = await _requestRaw(method, params: params, timeout: timeout);
+      return RemoteRequestResult.confirmed(value);
+    } on _ApplicationRpcException {
+      // A negative application response is still authoritative. Preserve the
+      // bridge's typed refusal for existing callers instead of turning it into
+      // a transport uncertainty.
+      rethrow;
+    } on RpcException {
+      if (kind == RemoteRequestKind.mutating) {
+        return const RemoteRequestResult.outcomeUnknown();
+      }
+      rethrow;
+    }
+  }
+
+  Future<Map<String, dynamic>> _requestRaw(
+    String method, {
+    Map<String, dynamic>? params,
+    required Duration timeout,
   }) {
     final requestId = 'r${_nextRequestId++}';
     final completer = Completer<Map<String, dynamic>>();
@@ -120,7 +153,7 @@ abstract class BufferedAgentTransport implements AgentTransport {
       } else {
         final err = (json['error'] as Map?)?.cast<String, dynamic>();
         completer.completeError(
-          RpcException(
+          _ApplicationRpcException(
             err?['code'] as String? ?? 'E_UNKNOWN',
             err?['message'] as String? ?? '',
           ),
@@ -243,4 +276,8 @@ abstract class BufferedAgentTransport implements AgentTransport {
     _currentState = state;
     stateController.add(state);
   }
+}
+
+class _ApplicationRpcException extends RpcException {
+  _ApplicationRpcException(super.code, super.message);
 }

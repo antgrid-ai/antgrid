@@ -5,7 +5,7 @@
 // `s` provably survives the wire.
 import { describe, test, expect, afterEach } from "bun:test";
 import { generateKeyPairSync } from "node:crypto";
-import { buildFragments, encodeRouteFrame, FrameKind } from "antgrid-wire";
+import { buildFragments, encodePeerFrame, FrameKind } from "antgrid-wire";
 import {
   StreamMux, CONTROL_STREAM_ID, INVALID_NOTICE_COOLDOWN_MS,
   type StreamMuxTransport, type PeerSessionView, type SendTarget,
@@ -401,8 +401,8 @@ function ed25519Pair(): { seedB64: string; pubB64: string } {
 }
 
 function injectFrame(client: TestPeerSessionOwner, kind: FrameKind, payload: Buffer, channel: Channel = "control"): void {
-  const frame = encodeRouteFrame({ type: "message", from: PHONE_ID, channel }, payload, kind);
-  client.injectRouteFrame(Buffer.from(frame));
+  const frame = encodePeerFrame({ type: "message", channel }, payload, kind);
+  client.injectPeerFrame(Buffer.from(frame), PHONE_ID);
 }
 
 let clients: TestPeerSessionOwner[] = [];

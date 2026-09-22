@@ -5,6 +5,12 @@ import 'dart:typed_data';
 
 import 'relay_origin.dart';
 
+const int peerIdentityMaxChars = 256;
+const int maxAuthorizedPeers = 1024;
+const int maxPeerRelayUrls = 16;
+const String maxPeerGeneration = '9223372036854775807';
+const int maxPeerLeaseMs = 60000;
+
 void _exact(Map<String, dynamic> json, List<String> keys) {
   if (json.length != keys.length || keys.any((key) => !json.containsKey(key))) {
     throw const FormatException('Unexpected authorization fields');
@@ -25,7 +31,7 @@ BigInt parseGeneration(Object? value) {
     throw const FormatException('Invalid generation');
   }
   final number = BigInt.parse(value);
-  if (number > BigInt.parse('9223372036854775807')) {
+  if (number > BigInt.parse(maxPeerGeneration)) {
     throw const FormatException('Generation out of range');
   }
   return number;
@@ -152,14 +158,14 @@ class AuthorizationSnapshot {
     ]);
     _uuid(deviceId);
     if (accountId.isEmpty ||
-        accountId.length > 256 ||
+        accountId.length > peerIdentityMaxChars ||
         enrollmentId.isEmpty ||
-        enrollmentId.length > 256)
+        enrollmentId.length > peerIdentityMaxChars)
       throw const FormatException('Invalid identity');
     if (leaseMs < 0 ||
-        leaseMs > 60000 ||
-        peers.length > 1024 ||
-        relayUrls.length > 16) {
+        leaseMs > maxPeerLeaseMs ||
+        peers.length > maxAuthorizedPeers ||
+        relayUrls.length > maxPeerRelayUrls) {
       throw const FormatException('Invalid authorization bounds');
     }
     for (final url in relayUrls) {
@@ -185,10 +191,8 @@ abstract interface class LeaseScheduleHandle {
   void cancel();
 }
 
-typedef LeaseScheduler = LeaseScheduleHandle Function(
-  Duration delay,
-  void Function() callback,
-);
+typedef LeaseScheduler =
+    LeaseScheduleHandle Function(Duration delay, void Function() callback);
 
 class _TimerScheduleHandle implements LeaseScheduleHandle {
   _TimerScheduleHandle(Duration delay, void Function() callback)

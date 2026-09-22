@@ -314,9 +314,9 @@ void main() {
     expect(deleter.attempts, isEmpty);
   });
 
-  // An unanswered delete is still running on the bridge, so the ladder reports
-  // nothing and leaves the row's own pending state as the only feedback.
-  testWidgets('an accepted delete is pending, reported by nothing', (
+  // An unanswered delete may have executed, so the ladder says exactly that
+  // and releases the row for a deliberate fresh user action.
+  testWidgets('an unresolved delete reports uncertainty and permits retry', (
     tester,
   ) async {
     final ctx = await _pumpHost(tester);
@@ -325,15 +325,17 @@ void main() {
       tester,
       ctx,
       checkoutKind: 'managed-worktree',
-      deleter: _Deleter([SessionDeleteAck.accepted]),
+      deleter: _Deleter([SessionDeleteAck.outcomeUnknown]),
       onInFlight: marks.add,
       drive: (t) async => _tap(t, 'Delete'),
     );
-    expect(result, SessionDeleteResult.pending);
-    expect(find.byType(SnackBar), findsNothing);
-    // Left armed on purpose: the Recent list's remote rows never receive the
-    // bridge's own flag, so this mark is their only pending signal.
-    expect(marks, [true]);
+    expect(result, SessionDeleteResult.outcomeUnknown);
+    expect(
+      find.text('Connection lost; execution could not be confirmed'),
+      findsOneWidget,
+    );
+    expect(marks, [true, false]);
+    await _dismissToast(tester);
   });
 
   testWidgets('the in-flight mark is released by every settled outcome', (

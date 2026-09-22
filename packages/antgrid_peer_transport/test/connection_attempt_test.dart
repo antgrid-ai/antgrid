@@ -11,7 +11,7 @@ class FakeLink implements PeerLink {
   @override
   PeerLinkDiagnostic? get netTap => null;
   @override
-  Stream<IncomingRouteMessage> get messageStream => const Stream.empty();
+  Stream<IncomingPeerFrame> get messageStream => const Stream.empty();
   @override
   Stream<PeerLinkState> get payloadStateStream => const Stream.empty();
   @override
@@ -22,7 +22,6 @@ class FakeLink implements PeerLink {
   Stream<void> get peerRestartStream => const Stream.empty();
   @override
   Future<PeerSendOutcome> sendFrame(
-    String to,
     String channel,
     Uint8List payload, {
     FrameKind kind = FrameKind.sealed,

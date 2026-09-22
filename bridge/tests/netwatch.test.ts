@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
-import { encodeRouteFrame, FrameKind } from "antgrid-wire";
+import { encodePeerFrame, FrameKind } from "antgrid-wire";
 import { Netwatch, netwatch, frameIdFor, __resetNetwatchForTest, type NetwatchEvent } from "../src/netwatch";
 import { ControlListener } from "../src/control-listener";
 import { TestPeerSessionOwner } from "./test-peer-session-owner";
@@ -139,12 +139,12 @@ describe("TestPeerSessionOwner netwatch taps", () => {
     client = makeClient({ open: () => envelope });
 
     const payload = Buffer.concat([Buffer.alloc(12, 0x7f), Buffer.from("sealed-bytes")]);
-    const frame = encodeRouteFrame(
-      { type: "message", from: "phone-1", channel: "control", ts: Date.now() },
+    const frame = encodePeerFrame(
+      { type: "message", channel: "control" },
       payload,
       FrameKind.sealed,
     );
-    client.injectRouteFrame(Buffer.from(frame));
+    client.injectPeerFrame(Buffer.from(frame), "phone-1");
 
     const rx = events().filter((e) => e.dir === "rx" && e.kind === "sealed");
     expect(rx).toHaveLength(1);
@@ -156,12 +156,12 @@ describe("TestPeerSessionOwner netwatch taps", () => {
   it("records a frame that arrived but would not decrypt", () => {
     client = makeClient({ open: () => null });
     const payload = Buffer.concat([Buffer.alloc(12, 0x01), Buffer.from("garbage")]);
-    const frame = encodeRouteFrame(
-      { type: "message", from: "phone-1", channel: "control", ts: Date.now() },
+    const frame = encodePeerFrame(
+      { type: "message", channel: "control" },
       payload,
       FrameKind.sealed,
     );
-    client.injectRouteFrame(Buffer.from(frame));
+    client.injectPeerFrame(Buffer.from(frame), "phone-1");
 
     const drops = events().filter((e) => e.kind === "drop");
     expect(drops).toHaveLength(1);

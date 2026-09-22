@@ -4,7 +4,7 @@ import type { Connection } from "@number0/iroh";
 import { NativeHostConnection, evalIrohBindAddress } from "../src/peer/native-host-connection";
 import { generateEphemeralKeypair } from "../src/key-exchange";
 import vector from "../../evals/fixtures/endpoint-registration-vectors.json";
-import { FrameKind, encodeRouteFrame } from "antgrid-wire";
+import { FrameKind, encodePeerFrame } from "antgrid-wire";
 import { MessageBus } from "../src/message-bus";
 import type { PendingSinkWrite, QueuedAppFrame } from "../src/send-scheduler";
 
@@ -121,8 +121,8 @@ test("native write diagnostics await acceptance and separate payload from record
     expect(tx).toHaveLength(1);
     expect(tx[0].transport).toBe("iroh");
     expect(tx[0].bytes).toBe(payload.length);
-    const route = encodeRouteFrame({ type: "message", to: slot, channel: "control" }, payload, FrameKind.handshake);
-    expect(tx[0].detail).toEqual({ routeBytes: route.length, recordBytes: route.length + 4, lengthPrefixBytes: 4 });
+    const peerFrame = encodePeerFrame({ type: "message", channel: "control" }, payload, FrameKind.handshake);
+    expect(tx[0].detail).toEqual({ peerFrameBytes: peerFrame.length, recordBytes: peerFrame.length + 4, lengthPrefixBytes: 4 });
     expect(JSON.stringify(events)).not.toContain("private-test-payload");
     const scheduled = access.sendNativeScheduled(Buffer.alloc(48, 7), slot, {
       channel: "control", streamId: "project-stream", type: "file:content", plaintext: "private-file",

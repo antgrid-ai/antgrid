@@ -172,7 +172,7 @@ export abstract class PeerSessionOwner {
     try { netwatch.record(event); } catch { /* Observers cannot break admission or delivery. */ }
   }
 
-  protected receiveRoutedFrame(payload: Uint8Array, from: string, channel: Channel, kind: FrameKind): void {
+  protected receivePeerFrame(payload: Uint8Array, from: string, channel: Channel, kind: FrameKind): void {
     const frameId = frameIdFor(payload, kind === FrameKind.sealed);
     if (kind === FrameKind.handshake) {
       this.handleHandshakeFrame(payload, from, frameId, payload.length);

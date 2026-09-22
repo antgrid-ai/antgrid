@@ -8,6 +8,7 @@
     ".": "./src/index.ts"
   },
   "scripts": {
+    "gen:peer-vectors": "bun run scripts/gen-peer-transport-vectors.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit"
   },

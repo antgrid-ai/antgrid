@@ -4,7 +4,7 @@
 // here is the count that goes on the wire.
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { generateKeyPairSync, randomBytes } from "node:crypto";
-import { encodeRouteFrame, FrameKind, WINDOW_RESYNC_AGE_MS } from "antgrid-wire";
+import { encodePeerFrame, FrameKind, WINDOW_RESYNC_AGE_MS } from "antgrid-wire";
 import { TestPeerSessionOwner } from "./test-peer-session-owner";
 import { createMessage } from "../src/protocol";
 import { generateEphemeralKeypair, deriveSharedSecret } from "../src/key-exchange";
@@ -54,8 +54,8 @@ function injectFrame(
   channel: "control" | "preview" = "control",
   from: string = PHONE_ID,
 ): void {
-  const frame = encodeRouteFrame({ type: "message", from, channel }, payload, kind);
-  client.injectRouteFrame(Buffer.from(frame));
+  const frame = encodePeerFrame({ type: "message", channel }, payload, kind);
+  client.injectPeerFrame(Buffer.from(frame), from);
 }
 
 /** Seal one plaintext as the phone and feed it in. Returns the sealed length â€”

@@ -9,7 +9,8 @@ import 'relay_origin.dart';
 import 'connection_attempt.dart';
 
 const peerAlpn = 'antgrid/peer/1';
-const maxPeerRecordBytes = kMaxFramePayload + 1028;
+const maxPeerRecordBytes =
+    kMaxFramePayload + maxPeerFrameHeaderBytes + peerFrameFixedPrefix;
 
 /// Enrollment-scoped storage implemented by the platform secure credential store.
 abstract interface class EndpointKeyStore {
@@ -56,8 +57,6 @@ class NativeEndpointOwner {
 
   Future<IrohPeerLink> dial({
     required String endpointId,
-    required String localDeviceId,
-    required String peerDeviceId,
     required bool Function() authorized,
     List<String> ipAddresses = const [],
     PeerLinkDiagnostic? diagnostic,
@@ -105,15 +104,8 @@ class NativeEndpointOwner {
         transport: 'iroh',
         elapsedMs: timer.elapsedMilliseconds,
       );
-      return IrohPeerLink._(
-        connection,
-        send,
-        recv,
-        localDeviceId,
-        peerDeviceId,
-        authorized,
-        diagnostic,
-      ).._start();
+      return IrohPeerLink._(connection, send, recv, authorized, diagnostic)
+        .._start();
     } catch (_) {
       connection.close(errorCode: 1);
       rethrow;
@@ -128,21 +120,16 @@ class IrohPeerLink implements PeerLink {
     this._connection,
     this._send,
     this._recv,
-    this.localDeviceId,
-    this.peerDeviceId,
     this._authorized,
     this.netTap,
   );
   final iroh.Connection _connection;
   final iroh.SendStream _send;
   final iroh.RecvStream _recv;
-  final String localDeviceId, peerDeviceId;
   final bool Function() _authorized;
   @override
   final PeerLinkDiagnostic? netTap;
-  final _messages = StreamController<IncomingRouteMessage>.broadcast(
-    sync: true,
-  );
+  final _messages = StreamController<IncomingPeerFrame>.broadcast(sync: true);
   final _states = StreamController<PeerLinkState>.broadcast(sync: true);
   final _failures = StreamController<PeerLinkFailure>.broadcast(sync: true);
   bool _closed = false;
@@ -152,7 +139,7 @@ class IrohPeerLink implements PeerLink {
   @override
   bool get isDispatchAllowed => !_closed && _authorized();
   @override
-  Stream<IncomingRouteMessage> get messageStream => _messages.stream;
+  Stream<IncomingPeerFrame> get messageStream => _messages.stream;
   @override
   Stream<PeerLinkState> get payloadStateStream => _states.stream;
   @override
@@ -202,17 +189,15 @@ class IrohPeerLink implements PeerLink {
           await close();
           return;
         }
-        final frame = decodeRouteFrame(bytes);
+        final frame = decodePeerFrame(bytes);
         if (frame.payload.length > kMaxFramePayload ||
             frame.header['type'] != 'message' ||
-            frame.header['to'] != localDeviceId ||
             !['control', 'preview'].contains(frame.header['channel'])) {
-          _fail('INVALID_ROUTE', false);
+          _fail('INVALID_PEER_FRAME', false);
           return;
         }
         _messages.add(
-          IncomingRouteMessage(
-            from: peerDeviceId,
+          IncomingPeerFrame(
             channel: frame.header['channel'] as String,
             payload: frame.payload,
             kind: frame.kind,
@@ -228,20 +213,19 @@ class IrohPeerLink implements PeerLink {
 
   @override
   Future<PeerSendOutcome> sendFrame(
-    String to,
     String channel,
     Uint8List payload, {
     FrameKind kind = FrameKind.sealed,
   }) {
     if (!isDispatchAllowed) return Future.value(PeerSendOutcome.closed);
-    if (to != peerDeviceId || !['control', 'preview'].contains(channel)) {
-      _fail('INVALID_ROUTE', false);
+    if (!['control', 'preview'].contains(channel)) {
+      _fail('INVALID_PEER_FRAME', false);
       return Future.value(PeerSendOutcome.failed);
     }
     if (payload.length > kMaxFramePayload)
       return Future.value(PeerSendOutcome.tooLarge);
-    final frame = encodeRouteFrame(
-      {'type': 'message', 'to': to, 'channel': channel},
+    final frame = encodePeerFrame(
+      {'type': 'message', 'channel': channel},
       payload,
       kind,
     );

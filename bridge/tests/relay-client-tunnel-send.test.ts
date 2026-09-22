@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { generateKeyPairSync } from "node:crypto";
-import { encodeRouteFrame, FrameKind } from "antgrid-wire";
+import { encodePeerFrame, FrameKind } from "antgrid-wire";
 import { TestPeerSessionOwner } from "./test-peer-session-owner";
 import { generateEphemeralKeypair, deriveSharedSecret } from "../src/key-exchange";
 import { buildTranscript, deriveSessionKeys, phoneConfirmTag, E2eTransport, signTranscript } from "../src/e2e";
@@ -17,8 +17,8 @@ function ed25519Pair(): { seedB64: string; pubB64: string } {
 }
 
 function injectFrame(client: TestPeerSessionOwner, kind: FrameKind, payload: Buffer, channel: "control" | "preview" = "control"): void {
-  const frame = encodeRouteFrame({ type: "message", from: PHONE_ID, channel }, payload, kind);
-  client.injectRouteFrame(Buffer.from(frame));
+  const frame = encodePeerFrame({ type: "message", channel }, payload, kind);
+  client.injectPeerFrame(Buffer.from(frame), PHONE_ID);
 }
 
 /** Establish a real E2E session on a forTest client. */

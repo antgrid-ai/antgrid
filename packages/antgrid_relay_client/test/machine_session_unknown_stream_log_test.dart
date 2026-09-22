@@ -74,8 +74,7 @@ void main() {
 
     Future<void> inject(Uint8List payload) async {
       relay.inject(
-        IncomingRouteMessage(
-          from: 'machine-1',
+        IncomingPeerFrame(
           channel: 'control',
           kind: FrameKind.sealed,
           payload: payload,
@@ -96,28 +95,31 @@ void main() {
       expect(w['sessionEpoch'], 1);
     });
 
-    test('a reassembled message names the fragment that completed it', () async {
-      final frames = buildFragments(
-        jsonEncode(_ghostEnvelope),
-        'ghost-1',
-        null,
-        24,
-      );
-      expect(frames.length, greaterThan(1));
-      final sealed = [for (final f in frames) await _sealFromAgent(keys, f)];
+    test(
+      'a reassembled message names the fragment that completed it',
+      () async {
+        final frames = buildFragments(
+          jsonEncode(_ghostEnvelope),
+          'ghost-1',
+          null,
+          24,
+        );
+        expect(frames.length, greaterThan(1));
+        final sealed = [for (final f in frames) await _sealFromAgent(keys, f)];
 
-      // Out of index order so the completing fragment is not also the first:
-      // the two would be indistinguishable if it were.
-      await inject(sealed[1]);
-      for (var i = 2; i < sealed.length; i++) {
-        await inject(sealed[i]);
-      }
-      await inject(sealed[0]);
+        // Out of index order so the completing fragment is not also the first:
+        // the two would be indistinguishable if it were.
+        await inject(sealed[1]);
+        for (var i = 2; i < sealed.length; i++) {
+          await inject(sealed[i]);
+        }
+        await inject(sealed[0]);
 
-      final w = warns.single!;
-      expect(w['frameId'], frameIdOf(sealed[0], FrameKind.sealed));
-      expect(w['openedUnder'], 1);
-    });
+        final w = warns.single!;
+        expect(w['frameId'], frameIdOf(sealed[0], FrameKind.sealed));
+        expect(w['openedUnder'], 1);
+      },
+    );
 
     test('answers the agent with stream-unbound, once per id per window', () async {
       // The log records that we are losing frames; this is what asks the agent
@@ -169,8 +171,7 @@ void main() {
 
     Future<void> ghost(SessionKeys k) async {
       relay.inject(
-        IncomingRouteMessage(
-          from: 'm1',
+        IncomingPeerFrame(
           channel: 'control',
           kind: FrameKind.sealed,
           payload: await _sealFromAgent(k, jsonEncode(_ghostEnvelope)),
