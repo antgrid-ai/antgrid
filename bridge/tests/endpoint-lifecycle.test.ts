@@ -3,6 +3,13 @@ import { EndpointFailure, EndpointLifecycle } from "../src/peer/endpoint-lifecyc
 const flush = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
 function fixture() {
   const callbacks: (() => void)[] = [], delays: number[] = [], retired: number[] = [];
+  const events: Array<{ state: string; reason?: string; detail?: {
+    attemptGeneration: number;
+    retryReason?: string;
+    retryDelayMs?: number;
+    teardownReason?: string;
+    teardownOutcome?: string;
+  } }> = [];
   const listeners = new Map<number, ReturnType<typeof Promise.withResolvers<void>>>();
   let count = 0, now = 0, fail = false;
   const owner = new EndpointLifecycle<number>({
@@ -10,20 +17,35 @@ function fixture() {
     listen: async (id) => { const p = Promise.withResolvers<void>(); listeners.set(id, p); return p.promise; },
     retire: async (id) => { retired.push(id); listeners.get(id)?.resolve(); },
     terminal: (e) => e instanceof EndpointFailure && e.terminal,
+    changed: (state, reason, detail) => { events.push({ state, reason, detail }); },
     now: () => now, random: () => 0,
     schedule: (fn, ms) => { callbacks.push(fn); delays.push(ms); return () => { const i = callbacks.indexOf(fn); if (i >= 0) callbacks.splice(i, 1); }; },
   });
-  return { owner, callbacks, delays, retired, listeners, count: () => count, fail: (v: boolean) => fail = v, time: (v: number) => now = v };
+  return { owner, callbacks, delays, retired, listeners, events,
+    count: () => count, fail: (v: boolean) => fail = v, time: (v: number) => now = v };
 }
 test("transient startup recovers, healthy listeners reset backoff, stop cancels retry", async () => {
   const f = fixture(); f.fail(true); f.owner.start(); await flush();
   expect(f.owner.state).toBe("backoff"); expect(f.delays).toEqual([500]);
+  expect(f.events.find((event) => event.state === "backoff")).toEqual({
+    state: "backoff",
+    reason: "ENDPOINT_UNAVAILABLE",
+    detail: {
+      attemptGeneration: 1,
+      retryReason: "ENDPOINT_UNAVAILABLE",
+      retryDelayMs: 500,
+    },
+  });
   f.fail(false); f.callbacks.shift()!(); await flush(); expect(f.owner.state).toBe("ready");
   f.listeners.get(1)!.reject(new Error("listener failed")); await flush();
   expect(f.retired).toEqual([1]); expect(f.delays).toEqual([500, 1000]);
   f.callbacks.shift()!(); await flush(); f.time(31_000); f.listeners.get(2)!.resolve(); await flush();
   expect(f.delays).toEqual([500, 1000, 500]);
-  f.owner.stop(); expect(f.callbacks).toHaveLength(0); expect(f.owner.state).toBe("stopped");
+  await f.owner.stop(); expect(f.callbacks).toHaveLength(0); expect(f.owner.state).toBe("stopped");
+  expect(f.events.at(-1)?.detail).toMatchObject({
+    teardownReason: "lifecycle-stop",
+    teardownOutcome: "complete",
+  });
 });
 test("stop fences late creation without starting a listener", async () => {
   const pending = Promise.withResolvers<number>(); let closed = 0, listening = 0;

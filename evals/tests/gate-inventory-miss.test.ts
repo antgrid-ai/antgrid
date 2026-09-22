@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { setupTestEnv, handshakeWithoutPairing } from "../helpers/harness";
+import { establishNativeSession, setupTestEnv } from "../helpers/harness";
 import { RelayClient } from "../helpers/relay-client";
 import { createMessage } from "../../bridge/src/protocol";
 
@@ -29,7 +29,7 @@ async function assertSnapshot(app: RelayClient, label: string): Promise<void> {
  * fetch — so this is a genuinely late addition, unlike the up-front seeding
  * `setupTestEnv` does for `env.appIdentity`. See its doc comment.
  *
- * This drives the retry itself via `handshakeWithoutPairing` (SAME socket,
+ * This drives the retry itself via `establishNativeSession` (same carrier,
  * resending `client-hello` — the bridge drops an unknown identity's first
  * hello silently rather than answering with anything the phone could
  * distinguish from "not yet", so a bare single-shot handshake attempt here
@@ -39,7 +39,7 @@ async function assertSnapshot(app: RelayClient, label: string): Promise<void> {
  *
  * What makes this go red without the fix: if the bridge only ever consulted
  * its STARTUP-time inventory snapshot (no `noteMiss()`/refresh), every
- * resend would keep missing and `handshakeWithoutPairing` would exhaust its
+ * resend would keep missing and `establishNativeSession` would exhaust its
  * retry budget and throw — a real, catchable failure, not a vacuous pass.
  */
 test("a phone added to the account after agent start is admitted without ceremony", async () => {
@@ -48,16 +48,15 @@ test("a phone added to the account after agent start is admitted without ceremon
   try {
     const late = await env.license.addAccountDevice({ kind: "app" });
 
-    phone = await RelayClient.connectAndAuth(env.relay.url, {
-      deviceType: "app",
+    phone = await env.connectNativeApp({
       name: "gate-inventory-miss-app",
-      deviceId: late.deviceId,
       identity: late,
+      accountDeviceId: late.deviceId,
     });
     // Bounded well under this test's 60s timeout (15 * (2000+300) ~= 34.5s
     // worst case) so a genuine admission failure surfaces as this function's
     // own thrown assertion, not an opaque Bun test-timeout.
-    await handshakeWithoutPairing(phone, env.agentDeviceId, env.agent.ed25519Pubkey, { attempts: 15 });
+    await establishNativeSession(phone, env.agentDeviceId, env.agent.ed25519Pubkey, { attempts: 15 });
 
     await assertSnapshot(phone, "baseline");
   } finally {

@@ -40,6 +40,10 @@ export class AuthorizationLease {
     return this.snapshot;
   }
 
+  get remainingMs(): number {
+    return this.snapshot ? Math.max(0, this.deadline - this.now()) : 0;
+  }
+
   allows(deviceId: string, endpointId?: string): boolean {
     return this.current?.peers.some((peer) => peer.deviceId === deviceId &&
       (endpointId === undefined || peer.endpoint?.endpointId === endpointId)) ?? false;

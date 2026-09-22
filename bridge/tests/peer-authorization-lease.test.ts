@@ -74,6 +74,7 @@ test("accepted leases schedule jittered one-third refresh and their original exp
     () => now, () => 0.5, clock.schedule);
 
   expect(await lease.refresh()).toBe(true);
+  expect(lease.remainingMs).toBe(60_000);
   expect(clock.jobs.filter((job) => job.active).map((job) => job.ms).sort((a, b) => a - b))
     .toEqual([20_000, 60_000]);
   now = 60_000;
@@ -99,6 +100,7 @@ test("transient refresh failure retains access only to the original deadline", a
 
   now = 60_000;
   expect(lease.allows(peerId)).toBe(false);
+  expect(lease.remainingMs).toBe(0);
   expect(invalidated).toEqual(["expired"]);
 });
 

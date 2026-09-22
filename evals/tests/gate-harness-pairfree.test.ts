@@ -29,9 +29,12 @@ test("ordinary eval harness establishes an account-authorized native session", a
 test("central socket loss does not interrupt a healthy native payload session", async () => {
   const env = await setupTestEnv({ fixtureName: "basic" });
   try {
+    const before = env.app.lifecycleGenerations;
     env.app.dropSocket();
     expect(await env.app.waitForClose(2_000)).toBe(true);
     await snapshotRoundTrip(env, "central-offline");
+    expect(env.app.lifecycleGenerations.native).toBe(before.native);
+    expect(env.app.lifecycleGenerations.e2e).toBe(before.e2e);
   } finally {
     await env.teardown();
   }

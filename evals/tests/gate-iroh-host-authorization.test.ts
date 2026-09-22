@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Endpoint, EndpointAddr } from "@number0/iroh/index.js";
-import { FrameKind, decodeRouteFrame, encodeRouteFrame } from "antgrid-wire";
+import { FrameKind, decodePeerFrame, encodePeerFrame } from "antgrid-wire";
 import { HostServer } from "../../bridge/src/host-server";
 import { PeerRecords } from "../../bridge/src/peer/records";
 import { computeProjectId } from "../../bridge/src/project-id";
@@ -109,11 +109,11 @@ test("real backend enrollment authorizes native host projects and revocation clo
       const attemptId = randomUUID();
       const transcript = { registrationId: machine.id, agentDeviceId: machine.id, phoneDeviceId: phone.id,
         phoneX25519Pub: ephemeral.publicKey, nonce };
-      await records.send(encodeRouteFrame({ type: "message", to: machine.id, channel: "control" }, Buffer.from(JSON.stringify({
+      await records.send(encodePeerFrame({ type: "message", channel: "control" }, Buffer.from(JSON.stringify({
         type: "handshake:client-hello", attemptId, pubkey: ephemeral.publicKey.toString("base64"), nonce: nonce.toString("base64"),
         sig: signTranscript(buildTranscript({ ...transcript, role: "phone", agentX25519Pub: Buffer.alloc(0) }), Buffer.from(phone.secret, "base64")),
       })), FrameKind.handshake));
-      const hello = JSON.parse(Buffer.from(decodeRouteFrame(await records.read()).payload).toString());
+      const hello = JSON.parse(Buffer.from(decodePeerFrame(await records.read()).payload).toString());
       assert.equal(hello.type, "handshake:agent-hello");
       assert.equal(hello.attemptId, attemptId);
       const agentPub = Buffer.from(hello.pubkey, "base64");
@@ -122,10 +122,10 @@ test("real backend enrollment authorizes native host projects and revocation clo
       const keys = deriveSessionKeys(deriveSharedSecret(ephemeral.privateKey, agentPub),
         buildTranscript({ ...transcript, role: "agent", agentX25519Pub: agentPub }));
       const e2e = new E2eTransport({ sendKey: keys.p2a, recvKey: keys.a2p });
-      const send = (value: object) => records!.send(encodeRouteFrame({ type: "message", to: machine.id, channel: "control" }, e2e.seal(JSON.stringify(value)), FrameKind.sealed));
+      const send = (value: object) => records!.send(encodePeerFrame({ type: "message", channel: "control" }, e2e.seal(JSON.stringify(value)), FrameKind.sealed));
       const read = async (predicate: (value: any) => boolean): Promise<any> => {
         for (;;) {
-          const frame = decodeRouteFrame(await records!.read());
+          const frame = decodePeerFrame(await records!.read());
           const clear = e2e.open(Buffer.from(frame.payload));
           assert.notEqual(clear, null);
           const value = JSON.parse(clear!);

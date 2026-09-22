@@ -117,7 +117,7 @@ reporting policy if you find something wrong with them.
 | **Web** | `web/` | TypeScript / Bun + Hono + Postgres | Accounts and sign-in, subscriptions, OAuth device flow, Ed25519 JWT minting for the relay's gate. |
 
 Shared code lives in `packages/`: `antgrid_relay_client` (pure Dart central-control,
-E2E and session protocol over native peer links), `antgrid-wire` (the TypeScript native route-frame codec and central control-envelope schemas),
+E2E and session protocol over native peer links), `antgrid-wire` (the TypeScript native peer-frame codec and central control-envelope schemas),
 and `antgrid_eval_client` (end-to-end test fixtures).
 
 Message flow, the shared-package breakdown and the `antgrid.yaml` schema:

@@ -16,8 +16,8 @@ import {
 import { sign as nodeSign } from "node:crypto";
 import { createMessage, parseMessage, type AbMessage } from "../../bridge/src/protocol";
 import {
-  encodeRouteFrame,
-  decodeRouteFrame,
+  encodePeerFrame,
+  decodePeerFrame,
   FrameKind,
   CONTROL_STREAM_ID,
   PEER_ALPN,
@@ -85,6 +85,13 @@ export interface TunnelHttpResult {
   chunks: number;
 }
 
+export class NativeAuthorizationNotReadyError extends Error {
+  constructor(readonly machineDeviceId: string, cause: unknown) {
+    super(`Native authorization for ${machineDeviceId} is not ready: ${String(cause)}`);
+    this.name = "NativeAuthorizationNotReadyError";
+  }
+}
+
 /** Undo one body slice's encoding. Each gzip slice is an independent member, so
  *  nothing carries over between slices. */
 function decodeTunnelSlice(frame: { data?: unknown; bodyEncoding?: unknown }): Buffer {
@@ -106,7 +113,9 @@ export class RelayClient {
   private nativeConnection: Connection | null = null;
   private nativeRecords: PeerRecords | null = null;
   private nativeTarget: { endpointId: string; addresses: string[] } | null = null;
+  private nativePeerId: string | null = null;
   private nativeGeneration = 0;
+  private e2eGeneration = 0;
   private ws: WebSocket | null = null;
   private messageQueue: any[] = [];
   private waiters: Array<{
@@ -311,7 +320,6 @@ export class RelayClient {
 
       ws.addEventListener("message", (event) => {
         if (event.data instanceof ArrayBuffer || event.data instanceof Uint8Array) {
-          if (authDone) this.handleBinaryFrame(event.data);
           return;
         }
         const data = JSON.parse(typeof event.data === "string" ? event.data : String(event.data));
@@ -395,7 +403,7 @@ export class RelayClient {
   }
 
   /** Enroll this app endpoint and dial the machine over a real Iroh connection.
-   *  The central socket remains control-only; all route frames use this link. */
+   *  The central socket remains control-only; all peer frames use this link. */
   async connectNative(options: {
     licenseApiUrl: string;
     accountId: string;
@@ -436,6 +444,7 @@ export class RelayClient {
       this.nativeEndpoint = await builder.bind();
       this.nativeTarget = { endpointId: target.endpointId, addresses: options.addresses };
       await this.dialNative();
+      this.nativePeerId = options.machineDeviceId;
     } finally {
       enrollment.close();
     }
@@ -513,11 +522,11 @@ export class RelayClient {
     const buf = Buffer.from(data as Uint8Array);
     let decoded: { header: unknown; payload: Uint8Array; kind: FrameKind };
     try {
-      decoded = decodeRouteFrame(buf);
+      decoded = decodePeerFrame(buf);
     } catch {
       return; // malformed frame — drop
     }
-    const header = decoded.header as { type?: string; from?: string; channel?: string };
+    const header = decoded.header as { type?: string; channel?: string };
     if (header.type !== "message") return;
     const channel = header.channel === "preview" ? "preview" : "control";
 
@@ -572,7 +581,7 @@ export class RelayClient {
    *  the next one carries the whole total. */
   private sendCredit(channel: "control" | "preview"): void {
     const ctx = this.established;
-    if (!ctx || !this._pairedPeerId || this.creditsPaused) return;
+    if (!ctx || !this.nativePeerId || this.creditsPaused) return;
     this.rxCredited[channel] = this.rxConsumed[channel];
     this.sendSealedFrame({ type: "credit", channel, consumed: this.rxConsumed[channel] }, ctx.transport, "control");
   }
@@ -772,6 +781,12 @@ export class RelayClient {
       omitTerminalFramesV1?: boolean;
     } = {},
   ): Promise<void> {
+    if (!this.nativePeerId) throw new Error("Native peer is not connected");
+    if (agentDeviceId !== this.nativePeerId) {
+      throw new Error(
+        `Handshake peer ${agentDeviceId} does not match authenticated native peer ${this.nativePeerId}`,
+      );
+    }
     this.e2eMode = true;
 
     // Reset partial state from a prior failed attempt. A CONFIRMED live session
@@ -805,7 +820,7 @@ export class RelayClient {
     }
 
     // Step 3: kind-1 client-hello.
-    this.sendHandshakePlaintext(agentDeviceId, {
+    this.sendHandshakePlaintext({
       type: "handshake:client-hello",
       attemptId,
       pubkey: phoneX25519Pub.toString("base64"),
@@ -814,10 +829,18 @@ export class RelayClient {
     });
 
     // Step 4: agent-hello.
-    const agentHello = await this.waitFor(
-      (m: any) => m.type === "handshake:agent-hello" && m.attemptId === attemptId,
-      timeoutMs,
-    );
+    let agentHello: any;
+    try {
+      agentHello = await this.waitFor(
+        (m: any) => m.type === "handshake:agent-hello" && m.attemptId === attemptId,
+        timeoutMs,
+      );
+    } catch (error) {
+      if (!(error instanceof Error) || !error.message.startsWith("Timed out waiting for message")) {
+        throw error;
+      }
+      throw new NativeAuthorizationNotReadyError(agentDeviceId, error);
+    }
     let agentX25519Pub = Buffer.from(agentHello.pubkey, "base64");
     if (opts.corruptAgentHelloPubkey) {
       const corrupted = Buffer.from(agentX25519Pub);
@@ -892,6 +915,7 @@ export class RelayClient {
       this.dropEstablishedAttemptId = null;
     }
     this.sessionConfirmed = true;
+    this.e2eGeneration++;
     this.startLiveness();
   }
 
@@ -922,7 +946,7 @@ export class RelayClient {
       });
       const pkcs8 = rawSeedToPkcs8(this.privateKeySeed);
       const sigB64 = nodeSign(null, phoneTranscript, { key: pkcs8, format: "der", type: "pkcs8" }).toString("base64");
-      this.sendHandshakePlaintext(agentDeviceId, {
+      this.sendHandshakePlaintext({
         type: "handshake:client-hello",
         attemptId,
         pubkey: phoneX25519Pub.toString("base64"),
@@ -984,6 +1008,7 @@ export class RelayClient {
       this.established = this.pending;
       this.pending = null;
       old?.transport.zeroize();
+      this.e2eGeneration++;
       this.recordSealedRecv();
     } finally {
       this.rekeyInFlight = false;
@@ -1040,66 +1065,34 @@ export class RelayClient {
     this.sendAppEnvelope(CONTROL_STREAM_ID, msg, "control");
   }
 
-  /** Seal + send a tunnel-protocol message on the preview channel of the machine
-   *  CONTROL PLANE — where the bridge deliberately drops it (`onTunnelMessage:
-   *  () => {}` in host-server.ts). The tunnel is served per-project, so a frame
-   *  that expects an answer goes through `sendOnStream(streamId, …, "preview")`;
-   *  this exists only to drive the control-plane drop. */
-  sendEncryptedTunnel(data: object): void {
-    this.sendAppEnvelope(CONTROL_STREAM_ID, data, "preview");
-  }
-
   /** Wrap `msg` in the `{ s?, m }` stream envelope, seal, and send.
    *  Control-plane traffic uses `CONTROL_STREAM_ID` (`s` omitted). */
   private sendAppEnvelope(streamId: string, msg: unknown, channel: "control" | "preview"): void {
     const ctx = this.established;
-    if (!ctx || !this._pairedPeerId) throw new Error("Not paired or no E2E session");
+    if (!ctx || !this.nativePeerId) throw new Error("Native E2E session is not established");
     const envelope = streamId && streamId !== CONTROL_STREAM_ID ? { s: streamId, m: msg } : { m: msg };
-    this.sendRelayPayload(this._pairedPeerId, ctx.transport.seal(JSON.stringify(envelope)), channel);
+    this.sendPeerPayload(ctx.transport.seal(JSON.stringify(envelope)), channel);
   }
 
   /** Seal one bare session/liveness frame under `transport` and send it kind-0. */
   private sendSealedFrame(obj: object, transport: E2eTransport, channel: "control" | "preview"): void {
-    this.sendRelayPayload(this._pairedPeerId!, transport.seal(JSON.stringify(obj)), channel);
+    this.sendPeerPayload(transport.seal(JSON.stringify(obj)), channel);
   }
 
-  /** Send a kind-1 plaintext handshake frame to `to`. */
-  private sendHandshakePlaintext(to: string, obj: object): void {
-    const frame = encodeRouteFrame(
-      { type: "message", to, channel: "control" },
+  /** Send a kind-1 plaintext handshake frame. */
+  private sendHandshakePlaintext(obj: object): void {
+    const frame = encodePeerFrame(
+      { type: "message", channel: "control" },
       Buffer.from(JSON.stringify(obj), "utf8"),
       FrameKind.handshake,
     );
     this.sendBinary(frame);
   }
 
-  private _pairedPeerId: string | null = null;
-
-  /** Set the addressed peer id (the BARE agent deviceUuid) that outbound app
-   *  traffic routes to. Admission is account-trust, not a pairing ceremony —
-   *  this is local addressing bookkeeping only, never sent over the wire. */
-  setPeerId(peerId: string): void {
-    this._pairedPeerId = peerId;
-  }
-
-  /** Send a sealed binary payload as a route-message frame (kind-0). */
-  private sendRelayPayload(to: string, payload: Uint8Array | Buffer, channel: "control" | "preview" = "control"): void {
+  /** Send a sealed binary payload as a peer frame (kind-0). */
+  private sendPeerPayload(payload: Uint8Array | Buffer, channel: "control" | "preview" = "control"): void {
     const bytes = payload instanceof Buffer ? payload : Buffer.from(payload);
-    this.sendBinary(encodeRouteFrame({ type: "message", to, channel }, bytes, FrameKind.sealed));
-  }
-
-  /** Send an OPAQUE payload to a peer as a sealed-kind native route frame.
-   *  Used by low-level routing/isolation tests; the payload is not real
-   *  ciphertext, so the peer will drop it. */
-  sendMessage(to: string, channel: string, payload: string | Uint8Array | Buffer): void {
-    const payloadBytes =
-      typeof payload === "string"
-        ? Buffer.from(payload, "utf8")
-        : payload instanceof Buffer
-          ? payload
-          : Buffer.from(payload);
-    const ch = channel === "preview" ? "preview" : "control";
-    this.sendBinary(encodeRouteFrame({ type: "message", to, channel: ch }, payloadBytes, FrameKind.sealed));
+    this.sendBinary(encodePeerFrame({ type: "message", channel }, bytes, FrameKind.sealed));
   }
 
   /** Send raw JSON to the central relay, including retired verbs in rejection tests. */
@@ -1340,18 +1333,24 @@ export class RelayClient {
     return this.wsClosed;
   }
 
-  /** Re-establish a fresh authenticated socket under the SAME identity after an
-   *  unpaired close (does NOT restore a paired peer id). */
+  get lifecycleGenerations(): Readonly<{
+    control: number;
+    native: number;
+    e2e: number;
+  }> {
+    return {
+      control: this.wsGeneration,
+      native: this.nativeGeneration,
+      e2e: this.e2eGeneration,
+    };
+  }
+
+  /** Re-establish the central control socket under the same account identity. */
   async reconnectAndAuth(relayUrl: string): Promise<void> {
     await this.connectAndAuthenticate(relayUrl);
   }
 
-  /** Hard-close the socket WITHOUT touching E2E/session bookkeeping —
-   *  simulates an unintentional network drop (unlike `disconnect()`, a
-   *  deliberate app-side teardown that also resets E2E state and clears the
-   *  paired peer id). Leaves `_pairedPeerId`/E2E context intact so a
-   *  subsequent `reconnectAndAuth` + `performE2EHandshake` mirrors a real
-   *  redial, not a fresh pairing. */
+  /** Hard-close central control without touching the native/E2E session. */
   dropSocket(): void {
     this.ws?.close();
     this.ws = null;
@@ -1363,16 +1362,6 @@ export class RelayClient {
    *  real JWT. Persists until overridden again. */
   setLicenseToken(token: string): void {
     this.helloOpts.licenseToken = token;
-  }
-
-  /** Reconnect with the SAME identity, restoring the paired peer id — the grant
-   *  survives on the relay, so routing works immediately. Call
-   *  `performE2EHandshake` again for a fresh session. */
-  async reconnect(relayUrl: string, pairedPeerId: string): Promise<void> {
-    this.resetE2e();
-    this._pairedPeerId = pairedPeerId;
-    await this.connectAndAuthenticate(relayUrl);
-    if (this.nativeTarget) await this.dialNative();
   }
 
   private resetE2e(): void {
@@ -1396,7 +1385,7 @@ export class RelayClient {
     this.waiters = [];
     this.messageQueue = [];
     this.resetE2e();
-    this._pairedPeerId = null;
+    this.nativePeerId = null;
     this.ws?.close();
     this.ws = null;
     this.dropNative();

@@ -269,8 +269,8 @@ Canonical implementation: `bridge/src/e2e/transport.ts` (TS) and
 
 ### 8.1 Frame-kind dispatch
 
-Downgrade is prevented **structurally** by the route-frame kind byte
-(`antgrid-wire` `frame.ts`), not by a per-connection `confirmed` flag. `kind=1`
+Downgrade is prevented **structurally** by the peer-frame kind byte
+(`antgrid-wire` `peer-frame.ts`), not by a per-connection `confirmed` flag. `kind=1`
 (`handshake`) admits exactly the two plaintext handshake types (`client-hello`,
 `agent-hello`); everything else is `kind=0` (`sealed`) and is decrypt-or-drop at
 all times. There is no plaintext app-traffic path to lock out — a `kind=1` frame
@@ -278,8 +278,9 @@ that is not a signature-valid handshake message is dropped with a log, and the
 receiver never try-parses ciphertext as plaintext. This supersedes the v2
 "post-establishment plaintext lockout".
 
-The relay does not interpret `kind`; it parses the header for `to`/`channel` and
-forwards route frames opaquely.
+The native carrier does not interpret `kind`. A peer frame carries only its
+message type and channel in the header; the authenticated connection supplies
+peer identity.
 
 Within `kind=0`, sealed plaintext is one of two shapes and the split is
 unambiguous: **session frames are bare `{ type, … }` objects**
@@ -328,8 +329,9 @@ timeouts while established, or peer-online following a peer-offline. Owned by
 
 ### 8.4 Rekey and capacity
 
-An agent holds **one session per app device**, keyed by the route address, over
-the one socket. A signature-verified `client-hello` from a peer that already
+An agent holds **one session per app device**, keyed by authenticated peer
+identity, over that peer's native connection. A signature-verified
+`client-hello` from a peer that already
 holds a session is the make-before-break rekey of §8.3. A `client-hello` from a
 **different** peer is admitted **alongside** it: a phone and a desktop app drive
 the same machine at once, and neither displaces the other.
@@ -362,7 +364,7 @@ the live socket (§8.3), while the **agent** drops its keys and waits to be
 rekeyed. Only the phone may initiate (pull model), so an agent that tried to
 re-drive would have nothing to send.
 
-Any structurally valid route frame counts as liveness, even if its sealed
+Any structurally valid peer frame counts as liveness, even if its sealed
 payload later fails to decrypt: the socket demonstrably delivered real bytes,
 and sealed binary traffic (terminal output, file data) must count the same as an
 explicit `pong`. The phone diverges here: it advances `_lastRecv` only for

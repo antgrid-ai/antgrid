@@ -55,11 +55,9 @@ describe("handshake MITM", () => {
    * and sends `peer-online` to the agent, which re-arms for a fresh handshake.
    */
   beforeEach(async () => {
-    const relayUrl = env.relay.url;
-    const agentId = env.agentDeviceId;
-    await env.app.disconnect();
+    env.app.dropNative();
     await Bun.sleep(150); // let relay detect disconnect
-    await env.app.reconnect(relayUrl, agentId);
+    await env.app.reconnectNative();
     await Bun.sleep(300); // let relay deliver peer-online → agent prepareForHandshake
   });
 
@@ -147,9 +145,7 @@ describe("handshake MITM", () => {
       }).not.toThrow();
 
       // Disconnect the phone — this closes the WS.
-      const relayUrl = localEnv.relay.url;
-      const agentId = localEnv.agentDeviceId;
-      await localEnv.app.disconnect();
+      localEnv.app.dropNative();
 
       // Small gap to let the relay and agent detect the disconnect.
       await Bun.sleep(200);
@@ -157,7 +153,7 @@ describe("handshake MITM", () => {
       // Reconnect with the SAME identity (deviceId + keypair). The relay
       // restores pair state and sends `peer-online` to the agent, which calls
       // `prepareForHandshake()` → `confirmed = false`.
-      await localEnv.app.reconnect(relayUrl, agentId);
+      await localEnv.app.reconnectNative();
 
       // Wait briefly for the relay to deliver peer-online to the agent and for
       // the agent to arm its keypair.

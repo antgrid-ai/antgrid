@@ -1,6 +1,6 @@
 import { test, expect } from "bun:test";
 import { relaySlotId } from "antgrid-wire";
-import { setupTestEnv, generateAppIdentity, handshakeWithoutPairing } from "../helpers/harness";
+import { establishNativeSession, setupTestEnv, generateAppIdentity } from "../helpers/harness";
 import { RelayClient, type PhoneIdentity } from "../helpers/relay-client";
 import { TestApp } from "../helpers/test-app";
 import type { TestEnv } from "../helpers/harness";
@@ -28,7 +28,7 @@ import type { TestEnv } from "../helpers/harness";
  *
  * `addAccountDevice` here runs AFTER each env's agent already started (and
  * cached its startup inventory) — same miss-then-refresh dynamic as
- * `gate-inventory-miss.test.ts` — so connecting uses `handshakeWithoutPairing`
+ * `gate-inventory-miss.test.ts` — so connecting uses `establishNativeSession`
  * (retries on the SAME socket) rather than `TestApp.connect` (documented
  * single-shot; a bare attempt here would deterministically time out on the
  * first, pre-refresh, hello).
@@ -55,14 +55,13 @@ async function connectSlotted(
   account: string,
   machineDeviceId: string,
 ): Promise<TestApp> {
-  const client = await RelayClient.connectAndAuth(env.relay.url, {
-    deviceType: "app",
+  const client = await env.connectNativeApp({
     name: "gate-multi-machine-slots-app",
     identity,
-    deviceId: relaySlotId(account, machineDeviceId),
-    transcriptDeviceId: account,
+    accountDeviceId: account,
+    helloDeviceId: relaySlotId(account, machineDeviceId),
   });
-  await handshakeWithoutPairing(client, env.agentDeviceId, env.agent.ed25519Pubkey);
+  await establishNativeSession(client, env.agentDeviceId, env.agent.ed25519Pubkey);
   return TestApp.wrap(client, env);
 }
 

@@ -79,7 +79,7 @@ describe("gate: rekey make-before-break", () => {
     // Old-key rejection: replay the pre-sealed canary now that the agent has
     // swapped+zeroized. It must be silently dropped (undecryptable) — no
     // response ever arrives.
-    (testEnv.app as any).sendRelayPayload(testEnv.agentDeviceId, canaryCiphertext, "control");
+    (testEnv.app as any).sendPeerPayload(canaryCiphertext, "control");
     const canaryAnswered = await testEnv.app
       .waitFor((m: any) => m.type === "response" && m.requestId === canaryRequestId, 2_000)
       .then(() => true)

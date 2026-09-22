@@ -75,6 +75,27 @@ deployment, `promtool` validation and live dashboard queries remain staging work
 8. Send a binary frame and each retired stream-registration verb after central
    authentication. Each must receive PROTOCOL_VIOLATION and close code 1008.
 
+## Lifecycle and interrupted-command handling
+
+Native shutdown first fences generations, dispatch, timers, and queued work.
+Graceful teardown has five seconds, followed by forced carrier closure and five
+seconds for ownership confirmation. A `cleanupIncomplete` result means the
+runtime still owns work or a carrier; keep the identity locked and do not start
+a replacement. Repeated stop calls share the same completion.
+
+An interrupted mutating request has three local outcomes: `notSent`,
+`confirmed`, or `outcomeUnknown`. A completed socket write is not execution
+confirmation. After `outcomeUnknown`, refresh authoritative state with reads
+and require a fresh user action before submitting another mutation. Never
+replay terminal input, reconnect hydration mutations, or host-restart recovery
+mutations automatically.
+
+Authorization refresh starts after roughly one third of the accepted lease,
+with jitter. Each request is bounded by ten seconds or the remaining lease,
+whichever is shorter. Backend failure, central reconnect, and native success do
+not move the original deadline. Denial, revocation, rotation, remote-access-off,
+or expiry fence dispatch immediately.
+
 Backend registration and lease code is not evidence that an upstream relay has
 enforced admission. The latter needs independent service race tests before
 staging preference can pass.
@@ -90,12 +111,15 @@ bun run --filter antgrid-relay test
 bun run --filter antgrid-web test
 bun run --filter antgrid-bridge test
 bun run --filter antgrid-evals test:evals
+bun run --filter antgrid-evals test:evals:native-soak
 ```
 
-Before the full eval sweep, build its Rust relay probe with
-`cargo build --locked -j 2 --manifest-path iroh-relay/Cargo.toml --example real_backend_gate`.
-Run just the combined backend/relay gate with
-`bun run --filter antgrid-evals test:evals:iroh-relay-authorization`.
+The default serialized eval sweep excludes gates that require separately built
+native artifacts. Build the Rust relay probe with
+`cargo build --locked -j 2 --manifest-path iroh-relay/Cargo.toml --example real_backend_gate`,
+then run `bun run --filter antgrid-evals test:evals:iroh-relay-authorization`.
+Set `IROH_INTEROP_NATIVE_LIBRARY` to the verified Dart native library before
+running `test:evals:dart-client-e2e` and `test:evals:peer-resume`.
 Backend gates also require the existing PostgreSQL/Prisma test prerequisites.
 
 In `packages/antgrid_peer_transport`, run `dart analyze`, `dart test`, and the
@@ -106,6 +130,10 @@ the production record adapter, shared endpoint cleanup and rejection paths; it
 does not qualify backend authorization, real host features, WAN or performance.
 The same package supplies app and CLI native code; FRB disposal in the smoke
 executable occurs only at process-final teardown.
+
+The native soak is intentionally excluded from the default eval sweep. It runs
+for 30 minutes unless its documented test-only duration override is set, records
+its seed, and must settle owned-resource counts after every fault cycle.
 
 ## Platform and rollout gates
 

@@ -9,31 +9,75 @@ import 'package:iroh_quic/iroh_quic.dart' as iroh;
 import 'package:uuid/uuid.dart';
 
 typedef EmitFn = void Function(Map<String, dynamic> response);
+typedef _Cleanup = FutureOr<void> Function();
+
+final class _CleanupStack {
+  final List<_Cleanup> _entries = [];
+  bool _finished = false;
+
+  void add(_Cleanup cleanup) {
+    if (_finished) throw StateError('Cleanup stack already finished');
+    _entries.add(cleanup);
+  }
+
+  void disarm() {
+    _entries.clear();
+    _finished = true;
+  }
+
+  Future<void> run() async {
+    if (_finished) return;
+    _finished = true;
+    Object? firstError;
+    StackTrace? firstStack;
+    for (final cleanup in _entries.reversed) {
+      try {
+        await cleanup();
+      } catch (error, stack) {
+        firstError ??= error;
+        firstStack ??= stack;
+      }
+    }
+    _entries.clear();
+    if (firstError != null) {
+      Error.throwWithStackTrace(firstError, firstStack!);
+    }
+  }
+}
 
 /// JSON-line command surface the TS eval harness drives (`DartAppClient`).
 ///
-/// Everything after the relay socket is delegated to the PRODUCTION Dart
-/// client: [MachineSession] owns the E2E session, the sealed `{s, m}` stream
-/// demux, fragment reassembly and liveness, exactly as the app's
-/// `RelayConnection` does. This handler is only a translation layer between
-/// stdin JSON actions and that object graph — anything it reimplements is a
-/// place where an eval could pass against code the app does not ship.
+/// Central control and native payload setup have independent lifetimes.
+/// [MachineSession] owns the E2E session, sealed `{s, m}` stream demux,
+/// fragment reassembly and liveness. This handler only translates stdin JSON
+/// actions into the production client object graph.
 class _MemoryEndpointKeys implements EndpointKeyStore {
-  Uint8List? value;
+  final Map<String, Uint8List> _values = {};
 
   @override
-  Future<Uint8List?> read(String enrollmentId) async =>
-      value == null ? null : Uint8List.fromList(value!);
+  Future<Uint8List?> read(String enrollmentId) async {
+    final value = _values[enrollmentId];
+    return value == null ? null : Uint8List.fromList(value);
+  }
 
   @override
   Future<void> write(String enrollmentId, Uint8List secret) async {
-    value = Uint8List.fromList(secret);
+    final previous = _values[enrollmentId];
+    previous?.fillRange(0, previous.length, 0);
+    _values[enrollmentId] = Uint8List.fromList(secret);
   }
 
   @override
   Future<void> delete(String enrollmentId) async {
-    value?.fillRange(0, value!.length, 0);
-    value = null;
+    final value = _values.remove(enrollmentId);
+    value?.fillRange(0, value.length, 0);
+  }
+
+  Future<void> clear() async {
+    for (final value in _values.values) {
+      value.fillRange(0, value.length, 0);
+    }
+    _values.clear();
   }
 }
 
@@ -44,6 +88,7 @@ class CommandHandler {
   RelayService? _relay;
   NativeEndpointOwner? _endpoint;
   PeerLink? _payload;
+  AuthorizationLease? _lease;
   final _endpointKeys = _MemoryEndpointKeys();
   DeviceIdentity? _identity;
   MachineSession? _session;
@@ -59,13 +104,17 @@ class CommandHandler {
 
   CommandHandler(this._emit);
 
+  Future<void> dispose() => _disposeAll();
+
   Future<void> handle(Map<String, dynamic> cmd) async {
     final action = cmd['action'] as String?;
     switch (action) {
       case 'init':
         await _handleInit(cmd);
-      case 'connect':
-        await _handleConnect(cmd);
+      case 'control-connect':
+        await _handleControlConnect(cmd);
+      case 'peer-connect':
+        await _handlePeerConnect(cmd);
       case 'handshake':
         await _handleHandshake(cmd);
       case 'project-start':
@@ -74,71 +123,81 @@ class CommandHandler {
         await _handleSendEncrypted(cmd);
       case 'snapshot':
         await _handleSnapshot(cmd);
-      case 'disconnect':
-        await _handleDisconnect();
+      case 'peer-disconnect':
+        await _handlePeerDisconnect();
+      case 'control-disconnect':
+        _handleControlDisconnect();
+      case 'dispose':
+        await _handleDispose();
       default:
         _emit({'event': 'error', 'message': 'Unknown action: $action'});
     }
   }
 
   Future<void> _handleInit(Map<String, dynamic> cmd) async {
-    _crypto = CryptoService();
-    final (ed25519Private, ed25519Public) = await _crypto!
-        .generateEd25519KeyPair();
-    final (x25519Private, x25519Public) = await _crypto!
-        .generateX25519KeyPair();
+    await _disposeAll();
+    final cleanup = _CleanupStack();
+    try {
+      final crypto = CryptoService();
+      final (ed25519Private, ed25519Public) = await crypto
+          .generateEd25519KeyPair();
+      final (x25519Private, x25519Public) = await crypto
+          .generateX25519KeyPair();
+      cleanup.add(() {
+        ed25519Private.fillRange(0, ed25519Private.length, 0);
+        x25519Private.fillRange(0, x25519Private.length, 0);
+      });
 
-    final deviceId = const Uuid().v4();
-    final name = cmd['name'] as String? ?? 'eval-client';
-    _identity = DeviceIdentity(
-      deviceId: deviceId,
-      name: name,
-      ed25519PrivateKey: ed25519Private,
-      ed25519PublicKey: ed25519Public,
-      x25519PrivateKey: x25519Private,
-      x25519PublicKey: x25519Public,
-    );
+      final deviceId = const Uuid().v4();
+      final identity = DeviceIdentity(
+        deviceId: deviceId,
+        name: cmd['name'] as String? ?? 'eval-client',
+        ed25519PrivateKey: ed25519Private,
+        ed25519PublicKey: ed25519Public,
+        x25519PrivateKey: x25519Private,
+        x25519PublicKey: x25519Public,
+      );
+      final relay = RelayService(crypto: crypto);
+      cleanup.add(relay.dispose);
+      final stateSub = relay.stateStream.listen((state) {
+        final out = <String, dynamic>{
+          'event': 'state',
+          'connectionState': state.connectionState.name,
+        };
+        if (state.peerName != null) out['peerName'] = state.peerName;
+        if (state.error != null) out['error'] = state.error;
+        _emit(out);
+      });
+      cleanup.add(stateSub.cancel);
 
-    _endpoint = await NativeEndpointOwner.create(
-      enrollmentId: deviceId,
-      keyStore: _endpointKeys,
-      approvedRelays: const [],
-      initializeNative: () => iroh.Iroh.init(
-        libraryPath: Platform.environment['IROH_INTEROP_NATIVE_LIBRARY'],
-      ),
-    );
-    _relay = RelayService(crypto: _crypto!);
-    _stateSub = _relay!.stateStream.listen((state) {
-      final out = <String, dynamic>{
-        'event': 'state',
-        'connectionState': state.connectionState.name,
-      };
-      if (state.peerName != null) out['peerName'] = state.peerName;
-      if (state.error != null) out['error'] = state.error;
-      _emit(out);
-    });
-
-    _emit({
-      'event': 'initialized',
-      'deviceId': deviceId,
-      'publicKey': base64.encode(ed25519Public),
-      'x25519PublicKey': base64.encode(x25519Public),
-      'endpointId': _endpoint!.endpoint.id.toHex(),
-    });
+      _crypto = crypto;
+      _identity = identity;
+      _relay = relay;
+      _stateSub = stateSub;
+      cleanup.disarm();
+      _emit({
+        'event': 'initialized',
+        'deviceId': deviceId,
+        'publicKey': base64.encode(ed25519Public),
+        'x25519PublicKey': base64.encode(x25519Public),
+      });
+    } catch (_) {
+      await cleanup.run();
+      rethrow;
+    }
   }
 
-  Future<void> _handleConnect(Map<String, dynamic> cmd) async {
+  Future<void> _handleControlConnect(Map<String, dynamic> cmd) async {
     final relayUrl = cmd['relayUrl'] as String?;
     final licenseToken = cmd['licenseToken'] as String?;
     if (relayUrl == null ||
         licenseToken == null ||
         _relay == null ||
-        _endpoint == null ||
         _identity == null) {
       _emit({
         'event': 'error',
         'message':
-            'Must init before connect; relayUrl and licenseToken are required',
+            'Must init before control-connect; relayUrl and licenseToken are required',
       });
       return;
     }
@@ -149,18 +208,19 @@ class CommandHandler {
       machineDeviceId: cmd['machineDeviceId'] as String?,
       epoch: cmd['epoch'] as int? ?? 1,
     );
-    await _connectPayload(cmd);
-    _emit({'event': 'native-connected'});
+    _emit({'event': 'control-connected'});
   }
 
-  Future<void> _connectPayload(Map<String, dynamic> cmd) async {
+  Future<void> _handlePeerConnect(Map<String, dynamic> cmd) async {
     final baseUrl = cmd['licenseApiUrl'] as String?;
     final accountId = cmd['accountId'] as String?;
     final enrollmentId = cmd['enrollmentId'] as String?;
     final clientSecret = cmd['clientSecret'] as String?;
     final machineDeviceId = cmd['machineDeviceId'] as String?;
     final addresses = (cmd['nativeAddresses'] as List?)?.cast<String>();
-    if (baseUrl == null ||
+    final identity = _identity;
+    if (identity == null ||
+        baseUrl == null ||
         accountId == null ||
         enrollmentId == null ||
         clientSecret == null ||
@@ -169,6 +229,7 @@ class CommandHandler {
         addresses.isEmpty) {
       throw ArgumentError('Native enrollment coordinates are required');
     }
+    await _disconnectPeerState();
 
     Future<Map<String, dynamic>> request(
       String method,
@@ -209,8 +270,12 @@ class CommandHandler {
         final response = await peerRequest.close();
         final responseText = await utf8.decodeStream(response);
         if (response.statusCode < 200 || response.statusCode >= 300) {
+          if (response.statusCode == HttpStatus.unauthorized ||
+              response.statusCode == HttpStatus.forbidden) {
+            throw const PeerAuthorizationDenied();
+          }
           throw HttpException(
-            'Peer authorization failed: ${response.statusCode} $responseText',
+            'Peer authorization failed: ${response.statusCode}',
           );
         }
         return (jsonDecode(responseText) as Map).cast<String, dynamic>();
@@ -219,41 +284,114 @@ class CommandHandler {
       }
     }
 
-    final enrollment = EndpointEnrollmentClient(
-      request: request,
-      accountId: accountId,
-      deviceId: _identity!.deviceId,
-      enrollmentId: enrollmentId,
-    );
-    var snapshot = await enrollment.fetchSnapshot();
-    final endpointSecret = await _endpointKeys.read(enrollmentId);
-    if (endpointSecret == null) throw StateError('Native endpoint key missing');
-    if (snapshot.endpoint == null) {
-      await enrollment.register(
-        deviceSecret: _identity!.ed25519PrivateKey,
-        endpointSecret: endpointSecret,
-        expectedGeneration: snapshot.registrationGeneration,
+    final cleanup = _CleanupStack();
+    try {
+      final enrollment = EndpointEnrollmentClient(
+        request: request,
+        accountId: accountId,
+        deviceId: identity.deviceId,
+        enrollmentId: enrollmentId,
       );
-    }
-    PeerRegistration? target;
-    for (var attempt = 0; attempt < 100 && target == null; attempt++) {
-      snapshot = await enrollment.fetchSnapshot();
-      for (final peer in snapshot.peers) {
-        if (peer.deviceId == machineDeviceId) target = peer.endpoint;
+      final lease = AuthorizationLease(
+        accountId: accountId,
+        deviceId: identity.deviceId,
+        enrollmentId: enrollmentId,
+        fetchSnapshot: enrollment.fetchSnapshot,
+      );
+      cleanup.add(lease.dispose);
+      if (!await lease.refresh()) {
+        throw StateError('Initial native authorization was refused');
       }
-      if (target == null)
-        await Future<void>.delayed(const Duration(milliseconds: 100));
+      var snapshot = lease.snapshot!;
+      final endpoint = await NativeEndpointOwner.create(
+        enrollmentId: enrollmentId,
+        keyStore: _endpointKeys,
+        approvedRelays: snapshot.relayUrls,
+        initializeNative: () => iroh.Iroh.init(
+          libraryPath: Platform.environment['IROH_INTEROP_NATIVE_LIBRARY'],
+        ),
+      );
+      cleanup.add(endpoint.close);
+      final endpointSecret = await _endpointKeys.read(enrollmentId);
+      if (endpointSecret == null) {
+        throw StateError('Native endpoint key missing');
+      }
+      try {
+        if (snapshot.endpoint == null) {
+          await enrollment.register(
+            deviceSecret: identity.ed25519PrivateKey,
+            endpointSecret: endpointSecret,
+            expectedGeneration: snapshot.registrationGeneration,
+          );
+        }
+      } finally {
+        endpointSecret.fillRange(0, endpointSecret.length, 0);
+      }
+      if (snapshot.endpoint == null) {
+        if (!await lease.refreshFresh()) {
+          throw StateError('Registered endpoint was not authorized');
+        }
+        snapshot = lease.snapshot!;
+      }
+      final localEndpointId = endpoint.endpoint.id.toHex();
+      if (snapshot.endpoint?.endpointId != localEndpointId) {
+        throw StateError(
+          'Native endpoint identity does not match authorization',
+        );
+      }
+
+      PeerRegistration? target;
+      for (var attempt = 0; attempt < 100 && target == null; attempt++) {
+        snapshot = lease.snapshot!;
+        for (final peer in snapshot.peers) {
+          if (peer.deviceId == machineDeviceId) target = peer.endpoint;
+        }
+        if (target == null) {
+          await Future<void>.delayed(const Duration(milliseconds: 100));
+          final refreshed = await lease.refresh();
+          if (!refreshed && !lease.isValid) break;
+        }
+      }
+      if (target == null) {
+        throw StateError('Machine did not publish a native endpoint');
+      }
+      final registration = target;
+      bool authorized() =>
+          lease.snapshot?.endpoint?.endpointId == localEndpointId &&
+          lease.permits(
+            machineDeviceId,
+            endpointId: registration.endpointId,
+            generation: registration.generation,
+          );
+      final raw = await endpoint.dial(
+        endpointId: registration.endpointId,
+        authorized: authorized,
+        ipAddresses: addresses,
+      );
+      cleanup.add(raw.close);
+      final payload = LeasedPeerLink(
+        raw,
+        lease,
+        peerId: machineDeviceId,
+        endpointId: registration.endpointId,
+        registrationGeneration: registration.generation,
+      );
+      cleanup.add(payload.close);
+      lease.startRefreshing();
+
+      _endpoint = endpoint;
+      _lease = lease;
+      _payload = payload;
+      cleanup.disarm();
+      _emit({
+        'event': 'peer-connected',
+        'endpointId': localEndpointId,
+        'leaseRemainingMs': lease.remainingMs,
+      });
+    } catch (_) {
+      await cleanup.run();
+      rethrow;
     }
-    if (target == null)
-      throw StateError('Machine did not publish a native endpoint');
-    await _payload?.close();
-    _payload = await _endpoint!.dial(
-      endpointId: target.endpointId,
-      localDeviceId: relaySlotId(_identity!.deviceId, machineDeviceId),
-      peerDeviceId: machineDeviceId,
-      authorized: () => true,
-      ipAddresses: addresses,
-    );
   }
 
   /// Establish the E2E session with the machine at [cmd]`['machineDeviceId']`.
@@ -338,11 +476,8 @@ class CommandHandler {
     try {
       await session.ensureEstablished();
     } catch (e) {
-      // `start()` armed the session supervisor, which keeps re-driving a
-      // handshake on every peer-online. Leaving it up after reporting failure
-      // both churns in the background and leaves `_session` non-null, so a
-      // later send-encrypted/snapshot passes its guard and acts on a session
-      // that never established.
+      // Leaving a failed session installed would let later commands pass their
+      // lifecycle guard even though no authenticated session was established.
       await _teardownSession();
       _emit({'event': 'error', 'message': 'Handshake failed: $e'});
       return;
@@ -475,20 +610,68 @@ class CommandHandler {
     }
   }
 
-  Future<void> _handleDisconnect() async {
-    await _teardownSession();
-    await _stateSub?.cancel();
-    _stateSub = null;
-    _relay?.dispose();
-    _relay = null;
-    await _payload?.close();
-    _payload = null;
-    await _endpoint?.close();
-    _endpoint = null;
-    await _endpointKeys.delete(_identity?.deviceId ?? '');
-    _crypto = null;
-    _identity = null;
+  Future<void> _handlePeerDisconnect() async {
+    await _disconnectPeerState();
+    _emit({'event': 'peer-disconnected'});
+  }
+
+  void _handleControlDisconnect() {
+    _relay?.disconnect();
+    _emit({'event': 'control-disconnected'});
+  }
+
+  Future<void> _handleDispose() async {
+    await _disposeAll();
     _emit({'event': 'disconnected'});
+  }
+
+  Future<void> _disconnectPeerState() async {
+    final payload = _payload;
+    final lease = _lease;
+    final endpoint = _endpoint;
+    _payload = null;
+    _lease = null;
+    _endpoint = null;
+    final payloadClose = payload?.close();
+    lease?.invalidate();
+
+    final cleanup = _CleanupStack();
+    if (endpoint != null) cleanup.add(endpoint.close);
+    if (lease != null) cleanup.add(lease.dispose);
+    if (payloadClose != null) cleanup.add(() => payloadClose);
+    cleanup.add(_teardownSession);
+    await cleanup.run();
+  }
+
+  Future<void> _disposeAll() async {
+    final stateSub = _stateSub;
+    final relay = _relay;
+    final identity = _identity;
+    _stateSub = null;
+    _relay = null;
+    _identity = null;
+    _crypto = null;
+
+    final cleanup = _CleanupStack();
+    cleanup.add(_endpointKeys.clear);
+    if (identity != null) {
+      cleanup.add(() {
+        identity.ed25519PrivateKey.fillRange(
+          0,
+          identity.ed25519PrivateKey.length,
+          0,
+        );
+        identity.x25519PrivateKey.fillRange(
+          0,
+          identity.x25519PrivateKey.length,
+          0,
+        );
+      });
+    }
+    if (relay != null) cleanup.add(relay.dispose);
+    if (stateSub != null) cleanup.add(stateSub.cancel);
+    cleanup.add(_disconnectPeerState);
+    await cleanup.run();
   }
 
   /// Republish every frame the session demuxes to [streamId]. Idempotent: the

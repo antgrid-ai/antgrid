@@ -47,6 +47,8 @@ interface NativePeerContext {
   connection: Connection;
   endpointId: string;
   registrationGeneration: string;
+  attemptGeneration: number;
+  sessionGeneration: number;
   records?: PeerRecords;
   handshakeTimer?: ReturnType<typeof setTimeout>;
   authorizedHello?: { attemptId: string; admitted: boolean };
@@ -64,6 +66,8 @@ export class NativePeerSessions extends PeerSessionOwner {
   private lifetime = 0;
   private stopped = false;
   private admissionGeneration = 0;
+  private peerAttemptGeneration = 0;
+  private peerSessionGeneration = 0;
   private approvedRelays = "";
   private closing: Promise<void> | null = null;
 
@@ -80,8 +84,13 @@ export class NativePeerSessions extends PeerSessionOwner {
       },
       terminal: (error) => error instanceof EndpointFailure && error.terminal ||
         error instanceof z.ZodError || error instanceof EndpointApiError && [401, 403, 409].includes(error.status),
-      changed: (state, reason) => this.recordDiagnostic({ dir: "event", kind: "lifecycle", transport: "iroh",
-        msgType: "peer:endpoint-state", detail: { state, ...(reason ? { reason } : {}) } }),
+      changed: (state, reason, detail) => this.recordDiagnostic({ dir: "event", kind: "lifecycle", transport: "iroh",
+        msgType: "peer:endpoint-state", detail: {
+          state,
+          ...(reason ? { reason } : {}),
+          ...detail,
+          leaseRemainingMs: this.lease?.remainingMs ?? 0,
+        } }),
       ...nativeOpts.lifecycle,
     });
     this.enrollment = new EndpointEnrollment(nativeOpts.enrollment, nativeOpts.endpointSecret,
@@ -188,6 +197,7 @@ export class NativePeerSessions extends PeerSessionOwner {
   private async acceptPeer(connection: Connection): Promise<void> {
     const now = this.nativeOpts.lifecycle?.now ?? performance.now.bind(performance);
     const startedAt = now();
+    const attemptGeneration = ++this.peerAttemptGeneration;
     const generation = this.admissionGeneration;
     const close = () => connection.close(3n, []);
     if (!Buffer.from(connection.alpn()).equals(Buffer.from(PEER_ALPN))) { connection.close(2n, []); return; }
@@ -199,8 +209,15 @@ export class NativePeerSessions extends PeerSessionOwner {
     // A concurrent native connection must not create a second session writer.
     if (this.sessions.has(peerId) || this.pending.has(peerId) || this.nativePeers.has(peerId) ||
         this.nativePeers.size >= MAX_APP_SESSIONS) { connection.close(1n, []); return; }
-    const peer: NativePeerContext = { connection, endpointId, registrationGeneration: device.endpoint!.generation,
-      retired: false, acceptedAt: now() };
+    const peer: NativePeerContext = {
+      connection,
+      endpointId,
+      registrationGeneration: device.endpoint!.generation,
+      attemptGeneration,
+      sessionGeneration: 0,
+      retired: false,
+      acceptedAt: now(),
+    };
     this.nativePeers.set(peerId, peer);
     let stream;
     try {
@@ -223,7 +240,11 @@ export class NativePeerSessions extends PeerSessionOwner {
     peer.records = records;
     peer.handshakeTimer = handshakeTimer;
     this.recordDiagnostic({ dir: "event", kind: "lifecycle", transport: "iroh", msgType: "peer:native-accepted",
-      detail: { elapsedMs: now() - startedAt } });
+      detail: {
+        elapsedMs: now() - startedAt,
+        attemptGeneration,
+        leaseRemainingMs: this.lease.remainingMs,
+      } });
     void connection.acceptBi().then(() => records.close("protocol-violation"), () => {});
     void connection.acceptUni().then(() => records.close("protocol-violation"), () => {});
     void connection.closed().then(() => {
@@ -283,6 +304,19 @@ export class NativePeerSessions extends PeerSessionOwner {
     peer.records?.close(reason);
     super.dropSession(peerId, "iroh");
     this.tearDownPending(peerId);
+    this.recordDiagnostic({
+      dir: "event",
+      kind: "lifecycle",
+      transport: "iroh",
+      msgType: "peer:native-retired",
+      detail: {
+        attemptGeneration: peer.attemptGeneration,
+        sessionGeneration: peer.sessionGeneration,
+        reason,
+        teardownOutcome: "requested",
+        leaseRemainingMs: this.lease.remainingMs,
+      },
+    });
   }
 
   private dropAllPeers(reason: PeerRecordFailure = "unauthorized"): void {
@@ -301,8 +335,14 @@ export class NativePeerSessions extends PeerSessionOwner {
   protected override onSessionEstablished(peerId: string): void {
     const peer = this.nativePeers.get(peerId);
     if (!peer) return;
+    peer.sessionGeneration = ++this.peerSessionGeneration;
     this.recordDiagnostic({ dir: "event", kind: "lifecycle", transport: "iroh", msgType: "peer:e2e-established",
-      detail: { elapsedMs: (this.nativeOpts.lifecycle?.now ?? performance.now.bind(performance))() - peer.acceptedAt } });
+      detail: {
+        elapsedMs: (this.nativeOpts.lifecycle?.now ?? performance.now.bind(performance))() - peer.acceptedAt,
+        attemptGeneration: peer.attemptGeneration,
+        sessionGeneration: peer.sessionGeneration,
+        leaseRemainingMs: this.lease.remainingMs,
+      } });
   }
 
   protected override receivePeerFrame(payload: Uint8Array, from: string, channel: Channel, kind: FrameKind): void {

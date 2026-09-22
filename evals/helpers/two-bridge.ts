@@ -12,7 +12,7 @@ import {
 } from "../../bridge/src/protocol";
 import { postJson } from "../support/session-bus";
 import { firstProjectStream, resolveOnFreshAdvert } from "../support/stream";
-import { generateAppIdentity, handshakeWithoutPairing, setupTestEnv, waitForHostFile, type TestEnv } from "./harness";
+import { establishNativeSession, generateAppIdentity, setupTestEnv, waitForHostFile, type TestEnv } from "./harness";
 import { LocalTestClient, type LocalConnectInfo } from "./local-client";
 import { RelayClient, type PhoneIdentity } from "./relay-client";
 
@@ -161,7 +161,7 @@ export interface TwoBridgeEnv {
  * Each bridge only ever consults its OWN `/account/devices/me/peers`, so an
  * account id seeded on one machine is unadmittable on the other. Seeded after
  * both agents started (and cached their startup inventory), which is why every
- * connect below goes through `handshakeWithoutPairing` — it retries on the SAME
+ * connect below goes through `establishNativeSession` — it retries on the same
  * socket until the bridge's inventory refresh lands.
  */
 async function seedSharedAccountDevice(
@@ -193,7 +193,7 @@ async function connectSlotted(
     helloDeviceId: relaySlotId(account, machineDeviceId),
     name: "two-bridge-carrier",
   });
-  await handshakeWithoutPairing(client, env.agentDeviceId, env.agent.ed25519Pubkey);
+  await establishNativeSession(client, env.agentDeviceId, env.agent.ed25519Pubkey);
   return client;
 }
 /**
@@ -363,10 +363,10 @@ class TwoBridgeCarrier implements Carrier {
   async reestablishRemote(machine: MachineName): Promise<void> {
     const env = this.machines[machine].env;
     await this.relays[machine].reconnectNative();
-    await handshakeWithoutPairing(this.relays[machine], env.agentDeviceId, env.agent.ed25519Pubkey);
+    await establishNativeSession(this.relays[machine], env.agentDeviceId, env.agent.ed25519Pubkey);
     this.relayStreams[machine] = await resolveStream(this.relays[machine], env.projectId);
     await env.app.reconnectNative();
-    await handshakeWithoutPairing(env.app, env.agentDeviceId, env.agent.ed25519Pubkey);
+    await establishNativeSession(env.app, env.agentDeviceId, env.agent.ed25519Pubkey);
     await resolveStream(env.app, env.projectId);
   }
 

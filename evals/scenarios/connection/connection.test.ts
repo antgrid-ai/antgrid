@@ -1,6 +1,6 @@
 import { describe, test, expect } from "bun:test";
 import { startRelay, allocatePort } from "../../helpers/harness";
-import { RelayClient } from "../../helpers/relay-client";
+import { CentralTestClient } from "../../helpers/central-test-client";
 
 describe("central control resilience", () => {
   test("JSON control flood is rate-limited without closing the authenticated socket", async () => {
@@ -9,9 +9,9 @@ describe("central control resilience", () => {
       jsonRateLimitPerSec: 5,
       jsonRateLimitBurst: 5,
     });
-    let app: RelayClient | null = null;
+    let app: CentralTestClient | null = null;
     try {
-      app = await RelayClient.connectAndAuth(relay.url, { deviceType: "app" });
+      app = await CentralTestClient.connectAndAuth(relay.url, { deviceType: "app" });
       const limited = app.waitFor(
         (message: any) => message.type === "error" && message.code === "MESSAGE_RATE_LIMITED",
         5_000,

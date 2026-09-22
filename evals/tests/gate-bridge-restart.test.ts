@@ -15,7 +15,7 @@ import { TestApp } from "../helpers/test-app";
     // `env.agent.ed25519Pubkey` below still reads the (stable) identity.
     await env.agent.restart();
 
-    const snap = await app.waitForStateSnapshot({ timeoutMs: 30_000 });
+    const snap = await app.recoverStateSnapshot({ timeoutMs: 30_000 });
     expect(snap.ok).toBe(true);
 
     await app.disconnect();

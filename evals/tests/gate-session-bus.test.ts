@@ -11,7 +11,6 @@ import { computeProjectId } from "../../bridge/src/project-id";
 import { readRepoKey } from "../../bridge/src/capability-card";
 import { readHostFile, type HostFile } from "../../bridge/src/host-discovery";
 import { createMessage, type AbMessage } from "../../bridge/src/protocol";
-import { loadDeliveries } from "../../bridge/src/session-bus/delivery-queue";
 import {
   LOCAL_MACHINE_ID,
   MAX_NOTIFIES_PER_PAIR_HOUR,
@@ -23,6 +22,8 @@ import {
   REPLY_MARKER,
   SINK_SCRIPT_NAME,
   apiPort,
+  awaitDeliveryLines,
+  awaitSinkRunId,
   busCall,
   countMarkers,
   postJson,
@@ -274,14 +275,42 @@ async function awaitAddressable(bridge: LocalBridge, terminalId: string): Promis
   }
 }
 
+/** A synthetic turn hook is valid only after the process has published the
+ * live row that a production hook necessarily follows. */
+async function awaitLiveSession(
+  bridge: LocalBridge,
+  callerId: string,
+  sessionId: string,
+): Promise<void> {
+  await untilAsync(async () => {
+    const directory = await busCall(bridge.abDir, "sessions", { terminalId: callerId });
+    return directory.status === 200 && (directory.body.sessions ?? []).some(
+      (session: { sessionId?: string; activity?: string }) =>
+        session.sessionId === sessionId && session.activity !== "stopped",
+    ) ? true : undefined;
+  }, 30_000, `session ${sessionId} to publish its live directory row`);
+}
+
+async function openSyntheticTurn(
+  bridge: LocalBridge,
+  callerId: string,
+  terminalId: string,
+): Promise<void> {
+  await awaitLiveSession(bridge, callerId, terminalId);
+  const api = `http://127.0.0.1:${await apiPort(bridge.abDir)}`;
+  const result = await postJson(`${api}/turn-start`, {
+    terminalId,
+    runId: await awaitSinkRunId(bridge.sinkPath, terminalId),
+  });
+  if (result.ok !== true || result.stale === true) {
+    throw new Error(`turn-start was not accepted: ${JSON.stringify(result)}`);
+  }
+}
+
 function localTarget(bridge: LocalBridge, sessionId: string): { projectId: string; sessionId: string } {
   // No `machineId`, which is the §6.1 address: an omitted machine IS this
   // machine, and this machine has no id to spell.
   return { projectId: bridge.projectId, sessionId };
-}
-
-function heldFor(bridge: LocalBridge, sessionId: string) {
-  return loadDeliveries(bridge.abDir, bridge.projectId).lines.filter((l) => l.sessionId === sessionId);
 }
 
 test("a post reaches a sibling session's mailbox on a bridge with no relay identity, no carrier and remote access off", async () => {
@@ -379,12 +408,10 @@ test("a notify waits for the target's next turn boundary and arrives there exact
     await startSession(bridge, sender);
     await startSession(bridge, target);
     await awaitAddressable(bridge, sender);
-
+    // The production hook comes from the running process. This synthetic hook
+    // therefore uses the same live-run generation fence before opening a turn.
+    await openSyntheticTurn(bridge, sender, target);
     const api = `http://127.0.0.1:${await apiPort(bridge.abDir)}`;
-    // A turn-start naming a session the work-status reduction has not seen
-    // running yet is HELD and promoted when it appears, so this needs no race
-    // with `session:start`'s own bookkeeping.
-    await postJson(`${api}/turn-start`, { terminalId: target });
 
     const notified = await busCall(bridge.abDir, "notify", {
       terminalId: sender,
@@ -397,12 +424,24 @@ test("a notify waits for the target's next turn boundary and arrives there exact
     // turn the line exists and has NOT been submitted.
     await sleep(NOT_YET_MS);
     expect(countMarkers(sinkText(bridge.sinkPath), NOTIFY_MARKER)).toBe(0);
-    const held = heldFor(bridge, target);
+    const held = await awaitDeliveryLines(
+      bridge.abDir,
+      bridge.projectId,
+      target,
+      1,
+      20_000,
+      "the notify to remain queued during the target turn",
+    );
     expect(held).toHaveLength(1);
     expect(held[0]!.kind).toBe("notify");
 
     // Half two: the closing edge, which is what a turn-ending notification is.
-    await postJson(`${api}/notify`, { type: "task_complete", terminalId: target, message: randomUUID() });
+    await postJson(`${api}/notify`, {
+      type: "task_complete",
+      terminalId: target,
+      runId: await awaitSinkRunId(bridge.sinkPath, target),
+      message: randomUUID(),
+    });
     await untilAsync(
       async () => (countMarkers(sinkText(bridge.sinkPath), NOTIFY_MARKER) === 1 ? true : undefined),
       20_000,
@@ -413,7 +452,14 @@ test("a notify waits for the target's next turn boundary and arrives there exact
     // than fail anything.
     await sleep(NOT_YET_MS);
     expect(countMarkers(sinkText(bridge.sinkPath), NOTIFY_MARKER)).toBe(1);
-    expect(heldFor(bridge, target)).toHaveLength(0);
+    expect(await awaitDeliveryLines(
+      bridge.abDir,
+      bridge.projectId,
+      target,
+      0,
+      20_000,
+      "the delivered notify to leave the target queue",
+    )).toHaveLength(0);
   } finally {
     await bridge.teardown();
   }
@@ -443,7 +489,8 @@ test("a reply answers on the thread it was given and reaches the opener at its o
     expect(inbox.body.posts[0].threadId).toBe(threadId);
 
     const api = `http://127.0.0.1:${await apiPort(bridge.abDir)}`;
-    await postJson(`${api}/turn-start`, { terminalId: asker });
+    await startSession(bridge, asker);
+    await openSyntheticTurn(bridge, answerer, asker);
 
     const replied = await busCall(bridge.abDir, "reply", {
       terminalId: answerer,
@@ -456,13 +503,25 @@ test("a reply answers on the thread it was given and reaches the opener at its o
     // boundary exactly as a notify does — and mid-turn it must not have landed.
     await sleep(NOT_YET_MS);
     expect(countMarkers(sinkText(bridge.sinkPath), REPLY_MARKER)).toBe(0);
-    const held = heldFor(bridge, asker);
+    const held = await awaitDeliveryLines(
+      bridge.abDir,
+      bridge.projectId,
+      asker,
+      1,
+      20_000,
+      "the reply to remain queued during the asker's turn",
+    );
     expect(held).toHaveLength(1);
     // The template turns on whether the thread already existed AT THE RECEIVER,
     // which is the only thing separating an answer from a first contact.
     expect(held[0]!.kind).toBe("reply");
 
-    await postJson(`${api}/notify`, { type: "task_complete", terminalId: asker, message: randomUUID() });
+    await postJson(`${api}/notify`, {
+      type: "task_complete",
+      terminalId: asker,
+      runId: await awaitSinkRunId(bridge.sinkPath, asker),
+      message: randomUUID(),
+    });
     await untilAsync(
       async () => (countMarkers(sinkText(bridge.sinkPath), REPLY_MARKER) === 1 ? true : undefined),
       20_000,

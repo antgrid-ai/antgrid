@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { setupTestEnv, handshakeWithoutPairing } from "../helpers/harness";
+import { establishNativeSession, setupTestEnv } from "../helpers/harness";
 import { RelayClient } from "../helpers/relay-client";
 import { resolveOnFreshAdvert } from "../support/stream";
 import { createMessage } from "../../bridge/src/protocol";
@@ -19,7 +19,7 @@ import { createMessage } from "../../bridge/src/protocol";
  * now holds two live peers.
  *
  * The second device is added to the account inventory AFTER the agent's startup
- * fetch, so it connects via `handshakeWithoutPairing` (retries on the SAME
+ * fetch, so it connects via `establishNativeSession` (retries on the same
  * socket while the bridge's throttled inventory refresh lands) rather than
  * `TestApp.connect`, whose single-shot attempt would deterministically miss —
  * same dynamic as `gate-inventory-miss` / `gate-multi-machine-slots`.
@@ -53,13 +53,12 @@ test("two app devices hold concurrent sessions with one bridge, and neither disp
     // so it addresses a relay connection distinct from env.app's (no slot
     // needed — the two are already different account devices).
     const second = await env.license.addAccountDevice();
-    app2 = await RelayClient.connectAndAuth(env.relay.url, {
-      deviceType: "app",
+    app2 = await env.connectNativeApp({
       name: "gate-two-devices-app2",
       identity: second,
-      deviceId: second.deviceId,
+      accountDeviceId: second.deviceId,
     });
-    await handshakeWithoutPairing(app2, env.agentDeviceId, env.agent.ed25519Pubkey);
+    await establishNativeSession(app2, env.agentDeviceId, env.agent.ed25519Pubkey);
 
     // Both apps plus the agent are live on the relay before anything is
     // asserted about fan-out.

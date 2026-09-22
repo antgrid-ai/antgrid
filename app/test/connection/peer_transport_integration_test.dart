@@ -127,10 +127,15 @@ class _Relay extends RelayService {
 }
 
 class _Handshake implements SessionHandshaker {
+  _Handshake({this.gate});
+
+  final Completer<void>? gate;
   int calls = 0;
+  int aborts = 0;
   @override
   Future<SessionKeys?> perform() async {
     calls++;
+    await gate?.future;
     return SessionKeys(
       a2p: Uint8List(32),
       p2a: Uint8List(32),
@@ -139,7 +144,11 @@ class _Handshake implements SessionHandshaker {
   }
 
   @override
-  void abort() {}
+  void abort() {
+    aborts++;
+    final pending = gate;
+    if (pending != null && !pending.isCompleted) pending.complete();
+  }
 }
 
 Future<void> _settle() async {
@@ -271,6 +280,44 @@ void main() {
     relay.dispose();
     await runtime.dispose();
   });
+
+  test(
+    'sign-out during handshake fences late establishment and dispatch',
+    () async {
+      final relay = _Relay();
+      final payload = _Payload();
+      final runtime = _Runtime(payload);
+      final handshakeGate = Completer<void>();
+      final handshake = _Handshake(gate: handshakeGate);
+      final connection = MachineConnection(
+        machineDeviceId: 'machine',
+        crypto: CryptoService(),
+        relayOverride: relay,
+      );
+      final statuses = <SupervisorStatus?>[];
+      final statusSub = connection.statusStream.listen(statuses.add);
+      connection.ensureStarted(
+        mechanisms: _mechanisms(relay, runtime, handshake),
+        central: _central(relay),
+      );
+      for (var i = 0; i < 50 && handshake.calls == 0; i++) {
+        await Future<void>.delayed(Duration.zero);
+      }
+      expect(handshake.calls, 1);
+
+      expect(await connection.dispose(), NativeStopResult.stopped);
+      await _settle();
+
+      expect(handshake.aborts, greaterThanOrEqualTo(1));
+      expect(payload.closed, isTrue);
+      expect(connection.session, isNull);
+      expect(statuses.whereType<Connected>(), isEmpty);
+      expect(payload.isDispatchAllowed, isFalse);
+      await statusSub.cancel();
+      relay.dispose();
+      await runtime.dispose();
+    },
+  );
   test(
     'terminal native failure blocks; retryable failure wakes the ladder',
     () async {

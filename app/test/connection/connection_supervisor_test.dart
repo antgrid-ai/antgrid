@@ -16,6 +16,7 @@ class _Native implements PeerConnectionContract {
   int fenceCalls = 0;
   int payloadFailures = 0;
   Completer<ConnCoords?>? coordsGate;
+  Completer<void>? establishGate;
   Completer<void>? releaseGate;
   Completer<void>? forceGate;
   Object? releaseError;
@@ -52,6 +53,7 @@ class _Native implements PeerConnectionContract {
   @override
   Future<void> establishSession() async {
     establishCalls++;
+    await establishGate?.future;
     established = true;
   }
 
@@ -176,6 +178,58 @@ void main() {
     await centralSupervisor.stop();
     await nativeSupervisor.stop();
   });
+
+  test(
+    'central conflict stays sticky while native recovery continues',
+    () async {
+      final now = DateTime(2026);
+      final native = _Native()..payloadFailures = 2;
+      final nativeSupervisor = NativeConnectionSupervisor(
+        native,
+        backoffBaseMs: 100000,
+        backoffCapMs: 100000,
+        jitter: (_) => 0,
+        now: () => now,
+      );
+      final central = _Central();
+      final centralSupervisor = CentralControlSupervisor(
+        central,
+        backoffBaseMs: 100000,
+        backoffCapMs: 100000,
+        jitter: (_) => 0,
+        now: () => now,
+      );
+      const coords = ConnCoords(
+        relayUrl: 'wss://central.example',
+        agentEd25519PubB64: 'agent-key',
+      );
+      nativeSupervisor.setWanted(true);
+      centralSupervisor.noteCoords(coords);
+      centralSupervisor.setWanted(true);
+      await _settle();
+      expect(native.payloadCalls, 1);
+
+      central.reconnect = true;
+      centralSupervisor.noteRelayError('SUPERSEDED');
+      final centralCalls = central.connectCalls;
+      nativeSupervisor.notePresence(true);
+      await _settle();
+
+      expect(
+        native.payloadCalls,
+        2,
+        reason: 'native recovery remains independent',
+      );
+      expect(centralSupervisor.conflict, isTrue);
+      expect(
+        central.connectCalls,
+        centralCalls,
+        reason: 'conflict remains sticky',
+      );
+      await centralSupervisor.stop();
+      await nativeSupervisor.stop();
+    },
+  );
 
   test('presence accelerates only bounded offline-to-online edges', () async {
     var now = DateTime(2026);

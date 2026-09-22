@@ -13,11 +13,7 @@ import type { TestEnv } from "./harness";
   static async connect(env: TestEnv): Promise<TestApp> {
     return new TestApp(env.app, env, false);
   }
-  /** Wrap an ALREADY connected + already E2E-handshaked `RelayClient` as a
-   *  `TestApp` — for callers that need `handshakeWithoutPairing`'s retry
-   *  (SAME socket, resent client-hello) instead of `connect`'s single-shot
-   *  attempt, e.g. a slotted identity added to the account inventory AFTER
-   *  the agent's own startup fetch (gate-multi-machine-slots). */
+  /** Wrap an already-connected native session for scenario-level operations. */
   static wrap(client: RelayClient, env: TestEnv): TestApp {
     return new TestApp(client, env);
   }
@@ -61,20 +57,25 @@ import type { TestEnv } from "./harness";
     }
   }
 
+  get lifecycleGenerations(): Readonly<{ control: number; native: number; e2e: number }> {
+    return this.client.lifecycleGenerations;
+  }
+
+  /** Prove the current native/E2E session is responsive without dialing,
+   * reconnecting, or deriving replacement keys. */
+  waitForStateSnapshot(opts: { timeoutMs?: number } = {}): Promise<{ ok: true }> {
+    return this.snapshotRoundTrip(opts.timeoutMs ?? 10_000);
+  }
+
   /**
-   * Strong session-liveness proof for the failure-matrix suites: sends a
-   * direct `state.snapshot` RPC and THROWS if it never answers ok:true —
-   * unlike `pullStateSnapshot` (which silently returns on a dead session, see
-   * its doc comment), a caller asserting "the session recovered" actually
-   * fails when it hasn't. Tries the RPC on the CURRENT E2E context first; on
-   * failure, re-runs the E2E handshake on the SAME live socket (no reconnect,
-   * no re-pair — mirrors a bridge restart handing the phone fresh keys) and
-   * retries, until `timeoutMs` elapses.
+   * Explicit recovery helper for tests whose subject is native redial or
+   * bridge restart. Ordinary snapshot assertions must use
+   * `waitForStateSnapshot`, which never changes transport generations.
    */
-  async waitForStateSnapshot(opts: { timeoutMs?: number } = {}): Promise<{ ok: true }> {
+  async recoverStateSnapshot(opts: { timeoutMs?: number } = {}): Promise<{ ok: true }> {
     const timeoutMs = opts.timeoutMs ?? 10_000;
     const deadline = Date.now() + timeoutMs;
-    let lastErr: unknown = new Error("waitForStateSnapshot: no attempt completed");
+    let lastErr: unknown = new Error("recoverStateSnapshot: no attempt completed");
     while (Date.now() < deadline) {
       const remaining = Math.max(500, deadline - Date.now());
       try {
@@ -84,7 +85,6 @@ import type { TestEnv } from "./harness";
       }
       try {
         await this.client.reconnectNative();
-        this.client.setPeerId(this.env.agentDeviceId);
         await this.client.performE2EHandshake(this.env.agentDeviceId, Math.min(2_000, Math.max(500, deadline - Date.now())), {
           agentEd25519Pub: this.env.agent.ed25519Pubkey,
         });
@@ -93,7 +93,7 @@ import type { TestEnv } from "./harness";
         await Bun.sleep(300);
       }
     }
-    throw new Error(`waitForStateSnapshot timed out after ${timeoutMs}ms: ${String(lastErr)}`);
+    throw new Error(`recoverStateSnapshot timed out after ${timeoutMs}ms: ${String(lastErr)}`);
   }
 
   private async snapshotRoundTrip(timeoutMs: number): Promise<{ ok: true }> {

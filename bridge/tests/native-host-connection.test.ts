@@ -93,7 +93,26 @@ test("peer payload diagnostics classify all production payload frames as native"
     access.onSealedPlaintext("{}", "control", "websocket-peer", null);
     expect(events.filter((event) => event.reason === "unrecognized-plaintext").map((event) => event.transport))
       .toEqual(["iroh", "iroh"]);
-    expect(events.some((event) => event.kind === "lifecycle" && event.msgType === "peer:native-accepted")).toBe(true);
+    const accepted = events.find((event) => event.kind === "lifecycle" && event.msgType === "peer:native-accepted");
+    expect(accepted?.detail?.attemptGeneration).toBe(1);
+    expect(accepted?.detail?.leaseRemainingMs).toBeGreaterThan(59_000);
+    const slot = `${f.peerId}#${f.client.deviceId}`;
+    f.access.onSessionEstablished(slot);
+    const established = events.find((event) => event.msgType === "peer:e2e-established");
+    expect(established?.detail?.attemptGeneration).toBe(1);
+    expect(established?.detail?.sessionGeneration).toBe(1);
+    expect(established?.detail?.leaseRemainingMs).toBeGreaterThan(59_000);
+    f.setAllowed(false);
+    f.client.recheckAuthorization();
+    const retired = events.find((event) => event.msgType === "peer:native-retired");
+    expect(retired?.detail).toMatchObject({
+      attemptGeneration: 1,
+      sessionGeneration: 1,
+      reason: "unauthorized",
+      teardownOutcome: "requested",
+    });
+    expect(JSON.stringify(events)).not.toContain("private");
+    expect(JSON.stringify(events)).not.toContain("test-only");
   } finally { observer.mockRestore(); f.client.close(); }
 });
 

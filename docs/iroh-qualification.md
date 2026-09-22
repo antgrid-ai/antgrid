@@ -1,15 +1,24 @@
 # Iroh qualification
 
-Historical checkpoint: 2026-09-15. **Release remains unqualified.**
+Current checkpoint: 2026-09-22. **Release remains unqualified.**
 
-Current remote payloads require Iroh. WebSocket payload selection/fallback has
-been removed; older WebSocket-only peers require an upgrade. Historical
-WebSocket evidence below does not qualify the native-only runtime.
-Implementation and regression history live in the [task ledger](iroh-migration-ledger.md).
-The [approved plan](iroh-migration-plan.md) defines acceptance criteria;
-[operations](iroh-operations.md) covers staging, rollout and rollback.
+Remote application payloads require native Iroh plus E2E encryption. The central WebSocket is control-only. Peer-frame v3 is a coordinated beta cutover: v2 is rejected and no compatibility decoder, route alias, payload fallback, or mixed-version rollout switch exists. Existing endpoint registrations and keys remain valid.
 
-## Executed evidence and its limits
+The [native follow-up plan](native-transport-followup-plan.md) defines this pass; the [simplification ledger](iroh-simplification-ledger.md) records staged commits and exact results; [operations](iroh-operations.md) covers local evidence and future rollout work.
+
+## 2026-09-22 follow-up evidence
+
+| Gate | Result | Boundary |
+| --- | --- | --- |
+| Self-contained serialized eval sweep | 100 passed, five declared skips, zero failed | Includes central control, native direct loopback, real HTTP/OAuth/Prisma authorization, host/project/file/terminal/Git/preview/session behavior, and current-protocol recovery. Explicit native-DLL and Rust-relay probes are separate. |
+| Dart/Bun native interop and resume | 17 passed, one declared skip | Production Dart `iroh_quic` against `@number0/iroh`, with three native/E2E resume cycles and retained project bindings. Direct loopback using an existing built Windows DLL. |
+| Seeded native fault soak | Passed: one test, 1,830 assertions, 1,800.77 seconds; seed `0x41c6ce57` | Direct loopback only. Tracks owned cycles, central/native faults, host restart, duplicate mutations, settled relay sessions, and process RSS. |
+| Real backend plus native host | Passed; current revocation closure about 21.95 seconds | Real device OAuth, enrollment, authorization refresh, two projects, central outage, and native revocation. Direct loopback. |
+| Rust real-backend relay probe | No qualifying result in this pass | The explicit attempt timed out at 100 seconds. The required prebuilt `real_backend_gate` probe was not qualified in this environment. |
+
+Component gates and the few non-clean broad-suite results are recorded without promotion in the simplification ledger. WAN, blocked UDP, forced-relay native QUIC, physical-device backgrounding, sleep/wake, platform packaging, and comparative performance remain unqualified.
+
+## Historical executed evidence and its limits
 
 These are recorded results from September 14-15, not checks rerun whenever this
 file changes. The ledger records component gates and subsequent fixes; a clean

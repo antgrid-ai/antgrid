@@ -19,7 +19,7 @@
 import { test, expect } from "bun:test";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { handshakeWithoutPairing, setMobileAccess, setupTestEnv } from "../helpers/harness";
+import { establishNativeSession, setMobileAccess, setupTestEnv } from "../helpers/harness";
 import { TERMINAL_PROTOCOL_VERSION } from "../../bridge/src/terminal-frames/protocol";
 import { generateEphemeralKeypair } from "../../bridge/src/key-exchange";
 import type { RelayClient } from "../helpers/relay-client";
@@ -217,7 +217,10 @@ test("outbound rides the machine switch: output stops while off and resumes only
     // === Switch OFF: the same bound stream goes quiet ===
     await setMobileAccess(env.abDir, false);
     cp.drainQueued("terminal:frame"); // in-flight frames sent before the flip
-    cp.sendOnStream(streamB, createMessage("terminal:input", { terminalId: "ticker", data: "FORBIDDEN_INPUT\r" }));
+    expect(() => cp.sendOnStream(
+      streamB,
+      createMessage("terminal:input", { terminalId: "ticker", data: "FORBIDDEN_INPUT\r" }),
+    )).toThrow(/Native payload is not connected/);
     const whileOff = await collectOutput(cp, streamB, "ticker", 6_000);
     expect(whileOff).toEqual([]);
     expect(existsSync(join(projBdir.dir, "input.log"))).toBe(false);
@@ -225,7 +228,8 @@ test("outbound rides the machine switch: output stops while off and resumes only
     // Re-enabling cannot resurrect old keys or replay denied input.
     await setMobileAccess(env.abDir, true);
     expect(await collectOutput(cp, streamB, "ticker", 500)).toEqual([]);
-    await handshakeWithoutPairing(cp, env.agentDeviceId, env.agent.ed25519Pubkey);
+    await cp.reconnectNative();
+    await establishNativeSession(cp, env.agentDeviceId, env.agent.ed25519Pubkey);
     const freshStream = await cp.openProjectStream(projB, 12_000);
     await subscribe(cp, freshStream, "ticker");
     const whileOnAgain = await collectOutput(cp, freshStream, "ticker", 15_000, 2);
@@ -298,13 +302,16 @@ test("machine switch on exposes the catalog; switch off retires E2E and never re
 
     // projC is stopped, so a dispatched start would be visible in the host list.
     cp.drainQueued("control:result");
-    cp.sendEncrypted(createMessage("project:start", { projectId: projC }));
+    expect(() => cp.sendEncrypted(
+      createMessage("project:start", { projectId: projC }),
+    )).toThrow(/Native payload is not connected/);
     expect(await cp.waitForAbType("control:result", 1_000).catch(() => null)).toBeNull();
     const projectIsRunning = async () => (await loopbackControl(env.abDir, { id: "list", type: "project:list" }))
       .projects.some((project: any) => project.projectId === projC && project.running);
     expect(await projectIsRunning()).toBe(false);
     await setMobileAccess(env.abDir, true);
-    await handshakeWithoutPairing(cp, env.agentDeviceId, env.agent.ed25519Pubkey);
+    await cp.reconnectNative();
+    await establishNativeSession(cp, env.agentDeviceId, env.agent.ed25519Pubkey);
     await cp.pullStateSnapshot();
     expect(await projectIsRunning()).toBe(false);
     await cp.openProjectStream(projC, 12_000);

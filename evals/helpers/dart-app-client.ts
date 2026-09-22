@@ -37,7 +37,15 @@ function dartRunArgv(): string[] {
 const MAX_QUEUE_LENGTH = 1_000;
 
 /** An event emitted by the Dart CLI over stdout (JSON line). */
-type DartEvent = Record<string, any>;
+type DartLifecycleEvent =
+  | { event: "initialized"; deviceId: string; publicKey: string; x25519PublicKey: string }
+  | { event: "control-connected" }
+  | { event: "peer-connected"; endpointId: string; leaseRemainingMs: number }
+  | { event: "peer-disconnected" }
+  | { event: "control-disconnected" }
+  | { event: "disconnected" };
+
+type DartEvent = (DartLifecycleEvent | { event: string }) & Record<string, any>;
 
 type Waiter = {
   match: (event: DartEvent) => boolean;
@@ -252,31 +260,44 @@ export class DartAppClient {
     );
   }
 
-  async connect(
+  async connectControl(
     relayUrl: string,
     licenseToken: string,
     machineDeviceId: string,
-    native: {
-      licenseApiUrl: string;
-      accountId: string;
-      enrollmentId: string;
-      clientSecret: string;
-      addresses: string[];
-    },
   ): Promise<void> {
-    const connected = this.waitForEvent((e) => e.event === "native-connected", 30_000);
+    const connected = this.waitForEvent((e) => e.event === "control-connected", 30_000);
     this.sendCommand({
-      action: "connect",
+      action: "control-connect",
       relayUrl,
       licenseToken,
       machineDeviceId,
-      licenseApiUrl: native.licenseApiUrl,
-      accountId: native.accountId,
-      enrollmentId: native.enrollmentId,
-      clientSecret: native.clientSecret,
-      nativeAddresses: native.addresses,
     });
     await connected;
+  }
+
+  async connectPeer(options: {
+    licenseApiUrl: string;
+    accountId: string;
+    enrollmentId: string;
+    clientSecret: string;
+    machineDeviceId: string;
+    addresses: string[];
+  }): Promise<{ endpointId: string; leaseRemainingMs: number }> {
+    const connected = this.waitForEvent((e) => e.event === "peer-connected", 30_000);
+    this.sendCommand({
+      action: "peer-connect",
+      machineDeviceId: options.machineDeviceId,
+      licenseApiUrl: options.licenseApiUrl,
+      accountId: options.accountId,
+      enrollmentId: options.enrollmentId,
+      clientSecret: options.clientSecret,
+      nativeAddresses: options.addresses,
+    });
+    const event = await connected;
+    return {
+      endpointId: event.endpointId as string,
+      leaseRemainingMs: event.leaseRemainingMs as number,
+    };
   }
   /**
    * Drive the pull-model E2E handshake to `established`. The eval-client
@@ -536,9 +557,23 @@ export class DartAppClient {
     }
   }
 
+  async disconnectPeer(): Promise<void> {
+    const disconnected = this.waitForEvent((e) => e.event === "peer-disconnected", 10_000);
+    this.sendCommand({ action: "peer-disconnect" });
+    await disconnected;
+  }
+
+  async disconnectControl(): Promise<void> {
+    const disconnected = this.waitForEvent((e) => e.event === "control-disconnected", 10_000);
+    this.sendCommand({ action: "control-disconnect" });
+    await disconnected;
+  }
+
   async disconnect(): Promise<void> {
     try {
-      this.sendCommand({ action: "disconnect" });
+      const disconnected = this.waitForEvent((e) => e.event === "disconnected", 10_000);
+      this.sendCommand({ action: "dispose" });
+      await disconnected;
     } catch {
       // Ignore write errors if process already died
     }

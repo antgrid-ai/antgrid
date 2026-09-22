@@ -25,7 +25,7 @@ import {
   allocatePort,
   generateAppIdentity,
   generateEvalAuth,
-  handshakeWithoutPairing,
+  establishNativeSession,
   setMobileAccess,
   spawnAgent,
   startFakeLicenseApi,
@@ -82,6 +82,15 @@ async function withMachine(label: string, body: (m: Machine) => Promise<void>): 
       accountDevices: [{ deviceId: appIdentity.deviceId, ed25519Pub: appIdentity.publicKeyBase64 }],
     });
     const auth = generateEvalAuth();
+    const appAuth = {
+      ...generateEvalAuth(),
+      userId: auth.userId,
+      deviceUuid: appIdentity.deviceId,
+      ed25519Pub: appIdentity.publicKeyBase64,
+      ed25519Priv: appIdentity.privateKeySeed.toString("base64"),
+    };
+    licenseApi.provision(appAuth);
+    const nativePort = allocatePort();
     project = createTestProject("basic", { "__RELAY_URL__": `ws://localhost:${relayPort}` });
 
     agent = await spawnAgent({
@@ -90,7 +99,10 @@ async function withMachine(label: string, body: (m: Machine) => Promise<void>): 
       abDir,
       projectDir: project.dir,
       auth,
-      env: { ANTGRID_EVAL_TEST: "1" },
+      env: {
+        ANTGRID_EVAL_TEST: "1",
+        ANTGRID_EVAL_IROH_BIND_ADDR: `127.0.0.1:${nativePort}`,
+      },
     });
 
     const relayUrl = relay.url;
@@ -106,12 +118,27 @@ async function withMachine(label: string, body: (m: Machine) => Promise<void>): 
           deviceId: appIdentity.deviceId,
         });
         phones.push(phone);
+        try {
+          await phone.connectNative({
+            licenseApiUrl: licenseApi!.url,
+            accountId: appAuth.userId,
+            enrollmentId: appAuth.clientId,
+            clientSecret: appAuth.clientSecret,
+            endpointSecret: appAuth.endpointSecret,
+            machineDeviceId: auth.deviceUuid,
+            addresses: [`127.0.0.1:${nativePort}`],
+          });
+        } catch (error) {
+          if (admission === "allowed") throw error;
+          expect(error).toBeDefined();
+          return phone;
+        }
         if (admission === "allowed") {
-          await handshakeWithoutPairing(phone, auth.deviceUuid, auth.ed25519Pub);
+          await establishNativeSession(phone, auth.deviceUuid, auth.ed25519Pub);
         } else {
           let refused = false;
           try {
-            await handshakeWithoutPairing(phone, auth.deviceUuid, auth.ed25519Pub,
+            await establishNativeSession(phone, auth.deviceUuid, auth.ed25519Pub,
               { attempts: 2, perAttemptTimeoutMs: 1_000, gapMs: 200 });
           } catch { refused = true; }
           expect(refused).toBe(true);

@@ -4,13 +4,14 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createMessage } from "../../bridge/src/protocol";
-import { loadDeliveries } from "../../bridge/src/session-bus/delivery-queue";
 import { setMobileAccess } from "../helpers/harness";
 import { setupTwoBridgeEnv, type BridgeMachine, type TwoBridgeEnv } from "../helpers/two-bridge";
 import {
   NOTIFY_MARKER,
   SINK_SCRIPT_NAME,
   apiPort,
+  awaitDeliveryLines,
+  awaitSinkRunId,
   busCall,
   countMarkers,
   postJson,
@@ -292,7 +293,13 @@ test("a message crosses to the other machine, comes back receipted, and refuses 
   // A turn is opened on the receiver so the notify below has a boundary to wait
   // at: an idle session reaches one immediately, which would prove the frame
   // crossed but nothing about when it is allowed to speak.
-  await postJson(`http://127.0.0.1:${portB}/turn-start`, { terminalId: sessionB });
+  const runIdB = await awaitSinkRunId(sinks.b, sessionB, CROSS_TIMEOUT_MS);
+  const turnStarted = await postJson(
+    `http://127.0.0.1:${portB}/turn-start`,
+    { terminalId: sessionB, runId: runIdB },
+  );
+  expect(turnStarted.ok).toBe(true);
+  expect(turnStarted.stale).not.toBe(true);
 
   const NOTIFY_SUMMARY = "Main is red on the same two tests; stop rebasing onto it.";
   const notified = await busCall(a.env.abDir, "notify", {
@@ -308,11 +315,11 @@ test("a message crosses to the other machine, comes back receipted, and refuses 
   // submitted and cleared only once it went in. Waiting on it is what makes the
   // "nothing reached the terminal" assertion below a statement about the turn
   // boundary rather than about a frame that never crossed at all.
-  const queued = await untilAsync(
-    async () => {
-      const lines = loadDeliveries(b.env.abDir, b.env.projectId).lines.filter((l) => l.sessionId === sessionB);
-      return lines.length > 0 ? lines : undefined;
-    },
+  const queued = await awaitDeliveryLines(
+    b.env.abDir,
+    b.env.projectId,
+    sessionB,
+    1,
     CROSS_TIMEOUT_MS,
     `the notify from machine a to be queued for session ${sessionB} on machine b`,
   );
@@ -323,6 +330,7 @@ test("a message crosses to the other machine, comes back receipted, and refuses 
   await postJson(`http://127.0.0.1:${portB}/notify`, {
     type: "task_complete",
     terminalId: sessionB,
+    runId: runIdB,
     message: `turn closed ${randomUUID()}`,
   });
   await until(
