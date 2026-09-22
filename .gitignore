@@ -3,7 +3,7 @@
 *.log
 *.pyc
 *.swp
-/.tmp/
+.tmp/
 
 # Android signing keys — never commit
 *.jks
