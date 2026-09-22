@@ -42,8 +42,12 @@ const ogUrl = new URL(ogImage, SITE_URL).href;
 <meta name="description" content={description} />
 {robots && <meta name="robots" content={robots} />}
 <link rel="canonical" href={canonical} />
-{/* Keep in lockstep with --color-page in styles/global.css. */}
-<meta name="theme-color" content="#101015" />
+{/* The two halves of --color-page in styles/global.css; tests/unit/theme-color
+    .test.ts holds them together. Light FIRST and never reordered: Chrome takes
+    the first meta whose `media` matches, and the override script in Base.astro
+    flips `media` to all / not all rather than rewriting content. */}
+<meta name="theme-color" media="(prefers-color-scheme: light)" content="#f7f4ee" data-scheme="light" />
+<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#131110" data-scheme="dark" />
 <link rel="icon" href="/logo/antgrid-favicon.svg" type="image/svg+xml" />
 <link rel="icon" href="/favicon.ico" sizes="any" />
 <link rel="apple-touch-icon" href="/logo/apple-touch-icon-180.png" />
