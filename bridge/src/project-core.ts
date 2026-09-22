@@ -296,8 +296,12 @@ export class ProjectCore {
   /** The user typed into [sessionId]'s PTY — the only "I answered" signal a
    *  terminal-mode session has. Clears its block; claims a turn only for an
    *  agent that can't report its own turn starts, and only when the session has
-   *  typed content to submit. See {@link userReply}. */
-  noteUserReply(sessionId: string, opts: { submitted: boolean; typed: boolean }): void {
+   *  a typed PROMPT to submit — one of the CLI's own `/` commands runs no model
+   *  turn and so has no turn-end to close what it opened. See {@link userReply}. */
+  noteUserReply(
+    sessionId: string,
+    opts: { submitted: boolean; typed: boolean; command?: boolean },
+  ): void {
     this.commitWork(userReply(this._work, sessionId, opts));
   }
 

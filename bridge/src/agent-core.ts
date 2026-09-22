@@ -21,6 +21,7 @@ import {
   isInterruptKeystroke,
   isSubmitKeystroke,
   isTerminalReport,
+  opensCommandLine,
   submittedLine,
 } from "./keystrokes";
 import { AGENT_GRACE_MS, killChildTree, processGroupSpawn } from "./terminal-session";
@@ -441,10 +442,12 @@ export interface BuildAgentCoreOptions {
    *  on its own: typing in an idle session is not work. `submitted` (the input
    *  carried a CR) is a turn-start only for agents that have no pre-turn hook,
    *  and only once `typed` has reported content for that session — a bare enter
-   *  submits nothing (see {@link hasTypedContent}). */
+   *  submits nothing (see {@link hasTypedContent}) — and only when that content
+   *  was a prompt rather than one of the CLI's own commands, which run no model
+   *  turn and so fire no turn-end (see {@link opensCommandLine}). */
   onUserReply?: (
     sessionId: string,
-    opts: { submitted: boolean; typed: boolean },
+    opts: { submitted: boolean; typed: boolean; command?: boolean },
   ) => void;
   /** Fired when the user resolves a permission/question on [sessionId], so the
    *  owning ProjectCore can clear the block and resume the turn. Distinct from
@@ -2047,6 +2050,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         opts.onUserReply?.(msg.terminalId, {
           submitted: isSubmitKeystroke(msg.data),
           typed: hasTypedContent(msg.data),
+          command: opensCommandLine(msg.data),
         });
         // ...and lifts a session-bus no-progress halt. The halt waits on a human
         // looking (spec 8); a human submitting into that session is the only such

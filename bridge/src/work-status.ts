@@ -2,6 +2,11 @@ import { needsKeystrokeTurnStart } from "./agent-runtime";
 import type { ClientKey } from "./message-bus";
 import type { AbMessage, NotificationType, WorkStatus } from "./protocol";
 
+/** What a session's half-typed composer line will be if it is submitted: a
+ *  prompt the agent answers with a model turn, or one of the CLI's own commands
+ *  that it answers itself. See {@link WorkStatusState.typedSessions}. */
+export type TypedLine = "prompt" | "command";
+
 /** Reduced work status for the control-plane advert, folded from a core's
  *  OUTBOUND bus frames plus the inbound turn-start/answer hooks.
  *
@@ -42,11 +47,21 @@ export interface WorkStatusState {
    *  already written off — a turn opened by a keystroke that nothing could ever
    *  close, which is what a wedged "working" dot is made of. */
   readonly deadHookSessions: ReadonlySet<string>;
-  /** Sessions that have received PTY input carrying more than the submitting CR
-   *  since their last inferred turn. The evidence half of the keystroke
-   *  inference: without it a bare enter — on an empty prompt, or to dismiss a
-   *  TUI menu — opened a turn no stop hook was ever going to close. */
-  readonly typedSessions: ReadonlySet<string>;
+  /** What is sitting in each session's composer: the line it has received PTY
+   *  input for since its last inferred turn, classified by the first thing typed
+   *  on it. The evidence half of the keystroke inference — without an entry a
+   *  bare enter (on an empty prompt, or to dismiss a TUI menu) opened a turn no
+   *  stop hook was ever going to close.
+   *
+   *  The `"command"` classification is the other half of that same guard. A line
+   *  that opened with `/` is one of the agent CLI's OWN commands, which it
+   *  answers itself without running a model turn, so no turn-end hook fires for
+   *  it either — and
+   *  `/compact`, `/clear` and `/new` are things a user submits several times a
+   *  session. A command that DOES run a turn (`/review`, `/init`) costs an unlit
+   *  dot until its turn-end lands, which is the cheap direction to be wrong in.
+   *  See `opensCommandLine` in keystrokes.ts. */
+  readonly typedSessions: ReadonlyMap<string, TypedLine>;
   /** What each client has ON SCREEN — at most one session per client, since a
    *  client shows one at a time. Keyed by {@link ClientKey} because that is the
    *  honest granularity: the desktop owner reaches a core over loopback while
@@ -172,6 +187,7 @@ export function openedTurns(prev: WorkStatusState, next: WorkStatusState): strin
 const EMPTY_IDS: ReadonlySet<string> = new Set();
 const EMPTY_NOTIFICATIONS: ReadonlyMap<string, NotificationType> = new Map();
 const EMPTY_REQUESTS: ReadonlyMap<string, ReadonlySet<string>> = new Map();
+const EMPTY_TYPED: ReadonlyMap<string, TypedLine> = new Map();
 const EMPTY_FOCUS: ReadonlyMap<ClientKey, string> = new Map();
 
 /** The mutable inputs {@link build} folds into a state; everything else on
@@ -184,7 +200,7 @@ interface WorkInputs {
   pendingTurns: ReadonlySet<string>;
   keystrokeTurnSessions: ReadonlySet<string>;
   deadHookSessions: ReadonlySet<string>;
-  typedSessions: ReadonlySet<string>;
+  typedSessions: ReadonlyMap<string, TypedLine>;
   focusedSessions: ReadonlyMap<ClientKey, string>;
   readTracking: boolean;
   unreadSessions: ReadonlySet<string>;
@@ -387,7 +403,7 @@ export const initialWorkStatus: WorkStatusState = build({
   pendingTurns: EMPTY_IDS,
   keystrokeTurnSessions: EMPTY_IDS,
   deadHookSessions: EMPTY_IDS,
-  typedSessions: EMPTY_IDS,
+  typedSessions: EMPTY_TYPED,
   focusedSessions: EMPTY_FOCUS,
   readTracking: false,
   unreadSessions: EMPTY_IDS,
@@ -557,14 +573,23 @@ export function answerRequest(
  *  ({@link noteHookChannelLost}). Agents with a real turn-start signal are left
  *  to it: guessing from keystrokes there could only be wrong.
  *
- *  ...and only once [typed] has reported content for this session. A PTY sends
- *  one keystroke per frame, so the submitting CR normally arrives alone and
- *  `submitted` alone cannot distinguish a prompt from enter on an empty prompt or
- *  on a TUI menu. Those start no turn, so the stop hook the inference relies on
- *  never fires and the session hangs on "working" until some LATER turn ends.
- *  Requiring typed content since the last inferred turn is the evidence that a
- *  prompt existed at all; the marker is consumed when the turn opens, so the next
- *  bare enter has to earn its own.
+ *  ...and only once [typed] has reported content for this session, and only when
+ *  that content was a PROMPT. A PTY sends one keystroke per frame, so the
+ *  submitting CR normally arrives alone and `submitted` alone cannot distinguish
+ *  a prompt from enter on an empty prompt or on a TUI menu. Those start no turn,
+ *  so the stop hook the inference relies on never fires and the session hangs on
+ *  "working" until some LATER turn ends. Requiring typed content since the last
+ *  inferred turn is the evidence that a prompt existed at all.
+ *
+ *  [command] classifies that content, and only on the frame that OPENS the line —
+ *  a line beginning `/` is one of the CLI's own commands (`/compact`, `/clear`,
+ *  `/new`), which it answers without a model turn and therefore without a
+ *  turn-end hook. Submitting one used to open a turn nothing could close, which
+ *  is a wedged "working" dot a user hits several times a session.
+ *
+ *  The line is consumed by the submit either way, opening or not: it has left the
+ *  composer, so the next one classifies itself afresh — and a bare enter after it
+ *  has to earn its own content.
  *
  *  Otherwise deliberately narrower than {@link turnStart}: a bare keystroke is
  *  weaker evidence than a submitted prompt, so it never clears the UNATTRIBUTED
@@ -573,20 +598,33 @@ export function answerRequest(
 export function userReply(
   prev: WorkStatusState,
   sessionId: string,
-  opts: { submitted?: boolean; typed?: boolean } = {},
+  opts: { submitted?: boolean; typed?: boolean; command?: boolean } = {},
 ): WorkStatusState {
   const own = prev.notifications.get(sessionId);
   const blocked = own !== undefined && isCallToAction(own);
   const pending = prev.pendingRequests.has(sessionId);
-  // Content in THIS frame counts toward this same submit: a paste (or the app's
-  // send-to-agent composer) delivers "prompt text\r" as one chunk.
-  const typed = opts.typed === true || prev.typedSessions.has(sessionId);
+  // What a line this frame OPENS would be. Content in this frame counts toward
+  // this same submit: a paste (or the app's send-to-agent composer) delivers
+  // "prompt text\r" as one chunk.
+  const opening: TypedLine | undefined = opts.typed === true
+    ? (opts.command === true ? "command" : "prompt")
+    : undefined;
+  // A line already in the composer wins: what opened it is what classifies it,
+  // and every frame after the first carries the middle of a line.
+  const held = prev.typedSessions.get(sessionId);
+  const line = held ?? opening;
   const opens = opts.submitted === true
-    && typed
+    && line === "prompt"
     && prev.keystrokeTurnSessions.has(sessionId)
     && !prev.activeTurns.has(sessionId);
-  const recordTyped = opts.typed === true && !prev.typedSessions.has(sessionId);
-  if (!blocked && !pending && !opens && !recordTyped) return prev;
+  // A frame that both types and submits (a paste) leaves nothing behind: the
+  // line it opens is the line the same frame consumes.
+  const recordTyped = opening !== undefined && held === undefined && opts.submitted !== true;
+  // The submit takes the line with it whether or not it opened a turn — a
+  // classification latched past its own submit is the mirror failure: one
+  // `/compact` and the session could never read "working" again.
+  const clearsLine = opts.submitted === true && held !== undefined;
+  if (!blocked && !pending && !opens && !recordTyped && !clearsLine) return prev;
   let notifications = prev.notifications;
   // Opening the turn means clearing the session's turn-end notification too:
   // statusFor reads notifications BEFORE activeTurns, so a leftover
@@ -597,10 +635,12 @@ export function userReply(
     notifications = next;
   }
   let typedSessions = prev.typedSessions;
-  if (opens) {
-    typedSessions = withoutTurn(typedSessions, sessionId);
-  } else if (recordTyped) {
-    typedSessions = new Set(typedSessions).add(sessionId);
+  if (clearsLine) {
+    const next = new Map(prev.typedSessions);
+    next.delete(sessionId);
+    typedSessions = next;
+  } else if (recordTyped && opening !== undefined) {
+    typedSessions = new Map(typedSessions).set(sessionId, opening);
   }
   return build({
     ...inputsOf(prev),
@@ -964,8 +1004,8 @@ function foldSessions(
   for (const [id, n] of prev.notifications) {
     if (id === UNATTRIBUTED_TURN ? live.size > 0 : live.has(id)) notifications.set(id, n);
   }
-  const typedSessions = new Set<string>();
-  for (const id of prev.typedSessions) if (live.has(id)) typedSessions.add(id);
+  const typedSessions = new Map<string, TypedLine>();
+  for (const [id, line] of prev.typedSessions) if (live.has(id)) typedSessions.set(id, line);
   // A newly-started session is a fresh turn of work — clear a stale done-type
   // UNATTRIBUTED notification so a turn-start on the new session isn't masked by
   // a fallback that predates it. The call-to-action signals ({@link

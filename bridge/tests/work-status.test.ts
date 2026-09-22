@@ -724,6 +724,69 @@ test("a submitted prompt on an already-working session is a no-op (SAME object)"
   expect(queued.activeTurns).toEqual(working.activeTurns);
 });
 
+// ── The CLI's own commands are not prompts ───────────────────────────────────
+
+test("a submitted slash command does NOT open a turn", () => {
+  // `/compact`, `/clear`, `/new`, `/model`… are answered by the CLI itself and
+  // run no model turn, so neither turn-end channel ever fires for one. Measured
+  // against a real codex: an ordinary prompt fires its `notify` argv, `/compact`,
+  // `/new` and `/status` fire nothing. Inferring a start from one wedged the
+  // session on "working" for the rest of its life.
+  const idle = fold([sessions(1, { tool: "codex" })]);
+  // One keystroke per frame: the `/` that opens the line, then the rest of it.
+  const slash = userReply(idle, "r0", { typed: true, command: true });
+  const rest = userReply(slash, "r0", { typed: true });
+  expect(userReply(rest, "r0", { submitted: true }).status).toBe("done");
+});
+
+test("a slash command pasted whole (one chunk) does NOT open a turn", () => {
+  // The app's send-to-agent composer delivers "line\r" as a single frame.
+  const idle = fold([sessions(1, { tool: "codex" })]);
+  expect(
+    userReply(idle, "r0", { typed: true, submitted: true, command: true }).status,
+  ).toBe("done");
+});
+
+test("the command line is consumed by its submit, so the next prompt still opens", () => {
+  // The whole failure this guards: leaving the classification latched turned one
+  // `/compact` into a session that could never read "working" again.
+  const idle = fold([sessions(1, { tool: "codex" })]);
+  const afterCommand = userReply(
+    userReply(idle, "r0", { typed: true, command: true }),
+    "r0",
+    { submitted: true },
+  );
+  expect(afterCommand.status).toBe("done");
+  const prompt = userReply(afterCommand, "r0", { typed: true });
+  expect(userReply(prompt, "r0", { submitted: true }).status).toBe("working");
+});
+
+test("only the character that OPENS the line classifies it", () => {
+  // A `/` typed mid-prompt ("see /etc/hosts") is not a command, and the frames
+  // after the first carry the middle of a line rather than its start.
+  const idle = fold([sessions(1, { tool: "codex" })]);
+  const typed = userReply(idle, "r0", { typed: true });
+  const slashInside = userReply(typed, "r0", { typed: true, command: true });
+  expect(userReply(slashInside, "r0", { submitted: true }).status).toBe("working");
+});
+
+test("a frame that types and submits at once leaves no line behind (SAME object)", () => {
+  // The record and the clear cancel out. Rebuilding anyway would break the
+  // SAME-object contract `commitWork` reads to decide there was a transition.
+  const claude = fold([sessions(1, { tool: "claude-code" })]);
+  expect(userReply(claude, "r0", { typed: true, submitted: true })).toBe(claude);
+  expect(userReply(claude, "r0", { typed: true, submitted: true, command: true })).toBe(claude);
+});
+
+test("a command line still clears the block it was typed into", () => {
+  // The other half of userReply is unconditional: a terminal-mode session has no
+  // resolve frame, so any keystroke is what says the reported block is gone —
+  // typing `/model` at a permission prompt must not leave it on "needs you".
+  const blocked = fold([sessions(1, { tool: "codex" }), push("permission_request", "r0")]);
+  expect(blocked.status).toBe("attention");
+  expect(userReply(blocked, "r0", { typed: true, command: true }).status).toBe("done");
+});
+
 test("the project's agent.tool is what a session with no tool of its own inherits", () => {
   // A SessionEntry only carries `tool` when it OVERRODE the project default, so
   // reading it alone opted every default-spec session out of the inference.
