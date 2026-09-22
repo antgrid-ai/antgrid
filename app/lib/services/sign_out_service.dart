@@ -15,6 +15,13 @@ import '../util/ab_log.dart';
 const _kRetiredPhonePrivPrefix = 'antgrid.phone_priv.';
 const _kRetiredPhonePubPrefix = 'antgrid.phone_pub.';
 
+class SignOutCleanupIncomplete implements Exception {
+  const SignOutCleanupIncomplete(this.cause);
+  final Object cause;
+  @override
+  String toString() => 'Sign-out cleanup incomplete: $cause';
+}
+
 /// Orchestrates a **hard** sign-out: revoke this device on the account, then
 /// wipe every piece of local identity and connection state so the app lands in
 /// a clean signed-out condition.
@@ -22,9 +29,8 @@ const _kRetiredPhonePubPrefix = 'antgrid.phone_pub.';
 /// Two principles drive the ordering and error handling:
 ///   - **Server revoke happens while the cookie is still valid** — it runs
 ///     before [AuthService.signOut] clears the session.
-///   - **Local teardown always completes.** Server revoke, minter stop, and
-///     session close are best-effort; a failure in any one of them must not
-///     leave a half-signed-out state with stale keys at rest.
+///   - **Owned transports must be confirmed closed.** A cleanup failure locks
+///     the current identity and preserves its credentials for recovery.
 ///
 /// Provider invalidation and the live-session eviction are injected as
 /// [stopMinter]/[closeSessions] callbacks so this class stays free of Riverpod
@@ -38,12 +44,15 @@ class SignOutService {
     required this.pushIdentity,
     required this.recentAgentsStore,
     this.stopMinter,
+    this.blockNewWork,
     this.clearPushToken,
     this.closeSessions,
+    this.clearPeerRuntime,
     this.clearCaches,
     this.releaseControlPlanes,
     FlutterSecureStorage? secureStorage,
     void Function(Object error, StackTrace stack)? onStepError,
+    this.onCleanupLocked,
   }) : _secureStorage = secureStorage ?? const FlutterSecureStorage(),
        _onStepError = onStepError ?? _debugReport;
 
@@ -61,6 +70,9 @@ class SignOutService {
   /// Cancels the license-token refresh timer so it can't re-mint mid-teardown.
   final Future<void> Function()? stopMinter;
 
+  /// Synchronously prevents new project, control, or native work from starting.
+  final void Function()? blockNewWork;
+
   /// Tells every warm session's paired agent to stop pushing to this device
   /// (empty-token `push:register`). Must run before [closeSessions] tears down
   /// the transports it needs to send on — a signed-out phone with no more live
@@ -72,6 +84,9 @@ class SignOutService {
   /// [clearCaches] deletes them.
   final Future<void> Function()? closeSessions;
 
+  /// Retires the enrollment-scoped native endpoint after machine teardown.
+  final Future<void> Function()? clearPeerRuntime;
+
   /// Wipes every persisted cache derived from the account — cached session
   /// lists, project labels and work status, remembered ports, the agent
   /// catalog, the paired-machine list, per-project file-tree prefs. Identity
@@ -81,13 +96,8 @@ class SignOutService {
   /// write-through can land behind it.
   final Future<void> Function()? clearCaches;
 
-  /// Closes every machine control-plane socket still open (eager launch dials,
-  /// viewed machines — [closeSessions] only evicts project sessions, never
-  /// machine sockets). Runs LAST: the reaper normally owns release, but
-  /// sign-out unmounts it in a race against the recents-clear ripple, and a
-  /// resume during the slow revoke steps can even dial fresh sockets — this
-  /// step is the deterministic backstop that a signed-out app holds no open
-  /// relay connections.
+  /// Closes every machine control-plane socket after project eviction and
+  /// before the enrollment runtime or credentials are cleared.
   final Future<void> Function()? releaseControlPlanes;
 
   /// Backs the retired-key sweep below. Everything else on this class reaches
@@ -95,12 +105,27 @@ class SignOutService {
   /// because the keys it deletes have no owner left to ask.
   final FlutterSecureStorage _secureStorage;
 
-  /// Reports a swallowed step failure. Best-effort steps never throw out of
-  /// [hardSignOut], but a failed server revoke must remain observable — it
-  /// means the device is still live on the account despite the user's intent.
+  /// Reports both best-effort failures and ownership cleanup failures.
   final void Function(Object error, StackTrace stack) _onStepError;
+  final void Function(SignOutCleanupIncomplete failure)? onCleanupLocked;
+
+  bool _cleanupLocked = false;
+  Object? _cleanupError;
+  bool get cleanupLocked => _cleanupLocked;
+  Object? get cleanupError => _cleanupError;
 
   Future<void> hardSignOut() async {
+    if (_cleanupLocked) {
+      throw SignOutCleanupIncomplete(
+        _cleanupError ?? StateError('cleanup remains locked'),
+      );
+    }
+    try {
+      blockNewWork?.call();
+    } catch (error, stack) {
+      _lockCleanup(error, stack);
+    }
+
     // Tell paired agents to stop pushing to this device while sessions are
     // still live — closeSessions below tears down the transports this needs.
     await _swallow('clearPushToken', () async => clearPushToken?.call());
@@ -108,7 +133,13 @@ class SignOutService {
     // Stop token churn and begin tearing down live connections first, before we
     // revoke and drop the credentials they depend on.
     await _swallow('stopMinter', () async => stopMinter?.call());
-    await _swallow('closeSessions', () async => closeSessions?.call());
+    try {
+      await closeSessions?.call();
+      await releaseControlPlanes?.call();
+      await clearPeerRuntime?.call();
+    } catch (error, stack) {
+      _lockCleanup(error, stack);
+    }
 
     // Revoke this device server-side while the session cookie is still valid.
     await _swallow('revokeDevice', _revokeDeviceServerSide);
@@ -124,13 +155,18 @@ class SignOutService {
     await _swallow('clearRecentAgents', recentAgentsStore.clear);
     await _swallow('clearRetiredPhoneKeys', _sweepRetiredPhonePairingKeys);
     await _swallow('clearCaches', () async => clearCaches?.call());
+  }
 
-    // After clearRecentAgents: anything a mid-sign-out resume eagerly dialed
-    // is caught here too.
-    await _swallow(
-      'releaseControlPlanes',
-      () async => releaseControlPlanes?.call(),
+  Never _lockCleanup(Object error, StackTrace stack) {
+    _cleanupLocked = true;
+    _cleanupError = error;
+    final failure = SignOutCleanupIncomplete(error);
+    _onStepError(
+      StateError('hard sign-out ownership cleanup failed: $error'),
+      stack,
     );
+    onCleanupLocked?.call(failure);
+    throw failure;
   }
 
   /// Deletes the retired per-machine phone pairing seeds.

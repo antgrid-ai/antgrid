@@ -24,6 +24,47 @@ Map<String, dynamic> snapshot({String policy = '1', bool allowed = true}) => {
   ],
 };
 
+class _Scheduled implements LeaseScheduleHandle {
+  _Scheduled(this.dueMs, this.callback);
+  final int dueMs;
+  final void Function() callback;
+  bool cancelled = false;
+  @override
+  void cancel() => cancelled = true;
+}
+
+class _FakeScheduler {
+  int nowMs = 0;
+  final tasks = <_Scheduled>[];
+  LeaseScheduleHandle schedule(Duration delay, void Function() callback) {
+    final task = _Scheduled(nowMs + delay.inMilliseconds, callback);
+    tasks.add(task);
+    return task;
+  }
+
+  void elapse(int milliseconds) {
+    final target = nowMs + milliseconds;
+    while (true) {
+      final due = tasks
+          .where((task) => !task.cancelled && task.dueMs <= target)
+          .toList()
+        ..sort((a, b) => a.dueMs.compareTo(b.dueMs));
+      if (due.isEmpty) break;
+      final task = due.first;
+      task.cancelled = true;
+      nowMs = task.dueMs;
+      task.callback();
+    }
+    nowMs = target;
+  }
+
+  List<int> get activeDelays => tasks
+      .where((task) => !task.cancelled)
+      .map((task) => task.dueMs - nowMs)
+      .toList()
+    ..sort();
+}
+
 void main() {
   test(
     'resume admission waits for fresh authorization, not the old request',
@@ -190,6 +231,94 @@ void main() {
     expect(await lease.refresh(), isTrue);
     response = snapshot(policy: '1');
     expect(await lease.refresh(), isFalse);
+    expect(lease.isValid, isFalse);
+    await lease.dispose();
+  });
+
+  test('refreshes after one third of the accepted lease with jitter', () async {
+    final clock = _FakeScheduler();
+    var calls = 0;
+    final lease = AuthorizationLease(
+      accountId: 'account',
+      deviceId: local,
+      enrollmentId: 'credential',
+      nowMs: () => clock.nowMs,
+      schedule: clock.schedule,
+      random: () => 0.5,
+      fetchSnapshot: () async {
+        calls++;
+        return AuthorizationSnapshot.fromJson(snapshot());
+      },
+    );
+    lease.startRefreshing();
+    expect(await lease.refresh(), isTrue);
+    expect(clock.activeDelays, containsAll([20000, 60000]));
+    clock.elapse(19999);
+    expect(calls, 1);
+    clock.elapse(1);
+    await Future<void>.delayed(Duration.zero);
+    expect(calls, 2);
+    await lease.dispose();
+  });
+
+  test('transient refresh failures retry without extending the deadline', () async {
+    final clock = _FakeScheduler();
+    var calls = 0;
+    final lease = AuthorizationLease(
+      accountId: 'account',
+      deviceId: local,
+      enrollmentId: 'credential',
+      nowMs: () => clock.nowMs,
+      schedule: clock.schedule,
+      random: () => 0.5,
+      fetchSnapshot: () async {
+        calls++;
+        if (calls == 2) throw StateError('backend unavailable');
+        return AuthorizationSnapshot.fromJson(snapshot());
+      },
+    );
+    lease.startRefreshing();
+    expect(await lease.refresh(), isTrue);
+    clock.elapse(20000);
+    await Future<void>.delayed(Duration.zero);
+    expect(calls, 2);
+    expect(lease.remainingMs, 40000);
+    expect(clock.activeDelays, contains(500));
+    clock.elapse(500);
+    await Future<void>.delayed(Duration.zero);
+    expect(calls, 3);
+    expect(lease.remainingMs, 60000);
+    await lease.dispose();
+  });
+
+  test('request timeout is bounded by remaining lease and late data is fenced', () async {
+    final clock = _FakeScheduler();
+    final late = Completer<AuthorizationSnapshot>();
+    var calls = 0;
+    final lease = AuthorizationLease(
+      accountId: 'account',
+      deviceId: local,
+      enrollmentId: 'credential',
+      nowMs: () => clock.nowMs,
+      schedule: clock.schedule,
+      random: () => 0.5,
+      fetchSnapshot: () {
+        calls++;
+        if (calls == 1) {
+          return Future.value(
+            AuthorizationSnapshot.fromJson({...snapshot(), 'leaseMs': 10}),
+          );
+        }
+        return late.future;
+      },
+    );
+    expect(await lease.refresh(), isTrue);
+    clock.elapse(9);
+    expect(await lease.refresh(), isFalse);
+    clock.elapse(1);
+    expect(lease.isValid, isFalse);
+    late.complete(AuthorizationSnapshot.fromJson(snapshot(policy: '2')));
+    await Future<void>.delayed(Duration.zero);
     expect(lease.isValid, isFalse);
     await lease.dispose();
   });

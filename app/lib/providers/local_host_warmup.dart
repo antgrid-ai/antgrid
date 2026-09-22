@@ -10,7 +10,7 @@ import '../util/ab_log.dart';
 import '../utils/platform_utils.dart';
 import 'agent_transport.dart' show localAgentLauncherProvider;
 import 'auth.dart' show currentUserProvider, licenseApiUrlProvider;
-import 'device_provisioning.dart' show resolveDeviceRecord;
+import 'provisioning_coordinator.dart';
 
 /// Eagerly warms the local bridge host at app launch so the always-on control
 /// plane is live (machine phone-reachable) and the first project open is just an
@@ -23,6 +23,7 @@ import 'device_provisioning.dart' show resolveDeviceRecord;
 /// still spawns the host on the first project open.
 final localHostWarmupProvider = Provider<void>((ref) {
   if (isMobilePlatform) return;
+  final provisioning = ref.read(provisioningCoordinatorProvider);
 
   // OAuth client of the account device the LIVE warm host was spawned with, or
   // null when it came up machine-less. The host reads its credentials once,
@@ -42,7 +43,7 @@ final localHostWarmupProvider = Provider<void>((ref) {
   /// works, there is just no relay control plane).
   Future<DeviceRecord?> resolve() async {
     try {
-      return await resolveDeviceRecord(ref, logTag: 'localHostWarmup');
+      return await provisioning.resolveDeviceRecord(logTag: 'localHostWarmup');
     } catch (e) {
       AbLog.warn(
         'localHostWarmup',

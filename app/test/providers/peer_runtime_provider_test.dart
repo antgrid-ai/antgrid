@@ -8,7 +8,7 @@ import 'package:antgrid/services/license_token_minter.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-DeviceRecord _record({bool seeded = false}) => DeviceRecord(
+DeviceRecord _record({int? endpointSeed}) => DeviceRecord(
   userId: 'owner',
   deviceUuid: 'device',
   clientId: 'client',
@@ -17,16 +17,17 @@ DeviceRecord _record({bool seeded = false}) => DeviceRecord(
   ed25519Priv: '',
   x25519Pub: '',
   x25519Priv: '',
-  endpointSecret: seeded ? base64Encode(List.filled(32, 1)) : null,
+  endpointSecret: endpointSeed == null
+      ? null
+      : base64Encode(List.filled(32, endpointSeed)),
 );
 
 void main() {
   test('token minter refresh preserves the enrollment runtime', () async {
+    var record = _record(endpointSeed: 1);
     final container = ProviderContainer(
       overrides: [
-        connectionDeviceRecordProvider.overrideWith(
-          (_) async => _record(seeded: true),
-        ),
+        connectionDeviceRecordProvider.overrideWith((_) async => record),
         connectionTokenMinterProvider.overrideWith(
           (_) async => LicenseTokenMinter(
             licenseApiUrl: 'http://localhost:8787',
@@ -41,6 +42,11 @@ void main() {
     container.invalidate(connectionTokenMinterProvider);
     await container.pump();
     expect(await container.read(peerRuntimeProvider.future), same(runtime));
+    container.invalidate(connectionDeviceRecordProvider);
+    await container.pump();
+    expect(await container.read(peerRuntimeProvider.future), same(runtime));
+
+    record = _record(endpointSeed: 2);
     container.invalidate(connectionDeviceRecordProvider);
     await container.pump();
     expect(
@@ -77,7 +83,7 @@ void main() {
       final container = ProviderContainer(
         overrides: [
           connectionDeviceRecordProvider.overrideWith(
-            (_) async => _record(seeded: true),
+            (_) async => _record(endpointSeed: 1),
           ),
           connectionTokenMinterProvider.overrideWith((_) async => null),
         ],

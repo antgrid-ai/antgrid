@@ -9,6 +9,7 @@ import '../services/keychain_device_store.dart';
 import '../services/license_token_minter.dart';
 import 'auth.dart';
 import 'device_provisioning.dart';
+import 'provisioning_coordinator.dart';
 import 'provider_retry.dart';
 
 /// Test seam for the desktop/mobile split. Read through a provider rather than
@@ -27,11 +28,12 @@ final isMobilePlatformProvider = Provider<bool>(
 ///
 /// Lazily provisions the controller record on first read, so a desktop that has
 /// never remote-controlled anything registers no extra device.
-final connectionDeviceRecordProvider = FutureProvider<DeviceRecord>((
-  ref,
-) async {
+final FutureProvider<DeviceRecord>
+connectionDeviceRecordProvider = FutureProvider<DeviceRecord>((ref) async {
   if (ref.watch(isMobilePlatformProvider)) {
-    return ensureCurrentUserDeviceRecord(ref);
+    return ref
+        .read(provisioningCoordinatorProvider)
+        .ensureCurrentUserDeviceRecord();
   }
 
   // The user comes FIRST, then the cached record — the read must be

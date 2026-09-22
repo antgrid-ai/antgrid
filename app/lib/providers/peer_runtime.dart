@@ -1,10 +1,53 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../connection/peer_runtime.dart';
+import '../connection/peer_runtime_owner.dart';
+import '../services/keychain_device_store.dart';
 import '../services/devices_api.dart' show ProvisioningException;
 import '../util/detached.dart';
 import 'auth.dart';
 import 'connection_identity.dart';
 import 'provider_retry.dart';
+
+final class PeerRuntimeRequest {
+  const PeerRuntimeRequest({
+    required this.record,
+    required this.licenseApiUrl,
+    required this.mintToken,
+  });
+
+  final DeviceRecord record;
+  final String licenseApiUrl;
+  final Future<String> Function() mintToken;
+}
+
+typedef AppPeerRuntimeOwner = PeerRuntimeOwner<PeerRuntime, PeerRuntimeRequest>;
+
+final peerRuntimeOwnerProvider = Provider<AppPeerRuntimeOwner>((ref) {
+  final owner = AppPeerRuntimeOwner(
+    create: (request) => PeerRuntime(
+      record: request.record,
+      licenseApiUrl: request.licenseApiUrl,
+      mintToken: request.mintToken,
+    ),
+    dispose: (runtime) async {
+      if (await runtime.dispose()) {
+        return const PeerRuntimeCleanupResult.complete();
+      }
+      return PeerRuntimeCleanupResult.incomplete(
+        StateError('native endpoint ownership remains unresolved'),
+      );
+    },
+  );
+  ref.onDispose(() {
+    detached('PeerRuntimeOwner', 'clear', () async {
+      final result = await owner.clear();
+      if (!result.complete) {
+        throw PeerRuntimeOwnerLockedException(owner.cleanupFailure!);
+      }
+    });
+  });
+  return owner;
+});
 
 final peerRuntimeProvider = FutureProvider<PeerRuntime>((ref) async {
   final record = await ref.watch(connectionDeviceRecordProvider.future);
@@ -26,15 +69,19 @@ final peerRuntimeProvider = FutureProvider<PeerRuntime>((ref) async {
   if (!ref.mounted) {
     throw StateError('Peer runtime provider disposed during provisioning');
   }
-  final runtime = PeerRuntime(
-    record: record,
-    licenseApiUrl: ref.watch(licenseApiUrlProvider),
-    mintToken: minter.mint,
-  );
-  ref.onDispose(
-    () => detached('PeerRuntime', 'dispose', () async {
-      await runtime.dispose();
-    }),
-  );
-  return runtime;
+  final endpointSecret = record.endpointSecret!;
+  return ref
+      .read(peerRuntimeOwnerProvider)
+      .obtain(
+        PeerRuntimeIdentity(
+          accountId: record.userId,
+          enrollmentId: record.clientId,
+          endpointSecret: endpointSecret,
+        ),
+        PeerRuntimeRequest(
+          record: record,
+          licenseApiUrl: ref.watch(licenseApiUrlProvider),
+          mintToken: minter.mint,
+        ),
+      );
 }, retry: noProviderRetry);

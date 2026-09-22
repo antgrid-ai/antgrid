@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'relay_origin.dart';
@@ -180,6 +181,23 @@ class PeerAuthorizationDenied implements Exception {
   const PeerAuthorizationDenied();
 }
 
+abstract interface class LeaseScheduleHandle {
+  void cancel();
+}
+
+typedef LeaseScheduler = LeaseScheduleHandle Function(
+  Duration delay,
+  void Function() callback,
+);
+
+class _TimerScheduleHandle implements LeaseScheduleHandle {
+  _TimerScheduleHandle(Duration delay, void Function() callback)
+    : _timer = Timer(delay, callback);
+  final Timer _timer;
+  @override
+  void cancel() => _timer.cancel();
+}
+
 /// An authenticated HTTP client is injected; wall-clock dates never extend a lease.
 class AuthorizationLease {
   AuthorizationLease({
@@ -188,13 +206,19 @@ class AuthorizationLease {
     required this.enrollmentId,
     required this.fetchSnapshot,
     int Function()? nowMs,
+    LeaseScheduler? schedule,
+    double Function()? random,
   }) {
     final stopwatch = Stopwatch()..start();
     _nowMs = nowMs ?? () => stopwatch.elapsedMilliseconds;
+    _schedule = schedule ?? _TimerScheduleHandle.new;
+    _random = random ?? math.Random.secure().nextDouble;
   }
   final String accountId, deviceId, enrollmentId;
   final Future<AuthorizationSnapshot> Function() fetchSnapshot;
   late final int Function() _nowMs;
+  late final LeaseScheduler _schedule;
+  late final double Function() _random;
   final _changes = StreamController<void>.broadcast(sync: true);
   Stream<void> get changes => _changes.stream;
   AuthorizationSnapshot? _snapshot;
@@ -203,12 +227,15 @@ class AuthorizationLease {
   int _deadline = 0;
   int _generation = 0;
   bool _disposed = false;
-  Timer? _expiry, _refresh;
+  LeaseScheduleHandle? _expiry, _refresh;
+  bool _refreshing = false;
+  int _retryAttempt = 0;
   Future<bool>? _pending;
   Future<bool>? _freshPending;
   Object? lastRefreshFailure;
   bool get isValid =>
       !_disposed && _snapshot?.allowed == true && _nowMs() < _deadline;
+  int get remainingMs => math.max(0, _deadline - _nowMs());
 
   bool permits(String peerId, {String? endpointId, BigInt? generation}) =>
       isValid &&
@@ -228,8 +255,15 @@ class AuthorizationLease {
     lastRefreshFailure = null;
     final generation = _generation;
     final start = _nowMs();
+    final timeoutMs = isValid ? math.min(10000, remainingMs) : 10000;
+    if (timeoutMs <= 0) {
+      invalidate();
+      return false;
+    }
     try {
-      final result = await fetchSnapshot().timeout(const Duration(seconds: 60));
+      final result = await fetchSnapshot().timeout(
+        Duration(milliseconds: timeoutMs),
+      );
       if (_disposed || generation != _generation) return false;
       if (result.accountId != accountId ||
           result.deviceId != deviceId ||
@@ -250,7 +284,12 @@ class AuthorizationLease {
       _snapshot = result;
       _deadline = deadline;
       _expiry?.cancel();
-      _expiry = Timer(Duration(milliseconds: deadline - _nowMs()), invalidate);
+      _expiry = _schedule(
+        Duration(milliseconds: deadline - _nowMs()),
+        invalidate,
+      );
+      _retryAttempt = 0;
+      if (_refreshing) _scheduleNormalRefresh(result.leaseMs);
       _changes.add(null);
       return true;
     } catch (error) {
@@ -261,9 +300,41 @@ class AuthorizationLease {
         return false;
       }
       // A failed refresh cannot extend the last authoritative deadline.
-      if (!isValid && !_disposed) invalidate();
+      if (!isValid && !_disposed) {
+        invalidate();
+      } else if (_refreshing) {
+        _scheduleTransientRetry();
+      }
       return false;
     }
+  }
+
+  int _jittered(int milliseconds) {
+    final factor = 0.9 + 0.2 * _random().clamp(0.0, 1.0);
+    return math.max(1, (milliseconds * factor).round());
+  }
+
+  void _scheduleRefresh(int delayMs) {
+    _refresh?.cancel();
+    final bounded = math.min(delayMs, remainingMs);
+    if (!_refreshing || !isValid || bounded <= 0) {
+      _refresh = null;
+      return;
+    }
+    _refresh = _schedule(Duration(milliseconds: bounded), () {
+      _refresh = null;
+      unawaited(refresh());
+    });
+  }
+
+  void _scheduleNormalRefresh(int leaseMs) {
+    _scheduleRefresh(_jittered(math.max(1, leaseMs ~/ 3)));
+  }
+
+  void _scheduleTransientRetry() {
+    final exponent = math.min(_retryAttempt++, 4);
+    final baseMs = math.min(500 * (1 << exponent), 5000);
+    _scheduleRefresh(_jittered(baseMs));
   }
 
   void notePolicyGeneration(BigInt generation) {
@@ -292,13 +363,14 @@ class AuthorizationLease {
   }
 
   void startRefreshing() {
-    _refresh ??= Timer.periodic(
-      const Duration(seconds: 20),
-      (_) => unawaited(refresh()),
-    );
+    if (_refreshing || _disposed) return;
+    _refreshing = true;
+    final leaseMs = _snapshot?.leaseMs;
+    if (leaseMs != null && isValid) _scheduleNormalRefresh(leaseMs);
   }
 
   void stopRefreshing() {
+    _refreshing = false;
     _refresh?.cancel();
     _refresh = null;
   }
@@ -310,6 +382,9 @@ class AuthorizationLease {
     _snapshot = null;
     _deadline = 0;
     _expiry?.cancel();
+    _expiry = null;
+    _refresh?.cancel();
+    _refresh = null;
     _changes.add(null);
   }
 

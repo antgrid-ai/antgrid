@@ -10,6 +10,7 @@ import 'package:antgrid/models/ab_project.dart';
 import 'package:antgrid/providers/auth.dart';
 import 'package:antgrid/providers/device_provisioning.dart';
 import 'package:antgrid/providers/projects.dart';
+import 'package:antgrid/providers/provisioning_coordinator.dart';
 import 'package:antgrid/services/auth_service.dart';
 import 'package:antgrid/services/device_provisioning.dart';
 import 'package:antgrid/services/devices_api.dart';
@@ -91,54 +92,53 @@ void main() {
     expect(byId['p3']!.hostDeviceUuid, isNull);
   });
 
-  test(
-    'a folder opened while provisioning is in flight is re-hosted onto the '
-    'provisioned uuid',
-    () async {
-      // Prefs starts empty, so provisioning reads no uuid to reuse and mints
-      // one — the exact ordering that lets the self-heal slip in behind it.
-      useInMemoryPrefs();
-      final projectStore = await ProjectStore.open();
-      final pendingForgets = await PendingForgetsStore.open();
-      final keychain = inMemoryDeviceStore();
-      final gate = Completer<void>();
-      final api = _GatedDevicesApi(gate);
+  test('a folder opened while provisioning is in flight is re-hosted onto the '
+      'provisioned uuid', () async {
+    // Prefs starts empty, so provisioning reads no uuid to reuse and mints
+    // one — the exact ordering that lets the self-heal slip in behind it.
+    useInMemoryPrefs();
+    final projectStore = await ProjectStore.open();
+    final pendingForgets = await PendingForgetsStore.open();
+    final keychain = inMemoryDeviceStore();
+    final gate = Completer<void>();
+    final api = _GatedDevicesApi(gate);
 
-      final container = ProviderContainer(
-        overrides: [
-          projectStoreProvider.overrideWithValue(projectStore),
-          pendingForgetsStoreProvider.overrideWithValue(pendingForgets),
-          keychainDeviceStoreProvider.overrideWithValue(keychain),
-          licenseApiUrlProvider.overrideWithValue('https://api.antgrid.test'),
-          deviceProvisioningProvider.overrideWithValue(
-            DeviceProvisioning(api: api, store: keychain, platform: 'linux'),
-          ),
-          currentUserProvider.overrideWith(
-            (ref) => CurrentUser(userId: 'u-1', email: 'a@b.test'),
-          ),
-        ],
-      );
-      addTearDown(container.dispose);
+    final container = ProviderContainer(
+      overrides: [
+        projectStoreProvider.overrideWithValue(projectStore),
+        pendingForgetsStoreProvider.overrideWithValue(pendingForgets),
+        keychainDeviceStoreProvider.overrideWithValue(keychain),
+        licenseApiUrlProvider.overrideWithValue('https://api.antgrid.test'),
+        deviceProvisioningProvider.overrideWithValue(
+          DeviceProvisioning(api: api, store: keychain, platform: 'linux'),
+        ),
+        currentUserProvider.overrideWith(
+          (ref) => CurrentUser(userId: 'u-1', email: 'a@b.test'),
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
 
-      final provisioning = ensureCurrentUserDeviceRecord(container);
-      await api.started.future;
-      // The desktop self-heal mints and persists an anonymous uuid, and the
-      // folder picked in that window is stamped with it.
-      await SharedPreferencesAsync().setString(kLocalHostUuidKey, 'anon-A');
-      await projectStore.upsert(_project('p1', 'anon-A'));
-      gate.complete();
-      final record = await provisioning;
+    final provisioning = container
+        .read(provisioningCoordinatorProvider)
+        .ensureCurrentUserDeviceRecord();
+    await api.started.future;
+    // The desktop self-heal mints and persists an anonymous uuid, and the
+    // folder picked in that window is stamped with it.
+    await SharedPreferencesAsync().setString(kLocalHostUuidKey, 'anon-A');
+    await projectStore.upsert(_project('p1', 'anon-A'));
+    gate.complete();
+    final record = await provisioning;
 
-      expect(record.deviceUuid, isNot('anon-A'));
-      expect(
-        await SharedPreferencesAsync().getString(kLocalHostUuidKey),
-        record.deviceUuid,
-      );
-      final project = container.read(projectsProvider).single;
-      expect(project.hostDeviceUuid, record.deviceUuid);
-      expect(project.isLocalFor(record.deviceUuid), isTrue);
-    },
-  );
+    expect(record.deviceUuid, isNot('anon-A'));
+    expect(
+      await SharedPreferencesAsync().getString(kLocalHostUuidKey),
+      record.deviceUuid,
+    );
+    final project = container.read(projectsProvider).single;
+    expect(project.hostDeviceUuid, record.deviceUuid);
+    expect(project.isLocalFor(record.deviceUuid), isTrue);
+  });
 
   test('a project already on the provisioned uuid is left alone', () async {
     useInMemoryPrefs({'antgrid.local_host_uuid': 'anon-A'});
@@ -167,7 +167,9 @@ void main() {
 
     // The anon uuid is reused as the account device's, so nothing moves — this
     // is the ordinary anonymous→signed-in transition, not the race.
-    final record = await ensureCurrentUserDeviceRecord(container);
+    final record = await container
+        .read(provisioningCoordinatorProvider)
+        .ensureCurrentUserDeviceRecord();
 
     expect(record.deviceUuid, 'anon-A');
     expect(container.read(projectsProvider).single.hostDeviceUuid, 'anon-A');

@@ -7,13 +7,10 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
 import '../config/storage_scope.dart';
-import '../models/ab_project.dart';
 import '../services/device_provisioning.dart';
 import '../services/devices_api.dart';
 import '../services/keychain_device_store.dart';
-import '../util/ab_log.dart';
 import 'auth.dart';
-import 'projects.dart';
 import 'provider_retry.dart';
 
 bool _isDesktopPlatform() =>
@@ -45,116 +42,6 @@ final deviceProvisioningProvider = Provider<DeviceProvisioning>((ref) {
     platform: detectPlatform(),
   );
 });
-
-Future<DeviceRecord> ensureCurrentUserDeviceRecord(dynamic ref) async {
-  final store = ref.read(keychainDeviceStoreProvider);
-  final existingRecord = await store.read();
-  if (existingRecord != null) {
-    if (existingRecord.endpointSecret != null) return existingRecord;
-    return ref
-        .read(deviceProvisioningProvider)
-        .ensureProvisioned(
-          userId: existingRecord.userId,
-          displayName: await hostDisplayName(),
-          existingDeviceUuid: existingRecord.deviceUuid,
-        );
-  }
-
-  final user = await ref.read(currentUserProvider.future);
-  if (user == null) {
-    throw ProvisioningException('AUTH', 'Sign in required');
-  }
-
-  final prefs = SharedPreferencesAsync(
-    options: desktopSharedPreferencesOptions,
-  );
-  final existing = await prefs.getString(kLocalHostUuidKey);
-  final record = await ref
-      .read(deviceProvisioningProvider)
-      .ensureProvisioned(
-        userId: user.userId,
-        displayName: await hostDisplayName(),
-        existingDeviceUuid: existing,
-      );
-
-  // Re-read rather than reuse `existing`: the desktop self-heal in
-  // [localDeviceUuidProvider] mints and persists an anonymous uuid whenever it
-  // is read with an empty keychain, which can land during the provisioning
-  // round trip above — and a folder opened in that window is stamped with it.
-  final outgoing = await prefs.getString(kLocalHostUuidKey);
-  if (outgoing != record.deviceUuid) {
-    await prefs.setString(kLocalHostUuidKey, record.deviceUuid);
-    if (outgoing != null) {
-      await _rehostLocalProjects(ref, from: outgoing, to: record.deviceUuid);
-    }
-  }
-  ref.invalidate(localDeviceUuidProvider);
-  return record;
-}
-
-/// Moves projects recorded against a replaced host identity onto the new one.
-///
-/// This is the only place a persisted host uuid is replaced by a *different*
-/// value, so it is the only place that can repair the rows carrying the old
-/// one: the prefs key self-heals, project rows never did, and a row left behind
-/// fails [AbProject.isLocalFor] forever — losing its working-directory actions
-/// and wearing a "Remote host" chip for a folder on this disk.
-///
-/// Swallowed: a failed repair must not fail provisioning, and the same rows are
-/// still fixed by re-opening the folder (`registerPickedFolder`).
-Future<void> _rehostLocalProjects(
-  dynamic ref, {
-  required String from,
-  required String to,
-}) async {
-  try {
-    await ref.read(projectsProvider.notifier).rehost(from: from, to: to);
-  } catch (e) {
-    AbLog.warn(
-      'device_provisioning',
-      'host uuid backfill skipped',
-      fields: {'error': '$e'},
-    );
-  }
-}
-
-/// Best-effort resolve of the machine [DeviceRecord] to carry into a host
-/// bootstrap: the keychain record if present, else provision one when a user is
-/// signed in. ANY failure (auth fetch offline, provisioning rejected) resolves
-/// to null so the caller proceeds machine-less — never blocks/aborts the spawn.
-/// [logTag] prefixes the skip diagnostic. Shared by the eager warm-up and the
-/// per-project open path, which must resolve the device identically.
-Future<DeviceRecord?> resolveDeviceRecord(
-  dynamic ref, {
-  required String logTag,
-}) async {
-  final store = ref.read(keychainDeviceStoreProvider);
-  DeviceRecord? device = await store.read();
-  if (device == null || device.endpointSecret == null) {
-    try {
-      // Await the future (not .value): a still-pending currentUserProvider
-      // for a genuinely signed-in user would otherwise read as null and silently
-      // skip provisioning.
-      final signedIn = (await ref.read(currentUserProvider.future)) != null;
-      if (signedIn) {
-        device = await ensureCurrentUserDeviceRecord(ref);
-      }
-    } on ProvisioningException catch (e) {
-      AbLog.error(
-        logTag,
-        'provisioning failed',
-        fields: {'code': e.code, 'message': e.message},
-      );
-    } catch (e) {
-      AbLog.warn(
-        logTag,
-        'skipped machine provisioning',
-        fields: {'error': '$e'},
-      );
-    }
-  }
-  return device;
-}
 
 /// Resolves the stable UUID that identifies THIS device as a local host.
 ///

@@ -34,6 +34,7 @@ import 'demo_mode.dart';
 import 'device_provisioning.dart';
 import 'local_transport_fault.dart';
 import 'projects.dart';
+import 'provisioning_coordinator.dart';
 import 'provider_retry.dart';
 import 'providers.dart';
 import 'recent_agents.dart';
@@ -576,7 +577,9 @@ Future<AgentTransport?> _buildLocalTransportFor(
   // secondary safety net. Machine-level credentials are carried unconditionally;
   // relay access is not gated on any per-project flag. Failure resolves to null
   // (open proceeds machine-less) — provisioning must never block the open.
-  final device = await resolveDeviceRecord(ref, logTag: 'agentTransport');
+  final device = await ref
+      .read(provisioningCoordinatorProvider)
+      .resolveDeviceRecord(logTag: 'agentTransport');
   final launcher = ref.read(localAgentLauncherProvider);
   // The desktop always opens a LOCAL core and connects over loopback. The
   // device + endpoints are always carried into the host's machine bootstrap
