@@ -62,5 +62,245 @@
     "maxRelayUrls": 16,
     "maxGeneration": "9223372036854775807",
     "maxLeaseMs": 60000
+  },
+  "streamOpen": {
+    "maxOpenBytes": 4096,
+    "maxIdLength": 200,
+    "caps": {
+      "maxBidiStreamsPerConnection": 256,
+      "maxProjectsPerPeer": 32,
+      "maxTerminalAttachmentsPerPeer": 64,
+      "maxTunnelStreamsPerPeer": 128,
+      "maxPendingOpensPerPeer": 16
+    },
+    "opens": [
+      {
+        "name": "session",
+        "json": {
+          "kind": "session"
+        }
+      },
+      {
+        "name": "project",
+        "json": {
+          "kind": "project",
+          "projectId": "proj-1"
+        }
+      },
+      {
+        "name": "terminal",
+        "json": {
+          "kind": "terminal",
+          "projectId": "proj-1",
+          "requestId": "req-1"
+        }
+      },
+      {
+        "name": "terminal-with-checkout",
+        "json": {
+          "kind": "terminal",
+          "projectId": "proj-1",
+          "checkoutId": "chk-1",
+          "requestId": "req-1"
+        }
+      },
+      {
+        "name": "tunnel-http",
+        "json": {
+          "kind": "tunnel-http",
+          "projectId": "proj-1",
+          "requestId": "req-1"
+        }
+      },
+      {
+        "name": "tunnel-ws",
+        "json": {
+          "kind": "tunnel-ws",
+          "projectId": "proj-1",
+          "wsId": "ws-1"
+        }
+      }
+    ],
+    "refusals": [
+      {
+        "name": "not-ready",
+        "json": {
+          "type": "stream:refused",
+          "code": "NOT_READY",
+          "message": "project core is still starting"
+        }
+      },
+      {
+        "name": "update-required",
+        "json": {
+          "type": "stream:refused",
+          "code": "UPDATE_REQUIRED",
+          "message": "update the app to open this stream"
+        }
+      },
+      {
+        "name": "not-allowed",
+        "json": {
+          "type": "stream:refused",
+          "code": "NOT_ALLOWED",
+          "message": "remote access is disabled on this machine"
+        }
+      },
+      {
+        "name": "cap-exceeded",
+        "json": {
+          "type": "stream:refused",
+          "code": "CAP_EXCEEDED",
+          "message": "too many terminal attachments for this peer"
+        }
+      },
+      {
+        "name": "invalid",
+        "json": {
+          "type": "stream:refused",
+          "code": "INVALID",
+          "message": "the open frame did not parse"
+        }
+      }
+    ],
+    "rejectedOpens": [
+      {
+        "name": "missing-kind",
+        "json": {
+          "projectId": "proj-1"
+        }
+      },
+      {
+        "name": "unknown-kind",
+        "json": {
+          "kind": "request",
+          "projectId": "proj-1"
+        }
+      },
+      {
+        "name": "non-string-kind",
+        "json": {
+          "kind": 1
+        }
+      },
+      {
+        "name": "session-extra-field",
+        "json": {
+          "kind": "session",
+          "projectId": "proj-1"
+        }
+      },
+      {
+        "name": "project-with-checkout",
+        "json": {
+          "kind": "project",
+          "projectId": "proj-1",
+          "checkoutId": "main"
+        }
+      },
+      {
+        "name": "project-empty-id",
+        "json": {
+          "kind": "project",
+          "projectId": ""
+        }
+      },
+      {
+        "name": "project-numeric-id",
+        "json": {
+          "kind": "project",
+          "projectId": 7
+        }
+      },
+      {
+        "name": "project-overlong-id",
+        "json": {
+          "kind": "project",
+          "projectId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        }
+      },
+      {
+        "name": "terminal-missing-request",
+        "json": {
+          "kind": "terminal",
+          "projectId": "proj-1"
+        }
+      },
+      {
+        "name": "terminal-null-checkout",
+        "json": {
+          "kind": "terminal",
+          "projectId": "proj-1",
+          "checkoutId": null,
+          "requestId": "req-1"
+        }
+      },
+      {
+        "name": "terminal-empty-checkout",
+        "json": {
+          "kind": "terminal",
+          "projectId": "proj-1",
+          "checkoutId": "",
+          "requestId": "req-1"
+        }
+      },
+      {
+        "name": "tunnel-http-missing-request",
+        "json": {
+          "kind": "tunnel-http",
+          "projectId": "proj-1"
+        }
+      },
+      {
+        "name": "tunnel-ws-request-not-ws",
+        "json": {
+          "kind": "tunnel-ws",
+          "projectId": "proj-1",
+          "requestId": "req-1"
+        }
+      },
+      {
+        "name": "tunnel-ws-overlong-id",
+        "json": {
+          "kind": "tunnel-ws",
+          "projectId": "proj-1",
+          "wsId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        }
+      }
+    ],
+    "rejectedRefusals": [
+      {
+        "name": "unknown-code",
+        "json": {
+          "type": "stream:refused",
+          "code": "EXTRA_STREAM",
+          "message": "x"
+        }
+      },
+      {
+        "name": "missing-message",
+        "json": {
+          "type": "stream:refused",
+          "code": "INVALID"
+        }
+      },
+      {
+        "name": "extra-field",
+        "json": {
+          "type": "stream:refused",
+          "code": "INVALID",
+          "message": "x",
+          "streamId": "1"
+        }
+      },
+      {
+        "name": "wrong-type",
+        "json": {
+          "type": "stream-refused",
+          "code": "INVALID",
+          "message": "x"
+        }
+      }
+    ]
   }
 }

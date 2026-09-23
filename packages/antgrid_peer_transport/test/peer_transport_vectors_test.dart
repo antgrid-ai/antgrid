@@ -97,4 +97,98 @@ void main() {
       expect(maxPeerLeaseMs, authorization['maxLeaseMs']);
     },
   );
+
+  test('Dart stream-open caps match the shared transport vector', () {
+    final streamOpen = _map(fixture['streamOpen']);
+    expect(kStreamOpenMaxBytes, streamOpen['maxOpenBytes']);
+    expect(kStreamOpenMaxIdLength, streamOpen['maxIdLength']);
+    final caps = _map(streamOpen['caps']);
+    expect(kStreamMaxBidiStreamsPerConnection, caps['maxBidiStreamsPerConnection']);
+    expect(kStreamMaxProjectsPerPeer, caps['maxProjectsPerPeer']);
+    expect(kStreamMaxTerminalAttachmentsPerPeer, caps['maxTerminalAttachmentsPerPeer']);
+    expect(kStreamMaxTunnelStreamsPerPeer, caps['maxTunnelStreamsPerPeer']);
+    expect(kStreamMaxPendingOpensPerPeer, caps['maxPendingOpensPerPeer']);
+  });
+
+  test('Dart parses every stream-open kind golden vector, and round-trips it', () {
+    final opens = (_map(fixture['streamOpen'])['opens'] as List)
+        .cast<Map<String, dynamic>>();
+    expect(opens.map((o) => o['name']), [
+      'session',
+      'project',
+      'terminal',
+      'terminal-with-checkout',
+      'tunnel-http',
+      'tunnel-ws',
+    ]);
+    for (final sample in opens) {
+      final json = _map(sample['json']);
+      final parsed = StreamOpen.fromJson(json);
+      expect(parsed, isNotNull, reason: sample['name'] as String);
+      expect(parsed!.toJson(), json, reason: sample['name'] as String);
+      switch (sample['name']) {
+        case 'session':
+          expect(parsed, isA<SessionStreamOpen>());
+        case 'project':
+          expect(parsed, isA<ProjectStreamOpen>());
+        case 'terminal':
+        case 'terminal-with-checkout':
+          expect(parsed, isA<TerminalStreamOpen>());
+        case 'tunnel-http':
+          expect(parsed, isA<TunnelHttpStreamOpen>());
+        case 'tunnel-ws':
+          expect(parsed, isA<TunnelWsStreamOpen>());
+      }
+    }
+  });
+
+  test('Dart rejects every stream-open frame the schema rejects', () {
+    final rejected = (_map(fixture['streamOpen'])['rejectedOpens'] as List)
+        .cast<Map<String, dynamic>>();
+    expect(rejected, isNotEmpty);
+    for (final sample in rejected) {
+      expect(
+        StreamOpen.fromJson(_map(sample['json'])),
+        isNull,
+        reason: sample['name'] as String,
+      );
+    }
+  });
+
+  test('Dart rejects every stream-refused record the schema rejects', () {
+    final rejected = (_map(fixture['streamOpen'])['rejectedRefusals'] as List)
+        .cast<Map<String, dynamic>>();
+    expect(rejected, isNotEmpty);
+    for (final sample in rejected) {
+      expect(
+        StreamRefused.fromJson(_map(sample['json'])),
+        isNull,
+        reason: sample['name'] as String,
+      );
+    }
+  });
+
+  test('Dart parses every stream-refused code golden vector, and round-trips it', () {
+    final refusals = (_map(fixture['streamOpen'])['refusals'] as List)
+        .cast<Map<String, dynamic>>();
+    expect(refusals.map((r) => r['name']), [
+      'not-ready',
+      'update-required',
+      'not-allowed',
+      'cap-exceeded',
+      'invalid',
+    ]);
+    for (final sample in refusals) {
+      final json = _map(sample['json']);
+      final parsed = StreamRefused.fromJson(json);
+      expect(parsed, isNotNull, reason: sample['name'] as String);
+      expect(parsed!.toJson(), json, reason: sample['name'] as String);
+    }
+    // A Dart-only code would pass every other check here.
+    expect(
+      refusals.map((r) => _map(r['json'])['code']).toList(),
+      StreamRefusedCode.values.map((c) => c.wireValue).toList(),
+    );
+  });
+
 }

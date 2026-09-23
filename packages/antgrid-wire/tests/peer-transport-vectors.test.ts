@@ -11,6 +11,9 @@ import {
   MAX_FRAGMENT_COUNT,
   MAX_REREQUESTS,
   MAX_TRANSFER_BYTES,
+  StreamOpen,
+  StreamRefused,
+  StreamRefusedCode,
   TRANSFER_TIMEOUT_MS,
 } from "../src/index";
 
@@ -34,6 +37,53 @@ test("peer transport byte vectors decode with no route identity", () => {
     expect(Buffer.from(decoded.payload).toString("hex")).toBe(sample.payloadHex);
   }
   expect(fixture.framing.kinds).toEqual(FrameKind);
+});
+
+test("peer transport fixture covers every stream-open kind and refusal code", () => {
+  const streamOpen = fixture.streamOpen;
+  expect(streamOpen.opens.map((o: { name: string }) => o.name)).toEqual([
+    "session",
+    "project",
+    "terminal",
+    "terminal-with-checkout",
+    "tunnel-http",
+    "tunnel-ws",
+  ]);
+  for (const sample of streamOpen.opens) {
+    expect(StreamOpen.parse(sample.json)).toEqual(sample.json);
+  }
+  expect(streamOpen.refusals.map((r: { name: string }) => r.name)).toEqual([
+    "not-ready",
+    "update-required",
+    "not-allowed",
+    "cap-exceeded",
+    "invalid",
+  ]);
+  for (const sample of streamOpen.refusals) {
+    expect(StreamRefused.parse(sample.json)).toEqual(sample.json);
+  }
+  // Derived from the schema, not a hand list: a kind or code added to
+  // stream-open.ts without a vector must fail here, since the fixture is the
+  // Dart mirror's only cross-check.
+  const kinds = StreamOpen.options.map((o) => o.shape.kind.value);
+  expect(
+    new Set(streamOpen.opens.map((o: { json: { kind: string } }) => o.json.kind)),
+  ).toEqual(new Set(kinds));
+  expect(
+    streamOpen.refusals.map((r: { json: { code: string } }) => r.json.code),
+  ).toEqual(StreamRefusedCode.options);
+});
+
+test("peer transport fixture's rejected stream-open frames are rejected", () => {
+  const streamOpen = fixture.streamOpen;
+  expect(streamOpen.rejectedOpens.length).toBeGreaterThan(0);
+  for (const sample of streamOpen.rejectedOpens) {
+    expect(StreamOpen.safeParse(sample.json).success, sample.name).toBe(false);
+  }
+  expect(streamOpen.rejectedRefusals.length).toBeGreaterThan(0);
+  for (const sample of streamOpen.rejectedRefusals) {
+    expect(StreamRefused.safeParse(sample.json).success, sample.name).toBe(false);
+  }
 });
 
 test("peer transport fixture covers every mirrored fragmentation bound", () => {

@@ -16,5 +16,6 @@ export 'src/models/device_identity.dart';
 export 'src/models/relay_license_error.dart';
 export 'src/models/relay_message.dart';
 export 'src/models/stream_envelope.dart';
+export 'src/models/stream_open.dart';
 export 'src/push/push_open.dart';
 export 'src/peer_link.dart';
