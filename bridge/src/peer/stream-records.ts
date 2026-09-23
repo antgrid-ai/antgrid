@@ -1,0 +1,233 @@
+/**
+ * Per-stream record I/O over one native Iroh QUIC bidirectional stream
+ * (`@number0/iroh` `BiStream`). Knows nothing about stream kinds, dispatch
+ * or admission; those belong to whoever accepted the stream.
+ *
+ * The binding's `SendStream`/`RecvStream` are each `Arc<Mutex<..>>` on the
+ * Rust side (docs/iroh-reduction/stage-A-waves.md §1.1): every method —
+ * `write`, `writeAll`, `reset`, `setPriority`, `stopped` — takes the SAME
+ * lock and holds it across its await. A write in flight therefore blocks
+ * `reset` until that write's slice completes; there is no way to preempt it.
+ * Two consequences shape everything below:
+ *   - writes are sliced to a bounded size, so an overflow reset waits at
+ *     most one slice, never a whole multi-megabyte record;
+ *   - `stopped`/`receivedReset` are never awaited — doing so on a live
+ *     stream would wedge every later write or read on it, and the only
+ *     thing that would then free it is closing the whole connection.
+ */
+
+/** ≤256 KiB per native call, both directions — the bound that keeps a
+ *  stream's `reset()` (or the next inbound record) waiting on at most one
+ *  in-flight slice instead of an entire queued transfer. */
+export const STREAM_RECORD_SLICE_BYTES = 262_144;
+
+const LENGTH_PREFIX_BYTES = 4;
+
+/** The write half of a native bidirectional stream. Deliberately narrower
+ *  than the real `SendStream`: it has no `stopped`/`receivedReset`, so
+ *  nothing in this file can be tempted to await them. */
+export interface StreamSend {
+  writeAll(bytes: number[]): Promise<void>;
+  setPriority(p: number): Promise<void>;
+  reset(errorCode: bigint): Promise<void>;
+}
+
+/** The read half of a native bidirectional stream. */
+export interface StreamRecv {
+  readExact(size: number): Promise<number[]>;
+}
+
+/** Why a writer stopped for good. Only `unauthorized` retires the whole
+ *  connection; the other two mean only this stream is dead and the owner
+ *  unbinds it (D3, docs/iroh-reduction/ledger.md: a slow or stopped stream
+ *  never costs the connection). A native write rejection is `stream-lost`
+ *  rather than connection-fatal because the binding reports a peer's
+ *  STOP_SENDING on this one stream the same way it reports a dead connection,
+ *  and a real connection loss is already surfaced by the connection itself. */
+export type StreamWriteFailure = "unauthorized" | "overflow" | "stream-lost";
+
+export type StreamSendOutcome = "sent" | "dropped";
+
+/** Thrown by `StreamRecordReader.read()` for a malformed length prefix.
+ *  Distinct from a plain rejection out of the native `readExact` (a peer
+ *  reset or FIN on this one stream, which is routine and not a connection
+ *  fault) — only THIS is a protocol violation, and per D3 it is the
+ *  reader's one connection-fatal signal. */
+export class StreamProtocolViolation extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "StreamProtocolViolation";
+  }
+}
+
+interface PendingWrite {
+  bytes: Buffer;
+  settle: (outcome: StreamSendOutcome) => void;
+}
+
+/**
+ * Writes `[u32 len][frame]` records onto one stream's send half, queuing
+ * ahead of the native binding (which exposes no observable write buffer of
+ * its own — mirrors `PeerRecords`, `bridge/src/peer/records.ts`).
+ */
+export class StreamRecordWriter {
+  private readonly queue: PendingWrite[] = [];
+  private writing = false;
+  private stopped = false;
+  private queuedBytes = 0;
+  private prioritySet = false;
+
+  constructor(
+    private readonly stream: { send: StreamSend },
+    private readonly authorized: () => boolean,
+    private readonly onFailure: (reason: StreamWriteFailure) => void,
+    private readonly maxQueuedBytes: number,
+    private readonly priority = 0,
+    private readonly resetCode = 0n,
+  ) {}
+
+  send(frame: Uint8Array): Promise<StreamSendOutcome> {
+    if (this.stopped) return Promise.resolve("dropped");
+    if (!this.authorized()) {
+      this.failConnection("unauthorized");
+      return Promise.resolve("dropped");
+    }
+    const bytes = Buffer.allocUnsafe(frame.length + LENGTH_PREFIX_BYTES);
+    bytes.writeUInt32BE(frame.length);
+    bytes.set(frame, LENGTH_PREFIX_BYTES);
+    if (this.queuedBytes + bytes.length > this.maxQueuedBytes) {
+      this.stopStream("overflow");
+      return Promise.resolve("dropped");
+    }
+    return new Promise((settle) => {
+      const record: PendingWrite = { bytes, settle };
+      this.queue.push(record);
+      this.queuedBytes += bytes.length;
+      void this.drain();
+    });
+  }
+
+  private async drain(): Promise<void> {
+    if (this.writing || this.stopped) return;
+    this.writing = true;
+    try {
+      while (!this.stopped && this.queue.length) {
+        if (!this.authorized()) {
+          this.failConnection("unauthorized");
+          return;
+        }
+        const record = this.queue.shift()!;
+        this.queuedBytes -= record.bytes.length;
+        let outcome: "complete" | "aborted";
+        try {
+          if (!this.prioritySet) {
+            // Must land before the first write ever reaches the wire, or the
+            // binding has nothing to reorder ahead of (spec §"Binding constraints").
+            this.prioritySet = true;
+            await this.stream.send.setPriority(this.priority);
+          }
+          outcome = this.stopped ? "aborted" : await this.writeInSlices(record.bytes);
+        } catch {
+          record.bytes.fill(0);
+          record.settle("dropped");
+          this.stopStream("stream-lost");
+          return;
+        }
+        record.bytes.fill(0);
+        record.settle(outcome === "complete" ? "sent" : "dropped");
+      }
+    } finally {
+      this.writing = false;
+    }
+  }
+
+  /** Checks `stopped` between slices, not just before the record starts, so
+   *  an overflow (or a failure) noticed mid-record aborts after the slice
+   *  already handed to the native binding rather than after the whole
+   *  record — the reset that follows then waits on at most that one slice.
+   *  Authorization is rechecked per slice too, so turning remote access off
+   *  mid-transfer stops a 32 MiB record within one slice, not at its end. */
+  private async writeInSlices(bytes: Buffer): Promise<"complete" | "aborted"> {
+    for (let offset = 0; offset < bytes.length; offset += STREAM_RECORD_SLICE_BYTES) {
+      if (this.stopped) return "aborted";
+      if (!this.authorized()) {
+        this.failConnection("unauthorized");
+        return "aborted";
+      }
+      const end = Math.min(offset + STREAM_RECORD_SLICE_BYTES, bytes.length);
+      await this.stream.send.writeAll(Array.from(bytes.subarray(offset, end)));
+    }
+    return "complete";
+  }
+
+  /** Resets only this stream — the app reopens and resyncs (D3). Queued
+   *  records are dropped up front so no caller waits on a reset that, per the
+   *  shared mutex, can only run after the in-flight slice returns. The reset
+   *  is explicit because a dropped native SendStream FINs, which would hand
+   *  the peer a truncated record followed by a clean end. */
+  private stopStream(reason: "overflow" | "stream-lost"): void {
+    if (this.stopped) return;
+    this.stopped = true;
+    this.dropQueue();
+    // Never awaited: the stream (or connection) may already be gone.
+    this.stream.send.reset(this.resetCode).catch(() => {});
+    this.onFailure(reason);
+  }
+
+  private failConnection(reason: "unauthorized"): void {
+    if (this.stopped) return;
+    this.stopped = true;
+    this.dropQueue();
+    this.onFailure(reason);
+  }
+
+  private dropQueue(): void {
+    for (const record of this.queue) {
+      record.bytes.fill(0);
+      record.settle("dropped");
+    }
+    this.queue.length = 0;
+    this.queuedBytes = 0;
+  }
+}
+
+export type StreamReadFailure = "protocol-violation";
+
+/**
+ * Reads `[u32 len][frame]` records off one stream's receive half. A native
+ * `readExact` rejection (peer reset or FIN on this one stream) is rethrown
+ * as-is — routine, and for the caller to interpret — while a malformed
+ * length prefix is the reader's own protocol violation and retires the
+ * connection (D3).
+ */
+export class StreamRecordReader {
+  constructor(
+    private readonly stream: { recv: StreamRecv },
+    private readonly maxRecordBytes: number,
+    private readonly onFailure: (reason: StreamReadFailure) => void,
+  ) {}
+
+  async read(): Promise<Uint8Array> {
+    const prefix = Buffer.from(await this.stream.recv.readExact(LENGTH_PREFIX_BYTES));
+    if (prefix.length !== LENGTH_PREFIX_BYTES) return this.violate("short length prefix");
+    const length = prefix.readUInt32BE();
+    if (length === 0 || length > this.maxRecordBytes) {
+      return this.violate(`record length ${length} out of bounds`);
+    }
+    const body = Buffer.allocUnsafe(length);
+    let offset = 0;
+    while (offset < length) {
+      const want = Math.min(STREAM_RECORD_SLICE_BYTES, length - offset);
+      const piece = await this.stream.recv.readExact(want);
+      if (piece.length !== want) return this.violate("short read");
+      body.set(piece, offset);
+      offset += want;
+    }
+    return new Uint8Array(body.buffer, body.byteOffset, body.byteLength);
+  }
+
+  private violate(message: string): never {
+    this.onFailure("protocol-violation");
+    throw new StreamProtocolViolation(message);
+  }
+}
