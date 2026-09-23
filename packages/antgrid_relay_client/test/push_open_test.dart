@@ -1,7 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:antgrid_relay_client/src/e2e/push_open.dart';
+import 'package:antgrid_relay_client/src/push/push_open.dart';
 import 'package:cryptography/cryptography.dart';
 import 'package:test/test.dart';
 
