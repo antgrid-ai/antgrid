@@ -17,6 +17,8 @@ import 'dart:typed_data';
 import 'package:antgrid/config/cng_aes_gcm.dart';
 import 'package:antgrid/connection/connection_supervisor.dart';
 import 'package:antgrid/connection/peer_connection.dart';
+import 'package:antgrid/connection/peer_runtime.dart';
+import 'package:antgrid_peer_transport/antgrid_peer_transport.dart';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -129,7 +131,22 @@ SessionKeys _keys(int fill) => SessionKeys(
 );
 
 const _pinA = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
-const _pinB = 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=';
+
+/// Hands back a NEW link on every dial, as the production runtime does (each
+/// connect wraps a fresh native connection). [FixedPeerConnector] returns one
+/// link forever, so it cannot tell a session bound to the live link from one
+/// still bound to the link a redial closed.
+class _FreshLinkConnector extends FixedPeerConnector {
+  _FreshLinkConnector(this.carrier) : super(carrier);
+  final PeerLink carrier;
+  @override
+  Future<PeerLink> connect({
+    required PeerConnectionAttempt attempt,
+    PeerLinkDiagnostic? diagnostic,
+    required String machineDeviceId,
+    required String machinePublicKey,
+  }) async => TestPayloadLink(carrier);
+}
 
 void main() {
   late _StubRelay relay;
@@ -140,12 +157,16 @@ void main() {
     CngAesGcm.evictImportedKeys();
   });
 
-  PeerConnectionMechanisms build({List<SessionKeys?>? handshakes}) =>
-      PeerConnectionMechanisms(
+  PeerConnectionMechanisms build({
+    List<SessionKeys?>? handshakes,
+    bool freshLinkPerDial = false,
+  }) => PeerConnectionMechanisms(
         buildHandshaker: handshakes == null
             ? null
             : (_) => _FakeHandshaker(handshakes),
-        peerRuntime: FixedPeerConnector(relay),
+        peerRuntime: freshLinkPerDial
+            ? _FreshLinkConnector(relay)
+            : FixedPeerConnector(relay),
         crypto: CryptoService(),
         machineDeviceId: 'M',
         phoneDeviceId: 'phone-1',
@@ -166,6 +187,57 @@ void main() {
       3,
     ], secretKey: SecretKeyData(Uint8List(32)..fillRange(0, 32, fill)));
   }
+
+  // `MachineSession.relay` is fixed at construction, so a session outliving
+  // the link it was built on reads a closed link forever. Platform-independent,
+  // unlike the cipher group below.
+  group('session binding to the payload link', () {
+    const coords = ConnCoords(
+      relayUrl: 'ws://relay.test',
+      agentEd25519PubB64: _pinA,
+    );
+
+    test('a redial that returns the same link reuses the live session', () async {
+      final mech = build();
+      addTearDown(mech.release);
+      await mech.connectPayload(coords);
+      final first = mech.session;
+
+      await mech.connectPayload(coords);
+
+      expect(
+        identical(mech.session, first),
+        isTrue,
+        reason: 'a plain redial must not orphan the project streams',
+      );
+    });
+
+    test('a redial onto a new link rebuilds the session on it, disposes the '
+        'old one and signals the replacement', () async {
+      final mech = build(freshLinkPerDial: true);
+      addTearDown(mech.release);
+      final replaced = <PeerConnectionEvent>[];
+      mech.events.listen((e) {
+        if (e is PeerSessionReplaced) replaced.add(e);
+      });
+      await mech.connectPayload(coords);
+      final stale = mech.session!;
+      var staleDisposed = false;
+      stale.takeoverEvents.listen(null, onDone: () => staleDisposed = true);
+
+      await mech.connectPayload(coords);
+
+      expect(identical(mech.session, stale), isFalse);
+      expect(identical(mech.session!.relay, mech.payloadLink), isTrue);
+      await pumpEventQueue();
+      expect(staleDisposed, isTrue);
+      expect(
+        replaced,
+        hasLength(1),
+        reason: 'every project transport hangs off the disposed session',
+      );
+    });
+  });
 
   group('native cipher key retirement', () {
     setUp(() {
@@ -223,26 +295,21 @@ void main() {
       },
     );
 
-    test('replacing a stale-pinned session retires its keys too', () async {
-      final mech = build();
+    test('replacing a session bound to a redialed-away link retires its keys '
+        'too', () async {
+      final mech = build(freshLinkPerDial: true);
       addTearDown(mech.release);
-      await mech.connectPayload(
-        const ConnCoords(
-          relayUrl: 'ws://relay.test',
-          agentEd25519PubB64: _pinA,
-        ),
+      const coords = ConnCoords(
+        relayUrl: 'ws://relay.test',
+        agentEd25519PubB64: _pinA,
       );
+      await mech.connectPayload(coords);
       await sealOneFrame(0x42);
       expect(CngAesGcm.importedKeyCount, 1);
 
-      // The host re-provisioned: the old session is disposed mid-flight rather
-      // than released, a path that zeroizes its keys just the same.
-      await mech.connectPayload(
-        const ConnCoords(
-          relayUrl: 'ws://relay.test',
-          agentEd25519PubB64: _pinB,
-        ),
-      );
+      // The old session is disposed mid-flight rather than released, a path
+      // that has to zeroize its keys just the same.
+      await mech.connectPayload(coords);
 
       expect(CngAesGcm.importedKeyCount, 0);
     });

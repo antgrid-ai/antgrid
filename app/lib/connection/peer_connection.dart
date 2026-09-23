@@ -59,6 +59,10 @@ class PeerConnectionMechanisms implements PeerConnectionContract {
   Future<void>? _releasePending;
   PeerLink? _payloadLink;
   PeerLink? _closingPayloadLink;
+
+  /// The link [_session] was constructed on. `MachineSession.relay` is fixed,
+  /// and every dial returns a new link, so a session kept across a redial
+  /// would go on reading and writing the link that redial closed.
   PeerLink? _sessionLink;
   StreamSubscription<PeerLinkFailure>? _peerFailureSub;
   bool _runtimeRetained = false;
@@ -94,18 +98,8 @@ class PeerConnectionMechanisms implements PeerConnectionContract {
   /// retiring keys on behalf of a session that no longer exists.
   StreamSubscription<PeerLinkState>? _payloadDownSub;
 
-  /// The agent Ed25519 key [_session]'s handshaker was pinned against. The pin
-  /// is fixed at construction, so this is what tells a redial whether the live
-  /// session can still verify the identity the coords step just returned.
-  String? _sessionPin;
-
-  /// The most recent answer the coords step gave — the agent identity the
-  /// session has to be pinned against right now.
-  ///
-  /// Kept because the ladder does not always reconnect the payload on its way to
-  /// a fresh pin: a host that re-provisions its Ed25519 identity without moving
-  /// a host can retain its payload path, so the lowest broken rung after the
-  /// coords re-resolve is `established`, not `payload`.
+  /// The most recent answer the coords step gave. [establishSession] needs the
+  /// agent key to build a session when no payload dial has built one yet.
   ConnCoords? _lastCoords;
 
   /// Reports a relay-shaped error code that no rung failure can express, so the
@@ -124,16 +118,15 @@ class PeerConnectionMechanisms implements PeerConnectionContract {
   /// Without it the ladder would see only "session down", re-handshake, and the
   /// two devices would evict each other forever.
 
-  /// The [MachineSession] was REPLACED (not merely torn down) because the
-  /// coords step came back with a different agent pin. Wired by
-  /// `MachineConnection` to its `sessionReplacements` stream; unset until then.
+  /// The [MachineSession] was REPLACED (not merely torn down) because a redial
+  /// produced a new payload link. Wired by `MachineConnection` to its
+  /// `sessionReplacements` stream.
   ///
   /// Disposing the old session disposes every [StreamTransport] hanging off it
-  /// — i.e. exactly the objects the transport provider handed to each project
-  /// on this machine. Nothing else observes the swap: the connection is neither
-  /// added nor removed, so `connectionChanges` stays silent, and
-  /// The typed session-down event goes only to the supervisor. Without this
-  /// the focused
+  /// — exactly the objects the transport provider handed to each project on
+  /// this machine. Nothing else observes the swap: the connection is neither
+  /// added nor removed, so `connectionChanges` stays silent, and the typed
+  /// session-down event goes only to the supervisor. Without this the focused
   /// project recovers on Retry (which invalidates its own family entry) while
   /// every other warm project on the machine keeps a disposed transport whose
   /// RPCs can never complete.
@@ -149,8 +142,8 @@ class PeerConnectionMechanisms implements PeerConnectionContract {
   /// The machine's single E2E session, or null before the first payload connection / after a
   /// [release]. Deliberately survives a central reconnect: the project [StreamTransport]s
   /// handed to services hang off it, and recreating it on every control-plane blip
-  /// would orphan them. The one exception is coords carrying a different agent
-  /// Ed25519 pin — see [_ensureSession].
+  /// would orphan them. The one exception is a redial onto a new payload link —
+  /// see [_ensureSession].
   MachineSession? get session => _session;
 
   @override
@@ -227,11 +220,9 @@ class PeerConnectionMechanisms implements PeerConnectionContract {
     if (coords == null) {
       throw StateError('establishSession before the coords step ran');
     }
-    // Deliberately routed through [_ensureSession] rather than reading
-    // [_session]: this rung, not the payload rung, is where a re-provisioned
-    // host is met, because its payload never dropped. Reusing the session here
-    // would verify every agent-hello against the retired key and make the
-    // user's Retry inert.
+    // Routed through [_ensureSession] rather than reading [_session] directly
+    // so this rung can build the session on its own the first time it runs
+    // without waiting on [connectPayload] to have done it already.
     final session = await _ensureSession(coords.agentEd25519PubB64);
     // A step runs under the supervisor's single-flight guard, so anything this
     // waits out is time the ladder cannot use to react. Failing the instant the
@@ -301,7 +292,6 @@ class PeerConnectionMechanisms implements PeerConnectionContract {
     }
     final session = _session;
     _session = null;
-    _sessionPin = null;
     await _payloadDownSub?.cancel();
     _payloadDownSub = null;
     _lastCoords = null;
@@ -325,18 +315,11 @@ class PeerConnectionMechanisms implements PeerConnectionContract {
     final generation = _dialGeneration;
     final existing = _session;
     if (existing != null) {
-      if (_sessionPin == agentEd25519PubB64 &&
-          identical(_sessionLink, payloadLink)) {
-        return existing;
-      }
-      // The coords step came back with a different agent identity — the host
-      // re-provisioned. [AppSessionHandshaker] pins the key at construction, so
-      // keeping this session would verify every agent-hello against a key that
-      // no longer exists and the user's Retry would be inert. Dispose first
-      // (which zeroizes the old session keys) so nothing outlives the pin it
-      // was derived under.
+      if (identical(_sessionLink, payloadLink)) return existing;
+      // Dispose first (which zeroizes the old session keys) so nothing
+      // outlives the link it was derived on.
       _session = null;
-      _sessionPin = null;
+      _sessionLink = null;
       await _payloadDownSub?.cancel();
       _payloadDownSub = null;
       await existing.dispose();
@@ -390,7 +373,6 @@ class PeerConnectionMechanisms implements PeerConnectionContract {
       }
     });
     session.start();
-    _sessionPin = agentEd25519PubB64;
     _sessionLink = payloadLink;
     return _session = session;
   }

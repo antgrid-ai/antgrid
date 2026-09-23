@@ -68,10 +68,10 @@ class MachineConnection {
   final StreamController<void> _sessionReplacements =
       StreamController<void>.broadcast();
 
-  /// Fires when this machine's [MachineSession] is swapped for a fresh one
-  /// (the agent re-provisioned its Ed25519 identity, so the coords step
-  /// returned a new pin). Every project bound to this machine must rebuild its
-  /// transport: the swap disposed the [StreamTransport] each of them holds.
+  /// Fires when this machine's [MachineSession] is swapped for a fresh one (a
+  /// redial produced a new payload link). Every project bound to this machine
+  /// must rebuild its transport: the swap disposed the [StreamTransport] each
+  /// of them holds.
   ///
   /// Deliberately NOT emitted on [dispose] — a released connection already has
   /// the reaper and the registry's `onEvict` invalidating its transports.

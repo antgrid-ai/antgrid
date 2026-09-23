@@ -353,11 +353,11 @@ Future<AgentTransport?> _buildRelayTransportFor(
       mintToken: mintConnectionToken,
     ),
   );
-  // A changed agent pin makes the mechanisms swap the whole MachineSession,
-  // which disposes the StreamTransport built below. Nothing else rebuilds this
-  // entry — Retry only invalidates the FOCUSED id — so without this every other
-  // warm project on this machine would keep serving a dead transport. Wired
-  // before the session is awaited so a swap mid-handshake is not missed.
+  // A redial onto a new payload link swaps the whole MachineSession, which
+  // disposes the StreamTransport built below. Nothing else rebuilds this entry
+  // — Retry only invalidates the FOCUSED id — so without this every other warm
+  // project on this machine would keep serving a dead transport. Wired before
+  // the session is awaited so a swap mid-handshake is not missed.
   final replacements = conn.sessionReplacements.listen((_) {
     if (ref.mounted) ref.invalidateSelf();
   });
