@@ -2,7 +2,7 @@ import { createPrivateKey, createPublicKey, sign } from "node:crypto";
 import { EndpointFailure } from "./endpoint-lifecycle";
 import { EndpointChallengeSchema, EndpointRegistrationSchema, endpointChallengeBytes } from "antgrid-wire";
 import { AcceptedAuthorizationSnapshotSchema } from "./dev-insecure-relay";
-import { rawSeedToPkcs8 } from "../e2e";
+import { rawSeedToPkcs8 } from "../ed25519-pkcs8";
 import type { EnrollmentIdentity } from "./authorization-lease";
 
 export class EndpointApiError extends Error {

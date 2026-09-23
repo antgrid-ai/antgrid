@@ -7,7 +7,7 @@ import { sign, verify } from "node:crypto";
 import { buildHelloSigBody, normalizeRelayHost } from "antgrid-wire";
 import { CentralControlClient } from "../src/central-control-client";
 import { MessageBus } from "../src/message-bus";
-import { rawSeedToPkcs8 } from "../src/e2e";
+import { rawSeedToPkcs8 } from "../src/ed25519-pkcs8";
 import { ED25519_SPKI_PREFIX } from "../src/ed25519-der";
 import vector from "../../evals/fixtures/relay-hello-vector.json";
 

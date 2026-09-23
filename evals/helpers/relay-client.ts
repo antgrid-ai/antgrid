@@ -3,6 +3,7 @@ import { Endpoint, EndpointAddr, EndpointId, type Connection } from "@number0/ir
 import { EndpointEnrollment } from "../../bridge/src/peer/enrollment";
 import { PeerRecords } from "../../bridge/src/peer/records";
 import { generateEphemeralKeypair, deriveSharedSecret } from "../../bridge/src/key-exchange";
+import { rawSeedToPkcs8 } from "../../bridge/src/ed25519-pkcs8";
 import {
   buildTranscript,
   deriveSessionKeys,
@@ -11,7 +12,6 @@ import {
   verifyConfirmTag,
   E2eTransport,
   verifyTranscriptSig,
-  rawSeedToPkcs8,
 } from "../../bridge/src/e2e";
 import { sign as nodeSign } from "node:crypto";
 import { createMessage, parseMessage, type AbMessage } from "../../bridge/src/protocol";

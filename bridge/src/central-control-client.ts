@@ -1,7 +1,7 @@
 import { sign, createPrivateKey, randomBytes } from "node:crypto";
 import { logger } from "./logger";
 
-import { rawSeedToPkcs8 } from "./e2e";
+import { rawSeedToPkcs8 } from "./ed25519-pkcs8";
 
 import { ServerMessage, buildHelloSigBody, normalizeRelayHost, type HelloMessage } from "antgrid-wire";
 
