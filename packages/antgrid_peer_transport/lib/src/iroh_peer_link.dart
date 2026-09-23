@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
@@ -115,18 +116,24 @@ class NativeEndpointOwner {
   Future<void> close() => endpoint.close();
 }
 
-class IrohPeerLink implements PeerLink {
+class IrohPeerLink implements PeerLink, MultiStreamPeerLink {
   IrohPeerLink._(
     this._connection,
     this._send,
     this._recv,
     this._authorized,
     this.netTap,
-  );
+  ) : _opener = PeerStreamOpener(
+        () async {
+          final (send, recv) = await _connection.openBi();
+          return (_IrohStreamSend(send), _IrohStreamRecv(recv));
+        },
+      );
   final iroh.Connection _connection;
   final iroh.SendStream _send;
   final iroh.RecvStream _recv;
   final bool Function() _authorized;
+  final PeerStreamOpener _opener;
   @override
   final PeerLinkDiagnostic? netTap;
   final _messages = StreamController<IncomingPeerFrame>.broadcast(sync: true);
@@ -257,6 +264,28 @@ class IrohPeerLink implements PeerLink {
     return completion.future;
   }
 
+  @override
+  Future<PeerStream> openStream(
+    StreamOpen open, {
+    required int maxRecordBytes,
+    required int maxQueuedBytes,
+  }) => _opener.open(
+    open,
+    authorized: () => isDispatchAllowed,
+    maxRecordBytes: maxRecordBytes,
+    maxQueuedBytes: maxQueuedBytes,
+    // Same outcomes as the session stream's reader: lost authorization
+    // closes quietly, a malformed record is a non-retryable violation.
+    onConnectionFatal: (cause) async {
+      switch (cause) {
+        case PeerStreamFatalCause.unauthorized:
+          await close();
+        case PeerStreamFatalCause.protocolViolation:
+          _fail('INVALID_STREAM_RECORD', false);
+      }
+    },
+  );
+
   /// `retryable: false` is reserved for what a second attempt cannot fix — a
   /// protocol violation by the peer. An unexplained native close or write
   /// error is precisely the case that cannot be classified, and the supervisor
@@ -287,5 +316,387 @@ class IrohPeerLink implements PeerLink {
     await _messages.close();
     await _states.close();
     await _failures.close();
+  }
+}
+
+/// Per native `writeAll` call, mirroring the bridge's
+/// `STREAM_RECORD_SLICE_BYTES` (`bridge/src/peer/stream-records.ts`).
+/// `iroh_quic` holds one mutex per stream across `writeAll`, and `reset`
+/// takes the same mutex, so a reset issued while a write is flow-blocked
+/// waits for that write; bounding the slice bounds the wait.
+const int kPeerStreamSliceBytes = 262144;
+
+const int _kRecordLengthPrefixBytes = 4;
+
+/// The send half a [NativePeerStream] writes through — narrower than
+/// `iroh.SendStream` so tests can fake it with no native library loaded.
+abstract interface class PeerStreamSend {
+  Future<void> writeAll(List<int> bytes);
+  Future<void> reset(int errorCode);
+  Future<void> finish();
+}
+
+/// The receive half a [NativePeerStream] reads through.
+abstract interface class PeerStreamRecv {
+  Future<Uint8List> readExact(int length);
+}
+
+/// Why a [NativePeerStream] asks its link to retire the whole connection.
+/// These are the only two; overflow, a cancel and a peer's reset or FIN end
+/// just the one stream.
+enum PeerStreamFatalCause { unauthorized, protocolViolation }
+
+class _IrohStreamSend implements PeerStreamSend {
+  _IrohStreamSend(this._inner);
+  final iroh.SendStream _inner;
+  @override
+  Future<void> writeAll(List<int> bytes) => _inner.writeAll(bytes);
+  @override
+  Future<void> reset(int errorCode) => _inner.reset(errorCode);
+  @override
+  Future<void> finish() => _inner.finish();
+}
+
+class _IrohStreamRecv implements PeerStreamRecv {
+  _IrohStreamRecv(this._inner);
+  final iroh.RecvStream _inner;
+  @override
+  Future<Uint8List> readExact(int length) => _inner.readExact(length);
+}
+
+class _PendingSend {
+  _PendingSend(this.bytes, this.settle);
+  final Uint8List bytes;
+  final void Function(PeerSendOutcome) settle;
+}
+
+/// One opened native stream's `[u32 len][record]` I/O, the Dart counterpart
+/// of the bridge's `StreamRecordWriter`/`StreamRecordReader`.
+///
+/// Reading starts when [records] is first listened to and pauses with the
+/// subscription, so an unread stream leaves its data in QUIC flow control
+/// rather than in an unbounded Dart buffer.
+class NativePeerStream implements PeerStream {
+  NativePeerStream(
+    this._send,
+    this._recv,
+    this._authorized,
+    this._onConnectionFatal, {
+    required int maxRecordBytes,
+    required int maxQueuedBytes,
+  }) : _maxRecordBytes = maxRecordBytes,
+       _maxQueuedBytes = maxQueuedBytes;
+
+  final PeerStreamSend _send;
+  final PeerStreamRecv _recv;
+  final bool Function() _authorized;
+  final Future<void> Function(PeerStreamFatalCause) _onConnectionFatal;
+  final int _maxRecordBytes;
+  final int _maxQueuedBytes;
+
+  // Single-subscription, not broadcast: a broadcast controller drops what
+  // arrives before the caller listens, and the first inbound record (an
+  // in-band `stream:refused`) can land before `openStream` has returned.
+  late final StreamController<Uint8List> _records = StreamController(
+    sync: true,
+    onListen: () => unawaited(_readLoop()),
+    onResume: _wakeReader,
+    onCancel: _wakeReader,
+  );
+  Completer<void>? _resumed;
+  final _queue = <_PendingSend>[];
+  final _idleWaiters = <Completer<void>>[];
+  bool _writing = false;
+  bool _writeStopped = false;
+  bool _finishing = false;
+  bool _resetIssued = false;
+  bool _fatal = false;
+  int _queuedBytes = 0;
+
+  /// Single-subscription: listen once.
+  @override
+  Stream<Uint8List> get records => _records.stream;
+
+  @override
+  Future<PeerSendOutcome> send(Uint8List record) {
+    if (_writeStopped || _finishing) {
+      return Future.value(PeerSendOutcome.closed);
+    }
+    if (!_authorized()) {
+      _abandon(PeerStreamFatalCause.unauthorized);
+      return Future.value(PeerSendOutcome.closed);
+    }
+    final size = record.length + _kRecordLengthPrefixBytes;
+    if (_queuedBytes + size > _maxQueuedBytes) {
+      // D3: the caller reopens and resyncs; the connection and every other
+      // stream on it are untouched.
+      unawaited(reset());
+      return Future.value(PeerSendOutcome.backpressured);
+    }
+    final framed = Uint8List(size);
+    ByteData.sublistView(framed).setUint32(0, record.length, Endian.big);
+    framed.setRange(_kRecordLengthPrefixBytes, size, record);
+    final completer = Completer<PeerSendOutcome>();
+    _queue.add(_PendingSend(framed, completer.complete));
+    _queuedBytes += size;
+    unawaited(_drain());
+    return completer.future;
+  }
+
+  Future<void> _drain() async {
+    if (_writing || _writeStopped) return;
+    _writing = true;
+    try {
+      while (!_writeStopped && _queue.isNotEmpty) {
+        if (!_authorized()) {
+          _abandon(PeerStreamFatalCause.unauthorized);
+          return;
+        }
+        final pending = _queue.removeAt(0);
+        _queuedBytes -= pending.bytes.length;
+        try {
+          final completed = await _writeInSlices(pending.bytes);
+          pending.settle(
+            completed ? PeerSendOutcome.accepted : PeerSendOutcome.closed,
+          );
+        } catch (_) {
+          // The peer stopped reading, or the connection went: this stream is
+          // over, and there is nothing left to reset.
+          pending.settle(PeerSendOutcome.closed);
+          _writeStopped = true;
+          _resetIssued = true;
+          _dropQueue();
+          return;
+        }
+      }
+    } finally {
+      _writing = false;
+      _notifyIdle();
+    }
+  }
+
+  /// Checks `_writeStopped` between slices, so a cancel or overflow noticed
+  /// mid-record stops after the slice already handed to the binding.
+  Future<bool> _writeInSlices(Uint8List bytes) async {
+    for (
+      var offset = 0;
+      offset < bytes.length;
+      offset += kPeerStreamSliceBytes
+    ) {
+      if (_writeStopped) return false;
+      final end = math.min(offset + kPeerStreamSliceBytes, bytes.length);
+      await _send.writeAll(bytes.sublist(offset, end));
+    }
+    return !_writeStopped;
+  }
+
+  void _dropQueue() {
+    for (final pending in _queue) {
+      pending.settle(PeerSendOutcome.closed);
+    }
+    _queue.clear();
+    _queuedBytes = 0;
+  }
+
+  void _notifyIdle() {
+    if (_writing || (_queue.isNotEmpty && !_writeStopped)) return;
+    for (final waiter in _idleWaiters) {
+      waiter.complete();
+    }
+    _idleWaiters.clear();
+  }
+
+  void _wakeReader() {
+    _resumed?.complete();
+    _resumed = null;
+  }
+
+  Future<void> _readLoop() async {
+    try {
+      while (!_records.isClosed) {
+        if (_records.isPaused) {
+          await (_resumed ??= Completer<void>()).future;
+          continue;
+        }
+        final prefix = await _recv.readExact(_kRecordLengthPrefixBytes);
+        final length = ByteData.sublistView(prefix).getUint32(0, Endian.big);
+        if (length == 0 || length > _maxRecordBytes) {
+          _abandon(PeerStreamFatalCause.protocolViolation);
+          return;
+        }
+        final body = await _recv.readExact(length);
+        if (!_authorized()) {
+          _abandon(PeerStreamFatalCause.unauthorized);
+          return;
+        }
+        if (!_records.isClosed) _records.add(body);
+      }
+    } catch (_) {
+      // The peer finished or reset this stream, or the connection went.
+    } finally {
+      _closeRecords();
+    }
+  }
+
+  // Never awaited: a single-subscription close completes only once a
+  // listener has taken the done event, which may be never.
+  void _closeRecords() {
+    if (!_records.isClosed) unawaited(_records.close());
+  }
+
+  void _issueReset() {
+    if (_resetIssued) return;
+    _resetIssued = true;
+    unawaited(
+      _send.reset(0).catchError((Object _) {
+        // The stream, or the connection under it, may already be gone.
+      }),
+    );
+  }
+
+  /// Retires the connection. The native reset is issued but not awaited: it
+  /// queues behind any flow-blocked write on the binding's stream mutex, and
+  /// only closing the connection preempts that write.
+  void _abandon(PeerStreamFatalCause cause) {
+    if (_fatal) return;
+    _fatal = true;
+    _writeStopped = true;
+    _dropQueue();
+    _notifyIdle();
+    _issueReset();
+    _closeRecords();
+    unawaited(_onConnectionFatal(cause));
+  }
+
+  /// Resolves once the native reset has been issued, which can wait for one
+  /// in-flight slice to drain (see [kPeerStreamSliceBytes]).
+  @override
+  Future<void> reset() async {
+    if (_resetIssued) return;
+    _writeStopped = true;
+    _resetIssued = true;
+    _dropQueue();
+    _notifyIdle();
+    try {
+      await _send.reset(0);
+    } catch (_) {
+      // The stream, or the connection under it, may already be gone.
+    }
+  }
+
+  /// Writes everything already queued, then FINs. A FIN issued while a
+  /// record is still going out would end the stream mid-record.
+  @override
+  Future<void> finish() async {
+    if (_writeStopped || _finishing) return;
+    _finishing = true;
+    if (_writing || _queue.isNotEmpty) {
+      final idle = Completer<void>();
+      _idleWaiters.add(idle);
+      await idle.future;
+    }
+    if (_writeStopped) return;
+    _writeStopped = true;
+    _resetIssued = true;
+    try {
+      await _send.finish();
+    } catch (_) {
+      // The stream, or the connection under it, may already be gone.
+    }
+  }
+}
+
+/// Opens purpose-specific streams on one connection: bounds concurrent
+/// in-flight opens with a semaphore and writes the [StreamOpen] frame as the
+/// stream's first record. The QUIC stream limit is the bridge's alone, and
+/// an open over it waits in `openBi` with no error, so the local bound is
+/// what turns a burst of opens into a queue the app can see.
+class PeerStreamOpener {
+  PeerStreamOpener(
+    this._openBi, {
+    int maxPendingOpens = kStreamMaxPendingOpensPerPeer,
+  }) : _maxPendingOpens = maxPendingOpens;
+
+  final Future<(PeerStreamSend, PeerStreamRecv)> Function() _openBi;
+  final int _maxPendingOpens;
+  int _pending = 0;
+  final _waiters = <Completer<void>>[];
+
+  Future<PeerStream> open(
+    StreamOpen open, {
+    required bool Function() authorized,
+    required int maxRecordBytes,
+    required int maxQueuedBytes,
+    required Future<void> Function(PeerStreamFatalCause) onConnectionFatal,
+  }) async {
+    final openBytes = Uint8List.fromList(
+      utf8.encode(jsonEncode(open.toJson())),
+    );
+    if (openBytes.length > kStreamOpenMaxBytes) {
+      throw const PeerConnectionFailure(
+        'STREAM_OPEN_TOO_LARGE',
+        terminal: true,
+      );
+    }
+    if (!authorized()) {
+      throw const PeerConnectionFailure(
+        'AUTHORIZATION_DENIED',
+        terminal: true,
+      );
+    }
+    await _acquire();
+    try {
+      if (!authorized()) {
+        throw const PeerConnectionFailure(
+          'AUTHORIZATION_DENIED',
+          terminal: true,
+        );
+      }
+      final (send, recv) = await _openBi();
+      final stream = NativePeerStream(
+        send,
+        recv,
+        authorized,
+        onConnectionFatal,
+        maxRecordBytes: maxRecordBytes,
+        maxQueuedBytes: maxQueuedBytes,
+      );
+      // A fresh Dart stream is invisible to the peer until its first write,
+      // so the open frame goes out before the stream is handed to anyone.
+      // `send` re-checks authorization, which covers a revocation during
+      // `openBi`.
+      final outcome = await stream.send(openBytes);
+      if (outcome != PeerSendOutcome.accepted) {
+        await stream.reset();
+        throw const PeerConnectionFailure(
+          'STREAM_OPEN_FAILED',
+          terminal: false,
+        );
+      }
+      return stream;
+    } finally {
+      _release();
+    }
+  }
+
+  Future<void> _acquire() {
+    if (_pending < _maxPendingOpens) {
+      _pending++;
+      return Future.value();
+    }
+    final completer = Completer<void>();
+    _waiters.add(completer);
+    return completer.future;
+  }
+
+  void _release() {
+    if (_waiters.isNotEmpty) {
+      // The slot passes straight to the head waiter: `complete()` resumes it
+      // only in a later microtask, so decrementing here would let a new
+      // caller take the slot first.
+      _waiters.removeAt(0).complete();
+    } else {
+      _pending--;
+    }
   }
 }

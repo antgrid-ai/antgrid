@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:typed_data';
 
+import 'models/stream_open.dart';
+
 enum PeerLinkState { connecting, ready, closed }
 
 enum PeerPath { unknown, direct, relay }
@@ -43,4 +45,44 @@ abstract interface class PeerLink {
   Future<PeerSendOutcome> sendFrame(String channel, Uint8List payload);
 
   Future<void> close();
+}
+
+/// One purpose-specific native stream. The send and receive halves end
+/// independently: [reset] and [finish] end only the send half.
+abstract interface class PeerStream {
+  /// Decoded records in arrival order. Ends when the peer finishes or resets
+  /// its send half, when the connection goes, or on a violation that retires
+  /// the connection; never because this side called [reset] or [finish]. A
+  /// cancelling caller keeps draining here until the peer's own end arrives.
+  Stream<Uint8List> get records;
+
+  /// Queues one record. A non-`accepted` outcome is final for this record;
+  /// `backpressured` means the stream was reset and must be reopened.
+  Future<PeerSendOutcome> send(Uint8List record);
+
+  /// Abandons the send half. Required on every error path: the native
+  /// binding FINs a send half that is dropped without a reset, which the
+  /// peer reads as a clean end.
+  Future<void> reset();
+
+  /// Writes what is already queued, then ends the send half cleanly.
+  Future<void> finish();
+}
+
+/// A link that can open purpose-specific streams. Separate from [PeerLink]
+/// so implementers with a single channel need not grow a stream API.
+abstract interface class MultiStreamPeerLink {
+  bool get isDispatchAllowed;
+
+  /// Opens one stream and writes [open] as its first record: a fresh native
+  /// stream is invisible to the peer until something is written on it.
+  /// Throws if the link may not dispatch or the open frame cannot be sent.
+  /// A bridge refusal arrives later, in-band, as a `stream:refused` record
+  /// on [PeerStream.records]. The bounds differ by stream kind, so neither
+  /// has a default.
+  Future<PeerStream> openStream(
+    StreamOpen open, {
+    required int maxRecordBytes,
+    required int maxQueuedBytes,
+  });
 }
