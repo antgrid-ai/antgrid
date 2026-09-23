@@ -3,7 +3,6 @@ import 'dart:async';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:antgrid_peer_transport/antgrid_peer_transport.dart';
 
-import '../config/native_crypto.dart';
 import '../models/ab_message.dart';
 import '../services/license_token_minter.dart';
 import '../util/ab_log.dart';
@@ -287,9 +286,6 @@ class PeerConnectionMechanisms implements PeerConnectionContract {
     _lastCoords = null;
     if (session != null) {
       await session.dispose();
-      // dispose() zeroizes the Dart-side keys; the installed native cipher
-      // holds its own copy that nothing else retires.
-      retireNativeE2eCipherKeys();
     }
     // Guarded, not merely idempotent: `disconnect()` emits a state event, which
     // feeds another evaluation, which releases again — an unguarded call loops.
@@ -313,7 +309,6 @@ class PeerConnectionMechanisms implements PeerConnectionContract {
       await _payloadDownSub?.cancel();
       _payloadDownSub = null;
       await existing.dispose();
-      retireNativeE2eCipherKeys();
       if (generation != _dialGeneration) {
         throw StateError('Session attempt superseded');
       }
@@ -331,17 +326,10 @@ class PeerConnectionMechanisms implements PeerConnectionContract {
           createAbMessage('project:start', {'projectId': projectId}),
       logger: _logMachineSession,
     );
-    // A session retires its keys on four paths and is DISPOSED on only two of
-    // them, so the dispose sites alone leave the involuntary majority — a
-    // dropped payload above all — holding key material in the native cipher.
-    // `MachineSession` zeroizes its own buffers on each of these; the cipher's
-    // copy is reachable from here or nowhere.
     session.takeoverEvents.listen((_) {
-      retireNativeE2eCipherKeys();
       _emit(const PeerSessionTakenOver());
     });
     session.sessionDownEvents.listen((_) {
-      retireNativeE2eCipherKeys();
       _emit(const PeerSessionDown());
     });
     // The common one, and the only one with no event of its own: the session
@@ -350,7 +338,6 @@ class PeerConnectionMechanisms implements PeerConnectionContract {
     // proxy for it.
     _payloadDownSub = payloadLink.payloadStateStream.listen((s) {
       if (s == PeerLinkState.closed) {
-        retireNativeE2eCipherKeys();
         _emit(const PeerSessionDown());
       }
     });

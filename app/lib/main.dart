@@ -15,7 +15,6 @@ import 'analytics/events.dart';
 import 'analytics/install_id.dart';
 import 'config/build_info.dart';
 import 'config/environment.dart';
-import 'config/native_crypto.dart';
 import 'design/ab_colors.dart';
 import 'design/ab_text_density.dart';
 import 'design/ab_theme.dart';
@@ -112,9 +111,6 @@ Future<void> main() async {
   // paste (Win+V) types a bare "v" instead of pasting without this — see
   // WindowsPasteFix's doc.
   WindowsPasteFix.install();
-  // Before any socket can seal a frame: the default cipher is pure Dart and
-  // blocks the UI isolate for the whole of a tunneled preview response.
-  installNativeE2eCipher();
   // OFL 1.1 obliges us to distribute the licence alongside the bundled
   // JetBrains Mono NL faces. The asset is the distribution; this makes it
   // reachable from the standard Flutter licence listing.
