@@ -231,7 +231,17 @@ class TerminalHistoryModel extends ChangeNotifier {
     _seekBefore = null;
     _replacePage = false;
     final previous = _boundary;
-    _boundary = page.history;
+    // A page reply and a live frame's `applyBoundary` race independently, and
+    // the reply carries whatever the bridge held when it answered -- which a
+    // frame arriving in between can already have overtaken. Only move the
+    // boundary forward within the same epoch, or a stale reply would revert
+    // `nextRowId`, closing `canLoadMore`/`hasHistory` on history that is
+    // still there and still growing.
+    final staleBoundary =
+        previous != null &&
+        previous.epoch == page.history.epoch &&
+        page.history.nextRowId < previous.nextRowId;
+    if (!staleBoundary) _boundary = page.history;
     _failure = null;
     // `expired` is the agent's verdict; the epoch is the fact, and it is the
     // fact [applyBoundary] already refuses to splice across. Rows counted in
@@ -277,7 +287,7 @@ class TerminalHistoryModel extends ChangeNotifier {
     // could only ever come back empty.
     _atOldest =
         fresh.isEmpty ||
-        (_rows.isNotEmpty && _rows.first.rowId <= page.history.firstRowId);
+        (_rows.isNotEmpty && _rows.first.rowId <= _boundary!.firstRowId);
     notifyListeners();
     return true;
   }

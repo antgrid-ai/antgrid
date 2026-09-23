@@ -275,6 +275,27 @@ class TerminalService {
   _endedHistoryAttachment = {};
   final Map<String, int?> _pendingExitCodes = {};
 
+  /// terminalId -> an ENDED notice held back by hazard B: the bridge
+  /// prioritizes control traffic over the preview channel, so ENDED can
+  /// overtake frames still queued behind it on the wire. The attachment
+  /// stays live until a frame reaching `finalSequence` is accepted, or the
+  /// run's own tail output is dropped along with the retirement.
+  ///
+  /// The exit code rides [_pendingExitCodes] meanwhile, so every path that
+  /// tears the display down mid-drain still completes the run. The deadline
+  /// exists because an overtaken frame is not guaranteed to follow: the
+  /// bridge aborts a retired attachment's queued sends, and without a bound
+  /// that loss would strand the tab as running forever.
+  final Map<
+    String,
+    ({
+      ({String runId, String attachmentId}) attachment,
+      int finalSequence,
+      Timer deadline,
+    })
+  >
+  _drainingEnded = {};
+
   /// terminalId -> the highest `terminal:frame` `sequence` this client has
   /// processed (applied or dropped as stale) for its live attachment. Acks
   /// are cumulative on this value, so it doubles as "what to ack next".
@@ -351,6 +372,11 @@ class TerminalService {
   final Duration checkoutAttachTimeout;
   final Duration prefetchSettleDelay;
   final Duration prefetchTimeout;
+
+  /// How long an ENDED that overtook its own frames waits for them before
+  /// retiring anyway (see [_drainingEnded]). Injectable so tests drive a
+  /// short window.
+  final Duration endedDrainTimeout;
   ReplyLatch? _branchesLatch;
   ReplyLatch? _checkoutLatch;
 
@@ -387,6 +413,7 @@ class TerminalService {
     this.checkoutAttachTimeout = const Duration(seconds: 30),
     this.prefetchSettleDelay = const Duration(milliseconds: 500),
     this.prefetchTimeout = const Duration(seconds: 5),
+    this.endedDrainTimeout = const Duration(seconds: 2),
   }) {
     // Heavy tier — terminal:output + terminal:snapshot (HEAVY tier messages).
     _heavySub = session.checkoutHeavyStream(checkoutId).listen(_onHeavyJson);
@@ -710,6 +737,23 @@ class TerminalService {
     // second ack -- "ack the highest and drop the superseded ones unparsed".
     if (msg.sequence <= highest) return;
     _frameHighestSequence[msg.terminalId] = msg.sequence;
+    final draining = _drainingEnded[msg.terminalId];
+    try {
+      _applyAcceptedFrame(tab, msg);
+    } finally {
+      // Retired only after the frame is painted and acked: `tab` is captured
+      // above, so a geometry change written back from it after
+      // `_completeTerminal` would resurrect the run as running. The identity
+      // check covers a frame whose own handling tore the display down.
+      if (draining != null &&
+          msg.sequence >= draining.finalSequence &&
+          identical(_drainingEnded[msg.terminalId], draining)) {
+        _finishEndedDrain(msg.terminalId);
+      }
+    }
+  }
+
+  void _applyAcceptedFrame(TerminalTab tab, TerminalFrameMessage msg) {
     if (_prefetchId == msg.terminalId && !_visible(msg.terminalId)) {
       final elapsed = _screenWaits.remove(msg.terminalId)?.elapsedMilliseconds;
       if (elapsed != null) {
@@ -830,6 +874,11 @@ class TerminalService {
     _freshScreens.remove(terminalId);
     _endedHistoryAttachment.remove(terminalId);
     _pendingExitCodes.remove(terminalId);
+    // A fresh attachment must not inherit a drain armed by the one it
+    // replaces -- its sequence numbers restart from 0 (see
+    // `_handleFrameSubscribed`), so a stale `finalSequence` could retire it
+    // before it has painted anything of its own.
+    _drainingEnded.remove(terminalId)?.deadline.cancel();
     _historyRequestDeadlines.remove(terminalId)?.cancel();
     _state.tabs[terminalId]?.history.cancelRequest();
     _frameAttachment.remove(terminalId);
@@ -1210,13 +1259,36 @@ class TerminalService {
     }
     _frameStatusMessage[terminalId] = msg.message;
     if (msg.code == 'ENDED') {
+      final finalSequence = msg.finalSequence;
+      final highest = _frameHighestSequence[terminalId] ?? 0;
+      // Hazard B: the bridge prioritizes control traffic over the preview
+      // channel, so this can overtake frames still queued behind it. Stay
+      // attached and keep applying/acking up to finalSequence -- retiring
+      // now would drop the run's own tail output.
+      if (finalSequence != null && highest < finalSequence) {
+        _pendingExitCodes[terminalId] =
+            _pendingExitCodes[terminalId] ?? msg.exitCode;
+        _drainingEnded.remove(terminalId)?.deadline.cancel();
+        late final Timer deadline;
+        deadline = Timer(endedDrainTimeout, () {
+          if (identical(_drainingEnded[terminalId]?.deadline, deadline)) {
+            _finishEndedDrain(terminalId);
+          }
+        });
+        _drainingEnded[terminalId] = (
+          attachment: attachment,
+          finalSequence: finalSequence,
+          deadline: deadline,
+        );
+        return;
+      }
       // D7: lifecycle, not failure. The only notice that definitionally ends
       // the attachment, so the only one that drops it here.
-      _endedHistoryAttachment[terminalId] = attachment;
-      _frameAttachment.remove(terminalId);
-      _frameEndedIds.add(terminalId);
-      final exitCode = _pendingExitCodes.remove(terminalId) ?? msg.exitCode;
-      _completeTerminal(terminalId, exitCode);
+      _retireEndedAttachment(
+        terminalId,
+        attachment,
+        _pendingExitCodes.remove(terminalId) ?? msg.exitCode,
+      );
     } else {
       _frameFailedIds.add(terminalId);
     }
@@ -1350,6 +1422,32 @@ class TerminalService {
       return;
     }
     _completeTerminal(msg.terminalId, msg.exitCode);
+  }
+
+  /// Finishes what an ENDED notice claims: past this point [terminalId] has
+  /// no live frame attachment, whether it retired immediately or was held in
+  /// [_drainingEnded] for a trailing frame first (hazard B).
+  void _retireEndedAttachment(
+    String terminalId,
+    ({String runId, String attachmentId}) attachment,
+    int? exitCode,
+  ) {
+    _endedHistoryAttachment[terminalId] = attachment;
+    _frameAttachment.remove(terminalId);
+    _frameEndedIds.add(terminalId);
+    _completeTerminal(terminalId, exitCode);
+  }
+
+  void _finishEndedDrain(String terminalId) {
+    final drain = _drainingEnded.remove(terminalId);
+    if (drain == null) return;
+    drain.deadline.cancel();
+    _retireEndedAttachment(
+      terminalId,
+      drain.attachment,
+      _pendingExitCodes.remove(terminalId),
+    );
+    _publishHydration();
   }
 
   void _completeTerminal(String terminalId, int? exitCode) {
@@ -2022,6 +2120,7 @@ class TerminalService {
       ..._historyRequestDeadlines.values,
       ..._resizeTimers.values,
       ..._pendingTerminalTimers.values,
+      for (final drain in _drainingEnded.values) drain.deadline,
     ]) {
       timer.cancel();
     }

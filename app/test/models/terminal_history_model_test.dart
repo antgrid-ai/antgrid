@@ -508,6 +508,41 @@ void main() {
     expect(m.failure, 'archiving is off');
   });
 
+  test('a stale page reply cannot move a live boundary backward', () {
+    // The reply's `history` is whatever the bridge held when it answered --
+    // which a live frame's own `applyBoundary`, racing independently, can
+    // already have overtaken by the time the reply lands.
+    final m = TerminalHistoryModel()..applyBoundary(_boundary(nextRowId: 1000));
+    m.markRequested('r1');
+    m.applyBoundary(_boundary(nextRowId: 5000));
+    m.applyPage(
+      _page(
+        requestId: 'r1',
+        rows: _rowsBelow(1000),
+        history: _boundary(nextRowId: 1000),
+      ),
+    );
+    expect(m.boundary!.nextRowId, 5000);
+    expect(m.hasHistory, isTrue);
+  });
+
+  test('a stale page reply judges the top against the held boundary', () {
+    // Retention moved the first retained row up while the page was in
+    // flight; the reply's own boundary still names the old one.
+    final m = TerminalHistoryModel()..applyBoundary(_boundary(nextRowId: 1000));
+    m.markRequested('r1');
+    m.applyBoundary(_boundary(firstRowId: 800, nextRowId: 5000));
+    m.applyPage(
+      _page(
+        requestId: 'r1',
+        rows: _rowsBelow(1000),
+        history: _boundary(nextRowId: 1000),
+      ),
+    );
+    expect(m.rows.first.rowId, 800);
+    expect(m.atOldest, isTrue);
+  });
+
   test('reset forgets the boundary as well as the rows', () {
     final m = TerminalHistoryModel()..applyBoundary(_boundary(nextRowId: 1000));
     m.markRequested('r1');
