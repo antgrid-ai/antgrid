@@ -23,6 +23,10 @@ const EnvSchema = z
     EMAIL_FROM: z.string().default("Antgrid <no-reply@radhaai.org>"),
     RELAY_INTERNAL_URL: z.string().url().optional(),
     RELAY_INTERNAL_SECRET: z.string().min(16).optional(),
+    // Bearer token the stock iroh-relay's `access.http` check presents back to
+    // us (relay-side env: IROH_RELAY_HTTP_BEARER_TOKEN). Aspire generates one
+    // per run; production sets it through deployment secrets.
+    PEER_RELAY_ACCESS_TOKEN: z.string().min(32).optional(),
     // Scheme validation happens in the object transform below, which is the
     // first place ANTGRID_DEV_INSECURE_RELAY and NODE_ENV are both in scope.
     IROH_RELAY_URLS: z.string().optional().transform((value) =>

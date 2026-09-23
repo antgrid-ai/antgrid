@@ -8,6 +8,7 @@ import { deviceRoutes } from "./routes/devices.js";
 import { agentRoutes } from "./routes/agents.js";
 import { peerAuthorizationRoutes } from "./routes/peer-authorization.js";
 import { peerAdmissionRoutes } from "./routes/peer-admission.js";
+import { irohAccessRoutes } from "./routes/iroh-access.js";
 import { subscriptionRoutes } from "./routes/subscriptions.js";
 import { billingRoutes } from "./routes/billing.js";
 import { webhookRoutes } from "./routes/webhooks.js";
@@ -124,6 +125,7 @@ export function buildApp(deps: AppDeps) {
   app.route("/", agentRoutes({ db: deps.db, auth: deps.auth, env: deps.env }));
   app.route("/", peerAuthorizationRoutes(deps));
   app.route("/", peerAdmissionRoutes(deps));
+  app.route("/", irohAccessRoutes(deps));
   app.route("/", subscriptionRoutes({ db: deps.db, auth: deps.auth }));
   app.route("/", billingRoutes({ db: deps.db, auth: deps.auth, env: deps.env, relay: deps.relay, clientIp }));
   app.route(

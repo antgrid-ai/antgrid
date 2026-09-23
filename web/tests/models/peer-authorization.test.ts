@@ -4,7 +4,7 @@ import { getPublicKeyAsync, signAsync } from "@noble/ed25519";
 import { endpointChallengeBytes } from "antgrid-wire";
 import { startTestPg, type PgHandle } from "../helpers/pg.js";
 import { rejection } from "../helpers/rejection.js";
-import { createEndpointChallenge, registerEndpoint, peerAuthorizationSnapshot, peerRelayAdmission } from "../../src/models/peer-authorization.js";
+import { createEndpointChallenge, registerEndpoint, peerAuthorizationSnapshot, peerRelayAdmission, admitRelayEndpoint } from "../../src/models/peer-authorization.js";
 import { buildTestApp } from "../helpers/app.js";
 import { peerAdmissionRoutes } from "../../src/routes/peer-admission.js";
 import { provisionProductAccountForUser } from "../../src/models/subscription.js";
@@ -46,7 +46,51 @@ describe("relay endpoint admission", () => {
   const relayUrl = "https://relay.example/";
   const input = (endpointId: string) => ({ endpointId, relayUrl, requestId: randomUUID(), issuedAt: Date.now() });
 
-  test("live enrollment is admitted with exact generation and historical endpoints stay denied", async () => {
+  test("live enrollment is admitted; historical endpoints and generation rotation stay denied", async () => {
+    await provisionProductAccountForUser(pg.db, identity.userId);
+    const first = await signed();
+    await registerEndpoint(pg.db, identity, first.input);
+    expect(await admitRelayEndpoint(pg.db, first.endpointId, relayUrl, [relayUrl])).toBe(true);
+    const next = await signed("1");
+    await registerEndpoint(pg.db, identity, next.input);
+    expect(await admitRelayEndpoint(pg.db, first.endpointId, relayUrl, [relayUrl])).toBe(false);
+    expect(await admitRelayEndpoint(pg.db, next.endpointId, relayUrl, [relayUrl])).toBe(true);
+  });
+
+  test("denies unapproved relay, absent entitlement and disabled bound credentials", async () => {
+    const proof = await signed();
+    await registerEndpoint(pg.db, identity, proof.input);
+    expect(await admitRelayEndpoint(pg.db, proof.endpointId, relayUrl, [relayUrl])).toBe(false);
+    await provisionProductAccountForUser(pg.db, identity.userId);
+    expect(await admitRelayEndpoint(pg.db, proof.endpointId, relayUrl, [])).toBe(false);
+    await pg.db.oauthClient.update({ where: { clientId: identity.enrollmentId }, data: { disabled: true } });
+    expect(await admitRelayEndpoint(pg.db, proof.endpointId, relayUrl, [relayUrl])).toBe(false);
+  });
+
+  test("rejects credential metadata impersonation even with a live registration", async () => {
+    await provisionProductAccountForUser(pg.db, identity.userId);
+    const proof = await signed();
+    await registerEndpoint(pg.db, identity, proof.input);
+    await pg.db.oauthClient.update({ where: { clientId: identity.enrollmentId }, data: { metadata: {
+      userId: identity.userId, deviceUuid: randomUUID(), ed25519Pub: Buffer.from(identity.publicKey).toString("base64"),
+    } } });
+    expect(await admitRelayEndpoint(pg.db, proof.endpointId, relayUrl, [relayUrl])).toBe(false);
+  });
+
+  test("subscription removal and account deletion deny the next admission", async () => {
+    const account = await provisionProductAccountForUser(pg.db, identity.userId);
+    const proof = await signed();
+    await registerEndpoint(pg.db, identity, proof.input);
+    expect(await admitRelayEndpoint(pg.db, proof.endpointId, relayUrl, [relayUrl])).toBe(true);
+    await pg.db.subscription.updateMany({ where: { accountId: account.id }, data: { status: "canceled" } });
+    expect(await admitRelayEndpoint(pg.db, proof.endpointId, relayUrl, [relayUrl])).toBe(false);
+    await pg.db.productAccount.update({ where: { id: account.id }, data: { deletedAt: new Date() } });
+    expect(await admitRelayEndpoint(pg.db, proof.endpointId, relayUrl, [relayUrl])).toBe(false);
+  });
+
+  // The custom relay's route reads identity, generations and lease off this
+  // response; `admitRelayEndpoint` shares its core but reports only a boolean.
+  test("peerRelayAdmission still carries generation and lease detail for the custom-relay route", async () => {
     await provisionProductAccountForUser(pg.db, identity.userId);
     const first = await signed();
     await registerEndpoint(pg.db, identity, first.input);
@@ -68,37 +112,6 @@ describe("relay endpoint admission", () => {
       expect(rotated.registrationGeneration).toBe("2");
       expect(BigInt(rotated.policyGeneration)).toBeGreaterThan(BigInt(admitted.policyGeneration));
     }
-  });
-
-  test("denies unapproved relay, absent entitlement and disabled bound credentials", async () => {
-    const proof = await signed();
-    await registerEndpoint(pg.db, identity, proof.input);
-    expect((await peerRelayAdmission(pg.db, input(proof.endpointId), [relayUrl])).allowed).toBe(false);
-    await provisionProductAccountForUser(pg.db, identity.userId);
-    expect((await peerRelayAdmission(pg.db, input(proof.endpointId), [])).allowed).toBe(false);
-    await pg.db.oauthClient.update({ where: { clientId: identity.enrollmentId }, data: { disabled: true } });
-    expect((await peerRelayAdmission(pg.db, input(proof.endpointId), [relayUrl])).allowed).toBe(false);
-  });
-
-  test("rejects credential metadata impersonation even with a live registration", async () => {
-    await provisionProductAccountForUser(pg.db, identity.userId);
-    const proof = await signed();
-    await registerEndpoint(pg.db, identity, proof.input);
-    await pg.db.oauthClient.update({ where: { clientId: identity.enrollmentId }, data: { metadata: {
-      userId: identity.userId, deviceUuid: randomUUID(), ed25519Pub: Buffer.from(identity.publicKey).toString("base64"),
-    } } });
-    expect((await peerRelayAdmission(pg.db, input(proof.endpointId), [relayUrl])).allowed).toBe(false);
-  });
-
-  test("subscription removal and account deletion deny the next admission", async () => {
-    const account = await provisionProductAccountForUser(pg.db, identity.userId);
-    const proof = await signed();
-    await registerEndpoint(pg.db, identity, proof.input);
-    expect((await peerRelayAdmission(pg.db, input(proof.endpointId), [relayUrl])).allowed).toBe(true);
-    await pg.db.subscription.updateMany({ where: { accountId: account.id }, data: { status: "canceled" } });
-    expect((await peerRelayAdmission(pg.db, input(proof.endpointId), [relayUrl])).allowed).toBe(false);
-    await pg.db.productAccount.update({ where: { id: account.id }, data: { deletedAt: new Date() } });
-    expect((await peerRelayAdmission(pg.db, input(proof.endpointId), [relayUrl])).allowed).toBe(false);
   });
 
   test("real HTTP app route authenticates exact bytes and bounds freshness/body", async () => {

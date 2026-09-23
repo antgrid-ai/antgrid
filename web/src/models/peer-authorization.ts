@@ -174,32 +174,52 @@ async function authorizationSnapshot(tx: Tx, identity: Identity, relayUrls: stri
       endpoint: endpoints.get(identity.enrollmentId) ?? null, peers, relayUrls: allowed ? relayUrls : [] });
 }
 
-export async function peerRelayAdmission(db: DB, input: PeerRelayAdmissionRequest,
-  relayUrls: string[], options: RelayOptions = {}): Promise<PeerRelayAdmissionResponse> {
-  const denied = { allowed: false as const, requestId: input.requestId };
-  if (!relayUrls.includes(input.relayUrl)) return denied;
+/**
+ * Core relay-admission check, shared by the stock relay's `access.http` route
+ * and (until Stage C's delete wave) the custom relay's admission route below.
+ * Returns the full snapshot on admission so `peerRelayAdmission` can still
+ * report registration/policy generation and lease detail; returns null on any
+ * denial, including an unexpected error (fail closed).
+ */
+async function resolveRelayEndpointAdmission(db: DB, endpointId: string, relayUrl: string,
+  relayUrls: string[], options: RelayOptions) {
+  if (!relayUrls.includes(relayUrl)) return null;
   try {
     return await serializable(db, async (tx) => {
-      const registration = await tx.peerEndpointRegistration.findUnique({ where: { endpointId: input.endpointId } });
-      if (!registration || registration.revokedAt) return denied;
+      const registration = await tx.peerEndpointRegistration.findUnique({ where: { endpointId } });
+      if (!registration || registration.revokedAt) return null;
       const device = await tx.device.findUnique({ where: { userId_deviceId: {
         userId: registration.userId, deviceId: registration.deviceId,
       } } });
-      if (!device) return denied;
+      if (!device) return null;
       // Registration, credential binding and policy must come from one transaction.
       const snapshot = await authorizationSnapshot(tx, { id: device.id, userId: registration.userId,
         deviceId: registration.deviceId, enrollmentId: registration.enrollmentId,
         publicKey: device.publicKey, kind: device.kind }, relayUrls, options);
-      if (!snapshot.allowed || snapshot.leaseMs <= 0 || snapshot.endpoint?.endpointId !== input.endpointId ||
+      if (!snapshot.allowed || snapshot.leaseMs <= 0 || snapshot.endpoint?.endpointId !== endpointId ||
           snapshot.endpoint.generation !== registration.generation.toString() ||
-          snapshot.registrationGeneration !== registration.generation.toString()) return denied;
-      return PeerRelayAdmissionResponseSchema.parse({ allowed: true, requestId: input.requestId,
-        endpointId: input.endpointId, userId: snapshot.accountId, deviceId: snapshot.deviceId,
-        enrollmentId: snapshot.enrollmentId, registrationGeneration: snapshot.registrationGeneration,
-        policyGeneration: snapshot.policyGeneration, leaseMs: snapshot.leaseMs });
+          snapshot.registrationGeneration !== registration.generation.toString()) return null;
+      return snapshot;
     });
   } catch (error) {
-    if (error instanceof PeerAuthorizationError) return denied;
+    if (error instanceof PeerAuthorizationError) return null;
     throw error;
   }
+}
+
+/** Boolean shape for the stock relay's `access.http` route — see `routes/iroh-access.ts`. */
+export async function admitRelayEndpoint(db: DB, endpointId: string, relayUrl: string,
+  relayUrls: string[], options: RelayOptions = {}): Promise<boolean> {
+  return (await resolveRelayEndpointAdmission(db, endpointId, relayUrl, relayUrls, options)) !== null;
+}
+
+export async function peerRelayAdmission(db: DB, input: PeerRelayAdmissionRequest,
+  relayUrls: string[], options: RelayOptions = {}): Promise<PeerRelayAdmissionResponse> {
+  const denied = { allowed: false as const, requestId: input.requestId };
+  const snapshot = await resolveRelayEndpointAdmission(db, input.endpointId, input.relayUrl, relayUrls, options);
+  if (!snapshot) return denied;
+  return PeerRelayAdmissionResponseSchema.parse({ allowed: true, requestId: input.requestId,
+    endpointId: input.endpointId, userId: snapshot.accountId, deviceId: snapshot.deviceId,
+    enrollmentId: snapshot.enrollmentId, registrationGeneration: snapshot.registrationGeneration,
+    policyGeneration: snapshot.policyGeneration, leaseMs: snapshot.leaseMs });
 }

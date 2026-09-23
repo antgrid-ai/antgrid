@@ -64,6 +64,13 @@ describe("loadEnv", () => {
     expect(() => loadEnv({})).toThrow(/PG_DATABASE_URL/);
   });
 
+  test("PEER_RELAY_ACCESS_TOKEN is optional but bounded below 32 characters", () => {
+    expect(loadEnv(baseSource).PEER_RELAY_ACCESS_TOKEN).toBeUndefined();
+    expect(() => loadEnv({ ...baseSource, PEER_RELAY_ACCESS_TOKEN: "short" })).toThrow();
+    const token = "x".repeat(32);
+    expect(loadEnv({ ...baseSource, PEER_RELAY_ACCESS_TOKEN: token }).PEER_RELAY_ACCESS_TOKEN).toBe(token);
+  });
+
   test("Razorpay key id is undefined when env omits it (no config default)", () => {
     const env = loadEnv({ NODE_ENV: "development", ...baseSource });
     expect(env.RAZORPAY_KEY_ID).toBeUndefined();
