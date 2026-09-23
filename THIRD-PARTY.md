@@ -24,12 +24,11 @@ These additions were inspected at their installed package licence files. The
 historical bulk scan below predates the native peer dependencies; a complete
 updated transitive/native redistribution inventory remains a release gate.
 
-The ELv2 self-hosted service embeds upstream `iroh-relay` 1.2.0 (MIT OR
-Apache-2.0) through its public APIs. Its [resolved Rust dependency inventory](iroh-relay/third-party-inventory.json)
-and [license notes](iroh-relay/THIRD-PARTY.md) accompany the service; `Cargo.lock` is the version
-authority. The separate `compat-client/Cargo.lock` pins the older relay protocol
-test client and is not shipped in the service container. Redistribution notices,
-source license texts and the final container inventory require release review.
+The self-hosted relay service ships the stock upstream `iroh-relay` 1.2.0
+binary (MIT OR Apache-2.0), built unmodified by `cargo install --locked` (see
+`aspire/apphost.ts` and `deploy/iroh/Dockerfile`); no source is vendored here.
+The container redistributes that binary and its statically linked Rust
+dependencies, so their notices and license texts still require release review.
 
 This file lists **direct** dependencies, plus anything whose compiled output ends
 up inside a shipped artefact. The transitive dependency tree is **not** enumerated

@@ -1,12 +1,10 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import { createHmac, randomBytes, randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { getPublicKeyAsync, signAsync } from "@noble/ed25519";
 import { endpointChallengeBytes } from "antgrid-wire";
 import { startTestPg, type PgHandle } from "../helpers/pg.js";
 import { rejection } from "../helpers/rejection.js";
-import { createEndpointChallenge, registerEndpoint, peerAuthorizationSnapshot, peerRelayAdmission, admitRelayEndpoint } from "../../src/models/peer-authorization.js";
-import { buildTestApp } from "../helpers/app.js";
-import { peerAdmissionRoutes } from "../../src/routes/peer-admission.js";
+import { createEndpointChallenge, registerEndpoint, peerAuthorizationSnapshot, admitRelayEndpoint } from "../../src/models/peer-authorization.js";
 import { provisionProductAccountForUser } from "../../src/models/subscription.js";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { Hono } from "hono";
@@ -44,7 +42,6 @@ async function signed(expectedGeneration = "0", secret = randomBytes(32)) {
 
 describe("relay endpoint admission", () => {
   const relayUrl = "https://relay.example/";
-  const input = (endpointId: string) => ({ endpointId, relayUrl, requestId: randomUUID(), issuedAt: Date.now() });
 
   test("live enrollment is admitted; historical endpoints and generation rotation stay denied", async () => {
     await provisionProductAccountForUser(pg.db, identity.userId);
@@ -86,65 +83,6 @@ describe("relay endpoint admission", () => {
     expect(await admitRelayEndpoint(pg.db, proof.endpointId, relayUrl, [relayUrl])).toBe(false);
     await pg.db.productAccount.update({ where: { id: account.id }, data: { deletedAt: new Date() } });
     expect(await admitRelayEndpoint(pg.db, proof.endpointId, relayUrl, [relayUrl])).toBe(false);
-  });
-
-  // The custom relay's route reads identity, generations and lease off this
-  // response; `admitRelayEndpoint` shares its core but reports only a boolean.
-  test("peerRelayAdmission still carries generation and lease detail for the custom-relay route", async () => {
-    await provisionProductAccountForUser(pg.db, identity.userId);
-    const first = await signed();
-    await registerEndpoint(pg.db, identity, first.input);
-    const admitted = await peerRelayAdmission(pg.db, input(first.endpointId), [relayUrl]);
-    expect(admitted.allowed).toBe(true);
-    if (!admitted.allowed) throw new Error("expected admission");
-    expect(admitted.userId).toBe(identity.userId);
-    expect(admitted.deviceId).toBe(identity.deviceId);
-    expect(admitted.enrollmentId).toBe(identity.enrollmentId);
-    expect(admitted.registrationGeneration).toBe("1");
-    expect(admitted.leaseMs).toBeGreaterThan(0);
-    expect(admitted.leaseMs).toBeLessThanOrEqual(60_000);
-    const next = await signed("1");
-    await registerEndpoint(pg.db, identity, next.input);
-    expect((await peerRelayAdmission(pg.db, input(first.endpointId), [relayUrl])).allowed).toBe(false);
-    const rotated = await peerRelayAdmission(pg.db, input(next.endpointId), [relayUrl]);
-    expect(rotated.allowed).toBe(true);
-    if (rotated.allowed) {
-      expect(rotated.registrationGeneration).toBe("2");
-      expect(BigInt(rotated.policyGeneration)).toBeGreaterThan(BigInt(admitted.policyGeneration));
-    }
-  });
-
-  test("real HTTP app route authenticates exact bytes and bounds freshness/body", async () => {
-    await provisionProductAccountForUser(pg.db, identity.userId);
-    const proof = await signed();
-    await registerEndpoint(pg.db, identity, proof.input);
-    const secret = "test-relay-service-secret";
-    const { app } = buildTestApp(pg.db, pg.url, { envOverrides: { RELAY_INTERNAL_SECRET: secret, IROH_RELAY_URLS: [relayUrl] } });
-    const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: app.fetch });
-    const request = (body: string, signedBody = body, key = secret) => fetch(`http://127.0.0.1:${server.port}/internal/peer-admission`, {
-      method: "POST", body, headers: { "content-type": "application/json",
-        "x-antgrid-signature": createHmac("sha256", key).update(signedBody).digest("hex") },
-    });
-    try {
-      const value = input(proof.endpointId);
-      const body = JSON.stringify(value);
-      const admitted = await request(body);
-      expect(admitted.status).toBe(200);
-      expect(admitted.headers.get("cache-control")).toBe("no-store");
-      expect((await admitted.json()).allowed).toBe(true);
-      expect((await request(body, body, "wrong")).status).toBe(401);
-      expect((await request(body + " ", body)).status).toBe(401);
-      expect((await request(JSON.stringify({ ...value, extra: true }))).status).toBe(400);
-      expect((await request("x".repeat(4097))).status).toBe(413);
-      for (const issuedAt of [Date.now() - 31_000, Date.now() + 31_000]) {
-        expect(await (await request(JSON.stringify({ ...value, issuedAt }))).json()).toEqual({ allowed: false, requestId: value.requestId });
-      }
-      const unapproved = await request(JSON.stringify({ ...value, relayUrl: "https://unapproved.example/" }));
-      expect(await unapproved.json()).toEqual({ allowed: false, requestId: value.requestId });
-    } finally { server.stop(true); }
-    const missingSecret = new Hono().route("/", peerAdmissionRoutes({ db: pg.db,
-      env: { IROH_RELAY_URLS: [relayUrl] } as Env }));
-    expect((await missingSecret.request("/internal/peer-admission", { method: "POST" })).status).toBe(401);
   });
 });
 

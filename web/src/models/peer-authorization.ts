@@ -2,8 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { verifyAsync } from "@noble/ed25519";
 import {
   ENDPOINT_CHALLENGE_MS, PEER_LEASE_MS, endpointChallengeBytes,
-  peerAuthorizationSnapshotSchema, PeerRelayAdmissionResponseSchema, type EndpointChallenge,
-  type PeerRelayAdmissionRequest, type PeerRelayAdmissionResponse,
+  peerAuthorizationSnapshotSchema, type EndpointChallenge,
 } from "antgrid-wire";
 import type { DB, Tx } from "../db/index.js";
 import type { AuthVars } from "../auth/middleware.js";
@@ -175,11 +174,9 @@ async function authorizationSnapshot(tx: Tx, identity: Identity, relayUrls: stri
 }
 
 /**
- * Core relay-admission check, shared by the stock relay's `access.http` route
- * and (until Stage C's delete wave) the custom relay's admission route below.
- * Returns the full snapshot on admission so `peerRelayAdmission` can still
- * report registration/policy generation and lease detail; returns null on any
- * denial, including an unexpected error (fail closed).
+ * Core relay-admission check behind the stock relay's `access.http` route.
+ * Returns null on any denial. Errors other than `PeerAuthorizationError` propagate;
+ * the route turns them into a denial.
  */
 async function resolveRelayEndpointAdmission(db: DB, endpointId: string, relayUrl: string,
   relayUrls: string[], options: RelayOptions) {
@@ -211,15 +208,4 @@ async function resolveRelayEndpointAdmission(db: DB, endpointId: string, relayUr
 export async function admitRelayEndpoint(db: DB, endpointId: string, relayUrl: string,
   relayUrls: string[], options: RelayOptions = {}): Promise<boolean> {
   return (await resolveRelayEndpointAdmission(db, endpointId, relayUrl, relayUrls, options)) !== null;
-}
-
-export async function peerRelayAdmission(db: DB, input: PeerRelayAdmissionRequest,
-  relayUrls: string[], options: RelayOptions = {}): Promise<PeerRelayAdmissionResponse> {
-  const denied = { allowed: false as const, requestId: input.requestId };
-  const snapshot = await resolveRelayEndpointAdmission(db, input.endpointId, input.relayUrl, relayUrls, options);
-  if (!snapshot) return denied;
-  return PeerRelayAdmissionResponseSchema.parse({ allowed: true, requestId: input.requestId,
-    endpointId: input.endpointId, userId: snapshot.accountId, deviceId: snapshot.deviceId,
-    enrollmentId: snapshot.enrollmentId, registrationGeneration: snapshot.registrationGeneration,
-    policyGeneration: snapshot.policyGeneration, leaseMs: snapshot.leaseMs });
 }

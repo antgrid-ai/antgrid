@@ -92,30 +92,6 @@ export const peerAuthorizationSnapshotSchema = (allowInsecureRelay: boolean) => 
 export const PeerAuthorizationSnapshotSchema = peerAuthorizationSnapshotSchema(false);
 export type PeerAuthorizationSnapshot = z.infer<typeof PeerAuthorizationSnapshotSchema>;
 
-export const peerRelayAdmissionRequestSchema = (allowInsecureRelay: boolean) => z.strictObject({
-  endpointId: EndpointIdSchema,
-  relayUrl: relayUrlsSchema(allowInsecureRelay).element,
-  requestId: z.string().uuid(),
-  issuedAt: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
-});
-export const PeerRelayAdmissionRequestSchema = peerRelayAdmissionRequestSchema(false);
-export const PeerRelayAdmissionResponseSchema = z.discriminatedUnion("allowed", [
-  z.strictObject({ allowed: z.literal(false), requestId: z.string().uuid() }),
-  z.strictObject({
-    allowed: z.literal(true),
-    requestId: z.string().uuid(),
-    endpointId: EndpointIdSchema,
-    userId: z.string().min(1).max(PEER_IDENTITY_MAX_CHARS),
-    deviceId: z.string().uuid(),
-    enrollmentId: z.string().min(1).max(PEER_IDENTITY_MAX_CHARS),
-    registrationGeneration: DecimalGenerationSchema,
-    policyGeneration: DecimalGenerationSchema,
-    leaseMs: z.number().int().positive().max(PEER_LEASE_MS),
-  }),
-]);
-export type PeerRelayAdmissionRequest = z.infer<typeof PeerRelayAdmissionRequestSchema>;
-export type PeerRelayAdmissionResponse = z.infer<typeof PeerRelayAdmissionResponseSchema>;
-
 /** Length prefixes keep variable identifiers unambiguous across TS and Dart. */
 export function endpointChallengeBytes(value: EndpointChallenge): Uint8Array {
   const parsed = EndpointChallengeSchema.parse(value);

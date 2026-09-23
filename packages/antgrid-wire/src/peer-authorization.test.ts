@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { createPublicKey, verify } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { DecimalGenerationSchema, endpointChallengeBytes, PeerRelayAdmissionRequestSchema, PeerRelayAdmissionResponseSchema, type EndpointChallenge } from "./peer-authorization";
+import { DecimalGenerationSchema, endpointChallengeBytes, type EndpointChallenge } from "./peer-authorization";
 
 const challenge: EndpointChallenge = {
   challengeId: "00000000-0000-4000-8000-000000000001",
@@ -9,23 +9,6 @@ const challenge: EndpointChallenge = {
   deviceId: "00000000-0000-4000-8000-000000000002", enrollmentId: "credential",
   endpointId: "01".repeat(32), expectedGeneration: "9007199254740993",
 };
-
-test("relay admission rejects unapproved URL shapes and unbounded leases", () => {
-  const request = { endpointId: challenge.endpointId, relayUrl: "https://relay.example/", requestId: challenge.challengeId, issuedAt: 1 };
-  expect(PeerRelayAdmissionRequestSchema.safeParse(request).success).toBe(true);
-  for (const relayUrl of ["http://relay.example/", "https://user@relay.example/", "https://relay.example/path", "https://relay.example/?token=x"]) {
-    expect(PeerRelayAdmissionRequestSchema.safeParse({ ...request, relayUrl }).success).toBe(false);
-  }
-  const response = { allowed: true, requestId: request.requestId, endpointId: request.endpointId,
-    userId: "account", deviceId: challenge.deviceId, enrollmentId: "credential",
-    registrationGeneration: "9007199254740993", policyGeneration: "1", leaseMs: 60000 };
-  expect(PeerRelayAdmissionResponseSchema.safeParse(response).success).toBe(true);
-  for (const leaseMs of [0, -1, 60001, 1.5]) {
-    expect(PeerRelayAdmissionResponseSchema.safeParse({ ...response, leaseMs }).success).toBe(false);
-  }
-  expect(PeerRelayAdmissionResponseSchema.safeParse({ allowed: false }).success).toBe(false);
-  expect(PeerRelayAdmissionResponseSchema.safeParse({ allowed: false, requestId: request.requestId }).success).toBe(true);
-});
 
 test("generations preserve values beyond JSON integer precision", () => {
   expect(DecimalGenerationSchema.parse(challenge.expectedGeneration)).toBe("9007199254740993");
