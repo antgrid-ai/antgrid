@@ -105,6 +105,84 @@ describe("joinCaptures", () => {
     expect(rows.find((r) => r.event.frameId === "orphan")!.verdict).toBe("unpaired");
   });
 
+  it("pairs byte-identical frames (same frameId) by occurrence, not all to one peer", () => {
+    // A ping, a pong, a credit update — every occurrence of the same payload
+    // hashes to the same frameId. The buggy `.find()` wired every send to the
+    // FIRST receive sharing that id, so this must use two occurrences on each
+    // side and check each pairs with its own counterpart, not both with #1.
+    const app = [
+      ev({ at: 1000, dir: "tx", frameId: "dup", msgType: "ping" }),
+      ev({ at: 2000, dir: "tx", frameId: "dup", msgType: "ping" }),
+    ];
+    const bridge = [
+      ev({ at: 1010, dir: "rx", frameId: "dup" }),
+      ev({ at: 2050, dir: "rx", frameId: "dup" }),
+    ];
+
+    const { rows } = joinCaptures(app, bridge, NOW);
+    expect(rows.every((r) => r.verdict === "matched")).toBe(true);
+    const rx1 = rows.find((r) => r.event.dir === "rx" && r.event.at === 1010)!;
+    const rx2 = rows.find((r) => r.event.dir === "rx" && r.event.at === 2050)!;
+    expect(rx1.deltaMs).toBe(10);
+    expect(rx2.deltaMs).toBe(50);
+  });
+
+  it("pairs a duplicate id's discard to its own occurrence, not to a later delivery", () => {
+    const app = [
+      ev({ at: 1000, dir: "tx", frameId: "dup", msgType: "ping" }),
+      ev({ at: 2000, dir: "tx", frameId: "dup", msgType: "ping" }),
+    ];
+    const bridge = [
+      ev({ at: 1010, dir: "rx", kind: "drop", frameId: "dup", reason: "decrypt-failed" }),
+      ev({ at: 2050, dir: "rx", frameId: "dup" }),
+    ];
+
+    const { rows } = joinCaptures(app, bridge, NOW);
+    const tx1 = rows.find((r) => r.event.dir === "tx" && r.event.at === 1000)!;
+    const tx2 = rows.find((r) => r.event.dir === "tx" && r.event.at === 2000)!;
+    expect(tx1.verdict).toBe("discarded");
+    expect(tx2.verdict).toBe("matched");
+    expect(tx2.deltaMs).toBeUndefined();
+    const rx2 = rows.find((r) => r.event.dir === "rx" && r.event.at === 2050)!;
+    expect(rx2.verdict).toBe("matched");
+    expect(rx2.deltaMs).toBe(50);
+  });
+
+  it("never pairs a duplicate id against a frame travelling the other way", () => {
+    // Both ends send the same bytes, so both sends share one hash id. A send
+    // pairs only with a receive at the FAR end: the app's own receive of the
+    // bridge's copy is a different frame, however close in time.
+    const app = [
+      ev({ at: 1000, dir: "tx", frameId: "dup", msgType: "ping" }),
+      ev({ at: 1005, dir: "rx", frameId: "dup" }),
+    ];
+    const bridge = [
+      ev({ at: 1001, dir: "tx", frameId: "dup", msgType: "ping" }),
+      ev({ at: 1030, dir: "rx", frameId: "dup" }),
+    ];
+
+    const { rows } = joinCaptures(app, bridge, NOW);
+    expect(rows.every((r) => r.verdict === "matched")).toBe(true);
+    const appRx = rows.find((r) => r.origin === "app" && r.event.dir === "rx")!;
+    const brgRx = rows.find((r) => r.origin === "brg" && r.event.dir === "rx")!;
+    expect(appRx.deltaMs).toBe(4);
+    expect(brgRx.deltaMs).toBe(30);
+  });
+
+  it("pairs a duplicate id only within its own channel", () => {
+    const app = [
+      ev({ at: 1000, dir: "tx", frameId: "dup", channel: "preview" }),
+      ev({ at: 1001, dir: "tx", frameId: "dup", channel: "control" }),
+    ];
+    const bridge = [ev({ at: 1020, dir: "rx", frameId: "dup", channel: "control" })];
+
+    const { rows } = joinCaptures(app, bridge, NOW);
+    const preview = rows.find((r) => r.event.channel === "preview")!;
+    const rx = rows.find((r) => r.event.dir === "rx")!;
+    expect(preview.verdict).not.toBe("matched");
+    expect(rx.deltaMs).toBe(19);
+  });
+
   it("counts a drop as unpairable, not as a match", () => {
     // A drop never crossed the socket, so it has no counterpart by
     // construction — calling it matched would flatter every report.

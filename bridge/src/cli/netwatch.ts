@@ -401,17 +401,10 @@ export function joinCaptures(
   // sender's own frameId (`decrypt-failed` in relay-client.ts is the one that
   // matters). Excluding it verdicted the sender's half "never arrived" — turning
   // the rekey race this capture exists to catch into a report of network loss.
-  const index = new Map<string, NetwatchEvent[]>();
-  const add = (e: NetwatchEvent): void => {
-    if (!e.frameId || (e.kind === "drop" && e.dir !== "rx")) return;
-    const bucket = index.get(e.frameId);
-    if (bucket) bucket.push(e);
-    else index.set(e.frameId, [e]);
-  };
-  for (const e of app) add(e);
-  for (const e of bridge) add(e);
+  const eligible = (e: NetwatchEvent): boolean =>
+    Boolean(e.frameId) && !(e.kind === "drop" && e.dir !== "rx");
 
-  const rows = [...app.map((e) => ({ e, origin: "app" as Origin })), ...bridge.map((e) => ({ e, origin: "brg" as Origin }))]
+  const sorted = [...app.map((e) => ({ e, origin: "app" as Origin })), ...bridge.map((e) => ({ e, origin: "brg" as Origin }))]
     // `seq` counts one process's own records, so it orders rows only WITHIN an
     // origin — netwatch.ts says as much, and an older capture file may not carry
     // it at all, which made the subtraction NaN and left same-millisecond rows
@@ -421,30 +414,67 @@ export function joinCaptures(
       x.e.at - y.e.at ||
       (x.origin === y.origin
         ? (x.e.seq ?? 0) - (y.e.seq ?? 0)
-        : (x.e.dir === y.e.dir ? 0 : x.e.dir === "tx" ? -1 : 1)))
-    .map(({ e, origin }) => {
-      if (!e.frameId || e.kind === "drop") return { event: e, origin, verdict: "na" as Verdict };
-      const peer = (index.get(e.frameId) ?? []).find((o) => o !== e && o.dir !== e.dir);
-      if (peer && peer.kind === "drop") {
-        // It reached the far end and died there. No latency: the peer row
-        // carries the reason, and timing a frame to its own discard would read
-        // as a successful delivery.
-        return { event: e, origin, verdict: "discarded" as Verdict };
-      }
-      if (peer) {
-        return {
-          event: e,
-          origin,
-          verdict: "matched" as Verdict,
-          // Only meaningful on the receiving half of a pair, and only because
-          // both captures come off one machine's clock in the desktop case.
-          deltaMs: e.dir === "rx" ? e.at - peer.at : undefined,
-        };
-      }
-      const inOverlap = overlap !== null && e.at >= overlap[0] && e.at <= overlap[1];
-      if (!inOverlap) return { event: e, origin, verdict: "outside" as Verdict };
-      return { event: e, origin, verdict: (e.dir === "tx" ? "lost" : "unpaired") as Verdict };
-    });
+        : (x.e.dir === y.e.dir ? 0 : x.e.dir === "tx" ? -1 : 1)));
+
+  // A hash id (the coming replacement for the sealed-frame nonce, D3) repeats
+  // for every byte-identical frame — a ping, a pong, a credit update — so more
+  // than one occurrence can legitimately share a frameId. Pairing "the first
+  // opposite-direction event with this id" wired every later occurrence to that
+  // SAME first peer instead of to the one that actually crossed with it, which
+  // both double-counted one frame as matched and left its true counterpart
+  // unpaired. Bucketing per direction and zipping by position — the Nth send
+  // with the Nth receive, in the causal order established above — pairs the
+  // occurrences that actually happened together, and degrades to exactly the
+  // old one-shot lookup when an id occurs once per side. Channel joins the key
+  // so two channels sharing an id is never read as the same event twice, and so
+  // does the direction of travel: both ends can send the same bytes, and a send
+  // pairs only with a receive at the far end, never with its own side's receive
+  // of the other end's copy.
+  const txByKey = new Map<string, NetwatchEvent[]>();
+  const rxByKey = new Map<string, NetwatchEvent[]>();
+  for (const { e, origin } of sorted) {
+    if (!eligible(e)) continue;
+    const sender: Origin = e.dir === "tx" ? origin : origin === "app" ? "brg" : "app";
+    const key = `${e.frameId}\u0000${e.channel ?? ""}\u0000${sender}`;
+    const bucket = e.dir === "tx" ? txByKey : rxByKey;
+    const list = bucket.get(key);
+    if (list) list.push(e);
+    else bucket.set(key, [e]);
+  }
+  const peerOf = new Map<NetwatchEvent, NetwatchEvent>();
+  for (const [key, txs] of txByKey) {
+    const rxs = rxByKey.get(key);
+    if (!rxs) continue;
+    const n = Math.min(txs.length, rxs.length);
+    for (let i = 0; i < n; i++) {
+      peerOf.set(txs[i], rxs[i]);
+      peerOf.set(rxs[i], txs[i]);
+    }
+  }
+
+  const rows = sorted.map(({ e, origin }) => {
+    if (!e.frameId || e.kind === "drop") return { event: e, origin, verdict: "na" as Verdict };
+    const peer = peerOf.get(e);
+    if (peer && peer.kind === "drop") {
+      // It reached the far end and died there. No latency: the peer row
+      // carries the reason, and timing a frame to its own discard would read
+      // as a successful delivery.
+      return { event: e, origin, verdict: "discarded" as Verdict };
+    }
+    if (peer) {
+      return {
+        event: e,
+        origin,
+        verdict: "matched" as Verdict,
+        // Only meaningful on the receiving half of a pair, and only because
+        // both captures come off one machine's clock in the desktop case.
+        deltaMs: e.dir === "rx" ? e.at - peer.at : undefined,
+      };
+    }
+    const inOverlap = overlap !== null && e.at >= overlap[0] && e.at <= overlap[1];
+    if (!inOverlap) return { event: e, origin, verdict: "outside" as Verdict };
+    return { event: e, origin, verdict: (e.dir === "tx" ? "lost" : "unpaired") as Verdict };
+  });
 
   return { rows, overlap };
 }
