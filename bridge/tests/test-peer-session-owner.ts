@@ -139,11 +139,6 @@ export class TestPeerSessionOwner extends PeerSessionOwner {
     );
   }
 
-  markPeerOnline(peerId: string): void {
-    if (this.isForeignSlot(peerId)) return;
-    this.backfillPeerPubkey(peerId);
-  }
-
   markPeerOffline(peerId: string): void {
     if (this.isForeignSlot(peerId)) return;
     this.dropSession(peerId);

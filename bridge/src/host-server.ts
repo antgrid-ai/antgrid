@@ -10,7 +10,6 @@ import { ControlListener } from "./control-listener";
 import type { ControlRequest, ControlResponse } from "./control-protocol";
 import { hostFilePath, writeHostFile, removeHostFile } from "./host-discovery";
 import { loadPairedPhones, type PairedPhonesStore } from "./paired-phones";
-import { TrustedPeersProvider } from "./trusted-peers";
 import { loadRemoteAccessPolicy, type RemoteAccessPolicyStore } from "./remote-access-policy";
 import { loadAgentReachPolicy, type AgentReachPolicyStore } from "./agent-reach-policy";
 import { resolveAbDir } from "./antgrid-dir";
@@ -213,9 +212,7 @@ export interface OpenResult {
   connect: ConnectInfo | null;
 }
 
-// pushHeartbeat() rides one cadence for both the device heartbeat POST and the
-// trustedPeers inventory refresh (see pushHeartbeat()'s doc comment). 60s
-// mirrors the interval this device-heartbeat design already settled on for a
+// 60s mirrors the interval this device-heartbeat design already settled on for a
 // no-reconnect-hook periodic POST (the original design predates account-trust
 // admission replacing pair-request auto-approve; the interval choice stands).
 const HEARTBEAT_REFRESH_INTERVAL_MS = 60_000;
@@ -634,11 +631,6 @@ export class HostServer {
   private controlPlaneRelay: RemoteHostConnection | null = null;
   // retained to prevent GC of the bus before shutdown
   private controlPlaneBus: MessageBus | null = null;
-  // Account device inventory, the primary E2E-admission trust source.
-  // Built once on the first startRemoteControlPlane() call
-  // and reused across reconnects so its in-memory cache stays warm; refreshed
-  // on the existing heartbeat cadence (see pushHeartbeat()).
-  private trustedPeers: TrustedPeersProvider | null = null;
   // Owns the periodic pushHeartbeat() cadence (started once, in
   // startRemoteControlPlane; cleared in shutdown()). unref'd so it never keeps
   // the process alive on its own — mirrors owner-watchdog.ts's idiom.
@@ -813,17 +805,6 @@ export class HostServer {
     const bus = new MessageBus();
     const abDir = resolveAbDir();
 
-    // Built once and reused across reconnects (same licenseApiUrl/getToken the
-    // heartbeat push already uses — see pushHeartbeat()) so the on-disk cache
-    // and in-memory map survive socket churn.
-    if (!this.trustedPeers) {
-      this.trustedPeers = new TrustedPeersProvider({
-        licenseApiUrl: r.licenseApiUrl,
-        getToken: rt.maint.getToken,
-        filePath: join(abDir, "trusted-peers.json"),
-      });
-    }
-
     if (!r.auth.userId || !r.auth.endpointSecret) {
       throw new Error("Remote transport requires a secure endpoint enrollment; sign in again");
     }
@@ -857,7 +838,6 @@ export class HostServer {
       // re-enroll (index.ts writes auth_revoked + exits). SUPERSEDED never does.
       getLicenseToken,
       pairedPhones: this.pairedPhonesStore,
-      trustedPeers: this.trustedPeers,
       onTunnelMessage: () => {}, // machine-level control has no tunnel handler; project streams install theirs
       // The always-on control plane is the registration a phone's autoOpen dials,
       // so it MUST keep the account inventory's relay_url/machine_name fresh —
@@ -906,7 +886,7 @@ export class HostServer {
 
     // pushHeartbeat() was previously event-triggered only (onAuthenticated +
     // mobile-access mutations), so a long-lived, stably-connected bridge never
-    // re-fetched trustedPeers — a removed/re-keyed phone's stale identity stuck
+    // re-published relayUrl/machineName — a LAN IP change or rename stuck
     // around indefinitely. Give it the actual cadence the design describes.
     if (!this.heartbeatTimer) {
       const intervalMs = this.opts.heartbeatIntervalMs ?? HEARTBEAT_REFRESH_INTERVAL_MS;
@@ -2500,9 +2480,6 @@ export class HostServer {
     const r = this.remoteConfig();
     if (!r || !this.remoteRuntime) return;
     const rt = this.remoteRuntime;
-    // Rides the heartbeat cadence to keep the E2E-admission inventory cache
-    // warm without a dedicated poll loop.
-    void this.trustedPeers?.refresh();
     void sendHeartbeat({
       licenseApiUrl: r.licenseApiUrl,
       getToken: rt.maint.getToken,

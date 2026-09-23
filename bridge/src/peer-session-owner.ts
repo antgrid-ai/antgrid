@@ -7,7 +7,6 @@ import { parseTunnelMessage } from "./tunnel-protocol";
 import { buildFragments, FRAG_THRESHOLD, MAX_TRANSFER_BYTES, TRANSFER_TIMEOUT_MS, GLOBAL_REASSEMBLY_BUDGET, CONTROL_STREAM_ID, CREDIT_BATCH_BYTES, WINDOW_STALL_WARN_MS } from "antgrid-wire";
 import type { MessageBus, Channel, TransportSubscriber } from "./message-bus";
 import type { PairedPhonesStore } from "./paired-phones";
-import type { TrustedPeersProvider } from "./trusted-peers";
 import { FragReassembler, type SharedByteBudget } from "./frag-reassembler";
 
 import { StreamMux, type AttachStreamOpts, type PeerSessionView, type SendTarget, type StreamHandle } from "./stream-mux";
@@ -32,12 +31,9 @@ export interface PeerSessionOwnerOptions {
   onDisconnected?: () => void;
   onError?: (code: string, message: string) => void;
   /** Phone identity/push registry. Grants nothing — it is where `admitPeer`
-   *  records the device, and where `backfillPeerPubkey` recovers a
-   *  reconnecting phone's pubkey after an agent restart. */
+   *  records the device: what `antgrid phones list` shows, what push
+   *  targeting resolves tokens from. */
   pairedPhones?: PairedPhonesStore;
-  /** Account device inventory; kept for W2b, currently unused — admission is
-   *  decided by the lease, not this. */
-  trustedPeers?: TrustedPeersProvider;
 }
 
 /** Send a ping after this much receive silence. */
@@ -257,8 +253,8 @@ export abstract class PeerSessionOwner {
   }
 
   /** The Ed25519 pubkey (standard base64) behind one route address, or null.
-   *  Resolved from `phoneEd25519ByDeviceId` — populated by `admitPeer`, or
-   *  backfilled from the paired-phones store on a trusted reconnect. */
+   *  Resolved from `phoneEd25519ByDeviceId`, which `admitPeer` sets from the
+   *  lease on every accepted connection. */
   peerPubkeyFor(peerId: string): string | null {
     return this.phoneEd25519ByDeviceId.get(peerId) ?? null;
   }
@@ -271,21 +267,6 @@ export abstract class PeerSessionOwner {
       pullsTree: session.pullsTree,
       terminalFramesV1: session.terminalFramesV1,
     };
-  }
-
-  /** Ensure `phoneEd25519ByDeviceId` has an entry for `peerId` by recovering it
-   *  from the persistent phone registry. Used on a trusted reconnect
-   *  after a trusted reconnect so per-peer authorization still
-   *  resolves after an agent restart — without it the control-plane dispatch
-   *  drops every frame (`if (!pk) return`). No-op when already known or
-   *  unregistered. */
-  protected backfillPeerPubkey(peerId: string): void {
-    if (this.phoneEd25519ByDeviceId.has(peerId)) return;
-    // Cache under the route id we were given, look up under the account device
-    // the store is keyed by — see `relay-slot.ts`.
-    const baseId = baseSlotDeviceId(peerId);
-    const phone = this.opts.pairedPhones?.list().find((p) => p.phoneDeviceId === baseId);
-    if (phone) this.phoneEd25519ByDeviceId.set(peerId, phone.phonePubkey);
   }
 
   /** True when `peerId` is an app relay slot scoped at a DIFFERENT machine.
@@ -742,9 +723,9 @@ export abstract class PeerSessionOwner {
     // Account trust admits without a pair-request, so nothing else ever creates
     // this phone's row. The row grants NOTHING — authorization is the machine's
     // one mobile-access switch — it is the identity/push/last-seen record: what
-    // `antgrid phones list` shows, what push targeting resolves tokens from, and
-    // what `backfillPeerPubkey` recovers from after a reconnect. Without it a
-    // fully connected phone is invisible to the operator and unreachable by push.
+    // `antgrid phones list` shows and what push targeting resolves tokens from.
+    // Without it a fully connected phone is invisible to the operator and
+    // unreachable by push.
     //
     // Creation only. A reconnect re-admits the same device, and rewriting the
     // row would flush the file — tripping its watcher's re-advertise — on

@@ -5,7 +5,6 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { buildAgentCore, type AgentCore } from "../src/agent-core";
 import { MessageBus } from "../src/message-bus";
-import { loadPairedPhones } from "../src/paired-phones";
 import { createMessage, type AbMessage } from "../src/protocol";
 import { TestPeerSessionOwner } from "./test-peer-session-owner";
 import { createRelayPromotion, type MachineRelaySession } from "../src/relay-promotion";
@@ -334,43 +333,6 @@ test("drops tunnel:http-request while mobile access is off, honors it once on", 
   }
   expect(tunnelResponses(plain).length).toBe(1);
   expect((tunnelResponses(plain)[0] as { requestId?: string }).requestId).toBe("req-2");
-});
-
-// SOFT CONCERN: on a trusted reconnect the relay sends peer-online (NOT a fresh
-// pair-request), so onApproved never repopulates the pubkey map. After an agent
-// RESTART the map starts empty, so nothing could name the device behind a route
-// address â€” and push, which seals to a phone's registry row, has no row to find.
-// The peer-online handler must backfill the pubkey from the persistent
-// pairedPhones store.
-test("peer-online backfills the peer pubkey from the phone store (empty map)", async () => {
-  const store = loadPairedPhones(abDir);
-  const pk1 = "phone-pubkey-reconnect-base64";
-  const phoneDeviceId = "phone-dev-reconnect";
-  store.upsert({
-    phonePubkey: pk1,
-    phoneDeviceId,
-    pairedAt: new Date().toISOString(),
-    lastSeenAt: new Date().toISOString(),
-  });
-
-  // A fresh TestPeerSessionOwner simulates the post-restart state: phoneEd25519ByDeviceId
-  // starts empty (it's in-memory, never persisted).
-  const client = new TestPeerSessionOwner({
-    identity: { deviceId: "agent-dev", deviceName: "agent-dev", createdAt: new Date().toISOString() },
-    pairedPhones: store,
-  });
-
-  // Before reconnect the address resolves to nothing.
-  expect(client.peerPubkeyFor(phoneDeviceId)).toBe(null);
-
-  // Drive the real peer-online server message (the reconnect-restore path).
-  client.markPeerOnline(phoneDeviceId);
-
-  // The gate can now identify the reconnected phone even though no fresh
-  // pair-request (and thus no onApproved) ran this process.
-  expect(client.peerPubkeyFor(phoneDeviceId)).toBe(pk1);
-
-  client.close();
 });
 
 // CRITICAL #2: a localâ†’relay-promoted connection must be gated too. In v3

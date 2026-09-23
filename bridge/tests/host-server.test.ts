@@ -1,6 +1,6 @@
 import { createHostPolicyFixture } from "./host-policy-fixture";
 import { TestRemoteHostConnection } from "./test-peer-session-owner";
-import { test, expect, beforeEach, afterEach } from "bun:test";
+import { test, expect, beforeEach, afterEach, spyOn } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -413,10 +413,10 @@ test("host:shutdown returns ok and fires onShutdownRequested (after the response
 });
 
 // M6: pushHeartbeat() previously fired only from onAuthenticated + the
-// mobile-access mutation — a stably-connected bridge never re-ran it, so
-// trustedPeers.json (the E2E-admission inventory cache) never refreshed on
-// its own. The design spec calls for "the existing heartbeat cadence"; this
-// proves that cadence is now a real, owned, disposable timer.
+// mobile-access mutation — a stably-connected bridge never re-ran it, so a LAN
+// IP change or rename stuck around indefinitely until the next reconnect. The
+// design spec calls for "the existing heartbeat cadence"; this proves that
+// cadence is now a real, owned, disposable timer.
 test("startControlPlane's remote control plane runs pushHeartbeat on an actual cadence, and shutdown clears the timer", async () => {
   let calls = 0;
   host = createHostPolicyFixture({
@@ -445,40 +445,44 @@ test("startControlPlane's remote control plane runs pushHeartbeat on an actual c
 // A host launched local-only and promoted by the desktop wizard has no
 // `opts.remote` — its machine config lives in `wizardRemote`. The heartbeat
 // cadence has to answer to the SAME resolution the rest of
-// startRemoteControlPlane uses, or the timer ticks into a no-op and
-// trusted-peers.json (the E2E-admission inventory cache) never refreshes on
-// exactly the path the wizard creates.
+// startRemoteControlPlane uses, or the timer ticks into a no-op and the
+// account inventory's relayUrl/machineName never refresh on exactly the path
+// the wizard creates.
 test("a wizard-promoted host (no opts.remote) actually pushes on the heartbeat cadence", async () => {
-  host = createHostPolicyFixture({
-    remoteRuntimeFactory: () => Promise.resolve(fakeRuntime()),
-    remoteHostFactory: () => stubRemoteHostConnection(),
-    heartbeatIntervalMs: 15,
-  });
+  const calls: string[] = [];
+  const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (input: any) => {
+    calls.push(String(input));
+    return new Response(null, { status: 200 });
+  }) as unknown as typeof fetch);
+  try {
+    host = createHostPolicyFixture({
+      remoteRuntimeFactory: () => Promise.resolve(fakeRuntime()),
+      remoteHostFactory: () => stubRemoteHostConnection(),
+      heartbeatIntervalMs: 15,
+    });
 
-  await host.ensureMachineRelay({
-    id: "1",
-    type: "agent:enableRelay",
-    relayUrl: "ws://127.0.0.1:1",
-    licenseApiUrl: "http://127.0.0.1:1",
-    auth: {
-      deviceUuid: "11111111-2222-3333-4444-555555555555",
-      ed25519Pub: "cHVi",
-      ed25519Priv: "cHJpdg==",
-      clientId: "cid",
-      clientSecret: "secret",
-      userId: "user-1",
-      endpointSecret: Buffer.alloc(32, 1).toString("base64"),
-    },
-  } as AgentEnableRelay);
+    await host.ensureMachineRelay({
+      id: "1",
+      type: "agent:enableRelay",
+      relayUrl: "ws://127.0.0.1:1",
+      licenseApiUrl: "http://127.0.0.1:1",
+      auth: {
+        deviceUuid: "11111111-2222-3333-4444-555555555555",
+        ed25519Pub: "cHVi",
+        ed25519Priv: "cHJpdg==",
+        clientId: "cid",
+        clientSecret: "secret",
+        userId: "user-1",
+        endpointSecret: Buffer.alloc(32, 1).toString("base64"),
+      },
+    } as AgentEnableRelay);
 
-  // The tick's observable work: warming the trusted-peers cache.
-  let refreshes = 0;
-  (host as unknown as { trustedPeers: { refresh: () => Promise<void> } }).trustedPeers = {
-    refresh: () => { refreshes++; return Promise.resolve(); },
-  };
-
-  await new Promise((r) => setTimeout(r, 80));
-  expect(refreshes).toBeGreaterThanOrEqual(2);
+    await new Promise((r) => setTimeout(r, 80));
+    const heartbeats = calls.filter((url) => url.endsWith("/account/devices/me/heartbeat"));
+    expect(heartbeats.length).toBeGreaterThanOrEqual(2);
+  } finally {
+    fetchSpy.mockRestore();
+  }
 });
 
 test("prunes seen-catalog entries whose folder no longer exists, on load", () => {

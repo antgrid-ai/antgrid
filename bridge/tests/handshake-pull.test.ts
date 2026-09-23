@@ -232,28 +232,6 @@ test("a session declared dead by liveness fires the coarse peer-offline only whe
   expect(coarseOffline).toBe(1);
 });
 
-test("a sibling peer-online creates no session and leaves the live one untouched", () => {
-  const client = freshClient();
-  client.establish(PHONE_ID, { attemptId: "attempt-a" });
-  expect(client.establishedPeers().map((p) => p.peerId)).toEqual([PHONE_ID]);
-
-  // A same-account sibling comes online — presence, NOT a hello.
-  client.markPeerOnline(PHONE_2_ID);
-
-  expect(client.establishedPeers().map((p) => p.peerId)).toEqual([PHONE_ID]);
-  expect(client._handshakeComplete()).toBe(true);
-});
-
-test("peer-online alone establishes nothing — presence is not a hello", () => {
-  const client = freshClient();
-  expect(client.hasEstablishedSession()).toBe(false);
-
-  client.markPeerOnline(PHONE_2_ID);
-
-  expect(client.hasEstablishedSession()).toBe(false);
-  expect(client.establishedPeers()).toEqual([]);
-});
-
 // Per-machine relay slots: the app addresses each machine on its own
 // `<accountDeviceUuid>#<machineDeviceUuid>` slot so it can hold several
 // machines open at once. The slot is a TRANSPORT address; presence for a
@@ -270,12 +248,6 @@ test("loss for a slot scoped at another machine never retires our session", () =
 
   client.markPeerOffline(PHONE_SLOT);
   expect(client.peerSession(PHONE_SLOT)).toBeNull();
-
-  client.markPeerOnline(foreign);
-  expect(client.peerSession(PHONE_SLOT)).toBeNull();
-
-  client.markPeerOnline(PHONE_SLOT);
-  expect(client.peerSession(PHONE_SLOT)).toBeNull();
 });
 
 // An unscoped id carries no claim about who it is for, and every pre-slot
@@ -285,9 +257,6 @@ test("loss for an unscoped peer id retires its native session", () => {
   client.establish(PHONE_ID, { attemptId: "attempt-a" });
 
   client.markPeerOffline(PHONE_ID);
-  expect(client.peerSession(PHONE_ID)).toBeNull();
-
-  client.markPeerOnline(PHONE_ID);
   expect(client.peerSession(PHONE_ID)).toBeNull();
 });
 
