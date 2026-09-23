@@ -18,7 +18,7 @@ test("eval native bind seam accepts loopback only and is inert outside evals", (
   expect(() => evalIrohBindAddress({ ANTGRID_EVAL_TEST: "1", ANTGRID_EVAL_IROH_BIND_ADDR: "127.0.0.1:65536" }))
     .toThrow("INVALID_EVAL_BIND_ADDR");
 });
-function fixture() {
+function fixture(now?: () => number) {
   let allowed = true;
   const client = new NativeHostConnection({
     central: {
@@ -32,6 +32,7 @@ function fixture() {
       enrollment: vector.challenge, endpointSecret: vector.endpointSeed, licenseApiUrl: "https://backend.invalid",
       getLicenseToken: () => "test-only", generateKeypair: generateEphemeralKeypair,
       remoteAccessEnabled: () => allowed,
+      ...(now ? { lifecycle: { now } } : {}),
     },
   });
   const endpointId = "a".repeat(64);
@@ -48,6 +49,7 @@ function fixture() {
     resetE2eState: () => void;
     handleBinaryFrame: (frame: Buffer) => void;
     onSessionEstablished: (peerId: string) => void;
+    notePolicyGeneration: (generation: string) => void;
   };
   access.enrollment.authorization = async () => snapshot;
   return { client, access, endpointId, peerId, snapshot, setAllowed: (value: boolean) => { allowed = value; } };
@@ -77,6 +79,110 @@ test("native endpoint identity must be present in authoritative peer inventory",
     await f.access.acceptPeer(impostor.native);
     expect(impostor.closes()).toBe(1);
     expect(f.access.nativePeers.size).toBe(0);
+  } finally { f.client.close(); }
+});
+
+test("repeated dials from one unrecognized endpoint cost at most one lease refresh per window", async () => {
+  const f = fixture();
+  let calls = 0;
+  const authorize = f.access.enrollment.authorization;
+  f.access.enrollment.authorization = async () => { calls++; return authorize(); };
+  const strangerId = "c".repeat(64);
+  try {
+    for (let i = 0; i < 5; i++) {
+      const stranger = connection(strangerId);
+      await f.access.acceptPeer(stranger.native);
+      expect(stranger.closes()).toBe(1);
+    }
+    expect(calls).toBe(1);
+    expect(f.access.nativePeers.size).toBe(0);
+  } finally { f.client.close(); }
+});
+
+test("two distinct endpoint ids each get their own refresh window, unaffected by the other", async () => {
+  const f = fixture();
+  const secondEndpointId = "b".repeat(64);
+  f.snapshot.peers.push({ deviceId: "22222222-2222-4222-8222-222222222222", ed25519Pub: vector.devicePublic,
+    endpoint: { endpointId: secondEndpointId, generation: "1" } });
+  try {
+    const first = connection(f.endpointId);
+    const second = connection(secondEndpointId);
+    await Promise.all([f.access.acceptPeer(first.native), f.access.acceptPeer(second.native)]);
+    expect(f.access.nativePeers.size).toBe(2);
+    expect(first.closes()).toBe(0);
+    expect(second.closes()).toBe(0);
+  } finally { f.client.close(); }
+});
+
+test("a just-registered endpoint is admitted once its one refresh catches the fresh registration", async () => {
+  const f = fixture();
+  const freshId = "d".repeat(64);
+  let calls = 0;
+  f.access.enrollment.authorization = async () => {
+    calls++;
+    return { ...f.snapshot, peers: [...f.snapshot.peers, { deviceId: "33333333-3333-4333-8333-333333333333",
+      ed25519Pub: vector.devicePublic, endpoint: { endpointId: freshId, generation: "1" } }] };
+  };
+  try {
+    const fresh = connection(freshId);
+    await f.access.acceptPeer(fresh.native);
+    expect(fresh.closes()).toBe(0);
+    expect(f.access.nativePeers.size).toBe(1);
+    expect(calls).toBe(1);
+  } finally { f.client.close(); }
+});
+
+test("an unrecognized endpoint earns another refresh once its window elapses", async () => {
+  let clock = 1_000;
+  const f = fixture(() => clock);
+  let calls = 0;
+  const authorize = f.access.enrollment.authorization;
+  f.access.enrollment.authorization = async () => { calls++; return authorize(); };
+  const strangerId = "c".repeat(64);
+  try {
+    await f.access.acceptPeer(connection(strangerId).native);
+    clock += 4_999;
+    await f.access.acceptPeer(connection(strangerId).native);
+    expect(calls).toBe(1);
+    clock += 2;
+    await f.access.acceptPeer(connection(strangerId).native);
+    expect(calls).toBe(2);
+  } finally { f.client.close(); }
+});
+
+test("an endpoint already in the cached lease is admitted without a refresh", async () => {
+  const f = fixture();
+  const secondEndpointId = "b".repeat(64);
+  f.snapshot.peers.push({ deviceId: "22222222-2222-4222-8222-222222222222", ed25519Pub: vector.devicePublic,
+    endpoint: { endpointId: secondEndpointId, generation: "1" } });
+  let calls = 0;
+  const authorize = f.access.enrollment.authorization;
+  f.access.enrollment.authorization = async () => { calls++; return authorize(); };
+  try {
+    await f.access.acceptPeer(connection(f.endpointId).native);
+    expect(calls).toBe(1);
+    const second = connection(secondEndpointId);
+    await f.access.acceptPeer(second.native);
+    expect(second.closes()).toBe(0);
+    expect(f.access.nativePeers.size).toBe(2);
+    expect(calls).toBe(1);
+  } finally { f.client.close(); }
+});
+
+test("an admitted endpoint redialing after a policy bump is not throttled as unknown", async () => {
+  const f = fixture();
+  try {
+    const first = connection(f.endpointId);
+    await f.access.acceptPeer(first.native);
+    expect(f.access.nativePeers.size).toBe(1);
+    f.snapshot.policyGeneration = "2";
+    f.access.notePolicyGeneration("2");
+    expect(first.closes()).toBe(1);
+    expect(f.access.nativePeers.size).toBe(0);
+    const redial = connection(f.endpointId);
+    await f.access.acceptPeer(redial.native);
+    expect(redial.closes()).toBe(0);
+    expect(f.access.nativePeers.size).toBe(1);
   } finally { f.client.close(); }
 });
 

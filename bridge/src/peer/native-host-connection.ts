@@ -43,6 +43,15 @@ export function evalIrohBindAddress(
   }
   return value;
 }
+
+// A stock relay has no per-account registry, so any admitted or revoked
+// endpoint can loop dials against this bridge's endpoint id; each dial that
+// reaches the lease refresh is a web DB transaction. Bounding it per
+// endpoint id (not globally) keeps two legitimately concurrent devices from
+// throttling each other, while still capping a single looping identity.
+const UNKNOWN_ENDPOINT_REFRESH_WINDOW_MS = 5_000;
+const MAX_UNKNOWN_ENDPOINT_ENTRIES = 256;
+
 interface NativePeerContext {
   connection: Connection;
   endpointId: string;
@@ -59,6 +68,7 @@ interface NativePeerContext {
 /** Central inventory and native payloads share host-owned project bindings. */
 export class NativePeerSessions extends PeerSessionOwner {
   private readonly nativePeers = new Map<string, NativePeerContext>();
+  private readonly unknownEndpointRefreshAt = new Map<string, number>();
   private readonly lifecycle: EndpointLifecycle<Endpoint>;
   private readonly admissions = new AdmissionRegistry(4);
   private readonly enrollment: EndpointEnrollment;
@@ -201,9 +211,27 @@ export class NativePeerSessions extends PeerSessionOwner {
     const generation = this.admissionGeneration;
     const close = () => connection.close(3n, []);
     if (!Buffer.from(connection.alpn()).equals(Buffer.from(PEER_ALPN))) { connection.close(2n, []); return; }
-    if (!await this.lease.refresh() || generation !== this.admissionGeneration) { close(); return; }
     const endpointId = connection.remoteId().toString();
-    const device = this.lease.current?.peers.find((peer) => peer.endpoint?.endpointId === endpointId);
+    let device = this.lease.current?.peers.find((peer) => peer.endpoint?.endpointId === endpointId);
+    if (!device) {
+      // Pre-filter before refreshing: an id already in the cached lease costs
+      // no extra request here. An id that is still unrecognized after one
+      // refresh this window is closed without retrying it — that refresh
+      // is what admits a just-registered device whose outbox push is late.
+      const attemptedAt = now();
+      const last = this.unknownEndpointRefreshAt.get(endpointId);
+      if (last !== undefined && attemptedAt - last < UNKNOWN_ENDPOINT_REFRESH_WINDOW_MS) { close(); return; }
+      if (last === undefined && this.unknownEndpointRefreshAt.size >= MAX_UNKNOWN_ENDPOINT_ENTRIES) {
+        const oldest = this.unknownEndpointRefreshAt.keys().next().value;
+        if (oldest !== undefined) this.unknownEndpointRefreshAt.delete(oldest);
+      }
+      this.unknownEndpointRefreshAt.set(endpointId, attemptedAt);
+      if (!await this.lease.refresh() || generation !== this.admissionGeneration) { close(); return; }
+      device = this.lease.current?.peers.find((peer) => peer.endpoint?.endpointId === endpointId);
+    }
+    // A recognized id must not carry a throttle stamp: a policy bump drops every
+    // peer and nulls the lease, and its redial would otherwise be refused as unknown.
+    if (device) this.unknownEndpointRefreshAt.delete(endpointId);
     if (!device || !this.nativeOpts.remoteAccessEnabled()) { close(); return; }
     const peerId = `${device.deviceId}#${this.deviceId}`;
     // A concurrent native connection must not create a second session writer.
