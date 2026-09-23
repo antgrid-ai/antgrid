@@ -39,8 +39,6 @@ class TestPayloadLink implements PeerLink {
   @override
   Stream<PeerPath> get pathStream => const Stream.empty();
   @override
-  Stream<void> get peerRestartStream => carrier.peerRestartStream;
-  @override
   Stream<PeerLinkFailure> get failureStream => const Stream.empty();
   @override
   PeerLinkDiagnostic? get netTap => carrier.netTap;
@@ -63,8 +61,6 @@ class _NoopPayloadLink implements PeerLink {
   Stream<PeerLinkState> get payloadStateStream => const Stream.empty();
   @override
   Stream<PeerPath> get pathStream => const Stream.empty();
-  @override
-  Stream<void> get peerRestartStream => const Stream.empty();
   @override
   Stream<PeerLinkFailure> get failureStream => const Stream.empty();
   @override

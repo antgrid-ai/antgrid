@@ -26,8 +26,6 @@ class _Payload implements PeerLink {
   @override
   Stream<PeerPath> get pathStream => paths.stream;
   @override
-  Stream<void> get peerRestartStream => const Stream.empty();
-  @override
   Stream<PeerLinkFailure> get failureStream => failures.stream;
   @override
   PeerLinkDiagnostic? get netTap => null;

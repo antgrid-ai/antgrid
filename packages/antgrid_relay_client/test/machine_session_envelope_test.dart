@@ -5,23 +5,11 @@
 // envelopes) instead of the old socket-per-project
 // RelayTransport.
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:test/test.dart';
 
 import 'support/fake_live_relay.dart';
-
-/// Opens the payload MachineSession sealed with the phone's send key (p2a) —
-/// i.e. the transport's perspective when reading what MachineSession sent.
-Future<String?> _openFromPhone(SessionKeys keys, Uint8List payload) =>
-    E2eTransportDart(sendKey: keys.a2p, recvKey: keys.p2a).open(payload);
-
-/// Seals a plaintext as if it came from the agent (a2p) — what an inbound
-/// IncomingPeerFrame's payload must look like for MachineSession to accept
-/// it (`_decryptAndDispatch` decrypts with recvKey: a2p).
-Future<Uint8List> _sealFromAgent(SessionKeys keys, String plaintext) =>
-    E2eTransportDart(sendKey: keys.a2p, recvKey: keys.p2a).seal(plaintext);
 
 void main() {
   late FakeLiveRelay relay;
@@ -33,13 +21,7 @@ void main() {
     relay = FakeLiveRelay();
     keys = fixedKeys(1);
     handshaker = FakeHandshaker(keys);
-    session = MachineSession(
-      relay: relay,
-      machineDeviceId: 'machine-1',
-      handshaker: handshaker,
-    );
-    session.start();
-    await session.ensureEstablished();
+    session = await establishSession(relay, handshaker: handshaker);
   });
 
   tearDown(() async {
@@ -56,7 +38,7 @@ void main() {
         final frame = relay.sent.single;
         expect(frame.kind, FrameKind.sealed);
 
-        final plaintext = await _openFromPhone(keys, frame.payload);
+        final plaintext = await openFromPhone(keys, frame.payload);
         expect(plaintext, isNotNull);
         final json = jsonDecode(plaintext!) as Map<String, dynamic>;
         expect(json['s'], 'proj-1');
@@ -68,7 +50,7 @@ void main() {
       await session.sendOnStream(kControlStreamId, {
         'type': 'project:list',
       }, 'control');
-      final plaintext = await _openFromPhone(keys, relay.sent.single.payload);
+      final plaintext = await openFromPhone(keys, relay.sent.single.payload);
       final json = jsonDecode(plaintext!) as Map<String, dynamic>;
       expect(json.containsKey('s'), isFalse);
       expect(json['m'], {'type': 'project:list'});
@@ -102,7 +84,7 @@ void main() {
         onAbort: (_) {},
       );
       for (final f in relay.sent) {
-        final plaintext = await _openFromPhone(keys, f.payload);
+        final plaintext = await openFromPhone(keys, f.payload);
         expect(plaintext, isNotNull);
         reassembler.accept(
           plaintext!,
@@ -137,7 +119,7 @@ void main() {
         IncomingPeerFrame(
           channel: 'control',
           kind: FrameKind.sealed,
-          payload: await _sealFromAgent(
+          payload: await sealFromAgent(
             keys,
             jsonEncode({
               's': 'proj-1',
@@ -150,7 +132,7 @@ void main() {
         IncomingPeerFrame(
           channel: 'control',
           kind: FrameKind.sealed,
-          payload: await _sealFromAgent(
+          payload: await sealFromAgent(
             keys,
             jsonEncode({
               's': 'proj-2',
@@ -180,7 +162,7 @@ void main() {
         IncomingPeerFrame(
           channel: 'control',
           kind: FrameKind.sealed,
-          payload: await _sealFromAgent(
+          payload: await sealFromAgent(
             keys,
             jsonEncode({
               'm': {'type': 'agent:projects'},
@@ -193,7 +175,7 @@ void main() {
         IncomingPeerFrame(
           channel: 'control',
           kind: FrameKind.sealed,
-          payload: await _sealFromAgent(
+          payload: await sealFromAgent(
             keys,
             jsonEncode({
               's': '0',
@@ -235,7 +217,7 @@ void main() {
             IncomingPeerFrame(
               channel: 'control',
               kind: FrameKind.sealed,
-              payload: await _sealFromAgent(keys, frag),
+              payload: await sealFromAgent(keys, frag),
             ),
           );
         }
@@ -275,14 +257,14 @@ void main() {
           IncomingPeerFrame(
             channel: 'control',
             kind: FrameKind.sealed,
-            payload: await _sealFromAgent(keys, frame0),
+            payload: await sealFromAgent(keys, frame0),
           ),
         );
         relay.inject(
           IncomingPeerFrame(
             channel: 'control',
             kind: FrameKind.sealed,
-            payload: await _sealFromAgent(keys, frame1),
+            payload: await sealFromAgent(keys, frame1),
           ),
         );
 

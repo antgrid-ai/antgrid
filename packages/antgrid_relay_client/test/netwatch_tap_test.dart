@@ -9,9 +9,6 @@ import 'package:test/test.dart';
 import 'support/fake_live_relay.dart';
 import 'support/fake_relay_ws_server.dart';
 
-Future<Uint8List> _sealFromAgent(SessionKeys keys, String plaintext) =>
-    E2eTransportDart(sendKey: keys.a2p, recvKey: keys.p2a).seal(plaintext);
-
 /// A capture that just collects, standing in for `app/lib/util/netwatch.dart`.
 class _Capture {
   final events = <Map<String, Object?>>[];
@@ -134,9 +131,8 @@ void main() {
       relay = FakeLiveRelay(netTap: capture.tap);
       keys = fixedKeys(1);
       warns = [];
-      session = MachineSession(
-        relay: relay,
-        machineDeviceId: 'machine-1',
+      session = await establishSession(
+        relay,
         handshaker: FakeHandshaker(keys),
         // Short enough that a test can cross the window without idling out the
         // shipped 30s.
@@ -147,8 +143,6 @@ void main() {
           }
         },
       );
-      session.start();
-      await session.ensureEstablished();
       capture.events.clear(); // establishment traffic is not what is under test
     });
 
@@ -190,7 +184,7 @@ void main() {
     });
 
     test('names an inbound frame after decrypt, joined by the nonce', () async {
-      final payload = await _sealFromAgent(
+      final payload = await sealFromAgent(
         keys,
         jsonEncode({
           's': 'proj-1',
@@ -229,7 +223,7 @@ void main() {
     });
 
     test('records a frame for a stream nothing is bound to', () async {
-      final payload = await _sealFromAgent(
+      final payload = await sealFromAgent(
         keys,
         jsonEncode({
           's': 'ghost-stream',
@@ -256,7 +250,7 @@ void main() {
       // for, so a live PTY on a stale stream drops one frame per frame with no
       // end. A capture is bounded by how long it runs; app.log is not.
       Future<void> injectGhost() async {
-        final payload = await _sealFromAgent(
+        final payload = await sealFromAgent(
           keys,
           jsonEncode({
             's': 'ghost-stream',

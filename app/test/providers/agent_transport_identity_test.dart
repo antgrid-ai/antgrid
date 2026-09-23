@@ -53,8 +53,6 @@ class _RecordingRelay extends RelayService implements PeerLink {
   Stream<PeerPath> get pathStream => const Stream.empty();
   @override
   Stream<PeerLinkFailure> get failureStream => const Stream.empty();
-  @override
-  Stream<void> get peerRestartStream => const Stream.empty();
   _RecordingRelay() : super(crypto: CryptoService());
 
   final _states = StreamController<AppState>.broadcast();

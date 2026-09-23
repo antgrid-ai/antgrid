@@ -39,9 +39,6 @@ abstract interface class PeerLink {
   Stream<PeerPath> get pathStream;
   Stream<PeerLinkFailure> get failureStream;
 
-  /// A known peer process restart requires fresh E2E. A central presence change
-  /// alone must not emit this for a transport that remains connected to the peer.
-  Stream<void> get peerRestartStream;
   PeerLinkDiagnostic? get netTap;
 
   /// Synchronous authorization/admission fence. Lease wrappers must clear this

@@ -1,11 +1,10 @@
 // MachineSession key-lifecycle coverage: nothing dispatches before the first
-// handshake establishes, rekey swaps to fresh keys with a make-before-break
+// handshake establishes, and rekey swaps to fresh keys with a make-before-break
 // handover (old keys keep decrypting until the new ones are confirmed) and
-// zeroizes the superseded key material, and a peer-online-after-offline
-// transition triggers a rekey. Replaces the deleted relay_transport_test.dart
-// cases that exercised `RelayTransport.updateAgent` (send/receive silently
-// gated on key presence, keys hot-swapped) — that hot-swap now lives in
-// MachineSession's `_runHandshake`.
+// zeroizes the superseded key material. Replaces the deleted
+// relay_transport_test.dart cases that exercised `RelayTransport.updateAgent`
+// (send/receive silently gated on key presence, keys hot-swapped) — that
+// hot-swap now lives in MachineSession's `_runHandshake`.
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -13,9 +12,6 @@ import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:test/test.dart';
 
 import 'support/fake_live_relay.dart';
-
-Future<Uint8List> _sealFromAgent(SessionKeys keys, String plaintext) =>
-    E2eTransportDart(sendKey: keys.a2p, recvKey: keys.p2a).seal(plaintext);
 
 bool _isZeroized(SessionKeys keys) {
   bool allZero(Uint8List b) => b.every((x) => x == 0);
@@ -78,7 +74,7 @@ void main() {
         IncomingPeerFrame(
           channel: 'control',
           kind: FrameKind.sealed,
-          payload: await _sealFromAgent(
+          payload: await sealFromAgent(
             fixedKeys(1),
             jsonEncode({
               'm': {'type': 'agent:projects'},
@@ -134,19 +130,15 @@ void main() {
   });
 
   group('session teardown fails in-flight RPCs', () {
-    test('peer restart fails pending actions and drops queued input', () async {
+    test('a socket-down fails pending actions and drops queued input', () async {
       final relay = FakeLiveRelay();
-      final handshaker = FakeHandshaker.sequence([fixedKeys(1), fixedKeys(2)])
-        ..delayFor = (i) =>
-            i == 1 ? const Duration(milliseconds: 100) : Duration.zero;
-      final session = MachineSession(
-        relay: relay,
+      // A 64-byte window: the RPC below fills it, so the input stays queued.
+      final session = await establishSession(
+        relay,
+        handshaker: FakeHandshaker(fixedKeys(1)),
         machineDeviceId: 'm1',
-        handshaker: handshaker,
         channelWindowBytes: 64,
       );
-      session.start();
-      await session.ensureEstablished();
       final pending = session
           .streamFor('project')
           .request('config:read', timeout: const Duration(seconds: 30));
@@ -162,13 +154,14 @@ void main() {
         'data': 'must-not-replay',
       }, 'control');
       expect(session.debugScheduler.queued('control').bytes, greaterThan(0));
-      relay.presence(false);
-      relay.presence(true);
+
+      relay.setState(
+        const AppState(connectionState: RelayConnectionState.disconnected),
+      );
+
       await failed.timeout(const Duration(seconds: 2));
       await queued.timeout(const Duration(seconds: 2));
       expect(session.debugScheduler.queued('control').bytes, 0);
-      await Future<void>.delayed(const Duration(milliseconds: 150));
-      expect(session.isEstablished, isTrue);
       await session.dispose();
       await relay.closeStreams();
     });
@@ -220,32 +213,6 @@ void main() {
   });
 
   group('rekey', () {
-    test('a peer-online after peer-offline triggers a fresh handshake '
-        'attempt (rekey)', () async {
-      final relay = FakeLiveRelay();
-      final handshaker = FakeHandshaker.sequence([fixedKeys(1), fixedKeys(2)]);
-      final session = MachineSession(
-        relay: relay,
-        machineDeviceId: 'm1',
-        handshaker: handshaker,
-      );
-      session.start();
-      await session.ensureEstablished();
-      expect(handshaker.performCalls, 1);
-
-      relay.presence(false);
-      relay.presence(true);
-
-      // Rekey runs the handshaker again on the SAME (live) socket.
-      for (var i = 0; i < 50 && handshaker.performCalls < 2; i++) {
-        await Future<void>.delayed(const Duration(milliseconds: 10));
-      }
-      expect(handshaker.performCalls, 2);
-
-      await session.dispose();
-      await relay.closeStreams();
-    });
-
     test('a rekey that never confirms tears the session down instead of '
         'leaving it wedged as established', () async {
       // The wedge this guards: liveness declares the session dead, stops its
@@ -267,8 +234,10 @@ void main() {
       var downs = 0;
       final sub = session.sessionDownEvents.listen((_) => downs++);
 
-      relay.presence(false);
-      relay.presence(true); // rekey trigger; this attempt returns null
+      // RPC-timeout rekey trigger; this attempt returns null.
+      for (var i = 0; i < 3; i++) {
+        session.notifyRpcResult(timedOut: true);
+      }
 
       for (var i = 0; i < 50 && handshaker.performCalls < 2; i++) {
         await Future<void>.delayed(const Duration(milliseconds: 10));
@@ -327,10 +296,12 @@ void main() {
         final seen = <Map<String, dynamic>>[];
         final sub = control.messages.listen((m) => seen.add(m.json));
 
-        // Trigger the rekey (peer bounce) — the new handshake attempt takes
-        // 150ms per delayFor above, so there is a real in-flight window.
-        relay.presence(false);
-        relay.presence(true);
+        // Trigger the rekey (three consecutive RPC timeouts) — the new
+        // handshake attempt takes 150ms per delayFor above, so there is a
+        // real in-flight window.
+        for (var i = 0; i < 3; i++) {
+          session.notifyRpcResult(timedOut: true);
+        }
         await Future<void>.delayed(const Duration(milliseconds: 20));
         expect(
           handshaker.performCalls,
@@ -344,7 +315,7 @@ void main() {
           IncomingPeerFrame(
             channel: 'control',
             kind: FrameKind.sealed,
-            payload: await _sealFromAgent(
+            payload: await sealFromAgent(
               oldKeys,
               jsonEncode({
                 'm': {'type': 'still-old-keys'},
@@ -384,7 +355,7 @@ void main() {
           IncomingPeerFrame(
             channel: 'control',
             kind: FrameKind.sealed,
-            payload: await _sealFromAgent(
+            payload: await sealFromAgent(
               newKeys,
               jsonEncode({
                 'm': {'type': 'new-keys'},

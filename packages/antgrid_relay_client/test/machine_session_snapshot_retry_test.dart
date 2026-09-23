@@ -13,18 +13,11 @@
 // socket the pull had just come up on.
 import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:test/test.dart';
 
 import 'support/fake_live_relay.dart';
-
-Future<String?> _openFromPhone(SessionKeys keys, Uint8List payload) =>
-    E2eTransportDart(sendKey: keys.a2p, recvKey: keys.p2a).open(payload);
-
-Future<Uint8List> _sealFromAgent(SessionKeys keys, String plaintext) =>
-    E2eTransportDart(sendKey: keys.a2p, recvKey: keys.p2a).seal(plaintext);
 
 const _baseTimeout = Duration(milliseconds: 40);
 
@@ -38,14 +31,11 @@ void main() {
     relay = FakeLiveRelay();
     keys = fixedKeys(1);
     handshaker = FakeHandshaker(keys);
-    session = MachineSession(
-      relay: relay,
-      machineDeviceId: 'machine-1',
+    session = await establishSession(
+      relay,
       handshaker: handshaker,
       snapshotTimeout: _baseTimeout,
     );
-    session.start();
-    await session.ensureEstablished();
   });
 
   tearDown(() async {
@@ -60,7 +50,7 @@ void main() {
   }) async {
     final out = <({String id, Map<String, dynamic> params})>[];
     for (final f in relay.sent) {
-      final pt = await _openFromPhone(keys, f.payload);
+      final pt = await openFromPhone(keys, f.payload);
       if (pt == null) continue;
       final e = jsonDecode(pt) as Map<String, dynamic>;
       final m = e['m'];
@@ -92,7 +82,7 @@ void main() {
       IncomingPeerFrame(
         channel: 'control',
         kind: FrameKind.sealed,
-        payload: await _sealFromAgent(
+        payload: await sealFromAgent(
           keys,
           jsonEncode({if (stream != null) 's': stream, 'm': m}),
         ),

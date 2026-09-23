@@ -152,7 +152,6 @@ class MachineSession {
 
   StreamSubscription<IncomingPeerFrame>? _msgSub;
   StreamSubscription<PeerLinkState>? _stateSub;
-  StreamSubscription<void>? _presenceSub;
   Timer? _fragSweep;
   Timer? _livenessTimer;
 
@@ -321,7 +320,7 @@ class MachineSession {
     return id;
   }
 
-  /// Begin driving the session: subscribe to the socket, liveness and presence.
+  /// Begin driving the session: subscribe to the socket and liveness.
   /// Call once, right after construction.
   ///
   /// Deliberately does NOT start a handshake. The connection supervisor climbs
@@ -331,7 +330,6 @@ class MachineSession {
   void start() {
     _msgSub = relay.messageStream.listen(_onPeerFrame);
     _stateSub = relay.payloadStateStream.listen(_onState);
-    _presenceSub = relay.peerRestartStream.listen((_) => _onPeerRestart());
     _fragSweep = Timer.periodic(
       const Duration(seconds: 2),
       (_) => _reassembler.sweep(),
@@ -673,7 +671,7 @@ class MachineSession {
     _scheduler.dropStream(streamId);
   }
 
-  // --- socket / presence transitions ---------------------------------------
+  // --- socket transitions ---------------------------------------------------
 
   /// Session keys are per-CONNECTION, so only the socket dying invalidates
   /// them. Every other transition is left alone: with pairing gone there is no
@@ -683,15 +681,6 @@ class MachineSession {
     if (s == PeerLinkState.closed) {
       _teardownSession();
     }
-  }
-
-  void _onPeerRestart() {
-    if (!_established) return;
-    // A peer bounce can erase its session while our relay socket stays open.
-    // Commands awaiting a reply have an unknown outcome; queued input must not
-    // spill into the replacement session. Ordinary live rekeys keep their queue.
-    _cancelPendingWork();
-    if (!_handshakeInFlight) unawaited(_rekey());
   }
 
   void _armKeysReady() {
@@ -706,8 +695,8 @@ class MachineSession {
     // Drop all session state — called when the socket dies and when the agent
     // hands the session to another device. Session keys are per-connection;
     // either event invalidates them. Clearing `_established` is also what
-    // silences every rekey trigger (liveness, RPC timeouts, peer-online), all
-    // of which are gated on a live session.
+    // silences both rekey triggers (liveness, RPC timeouts), which are gated on
+    // a live session.
     _established = false;
     _stopLiveness();
     _keys?.zeroize();
@@ -779,7 +768,7 @@ class MachineSession {
     }
     if (newKeys == null) {
       // A rekey only ever runs because the session already looks dead
-      // (missed pongs, repeated RPC timeouts, a peer that bounced), so keeping
+      // (missed pongs, repeated RPC timeouts), so keeping
       // the old keys after a failed attempt preserves a session the peer has
       // most likely already dropped — and, with `_established` still true,
       // leaves nothing able to notice.
@@ -1508,7 +1497,6 @@ class MachineSession {
     _fragSweep?.cancel();
     await _msgSub?.cancel();
     await _stateSub?.cancel();
-    await _presenceSub?.cancel();
     for (final s in List<StreamTransport>.of(_streams.values)) {
       await s.dispose();
     }

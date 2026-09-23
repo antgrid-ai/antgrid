@@ -6,15 +6,11 @@
 // owns retry) and must never resolve ahead of [MachineSession.isEstablished].
 // A sealed `session-takeover` is reported, not repaired.
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:test/test.dart';
 
 import 'support/fake_live_relay.dart';
-
-Future<Uint8List> _sealFromAgent(SessionKeys keys, String plaintext) =>
-    E2eTransportDart(sendKey: keys.a2p, recvKey: keys.p2a).seal(plaintext);
 
 void main() {
   group('handshake trigger', () {
@@ -198,7 +194,7 @@ void main() {
           IncomingPeerFrame(
             channel: 'control',
             kind: FrameKind.sealed,
-            payload: await _sealFromAgent(
+            payload: await sealFromAgent(
               keys,
               jsonEncode({'type': 'session-takeover'}),
             ),
@@ -212,12 +208,6 @@ void main() {
           isFalse,
           reason: 'the agent handed the session to another device',
         );
-
-        // Every rekey trigger must stay silent: reclaiming the session would
-        // make the two devices evict each other forever.
-        relay.presence(false);
-        relay.presence(true);
-        await Future<void>.delayed(const Duration(milliseconds: 40));
         expect(
           handshaker.performCalls,
           1,

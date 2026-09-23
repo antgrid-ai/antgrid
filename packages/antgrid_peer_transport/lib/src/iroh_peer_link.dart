@@ -145,8 +145,6 @@ class IrohPeerLink implements PeerLink {
   @override
   Stream<PeerLinkFailure> get failureStream => _failures.stream;
   @override
-  Stream<void> get peerRestartStream => const Stream.empty();
-  @override
   Stream<PeerPath> get pathStream => _connection.pathEvents().map((event) {
     // Upstream exposes address strings, not a stable typed path classifier.
     netTap?.call({'op': 'path', 'event': event.runtimeType.toString()});

@@ -14,14 +14,6 @@ import 'package:test/test.dart';
 
 import 'support/fake_live_relay.dart';
 
-Future<String?> _openFromPhone(SessionKeys keys, Uint8List payload) =>
-    E2eTransportDart(sendKey: keys.a2p, recvKey: keys.p2a).open(payload);
-
-/// Seals a plaintext as if the agent wrote it — what an inbound frame's payload
-/// has to look like for the session to open it.
-Future<Uint8List> _sealFromAgent(SessionKeys keys, String plaintext) =>
-    E2eTransportDart(sendKey: keys.a2p, recvKey: keys.p2a).seal(plaintext);
-
 /// The bare session frames among [frames], decoded, in send order. Anything
 /// that turns out to be an app envelope or a fragment is left out.
 Future<List<Map<String, dynamic>>> _sessionFrames(
@@ -30,7 +22,7 @@ Future<List<Map<String, dynamic>>> _sessionFrames(
 ) async {
   final out = <Map<String, dynamic>>[];
   for (final f in frames) {
-    final plaintext = await _openFromPhone(keys, f.payload);
+    final plaintext = await openFromPhone(keys, f.payload);
     if (plaintext == null) continue;
     final json = jsonDecode(plaintext);
     if (json is Map<String, dynamic> && json['type'] is String) out.add(json);
@@ -53,7 +45,7 @@ SessionKeys _copyOf(SessionKeys k) => SessionKeys(
 Future<List<String>> _labels(SessionKeys keys, List<SentFrame> frames) async {
   final out = <String>[];
   for (final f in frames) {
-    final plaintext = await _openFromPhone(keys, f.payload);
+    final plaintext = await openFromPhone(keys, f.payload);
     if (plaintext == null) {
       out.add('undecryptable');
       continue;
@@ -109,9 +101,8 @@ void main() {
     int creditBatchBytes = kCreditBatchBytes,
     RelayLogger? logger,
   }) async {
-    final session = MachineSession(
-      relay: relay,
-      machineDeviceId: 'machine-1',
+    final session = await establishSession(
+      relay,
       handshaker: handshaker,
       pingSilence: pingSilence,
       channelWindowBytes: channelWindowBytes,
@@ -119,8 +110,6 @@ void main() {
       creditBatchBytes: creditBatchBytes,
       logger: logger,
     );
-    session.start();
-    await session.ensureEstablished();
     addTearDown(() async {
       await session.dispose();
       await relay.closeStreams();
@@ -365,7 +354,7 @@ void main() {
       IncomingPeerFrame(
         channel: channel,
         kind: FrameKind.sealed,
-        payload: await _sealFromAgent(readKeys, plaintext),
+        payload: await sealFromAgent(readKeys, plaintext),
       ),
     );
   }
@@ -456,7 +445,7 @@ void main() {
       String plaintext, {
       SessionKeys? sealedWith,
     }) async {
-      final payload = await _sealFromAgent(sealedWith ?? readKeys, plaintext);
+      final payload = await sealFromAgent(sealedWith ?? readKeys, plaintext);
       preview += payload.length;
       relay.inject(
         IncomingPeerFrame(
@@ -495,7 +484,7 @@ void main() {
 
     var control = 0;
     Future<void> feedControl(String plaintext) async {
-      final payload = await _sealFromAgent(readKeys, plaintext);
+      final payload = await sealFromAgent(readKeys, plaintext);
       control += payload.length;
       relay.inject(
         IncomingPeerFrame(
@@ -536,7 +525,7 @@ void main() {
       pingSilence: const Duration(milliseconds: 60),
       creditBatchBytes: 10000000,
     );
-    final payload = await _sealFromAgent(readKeys, filler(10000));
+    final payload = await sealFromAgent(readKeys, filler(10000));
     relay.inject(
       IncomingPeerFrame(
         channel: 'preview',
@@ -654,7 +643,7 @@ void main() {
       reason: 'a full window goes out before the agent has credited anything',
     );
     expect(
-      await _openFromPhone(read2, relay.sent.last.payload),
+      await openFromPhone(read2, relay.sent.last.payload),
       isNotNull,
       reason: 'sealed under the keys of the session that is live now',
     );
@@ -678,7 +667,7 @@ void main() {
       // makes the case bite: an await added anywhere between the injection here
       // and the swap would let the chain capture the new keys and open the frame
       // on the first try, and the assertion below would hold for free.
-      final acrossSwap = await _sealFromAgent(
+      final acrossSwap = await sealFromAgent(
         read2,
         jsonEncode({'type': 'ping'}),
       );

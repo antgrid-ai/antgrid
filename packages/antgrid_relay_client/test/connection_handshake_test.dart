@@ -33,8 +33,6 @@ class _RecordingRelay implements PeerLink {
   Stream<PeerLinkFailure> get failureStream =>
       const Stream<PeerLinkFailure>.empty();
   @override
-  Stream<void> get peerRestartStream => const Stream<void>.empty();
-  @override
   bool get isDispatchAllowed => true;
   @override
   PeerLinkDiagnostic? get netTap => null;

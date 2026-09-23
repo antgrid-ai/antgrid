@@ -6,18 +6,11 @@
 // push is best-effort and the snapshot is the reconnect contract.
 import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:test/test.dart';
 
 import 'support/fake_live_relay.dart';
-
-Future<String?> _openFromPhone(SessionKeys keys, Uint8List payload) =>
-    E2eTransportDart(sendKey: keys.a2p, recvKey: keys.p2a).open(payload);
-
-Future<Uint8List> _sealFromAgent(SessionKeys keys, String plaintext) =>
-    E2eTransportDart(sendKey: keys.a2p, recvKey: keys.p2a).seal(plaintext);
 
 void main() {
   late FakeLiveRelay relay;
@@ -29,17 +22,14 @@ void main() {
     relay = FakeLiveRelay();
     keys = fixedKeys(1);
     handshaker = FakeHandshaker(keys);
-    session = MachineSession(
-      relay: relay,
-      machineDeviceId: 'machine-1',
+    session = await establishSession(
+      relay,
       handshaker: handshaker,
       projectStartMessageBuilder: (projectId) => {
         'type': 'project:start',
         'projectId': projectId,
       },
     );
-    session.start();
-    await session.ensureEstablished();
   });
 
   tearDown(() async {
@@ -50,7 +40,7 @@ void main() {
   Future<List<Map<String, dynamic>>> sentEnvelopes() async {
     final out = <Map<String, dynamic>>[];
     for (final f in relay.sent) {
-      final pt = await _openFromPhone(keys, f.payload);
+      final pt = await openFromPhone(keys, f.payload);
       if (pt != null) out.add(jsonDecode(pt) as Map<String, dynamic>);
     }
     return out;
@@ -75,7 +65,7 @@ void main() {
       IncomingPeerFrame(
         channel: 'control',
         kind: FrameKind.sealed,
-        payload: await _sealFromAgent(keys, jsonEncode({'m': m})),
+        payload: await sealFromAgent(keys, jsonEncode({'m': m})),
       ),
     );
   }
@@ -275,7 +265,7 @@ void main() {
         IncomingPeerFrame(
           channel: 'control',
           kind: FrameKind.sealed,
-          payload: await _sealFromAgent(
+          payload: await sealFromAgent(
             keys,
             jsonEncode({
               's': 's-new',
@@ -564,7 +554,7 @@ void main() {
         IncomingPeerFrame(
           channel: 'control',
           kind: FrameKind.sealed,
-          payload: await _sealFromAgent(
+          payload: await sealFromAgent(
             coldKeys,
             jsonEncode({
               'm': {

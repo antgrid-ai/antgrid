@@ -19,8 +19,6 @@ class _Peer implements PeerLink {
   @override
   Stream<PeerLinkFailure> get failureStream => const Stream.empty();
   @override
-  Stream<void> get peerRestartStream => const Stream.empty();
-  @override
   bool get isDispatchAllowed => true;
   @override
   PeerLinkDiagnostic? get netTap => null;

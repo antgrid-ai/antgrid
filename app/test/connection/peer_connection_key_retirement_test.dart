@@ -32,25 +32,15 @@ class _StubRelay extends RelayService implements PeerLink {
   Stream<PeerPath> get pathStream => const Stream.empty();
   @override
   Stream<PeerLinkFailure> get failureStream => const Stream.empty();
-  @override
-  Stream<void> get peerRestartStream => _peerRestarts.stream;
   _StubRelay() : super(crypto: CryptoService());
 
   final _states = StreamController<AppState>.broadcast();
   final _payloadStates = StreamController<PeerLinkState>.broadcast();
-  final _peerRestarts = StreamController<void>.broadcast();
   final _presence = StreamController<bool>.broadcast();
   final _messages = StreamController<IncomingPeerFrame>.broadcast();
   AppState _cur = const AppState();
 
-  /// The agent going away and coming back is what arms a rekey.
-  void presence(bool online) {
-    if (!_presence.isClosed) _presence.add(online);
-  }
-
   void dropPayload() => _payloadStates.add(PeerLinkState.closed);
-
-  void restartPayload() => _peerRestarts.add(null);
 
   void inject(IncomingPeerFrame msg) {
     if (!_messages.isClosed) _messages.add(msg);
@@ -110,7 +100,6 @@ class _StubRelay extends RelayService implements PeerLink {
     if (!_presence.isClosed) await _presence.close();
     if (!_messages.isClosed) await _messages.close();
     if (!_payloadStates.isClosed) await _payloadStates.close();
-    if (!_peerRestarts.isClosed) await _peerRestarts.close();
   }
 }
 
@@ -312,8 +301,10 @@ void main() {
         await sealOneFrame(0x45);
         expect(CngAesGcm.importedKeyCount, 1);
 
-        // The agent bounces: coming back arms a rekey, and this attempt fails.
-        relay.restartPayload();
+        // Repeated RPC timeouts arm a rekey, and this attempt fails.
+        for (var i = 0; i < 3; i++) {
+          mech.session!.notifyRpcResult(timedOut: true);
+        }
         for (var i = 0; i < 50 && mech.session!.isEstablished; i++) {
           await Future<void>.delayed(const Duration(milliseconds: 10));
         }

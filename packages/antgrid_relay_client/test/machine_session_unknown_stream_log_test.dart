@@ -10,9 +10,6 @@ import 'package:test/test.dart';
 
 import 'support/fake_live_relay.dart';
 
-Future<Uint8List> _sealFromAgent(SessionKeys keys, String plaintext) =>
-    E2eTransportDart(sendKey: keys.a2p, recvKey: keys.p2a).seal(plaintext);
-
 const _ghostEnvelope = {
   's': 'ghost-stream',
   'm': {'type': 'terminal:output'},
@@ -53,9 +50,8 @@ void main() {
       relay = FakeLiveRelay();
       keys = fixedKeys(1);
       warns = [];
-      session = MachineSession(
-        relay: relay,
-        machineDeviceId: 'machine-1',
+      session = await establishSession(
+        relay,
         handshaker: FakeHandshaker(keys),
         logger: (level, message, {fields}) {
           if (message == 'dropping inbound frame for unknown stream') {
@@ -63,8 +59,6 @@ void main() {
           }
         },
       );
-      session.start();
-      await session.ensureEstablished();
     });
 
     tearDown(() async {
@@ -84,7 +78,7 @@ void main() {
     }
 
     test('carries the frame id and the epoch it arrived under', () async {
-      final payload = await _sealFromAgent(keys, jsonEncode(_ghostEnvelope));
+      final payload = await sealFromAgent(keys, jsonEncode(_ghostEnvelope));
       await inject(payload);
 
       final w = warns.single!;
@@ -105,7 +99,7 @@ void main() {
           24,
         );
         expect(frames.length, greaterThan(1));
-        final sealed = [for (final f in frames) await _sealFromAgent(keys, f)];
+        final sealed = [for (final f in frames) await sealFromAgent(keys, f)];
 
         // Out of index order so the completing fragment is not also the first:
         // the two would be indistinguishable if it were.
@@ -127,7 +121,7 @@ void main() {
       // covers only the opposite direction, so without this a live PTY on a
       // stream we never bound drops a frame per frame for as long as it runs.
       Future<void> injectGhost() async =>
-          inject(await _sealFromAgent(keys, jsonEncode(_ghostEnvelope)));
+          inject(await sealFromAgent(keys, jsonEncode(_ghostEnvelope)));
 
       for (var i = 0; i < 4; i++) {
         await injectGhost();
@@ -161,20 +155,18 @@ void main() {
     // timed-out RPCs re-handshake — so the loop would re-open its own cause.
     final relay = FakeLiveRelay();
     final handshaker = FakeHandshaker.sequence([fixedKeys(1), fixedKeys(2)]);
-    final session = MachineSession(
-      relay: relay,
-      machineDeviceId: 'm1',
+    final session = await establishSession(
+      relay,
       handshaker: handshaker,
+      machineDeviceId: 'm1',
     );
-    session.start();
-    await session.ensureEstablished();
 
     Future<void> ghost(SessionKeys k) async {
       relay.inject(
         IncomingPeerFrame(
           channel: 'control',
           kind: FrameKind.sealed,
-          payload: await _sealFromAgent(k, jsonEncode(_ghostEnvelope)),
+          payload: await sealFromAgent(k, jsonEncode(_ghostEnvelope)),
         ),
       );
       await Future<void>.delayed(const Duration(milliseconds: 20));
@@ -183,8 +175,9 @@ void main() {
     await ghost(fixedKeys(1));
     expect(await _noticesUnder(relay, fixedKeys(1)), hasLength(1));
 
-    relay.presence(false);
-    relay.presence(true);
+    for (var i = 0; i < 3; i++) {
+      session.notifyRpcResult(timedOut: true);
+    }
     for (var i = 0; i < 50 && handshaker.performCalls < 2; i++) {
       await Future<void>.delayed(const Duration(milliseconds: 10));
     }

@@ -84,8 +84,6 @@ class LeasedPeerLink implements PeerLink {
   @override
   Stream<PeerLinkFailure> get failureStream => inner.failureStream;
   @override
-  Stream<void> get peerRestartStream => inner.peerRestartStream;
-  @override
   PeerLinkDiagnostic? get netTap => inner.netTap;
   @override
   Future<PeerSendOutcome> sendFrame(

@@ -25,8 +25,6 @@ class _StubRelay extends RelayService implements PeerLink {
   Stream<PeerPath> get pathStream => const Stream.empty();
   @override
   Stream<PeerLinkFailure> get failureStream => const Stream.empty();
-  @override
-  Stream<void> get peerRestartStream => const Stream.empty();
   _StubRelay() : super(crypto: CryptoService());
 
   final _states = StreamController<AppState>.broadcast();

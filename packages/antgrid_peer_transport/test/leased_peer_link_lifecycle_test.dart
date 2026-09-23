@@ -86,8 +86,6 @@ class _QueuedLink implements PeerLink {
   Stream<PeerPath> get pathStream => const Stream.empty();
   @override
   Stream<PeerLinkFailure> get failureStream => const Stream.empty();
-  @override
-  Stream<void> get peerRestartStream => const Stream.empty();
 
   @override
   Future<PeerSendOutcome> sendFrame(

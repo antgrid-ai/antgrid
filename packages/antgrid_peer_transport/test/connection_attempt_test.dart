@@ -19,8 +19,6 @@ class FakeLink implements PeerLink {
   @override
   Stream<PeerLinkFailure> get failureStream => const Stream.empty();
   @override
-  Stream<void> get peerRestartStream => const Stream.empty();
-  @override
   Future<PeerSendOutcome> sendFrame(
     String channel,
     Uint8List payload, {
