@@ -94,7 +94,7 @@ BlockReasonPresentation blockReasonPresentation(
     connectFailure: 'Connect failed: could not verify that machine.',
     workspaceHeadline: 'the encrypted session could not be established',
     workspaceTip:
-        'The agent answered but the E2E handshake kept failing — usually '
+        'The agent answered but the session handshake kept failing — usually '
         'a host that re-provisioned its identity. Retry; if it persists, '
         'forget the machine and pair it again.',
     retryLabel: 'retry',

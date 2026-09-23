@@ -43,12 +43,15 @@ our infrastructure than you need to in order to demonstrate the issue.
 
 ## The security model
 
-Enough detail to aim at the parts that matter. The handshake is specified in
-full, including its threat model and cross-language test vectors, at
-[`docs/protocol/e2e-handshake.md`](docs/protocol/e2e-handshake.md). The
-implementations are `bridge/src/e2e/` (TypeScript),
-`packages/antgrid_relay_client/lib/src/e2e/` (Dart), and `relay/src/` for
-admission and routing.
+Enough detail to aim at the parts that matter. The peer session protocol —
+admission, the plaintext session hello, and per-channel flow control — is
+specified at [`docs/protocol/peer-session.md`](docs/protocol/peer-session.md).
+The implementations are `bridge/src/peer-session-owner.ts` and
+`bridge/src/peer/native-host-connection.ts` (TypeScript),
+`packages/antgrid_relay_client/lib/src/connection_handshake.dart` and
+`machine_session.dart` (Dart), and `relay/src/` for the *central* control
+socket's admission and routing (a separate concern from the payload path
+below).
 
 The Dart implementation and the wire protocol it speaks
 (`packages/antgrid_relay_client` and `packages/antgrid-wire`) are Apache-2.0, not
@@ -57,23 +60,26 @@ reimplement that code, and publish your own work built on it, without asking us.
 That is a copyright grant and nothing more — the disclosure window above still
 applies to anything you find.
 
-**App to bridge traffic is end-to-end encrypted.** Session keys come from a fresh
-X25519 ephemeral Diffie-Hellman exchange on every handshake, authenticated in
-both directions by Ed25519 signatures over a canonical transcript that binds both
-identities, both ephemeral keys, and a nonce. Transport is AES-256-GCM with
-separate keys per direction. Establishment is gated on HMAC key-confirmation tags
-compared in constant time, so no application traffic is dispatched on unconfirmed
-keys. Session keys are per-connection and are never written to disk. Their
-backing buffers are overwritten on teardown — best-effort, since both runtimes
-are garbage-collected and we cannot guarantee no copy survives in unreachable
-memory. Residual key material in a process dump is expected and is not treated
-as a vulnerability.
+**App to bridge payload traffic is end-to-end encrypted between your devices
+(QUIC/TLS 1.3); relays cannot read content.** Every native connection is a QUIC
+connection directly between the app's and the bridge's own Iroh endpoints —
+TLS 1.3, terminated at the two endpoints only. Admission is gated on the
+endpoint ID presented at the QUIC layer being one the bridge's authorization
+lease names for that account (`acceptPeer`); nothing the peer sends over the
+connection is trusted to prove its own identity. Once admitted, a single
+plaintext `session:hello`/`established` exchange starts the session — there is
+no session key for this layer to protect, because QUIC/TLS is already the
+confidentiality boundary underneath it. Two different relays sit outside this
+boundary and see neither plaintext nor keys: the **Iroh relay**, used only when
+a direct path is unavailable, forwards already-TLS-encrypted QUIC packets
+between the two endpoints without terminating them; the **central Antgrid
+relay** (below) never carries payload traffic at all.
 
-**The relay routes frames and never holds decryption keys.** It authenticates
-each socket from a single signed `hello` frame and will only route between
-devices belonging to the same account. Payloads, including the stream envelope,
-are opaque ciphertext to it. A relay operator who tampers with a key exchange
-cannot produce a valid transcript signature, so the peer rejects the session.
+**The central relay authenticates devices and never carries payloads.** It
+authenticates each control socket from a single Ed25519-signed `hello` frame
+and will only route control-plane traffic (presence, policy, push) between
+devices belonging to the same account. It has no role in payload admission or
+delivery — see the licence-gate claim below for what it does check.
 
 **Command execution on your machine is gated three ways, and all three must
 hold.** A remote device may drive a project only if it is trusted through your
@@ -92,15 +98,19 @@ token.
 
 In scope. These are the claims worth attacking:
 
-- **The end-to-end transport.** Anything that lets a party other than the
-  intended peer read, modify, or replay app-to-bridge traffic; any downgrade to
-  plaintext; any way to make two honest parties derive the same keys while
-  misidentifying each other; any flaw in the transcript, key schedule, key
-  confirmation, or AES-GCM framing. Cross-language interop vectors live in
-  `evals/fixtures/e2e-handshake-vectors.json` if you want a starting point.
-- **The relay's zero-knowledge property.** Anything that lets the relay, or
-  someone who controls it, recover plaintext or key material, act as a
-  man-in-the-middle, or route frames between devices on different accounts.
+- **The peer payload transport.** Anything that lets a party other than the
+  intended peer read, modify, or replay app-to-bridge payload traffic; any way
+  to have a connection admitted whose QUIC-authenticated endpoint ID is not the
+  one the authorization lease names for it; any way to dispatch a frame from a
+  peer that has not completed the plaintext session hello, or to have a frame
+  attributed to a peer other than the one the connection actually
+  authenticates as. Cross-language interop vectors for the frame format live in
+  `evals/fixtures/peer-transport-vectors.json` if you want a starting point.
+- **The relays' zero-knowledge property**, for both the Iroh relay (packet
+  forwarding only) and the central Antgrid relay (control-plane only).
+  Anything that lets either one, or someone who controls it, recover payload
+  plaintext, act as a payload man-in-the-middle, or route frames between
+  devices on different accounts.
 - **The command-execution authorization path.** Any way a remote device runs
   commands, reads files, opens a terminal, or reaches a preview tunnel on a
   machine whose remote-access switch is off; any way to reach a project outside

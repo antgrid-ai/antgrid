@@ -25,7 +25,7 @@ import '../services/account_agents_api.dart' show InventoryAgent;
 const Duration kDirectoryWarmWindow = Duration(minutes: 5);
 
 /// Ceiling on machines warmed by one miss. Each is a persistent WebSocket plus
-/// an E2E session, the same cost `kEagerControlPlaneCap` bounds on mobile — and
+/// a peer session, the same cost `kEagerControlPlaneCap` bounds on mobile — and
 /// desktop is lazy precisely because connecting to everything at once has
 /// already caused connection storms here (see `eagerControlPlanesEnabledProvider`).
 /// A miss is evidence that SOME peer was wanted, never evidence that all of them

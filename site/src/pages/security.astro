@@ -29,16 +29,13 @@ const relayHolds = [
   { it: "The Host header of the upgrade", why: "rebuilt into the signature body so a hello cannot be replayed elsewhere" },
   { it: "The hello timestamp and nonce", why: "for replay rejection and equal-epoch arbitration" },
   { it: "Connect time and last-seen time", why: "per open connection" },
-  { it: "Who is sending to whom", why: "the destination in each frame's cleartext route header" },
-  { it: "Which channel a frame is on", why: "control or preview — it keys the rate-limit bucket" },
-  { it: "The size and timing of every frame", why: "and its kind byte, forwarded without interpretation" },
   { it: "Which of your devices are online", why: "and it tells your other live connections" },
   { it: "Push routing", why: "the destination token and provider transit the relay" },
   { it: "Device ids in operational logs", why: "a ping timeout names the device it dropped" },
 ];
 
 const relayNeverHolds = [
-  { it: "Message payloads", why: "sealed on the sending device" },
+  { it: "Message payloads", why: "they never touch the central relay — they travel over QUIC/TLS between your devices" },
   { it: "The stream envelope inside them", why: "including stream ids" },
   { it: "Project names and project ids", why: "" },
   { it: "File paths and file contents", why: "" },
@@ -77,10 +74,10 @@ const gaps = [
 const sources = [
   { label: "Repository", href: links.repo, note: "the whole product, source-available" },
   { label: "SECURITY.md", href: links.securityPolicyFile, note: "scope, reporting, what to expect" },
-  { label: "packages/antgrid_relay_client", href: links.relayClient, note: "the client-side encryption, Apache-2.0" },
+  { label: "packages/antgrid_relay_client", href: links.relayClient, note: "the Dart peer-session client, Apache-2.0" },
   { label: "packages/antgrid-wire", href: links.wirePackage, note: "the wire protocol, Apache-2.0" },
-  { label: "docs/protocol/e2e-handshake.md", href: links.handshakeSpec, note: "the handshake, specified to the byte" },
-  { label: "e2e-handshake-vectors.json", href: links.handshakeVectors, note: "the vectors both implementations must pass" },
+  { label: "docs/protocol/peer-session.md", href: links.handshakeSpec, note: "peer admission and the session protocol, specified in full" },
+  { label: "peer-transport-vectors.json", href: links.handshakeVectors, note: "the frame vectors both implementations must pass" },
 ];
 ---
 <Base
@@ -114,38 +111,35 @@ const sources = [
       <Eyebrow class="mb-5">The wire</Eyebrow>
       <h2 class="mb-5 max-w-3xl font-display text-title font-semibold text-ink">The relay forwards bytes it holds no key for.</h2>
       <p class="mb-4 max-w-2xl text-lede text-muted">
-        Traffic between your devices and your machines is end-to-end encrypted. Keys are made on the two devices, and the relay is never given one.
+        Payload traffic between your devices is end-to-end encrypted (QUIC/TLS 1.3); relays cannot read content.
       </p>
 
       <div class="grid items-start gap-8 md:grid-cols-2">
-        <Readout source="app ⇄ machine · handshake" state="sealed" label="mutual auth">
+        <Readout source="app ⇄ machine · admission" state="sealed" label="mutual auth">
           <ol class="flex flex-col gap-2.5 p-4 md:p-5">
             <li class="font-mono text-row text-ink2">
-              <span class="text-faint">1 </span>Both sides generate an ephemeral X25519 keypair, fresh for this connection, and exchange the public halves.
+              <span class="text-faint">1 </span>The app dials the bridge as one Iroh endpoint to another — directly when it can, through an Iroh relay when it cannot. The connection is QUIC, so it is TLS 1.3 underneath — terminated at the two endpoints only, never at a relay.
             </li>
             <li class="font-mono text-row text-ink2">
-              <span class="text-faint">2 </span>Both sign a canonical transcript with their long-term Ed25519 identity key. The transcript binds both device identities, both ephemeral public keys, a 32-byte fresh nonce, the machine binding and the protocol version.
+              <span class="text-faint">2 </span>The bridge admits the connection by checking the endpoint ID the QUIC handshake authenticated against its authorization lease for that account — the peer's identity comes from what the connection cryptographically is, never from anything it sends afterward.
             </li>
             <li class="font-mono text-row text-ink2">
-              <span class="text-faint">3 </span>Each side verifies the other's signature against the key it already holds for that device. A key exchange someone tampered with in transit produces no signature that verifies.
+              <span class="text-faint">3 </span>Once admitted, a single plaintext session-hello exchange starts the session. It carries no key material, because there is no layer left above QUIC/TLS for it to protect.
             </li>
             <li class="font-mono text-row text-ink2">
-              <span class="text-faint">4 </span>Both sides check an HMAC key-confirmation tag, compared in constant time. No application data is sent or accepted before that passes.
-            </li>
-            <li class="font-mono text-row text-ink2">
-              <span class="text-faint">5 </span>Transport is AES-256-GCM, with a separate key for each direction.
+              <span class="text-faint">4 </span>A liveness failure closes the connection outright rather than rekeying in place; the next attempt re-dials through admission and a fresh hello.
             </li>
           </ol>
         </Readout>
 
         <div>
           <p class="mb-4 max-w-xl text-note leading-relaxed text-muted">
-            Because the session keys are ephemeral, a long-term signing key stolen later does not decrypt sessions that already happened. Session keys live in memory for the life of one connection, are never written to disk, and every teardown path overwrites their buffers.
+            A long-term key stolen later does not decrypt sessions that already happened: confidentiality is QUIC's own ephemeral TLS 1.3 session, torn down with the connection. What has to stay correct is admission — that the endpoint ID a connection authenticates as is really the one your account's inventory names for that device.
           </p>
           <div class="mb-5 border-l-2 border-edge-emph pl-4">
             <p class="mb-1.5 font-mono text-marker uppercase tracking-[0.14em] text-faint">Limit</p>
             <p class="max-w-xl text-note leading-relaxed text-muted2">
-              That overwrite is best effort. Both implementations run in garbage-collected runtimes, so residual key material in a process dump is expected and is not treated as a vulnerability.
+              Admission rests on your account's device inventory, so the service that serves it stays inside the trust boundary: see "What we are still trusted with" below.
             </p>
           </div>
           <div class="mb-5 border-l-2 border-edge-emph pl-4">
@@ -155,10 +149,10 @@ const sources = [
             </p>
           </div>
           <div class="flex flex-wrap gap-2">
-            <Chip>ephemeral X25519 per connection</Chip>
-            <Chip>Ed25519 transcript signatures</Chip>
-            <Chip>AES-256-GCM, one key per direction</Chip>
-            <Chip>constant-time key confirmation</Chip>
+            <Chip>QUIC / TLS 1.3 per connection</Chip>
+            <Chip>lease-based endpoint admission</Chip>
+            <Chip>plaintext session hello</Chip>
+            <Chip>no in-place rekey — reconnect instead</Chip>
           </div>
         </div>
       </div>
@@ -169,7 +163,7 @@ const sources = [
         <Eyebrow class="mb-5">The relay</Eyebrow>
         <h2 class="mb-5 max-w-3xl font-display text-title font-semibold text-ink">What the relay does see.</h2>
         <p class="mb-8 max-w-2xl text-lede text-muted">
-          Zero-knowledge is a claim about content, and only about content. Everything the relay needs in cleartext to admit a socket and route a frame, it has. Here is that list in full, beside the list of what it never holds.
+          Zero-knowledge is a claim about content, and only about content. Everything the central relay needs in cleartext to admit a socket and route a frame, it has. Here is that list in full, beside the list of what it never holds — the Iroh relay that forwards payload traffic when a direct path is unavailable is a separate hop again: it sees the two endpoint ids of a connection and the size and timing of its already-TLS-encrypted QUIC packets, never their content.
         </p>
 
         <div class="grid items-start gap-3.5 md:grid-cols-2">
@@ -224,7 +218,7 @@ const sources = [
           <div>
             <h3 class="mb-2 text-kicker font-medium text-ink">What we are still trusted with</h3>
             <p class="max-w-xl text-note leading-relaxed text-muted">
-              This design takes the relay out of the trust boundary. It does not take our account service out of it. A relay operator who tampers with the key exchange cannot produce a signature your device accepts — but your phone learns a machine's Ed25519 identity key from your account's device inventory, served by app.antgrid.ai, so a compromised account service could hand a device that has not yet cached the real key one of its choosing. The relay is not trusted with identity. The account service is.
+              This design takes the relay out of the trust boundary. It does not take our account service out of it. A relay operator cannot forge the Ed25519 signature that authenticates a device's central hello, and cannot make itself an endpoint your bridge admits — but your bridge and your phone each learn which endpoint IDs to trust for each other from your account's device inventory, served by app.antgrid.ai. A compromised account service could hand one of them a wrong endpoint to trust. The relay is not trusted with identity. The account service is.
             </p>
           </div>
         </div>
@@ -243,7 +237,7 @@ const sources = [
           <p class="mb-2 font-mono text-marker text-faint">01</p>
           <p class="mb-2 text-note font-medium text-ink">The device is on your signed-in account.</p>
           <p class="text-note leading-relaxed text-muted2">
-            A device is admitted from your account's own inventory — there is no pairing code or QR ceremony to intercept — and its Ed25519 identity must verify against the handshake transcript before anything proceeds.
+            A device is admitted from your account's own inventory — there is no pairing code or QR ceremony to intercept — and the QUIC-authenticated endpoint ID it connects as must be the one that inventory names for it before anything proceeds.
           </p>
         </div>
         <div class="rounded-lg border border-edge bg-panel p-5">
@@ -346,7 +340,7 @@ const sources = [
         <Eyebrow class="mb-5">Verify it</Eyebrow>
         <h2 class="mb-5 max-w-3xl font-display text-title font-semibold text-ink">Check the crypto claims yourself.</h2>
         <p class="mb-4 max-w-2xl text-lede text-muted">
-          The handshake is specified in public down to the byte layout of the signed transcript, with cross-language test vectors that both the TypeScript and the Dart implementation must pass. The wire protocol and the client-side encryption are Apache-2.0 and carry their own licence files, so you can read, reimplement and publish work built on them without asking us.
+          The peer session protocol — admission, the plaintext session hello, and per-channel flow control — is specified in public, and the frame layout is pinned by cross-language test vectors that both the TypeScript and the Dart implementation must pass. The wire protocol and the Dart client are Apache-2.0 and carry their own licence files, so you can read, reimplement and publish work built on them without asking us.
         </p>
         <p class="mb-8 max-w-2xl text-note leading-relaxed text-muted2">
           The rest of antgrid is source-available under the Elastic License 2.0. That is not OSI-approved open source and we do not call it that.

@@ -80,9 +80,12 @@ antgrid watch --dir ~/.antgrid-dev  # a debug-build app's host
 
 **Both halves.** The app records its own side when `ANTGRID_NETWATCH` is set in
 its environment (runtime, so arming it needs no rebuild), to
-`<ANTGRID_DIR>/netwatch.log`. `--join` pairs the two on `frameId` — the sealed
-frame's AES-GCM nonce, which the relay forwards untouched and both endpoints
-therefore compute identically:
+`<ANTGRID_DIR>/netwatch.log`. `--join` pairs the two on `frameId` — a sha256
+hash of the frame's own payload bytes (`frameIdFor`, `bridge/src/netwatch.ts`),
+which both endpoints compute identically since the payload crosses the wire
+unchanged. More than one occurrence can legitimately share an id (a resend, an
+identical control message), so pairing matches occurrence order within each
+`(frameId, channel, sender)` key rather than assuming uniqueness:
 
 ```bash
 ANTGRID_NETWATCH=1 <launch the app>
@@ -90,9 +93,9 @@ antgrid watch --dir ~/.antgrid-dev --join ~/.antgrid-dev/netwatch.log
 ```
 
 ```
-22:11:56.211  app  -> tx  ctrl  sealed  412B  a3f9c211  terminal:input  s:9f1c22ab
-22:11:56.233  brg  <- rx  ctrl  sealed  412B  a3f9c211  terminal:input  +22ms
-22:11:56.240  app  -> tx  ctrl  sealed   88B  cc12ef44  file:read       ✗ never arrived
+22:11:56.211  app  -> tx  ctrl  frame   412B  a3f9c211  terminal:input  s:9f1c22ab
+22:11:56.233  brg  <- rx  ctrl  frame   412B  a3f9c211  terminal:input  +22ms
+22:11:56.240  app  -> tx  ctrl  frame    88B  cc12ef44  file:read       ✗ never arrived
 ```
 
 This answers what neither endpoint can alone — the route header carries no
@@ -216,7 +219,7 @@ rebinding. The page loads nothing from anywhere, renders every peer-supplied
 value through `textContent`, and runs under a nonce CSP whose default is `'none'`.
 
 Two things it still does NOT show. A relay session that never established: both
-halves of that capture ride the sealed control plane, so `--remote` can describe
+halves of that capture ride the control plane, so `--remote` can describe
 a connection that is misbehaving but structurally cannot describe one that never
 came up (a refused loopback hello, by contrast, is an ordinary event). And which
 machine an app-side frame belongs to: the app's recorder is process-wide, so an

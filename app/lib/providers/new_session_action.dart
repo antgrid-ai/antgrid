@@ -595,7 +595,7 @@ Future<String> openRemoteProjectForActivation(
   ).registrationId; // "<uuid>.<projId>"
 
   // No pairing step: the control-plane read below is what declares the machine
-  // socket wanted, and the supervisor owns the dial + E2E handshake from there.
+  // socket wanted, and the supervisor owns the dial + session handshake from there.
   // Await the inventory when we hold no cached coordinates, so a still-loading
   // inventory isn't mistaken for "machine unknown".
   final recent = ref

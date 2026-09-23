@@ -6,38 +6,43 @@ only the cross-cutting shape.
 
 ## Message flow
 
-Remote payloads use Iroh with application E2E encryption. Iroh handles direct
-and relayed connectivity; there is no application-level WebSocket fallback.
-The central WebSocket remains for discovery, presence and revocation. Release
-remains unqualified. See [the task ledger](iroh-migration-ledger.md) and
-[qualification checkpoint](iroh-qualification.md) for evidence and release gates.
+Remote payloads use Iroh; QUIC/TLS 1.3 between two endpoint IDs the
+authorization snapshot names is the confidentiality layer, with no app-layer
+sealing on top of it and no application-level WebSocket fallback. The central
+WebSocket remains for discovery, presence and revocation. Release remains
+unqualified. See [the task ledger](iroh-migration-ledger.md) and
+[qualification checkpoint](iroh-qualification.md) for evidence and release
+gates, and [`docs/protocol/peer-session.md`](protocol/peer-session.md) for the
+session hello, admission and flow-control protocol.
 
 ```
-App (Flutter) <--E2E over Iroh (direct or relayed)--> Agent (Bun)
+App (Flutter) <--QUIC/TLS over Iroh (direct or relayed)--> Agent (Bun)
 ```
 
 The central relay authenticates devices via a signed `hello` frame (Ed25519
-proof-of-possession). The encrypted payload protocol has two channels: `control`
-(terminal, files, status) and `preview` (HTTP tunnel, streamed as start/chunk/end
-frames under the credit window).
+proof-of-possession) — unrelated to peer payload admission, which is decided
+entirely by the authorization lease (`docs/protocol/peer-session.md` §1). The
+payload protocol has two channels: `control` (terminal, files, status) and
+`preview` (HTTP tunnel, streamed as start/chunk/end frames under the credit
+window).
 
 ### Native peer payloads
 
 The authenticated central WebSocket retains inventory, presence and policy
 invalidation. The Apache Dart `PeerLink` interface separates that control
-connection from payload lifecycle. `MachineSession` and handshake drivers consume
-the native link; feature services retain their existing interfaces. Native
-implementation and authoritative lease handling live in the ELv2
+connection from payload lifecycle. `MachineSession` and the session-hello driver
+consume the native link; feature services retain their existing interfaces.
+Native implementation and authoritative lease handling live in the ELv2
 `packages/antgrid_peer_transport` package, shared with its standalone CLI smoke.
 
-The bridge's `PeerSessionOwner` owns E2E, fragmentation, scheduling, credits and
-liveness over Iroh. `CentralControlClient` owns central authentication,
-presence, policy invalidation and push delivery; it has no binary payload API.
-`NativeHostConnection` composes those independent owners with endpoint
-lifecycle recovery for authenticated native connections. Native requests keep remote command authorization, project catalog
-checks and checkout routing. Host-assigned stream readiness is independent of
-central stream admission, allowing native project use during a leased central
-outage.
+The bridge's `PeerSessionOwner` owns session establishment, fragmentation,
+scheduling, credits and liveness over Iroh. `CentralControlClient` owns central
+authentication, presence, policy invalidation and push delivery; it has no
+binary payload API. `NativeHostConnection` composes those independent owners
+with endpoint lifecycle recovery for authenticated native connections. Native
+requests keep remote command authorization, project catalog checks and
+checkout routing. Host-assigned stream readiness is independent of central
+stream admission, allowing native project use during a leased central outage.
 
 Each enrollment has a distinct protected endpoint seed. Device-bound OAuth
 credentials authorize challenge, dual-signature registration and snapshot APIs
@@ -51,7 +56,7 @@ outbox delivery informs connected clients and configured private relay targets.
 An app-initiated Iroh connection is reused across projects. ALPN
 `antgrid/peer/1` selects one reliable bidirectional stream carrying existing route
 frames with a four-byte big-endian length prefix. Additional application streams
-are rejected. Transport selection precedes E2E and is fenced by attempt generation;
+are rejected. Transport selection precedes the session hello and is fenced by attempt generation;
 the app's `ConnectionSupervisor` remains the retry authority. Central outages do
 not close a healthy authorized native payload connection.
 
@@ -95,7 +100,7 @@ silent.
 
 Checkout lifecycle and storage live in `bridge/src/worktrees/`, and the checkout path
 itself never crosses the wire. An app must advertise the `checkoutRouting` capability on
-`app:ready` (`docs/protocol/e2e-handshake.md`) or it is refused a project holding a
+its session hello (`docs/protocol/peer-session.md`) or it is refused a project holding a
 managed session, rather than shown main's workspace beside an isolated agent.
 `WORKTREE_SESSIONS_SUPPORTED` (`bridge/src/worktree-capability.ts`) is the kill switch.
 
@@ -112,7 +117,7 @@ advertises `pullsTree` on both hellos, so the bridge's re-sync
 whenever every attached client pulls; a client that does not advertise it still gets
 the push. The app's capability literals live in the relay-client package
 (`connection_handshake.dart`, `local_transport.dart`) and are mirrored by hand against
-`AppReadyMessage.capabilities` in `bridge/src/protocol.ts` — Zod strips a key the
+`SessionHelloCapabilities` in `bridge/src/protocol.ts` — Zod strips a key the
 schema does not declare, and the fail direction is a silent return of the flood.
 
 ## Terminal frames and history
@@ -155,9 +160,9 @@ and offers recovery through a fresh attachment, never raw-stream fallback.
 
 Each authenticated app connection owns its terminal attachments, acknowledgments,
 pause state, and delivery budget. Relay replies name the subscribing peer before
-encryption; another connected app receives neither its frames nor its history
+they are sent; another connected app receives neither its frames nor its history
 pages. Project streams on the same connection share the terminal byte budget.
-A disconnect or rekey retires that peer's attachments while other viewers stay
+A disconnect retires that peer's attachments while other viewers stay
 attached. Cancellation removes unsent fragments from that peer's send queue.
 
 Terminal size ownership is explicit. Passive live viewers show **Take control**;
@@ -238,7 +243,8 @@ before emulator disposal; its immutable frame remains until acknowledgment or
 attachment expiry, and the app keeps the completed viewport available.
 
 The terminal protocol uses the existing authenticated transports: relay traffic
-is E2E encrypted; the current loopback listener uses a local bearer token.
+runs over the authenticated QUIC/TLS native connection; the current loopback
+listener uses a local bearer token.
 Terminal qualification commands live in `bridge/package.json` and `evals/package.json`.
 
 ## Shared packages (`packages/`)
@@ -261,9 +267,10 @@ Terminal qualification commands live in `bridge/package.json` and `evals/package
   Shared by bridge/relay/web/evals.
 
   Single source of truth for peer `FRAME_VERSION`, which is distinct from the
-  central relay message `protocolVersion`. Peer-frame v3 carries message type,
+  central relay message `protocolVersion`. The peer frame carries message type,
   channel, kind, and payload; the authenticated native connection supplies peer
-  identity. `relay/src/protocol.ts` is a thin re-export shim of this package;
+  identity — see `docs/protocol/peer-session.md` for the frame layout and the
+  session hello it carries. `relay/src/protocol.ts` is a thin re-export shim of this package;
   the Dart clients mirror these schemas by hand, so drift is silent. Shared
   fixtures under `evals/fixtures/` pin both control envelopes and peer transport
   bytes and constants across TypeScript and Dart.
@@ -383,4 +390,4 @@ contract, which wins over the inherited environment.
 Host-side lifecycle — the one PTY the run lives in, the deferred `services`, the
 start gate and what survives a restart — is in `bridge/CLAUDE.md`.
 
-Native endpoint recovery and central reconnect have separate owners. The bridge endpoint lifecycle serializes creation/retirement, retries transient listener failures with bounded backoff, and bounds concurrent admissions. Native project readiness uses host-local bindings; the central protocol has no stream registration or payload acknowledgements. On the app, `PeerRuntime` owns the enrollment endpoint and `ConnectionSupervisor` owns per-machine retry. Endpoint initialization and peer dialing have separate deadlines; neither central presence nor Iroh path transitions establish a new E2E epoch.
+Native endpoint recovery and central reconnect have separate owners. The bridge endpoint lifecycle serializes creation/retirement, retries transient listener failures with bounded backoff, and bounds concurrent admissions. Native project readiness uses host-local bindings; the central protocol has no stream registration or payload acknowledgements. On the app, `PeerRuntime` owns the enrollment endpoint and `ConnectionSupervisor` owns per-machine retry. Endpoint initialization and peer dialing have separate deadlines; neither central presence nor Iroh path transitions establishes a new session generation.

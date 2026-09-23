@@ -160,13 +160,15 @@ final agentTransportForProvider = FutureProvider.family<AgentTransport?, String>
 /// for a bare machine id, or the project's data-plane stream for a compound
 /// `<uuid>.<projectId>` — 0 RTT when the agent already advertised its streamId,
 /// else `project:start` + await `stream-ready`. No new socket, no
-/// per-project handshake, so the v2 drill-in race is gone. Rekey lives inside
-/// [MachineSession]; keys hot-swap under the live streams with no invalidate
-/// here.
+/// per-project handshake, so the v2 drill-in race is gone. A liveness failure
+/// inside [MachineSession] closes the connection and re-dials through a fresh
+/// session hello rather than rekeying in place; live streams re-bind onto the
+/// new session with no invalidate here.
 ///
 /// Admission is ACCOUNT trust: there is no pair-request and no relay grant. The
-/// app connects and signs the E2E transcript as its own `kind:"app"`
-/// [DeviceRecord], which the agent recognises from the account peers inventory.
+/// app connects with its own `kind:"app"` [DeviceRecord] identity, and the
+/// agent admits it by resolving the QUIC-authenticated endpoint against the
+/// account peers inventory — nothing the app sends is what proves who it is.
 Future<AgentTransport?> _buildRelayTransportFor(
   Ref ref,
   String projectId,

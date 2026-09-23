@@ -877,7 +877,7 @@ Future<bool> selectRemoteAgent(
         .read(recentAgentsProvider)
         .firstWhere((r) => r.agentDeviceId == agentDeviceId);
     // No rendezvous: reading the machine's transport declares the connection
-    // wanted and hands the supervisor the ladder (dial → presence → E2E
+    // wanted and hands the supervisor the ladder (dial → presence → session
     // handshake as this app's own DeviceRecord). It throws with the block
     // reason when the supervisor gives up, which is what the snackbar reports.
     await ref.read(agentTransportForProvider(ra.agentDeviceId).future);
@@ -1044,7 +1044,7 @@ Future<bool> activateDrawerEntryById(
     case InventoryAgentEntry e:
       // Same-account machine straight from the peers inventory. Reading its
       // transport brings the supervisor up; the agent admits us from the
-      // inventory when the E2E handshake lands.
+      // inventory when the session handshake lands.
       final priorTarget = ref.read(selectedTargetProvider);
       ref.read(selectedTargetProvider.notifier).set(null);
       try {

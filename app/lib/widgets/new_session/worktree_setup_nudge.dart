@@ -245,7 +245,7 @@ Future<void> _applyStarterSetup(
     entryId,
     (s) => s,
     // Past warmServiceFor's default: a remote target may be a cold machine
-    // whose socket and E2E handshake still have to come up.
+    // whose socket and session handshake still have to come up.
     timeout: const Duration(seconds: 30),
   );
   if (session == null) {

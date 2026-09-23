@@ -14,7 +14,7 @@ import 'device_revocation.dart';
 import 'providers.dart';
 
 /// Owns one machine's independent central-control [RelayService], required
-/// native payload, and E2E [MachineSession]. Projects share host-owned streams
+/// native payload, and peer [MachineSession]. Projects share host-owned streams
 /// on that native session; the central socket carries authentication, presence,
 /// policy and revocation only. There is one [MachineConnection] per bare machine
 /// `deviceUuid`, never one per project.
@@ -203,7 +203,7 @@ class MachineConnection {
     supervisor.setWanted(true);
   }
 
-  /// Waits for this machine's E2E session to be usable.
+  /// Waits for this machine's peer session to be usable.
   ///
   /// Throws [ConnectionBlockedException] the moment the supervisor stops
   /// climbing (license, revocation, handshake, or peer rejection) so the caller surfaces the
@@ -332,7 +332,7 @@ void _logRelayService(
 
 /// Holds one [MachineConnection] per bare machine `deviceUuid`. Each connection
 /// maintains its own central-control socket and native payload; project streams
-/// multiplex over the machine's E2E session on that payload.
+/// multiplex over the machine's peer session on that payload.
 class MachineConnectionManager {
   final CryptoService _crypto;
   final Map<String, MachineConnection> _connections = {};

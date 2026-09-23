@@ -129,7 +129,7 @@ class PeerConnectionMechanisms implements PeerConnectionContract {
   /// state event fires, and without this the `established` rung would keep
   /// reading satisfied off a session that has already been torn down.
 
-  /// The machine's single E2E session, or null before the first payload connection / after a
+  /// The machine's single peer session, or null before the first payload connection / after a
   /// [release]. Deliberately survives a central reconnect: the project [StreamTransport]s
   /// handed to services hang off it, and recreating it on every control-plane blip
   /// would orphan them. The one exception is a redial onto a new payload link —
@@ -222,7 +222,7 @@ class PeerConnectionMechanisms implements PeerConnectionContract {
       if (s != PeerLinkState.closed) return;
       if (!dropped.isCompleted) {
         dropped.completeError(
-          StateError('payload dropped before the E2E handshake completed'),
+          StateError('payload dropped before the session handshake completed'),
         );
       }
     });
@@ -302,8 +302,8 @@ class PeerConnectionMechanisms implements PeerConnectionContract {
     final existing = _session;
     if (existing != null) {
       if (identical(_sessionLink, payloadLink)) return existing;
-      // Dispose first (which zeroizes the old session keys) so nothing
-      // outlives the link it was derived on.
+      // Dispose first so nothing from the old session (its streams, its
+      // generation fence) outlives the link it was derived on.
       _session = null;
       _sessionLink = null;
       await _payloadDownSub?.cancel();

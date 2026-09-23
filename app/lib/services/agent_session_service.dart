@@ -772,8 +772,8 @@ class AgentSessionService {
   /// safe to call repeatedly (a call while turns are already populated is a
   /// harmless no-op refresh).
   ///
-  /// Deferral is the load-bearing part: on a relay session whose E2E stream
-  /// hasn't established yet, the transcript RPC would be silently dropped and
+  /// Deferral is the load-bearing part: on a relay session whose project
+  /// stream hasn't established yet, the transcript RPC would be silently dropped and
   /// burn its full timeout, leaving the transcript blank until an unrelated
   /// re-attach happened to fire it post-establishment (the "old messages don't
   /// come until I background+reopen" bug). The transport's tier-3 hydrator

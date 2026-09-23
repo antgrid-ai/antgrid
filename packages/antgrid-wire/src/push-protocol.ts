@@ -7,7 +7,7 @@ import { z } from "zod/v4";
  * base64 of the AES-256-GCM
  * frame `nonce(12) ‖ ciphertext ‖ tag(16)`; `epk` is the base64 ephemeral X25519
  * public key used to derive the per-push key. Keep in lockstep with
- * bridge/src/push/seal.ts and packages/antgrid_relay_client/lib/src/e2e/push_open.dart.
+ * bridge/src/push/seal.ts and packages/antgrid_relay_client/lib/src/push/push_open.dart.
  */
 export const PushDeliverMessage = z.object({
   type: z.literal("push:deliver"),

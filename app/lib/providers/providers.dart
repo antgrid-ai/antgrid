@@ -1021,7 +1021,7 @@ class MachineConnectionNotifier extends Notifier<void> {
       final machineUuid = baseDeviceUuid(activeId);
       // Same guard, and the same reason, as the control-plane reaper's: the
       // socket is machine-level and un-refcounted, so releasing an ESTABLISHED
-      // one from here would kill the live E2E session and every other project
+      // one from here would kill the live peer session and every other project
       // stream riding it. Cancel only ever abandons an attempt in flight.
       if (mgr.peek(machineUuid)?.supervisor?.status is! Connected) {
         mgr.release(machineUuid);

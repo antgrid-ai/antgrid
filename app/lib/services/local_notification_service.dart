@@ -120,7 +120,7 @@ class LocalNotificationService {
   ///
   /// Still no `actions:`, because an escalation's quick choices have nowhere to
   /// go: they are not in the sealed payload, and an answer must be sealed on a
-  /// live E2E session (`HandlerService.reply` → `ProjectSession.send`), which a
+  /// live peer session (`HandlerService.reply` → `ProjectSession.send`), which a
   /// background/headless isolate does not have and no offline queue holds. On
   /// iOS the escalation notification is not ours at all — the NSE in
   /// `ios/NotificationService` renders the APNs alert, and the forked `push`

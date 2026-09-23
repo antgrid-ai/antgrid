@@ -59,7 +59,7 @@ class FakeAgentTransport implements AgentTransport {
   @override
   int get establishmentEpoch => _establishmentEpoch;
 
-  /// Test control: simulate the E2E session (un)establishing independently of
+  /// Test control: simulate the peer session (un)establishing independently of
   /// the socket state — a relay stream can be `connected` yet not yet
   /// established (a send would seal-and-vanish). Transitioning to established
   /// re-drives hydrators, exactly as [StreamTransport.refreshSnapshot] does on
@@ -77,7 +77,7 @@ class FakeAgentTransport implements AgentTransport {
   /// Test control: drive the transport's lifecycle state directly — the
   /// signal `ProjectSession`'s pending-reply registry keys its down/up edges
   /// on for a non-relay transport. Deliberately does not touch
-  /// [redriveHydrators] or [_established]: those model the E2E session, an
+  /// [redriveHydrators] or [_established]: those model the peer session, an
   /// orthogonal axis to the socket-level state this simulates.
   void emitState(TransportState value) {
     _state = value;

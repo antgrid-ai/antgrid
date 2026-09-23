@@ -612,7 +612,7 @@ class PreviewService {
     return pending.future;
   }
 
-  /// A fresh E2E session: the relay client cleared its queues and the bridge
+  /// A fresh peer session: the relay client cleared its queues and the bridge
   /// aborted every in-flight run, so a started body can never be completed.
   /// A headless request is re-sent under the SAME id — the bridge replays it
   /// from its outbox, fetches it fresh, or joins a run still going, which is

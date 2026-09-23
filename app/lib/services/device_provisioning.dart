@@ -81,7 +81,7 @@ class DeviceProvisioning {
       platform: platform,
       displayName: displayName,
       // Overrides the platform derivation, which would make a desktop an
-      // `agent`. The peers inventory (bridge E2E admission) serves `app` rows.
+      // `agent`. The peers inventory (bridge peer admission) serves `app` rows.
       kind: 'app',
     );
 

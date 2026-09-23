@@ -193,7 +193,7 @@ class PushMessagingService {
       if (s.mode != ProjectSessionMode.relay) continue;
       // Already told this token about the project.
       if (_registered.contains(s.projectId)) continue;
-      // A send() on a transport that hasn't finished its E2E handshake is
+      // A send() on a transport that hasn't finished its session handshake is
       // silently dropped, and the registry-membership trigger never re-fires
       // for a session that merely transitions from handshaking to connected —
       // registering now would strand the token. Defer until the agent

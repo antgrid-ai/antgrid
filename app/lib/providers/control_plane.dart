@@ -267,7 +267,7 @@ Future<void> refreshMachineInventoryAndControlPlanes(
 
       // A machine can sit Connected UNDER a stale cached rejection (a failed
       // eager launch dial that later self-recovered via peer presence).
-      // Releasing it would kill the live E2E session and every project stream
+      // Releasing it would kill the live peer session and every project stream
       // riding the socket — and the invalidate + re-read below succeeds on the
       // live connection anyway, so only a not-connected machine is torn down
       // for its fresh attempt.
