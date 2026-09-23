@@ -111,9 +111,8 @@ class _ClosingPayloadLink extends TestPayloadLink {
 }
 
 class _ClosingLinkConnector extends FixedPeerConnector {
-  _ClosingLinkConnector(PeerLink carrier)
-    : _link = _ClosingPayloadLink(carrier),
-      super(carrier);
+  _ClosingLinkConnector(super.carrier)
+    : _link = _ClosingPayloadLink(carrier);
   final PeerLink _link;
   @override
   PeerLink get link => _link;

@@ -266,13 +266,8 @@ Future work:
 
 All messages share a base schema: `{ id: UUID, timestamp: number, type: string }`.
 
-### Handshake Messages
-Authoritative flow, field types and sealing rules: `docs/protocol/e2e-handshake.md`.
-
-| Type | Direction | Purpose |
-|------|-----------|---------|
-| `handshake:client-hello` | Client → Agent | Client ephemeral pubkey + nonce |
-| `handshake:agent-ready` | Agent → Client | Confirms shared secret derived |
+### Session Messages
+Authoritative flow and field types: `docs/protocol/peer-session.md`.
 
 ### Terminal Messages
 | Type | Direction | Purpose |

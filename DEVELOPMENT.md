@@ -914,9 +914,9 @@ migrations. A `postgres:16-alpine` container is enough.
 | `docs/` | Design notes, protocol specs and release procedures. |
 
 Message flow, the shared-package breakdown and the `antgrid.yaml` project schema
-are in [`docs/architecture.md`](docs/architecture.md). The end-to-end handshake
-has its own specification at
-[`docs/protocol/e2e-handshake.md`](docs/protocol/e2e-handshake.md).
+are in [`docs/architecture.md`](docs/architecture.md). The native peer session has
+its own specification at
+[`docs/protocol/peer-session.md`](docs/protocol/peer-session.md).
 
 Note that the wire protocol is mirrored **by hand** between TypeScript and Dart
 — `packages/antgrid-wire` and `packages/antgrid_relay_client` do not share code.

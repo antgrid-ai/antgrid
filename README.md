@@ -74,16 +74,14 @@ Antgrid exists to let you control an agent over the internet without handing you
 prompts or terminal to a server in the middle. That is a design constraint, not a
 feature flag.
 
-- **Encryption is never optional.** Every app↔agent message after the handshake is
-  encrypted. There is no plaintext mode to fall back to and no setting that disables it.
-- **X25519 ECDH + AES-256-GCM**, with ephemeral keys generated per connection. Session
-  keys are never persisted, and a connection rekeys on receive-silence or repeated
-  failure rather than running indefinitely on one set.
-- **Authenticated handshake.** Both sides pin the peer's Ed25519 identity in advance and
-  sign a transcript that binds both ephemeral keys; HMAC key-confirmation tags must
-  verify before either side sends traffic. Specification:
-  [`docs/protocol/e2e-handshake.md`](docs/protocol/e2e-handshake.md); implementation in
-  [`bridge/src/e2e/`](bridge/src/e2e/) and `packages/antgrid_relay_client/lib/src/e2e/`.
+- **Encryption is never optional.** Every app↔agent message travels inside a QUIC
+  connection (TLS 1.3) between two Iroh endpoints. There is no plaintext mode to fall back
+  to and no setting that disables it.
+- **Authenticated endpoints.** Each device's Iroh endpoint ID is its public key, and the
+  QUIC handshake proves it. The machine admits a connection only from an endpoint ID its
+  authorization lease names for your account, and it never trusts anything the peer
+  claims after that. Specification:
+  [`docs/protocol/peer-session.md`](docs/protocol/peer-session.md).
 - **The relay is zero-knowledge.** It authenticates devices from a single signed `hello`
   frame and then routes opaque blobs. It holds no decryption keys, so terminal output,
   prompts, file contents and diffs are unreadable to it — and to anyone who compromises

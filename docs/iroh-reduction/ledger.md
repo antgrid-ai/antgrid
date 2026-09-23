@@ -22,6 +22,8 @@ the code wins over both.
 | A: scope | Descoped: terminals and tunnel HTTP/WS get their own streams, project streams replace the mux; file:read, diffs, search, tree snapshot and upload stay on the project stream. |
 | A: loopback | No loopback wire change; the `channel` label and preview-channel classification stay, loopback-only. |
 | A: refusals | In-band `stream:refused` records (Dart cannot read reset codes); overflow resets the one stream, never the connection. |
+| A: version | `FRAME_VERSION` stays at the value Stage B set, since that value was never released. A1 bumps the ALPN to `antgrid/peer/2`. |
+| A: caps | Adopted from the wave plan pending owner review. On the bridge: QUIC bidi limit 256 per connection. Per peer: projects 32, terminal attachments 64, tunnel streams 128, pending opens 16. The app mirrors these with semaphores. |
 
 ## Status
 
@@ -35,7 +37,17 @@ the code wins over both.
 | C | W4 relay eval gate (stock binary) | done | `0468789c` |
 | C | W5 delete custom relay and admission route | done | `d5e33177` |
 | C | follow-up: relay URL schema threw on unparseable input | done | see git log |
-| B | — | not started | |
+| B | W0a move `rawSeedToPkcs8` out of `e2e/` | done | `0f4a18e4` |
+| B | W0b netwatch joiner pairs by occurrence, direction and channel | done | `be318d75` |
+| B | W0c one bridge test session-establish seam | done | `6fdd0d3f` |
+| B | W0d delete the peer-restart rekey trigger | done | `dfcd78f7` |
+| B | W0e remove the app pin path (D8) | done | `ce336965` |
+| B | W1 flip: plaintext hello, app-layer sealing removed | done | `f487a670` |
+| B | W2a drop the native CNG AES-GCM cipher | done | `e0666f12` |
+| B | W2b delete bridge `e2e/` and trusted-peers | done | `ee344c45` |
+| B | W2c delete Dart E2E crypto and the vector fixture | done | `a7684de7` |
+| B | W3 docs and CLAUDE.md rules | done | `0eec4443` |
+| B | follow-up: evals typecheck, stale public crypto claims, uncalled `hasEstablishedSession` | done | see git log |
 | A | — | not started | |
 
 ### Stage C gate evidence (executed by the wave commit agents)
@@ -54,4 +66,17 @@ the code wins over both.
 - A misspelt non-access TOML key is silently ignored upstream. The guards catch only a missing file or a missing `[access.http]`.
 - The `[limits]` values are placeholders the implementer picked (accept 32/s, burst 64; rx 10 MiB/s, burst 2 MiB). They need an owner call.
 - The W2 throttle stamp survives a failed refresh, so a new device that hits a transient web error is refused for up to 5s. Accepted as minor.
-- Production cutover order is in `deploy/iroh/README.md`. The `/internal/disconnect` target must leave the live `PEER_POLICY_TARGETS` before the custom relay is retired, or the outbox wedges.
+- Production cutover order is in `deploy/iroh/README.md`.
+
+### Stage B gate evidence (executed)
+
+- W1, by the flip integrator: wire 110, relay 173, relay_client 267, peer_transport 29, app 4215 pass; bridge 4842 pass with the 6 known failures; `qualify:iroh-host` and `qualify:iroh-interop` pass.
+- `flutter analyze`: after the stage it found one info in a W0e test. That is fixed, and now `app` and all three Dart packages report no issues.
+- Evals: the count fell from 100 to 92 because handshake-only tests were deleted by design. `gate-vectors` is green once the regenerated fixture is committed.
+
+### Stage B open items
+
+- `site/src/pages/privacy.md` still claims X25519 + AES-256-GCM app-layer encryption. It is a legal page, so the owner has to reword it; nothing else public still makes that claim.
+- `app/build/windows` must be deleted before the next Windows build anywhere, because W2a removed `cryptography_flutter` from the plugin set.
+- The eval client has no `dart test` suite. The evals cover it through `evals/helpers/dart-app-client.ts`.
+- `iroh-interop-smoke.ts` and `gate-iroh-host-authorization` still label their pass line `e2e: "real"`, meaning a real session end to end. The label is cosmetic. The `/internal/disconnect` target must leave the live `PEER_POLICY_TARGETS` before the custom relay is retired, or the outbox wedges.

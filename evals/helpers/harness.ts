@@ -14,7 +14,6 @@ import { DartAppClient } from "./dart-app-client";
 import { computeProjectId } from "../../bridge/src/project-id";
 import { loadPairedPhones, type PairedPhone } from "../../bridge/src/paired-phones";
 import { readHostFile, type HostFile } from "../../bridge/src/host-discovery";
-import type { TrustedPeer } from "../../bridge/src/trusted-peers";
 import type { RelayConfig } from "../../relay/src/config";
 import type { LicenseGate } from "../../relay/src/license/gate";
 import type { LicenseCacheEntry } from "../../relay/src/license/cache";
@@ -90,9 +89,9 @@ export async function setMobileAccess(abDir: string, enabled: boolean): Promise<
  *  keypair `RelayClient.connectAndAuth({ identity })` reuses across connections.
  *  Registering `{deviceId, ed25519Pub: publicKeyBase64}` with the fake account
  *  inventory (`startFakeLicenseApi({ accountDevices })`) is what admits it —
- *  the bridge's `TrustedPeersProvider` is deviceId-keyed (see
- *  `bridge/src/relay-client.ts`'s `resolvePhoneEd25519PubB64`), so a never-
- *  registered identity cannot be admitted on any attempt, retried or not.
+ *  the bridge admits by the authorization lease built from that inventory, so
+ *  a never-registered identity cannot be admitted on any attempt, retried or
+ *  not.
  *  Shared with `gate-account-trust.test.ts` (imported, not duplicated). */
 export async function generateAppIdentity(): Promise<PhoneIdentity & { deviceId: string }> {
   const deviceId = randomUUID();
@@ -293,17 +292,16 @@ export interface FakeLicenseApi {
  * credential-bound fixture token and exercise signed endpoint enrollment and
  * authoritative leases; this fixture does not qualify production JWT auth.
  *
- * For account-trust admission, the agent fetches its account's enrolled
- * app-device set from `GET /account/devices/me/peers` over this same Bearer
- * channel (see `bridge/src/trusted-peers.ts`'s `TrustedPeersProvider`). Pass
- * `opts.accountDevices` to seed known peers; absent → empty set.
+ * `opts.accountDevices` seeds the account's enrolled app devices, which the
+ * authorization fixture turns into lease peers; absent → empty set.
  */
+type AccountDevice = { deviceId: string; ed25519Pub: string };
 const fixtureAuthorities = new Map<string, PeerAuthorizationFixture>();
 
 export function startFakeLicenseApi(
   opts: {
     accountPeerKeys?: string[];
-    accountDevices?: TrustedPeer[];
+    accountDevices?: AccountDevice[];
     /** Relay HTTP base (`RelayHandle.httpUrl`) — required for `revokeDevice`.
      *  `setupTestEnv` wires this automatically since it always has a relay. */
     relayInternalUrl?: string;
@@ -312,7 +310,7 @@ export function startFakeLicenseApi(
   const peerKeys = opts.accountPeerKeys ?? [];
   // Mutable: addAccountDevice pushes onto this SAME array, so the next
   // /account/devices/me/peers poll (closure reads it live) sees the addition.
-  const devices: TrustedPeer[] = opts.accountDevices ? [...opts.accountDevices] : [];
+  const devices: AccountDevice[] = opts.accountDevices ? [...opts.accountDevices] : [];
   const authority = new PeerAuthorizationFixture(() => devices);
   let expireNext = false;
   const server = Bun.serve({
@@ -330,9 +328,7 @@ export function startFakeLicenseApi(
       }
       // Account-membership peer-key set (Bearer-gated in prod; the fake accepts
       // any token, matching the relay's fakeLicenseGate). Mirrors web's
-      // `GET /account/devices/me/peers` → `{ keys: string[], devices: [{deviceId, ed25519Pub}] }`
-      // (Task 4: `devices[]` is the enabling delta for the bridge's
-      // TrustedPeersProvider — `{keys}` alone has no deviceId to key off).
+      // `GET /account/devices/me/peers` → `{ keys: string[], devices: [{deviceId, ed25519Pub}] }`.
       if (url.pathname === "/account/devices/me/peers") {
         return Response.json({ keys: peerKeys, devices });
       }
