@@ -5,7 +5,6 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { encodePeerFrame, FrameKind } from "antgrid-wire";
 import { Netwatch, netwatch, armRemoteIngest, __resetNetwatchForTest } from "../src/netwatch";
 import { TestPeerSessionOwner } from "./test-peer-session-owner";
 import type { AbMessage } from "../src/protocol";
@@ -84,7 +83,7 @@ describe("Netwatch.ingestRemote", () => {
 });
 
 /** A paired, handshake-complete client whose socket and seal are inert. */
-function makeClient(open: () => string | null, onMessage?: (m: AbMessage) => void): TestPeerSessionOwner {
+function makeClient(onMessage?: (m: AbMessage) => void): TestPeerSessionOwner {
   const c = new TestPeerSessionOwner({
     identity: {
       deviceId: "dev-1",
@@ -98,22 +97,13 @@ function makeClient(open: () => string | null, onMessage?: (m: AbMessage) => voi
     },
     onMessage,
   });
-  installFakeSession(c, "phone-1", {
-    transport: { seal: (p: string) => Buffer.from(p, "utf8"), open, zeroize: () => {} },
-  });
+  installFakeSession(c, "phone-1");
   (c as any).ws = { readyState: WebSocket.OPEN, send: () => {}, close: () => {} };
   return c;
 }
 
 function deliverControlPlane(client: TestPeerSessionOwner, m: unknown): void {
-  const payload = Buffer.concat([Buffer.alloc(12, 0x7f), Buffer.from("sealed")]);
-  (client as any).sessions.get("phone-1").transport.open = () => JSON.stringify({ m });
-  const frame = encodePeerFrame(
-    { type: "message", channel: "control" },
-    payload,
-    FrameKind.sealed,
-  );
-  client.injectPeerFrame(Buffer.from(frame), "phone-1");
+  client.sendFromPeer("phone-1", { m });
 }
 
 describe("TestPeerSessionOwner netwatch:events ingest", () => {
@@ -129,7 +119,7 @@ describe("TestPeerSessionOwner netwatch:events ingest", () => {
   it("admits the batch and never forwards it downstream", () => {
     const seen: AbMessage[] = [];
     armRemoteIngest(true, 60_000);
-    client = makeClient(() => null, (m) => seen.push(m));
+    client = makeClient((m) => seen.push(m));
     deliverControlPlane(client, {
       type: "netwatch:events",
       id: "1",
@@ -145,7 +135,7 @@ describe("TestPeerSessionOwner netwatch:events ingest", () => {
 
   it("records what the app's own budget threw away", () => {
     armRemoteIngest(true, 60_000);
-    client = makeClient(() => null);
+    client = makeClient();
     deliverControlPlane(client, {
       type: "netwatch:events",
       id: "1",
@@ -161,7 +151,7 @@ describe("TestPeerSessionOwner netwatch:events ingest", () => {
 
   it("ignores a batch nobody armed", () => {
     const seen: AbMessage[] = [];
-    client = makeClient(() => null, (m) => seen.push(m));
+    client = makeClient((m) => seen.push(m));
     // Account trust alone reaches dispatchControlPlane, and that runs BEFORE
     // the bus gate where the machine's remote-access switch lives â€” so an
     // unarmed ingest is a peer writing into the operator's ring through the one
@@ -182,7 +172,7 @@ describe("TestPeerSessionOwner netwatch:events ingest", () => {
 
   it("never takes a body from the peer", () => {
     armRemoteIngest(true, 60_000);
-    client = makeClient(() => null);
+    client = makeClient();
     // The app's own event has no `body` field, so one here was not captured on
     // the app's side of the socket â€” it is a payload the peer chose to put in
     // the operator's ring, past the `--bodies` gate that is all they armed.
@@ -200,7 +190,7 @@ describe("TestPeerSessionOwner netwatch:events ingest", () => {
 
   it("survives a batch whose events are not an array", () => {
     armRemoteIngest(true, 60_000);
-    client = makeClient(() => null);
+    client = makeClient();
     // parseMessageFast checks the `type` and nothing else, so this reaches the
     // ingest exactly as the peer wrote it.
     expect(() =>

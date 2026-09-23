@@ -6,10 +6,9 @@
 // already established, and one from a DIFFERENT device is admitted alongside
 // rather than displacing anyone.
 import { test, expect, afterEach } from "bun:test";
-import { generateKeyPairSync } from "node:crypto";
 import { encodePeerFrame, FrameKind } from "antgrid-wire";
 import { generateEphemeralKeypair, deriveSharedSecret } from "../src/key-exchange";
-import { TestPeerSessionOwner, MAX_APP_SESSIONS } from "./test-peer-session-owner";
+import { TestPeerSessionOwner, MAX_APP_SESSIONS, ed25519Pair } from "./test-peer-session-owner";
 import { MessageBus } from "../src/message-bus";
 import {
   buildTranscript, deriveSessionKeys, phoneConfirmTag, agentConfirmTag,
@@ -30,22 +29,17 @@ function baseOf(routeId: string): string {
   return hash === -1 ? routeId : routeId.slice(0, hash);
 }
 
-/** Generate a raw 32-byte Ed25519 seed + raw 32-byte pubkey, both base64. */
-function ed25519Pair(): { seedB64: string; pubB64: string } {
-  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
-  const seedB64 = Buffer.from(
-    privateKey.export({ format: "der", type: "pkcs8" }).subarray(-32),
-  ).toString("base64");
-  const pubB64 = Buffer.from(
-    publicKey.export({ format: "der", type: "spki" }).subarray(-32),
-  ).toString("base64");
-  return { seedB64, pubB64 };
-}
-
-/** Feed a binary peer frame straight into the client's dispatch, exactly as
- *  `handleBinaryFrame` receives it off the socket â€” exercises the real
- *  kind-byte dispatch (kind 1 = handshake plaintext, kind 0 = sealed). */
+/** Feed one frame into the client's real kind-byte dispatch, exactly as the
+ *  native host receives it. A handshake frame is plaintext, so it goes through
+ *  the seam's `sendFromPeer`; a sealed one here is ALWAYS sealed by hand under
+ *  keys this suite derived itself (a candidate's, a stale session's, or none),
+ *  which is what the suite asserts, so it bypasses the seam's registered
+ *  transport. */
 function injectFrame(client: TestPeerSessionOwner, kind: FrameKind, payload: Buffer, channel: "control" | "preview" = "control", from: string = PHONE_ID): void {
+  if (kind === FrameKind.handshake) {
+    client.sendFromPeer(from, payload.toString("utf8"), channel, { handshake: true });
+    return;
+  }
   const frame = encodePeerFrame({ type: "message", channel }, payload, kind);
   client.injectPeerFrame(Buffer.from(frame), from);
 }
@@ -199,6 +193,10 @@ function handshakeOn(args: {
     "control",
     from,
   );
+  // Register the transport this handshake just proved out, so a test that only
+  // needs application traffic afterward can drive it through the seam instead
+  // of re-sealing by hand.
+  args.client.adoptPeerTransport(from, transport, keys, args.attemptId);
   return { transport, keys };
 }
 
@@ -249,6 +247,10 @@ function establishSession(opts: { agentEd: ReturnType<typeof ed25519Pair>; phone
   injectFrame(client, FrameKind.sealed, phoneTransport.seal(appReadyJson));
   expect(client._handshakeComplete()).toBe(true);
 
+  // Register the transport this handshake just proved out, so a test that only
+  // needs application traffic afterward can drive it through the seam instead
+  // of re-sealing by hand.
+  client.adoptPeerTransport(PHONE_ID, phoneTransport, phoneKeys, opts.attemptId);
   return { client, sent, attemptId: opts.attemptId, phoneTransport, phoneKeys };
 }
 
@@ -472,14 +474,14 @@ test("send() drops app messages (never plaintext) when no E2E session is establi
 
 test("sealed app envelope on the preview channel is routed to onTunnelMessage after establishment", () => {
   let tunnelMsgs: unknown[] = [];
-  const { client, phoneTransport } = establishSession({ agentEd: ed25519Pair(), phoneEd: ed25519Pair(), attemptId: "attempt-a" });
+  const { client } = establishSession({ agentEd: ed25519Pair(), phoneEd: ed25519Pair(), attemptId: "attempt-a" });
   (client as any).opts.onTunnelMessage = (m: unknown) => tunnelMsgs.push(m);
 
   // App traffic is always the `{ m }` envelope now â€” even
   // non-AbMessage tunnel-protocol frames, which fall through parseMessageFast
   // to parseTunnelMessage inside dispatchControlPlane.
   const tunnelReq = { type: "tunnel:http-request", requestId: "req-1", port: 3000, method: "GET", path: "/" };
-  injectFrame(client, FrameKind.sealed, phoneTransport.seal(JSON.stringify({ m: tunnelReq })), "preview");
+  client.sendFromPeer(PHONE_ID, { m: tunnelReq }, "preview");
 
   expect(tunnelMsgs).toEqual([{ ...tunnelReq, checkoutId: "main" }]);
 });
@@ -488,7 +490,7 @@ test("sealed ping is answered with a sealed pong", () => {
   const { client, sent, phoneTransport } = establishSession({ agentEd: ed25519Pair(), phoneEd: ed25519Pair(), attemptId: "attempt-a" });
   const sentBefore = sent.length;
 
-  injectFrame(client, FrameKind.sealed, phoneTransport.seal(JSON.stringify({ type: "ping" })));
+  client.sendFromPeer(PHONE_ID, { type: "ping" });
 
   expect(sent.length).toBe(sentBefore + 1);
   const pong = phoneTransport.open(sent[sent.length - 1] as Buffer);
@@ -522,7 +524,7 @@ test("2 missed pongs declare the E2E session dead (keys dropped, peer-offline no
 test("a stale half-open handshake attempt expires without disturbing the live established session", async () => {
   const agentEd = ed25519Pair();
   const phoneEd = ed25519Pair();
-  const { client, sent, phoneTransport } = establishSession({ agentEd, phoneEd, attemptId: "attempt-a" });
+  const { client, sent } = establishSession({ agentEd, phoneEd, attemptId: "attempt-a" });
   // Test seam (justified src change, see report): the real HALF_OPEN_MS is 30s â€”
   // override it so the expiry fires within the test's lifetime.
   (client as any).opts.halfOpenMs = 20;
@@ -544,8 +546,7 @@ test("a stale half-open handshake attempt expires without disturbing the live es
   expect((client as any).pending.size).toBe(0);
   // The live session survived the half-open attempt's expiry untouched: a
   // fresh message sealed under the ORIGINAL (attempt-a) transport still opens.
-  const probe = phoneTransport.seal(JSON.stringify({ m: { type: "pong", id: "p", timestamp: 0 } }));
-  injectFrame(client, FrameKind.sealed, probe);
+  client.sendFromPeer(PHONE_ID, { m: { type: "pong", id: "p", timestamp: 0 } });
   expect(sent.filter((s) => typeof s !== "string").length).toBeGreaterThan(0); // at least agent-ready survived earlier
   expect(client._handshakeComplete()).toBe(true);
 });
@@ -688,23 +689,23 @@ test("each admitted device opens only its own inbound frames, and the sender's p
   const agentEd = ed25519Pair();
   const phoneAEd = ed25519Pair();
   const phoneBEd = ed25519Pair();
-  const { client, phoneTransport: phoneA } = establishSession({ agentEd, phoneEd: phoneAEd, attemptId: "attempt-a" });
+  const { client } = establishSession({ agentEd, phoneEd: phoneAEd, attemptId: "attempt-a" });
   (client as any).phoneEd25519ByDeviceId.set(PHONE_2_ID, phoneBEd.pubB64);
 
   const bSent: Array<string | Buffer> = [];
   client.setNativeWriter((p) => { bSent.push(p); return true; });
-  const { transport: phoneB } = handshakeOn({ client, sent: bSent, phoneEd: phoneBEd, attemptId: "attempt-b", from: PHONE_2_ID, nonce: Buffer.from([7, 7, 7, 7, 7, 7, 7, 7]) });
+  handshakeOn({ client, sent: bSent, phoneEd: phoneBEd, attemptId: "attempt-b", from: PHONE_2_ID, nonce: Buffer.from([7, 7, 7, 7, 7, 7, 7, 7]) });
 
   const seen: Array<{ requestId: unknown; peerId: string }> = [];
   (client as any).opts.onTunnelMessage = (m: unknown, peerId: string) => {
     seen.push({ requestId: (m as { requestId?: unknown }).requestId, peerId });
   };
 
-  const req = (requestId: string) => JSON.stringify({
+  const req = (requestId: string) => ({
     m: { type: "tunnel:http-request", requestId, port: 3000, method: "GET", path: "/" },
   });
-  injectFrame(client, FrameKind.sealed, phoneA.seal(req("from-a")), "preview", PHONE_ID);
-  injectFrame(client, FrameKind.sealed, phoneB.seal(req("from-b")), "preview", PHONE_2_ID);
+  client.sendFromPeer(PHONE_ID, req("from-a"), "preview");
+  client.sendFromPeer(PHONE_2_ID, req("from-b"), "preview");
 
   // Identity comes from the session whose keys opened the frame â€” the auth tag
   // is the proof; the relay's `from` is only the lookup hint.

@@ -3,9 +3,9 @@
 // drop report reopens. Real E2E keys throughout, so every byte count asserted
 // here is the count that goes on the wire.
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { generateKeyPairSync, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { encodePeerFrame, FrameKind, WINDOW_RESYNC_AGE_MS } from "antgrid-wire";
-import { TestPeerSessionOwner } from "./test-peer-session-owner";
+import { ed25519Pair, TestPeerSessionOwner } from "./test-peer-session-owner";
 import { createMessage } from "../src/protocol";
 import { generateEphemeralKeypair, deriveSharedSecret } from "../src/key-exchange";
 import {
@@ -39,14 +39,8 @@ beforeEach(() => {
 afterEach(() => { for (const c of clients.splice(0)) try { c.close(); } catch {} });
 afterAll(() => __setRootForTest(process.stdout));
 
-function ed25519Pair(): { seedB64: string; pubB64: string } {
-  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
-  return {
-    seedB64: Buffer.from(privateKey.export({ format: "der", type: "pkcs8" }).subarray(-32)).toString("base64"),
-    pubB64: Buffer.from(publicKey.export({ format: "der", type: "spki" }).subarray(-32)).toString("base64"),
-  };
-}
-
+/** A sealed frame here is sealed by hand under keys the test chose (a
+ *  candidate's, or junk), so only a plaintext handshake frame uses the seam. */
 function injectFrame(
   client: TestPeerSessionOwner,
   kind: FrameKind,
@@ -54,22 +48,27 @@ function injectFrame(
   channel: "control" | "preview" = "control",
   from: string = PHONE_ID,
 ): void {
+  if (kind === FrameKind.handshake) {
+    client.sendFromPeer(from, payload.toString("utf8"), channel, { handshake: true });
+    return;
+  }
   const frame = encodePeerFrame({ type: "message", channel }, payload, kind);
   client.injectPeerFrame(Buffer.from(frame), from);
 }
 
-/** Seal one plaintext as the phone and feed it in. Returns the sealed length â€”
- *  exactly the number the receiver counts and the sender charged. */
+/** Seal one plaintext as the phone through the seam and feed it in. Returns
+ *  the sealed length, exactly the number the receiver counts and the sender
+ *  charged; a second seal just to measure is harmless, since GCM output length
+ *  depends only on the plaintext length. */
 function injectSealed(
   client: TestPeerSessionOwner,
-  phone: E2eTransport,
   plaintext: string,
   channel: "control" | "preview" = "control",
   from: string = PHONE_ID,
 ): number {
-  const sealed = phone.seal(plaintext);
-  injectFrame(client, FrameKind.sealed, sealed, channel, from);
-  return sealed.length;
+  const length = client.peerTransport(from)!.seal(plaintext).length;
+  client.sendFromPeer(from, plaintext, channel);
+  return length;
 }
 
 function open(phone: E2eTransport, frame: Frame): any {
@@ -118,17 +117,21 @@ function handshake(
     buildTranscript({ ...shared, role: "agent", agentX25519Pub: agentPubkey }),
   );
   const phone = new E2eTransport({ sendKey: keys.p2a, recvKey: keys.a2p });
-  injectSealed(
+  // Sealed under the CANDIDATE's own keys, never the seam's registered
+  // transport: on a rekey that is still the old session's, and an app:ready
+  // opened there would promote the candidate without its keys ever proving out.
+  injectFrame(
     client,
-    phone,
-    JSON.stringify({
+    FrameKind.sealed,
+    phone.seal(JSON.stringify({
       type: "app:ready",
       attemptId: opts.attemptId,
       confirm: phoneConfirmTag(keys.confirm).toString("base64"),
-    }),
+    })),
     "control",
     opts.phoneId,
   );
+  client.adoptPeerTransport(opts.phoneId, phone, keys, opts.attemptId);
   return phone;
 }
 
@@ -140,7 +143,6 @@ interface Harness {
    *  through on every access rather than captured at establish. */
   readonly s: SendScheduler;
   readonly session: { lastSealedRecvAt: number; rxFlow: { consumed: Record<string, number> } };
-  agentEd: { seedB64: string; pubB64: string };
   phoneEd: { seedB64: string; pubB64: string };
 }
 
@@ -157,26 +159,24 @@ function applyLimits(s: SendScheduler): SendScheduler {
 }
 
 function establish(): Harness {
-  const agentEd = ed25519Pair();
-  const phoneEd = ed25519Pair();
   const sent: Frame[] = [];
   const client = TestPeerSessionOwner.forTest({
     generateKeypair: generateEphemeralKeypair,
     sendPayload: (p) => sent.push(p),
     peerId: PHONE_ID,
     deviceId: AGENT_DEVICE_ID,
-    agentEd25519PrivB64: agentEd.seedB64,
-    phoneEd25519PubB64: phoneEd.pubB64,
+    agentEd25519PrivB64: ed25519Pair().seedB64,
     creditBatchBytes: CREDIT_BATCH,
   });
   clients.push(client);
-  const phone = handshake(client, sent, {
-    attemptId: "a1", phoneEd, phoneId: PHONE_ID, nonce: Buffer.from([1, 2, 3, 4, 5, 6, 7, 8]),
+  const { identity: phoneEd } = client.establish(PHONE_ID, {
+    attemptId: "a1", nonce: Buffer.from([1, 2, 3, 4, 5, 6, 7, 8]),
   });
+  const phone = client.peerTransport(PHONE_ID)!;
   expect(client._handshakeComplete()).toBe(true);
   applyLimits(sessionOf(client).scheduler as SendScheduler);
   return {
-    client, sent, phone, agentEd, phoneEd,
+    client, sent, phone, phoneEd,
     get s(): SendScheduler { return applyLimits(sessionOf(client).scheduler as SendScheduler); },
     get session() { return sessionOf(client); },
   };
@@ -221,7 +221,7 @@ describe("TestPeerSessionOwner credit windows", () => {
     h.client.sendOnChannel(createMessage("agent:turn-start", { sessionId: "s1", turnId: "t1" }), "control");
     expect(h.sent).toHaveLength(at + 4);
 
-    injectSealed(h.client, h.phone, JSON.stringify({ type: "credit", channel: "preview", consumed: sum(written) }));
+    injectSealed(h.client, JSON.stringify({ type: "credit", channel: "preview", consumed: sum(written) }));
 
     const preview = (h.sent.slice(at) as Buffer[]).filter((f) => f.length > 1000);
     expect(preview).toHaveLength(5);
@@ -235,10 +235,10 @@ describe("TestPeerSessionOwner credit windows", () => {
 
     // The peer credits cumulatively, so a value in the middle can go missing
     // entirely and the next one still releases everything up to it.
-    injectSealed(h.client, h.phone, JSON.stringify({ type: "credit", channel: "preview", consumed: f0.length }));
+    injectSealed(h.client, JSON.stringify({ type: "credit", channel: "preview", consumed: f0.length }));
     expect(h.s.queued("preview").frames).toBe(1);
 
-    injectSealed(h.client, h.phone, JSON.stringify({
+    injectSealed(h.client, JSON.stringify({
       type: "credit", channel: "preview", consumed: f0.length + f1.length + f2.length,
     }));
     expect(h.s.queued("preview").frames).toBe(0);
@@ -248,7 +248,7 @@ describe("TestPeerSessionOwner credit windows", () => {
     const h = establish();
     fillWindow(h);
     const credit = (consumed: number) =>
-      injectSealed(h.client, h.phone, JSON.stringify({ type: "credit", channel: "preview", consumed }));
+      injectSealed(h.client, JSON.stringify({ type: "credit", channel: "preview", consumed }));
 
     // Advancing, but nowhere near enough to fit the head.
     credit(1);
@@ -267,10 +267,10 @@ describe("TestPeerSessionOwner credit windows", () => {
     const h = establish();
     let at = h.sent.length;
 
-    const a = injectSealed(h.client, h.phone, envelope(40_000), "preview");
-    const b = injectSealed(h.client, h.phone, envelope(40_000), "preview");
+    const a = injectSealed(h.client, envelope(40_000), "preview");
+    const b = injectSealed(h.client, envelope(40_000), "preview");
     expect(h.sent).toHaveLength(at);
-    const c = injectSealed(h.client, h.phone, envelope(40_000), "preview");
+    const c = injectSealed(h.client, envelope(40_000), "preview");
 
     expect(open(h.phone, h.sent[at]!)).toEqual({ type: "credit", channel: "preview", consumed: a + b + c });
     at = h.sent.length;
@@ -279,20 +279,20 @@ describe("TestPeerSessionOwner credit windows", () => {
     // would shrink that channel's window for the rest of the session.
     const junk = randomBytes(40_000);
     injectFrame(h.client, FrameKind.sealed, junk, "preview");
-    const d = injectSealed(h.client, h.phone, envelope(60_000), "preview");
+    const d = injectSealed(h.client, envelope(60_000), "preview");
 
     expect(open(h.phone, h.sent[at]!)).toEqual({
       type: "credit", channel: "preview", consumed: a + b + c + junk.length + d,
     });
 
-    const ping = injectSealed(h.client, h.phone, JSON.stringify({ type: "ping" }), "control");
+    const ping = injectSealed(h.client, JSON.stringify({ type: "ping" }), "control");
     expect(open(h.phone, h.sent[h.sent.length - 1]!)).toEqual({ type: "pong" });
     expect(h.session.rxFlow.consumed.control).toBe(ping);
   });
 
   it("re-sends both credits every liveness tick, and a credit refreshes liveness", () => {
     const h = establish();
-    const consumed = injectSealed(h.client, h.phone, envelope(10_000), "preview");
+    const consumed = injectSealed(h.client, envelope(10_000), "preview");
     const expected = [
       { type: "credit", channel: "control", consumed: 0 },
       { type: "credit", channel: "preview", consumed },
@@ -309,7 +309,7 @@ describe("TestPeerSessionOwner credit windows", () => {
     (h.client as any).checkLiveness();
     expect((h.sent.slice(at) as Buffer[]).map((f) => open(h.phone, f))).toEqual(expected);
     h.session.lastSealedRecvAt = 0;
-    injectSealed(h.client, h.phone, JSON.stringify({ type: "credit", channel: "preview", consumed: 1 }));
+    injectSealed(h.client, JSON.stringify({ type: "credit", channel: "preview", consumed: 1 }));
     expect(Date.now() - h.session.lastSealedRecvAt).toBeLessThan(1000);
   });
 
@@ -348,7 +348,7 @@ describe("TestPeerSessionOwner credit windows", () => {
     let clock = 1_000;
     h.s.now = () => clock;
     const credit = () =>
-      injectSealed(h.client, h.phone, JSON.stringify({ type: "credit", channel: "preview", consumed: 0 }));
+      injectSealed(h.client, JSON.stringify({ type: "credit", channel: "preview", consumed: 0 }));
 
     credit();
     clock += WINDOW_RESYNC_AGE_MS - 1;

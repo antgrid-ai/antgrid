@@ -4,8 +4,9 @@
 // `sendAppEnvelope` rather than at the seam — this keeps the shape in one place.
 import type { PeerSessionOwner } from "../src/peer-session-owner";
 
-/** Install a session for `peerId` whose seal is the identity, so a queued frame
- *  reads straight off the wire. The scheduler and the rx window are built by the
+/** Install a session for `peerId` whose seal and open are the identity, so a
+ *  queued frame reads straight off the wire and `TestPeerSessionOwner.sendFromPeer`
+ *  can deliver into it. The scheduler and the rx window are built by the
  *  client's own factories: a test that stubbed them would be testing itself. */
 export function installFakeSession(
   client: PeerSessionOwner,
@@ -18,7 +19,11 @@ export function installFakeSession(
   };
   const session: Record<string, unknown> = {
     attemptId: "a1",
-    transport: { seal: (plaintext: string) => Buffer.from(plaintext, "utf8"), zeroize: () => {} },
+    transport: {
+      seal: (plaintext: string) => Buffer.from(plaintext, "utf8"),
+      open: (sealed: Buffer) => sealed.toString("utf8"),
+      zeroize: () => {},
+    },
     sessionKeys: { a2p: Buffer.alloc(32), p2a: Buffer.alloc(32), confirm: Buffer.alloc(32) },
     peerId,
     checkoutRouting: false,

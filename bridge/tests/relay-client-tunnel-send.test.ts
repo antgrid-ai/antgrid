@@ -1,20 +1,10 @@
 import { describe, expect, it } from "bun:test";
-import { generateKeyPairSync } from "node:crypto";
 import { encodePeerFrame, FrameKind } from "antgrid-wire";
-import { TestPeerSessionOwner } from "./test-peer-session-owner";
-import { generateEphemeralKeypair, deriveSharedSecret } from "../src/key-exchange";
-import { buildTranscript, deriveSessionKeys, phoneConfirmTag, E2eTransport, signTranscript } from "../src/e2e";
+import { ed25519Pair, TestPeerSessionOwner } from "./test-peer-session-owner";
+import { generateEphemeralKeypair } from "../src/key-exchange";
 
 const AGENT_DEVICE_ID = "agent-1";
 const PHONE_ID = "phone-1";
-
-function ed25519Pair(): { seedB64: string; pubB64: string } {
-  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
-  return {
-    seedB64: Buffer.from(privateKey.export({ format: "der", type: "pkcs8" }).subarray(-32)).toString("base64"),
-    pubB64: Buffer.from(publicKey.export({ format: "der", type: "spki" }).subarray(-32)).toString("base64"),
-  };
-}
 
 function injectFrame(client: TestPeerSessionOwner, kind: FrameKind, payload: Buffer, channel: "control" | "preview" = "control"): void {
   const frame = encodePeerFrame({ type: "message", channel }, payload, kind);
@@ -22,59 +12,30 @@ function injectFrame(client: TestPeerSessionOwner, kind: FrameKind, payload: Buf
 }
 
 /** Establish a real E2E session on a forTest client. */
-function establish(sent: Array<string | Buffer>): { client: TestPeerSessionOwner; phoneTransport: E2eTransport } {
-  const agentEd = ed25519Pair();
-  const phoneEd = ed25519Pair();
+function establish(sent: Array<string | Buffer>): { client: TestPeerSessionOwner } {
   const client = TestPeerSessionOwner.forTest({
     generateKeypair: generateEphemeralKeypair,
     sendPayload: (p) => sent.push(p),
     peerId: PHONE_ID,
     deviceId: AGENT_DEVICE_ID,
-    agentEd25519PrivB64: agentEd.seedB64,
-    phoneEd25519PubB64: phoneEd.pubB64,
+    agentEd25519PrivB64: ed25519Pair().seedB64,
   });
-
-  const app = generateEphemeralKeypair();
-  const nonce = Buffer.from([1, 2, 3, 4, 5, 6, 7, 8]);
-  const phoneTranscript = buildTranscript({
-    registrationId: AGENT_DEVICE_ID, role: "phone", agentDeviceId: AGENT_DEVICE_ID, phoneDeviceId: PHONE_ID,
-    agentX25519Pub: Buffer.alloc(0), phoneX25519Pub: app.publicKey, nonce,
-  });
-  const sig = signTranscript(phoneTranscript, Buffer.from(phoneEd.seedB64, "base64"));
-  injectFrame(client, FrameKind.handshake, Buffer.from(JSON.stringify({
-    type: "handshake:client-hello", attemptId: "a1", pubkey: app.publicKey.toString("base64"), nonce: nonce.toString("base64"), sig,
-  })));
-
-  const agentHello = JSON.parse(sent[0] as string);
-  const agentPubkey = Buffer.from(agentHello.pubkey, "base64");
-  const agentTranscript = buildTranscript({
-    registrationId: AGENT_DEVICE_ID, role: "agent", agentDeviceId: AGENT_DEVICE_ID, phoneDeviceId: PHONE_ID,
-    agentX25519Pub: agentPubkey, phoneX25519Pub: app.publicKey, nonce,
-  });
-  const sharedSecret = deriveSharedSecret(app.privateKey, agentPubkey);
-  const keys = deriveSessionKeys(sharedSecret, agentTranscript);
-  const phoneTransport = new E2eTransport({ sendKey: keys.p2a, recvKey: keys.a2p });
-
-  injectFrame(client, FrameKind.sealed, phoneTransport.seal(JSON.stringify({
-    type: "app:ready", attemptId: "a1", confirm: phoneConfirmTag(keys.confirm).toString("base64"),
-  })));
-  expect(client._handshakeComplete()).toBe(true);
-
-  return { client, phoneTransport };
+  client.establish(PHONE_ID);
+  return { client };
 }
 
 describe("TestPeerSessionOwner.sendTunnel", () => {
   it("seals the tunnel message in the control-plane envelope and sends it on the preview channel", async () => {
     const sent: Array<string | Buffer> = [];
-    const { client, phoneTransport } = establish(sent);
+    const { client } = establish(sent);
     const sentBefore = sent.length;
 
     const msg = { type: "tunnel:http-start", requestId: "r1", status: 200, headers: {}, data: "b2s=", bodyEncoding: "base64", last: true };
     expect(await client.sendTunnel(msg)).toBe("sent");
 
     expect(sent.length).toBe(sentBefore + 1);
-    const envelopeJson = phoneTransport.open(sent[sent.length - 1] as Buffer);
-    expect(JSON.parse(envelopeJson!)).toEqual({ m: msg });
+    expect(client.readToPeer(PHONE_ID)).toEqual({ m: msg });
+    expect(client.sentTo(PHONE_ID)).toHaveLength(0);
   });
 
   it("resolves too-large and writes nothing for a message the fragmenter refuses", async () => {

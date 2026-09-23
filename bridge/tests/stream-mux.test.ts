@@ -4,20 +4,16 @@
 // and the real TestPeerSessionOwner wiring the envelope through seal/fragment/send so
 // `s` provably survives the wire.
 import { describe, test, expect, afterEach } from "bun:test";
-import { generateKeyPairSync } from "node:crypto";
-import { buildFragments, encodePeerFrame, FrameKind } from "antgrid-wire";
+import { buildFragments } from "antgrid-wire";
 import {
   StreamMux, CONTROL_STREAM_ID, INVALID_NOTICE_COOLDOWN_MS,
   type StreamMuxTransport, type PeerSessionView, type SendTarget,
 } from "../src/stream-mux";
 import { MessageBus, type Channel } from "../src/message-bus";
 import { createMessage } from "../src/protocol";
-import { TestPeerSessionOwner } from "./test-peer-session-owner";
-import { generateEphemeralKeypair, deriveSharedSecret } from "../src/key-exchange";
-import {
-  buildTranscript, deriveSessionKeys, phoneConfirmTag,
-  E2eTransport, signTranscript,
-} from "../src/e2e";
+import { ed25519Pair, TestPeerSessionOwner } from "./test-peer-session-owner";
+import { generateEphemeralKeypair } from "../src/key-exchange";
+import type { E2eTransport } from "../src/e2e";
 
 function makeTransport(peers: Map<string, PeerSessionView> = new Map()) {
   const closed: string[] = [];
@@ -392,19 +388,6 @@ describe("StreamMux (unit, stub transport)", () => {
 const AGENT_DEVICE_ID = "agent-1";
 const PHONE_ID = "phone-1";
 
-function ed25519Pair(): { seedB64: string; pubB64: string } {
-  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
-  return {
-    seedB64: Buffer.from(privateKey.export({ format: "der", type: "pkcs8" }).subarray(-32)).toString("base64"),
-    pubB64: Buffer.from(publicKey.export({ format: "der", type: "spki" }).subarray(-32)).toString("base64"),
-  };
-}
-
-function injectFrame(client: TestPeerSessionOwner, kind: FrameKind, payload: Buffer, channel: Channel = "control"): void {
-  const frame = encodePeerFrame({ type: "message", channel }, payload, kind);
-  client.injectPeerFrame(Buffer.from(frame), PHONE_ID);
-}
-
 let clients: TestPeerSessionOwner[] = [];
 afterEach(() => { for (const c of clients.splice(0)) try { c.close(); } catch {} });
 
@@ -416,48 +399,20 @@ afterEach(() => { for (const c of clients.splice(0)) try { c.close(); } catch {}
  *  uses) plus a stubbed OPEN socket so `sendJson`'s stream-open/close land in
  *  the same observable `sent` array as sealed application traffic. */
 function establish(): { client: TestPeerSessionOwner; sent: Array<string | Buffer>; phoneTransport: E2eTransport } {
-  const agentEd = ed25519Pair();
-  const phoneEd = ed25519Pair();
   const sent: Array<string | Buffer> = [];
   const client = new TestPeerSessionOwner({
     identity: {
       deviceId: AGENT_DEVICE_ID, deviceName: "agent", createdAt: new Date().toISOString(),
-      ed25519PublicKey: "unused", ed25519PrivateKey: agentEd.seedB64,
+      ed25519PublicKey: "unused", ed25519PrivateKey: ed25519Pair().seedB64,
     },
     generateKeypair: generateEphemeralKeypair,
   });
   clients.push(client);
-  (client as any).phoneEd25519ByDeviceId.set(PHONE_ID, phoneEd.pubB64);
   client.setNativeWriter((p) => { sent.push(p); return true; });
   (client as any).ws = { readyState: WebSocket.OPEN, send: (d: string) => sent.push(d), close: () => {} };
 
-  const app = generateEphemeralKeypair();
-  const nonce = Buffer.from([1, 2, 3, 4, 5, 6, 7, 8]);
-  const clientPubkey = app.publicKey;
-  const phoneTranscript = buildTranscript({
-    registrationId: AGENT_DEVICE_ID, role: "phone", agentDeviceId: AGENT_DEVICE_ID, phoneDeviceId: PHONE_ID,
-    agentX25519Pub: Buffer.alloc(0), phoneX25519Pub: clientPubkey, nonce,
-  });
-  const sig = signTranscript(phoneTranscript, Buffer.from(phoneEd.seedB64, "base64"));
-  injectFrame(client, FrameKind.handshake, Buffer.from(JSON.stringify({
-    type: "handshake:client-hello", attemptId: "a1", pubkey: clientPubkey.toString("base64"), nonce: nonce.toString("base64"), sig,
-  })));
-
-  const agentHello = JSON.parse(sent[0] as string);
-  const agentPubkey = Buffer.from(agentHello.pubkey, "base64");
-  const agentTranscript = buildTranscript({
-    registrationId: AGENT_DEVICE_ID, role: "agent", agentDeviceId: AGENT_DEVICE_ID, phoneDeviceId: PHONE_ID,
-    agentX25519Pub: agentPubkey, phoneX25519Pub: clientPubkey, nonce,
-  });
-  const sharedSecret = deriveSharedSecret(app.privateKey, agentPubkey);
-  const keys = deriveSessionKeys(sharedSecret, agentTranscript);
-  const phoneTransport = new E2eTransport({ sendKey: keys.p2a, recvKey: keys.a2p });
-
-  const appReady = JSON.stringify({ type: "app:ready", attemptId: "a1", confirm: phoneConfirmTag(keys.confirm).toString("base64") });
-  injectFrame(client, FrameKind.sealed, phoneTransport.seal(appReady));
-  expect(client._handshakeComplete()).toBe(true);
-
-  return { client, sent, phoneTransport };
+  client.establish(PHONE_ID, { attemptId: "a1" });
+  return { client, sent, phoneTransport: client.peerTransport(PHONE_ID)! };
 }
 
 describe("StreamMux over a live TestPeerSessionOwner (wire-level envelope tagging)", () => {
@@ -494,7 +449,7 @@ describe("StreamMux over a live TestPeerSessionOwner (wire-level envelope taggin
     const handle = client.attachStream(bus, {});
 
     const msg = createMessage("pong", {});
-    injectFrame(client, FrameKind.sealed, phoneTransport.seal(JSON.stringify({ s: handle.streamId, m: msg })));
+    client.sendFromPeer(PHONE_ID, { s: handle.streamId, m: msg });
 
     expect(received).toEqual([msg]);
   });
@@ -507,7 +462,7 @@ describe("StreamMux over a live TestPeerSessionOwner (wire-level envelope taggin
     client.attachStream(bus, {});
     sent.length = 0;
 
-    injectFrame(client, FrameKind.sealed, phoneTransport.seal(JSON.stringify({ s: "deadbeefdeadbeef", m: createMessage("pong", {}) })));
+    client.sendFromPeer(PHONE_ID, { s: "deadbeefdeadbeef", m: createMessage("pong", {}) });
 
     expect(received).toEqual([]);
     // The notice rides the control plane (`s` omitted), so the phone reads it
@@ -520,7 +475,7 @@ describe("StreamMux over a live TestPeerSessionOwner (wire-level envelope taggin
   });
 
   test("a fragmented inbound envelope reassembles with `s` intact", () => {
-    const { client, phoneTransport } = establish();
+    const { client } = establish();
     const bus = new MessageBus();
     const received: unknown[] = [];
     bus.setInboundHandler((m) => received.push(m));
@@ -535,7 +490,7 @@ describe("StreamMux over a live TestPeerSessionOwner (wire-level envelope taggin
     expect(frames.length).toBeGreaterThan(1);
 
     for (const frame of frames) {
-      injectFrame(client, FrameKind.sealed, phoneTransport.seal(frame));
+      client.sendFromPeer(PHONE_ID, frame);
     }
 
     expect(received).toEqual([bigMsg]);

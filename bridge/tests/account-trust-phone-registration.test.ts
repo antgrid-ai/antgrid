@@ -5,7 +5,6 @@
 // and unreachable by push.
 import { test, expect, afterEach } from "bun:test";
 import { generateKeyPairSync } from "node:crypto";
-import { encodePeerFrame, FrameKind } from "antgrid-wire";
 import { generateEphemeralKeypair } from "../src/key-exchange";
 import { TestPeerSessionOwner } from "./test-peer-session-owner";
 import type { PairedPhone, PairedPhonesStore } from "../src/paired-phones";
@@ -91,8 +90,7 @@ function makeClient(store: PairedPhonesStore, phoneEd: { pubB64: string }, agent
 function sendHello(client: TestPeerSessionOwner, phoneSeedB64: string, attemptId: string, sign = true): void {
   const app = generateEphemeralKeypair();
   const payload = clientHello({ attemptId, appX25519PubB64: app.publicKey.toString("base64"), phoneSeedB64, sign });
-  const frame = encodePeerFrame({ type: "message", channel: "control" }, payload, FrameKind.handshake);
-  client.injectPeerFrame(Buffer.from(frame), PHONE_ID);
+  client.sendFromPeer(PHONE_ID, payload.toString("utf8"), "control", { handshake: true });
 }
 
 test("a verified client-hello registers an unknown account-trusted phone", () => {
