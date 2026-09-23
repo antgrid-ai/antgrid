@@ -46,15 +46,20 @@ the encrypted session from establishing.
 
 ## Run
 
-All Aspire launchers start web, central relay, `iroh-relay` and `relay-gateway`.
+All Aspire launchers start web, central relay, the stock upstream `iroh-relay`
+binary and `relay-gateway`. A one-shot `iroh-relay-install` resource provisions
+the binary into `.tmp/iroh-relay-bin` first.
 `bun run aspire:all` launches Windows and Android with Iroh payloads.
 Both apps share one origin on port 3000: `/ws` routes to central control on
-3001; `/relay`, `/ping` and `/generate_204` route to the Rust listener on
-loopback 443, or loopback 3443 when it serves cleartext (below).
-Administration stays on loopback 9000 and is not exposed by the gateway.
-Aspire generates an ignored `.tmp/aspire-iroh/relay.json`, advertises the shared
-URL through web authorization, and configures both policy-disconnect targets.
-The gateway preserves TLS verification to the Rust service.
+3001; `/relay`, `/ping` and, in cleartext mode, `/generate_204` route to the
+native relay on loopback 443, or loopback 3443 when it serves cleartext (below).
+With TLS the relay serves `/generate_204` only from its plain captive-portal
+listener on loopback 3080, which the gateway does not proxy, so the gateway
+answers 404 for it. Metrics stay on loopback 9091 and are not exposed.
+Aspire generates an ignored `.tmp/aspire-iroh/relay.toml`, advertises the shared
+URL through web authorization, and points the relay's `access.http` check at
+web's `/internal/iroh-access` with a per-run bearer token passed only through
+env. The gateway preserves TLS verification to the native relay.
 
 There are two ways to satisfy the relay's transport requirement. Cleartext
 needs nothing configured and is what you get; supply a certificate when you are
@@ -72,9 +77,9 @@ are needed — which is why configuring no certificate selects it, and
 even where a certificate is configured, `"false"` refuses to launch without one.
 The gateway drops to `http://` and `ANTGRID_RELAY_HOST` defaults to the same
 detected LAN IP the mobile dart-defines use, so a phone or emulator reaches the
-relay on the address it reaches web on; override it to pin a different one. The
-relay, web and the app all refuse a cleartext origin outside loopback and the
-private ranges, so a public name fails at relay startup rather than serving
+relay on the address it reaches web on; override it to pin a different one. Web
+and the app both refuse a cleartext origin outside loopback and the
+private ranges, so a public name fails at web startup rather than serving
 plaintext to the internet. Nothing accepts a
 plaintext relay origin on trust: web refuses the flag outside `development`/`test`
 and only then mints an `http:` origin into an authorization snapshot, the bridge
@@ -105,9 +110,12 @@ Certificate name, validity and key matching are checked before launch; the nativ
 TLS connection remains the trust-chain check. Keep key/config files in protected
 locations. Certificates load at startup, so renewal requires restart.
 
-The pinned Rust compiler must be available through `cargo` on PATH. Aspire runs
-`cargo run --locked -j 2`; the initial build can take time. Loopback 443 (3443 in
-cleartext mode) and 9000, and gateway/central ports 3000/3001 must be free. Unix
+A Rust toolchain must be available through `cargo` on PATH. Aspire runs
+`cargo install iroh-relay --version 1.2.0 --locked --features server` on every
+launch; the first install compiles and can take time, later ones find it
+already installed and exit 0. A failed install keeps the relay from starting.
+Loopback 443 (3443 in cleartext mode), 3080 (TLS captive portal) and 9091
+(metrics), and gateway/central ports 3000/3001 must be free. Unix
 needs permission to bind loopback 443; avoid running the whole app stack as root,
 or use cleartext mode, whose unprivileged port sidesteps it.
 

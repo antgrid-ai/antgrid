@@ -23,7 +23,13 @@ const HEAD_LIMIT = 8192;
 const HEAD_TIMEOUT = 10_000;
 const UPSTREAM_TIMEOUT = 10_000;
 const CENTRAL_ROUTES = ['/ws', '/health'];
-const NATIVE_ROUTES = ['/relay', '/ping', '/generate_204'];
+// `/generate_204` only shares a port with `/relay`/`/ping` when the relay has
+// no [tls] table: with TLS on, the stock server moves it to a standalone
+// plain-HTTP captive-portal listener on a different port (iroh-relay 1.2.0 src/server.rs
+// :795-827), which this gateway is not wired to reach — so in that mode it is
+// dropped rather than proxied to the wrong backend.
+const NATIVE_ROUTES = ['/relay', '/ping'];
+const CLEARTEXT_ONLY_NATIVE_ROUTES = ['/generate_204'];
 
 function respond(socket, status) {
   socket.end(`HTTP/1.1 ${status}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
@@ -57,6 +63,7 @@ export function createRelayGateway({ cert, key, hostname, centralPort = 3001, na
   function target(path) {
     if (CENTRAL_ROUTES.includes(path)) return { port: centralPort, secure: false };
     if (NATIVE_ROUTES.includes(path)) return { port: nativePort, secure: !insecure };
+    if (insecure && CLEARTEXT_ONLY_NATIVE_ROUTES.includes(path)) return { port: nativePort, secure: false };
     return null;
   }
 

@@ -154,7 +154,10 @@ test('shared TLS origin routes both protocols, denies private routes and verifie
     try {
       assert.deepEqual(await get('/health'), [200, 'central']);
       assert.deepEqual(await get('/ping'), [200, 'native']);
-      assert.deepEqual(await get('/generate_204'), [200, 'native']);
+      // With TLS on, the stock relay serves /generate_204 from a standalone
+      // captive-portal listener on a different port, not https_bind_addr —
+      // the gateway has no route for it in this mode (relay-gateway.mjs).
+      assert.deepEqual(await get('/generate_204'), [404, '']);
       assert.deepEqual(await get('/internal/disconnect'), [404, '']);
       assert.deepEqual(await get('/internal/peer-policy'), [404, '']);
       assert.equal(await echo(dial, '/ws'), 'opaque payload');

@@ -153,7 +153,10 @@ const licenseApi = await builder
     if (peerStack) {
       await setEnvRef(ctx, "IROH_RELAY_URLS", peerStack.url);
       await setEnvRef(ctx, "PEER_POLICY_TARGETS", peerStack.policyTargets);
-      await setEnvRef(ctx, "RELAY_INTERNAL_SECRET", peerStack.admissionSecret);
+      await setEnvRef(ctx, "RELAY_INTERNAL_SECRET", peerStack.internalSecret);
+      // Must equal the relay's IROH_RELAY_HTTP_BEARER_TOKEN below, or web
+      // denies every relay admission.
+      await setEnvRef(ctx, "PEER_RELAY_ACCESS_TOKEN", peerStack.accessToken);
       // Without this web refuses to boot on an http origin, which is the point:
       // the downgrade has to be stated on the process that mints the snapshot.
       if (peerStack.insecure) await setEnvRef(ctx, "ANTGRID_DEV_INSECURE_RELAY", "true");
@@ -203,13 +206,32 @@ const relay = await builder
   .waitFor(licenseApi)
   .withEnvironmentCallback(async (ctx: EnvironmentCallbackContext) => {
     await setEnvRef(ctx, "LICENSE_API_URL", licenseApiHttp);
-    if (peerStack) await setEnvRef(ctx, "RELAY_INTERNAL_SECRET", peerStack.admissionSecret);
+    if (peerStack) await setEnvRef(ctx, "RELAY_INTERNAL_SECRET", peerStack.internalSecret);
   });
 
-const nativeRelay = peerStack ? await builder
-  .addExecutable("iroh-relay", process.platform === "win32" ? "cargo.exe" : "cargo", "../iroh-relay", [
-    "run", "--locked", "-j", "2", "--bin", "antgrid-iroh-relay", "--", peerStack.config,
+const repoRoot = resolve(aspireDir, "..");
+const cargoBin = process.platform === "win32" ? "cargo.exe" : "cargo";
+// The stock upstream binary, pinned by version and lockfile. Re-running is
+// cheap: cargo exits 0 with "already installed". waitForCompletion requires
+// exit code 0, so a failed install keeps the relay down rather than starting
+// whatever stale binary is on disk.
+const irohRelayInstall = peerStack ? await builder
+  .addExecutable("iroh-relay-install", cargoBin, repoRoot, [
+    "install", "iroh-relay", "--version", "1.2.0", "--locked",
+    "--features", "server", "--root", ".tmp/iroh-relay-bin",
+  ]) : undefined;
+const irohRelayBin = resolve(
+  repoRoot, ".tmp/iroh-relay-bin/bin",
+  process.platform === "win32" ? "iroh-relay.exe" : "iroh-relay",
+);
+const nativeRelay = peerStack && irohRelayInstall ? await builder
+  .addExecutable("iroh-relay", irohRelayBin, repoRoot, [
+    "--config-path", peerStack.config,
   ])
+  // Never --dev: it ignores the [tls] table and serves plaintext. A missing
+  // --config-path file is not an error either; the relay starts open to all.
+  .withEnvironment("IROH_RELAY_HTTP_BEARER_TOKEN", peerStack.accessToken)
+  .waitForCompletion(irohRelayInstall)
   .waitFor(licenseApi) : undefined;
 
 const relayGateway = peerStack && nativeRelay ? await (() => {

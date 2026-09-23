@@ -12,7 +12,7 @@
     "aspire:build": "tsc -p tsconfig.apphost.json",
     "aspire:dev": "tsc --watch -p tsconfig.apphost.json",
     "lint": "npm run aspire:lint",
-    "test": "bun test scripts/relay-gateway.test.mjs",
+    "test": "bun test scripts/relay-gateway.test.mjs peer-stack.test.ts",
     "predev": "npm run aspire:lint",
     "dev": "npm run aspire:start",
     "prebuild": "npm run aspire:lint",
