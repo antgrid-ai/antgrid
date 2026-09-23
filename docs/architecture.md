@@ -55,12 +55,18 @@ are rejected. Transport selection precedes E2E and is fenced by attempt generati
 the app's `ConnectionSupervisor` remains the retry authority. Central outages do
 not close a healthy authorized native payload connection.
 
-Approved relay maps disable implicit public discovery. The self-hosted relay
-under `iroh-relay/` composes upstream public handshake and registry interfaces;
-its admission/dispatch fencing and resource accounting remain under verification.
-See [the relay security boundary](../iroh-relay/README.md#security-boundary). Native
-error classification and key erasure also require qualification. Nothing in this
-branch authorizes enabling production preference before those gates pass.
+Approved relay maps disable implicit public discovery. Native connections relay
+through the stock upstream `iroh-relay` binary, configured with `access.http`:
+on each new connection the relay POSTs the endpoint ID and a `relay=<origin>`
+query to web's `/internal/iroh-access`, which re-runs the registration, device,
+entitlement and generation checks and answers `true` or `false` — the relay
+itself holds no per-account registry and performs no further check afterward.
+Mid-connection revocation is not enforced by the relay: a revoked endpoint keeps
+its relay connection, and the bridge closes its own peer connection instead,
+immediately on the central `peer-policy-changed` push or at the latest when its
+lease expires (60 seconds; see [operations](iroh-operations.md)). Native error classification and key erasure
+also require qualification. Nothing in this branch authorizes enabling
+production preference before those gates pass.
 
 ### The session bus
 

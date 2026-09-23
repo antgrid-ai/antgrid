@@ -1,12 +1,14 @@
 # Iroh staging and operations
 
 Release status: **unqualified**. Remote payloads require Iroh; the central
-WebSocket remains for control only. The authenticated
-self-hosted Iroh relay service under `iroh-relay/` is being integrated using
-upstream public APIs. Admission, revocation fencing and resource controls passed
-local gates documented in [qualification](iroh-qualification.md);
-deployment and native forced-relay/platform/performance gates remain open.
-A stock allow-all relay does not satisfy this deployment contract.
+WebSocket remains for control only. Relay traffic runs through the stock
+upstream `iroh-relay` 1.2.0 binary, admission-gated by web's `access.http`
+check. Its unconfigured default is `access = Everyone`, and a missing config
+file or a key under the wrong TOML table silently falls back to it, so an
+allow-all stock relay does not satisfy this deployment contract. The relay
+admission/denial gate is listed in [qualification](iroh-qualification.md) and
+has no recorded stock-relay run yet; deployment and native
+forced-relay/platform/performance gates remain open.
 
 ## Additive backend deployment
 
@@ -22,13 +24,20 @@ The web environment accepts:
   no Iroh relays are approved. These public origins appear in authenticated
   device snapshots; they contain no shared secret.
 - `PEER_POLICY_TARGETS`: JSON array of private `{url, secret}` delivery targets.
-  Include each central relay's full `/internal/peer-policy` URL and, once a
-  qualified Iroh service exists, every instance's `/internal/disconnect` URL.
+  Include each central relay's full `/internal/peer-policy` URL. The stock
+  relay has no admin/disconnect API, so there is no relay-side target: the
+  central relay's `peer-policy-changed` push to the bridge is the only
+  immediate revocation path, and the bridge's lease is the backstop. A leftover
+  `/internal/disconnect` target never succeeds and wedges the outbox.
   Supply secrets through the deployment secret store. They never reach clients.
-- `RELAY_INTERNAL_SECRET`: authenticates the private `/internal/peer-admission`
-  API. Configure the same secret in the Iroh service's `admissionSecret` field.
-  The relay signs exact request bytes and bounds the complete request to two
-  seconds; backend decisions bind endpoint, relay origin and request ID.
+- `PEER_RELAY_ACCESS_TOKEN`: the bearer token the relay's `access.http`
+  presents to `POST /internal/iroh-access`; the relay side reads the same
+  value as its own `IROH_RELAY_HTTP_BEARER_TOKEN`. Compared in constant time;
+  an unset token denies every request. The route also enforces a 2s deadline
+  and a 32-in-flight bound, because nothing on the relay side bounds the
+  request once its own upgrade response has gone out.
+- `RELAY_INTERNAL_SECRET`: unrelated to Iroh admission — authenticates the
+  central control relay's own calls to web (`relay/src/config.ts`).
 
 The outbox remains pending if no central policy target is configured. A batch is
 marked delivered only after every configured target returns success. Requests
@@ -38,19 +47,21 @@ carry `{userId, generation, issuedAt}`, signed with HMAC-SHA256 in
 and retries failures with bounded backoff. Retrying an event cannot renew a
 client authorization lease; only an authenticated snapshot can do that.
 
-Do not configure an Iroh URL until its admission, active disconnect and resource
-limits pass qualification. URL changes advance policy on the next authorization
+Do not configure an Iroh URL until its admission and resource limits pass
+qualification. URL changes advance policy on the next authorization
 snapshot; coordinated immediate invalidation across processes is still an
 operator/qualification gap. Delivered-outbox retention remains to be implemented; the supplied monitoring
 configuration still needs deployment and load qualification.
 
 ## Staging checks
 
-The relay's build, configuration and private administration instructions live
-under `iroh-relay/`; `deploy/iroh/` supplies Compose/private-proxy integration.
-Prometheus scraping, alert rules and an importable Grafana
-dashboard are in `deploy/iroh/monitoring/`. Their JSON/YAML syntax is checked;
-deployment, `promtool` validation and live dashboard queries remain staging work.
+The relay is the stock `iroh-relay` 1.2.0 binary, installed rather than built
+from source; `deploy/iroh/relay.example.toml` configures it and `deploy/iroh/`
+supplies Compose/private-proxy integration. Prometheus scraping, alert rules
+and an importable Grafana dashboard are in `deploy/iroh/monitoring/`,
+rewritten onto upstream's own metric names. Their JSON/YAML syntax is checked;
+deployment, `promtool` validation and live dashboard queries remain staging
+work.
 
 1. Verify central `/health`, web health, migrations and policy worker logs.
 2. Provision distinct bridge and controller devices. Use their OAuth bearer
@@ -96,9 +107,10 @@ whichever is shorter. Backend failure, central reconnect, and native success do
 not move the original deadline. Denial, revocation, rotation, remote-access-off,
 or expiry fence dispatch immediately.
 
-Backend registration and lease code is not evidence that an upstream relay has
-enforced admission. The latter needs independent service race tests before
-staging preference can pass.
+Backend registration and lease code is not evidence that a deployed relay
+enforces admission. That needs the relay gate run against the deployed
+configuration, including an unregistered endpoint being denied, before staging
+preference can pass.
 
 ## Local evidence commands
 
@@ -114,10 +126,11 @@ bun run --filter antgrid-evals test:evals
 bun run --filter antgrid-evals test:evals:native-soak
 ```
 
-The default serialized eval sweep excludes gates that require separately built
-native artifacts. Build the Rust relay probe with
-`cargo build --locked -j 2 --manifest-path iroh-relay/Cargo.toml --example real_backend_gate`,
-then run `bun run --filter antgrid-evals test:evals:iroh-relay-authorization`.
+The default serialized eval sweep excludes gates that require a separately
+installed native binary. Resolve the stock relay from
+`ANTGRID_IROH_RELAY_BIN`, or `iroh-relay` on `PATH`
+(`cargo install iroh-relay --version 1.2.0 --locked --features server`), then
+run `bun run --filter antgrid-evals test:evals:iroh-relay-authorization`.
 Set `IROH_INTEROP_NATIVE_LIBRARY` to the verified Dart native library before
 running `test:evals:dart-client-e2e` and `test:evals:peer-resume`.
 Backend gates also require the existing PostgreSQL/Prisma test prerequisites.
