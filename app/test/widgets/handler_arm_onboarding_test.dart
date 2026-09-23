@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:antgrid/billing/pricing_visibility.dart';
 import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/design/widgets/ab_button.dart';
 import 'package:antgrid/design/widgets/ab_text_field.dart';
@@ -272,7 +273,9 @@ void main() {
             tier: 'free',
           ),
         ),
-        contains('Free plan'),
+        kPricingSurfacesEnabled
+            ? contains('Free plan')
+            : contains("isn't available"),
       );
       expect(
         handlerShieldTooltip(
@@ -307,7 +310,18 @@ void main() {
   });
 
   group('handlerEntitlementNotice', () {
-    test('names the plan the machine is on when the bridge could read one', () {
+    test('names no plan while pricing is hidden', () {
+      final notice = handlerEntitlementNotice(
+        const HandlerEntitlement(
+          reason: HandlerEntitlementReason.notEntitled,
+          tier: 'free',
+        ),
+      );
+      expect(notice, isNot(contains('Pro')));
+      expect(notice, isNot(contains('plan')));
+    }, skip: kPricingSurfacesEnabled);
+
+    test('names the plan the machine is on when the bridge could read one', skip: !kPricingSurfacesEnabled, () {
       // "You need Pro" alone leaves a paying user unable to tell whether they
       // already have it.
       expect(
@@ -895,12 +909,23 @@ void main() {
 
       // The arm sheet is a form that could not have committed, so it never
       // opens: the refusal takes its place and offers the one fix it has.
-      expect(find.text('Handler needs Pro'), findsOneWidget);
-      expect(find.textContaining('Free plan'), findsOneWidget);
-      expect(find.widgetWithText(AbButton, 'See plans'), findsOneWidget);
+      if (kPricingSurfacesEnabled) {
+        expect(find.text('Handler needs Pro'), findsOneWidget);
+        expect(find.textContaining('Free plan'), findsOneWidget);
+        expect(find.widgetWithText(AbButton, 'See plans'), findsOneWidget);
+      } else {
+        expect(find.text('Handler is unavailable'), findsOneWidget);
+        expect(find.textContaining('Pro'), findsNothing);
+        expect(find.widgetWithText(AbButton, 'See plans'), findsNothing);
+      }
       expect(find.widgetWithText(AbButton, 'Arm Handler'), findsNothing);
 
-      await tester.tap(find.widgetWithText(AbButton, 'Not now'));
+      await tester.tap(
+        find.widgetWithText(
+          AbButton,
+          kPricingSurfacesEnabled ? 'Not now' : 'Close',
+        ),
+      );
       await tester.pumpAndSettle();
       expect(
         transport.sent.where((m) => m['type'] == 'handler:configure'),
@@ -970,7 +995,12 @@ void main() {
       await refuse(tester, transport, {'reason': 'not_entitled', 'tier': 'free'});
 
       expect(find.text('Handler not armed'), findsOneWidget);
-      expect(find.textContaining('Free plan'), findsOneWidget);
+      expect(
+        find.textContaining(
+          kPricingSurfacesEnabled ? 'Free plan' : "isn't available",
+        ),
+        findsOneWidget,
+      );
       await settleToast(tester);
     });
 
