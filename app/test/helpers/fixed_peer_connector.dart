@@ -43,11 +43,8 @@ class TestPayloadLink implements PeerLink {
   @override
   PeerLinkDiagnostic? get netTap => carrier.netTap;
   @override
-  Future<PeerSendOutcome> sendFrame(
-    String channel,
-    Uint8List payload, {
-    FrameKind kind = FrameKind.sealed,
-  }) => carrier.sendFrame(channel, payload, kind: kind);
+  Future<PeerSendOutcome> sendFrame(String channel, Uint8List payload) =>
+      carrier.sendFrame(channel, payload);
   @override
   Future<void> close() async {}
 }
@@ -66,11 +63,8 @@ class _NoopPayloadLink implements PeerLink {
   @override
   PeerLinkDiagnostic? get netTap => null;
   @override
-  Future<PeerSendOutcome> sendFrame(
-    String channel,
-    Uint8List payload, {
-    FrameKind kind = FrameKind.sealed,
-  }) async => PeerSendOutcome.accepted;
+  Future<PeerSendOutcome> sendFrame(String channel, Uint8List payload) async =>
+      PeerSendOutcome.accepted;
   @override
   Future<void> close() async {}
 }

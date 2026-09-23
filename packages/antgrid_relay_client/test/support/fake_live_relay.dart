@@ -1,6 +1,7 @@
 // Not a `_test.dart` file - shared PeerLink and handshaker fakes for
 // MachineSession protocol tests.
 import 'dart:async';
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
@@ -8,8 +9,7 @@ import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 class SentFrame {
   final String channel;
   final Uint8List payload;
-  final FrameKind kind;
-  SentFrame(this.channel, this.payload, this.kind);
+  SentFrame(this.channel, this.payload);
 }
 
 class FakeLiveRelay implements PeerLink {
@@ -26,6 +26,11 @@ class FakeLiveRelay implements PeerLink {
   final sent = <SentFrame>[];
   PeerLinkState _state;
 
+  /// True once [close] has been called. There is no application-layer key to
+  /// rotate any more, so a session that decides it is dead closes the whole
+  /// link — this is how a test observes that decision without a real socket.
+  bool closeCalled = false;
+
   @override
   Stream<IncomingPeerFrame> get messageStream => _messages.stream;
   @override
@@ -40,12 +45,8 @@ class FakeLiveRelay implements PeerLink {
   final RelayNetTap? netTap;
 
   @override
-  Future<PeerSendOutcome> sendFrame(
-    String channel,
-    Uint8List payload, {
-    FrameKind kind = FrameKind.sealed,
-  }) async {
-    sent.add(SentFrame(channel, payload, kind));
+  Future<PeerSendOutcome> sendFrame(String channel, Uint8List payload) async {
+    sent.add(SentFrame(channel, payload));
     return PeerSendOutcome.accepted;
   }
 
@@ -57,7 +58,7 @@ class FakeLiveRelay implements PeerLink {
       RelayConnectionState.disconnected => PeerLinkState.closed,
       _ => PeerLinkState.connecting,
     };
-    _states.add(_state);
+    if (!_states.isClosed) _states.add(_state);
   }
 
   void injectError(PeerLinkFailure error) => _errors.add(error);
@@ -69,55 +70,57 @@ class FakeLiveRelay implements PeerLink {
   }
 
   @override
-  Future<void> close() => closeStreams();
+  Future<void> close() async {
+    closeCalled = true;
+    // Idempotent: a session with no application-layer key to rotate closes
+    // the link from more than one trigger (RPC timeouts, missed liveness),
+    // and only the first must actually transition the state.
+    if (_state != PeerLinkState.closed) {
+      _state = PeerLinkState.closed;
+      if (!_states.isClosed) _states.add(PeerLinkState.closed);
+    }
+    await closeStreams();
+  }
 }
 
-/// Resolves [keys] (or each of [sequence] in turn, one per call) with no real
-/// crypto — MachineSession only cares that `perform()` eventually resolves.
+/// Resolves to [established] (or each of [sequence] in turn, one per call).
+/// There is no key to fabricate any more — MachineSession only cares that
+/// `perform()` eventually resolves true or false.
 class FakeHandshaker implements SessionHandshaker {
-  FakeHandshaker(SessionKeys keys) : _sequence = [keys];
+  FakeHandshaker({bool established = true}) : _sequence = [established];
   FakeHandshaker.sequence(this._sequence);
 
-  final List<SessionKeys?> _sequence;
+  final List<bool> _sequence;
   int performCalls = 0;
   bool aborted = false;
 
   /// Optional per-call delay, keyed by call index (0-based) — lets a test hold
-  /// a rekey "in flight" to observe make-before-break behavior.
+  /// an attempt "in flight" to observe ordering around it.
   Duration Function(int callIndex)? delayFor;
 
   @override
-  Future<SessionKeys?> perform() async {
+  Future<bool> perform() async {
     final idx = performCalls;
     performCalls++;
     final delay = delayFor?.call(idx);
     if (delay != null) await Future<void>.delayed(delay);
     if (idx < _sequence.length) return _sequence[idx];
-    return _sequence.isEmpty ? null : _sequence.last;
+    return _sequence.isEmpty ? false : _sequence.last;
   }
 
   @override
   void abort() => aborted = true;
 }
 
-/// A fresh all-`seed`-valued 32-byte SessionKeys triple, distinguishable by
-/// `seed` across a2p/p2a/confirm so mistaken key-direction bugs show up as a
-/// decrypt failure rather than an accidental match.
-SessionKeys fixedKeys(int seed) => SessionKeys(
-  a2p: Uint8List(32)..fillRange(0, 32, seed),
-  p2a: Uint8List(32)..fillRange(0, 32, (seed + 50) % 256),
-  confirm: Uint8List(32)..fillRange(0, 32, (seed + 100) % 256),
-);
+/// Opens a frame MachineSession sent, as the agent would. Suites decode
+/// outbound frames only through this and [encodeFromAgent], so the payload
+/// encoding is swapped in one place. Synchronous: QUIC/TLS is the
+/// confidentiality layer now, so there is no per-frame crypto step left.
+String decodeFromPhone(Uint8List payload) => utf8.decode(payload);
 
-/// Opens a frame MachineSession sent (sealed under p2a), as the agent would.
-/// Suites decode outbound frames only through this and [sealFromAgent], so the
-/// payload encoding is swapped in one place.
-Future<String?> openFromPhone(SessionKeys keys, Uint8List payload) =>
-    E2eTransportDart(sendKey: keys.a2p, recvKey: keys.p2a).open(payload);
-
-/// Encodes [plaintext] as an inbound agent frame (sealed under a2p).
-Future<Uint8List> sealFromAgent(SessionKeys keys, String plaintext) =>
-    E2eTransportDart(sendKey: keys.a2p, recvKey: keys.p2a).seal(plaintext);
+/// Encodes [plaintext] as an inbound agent frame.
+Uint8List encodeFromAgent(String plaintext) =>
+    Uint8List.fromList(utf8.encode(plaintext));
 
 /// Constructs a [MachineSession] over [relay], starts it and drives it to
 /// established.

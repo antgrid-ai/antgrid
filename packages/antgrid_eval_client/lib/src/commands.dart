@@ -84,7 +84,6 @@ class _MemoryEndpointKeys implements EndpointKeyStore {
 class CommandHandler {
   final EmitFn _emit;
 
-  CryptoService? _crypto;
   RelayService? _relay;
   NativeEndpointOwner? _endpoint;
   PeerLink? _payload;
@@ -170,7 +169,6 @@ class CommandHandler {
       });
       cleanup.add(stateSub.cancel);
 
-      _crypto = crypto;
       _identity = identity;
       _relay = relay;
       _stateSub = stateSub;
@@ -399,7 +397,7 @@ class CommandHandler {
   /// The agent is addressed explicitly: native coordinates come from the
   /// authenticated account inventory, independently of central presence.
   Future<void> _handleHandshake(Map<String, dynamic> cmd) async {
-    if (_payload == null || _identity == null || _crypto == null) {
+    if (_payload == null || _identity == null) {
       _emit({'event': 'error', 'message': 'Must init before handshake'});
       return;
     }
@@ -413,37 +411,19 @@ class CommandHandler {
       return;
     }
 
-    // The agent's pinned Ed25519 pubkey (raw 32 bytes, base64) anchors
-    // agent-hello verification. In production the app pins this from the
-    // account inventory (a relay-independent anchor); the eval harness threads
-    // it in from the agent's bootstrap auth keypair. Abort if absent — we cannot
-    // authenticate the agent's X25519 pubkey without it, and deriving on an
-    // unverified pubkey re-opens the active-relay DH MITM this signing defeats.
-    final agentEd25519PubB64 = cmd['agentEd25519Pub'] as String?;
-    if (agentEd25519PubB64 == null) {
-      _emit({
-        'event': 'error',
-        'message': 'handshake requires agentEd25519Pub to verify agent-hello',
-      });
-      return;
-    }
+    // `agentEd25519Pub` is accepted and ignored: QUIC/TLS between the two
+    // lease-authorized endpoints is the confidentiality layer now, so there is
+    // no agent-hello signature left to verify it against. Not reading it here
+    // is what lets older scenario fixtures that still pass it go unedited.
 
     final attemptTimeoutMs = cmd['attemptTimeoutMs'] as int?;
 
     await _teardownSession();
 
-    // The eval-client plays the "phone" role: the agent resolves this same
-    // Ed25519 identity from the signed-in account's device inventory, so the
-    // raw 32-byte seed signs the client-hello transcript. The driver itself is
-    // the one the app ships — a second copy here is exactly the drift these
-    // scenarios exist to catch.
+    // The driver itself is the one the app ships — a second copy here is
+    // exactly the drift these scenarios exist to catch.
     final handshaker = _handshaker = AppSessionHandshaker(
       relay: _payload!,
-      crypto: _crypto!,
-      machineDeviceId: machineDeviceId,
-      phoneDeviceId: _identity!.deviceId,
-      agentEd25519PubB64: agentEd25519PubB64,
-      phoneEd25519Seed: _identity!.ed25519PrivateKey,
       logger: (level, message, {fields}) => _emit({
         'event': 'handshake-diagnostic',
         'level': level.name,
@@ -650,7 +630,6 @@ class CommandHandler {
     _stateSub = null;
     _relay = null;
     _identity = null;
-    _crypto = null;
 
     final cleanup = _CleanupStack();
     cleanup.add(_endpointKeys.clear);

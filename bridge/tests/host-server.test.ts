@@ -598,7 +598,6 @@ test(
 function withRegistration(host: HostServer, deviceId: string): void {
   const remote = new TestRemoteHostConnection({
     identity: { deviceId, deviceName: "test", createdAt: "" },
-    generateKeypair: () => { throw new Error("not used"); },
   });
   (host as any).controlPlaneRelay = remote;
   expect(host.controlPlaneRegistrationId).toBe(deviceId);
@@ -960,3 +959,28 @@ test(
   },
   20_000,
 );
+
+// The machine control plane admits by "THIS peer holds a session", not "some
+// peer does": without its own session a lease-authorized endpoint could drive
+// machine verbs while another device is attached.
+test("the control-plane bus dispatches only for a peer that holds its own session", async () => {
+  let remote: TestRemoteHostConnection | null = null;
+  host = createHostPolicyFixture({
+    remote: fakeRemoteConfig(),
+    remoteRuntimeFactory: () => Promise.resolve(fakeRuntime()),
+    remoteHostFactory: (options) => (remote = new TestRemoteHostConnection(options)),
+  });
+  const dispatched: Array<string | undefined> = [];
+  (host as unknown as { dispatchControlPlaneInbound: (...args: unknown[]) => void }).dispatchControlPlaneInbound =
+    (_msg, _channel, _bus, peerId) => { dispatched.push(peerId as string | undefined); };
+  await host.startControlPlane();
+  if (!remote) throw new Error("control plane did not build its remote connection");
+  const bus = (host as unknown as { controlPlaneBus: import("../src/message-bus").MessageBus }).controlPlaneBus;
+  (remote as TestRemoteHostConnection).establish("phone-a#uuid-1");
+
+  const msg = createMessage("agent:turn-start", { sessionId: "s1", turnId: "t1" });
+  bus.dispatchInbound(msg, "control", "relay", "phone-b#uuid-1");
+  bus.dispatchInbound(msg, "control", "relay");
+  bus.dispatchInbound(msg, "control", "relay", "phone-a#uuid-1");
+  expect(dispatched).toEqual(["phone-a#uuid-1"]);
+});

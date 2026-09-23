@@ -1,4 +1,3 @@
-import '../helpers/fixed_peer_connector.dart';
 // A native transport cipher caches per-key state so that the stateless
 // `E2eTransportDart` does not pay key setup per frame. `SessionKeys.zeroize`
 // cannot reach that copy, and the cache evicts by USE — so once a session is
@@ -17,11 +16,12 @@ import 'dart:typed_data';
 import 'package:antgrid/config/cng_aes_gcm.dart';
 import 'package:antgrid/connection/connection_supervisor.dart';
 import 'package:antgrid/connection/peer_connection.dart';
-import 'package:antgrid/connection/peer_runtime.dart';
 import 'package:antgrid_peer_transport/antgrid_peer_transport.dart';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter_test/flutter_test.dart';
+
+import '../helpers/fixed_peer_connector.dart';
 
 /// Authenticates instantly and routes nothing: only which sessions get disposed
 /// is under test here.
@@ -78,21 +78,15 @@ class _StubRelay extends RelayService implements PeerLink {
   }
 
   @override
-  Future<PeerSendOutcome> sendFrame(
-    String channel,
-    Uint8List payload, {
-    FrameKind kind = FrameKind.sealed,
-  }) async {
+  Future<PeerSendOutcome> sendFrame(String channel, Uint8List payload) async {
     if (!isDispatchAllowed) return PeerSendOutcome.closed;
-    sendMessage(channel, payload, kind: kind);
     return PeerSendOutcome.accepted;
   }
 
-  void sendMessage(
-    String channel,
-    Uint8List payload, {
-    FrameKind kind = FrameKind.sealed,
-  }) {}
+  /// The session's only recovery is closing its link; a real link reports
+  /// that as a closed payload, which is the teardown under test.
+  @override
+  Future<void> close() async => dropPayload();
 
   @override
   void dispose() => unawaited(closeStreams());
@@ -106,7 +100,7 @@ class _StubRelay extends RelayService implements PeerLink {
 }
 
 /// Hands back a scripted sequence of results, so a test can reach the teardowns
-/// that only a rekey outcome can produce. A null entry is an attempt that never
+/// that only an establishment outcome can produce. A null entry is an attempt that never
 /// confirmed.
 class _FakeHandshaker implements SessionHandshaker {
   _FakeHandshaker(this._results);
@@ -115,9 +109,9 @@ class _FakeHandshaker implements SessionHandshaker {
   int calls = 0;
 
   @override
-  Future<SessionKeys?> perform() async {
+  Future<bool> perform() async {
     final i = calls++;
-    return _results[i < _results.length ? i : _results.length - 1];
+    return _results[i < _results.length ? i : _results.length - 1] != null;
   }
 
   @override
@@ -148,6 +142,23 @@ class _FreshLinkConnector extends FixedPeerConnector {
   }) async => TestPayloadLink(carrier);
 }
 
+/// [TestPayloadLink.close] is a no-op, but the session's timeout recovery IS
+/// a link close, so this carrier has to see it for the teardown to run.
+class _ClosingPayloadLink extends TestPayloadLink {
+  _ClosingPayloadLink(super.carrier);
+  @override
+  Future<void> close() => carrier.close();
+}
+
+class _ClosingLinkConnector extends FixedPeerConnector {
+  _ClosingLinkConnector(PeerLink carrier)
+    : _link = _ClosingPayloadLink(carrier),
+      super(carrier);
+  final PeerLink _link;
+  @override
+  PeerLink get link => _link;
+}
+
 void main() {
   late _StubRelay relay;
 
@@ -163,14 +174,11 @@ void main() {
   }) => PeerConnectionMechanisms(
         buildHandshaker: handshakes == null
             ? null
-            : (_) => _FakeHandshaker(handshakes),
+            : () => _FakeHandshaker(handshakes),
         peerRuntime: freshLinkPerDial
             ? _FreshLinkConnector(relay)
-            : FixedPeerConnector(relay),
-        crypto: CryptoService(),
+            : _ClosingLinkConnector(relay),
         machineDeviceId: 'M',
-        phoneDeviceId: 'phone-1',
-        phoneEd25519Seed: List<int>.filled(32, 7),
         resolveCoords: () async => const ConnCoords(
           relayUrl: 'ws://relay.test',
           agentEd25519PubB64: _pinA,
@@ -344,11 +352,9 @@ void main() {
       relay.inject(
         IncomingPeerFrame(
           channel: 'control',
-          kind: FrameKind.sealed,
-          payload: await E2eTransportDart(
-            sendKey: keys.a2p,
-            recvKey: keys.p2a,
-          ).seal(jsonEncode({'type': 'session-takeover'})),
+          payload: Uint8List.fromList(
+            utf8.encode(jsonEncode({'type': 'session-takeover'})),
+          ),
         ),
       );
       await pumpEventQueue();
@@ -362,13 +368,13 @@ void main() {
     });
 
     test(
-      'a rekey that never confirmed retires the keys it tore down',
+      'a link closed on repeated timeouts retires the keys it tore down',
       () async {
         final mech = await established([_keys(0x20), null]);
         await sealOneFrame(0x45);
         expect(CngAesGcm.importedKeyCount, 1);
 
-        // Repeated RPC timeouts arm a rekey, and this attempt fails.
+        // Repeated RPC timeouts close the link.
         for (var i = 0; i < 3; i++) {
           mech.session!.notifyRpcResult(timedOut: true);
         }

@@ -4,7 +4,6 @@ import {
   SOCKET_INFLIGHT_BYTES,
   CREDIT_BATCH_BYTES,
   MAX_SEND_QUEUE_BYTES,
-  SEAL_OVERHEAD_BYTES,
   WINDOW_RESYNC_AGE_MS,
   WINDOW_STALL_WARN_MS,
   MAX_FRAME_PAYLOAD,
@@ -16,8 +15,8 @@ describe("flow-control constants", () => {
     expect(CREDIT_BATCH_BYTES * 2).toBeLessThanOrEqual(CHANNEL_WINDOW_BYTES);
   });
 
-  it("holds one maximal sealed fragment, so a lone big frame never deadlocks a channel", () => {
-    expect(CHANNEL_WINDOW_BYTES).toBeGreaterThanOrEqual(MAX_FRAME_PAYLOAD + SEAL_OVERHEAD_BYTES);
+  it("holds one maximal fragment, so a lone big frame never deadlocks a channel", () => {
+    expect(CHANNEL_WINDOW_BYTES).toBeGreaterThanOrEqual(MAX_FRAME_PAYLOAD);
   });
 
   it("leaves headroom for control while one channel's window is full", () => {
@@ -26,10 +25,6 @@ describe("flow-control constants", () => {
 
   it("queues at least one maximal transfer before dropping messages whole", () => {
     expect(MAX_SEND_QUEUE_BYTES).toBeGreaterThanOrEqual(MAX_TRANSFER_BYTES);
-  });
-
-  it("states the AES-GCM seal overhead a sender adds to plaintext length", () => {
-    expect(SEAL_OVERHEAD_BYTES).toBe(28);
   });
 
   it("pins the values the Dart client mirrors by hand", () => {

@@ -595,7 +595,10 @@ export function agentRegistrationId(deviceUuid: string, projectDir: string): str
 export async function establishNativeSession(
   app: RelayClient,
   agentDeviceId: string,
-  agentEd25519Pub: string,
+  // Unused since the app E2E layer was removed — QUIC/TLS between the leased
+  // endpoints is the confidentiality layer, so there is no agent key to pin.
+  // Kept positional so call sites don't need to change.
+  _agentEd25519Pub: string,
   opts: { attempts?: number; perAttemptTimeoutMs?: number; gapMs?: number; omitPullsTree?: boolean } = {},
 ): Promise<void> {
   // `setupTestEnv` calls this with the default before its own STREAM_ADVERT_*
@@ -612,7 +615,6 @@ export async function establishNativeSession(
   for (let i = 0; i < attempts; i++) {
     try {
       await app.performE2EHandshake(agentDeviceId, perAttemptTimeoutMs, {
-        agentEd25519Pub,
         omitPullsTree: opts.omitPullsTree,
       });
       return;
@@ -649,6 +651,10 @@ export interface TestEnv {
   /** Bare machine `deviceUuid` — the id the app handshakes against (one machine
    *  socket; projects are streams). */
   agentDeviceId: string;
+  /** The loopback port the agent's native Iroh endpoint is bound to — lets a
+   *  scenario dial it directly (e.g. a raw pre-registration connect attempt)
+   *  without going through `connectNativeApp`'s bundled register-then-dial. */
+  nativePort: number;
   /** Kill the current agent process and respawn a fresh one reusing the SAME
    *  `abDir`/`auth`/`projectDir` — the on-disk paired-phones row, the machine's
    *  mobile-access switch and the agent's deviceId/pubkey survive; only the
@@ -826,6 +832,7 @@ async function buildTestEnv(opts: SetupTestEnvOptions, cleanup: CleanupStack): P
     projectId,
     projectDir: project.dir,
     agentDeviceId: deviceUuid,
+    nativePort,
     // Delegates to AgentHandle.restart() rather than re-spawning here: that
     // mutates `agent.process` in place instead of rebinding the closure-local
     // `agent` variable, so the `agent` this env object already captured stays
@@ -953,10 +960,9 @@ async function buildDartTestEnv(
     machineDeviceId: deviceUuid,
     addresses: [`127.0.0.1:${nativePort}`],
   });
-  // Peer setup already waits for authorization inventory readiness. The
-  // cryptographic handshake runs once so signature and confirmation failures
-  // remain terminal rather than being disguised as startup retries.
-  await app.performHandshake(auth.ed25519Pub, deviceUuid, 10_000);
+  // Peer setup already waits for authorization inventory readiness, so the
+  // hello runs once here rather than being folded into a startup retry.
+  await app.performHandshake(deviceUuid, 10_000);
 
   // Welcome-replay: pull the control-plane snapshot (the `agent:projects`
   // catalog) like the production app.

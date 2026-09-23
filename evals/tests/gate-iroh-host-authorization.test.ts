@@ -4,12 +4,10 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Endpoint, EndpointAddr } from "@number0/iroh/index.js";
-import { FrameKind, decodePeerFrame, encodePeerFrame } from "antgrid-wire";
+import { decodePeerFrame, encodePeerFrame } from "antgrid-wire";
 import { HostServer } from "../../bridge/src/host-server";
 import { PeerRecords } from "../../bridge/src/peer/records";
 import { computeProjectId } from "../../bridge/src/project-id";
-import { generateEphemeralKeypair, deriveSharedSecret } from "../../bridge/src/key-exchange";
-import { buildTranscript, deriveSessionKeys, E2eTransport, phoneConfirmTag, signTranscript, verifyTranscriptSig } from "../../bridge/src/e2e";
 import { createMessage } from "../../bridge/src/protocol";
 import { setLogLevel } from "../../bridge/src/logger";
 
@@ -104,38 +102,22 @@ test("real backend enrollment authorizes native host projects and revocation clo
       connection = await app.connect(new EndpointAddr(endpoint.id(), undefined, addresses), Array.from(Buffer.from("antgrid/peer/1")));
       const stream = await connection.openBi();
       records = new PeerRecords(stream, () => true, () => connection?.close(1n, []));
-      const ephemeral = generateEphemeralKeypair();
-      const nonce = randomBytes(32);
       const attemptId = randomUUID();
-      const transcript = { registrationId: machine.id, agentDeviceId: machine.id, phoneDeviceId: phone.id,
-        phoneX25519Pub: ephemeral.publicKey, nonce };
-      await records.send(encodePeerFrame({ type: "message", channel: "control" }, Buffer.from(JSON.stringify({
-        type: "handshake:client-hello", attemptId, pubkey: ephemeral.publicKey.toString("base64"), nonce: nonce.toString("base64"),
-        sig: signTranscript(buildTranscript({ ...transcript, role: "phone", agentX25519Pub: Buffer.alloc(0) }), Buffer.from(phone.secret, "base64")),
-      })), FrameKind.handshake));
-      const hello = JSON.parse(Buffer.from(decodePeerFrame(await records.read()).payload).toString());
-      assert.equal(hello.type, "handshake:agent-hello");
-      assert.equal(hello.attemptId, attemptId);
-      const agentPub = Buffer.from(hello.pubkey, "base64");
-      assert.ok(verifyTranscriptSig(buildTranscript({ ...transcript, role: "agent", agentX25519Pub: agentPub }),
-        authorizedMachine!.ed25519Pub, hello.sig));
-      const keys = deriveSessionKeys(deriveSharedSecret(ephemeral.privateKey, agentPub),
-        buildTranscript({ ...transcript, role: "agent", agentX25519Pub: agentPub }));
-      const e2e = new E2eTransport({ sendKey: keys.p2a, recvKey: keys.a2p });
-      const send = (value: object) => records!.send(encodePeerFrame({ type: "message", channel: "control" }, e2e.seal(JSON.stringify(value)), FrameKind.sealed));
+      const send = (value: object) =>
+        records!.send(encodePeerFrame({ type: "message", channel: "control" }, Buffer.from(JSON.stringify(value), "utf8")));
       const read = async (predicate: (value: any) => boolean): Promise<any> => {
         for (;;) {
           const frame = decodePeerFrame(await records!.read());
-          const clear = e2e.open(Buffer.from(frame.payload));
-          assert.notEqual(clear, null);
-          const value = JSON.parse(clear!);
+          const value = JSON.parse(Buffer.from(frame.payload).toString("utf8"));
           const message = value.m ?? value;
           if (predicate(message)) return message;
         }
       };
-      await send({ type: "app:ready", attemptId, confirm: phoneConfirmTag(keys.confirm).toString("base64"),
-        capabilities: { checkoutRouting: true, pullsTree: true, terminalFramesV1: true } });
-      await read((value) => value.type === "established");
+      // QUIC/TLS between the endpoints the lease authorizes is the
+      // confidentiality layer now — the hello is a plaintext frame the
+      // bridge's lease re-check gates, not a signed transcript exchange.
+      await send({ type: "session:hello", attemptId, capabilities: { checkoutRouting: true, pullsTree: true, terminalFramesV1: true } });
+      await read((value) => value.type === "established" && value.attemptId === attemptId);
       const nativeConnectionId = connection.stableId();
       centralOnline = false;
       centralSocket?.close();

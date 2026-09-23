@@ -31,25 +31,19 @@ const Duration _kEstablishTimeout = Duration(seconds: 20);
 
 /// Native payload mechanisms and central-control dialer for one machine.
 /// A required, enrollment-scoped [PeerConnector] establishes the payload;
-/// [MachineSession] owns E2E and host project streams.
+/// [MachineSession] owns the peer session and host project streams.
 ///
 /// Every member is a single attempt with no retry of its own — the supervisor
 /// is the only thing that decides when to try again.
 class PeerConnectionMechanisms implements PeerConnectionContract {
   PeerConnectionMechanisms({
-    required CryptoService crypto,
     required String machineDeviceId,
-    required String phoneDeviceId,
-    required List<int> phoneEd25519Seed,
     required Future<ConnCoords?> Function() resolveCoords,
-    SessionHandshaker Function(String agentEd25519PubB64)? buildHandshaker,
+    SessionHandshaker Function()? buildHandshaker,
     this.diagnostic,
     required this.peerRuntime,
   }) : _buildHandshaker = buildHandshaker,
-       _crypto = crypto,
        _machineDeviceId = machineDeviceId,
-       _phoneDeviceId = phoneDeviceId,
-       _phoneEd25519Seed = phoneEd25519Seed,
        _resolveCoords = resolveCoords;
 
   final PeerConnector peerRuntime;
@@ -78,17 +72,14 @@ class PeerConnectionMechanisms implements PeerConnectionContract {
     });
   }
 
-  final CryptoService _crypto;
   final String _machineDeviceId;
-  final String _phoneDeviceId;
-  final List<int> _phoneEd25519Seed;
   final Future<ConnCoords?> Function() _resolveCoords;
 
   /// A test seam — production passes nothing and gets [AppSessionHandshaker].
   /// Exists because the handshake is the only way to reach the teardowns that
   /// retire session keys WITHOUT disposing the session, and those are the
   /// majority of them.
-  final SessionHandshaker Function(String agentEd25519PubB64)? _buildHandshaker;
+  final SessionHandshaker Function()? _buildHandshaker;
 
   MachineSession? _session;
 
@@ -98,8 +89,8 @@ class PeerConnectionMechanisms implements PeerConnectionContract {
   /// retiring keys on behalf of a session that no longer exists.
   StreamSubscription<PeerLinkState>? _payloadDownSub;
 
-  /// The most recent answer the coords step gave. [establishSession] needs the
-  /// agent key to build a session when no payload dial has built one yet.
+  /// The most recent answer the coords step gave. [establishSession] reads it
+  /// only to confirm the coords step already ran before it builds a session.
   ConnCoords? _lastCoords;
 
   /// Reports a relay-shaped error code that no rung failure can express, so the
@@ -111,8 +102,8 @@ class PeerConnectionMechanisms implements PeerConnectionContract {
   /// the native ladder (a token mint the account rejected) is retried on the 30s cap
   /// forever and the caller waiting on the session sees only a timeout.
 
-  /// The agent handed this machine's E2E session to another device (sealed
-  /// `session-takeover`). Wired by `MachineConnection` to the supervisor's
+  /// The agent handed this machine's session to another device
+  /// (`session-takeover`). Wired by `MachineConnection` to the supervisor's
   /// `noteSessionTakenOver`; unset until then.
   ///
   /// Without it the ladder would see only "session down", re-handshake, and the
@@ -131,8 +122,8 @@ class PeerConnectionMechanisms implements PeerConnectionContract {
   /// every other warm project on the machine keeps a disposed transport whose
   /// RPCs can never complete.
 
-  /// The E2E session died under a still-live native payload (a rekey the agent never
-  /// confirmed). Wired by `MachineConnection` to the supervisor's
+  /// The peer session died under a still-live native payload (a hello the
+  /// agent never answered). Wired by `MachineConnection` to the supervisor's
   /// `noteSessionDown`; unset until then.
   ///
   /// Nothing else reports it: the native payload stays connected, so no
@@ -194,7 +185,7 @@ class PeerConnectionMechanisms implements PeerConnectionContract {
             _emit(const PeerSessionDown());
           }
         });
-        await _ensureSession(coords.agentEd25519PubB64);
+        await _ensureSession();
       } on PeerConnectionFailure catch (error) {
         if (error.cancelled || generation != _dialGeneration) {
           throw ConnectionAttemptCancelled();
@@ -216,14 +207,13 @@ class PeerConnectionMechanisms implements PeerConnectionContract {
 
   @override
   Future<void> establishSession() async {
-    final coords = _lastCoords;
-    if (coords == null) {
+    if (_lastCoords == null) {
       throw StateError('establishSession before the coords step ran');
     }
     // Routed through [_ensureSession] rather than reading [_session] directly
     // so this rung can build the session on its own the first time it runs
     // without waiting on [connectPayload] to have done it already.
-    final session = await _ensureSession(coords.agentEd25519PubB64);
+    final session = await _ensureSession();
     // A step runs under the supervisor's single-flight guard, so anything this
     // waits out is time the ladder cannot use to react. Failing the instant the
     // payload dies is what lets a drop mid-handshake reconnect now instead of at
@@ -311,7 +301,7 @@ class PeerConnectionMechanisms implements PeerConnectionContract {
     await (_payloadLink ?? _closingPayloadLink)?.close();
   }
 
-  Future<MachineSession> _ensureSession(String agentEd25519PubB64) async {
+  Future<MachineSession> _ensureSession() async {
     final generation = _dialGeneration;
     final existing = _session;
     if (existing != null) {
@@ -335,16 +325,8 @@ class PeerConnectionMechanisms implements PeerConnectionContract {
       relay: payloadLink,
       machineDeviceId: _machineDeviceId,
       handshaker:
-          _buildHandshaker?.call(agentEd25519PubB64) ??
-          AppSessionHandshaker(
-            relay: payloadLink,
-            crypto: _crypto,
-            machineDeviceId: _machineDeviceId,
-            phoneDeviceId: _phoneDeviceId,
-            agentEd25519PubB64: agentEd25519PubB64,
-            phoneEd25519Seed: _phoneEd25519Seed,
-            logger: _logHandshake,
-          ),
+          _buildHandshaker?.call() ??
+          AppSessionHandshaker(relay: payloadLink, logger: _logHandshake),
       projectStartMessageBuilder: (projectId) =>
           createAbMessage('project:start', {'projectId': projectId}),
       logger: _logMachineSession,

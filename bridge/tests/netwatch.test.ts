@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
-import { encodePeerFrame, FrameKind } from "antgrid-wire";
+import { createHash } from "node:crypto";
+import { encodePeerFrame } from "antgrid-wire";
 import { Netwatch, netwatch, frameIdFor, __resetNetwatchForTest, type NetwatchEvent } from "../src/netwatch";
 import { ControlListener } from "../src/control-listener";
 import { TestPeerSessionOwner } from "./test-peer-session-owner";
@@ -8,7 +9,6 @@ import { runNetwatchCli, renderEvent } from "../src/cli/netwatch";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { installFakeSession } from "./fake-session";
 
 describe("Netwatch ring", () => {
   it("keeps native lifecycle observations distinct from transmitted frames", () => {
@@ -23,12 +23,14 @@ describe("Netwatch ring", () => {
     expect(rendered).toContain("iroh");
     expect(rendered).toContain("event");
     expect(rendered).not.toContain("relay");
-    expect(w.ingestRemote([{ at: 2, dir: "event", kind: "sealed" }])).toBe(0);
+    // `event` dir is only valid paired with `lifecycle` — any other kind is
+    // the malformed row this admits zero of.
+    expect(w.ingestRemote([{ at: 2, dir: "event", kind: "frame" }])).toBe(0);
   });
   it("keeps the newest events, oldest first, and reports what it evicted", () => {
     const w = new Netwatch(3);
     for (let i = 0; i < 5; i++) {
-      w.record({ dir: "tx", kind: "sealed", transport: "relay", msgType: `m${i}` });
+      w.record({ dir: "tx", kind: "frame", transport: "relay", msgType: `m${i}` });
     }
     expect(w.snapshot().map((e) => e.msgType)).toEqual(["m2", "m3", "m4"]);
     expect(w.recorded).toBe(5);
@@ -40,7 +42,7 @@ describe("Netwatch ring", () => {
   it("honours a snapshot limit smaller than the ring", () => {
     const w = new Netwatch(8);
     for (let i = 0; i < 5; i++) {
-      w.record({ dir: "rx", kind: "sealed", transport: "relay", msgType: `m${i}` });
+      w.record({ dir: "rx", kind: "frame", transport: "relay", msgType: `m${i}` });
     }
     expect(w.snapshot(2).map((e) => e.msgType)).toEqual(["m3", "m4"]);
   });
@@ -54,61 +56,30 @@ describe("Netwatch ring", () => {
     const off = w.subscribe((e) => seen.push(e.msgType ?? ""));
     // A watcher is an observer; a broken one must never fail the send path.
     expect(() =>
-      w.record({ dir: "tx", kind: "sealed", transport: "relay", msgType: "a" }),
+      w.record({ dir: "tx", kind: "frame", transport: "relay", msgType: "a" }),
     ).not.toThrow();
     off();
-    w.record({ dir: "tx", kind: "sealed", transport: "relay", msgType: "b" });
+    w.record({ dir: "tx", kind: "frame", transport: "relay", msgType: "b" });
     expect(seen).toEqual(["a"]);
   });
 });
 
 describe("frameIdFor", () => {
-  it("uses the sealed frame's own nonce, which both endpoints see byte-identically", () => {
-    const payload = Buffer.concat([Buffer.alloc(12, 0xab), Buffer.from("ciphertext")]);
-    expect(frameIdFor(payload, true)).toBe("ab".repeat(12));
-  });
-
-  it("falls back to a hash for plaintext frames, which carry no nonce", () => {
-    const id = frameIdFor(Buffer.from('{"type":"handshake:client-hello"}'), false);
-    // Pinned, and pinned to the SAME string as `frameIdOf` in
+  it("hashes the frame payload bytes, so both endpoints compute the same id with no wire change", () => {
+    const payload = Buffer.from('{"type":"session:hello","attemptId":"a1"}');
+    // Pinned, and pinned to the SAME string `frameIdOf` in
     // packages/antgrid_relay_client/lib/src/frame.dart asserts for these bytes.
     // The two are hand-mirrored: if they drift, nothing fails except a --join
     // that quietly pairs nothing.
-    expect(id).toBe("59e7c7d96c01d53688b362a9");
+    expect(frameIdFor(payload)).toBe("1e65322bad672889949c1355");
+  });
+
+  it("gives byte-identical recurrences (a ping, say) the same id", () => {
+    const a = Buffer.from(JSON.stringify({ type: "ping" }));
+    const b = Buffer.from(JSON.stringify({ type: "ping" }));
+    expect(frameIdFor(a)).toBe(frameIdFor(b));
   });
 });
-
-/** A paired, handshake-complete client whose socket and seal are inert â€” the
- *  same seam relay-client-rate-diagnostics.test.ts uses. */
-function makeClient(
-  overrides: { open?: (b: Buffer) => string | null; readyState?: number } = {},
-): TestPeerSessionOwner {
-  const c = new TestPeerSessionOwner({
-    identity: {
-      deviceId: "dev-1",
-      deviceName: "machine",
-      createdAt: new Date().toISOString(),
-      ed25519PublicKey: "pk",
-      ed25519PrivateKey: "sk",
-    },
-    generateKeypair: () => {
-      throw new Error("not used");
-    },
-  });
-  installFakeSession(c, "phone-1", {
-    transport: {
-      seal: (plaintext: string) => Buffer.from(plaintext, "utf8"),
-      open: overrides.open ?? (() => null),
-      zeroize: () => {},
-    },
-  });
-  (c as any).ws = {
-    readyState: overrides.readyState ?? WebSocket.OPEN,
-    send: () => {},
-    close: () => {},
-  };
-  return c;
-}
 
 const events = (): NetwatchEvent[] => netwatch.snapshot();
 
@@ -123,7 +94,8 @@ describe("TestPeerSessionOwner netwatch taps", () => {
   });
 
   it("records a send dropped for want of an E2E session", () => {
-    client = makeClient();
+    client = TestPeerSessionOwner.forTest({ sendPayload: () => {}, peerId: "phone-1", deviceId: "dev-1" });
+    client.establish("phone-1", { attemptId: "a1" });
     (client as any).sessions.clear();
     client.sendOnChannel(createMessage("agent:turn-start", { sessionId: "s1", turnId: "t1" }), "control");
 
@@ -132,41 +104,21 @@ describe("TestPeerSessionOwner netwatch taps", () => {
     expect(drops[0].reason).toBe("no-e2e-session");
   });
 
-  it("carries the nonce down four calls so an inbound frame lands with its type", () => {
-    // The threading is the fragile part: the id is only readable before
-    // decrypt, the type only after it.
-    const envelope = JSON.stringify({ s: "abc123def456", m: { type: "terminal:input", data: "x" } });
-    client = makeClient({ open: () => envelope });
+  it("classifies a received frame by its message type and its own payload hash", () => {
+    client = TestPeerSessionOwner.forTest({ sendPayload: () => {}, peerId: "phone-1", deviceId: "dev-1" });
+    client.establish("phone-1", { attemptId: "a1" });
+    // establish() records its own hello's rx diagnostic; reset so this test
+    // sees only the frame it injects below.
+    __resetNetwatchForTest();
 
-    const payload = Buffer.concat([Buffer.alloc(12, 0x7f), Buffer.from("sealed-bytes")]);
-    const frame = encodePeerFrame(
-      { type: "message", channel: "control" },
-      payload,
-      FrameKind.sealed,
-    );
+    const payload = Buffer.from(JSON.stringify({ type: "terminal:input", terminalId: "t", data: "x" }));
+    const frame = encodePeerFrame({ type: "message", channel: "control" }, payload);
     client.injectPeerFrame(Buffer.from(frame), "phone-1");
 
-    const rx = events().filter((e) => e.dir === "rx" && e.kind === "sealed");
+    const rx = events().filter((e) => e.dir === "rx" && e.kind === "frame");
     expect(rx).toHaveLength(1);
     expect(rx[0].msgType).toBe("terminal:input");
-    expect(rx[0].streamId).toBe("abc123def456");
-    expect(rx[0].frameId).toBe("7f".repeat(12));
-  });
-
-  it("records a frame that arrived but would not decrypt", () => {
-    client = makeClient({ open: () => null });
-    const payload = Buffer.concat([Buffer.alloc(12, 0x01), Buffer.from("garbage")]);
-    const frame = encodePeerFrame(
-      { type: "message", channel: "control" },
-      payload,
-      FrameKind.sealed,
-    );
-    client.injectPeerFrame(Buffer.from(frame), "phone-1");
-
-    const drops = events().filter((e) => e.kind === "drop");
-    expect(drops).toHaveLength(1);
-    expect(drops[0].reason).toBe("decrypt-failed");
-    expect(drops[0].frameId).toBe("01".repeat(12));
+    expect(rx[0].frameId).toBe(createHash("sha256").update(payload).digest("hex").slice(0, 24));
   });
 });
 
@@ -198,8 +150,8 @@ describe("control plane /netwatch", () => {
 
   it("replays the buffer and closes when not following", async () => {
     const { port, token } = await start();
-    netwatch.record({ dir: "tx", kind: "sealed", transport: "relay", msgType: "agent:turn-start" });
-    netwatch.record({ dir: "rx", kind: "drop", transport: "relay", reason: "decrypt-failed" });
+    netwatch.record({ dir: "tx", kind: "frame", transport: "relay", msgType: "agent:turn-start" });
+    netwatch.record({ dir: "rx", kind: "drop", transport: "relay", reason: "pre-establishment" });
 
     const res = await fetch(`http://127.0.0.1:${port}/netwatch?follow=0`, {
       headers: { authorization: `Bearer ${token}` },
@@ -209,7 +161,7 @@ describe("control plane /netwatch", () => {
 
     const body = await res.text();
     expect(body).toContain("agent:turn-start");
-    expect(body).toContain("decrypt-failed");
+    expect(body).toContain("pre-establishment");
     expect(body).toContain("event: replayed");
   });
 
@@ -281,11 +233,11 @@ describe("antgrid watch summary", () => {
     const BEL = String.fromCharCode(7);
     netwatch.record({
       dir: "rx",
-      kind: "sealed",
+      kind: "frame",
       transport: "relay",
       msgType: `terminal:${ESC}]0;pwned${BEL}${ESC}[2Kinput`,
     });
-    netwatch.record({ dir: "tx", kind: "sealed", transport: "relay", msgType: "z".repeat(200) });
+    netwatch.record({ dir: "tx", kind: "frame", transport: "relay", msgType: "z".repeat(200) });
 
     const err = spyOn(console, "error").mockImplementation(() => {});
     const out = spyOn(console, "log").mockImplementation(() => {});

@@ -31,7 +31,7 @@ void main() {
     final w = make();
     w.record(
       dir: 'tx',
-      kind: 'sealed',
+      kind: 'frame',
       channel: 'control',
       bytes: 412,
       frameId: 'a3f9c2110bd4',
@@ -40,7 +40,7 @@ void main() {
 
     final o = readLines().single;
     expect(o['dir'], 'tx');
-    expect(o['kind'], 'sealed');
+    expect(o['kind'], 'frame');
     expect(o['channel'], 'control');
     expect(o['bytes'], 412);
     expect(o['frameId'], 'a3f9c2110bd4');
@@ -54,7 +54,7 @@ void main() {
 
   test('an annotation lands on the held frame before it is written', () async {
     final w = make();
-    w.record(dir: 'tx', kind: 'sealed', frameId: 'abc123');
+    w.record(dir: 'tx', kind: 'frame', frameId: 'abc123');
     w.annotate('abc123', msgType: 'terminal:input', streamId: 'proj-1');
     await w.flush();
 
@@ -69,8 +69,8 @@ void main() {
     // is the flood case — a capture must degrade to typeless frames, never
     // stall a send to keep one annotatable.
     final w = make(capacity: 1);
-    w.record(dir: 'tx', kind: 'sealed', frameId: 'gone');
-    w.record(dir: 'tx', kind: 'sealed', frameId: 'here');
+    w.record(dir: 'tx', kind: 'frame', frameId: 'gone');
+    w.record(dir: 'tx', kind: 'frame', frameId: 'here');
     expect(() => w.annotate('gone', msgType: 'too:late'), returnsNormally);
     await w.flush();
 
@@ -84,7 +84,7 @@ void main() {
   test('order is preserved and seq is contiguous under eviction', () async {
     final w = make(capacity: 2);
     for (var i = 0; i < 5; i++) {
-      w.record(dir: 'rx', kind: 'sealed', frameId: 'f$i');
+      w.record(dir: 'rx', kind: 'frame', frameId: 'f$i');
     }
     await w.flush();
 
@@ -101,7 +101,7 @@ void main() {
       w.tap({
         'op': 'frame',
         'dir': 'rx',
-        'kind': 'sealed',
+        'kind': 'frame',
         'channel': 'control',
         'bytes': 96,
         'frameId': 'ff00',

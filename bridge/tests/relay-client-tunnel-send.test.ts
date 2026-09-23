@@ -1,20 +1,12 @@
 import { describe, expect, it } from "bun:test";
-import { encodePeerFrame, FrameKind } from "antgrid-wire";
 import { ed25519Pair, TestPeerSessionOwner } from "./test-peer-session-owner";
-import { generateEphemeralKeypair } from "../src/key-exchange";
 
 const AGENT_DEVICE_ID = "agent-1";
 const PHONE_ID = "phone-1";
 
-function injectFrame(client: TestPeerSessionOwner, kind: FrameKind, payload: Buffer, channel: "control" | "preview" = "control"): void {
-  const frame = encodePeerFrame({ type: "message", channel }, payload, kind);
-  client.injectPeerFrame(Buffer.from(frame), PHONE_ID);
-}
-
-/** Establish a real E2E session on a forTest client. */
+/** Establish a real session on a forTest client. */
 function establish(sent: Array<string | Buffer>): { client: TestPeerSessionOwner } {
   const client = TestPeerSessionOwner.forTest({
-    generateKeypair: generateEphemeralKeypair,
     sendPayload: (p) => sent.push(p),
     peerId: PHONE_ID,
     deviceId: AGENT_DEVICE_ID,
@@ -25,7 +17,7 @@ function establish(sent: Array<string | Buffer>): { client: TestPeerSessionOwner
 }
 
 describe("TestPeerSessionOwner.sendTunnel", () => {
-  it("seals the tunnel message in the control-plane envelope and sends it on the preview channel", async () => {
+  it("sends the tunnel message in the control-plane envelope on the preview channel", async () => {
     const sent: Array<string | Buffer> = [];
     const { client } = establish(sent);
     const sentBefore = sent.length;
@@ -44,7 +36,7 @@ describe("TestPeerSessionOwner.sendTunnel", () => {
     const sentBefore = sent.length;
 
     // Body large enough that the JSON envelope exceeds MAX_TRANSFER_BYTES (32 MiB),
-    // so fragmentForSend rejects it. The outcome is the answer now â€” the caller
+    // so fragmentForSend rejects it. The outcome is the answer now — the caller
     // (TunnelManager) ends its stream on it rather than the send path
     // synthesising a reply it cannot attribute to a checkout.
     const huge = "a".repeat(34 * 1024 * 1024);
@@ -59,31 +51,27 @@ describe("TestPeerSessionOwner.sendTunnel", () => {
     expect(sent.length).toBe(sentBefore);
   });
 
-  it("drops the tunnel message when the E2E session is not established", async () => {
+  it("drops the tunnel message when the session is not established", async () => {
     const sent: unknown[] = [];
     const client = TestPeerSessionOwner.forTest({
-      generateKeypair: () => {
-        throw new Error("not used");
-      },
       sendPayload: (data: Buffer | string) => sent.push(data),
       peerId: "phone-1",
     });
-    // No handshake â†’ no established session.
+    // No hello → no established session.
     expect(await client.sendTunnel({ type: "tunnel:http-end", requestId: "r1", chunks: 0 })).toBe("dropped");
     expect(sent).toEqual([]);
   });
 });
 
-describe("TestPeerSessionOwner receive: a malformed sealed preview frame never reaches onTunnelMessage", () => {
-  it("drops a frame the established transport fails to decrypt", () => {
+describe("TestPeerSessionOwner receive: a malformed preview frame never reaches onTunnelMessage", () => {
+  it("drops a frame that isn't valid JSON", () => {
     const sent: Array<string | Buffer> = [];
     const { client } = establish(sent);
     const tunnelSeen: unknown[] = [];
     (client as any).opts.onTunnelMessage = (m: unknown) => tunnelSeen.push(m);
 
-    // Garbage ciphertext (well-formed frame, but not sealed under the
-    // established transport) â€” must fail to decrypt and never dispatch.
-    injectFrame(client, FrameKind.sealed, Buffer.alloc(40, 7), "preview");
+    // Garbage bytes — not valid JSON — must fail to parse and never dispatch.
+    client.injectPeerPayload(Buffer.alloc(40, 7), PHONE_ID, "preview");
 
     expect(tunnelSeen).toEqual([]);
   });

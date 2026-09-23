@@ -1,35 +1,34 @@
 {
-  "comment": "Peer transport v3 cross-language pin. Regenerate: cd packages/antgrid-wire && bun run gen:peer-vectors",
+  "comment": "Peer transport v4 cross-language pin. Regenerate: cd packages/antgrid-wire && bun run gen:peer-vectors",
   "framing": {
-    "version": 3,
+    "version": 4,
     "fixedPrefixBytes": 4,
     "maxHeaderBytes": 1024,
     "maxPayloadBytes": 1500000,
     "maxRecordBytes": 1501028,
     "kinds": {
-      "sealed": 0,
-      "handshake": 1
+      "message": 0
     },
     "samples": [
       {
-        "name": "sealed-control",
+        "name": "message-control",
         "header": {
           "type": "message",
           "channel": "control"
         },
         "kind": 0,
         "payloadHex": "deadbeef",
-        "frameHex": "030000267b2274797065223a226d657373616765222c226368616e6e656c223a22636f6e74726f6c227ddeadbeef"
+        "frameHex": "040000267b2274797065223a226d657373616765222c226368616e6e656c223a22636f6e74726f6c227ddeadbeef"
       },
       {
-        "name": "handshake-preview",
+        "name": "message-preview",
         "header": {
           "type": "message",
           "channel": "preview"
         },
-        "kind": 1,
+        "kind": 0,
         "payloadHex": "000102ff",
-        "frameHex": "030100267b2274797065223a226d657373616765222c226368616e6e656c223a2270726576696577227d000102ff"
+        "frameHex": "040000267b2274797065223a226d657373616765222c226368616e6e656c223a2270726576696577227d000102ff"
       }
     ]
   },
@@ -54,7 +53,6 @@
     "socketInflightBytes": 3145728,
     "creditBatchBytes": 524288,
     "maxSendQueueBytes": 67108864,
-    "sealOverheadBytes": 28,
     "windowResyncAgeMs": 40000,
     "windowStallWarnMs": 5000
   },

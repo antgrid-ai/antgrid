@@ -29,11 +29,6 @@ test("local: terminal start + input + output", async () => {
     }
   });
 
-  // confirm is the E2E handshake tag — meaningless on the trusted local socket,
-  // but the v3 schema requires it; agent-core only uses app:ready as a resync nudge.
-  env.client.send(createMessage("app:ready", { confirm: "" }));
-  await new Promise((r) => setTimeout(r, 500));
-
   env.client.send(createMessage("terminal:start", {
     terminalId: "s1",
     name: "s1",

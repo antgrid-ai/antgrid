@@ -34,10 +34,7 @@ void main() {
       connection.ensureStarted(
         mechanisms: PeerConnectionMechanisms(
           peerRuntime: FixedPeerConnector.stub(),
-          crypto: CryptoService(),
           machineDeviceId: 'M',
-          phoneDeviceId: 'phone-1',
-          phoneEd25519Seed: List<int>.filled(32, 7),
           resolveCoords: () async => null,
         ),
       );

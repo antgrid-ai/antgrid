@@ -1,8 +1,8 @@
-// The send scheduler on its own: no session, no crypto, no socket. The sink
-// stands in for "seal and write", returning the sealed length the real one
-// would have produced, so the window arithmetic here is the arithmetic that
-// runs in production. Mirrors `bridge/tests/send-scheduler.test.ts` case for
-// case — the two clients must gate identically or one stalls the other.
+// The send scheduler on its own: no session, no socket. The sink stands in
+// for "encode and write", returning the length the real one would have
+// produced, so the window arithmetic here is the arithmetic that runs in
+// production. Mirrors `bridge/tests/send-scheduler.test.ts` case for case —
+// the two clients must gate identically or one stalls the other.
 import 'dart:async';
 
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
@@ -13,7 +13,7 @@ class _Wire {
 
   Future<int?> call(QueuedAppFrame f) async {
     frames.add(f);
-    return f.plaintextBytes + kSealOverheadBytes;
+    return f.plaintextBytes;
   }
 
   List<String?> get names => [for (final f in frames) f.msgType];
@@ -86,9 +86,25 @@ void main() {
     await _settle();
 
     expect(wire.names, ['p1', 'c1']);
-    expect(s.unacked('preview'), 628);
+    expect(s.unacked('preview'), 600);
     expect(s.queued('preview').frames, 1);
     expect(s.blockedSince['preview'], isNotNull);
+  });
+
+  test('charges a window exactly the payload bytes the receiver credits '
+      'back', () async {
+    // The receiver credits plaintext bytes, so any per-frame overhead charged
+    // here leaks window on every frame until the channel wedges.
+    s.window = 300;
+    s.socketCap = null;
+    s.enqueue([
+      _frame('control', 100, name: 'a'),
+      _frame('control', 100, name: 'b'),
+      _frame('control', 100, name: 'c'),
+    ]);
+    await _settle();
+    expect(wire.names, ['a', 'b', 'c']);
+    expect(s.unacked('control'), 300);
   });
 
   test('credit releases exactly the delta; a duplicate is a no-op; '
@@ -106,11 +122,11 @@ void main() {
       'p1',
     ], reason: 'a partial credit releases nothing the frame cannot fit into');
 
-    expect(s.credit('preview', 628), isTrue);
+    expect(s.credit('preview', 600), isTrue);
     await _settle();
     expect(wire.names, ['p1', 'p2']);
 
-    expect(s.credit('preview', 628), isFalse, reason: 'duplicate');
+    expect(s.credit('preview', 600), isFalse, reason: 'duplicate');
 
     expect(s.credit('preview', 10000), isTrue);
     expect(s.unacked('preview'), 0);
@@ -137,10 +153,10 @@ void main() {
     s.socketCap = 3000;
     s.enqueue([_frame('preview', 1000, name: 'p1')]);
     await _settle();
-    s.enqueue([_frame('preview', 900, name: 'p2')]);
+    s.enqueue([_frame('preview', 950, name: 'p2')]);
     await _settle();
     expect(wire.names, ['p1', 'p2']);
-    expect(s.totalUnacked(), 1956);
+    expect(s.totalUnacked(), 1950);
 
     s.enqueue([_frame('preview', 100, name: 'p3')]);
     await _settle();
@@ -157,9 +173,9 @@ void main() {
       'p2',
       'c1',
     ], reason: 'c2 fits its own window; the socket cap is what holds it');
-    expect(s.unacked('control'), 928);
+    expect(s.unacked('control'), 900);
 
-    s.credit('preview', 1956);
+    s.credit('preview', 1950);
     await _settle();
     expect(wire.names, ['p1', 'p2', 'c1', 'c2', 'p3']);
   });
@@ -213,10 +229,10 @@ void main() {
     s.window = 1000;
     s.enqueue([_frame('preview', 900, name: 'p1')]);
     await _settle();
-    expect(s.unacked('preview'), 928);
+    expect(s.unacked('preview'), 900);
 
     s.uncharge('preview', 900);
-    expect(s.unacked('preview'), 28);
+    expect(s.unacked('preview'), 0);
 
     s.enqueue([_frame('preview', 900, name: 'p2')]);
     await _settle();
@@ -241,7 +257,7 @@ void main() {
     await _settle();
     expect(wire.names, ['p1']);
 
-    // The anchor: 928 bytes written, none counted. Not conclusive on its own.
+    // The anchor: 900 bytes written, none counted. Not conclusive on its own.
     expect(s.credit('preview', 0), isFalse);
     clock = clock.add(const Duration(milliseconds: kWindowResyncAgeMs - 1));
     expect(s.credit('preview', 0), isFalse);
@@ -253,20 +269,20 @@ void main() {
     expect(s.unacked('preview'), 0);
     await _settle();
     expect(wire.names, ['p1', 'p2']);
-    expect(resyncs().single, contains('928'));
+    expect(resyncs().single, contains('900'));
 
     // Only what the old anchor saw can be presumed lost: p2's bytes were
     // written after it, and the credits that would count them are still due.
     clock = clock.add(const Duration(milliseconds: 10));
     expect(s.credit('preview', 0), isFalse);
-    expect(s.unacked('preview'), 528);
+    expect(s.unacked('preview'), 500);
     expect(resyncs(), hasLength(1));
 
     // A credit that counts the bytes in time leaves nothing to presume.
     clock = clock.add(const Duration(milliseconds: kWindowResyncAgeMs));
-    expect(s.credit('preview', 1456), isTrue);
+    expect(s.credit('preview', 1400), isTrue);
     clock = clock.add(const Duration(milliseconds: kWindowResyncAgeMs));
-    expect(s.credit('preview', 1456), isFalse);
+    expect(s.credit('preview', 1400), isFalse);
     expect(resyncs(), hasLength(1));
   });
 
@@ -285,12 +301,12 @@ void main() {
 
     // The relay reports p1 discarded: the anchor must shrink with the sent
     // total, or the resync would un-charge p1 again on top of the report.
-    s.uncharge('preview', 928);
+    s.uncharge('preview', 900);
     s.enqueue([_frame('preview', 500, name: 'p2')]);
     await _settle();
     clock = clock.add(const Duration(milliseconds: kWindowResyncAgeMs));
     expect(s.credit('preview', 0), isFalse);
-    expect(s.unacked('preview'), 528);
+    expect(s.unacked('preview'), 500);
     expect(logs, isEmpty);
   });
 

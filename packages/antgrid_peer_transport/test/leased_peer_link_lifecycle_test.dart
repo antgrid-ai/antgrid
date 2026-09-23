@@ -88,11 +88,7 @@ class _QueuedLink implements PeerLink {
   Stream<PeerLinkFailure> get failureStream => const Stream.empty();
 
   @override
-  Future<PeerSendOutcome> sendFrame(
-    String channel,
-    Uint8List payload, {
-    FrameKind kind = FrameKind.sealed,
-  }) async {
+  Future<PeerSendOutcome> sendFrame(String channel, Uint8List payload) async {
     queued++;
     await gate.future;
     if (closed) return PeerSendOutcome.closed;

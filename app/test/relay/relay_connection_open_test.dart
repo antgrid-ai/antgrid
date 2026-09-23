@@ -1,12 +1,15 @@
 import '../helpers/fixed_peer_connector.dart';
 // End-to-end coverage for supervisor-driven `RelayConnection` bring-up against
-// the REAL v3 crypto handshake (via a fake agent responder, mirroring
-// antgrid_relay_client's connection_handshake_test.dart harness).
+// the plaintext `session:hello` -> `established` exchange (via a fake agent
+// responder). QUIC/TLS between lease-authorized Iroh endpoints is the
+// confidentiality layer since Stage B, so the fake agent below answers with no
+// crypto of its own — mirroring antgrid_relay_client's
+// connection_handshake_test.dart harness.
 //
 // Also covers two "provider wiring" claims that are naturally proven at this
-// layer, one connection/one handshake for real:
+// layer, one connection/one hello for real:
 //   - two projects on ONE machine share the ONE MachineSession the connection
-//     produces (no second dial / handshake for the second project).
+//     produces (no second dial / hello for the second project).
 //   - drill-in binds via `stream-ready` at 0 RTT: once the control plane has
 //     advertised a project's streamId, `bindProject` resolves immediately
 //     with no new `project:start` send.
@@ -18,7 +21,6 @@ import 'package:antgrid/connection/connection_supervisor.dart';
 import 'package:antgrid/connection/peer_connection.dart';
 import 'package:antgrid/providers/relay_connection.dart';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
-import 'package:cryptography/cryptography.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 // ---------------------------------------------------------------------------
@@ -41,7 +43,7 @@ class _RecordingRelay extends RelayService implements PeerLink {
   final _states = StreamController<AppState>.broadcast();
   final _presence = StreamController<bool>.broadcast();
   final _errors = StreamController<ErrorMessage>.broadcast();
-  final sent = <({Uint8List payload, FrameKind kind})>[];
+  final sent = <Uint8List>[];
   AppState _cur = const AppState();
 
   /// How many upcoming connect() calls must fail before one succeeds.
@@ -90,22 +92,10 @@ class _RecordingRelay extends RelayService implements PeerLink {
   }
 
   @override
-  Future<PeerSendOutcome> sendFrame(
-    String channel,
-    Uint8List payload, {
-    FrameKind kind = FrameKind.sealed,
-  }) async {
+  Future<PeerSendOutcome> sendFrame(String channel, Uint8List payload) async {
     if (!isDispatchAllowed) return PeerSendOutcome.closed;
-    sendMessage(channel, payload, kind: kind);
+    if (channel == 'control') sent.add(payload);
     return PeerSendOutcome.accepted;
-  }
-
-  void sendMessage(
-    String channel,
-    Uint8List payload, {
-    FrameKind kind = FrameKind.sealed,
-  }) {
-    if (channel == 'control') sent.add((payload: payload, kind: kind));
   }
 
   void inject(IncomingPeerFrame msg) => _messages.add(msg);
@@ -128,14 +118,7 @@ class _RecordingRelay extends RelayService implements PeerLink {
   }
 }
 
-Future<(List<int> seed, Uint8List pub)> _agentEd25519Keypair() async {
-  final seed = List.filled(32, 0xA1);
-  final kp = await Ed25519().newKeyPairFromSeed(seed);
-  final pub = await kp.extractPublicKey();
-  return (seed, Uint8List.fromList(pub.bytes));
-}
-
-Future<Map<String, dynamic>> _waitForHandshakeFrame(
+Future<Map<String, dynamic>> _waitForControlFrame(
   _RecordingRelay relay,
   String type, {
   Duration timeout = const Duration(seconds: 5),
@@ -147,11 +130,9 @@ Future<Map<String, dynamic>> _waitForHandshakeFrame(
       throw TimeoutException('fake agent: "$type" not received');
     }
     for (var i = startIndex; i < relay.sent.length; i++) {
-      final f = relay.sent[i];
-      if (f.kind != FrameKind.handshake) continue;
       Map<String, dynamic> j;
       try {
-        j = jsonDecode(utf8.decode(f.payload)) as Map<String, dynamic>;
+        j = jsonDecode(utf8.decode(relay.sent[i])) as Map<String, dynamic>;
       } catch (_) {
         continue;
       }
@@ -161,117 +142,32 @@ Future<Map<String, dynamic>> _waitForHandshakeFrame(
   }
 }
 
-/// Fully drives the fake-agent side of one handshake attempt to
-/// `established`, so the phone's `open()` resolves.
-Future<SessionKeys> _completeFakeAgentHandshake(
+/// Answers the phone's plaintext `session:hello` with `established`, so the
+/// handshaker's `perform()` resolves. QUIC/TLS between the two lease-
+/// authorized endpoints is the confidentiality layer now, so there is nothing
+/// here to sign or seal.
+Future<void> _completeFakeAgentHello(
   _RecordingRelay relay, {
-  required List<int> agentSeed,
-  required String machineDeviceId,
-  required String phoneDeviceId,
   int startIndex = 0,
   Duration timeout = const Duration(seconds: 5),
 }) async {
-  final clientHello = await _waitForHandshakeFrame(
+  final hello = await _waitForControlFrame(
     relay,
-    'handshake:client-hello',
+    'session:hello',
     startIndex: startIndex,
     timeout: timeout,
   );
-  final attemptId = clientHello['attemptId'] as String;
-  final phoneX25519Pub = base64.decode(clientHello['pubkey'] as String);
-  final nonce = base64.decode(clientHello['nonce'] as String);
-
-  final agentX25519KP = await X25519().newKeyPair();
-  final agentX25519Priv = Uint8List.fromList(
-    await agentX25519KP.extractPrivateKeyBytes(),
-  );
-  final agentX25519Pub = Uint8List.fromList(
-    (await agentX25519KP.extractPublicKey()).bytes,
-  );
-
-  final agentTranscript = buildTranscriptV2(
-    TranscriptFields(
-      registrationId: machineDeviceId,
-      role: 'agent',
-      agentDeviceId: machineDeviceId,
-      phoneDeviceId: phoneDeviceId,
-      agentX25519Pub: agentX25519Pub,
-      phoneX25519Pub: phoneX25519Pub,
-      nonce: nonce,
-    ),
-  );
-  final agentSig = await signTranscriptV2(
-    transcript: agentTranscript,
-    ed25519Seed: agentSeed,
-  );
-  final ss = await x25519SharedSecret(
-    privateKey: agentX25519Priv,
-    peerPublicKey: phoneX25519Pub,
-  );
-  final keys = await deriveSessionKeysV2(ss, agentTranscript);
-
+  final attemptId = hello['attemptId'] as String;
   relay.inject(
     IncomingPeerFrame(
       channel: 'control',
-      kind: FrameKind.handshake,
       payload: Uint8List.fromList(
         utf8.encode(
-          jsonEncode({
-            'type': 'handshake:agent-hello',
-            'attemptId': attemptId,
-            'pubkey': base64.encode(agentX25519Pub),
-            'sig': agentSig,
-          }),
+          jsonEncode({'type': 'established', 'attemptId': attemptId}),
         ),
       ),
     ),
   );
-
-  final t = E2eTransportDart(sendKey: keys.a2p, recvKey: keys.p2a);
-  relay.inject(
-    IncomingPeerFrame(
-      channel: 'control',
-      kind: FrameKind.sealed,
-      payload: await t.seal(
-        jsonEncode({
-          'type': 'handshake:agent-ready',
-          'attemptId': attemptId,
-          'confirm': base64.encode(await agentConfirmTagV2(keys.confirm)),
-        }),
-      ),
-    ),
-  );
-
-  // Wait for the resulting sealed app:ready before answering established —
-  // matches the real protocol's causal order.
-  final deadline = DateTime.now().add(const Duration(seconds: 5));
-  while (DateTime.now().isBefore(deadline)) {
-    var found = false;
-    for (final f in relay.sent) {
-      if (f.kind != FrameKind.sealed) continue;
-      final dec = await t.open(f.payload);
-      if (dec == null) continue;
-      final j = jsonDecode(dec) as Map<String, dynamic>;
-      if (j['type'] == 'app:ready' && j['attemptId'] == attemptId) {
-        found = true;
-        break;
-      }
-    }
-    if (found) break;
-    await Future<void>.delayed(const Duration(milliseconds: 5));
-  }
-
-  relay.inject(
-    IncomingPeerFrame(
-      channel: 'control',
-      kind: FrameKind.sealed,
-      payload: await t.seal(
-        jsonEncode({'type': 'established', 'attemptId': attemptId}),
-      ),
-    ),
-  );
-
-  return keys;
 }
 
 const _machineId = 'machine-1';
@@ -289,21 +185,16 @@ DeviceIdentity _identity() => DeviceIdentity(
 );
 
 /// The production mechanisms adapter over the fake relay. No pair step: trust
-/// is account-derived, so the ladder is dial -> presence -> E2E handshake.
-PeerConnectionMechanisms _mechanisms(
-  _RecordingRelay relay, {
-  required Uint8List agentPub,
-}) => PeerConnectionMechanisms(
-  peerRuntime: FixedPeerConnector(relay),
-  crypto: CryptoService(),
-  machineDeviceId: _machineId,
-  phoneDeviceId: _phoneId,
-  phoneEd25519Seed: List<int>.filled(32, 3),
-  resolveCoords: () async => ConnCoords(
-    relayUrl: 'ws://relay.test',
-    agentEd25519PubB64: base64.encode(agentPub),
-  ),
-);
+/// is account-derived, so the ladder is dial -> presence -> plaintext hello.
+PeerConnectionMechanisms _mechanisms(_RecordingRelay relay) =>
+    PeerConnectionMechanisms(
+      peerRuntime: FixedPeerConnector(relay),
+      machineDeviceId: _machineId,
+      resolveCoords: () async => const ConnCoords(
+        relayUrl: 'ws://relay.test',
+        agentEd25519PubB64: 'AGENT_PUB',
+      ),
+    );
 
 RelayCentralControlDialer _central(_RecordingRelay relay) =>
     RelayCentralControlDialer(
@@ -314,61 +205,29 @@ RelayCentralControlDialer _central(_RecordingRelay relay) =>
       mintToken: () async => 'license-token',
     );
 
-/// Brings the connection up against the fake agent and returns both the
-/// resulting session and the derived [SessionKeys], so a caller can seal
-/// further control-plane traffic (e.g. a `stream-ready` advert) as the agent
-/// would.
-Future<(MachineSession, SessionKeys)> _openConnectionWithKeys(
-  MachineConnection conn, {
-  required List<int> agentSeed,
-  required Uint8List agentPub,
-}) async {
+/// Brings the connection up against the fake agent and returns the resulting
+/// session.
+Future<MachineSession> _openConnection(MachineConnection conn) async {
   final relay = conn.relay as _RecordingRelay;
-  final agentFuture = _completeFakeAgentHandshake(
-    relay,
-    agentSeed: agentSeed,
-    machineDeviceId: _machineId,
-    phoneDeviceId: _phoneId,
-  );
-  conn.ensureStarted(
-    mechanisms: _mechanisms(relay, agentPub: agentPub),
-    central: _central(relay),
-  );
+  final agentFuture = _completeFakeAgentHello(relay);
+  conn.ensureStarted(mechanisms: _mechanisms(relay), central: _central(relay));
   final session = await conn.awaitSession();
-  final keys = await agentFuture;
-  return (session, keys);
-}
-
-Future<MachineSession> _openConnection(
-  MachineConnection conn, {
-  required List<int> agentSeed,
-  required Uint8List agentPub,
-}) async {
-  final (session, _) = await _openConnectionWithKeys(
-    conn,
-    agentSeed: agentSeed,
-    agentPub: agentPub,
-  );
+  await agentFuture;
   return session;
 }
 
 void main() {
   late _RecordingRelay relay;
-  late List<int> agentSeed;
-  late Uint8List agentPub;
 
-  setUp(() async {
+  setUp(() {
     relay = _RecordingRelay();
-    final (seed, pub) = await _agentEd25519Keypair();
-    agentSeed = seed;
-    agentPub = pub;
   });
 
   tearDown(() async {
     await relay.closeStreams();
   });
 
-  test('the supervisor drives dial → presence → E2E handshake and resolves '
+  test('the supervisor drives dial → presence → plaintext hello and resolves '
       'a usable MachineSession', () async {
     final conn = MachineConnection(
       machineDeviceId: _machineId,
@@ -377,11 +236,7 @@ void main() {
     );
     addTearDown(conn.dispose);
 
-    final session = await _openConnection(
-      conn,
-      agentSeed: agentSeed,
-      agentPub: agentPub,
-    );
+    final session = await _openConnection(conn);
 
     expect(relay.connectCalls, 1);
     expect(session.isEstablished, isTrue);
@@ -402,15 +257,12 @@ void main() {
     // recovery. Recovery is now a level-triggered re-evaluation, with nobody
     // re-invoking anything.
     relay.failNextConnects = 1;
-    final agentFuture = _completeFakeAgentHandshake(
+    final agentFuture = _completeFakeAgentHello(
       relay,
-      agentSeed: agentSeed,
-      machineDeviceId: _machineId,
-      phoneDeviceId: _phoneId,
       timeout: const Duration(seconds: 15),
     );
     conn.ensureStarted(
-      mechanisms: _mechanisms(relay, agentPub: agentPub),
+      mechanisms: _mechanisms(relay),
       central: _central(relay),
     );
 
@@ -431,7 +283,7 @@ void main() {
 
   test('two projects on the SAME machine share the ONE MachineSession — a '
       'second bring-up reuses the running supervisor with no second '
-      'dial/handshake', () async {
+      'dial/hello', () async {
     final conn = MachineConnection(
       machineDeviceId: _machineId,
       crypto: CryptoService(),
@@ -439,18 +291,14 @@ void main() {
     );
     addTearDown(conn.dispose);
 
-    final session1 = await _openConnection(
-      conn,
-      agentSeed: agentSeed,
-      agentPub: agentPub,
-    );
+    final session1 = await _openConnection(conn);
 
     // Simulate a SECOND project on this machine resolving its transport —
     // agentTransportForProvider calls ensureStarted/awaitSession again for
     // every project id; the machine's supervisor must already be running and
     // must not re-dial.
     conn.ensureStarted(
-      mechanisms: _mechanisms(relay, agentPub: agentPub),
+      mechanisms: _mechanisms(relay),
       central: _central(relay),
     );
     final session2 = await conn.awaitSession();
@@ -476,28 +324,24 @@ void main() {
     );
     addTearDown(conn.dispose);
 
-    final (session, keys) = await _openConnectionWithKeys(
-      conn,
-      agentSeed: agentSeed,
-      agentPub: agentPub,
-    );
+    final session = await _openConnection(conn);
 
     // The agent advertises a project's stream unprompted (e.g. as part of
-    // `agent:projects` on connect) — sealed under the established keys,
-    // exactly as MachineSession's own outbound traffic is.
-    final agentSend = E2eTransportDart(sendKey: keys.a2p, recvKey: keys.p2a);
+    // `agent:projects` on connect) — plaintext, exactly as MachineSession's
+    // own outbound traffic is since Stage B.
     relay.inject(
       IncomingPeerFrame(
         channel: 'control',
-        kind: FrameKind.sealed,
-        payload: await agentSend.seal(
-          jsonEncode({
-            'm': {
-              'type': 'stream-ready',
-              'projectId': 'proj-a',
-              'streamId': 'stream-a',
-            },
-          }),
+        payload: Uint8List.fromList(
+          utf8.encode(
+            jsonEncode({
+              'm': {
+                'type': 'stream-ready',
+                'projectId': 'proj-a',
+                'streamId': 'stream-a',
+              },
+            }),
+          ),
         ),
       ),
     );

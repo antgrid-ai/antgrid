@@ -86,13 +86,9 @@ class LeasedPeerLink implements PeerLink {
   @override
   PeerLinkDiagnostic? get netTap => inner.netTap;
   @override
-  Future<PeerSendOutcome> sendFrame(
-    String channel,
-    Uint8List payload, {
-    FrameKind kind = FrameKind.sealed,
-  }) async {
+  Future<PeerSendOutcome> sendFrame(String channel, Uint8List payload) async {
     if (!isDispatchAllowed) return PeerSendOutcome.closed;
-    return inner.sendFrame(channel, payload, kind: kind);
+    return inner.sendFrame(channel, payload);
   }
 
   @override

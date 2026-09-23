@@ -1,14 +1,13 @@
 import {
   CHANNEL_WINDOW_BYTES,
   MAX_SEND_QUEUE_BYTES,
-  SEAL_OVERHEAD_BYTES,
   SOCKET_INFLIGHT_BYTES,
   WINDOW_RESYNC_AGE_MS,
 } from "antgrid-wire";
 import type { Channel } from "./message-bus";
 
 /** What became of a message handed to the send path. "sent" = every frame of
- *  it was sealed and written; "dropped" = at least one never will be (no
+ *  it was written; "dropped" = at least one never will be (no
  *  session, queue cleared, stream detached, sink refused); "too-large" = the
  *  fragmenter refused it, decided synchronously at enqueue; "gated" = the
  *  stream's outbound authorization (`mayDeliver`, the remote-access switch)
@@ -16,9 +15,8 @@ import type { Channel } from "./message-bus";
  *  machine is not talking to it. Only StreamHandle.sendTunnel produces it. */
 export type SendOutcome = "sent" | "dropped" | "too-large" | "gated";
 
-/** One frame waiting to be sealed and written: either a whole envelope or one
- *  fragment of one. Plaintext, because sealing happens at dequeue — a frame
- *  queued across a rekey must go out under the keys live at that moment. */
+/** One frame waiting to be written: either a whole envelope or one fragment
+ *  of one. */
 export interface QueuedAppFrame {
   channel: Channel;
   /** `CONTROL_STREAM_ID` for the control plane. */
@@ -37,8 +35,7 @@ export interface QueuedAppFrame {
 }
 
 export interface SchedulerSink {
-  /** Seal + write one frame NOW. Returns the sealed payload length that hit
-   *  the wire, or null if it was dropped (no session, socket not open). */
+  /** Write one frame NOW. Returns the payload length that hit the wire, or null if it was dropped (no session, socket not open). */
   send(frame: QueuedAppFrame): number | null | PendingSinkWrite;
 }
 
@@ -59,7 +56,7 @@ export type DrainResult = "idle" | "held" | "blocked";
  * {@link drain}, so there is a single place where a frame reaches the wire.
  * `charge`, `uncharge` and `credit` never drain by themselves.
  *
- * Accounting is in SEALED payload bytes — the number the sender writes and the
+ * Accounting is in frame payload bytes — the number the sender writes and the
  * receiver reads back — so a peer's cumulative credit and a relay drop report
  * are directly comparable with what was charged.
  */
@@ -75,7 +72,7 @@ export class SendScheduler {
 
   private queues: Record<Channel, QueuedAppFrame[]> = { control: [], preview: [] };
   private queuedBytes: Record<Channel, number> = { control: 0, preview: 0 };
-  /** Cumulative sealed bytes written on this session, queued or bypassed. */
+  /** Cumulative payload bytes written on this session, queued or bypassed. */
   private sent: Record<Channel, number> = { control: 0, preview: 0 };
   /** Clamped to `sent`: over-credit is discarded rather than banked, so
    *  in-flight can never exceed one window per channel. */
@@ -199,8 +196,8 @@ export class SendScheduler {
    *  never gated by it. Charging them is what makes a relay drop report exact —
    *  the report names only a channel and a length, so bytes invisible to the
    *  accounting would un-charge something never charged. */
-  charge(ch: Channel, sealedBytes: number): void {
-    this.sent[ch] += sealedBytes;
+  charge(ch: Channel, bytes: number): void {
+    this.sent[ch] += bytes;
   }
 
   /** The relay reported it discarded `bytes` of this sender's frames on `ch`.
@@ -315,7 +312,9 @@ export class SendScheduler {
   }
 
   private fits(f: QueuedAppFrame): boolean {
-    const need = f.plaintextBytes + SEAL_OVERHEAD_BYTES;
+    // Post Stage-B, the wire carries the plaintext bytes as-is: QUIC/TLS below
+    // this layer adds no per-message overhead the window needs to reserve for.
+    const need = f.plaintextBytes;
     // The `=== 0` arms are the deadlock guards: a frame larger than a limit
     // still goes out when nothing is outstanding on it.
     const chOk =

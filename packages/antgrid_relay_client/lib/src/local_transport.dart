@@ -6,6 +6,7 @@ import 'package:web_socket_channel/io.dart';
 
 import 'agent_transport.dart';
 import 'buffered_agent_transport.dart';
+import 'connection_handshake.dart' show kSessionHelloCapabilities;
 import 'relay_service.dart' show RelayNetTap;
 
 /// Thrown when the local agent's WebSocket closes during the handshake.
@@ -84,11 +85,7 @@ class LocalTransport extends BufferedAgentTransport {
     this.appVersion = 'app',
     this.connectTimeout = const Duration(seconds: 15),
     this.netTap,
-    this.capabilities = const {
-      'checkoutRouting': true,
-      'pullsTree': true,
-      'terminalFramesV1': true,
-    },
+    this.capabilities = kSessionHelloCapabilities,
   });
 
   /// Records a frame that never left, or never reached dispatch.

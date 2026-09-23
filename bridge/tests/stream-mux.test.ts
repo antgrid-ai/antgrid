@@ -12,8 +12,6 @@ import {
 import { MessageBus, type Channel } from "../src/message-bus";
 import { createMessage } from "../src/protocol";
 import { ed25519Pair, TestPeerSessionOwner } from "./test-peer-session-owner";
-import { generateEphemeralKeypair } from "../src/key-exchange";
-import type { E2eTransport } from "../src/e2e";
 
 function makeTransport(peers: Map<string, PeerSessionView> = new Map()) {
   const closed: string[] = [];
@@ -391,28 +389,31 @@ const PHONE_ID = "phone-1";
 let clients: TestPeerSessionOwner[] = [];
 afterEach(() => { for (const c of clients.splice(0)) try { c.close(); } catch {} });
 
-/** Establish a real E2E session on a REAL (non-forTest) TestPeerSessionOwner and return
- *  the phone-side transport the test drives against it. Unlike forTest() â€”
- *  which stubs the mux to a no-op for handshake-only tests â€” this needs the
- *  real StreamMux wired to real sendJson/sendAppEnvelope, so it constructs the
- *  client normally and overrides `sendPayload` (same shadowing trick forTest
- *  uses) plus a stubbed OPEN socket so `sendJson`'s stream-open/close land in
- *  the same observable `sent` array as sealed application traffic. */
-function establish(): { client: TestPeerSessionOwner; sent: Array<string | Buffer>; phoneTransport: E2eTransport } {
+/** Establish a real session on a REAL (non-forTest) TestPeerSessionOwner.
+ *  Unlike forTest() — which stubs the mux to a no-op for hello-only tests —
+ *  this needs the real StreamMux wired to real sendJson/sendAppEnvelope, so it
+ *  constructs the client normally and overrides `sendPayload` (same shadowing
+ *  trick forTest uses) plus a stubbed OPEN socket so `sendJson`'s
+ *  stream-open/close land in the same observable `sent` array as application
+ *  traffic. */
+function establish(): { client: TestPeerSessionOwner; sent: Array<string | Buffer> } {
   const sent: Array<string | Buffer> = [];
   const client = new TestPeerSessionOwner({
     identity: {
       deviceId: AGENT_DEVICE_ID, deviceName: "agent", createdAt: new Date().toISOString(),
       ed25519PublicKey: "unused", ed25519PrivateKey: ed25519Pair().seedB64,
     },
-    generateKeypair: generateEphemeralKeypair,
   });
   clients.push(client);
   client.setNativeWriter((p) => { sent.push(p); return true; });
   (client as any).ws = { readyState: WebSocket.OPEN, send: (d: string) => sent.push(d), close: () => {} };
 
   client.establish(PHONE_ID, { attemptId: "a1" });
-  return { client, sent, phoneTransport: client.peerTransport(PHONE_ID)! };
+  return { client, sent };
+}
+
+function parse(frame: string | Buffer): any {
+  return JSON.parse(typeof frame === "string" ? frame : frame.toString("utf8"));
 }
 
 describe("StreamMux over a live TestPeerSessionOwner (wire-level envelope tagging)", () => {
@@ -425,8 +426,8 @@ describe("StreamMux over a live TestPeerSessionOwner (wire-level envelope taggin
     expect(admitted).toEqual([handle.streamId]);
   });
 
-  test("outbound: a bus publish on an attached stream is sealed as {s: streamId, m: msg}", () => {
-    const { client, sent, phoneTransport } = establish();
+  test("outbound: a bus publish on an attached stream is sent as {s: streamId, m: msg}", () => {
+    const { client, sent } = establish();
     const bus = new MessageBus();
     const handle = client.attachStream(bus, {});
     const sentBefore = sent.length;
@@ -435,14 +436,13 @@ describe("StreamMux over a live TestPeerSessionOwner (wire-level envelope taggin
     bus.publish(msg, "control");
 
     expect(sent.length).toBe(sentBefore + 1);
-    const envelopeJson = phoneTransport.open(sent[sent.length - 1] as Buffer);
-    const envelope = JSON.parse(envelopeJson!);
+    const envelope = parse(sent[sent.length - 1]!);
     expect(envelope.s).toBe(handle.streamId);
     expect(envelope.m).toEqual(msg);
   });
 
-  test("inbound: a sealed {s: streamId, m} envelope is routed to the matching stream's bus", () => {
-    const { client, phoneTransport } = establish();
+  test("inbound: a {s: streamId, m} envelope is routed to the matching stream's bus", () => {
+    const { client } = establish();
     const bus = new MessageBus();
     const received: unknown[] = [];
     bus.setInboundHandler((m) => received.push(m));
@@ -454,8 +454,8 @@ describe("StreamMux over a live TestPeerSessionOwner (wire-level envelope taggin
     expect(received).toEqual([msg]);
   });
 
-  test("inbound envelope for an unknown streamId is dropped (no stream sees it) and answered with a sealed control-plane stream-invalid", () => {
-    const { client, sent, phoneTransport } = establish();
+  test("inbound envelope for an unknown streamId is dropped (no stream sees it) and answered with a control-plane stream-invalid", () => {
+    const { client, sent } = establish();
     const bus = new MessageBus();
     const received: unknown[] = [];
     bus.setInboundHandler((m) => received.push(m));
@@ -467,9 +467,9 @@ describe("StreamMux over a live TestPeerSessionOwner (wire-level envelope taggin
     expect(received).toEqual([]);
     // The notice rides the control plane (`s` omitted), so the phone reads it
     // without a stream binding â€” which is the whole point: it has none.
-    const sealedReplies = sent.filter((s): s is Buffer => Buffer.isBuffer(s));
-    expect(sealedReplies).toHaveLength(1);
-    const envelope = JSON.parse(phoneTransport.open(sealedReplies[0]!)!);
+    const replies = sent.filter((s): s is Buffer => Buffer.isBuffer(s));
+    expect(replies).toHaveLength(1);
+    const envelope = parse(replies[0]!);
     expect(envelope.s).toBeUndefined();
     expect(envelope.m).toMatchObject({ type: "stream-invalid", streamId: "deadbeefdeadbeef" });
   });

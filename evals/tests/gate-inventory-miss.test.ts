@@ -1,66 +1,133 @@
 import { test, expect } from "bun:test";
-import { establishNativeSession, setupTestEnv } from "../helpers/harness";
-import { RelayClient } from "../helpers/relay-client";
+import { randomUUID } from "node:crypto";
+import { Endpoint, EndpointAddr, EndpointId } from "@number0/iroh/index.js";
+import { decodePeerFrame, encodePeerFrame, PEER_ALPN, type PeerAuthorizationSnapshot } from "antgrid-wire";
+import { EndpointEnrollment } from "../../bridge/src/peer/enrollment";
+import { PeerRecords } from "../../bridge/src/peer/records";
 import { createMessage } from "../../bridge/src/protocol";
-
-/** Round-trip the control-plane `state.snapshot` RPC and assert a sane
- *  (`ok:true`) response — mirrors `gate-account-trust.test.ts`'s helper of
- *  the same shape (not imported, to keep this file's dependency on that one
- *  minimal; the RPC itself is the shared contract, not the helper). */
-async function assertSnapshot(app: RelayClient, label: string): Promise<void> {
-  const requestId = `gate-inventory-miss-${label}`;
-  const responseP = app.waitFor((m: any) => m.type === "response" && m.requestId === requestId, 8_000);
-  app.sendEncrypted(createMessage("request", { requestId, method: "state.snapshot", params: { types: ["*"] } }));
-  const res = (await responseP) as { ok?: boolean };
-  expect(res.ok).toBe(true);
-}
+import { generateEvalAuth, setupTestEnv } from "../helpers/harness";
 
 /**
- * Failure-matrix row: a phone is added to the account AFTER the agent
- * already started (and cached its account-device inventory). The bridge's
- * `TrustedPeersProvider` misses the unknown identity on its first
- * client-hello, throttled-refreshes from `/account/devices/me/peers`
- * (`noteMiss()`), and a LATER client-hello attempt is admitted — no pairing
- * ceremony, no bridge restart.
+ * Failure-matrix row: a phone's Iroh endpoint the agent's cached
+ * authorization lease has never seen. After the Stage B flip the native path
+ * authorizes at QUIC accept time (`acceptPeer` in
+ * `bridge/src/peer/native-host-connection.ts`) — an endpoint absent from the
+ * lease is refused outright (the connection is closed) rather than admitted
+ * and then silently dropping an unrecognized app-layer identity. The very
+ * next connect from that same endpoint after it registers is what admits it:
+ * `acceptPeer` refreshes the lease inline on an unrecognized endpoint id.
  *
- * `env.license.addAccountDevice({ kind: "app" })` registers a FRESH identity
- * with the fake license API's account inventory strictly AFTER
- * `setupTestEnv` already returned — i.e. after the agent's own startup
- * fetch — so this is a genuinely late addition, unlike the up-front seeding
- * `setupTestEnv` does for `env.appIdentity`. See its doc comment.
- *
- * This drives the retry itself via `establishNativeSession` (same carrier,
- * resending `client-hello` — the bridge drops an unknown identity's first
- * hello silently rather than answering with anything the phone could
- * distinguish from "not yet", so a bare single-shot handshake attempt here
- * would deterministically time out; only a RESENT hello lands after the
- * inventory refresh completes) rather than `TestApp.connect` (documented
- * single-shot).
- *
- * What makes this go red without the fix: if the bridge only ever consulted
- * its STARTUP-time inventory snapshot (no `noteMiss()`/refresh), every
- * resend would keep missing and `establishNativeSession` would exhaust its
- * retry budget and throw — a real, catchable failure, not a vacuous pass.
+ * Superseded: this used to exercise `TrustedPeersProvider.noteMiss()` racing
+ * a phone whose Ed25519 identity reached the account inventory after the
+ * agent's own startup fetch (see D6, docs/iroh-reduction/stage-B-waves.md).
+ * That provider, and native admission's use of it, are deleted — the lease
+ * check below is the only gate left.
  */
-test("a phone added to the account after agent start is admitted without ceremony", async () => {
+test("an endpoint absent from the lease is refused at accept, and admitted once it registers", async () => {
   const env = await setupTestEnv({ fixtureName: "basic" });
-  let phone: RelayClient | undefined;
+  let rawEndpoint: Endpoint | undefined;
+  let connection: Awaited<ReturnType<Endpoint["connect"]>> | undefined;
+  let records: PeerRecords | undefined;
   try {
-    const late = await env.license.addAccountDevice({ kind: "app" });
+    const credential = generateEvalAuth();
+    env.license.provision(credential);
+    const token = async (): Promise<string> => {
+      const response = await fetch(`${env.license.url.replace(/\/$/, "")}/api/auth/oauth2/token`, {
+        method: "POST",
+        headers: {
+          authorization: `Basic ${Buffer.from(`${credential.clientId}:${credential.clientSecret}`).toString("base64")}`,
+        },
+      });
+      if (!response.ok) throw new Error(`Eval endpoint token failed: ${response.status}`);
+      const body = (await response.json()) as { access_token?: string };
+      if (!body.access_token) throw new Error("Eval endpoint token response omitted access_token");
+      return body.access_token;
+    };
+    const enrollment = new EndpointEnrollment(
+      { accountId: credential.userId, deviceId: credential.deviceUuid, enrollmentId: credential.clientId },
+      credential.endpointSecret,
+      credential.ed25519Priv,
+      env.license.url,
+      token,
+    );
+    try {
+      let target: { endpointId: string } | null = null;
+      for (let attempt = 0; attempt < 100 && !target; attempt++) {
+        const snapshot = (await enrollment.authorization()) as PeerAuthorizationSnapshot;
+        target = snapshot.peers.find((peer) => peer.deviceId === env.agentDeviceId)?.endpoint ?? null;
+        if (!target) await Bun.sleep(100);
+      }
+      if (!target) throw new Error(`agent ${env.agentDeviceId} never published a native endpoint`);
 
-    phone = await env.connectNativeApp({
-      name: "gate-inventory-miss-app",
-      identity: late,
-      accountDeviceId: late.deviceId,
-    });
-    // Bounded well under this test's 60s timeout (15 * (2000+300) ~= 34.5s
-    // worst case) so a genuine admission failure surfaces as this function's
-    // own thrown assertion, not an opaque Bun test-timeout.
-    await establishNativeSession(phone, env.agentDeviceId, env.agent.ed25519Pubkey, { attempts: 15 });
+      const builder = Endpoint.builder();
+      builder.applyMinimal();
+      builder.secretKey(enrollment.seedBytes());
+      builder.bindAddr("127.0.0.1:0");
+      rawEndpoint = await builder.bind();
+      const addr = new EndpointAddr(EndpointId.fromString(target.endpointId), undefined, [`127.0.0.1:${env.nativePort}`]);
+      const alpn = Array.from(Buffer.from(PEER_ALPN));
 
-    await assertSnapshot(phone, "baseline");
+      // (1) This endpoint has never registered, so the agent's inline
+      // accept-time refresh still finds nothing for it — refused, not a
+      // connection that opens and then drops the first frame.
+      // QUIC completes the TLS handshake and opens a stream locally before the
+      // agent has judged the endpoint, so a refusal shows only as the agent
+      // closing the connection.
+      let refused = false;
+      let refusedConnection: Awaited<ReturnType<Endpoint["connect"]>> | undefined;
+      try {
+        refusedConnection = await rawEndpoint.connect(addr, alpn);
+        const outcome = await Promise.race([
+          refusedConnection.closed().then(() => "closed", () => "closed"),
+          Bun.sleep(10_000).then(() => "open"),
+        ]);
+        refused = outcome === "closed";
+      } catch {
+        refused = true;
+      } finally {
+        refusedConnection?.close(1n, []);
+      }
+      expect(refused).toBe(true);
+
+      // (2) Registering is the refresh trigger: the very next connect from
+      // this same endpoint is admitted.
+      await enrollment.register();
+      // The agent refuses a repeat of an unrecognized id without refreshing
+      // for UNKNOWN_ENDPOINT_REFRESH_WINDOW_MS (5s, native-host-connection.ts);
+      // the connect that proves admission has to land after it.
+      await Bun.sleep(5_500);
+      connection = await rawEndpoint.connect(addr, alpn);
+      const stream = await connection.openBi();
+      records = new PeerRecords(stream, () => true, () => connection?.close(1n, []));
+      const attemptId = randomUUID();
+      const send = (value: object) =>
+        records!.send(encodePeerFrame({ type: "message", channel: "control" }, Buffer.from(JSON.stringify(value), "utf8")));
+      const read = async (predicate: (value: any) => boolean): Promise<any> => {
+        for (;;) {
+          const frame = decodePeerFrame(await records!.read());
+          const value = JSON.parse(Buffer.from(frame.payload).toString("utf8"));
+          const message = value.m ?? value;
+          if (predicate(message)) return message;
+        }
+      };
+      await send({
+        type: "session:hello",
+        attemptId,
+        capabilities: { checkoutRouting: true, pullsTree: true, terminalFramesV1: true },
+      });
+      await read((value) => value.type === "established" && value.attemptId === attemptId);
+
+      const requestId = "gate-inventory-miss-baseline";
+      await send({ m: createMessage("request", { requestId, method: "state.snapshot", params: { types: ["*"] } }) });
+      const response = await read((value) => value.type === "response" && value.requestId === requestId);
+      expect(response.ok).toBe(true);
+    } finally {
+      enrollment.close();
+    }
   } finally {
-    await phone?.disconnect();
+    records?.close();
+    connection?.close(1n, []);
+    await rawEndpoint?.close();
     await env.teardown();
   }
 }, 60_000);

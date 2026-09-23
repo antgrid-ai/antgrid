@@ -61,8 +61,8 @@ import type { TestEnv } from "./harness";
     return this.client.lifecycleGenerations;
   }
 
-  /** Prove the current native/E2E session is responsive without dialing,
-   * reconnecting, or deriving replacement keys. */
+  /** Prove the current native session is responsive without dialing,
+   * reconnecting, or re-running the hello. */
   waitForStateSnapshot(opts: { timeoutMs?: number } = {}): Promise<{ ok: true }> {
     return this.snapshotRoundTrip(opts.timeoutMs ?? 10_000);
   }
@@ -85,9 +85,10 @@ import type { TestEnv } from "./harness";
       }
       try {
         await this.client.reconnectNative();
-        await this.client.performE2EHandshake(this.env.agentDeviceId, Math.min(2_000, Math.max(500, deadline - Date.now())), {
-          agentEd25519Pub: this.env.agent.ed25519Pubkey,
-        });
+        await this.client.performE2EHandshake(
+          this.env.agentDeviceId,
+          Math.min(2_000, Math.max(500, deadline - Date.now())),
+        );
       } catch (err) {
         lastErr = err;
         await Bun.sleep(300);

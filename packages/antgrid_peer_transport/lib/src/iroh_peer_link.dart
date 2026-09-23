@@ -198,7 +198,6 @@ class IrohPeerLink implements PeerLink {
           IncomingPeerFrame(
             channel: frame.header['channel'] as String,
             payload: frame.payload,
-            kind: frame.kind,
           ),
         );
       }
@@ -210,11 +209,7 @@ class IrohPeerLink implements PeerLink {
   }
 
   @override
-  Future<PeerSendOutcome> sendFrame(
-    String channel,
-    Uint8List payload, {
-    FrameKind kind = FrameKind.sealed,
-  }) {
+  Future<PeerSendOutcome> sendFrame(String channel, Uint8List payload) {
     if (!isDispatchAllowed) return Future.value(PeerSendOutcome.closed);
     if (!['control', 'preview'].contains(channel)) {
       _fail('INVALID_PEER_FRAME', false);
@@ -222,11 +217,7 @@ class IrohPeerLink implements PeerLink {
     }
     if (payload.length > kMaxFramePayload)
       return Future.value(PeerSendOutcome.tooLarge);
-    final frame = encodePeerFrame(
-      {'type': 'message', 'channel': channel},
-      payload,
-      kind,
-    );
+    final frame = encodePeerFrame({'type': 'message', 'channel': channel}, payload);
     final size = frame.length + 4;
     if (_queued + size > kSocketInflightBytes)
       return Future.value(PeerSendOutcome.backpressured);

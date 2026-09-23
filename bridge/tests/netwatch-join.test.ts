@@ -9,7 +9,7 @@ let seq = 0;
 function ev(partial: Partial<NetwatchEvent> & { at: number; dir: "tx" | "rx" }): NetwatchEvent {
   return {
     seq: ++seq,
-    kind: "sealed",
+    kind: "frame",
     transport: "relay",
     channel: "control",
     ...partial,
@@ -133,7 +133,7 @@ describe("joinCaptures", () => {
       ev({ at: 2000, dir: "tx", frameId: "dup", msgType: "ping" }),
     ];
     const bridge = [
-      ev({ at: 1010, dir: "rx", kind: "drop", frameId: "dup", reason: "decrypt-failed" }),
+      ev({ at: 1010, dir: "rx", kind: "drop", frameId: "dup", reason: "pre-establishment" }),
       ev({ at: 2050, dir: "rx", frameId: "dup" }),
     ];
 
@@ -270,12 +270,12 @@ describe("antgrid watch --join", () => {
     const base = Date.now() - 30_000;
     const { dir, appLog, server } = seeded(
       [
-        { seq: 1, at: base, dir: "rx", kind: "sealed", transport: "relay", channel: "control", frameId: "aa" },
-        { seq: 2, at: base + 5, dir: "rx", kind: "sealed", transport: "relay", channel: "control", frameId: "solo" },
+        { seq: 1, at: base, dir: "rx", kind: "frame", transport: "relay", channel: "control", frameId: "aa" },
+        { seq: 2, at: base + 5, dir: "rx", kind: "frame", transport: "relay", channel: "control", frameId: "solo" },
       ] as NetwatchEvent[],
       [
-        JSON.stringify({ seq: 1, at: base - 20, dir: "tx", kind: "sealed", transport: "relay", origin: "app", channel: "control", frameId: "aa", msgType: "terminal:input" }),
-        JSON.stringify({ seq: 2, at: base + 2, dir: "tx", kind: "sealed", transport: "relay", origin: "app", channel: "control", frameId: "vanished", msgType: "file:read" }),
+        JSON.stringify({ seq: 1, at: base - 20, dir: "tx", kind: "frame", transport: "relay", origin: "app", channel: "control", frameId: "aa", msgType: "terminal:input" }),
+        JSON.stringify({ seq: 2, at: base + 2, dir: "tx", kind: "frame", transport: "relay", origin: "app", channel: "control", frameId: "vanished", msgType: "file:read" }),
         "{ this line is torn",
       ],
     );

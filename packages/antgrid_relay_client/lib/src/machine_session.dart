@@ -5,8 +5,6 @@ import 'dart:typed_data';
 
 import 'agent_transport.dart';
 import 'buffered_agent_transport.dart';
-import 'e2e/key_schedule.dart';
-import 'e2e/transport.dart';
 import 'flow.dart';
 import 'frag.dart';
 import 'frame.dart';
@@ -16,10 +14,9 @@ import 'peer_link.dart';
 import 'send_scheduler.dart';
 
 /// Liveness constants; mirror `bridge/src/relay-client.ts`.
-/// Spec: docs/protocol/e2e-handshake.md §"Sealed liveness".
 const int kPingSilenceSeconds = 20;
 const int kMaxMissedPongs = 2;
-const int _kConsecutiveTimeoutsToRekey = 3;
+const int _kConsecutiveTimeoutsToClose = 3;
 
 /// One `stream-unbound` per dead id per this window. The agent mutes on the
 /// first, so this paces the RETRY that covers a lost notice — long enough that
@@ -46,14 +43,14 @@ String _uuidV4() {
       '-${h.substring(16, 20)}-${h.substring(20)}';
 }
 
-/// Drives ONE E2E handshake attempt-cycle over a [MachineSession]'s socket,
-/// completing only after the agent's sealed `established`.
-/// The app implements this wrapping `ConnectionHandshake`; the package stays
-/// Flutter-free. Each [perform] must run a FRESH attempt (new `attemptId`).
-abstract class SessionHandshaker {
-  /// Runs one full handshake to `established`. Returns the confirmed
-  /// [SessionKeys], or null on timeout / verification failure.
-  Future<SessionKeys?> perform();
+/// Drives ONE hello attempt-cycle over a [MachineSession]'s socket, completing
+/// only once the bridge's `established` arrives. The app implements this
+/// wrapping `ConnectionHandshake`; the package stays Flutter-free. Each
+/// [perform] must run a FRESH attempt (new `attemptId`).
+abstract interface class SessionHandshaker {
+  /// Runs one hello to `established`. True once it lands, false on timeout /
+  /// abort / a link that will not accept the hello.
+  Future<bool> perform();
 
   /// Abort any in-flight [perform] (session teardown / supersession).
   void abort();
@@ -82,11 +79,22 @@ class ProjectBindException implements Exception {
   String toString() => 'ProjectBindException($code): $message';
 }
 
-/// One phone↔machine E2E session multiplexed over a single [PeerLink]
-/// socket. Owns the single [SessionKeys] set, the handshake/rekey driver, the
-/// per-machine fragment reassembler, liveness, and the stream demux. Project
-/// traffic rides sealed `{s, m}` envelopes; `s` absent/"0" is the machine
-/// control plane. Replaces the v2 socket-per-project `RelayTransport`.
+/// One established hello, identified by a monotonic epoch rather than a bool:
+/// object identity lets a send fence itself against a rotation that happens
+/// mid-await (`identical(gen, _generation)`), which a bool cannot distinguish
+/// from "still the same state" when it flips false then true again before the
+/// awaited call returns.
+class _SessionGeneration {
+  _SessionGeneration(this.epoch);
+  final int epoch;
+}
+
+/// One phone↔machine session multiplexed over a single [PeerLink] socket.
+/// QUIC/TLS between the two lease-authorized endpoints is the confidentiality
+/// layer; this class owns the hello/close driver, the per-machine fragment
+/// reassembler, liveness, and the stream demux. Project traffic rides plain
+/// `{s, m}` envelopes; `s` absent/"0" is the machine control plane. Replaces
+/// the v2 socket-per-project `RelayTransport`.
 class MachineSession {
   final PeerLink relay;
 
@@ -108,7 +116,7 @@ class MachineSession {
   /// [StreamTransport.refreshSnapshot] for why a pull is retried at all.
   final Duration snapshotTimeout;
 
-  /// Silence after which liveness sends a sealed `ping`, and the period the
+  /// Silence after which liveness sends a `ping`, and the period the
   /// liveness timer itself runs at. Injectable so a test need not wait out the
   /// real interval.
   final Duration pingSilence;
@@ -144,10 +152,11 @@ class MachineSession {
     // a swallowing listener so that never trips the unhandled-error zone hook;
     // every real `await ready` still receives the error.
     _readyCompleter.future.ignore();
-    _armKeysReady();
+    _armEstablishedReady();
   }
 
-  SessionKeys? _keys;
+  _SessionGeneration? _generation;
+  int _epochCounter = 0;
   final Map<String, StreamTransport> _streams = {};
 
   StreamSubscription<IncomingPeerFrame>? _msgSub;
@@ -156,7 +165,6 @@ class MachineSession {
   Timer? _livenessTimer;
 
   bool _disposed = false;
-  int _dispatchGeneration = 0;
   bool _established = false;
   bool _handshakeInFlight = false;
   int _missedPongs = 0;
@@ -170,10 +178,11 @@ class MachineSession {
 
   final _readyCompleter = Completer<void>();
 
-  /// Completes each time [_keys] are installed and is re-armed on socket loss,
-  /// so a bind issued across a reconnect can wait for the next establishment
-  /// instead of failing on the transient keyless window.
-  late Completer<void> _keysReady;
+  /// Completes each time [_generation] is installed and is re-armed on socket
+  /// loss, so a bind issued across a reconnect can wait for the next
+  /// establishment instead of failing on the transient pre-establishment
+  /// window.
+  late Completer<void> _establishedReady;
 
   final _established$ = StreamController<void>.broadcast();
   final _takeovers = StreamController<void>.broadcast();
@@ -183,35 +192,24 @@ class MachineSession {
   final _streamReadyController =
       StreamController<({String projectId, String streamId})>.broadcast();
 
-  /// channel → the decrypt-and-dispatch chain currently draining for it. See
-  /// [_onPeerFrame]; an entry lives only while that channel has work in flight.
-  final Map<String, Future<void>> _inboundTails = {};
-
-  /// Sealed bytes allowed in flight per channel and across the socket before
-  /// the agent must credit them.
+  /// Frame-payload bytes allowed in flight per channel and across the socket
+  /// before the agent must credit them.
   final int _channelWindowBytes;
   final int _socketInflightBytes;
 
-  /// Cumulative sealed payload bytes received on each channel this session, and
-  /// how much of that has already been credited back to the agent. Both reset at
+  /// Cumulative payload bytes received on each channel this session, and how
+  /// much of that has already been credited back to the agent. Both reset at
   /// establishment, which is the same instant the agent's send windows reset.
   final Map<String, int> _consumed = {'control': 0, 'preview': 0};
   final Map<String, int> _creditSent = {'control': 0, 'preview': 0};
 
-  /// Bumped wherever the send windows are zeroed. Inbound frames are decrypted
-  /// on an async chain, so one that arrived under the previous session can be
-  /// dispatched after the reset; a `credit` from it carries that session's
-  /// cumulative total, which would sit far ahead of everything the new session
-  /// will ever say and leave every real credit reading as stale.
-  int _sessionEpoch = 0;
-
-  /// Every outbound app frame passes through here: one drain loop, sealed at
+  /// Every outbound app frame passes through here: one drain loop, encoded at
   /// dequeue, control ahead of preview. Session frames are written directly and
   /// so overtake any backlog — but they still land behind whatever is already
   /// inside the socket's own sink, and nothing in this stack can read that
   /// sink, so the scheduler's accounting is the only bound on it there is.
   late final SendScheduler _scheduler = SendScheduler(
-    sink: _sealAndSend,
+    sink: _encodeAndSend,
     window: _channelWindowBytes,
     socketCap: _socketInflightBytes,
     // A gate stalled with data queued is the one failure here with no other
@@ -274,23 +272,22 @@ class MachineSession {
   /// async errors while real awaiters still observe them.
   Future<void> get ready => _readyCompleter.future;
 
-  /// `true` once the E2E session is established at least once and still live.
+  /// `true` once the peer session is established at least once and still live.
   bool get isEstablished => _established;
 
-  /// Fires on EVERY (re)establishment, including rekeys. [ready] cannot serve
+  /// Fires on EVERY (re)establishment. [ready] cannot serve
   /// that purpose — it is one-shot, so after the first establishment it can no
   /// longer tell a caller that the session came back.
   Stream<void> get established => _established$.stream;
 
-  /// Fires when the agent hands this machine's E2E session to another device
-  /// (sealed `session-takeover`). Report-only: the session is already torn down
+  /// Fires when the agent hands this machine's session to another device
+  /// (`session-takeover`). Report-only: the session is already torn down
   /// when this emits and NOTHING here re-establishes it, because two devices
   /// each reclaiming on takeover would evict each other forever.
   Stream<void> get takeoverEvents => _takeovers.stream;
 
-  /// Fires when a handshake attempt ends with no live session — the E2E layer
-  /// died while the socket underneath it stayed up (a rekey the peer never
-  /// confirmed).
+  /// Fires when a hello attempt ends with no live session (the agent never
+  /// answered `established`).
   ///
   /// Nothing here retries: retry pacing and give-up belong to the caller's
   /// connection supervisor, and a supervisor can only re-drive what it is told
@@ -377,15 +374,16 @@ class MachineSession {
     if (known != null) return known;
     // One deadline spans both waits below, so a bind can never take 2×[timeout].
     final deadline = DateTime.now().add(timeout);
-    // sendOnStream drops silently without keys, so the start message has to
-    // wait for them. Keys are per-connection and nulled on every socket blip
-    // while the reconnect re-establishes within seconds — treating that window
-    // as a hard failure turns a routine blip into a user-visible bind error.
-    if (_keys == null) {
+    // sendOnStream drops silently pre-establishment, so the start message has
+    // to wait for it. The session is per-connection and nulled on every socket
+    // blip while the reconnect re-establishes within seconds — treating that
+    // window as a hard failure turns a routine blip into a user-visible bind
+    // error.
+    if (_generation == null) {
       try {
-        await _keysReady.future.timeout(_remainingUntil(deadline));
+        await _establishedReady.future.timeout(_remainingUntil(deadline));
       } on TimeoutException {
-        throw StateError('bindProject: E2E session not established');
+        throw StateError('bindProject: session not established');
       }
       // The post-establish `agent:projects` re-advert may have bound the
       // project while we waited — no need to ask the agent to start it again.
@@ -430,7 +428,7 @@ class MachineSession {
     String channel,
   ) async {
     final type = message['type'] is String ? message['type'] as String : null;
-    if (_keys == null) {
+    if (_generation == null) {
       // The phone-side mirror of the bridge's `no-e2e-session` drop. Usually
       // benign (the bridge replays durable state on establishment), but it is
       // also where a session that never comes back shows up first, and nothing
@@ -451,7 +449,7 @@ class MachineSession {
       // count how long the drops went on.
       _log(
         RelayLogLevel.info,
-        'send dropped — no E2E session',
+        'send dropped — no session',
         fields: {'channel': channel, 'streamId': streamId, 'msgType': type},
       );
       return;
@@ -552,11 +550,11 @@ class MachineSession {
     await queued.last.done.future;
   }
 
-  /// Seal one queued frame under the keys live at THIS moment and write it.
-  /// Returns the sealed length that reached the wire, or null if nothing did.
-  Future<int?> _sealAndSend(QueuedAppFrame f) async {
-    final keys = _keys;
-    if (keys == null) {
+  /// Encode one queued frame under the session live at THIS moment and write
+  /// it. Returns the length that reached the wire, or null if nothing did.
+  Future<int?> _encodeAndSend(QueuedAppFrame f) async {
+    final gen = _generation;
+    if (gen == null) {
       _dropped(
         'tx',
         'no-e2e-session',
@@ -569,7 +567,7 @@ class MachineSession {
       // hand-off that now never comes.
       _log(
         RelayLogLevel.warn,
-        'queued frame dropped — session went down before it was sealed',
+        'queued frame dropped — session went down before it was sent',
         fields: {
           'channel': f.channel,
           'streamId': f.streamId,
@@ -578,74 +576,22 @@ class MachineSession {
       );
       return null;
     }
-    try {
-      final sealed = await E2eTransportDart(
-        sendKey: keys.p2a,
-        recvKey: keys.a2p,
-      ).seal(f.plaintext);
-      if (!identical(keys, _keys)) {
-        // `seal` holds the key by reference and reads it after its own awaits,
-        // and a teardown or rekey swap zeroizes those bytes in place meanwhile.
-        // Whatever came out is either under an all-zero key or under keys the
-        // agent has already retired — not worth a wire write.
-        _dropped(
-          'tx',
-          'keys-rotated',
-          channel: f.channel,
-          streamId: f.streamId,
-          msgType: f.msgType,
-        );
-        _log(
-          RelayLogLevel.warn,
-          'queued frame dropped — keys rotated mid-seal',
-          fields: {
-            'channel': f.channel,
-            'streamId': f.streamId,
-            'msgType': f.msgType,
-          },
-        );
-        return null;
-      }
-      if (!relay.isDispatchAllowed) return null;
-      final outcome = await relay.sendFrame(f.channel, sealed);
-      if (outcome != PeerSendOutcome.accepted || !identical(keys, _keys)) {
-        return null;
-      }
-      // Each fragment is sealed on its own, so one message leaves as N frames
-      // with N unrelated ids. Naming every one with the parent type is what
-      // keeps a large transfer from reading as a burst of anonymous frames.
-      // After the send, not before: the tap records the wire event inside
-      // sendFrame, and this names the event it just made.
-      _annotate(_frameId(sealed), msgType: f.msgType, streamId: f.streamId);
-      return sealed.length;
-    } catch (e) {
-      // The type alone, as everywhere else a drop names an error: an exception
-      // out of `seal` prints the plaintext it choked on. `detail` is shipped to
-      // the bridge by NetwatchUploader and written into an operator's export
-      // file — the app's event has no `body` field precisely so a capture
-      // carries no payload, and this is the one door left open to it.
-      _dropped(
-        'tx',
-        'seal-failed',
-        channel: f.channel,
-        streamId: f.streamId,
-        msgType: f.msgType,
-        detail: {'error': '${e.runtimeType}'},
-      );
-      // The runtime type only, for the reason the comment above gives: the
-      // plaintext must not reach a log any more than it may reach a capture.
-      _log(
-        RelayLogLevel.error,
-        'queued frame dropped — seal threw',
-        fields: {
-          'channel': f.channel,
-          'streamId': f.streamId,
-          'msgType': f.msgType,
-          'error': '${e.runtimeType}',
-        },
-      );
+    final bytes = Uint8List.fromList(utf8.encode(f.plaintext));
+    if (!relay.isDispatchAllowed) return null;
+    final outcome = await relay.sendFrame(f.channel, bytes);
+    if (outcome != PeerSendOutcome.accepted || !identical(gen, _generation)) {
+      // A generation change between the send and its outcome means a teardown
+      // or a fresh hello already retired the session this frame was written
+      // for — the peer either never saw it or has since moved on.
       return null;
     }
+    // Each fragment leaves on its own, so one message leaves as N frames with
+    // N unrelated ids. Naming every one with the parent type is what keeps a
+    // large transfer from reading as a burst of anonymous frames. After the
+    // send, not before: the tap records the wire event inside sendFrame, and
+    // this names the event it just made.
+    _annotate(_frameId(bytes), msgType: f.msgType, streamId: f.streamId);
+    return bytes.length;
   }
 
   void notifyRpcResult({required bool timedOut}) {
@@ -654,11 +600,14 @@ class MachineSession {
       return;
     }
     _consecutiveTimeouts++;
-    if (_consecutiveTimeouts >= _kConsecutiveTimeoutsToRekey &&
+    if (_consecutiveTimeouts >= _kConsecutiveTimeoutsToClose &&
         _established &&
         !_handshakeInFlight) {
       _consecutiveTimeouts = 0;
-      unawaited(_rekey());
+      // A session with no application-layer keys to rotate cannot repair
+      // itself in place: closing the link is the whole recovery, and the
+      // supervisor redials with a fresh session.
+      unawaited(relay.close());
     }
   }
 
@@ -673,8 +622,8 @@ class MachineSession {
 
   // --- socket transitions ---------------------------------------------------
 
-  /// Session keys are per-CONNECTION, so only the socket dying invalidates
-  /// them. Every other transition is left alone: with pairing gone there is no
+  /// A session is per-CONNECTION, so only the socket dying invalidates it.
+  /// Every other transition is left alone: with pairing gone there is no
   /// grant whose loss could strand an otherwise-live session, and the
   /// supervisor re-drives [ensureEstablished] on whatever it observes.
   void _onState(PeerLinkState s) {
@@ -683,29 +632,26 @@ class MachineSession {
     }
   }
 
-  void _armKeysReady() {
-    _keysReady = Completer<void>();
+  void _armEstablishedReady() {
+    _establishedReady = Completer<void>();
     // dispose() can fail this before any [bindProject] awaits it — same
     // unobserved-error guard as [_readyCompleter].
-    _keysReady.future.ignore();
+    _establishedReady.future.ignore();
   }
 
   void _teardownSession() {
-    _dispatchGeneration++;
     // Drop all session state — called when the socket dies and when the agent
-    // hands the session to another device. Session keys are per-connection;
-    // either event invalidates them. Clearing `_established` is also what
-    // silences both rekey triggers (liveness, RPC timeouts), which are gated on
-    // a live session.
+    // hands the session to another device. A session is per-connection; either
+    // event invalidates it. Clearing `_established` is also what silences the
+    // RPC-timeout close trigger, which is gated on a live session.
     _established = false;
+    _generation = null;
     _stopLiveness();
-    _keys?.zeroize();
-    _keys = null;
     _cancelPendingWork();
     _resetRxFlow();
     // Re-arm only from the completed state: a second blip before the first
     // establishment would otherwise orphan whoever is already awaiting.
-    if (_keysReady.isCompleted) _armKeysReady();
+    if (_establishedReady.isCompleted) _armEstablishedReady();
   }
 
   void _cancelPendingWork() {
@@ -716,8 +662,8 @@ class MachineSession {
     for (final s in _streams.values) {
       s.failAllPending(code: 'E_SESSION_DOWN', message: 'relay session down');
     }
-    // Whatever the send gate was still holding dies with the keys it would have
-    // been sealed under. Their futures complete rather than fail: the callers
+    // Whatever the send gate was still holding dies with the session it was
+    // queued for. Their futures complete rather than fail: the callers
     // are fire-and-forget, so an error would land in no handler at all.
     for (final f in _scheduler.clear()) {
       _dropped(
@@ -731,12 +677,7 @@ class MachineSession {
     }
   }
 
-  // --- handshake / rekey ----------------------------------------------------
-
-  Future<void> _rekey() async {
-    if (_disposed || !_established) return;
-    await _runHandshake();
-  }
+  // --- handshake --------------------------------------------------------
 
   /// Runs a single attempt and publishes it as [_handshakeFuture] so a
   /// concurrent [ensureEstablished] joins it instead of racing a second one.
@@ -761,26 +702,23 @@ class MachineSession {
   /// ONE attempt, no retry: the app's connection supervisor owns backoff and
   /// give-up, so a loop here would nest inside its backoff and multiply it.
   Future<void> _handshakeAttempt() async {
-    final newKeys = await _handshaker.perform();
-    if (_disposed) {
-      newKeys?.zeroize();
-      return;
-    }
-    if (newKeys == null) {
-      // A rekey only ever runs because the session already looks dead
-      // (missed pongs, repeated RPC timeouts), so keeping
-      // the old keys after a failed attempt preserves a session the peer has
-      // most likely already dropped — and, with `_established` still true,
-      // leaves nothing able to notice.
+    // Windows reset BEFORE the attempt, not after it confirms: there is never
+    // a second hello on the same link, so an attempt that fails closes the
+    // link anyway, and a stale window left behind would misattribute whatever
+    // the peer wrote in the meantime to a session that never existed.
+    _scheduler.resetWindows();
+    _resetRxFlow();
+    final ok = await _handshaker.perform();
+    if (_disposed) return;
+    if (!ok) {
+      // There is never a second hello on the same link — a failed attempt
+      // means the connection itself is abandoned, not just the session.
       _teardownSession();
+      unawaited(relay.close());
       return;
     }
-    // Make-before-break: swap AFTER the new attempt confirmed, then zeroize
-    // the superseded keys (no dropped traffic on the old keys).
-    final old = _keys;
-    _keys = newKeys;
-    old?.zeroize();
-    if (!_keysReady.isCompleted) _keysReady.complete();
+    _generation = _SessionGeneration(++_epochCounter);
+    if (!_establishedReady.isCompleted) _establishedReady.complete();
     _established = true;
     _lastRecv = DateTime.now();
     _missedPongs = 0;
@@ -788,21 +726,13 @@ class MachineSession {
     _startLiveness();
     if (!_readyCompleter.isCompleted) _readyCompleter.complete();
     if (!_established$.isClosed) _established$.add(null);
-    // A new session credits from zero. The QUEUE deliberately survives a rekey:
-    // frames dequeued from here on seal under the new keys, and the agent
-    // swapped before it confirmed, so nothing straddles the change in this
-    // direction — where dropping them would strand every pending RPC until its
-    // timeout.
-    _sessionEpoch++;
-    _scheduler.resetWindows();
-    _resetRxFlow();
     _scheduler.kick();
     // The agent un-mutes EVERY stream on a fresh session (`notifyPeerOnline` in
     // bridge/src/stream-mux.ts), so a throttle carried across the boundary
     // would leave a stream it just resumed flooding with nothing asking it to
-    // stop again. Matters most for the rekey a flooded control channel causes:
-    // three timed-out RPCs re-handshake, and the loop would re-open its own
-    // cause. The bound streams below re-announce themselves by transmitting;
+    // stop again. Matters most for the redial a flooded control channel
+    // causes: three timed-out RPCs close the link, and the loop would re-open
+    // its own cause. The bound streams below re-announce themselves by transmitting;
     // the unbound ones have nothing that can.
     _unboundNotifiedAt.clear();
     // Re-pull durable state on every (re)establish so late subscribers
@@ -821,8 +751,8 @@ class MachineSession {
     }
   }
 
-  /// Count sealed payload bytes the agent charged to its window. Every kind-0
-  /// frame that arrives on a live session counts, whether or not it decrypted:
+  /// Count payload bytes the agent charged to its window. Every frame that
+  /// arrives on a live session counts, whether or not it decoded:
   /// the agent charged it either way, so skipping the ones that failed would
   /// leak its window a frame at a time and let a single corrupt frame wedge a
   /// channel for the session.
@@ -875,28 +805,25 @@ class MachineSession {
     for (final ch in const ['control', 'preview']) {
       _sendCredit(ch);
     }
-    // The flush above is deliberately ahead of this: a rekey keeps the old keys
-    // live until the new ones confirm, so skipping it would stretch the
-    // lost-credit floor by a whole handshake.
+    // The flush above is deliberately ahead of this: closing the link still
+    // leaves whatever credit was just queued written to the socket first.
     if (_handshakeInFlight) return;
     final silentFor = DateTime.now().difference(_lastRecv);
     if (silentFor < pingSilence) return;
     if (_missedPongs >= kMaxMissedPongs) {
-      // Ahead of _stopLiveness, which zeroes the count this line reports. The
-      // session resetting itself is otherwise the one E2E transition with no
-      // trace at all in app.log — the rekey that follows either succeeds (and
-      // looks like nothing happened) or tears down under a reason of its own.
+      // Ahead of _stopLiveness, which zeroes the count this line reports.
       _log(
         RelayLogLevel.warn,
-        'E2E session declared dead — rekeying on the live socket',
+        'session declared dead — closing the link',
         fields: {
           'silentForMs': silentFor.inMilliseconds,
           'missedPongs': _missedPongs,
         },
       );
-      // Session declared dead at the E2E layer → rekey on the live socket.
+      // A session with no in-place repair: closing the link is the whole
+      // recovery, and the supervisor redials with a fresh session.
       _stopLiveness();
-      unawaited(_rekey());
+      unawaited(relay.close());
       return;
     }
     _missedPongs++;
@@ -911,7 +838,7 @@ class MachineSession {
   RelayNetTap? get _tap => relay.netTap;
 
   String? _frameId(Uint8List payload) =>
-      _tap == null ? null : frameIdOf(payload, FrameKind.sealed);
+      _tap == null ? null : frameIdOf(payload);
 
   /// Name a frame this layer can type but not identify. [RelayService] records
   /// the wire event synchronously as the frame crosses the socket, so by the
@@ -959,116 +886,47 @@ class MachineSession {
 
   // --- inbound dispatch -----------------------------------------------------
 
+  /// Synchronous and in order: QUIC/TLS is the confidentiality layer now, so
+  /// there is no per-frame async decrypt step left to chain — the old
+  /// per-channel tail existed only to keep a slow `open()` from letting a
+  /// small frame overtake a large one, and a plain UTF-8 decode never blocks.
   void _onPeerFrame(IncomingPeerFrame msg) {
     if (_disposed || !relay.isDispatchAllowed) return;
-    // Kind-1 (handshake) plaintext frames belong to the handshake driver, which
-    // subscribes to the same messageStream and does its own dispatch.
-    if (msg.kind == FrameKind.handshake) return;
-    final keys = _keys;
-    if (keys == null) return; // pre-establishment: driver owns sealed frames
-    // Read with the keys rather than inside the chain below: a frame can
-    // wait there behind everything already queued on its channel, and the
-    // session it ARRIVED under is the only one its contents describe.
-    final epoch = _sessionEpoch;
-    // Chained per channel, never fired independently: `open()` is async and the
-    // platform AES-GCM implementation dispatches by payload size, so a small
-    // frame otherwise overtakes a large one — a `{"type":6}` ping ahead of the
-    // 30 KB render batch it acknowledges, one `terminal:output` chunk ahead of
-    // another, or a fragment ahead of its predecessor in [_reassembler]. The
-    // relay delivers a channel in order; this is what keeps that true through
-    // decryption. Channels stay independent of each other.
-    final ahead = _inboundTails[msg.channel] ?? Future<void>.value();
-    final next = ahead.then((_) => _decryptAndDispatch(msg, keys, epoch));
-    // A rejection must not strand every frame queued behind it.
-    final chained = next.catchError((Object _) {});
-    _inboundTails[msg.channel] = chained;
-    unawaited(
-      chained.whenComplete(() {
-        // Only the tail retires the entry — a later frame has already replaced
-        // it, and dropping that would let the next frame race this one.
-        if (identical(_inboundTails[msg.channel], chained)) {
-          _inboundTails.remove(msg.channel);
-        }
-      }),
-    );
-  }
-
-  Future<void> _decryptAndDispatch(
-    IncomingPeerFrame msg,
-    SessionKeys keys,
-    int epoch,
-  ) async {
-    if (_disposed || _keys == null || !relay.isDispatchAllowed) return;
-    final generation = _dispatchGeneration;
-    // Captured before the open: the nonce that identifies this frame is only
-    // readable while the payload is still sealed, and the type that makes it
-    // legible only exists after. The two meet by id, not by threading — this
-    // path is chained through `_inboundTails` and is genuinely async, so a
-    // field would start mis-attributing under any concurrency.
-    //
-    // Computed whether or not a capture is armed, unlike the tx sites: the
-    // unknown-stream and decrypt-failed logs name it, and those are read on the
-    // sessions nobody thought to tap — which is every session, right up until
-    // it misbehaves. A sealed payload's id is a hex encode of its 12-byte
-    // nonce.
-    final frameId = frameIdOf(msg.payload, msg.kind);
-    var openedUnder = epoch;
-    _noteConsumed(msg.channel, msg.payload.length);
-    var plaintext = await E2eTransportDart(
-      sendKey: keys.p2a,
-      recvKey: keys.a2p,
-    ).open(msg.payload);
-    if (plaintext == null) {
-      final current = _keys;
-      if (current != null && !identical(current, keys)) {
-        // This chain captured the keys as the frame arrived and a rekey swaps
-        // them several awaits later, so everything the agent writes right
-        // behind `established` — the adverts a fresh session needs first — is
-        // sealed under the new set and would otherwise be read under the
-        // retired one.
-        plaintext = await E2eTransportDart(
-          sendKey: current.p2a,
-          recvKey: current.a2p,
-        ).open(msg.payload);
-        // The live keys opened it, so the agent sealed it after the swap:
-        // whatever it reports belongs to the session those keys serve, not
-        // to the one this frame waited under.
-        if (plaintext != null) openedUnder = _sessionEpoch;
-      }
+    final gen = _generation;
+    // Counted even pre-establishment (the hello driver owns dispatch of
+    // those frames, but the bridge already charged them to a window this
+    // side must agree on once the window exists).
+    if (gen != null || _handshakeInFlight) {
+      _noteConsumed(msg.channel, msg.payload.length);
     }
-    if (_disposed ||
-        generation != _dispatchGeneration ||
-        !relay.isDispatchAllowed)
-      return;
-    // A candidate-key handshake frame during rekey (agent-ready/established) or
-    // garbage → decrypt-or-drop.
-    if (plaintext == null) {
-      _dropped(
-        'rx',
-        'decrypt-failed',
-        channel: msg.channel,
-        frameId: frameId,
-        detail: {'kind': msg.kind.name},
-      );
+    // Frames between `established` and this side's install are counted above
+    // and dropped here; the snapshot re-pull on install covers them.
+    if (gen == null) return;
+    String plaintext;
+    try {
+      plaintext = utf8.decode(msg.payload);
+    } catch (_) {
+      _dropped('rx', 'bad-utf8', channel: msg.channel);
       return;
     }
+    final frameId = frameIdOf(msg.payload);
     _lastRecv = DateTime.now();
     _missedPongs = 0;
     if (_reassembler.accept(
       plaintext,
       channel: msg.channel,
       frameId: frameId,
-      epoch: openedUnder,
+      epoch: gen.epoch,
     )) {
       // The reassembler consumes a fragment before any type is visible, so this
       // is the only chance to say what it was. Matches the bridge's `__frag`.
       _annotate(frameId, msgType: '__frag');
       return;
     }
-    _dispatchDecoded(plaintext, msg.channel, frameId, openedUnder);
+    _dispatchDecoded(plaintext, msg.channel, frameId, gen.epoch);
   }
 
-  /// [frameId] and [epoch] name the sealed frame this plaintext arrived in. A
+  /// [frameId] and [epoch] name the frame this plaintext arrived in. A
   /// reassembled message spans N frames and takes them from the fragment that
   /// completed it — see [FragReassembler.accept].
   void _dispatchDecoded(
@@ -1077,7 +935,7 @@ class MachineSession {
     String frameId,
     int epoch,
   ) {
-    if (_disposed || _keys == null || !relay.isDispatchAllowed) return;
+    if (_disposed || _generation == null || !relay.isDispatchAllowed) return;
     Map<String, dynamic> json;
     try {
       json = jsonDecode(plaintext) as Map<String, dynamic>;
@@ -1086,7 +944,7 @@ class MachineSession {
       return;
     }
     final type = json['type'];
-    // Sealed-payload disambiguation: a top-level `type` string is a
+    // Payload disambiguation: a top-level `type` string is a
     // session/liveness frame; an `m` field is stream/app traffic.
     if (type is String) {
       _annotate(frameId, msgType: type);
@@ -1204,9 +1062,8 @@ class MachineSession {
   /// direction: an id recurring across lines is a frame being re-delivered,
   /// while a non-recurring one rules nothing out — at one sample per throttle
   /// window a replayed stream of distinct frames looks exactly like a peer
-  /// sealing fresh ones. `openedUnder` behind `sessionEpoch` is the reading
-  /// that stands on its own: the frame arrived under an earlier session and
-  /// only drained out of its channel's decrypt chain now.
+  /// sending fresh ones. `openedUnder` behind `sessionEpoch` is the reading
+  /// that stands on its own: the frame arrived under an earlier session.
   ///
   /// The netwatch tap is deliberately NOT throttled — a capture is opened to
   /// see every frame, and it is bounded by how long it runs.
@@ -1241,7 +1098,7 @@ class MachineSession {
         // Paired with `openedUnder`, which says nothing on its own: a reader
         // has no other way to tell an epoch that is current from one the
         // session has since left behind.
-        'sessionEpoch': _sessionEpoch,
+        'sessionEpoch': _generation?.epoch,
         // ALWAYS present, and counts this frame as well as the ones it stands
         // for. Omitting it at 1 would leave a reader summing LINES to get a
         // loss rate, and one line here can stand for ~750 frames — three orders
@@ -1412,7 +1269,7 @@ class MachineSession {
         _missedPongs = 0;
         break;
       case 'credit':
-        // Hand-validated, like every other sealed session frame: these are bare
+        // Hand-validated, like every other session frame: these are bare
         // objects that never pass through the envelope schemas.
         final channel = json['channel'];
         final consumed = json['consumed'];
@@ -1423,30 +1280,26 @@ class MachineSession {
           break;
         }
         // A cumulative total only means anything against the session that
-        // produced it. This frame may have been decrypted after an
-        // establishment zeroed the windows, and banking the old session's much
-        // larger total would make every credit of the new one read as stale —
-        // the channel would then ride the resync floor for the rest of it.
-        if (epoch != _sessionEpoch) break;
+        // produced it. Banking an earlier session's much larger total would
+        // make every credit of the current one read as stale — the channel
+        // would then ride the resync floor for the rest of it.
+        if (_generation == null || epoch != _generation!.epoch) break;
         _scheduler.credit(channel as String, consumed);
         break;
       case 'session-takeover':
         // The agent is switching to another device and is about to drop our
-        // keys. Tear down (which also disarms every rekey trigger) and REPORT —
-        // re-establishing here would fight the other device for the session.
+        // session. Tear down and REPORT — re-establishing here would fight the
+        // other device for it.
         _teardownSession();
         if (!_takeovers.isClosed) _takeovers.add(null);
         break;
-      // 'established' / 'handshake:agent-ready' are decrypted under the
-      // handshake's candidate keys and owned by the driver; a stale copy here
-      // (already-swapped keys) is ignored.
     }
   }
 
   Future<void> _sendSessionFrame(Map<String, dynamic> obj) async {
-    final keys = _keys;
+    final gen = _generation;
     final type = obj['type'] as String?;
-    if (keys == null) {
+    if (gen == null) {
       _dropped('tx', 'no-e2e-session', channel: 'control', msgType: type);
       // This path carries ping, pong and credit — the frames the peer reads as
       // proof we are alive and as permission to keep sending. Losing one is
@@ -1454,31 +1307,20 @@ class MachineSession {
       // must never be diagnosed only from an unarmed tap.
       _log(
         RelayLogLevel.warn,
-        'session frame dropped — no E2E session',
+        'session frame dropped — no session',
         fields: {'msgType': type},
       );
       return;
     }
-    final ct = await E2eTransportDart(
-      sendKey: keys.p2a,
-      recvKey: keys.a2p,
-    ).seal(jsonEncode(obj));
-    if (!identical(keys, _keys)) {
-      // The same guard [_sealAndSend] applies, for the same two reasons: `seal`
-      // reads the key after its own awaits and a teardown zeroizes it in place,
-      // and a frame sealed under retired keys must not charge the window the
-      // establishment that retired them has just zeroed.
-      _dropped('tx', 'keys-rotated', channel: 'control', msgType: type);
-      _log(
-        RelayLogLevel.warn,
-        'session frame dropped — keys rotated mid-seal',
-        fields: {'msgType': type},
-      );
-      return;
-    }
+    final ct = Uint8List.fromList(utf8.encode(jsonEncode(obj)));
     if (!relay.isDispatchAllowed) return;
     final outcome = await relay.sendFrame('control', ct);
-    if (outcome != PeerSendOutcome.accepted || !identical(keys, _keys)) return;
+    if (outcome != PeerSendOutcome.accepted || !identical(gen, _generation)) {
+      // A generation change between the send and its outcome means a teardown
+      // or a fresh hello already retired the session this frame was written
+      // for.
+      return;
+    }
     // Exempt from the GATE, never from the accounting: a relay drop report
     // names only a channel and a byte count, so a frame written without being
     // charged would have its report give back bytes some other frame is still
@@ -1505,7 +1347,6 @@ class MachineSession {
       if (!w.isCompleted) w.completeError(StateError('session disposed'));
     }
     _streamReadyWaiters.clear();
-    _inboundTails.clear();
     // No drop records: the capture tap is read off the socket this dispose is
     // tearing down.
     _scheduler.clear();
@@ -1515,13 +1356,12 @@ class MachineSession {
     await _fragAborts.close();
     await _fragSendErrors.close();
     await _streamReadyController.close();
-    _keys?.zeroize();
-    _keys = null;
+    _generation = null;
     if (!_readyCompleter.isCompleted) {
       _readyCompleter.completeError(StateError('session disposed'));
     }
-    if (!_keysReady.isCompleted) {
-      _keysReady.completeError(StateError('session disposed'));
+    if (!_establishedReady.isCompleted) {
+      _establishedReady.completeError(StateError('session disposed'));
     }
   }
 }
@@ -1563,9 +1403,9 @@ class StreamTransport extends BufferedAgentTransport {
   bool get isLocal => false;
 
   // A stream stays TransportState.connected across a session-down window (the
-  // socket may be fine; only the E2E session drops), so the base "connected ==
-  // established" is wrong here — a hydrator firing then would seal-and-vanish.
-  // The live E2E session is the truth.
+  // socket may be fine; only the peer session drops), so the base "connected ==
+  // established" is wrong here — a hydrator firing then would send into
+  // nothing. The live peer session is the truth.
   @override
   bool get isEstablished => session.isEstablished;
 
@@ -1602,9 +1442,9 @@ class StreamTransport extends BufferedAgentTransport {
       if (countsTowardHealth) session.notifyRpcResult(timedOut: false);
       return r;
     } on RpcException catch (e) {
-      // ≥3 consecutive E_TIMEOUTs is a rekey trigger. Skipped when the caller
+      // ≥3 consecutive E_TIMEOUTs close the link. Skipped when the caller
       // re-issues this same pull on every re-establishment — including the
-      // one a rekey itself causes — since folding those in makes the retry
+      // one that close itself causes — since folding those in makes the retry
       // loop its own trigger (see the doc on [AgentTransport.request]).
       if (countsTowardHealth) {
         session.notifyRpcResult(timedOut: e.code == 'E_TIMEOUT');
@@ -1689,8 +1529,8 @@ class StreamTransport extends BufferedAgentTransport {
   static const _kSnapshotAttempts = 3;
 
   /// Stamps each pull so the retries of a superseded one stop: a
-  /// (re)establish or a second bind starts a fresh pull on the live keys, and
-  /// [dispose] ends them all.
+  /// (re)establish or a second bind starts a fresh pull on the live session,
+  /// and [dispose] ends them all.
   int _snapshotGen = 0;
 
   Future<void> _fetchSnapshot({required Duration timeout}) async {
@@ -1727,9 +1567,9 @@ class StreamTransport extends BufferedAgentTransport {
     };
     try {
       // Only the first attempt counts toward the session's consecutive-timeout
-      // rekey trigger. A retry re-asks a question already counted, and letting
+      // close trigger. A retry re-asks a question already counted, and letting
       // it count too made the chain itself the trigger: three waits on a slow
-      // link forced a rekey, the re-establish started a fresh chain, and the
+      // link forced a re-establish, the re-establish started a fresh chain, and the
       // loop re-requested the reply forever over a link that could not carry
       // it. A pull that lands still clears the counter — the session has just
       // proven itself.

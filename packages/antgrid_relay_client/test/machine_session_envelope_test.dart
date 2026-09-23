@@ -1,9 +1,8 @@
 // MachineSession envelope/fragmentation/stream-demux coverage — the
 // replacement for the deleted relay_transport_test.dart /
 // relay_transport_frag_test.dart suites, now exercised at the MachineSession
-// level (one E2E session multiplexing project streams via sealed `{s, m}`
-// envelopes) instead of the old socket-per-project
-// RelayTransport.
+// level (one session multiplexing project streams via `{s, m}` envelopes)
+// instead of the old socket-per-project RelayTransport.
 import 'dart:convert';
 
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
@@ -14,13 +13,11 @@ import 'support/fake_live_relay.dart';
 void main() {
   late FakeLiveRelay relay;
   late FakeHandshaker handshaker;
-  late SessionKeys keys;
   late MachineSession session;
 
   setUp(() async {
     relay = FakeLiveRelay();
-    keys = fixedKeys(1);
-    handshaker = FakeHandshaker(keys);
+    handshaker = FakeHandshaker();
     session = await establishSession(relay, handshaker: handshaker);
   });
 
@@ -31,16 +28,14 @@ void main() {
 
   group('outbound envelope', () {
     test(
-      'sendOnStream wraps as sealed {s, m} addressed to the machine',
+      'sendOnStream wraps as a plaintext {s, m} envelope',
       () async {
         await session.sendOnStream('proj-1', {'type': 'ping'}, 'control');
         expect(relay.sent, hasLength(1));
         final frame = relay.sent.single;
-        expect(frame.kind, FrameKind.sealed);
 
-        final plaintext = await openFromPhone(keys, frame.payload);
-        expect(plaintext, isNotNull);
-        final json = jsonDecode(plaintext!) as Map<String, dynamic>;
+        final plaintext = decodeFromPhone(frame.payload);
+        final json = jsonDecode(plaintext) as Map<String, dynamic>;
         expect(json['s'], 'proj-1');
         expect(json['m'], {'type': 'ping'});
       },
@@ -50,8 +45,8 @@ void main() {
       await session.sendOnStream(kControlStreamId, {
         'type': 'project:list',
       }, 'control');
-      final plaintext = await openFromPhone(keys, relay.sent.single.payload);
-      final json = jsonDecode(plaintext!) as Map<String, dynamic>;
+      final plaintext = decodeFromPhone(relay.sent.single.payload);
+      final json = jsonDecode(plaintext) as Map<String, dynamic>;
       expect(json.containsKey('s'), isFalse);
       expect(json['m'], {'type': 'project:list'});
     });
@@ -72,9 +67,6 @@ void main() {
         greaterThan(1),
         reason: 'a >1.4MB envelope must fragment',
       );
-      for (final f in relay.sent) {
-        expect(f.kind, FrameKind.sealed);
-      }
 
       final joined = <String>[];
       final reassembler = FragReassembler(
@@ -84,11 +76,10 @@ void main() {
         onAbort: (_) {},
       );
       for (final f in relay.sent) {
-        final plaintext = await openFromPhone(keys, f.payload);
-        expect(plaintext, isNotNull);
+        final plaintext = decodeFromPhone(f.payload);
         reassembler.accept(
-          plaintext!,
-          frameId: frameIdOf(f.payload, f.kind),
+          plaintext,
+          frameId: frameIdOf(f.payload),
           epoch: 1,
         );
       }
@@ -118,9 +109,7 @@ void main() {
       relay.inject(
         IncomingPeerFrame(
           channel: 'control',
-          kind: FrameKind.sealed,
-          payload: await sealFromAgent(
-            keys,
+          payload: encodeFromAgent(
             jsonEncode({
               's': 'proj-1',
               'm': {'type': 'a'},
@@ -131,9 +120,7 @@ void main() {
       relay.inject(
         IncomingPeerFrame(
           channel: 'control',
-          kind: FrameKind.sealed,
-          payload: await sealFromAgent(
-            keys,
+          payload: encodeFromAgent(
             jsonEncode({
               's': 'proj-2',
               'm': {'type': 'b'},
@@ -161,9 +148,7 @@ void main() {
       relay.inject(
         IncomingPeerFrame(
           channel: 'control',
-          kind: FrameKind.sealed,
-          payload: await sealFromAgent(
-            keys,
+          payload: encodeFromAgent(
             jsonEncode({
               'm': {'type': 'agent:projects'},
             }),
@@ -174,9 +159,7 @@ void main() {
       relay.inject(
         IncomingPeerFrame(
           channel: 'control',
-          kind: FrameKind.sealed,
-          payload: await sealFromAgent(
-            keys,
+          payload: encodeFromAgent(
             jsonEncode({
               's': '0',
               'm': {'type': 'agent:tools'},
@@ -216,8 +199,7 @@ void main() {
           relay.inject(
             IncomingPeerFrame(
               channel: 'control',
-              kind: FrameKind.sealed,
-              payload: await sealFromAgent(keys, frag),
+              payload: encodeFromAgent(frag),
             ),
           );
         }
@@ -256,15 +238,13 @@ void main() {
         relay.inject(
           IncomingPeerFrame(
             channel: 'control',
-            kind: FrameKind.sealed,
-            payload: await sealFromAgent(keys, frame0),
+            payload: encodeFromAgent(frame0),
           ),
         );
         relay.inject(
           IncomingPeerFrame(
             channel: 'control',
-            kind: FrameKind.sealed,
-            payload: await sealFromAgent(keys, frame1),
+            payload: encodeFromAgent(frame1),
           ),
         );
 

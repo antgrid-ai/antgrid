@@ -1,16 +1,16 @@
-/// Flow-control constants for the sealed session, hand-mirrored from
+/// Flow-control constants for the peer session, hand-mirrored from
 /// `packages/antgrid-wire/src/flow.ts`. Keep the two in lockstep by value: a
 /// sender's window and its peer's credit batch only agree because both ends
 /// compile the same numbers, and nothing on the wire negotiates them.
 library;
 
-/// Sealed bytes a sender may have in flight PER CHANNEL beyond what the peer
-/// has credited. Holds one maximal sealed fragment with room to pipeline the
+/// Frame-payload bytes a sender may have in flight PER CHANNEL beyond what the
+/// peer has credited. Holds one maximal fragment with room to pipeline the
 /// next as credits arrive, and is small enough that a control frame written
 /// behind a full preview window waits only this much link time.
 const int kChannelWindowBytes = 2097152;
 
-/// Sealed bytes a sender may have in flight PER SOCKET, both channels together.
+/// Frame-payload bytes a sender may have in flight PER SOCKET, both channels together.
 /// Bounds what a liveness frame written now sits behind, since neither client
 /// can read its socket buffer — `dart:io` exposes nothing, and Bun's client
 /// `bufferedAmount` reads 0 however much is queued. One window plus 1 MiB, so
@@ -34,10 +34,6 @@ const int kWindowResyncAgeMs = 40000;
 /// would push past it is dropped whole, since a fragment set is never split.
 /// Two maximal transfers: one queued behind another.
 const int kMaxSendQueueBytes = 67108864;
-
-/// nonce(12) + GCM tag(16). A sealed frame is this much longer than its utf8
-/// plaintext, which is what lets a sender check its window before sealing.
-const int kSealOverheadBytes = 28;
 
 /// A channel blocked at the send gate for this long with data queued is logged
 /// once, so a peer that stops crediting reads as "alive but not crediting"

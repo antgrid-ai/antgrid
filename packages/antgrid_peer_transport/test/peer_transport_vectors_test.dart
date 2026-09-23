@@ -35,11 +35,7 @@ void main() {
       expect(maxPeerFrameHeaderBytes, framing['maxHeaderBytes']);
       expect(kMaxFramePayload, framing['maxPayloadBytes']);
       expect(maxPeerRecordBytes, framing['maxRecordBytes']);
-      expect(FrameKind.sealed.wireValue, _map(framing['kinds'])['sealed']);
-      expect(
-        FrameKind.handshake.wireValue,
-        _map(framing['kinds'])['handshake'],
-      );
+      expect(FrameKind.message.wireValue, _map(framing['kinds'])['message']);
 
       final native = _map(fixture['native']);
       expect(peerAlpn, native['alpn']);
@@ -56,8 +52,9 @@ void main() {
     for (final sample in samples) {
       final header = _map(sample['header']);
       final kind = FrameKind.fromWire(sample['kind'] as int)!;
+      expect(kind, FrameKind.message, reason: sample['name'] as String);
       final payload = _hex(sample['payloadHex'] as String);
-      final encoded = encodePeerFrame(header, payload, kind);
+      final encoded = encodePeerFrame(header, payload);
       expect(
         _toHex(encoded),
         sample['frameHex'],
@@ -66,7 +63,6 @@ void main() {
 
       final decoded = decodePeerFrame(_hex(sample['frameHex'] as String));
       expect(decoded.header, header);
-      expect(decoded.kind, kind);
       expect(decoded.payload, payload);
       expect(decoded.header.containsKey('to'), isFalse);
       expect(decoded.header.containsKey('from'), isFalse);
@@ -90,7 +86,6 @@ void main() {
       expect(kSocketInflightBytes, flow['socketInflightBytes']);
       expect(kCreditBatchBytes, flow['creditBatchBytes']);
       expect(kMaxSendQueueBytes, flow['maxSendQueueBytes']);
-      expect(kSealOverheadBytes, flow['sealOverheadBytes']);
       expect(kWindowResyncAgeMs, flow['windowResyncAgeMs']);
       expect(kWindowStallWarnMs, flow['windowStallWarnMs']);
 

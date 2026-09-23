@@ -13,7 +13,6 @@ import '../helpers/test_peer_runtime.dart';
 
 import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart';
@@ -90,22 +89,6 @@ class _FakeRelayService extends RelayService {
     unawaited(_states.close());
   }
 
-  Future<PeerSendOutcome> sendFrame(
-    String channel,
-    Uint8List payload, {
-    FrameKind kind = FrameKind.sealed,
-  }) async {
-    sendMessage(channel, payload, kind: kind);
-    return PeerSendOutcome.accepted;
-  }
-
-  void sendMessage(
-    String channel,
-    Uint8List payload, {
-    FrameKind kind = FrameKind.sealed,
-  }) {
-    // no-op — no real relay in tests
-  }
 }
 
 /// Hands every machine a connection whose socket is the fake above, so the

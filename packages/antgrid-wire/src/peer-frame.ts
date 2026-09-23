@@ -9,11 +9,11 @@ import { z } from "zod/v4";
 import { MAX_FRAME_PAYLOAD } from "./frag";
 import { PeerFrameHeader, type PeerFrameHeader as PeerFrameHeaderValue } from "./peer-protocol";
 
-const FRAME_VERSION = 0x03;
+const FRAME_VERSION = 0x04;
 const FIXED_PREFIX = 4;
 const MAX_HEADER_LEN = 1024;
 
-export const FrameKind = { sealed: 0x00, handshake: 0x01 } as const;
+export const FrameKind = { message: 0x00 } as const;
 export type FrameKind = (typeof FrameKind)[keyof typeof FrameKind];
 
 const KNOWN_KINDS = new Set<number>(Object.values(FrameKind));
@@ -47,7 +47,6 @@ function parseHeader(value: unknown): PeerFrameHeaderValue {
 export function encodePeerFrame(
   header: PeerFrameHeaderValue,
   payload: Uint8Array,
-  kind: FrameKind,
 ): Uint8Array {
   const parsed = parseHeader(header);
   if (payload.length > MAX_FRAME_PAYLOAD) {
@@ -65,7 +64,7 @@ export function encodePeerFrame(
   }
   const frame = Buffer.allocUnsafe(FIXED_PREFIX + headerBytes.length + payload.length);
   frame[0] = FRAME_VERSION;
-  frame[1] = kind;
+  frame[1] = FrameKind.message;
   frame.writeUInt16BE(headerBytes.length, 2);
   headerBytes.copy(frame, FIXED_PREFIX);
   Buffer.from(payload.buffer, payload.byteOffset, payload.byteLength).copy(
@@ -78,7 +77,6 @@ export function encodePeerFrame(
 export function decodePeerFrame(buf: Uint8Array): {
   header: PeerFrameHeaderValue;
   payload: Uint8Array;
-  kind: FrameKind;
 } {
   if (buf.length < FIXED_PREFIX) {
     throw new FrameError("TRUNCATED", `Frame shorter than ${FIXED_PREFIX} bytes`);
@@ -92,7 +90,6 @@ export function decodePeerFrame(buf: Uint8Array): {
   if (!KNOWN_KINDS.has(buf[1])) {
     throw new FrameError("BAD_KIND", `Unknown frame kind: 0x${buf[1].toString(16)}`);
   }
-  const kind = buf[1] as FrameKind;
   const b = Buffer.from(buf.buffer, buf.byteOffset, buf.byteLength);
   const headerLen = b.readUInt16BE(2);
   if (headerLen > MAX_HEADER_LEN) {
@@ -125,7 +122,6 @@ export function decodePeerFrame(buf: Uint8Array): {
   return {
     header: header as PeerFrameHeaderValue,
     payload: buf.slice(FIXED_PREFIX + headerLen),
-    kind,
   };
 }
 

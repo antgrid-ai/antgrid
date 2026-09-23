@@ -30,11 +30,8 @@ class _Payload implements PeerLink {
   @override
   PeerLinkDiagnostic? get netTap => null;
   @override
-  Future<PeerSendOutcome> sendFrame(
-    String channel,
-    Uint8List payload, {
-    FrameKind kind = FrameKind.sealed,
-  }) async => closed ? PeerSendOutcome.closed : PeerSendOutcome.accepted;
+  Future<PeerSendOutcome> sendFrame(String channel, Uint8List payload) async =>
+      closed ? PeerSendOutcome.closed : PeerSendOutcome.accepted;
   @override
   Future<void> close() async {
     if (closed) return;
@@ -131,14 +128,10 @@ class _Handshake implements SessionHandshaker {
   int calls = 0;
   int aborts = 0;
   @override
-  Future<SessionKeys?> perform() async {
+  Future<bool> perform() async {
     calls++;
     await gate?.future;
-    return SessionKeys(
-      a2p: Uint8List(32),
-      p2a: Uint8List(32),
-      confirm: Uint8List(32),
-    );
+    return true;
   }
 
   @override
@@ -160,14 +153,11 @@ PeerConnectionMechanisms _mechanisms(
   _Runtime runtime,
   _Handshake handshake,
 ) => PeerConnectionMechanisms(
-  crypto: CryptoService(),
   machineDeviceId: 'machine',
-  phoneDeviceId: 'phone',
-  phoneEd25519Seed: Uint8List(32),
   resolveCoords: () async =>
       const ConnCoords(relayUrl: 'wss://relay.test', agentEd25519PubB64: 'pin'),
   peerRuntime: runtime,
-  buildHandshaker: (_) => handshake,
+  buildHandshaker: () => handshake,
 );
 
 RelayCentralControlDialer _central(_Relay relay) => RelayCentralControlDialer(

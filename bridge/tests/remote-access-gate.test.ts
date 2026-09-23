@@ -10,7 +10,6 @@ import { createMessage, type AbMessage } from "../src/protocol";
 import { TestPeerSessionOwner } from "./test-peer-session-owner";
 import { createRelayPromotion, type MachineRelaySession } from "../src/relay-promotion";
 import type { PeerSessionView } from "../src/stream-mux";
-import { generateEphemeralKeypair } from "../src/key-exchange";
 
 /** One established app session, as the relay transport would report it. */
 function session(peerPubkey: string, peerId = "app-dev#machine-dev"): PeerSessionView {
@@ -143,7 +142,7 @@ test("drops project verbs from an account-trusted phone while mobile access is o
   // Wire the attached-session lookup exactly as the remote transport does.
   core.setPeerSessionProvider(() => session("phone-pubkey-1-base64"));
 
-  // Spin up managers (the relay does this after the E2E handshake confirms).
+  // Spin up managers (the relay does this once the peer session is established).
   core.onHandshakeComplete();
   await waitForServices(sent);
 
@@ -358,7 +357,6 @@ test("peer-online backfills the peer pubkey from the phone store (empty map)", a
   // starts empty (it's in-memory, never persisted).
   const client = new TestPeerSessionOwner({
     identity: { deviceId: "agent-dev", deviceName: "agent-dev", createdAt: new Date().toISOString() },
-    generateKeypair: () => generateEphemeralKeypair(),
     pairedPhones: store,
   });
 

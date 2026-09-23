@@ -1,5 +1,10 @@
 import { describe, it, expect } from "bun:test";
-import { parseMessage, createMessage, AbMessageSchema, parseMessageFast } from "../src/protocol";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import {
+  parseMessage, createMessage, AbMessageSchema, parseMessageFast,
+  SessionHelloFrame, SessionHelloCapabilities, SessionEstablishedFrame,
+} from "../src/protocol";
 
 describe("agent:status shape", () => {
   it("accepts services + ports in place of terminals/proxies/layout", () => {
@@ -403,37 +408,46 @@ describe("preview:snapshot", () => {
   });
 });
 
-describe("v2 handshake message schemas", () => {
-  it("client-hello requires nonce", () => {
-    expect(parseMessage(JSON.stringify({
-      id: "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
-      type: "handshake:client-hello", timestamp: Date.now(),
-      pubkey: "AA==", sig: "AA==",
-    }))).toBeNull();
-    expect(parseMessage(JSON.stringify({
-      id: "b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e",
-      type: "handshake:client-hello", timestamp: Date.now(),
-      pubkey: "AA==", sig: "AA==", nonce: "AA==",
-    }))).not.toBeNull();
+// Stage B: the native peer session opens on one plaintext `session:hello` /
+// `established` pair — no transcript, no confirm tag. These frames carry no
+// id/timestamp envelope (see the comment above their definition in
+// protocol.ts), so they are validated directly, never through parseMessage.
+describe("session:hello / established frame schemas", () => {
+  it("session:hello requires a non-empty attemptId", () => {
+    expect(SessionHelloFrame.safeParse({ type: "session:hello" }).success).toBe(false);
+    expect(SessionHelloFrame.safeParse({ type: "session:hello", attemptId: "" }).success).toBe(false);
+    expect(SessionHelloFrame.safeParse({ type: "session:hello", attemptId: "a1" }).success).toBe(true);
   });
 
-  it("agent-ready and app:ready require confirm", () => {
+  it("accepts optional capabilities", () => {
+    const parsed = SessionHelloFrame.safeParse({
+      type: "session:hello", attemptId: "a1",
+      capabilities: { pullsTree: true, terminalFramesV1: true },
+    });
+    expect(parsed.success).toBe(true);
+  });
+
+  it("a capability is true-only — false is a parse failure, not a signal", () => {
+    // The read side treats an unknown/absent capability as false already;
+    // accepting `false` here would invite a caller to treat it as a value
+    // that round-trips rather than one the schema refuses outright.
+    expect(SessionHelloCapabilities.safeParse({ pullsTree: false }).success).toBe(false);
+  });
+
+  it("established requires the matching attemptId", () => {
+    expect(SessionEstablishedFrame.safeParse({ type: "established" }).success).toBe(false);
+    expect(SessionEstablishedFrame.safeParse({ type: "established", attemptId: "a1" }).success).toBe(true);
+  });
+
+  it("neither frame is a member of AbMessageSchema", () => {
     expect(parseMessage(JSON.stringify({
-      id: "c3d4e5f6-a7b8-4c9d-ae0f-1a2b3c4d5e6f",
-      type: "handshake:agent-ready", timestamp: Date.now(),
+      id: "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d", timestamp: Date.now(),
+      type: "session:hello", attemptId: "a1",
     }))).toBeNull();
     expect(parseMessage(JSON.stringify({
-      id: "d4e5f6a7-b8c9-4d0e-bf1a-2b3c4d5e6f7a",
-      type: "handshake:agent-ready", timestamp: Date.now(), confirm: "AA==",
-    }))).not.toBeNull();
-    expect(parseMessage(JSON.stringify({
-      id: "e5f6a7b8-c9d0-4e1f-80a2-3b4c5d6e7f8a",
-      type: "app:ready", timestamp: Date.now(),
+      id: "b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e", timestamp: Date.now(),
+      type: "established", attemptId: "a1",
     }))).toBeNull();
-    expect(parseMessage(JSON.stringify({
-      id: "f6a7b8c9-d0e1-4f2a-81b3-4c5d6e7f8a9b",
-      type: "app:ready", timestamp: Date.now(), confirm: "AA==",
-    }))).not.toBeNull();
   });
 });
 
@@ -557,5 +571,33 @@ describe("the session object is unchanged and unextended", () => {
     expect(parsed?.type).toBe("session:create");
     expect(parsed).not.toHaveProperty("memberOf");
     expect(parsed).not.toHaveProperty("brief");
+  });
+});
+
+// The app's hello literal lives in Dart and is mirrored here by hand. Zod
+// strips an undeclared key, so a capability the app sends but this schema
+// forgot is silently read as false; nothing else spans both sides.
+describe("session:hello capabilities mirror the app's literal", () => {
+  const dartSource = (file: string) => readFileSync(
+    join(import.meta.dir, "..", "..", "packages", "antgrid_relay_client", "lib", "src", file), "utf8");
+
+  function dartHelloKeys(): string[] {
+    const body = dartSource("connection_handshake.dart")
+      .match(/const Map<String, bool> kSessionHelloCapabilities = \{([^}]*)\};/)?.[1];
+    if (body === undefined) throw new Error("kSessionHelloCapabilities not found in connection_handshake.dart");
+    return [...body.matchAll(/'([A-Za-z0-9]+)'\s*:\s*true/g)].map((m) => m[1]!).sort();
+  }
+
+  it("names exactly the keys SessionHelloCapabilities declares", () => {
+    expect(dartHelloKeys()).toEqual(Object.keys(SessionHelloCapabilities.shape).sort());
+  });
+
+  it("keeps the loopback-only sessionBusCarrier out of the native hello on both sides", () => {
+    expect(dartHelloKeys()).not.toContain("sessionBusCarrier");
+    expect(Object.keys(SessionHelloCapabilities.shape)).not.toContain("sessionBusCarrier");
+  });
+
+  it("is the loopback transport's default capability set too", () => {
+    expect(dartSource("local_transport.dart")).toMatch(/this\.capabilities = kSessionHelloCapabilities,/);
   });
 });

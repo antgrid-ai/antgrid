@@ -3,7 +3,7 @@ import 'dart:math';
 
 import 'flow.dart';
 
-/// One frame waiting to be sealed and written: a whole envelope JSON, or one
+/// One frame waiting to be written: a whole envelope JSON, or one
 /// fragment of one.
 class QueuedAppFrame {
   QueuedAppFrame({
@@ -18,8 +18,7 @@ class QueuedAppFrame {
   final String streamId;
   final String plaintext;
 
-  /// utf8 length of [plaintext] — the number the window is charged in, once the
-  /// seal overhead is added. Passed in rather than computed here so a multi-MB
+  /// utf8 length of [plaintext] — the number the window is charged in. Passed in rather than computed here so a multi-MB
   /// fragment is measured once, by the encoder's own counter.
   final int plaintextBytes;
 
@@ -34,17 +33,14 @@ class QueuedAppFrame {
   final done = Completer<void>();
 }
 
-/// Seals and writes one frame now. Returns the sealed length that reached the
-/// wire, or null if the frame was dropped before it got there.
+/// Writes one frame now. Returns the payload length that reached the wire, or null if the frame was dropped before it got there.
 typedef SchedulerSink = Future<int?> Function(QueuedAppFrame frame);
 
-/// The outbound half of one E2E session: per-channel FIFO queues drained by a
-/// single loop, so exactly one frame is sealed at a time and a channel's frames
-/// reach the socket in the order they were handed over. Sealing at dequeue
-/// rather than at enqueue means a frame queued across a rekey goes out under
-/// the keys live at that moment.
+/// The outbound half of one peer session: per-channel FIFO queues drained by a
+/// single loop, so exactly one frame is written at a time and a channel's
+/// frames reach the socket in the order they were handed over.
 ///
-/// [window] and [socketCap] bound the sealed bytes a sender may have in flight
+/// [window] and [socketCap] bound the payload bytes a sender may have in flight
 /// beyond what the peer has credited, per channel and per socket. Both null
 /// means no gate at all: everything queued drains as fast as the sink accepts
 /// it.
@@ -70,10 +66,10 @@ class SendScheduler {
   /// Test seam for the resync clock.
   DateTime Function() clock;
 
-  /// Sealed bytes allowed in flight per channel; null disables the gate.
+  /// Payload bytes allowed in flight per channel; null disables the gate.
   int? window;
 
-  /// Sealed bytes allowed in flight across both channels; null disables it.
+  /// Payload bytes allowed in flight across both channels; null disables it.
   int? socketCap;
 
   /// Per-channel cap on queued plaintext. A message whose frames would push
@@ -92,7 +88,7 @@ class SendScheduler {
   };
   final Map<String, int> _queuedBytes = {'control': 0, 'preview': 0};
 
-  /// Cumulative sealed bytes written on each channel this session.
+  /// Cumulative payload bytes written on each channel this session.
   final Map<String, int> _sent = {'control': 0, 'preview': 0};
 
   /// The peer's cumulative consumed count, clamped to [_sent]. Banking an
@@ -118,7 +114,7 @@ class SendScheduler {
 
   final Set<String> _stallWarned = {};
 
-  /// Sealed bytes written on [ch] that the peer has not credited yet.
+  /// Payload bytes written on [ch] that the peer has not credited yet.
   int unacked(String ch) => max(0, _sent[ch]! - _credited[ch]!);
 
   int totalUnacked() => unacked('control') + unacked('preview');
@@ -152,8 +148,8 @@ class SendScheduler {
   /// gate but not the accounting. A peer's drop report names only a channel and
   /// a byte count, so bytes the sender never charged would un-charge bytes it
   /// did and inflate the window.
-  void charge(String ch, int sealedBytes) {
-    _sent[ch] = _sent[ch]! + sealedBytes;
+  void charge(String ch, int bytes) {
+    _sent[ch] = _sent[ch]! + bytes;
   }
 
   /// The relay reported it discarded [bytes] of this sender's frames on [ch].
@@ -229,7 +225,8 @@ class SendScheduler {
   }
 
   /// Forget every counter on both channels — a new session credits from zero.
-  /// The queues are untouched: frames held across a rekey are still owed.
+  /// The queues are untouched: frames held across a re-establishment are still
+  /// owed.
   void resetWindows() {
     for (final ch in _channels) {
       _sent[ch] = 0;
@@ -290,7 +287,7 @@ class SendScheduler {
   }
 
   bool _fits(QueuedAppFrame f) {
-    final need = f.plaintextBytes + kSealOverheadBytes;
+    final need = f.plaintextBytes;
     final w = window;
     final cap = socketCap;
     final chUnacked = unacked(f.channel);

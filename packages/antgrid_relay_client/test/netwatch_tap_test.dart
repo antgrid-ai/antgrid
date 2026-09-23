@@ -25,36 +25,28 @@ class _Capture {
       annotations.singleWhere((e) => e['frameId'] == frameId);
 }
 
-Uint8List _sealedLookingPayload(int fill) =>
-    Uint8List.fromList(List<int>.filled(12, fill) + utf8.encode('ciphertext'));
-
 void main() {
   group('frameIdOf', () {
-    test('uses the sealed frame own nonce, which both endpoints see', () {
-      expect(
-        frameIdOf(_sealedLookingPayload(0xab), FrameKind.sealed),
-        'ab' * 12,
+    test('hashes the frame payload — pinned, not merely well-formed', () {
+      // The SAME bytes are hashed by `frameIdFor` in bridge/src/netwatch.ts
+      // and asserted against this exact string there — the pair is
+      // hand-mirrored, so a silent divergence would otherwise surface only as
+      // a `--join` that matches nothing.
+      final id = frameIdOf(
+        Uint8List.fromList(
+          utf8.encode('{"type":"session:hello","attemptId":"a1"}'),
+        ),
       );
+      expect(id, '1e65322bad672889949c1355');
     });
 
-    test(
-      'falls back to a hash for a plaintext frame, which carries no nonce',
-      () {
-        final id = frameIdOf(
-          Uint8List.fromList(utf8.encode('{"type":"handshake:client-hello"}')),
-          FrameKind.handshake,
-        );
-        // Pinned, not merely well-formed. The SAME bytes are hashed by
-        // `frameIdFor` in bridge/src/netwatch.ts and asserted against this exact
-        // string there — the pair is hand-mirrored, so a silent divergence would
-        // otherwise surface only as a `--join` that matches nothing.
-        expect(id, '59e7c7d96c01d53688b362a9');
-      },
-    );
-
-    test('a short sealed payload cannot yield a nonce and is hashed', () {
-      final id = frameIdOf(Uint8List.fromList([1, 2, 3]), FrameKind.sealed);
-      expect(id, hasLength(24));
+    test('is stable for identical bytes and differs for different ones', () {
+      final a = frameIdOf(Uint8List.fromList([1, 2, 3]));
+      final b = frameIdOf(Uint8List.fromList([1, 2, 3]));
+      final c = frameIdOf(Uint8List.fromList([1, 2, 4]));
+      expect(a, b);
+      expect(a, isNot(c));
+      expect(a, hasLength(24));
     });
   });
 
@@ -122,18 +114,16 @@ void main() {
   group('MachineSession annotations', () {
     late _Capture capture;
     late FakeLiveRelay relay;
-    late SessionKeys keys;
     late MachineSession session;
     late List<Map<String, Object?>?> warns;
 
     setUp(() async {
       capture = _Capture();
       relay = FakeLiveRelay(netTap: capture.tap);
-      keys = fixedKeys(1);
       warns = [];
       session = await establishSession(
         relay,
-        handshaker: FakeHandshaker(keys),
+        handshaker: FakeHandshaker(),
         // Short enough that a test can cross the window without idling out the
         // shipped 30s.
         unknownStreamLogInterval: const Duration(milliseconds: 500),
@@ -159,20 +149,20 @@ void main() {
           'data': 'x',
         }, 'control');
 
-        final sealed = relay.sent.single.payload;
-        final note = capture.annotationFor(frameIdOf(sealed, FrameKind.sealed));
+        final payload = relay.sent.single.payload;
+        final note = capture.annotationFor(frameIdOf(payload));
         expect(note['msgType'], 'terminal:input');
         expect(note['streamId'], 'proj-1');
       },
     );
 
     test('records the send dropped for want of an E2E session', () async {
-      // A fresh session has installed no keys, so this is the pre-establishment
-      // window the app hits on every reconnect.
+      // A fresh session has not yet completed a hello, so this is the
+      // pre-establishment window the app hits on every reconnect.
       final cold = MachineSession(
         relay: relay,
         machineDeviceId: 'machine-1',
-        handshaker: FakeHandshaker(keys),
+        handshaker: FakeHandshaker(),
       );
       await cold.sendOnStream('proj-1', {'type': 'file:read'}, 'control');
 
@@ -183,60 +173,42 @@ void main() {
       await cold.dispose();
     });
 
-    test('names an inbound frame after decrypt, joined by the nonce', () async {
-      final payload = await sealFromAgent(
-        keys,
+    test('names an inbound frame after decode, joined by the frame id', () async {
+      final payload = encodeFromAgent(
         jsonEncode({
           's': 'proj-1',
           'm': {'type': 'terminal:output', 'data': 'hi'},
         }),
       );
-      relay.inject(
-        IncomingPeerFrame(
-          channel: 'control',
-          kind: FrameKind.sealed,
-          payload: payload,
-        ),
-      );
+      relay.inject(IncomingPeerFrame(channel: 'control', payload: payload));
       await Future<void>.delayed(const Duration(milliseconds: 20));
 
-      // The whole point: the id was readable only before the decrypt, the type
-      // only after it, and they meet without either being threaded.
-      final note = capture.annotationFor(frameIdOf(payload, FrameKind.sealed));
+      // The whole point: the id is readable before any parsing, the type only
+      // after it, and they meet without either being threaded.
+      final note = capture.annotationFor(frameIdOf(payload));
       expect(note['msgType'], 'terminal:output');
       expect(note['streamId'], 'proj-1');
     });
 
-    test('records an inbound frame that would not decrypt', () async {
-      relay.inject(
-        IncomingPeerFrame(
-          channel: 'control',
-          kind: FrameKind.sealed,
-          payload: _sealedLookingPayload(0x01),
-        ),
-      );
+    test('records an inbound frame that is not valid UTF-8', () async {
+      // Lone continuation bytes: never a valid UTF-8 sequence on their own.
+      final payload = Uint8List.fromList([0x80, 0x80, 0x80]);
+      relay.inject(IncomingPeerFrame(channel: 'control', payload: payload));
       await Future<void>.delayed(const Duration(milliseconds: 20));
 
       final drop = capture.drops.single;
-      expect(drop['reason'], 'decrypt-failed');
-      expect(drop['frameId'], '01' * 12);
+      expect(drop['reason'], 'bad-utf8');
+      expect(drop['frameId'], isNull); // named only once decoded far enough to know a type
     });
 
     test('records a frame for a stream nothing is bound to', () async {
-      final payload = await sealFromAgent(
-        keys,
+      final payload = encodeFromAgent(
         jsonEncode({
           's': 'ghost-stream',
           'm': {'type': 'terminal:output'},
         }),
       );
-      relay.inject(
-        IncomingPeerFrame(
-          channel: 'control',
-          kind: FrameKind.sealed,
-          payload: payload,
-        ),
-      );
+      relay.inject(IncomingPeerFrame(channel: 'control', payload: payload));
       await Future<void>.delayed(const Duration(milliseconds: 20));
 
       final drop = capture.drops.single;
@@ -250,20 +222,13 @@ void main() {
       // for, so a live PTY on a stale stream drops one frame per frame with no
       // end. A capture is bounded by how long it runs; app.log is not.
       Future<void> injectGhost() async {
-        final payload = await sealFromAgent(
-          keys,
+        final payload = encodeFromAgent(
           jsonEncode({
             's': 'ghost-stream',
             'm': {'type': 'terminal:output'},
           }),
         );
-        relay.inject(
-          IncomingPeerFrame(
-            channel: 'control',
-            kind: FrameKind.sealed,
-            payload: payload,
-          ),
-        );
+        relay.inject(IncomingPeerFrame(channel: 'control', payload: payload));
         await Future<void>.delayed(const Duration(milliseconds: 20));
       }
 

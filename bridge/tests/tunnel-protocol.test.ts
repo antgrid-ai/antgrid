@@ -1,7 +1,7 @@
 // The streamed-tunnel wire: the slice-size arithmetic the flow-control window
 // depends on, and what parseTunnelMessage does and does not accept.
 import { describe, expect, it } from "bun:test";
-import { CHANNEL_WINDOW_BYTES, CREDIT_BATCH_BYTES, FRAG_THRESHOLD, SEAL_OVERHEAD_BYTES } from "antgrid-wire";
+import { CHANNEL_WINDOW_BYTES, CREDIT_BATCH_BYTES, FRAG_THRESHOLD } from "antgrid-wire";
 import { base64Length, parseTunnelMessage, TUNNEL_CHUNK_BYTES } from "../src/tunnel-protocol";
 
 // Envelope + header slack. A start carrying more than this in headers may
@@ -19,12 +19,14 @@ describe("TUNNEL_CHUNK_BYTES sizing", () => {
   });
 
   it("earns a credit within every two chunks", () => {
-    expect(2 * (base64Length(TUNNEL_CHUNK_BYTES) + SEAL_OVERHEAD_BYTES))
+    // Stage B: the wire carries plaintext, so a chunk's charge is its own
+    // base64 length with no seal overhead added on top.
+    expect(2 * base64Length(TUNNEL_CHUNK_BYTES))
       .toBeGreaterThanOrEqual(CREDIT_BATCH_BYTES);
   });
 
   it("lets seven chunks pipeline inside one channel window", () => {
-    expect(7 * (base64Length(TUNNEL_CHUNK_BYTES) + FRAME_SLACK + SEAL_OVERHEAD_BYTES))
+    expect(7 * (base64Length(TUNNEL_CHUNK_BYTES) + FRAME_SLACK))
       .toBeLessThanOrEqual(CHANNEL_WINDOW_BYTES);
   });
 });

@@ -5,17 +5,16 @@ import 'package:crypto/crypto.dart';
 
 import 'frag.dart';
 
-const int peerFrameVersion = 0x03;
+const int peerFrameVersion = 0x04;
 const int peerFrameFixedPrefix = 4;
 const int maxPeerFrameHeaderBytes = 1024;
 
-/// Peer-frame kind byte. Meaningful to the two authenticated endpoints only.
-/// Endpoints dispatch on it instead of try-parsing
-/// payload plaintext — `handshake` admits exactly the two E2E handshake
-/// messages, everything else must arrive `sealed`.
+/// Peer-frame kind byte. QUIC/TLS between the two lease-authorized endpoints
+/// is the confidentiality layer now, so the byte carries a single value —
+/// kept, with the header layout, so framing does not churn twice before Stage
+/// A redesigns it.
 enum FrameKind {
-  sealed(0x00),
-  handshake(0x01);
+  message(0x00);
 
   final int wireValue;
   const FrameKind(this.wireValue);
@@ -47,40 +46,16 @@ class FrameException implements Exception {
   String toString() => 'FrameException(${reason.name}): $message';
 }
 
-/// Sealed framing is `nonce(12) || ciphertext || tag(16)` — see e2e/transport.dart.
-const int _nonceLength = 12;
-
-/// A frame's cross-endpoint identity.
-///
-/// A sealed payload opens with a per-seal random nonce, and the native
-/// payload link forwards it byte-for-byte. Both endpoints can therefore
-/// identify the exact frame without changing the route framing.
-///
-/// Plaintext frames (kind-1 handshake) carry no nonce and are rare enough that
-/// hashing them costs nothing.
+/// A frame's cross-endpoint identity: the SHA-256 of the payload bytes,
+/// lowercase hex, truncated to 24 characters.
 ///
 /// MUST stay byte-identical to `frameIdFor` in `bridge/src/netwatch.ts` —
-/// lowercase hex either way, and a 24-char hash prefix. Drift is silent: the
-/// join simply matches nothing.
-String frameIdOf(Uint8List payload, FrameKind kind) {
-  if (kind == FrameKind.sealed && payload.length >= _nonceLength) {
-    final buf = StringBuffer();
-    for (var i = 0; i < _nonceLength; i++) {
-      buf.write(payload[i].toRadixString(16).padLeft(2, '0'));
-    }
-    return buf.toString();
-  }
-  return sha256.convert(payload).toString().substring(0, 24);
-}
+/// lowercase hex either way. Drift is silent: the join simply matches
+/// nothing.
+String frameIdOf(Uint8List payload) =>
+    sha256.convert(payload).toString().substring(0, 24);
 
-// `kind` is deliberately required (no default): every call site must state
-// what it is sending — a `sealed` default would let a future handshake path
-// silently mislabel its frames.
-Uint8List encodePeerFrame(
-  Map<String, dynamic> header,
-  Uint8List payload,
-  FrameKind kind,
-) {
+Uint8List encodePeerFrame(Map<String, dynamic> header, Uint8List payload) {
   final parsedHeader = _validatePeerHeader(header);
   if (payload.length > kMaxFramePayload) {
     throw FrameException(
@@ -98,7 +73,7 @@ Uint8List encodePeerFrame(
   final total = peerFrameFixedPrefix + headerBytes.length + payload.length;
   final frame = Uint8List(total);
   frame[0] = peerFrameVersion;
-  frame[1] = kind.wireValue;
+  frame[1] = FrameKind.message.wireValue;
   ByteData.view(frame.buffer).setUint16(2, headerBytes.length, Endian.big);
   frame.setRange(
     peerFrameFixedPrefix,
@@ -113,8 +88,9 @@ Uint8List encodePeerFrame(
 ///
 /// The returned `payload` is a copy (via `sublist`), safe to retain past the
 /// current tick.
-({Map<String, dynamic> header, Uint8List payload, FrameKind kind})
-decodePeerFrame(Uint8List buf) {
+({Map<String, dynamic> header, Uint8List payload}) decodePeerFrame(
+  Uint8List buf,
+) {
   if (buf.length < peerFrameFixedPrefix) {
     throw FrameException(
       FrameErrorReason.truncated,
@@ -177,7 +153,7 @@ decodePeerFrame(Uint8List buf) {
   final payload = Uint8List.fromList(
     buf.sublist(peerFrameFixedPrefix + headerLen),
   );
-  return (header: header, payload: payload, kind: kind);
+  return (header: header, payload: payload);
 }
 
 Map<String, dynamic> _validatePeerHeader(Map<String, dynamic> header) {

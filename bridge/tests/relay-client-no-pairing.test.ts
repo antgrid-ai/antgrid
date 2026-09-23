@@ -8,7 +8,6 @@
 import { test, expect, afterEach } from "bun:test";
 import { ServerMessage } from "antgrid-wire";
 import { ed25519Pair, TestPeerSessionOwner } from "./test-peer-session-owner";
-import { generateEphemeralKeypair } from "../src/key-exchange";
 
 const AGENT_DEVICE_ID = "agent-1";
 const PHONE_ID = "phone-1";
@@ -43,7 +42,6 @@ test("an inbound pair-request frame no longer parses, and is dropped without clo
  *  grant-revoked at it. */
 function establishSession(): TestPeerSessionOwner {
   const client = TestPeerSessionOwner.forTest({
-    generateKeypair: generateEphemeralKeypair,
     sendPayload: () => {},
     peerId: PHONE_ID,
     deviceId: AGENT_DEVICE_ID,

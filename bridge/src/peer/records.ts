@@ -6,7 +6,7 @@ export interface NativeRecordStream {
   recv: { readExact(length: number): Promise<number[]> };
 }
 
-export type PeerRecordFailure = "connection-lost" | "protocol-violation" | "queue-full" | "unauthorized";
+export type PeerRecordFailure = "connection-lost" | "protocol-violation" | "queue-full" | "unauthorized" | "superseded";
 
 interface PendingRecord {
   bytes: Buffer;

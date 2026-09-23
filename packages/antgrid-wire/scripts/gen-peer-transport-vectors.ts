@@ -25,7 +25,6 @@ import {
   PEER_MAX_RELAY_URLS,
   PEER_REFRESH_MS,
   PEER_SELECTION_MS,
-  SEAL_OVERHEAD_BYTES,
   SOCKET_INFLIGHT_BYTES,
   TRANSFER_TIMEOUT_MS,
   WINDOW_RESYNC_AGE_MS,
@@ -36,31 +35,27 @@ import {
 export function buildPeerTransportVectors() {
   const samples = [
     {
-      name: "sealed-control",
+      name: "message-control",
       header: { type: "message", channel: "control" } as const,
-      kind: FrameKind.sealed,
+      kind: FrameKind.message,
       payloadHex: "deadbeef",
     },
     {
-      name: "handshake-preview",
+      name: "message-preview",
       header: { type: "message", channel: "preview" } as const,
-      kind: FrameKind.handshake,
+      kind: FrameKind.message,
       payloadHex: "000102ff",
     },
   ].map((sample) => ({
     ...sample,
     frameHex: Buffer.from(
-      encodePeerFrame(
-        sample.header,
-        Buffer.from(sample.payloadHex, "hex"),
-        sample.kind,
-      ),
+      encodePeerFrame(sample.header, Buffer.from(sample.payloadHex, "hex")),
     ).toString("hex"),
   }));
 
   return {
     comment:
-      "Peer transport v3 cross-language pin. Regenerate: cd packages/antgrid-wire && bun run gen:peer-vectors",
+      "Peer transport v4 cross-language pin. Regenerate: cd packages/antgrid-wire && bun run gen:peer-vectors",
     framing: {
       version: FRAME_VERSION,
       fixedPrefixBytes: FIXED_PREFIX,
@@ -91,7 +86,6 @@ export function buildPeerTransportVectors() {
       socketInflightBytes: SOCKET_INFLIGHT_BYTES,
       creditBatchBytes: CREDIT_BATCH_BYTES,
       maxSendQueueBytes: MAX_SEND_QUEUE_BYTES,
-      sealOverheadBytes: SEAL_OVERHEAD_BYTES,
       windowResyncAgeMs: WINDOW_RESYNC_AGE_MS,
       windowStallWarnMs: WINDOW_STALL_WARN_MS,
     },

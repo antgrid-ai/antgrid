@@ -6,15 +6,15 @@ import { createMessage } from "../../bridge/src/protocol";
 
 /**
  * Failure-matrix row for concurrent app sessions: ONE bridge now keeps an
- * established E2E session PER APP DEVICE, so a phone and a desktop app signed
+ * established session PER APP DEVICE, so a phone and a desktop app signed
  * into the same account drive the same machine at the same time. Before this,
  * the bridge held exactly one session and a second device's verified
- * client-hello displaced the first (sealed `session-takeover`, keys zeroized) —
+ * client-hello displaced the first (`session-takeover`, keys zeroized) —
  * the behaviour `gate-harness-pairfree.test.ts` used to pin.
  *
  * Unit coverage lives in `bridge/tests/handshake-pull.test.ts`, but only a real
  * relay plus a real bridge exercises the parts that unit tests stub: two
- * distinct account identities admitted from one inventory, per-session sealing
+ * distinct account identities admitted from one inventory, per-session framing
  * on one agent socket, and the relay's presence fan-out reaching a bridge that
  * now holds two live peers.
  *
@@ -27,8 +27,9 @@ import { createMessage } from "../../bridge/src/protocol";
 
 /** Round-trip the control-plane `state.snapshot` RPC and assert ok:true. Throws
  *  (via the `waitFor` timeout) if this device's session was torn down, or if
- *  the agent sealed the reply under some other device's keys. Deliberately not
- *  `pullStateSnapshot`, which resolves silently on a dead session. */
+ *  the agent routed the reply onto some other device's connection.
+ *  Deliberately not `pullStateSnapshot`, which resolves silently on a dead
+ *  session. */
 async function assertSnapshot(app: RelayClient, label: string): Promise<void> {
   const requestId = `gate-two-devices-${label}`;
   const responseP = app.waitFor((m: any) => m.type === "response" && m.requestId === requestId, 8_000);
@@ -37,7 +38,7 @@ async function assertSnapshot(app: RelayClient, label: string): Promise<void> {
   expect(res.ok).toBe(true);
 }
 
-/** Count `session-takeover` frames this client has decrypted. Reads the
+/** Count `session-takeover` frames this client has received. Reads the
  *  message QUEUE rather than arming a `waitFor` up front: a waiter covers only
  *  its own timeout window, whereas the queue holds anything that ever arrived
  *  for the whole life of the test. */
@@ -66,13 +67,13 @@ test("two app devices hold concurrent sessions with one bridge, and neither disp
     while (Date.now() < deadline && env.relay.connectionCount() < 3) await Bun.sleep(100);
     expect(env.relay.connectionCount()).toBeGreaterThanOrEqual(3);
 
-    // (2) BOTH devices get answers on their OWN keys. app1's is the load-bearing
-    // half: pre-wave-1 its session was zeroized the moment app2 was admitted,
-    // so this RPC would never be answered.
+    // (2) BOTH devices get answers on their OWN session. app1's is the
+    // load-bearing half: pre-wave-1 its session was torn down the moment app2
+    // was admitted, so this RPC would never be answered.
     await assertSnapshot(env.app, "app1-after-app2-joins");
     await assertSnapshot(app2, "app2-first");
 
-    // (3) One bus publish fans out to both sessions, sealed once per device.
+    // (3) One bus publish fans out to both sessions, framed once per device.
     // Both resolve the SAME streamId — a stream is a project namespace, not a
     // device route — so `terminal:started`, published once on that project's
     // bus, must reach both.
@@ -95,11 +96,13 @@ test("two app devices hold concurrent sessions with one bridge, and neither disp
     expect((await startedOnApp1).terminalId).toBe(terminalId);
     expect((await startedOnApp2).terminalId).toBe(terminalId);
 
-    // (5) A same-device rekey is still make-before-break and still scoped to
-    // the rekeying device: app2's session must not so much as flinch.
-    await env.app.rekey(env.agentDeviceId, env.agent.ed25519Pubkey);
-    await assertSnapshot(app2, "app2-after-app1-rekey");
-    await assertSnapshot(env.app, "app1-after-own-rekey");
+    // (5) A same-device native reconnect is still scoped to the reconnecting
+    // device: "newest wins" only supersedes an OLD connection from the SAME
+    // endpoint, so app2's session must not so much as flinch.
+    await env.app.reconnectNative();
+    await env.app.performE2EHandshake(env.agentDeviceId);
+    await assertSnapshot(app2, "app2-after-app1-reconnect");
+    await assertSnapshot(env.app, "app1-after-own-reconnect");
 
     // (1) Nothing was displaced, on either side, at any point above. Checked
     // for app2 here, while it is still connected.

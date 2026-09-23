@@ -27,8 +27,6 @@ import { parseArgs } from "node:util";
 import { mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { randomBytes } from "node:crypto";
-import { E2eTransport } from "../src/e2e/transport";
 import { TerminalFrameSource } from "../src/terminal-frames/source";
 import { TerminalFrameHub, type TerminalAddress, type TerminalViewerTransport } from "../src/terminal-frames/delivery";
 import { TerminalHistoryStore, TerminalRunHistory, type HistoryPage } from "../src/terminal-frames/history";
@@ -151,7 +149,12 @@ function scrollbackLine(seq: number): string {
  *  Fixed id/timestamp rather than createMessage(): the baseline must be exactly
  *  as deterministic as the content it wraps, and the ENVELOPE is what a
  *  comparison against terminal:frame's encodedJsonBytes needs to match units
- *  with — not the bare PTY payload. */
+ *  with — not the bare PTY payload.
+ *
+ *  Post Stage-B the transport applies no per-message seal — QUIC/TLS between
+ *  the lease-authorized endpoints is the confidentiality layer below this
+ *  boundary — so `wireBytes` (the plain JSON envelope) already IS what crosses
+ *  the wire; there is no separate encrypted-size figure to track. */
 class LegacyOutputBatcher {
   private static readonly ENVELOPE_ID = "00000000-0000-4000-8000-000000000000";
   private static readonly ENVELOPE_TS = 1_700_000_000_000;
@@ -160,10 +163,9 @@ class LegacyOutputBatcher {
   private timer?: ReturnType<typeof setTimeout>;
   envelopes = 0;
   wireBytes = 0;
-  encryptedBytes = 0;
   payloadBytes = 0;
 
-  constructor(private readonly terminalId: string, private readonly cipher: E2eTransport) {}
+  constructor(private readonly terminalId: string) {}
 
   enqueue(data: string): void {
     this.chunks.push(data);
@@ -185,7 +187,6 @@ class LegacyOutputBatcher {
       type: "terminal:output", terminalId: this.terminalId, checkoutId: "main", data,
     };
     this.wireBytes += encodedJsonBytes(envelope);
-    this.encryptedBytes += this.cipher.seal(JSON.stringify(envelope)).byteLength;
   }
 }
 
@@ -279,7 +280,7 @@ TerminalRunHistory.prototype.page = function (this: TerminalRunHistory, epoch: n
 
 // ---------------------------------------------------------------------------
 type Phase = "output" | "drain" | "probe" | "exit" | "done";
-interface FrameEvent { atMs: number; bytes: number; encryptedBytes: number; ageMs: number; revision: number; sequence: number }
+interface FrameEvent { atMs: number; bytes: number; ageMs: number; revision: number; sequence: number }
 interface StatusEvent { atMs: number; phase: Phase; code: TerminalDisplayStatus["code"] }
 
 /** Acknowledges frames on a timer, as the app does over the relay, rather than
@@ -297,7 +298,6 @@ class BenchTransport implements TerminalViewerTransport {
   private stopped = false;
   private linkAvailableAt = 0;
 
-  readonly cipher = new E2eTransport({ sendKey: randomBytes(32), recvKey: randomBytes(32) });
   constructor(
     private readonly acks: boolean, private readonly ackDelayMs: number,
     private readonly bandwidthBytesPerSec: number,
@@ -321,12 +321,14 @@ class BenchTransport implements TerminalViewerTransport {
       await Bun.sleep(Math.max(0, this.linkAvailableAt - performance.now()));
       if (signal.aborted || this.stopped) return;
     }
-    const encryptedBytes = this.cipher.seal(JSON.stringify(message)).byteLength;
-    const wireTimeMs = this.bandwidthBytesPerSec > 0 ? encryptedBytes * 1000 / this.bandwidthBytesPerSec : 0;
+    // Post Stage-B the wire carries these bytes as-is: no per-message seal to
+    // add to the bandwidth simulation.
+    const wireBytes = encodedJsonBytes(message);
+    const wireTimeMs = this.bandwidthBytesPerSec > 0 ? wireBytes * 1000 / this.bandwidthBytesPerSec : 0;
     this.linkAvailableAt = performance.now() + wireTimeMs;
     this.frames.push({
-      atMs: performance.now() - this.origin, bytes: encodedJsonBytes(message),
-      encryptedBytes, ageMs: performance.now() - captured,
+      atMs: performance.now() - this.origin, bytes: wireBytes,
+      ageMs: performance.now() - captured,
       revision: message.revision, sequence: message.sequence,
     });
     if (!this.acks || this.stopped) return;
@@ -345,7 +347,6 @@ class BenchTransport implements TerminalViewerTransport {
     this.stopped = true;
     for (const timer of this.ackTimers) clearTimeout(timer);
     this.ackTimers.clear();
-    this.cipher.zeroize();
   }
 
   lastRevision(): number { return this.frames.at(-1)?.revision ?? -1; }
@@ -501,7 +502,6 @@ interface WorkloadResult {
   bandwidth: {
     frameBytesPerSec: number; rawWireBytesPerSec: number; rawPayloadBytesPerSec: number;
     rawEnvelopeOverheadPct: number; frameToRawRatio: number; frameModeIsWorse: boolean;
-    encryptedFrameBytesPerSec: number; encryptedRawBytesPerSec: number;
   };
   history: {
     rowsArchivedAllEpochs: number; rowsRetainedInEpoch: number; epochTurnovers: number;
@@ -597,7 +597,7 @@ async function runWorkload(
         (source as unknown as { pendingChars: number }).pendingChars);
     }, 10);
 
-    const batcher = new LegacyOutputBatcher(workload.id, transport.cipher);
+    const batcher = new LegacyOutputBatcher(workload.id);
     const rng = mulberry32(seedFor(workload.id));
     const drive = await driveContent(source, workload, durationMs, rng, batcher, () => {
       if (fault === "retire-mid") connection.unsubscribe(address, runId, attachmentId);
@@ -725,8 +725,6 @@ async function runWorkload(
           ? (100 * (batcher.wireBytes - batcher.payloadBytes)) / batcher.wireBytes : 0,
         frameToRawRatio: rawWireBytesPerSec > 0 ? frameBytesPerSec / rawWireBytesPerSec : 0,
         frameModeIsWorse: rawWireBytesPerSec > 0 && frameBytesPerSec > rawWireBytesPerSec,
-        encryptedFrameBytesPerSec: perSec(inWindow.reduce((sum, f) => sum + f.encryptedBytes, 0)),
-        encryptedRawBytesPerSec: perSec(batcher.encryptedBytes),
       },
       history: {
         rowsArchivedAllEpochs: historyStats.rowsArchived,
@@ -958,10 +956,9 @@ async function main(): Promise<void> {
     console.log(JSON.stringify({
       generatedBy: "terminal-frame-bench", schemaVersion: 4, durationMs, ackDelayMs, bandwidthBytesPerSec,
       measurementScope: {
-        encryption: "actual AES-GCM application envelopes; excludes route headers and fragmentation",
         network: "bandwidth serialization plus acknowledgment delay; no real relay",
         frameAge: "capture start to simulated-link handoff; not paint or input-to-paint latency",
-        cpu: "whole benchmark process, including raw baseline encryption and history",
+        cpu: "whole benchmark process, including raw baseline and history",
         parserBacklog: "sampled private parser queue in UTF-16 characters; 10 ms sampling can miss peaks",
       },
       fault: fault ?? null, frameIntervalMs: TERMINAL_FRAME_INTERVAL_MS,

@@ -16,41 +16,27 @@ import 'support/fake_live_relay.dart';
 
 /// The bare session frames among [frames], decoded, in send order. Anything
 /// that turns out to be an app envelope or a fragment is left out.
-Future<List<Map<String, dynamic>>> _sessionFrames(
-  SessionKeys keys,
-  List<SentFrame> frames,
-) async {
+List<Map<String, dynamic>> _sessionFrames(List<SentFrame> frames) {
   final out = <Map<String, dynamic>>[];
   for (final f in frames) {
-    final plaintext = await openFromPhone(keys, f.payload);
-    if (plaintext == null) continue;
-    final json = jsonDecode(plaintext);
-    if (json is Map<String, dynamic> && json['type'] is String) out.add(json);
+    Map<String, dynamic> json;
+    try {
+      json = jsonDecode(decodeFromPhone(f.payload)) as Map<String, dynamic>;
+    } catch (_) {
+      continue;
+    }
+    if (json['type'] is String) out.add(json);
   }
   return out;
 }
 
-/// A detached copy of the session's key material. The session zeroizes its own
-/// keys in place on teardown and on rekey, which would take the test's ability
-/// to read what it captured down with it.
-SessionKeys _copyOf(SessionKeys k) => SessionKeys(
-  a2p: Uint8List.fromList(k.a2p),
-  p2a: Uint8List.fromList(k.p2a),
-  confirm: Uint8List.fromList(k.confirm),
-);
-
 /// One line per captured frame, in send order: `session:<type>` for a bare
 /// session frame, `frag:<id>#<i>` for one fragment, `app:<type>` for a whole
 /// envelope.
-Future<List<String>> _labels(SessionKeys keys, List<SentFrame> frames) async {
+List<String> _labels(List<SentFrame> frames) {
   final out = <String>[];
   for (final f in frames) {
-    final plaintext = await openFromPhone(keys, f.payload);
-    if (plaintext == null) {
-      out.add('undecryptable');
-      continue;
-    }
-    final json = jsonDecode(plaintext) as Map<String, dynamic>;
+    final json = jsonDecode(decodeFromPhone(f.payload)) as Map<String, dynamic>;
     final type = json['type'];
     if (type is String) {
       out.add('session:$type');
@@ -83,15 +69,11 @@ Future<void> _waitUntil(
 
 void main() {
   late FakeLiveRelay relay;
-  late SessionKeys keys;
-  late SessionKeys readKeys;
   late FakeHandshaker handshaker;
 
   setUp(() {
     relay = FakeLiveRelay();
-    keys = fixedKeys(1);
-    readKeys = _copyOf(keys);
-    handshaker = FakeHandshaker(keys);
+    handshaker = FakeHandshaker();
   });
 
   Future<MachineSession> establish({
@@ -177,7 +159,7 @@ void main() {
 
     expect(
       logged,
-      anyElement(startsWith('info: send dropped — no E2E session')),
+      anyElement(startsWith('info: send dropped — no session')),
     );
   });
 
@@ -200,12 +182,12 @@ void main() {
       'type': 'project:list',
     }, 'control');
 
-    // Two unanswered pings declare the session dead and rekey it, which
-    // zeroizes the keys this test reads its captured frames back with. So take
-    // the first tick as the proof liveness runs and get on with it, rather than
-    // sleeping into the third.
+    // Two unanswered pings declare the session dead and close the link, and
+    // there is nothing to read once it does. So take the first tick as the
+    // proof liveness runs and get on with it, rather than sleeping into the
+    // third.
     await _waitUntil(() => relay.sent.length >= 3);
-    final held = await _labels(readKeys, relay.sent);
+    final held = _labels(relay.sent);
     expect(
       held,
       contains('session:ping'),
@@ -223,7 +205,7 @@ void main() {
     await Future.wait([preview, control]);
     expect(previewDone, isTrue);
 
-    final all = await _labels(readKeys, relay.sent);
+    final all = _labels(relay.sent);
     final app = all.where((l) => !l.startsWith('session:')).toList();
     expect(app, ['app:project:list', 'app:tunnel:http-response']);
   });
@@ -245,7 +227,7 @@ void main() {
       }, 'preview');
       await Future.wait([first, second]);
 
-      final labels = await _labels(readKeys, relay.sent);
+      final labels = _labels(relay.sent);
       expect(
         labels.length,
         greaterThan(2),
@@ -333,8 +315,8 @@ void main() {
 
   // --- credit windows -------------------------------------------------------
 
-  /// A preview message whose sealed frame runs a little over 50 KB, so three of
-  /// them fill the 200 KB window the cases below shrink the channel to and the
+  /// A preview message whose frame runs a little over 50 KB, so three of them
+  /// fill the 200 KB window the cases below shrink the channel to and the
   /// fourth cannot go.
   Map<String, dynamic> bulk(int i) => {
     'type': 'tunnel:http-response',
@@ -349,20 +331,18 @@ void main() {
     'm': {'type': 'agent:tools', 'pad': 'x' * pad},
   });
 
-  Future<void> injectFromAgent(String channel, String plaintext) async {
+  void injectFromAgent(String channel, String plaintext) {
     relay.inject(
-      IncomingPeerFrame(
-        channel: channel,
-        kind: FrameKind.sealed,
-        payload: await sealFromAgent(readKeys, plaintext),
-      ),
+      IncomingPeerFrame(channel: channel, payload: encodeFromAgent(plaintext)),
     );
   }
 
-  Future<void> injectCredit(String channel, int consumed) => injectFromAgent(
-    'control',
-    jsonEncode({'type': 'credit', 'channel': channel, 'consumed': consumed}),
-  );
+  Future<void> injectCredit(String channel, int consumed) async {
+    injectFromAgent(
+      'control',
+      jsonEncode({'type': 'credit', 'channel': channel, 'consumed': consumed}),
+    );
+  }
 
   /// Establishes on a shrunken window and hands five [bulk] messages to the
   /// preview channel, three of which fit. Returns the session and the five
@@ -435,35 +415,25 @@ void main() {
   });
 
   test('the receiver credits once a batch has arrived, counting the frames it '
-      'could not decrypt and the session frames alike', () async {
+      'could not decode and the session frames alike', () async {
     await establish(creditBatchBytes: 100000);
 
-    // The consumed count is over SEALED payload bytes, so it has to be summed
-    // from the frames as they are sealed, not from their plaintext.
+    // The consumed count is over the frame's wire bytes, so it has to be
+    // summed from the frames as they are sent, not from their plaintext.
     var preview = 0;
-    Future<void> feedPreview(
-      String plaintext, {
-      SessionKeys? sealedWith,
-    }) async {
-      final payload = await sealFromAgent(sealedWith ?? readKeys, plaintext);
+    void feedPreview(String plaintext) {
+      final payload = encodeFromAgent(plaintext);
       preview += payload.length;
-      relay.inject(
-        IncomingPeerFrame(
-          channel: 'preview',
-          kind: FrameKind.sealed,
-          payload: payload,
-        ),
-      );
+      relay.inject(IncomingPeerFrame(channel: 'preview', payload: payload));
     }
 
     for (var i = 0; i < 3; i++) {
-      await feedPreview(filler(40000));
+      feedPreview(filler(40000));
     }
     await _waitUntil(() => relay.sent.isNotEmpty);
-    var credits = (await _sessionFrames(
-      readKeys,
+    var credits = _sessionFrames(
       relay.sent,
-    )).where((j) => j['type'] == 'credit').toList();
+    ).where((j) => j['type'] == 'credit').toList();
     expect(credits, hasLength(1));
     expect(credits.single, {
       'type': 'credit',
@@ -471,37 +441,32 @@ void main() {
       'consumed': preview,
     });
 
-    // A frame sealed under keys this session never held still cost the agent
-    // its window, so it has to be credited back like any other.
-    await feedPreview(filler(40000), sealedWith: fixedKeys(9));
-    await feedPreview(filler(70000));
+    // A frame that is not valid UTF-8 still cost the agent its window, so it
+    // has to be credited back like any other frame the wire delivered.
+    final garbage = Uint8List(40000)..fillRange(0, 40000, 0x80);
+    preview += garbage.length;
+    relay.inject(IncomingPeerFrame(channel: 'preview', payload: garbage));
+    feedPreview(filler(70000));
     await _waitUntil(() => relay.sent.length >= 2);
-    credits = (await _sessionFrames(
-      readKeys,
+    credits = _sessionFrames(
       relay.sent,
-    )).where((j) => j['type'] == 'credit').toList();
+    ).where((j) => j['type'] == 'credit').toList();
     expect(credits.last['consumed'], preview);
 
     var control = 0;
-    Future<void> feedControl(String plaintext) async {
-      final payload = await sealFromAgent(readKeys, plaintext);
+    void feedControl(String plaintext) {
+      final payload = encodeFromAgent(plaintext);
       control += payload.length;
-      relay.inject(
-        IncomingPeerFrame(
-          channel: 'control',
-          kind: FrameKind.sealed,
-          payload: payload,
-        ),
-      );
+      relay.inject(IncomingPeerFrame(channel: 'control', payload: payload));
     }
 
-    await feedControl(jsonEncode({'type': 'ping'}));
-    await feedControl(filler(100000));
+    feedControl(jsonEncode({'type': 'ping'}));
+    feedControl(filler(100000));
     await _waitUntil(
       () => relay.sent.length >= 4,
       within: const Duration(milliseconds: 300),
     );
-    final decoded = await _sessionFrames(readKeys, relay.sent);
+    final decoded = _sessionFrames(relay.sent);
     expect(
       decoded.map((j) => j['type']),
       contains('pong'),
@@ -525,43 +490,33 @@ void main() {
       pingSilence: const Duration(milliseconds: 60),
       creditBatchBytes: 10000000,
     );
-    final payload = await sealFromAgent(readKeys, filler(10000));
-    relay.inject(
-      IncomingPeerFrame(
-        channel: 'preview',
-        kind: FrameKind.sealed,
-        payload: payload,
-      ),
-    );
+    final payload = encodeFromAgent(filler(10000));
+    relay.inject(IncomingPeerFrame(channel: 'preview', payload: payload));
 
-    Future<List<String>> creditsIn(List<SentFrame> frames) async =>
-        (await _sessionFrames(readKeys, frames))
-            .where((j) => j['type'] == 'credit')
-            .map((j) => "${j['channel']}=${j['consumed']}")
-            .toList();
+    List<String> creditsIn(List<SentFrame> frames) => _sessionFrames(frames)
+        .where((j) => j['type'] == 'credit')
+        .map((j) => "${j['channel']}=${j['consumed']}")
+        .toList();
 
     await _waitUntil(
       () => relay.sent.length >= 2,
       within: const Duration(milliseconds: 200),
     );
     final firstTick = relay.sent.length;
-    expect(await creditsIn(relay.sent), [
-      'control=0',
-      'preview=${payload.length}',
-    ]);
+    expect(creditsIn(relay.sent), ['control=0', 'preview=${payload.length}']);
 
     await _waitUntil(
       () => relay.sent.length >= firstTick + 2,
       within: const Duration(milliseconds: 200),
     );
-    expect(await creditsIn(relay.sent.sublist(firstTick)), [
+    expect(creditsIn(relay.sent.sublist(firstTick)), [
       'control=0',
       'preview=${payload.length}',
     ]);
   });
 
   test('credits arriving from the agent keep the session alive on their own — '
-      'no ping, no rekey', () async {
+      'no ping, no reconnect', () async {
     await establish(
       pingSilence: const Duration(milliseconds: 60),
       creditBatchBytes: 10000000,
@@ -571,23 +526,23 @@ void main() {
       await Future<void>.delayed(const Duration(milliseconds: 25));
     }
 
-    final types = (await _sessionFrames(
-      readKeys,
-      relay.sent,
-    )).map((j) => j['type']).toSet();
+    final types = _sessionFrames(relay.sent).map((j) => j['type']).toSet();
     expect(
       types,
       isNot(contains('ping')),
-      reason: 'a credit is a sealed frame, so it is proof of life too',
+      reason: 'a credit is a frame from the peer, so it is proof of life too',
     );
-    expect(handshaker.performCalls, 1, reason: 'no missed pong, no rekey');
+    expect(
+      relay.closeCalled,
+      isFalse,
+      reason: 'no missed pong, no reconnect',
+    );
+    expect(handshaker.performCalls, 1);
   });
 
   test('a socket loss drops what the gate was holding, and the next '
       'establishment starts from a fresh window', () async {
-    final k2 = fixedKeys(2);
-    final read2 = _copyOf(k2);
-    handshaker = FakeHandshaker.sequence([fixedKeys(1), k2]);
+    handshaker = FakeHandshaker.sequence([true, true]);
     final session = await establish(
       channelWindowBytes: 200000,
       socketInflightBytes: 300000,
@@ -618,7 +573,9 @@ void main() {
     expect(
       relay.sent,
       hasLength(3),
-      reason: 'frames the gate held die with the keys they would have used',
+      reason:
+          'frames the gate held die with the session that would have sent '
+          'them',
     );
 
     s.hold = false;
@@ -643,54 +600,56 @@ void main() {
       reason: 'a full window goes out before the agent has credited anything',
     );
     expect(
-      await openFromPhone(read2, relay.sent.last.payload),
-      isNotNull,
-      reason: 'sealed under the keys of the session that is live now',
+      decodeFromPhone(relay.sent.last.payload),
+      isNotEmpty,
+      reason: 'a plain frame, readable on the new session as on the old',
     );
     await Future.wait(fresh);
   });
 
-  test(
-    'a frame that arrives across a key swap is opened with the new keys',
-    () async {
-      final k2 = fixedKeys(2);
-      final read2 = _copyOf(k2);
-      handshaker = FakeHandshaker.sequence([fixedKeys(1), k2]);
-      final session = await establish();
+  test('a send the socket accepts only after the session was replaced is not '
+      "charged to the new session's window", () async {
+    // The outcome of an in-flight write lands after a teardown and a fresh
+    // hello. A bool fence reads "established" again and would bill the new
+    // session for bytes its peer never receives, so that window never drains.
+    final gated = _GatedRelay();
+    relay = gated;
+    handshaker = FakeHandshaker.sequence([true, true]);
+    final session = await establish();
+    final s = session.debugScheduler;
 
-      // The agent swaps to the new keys before it confirms them, so the frames it
-      // writes next are sealed under a set this side does not hold yet. The
-      // inbound chain captures the keys as a frame ARRIVES and decrypts it
-      // several turns later, which is the gap this frame lands in — so the frame
-      // is sealed up front and handed over in the same turn as the rekey
-      // trigger, with nothing awaited in between. That microtask ordering is what
-      // makes the case bite: an await added anywhere between the injection here
-      // and the swap would let the chain capture the new keys and open the frame
-      // on the first try, and the assertion below would hold for free.
-      final acrossSwap = await sealFromAgent(
-        read2,
-        jsonEncode({'type': 'ping'}),
-      );
-      relay.inject(
-        IncomingPeerFrame(
-          channel: 'control',
-          kind: FrameKind.sealed,
-          payload: acrossSwap,
-        ),
-      );
-      for (var i = 0; i < 3; i++) {
-        session.notifyRpcResult(timedOut: true);
-      }
+    gated.gate = Completer<void>();
+    final inFlight = session.sendOnStream(kControlStreamId, {
+      'type': 'project:list',
+    }, 'preview');
+    await _waitUntil(() => gated.sent.isNotEmpty);
+    expect(gated.sent, hasLength(1));
 
-      await _waitUntil(
-        () => relay.sent.isNotEmpty,
-        within: const Duration(milliseconds: 500),
-      );
-      expect(
-        (await _sessionFrames(read2, relay.sent)).map((j) => j['type']),
-        contains('pong'),
-        reason: 'the retry with the live keys is what saves this frame',
-      );
-    },
-  );
+    relay.setState(
+      const AppState(connectionState: RelayConnectionState.disconnected),
+    );
+    await Future<void>.delayed(Duration.zero);
+    relay.setState(
+      const AppState(connectionState: RelayConnectionState.authenticated),
+    );
+    await session.ensureEstablished();
+    expect(handshaker.performCalls, 2, reason: 'a second hello established');
+    expect(s.unacked('preview'), 0);
+
+    gated.gate!.complete();
+    await inFlight;
+    expect(s.unacked('preview'), 0);
+  });
+}
+
+class _GatedRelay extends FakeLiveRelay {
+  Completer<void>? gate;
+
+  @override
+  Future<PeerSendOutcome> sendFrame(String channel, Uint8List payload) async {
+    final outcome = await super.sendFrame(channel, payload);
+    final g = gate;
+    if (channel == 'preview' && g != null) await g.future;
+    return outcome;
+  }
 }

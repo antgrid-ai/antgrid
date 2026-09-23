@@ -43,13 +43,13 @@ class NetwatchEvent {
   /// `tx` | `rx`.
   final String dir;
 
-  /// `sealed` | `handshake` | `control` | `drop`.
+  /// `frame` | `hello` | `control` | `json` | `drop` | `lifecycle`.
   final String kind;
 
   /// `relay` | `local`. The two are not the same wire — the relay path is
-  /// sealed frames over a routed socket, the loopback path is plain JSON with
-  /// no seal, no frames and no streams — so a capture that did not say which
-  /// one it came from could be read as relay traffic it never was.
+  /// framed plaintext over a QUIC/TLS-authorized socket, the loopback path is
+  /// plain JSON with no framing and no streams — so a capture that did not say
+  /// which one it came from could be read as relay traffic it never was.
   ///
   /// This app records the relay wire in full and the loopback wire ONLY where
   /// it drops. The agent's `LocalListener` is the far end of the loopback
@@ -107,11 +107,13 @@ String netwatchLogPath({String? abDir}) =>
 /// Records frames, holds each one briefly so the layer that knows its message
 /// type can [annotate] it, then writes it out as JSONL.
 ///
-/// The delay is what makes annotation possible at all. A frame's id (its
-/// AES-GCM nonce) is readable only at the transport edge, and its plaintext
-/// type only after decrypt — which on the inbound path is a real `await`
-/// behind a per-channel chain. Rather than thread the id through four calls,
-/// both layers name the same frame by id and this buffer joins them.
+/// The delay is what makes annotation possible at all. A frame's id (a SHA-256
+/// hash of its plaintext payload, mirroring `frameIdFor` in
+/// `bridge/src/netwatch.ts`) is readable only at the transport edge, and its
+/// message type only after the layer above parses it — which on the inbound
+/// path is a real `await` behind a per-channel chain. Rather than thread the
+/// id through four calls, both layers name the same frame by id and this
+/// buffer joins them.
 class Netwatch {
   Netwatch(
     this._sink, {
@@ -197,8 +199,9 @@ class Netwatch {
   /// a typeless frame, which is honest — better than blocking a send to keep it
   /// annotatable.
   void annotate(String frameId, {String? msgType, String? streamId}) {
-    // Newest first: a nonce repeat is a cryptographic impossibility, but a
-    // reverse scan also finds the just-recorded frame in one step.
+    // Newest first: an annotation almost always follows its own frame right
+    // away, so a reverse scan finds it in one step even on a hash collision
+    // between two distinct frames sharing identical payload bytes.
     for (var i = _pending.length - 1; i >= 0; i--) {
       final e = _pending[i];
       if (e.frameId != frameId) continue;

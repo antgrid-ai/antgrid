@@ -7,13 +7,13 @@ export type NetwatchDir = "tx" | "rx" | "event";
 
 /**
  * Frame classification at the transport edge:
- *   - `sealed`    — an E2E-encrypted app or session frame (FrameKind.sealed)
- *   - `handshake` — a kind-1 plaintext handshake frame
+ *   - `frame`     — a native peer frame (app or session), plaintext under QUIC/TLS
+ *   - `hello`     — the loopback hello/ready exchange
  *   - `control`   — a relay control JSON message (welcome / error / peer-*)
  *   - `json`      — a loopback frame: plain JSON, no seal, no frames, no streams
  *   - `drop`      — a frame that never left, or never reached dispatch
  */
-export type NetwatchKind = "sealed" | "handshake" | "control" | "json" | "drop" | "lifecycle";
+export type NetwatchKind = "frame" | "hello" | "control" | "json" | "drop" | "lifecycle";
 
 export interface NetwatchEvent {
   /** Monotonic counter of the process that RECORDED this — this bridge, or the
@@ -51,27 +51,24 @@ export interface NetwatchEvent {
   origin?: "app";
 }
 
-/** Sealed framing is `nonce(12) || ciphertext || tag(16)` — see e2e/transport.ts. */
-const NONCE_LENGTH = 12;
-
 /**
  * The cross-endpoint join key.
  *
- * A sealed payload opens with a per-seal RANDOM nonce, and the relay forwards
- * the payload byte-for-byte (`decoded.payload` in relay/src/server.ts), so that
- * nonce is already a unique id for this exact frame that BOTH endpoints can
- * compute — with no wire change, no header space, and no key material. This is
- * what closes the gap `AgentTransport.droppedFrames` documents: "the route
- * header carries no message id — so a listener learns that something in flight
- * died, never which one."
+ * QUIC/TLS is the confidentiality layer for a native peer frame, so the
+ * payload the relay-era nonce used to key off of no longer exists — every
+ * frame is hashed instead. The relay forwards a loopback/relay payload
+ * byte-for-byte, so the same hash is already a unique id for this exact frame
+ * that BOTH endpoints can compute — with no wire change, no header space, and
+ * no key material. This is what closes the gap `AgentTransport.droppedFrames`
+ * documents: "the route header carries no message id — so a listener learns
+ * that something in flight died, never which one."
  *
- * Plaintext frames (kind-1 handshake, relay control JSON) carry no nonce, and
- * are rare enough that a hash prefix costs nothing.
+ * More than one occurrence can legitimately share an id (a ping, a pong, a
+ * credit update are byte-identical every time they recur) — `joinCaptures`
+ * (`cli/netwatch.ts`) pairs occurrences in order rather than assuming the id
+ * is unique.
  */
-export function frameIdFor(payload: Uint8Array, sealed: boolean): string {
-  if (sealed && payload.length >= NONCE_LENGTH) {
-    return Buffer.from(payload.subarray(0, NONCE_LENGTH)).toString("hex");
-  }
+export function frameIdFor(payload: Uint8Array): string {
   return createHash("sha256").update(payload).digest("hex").slice(0, 24);
 }
 

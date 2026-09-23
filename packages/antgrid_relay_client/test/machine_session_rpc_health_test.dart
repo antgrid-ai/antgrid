@@ -1,11 +1,11 @@
 // `StreamTransport.request`'s `countsTowardHealth` flag, and what it does to
-// `MachineSession`'s consecutive-timeout rekey trigger.
+// `MachineSession`'s consecutive-timeout link-close trigger.
 //
 // A caller that re-issues the SAME pull on every re-establishment —
-// including the one a rekey itself causes — must be able to opt its own
-// timeouts out of the trigger, or a run of timeouts on a link that cannot
-// carry the pull forces a rekey, the rekey re-establishes, the
-// re-establish re-drives the same pull, and the loop never breaks (see
+// including the one closing the link itself causes — must be able to opt its
+// own timeouts out of the trigger, or a run of timeouts on a link that cannot
+// carry the pull closes the link, the supervisor redials, the redial
+// re-drives the same pull, and the loop never breaks (see
 // `AgentTransport.request`'s doc comment, and `TerminalService`'s use of it
 // for `terminal.snapshot`).
 
@@ -16,10 +16,11 @@ import 'support/fake_live_relay.dart';
 
 void main() {
   test(
-    'countsTowardHealth: false timeouts never advance the rekey counter',
+    'countsTowardHealth: false timeouts never advance the close-trigger '
+    'counter',
     () async {
       final relay = FakeLiveRelay();
-      final handshaker = FakeHandshaker.sequence([fixedKeys(1), fixedKeys(2)]);
+      final handshaker = FakeHandshaker();
       final session = MachineSession(
         relay: relay,
         machineDeviceId: 'm1',
@@ -30,8 +31,8 @@ void main() {
       expect(handshaker.performCalls, 1);
 
       final control = session.streamFor(kControlStreamId);
-      // Three consecutive timeouts is the rekey trigger — none of these count,
-      // so running past it must still leave the session on its first handshake.
+      // Three consecutive timeouts is the close trigger — none of these count,
+      // so running past it must still leave the link open.
       for (var i = 0; i < 4; i++) {
         await expectLater(
           control.request(
@@ -43,12 +44,14 @@ void main() {
         );
       }
 
-      // Give a wrongly-triggered rekey room to start before asserting it didn't.
+      // Give a wrongly-triggered close room to happen before asserting it
+      // didn't.
       await Future<void>.delayed(const Duration(milliseconds: 30));
       expect(
-        handshaker.performCalls,
-        1,
-        reason: 'a timeout that does not count toward health must not rekey',
+        relay.closeCalled,
+        isFalse,
+        reason: 'a timeout that does not count toward health must not close '
+            'the link',
       );
       expect(session.isEstablished, isTrue);
 
@@ -58,11 +61,11 @@ void main() {
   );
 
   test(
-    'countsTowardHealth: true (the default) still triggers a rekey after '
+    'countsTowardHealth: true (the default) still closes the link after '
     'three consecutive timeouts',
     () async {
       final relay = FakeLiveRelay();
-      final handshaker = FakeHandshaker.sequence([fixedKeys(1), fixedKeys(2)]);
+      final handshaker = FakeHandshaker();
       final session = MachineSession(
         relay: relay,
         machineDeviceId: 'm1',
@@ -83,13 +86,18 @@ void main() {
         );
       }
 
-      for (var i = 0; i < 50 && handshaker.performCalls < 2; i++) {
+      for (var i = 0; i < 50 && !relay.closeCalled; i++) {
         await Future<void>.delayed(const Duration(milliseconds: 10));
       }
       expect(
+        relay.closeCalled,
+        isTrue,
+        reason: 'three consecutive counted timeouts must still close the link',
+      );
+      expect(
         handshaker.performCalls,
-        2,
-        reason: 'three consecutive counted timeouts must still trigger a rekey',
+        1,
+        reason: 'no in-place repair — the supervisor owns the redial',
       );
 
       await session.dispose();

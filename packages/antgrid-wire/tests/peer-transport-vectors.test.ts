@@ -30,7 +30,7 @@ test("peer transport byte vectors decode with no route identity", () => {
     expect(decoded.header).toEqual(sample.header);
     expect(decoded.header).not.toHaveProperty("to");
     expect(decoded.header).not.toHaveProperty("from");
-    expect(decoded.kind).toBe(sample.kind);
+    expect(sample.kind).toBe(FrameKind.message);
     expect(Buffer.from(decoded.payload).toString("hex")).toBe(sample.payloadHex);
   }
   expect(fixture.framing.kinds).toEqual(FrameKind);

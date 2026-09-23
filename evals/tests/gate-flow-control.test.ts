@@ -1,15 +1,15 @@
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { CHANNEL_WINDOW_BYTES, MAX_FRAME_PAYLOAD, SEAL_OVERHEAD_BYTES } from "antgrid-wire";
+import { CHANNEL_WINDOW_BYTES, MAX_FRAME_PAYLOAD } from "antgrid-wire";
 import { setupTestEnv, type TestEnv } from "../helpers/harness";
 import { createMessage, type AbMessage } from "../../bridge/src/protocol";
 import { firstProjectStream } from "../support/stream";
 
 /**
  * Per-channel credit windows, end to end over a real relay and a real agent
- * (docs/protocol/e2e-handshake.md §8.8). The agent may hold at most
- * CHANNEL_WINDOW_BYTES of sealed payload in flight on a channel beyond what
+ * (docs/protocol/peer-session.md). The agent may hold at most
+ * CHANNEL_WINDOW_BYTES of frame payload in flight on a channel beyond what
  * this client has credited; the client counts what it takes off the wire and
  * returns cumulative `credit` session frames. Two things have to be true for
  * that to be an improvement rather than a new way to wedge: a body larger than
@@ -87,7 +87,7 @@ describe("gate: per-channel flow control", () => {
     expect(readme).toBeDefined();
     expect(readme!.content).toContain("Eval Test Project");
 
-    // More than one window of sealed payload arrived on this channel, so the
+    // More than one window of frame payload arrived on this channel, so the
     // agent could only have written it after credits released the window it
     // filled first.
     expect(env.app.consumedBytes("control") - before).toBeGreaterThan(CHANNEL_WINDOW_BYTES);
@@ -118,7 +118,7 @@ describe("gate: per-channel flow control", () => {
     expect(stalled).toBeGreaterThan(0);
     // The gate lets a frame through whenever nothing is outstanding, so one
     // maximal frame past a full window is the ceiling.
-    expect(stalled).toBeLessThanOrEqual(CHANNEL_WINDOW_BYTES + MAX_FRAME_PAYLOAD + SEAL_OVERHEAD_BYTES);
+    expect(stalled).toBeLessThanOrEqual(CHANNEL_WINDOW_BYTES + MAX_FRAME_PAYLOAD);
 
     env.app.setCreditsPaused(false);
 

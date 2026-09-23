@@ -224,7 +224,7 @@ export class LocalListener implements TransportSubscriber {
     netwatch.record({
       dir: "rx", kind: "drop", transport: "local",
       reason, bytes: Buffer.byteLength(text, "utf8"),
-      frameId: frameIdFor(Buffer.from(text, "utf8"), false),
+      frameId: frameIdFor(Buffer.from(text, "utf8")),
       detail: this.netwatchDetail,
     });
   }
@@ -315,17 +315,17 @@ export class LocalListener implements TransportSubscriber {
     // carries the core's shared token, and an accepted hello carries a VALID
     // one.
     netwatch.record({
-      dir: "rx", kind: "handshake", transport: "local",
+      dir: "rx", kind: "hello", transport: "local",
       msgType: "hello", bytes: Buffer.byteLength(text, "utf8"),
-      frameId: frameIdFor(Buffer.from(text, "utf8"), false),
+      frameId: frameIdFor(Buffer.from(text, "utf8")),
       detail: { ...this.netwatchDetail, ...(newPid === undefined ? {} : { appPid: newPid }) },
     });
     const ready = JSON.stringify({ type: "ready" });
     ws.send(ready);
     netwatch.record({
-      dir: "tx", kind: "handshake", transport: "local",
+      dir: "tx", kind: "hello", transport: "local",
       msgType: "ready", bytes: Buffer.byteLength(ready, "utf8"),
-      frameId: frameIdFor(Buffer.from(ready, "utf8"), false),
+      frameId: frameIdFor(Buffer.from(ready, "utf8")),
       detail: this.netwatchDetail,
     });
     this.busUnsubscribe = this.opts.bus.subscribe(this);

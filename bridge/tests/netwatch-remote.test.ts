@@ -15,7 +15,7 @@ const appEvent = (over: Record<string, unknown> = {}): Record<string, unknown> =
   seq: 7,
   at: 1_000,
   dir: "tx",
-  kind: "sealed",
+  kind: "frame",
   transport: "relay",
   origin: "app",
   channel: "control",
@@ -28,7 +28,7 @@ const appEvent = (over: Record<string, unknown> = {}): Record<string, unknown> =
 describe("Netwatch.ingestRemote", () => {
   it("keeps the app's own seq and marks the event as the far end's", () => {
     const w = new Netwatch(8);
-    w.record({ dir: "rx", kind: "sealed", transport: "relay", msgType: "local" });
+    w.record({ dir: "rx", kind: "frame", transport: "relay", msgType: "local" });
     expect(w.ingestRemote([appEvent()])).toBe(1);
 
     const remote = w.snapshot().find((e) => e.origin === "app")!;
@@ -62,9 +62,9 @@ describe("Netwatch.ingestRemote", () => {
     const admitted = w.ingestRemote([
       null,
       "not an object",
-      { dir: "sideways", kind: "sealed", at: 1 },
+      { dir: "sideways", kind: "frame", at: 1 },
       { dir: "tx", at: 1 },
-      { dir: "tx", kind: "sealed" },
+      { dir: "tx", kind: "frame" },
       appEvent(),
     ]);
     expect(admitted).toBe(1);
@@ -73,7 +73,7 @@ describe("Netwatch.ingestRemote", () => {
 
   it("counts remote events against the ring's eviction budget", () => {
     const w = new Netwatch(2);
-    w.record({ dir: "tx", kind: "sealed", transport: "relay" });
+    w.record({ dir: "tx", kind: "frame", transport: "relay" });
     w.ingestRemote([appEvent(), appEvent(), appEvent()]);
     // `seq` counts only what THIS process recorded, so eviction cannot be
     // derived from it once a second origin is feeding the same ring.
@@ -82,7 +82,8 @@ describe("Netwatch.ingestRemote", () => {
   });
 });
 
-/** A paired, handshake-complete client whose socket and seal are inert. */
+/** A client with a session installed directly (past the hello) whose socket is
+ *  inert. */
 function makeClient(onMessage?: (m: AbMessage) => void): TestPeerSessionOwner {
   const c = new TestPeerSessionOwner({
     identity: {
@@ -91,9 +92,6 @@ function makeClient(onMessage?: (m: AbMessage) => void): TestPeerSessionOwner {
       createdAt: new Date().toISOString(),
       ed25519PublicKey: "pk",
       ed25519PrivateKey: "sk",
-    },
-    generateKeypair: () => {
-      throw new Error("not used");
     },
     onMessage,
   });

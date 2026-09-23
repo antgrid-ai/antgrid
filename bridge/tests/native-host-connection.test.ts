@@ -2,9 +2,8 @@ import { expect, test, spyOn } from "bun:test";
 import { netwatch } from "../src/netwatch";
 import type { Connection } from "@number0/iroh";
 import { NativeHostConnection, evalIrohBindAddress } from "../src/peer/native-host-connection";
-import { generateEphemeralKeypair } from "../src/key-exchange";
 import vector from "../../evals/fixtures/endpoint-registration-vectors.json";
-import { FrameKind, encodePeerFrame } from "antgrid-wire";
+import { encodePeerFrame } from "antgrid-wire";
 import { MessageBus } from "../src/message-bus";
 import type { PendingSinkWrite, QueuedAppFrame } from "../src/send-scheduler";
 
@@ -30,7 +29,7 @@ function fixture(now?: () => number) {
       identity: { deviceId: vector.challenge.deviceId, deviceName: "test", createdAt: "",
         ed25519PublicKey: vector.devicePublic, ed25519PrivateKey: vector.deviceSeed },
       enrollment: vector.challenge, endpointSecret: vector.endpointSeed, licenseApiUrl: "https://backend.invalid",
-      getLicenseToken: () => "test-only", generateKeypair: generateEphemeralKeypair,
+      getLicenseToken: () => "test-only",
       remoteAccessEnabled: () => allowed,
       ...(now ? { lifecycle: { now } } : {}),
     },
@@ -46,7 +45,7 @@ function fixture(now?: () => number) {
     acceptPeer: (connection: Connection) => Promise<void>;
     nativePeers: Map<string, unknown>;
     handleTextMessage: (raw: string) => void;
-    resetE2eState: () => void;
+    resetSessions: () => void;
     handleBinaryFrame: (frame: Buffer) => void;
     onSessionEstablished: (peerId: string) => void;
     notePolicyGeneration: (generation: string) => void;
@@ -193,10 +192,13 @@ test("peer payload diagnostics classify all production payload frames as native"
   try {
     await f.access.acceptPeer(connection(f.endpointId).native);
     const access = f.client.peers as unknown as {
-      onSealedPlaintext: (text: string, channel: "control", peerId: string, session: null) => void;
+      onPeerPlaintext: (text: string, channel: "control", peerId: string, session: unknown) => void;
     };
-    access.onSealedPlaintext("{}", "control", `${f.peerId}#${f.client.deviceId}`, null);
-    access.onSealedPlaintext("{}", "control", "websocket-peer", null);
+    // Frag reassembly is checked unconditionally before classification runs,
+    // so the fake stands in for a session with nothing buffered.
+    const fakeSession = { frag: { accept: () => false } };
+    access.onPeerPlaintext("{}", "control", `${f.peerId}#${f.client.deviceId}`, fakeSession);
+    access.onPeerPlaintext("{}", "control", "websocket-peer", fakeSession);
     expect(events.filter((event) => event.reason === "unrecognized-plaintext").map((event) => event.transport))
       .toEqual(["iroh", "iroh"]);
     const accepted = events.find((event) => event.kind === "lifecycle" && event.msgType === "peer:native-accepted");
@@ -235,10 +237,10 @@ test("native write diagnostics await acceptance and separate payload from record
     const slot = `${f.peerId}#${f.client.deviceId}`;
     const payload = Buffer.from("private-test-payload");
     const access = f.client.peers as unknown as {
-      sendNativePayload: (data: Buffer, to: string, channel: "control", kind: FrameKind, type: string) => boolean;
+      sendNativePayload: (data: Buffer, to: string, channel: "control", type: string) => boolean;
       sendNativeScheduled: (data: Buffer, to: string, frame: QueuedAppFrame) => PendingSinkWrite;
     };
-    expect(access.sendNativePayload(payload, slot, "control", FrameKind.handshake, "handshake:agent-hello")).toBe(true);
+    expect(access.sendNativePayload(payload, slot, "control", "session:hello")).toBe(true);
     expect(events.filter((event) => event.dir === "tx")).toHaveLength(0);
     written.resolve();
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -246,13 +248,16 @@ test("native write diagnostics await acceptance and separate payload from record
     expect(tx).toHaveLength(1);
     expect(tx[0].transport).toBe("iroh");
     expect(tx[0].bytes).toBe(payload.length);
-    const peerFrame = encodePeerFrame({ type: "message", channel: "control" }, payload, FrameKind.handshake);
+    const peerFrame = encodePeerFrame({ type: "message", channel: "control" }, payload);
     expect(tx[0].detail).toEqual({ peerFrameBytes: peerFrame.length, recordBytes: peerFrame.length + 4, lengthPrefixBytes: 4 });
     expect(JSON.stringify(events)).not.toContain("private-test-payload");
     const scheduled = access.sendNativeScheduled(Buffer.alloc(48, 7), slot, {
       channel: "control", streamId: "project-stream", type: "file:content", plaintext: "private-file",
       plaintextBytes: 12,
     });
+    // The window charge must equal what the receiver credits: payload bytes,
+    // with no seal overhead added on this side only.
+    expect(scheduled.bytes).toBe(48);
     expect(await scheduled.completed).toBe(true);
     const scheduledEvent = events.find((event) => event.msgType === "file:content");
     expect(scheduledEvent?.transport).toBe("iroh");
@@ -406,17 +411,34 @@ test("missing native carrier never writes payloads to central WebSocket", async 
 });
 
 
-test("a slow first stream cannot admit a duplicate peer writer", async () => {
+test("a new connection for the same endpoint retires a slow first (newest wins)", async () => {
+  // D4: a second authenticated connection for a peerId already in nativePeers
+  // retires the first rather than being refused — the fix for the
+  // rekey-as-reconnect stall (stage-B-waves.md §1.4).
   const f = fixture(); const stream = Promise.withResolvers<any>();
+  const events: Parameters<typeof netwatch.record>[0][] = [];
+  const observer = spyOn(netwatch, "record").mockImplementation((event) => { events.push(event); });
   try {
     const first = connection(f.endpointId, stream.promise);
     const pending = f.access.acceptPeer(first.native);
     await new Promise((r) => setTimeout(r, 0));
-    const duplicate = connection(f.endpointId); await f.access.acceptPeer(duplicate.native);
-    expect(duplicate.closes()).toBe(1);
+    expect(f.access.nativePeers.size).toBe(1);
+
+    const second = connection(f.endpointId);
+    await f.access.acceptPeer(second.native);
+
+    // The slow first is retired, not the newcomer.
+    expect(first.closes()).toBeGreaterThanOrEqual(1);
+    expect(f.access.nativePeers.size).toBe(1);
+    const retired = events.find((event) => event.msgType === "peer:native-retired" && event.detail?.reason === "superseded");
+    expect(retired).toBeDefined();
+
+    // The stale connection's own stream finally resolving must not disturb
+    // the newcomer: a superseded attempt never retires its successor.
     stream.resolve({ send: { writeAll: async () => {} }, recv: { readExact: () => new Promise(() => {}) } });
-    await pending; expect(f.access.nativePeers.size).toBe(1);
-  } finally { f.client.close(); }
+    await pending;
+    expect(f.access.nativePeers.size).toBe(1);
+  } finally { observer.mockRestore(); f.client.close(); }
 });
 
 test("slow admission does not block a second authorized device", async () => {

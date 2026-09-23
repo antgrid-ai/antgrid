@@ -60,9 +60,7 @@ test("seeded loopback native fault soak releases ownership and never duplicates 
         } else if (fault === 1) {
           env.app.dropNative();
           await env.app.reconnectNative();
-          await env.app.performE2EHandshake(env.agentDeviceId, 10_000, {
-            agentEd25519Pub: env.agent.ed25519Pubkey,
-          });
+          await env.app.performE2EHandshake(env.agentDeviceId, 10_000);
           await app.waitForStateSnapshot();
         } else {
           await env.restartAgent();

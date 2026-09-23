@@ -23,11 +23,8 @@ class _Peer implements PeerLink {
   @override
   PeerLinkDiagnostic? get netTap => null;
   @override
-  Future<PeerSendOutcome> sendFrame(
-    String channel,
-    Uint8List payload, {
-    FrameKind kind = FrameKind.sealed,
-  }) async => PeerSendOutcome.accepted;
+  Future<PeerSendOutcome> sendFrame(String channel, Uint8List payload) async =>
+      PeerSendOutcome.accepted;
   @override
   Future<void> close() async {
     states.add(PeerLinkState.closed);
@@ -39,8 +36,7 @@ class _Peer implements PeerLink {
 void main() {
   test('session consumes a non-relay link and ignores path changes', () async {
     final peer = _Peer();
-    final keys = fixedKeys(12);
-    final handshaker = FakeHandshaker(keys);
+    final handshaker = FakeHandshaker();
     final session = MachineSession(
       relay: peer,
       machineDeviceId: 'machine',
@@ -54,7 +50,6 @@ void main() {
     expect(handshaker.performCalls, 1);
     peer.states.add(PeerLinkState.closed);
     expect(session.isEstablished, isFalse);
-    expect(keys.p2a, everyElement(0));
     await session.dispose();
     await peer.close();
   });

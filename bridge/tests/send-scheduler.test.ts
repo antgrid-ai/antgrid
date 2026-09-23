@@ -1,10 +1,10 @@
 import { describe, expect, it } from "bun:test";
-import { SEAL_OVERHEAD_BYTES, WINDOW_RESYNC_AGE_MS } from "antgrid-wire";
+import { WINDOW_RESYNC_AGE_MS } from "antgrid-wire";
 import { SendScheduler, type QueuedAppFrame } from "../src/send-scheduler";
 import type { Channel } from "../src/message-bus";
 
-/** Sealed length is plaintext + the AES-GCM overhead, exactly as the real sink
- *  reports it, so window arithmetic here is the arithmetic in production. */
+/** Stage B: there is no seal, so the sink reports back exactly the plaintext
+ *  length it wrote — window arithmetic here is the arithmetic in production. */
 function makeScheduler(): {
   s: SendScheduler;
   wire: QueuedAppFrame[];
@@ -13,7 +13,7 @@ function makeScheduler(): {
   const wire: QueuedAppFrame[] = [];
   const logs: string[] = [];
   const s = new SendScheduler(
-    { send: (f) => { wire.push(f); return f.plaintextBytes + SEAL_OVERHEAD_BYTES; } },
+    { send: (f) => { wire.push(f); return f.plaintextBytes; } },
     (m) => logs.push(m),
   );
   return { s, wire, logs };
@@ -32,8 +32,6 @@ function frame(
     type: opts.type ?? "app",
   };
 }
-
-const sealed = (bytes: number) => bytes + SEAL_OVERHEAD_BYTES;
 
 describe("SendScheduler queueing and priority", () => {
   it("native writes settle on completion and prioritize control after an active preview", async () => {
@@ -103,8 +101,20 @@ describe("SendScheduler queueing and priority", () => {
     expect(s.drain()).toBe("blocked");
 
     expect(wire.map((f) => f.type)).toEqual(["p1", "c1"]);
-    expect(s.unacked("preview")).toBe(sealed(600));
+    expect(s.unacked("preview")).toBe(600);
     expect(s.blockedSince.preview).toBeGreaterThan(0);
+  });
+
+  it("charges a window exactly the payload bytes the receiver credits back", () => {
+    // The receiver credits plaintext bytes, so any per-frame overhead charged
+    // here leaks window on every frame until the channel wedges.
+    const { s, wire } = makeScheduler();
+    s.limits.window = 300;
+    s.limits.socketCap = null;
+    s.enqueue([frame("control", 100, { type: "a" }), frame("control", 100, { type: "b" }), frame("control", 100, { type: "c" })]);
+    s.drain();
+    expect(wire.map((f) => f.type)).toEqual(["a", "b", "c"]);
+    expect(s.unacked("control")).toBe(300);
   });
 
   it("releases exactly the delta on a credit; stale and duplicate credits are no-ops; over-credit clamps to sent", () => {
@@ -121,11 +131,11 @@ describe("SendScheduler queueing and priority", () => {
     expect(s.drain()).toBe("blocked");
     expect(wire).toHaveLength(1);
 
-    expect(s.credit("preview", sealed(600))).toBe(true);
+    expect(s.credit("preview", 600)).toBe(true);
     s.drain();
     expect(wire.map((f) => f.type)).toEqual(["p1", "p2"]);
 
-    expect(s.credit("preview", sealed(600))).toBe(false);
+    expect(s.credit("preview", 600)).toBe(false);
     expect(wire).toHaveLength(2);
 
     // Credit beyond what was ever sent is discarded, not banked: the next
@@ -158,21 +168,21 @@ describe("SendScheduler queueing and priority", () => {
     s.enqueue([frame("preview", 900, { type: "p2" })]);
     s.drain();
     expect(wire.map((f) => f.type)).toEqual(["p1", "p2"]);
-    expect(s.unacked("preview")).toBe(sealed(1000) + sealed(900));
+    expect(s.unacked("preview")).toBe(1000 + 900);
 
-    // Preview is effectively full; control still has window and cap headroom.
-    s.enqueue([frame("preview", 100, { type: "p3" })]);
+    // Preview has 100 bytes of window left; p3 asks for more than that.
+    s.enqueue([frame("preview", 150, { type: "p3" })]);
     s.enqueue([frame("control", 900, { type: "c1" })]);
     expect(s.drain()).toBe("blocked");
     expect(wire.map((f) => f.type)).toEqual(["p1", "p2", "c1"]);
 
     // Blocked by the socket cap rather than by its own window.
-    s.enqueue([frame("control", 200, { type: "c2" })]);
+    s.enqueue([frame("control", 201, { type: "c2" })]);
     expect(s.drain()).toBe("blocked");
-    expect(s.unacked("control") + sealed(200)).toBeLessThanOrEqual(s.limits.window);
-    expect(s.totalUnacked() + sealed(200)).toBeGreaterThan(s.limits.socketCap);
+    expect(s.unacked("control") + 201).toBeLessThanOrEqual(s.limits.window);
+    expect(s.totalUnacked() + 201).toBeGreaterThan(s.limits.socketCap);
 
-    s.credit("preview", sealed(1000) + sealed(900));
+    s.credit("preview", 1000 + 900);
     s.drain();
     expect(wire.map((f) => f.type)).toEqual(["p1", "p2", "c1", "c2", "p3"]);
   });
@@ -213,7 +223,7 @@ describe("SendScheduler queueing and priority", () => {
     s.drain();
     s.hold = true;
     s.enqueue([frame("control", 10)]);
-    expect(s.unacked("preview")).toBe(sealed(600));
+    expect(s.unacked("preview")).toBe(600);
 
     s.resetWindows();
 
@@ -227,7 +237,7 @@ describe("SendScheduler queueing and priority", () => {
     s.limits.window = 1000;
     s.enqueue([frame("preview", 900, { type: "p1" })]);
     s.drain();
-    expect(s.unacked("preview")).toBe(sealed(900));
+    expect(s.unacked("preview")).toBe(900);
 
     s.enqueue([frame("preview", 900, { type: "p2" })]);
     expect(s.drain()).toBe("blocked");
@@ -248,7 +258,7 @@ describe("SendScheduler queueing and priority", () => {
     s.enqueue([frame("preview", 500, { type: "p2" })]);
     expect(s.drain()).toBe("blocked");
 
-    // The anchor: 928 bytes written, none counted. Not conclusive on its own.
+    // The anchor: 900 bytes written, none counted. Not conclusive on its own.
     expect(s.credit("preview", 0)).toBe(false);
     clock += WINDOW_RESYNC_AGE_MS - 1;
     expect(s.credit("preview", 0)).toBe(false);
@@ -260,20 +270,20 @@ describe("SendScheduler queueing and priority", () => {
     s.drain();
     expect(wire.map((f) => f.type)).toEqual(["p1", "p2"]);
     expect(resyncs()).toHaveLength(1);
-    expect(resyncs()[0]).toContain("928");
+    expect(resyncs()[0]).toContain("900");
 
     // Only what the old anchor saw can be presumed lost: p2's bytes were
     // written after it, and the credits that would count them are still due.
     clock += 10;
     expect(s.credit("preview", 0)).toBe(false);
-    expect(s.unacked("preview")).toBe(528);
+    expect(s.unacked("preview")).toBe(500);
     expect(resyncs()).toHaveLength(1);
 
     // A credit that counts the bytes in time leaves nothing to presume.
     clock += WINDOW_RESYNC_AGE_MS;
-    expect(s.credit("preview", 1456)).toBe(true);
+    expect(s.credit("preview", 1400)).toBe(true);
     clock += WINDOW_RESYNC_AGE_MS;
-    expect(s.credit("preview", 1456)).toBe(false);
+    expect(s.credit("preview", 1400)).toBe(false);
     expect(resyncs()).toHaveLength(1);
   });
 
@@ -288,12 +298,12 @@ describe("SendScheduler queueing and priority", () => {
 
     // The relay reports p1 discarded: the anchor must shrink with `sent`, or
     // the resync would un-charge p1 again on top of the report.
-    s.uncharge("preview", 928);
+    s.uncharge("preview", 900);
     s.enqueue([frame("preview", 500, { type: "p2" })]);
     s.drain();
     clock += WINDOW_RESYNC_AGE_MS;
     expect(s.credit("preview", 0)).toBe(false);
-    expect(s.unacked("preview")).toBe(528);
+    expect(s.unacked("preview")).toBe(500);
     expect(logs.filter((l) => l.includes("window resync"))).toHaveLength(0);
   });
 

@@ -1,8 +1,8 @@
 // The send scheduler as the TestPeerSessionOwner wires it: what bypasses the
-// queue and what clears it. Sealing is the identity function here so a queued
-// peer frame can be read straight off the wire.
+// queue and what clears it. Payloads are plaintext on the wire (Stage B), so a
+// queued peer frame can be read straight off the wire with no unseal step.
 import { afterEach, describe, expect, it } from "bun:test";
-import { decodePeerFrame, encodePeerFrame, FrameKind } from "antgrid-wire";
+import { decodePeerFrame, encodePeerFrame } from "antgrid-wire";
 import { TestPeerSessionOwner } from "./test-peer-session-owner";
 import { MessageBus } from "../src/message-bus";
 import { createMessage } from "../src/protocol";
@@ -20,9 +20,9 @@ interface Harness {
 let clients: TestPeerSessionOwner[] = [];
 afterEach(() => { for (const c of clients.splice(0)) try { c.close(); } catch {} });
 
-/** A paired, handshake-complete client whose socket collects frames and whose
- *  seal is the identity, so `sent` holds real peer frames over readable
- *  plaintext. */
+/** A client with a session installed directly (past the hello with no
+ *  connection run) whose socket collects frames, so `sent` holds real peer
+ *  frames over readable plaintext. */
 function makeClient(): Harness {
   const sent: Array<string | Uint8Array> = [];
   const client = new TestPeerSessionOwner({
@@ -33,12 +33,11 @@ function makeClient(): Harness {
       ed25519PublicKey: "pk",
       ed25519PrivateKey: "sk",
     },
-    generateKeypair: () => { throw new Error("not used"); },
   });
   clients.push(client);
   const session = installFakeSession(client, PHONE_ID);
-  client.setNativeWriter((data, to, channel = "control", kind = FrameKind.sealed) => {
-    sent.push(encodePeerFrame({ type: "message", channel }, Buffer.from(data), kind));
+  client.setNativeWriter((data, to, channel = "control") => {
+    sent.push(encodePeerFrame({ type: "message", channel }, Buffer.from(data)));
     return true;
   });
   return { client, sent, s: session.scheduler as SendScheduler };
@@ -83,14 +82,14 @@ describe("TestPeerSessionOwner send scheduler", () => {
     handle.detach();
   });
 
-  it("writes a sealed session ping ahead of held preview frames", () => {
+  it("writes a session ping ahead of held preview frames", () => {
     const { client, sent, s } = makeClient();
     s.hold = true;
 
     for (const id of ["r1", "r2", "r3"]) void client.sendTunnel(tunnelChunk(id));
     expect(sent).toHaveLength(0);
 
-    (client as any).sessions.get(PHONE_ID).lastSealedRecvAt = 0;
+    (client as any).sessions.get(PHONE_ID).lastRecvAt = 0;
     (client as any).checkLiveness();
 
     // A tick writes both channels' credits beside the ping; every one of them

@@ -71,7 +71,6 @@ Future<void> main(List<String> args) async {
       final sent = await link.sendFrame(
         'control',
         Uint8List.fromList([1, 2, 3]),
-        kind: FrameKind.handshake,
       );
       if (sent != PeerSendOutcome.accepted)
         throw StateError('native write failed');
@@ -87,7 +86,6 @@ Future<void> main(List<String> args) async {
         final response = encodePeerFrame(
           {'type': 'message', 'channel': 'control'},
           frame.payload,
-          FrameKind.handshake,
         );
         final length = (ByteData(
           4,

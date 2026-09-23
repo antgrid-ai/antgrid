@@ -247,10 +247,7 @@ void main() {
       conn.ensureStarted(
         mechanisms: PeerConnectionMechanisms(
           peerRuntime: FixedPeerConnector.stub(),
-          crypto: CryptoService(),
           machineDeviceId: 'M',
-          phoneDeviceId: 'phone-1',
-          phoneEd25519Seed: List<int>.filled(32, 7),
           // Null coords park the ladder before the dial: this test is about the
           // error stream, not the climb.
           resolveCoords: () async => null,

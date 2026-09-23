@@ -1,11 +1,12 @@
 import { z } from "zod";
-import { FrameKind, MAX_FRAME_PAYLOAD, PEER_ALPN, decodePeerFrame, encodePeerFrame } from "antgrid-wire";
+import { MAX_FRAME_PAYLOAD, PEER_ALPN, decodePeerFrame, encodePeerFrame } from "antgrid-wire";
 import type { Connection, Endpoint, Incoming } from "@number0/iroh";
 import { CentralControlClient, type CentralControlOptions } from "../central-control-client";
 import { baseSlotDeviceId } from "../relay-slot";
 import type { Channel, MessageBus } from "../message-bus";
 import type { AttachStreamOpts, StreamHandle } from "../stream-mux";
 import type { PendingSinkWrite, QueuedAppFrame } from "../send-scheduler";
+import type { SessionHello } from "../protocol";
 import { AuthorizationLease, type EnrollmentIdentity, type LeaseFailure } from "./authorization-lease";
 import { EndpointApiError, EndpointEnrollment } from "./enrollment";
 import { PeerRecords, type PeerRecordFailure } from "./records";
@@ -52,6 +53,9 @@ export function evalIrohBindAddress(
 const UNKNOWN_ENDPOINT_REFRESH_WINDOW_MS = 5_000;
 const MAX_UNKNOWN_ENDPOINT_ENTRIES = 256;
 
+/** How long an accepted connection may stay without an established session. */
+const HELLO_TIMEOUT_MS = 30_000;
+
 interface NativePeerContext {
   connection: Connection;
   endpointId: string;
@@ -59,8 +63,8 @@ interface NativePeerContext {
   attemptGeneration: number;
   sessionGeneration: number;
   records?: PeerRecords;
-  handshakeTimer?: ReturnType<typeof setTimeout>;
-  authorizedHello?: { attemptId: string; admitted: boolean };
+  cancelHelloTimer?: () => void;
+  helloAttemptId?: string;
   retired: boolean;
   acceptedAt: number;
 }
@@ -164,8 +168,11 @@ export class NativePeerSessions extends PeerSessionOwner {
     while (!this.stopped && lifetime === this.lifetime) {
       const incoming = await endpoint.acceptNext();
       if (!incoming) return;
-      if (this.stopped || lifetime !== this.lifetime || !this.nativeOpts.remoteAccessEnabled() ||
-          this.nativePeers.size >= MAX_APP_SESSIONS) {
+      // Capacity is judged in `acceptPeer`, once the connecting device's
+      // identity is known — a peer with a live connection reconnecting must
+      // supersede its old one rather than being refused for the room it
+      // already occupies.
+      if (this.stopped || lifetime !== this.lifetime || !this.nativeOpts.remoteAccessEnabled()) {
         await incoming.refuse(); continue;
       }
       const reservation = this.admissions.reserve();
@@ -234,9 +241,24 @@ export class NativePeerSessions extends PeerSessionOwner {
     if (device) this.unknownEndpointRefreshAt.delete(endpointId);
     if (!device || !this.nativeOpts.remoteAccessEnabled()) { close(); return; }
     const peerId = `${device.deviceId}#${this.deviceId}`;
-    // A concurrent native connection must not create a second session writer.
-    if (this.sessions.has(peerId) || this.pending.has(peerId) || this.nativePeers.has(peerId) ||
-        this.nativePeers.size >= MAX_APP_SESSIONS) { connection.close(1n, []); return; }
+    // Newest authenticated connection wins: a device redialing (network
+    // flap, app restart) supersedes its own prior connection rather than
+    // being refused for the session it still holds. Only a device the lease
+    // has authenticated reaches this point, so this is never a stranger
+    // evicting a legitimate holder — and only the SAME endpoint supersedes:
+    // a different endpoint the lease still authorizes for this device is a
+    // second live identity, and must not evict the first.
+    const existing = this.nativePeers.get(peerId);
+    if (existing) {
+      if (existing.endpointId !== endpointId && this.authorized(peerId, existing.endpointId)) {
+        connection.close(1n, []);
+        return;
+      }
+      this.retirePeer(peerId, existing.endpointId === endpointId ? "superseded" : "unauthorized");
+    } else if (this.nativePeers.size >= MAX_APP_SESSIONS) {
+      connection.close(1n, []);
+      return;
+    }
     const peer: NativePeerContext = {
       connection,
       endpointId,
@@ -251,22 +273,26 @@ export class NativePeerSessions extends PeerSessionOwner {
     try {
       stream = await deadline(connection.acceptBi(), () => connection.close(1n, []), this.nativeOpts.lifecycle?.schedule);
     } catch (error) {
-      this.retirePeer(peerId, "connection-lost");
+      this.retireOwnAttempt(peerId, peer);
       throw error;
     }
-    if (this.stopped || generation !== this.admissionGeneration || !this.nativeOpts.remoteAccessEnabled() || !this.lease.allows(device.deviceId, endpointId) ||
-        this.sessions.has(peerId) || this.pending.has(peerId) || this.nativePeers.get(peerId) !== peer) {
-      this.retirePeer(peerId, "connection-lost"); return;
+    if (this.stopped || generation !== this.admissionGeneration || !this.nativeOpts.remoteAccessEnabled() ||
+        !this.lease.allows(device.deviceId, endpointId) || this.nativePeers.get(peerId) !== peer) {
+      this.retireOwnAttempt(peerId, peer); return;
     }
+    // Identity exists before the first read: the read loop's very first
+    // frame may be the hello, and `handleHello` fails closed on an absent
+    // `peerPubkeyFor`.
+    this.admitPeer(peerId, device.ed25519Pub);
     const records = new PeerRecords(stream, () => this.authorized(peerId, endpointId), (reason) => {
       if (this.nativePeers.get(peerId)?.records === records) this.retirePeer(peerId, reason);
     });
-    const handshakeTimer = setTimeout(() => {
-      if (!this.sessions.has(peerId)) records.close();
-    }, 30_000);
-    handshakeTimer.unref?.();
     peer.records = records;
-    peer.handshakeTimer = handshakeTimer;
+    // Reads `sessions`, not any hello bookkeeping: `handleHello` must have put
+    // the peer there by the time this fires, or every connection dies here.
+    peer.cancelHelloTimer = this.schedule(() => {
+      if (this.nativePeers.get(peerId) === peer && !this.sessions.has(peerId)) records.close();
+    }, HELLO_TIMEOUT_MS);
     this.recordDiagnostic({ dir: "event", kind: "lifecycle", transport: "iroh", msgType: "peer:native-accepted",
       detail: {
         elapsedMs: now() - startedAt,
@@ -285,10 +311,17 @@ export class NativePeerSessions extends PeerSessionOwner {
           if (frame.payload.length > MAX_FRAME_PAYLOAD) throw new Error("Invalid peer payload length");
           const header = frame.header;
           if (this.nativePeers.get(peerId) !== peer) return;
-          this.receivePeerFrame(frame.payload, peerId, header.channel, frame.kind);
+          this.receivePeerFrame(frame.payload, peerId, header.channel);
         }
       } catch { records.close("protocol-violation"); }
     })();
+  }
+
+  private schedule(callback: () => void, ms: number): () => void {
+    if (this.nativeOpts.lifecycle?.schedule) return this.nativeOpts.lifecycle.schedule(callback, ms);
+    const timer = setTimeout(callback, ms);
+    timer.unref?.();
+    return () => clearTimeout(timer);
   }
 
   private authorized(peerId: string, endpointId?: string): boolean {
@@ -308,7 +341,7 @@ export class NativePeerSessions extends PeerSessionOwner {
   }
 
   recheckAuthorization(): void {
-    for (const peerId of new Set([...this.sessions.keys(), ...this.pending.keys(), ...this.nativePeers.keys()])) {
+    for (const peerId of new Set([...this.sessions.keys(), ...this.nativePeers.keys()])) {
       if (!this.authorized(peerId, this.nativePeers.get(peerId)?.endpointId)) {
         this.retirePeer(peerId, "unauthorized");
       }
@@ -322,16 +355,23 @@ export class NativePeerSessions extends PeerSessionOwner {
     });
   }
 
+  /** A superseded attempt must never retire its successor: `retirePeer` keys
+   *  on `peerId`, and by the time a slow `acceptBi` settles that slot may hold
+   *  the newer connection that replaced this one. */
+  private retireOwnAttempt(peerId: string, peer: NativePeerContext): void {
+    if (this.nativePeers.get(peerId) === peer) this.retirePeer(peerId, "connection-lost");
+    else if (!peer.retired) peer.connection.close(1n, []);
+  }
+
   private retirePeer(peerId: string, reason: PeerRecordFailure = "connection-lost"): void {
     const peer = this.nativePeers.get(peerId);
     if (!peer || peer.retired) return;
     peer.retired = true;
     this.nativePeers.delete(peerId);
-    if (peer.handshakeTimer) clearTimeout(peer.handshakeTimer);
+    peer.cancelHelloTimer?.();
     peer.connection.close(reason === "unauthorized" ? 3n : reason === "protocol-violation" ? 2n : 1n, []);
     peer.records?.close(reason);
     super.dropSession(peerId, "iroh");
-    this.tearDownPending(peerId);
     this.recordDiagnostic({
       dir: "event",
       kind: "lifecycle",
@@ -352,7 +392,6 @@ export class NativePeerSessions extends PeerSessionOwner {
     this.admissions.retireGeneration();
     for (const peerId of [...this.nativePeers.keys()]) this.retirePeer(peerId, reason);
     for (const peerId of [...this.sessions.keys()]) this.dropSession(peerId);
-    for (const peerId of [...this.pending.keys()]) this.tearDownPending(peerId);
   }
 
   private invalidatePeerConnections(reason: LeaseFailure): void {
@@ -363,6 +402,8 @@ export class NativePeerSessions extends PeerSessionOwner {
   protected override onSessionEstablished(peerId: string): void {
     const peer = this.nativePeers.get(peerId);
     if (!peer) return;
+    peer.cancelHelloTimer?.();
+    peer.cancelHelloTimer = undefined;
     peer.sessionGeneration = ++this.peerSessionGeneration;
     this.recordDiagnostic({ dir: "event", kind: "lifecycle", transport: "iroh", msgType: "peer:e2e-established",
       detail: {
@@ -373,35 +414,44 @@ export class NativePeerSessions extends PeerSessionOwner {
       } });
   }
 
-  protected override receivePeerFrame(payload: Uint8Array, from: string, channel: Channel, kind: FrameKind): void {
+  protected override receivePeerFrame(payload: Uint8Array, from: string, channel: Channel): void {
     if (!this.authorized(from, this.nativePeers.get(from)?.endpointId)) {
       void this.lease.refresh().catch(() => {});
       return;
     }
-    super.receivePeerFrame(payload, from, channel, kind);
+    super.receivePeerFrame(payload, from, channel);
   }
 
-  protected override handleHandshakeFrame(payload: Uint8Array, from: string, frameId?: string, bytes?: number): void {
-    let hello: { attemptId: string };
-    try {
-      hello = z.object({ type: z.literal("handshake:client-hello"), attemptId: z.string().min(1).max(256) })
-        .parse(JSON.parse(Buffer.from(payload).toString("utf8")));
-    } catch { return; }
-    const nativePeer = this.nativePeers.get(from);
-    if (!nativePeer || nativePeer.retired) return;
-    const previous = nativePeer.authorizedHello;
-    if (previous?.attemptId === hello.attemptId) {
-      if (previous.admitted) super.handleHandshakeFrame(payload, from, frameId, bytes);
+  /**
+   * The lease re-check gate for a hello. A peer with an established session
+   * just gets the base re-ack/violation rule (step 2) — the lease was already
+   * checked when that session was established and is re-verified continuously
+   * by `recheckAuthorization`. A fresh hello instead pins its `attemptId`
+   * (so a retransmit before the refresh settles is a no-op, and a DIFFERENT
+   * attemptId arriving mid-refresh is a violation) and defers establishment
+   * until the refresh confirms the lease still allows this device.
+   */
+  protected override handleHello(hello: SessionHello, from: string, frameId?: string, bytes?: number): void {
+    const peer = this.nativePeers.get(from);
+    if (!peer || peer.retired) return;
+    if (this.sessions.has(from)) { super.handleHello(hello, from, frameId, bytes); return; }
+    if (peer.helloAttemptId !== undefined) {
+      if (peer.helloAttemptId === hello.attemptId) return;
+      this.refusePeer(from, "protocol-violation");
       return;
     }
-    const attempt = { attemptId: hello.attemptId, admitted: false };
-    nativePeer.authorizedHello = attempt;
+    peer.helloAttemptId = hello.attemptId;
     void this.lease.refresh().then((allowed) => {
-      if (!allowed || this.stopped || nativePeer.authorizedHello !== attempt ||
-          this.nativePeers.get(from) !== nativePeer || !this.authorized(from, nativePeer?.endpointId)) return;
-      attempt.admitted = true;
-      super.handleHandshakeFrame(payload, from, frameId, bytes);
-    }).catch(() => {});
+      if (this.stopped || this.nativePeers.get(from) !== peer || peer.retired) return;
+      if (!allowed || !this.authorized(from, peer.endpointId)) { this.refusePeer(from, "unauthorized"); return; }
+      super.handleHello(hello, from, frameId, bytes);
+    }).catch(() => {
+      if (this.nativePeers.get(from) === peer && !peer.retired) this.refusePeer(from, "connection-lost");
+    });
+  }
+
+  protected override refusePeer(peerId: string, reason: PeerRecordFailure): void {
+    this.retirePeer(peerId, reason);
   }
 
   protected override dropSession(peerId: string, transport = this.payloadTransport(peerId)): void {
@@ -409,42 +459,37 @@ export class NativePeerSessions extends PeerSessionOwner {
     super.dropSession(peerId, transport);
   }
 
-  protected override resolvePhoneEd25519PubB64(peerId: string, verify: (candidate: string) => boolean) {
-    const peer = this.lease.current?.peers.find((value) => value.deviceId === baseSlotDeviceId(peerId));
-    return { pub: peer && verify(peer.ed25519Pub) ? peer.ed25519Pub : undefined, known: peer ? 1 : 0 };
-  }
-
-  protected override sendNativeScheduled(sealed: Buffer, peerId: string, frame: QueuedAppFrame): number | null | PendingSinkWrite {
+  protected override sendNativeScheduled(payload: Buffer, peerId: string, frame: QueuedAppFrame): number | null | PendingSinkWrite {
     if (!this.authorized(peerId, this.nativePeers.get(peerId)?.endpointId)) return null;
     const peer = this.nativePeers.get(peerId);
     if (!peer?.records) return null;
     const session = this.sessions.get(peerId);
-    const record = encodePeerFrame({ type: "message", channel: frame.channel }, sealed, FrameKind.sealed);
-    return { bytes: sealed.length, completed: peer.records.send(record, () =>
+    const record = encodePeerFrame({ type: "message", channel: frame.channel }, payload);
+    return { bytes: payload.length, completed: peer.records.send(record, () =>
       this.sessions.get(peerId) === session && !frame.signal?.aborted && frame.authorized?.() !== false,
     ).then((outcome) => {
-      if (outcome === "sent") this.recordNativeWrite(sealed, record.length, frame.channel, FrameKind.sealed, frame.type, frame.streamId);
+      if (outcome === "sent") this.recordNativeWrite(payload, record.length, frame.channel, frame.type, frame.streamId);
       return outcome === "sent";
     }) };
   }
 
-  protected override sendNativePayload(data: Buffer | string, to: string, channel: Channel = "control", kind: FrameKind = FrameKind.sealed,
+  protected override sendNativePayload(data: Buffer | string, to: string, channel: Channel = "control",
     diagnosticType = "transport", streamId?: string): boolean {
     if (!this.authorized(to, this.nativePeers.get(to)?.endpointId)) return false;
     const peer = this.nativePeers.get(to);
     if (!peer?.records) return false;
     const payload = typeof data === "string" ? Buffer.from(data) : data;
-    const record = encodePeerFrame({ type: "message", channel }, payload, kind);
+    const record = encodePeerFrame({ type: "message", channel }, payload);
     void peer.records.send(record).then((outcome) => {
-      if (outcome === "sent") this.recordNativeWrite(payload, record.length, channel, kind, diagnosticType, streamId);
+      if (outcome === "sent") this.recordNativeWrite(payload, record.length, channel, diagnosticType, streamId);
     });
     return true;
   }
 
-  private recordNativeWrite(payload: Uint8Array, peerFrameBytes: number, channel: Channel, kind: FrameKind,
+  private recordNativeWrite(payload: Uint8Array, peerFrameBytes: number, channel: Channel,
     msgType: string, streamId?: string): void {
-    this.recordDiagnostic({ dir: "tx", kind: kind === FrameKind.handshake ? "handshake" : "sealed", transport: "iroh",
-      channel, msgType, streamId, bytes: payload.length, frameId: frameIdFor(payload, kind === FrameKind.sealed),
+    this.recordDiagnostic({ dir: "tx", kind: "frame", transport: "iroh",
+      channel, msgType, streamId, bytes: payload.length, frameId: frameIdFor(payload),
       detail: { peerFrameBytes, recordBytes: peerFrameBytes + 4, lengthPrefixBytes: 4 } });
   }
 

@@ -15,13 +15,11 @@ import 'support/fake_live_relay.dart';
 void main() {
   late FakeLiveRelay relay;
   late FakeHandshaker handshaker;
-  late SessionKeys keys;
   late MachineSession session;
 
   setUp(() async {
     relay = FakeLiveRelay();
-    keys = fixedKeys(1);
-    handshaker = FakeHandshaker(keys);
+    handshaker = FakeHandshaker();
     session = await establishSession(
       relay,
       handshaker: handshaker,
@@ -40,8 +38,7 @@ void main() {
   Future<List<Map<String, dynamic>>> sentEnvelopes() async {
     final out = <Map<String, dynamic>>[];
     for (final f in relay.sent) {
-      final pt = await openFromPhone(keys, f.payload);
-      if (pt != null) out.add(jsonDecode(pt) as Map<String, dynamic>);
+      out.add(jsonDecode(decodeFromPhone(f.payload)) as Map<String, dynamic>);
     }
     return out;
   }
@@ -64,8 +61,7 @@ void main() {
     relay.inject(
       IncomingPeerFrame(
         channel: 'control',
-        kind: FrameKind.sealed,
-        payload: await sealFromAgent(keys, jsonEncode({'m': m})),
+        payload: encodeFromAgent(jsonEncode({'m': m})),
       ),
     );
   }
@@ -264,9 +260,7 @@ void main() {
       relay.inject(
         IncomingPeerFrame(
           channel: 'control',
-          kind: FrameKind.sealed,
-          payload: await sealFromAgent(
-            keys,
+          payload: encodeFromAgent(
             jsonEncode({
               's': 's-new',
               'm': {'type': 'agent:status', 'foo': 1},
@@ -511,17 +505,16 @@ void main() {
     });
   });
 
-  group('bindProject keyless window', () {
-    test('a bind issued before the session establishes waits for keys and '
-        'resolves once the handshake lands', () async {
+  group('bindProject pre-establishment window', () {
+    test('a bind issued before the session establishes waits for the hello '
+        'and resolves once it lands', () async {
       final coldRelay = FakeLiveRelay(
         initial: RelayConnectionState.disconnected,
       );
-      final coldKeys = fixedKeys(3);
       final cold = MachineSession(
         relay: coldRelay,
         machineDeviceId: 'machine-3',
-        handshaker: FakeHandshaker(coldKeys),
+        handshaker: FakeHandshaker(),
       );
       cold.start();
       addTearDown(() async {
@@ -538,12 +531,12 @@ void main() {
         coldRelay.sent,
         isEmpty,
         reason:
-            'project:start must not be sent into the keyless window — '
+            'project:start must not be sent before establishment — '
             'sendOnStream would drop it silently',
       );
 
       // The reconnect lands: the supervisor climbs to the established rung and
-      // drives the handshake, which installs the keys.
+      // drives the handshake, which completes the session.
       coldRelay.setState(
         const AppState(connectionState: RelayConnectionState.authenticated),
       );
@@ -553,9 +546,7 @@ void main() {
       coldRelay.inject(
         IncomingPeerFrame(
           channel: 'control',
-          kind: FrameKind.sealed,
-          payload: await sealFromAgent(
-            coldKeys,
+          payload: encodeFromAgent(
             jsonEncode({
               'm': {
                 'type': 'stream-ready',
@@ -570,15 +561,16 @@ void main() {
       expect(await bindF, 's-7');
     });
 
-    test('a bind that never sees keys fails with StateError, bounded by its '
-        'own timeout (instead of a blind stream-ready wait)', () async {
+    test('a bind that never sees establishment fails with StateError, '
+        'bounded by its own timeout (instead of a blind stream-ready '
+        'wait)', () async {
       final coldRelay = FakeLiveRelay(
         initial: RelayConnectionState.disconnected,
       );
       final cold = MachineSession(
         relay: coldRelay,
         machineDeviceId: 'machine-2',
-        handshaker: FakeHandshaker(fixedKeys(2)),
+        handshaker: FakeHandshaker(),
       );
       cold.start();
       addTearDown(() async {
@@ -733,7 +725,7 @@ void main() {
       final cold = MachineSession(
         relay: coldRelay,
         machineDeviceId: 'machine-4',
-        handshaker: FakeHandshaker(fixedKeys(4)),
+        handshaker: FakeHandshaker(),
       );
       cold.start();
       addTearDown(() async {

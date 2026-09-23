@@ -24,13 +24,11 @@ const _baseTimeout = Duration(milliseconds: 40);
 void main() {
   late FakeLiveRelay relay;
   late FakeHandshaker handshaker;
-  late SessionKeys keys;
   late MachineSession session;
 
   setUp(() async {
     relay = FakeLiveRelay();
-    keys = fixedKeys(1);
-    handshaker = FakeHandshaker(keys);
+    handshaker = FakeHandshaker();
     session = await establishSession(
       relay,
       handshaker: handshaker,
@@ -45,13 +43,12 @@ void main() {
 
   /// Every `state.snapshot` request sent so far on [stream] (null: the
   /// control plane), in order.
-  Future<List<({String id, Map<String, dynamic> params})>> snapshotRequests({
+  List<({String id, Map<String, dynamic> params})> snapshotRequests({
     String? stream,
-  }) async {
+  }) {
     final out = <({String id, Map<String, dynamic> params})>[];
     for (final f in relay.sent) {
-      final pt = await openFromPhone(keys, f.payload);
-      if (pt == null) continue;
+      final pt = decodeFromPhone(f.payload);
       final e = jsonDecode(pt) as Map<String, dynamic>;
       final m = e['m'];
       if (m is Map &&
@@ -68,8 +65,8 @@ void main() {
   }
 
   /// The control plane's `state.snapshot` requestIds so far, in order.
-  Future<List<String>> snapshotRequestIds() async => [
-    for (final r in await snapshotRequests()) r.id,
+  List<String> snapshotRequestIds() => [
+    for (final r in snapshotRequests()) r.id,
   ];
 
   bool isTreePull(Map<String, dynamic> params) {
@@ -77,13 +74,11 @@ void main() {
     return types is List && types.length == 1 && types.single == 'tree:full';
   }
 
-  Future<void> injectControl(Map<String, dynamic> m, {String? stream}) async {
+  void injectControl(Map<String, dynamic> m, {String? stream}) {
     relay.inject(
       IncomingPeerFrame(
         channel: 'control',
-        kind: FrameKind.sealed,
-        payload: await sealFromAgent(
-          keys,
+        payload: encodeFromAgent(
           jsonEncode({if (stream != null) 's': stream, 'm': m}),
         ),
       ),
@@ -110,15 +105,15 @@ void main() {
       'reply is applied', () async {
     session.streamFor(kControlStreamId);
     await Future<void>.delayed(const Duration(milliseconds: 10));
-    expect(await snapshotRequestIds(), hasLength(1));
+    expect(snapshotRequestIds(), hasLength(1));
 
     // Past the first wait: the reply never came, so a second request is out.
     await Future<void>.delayed(_baseTimeout);
     await Future<void>.delayed(const Duration(milliseconds: 10));
-    final ids = await snapshotRequestIds();
+    final ids = snapshotRequestIds();
     expect(ids, hasLength(2), reason: 'the timeout must be retried');
 
-    await injectControl(snapshotReply(ids.last));
+    injectControl(snapshotReply(ids.last));
     await Future<void>.delayed(const Duration(milliseconds: 10));
     expect(
       session.streamIdForProject('proj-a'),
@@ -129,27 +124,27 @@ void main() {
     // A landed reply ends the chain — no third request, even past what the
     // doubled second wait would have allowed.
     await Future<void>.delayed(_baseTimeout * 3);
-    expect(await snapshotRequestIds(), hasLength(2));
+    expect(snapshotRequestIds(), hasLength(2));
   });
 
   test('a reply that lands in time is not followed by a retry', () async {
     session.streamFor(kControlStreamId);
     await Future<void>.delayed(const Duration(milliseconds: 10));
-    final ids = await snapshotRequestIds();
+    final ids = snapshotRequestIds();
     expect(ids, hasLength(1));
-    await injectControl(snapshotReply(ids.single));
+    injectControl(snapshotReply(ids.single));
 
     await Future<void>.delayed(_baseTimeout * 4);
-    expect(await snapshotRequestIds(), hasLength(1));
+    expect(snapshotRequestIds(), hasLength(1));
   });
 
   test('an error the agent answers with is not retried', () async {
     session.streamFor(kControlStreamId);
     await Future<void>.delayed(const Duration(milliseconds: 10));
-    final ids = await snapshotRequestIds();
+    final ids = snapshotRequestIds();
     expect(ids, hasLength(1));
     // A pre-RPC agent: the answer will not change on a second ask.
-    await injectControl({
+    injectControl({
       'type': 'response',
       'requestId': ids.single,
       'ok': false,
@@ -157,45 +152,45 @@ void main() {
     });
 
     await Future<void>.delayed(_baseTimeout * 4);
-    expect(await snapshotRequestIds(), hasLength(1));
+    expect(snapshotRequestIds(), hasLength(1));
   });
 
   test('retries stop at the attempt cap', () async {
     session.streamFor(kControlStreamId);
     // Waits of 1x, 2x, 4x the base: well past the sum, plus slack.
     await Future<void>.delayed(_baseTimeout * 9);
-    expect(await snapshotRequestIds(), hasLength(3));
+    expect(snapshotRequestIds(), hasLength(3));
   });
 
   test('disposing the transport ends its retries', () async {
     final st = session.streamFor(kControlStreamId);
     await Future<void>.delayed(const Duration(milliseconds: 10));
-    expect(await snapshotRequestIds(), hasLength(1));
+    expect(snapshotRequestIds(), hasLength(1));
     await st.dispose();
 
     await Future<void>.delayed(_baseTimeout * 4);
-    expect(await snapshotRequestIds(), hasLength(1));
+    expect(snapshotRequestIds(), hasLength(1));
   });
 
   test('refreshDurableState re-pulls the durable state', () async {
     session.streamFor(kControlStreamId);
     await Future<void>.delayed(const Duration(milliseconds: 10));
-    final seeded = await snapshotRequestIds();
+    final seeded = snapshotRequestIds();
     expect(seeded, hasLength(1));
-    await injectControl(snapshotReply(seeded.single));
+    injectControl(snapshotReply(seeded.single));
     await Future<void>.delayed(const Duration(milliseconds: 10));
 
     final st = session.streamFor(kControlStreamId);
     unawaited(st.refreshDurableState());
     await Future<void>.delayed(const Duration(milliseconds: 10));
-    final sent = await snapshotRequests();
+    final sent = snapshotRequests();
     expect(sent, hasLength(2));
     expect(sent.last.params, {
       'types': ['*'],
       'exclude': ['tree:full'],
     });
 
-    await injectControl(snapshotReply(sent.last.id));
+    injectControl(snapshotReply(sent.last.id));
     await Future<void>.delayed(const Duration(milliseconds: 10));
     expect(
       session.streamIdForProject('proj-a'),
@@ -207,9 +202,9 @@ void main() {
   test('refreshDurableState leaves the hydrators alone', () async {
     final st = session.streamFor(kControlStreamId);
     await Future<void>.delayed(const Duration(milliseconds: 10));
-    final seeded = await snapshotRequestIds();
+    final seeded = snapshotRequestIds();
     expect(seeded, hasLength(1));
-    await injectControl(snapshotReply(seeded.single));
+    injectControl(snapshotReply(seeded.single));
     await Future<void>.delayed(const Duration(milliseconds: 10));
 
     var hydrated = 0;
@@ -224,9 +219,9 @@ void main() {
 
     unawaited(st.refreshDurableState());
     await Future<void>.delayed(const Duration(milliseconds: 10));
-    final afterDurable = await snapshotRequestIds();
+    final afterDurable = snapshotRequestIds();
     expect(afterDurable, hasLength(2));
-    await injectControl(snapshotReply(afterDurable.last));
+    injectControl(snapshotReply(afterDurable.last));
     await Future<void>.delayed(const Duration(milliseconds: 10));
     expect(
       hydrated,
@@ -236,9 +231,9 @@ void main() {
 
     unawaited(st.refreshSnapshot());
     await Future<void>.delayed(const Duration(milliseconds: 10));
-    final afterFull = await snapshotRequestIds();
+    final afterFull = snapshotRequestIds();
     expect(afterFull, hasLength(3));
-    await injectControl(snapshotReply(afterFull.last));
+    injectControl(snapshotReply(afterFull.last));
     await Future<void>.delayed(const Duration(milliseconds: 10));
     expect(
       hydrated,
@@ -276,24 +271,24 @@ void main() {
       session.streamFor(stream);
       await Future<void>.delayed(const Duration(milliseconds: 10));
 
-      final sent = await snapshotRequests(stream: stream);
+      final sent = snapshotRequests(stream: stream);
       expect(sent, hasLength(1));
       expect(sent.single.params, {
         'types': ['*'],
         'exclude': ['tree:full'],
       });
-      await injectControl(reply(sent.single.id, [status]), stream: stream);
+      injectControl(reply(sent.single.id, [status]), stream: stream);
 
       // Nothing follows the landed pull — in particular no tree pull on the
       // longer cadence the tree used to get.
       await Future<void>.delayed(_baseTimeout * 9);
-      final later = await snapshotRequests(stream: stream);
+      final later = snapshotRequests(stream: stream);
       expect(later, hasLength(1));
       expect(later.where((r) => isTreePull(r.params)), isEmpty);
 
       // The control plane's pull (unanswered here, so it ran its chain) never
       // asked for the tree either.
-      final control = await snapshotRequests();
+      final control = snapshotRequests();
       expect(control, isNotEmpty);
       expect(control.where((r) => isTreePull(r.params)), isEmpty);
     });
@@ -304,12 +299,9 @@ void main() {
       final seen = <String>[];
       transport.messages.listen((m) => seen.add(m.json['type'] as String));
       await Future<void>.delayed(const Duration(milliseconds: 10));
-      final sent = await snapshotRequests(stream: stream);
+      final sent = snapshotRequests(stream: stream);
       // A bridge that predates `exclude` answers with the tree in it too.
-      await injectControl(
-        reply(sent.single.id, [status, tree]),
-        stream: stream,
-      );
+      injectControl(reply(sent.single.id, [status, tree]), stream: stream);
       await Future<void>.delayed(const Duration(milliseconds: 10));
       expect(seen, ['agent:status', 'tree:full']);
 

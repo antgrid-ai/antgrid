@@ -52,7 +52,7 @@ const allLocal = (): NetwatchEvent[] => netwatch.snapshot().filter((e) => e.tran
 /** The data plane alone. Every `connectOwner()` also records the accepted hello
  *  and its `ready` answer, so a frame assertion that counted those would be
  *  measuring the fixture rather than the behaviour under test. */
-const local = (): NetwatchEvent[] => allLocal().filter((e) => e.kind !== "handshake");
+const local = (): NetwatchEvent[] => allLocal().filter((e) => e.kind !== "hello");
 
 async function connectOwner(): Promise<WebSocket> {
   const ws = new WebSocket(`ws://127.0.0.1:${listener.port}`);
@@ -95,7 +95,7 @@ describe("LocalListener netwatch taps", () => {
   it("records the accepted hello and its answer, not just the refusals", async () => {
     const ws = await connectOwner();
 
-    const shake = allLocal().filter((e) => e.kind === "handshake");
+    const shake = allLocal().filter((e) => e.kind === "hello");
     // Recording only the REFUSED helloes would make every session that DID come
     // up look like it had no beginning: a capture would open with traffic on a
     // socket the reader never saw attach.

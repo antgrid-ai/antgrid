@@ -15,21 +15,11 @@ const _ghostEnvelope = {
   'm': {'type': 'terminal:output'},
 };
 
-/// Every `stream-unbound` in [relay]'s outbox that opens under [keys]. A frame
-/// sealed under a superseded epoch simply will not open, which is what lets a
-/// test count one session's notices without draining the outbox first.
-Future<List<Map<String, dynamic>>> _noticesUnder(
-  FakeLiveRelay relay,
-  SessionKeys keys,
-) async {
+/// Every `stream-unbound` in [relay]'s outbox.
+List<Map<String, dynamic>> _notices(FakeLiveRelay relay) {
   final out = <Map<String, dynamic>>[];
   for (final f in relay.sent) {
-    final plain = await E2eTransportDart(
-      sendKey: keys.a2p,
-      recvKey: keys.p2a,
-    ).open(f.payload);
-    if (plain == null) continue;
-    final env = jsonDecode(plain) as Map<String, dynamic>;
+    final env = jsonDecode(decodeFromPhone(f.payload)) as Map<String, dynamic>;
     // The notice is a control-plane statement about the stream table, so it
     // rides stream "0" — sending it ON the dead stream would be circular.
     if (env['s'] != null) continue;
@@ -42,17 +32,15 @@ Future<List<Map<String, dynamic>>> _noticesUnder(
 void main() {
   group('unknown-stream warn without a capture armed', () {
     late FakeLiveRelay relay;
-    late SessionKeys keys;
     late MachineSession session;
     late List<Map<String, Object?>?> warns;
 
     setUp(() async {
       relay = FakeLiveRelay();
-      keys = fixedKeys(1);
       warns = [];
       session = await establishSession(
         relay,
-        handshaker: FakeHandshaker(keys),
+        handshaker: FakeHandshaker(),
         logger: (level, message, {fields}) {
           if (message == 'dropping inbound frame for unknown stream') {
             warns.add(fields);
@@ -67,22 +55,16 @@ void main() {
     });
 
     Future<void> inject(Uint8List payload) async {
-      relay.inject(
-        IncomingPeerFrame(
-          channel: 'control',
-          kind: FrameKind.sealed,
-          payload: payload,
-        ),
-      );
+      relay.inject(IncomingPeerFrame(channel: 'control', payload: payload));
       await Future<void>.delayed(const Duration(milliseconds: 20));
     }
 
     test('carries the frame id and the epoch it arrived under', () async {
-      final payload = await sealFromAgent(keys, jsonEncode(_ghostEnvelope));
+      final payload = encodeFromAgent(jsonEncode(_ghostEnvelope));
       await inject(payload);
 
       final w = warns.single!;
-      expect(w['frameId'], frameIdOf(payload, FrameKind.sealed));
+      expect(w['frameId'], frameIdOf(payload));
       // One establishment, so both read 1 — spelled out rather than compared to
       // each other, which two nulls would also satisfy.
       expect(w['openedUnder'], 1);
@@ -99,18 +81,18 @@ void main() {
           24,
         );
         expect(frames.length, greaterThan(1));
-        final sealed = [for (final f in frames) await sealFromAgent(keys, f)];
+        final encoded = [for (final f in frames) encodeFromAgent(f)];
 
         // Out of index order so the completing fragment is not also the first:
         // the two would be indistinguishable if it were.
-        await inject(sealed[1]);
-        for (var i = 2; i < sealed.length; i++) {
-          await inject(sealed[i]);
+        await inject(encoded[1]);
+        for (var i = 2; i < encoded.length; i++) {
+          await inject(encoded[i]);
         }
-        await inject(sealed[0]);
+        await inject(encoded[0]);
 
         final w = warns.single!;
-        expect(w['frameId'], frameIdOf(sealed[0], FrameKind.sealed));
+        expect(w['frameId'], frameIdOf(encoded[0]));
         expect(w['openedUnder'], 1);
       },
     );
@@ -120,14 +102,14 @@ void main() {
       // to stop sending them. Nothing else does — the agent's `stream-invalid`
       // covers only the opposite direction, so without this a live PTY on a
       // stream we never bound drops a frame per frame for as long as it runs.
-      Future<void> injectGhost() async =>
-          inject(await sealFromAgent(keys, jsonEncode(_ghostEnvelope)));
+      Future<void> injectGhost() =>
+          inject(encodeFromAgent(jsonEncode(_ghostEnvelope)));
 
       for (var i = 0; i < 4; i++) {
         await injectGhost();
       }
 
-      final notices = await _noticesUnder(relay, keys);
+      final notices = _notices(relay);
 
       expect(notices, hasLength(1));
       expect(notices.single['streamId'], 'ghost-stream');
@@ -147,48 +129,43 @@ void main() {
     });
   });
 
-  test('a rekey re-arms the notice throttle', () async {
+  test('a fresh MachineSession — as the supervisor builds after a redial — '
+      'starts with no muted streams of its own', () async {
     // The agent clears every mute on a fresh session (`notifyPeerOnline` in
-    // bridge/src/stream-mux.ts), so a throttle carried across that boundary
-    // would leave a stream it just resumed flooding with nothing left to ask
-    // it to stop. A rekey is what a flooded control channel produces — three
-    // timed-out RPCs re-handshake — so the loop would re-open its own cause.
-    final relay = FakeLiveRelay();
-    final handshaker = FakeHandshaker.sequence([fixedKeys(1), fixedKeys(2)]);
-    final session = await establishSession(
-      relay,
-      handshaker: handshaker,
-      machineDeviceId: 'm1',
+    // bridge/src/stream-mux.ts); this side's own throttle state has to agree,
+    // or a stream that just resumed flooding a NEW session finds nothing left
+    // asking it to stop. There is no in-place rekey any more — "fresh session"
+    // now means a brand-new MachineSession over a brand-new link, which is
+    // exactly what the supervisor builds on redial.
+    final relayA = FakeLiveRelay();
+    final sessionA = await establishSession(relayA, handshaker: FakeHandshaker());
+    relayA.inject(
+      IncomingPeerFrame(
+        channel: 'control',
+        payload: encodeFromAgent(jsonEncode(_ghostEnvelope)),
+      ),
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(_notices(relayA), hasLength(1));
+    await sessionA.dispose();
+    await relayA.closeStreams();
+
+    final relayB = FakeLiveRelay();
+    final sessionB = await establishSession(relayB, handshaker: FakeHandshaker());
+    relayB.inject(
+      IncomingPeerFrame(
+        channel: 'control',
+        payload: encodeFromAgent(jsonEncode(_ghostEnvelope)),
+      ),
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(
+      _notices(relayB),
+      hasLength(1),
+      reason: "the new session's throttle map starts empty, independent of A's",
     );
 
-    Future<void> ghost(SessionKeys k) async {
-      relay.inject(
-        IncomingPeerFrame(
-          channel: 'control',
-          kind: FrameKind.sealed,
-          payload: await sealFromAgent(k, jsonEncode(_ghostEnvelope)),
-        ),
-      );
-      await Future<void>.delayed(const Duration(milliseconds: 20));
-    }
-
-    await ghost(fixedKeys(1));
-    expect(await _noticesUnder(relay, fixedKeys(1)), hasLength(1));
-
-    for (var i = 0; i < 3; i++) {
-      session.notifyRpcResult(timedOut: true);
-    }
-    for (var i = 0; i < 50 && handshaker.performCalls < 2; i++) {
-      await Future<void>.delayed(const Duration(milliseconds: 10));
-    }
-    expect(handshaker.performCalls, 2);
-
-    // Well inside _unboundNoticeInterval, so only the re-arm can explain a
-    // second notice for the same id.
-    await ghost(fixedKeys(2));
-    expect(await _noticesUnder(relay, fixedKeys(2)), hasLength(1));
-
-    await session.dispose();
-    await relay.closeStreams();
+    await sessionB.dispose();
+    await relayB.closeStreams();
   });
 }

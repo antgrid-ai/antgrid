@@ -24,10 +24,7 @@ import '../helpers/fixed_peer_connector.dart';
 /// `RelayConnection`).
 class _ToggleableMechanisms extends PeerConnectionMechanisms {
   _ToggleableMechanisms({
-    required super.crypto,
     required super.machineDeviceId,
-    required super.phoneDeviceId,
-    required super.phoneEd25519Seed,
     required super.resolveCoords,
     required super.peerRuntime,
   });
@@ -53,10 +50,7 @@ class _ToggleableMechanisms extends PeerConnectionMechanisms {
 
 _ToggleableMechanisms _toggleable(MachineConnection conn, String machineId) =>
     _ToggleableMechanisms(
-      crypto: CryptoService(),
       machineDeviceId: machineId,
-      phoneDeviceId: 'phone-1',
-      phoneEd25519Seed: List<int>.filled(32, 7),
       resolveCoords: () async => const ConnCoords(
         relayUrl: 'ws://relay.test',
         agentEd25519PubB64: 'AGENT_PUB',
@@ -235,10 +229,7 @@ void main() {
         final connB = mgr.connectionFor('b');
         final mechA = _ToggleableMechanisms(
           peerRuntime: FixedPeerConnector.stub(),
-          crypto: CryptoService(),
           machineDeviceId: 'a',
-          phoneDeviceId: 'phone-1',
-          phoneEd25519Seed: List<int>.filled(32, 7),
           resolveCoords: () async => const ConnCoords(
             relayUrl: 'ws://relay.test',
             agentEd25519PubB64: 'AGENT_PUB',
@@ -246,10 +237,7 @@ void main() {
         );
         final mechB = _ToggleableMechanisms(
           peerRuntime: FixedPeerConnector.stub(),
-          crypto: CryptoService(),
           machineDeviceId: 'b',
-          phoneDeviceId: 'phone-1',
-          phoneEd25519Seed: List<int>.filled(32, 7),
           resolveCoords: () async => const ConnCoords(
             relayUrl: 'ws://relay.test',
             agentEd25519PubB64: 'AGENT_PUB',
@@ -291,10 +279,7 @@ void main() {
       conn.ensureStarted(
         mechanisms: PeerConnectionMechanisms(
           peerRuntime: FixedPeerConnector.stub(),
-          crypto: CryptoService(),
           machineDeviceId: 'm',
-          phoneDeviceId: 'phone-1',
-          phoneEd25519Seed: List<int>.filled(32, 7),
           // Never resolves — this test only needs a live supervisor to
           // toggle `wanted` on, not a real climb.
           resolveCoords: () async => null,
@@ -323,10 +308,7 @@ void main() {
       conn.ensureStarted(
         mechanisms: PeerConnectionMechanisms(
           peerRuntime: FixedPeerConnector.stub(),
-          crypto: CryptoService(),
           machineDeviceId: 'm',
-          phoneDeviceId: 'phone-1',
-          phoneEd25519Seed: List<int>.filled(32, 7),
           resolveCoords: () async => null,
         ),
       );

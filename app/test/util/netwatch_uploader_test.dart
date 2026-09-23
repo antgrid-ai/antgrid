@@ -39,7 +39,7 @@ void main() {
   );
 
   void frame(String type, {String? id}) => recorder
-    ..record(dir: 'tx', kind: 'sealed', frameId: id ?? type, msgType: type);
+    ..record(dir: 'tx', kind: 'frame', frameId: id ?? type, msgType: type);
 
   test('ships what the recorder drained, once armed', () async {
     final up = make()..configure(enabled: true, ttl: const Duration(minutes: 5));

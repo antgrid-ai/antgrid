@@ -11,10 +11,7 @@ PeerConnectionMechanisms _mechanismsFor(
   String machineId,
 ) => PeerConnectionMechanisms(
   peerRuntime: FixedPeerConnector.stub(),
-  crypto: CryptoService(),
   machineDeviceId: machineId,
-  phoneDeviceId: 'phone-1',
-  phoneEd25519Seed: List<int>.filled(32, 7),
   // Never resolves — these tests only need a live supervisor to ping, not
   // a real climb to Connected.
   resolveCoords: () async => null,

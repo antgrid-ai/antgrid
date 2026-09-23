@@ -27,7 +27,6 @@ import type { AgentEnableRelay } from "./protocol";
 import { MessageBus, type Channel } from "./message-bus";
 import { dispatchRpc } from "./rpc/methods";
 import { snapshotAsksFor } from "./rpc/state-snapshot";
-import { generateEphemeralKeypair } from "./key-exchange";
 import { joinRelayWsPath } from "./relay-url";
 import { createMessage } from "./protocol";
 import { armBodyCapture, armRemoteIngest } from "./netwatch";
@@ -859,7 +858,6 @@ export class HostServer {
       getLicenseToken,
       pairedPhones: this.pairedPhonesStore,
       trustedPeers: this.trustedPeers,
-      generateKeypair: () => generateEphemeralKeypair(),
       onTunnelMessage: () => {}, // machine-level control has no tunnel handler; project streams install theirs
       // The always-on control plane is the registration a phone's autoOpen dials,
       // so it MUST keep the account inventory's relay_url/machine_name fresh —
@@ -888,11 +886,15 @@ export class HostServer {
     });
 
     bus.setInboundHandler((msg, channel, _source, peerId) => {
-      // Admission is "an account-trusted app completed the E2E handshake", so
-      // only presence is checked here. Authorization is the machine switch,
-      // applied per verb — and the asking session names itself, which is what
-      // lets `project:start` answer from THAT device's capabilities.
-      if (!client.hasEstablishedSession()) return;
+      // Admission is "this peer completed the session hello", checked PER
+      // PEER now that a pre-establishment frame is no longer stopped by a
+      // decrypt failure — any lease-authorized endpoint can reach this
+      // dispatch with no session at all (see the pre-establishment drop in
+      // PeerSessionOwner.receivePeerFrame). Authorization is still the
+      // machine switch, applied per verb, and the asking session names
+      // itself, which is what lets `project:start` answer from THAT device's
+      // capabilities.
+      if (!peerId || client.peerSession(peerId) == null) return;
       this.dispatchControlPlaneInbound(msg, channel, bus, peerId);
     });
     client.setBus(bus);

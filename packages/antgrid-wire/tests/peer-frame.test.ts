@@ -11,13 +11,13 @@ import {
 const header = { type: "message", channel: "control" } as const;
 
 describe("encodePeerFrame", () => {
-  it("produces the v3 prefix, peer header, and payload", () => {
+  it("produces the v4 prefix, peer header, and payload", () => {
     const payload = new Uint8Array([0xde, 0xad, 0xbe, 0xef]);
-    const frame = encodePeerFrame(header, payload, FrameKind.sealed);
+    const frame = encodePeerFrame(header, payload);
 
-    expect(frame[0]).toBe(0x03);
+    expect(frame[0]).toBe(0x04);
     expect(frame[0]).toBe(FRAME_VERSION);
-    expect(frame[1]).toBe(FrameKind.sealed);
+    expect(frame[1]).toBe(FrameKind.message);
     const headerLen = (frame[2] << 8) | frame[3];
     expect(JSON.parse(Buffer.from(frame.subarray(4, 4 + headerLen)).toString("utf8")))
       .toEqual(header);
@@ -28,12 +28,10 @@ describe("encodePeerFrame", () => {
     expect(() => encodePeerFrame(
       { ...header, to: "agent-1" } as typeof header,
       new Uint8Array(),
-      FrameKind.sealed,
     )).toThrow(expect.objectContaining({ reason: "BAD_HEADER" }));
     expect(() => encodePeerFrame(
       { ...header, from: "app-1" } as typeof header,
       new Uint8Array(),
-      FrameKind.sealed,
     )).toThrow(expect.objectContaining({ reason: "BAD_HEADER" }));
   });
 
@@ -41,42 +39,40 @@ describe("encodePeerFrame", () => {
     expect(() => encodePeerFrame(
       header,
       new Uint8Array(MAX_FRAME_PAYLOAD + 1),
-      FrameKind.sealed,
     )).toThrow(expect.objectContaining({ reason: "PAYLOAD_TOO_LARGE" }));
   });
 });
 
 describe("decodePeerFrame", () => {
-  it("round-trips both frame kinds and returns a payload view", () => {
-    for (const kind of [FrameKind.sealed, FrameKind.handshake]) {
-      const payload = new Uint8Array([1, 2, 3, 4, 5]);
-      const frame = encodePeerFrame(header, payload, kind);
-      const decoded = decodePeerFrame(frame);
+  it("round-trips a frame and returns a payload view", () => {
+    const payload = new Uint8Array([1, 2, 3, 4, 5]);
+    const frame = encodePeerFrame(header, payload);
+    const decoded = decodePeerFrame(frame);
 
-      expect(decoded.header).toEqual(header);
-      expect([...decoded.payload]).toEqual([...payload]);
-      expect(decoded.kind).toBe(kind);
-      frame[frame.length - 1] = 9;
-      expect(decoded.payload[decoded.payload.length - 1]).toBe(9);
-    }
+    expect(decoded.header).toEqual(header);
+    expect([...decoded.payload]).toEqual([...payload]);
+    frame[frame.length - 1] = 9;
+    expect(decoded.payload[decoded.payload.length - 1]).toBe(9);
   });
 
-  it("rejects v2 and unknown versions", () => {
-    for (const version of [0x02, 0x99]) {
+  it("rejects v3 and unknown versions", () => {
+    for (const version of [0x03, 0x99]) {
       expect(() => decodePeerFrame(
-        new Uint8Array([version, FrameKind.sealed, 0, 0]),
+        new Uint8Array([version, FrameKind.message, 0, 0]),
       )).toThrow(expect.objectContaining({ reason: "BAD_VERSION" }));
     }
   });
 
   it("rejects truncated, unknown-kind, and oversized-header records", () => {
-    expect(() => decodePeerFrame(new Uint8Array([0x03, 0, 0])))
+    expect(() => decodePeerFrame(new Uint8Array([0x04, 0, 0])))
       .toThrow(expect.objectContaining({ reason: "TRUNCATED" }));
-    expect(() => decodePeerFrame(new Uint8Array([0x03, 0x7f, 0, 0])))
+    expect(() => decodePeerFrame(new Uint8Array([0x04, 0x7f, 0, 0])))
       .toThrow(expect.objectContaining({ reason: "BAD_KIND" }));
-    expect(() => decodePeerFrame(new Uint8Array([0x03, 0, 0x04, 0x01])))
+    expect(() => decodePeerFrame(new Uint8Array([0x04, 0x01, 0, 0])))
+      .toThrow(expect.objectContaining({ reason: "BAD_KIND" }));
+    expect(() => decodePeerFrame(new Uint8Array([0x04, 0, 0x04, 0x01])))
       .toThrow(expect.objectContaining({ reason: "HEADER_TOO_LARGE" }));
-    expect(() => decodePeerFrame(new Uint8Array([0x03, 0, 0, 2, 0x7b])))
+    expect(() => decodePeerFrame(new Uint8Array([0x04, 0, 0, 2, 0x7b])))
       .toThrow(expect.objectContaining({ reason: "TRUNCATED" }));
   });
 
@@ -84,8 +80,8 @@ describe("decodePeerFrame", () => {
     const record = (json: string) => {
       const encoded = Buffer.from(json);
       return new Uint8Array([
-        0x03,
-        FrameKind.sealed,
+        0x04,
+        FrameKind.message,
         encoded.length >> 8,
         encoded.length & 0xff,
         ...encoded,
@@ -105,9 +101,7 @@ describe("decodePeerFrame", () => {
 
   it("uses a bounded header and exposes typed errors", () => {
     expect(FrameError).toBeDefined();
-    const decoded = decodePeerFrame(
-      encodePeerFrame(header, new Uint8Array(), FrameKind.sealed),
-    );
+    const decoded = decodePeerFrame(encodePeerFrame(header, new Uint8Array()));
     expect(decoded.payload).toHaveLength(0);
   });
 });

@@ -1,30 +1,25 @@
-// MachineSession key-lifecycle coverage: nothing dispatches before the first
-// handshake establishes, and rekey swaps to fresh keys with a make-before-break
-// handover (old keys keep decrypting until the new ones are confirmed) and
-// zeroizes the superseded key material. Replaces the deleted
-// relay_transport_test.dart cases that exercised `RelayTransport.updateAgent`
-// (send/receive silently gated on key presence, keys hot-swapped) — that
-// hot-swap now lives in MachineSession's `_runHandshake`.
+// MachineSession session-lifecycle coverage: nothing dispatches before the
+// first hello establishes, and a session with no application-layer key to
+// rotate cannot repair itself in place — every "this session is dead" trigger
+// (a run of RPC timeouts, missed liveness pongs, a failed hello) closes the
+// whole link instead, and the supervisor (outside this package) redials.
+// Replaces the deleted relay_transport_test.dart cases that exercised
+// `RelayTransport.updateAgent` (send/receive silently gated on key presence,
+// keys hot-swapped) — there is no key to hot-swap any more.
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:test/test.dart';
 
 import 'support/fake_live_relay.dart';
 
-bool _isZeroized(SessionKeys keys) {
-  bool allZero(Uint8List b) => b.every((x) => x == 0);
-  return allZero(keys.a2p) && allZero(keys.p2a) && allZero(keys.confirm);
-}
-
 void main() {
   group('no app traffic before the first handshake establishes', () {
-    test('sendOnStream is a silent no-op while keys are unset', () async {
+    test('sendOnStream is a silent no-op before the hello confirms', () async {
       final relay = FakeLiveRelay(
         initial: RelayConnectionState.authenticated,
-      ); // NOT yet paired
-      final handshaker = FakeHandshaker(fixedKeys(1));
+      ); // NOT yet established
+      final handshaker = FakeHandshaker();
       final session = MachineSession(
         relay: relay,
         machineDeviceId: 'm1',
@@ -39,20 +34,20 @@ void main() {
         relay.sent,
         isEmpty,
         reason:
-            'no keys installed yet — the send must be dropped, not '
-            'queued or sent in the clear',
+            'not established yet — the send must be dropped, not '
+            'queued or sent early',
       );
 
       await session.dispose();
       await relay.closeStreams();
     });
 
-    test('an inbound sealed frame arriving before establishment is dropped '
-        '(pre-key traffic is never dispatched)', () async {
+    test('an inbound frame arriving before establishment is dropped '
+        '(pre-establishment traffic is never dispatched)', () async {
       final relay = FakeLiveRelay();
       // A handshaker that never resolves during this test's window — models
-      // "handshake still in flight".
-      final handshaker = FakeHandshaker(fixedKeys(1))
+      // "hello still in flight".
+      final handshaker = FakeHandshaker()
         ..delayFor = (_) => const Duration(milliseconds: 500);
       final session = MachineSession(
         relay: relay,
@@ -67,15 +62,12 @@ void main() {
       final seen = <Map<String, dynamic>>[];
       final sub = control.messages.listen((m) => seen.add(m.json));
 
-      // Seal under keys the session doesn't have yet (arbitrary keys) —
-      // MachineSession has no `_keys` installed, so `_onPeerFrame` must drop
-      // this on the floor without even attempting a decrypt.
+      // MachineSession has no session installed yet — `_onPeerFrame` must
+      // drop this on the floor without attempting to dispatch it.
       relay.inject(
         IncomingPeerFrame(
           channel: 'control',
-          kind: FrameKind.sealed,
-          payload: await sealFromAgent(
-            fixedKeys(1),
+          payload: encodeFromAgent(
             jsonEncode({
               'm': {'type': 'agent:projects'},
             }),
@@ -96,13 +88,13 @@ void main() {
   // Replaces the former "grant revocation" case. Trust is account-derived now:
   // there is no grant, so a paired→authenticated transition carries no meaning
   // and tearing the session down on it would drop a perfectly good session
-  // (and the keys under every live project stream) for nothing. Only the SOCKET
-  // dying invalidates per-connection keys.
+  // (and every live project stream) for nothing. Only the SOCKET dying
+  // invalidates a per-connection session.
   group('non-disconnect state churn', () {
     test('an established session survives a state transition that is not a '
         'disconnect', () async {
       final relay = FakeLiveRelay();
-      final handshaker = FakeHandshaker.sequence([fixedKeys(1), fixedKeys(2)]);
+      final handshaker = FakeHandshaker.sequence([true, true]);
       final session = MachineSession(
         relay: relay,
         machineDeviceId: 'm1',
@@ -120,7 +112,7 @@ void main() {
       expect(
         session.isEstablished,
         isTrue,
-        reason: 'keys are per-connection; the socket never went down',
+        reason: 'a session is per-connection; the socket never went down',
       );
       expect(handshaker.performCalls, 1, reason: 'nothing to re-handshake');
 
@@ -135,7 +127,7 @@ void main() {
       // A 64-byte window: the RPC below fills it, so the input stays queued.
       final session = await establishSession(
         relay,
-        handshaker: FakeHandshaker(fixedKeys(1)),
+        handshaker: FakeHandshaker(),
         machineDeviceId: 'm1',
         channelWindowBytes: 64,
       );
@@ -169,7 +161,7 @@ void main() {
     test('a socket-down fails per-stream pending RPCs fast (no full-timeout '
         'hang)', () async {
       final relay = FakeLiveRelay();
-      final handshaker = FakeHandshaker(fixedKeys(1));
+      final handshaker = FakeHandshaker();
       final session = MachineSession(
         relay: relay,
         machineDeviceId: 'm1',
@@ -179,9 +171,9 @@ void main() {
       await session.ensureEstablished();
 
       final control = session.streamFor(kControlStreamId);
-      // In-flight RPC: sealed and sent, now awaiting a reply that will never
-      // come because the socket drops. Give it a long timeout so a fail-SLOW
-      // implementation would visibly hang past this test's patience.
+      // In-flight RPC: sent, now awaiting a reply that will never come because
+      // the socket drops. Give it a long timeout so a fail-SLOW implementation
+      // would visibly hang past this test's patience.
       final pending = control.request(
         'config:read',
         timeout: const Duration(seconds: 30),
@@ -212,16 +204,12 @@ void main() {
     });
   });
 
-  group('rekey', () {
-    test('a rekey that never confirms tears the session down instead of '
-        'leaving it wedged as established', () async {
-      // The wedge this guards: liveness declares the session dead, stops its
-      // own timer and fires one rekey. If that attempt fails and the session
-      // keeps reporting `isEstablished`, the supervisor's `established` rung
-      // reads healthy forever, nothing re-drives the ladder, and every send is
-      // a silent no-op over keys the peer no longer holds.
+  group('closing the link on failure', () {
+    test('3 consecutive RPC timeouts close the link, and the session goes '
+        'down once the closed state lands — never a second hello on the same '
+        'link', () async {
       final relay = FakeLiveRelay();
-      final handshaker = FakeHandshaker.sequence([fixedKeys(1), null]);
+      final handshaker = FakeHandshaker();
       final session = MachineSession(
         relay: relay,
         machineDeviceId: 'm1',
@@ -231,145 +219,100 @@ void main() {
       await session.ensureEstablished();
       expect(session.isEstablished, isTrue);
 
-      var downs = 0;
-      final sub = session.sessionDownEvents.listen((_) => downs++);
-
-      // RPC-timeout rekey trigger; this attempt returns null.
       for (var i = 0; i < 3; i++) {
         session.notifyRpcResult(timedOut: true);
       }
 
-      for (var i = 0; i < 50 && handshaker.performCalls < 2; i++) {
+      for (var i = 0; i < 50 && !relay.closeCalled; i++) {
         await Future<void>.delayed(const Duration(milliseconds: 10));
       }
-      expect(handshaker.performCalls, 2);
+      expect(relay.closeCalled, isTrue);
       await Future<void>.delayed(const Duration(milliseconds: 20));
-
       expect(
         session.isEstablished,
         isFalse,
-        reason:
-            'a failed rekey must break the established rung honestly so the '
-            'supervisor can re-drive it',
+        reason: 'the closed link must break the established rung honestly '
+            'so the supervisor can re-drive it',
       );
       expect(
         handshaker.performCalls,
-        2,
-        reason: 'retry ownership stays with the supervisor — no loop here',
-      );
-      expect(
-        downs,
         1,
         reason:
-            'the supervisor can only re-drive a rung it is told about, and no '
-            'socket event fires when only the E2E layer dies',
+            'there is no in-place repair — retry ownership stays entirely '
+            'with the supervisor',
       );
 
-      await sub.cancel();
       await session.dispose();
       await relay.closeStreams();
     });
 
-    test(
-      'make-before-break: the OLD keys keep decrypting live traffic while a '
-      'rekey is in flight, and are zeroized only after the new keys swap in',
-      () async {
-        final relay = FakeLiveRelay();
-        final oldKeys = fixedKeys(1);
-        final newKeys = fixedKeys(9);
-        final handshaker = FakeHandshaker.sequence([oldKeys, newKeys])
-          ..delayFor = (i) =>
-              i == 1 ? const Duration(milliseconds: 150) : Duration.zero;
-        final session = MachineSession(
-          relay: relay,
-          machineDeviceId: 'm1',
-          handshaker: handshaker,
-        );
-        session.start();
-        await session.ensureEstablished();
-        expect(handshaker.performCalls, 1);
-        // The FakeHandshaker returns the SAME SessionKeys instance each call
-        // (no cloning), so oldKeys is exactly what MachineSession zeroizes.
-        expect(_isZeroized(oldKeys), isFalse);
+    test('a successful RPC resets the timeout streak — no close', () async {
+      final relay = FakeLiveRelay();
+      final session = await establishSession(relay, handshaker: FakeHandshaker());
 
-        final control = session.streamFor(kControlStreamId);
-        final seen = <Map<String, dynamic>>[];
-        final sub = control.messages.listen((m) => seen.add(m.json));
+      session.notifyRpcResult(timedOut: true);
+      session.notifyRpcResult(timedOut: true);
+      session.notifyRpcResult(timedOut: false); // resets the streak
+      session.notifyRpcResult(timedOut: true);
+      session.notifyRpcResult(timedOut: true);
+      await Future<void>.delayed(const Duration(milliseconds: 30));
 
-        // Trigger the rekey (three consecutive RPC timeouts) — the new
-        // handshake attempt takes 150ms per delayFor above, so there is a
-        // real in-flight window.
-        for (var i = 0; i < 3; i++) {
-          session.notifyRpcResult(timedOut: true);
-        }
-        await Future<void>.delayed(const Duration(milliseconds: 20));
-        expect(
-          handshaker.performCalls,
-          2,
-          reason: 'the rekey attempt must already be running',
-        );
+      expect(
+        relay.closeCalled,
+        isFalse,
+        reason: 'only 2 timeouts have accumulated since the reset',
+      );
 
-        // While the new handshake is still in flight, traffic sealed under
-        // the OLD keys must still decrypt and dispatch.
-        relay.inject(
-          IncomingPeerFrame(
-            channel: 'control',
-            kind: FrameKind.sealed,
-            payload: await sealFromAgent(
-              oldKeys,
-              jsonEncode({
-                'm': {'type': 'still-old-keys'},
-              }),
-            ),
-          ),
-        );
-        await Future<void>.delayed(const Duration(milliseconds: 30));
-        expect(
-          seen.map((j) => j['type']),
-          contains('still-old-keys'),
-          reason:
-              'old keys must remain live until the new confirm lands '
-              '(make-before-break)',
-        );
-        expect(
-          _isZeroized(oldKeys),
-          isFalse,
-          reason: 'not swapped out yet — still mid-handshake',
-        );
+      await session.dispose();
+      await relay.closeStreams();
+    });
 
-        // Let the rekey finish.
-        await Future<void>.delayed(const Duration(milliseconds: 200));
+    test('a timeout streak before establishment completes never closes the '
+        'link', () async {
+      final relay = FakeLiveRelay();
+      final handshaker = FakeHandshaker()
+        ..delayFor = (_) => const Duration(milliseconds: 300);
+      final session = MachineSession(
+        relay: relay,
+        machineDeviceId: 'm1',
+        handshaker: handshaker,
+      );
+      session.start();
+      final establishing = session.ensureEstablished();
 
-        expect(
-          _isZeroized(oldKeys),
-          isTrue,
-          reason:
-              'the superseded key set is zeroized once the new one '
-              'is confirmed',
-        );
+      for (var i = 0; i < 5; i++) {
+        session.notifyRpcResult(timedOut: true);
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(
+        relay.closeCalled,
+        isFalse,
+        reason: 'the close trigger is gated on an already-established session',
+      );
 
-        // New traffic must now be sealed under the NEW keys — the old ones
-        // no longer decrypt anything (they're zero bytes).
-        seen.clear();
-        relay.inject(
-          IncomingPeerFrame(
-            channel: 'control',
-            kind: FrameKind.sealed,
-            payload: await sealFromAgent(
-              newKeys,
-              jsonEncode({
-                'm': {'type': 'new-keys'},
-              }),
-            ),
-          ),
-        );
-        await Future<void>.delayed(const Duration(milliseconds: 30));
-        expect(seen.map((j) => j['type']), ['new-keys']);
+      await establishing;
+      await session.dispose();
+      await relay.closeStreams();
+    });
 
-        await sub.cancel();
-        await session.dispose();
-        await relay.closeStreams();
-      },
-    );
+    test('2 missed liveness pongs close the link', () async {
+      final relay = FakeLiveRelay();
+      final session = await establishSession(
+        relay,
+        handshaker: FakeHandshaker(),
+        pingSilence: const Duration(milliseconds: 30),
+      );
+
+      // The fake relay never answers a ping, so silence never resets.
+      for (var i = 0; i < 50 && !relay.closeCalled; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }
+      expect(relay.closeCalled, isTrue);
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(session.isEstablished, isFalse);
+
+      await session.dispose();
+      await relay.closeStreams();
+    });
   });
 }

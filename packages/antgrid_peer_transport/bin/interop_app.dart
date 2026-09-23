@@ -148,14 +148,14 @@ Future<void> main(List<String> args) async {
         .first;
     final config = jsonDecode(line) as Map<String, dynamic>;
     final machineId = config['machineId'] as String;
-    final appId = config['appId'] as String;
 
     Future<(PeerLink, MachineSession, Future<void>)> establish() async {
       final active = link = await client.dial(
         endpointId: config['endpointId'] as String,
-        // Transport address only, and scoped per machine exactly as
-        // `PeerRuntime` dials. The handshake below binds the bare `appId`, which
-        // is what the E2E transcript and the host's identity lookup are keyed by.
+        // Transport address only, scoped per machine exactly as `PeerRuntime`
+        // dials. The connection's own authenticated peer identity is what the
+        // host's `admitPeer` keys on now — no phone-side identity travels in
+        // the hello.
         authorized: () => true,
         ipAddresses: (config['addresses'] as List).cast<String>(),
       );
@@ -171,11 +171,6 @@ Future<void> main(List<String> args) async {
         machineDeviceId: machineId,
         handshaker: AppSessionHandshaker(
           relay: active,
-          crypto: crypto,
-          machineDeviceId: machineId,
-          phoneDeviceId: appId,
-          agentEd25519PubB64: config['machinePublic'] as String,
-          phoneEd25519Seed: seed,
           logger: (level, text, {fields}) =>
               stderr.writeln('handshake[$level]: $text ${fields ?? ''}'),
         ),

@@ -11,7 +11,6 @@ import '../helpers/test_peer_runtime.dart';
 // owns the coords resolution has to outlive the element that first built it.
 import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:antgrid/providers/account_agents.dart';
 import 'package:antgrid/providers/agent_transport.dart';
@@ -77,21 +76,6 @@ class _DialRecordingRelay extends RelayService {
 
   @override
   void disconnect() {}
-
-  Future<PeerSendOutcome> sendFrame(
-    String channel,
-    Uint8List payload, {
-    FrameKind kind = FrameKind.sealed,
-  }) async {
-    sendMessage(channel, payload, kind: kind);
-    return PeerSendOutcome.accepted;
-  }
-
-  void sendMessage(
-    String channel,
-    Uint8List payload, {
-    FrameKind kind = FrameKind.sealed,
-  }) {}
 
   @override
   void dispose() => unawaited(closeStreams());

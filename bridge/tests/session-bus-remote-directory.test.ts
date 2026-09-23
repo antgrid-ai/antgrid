@@ -509,7 +509,6 @@ async function setMobileAccess(h: HostServer, enabled: boolean): Promise<void> {
 function giveMachineIdentity(h: HostServer, machineId: string): void {
   const remote = new TestRemoteHostConnection({
     identity: { deviceId: machineId, deviceName: "test", createdAt: "" },
-    generateKeypair: () => { throw new Error("not used"); },
   });
   (h as any).controlPlaneRelay = remote;
 }

@@ -1,14 +1,14 @@
 import '../helpers/test_license_token_minter.dart';
 import '../helpers/fixed_peer_connector.dart';
 import '../helpers/test_peer_runtime.dart';
-// Task 9 cutover: the remote transport connects and signs AS the app's own
-// `kind:"app"` DeviceRecord on every resolve path.
+// Task 9 cutover: the remote transport connects and authenticates the CENTRAL
+// relay hello AS the app's own `kind:"app"` DeviceRecord on every resolve path.
 //
-// The signing assertion is made against the real handshake bytes: the transcript
-// carries the phone device id and is signed with the phone's Ed25519 seed, so
-// rebuilding it from the emitted `handshake:client-hello` and verifying it under
-// the record's public key proves BOTH halves at once — a hello signed with any
-// other key would neither carry the record's deviceUuid nor verify under its.
+// The native peer hello carries no crypto of its own since Stage B: QUIC/TLS
+// between lease-authorized Iroh endpoints is the confidentiality layer, so a
+// plaintext `session:hello {attemptId, capabilities}` replaces the old
+// transcript-signed `handshake:client-hello` — there is no signature left to
+// rebuild or verify here.
 //
 // "No resolve path sends a pair-request" is no longer asserted here because it
 // is no longer assertable: Task 10 deleted `RelayService.requestPair`, so the
@@ -57,7 +57,7 @@ class _RecordingRelay extends RelayService implements PeerLink {
 
   final _states = StreamController<AppState>.broadcast();
   final _presence = StreamController<bool>.broadcast();
-  final sent = <({String channel, Uint8List payload, FrameKind kind})>[];
+  final sent = <({String channel, Uint8List payload})>[];
   DeviceIdentity? connectedAs;
   String? connectedMachineId;
   AppState _cur = const AppState();
@@ -96,22 +96,10 @@ class _RecordingRelay extends RelayService implements PeerLink {
   }
 
   @override
-  Future<PeerSendOutcome> sendFrame(
-    String channel,
-    Uint8List payload, {
-    FrameKind kind = FrameKind.sealed,
-  }) async {
+  Future<PeerSendOutcome> sendFrame(String channel, Uint8List payload) async {
     if (!isDispatchAllowed) return PeerSendOutcome.closed;
-    sendMessage(channel, payload, kind: kind);
+    sent.add((channel: channel, payload: payload));
     return PeerSendOutcome.accepted;
-  }
-
-  void sendMessage(
-    String channel,
-    Uint8List payload, {
-    FrameKind kind = FrameKind.sealed,
-  }) {
-    sent.add((channel: channel, payload: payload, kind: kind));
   }
 
   @override
@@ -120,12 +108,12 @@ class _RecordingRelay extends RelayService implements PeerLink {
     unawaited(_presence.close());
   }
 
-  /// The decoded kind-1 handshake frames, in order.
-  List<Map<String, dynamic>> handshakeFrames() => [
+  /// The decoded `session:hello` frames sent on the control channel, in order.
+  List<Map<String, dynamic>> helloFrames() => [
     for (final f in sent)
-      if (f.kind == FrameKind.handshake)
+      if (f.channel == 'control')
         jsonDecode(utf8.decode(f.payload)) as Map<String, dynamic>,
-  ];
+  ].where((m) => m['type'] == 'session:hello').toList();
 }
 
 class _FakeConnectionManager extends MachineConnectionManager {
@@ -229,17 +217,17 @@ void main() {
     }
   }
 
-  test('the remote transport connects and signs the handshake with the '
-      'connection DeviceRecord, never PhoneIdentity', () async {
+  test('the remote transport connects on the relay slot and sends a plaintext '
+      'session:hello, never a signed transcript', () async {
     await stores.recentAgentsStore.upsert(_recent(_machine));
     final c = ProviderContainer(overrides: overrides());
     addTearDown(c.dispose);
     await c.read(accountAgentsProvider.future);
 
-    // The handshake never confirms against this fake, so don't await the
-    // transport — only the identity it presented is under test.
+    // The bridge fake never answers `established`, so don't await the
+    // transport — only the hello it sent is under test.
     c.read(agentTransportForProvider(_machine));
-    await pump(c, () => relay.handshakeFrames().isNotEmpty);
+    await pump(c, () => relay.helloFrames().isNotEmpty);
 
     expect(
       relay.connectedAs?.deviceId,
@@ -255,48 +243,13 @@ void main() {
     );
     expect(relay.connectedMachineId, _machine);
 
-    final hello = relay.handshakeFrames().single;
-    expect(hello['type'], 'handshake:client-hello');
-
-    // Rebuild the exact bytes the phone signed and verify them under the
-    // record's public key. The transcript names the BARE deviceUuid even though
-    // the hello above is scoped: it binds the account identity the agent
-    // resolves us by, and a transport address there would make one phone sign a
-    // different transcript per machine (see docs/protocol/e2e-handshake.md).
-    final transcript = buildTranscriptV2(
-      TranscriptFields(
-        registrationId: _machine,
-        role: 'phone',
-        agentDeviceId: _machine,
-        phoneDeviceId: record.deviceUuid,
-        agentX25519Pub: Uint8List(0),
-        phoneX25519Pub: base64Decode(hello['pubkey'] as String),
-        nonce: base64Decode(hello['nonce'] as String),
-      ),
-    );
-    expect(
-      await verifyTranscriptSigV2(
-        transcript: transcript,
-        ed25519PubB64: record.ed25519Pub,
-        sigB64: hello['sig'] as String,
-      ),
-      isTrue,
-      reason:
-          'the transcript names the record deviceUuid AND is signed with '
-          'its Ed25519 seed',
-    );
-
-    // A DIFFERENT account key over the same bytes must NOT verify — otherwise
-    // the check above would pass for any signer.
-    expect(
-      await verifyTranscriptSigV2(
-        transcript: transcript,
-        ed25519PubB64: _agentPubB64,
-        sigB64: hello['sig'] as String,
-      ),
-      isFalse,
-      reason: 'only the connection record may sign the handshake transcript',
-    );
+    // QUIC/TLS between lease-authorized endpoints is the confidentiality layer
+    // now, so the native hello carries capabilities only — no transcript, no
+    // signature, nothing naming the connection DeviceRecord at all.
+    final hello = relay.helloFrames().single;
+    expect(hello['type'], 'session:hello');
+    expect(hello['attemptId'], isA<String>());
+    expect(hello['capabilities'], kSessionHelloCapabilities);
   }, timeout: const Timeout(Duration(seconds: 30)));
 
   test(
@@ -311,8 +264,8 @@ void main() {
       addTearDown(withPaired.dispose);
       await withPaired.read(accountAgentsProvider.future);
       withPaired.read(agentTransportForProvider(_machine));
-      await pump(withPaired, () => relay.handshakeFrames().isNotEmpty);
-      expect(relay.handshakeFrames(), isNotEmpty, reason: 'recent + inventory');
+      await pump(withPaired, () => relay.helloFrames().isNotEmpty);
+      expect(relay.helloFrames(), isNotEmpty, reason: 'recent + inventory');
 
       // recent only (no inventory row)
       final relay2 = _RecordingRelay();
@@ -320,9 +273,9 @@ void main() {
       addTearDown(recentOnly.dispose);
       await recentOnly.read(accountAgentsProvider.future);
       recentOnly.read(agentTransportForProvider(_machine));
-      await pump(recentOnly, () => relay2.handshakeFrames().isNotEmpty);
+      await pump(recentOnly, () => relay2.helloFrames().isNotEmpty);
       expect(
-        relay2.handshakeFrames(),
+        relay2.helloFrames(),
         isNotEmpty,
         reason: 'recent-only dialled',
       );
@@ -338,8 +291,8 @@ void main() {
       addTearDown(invOnly.dispose);
       await invOnly.read(accountAgentsProvider.future);
       invOnly.read(agentTransportForProvider('other-machine'));
-      await pump(invOnly, () => relay3.handshakeFrames().isNotEmpty);
-      expect(relay3.handshakeFrames(), isNotEmpty, reason: 'inventory dialled');
+      await pump(invOnly, () => relay3.helloFrames().isNotEmpty);
+      expect(relay3.helloFrames(), isNotEmpty, reason: 'inventory dialled');
     },
     timeout: const Timeout(Duration(seconds: 60)),
   );
@@ -351,10 +304,7 @@ void main() {
     );
     final mech = PeerConnectionMechanisms(
       peerRuntime: FixedPeerConnector(relay),
-      crypto: CryptoService(),
       machineDeviceId: _machine,
-      phoneDeviceId: record.deviceUuid,
-      phoneEd25519Seed: base64Decode(record.ed25519Priv),
       resolveCoords: () async => coords,
     );
     addTearDown(mech.release);

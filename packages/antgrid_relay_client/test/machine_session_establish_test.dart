@@ -1,10 +1,10 @@
 // Task 9 cutover coverage for MachineSession's handshake ownership.
 //
-// The E2E handshake is no longer triggered by a `paired` socket transition —
-// pairing is gone. The connection supervisor drives it explicitly via
+// The hello is no longer triggered by a `paired` socket transition — pairing
+// is gone. The connection supervisor drives it explicitly via
 // [MachineSession.ensureEstablished], which is a SINGLE attempt (the supervisor
 // owns retry) and must never resolve ahead of [MachineSession.isEstablished].
-// A sealed `session-takeover` is reported, not repaired.
+// A `session-takeover` is reported, not repaired.
 import 'dart:convert';
 
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
@@ -18,7 +18,7 @@ void main() {
       'no socket state drives a handshake; ensureEstablished does',
       () async {
         final relay = FakeLiveRelay(initial: RelayConnectionState.connecting);
-        final handshaker = FakeHandshaker(fixedKeys(1));
+        final handshaker = FakeHandshaker();
         final session = MachineSession(
           relay: relay,
           machineDeviceId: 'm1',
@@ -36,7 +36,7 @@ void main() {
         expect(
           handshaker.performCalls,
           0,
-          reason: 'socket state must not trigger the E2E handshake',
+          reason: 'socket state must not trigger the hello',
         );
 
         await session.ensureEstablished();
@@ -54,10 +54,7 @@ void main() {
         final relay = FakeLiveRelay(
           initial: RelayConnectionState.authenticated,
         );
-        final handshaker = FakeHandshaker.sequence([
-          fixedKeys(1),
-          fixedKeys(2),
-        ]);
+        final handshaker = FakeHandshaker.sequence([true, true]);
         final session = MachineSession(
           relay: relay,
           machineDeviceId: 'm1',
@@ -76,7 +73,7 @@ void main() {
     test('ensureEstablished re-establishes after a teardown and only resolves '
         'once isEstablished reads true', () async {
       final relay = FakeLiveRelay(initial: RelayConnectionState.authenticated);
-      final handshaker = FakeHandshaker.sequence([fixedKeys(1), fixedKeys(2)])
+      final handshaker = FakeHandshaker.sequence([true, true])
         ..delayFor = (i) =>
             i == 1 ? const Duration(milliseconds: 150) : Duration.zero;
       final session = MachineSession(
@@ -123,7 +120,7 @@ void main() {
       final relay = FakeLiveRelay(initial: RelayConnectionState.authenticated);
       // A handshaker that never confirms — the peer is there but the attempt
       // fails. The supervisor owns retry, so the session must not loop.
-      final handshaker = FakeHandshaker.sequence(<SessionKeys?>[null]);
+      final handshaker = FakeHandshaker.sequence([false]);
       final session = MachineSession(
         relay: relay,
         machineDeviceId: 'm1',
@@ -148,7 +145,7 @@ void main() {
 
     test('concurrent ensureEstablished calls share one attempt', () async {
       final relay = FakeLiveRelay(initial: RelayConnectionState.authenticated);
-      final handshaker = FakeHandshaker.sequence([fixedKeys(1), fixedKeys(2)])
+      final handshaker = FakeHandshaker.sequence([true, true])
         ..delayFor = (_) => const Duration(milliseconds: 60);
       final session = MachineSession(
         relay: relay,
@@ -176,8 +173,7 @@ void main() {
         final relay = FakeLiveRelay(
           initial: RelayConnectionState.authenticated,
         );
-        final keys = fixedKeys(1);
-        final handshaker = FakeHandshaker.sequence([keys, fixedKeys(2)]);
+        final handshaker = FakeHandshaker.sequence([true, true]);
         final session = MachineSession(
           relay: relay,
           machineDeviceId: 'm1',
@@ -193,9 +189,7 @@ void main() {
         relay.inject(
           IncomingPeerFrame(
             channel: 'control',
-            kind: FrameKind.sealed,
-            payload: await sealFromAgent(
-              keys,
+            payload: encodeFromAgent(
               jsonEncode({'type': 'session-takeover'}),
             ),
           ),

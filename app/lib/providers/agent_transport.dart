@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
 
 import 'package:collection/collection.dart';
 import 'package:flutter/foundation.dart';
@@ -173,7 +172,6 @@ Future<AgentTransport?> _buildRelayTransportFor(
   String projectId,
 ) async {
   final mgr = ref.read(relayConnectionManagerProvider);
-  final crypto = ref.read(cryptoServiceProvider);
   final recentStore = ref.read(recentAgentsStoreProvider);
 
   // Machine-level identity: a compound project id resolves via its base machine.
@@ -234,7 +232,7 @@ Future<AgentTransport?> _buildRelayTransportFor(
   if (resolve == null) return null;
 
   // The ONE remote-control identity: the app's own `kind:"app"` DeviceRecord.
-  // It authenticates the relay hello AND signs the E2E transcript, so the agent
+  // It authenticates the relay hello, and its Ed25519 pubkey is how the agent
   // resolves us from the account peers inventory.
   final record = await ref.read(connectionDeviceRecordProvider.future);
   // Scoped to THIS machine so each of the app's sockets holds its own relay
@@ -242,11 +240,6 @@ Future<AgentTransport?> _buildRelayTransportFor(
   // epoch, so sharing one slot across machines lets the second machine wanted
   // kill the first (see [relaySlotId]).
   final identity = connectionIdentityFor(record, machineDeviceId: base);
-  // The E2E transcript stays on the BARE device id even though the hello is
-  // scoped: it is what the agent resolves us by in the account peers inventory,
-  // so it must name the account device, not the transport address.
-  final phoneDeviceId = record.deviceUuid;
-  final phoneEd25519Seed = base64Decode(record.ed25519Priv);
   final r = resolve;
 
   final invHit = uncachedInventoryHit;
@@ -339,10 +332,7 @@ Future<AgentTransport?> _buildRelayTransportFor(
     mechanisms: PeerConnectionMechanisms(
       peerRuntime: peerRuntime,
       diagnostic: conn.relay.netTap,
-      crypto: crypto,
       machineDeviceId: base,
-      phoneDeviceId: phoneDeviceId,
-      phoneEd25519Seed: phoneEd25519Seed,
       resolveCoords: resolveConnectionCoords,
     ),
     central: RelayCentralControlDialer(

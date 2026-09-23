@@ -2,7 +2,6 @@ import { describe, expect, it } from "bun:test";
 import { buildFragments, isFragEnvelope, MAX_FRAME_PAYLOAD } from "antgrid-wire";
 import { ed25519Pair, fragmentForSend, TestPeerSessionOwner } from "./test-peer-session-owner";
 import { createMessage } from "../src/protocol";
-import { generateEphemeralKeypair } from "../src/key-exchange";
 
 describe("fragmentForSend", () => {
   it("returns the json unchanged when under threshold", () => {
@@ -90,7 +89,6 @@ const PHONE_ID = "phone-1";
  *  to seal control-plane traffic via `sendFromPeer`. */
 function establish(): TestPeerSessionOwner {
   const client = TestPeerSessionOwner.forTest({
-    generateKeypair: generateEphemeralKeypair,
     sendPayload: () => {},
     peerId: PHONE_ID,
     deviceId: AGENT_DEVICE_ID,

@@ -2,23 +2,10 @@ import { randomBytes } from "node:crypto";
 import { Endpoint, EndpointAddr, EndpointId, type Connection } from "@number0/iroh/index.js";
 import { EndpointEnrollment } from "../../bridge/src/peer/enrollment";
 import { PeerRecords } from "../../bridge/src/peer/records";
-import { generateEphemeralKeypair, deriveSharedSecret } from "../../bridge/src/key-exchange";
-import { rawSeedToPkcs8 } from "../../bridge/src/ed25519-pkcs8";
-import {
-  buildTranscript,
-  deriveSessionKeys,
-  agentConfirmTag,
-  phoneConfirmTag,
-  verifyConfirmTag,
-  E2eTransport,
-  verifyTranscriptSig,
-} from "../../bridge/src/e2e";
-import { sign as nodeSign } from "node:crypto";
 import { createMessage, parseMessage, type AbMessage } from "../../bridge/src/protocol";
 import {
   encodePeerFrame,
   decodePeerFrame,
-  FrameKind,
   CONTROL_STREAM_ID,
   PEER_ALPN,
   type PeerAuthorizationSnapshot,
@@ -101,13 +88,6 @@ function decodeTunnelSlice(frame: { data?: unknown; bodyEncoding?: unknown }): B
   return frame.bodyEncoding === TUNNEL_GZIP_ENCODING ? Buffer.from(Bun.gunzipSync(raw)) : raw;
 }
 
-/** The current E2E receive/send context (confirmed session or a rekey candidate). */
-interface E2eContext {
-  attemptId: string;
-  transport: E2eTransport;
-  confirmKey: Buffer;
-}
-
 export class RelayClient {
   private nativeEndpoint: Endpoint | null = null;
   private nativeConnection: Connection | null = null;
@@ -140,16 +120,15 @@ export class RelayClient {
   private wsGeneration = 0;
 
   readonly deviceId: string;
-  /** The ACCOUNT device the E2E transcript binds — `deviceId` may be a
-   *  per-machine SLOT (`<transcriptDeviceId>#<machineDeviceId>`), but the
-   *  transcript (the HKDF salt) always binds the bare account device on both
-   *  sides. Defaults to `deviceId`, so an unscoped connection is unaffected. */
+  /** The ACCOUNT device the peer enrollment binds — `deviceId` may be a
+   *  per-machine SLOT (`<transcriptDeviceId>#<machineDeviceId>`). Defaults to
+   *  `deviceId`, so an unscoped connection is unaffected. */
   readonly transcriptDeviceId: string;
   readonly deviceType: "agent" | "app";
   readonly name: string;
   private publicKeyBase64: string;
   private privateKey: CryptoKey;
-  /** Raw 32-byte Ed25519 seed — used for E2E transcript signing (node:crypto). */
+  /** Raw 32-byte Ed25519 seed — used for the native endpoint's enrollment identity. */
   private privateKeySeed: Buffer;
   /** Tap for every outbound text-JSON frame (hello + raw control messages) —
    *  lets a caller assert a negative on the wire (e.g. "never sent pair-request"). */
@@ -160,39 +139,20 @@ export class RelayClient {
   /** The nonce sent in the most recent hello — reuse it via `reuseNonce`. */
   lastHelloNonce = "";
 
-  // --- E2E session state ---
-  /** The confirmed session (or, mid-initial-handshake, the derived candidate the
-   *  phone confirms last). Make-before-break rekey keeps it live for RECEIVING
-   *  until the pending attempt establishes. */
-  private established: E2eContext | null = null;
-  /** An in-flight rekey attempt whose keys receive-only until it establishes. */
-  private pending: E2eContext | null = null;
-  private e2eMode = false;
-  /** True once the initial handshake's confirm is sent + established. */
+  // --- Native session state ---
+  // After the flip, QUIC/TLS between the lease-authorized endpoints is the
+  // confidentiality layer, so this only tracks whether a `session:hello` has
+  // established — no key material lives here.
+  private established: { attemptId: string } | null = null;
+  /** True once the hello resolves `established`. */
   private sessionConfirmed = false;
-  /** Sealed frames that failed to decrypt under all live contexts during a
-   *  handshake/rekey (a candidate agent-ready racing ahead of key derivation).
-   *  Replayed once the relevant transport is installed. */
-  private pendingEncrypted: Uint8Array[] = [];
 
   // --- Multiplexed project streams ---
   /** projectId → streamId, learned from control-plane `stream-ready`/`agent:projects`. */
   private streamByProject = new Map<string, string>();
 
-  // --- Phone-side liveness (from the phone's perspective) ---
-  private livenessTimer: ReturnType<typeof setInterval> | null = null;
-  private lastSealedRecvAt = 0;
-  private missedPongs = 0;
-  private pingSilenceMs = 20_000;
-  private maxMissedPongs = 2;
-  /** Test lever: drop inbound sealed `pong`s so this client's liveness starves
-   *  and it rekeys. The relay is zero-knowledge and cannot single
-   *  out sealed pongs, so the "swallow pongs" lever lives at the endpoint. */
-  private swallowPongs = false;
-  private rekeyInFlight = false;
-
-  // --- Per-channel flow control (receiver half; see docs/protocol/e2e-handshake.md §8.8) ---
-  // Cumulative sealed payload bytes taken off each channel since this session
+  // --- Per-channel flow control (receiver half; see docs/protocol/peer-session.md) ---
+  // Cumulative frame-payload bytes taken off each channel since this session
   // was established, and how much of that the agent has been told about. An
   // eval client that never credits wedges the agent's window after one
   // CHANNEL_WINDOW_BYTES, with liveness still green.
@@ -237,9 +197,9 @@ export class RelayClient {
       name?: string;
       identity?: PhoneIdentity;
       deviceId?: string;
-      /** ACCOUNT device the E2E transcript binds. Defaults to `deviceId` — only
-       *  a slotted `deviceId` (`<transcriptDeviceId>#<machineDeviceId>`) needs
-       *  this set separately. */
+      /** ACCOUNT device the peer enrollment binds. Defaults to `deviceId` —
+       *  only a slotted `deviceId` (`<transcriptDeviceId>#<machineDeviceId>`)
+       *  needs this set separately. */
       transcriptDeviceId?: string;
       /** Tap for every outbound text-JSON frame this client sends. */
       onOutbound?: (raw: string) => void;
@@ -485,7 +445,7 @@ export class RelayClient {
     })();
   }
 
-  /** Redial the configured native endpoint with fresh E2E state after peer failure. */
+  /** Redial the configured native endpoint with fresh session state after peer failure. */
   async reconnectNative(): Promise<void> {
     this.resetE2e();
     await this.dialNative();
@@ -516,11 +476,12 @@ export class RelayClient {
     });
   }
 
-  // --- Binary receive path (kind-byte dispatch) ---
+  // --- Binary receive path (plaintext; QUIC/TLS between leased endpoints is
+  //     the confidentiality layer, so a frame's payload is consumed directly) ---
 
   private handleBinaryFrame(data: ArrayBuffer | Uint8Array): void {
     const buf = Buffer.from(data as Uint8Array);
-    let decoded: { header: unknown; payload: Uint8Array; kind: FrameKind };
+    let decoded: { header: unknown; payload: Uint8Array };
     try {
       decoded = decodePeerFrame(buf);
     } catch {
@@ -529,47 +490,7 @@ export class RelayClient {
     const header = decoded.header as { type?: string; channel?: string };
     if (header.type !== "message") return;
     const channel = header.channel === "preview" ? "preview" : "control";
-
-    if (decoded.kind === FrameKind.handshake) {
-      // Kind-1 plaintext admits exactly the handshake messages; the phone only
-      // ever consumes agent-hello.
-      let obj: any;
-      try {
-        obj = JSON.parse(Buffer.from(decoded.payload).toString("utf8"));
-      } catch {
-        return;
-      }
-      if (obj?.type === "handshake:agent-hello") this.deliver(obj);
-      return;
-    }
-    // kind === sealed: decrypt-or-drop.
-    this.handleSealedFrame(Buffer.from(decoded.payload), channel);
-  }
-
-  private handleSealedFrame(payload: Buffer, channel: "control" | "preview"): void {
-    // Make-before-break: try the established context first, then a rekey candidate.
-    if (this.established) {
-      const pt = this.established.transport.open(payload);
-      if (pt !== null) {
-        this.noteConsumed(channel, payload.length);
-        this.onSealedPlaintext(pt, channel, false);
-        return;
-      }
-    }
-    if (this.pending) {
-      const pt = this.pending.transport.open(payload);
-      if (pt !== null) {
-        this.onSealedPlaintext(pt, channel, true);
-        return;
-      }
-    }
-    // The agent charged these bytes to its window the moment it wrote them, so
-    // a frame nothing could open is still consumed — leaving it uncounted would
-    // shrink that window for the rest of the session.
-    if (this.established) this.noteConsumed(channel, payload.length);
-    // Undecryptable now: most likely a candidate agent-ready racing ahead of key
-    // derivation — buffer for replay once the transport is installed.
-    this.pendingEncrypted.push(new Uint8Array(payload));
+    this.onPeerPlaintext(Buffer.from(decoded.payload), channel);
   }
 
   private noteConsumed(channel: "control" | "preview", bytes: number): void {
@@ -580,10 +501,9 @@ export class RelayClient {
   /** `consumed` is cumulative, so a lost or reordered credit costs nothing —
    *  the next one carries the whole total. */
   private sendCredit(channel: "control" | "preview"): void {
-    const ctx = this.established;
-    if (!ctx || !this.nativePeerId || this.creditsPaused) return;
+    if (!this.established || !this.nativePeerId || this.creditsPaused) return;
     this.rxCredited[channel] = this.rxConsumed[channel];
-    this.sendSealedFrame({ type: "credit", channel, consumed: this.rxConsumed[channel] }, ctx.transport, "control");
+    this.sendPlaintextFrame({ type: "credit", channel, consumed: this.rxConsumed[channel] }, "control");
   }
 
   private resetRxFlow(): void {
@@ -591,12 +511,11 @@ export class RelayClient {
     this.rxCredited = { control: 0, preview: 0 };
   }
 
-  private onSealedPlaintext(plaintext: string, channel: "control" | "preview", fromPending: boolean): void {
-    // Fragmented app traffic → buffer; onComplete routes the reassembled envelope.
-    if (this.fragReassembler.accept(plaintext)) {
-      if (!fromPending) this.recordSealedRecv();
-      return;
-    }
+  /** A frame's payload IS the plaintext now — there is no open-or-buffer step. */
+  private onPeerPlaintext(payload: Buffer, channel: "control" | "preview"): void {
+    if (this.established) this.noteConsumed(channel, payload.length);
+    const plaintext = payload.toString("utf8");
+    if (this.fragReassembler.accept(plaintext)) return;
     let obj: any;
     try {
       obj = JSON.parse(plaintext);
@@ -604,44 +523,25 @@ export class RelayClient {
       return;
     }
     if (obj && typeof obj === "object" && typeof obj.type === "string") {
-      // Bare session/liveness frame (top-level `type`). App traffic is always
-      // wrapped in `{ s?, m }`, so a top-level `type` is unambiguously a session
-      // frame.
-      if (obj.type === "pong" && this.swallowPongs) return; // liveness lever — drop, don't record
-      if (!fromPending) this.recordSealedRecv();
+      // Bare session frame (top-level `type`). App traffic is always wrapped
+      // in `{ s?, m }`, so a top-level `type` is unambiguously a session frame.
       this.handleSessionFrame(obj);
       return;
     }
     if (obj && typeof obj === "object" && "m" in obj) {
-      if (!fromPending) this.recordSealedRecv();
       this.routeAppEnvelope(obj as { s?: string; m: unknown });
       return;
     }
   }
 
-  private handleSessionFrame(obj: { type: string; attemptId?: string; confirm?: string }): void {
+  private handleSessionFrame(obj: { type: string; attemptId?: string }): void {
     switch (obj.type) {
-      case "handshake:agent-ready":
-        this.deliver(obj);
-        return;
       case "established":
-        // dropEstablished hook: swallow the FIRST established for the in-flight
-        // attempt so the phone must retransmit app:ready to establish.
-        if (this.dropEstablishedAttemptId && obj.attemptId === this.dropEstablishedAttemptId) {
-          this.dropEstablishedAttemptId = null;
-          return;
-        }
-        // Counters are per session on both sides: the agent zeroes its window
-        // as it sends this, so anything carried over would credit bytes it no
-        // longer has charged.
-        this.resetRxFlow();
         this.deliver(obj);
         return;
-      case "ping": {
-        // Answer sealed under whichever context is currently confirmed.
-        const ctx = this.established;
-        if (ctx) {
-          this.sendSealedFrame({ type: "pong" }, ctx.transport, "control");
+      case "ping":
+        if (this.established) {
+          this.sendPlaintextFrame({ type: "pong" }, "control");
           // The agent's liveness tick is this client's only clock: re-sending
           // both cumulative credits here is what heals one the relay dropped,
           // for two ~60-byte frames per tick.
@@ -649,13 +549,11 @@ export class RelayClient {
           this.sendCredit("preview");
         }
         return;
-      }
       case "credit":
         // The agent credits this client's own sends. Nothing here writes more
         // than a window ahead of a reply, so there is no window to release.
         return;
       case "pong":
-        this.missedPongs = 0;
         return;
       case "session-takeover":
         // Sent by the bridge to a session it is about to tear down. A bridge
@@ -726,52 +624,22 @@ export class RelayClient {
     this.messageQueue.push(msg);
   }
 
-  // --- E2E handshake ---
-
-  /** Set while a `dropEstablished` attempt is in flight (the attemptId whose
-   *  first `established` must be swallowed). */
-  private dropEstablishedAttemptId: string | null = null;
+  // --- Session establishment ---
 
   /**
-   * Perform the v3 acked E2E handshake with the agent through the relay.
+   * Establish the native session with the agent through the peer connection.
    *
-   * Phone perspective:
-   *  1. Generate ephemeral X25519 keypair + phone-generated `attemptId` + nonce.
-   *  2. Sign the PHONE-role transcript (pull-model: empty agentX25519Pub).
-   *  3. Send kind-1 `client-hello { attemptId, pubkey, nonce, sig }`.
-   *  4. Receive kind-1 `agent-hello { attemptId, pubkey, sig }`; verify against
-   *     the pinned agent Ed25519 key when supplied.
-   *  5. Derive directional keys; install as the (sole) receive context.
-   *  6. Receive sealed `agent-ready { attemptId, confirm }`; verify confirm tag.
-   *  7. Send sealed `app:ready { attemptId, confirm }`, retransmit every 2s until
-   *     the agent's sealed `established { attemptId }` arrives; return only then.
-   *
-   * `attemptId` is correlation only — it never enters the transcript (the nonce
-   * already binds the attempt cryptographically).
+   * Phone perspective: send a plaintext `session:hello { attemptId,
+   * capabilities }` on the control channel and resolve once `established
+   * { attemptId }` comes back with a matching id. QUIC/TLS between the
+   * lease-authorized endpoints is the confidentiality layer now, so there is
+   * no key derivation or confirm tag — the bridge's lease re-check on the
+   * hello is what authorizes this session.
    */
   async performE2EHandshake(
     agentDeviceId: string,
     timeoutMs = 10_000,
     opts: {
-      /** MITM: corrupt the received agent-hello pubkey before deriving. */
-      corruptAgentHelloPubkey?: boolean;
-      /** Omit the client-hello transcript signature (unsigned client). */
-      omitClientHelloSig?: boolean;
-      /** Replace agent-ready's confirm with random bytes before verifying. */
-      corruptAgentReadyConfirm?: boolean;
-      /** Pinned agent Ed25519 pubkey (raw 32 bytes, base64). When set, the phone
-       *  verifies the agent-hello transcript signature and ABORTS on mismatch. */
-      agentEd25519Pub?: string;
-      /** Wedge-recovery hook: skip the FIRST app:ready send; the 2s retransmit
-       *  then establishes the session (wedge recovery). */
-      dropFirstAppReady?: boolean;
-      /** Wedge-recovery hook: swallow the agent's first `established` so the phone
-       *  retransmits app:ready and establishes on the agent's idempotent re-send. */
-      dropEstablished?: boolean;
-      /** Wedge-recovery hook: never retransmit app:ready. Combined with
-       *  `dropFirstAppReady` the attempt times out (a FRESH attempt must recover
-       *  — no permanent wedge state). */
-      noRetransmit?: boolean;
       /** Play a pre-`pullsTree` app: omit the capability so the bridge keeps
        *  pushing the file tree on re-sync (gate-lazy-hydration's legacy row). */
       omitPullsTree?: boolean;
@@ -787,105 +655,8 @@ export class RelayClient {
         `Handshake peer ${agentDeviceId} does not match authenticated native peer ${this.nativePeerId}`,
       );
     }
-    this.e2eMode = true;
-
-    // Reset partial state from a prior failed attempt. A CONFIRMED live session
-    // is left intact (a failed re-attempt must not tear down a working session).
-    if (!this.sessionConfirmed) {
-      this.established?.transport.zeroize();
-      this.established = null;
-      this.pending?.transport.zeroize();
-      this.pending = null;
-      this.pendingEncrypted = [];
-    }
-
-    const keypair = generateEphemeralKeypair();
-    const phoneX25519Pub = keypair.publicKey;
+    this.resetRxFlow();
     const attemptId = randomBytes(8).toString("hex");
-    const nonce = randomBytes(16);
-
-    let sigB64 = "";
-    if (!opts.omitClientHelloSig) {
-      const phoneTranscript = buildTranscript({
-        registrationId: agentDeviceId,
-        role: "phone",
-        agentDeviceId,
-        phoneDeviceId: this.transcriptDeviceId,
-        agentX25519Pub: Buffer.alloc(0),
-        phoneX25519Pub,
-        nonce,
-      });
-      const pkcs8 = rawSeedToPkcs8(this.privateKeySeed);
-      sigB64 = nodeSign(null, phoneTranscript, { key: pkcs8, format: "der", type: "pkcs8" }).toString("base64");
-    }
-
-    // Step 3: kind-1 client-hello.
-    this.sendHandshakePlaintext({
-      type: "handshake:client-hello",
-      attemptId,
-      pubkey: phoneX25519Pub.toString("base64"),
-      nonce: nonce.toString("base64"),
-      sig: sigB64,
-    });
-
-    // Step 4: agent-hello.
-    let agentHello: any;
-    try {
-      agentHello = await this.waitFor(
-        (m: any) => m.type === "handshake:agent-hello" && m.attemptId === attemptId,
-        timeoutMs,
-      );
-    } catch (error) {
-      if (!(error instanceof Error) || !error.message.startsWith("Timed out waiting for message")) {
-        throw error;
-      }
-      throw new NativeAuthorizationNotReadyError(agentDeviceId, error);
-    }
-    let agentX25519Pub = Buffer.from(agentHello.pubkey, "base64");
-    if (opts.corruptAgentHelloPubkey) {
-      const corrupted = Buffer.from(agentX25519Pub);
-      corrupted[0] ^= 0xff;
-      agentX25519Pub = corrupted;
-    }
-
-    // Step 5: derive keys over the AGENT-role transcript (agent pub as received).
-    const agentTranscript = buildTranscript({
-      registrationId: agentDeviceId,
-      role: "agent",
-      agentDeviceId,
-      phoneDeviceId: this.transcriptDeviceId,
-      agentX25519Pub,
-      phoneX25519Pub,
-      nonce,
-    });
-    if (opts.agentEd25519Pub) {
-      if (!verifyTranscriptSig(agentTranscript, opts.agentEd25519Pub, agentHello.sig ?? "")) {
-        throw new Error("agent-hello sig invalid — aborting handshake (possible MITM)");
-      }
-    }
-    const sharedSecret = deriveSharedSecret(keypair.privateKey, agentX25519Pub);
-    keypair.privateKey.fill(0);
-    const sessionKeys = deriveSessionKeys(sharedSecret, agentTranscript);
-    // Phone transport: send = p2a (phone→agent), recv = a2p (agent→phone).
-    const transport = new E2eTransport({ sendKey: sessionKeys.p2a, recvKey: sessionKeys.a2p });
-    const ctx: E2eContext = { attemptId, transport, confirmKey: sessionKeys.confirm };
-    this.established = ctx;
-    this.replayPendingEncrypted();
-
-    // Step 6: sealed agent-ready + confirm-tag verify.
-    const agentReady = await this.waitFor(
-      (m: any) => m.type === "handshake:agent-ready" && m.attemptId === attemptId,
-      timeoutMs,
-    );
-    let agentConfirmB64: string = agentReady.confirm ?? "";
-    if (opts.corruptAgentReadyConfirm) agentConfirmB64 = randomBytes(32).toString("base64");
-    if (!verifyConfirmTag(agentConfirmTag(sessionKeys.confirm), Buffer.from(agentConfirmB64, "base64"))) {
-      transport.zeroize();
-      this.established = null;
-      throw new Error("agent-ready confirm tag invalid — handshake rejected");
-    }
-
-    // Step 7: sealed app:ready with retransmit until established.
     // `capabilities` mirrors the production Dart client (connection_handshake.dart):
     // without checkoutRouting the bridge treats this app as pre-worktree and
     // refuses to stream any project holding a managed session; `pullsTree` tells
@@ -895,136 +666,29 @@ export class RelayClient {
     const capabilities: Record<string, true> = { checkoutRouting: true };
     if (!opts.omitPullsTree) capabilities.pullsTree = true;
     if (!opts.omitTerminalFramesV1) capabilities.terminalFramesV1 = true;
-    const appReady = {
-      type: "app:ready", attemptId,
-      confirm: phoneConfirmTag(sessionKeys.confirm).toString("base64"),
-      capabilities,
-    };
-    if (opts.dropEstablished) this.dropEstablishedAttemptId = attemptId;
-    const establishedP = this.waitFor((m: any) => m.type === "established" && m.attemptId === attemptId, timeoutMs);
-    if (!opts.dropFirstAppReady) this.sendSealedFrame(appReady, transport, "control");
-    let retransmit: ReturnType<typeof setInterval> | null = null;
-    if (!opts.noRetransmit) {
-      retransmit = setInterval(() => this.sendSealedFrame(appReady, transport, "control"), 2_000);
-      retransmit.unref?.();
-    }
+
+    const establishedP = this.waitFor(
+      (m: any) => m.type === "established" && m.attemptId === attemptId,
+      timeoutMs,
+    );
+    this.sendPlaintextFrame({ type: "session:hello", attemptId, capabilities }, "control");
     try {
       await establishedP;
-    } finally {
-      if (retransmit) clearInterval(retransmit);
-      this.dropEstablishedAttemptId = null;
+    } catch (error) {
+      if (!(error instanceof Error) || !error.message.startsWith("Timed out waiting for message")) {
+        throw error;
+      }
+      throw new NativeAuthorizationNotReadyError(agentDeviceId, error);
     }
+    this.established = { attemptId };
     this.sessionConfirmed = true;
     this.e2eGeneration++;
-    this.startLiveness();
-  }
-
-  /**
-   * Make-before-break rekey on the LIVE socket: run a fresh
-   * handshake while keeping the current session's keys live for receiving,
-   * then atomically swap and zeroize the old keys. Used by the rekey gate test
-   * (drive it directly, or let phone-side liveness auto-trigger it).
-   */
-  async rekey(agentDeviceId: string, agentEd25519Pub: string, timeoutMs = 10_000): Promise<void> {
-    if (!this.established) throw new Error("rekey requires an established session");
-    if (this.rekeyInFlight) return;
-    this.rekeyInFlight = true;
-    try {
-      const keypair = generateEphemeralKeypair();
-      const phoneX25519Pub = keypair.publicKey;
-      const attemptId = randomBytes(8).toString("hex");
-      const nonce = randomBytes(16);
-
-      const phoneTranscript = buildTranscript({
-        registrationId: agentDeviceId,
-        role: "phone",
-        agentDeviceId,
-        phoneDeviceId: this.transcriptDeviceId,
-        agentX25519Pub: Buffer.alloc(0),
-        phoneX25519Pub,
-        nonce,
-      });
-      const pkcs8 = rawSeedToPkcs8(this.privateKeySeed);
-      const sigB64 = nodeSign(null, phoneTranscript, { key: pkcs8, format: "der", type: "pkcs8" }).toString("base64");
-      this.sendHandshakePlaintext({
-        type: "handshake:client-hello",
-        attemptId,
-        pubkey: phoneX25519Pub.toString("base64"),
-        nonce: nonce.toString("base64"),
-        sig: sigB64,
-      });
-
-      const agentHello = await this.waitFor(
-        (m: any) => m.type === "handshake:agent-hello" && m.attemptId === attemptId,
-        timeoutMs,
-      );
-      const agentX25519Pub = Buffer.from(agentHello.pubkey, "base64");
-      const agentTranscript = buildTranscript({
-        registrationId: agentDeviceId,
-        role: "agent",
-        agentDeviceId,
-        phoneDeviceId: this.transcriptDeviceId,
-        agentX25519Pub,
-        phoneX25519Pub,
-        nonce,
-      });
-      if (!verifyTranscriptSig(agentTranscript, agentEd25519Pub, agentHello.sig ?? "")) {
-        throw new Error("rekey agent-hello sig invalid");
-      }
-      const sharedSecret = deriveSharedSecret(keypair.privateKey, agentX25519Pub);
-      keypair.privateKey.fill(0);
-      const sessionKeys = deriveSessionKeys(sharedSecret, agentTranscript);
-      const transport = new E2eTransport({ sendKey: sessionKeys.p2a, recvKey: sessionKeys.a2p });
-      // Candidate: receive-only until established (old keys still decrypt traffic).
-      this.pending = { attemptId, transport, confirmKey: sessionKeys.confirm };
-      this.replayPendingEncrypted();
-
-      const agentReady = await this.waitFor(
-        (m: any) => m.type === "handshake:agent-ready" && m.attemptId === attemptId,
-        timeoutMs,
-      );
-      if (!verifyConfirmTag(agentConfirmTag(sessionKeys.confirm), Buffer.from(agentReady.confirm ?? "", "base64"))) {
-        transport.zeroize();
-        this.pending = null;
-        throw new Error("rekey agent-ready confirm invalid");
-      }
-      // Unconditional: a rekey must not silently downgrade a live app's capability.
-      const appReady = {
-        type: "app:ready", attemptId,
-        confirm: phoneConfirmTag(sessionKeys.confirm).toString("base64"),
-        capabilities: { checkoutRouting: true, pullsTree: true, terminalFramesV1: true },
-      };
-      const establishedP = this.waitFor((m: any) => m.type === "established" && m.attemptId === attemptId, timeoutMs);
-      this.sendSealedFrame(appReady, transport, "control");
-      const retransmit = setInterval(() => this.sendSealedFrame(appReady, transport, "control"), 2_000);
-      retransmit.unref?.();
-      try {
-        await establishedP;
-      } finally {
-        clearInterval(retransmit);
-      }
-      // Swap: promote the candidate, zeroize the old keys.
-      const old = this.established;
-      this.established = this.pending;
-      this.pending = null;
-      old?.transport.zeroize();
-      this.e2eGeneration++;
-      this.recordSealedRecv();
-    } finally {
-      this.rekeyInFlight = false;
-    }
-  }
-
-  private replayPendingEncrypted(): void {
-    if (this.pendingEncrypted.length === 0) return;
-    const pending = this.pendingEncrypted.splice(0);
-    for (const p of pending) this.handleSealedFrame(Buffer.from(p), "control");
   }
 
   // --- Streams ---
 
   /**
-   * Drill into a project: send control-plane `project:start`, await the sealed
+   * Drill into a project: send control-plane `project:start`, await the
    * `stream-ready { projectId, streamId }`, and return the streamId to tag
    * subsequent project traffic. No new socket, no pairing.
    */
@@ -1060,39 +724,22 @@ export class RelayClient {
 
   // --- Sending ---
 
-  /** Send an AbMessage on the machine CONTROL PLANE (`s` omitted), sealed. */
+  /** Send an AbMessage on the machine CONTROL PLANE (`s` omitted). */
   sendEncrypted(msg: AbMessage): void {
     this.sendAppEnvelope(CONTROL_STREAM_ID, msg, "control");
   }
 
-  /** Wrap `msg` in the `{ s?, m }` stream envelope, seal, and send.
+  /** Wrap `msg` in the `{ s?, m }` stream envelope and send plaintext.
    *  Control-plane traffic uses `CONTROL_STREAM_ID` (`s` omitted). */
   private sendAppEnvelope(streamId: string, msg: unknown, channel: "control" | "preview"): void {
-    const ctx = this.established;
-    if (!ctx || !this.nativePeerId) throw new Error("Native E2E session is not established");
+    if (!this.established || !this.nativePeerId) throw new Error("Native session is not established");
     const envelope = streamId && streamId !== CONTROL_STREAM_ID ? { s: streamId, m: msg } : { m: msg };
-    this.sendPeerPayload(ctx.transport.seal(JSON.stringify(envelope)), channel);
+    this.sendPlaintextFrame(envelope, channel);
   }
 
-  /** Seal one bare session/liveness frame under `transport` and send it kind-0. */
-  private sendSealedFrame(obj: object, transport: E2eTransport, channel: "control" | "preview"): void {
-    this.sendPeerPayload(transport.seal(JSON.stringify(obj)), channel);
-  }
-
-  /** Send a kind-1 plaintext handshake frame. */
-  private sendHandshakePlaintext(obj: object): void {
-    const frame = encodePeerFrame(
-      { type: "message", channel: "control" },
-      Buffer.from(JSON.stringify(obj), "utf8"),
-      FrameKind.handshake,
-    );
-    this.sendBinary(frame);
-  }
-
-  /** Send a sealed binary payload as a peer frame (kind-0). */
-  private sendPeerPayload(payload: Uint8Array | Buffer, channel: "control" | "preview" = "control"): void {
-    const bytes = payload instanceof Buffer ? payload : Buffer.from(payload);
-    this.sendBinary(encodePeerFrame({ type: "message", channel }, bytes, FrameKind.sealed));
+  /** Send one bare session frame as a peer frame. */
+  private sendPlaintextFrame(obj: object, channel: "control" | "preview" = "control"): void {
+    this.sendBinary(encodePeerFrame({ type: "message", channel }, Buffer.from(JSON.stringify(obj), "utf8")));
   }
 
   /** Send raw JSON to the central relay, including retired verbs in rejection tests. */
@@ -1109,63 +756,6 @@ export class RelayClient {
       this.deliver({ type: "error", code: "NATIVE_SEND_FAILED", message: String(error) }));
   }
 
-  // --- Phone-side liveness ---
-
-  private recordSealedRecv(): void {
-    this.lastSealedRecvAt = Date.now();
-    this.missedPongs = 0;
-  }
-
-  private startLiveness(): void {
-    this.stopLiveness();
-    this.lastSealedRecvAt = Date.now();
-    this.missedPongs = 0;
-  }
-
-  private stopLiveness(): void {
-    if (this.livenessTimer) {
-      clearInterval(this.livenessTimer);
-      this.livenessTimer = null;
-    }
-  }
-
-  /**
-   * Enable phone-side liveness: after `pingSilenceMs` of sealed-receive silence
-   * send a sealed ping; after `maxMissedPongs` unanswered pings, auto-rekey on
-   * the live socket. Off by default so short tests aren't
-   * disturbed. Combine with {@link setSwallowPongs} to starve liveness on demand.
-   */
-  enableLiveness(
-    agentDeviceId: string,
-    agentEd25519Pub: string,
-    opts: { pingSilenceMs?: number; maxMissedPongs?: number } = {},
-  ): void {
-    this.pingSilenceMs = opts.pingSilenceMs ?? this.pingSilenceMs;
-    this.maxMissedPongs = opts.maxMissedPongs ?? this.maxMissedPongs;
-    this.stopLiveness();
-    this.lastSealedRecvAt = Date.now();
-    this.missedPongs = 0;
-    this.livenessTimer = setInterval(() => {
-      if (!this.established || this.rekeyInFlight) return;
-      if (Date.now() - this.lastSealedRecvAt < this.pingSilenceMs) return;
-      if (this.missedPongs >= this.maxMissedPongs) {
-        void this.rekey(agentDeviceId, agentEd25519Pub).catch(() => {});
-        this.lastSealedRecvAt = Date.now();
-        this.missedPongs = 0;
-        return;
-      }
-      this.missedPongs++;
-      this.sendSealedFrame({ type: "ping" }, this.established.transport, "control");
-    }, Math.max(250, this.pingSilenceMs));
-    this.livenessTimer.unref?.();
-  }
-
-  /** Test lever: when true, inbound sealed `pong`s are dropped (not counted), so
-   *  phone-side liveness starves and rekeys. */
-  setSwallowPongs(v: boolean): void {
-    this.swallowPongs = v;
-  }
-
   /** Test lever: while true this client emits no `credit` frame, so the agent's
    *  send window on a channel closes after CHANNEL_WINDOW_BYTES and stays
    *  closed. Liveness is unaffected — session frames bypass the gate — so the
@@ -1179,7 +769,7 @@ export class RelayClient {
     }
   }
 
-  /** Cumulative sealed payload bytes taken off `channel` since this session was
+  /** Cumulative frame-payload bytes taken off `channel` since this session was
    *  established — the receiver-side view of what the agent charged to its
    *  window. */
   consumedBytes(channel: "control" | "preview"): number {
@@ -1350,7 +940,7 @@ export class RelayClient {
     await this.connectAndAuthenticate(relayUrl);
   }
 
-  /** Hard-close central control without touching the native/E2E session. */
+  /** Hard-close central control without touching the native session. */
   dropSocket(): void {
     this.ws?.close();
     this.ws = null;
@@ -1365,19 +955,12 @@ export class RelayClient {
   }
 
   private resetE2e(): void {
-    this.established?.transport.zeroize();
     this.established = null;
-    this.pending?.transport.zeroize();
-    this.pending = null;
-    this.e2eMode = false;
     this.sessionConfirmed = false;
-    this.pendingEncrypted = [];
     this.streamByProject.clear();
-    this.stopLiveness();
   }
 
   async disconnect(): Promise<void> {
-    this.stopLiveness();
     this.waiters.forEach((w) => {
       clearTimeout(w.timer);
       w.reject(new Error("Disconnected"));

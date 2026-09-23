@@ -1,7 +1,7 @@
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { randomBytes } from "node:crypto";
 import type { Server } from "bun";
-import { CHANNEL_WINDOW_BYTES, MAX_FRAME_PAYLOAD, SEAL_OVERHEAD_BYTES } from "antgrid-wire";
+import { CHANNEL_WINDOW_BYTES, MAX_FRAME_PAYLOAD } from "antgrid-wire";
 import { setupTestEnv, type TestEnv } from "../helpers/harness";
 import { base64Length } from "../../bridge/src/tunnel-protocol";
 import { firstProjectStream, streamSnapshot } from "../support/stream";
@@ -29,7 +29,7 @@ const BIG = randomBytes(6 * 1024 * 1024);
 /** The most the sender may write past what has been credited: the gate lets a
  *  frame through whenever nothing is outstanding, so one maximal frame past a
  *  full window is the ceiling. */
-const WINDOW_CEILING = CHANNEL_WINDOW_BYTES + MAX_FRAME_PAYLOAD + SEAL_OVERHEAD_BYTES;
+const WINDOW_CEILING = CHANNEL_WINDOW_BYTES + MAX_FRAME_PAYLOAD;
 
 describe("gate: tunnel HTTP streaming under the preview window", () => {
   let env: TestEnv;
@@ -100,7 +100,7 @@ describe("gate: tunnel HTTP streaming under the preview window", () => {
     expect(res.frames).toBe(res.chunks + 2);
 
     // Random bytes never gzip smaller, so every slice went out as plain base64
-    // and the sealed payload is at least the body's base64 length — several
+    // and the frame payload is at least the body's base64 length — several
     // windows: the agent could only have written it after this client's
     // credits reopened the window it filled first.
     const consumed = env.app.consumedBytes("preview") - before;

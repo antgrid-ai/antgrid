@@ -3,13 +3,6 @@ import 'dart:convert';
 import 'dart:math';
 import 'dart:typed_data';
 
-import 'crypto_service.dart';
-import 'e2e/confirm.dart';
-import 'e2e/handshake_sig.dart';
-import 'e2e/key_schedule.dart';
-import 'e2e/transcript.dart';
-import 'e2e/transport.dart';
-import 'frame.dart';
 import 'machine_session.dart';
 import 'peer_link.dart';
 
@@ -29,327 +22,115 @@ typedef HandshakeLogger =
       Map<String, Object?>? fields,
     });
 
-/// Runs ONE phone-initiated v2-crypto handshake to `established` over a single
-/// [PeerLink] socket. v3 changes the conversation around the (unchanged)
-/// crypto: a phone-generated `attemptId` correlates every frame, frames go out
-/// kind-1 (handshake plaintext) / kind-0 (sealed), and the phone retransmits
-/// `app:ready` until the agent's sealed `established` arrives — only then does
-/// [run] complete. All per-run state is instance-local.
+/// The app's hello literal. Byte-identical, key for key, to the old
+/// `AppReadyMessage.capabilities` — the bridge strips unknown keys, so a
+/// newer app capability never fails an older bridge.
+///
+/// MUST stay in lockstep with `SessionHelloCapabilities`
+/// (`bridge/src/protocol.ts`). `sessionBusCarrier` is deliberately absent: it
+/// is a loopback-hello key only (`local_transport.dart`), never sent on the
+/// native path.
+const Map<String, bool> kSessionHelloCapabilities = {
+  'checkoutRouting': true,
+  'pullsTree': true,
+  'terminalFramesV1': true,
+};
+
+/// Runs ONE plaintext hello to `established` over a single [PeerLink] socket.
+/// QUIC/TLS between the two lease-authorized endpoints is the confidentiality
+/// layer, so the hello carries no crypto of its own: a phone-generated
+/// `attemptId` correlates the exchange, and there is no retransmit — a
+/// connection carries at most one hello, and a hello that times out means the
+/// caller closes the whole link rather than retrying on it. All per-run state
+/// is instance-local.
 ///
 /// Lives in this package, not in the app, so the app and the eval CLI drive the
-/// SAME driver: a second copy is what let the eval client sit on the v2
-/// conversation for a full protocol revision while its scenarios stayed
-/// skipped.
+/// SAME driver: a second copy is what let the eval client sit on a stale
+/// protocol conversation for a full protocol revision while its scenarios
+/// stayed skipped.
 class ConnectionHandshake {
-  /// How long one attempt waits for the agent's sealed `established`. Sized for
-  /// a phone on a real network; a caller that drives its own retry loop wants a
+  /// How long one attempt waits for the bridge's `established`. Sized for a
+  /// phone on a real network; a caller that drives its own retry loop wants a
   /// shorter one, so that the loop's worst case stays inside its budget rather
   /// than being set by this single figure.
   static const Duration defaultAttemptTimeout = Duration(seconds: 10);
 
   ConnectionHandshake({
     required PeerLink relay,
-    required CryptoService crypto,
-    required String machineDeviceId,
-    required String phoneDeviceId,
-    required String agentEd25519PubB64,
-    required List<int> phoneEd25519Seed,
     HandshakeLogger? logger,
     Duration attemptTimeout = defaultAttemptTimeout,
-    Duration appReadyRetransmit = const Duration(seconds: 2),
   }) : _relay = relay,
-       _crypto = crypto,
-       _machineDeviceId = machineDeviceId,
-       _phoneDeviceId = phoneDeviceId,
-       _agentEd25519PubB64 = agentEd25519PubB64,
-       _phoneEd25519Seed = phoneEd25519Seed,
        _logger = logger,
-       _attemptTimeout = attemptTimeout,
-       _appReadyRetransmit = appReadyRetransmit;
+       _attemptTimeout = attemptTimeout;
 
   final PeerLink _relay;
-  final CryptoService _crypto;
-
-  /// The bare machine deviceUuid — the transcript's `registrationId`/
-  /// `agentDeviceId` and the routing `to` for handshake frames.
-  final String _machineDeviceId;
-  final String _phoneDeviceId;
-  final String _agentEd25519PubB64;
-  final List<int> _phoneEd25519Seed;
   final HandshakeLogger? _logger;
   final Duration _attemptTimeout;
-  final Duration _appReadyRetransmit;
 
   bool _cancelled = false;
   StreamSubscription<IncomingPeerFrame>? _messageSub;
-  Timer? _appReadyTimer;
 
   void cancel() {
     _cancelled = true;
     _messageSub?.cancel();
     _messageSub = null;
-    _appReadyTimer?.cancel();
-    _appReadyTimer = null;
   }
 
-  /// Runs one handshake attempt (fresh `attemptId`). Returns the confirmed
-  /// [SessionKeys] once the sealed `established` arrives, or null on timeout /
-  /// verification failure / cancellation.
-  Future<SessionKeys?> run() async {
-    if (_cancelled) return null;
+  /// Runs one hello attempt (fresh `attemptId`). Resolves true once the
+  /// bridge's `established {attemptId}` arrives, false on timeout,
+  /// cancellation, or a link that will not accept the hello.
+  Future<bool> run() async {
+    if (_cancelled) return false;
 
     final attemptId = _secureNonceB64();
-    final nonceB64 = _secureNonceB64();
-    final nonce = base64.decode(nonceB64);
-    final (phoneX25519Priv, phoneX25519Pub) = await _crypto
-        .generateX25519KeyPair();
-    if (_cancelled || !_relay.isDispatchAllowed) {
-      phoneX25519Priv.fillRange(0, phoneX25519Priv.length, 0);
-      return null;
-    }
     var finished = false;
-    var transferred = false;
     bool active() => !finished && !_cancelled && _relay.isDispatchAllowed;
-    var phoneX25519PrivScrubbed = false;
-    final phoneX25519PubB64 = base64.encode(phoneX25519Pub);
-    final established = Completer<SessionKeys>();
-    SessionKeys? derivedKeys;
-    Future<SessionKeys?>? keysFuture;
-    var appReadySent = false;
+    final established = Completer<bool>();
 
-    final sub = _relay.messageStream.listen((msg) async {
+    // Subscribe before sending: the bridge may answer before the send call
+    // itself returns.
+    final sub = _relay.messageStream.listen((msg) {
       if (!active() || msg.channel != 'control') return;
-
-      if (msg.kind == FrameKind.handshake) {
-        // Kind-1 plaintext: the only expected type here is agent-hello.
-        Map<String, dynamic>? j;
-        try {
-          j = jsonDecode(utf8.decode(msg.payload)) as Map<String, dynamic>;
-        } catch (_) {
-          return;
-        }
-        if (j['type'] != 'handshake:agent-hello') return;
-        if (j['attemptId'] != attemptId) return;
-        final pubkey = j['pubkey'] as String?;
-        final sig = j['sig'] as String?;
-        if (pubkey == null || sig == null) return;
-
-        Uint8List agentPubkey;
-        try {
-          agentPubkey = base64.decode(pubkey);
-        } catch (_) {
-          return;
-        }
-        if (agentPubkey.length != 32) return;
-
-        keysFuture ??=
-            () async {
-              final agentTranscript = buildTranscriptV2(
-                TranscriptFields(
-                  registrationId: _machineDeviceId,
-                  role: 'agent',
-                  agentDeviceId: _machineDeviceId,
-                  phoneDeviceId: _phoneDeviceId,
-                  agentX25519Pub: agentPubkey,
-                  phoneX25519Pub: phoneX25519Pub,
-                  nonce: nonce,
-                ),
-              );
-              final ok = await verifyTranscriptSigV2(
-                transcript: agentTranscript,
-                ed25519PubB64: _agentEd25519PubB64,
-                sigB64: sig,
-              );
-              if (!active()) return null;
-              if (!ok) {
-                _log(
-                  HandshakeLogLevel.debug,
-                  'agent-hello v2 sig invalid (possible MITM)',
-                );
-                keysFuture = null;
-                return null;
-              }
-              final ss = await x25519SharedSecret(
-                privateKey: phoneX25519Priv,
-                peerPublicKey: agentPubkey,
-              );
-              phoneX25519Priv.fillRange(0, phoneX25519Priv.length, 0);
-              phoneX25519PrivScrubbed = true;
-              if (!active()) {
-                ss.fillRange(0, ss.length, 0);
-                return null;
-              }
-              try {
-                final dk = await deriveSessionKeysV2(ss, agentTranscript);
-                if (!active()) {
-                  dk.zeroize();
-                  return null;
-                }
-                derivedKeys = dk;
-                return dk;
-              } finally {
-                ss.fillRange(0, ss.length, 0);
-              }
-            }().catchError((Object _) {
-              phoneX25519Priv.fillRange(0, phoneX25519Priv.length, 0);
-              return null;
-            });
-        return;
-      }
-
-      // Kind-0 sealed: agent-ready or established, sealed under the derived
-      // (candidate) keys. Decrypt-or-drop.
-      final kf = keysFuture;
-      if (kf == null) return;
-      final keys = await kf;
-      if (!active() || keys == null) return;
-
-      final t = E2eTransportDart(sendKey: keys.p2a, recvKey: keys.a2p);
-      final dec = await t.open(msg.payload);
-      if (!active() || dec == null) return;
-
-      Map<String, dynamic> json;
+      Map<String, dynamic>? json;
       try {
-        json = jsonDecode(dec) as Map<String, dynamic>;
+        json = jsonDecode(utf8.decode(msg.payload)) as Map<String, dynamic>;
       } catch (_) {
         return;
       }
-      if (json['attemptId'] != attemptId) return;
-      final type = json['type'];
-
-      if (type == 'handshake:agent-ready') {
-        final confirmB64 = json['confirm'] as String?;
-        if (confirmB64 == null) return;
-        final expectedAgentTag = await agentConfirmTagV2(keys.confirm);
-        if (!active()) return;
-        Uint8List presented;
-        try {
-          presented = base64.decode(confirmB64);
-        } catch (_) {
-          return;
-        }
-        if (!verifyConfirmTagV2(expectedAgentTag, presented)) {
-          _log(
-            HandshakeLogLevel.debug,
-            'agent-ready confirm tag invalid, rejecting',
-          );
-          return;
-        }
-        if (!appReadySent) {
-          appReadySent = true;
-          _startAppReadyRetransmit(keys, attemptId, active);
-        }
-      } else if (type == 'established') {
-        if (!established.isCompleted) established.complete(keys);
+      if (json['type'] != 'established' || json['attemptId'] != attemptId) {
+        return;
       }
+      if (!established.isCompleted) established.complete(true);
     });
     _messageSub = sub;
 
     try {
-      final phoneTranscript = buildTranscriptV2(
-        TranscriptFields(
-          registrationId: _machineDeviceId,
-          role: 'phone',
-          agentDeviceId: _machineDeviceId,
-          phoneDeviceId: _phoneDeviceId,
-          agentX25519Pub: Uint8List(0),
-          phoneX25519Pub: phoneX25519Pub,
-          nonce: nonce,
-        ),
-      );
-      final clientHelloSig = await signTranscriptV2(
-        transcript: phoneTranscript,
-        ed25519Seed: _phoneEd25519Seed,
-      );
-      if (!active()) return null;
-      final clientHello = <String, dynamic>{
-        'type': 'handshake:client-hello',
+      final hello = <String, dynamic>{
+        'type': 'session:hello',
         'attemptId': attemptId,
-        'pubkey': phoneX25519PubB64,
-        'nonce': nonceB64,
-        'sig': clientHelloSig,
+        'capabilities': kSessionHelloCapabilities,
       };
       final outcome = await _relay.sendFrame(
         'control',
-        Uint8List.fromList(utf8.encode(jsonEncode(clientHello))),
-        kind: FrameKind.handshake,
+        Uint8List.fromList(utf8.encode(jsonEncode(hello))),
       );
-
-      if (outcome != PeerSendOutcome.accepted) return null;
-      final keys = await established.future.timeout(_attemptTimeout);
-      if (!active()) return null;
-      transferred = true;
-      return keys;
+      if (outcome != PeerSendOutcome.accepted) return false;
+      if (!active()) return false;
+      return await established.future.timeout(_attemptTimeout);
     } on TimeoutException {
-      return null;
+      return false;
     } catch (e, st) {
       _log(
         HandshakeLogLevel.error,
         'run error',
         fields: {'error': '$e', 'stack': '$st'},
       );
-      return null;
+      return false;
     } finally {
       finished = true;
-      _appReadyTimer?.cancel();
-      _appReadyTimer = null;
       if (identical(_messageSub, sub)) _messageSub = null;
       await sub.cancel();
-      // Scrub the ephemeral X25519 private key ONLY when no DH ran on it (see
-      // the DH future above, which scrubs immediately after the shared secret).
-      if (!phoneX25519PrivScrubbed) {
-        phoneX25519Priv.fillRange(0, phoneX25519Priv.length, 0);
-      }
-      // Zeroize the derived keys unless the caller (MachineSession) took them:
-      // on a completed established they are returned and owned by the caller.
-      if (!transferred) derivedKeys?.zeroize();
     }
-  }
-
-  /// Retransmit sealed `app:ready` every [_appReadyRetransmit] (re-sealed each
-  /// time; GCM nonces are per-seal) until `established` arrives or the attempt
-  /// times out — closes the dropped-`app:ready` wedge.
-  void _startAppReadyRetransmit(
-    SessionKeys keys,
-    String attemptId,
-    bool Function() active,
-  ) {
-    Future<void> send() async {
-      if (!active()) return;
-      try {
-        final phoneTag = await phoneConfirmTagV2(keys.confirm);
-        if (!active()) return;
-        final t = E2eTransportDart(sendKey: keys.p2a, recvKey: keys.a2p);
-        // Bare session frame (matches the bridge's handleAppReady) — session
-        // frames are not `{s, m}` envelopes.
-        final sealed = await t.seal(
-          jsonEncode({
-            'type': 'app:ready',
-            'attemptId': attemptId,
-            'confirm': base64.encode(phoneTag),
-            'capabilities': {
-              'checkoutRouting': true,
-              'pullsTree': true,
-              'terminalFramesV1': true,
-            },
-          }),
-        );
-        if (!active()) return;
-        await _relay.sendFrame('control', sealed);
-      } catch (e) {
-        _log(
-          HandshakeLogLevel.error,
-          'app:ready seal/send failed',
-          fields: {'error': '$e'},
-        );
-      }
-    }
-
-    unawaited(send());
-    _appReadyTimer = Timer.periodic(
-      _appReadyRetransmit,
-      (_) => unawaited(send()),
-    );
   }
 
   void _log(
@@ -359,44 +140,29 @@ class ConnectionHandshake {
   }) => _logger?.call(level, message, fields: fields);
 }
 
-/// A fresh, base64-encoded 16-byte nonce. Binds a handshake transcript
-/// signature (and the correlating `attemptId`) to a single exchange.
+/// A fresh, base64-encoded 16-byte nonce, used as the hello's `attemptId`.
 String _secureNonceB64() {
   final r = Random.secure();
   return base64.encode(List<int>.generate(16, (_) => r.nextInt(256)));
 }
 
-/// The [SessionHandshaker] a [MachineSession] drives. Each [perform] runs a
-/// FRESH [ConnectionHandshake] (new `attemptId`) on the live socket, so a rekey
-/// never collides with a superseded attempt.
+/// The [SessionHandshaker] a `MachineSession` drives. Each [perform] runs a
+/// FRESH [ConnectionHandshake] (new `attemptId`) on the live socket — there is
+/// never a second hello on the same link, so a failed attempt's caller closes
+/// the link rather than reusing this driver on it.
 ///
 /// "App" is the ROLE, not the Flutter app: every phone-side client (the app,
-/// the eval CLI) is the initiating half of the handshake.
+/// the eval CLI) is the initiating half of the hello.
 class AppSessionHandshaker implements SessionHandshaker {
   AppSessionHandshaker({
     required PeerLink relay,
-    required CryptoService crypto,
-    required String machineDeviceId,
-    required String phoneDeviceId,
-    required String agentEd25519PubB64,
-    required List<int> phoneEd25519Seed,
     HandshakeLogger? logger,
     Duration attemptTimeout = ConnectionHandshake.defaultAttemptTimeout,
   }) : _relay = relay,
-       _crypto = crypto,
-       _machineDeviceId = machineDeviceId,
-       _phoneDeviceId = phoneDeviceId,
-       _agentEd25519PubB64 = agentEd25519PubB64,
-       _phoneEd25519Seed = phoneEd25519Seed,
        _logger = logger,
        _attemptTimeout = attemptTimeout;
 
   final PeerLink _relay;
-  final CryptoService _crypto;
-  final String _machineDeviceId;
-  final String _phoneDeviceId;
-  final String _agentEd25519PubB64;
-  final List<int> _phoneEd25519Seed;
   final HandshakeLogger? _logger;
   final Duration _attemptTimeout;
 
@@ -404,15 +170,10 @@ class AppSessionHandshaker implements SessionHandshaker {
   bool _aborted = false;
 
   @override
-  Future<SessionKeys?> perform() async {
-    if (_aborted) return null;
+  Future<bool> perform() async {
+    if (_aborted) return false;
     final hs = _current = ConnectionHandshake(
       relay: _relay,
-      crypto: _crypto,
-      machineDeviceId: _machineDeviceId,
-      phoneDeviceId: _phoneDeviceId,
-      agentEd25519PubB64: _agentEd25519PubB64,
-      phoneEd25519Seed: _phoneEd25519Seed,
       logger: _logger,
       attemptTimeout: _attemptTimeout,
     );

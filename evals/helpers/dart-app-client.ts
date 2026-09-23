@@ -300,14 +300,13 @@ export class DartAppClient {
     };
   }
   /**
-   * Drive the pull-model E2E handshake to `established`. The eval-client
-   * (phone) signs its client-hello and verifies the agent's signed agent-hello
-   * against the agent's pinned Ed25519 pubkey before deriving — mirroring the
-   * production app. `agentEd25519Pub` (raw 32 bytes, base64) comes from the
-   * agent's bootstrap keypair; without it the Dart client refuses to derive.
-   * `machineDeviceId` is the agent's bare deviceUuid: with pairing gone the
-   * relay hands out no peer id, so the phone addresses coordinates it already
-   * holds — exactly as the app dials from its account inventory.
+   * Drive the session to `established`: a plaintext `session:hello` on the
+   * native payload, confirmed by the agent's `established`. QUIC/TLS between
+   * the leased endpoints is the confidentiality layer, so there is no agent
+   * key to pin. `machineDeviceId` is the agent's bare deviceUuid: with
+   * pairing gone the relay hands out no peer id, so the phone addresses
+   * coordinates it already holds — exactly as the app dials from its account
+   * inventory.
    *
    * Runs ONE attempt: the Dart driver leaves give-up to the caller's
    * supervisor, which no eval has, so callers racing agent startup must retry.
@@ -315,7 +314,6 @@ export class DartAppClient {
    * looping so the loop's worst case stays bounded.
    */
   async performHandshake(
-    agentEd25519Pub: string,
     machineDeviceId: string,
     attemptTimeoutMs?: number,
   ): Promise<void> {
@@ -325,7 +323,7 @@ export class DartAppClient {
         (e.event === "error" && String(e.message).startsWith("Handshake failed")),
       30_000,
     );
-    this.sendCommand({ action: "handshake", agentEd25519Pub, machineDeviceId, attemptTimeoutMs });
+    this.sendCommand({ action: "handshake", machineDeviceId, attemptTimeoutMs });
     const result = await done;
     if (result.event !== "handshake-complete") throw new Error(String(result.message));
   }
@@ -348,7 +346,11 @@ export class DartAppClient {
     return result.streamId as string;
   }
 
-  /** Send an AbMessage on the machine CONTROL PLANE (`s` omitted), sealed. */
+  /**
+   * Send an AbMessage on the machine CONTROL PLANE (`s` omitted), plaintext.
+   * Name/action kept as `send(-encrypted)` — the wire command the Dart CLI
+   * (`packages/antgrid_eval_client`) still expects — not a claim about sealing.
+   */
   sendEncrypted(msg: AbMessage): void {
     this.sendCommand({ action: "send-encrypted", data: msg });
   }

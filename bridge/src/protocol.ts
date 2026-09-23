@@ -143,39 +143,29 @@ const PongMessage = BaseMessage.extend({
   type: z.literal("pong"),
 });
 
-const HandshakeClientHelloMessage = BaseMessage.extend({
-  type: z.literal("handshake:client-hello"),
-  pubkey: z.string(),
-  nonce: z.string(),
-  sig: z.string(),
+// A native peer session is established by one plaintext hello per connection —
+// QUIC/TLS between authorized endpoints is the confidentiality layer, so
+// there is no transcript to sign and nothing to confirm. Bare session frames
+// like this one carry no `id`/`timestamp` envelope, so they are deliberately
+// NOT members of `AbMessageSchema`/`KNOWN_TYPES` — see the comment above
+// `PeerSessionOwner.handleHello` (peer-session-owner.ts) for why, and never
+// add them there.
+export const SessionHelloCapabilities = z.object({
+  checkoutRouting: z.literal(true).optional(),
+  pullsTree: z.literal(true).optional(),
+  // The app can render `terminal:frame` display mode. Absent means it cannot,
+  // and the read of it MUST fail closed (unknown peer reads false) or an old
+  // app is switched into a mode it has no renderer for.
+  terminalFramesV1: z.literal(true).optional(),
 });
-
-const HandshakeAgentHelloMessage = BaseMessage.extend({
-  type: z.literal("handshake:agent-hello"),
-  pubkey: z.string(),
-  sig: z.string(),
+export const SessionHelloFrame = z.object({
+  type: z.literal("session:hello"),
+  attemptId: z.string().min(1).max(256),
+  capabilities: SessionHelloCapabilities.optional(),
 });
-
-const HandshakeAgentReadyMessage = BaseMessage.extend({
-  type: z.literal("handshake:agent-ready"),
-  confirm: z.string(),
-});
-
-const AppReadyMessage = BaseMessage.extend({
-  type: z.literal("app:ready"),
-  confirm: z.string(),
-  // Neither live reader parses `app:ready` through Zod — relay-client.ts and
-  // local-listener.ts both read the raw JSON — so this object is union typing
-  // and documentation, not the runtime gate. Adding a key here does not make
-  // the bridge honour it; the reads are hand-written on both transports.
-  capabilities: z.object({
-    checkoutRouting: z.literal(true).optional(),
-    pullsTree: z.literal(true).optional(),
-    // The app can render `terminal:frame` display mode. Absent means it cannot,
-    // and the read of it MUST fail closed (unknown peer reads false) or an old
-    // app is switched into a mode it has no renderer for.
-    terminalFramesV1: z.literal(true).optional(),
-  }).optional(),
+export const SessionEstablishedFrame = z.object({
+  type: z.literal("established"),
+  attemptId: z.string().min(1).max(256),
 });
 
 const TerminalStartCommand = BaseMessage.extend({
@@ -2673,9 +2663,6 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   AgentStatusMessage,
   PingMessage,
   PongMessage,
-  HandshakeClientHelloMessage,
-  HandshakeAgentHelloMessage,
-  HandshakeAgentReadyMessage,
   TreeFullMessage,
   TreeUpdateMessage,
   FileReadMessage,
@@ -2701,7 +2688,6 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   StreamInvalidMessage,
   StreamUnboundMessage,
   ControlResultMessage,
-  AppReadyMessage,
   CommandRunMessage,
   CommandOutputMessage,
   CommandDoneMessage,
@@ -2846,9 +2832,8 @@ export type TerminalOutput = z.infer<typeof TerminalOutputMessage>;
 export type TerminalInput = z.infer<typeof TerminalInputMessage>;
 export type TerminalStarted = z.infer<typeof TerminalStartedMessage>;
 export type TerminalExited = z.infer<typeof TerminalExitedMessage>;
-export type HandshakeClientHello = z.infer<typeof HandshakeClientHelloMessage>;
-export type HandshakeAgentHello = z.infer<typeof HandshakeAgentHelloMessage>;
-export type HandshakeAgentReady = z.infer<typeof HandshakeAgentReadyMessage>;
+export type SessionHello = z.infer<typeof SessionHelloFrame>;
+export type SessionEstablished = z.infer<typeof SessionEstablishedFrame>;
 export type TerminalStart = z.infer<typeof TerminalStartCommand>;
 export type TerminalStop = z.infer<typeof TerminalStopCommand>;
 export type TerminalResize = z.infer<typeof TerminalResizeCommand>;
@@ -2871,7 +2856,6 @@ export type StreamReady = z.infer<typeof StreamReadyMessage>;
 export type StreamInvalid = z.infer<typeof StreamInvalidMessage>;
 export type StreamUnbound = z.infer<typeof StreamUnboundMessage>;
 export type ControlResult = z.infer<typeof ControlResultMessage>;
-export type AppReady = z.infer<typeof AppReadyMessage>;
 export type CommandRun = z.infer<typeof CommandRunMessage>;
 export type CommandOutput = z.infer<typeof CommandOutputMessage>;
 export type CommandDone = z.infer<typeof CommandDoneMessage>;
@@ -3189,11 +3173,11 @@ export function parseMessage(raw: string): AbMessage | null {
 const KNOWN_TYPES = new Set<string>([
   "terminal:output", "terminal:input", "terminal:started", "terminal:exited", "terminal:notification", "terminal:bell",
   "terminal:start", "terminal:stop", "terminal:resize", "terminal:size", "agent:status",
-  "ping", "pong", "handshake:client-hello", "handshake:agent-hello", "handshake:agent-ready",
+  "ping", "pong",
   "tree:full", "tree:update", "file:read", "file:content",
   "file:resolve-path", "file:resolve-path-result",
   "ports:update", "preview:url",
-  "agent:disconnecting", "agent:projects", "agent:tools", "stream-ready", "stream-invalid", "stream-unbound", "control:result", "app:ready",
+  "agent:disconnecting", "agent:projects", "agent:tools", "stream-ready", "stream-invalid", "stream-unbound", "control:result",
   "command:run", "command:output", "command:done", "notification:push", "push:register",
   "handler:configure", "handler:instruct", "handler:status", "handler:escalation", "handler:activity",
   "handler:snapshot", "handler:undo", "handler:dismiss", "handler:answer",

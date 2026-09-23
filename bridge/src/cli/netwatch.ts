@@ -359,10 +359,11 @@ const SETTLE_MS = 1000;
 /**
  * Pairs the two captures on frame id.
  *
- * A sealed frame's id is its AES-GCM nonce, which the relay forwards
- * untouched — so the SAME id appears as `tx` on the sender and `rx` on the
- * receiver, and that is the entire join. What it buys is the question the
- * route header cannot answer: not "was something dropped" but "which one".
+ * A frame's id is a SHA-256 hash of its payload bytes, which both endpoints
+ * compute the same way — so the SAME id appears as `tx` on the sender and
+ * `rx` on the receiver, and that is the entire join. What it buys is the
+ * question the route header cannot answer: not "was something dropped" but
+ * "which one".
  *
  * A frame can only be called lost inside the window both captures actually
  * cover. That window's END is not the last event either side recorded — a quiet
@@ -398,9 +399,10 @@ export function joinCaptures(
   // receiver's unrelated frame of the same id, which cannot happen but would be
   // a silent lie if it did. An `rx` drop is the opposite case and belongs IN it:
   // the frame did cross the socket and was thrown away on arrival, carrying the
-  // sender's own frameId (`decrypt-failed` in relay-client.ts is the one that
-  // matters). Excluding it verdicted the sender's half "never arrived" — turning
-  // the rekey race this capture exists to catch into a report of network loss.
+  // sender's own frameId (a receive-side drop such as `pre-establishment` or
+  // `not-admitted` is the one that matters here). Excluding it verdicted the
+  // sender's half "never arrived" — turning the rekey race this capture exists
+  // to catch into a report of network loss.
   const eligible = (e: NetwatchEvent): boolean =>
     Boolean(e.frameId) && !(e.kind === "drop" && e.dir !== "rx");
 
@@ -416,9 +418,9 @@ export function joinCaptures(
         ? (x.e.seq ?? 0) - (y.e.seq ?? 0)
         : (x.e.dir === y.e.dir ? 0 : x.e.dir === "tx" ? -1 : 1)));
 
-  // A hash id (the coming replacement for the sealed-frame nonce, D3) repeats
-  // for every byte-identical frame — a ping, a pong, a credit update — so more
-  // than one occurrence can legitimately share a frameId. Pairing "the first
+  // A hash id (D3) repeats for every byte-identical frame — a ping, a pong, a
+  // credit update — so more than one occurrence can legitimately share a
+  // frameId. Pairing "the first
   // opposite-direction event with this id" wired every later occurrence to that
   // SAME first peer instead of to the one that actually crossed with it, which
   // both double-counted one frame as matched and left its true counterpart
