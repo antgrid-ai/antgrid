@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:antgrid/design/ab_theme.dart';
 import 'package:antgrid/design/widgets/ab_button.dart';
 import 'package:antgrid/models/agent_work_status.dart';
+import 'package:antgrid/providers/provider_retry.dart';
 import 'package:antgrid/providers/tasks.dart';
 import 'package:antgrid/services/tasks_api.dart';
 import 'package:antgrid/models/task.dart';
@@ -33,6 +34,7 @@ Map<String, Object?> _task({
   String? syncState,
   Map<String, Object?>? conflict,
   Map<String, Object?>? pushBlocked,
+  bool? pushLive,
   List<Map<String, Object?>> otherAssignees = const [],
   String? projectId,
 }) => {
@@ -51,6 +53,7 @@ Map<String, Object?> _task({
   'syncState': syncState,
   'conflict': conflict,
   'pushBlocked': pushBlocked,
+  'pushLive': pushLive,
   'assignee': const {'kind': 'member', 'userId': 'u-1'},
   'otherAssignees': otherAssignees,
   'labels': labels,
@@ -73,6 +76,11 @@ ProviderContainer _container(
   List<Override> overrides = const [],
 }) {
   final container = ProviderContainer(
+    // Match `main.dart`: without this, Riverpod 3's default auto-retry
+    // schedules a real backoff `Timer` for a provider whose build throws
+    // (`taskListProvider`, on the 403s this file serves), which outlives the
+    // widget tree and trips `!timersPending` at teardown.
+    retry: noProviderRetry,
     overrides: [
       tasksApiProvider.overrideWithValue(
         TasksApi(
@@ -167,6 +175,46 @@ void main() {
     expect(find.text('Retry'), findsOneWidget);
   });
 
+  // `ensureLoaded`'s own failure — this task's list is fine, the deep-linked
+  // task itself didn't fetch — must not read as "no longer exists": that
+  // copy is for a task truly absent from the account, not a network blip.
+  testWidgets(
+    'a deep-linked task whose own fetch fails shows a retry, not "no longer exists", and retrying recovers it',
+    (tester) async {
+      var taskAttempts = 0;
+      final container = _container(
+        MockClient((req) async {
+          if (req.method == 'GET' && req.url.path == '/tasks') {
+            return http.Response(jsonEncode({'tasks': <Object?>[]}), 200);
+          }
+          if (req.method == 'GET' && req.url.path == '/tasks/42') {
+            taskAttempts += 1;
+            if (taskAttempts == 1) {
+              return http.Response('{"error":"NO_ACCOUNT"}', 403);
+            }
+            return http.Response(jsonEncode({'task': _task()}), 200);
+          }
+          return http.Response(jsonEncode({'task': _task()}), 200);
+        }),
+      );
+      await _pump(tester, container);
+      await tester.pumpAndSettle();
+
+      expect(find.text('This task no longer exists'), findsNothing);
+      expect(
+        find.textContaining('belongs to no Antgrid account'),
+        findsOneWidget,
+      );
+      expect(find.text('Retry'), findsOneWidget);
+
+      await tester.tap(find.text('Retry'));
+      await tester.pumpAndSettle();
+
+      expect(taskAttempts, 2);
+      expect(find.text('Fix the drawer'), findsOneWidget);
+    },
+  );
+
   testWidgets('a task renders its ref, title, status, labels and body', (
     tester,
   ) async {
@@ -181,6 +229,55 @@ void main() {
     expect(find.text('bug'), findsOneWidget);
     expect(find.textContaining('It jitters on resize.'), findsOneWidget);
   });
+
+  // `task_list_view.dart`'s own banner hides itself whenever the failing task
+  // is the one open in a sibling detail pane, on the assumption this view
+  // already shows that exact failure — true only if this view filters by its
+  // own task number rather than rendering any failure in the provider.
+  testWidgets(
+    'a mutation failure on a different task is not shown here',
+    (tester) async {
+      final container = _container(
+        MockClient((req) async {
+          if (req.url.path == '/labels') {
+            return http.Response('{"labels":[]}', 200);
+          }
+          if (req.url.path == '/tasks/publish-targets') {
+            return http.Response('{"targets":[]}', 200);
+          }
+          if (req.method == 'PATCH') {
+            return http.Response('{"error":"INVALID_TITLE"}', 400);
+          }
+          if (req.method == 'GET' && req.url.path == '/tasks') {
+            return http.Response(
+              jsonEncode({
+                'tasks': [_task(), _task(number: 43, title: 'Other')],
+              }),
+              200,
+            );
+          }
+          return http.Response(jsonEncode({'task': _task()}), 200);
+        }),
+      );
+      await _pump(tester, container);
+      await tester.pumpAndSettle();
+
+      final notifier = container.read(taskListProvider.notifier);
+      await notifier.setTitle(43, 'Other renamed');
+      await tester.pumpAndSettle();
+
+      // Task 42 (the one this view shows) is untouched by task 43's refusal.
+      expect(
+        find.textContaining('A task needs a title'),
+        findsNothing,
+      );
+
+      await notifier.setTitle(42, 'Renamed');
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('A task needs a title'), findsOneWidget);
+    },
+  );
 
   testWidgets('a blocked agent is spelled out above the brief', (tester) async {
     final container = _container(
@@ -957,6 +1054,93 @@ void main() {
         find.text('The task is saved here; the issue does not exist yet.'),
         findsOneWidget,
       );
+    });
+
+    // `syncState: synced` is read from the last successful round trip and does
+    // not move again on its own — `pushLive` is the only thing the server
+    // updates as the connection behind it changes, so it is what this block
+    // has to watch instead.
+    testWidgets('a synced task with a live connection says edits are sent', (
+      tester,
+    ) async {
+      _tall(tester);
+      final container = _container(
+        _serving(
+          _task(
+            projectId: 'p-1',
+            externalId: 'I_1',
+            externalKey: 'o/r#12',
+            syncState: 'synced',
+            pushLive: true,
+          ),
+        ),
+      );
+      await _pump(tester, container);
+      await tester.pumpAndSettle();
+
+      expect(find.text('Published to GitHub'), findsOneWidget);
+      expect(
+        find.textContaining('are sent to this issue'),
+        findsOneWidget,
+      );
+      expect(find.text('GitHub disconnected'), findsNothing);
+    });
+
+    // The exact scenario a disconnected GitHub App leaves behind: the task
+    // still reads `synced` from before the connection died, so `pushLive`
+    // alone is what stops this block from promising a sync that will not
+    // happen.
+    testWidgets(
+      'a synced task whose connection died says so instead of lying',
+      (tester) async {
+        _tall(tester);
+        final container = _container(
+          _serving(
+            _task(
+              projectId: 'p-1',
+              externalId: 'I_1',
+              externalKey: 'o/r#12',
+              syncState: 'synced',
+              pushLive: false,
+            ),
+          ),
+        );
+        await _pump(tester, container);
+        await tester.pumpAndSettle();
+
+        expect(find.text('GitHub disconnected'), findsOneWidget);
+        expect(
+          find.textContaining('not reaching the issue'),
+          findsOneWidget,
+        );
+        expect(find.text('Published to GitHub'), findsNothing);
+        // Still resolvable: the identity and the way out to the issue are
+        // both still there, disconnected or not.
+        expect(find.text('o/r#12'), findsOneWidget);
+      },
+    );
+
+    // An account service older than `pushLive` sends no such key at all, and
+    // that must read as "nothing to warn about" — not as a false disconnect.
+    testWidgets('a server that predates pushLive is read as connected', (
+      tester,
+    ) async {
+      _tall(tester);
+      final container = _container(
+        _serving(
+          _task(
+            projectId: 'p-1',
+            externalId: 'I_1',
+            externalKey: 'o/r#12',
+            syncState: 'synced',
+          ),
+        ),
+      );
+      await _pump(tester, container);
+      await tester.pumpAndSettle();
+
+      expect(find.text('Published to GitHub'), findsOneWidget);
+      expect(find.text('GitHub disconnected'), findsNothing);
     });
 
     testWidgets('the button goes dead for the whole write, not just the tap', (

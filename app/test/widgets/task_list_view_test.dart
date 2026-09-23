@@ -29,6 +29,7 @@ Map<String, Object?> _task({
   String? externalProvider,
   String? externalUrl,
   String? syncState,
+  bool? pushLive,
 }) => {
   'number': number,
   'title': title,
@@ -39,6 +40,7 @@ Map<String, Object?> _task({
   'externalProvider': externalProvider,
   'externalUrl': externalUrl,
   'syncState': syncState,
+  'pushLive': pushLive,
   'assignee': assignee,
   'otherAssignees': otherAssignees,
   'labels': labels,
@@ -347,6 +349,87 @@ void main() {
       find.byTooltip('Imported from GitHub · no longer linked'),
       findsOneWidget,
     );
+  });
+
+  // `unlinkTask` never clears `integrationRepoId` (see the server-side doc
+  // comment on `unlinkTask`), so a repo whose connection goes bad AFTER a
+  // task was unlinked still flips this task's `pushLive` to false. The row
+  // must not warn about a channel this task was never using.
+  testWidgets(
+    'an unlinked task is not marked disconnected even when pushLive is false',
+    (tester) async {
+      final container = _container(
+        client: _serving(
+          tasks: [
+            _task(
+              number: 13,
+              source: 'github',
+              externalProvider: 'github',
+              syncState: 'unlinked',
+              pushLive: false,
+            ),
+          ],
+        ),
+      );
+      await _pump(tester, container);
+      await tester.pumpAndSettle();
+
+      expect(find.byType(TaskSyncBrokenMark), findsNothing);
+    },
+  );
+
+  // The gap `TaskProvenanceMark` cannot close on its own: a task published
+  // FROM Antgrid keeps `source: local` forever, so it never mounts here no
+  // matter how disconnected the sync gets. `TaskSyncBrokenMark` is the row's
+  // only way to say so without opening the task.
+  testWidgets(
+    'a published local task whose connection died is marked on the row',
+    (tester) async {
+      final container = _container(
+        client: _serving(
+          tasks: [
+            _task(
+              number: 11,
+              source: 'local',
+              externalProvider: 'github',
+              syncState: 'synced',
+              pushLive: false,
+            ),
+          ],
+        ),
+      );
+      await _pump(tester, container);
+      await tester.pumpAndSettle();
+
+      expect(find.byType(TaskProvenanceMark), findsNothing);
+      expect(find.byType(TaskSyncBrokenMark), findsOneWidget);
+      expect(
+        find.byTooltip('GitHub disconnected · edits here are not reaching the issue'),
+        findsOneWidget,
+      );
+    },
+  );
+
+  testWidgets('a published local task with a live connection carries no mark', (
+    tester,
+  ) async {
+    final container = _container(
+      client: _serving(
+        tasks: [
+          _task(
+            number: 12,
+            source: 'local',
+            externalProvider: 'github',
+            syncState: 'synced',
+            pushLive: true,
+          ),
+        ],
+      ),
+    );
+    await _pump(tester, container);
+    await tester.pumpAndSettle();
+
+    expect(find.byType(TaskSyncBrokenMark), findsNothing);
   });
 
   testWidgets('an agent blocked on a person says so on the row', (

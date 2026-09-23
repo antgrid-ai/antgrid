@@ -2,6 +2,7 @@ import { describe, test, expect, beforeAll, afterAll, beforeEach } from "bun:tes
 import { startTestPg, type PgHandle } from "../helpers/pg.js";
 import { createTestUser, createTestSubscription } from "../helpers/fixtures.js";
 import {
+  dismissIntegration,
   getIntegration,
   listIntegrationRepos,
   listIntegrations,
@@ -182,6 +183,17 @@ describe("Integration uniques", () => {
     expect((await resolveInstallation(pg.db, "github", "install-2"))?.id).toBe(first.id);
   });
 
+  test("reconnecting a dismissed-and-revoked integration un-dismisses it too", async () => {
+    const a = await makeAccount();
+    const first = await connect(a, { installationId: "install-1" });
+    await revokeIntegration(pg.db, a.accountId, first.id);
+    expect(await dismissIntegration(pg.db, a.accountId, first.id)).toBe(true);
+
+    const again = await connect(a, { installationId: "install-2" });
+    expect(again.id).toBe(first.id);
+    expect(again.dismissedAt).toBeNull();
+  });
+
   test("an unknown provider is refused before it reaches a column", async () => {
     const a = await makeAccount();
     const result = await upsertIntegration(pg.db, {
@@ -223,6 +235,24 @@ describe("account scoping", () => {
 
     expect(await revokeIntegration(pg.db, b.accountId, integration.id)).toBe(false);
     expect((await getIntegration(pg.db, a.accountId, integration.id))?.revokedAt).toBeNull();
+  });
+
+  test("dismissIntegration only takes a revoked row, and refuses another account's id", async () => {
+    const a = await makeAccount();
+    const b = await makeAccount();
+    const live = await connect(a);
+
+    // Nothing to dismiss while it is still live or suspended.
+    expect(await dismissIntegration(pg.db, a.accountId, live.id)).toBe(false);
+
+    await revokeIntegration(pg.db, a.accountId, live.id);
+    expect(await dismissIntegration(pg.db, b.accountId, live.id)).toBe(false);
+    expect((await getIntegration(pg.db, a.accountId, live.id))?.dismissedAt).toBeNull();
+
+    expect(await dismissIntegration(pg.db, a.accountId, live.id)).toBe(true);
+    expect((await getIntegration(pg.db, a.accountId, live.id))?.dismissedAt).not.toBeNull();
+    // A second dismiss is a no-op, not a moved timestamp.
+    expect(await dismissIntegration(pg.db, a.accountId, live.id)).toBe(false);
   });
 
   test("listIntegrationRepos returns nothing for another account's integration", async () => {

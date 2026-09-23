@@ -297,6 +297,19 @@ export type PushTarget = {
 };
 
 /**
+ * Whether an edit to a task linked through this repo would actually reach the
+ * provider right now. The one predicate `resolvePushTarget` and `toRecord`
+ * (`models/task.ts`, as `TaskRecord.pushLive`) both call, so the two cannot
+ * drift apart the way a hand-copied second version could.
+ */
+export function isRepoPushLive(
+  repo: { pushEnabled: boolean; integration: { accountId: string; revokedAt: Date | null } },
+  accountId: string
+): boolean {
+  return repo.pushEnabled && repo.integration.accountId === accountId && repo.integration.revokedAt === null;
+}
+
+/**
  * Where a task's provider writes go, or null when they go nowhere.
  *
  * Four separate refusals, and none of them is redundant:
@@ -347,9 +360,7 @@ export async function resolvePushTarget(
   if (row.syncState === null || row.syncState === TaskSyncStateSchema.enum.unlinked) return null;
 
   const repo = row.integrationRepo;
-  if (repo === null || !repo.pushEnabled) return null;
-  if (repo.integration.accountId !== accountId) return null;
-  if (repo.integration.revokedAt !== null) return null;
+  if (repo === null || !isRepoPushLive(repo, accountId)) return null;
   return { integrationId: repo.integrationId, provider: repo.integration.provider };
 }
 

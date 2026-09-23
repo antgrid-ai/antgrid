@@ -1229,6 +1229,111 @@ describe("task routes: push blocks", () => {
   });
 });
 
+describe("task routes: pushLive", () => {
+  async function linkedTask(
+    caller: { accountId: string; user: { id: string } },
+    over: { pushEnabled?: boolean; revoked?: boolean } = {}
+  ) {
+    const integration = await pg.db.integration.create({
+      data: {
+        accountId: caller.accountId,
+        provider: "github",
+        externalAccountId: "org-x",
+        installationId: crypto.randomUUID(),
+        displayName: "acme",
+        status: over.revoked ? "revoked" : "active",
+        installedBy: caller.user.id,
+        revokedAt: over.revoked ? new Date() : null,
+      },
+      select: { id: true },
+    });
+    const repo = await pg.db.integrationRepo.create({
+      data: {
+        integrationId: integration.id,
+        repoKey: `github.com/acme/${crypto.randomUUID()}`,
+        externalRepoId: crypto.randomUUID(),
+        visibility: "private",
+        syncEnabled: true,
+        pushEnabled: over.pushEnabled ?? true,
+      },
+      select: { id: true },
+    });
+    const task = await pg.db.task.findFirstOrThrow({
+      where: { accountId: caller.accountId },
+      orderBy: { number: "asc" },
+    });
+    await pg.db.task.update({
+      where: { id: task.id },
+      data: {
+        source: "github",
+        externalProvider: "github",
+        externalId: "42",
+        syncState: "synced",
+        integrationRepoId: repo.id,
+      },
+    });
+    return task;
+  }
+
+  async function readTask(app: App, cookie: string) {
+    const res = await app.request("/tasks/1", { headers: cookieHeaders(cookie) });
+    expect(res.status).toBe(200);
+    return ((await res.json()) as { task: Record<string, unknown> }).task;
+  }
+
+  test("a task never linked to a provider carries no answer at all", async () => {
+    const { app } = buildTestApp(pg.db, pg.url);
+    const caller = await setupCaller(app, "pushlive-none@example.com");
+    await createTaskVia(app, cookieHeaders(caller.cookie), { title: "local" });
+
+    expect((await readTask(app, caller.cookie)).pushLive).toBeNull();
+  });
+
+  test("a live, push-enabled repo reads true", async () => {
+    const { app } = buildTestApp(pg.db, pg.url);
+    const caller = await setupCaller(app, "pushlive-on@example.com");
+    await createTaskVia(app, cookieHeaders(caller.cookie), { title: "linked" });
+    await linkedTask(caller);
+
+    expect((await readTask(app, caller.cookie)).pushLive).toBe(true);
+  });
+
+  // The exact scenario the app's task detail view has to stop lying about: a
+  // task can read `syncState: synced` from its last round trip and still have
+  // nowhere for the next edit to go.
+  test("a revoked integration reads false even though syncState still says synced", async () => {
+    const { app } = buildTestApp(pg.db, pg.url);
+    const caller = await setupCaller(app, "pushlive-revoked@example.com");
+    await createTaskVia(app, cookieHeaders(caller.cookie), { title: "linked" });
+    await linkedTask(caller, { revoked: true });
+
+    const task = await readTask(app, caller.cookie);
+    expect(task.syncState).toBe("synced");
+    expect(task.pushLive).toBe(false);
+  });
+
+  test("push switched off for the repo reads false too", async () => {
+    const { app } = buildTestApp(pg.db, pg.url);
+    const caller = await setupCaller(app, "pushlive-pushoff@example.com");
+    await createTaskVia(app, cookieHeaders(caller.cookie), { title: "linked" });
+    await linkedTask(caller, { pushEnabled: false });
+
+    expect((await readTask(app, caller.cookie)).pushLive).toBe(false);
+  });
+
+  test("the list carries pushLive, not only the single-task read", async () => {
+    const { app } = buildTestApp(pg.db, pg.url);
+    const caller = await setupCaller(app, "pushlive-list@example.com");
+    await createTaskVia(app, cookieHeaders(caller.cookie), { title: "linked" });
+    await linkedTask(caller, { revoked: true });
+
+    const res = await app.request("/tasks", { headers: cookieHeaders(caller.cookie) });
+    expect(res.status).toBe(200);
+    const { tasks } = (await res.json()) as { tasks: { pushLive: unknown }[] };
+    expect(tasks[0]?.pushLive).toBe(false);
+  });
+});
+
 /**
  * The carrier gate on the one verb that cannot be taken back.
  *

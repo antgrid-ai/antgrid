@@ -293,6 +293,7 @@ async function decide(tx: Tx, op: TaskSyncOpRecord, at: Date): Promise<Decision>
     return stop({ kind: "skipped", opId: op.id, taskId: op.taskId, reason: "op_not_pending" });
   }
   const payload = parsePayload(row.payload, op.payload);
+  const isCreate = payload.kind === TaskSyncOpKindSchema.enum["issue.create"];
 
   const task = await tx.task.findUnique({ where: { id: op.taskId }, select: PUSH_TASK_SELECT });
   if (!task) {
@@ -313,13 +314,33 @@ async function decide(tx: Tx, op: TaskSyncOpRecord, at: Date): Promise<Decision>
     return stop({ kind: "skipped", opId: op.id, taskId: op.taskId, reason: "task_in_conflict" });
   }
 
+  // An `issue.create` cancelled below never reached the provider — `externalId`
+  // is still null — so leaving `syncState: pending` would tell every reader an
+  // issue is still on its way, permanently, since nothing else ever revisits
+  // this op. Clearing `integrationRepoId` too, not just `syncState`, un-links
+  // the task from the channel the abandoned publish pointed it at — otherwise
+  // the app's `pushLive` (read off that column) reports the now-unreachable
+  // repo as a live but disconnected channel for a task that was never
+  // actually published anywhere. Together they let `isPublishable` (the app's
+  // `TaskLinkState`) offer a retry instead of showing "Creating the issue…"
+  // forever.
+  const abandonStuckCreate = () =>
+    isCreate && task.externalId === null
+      ? tx.task.update({
+          where: { id: op.taskId },
+          data: { syncState: null, integrationRepoId: null },
+        })
+      : Promise.resolve();
+
   const repo = task.integrationRepo;
   if (!repo || repo.removedAt !== null) {
     await cancelOp(tx, op.id, "task is not linked to a reachable repository");
+    await abandonStuckCreate();
     return stop({ kind: "skipped", opId: op.id, taskId: op.taskId, reason: "not_linked" });
   }
   if (repo.integration.revokedAt !== null) {
     await cancelOp(tx, op.id, "the installation was revoked");
+    await abandonStuckCreate();
     return stop({ kind: "skipped", opId: op.id, taskId: op.taskId, reason: "integration_revoked" });
   }
   // Outbound consent is per repository and deliberately not implied by
@@ -327,6 +348,7 @@ async function decide(tx: Tx, op: TaskSyncOpRecord, at: Date): Promise<Decision>
   // only governs new ones.
   if (!repo.pushEnabled) {
     await cancelOp(tx, op.id, "outbound writes are off for this repository");
+    await abandonStuckCreate();
     return stop({ kind: "skipped", opId: op.id, taskId: op.taskId, reason: "push_disabled" });
   }
 
@@ -342,7 +364,6 @@ async function decide(tx: Tx, op: TaskSyncOpRecord, at: Date): Promise<Decision>
     });
   }
 
-  const isCreate = payload.kind === TaskSyncOpKindSchema.enum["issue.create"];
   if (isCreate && task.externalId !== null) {
     // The local guard that stands regardless of the marker: a task holding an
     // external id has an issue, and the duplicate a second create posts is

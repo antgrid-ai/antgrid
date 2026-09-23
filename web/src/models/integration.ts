@@ -79,6 +79,7 @@ const INTEGRATION_SELECT = {
   installedBy: true,
   createdAt: true,
   revokedAt: true,
+  dismissedAt: true,
 } satisfies Prisma.IntegrationSelect;
 
 const REPO_SELECT = {
@@ -115,7 +116,9 @@ export type IntegrationRepoRecord = Prisma.IntegrationRepoGetPayload<{
  * Revoked rows are deliberately not filtered out: they are the provenance of
  * tasks imported through them, and a settings screen that hides them cannot
  * explain where an unlinked task came from. Callers that want live ones filter
- * on `revokedAt`.
+ * on `revokedAt`; the Integrations page additionally filters on `dismissedAt`
+ * for the ones the user has already acknowledged — that filter belongs to the
+ * page, not here, since every other reader still needs the row.
  */
 export async function listIntegrations(db: Tx, accountId: string): Promise<IntegrationRecord[]> {
   return db.integration.findMany({
@@ -179,6 +182,9 @@ export async function upsertIntegration(
     displayName: args.displayName,
     status,
     revokedAt: null,
+    // A row the user dismissed while it was revoked is reviving here, so the
+    // reason it was hidden no longer holds.
+    dismissedAt: null,
   };
 
   try {
@@ -224,6 +230,25 @@ export async function revokeIntegration(db: Tx, accountId: string, id: string): 
   const result = await db.integration.updateMany({
     where: { id, accountId, revokedAt: null },
     data: { revokedAt: new Date(), status: IntegrationStatusSchema.enum.revoked },
+  });
+  return result.count > 0;
+}
+
+/**
+ * Take a revoked integration off the Integrations page.
+ *
+ * A display preference, not a second revocation: the row, its repositories and
+ * every task's provenance are untouched, so this never needs the reasoning
+ * `revokeIntegration` carries. Scoped to `revokedAt: { not: null }` because a
+ * live or suspended connection has nothing on the page to dismiss — reconnecting
+ * (`upsertIntegration`) is what makes the row disappear from that state, and it
+ * also clears `dismissedAt` so a later revoke starts undismissed again.
+ */
+export async function dismissIntegration(db: Tx, accountId: string, id: string): Promise<boolean> {
+  if (!isUuid(id)) return false;
+  const result = await db.integration.updateMany({
+    where: { id, accountId, revokedAt: { not: null }, dismissedAt: null },
+    data: { dismissedAt: new Date() },
   });
   return result.count > 0;
 }

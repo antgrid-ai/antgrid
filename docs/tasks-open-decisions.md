@@ -19,7 +19,7 @@ hand back:
 | Private key (PEM) | **cross-tenant master key** — see the plan's warning; it signs for every installation |
 | Webhook secret | inbound signature verification |
 | Webhook URL | needs a publicly reachable endpoint; staging or a tunnel |
-| Permissions | Issues: read+write, Metadata: read. Nothing else in v1. |
+| Permissions | Issues: read+write, Metadata: read. Nothing else in v1. Confirmed available as a per-resource choice on GitHub's App-creation form. |
 | Events | `issues`, `issue_comment`, `installation`, `installation_repositories` |
 
 One correction to that Events row, found while building 4b. `repository` belongs

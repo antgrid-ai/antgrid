@@ -9,6 +9,7 @@ import { sameRemoteState, toRemote, type Assignee, type TaskStatus } from "../ta
 import {
   cancelPendingOps,
   enqueueForTask,
+  isRepoPushLive,
   issueLabelsPayload,
   sameLabelSet,
   TaskSyncOpKindSchema,
@@ -106,6 +107,14 @@ const TASK_SELECT = {
   updatedAt: true,
   closedAt: true,
   labels: { select: { label: { select: { id: true, name: true, color: true } } } },
+  // Read for `pushLive` alone — the same facts `isRepoPushLive`
+  // (tasks/sync-op.ts) checks before `resolvePushTarget` will enqueue a write.
+  integrationRepo: {
+    select: {
+      pushEnabled: true,
+      integration: { select: { accountId: true, revokedAt: true } },
+    },
+  },
 } satisfies Prisma.TaskSelect;
 
 type TaskRow = Prisma.TaskGetPayload<{ select: typeof TASK_SELECT }>;
@@ -144,6 +153,14 @@ export type TaskRecord = {
    *  filter that drops a field name written before this vocabulary, or after
    *  one was retired. */
   pushBlocked: unknown;
+  /** Whether an edit made right now would actually reach the provider — null
+   *  when the task was never linked, so there is nothing to answer. Computed by
+   *  `isRepoPushLive` (`tasks/sync-op.ts`), the same predicate
+   *  `resolvePushTarget` gates on, because that function is what silently drops
+   *  the edit when this is false; a task can be `syncState: synced` and still
+   *  answer false here the moment its integration is revoked, belongs to
+   *  another account, or its repo's push switch is off. */
+  pushLive: boolean | null;
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;
@@ -1144,6 +1161,9 @@ function toRecord(row: TaskRow): TaskRecord {
     remoteSnapshot: row.remoteSnapshot,
     localConflict: row.localConflict,
     pushBlocked: row.pushBlocked,
+    pushLive: row.integrationRepo === null
+      ? null
+      : isRepoPushLive(row.integrationRepo, row.accountId),
     createdBy: row.createdBy,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,

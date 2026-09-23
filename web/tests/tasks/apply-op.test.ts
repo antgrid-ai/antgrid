@@ -737,6 +737,44 @@ describe("applyOp — local refusals", () => {
     expect((await opRow(claimed.id)).status).toBe("cancelled");
   });
 
+  test("a create abandoned before it ever reaches the provider reverts the task to unlinked, rather than leaving it \"pending\" with no externalId forever", async () => {
+    const account = await makeAccount();
+    const integration = await connect(account);
+    const repo = await addRepo(account, integration);
+    const created = await createTask(pg.db, {
+      accountId: account.accountId,
+      createdBy: account.userId,
+      title: "publish me",
+    });
+    if (created.kind !== "ok") throw new Error(created.kind);
+    await pg.db.task.update({
+      where: { id: created.task.id },
+      data: { integrationRepoId: repo.id, syncState: "pending" },
+    });
+    await enqueue(integration.id, created.task.id, {
+      kind: "issue.create",
+      title: "publish me",
+      body: "",
+      state: "open",
+      stateReason: null,
+      labels: [],
+    });
+    const claimed = await claimOne();
+    // Withdrawn before the create ever attempted — the outbox has nothing to
+    // resolve, since the provider was never asked.
+    await pg.db.integrationRepo.update({ where: { id: repo.id }, data: { pushEnabled: false } });
+
+    const { writer, calls } = fakeWriter();
+    expect(expectKind(await run(writer, claimed), "skipped").reason).toBe("push_disabled");
+    expect(calls.create).toHaveLength(0);
+    expect((await opRow(claimed.id)).status).toBe("cancelled");
+
+    const after = await taskRow(created.task.id);
+    expect(after.syncState).toBeNull();
+    expect(after.integrationRepoId).toBeNull();
+    expect(after.externalId).toBeNull();
+  });
+
   test("an unadjudicated conflict defers the op rather than pushing over it", async () => {
     const account = await makeAccount();
     const task = await linkedTask(account);

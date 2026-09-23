@@ -121,6 +121,7 @@ import {
   verifyInstallState,
 } from "../integrations/github-install.js";
 import {
+  dismissIntegration,
   getIntegration,
   ImportFilterKindSchema,
   IntegrationStatusSchema,
@@ -1986,13 +1987,15 @@ export function uiRoutes(deps: {
 
     const integrations = await listIntegrations(deps.db, accountId);
     const views: IntegrationView[] = await Promise.all(
-      integrations.map(async (integration) => ({
-        id: integration.id,
-        displayName: integration.displayName,
-        status: IntegrationStatusSchema.catch("active").parse(integration.status),
-        revokedAt: integration.revokedAt,
-        repos: (await listIntegrationRepos(deps.db, accountId, integration.id)).map(repoView),
-      }))
+      integrations
+        .filter((integration) => integration.dismissedAt === null)
+        .map(async (integration) => ({
+          id: integration.id,
+          displayName: integration.displayName,
+          status: IntegrationStatusSchema.catch("active").parse(integration.status),
+          revokedAt: integration.revokedAt,
+          repos: (await listIntegrationRepos(deps.db, accountId, integration.id)).map(repoView),
+        }))
     );
 
     return c.html(
@@ -2007,6 +2010,22 @@ export function uiRoutes(deps: {
         integrations={views}
       />
     );
+  });
+
+  /**
+   * Take a revoked connection off the Integrations page.
+   *
+   * Full redirect rather than an htmx swap: the whole card leaves the page, not
+   * one row of it, so there is nothing sensible to swap in its place.
+   */
+  r.post("/ui/integrations/:id/remove", requireUser({ auth: deps.auth }), async (c) => {
+    const userId = c.get("userId");
+    const accountId = await resolveBillingAccountId(deps.db, userId);
+    if (!accountId) return c.text("Forbidden", 403);
+
+    const id = c.req.param("id");
+    await dismissIntegration(deps.db, accountId, id);
+    return c.redirect("/integrations?github=removed");
   });
 
   /**

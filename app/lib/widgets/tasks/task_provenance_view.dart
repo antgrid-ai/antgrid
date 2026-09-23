@@ -92,6 +92,34 @@ class TaskProvenanceMark extends StatelessWidget {
   }
 }
 
+/// The row marker for a linked task whose provider connection is currently
+/// down — deliberately separate from [TaskProvenanceMark], which never mounts
+/// for a task born here (`isLocal`), even after it is published: `source`
+/// records where a task started, not where it now lives, so a task published
+/// FROM Antgrid keeps `source: local` forever and [TaskProvenanceMark] would
+/// stay invisible on it no matter how stale its sync got. This mark answers a
+/// different question — is an edit right now actually going anywhere — so it
+/// checks [Task.isPushDisconnected] alone and ignores [Task.isLocal].
+class TaskSyncBrokenMark extends StatelessWidget {
+  const TaskSyncBrokenMark({super.key, required this.task});
+
+  final Task task;
+
+  @override
+  Widget build(BuildContext context) {
+    if (!task.isPushDisconnected) return const SizedBox.shrink();
+    return AbTooltip(
+      message:
+          'GitHub disconnected · edits here are not reaching the issue',
+      child: AbIcon(
+        AbIcons.warning,
+        size: AbTokens.iconButtonGlyph,
+        color: context.antgrid.warning,
+      ),
+    );
+  }
+}
+
 /// The detail view's block: who wrote this, which issue it is, and the way out
 /// to it.
 class TaskProvenanceBlock extends StatelessWidget {

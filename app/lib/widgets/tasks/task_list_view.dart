@@ -37,6 +37,7 @@ class TaskListView extends ConsumerWidget {
     this.onOpen,
     this.compact = false,
     this.showProject = true,
+    this.siblingDetailNumber,
   });
 
   /// Called with the task number the row wants opened. The master–detail split
@@ -48,12 +49,27 @@ class TaskListView extends ConsumerWidget {
 
   final bool showProject;
 
+  /// The task number a `TaskDetailView` is ALREADY showing beside this list,
+  /// on the desktop master–detail split — never inferred from
+  /// [selectedTaskNumberProvider] alone, which a phone leaves set after
+  /// popping the detail route, where no sibling pane exists to be showing
+  /// anything. Null everywhere else, including the phone's stacked list,
+  /// which is the only place a mutation failure is visible at all.
+  final int? siblingDetailNumber;
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final filter = ref.watch(taskFilterProvider);
     final tasks = ref.watch(visibleTasksProvider);
     final selected = ref.watch(selectedTaskNumberProvider);
     final failure = ref.watch(taskMutationErrorProvider);
+    // The detail pane already shows this exact failure (with the same Retry)
+    // whenever its task is the one open in the sibling pane — stacking the
+    // list's own copy on top reads as the same error happening twice.
+    final showFailureHere =
+        failure != null &&
+        (failure.taskNumber == null ||
+            failure.taskNumber != siblingDetailNumber);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -61,7 +77,7 @@ class TaskListView extends ConsumerWidget {
         const _ScopeBar(),
         const AbSeparator.horizontal(),
         _FilterBar(compact: compact),
-        if (failure != null) _MutationBanner(failure: failure),
+        if (showFailureHere) _MutationBanner(failure: failure),
         const AbSeparator.horizontal(),
         Expanded(
           child: tasks.when(

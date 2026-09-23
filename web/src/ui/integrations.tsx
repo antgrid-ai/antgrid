@@ -66,6 +66,7 @@ export type IntegrationsPageProps = {
 
 const NOTICE: Record<IntegrationsNotice, { tone: "ok" | "warn" | "error"; text: string }> = {
   connected: { tone: "ok", text: "GitHub is connected. Switch on the repositories you want imported." },
+  removed: { tone: "ok", text: "That connection is off this page. Tasks already imported through it are unaffected." },
   bad_state: {
     tone: "error",
     text: "That link did not come from this browser, or it sat too long. Start again from Connect GitHub.",
@@ -275,9 +276,18 @@ function IntegrationCard({
             {formatDate(integration.revokedAt)}
           </span>
         )}
-        <a href={connectUrl} class="btn btn-quiet btn-sm ml-auto">
-          Manage on GitHub
-        </a>
+        <div class="ml-auto flex items-center gap-2">
+          <a href={connectUrl} class="btn btn-quiet btn-sm">
+            Manage on GitHub
+          </a>
+          {integration.status === "revoked" && (
+            <form method="post" action={`/ui/integrations/${integration.id}/remove`} class="inline">
+              <button type="submit" class="btn btn-ghost btn-sm text-error">
+                Remove
+              </button>
+            </form>
+          )}
+        </div>
       </div>
 
       {note && (

@@ -825,6 +825,11 @@ model Integration {
   /// id, so it is a new row rather than a resurrected one. Retaining the row is
   /// what keeps an imported task's provenance readable after the link is gone.
   revokedAt DateTime? @map("revoked_at") @db.Timestamptz(6)
+  /// The user removed a revoked connection from the Integrations page. Purely a
+  /// display preference — never read by routing or import — and
+  /// `upsertIntegration` clears it on reconnect so a revived row is visible
+  /// again without a second action.
+  dismissedAt DateTime? @map("dismissed_at") @db.Timestamptz(6)
 
   // Cascade is NOT the cleanup path for a deleted account: `deleteUserAccount`
   // tombstones `product_accounts.deleted_at` rather than deleting the row, so

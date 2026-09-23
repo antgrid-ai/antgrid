@@ -151,6 +151,28 @@ describe("IntegrationsPage", () => {
     expect(html).toContain("<fieldset class=\"fieldset\" disabled=\"\"");
   });
 
+  test("a revoked connection offers Remove; live and suspended ones do not", () => {
+    const revoked = render({
+      integrations: [integration({ status: "revoked", revokedAt: new Date("2026-07-04T00:00:00Z") })],
+    });
+    expect(revoked).toContain(
+      `action="/ui/integrations/${"22222222-2222-4222-8222-222222222222"}/remove"`
+    );
+    expect(revoked).toContain("Remove");
+
+    const active = render({ integrations: [integration()] });
+    expect(active).not.toContain("/remove\"");
+
+    const suspended = render({ integrations: [integration({ status: "suspended" })] });
+    expect(suspended).not.toContain("/remove\"");
+  });
+
+  test("the removed notice reassures rather than reading like an error", () => {
+    const html = render({ notice: "removed" });
+    expect(html).toContain("That connection is off this page");
+    expect(html).toContain("alert-success");
+  });
+
   test("a suspended connection reads differently from an active one", () => {
     const active = render({ integrations: [integration()] });
     const suspended = render({ integrations: [integration({ status: "suspended" })] });

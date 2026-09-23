@@ -253,9 +253,10 @@ class TaskListController extends AsyncNotifier<List<Task>> {
     try {
       final task = await _api.getTask(number);
       _upsert(task);
+      _clearError();
       return task;
     } on TaskApiException catch (e) {
-      _fail(e, null);
+      _fail(e, () => ensureLoaded(number).then((_) {}), taskNumber: number);
       return null;
     }
   }
@@ -502,7 +503,7 @@ class TaskListController extends AsyncNotifier<List<Task>> {
       return true;
     } on TaskApiException catch (e) {
       if (snapshot != null) state = AsyncData(snapshot);
-      _fail(e, () => delete(number));
+      _fail(e, () => delete(number), taskNumber: number);
       return false;
     }
   }
@@ -533,7 +534,7 @@ class TaskListController extends AsyncNotifier<List<Task>> {
           _remove(number);
         }
       }
-      _fail(e, retry);
+      _fail(e, retry, taskNumber: number);
       return null;
     }
   }
@@ -561,10 +562,16 @@ class TaskListController extends AsyncNotifier<List<Task>> {
     );
   }
 
-  void _fail(TaskApiException error, Future<void> Function()? retry) {
+  void _fail(
+    TaskApiException error,
+    Future<void> Function()? retry, {
+    int? taskNumber,
+  }) {
     ref
         .read(taskMutationErrorProvider.notifier)
-        .set(TaskMutationFailure(error: error, retry: retry));
+        .set(
+          TaskMutationFailure(error: error, retry: retry, taskNumber: taskNumber),
+        );
   }
 
   void _clearError() => ref.read(taskMutationErrorProvider.notifier).set(null);
@@ -573,10 +580,16 @@ class TaskListController extends AsyncNotifier<List<Task>> {
 /// A write that was rolled back, with the reason and — where retrying is
 /// meaningful — the same call again.
 class TaskMutationFailure {
-  const TaskMutationFailure({required this.error, this.retry});
+  const TaskMutationFailure({required this.error, this.retry, this.taskNumber});
 
   final TaskApiException error;
   final Future<void> Function()? retry;
+
+  /// Which task the failure belongs to, when the mutation named one — null for
+  /// a create, which fails before a task exists to number. Lets a surface that
+  /// already shows this task in full (the detail view) suppress the list's own
+  /// copy of the same banner instead of the two stacking.
+  final int? taskNumber;
 }
 
 class TaskMutationErrorController extends Notifier<TaskMutationFailure?> {
@@ -687,6 +700,17 @@ final taskLabelsProvider = FutureProvider<List<TaskLabel>>((ref) async {
   return ref.watch(tasksApiProvider).listLabels();
 });
 
+/// Whether the account holds a live GitHub integration, for the settings
+/// screen's Connect GitHub button.
+///
+/// autoDispose: the connect flow happens in an external browser (see
+/// `openGitHubIntegrationsInBrowser`), so nothing in-app can push a change —
+/// the settings screen invalidates this on resume instead of it holding a
+/// stale `false` forever after a successful install.
+final githubConnectedProvider = FutureProvider.autoDispose<bool>((ref) {
+  return ref.watch(tasksApiProvider).githubConnected();
+});
+
 /// Where a task filed against this project could be published.
 ///
 /// Keyed by project uuid rather than by task number: the answer is a property
@@ -694,8 +718,12 @@ final taskLabelsProvider = FutureProvider<List<TaskLabel>>((ref) async {
 /// and an existing task's confirm sheet read the same list. An empty list, and
 /// a load that failed, both mean the publish affordance is ABSENT: a dead
 /// button on an irreversible action reads as a broken one.
-final taskPublishTargetsProvider =
-    FutureProvider.family<List<TaskPublishTarget>, String>((ref, projectId) {
+///
+/// autoDispose because the answer changes on the web (an integration's push
+/// switch), where nothing can invalidate this: a cached empty list would hide
+/// the affordance until the app restarted.
+final taskPublishTargetsProvider = FutureProvider.autoDispose
+    .family<List<TaskPublishTarget>, String>((ref, projectId) {
       return ref
           .watch(tasksApiProvider)
           .listPublishTargets(projectId: projectId);

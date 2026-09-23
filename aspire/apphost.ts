@@ -164,6 +164,19 @@ const licenseApi = await builder
     }
   });
 
+// web-sync — the GitHub sync jobs (webhook drain, task-sync drain, reconcile
+// poll) have no in-process timer by design; this is the dev stand-in for the
+// cron that runs them in a deployed environment (see web/scripts/dev-sync-loop.ts
+// and its counterpart in scripts/dev.ts, which `aspire run` otherwise bypasses).
+// Without it, a webhook is recorded and a publish/edit is queued but neither
+// ever applies — GitHub and the app look unsynced no matter how long you wait.
+// No endpoint, no reference to `licenseApi`: it talks to Postgres directly via
+// web's own PG_DATABASE_URL, never over HTTP to the web resource.
+await builder
+  .addBunApp("web-sync", "../web", "scripts/dev-sync-loop.ts")
+  .withBun({ install: false })
+  .withRunScript("dev:sync");
+
 // relay — verifies license JWTs against web's JWKS endpoint.
 // Aspire assigns web a dynamic port via withHttpEndpoint, so the
 // stale LICENSE_API_URL=http://localhost:8787 in relay/.env points at nothing.

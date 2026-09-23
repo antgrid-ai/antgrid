@@ -84,8 +84,17 @@ class _TaskDetailViewState extends ConsumerState<TaskDetailView> {
   Widget build(BuildContext context) {
     final tasks = ref.watch(taskListProvider);
     final task = tasks.value?.firstWhereOrNullByNumber(widget.number);
+    final failure = ref.watch(taskMutationErrorProvider);
 
     if (task == null) {
+      // `ensureLoaded`'s own failure is the authoritative reason this task
+      // isn't in the list — checked before falling back to `tasks`' state, or
+      // a network blip fetching just THIS task reads as it having been
+      // deleted, and the list's own banner (which suppresses whenever it
+      // thinks this pane already shows the error) shows nothing either.
+      if (failure != null && failure.taskNumber == widget.number) {
+        return _DetailError(error: failure.error, onRetry: failure.retry);
+      }
       return switch (tasks) {
         AsyncError(:final error) => _DetailError(error: error),
         AsyncLoading() => const AbLoading(message: 'Loading task…'),
@@ -100,9 +109,13 @@ class _TaskDetailViewState extends ConsumerState<TaskDetailView> {
 }
 
 class _DetailError extends ConsumerWidget {
-  const _DetailError({required this.error});
+  const _DetailError({required this.error, this.onRetry});
 
   final Object error;
+
+  /// Retries the specific failed call. Falls back to refreshing the whole
+  /// list, the only recovery available for a failure that named no retry.
+  final Future<void> Function()? onRetry;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -114,7 +127,7 @@ class _DetailError extends ConsumerWidget {
         onTap: () => detached(
           'tasks',
           'retry task load',
-          () => ref.read(taskListProvider.notifier).refresh(),
+          onRetry ?? () => ref.read(taskListProvider.notifier).refresh(),
         ),
       ),
     );
@@ -485,7 +498,13 @@ class _LoadedState extends ConsumerState<_Loaded> {
       children: [
         _header(context),
         const AbSeparator.horizontal(),
-        if (failure != null)
+        // Scoped to THIS task's number: `task_list_view.dart`'s own banner
+        // hides itself whenever the failing task is the one open here, on the
+        // assumption this pane already shows it — true only if this check is
+        // here, or a failure on a task the list is showing (deleted from a
+        // row-actions sheet, say) would surface on whichever unrelated task
+        // happens to be open in the split, instead of on the list itself.
+        if (failure != null && failure.taskNumber == _task.number)
           AbInlineBanner(
             text: failure.error.message,
             color: palette.warning,
@@ -857,7 +876,13 @@ class _LoadedState extends ConsumerState<_Loaded> {
           _attribute(
             context,
             'Project',
-            onTap: () => detached('tasks', 'pick project', _pickProject),
+            // Once a task is filed against a project, that project is where
+            // its checkout, sessions and provenance all live — reassigning it
+            // here would orphan those without moving them, so the field is
+            // set-once: editable only while still unset.
+            onTap: _task.projectId == null
+                ? () => detached('tasks', 'pick project', _pickProject)
+                : null,
             child: _task.projectId == null
                 ? Text(
                     'None',
@@ -1369,6 +1394,9 @@ class _LoadedState extends ConsumerState<_Loaded> {
     final pending =
         _task.syncState == TaskSyncState.pending && _task.externalId == null;
     final unlinked = _task.syncState == TaskSyncState.unlinked;
+    // See [Task.isPushDisconnected]: distinct from [unlinked] (this task
+    // choosing to stop) — this is the channel itself being down.
+    final disconnected = _task.isPushDisconnected;
     return Padding(
       padding: const EdgeInsets.fromLTRB(
         AbTokens.space12,
@@ -1382,9 +1410,13 @@ class _LoadedState extends ConsumerState<_Loaded> {
           Row(
             children: [
               AbIcon(
-                unlinked ? AbIcons.syncOff : AbIcons.openExternal,
+                disconnected
+                    ? AbIcons.warning
+                    : unlinked
+                    ? AbIcons.syncOff
+                    : AbIcons.openExternal,
                 size: AbTokens.iconButtonGlyph,
-                color: palette.iconMuted,
+                color: disconnected ? palette.warning : palette.iconMuted,
               ),
               const SizedBox(width: AbTokens.space6),
               Text(
@@ -1392,10 +1424,14 @@ class _LoadedState extends ConsumerState<_Loaded> {
                     ? 'Creating the issue…'
                     : unlinked
                     ? 'No longer syncing'
+                    : disconnected
+                    ? 'GitHub disconnected'
                     : 'Published to GitHub',
                 style: AbTokens.sansStyle(
                   fontSize: AbTokens.fontXs,
-                  color: palette.textSecondary,
+                  color: disconnected
+                      ? palette.warning
+                      : palette.textSecondary,
                 ),
               ),
               if (key != null) ...[
@@ -1437,11 +1473,15 @@ class _LoadedState extends ConsumerState<_Loaded> {
                 : unlinked
                 ? 'Edits here no longer reach the issue, and it is untouched '
                       'where it is. Publishing again creates a second one.'
+                : disconnected
+                ? 'Edits here are saved but not reaching the issue — the '
+                      'GitHub connection behind this repo was disconnected. '
+                      'Reconnect on the web to resume syncing.'
                 : 'Edits to the title, description, status and labels are sent '
                       'to this issue.',
             style: AbTokens.sansStyle(
               fontSize: AbTokens.fontXxs,
-              color: palette.textMuted,
+              color: disconnected ? palette.warning : palette.textMuted,
             ),
           ),
         ],
@@ -1716,7 +1756,6 @@ class _TaskChangesSectionState extends ConsumerState<_TaskChangesSection> {
             root: state.root,
             expandedPaths: state.expandedPaths,
             selectedFilePath: state.git.diffPath,
-            filterQuery: null,
             gitFileEntries: entries,
             changesOnly: true,
             collapsedPaths: state.git.collapsedPaths,

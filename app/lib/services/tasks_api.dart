@@ -132,6 +132,17 @@ class TasksApi extends CookieApiClient {
         .toList(growable: false);
   }
 
+  /// Whether the account holds a live GitHub integration, for the settings
+  /// screen's Connect GitHub button.
+  Future<bool> githubConnected() async {
+    final body = await _send(
+      'GET',
+      _uri('/tasks/integrations/status'),
+      subject: _Subject.task,
+    );
+    return body['connected'] == true;
+  }
+
   Future<Task> updateTask(int number, TaskPatch patch) async {
     final res = await _send(
       'PATCH',

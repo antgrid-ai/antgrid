@@ -137,6 +137,11 @@ class TaskRow extends ConsumerWidget {
         const SizedBox(width: AbTokens.space6),
         TaskProvenanceMark(task: task),
       ],
+      // Ignores `isLocal` on purpose — see the mark's own doc comment.
+      if (task.isPushDisconnected) ...[
+        const SizedBox(width: AbTokens.space6),
+        TaskSyncBrokenMark(task: task),
+      ],
       // Unassigned is a fact ABOUT the task, same standing as its provenance —
       // not an answer to "who is this for" that belongs on the line built for
       // that question. `_assignee` still renders it there for the wide
@@ -176,6 +181,11 @@ class TaskRow extends ConsumerWidget {
         if (!twoLine) ...[
           if (!task.isLocal) ...[
             TaskProvenanceMark(task: task),
+            const SizedBox(width: AbTokens.space6),
+          ],
+          // Ignores `isLocal` on purpose — see the mark's own doc comment.
+          if (task.isPushDisconnected) ...[
+            TaskSyncBrokenMark(task: task),
             const SizedBox(width: AbTokens.space6),
           ],
           for (final label in shown) ...[

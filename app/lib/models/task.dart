@@ -344,6 +344,7 @@ class Task {
     this.syncState,
     this.conflict,
     this.pushBlocked,
+    this.pushLive,
     this.closedAt,
     String? displayId,
   }) : _displayId = displayId;
@@ -394,6 +395,13 @@ class Task {
   /// whose last import agreed with us can still hold a value the provider keeps
   /// declining, and does not sit in the conflict state for it.
   final TaskPushBlock? pushBlocked;
+
+  /// Whether an edit made right now would actually reach the provider — null
+  /// when the task was never linked. Independent of [syncState]: a task reads
+  /// `synced` from the last successful round trip and stays that way even
+  /// after the connection behind it is revoked or its repo's push switch is
+  /// turned off, because nothing about the task itself changed.
+  final bool? pushLive;
 
   final String createdBy;
   final DateTime createdAt;
@@ -456,6 +464,7 @@ class Task {
       syncState: TaskSyncState.fromWire(raw['syncState']),
       conflict: TaskConflict.fromJson(raw['conflict']),
       pushBlocked: TaskPushBlock.fromJson(raw['pushBlocked']),
+      pushLive: raw['pushLive'] is bool ? raw['pushLive'] as bool : null,
       createdBy: raw['createdBy'] is String ? raw['createdBy'] as String : '',
       createdAt:
           _date(raw['createdAt']) ?? DateTime.fromMillisecondsSinceEpoch(0),
@@ -504,6 +513,7 @@ class Task {
       externalKey: externalKey,
       externalUrl: externalUrl,
       syncState: syncState,
+      pushLive: pushLive,
       conflict: identical(conflict, kUnset)
           ? this.conflict
           : conflict as TaskConflict?,
@@ -621,6 +631,20 @@ extension TaskLinkState on Task {
   /// the second press as `ALREADY_LINKED`; withholding the button is what stops
   /// a user being shown an action whose only outcome is a refusal banner.
   bool get isPublishable => !isLinked && syncState != TaskSyncState.pending;
+
+  /// Whether the provider connection behind this task is down right now —
+  /// distinct from [hasUnlinkedIdentity] (this task chose to stop) and from a
+  /// still-creating publish (nothing to contradict yet, since [pushLive] is
+  /// read off `integrationRepoId`, which a publish sets before the create
+  /// completes). [pushLive] alone conflates the two: `unlinkTask` never clears
+  /// `integrationRepoId`, so a repo whose push switch or connection goes bad
+  /// AFTER a task was unlinked would otherwise still flip this task's
+  /// [pushLive] to false, and the row would warn about a channel this task
+  /// never uses.
+  bool get isPushDisconnected =>
+      pushLive == false &&
+      syncState != TaskSyncState.unlinked &&
+      !(syncState == TaskSyncState.pending && externalId == null);
 }
 
 /// A project a task can be filed against.

@@ -496,3 +496,61 @@ describe("POST /ui/integrations/repos/:id/sync — the outbound consents", () =>
     expect(read).not.toContain("still reading this repository for the first time");
   });
 });
+
+function postRemove(app: App, integrationId: string, cookie: string) {
+  return app.request(`/ui/integrations/${integrationId}/remove`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded", origin: ORIGIN, cookie },
+  });
+}
+
+describe("POST /ui/integrations/:id/remove", () => {
+  test("a revoked connection is dismissed and drops off the page", async () => {
+    const app = build();
+    const { cookie, accountId, user } = await signIn("nia@example.com");
+    const { integrationId } = await seedRepo(accountId, user.id);
+    await pg.db.integration.update({
+      where: { id: integrationId },
+      data: { status: "revoked", revokedAt: new Date("2026-07-04T00:00:00Z") },
+    });
+
+    const res = await postRemove(app, integrationId, cookie);
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe("/integrations?github=removed");
+
+    const row = await pg.db.integration.findUniqueOrThrow({ where: { id: integrationId } });
+    expect(row.dismissedAt).not.toBeNull();
+
+    const html = await (await app.request("/integrations", { headers: { cookie } })).text();
+    expect(html).not.toContain("acme");
+  });
+
+  test("a live connection has nothing to dismiss, and stays on the page", async () => {
+    const app = build();
+    const { cookie, accountId, user } = await signIn("nia@example.com");
+    const { integrationId } = await seedRepo(accountId, user.id);
+
+    await postRemove(app, integrationId, cookie);
+
+    const row = await pg.db.integration.findUniqueOrThrow({ where: { id: integrationId } });
+    expect(row.dismissedAt).toBeNull();
+    const html = await (await app.request("/integrations", { headers: { cookie } })).text();
+    expect(html).toContain("acme");
+  });
+
+  test("another account's integration id is refused, not dismissed", async () => {
+    const app = build();
+    const owner = await signIn("nia@example.com");
+    const { integrationId } = await seedRepo(owner.accountId, owner.user.id);
+    await pg.db.integration.update({
+      where: { id: integrationId },
+      data: { status: "revoked", revokedAt: new Date() },
+    });
+    const stranger = await signIn("mal@example.com");
+
+    await postRemove(app, integrationId, stranger.cookie);
+
+    const row = await pg.db.integration.findUniqueOrThrow({ where: { id: integrationId } });
+    expect(row.dismissedAt).toBeNull();
+  });
+});

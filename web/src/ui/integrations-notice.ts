@@ -17,6 +17,7 @@ import { z } from "zod";
  */
 export const IntegrationsNoticeSchema = z.enum([
   "connected",
+  "removed",
   "bad_state",
   "not_your_installation",
   "installation_taken",

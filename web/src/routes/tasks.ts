@@ -28,6 +28,7 @@ import {
   type UnlinkTaskRefusal,
 } from "../models/task.js";
 import { listPublishTargets, type PublishRefusal, type PublishTarget } from "../tasks/publish.js";
+import { listIntegrations } from "../models/integration.js";
 import { blockedFields, parsePushBlocked, PushFieldSchema } from "../tasks/push-blocked.js";
 import { formatTaskId, parseTaskId } from "../tasks/display-id.js";
 import { fromRemote, sameAssignee, type Assignee, type TaskStatus } from "../tasks/merge.js";
@@ -295,6 +296,21 @@ export function taskRoutes(deps: { db: DB; auth: Auth; env: Env }) {
       projectId: parsed.data.projectId,
     });
     return c.json({ targets: targets.map(publishTargetJson) });
+  });
+
+  /**
+   * Whether the account holds a live GitHub integration, for the settings
+   * screen's Connect GitHub button. Declared before `/tasks/:number` for the
+   * same reason as `/tasks/publish-targets` above — a literal path ahead of
+   * the parameterized one in registration order.
+   *
+   * A row with `revokedAt` set does not count: the settings screen shows
+   * "Connect GitHub" again in that case, same as before any install existed.
+   */
+  r.get("/tasks/integrations/status", async (c) => {
+    const integrations = await listIntegrations(deps.db, c.get("accountId"));
+    const connected = integrations.some((i) => i.revokedAt === null);
+    return c.json({ connected });
   });
 
   /**
@@ -979,6 +995,7 @@ function taskJson(task: TaskRecord) {
     externalKey: task.externalKey,
     externalUrl: task.externalUrl,
     syncState: task.syncState,
+    pushLive: task.pushLive,
     conflict: conflictJson(task),
     pushBlocked: pushBlockedJson(task),
     otherAssignees: otherAssignees(task),

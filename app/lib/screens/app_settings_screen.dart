@@ -19,6 +19,7 @@ import '../models/settings_section.dart';
 import '../providers/agent_transport.dart';
 import '../providers/auth.dart';
 import '../providers/sign_out.dart';
+import '../providers/tasks.dart';
 import '../providers/ui_attention_providers.dart';
 import '../services/account_api.dart';
 import '../services/app_settings_service.dart';
@@ -77,10 +78,12 @@ class AppSettingsScreen extends ConsumerStatefulWidget {
   ConsumerState<AppSettingsScreen> createState() => _AppSettingsScreenState();
 }
 
-class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
+class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen>
+    with WidgetsBindingObserver {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     // A link naming a section writes it before this screen exists — the surface
     // it also names is what mounts us — so the first frame is the first chance
     // to honour it. Post-frame: the sections need to be laid out before one can
@@ -89,6 +92,22 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
       if (!mounted) return;
       _drainPendingSettingsSection();
     });
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  // Connect GitHub is a browser hand-off (see openGitHubIntegrationsInBrowser)
+  // — nothing in-app can push a change when the install completes there, so
+  // resuming from that browser is the one signal available to re-check.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      ref.invalidate(githubConnectedProvider);
+    }
   }
 
   /// Scroll to the section a navigation left in [pendingSettingsSectionProvider]
@@ -450,17 +469,39 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
                         const SizedBox(height: AbTokens.space8),
                         Align(
                           alignment: Alignment.centerLeft,
-                          child: AbButton(
-                            label: 'CONNECT GITHUB',
-                            leading: AbIcon(
-                              AbIcons.openExternal,
-                              size: 10,
-                              color: antgrid.textSecondary,
-                            ),
-                            onTap: () => openGitHubIntegrationsInBrowser(
-                              ref.container,
-                              appUserEmail: user.email,
-                            ),
+                          child: Builder(
+                            builder: (_) {
+                              // Defaults to the disconnected look while the
+                              // first check is in flight (and stays there on
+                              // error) — the button still opens the connect
+                              // flow, which is the one action that fixes
+                              // either.
+                              final connected =
+                                  ref.watch(githubConnectedProvider).value ??
+                                  false;
+                              return AbButton(
+                                label: connected
+                                    ? 'GITHUB CONNECTED'
+                                    : 'CONNECT GITHUB',
+                                color: connected ? antgrid.success : null,
+                                leading: AbIcon(
+                                  connected
+                                      ? AbIcons.circleCheck
+                                      : AbIcons.openExternal,
+                                  size: 10,
+                                  color: connected
+                                      ? antgrid.success
+                                      : antgrid.textSecondary,
+                                ),
+                                // Tappable either way: connected still opens
+                                // the web Integrations page, where repos are
+                                // added and sync is turned on per repo.
+                                onTap: () => openGitHubIntegrationsInBrowser(
+                                  ref.container,
+                                  appUserEmail: user.email,
+                                ),
+                              );
+                            },
                           ),
                         ),
                         const SizedBox(height: AbTokens.space16),

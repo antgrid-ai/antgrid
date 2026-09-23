@@ -73,6 +73,7 @@ class _Split extends ConsumerWidget {
           // one line without clipping either.
           child: TaskListView(
             compact: true,
+            siblingDetailNumber: selected,
             onOpen: (number) =>
                 ref.read(selectedTaskNumberProvider.notifier).select(number),
           ),
