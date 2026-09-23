@@ -129,7 +129,8 @@ docs/superpowers/specs/
 /deploy/iroh/*
 !/deploy/iroh/README.md
 !/deploy/iroh/compose.yaml
-!/deploy/iroh/administration.nginx.conf
+!/deploy/iroh/Dockerfile
+!/deploy/iroh/relay.example.toml
 !/deploy/iroh/monitoring/
 /deploy/iroh/monitoring/*
 !/deploy/iroh/monitoring/README.md

@@ -11,7 +11,7 @@
   "title": "Antgrid Iroh relay",
   "uid": "antgrid-iroh",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "tags": [
     "antgrid",
     "iroh"
@@ -25,7 +25,7 @@
   "panels": [
     {
       "id": 1,
-      "title": "Backend authorization ready",
+      "title": "Metrics scrape available",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -40,7 +40,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "antgrid_iroh_backend_ready",
+          "expr": "up{job=\"relayserver\"}",
           "legendFormat": "{{instance}}"
         }
       ],
@@ -62,7 +62,7 @@
     },
     {
       "id": 2,
-      "title": "Active connections",
+      "title": "Healthz probe success",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -77,7 +77,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "antgrid_iroh_connections",
+          "expr": "probe_success{job=\"relayserver-healthz\"}",
           "legendFormat": "{{instance}}"
         }
       ],
@@ -99,7 +99,7 @@
     },
     {
       "id": 3,
-      "title": "Pending admissions",
+      "title": "Connected relay clients",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -114,7 +114,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "antgrid_iroh_pending_admissions",
+          "expr": "relayserver_accepts_total - relayserver_disconnects_total",
           "legendFormat": "{{instance}}"
         }
       ],
@@ -136,7 +136,7 @@
     },
     {
       "id": 4,
-      "title": "Admission decisions / second",
+      "title": "Endpoint accepts / disconnects per second",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -151,8 +151,13 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "rate(antgrid_iroh_admissions_total[5m])",
-          "legendFormat": "{{instance}}"
+          "expr": "rate(relayserver_accepts_total[5m])",
+          "legendFormat": "accepts {{instance}}"
+        },
+        {
+          "refId": "B",
+          "expr": "rate(relayserver_disconnects_total[5m])",
+          "legendFormat": "disconnects {{instance}}"
         }
       ],
       "fieldConfig": {
@@ -173,7 +178,7 @@
     },
     {
       "id": 5,
-      "title": "Rejections / second",
+      "title": "Bytes transferred / second",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -188,7 +193,49 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "rate(antgrid_iroh_rejections_total[5m])",
+          "expr": "rate(relayserver_bytes_sent_total[5m])",
+          "legendFormat": "sent {{instance}}"
+        },
+        {
+          "refId": "B",
+          "expr": "rate(relayserver_bytes_recv_total[5m])",
+          "legendFormat": "recv {{instance}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      }
+    },
+    {
+      "id": 6,
+      "title": "Send packets dropped / second",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(relayserver_send_packets_dropped_total[5m])",
           "legendFormat": "{{instance}}"
         }
       ],
@@ -209,45 +256,8 @@
       }
     },
     {
-      "id": 6,
-      "title": "Account transport bytes / second",
-      "type": "timeseries",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 16
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum by (instance) (rate(antgrid_iroh_account_tx_transport_bytes_total[5m]) + rate(antgrid_iroh_account_rx_transport_bytes_total[5m]))",
-          "legendFormat": "{{instance}}"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "Bps"
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "single"
-        }
-      }
-    },
-    {
       "id": 7,
-      "title": "Policy invalidations / second",
+      "title": "Rate-limited connections / second",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -262,7 +272,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "rate(antgrid_iroh_invalidations_total[5m])",
+          "expr": "rate(relayserver_conns_rx_ratelimited_total[5m])",
           "legendFormat": "{{instance}}"
         }
       ],
@@ -284,7 +294,7 @@
     },
     {
       "id": 8,
-      "title": "Metrics scrape available",
+      "title": "HTTP(S) connection errors / second",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -299,13 +309,13 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "up{job=\"antgrid-iroh\"}",
+          "expr": "rate(relayserver_http_connections_errored_total[5m])",
           "legendFormat": "{{instance}}"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "short"
+          "unit": "ops"
         },
         "overrides": []
       },

@@ -1,7 +1,7 @@
 services:
   iroh:
     build:
-      context: ../../iroh-relay
+      context: .
     restart: unless-stopped
     read_only: true
     cap_drop: [ALL]
@@ -11,27 +11,16 @@ services:
     pids_limit: 128
     ports:
       - '443:443'
+      - '80:80'
+    environment:
+      # Read by the stock binary itself (main.rs ENV_HTTP_BEARER_TOKEN); web
+      # holds the same value as PEER_RELAY_ACCESS_TOKEN. Never put it in
+      # relay.toml — see that file's [access.http] comment.
+      IROH_RELAY_HTTP_BEARER_TOKEN: '${IROH_RELAY_HTTP_BEARER_TOKEN:?Set the token web also holds as PEER_RELAY_ACCESS_TOKEN}'
     volumes:
-      - '${IROH_CONFIG_PATH:?Set an absolute protected relay config path}:/config/relay.json:ro'
+      - '${IROH_CONFIG_PATH:?Set an absolute protected relay config path}:/config/relay.toml:ro'
       - '${IROH_CERT_DIRECTORY:?Set an absolute TLS certificate directory}:/certs:ro'
     networks: [services]
-  administration:
-    image: nginx:stable-alpine@sha256:dc5069ad14f19660b141b21236140b91656bf89bbc3e2417c70ae650cd66104c
-    network_mode: 'service:iroh'
-    depends_on: [iroh]
-    restart: unless-stopped
-    user: '101:101'
-    entrypoint: [nginx]
-    command: ['-g', 'daemon off;']
-    read_only: true
-    cap_drop: [ALL]
-    security_opt: ['no-new-privileges:true']
-    mem_limit: 64m
-    pids_limit: 32
-    tmpfs:
-      - /tmp:size=16m,mode=1777
-    volumes:
-      - './administration.nginx.conf:/etc/nginx/nginx.conf:ro'
 networks:
   services:
     external: true

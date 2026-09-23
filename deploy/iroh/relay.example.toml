@@ -1,0 +1,55 @@
+# Example config for the stock iroh-relay 1.2.0 binary. Copy to a protected
+# path outside the checkout, fill in the real hostnames and TLS material, and
+# run it with --config-path, never --dev, which forces cleartext regardless of
+# this file's [tls] table.
+#
+# A missing config file, or any key placed under the wrong table, silently
+# produces an open relay: upstream ignores unknown keys and falls back to
+# Config::default(), whose access is everyone (iroh-relay src/main.rs,
+# Config::load). The image's entrypoint refuses a missing file or one without
+# an [access.http] table; nothing catches a misplaced key. Parse any edit with
+# the real binary before deploying it; with the certs absent it must still get
+# as far as loading them:
+#   iroh-relay --config-path relay.toml
+
+# Root keys must appear before the first [table] header — TOML attaches a
+# bare key to whichever table header precedes it, not to the document root.
+http_bind_addr = "0.0.0.0:80"
+enable_quic_addr_discovery = false
+# Loopback only, and not upstream's default 9090: Prometheus scrapes from
+# inside the relay's network namespace (monitoring/README.md), where its own
+# :9090 listener would collide.
+metrics_bind_addr = "127.0.0.1:9000"
+
+[limits]
+# Unlimited if unset upstream. These are a conservative starting point, not a
+# qualified capacity — watch monitoring/grafana-dashboard.json before raising
+# them.
+accept_conn_limit = 100.0
+accept_conn_burst = 200
+
+[limits.client.rx]
+bytes_per_second = 5000000
+max_burst_bytes = 10000000
+
+[tls]
+# "Reloading" re-reads the cert and key on an interval, so renewal needs no
+# restart; use "Manual" if the deployment restarts the container on renewal.
+cert_mode = "Reloading"
+https_bind_addr = "0.0.0.0:443"
+cert_dir = "/certs"
+manual_cert_path = "/certs/fullchain.pem"
+manual_key_path = "/certs/privkey.pem"
+
+[access.http]
+# The bearer token is deliberately absent: the relay reads it from the
+# IROH_RELAY_HTTP_BEARER_TOKEN env var (web holds the same value as
+# PEER_RELAY_ACCESS_TOKEN), so it never lands in this file or a backup of it.
+# Without it web denies every endpoint; the relay never fails open for it.
+#
+# The query names this relay's own public origin so web can deny it wholesale
+# by removing that origin from IROH_RELAY_URLS; it is configuration, not an
+# authenticated claim. It must be one of web's IROH_RELAY_URLS or web denies
+# everyone. Web compares by normalised href, so the percent-encoding need not
+# match byte-for-byte; it only has to parse to the same URL.
+url = "https://web.antgrid.ai/internal/iroh-access?relay=https%3A%2F%2Frelay.antgrid.ai%2F"

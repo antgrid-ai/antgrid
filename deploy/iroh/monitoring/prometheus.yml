@@ -4,7 +4,24 @@ global:
 rule_files:
   - alerts.yml
 scrape_configs:
-  - job_name: antgrid-iroh
+  # alerts.yml selects on these job names.
+  - job_name: relayserver
     static_configs:
       - targets: ['127.0.0.1:9000']
     metrics_path: /metrics
+  # /healthz is served only on the relay's HTTPS listener. Probing the public
+  # origin through the standard module also verifies the certificate chain and
+  # hostname, which catches an expired or mismatched certificate.
+  - job_name: relayserver-healthz
+    metrics_path: /probe
+    params:
+      module: [http_2xx]
+    static_configs:
+      - targets: ['https://relay.antgrid.ai/healthz']
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox-exporter:9115

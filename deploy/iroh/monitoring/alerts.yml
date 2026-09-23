@@ -2,23 +2,16 @@ groups:
   - name: antgrid-iroh
     rules:
       - alert: IrohRelayMetricsUnavailable
-        expr: up{job="antgrid-iroh"} == 0 or absent(up{job="antgrid-iroh"})
+        expr: up{job="relayserver"} == 0 or absent(up{job="relayserver"})
         for: 1m
         labels:
           severity: critical
         annotations:
           summary: Iroh relay metrics are unavailable
-      - alert: IrohAuthorizationUnavailable
-        expr: antgrid_iroh_backend_ready == 0
-        for: 30s
+      - alert: IrohRelayUnhealthy
+        expr: probe_success{job="relayserver-healthz"} == 0
+        for: 1m
         labels:
           severity: critical
         annotations:
-          summary: Iroh relay cannot obtain authoritative admission decisions
-      - alert: IrohAdmissionRejections
-        expr: rate(antgrid_iroh_rejections_total[5m]) > 1
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: Iroh relay admission rejections are sustained
+          summary: Iroh relay /healthz probe is failing
