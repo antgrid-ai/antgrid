@@ -17,6 +17,7 @@ import '../providers/sessions.dart';
 import '../providers/ui_attention_providers.dart';
 import '../screens/sign_in_screen.dart';
 import '../screens/upgrade_screen.dart';
+import '../billing/pricing_visibility.dart';
 import 'auth_status_pill.dart';
 import 'sign_out_action.dart';
 
@@ -35,7 +36,8 @@ class AccountFooter extends ConsumerWidget {
     ref.watch(pricingCatalogProvider);
     final user = userAsync.value;
     final tier = subscription?.tier ?? user?.tier;
-    final showUpgrade = user != null && tier == 'free';
+    final showUpgrade =
+        kPricingSurfacesEnabled && user != null && tier == 'free';
     final tone = context.antgrid.textSecondary;
 
     return Container(

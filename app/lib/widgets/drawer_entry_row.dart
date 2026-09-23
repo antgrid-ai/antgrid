@@ -54,6 +54,7 @@ import '../providers/recent_agents.dart';
 import '../providers/sessions.dart';
 import '../providers/supervisor_status.dart';
 import '../screens/upgrade_screen.dart';
+import '../billing/pricing_visibility.dart';
 import 'ab_status_helpers.dart';
 import 'agent_work_status_dot.dart';
 import 'session_isolation_badge.dart' show sessionIsIsolated;
@@ -1147,7 +1148,7 @@ Future<bool> _openColdRemoteProject(
     ref.read(selectedTargetProvider.notifier).set(priorTarget);
     if (context.mounted) {
       showAbSnackBar(context, e.userMessage);
-      await openUpgrade(context, ref);
+      if (kPricingSurfacesEnabled) await openUpgrade(context, ref);
     }
     return false;
   } catch (e) {
