@@ -127,7 +127,7 @@ smokes do not establish those results. Lifecycle telemetry still needs dedicated
 central authentication/discovery, E2E, project-binding, usable-terminal, CPU,
 memory and path-byte measurements. Outbox retention and billing invalidation
 load also need operational qualification. See the [qualification record](iroh-qualification.md),
-[relay README](../iroh-relay/README.md) and [operations guide](iroh-operations.md).
+[relay deployment README](../deploy/iroh/README.md) and [operations guide](iroh-operations.md).
 
 Temporary agent handoffs and dated investigation logs were consolidated into
 this ledger. Historical detail remains in Git history; local capture artifacts

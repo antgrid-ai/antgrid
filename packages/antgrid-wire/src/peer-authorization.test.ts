@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { createPublicKey, verify } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { DecimalGenerationSchema, endpointChallengeBytes, type EndpointChallenge } from "./peer-authorization";
+import { DecimalGenerationSchema, endpointChallengeBytes, peerAuthorizationSnapshotSchema, type EndpointChallenge } from "./peer-authorization";
 
 const challenge: EndpointChallenge = {
   challengeId: "00000000-0000-4000-8000-000000000001",
@@ -40,4 +40,12 @@ test("cross-language enrollment vector binds both Ed25519 identities", () => {
     const changed = endpointChallengeBytes({ ...fixture.challenge, accountId: "other" });
     expect(verify(null, changed, publicKey, Buffer.from(signature, "base64"))).toBe(false);
   }
+});
+
+test("an unparseable relay URL fails validation instead of throwing", () => {
+  const relayUrls = peerAuthorizationSnapshotSchema(false).shape.relayUrls;
+  for (const value of ["not a url", "https://a b/"]) {
+    expect(relayUrls.safeParse([value]).success).toBe(false);
+  }
+  expect(relayUrls.safeParse(["https://relay.example/"]).success).toBe(true);
 });

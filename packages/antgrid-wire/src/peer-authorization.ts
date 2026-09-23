@@ -67,6 +67,8 @@ const isLocalRelayHost = (hostname: string) => {
   return /^f[cd][0-9a-f]{0,2}:/.test(host) || /^fe[89ab][0-9a-f]:/.test(host);
 };
 const relayUrlsSchema = (allowInsecureRelay: boolean) => z.array(z.url().refine((value) => {
+  // Zod v4 still runs this refine after z.url() rejects the value.
+  if (!URL.canParse(value)) return false;
   const url = new URL(value);
   const scheme = url.protocol === "https:" ||
     (allowInsecureRelay && url.protocol === "http:" && isLocalRelayHost(url.hostname));
