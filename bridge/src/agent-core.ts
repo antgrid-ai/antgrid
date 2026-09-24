@@ -2595,6 +2595,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
               approvalPolicy: msg.approvalPolicy ?? "default",
               isolation: msg.isolation ?? "shared",
               baseBranch: msg.baseBranch,
+              taskRef: msg.taskRef,
             });
             sendAb(createMessage("session:result", {
               requestId: msg.requestId, ok: true, session: created, checkoutId: created.checkoutId,

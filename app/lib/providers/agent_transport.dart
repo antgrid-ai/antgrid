@@ -594,6 +594,21 @@ Future<AgentTransport?> _buildLocalTransportFor(
   // registry eviction) — without it a since-recovered project stays pinned on
   // the blocking error screen over the very reconnect it was waiting for.
   ref.read(localTransportFaultProvider(projectId).notifier).clear();
+  // Persist the host's repository identity the first time we learn it: it is
+  // the key that joins this folder to its account-scoped tasks, and only a host
+  // can fold a linked worktree onto its primary checkout, so it cannot be known
+  // at folder-pick time. Guarded on change because an unconditional upsert
+  // would churn every projectsProvider listener on every open — this build
+  // watches `folder` alone, but the others do not.
+  final learnedRepoKey = result.repoKey;
+  if (learnedRepoKey != null) {
+    for (final p in ref.read(projectsProvider)) {
+      if (p.projectId != projectId || p.repoKey == learnedRepoKey) continue;
+      p.repoKey = learnedRepoKey;
+      await ref.read(projectsProvider.notifier).upsert(p);
+      break;
+    }
+  }
 
   // Listen for structured stderr events from the spawned agent process.
   // For orphan-attached agents result.events is an empty stream (no-op).

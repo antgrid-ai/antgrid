@@ -1,6 +1,7 @@
 import 'package:antgrid/models/git_branch.dart';
 import 'package:antgrid/models/session_entry.dart';
 import 'package:antgrid/models/session_target.dart';
+import 'package:antgrid/models/task_ref.dart';
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/project/project_session_registry.dart';
 import 'package:antgrid/providers/agent_transport.dart';
@@ -698,6 +699,7 @@ class _StubSessionsService extends SessionsService {
     String approvalPolicy = 'default',
     String isolation = 'shared',
     String? baseBranch,
+    TaskRef? taskRef,
   }) async {
     await onCreate();
     created++;

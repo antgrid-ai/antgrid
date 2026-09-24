@@ -71,6 +71,7 @@ import '../widgets/session_search_modal.dart';
 import '../widgets/session_start_refusal.dart';
 import '../design/widgets/pulsing_opacity.dart';
 import '../widgets/resizable_pane.dart';
+import '../widgets/tasks/tasks_surface.dart';
 import '../widgets/terminal_elapsed.dart';
 import '../widgets/workspace_tab_bar.dart';
 import '../widgets/ab_banner.dart';
@@ -979,6 +980,12 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
       // Session page or double-start. See the per-session-agent design.
       if (!isCurrent()) return;
       if (ref.read(newSessionStartInFlightProvider)) return;
+      // Only from the workspace itself. An empty project is focused the moment
+      // it is cloned or opened, and the user's next tap is often Tasks or
+      // Settings; forcing New Session here would silently undo that overlay.
+      if (ref.read(workbenchSurfaceProvider) != WorkbenchSurface.workspace) {
+        return;
+      }
       ref
           .read(workbenchSurfaceProvider.notifier)
           .set(WorkbenchSurface.newSession);
@@ -2394,6 +2401,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
 
     return switch (surface) {
       WorkbenchSurface.appSettings => AppSettingsScreen(onClose: close),
+      WorkbenchSurface.tasks => TasksSurface(onClose: close),
       // No longer a surface of its own: the device roster lives in the title
       // bar's RemoteAccessPanel. Kept only so a lingering `devices` deep link
       // no-ops the same way here as on new_session_screen.dart.

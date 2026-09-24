@@ -634,8 +634,9 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
       // controller, or every tab would reload on every state update. Keyed
       // on the full URL (path included), not [_TabWebViewState.origin] —
       // that's deliberately path-free (see its doc) so it can't serve this.
-      if (tabState.lastAppliedUrl == initialUrl) continue;
-      tabState.lastAppliedUrl = initialUrl;
+      final appliedKey = '$initialUrl#${tab.navRevision}';
+      if (tabState.lastAppliedUrl == appliedKey) continue;
+      tabState.lastAppliedUrl = appliedKey;
       tabState.origin = _originOf(initialUrl);
       // Present the logical target, not the proxy: in relay mode the webview
       // loads http://localhost:<random proxy port>, but the tab targets

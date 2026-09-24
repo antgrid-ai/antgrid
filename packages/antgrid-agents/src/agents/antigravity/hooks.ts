@@ -40,12 +40,15 @@ function withFallbackRoots(existing: string | undefined): string {
 
 /**
  * Idempotently merges our PreInvocation (conversation id + transcript path, for
- * title/resume) and Stop (title refresh + task-complete notify) hooks into the
- * GLOBAL `~/.gemini/config/hooks.json`. PreInvocation fires on every turn
- * (including the first), forwarding the conversation id + transcript path as
- * soon as they exist — more robust than a SessionStart-style one-shot hook for a
- * `--conversation <id>`-resumed session, which may not re-fire a "session start"
- * event.
+ * title/resume), Stop (title refresh + task-complete notify) and PreToolUse
+ * (permission-request notify, for the app's "needs you" indicator — agy has no
+ * post-decision "about to show a permission dialog" event, only this
+ * pre-decision one, so it fires for every tool call and never overrides the
+ * decision; see post-title.js) hooks into the GLOBAL `~/.gemini/config/hooks.json`.
+ * PreInvocation fires on every turn (including the first), forwarding the
+ * conversation id + transcript path as soon as they exist — more robust than a
+ * SessionStart-style one-shot hook for a `--conversation <id>`-resumed session,
+ * which may not re-fire a "session start" event.
  *
  * agy has no per-spawn hook flag (no `--plugin-dir` like claude-code/copilot, no
  * `-c` like codex) — confirmed against a real install: its `plugin` subcommand
@@ -83,6 +86,10 @@ export function ensureAntigravityHook(
     const merged = mergeAntigravityHookEntries(data, [
       { event: "PreInvocation", command: antigravityHookCommand(scriptPath, "PreInvocation") },
       { event: "Stop", command: antigravityHookCommand(scriptPath, "Stop") },
+      // matcher "*": we never gate or override (see post-title.js), so every
+      // tool is observed rather than guessing which ones agy's default policy
+      // actually prompts for.
+      { event: "PreToolUse", command: antigravityHookCommand(scriptPath, "PreToolUse"), matcher: "*" },
     ]);
     if (merged === null) return true; // both hooks already present
     atomicWriteFile(hooksPath, `${JSON.stringify(merged, null, 2)}\n`);
@@ -102,9 +109,10 @@ export function inject({ geminiConfigDir, abDir }: HookInjectCtx): LaunchAugment
   };
 }
 
-// Empty on purpose: the injected hook runs under bare `node` and POSTs to the
-// loopback API itself (see assets/antigravity/post-title.js), so agy never
-// shells out to `bridge hook` and has no event for the runner to allowlist.
+// Empty on purpose: every injected hook (PreInvocation, Stop, PreToolUse) runs
+// under bare `node` and POSTs to the loopback API itself (see
+// assets/antigravity/post-title.js), so agy never shells out to `bridge hook`
+// and has no event for the runner to allowlist.
 export const events = [] as const;
 
 // Empty for the same reason `events` is: agy's Stop hook posts its turn-end

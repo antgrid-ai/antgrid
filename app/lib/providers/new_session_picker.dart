@@ -521,7 +521,7 @@ final class CustomAgent extends NewSessionAgent {
 /// a form field BEFORE a target is chosen, so there is no bridge to ask, and it
 /// is a product choice ("we open on Claude Code") rather than a fact about any
 /// machine.
-const NewSessionAgent kDefaultSessionAgent = KnownAgent('claude-code');
+const KnownAgent kDefaultSessionAgent = KnownAgent('claude-code');
 
 /// Registry key for a known agent, or null for `custom`.
 String? newSessionAgentToolKey(NewSessionAgent a) => switch (a) {

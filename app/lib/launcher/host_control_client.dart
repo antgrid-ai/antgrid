@@ -46,6 +46,9 @@ class ResolvedLocalProject {
   /// Set only for `kind == 'managed-checkout'` with a `checkouts.json` record.
   final String? checkoutId;
 
+  /// Cross-machine repository identity folded from the origin remote, or null
+  /// when the host could not fold one — never a value the app may invent.
+  final String? repoKey;
   const ResolvedLocalProject({
     required this.projectId,
     required this.repoPath,
@@ -54,6 +57,7 @@ class ResolvedLocalProject {
     required this.isGitRepository,
     this.kind,
     this.checkoutId,
+    this.repoKey,
   });
 
   factory ResolvedLocalProject.fromJson(Map<String, dynamic> json) {
@@ -80,6 +84,7 @@ class ResolvedLocalProject {
       checkoutId: json['checkoutId'] is String
           ? json['checkoutId'] as String
           : null,
+      repoKey: json['repoKey'] as String?,
     );
   }
 }
@@ -96,6 +101,9 @@ class ProjectSummary {
   /// Per-running-session status keyed by session id — [workStatus] is only their
   /// rollup. Null for a cold core (or an older host); `{}` when nothing runs.
   final Map<String, AgentWorkStatus>? sessionStatuses;
+
+  /// See [ResolvedLocalProject.repoKey]. Also null on a host too old to send it.
+  final String? repoKey;
   const ProjectSummary({
     required this.projectId,
     required this.path,
@@ -103,6 +111,7 @@ class ProjectSummary {
     required this.mode,
     this.workStatus,
     this.sessionStatuses,
+    this.repoKey,
   });
 }
 
@@ -298,7 +307,9 @@ class RemoteDirectoryAck {
     }
     final rawKeys = json['wantedRepoKeys'];
     final wantedRepoKeys = <String>[
-      if (rawKeys is List) for (final k in rawKeys) if (k is String) k,
+      if (rawKeys is List)
+        for (final k in rawKeys)
+          if (k is String) k,
     ];
     final lastReadAt = json['lastReadAt'];
     return RemoteDirectoryAck(
@@ -473,6 +484,7 @@ class HostControlClient {
             mode: mode,
             workStatus: e['workStatus'] as String?,
             sessionStatuses: parseSessionStatuses(e['sessionStatuses']),
+            repoKey: e['repoKey'] as String?,
           );
         })
         .toList(growable: false);
@@ -685,6 +697,32 @@ class HostControlClient {
         'malformed git:branches response: $e',
       );
     }
+  }
+
+  /// Clones [url] into `<parentDir>/<dirName ?? repo name>` and returns the new
+  /// checkout's path. The bridge refuses an existing target rather than cloning
+  /// into it, and a long timeout is the point: a clone is minutes, not the
+  /// seconds the other git verbs get.
+  Future<String> gitClone({
+    required String url,
+    required String parentDir,
+    String? dirName,
+    Duration timeout = const Duration(minutes: 11),
+  }) async {
+    final m = await _post({
+      'type': 'git:clone',
+      'url': url,
+      'parentDir': parentDir,
+      'dirName': ?dirName,
+    }, timeout: timeout);
+    final path = m['path'];
+    if (path is! String || path.isEmpty) {
+      throw HostControlException(
+        'BAD_RESPONSE',
+        'malformed git:clone response',
+      );
+    }
+    return path;
   }
 
   /// Reaches the network on the bridge side (`git ls-remote`), so it carries a

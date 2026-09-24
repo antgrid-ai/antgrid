@@ -30,7 +30,7 @@ import { TITLE_RANKS, titleRankValue, type TitleRank } from "./session-namer";
 import type { WorkStatus, HandlerAvailability } from "./protocol";
 import type { TerminalManager } from "./terminal-manager";
 import { AGENT_GRACE_MS } from "./terminal-session";
-import type { AbMessage, SessionEntry } from "./protocol";
+import { TaskRefSchema, type AbMessage, type SessionEntry, type TaskRef } from "./protocol";
 import {
   CHECKOUT_KINDS,
   CHECKOUT_STATES,
@@ -70,6 +70,9 @@ export interface SessionLaunchSpec {
   isolation?: "shared" | "worktree";
   /** An explicitly selected local branch to use as a base for a worktree. */
   baseBranch?: string;
+  /** The task this session was launched for. Stored and echoed verbatim — the
+   *  bridge never resolves it against the account. */
+  taskRef?: TaskRef;
 }
 
 export type ForkWorkspace = "copy" | "current";
@@ -239,6 +242,10 @@ interface PersistedEntry {
    *  It is what still answers "forked from what" once the derived name below
    *  has been renamed away on either side. */
   forkedFromSessionId?: string;
+  // The task this session was launched for, carried on the wire so the app can
+  // label the session without asking the account. Absent for every session
+  // created outside a task, and for every row written before the field existed.
+  taskRef?: TaskRef;
 }
 
 /** On-disk shape written by `flush()`; validated on read by PersistedFileSchema. */
@@ -280,6 +287,7 @@ const PersistedEntrySchema = z
     forkNativeAttempted: z.boolean().optional().catch(undefined),
     conversationStart: z.enum(["fresh", "resume", "fork"]).optional().catch(undefined),
     forkedFromSessionId: z.string().optional().catch(undefined),
+    taskRef: TaskRefSchema.optional().catch(undefined),
   })
   .transform((s): PersistedEntry => {
     const createdAt = s.createdAt ?? Date.now();
@@ -325,6 +333,7 @@ const PersistedEntrySchema = z
       forkNativeAttempted: s.forkNativeAttempted,
       conversationStart: s.conversationStart ?? (s.agentSessionId ? "resume" : "fresh"),
       forkedFromSessionId: s.forkedFromSessionId,
+      taskRef: s.taskRef,
     };
   });
 
@@ -739,6 +748,7 @@ export class SessionManager {
         checkoutKind: e.checkoutKind,
         checkoutBranch: e.checkoutBranch,
         checkoutState: e.checkoutState,
+        taskRef: e.taskRef,
       });
     }
     out.sort((a, b) => b.lastUsedAt - a.lastUsedAt);
@@ -913,6 +923,7 @@ export class SessionManager {
       mode,
       approvalPolicy,
       manuallyRenamed: name !== undefined,
+      taskRef: spec?.taskRef,
       checkoutId: "main",
       checkoutKind: "main",
       checkoutState: "ready",
@@ -2665,6 +2676,7 @@ export class SessionManager {
       // positive integer.
       workspaceMemberCount: Math.max(memberCount, 1),
       setup: this.setupWire(e.id),
+      taskRef: e.taskRef,
     };
   }
 

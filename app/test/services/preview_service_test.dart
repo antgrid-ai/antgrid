@@ -119,6 +119,27 @@ void main() {
       expect(svc.currentState.activeTab!.currentUrl, 'https://localhost:3000/dashboard');
     });
 
+    test('a clicked link re-targets and reloads an already-open tab', () async {
+      final session = await _newSession(_LocalFakeTransport());
+      addTearDown(session.close);
+      final svc = session.previewService;
+      await svc.openTab(3000, path: '/approval');
+      final before = svc.currentState.activeTab!;
+
+      await svc.openTabAtLink(3000, path: '/');
+      final after = svc.currentState.activeTab!;
+      expect(after.currentUrl, 'http://localhost:3000');
+      expect(after.navRevision, before.navRevision + 1);
+
+      // Same target again still bumps the revision: the webview may have
+      // followed in-page links since, so the screen must reload it.
+      await svc.openTabAtLink(3000, path: '/');
+      expect(svc.currentState.activeTab!.navRevision, after.navRevision + 1);
+
+      await svc.openTabAtLink(4000, path: '/x');
+      expect(svc.currentState.activeTabId, 4000);
+    });
+
     test('explicit navigation uses the existing fallback proxy origin', () async {
       final occupied = await ServerSocket.bind('localhost', 0);
       addTearDown(occupied.close);

@@ -13,6 +13,19 @@ import { join } from "node:path";
 //   - Stop: refreshes the title (titleOnly) and — unless the turn ended in a real
 //     error — POSTs /notify so the app raises a "turn complete" notification
 //     (mirrors cursor's post-notify.js).
+//   - PreToolUse (every tool call, before it runs): POSTs /notify so the app
+//     raises its "needs you" indicator. agy has no post-decision "about to show
+//     a permission dialog" hook (unlike Claude's Notification event) — only
+//     this pre-decision one, which fires for every tool call regardless of
+//     whether agy ends up prompting (a cached "always allow" skips the dialog
+//     silently). We accept the occasional false "needs you" flash rather than
+//     guess which tools agy's default policy gates: a terminal-mode session's
+//     only way to clear that flag is the user's own keystroke answering the
+//     prompt (see userReply in work-status.ts), so a call that never actually
+//     blocked just gets superseded by the next PreToolUse or by Stop's
+//     task_complete. The stdout result ALWAYS carries `{"decision":"ask"}` —
+//     never a hardcoded allow/deny — so this hook only ever observes, never
+//     changes what agy would have done on its own.
 // The title is deliberately resolved bridge-side, not here: this hook runs under
 // bare `node`, which has no reliable sqlite reader for agy's global
 // conversation_summaries.db — and nothing reads that DB in any case, since
@@ -21,23 +34,28 @@ import { join } from "node:path";
 // agents/antigravity/title.ts.
 //
 // agy feeds the hook payload as JSON on stdin and reads a JSON object on
-// stdout; we always emit `{}` so the agent loop is never gated or mutated — a
-// Stop `{}` allows the stop, a PreInvocation `{}` injects nothing (pure observer).
+// stdout. PreInvocation/Stop always get `{}` so the agent loop is never gated
+// or mutated — a Stop `{}` allows the stop, a PreInvocation `{}` injects
+// nothing (pure observer). PreToolUse's `decision` is documented as required,
+// so it gets `{"decision":"ask"}` instead — agy's own default policy for that
+// tool (including any cached "always allow") still decides what happens next;
+// "ask" only preserves that default rather than forcing or skipping a prompt.
 //
-// Hooks run SYNCHRONOUSLY and block agy's loop (every PreInvocation + Stop, every
-// turn), so we don't wait on the HTTP *response* — the body carries nothing we
-// need. But we DO wait for each request to finish flushing before exiting: the
-// POSTs go to 127.0.0.1, which round-trips in single-digit ms, and exiting the
-// instant they're queued (the earlier unref'd-socket approach) let the process
-// tear down before libuv flushed the TCP write, silently dropping title/notify
-// updates. A hard 4.5s timeout is the backstop so a stuck socket can never hold
-// agy's loop hostage.
+// Hooks run SYNCHRONOUSLY and block agy's loop (every PreInvocation + Stop +
+// PreToolUse, every turn), so we don't wait on the HTTP *response* — the body
+// carries nothing we need. But we DO wait for each request to finish flushing
+// before exiting: the POSTs go to 127.0.0.1, which round-trips in single-digit
+// ms, and exiting the instant they're queued (the earlier unref'd-socket
+// approach) let the process tear down before libuv flushed the TCP write,
+// silently dropping title/notify updates. A hard 4.5s timeout is the backstop
+// so a stuck socket can never hold agy's loop hostage.
 //
 // agy has no per-spawn hook flag, so the hook is machine-global; a non-bridge
 // `agy` run also triggers it but no-ops immediately (no ANTGRID_TERMINAL_ID).
 
 const eventName = process.argv[2];
 const isStop = eventName === "Stop";
+const isPreToolUse = eventName === "PreToolUse";
 const port = resolvePort();
 const terminalId = process.env.ANTGRID_TERMINAL_ID;
 
@@ -57,14 +75,16 @@ function resolvePort() {
   }
 }
 
-// agy reads a JSON object from stdout; `{}` = no permission/step/termination
-// changes. Writing the result unblocks agy's loop; we then linger only long
-// enough for any in-flight POSTs to flush (see maybeExit).
-function writeResult() {
+// agy reads a JSON object from stdout. Writing the result unblocks agy's loop;
+// we then linger only long enough for any in-flight POSTs to flush (see
+// maybeExit). No caller passes an explicit body except the tests — every real
+// path (including the no-op/timeout ones in finish()) takes the default, which
+// is what guarantees PreToolUse never resolves to a body missing `decision`.
+function writeResult(body = isPreToolUse ? { decision: "ask" } : {}) {
   if (resultWritten) return;
   resultWritten = true;
   try {
-    process.stdout.write("{}");
+    process.stdout.write(JSON.stringify(body));
   } catch {
     // stdout already closed — nothing we can do, still exit cleanly.
   }
@@ -122,6 +142,14 @@ function transcriptPathOf(payload) {
   return typeof p === "string" && p.trim() ? p.trim() : null;
 }
 
+// PreToolUse only: {"toolCall": {"name": "run_command", "args": {...}}, "stepIdx": N}.
+// The name is already the matcher's lowercase form (confirmed against the
+// bundled hooks.json doc's own example), so it's forwarded as-is.
+function toolCallNameOf(payload) {
+  const name = payload.toolCall && payload.toolCall.name;
+  return typeof name === "string" && name.trim() ? name.trim() : null;
+}
+
 // Best-effort POST: we don't read the response (nothing we need), but the
 // request socket stays ref'd until the body has flushed, so the process can't
 // exit mid-write and drop it. We settle on `finish` (request fully handed to the
@@ -130,8 +158,8 @@ function transcriptPathOf(payload) {
 function postJson(path, body) {
   const data = JSON.stringify({ ...body, runId: process.env.ANTGRID_RUN_ID });
   // Guard against a synchronous throw from http.request itself so it can't crash
-  // the hook before writeResult() emits `{}` and unblocks agy's loop; async
-  // failures are already swallowed by the "error" listener below.
+  // the hook before writeResult() unblocks agy's loop; async failures are
+  // already swallowed by the "error" listener below.
   try {
     const req = http.request({
       hostname: "127.0.0.1",
@@ -167,9 +195,20 @@ function postJson(path, body) {
 }
 
 function run(payload) {
+  if (!port || !terminalId) return finish();
+
+  if (isPreToolUse) {
+    // Unconditional — see the file-header comment on why this can't be
+    // narrowed to "only tools that will actually prompt", and why that's fine.
+    const promptTool = toolCallNameOf(payload);
+    if (promptTool) {
+      postJson("/notify", { type: "permission_request", terminalId, agent: "antigravity", promptTool });
+    }
+    return writeResult();
+  }
+
   const conversationId = conversationIdOf(payload);
   const transcriptPath = transcriptPathOf(payload);
-  if (!port || !terminalId) return finish();
 
   if (conversationId) {
     postJson("/session-title", {

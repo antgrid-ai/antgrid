@@ -1,0 +1,11 @@
+-- A repository can stop syncing for two unrelated reasons and the table could
+-- only record one of them. `installation_repositories.removed` and
+-- `repository.deleted` both flip `sync_enabled` to false, which is
+-- indistinguishable from the user turning the toggle off — so the settings page
+-- can show the off state but cannot explain it, and an unexplained off state
+-- reads as a bug in our product rather than as GitHub having taken the
+-- repository away.
+--
+-- Nullable with no default and no backfill: NULL means "in the installation",
+-- which is true of every row that exists today.
+ALTER TABLE "integration_repos" ADD COLUMN "removed_at" TIMESTAMPTZ(6);

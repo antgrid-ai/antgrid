@@ -19,7 +19,12 @@ import {
 
 /** Which nav entry the current page IS, so it can be marked. Pages without an
  *  entry of their own (account, sign-in, checkout) pass nothing. */
-export type NavSection = "dashboard" | "devices" | "team" | "pricing";
+export type NavSection =
+  | "dashboard"
+  | "devices"
+  | "team"
+  | "integrations"
+  | "pricing";
 
 export type LayoutUser = {
   id: string;
@@ -49,6 +54,7 @@ const NAV: { section: NavSection; href: string; label: string }[] = [
   // Shown to everyone: /team is a real page for a member too — it is where they
   // find out whose account they bill against.
   { section: "team", href: "/team", label: "Team" },
+  { section: "integrations", href: "/integrations", label: "Integrations" },
   { section: "pricing", href: "/pricing", label: "Pricing" },
 ];
 
@@ -118,7 +124,7 @@ export function Layout({ title, user, section, children }: LayoutProps) {
               )}
             </a>
             {user && (
-              // `min-w-0` + `overflow-x-auto`: four labels plus the wordmark and
+              // `min-w-0` + `overflow-x-auto`: five labels plus the wordmark and
               // the avatar do not fit a phone, and without this the nav pushes
               // the whole document wider than the viewport rather than scrolling
               // inside itself. The corollary is that nothing else in this row may

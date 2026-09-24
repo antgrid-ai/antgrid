@@ -55,13 +55,23 @@ export function antigravityScriptPath(directory: string): string {
  * the fix, so a spaced path is instead neutralized upstream — antigravityScriptPath
  * folds it to a space-free 8.3 short path on Windows (see spaceSafePath).
  */
-export function antigravityHookCommand(scriptPath: string, event: "PreInvocation" | "Stop"): string {
+export function antigravityHookCommand(scriptPath: string, event: "PreInvocation" | "Stop" | "PreToolUse"): string {
   return `node ${scriptPath} ${event}`;
 }
 
-export interface AntigravityHookSpec {
-  event: "PreInvocation" | "Stop";
-  command: string;
+// PreInvocation/Stop are FLAT (a bare handler-object array keys the event
+// directly); PreToolUse is GROUPED — agy requires a `matcher` wrapper for any
+// per-tool event (confirmed against the hooks.json doc bundled in the agy
+// binary itself: "For tool-specific events (PreToolUse, PostToolUse), you must
+// wrap the handlers in a group with a matcher regex"). The two shapes cannot be
+// unified, so the spec carries `matcher` only where it applies.
+export type AntigravityHookSpec =
+  | { event: "PreInvocation" | "Stop"; command: string }
+  | { event: "PreToolUse"; command: string; matcher: string };
+
+function canonicalHookEntry(spec: AntigravityHookSpec): unknown {
+  const handler: AntigravityCommandHook = { type: "command", command: spec.command, timeout: 5 };
+  return spec.event === "PreToolUse" ? [{ matcher: spec.matcher, hooks: [handler] }] : [handler];
 }
 
 /**
@@ -83,12 +93,11 @@ export function mergeAntigravityHookEntries(
     ? { ...existingGroup }
     : {};
   let changed = false;
-  for (const { event, command } of specs) {
-    const existing: AntigravityCommandHook[] = Array.isArray(group[event]) ? group[event] : [];
-    if (existing.length === 1 && existing[0]?.type === "command"
-      && existing[0].command === command && existing[0].timeout === 5) continue;
+  for (const spec of specs) {
     // Asset hashes change across upgrades; retaining old paths executes every version.
-    group[event] = [{ type: "command", command, timeout: 5 }];
+    const entry = canonicalHookEntry(spec);
+    if (JSON.stringify(group[spec.event]) === JSON.stringify(entry)) continue;
+    group[spec.event] = entry;
     changed = true;
   }
   if (!changed) return null;
