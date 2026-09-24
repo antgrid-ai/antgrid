@@ -17,6 +17,10 @@ import {
   TerminalStreamOpen,
   TunnelHttpStreamOpen,
   TunnelWsStreamOpen,
+  decodeStreamOpen,
+  decodeStreamRefused,
+  encodeStreamOpen,
+  encodeStreamRefused,
 } from "../src/index";
 
 describe("StreamOpen: every kind round-trips and rejects unknown fields", () => {
@@ -96,6 +100,56 @@ test("the longest valid open frame, fully JSON-escaped, fits STREAM_OPEN_MAX_BYT
 test("MAX_TRANSFER_BYTES and PEER_MAX_RECORD_BYTES are the frag.ts / peer-authorization.ts values by name only", () => {
   expect(MAX_TRANSFER_BYTES).toBe(33_554_432);
   expect(PEER_MAX_RECORD_BYTES).toBeGreaterThan(0);
+});
+
+describe("encodeStreamOpen / decodeStreamOpen", () => {
+  test("encodeStreamOpen round-trips every kind through decodeStreamOpen", () => {
+    const samples: StreamOpen[] = [
+      { kind: "session" },
+      { kind: "project", projectId: "proj-1" },
+      { kind: "terminal", projectId: "proj-1", requestId: "req-1" },
+      { kind: "terminal", projectId: "proj-1", checkoutId: "chk-1", requestId: "req-1" },
+      { kind: "tunnel-http", projectId: "proj-1", requestId: "req-1" },
+      { kind: "tunnel-ws", projectId: "proj-1", wsId: "ws-1" },
+    ];
+    for (const open of samples) {
+      expect(decodeStreamOpen(encodeStreamOpen(open))).toEqual(open);
+    }
+  });
+
+  test("encodeStreamOpen throws on schema-invalid input", () => {
+    expect(() => encodeStreamOpen({ kind: "request", projectId: "p" } as unknown as StreamOpen)).toThrow();
+    expect(() => encodeStreamOpen({ kind: "project" } as unknown as StreamOpen)).toThrow();
+  });
+
+  test("decodeStreamOpen returns null for oversize, bad UTF-8, bad JSON, unknown kind and extra keys", () => {
+    expect(decodeStreamOpen(new Uint8Array(STREAM_OPEN_MAX_BYTES + 1).fill(0x61))).toBeNull();
+
+    expect(decodeStreamOpen(new Uint8Array([0xff, 0xfe, 0xfd]))).toBeNull();
+    expect(decodeStreamOpen(new TextEncoder().encode("{not json"))).toBeNull();
+    expect(decodeStreamOpen(new TextEncoder().encode(JSON.stringify({ kind: "request", projectId: "p" })))).toBeNull();
+    expect(decodeStreamOpen(new TextEncoder().encode(JSON.stringify({ kind: "project", projectId: "p", extra: 1 })))).toBeNull();
+  });
+});
+
+describe("encodeStreamRefused / decodeStreamRefused", () => {
+  test("round-trip every documented code", () => {
+    for (const code of StreamRefusedCode.options) {
+      const refused = { type: "stream:refused" as const, code, message: "x" };
+      expect(decodeStreamRefused(encodeStreamRefused(refused))).toEqual(refused);
+    }
+  });
+
+  test("decode rejects an unknown code", () => {
+    const bytes = new TextEncoder().encode(JSON.stringify({ type: "stream:refused", code: "EXTRA_STREAM", message: "x" }));
+    expect(decodeStreamRefused(bytes)).toBeNull();
+  });
+
+  test("decode rejects bad UTF-8, bad JSON and a non-map", () => {
+    expect(decodeStreamRefused(new Uint8Array([0xff, 0xfe, 0xfd]))).toBeNull();
+    expect(decodeStreamRefused(new TextEncoder().encode("{not json"))).toBeNull();
+    expect(decodeStreamRefused(new TextEncoder().encode(JSON.stringify(["stream:refused"])))).toBeNull();
+  });
 });
 
 test("D7 cap constants hold the adopted owner values (docs/iroh-reduction/ledger.md)", () => {

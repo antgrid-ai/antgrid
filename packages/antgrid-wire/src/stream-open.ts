@@ -122,3 +122,57 @@ export const STREAM_MAX_PROJECTS_PER_PEER = 32;
 export const STREAM_MAX_TERMINAL_ATTACHMENTS_PER_PEER = 64;
 export const STREAM_MAX_TUNNEL_STREAMS_PER_PEER = 128;
 export const STREAM_MAX_PENDING_OPENS_PER_PEER = 16;
+
+const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder("utf-8", { fatal: true });
+
+/** The open-frame body: `StreamOpen.parse(open)` then UTF-8 JSON. There is no
+ *  length prefix here — the caller frames it (`[u32 BE len][body]`), matching
+ *  the bytes `PeerStreamOpener` writes on the Dart side. */
+export function encodeStreamOpen(open: StreamOpen): Uint8Array {
+  return textEncoder.encode(JSON.stringify(StreamOpen.parse(open)));
+}
+
+/** Never throws: a hostile or corrupt peer's open frame must be refusable,
+ *  not fatal to the connection. `STREAM_OPEN_MAX_BYTES` is checked before the
+ *  UTF-8 decode so an oversized frame is rejected without paying for it. */
+export function decodeStreamOpen(bytes: Uint8Array): StreamOpen | null {
+  if (bytes.length > STREAM_OPEN_MAX_BYTES) return null;
+  let text: string;
+  try {
+    text = textDecoder.decode(bytes);
+  } catch {
+    return null;
+  }
+  let json: unknown;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  const parsed = StreamOpen.safeParse(json);
+  return parsed.success ? parsed.data : null;
+}
+
+/** `StreamRefused.parse(refused)` then UTF-8 JSON, unframed like `encodeStreamOpen`. */
+export function encodeStreamRefused(refused: StreamRefused): Uint8Array {
+  return textEncoder.encode(JSON.stringify(StreamRefused.parse(refused)));
+}
+
+/** Never throws, mirroring `decodeStreamOpen`. */
+export function decodeStreamRefused(bytes: Uint8Array): StreamRefused | null {
+  let text: string;
+  try {
+    text = textDecoder.decode(bytes);
+  } catch {
+    return null;
+  }
+  let json: unknown;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  const parsed = StreamRefused.safeParse(json);
+  return parsed.success ? parsed.data : null;
+}

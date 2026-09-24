@@ -186,6 +186,41 @@ Future<void> main(List<String> args) async {
     final streamIds = <String, String>{};
     _emit({'check': 'established'});
 
+    // A1 has no stream handlers yet: any non-session open from an established
+    // peer is refused NOT_ALLOWED in-band, which is what proves the new
+    // per-purpose stream path round-trips across the real binding before A2
+    // gives it a handler.
+    final firstProjectId =
+        ((config['projects'] as List).first as Map<String, dynamic>)['id']
+            as String;
+    final probeStream = await (active as MultiStreamPeerLink).openStream(
+      ProjectStreamOpen(firstProjectId),
+      maxRecordBytes: kStreamOpenMaxBytes,
+      maxQueuedBytes: 2 * kStreamOpenMaxBytes,
+    );
+    // A dropped noq send half FINs rather than resets, so every exit from the
+    // probe, a failed one included, resets it explicitly.
+    final StreamRefused refused;
+    try {
+      final probeRecords = await probeStream.records.toList().timeout(
+        const Duration(seconds: 5),
+      );
+      if (probeRecords.length != 1) {
+        throw StateError(
+          'stream-refused probe: expected exactly one record, got '
+          '${probeRecords.length}',
+        );
+      }
+      final decoded = StreamRefused.tryDecode(probeRecords.single);
+      if (decoded == null) {
+        throw StateError('stream-refused probe: record failed to decode');
+      }
+      refused = decoded;
+    } finally {
+      await probeStream.reset();
+    }
+    _emit({'check': 'stream-refused', 'code': refused.code.wireValue});
+
     for (final raw
         in (config['projects'] as List).cast<Map<String, dynamic>>()) {
       final projectId = raw['id'] as String;

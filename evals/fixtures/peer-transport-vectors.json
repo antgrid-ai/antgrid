@@ -33,7 +33,7 @@
     ]
   },
   "native": {
-    "alpn": "antgrid/peer/1",
+    "alpn": "antgrid/peer/2",
     "leaseMs": 60000,
     "refreshMs": 20000,
     "selectionMs": 5000,

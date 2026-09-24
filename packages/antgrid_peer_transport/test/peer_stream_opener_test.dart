@@ -209,6 +209,40 @@ void main() {
     },
   );
 
+  test(
+    'encodeStreamOpenFrame is the exact body the opener writes as the first '
+    'record',
+    () async {
+      final send = _FakeSend();
+      final opener = PeerStreamOpener(() async => (send, _FakeRecv()));
+      const open = ProjectStreamOpen('project-1');
+      final stream = await opener.open(
+        open,
+        authorized: () => true,
+        maxRecordBytes: 4096,
+        maxQueuedBytes: 4096,
+        onConnectionFatal: _noFatal,
+      );
+      addTearDown(stream.reset);
+
+      final body = send.writeAllCalls.single.sublist(4);
+      expect(body, encodeStreamOpenFrame(open));
+    },
+  );
+
+  test('encodeStreamOpenFrame throws STREAM_OPEN_TOO_LARGE past kStreamOpenMaxBytes', () {
+    expect(
+      () => encodeStreamOpenFrame(ProjectStreamOpen('p' * 10000)),
+      throwsA(
+        isA<PeerConnectionFailure>().having(
+          (e) => e.code,
+          'code',
+          'STREAM_OPEN_TOO_LARGE',
+        ),
+      ),
+    );
+  });
+
   test('the default pending-open bound is the D7 constant', () async {
     final gates = <Completer<void>>[];
     final opener = PeerStreamOpener(() async {

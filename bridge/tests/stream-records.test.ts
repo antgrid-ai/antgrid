@@ -38,6 +38,7 @@ function createFakeSendStream() {
   const setPriorityCalls: number[] = [];
   const resetCalls: bigint[] = [];
   const order: string[] = [];
+  let finishCalls = 0;
   let pendingGate: Promise<void> | null = null;
   let pendingError: Error | null = null;
   const send: StreamSend = {
@@ -54,12 +55,14 @@ function createFakeSendStream() {
       }),
     setPriority: (p) => mutex.run(async () => { order.push("setPriority"); setPriorityCalls.push(p); }),
     reset: (code) => mutex.run(async () => { order.push("reset"); resetCalls.push(code); }),
+    finish: () => mutex.run(async () => { order.push("finish"); finishCalls++; }),
   };
   return {
     stream: { send },
     writeAllCalls,
     setPriorityCalls,
     resetCalls,
+    finishCalls: () => finishCalls,
     order,
     /** Makes the NEXT `writeAll` reject, as the binding does when the peer
      *  sends STOP_SENDING on this stream. One-shot. */
@@ -248,6 +251,51 @@ test("revoking authorization mid-record stops a multi-slice record after the in-
   expect(fake.writeAllCalls.length).toBe(1);
   expect(failures).toEqual(["unauthorized"]);
   expect(fake.resetCalls).toEqual([]);
+});
+
+test("finish() writes every queued record, then finishes the send half once", async () => {
+  const fake = createFakeSendStream();
+  const writer = new StreamRecordWriter(fake.stream, () => true, () => {}, 1_000_000);
+  const sentA = writer.send(new Uint8Array([1]));
+  const sentB = writer.send(new Uint8Array([2]));
+  await writer.finish();
+  expect(await sentA).toBe("sent");
+  expect(await sentB).toBe("sent");
+  expect(fake.writeAllCalls.length).toBe(2);
+  expect(fake.finishCalls()).toBe(1);
+  // finish() lands only after both queued records are on the wire.
+  expect(fake.order.indexOf("finish")).toBeGreaterThan(fake.order.lastIndexOf("writeAll"));
+  // Idempotent: a second call does not re-issue the native finish.
+  await writer.finish();
+  expect(fake.finishCalls()).toBe(1);
+});
+
+test("finish() after an overflow reset is a no-op", async () => {
+  const fake = createFakeSendStream();
+  const failures: StreamWriteFailure[] = [];
+  // Room for exactly one 8-byte record; the third overflows before any of
+  // the three writes reaches the wire (see the analogous test above).
+  const writer = new StreamRecordWriter(fake.stream, () => true, (r) => failures.push(r), 10, 0, 99n);
+  const sentA = writer.send(new Uint8Array(4));
+  const sentB = writer.send(new Uint8Array(4));
+  const sentC = writer.send(new Uint8Array(4));
+  expect(await sentC).toBe("dropped");
+  expect(await sentB).toBe("dropped");
+  expect(await sentA).toBe("dropped");
+  expect(failures).toEqual(["overflow"]);
+  await writer.finish();
+  expect(fake.finishCalls()).toBe(0);
+  expect(fake.resetCalls).toEqual([99n]);
+});
+
+test("send() after finish() is dropped", async () => {
+  const fake = createFakeSendStream();
+  const writer = new StreamRecordWriter(fake.stream, () => true, () => {}, 1_000_000);
+  await writer.send(new Uint8Array([1]));
+  await writer.finish();
+  expect(fake.finishCalls()).toBe(1);
+  expect(await writer.send(new Uint8Array([2]))).toBe("dropped");
+  expect(fake.writeAllCalls.length).toBe(1); // the post-finish send never reached the wire
 });
 
 // --- StreamRecordReader -------------------------------------------------

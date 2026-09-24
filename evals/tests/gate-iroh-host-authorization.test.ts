@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Endpoint, EndpointAddr } from "@number0/iroh/index.js";
-import { decodePeerFrame, encodePeerFrame } from "antgrid-wire";
+import { decodePeerFrame, encodePeerFrame, encodeStreamOpen, PEER_ALPN } from "antgrid-wire";
 import { HostServer } from "../../bridge/src/host-server";
 import { PeerRecords } from "../../bridge/src/peer/records";
 import { computeProjectId } from "../../bridge/src/project-id";
@@ -99,9 +99,10 @@ test("real backend enrollment authorizes native host projects and revocation clo
       assert.equal((await authorization.snapshot(machineDevice)).peers[0]?.endpoint?.endpointId, app.id().toString());
       const addresses = endpoint.boundSockets().filter((address) => address.startsWith("0.0.0.0:") || address.startsWith("127.0.0.1:"))
         .map((address) => address.replace("0.0.0.0:", "127.0.0.1:"));
-      connection = await app.connect(new EndpointAddr(endpoint.id(), undefined, addresses), Array.from(Buffer.from("antgrid/peer/1")));
+      connection = await app.connect(new EndpointAddr(endpoint.id(), undefined, addresses), Array.from(Buffer.from(PEER_ALPN)));
       const stream = await connection.openBi();
       records = new PeerRecords(stream, () => true, () => connection?.close(1n, []));
+      void records.send(encodeStreamOpen({ kind: "session" }));
       const attemptId = randomUUID();
       const send = (value: object) =>
         records!.send(encodePeerFrame({ type: "message", channel: "control" }, Buffer.from(JSON.stringify(value), "utf8")));

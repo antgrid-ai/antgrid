@@ -2,7 +2,10 @@ import { z } from "zod";
 import { FIXED_PREFIX, MAX_HEADER_LEN } from "./peer-frame";
 import { MAX_FRAME_PAYLOAD } from "./frag";
 
-export const PEER_ALPN = "antgrid/peer/1";
+// Bump whenever native stream framing changes: an app on the old framing is
+// then refused at the QUIC handshake instead of reaching a bridge that waits
+// for an open frame the app never sends.
+export const PEER_ALPN = "antgrid/peer/2";
 export const PEER_MAX_RECORD_BYTES =
   MAX_FRAME_PAYLOAD + MAX_HEADER_LEN + FIXED_PREFIX;
 export const PEER_LEASE_MS = 60_000;

@@ -1,7 +1,13 @@
 import { test, expect } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { Endpoint, EndpointAddr, EndpointId } from "@number0/iroh/index.js";
-import { decodePeerFrame, encodePeerFrame, PEER_ALPN, type PeerAuthorizationSnapshot } from "antgrid-wire";
+import {
+  decodePeerFrame,
+  encodePeerFrame,
+  encodeStreamOpen,
+  PEER_ALPN,
+  type PeerAuthorizationSnapshot,
+} from "antgrid-wire";
 import { EndpointEnrollment } from "../../bridge/src/peer/enrollment";
 import { PeerRecords } from "../../bridge/src/peer/records";
 import { createMessage } from "../../bridge/src/protocol";
@@ -99,6 +105,7 @@ test("an endpoint absent from the lease is refused at accept, and admitted once 
       connection = await rawEndpoint.connect(addr, alpn);
       const stream = await connection.openBi();
       records = new PeerRecords(stream, () => true, () => connection?.close(1n, []));
+      void records.send(encodeStreamOpen({ kind: "session" }));
       const attemptId = randomUUID();
       const send = (value: object) =>
         records!.send(encodePeerFrame({ type: "message", channel: "control" }, Buffer.from(JSON.stringify(value), "utf8")));

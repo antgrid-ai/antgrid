@@ -54,10 +54,19 @@ recheck authorization; revocation closes affected sessions. Transactional policy
 outbox delivery informs connected clients and configured private relay targets.
 
 An app-initiated Iroh connection is reused across projects. ALPN
-`antgrid/peer/1` selects one reliable bidirectional stream carrying existing route
-frames with a four-byte big-endian length prefix. Additional application streams
-are rejected. Transport selection precedes the session hello and is fenced by attempt generation;
-the app's `ConnectionSupervisor` remains the retry authority. Central outages do
+`antgrid/peer/2` admits multiple native bidirectional streams. Every stream opens
+with one `[u32 BE len][UTF-8 JSON StreamOpen]` record; the first stream on a
+connection must declare `{kind:"session"}` and then carries the existing route
+frames (peer frames with a four-byte big-endian length prefix) unchanged — an
+invalid or non-session first open closes the connection, since there is no
+session yet to keep alive. Every later stream is admitted in its own task by
+`PeerStreamAcceptor` (`bridge/src/peer/stream-dispatch.ts`), enforcing a
+pending-open cap and a 5s open-frame deadline before dispatching by `kind`; a
+refusal is in-band (`stream:refused` then FIN), a missed deadline resets that
+stream, and neither costs the connection. See `docs/protocol/peer-session.md` §1a
+for the admission order and refusal codes. Transport selection precedes the
+session hello and is fenced by attempt generation; the app's
+`ConnectionSupervisor` remains the retry authority. Central outages do
 not close a healthy authorized native payload connection.
 
 Approved relay maps disable implicit public discovery. Native connections relay

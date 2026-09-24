@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { Endpoint, EndpointAddr, EndpointId } from "@number0/iroh/index.js";
-import { decodePeerFrame, encodePeerFrame } from "antgrid-wire";
+import { PEER_ALPN, decodePeerFrame, encodePeerFrame, encodeStreamOpen } from "antgrid-wire";
 import { PeerRecords } from "../src/peer/records";
 import { createMessage } from "../src/protocol";
 import { TERMINAL_PROTOCOL_VERSION } from "../src/terminal-frames/protocol";
@@ -28,9 +28,12 @@ let connection: Awaited<ReturnType<Endpoint["connect"]>> | undefined;
 const timeout = setTimeout(() => { console.error("native-host-smoke timed out"); process.exitCode = 1; void fixture.dispose(); }, 30_000);
 try {
   const native = await fixture.nativeAddress();
-  connection = await app.connect(new EndpointAddr(EndpointId.fromString(native.endpointId), undefined, native.addresses), Array.from(Buffer.from("antgrid/peer/1")));
+  connection = await app.connect(new EndpointAddr(EndpointId.fromString(native.endpointId), undefined, native.addresses), Array.from(Buffer.from(PEER_ALPN)));
   const stream = await connection.openBi();
   records = new PeerRecords(stream, () => true, () => connection?.close(1n, []));
+  // Every native bidi stream opens with a StreamOpen record before it
+  // carries anything else, the session stream included.
+  void records.send(encodeStreamOpen({ kind: "session" }));
   const attemptId = randomUUID();
   const send = (value: object) => records!.send(encodePeerFrame({ type: "message", channel: "control" }, Buffer.from(JSON.stringify(value), "utf8")));
   const read = async (predicate: (value: any) => boolean): Promise<any> => {

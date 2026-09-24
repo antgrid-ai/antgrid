@@ -3,6 +3,9 @@
 // every kind, refusal code and rejection case needs a vector there
 // (`peer_transport_vectors_test.dart`).
 
+import 'dart:convert';
+import 'dart:typed_data';
+
 /// Wire cap on a serialized open frame, checked before decoding — a
 /// `{kind, projectId, ...}` record needs a few hundred bytes at most.
 const int kStreamOpenMaxBytes = 4096;
@@ -298,6 +301,20 @@ class StreamRefused {
     final parsed = StreamRefusedCode.fromWire(code);
     if (parsed == null) return null;
     return StreamRefused(code: parsed, message: message);
+  }
+
+  /// Decodes one stream record's bytes as a [StreamRefused]. Dart cannot read
+  /// a QUIC reset code, so every refusal an app-side reader acts on arrives
+  /// this way instead — any decode failure (bad UTF-8, bad JSON, not an
+  /// object, wrong shape) is `null`, never a thrown exception.
+  static StreamRefused? tryDecode(Uint8List record) {
+    try {
+      final decoded = jsonDecode(utf8.decode(record, allowMalformed: false));
+      if (decoded is! Map<String, dynamic>) return null;
+      return StreamRefused.fromJson(decoded);
+    } catch (_) {
+      return null;
+    }
   }
 
   @override

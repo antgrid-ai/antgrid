@@ -8,7 +8,7 @@
 // layer, since only `NativeHostConnection` has a connection to close.
 import { describe, expect, it, spyOn, test } from "bun:test";
 import type { Connection } from "@number0/iroh";
-import { encodePeerFrame } from "antgrid-wire";
+import { PEER_ALPN, encodePeerFrame, encodeStreamOpen } from "antgrid-wire";
 import { MessageBus } from "../src/message-bus";
 import { createMessage } from "../src/protocol";
 import { netwatch, __resetNetwatchForTest } from "../src/netwatch";
@@ -142,17 +142,56 @@ function fixture(extra: {
   return { client, access, endpointId, peerId, snapshot, setAllowed: (value: boolean) => { allowed = value; } };
 }
 
+/** A1: every native bidi stream, the session stream included, opens with one
+ *  `[u32 BE len][UTF-8 JSON StreamOpen]` record before it carries anything
+ *  else (docs/iroh-reduction/stage-A-A1-contract.md §0). This prepends the
+ *  default `{"kind":"session"}` record ahead of whatever a fixture below
+ *  scripts for the session stream itself, so every fixture here keeps
+ *  driving the SAME protocol content past the open-frame read `acceptPeer`
+ *  now does first. */
+function withSessionOpen<T extends { recv: { readExact: (length: number) => Promise<number[]> } }>(stream: T): T {
+  const body = Array.from(encodeStreamOpen({ kind: "session" }));
+  const prefix = Buffer.alloc(4);
+  prefix.writeUInt32BE(body.length, 0);
+  const record = { prefix: Array.from(prefix), body };
+  let stage: 0 | 1 | 2 = 0;
+  return {
+    ...stream,
+    recv: {
+      readExact: async (length: number) => {
+        if (stage === 0) { stage = 1; return record.prefix; }
+        if (stage === 1) { stage = 2; return record.body; }
+        return stream.recv.readExact(length);
+      },
+    },
+  };
+}
+
 /** Same shape as native-host-connection.test.ts's `connection()`, plus the
- *  close CODE — the thing this file's two native tests exist to check. */
-function connection(endpointId: string, firstStream = Promise.resolve({
+ *  close CODE — the thing this file's two native tests exist to check.
+ *
+ *  Unlike that file's version, `firstStream` here arrives ALREADY wrapped
+ *  with the session open frame — every caller below builds it from
+ *  `pausableStream()`/`scriptedStream()`, which do that themselves so their
+ *  own doc comments can describe the full stream shape in one place.
+ *  Wrapping again here would inject a second open-frame record ahead of the
+ *  real one, which the session-stream reader would misparse as the first
+ *  actual frame and never reach the scripted data.
+ *
+ *  The default `firstStream` (no data ever scripted) still needs the open
+ *  frame served — several tests below admit a peer that never says hello, or
+ *  that the lease refuses, and both outcomes are decided only after the
+ *  session stream's open frame is validated. */
+function connection(endpointId: string, firstStream = Promise.resolve(withSessionOpen({
   send: { writeAll: async (_bytes: number[]) => {} },
   recv: { readExact: (_length: number) => new Promise<number[]>(() => {}) },
-})) {
+}))) {
   let streams = 0;
   const codes: bigint[] = [];
   const fake = {
     remoteId: () => ({ toString: () => endpointId }),
-    alpn: () => Array.from(Buffer.from("antgrid/peer/1")),
+    alpn: () => Array.from(Buffer.from(PEER_ALPN)),
+    setMaxConcurrentBiStreams: (_n: bigint) => {},
     acceptBi: () => streams++ === 0 ? firstStream : new Promise(() => {}),
     acceptUni: () => new Promise(() => {}),
     closed: () => new Promise(() => {}),
@@ -164,15 +203,17 @@ function connection(endpointId: string, firstStream = Promise.resolve({
 /** A record stream whose first `readExact(4)` call hangs until released —
  *  for putting a peer PAST admission and INTO the read loop before revoking
  *  access, so the close it earns comes from `PeerRecords.checkAdmission`
- *  (code 3) rather than the pre-stream admission check (code 1). */
+ *  (code 3) rather than the pre-stream admission check (code 1). The A1 open
+ *  frame is served first (`withSessionOpen`); the gate below it is what a
+ *  test releases. */
 function pausableStream() {
   const gate = Promise.withResolvers<number[]>();
   return {
     resolve: (bytes: number[]) => gate.resolve(bytes),
-    stream: {
+    stream: withSessionOpen({
       send: { writeAll: async (_bytes: number[]) => {} },
       recv: { readExact: (_length: number) => gate.promise },
-    },
+    }),
   };
 }
 
@@ -187,7 +228,8 @@ function pausableStream() {
  *  a poll for "session established" never caught it, because by its first
  *  check the second frame had already been read and had torn the session back
  *  down). Gating each later frame behind an explicit release is what gives a
- *  test a real point to poll from. */
+ *  test a real point to poll from. The A1 open frame is served first
+ *  (`withSessionOpen`), ungated, ahead of frame 0. */
 function scriptedStream(frames: Uint8Array[]) {
   const perFrame = frames.map((frame): [number[], number[]] => {
     const prefix = Buffer.alloc(4);
@@ -205,7 +247,7 @@ function scriptedStream(frames: Uint8Array[]) {
   let chunkIndex = 0;
   return {
     release: (index: number) => resolvers[index]?.(),
-    stream: {
+    stream: withSessionOpen({
       send: { writeAll: async (_bytes: number[]) => {} },
       recv: {
         readExact: async (_length: number) => {
@@ -217,7 +259,7 @@ function scriptedStream(frames: Uint8Array[]) {
           return bytes;
         },
       },
-    },
+    }),
   };
 }
 

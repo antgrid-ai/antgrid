@@ -9,7 +9,7 @@ import 'package:iroh_quic/iroh_quic.dart' as iroh;
 import 'relay_origin.dart';
 import 'connection_attempt.dart';
 
-const peerAlpn = 'antgrid/peer/1';
+const peerAlpn = 'antgrid/peer/2';
 const maxPeerRecordBytes =
     kMaxFramePayload + maxPeerFrameHeaderBytes + peerFrameFixedPrefix;
 
@@ -99,6 +99,15 @@ class NativeEndpointOwner {
           'AUTHORIZATION_DENIED',
           terminal: true,
         );
+      // The session stream carries the same open-frame prefix as every later
+      // stream, but its I/O stays on this class's reader/writer: a
+      // NativePeerStream would turn session backpressure into a stream reset
+      // and drop the write timeout the credit/frag path relies on.
+      final body = encodeStreamOpenFrame(const SessionStreamOpen());
+      final prefixed = Uint8List(4 + body.length);
+      ByteData.sublistView(prefixed).setUint32(0, body.length, Endian.big);
+      prefixed.setRange(4, prefixed.length, body);
+      await send.writeAll(prefixed);
       emitPeerLifecycle(
         diagnostic,
         'peer:iroh-established',
@@ -160,12 +169,6 @@ class IrohPeerLink implements PeerLink, MultiStreamPeerLink {
 
   void _start() {
     unawaited(_read());
-    unawaited(
-      _connection.acceptBi().then(
-        (_) => _fail('EXTRA_STREAM', false),
-        onError: (Object _) {},
-      ),
-    );
     unawaited(
       _connection.acceptUni().then(
         (_) => _fail('EXTRA_STREAM', false),
@@ -339,6 +342,17 @@ abstract interface class PeerStreamSend {
 /// The receive half a [NativePeerStream] reads through.
 abstract interface class PeerStreamRecv {
   Future<Uint8List> readExact(int length);
+}
+
+/// The UTF-8 JSON body of a stream's first record, with no length prefix —
+/// the same encoding on the session stream (written inline by [dial]) and on
+/// every later stream ([PeerStreamOpener.open]).
+Uint8List encodeStreamOpenFrame(StreamOpen open) {
+  final body = Uint8List.fromList(utf8.encode(jsonEncode(open.toJson())));
+  if (body.length > kStreamOpenMaxBytes) {
+    throw const PeerConnectionFailure('STREAM_OPEN_TOO_LARGE', terminal: true);
+  }
+  return body;
 }
 
 /// Why a [NativePeerStream] asks its link to retire the whole connection.
@@ -629,15 +643,7 @@ class PeerStreamOpener {
     required int maxQueuedBytes,
     required Future<void> Function(PeerStreamFatalCause) onConnectionFatal,
   }) async {
-    final openBytes = Uint8List.fromList(
-      utf8.encode(jsonEncode(open.toJson())),
-    );
-    if (openBytes.length > kStreamOpenMaxBytes) {
-      throw const PeerConnectionFailure(
-        'STREAM_OPEN_TOO_LARGE',
-        terminal: true,
-      );
-    }
+    final openBytes = encodeStreamOpenFrame(open);
     if (!authorized()) {
       throw const PeerConnectionFailure(
         'AUTHORIZATION_DENIED',

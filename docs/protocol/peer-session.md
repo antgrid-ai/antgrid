@@ -26,6 +26,48 @@ a *different* endpoint for the same device cannot sit alongside it: while the le
 held endpoint, the newcomer is the one closed — a second endpoint never evicts a live, authorized one.
 Only when the held endpoint has lost its authorization is it retired in the newcomer's favour.
 
+## 1a. Streams
+
+ALPN `antgrid/peer/2`. Every native bidirectional stream — the session stream included — opens with one
+open-frame record, `[u32 BE len][UTF-8 JSON StreamOpen]`; the body is raw JSON, not a peer frame. Schema
+and codecs: `StreamOpen`/`StreamRefused`, `encodeStreamOpen`/`decodeStreamOpen`,
+`encodeStreamRefused`/`decodeStreamRefused` (`packages/antgrid-wire/src/stream-open.ts`).
+
+**The first stream** the bridge accepts must declare `{kind:"session"}`. A missing, unparseable or
+non-session first open closes the connection (code `2n`, protocol violation) rather than being refused
+in-band — there is no session yet worth keeping alive. Once validated, the session stream carries the
+rest of this document unchanged: peer frames, the hello (§2), credits (§5) and frag, all on the same
+stream, with no open acknowledgement.
+
+**Every later stream** is admitted in its own task by `PeerStreamAcceptor`
+(`bridge/src/peer/stream-dispatch.ts`), so stream *N+1* is never blocked behind stream *N*'s open-frame
+read. Admission order per stream:
+
+1. A pending-open cap per peer (`STREAM_MAX_PENDING_OPENS_PER_PEER`) — over cap is refused
+   `CAP_EXCEEDED` without being read.
+2. The open frame is read under a 5s deadline; a missed deadline resets the stream's send half (the read
+   still holds the recv mutex, so `recv.stop` waits until that read settles, and a late frame is never
+   admitted) and a native read failure (peer FIN/reset) drops the stream silently. Neither costs the
+   connection.
+3. A peer no longer authorized gets nothing written; the connection is retired as unauthorized instead.
+4. An unparseable, zero-length or oversized open frame, or `{kind:"session"}` on a later stream (the
+   session stream is already open), is refused `INVALID`.
+5. A non-session open before the session is established is refused `NOT_READY`.
+6. A well-formed kind with no registered handler is refused `NOT_ALLOWED`.
+
+Refusals are in-band `{type:"stream:refused", code, message}` followed by FIN — the Dart binding cannot
+read a QUIC reset code, so every refusal the app must act on has to be a record it can decode. Reset and
+stop codes (`STREAM_STOP_REFUSED`, `STREAM_RESET_OPEN_TIMEOUT`, `STREAM_RESET_REFUSED`,
+`bridge/src/peer/stream-dispatch.ts`) are bridge-side diagnostics only. A refused or timed-out later
+stream never costs the connection; only an unauthorized peer or a first-stream protocol violation does.
+
+As of Stage A wave A1 the handler table is empty, so every well-formed later stream is refused
+`NOT_ALLOWED` — project, terminal and tunnel streams (and their own per-kind caps) arrive with their
+handlers in later waves. The QUIC-level cap (`STREAM_MAX_BIDI_STREAMS_PER_CONNECTION`) is set once per
+connection via `setMaxConcurrentBiStreams`, synchronously after the ALPN check. All caps are defined once
+in `packages/antgrid-wire/src/stream-open.ts` and hand-mirrored in
+`packages/antgrid_relay_client/lib/src/models/stream_open.dart`.
+
 ## 2. The hello
 
 One plaintext hello establishes a session per connection:

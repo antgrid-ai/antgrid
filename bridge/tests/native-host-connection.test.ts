@@ -3,9 +3,37 @@ import { netwatch } from "../src/netwatch";
 import type { Connection } from "@number0/iroh";
 import { NativeHostConnection, evalIrohBindAddress } from "../src/peer/native-host-connection";
 import vector from "../../evals/fixtures/endpoint-registration-vectors.json";
-import { encodePeerFrame } from "antgrid-wire";
+import { PEER_ALPN, STREAM_MAX_BIDI_STREAMS_PER_CONNECTION, STREAM_OPEN_MAX_BYTES, decodeStreamRefused, encodePeerFrame, encodeStreamOpen } from "antgrid-wire";
 import { MessageBus } from "../src/message-bus";
 import type { PendingSinkWrite, QueuedAppFrame } from "../src/send-scheduler";
+
+// A1: every native bidi stream, the session stream included, opens with one
+// `[u32 BE len][UTF-8 JSON StreamOpen]` record before it carries anything
+// else (docs/iroh-reduction/stage-A-A1-contract.md §0). `withSessionOpen`
+// prepends the default `{"kind":"session"}` record ahead of whatever a test
+// scripted for the session stream itself, so every existing fixture keeps
+// working unmodified past the open-frame read `acceptPeer` now does first.
+function sessionOpenRecord(): { prefix: number[]; body: number[] } {
+  const body = Array.from(encodeStreamOpen({ kind: "session" }));
+  const prefix = Buffer.alloc(4);
+  prefix.writeUInt32BE(body.length, 0);
+  return { prefix: Array.from(prefix), body };
+}
+
+function withSessionOpen<T extends { recv: { readExact: (length: number) => Promise<number[]> } }>(stream: T): T {
+  const record = sessionOpenRecord();
+  let stage: 0 | 1 | 2 = 0;
+  return {
+    ...stream,
+    recv: {
+      readExact: async (length: number) => {
+        if (stage === 0) { stage = 1; return record.prefix; }
+        if (stage === 1) { stage = 2; return record.body; }
+        return stream.recv.readExact(length);
+      },
+    },
+  };
+}
 
 test("eval native bind seam accepts loopback only and is inert outside evals", () => {
   expect(evalIrohBindAddress({ ANTGRID_EVAL_TEST: "1", ANTGRID_EVAL_IROH_BIND_ADDR: "127.0.0.1:19001" }))
@@ -17,8 +45,11 @@ test("eval native bind seam accepts loopback only and is inert outside evals", (
   expect(() => evalIrohBindAddress({ ANTGRID_EVAL_TEST: "1", ANTGRID_EVAL_IROH_BIND_ADDR: "127.0.0.1:65536" }))
     .toThrow("INVALID_EVAL_BIND_ADDR");
 });
-function fixture(now?: () => number) {
+function fixture(now?: () => number, schedule?: (callback: () => void, ms: number) => () => void) {
   let allowed = true;
+  const lifecycle: { now?: () => number; schedule?: (callback: () => void, ms: number) => () => void } = {};
+  if (now) lifecycle.now = now;
+  if (schedule) lifecycle.schedule = schedule;
   const client = new NativeHostConnection({
     central: {
       url: "ws://localhost:1", identity: { deviceId: vector.challenge.deviceId, deviceName: "test", createdAt: "",
@@ -31,7 +62,7 @@ function fixture(now?: () => number) {
       enrollment: vector.challenge, endpointSecret: vector.endpointSeed, licenseApiUrl: "https://backend.invalid",
       getLicenseToken: () => "test-only",
       remoteAccessEnabled: () => allowed,
-      ...(now ? { lifecycle: { now } } : {}),
+      ...(Object.keys(lifecycle).length ? { lifecycle } : {}),
     },
   });
   const endpointId = "a".repeat(64);
@@ -57,18 +88,96 @@ function fixture(now?: () => number) {
 function connection(endpointId: string, firstStream = Promise.resolve({
   send: { writeAll: async (_bytes: number[]) => {} },
   recv: { readExact: (_length: number) => new Promise<number[]>(() => {}) },
-})) {
+}), alpn = PEER_ALPN, acceptUni: () => Promise<unknown> = () => new Promise(() => {})) {
   let streams = 0;
-  let closes = 0;
+  let acceptBiCalls = 0;
+  const closeCodes: bigint[] = [];
+  const maxBiCalls: bigint[] = [];
+  const order: string[] = [];
+  // A per-test queue for streams AFTER the session stream: an `acceptBi`
+  // with nothing queued waits for the next `pushLaterStream`, like a real
+  // connection whose peer has not opened another stream yet.
+  const laterStreams: unknown[] = [];
+  const laterWaiters: Array<(stream: unknown) => void> = [];
   const fake = {
     remoteId: () => ({ toString: () => endpointId }),
-    alpn: () => Array.from(Buffer.from("antgrid/peer/1")),
-    acceptBi: () => streams++ === 0 ? firstStream : new Promise(() => {}),
+    alpn: () => Array.from(Buffer.from(alpn)),
+    setMaxConcurrentBiStreams: (n: bigint) => { order.push("setMaxConcurrentBiStreams"); maxBiCalls.push(n); },
+    acceptBi: () => {
+      acceptBiCalls++;
+      order.push("acceptBi");
+      return streams++ === 0 ? firstStream.then(withSessionOpen) : (laterStreams.length ? Promise.resolve(laterStreams.shift()) : new Promise((resolve) => laterWaiters.push(resolve)));
+    },
+    acceptUni: () => acceptUni(),
+    closed: () => new Promise(() => {}),
+    close: (code: bigint) => { closeCodes.push(code); },
+  };
+  return {
+    native: fake as unknown as Connection,
+    closes: () => closeCodes.length,
+    closeCodes: () => closeCodes,
+    acceptBiCalls: () => acceptBiCalls,
+    maxBiCalls,
+    order,
+    pushLaterStream: (stream: { send: unknown; recv: { readExact: (length: number) => Promise<number[]> } }) => {
+      const waiter = laterWaiters.shift();
+      if (waiter) waiter(stream);
+      else laterStreams.push(stream);
+    },
+  };
+}
+
+/** Like `connection()`, but the caller controls the EXACT bytes served for
+ *  the session stream's own open frame, instead of the well-formed
+ *  `{"kind":"session"}` record `withSessionOpen` injects — for exercising the
+ *  bridge's validation of that first record itself (§3.3 step 6). */
+function connectionWithRawFirstStream(endpointId: string, firstStream: Promise<{
+  send: { writeAll: (bytes: number[]) => Promise<void> };
+  recv: { readExact: (length: number) => Promise<number[]> };
+}>, alpn = PEER_ALPN) {
+  let streams = 0;
+  let acceptBiCalls = 0;
+  const closeCodes: bigint[] = [];
+  const fake = {
+    remoteId: () => ({ toString: () => endpointId }),
+    alpn: () => Array.from(Buffer.from(alpn)),
+    setMaxConcurrentBiStreams: (_n: bigint) => {},
+    acceptBi: () => { acceptBiCalls++; return streams++ === 0 ? firstStream : new Promise(() => {}); },
     acceptUni: () => new Promise(() => {}),
     closed: () => new Promise(() => {}),
-    close: () => { closes++; },
+    close: (code: bigint) => { closeCodes.push(code); },
   };
-  return { native: fake as unknown as Connection, closes: () => closes };
+  return { native: fake as unknown as Connection, closeCodes: () => closeCodes, acceptBiCalls: () => acceptBiCalls };
+}
+
+/** A `{send, recv}` fake that serves each element of `steps` in order off
+ *  `readExact`, then hangs — for scripting a raw (non-session-wrapped) open
+ *  frame directly onto the session stream. */
+function rawStream(steps: number[][]) {
+  let index = 0;
+  return {
+    send: { writeAll: async (_bytes: number[]) => {} },
+    recv: {
+      readExact: async (_length: number): Promise<number[]> => {
+        if (index >= steps.length) return new Promise<number[]>(() => {});
+        return steps[index++]!;
+      },
+    },
+  };
+}
+
+function lengthPrefix(length: number): number[] {
+  const buf = Buffer.alloc(4);
+  buf.writeUInt32BE(length, 0);
+  return Array.from(buf);
+}
+
+async function until(condition: () => boolean, timeoutMs = 2_000): Promise<void> {
+  const deadlineAt = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() > deadlineAt) throw new Error("condition not met in time");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
 }
 
 test("native endpoint identity must be present in authoritative peer inventory", async () => {
@@ -475,4 +584,193 @@ test("pending native admissions are bounded and late arrivals are retired after 
   await new Promise((r) => setTimeout(r, 0));
   expect(access.admissions.size).toBe(0);
   expect(peers.every((p) => p.closes() === 1)).toBe(true);
+});
+
+// --- A1: multi-stream admission (docs/iroh-reduction/stage-A-A1-contract.md §3.3) ---
+
+test("setMaxConcurrentBiStreams(256n) is called before the first acceptBi", async () => {
+  const f = fixture();
+  try {
+    const peer = connection(f.endpointId);
+    await f.access.acceptPeer(peer.native);
+    expect(peer.maxBiCalls).toEqual([BigInt(STREAM_MAX_BIDI_STREAMS_PER_CONNECTION)]);
+    expect(peer.order.indexOf("setMaxConcurrentBiStreams")).toBeGreaterThanOrEqual(0);
+    expect(peer.order.indexOf("setMaxConcurrentBiStreams")).toBeLessThan(peer.order.indexOf("acceptBi"));
+  } finally { f.client.close(); }
+});
+
+test("a connection on the stale ALPN antgrid/peer/1 is closed with code 2 before any stream is accepted", async () => {
+  const f = fixture();
+  try {
+    const peer = connection(f.endpointId, undefined, "antgrid/peer/1");
+    await f.access.acceptPeer(peer.native);
+    expect(peer.closeCodes()).toEqual([2n]);
+    expect(peer.acceptBiCalls()).toBe(0);
+    expect(peer.maxBiCalls).toEqual([]);
+  } finally { f.client.close(); }
+});
+
+test("a first stream declaring a non-session kind closes the connection with code 2", async () => {
+  const f = fixture();
+  const body = Array.from(encodeStreamOpen({ kind: "project", projectId: "p1" }));
+  const peer = connectionWithRawFirstStream(f.endpointId, Promise.resolve(rawStream([lengthPrefix(body.length), body])));
+  try {
+    await f.access.acceptPeer(peer.native);
+    expect(peer.closeCodes()).toEqual([2n]);
+  } finally { f.client.close(); }
+});
+
+test("a first stream with an unparseable or oversized open frame closes the connection with code 2", async () => {
+  const f = fixture();
+  const garbage = [0xff, 0xfe, 0xfd];
+  const unparseable = connectionWithRawFirstStream(f.endpointId, Promise.resolve(rawStream([lengthPrefix(garbage.length), garbage])));
+  try {
+    await f.access.acceptPeer(unparseable.native);
+    expect(unparseable.closeCodes()).toEqual([2n]);
+  } finally { f.client.close(); }
+
+  const g = fixture();
+  const oversized = connectionWithRawFirstStream(g.endpointId, Promise.resolve(rawStream([lengthPrefix(STREAM_OPEN_MAX_BYTES + 1)])));
+  try {
+    await g.access.acceptPeer(oversized.native);
+    expect(oversized.closeCodes()).toEqual([2n]);
+  } finally { g.client.close(); }
+});
+
+test("a first stream with no open frame within 5s retires the attempt", async () => {
+  const timers: Array<{ ms: number; fire: () => void; cancelled: boolean }> = [];
+  const schedule = (callback: () => void, ms: number) => {
+    const timer = { ms, fire: () => { if (!timer.cancelled) callback(); }, cancelled: false };
+    timers.push(timer);
+    return () => { timer.cancelled = true; };
+  };
+  const f = fixture(undefined, schedule);
+  const hanging = { send: { writeAll: async (_bytes: number[]) => {} }, recv: { readExact: () => new Promise<number[]>(() => {}) } };
+  const peer = connectionWithRawFirstStream(f.endpointId, Promise.resolve(hanging));
+  try {
+    const admission = f.access.acceptPeer(peer.native);
+    await until(() => timers.some((t) => t.ms === 5_000 && !t.cancelled));
+    timers.find((t) => t.ms === 5_000 && !t.cancelled)!.fire();
+    await admission;
+    // `deadline()`'s own timeout callback closes once, and the
+    // `retireOwnAttempt` it lands in closes again on the same code (1n) —
+    // both calls agree on the code, which is what the retired-not-refused
+    // half of D-3 requires.
+    expect(peer.closeCodes().length).toBeGreaterThan(0);
+    expect(peer.closeCodes().every((code) => code === 1n)).toBe(true);
+  } finally { f.client.close(); }
+});
+
+/** A later stream with the full send/recv surface `PeerStreamAcceptor` and
+ *  `refuseStream` drive, recording every write so a test can decode the
+ *  in-band refusal. */
+function laterStream(steps: number[][]) {
+  const written: number[][] = [];
+  const stops: bigint[] = [];
+  let index = 0;
+  return {
+    stream: {
+      send: {
+        writeAll: async (bytes: number[]) => { written.push(bytes); },
+        setPriority: async (_p: number) => {},
+        reset: async (_code: bigint) => {},
+        finish: async () => {},
+      },
+      recv: {
+        readExact: async (_length: number): Promise<number[]> => {
+          if (index >= steps.length) return new Promise<number[]>(() => {});
+          return steps[index++]!;
+        },
+        stop: async (code: bigint) => { stops.push(code); },
+      },
+    },
+    stops,
+    refusalCode: (): string | undefined => {
+      if (!written.length) return undefined;
+      const all = Buffer.concat(written.map((bytes) => Buffer.from(bytes)));
+      return decodeStreamRefused(all.subarray(4, 4 + all.readUInt32BE(0)))?.code;
+    },
+    written,
+  };
+}
+
+test("a second bidi stream is refused in-band instead of retiring the connection", async () => {
+  const f = fixture();
+  const peer = connection(f.endpointId);
+  try {
+    await f.access.acceptPeer(peer.native);
+    expect(peer.closeCodes()).toEqual([]);
+    const body = Array.from(encodeStreamOpen({ kind: "project", projectId: "p1" }));
+    const later = laterStream([lengthPrefix(body.length), body]);
+    peer.pushLaterStream(later.stream);
+    await until(() => later.stops.length > 0);
+    // No hello has been exchanged, so the real `established` wiring must
+    // answer NOT_READY; the connection stays up either way.
+    expect(later.refusalCode()).toBe("NOT_READY");
+    expect(peer.closeCodes()).toEqual([]);
+    expect(f.access.nativePeers.size).toBe(1);
+  } finally { f.client.close(); }
+});
+
+test("a later stream opened after remote access is switched off writes nothing and retires the connection as unauthorized", async () => {
+  const f = fixture();
+  const peer = connection(f.endpointId);
+  try {
+    await f.access.acceptPeer(peer.native);
+    f.setAllowed(false);
+    const body = Array.from(encodeStreamOpen({ kind: "project", projectId: "p1" }));
+    const later = laterStream([lengthPrefix(body.length), body]);
+    peer.pushLaterStream(later.stream);
+    await until(() => peer.closeCodes().length > 0);
+    expect(peer.closeCodes()).toEqual([3n]);
+    expect(later.written).toEqual([]);
+    expect(f.access.nativePeers.size).toBe(0);
+  } finally { f.client.close(); }
+});
+
+test("remote access switched off while the session open frame is read retires the attempt before admission", async () => {
+  const f = fixture();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const record = Array.from(encodeStreamOpen({ kind: "session" }));
+  let index = 0;
+  const steps = [lengthPrefix(record.length), record];
+  let reading = false;
+  const first = {
+    send: { writeAll: async (_bytes: number[]) => {} },
+    recv: {
+      readExact: async (_length: number): Promise<number[]> => {
+        reading = true;
+        await gate;
+        if (index >= steps.length) return new Promise<number[]>(() => {});
+        return steps[index++]!;
+      },
+    },
+  };
+  const peer = connectionWithRawFirstStream(f.endpointId, Promise.resolve(first));
+  try {
+    const admission = f.access.acceptPeer(peer.native);
+    await until(() => reading);
+    expect(f.access.nativePeers.size).toBe(1);
+    const admit = spyOn(f.client.peers as unknown as { admitPeer: (peerId: string, pub: string) => void }, "admitPeer");
+    f.setAllowed(false);
+    release();
+    await admission;
+    // Identity is never registered for an attempt whose authorization lapsed
+    // during the read; the session reader's own check would only catch it
+    // afterwards, as unauthorized, with the peer already admitted.
+    expect(admit).not.toHaveBeenCalled();
+    expect(peer.closeCodes()).toEqual([1n]);
+    expect(f.access.nativePeers.size).toBe(0);
+  } finally { f.client.close(); }
+});
+
+test("a uni stream still retires the connection as a protocol violation", async () => {
+  const f = fixture();
+  const peer = connection(f.endpointId, undefined, PEER_ALPN, () => Promise.resolve({}));
+  try {
+    await f.access.acceptPeer(peer.native);
+    await until(() => peer.closeCodes().length > 0);
+    expect(peer.closeCodes()).toEqual([2n]);
+  } finally { f.client.close(); }
 });

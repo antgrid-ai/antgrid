@@ -96,6 +96,10 @@ try {
   await child.stdin.flush();
 
   await next("established");
+  // No stream handler is registered yet, so a well-formed non-session open
+  // from an established peer is refused in-band.
+  const refused = await next("stream-refused");
+  assert.equal(refused.code, "NOT_ALLOWED");
   // Central goes down only after E2E is up, so everything below proves the
   // native path carried it rather than a surviving WebSocket.
   fixture.takeCentralOffline();

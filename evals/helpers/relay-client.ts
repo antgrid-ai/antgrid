@@ -6,6 +6,7 @@ import { createMessage, parseMessage, type AbMessage } from "../../bridge/src/pr
 import {
   encodePeerFrame,
   decodePeerFrame,
+  encodeStreamOpen,
   CONTROL_STREAM_ID,
   PEER_ALPN,
   type PeerAuthorizationSnapshot,
@@ -86,6 +87,31 @@ function decodeTunnelSlice(frame: { data?: unknown; bodyEncoding?: unknown }): B
   if (data === "") return Buffer.alloc(0);
   const raw = Buffer.from(data, "base64");
   return frame.bodyEncoding === TUNNEL_GZIP_ENCODING ? Buffer.from(Bun.gunzipSync(raw)) : raw;
+}
+
+/** `[u32 BE len][bytes]`, the framing every stream-open and refusal record uses. */
+function prefixWithLength(bytes: Uint8Array): Uint8Array {
+  const out = Buffer.alloc(4 + bytes.length);
+  out.writeUInt32BE(bytes.length, 0);
+  Buffer.from(bytes.buffer, bytes.byteOffset, bytes.length).copy(out, 4);
+  return out;
+}
+
+/** Splits a byte stream into `[u32 BE len][body]` records, stopping at the
+ *  first short or truncated prefix (the tail of a raw readToEnd is never a
+ *  partial record in a well-formed reply, but a probe's hand-built input can
+ *  be anything). */
+function splitLengthPrefixedRecords(buf: Buffer): Uint8Array[] {
+  const records: Uint8Array[] = [];
+  let offset = 0;
+  while (offset + 4 <= buf.length) {
+    const len = buf.readUInt32BE(offset);
+    offset += 4;
+    if (offset + len > buf.length) break;
+    records.push(new Uint8Array(buf.subarray(offset, offset + len)));
+    offset += len;
+  }
+  return records;
 }
 
 export class RelayClient {
@@ -434,6 +460,10 @@ export class RelayClient {
     const stream = await connection.openBi();
     const records = new PeerRecords(stream, () => generation === this.nativeGeneration,
       () => connection.close(1n, []));
+    // The first record on every native stream, session included, declares
+    // its kind before anything else — PeerRecords queues in order, so this
+    // goes out ahead of the hello.
+    void records.send(encodeStreamOpen({ kind: "session" }));
     this.nativeConnection = connection;
     this.nativeRecords = records;
     void (async () => {
@@ -457,6 +487,73 @@ export class RelayClient {
     this.nativeRecords = null;
     this.nativeConnection?.close(1n, []);
     this.nativeConnection = null;
+  }
+
+  /** `connection.stableId()` of the live native connection, or null. */
+  get nativeConnectionId(): number | null {
+    return this.nativeConnection?.stableId() ?? null;
+  }
+
+  /** Opens one extra bidi stream on the live native connection, writes `bytes`
+   *  (length-prefixed by default, or verbatim for a hand-built oversize
+   *  prefix), then reads whatever the peer sends back and splits it into
+   *  `[u32 len]`-framed records. Drives streams the session protocol never
+   *  opens, for the stream-admission gate. */
+  async openNativeStreamRaw(
+    bytes: Uint8Array,
+    opts?: { framed?: boolean; timeoutMs?: number },
+  ): Promise<{ records: Uint8Array[]; ended: "fin" | "error" | "timeout" }> {
+    const connection = this.nativeConnection;
+    if (!connection) throw new Error("Native connection is not established");
+    const framed = opts?.framed ?? true;
+    const timeoutMs = opts?.timeoutMs ?? 5_000;
+    const stream = await connection.openBi();
+    const outgoing = framed ? prefixWithLength(bytes) : bytes;
+    await stream.send.writeAll(Array.from(outgoing));
+
+    let ended: "fin" | "error" | "timeout";
+    let raw: Buffer = Buffer.alloc(0);
+    const read = stream.recv.readToEnd(65_536);
+    const timedOut = Bun.sleep(timeoutMs).then(() => "timeout" as const);
+    const settled = await Promise.race([
+      read.then((data) => ({ kind: "data" as const, data }), () => ({ kind: "error" as const })),
+      timedOut.then((kind) => ({ kind })),
+    ]);
+    if (settled.kind === "timeout") {
+      ended = "timeout";
+    } else if (settled.kind === "error") {
+      ended = "error";
+    } else {
+      ended = "fin";
+      raw = Buffer.from(settled.data);
+    }
+    stream.send.reset(0n).catch(() => {});
+    return { records: splitLengthPrefixedRecords(raw), ended };
+  }
+
+  /** Connects from the configured native endpoint to the configured target
+   *  with `alpn`. Returns "refused" if connect rejects or the connection
+   *  closes within `timeoutMs`, otherwise "connected" (and closes it). */
+  async probeNativeAlpn(alpn: string, timeoutMs = 5_000): Promise<"refused" | "connected"> {
+    const endpoint = this.nativeEndpoint;
+    const target = this.nativeTarget;
+    if (!endpoint || !target) throw new Error("Native endpoint is not configured");
+    let connection: Connection;
+    try {
+      connection = await endpoint.connect(
+        new EndpointAddr(EndpointId.fromString(target.endpointId), undefined, target.addresses),
+        Array.from(Buffer.from(alpn)),
+      );
+    } catch {
+      return "refused";
+    }
+    const outcome = await Promise.race([
+      connection.closed().then(() => "closed" as const, () => "closed" as const),
+      Bun.sleep(timeoutMs).then(() => "open" as const),
+    ]);
+    if (outcome === "closed") return "refused";
+    connection.close(1n, []);
+    return "connected";
   }
   /** Resolve once the underlying socket has closed (true), or false on timeout.
    *  Observes relay-initiated supersession/close. */

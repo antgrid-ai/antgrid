@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { MAX_FRAME_PAYLOAD, PEER_ALPN, decodePeerFrame, encodePeerFrame } from "antgrid-wire";
+import { MAX_FRAME_PAYLOAD, PEER_ALPN, STREAM_MAX_BIDI_STREAMS_PER_CONNECTION, decodePeerFrame, encodePeerFrame } from "antgrid-wire";
 import type { Connection, Endpoint, Incoming } from "@number0/iroh";
 import { CentralControlClient, type CentralControlOptions } from "../central-control-client";
 import { baseSlotDeviceId } from "../relay-slot";
@@ -15,6 +15,7 @@ import { EndpointLifecycle, EndpointFailure } from "./endpoint-lifecycle";
 import type { RemoteHostConnection } from "../remote-host-connection";
 import { frameIdFor } from "../netwatch";
 import { AdmissionRegistry, type AdmissionReservation } from "./admission-registry";
+import { PeerStreamAcceptor, readStreamOpen } from "./stream-dispatch";
 
 export interface NativePeerOptions extends PeerSessionOwnerOptions {
   enrollment: EnrollmentIdentity;
@@ -63,6 +64,7 @@ interface NativePeerContext {
   attemptGeneration: number;
   sessionGeneration: number;
   records?: PeerRecords;
+  streams?: PeerStreamAcceptor;
   cancelHelloTimer?: () => void;
   helloAttemptId?: string;
   retired: boolean;
@@ -218,6 +220,9 @@ export class NativePeerSessions extends PeerSessionOwner {
     const generation = this.admissionGeneration;
     const close = () => connection.close(3n, []);
     if (!Buffer.from(connection.alpn()).equals(Buffer.from(PEER_ALPN))) { connection.close(2n, []); return; }
+    // Synchronous and before any await: the accept loop below must never see
+    // a stream count the peer negotiated ahead of this cap taking effect.
+    connection.setMaxConcurrentBiStreams(BigInt(STREAM_MAX_BIDI_STREAMS_PER_CONNECTION));
     const endpointId = connection.remoteId().toString();
     let device = this.lease.current?.peers.find((peer) => peer.endpoint?.endpointId === endpointId);
     if (!device) {
@@ -280,6 +285,27 @@ export class NativePeerSessions extends PeerSessionOwner {
         !this.lease.allows(device.deviceId, endpointId) || this.nativePeers.get(peerId) !== peer) {
       this.retireOwnAttempt(peerId, peer); return;
     }
+    // Every native stream — the session stream included — opens with one
+    // open-frame record; only the first stream may declare `{kind:"session"}`,
+    // and a stream open frame violation here has no session yet to keep
+    // alive, unlike a later stream's in-band refusal.
+    let opened;
+    try {
+      opened = await deadline(readStreamOpen(stream.recv), () => connection.close(1n, []), this.nativeOpts.lifecycle?.schedule);
+    } catch {
+      this.retireOwnAttempt(peerId, peer);
+      return;
+    }
+    if (!opened.ok || opened.open.kind !== "session") {
+      if (this.nativePeers.get(peerId) === peer) this.retirePeer(peerId, "protocol-violation");
+      else connection.close(2n, []);
+      return;
+    }
+    // The read above awaited, so every step-5 check can have gone stale.
+    if (this.stopped || generation !== this.admissionGeneration || !this.nativeOpts.remoteAccessEnabled() ||
+        !this.lease.allows(device.deviceId, endpointId) || this.nativePeers.get(peerId) !== peer) {
+      this.retireOwnAttempt(peerId, peer); return;
+    }
     // Identity exists before the first read: the read loop's very first
     // frame may be the hello, and `handleHello` fails closed on an absent
     // `peerPubkeyFor`.
@@ -299,7 +325,8 @@ export class NativePeerSessions extends PeerSessionOwner {
         attemptGeneration,
         leaseRemainingMs: this.lease.remainingMs,
       } });
-    void connection.acceptBi().then(() => records.close("protocol-violation"), () => {});
+    // Later bidi streams belong to `PeerStreamAcceptor` (admitted or refused
+    // in-band, never fatal); nothing uses a uni stream, so one is a violation.
     void connection.acceptUni().then(() => records.close("protocol-violation"), () => {});
     void connection.closed().then(() => {
       if (this.nativePeers.get(peerId) === peer) records.close();
@@ -315,6 +342,18 @@ export class NativePeerSessions extends PeerSessionOwner {
         }
       } catch { records.close("protocol-violation"); }
     })();
+    peer.streams = new PeerStreamAcceptor({
+      connection,
+      peerId,
+      isCurrent: () => this.nativePeers.get(peerId) === peer,
+      authorized: () => this.authorized(peerId, endpointId),
+      established: () => this.sessions.has(peerId),
+      onUnauthorized: () => { if (this.nativePeers.get(peerId) === peer) this.retirePeer(peerId, "unauthorized"); },
+      handlers: {},
+      schedule: this.nativeOpts.lifecycle?.schedule,
+      diagnostic: (type, detail) => this.recordDiagnostic({ dir: "event", kind: "lifecycle", transport: "iroh", msgType: type, detail }),
+    });
+    peer.streams.start();
   }
 
   private schedule(callback: () => void, ms: number): () => void {
@@ -369,6 +408,7 @@ export class NativePeerSessions extends PeerSessionOwner {
     peer.retired = true;
     this.nativePeers.delete(peerId);
     peer.cancelHelloTimer?.();
+    peer.streams?.stop();
     peer.connection.close(reason === "unauthorized" ? 3n : reason === "protocol-violation" ? 2n : 1n, []);
     peer.records?.close(reason);
     super.dropSession(peerId, "iroh");

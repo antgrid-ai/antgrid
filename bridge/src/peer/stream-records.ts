@@ -30,6 +30,7 @@ export interface StreamSend {
   writeAll(bytes: number[]): Promise<void>;
   setPriority(p: number): Promise<void>;
   reset(errorCode: bigint): Promise<void>;
+  finish(): Promise<void>;
 }
 
 /** The read half of a native bidirectional stream. */
@@ -76,6 +77,13 @@ export class StreamRecordWriter {
   private stopped = false;
   private queuedBytes = 0;
   private prioritySet = false;
+  // `finishing` gates new sends the instant `finish()` is called; `finished`
+  // marks that `send.finish()` has actually been issued. They are distinct so
+  // a `finish()` racing an overflow/unauthorized failure still resolves (see
+  // `resolveFinishWaiters`) without ever having reached the native call.
+  private finishing = false;
+  private finished = false;
+  private finishWaiters: Array<() => void> = [];
 
   constructor(
     private readonly stream: { send: StreamSend },
@@ -87,7 +95,7 @@ export class StreamRecordWriter {
   ) {}
 
   send(frame: Uint8Array): Promise<StreamSendOutcome> {
-    if (this.stopped) return Promise.resolve("dropped");
+    if (this.stopped || this.finishing) return Promise.resolve("dropped");
     if (!this.authorized()) {
       this.failConnection("unauthorized");
       return Promise.resolve("dropped");
@@ -136,9 +144,39 @@ export class StreamRecordWriter {
         record.bytes.fill(0);
         record.settle(outcome === "complete" ? "sent" : "dropped");
       }
+      // The queue this `finish()` promised to drain is empty now, and nothing
+      // can have re-queued behind it: `send()` already refuses once
+      // `finishing` is set, so this check and the native call are atomic with
+      // respect to any caller still on this microtask queue.
+      if (this.finishing && !this.finished && !this.stopped && !this.queue.length) {
+        await this.stream.send.finish().catch(() => {});
+        this.finished = true;
+        this.resolveFinishWaiters();
+      }
     } finally {
       this.writing = false;
     }
+  }
+
+  /** Resolves once every record queued before the call has been written and
+   *  `send.finish()` has been issued. A no-op if the writer already stopped
+   *  (overflow, stream-lost, unauthorized) or `finish()` already ran. */
+  finish(): Promise<void> {
+    if (this.stopped || this.finished) return Promise.resolve();
+    if (!this.finishing) {
+      this.finishing = true;
+      void this.drain();
+    }
+    return new Promise((resolve) => {
+      if (this.finished) resolve();
+      else this.finishWaiters.push(resolve);
+    });
+  }
+
+  private resolveFinishWaiters(): void {
+    const waiters = this.finishWaiters;
+    this.finishWaiters = [];
+    for (const resolve of waiters) resolve();
   }
 
   /** Checks `stopped` between slices, not just before the record starts, so
@@ -169,6 +207,7 @@ export class StreamRecordWriter {
     if (this.stopped) return;
     this.stopped = true;
     this.dropQueue();
+    this.resolveFinishWaiters();
     // Never awaited: the stream (or connection) may already be gone.
     this.stream.send.reset(this.resetCode).catch(() => {});
     this.onFailure(reason);
@@ -178,6 +217,7 @@ export class StreamRecordWriter {
     if (this.stopped) return;
     this.stopped = true;
     this.dropQueue();
+    this.resolveFinishWaiters();
     this.onFailure(reason);
   }
 
