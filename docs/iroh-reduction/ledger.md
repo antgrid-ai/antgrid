@@ -48,7 +48,13 @@ the code wins over both.
 | B | W2c delete Dart E2E crypto and the vector fixture | done | `a7684de7` |
 | B | W3 docs and CLAUDE.md rules | done | `0eec4443` |
 | B | follow-up: evals typecheck, stale public crypto claims, uncalled `hasEstablishedSession` | done | see git log |
-| A | — | not started | |
+| A | A0a bridge per-stream record I/O | done | `a6e8ca51` |
+| A | A0b stream-open wire schema and refusal codes | done | `a1e9284f` |
+| A | A0c Dart multi-stream peer link | done | `fb396bb0` |
+| A | A0d app hazards B and C (terminal drain, history boundary) | done | `7c97b72c` |
+| A | A1 multi-stream admission, ALPN `antgrid/peer/2` | done | `7523c75a` |
+| A | A2 terminal streams, A3 tunnel streams | in progress | |
+| A | A4 project streams, A5 deletions, A6 docs | not started | |
 
 ### Stage C gate evidence (executed by the wave commit agents)
 
@@ -66,7 +72,7 @@ the code wins over both.
 - A misspelt non-access TOML key is silently ignored upstream. The guards catch only a missing file or a missing `[access.http]`.
 - The `[limits]` values are placeholders the implementer picked (accept 32/s, burst 64; rx 10 MiB/s, burst 2 MiB). They need an owner call.
 - The W2 throttle stamp survives a failed refresh, so a new device that hits a transient web error is refused for up to 5s. Accepted as minor.
-- Production cutover order is in `deploy/iroh/README.md`.
+- Production cutover order is in `deploy/iroh/README.md`. The `/internal/disconnect` target must leave the live `PEER_POLICY_TARGETS` before the custom relay is retired, or the outbox wedges.
 
 ### Stage B gate evidence (executed)
 
@@ -79,4 +85,4 @@ the code wins over both.
 - `site/src/pages/privacy.md` still claims X25519 + AES-256-GCM app-layer encryption. It is a legal page, so the owner has to reword it; nothing else public still makes that claim.
 - `app/build/windows` must be deleted before the next Windows build anywhere, because W2a removed `cryptography_flutter` from the plugin set.
 - The eval client has no `dart test` suite. The evals cover it through `evals/helpers/dart-app-client.ts`.
-- `iroh-interop-smoke.ts` and `gate-iroh-host-authorization` still label their pass line `e2e: "real"`, meaning a real session end to end. The label is cosmetic. The `/internal/disconnect` target must leave the live `PEER_POLICY_TARGETS` before the custom relay is retired, or the outbox wedges.
+- `iroh-interop-smoke.ts` and `gate-iroh-host-authorization` still label their pass line `e2e: "real"`, meaning a real session end to end. The label is cosmetic.
