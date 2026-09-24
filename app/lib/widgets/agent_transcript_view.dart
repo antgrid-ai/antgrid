@@ -694,6 +694,15 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
         onDismiss: () => setState(() => _mentionDismissed = true),
       );
     }
+    // Esc stops a running turn — the agent CLIs' own interrupt key, so the
+    // habit carries over from terminal mode. Below the popups above, which
+    // take Esc first to close themselves.
+    if (event is KeyDownEvent &&
+        event.logicalKey == LogicalKeyboardKey.escape &&
+        _cachedState?.openTurn != null) {
+      _service()?.cancel(widget.sessionId);
+      return KeyEventResult.handled;
+    }
     return KeyEventResult.ignored;
   }
 

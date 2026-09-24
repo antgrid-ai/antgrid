@@ -24,6 +24,7 @@ import '../design/widgets/ab_tap_target.dart';
 import '../design/widgets/ab_tooltip.dart';
 import '../design/widgets/ab_loading.dart';
 import '../design/widgets/ab_separator.dart';
+import '../keyboard/app_shortcuts.dart';
 import '../models/ab_message.dart'
     show GitFileStatusEntry, GitCommitFileEntry, GitLogEntry, GitStashEntry;
 import '../models/git_sync_state.dart';
@@ -317,6 +318,17 @@ const double _stashBannerMaxHeight = 132;
 /// once so the loading/error/data branches can't drift in how they wrap the
 /// header. [onBack] is forwarded to the header (only the compact diff-viewing
 /// data branch supplies it).
+/// Re-pulls everything the panel shows: the file tree (which, server-side,
+/// forces a fresh git-status read alongside it — see the bridge's
+/// `file:tree:root:request` handler), the ahead/behind sync counts, and the
+/// commit log. One action for all three: from here they read as one picture of
+/// the repository, not three independently-stale ones.
+void _refreshGit(FileService fileService) {
+  fileService.requestFullTree();
+  fileService.refreshSyncState();
+  fileService.loadHistory();
+}
+
 class _GitPanelScaffold extends StatelessWidget {
   const _GitPanelScaffold({
     required this.counts,
@@ -339,6 +351,15 @@ class _GitPanelScaffold extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    return CallbackShortcuts(
+      bindings: localShortcutBindings({
+        AppCommand.refresh: () => _refreshGit(fileService),
+      }),
+      child: _buildColumn(),
+    );
+  }
+
+  Widget _buildColumn() {
     return Column(
       children: [
         _GitChangesHeader(
@@ -593,24 +614,13 @@ class _GitChangesHeader extends StatelessWidget {
     );
   }
 
-  /// Re-pulls everything the panel shows: the file tree (which, server-side,
-  /// forces a fresh git-status read alongside it — see the bridge's
-  /// `file:tree:root:request` handler), the ahead/behind sync counts, and
-  /// the commit log. One button for all three: from here they read as one
-  /// picture of the repository, not three independently-stale ones.
-  void _refresh() {
-    fileService.requestFullTree();
-    fileService.refreshSyncState();
-    fileService.loadHistory();
-  }
-
   List<Widget> _actions(BuildContext context) => [
     SizedBox(
       width: AbTokens.rowHeightSm,
       child: AbIconButton(
         icon: AbIcons.refresh,
-        tooltip: 'Refresh',
-        onTap: _refresh,
+        tooltip: withShortcut('Refresh', AppCommand.refresh),
+        onTap: () => _refreshGit(fileService),
       ),
     ),
     const SizedBox(width: AbTokens.space6),

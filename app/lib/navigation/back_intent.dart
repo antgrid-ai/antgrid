@@ -2,7 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
+import 'package:flutter/services.dart' show SystemNavigator;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../design/ab_icons.dart';
@@ -316,7 +316,7 @@ class _BackHandlerState extends ConsumerState<BackHandler> {
   Widget build(BuildContext context) => widget.child;
 }
 
-/// Hosts the app's ONE `PopScope`, plus the desktop back/forward inputs.
+/// Hosts the app's ONE `PopScope`, plus the mouse back/forward buttons.
 ///
 /// Mounted at the top of `AppShell` so it covers both routes (New Session and
 /// the workspace) and every `WorkspaceShell` early return alike.
@@ -346,28 +346,20 @@ class AppBackScope extends ConsumerWidget {
           allowExit: isMobilePlatform,
         );
       },
-      child: CallbackShortcuts(
-        bindings: {
-          const SingleActivator(LogicalKeyboardKey.arrowLeft, alt: true): back,
-          const SingleActivator(LogicalKeyboardKey.arrowRight, alt: true):
-              nav.forward,
-          const SingleActivator(LogicalKeyboardKey.bracketLeft, meta: true):
-              back,
-          const SingleActivator(LogicalKeyboardKey.bracketRight, meta: true):
-              nav.forward,
+      // The keyboard's back/forward (Alt+←, ⌘[) are AppCommand.goBack/
+      // goForward in `keyboard/app_shortcuts.dart`, dispatched by
+      // AppShortcutScope with every other shortcut.
+      child: Listener(
+        onPointerDown: (event) {
+          // Mouse "back"/"forward" side buttons: kBackMouseButton (8),
+          // kForwardMouseButton (16). Guarded so a normal click never fires.
+          if (event.buttons == kBackMouseButton) {
+            back();
+          } else if (event.buttons == kForwardMouseButton) {
+            nav.forward();
+          }
         },
-        child: Listener(
-          onPointerDown: (event) {
-            // Mouse "back"/"forward" side buttons: kBackMouseButton (8),
-            // kForwardMouseButton (16). Guarded so a normal click never fires.
-            if (event.buttons == kBackMouseButton) {
-              back();
-            } else if (event.buttons == kForwardMouseButton) {
-              nav.forward();
-            }
-          },
-          child: child,
-        ),
+        child: child,
       ),
     );
   }

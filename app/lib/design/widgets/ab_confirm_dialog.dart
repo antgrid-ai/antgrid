@@ -1,3 +1,4 @@
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter/material.dart' show Dialog, Navigator, showDialog;
 
@@ -8,6 +9,26 @@ import 'ab_button.dart';
 import 'ab_icon_button.dart';
 import 'ab_switch.dart';
 import 'ab_text_field.dart';
+
+class _ConfirmIntent extends Intent {
+  const _ConfirmIntent();
+}
+
+/// Disabled — so the key is not consumed — unless Enter came from the body;
+/// see [_AbConfirmDialogState._enterFromBody].
+class _ConfirmAction extends Action<_ConfirmIntent> {
+  _ConfirmAction(this._state);
+  final _AbConfirmDialogState _state;
+
+  @override
+  bool isEnabled(_ConfirmIntent intent) => _state._enterFromBody;
+
+  @override
+  Object? invoke(_ConfirmIntent intent) {
+    if (_state._enterConfirms) _state._confirm();
+    return null;
+  }
+}
 
 class AbConfirmDialog extends StatefulWidget {
   final String title;
@@ -110,17 +131,59 @@ class _AbConfirmDialogState extends State<AbConfirmDialog> {
     }
   }
 
+  final _bodyFocus = FocusNode(debugLabel: 'confirm-dialog');
+  final _wordFocus = FocusNode(debugLabel: 'confirm-word');
+
   @override
   void dispose() {
     _controller?.dispose();
+    _bodyFocus.dispose();
+    _wordFocus.dispose();
     super.dispose();
   }
 
   void _cancel() =>
       Navigator.of(context).pop((confirmed: false, optionSelected: false));
 
+  void _confirm() => Navigator.of(
+    context,
+  ).pop((confirmed: true, optionSelected: _optionSelected));
+
+  /// Enter confirms, but never a destructive action on its own: one stray
+  /// keypress must not delete something. With a confirm word typed, the
+  /// deliberate part is already done and Enter just submits it.
+  bool get _enterConfirms =>
+      _confirmed && (!widget.destructive || widget.confirmWord != null);
+
   @override
   Widget build(BuildContext context) {
+    // Esc needs nothing here — the dialog route already dismisses on it.
+    return Shortcuts(
+      shortcuts: const {
+        SingleActivator(LogicalKeyboardKey.enter): _ConfirmIntent(),
+        SingleActivator(LogicalKeyboardKey.numpadEnter): _ConfirmIntent(),
+      },
+      child: Actions(
+        actions: {_ConfirmIntent: _ConfirmAction(this)},
+        // Takes focus so Enter lands here — except behind a confirm-word
+        // field, which autofocuses itself and passes Enter up to this binding.
+        child: Focus(
+          focusNode: _bodyFocus,
+          autofocus: widget.confirmWord == null,
+          child: _buildDialog(context),
+        ),
+      ),
+    );
+  }
+
+  /// Enter on a Tab-focused button bubbles up here too, and must press THAT
+  /// button — Cancel included — rather than confirm. The shortcut is only
+  /// claimed from the body or the confirm-word field; anywhere else it carries
+  /// on to the app's own Enter-activates binding.
+  bool get _enterFromBody =>
+      _bodyFocus.hasPrimaryFocus || _wordFocus.hasPrimaryFocus;
+
+  Widget _buildDialog(BuildContext context) {
     final controller = _controller;
     return Dialog(
       child: ConstrainedBox(
@@ -162,6 +225,7 @@ class _AbConfirmDialogState extends State<AbConfirmDialog> {
                 const SizedBox(height: AbTokens.space8),
                 AbTextField(
                   controller: controller,
+                  focusNode: _wordFocus,
                   hintText: widget.confirmWord,
                   autofocus: true,
                 ),
@@ -199,12 +263,7 @@ class _AbConfirmDialogState extends State<AbConfirmDialog> {
                     color: widget.destructive
                         ? context.antgrid.error
                         : context.antgrid.accent,
-                    onTap: _confirmed
-                        ? () => Navigator.of(context).pop((
-                            confirmed: true,
-                            optionSelected: _optionSelected,
-                          ))
-                        : null,
+                    onTap: _confirmed ? _confirm : null,
                   ),
                 ],
               ),

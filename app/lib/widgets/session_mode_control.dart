@@ -6,6 +6,8 @@ import '../design/widgets/ab_confirm_dialog.dart';
 import '../design/widgets/ab_menu.dart';
 import '../design/widgets/ab_snack_bar.dart';
 import '../design/widgets/pulsing_opacity.dart';
+import '../keyboard/app_command_registry.dart';
+import '../keyboard/app_shortcuts.dart';
 import '../models/agent_work_status.dart';
 import '../models/session_entry.dart';
 import '../project/project_session_registry.dart';
@@ -96,6 +98,79 @@ class SessionModeControl extends ConsumerWidget {
   }
 }
 
+/// What flipping the focused session's mode would do right now, or null when
+/// the flip is not on offer at all (no session, or a conversation that can no
+/// longer be resumed). The one reading of the rules behind
+/// [SessionModeMenuItem] and [SessionModeShortcut], so the row and the chord
+/// can never disagree about whether a switch is allowed.
+typedef _ModeFlip = ({
+  SessionEntry session,
+  String target,
+  bool inFlight,
+  bool enabled,
+  String disabledReason,
+});
+
+_ModeFlip? _watchModeFlip(WidgetRef ref) {
+  final active = ref.watch(activeSessionProvider);
+  if (active == null || !active.agentSessionResumable) return null;
+  final pending = ref.watch(pendingSessionModeProvider);
+  final mode = (ref.watch(activeSessionModeProvider) ?? active.mode) == 'chat'
+      ? 'chat'
+      : 'terminal';
+  final target = mode == 'chat' ? 'terminal' : 'chat';
+  final chatCapable = ref.watch(focusedToolChatCapableProvider(active.tool));
+  final agent =
+      ref.watch(focusedMachineToolsProvider).value?.labels[active.tool] ??
+      sessionAgentDisplayLabel(active, ref.watch(agentCatalogProvider));
+  final chatEnabled = mode == 'chat' || chatCapable == true;
+  return (
+    session: active,
+    target: target,
+    inFlight: pending?.sessionId == active.id,
+    // Switching TO terminal is always reachable; switching to chat carries
+    // the same capability gate as the segmented control's Chat cell.
+    enabled: target == 'terminal' || chatEnabled,
+    disabledReason: chatCapable == null
+        ? "This machine hasn't said whether $agent supports chat sessions — "
+              'it may still be connecting, or its bridge may be too old to '
+              'answer.'
+        : "$agent doesn't support chat sessions.",
+  );
+}
+
+/// Offers [AppCommand.toggleSessionMode] to the keyboard while the flip is
+/// available. Mounted around the agent bar's kebab, which is on screen on both
+/// breakpoints — the menu row itself only exists while the popup is open.
+class SessionModeShortcut extends ConsumerWidget {
+  const SessionModeShortcut({super.key, required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final flip = _watchModeFlip(ref);
+    final available = flip != null && flip.enabled && !flip.inFlight;
+    return AppCommandHandlers(
+      handlers: {
+        AppCommand.toggleSessionMode: available
+            ? () => detached(
+                'SessionModeShortcut',
+                'switch session mode',
+                () => _switchMode(
+                  context,
+                  ref.container,
+                  flip.session,
+                  flip.target,
+                ),
+              )
+            : null,
+      },
+      child: child,
+    );
+  }
+}
+
 /// [SessionModeControl]'s state, redone as a single [AbLiveMenuRow] for a
 /// text-menu host (the mobile overflow popup) instead of a segmented
 /// control. A menu row has no room to show the option NOT being picked, so
@@ -108,34 +183,18 @@ class SessionModeMenuItem extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final active = ref.watch(activeSessionProvider);
-    if (active == null || !active.agentSessionResumable) {
-      return const SizedBox.shrink();
-    }
-    final pending = ref.watch(pendingSessionModeProvider);
-    final inFlight = pending?.sessionId == active.id;
-    final mode = (ref.watch(activeSessionModeProvider) ?? active.mode) == 'chat'
-        ? 'chat'
-        : 'terminal';
-    final target = mode == 'chat' ? 'terminal' : 'chat';
-    final chatCapable = ref.watch(focusedToolChatCapableProvider(active.tool));
-    final agent =
-        ref.watch(focusedMachineToolsProvider).value?.labels[active.tool] ??
-        sessionAgentDisplayLabel(active, ref.watch(agentCatalogProvider));
-    final chatEnabled = mode == 'chat' || chatCapable == true;
-    // Switching TO terminal is always reachable; switching to chat carries
-    // the same capability gate as the segmented control's Chat cell.
-    final targetEnabled = target == 'terminal' || chatEnabled;
+    final flip = _watchModeFlip(ref);
+    if (flip == null) return const SizedBox.shrink();
+    final active = flip.session;
+    final target = flip.target;
+    final inFlight = flip.inFlight;
 
     final row = AbLiveMenuRow(
       label: target == 'chat' ? 'Switch to Chat' : 'Switch to Terminal',
       icon: target == 'chat' ? AbIcons.comment : AbIcons.terminal,
-      enabled: targetEnabled,
-      disabledReason: chatCapable == null
-          ? "This machine hasn't said whether $agent supports chat sessions — "
-                'it may still be connecting, or its bridge may be too old to '
-                'answer.'
-          : "$agent doesn't support chat sessions.",
+      enabled: flip.enabled,
+      disabledReason: flip.disabledReason,
+      shortcut: shortcutLabel(AppCommand.toggleSessionMode),
       onTap: () {
         // Inert while a flip is in flight, so a second tap can't queue a
         // second one — same contract as SessionModeControl.

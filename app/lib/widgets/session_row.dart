@@ -514,7 +514,7 @@ class _SessionRowState extends ConsumerState<SessionRow> {
   }
 
   void _showFocusedSessionSurface(ProviderContainer ref) =>
-      _showSessionSurface(ref, session.id);
+      showSessionSurface(ref, session.id);
 
   /// Inline rename field. Enter (onSubmitted) and blur (onFocusChange)
   /// commit; Escape (intercepted by the wrapping [Focus]) cancels.
@@ -569,10 +569,11 @@ class _SessionRowState extends ConsumerState<SessionRow> {
 }
 
 /// Puts the workspace surface in front of the user on [sessionId], and records
-/// it as the nav entry. Top-level so the row tap and the kebab's Fork land the
-/// user in exactly the same place — a forked session the user is not looking at
-/// is indistinguishable from a menu item that did nothing.
-void _showSessionSurface(ProviderContainer ref, String sessionId) {
+/// it as the nav entry. Shared by the row tap, the kebab's Fork and the
+/// next/previous-session shortcuts so all of them land the user in exactly the
+/// same place — a forked session the user is not looking at is
+/// indistinguishable from a menu item that did nothing.
+void showSessionSurface(ProviderContainer ref, String sessionId) {
   ref.read(workbenchSurfaceProvider.notifier).set(WorkbenchSurface.workspace);
   ref
       .read(navControllerProvider.notifier)
@@ -917,7 +918,7 @@ class _SessionMenu extends ConsumerWidget {
     if (ref.read(selectedRegistrationIdProvider) == entryId) {
       ref.read(activeSessionIdProvider.notifier).set(sessionId);
       svc.focus(sessionId);
-      _showSessionSurface(ref, sessionId);
+      showSessionSurface(ref, sessionId);
       return;
     }
     ref.read(pendingActiveSessionIdProvider.notifier).set(sessionId);
@@ -925,7 +926,7 @@ class _SessionMenu extends ConsumerWidget {
       ref.read(pendingActiveSessionIdProvider.notifier).set(null);
       return;
     }
-    _showSessionSurface(ref, sessionId);
+    showSessionSurface(ref, sessionId);
   }
 
   Future<void> _deleteSession(

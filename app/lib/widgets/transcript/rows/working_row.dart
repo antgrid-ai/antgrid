@@ -6,6 +6,8 @@ import '../../../design/ab_colors.dart';
 import '../../../design/ab_tokens.dart';
 import '../../../design/widgets/ab_button.dart';
 import '../../../design/widgets/ab_loading.dart';
+import '../../../design/widgets/ab_tooltip.dart';
+import '../../../keyboard/app_shortcuts.dart';
 import '../format.dart';
 import '../transcript_rows.dart';
 
@@ -66,11 +68,14 @@ class _WorkingRowState extends State<WorkingRow> {
               ),
             ),
           ),
-          AbButton(
-            label: 'Stop',
-            compact: true,
-            color: c.error,
-            onTap: widget.onStop,
+          AbTooltip(
+            message: withShortcut('Stop the agent', AppCommand.stopAgent),
+            child: AbButton(
+              label: 'Stop',
+              compact: true,
+              color: c.error,
+              onTap: widget.onStop,
+            ),
           ),
         ],
       ),

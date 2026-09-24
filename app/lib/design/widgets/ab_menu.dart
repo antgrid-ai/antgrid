@@ -201,9 +201,13 @@ class AbLiveMenuRow extends StatelessWidget {
     this.enabled = true,
     this.disabledReason,
     this.tooltip,
+    this.shortcut,
   });
 
   final String label;
+
+  /// Trailing key hint, rendered like [AbMenuItem.shortcut].
+  final String? shortcut;
 
   /// Null renders the row inert (dimmed, no tap) with no way to reach it —
   /// use [enabled]/[disabledReason] instead when the row should stay
@@ -257,6 +261,14 @@ class AbLiveMenuRow extends StatelessWidget {
                   style: TextStyle(fontSize: AbTokens.fontSm, color: fg),
                 ),
               ),
+              if (shortcut != null)
+                Text(
+                  shortcut!,
+                  style: AbTokens.monoStyle(
+                    fontSize: AbTokens.fontXxs,
+                    color: p.textMuted,
+                  ),
+                ),
             ],
           ),
         ),

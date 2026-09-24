@@ -17,6 +17,8 @@ import '../connection/relay_mechanisms.dart' show ConnectionBlockedException;
 import '../connection/supervisor_state.dart'
     show BlockReason, Blocked, SupervisorStatus;
 import '../constants/breakpoints.dart';
+import '../keyboard/app_command_registry.dart';
+import '../keyboard/app_shortcuts.dart';
 import '../design/ab_icons.dart';
 import '../design/ab_tokens.dart';
 import '../design/ab_colors.dart';
@@ -43,7 +45,6 @@ import '../providers/notification_route_apply.dart';
 import '../providers/providers.dart';
 import '../providers/recent_sessions.dart' show recentSessionsProvider;
 import '../providers/relay_error_banner.dart';
-import '../providers/session_search.dart';
 import '../providers/session_workspace_state.dart';
 import '../providers/session_setup.dart';
 import '../providers/sessions.dart';
@@ -67,7 +68,6 @@ import '../widgets/handler/handler_why.dart' show handlerFallbackQuestion;
 import '../widgets/mobile_bottom_nav.dart';
 import '../widgets/operational_error_toaster.dart';
 import '../widgets/projects_drawer.dart';
-import '../widgets/session_search_modal.dart';
 import '../widgets/session_start_refusal.dart';
 import '../design/widgets/pulsing_opacity.dart';
 import '../widgets/resizable_pane.dart';
@@ -1477,28 +1477,16 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
       });
     }
 
-    // Back/forward inputs (Alt+←, ⌘[, mouse side buttons) live in AppBackScope
-    // so they behave identically on the New Session route, which this shell
-    // isn't mounted under. Only the workspace-specific bindings stay here.
-    return CallbackShortcuts(
-      bindings: {
-        const SingleActivator(LogicalKeyboardKey.keyK, control: true):
-            _focusSessionSearch,
-        const SingleActivator(LogicalKeyboardKey.keyK, meta: true):
-            _focusSessionSearch,
-        // ⌥⌘→ / Ctrl+Alt+→ — macOS's inspector-pane toggle. Distinct from the
-        // alt-only forward binding in AppBackScope: SingleActivator requires an
-        // exact modifier match, so alt+meta never lands on alt.
-        const SingleActivator(
-          LogicalKeyboardKey.arrowRight,
-          alt: true,
-          meta: true,
-        ): _toggleContextPanel,
-        const SingleActivator(
-          LogicalKeyboardKey.arrowRight,
-          alt: true,
-          control: true,
-        ): _toggleContextPanel,
+    // App-wide shortcuts (search, panes, tabs, back/forward) are dispatched by
+    // AppShortcutScope, which the New Session route shares. Only what needs
+    // this State is offered here.
+    return AppCommandHandlers(
+      handlers: {
+        AppCommand.toggleMaximizePanel: (isMobile || surfaceChild != null)
+            ? null
+            : _toggleMaximizeContextPanel,
+        for (final entry in _tabCommandFallbacks.entries)
+          entry.key: (isMobile || surfaceChild != null) ? null : entry.value,
       },
       // Android 15 forces edge-to-edge (targetSdk 35+): system bars are
       // transparent and we draw behind them. Without this the header collides
@@ -1521,24 +1509,52 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     );
   }
 
-  /// Ctrl/⌘-K. On desktop, focusing the title-bar field is all it takes: the
-  /// field opens its result popup on focus, so this one binding both reveals
-  /// the search and shows the recent sessions to pick from. The node is
-  /// provider-owned because that field mounts above this route.
+  /// Fallbacks for commands a workspace tab owns. With the context panel
+  /// hidden the tab is not mounted to offer its own handler, so these show the
+  /// tab and hand the chord to it once it has. A mounted tab registers after
+  /// this shell and so outranks these.
   ///
-  /// A narrow window has no title-bar field to focus — its search is a modal —
-  /// so the binding opens that instead. Below kMediumBreakpoint there's no
-  /// title bar at all (mobile and tablet alike — see app_shell.dart); a touch
-  /// platform has none EITHER, at any width — a keyboard is rare but not
-  /// impossible on a tablet, and this must not be a silent no-op against a
-  /// field that was never mounted.
-  void _focusSessionSearch() {
-    if (isMobilePlatform ||
-        MediaQuery.sizeOf(context).width < kMediumBreakpoint) {
-      showSessionSearch(context);
+  /// Built once so each closure keeps its identity across rebuilds — that
+  /// identity is how [_revealThenRedispatch] tells the tab's handler from its
+  /// own, and a fresh closure per build would re-dispatch to itself forever.
+  late final Map<AppCommand, VoidCallback> _tabCommandFallbacks = {
+    for (final (command, view) in const [
+      (AppCommand.newTerminal, WorkspaceView.terminals),
+      (AppCommand.goToFile, WorkspaceView.files),
+      (AppCommand.searchInFiles, WorkspaceView.files),
+    ])
+      command: () => _revealThenRedispatch(view, command),
+  };
+
+  void _revealThenRedispatch(WorkspaceView view, AppCommand command) {
+    _revealWorkspaceView(view);
+    final registry = ref.read(appCommandRegistryProvider);
+    final fallback = _tabCommandFallbacks[command];
+    WidgetsBinding.instance
+      ..addPostFrameCallback((_) {
+        if (!mounted) return;
+        final owner = registry.handlerFor(command);
+        if (owner != null && !identical(owner, fallback)) owner();
+      })
+      // The callback waits for a frame; make sure there is one.
+      ..ensureVisualUpdate();
+  }
+
+  /// Flips between the split and the context panel alone. From hidden it
+  /// maximizes: the chord names the panel, so it should end up on screen.
+  void _toggleMaximizeContextPanel() {
+    if (isMobilePlatform) {
+      if (!_tabletEndDrawerOpen) _openTabletContextPanel();
+      _setTabletContextExpanded(!_tabletContextPanelExpanded);
       return;
     }
-    ref.read(sessionSearchFocusProvider).requestFocus();
+    setState(() {
+      _panelMode = _effectivePanelMode == _PanelMode.contextExpanded
+          ? _PanelMode.normal
+          : _PanelMode.contextExpanded;
+      _updateSessionUi((s) => s.copyWith(panelMode: _panelMode!.name));
+      _updatePrefs();
+    });
   }
 
   // ── Mobile ───────────────────────────────────────────────────────────

@@ -16,6 +16,7 @@ import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_loading.dart';
 import '../design/widgets/ab_search_field.dart';
 import '../design/widgets/ab_toolbar.dart';
+import '../keyboard/app_shortcuts.dart';
 import '../models/file_tree_models.dart';
 import '../providers/providers.dart';
 import '../util/detached.dart';
@@ -268,6 +269,28 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
     });
   }
 
+  /// Opens the find bar, or puts the keyboard back in it when already open.
+  void _openSearch() {
+    if (_findController == null) return;
+    if (!_showSearch) {
+      _toggleSearch();
+      return;
+    }
+    _searchFocusNode.requestFocus();
+  }
+
+  void _stepMatch({required bool forward}) {
+    final fc = _findController;
+    if (fc == null) return;
+    // No active find yet: the first press opens the bar rather than doing
+    // nothing, the same as in an editor.
+    if (fc.value == null) {
+      _openSearch();
+      return;
+    }
+    forward ? fc.nextMatch() : fc.previousMatch();
+  }
+
   @override
   void dispose() {
     _editorReadyTimer?.cancel();
@@ -414,9 +437,20 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
       );
     }
 
+    return CallbackShortcuts(
+      bindings: localShortcutBindings({
+        AppCommand.findInFile: _openSearch,
+        AppCommand.findNext: () => _stepMatch(forward: true),
+        AppCommand.findPrevious: () => _stepMatch(forward: false),
+        if (widget.onClose != null) AppCommand.closeFile: widget.onClose!,
+      }),
+      child: _buildContent(content),
+    );
+  }
+
+  Widget _buildContent(FileContent content) {
     final fileName = viewerBasename(content.path);
     final lang = codeLanguageForPath(content.path);
-
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -446,6 +480,18 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
                         controller: _controller,
                         scrollController: _scrollController,
                         findController: _findController,
+                        // The editor's own find chord only arms its
+                        // controller; route it to the find bar so the chord
+                        // opens the same UI the search button does.
+                        shortcutOverrideActions: {
+                          CodeShortcutFindIntent:
+                              CallbackAction<CodeShortcutFindIntent>(
+                                onInvoke: (_) {
+                                  _openSearch();
+                                  return null;
+                                },
+                              ),
+                        },
                         readOnly: true,
                         wordWrap: false,
                         showCursorWhenReadOnly: true,
@@ -532,7 +578,7 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
           icon: AbIcons.search,
           tone: _showSearch ? AbIconButtonTone.accent : AbIconButtonTone.normal,
           onTap: _toggleSearch,
-          tooltip: 'Search in file',
+          tooltip: withShortcut('Search in file', AppCommand.findInFile),
         ),
         if (widget.onShowPreview != null)
           AbIconButton(
@@ -543,7 +589,7 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
         AbIconButton(
           icon: AbIcons.close,
           onTap: widget.onClose,
-          tooltip: 'Close file',
+          tooltip: withShortcut('Close file', AppCommand.closeFile),
         ),
       ],
     );
@@ -602,12 +648,12 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
         AbIconButton(
           icon: AbIcons.arrowUp,
           onTap: () => fc.previousMatch(),
-          tooltip: 'Previous match',
+          tooltip: withShortcut('Previous match', AppCommand.findPrevious),
         ),
         AbIconButton(
           icon: AbIcons.arrowDown,
           onTap: () => fc.nextMatch(),
-          tooltip: 'Next match',
+          tooltip: withShortcut('Next match', AppCommand.findNext),
         ),
         AbIconButton(
           icon: AbIcons.close,

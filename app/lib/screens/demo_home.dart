@@ -4,6 +4,7 @@ import 'package:flutter/material.dart' show Scaffold;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../keyboard/app_shortcut_scope.dart';
 import '../navigation/back_intent.dart';
 import '../navigation/nav_controller.dart';
 import '../providers/agent_transport.dart';
@@ -108,14 +109,16 @@ class _DemoHomeState extends ConsumerState<DemoHome> {
       body = const Scaffold(body: WorkspaceShell());
     }
     return AppBackScope(
-      child: BackHandler(
-        priority: BackPriority.demoExit,
-        active: !canStepBack,
-        onBack: () {
-          exitDemoMode(ref.container);
-          return true;
-        },
-        child: body,
+      child: AppShortcutScope(
+        child: BackHandler(
+          priority: BackPriority.demoExit,
+          active: !canStepBack,
+          onBack: () {
+            exitDemoMode(ref.container);
+            return true;
+          },
+          child: body,
+        ),
       ),
     );
   }

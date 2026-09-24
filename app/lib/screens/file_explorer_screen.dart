@@ -32,6 +32,8 @@ import '../design/widgets/ab_loading.dart';
 import '../design/widgets/ab_search_field.dart';
 import '../design/widgets/ab_separator.dart';
 import '../design/widgets/ab_toolbar.dart';
+import '../keyboard/app_command_registry.dart';
+import '../keyboard/app_shortcuts.dart';
 import '../util/detached.dart';
 import '../widgets/file_search_bar.dart';
 
@@ -47,10 +49,53 @@ class FileExplorerScreen extends ConsumerStatefulWidget {
 
 class _FileExplorerScreenState extends ConsumerState<FileExplorerScreen> {
   final _treeInterest = TreeInterest();
+  final _filterFocus = FocusNode(debugLabel: 'file-filter');
+  final _searchPanelKey = GlobalKey<_SearchPanelState>();
+
   @override
   void dispose() {
     _treeInterest.dispose();
+    _filterFocus.dispose();
     super.dispose();
+  }
+
+  void _revealFiles() =>
+      ref.read(workspaceMenuControlProvider)?.reveal(WorkspaceView.files);
+
+  /// [AppCommand.goToFile]: the tree's name filter, taking the keyboard. In the
+  /// compact layout an open file replaces the tree, filter and all, so the file
+  /// is closed first — the chord names the tree, so it has to be on screen.
+  void _goToFile() {
+    _revealFiles();
+    if (_searchOpen) setState(() => _searchOpen = false);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (_filterFocus.context != null) {
+        _filterFocus.requestFocus();
+        return;
+      }
+      focusedCheckoutServiceOrNull(
+        ref.container,
+        (s) => s.fileService,
+      )?.clearViewingFile();
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _filterFocus.requestFocus();
+      });
+    });
+  }
+
+  /// [AppCommand.searchInFiles]: opens the content search, or puts the
+  /// keyboard back in its field when it is already open. A freshly opened
+  /// panel focuses itself.
+  void _searchInFiles() {
+    _revealFiles();
+    if (!_searchOpen) {
+      setState(() => _searchOpen = true);
+      return;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _searchPanelKey.currentState?.focusField();
+    });
   }
 
   bool _searchOpen = false;
@@ -181,29 +226,38 @@ class _FileExplorerScreenState extends ConsumerState<FileExplorerScreen> {
     final onScreen =
         ref.watch(visibleWorkspaceViewProvider) == WorkspaceView.files;
 
-    return BackHandler(
-      priority: BackPriority.fileViewer,
-      active: onScreen && treeStateAsync.value?.files.selectedFilePath != null,
-      onBack: _backFromViewer,
+    return AppCommandHandlers(
+      handlers: {
+        AppCommand.goToFile: _goToFile,
+        AppCommand.searchInFiles: _searchInFiles,
+      },
       child: BackHandler(
-        priority: BackPriority.fileSearch,
-        active: onScreen && _searchOpen,
-        onBack: _backFromSearch,
-        child: treeStateAsync.when(
-          loading: () => const AbLoading(message: 'loading files...'),
-          error: (error, _) =>
-              AbEmptyState.error(title: 'Error loading files: $error'),
-          data: (state) => _FileExplorerBody(
-            state: state,
-            fileService: fileService,
-            searchOpen: _searchOpen,
-            onToggleSearch: () => setState(() => _searchOpen = !_searchOpen),
-            onCloseSearch: () => setState(() => _searchOpen = false),
-            filterQuery: _filterQuery,
-            filterResults: _filterResults,
-            filterLoading: _filterLoading,
-            filterError: _filterError,
-            onFilterQueryChanged: _onFilterQueryChanged,
+        priority: BackPriority.fileViewer,
+        active:
+            onScreen && treeStateAsync.value?.files.selectedFilePath != null,
+        onBack: _backFromViewer,
+        child: BackHandler(
+          priority: BackPriority.fileSearch,
+          active: onScreen && _searchOpen,
+          onBack: _backFromSearch,
+          child: treeStateAsync.when(
+            loading: () => const AbLoading(message: 'loading files...'),
+            error: (error, _) =>
+                AbEmptyState.error(title: 'Error loading files: $error'),
+            data: (state) => _FileExplorerBody(
+              state: state,
+              fileService: fileService,
+              searchOpen: _searchOpen,
+              onToggleSearch: () => setState(() => _searchOpen = !_searchOpen),
+              onCloseSearch: () => setState(() => _searchOpen = false),
+              filterQuery: _filterQuery,
+              filterResults: _filterResults,
+              filterLoading: _filterLoading,
+              filterError: _filterError,
+              onFilterQueryChanged: _onFilterQueryChanged,
+              filterFocus: _filterFocus,
+              searchPanelKey: _searchPanelKey,
+            ),
           ),
         ),
       ),
@@ -296,6 +350,8 @@ class _FileExplorerBody extends ConsumerWidget {
   final bool filterLoading;
   final String? filterError;
   final void Function(String?) onFilterQueryChanged;
+  final FocusNode filterFocus;
+  final GlobalKey<_SearchPanelState> searchPanelKey;
 
   const _FileExplorerBody({
     required this.state,
@@ -308,10 +364,21 @@ class _FileExplorerBody extends ConsumerWidget {
     required this.filterLoading,
     required this.filterError,
     required this.onFilterQueryChanged,
+    required this.filterFocus,
+    required this.searchPanelKey,
   });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    return CallbackShortcuts(
+      bindings: localShortcutBindings({
+        AppCommand.refresh: fileService.requestFullTree,
+      }),
+      child: _buildLayout(context, ref),
+    );
+  }
+
+  Widget _buildLayout(BuildContext context, WidgetRef ref) {
     return LayoutBuilder(
       builder: (context, constraints) {
         final showSideBySide = constraints.maxWidth >= kCompactBreakpoint;
@@ -339,6 +406,7 @@ class _FileExplorerBody extends ConsumerWidget {
       center: searchOpen
           ? null
           : FileSearchBar(
+              focusNode: filterFocus,
               currentQuery: filterQuery,
               // Zero here on purpose: [FileService.find] debounces already,
               // and stacking the two put the first request ~550ms after the
@@ -351,13 +419,13 @@ class _FileExplorerBody extends ConsumerWidget {
         AbIconButton(
           icon: AbIcons.refresh,
           onTap: () => fileService.requestFullTree(),
-          tooltip: 'Refresh',
+          tooltip: withShortcut('Refresh', AppCommand.refresh),
         ),
         AbIconButton(
           icon: AbIcons.search,
           tone: searchOpen ? AbIconButtonTone.accent : AbIconButtonTone.normal,
           onTap: onToggleSearch,
-          tooltip: 'Search in files',
+          tooltip: withShortcut('Search in files', AppCommand.searchInFiles),
         ),
       ],
     );
@@ -388,6 +456,7 @@ class _FileExplorerBody extends ConsumerWidget {
       loading: () => const AbLoading(),
       error: (error, _) => Center(child: Text('Error: $error')),
       data: (searchState) => _SearchPanel(
+        key: searchPanelKey,
         searchState: searchState,
         searchService: searchService,
         onMatchTap: (path, line, column) {
@@ -598,6 +667,7 @@ class _SearchPanel extends StatefulWidget {
   final VoidCallback onClose;
 
   const _SearchPanel({
+    super.key,
     required this.searchState,
     required this.searchService,
     required this.onMatchTap,
@@ -633,6 +703,14 @@ class _SearchPanelState extends State<_SearchPanel> {
     _focusNode.dispose();
     _controller.dispose();
     super.dispose();
+  }
+
+  void focusField() {
+    _focusNode.requestFocus();
+    _controller.selection = TextSelection(
+      baseOffset: 0,
+      extentOffset: _controller.text.length,
+    );
   }
 
   void _onQueryChanged(String value) {

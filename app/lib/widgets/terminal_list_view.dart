@@ -12,6 +12,8 @@ import '../design/widgets/ab_list_row.dart';
 import '../design/widgets/ab_loading.dart';
 import '../design/widgets/ab_status_dot.dart';
 import '../design/widgets/ab_toolbar.dart';
+import '../keyboard/app_command_registry.dart';
+import '../keyboard/app_shortcuts.dart';
 import '../models/session_entry.dart';
 import '../models/terminal_models.dart';
 import '../navigation/back_intent.dart';
@@ -140,11 +142,23 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
     final onScreen =
         ref.watch(visibleWorkspaceViewProvider) == WorkspaceView.terminals;
 
-    return BackHandler(
-      priority: BackPriority.pushedTerminal,
-      active: onScreen && _pushedTerminalId != null,
-      onBack: _backFromPushed,
-      child: _buildBody(terminalService, key),
+    final menu = ref.watch(workspaceMenuControlProvider);
+    final tabs = _adHocTerminals;
+    return AppCommandHandlers(
+      handlers: {
+        AppCommand.newTerminal: tabs.length >= _maxAdHocTerminals
+            ? null
+            : () {
+                menu?.reveal(WorkspaceView.terminals);
+                _openNewTerminal(terminalService, tabs);
+              },
+      },
+      child: BackHandler(
+        priority: BackPriority.pushedTerminal,
+        active: onScreen && _pushedTerminalId != null,
+        onBack: _backFromPushed,
+        child: _buildBody(terminalService, key),
+      ),
     );
   }
 
@@ -283,37 +297,34 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
   }
 
   Widget _newTerminalButton(TerminalService service, List<TerminalTab> tabs) {
-    final existingIds = tabs.map((t) => t.terminalId).toSet();
     return AbButton(
       label: 'New Terminal',
       leading: AbIcon(AbIcons.add, size: 12, color: context.antgrid.accent),
-      onTap: () {
-        final id = _nextAdHocTerminalId(existingIds);
-        final name = _terminalName(id);
-        service.createAdHocTerminal(id, name: name);
-        _setPushedTerminal(id);
-      },
+      onTap: () => _openNewTerminal(service, tabs),
     );
+  }
+
+  /// Opens a shell and pushes it full-pane. Shared by both New Terminal
+  /// buttons and [AppCommand.newTerminal].
+  void _openNewTerminal(TerminalService service, List<TerminalTab> tabs) {
+    if (tabs.length >= _maxAdHocTerminals) return;
+    final id = _nextAdHocTerminalId(tabs.map((t) => t.terminalId).toSet());
+    service.createAdHocTerminal(id, name: _terminalName(id));
+    _setPushedTerminal(id);
   }
 
   Widget _buildHeader(TerminalService service, List<TerminalTab> tabs) {
     final adHocCount = tabs.length;
     final atLimit = adHocCount >= _maxAdHocTerminals;
-    final existingIds = tabs.map((t) => t.terminalId).toSet();
     return AbToolbar.panel(
       title: 'TERMINALS',
       actions: [
         AbIconButton(
           icon: AbIcons.add,
-          tooltip: atLimit ? 'Max terminals reached' : 'New terminal',
-          onTap: atLimit
-              ? null
-              : () {
-                  final id = _nextAdHocTerminalId(existingIds);
-                  final name = _terminalName(id);
-                  service.createAdHocTerminal(id, name: name);
-                  _setPushedTerminal(id);
-                },
+          tooltip: atLimit
+              ? 'Max terminals reached'
+              : withShortcut('New terminal', AppCommand.newTerminal),
+          onTap: atLimit ? null : () => _openNewTerminal(service, tabs),
         ),
       ],
     );

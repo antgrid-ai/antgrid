@@ -19,6 +19,7 @@ import '../design/widgets/ab_button.dart';
 import '../design/widgets/ab_tooltip.dart';
 import '../design/widgets/ab_empty_state.dart';
 import '../design/widgets/ab_snack_bar.dart';
+import '../keyboard/app_command_registry.dart';
 import '../models/terminal_models.dart';
 import '../models/ab_message.dart';
 import '../project/project_session.dart';
@@ -928,6 +929,12 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     if (!_focusScope.hasFocus) return KeyEventResult.ignored;
     _trackHeldModifier(event);
     if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
+      return KeyEventResult.ignored;
+    }
+    // An app shortcut the app is about to run. Every early handler sees every
+    // event, so the app claiming it does not keep it from here — and the
+    // history reader below would otherwise forward the chord to the PTY too.
+    if (ref.read(appCommandRegistryProvider).claims(event) != null) {
       return KeyEventResult.ignored;
     }
     if (!_historyOpen &&

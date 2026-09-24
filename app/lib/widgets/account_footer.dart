@@ -8,6 +8,7 @@ import '../design/ab_icons.dart';
 import '../design/ab_tokens.dart';
 import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_menu.dart';
+import '../keyboard/app_shortcuts.dart';
 import '../navigation/nav_controller.dart';
 import '../navigation/nav_location.dart';
 import '../providers/agent_transport.dart';
@@ -107,18 +108,7 @@ class AccountFooter extends ConsumerWidget {
   }
 
   void _openSettings(BuildContext context, WidgetRef ref) {
-    ref
-        .read(workbenchSurfaceProvider.notifier)
-        .set(WorkbenchSurface.appSettings);
-    ref
-        .read(navControllerProvider.notifier)
-        .commit(
-          NavLocation(
-            target: ref.read(selectedTargetProvider),
-            surface: WorkbenchSurface.appSettings,
-            sessionId: ref.read(activeSessionIdProvider),
-          ),
-        );
+    openAppSettings(ref.container);
     final scaffold = Scaffold.maybeOf(context);
     if (scaffold?.isDrawerOpen ?? false) {
       Navigator.of(context).pop();
@@ -178,10 +168,11 @@ class AccountFooter extends ConsumerWidget {
       width: menuWidth,
       bounds: bounds,
       entries: [
-        const AbMenuItem(
+        AbMenuItem(
           label: 'App settings…',
           value: _AccountMenu.settings,
           icon: AbIcons.settings,
+          shortcut: shortcutLabel(AppCommand.openSettings),
         ),
         if (showUpgrade)
           const AbMenuItem(
@@ -215,3 +206,20 @@ class AccountFooter extends ConsumerWidget {
 }
 
 enum _AccountMenu { settings, upgrade, logout, signIn }
+
+/// Puts the app settings surface on screen and records it as a navigation, so
+/// Back returns to where the user was.
+void openAppSettings(ProviderContainer container) {
+  container
+      .read(workbenchSurfaceProvider.notifier)
+      .set(WorkbenchSurface.appSettings);
+  container
+      .read(navControllerProvider.notifier)
+      .commit(
+        NavLocation(
+          target: container.read(selectedTargetProvider),
+          surface: WorkbenchSurface.appSettings,
+          sessionId: container.read(activeSessionIdProvider),
+        ),
+      );
+}

@@ -440,12 +440,14 @@ class _SessionOverflowButton extends ConsumerWidget {
     // desktop it sits directly after WorkspaceMenuButton with no bar-level
     // spacer between them, and the button — not the bar — is the one that
     // knows it needs its own.
-    return compact
-        ? button
-        : Padding(
-            padding: const EdgeInsets.only(left: AbTokens.space6),
-            child: button,
-          );
+    return SessionModeShortcut(
+      child: compact
+          ? button
+          : Padding(
+              padding: const EdgeInsets.only(left: AbTokens.space6),
+              child: button,
+            ),
+    );
   }
 
   Future<void> _open(BuildContext anchor) async {
@@ -454,7 +456,8 @@ class _SessionOverflowButton extends ConsumerWidget {
     await showAbPanel<void>(
       context: anchor,
       anchorRect: anchorRect,
-      width: 220,
+      // Room for the longest row plus its shortcut hint on one line.
+      width: 260,
       // Tight, hanging right under the button — the Chrome kebab-menu look —
       // rather than the wider 4px default gap other (non-adjacent) popups use.
       gap: 2,

@@ -14,6 +14,7 @@ import '../design/widgets/ab_breadcrumb.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_snack_bar.dart';
 import '../design/widgets/ab_window_controls.dart';
+import '../keyboard/app_shortcuts.dart';
 import '../navigation/back_intent.dart';
 import '../navigation/nav_controller.dart';
 import '../providers/agent_transport.dart';
@@ -319,7 +320,7 @@ class _WindowTitleBarContentsState
                             .hasActive;
                         return AbIconButton(
                           icon: AbIcons.chevronLeft,
-                          tooltip: 'Back',
+                          tooltip: withShortcut('Back', AppCommand.goBack),
                           onTap: nav.canBack || hasActive
                               ? () => resolveBackIntent(
                                   ref.container,
@@ -331,7 +332,7 @@ class _WindowTitleBarContentsState
                     ),
                     AbIconButton(
                       icon: AbIcons.chevronRight,
-                      tooltip: 'Forward',
+                      tooltip: withShortcut('Forward', AppCommand.goForward),
                       onTap: nav.canForward ? navNotifier.forward : null,
                     ),
                     const SizedBox(width: AbTokens.space6),
@@ -423,7 +424,10 @@ class _WindowTitleBarContentsState
                   icon: sidebar.hidden
                       ? AbIcons.layoutSidebarLeftOff
                       : AbIcons.layoutSidebarLeft,
-                  tooltip: sidebar.hidden ? 'Show projects' : 'Hide projects',
+                  tooltip: withShortcut(
+                    sidebar.hidden ? 'Show projects' : 'Hide projects',
+                    AppCommand.toggleSidebar,
+                  ),
                   onTap: sidebar.toggle,
                 ),
         ),
@@ -489,9 +493,12 @@ class _WindowTitleBarContentsState
                 // — there's no action for it to describe.
                 tooltip: panel == null
                     ? null
-                    : (panel.hidden
-                          ? 'Show context panel'
-                          : 'Hide context panel'),
+                    : withShortcut(
+                        panel.hidden
+                            ? 'Show context panel'
+                            : 'Hide context panel',
+                        AppCommand.toggleContextPanel,
+                      ),
                 onTap: panel?.toggle,
               ),
             ),

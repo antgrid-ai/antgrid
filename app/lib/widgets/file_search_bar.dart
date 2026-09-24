@@ -21,7 +21,11 @@ class FileSearchBar extends StatefulWidget {
     this.currentQuery,
     this.debounce = const Duration(milliseconds: 300),
     required this.onQueryChanged,
+    this.focusNode,
   });
+
+  /// Lets the explorer put the keyboard here for the Filter files shortcut.
+  final FocusNode? focusNode;
 
   @override
   State<FileSearchBar> createState() => _FileSearchBarState();
@@ -60,6 +64,7 @@ class _FileSearchBarState extends State<FileSearchBar> {
   Widget build(BuildContext context) {
     return AbSearchField(
       controller: _controller,
+      focusNode: widget.focusNode,
       hint: 'Filter files...',
       height: AbTokens.rowHeightXs,
       // Chrome, not a control. The action row already bounds it, so an

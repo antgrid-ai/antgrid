@@ -7,6 +7,7 @@ import '../design/ab_colors.dart';
 import '../design/widgets/ab_button.dart';
 import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_icon_button.dart';
+import '../keyboard/app_shortcuts.dart';
 import '../models/workspace_view.dart';
 import '../providers/visible_surface.dart';
 
@@ -208,7 +209,10 @@ class _WorkspaceTabBarState extends ConsumerState<WorkspaceTabBar> {
                     else
                       AbIconButton(
                         icon: AbIcons.expand,
-                        tooltip: 'Expand',
+                        tooltip: withShortcut(
+                          'Expand',
+                          AppCommand.toggleMaximizePanel,
+                        ),
                         onTap: widget.onToggleExpand,
                       ),
                   // Hides the panel outright (not a collapse to a strip); the
@@ -216,7 +220,10 @@ class _WorkspaceTabBarState extends ConsumerState<WorkspaceTabBar> {
                   if (widget.onClose != null)
                     AbIconButton(
                       icon: AbIcons.close,
-                      tooltip: 'Hide panel',
+                      tooltip: withShortcut(
+                        'Hide panel',
+                        AppCommand.toggleContextPanel,
+                      ),
                       onTap: widget.onClose,
                     ),
                 ],

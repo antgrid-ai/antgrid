@@ -6,6 +6,8 @@
 import 'dart:ui' as ui;
 
 import 'package:antgrid/design/theme_presets.dart';
+import 'package:antgrid/keyboard/app_command_registry.dart';
+import 'package:antgrid/keyboard/app_shortcuts.dart';
 import 'package:antgrid/models/terminal_models.dart';
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/providers/client_id.dart';
@@ -639,6 +641,60 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(String.fromCharCodes(written), 'deferred');
+    },
+  );
+
+  /// Installs the app's global-shortcut dispatch the way `AppShortcutScope`
+  /// does, without the rest of the app it would drag in.
+  AppCommandRegistry installShortcuts(WidgetTester tester) {
+    final registry = ProviderScope.containerOf(
+      tester.element(find.byType(TerminalViewWrapper)),
+    ).read(appCommandRegistryProvider);
+    bool active() => true;
+    registry.addActiveCheck(active);
+    FocusManager.instance.addEarlyKeyEventHandler(registry.handleEarlyKey);
+    addTearDown(() {
+      FocusManager.instance.removeEarlyKeyEventHandler(registry.handleEarlyKey);
+      registry.removeActiveCheck(active);
+    });
+    return registry;
+  }
+
+  _platformTestWidgets(
+    'Windows: an app shortcut runs and never reaches the PTY',
+    TargetPlatform.windows,
+    (tester) async {
+      final written = await pumpTerminal(tester, 't-app-chord');
+      var toggles = 0;
+      installShortcuts(
+        tester,
+      ).register({AppCommand.toggleSidebar: () => toggles++});
+
+      await chord(tester, [
+        LogicalKeyboardKey.controlLeft,
+        LogicalKeyboardKey.shiftLeft,
+      ], LogicalKeyboardKey.keyB);
+
+      expect(toggles, 1);
+      expect(written, isEmpty);
+    },
+  );
+
+  _platformTestWidgets(
+    'Windows: an app chord nothing offers stays with the terminal',
+    TargetPlatform.windows,
+    (tester) async {
+      final written = await pumpTerminal(tester, 't-unclaimed-chord');
+      // Dispatch installed, but no handler for toggleSidebar — the chord is
+      // the terminal program's to have.
+      installShortcuts(tester);
+
+      await chord(tester, [
+        LogicalKeyboardKey.controlLeft,
+        LogicalKeyboardKey.shiftLeft,
+      ], LogicalKeyboardKey.keyB);
+
+      expect(written, isNotEmpty);
     },
   );
 }

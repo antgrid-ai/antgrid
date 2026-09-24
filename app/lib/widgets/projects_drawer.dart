@@ -771,7 +771,9 @@ class _AdvertisedProjectRowState extends ConsumerState<_AdvertisedProjectRow> {
   }
 }
 
-extension _DrawerSessionVisibility on Iterable<SessionEntry> {
+/// The drawer's rule for which sessions it lists. Shared with the
+/// next/previous-session shortcuts, which must walk exactly what is on screen.
+extension VisibleInDrawer on Iterable<SessionEntry> {
   List<SessionEntry> whereVisibleInDrawer() =>
       where((s) => !s.archived).toList(growable: false);
 }

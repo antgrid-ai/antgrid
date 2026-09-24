@@ -18,6 +18,7 @@ import '../design/widgets/ab_menu.dart';
 import '../design/widgets/ab_progress_rule.dart';
 import '../design/widgets/ab_snack_bar.dart';
 import '../design/widgets/ab_toolbar.dart';
+import '../keyboard/app_shortcuts.dart';
 import '../design/widgets/ab_url_field.dart';
 import '../models/preview_models.dart';
 import '../models/workspace_view.dart';
@@ -1173,6 +1174,39 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     // that case (the local tunnel proxy, not the address the user typed).
     final showOpenExternal = !isMobilePlatform;
 
+    // Reaches only as far as Flutter's focus does: once the user clicks into
+    // the page itself, the WebView owns the keyboard natively.
+    return CallbackShortcuts(
+      bindings: localShortcutBindings({
+        AppCommand.focusAddressBar: () {
+          _addrFocus.requestFocus();
+          _addrController.selection = TextSelection(
+            baseOffset: 0,
+            extentOffset: _addrController.text.length,
+          );
+        },
+        if (activeState != null)
+          AppCommand.refresh: () => activeState.controller?.reload(),
+      }),
+      child: _buildToolbarAndBody(
+        state: state,
+        preview: preview,
+        activeTab: activeTab,
+        activeState: activeState,
+        captureInFlight: captureInFlight,
+        showOpenExternal: showOpenExternal,
+      ),
+    );
+  }
+
+  Widget _buildToolbarAndBody({
+    required PreviewState state,
+    required PreviewService? preview,
+    required PreviewTab? activeTab,
+    required _TabWebViewState? activeState,
+    required bool captureInFlight,
+    required bool showOpenExternal,
+  }) {
     return Column(
       children: [
         // Every other AbToolbar in the app stacks flush against whatever's
@@ -1257,7 +1291,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
                   ),
                   AbIconButton(
                     icon: AbIcons.refresh,
-                    tooltip: 'Refresh',
+                    tooltip: withShortcut('Refresh', AppCommand.refresh),
                     onTap: activeState == null
                         ? null
                         : () => activeState.controller?.reload(),

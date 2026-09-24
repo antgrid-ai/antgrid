@@ -30,6 +30,7 @@ import '../session_bus/remote_directory_pump.dart';
 import '../storage/cached_sessions_store.dart';
 import '../launcher/host_control_client.dart';
 import '../launcher/project_resolve.dart';
+import '../keyboard/app_shortcut_scope.dart';
 import '../navigation/back_intent.dart';
 import '../util/ab_log.dart';
 import '../design/widgets/ab_window_controls.dart';
@@ -191,7 +192,7 @@ class _AppShellState extends ConsumerState<AppShell> {
 
   @override
   Widget build(BuildContext context) {
-    return AppBackScope(child: _buildShell(context));
+    return AppBackScope(child: AppShortcutScope(child: _buildShell(context)));
   }
 
   Widget _buildShell(BuildContext context) {

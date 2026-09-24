@@ -4,6 +4,7 @@ import 'package:antgrid/constants/breakpoints.dart';
 import 'package:antgrid/design/ab_tokens.dart';
 import 'package:antgrid/design/widgets/ab_brand_mark.dart';
 import 'package:antgrid/design/widgets/ab_icon_button.dart';
+import 'package:antgrid/keyboard/app_shortcuts.dart';
 import 'package:antgrid/models/handler_state.dart';
 import 'package:antgrid/models/terminal_models.dart';
 import 'package:antgrid/providers/account_agents.dart';
@@ -138,8 +139,11 @@ void main() {
           matching: find.byType(AbIconButton),
         ),
       );
-      expect(buttonFor('Back').onTap, isNull);
-      expect(buttonFor('Forward').onTap, isNull);
+      expect(buttonFor(withShortcut('Back', AppCommand.goBack)).onTap, isNull);
+      expect(
+        buttonFor(withShortcut('Forward', AppCommand.goForward)).onTap,
+        isNull,
+      );
     } finally {
       debugDefaultTargetPlatformOverride = null;
     }
@@ -260,7 +264,7 @@ void main() {
       await pumpAt(tester, kMediumBreakpoint);
       final forward = tester.getRect(
         find.ancestor(
-          of: find.byTooltip('Forward'),
+          of: find.byTooltip(withShortcut('Forward', AppCommand.goForward)),
           matching: find.byType(AbIconButton),
         ),
       );
@@ -351,7 +355,10 @@ void main() {
       var toggled = 0;
       await pumpSidebar(tester, hidden: false, toggle: () => toggled++);
 
-      expect(find.byTooltip('Hide projects'), findsOneWidget);
+      expect(
+        find.byTooltip(withShortcut('Hide projects', AppCommand.toggleSidebar)),
+        findsOneWidget,
+      );
       // The other half of the reserved-slot pin: a published control occupies
       // exactly what the placeholder holds open, so the row's geometry — and
       // the search box centred on it — is the same on both kinds of route.
@@ -374,7 +381,10 @@ void main() {
     try {
       debugDefaultTargetPlatformOverride = TargetPlatform.windows;
       await pumpSidebar(tester, hidden: true, toggle: () {});
-      expect(find.byTooltip('Show projects'), findsOneWidget);
+      expect(
+        find.byTooltip(withShortcut('Show projects', AppCommand.toggleSidebar)),
+        findsOneWidget,
+      );
     } finally {
       debugDefaultTargetPlatformOverride = null;
     }
@@ -444,7 +454,12 @@ void main() {
           find.byKey(WindowTitleBarContents.contextPanelSlotKey),
           findsOneWidget,
         );
-        expect(find.byTooltip('Show context panel'), findsOneWidget);
+        expect(
+          find.byTooltip(
+            withShortcut('Show context panel', AppCommand.toggleContextPanel),
+          ),
+          findsOneWidget,
+        );
         await tester.tap(
           find.byKey(WindowTitleBarContents.contextPanelSlotKey),
         );
@@ -481,11 +496,17 @@ void main() {
       expect(
         find.descendant(
           of: find.byKey(WindowTitleBarContents.contextPanelSlotKey),
-          matching: find.byTooltip('Hide context panel'),
+          matching: find.byTooltip(
+            withShortcut('Hide context panel', AppCommand.toggleContextPanel),
+          ),
         ),
         findsOneWidget,
       );
-      await tester.tap(find.byTooltip('Hide context panel'));
+      await tester.tap(
+        find.byTooltip(
+          withShortcut('Hide context panel', AppCommand.toggleContextPanel),
+        ),
+      );
       await tester.pump();
       expect(toggled, 1);
     } finally {
