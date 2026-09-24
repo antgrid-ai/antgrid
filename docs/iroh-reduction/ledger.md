@@ -23,7 +23,7 @@ the code wins over both.
 | A: loopback | No loopback wire change; the `channel` label and preview-channel classification stay, loopback-only. |
 | A: refusals | In-band `stream:refused` records (Dart cannot read reset codes); overflow resets the one stream, never the connection. |
 | A: version | `FRAME_VERSION` stays at the value Stage B set, since that value was never released. A1 bumps the ALPN to `antgrid/peer/2`. |
-| A: caps | Adopted from the wave plan pending owner review. On the bridge: QUIC bidi limit 256 per connection. Per peer: projects 32, terminal attachments 64, tunnel streams 128, pending opens 16. The app mirrors these with semaphores. |
+| A: caps | Accepted by the owner on 2026-09-24. On the bridge: QUIC bidi limit 256 per connection. Per peer: projects 32, terminal attachments 64, tunnel streams 128, pending opens 16. The app mirrors these with semaphores. |
 
 ## Status
 
@@ -70,7 +70,7 @@ the code wins over both.
 - The Docker image has not been built because the daemon is down. Its base-image digests are reused from the fork's Dockerfile and were not re-reviewed.
 - Upstream prints the whole config, bearer token included, at `RUST_LOG=debug`. This is documented in `deploy/iroh/README.md`.
 - A misspelt non-access TOML key is silently ignored upstream. The guards catch only a missing file or a missing `[access.http]`.
-- The `[limits]` values are placeholders the implementer picked (accept 32/s, burst 64; rx 10 MiB/s, burst 2 MiB). They need an owner call.
+- The `[limits]` values (accept 32/s, burst 64; rx 10 MiB/s, burst 2 MiB) were accepted by the owner on 2026-09-24.
 - The W2 throttle stamp survives a failed refresh, so a new device that hits a transient web error is refused for up to 5s. Accepted as minor.
 - Production cutover order is in `deploy/iroh/README.md`. The `/internal/disconnect` target must leave the live `PEER_POLICY_TARGETS` before the custom relay is retired, or the outbox wedges.
 
