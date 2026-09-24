@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 import { describe, test, expect } from "bun:test";
 import {
   IntegrationsPage,
@@ -6,7 +9,7 @@ import {
 } from "../../src/ui/integrations.js";
 import type { IntegrationsNotice } from "../../src/ui/integrations-notice.js";
 
-const USER = { email: "gita@example.com" };
+const USER = { id: "u-gita", email: "gita@example.com" };
 const CONNECT_URL = "/integrations/connect";
 
 function repo(over: Partial<IntegrationRepoView> = {}): IntegrationRepoView {

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 /**
  * The outbox's rate and backoff policy: pure functions over a response and a
  * clock, so the drain can derive `nextAttemptAt` without a network, a database

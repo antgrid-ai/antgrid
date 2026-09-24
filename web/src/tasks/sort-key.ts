@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 /**
  * Fractional indexing for `Task.sortKey`: a key is a string, and there is
  * always a string strictly between any two distinct keys. That is what makes a

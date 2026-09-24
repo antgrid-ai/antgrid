@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 // web/scripts/drain-github-webhooks.ts
 //
 // Applies the GitHub deliveries the webhook route recorded and answered 202 to,

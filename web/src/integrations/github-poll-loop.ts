@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 // web/src/integrations/github-poll-loop.ts
 //
 // The production wiring around `pollDueRepos`, which owns the walk itself.

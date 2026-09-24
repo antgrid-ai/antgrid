@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 import { createHash } from "node:crypto";
 import type { GithubIssue } from "./github-events.js";
 import { githubAssignees, githubStateReason } from "./github-import.js";

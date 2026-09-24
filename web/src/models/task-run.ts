@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 import { z } from "zod";
 import type { DB, Tx } from "../db/index.js";
 import type { Prisma } from "../generated/prisma/client.js";
@@ -20,8 +23,8 @@ import type { TaskStatus } from "../tasks/merge.js";
 
 /** The bridge's per-session `WorkStatus`, mirrored by hand from
  *  `bridge/src/work-status.ts` — the two live in different runtimes with no
- *  shared package between them (`packages/antgrid-wire` is Apache-2.0 and the
- *  licence boundary is one-way), so a value added there and not here is stored
+ *  shared package between them (`packages/antgrid-wire` is MPL-2.0 and web
+ *  business logic must not move into it), so a value added there and not here is stored
  *  by nothing. */
 export const TaskRunStatusSchema = z.enum(["working", "attention", "error", "done"]);
 export type TaskRunStatus = z.infer<typeof TaskRunStatusSchema>;

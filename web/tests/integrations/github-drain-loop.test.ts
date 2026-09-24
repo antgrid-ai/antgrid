@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 import { describe, expect, test } from "bun:test";
 import type { DB } from "../../src/db/index.js";
 import type { GithubDrainReport } from "../../src/integrations/github-inbound.js";

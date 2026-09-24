@@ -2000,7 +2000,7 @@ export function uiRoutes(deps: {
 
     return c.html(
       <IntegrationsPage
-        user={{ email: c.get("userEmail") }}
+        user={layoutUser(c)}
         notice={parseIntegrationsNotice(c.req.query("github"))}
         githubApp={
           githubAppConfig(deps.env)

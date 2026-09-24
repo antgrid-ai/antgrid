@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 // web/scripts/drain-task-sync.ts
 //
 // Pushes the task edits the outbox queued to GitHub, invoked from OUTSIDE the

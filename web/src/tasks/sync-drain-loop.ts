@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 // web/src/tasks/sync-drain-loop.ts
 //
 // The runner around `applyOp`, which executes one outbox op and returns.

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 // web/scripts/poll-github-issues.ts
 //
 // Reads GitHub issues that no webhook ever delivered, invoked from OUTSIDE the

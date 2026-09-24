@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 // web/src/integrations/github-drain-loop.ts
 //
 // The runner around `drainGithubWebhooks`, which applies one batch and returns.

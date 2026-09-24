@@ -1,4 +1,7 @@
-import { Layout } from "./layout.js";
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
+import { Layout, type LayoutUser } from "./layout.js";
 import type { IntegrationsNotice } from "./integrations-notice.js";
 import type {
   ImportFilterKind,
@@ -56,7 +59,7 @@ export type GitHubAppState =
   | { configured: true; connectUrl: string };
 
 export type IntegrationsPageProps = {
-  user: { email?: string | null };
+  user: LayoutUser;
   githubApp: GitHubAppState;
   integrations: IntegrationView[];
   /** What the last action did, carried through a redirect so the callback's

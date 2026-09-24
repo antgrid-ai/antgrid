@@ -185,10 +185,11 @@ so in a comment at the point of decision — argue with that comment.
   delivery (`remote == base`) from re-clobbering.
 - **`setTaskLabelsInTx` deliberately does not enqueue.** Its only caller is the
   inbound importer; enqueueing there pushes the provider's own state back at it.
-- **The dual-license boundary is one-way.** `packages/antgrid-wire` and
-  `packages/antgrid_relay_client` are Apache-2.0. Hoisting a shared helper out
-  of `web/` into either relicenses it permissively — it compiles, CI stays
-  green, and nothing warns you.
+- **The licence boundary is file-level.** `web/` is ELv2 while
+  `packages/antgrid-wire` and `packages/antgrid_relay_client` are MPL-2.0.
+  Hoisting a shared helper out of `web/` into either puts that logic under
+  MPL source-distribution obligations — it compiles, CI stays green, and
+  nothing warns you.
 
 ## What is deliberately not here
 
