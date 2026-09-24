@@ -269,6 +269,15 @@ export class TerminalManager {
   confirmHookAlive(terminalId: string): void {
     this.sessions.get(terminalId)?.confirmHookAlive();
   }
+  /** The agent expected to ping `/hook-alive`, or undefined when it declares no
+   *  probe. Read live: a same-id respawn replaces the TerminalSession. */
+  hookAliveProbeAgent(terminalId: string): string | undefined {
+    return this.sessions.get(terminalId)?.hookAliveProbeAgent;
+  }
+  /** Live and not already on its way out — narrower than {@link has}. */
+  isRunning(terminalId: string): boolean {
+    return this.sessions.get(terminalId)?.isRunning ?? false;
+  }
   private sessions = new Map<string, TerminalSession>();
   private agentRunIds = new WeakMap<TerminalSession, string>();
   private scrollbacks = new Map<string, ScrollbackBuffer>();

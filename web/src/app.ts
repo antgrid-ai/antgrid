@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: LicenseRef-Elastic-2.0
 
 import { Hono } from "hono";
+import { contextStorage } from "hono/context-storage";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
 import { secureHeaders } from "hono/secure-headers";
@@ -49,6 +50,13 @@ export function buildApp(deps: AppDeps) {
   // relative URL against. This is the one place that knows the public origin.
   setPublicOrigin(deps.env.BETTER_AUTH_URL);
   setSalesIqWidgetUrl(deps.env.SALESIQ_WIDGET_URL);
+
+  // FIRST, before anything that can render. `Layout` reads the reader's
+  // colour-scheme cookie through `tryGetContext()` (ui/theme.ts) rather than
+  // taking the request as a prop from its twenty-odd call sites; a route
+  // mounted above this line renders with no context and silently falls back
+  // to the OS scheme. tests/routes/account-page.test.ts pins the order.
+  app.use("*", contextStorage());
 
   // The ZeptoMail webhook authenticates via a secret in its URL path
   // (/webhooks/zeptomail/:key). Hono's logger prints the full path, so redact

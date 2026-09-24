@@ -1076,6 +1076,12 @@ const NotificationPushMessage = BaseMessage.extend({
   // (notification_routing.dart).
   sessionId: z.string().optional(),
   projectId: z.string().optional(),
+  // WHO reported this: the agent itself, not the bridge speaking about it — the
+  // two are one shape, and the Handler's wrap-up is `task_complete` on the slot
+  // it is armed on (see push-dispatcher.ts). Absent must mean "keep it", so this
+  // marks the suppressible half. Stamped by {@link agentNotification}, not by
+  // hand. Not mirrored in the app — nothing on the far side reads it.
+  origin: z.literal("agent").optional(),
 });
 
 /** The app encodes its persistent X25519 push key as standard base64 of the raw
@@ -3392,6 +3398,15 @@ export function createMessage<T extends AbMessage["type"]>(
     ...(CHECKOUT_VARIABLE_MESSAGE_TYPES.has(type) && !("checkoutId" in payload) ? { checkoutId: "main" } : {}),
     ...payload,
   } as Extract<AbMessage, { type: T }>;
+}
+
+/** A `notification:push` the AGENT reported about itself (see `origin` on
+ *  NotificationPushMessage). A constructor rather than a stamped field because
+ *  forgetting the field fails silently — safely, but with no test to catch it. */
+export function agentNotification(
+  payload: Omit<MessagePayload<"notification:push">, "origin">,
+): Extract<AbMessage, { type: "notification:push" }> {
+  return createMessage("notification:push", { ...payload, origin: "agent" });
 }
 
 /**

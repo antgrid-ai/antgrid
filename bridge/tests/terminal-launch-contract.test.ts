@@ -77,6 +77,42 @@ describe("terminal adapter launch contract", () => {
     f.sm.flushNow();
   });
 
+  it("a /hook-alive ping undoes an invalidation the probe only guessed at", async () => {
+    // The probe writes a session off before its hooks have had reason to run. A
+    // ping is proof they do, and nothing else ever reconsiders one.
+    const f = fixture();
+    const observation = { notifications: true, titles: true, handler: true, turnStart: false, turnEnd: true, hookAlive: true };
+    prepare = () => ({ command: "owned-runtime", invocationKind: "exec", args: [], env: {}, resumed: false,
+      promptDelivery: "none", observation });
+    const entry = f.sm.create("probed", { tool: "claude-code" });
+    await f.sm.start(entry.id);
+
+    f.sm.invalidateHookObservation(entry.id, "Agent monitoring did not respond");
+    expect(f.sm.terminalObservation(entry.id)?.turnEnd).toBe(false);
+    expect(f.sm.handlerAvailability(entry.id).state).toBe("unavailable");
+
+    f.sm.restoreHookObservation(entry.id);
+    expect(f.sm.terminalObservation(entry.id)).toEqual(observation);
+    // Handler availability is `confirmHookRun`'s, which the same ping calls.
+    f.sm.confirmHookRun(entry.id, f.sm.hookRunId(entry.id));
+    expect(f.sm.handlerAvailability(entry.id).state).toBe("available");
+    f.sm.flushNow();
+  });
+
+  it("restoring an observation the launch never declared is a no-op", async () => {
+    const f = fixture();
+    prepare = () => ({ command: "owned-runtime", invocationKind: "exec", args: [], env: {}, resumed: false,
+      promptDelivery: "none" });
+    const entry = f.sm.create("unobserved", { tool: "claude-code" });
+    await f.sm.start(entry.id);
+    f.sm.invalidateHookObservation(entry.id);
+    f.sm.restoreHookObservation(entry.id);
+    // Nothing to put back, so the invalidation stands rather than being
+    // silently replaced by a spec-derived guess.
+    expect(f.sm.terminalObservation(entry.id)?.turnEnd).toBe(false);
+    f.sm.flushNow();
+  });
+
   it("reports unsupported prompt delivery and disposes preparation without dispatch", async () => {
     const f = fixture();
     let disposed = 0;

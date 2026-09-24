@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../billing/pricing_visibility.dart';
 import '../design/theme_presets.dart';
 import '../design/ab_colors.dart';
 import '../design/ab_icons.dart';
@@ -217,7 +218,8 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen>
                 // centres them, which would shrink-wrap every section frame.
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  if (defaultNativeUpgradePlatformCheck()) ...[
+                  if (kPricingSurfacesEnabled &&
+                      defaultNativeUpgradePlatformCheck()) ...[
                     _Section(
                       section: SettingsSection.billing,
                       body: [

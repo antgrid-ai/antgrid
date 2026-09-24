@@ -21,6 +21,7 @@ import {
   isInterruptKeystroke,
   isSubmitKeystroke,
   isTerminalReport,
+  opensCommandLine,
   submittedLine,
 } from "./keystrokes";
 import { AGENT_GRACE_MS, killChildTree, processGroupSpawn } from "./terminal-session";
@@ -50,7 +51,7 @@ import { lineForEvent } from "./session-bus/deliver-event";
 import { isRefusal } from "./session-bus/errors";
 import { neutralizeFenced } from "./session-bus/delivery";
 import type { BusInjectOutcome, QueuedLine } from "./session-bus/delivery-queue";
-import { CHECKOUT_VARIABLE_MESSAGE_TYPES, createMessage, HANDLER_HISTORY_RECORDS, HandlerAnswerWire, HandlerConfigureWire, HandlerDismissWire, HandlerHistoryRequestWire, HandlerInstructWire, HandlerUndoWire, PREVIEW_CHANNEL_MESSAGE_TYPES, type AbMessage, type RpcRequest, type SessionEntry, type WorkStatus } from "./protocol";
+import { agentNotification, CHECKOUT_VARIABLE_MESSAGE_TYPES, createMessage, HANDLER_HISTORY_RECORDS, HandlerAnswerWire, HandlerConfigureWire, HandlerDismissWire, HandlerHistoryRequestWire, HandlerInstructWire, HandlerUndoWire, PREVIEW_CHANNEL_MESSAGE_TYPES, type AbMessage, type RpcRequest, type SessionEntry, type WorkStatus } from "./protocol";
 import { parseTunnelMessage } from "./tunnel-protocol";
 import { startApiServer, type ApiServerHandle } from "./api-server";
 import { MessageBus, clientKeyOf, type Channel, type ClientKey, type InboundSource } from "./message-bus";
@@ -190,11 +191,13 @@ interface CheckoutRuntime {
   disposed: boolean;
 }
 
-// Tracks terminal ids that have pinged /hook-alive (a SessionStart probe an
-// agent's injection may declare). Module-level so it lives as long as the
-// process — terminals cleared from this Set on exit aren't re-added, keeping
-// the warning one-shot per spawn.
-const hookAlivePinged = new Set<string>();
+// Where each terminal stands with the /hook-alive probe. Only a respawn clears
+// an entry, which is what keeps the verdict — and the warning — one per spawn.
+const hookAliveState = new Map<string, "armed" | "pinged">();
+
+// How long an agent has to ping /hook-alive after a prompt is submitted into it.
+// Measured at 3s on a cold codex TUI; firing early is a false "hooks are dead".
+const HOOK_ALIVE_PROBE_MS = 20_000;
 
 export function buildAgentHello(cfg: AbConfig, version: string): AbMessage {
   return createMessage("agent:hello", {
@@ -367,6 +370,10 @@ export interface AgentCore {
    *  because it is what puts the session's dot on "needs you" and what the
    *  attached app renders in band. */
   isHandlerArmed(terminalId: string): boolean;
+  /** True when the Handler will announce this work finishing — armed AND holding
+   *  a backlog, since an empty one reaches no wrap-up (`allTerminal` in
+   *  handler/backlog.ts) and must keep its own turn-end. */
+  handlerOwnsCompletion(terminalId: string): boolean;
   /** True when a work-status key is bound to the main checkout (or is not a
    *  session at all). Pre-handshake this answers true — nothing is isolated
    *  yet, so no guard should be narrowed away. */
@@ -433,10 +440,11 @@ export interface BuildAgentCoreOptions {
    *  on its own: typing in an idle session is not work. `submitted` (the input
    *  carried a CR) is a turn-start only for agents that have no pre-turn hook,
    *  and only once `typed` has reported content for that session — a bare enter
-   *  submits nothing (see {@link hasTypedContent}). */
+   *  submits nothing (see {@link hasTypedContent}) — and only when that content
+   *  was a prompt, not a CLI `/` command (see {@link opensCommandLine}). */
   onUserReply?: (
     sessionId: string,
-    opts: { submitted: boolean; typed: boolean },
+    opts: { submitted: boolean; typed: boolean; command?: boolean },
   ) => void;
   /** Fired when the user resolves a permission/question on [sessionId], so the
    *  owning ProjectCore can clear the block and resume the turn. Distinct from
@@ -454,6 +462,16 @@ export interface BuildAgentCoreOptions {
    *  it. A later real turn-end/notification for the same turn is harmless
    *  (closeTurn is idempotent on an already-closed turn). */
   onInterrupt?: (sessionId: string) => void;
+  /** A hook reported [sessionId]'s turn ENDED on a channel filing no notification
+   *  (codex's `notify` argv) — the second closer, so a turn opened by keystroke
+   *  inference does not hang on one. Bridge-internal. See {@link hookTurnEnd}. */
+  onHookTurnEnd?: (sessionId: string) => void;
+  /** [sessionId]'s injected hooks were written off, so the owning ProjectCore
+   *  stops inferring turn-starts — the channel that closed them is the dead one. */
+  onHookChannelLost?: (sessionId: string) => void;
+  /** Fired when [sessionId]'s hooks ping `/hook-alive` — proof the channel works
+   *  after all, so the mark {@link onHookChannelLost} left is dropped. */
+  onHookChannelRestored?: (sessionId: string) => void;
   /** Fired when a client says [sessionId] is on screen (`session:focus`), so the
    *  owning ProjectCore can clear its unread mark and record where that client
    *  is looking. [client] is the client key — the desktop over loopback vs each
@@ -1051,7 +1069,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     if (session && normalized) {
       // Route semantic requests through the shared channel so push and work
       // status observe the same prompt without a duplicate terminal toast.
-      sendFromRuntime(runtime, createMessage("notification:push", {
+      sendFromRuntime(runtime, agentNotification({
         notificationType: normalized.type,
         message: normalized.message,
         sessionId: session.id,
@@ -2020,12 +2038,18 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         opts.onUserReply?.(msg.terminalId, {
           submitted: isSubmitKeystroke(msg.data),
           typed: hasTypedContent(msg.data),
+          command: opensCommandLine(msg.data),
         });
         // ...and lifts a session-bus no-progress halt. The halt waits on a human
         // looking (spec 8); a human submitting into that session is the only such
         // signal a bridge can observe, and an agent cannot forge it because
         // nothing an agent submits arrives as terminal input.
-        if (isSubmitKeystroke(msg.data)) sessionBus.clearHalt(msg.terminalId);
+        if (isSubmitKeystroke(msg.data)) {
+          sessionBus.clearHalt(msg.terminalId);
+          // ...and starts the /hook-alive deadline, which cannot begin at spawn:
+          // codex runs SessionStart on its first THREAD. Internal id on purpose.
+          armHookAliveProbe(id);
+        }
         if (isInterruptKeystroke(msg.data)) opts.onInterrupt?.(msg.terminalId);
         break;
       }
@@ -3078,7 +3102,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // cannot fall behind, unlike one kept by watching the verbs that reach us.
       if (msg.type === "handler:status") {
         handlerArmedSlots.clear();
-        for (const s of msg.sessions) handlerArmedSlots.add(s.terminalId);
+        for (const s of msg.sessions) handlerArmedSlots.set(s.terminalId, s.backlog.length > 0);
       }
       sendAb(msg);
     },
@@ -3138,8 +3162,11 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
    *  bus drops a re-publish whose payload is unchanged, so a subscriber that
    *  attaches after the arm can wait indefinitely for a frame that never comes.
    *
-   *  Read by {@link AgentCore.isHandlerArmed}; see it for what depends on it. */
-  const handlerArmedSlots = new Set<string>();
+   *  Read by {@link AgentCore.isHandlerArmed}; see it for what depends on it.
+   *
+   *  The value is whether that slot's backlog holds any items — all
+   *  {@link AgentCore.handlerOwnsCompletion} needs, and it rides on this frame. */
+  const handlerArmedSlots = new Map<string, boolean>();
 
   function registerSetupTerminal(checkoutId: string, terminalId: string): void {
     checkoutRuntimes.runtime(checkoutId)?.configuredTerminalIds.set(terminalId, terminalId);
@@ -4252,6 +4279,34 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     await checkoutRuntimes.remove(checkoutId);
   }
 
+  /** Start [terminalId]'s `/hook-alive` deadline, once per spawn; silence means
+   *  the injected hooks are not running, so fall back to the OSC scanner. Armed
+   *  by the first SUBMIT, never the spawn — codex runs SessionStart on its first
+   *  thread, so a spawn-time deadline tripped on every codex session. */
+  function armHookAliveProbe(terminalId: string): void {
+    const agent = manager?.hookAliveProbeAgent(terminalId);
+    if (!agent || hookAliveState.has(terminalId)) return;
+    hookAliveState.set(terminalId, "armed");
+    setTimeout(() => {
+      if (hookAliveState.get(terminalId) === "pinged") return;
+      manager?.enableHookFallback(terminalId);
+      // Only for a session still live enough to be misread; a dead row's inferred
+      // turn is closed by the prune in `foldSessions` anyway.
+      if (manager?.isRunning(terminalId)) {
+        sessions?.invalidateHookObservation(terminalId, "Agent monitoring did not respond");
+        opts.onHookChannelLost?.(terminalId);
+      }
+      log.warn(
+        "%s hooks did not ping /hook-alive for %s within %ds of the first submitted " +
+        "prompt — its injected hooks are not running; re-enabled OSC scanner " +
+        "(notifications + title) as fallback",
+        agent,
+        terminalId,
+        HOOK_ALIVE_PROBE_MS / 1000,
+      );
+    }, HOOK_ALIVE_PROBE_MS).unref?.();
+  }
+
   async function setupServices() {
     // If services are already running (app reconnected), just re-sync state
     if (manager) {
@@ -4514,7 +4569,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           case "title": namer?.onStructuredTitle(sessionId, event.title, event.kind); break;
           case "turn-start": opts.onTurnStart?.(sessionId); break;
           case "notification":
-            sendNotifying(createMessage("notification:push", { sessionId, projectId: project.id, notificationType: event.notificationType, message: event.message }));
+            sendNotifying(agentNotification({ sessionId, projectId: project.id, notificationType: event.notificationType, message: event.message }));
             break;
           case "handler":
             handlerEngine.handleEvent({ terminalId: sessionId, event: event.event, resetsAt: event.resetsAt, errorClass: event.errorClass })
@@ -4678,34 +4733,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       });
     });
 
-    // Probe: an agent whose injection declares /hook-alive (see the spec's
-    // hooks.posts) pings it from a SessionStart hook. If no ping arrives within
-    // 10s the trust fingerprint likely drifted — the agent's hooks are
-    // Untrusted/skipped, so BOTH its plugin notifications and its structured
-    // title correlation are dead (same injected hooks.state file, see
-    // agent-launch-augmenter.ts). Re-enable the OSC scanner (notifications AND
-    // title) as a best-effort fallback so the session isn't permanently muted or
-    // nameless, and warn. An agent that declares no probe never arms this and
-    // must never trip the warning.
-    manager.onSessionCreated((session) => {
-      const agent = session.hookAliveProbeAgent;
-      if (!agent) return;
-      const id = session.terminalId;
-      hookAlivePinged.delete(id);
-      setTimeout(() => {
-        if (!hookAlivePinged.has(id)) {
-          session.enableOscNotifications();
-          session.enableOscTitle();
-          if (session.isRunning) sessions?.invalidateHookObservation(id, "Agent monitoring did not respond");
-          log.warn(
-            "%s hooks did not ping /hook-alive for %s — trust fingerprint " +
-            "may have drifted; re-enabled OSC scanner (notifications + title) as fallback",
-            agent,
-            id,
-          );
-        }
-      }, 10_000).unref?.();
-    });
+    // Clears the previous spawn's verdict; `armHookAliveProbe` starts the new
+    // deadline. Unconditional, or a no-probe respawn leaves the id stale.
+    manager.onSessionCreated((session) => hookAliveState.delete(session.terminalId));
 
     // Forward URL detections to the app as port:detected messages.
     pd.onDetection((event) => {
@@ -5086,6 +5116,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       if (!accepted && runId === undefined) {
         manager?.enableHookFallback(terminalId);
         sessions?.invalidateHookObservation(terminalId);
+        opts.onHookChannelLost?.(terminalId);
       }
       return accepted;
     },
@@ -5128,6 +5159,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // spawns — drop those or every turn_end fires twice.
       if (sessions?.get(body.terminalId)?.mode === "chat") return;
       sessions?.confirmHookRun(body.terminalId, body.runId);
+      // The work reduction's SECOND closer: codex fires this and its Stop hook
+      // independently. `turn_end` alone, never `turn_failed` — that is claude
+      // parking for the Handler, which withholds its notification on purpose.
+      if (body.event === "turn_end") opts.onHookTurnEnd?.(body.terminalId);
       // A prompt that is over is not a pause to judge, and the engine's event
       // union carries no member for it: it retires the row the `question`
       // raised, by the id the agent gave that one tool call.
@@ -5228,9 +5263,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       if (!resolved || resolved.kind === "first-message") nameFromHook(resolved?.title);
     },
     onHookAlive: (terminalId) => {
-      hookAlivePinged.add(terminalId);
+      hookAliveState.set(terminalId, "pinged");
       manager?.confirmHookAlive(terminalId);
       sessions?.confirmHookRun(terminalId, sessions.hookRunId(terminalId));
+      // A ping is proof, so it undoes the guess — nothing else reconsiders one.
+      sessions?.restoreHookObservation(terminalId);
+      opts.onHookChannelRestored?.(terminalId);
     },
     onTurnStart: (terminalId) => {
       if (terminalId) openAgentPrompts.clear(terminalId);
@@ -5572,6 +5610,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     },
     isHandlerArmed(terminalId: string): boolean {
       return handlerArmedSlots.has(terminalId);
+    },
+    handlerOwnsCompletion(terminalId: string): boolean {
+      return handlerArmedSlots.get(terminalId) === true;
     },
     isMainCheckoutSession(id: string): boolean {
       return sessions?.isMainCheckoutSession(id) ?? true;

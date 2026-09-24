@@ -145,7 +145,7 @@ MockClient _serving(
 }
 
 void main() {
-  main_projectResolution();
+  projectResolutionTests();
   testWidgets('a fetch in flight shows loading, not "no longer exists"', (
     tester,
   ) async {
@@ -1317,7 +1317,7 @@ void _startIsDisabled(WidgetTester tester) {
   expect(start.onTap, isNull);
 }
 
-void main_projectResolution() {
+void projectResolutionTests() {
   // Registered from the end of the file so the launch tests above keep their
   // own harness; see the call in main().
   group('a task filed against a project', () {
