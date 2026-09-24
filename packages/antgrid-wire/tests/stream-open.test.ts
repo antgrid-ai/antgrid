@@ -10,6 +10,8 @@ import {
   STREAM_MAX_TUNNEL_STREAMS_PER_PEER,
   STREAM_OPEN_MAX_BYTES,
   STREAM_OPEN_MAX_ID_LENGTH,
+  STREAM_TERMINAL_APP_RECORD_MAX_BYTES,
+  STREAM_TERMINAL_BRIDGE_RECORD_MAX_BYTES,
   SessionStreamOpen,
   StreamOpen,
   StreamRefused,
@@ -150,6 +152,11 @@ describe("encodeStreamRefused / decodeStreamRefused", () => {
     expect(decodeStreamRefused(new TextEncoder().encode("{not json"))).toBeNull();
     expect(decodeStreamRefused(new TextEncoder().encode(JSON.stringify(["stream:refused"])))).toBeNull();
   });
+});
+
+test("terminal record caps are exported from the package root as 16384 and 2097152", () => {
+  expect(STREAM_TERMINAL_APP_RECORD_MAX_BYTES).toBe(16_384);
+  expect(STREAM_TERMINAL_BRIDGE_RECORD_MAX_BYTES).toBe(2_097_152);
 });
 
 test("D7 cap constants hold the adopted owner values (docs/iroh-reduction/ledger.md)", () => {

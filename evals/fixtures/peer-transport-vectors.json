@@ -73,6 +73,10 @@
       "maxTunnelStreamsPerPeer": 128,
       "maxPendingOpensPerPeer": 16
     },
+    "terminalRecords": {
+      "appMaxRecordBytes": 16384,
+      "bridgeMaxRecordBytes": 2097152
+    },
     "opens": [
       {
         "name": "session",

@@ -298,6 +298,82 @@ test("send() after finish() is dropped", async () => {
   expect(fake.writeAllCalls.length).toBe(1); // the post-finish send never reached the wire
 });
 
+// --- StreamRecordWriter: send()'s signal and abort() (A2 §3.1) --------
+
+test("send() with an already-aborted signal is dropped without queueing", async () => {
+  const fake = createFakeSendStream();
+  const writer = new StreamRecordWriter(fake.stream, () => true, () => {}, 1_000_000);
+  const controller = new AbortController();
+  controller.abort();
+  const outcome = await writer.send(new Uint8Array([1]), controller.signal);
+  expect(outcome).toBe("dropped");
+  expect(fake.writeAllCalls).toEqual([]);
+});
+
+test("a signal aborted while queued removes the record and frees its queued bytes", async () => {
+  const fake = createFakeSendStream();
+  const gate = fake.gateNextWrite(); // A is already dequeued and gated mid-write
+  // Room for exactly one queued 8-byte record ([4-byte len][4-byte frame]) on
+  // top of A, which is in flight and no longer counts against the queue.
+  const writer = new StreamRecordWriter(fake.stream, () => true, () => {}, 8);
+  const controller = new AbortController();
+  const first = writer.send(new Uint8Array(4)); // dequeued immediately, stuck on the gate
+  const second = writer.send(new Uint8Array(4), controller.signal); // fills the one queue slot
+  await flush();
+  controller.abort();
+  expect(await second).toBe("dropped");
+  // If the abort had not freed second's queued bytes, this would overflow.
+  const third = writer.send(new Uint8Array(4));
+  await flush();
+  expect(fake.writeAllCalls.length).toBe(1); // still only A's slice, stuck on the gate
+  gate.release();
+  expect(await first).toBe("sent");
+  expect(await third).toBe("sent");
+});
+
+test("a signal aborted after the first slice lets the record complete", async () => {
+  const fake = createFakeSendStream();
+  const gate = fake.gateNextWrite();
+  const writer = new StreamRecordWriter(fake.stream, () => true, () => {}, 1_000_000);
+  const controller = new AbortController();
+  const sent = writer.send(new Uint8Array([1, 2, 3]), controller.signal);
+  await flush(); // the record's one slice has reached writeAll and is now gated
+  controller.abort(); // too late: a partial record would corrupt the framing
+  gate.release();
+  expect(await sent).toBe("sent");
+});
+
+test("abort() drops the queue, resets without awaiting, and never calls onFailure", async () => {
+  const fake = createFakeSendStream();
+  const gate = fake.gateNextWrite();
+  const failures: StreamWriteFailure[] = [];
+  const writer = new StreamRecordWriter(fake.stream, () => true, (r) => failures.push(r), 1_000_000, 0, 7n);
+  const first = writer.send(new Uint8Array([1])); // stuck on the gate
+  const second = writer.send(new Uint8Array([2])); // queued behind it
+  await flush();
+  writer.abort(); // calls reset() right away, without waiting on the gated write
+  expect(await second).toBe("dropped");
+  expect(failures).toEqual([]);
+  // The reset call was issued synchronously above; it only settles once the
+  // shared mutex frees up, which the gated write is holding (FakeMutex models
+  // the binding's single per-stream lock — see the module comment above).
+  expect(fake.resetCalls).toEqual([]);
+  gate.release();
+  await flush();
+  expect(fake.resetCalls).toEqual([7n]);
+  expect(await writer.send(new Uint8Array([3]))).toBe("dropped"); // stopped for good
+});
+
+test("abort() after finish() is a no-op", async () => {
+  const fake = createFakeSendStream();
+  const writer = new StreamRecordWriter(fake.stream, () => true, () => {}, 1_000_000, 0, 7n);
+  await writer.send(new Uint8Array([1]));
+  await writer.finish();
+  writer.abort();
+  expect(fake.resetCalls).toEqual([]); // finish() already ran; abort() must not reset
+  expect(fake.finishCalls()).toBe(1);
+});
+
 // --- StreamRecordReader -------------------------------------------------
 
 test("reads a length-prefixed record delivered in one piece", async () => {

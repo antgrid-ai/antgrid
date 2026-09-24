@@ -108,6 +108,9 @@ void main() {
     expect(kStreamMaxTerminalAttachmentsPerPeer, caps['maxTerminalAttachmentsPerPeer']);
     expect(kStreamMaxTunnelStreamsPerPeer, caps['maxTunnelStreamsPerPeer']);
     expect(kStreamMaxPendingOpensPerPeer, caps['maxPendingOpensPerPeer']);
+    final terminalRecords = _map(streamOpen['terminalRecords']);
+    expect(kStreamTerminalAppRecordMaxBytes, terminalRecords['appMaxRecordBytes']);
+    expect(kStreamTerminalBridgeRecordMaxBytes, terminalRecords['bridgeMaxRecordBytes']);
   });
 
   test('Dart parses every stream-open kind golden vector, and round-trips it', () {

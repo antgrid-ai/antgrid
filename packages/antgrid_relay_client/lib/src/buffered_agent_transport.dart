@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'agent_transport.dart';
+import 'terminal_attachment.dart';
 
 /// Shared scaffolding for [AgentTransport] implementations.
 ///
@@ -37,6 +38,24 @@ abstract class BufferedAgentTransport implements AgentTransport {
   /// (re)establishment — the reconciliation checkpoint. Keyed so a re-register
   /// supersedes rather than duplicates; torn down with the transport.
   final _hydrators = <String, Future<void> Function()>{};
+
+  /// Socket-path terminal attachments — the default [openTerminalAttachment].
+  /// `StreamTransport` (`machine_session.dart`) overrides it to open a native
+  /// stream instead when its link supports one, falling back to this over the
+  /// same `send`.
+  late final SocketTerminalAttachments terminalAttachments =
+      SocketTerminalAttachments((m) => send(m));
+
+  @override
+  TerminalAttachment openTerminalAttachment({
+    required String requestId,
+    required String checkoutId,
+    required Map<String, dynamic> subscribe,
+  }) => terminalAttachments.open(
+    requestId: requestId,
+    checkoutId: checkoutId,
+    subscribe: subscribe,
+  );
 
   @override
   Stream<InboundMessage> get messages {
@@ -161,6 +180,9 @@ abstract class BufferedAgentTransport implements AgentTransport {
       }
       return;
     }
+    // A reply belonging to an open terminal attachment is claimed there
+    // instead of reaching the public stream — see [SocketTerminalAttachments.divert].
+    if (terminalAttachments.divert(json)) return;
     outbound.add(InboundMessage(channel, json));
   }
 
@@ -249,10 +271,16 @@ abstract class BufferedAgentTransport implements AgentTransport {
     }
   }
 
-  /// Drop all registered hydrators. Call from a subclass [dispose] so the
-  /// registry lifetime tracks the transport (and the warm-LRU eviction that
-  /// disposes it).
-  void clearHydrators() => _hydrators.clear();
+  /// Drop all registered hydrators, and end every open terminal attachment
+  /// [TerminalAttachmentTransportClosed]. Call from a subclass [dispose] so
+  /// the registry lifetime tracks the transport (and the warm-LRU eviction
+  /// that disposes it) — every subclass already calls this first in its own
+  /// [dispose], which is what lets a terminal attachment's teardown live here
+  /// instead of needing its own call at each of them.
+  void clearHydrators() {
+    _hydrators.clear();
+    terminalAttachments.closeAll();
+  }
 
   /// Fail every in-flight request and clear the table. Defaults describe a
   /// [dispose] (call it first from a subclass dispose); a session-down teardown

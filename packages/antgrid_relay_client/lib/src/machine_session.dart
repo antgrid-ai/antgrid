@@ -9,9 +9,11 @@ import 'flow.dart';
 import 'frag.dart';
 import 'frame.dart';
 import 'models/stream_envelope.dart';
+import 'models/stream_open.dart';
 import 'relay_service.dart';
 import 'peer_link.dart';
 import 'send_scheduler.dart';
+import 'terminal_attachment.dart';
 
 /// Liveness constants; mirror `bridge/src/relay-client.ts`.
 const int kPingSilenceSeconds = 20;
@@ -315,6 +317,34 @@ class MachineSession {
     final id = _projectStreamIds[projectId];
     if (id == null || _invalidStreamIds.contains(id)) return null;
     return id;
+  }
+
+  /// The projectId bound to [streamId], the reverse of [_projectStreamIds].
+  /// [StreamTransport.openTerminalAttachment] needs it: the terminal open
+  /// frame names the project, not the parent project stream.
+  String? projectIdForStream(String streamId) {
+    for (final entry in _projectStreamIds.entries) {
+      if (entry.value == streamId) return entry.key;
+    }
+    return null;
+  }
+
+  /// Terminal-attachment streams this session currently holds open, capped at
+  /// [kStreamMaxTerminalAttachmentsPerPeer] so an over-cap open fails locally
+  /// (`CAP_EXCEEDED`) instead of stalling on `openBi` against the bridge's own
+  /// per-peer limit.
+  int _terminalAttachmentSlots = 0;
+
+  bool _takeTerminalAttachmentSlot() {
+    if (_terminalAttachmentSlots >= kStreamMaxTerminalAttachmentsPerPeer) {
+      return false;
+    }
+    _terminalAttachmentSlots++;
+    return true;
+  }
+
+  void _releaseTerminalAttachmentSlot() {
+    if (_terminalAttachmentSlots > 0) _terminalAttachmentSlots--;
   }
 
   /// Begin driving the session: subscribe to the socket and liveness.
@@ -1457,6 +1487,37 @@ class StreamTransport extends BufferedAgentTransport {
   void dispatchFromSession(Map<String, dynamic> json, String channel) =>
       dispatchDecoded(json, channel);
 
+  /// Opens a native terminal stream when the session's link supports one,
+  /// falling back to the inherited socket-path attachment otherwise (e.g.
+  /// `fake_live_relay.dart`, which implements [PeerLink] only).
+  @override
+  TerminalAttachment openTerminalAttachment({
+    required String requestId,
+    required String checkoutId,
+    required Map<String, dynamic> subscribe,
+  }) {
+    final link = session.relay;
+    if (link is! MultiStreamPeerLink) {
+      return super.openTerminalAttachment(
+        requestId: requestId,
+        checkoutId: checkoutId,
+        subscribe: subscribe,
+      );
+    }
+    final attachment = _StreamTerminalAttachment(
+      session: session,
+      streamId: streamId,
+      requestId: requestId,
+      checkoutId: checkoutId,
+      subscribe: subscribe,
+      // `PeerLink` and `MultiStreamPeerLink` are separate interfaces (see
+      // peer_link.dart), so the `is!` check above cannot promote `link`.
+      link: link as MultiStreamPeerLink,
+    );
+    attachment._start();
+    return attachment;
+  }
+
   @override
   void noteOrphanResponse(String? requestId, String channel) {
     session.relay.netTap?.call({
@@ -1634,3 +1695,215 @@ class StreamTransport extends BufferedAgentTransport {
 /// bridge caches, each delivered by a per-checkout hydrator instead — see
 /// [StreamTransport.refreshSnapshot].
 const _kHeavyReplayTypes = <String>['tree:full'];
+
+/// A terminal attachment riding its own native QUIC stream. Opens
+/// asynchronously and never throws: every failure — including the open
+/// itself — ends [done] with a [TerminalAttachmentFailed] instead (carry-over
+/// 4), so a bridge that briefly cannot serve one attachment never surfaces
+/// through [PeerLink.failureStream] or the connection supervisor.
+class _StreamTerminalAttachment implements TerminalAttachment {
+  _StreamTerminalAttachment({
+    required this.session,
+    required this.streamId,
+    required this.requestId,
+    required this.checkoutId,
+    required Map<String, dynamic> subscribe,
+    required MultiStreamPeerLink link,
+  }) : _subscribe = subscribe,
+       _link = link;
+
+  final MachineSession session;
+  final String streamId;
+  @override
+  final String requestId;
+  @override
+  final String checkoutId;
+  final Map<String, dynamic> _subscribe;
+  final MultiStreamPeerLink _link;
+
+  @override
+  bool get isStream => true;
+
+  final _messages = StreamController<Map<String, dynamic>>();
+  final _doneCompleter = Completer<TerminalAttachmentEnd>();
+
+  bool _slotTaken = false;
+  bool _ended = false;
+  // Set by close(): before the stream exists yet, or while its open is still
+  // in flight, there is nothing to finish() — only a slot and (once opened) a
+  // stream to reset.
+  bool _closeRequested = false;
+  PeerStream? _stream;
+
+  @override
+  Stream<Map<String, dynamic>> get messages => _messages.stream;
+
+  @override
+  Future<TerminalAttachmentEnd> get done => _doneCompleter.future;
+
+  // Once a stream exists the slot is held until its records complete, so a
+  // close() cannot free a slot the bridge is still counting.
+  bool _recordsDone = false;
+
+  void _releaseSlot() {
+    if (!_slotTaken) return;
+    _slotTaken = false;
+    session._releaseTerminalAttachmentSlot();
+  }
+
+  void _end(TerminalAttachmentEnd end) {
+    if (_ended) return;
+    _ended = true;
+    if (_stream == null || _recordsDone) _releaseSlot();
+    if (!_doneCompleter.isCompleted) _doneCompleter.complete(end);
+    unawaited(_messages.close());
+  }
+
+  Future<void> _start() async {
+    if (!session._takeTerminalAttachmentSlot()) {
+      _end(const TerminalAttachmentFailed('CAP_EXCEEDED'));
+      return;
+    }
+    _slotTaken = true;
+    final projectId = session.projectIdForStream(streamId);
+    if (projectId == null) {
+      _end(const TerminalAttachmentFailed('NO_PROJECT'));
+      return;
+    }
+    if (_closeRequested) {
+      // close() landed before the open was even attempted.
+      _end(const TerminalAttachmentClosedLocally());
+      return;
+    }
+    PeerStream stream;
+    try {
+      stream = await _link.openStream(
+        TerminalStreamOpen(
+          projectId: projectId,
+          requestId: requestId,
+          checkoutId: checkoutId,
+        ),
+        maxRecordBytes: kStreamTerminalBridgeRecordMaxBytes,
+        maxQueuedBytes: kTerminalAttachmentMaxQueuedBytes,
+      );
+    } catch (e) {
+      // Carry-over 4: never rethrown, never reported to failureStream or the
+      // connection supervisor — this attachment's open failure is purely
+      // local (e.g. PeerConnectionFailure(terminal: true) from a closed link).
+      _end(TerminalAttachmentFailed('STREAM_OPEN_FAILED', e));
+      return;
+    }
+    _stream = stream;
+    if (_closeRequested) {
+      // close() landed while the open was in flight (step 7: reset it and
+      // release the slot once it resolves, rather than finish()ing a stream
+      // whose subscribe was never sent).
+      _quietly(stream.reset());
+      _end(const TerminalAttachmentClosedLocally());
+      _releaseSlot();
+      return;
+    }
+    PeerSendOutcome? outcome;
+    Object? sendError;
+    try {
+      outcome = await stream.send(
+        Uint8List.fromList(utf8.encode(jsonEncode(_subscribe))),
+      );
+    } catch (e) {
+      sendError = e;
+    }
+    if (outcome != PeerSendOutcome.accepted) {
+      _quietly(stream.reset());
+      _end(TerminalAttachmentFailed('SEND_FAILED', sendError));
+      _releaseSlot();
+      return;
+    }
+    await _readRecords(stream);
+  }
+
+  Future<void> _readRecords(PeerStream stream) async {
+    var first = true;
+    try {
+      await for (final record in stream.records) {
+        // Ended already (a mid-stream close(), a refusal, or an invalid
+        // record) — keep draining without delivering so the native side's
+        // completion still runs its course (step 7).
+        if (_ended) continue;
+        if (first) {
+          first = false;
+          final refusal = StreamRefused.tryDecode(record);
+          if (refusal != null) {
+            _quietly(stream.finish());
+            _end(TerminalAttachmentRefused(refusal));
+            continue;
+          }
+        }
+        Object? decoded;
+        try {
+          decoded = jsonDecode(utf8.decode(record));
+        } catch (_) {
+          decoded = null;
+        }
+        if (decoded is! Map<String, dynamic>) {
+          _quietly(stream.reset());
+          _end(const TerminalAttachmentFailed('INVALID_RECORD'));
+          continue;
+        }
+        if (!_messages.isClosed) _messages.add(decoded);
+      }
+    } catch (_) {
+      // A records error is the bridge's half ending too; handled below.
+    }
+    // The bridge's half ended (FIN or reset — Dart cannot tell them apart).
+    // Always finish our own send half here (a no-op if already finished),
+    // and release the slot now that nothing more is coming.
+    try {
+      await stream.finish();
+    } catch (_) {
+      // A link already gone has nothing left to finish.
+    }
+    _recordsDone = true;
+    _end(const TerminalAttachmentPeerEnded());
+    _releaseSlot();
+  }
+
+  @override
+  Future<void> send(Map<String, dynamic> message) async {
+    if (_ended) return;
+    final stream = _stream;
+    if (stream == null) return; // Still opening; nothing to send onto yet.
+    try {
+      final outcome = await stream.send(
+        Uint8List.fromList(utf8.encode(jsonEncode(message))),
+      );
+      if (outcome != PeerSendOutcome.accepted) {
+        _quietly(stream.reset());
+      }
+    } catch (_) {
+      // Never throws — mirrors the socket path's fire-and-forget send.
+    }
+  }
+
+  @override
+  Future<void> close() async {
+    if (_closeRequested || _ended) return;
+    _closeRequested = true;
+    final stream = _stream;
+    if (stream == null) {
+      // Open hasn't resolved yet; _start() checks _closeRequested at both of
+      // its points before a stream exists.
+      return;
+    }
+    _end(const TerminalAttachmentClosedLocally());
+    try {
+      await stream.finish();
+    } catch (_) {
+      // Never throws; the records loop still observes the bridge's end.
+    }
+  }
+}
+
+/// Fire-and-forget for a stream end whose failure means the link is already
+/// gone: an unawaited rejection would otherwise surface as an uncaught error.
+void _quietly(Future<void> future) =>
+    unawaited(future.catchError((Object _) {}));

@@ -12,6 +12,8 @@
 /// Flutter layer.
 library;
 
+import 'terminal_attachment.dart';
+
 /// Lifecycle states an [AgentTransport] can be in.
 enum TransportState { connecting, connected, disconnected, error }
 
@@ -181,6 +183,17 @@ abstract class AgentTransport {
 
   /// Tear down the connection and release resources.
   Future<void> dispose();
+
+  /// Opens one terminal viewer attachment. [subscribe] is the complete
+  /// `terminal:subscribe` message, checkoutId already stamped, with
+  /// `subscribe['requestId'] == requestId`. Returns synchronously; never
+  /// throws — every failure (refusal, a local open error, the transport
+  /// closing) is reported through the returned handle's `done`.
+  TerminalAttachment openTerminalAttachment({
+    required String requestId,
+    required String checkoutId,
+    required Map<String, dynamic> subscribe,
+  });
 }
 
 class RpcException implements Exception {

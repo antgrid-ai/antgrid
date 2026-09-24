@@ -101,6 +101,13 @@ class CommandHandler {
   /// as an `antgrid-message` event tagged with the stream it arrived on.
   final Map<String, StreamSubscription<InboundMessage>> _streamSubs = {};
 
+  /// Open terminal attachments (`terminal-attach`), keyed by the caller's own
+  /// `requestId` — the same id used to open them and to address
+  /// `terminal-attach-send`/`-close`.
+  final Map<String, TerminalAttachment> _attachmentHandles = {};
+  final Map<String, StreamSubscription<Map<String, dynamic>>>
+  _attachmentMsgSubs = {};
+
   CommandHandler(this._emit);
 
   Future<void> dispose() => _disposeAll();
@@ -122,6 +129,12 @@ class CommandHandler {
         await _handleSendEncrypted(cmd);
       case 'snapshot':
         await _handleSnapshot(cmd);
+      case 'terminal-attach':
+        await _handleTerminalAttach(cmd);
+      case 'terminal-attach-send':
+        await _handleTerminalAttachSend(cmd);
+      case 'terminal-attach-close':
+        await _handleTerminalAttachClose(cmd);
       case 'peer-disconnect':
         await _handlePeerDisconnect();
       case 'control-disconnect':
@@ -590,6 +603,110 @@ class CommandHandler {
     }
   }
 
+  /// Opens one terminal viewer attachment (native stream when the session's
+  /// link supports one, else the legacy socket path) and republishes its
+  /// lifecycle as `terminal-attach-*` events, exactly as
+  /// `terminal_service.dart` consumes the same [TerminalAttachment] surface.
+  Future<void> _handleTerminalAttach(Map<String, dynamic> cmd) async {
+    final session = _session;
+    final streamId = cmd['streamId'] as String?;
+    final terminalId = cmd['terminalId'] as String?;
+    final requestId = cmd['requestId'] as String?;
+    final version = cmd['version'] as int?;
+    if (session == null ||
+        streamId == null ||
+        terminalId == null ||
+        requestId == null ||
+        version == null) {
+      _emit({
+        'event': 'error',
+        'message':
+            'Must complete handshake before terminal-attach, and streamId, '
+            'terminalId, requestId and version are required',
+      });
+      return;
+    }
+    final checkoutId = cmd['checkoutId'] as String? ?? 'main';
+    final subscribe = _createAbMessage('terminal:subscribe', {
+      'terminalId': terminalId,
+      'version': version,
+      'requestId': requestId,
+      'checkoutId': checkoutId,
+    });
+    final handle = session.streamFor(streamId).openTerminalAttachment(
+      requestId: requestId,
+      checkoutId: checkoutId,
+      subscribe: subscribe,
+    );
+    _attachmentHandles[requestId] = handle;
+    _emit({
+      'event': 'terminal-attach-opened',
+      'requestId': requestId,
+      'isStream': handle.isStream,
+    });
+    _attachmentMsgSubs[requestId] = handle.messages.listen((data) {
+      _emit({
+        'event': 'terminal-attach-message',
+        'requestId': requestId,
+        'data': data,
+      });
+    });
+    unawaited(
+      handle.done.then((end) {
+        _attachmentHandles.remove(requestId);
+        unawaited(_attachmentMsgSubs.remove(requestId)?.cancel() ?? Future.value());
+        final out = <String, dynamic>{
+          'event': 'terminal-attach-end',
+          'requestId': requestId,
+        };
+        switch (end) {
+          case TerminalAttachmentPeerEnded():
+            out['end'] = 'peerEnded';
+          case TerminalAttachmentRefused(:final refusal):
+            out['end'] = 'refused';
+            out['code'] = refusal.code.wireValue;
+          case TerminalAttachmentFailed(:final code):
+            out['end'] = 'failed';
+            out['code'] = code;
+          case TerminalAttachmentTransportClosed():
+            out['end'] = 'transportClosed';
+          case TerminalAttachmentClosedLocally():
+            out['end'] = 'closedLocally';
+        }
+        _emit(out);
+      }),
+    );
+  }
+
+  Future<void> _handleTerminalAttachSend(Map<String, dynamic> cmd) async {
+    final requestId = cmd['requestId'] as String?;
+    final data = cmd['data'] as Map<String, dynamic>?;
+    final handle = requestId == null ? null : _attachmentHandles[requestId];
+    if (handle == null || data == null) {
+      _emit({
+        'event': 'error',
+        'message':
+            'terminal-attach-send requires a requestId with an open '
+            'attachment, and data',
+      });
+      return;
+    }
+    await handle.send(data);
+  }
+
+  Future<void> _handleTerminalAttachClose(Map<String, dynamic> cmd) async {
+    final requestId = cmd['requestId'] as String?;
+    final handle = requestId == null ? null : _attachmentHandles[requestId];
+    if (handle == null) {
+      _emit({
+        'event': 'error',
+        'message': 'terminal-attach-close requires a requestId with an open attachment',
+      });
+      return;
+    }
+    await handle.close();
+  }
+
   Future<void> _handlePeerDisconnect() async {
     await _disconnectPeerState();
     _emit({'event': 'peer-disconnected'});
@@ -649,8 +766,19 @@ class CommandHandler {
     }
     if (relay != null) cleanup.add(relay.dispose);
     if (stateSub != null) cleanup.add(stateSub.cancel);
+    cleanup.add(_closeAllAttachments);
     cleanup.add(_disconnectPeerState);
     await cleanup.run();
+  }
+
+  /// Closes every open terminal attachment. Their own `done` handlers already
+  /// remove each from [_attachmentHandles] and cancel its message
+  /// subscription, so this only needs to trigger [TerminalAttachment.close]
+  /// on whatever is still open.
+  Future<void> _closeAllAttachments() async {
+    for (final handle in _attachmentHandles.values.toList()) {
+      await handle.close();
+    }
   }
 
   /// Republish every frame the session demuxes to [streamId]. Idempotent: the

@@ -98,6 +98,24 @@ class ThrowOnceTransport implements TerminalViewerTransport {
   }
 }
 
+/** Models a frame handed to the transport but not yet acknowledged BY THE
+ *  TRANSPORT LAYER ITSELF — `send()` for a `terminal:frame` never settles, so
+ *  `attachment.unsent` stays populated exactly like a real send in flight.
+ *  Every other message type resolves immediately: `subscribe()` awaits its own
+ *  `terminal:subscribed` send directly, and a parked reply there would hang
+ *  the whole test rather than model anything delivery.ts does. */
+class ParkingFrameTransport extends FakeTransport {
+  pendingSignals: AbortSignal[] = [];
+  override async send(message: TerminalFrame | TerminalDisplayStatus | AbMessage, signal: AbortSignal): Promise<void> {
+    if (signal.aborted) return;
+    this.sent.push(message);
+    if (message.type === "terminal:frame") {
+      this.pendingSignals.push(signal);
+      return new Promise(() => {});
+    }
+  }
+}
+
 function frames(t: { sent: (TerminalFrame | TerminalDisplayStatus | AbMessage)[] }): TerminalFrame[] {
   return t.sent.filter((m): m is TerminalFrame => m.type === "terminal:frame");
 }
@@ -401,6 +419,125 @@ describe("hub", () => {
 
     expect(t.retirements).toEqual([attachmentId!]);
     expect(conn.size).toBe(0);
+  });
+
+  // Contract §3.6: retireRun/the tick-driven ENDED branch must hand ENDED to
+  // the transport before retiring, and must NOT abort a frame already handed
+  // to the transport (`retire(attachment, { abortQueued: false })`). Two
+  // separate connections/attachments, one frame each, avoid the UNRELATED
+  // "unsent superseded by a newer frame" housekeeping in tickAttachment (which
+  // aborts an old in-flight frame on the SAME attachment when a second frame
+  // becomes due) so this test cannot pass or fail for that reason instead.
+  test("retireRun hands ENDED to the transport after every queued frame and aborts none of them", async () => {
+    let now = 0;
+    const hub = new TerminalFrameHub(() => now);
+    const screen = source();
+    const runId = crypto.randomUUID();
+    hub.register(addr(), screen, runId);
+
+    const t1 = new ParkingFrameTransport();
+    const t2 = new ParkingFrameTransport();
+    const conn1 = hub.connect(t1);
+    const conn2 = hub.connect(t2);
+    await conn1.subscribe(addr(), TERMINAL_PROTOCOL_VERSION, crypto.randomUUID());
+    await conn2.subscribe(addr(), TERMINAL_PROTOCOL_VERSION, crypto.randomUUID());
+
+    await paint(screen, "x\r\n");
+    now += TERMINAL_FRAME_INTERVAL_MS + 10;
+    hub.tick();
+    // subscribe()'s own tick already captured the initial (empty) screen, so
+    // the frame this paint produced is the LATEST one, not the only one — and
+    // it is the one this test is about. (subscribe's frame is superseded and
+    // aborted by the unrelated "newer frame is due" housekeeping the moment
+    // this tick runs, which is expected and not what this test asserts on.)
+    expect(frames(t1).length).toBeGreaterThanOrEqual(1);
+    expect(frames(t2).length).toBeGreaterThanOrEqual(1);
+    const latest1 = t1.pendingSignals.at(-1)!;
+    const latest2 = t2.pendingSignals.at(-1)!;
+
+    hub.remove(addr(), 3);
+
+    for (const t of [t1, t2]) {
+      const kinds = t.sent.map((m) => m.type);
+      expect(kinds.indexOf("terminal:frame")).toBeLessThan(kinds.indexOf("terminal:display:status"));
+      expect(statuses(t)).toEqual([expect.objectContaining({ code: "ENDED", exitCode: 3 })]);
+    }
+    expect(latest1.aborted).toBe(false);
+    expect(latest2.aborted).toBe(false);
+    expect(t1.retirements.length).toBe(1);
+    expect(t2.retirements.length).toBe(1);
+  });
+
+  // Contract §3.6: the natural, tick-driven end (`run.finalRevision` catches
+  // up with an attachment that has nothing pending) retires the SAME way as
+  // an explicit `remove()` — ENDED reaches the transport, and a frame the
+  // transport already has (acknowledged, so `pending` is empty, but still
+  // "in flight" because the transport's own send() promise never settled) is
+  // never aborted underneath it.
+  test("the ENDED tick path retires without aborting a frame already handed to the transport", async () => {
+    let now = 0;
+    const hub = new TerminalFrameHub(() => now);
+    const screen = source();
+    const runId = crypto.randomUUID();
+    hub.register(addr(), screen, runId);
+    const t = new ParkingFrameTransport();
+    const conn = hub.connect(t);
+    const attachmentId = (await conn.subscribe(addr(), TERMINAL_PROTOCOL_VERSION, crypto.randomUUID()))!;
+
+    await paint(screen, "x\r\n");
+    now += TERMINAL_FRAME_INTERVAL_MS + 10;
+    hub.tick();
+    // subscribe()'s own tick already captured the initial (empty) screen, so
+    // this paint's frame — the one under test — is the LATEST send, not the
+    // only one; its signal is `pendingSignals.at(-1)`.
+    const sent = frames(t).at(-1)!;
+    const signal = t.pendingSignals.at(-1)!;
+
+    // Acknowledging empties `pending` (the ACK_TIMEOUT/ENDED gate), but the
+    // transport's send() for this frame still never resolved, so `unsent`
+    // stays live — modelling "handed over, not yet settled".
+    conn.acknowledge(addr(), { runId, attachmentId, sequence: sent.sequence });
+
+    await hub.finish(addr(), runId, 5);
+
+    expect(statuses(t)).toEqual([expect.objectContaining({ code: "ENDED", exitCode: 5 })]);
+    expect(t.retirements).toEqual([attachmentId]);
+    expect(signal.aborted).toBe(false);
+    expect(conn.size).toBe(0);
+  });
+
+  // Contract §3.6: `fail()` was reordered to send its status notice before
+  // retiring — a `retired()` fired first would close the viewer's book on
+  // this attachment (and any owner-side "still watching" gate keyed off it)
+  // before the reason it ended ever reached the transport.
+  test("fail() hands its status to the transport before retired() fires", async () => {
+    let now = 0;
+    const hub = new TerminalFrameHub(() => now);
+    const screen = source();
+    hub.register(addr(), screen, crypto.randomUUID());
+    const order: string[] = [];
+    class OrderingTransport extends FakeTransport {
+      override async send(message: TerminalFrame | TerminalDisplayStatus | AbMessage, signal: AbortSignal): Promise<void> {
+        if (signal.aborted) return;
+        this.sent.push(message);
+        if (message.type === "terminal:display:status") order.push(`send:${message.code}`);
+      }
+      override retired(address: TerminalAddress, attachmentId: string): void {
+        order.push("retired");
+        super.retired(address, attachmentId);
+      }
+    }
+    const t = new OrderingTransport();
+    const conn = hub.connect(t);
+    await conn.subscribe(addr(), TERMINAL_PROTOCOL_VERSION, crypto.randomUUID());
+
+    await paint(screen, "x\r\n");
+    now += TERMINAL_FRAME_INTERVAL_MS + 10;
+    hub.tick(); // frame queued, never acknowledged
+    now += TERMINAL_ACK_TIMEOUT_MS + 10;
+    hub.tick(); // fail("ACK_TIMEOUT")
+
+    expect(order).toEqual(["send:ACK_TIMEOUT", "retired"]);
   });
 
   test("a capture the source refuses is still charged against the frame interval", async () => {

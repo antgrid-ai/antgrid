@@ -8,6 +8,7 @@ import '../analytics/events.dart';
 import '../models/terminal_models.dart';
 import '../models/ab_message.dart';
 import '../project/perf_recorder.dart';
+import '../project/project_message_classification.dart';
 import '../project/project_session.dart';
 import '../util/detached.dart';
 import '../utils/terminal_bell.dart';
@@ -270,6 +271,26 @@ class TerminalService {
   /// name anything on the other end.
   final Map<String, ({String runId, String attachmentId})> _frameAttachment =
       {};
+
+  /// terminalId -> the live [TerminalAttachment] backing [_frameAttachment],
+  /// bound the moment `terminal:subscribe` is sent (before any reply) and
+  /// removed exactly when this client is done with it: on `close()` (its own
+  /// `_unsubscribeFrame`/`_failFrameSubscribe`) or on the attachment's own
+  /// [TerminalAttachmentEnd] (`_onAttachmentEnd`). Kept alongside
+  /// [_frameAttachment] rather than folded into it, because a handle exists
+  /// (and must eventually be closed) for the whole subscribe attempt, while
+  /// [_frameAttachment] only exists once `terminal:subscribed` confirms it.
+  final Map<String, TerminalAttachment> _attachmentHandles = {};
+  final Map<String, StreamSubscription<Map<String, dynamic>>>
+  _attachmentMsgSubs = {};
+
+  /// terminalId -> guards a bare [TerminalAttachmentPeerEnded] (a bridge
+  /// overflow or lost-stream reset, D3) from re-subscribing more than once
+  /// before a frame is next accepted -- otherwise a link that cannot carry
+  /// the terminal at all would resubscribe in a tight loop. Cleared in
+  /// [_applyAcceptedFrame].
+  final Set<String> _bareEndedResubscribeGuard = {};
+
   final Map<String, String> _historyRunId = {};
   final Map<String, ({String runId, String attachmentId})>
   _endedHistoryAttachment = {};
@@ -754,6 +775,9 @@ class TerminalService {
   }
 
   void _applyAcceptedFrame(TerminalTab tab, TerminalFrameMessage msg) {
+    // A frame accepted for the live attachment proves the link can still
+    // carry this terminal, re-arming the bare-PeerEnded resubscribe guard.
+    _bareEndedResubscribeGuard.remove(msg.terminalId);
     if (_prefetchId == msg.terminalId && !_visible(msg.terminalId)) {
       final elapsed = _screenWaits.remove(msg.terminalId)?.elapsedMilliseconds;
       if (elapsed != null) {
@@ -837,19 +861,134 @@ class TerminalService {
     required String attachmentId,
     required int sequence,
   }) {
+    final message = _stampCheckout(
+      createAbMessage('terminal:ack', {
+        'terminalId': terminalId,
+        'runId': runId,
+        'attachmentId': attachmentId,
+        'sequence': sequence,
+      }),
+    );
+    final handle = _attachmentHandles[terminalId];
     detached(
       'terminal',
       'acknowledge consumed frame',
-      () => session.sendForCheckout(
-        checkoutId,
-        createAbMessage('terminal:ack', {
-          'terminalId': terminalId,
-          'runId': runId,
-          'attachmentId': attachmentId,
-          'sequence': sequence,
-        }),
-      ),
+      () => _sendAttachmentVerb(handle, message),
     );
+  }
+
+  /// A stream-backed attachment carries its own verbs. A socket-path one
+  /// sends the same bytes through [ProjectSession.sendForCheckout], which
+  /// keeps that path's throw-at-the-call for a transport that refuses a send
+  /// ([TerminalAttachment.send] never throws).
+  Future<void> _sendAttachmentVerb(
+    TerminalAttachment? handle,
+    Map<String, dynamic> message,
+  ) {
+    if (handle != null && handle.isStream) return handle.send(message);
+    return session.sendForCheckout(checkoutId, message);
+  }
+
+  /// Stamps [message] with this checkout's id exactly as
+  /// [ProjectSession.sendForCheckout] does, for a message sent through a
+  /// [TerminalAttachment]'s `send` instead of through it.
+  Map<String, dynamic> _stampCheckout(Map<String, dynamic> message) {
+    final type = message['type'];
+    if (type is String && kCheckoutVariableMessageTypes.contains(type)) {
+      return {...message, 'checkoutId': checkoutId};
+    }
+    return message;
+  }
+
+  /// Wires a freshly opened [handle] into this terminal's dispatch: every
+  /// message it carries feeds the same handlers the router feeds today, and
+  /// its [TerminalAttachment.done] is handled once, guarded by identity so a
+  /// stale handle superseded by a fresh attach (or our own `close()`) can
+  /// never act on behalf of the one that replaced it.
+  void _bindAttachmentHandle(String terminalId, TerminalAttachment handle) {
+    _attachmentHandles[terminalId] = handle;
+    _attachmentMsgSubs[terminalId] = handle.messages.listen((json) {
+      if (_disposed) return;
+      final parsed = parseAbMessage(json);
+      if (parsed == null) return;
+      if (parsed is TerminalFrameMessage) {
+        _handleTerminalFrame(parsed);
+      } else if (parsed is TerminalHistoryPageMessage) {
+        _handleTerminalHistoryPage(parsed);
+      } else if (parsed is TerminalSubscribedMessage) {
+        _handleFrameSubscribed(parsed);
+      } else if (parsed is TerminalDisplayStatusMessage) {
+        _handleFrameDisplayStatus(parsed);
+      }
+    });
+    unawaited(
+      handle.done.then((end) {
+        if (_disposed) return;
+        if (!identical(_attachmentHandles[terminalId], handle)) return;
+        _onAttachmentEnd(terminalId, end);
+      }),
+    );
+  }
+
+  /// Drops this terminal's current attachment handle and its message
+  /// subscription. Callers are responsible for closing/unsubscribing the
+  /// handle itself first when this side is the one ending it.
+  void _forgetAttachmentHandle(String terminalId) {
+    _attachmentHandles.remove(terminalId);
+    unawaited(_attachmentMsgSubs.remove(terminalId)?.cancel());
+  }
+
+  void _onAttachmentEnd(String terminalId, TerminalAttachmentEnd end) {
+    switch (end) {
+      case TerminalAttachmentPeerEnded():
+        _onAttachmentPeerEnded(terminalId);
+      case TerminalAttachmentRefused():
+      case TerminalAttachmentFailed():
+      case TerminalAttachmentTransportClosed():
+        // Treated as a subscribe that got no reply: clear the pending
+        // subscribe and leave re-subscription to the existing triggers.
+        // Never re-subscribe from here.
+        _forgetAttachmentHandle(terminalId);
+        _clearPendingSubscribe(terminalId);
+        _publishHydration();
+      case TerminalAttachmentClosedLocally():
+        // This side asked for the end (already unbound at the call site);
+        // nothing further to do.
+        break;
+    }
+  }
+
+  /// The bridge's half of a live attachment ended with no explicit status
+  /// (FIN or reset -- Dart cannot tell them apart).
+  void _onAttachmentPeerEnded(String terminalId) {
+    // Hazard B: the bridge wrote ENDED after its final frames, so nothing
+    // more is coming -- finish the drain now rather than waiting out its
+    // timeout.
+    if (_drainingEnded.containsKey(terminalId)) {
+      _forgetAttachmentHandle(terminalId);
+      _finishEndedDrain(terminalId);
+      return;
+    }
+    // The status handling already ran for one of these (ENDED,
+    // UNKNOWN_TERMINAL, UPGRADE_REQUIRED, ACK_TIMEOUT, or a latching
+    // DISPLAY_FAILED) -- the end is a no-op.
+    if (_frameEndedIds.contains(terminalId) ||
+        _frameFailedIds.contains(terminalId) ||
+        _missingTerminalIds.contains(terminalId)) {
+      _forgetAttachmentHandle(terminalId);
+      return;
+    }
+    _forgetAttachmentHandle(terminalId);
+    // A bare PeerEnded this service did not cause (a bridge overflow or
+    // lost-stream reset, D3): clear tracking and re-subscribe once, but only
+    // while the terminal is still displayed and the transport can carry it,
+    // and never more than once until a frame is next accepted (the guard).
+    if ((_visible(terminalId) || _prefetchId == terminalId) &&
+        session.transport.isEstablished &&
+        _bareEndedResubscribeGuard.add(terminalId)) {
+      _resetFrameTracking(terminalId);
+      _subscribeFrame(terminalId);
+    }
   }
 
   /// Reattaches the terminal with a fresh viewer attachment.
@@ -934,14 +1073,18 @@ class TerminalService {
       _frameSubscribeDeadlines.remove(terminalId);
       _failFrameSubscribe(terminalId);
     });
-    session.sendForCheckout(
-      checkoutId,
-      createAbMessage('terminal:subscribe', {
-        'terminalId': terminalId,
-        'version': kTerminalFrameProtocolVersion,
-        'requestId': requestId,
-      }),
+    final handle = session.transport.openTerminalAttachment(
+      requestId: requestId,
+      checkoutId: checkoutId,
+      subscribe: _stampCheckout(
+        createAbMessage('terminal:subscribe', {
+          'terminalId': terminalId,
+          'version': kTerminalFrameProtocolVersion,
+          'requestId': requestId,
+        }),
+      ),
     );
+    _bindAttachmentHandle(terminalId, handle);
     // The subscribe IS this terminal's attach from here on, so the stage it
     // moves to has to reach the pane — without this a re-subscribe over an
     // already-painted frame tab never republishes, and the UI keeps rendering
@@ -951,30 +1094,58 @@ class TerminalService {
 
   /// Bounds an unanswered subscribe without changing the display protocol.
   void _failFrameSubscribe(String terminalId) {
+    // A deadline armed by [_handleFrameSubscribed] (waiting for a first
+    // frame, not for `terminal:subscribed` itself) fires with the attachment
+    // already confirmed -- leave it live, exactly as before the attachment
+    // handle existed, so a late frame can still recover it (see
+    // `_paintFrame`'s `recovered`).
+    final unconfirmed = !_frameAttachment.containsKey(terminalId);
     _clearPendingSubscribe(terminalId);
     _frameFailedIds.add(terminalId);
     _frameStatusMessage[terminalId] =
         'Terminal connection failed. Reconnect or upgrade the bridge.';
+    if (unconfirmed) {
+      // The bridge never answered `terminal:subscribe` at all: close the
+      // attachment it opened rather than leaving the bridge to reclaim it on
+      // its own ACK_TIMEOUT/cap accounting.
+      final handle = _attachmentHandles[terminalId];
+      _forgetAttachmentHandle(terminalId);
+      if (handle != null) unawaited(handle.close());
+    }
     _publishHydration();
   }
 
   /// Best-effort `terminal:unsubscribe` for whatever live frame attachment
-  /// [terminalId] holds. Fire-and-forget like every other outbound verb here
-  /// -- the bridge's own ACK_TIMEOUT and run-exit paths already retire an
-  /// attachment nobody explicitly released, so a dropped send here costs
-  /// nothing but a slightly later bridge-side cleanup.
+  /// [terminalId] holds, then closes its handle. Fire-and-forget like every
+  /// other outbound verb here -- the bridge's own ACK_TIMEOUT and run-exit
+  /// paths already retire an attachment nobody explicitly released, so a
+  /// dropped send here costs nothing but a slightly later bridge-side
+  /// cleanup.
   void _unsubscribeFrame(String terminalId) {
+    final handle = _attachmentHandles[terminalId];
     final attachment = _frameAttachment.remove(terminalId);
-    if (attachment == null) return;
+    if (handle == null && attachment == null) return;
+    _forgetAttachmentHandle(terminalId);
+    if (attachment == null) {
+      // Only a still-outstanding subscribe: nothing was ever confirmed to
+      // unsubscribe from, so just abandon the open attachment.
+      unawaited(handle?.close());
+      return;
+    }
     perfRecorder.noteTerminalDemand('unsubscribes');
-    session.sendForCheckout(
-      checkoutId,
+    final message = _stampCheckout(
       createAbMessage('terminal:unsubscribe', {
         'terminalId': terminalId,
         'runId': attachment.runId,
         'attachmentId': attachment.attachmentId,
       }),
     );
+    if (handle != null && handle.isStream) {
+      unawaited(handle.send(message).whenComplete(() => handle.close()));
+    } else {
+      session.sendForCheckout(checkoutId, message);
+      if (handle != null) unawaited(handle.close());
+    }
   }
 
   bool requestTerminalHistoryPage(String terminalId) {
@@ -1014,8 +1185,7 @@ class TerminalService {
         requestId: requestId,
       );
     });
-    session.sendForCheckout(
-      checkoutId,
+    final message = _stampCheckout(
       createAbMessage('terminal:history:request', {
         'terminalId': terminalId,
         'runId': attachment.runId,
@@ -1025,6 +1195,17 @@ class TerminalService {
         'beforeRowId': cursor,
       }),
     );
+    // A live attachment carries this on its own stream; an ended one has no
+    // handle left (see [_endedHistoryAttachment]) and its page comes back on
+    // the project stream instead.
+    final handle = _frameAttachment.containsKey(terminalId)
+        ? _attachmentHandles[terminalId]
+        : null;
+    if (handle != null && handle.isStream) {
+      unawaited(handle.send(message));
+    } else {
+      session.sendForCheckout(checkoutId, message);
+    }
     return true;
   }
 
@@ -1971,6 +2152,7 @@ class TerminalService {
     _resizeBaseDrivers.remove(terminalId);
     _unsubscribeFrame(terminalId);
     _framePaintedIds.remove(terminalId);
+    _bareEndedResubscribeGuard.remove(terminalId);
     _resetFrameTracking(terminalId);
     // `replaceEpoch` and `history` are deliberately NOT disposed, while the
     // engine below must be: neither notifier holds a native resource, and
@@ -2145,10 +2327,16 @@ class TerminalService {
       _state.tabs[id]?.ghostty.dispose();
     }
     _materialized.clear();
-    // Disown every live frame attachment on the way out — otherwise the
-    // bridge keeps ticking an ack budget against a viewer that has stopped
-    // listening, and only discovers that the hard way via ACK_TIMEOUT.
-    for (final id in _frameAttachment.keys.toList()) {
+    // Disown every live (or still-opening) frame attachment on the way out —
+    // otherwise the bridge keeps ticking an ack budget against a viewer that
+    // has stopped listening, and only discovers that the hard way via
+    // ACK_TIMEOUT; a still-opening one otherwise holds its slot until the
+    // bridge's own timeout.
+    for (final id in {
+      ..._frameAttachment.keys,
+      ..._attachmentHandles.keys,
+      ..._frameSubscribePending,
+    }) {
       _unsubscribeFrame(id);
     }
     for (final timer in _resizeTimers.values) {

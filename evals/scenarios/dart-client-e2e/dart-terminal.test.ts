@@ -1,5 +1,6 @@
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { setupDartTestEnv, type DartTestEnv } from "../../helpers/harness";
+import { createMessage } from "../../../bridge/src/protocol";
 
 /**
  * Dart Terminal E2E — mirrors terminal.test.ts but routes through the real
@@ -108,6 +109,46 @@ describe("dart-terminal", () => {
     );
     expect(started.data.terminalId).toBe("post-resize-check");
   }, 15_000);
+
+  test("a frame subscription rides its own terminal stream: subscribed then frames, acked, and an unsubscribe ends it", async () => {
+    const terminalId = "dart-stream-attach";
+    env.app.sendTerminalStart(env.streamId, {
+      terminalId,
+      command: "node",
+      args: ["-e", "let i=0; setInterval(()=>process.stdout.write('DART_STREAM_'+(i++)+'\\n'), 20);"],
+    });
+    await env.app.waitForTerminalStarted(env.streamId, terminalId, 10_000);
+
+    const requestId = crypto.randomUUID();
+    env.app.terminalAttach(env.streamId, { terminalId, requestId });
+
+    const opened = await env.app.waitForTerminalAttach(
+      requestId, (e) => e.event === "terminal-attach-opened", 10_000,
+    );
+    expect(opened.isStream).toBe(true);
+
+    const subscribed = await env.app.waitForTerminalAttach(
+      requestId, (e) => e.event === "terminal-attach-message" && e.data?.type === "terminal:subscribed", 10_000,
+    );
+    const { runId, attachmentId } = subscribed.data;
+
+    const frame = await env.app.waitForTerminalAttach(
+      requestId, (e) => e.event === "terminal-attach-message" && e.data?.type === "terminal:frame", 10_000,
+    );
+
+    env.app.terminalAttachSend(requestId, createMessage("terminal:ack", {
+      terminalId, runId, attachmentId, sequence: frame.data.sequence,
+    }));
+    env.app.terminalAttachSend(requestId, createMessage("terminal:unsubscribe", {
+      terminalId, runId, attachmentId,
+    }));
+    env.app.terminalAttachClose(requestId);
+
+    const ended = await env.app.waitForTerminalAttach(
+      requestId, (e) => e.event === "terminal-attach-end", 10_000,
+    );
+    expect(["closedLocally", "peerEnded"]).toContain(ended.end);
+  }, 25_000);
 
   test("terminal exit reports exit code", async () => {
     env.app.sendTerminalStart(env.streamId, {

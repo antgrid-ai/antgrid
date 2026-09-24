@@ -16,6 +16,9 @@ import type { RemoteHostConnection } from "../remote-host-connection";
 import { frameIdFor } from "../netwatch";
 import { AdmissionRegistry, type AdmissionReservation } from "./admission-registry";
 import { PeerStreamAcceptor, readStreamOpen } from "./stream-dispatch";
+import { TerminalStreamRegistry } from "./terminal-streams";
+import type { AbMessage } from "../protocol";
+import type { StreamSendOutcome } from "./stream-records";
 
 export interface NativePeerOptions extends PeerSessionOwnerOptions {
   enrollment: EnrollmentIdentity;
@@ -23,6 +26,9 @@ export interface NativePeerOptions extends PeerSessionOwnerOptions {
   licenseApiUrl: string;
   getLicenseToken: () => Promise<string> | string;
   remoteAccessEnabled: () => boolean;
+  /** `HostServer.seenProjects.has`, threaded through to `TerminalStreamRegistry`
+   *  (A2). Absent fails every terminal-stream open closed, `NOT_ALLOWED`. */
+  projectCataloged?: (projectId: string) => boolean;
   lifecycle?: {
     now?: () => number;
     random?: () => number;
@@ -78,6 +84,7 @@ export class NativePeerSessions extends PeerSessionOwner {
   private readonly lifecycle: EndpointLifecycle<Endpoint>;
   private readonly admissions = new AdmissionRegistry(4);
   private readonly enrollment: EndpointEnrollment;
+  private readonly terminalStreams: TerminalStreamRegistry;
   private readonly lease: AuthorizationLease;
   private lifetime = 0;
   private stopped = false;
@@ -122,10 +129,45 @@ export class NativePeerSessions extends PeerSessionOwner {
         this.recheckAuthorization();
         this.reconcileRelays();
       }, nativeOpts.lifecycle?.now, nativeOpts.lifecycle?.random, nativeOpts.lifecycle?.schedule);
+    this.terminalStreams = new TerminalStreamRegistry({
+      projectCataloged: nativeOpts.projectCataloged,
+      projectBinding: (projectId) => this.mux.projectBinding(projectId),
+      peerSession: (peerId) => this.peerSession(peerId),
+      // Guarded the same way `onUnauthorized` above is: a stale binding from a
+      // superseded connection must never retire the peer's NEWER one.
+      retirePeer: (peerId, reason) => { if (this.nativePeers.has(peerId)) this.retirePeer(peerId, reason); },
+      // The registry's diagnostic detail is `Record<string, unknown>` (§3.2's
+      // contract-pinned shape, generic over every terminal-stream event this
+      // file has no reason to enumerate); netwatch's is narrower. Diagnostics
+      // are observability only, never a security or routing decision, so the
+      // cast is safe here in a way it would not be for an authorization value.
+      diagnostic: (type, detail) => this.recordDiagnostic({ dir: "event", kind: "lifecycle", transport: "iroh",
+        msgType: type, detail: detail as Record<string, string | number | boolean> }),
+    });
   }
 
   connect(): void {
     this.lifecycle.start();
+  }
+
+  protected override routeTerminalMessage(
+    peerId: string,
+    msg: AbMessage,
+    signal?: AbortSignal,
+  ): Promise<StreamSendOutcome> | undefined {
+    return this.terminalStreams.route(peerId, msg, signal);
+  }
+
+  protected override terminalRetired(peerId: string, attachmentId: string): void {
+    this.terminalStreams.retired(peerId, attachmentId);
+  }
+
+  protected override terminalSubscribeSettled(peerId: string, requestId: string, attachmentId: string | undefined): void {
+    this.terminalStreams.subscribeSettled(peerId, requestId, attachmentId);
+  }
+
+  protected override terminalProjectDetached(projectId: string): void {
+    this.terminalStreams.projectDetached(projectId);
   }
 
   private async startEndpoint(): Promise<Endpoint> {
@@ -349,7 +391,7 @@ export class NativePeerSessions extends PeerSessionOwner {
       authorized: () => this.authorized(peerId, endpointId),
       established: () => this.sessions.has(peerId),
       onUnauthorized: () => { if (this.nativePeers.get(peerId) === peer) this.retirePeer(peerId, "unauthorized"); },
-      handlers: {},
+      handlers: { terminal: this.terminalStreams.handler },
       schedule: this.nativeOpts.lifecycle?.schedule,
       diagnostic: (type, detail) => this.recordDiagnostic({ dir: "event", kind: "lifecycle", transport: "iroh", msgType: type, detail }),
     });
@@ -409,6 +451,7 @@ export class NativePeerSessions extends PeerSessionOwner {
     this.nativePeers.delete(peerId);
     peer.cancelHelloTimer?.();
     peer.streams?.stop();
+    this.terminalStreams.dropPeer(peerId);
     peer.connection.close(reason === "unauthorized" ? 3n : reason === "protocol-violation" ? 2n : 1n, []);
     peer.records?.close(reason);
     super.dropSession(peerId, "iroh");

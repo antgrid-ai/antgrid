@@ -45,7 +45,8 @@ test("eval native bind seam accepts loopback only and is inert outside evals", (
   expect(() => evalIrohBindAddress({ ANTGRID_EVAL_TEST: "1", ANTGRID_EVAL_IROH_BIND_ADDR: "127.0.0.1:65536" }))
     .toThrow("INVALID_EVAL_BIND_ADDR");
 });
-function fixture(now?: () => number, schedule?: (callback: () => void, ms: number) => () => void) {
+function fixture(now?: () => number, schedule?: (callback: () => void, ms: number) => () => void,
+  projectCataloged?: (projectId: string) => boolean) {
   let allowed = true;
   const lifecycle: { now?: () => number; schedule?: (callback: () => void, ms: number) => () => void } = {};
   if (now) lifecycle.now = now;
@@ -62,6 +63,7 @@ function fixture(now?: () => number, schedule?: (callback: () => void, ms: numbe
       enrollment: vector.challenge, endpointSecret: vector.endpointSeed, licenseApiUrl: "https://backend.invalid",
       getLicenseToken: () => "test-only",
       remoteAccessEnabled: () => allowed,
+      ...(projectCataloged ? { projectCataloged } : {}),
       ...(Object.keys(lifecycle).length ? { lifecycle } : {}),
     },
   });
@@ -773,4 +775,94 @@ test("a uni stream still retires the connection as a protocol violation", async 
     await until(() => peer.closeCodes().length > 0);
     expect(peer.closeCodes()).toEqual([2n]);
   } finally { f.client.close(); }
+});
+
+// --- A2: terminal attachment streams (docs/iroh-reduction/stage-A-A2-contract.md §3.4) ---
+
+/** Accepts `peer`, drives a real `session:hello`/lease-refresh round trip to
+ *  the point `established()` reads true, and returns the resulting slot. The
+ *  terminal-stream admission gate (`PeerStreamAcceptor`'s NOT_READY step)
+ *  depends on this exactly as the legacy session path does. */
+async function establishedSlot(
+  f: ReturnType<typeof fixture>,
+  peer: ReturnType<typeof connection>,
+): Promise<string> {
+  await f.access.acceptPeer(peer.native);
+  const slot = `${f.peerId}#${f.client.deviceId}`;
+  const owner = f.client.peers as unknown as {
+    handleHello: (hello: { type: "session:hello"; attemptId: string }, peerId: string) => void;
+    sessions: Map<string, unknown>;
+  };
+  owner.handleHello({ type: "session:hello", attemptId: "a1" }, slot);
+  await until(() => owner.sessions.has(slot));
+  return slot;
+}
+
+function terminalOpenRecord(projectId: string): number[][] {
+  const body = Array.from(encodeStreamOpen({ kind: "terminal", projectId, requestId: crypto.randomUUID() }));
+  return [lengthPrefix(body.length), body];
+}
+
+test("a terminal-kind stream reaches the terminal handler (no longer refused NOT_ALLOWED)", async () => {
+  // A1 shipped an empty `handlers` table, so every terminal-kind open was
+  // refused NOT_ALLOWED ("stream kind not allowed") before this wave wired
+  // `TerminalStreamRegistry` in as `handlers.terminal`.
+  const f = fixture(undefined, undefined, () => true);
+  const bus = new MessageBus();
+  const handle = f.client.attachStream(bus, { projectId: "p1" });
+  const peer = connection(f.endpointId);
+  try {
+    const slot = await establishedSlot(f, peer);
+    const later = laterStream(terminalOpenRecord("p1"));
+    peer.pushLaterStream(later.stream);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(later.written).toEqual([]); // admitted: no in-band stream:refused record
+    expect(peer.closeCodes()).toEqual([]); // the connection itself is untouched
+    const registry = f.client.peers as unknown as { terminalStreams: { attachmentCount: (peerId: string) => number } };
+    expect(registry.terminalStreams.attachmentCount(slot)).toBe(1);
+  } finally { handle.detach(); f.client.close(); }
+});
+
+test("a terminal-kind stream is refused NOT_ALLOWED when projectCataloged is not supplied", async () => {
+  // `projectCataloged` absent must fail CLOSED (§3.2: "Absent => every open is
+  // refused NOT_ALLOWED"), never fall back to admitting.
+  const f = fixture();
+  const bus = new MessageBus();
+  const handle = f.client.attachStream(bus, { projectId: "p1" });
+  const peer = connection(f.endpointId);
+  try {
+    const slot = await establishedSlot(f, peer);
+    const later = laterStream(terminalOpenRecord("p1"));
+    peer.pushLaterStream(later.stream);
+    await until(() => later.written.length > 0);
+
+    expect(later.refusalCode()).toBe("NOT_ALLOWED");
+    expect(peer.closeCodes()).toEqual([]); // an in-band refusal, not a connection-fatal one
+    const registry = f.client.peers as unknown as { terminalStreams: { attachmentCount: (peerId: string) => number } };
+    expect(registry.terminalStreams.attachmentCount(slot)).toBe(0);
+  } finally { handle.detach(); f.client.close(); }
+});
+
+test("retiring a peer drops its terminal bindings", async () => {
+  const f = fixture(undefined, undefined, () => true);
+  const bus = new MessageBus();
+  const handle = f.client.attachStream(bus, { projectId: "p1" });
+  const peer = connection(f.endpointId);
+  try {
+    const slot = await establishedSlot(f, peer);
+    const later = laterStream(terminalOpenRecord("p1"));
+    peer.pushLaterStream(later.stream);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const registry = f.client.peers as unknown as { terminalStreams: { attachmentCount: (peerId: string) => number } };
+    expect(registry.terminalStreams.attachmentCount(slot)).toBe(1);
+
+    // Drives the real retirePeer() path (as the existing recheckAuthorization
+    // tests do) rather than calling a private method directly.
+    f.setAllowed(false);
+    f.client.recheckAuthorization();
+
+    expect(f.access.nativePeers.size).toBe(0);
+    expect(registry.terminalStreams.attachmentCount(slot)).toBe(0);
+  } finally { handle.detach(); f.client.close(); }
 });

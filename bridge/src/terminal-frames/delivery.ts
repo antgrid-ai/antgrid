@@ -406,7 +406,7 @@ export class TerminalViewerConnection {
         ...wireAddress(run.address), runId: run.runId, attachmentId: attachment.id,
         code: "ENDED", message: "Terminal completed.", finalSequence: attachment.sequence, exitCode: run.exitCode,
       }), new AbortController().signal, () => {});
-      this.retire(attachment);
+      this.retire(attachment, { abortQueued: false });
       return;
     }
     if (attachment.unsent && attachment.unsent.revision < run.source.revision &&
@@ -504,11 +504,11 @@ export class TerminalViewerConnection {
   }
 
   private fail(attachment: Attachment, code: "ACK_TIMEOUT" | "DISPLAY_FAILED", message: string): void {
-    this.retire(attachment);
     this.safeSend(createMessage("terminal:display:status", {
       ...wireAddress(attachment.run.address), runId: attachment.run.runId, attachmentId: attachment.id,
       code, message: message.slice(0, 1024),
     }), new AbortController().signal, () => {});
+    this.retire(attachment);
   }
 
   /** Drops what is queued for a viewer that cannot receive right now, WITHOUT
@@ -544,9 +544,19 @@ export class TerminalViewerConnection {
     }
   }
 
-  private retire(attachment: Attachment): void {
+  /** Every attachment-scoped notice (ENDED, a status) is handed to the
+   *  transport before the retirement that follows it, and `abortQueued`
+   *  decides what that retirement does to what is already in flight.
+   *  `abortQueued: false` (ENDED only, both here and in `retireRun`) leaves
+   *  `attachment.controller` untouched, so the frame most recently handed to
+   *  `transport.send` keeps its own signal and is written rather than dropped
+   *  — aborting the owner would fire the abort listener onto that frame's
+   *  `unsent.controller` even though it already left this class. Every other
+   *  retirement still aborts, which is what makes a pause/fail's own queue
+   *  drop happen. */
+  private retire(attachment: Attachment, opts?: { abortQueued?: boolean }): void {
     if (!this.attachments.delete(attachment.id)) return;
-    attachment.controller.abort();
+    if (opts?.abortQueued !== false) attachment.controller.abort();
     this.bytes -= attachment.bytes;
     this.budget.bytes -= attachment.bytes;
     attachment.pending.clear();
@@ -575,7 +585,7 @@ export class TerminalViewerConnection {
           finalSequence: attachment.sequence, exitCode: exitCode ?? null,
         }), new AbortController().signal, () => {});
       }
-      this.retire(attachment);
+      this.retire(attachment, { abortQueued: false });
     }
   }
 

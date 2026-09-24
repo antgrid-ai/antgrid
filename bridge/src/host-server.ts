@@ -831,6 +831,10 @@ export class HostServer {
       endpointSecret: r.auth.endpointSecret,
       licenseApiUrl: r.licenseApiUrl,
       remoteAccessEnabled: () => this.remoteAccessPolicy.isEnabled(),
+      // A terminal-stream open (A2) has no `project:start` to catalogue a
+      // project through, so it consults this machine's own catalog directly —
+      // the same bound `isSafeProjectId` pairs with everywhere else.
+      projectCataloged: (projectId) => this.seenProjects.has(projectId),
       // Bare deviceUuid: one central control identity and one native endpoint
       // per machine; project cores attach as host-local native streams.
       identity,
@@ -2699,6 +2703,7 @@ export class HostServer {
           streamId: handle.streamId,
           sendTunnel: (data, target) => handle.sendTunnel(data, target),
           sendTo: (msg, channel, target) => handle.sendTo(msg, channel, target),
+          terminalHooks: handle.terminalHooks,
           detach: () => {
             if (this.streamIds.get(projectId) === handle.streamId) this.streamIds.delete(projectId);
             handle.detach();

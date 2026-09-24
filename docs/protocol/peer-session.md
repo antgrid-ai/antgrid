@@ -61,12 +61,56 @@ stop codes (`STREAM_STOP_REFUSED`, `STREAM_RESET_OPEN_TIMEOUT`, `STREAM_RESET_RE
 `bridge/src/peer/stream-dispatch.ts`) are bridge-side diagnostics only. A refused or timed-out later
 stream never costs the connection; only an unauthorized peer or a first-stream protocol violation does.
 
-As of Stage A wave A1 the handler table is empty, so every well-formed later stream is refused
-`NOT_ALLOWED` — project, terminal and tunnel streams (and their own per-kind caps) arrive with their
-handlers in later waves. The QUIC-level cap (`STREAM_MAX_BIDI_STREAMS_PER_CONNECTION`) is set once per
-connection via `setMaxConcurrentBiStreams`, synchronously after the ALPN check. All caps are defined once
-in `packages/antgrid-wire/src/stream-open.ts` and hand-mirrored in
+As of Stage A wave A1 the handler table held nothing, so every well-formed later stream was refused
+`NOT_ALLOWED`. Wave A2 registers the first handler, `{kind:"terminal"}` (§1b); project and tunnel streams
+arrive with theirs in later waves. The QUIC-level cap (`STREAM_MAX_BIDI_STREAMS_PER_CONNECTION`) is set
+once per connection via `setMaxConcurrentBiStreams`, synchronously after the ALPN check. All caps are
+defined once in `packages/antgrid-wire/src/stream-open.ts` and hand-mirrored in
 `packages/antgrid_relay_client/lib/src/models/stream_open.dart`.
+
+## 1b. Terminal attachment streams
+
+A terminal attachment (§1a's `{kind:"terminal", projectId, checkoutId?, requestId}`) gets its own stream
+once admitted by `TerminalStreamRegistry` (`bridge/src/peer/terminal-streams.ts`), plugged into
+`PeerStreamAcceptor` as `handlers.terminal`. Admission additionally requires a catalogued, safe
+`projectId` whose project currently has a live entry on the mux (`StreamMux.projectBinding`) — a lookup
+only; a stream open never opens or promotes a core. Past admission, refusal reuses §1a's in-band
+`stream:refused` codes; a `NOT_READY` here means the project has no live mux entry yet, not that the open
+frame was malformed.
+
+**Record set.** After the open frame, every record body is the raw UTF-8 JSON of one `AbMessage` — no
+`{s,m}` peer-frame envelope and no channel label. Exactly eight message types ride this stream:
+app→bridge `terminal:subscribe`, `terminal:ack`, `terminal:unsubscribe`, `terminal:history:request`;
+bridge→app `terminal:subscribed`, `terminal:frame`, `terminal:display:status`, `terminal:history:page`.
+Everything else — `terminal:input`, `terminal:resize`, `terminal:start` and the rest — stays on the
+project/session stream, unchanged by this section.
+
+**First-record rule.** The app's first record must be a `terminal:subscribe` naming the open frame's own
+`requestId` and normalized `checkoutId` (an absent `checkoutId` on either the open frame or the message
+normalizes to `"main"`). Every later app record must carry the same `terminalId`, `checkoutId`, and the
+`attachmentId`/`runId` the bridge bound from its own `terminal:subscribed` — one arriving before
+`subscribed` is a breach. The bridge's first record is either a refusal (§1a) or `terminal:subscribed`
+itself, or the requestId-addressed `terminal:display:status` that ends a failed attempt. A record that
+breaks either rule aborts only that stream, never the connection.
+
+**Routing keys.** `subscribed`, and a `display:status` naming no bound attachment yet (UPGRADE_REQUIRED,
+UNKNOWN_TERMINAL, a failed attach), route by `(peerId, requestId)`; every other outbound message routes by
+`(peerId, attachmentId)`. A message with no bound stream falls back to the legacy session path unchanged —
+this is how the app's own `terminal:subscribe` on the project stream (still accepted; the app itself never
+sends one there) and older builds keep working.
+
+**Ends.** When delivery retires the attachment, the bridge `finish()`es its send half; the app reads that
+FIN as a plain retirement, not an ENDED status. When the app FINs or resets its send half, the bridge
+synthesizes `terminal:unsubscribe` for whatever attachment was bound. An overflow or a lost stream resets
+only that one stream (every other attachment and the connection are untouched); only `unauthorized` closes
+the connection, exactly as in §1a.
+
+**Caps.** `STREAM_TERMINAL_APP_RECORD_MAX_BYTES`, `STREAM_TERMINAL_BRIDGE_RECORD_MAX_BYTES` and
+`STREAM_MAX_TERMINAL_ATTACHMENTS_PER_PEER` are defined once in `packages/antgrid-wire/src/stream-open.ts`
+beside every other stream cap (§1a); the writer's queue ceiling
+(`TERMINAL_STREAM_MAX_QUEUED_BYTES`) and stream priority (`STREAM_PRIORITY_TERMINAL`) are side-local to
+`bridge/src/peer/terminal-streams.ts`, since Dart has no priority concept and nothing on the app side reads
+them.
 
 ## 2. The hello
 

@@ -39,6 +39,51 @@ class FakeAgentTransport implements AgentTransport {
   bool _established = true;
   bool _disposed = false;
 
+  /// Socket-path terminal attachments over this transport's own [send], so a
+  /// subscribe still lands in [sent] exactly as it did before attachments
+  /// existed.
+  late final SocketTerminalAttachments _terminalAttachments =
+      SocketTerminalAttachments(send);
+
+  /// When true, attachments report `isStream` and everything sent on them
+  /// (the subscribe included) lands in [attachmentSent] instead of [sent],
+  /// as it would on a native terminal stream rather than the project stream.
+  bool terminalAttachmentsAsStream = false;
+
+  final List<Map<String, dynamic>> attachmentSent = [];
+
+  late final SocketTerminalAttachments _streamTerminalAttachments =
+      SocketTerminalAttachments((message) async => attachmentSent.add(message));
+
+  @override
+  TerminalAttachment openTerminalAttachment({
+    required String requestId,
+    required String checkoutId,
+    required Map<String, dynamic> subscribe,
+  }) {
+    if (!terminalAttachmentsAsStream) {
+      return _terminalAttachments.open(
+        requestId: requestId,
+        checkoutId: checkoutId,
+        subscribe: subscribe,
+      );
+    }
+    return _StreamFlaggedAttachment(
+      _streamTerminalAttachments.open(
+        requestId: requestId,
+        checkoutId: checkoutId,
+        subscribe: subscribe,
+      ),
+    );
+  }
+
+  /// Test control: end [requestId]'s attachment as the transport would —
+  /// `PeerEnded`, `Refused`, `Failed`, `TransportClosed` or `ClosedLocally`.
+  void endTerminalAttachment(String requestId, TerminalAttachmentEnd end) {
+    _terminalAttachments.endAttachment(requestId, end);
+    _streamTerminalAttachments.endAttachment(requestId, end);
+  }
+
   @override
   Stream<InboundMessage> get messages => _msgCtrl.stream;
 
@@ -246,8 +291,12 @@ class FakeAgentTransport implements AgentTransport {
     await _stateCtrl.close();
   }
 
-  /// Push a raw JSON map onto the inbound stream on the given channel.
+  /// Push a raw JSON map onto the inbound stream on the given channel. A
+  /// reply belonging to an open terminal attachment is diverted there first
+  /// (see [SocketTerminalAttachments.divert]) and never reaches [messages].
   void emitJson(Map<String, dynamic> json, {String channel = 'control'}) {
+    if (_terminalAttachments.divert(json)) return;
+    if (_streamTerminalAttachments.divert(json)) return;
     _msgCtrl.add(InboundMessage(channel, json));
   }
 
@@ -272,3 +321,24 @@ const _transportFailureCodes = <String>{
   'E_SOCKET_CLOSED',
   'E_SUPERSEDED',
 };
+
+class _StreamFlaggedAttachment implements TerminalAttachment {
+  _StreamFlaggedAttachment(this._inner);
+
+  final TerminalAttachment _inner;
+
+  @override
+  bool get isStream => true;
+  @override
+  String get requestId => _inner.requestId;
+  @override
+  String get checkoutId => _inner.checkoutId;
+  @override
+  Stream<Map<String, dynamic>> get messages => _inner.messages;
+  @override
+  Future<TerminalAttachmentEnd> get done => _inner.done;
+  @override
+  Future<void> send(Map<String, dynamic> message) => _inner.send(message);
+  @override
+  Future<void> close() => _inner.close();
+}

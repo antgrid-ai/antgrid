@@ -15,8 +15,10 @@ import {
   TRANSFER_TIMEOUT_MS,
   GLOBAL_REASSEMBLY_BUDGET,
   CREDIT_BATCH_BYTES,
+  STREAM_TERMINAL_BRIDGE_RECORD_MAX_BYTES,
 } from "antgrid-wire";
 import { FragReassembler } from "../../bridge/src/frag-reassembler";
+import { StreamRecordReader } from "../../bridge/src/peer/stream-records";
 import { TUNNEL_GZIP_ENCODING } from "../../bridge/src/tunnel-protocol";
 
 /** The fake license token the eval relay gate (`fakeLicenseGate`) accepts. v3
@@ -71,6 +73,20 @@ export interface TunnelHttpResult {
   body: Buffer;
   frames: number;
   chunks: number;
+}
+
+/** A terminal-kind native stream driven directly, without the app's own
+ *  subscribe/re-sync logic — the test sends `terminal:subscribe` itself so it
+ *  can assert on the raw record sequence (hazards A and B, §1 of the A2
+ *  contract). `records` and `next` see every record (AbMessage bodies AND a
+ *  `stream:refused`) as plain parsed JSON; the caller narrows by `type`. */
+export interface TerminalStreamClient {
+  readonly records: Array<Record<string, any>>;
+  next(predicate: (record: Record<string, any>) => boolean, timeoutMs?: number): Promise<Record<string, any>>;
+  send(msg: AbMessage | Record<string, unknown>): Promise<void>;
+  finish(): Promise<void>;
+  reset(): void;
+  readonly ended: Promise<void>;
 }
 
 export class NativeAuthorizationNotReadyError extends Error {
@@ -529,6 +545,101 @@ export class RelayClient {
     }
     stream.send.reset(0n).catch(() => {});
     return { records: splitLengthPrefixedRecords(raw), ended };
+  }
+
+  /** Opens a `kind:"terminal"` stream on the live native connection and writes
+   *  the open frame as the first record (openBi + write is one call, per the
+   *  binding constraint that a Dart-side stream is invisible until its first
+   *  write — mirrored here for parity, though this side has no such limit).
+   *  It does NOT send `terminal:subscribe`: the caller does, as the contract
+   *  requires it be the first record. Records are read with the same
+   *  `StreamRecordReader` the bridge uses, capped at the bridge's own
+   *  outbound record cap, so an oversize or malformed body fails the same way
+   *  production code would. */
+  async openTerminalStream(open: { projectId: string; requestId: string; checkoutId?: string }): Promise<TerminalStreamClient> {
+    const connection = this.nativeConnection;
+    if (!connection) throw new Error("Native connection is not established");
+    const stream = await connection.openBi();
+    const openFrame = prefixWithLength(
+      encodeStreamOpen({
+        kind: "terminal",
+        projectId: open.projectId,
+        requestId: open.requestId,
+        checkoutId: open.checkoutId,
+      }),
+    );
+    await stream.send.writeAll(Array.from(openFrame));
+
+    const records: Array<Record<string, any>> = [];
+    const waiters: Array<{
+      match: (record: Record<string, any>) => boolean;
+      resolve: (record: Record<string, any>) => void;
+      timer: ReturnType<typeof setTimeout>;
+    }> = [];
+    let settleEnded = () => {};
+    const ended = new Promise<void>((resolve) => {
+      settleEnded = resolve;
+    });
+
+    const reader = new StreamRecordReader({ recv: stream.recv }, STREAM_TERMINAL_BRIDGE_RECORD_MAX_BYTES, () => {});
+    void (async () => {
+      try {
+        while (true) {
+          const bytes = await reader.read();
+          let obj: Record<string, any>;
+          try {
+            obj = JSON.parse(Buffer.from(bytes).toString("utf8"));
+          } catch {
+            continue;
+          }
+          let delivered = false;
+          for (let i = 0; i < waiters.length; i++) {
+            if (waiters[i].match(obj)) {
+              const waiter = waiters.splice(i, 1)[0];
+              clearTimeout(waiter.timer);
+              waiter.resolve(obj);
+              delivered = true;
+              break;
+            }
+          }
+          if (!delivered) records.push(obj);
+        }
+      } catch {
+        // The bridge's half ended — FIN (orderly retirement/refusal) or reset
+        // (overflow, stream-lost) look the same from here; `ended` doesn't
+        // distinguish them (D4: Dart can't either).
+      } finally {
+        settleEnded();
+      }
+    })();
+
+    return {
+      records,
+      next(predicate, timeoutMs = 10_000): Promise<Record<string, any>> {
+        for (let i = 0; i < records.length; i++) {
+          if (predicate(records[i]!)) return Promise.resolve(records.splice(i, 1)[0]!);
+        }
+        return new Promise((resolve, reject) => {
+          const timer = setTimeout(() => {
+            const idx = waiters.findIndex((w) => w.timer === timer);
+            if (idx !== -1) waiters.splice(idx, 1);
+            reject(new Error(`Timed out waiting for terminal-stream record (${timeoutMs}ms)`));
+          }, timeoutMs);
+          waiters.push({ match: predicate, resolve, timer });
+        });
+      },
+      async send(msg): Promise<void> {
+        const body = prefixWithLength(Buffer.from(JSON.stringify(msg), "utf8"));
+        await stream.send.writeAll(Array.from(body));
+      },
+      async finish(): Promise<void> {
+        await stream.send.finish();
+      },
+      reset(): void {
+        void stream.send.reset(0n).catch(() => {});
+      },
+      ended,
+    };
   }
 
   /** Connects from the configured native endpoint to the configured target

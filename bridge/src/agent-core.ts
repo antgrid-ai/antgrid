@@ -24,7 +24,7 @@ import {
 } from "./keystrokes";
 import { AGENT_GRACE_MS, killChildTree, processGroupSpawn } from "./terminal-session";
 import { createConnState, type ConnState } from "./conn-state";
-import type { PeerSessionView, SendTarget } from "./stream-mux";
+import type { PeerSessionView, SendTarget, TerminalStreamHooks } from "./stream-mux";
 import { FileWatcher } from "./file-watcher";
 import { FileUploadManager } from "./file-upload";
 import { FileSearcher } from "./file-search";
@@ -301,6 +301,11 @@ export interface AgentCore {
    *  the gate is skipped — the loopback socket + token is that trust boundary.
    *  Pass `null` to clear it when the transport detaches. */
   setPeerSessionProvider(fn: ((peerId: string) => PeerSessionView | null) | null): void;
+  /** Wire the mux's terminal-stream hooks (A2): `retired` and `subscribeSettled`
+   *  callbacks so this core can end a terminal attachment's stream from the
+   *  ordinary session-teardown and subscribe-reply paths without knowing a
+   *  stream exists. Pass `null` to clear it alongside {@link setPeerSessionProvider}. */
+  setTerminalStreamHooks(hooks: TerminalStreamHooks | null): void;
   /** Every app session on this core's transport, for the questions that must be
    *  answered about ALL attached devices rather than the one that asked. Kept
    *  apart from {@link setPeerSessionProvider} because a lookup cannot answer
@@ -779,6 +784,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // literal, because the app-side gate reads the same set.
         await sendTerminalTo(message, source, signal);
       },
+      retired(_address, attachmentId) {
+        if (source !== "loopback") terminalStreamHooks?.retired(source, attachmentId);
+      },
     };
   }
 
@@ -970,6 +978,13 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   let peerSessionProvider: ((peerId: string) => PeerSessionView | null) | null = null;
   function setPeerSessionProvider(fn: ((peerId: string) => PeerSessionView | null) | null) {
     peerSessionProvider = fn;
+  }
+  // A2: the mux's terminal-stream hooks, wired alongside peerSessionProvider so
+  // a relay attachment's own QUIC stream can be ended from the ordinary
+  // retirement/subscribe-reply paths without those paths knowing it exists.
+  let terminalStreamHooks: TerminalStreamHooks | null = null;
+  function setTerminalStreamHooks(hooks: TerminalStreamHooks | null) {
+    terminalStreamHooks = hooks;
   }
   // Every app session on the transport, for the questions about ALL of them.
   let establishedPeersProvider: (() => PeerSessionView[]) | null = null;
@@ -2273,11 +2288,18 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // `viewerConnectionFor` and `TerminalViewerTransport.authorized` key on.
       case "terminal:subscribe": {
         const checkoutId = checkoutIdOf(msg);
-        if (sessions?.isCheckoutDeleting(checkoutId) === true) break;
+        // A2: every exit below settles the requestId with the terminal-stream
+        // registry, or a relay attachment that got no attachmentId here waits
+        // out its own subscribe deadline with its stream still open. Never for
+        // loopback, which never binds a stream.
+        const settleSubscribe = (attachmentId: string | undefined) => {
+          if (client !== "loopback") terminalStreamHooks?.subscribeSettled(client, msg.requestId, attachmentId);
+        };
+        if (sessions?.isCheckoutDeleting(checkoutId) === true) { settleSubscribe(undefined); break; }
         const owner = checkoutId === "main" ? mainRuntime : checkoutRuntimes.runtime(checkoutId);
-        if (!owner || owner.disposed) break;
+        if (!owner || owner.disposed) { settleSubscribe(undefined); break; }
         const internalId = internalTerminalId(owner, msg.terminalId);
-        if ((clientGenerations.get(client) ?? 0) !== clientGeneration) break;
+        if ((clientGenerations.get(client) ?? 0) !== clientGeneration) { settleSubscribe(undefined); break; }
         const connection = viewerConnectionFor(client);
         void (async () => {
           await manager?.restoreArchivedTerminal(internalId);
@@ -2288,6 +2310,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           );
         })()
           .then((attachmentId) => {
+            settleSubscribe(attachmentId);
             // Retired already, between the hub reporting the id and this
             // continuation: the release fired before there was a mark, so
             // recording one now would leave it set for good.
@@ -2302,12 +2325,13 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
             }
           }).catch((error) => {
             if (owner.disposed || sessions?.isCheckoutDeleting(checkoutId) === true ||
-                (clientGenerations.get(client) ?? 0) !== clientGeneration) return;
+                (clientGenerations.get(client) ?? 0) !== clientGeneration) { settleSubscribe(undefined); return; }
             log.warn("terminal %s attach failed: %s", internalId, error);
             sendAbToItsChannel(createMessage("terminal:display:status", {
               checkoutId, terminalId: msg.terminalId, requestId: msg.requestId,
               code: "DISPLAY_FAILED", message: "Terminal display unavailable. Reconnect to retry.",
             }), client);
+            settleSubscribe(undefined);
           });
         break;
       }
@@ -2539,16 +2563,20 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   /** The same narrowing on the "preview" channel, so a terminal's bulk display
    *  payloads queue and get credited separately from the control plane, behind
    *  `send-scheduler.ts`'s control>preview priority, instead of competing with
-   *  it for `CHANNEL_WINDOW_BYTES`: measured against
-   *  `packages/antgrid-wire/src/flow.ts`, `TERMINAL_CONNECTION_MAX_BYTES` (one
-   *  connection's whole terminal-viewer budget) is half `CHANNEL_WINDOW_BYTES`
-   *  — the other half is what leaves the browser preview tunnel, which shares
-   *  this channel, room of its own — so terminal traffic on "control" could
-   *  alone occupy half a credit window and stall every other control-plane
-   *  message behind it. Priority is not isolation: `SOCKET_INFLIGHT_BYTES` is shared across
-   *  both channels and sits only one window above one channel's, so a saturated
-   *  preview channel still leaves control a bounded headroom before it too waits
-   *  on a credit. */
+   *  it for `CHANNEL_WINDOW_BYTES`. Two paths use this, and only the first
+   *  still needs the isolation: on the session path, terminal bulk rides
+   *  "preview" so that a full terminal budget (`TERMINAL_CONNECTION_MAX_BYTES`,
+   *  `packages/antgrid-wire/src/flow.ts` — equal to, not half of,
+   *  `CHANNEL_WINDOW_BYTES`) cannot occupy the control channel's whole credit
+   *  window and stall every other control-plane message behind it. On the
+   *  native path (A2), an attachment with its own QUIC stream bypasses both
+   *  channels entirely — `route()` in `peer/terminal-streams.ts` intercepts it
+   *  before this sender is ever reached — and `TERMINAL_CONNECTION_MAX_BYTES`
+   *  then bounds only that stream's own unacknowledged frame bytes per client.
+   *  Priority is not isolation on the session path: `SOCKET_INFLIGHT_BYTES` is
+   *  shared across both channels and sits only one window above one channel's,
+   *  so a saturated preview channel still leaves control a bounded headroom
+   *  before it too waits on a credit. */
   let sendPreviewAbTo: (msg: AbMessage, only: ClientKey) => void = (_m, _o) => {};
   /** Which channel a message rides is a property of its TYPE, not of the call
    *  site. `PREVIEW_CHANNEL_MESSAGE_TYPES` is mirrored into the app, which drops
@@ -5095,6 +5123,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     setPlainHook,
     abortTunnelStreams,
     setPeerSessionProvider,
+    setTerminalStreamHooks,
     setEstablishedPeersProvider,
     setOwnerPullsTreeProvider,
     setPeerTerminalFramesV1Provider,

@@ -9,10 +9,17 @@ import type { MessageBus, Channel, TransportSubscriber } from "./message-bus";
 import type { PairedPhonesStore } from "./paired-phones";
 import { FragReassembler, type SharedByteBudget } from "./frag-reassembler";
 
-import { StreamMux, type AttachStreamOpts, type PeerSessionView, type SendTarget, type StreamHandle } from "./stream-mux";
+import {
+  StreamMux,
+  type AttachStreamOpts,
+  type PeerSessionView,
+  type SendTarget,
+  type StreamHandle,
+} from "./stream-mux";
 import { netwatch, frameIdFor, isRemoteIngestArmed } from "./netwatch";
 import { SendScheduler, type QueuedAppFrame, type SendOutcome, type PendingSinkWrite } from "./send-scheduler";
 import type { PeerRecordFailure } from "./peer/records";
+import type { StreamSendOutcome } from "./peer/stream-records";
 
 const log = logger.child({ component: "native-session" });
 
@@ -297,6 +304,15 @@ export abstract class PeerSessionOwner {
       },
       sendEnvelope: (id, msg, channel, target, signal, authorized) => this.sendAppEnvelope(id, msg, channel, target, signal, authorized),
       peerSession: (peerId) => this.peerSession(peerId),
+      // Late-bound over the protected hooks below (A2), so a subclass such as
+      // NativePeerSessions can plug in a TerminalStreamRegistry without this
+      // constructor knowing it exists. The base class's defaults are no-ops.
+      routeTerminal: (peerId, msg, signal) => this.routeTerminalMessage(peerId, msg, signal),
+      terminalHooks: {
+        retired: (peerId, attachmentId) => this.terminalRetired(peerId, attachmentId),
+        subscribeSettled: (peerId, requestId, attachmentId) => this.terminalSubscribeSettled(peerId, requestId, attachmentId),
+      },
+      projectDetached: (projectId) => this.terminalProjectDetached(projectId),
     });
     this.creditBatchBytes = CREDIT_BATCH_BYTES;
     this.startFragSweep();
@@ -306,6 +322,24 @@ export abstract class PeerSessionOwner {
   attachStream(bus: MessageBus, opts: AttachStreamOpts): StreamHandle {
     return this.mux.attach(bus, opts);
   }
+
+  /** A2 terminal-stream hooks: no-op on the base class. `NativePeerSessions`
+   *  overrides all four to delegate to its `TerminalStreamRegistry`; a
+   *  transport with no native stream support (or a test double) keeps every
+   *  terminal message on the legacy session path. */
+  protected routeTerminalMessage(
+    _peerId: string,
+    _msg: AbMessage,
+    _signal?: AbortSignal,
+  ): Promise<StreamSendOutcome> | undefined {
+    return undefined;
+  }
+
+  protected terminalRetired(_peerId: string, _attachmentId: string): void {}
+
+  protected terminalSubscribeSettled(_peerId: string, _requestId: string, _attachmentId: string | undefined): void {}
+
+  protected terminalProjectDetached(_projectId: string): void {}
 
   /** A reassembler owned by one session. Its completions are tagged with that
    *  session's peerId, which is what keeps a reassembled transfer attributable

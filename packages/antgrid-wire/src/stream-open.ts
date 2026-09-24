@@ -123,6 +123,17 @@ export const STREAM_MAX_TERMINAL_ATTACHMENTS_PER_PEER = 64;
 export const STREAM_MAX_TUNNEL_STREAMS_PER_PEER = 128;
 export const STREAM_MAX_PENDING_OPENS_PER_PEER = 16;
 
+// Per-record caps for the terminal attachment stream (A2). The app-to-bridge
+// direction only ever carries the four small subscribe/ack/unsubscribe/
+// history-request verbs; the bridge-to-app direction carries frames and
+// history pages, so its cap is set to twice the bridge's
+// `TERMINAL_VIEWER_MAX_BYTES` (1 MiB) — the largest single delivery
+// terminal-frames/delivery.ts ever hands over. antgrid-wire sits across the
+// licence boundary from bridge/, so that derivation can't be expressed as an
+// import; it's restated here as a comment instead.
+export const STREAM_TERMINAL_APP_RECORD_MAX_BYTES = 16_384;
+export const STREAM_TERMINAL_BRIDGE_RECORD_MAX_BYTES = 2_097_152;
+
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder("utf-8", { fatal: true });
 

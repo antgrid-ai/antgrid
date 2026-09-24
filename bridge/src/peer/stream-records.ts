@@ -64,6 +64,10 @@ export class StreamProtocolViolation extends Error {
 interface PendingWrite {
   bytes: Buffer;
   settle: (outcome: StreamSendOutcome) => void;
+  /** Removes the abort listener once the record leaves the queue by any path,
+   *  so a signal that outlives the record (or the whole stream) never fires
+   *  into a settled promise. */
+  cleanup?: () => void;
 }
 
 /**
@@ -94,8 +98,12 @@ export class StreamRecordWriter {
     private readonly resetCode = 0n,
   ) {}
 
-  send(frame: Uint8Array): Promise<StreamSendOutcome> {
+  /** `signal`, when given, cancels the record only while it is still queued
+   *  (§"Binding constraints": once a slice has reached `writeAll`, a partial
+   *  record would corrupt the framing, so it always completes from there). */
+  send(frame: Uint8Array, signal?: AbortSignal): Promise<StreamSendOutcome> {
     if (this.stopped || this.finishing) return Promise.resolve("dropped");
+    if (signal?.aborted) return Promise.resolve("dropped");
     if (!this.authorized()) {
       this.failConnection("unauthorized");
       return Promise.resolve("dropped");
@@ -109,10 +117,38 @@ export class StreamRecordWriter {
     }
     return new Promise((settle) => {
       const record: PendingWrite = { bytes, settle };
+      if (signal) {
+        const onAbort = () => {
+          const idx = this.queue.indexOf(record);
+          if (idx === -1) return; // already dequeued for writing: completes regardless
+          this.queue.splice(idx, 1);
+          this.queuedBytes -= record.bytes.length;
+          record.cleanup = undefined;
+          record.bytes.fill(0);
+          record.settle("dropped");
+        };
+        signal.addEventListener("abort", onAbort, { once: true });
+        record.cleanup = () => signal.removeEventListener("abort", onAbort);
+      }
       this.queue.push(record);
       this.queuedBytes += bytes.length;
       void this.drain();
     });
+  }
+
+  /** Stops the writer without treating it as a failure: for a stream the
+   *  owner is unbinding on purpose (the app FIN'd or reset its half), not one
+   *  that misbehaved. Drops the queue so every waiter resolves `"dropped"`,
+   *  resolves `finish()` waiters, and resets the native send half — never
+   *  awaited, and never calling `onFailure`, which is reserved for the writer
+   *  discovering its own failure. A no-op once the writer has stopped or
+   *  `finish()` has been issued, matching `send()`'s own `finishing` guard. */
+  abort(): void {
+    if (this.stopped || this.finishing) return;
+    this.stopped = true;
+    this.dropQueue();
+    this.resolveFinishWaiters();
+    void this.stream.send.reset(this.resetCode).catch(() => {});
   }
 
   private async drain(): Promise<void> {
@@ -126,6 +162,7 @@ export class StreamRecordWriter {
         }
         const record = this.queue.shift()!;
         this.queuedBytes -= record.bytes.length;
+        record.cleanup?.();
         let outcome: "complete" | "aborted";
         try {
           if (!this.prioritySet) {
@@ -223,6 +260,7 @@ export class StreamRecordWriter {
 
   private dropQueue(): void {
     for (const record of this.queue) {
+      record.cleanup?.();
       record.bytes.fill(0);
       record.settle("dropped");
     }

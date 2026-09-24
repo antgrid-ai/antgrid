@@ -499,11 +499,13 @@ export class ProjectCore {
       attach: (remote) => this.attachLocalStreamForWizard(core, bus, remote),
     });
     this.promotion = promotion;
-    bus.setInboundHandler((msg, channel, source) => {
+    bus.setInboundHandler((msg, channel, source, peerId) => {
       if (promotion.handleInbound(msg)) return;
-      // Thread `source` through so the core's gate still distinguishes the
-      // desktop's loopback frames from native peer frames after promotion.
-      coreInbound?.(msg, channel, source);
+      // Thread `source` and `peerId` through: the core's gate distinguishes the
+      // desktop's loopback frames from native peer frames by the one, and every
+      // per-client record (read state, viewer attachments, the terminal stream
+      // hooks) is keyed by the other.
+      coreInbound?.(msg, channel, source, peerId);
     });
   }
 
@@ -617,6 +619,7 @@ export class ProjectCore {
     // device that asked. Local mode never wires this, so loopback control stays
     // ungated.
     core.setPeerSessionProvider((peerId) => remote.peerSession(peerId));
+    core.setTerminalStreamHooks(handle.terminalHooks ?? null);
 
     // Fallback push path: while the paired phone can't receive in-band (no live
     // peer on this stream OR the app is backgrounded), seal a notification to its
@@ -724,6 +727,7 @@ export class ProjectCore {
         try { handle.detach(); } catch { /* best-effort */ }
         try { core.setPlainHook(null); } catch { /* best-effort */ }
         try { core.setPeerSessionProvider(null); } catch { /* best-effort */ }
+        try { core.setTerminalStreamHooks(null); } catch { /* best-effort */ }
       },
     };
   }
@@ -763,6 +767,7 @@ export class ProjectCore {
         try { handle.detach(); } catch {}
         try { core.setPlainHook(null); } catch {}
         try { core.setPeerSessionProvider(null); } catch {}
+        try { core.setTerminalStreamHooks(null); } catch {}
       },
     };
   }
@@ -778,6 +783,7 @@ export class ProjectCore {
       await new Promise((resolve) => setTimeout(resolve, 200));
     }
     try { this.core?.setPeerSessionProvider(null); } catch {}
+    try { this.core?.setTerminalStreamHooks(null); } catch {}
     // Remove the primary stream's push dispatcher (additive bus subscriber) before
     // detaching — deliver() would otherwise hand a frame to a torn-down stream.
     try { this.relayPushUnsub?.(); } catch {}

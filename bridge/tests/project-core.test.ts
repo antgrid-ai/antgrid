@@ -6,10 +6,11 @@ import { randomUUID } from "node:crypto";
 import { ProjectCore, type ProjectCoreRemoteDeps } from "../src/project-core";
 import { computeProjectId } from "../src/project-id";
 import { MessageBus } from "../src/message-bus";
-import type { AttachStreamOpts, StreamHandle } from "../src/stream-mux";
+import type { AttachStreamOpts, StreamHandle, TerminalStreamHooks } from "../src/stream-mux";
 import type { ConnState } from "../src/conn-state";
 import { createMessage, type AbMessage } from "../src/protocol";
 import { SessionDirectory } from "../src/session-bus/directory";
+import { TERMINAL_PROTOCOL_VERSION } from "../src/terminal-frames/protocol";
 
 let cleanup: Array<() => void | Promise<unknown>> = [];
 // LIFO + awaited: cores shut down (stopping their file watchers) before the
@@ -366,4 +367,88 @@ test("a core built with sessionDirectory deps answers session-bus:directory inst
   // weaker check while still proving nothing about the forward under test.
   expect(result.code).toBeUndefined();
   expect(result.sessions).toEqual([expect.objectContaining({ sessionId: siblingId })]);
+});
+
+test("attachRelayStream wires handle.terminalHooks into the core, and every teardown clears them", async () => {
+  // Every one of attachRelayStream's three callers (startRemote, promote,
+  // attachLocalStreamForWizard) shares this one wiring — promote() is used
+  // here only because it is the one whose handle stays reachable after its
+  // own teardown, to prove the clear actually took.
+  const folder = mkdtempSync(join(tmpdir(), "antgrid-pc-term-hooks-"));
+  cleanup.push(() => rmSync(folder, { recursive: true, force: true }));
+  writeFileSync(join(folder, "antgrid.yaml"), "");
+
+  const retired: Array<{ peerId: string; attachmentId: string }> = [];
+  const settled: Array<{ peerId: string; requestId: string; attachmentId: string | undefined }> = [];
+  const hooks: TerminalStreamHooks = {
+    retired: (peerId, attachmentId) => retired.push({ peerId, attachmentId }),
+    subscribeSettled: (peerId, requestId, attachmentId) => settled.push({ peerId, requestId, attachmentId }),
+  };
+  const calls: Array<{ bus: MessageBus; opts: AttachStreamOpts }> = [];
+  const deps: ProjectCoreRemoteDeps = {
+    attachStream: (bus, opts) => {
+      calls.push({ bus, opts });
+      const handle: StreamHandle = {
+        streamId: "stream-1",
+        detach: () => {},
+        sendTunnel: async () => "sent" as const,
+        sendTo: async () => "sent" as const,
+        terminalHooks: hooks,
+      };
+      return handle;
+    },
+    establishedPeers: () => [],
+    peerSession: () => null,
+    machineDeviceId: () => "machine-uuid",
+    sendPushDeliver: () => {},
+  };
+
+  const core = new ProjectCore({
+    folder,
+    mode: "local",
+    identity: { deviceId: randomUUID(), deviceName: "local", createdAt: new Date().toISOString() },
+    remoteAccessEnabled: () => true,
+  });
+  cleanup.push(() => core.shutdown());
+  await core.start();
+
+  const bus = (core as unknown as { bus: MessageBus }).bus;
+  const sent: AbMessage[] = [];
+  bus.subscribe({ deliver: (m) => sent.push(m) });
+  bus.dispatchInbound(createMessage("terminal:start", { terminalId: "adhoc", cwd: tmpdir() }) as any, "control", "loopback");
+  await waitFor(() => sent.some((m) => m.type === "terminal:started" && (m as any).terminalId === "adhoc"), "terminal:started");
+
+  const promoted = core.promote(deps);
+  expect(calls.length).toBe(1);
+  calls[0].opts.onAdmitted?.("stream-1");
+
+  // A promoted LOCAL core's inbound handler is startLocal()'s promotion
+  // wrapper; the hooks are keyed by peerId, so the wrapper must pass it on.
+  const requestId = randomUUID();
+  bus.dispatchInbound(
+    createMessage("terminal:subscribe", { terminalId: "adhoc", version: TERMINAL_PROTOCOL_VERSION, requestId }) as any,
+    "control", "relay", "phone-1",
+  );
+  await waitFor(() => settled.some((s) => s.requestId === requestId), "subscribeSettled after promotion");
+  expect(settled).toEqual([{ peerId: "phone-1", requestId, attachmentId: expect.any(String) }]);
+  const attachmentId = settled[0].attachmentId!;
+
+  // Teardown: promote()'s stop() must clear the hooks it wired, same as the
+  // other two callers (attachLocalStreamForWizard's detach, ProjectCore.shutdown).
+  promoted.stop();
+
+  bus.dispatchInbound(
+    createMessage("terminal:unsubscribe", { terminalId: "adhoc", runId: "adhoc", attachmentId }) as any,
+    "control", "relay", "phone-1",
+  );
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  expect(retired).toEqual([]);
+
+  const secondRequestId = randomUUID();
+  bus.dispatchInbound(
+    createMessage("terminal:subscribe", { terminalId: "adhoc", version: TERMINAL_PROTOCOL_VERSION, requestId: secondRequestId }) as any,
+    "control", "relay", "phone-2",
+  );
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  expect(settled.some((s) => s.requestId === secondRequestId)).toBe(false);
 });

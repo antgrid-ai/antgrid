@@ -260,6 +260,21 @@ export class DartAppClient {
     );
   }
 
+  /** Await a `terminal-attach-*` event for `requestId` matching `predicate`
+   *  (checked against the full event, so a caller can narrow on `end`,
+   *  `data?.type` or anything else the CLI attaches). */
+  waitForTerminalAttach(
+    requestId: string,
+    predicate: (event: DartEvent) => boolean,
+    timeoutMs = 10_000,
+  ): Promise<DartEvent> {
+    return this.waitForEvent(
+      (e) => typeof e.event === "string" && e.event.startsWith("terminal-attach-") &&
+        e.requestId === requestId && predicate(e),
+      timeoutMs,
+    );
+  }
+
   async connectControl(
     relayUrl: string,
     licenseToken: string,
@@ -399,6 +414,37 @@ export class DartAppClient {
 
   waitForAgentStatus(streamId: string, timeoutMs = 10_000): Promise<DartEvent> {
     return this.waitForStreamAbMessage(streamId, "agent:status", timeoutMs);
+  }
+
+  /** Opens a terminal attachment through the Dart eval CLI's `terminal-attach`
+   *  action (§4.5 of the Stage A A2 contract): `openTerminalAttachment` on a
+   *  `MultiStreamPeerLink` session rides its own native stream, and on the
+   *  socket path falls back transparently — `isStream` on the `-opened` event
+   *  tells the caller which. `version` always goes over the wire (defaulting
+   *  to the terminal-frames protocol version), because the Zod schema behind
+   *  `terminal:subscribe` requires it. */
+  terminalAttach(
+    streamId: string,
+    opts: { terminalId: string; requestId: string; checkoutId?: string; version?: number },
+  ): void {
+    this.sendCommand({
+      action: "terminal-attach",
+      streamId,
+      terminalId: opts.terminalId,
+      requestId: opts.requestId,
+      checkoutId: opts.checkoutId ?? "main",
+      version: opts.version ?? TERMINAL_PROTOCOL_VERSION,
+    });
+  }
+
+  /** `handle.send(data)` for an open terminal attachment. */
+  terminalAttachSend(requestId: string, data: Record<string, any>): void {
+    this.sendCommand({ action: "terminal-attach-send", requestId, data });
+  }
+
+  /** `handle.close()` for an open terminal attachment. Idempotent. */
+  terminalAttachClose(requestId: string): void {
+    this.sendCommand({ action: "terminal-attach-close", requestId });
   }
 
   sendTerminalInput(streamId: string, terminalId: string, data: string): void {

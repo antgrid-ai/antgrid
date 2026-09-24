@@ -22,6 +22,16 @@ const int kStreamMaxTerminalAttachmentsPerPeer = 64;
 const int kStreamMaxTunnelStreamsPerPeer = 128;
 const int kStreamMaxPendingOpensPerPeer = 16;
 
+/// Bridge reader's cap for the four small app-to-bridge terminal verbs
+/// (subscribe, ack, unsubscribe, history:request).
+const int kStreamTerminalAppRecordMaxBytes = 16384;
+
+/// App reader's cap for a terminal-stream record from the bridge — twice
+/// `TERMINAL_VIEWER_MAX_BYTES` (1 MiB), the largest frame delivery ever hands
+/// over (see `bridge/src/peer/terminal-streams.ts`, across the licence
+/// boundary this package cannot import).
+const int kStreamTerminalBridgeRecordMaxBytes = 2097152;
+
 bool _onlyKeys(Map<String, dynamic> json, Set<String> allowed) =>
     json.keys.every(allowed.contains);
 

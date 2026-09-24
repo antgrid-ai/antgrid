@@ -7,10 +7,11 @@ import { describe, test, expect, afterEach } from "bun:test";
 import { buildFragments } from "antgrid-wire";
 import {
   StreamMux, CONTROL_STREAM_ID, INVALID_NOTICE_COOLDOWN_MS,
-  type StreamMuxTransport, type PeerSessionView, type SendTarget,
+  type StreamMuxTransport, type PeerSessionView, type SendTarget, type TerminalStreamHooks,
 } from "../src/stream-mux";
 import { MessageBus, type Channel } from "../src/message-bus";
-import { createMessage } from "../src/protocol";
+import { createMessage, type AbMessage } from "../src/protocol";
+import type { StreamSendOutcome } from "../src/peer/stream-records";
 import { ed25519Pair, TestPeerSessionOwner } from "./test-peer-session-owner";
 
 function makeTransport(peers: Map<string, PeerSessionView> = new Map()) {
@@ -29,6 +30,38 @@ function makeTransport(peers: Map<string, PeerSessionView> = new Map()) {
     peerSession: (peerId) => peers.get(peerId) ?? null,
   };
   return { transport, closed, sent, targets, peers };
+}
+
+/** Same as {@link makeTransport}, plus the three A2 terminal-stream members so
+ *  `routeTerminal`/`terminalHooks`/`projectDetached` can be observed and
+ *  scripted per test. */
+function makeTerminalTransport(peers: Map<string, PeerSessionView> = new Map()) {
+  const base = makeTransport(peers);
+  const routedCalls: Array<{ peerId: string; msg: AbMessage; signal: AbortSignal | undefined }> = [];
+  const projectDetachedCalls: string[] = [];
+  let router: (peerId: string, msg: AbMessage, signal?: AbortSignal) => Promise<StreamSendOutcome> | undefined =
+    () => Promise.resolve("sent");
+  const hooks: TerminalStreamHooks = {
+    retired: () => {},
+    subscribeSettled: () => {},
+  };
+  const transport: StreamMuxTransport = {
+    ...base.transport,
+    routeTerminal: (peerId, msg, signal) => {
+      routedCalls.push({ peerId, msg, signal });
+      return router(peerId, msg, signal);
+    },
+    terminalHooks: hooks,
+    projectDetached: (projectId) => projectDetachedCalls.push(projectId),
+  };
+  return {
+    ...base,
+    transport,
+    routedCalls,
+    projectDetachedCalls,
+    hooks,
+    setRouter: (fn: typeof router) => { router = fn; },
+  };
 }
 
 function peerView(peerId: string, checkoutRouting: boolean): PeerSessionView {
@@ -378,6 +411,132 @@ describe("StreamMux (unit, stub transport)", () => {
     const b = mux.attach(new MessageBus(), {});
     mux.detachAll();
     expect(closed.sort()).toEqual([a.streamId, b.streamId].sort());
+  });
+
+  // --- A2: projectBinding, routeTerminal, terminalHooks, projectDetached ---
+
+  test("projectBinding returns the latest live entry for a projectId and null after detach", () => {
+    const { transport } = makeTransport();
+    const mux = new StreamMux(transport);
+    expect(mux.projectBinding("p1")).toBeNull();
+
+    const a = mux.attach(new MessageBus(), { projectId: "p1" });
+    expect(mux.projectBinding("p1")?.streamId).toBe(a.streamId);
+
+    // A second live entry for the same project (a reconnect race): the most
+    // recently attached one wins.
+    const b = mux.attach(new MessageBus(), { projectId: "p1" });
+    expect(mux.projectBinding("p1")?.streamId).toBe(b.streamId);
+
+    b.detach();
+    expect(mux.projectBinding("p1")?.streamId).toBe(a.streamId);
+    a.detach();
+    expect(mux.projectBinding("p1")).toBeNull();
+  });
+
+  test("binding.dispatch re-runs mayAcceptFrom and reaches the bus as relay with the peerId", () => {
+    const { transport, peers } = makeTransport();
+    peers.set("stale", peerView("stale", false));
+    peers.set("modern", peerView("modern", true));
+    const mux = new StreamMux(transport);
+    const bus = new MessageBus();
+    const received: Array<{ msg: unknown; channel: Channel; source: string; peerId?: string }> = [];
+    bus.setInboundHandler((msg, channel, source, peerId) => received.push({ msg, channel, source, peerId }));
+    mux.attach(bus, { projectId: "p1", mayAcceptFrom: refuseIncapable });
+    const binding = mux.projectBinding("p1")!;
+    const msg = createMessage("pong", {});
+
+    expect(binding.dispatch(msg, "stale")).toBe(false);
+    expect(received).toEqual([]);
+
+    expect(binding.dispatch(msg, "modern")).toBe(true);
+    expect(received).toEqual([{ msg, channel: "control", source: "relay", peerId: "modern" }]);
+  });
+
+  test("routeTerminal runs only after mayDeliver, mayDeliverTo and unboundAtPeer allow the send", async () => {
+    const { transport, routedCalls, peers } = makeTerminalTransport();
+    peers.set("peer1", peerView("peer1", true));
+    const mux = new StreamMux(transport);
+    const bus = new MessageBus();
+    let deliverAllowed = false;
+    let deliverToAllowed = false;
+    const handle = mux.attach(bus, {
+      mayDeliver: () => deliverAllowed,
+      mayDeliverTo: () => deliverToAllowed,
+    });
+    const msg = createMessage("pong", {});
+    const attempt = () => bus.deliverTo(msg, "control", "relay", new AbortController().signal, "peer1");
+
+    await expect(attempt()).rejects.toThrow("gated"); // mayDeliver refuses
+    expect(routedCalls).toEqual([]);
+
+    deliverAllowed = true;
+    await expect(attempt()).rejects.toThrow("gated"); // mayDeliverTo refuses
+    expect(routedCalls).toEqual([]);
+
+    deliverToAllowed = true;
+    mux.markUnbound(handle.streamId);
+    await expect(attempt()).rejects.toThrow("gated"); // unboundAtPeer mute
+    expect(routedCalls).toEqual([]);
+
+    mux.markBound(handle.streamId);
+    await attempt();
+    expect(routedCalls.length).toBe(1);
+    expect(routedCalls[0]!.peerId).toBe("peer1");
+  });
+
+  test("a routed send replaces sendEnvelope, and an undefined route falls back to it", () => {
+    const { transport, routedCalls, sent, setRouter } = makeTerminalTransport();
+    const mux = new StreamMux(transport);
+    const bus = new MessageBus();
+    const handle = mux.attach(bus, {});
+
+    setRouter(() => Promise.resolve("sent"));
+    const routedMsg = createMessage("pong", {});
+    bus.publishOnly(routedMsg, "control", "relay", "peer1");
+    expect(routedCalls.map((c) => c.msg)).toEqual([routedMsg]);
+    expect(sent).toEqual([]); // routeTerminal replaced sendEnvelope entirely
+
+    setRouter(() => undefined);
+    const fallbackMsg = createMessage("pong", {});
+    bus.publishOnly(fallbackMsg, "control", "relay", "peer1");
+    expect(sent).toEqual([{ streamId: handle.streamId, msg: fallbackMsg, channel: "control" }]);
+  });
+
+  test("a routed non-sent outcome rejects a signalled delivery", async () => {
+    const { transport, setRouter } = makeTerminalTransport();
+    const mux = new StreamMux(transport);
+    const bus = new MessageBus();
+    mux.attach(bus, {});
+    setRouter(() => Promise.resolve("dropped"));
+    const msg = createMessage("pong", {});
+    await expect(
+      bus.deliverTo(msg, "control", "relay", new AbortController().signal, "peer1"),
+    ).rejects.toThrow("Terminal delivery dropped");
+  });
+
+  test("detach calls projectDetached only when no other entry holds the project", () => {
+    const { transport, projectDetachedCalls } = makeTerminalTransport();
+    const mux = new StreamMux(transport);
+    const a = mux.attach(new MessageBus(), { projectId: "p1" });
+    const b = mux.attach(new MessageBus(), { projectId: "p1" });
+    const c = mux.attach(new MessageBus(), { projectId: "p2" });
+
+    a.detach();
+    expect(projectDetachedCalls).toEqual([]); // b still holds p1
+
+    b.detach();
+    expect(projectDetachedCalls).toEqual(["p1"]);
+
+    c.detach();
+    expect(projectDetachedCalls).toEqual(["p1", "p2"]);
+  });
+
+  test("attach returns the transport's terminalHooks on the handle", () => {
+    const { transport, hooks } = makeTerminalTransport();
+    const mux = new StreamMux(transport);
+    const handle = mux.attach(new MessageBus(), {});
+    expect(handle.terminalHooks).toBe(hooks);
   });
 });
 

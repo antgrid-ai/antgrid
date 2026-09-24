@@ -2,9 +2,10 @@ import { randomBytes } from "node:crypto";
 import { CONTROL_STREAM_ID } from "antgrid-wire";
 import type { Channel, MessageBus } from "./message-bus";
 import type { SendOutcome } from "./send-scheduler";
-import { createMessage, parseMessageFast } from "./protocol";
+import { createMessage, parseMessageFast, type AbMessage } from "./protocol";
 import { parseTunnelMessage } from "./tunnel-protocol";
 import { logger } from "./logger";
+import type { StreamSendOutcome } from "./peer/stream-records";
 
 const log = logger.child({ component: "stream-mux" });
 
@@ -38,6 +39,33 @@ export interface StreamHandle {
    *  the same outcomes as `sendTunnel`, so a caller with an outbox can hold the
    *  frame rather than assume it left. */
   sendTo(msg: unknown, channel: Channel, target: SendTarget): Promise<SendOutcome>;
+  /** Present iff the transport supports terminal attachment streams (A2). A
+   *  terminal stream's `retired`/`subscribeSettled` land here, keyed by this
+   *  project's own core rather than by peer, because the core is what knows
+   *  when a terminal run ends or a subscribe attempt resolves. */
+  readonly terminalHooks?: TerminalStreamHooks;
+}
+
+/** Delivered to whichever core owns a terminal stream's bound project, so it
+ *  can react to a native attachment's lifecycle the same way it reacts to the
+ *  loopback and legacy session-stream paths. See `terminal-streams.ts`. */
+export interface TerminalStreamHooks {
+  retired(peerId: string, attachmentId: string): void;
+  subscribeSettled(peerId: string, requestId: string, attachmentId: string | undefined): void;
+}
+
+/** What `TerminalStreamRegistry` needs from a project's mux entry to admit and
+ *  route a terminal stream without opening or promoting a core itself (A2). */
+export interface TerminalProjectBinding {
+  readonly streamId: string;
+  /** `entry.opts.mayAcceptFrom(peerSession(peerId))`, re-read on every call —
+   *  the same per-sender gate `dispatchInbound` applies to the legacy path. */
+  refusalFor(peerId: string): StreamRefusal | null;
+  /** Re-resolves the entry by `streamId` and re-runs `refusalFor`; on a pass,
+   *  retracts an `unboundAtPeer` mute exactly as `dispatchInbound` does, then
+   *  calls `entry.bus.dispatchInbound(msg, "control", "relay", peerId)`. False
+   *  when the entry has gone or `refusalFor` now refuses. */
+  dispatch(msg: AbMessage, peerId: string): boolean;
 }
 
 /** What one app session looks like to everything outside the relay client. No
@@ -145,6 +173,17 @@ export interface StreamMuxTransport {
    *  peer-addressed send and to an inbound frame, both of which name a session
    *  rather than enumerate them. */
   peerSession(peerId: string): PeerSessionView | null;
+  /** A2: routes one outbound terminal-stream message, replacing `sendEnvelope`
+   *  for it when present. `undefined` (no terminal registry, or the message is
+   *  unbound) falls back to the legacy session-stream path — see `attach()`'s
+   *  subscriber. Absent entirely on a transport with no terminal streams. */
+  routeTerminal?(peerId: string, msg: AbMessage, signal?: AbortSignal): Promise<StreamSendOutcome> | undefined;
+  /** Forwarded onto every `StreamHandle` this transport backs (A2). */
+  readonly terminalHooks?: TerminalStreamHooks;
+  /** A project's last live mux entry detached: unbind every terminal stream
+   *  still bound to it, because their bus is now gone. Absent on a transport
+   *  with no terminal streams. */
+  projectDetached?(projectId: string): void;
 }
 
 interface StreamEntry {
@@ -239,7 +278,12 @@ export class StreamMux {
           if (signal && !signal.aborted) return Promise.reject(new Error("Terminal delivery gated"));
           return;
         }
-        const sent = this.transport.sendEnvelope(streamId, msg, channel, gated(requested)!, signal, canSend);
+        // A2: a terminal-bound message routes onto its own stream instead of
+        // this project stream's envelope. `mayDeliver`/`mayDeliverTo`/`gated`
+        // above (and `unboundAtPeer`) still gate it at enqueue time; the
+        // writer's `authorized()` rechecks remote access per record.
+        const routed = peerId ? this.transport.routeTerminal?.(peerId, msg, signal) : undefined;
+        const sent = routed ?? this.transport.sendEnvelope(streamId, msg, channel, gated(requested)!, signal, canSend);
         if (signal) return sent.then((outcome) => {
           if (outcome !== "sent" && !signal.aborted) throw new Error(`Terminal delivery ${outcome}`);
         });
@@ -268,6 +312,7 @@ export class StreamMux {
       // branches on "sent", and "gated" is spoken for above.
       sendTunnel: (data, target) => sendTo(data, "preview", target),
       sendTo: (msg, channel, target) => sendTo(msg, channel, target),
+      terminalHooks: this.transport.terminalHooks,
     };
   }
 
@@ -277,6 +322,50 @@ export class StreamMux {
     this.streams.delete(streamId);
     try { entry.unsub(); } catch { /* bus already gone */ }
     this.transport.closeStream(streamId);
+    const projectId = entry.opts.projectId;
+    if (projectId !== undefined && !this.hasLiveEntryFor(projectId)) {
+      this.transport.projectDetached?.(projectId);
+    }
+  }
+
+  /** The most recently attached live entry bound to `projectId`, or null.
+   *  Lookup only — never opens or promotes a core (A2, `TerminalStreamRegistry`
+   *  admission step 5). Iterates newest-first: `Map` preserves insertion order,
+   *  and a project can hold more than one live entry only across a reconnect
+   *  race the mux does not otherwise resolve, so the latest one wins. */
+  projectBinding(projectId: string): TerminalProjectBinding | null {
+    let found: { streamId: string; entry: StreamEntry } | null = null;
+    for (const [streamId, entry] of this.streams) {
+      if (entry.opts.projectId === projectId) found = { streamId, entry };
+    }
+    if (!found) return null;
+    const { streamId } = found;
+    return {
+      streamId,
+      refusalFor: (peerId) => {
+        const entry = this.streams.get(streamId);
+        if (!entry) return { code: "NOT_ALLOWED", message: "project stream is gone" };
+        return entry.opts.mayAcceptFrom?.(this.transport.peerSession(peerId)) ?? null;
+      },
+      dispatch: (msg, peerId) => {
+        const entry = this.streams.get(streamId);
+        if (!entry) return false;
+        const refusal = entry.opts.mayAcceptFrom?.(this.transport.peerSession(peerId)) ?? null;
+        if (refusal) return false;
+        if (entry.unboundAtPeer) this.markBound(streamId);
+        entry.bus.dispatchInbound(msg, "control", "relay", peerId);
+        return true;
+      },
+    };
+  }
+
+  /** Whether any live entry is still bound to `projectId` — used only to decide
+   *  whether a detach was the LAST one for that project (§3.3). */
+  private hasLiveEntryFor(projectId: string): boolean {
+    for (const entry of this.streams.values()) {
+      if (entry.opts.projectId === projectId) return true;
+    }
+    return false;
   }
 
   /** Tell the phone a streamId is dead so it renegotiates instead of replaying
