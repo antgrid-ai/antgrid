@@ -53,7 +53,8 @@ the code wins over both.
 | A | A0c Dart multi-stream peer link | done | `fb396bb0` |
 | A | A0d app hazards B and C (terminal drain, history boundary) | done | `7c97b72c` |
 | A | A1 multi-stream admission, ALPN `antgrid/peer/2` | done | `7523c75a` |
-| A | A2 terminal streams, A3 tunnel streams | in progress | |
+| A | A2 terminal attachment streams | done | `8a13d83b` |
+| A | A3 tunnel HTTP/WS streams | done | `55c741e8` |
 | A | A4 project streams, A5 deletions, A6 docs | not started | |
 
 ### Stage C gate evidence (executed by the wave commit agents)
@@ -86,3 +87,17 @@ the code wins over both.
 - `app/build/windows` must be deleted before the next Windows build anywhere, because W2a removed `cryptography_flutter` from the plugin set.
 - The eval client has no `dart test` suite. The evals cover it through `evals/helpers/dart-app-client.ts`.
 - `iroh-interop-smoke.ts` and `gate-iroh-host-authorization` still label their pass line `e2e: "real"`, meaning a real session end to end. The label is cosmetic.
+
+### Stage A gate evidence (executed by the wave commit agents)
+
+- A2: wire 130; bridge 4902 pass with the 6 known failures; relay 173; relay_client 283; peer_transport 64; app 4210; `flutter analyze` clean in app and the three packages; evals 108 pass, 5 skip, with the only failure the gate-vectors git-clean guard, which clears at the commit; `test:evals:dart-terminal` 7 pass; qualify runs and the relay gate pass.
+- A3: wire 136; bridge 4928 pass with the 6 known failures; relay 173; relay_client 308; peer_transport 64; app 4187; `flutter analyze` clean; evals 113 pass, 5 skip, with the same git-clean guard as the only failure before the commit; qualify runs and the relay gate pass.
+
+### Stage A open items
+
+- The bridge and the app can briefly disagree on free slots while a close is in flight, so the bridge may refuse a new stream with `CAP_EXCEEDED`. Accepted.
+- A tunnel request body is reassembled in memory before `serveHttp`, so the worst case per peer is the wire body cap times 128 streams.
+- The bridge frees a tunnel slot when it unbinds, before the app's FIN, so a misbehaving app can hold QUIC streams past 128; the 256 bidi limit bounds it.
+- The tunnel-cap eval opens 128 streams in sequence and takes about 9s, close to other 10s timers.
+- The Dart stream WebSocket channel reports its own close as `TunnelWsClosedByPeer`, where the fake reports `TunnelWsClosedLocally`. Cosmetic: the browser close is forwarded the same way.
+- Carried into A4: the app's terminal attachment releases its slot before the records drain; the promoted local core drops `peerId`; `abortTunnelStreams` is not scoped to the peer that changed; the send-time and drain-time `authorized()` checks have no test of their own.
