@@ -344,9 +344,12 @@ export class DartAppClient {
   }
 
   /**
-   * Drill into a project: control-plane `project:start`, then the agent's
-   * `stream-ready { projectId, streamId }` — resolved at 0 RTT
-   * when the `agent:projects` advert already carried the stream. No new socket.
+   * Opens `projectId`'s own QUIC stream (Stage A wave A4): control-plane
+   * `project:start`, then `MachineSession.openProject` — resolved at 0 RTT
+   * when the `agent:projects` advert already showed the project running. No
+   * new socket. The Dart CLI's `project-started` event still carries a
+   * `streamId` field; its VALUE is now `projectId` (D-8), not a bridge-minted
+   * id.
    */
   async openProjectStream(projectId: string, timeoutMs = 25_000): Promise<string> {
     const done = this.waitForEvent(
@@ -370,7 +373,10 @@ export class DartAppClient {
     this.sendCommand({ action: "send-encrypted", data: msg });
   }
 
-  /** Send an AbMessage tagged with a project stream (`{ s: streamId, m }`). */
+  /** Send an AbMessage on `streamId`'s own project stream (A4: no `{s, m}`
+   *  envelope on the wire — the Dart CLI command shape is unchanged, but
+   *  `streamId` is the handle, which equals the projectId, not a bridge-minted
+   *  id). */
   sendOnStream(streamId: string, msg: AbMessage): void {
     this.sendCommand({ action: "send-encrypted", streamId, data: msg });
   }

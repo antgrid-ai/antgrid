@@ -36,7 +36,10 @@ describe("establishment: the one door in", () => {
     bus.setInboundHandler((msg) => received.push(msg));
     const handle = client.attachStream(bus, {});
     try {
-      client.sendFromPeer("phone-1", { s: handle.streamId, m: createMessage("agent:turn-start", { sessionId: "s1", turnId: "t1" }) });
+      // The drop fires purely on "no session for this peer" (receivePeerFrame),
+      // before any envelope shape or routing is even looked at — a bare
+      // AbMessage exercises the same gate the old `{s, m}` mux envelope did.
+      client.sendFromPeer("phone-1", createMessage("agent:turn-start", { sessionId: "s1", turnId: "t1" }));
       expect(received).toHaveLength(0);
       const drops = netwatch.snapshot().filter((e) => e.kind === "drop" && e.reason === "pre-establishment");
       expect(drops).toHaveLength(1);

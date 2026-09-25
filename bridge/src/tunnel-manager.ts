@@ -96,6 +96,10 @@ function splitUpstreamWsHeaders(
 /** One HTTP tunnel run's view of its own stream: the registry (A3
  *  `peer/tunnel-streams.ts`) implements this over a `StreamRecordWriter`. */
 export interface TunnelHttpExchange {
+  /** Whose stream this run is on — `abortHttpStreams(peerId)` aborts by this,
+   *  never by project or checkout, so a second phone establishing does not
+   *  abort a first phone's in-flight preview load (A3 trap, §3.8). */
+  readonly peerId: string;
   /** Aborted by the app's cancel, a failed/gated send, projectDetached, dropPeer, or abortHttpStreams. */
   readonly signal: AbortSignal;
   head(head: { status: number; headers: Record<string, string>; setCookies?: string[] }): Promise<StreamSendOutcome>;
@@ -130,7 +134,7 @@ export type TunnelAdmission =
   | { ok: false; refusal: { code: "UPDATE_REQUIRED" | "NOT_ALLOWED"; message: string } }
   | { ok: true; manager: TunnelManager };
 
-/** What a project's mux entry exposes to the tunnel registry: `AgentCore`
+/** What a project's core exposes to the tunnel registry: `AgentCore`
  *  implements it (`agent-core.ts`). */
 export interface TunnelStreamServer {
   admit(peerId: string, checkoutId: string): TunnelAdmission;
@@ -176,10 +180,11 @@ export class TunnelManager {
   /** Ports whose current entry was recorded while the stream was suppressed and
    *  so never reached the phone. Cleared on the send that delivers them. */
   private undelivered = new Set<number>();
-  /** Per-run controllers for every `serveHttp` in flight, so `abortHttpStreams`
-   *  can cancel every run without the manager tracking requestIds — the
-   *  registry (one per peer) is what dedupes those. */
-  private inflight = new Set<AbortController>();
+  /** Per-run controllers for every `serveHttp` in flight, keyed to the peer
+   *  whose stream it runs on, so `abortHttpStreams(peerId)` can cancel one
+   *  peer's runs without the manager tracking requestIds — the registry (one
+   *  per peer) is what dedupes those. */
+  private inflight = new Map<AbortController, string>();
   /** Live WS relays — see [TunnelWsRun]. */
   private wsRuns = new Set<TunnelWsRun>();
   /** Sockets released mid-handshake — see [WS_ABANDONED_MAX]. Insertion-ordered
@@ -285,7 +290,7 @@ export class TunnelManager {
    *  never thrown back at the caller. */
   async serveHttp(req: TunnelHttpRequest, body: Uint8Array, exchange: TunnelHttpExchange): Promise<void> {
     const runAbort = new AbortController();
-    this.inflight.add(runAbort);
+    this.inflight.set(runAbort, exchange.peerId);
     try {
       await this.runHttp(req, body, exchange, AbortSignal.any([exchange.signal, runAbort.signal]), runAbort);
     } finally {
@@ -396,13 +401,17 @@ export class TunnelManager {
     await this.sendOrAbort(exchange.end(), runAbort);
   }
 
-  /** The peer is gone or was just re-established: every in-flight HTTP run
-   *  exits through its own cancelled path — the fetch aborted, the upstream
-   *  connection closed, nothing retained — instead of streaming the rest of a
-   *  body toward a stream that is already gone. WS tunnels are left alone:
-   *  they survive a rekey today and the app re-opens them on loss. */
-  abortHttpStreams(): void {
-    for (const controller of this.inflight) controller.abort();
+  /** `peerId`'s session or project stream is gone: every in-flight HTTP run of
+   *  THIS peer exits through its own cancelled path — the fetch aborted, the
+   *  upstream connection closed, nothing retained — instead of streaming the
+   *  rest of a body toward a stream that is already gone. A sibling peer's
+   *  runs are untouched, so a second phone establishing does not abort the
+   *  first phone's preview load (A3 trap). WS tunnels are left alone: they
+   *  survive a rekey today and the app re-opens them on loss. */
+  abortHttpStreams(peerId: string): void {
+    for (const [controller, p] of this.inflight) {
+      if (p === peerId) controller.abort();
+    }
   }
 
   /** Opens the real upstream WebSocket for a browser-side tab's WS and returns
@@ -618,8 +627,8 @@ export class TunnelManager {
     this.sentUrlDetails.clear();
     // Aborted before the run set is cleared, or a run in flight would keep
     // reading its upstream and shipping frames a stopped manager can no
-    // longer own.
-    this.abortHttpStreams();
+    // longer own. Every peer's runs, unlike `abortHttpStreams(peerId)`.
+    for (const controller of this.inflight.keys()) controller.abort();
     this.inflight.clear();
     for (const run of this.wsRuns) {
       // Deleted BEFORE closing so the socket's own close event finds nothing

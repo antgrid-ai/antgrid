@@ -7,19 +7,18 @@ import { createMessage, type AbMessage } from "../../bridge/src/protocol";
 import { firstProjectStream } from "../support/stream";
 
 /**
- * Per-channel credit windows, end to end over a real relay and a real agent
- * (docs/protocol/peer-session.md). The agent may hold at most
- * CHANNEL_WINDOW_BYTES of frame payload in flight on a channel beyond what
- * this client has credited; the client counts what it takes off the wire and
- * returns cumulative `credit` session frames. Two things have to be true for
- * that to be an improvement rather than a new way to wedge: a body larger than
- * the window must still cross it, and a client that stops crediting must stop
- * the sender rather than let it flood.
+ * Per-channel credit windows (docs/protocol/peer-session.md) gate only the
+ * session stream: the control plane and its session frames. A project's
+ * records ride that project's own QUIC stream, paced by QUIC flow control, so
+ * a project body several windows long must cross without charging the session
+ * window at all, and a client that withholds session credits must not stall
+ * it. If project traffic ever fell back onto the session stream, one large
+ * `file:content` would again hold every other project's control traffic
+ * behind a window only this client's credits can reopen.
  *
- * Both rows drive the `control` channel; the preview window is exercised end to
- * end, with its own pacing and cancel rows, by gate-tunnel-streaming.test.ts.
- * The shared channel makes the first row stricter, not weaker: the small verb's
- * reply queues behind the flood in the same FIFO rather than beside it.
+ * The window's own stop-and-resume mechanics are pinned at the unit level by
+ * bridge/tests/relay-client-credit-window.test.ts; the preview window is
+ * exercised by gate-tunnel-streaming.test.ts.
  *
  * Known Windows test noise (NOT failures): fs.watch EPERM/EBUSY on teardown.
  */
@@ -87,46 +86,25 @@ describe("gate: per-channel flow control", () => {
     expect(readme).toBeDefined();
     expect(readme!.content).toContain("Eval Test Project");
 
-    // More than one window of frame payload arrived on this channel, so the
-    // agent could only have written it after credits released the window it
-    // filled first.
-    expect(env.app.consumedBytes("control") - before).toBeGreaterThan(CHANNEL_WINDOW_BYTES);
+    // Several windows of body crossed, and the session window was charged at
+    // most the liveness traffic that shares it.
+    expect(env.app.consumedBytes("control") - before).toBeLessThan(MAX_FRAME_PAYLOAD);
+    expect(Buffer.from(flood!.content!, "base64").length).toBeGreaterThan(CHANNEL_WINDOW_BYTES);
   }, 60_000);
 
-  test("withholding credits stops the agent inside one window, and releasing them resumes it", async () => {
+  test("withholding session credits does not stall a project stream", async () => {
     env.app.setCreditsPaused(true);
-    const before = env.app.consumedBytes("control");
-
-    // Registered before the read so nothing is missed, and observed rather than
-    // awaited: the point of the first half is that it does NOT arrive.
-    let arrived = false;
-    const content = env.app.waitForStreamAbType(streamId, "file:content", 40_000);
-    content.then(() => { arrived = true; }, () => { arrived = true; });
-
-    env.app.sendOnStream(streamId, createMessage("file:read", {
-      projectId: env.projectId,
-      path: "flood.png",
-    }));
-
-    // Long enough for the whole body to have landed on a healthy session, and
-    // well inside the receive-side reassembler's per-transfer timeout, which
-    // would otherwise discard the fragments already held.
-    await Bun.sleep(3_000);
-
-    const stalled = env.app.consumedBytes("control") - before;
-    expect(arrived).toBe(false);
-    expect(stalled).toBeGreaterThan(0);
-    // The gate lets a frame through whenever nothing is outstanding, so one
-    // maximal frame past a full window is the ceiling.
-    expect(stalled).toBeLessThanOrEqual(CHANNEL_WINDOW_BYTES + MAX_FRAME_PAYLOAD);
-
-    env.app.setCreditsPaused(false);
-
-    const flood = await content;
-    expect(flood.path).toBe("flood.png");
-    expect(flood.error).toBeUndefined();
-    expect(Buffer.from(flood.content!, "base64").equals(png)).toBe(true);
-    // Everything held back during the stall was still in the queue, not dropped.
-    expect(env.app.consumedBytes("control") - before).toBeGreaterThan(stalled);
+    try {
+      env.app.sendOnStream(streamId, createMessage("file:read", {
+        projectId: env.projectId,
+        path: "flood.png",
+      }));
+      const flood = await env.app.waitForStreamAbType(streamId, "file:content", 40_000);
+      expect(flood.path).toBe("flood.png");
+      expect(flood.error).toBeUndefined();
+      expect(Buffer.from(flood.content!, "base64").equals(png)).toBe(true);
+    } finally {
+      env.app.setCreditsPaused(false);
+    }
   }, 60_000);
 });

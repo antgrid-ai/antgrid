@@ -89,7 +89,9 @@ test("one account device holds two machines at once — neither supersedes the o
 
     // And a sibling slot naming the OTHER machine must not have repointed
     // this bridge's reply address or torn its session down — the same-account
-    // presence fan-out reaches both agents with both slots (isForeignSlot).
+    // presence fan-out reaches both agents with both slots (A4 deleted the
+    // `isForeignSlot` guard along with stream-mux.ts: `dropSession` no longer
+    // needs it to tell a foreign-slot loss apart from its own).
     expect((await a.waitForStateSnapshot()).ok).toBe(true);
 
     await a.disconnect();

@@ -1,11 +1,17 @@
 // The send scheduler as the TestPeerSessionOwner wires it: what bypasses the
 // queue and what clears it. Payloads are plaintext on the wire (Stage B), so a
 // queued peer frame can be read straight off the wire with no unseal step.
+//
+// A4 moved bus-attached project traffic off this scheduler entirely — a
+// project stream writes straight to its own bound QUIC stream
+// (`ProjectStreamRegistry.writeToRecipients`), with no queue here to inspect.
+// The session-stream (`CONTROL_STREAM_ID`) traffic this file exercises is
+// untouched (kept through A5); cancel-isolation-between-viewers and
+// detach-drops-the-queue coverage for the project stream itself now live in
+// terminal-frame-cancellation.test.ts against a real binding.
 import { afterEach, describe, expect, it } from "bun:test";
 import { CONTROL_STREAM_ID, decodePeerFrame, encodePeerFrame } from "antgrid-wire";
 import { TestPeerSessionOwner } from "./test-peer-session-owner";
-import { MessageBus } from "../src/message-bus";
-import { createMessage } from "../src/protocol";
 import type { SendScheduler } from "../src/send-scheduler";
 import { installFakeSession } from "./fake-session";
 
@@ -56,29 +62,6 @@ function previewFrame(requestId: string): object {
 }
 
 describe("TestPeerSessionOwner send scheduler", () => {
-  it("cancels only the addressed viewer's queued terminal frame", async () => {
-    const { client, sent, s } = makeClient();
-    const second = installFakeSession(client, "phone-2").scheduler as SendScheduler;
-    s.hold = true;
-    second.hold = true;
-    const bus = new MessageBus();
-    const handle = client.attachStream(bus, {});
-    sent.length = 0;
-    const controller = new AbortController();
-    const status = createMessage("terminal:display:status", {
-      terminalId: "t", code: "ACK_TIMEOUT", message: "Reconnect",
-    });
-    const delivery = bus.deliverTo(status, "preview", "relay", controller.signal, PHONE_ID);
-    expect(s.queued("preview").frames).toBe(1);
-    expect(second.queued("preview").frames).toBe(0);
-    controller.abort();
-    await delivery;
-    // An aborted attachment deliberately retires without surfacing a send error.
-    expect(s.queued("preview").frames).toBe(0);
-    expect(sent).toEqual([]);
-    handle.detach();
-  });
-
   it("writes a session ping ahead of held preview frames", () => {
     const { client, sent, s } = makeClient();
     s.hold = true;
@@ -114,23 +97,6 @@ describe("TestPeerSessionOwner send scheduler", () => {
 
     expect(s.queued("preview").frames).toBe(0);
     expect(sent).toHaveLength(0);
-  });
-
-  it("drops a stream's queued frames when it detaches", () => {
-    const { client, sent, s } = makeClient();
-    const bus = new MessageBus();
-    const handle = client.attachStream(bus, {});
-    s.hold = true;
-
-    bus.publish(createMessage("pong", {}), "control");
-    bus.publish(createMessage("pong", {}), "control");
-    expect(s.queued("control").frames).toBe(2);
-    sent.length = 0;
-
-    handle.detach();
-
-    expect(s.queued("control").frames).toBe(0);
-    expect(sent).toEqual([]);
   });
 
   it("drops the queue when the native peer session is retired", () => {

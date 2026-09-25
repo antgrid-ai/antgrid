@@ -11,7 +11,7 @@ test("a slot resolves back to the account device identity is keyed by", () => {
 });
 
 test("an unscoped id passes through unchanged and claims no machine", () => {
-  // Every pre-slot client sends one, and `isForeignSlot` must not reject it.
+  // Every pre-slot client sends one, and admission must not reject it.
   expect(baseSlotDeviceId("device-1")).toBe("device-1");
   expect(slotMachineDeviceId("device-1")).toBeNull();
 });

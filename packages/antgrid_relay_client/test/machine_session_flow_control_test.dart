@@ -113,14 +113,14 @@ void main() {
 
     // Goes out under the scheduler's "nothing outstanding" deadlock guard, and
     // stays uncredited because the fake relay never credits.
-    await session.sendOnStream(kControlStreamId, {
+    await session.sendOnSession({
       'type': 'project:list',
     }, 'control');
     expect(s.unacked('control'), greaterThan(0));
 
     // Unawaited: its head blocks the channel, which is the state being tested.
     unawaited(
-      session.sendOnStream(kControlStreamId, {
+      session.sendOnSession({
         'type': 'project:list',
       }, 'control'),
     );
@@ -155,7 +155,7 @@ void main() {
 
     // Deliberately never established — the state a terminal is typed into
     // while the ladder is still climbing.
-    await session.sendOnStream('s1', {'type': 'terminal:input'}, 'control');
+    await session.sendOnSession({'type': 'terminal:input'}, 'control');
 
     expect(
       logged,
@@ -173,12 +173,12 @@ void main() {
 
     var previewDone = false;
     final preview = session
-        .sendOnStream('proj-1', {
+        .sendOnSession({
           'type': 'tunnel:http-response',
           'body': 'x' * 4096,
         }, 'preview')
         .then((_) => previewDone = true);
-    final control = session.sendOnStream(kControlStreamId, {
+    final control = session.sendOnSession({
       'type': 'project:list',
     }, 'control');
 
@@ -220,8 +220,8 @@ void main() {
         'content': 'y' * 2000000,
       };
 
-      final first = session.sendOnStream('proj-1', big, 'preview');
-      final second = session.sendOnStream('proj-1', {
+      final first = session.sendOnSession(big, 'preview');
+      final second = session.sendOnSession({
         'type': 'terminal:input',
         'data': 'z',
       }, 'preview');
@@ -246,15 +246,14 @@ void main() {
     },
   );
 
-  test('a queued send completes at hand-off, when its stream is removed, and '
-      'on session teardown', () async {
+  test('a queued send completes at hand-off, and on session teardown', () async {
     final session = await establish();
     final s = session.debugScheduler;
 
     s.hold = true;
     var handedOff = false;
     final onHandOff = session
-        .sendOnStream('proj-1', {'type': 'a'}, 'control')
+        .sendOnSession({'type': 'a'}, 'control')
         .then((_) => handedOff = true);
     await Future<void>.delayed(const Duration(milliseconds: 30));
     expect(handedOff, isFalse);
@@ -264,23 +263,9 @@ void main() {
     expect(relay.sent, hasLength(1));
 
     s.hold = true;
-    var onDetach = false;
-    final detached = session
-        .sendOnStream('doomed', {'type': 'b'}, 'control')
-        .then((_) => onDetach = true);
-    await Future<void>.delayed(const Duration(milliseconds: 30));
-    expect(onDetach, isFalse);
-    session.removeStream('doomed');
-    await detached;
-    expect(
-      relay.sent,
-      hasLength(1),
-      reason: "a detached stream's backlog is dropped, not written",
-    );
-
     var onDown = false;
     final torn = session
-        .sendOnStream('proj-1', {'type': 'c'}, 'control')
+        .sendOnSession({'type': 'c'}, 'control')
         .then((_) => onDown = true);
     await Future<void>.delayed(const Duration(milliseconds: 30));
     expect(onDown, isFalse);
@@ -292,14 +277,14 @@ void main() {
   });
 
   test(
-    'bindProject times out instead of hanging while control cannot drain',
+    'openProject times out instead of hanging while control cannot drain',
     () async {
       final session = await establish();
       session.debugScheduler.hold = true;
 
       final started = DateTime.now();
       await expectLater(
-        session.bindProject('proj-1', {
+        session.openProject('proj-1', {
           'type': 'project:start',
           'projectId': 'proj-1',
         }, timeout: const Duration(milliseconds: 200)),
@@ -355,7 +340,7 @@ void main() {
     );
     final sends = [
       for (var i = 0; i < 5; i++)
-        session.sendOnStream('proj-1', bulk(i), 'preview'),
+        session.sendOnSession(bulk(i), 'preview'),
     ];
     await _waitUntil(() => relay.sent.length >= 3);
     await Future<void>.delayed(const Duration(milliseconds: 20));
@@ -372,7 +357,7 @@ void main() {
     final (session, sends) = await withFullPreviewWindow();
     final unacked = relay.sent.fold<int>(0, (n, f) => n + f.payload.length);
 
-    await session.sendOnStream(kControlStreamId, {
+    await session.sendOnSession({
       'type': 'project:list',
     }, 'control');
     expect(
@@ -553,7 +538,7 @@ void main() {
     // the counters carried across the break the frames below could not go.
     final filled = [
       for (var i = 0; i < 3; i++)
-        session.sendOnStream('proj-1', bulk(i), 'preview'),
+        session.sendOnSession(bulk(i), 'preview'),
     ];
     await Future.wait(filled);
     expect(relay.sent, hasLength(3));
@@ -561,7 +546,7 @@ void main() {
     s.hold = true;
     final held = [
       for (var i = 3; i < 6; i++)
-        session.sendOnStream('proj-1', bulk(i), 'preview'),
+        session.sendOnSession(bulk(i), 'preview'),
     ];
     await Future<void>.delayed(const Duration(milliseconds: 30));
     expect(relay.sent, hasLength(3));
@@ -585,7 +570,7 @@ void main() {
     await session.ensureEstablished();
     final fresh = [
       for (var i = 6; i < 9; i++)
-        session.sendOnStream('proj-1', bulk(i), 'preview'),
+        session.sendOnSession(bulk(i), 'preview'),
     ];
     // Polled rather than awaited: counters carried across the break would gate
     // the first of these forever, and a stuck window should report itself as a
@@ -619,7 +604,7 @@ void main() {
     final s = session.debugScheduler;
 
     gated.gate = Completer<void>();
-    final inFlight = session.sendOnStream(kControlStreamId, {
+    final inFlight = session.sendOnSession({
       'type': 'project:list',
     }, 'preview');
     await _waitUntil(() => gated.sent.isNotEmpty);

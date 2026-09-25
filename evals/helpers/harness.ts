@@ -85,6 +85,36 @@ export async function setMobileAccess(abDir: string, enabled: boolean): Promise<
   }
 }
 
+/**
+ * Open a project into the host's catalog via the loopback `project:open`
+ * verb, without relay-registering it: `mode:"local"` (the default) leaves it
+ * warm but `running:false` until an explicit `project:start` promotes it.
+ *
+ * `setupTestEnv`'s own default project auto-registers within a beat of agent
+ * boot (`spawnAgent`'s bootstrap payload uses `mode:"remote"`), which races
+ * too tightly to probe a hazard-J `NOT_READY` admission refusal against. This
+ * builds a second, deterministically-not-yet-running project for that case.
+ */
+export async function openLoopbackProject(
+  abDir: string,
+  opts: { projectId: string; projectPath: string; mode?: "local" | "remote" },
+): Promise<void> {
+  const hf = await waitForHostFile(abDir);
+  const res = await fetch(`http://127.0.0.1:${hf.controlPort}/control`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${hf.token}` },
+    body: JSON.stringify({
+      id: `eval-open-${opts.projectId}`,
+      type: "project:open",
+      projectId: opts.projectId,
+      projectPath: opts.projectPath,
+      mode: opts.mode ?? "local",
+    }),
+  });
+  const body = (await res.json()) as { ok?: boolean };
+  if (!body.ok) throw new Error(`project:open ${opts.projectId} failed: ${JSON.stringify(body)}`);
+}
+
 /** Generate a fresh Ed25519 app identity: a `deviceId` + the `PhoneIdentity`
  *  keypair `RelayClient.connectAndAuth({ identity })` reuses across connections.
  *  Registering `{deviceId, ed25519Pub: publicKeyBase64}` with the fake account
@@ -595,7 +625,13 @@ export async function establishNativeSession(
   // endpoints is the confidentiality layer, so there is no agent key to pin.
   // Kept positional so call sites don't need to change.
   _agentEd25519Pub: string,
-  opts: { attempts?: number; perAttemptTimeoutMs?: number; gapMs?: number; omitPullsTree?: boolean } = {},
+  opts: {
+    attempts?: number;
+    perAttemptTimeoutMs?: number;
+    gapMs?: number;
+    omitPullsTree?: boolean;
+    omitCheckoutRouting?: boolean;
+  } = {},
 ): Promise<void> {
   // `setupTestEnv` calls this with the default before its own STREAM_ADVERT_*
   // retry loop (~20 lines below), and gate-harness-pairfree wraps the whole
@@ -612,6 +648,7 @@ export async function establishNativeSession(
     try {
       await app.performE2EHandshake(agentDeviceId, perAttemptTimeoutMs, {
         omitPullsTree: opts.omitPullsTree,
+        omitCheckoutRouting: opts.omitCheckoutRouting,
       });
       return;
     } catch (err) {
@@ -644,6 +681,10 @@ export interface TestEnv {
   /** Absolute path to the temp project dir — lets a scenario write/read files the
    *  agent serves (e.g. seeding an oversize file for the fragmentation test). */
   projectDir: string;
+  /** The default project's own QUIC stream, opened during setup — the handle
+   *  every project verb rides. Equals `projectId` (D-8: the eval handle is
+   *  never a bridge-minted id). */
+  streamId: string;
   /** Bare machine `deviceUuid` — the id the app handshakes against (one machine
    *  socket; projects are streams). */
   agentDeviceId: string;
@@ -777,16 +818,16 @@ async function buildTestEnv(opts: SetupTestEnvOptions, cleanup: CleanupStack): P
   // like the production app, instead of racing the agent's de-duped live burst.
   //
   // `state.snapshot` recomputes `agent:projects` fresh (host-server.ts's
-  // `dispatchControlPlaneInbound`), but firstProject's auto-start (creating its
-  // host-owned native stream and assigning its streamId) is asynchronous and
-  // can still be in flight for a beat
-  // after the E2E handshake establishes. The old pair-request round trip (and
-  // its own AGENT_OFFLINE retries) incidentally absorbed this; the pair-free
-  // path is fast enough to win the race and land before the project registers
-  // — so poll until the advert actually carries a streamId for it. Once
-  // dialable, it stays dialable for the rest of the test, so the final pull
-  // below leaves a genuinely fresh advert queued for callers like
-  // `firstProjectStream`.
+  // `dispatchControlPlaneInbound`), but firstProject's auto-start (relay-
+  // registering its core) is asynchronous and can still be in flight for a
+  // beat after the E2E handshake establishes. The old pair-request round trip
+  // (and its own AGENT_OFFLINE retries) incidentally absorbed this; the
+  // pair-free path is fast enough to win the race and land before the project
+  // registers — so poll until the advert shows it `running`, per Stage A wave
+  // A4's hazard J (a project stream opened before the core is relay-registered
+  // is refused NOT_READY). Once dialable, it stays dialable for the rest of
+  // the test, so the final pull below leaves a genuinely fresh advert queued
+  // for callers like `firstProjectStream`.
   // Bounded well under the tightest caller timeout: gate-harness-pairfree's
   // guard test wraps setupTestEnv in a 30s bun:test timeout, and 20 attempts *
   // (2_000ms wait + 200ms gap) was a ~44s worst case — already past that
@@ -802,7 +843,7 @@ async function buildTestEnv(opts: SetupTestEnvOptions, cleanup: CleanupStack): P
     app.drainQueued("agent:projects");
     await app.pullStateSnapshot();
     const advert = await app.waitForAbType("agent:projects", STREAM_ADVERT_WAIT_MS).catch(() => null);
-    if (advert?.projects.some((p) => p.projectId === projectId && p.streamId)) {
+    if (advert?.projects.some((p) => p.projectId === projectId && p.running)) {
       advertised = true;
       break;
     }
@@ -810,13 +851,14 @@ async function buildTestEnv(opts: SetupTestEnvOptions, cleanup: CleanupStack): P
   }
   if (!advertised) {
     throw new Error(
-      `no streamId advertised for project ${projectId} after ${STREAM_ADVERT_ATTEMPTS} attempts ` +
+      `project ${projectId} never advertised running after ${STREAM_ADVERT_ATTEMPTS} attempts ` +
         `(~${STREAM_ADVERT_ATTEMPTS * (STREAM_ADVERT_WAIT_MS + STREAM_ADVERT_GAP_MS)}ms) — the agent's ` +
         `native project stream never became ready`,
     );
   }
   app.drainQueued("agent:projects");
   await app.pullStateSnapshot();
+  const streamId = await app.openProjectStream(projectId, 10_000);
 
   return {
     relay,
@@ -827,6 +869,7 @@ async function buildTestEnv(opts: SetupTestEnvOptions, cleanup: CleanupStack): P
     abDir,
     projectId,
     projectDir: project.dir,
+    streamId,
     agentDeviceId: deviceUuid,
     nativePort,
     // Delegates to AgentHandle.restart() rather than re-spawning here: that
@@ -964,10 +1007,10 @@ async function buildDartTestEnv(
   // catalog) like the production app.
   await app.pullStateSnapshot();
 
-  // v3: bind the firstProject stream every project verb rides. `project:start`
+  // v3: open the firstProject stream every project verb rides. `project:start`
   // is also the promote trigger, so retry it — firstProject's auto-start can
   // still be in flight for a beat after the handshake establishes (same race
-  // setupTestEnv polls the advert for; here bindProject's own `stream-ready`
+  // setupTestEnv polls the advert for; here `openProjectStream`'s own ready
   // wait absorbs it, and an UNKNOWN_PROJECT rejection — the catalog hint not
   // yet recorded — is what needs the outer retry).
   const STREAM_BIND_ATTEMPTS = 8;

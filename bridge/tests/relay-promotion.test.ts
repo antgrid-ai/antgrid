@@ -12,7 +12,7 @@ import { MessageBus } from "../src/message-bus";
 import { createMessage, type AbMessage } from "../src/protocol";
 import { createRelayPromotion, type MachineRelaySession, type LocalStreamAttachment } from "../src/relay-promotion";
 import type { ProjectCoreRemoteDeps } from "../src/project-core";
-import type { StreamHandle } from "../src/stream-mux";
+import type { StreamHandle } from "../src/project-streams";
 
 const ENABLE = createMessage("agent:enableRelay", {
   relayUrl: "https://relay.example.com",
@@ -26,7 +26,7 @@ const ENABLE = createMessage("agent:enableRelay", {
 
 function makeMachineSession(overrides: Partial<MachineRelaySession> = {}): MachineRelaySession {
   return {
-    attachStream: () => ({ streamId: "s1", detach: () => {}, sendTo: async () => "sent" as const }),
+    attachStream: () => ({ detach: () => {}, sendTo: async () => "sent" as const, deliverableTo: () => true }),
     establishedPeers: () => [],
     peerSession: () => null,
     sendPushDeliver: () => {},
@@ -41,7 +41,7 @@ function makeMachineSession(overrides: Partial<MachineRelaySession> = {}): Machi
 function makeDeps(session: MachineRelaySession) {
   const calls = { ensureMachineRelay: 0, attach: 0, detach: 0 };
   let attached: ProjectCoreRemoteDeps | null = null;
-  const handle: StreamHandle = { streamId: "s1", detach: () => {}, sendTo: async () => "sent" as const };
+  const handle: StreamHandle = { detach: () => {}, sendTo: async () => "sent" as const, deliverableTo: () => true };
   return {
     calls,
     ensureMachineRelay: async (_msg: Extract<AbMessage, { type: "agent:enableRelay" }>) => {
@@ -138,7 +138,7 @@ test("a disableRelay landing mid-start cancels the in-flight attach", async () =
   const ctrl = createRelayPromotion({
     bus,
     ensureMachineRelay: async () => { ensureCalls++; return gate; },
-    attach: () => { attachCalls++; return { handle: { streamId: "s1", detach: () => {}, sendTo: async () => "sent" as const }, detach: () => {} }; },
+    attach: () => { attachCalls++; return { handle: { detach: () => {}, sendTo: async () => "sent" as const, deliverableTo: () => true }, detach: () => {} }; },
   });
 
   expect(ctrl.handleInbound(ENABLE)).toBe(true); // start() begins, awaiting ensureMachineRelay
@@ -167,7 +167,7 @@ test("ensureMachineRelay rejecting surfaces relayError(ENABLE_FAILED) and allows
       if (fail) throw new Error("boom: machine socket failed to start");
       return makeMachineSession();
     },
-    attach: () => { attachCalls++; return { handle: { streamId: "s1", detach: () => {}, sendTo: async () => "sent" as const }, detach: () => {} }; },
+    attach: () => { attachCalls++; return { handle: { detach: () => {}, sendTo: async () => "sent" as const, deliverableTo: () => true }, detach: () => {} }; },
   });
 
   ctrl.handleInbound(ENABLE);

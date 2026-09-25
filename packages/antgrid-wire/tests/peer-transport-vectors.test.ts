@@ -11,6 +11,7 @@ import {
   MAX_FRAGMENT_COUNT,
   MAX_REREQUESTS,
   MAX_TRANSFER_BYTES,
+  STREAM_PROJECT_RECORD_MAX_BYTES,
   STREAM_TERMINAL_APP_RECORD_MAX_BYTES,
   STREAM_TERMINAL_BRIDGE_RECORD_MAX_BYTES,
   STREAM_TUNNEL_DATA_MAX_BYTES,
@@ -81,6 +82,14 @@ test("peer transport fixture covers every stream-open kind and refusal code", ()
   expect(
     streamOpen.refusals.map((r: { json: { code: string } }) => r.json.code),
   ).toEqual(StreamRefusedCode.options);
+});
+
+test("peer transport fixture's projectRecords equals STREAM_PROJECT_RECORD_MAX_BYTES (A4)", () => {
+  // The Dart mirror (kStreamProjectRecordMaxBytes) has no import to
+  // cross-check against, only this JSON.
+  expect(fixture.streamOpen.projectRecords).toEqual({
+    maxRecordBytes: STREAM_PROJECT_RECORD_MAX_BYTES,
+  });
 });
 
 test("peer transport fixture's terminalRecords and tunnelRecords equal the wire package's own constants", () => {

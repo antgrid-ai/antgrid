@@ -26,10 +26,14 @@ void main() {
       await session.dispose();
     });
 
-    Future<StreamTransport> bind({
-      required String projectId,
-      required String streamId,
-    }) async {
+    // Binds `projectId` over its own native stream (Stage A A4: a stream's
+    // identity IS its project, so binding is a real `openStream` round trip
+    // — the ready notice on the control plane, then the bridge's
+    // `stream-ready` as the new stream's first record) and then clears the
+    // link's tracking so every count below reflects only what THIS test
+    // drives, exactly as it did when `bind()` was a direct `streamFor`
+    // lookup with no native stream of its own.
+    Future<StreamTransport> bind({required String projectId}) async {
       session = MachineSession(
         relay: link,
         machineDeviceId: 'm1',
@@ -37,24 +41,32 @@ void main() {
       );
       session.start();
       await session.ensureEstablished();
+      final opening = session.openProject(projectId, {
+        'type': 'project:start',
+        'projectId': projectId,
+      });
+      await pumpEventQueue();
       link.inject(
         IncomingPeerFrame(
           channel: 'control',
           payload: Uint8List.fromList(
             utf8.encode(
               jsonEncode({
-                'm': {
-                  'type': 'stream-ready',
-                  'projectId': projectId,
-                  'streamId': streamId,
-                },
+                'm': {'type': 'stream-ready', 'projectId': projectId},
               }),
             ),
           ),
         ),
       );
       await pumpEventQueue();
-      return session.streamFor(streamId);
+      link.createdStreams.last.emit({
+        'type': 'stream-ready',
+        'projectId': projectId,
+      });
+      final transport = await opening;
+      link.opens.clear();
+      link.createdStreams.clear();
+      return transport;
     }
 
     TunnelHttpExchange openExchange(
@@ -75,7 +87,7 @@ void main() {
 
     test('the open head carries bodyLength and checkoutId; the body follows '
         'as a 0x00-tagged record', () async {
-      final transport = await bind(projectId: 'proj-a', streamId: 's-tun');
+      final transport = await bind(projectId: 'proj-a');
       openExchange(transport, body: Uint8List.fromList(utf8.encode('hello')));
 
       expect(link.opens, hasLength(1));
@@ -98,7 +110,7 @@ void main() {
     test(
       'a body over the 262144-byte slice ceiling is split across records',
       () async {
-        final transport = await bind(projectId: 'proj-a', streamId: 's-tun');
+        final transport = await bind(projectId: 'proj-a');
         final big = Uint8List(262144 + 10);
         openExchange(transport, body: big);
         final fakeStream = link.createdStreams.single;
@@ -115,7 +127,7 @@ void main() {
     test(
       'a refusal as the first record fails REFUSED and calls finish()',
       () async {
-        final transport = await bind(projectId: 'proj-a', streamId: 's-tun');
+        final transport = await bind(projectId: 'proj-a');
         final exchange = openExchange(transport);
         final fakeStream = link.createdStreams.single;
         await pumpEventQueue();
@@ -140,7 +152,7 @@ void main() {
       'head, body records and tunnel:http-end complete the exchange; '
       'finish() waits for the peer FIN',
       () async {
-        final transport = await bind(projectId: 'proj-a', streamId: 's-tun');
+        final transport = await bind(projectId: 'proj-a');
         final exchange = openExchange(transport);
         final fakeStream = link.createdStreams.single;
         await pumpEventQueue();
@@ -181,7 +193,7 @@ void main() {
       'the stream ending after a head but before tunnel:http-end fails '
       'TRUNCATED',
       () async {
-        final transport = await bind(projectId: 'proj-a', streamId: 's-tun');
+        final transport = await bind(projectId: 'proj-a');
         final exchange = openExchange(transport);
         final fakeStream = link.createdStreams.single;
         await pumpEventQueue();
@@ -208,7 +220,7 @@ void main() {
     test(
       'a data record before the head is PROTOCOL and resets the stream',
       () async {
-        final transport = await bind(projectId: 'proj-a', streamId: 's-tun');
+        final transport = await bind(projectId: 'proj-a');
         final exchange = openExchange(transport);
         final fakeStream = link.createdStreams.single;
         await pumpEventQueue();
@@ -234,7 +246,7 @@ void main() {
       () async {
         link.onOpen = (_) =>
             _FakeStream()..sendOutcome = PeerSendOutcome.backpressured;
-        final transport = await bind(projectId: 'proj-a', streamId: 's-tun');
+        final transport = await bind(projectId: 'proj-a');
         final exchange = openExchange(transport);
 
         await expectLater(
@@ -250,7 +262,7 @@ void main() {
     );
 
     test('a 0x01-tagged body record decodes with gzip: true', () async {
-      final transport = await bind(projectId: 'proj-a', streamId: 's-tun');
+      final transport = await bind(projectId: 'proj-a');
       final exchange = openExchange(transport);
       final fakeStream = link.createdStreams.single;
       await pumpEventQueue();
@@ -277,7 +289,7 @@ void main() {
       'cancel() after open resets the send half and releases the slot only '
       'once records drain',
       () async {
-        final transport = await bind(projectId: 'proj-a', streamId: 's-tun');
+        final transport = await bind(projectId: 'proj-a');
         final exchange = openExchange(transport);
         final fakeStream = link.createdStreams.single;
         await pumpEventQueue();
@@ -325,7 +337,7 @@ void main() {
       'cancel() while the open is in flight resets once it resolves and '
       'holds the slot until records drain',
       () async {
-        final transport = await bind(projectId: 'proj-a', streamId: 's-tun');
+        final transport = await bind(projectId: 'proj-a');
         final gate = Completer<void>();
         link.openGate = gate;
         final exchange = openExchange(transport);
@@ -367,7 +379,7 @@ void main() {
               )
               ? PeerSendOutcome.backpressured
               : PeerSendOutcome.accepted;
-        final transport = await bind(projectId: 'proj-a', streamId: 's-tun');
+        final transport = await bind(projectId: 'proj-a');
         final bad = openExchange(transport, requestId: 'bad');
         for (var i = 0; i < kStreamMaxTunnelStreamsPerPeer - 1; i++) {
           openExchange(transport, requestId: 'fill-$i');
@@ -401,7 +413,7 @@ void main() {
           }
           return s;
         };
-        final transport = await bind(projectId: 'proj-a', streamId: 's-tun');
+        final transport = await bind(projectId: 'proj-a');
         final bad = openExchange(
           transport,
           requestId: 'bad',
@@ -433,7 +445,7 @@ void main() {
       'the 129th concurrent open waits for a slot and opens once one is '
       'released by a clean end',
       () async {
-        final transport = await bind(projectId: 'proj-a', streamId: 's-tun');
+        final transport = await bind(projectId: 'proj-a');
         for (var i = 0; i < kStreamMaxTunnelStreamsPerPeer; i++) {
           openExchange(transport, requestId: 'r$i');
         }
@@ -459,7 +471,7 @@ void main() {
     );
 
     test('cancel() while waiting for a slot never opens a stream', () async {
-      final transport = await bind(projectId: 'proj-a', streamId: 's-tun');
+      final transport = await bind(projectId: 'proj-a');
       for (var i = 0; i < kStreamMaxTunnelStreamsPerPeer; i++) {
         openExchange(transport, requestId: 'r$i');
       }
@@ -481,7 +493,7 @@ void main() {
     test(
       'disposing the session fails a waiting exchange with TRANSPORT_CLOSED',
       () async {
-        final transport = await bind(projectId: 'proj-a', streamId: 's-tun');
+        final transport = await bind(projectId: 'proj-a');
         for (var i = 0; i < kStreamMaxTunnelStreamsPerPeer; i++) {
           openExchange(transport, requestId: 'r$i');
         }
@@ -516,10 +528,9 @@ void main() {
       await session.dispose();
     });
 
-    Future<StreamTransport> bind({
-      required String projectId,
-      required String streamId,
-    }) async {
+    // See the HTTP group's `bind()` above for why the link's tracking is
+    // cleared before returning.
+    Future<StreamTransport> bind({required String projectId}) async {
       session = MachineSession(
         relay: link,
         machineDeviceId: 'm1',
@@ -527,24 +538,32 @@ void main() {
       );
       session.start();
       await session.ensureEstablished();
+      final opening = session.openProject(projectId, {
+        'type': 'project:start',
+        'projectId': projectId,
+      });
+      await pumpEventQueue();
       link.inject(
         IncomingPeerFrame(
           channel: 'control',
           payload: Uint8List.fromList(
             utf8.encode(
               jsonEncode({
-                'm': {
-                  'type': 'stream-ready',
-                  'projectId': projectId,
-                  'streamId': streamId,
-                },
+                'm': {'type': 'stream-ready', 'projectId': projectId},
               }),
             ),
           ),
         ),
       );
       await pumpEventQueue();
-      return session.streamFor(streamId);
+      link.createdStreams.last.emit({
+        'type': 'stream-ready',
+        'projectId': projectId,
+      });
+      final transport = await opening;
+      link.opens.clear();
+      link.createdStreams.clear();
+      return transport;
     }
 
     TunnelWsChannel openChannel(
@@ -562,7 +581,7 @@ void main() {
     );
 
     test('frames arrive on frames in record order', () async {
-      final transport = await bind(projectId: 'proj-a', streamId: 's-ws');
+      final transport = await bind(projectId: 'proj-a');
       final channel = openChannel(transport);
       final fakeStream = link.createdStreams.single;
       await pumpEventQueue();
@@ -584,7 +603,7 @@ void main() {
       'close() writes tunnel:ws-close after every queued frame, then '
       'finishes',
       () async {
-        final transport = await bind(projectId: 'proj-a', streamId: 's-ws');
+        final transport = await bind(projectId: 'proj-a');
         final channel = openChannel(transport);
         final fakeStream = link.createdStreams.single;
         await pumpEventQueue();
@@ -610,7 +629,7 @@ void main() {
     );
 
     test("the peer's close record surfaces its code/reason in done", () async {
-      final transport = await bind(projectId: 'proj-a', streamId: 's-ws');
+      final transport = await bind(projectId: 'proj-a');
       final channel = openChannel(transport);
       final fakeStream = link.createdStreams.single;
       await pumpEventQueue();
@@ -628,7 +647,7 @@ void main() {
     test(
       'a peer FIN with no close record gives TunnelWsClosedByPeer(null, null)',
       () async {
-        final transport = await bind(projectId: 'proj-a', streamId: 's-ws');
+        final transport = await bind(projectId: 'proj-a');
         final channel = openChannel(transport);
         final fakeStream = link.createdStreams.single;
         await pumpEventQueue();
@@ -647,7 +666,7 @@ void main() {
       'a frame over kStreamTunnelDataMaxBytes resets the stream and its '
       'send resolves false',
       () async {
-        final transport = await bind(projectId: 'proj-a', streamId: 's-ws');
+        final transport = await bind(projectId: 'proj-a');
         final channel = openChannel(transport);
         final fakeStream = link.createdStreams.single;
         await pumpEventQueue();
@@ -666,7 +685,7 @@ void main() {
       'abort() while the open is in flight resets once it resolves and '
       'holds the slot until records drain',
       () async {
-        final transport = await bind(projectId: 'proj-a', streamId: 's-ws');
+        final transport = await bind(projectId: 'proj-a');
         final gate = Completer<void>();
         link.openGate = gate;
         final channel = openChannel(transport);
@@ -701,7 +720,7 @@ void main() {
               open == const TunnelWsStreamOpen(projectId: 'proj-a', wsId: 'bad')
               ? PeerSendOutcome.backpressured
               : PeerSendOutcome.accepted;
-        final transport = await bind(projectId: 'proj-a', streamId: 's-ws');
+        final transport = await bind(projectId: 'proj-a');
         final bad = openChannel(transport, tunnelId: 'bad');
         for (var i = 0; i < kStreamMaxTunnelStreamsPerPeer - 1; i++) {
           openChannel(transport, tunnelId: 'fill-$i');
@@ -732,14 +751,22 @@ void main() {
     test(
       'openTunnelHttp and openTunnelWs both fall back to NOT_SUPPORTED',
       () async {
-        final relay = FakeLiveRelay();
-        final session = await establishSession(relay, handshaker: FakeHandshaker());
+        // Since A4, a project's own transport only ever exists over a
+        // MultiStreamPeerLink (openProject requires one), so the only
+        // reachable non-multi-stream transport left is session.control.
+        final link = _PlainPeerLink();
+        final session = MachineSession(
+          relay: link,
+          machineDeviceId: 'm1',
+          handshaker: FakeHandshaker(),
+        );
+        session.start();
+        await session.ensureEstablished();
         addTearDown(() async {
           await session.dispose();
-          await relay.closeStreams();
         });
 
-        final transport = session.streamFor('s-p');
+        final transport = session.control;
         final exchange = transport.openTunnelHttp(
           requestId: 'r1',
           checkoutId: 'main',
@@ -775,6 +802,35 @@ void main() {
 /// scheduler's drain isn't a fixed number of microtasks away.
 Future<void> pumpEventQueue() =>
     Future<void>.delayed(const Duration(milliseconds: 20));
+
+/// A [PeerLink] that does NOT also implement [MultiStreamPeerLink] —
+/// `FakeLiveRelay` implements both (every native link does), so this stands
+/// in for an older relay to exercise the NOT_SUPPORTED fallback.
+class _PlainPeerLink implements PeerLink {
+  final _messages = StreamController<IncomingPeerFrame>.broadcast();
+  final _states = StreamController<PeerLinkState>.broadcast();
+  final _failures = StreamController<PeerLinkFailure>.broadcast();
+
+  @override
+  bool get isDispatchAllowed => true;
+  @override
+  Stream<IncomingPeerFrame> get messageStream => _messages.stream;
+  @override
+  Stream<PeerLinkState> get payloadStateStream => _states.stream;
+  @override
+  Stream<PeerPath> get pathStream => const Stream.empty();
+  @override
+  Stream<PeerLinkFailure> get failureStream => _failures.stream;
+  @override
+  PeerLinkDiagnostic? get netTap => null;
+
+  @override
+  Future<PeerSendOutcome> sendFrame(String channel, Uint8List payload) async =>
+      PeerSendOutcome.accepted;
+
+  @override
+  Future<void> close() async {}
+}
 
 class _FakeMultiStreamLink implements PeerLink, MultiStreamPeerLink {
   final _messages = StreamController<IncomingPeerFrame>.broadcast();

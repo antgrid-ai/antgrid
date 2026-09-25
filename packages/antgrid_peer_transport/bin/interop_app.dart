@@ -52,16 +52,16 @@ Map<String, dynamic> _message(String type, Map<String, dynamic> fields) => {
 
 void _emit(Map<String, dynamic> value) => stdout.writeln(jsonEncode(value));
 
-/// Buffers one project stream and acknowledges terminal frames, which the
-/// Flutter `TerminalService` owns in the product and no package layer does.
+/// Buffers one project's native stream and acknowledges terminal frames,
+/// which the Flutter `TerminalService` owns in the product and no package
+/// layer does.
 class _Inbox {
-  _Inbox(this._session, this._streamId) {
-    _sub = _session.streamFor(_streamId).messages.listen((event) {
+  _Inbox(this._transport) {
+    _sub = _transport.messages.listen((event) {
       final json = event.json;
       if (json['type'] == 'terminal:frame') {
-        _session
-            .sendOnStream(
-              _streamId,
+        _transport
+            .send(
               _message('terminal:ack', {
                 'terminalId': json['terminalId'],
                 'runId': json['runId'],
@@ -70,7 +70,7 @@ class _Inbox {
                 if (json['checkoutId'] != null)
                   'checkoutId': json['checkoutId'],
               }),
-              'control',
+              channel: 'control',
             )
             .ignore();
       }
@@ -79,8 +79,7 @@ class _Inbox {
     });
   }
 
-  final MachineSession _session;
-  final String _streamId;
+  final StreamTransport _transport;
   late final StreamSubscription<InboundMessage> _sub;
   final _buffered = <Map<String, dynamic>>[];
   final _waiters =
@@ -109,13 +108,15 @@ class _Inbox {
       timeout,
       onTimeout: () {
         _waiters.remove(waiter);
-        throw TimeoutException('No message matched on stream $_streamId');
+        throw TimeoutException(
+          'No message matched on project ${_transport.projectId}',
+        );
       },
     );
   }
 
   Future<void> send(Map<String, dynamic> message) =>
-      _session.sendOnStream(_streamId, message, 'control');
+      _transport.send(message, channel: 'control');
 
   Future<void> close() => _sub.cancel();
 }
@@ -183,18 +184,19 @@ Future<void> main(List<String> args) async {
     }
 
     var (active, live, closed) = await establish();
-    final streamIds = <String, String>{};
     _emit({'check': 'established'});
 
-    // A1 has no stream handlers yet: any non-session open from an established
-    // peer is refused NOT_ALLOWED in-band, which is what proves the new
-    // per-purpose stream path round-trips across the real binding before A2
-    // gives it a handler.
-    final firstProjectId =
-        ((config['projects'] as List).first as Map<String, dynamic>)['id']
+    // The host opened every project but the first one local-only, so none of
+    // those is relay-registered until a `project:start` promotes it (hazard
+    // J): opening its native stream now must be refused NOT_READY in-band,
+    // never parked, which is what proves the per-purpose stream path
+    // round-trips across the real binding before a real bind is attempted.
+    // The first project is already remote, so its open would be admitted.
+    final coldProjectId =
+        ((config['projects'] as List).last as Map<String, dynamic>)['id']
             as String;
     final probeStream = await (active as MultiStreamPeerLink).openStream(
-      ProjectStreamOpen(firstProjectId),
+      ProjectStreamOpen(coldProjectId),
       maxRecordBytes: kStreamOpenMaxBytes,
       maxQueuedBytes: 2 * kStreamOpenMaxBytes,
     );
@@ -219,18 +221,22 @@ Future<void> main(List<String> args) async {
     } finally {
       await probeStream.reset();
     }
+    if (refused.code != StreamRefusedCode.notReady) {
+      throw StateError(
+        'stream-refused probe: expected NOT_READY, got ${refused.code.wireValue}',
+      );
+    }
     _emit({'check': 'stream-refused', 'code': refused.code.wireValue});
 
     for (final raw
         in (config['projects'] as List).cast<Map<String, dynamic>>()) {
       final projectId = raw['id'] as String;
       final name = raw['name'] as String;
-      final streamId = await live.bindProject(
+      final transport = await live.openProject(
         projectId,
         _message('project:start', {'projectId': projectId}),
       );
-      streamIds[projectId] = streamId;
-      final inbox = _Inbox(live, streamId);
+      final inbox = _Inbox(transport);
       inboxes.add(inbox);
       await inbox.send(
         _message('file:read', {'projectId': projectId, 'path': 'proof.txt'}),
@@ -345,13 +351,11 @@ Future<void> main(List<String> args) async {
           in (config['projects'] as List).cast<Map<String, dynamic>>()) {
         final id = raw['id'] as String;
         final name = raw['name'] as String;
-        final streamId = await live.bindProject(
+        final transport = await live.openProject(
           id,
           _message('project:start', {'projectId': id}),
         );
-        if (streamId != streamIds[id])
-          throw StateError('Resume changed host-owned project binding');
-        final inbox = _Inbox(live, streamId);
+        final inbox = _Inbox(transport);
         inboxes.add(inbox);
         await inbox.send(
           _message('file:read', {'projectId': id, 'path': 'proof.txt'}),

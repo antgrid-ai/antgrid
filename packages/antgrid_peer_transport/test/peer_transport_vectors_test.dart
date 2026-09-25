@@ -108,6 +108,8 @@ void main() {
     expect(kStreamMaxTerminalAttachmentsPerPeer, caps['maxTerminalAttachmentsPerPeer']);
     expect(kStreamMaxTunnelStreamsPerPeer, caps['maxTunnelStreamsPerPeer']);
     expect(kStreamMaxPendingOpensPerPeer, caps['maxPendingOpensPerPeer']);
+    final projectRecords = _map(streamOpen['projectRecords']);
+    expect(kStreamProjectRecordMaxBytes, projectRecords['maxRecordBytes']);
     final terminalRecords = _map(streamOpen['terminalRecords']);
     expect(kStreamTerminalAppRecordMaxBytes, terminalRecords['appMaxRecordBytes']);
     expect(kStreamTerminalBridgeRecordMaxBytes, terminalRecords['bridgeMaxRecordBytes']);

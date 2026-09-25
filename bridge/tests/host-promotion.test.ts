@@ -8,7 +8,7 @@ import { computeProjectId } from "../src/project-id";
 import { MessageBus } from "../src/message-bus";
 import type { RemoteHostConnection } from "../src/remote-host-connection";
 import type { NativeHostOptions } from "../src/peer/native-host-connection";
-import type { AttachStreamOpts } from "../src/stream-mux";
+import type { AttachStreamOpts } from "../src/project-streams";
 
 // --- shared fakes (mirror control-plane-start.test.ts) ---------------------
 
@@ -40,8 +40,8 @@ function makeCountingFactory(): { factory: () => Promise<RemoteRuntime>; tokenCa
 }
 
 // A machine-relay-client stub whose promoted stream is admitted the instant it
-// attaches — the relay gate accepted the stream-open. Mirrors StreamMux firing
-// `onAdmitted` on `stream-opened`, which is what flips ProjectCore's
+// attaches — the project stream was opened. Mirrors `ProjectStreamRegistry`
+// firing `onAdmitted` on bind, which is what flips ProjectCore's
 // isRelayRegistered() true.
 function makeAuthenticatingRelayFactory() {
   return (_opts: NativeHostOptions): RemoteHostConnection =>
@@ -55,10 +55,9 @@ function makeAuthenticatingRelayFactory() {
       connect: () => {},
       close: () => {},
       attachStream: (_bus: MessageBus, streamOpts: AttachStreamOpts) => {
-        streamOpts.onAdmitted?.("s1");
-        return { streamId: "s1", detach: () => {} };
+        streamOpts.onAdmitted?.();
+        return { detach: () => {}, sendTo: async () => "sent" as const, deliverableTo: () => true };
       },
-      noteStreamBound: () => {},
       sendPushDeliver: () => {},
     }) as unknown as RemoteHostConnection;
 }

@@ -9,7 +9,8 @@ import { MessageBus } from "../src/message-bus";
 import { ProjectStartMessage, parseMessage } from "../src/protocol";
 import type { RemoteHostConnection } from "../src/remote-host-connection";
 import type { NativeHostOptions } from "../src/peer/native-host-connection";
-import type { AttachStreamOpts } from "../src/stream-mux";
+import type { AttachStreamOpts } from "../src/project-streams";
+import { TestRemoteHostConnection } from "./test-peer-session-owner";
 
 // --- shared fakes (mirror host-control-plane.test.ts) ----------------------
 
@@ -28,8 +29,9 @@ function fakeRuntime(): RemoteRuntime {
 }
 
 // A machine-relay-client stub whose promoted stream is admitted the instant it
-// attaches (mirrors host-promotion.test.ts) — flips isRelayRegistered() true
-// and records the streamId in host.streamIds via remoteDepsFor's wrapper.
+// attaches (mirrors host-promotion.test.ts) — flips isRelayRegistered() true.
+// A4: there is no per-project streamId any more — the project stream itself
+// (admitted by projectId off the open frame) is the binding.
 function makeAuthenticatingRelayFactory() {
   return (_opts: NativeHostOptions): RemoteHostConnection =>
     ({
@@ -42,10 +44,9 @@ function makeAuthenticatingRelayFactory() {
       connect: () => {},
       close: () => {},
       attachStream: (_bus: MessageBus, streamOpts: AttachStreamOpts) => {
-        streamOpts.onAdmitted?.("s1");
-        return { streamId: "s1", detach: () => {} };
+        streamOpts.onAdmitted?.();
+        return { detach: () => {}, sendTo: async () => "sent" as const, deliverableTo: () => true };
       },
-      noteStreamBound: () => {},
       sendPushDeliver: () => {},
     }) as unknown as RemoteHostConnection;
 }
@@ -198,7 +199,7 @@ test("idempotent project:start on an already-promoted, relay-registered core re-
   const first = await h.handleControlPlaneVerb({ type: "project:start", projectId: proj("projX") } as any, bus);
   expect(first.ok).toBe(true);
   await new Promise((r) => setTimeout(r, 20));
-  expect(out.some((m) => m.type === "stream-ready" && m.projectId === proj("projX") && m.streamId === "s1")).toBe(true);
+  expect(out.some((m) => m.type === "stream-ready" && m.projectId === proj("projX"))).toBe(true);
 
   // Reconnect scenario: a SECOND project:start hits the idempotent branch.
   out.length = 0;
@@ -207,7 +208,50 @@ test("idempotent project:start on an already-promoted, relay-registered core re-
   const ready = out.find((m) => m.type === "stream-ready");
   expect(ready).toBeDefined();
   expect(ready.projectId).toBe(proj("projX"));
-  expect(ready.streamId).toBe("s1");
+  expect("streamId" in ready).toBe(false);
+});
+
+test("a project open before project:start is NOT_READY and creates no core; after project:start the bridge publishes stream-ready {projectId}", async () => {
+  // Hazard J end to end: the app's project-stream open must never race ahead
+  // of the bridge actually starting the project. Driven through a real
+  // TestRemoteHostConnection (not the canned stub above) so the open genuinely
+  // reaches the machine's one ProjectStreamRegistry.
+  let remote: TestRemoteHostConnection | null = null;
+  await host?.shutdown();
+  host = createHostPolicyFixture({
+    remote: fakeRemoteConfig(),
+    remoteRuntimeFactory: () => Promise.resolve(fakeRuntime()),
+    remoteHostFactory: (options) => (remote = new TestRemoteHostConnection(options)),
+  });
+  const h = host;
+
+  // Opening a remote-mode project brings the machine's one native connection
+  // up lazily (host-server.ts), which is when remoteHostFactory fires.
+  await openAs(h, "projY", "remote");
+  await h.stop(proj("projY")); // known-but-stopped, same as the other rows here
+  await setMobileAccess(h, true);
+  if (!remote) throw new Error("opening a remote-mode project did not build the machine connection");
+  const machine = remote as TestRemoteHostConnection;
+  machine.establish("phone-a#uuid-1");
+
+  const early = await machine.openProjectStream("phone-a#uuid-1", proj("projY"));
+  expect(early.refusal()?.code).toBe("NOT_READY");
+  expect(h.get(proj("projY"))).toBeNull(); // still no core
+
+  const bus = new MessageBus();
+  bus.setInboundHandler(() => {});
+  const out: any[] = [];
+  bus.subscribe({ deliver: (m) => out.push(m) });
+
+  const started = await h.handleControlPlaneVerb({ type: "project:start", projectId: proj("projY") } as any, bus);
+  expect(started.ok).toBe(true);
+  await new Promise((r) => setTimeout(r, 20));
+  const ready = out.find((m) => m.type === "stream-ready" && m.projectId === proj("projY"));
+  expect(ready).toBeDefined();
+  expect("streamId" in ready).toBe(false);
+
+  const late = await machine.openProjectStream("phone-a#uuid-1", proj("projY"));
+  expect(late.refusal()).toBeUndefined();
 });
 
 test("a rejected verb's control:result carries projectId so the phone can correlate it", async () => {

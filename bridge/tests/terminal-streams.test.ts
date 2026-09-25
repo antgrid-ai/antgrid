@@ -13,7 +13,7 @@ import {
   type TerminalStreamRegistryOptions,
 } from "../src/peer/terminal-streams";
 import { STREAM_TERMINAL_APP_RECORD_MAX_BYTES, STREAM_MAX_TERMINAL_ATTACHMENTS_PER_PEER } from "antgrid-wire";
-import type { TerminalProjectBinding, PeerSessionView } from "../src/stream-mux";
+import type { TerminalProjectBinding, PeerSessionView } from "../src/project-streams";
 import type { StreamRefusal } from "../src/peer/stream-dispatch";
 import { createMessage, type AbMessage } from "../src/protocol";
 import { TERMINAL_PROTOCOL_VERSION } from "../src/terminal-frames/protocol";
@@ -122,13 +122,17 @@ function createFakeTerminalStream() {
 type FakeTerminalStream = ReturnType<typeof createFakeTerminalStream>;
 
 /** Fake `TerminalProjectBinding`: records every dispatch, and can be told to
- *  refuse a peer or to disappear (project detached from under it). */
-function fakeBinding(streamId = "project-stream") {
+ *  refuse a peer, to disappear (project detached from under it), or to lack
+ *  an open project stream for a peer (A4's admission gate). */
+function fakeBinding() {
   const dispatched: Array<{ msg: AbMessage; peerId: string }> = [];
   let refuse: ((peerId: string) => StreamRefusal | null) | null = null;
   let gone = false;
+  // Every peer has an open project stream by default, so a suite testing
+  // OTHER admission steps doesn't also have to wire this one.
+  let hasOpen: ((peerId: string) => boolean) | null = null;
   const binding: TerminalProjectBinding = {
-    streamId,
+    hasOpenStream: (peerId) => (hasOpen ? hasOpen(peerId) : true),
     refusalFor: (peerId) => (refuse ? refuse(peerId) : null),
     dispatch: (msg, peerId) => {
       if (gone) return false;
@@ -141,6 +145,7 @@ function fakeBinding(streamId = "project-stream") {
     binding, dispatched,
     setRefusal: (fn: ((peerId: string) => StreamRefusal | null) | null) => { refuse = fn; },
     setGone: (v: boolean) => { gone = v; },
+    setHasOpenStream: (fn: ((peerId: string) => boolean) | null) => { hasOpen = fn; },
   };
 }
 
@@ -657,5 +662,40 @@ describe("TerminalStreamRegistry (A2)", () => {
     expect(fake.writeAllCalls.length).toBe(1); // only frame 0's slice ever reached the wire
     gate.release();
     expect(await first).toBe("sent");
+  });
+
+  test("open with no open project stream for the peer is refused NOT_ALLOWED; another peer's open stream does not count", async () => {
+    const { registry, cataloged, bindings } = makeRegistry();
+    cataloged.add(PROJECT);
+    const { binding, setHasOpenStream } = fakeBinding();
+    bindings.set(PROJECT, binding);
+    setHasOpenStream((peerId) => peerId === "other-peer");
+
+    const { fake, result } = admit(registry, { peerId: PEER });
+    expect((await refusalOf(result))?.code).toBe("NOT_ALLOWED");
+    expect(fake.readCalls).toEqual([]);
+
+    // The same projectId's project stream is open for a DIFFERENT peer —
+    // that must not satisfy PEER's own admission (A4's single per-peer point).
+    const other = admit(registry, { peerId: "other-peer" });
+    expect(await refusalOf(other.result)).toBeUndefined();
+  });
+
+  test("closing the project stream does not unbind an open terminal stream", async () => {
+    const { registry, cataloged, bindings } = makeRegistry();
+    cataloged.add(PROJECT);
+    const { binding, dispatched, setHasOpenStream } = fakeBinding();
+    bindings.set(PROJECT, binding);
+    const { attachmentId, runId, peerId } = await admitAndBind(registry, binding, dispatched);
+    dispatched.length = 0;
+
+    // The project stream closes: the peer no longer has one open. Admission
+    // is a one-time gate, not a live dependency, so the terminal binding
+    // admitted while it WAS open keeps routing.
+    setHasOpenStream(() => false);
+
+    const frame = { ...createMessage("terminal:frame" as any, {} as any), attachmentId, runId, terminalId: "term1", sequence: 0 } as unknown as AbMessage;
+    expect(await registry.route(peerId, frame)).toBe("sent");
+    expect(registry.attachmentCount(peerId)).toBe(1);
   });
 });

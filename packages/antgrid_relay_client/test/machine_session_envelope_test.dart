@@ -1,8 +1,8 @@
-// MachineSession envelope/fragmentation/stream-demux coverage — the
-// replacement for the deleted relay_transport_test.dart /
-// relay_transport_frag_test.dart suites, now exercised at the MachineSession
-// level (one session multiplexing project streams via `{s, m}` envelopes)
-// instead of the old socket-per-project RelayTransport.
+// MachineSession control-plane envelope/fragmentation coverage. Since Stage A
+// A4 a project's traffic rides its own native QUIC stream as bare AbMessage
+// JSON (see machine_session_project_stream_test.dart) — only the control
+// plane (the session stream) still uses the `{s, m}` envelope, and `s` is
+// always absent on it now that there is no project id left to carry.
 import 'dart:convert';
 
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
@@ -27,24 +27,9 @@ void main() {
   });
 
   group('outbound envelope', () {
-    test(
-      'sendOnStream wraps as a plaintext {s, m} envelope',
-      () async {
-        await session.sendOnStream('proj-1', {'type': 'ping'}, 'control');
-        expect(relay.sent, hasLength(1));
-        final frame = relay.sent.single;
-
-        final plaintext = decodeFromPhone(frame.payload);
-        final json = jsonDecode(plaintext) as Map<String, dynamic>;
-        expect(json['s'], 'proj-1');
-        expect(json['m'], {'type': 'ping'});
-      },
-    );
-
-    test('the control stream ("0") omits `s` entirely', () async {
-      await session.sendOnStream(kControlStreamId, {
-        'type': 'project:list',
-      }, 'control');
+    test('sendOnSession wraps as a plaintext {m} envelope with no `s`', () async {
+      await session.sendOnSession({'type': 'project:list'}, 'control');
+      expect(relay.sent, hasLength(1));
       final plaintext = decodeFromPhone(relay.sent.single.payload);
       final json = jsonDecode(plaintext) as Map<String, dynamic>;
       expect(json.containsKey('s'), isFalse);
@@ -52,15 +37,14 @@ void main() {
     });
 
     test('a message above the fragmentation threshold is split into '
-        'multiple frames, and reassembling them recovers the ENVELOPE '
-        '(streamId `s` survives fragmentation)', () async {
+        'multiple frames, and reassembling them recovers the ENVELOPE', () async {
       final bigContent = List.filled(2000000, 'x').join();
       final message = {
         'type': 'file:content',
         'path': 'a.png',
         'content': bigContent,
       };
-      await session.sendOnStream('proj-1', message, 'control');
+      await session.sendOnSession(message, 'control');
 
       expect(
         relay.sent.length,
@@ -86,91 +70,8 @@ void main() {
 
       expect(joined, hasLength(1));
       final envelope = jsonDecode(joined.single) as Map<String, dynamic>;
-      expect(
-        envelope['s'],
-        'proj-1',
-        reason: 'the streamId must survive fragmentation intact',
-      );
+      expect(envelope.containsKey('s'), isFalse);
       expect(envelope['m'], message);
-    });
-  });
-
-  group('StreamTransport isolation', () {
-    test('two streams on one session never cross-deliver', () async {
-      final s1 = session.streamFor('proj-1');
-      final s2 = session.streamFor('proj-2');
-      expect(identical(s1, s2), isFalse);
-
-      final seen1 = <Map<String, dynamic>>[];
-      final seen2 = <Map<String, dynamic>>[];
-      final sub1 = s1.messages.listen((m) => seen1.add(m.json));
-      final sub2 = s2.messages.listen((m) => seen2.add(m.json));
-
-      relay.inject(
-        IncomingPeerFrame(
-          channel: 'control',
-          payload: encodeFromAgent(
-            jsonEncode({
-              's': 'proj-1',
-              'm': {'type': 'a'},
-            }),
-          ),
-        ),
-      );
-      relay.inject(
-        IncomingPeerFrame(
-          channel: 'control',
-          payload: encodeFromAgent(
-            jsonEncode({
-              's': 'proj-2',
-              'm': {'type': 'b'},
-            }),
-          ),
-        ),
-      );
-
-      await Future<void>.delayed(const Duration(milliseconds: 20));
-
-      expect(seen1.map((j) => j['type']), ['a']);
-      expect(seen2.map((j) => j['type']), ['b']);
-
-      await sub1.cancel();
-      await sub2.cancel();
-    });
-
-    test('a control-plane envelope with `s` absent (or "0") routes to the '
-        'control stream, not a project stream', () async {
-      final control = session.streamFor(kControlStreamId);
-      final seen = <Map<String, dynamic>>[];
-      final sub = control.messages.listen((m) => seen.add(m.json));
-
-      // `s` absent entirely.
-      relay.inject(
-        IncomingPeerFrame(
-          channel: 'control',
-          payload: encodeFromAgent(
-            jsonEncode({
-              'm': {'type': 'agent:projects'},
-            }),
-          ),
-        ),
-      );
-      // `s` explicitly "0".
-      relay.inject(
-        IncomingPeerFrame(
-          channel: 'control',
-          payload: encodeFromAgent(
-            jsonEncode({
-              's': '0',
-              'm': {'type': 'agent:tools'},
-            }),
-          ),
-        ),
-      );
-
-      await Future<void>.delayed(const Duration(milliseconds: 20));
-      expect(seen.map((j) => j['type']), ['agent:projects', 'agent:tools']);
-      await sub.cancel();
     });
   });
 
@@ -178,14 +79,13 @@ void main() {
     'inbound fragment reassembly (replaces relay_transport_frag_test.dart)',
     () {
       test('a fragmented inbound envelope is reassembled and dispatched whole '
-          'to the addressed stream', () async {
-        final stream = session.streamFor('proj-1');
+          'to the control transport', () async {
+        final control = session.control;
         final seen = <Map<String, dynamic>>[];
-        final sub = stream.messages.listen((m) => seen.add(m.json));
+        final sub = control.messages.listen((m) => seen.add(m.json));
 
         final bigContent = List.filled(2000000, 'y').join();
         final envelopeJson = jsonEncode({
-          's': 'proj-1',
           'm': {'type': 'file:content', 'path': 'b.png', 'content': bigContent},
         });
         final fragments = buildFragments(

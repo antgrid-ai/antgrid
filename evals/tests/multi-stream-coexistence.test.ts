@@ -1,13 +1,17 @@
-// E2E v3 multi-STREAM coexistence (one socket, project multiplexing):
-//   ONE phone holds ONE relay socket and ONE sealed session. The machine control
-//   plane plus two project data planes are STREAMS inside that single session
-//   (`{ s, m }` envelopes), not separate sockets. This replaces the v2 "one phone
-//   pubkey, N per-registration sockets via sub-deviceIds" model — sub-deviceIds
-//   and compound `deviceUuid.projectId` registrations are gone.
+// E2E v3 multi-STREAM coexistence (one connection, one QUIC stream per project):
+//   ONE phone holds ONE relay socket and ONE sealed native connection. The
+//   machine control plane rides that connection's session stream; each project
+//   gets its OWN QUIC stream on the SAME connection (Stage A wave A4) — no
+//   separate sockets, and no `{ s, m }` envelope tagging a shared stream. This
+//   replaces the v2 "one phone pubkey, N per-registration sockets via
+//   sub-deviceIds" model — sub-deviceIds and compound `deviceUuid.projectId`
+//   registrations are gone.
 //
-// Asserts: (1) traffic on each project stream comes back tagged with THAT stream's
-// id — the streams are isolated; (2) exactly ONE relay connection exists per side
-// (agent + phone = 2 total) — the whole point of v3 multiplexing.
+// Asserts: (1) traffic on each project stream comes back tagged with THAT
+// stream's handle (`_streamId`, which equals its projectId — D-8) — the
+// streams are isolated; (2) exactly ONE relay connection exists per side
+// (agent + phone = 2 total) — the whole point of multiplexing every project
+// onto one native connection.
 //
 // Known Windows test noise (NOT failures): fs.watch EPERM/EBUSY on teardown.
 import { test, expect } from "bun:test";
@@ -41,9 +45,10 @@ test("one phone socket carries control + two project streams, isolated, on a sin
 
     // Open projB remote so it's in the host catalog, then STOP it so the later
     // project:start exercises the genuine drill-in path (a fresh remote open +
-    // register), not the idempotent already-running branch. Both branches emit
-    // stream-ready — the idempotent one re-publishes it because the re-advert
-    // can be dedup-suppressed for a reconnecting phone.
+    // register), not the idempotent already-running branch. Both branches
+    // publish `stream-ready {projectId}` on the session stream and admit a
+    // fresh project stream — the idempotent one re-publishes it because the
+    // re-advert can be dedup-suppressed for a reconnecting phone.
     expect((await loopbackControl(env.abDir, {
       id: "open-b", type: "project:open", projectId: projB, projectPath: projBdir.dir, mode: "remote",
     })).ok).toBe(true);
@@ -55,8 +60,9 @@ test("one phone socket carries control + two project streams, isolated, on a sin
     // Both projects are reachable on one machine-wide switch (setupTestEnv
     // turned it on) — what still needs retrying is the catalog catching up with
     // the loopback open/stop above.
-    // projA (already running) → streamId from the advert; projB → project:start
-    // opens its stream. Both streams live in the ONE session.
+    // projA (already running) → firstProjectStream opens its stream once the
+    // advert shows it; projB → project:start re-registers it, then its own
+    // stream opens. Both streams live on the ONE native connection.
     // projB was explicitly stopped above, so this project:start takes the
     // FRESH-open path (terminals: startup commands run), not the idempotent
     // republish — 12s per attempt matches drill-in.test.ts's budget for that

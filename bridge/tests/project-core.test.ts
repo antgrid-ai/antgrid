@@ -6,11 +6,12 @@ import { randomUUID } from "node:crypto";
 import { ProjectCore, type ProjectCoreRemoteDeps } from "../src/project-core";
 import { computeProjectId } from "../src/project-id";
 import { MessageBus } from "../src/message-bus";
-import type { AttachStreamOpts, StreamHandle, TerminalStreamHooks } from "../src/stream-mux";
+import type { AttachStreamOpts, StreamHandle, TerminalStreamHooks } from "../src/project-streams";
 import type { ConnState } from "../src/conn-state";
 import { createMessage, type AbMessage } from "../src/protocol";
 import { SessionDirectory } from "../src/session-bus/directory";
 import { TERMINAL_PROTOCOL_VERSION } from "../src/terminal-frames/protocol";
+import type { WorkStatusState } from "../src/work-status";
 
 let cleanup: Array<() => void | Promise<unknown>> = [];
 // LIFO + awaited: cores shut down (stopping their file watchers) before the
@@ -27,9 +28,9 @@ function fakeRemoteDeps(): { deps: ProjectCoreRemoteDeps; calls: Array<{ bus: Me
     attachStream: (bus, opts) => {
       calls.push({ bus, opts });
       const handle: StreamHandle = {
-        streamId: "stream-1",
         detach: () => {},
         sendTo: async () => "sent" as const,
+        deliverableTo: () => true,
       };
       return handle;
     },
@@ -109,7 +110,7 @@ test("promoting a LOCAL core attaches its bus as a stream and reflects the admis
   const handle = core.promote(deps);
 
   expect(calls.length).toBe(1); // attached exactly once, on THIS core's bus
-  calls[0].opts.onAdmitted?.("stream-1");
+  calls[0].opts.onAdmitted?.();
 
   expect(core.isRelayRegistered()).toBe(true);
   await expect(handle.firstRegister).resolves.toBeUndefined();
@@ -208,7 +209,7 @@ test("remote-mode core also binds loopback (connect is non-null) and attaches it
   expect(core.localConnectInfo?.token).toBeTruthy();
   expect(calls.length).toBe(1); // the primary remote stream attached at start()
 
-  calls[0].opts.onAdmitted?.("stream-1");
+  calls[0].opts.onAdmitted?.();
   expect(core.isRelayRegistered()).toBe(true);
 });
 
@@ -388,9 +389,9 @@ test("attachRelayStream wires handle.terminalHooks into the core, and every tear
     attachStream: (bus, opts) => {
       calls.push({ bus, opts });
       const handle: StreamHandle = {
-        streamId: "stream-1",
         detach: () => {},
         sendTo: async () => "sent" as const,
+        deliverableTo: () => true,
         terminalHooks: hooks,
       };
       return handle;
@@ -418,7 +419,7 @@ test("attachRelayStream wires handle.terminalHooks into the core, and every tear
 
   const promoted = core.promote(deps);
   expect(calls.length).toBe(1);
-  calls[0].opts.onAdmitted?.("stream-1");
+  calls[0].opts.onAdmitted?.();
 
   // A promoted LOCAL core's inbound handler is startLocal()'s promotion
   // wrapper; the hooks are keyed by peerId, so the wrapper must pass it on.
@@ -449,4 +450,111 @@ test("attachRelayStream wires handle.terminalHooks into the core, and every tear
   );
   await new Promise((resolve) => setTimeout(resolve, 150));
   expect(settled.some((s) => s.requestId === secondRequestId)).toBe(false);
+});
+
+test("sendToAppSession returns false and sends nothing when deliverableTo(peer) is false", async () => {
+  const folder = mkdtempSync(join(tmpdir(), "antgrid-pc-deliverable-"));
+  cleanup.push(() => rmSync(folder, { recursive: true, force: true }));
+  writeFileSync(join(folder, "antgrid.yaml"), "");
+
+  const sendCalls: Array<{ peerId: string }> = [];
+  let deliverable = false;
+  const deps: ProjectCoreRemoteDeps = {
+    attachStream: (_bus, _opts) => ({
+      detach: () => {},
+      sendTo: async (_msg, _channel, target) => {
+        sendCalls.push({ peerId: (target as { peerId: string }).peerId });
+        return "sent" as const;
+      },
+      deliverableTo: () => deliverable,
+    }),
+    establishedPeers: () => [],
+    peerSession: () => null,
+    machineDeviceId: () => "machine-uuid",
+    sendPushDeliver: () => {},
+  };
+
+  const core = new ProjectCore({
+    folder,
+    mode: "remote",
+    identity: {
+      deviceId: randomUUID(), deviceName: "d", createdAt: new Date().toISOString(),
+      ed25519PublicKey: "AAAA", ed25519PrivateKey: "AAAA",
+    },
+    remote: deps,
+  });
+  cleanup.push(() => core.shutdown());
+  await core.start();
+
+  const msg = createMessage("terminal:display:status", {
+    terminalId: "t", code: "ACK_TIMEOUT", message: "Reconnect",
+  }) as AbMessage;
+
+  // Not deliverable: the strongest fact available synchronously says the
+  // session isn't live, so no queue is spent on a frame the writer would drop.
+  expect(core.sendToAppSession("peer-x", msg)).toBe(false);
+  expect(sendCalls).toEqual([]);
+
+  // Deliverable: the same call now reaches the stream's sendTo.
+  deliverable = true;
+  expect(core.sendToAppSession("peer-x", msg)).toBe(true);
+  expect(sendCalls).toEqual([{ peerId: "peer-x" }]);
+});
+
+test("onPeerStreamClosed(peer) clears that peer's focus claim", async () => {
+  // A device that closed its project stream stops vouching for whatever it had
+  // on screen — same effect as clientGone, just triggered by the stream rather
+  // than the whole peer session ending (§3.9).
+  const folder = mkdtempSync(join(tmpdir(), "antgrid-pc-streamclosed-"));
+  cleanup.push(() => rmSync(folder, { recursive: true, force: true }));
+  writeFileSync(join(folder, "antgrid.yaml"), "");
+
+  const core = new ProjectCore({
+    folder,
+    mode: "local",
+    identity: { deviceId: randomUUID(), deviceName: "local", createdAt: new Date().toISOString() },
+  });
+  cleanup.push(() => core.shutdown());
+  await core.start();
+  const { deps, calls } = fakeRemoteDeps();
+  core.promote(deps);
+  const opts = calls[0].opts;
+
+  core.noteSessionFocus("session-1", "phone-1");
+  const work = () => (core as unknown as { _work: WorkStatusState })._work;
+  expect(work().focusedSessions.get("phone-1")).toBe("session-1");
+
+  opts.onPeerStreamClosed?.("phone-1");
+  expect(work().focusedSessions.get("phone-1")).toBeUndefined();
+});
+
+test("tunnel aborts follow the peer's session: another phone coming online aborts nothing, and a session going aborts only its own runs", async () => {
+  const folder = mkdtempSync(join(tmpdir(), "antgrid-pc-tunnelabort-"));
+  cleanup.push(() => rmSync(folder, { recursive: true, force: true }));
+  writeFileSync(join(folder, "antgrid.yaml"), "");
+
+  const core = new ProjectCore({
+    folder,
+    mode: "local",
+    identity: { deviceId: randomUUID(), deviceName: "local", createdAt: new Date().toISOString() },
+  });
+  cleanup.push(() => core.shutdown());
+  await core.start();
+  const { deps, calls } = fakeRemoteDeps();
+  core.promote(deps);
+  const opts = calls[0].opts;
+
+  const agent = (core as unknown as { core: { abortTunnelStreams(peerId: string): void } }).core;
+  const aborted: string[] = [];
+  agent.abortTunnelStreams = (peerId) => { aborted.push(peerId); };
+
+  opts.onPeerOnline?.();
+  opts.onPeerOnline?.();
+  expect(aborted).toEqual([]);
+
+  opts.onPeerSessionGone?.("phone-a");
+  expect(aborted).toEqual(["phone-a"]);
+
+  opts.onPeerOffline?.();
+  expect(aborted).toEqual(["phone-a"]);
 });

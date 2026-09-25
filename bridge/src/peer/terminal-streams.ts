@@ -7,9 +7,9 @@
  * `terminal:start`, ...) stays on the project stream, unchanged.
  *
  * This registry is plugged into `PeerStreamAcceptor` as the `terminal`
- * handler and into `StreamMux`/`StreamMuxTransport` as `routeTerminal` +
+ * handler and into `ProjectStreamRegistry` as `routeTerminal` +
  * `terminalHooks`. It never opens or promotes a core: `projectBinding` is a
- * lookup over whatever the mux already has attached.
+ * lookup over whatever the registry already has attached.
  */
 
 import { z } from "zod";
@@ -33,7 +33,7 @@ import type {
   StreamHandler,
   StreamRefusal as DispatchStreamRefusal,
 } from "./stream-dispatch";
-import type { PeerSessionView, TerminalProjectBinding } from "../stream-mux";
+import type { PeerSessionView, TerminalProjectBinding } from "../project-streams";
 
 /** One viewer window (`TERMINAL_VIEWER_MAX_BYTES`) plus four history pages
  *  plus notices. Exceeding it resets only this stream (D3) — the app reopens
@@ -66,7 +66,7 @@ const textEncoder = new TextEncoder();
 export interface TerminalStreamRegistryOptions {
   /** host-server `seenProjects.has`. Absent => every open is refused NOT_ALLOWED (fail closed). */
   projectCataloged?: (projectId: string) => boolean;
-  /** `StreamMux.projectBinding`. Lookup only: never opens or promotes a core. */
+  /** `ProjectStreamRegistry.projectBinding`. Lookup only: never opens or promotes a core. */
   projectBinding: (projectId: string) => TerminalProjectBinding | null;
   peerSession: (peerId: string) => PeerSessionView | null;
   /** Retires the whole connection. Only ever called with "unauthorized" (writer) or
@@ -140,6 +140,13 @@ export class TerminalStreamRegistry {
     const projectBinding = this.opts.projectBinding(projectId);
     if (projectBinding === null) {
       return { code: "NOT_READY", message: "project is not attached" };
+    }
+    // A4: the project stream is the single per-peer admission point for a
+    // projectId — this is what keeps root CLAUDE.md's "seenProjects +
+    // isSafeProjectId are the only bound" true. Closing the project stream
+    // does not unbind an already-open terminal stream.
+    if (!projectBinding.hasOpenStream(peerId)) {
+      return { code: "NOT_ALLOWED", message: "open the project stream first" };
     }
     const refusal = projectBinding.refusalFor(peerId);
     if (refusal) {
@@ -308,9 +315,10 @@ export class TerminalStreamRegistry {
   }
 
   /** Routes one outbound terminal message onto its bound stream, called from
-   *  the mux subscriber after its own send gates. `undefined` means no stream
-   *  is bound for this (peerId, message) and the caller falls back to the
-   *  session path — including history for an attachment already unbound. */
+   *  `ProjectStreamRegistry`'s outbound subscriber (`routeTerminal`) after its
+   *  own send gates. `undefined` means no stream is bound for this
+   *  (peerId, message) and the caller falls back to the project-stream path —
+   *  including history for an attachment already unbound. */
   route(peerId: string, msg: AbMessage, signal?: AbortSignal): Promise<StreamSendOutcome> | undefined {
     if (!TERMINAL_STREAM_OUTBOUND_TYPES.has(msg.type)) return undefined;
     switch (msg.type) {
@@ -387,9 +395,9 @@ export class TerminalStreamRegistry {
     }
   }
 
-  /** The project's last live mux entry detached: its bus is gone, so every
-   *  bound stream is aborted with no synthesized unsubscribe (there is
-   *  nothing left to dispatch one to). */
+  /** The project's last live `ProjectStreamRegistry` entry detached: its bus is
+   *  gone, so every bound stream is aborted with no synthesized unsubscribe
+   *  (there is nothing left to dispatch one to). */
   projectDetached(projectId: string): void {
     for (const set of this.peerBindings.values()) {
       for (const binding of [...set]) {

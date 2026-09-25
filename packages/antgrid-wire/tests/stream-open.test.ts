@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  MAX_FRAME_PAYLOAD,
   MAX_TRANSFER_BYTES,
   PEER_MAX_RECORD_BYTES,
   ProjectStreamOpen,
@@ -10,6 +11,7 @@ import {
   STREAM_MAX_TUNNEL_STREAMS_PER_PEER,
   STREAM_OPEN_MAX_BYTES,
   STREAM_OPEN_MAX_ID_LENGTH,
+  STREAM_PROJECT_RECORD_MAX_BYTES,
   STREAM_TERMINAL_APP_RECORD_MAX_BYTES,
   STREAM_TERMINAL_BRIDGE_RECORD_MAX_BYTES,
   STREAM_TUNNEL_DATA_MAX_BYTES,
@@ -215,6 +217,13 @@ describe("encodeTunnelDataRecord / decodeTunnelRecord", () => {
       encodeTunnelDataRecord(TUNNEL_RECORD_TAG_BODY, new Uint8Array(STREAM_TUNNEL_DATA_MAX_BYTES)),
     ).not.toThrow();
   });
+});
+
+test("STREAM_PROJECT_RECORD_MAX_BYTES is MAX_FRAME_PAYLOAD by name only (A4)", () => {
+  // A project-stream record carries the same bare AbMessage JSON the session
+  // path fragmented at this threshold, so the two caps must never drift apart.
+  expect(STREAM_PROJECT_RECORD_MAX_BYTES).toBe(MAX_FRAME_PAYLOAD);
+  expect(STREAM_PROJECT_RECORD_MAX_BYTES).toBe(1_500_000);
 });
 
 test("D7 cap constants hold the adopted owner values (docs/iroh-reduction/ledger.md)", () => {

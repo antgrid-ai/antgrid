@@ -15,7 +15,7 @@ import 'support/fake_live_relay.dart';
 
 void main() {
   group('no app traffic before the first handshake establishes', () {
-    test('sendOnStream is a silent no-op before the hello confirms', () async {
+    test('sendOnSession is a silent no-op before the hello confirms', () async {
       final relay = FakeLiveRelay(
         initial: RelayConnectionState.authenticated,
       ); // NOT yet established
@@ -29,7 +29,7 @@ void main() {
       // start() never handshakes — the supervisor calls ensureEstablished().
       expect(handshaker.performCalls, 0);
 
-      await session.sendOnStream('proj-1', {'type': 'ping'}, 'control');
+      await session.sendOnSession({'type': 'ping'}, 'control');
       expect(
         relay.sent,
         isEmpty,
@@ -58,7 +58,7 @@ void main() {
       // Handshake genuinely in flight (the 500ms attempt has not confirmed).
       final establishing = session.ensureEstablished();
 
-      final control = session.streamFor(kControlStreamId);
+      final control = session.control;
       final seen = <Map<String, dynamic>>[];
       final sub = control.messages.listen((m) => seen.add(m.json));
 
@@ -131,9 +131,10 @@ void main() {
         machineDeviceId: 'm1',
         channelWindowBytes: 64,
       );
-      final pending = session
-          .streamFor('project')
-          .request('config:read', timeout: const Duration(seconds: 30));
+      final pending = session.control.request(
+        'config:read',
+        timeout: const Duration(seconds: 30),
+      );
       final failed = expectLater(
         pending,
         throwsA(
@@ -141,7 +142,7 @@ void main() {
         ),
       );
       await Future<void>.delayed(const Duration(milliseconds: 10));
-      final queued = session.sendOnStream('project', {
+      final queued = session.sendOnSession({
         'type': 'terminal:input',
         'data': 'must-not-replay',
       }, 'control');
@@ -170,7 +171,7 @@ void main() {
       session.start();
       await session.ensureEstablished();
 
-      final control = session.streamFor(kControlStreamId);
+      final control = session.control;
       // In-flight RPC: sent, now awaiting a reply that will never come because
       // the socket drops. Give it a long timeout so a fail-SLOW implementation
       // would visibly hang past this test's patience.

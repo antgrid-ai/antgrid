@@ -48,9 +48,10 @@ final class _CleanupStack {
 /// JSON-line command surface the TS eval harness drives (`DartAppClient`).
 ///
 /// Central control and native payload setup have independent lifetimes.
-/// [MachineSession] owns the E2E session, sealed `{s, m}` stream demux,
-/// fragment reassembly and liveness. This handler only translates stdin JSON
-/// actions into the production client object graph.
+/// [MachineSession] owns the E2E session, control-plane fragment reassembly
+/// and liveness, and (Stage A A4) opens each project its own native QUIC
+/// stream on demand. This handler only translates stdin JSON actions into the
+/// production client object graph.
 class _MemoryEndpointKeys implements EndpointKeyStore {
   final Map<String, Uint8List> _values = {};
 
@@ -94,11 +95,14 @@ class CommandHandler {
   AppSessionHandshaker? _handshaker;
 
   StreamSubscription<AppState>? _stateSub;
-  StreamSubscription<({String projectId, String streamId})>? _streamReadySub;
+  StreamSubscription<ProjectStreamEvent>? _streamReadySub;
 
-  /// One subscription per attached [StreamTransport], keyed by streamId
-  /// (`"0"` = the machine control plane). Every inbound frame is republished
-  /// as an `antgrid-message` event tagged with the stream it arrived on.
+  /// One subscription per attached [StreamTransport], keyed by HANDLE
+  /// (`kControlStreamId` = the machine control plane, else a bare projectId —
+  /// since Stage A A4 a project's identity IS its own native stream, so there
+  /// is no separate bridge-issued streamId left to key by). Every inbound
+  /// frame is republished as an `antgrid-message` event tagged with the
+  /// handle it arrived on.
   final Map<String, StreamSubscription<InboundMessage>> _streamSubs = {};
 
   /// Open terminal attachments (`terminal-attach`), keyed by the caller's own
@@ -458,11 +462,14 @@ class CommandHandler {
           _createAbMessage('project:start', {'projectId': projectId}),
     );
     session.start();
-    _streamReadySub = session.streamReadyEvents.listen(
+    // `open:false` covers a stream ending too, but nothing here has a
+    // 'stream-unbound'-style waiter left to feed a distinct event for it — a
+    // scenario that cares can watch `stream-ended` fire instead.
+    _streamReadySub = session.projectStreamEvents.listen(
       (e) => _emit({
-        'event': 'stream-ready',
+        'event': e.open ? 'stream-ready' : 'stream-ended',
         'projectId': e.projectId,
-        'streamId': e.streamId,
+        'streamId': e.projectId,
       }),
     );
 
@@ -479,13 +486,13 @@ class CommandHandler {
     // Attach the control plane so machine-scoped frames (agent:projects,
     // stream-ready, host verbs) are observable; project frames get their own
     // transport per `project-start`.
-    _attachStream(kControlStreamId);
+    _attachStream(kControlStreamId, session.control);
     _emit({'event': 'handshake-complete'});
   }
 
-  /// Drill into a project: `project:start` on the control plane, then await the
-  /// agent's `stream-ready`. Resolves at 0 RTT when the advert
-  /// already carried the stream.
+  /// Drill into a project: opens its own native QUIC stream, sending
+  /// `project:start` on the control plane first unless the agent already
+  /// advertised it ready. Resolves at 0 RTT in that case.
   Future<void> _handleProjectStart(Map<String, dynamic> cmd) async {
     final session = _session;
     final projectId = cmd['projectId'] as String?;
@@ -499,23 +506,29 @@ class CommandHandler {
       return;
     }
     try {
-      final streamId = await session.bindProject(
+      final transport = await session.openProject(
         projectId,
         _createAbMessage('project:start', {'projectId': projectId}),
       );
-      _attachStream(streamId);
+      _attachStream(projectId, transport);
       _emit({
         'event': 'project-started',
         'projectId': projectId,
-        'streamId': streamId,
+        // A project's identity IS its own stream now — the handle is just
+        // its projectId, kept under the old key so scenario fixtures that
+        // read `streamId` to address later commands still work.
+        'streamId': projectId,
       });
     } catch (e) {
       _emit({'event': 'error', 'message': 'project-start failed: $e'});
     }
   }
 
-  /// Send an AbMessage sealed inside a `{s, m}` envelope. `streamId` omitted =
-  /// the machine control plane (`s` absent).
+  /// Send a plain `AbMessage`. `streamId` omitted or `kControlStreamId`
+  /// addresses the machine control plane (`session.sendOnSession`); any other
+  /// value is a projectId whose stream must already be open
+  /// (`project-start` first) — since Stage A A4 a project's traffic rides its
+  /// own native QUIC stream, not a `{s, m}` envelope on the session socket.
   Future<void> _handleSendEncrypted(Map<String, dynamic> cmd) async {
     final session = _session;
     final data = cmd['data'] as Map<String, dynamic>?;
@@ -528,11 +541,20 @@ class CommandHandler {
       });
       return;
     }
-    await session.sendOnStream(
-      cmd['streamId'] as String? ?? kControlStreamId,
-      data,
-      'control',
-    );
+    final handle = cmd['streamId'] as String? ?? kControlStreamId;
+    if (handle == kControlStreamId) {
+      await session.sendOnSession(data, 'control');
+      return;
+    }
+    final transport = session.projectTransport(handle);
+    if (transport == null) {
+      _emit({
+        'event': 'error',
+        'message': 'send-encrypted: project $handle has no open stream',
+      });
+      return;
+    }
+    await transport.send(data, channel: 'control');
   }
 
   /// Pull-then-replay durable state — mirrors what a `ProjectSession` does on
@@ -559,16 +581,25 @@ class CommandHandler {
       });
       return;
     }
-    final streamId = cmd['streamId'] as String? ?? kControlStreamId;
-    _attachStream(streamId);
-    final transport = session.streamFor(streamId);
+    final handle = cmd['streamId'] as String? ?? kControlStreamId;
+    final transport = handle == kControlStreamId
+        ? session.control
+        : session.projectTransport(handle);
+    if (transport == null) {
+      _emit({
+        'event': 'error',
+        'message': 'snapshot: project $handle has no open stream',
+      });
+      return;
+    }
+    _attachStream(handle, transport);
     await transport.refreshSnapshot();
     // The control plane's bus never caches a tree; asking would spend a round
     // trip on an empty answer.
-    if (streamId != kControlStreamId) {
-      await _pullHeavyFrames(transport, streamId);
+    if (handle != kControlStreamId) {
+      await _pullHeavyFrames(transport, handle);
     }
-    _emit({'event': 'snapshot-complete', 'streamId': streamId});
+    _emit({'event': 'snapshot-complete', 'streamId': handle});
   }
 
   /// Frames the production snapshot pull leaves to the app's hydrators. Kept
@@ -627,13 +658,23 @@ class CommandHandler {
       return;
     }
     final checkoutId = cmd['checkoutId'] as String? ?? 'main';
+    final transport = streamId == kControlStreamId
+        ? session.control
+        : session.projectTransport(streamId);
+    if (transport == null) {
+      _emit({
+        'event': 'error',
+        'message': 'terminal-attach: project $streamId has no open stream',
+      });
+      return;
+    }
     final subscribe = _createAbMessage('terminal:subscribe', {
       'terminalId': terminalId,
       'version': version,
       'requestId': requestId,
       'checkoutId': checkoutId,
     });
-    final handle = session.streamFor(streamId).openTerminalAttachment(
+    final handle = transport.openTerminalAttachment(
       requestId: requestId,
       checkoutId: checkoutId,
       subscribe: subscribe,
@@ -781,16 +822,16 @@ class CommandHandler {
     }
   }
 
-  /// Republish every frame the session demuxes to [streamId]. Idempotent: the
-  /// transport is created on first use and reused after (a second subscription
-  /// would double-emit, since `messages` also replays the snapshot cache).
-  void _attachStream(String streamId) {
-    if (_streamSubs.containsKey(streamId)) return;
-    final transport = _session!.streamFor(streamId);
-    _streamSubs[streamId] = transport.messages.listen((msg) {
+  /// Republish every frame [transport] demuxes, tagged with its [handle].
+  /// Idempotent: a second call for a handle already attached is a no-op (a
+  /// second subscription would double-emit, since `messages` also replays the
+  /// snapshot cache).
+  void _attachStream(String handle, StreamTransport transport) {
+    if (_streamSubs.containsKey(handle)) return;
+    _streamSubs[handle] = transport.messages.listen((msg) {
       _emit({
         'event': 'antgrid-message',
-        'streamId': streamId,
+        'streamId': handle,
         'channel': msg.channel,
         'data': msg.json,
       });

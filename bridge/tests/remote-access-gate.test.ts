@@ -8,7 +8,7 @@ import { MessageBus } from "../src/message-bus";
 import { createMessage, type AbMessage } from "../src/protocol";
 import { TestPeerSessionOwner } from "./test-peer-session-owner";
 import { createRelayPromotion, type MachineRelaySession } from "../src/relay-promotion";
-import type { PeerSessionView } from "../src/stream-mux";
+import type { PeerSessionView } from "../src/project-streams";
 
 /** One established app session, as the relay transport would report it. */
 function session(peerPubkey: string, peerId = "app-dev#machine-dev"): PeerSessionView {
@@ -329,7 +329,7 @@ test("promotion wires (and clears) the gate's session provider", async () => {
   // wired provider â€” mirrors what HostServer.ensureMachineRelay() returns.
   const promoted = session("promoted-phone-pk", "promoted-phone#machine-dev");
   const machineSession: MachineRelaySession = {
-    attachStream: () => ({ streamId: "s1", detach: () => {}, sendTo: async () => "sent" as const }),
+    attachStream: () => ({ detach: () => {}, sendTo: async () => "sent" as const, deliverableTo: () => true }),
     establishedPeers: () => [promoted],
     peerSession: (peerId) => (peerId === promoted.peerId ? promoted : null),
     sendPushDeliver: () => {},
@@ -344,7 +344,7 @@ test("promotion wires (and clears) the gate's session provider", async () => {
     attach: (remote) => {
       setPeerSessionProvider((peerId) => remote.peerSession(peerId));
       return {
-        handle: { streamId: "s1", detach: () => {}, sendTo: async () => "sent" as const },
+        handle: { detach: () => {}, sendTo: async () => "sent" as const, deliverableTo: () => true },
         detach: () => { setPeerSessionProvider(null); },
       };
     },
@@ -432,8 +432,9 @@ async function initRepo(folder: string): Promise<void> {
  *  combined with (not replaced by) this one, and a run aborted that way must
  *  `fail()` its exchange: the app is still attached and would otherwise wait
  *  on a stream that neither ends nor resets. */
-function fakeExchange(calls: string[]) {
+function fakeExchange(calls: string[], peerId = "app-dev#machine-dev") {
   return {
+    peerId,
     signal: new AbortController().signal,
     head: async () => { calls.push("head"); return "sent" as const; },
     body: async () => { calls.push("body"); return "sent" as const; },
@@ -483,7 +484,7 @@ test("abortTunnelStreams aborts the core's in-flight tunnel exchange: the upstre
     while (!calls.includes("head") && Date.now() < headBy) await new Promise((r) => setTimeout(r, 15));
     expect(calls).toContain("head");
 
-    core.abortTunnelStreams();
+    core.abortTunnelStreams("app-dev#machine-dev");
     await run;
 
     const cancelledBy = Date.now() + 2000;
@@ -571,7 +572,7 @@ test("abortTunnelStreams reaches a checkout runtime's manager, not only main", a
     expect(mainCalls).toContain("head");
     expect(checkoutCalls).toContain("head");
 
-    core.abortTunnelStreams();
+    core.abortTunnelStreams("app-dev#machine-dev");
     await Promise.all([mainRun, checkoutRun]);
 
     const cancelledBy = Date.now() + 5000;

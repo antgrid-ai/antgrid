@@ -642,10 +642,6 @@ export class HostServer {
   // Whether an `invalid_client` verdict may kill the process. Disarmed for the
   // duration of the boot-time control-plane start only — see start().
   private fatalRevokeArmed = true;
-  // projectId → the streamId its host-local native project stream was allocated. Read by
-  // buildProjectsAdvertisement (per-project streamId) and stream-ready. Populated
-  // when a core attaches (remoteDepsFor's wrapper), cleared on detach.
-  private readonly streamIds = new Map<string, string>();
 
   constructor(private readonly opts: HostServerOptions) {
     // Watch the backing file so an external edit (e.g. `antgrid phones remove`)
@@ -966,7 +962,7 @@ export class HostServer {
     if (!this.controlPlaneRelay) await this.startRemoteControlPlane();
     const client = this.controlPlaneRelay!;
     return {
-      attachStream: (bus, opts) => client.attachStream(bus, { ...opts, streamId: randomBytes(8).toString("hex") }),
+      attachStream: (bus, opts) => client.attachStream(bus, opts),
       establishedPeers: () => client.establishedPeers(),
       peerSession: (peerId) => client.peerSession(peerId),
       sendPushDeliver: (m) => client.sendPushDeliver(m),
@@ -1014,13 +1010,10 @@ export class HostServer {
         const peerCanRoute = this.controlPlaneRelay?.anySessionSupportsCheckoutRouting() === true;
         const dialable = (entry?.core.isRelayRegistered() ?? false)
           && (!needsCheckoutRouting || peerCanRoute);
-        // A reconnecting phone binds its ProjectSession to this streamId without a
-        // fresh project:start. Only surfaced for a dialable stream.
-        const streamId = dialable ? this.streamIds.get(id) : undefined;
         // Live work status + running-session count for warm cores only. Cold
         // projects omit both (their agent PTY isn't alive → nothing "working");
         // the app falls back to `running` for those, reading them as done/offline.
-        return { projectId: id, label: seen?.label, path: seen?.path, running: dialable, status: entry?.core.workStatus, runningSessions: entry?.core.workRunningCount, sessionStatuses: entry?.core.sessionWorkStatuses, lastActiveAt: seen?.lastActiveAt, streamId };
+        return { projectId: id, label: seen?.label, path: seen?.path, running: dialable, status: entry?.core.workStatus, runningSessions: entry?.core.workRunningCount, sessionStatuses: entry?.core.sessionWorkStatuses, lastActiveAt: seen?.lastActiveAt };
       });
   }
 
@@ -1143,7 +1136,7 @@ export class HostServer {
         this.sendProjectsAdvertisement(bus);
         void this.sendToolsAdvertisement(bus)
           .then(() => dispatchRpc(bus, msg))
-          .then((res) => bus.publish(res, channel))
+          .then((res) => this.answerAsker(res, channel, bus, peerId))
           .catch((err) => log.warn("state.snapshot discovery failed: %s", err));
         return;
       }
@@ -1188,7 +1181,7 @@ export class HostServer {
           .catch((err) => log.warn("git.checkout handler threw: %s", err));
         return;
       }
-      void dispatchRpc(bus, msg).then((res) => bus.publish(res, channel));
+      void dispatchRpc(bus, msg).then((res) => this.answerAsker(res, channel, bus, peerId));
       return;
     }
     // Dispatch the verb (Task 4.4) and feed its FAILURE back to the phone as a
@@ -1198,8 +1191,9 @@ export class HostServer {
     void this.handleControlPlaneVerb(msg, bus, peerId)
       .then((res) => {
         if (!res.ok) {
-          // projectId lets the phone fail the exact pending bind (MachineSession
-          // keys its stream-ready waiters by projectId) instead of guessing.
+          // projectId lets the phone fail the exact pending project open
+          // (MachineSession keys its pending project open by projectId)
+          // instead of guessing.
           const projectId = "projectId" in msg && typeof msg.projectId === "string" ? msg.projectId : undefined;
           bus.publish(
             createMessage("control:result", { ok: false, verb: msg.type, projectId, error: res.error }),
@@ -1772,17 +1766,15 @@ export class HostServer {
         }
       }
       // else: already remote OR already promoted → idempotent. The phone's
-      // project:start IS the "what stream do I bind?" question, and the re-advert
-      // alone can't answer it — the bus's payload dedup legally suppresses a
-      // byte-identical re-advert to a reconnecting phone. stream-ready is
-      // dedup-immune (not in REPLAY_TYPES), so publish the binding whenever the
-      // slot is actually relay-admitted (same dialable gate as the advert).
+      // project:start IS the "may I open this project's stream?" question, and
+      // the re-advert alone can't answer it — the bus's payload dedup legally
+      // suppresses a byte-identical re-advert to a reconnecting phone.
+      // stream-ready is dedup-immune (not in REPLAY_TYPES), so publish it
+      // whenever the slot is actually relay-admitted (same dialable gate as the
+      // advert) — it is the ready notice hazard-J gates the app's project-stream
+      // open on, not a binding handoff.
       if (this.cores.get(projectId)?.core.isRelayRegistered()) {
-        const streamId = this.streamIds.get(projectId);
-        if (streamId) {
-          this.controlPlaneRelay?.noteStreamBound(streamId);
-          bus.publish(createMessage("stream-ready", { projectId, streamId }), "control");
-        }
+        bus.publish(createMessage("stream-ready", { projectId }), "control");
       }
       // Re-advertise so the phone re-reads the current dialable state
       // (running:true only if the slot is actually relay-admitted —
@@ -1802,11 +1794,7 @@ export class HostServer {
   ): void {
     void firstRegister
       .then(() => {
-        const streamId = this.streamIds.get(projectId);
-        if (streamId) {
-          this.controlPlaneRelay?.noteStreamBound(streamId);
-          bus.publish(createMessage("stream-ready", { projectId, streamId }), "control");
-        }
+        bus.publish(createMessage("stream-ready", { projectId }), "control");
         this.sendProjectsAdvertisement(bus);
       })
       .catch((e) => log.warn("reportFirstRegister threw for %s: %s", projectId, e));
@@ -2688,26 +2676,15 @@ export class HostServer {
   }
 
   /** Stream-attach surface for a project core: it attaches its bus to the ONE
-   *  native host connection rather than owning a peer connection. The wrapper
-   *  records the allocated streamId under `projectId` (for the advertisement +
-   *  stream-ready) and clears it on detach. */
+   *  native host connection rather than owning a peer connection. `projectId`
+   *  is carried in `opts` (the project stream open frame names it, not a
+   *  host-allocated id), so the wrapper needs no per-project bookkeeping of its
+   *  own — it passes straight through to `ProjectStreamRegistry.attach`. */
   private remoteDepsFor(projectId: string): ProjectCoreRemoteDeps {
     const client = this.controlPlaneRelay;
     if (!client) throw new Error("HostServer: native remote connection not started (call startRemoteControlPlane first)");
     return {
-      attachStream: (bus, opts) => {
-        const handle = client.attachStream(bus, { ...opts, streamId: randomBytes(8).toString("hex") });
-        this.streamIds.set(projectId, handle.streamId);
-        return {
-          streamId: handle.streamId,
-          sendTo: (msg, channel, target) => handle.sendTo(msg, channel, target),
-          terminalHooks: handle.terminalHooks,
-          detach: () => {
-            if (this.streamIds.get(projectId) === handle.streamId) this.streamIds.delete(projectId);
-            handle.detach();
-          },
-        };
-      },
+      attachStream: (bus, opts) => client.attachStream(bus, opts),
       establishedPeers: () => client.establishedPeers(),
       peerSession: (peerId) => client.peerSession(peerId),
       // client.deviceId, NOT the one from identityFor(): a local core is handed a fresh

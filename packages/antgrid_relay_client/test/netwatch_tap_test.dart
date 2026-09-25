@@ -115,24 +115,11 @@ void main() {
     late _Capture capture;
     late FakeLiveRelay relay;
     late MachineSession session;
-    late List<Map<String, Object?>?> warns;
 
     setUp(() async {
       capture = _Capture();
       relay = FakeLiveRelay(netTap: capture.tap);
-      warns = [];
-      session = await establishSession(
-        relay,
-        handshaker: FakeHandshaker(),
-        // Short enough that a test can cross the window without idling out the
-        // shipped 30s.
-        unknownStreamLogInterval: const Duration(milliseconds: 500),
-        logger: (level, message, {fields}) {
-          if (message == 'dropping inbound frame for unknown stream') {
-            warns.add(fields);
-          }
-        },
-      );
+      session = await establishSession(relay, handshaker: FakeHandshaker());
       capture.events.clear(); // establishment traffic is not what is under test
     });
 
@@ -144,7 +131,7 @@ void main() {
     test(
       'names an outbound frame with the type the wire could not see',
       () async {
-        await session.sendOnStream('proj-1', {
+        await session.sendOnSession({
           'type': 'terminal:input',
           'data': 'x',
         }, 'control');
@@ -152,7 +139,7 @@ void main() {
         final payload = relay.sent.single.payload;
         final note = capture.annotationFor(frameIdOf(payload));
         expect(note['msgType'], 'terminal:input');
-        expect(note['streamId'], 'proj-1');
+        expect(note['streamId'], kControlStreamId);
       },
     );
 
@@ -164,19 +151,18 @@ void main() {
         machineDeviceId: 'machine-1',
         handshaker: FakeHandshaker(),
       );
-      await cold.sendOnStream('proj-1', {'type': 'file:read'}, 'control');
+      await cold.sendOnSession({'type': 'file:read'}, 'control');
 
       final drop = capture.drops.single;
       expect(drop['reason'], 'no-e2e-session');
       expect(drop['msgType'], 'file:read');
-      expect(drop['streamId'], 'proj-1');
+      expect(drop['streamId'], kControlStreamId);
       await cold.dispose();
     });
 
     test('names an inbound frame after decode, joined by the frame id', () async {
       final payload = encodeFromAgent(
         jsonEncode({
-          's': 'proj-1',
           'm': {'type': 'terminal:output', 'data': 'hi'},
         }),
       );
@@ -187,7 +173,7 @@ void main() {
       // after it, and they meet without either being threaded.
       final note = capture.annotationFor(frameIdOf(payload));
       expect(note['msgType'], 'terminal:output');
-      expect(note['streamId'], 'proj-1');
+      expect(note['streamId'], kControlStreamId);
     });
 
     test('records an inbound frame that is not valid UTF-8', () async {
@@ -201,10 +187,12 @@ void main() {
       expect(drop['frameId'], isNull); // named only once decoded far enough to know a type
     });
 
-    test('records a frame for a stream nothing is bound to', () async {
+    test('a non-control `s` on the session stream is a protocol drop — Stage '
+        'A A4 gave every project its own native stream, so no legitimate '
+        'peer sends one here any more', () async {
       final payload = encodeFromAgent(
         jsonEncode({
-          's': 'ghost-stream',
+          's': 'ghost-project',
           'm': {'type': 'terminal:output'},
         }),
       );
@@ -212,46 +200,8 @@ void main() {
       await Future<void>.delayed(const Duration(milliseconds: 20));
 
       final drop = capture.drops.single;
-      expect(drop['reason'], 'unknown-stream');
-      expect(drop['streamId'], 'ghost-stream');
-      expect(drop['msgType'], 'terminal:output');
-    });
-
-    test('a drop storm on one stream throttles the log, never the tap', () async {
-      // Nothing heals an agent pushing onto an id this app holds no transport
-      // for, so a live PTY on a stale stream drops one frame per frame with no
-      // end. A capture is bounded by how long it runs; app.log is not.
-      Future<void> injectGhost() async {
-        final payload = encodeFromAgent(
-          jsonEncode({
-            's': 'ghost-stream',
-            'm': {'type': 'terminal:output'},
-          }),
-        );
-        relay.inject(IncomingPeerFrame(channel: 'control', payload: payload));
-        await Future<void>.delayed(const Duration(milliseconds: 20));
-      }
-
-      await injectGhost();
-      await injectGhost();
-      await injectGhost();
-
-      expect(capture.drops, hasLength(3));
-      expect(warns, hasLength(1));
-      expect(warns.single!['streamId'], 'ghost-stream');
-      expect(warns.single!['msgType'], 'terminal:output');
-      expect(warns.single!['framesDropped'], 1);
-
-      // The two the throttle swallowed are not lost to the reader — they land on
-      // the next line. This is the assertion that matters: `framesDropped` is
-      // the ONLY thing carrying magnitude once the throttle is on, so summing
-      // lines instead of this field understates the loss by orders of magnitude.
-      await Future<void>.delayed(const Duration(milliseconds: 550));
-      await injectGhost();
-
-      expect(capture.drops, hasLength(4));
-      expect(warns, hasLength(2));
-      expect(warns.last!['framesDropped'], 3);
+      expect(drop['reason'], 'project-on-session-stream');
+      expect(drop['streamId'], 'ghost-project');
     });
   });
 }

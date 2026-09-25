@@ -698,10 +698,6 @@ const AgentProjectsMessage = BaseMessage.extend({
       // `status` for every session.
       sessionStatuses: z.record(z.string(), WorkStatusSchema).optional(),
       lastActiveAt: z.string().optional(),
-      // Present when the project has an admitted relay data-plane stream: the
-      // phone binds its ProjectSession services to this streamId without a fresh
-      // project:start. Absent for a stopped/unpromoted project.
-      streamId: z.string().optional(),
     }),
   ),
   // Machine-level: the remote-access switch's live state, stamped on every
@@ -761,41 +757,17 @@ const AgentToolsMessage = BaseMessage.extend({
   agents: z.array(AgentDescriptorSchema).optional(),
 });
 
-// Outbound agent→app, control plane only: announces the streamId a phone binds
-// its ProjectSession services to for `projectId`. Sent when a
-// project's relay data-plane stream is admitted; also carried per-project in the
-// `agent:projects` advertisement so a reconnecting phone can bind without a
-// fresh project:start. E2E-opaque to the relay. No inbound switch case.
+// Outbound agent→app, control plane only (A4): the project is ready to open a
+// stream for. Two meanings share the one frame — a Hazard-J ready notice
+// (gates the app's project-stream open: opening before this arrives gets an
+// in-band `NOT_READY` refusal, never a park) and, per `ProjectStreamRegistry`
+// (`project-streams.ts`), the bridge's own FIRST record on an admitted project
+// stream, so the bind itself is observable to the app. An `agent:projects`
+// entry with `running:true` is the same ready notice for a project the app
+// learns about from the advert. No inbound switch case.
 const StreamReadyMessage = BaseMessage.extend({
   type: z.literal("stream-ready"),
   projectId: z.string(),
-  streamId: z.string(),
-});
-
-// Outbound agent→app, control plane only: the phone addressed a streamId this
-// host process holds no stream for — almost always a host restart, whose fresh
-// process re-attaches every project under newly random ids (stream-mux.ts). The
-// old id is dead forever, so without this the phone replays onto it and every
-// verb times out with no signal to renegotiate. The phone answers by re-driving
-// `project:start` for the project it had bound to `streamId`. E2E-opaque to the
-// relay. No inbound switch case.
-const StreamInvalidMessage = BaseMessage.extend({
-  type: z.literal("stream-invalid"),
-  streamId: z.string(),
-});
-
-// Inbound app→agent, control plane only: the MIRROR of stream-invalid. The app
-// received a frame on a streamId it holds no transport for, so everything this
-// host pushes onto that stream is being discarded. Without it the loss is
-// unobservable from here and unbounded — stream ids outlive the app process that
-// bound them (a core keeps its stream across the peer's restart, and a re-open
-// reuses the same id), so a live PTY on a stream the new app never bound drops
-// one frame per frame for as long as the terminal runs.
-// Advisory, never authorization: it only mutes a stream this host already
-// chose to open, and delivery resumes the moment the app proves it is bound.
-const StreamUnboundMessage = BaseMessage.extend({
-  type: z.literal("stream-unbound"),
-  streamId: z.string(),
 });
 
 // Outbound result for a control-plane verb (e.g. project:start). Success is
@@ -2685,8 +2657,6 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   AgentProjectsMessage,
   AgentToolsMessage,
   StreamReadyMessage,
-  StreamInvalidMessage,
-  StreamUnboundMessage,
   ControlResultMessage,
   CommandRunMessage,
   CommandOutputMessage,
@@ -2853,8 +2823,6 @@ export type AgentProjects = z.infer<typeof AgentProjectsMessage>;
 export type ProjectAdvertEntry = AgentProjects["projects"][number];
 export type AgentTools = z.infer<typeof AgentToolsMessage>;
 export type StreamReady = z.infer<typeof StreamReadyMessage>;
-export type StreamInvalid = z.infer<typeof StreamInvalidMessage>;
-export type StreamUnbound = z.infer<typeof StreamUnboundMessage>;
 export type ControlResult = z.infer<typeof ControlResultMessage>;
 export type CommandRun = z.infer<typeof CommandRunMessage>;
 export type CommandOutput = z.infer<typeof CommandOutputMessage>;
@@ -3176,7 +3144,7 @@ const KNOWN_TYPES = new Set<string>([
   "tree:full", "tree:update", "file:read", "file:content",
   "file:resolve-path", "file:resolve-path-result",
   "ports:update", "preview:url",
-  "agent:disconnecting", "agent:projects", "agent:tools", "stream-ready", "stream-invalid", "stream-unbound", "control:result",
+  "agent:disconnecting", "agent:projects", "agent:tools", "stream-ready", "control:result",
   "command:run", "command:output", "command:done", "notification:push", "push:register",
   "handler:configure", "handler:instruct", "handler:status", "handler:escalation", "handler:activity",
   "handler:snapshot", "handler:undo", "handler:dismiss", "handler:answer",

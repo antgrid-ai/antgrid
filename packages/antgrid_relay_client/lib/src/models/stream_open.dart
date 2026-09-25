@@ -22,6 +22,11 @@ const int kStreamMaxTerminalAttachmentsPerPeer = 64;
 const int kStreamMaxTunnelStreamsPerPeer = 128;
 const int kStreamMaxPendingOpensPerPeer = 16;
 
+/// Bridge reader's cap for a project-stream record, both directions — equal
+/// to `MAX_FRAME_PAYLOAD`, the same ceiling the session path enforced before
+/// A4 (`packages/antgrid-wire/src/stream-open.ts`).
+const int kStreamProjectRecordMaxBytes = 1500000;
+
 /// Payload cap on one tunnel data record, after its tag byte
 /// ([kTunnelRecordTagBody] etc.), in both directions.
 const int kStreamTunnelDataMaxBytes = 1048576;

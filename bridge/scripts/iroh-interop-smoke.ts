@@ -96,10 +96,11 @@ try {
   await child.stdin.flush();
 
   await next("established");
-  // No stream handler is registered yet, so a well-formed non-session open
-  // from an established peer is refused in-band.
+  // The Dart app probes a project the host opened local-only: it is
+  // cataloged, but no core for it is relay-registered until a project:start
+  // promotes it, so the open is refused in-band as NOT_READY (hazard J).
   const refused = await next("stream-refused");
-  assert.equal(refused.code, "NOT_ALLOWED");
+  assert.equal(refused.code, "NOT_READY");
   // Central goes down only after E2E is up, so everything below proves the
   // native path carried it rather than a surviving WebSocket.
   fixture.takeCentralOffline();

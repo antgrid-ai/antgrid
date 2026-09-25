@@ -84,7 +84,7 @@ describe("fragmentForSend", () => {
 const AGENT_DEVICE_ID = "agent-1";
 const PHONE_ID = "phone-1";
 
-/** Establish a real E2E session (see handshake-pull.test.ts / stream-mux.test.ts
+/** Establish a real E2E session (see handshake-pull.test.ts / project-streams.test.ts
  *  for the full-coverage versions of this seam) and return the client, ready
  *  to seal control-plane traffic via `sendFromPeer`. */
 function establish(): TestPeerSessionOwner {

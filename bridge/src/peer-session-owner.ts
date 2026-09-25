@@ -2,19 +2,19 @@ import { randomBytes } from "node:crypto";
 import { logger } from "./logger";
 import type { DeviceIdentity } from "./device";
 import { parseMessageFast, SessionHelloFrame, type AbMessage, type SessionHello } from "./protocol";
-import { baseSlotDeviceId, slotMachineDeviceId } from "./relay-slot";
+import { baseSlotDeviceId } from "./relay-slot";
 import { buildFragments, FRAG_THRESHOLD, MAX_TRANSFER_BYTES, TRANSFER_TIMEOUT_MS, GLOBAL_REASSEMBLY_BUDGET, CONTROL_STREAM_ID, CREDIT_BATCH_BYTES, WINDOW_STALL_WARN_MS } from "antgrid-wire";
 import type { MessageBus, Channel, TransportSubscriber } from "./message-bus";
 import type { PairedPhonesStore } from "./paired-phones";
 import { FragReassembler, type SharedByteBudget } from "./frag-reassembler";
 
 import {
-  StreamMux,
+  ProjectStreamRegistry,
   type AttachStreamOpts,
   type PeerSessionView,
   type SendTarget,
   type StreamHandle,
-} from "./stream-mux";
+} from "./project-streams";
 import { netwatch, frameIdFor, isRemoteIngestArmed } from "./netwatch";
 import { SendScheduler, type QueuedAppFrame, type SendOutcome, type PendingSinkWrite } from "./send-scheduler";
 import type { PeerRecordFailure } from "./peer/records";
@@ -39,6 +39,10 @@ export interface PeerSessionOwnerOptions {
    *  records the device: what `antgrid phones list` shows, what push
    *  targeting resolves tokens from. */
   pairedPhones?: PairedPhonesStore;
+  /** Fail closed: absent => every project-stream open is refused NOT_ALLOWED. */
+  remoteAccessEnabled?: () => boolean;
+  /** host-server `seenProjects.has`. Absent => NOT_ALLOWED (fail closed). */
+  projectCataloged?: (projectId: string) => boolean;
 }
 
 /** Send a ping after this much receive silence. */
@@ -214,7 +218,7 @@ export abstract class PeerSessionOwner {
 
   protected busUnsub: (() => void) | null = null;
 
-  protected readonly mux: StreamMux;
+  protected readonly projectStreams: ProjectStreamRegistry;
 
   protected fragSweep: ReturnType<typeof setInterval> | null = null;
 
@@ -274,34 +278,24 @@ export abstract class PeerSessionOwner {
     };
   }
 
-  /** True when `peerId` is an app relay slot scoped at a DIFFERENT machine.
-   *
-   *  The relay fans presence to every same-account peer of the opposite type,
-   *  so one phone holding N machines open reaches us once per SLOT — and all
-   *  but one of those name a machine that isn't us. Acting on a sibling's would
-   *  point our reply address at a socket whose session cannot open our frames
-   *  (peer-online), or suppress our heavy stream because a DIFFERENT machine's
-   *  socket closed (peer-offline).
-   *
-   *  Unscoped ids are never foreign — they carry no claim about who they are
-   *  for, and every pre-slot client sends one. */
-  protected isForeignSlot(peerId: string): boolean {
-    const machine = slotMachineDeviceId(peerId);
-    return machine !== null && machine !== this.opts.identity.deviceId;
-  }
-
   constructor(protected opts: PeerSessionOwnerOptions) {
-    this.mux = new StreamMux({
-      closeStream: (id) => {
-        // A detached stream's backlog must not sit in the send queue occupying
-        // room the streams that are still live need — in every device's queue,
-        // since the stream was fanned out to all of them.
-        for (const s of this.sessions.values()) {
-          this.recordQueueDrop("stream-detached", s.scheduler.dropStream(id), s.peerId);
-        }
-      },
-      sendEnvelope: (id, msg, channel, target, signal, authorized) => this.sendAppEnvelope(id, msg, channel, target, signal, authorized),
+    this.projectStreams = new ProjectStreamRegistry({
+      remoteAccessEnabled: this.opts.remoteAccessEnabled,
+      projectCataloged: this.opts.projectCataloged,
       peerSession: (peerId) => this.peerSession(peerId),
+      sendSessionMessage: (peerId, msg) => void this.sendAppEnvelope(CONTROL_STREAM_ID, msg, "control", { kind: "peer", peerId }),
+      newReassembler: (peerId, onComplete) => new FragReassembler({
+        timeoutMs: TRANSFER_TIMEOUT_MS,
+        budget: this.reassemblyBudget,
+        onComplete,
+        onAbort: (hint) => {
+          if (hint?.type === "file:content") {
+            this.diagnostics.warn("Fragmented file content transfer interrupted for %s", hint.key);
+            this.opts.onError?.("TRANSFER_INTERRUPTED", `Transfer interrupted for ${hint.key}`);
+          }
+        },
+      }),
+      retirePeer: (peerId, reason) => this.retirePeerConnection(peerId, reason),
       // Late-bound over the protected hooks below (A2), so a subclass such as
       // NativePeerSessions can plug in a TerminalStreamRegistry without this
       // constructor knowing it exists. The base class's defaults are no-ops.
@@ -316,9 +310,18 @@ export abstract class PeerSessionOwner {
     this.startFragSweep();
   }
 
-  /** Attach a project's bus as a multiplexed stream on this machine socket. */
+  /** Attach a project's bus to its own project stream. */
   attachStream(bus: MessageBus, opts: AttachStreamOpts): StreamHandle {
-    return this.mux.attach(bus, opts);
+    return this.projectStreams.attach(bus, opts);
+  }
+
+  /** The connection-level failure hook the registries call: only "unauthorized"
+   *  (a writer) or "protocol-violation" (a malformed length prefix). The base
+   *  class has no connection to close, so it can only end the session;
+   *  `NativePeerSessions` overrides this with its `retirePeer`, guarded on
+   *  `nativePeers.has(peerId)` as the A2/A3 registries are. */
+  protected retirePeerConnection(peerId: string, _reason: "unauthorized" | "protocol-violation"): void {
+    this.dropSession(peerId);
   }
 
   /** A2 terminal-stream hooks: no-op on the base class. `NativePeerSessions`
@@ -354,13 +357,6 @@ export abstract class PeerSessionOwner {
         }
       },
     });
-  }
-
-  /** We just told the app which stream a project is on (`stream-ready`), so any
-   *  `stream-unbound` mute on it is answered. Call it BEFORE publishing, or the
-   *  frames the re-advert is meant to unblock ride out while still muted. */
-  noteStreamBound(streamId: string): void {
-    this.mux.markBound(streamId);
   }
 
   /**
@@ -461,6 +457,7 @@ export abstract class PeerSessionOwner {
     if (this.fragSweep) return;
     this.fragSweep = setInterval(() => {
       for (const session of this.sessions.values()) session.frag.sweep();
+      this.projectStreams.sweepFragments();
     }, 2000);
     this.fragSweep.unref?.();
   }
@@ -585,13 +582,14 @@ export abstract class PeerSessionOwner {
       this.dispatchControlPlane(mJson, channel, peerId);
       return;
     }
-    if (!this.mux.dispatchInbound(streamId, mJson, channel, peerId)) {
-      this.logUnknownStreamDrop(streamId, msgType, frameId);
-      this.recordDiagnostic({
-        dir: "rx", kind: "drop", transport: this.payloadTransport(peerId), channel,
-        streamId, msgType, frameId, bytes, reason: "unknown-stream",
-      });
-    }
+    // A4: project traffic rides its own QUIC stream, never `{s, m}` on the
+    // session stream. A non-"0" `s` here is a stale app replaying the old
+    // envelope shape.
+    this.logUnknownStreamDrop(streamId, msgType, frameId);
+    this.recordDiagnostic({
+      dir: "rx", kind: "drop", transport: this.payloadTransport(peerId), channel,
+      streamId, msgType, frameId, bytes, reason: "project-on-session-stream",
+    });
   }
 
   /**
@@ -648,13 +646,6 @@ export abstract class PeerSessionOwner {
   protected dispatchControlPlane(mJson: string, channel: Channel, peerId: string): void {
     const msg = parseMessageFast(mJson);
     if (msg) {
-      // Consumed here like `netwatch:events` below: this is a statement about
-      // the SOCKET's stream table, not a verb, and the bus it would reach is
-      // the one whose stream the app just said it cannot receive.
-      if (msg.type === "stream-unbound") {
-        this.mux.markUnbound(msg.streamId);
-        return;
-      }
       // Consumed here and never forwarded: a capture batch is diagnostics about
       // this socket, not a verb, and letting it reach `onMessage`/the bus would
       // hand every project core a message type it has no case for. The frame
@@ -838,7 +829,7 @@ export abstract class PeerSessionOwner {
       peerId,
     });
     this.diagnostics.info("Session established with %s (attempt %s)", peerId, attemptId);
-    this.mux.notifyPeerOnline();
+    this.projectStreams.notifyPeerOnline();
     this.drain();
   }
 
@@ -1038,8 +1029,9 @@ export abstract class PeerSessionOwner {
     this.recordQueueDrop("session-torn-down", session.scheduler.clear(), session.peerId, transport);
     session.frag.dispose();
     if (this.sessions.size === 0) this.stopLiveness();
-    this.mux.notifyPeerSessionOffline(peerId);
-    if (this.sessions.size === 0) this.mux.notifyPeerOffline();
+    this.projectStreams.dropPeer(peerId);
+    this.projectStreams.notifyPeerSessionOffline(peerId);
+    if (this.sessions.size === 0) this.projectStreams.notifyPeerOffline();
   }
 
   /** Every session is gone (socket close / redial): the relay has forgotten
@@ -1094,7 +1086,7 @@ export abstract class PeerSessionOwner {
   }
   disposeSessions(): void {
     this.clearBus();
-    this.mux.detachAll();
+    this.projectStreams.detachAll();
     this.resetSessions();
     this.stopFragSweep();
   }

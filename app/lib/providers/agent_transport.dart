@@ -156,10 +156,11 @@ final agentTransportForProvider = FutureProvider.family<AgentTransport?, String>
 /// Resolves the coordinates for the machine backing [projectId] (RecentAgent →
 /// cached InventoryAgent, freshness-first), opens (or reuses) that machine's
 /// single [MachineSession] via `RelayConnectionManager.connectionFor(uuid)`,
-/// then binds [projectId] to a stream over it: the control plane (stream "0")
-/// for a bare machine id, or the project's data-plane stream for a compound
-/// `<uuid>.<projectId>` — 0 RTT when the agent already advertised its streamId,
-/// else `project:start` + await `stream-ready`. No new socket, no
+/// then binds [projectId] to a stream over it: the control plane
+/// (`session.control`) for a bare machine id, or a dedicated native project
+/// stream for a compound `<uuid>.<projectId>` (`session.openProject`, Stage A
+/// A4) — 0 RTT when the agent already advertised the project ready, else
+/// `project:start` + await its own stream-ready. No new socket, no
 /// per-project handshake, so the v2 drill-in race is gone. A liveness failure
 /// inside [MachineSession] closes the connection and re-dials through a fresh
 /// session hello rather than rekeying in place; live streams re-bind onto the
@@ -360,17 +361,13 @@ Future<AgentTransport?> _buildRelayTransportFor(
   final StreamTransport transport;
   if (projectId == base) {
     // Bare machine id → the control-plane stream.
-    transport = session.streamFor(kControlStreamId);
+    transport = session.control;
   } else {
     final projId = baseProjectId(projectId);
-    final known = session.streamIdForProject(projId);
-    final streamId =
-        known ??
-        await session.bindProject(
-          projId,
-          createAbMessage('project:start', {'projectId': projId}),
-        );
-    transport = session.streamFor(streamId);
+    transport = await session.openProject(
+      projId,
+      createAbMessage('project:start', {'projectId': projId}),
+    );
   }
   await transport.connect();
   // Detach only THIS stream on teardown; the machine connection's lifetime is

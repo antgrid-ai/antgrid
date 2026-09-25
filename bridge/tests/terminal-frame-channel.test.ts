@@ -16,7 +16,7 @@ import { MessageBus, type Channel } from "../src/message-bus";
 import { PREVIEW_CHANNEL_MESSAGE_TYPES, createMessage, type AbMessage } from "../src/protocol";
 import { setLogLevel } from "../src/logger";
 import { TERMINAL_PROTOCOL_VERSION } from "../src/terminal-frames/protocol";
-import type { TerminalStreamHooks } from "../src/stream-mux";
+import type { TerminalStreamHooks } from "../src/project-streams";
 
 setLogLevel("error");
 

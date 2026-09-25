@@ -21,7 +21,7 @@ import { setLogLevel } from "../src/logger";
 import { createMessage, type AbMessage, type SessionEntry, type SessionMemberRef } from "../src/protocol";
 import { SessionBusCoordinator } from "../src/session-bus/coordinator";
 import { SessionBusSessionIndex } from "../src/session-bus/session-index";
-import type { PeerSessionView } from "../src/stream-mux";
+import type { PeerSessionView } from "../src/project-streams";
 
 setLogLevel("error");
 

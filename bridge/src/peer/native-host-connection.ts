@@ -4,7 +4,7 @@ import type { Connection, Endpoint, Incoming } from "@number0/iroh";
 import { CentralControlClient, type CentralControlOptions } from "../central-control-client";
 import { baseSlotDeviceId } from "../relay-slot";
 import type { Channel, MessageBus } from "../message-bus";
-import type { AttachStreamOpts, StreamHandle } from "../stream-mux";
+import type { AttachStreamOpts, StreamHandle } from "../project-streams";
 import type { PendingSinkWrite, QueuedAppFrame } from "../send-scheduler";
 import type { SessionHello } from "../protocol";
 import { AuthorizationLease, type EnrollmentIdentity, type LeaseFailure } from "./authorization-lease";
@@ -134,7 +134,7 @@ export class NativePeerSessions extends PeerSessionOwner {
       }, nativeOpts.lifecycle?.now, nativeOpts.lifecycle?.random, nativeOpts.lifecycle?.schedule);
     this.terminalStreams = new TerminalStreamRegistry({
       projectCataloged: nativeOpts.projectCataloged,
-      projectBinding: (projectId) => this.mux.projectBinding(projectId),
+      projectBinding: (projectId) => this.projectStreams.projectBinding(projectId),
       peerSession: (peerId) => this.peerSession(peerId),
       // Guarded the same way `onUnauthorized` above is: a stale binding from a
       // superseded connection must never retire the peer's NEWER one.
@@ -149,7 +149,7 @@ export class NativePeerSessions extends PeerSessionOwner {
     });
     this.tunnelStreams = new TunnelStreamRegistry({
       projectCataloged: nativeOpts.projectCataloged,
-      tunnelBinding: (projectId) => this.mux.tunnelBinding(projectId),
+      tunnelBinding: (projectId) => this.projectStreams.tunnelBinding(projectId),
       // Guarded the same way `terminalStreams`'s is: a stale binding from a
       // superseded connection must never retire the peer's NEWER one.
       retirePeer: (peerId, reason) => { if (this.nativePeers.has(peerId)) this.retirePeer(peerId, reason); },
@@ -405,6 +405,7 @@ export class NativePeerSessions extends PeerSessionOwner {
       established: () => this.sessions.has(peerId),
       onUnauthorized: () => { if (this.nativePeers.get(peerId) === peer) this.retirePeer(peerId, "unauthorized"); },
       handlers: {
+        project: this.projectStreams.handler,
         terminal: this.terminalStreams.handler,
         "tunnel-http": this.tunnelStreams.httpHandler,
         "tunnel-ws": this.tunnelStreams.wsHandler,
@@ -470,6 +471,7 @@ export class NativePeerSessions extends PeerSessionOwner {
     peer.streams?.stop();
     this.terminalStreams.dropPeer(peerId);
     this.tunnelStreams.dropPeer(peerId);
+    this.projectStreams.dropPeer(peerId);
     peer.connection.close(reason === "unauthorized" ? 3n : reason === "protocol-violation" ? 2n : 1n, []);
     peer.records?.close(reason);
     super.dropSession(peerId, "iroh");
@@ -555,6 +557,13 @@ export class NativePeerSessions extends PeerSessionOwner {
     this.retirePeer(peerId, reason);
   }
 
+  /** Guarded the same way `terminalStreams`'s / `tunnelStreams`'s callbacks
+   *  are: a stale binding from a superseded connection must never retire the
+   *  peer's NEWER one. */
+  protected override retirePeerConnection(peerId: string, reason: "unauthorized" | "protocol-violation"): void {
+    if (this.nativePeers.has(peerId)) this.retirePeer(peerId, reason);
+  }
+
   protected override dropSession(peerId: string, transport = this.payloadTransport(peerId)): void {
     if (this.nativePeers.has(peerId)) { this.retirePeer(peerId); return; }
     super.dropSession(peerId, transport);
@@ -637,7 +646,6 @@ export class NativeHostConnection implements RemoteHostConnection {
   anySessionSupportsCheckoutRouting() { return this.peers.anySessionSupportsCheckoutRouting(); }
   send(...args: Parameters<NativePeerSessions["send"]>) { return this.peers.send(...args); }
   sendOnChannel(...args: Parameters<NativePeerSessions["sendOnChannel"]>) { return this.peers.sendOnChannel(...args); }
-  noteStreamBound(...args: Parameters<NativePeerSessions["noteStreamBound"]>) { return this.peers.noteStreamBound(...args); }
   noteResume(): Promise<boolean> { return this.peers.noteResume(); }
   recheckAuthorization(): void { this.peers.recheckAuthorization(); }
 }

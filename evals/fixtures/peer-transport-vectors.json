@@ -73,6 +73,9 @@
       "maxTunnelStreamsPerPeer": 128,
       "maxPendingOpensPerPeer": 16
     },
+    "projectRecords": {
+      "maxRecordBytes": 1500000
+    },
     "terminalRecords": {
       "appMaxRecordBytes": 16384,
       "bridgeMaxRecordBytes": 2097152

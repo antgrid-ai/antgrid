@@ -9,9 +9,9 @@
  *
  * This registry is plugged into `PeerStreamAcceptor` as the `tunnel-http` and
  * `tunnel-ws` handlers. It never opens or promotes a core: `tunnelBinding` is
- * a lookup over whatever the mux already has attached, and the real
- * per-checkout authorization runs through `TunnelStreamServer.admit` once the
- * head record names a checkout (D-7: `checkoutId` rides the head, not the
+ * a lookup over whatever `ProjectStreamRegistry` already has attached, and the
+ * real per-checkout authorization runs through `TunnelStreamServer.admit` once
+ * the head record names a checkout (D-7: `checkoutId` rides the head, not the
  * open frame, because the A0b open schemas are frozen).
  */
 
@@ -52,7 +52,7 @@ import {
   type StreamSendOutcome,
   type StreamWriteFailure,
 } from "./stream-records";
-import type { TunnelProjectBinding } from "../stream-mux";
+import type { TunnelProjectBinding } from "../project-streams";
 
 export const TUNNEL_STREAM_MAX_QUEUED_BYTES = 4 * 1024 * 1024;
 /** Below the session stream's binding default of 0, and below terminal's `1`
@@ -148,7 +148,7 @@ type Binding = HttpBinding | WsBinding;
 export interface TunnelStreamRegistryOptions {
   /** host-server `seenProjects.has`. Absent => every open is refused NOT_ALLOWED (fail closed). */
   projectCataloged?: (projectId: string) => boolean;
-  /** `StreamMux.tunnelBinding`. Lookup only: never opens or promotes a core. */
+  /** `ProjectStreamRegistry.tunnelBinding`. Lookup only: never opens or promotes a core. */
   tunnelBinding: (projectId: string) => TunnelProjectBinding | null;
   /** Only ever "unauthorized" (a writer, or a per-record authorized() check on read) or
    *  "protocol-violation" (a malformed length prefix from StreamRecordReader). */
@@ -200,6 +200,12 @@ export class TunnelStreamRegistry {
     const projBinding = this.opts.tunnelBinding(projectId);
     if (projBinding === null) {
       return { ok: false, refusal: { code: "NOT_READY", message: "project is not attached" } };
+    }
+    // A4: the project stream is the single per-peer admission point for a
+    // projectId. Closing the project stream does not unbind an already-open
+    // tunnel stream.
+    if (!projBinding.hasOpenStream(peerId)) {
+      return { ok: false, refusal: { code: "NOT_ALLOWED", message: "open the project stream first" } };
     }
     const refusal = projBinding.refusalFor(peerId);
     if (refusal) {
@@ -484,6 +490,7 @@ export class TunnelStreamRegistry {
     const body = concatBytes(chunks, received);
 
     const exchange: TunnelHttpExchange = {
+      peerId: binding.peerId,
       get signal() { return binding.exchangeAbort.signal; },
       head: (head) => this.sendHttpHead(binding, head),
       body: (slice) => this.sendHttpBody(binding, slice),
@@ -683,9 +690,9 @@ export class TunnelStreamRegistry {
     this.unbind(binding);
   }
 
-  /** The project's last live mux entry detached: its bus is gone, so every
-   *  bound stream is aborted with no synthesized message — there is nothing
-   *  left to dispatch one to. */
+  /** The project's last live `ProjectStreamRegistry` entry detached: its bus is
+   *  gone, so every bound stream is aborted with no synthesized message —
+   *  there is nothing left to dispatch one to. */
   projectDetached(projectId: string): void {
     for (const set of this.peerBindings.values()) {
       for (const binding of [...set]) {

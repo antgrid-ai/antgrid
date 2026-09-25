@@ -170,11 +170,12 @@ class ProjectSession {
       _fragSendErrSub = session.fragmentSendErrors.listen(_onFragmentSendError);
       // Relay only: the agent resets `appFocusPaused` for each connection, and
       // sends before the handshake are dropped silently — so re-declare focus
-      // once this project's stream is ready. Local mode has no handshake and no
-      // such window. Deferred transcript hydration is NOT wired here anymore: it
-      // rides the transport's hydrator registry, which refreshSnapshot re-drives
-      // on every (re)establish (see AgentSessionService.hydrateIfNeeded).
-      // Matched on wireProjectId: streamReadyEvents carries the BARE id the
+      // once this project's stream is (re)bound. Local mode has no handshake
+      // and no such window. Deferred transcript hydration is NOT wired here
+      // anymore: it rides the transport's hydrator registry, which
+      // refreshSnapshot re-drives on every (re)establish (see
+      // AgentSessionService.hydrateIfNeeded).
+      // Matched on wireProjectId: projectStreamEvents carries the BARE id the
       // bridge advertises in `agent:projects`, not the compound registrationId.
       //
       // BOTH halves of the focus declaration have to be restated, and the
@@ -182,18 +183,23 @@ class ProjectSession {
       // client's focused SESSION when the socket closes but keeps read tracking
       // armed, so re-arming it without re-naming the session is exactly the
       // state in which the next turn-end paints an unread dot on whatever the
-      // user is currently looking at.
-      _streamReadySub = session.streamReadyEvents
+      // user is currently looking at. Losing this hook entirely would paint
+      // that wrong unread dot with nothing to catch it — see
+      // project_session_stream_events_test.dart.
+      _streamReadySub = session.projectStreamEvents
           .where((e) => e.projectId == wireProjectId)
-          .listen((_) {
-            _router.resyncFocusState();
-            sessionsService.resyncFocus();
-            _markUp();
+          .listen((e) {
+            if (e.open) {
+              _router.resyncFocusState();
+              sessionsService.resyncFocus();
+              _markUp();
+            } else {
+              _markDown();
+            }
           });
-      // The machine session dropping is the relay-side "down": a stream that
-      // loses its session cannot answer anything until the next handshake
-      // rebinds this project, which is exactly what the streamReadyEvents
-      // listener above reports back as "up".
+      // The machine session dropping is also relay-side "down" for a project
+      // whose own stream hasn't yet reported its end — the projectStreamEvents
+      // listener above is what reports back "up" once a fresh bind lands.
       _sessionDownSub = session.sessionDownEvents.listen((_) => _markDown());
     } else {
       // Local transport (and every test double that is neither this nor a

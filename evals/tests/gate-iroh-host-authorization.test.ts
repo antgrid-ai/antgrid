@@ -124,9 +124,22 @@ test("real backend enrollment authorizes native host projects and revocation clo
       centralSocket?.close();
       for (const project of projects) {
         await send({ m: createMessage("project:start", { projectId: project.id }) });
-        const ready = await read((value) => value.type === "stream-ready" && value.projectId === project.id);
-        await send({ s: ready.streamId, m: createMessage("file:read", { projectId: project.id, path: "proof.txt" }) });
-        const file = await read((value) => value.type === "file:content" && value.projectId === project.id);
+        await read((value) => value.type === "stream-ready" && value.projectId === project.id);
+        // A4: project traffic no longer rides the session stream tagged by a
+        // bridge-minted streamId — each project gets its own QUIC stream,
+        // opened with the A0b open frame; its first record is a fresh
+        // stream-ready naming this project (D-1).
+        const projectStream = await connection.openBi();
+        const projectRecords = new PeerRecords(projectStream, () => true, () => connection?.close(1n, []));
+        void projectRecords.send(encodeStreamOpen({ kind: "project", projectId: project.id }));
+        const bound = JSON.parse(Buffer.from(await projectRecords.read()).toString("utf8"));
+        assert.equal(bound.type, "stream-ready");
+        assert.equal(bound.projectId, project.id);
+        await projectRecords.send(
+          Buffer.from(JSON.stringify(createMessage("file:read", { projectId: project.id, path: "proof.txt" })), "utf8"),
+        );
+        const file = JSON.parse(Buffer.from(await projectRecords.read()).toString("utf8"));
+        assert.equal(file.type, "file:content");
         assert.equal(file.content, `${project.name}:native-host-proof`);
         assert.equal(connection.stableId(), nativeConnectionId);
       }

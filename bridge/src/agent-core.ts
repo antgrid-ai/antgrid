@@ -24,7 +24,7 @@ import {
 } from "./keystrokes";
 import { AGENT_GRACE_MS, killChildTree, processGroupSpawn } from "./terminal-session";
 import { createConnState, type ConnState } from "./conn-state";
-import type { PeerSessionView, SendTarget, TerminalStreamHooks } from "./stream-mux";
+import type { PeerSessionView, SendTarget, TerminalStreamHooks } from "./project-streams";
 import { FileWatcher } from "./file-watcher";
 import { FileUploadManager } from "./file-upload";
 import { FileSearcher } from "./file-search";
@@ -273,12 +273,14 @@ export interface AgentCore {
    *  promotes a core — `checkoutRuntimes.runtime(checkoutId)` is a lookup over
    *  what is already running. */
   readonly tunnelStreams: TunnelStreamServer;
-  /** Abort every in-flight tunneled HTTP response, on every checkout runtime
-   *  and on main. Driven from the transport's peer-online/peer-offline hooks:
-   *  a body in flight across a peer loss or a (re)establishment is dead by
-   *  construction, and the relay client's queue clear only reaches a run that
-   *  happens to be parked on a send at that instant. WS tunnels are untouched. */
-  abortTunnelStreams(): void;
+  /** Abort every in-flight tunneled HTTP response for one peer, on every
+   *  checkout runtime and on main. Driven only from `onPeerSessionGone` (A4):
+   *  a body in flight across that peer's session loss is dead by construction,
+   *  and the relay client's queue clear only reaches a run that happens to be
+   *  parked on a send at that instant. A still-live sibling peer's runs are
+   *  untouched, so a second phone establishing does not abort a first phone's
+   *  in-flight preview load. WS tunnels are untouched. */
+  abortTunnelStreams(peerId: string): void;
   /** Wire a lookup from an app session's route id to what this core may know
    *  about it: the verified pubkey behind it (the push registry's key) and the
    *  capabilities it declared. A machine holds one session per attached device,
@@ -291,7 +293,7 @@ export interface AgentCore {
    *  the gate is skipped — the loopback socket + token is that trust boundary.
    *  Pass `null` to clear it when the transport detaches. */
   setPeerSessionProvider(fn: ((peerId: string) => PeerSessionView | null) | null): void;
-  /** Wire the mux's terminal-stream hooks (A2): `retired` and `subscribeSettled`
+  /** Wire the project-stream registry's terminal-stream hooks (A2): `retired` and `subscribeSettled`
    *  callbacks so this core can end a terminal attachment's stream from the
    *  ordinary session-teardown and subscribe-reply paths without knowing a
    *  stream exists. Pass `null` to clear it alongside {@link setPeerSessionProvider}. */
@@ -969,7 +971,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   function setPeerSessionProvider(fn: ((peerId: string) => PeerSessionView | null) | null) {
     peerSessionProvider = fn;
   }
-  // A2: the mux's terminal-stream hooks, wired alongside peerSessionProvider so
+  // A2: the project-stream registry's terminal-stream hooks, wired alongside peerSessionProvider so
   // a relay attachment's own QUIC stream can be ended from the ordinary
   // retirement/subscribe-reply paths without those paths knowing it exists.
   let terminalStreamHooks: TerminalStreamHooks | null = null;
@@ -2176,7 +2178,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         focusPausedByClient.set(client, msg.paused);
         recomputeFocusPaused();
         // Both edges, because the app restates its focus only on a STREAM
-        // re-establish (`resyncFocus`, driven by `streamReadyEvents`) — a
+        // re-establish (`resyncFocus`, driven by `projectStreamEvents`) — a
         // background/foreground inside one live connection sends this frame
         // and nothing else. Dropping the entry without putting it back left
         // the checkout the user is sitting on reading as unattended, which is
@@ -4837,6 +4839,13 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         (clientGenerations.get(client) ?? 0) === generation &&
         remoteFrameAllowed(source) &&
         peerBusReachAllowed(msg, source);
+      // An RPC response answers one asker. A remote asker holds its own
+      // project stream, so the reply goes there alone; every other device
+      // would only drop it as a late response.
+      const answerAsker = (res: AbMessage): void => {
+        if (source === "relay" && peerId !== undefined) bus.publishOnly(res, channel, "relay", peerId);
+        else bus.publish(res, channel);
+      };
       // Mobile-access gate: the single chokepoint through which both RPC
       // requests and plain Ab messages enter the core dispatch. Drops EVERY
       // inbound verb while the machine is not mobile-reachable, so an
@@ -4893,7 +4902,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           }
         }
         if (msg.method === "session.transcriptSnapshot") {
-          void handleTranscriptSnapshotRequest(msg).then((res) => bus.publish(res, channel));
+          void handleTranscriptSnapshotRequest(msg).then(answerAsker);
           return;
         }
         if (msg.method === "terminal.snapshot") {
@@ -4912,11 +4921,11 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
                 error: { code: "E_HANDLER", message: "terminal snapshot failed" },
               });
             })
-            .then((res) => bus.publish(res, channel));
+            .then(answerAsker);
           return;
         }
         if (!stillAuthorized()) return;
-        void dispatchRpc(bus, msg).then((res) => bus.publish(res, channel));
+        void dispatchRpc(bus, msg).then(answerAsker);
         return;
       }
       // Explicit checkout IDs never fall back to main. The asynchronous store
@@ -4966,9 +4975,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     });
   }
 
-  function abortTunnelStreams(): void {
-    for (const runtime of checkoutRuntimes.values()) runtime.tunnelManager?.abortHttpStreams();
-    tunnelManager?.abortHttpStreams();
+  function abortTunnelStreams(peerId: string): void {
+    for (const runtime of checkoutRuntimes.values()) runtime.tunnelManager?.abortHttpStreams(peerId);
+    tunnelManager?.abortHttpStreams(peerId);
   }
 
   return {

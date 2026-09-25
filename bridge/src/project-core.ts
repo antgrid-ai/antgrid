@@ -3,7 +3,7 @@ import { buildAgentCore, type AgentCore, type BuildAgentCoreOptions } from "./ag
 import { MessageBus, type ClientKey } from "./message-bus";
 import { LocalListener } from "./local-listener";
 import { createRelayPromotion, type RelayPromotionController, type RelayPromotionDeps } from "./relay-promotion";
-import type { AttachStreamOpts, PeerSessionView, StreamHandle } from "./stream-mux";
+import type { AttachStreamOpts, PeerSessionView, StreamHandle } from "./project-streams";
 import { createMessage, type AbMessage, type SessionEntry, type WorkStatus } from "./protocol";
 import type { DeleteSessionOptions } from "./session-manager";
 import { answerRequest, clientFocusState, clientGone, closeTurn, initialWorkStatus, isStaleIdleNudge, reduceWorkStatus, sessionFocus, turnOpenFor, turnStart, UNATTRIBUTED_TURN, userReply, type WorkStatusState } from "./work-status";
@@ -18,7 +18,7 @@ import { sealPush } from "./push/seal";
  * core attaches its bus as a host-local multiplexed stream. */
 export interface ProjectCoreRemoteDeps {
   /** Attach this core's bus as a host-local stream on the machine's native
-   *  peer sessions and allocate its streamId. */
+   *  peer sessions. */
   attachStream(bus: MessageBus, opts: AttachStreamOpts): StreamHandle;
   /** Every app device that currently holds an E2E session with this machine —
    *  the push dispatcher's authorized-device list, and the fan-out this stream
@@ -143,7 +143,7 @@ export class ProjectCore {
     // the caller has to decide whether to hold it. "The session is live" is the
     // strongest fact available synchronously and is exactly what the boolean
     // used to mean.
-    if (!this.streamHandle || !this.deps.remote?.peerSession(peerId)) return false;
+    if (!this.streamHandle?.deliverableTo(peerId)) return false;
     void this.streamHandle.sendTo(msg, "control", { kind: "peer", peerId });
     return true;
   }
@@ -528,15 +528,16 @@ export class ProjectCore {
    *  path. The stream is an ADDITIVE bus subscriber, so the live loopback
    *  session is undisturbed. Shared by {@link startRemote} (fresh remote core)
    *  and {@link promote} (already-open local core); the caller owns the returned
-   *  handle's lifetime. Encryption is NEVER optional — each native peer session owns
-   *  the E2E keys that seal every project stream addressed to that peer. */
+   *  handle's lifetime. Encryption is NEVER optional: every project stream rides an
+   *  authenticated Iroh connection to the one peer it was opened by. */
   private attachRelayStream(
     core: AgentCore,
     bus: MessageBus,
     remote: ProjectCoreRemoteDeps,
   ): { handle: StreamHandle; firstRegister: Promise<void>; unsubscribePush: () => void } {
-    // A binding is ready synchronously once the host mux admits it. Keep the
-    // promise-shaped seam so callers cannot race the ready advertisement.
+    // A binding is ready synchronously once the host's project-stream registry
+    // admits it. Keep the promise-shaped seam so callers cannot race the ready
+    // advertisement.
     let settle!: () => void;
     const firstRegister = new Promise<void>((res) => { settle = res; });
     let settled = false;
@@ -564,8 +565,9 @@ export class ProjectCore {
       // but only it. A modern device on the same machine keeps its stream.
       mayDeliverTo: (peer) => !core.hasIsolatedSessions() || peer.checkoutRouting,
       // Per-sender mirror, and the one that has to ANSWER. The advert is
-      // deliberately optimistic across a mixed fleet, and an app binds the
-      // streamId it carries without a fresh project:start — so this is the only
+      // deliberately optimistic across a mixed fleet, and an app opens a
+      // project stream off its running flag without a fresh project:start — so
+      // this (checked at open and per inbound record) is the only
       // place a stale device on a project with isolated sessions can be told
       // why, and the refusal it would have got from that verb is the one to
       // give it. Fail-closed on an unresolvable session, exactly as the core's
@@ -580,22 +582,10 @@ export class ProjectCore {
       // so don't suppress while a desktop owner shares it over loopback — that
       // would freeze the live local session.
       onPeerOnline: () => {
-        // A tunneled body in flight across either edge is dead by construction —
-        // the peer-session owner clears its queues at binding and peer loss —
-        // but that clear only reaches a run parked on a send at that instant; a
-        // run between sends keeps streaming into a native session that will drop it or a
-        // session that will ignore it, competing for the preview window with the
-        // page reload the app is doing. The manager is the only thing that can
-        // stop it.
-        core.abortTunnelStreams();
         peerConnected = true;
         core.connState.peerOnline = true;
       },
       onPeerOffline: () => {
-        // Before the hasOwner early return, and for the same reason as at
-        // peer-online: the phone has left whether or not a desktop owner is
-        // still here, and every body it was receiving is now unreachable.
-        core.abortTunnelStreams();
         // Unconditional, unlike the stream gate below: the loopback carve-out
         // keeps the DESKTOP's stream live, it doesn't make the phone reachable
         // in-band. Leaving this set would mute push on every promoted core.
@@ -609,7 +599,21 @@ export class ProjectCore {
         if (this.listener?.hasOwner) return;
         core.connState.peerOnline = false;
       },
-      onPeerSessionGone: (peerId) => this.noteClientGone(peerId),
+      // A peer's session, not the coarse online/offline flag, is what a
+      // tunneled body in flight is actually keyed to — the peer-session owner
+      // clears its queues at binding and at peer loss, but that clear only
+      // reaches a run parked on a send at that instant; a run between sends
+      // keeps streaming into a session that is already gone, competing for the
+      // preview window with the page reload the app is doing. Scoping the abort
+      // to THIS peerId keeps a still-live sibling peer's in-flight loads intact.
+      onPeerSessionGone: (peerId) => {
+        core.abortTunnelStreams(peerId);
+        this.noteClientGone(peerId);
+      },
+      // Fired when this peer's project-stream binding itself closes (unbind,
+      // reset, or the stream reader ending) rather than the whole peer session —
+      // the read-state cleanup is the same either way.
+      onPeerStreamClosed: (peerId) => this.noteClientGone(peerId),
       tunnels: core.tunnelStreams,
     });
 

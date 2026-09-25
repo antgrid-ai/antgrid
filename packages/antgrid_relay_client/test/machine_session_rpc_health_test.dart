@@ -30,7 +30,7 @@ void main() {
       await session.ensureEstablished();
       expect(handshaker.performCalls, 1);
 
-      final control = session.streamFor(kControlStreamId);
+      final control = session.control;
       // Three consecutive timeouts is the close trigger — none of these count,
       // so running past it must still leave the link open.
       for (var i = 0; i < 4; i++) {
@@ -75,7 +75,7 @@ void main() {
       await session.ensureEstablished();
       expect(handshaker.performCalls, 1);
 
-      final control = session.streamFor(kControlStreamId);
+      final control = session.control;
       for (var i = 0; i < 3; i++) {
         await expectLater(
           control.request(

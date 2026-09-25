@@ -120,11 +120,12 @@ describe("remote isolated-session security", () => {
     expect(res).toMatchObject({ ok: false, error: { code: "UPDATE_REQUIRED" } });
     expect(host!.get(projectId)).toBeNull();
 
-    // ...and the same project is advertised without a dialable streamId, so an
-    // old app has nothing to replay onto.
+    // ...and the same project is advertised `running: false` (A4: a project
+    // stream is admitted by projectId alone, off Hazard J's stream-ready
+    // notice — there is no separate dialable id to withhold any more), so an
+    // old app has nothing that tells it to open one.
     const advert = host!.buildProjectsAdvertisement().find((p) => p.projectId === projectId);
     expect(advert).toBeDefined();
-    expect(advert?.streamId).toBeUndefined();
     expect(advert?.running).toBe(false);
   });
 

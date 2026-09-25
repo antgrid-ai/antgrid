@@ -1,6 +1,6 @@
 import { AgentEnableRelayMessage, createMessage, type AbMessage } from "./protocol";
 import { MessageBus } from "./message-bus";
-import type { AttachStreamOpts, PeerSessionView, StreamHandle } from "./stream-mux";
+import type { AttachStreamOpts, PeerSessionView, StreamHandle } from "./project-streams";
 import type { ProjectCoreRemoteDeps } from "./project-core";
 
 type EnableMsg = Extract<AbMessage, { type: "agent:enableRelay" }>;

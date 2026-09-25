@@ -69,8 +69,11 @@ type SentEntry =
   | { kind: "end" };
 
 /** The exchange as a lever: each call's promise resolves when this test says
- *  it does, which is the whole pacing contract the read loop rides on. */
-function makeExchange() {
+ *  it does, which is the whole pacing contract the read loop rides on.
+ *  `peerId` defaults to a fixed value since most tests run a single exchange
+ *  and never care whose stream it is on; the abort-targeting tests pass two
+ *  distinct ids. */
+function makeExchange(peerId = "peer-a") {
   const sent: SentEntry[] = [];
   const waiting: Array<(o: StreamSendOutcome) => void> = [];
   const ctrl = new AbortController();
@@ -99,6 +102,7 @@ function makeExchange() {
     },
     bodyCalls: () => sent.filter((e): e is Extract<SentEntry, { kind: "body" }> => e.kind === "body"),
     exchange: {
+      peerId,
       signal: ctrl.signal,
       head: (h) => push({ kind: "head", value: h }),
       body: (s) => push({ kind: "body", value: s }),
@@ -362,11 +366,11 @@ describe("TunnelManager HTTP streaming", () => {
 
   // Both shapes of in-flight run must go: a caller that only reaches a run
   // parked on a settle at a given instant would miss the one still reading.
-  test("abortHttpStreams() aborts every in-flight run whether or not it is parked", async () => {
+  test("abortHttpStreams(peerId) aborts every in-flight run of that peer whether or not it is parked", async () => {
     const parked = startRoute({ writes: 8, writeBytes: 1024, gapMs: 20 });
     const running = startRoute({ writes: 20, writeBytes: 1024, gapMs: 20 });
-    const parkedExchange = makeExchange();
-    const runningExchange = makeExchange();
+    const parkedExchange = makeExchange("peer-a");
+    const runningExchange = makeExchange("peer-a");
     parkedExchange.plan = holdBody(parkedExchange, 0);
     const mgr = makeManager();
 
@@ -377,7 +381,7 @@ describe("TunnelManager HTTP streaming", () => {
     await waitUntil(() => parkedExchange.waiting() === 1);
     await waitUntil(() => runningExchange.bodyCalls().length > 0);
 
-    mgr.abortHttpStreams();
+    mgr.abortHttpStreams("peer-a");
     parkedExchange.plan = undefined;
     parkedExchange.releaseAll();
     await runs;
@@ -389,6 +393,68 @@ describe("TunnelManager HTTP streaming", () => {
     // holding a tunnel slot on both ends.
     expect(parkedExchange.failReason()).toBeDefined();
     expect(runningExchange.failReason()).toBeDefined();
+  });
+
+  // A3 trap (§3.8): the abort is keyed by peerId, never by project, so a
+  // second phone establishing its own tunnel must not cut the first phone's
+  // in-flight preview load.
+  test("abortHttpStreams(peerId) aborts only that peer's run and leaves a sibling peer's run alone", async () => {
+    const routeA = startRoute({ writes: 8, writeBytes: 1024, gapMs: 20 });
+    const routeB = startRoute({ writes: 8, writeBytes: 1024, gapMs: 20 });
+    const exchangeA = makeExchange("peer-a");
+    const exchangeB = makeExchange("peer-b");
+    exchangeA.plan = holdBody(exchangeA, 0);
+    exchangeB.plan = holdBody(exchangeB, 0);
+    const mgr = makeManager();
+
+    const runA = mgr.serveHttp(request(routeA.port, "a"), new Uint8Array(0), exchangeA.exchange);
+    const runB = mgr.serveHttp(request(routeB.port, "b"), new Uint8Array(0), exchangeB.exchange);
+    await waitUntil(() => exchangeA.waiting() === 1 && exchangeB.waiting() === 1);
+
+    mgr.abortHttpStreams("peer-a");
+    await waitUntil(() => routeA.state.cancelled);
+    expect(routeB.state.cancelled).toBe(false);
+
+    // fail() runs from inside the read loop, which is blocked on the held
+    // body write until it is released — the abort signal alone (checked
+    // above via route cancellation) does not unblock it.
+    exchangeA.plan = undefined;
+    exchangeA.releaseAll();
+    await runA;
+    expect(exchangeA.failReason()).toBeDefined();
+    expect(exchangeB.failReason()).toBeUndefined();
+
+    exchangeB.plan = undefined;
+    exchangeB.releaseAll();
+    await runB;
+    expect(exchangeB.sent.some((e) => e.kind === "end")).toBe(true);
+  });
+
+  // stop() has no peer to target: every run on the manager goes, unlike
+  // abortHttpStreams(peerId).
+  test("stop() aborts in-flight runs of every peer", async () => {
+    const routeA = startRoute({ writes: 8, writeBytes: 1024, gapMs: 20 });
+    const routeB = startRoute({ writes: 8, writeBytes: 1024, gapMs: 20 });
+    const exchangeA = makeExchange("peer-a");
+    const exchangeB = makeExchange("peer-b");
+    exchangeA.plan = holdBody(exchangeA, 0);
+    exchangeB.plan = holdBody(exchangeB, 0);
+    const mgr = makeManager();
+
+    const runA = mgr.serveHttp(request(routeA.port, "a"), new Uint8Array(0), exchangeA.exchange);
+    const runB = mgr.serveHttp(request(routeB.port, "b"), new Uint8Array(0), exchangeB.exchange);
+    await waitUntil(() => exchangeA.waiting() === 1 && exchangeB.waiting() === 1);
+
+    mgr.stop();
+    await waitUntil(() => routeA.state.cancelled && routeB.state.cancelled);
+
+    exchangeA.plan = undefined;
+    exchangeA.releaseAll();
+    exchangeB.plan = undefined;
+    exchangeB.releaseAll();
+    await Promise.all([runA, runB]);
+    expect(exchangeA.failReason()).toBeDefined();
+    expect(exchangeB.failReason()).toBeDefined();
   });
 
   test("an abort that came through the exchange's own signal does not also fail() it", async () => {

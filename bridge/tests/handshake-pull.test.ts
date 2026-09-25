@@ -173,11 +173,12 @@ test("native loss retires one session; the coarse peer-offline waits for the las
   client.establish(PHONE_ID, { attemptId: "attempt-a" });
   client.establish(PHONE_2_ID, { attemptId: "attempt-b" });
 
-  const mux = (client as any).mux;
   const sessionGone: string[] = [];
   let coarseOffline = 0;
-  mux.notifyPeerSessionOffline = (peerId: string) => sessionGone.push(peerId);
-  mux.notifyPeerOffline = () => { coarseOffline++; };
+  client.attachStream(new MessageBus(), {
+    onPeerSessionGone: (peerId) => sessionGone.push(peerId),
+    onPeerOffline: () => { coarseOffline++; },
+  });
 
   client.markPeerOffline(PHONE_ID);
 
@@ -199,9 +200,8 @@ test("a session declared dead by liveness fires the coarse peer-offline only whe
   client.establish(PHONE_ID, { attemptId: "attempt-a" });
   client.establish(PHONE_2_ID, { attemptId: "attempt-b" });
 
-  const mux = (client as any).mux;
   let coarseOffline = 0;
-  mux.notifyPeerOffline = () => { coarseOffline++; };
+  client.attachStream(new MessageBus(), { onPeerOffline: () => { coarseOffline++; } });
 
   const sessions = (client as any).sessions as Map<string, { lastRecvAt: number }>;
   sessions.get(PHONE_ID)!.lastRecvAt = 0;
@@ -218,24 +218,6 @@ test("a session declared dead by liveness fires the coarse peer-offline only whe
   expect(coarseOffline).toBe(1);
 });
 
-// Per-machine relay slots: the app addresses each machine on its own
-// `<accountDeviceUuid>#<machineDeviceUuid>` slot so it can hold several
-// machines open at once. The slot is a TRANSPORT address; presence for a
-// sibling slot must never touch a session that belongs to ours.
-const PHONE_SLOT = `${PHONE_ID}#${AGENT_DEVICE_ID}`;
-
-test("loss for a slot scoped at another machine never retires our session", () => {
-  const client = freshClient();
-  client.establish(PHONE_SLOT, { attemptId: "attempt-slot" });
-
-  const foreign = `${PHONE_ID}#some-other-agent`;
-  client.markPeerOffline(foreign);
-  expect(client.peerSession(PHONE_SLOT)).not.toBeNull();
-
-  client.markPeerOffline(PHONE_SLOT);
-  expect(client.peerSession(PHONE_SLOT)).toBeNull();
-});
-
 // An unscoped id carries no claim about who it is for, and every pre-slot
 // client sends one — it must never be read as another machine's.
 test("loss for an unscoped peer id retires its native session", () => {
@@ -244,23 +226,4 @@ test("loss for an unscoped peer id retires its native session", () => {
 
   client.markPeerOffline(PHONE_ID);
   expect(client.peerSession(PHONE_ID)).toBeNull();
-});
-
-// The nastier half of the same fan-out: peer-offline suppresses the heavy
-// stream. Charging that to a sibling slot means dropping one machine in the
-// drawer silently stops the OTHER machine's terminal output.
-test("peer-offline for a slot scoped at another machine does not suppress our stream", () => {
-  const client = freshClient();
-  client.establish(PHONE_SLOT, { attemptId: "attempt-slot" });
-
-  const mux = (client as any).mux;
-  let suppressed = false;
-  mux.notifyPeerOffline = () => { suppressed = true; };
-
-  client.markPeerOffline(`${PHONE_ID}#some-other-agent`);
-  expect(suppressed).toBe(false);
-
-  // …but our own machine's slot going offline still suppresses it.
-  client.markPeerOffline(PHONE_SLOT);
-  expect(suppressed).toBe(true);
 });

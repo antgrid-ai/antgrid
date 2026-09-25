@@ -664,7 +664,7 @@ class ControlPlaneClient {
   /// reconnect would spuriously boot stopped projects. project:start has no RPC
   /// reply, so the bound is on DELIVERABILITY. During a keyless (session-down)
   /// window the stream still reads `connected` but the send SILENTLY DROPS
-  /// (`sendOnStream` no-ops without keys) — project:start never reaches the host
+  /// (`sendOnSession` no-ops without keys) — project:start never reaches the host
   /// and `awaitProjectRunning` then burns the full 30s before a generic failure.
   /// Refuse to fire into that window (throw an [RpcException]) so the caller can
   /// surface a retry now instead of waiting it out.

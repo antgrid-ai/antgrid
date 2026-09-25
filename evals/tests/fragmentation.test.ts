@@ -59,10 +59,11 @@ describe("fragmentation", () => {
     expect(content.size).toBe(THREE_MB);
     expect(content.content).not.toBeNull();
 
-    // The stream envelope `{ s: streamId, m }` is fragmented as a whole, so `s`
-    // must survive reassembly: matching via waitForStreamAbType (which keys on
-    // `_streamId === streamId`) is that proof — a lost `s` would land the
-    // reassembled frame on the control plane and never match here.
+    // A4: the bare AbMessage JSON is fragmented directly on this project's own
+    // QUIC stream — there is no `{s, m}` envelope to survive reassembly.
+    // Matching via `waitForStreamAbType` (which keys on `_streamId ===
+    // streamId`) proves the binding tagged the reassembled message with ITS
+    // OWN handle, not e.g. the control plane's.
     expect((content as { _streamId?: string })._streamId).toBe(streamId);
 
     const decoded = Buffer.from(content.content!, "base64");

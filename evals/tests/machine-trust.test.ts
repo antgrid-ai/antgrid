@@ -7,8 +7,9 @@
 //      way — is advertised and startable too: with the switch on, the phone
 //      gets the machine's WHOLE catalog. That disclosure is the deliberate
 //      consequence of collapsing authorization to one boolean.
-//   4. Stop projB, then issue control-plane `project:start projB` → re-opens as a
-//      fresh stream (stream-ready) and re-advertises running:true.
+//   4. Stop projB, then issue control-plane `project:start projB` → re-publishes
+//      `stream-ready {projectId}` and admits a fresh QUIC stream for it, and
+//      re-advertises running:true.
 //   5. Turn the switch OFF over the loopback control plane → E2E keys are
 //      retired and remote commands stop. Re-enable requires fresh E2E.
 //
@@ -41,7 +42,7 @@ async function loopbackControl(abDir: string, body: object): Promise<any> {
   return res.json();
 }
 
-/** Resolve the advertised streamId for `projectId` from a fresh advert. */
+/** Open `projectId`'s stream once a fresh advert shows it running. */
 async function streamFor(app: RelayClient, projectId: string): Promise<string> {
   app.drainQueued("agent:projects");
   await app.pullStateSnapshot();
@@ -217,10 +218,15 @@ test("outbound rides the machine switch: output stops while off and resumes only
     // === Switch OFF: the same bound stream goes quiet ===
     await setMobileAccess(env.abDir, false);
     cp.drainQueued("terminal:frame"); // in-flight frames sent before the flip
+    // A4: the switch tears down the whole native connection, which ends
+    // every project stream on it — the client's own registry drops the
+    // handle, so a post-flip send throws "not open" rather than reaching a
+    // gate on the wire.
+    await Bun.sleep(500);
     expect(() => cp.sendOnStream(
       streamB,
       createMessage("terminal:input", { terminalId: "ticker", data: "FORBIDDEN_INPUT\r" }),
-    )).toThrow(/Native payload is not connected/);
+    )).toThrow(/is not open/);
     const whileOff = await collectOutput(cp, streamB, "ticker", 6_000);
     expect(whileOff).toEqual([]);
     expect(existsSync(join(projBdir.dir, "input.log"))).toBe(false);
@@ -292,7 +298,7 @@ test("machine switch on exposes the catalog; switch off retires E2E and never re
 
     // === STEP 4: stop projB, then control-plane project:start projB ===
     expect((await loopbackControl(env.abDir, { id: "stop-b", type: "project:stop", projectId: projB })).ok).toBe(true);
-    const streamB2 = await cp.openProjectStream(projB, 12_000); // start-on-open → fresh stream-ready
+    const streamB2 = await cp.openProjectStream(projB, 12_000); // start-on-open → fresh stream-ready, fresh QUIC stream
     const outB2 = await driveTerminal(cp, streamB2, "tB2", "RESTART_B");
     expect(outB2).toContain("RESTART_B");
 

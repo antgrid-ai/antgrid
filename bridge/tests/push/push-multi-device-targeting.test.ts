@@ -9,7 +9,7 @@ import { loadPairedPhones, type PairedPhonesStore } from "../../src/paired-phone
 import { generateEphemeralKeypair } from "../../src/key-exchange";
 import { createMessage } from "../../src/protocol";
 import type { MessageBus } from "../../src/message-bus";
-import type { PeerSessionView } from "../../src/stream-mux";
+import type { PeerSessionView } from "../../src/project-streams";
 
 // A machine holds one E2E session per attached app device, so "the connected
 // phone" no longer names anyone. These drive the REAL project-core push wiring
@@ -78,7 +78,7 @@ async function startCore(peers: PeerSessionView[], register: (store: PairedPhone
     remote: {
       attachStream: (b) => {
         bus = b;
-        return { streamId: "s1", detach: () => {}, sendTo: async () => "sent" as const };
+        return { detach: () => {}, sendTo: async () => "sent" as const, deliverableTo: () => true };
       },
       establishedPeers: () => peers,
       peerSession: (peerId) => peers.find((p) => p.peerId === peerId) ?? null,

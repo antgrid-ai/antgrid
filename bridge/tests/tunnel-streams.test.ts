@@ -22,7 +22,7 @@ import {
   type TunnelHttpStreamOpen,
   type TunnelWsStreamOpen,
 } from "antgrid-wire";
-import type { TunnelProjectBinding } from "../src/stream-mux";
+import type { TunnelProjectBinding } from "../src/project-streams";
 import type { StreamRefusal } from "../src/peer/stream-dispatch";
 import type {
   TunnelAdmission,
@@ -187,13 +187,16 @@ function fakeTunnelServer() {
 }
 
 /** Fake `TunnelProjectBinding`. */
-function fakeBinding(streamId = "project-stream") {
+function fakeBinding() {
   const server = fakeTunnelServer();
   let refuse: ((peerId: string) => StreamRefusal | null) | null = null;
   let mayDeliver = true;
   let available = true;
+  // Every peer has an open project stream by default (A4's admission gate),
+  // so a suite testing other admission steps doesn't also have to wire this.
+  let hasOpen: ((peerId: string) => boolean) | null = null;
   const binding: TunnelProjectBinding = {
-    streamId,
+    hasOpenStream: (peerId) => (hasOpen ? hasOpen(peerId) : true),
     refusalFor: (peerId) => (refuse ? refuse(peerId) : null),
     mayDeliverTo: () => mayDeliver,
     tunnels: () => (available ? { admit: server.admit } : null),
@@ -203,6 +206,7 @@ function fakeBinding(streamId = "project-stream") {
     setRefusal: (fn: ((peerId: string) => StreamRefusal | null) | null) => { refuse = fn; },
     setMayDeliver: (v: boolean) => { mayDeliver = v; },
     setAvailable: (v: boolean) => { available = v; },
+    setHasOpenStream: (fn: ((peerId: string) => boolean) | null) => { hasOpen = fn; },
   };
 }
 
@@ -815,5 +819,41 @@ describe("TunnelStreamRegistry (A3)", () => {
     expect(closed).toHaveLength(1);
     expect(retiredPeers).toEqual([]);
     expect(registry.streamCount("someone-else")).toBe(1);
+  });
+
+  test("open with no open project stream for the peer is refused NOT_ALLOWED; another peer's open stream does not count", async () => {
+    const { registry, cataloged, bindings } = makeRegistry();
+    cataloged.add(PROJECT);
+    const { binding, setHasOpenStream } = fakeBinding();
+    bindings.set(PROJECT, binding);
+    setHasOpenStream((peerId) => peerId === "other-peer");
+
+    const { fake, result } = admitHttp(registry, { peerId: PEER });
+    expect(result?.code).toBe("NOT_ALLOWED");
+    expect(fake.readCalls).toEqual([]);
+
+    // The same projectId's project stream is open for a DIFFERENT peer —
+    // that must not satisfy PEER's own admission (A4's single per-peer point).
+    const other = admitHttp(registry, { peerId: "other-peer" });
+    expect(other.result).toBeUndefined();
+  });
+
+  test("closing the project stream does not unbind an open tunnel stream", async () => {
+    const { registry, cataloged, bindings } = makeRegistry();
+    cataloged.add(PROJECT);
+    const fb = fakeBinding();
+    bindings.set(PROJECT, fb.binding);
+    const { fake, requestId } = admitHttp(registry, {});
+    fake.pushJson(httpRequest(requestId));
+    await flush();
+    expect(fb.server.httpCalls).toHaveLength(1);
+
+    // The project stream closes: the peer no longer has one open. Admission
+    // is a one-time gate, not a live dependency, so the tunnel exchange
+    // admitted while it WAS open keeps running.
+    fb.setHasOpenStream(() => false);
+    const exchange = fb.server.httpCalls[0]!.exchange;
+    expect(await exchange.head({ status: 200, headers: {} })).toBe("sent");
+    expect(registry.streamCount(PEER)).toBe(1);
   });
 });

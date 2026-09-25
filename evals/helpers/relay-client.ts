@@ -15,6 +15,10 @@ import {
   TRANSFER_TIMEOUT_MS,
   GLOBAL_REASSEMBLY_BUDGET,
   CREDIT_BATCH_BYTES,
+  FRAG_THRESHOLD,
+  MAX_TRANSFER_BYTES,
+  buildFragments,
+  STREAM_PROJECT_RECORD_MAX_BYTES,
   STREAM_TERMINAL_BRIDGE_RECORD_MAX_BYTES,
   STREAM_TUNNEL_RECORD_MAX_BYTES,
   TUNNEL_RECORD_TAG_BODY,
@@ -139,6 +143,25 @@ export interface TerminalStreamClient {
   readonly ended: Promise<void>;
 }
 
+/** One project's admitted QUIC stream (Stage A wave A4: project streams
+ *  replace the mux). `open` is true only between the bound `stream-ready` and
+ *  this half's end. `closingLocally` distinguishes a clean local close from a
+ *  bridge-initiated FIN/reset for `ended`'s classification — the two are
+ *  otherwise wire-indistinguishable (D4: `stopped()`/`receivedReset()` are
+ *  never awaited, mirroring the binding-constraint hard rule bridge-src and
+ *  Dart both follow). */
+interface ProjectStreamState {
+  readonly projectId: string;
+  readonly stream: Awaited<ReturnType<Connection["openBi"]>>;
+  open: boolean;
+  closingLocally: boolean;
+  refusal?: { code: string; message: string };
+  readonly ended: Promise<"fin" | "error">;
+  /** Writes are chained through this so `sendOnStream` calls land on the wire
+   *  in call order even though each write is itself async. */
+  writeChain: Promise<void>;
+}
+
 export class NativeAuthorizationNotReadyError extends Error {
   constructor(readonly machineDeviceId: string, cause: unknown) {
     super(`Native authorization for ${machineDeviceId} is not ready: ${String(cause)}`);
@@ -249,9 +272,18 @@ export class RelayClient {
   /** True once the hello resolves `established`. */
   private sessionConfirmed = false;
 
-  // --- Multiplexed project streams ---
-  /** projectId → streamId, learned from control-plane `stream-ready`/`agent:projects`. */
-  private streamByProject = new Map<string, string>();
+  // --- Project streams (Stage A wave A4: project streams replace the mux) ---
+  /** projectId → the project's admitted QUIC stream, once bound. Absent for a
+   *  project that was never opened, or whose stream has ended. */
+  private projectStreams = new Map<string, ProjectStreamState>();
+  /** Projects with a live ready notice (session-stream `stream-ready`, or an
+   *  `agent:projects` entry with `running:true`) since the last establishment
+   *  or this project's last stream end — mirrors `MachineSession`'s
+   *  `_readyProjects` so `openProjectStream` skips a redundant `project:start`. */
+  private readyProjects = new Set<string>();
+  /** Per-sender fragment id counter (the bridge mirrors this with a
+   *  process-global counter; Dart with `$machineDeviceId-$projectId-$counter`). */
+  private projectFragCounter = 0;
 
   // --- Per-channel flow control (receiver half; see docs/protocol/peer-session.md) ---
   // Cumulative frame-payload bytes taken off each channel since this session
@@ -561,6 +593,12 @@ export class RelayClient {
     this.nativeGeneration++;
     this.nativeRecords?.close();
     this.nativeRecords = null;
+    // Closing the connection ends every project stream on it (bridge-observed
+    // FIN/reset); marking closingLocally first classifies that as "fin" for
+    // anyone awaiting `ended`, since this is our own teardown, not a fault.
+    for (const state of this.projectStreams.values()) state.closingLocally = true;
+    this.projectStreams.clear();
+    this.readyProjects.clear();
     this.nativeConnection?.close(1n, []);
     this.nativeConnection = null;
   }
@@ -1124,27 +1162,38 @@ export class RelayClient {
     if (env && typeof env === "object" && "m" in env) this.routeAppEnvelope(env as { s?: string; m: unknown });
   }
 
+  /** A4: project traffic no longer rides the session stream. A `{s, m}` whose
+   *  `s` names a project is dropped rather than routed (§1.2) — this client's
+   *  mirror of the bridge's `reason:"project-on-session-stream"` diagnostic
+   *  drop, minus the netwatch record. */
   private routeAppEnvelope(env: { s?: string; m: unknown }): void {
     const s = env.s;
-    const streamId = typeof s === "string" && s !== CONTROL_STREAM_ID ? s : undefined;
-    this.dispatchAbMessage(JSON.stringify(env.m), streamId);
+    if (typeof s === "string" && s !== CONTROL_STREAM_ID && s !== "0") return;
+    this.dispatchAbMessage(JSON.stringify(env.m));
   }
 
   /** Parse a plaintext AbMessage and route it to waiters/queue. `streamId`
-   *  tags it so `waitForStreamAbType` can distinguish project streams from
-   *  the control plane; control-plane messages carry none. Tunnel traffic
-   *  rides its own QUIC streams, never a project stream, so anything that
+   *  tags it so `waitForStreamAbType` can distinguish project-stream traffic
+   *  from the control plane; control-plane messages carry none. Anything that
    *  fails to parse as an AbMessage is dropped, matching the bridge's own
    *  handling of a stray one. */
   private dispatchAbMessage(json: string, streamId?: string): void {
     const msg = parseMessage(json);
     if (!msg) return;
-    // `stream-ready` teaches the phone the streamId for a project.
+    // Ready-notice bookkeeping (mirrors MachineSession's `_readyProjects`):
+    // `stream-ready` no longer carries a streamId (A4) — it is only ever this
+    // project's readiness signal now. An `agent:projects` advert is the other
+    // source, keyed on `running`.
+    const anyMsg = msg as any;
     if (msg.type === ("stream-ready" as AbMessage["type"])) {
-      const anyMsg = msg as any;
-      if (anyMsg.projectId && anyMsg.streamId) this.streamByProject.set(anyMsg.projectId, anyMsg.streamId);
+      if (anyMsg.projectId) this.readyProjects.add(anyMsg.projectId);
+    } else if (msg.type === ("agent:projects" as AbMessage["type"])) {
+      for (const p of anyMsg.projects ?? []) {
+        if (p.running) this.readyProjects.add(p.projectId);
+        else this.readyProjects.delete(p.projectId);
+      }
     }
-    if (streamId) (msg as any)._streamId = streamId;
+    if (streamId) anyMsg._streamId = streamId;
     this.deliver(msg);
   }
 
@@ -1184,6 +1233,10 @@ export class RelayClient {
        *  keeps this client on the legacy raw-output display path (old-app
        *  compatibility eval). */
       omitTerminalFramesV1?: boolean;
+      /** Play a stale, pre-worktree app: omit `checkoutRouting` so the bridge
+       *  refuses a project stream open for any project holding a managed
+       *  worktree session (`UPDATE_REQUIRED` — gate-project-streams row 3). */
+      omitCheckoutRouting?: boolean;
     } = {},
   ): Promise<void> {
     if (!this.nativePeerId) throw new Error("Native peer is not connected");
@@ -1200,7 +1253,8 @@ export class RelayClient {
     // it the app fetches its own file tree, so the re-sync need not push one;
     // `terminalFramesV1` opts this client into rendered-frame terminal display —
     // omitting it must fail CLOSED to the legacy raw-output path (never assumed).
-    const capabilities: Record<string, true> = { checkoutRouting: true };
+    const capabilities: Record<string, true> = {};
+    if (!opts.omitCheckoutRouting) capabilities.checkoutRouting = true;
     if (!opts.omitPullsTree) capabilities.pullsTree = true;
     if (!opts.omitTerminalFramesV1) capabilities.terminalFramesV1 = true;
 
@@ -1225,29 +1279,233 @@ export class RelayClient {
   // --- Streams ---
 
   /**
-   * Drill into a project: send control-plane `project:start`, await the
-   * `stream-ready { projectId, streamId }`, and return the streamId to tag
-   * subsequent project traffic. No new socket, no pairing.
+   * Opens `projectId`'s own QUIC stream (Stage A wave A4: project streams
+   * replace the mux). Drives control-plane `project:start` and waits for the
+   * ready notice UNLESS one has already been seen since establishment or
+   * since this project's last stream end (mirrors `MachineSession.openProject`
+   * step 2). Then `openBi`s `{kind:"project", projectId}` and awaits the first
+   * record. Resolves to the handle, which IS `projectId` (D-8: every helper
+   * that took a bridge-minted streamId keeps its signature; the handle no
+   * longer leaks a bridge-internal id). Idempotent while the stream is open.
    */
   async openProjectStream(projectId: string, timeoutMs = 10_000): Promise<string> {
-    const existing = this.streamByProject.get(projectId);
-    if (existing) return existing;
-    this.sendEncrypted(createMessage("project:start", { projectId } as any));
-    const ready = await this.waitFor(
+    const existing = this.projectStreams.get(projectId);
+    if (existing?.open) return projectId;
+    const deadline = Date.now() + timeoutMs;
+    if (!this.readyProjects.has(projectId)) {
+      this.sendEncrypted(createMessage("project:start", { projectId } as any));
+      await this.awaitProjectReady(projectId, Math.max(1, deadline - Date.now()));
+    }
+    const { first } = await this.openProjectBiStream(projectId, Math.max(1, deadline - Date.now()));
+    if (first.refusal) {
+      throw Object.assign(
+        new Error(`project stream ${projectId} refused: ${first.refusal.code} ${first.refusal.message}`),
+        { refusal: first.refusal },
+      );
+    }
+    return projectId;
+  }
+
+  /** Admission probe: opens `projectId`'s QUIC stream directly, with no ready
+   *  wait and no `project:start`. Surfaces the outcome as data instead of
+   *  throwing — a refusal here is the row under test, not a failure. */
+  async openProjectStreamRaw(projectId: string, timeoutMs = 10_000): Promise<{
+    refusal?: { code: string; message: string };
+    first?: Record<string, any>;
+    ended: Promise<"fin" | "error">;
+  }> {
+    const { state, first } = await this.openProjectBiStream(projectId, timeoutMs);
+    return { refusal: first.refusal, first: first.record, ended: state.ended };
+  }
+
+  /** Waits for `projectId`'s ready notice: a live `stream-ready {projectId}`
+   *  on the session stream, or a `control:result {ok:false, verb:"project:start"}`
+   *  naming it (which fails with that error's code). A no-op if the project is
+   *  already in `readyProjects`. */
+  private awaitProjectReady(projectId: string, timeoutMs: number): Promise<void> {
+    if (this.readyProjects.has(projectId)) return Promise.resolve();
+    const ready = this.waitForCancelable(
       (m: any) => m.type === "stream-ready" && m.projectId === projectId,
       timeoutMs,
     );
-    const streamId = (ready as any).streamId as string;
-    this.streamByProject.set(projectId, streamId);
-    return streamId;
+    const failed = this.waitForCancelable(
+      (m: any) => m.type === "control:result" && m.ok === false && m.verb === "project:start" && m.projectId === projectId,
+      timeoutMs,
+    );
+    return Promise.race([
+      ready.promise.then(() => {
+        failed.cancel();
+      }),
+      failed.promise.then((m: any) => {
+        ready.cancel();
+        const code = m.error?.code ?? "PROJECT_START_FAILED";
+        throw Object.assign(new Error(`project:start ${projectId} failed: ${code} ${m.error?.message ?? ""}`), { code });
+      }),
+    ]);
   }
 
-  /** Send a message tagged with a project stream (`{ s: streamId, m }`).
-   *  `msg` is `object` rather than `AbMessage` because the preview channel
-   *  carries tunnel-protocol frames, which are deliberately not AbMessages
-   *  (`parseMessageFast` rejecting them IS the routing). */
-  sendOnStream(streamId: string, msg: object, channel: "control" | "preview" = "control"): void {
-    this.sendAppEnvelope(streamId, msg, channel);
+  /** Opens `projectId`'s bi-directional QUIC stream, writes the A0b open
+   *  frame, and classifies the first record (§1.1: `stream:refused` then FIN,
+   *  or `stream-ready` naming this project). Registers the binding into
+   *  `projectStreams`/`readyProjects` only once admitted. Every record after
+   *  the first is a bare `AbMessage` or a `__frag` piece of one, reassembled
+   *  per binding and dispatched with `_streamId = projectId` — the same shape
+   *  `openProjectStream`/`openProjectStreamRaw` both build on. */
+  private async openProjectBiStream(
+    projectId: string,
+    timeoutMs: number,
+  ): Promise<{ state: ProjectStreamState; first: { refusal?: { code: string; message: string }; record?: Record<string, any> } }> {
+    const connection = this.nativeConnection;
+    if (!connection) throw new Error("Native connection is not established");
+    const stream = await connection.openBi();
+    const openFrame = prefixWithLength(encodeStreamOpen({ kind: "project", projectId }));
+    await stream.send.writeAll(Array.from(openFrame));
+
+    let endedResolve!: (v: "fin" | "error") => void;
+    const ended = new Promise<"fin" | "error">((resolve) => {
+      endedResolve = resolve;
+    });
+    const state: ProjectStreamState = {
+      projectId,
+      stream,
+      open: false,
+      closingLocally: false,
+      ended,
+      writeChain: Promise.resolve(),
+    };
+
+    let firstResolve!: (v: { refusal?: { code: string; message: string }; record?: Record<string, any> }) => void;
+    const firstP = new Promise<{ refusal?: { code: string; message: string }; record?: Record<string, any> }>((resolve) => {
+      firstResolve = resolve;
+    });
+
+    const reader = new StreamRecordReader({ recv: stream.recv }, STREAM_PROJECT_RECORD_MAX_BYTES, () => {});
+    const reassembler = new FragReassembler({
+      timeoutMs: TRANSFER_TIMEOUT_MS,
+      globalBudgetBytes: GLOBAL_REASSEMBLY_BUDGET,
+      onComplete: (json) => this.dispatchAbMessage(json, projectId),
+      onAbort: () => {},
+    });
+
+    let gotFirst = false;
+    let cleanRefusal = false;
+
+    void (async () => {
+      try {
+        while (true) {
+          const bytes = await reader.read();
+          const text = Buffer.from(bytes).toString("utf8");
+          if (!gotFirst) {
+            gotFirst = true;
+            let obj: any;
+            try {
+              obj = JSON.parse(text);
+            } catch {
+              obj = null;
+            }
+            if (obj?.type === "stream:refused") {
+              cleanRefusal = true;
+              state.refusal = { code: obj.code, message: obj.message };
+              firstResolve({ refusal: state.refusal });
+              continue; // §1.1: a clean FIN follows a refusal (D4)
+            }
+            if (obj?.type === "stream-ready" && obj.projectId === projectId) {
+              state.open = true;
+              this.readyProjects.add(projectId);
+              this.projectStreams.set(projectId, state);
+              firstResolve({ record: obj });
+              continue;
+            }
+            // Protocol error (§1.1): neither refused nor a matching stream-ready.
+            firstResolve({ refusal: { code: "INVALID_RECORD", message: `unexpected first record: ${text.slice(0, 200)}` } });
+            void stream.send.reset(0n).catch(() => {});
+            continue;
+          }
+          if (reassembler.accept(text)) continue; // a __frag piece; onComplete dispatches once the set is whole
+          this.dispatchAbMessage(text, projectId);
+        }
+      } catch {
+        // The bridge's half ended — FIN (orderly close/refusal) or reset
+        // (overflow, stream-lost) are wire-indistinguishable here (D4).
+      } finally {
+        state.open = false;
+        this.readyProjects.delete(projectId);
+        if (this.projectStreams.get(projectId) === state) this.projectStreams.delete(projectId);
+        if (!gotFirst) firstResolve({ refusal: { code: "STREAM_ENDED", message: "project stream ended before any record" } });
+        endedResolve(cleanRefusal || state.closingLocally ? "fin" : "error");
+      }
+    })();
+
+    const first = await withTimeout(firstP, timeoutMs, `project-stream first record for ${projectId}`);
+    return { state, first };
+  }
+
+  /** Send a message on `handle`: `"0"`/`CONTROL_STREAM_ID` rides the session
+   *  stream unchanged; any other handle is that project's own QUIC stream,
+   *  fragmenting past `FRAG_THRESHOLD` (§1.1 — all fragment records are
+   *  queued in one synchronous loop so nothing interleaves inside the set).
+   *  `channel` is ignored on a project stream: a project record carries no
+   *  envelope to label (§1.1, "the inbound channel ... is always control").
+   *  `msg` is `object` rather than `AbMessage` because the preview channel on
+   *  the CONTROL stream still carries tunnel-protocol frames, which are
+   *  deliberately not AbMessages. Throws if the project stream is not open. */
+  sendOnStream(handle: string, msg: object, channel: "control" | "preview" = "control"): void {
+    if (handle === CONTROL_STREAM_ID || handle === "0") {
+      this.sendControlEnvelope(msg, channel);
+      return;
+    }
+    const state = this.projectStreams.get(handle);
+    if (!state?.open) throw new Error(`Project stream ${handle} is not open`);
+    this.writeProjectRecord(state, msg);
+  }
+
+  /** Encodes `msg`, fragments it past `FRAG_THRESHOLD`, and chains every
+   *  resulting record onto the binding's write order. Throws synchronously
+   *  past `MAX_TRANSFER_BYTES` (mirrors the bridge's send-time
+   *  `"too-large"`/Dart's `FragSendError`; nothing is written). A write
+   *  failure surfaces as a delivered `error` message, matching `sendBinary`'s
+   *  handling on the session stream. */
+  private writeProjectRecord(state: ProjectStreamState, msg: object): void {
+    const json = JSON.stringify(msg);
+    const byteLen = Buffer.byteLength(json, "utf8");
+    if (byteLen > MAX_TRANSFER_BYTES) {
+      throw new Error(`project-stream record for ${state.projectId} exceeds MAX_TRANSFER_BYTES (${byteLen} bytes)`);
+    }
+    const records =
+      byteLen > FRAG_THRESHOLD ? buildFragments(json, `${this.deviceId}-${state.projectId}-${this.projectFragCounter++}`) : [json];
+    for (const record of records) {
+      const bytes = prefixWithLength(Buffer.from(record, "utf8"));
+      state.writeChain = state.writeChain.then(() => state.stream.send.writeAll(Array.from(bytes)));
+    }
+    state.writeChain.catch((error) =>
+      this.deliver({ type: "error", code: "PROJECT_STREAM_SEND_FAILED", message: String(error) }),
+    );
+  }
+
+  /** Finishes our half of `handle`'s project stream and awaits the bridge's
+   *  end. A no-op if the handle names no open stream. */
+  async closeProjectStream(handle: string): Promise<void> {
+    const state = this.projectStreams.get(handle);
+    if (!state) return;
+    state.closingLocally = true;
+    await state.writeChain.catch(() => {});
+    await state.stream.send.finish().catch(() => {});
+    await state.ended;
+  }
+
+  /** Resolves once `handle`'s project stream has ended, `"fin"` for a clean
+   *  close (ours or a refusal's) and `"error"` otherwise (D4: reset and
+   *  stream-lost are wire-indistinguishable from here). Throws if `handle`
+   *  was never opened. */
+  projectStreamEnded(handle: string): Promise<"fin" | "error"> {
+    const state = this.projectStreams.get(handle);
+    if (!state) throw new Error(`Project stream ${handle} was never opened`);
+    return state.ended;
+  }
+
+  /** True iff `handle` names a project whose stream is currently bound. */
+  isProjectStreamOpen(handle: string): boolean {
+    return this.projectStreams.get(handle)?.open ?? false;
   }
 
   /** Await an AbMessage of `type` arriving on a specific project stream. */
@@ -1263,15 +1521,15 @@ export class RelayClient {
 
   /** Send an AbMessage on the machine CONTROL PLANE (`s` omitted). */
   sendEncrypted(msg: AbMessage): void {
-    this.sendAppEnvelope(CONTROL_STREAM_ID, msg, "control");
+    this.sendControlEnvelope(msg, "control");
   }
 
-  /** Wrap `msg` in the `{ s?, m }` stream envelope and send plaintext.
-   *  Control-plane traffic uses `CONTROL_STREAM_ID` (`s` omitted). */
-  private sendAppEnvelope(streamId: string, msg: unknown, channel: "control" | "preview"): void {
+  /** Wrap `msg` as `{ m }` and send as a plaintext session frame. Project
+   *  traffic no longer shares this envelope (A4) — it rides its own QUIC
+   *  stream via `sendOnStream`/`writeProjectRecord`. */
+  private sendControlEnvelope(msg: unknown, channel: "control" | "preview"): void {
     if (!this.established || !this.nativePeerId) throw new Error("Native session is not established");
-    const envelope = streamId && streamId !== CONTROL_STREAM_ID ? { s: streamId, m: msg } : { m: msg };
-    this.sendPlaintextFrame(envelope, channel);
+    this.sendPlaintextFrame({ m: msg }, channel);
   }
 
   /** Send one bare session frame as a peer frame. */
@@ -1434,7 +1692,9 @@ export class RelayClient {
   private resetE2e(): void {
     this.established = null;
     this.sessionConfirmed = false;
-    this.streamByProject.clear();
+    for (const state of this.projectStreams.values()) state.closingLocally = true;
+    this.projectStreams.clear();
+    this.readyProjects.clear();
   }
 
   async disconnect(): Promise<void> {

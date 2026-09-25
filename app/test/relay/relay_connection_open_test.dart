@@ -11,8 +11,8 @@ import '../helpers/fixed_peer_connector.dart';
 //   - two projects on ONE machine share the ONE MachineSession the connection
 //     produces (no second dial / hello for the second project).
 //   - drill-in binds via `stream-ready` at 0 RTT: once the control plane has
-//     advertised a project's streamId, `bindProject` resolves immediately
-//     with no new `project:start` send.
+//     advertised a project ready, `openProject` opens its native stream with
+//     no new `project:start` send.
 import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
@@ -28,7 +28,8 @@ import 'package:flutter_test/flutter_test.dart';
 // settable control state and an explicit payload double for the native link).
 // ---------------------------------------------------------------------------
 
-class _RecordingRelay extends RelayService implements PeerLink {
+class _RecordingRelay extends RelayService
+    implements PeerLink, MultiStreamPeerLink {
   @override
   bool get isDispatchAllowed => true;
   @override
@@ -105,6 +106,23 @@ class _RecordingRelay extends RelayService implements PeerLink {
     _states.add(s);
   }
 
+  /// Every native project stream opened, in call order — a project bound at
+  /// 0 RTT still opens exactly one of these; only an extra `project:start`
+  /// round trip would add a second control-plane send, not a second entry
+  /// here.
+  final openedStreams = <_FakeProjectStream>[];
+
+  @override
+  Future<PeerStream> openStream(
+    StreamOpen open, {
+    required int maxRecordBytes,
+    required int maxQueuedBytes,
+  }) async {
+    final stream = _FakeProjectStream(open);
+    openedStreams.add(stream);
+    return stream;
+  }
+
   @override
   void dispose() {
     unawaited(closeStreams());
@@ -116,6 +134,88 @@ class _RecordingRelay extends RelayService implements PeerLink {
     if (!_presence.isClosed) await _presence.close();
     if (!_errors.isClosed) await _errors.close();
   }
+}
+
+/// One project's native stream, the bridge side. Mirrors
+/// `antgrid_relay_client`'s own `FakePeerStream` test fake at the shape this
+/// suite needs: inject the bridge's first `stream-ready` record, read back
+/// what the app sent.
+class _FakeProjectStream implements PeerStream {
+  _FakeProjectStream(this.open);
+
+  final StreamOpen open;
+  // Single-subscription, so a record injected before the session's read loop
+  // subscribes is buffered rather than dropped.
+  final _records = StreamController<Uint8List>();
+  final sent = <Uint8List>[];
+  bool resetCalled = false;
+  bool finishCalled = false;
+
+  @override
+  Stream<Uint8List> get records => _records.stream;
+
+  @override
+  Future<PeerSendOutcome> send(Uint8List record) async {
+    sent.add(record);
+    return PeerSendOutcome.accepted;
+  }
+
+  @override
+  Future<void> reset() async => resetCalled = true;
+
+  @override
+  Future<void> finish() async => finishCalled = true;
+
+  void injectStreamReady(String projectId) => _injectJson({
+    'type': 'stream-ready',
+    'projectId': projectId,
+  });
+
+  void _injectJson(Map<String, dynamic> json) {
+    if (!_records.isClosed) {
+      _records.add(Uint8List.fromList(utf8.encode(jsonEncode(json))));
+    }
+  }
+}
+
+/// Opens [projectId] on [session] and answers its native stream's first
+/// record, as the bridge does once it admits the open.
+Future<StreamTransport> _openBound(
+  _RecordingRelay relay,
+  MachineSession session,
+  String projectId,
+) async {
+  final openBefore = relay.openedStreams.length;
+  final opening = session.openProject(projectId, {
+    'type': 'project:start',
+    'projectId': projectId,
+  }, timeout: const Duration(seconds: 2));
+  for (var i = 0; i < 50 && relay.openedStreams.length == openBefore; i++) {
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+  }
+  relay.openedStreams.last.injectStreamReady(projectId);
+  return opening;
+}
+
+/// Advertises [projectId] ready on the control plane, plaintext, exactly as
+/// an unprompted `agent:projects` push would — this is what lets a later
+/// `openProject` skip the `project:start` round trip (hazard J). Awaits a
+/// beat for the session's broadcast listener to process the injected frame
+/// before returning.
+Future<void> _advertiseReady(_RecordingRelay relay, String projectId) async {
+  relay.inject(
+    IncomingPeerFrame(
+      channel: 'control',
+      payload: Uint8List.fromList(
+        utf8.encode(
+          jsonEncode({
+            'm': {'type': 'stream-ready', 'projectId': projectId},
+          }),
+        ),
+      ),
+    ),
+  );
+  await Future<void>.delayed(const Duration(milliseconds: 20));
 }
 
 Future<Map<String, dynamic>> _waitForControlFrame(
@@ -188,7 +288,7 @@ DeviceIdentity _identity() => DeviceIdentity(
 /// is account-derived, so the ladder is dial -> presence -> plaintext hello.
 PeerConnectionMechanisms _mechanisms(_RecordingRelay relay) =>
     PeerConnectionMechanisms(
-      peerRuntime: FixedPeerConnector(relay),
+      peerRuntime: _MultiStreamConnector(relay),
       machineDeviceId: _machineId,
       resolveCoords: () async => const ConnCoords(
         relayUrl: 'ws://relay.test',
@@ -204,6 +304,35 @@ RelayCentralControlDialer _central(_RecordingRelay relay) =>
       epoch: 1,
       mintToken: () async => 'license-token',
     );
+
+/// [FixedPeerConnector] with a payload link that also opens native streams:
+/// `openProject` needs a [MultiStreamPeerLink], and [TestPayloadLink] alone
+/// hides the relay's.
+class _MultiStreamConnector extends FixedPeerConnector {
+  _MultiStreamConnector(_RecordingRelay super.relay)
+    : _multiStreamLink = _MultiStreamPayloadLink(relay);
+
+  final _MultiStreamPayloadLink _multiStreamLink;
+
+  @override
+  PeerLink get link => _multiStreamLink;
+}
+
+class _MultiStreamPayloadLink extends TestPayloadLink
+    implements MultiStreamPeerLink {
+  _MultiStreamPayloadLink(_RecordingRelay super.carrier);
+
+  @override
+  Future<PeerStream> openStream(
+    StreamOpen open, {
+    required int maxRecordBytes,
+    required int maxQueuedBytes,
+  }) => (carrier as _RecordingRelay).openStream(
+    open,
+    maxRecordBytes: maxRecordBytes,
+    maxQueuedBytes: maxQueuedBytes,
+  );
+}
 
 /// Brings the connection up against the fake agent and returns the resulting
 /// session.
@@ -306,9 +435,16 @@ void main() {
     expect(relay.connectCalls, 1);
     expect(session2, same(session1));
 
-    // Two distinct project streams, ONE underlying session/relay.
-    final streamA = session1.streamFor('stream-a');
-    final streamB = session1.streamFor('stream-b');
+    // Two distinct project streams, ONE underlying session/relay — each
+    // needs its own control-plane ready notice before its native stream
+    // binds (hazard J).
+    await _advertiseReady(relay, 'proj-a');
+    await _advertiseReady(relay, 'proj-b');
+    final streamA = await _openBound(relay, session1, 'proj-a');
+    await streamA.connect();
+    final streamB = await _openBound(relay, session1, 'proj-b');
+    await streamB.connect();
+
     expect(identical(streamA, streamB), isFalse);
     expect(streamA.session, same(session1));
     expect(streamB.session, same(session1));
@@ -316,7 +452,7 @@ void main() {
   });
 
   test('drill-in binds via a control-plane stream-ready advert at 0 RTT — no '
-      'new project:start once the streamId is already known', () async {
+      'new project:start once the project is already known ready', () async {
     final conn = MachineConnection(
       machineDeviceId: _machineId,
       crypto: CryptoService(),
@@ -326,49 +462,35 @@ void main() {
 
     final session = await _openConnection(conn);
 
-    // The agent advertises a project's stream unprompted (e.g. as part of
+    // The agent advertises a project ready unprompted (e.g. as part of
     // `agent:projects` on connect) — plaintext, exactly as MachineSession's
     // own outbound traffic is since Stage B.
-    relay.inject(
-      IncomingPeerFrame(
-        channel: 'control',
-        payload: Uint8List.fromList(
-          utf8.encode(
-            jsonEncode({
-              'm': {
-                'type': 'stream-ready',
-                'projectId': 'proj-a',
-                'streamId': 'stream-a',
-              },
-            }),
-          ),
-        ),
-      ),
-    );
-
-    String? knownStreamId;
-    for (var i = 0; i < 50; i++) {
-      knownStreamId = session.streamIdForProject('proj-a');
-      if (knownStreamId != null) break;
-      await Future<void>.delayed(const Duration(milliseconds: 10));
-    }
-    expect(knownStreamId, 'stream-a');
+    await _advertiseReady(relay, 'proj-a');
 
     final sentBefore = relay.sent.length;
-    final streamId = await session.bindProject('proj-a', {
+    final openBefore = relay.openedStreams.length;
+    final openFuture = session.openProject('proj-a', {
       'type': 'project:start',
       'projectId': 'proj-a',
     }, timeout: const Duration(seconds: 2));
-    expect(streamId, 'stream-a');
+    for (var i = 0; i < 50 && relay.openedStreams.length == openBefore; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+    }
+    expect(
+      relay.openedStreams.length,
+      openBefore + 1,
+      reason: 'a project already known ready opens its native stream at once',
+    );
+    relay.openedStreams.last.injectStreamReady('proj-a');
+    final transport = await openFuture;
+
     expect(
       relay.sent.length,
       sentBefore,
       reason:
-          'a known streamId resolves at 0 RTT — bindProject must '
-          'not send project:start when the mapping is already known',
+          'a project already known ready resolves at 0 RTT — openProject '
+          'must not send project:start when readiness is already known',
     );
-
-    final transport = session.streamFor(streamId);
     expect(
       transport.session,
       same(session),

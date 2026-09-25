@@ -5,7 +5,7 @@ import type { CentralControlClient } from "./central-control-client";
 export interface RemoteHostConnection extends Pick<PeerSessionOwner,
   "deviceId" | "setBus" | "attachStream" | "establishedPeers" | "peerSession" |
   "hasEstablishedSession" | "anySessionSupportsCheckoutRouting" | "sendOnChannel" |
-  "noteStreamBound" | "send"> {
+  "send"> {
   connect(): void;
   close(): Promise<void>;
   redialWithFreshToken(): void;

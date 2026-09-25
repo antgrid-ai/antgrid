@@ -1,5 +1,5 @@
 import { z } from "zod/v4";
-import { MAX_TRANSFER_BYTES } from "./frag";
+import { MAX_FRAME_PAYLOAD, MAX_TRANSFER_BYTES } from "./frag";
 import { PEER_MAX_RECORD_BYTES } from "./peer-authorization";
 
 // The first record on every native peer stream, the session stream included.
@@ -87,7 +87,8 @@ export type StreamOpenKind = StreamOpen["kind"];
 // this in-band record followed by FIN; a reset code is bridge diagnostics only.
 //   NOT_READY: the project core this stream would bind to has not finished
 //     starting (hazard J, §1.5); the app should wait for the session-stream
-//     ready notice and retry, not park the open.
+//     ready notice and retry, not park the open. Also covers a project
+//     stream itself opened before the project has a relay-registered core.
 //   UPDATE_REQUIRED: mirrors the existing `UPDATE_REQUIRED` code
 //     (host-server.ts / project-core.ts) for a peer too old to speak this
 //     stream's protocol.
@@ -122,6 +123,11 @@ export const STREAM_MAX_PROJECTS_PER_PEER = 32;
 export const STREAM_MAX_TERMINAL_ATTACHMENTS_PER_PEER = 64;
 export const STREAM_MAX_TUNNEL_STREAMS_PER_PEER = 128;
 export const STREAM_MAX_PENDING_OPENS_PER_PEER = 16;
+
+// Per-record cap for the project stream (A4), both directions: what the old
+// session-stream `{s, m}` envelope already accepted, so nothing this size
+// bound before can overflow one project stream now.
+export const STREAM_PROJECT_RECORD_MAX_BYTES = MAX_FRAME_PAYLOAD;
 
 // Per-record caps for the terminal attachment stream (A2). The app-to-bridge
 // direction only ever carries the four small subscribe/ack/unsubscribe/

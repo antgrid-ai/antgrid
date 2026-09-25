@@ -9,7 +9,7 @@ import { loadPairedPhones, type PairedPhonesStore } from "../../src/paired-phone
 import { generateEphemeralKeypair, deriveSharedSecret } from "../../src/key-exchange";
 import { createMessage } from "../../src/protocol";
 import type { MessageBus } from "../../src/message-bus";
-import type { AttachStreamOpts } from "../../src/stream-mux";
+import type { AttachStreamOpts } from "../../src/project-streams";
 
 // These exercise the REAL project-core push wiring (resolveTargets/shouldFallback),
 // not the dispatcher in isolation: push-dispatcher.test.ts injects both, so it
@@ -84,9 +84,9 @@ async function startRestartedAgent(opts: { mobileAccess: boolean }) {
       attachStream: (b) => {
         bus = b;
         return {
-          streamId: "s1",
           detach: () => {},
           sendTo: async () => "sent" as const,
+          deliverableTo: () => true,
         };
       },
       establishedPeers: () => [],
@@ -192,9 +192,9 @@ async function startAfterDesktopLeft() {
         bus = b;
         streamOpts = o;
         return {
-          streamId: "s1",
           detach: () => {},
           sendTo: async () => "sent" as const,
+          deliverableTo: () => true,
         };
       },
       establishedPeers: () => [],
@@ -266,9 +266,9 @@ async function startAfterPhoneLeft() {
         bus = b;
         streamOpts = o;
         return {
-          streamId: "s1",
           detach: () => {},
           sendTo: async () => "sent" as const,
+          deliverableTo: () => true,
         };
       },
       establishedPeers: () => [],

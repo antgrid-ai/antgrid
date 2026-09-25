@@ -714,6 +714,26 @@ test("a second bidi stream is refused in-band instead of retiring the connection
   } finally { f.client.close(); }
 });
 
+test("an established peer with a catalogued, attached project gets a project open admitted, and the first record is stream-ready", async () => {
+  const f = fixture(undefined, undefined, () => true);
+  const bus = new MessageBus();
+  const handle = f.client.attachStream(bus, { projectId: "p1" });
+  const peer = connection(f.endpointId);
+  try {
+    await establishedSlot(f, peer);
+    const body = Array.from(encodeStreamOpen({ kind: "project", projectId: "p1" }));
+    const later = laterStream([lengthPrefix(body.length), body]);
+    peer.pushLaterStream(later.stream);
+    await until(() => later.written.length > 0);
+
+    expect(later.refusalCode()).toBeUndefined();
+    const all = Buffer.concat(later.written.map((bytes) => Buffer.from(bytes)));
+    const first = JSON.parse(all.subarray(4, 4 + all.readUInt32BE(0)).toString("utf8"));
+    expect(first).toMatchObject({ type: "stream-ready", projectId: "p1" });
+    expect(peer.closeCodes()).toEqual([]);
+  } finally { handle.detach(); f.client.close(); }
+});
+
 test("a later stream opened after remote access is switched off writes nothing and retires the connection as unauthorized", async () => {
   const f = fixture();
   const peer = connection(f.endpointId);
@@ -803,6 +823,20 @@ function terminalOpenRecord(projectId: string): number[][] {
   return [lengthPrefix(body.length), body];
 }
 
+function projectOpenRecord(projectId: string): number[][] {
+  const body = Array.from(encodeStreamOpen({ kind: "project", projectId }));
+  return [lengthPrefix(body.length), body];
+}
+
+/** A4: terminal/tunnel admission now requires this peer to already hold an
+ *  open project stream (`binding.hasOpenStream`) — opens it and waits for the
+ *  `stream-ready` record so callers can push a terminal/tunnel open next. */
+async function openProjectStream(peer: ReturnType<typeof connection>, projectId: string): Promise<void> {
+  const later = laterStream(projectOpenRecord(projectId));
+  peer.pushLaterStream(later.stream);
+  await until(() => later.written.length > 0);
+}
+
 test("a terminal-kind stream reaches the terminal handler (no longer refused NOT_ALLOWED)", async () => {
   // A1 shipped an empty `handlers` table, so every terminal-kind open was
   // refused NOT_ALLOWED ("stream kind not allowed") before this wave wired
@@ -813,6 +847,7 @@ test("a terminal-kind stream reaches the terminal handler (no longer refused NOT
   const peer = connection(f.endpointId);
   try {
     const slot = await establishedSlot(f, peer);
+    await openProjectStream(peer, "p1");
     const later = laterStream(terminalOpenRecord("p1"));
     peer.pushLaterStream(later.stream);
     await new Promise((resolve) => setTimeout(resolve, 50));
@@ -851,6 +886,7 @@ test("retiring a peer drops its terminal bindings", async () => {
   const peer = connection(f.endpointId);
   try {
     const slot = await establishedSlot(f, peer);
+    await openProjectStream(peer, "p1");
     const later = laterStream(terminalOpenRecord("p1"));
     peer.pushLaterStream(later.stream);
     await new Promise((resolve) => setTimeout(resolve, 50));
@@ -896,6 +932,7 @@ test("a tunnel-http-kind and tunnel-ws-kind stream both reach the tunnel handler
   const peer = connection(f.endpointId);
   try {
     await establishedSlot(f, peer);
+    await openProjectStream(peer, "p1");
 
     const http = laterStream(tunnelHttpOpenRecord("p1"));
     peer.pushLaterStream(http.stream);
@@ -918,6 +955,7 @@ test("retiring a peer drops its tunnel bindings alongside its terminal bindings"
   const peer = connection(f.endpointId);
   try {
     const slot = await establishedSlot(f, peer);
+    await openProjectStream(peer, "p1");
     const terminal = laterStream(terminalOpenRecord("p1"));
     peer.pushLaterStream(terminal.stream);
     const http = laterStream(tunnelHttpOpenRecord("p1"));

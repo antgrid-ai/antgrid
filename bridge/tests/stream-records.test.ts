@@ -142,6 +142,40 @@ test("unauthorized drops the record and retires the connection, never the stream
   expect(fake.resetCalls).toEqual([]);
 });
 
+// A4 carry-over 4 (docs/iroh-reduction/stage-A-A4-contract.md §6): a project
+// stream's writer is built with the admission's own `authorized()`, which
+// includes the remote-access switch, so these two orderings matter beyond the
+// general case above — a peer refused mid-connection must never be told
+// "overflow" (D3: only the write-time queue check retires the stream itself).
+
+test("send-time authorized() refuses before the overflow check", async () => {
+  const fake = createFakeSendStream();
+  const failures: StreamWriteFailure[] = [];
+  // maxQueuedBytes is smaller than the record, so an overflow check that ran
+  // first would report "overflow" and reset the stream instead of dropping.
+  const writer = new StreamRecordWriter(fake.stream, () => false, (r) => failures.push(r), 4, 0, 99n);
+  const outcome = await writer.send(new Uint8Array(8));
+  expect(outcome).toBe("dropped");
+  expect(failures).toEqual(["unauthorized"]);
+  expect(fake.resetCalls).toEqual([]);
+  expect(fake.writeAllCalls).toEqual([]);
+});
+
+test("drain-time authorized() refuses before priority or any write", async () => {
+  const fake = createFakeSendStream();
+  const failures: StreamWriteFailure[] = [];
+  let calls = 0;
+  // True only at submit time (send()'s own check) and false once drain picks
+  // the record up — without the drain-time recheck, setPriority would already
+  // have run before this test's per-slice guard ever caught it.
+  const writer = new StreamRecordWriter(fake.stream, () => (++calls === 1), (r) => failures.push(r), 1_000_000);
+  const outcome = await writer.send(new Uint8Array([1]));
+  expect(outcome).toBe("dropped");
+  expect(failures).toEqual(["unauthorized"]);
+  expect(fake.setPriorityCalls).toEqual([]);
+  expect(fake.writeAllCalls).toEqual([]);
+});
+
 test("authorization is rechecked when a queued record reaches the front, not just at send()", async () => {
   const fake = createFakeSendStream();
   const gate = fake.gateNextWrite(); // gates A's slice so B stays queued behind it

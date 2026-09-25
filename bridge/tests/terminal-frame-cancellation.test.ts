@@ -1,12 +1,28 @@
-import { expect, test } from "bun:test";
+import { afterEach, expect, test } from "bun:test";
 import { SendScheduler, type QueuedAppFrame } from "../src/send-scheduler";
 import { MessageBus } from "../src/message-bus";
-import { StreamMux } from "../src/stream-mux";
 import { createMessage } from "../src/protocol";
 import { TerminalFrameHub } from "../src/terminal-frames/delivery";
 import { TerminalFrameSource } from "../src/terminal-frames/source";
 import { TERMINAL_PROTOCOL_VERSION } from "../src/terminal-frames/protocol";
 import type { TerminalFrame, TerminalDisplayStatus } from "../src/protocol";
+import { TestPeerSessionOwner } from "./test-peer-session-owner";
+
+const PROJECT = "p1";
+const PEER = "peer-a";
+
+function makeClient(): TestPeerSessionOwner {
+  const client = new TestPeerSessionOwner({
+    identity: { deviceId: "agent-1", deviceName: "agent", createdAt: new Date().toISOString() },
+    remoteAccessEnabled: () => true,
+    projectCataloged: () => true,
+  });
+  client.setNativeWriter(() => true);
+  return client;
+}
+
+let clients: TestPeerSessionOwner[] = [];
+afterEach(() => { for (const c of clients.splice(0)) try { void c.close(); } catch { /* already closed */ } });
 
 test("a transport blocked before encryption retains only the newest unsent screen", async () => {
   let now = 0;
@@ -65,52 +81,59 @@ test("attachment cancellation releases queued plaintext without sealing it", asy
   expect(dropped).toEqual(["dropped", "dropped", "dropped"]);
 });
 
-test("targeted bus delivery preserves cancellation and rechecks authorization at the transport", async () => {
+test("targeted bus delivery reaches the project stream and rechecks mayDeliver at send time", async () => {
+  const client = makeClient();
+  clients.push(client);
   const bus = new MessageBus();
   let allowed = true;
+  client.establish(PEER, { capabilities: { checkoutRouting: true } });
+  client.attachStream(bus, { projectId: PROJECT, mayDeliver: () => allowed });
+  const stream = await client.openProjectStream(PEER, PROJECT);
+  expect(stream.refusal()).toBeUndefined();
+
   const controller = new AbortController();
-  let received: AbortSignal | undefined;
-  let gate: (() => boolean) | undefined;
-  const mux = new StreamMux({
-    closeStream: () => {},
-    sendEnvelope: async (_id, _msg, _channel, _target, signal, authorized) => { received = signal; gate = authorized; return "sent"; },
-    peerSession: () => null,
-  });
-  const handle = mux.attach(bus, { mayDeliver: () => allowed });
-  await bus.deliverTo(createMessage("terminal:display:status", { terminalId: "t", code: "ACK_TIMEOUT", message: "Reconnect" }), "control", "relay", controller.signal);
-  expect(received).toBe(controller.signal);
-  mux.markUnbound(handle.streamId);
-  expect(gate!()).toBe(false);
-  mux.markBound(handle.streamId);
-  expect(gate!()).toBe(true);
+  const status = createMessage("terminal:display:status", { terminalId: "t", code: "ACK_TIMEOUT", message: "Reconnect" });
+
+  // Carries the signal through to the write, and lands on the wire.
+  await bus.deliverTo(status, "control", "relay", controller.signal);
+  expect(stream.read()).toMatchObject({ type: "terminal:display:status" });
+
+  // mayDeliver is re-read on every frame, not just at attach/open.
   allowed = false;
-  expect(gate!()).toBe(false);
-  handle.detach();
+  await expect(bus.deliverTo(status, "control", "relay", controller.signal)).rejects.toThrow("Project delivery gated");
+
+  allowed = true;
+  await bus.deliverTo(status, "control", "relay", controller.signal);
+  expect(stream.read()).toMatchObject({ type: "terminal:display:status" });
 });
 
-test("muted terminal delivery fails without leaking loopback frames and resumes after rebind", async () => {
+test("loopback frames never reach the project stream, and an addressed send drops before the stream is open", async () => {
+  // This project stream IS the relay wire for the project (project-streams.ts
+  // subscribes `audience: "relay"`), so a loopback-audience publish must never
+  // reach it even once a peer is bound — the mirror of what used to be
+  // `StreamMux`'s "muted" gate, expressed here as an audience filter instead.
+  const client = makeClient();
+  clients.push(client);
   const bus = new MessageBus();
-  let sent = 0;
-  const mux = new StreamMux({
-    closeStream: () => {},
-    sendEnvelope: async () => { sent++; return "sent"; },
-    peerSession: () => null,
-  });
-  const handle = mux.attach(bus, {});
+  client.establish(PEER, { capabilities: { checkoutRouting: true } });
+  client.attachStream(bus, { projectId: PROJECT });
   const signal = new AbortController().signal;
   const status = createMessage("terminal:display:status", {
     terminalId: "t", code: "ACK_TIMEOUT", message: "Reconnect",
   });
-  try {
-    await bus.deliverTo(status, "control", "loopback", signal);
-    expect(sent).toBe(0);
-    mux.markUnbound(handle.streamId);
-    await expect(bus.deliverTo(status, "control", "relay", signal)).rejects.toThrow("Terminal delivery gated");
-    expect(sent).toBe(0);
-    mux.markBound(handle.streamId);
-    await bus.deliverTo(status, "control", "relay", signal);
-    expect(sent).toBe(1);
-  } finally {
-    handle.detach();
-  }
+
+  // Before the stream opens, an addressed relay-origin send has no binding to
+  // land on — DROPPED, distinct from the mayDeliver gate above.
+  await expect(bus.deliverTo(status, "control", "relay", signal, PEER))
+    .rejects.toThrow("Project delivery dropped");
+
+  const stream = await client.openProjectStream(PEER, PROJECT);
+  expect(stream.refusal()).toBeUndefined();
+
+  await bus.deliverTo(status, "control", "loopback", signal);
+  expect(stream.written()).toHaveLength(1); // only the opening stream-ready record
+
+  // The same addressed send now lands once the peer is bound.
+  await bus.deliverTo(status, "control", "relay", signal, PEER);
+  expect(stream.read()).toMatchObject({ type: "terminal:display:status" });
 });

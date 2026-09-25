@@ -6,13 +6,15 @@
 //      running) + projB (opened remote then stopped → advertised running:false,
 //      startable because it stays in seenProjects).
 //   3. Drill into the STOPPED projB via the control-plane `project:start`; the
-//      agent starts the core, attaches it as a STREAM on the SAME session, and
-//      replies `stream-ready {projectId, streamId}` (0 new sockets, 0 pairs).
+//      agent starts the core, replies `stream-ready {projectId}` on the session
+//      stream, and admits projB's OWN QUIC stream on the SAME native connection
+//      (Stage A wave A4 — 0 new sockets, 0 pairs).
 //   4. Workspace traffic flows over projB's stream (session:list round-trip).
 //
 // The v3 headline (vs v2's per-project socket + drill-in pairing race): drilling
-// in adds ZERO relay connections and runs ZERO pair ceremonies — it is a stream
-// bind inside the one machine session. Asserted via connectionCount() before/after.
+// in adds ZERO relay connections and runs ZERO pair ceremonies — it is a project
+// stream opened inside the one machine session. Asserted via connectionCount()
+// before/after.
 //
 // Known Windows test noise (NOT failures): fs.watch EPERM/EBUSY on teardown.
 import { test, expect } from "bun:test";
@@ -63,8 +65,9 @@ test("drill-in: start a stopped project as a stream on the ONE socket, zero new 
     expect(advert.projects.map((p: any) => p.projectId)).toContain(projA);
 
     // === Drill in: this must add NO new relay connection and run NO pair. ===
-    // openProjectStream issues only a sealed control-plane `project:start` and
-    // awaits `stream-ready` — no pair-request, no hello, no new socket.
+    // openProjectStream drives control-plane `project:start`, awaits the
+    // ready notice, then opens projB's own QUIC stream on the ALREADY-live
+    // native connection — no pair-request, no hello, no new WebSocket.
     const connectionsBefore = env.relay.connectionCount();
     const streamB = await cp.openProjectStream(projB, 12_000);
     expect(streamB).toBeTruthy();

@@ -147,21 +147,25 @@ void main() {
     });
 
     test(
-      'StreamTransport over a PeerLink that is not multi-stream uses the '
-      'socket path',
+      'the control transport falls back to the socket path over a PeerLink '
+      'that is not multi-stream',
       () async {
-        final relay = FakeLiveRelay();
-        final session = await establishSession(
-          relay,
+        // Since A4, a project's own transport only ever exists over a
+        // MultiStreamPeerLink (openProject requires one) — the socket path
+        // survives only as session.control's fallback on an older relay.
+        final link = _PlainPeerLink();
+        final session = MachineSession(
+          relay: link,
+          machineDeviceId: 'm1',
           handshaker: FakeHandshaker(),
         );
+        session.start();
+        await session.ensureEstablished();
         addTearDown(() async {
           await session.dispose();
-          await relay.closeStreams();
         });
 
-        final transport = session.streamFor('s-p');
-        final attachment = transport.openTerminalAttachment(
+        final attachment = session.control.openTerminalAttachment(
           requestId: 'r1',
           checkoutId: 'main',
           subscribe: {
@@ -173,18 +177,20 @@ void main() {
         expect(attachment.isStream, isFalse);
 
         await pumpEventQueue();
-        final envelopes = relay.sent
+        final envelopes = link.sent
             .map((f) => jsonDecode(decodeFromPhone(f.payload)) as Map)
             .toList();
         expect(
           envelopes.any(
             (e) =>
-                e['s'] == 's-p' &&
+                !e.containsKey('s') &&
                 (e['m'] as Map)['type'] == 'terminal:subscribe' &&
                 (e['m'] as Map)['requestId'] == 'r1',
           ),
           isTrue,
-          reason: 'the socket path sends subscribe over the ordinary stream',
+          reason:
+              'the socket path sends subscribe over the control-plane '
+              'envelope, which since A4 never carries `s`',
         );
       },
     );
@@ -202,10 +208,12 @@ void main() {
       await session.dispose();
     });
 
-    Future<StreamTransport> bind({
-      required String projectId,
-      required String streamId,
-    }) async {
+    // Binds `projectId` over its own native stream (Stage A A4: the identity
+    // of a project's stream IS the project, so binding requires an actual
+    // `openStream` round trip — the ready notice on the control plane, then
+    // the bridge's `stream-ready` as the new stream's first record — rather
+    // than the old direct `streamFor(streamId)` lookup.
+    Future<StreamTransport> bind({required String projectId}) async {
       session = MachineSession(
         relay: link,
         machineDeviceId: 'm1',
@@ -213,31 +221,36 @@ void main() {
       );
       session.start();
       await session.ensureEstablished();
+      final opening = session.openProject(projectId, {
+        'type': 'project:start',
+        'projectId': projectId,
+      });
+      await pumpEventQueue();
       link.inject(
         IncomingPeerFrame(
           channel: 'control',
           payload: Uint8List.fromList(
             utf8.encode(
               jsonEncode({
-                'm': {
-                  'type': 'stream-ready',
-                  'projectId': projectId,
-                  'streamId': streamId,
-                },
+                'm': {'type': 'stream-ready', 'projectId': projectId},
               }),
             ),
           ),
         ),
       );
       await pumpEventQueue();
-      return session.streamFor(streamId);
+      link.createdStreams.last.emit({
+        'type': 'stream-ready',
+        'projectId': projectId,
+      });
+      return opening;
     }
 
     test(
       "opens TerminalStreamOpen with the session's projectId and sends "
       'subscribe as the first record',
       () async {
-        final transport = await bind(projectId: 'proj-a', streamId: 's-term');
+        final transport = await bind(projectId: 'proj-a');
         final subscribe = {
           'type': 'terminal:subscribe',
           'requestId': 'r1',
@@ -250,19 +263,20 @@ void main() {
         );
         expect(attachment.isStream, isTrue);
 
-        expect(link.opens, hasLength(1));
+        // link.opens[0] is the project's own bind stream opened by `bind()`.
+        expect(link.opens, hasLength(2));
         expect(
-          link.opens.single.open,
+          link.opens.last.open,
           const TerminalStreamOpen(
             projectId: 'proj-a',
             requestId: 'r1',
             checkoutId: 'main',
           ),
         );
-        expect(link.opens.single.maxRecordBytes, kStreamTerminalBridgeRecordMaxBytes);
-        expect(link.opens.single.maxQueuedBytes, kTerminalAttachmentMaxQueuedBytes);
+        expect(link.opens.last.maxRecordBytes, kStreamTerminalBridgeRecordMaxBytes);
+        expect(link.opens.last.maxQueuedBytes, kTerminalAttachmentMaxQueuedBytes);
 
-        final fakeStream = link.createdStreams.single;
+        final fakeStream = link.createdStreams.last;
         await pumpEventQueue();
         expect(fakeStream.sent, hasLength(1));
         expect(jsonDecode(utf8.decode(fakeStream.sent.single)), subscribe);
@@ -270,13 +284,13 @@ void main() {
     );
 
     test('records arrive on messages in record order (hazards A and B)', () async {
-      final transport = await bind(projectId: 'proj-a', streamId: 's-term');
+      final transport = await bind(projectId: 'proj-a');
       final attachment = transport.openTerminalAttachment(
         requestId: 'r1',
         checkoutId: 'main',
         subscribe: {'type': 'terminal:subscribe', 'requestId': 'r1'},
       );
-      final fakeStream = link.createdStreams.single;
+      final fakeStream = link.createdStreams.last;
       fakeStream.emit({
         'type': 'terminal:subscribed',
         'requestId': 'r1',
@@ -300,13 +314,13 @@ void main() {
     });
 
     test('a stream:refused first record ends Refused', () async {
-      final transport = await bind(projectId: 'proj-a', streamId: 's-term');
+      final transport = await bind(projectId: 'proj-a');
       final attachment = transport.openTerminalAttachment(
         requestId: 'r1',
         checkoutId: 'main',
         subscribe: {'type': 'terminal:subscribe', 'requestId': 'r1'},
       );
-      final fakeStream = link.createdStreams.single;
+      final fakeStream = link.createdStreams.last;
       const refusal = StreamRefused(
         code: StreamRefusedCode.notReady,
         message: 'project core not started',
@@ -323,13 +337,13 @@ void main() {
       'bridge FIN ends PeerEnded, finishes the send half and releases the '
       'slot',
       () async {
-        final transport = await bind(projectId: 'proj-a', streamId: 's-term');
+        final transport = await bind(projectId: 'proj-a');
         final attachment = transport.openTerminalAttachment(
           requestId: 'r1',
           checkoutId: 'main',
           subscribe: {'type': 'terminal:subscribe', 'requestId': 'r1'},
         );
-        final fakeStream = link.createdStreams.single;
+        final fakeStream = link.createdStreams.last;
         fakeStream.emit({'type': 'terminal:subscribed', 'requestId': 'r1'});
         await pumpEventQueue();
         await fakeStream.endPeer();
@@ -351,18 +365,19 @@ void main() {
             ),
           );
         }
-        expect(link.opens, hasLength(1 + kStreamMaxTerminalAttachmentsPerPeer));
+        // link.opens[0] is the project's own bind stream opened by `bind()`.
+        expect(link.opens, hasLength(2 + kStreamMaxTerminalAttachmentsPerPeer));
       },
     );
 
     test('close() finishes the send half and ends ClosedLocally', () async {
-      final transport = await bind(projectId: 'proj-a', streamId: 's-term');
+      final transport = await bind(projectId: 'proj-a');
       final attachment = transport.openTerminalAttachment(
         requestId: 'r1',
         checkoutId: 'main',
         subscribe: {'type': 'terminal:subscribe', 'requestId': 'r1'},
       );
-      final fakeStream = link.createdStreams.single;
+      final fakeStream = link.createdStreams.last;
       fakeStream.emit({'type': 'terminal:subscribed', 'requestId': 'r1'});
       await pumpEventQueue();
 
@@ -388,10 +403,12 @@ void main() {
       () async {
         final failures = <PeerLinkFailure>[];
         link.failureStream.listen(failures.add);
+
+        final transport = await bind(projectId: 'proj-a');
+        // Set only after the bind's own stream is up — an error here must
+        // fail this attachment's open alone, not the project bind itself.
         final boom = Exception('boom');
         link.openError = boom;
-
-        final transport = await bind(projectId: 'proj-a', streamId: 's-term');
         final attachment = transport.openTerminalAttachment(
           requestId: 'r1',
           checkoutId: 'main',
@@ -412,7 +429,7 @@ void main() {
       'the 65th concurrent attachment ends Failed(CAP_EXCEEDED) without '
       'opening',
       () async {
-        final transport = await bind(projectId: 'proj-a', streamId: 's-term');
+        final transport = await bind(projectId: 'proj-a');
         for (var i = 0; i < kStreamMaxTerminalAttachmentsPerPeer; i++) {
           transport.openTerminalAttachment(
             requestId: 'r$i',
@@ -420,7 +437,8 @@ void main() {
             subscribe: {'type': 'terminal:subscribe', 'requestId': 'r$i'},
           );
         }
-        expect(link.opens, hasLength(kStreamMaxTerminalAttachmentsPerPeer));
+        // link.opens[0] is the project's own bind stream opened by `bind()`.
+        expect(link.opens, hasLength(1 + kStreamMaxTerminalAttachmentsPerPeer));
 
         final overflow = transport.openTerminalAttachment(
           requestId: 'r-overflow',
@@ -428,7 +446,7 @@ void main() {
           subscribe: {'type': 'terminal:subscribe', 'requestId': 'r-overflow'},
         );
         // Never opened: the cap check runs before the async open.
-        expect(link.opens, hasLength(kStreamMaxTerminalAttachmentsPerPeer));
+        expect(link.opens, hasLength(1 + kStreamMaxTerminalAttachmentsPerPeer));
 
         final end = await overflow.done;
         expect(end, isA<TerminalAttachmentFailed>());
@@ -437,8 +455,8 @@ void main() {
     );
 
     test('a send outcome other than accepted resets the stream', () async {
+      final transport = await bind(projectId: 'proj-a');
       link.onOpen = (_) => _FakeStream()..sendOutcome = PeerSendOutcome.backpressured;
-      final transport = await bind(projectId: 'proj-a', streamId: 's-term');
       final attachment = transport.openTerminalAttachment(
         requestId: 'r1',
         checkoutId: 'main',
@@ -447,15 +465,42 @@ void main() {
       final end = await attachment.done;
       expect(end, isA<TerminalAttachmentFailed>());
       expect((end as TerminalAttachmentFailed).code, 'SEND_FAILED');
-      expect(link.createdStreams.single.resetCalled, isTrue);
+      expect(link.createdStreams.last.resetCalled, isTrue);
     });
+
+    // Opens [count] fresh attachments and returns the one after them, which
+    // is the probe: it fails CAP_EXCEEDED iff every slot is still taken.
+    Future<TerminalAttachmentEnd?> probeAfter(
+      StreamTransport transport,
+      int count,
+      String tag,
+    ) async {
+      for (var i = 0; i < count; i++) {
+        transport.openTerminalAttachment(
+          requestId: '$tag-$i',
+          checkoutId: 'main',
+          subscribe: {'type': 'terminal:subscribe', 'requestId': '$tag-$i'},
+        );
+      }
+      final probe = transport.openTerminalAttachment(
+        requestId: '$tag-probe',
+        checkoutId: 'main',
+        subscribe: {'type': 'terminal:subscribe', 'requestId': '$tag-probe'},
+      );
+      await pumpEventQueue();
+      TerminalAttachmentEnd? end;
+      unawaited(probe.done.then((e) => end = e));
+      await pumpEventQueue();
+      return end;
+    }
 
     test(
       'close() while the open is in flight resets the stream once it '
-      'resolves, never sends subscribe, and releases the slot',
+      'resolves, never sends subscribe, and holds the slot until the '
+      "bridge's half ends (carry-over 1)",
       () async {
+        final transport = await bind(projectId: 'proj-a');
         link.openGate = Completer<void>();
-        final transport = await bind(projectId: 'proj-a', streamId: 's-term');
         final attachment = transport.openTerminalAttachment(
           requestId: 'r1',
           checkoutId: 'main',
@@ -467,19 +512,56 @@ void main() {
         link.openGate = null;
 
         expect(await attachment.done, isA<TerminalAttachmentClosedLocally>());
-        final fakeStream = link.createdStreams.single;
+        final fakeStream = link.createdStreams.last;
         expect(fakeStream.resetCalled, isTrue);
         expect(fakeStream.finishCalled, isFalse);
         expect(fakeStream.sent, isEmpty);
 
-        for (var i = 0; i < kStreamMaxTerminalAttachmentsPerPeer; i++) {
-          transport.openTerminalAttachment(
-            requestId: 'fresh-$i',
-            checkoutId: 'main',
-            subscribe: {'type': 'terminal:subscribe', 'requestId': 'fresh-$i'},
-          );
-        }
-        expect(link.opens, hasLength(1 + kStreamMaxTerminalAttachmentsPerPeer));
+        // The reset stream still holds one slot: 63 more fill the cap.
+        final held = await probeAfter(
+          transport,
+          kStreamMaxTerminalAttachmentsPerPeer - 1,
+          'held',
+        );
+        expect(held, isA<TerminalAttachmentFailed>());
+        expect((held as TerminalAttachmentFailed).code, 'CAP_EXCEEDED');
+
+        await fakeStream.endPeer();
+        await pumpEventQueue();
+        final freed = await probeAfter(transport, 0, 'freed');
+        expect(freed, isNull); // took the freed slot and is still open
+      },
+    );
+
+    test(
+      "a failed subscribe send holds the slot until the bridge's half ends "
+      '(carry-over 1)',
+      () async {
+        final transport = await bind(projectId: 'proj-a');
+        link.onOpen = (_) => _FakeStream()..sendOutcome = PeerSendOutcome.closed;
+        final attachment = transport.openTerminalAttachment(
+          requestId: 'r1',
+          checkoutId: 'main',
+          subscribe: {'type': 'terminal:subscribe', 'requestId': 'r1'},
+        );
+        final end = await attachment.done;
+        expect((end as TerminalAttachmentFailed).code, 'SEND_FAILED');
+        final failedStream = link.createdStreams.last;
+        expect(failedStream.resetCalled, isTrue);
+        link.onOpen = null;
+
+        final held = await probeAfter(
+          transport,
+          kStreamMaxTerminalAttachmentsPerPeer - 1,
+          'held',
+        );
+        expect(held, isA<TerminalAttachmentFailed>());
+        expect((held as TerminalAttachmentFailed).code, 'CAP_EXCEEDED');
+
+        await failedStream.endPeer();
+        await pumpEventQueue();
+        final freed = await probeAfter(transport, 0, 'freed');
+        expect(freed, isNull);
       },
     );
 
@@ -487,13 +569,13 @@ void main() {
       'a record that is not a JSON map resets the stream and ends '
       'Failed(INVALID_RECORD)',
       () async {
-        final transport = await bind(projectId: 'proj-a', streamId: 's-term');
+        final transport = await bind(projectId: 'proj-a');
         final attachment = transport.openTerminalAttachment(
           requestId: 'r1',
           checkoutId: 'main',
           subscribe: {'type': 'terminal:subscribe', 'requestId': 'r1'},
         );
-        final fakeStream = link.createdStreams.single;
+        final fakeStream = link.createdStreams.last;
         fakeStream.emit({'type': 'terminal:subscribed', 'requestId': 'r1'});
         fakeStream.emitRaw(utf8.encode('[1, 2, 3]'));
 
@@ -507,13 +589,13 @@ void main() {
     test(
       'a verb whose send outcome is not accepted resets the stream',
       () async {
-        final transport = await bind(projectId: 'proj-a', streamId: 's-term');
+        final transport = await bind(projectId: 'proj-a');
         final attachment = transport.openTerminalAttachment(
           requestId: 'r1',
           checkoutId: 'main',
           subscribe: {'type': 'terminal:subscribe', 'requestId': 'r1'},
         );
-        final fakeStream = link.createdStreams.single;
+        final fakeStream = link.createdStreams.last;
         await pumpEventQueue();
         expect(fakeStream.sent, hasLength(1));
         fakeStream.sendOutcome = PeerSendOutcome.backpressured;
@@ -523,28 +605,65 @@ void main() {
       },
     );
 
-    test('an unknown projectId for the stream ends Failed(NO_PROJECT)', () async {
-      session = MachineSession(
-        relay: link,
-        machineDeviceId: 'm1',
-        handshaker: FakeHandshaker(),
-      );
-      session.start();
-      await session.ensureEstablished();
-      // No stream-ready was ever injected for 's-unbound'.
-      final transport = session.streamFor('s-unbound');
+    test(
+      'opening a terminal attachment on the control transport ends '
+      'Failed(NO_PROJECT) — since A4 every project-bound StreamTransport '
+      'carries its projectId from birth, so only the control-plane '
+      'transport (projectId == null) can hit this any more',
+      () async {
+        session = MachineSession(
+          relay: link,
+          machineDeviceId: 'm1',
+          handshaker: FakeHandshaker(),
+        );
+        session.start();
+        await session.ensureEstablished();
 
-      final attachment = transport.openTerminalAttachment(
-        requestId: 'r1',
-        checkoutId: 'main',
-        subscribe: {'type': 'terminal:subscribe', 'requestId': 'r1'},
-      );
-      final end = await attachment.done;
-      expect(end, isA<TerminalAttachmentFailed>());
-      expect((end as TerminalAttachmentFailed).code, 'NO_PROJECT');
-      expect(link.opens, isEmpty);
-    });
+        final attachment = session.control.openTerminalAttachment(
+          requestId: 'r1',
+          checkoutId: 'main',
+          subscribe: {'type': 'terminal:subscribe', 'requestId': 'r1'},
+        );
+        final end = await attachment.done;
+        expect(end, isA<TerminalAttachmentFailed>());
+        expect((end as TerminalAttachmentFailed).code, 'NO_PROJECT');
+        expect(link.opens, isEmpty);
+      },
+    );
   });
+}
+
+/// A [PeerLink] that does NOT also implement [MultiStreamPeerLink] —
+/// `FakeLiveRelay` implements both (every native link does), so this stands
+/// in for an older relay to exercise `openTerminalAttachment`'s socket-path
+/// fallback.
+class _PlainPeerLink implements PeerLink {
+  final _messages = StreamController<IncomingPeerFrame>.broadcast();
+  final _states = StreamController<PeerLinkState>.broadcast();
+  final _failures = StreamController<PeerLinkFailure>.broadcast();
+  final sent = <SentFrame>[];
+
+  @override
+  bool get isDispatchAllowed => true;
+  @override
+  Stream<IncomingPeerFrame> get messageStream => _messages.stream;
+  @override
+  Stream<PeerLinkState> get payloadStateStream => _states.stream;
+  @override
+  Stream<PeerPath> get pathStream => const Stream.empty();
+  @override
+  Stream<PeerLinkFailure> get failureStream => _failures.stream;
+  @override
+  PeerLinkDiagnostic? get netTap => null;
+
+  @override
+  Future<PeerSendOutcome> sendFrame(String channel, Uint8List payload) async {
+    sent.add(SentFrame(channel, payload));
+    return PeerSendOutcome.accepted;
+  }
+
+  @override
+  Future<void> close() async {}
 }
 
 /// Lets an unawaited async chain (every `_StreamTerminalAttachment._start()`
@@ -636,10 +755,11 @@ class _FakeStream implements PeerStream {
     return sendOutcome;
   }
 
+  /// Resets the send half only, as `NativePeerStream.reset` does: the
+  /// records keep flowing until the bridge ends its own half ([endPeer]).
   @override
   Future<void> reset() async {
     resetCalled = true;
-    if (!_records.isClosed) await _records.close();
   }
 
   @override

@@ -12,7 +12,7 @@ class SentFrame {
   SentFrame(this.channel, this.payload);
 }
 
-class FakeLiveRelay implements PeerLink {
+class FakeLiveRelay implements PeerLink, MultiStreamPeerLink {
   FakeLiveRelay({
     RelayConnectionState initial = RelayConnectionState.authenticated,
     this.netTap,
@@ -25,6 +25,32 @@ class FakeLiveRelay implements PeerLink {
   final _errors = StreamController<PeerLinkFailure>.broadcast();
   final sent = <SentFrame>[];
   PeerLinkState _state;
+
+  /// Every stream a test's [MachineSession] has opened, in call order — a
+  /// project that reopens (a stream end + backoff, or a fresh establishment)
+  /// appends a SECOND [FakePeerStream] rather than replacing the first, so a
+  /// test can tell a reopen happened from a bind that just took a while.
+  final openedStreams = <FakePeerStream>[];
+
+  /// Set to make the NEXT [openStream] call throw this instead of returning a
+  /// stream — for a `STREAM_OPEN_FAILED`-shaped test. Consumed on use.
+  Object? openStreamError;
+
+  @override
+  Future<PeerStream> openStream(
+    StreamOpen open, {
+    required int maxRecordBytes,
+    required int maxQueuedBytes,
+  }) async {
+    final err = openStreamError;
+    if (err != null) {
+      openStreamError = null;
+      throw err;
+    }
+    final stream = FakePeerStream(open);
+    openedStreams.add(stream);
+    return stream;
+  }
 
   /// True once [close] has been called. There is no application-layer key to
   /// rotate any more, so a session that decides it is dead closes the whole
@@ -112,6 +138,75 @@ class FakeHandshaker implements SessionHandshaker {
   void abort() => aborted = true;
 }
 
+/// One project's (or other purpose-specific) native stream a test drives
+/// directly: the bridge side of [PeerStream]. A test injects the bridge's
+/// first record ([injectStreamReady]/[injectRefusal]) and any record after
+/// it ([injectJson]/[injectRecord]), and reads back what the app wrote in
+/// [sent].
+class FakePeerStream implements PeerStream {
+  FakePeerStream(this.open);
+
+  /// The open frame [MachineSession] sent to create this stream.
+  final StreamOpen open;
+
+  final _records = StreamController<Uint8List>.broadcast();
+  final sent = <Uint8List>[];
+  bool resetCalled = false;
+  bool finishCalled = false;
+  bool _ended = false;
+
+  @override
+  Stream<Uint8List> get records => _records.stream;
+
+  @override
+  Future<PeerSendOutcome> send(Uint8List record) async {
+    if (_ended) return PeerSendOutcome.closed;
+    sent.add(record);
+    return PeerSendOutcome.accepted;
+  }
+
+  // Real semantics: our own reset()/finish() ends only OUR send half. The
+  // bridge counts the stream until it ALSO sees its own half end (§4.3), so
+  // records must keep flowing (or a test must explicitly call [end]) until
+  // that happens — matching [end]'s own doc comment below.
+  @override
+  Future<void> reset() async {
+    resetCalled = true;
+  }
+
+  @override
+  Future<void> finish() async {
+    finishCalled = true;
+  }
+
+  /// Injects the bridge's `stream-ready {projectId}` first record.
+  void injectStreamReady(String projectId) =>
+      injectJson({'type': 'stream-ready', 'projectId': projectId});
+
+  /// Injects a `stream:refused` record, then ends the stream — a real bridge
+  /// FINs right after refusing, since Dart cannot read a QUIC reset code.
+  void injectRefusal(StreamRefusedCode code, [String message = 'refused']) {
+    injectJson(StreamRefused(code: code, message: message).toJson());
+    end();
+  }
+
+  void injectJson(Map<String, dynamic> json) =>
+      injectRecord(Uint8List.fromList(utf8.encode(jsonEncode(json))));
+
+  void injectRecord(Uint8List record) {
+    if (!_ended && !_records.isClosed) _records.add(record);
+  }
+
+  /// Ends the bridge's send half, as a clean close or right after a refusal.
+  /// Idempotent, and distinct from [reset]/[finish] (the APP's send half) —
+  /// a test can end the bridge side without ever driving the app to close.
+  void end() {
+    if (_ended) return;
+    _ended = true;
+    unawaited(_records.close());
+  }
+}
+
 /// Opens a frame MachineSession sent, as the agent would. Suites decode
 /// outbound frames only through this and [encodeFromAgent], so the payload
 /// encoding is swapped in one place. Synchronous: QUIC/TLS is the
@@ -134,7 +229,6 @@ Future<MachineSession> establishSession(
   int? channelWindowBytes,
   int? socketInflightBytes,
   int creditBatchBytes = kCreditBatchBytes,
-  Duration unknownStreamLogInterval = const Duration(seconds: 30),
   RelayLogger? logger,
 }) async {
   final session = MachineSession(
@@ -147,7 +241,6 @@ Future<MachineSession> establishSession(
     channelWindowBytes: channelWindowBytes,
     socketInflightBytes: socketInflightBytes,
     creditBatchBytes: creditBatchBytes,
-    unknownStreamLogInterval: unknownStreamLogInterval,
     logger: logger,
   );
   session.start();
