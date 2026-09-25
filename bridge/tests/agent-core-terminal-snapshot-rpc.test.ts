@@ -10,6 +10,8 @@ import { setLogLevel } from "../src/logger";
 
 setLogLevel("error");
 
+const PHONE_PEER = "phone-dev-terminal-snap-rpc#agent-dev";
+
 let root: string;
 let previousAbDir: string | undefined;
 let core: AgentCore | null;
@@ -67,11 +69,13 @@ function requestSnapshot(
   requestId: string,
   params: { terminalId?: string; checkoutId?: string; history?: boolean },
   source: "loopback" | "relay" = "loopback",
+  peerId?: string,
 ): void {
   bus.dispatchInbound(
     createMessage("request", { requestId, method: "terminal.snapshot", params }),
     "control",
     source,
+    peerId,
   );
 }
 
@@ -138,14 +142,14 @@ test("dropped from a remote phone while mobile access is off — no response at 
   bus.subscribe({ deliver: (m) => sent.push(m) });
   core.attachTransport(bus);
   core.setPeerSessionProvider(() => ({
-    peerId: "phone-dev-terminal-snap-rpc#agent-dev", peerPubkey: pk1, checkoutRouting: true,
+    peerId: PHONE_PEER, peerPubkey: pk1, checkoutRouting: true,
     pullsTree: false,
   }));
   core.onHandshakeComplete();
   await waitFor(sent, (m) => m.type === "agent:status", "agent:status");
 
   sent.length = 0;
-  requestSnapshot(bus, "r-gated", { terminalId: "adhoc" }, "relay");
+  requestSnapshot(bus, "r-gated", { terminalId: "adhoc" }, "relay", PHONE_PEER);
   await new Promise((resolve) => setTimeout(resolve, 200));
   expect(findResponse(sent, "r-gated")).toBeUndefined();
 
@@ -153,7 +157,7 @@ test("dropped from a remote phone while mobile access is off — no response at 
   // flip the switch and prove the method DOES reach the handler once allowed.
   mobileAccess = true;
   sent.length = 0;
-  requestSnapshot(bus, "r-gated-on", { terminalId: "adhoc" }, "relay");
+  requestSnapshot(bus, "r-gated-on", { terminalId: "adhoc" }, "relay", PHONE_PEER);
   const res = await waitForResponse(sent, "r-gated-on");
   if (res.type !== "response") throw new Error("unreachable");
   expect(res.ok).toBe(false);

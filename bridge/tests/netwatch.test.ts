@@ -112,7 +112,7 @@ describe("TestPeerSessionOwner netwatch taps", () => {
     __resetNetwatchForTest();
 
     const payload = Buffer.from(JSON.stringify({ type: "terminal:input", terminalId: "t", data: "x" }));
-    const frame = encodePeerFrame({ type: "message", channel: "control" }, payload);
+    const frame = encodePeerFrame({ type: "message" }, payload);
     client.injectPeerFrame(Buffer.from(frame), "phone-1");
 
     const rx = events().filter((e) => e.dir === "rx" && e.kind === "frame");

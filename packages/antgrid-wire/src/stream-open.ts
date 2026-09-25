@@ -1,16 +1,13 @@
 import { z } from "zod/v4";
-import { MAX_FRAME_PAYLOAD, MAX_TRANSFER_BYTES } from "./frag";
-import { PEER_MAX_RECORD_BYTES } from "./peer-authorization";
 
 // The first record on every native peer stream, the session stream included.
 // The app writes it in the same call as `openBi` because a Dart stream is
 // invisible to the peer until its first write; the bridge reads and validates
 // it under a deadline before the stream reaches its dispatch table.
-//
-// `MAX_TRANSFER_BYTES` and `PEER_MAX_RECORD_BYTES` are re-exported so stream
-// code has one import that outlives frag.ts; the values still live in frag.ts
-// and peer-authorization.ts.
-export { MAX_TRANSFER_BYTES, PEER_MAX_RECORD_BYTES };
+
+/** Largest single `AbMessage` JSON the bridge writes on any stream: one
+ *  message is one record, so this is the sender's hard ceiling. */
+export const MAX_TRANSFER_BYTES = 33_554_432;
 
 /** Wire cap on a serialized open frame, checked before Zod ever runs — a
  *  `{kind, projectId, ...}` record needs a few hundred bytes at most, so this
@@ -124,10 +121,12 @@ export const STREAM_MAX_TERMINAL_ATTACHMENTS_PER_PEER = 64;
 export const STREAM_MAX_TUNNEL_STREAMS_PER_PEER = 128;
 export const STREAM_MAX_PENDING_OPENS_PER_PEER = 16;
 
-// Per-record cap for the project stream (A4), both directions: what the old
-// session-stream `{s, m}` envelope already accepted, so nothing this size
-// bound before can overflow one project stream now.
-export const STREAM_PROJECT_RECORD_MAX_BYTES = MAX_FRAME_PAYLOAD;
+// Per-record caps for the project stream, asymmetric by direction:
+// the app sends small verbs and reads back potentially large payloads
+// (file:content, diffs), so its read cap is the bridge's write ceiling while
+// its own send cap stays far below it.
+export const STREAM_PROJECT_APP_RECORD_MAX_BYTES = 1_500_000;
+export const STREAM_PROJECT_BRIDGE_RECORD_MAX_BYTES = MAX_TRANSFER_BYTES;
 
 // Per-record caps for the terminal attachment stream (A2). The app-to-bridge
 // direction only ever carries the four small subscribe/ack/unsubscribe/

@@ -3,14 +3,13 @@ import { randomUUID } from "node:crypto";
 import { Endpoint, EndpointAddr, EndpointId } from "@number0/iroh/index.js";
 import {
   PEER_ALPN,
-  STREAM_PROJECT_RECORD_MAX_BYTES,
+  STREAM_PROJECT_BRIDGE_RECORD_MAX_BYTES,
   STREAM_TERMINAL_BRIDGE_RECORD_MAX_BYTES,
   decodePeerFrame,
   encodePeerFrame,
   encodeStreamOpen,
 } from "antgrid-wire";
-import { PeerRecords } from "../src/peer/records";
-import { StreamRecordReader } from "../src/peer/stream-records";
+import { StreamRecordReader, StreamRecordWriter } from "../src/peer/stream-records";
 import { createMessage } from "../src/protocol";
 import { TERMINAL_PROTOCOL_VERSION } from "../src/terminal-frames/protocol";
 import { device, startSmokeFixture } from "./iroh-smoke-fixture";
@@ -41,33 +40,38 @@ const fixture = await startSmokeFixture({
   label: "native-host-smoke",
 });
 const projects = fixture.projects;
-let records: PeerRecords | undefined;
+// Headroom for one hello plus the handful of control-plane frames this script
+// sends; the production cap (`SESSION_STREAM_MAX_QUEUED_BYTES`,
+// native-host-connection.ts) is bridge-internal and not exported.
+const SMOKE_SESSION_MAX_QUEUED_BYTES = 64 * 1024 * 1024;
+let sessionWriter: StreamRecordWriter | undefined;
 let connection: Awaited<ReturnType<Endpoint["connect"]>> | undefined;
 const timeout = setTimeout(() => { console.error("native-host-smoke timed out"); process.exitCode = 1; void fixture.dispose(); }, 30_000);
 try {
   const native = await fixture.nativeAddress();
   connection = await app.connect(new EndpointAddr(EndpointId.fromString(native.endpointId), undefined, native.addresses), Array.from(Buffer.from(PEER_ALPN)));
   const stream = await connection.openBi();
-  records = new PeerRecords(stream, () => true, () => connection?.close(1n, []));
+  sessionWriter = new StreamRecordWriter(stream, () => true, () => connection?.close(1n, []), SMOKE_SESSION_MAX_QUEUED_BYTES);
+  const sessionReader = new StreamRecordReader({ recv: stream.recv }, STREAM_PROJECT_BRIDGE_RECORD_MAX_BYTES, () => {});
   // Every native bidi stream opens with a StreamOpen record before it
   // carries anything else, the session stream included.
-  void records.send(encodeStreamOpen({ kind: "session" }));
+  void sessionWriter.send(encodeStreamOpen({ kind: "session" }));
   const attemptId = randomUUID();
   // A4: the session stream carries only machine control-plane frames now —
   // terminal:frame (and every other project/terminal record) rides its own
   // QUIC stream, so this loop needs no ack side-channel of its own.
-  const send = (value: object) => records!.send(encodePeerFrame({ type: "message", channel: "control" }, Buffer.from(JSON.stringify(value), "utf8")));
+  const send = (value: object) => sessionWriter!.send(encodePeerFrame({ type: "message" }, Buffer.from(JSON.stringify(value), "utf8")));
+  const sendHello = (value: object) => sessionWriter!.send(encodePeerFrame({ type: "session" }, Buffer.from(JSON.stringify(value), "utf8")));
   const read = async (predicate: (value: any) => boolean): Promise<any> => {
     for (;;) {
-      const frame = decodePeerFrame(await records!.read());
-      const value = JSON.parse(Buffer.from(frame.payload).toString("utf8"));
-      const message = value.m ?? value;
+      const frame = decodePeerFrame(await sessionReader.read());
+      const message = JSON.parse(Buffer.from(frame.payload).toString("utf8"));
       if (predicate(message)) return message;
     }
   };
   // QUIC/TLS between the lease-authorized endpoints is the confidentiality
   // layer post Stage-B; the hello is plaintext and carries no transcript.
-  await send({ type: "session:hello", attemptId, capabilities: { checkoutRouting: true, pullsTree: true, terminalFramesV1: true } });
+  await sendHello({ type: "session:hello", attemptId, capabilities: { checkoutRouting: true, pullsTree: true, terminalFramesV1: true } });
   await read((value) => value.type === "established" && value.attemptId === attemptId);
   const nativeConnectionId = connection.stableId();
   fixture.takeCentralOffline();
@@ -75,14 +79,14 @@ try {
     // A4: `project:start` still rides the session stream, but the stream it
     // readies is the project's OWN QUIC stream — the `stream-ready` notice
     // carries no id to bind to, it only gates opening that stream (Hazard J).
-    await send({ m: createMessage("project:start", { projectId: project.id }) });
+    await send(createMessage("project:start", { projectId: project.id }));
     await read((value) => value.type === "stream-ready" && value.projectId === project.id);
 
     const pStream = await connection.openBi();
     await pStream.send.writeAll(Array.from(
       prefixWithLength(encodeStreamOpen({ kind: "project", projectId: project.id })),
     ));
-    const pReader = new StreamRecordReader({ recv: pStream.recv }, STREAM_PROJECT_RECORD_MAX_BYTES, () => {});
+    const pReader = new StreamRecordReader({ recv: pStream.recv }, STREAM_PROJECT_BRIDGE_RECORD_MAX_BYTES, () => {});
     const pSend = (value: object) =>
       pStream.send.writeAll(Array.from(prefixWithLength(Buffer.from(JSON.stringify(value), "utf8"))));
     const pRead = async (predicate: (value: any) => boolean): Promise<any> => {
@@ -162,7 +166,7 @@ try {
     terminalInputOutput: true, terminalFramesAcknowledged: true, managedCheckoutGit: true }));
 } finally {
   clearTimeout(timeout);
-  records?.close();
+  sessionWriter?.abort();
   await app.close();
   await fixture.dispose();
 }

@@ -1,12 +1,13 @@
-// `MachineSession.openProject` coverage (Stage A A4): a project's native
-// stream identity IS the project itself (`StreamTransport.projectId`, fixed
-// for its lifetime) — there is no bridge-issued streamId, and no `{s, m}`
-// envelope, on a project's own stream. Readiness-gating (hazard J) and
+// `MachineSession.openProject` coverage: a project's native stream identity
+// IS the project itself (`StreamTransport.projectId`, fixed for its
+// lifetime) — there is no bridge-issued streamId, and no `{s, m}` envelope,
+// on a project's own stream. Readiness-gating (hazard J) and
 // snapshot-hydration coverage live in `machine_session_stream_binding_test.dart`
 // and `machine_session_snapshot_retry_test.dart`; this file is the bind
-// sequence itself — caps, refusals, protocol errors, reopen and
-// `projectStreamEvents`.
+// sequence itself — caps, refusals, protocol errors, reopen,
+// `projectStreamEvents`, and the record-size caps on a bound project stream.
 import 'dart:async';
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
@@ -39,12 +40,9 @@ void main() {
       handshaker: FakeHandshaker(),
       projectStartMessageBuilder: projectStartMessageBuilder,
     );
-    relay.inject(
-      IncomingPeerFrame(
-        channel: 'control',
-        payload: encodeFromAgent(
-          '{"m":{"type":"stream-ready","projectId":"$projectId"}}',
-        ),
+    relay.injectFrame(
+      encodeFromAgent(
+        jsonEncode({'type': 'stream-ready', 'projectId': projectId}),
       ),
     );
     await Future<void>.delayed(const Duration(milliseconds: 20));
@@ -54,14 +52,15 @@ void main() {
   /// project unknown, …) — used here to settle a filler project's
   /// still-pending open before a test ends.
   void rejectStart(String projectId) {
-    relay.inject(
-      IncomingPeerFrame(
-        channel: 'control',
-        payload: encodeFromAgent(
-          '{"m":{"type":"control:result","ok":false,"verb":"project:start",'
-          '"projectId":"$projectId","error":{"code":"CANCELLED",'
-          '"message":"test cleanup"}}}',
-        ),
+    relay.injectFrame(
+      encodeFromAgent(
+        jsonEncode({
+          'type': 'control:result',
+          'ok': false,
+          'verb': 'project:start',
+          'projectId': projectId,
+          'error': {'code': 'CANCELLED', 'message': 'test cleanup'},
+        }),
       ),
     );
   }
@@ -76,12 +75,9 @@ void main() {
       )
       .length;
 
-  void injectReadyNotice(String projectId) => relay.inject(
-    IncomingPeerFrame(
-      channel: 'control',
-      payload: encodeFromAgent(
-        '{"m":{"type":"stream-ready","projectId":"$projectId"}}',
-      ),
+  void injectReadyNotice(String projectId) => relay.injectFrame(
+    encodeFromAgent(
+      jsonEncode({'type': 'stream-ready', 'projectId': projectId}),
     ),
   );
 
@@ -169,9 +165,9 @@ void main() {
       await session.ensureEstablished();
       link.inject(
         IncomingPeerFrame(
-          channel: 'control',
+          kind: kPeerFrameMessage,
           payload: encodeFromAgent(
-            '{"m":{"type":"stream-ready","projectId":"proj-a"}}',
+            jsonEncode({'type': 'stream-ready', 'projectId': 'proj-a'}),
           ),
         ),
       );
@@ -375,12 +371,9 @@ void main() {
         reason: 'the backoff elapsed — project:start is resent on its own',
       );
 
-      relay.inject(
-        IncomingPeerFrame(
-          channel: 'control',
-          payload: encodeFromAgent(
-            '{"m":{"type":"stream-ready","projectId":"proj-a"}}',
-          ),
+      relay.injectFrame(
+        encodeFromAgent(
+          jsonEncode({'type': 'stream-ready', 'projectId': 'proj-a'}),
         ),
       );
       await Future<void>.delayed(const Duration(milliseconds: 20));
@@ -529,12 +522,9 @@ void main() {
     test('holds its cap slot until the bridge\'s own FIN drains the stream',
         () async {
       session = await establishSession(relay, handshaker: FakeHandshaker());
-      relay.inject(
-        IncomingPeerFrame(
-          channel: 'control',
-          payload: encodeFromAgent(
-            '{"m":{"type":"stream-ready","projectId":"proj-a"}}',
-          ),
+      relay.injectFrame(
+        encodeFromAgent(
+          jsonEncode({'type': 'stream-ready', 'projectId': 'proj-a'}),
         ),
       );
       await Future<void>.delayed(const Duration(milliseconds: 20));
@@ -604,6 +594,80 @@ void main() {
       await Future.wait(settled);
     });
   });
+
+  group('record-size caps on a bound project stream', () {
+    test(
+      'S1: the project stream is opened with '
+      'maxRecordBytes: kStreamProjectBridgeRecordMaxBytes',
+      () async {
+        await establishReady('proj-a');
+        session.openProject('proj-a', {
+          'type': 'project:start',
+          'projectId': 'proj-a',
+        });
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+
+        expect(
+          relay.openedStreams.single.maxRecordBytes,
+          kStreamProjectBridgeRecordMaxBytes,
+        );
+      },
+    );
+
+    test('S2: a 20 MB inbound project record dispatches as one message', () async {
+      await establishReady('proj-a');
+      final opening = session.openProject('proj-a', {
+        'type': 'project:start',
+        'projectId': 'proj-a',
+      });
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      final stream = relay.openedStreams.single;
+      stream.injectStreamReady('proj-a');
+      final transport = await opening;
+
+      final seen = <Map<String, dynamic>>[];
+      final sub = transport.messages.listen((m) => seen.add(m.json));
+      final blob = 'a' * (20 * 1024 * 1024);
+      stream.injectJson({'type': 'file:content', 'content': blob});
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+
+      expect(seen, hasLength(1));
+      expect(seen.single['content'], blob);
+      await sub.cancel();
+    });
+
+    test(
+      'S3: a project send over kStreamProjectAppRecordMaxBytes drops '
+      'message-too-large and emits MessageTooLarge',
+      () async {
+        await establishReady('proj-a');
+        final opening = session.openProject('proj-a', {
+          'type': 'project:start',
+          'projectId': 'proj-a',
+        });
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        final stream = relay.openedStreams.single;
+        stream.injectStreamReady('proj-a');
+        final transport = await opening;
+
+        final tooLarge = <MessageTooLarge>[];
+        final sub = session.messageTooLarge.listen(tooLarge.add);
+        final blob = 'a' * (kStreamProjectAppRecordMaxBytes + 1);
+        await transport.send({'type': 'git:diff', 'path': blob});
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+
+        // The bind's own hydration request may share the stream; the
+        // oversized verb must not.
+        final sentTypes = stream.sent
+            .map((b) => (jsonDecode(utf8.decode(b)) as Map)['type'])
+            .toList();
+        expect(sentTypes, isNot(contains('git:diff')));
+        expect(tooLarge, hasLength(1));
+        expect(tooLarge.single.type, 'git:diff');
+        await sub.cancel();
+      },
+    );
+  });
 }
 
 /// A [PeerLink] that does NOT also implement [MultiStreamPeerLink] —
@@ -630,7 +694,7 @@ class _PlainPeerLink implements PeerLink {
   void inject(IncomingPeerFrame frame) => _messages.add(frame);
 
   @override
-  Future<PeerSendOutcome> sendFrame(String channel, Uint8List payload) async =>
+  Future<PeerSendOutcome> sendFrame(String kind, Uint8List payload) async =>
       PeerSendOutcome.accepted;
 
   @override

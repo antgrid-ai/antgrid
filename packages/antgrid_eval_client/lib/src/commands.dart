@@ -48,10 +48,13 @@ final class _CleanupStack {
 /// JSON-line command surface the TS eval harness drives (`DartAppClient`).
 ///
 /// Central control and native payload setup have independent lifetimes.
-/// [MachineSession] owns the E2E session, control-plane fragment reassembly
-/// and liveness, and (Stage A A4) opens each project its own native QUIC
-/// stream on demand. This handler only translates stdin JSON actions into the
-/// production client object graph.
+/// [MachineSession] owns the E2E session and liveness, and (Stage A A4) opens
+/// each project its own native QUIC stream on demand. This handler only
+/// translates stdin JSON actions into the production client object graph.
+
+/// The eval protocol's handle for the machine control plane (A4 D-8) — a bare
+/// local id, unrelated to the wire's peer-frame `kind`.
+const String _kControlHandle = '0';
 class _MemoryEndpointKeys implements EndpointKeyStore {
   final Map<String, Uint8List> _values = {};
 
@@ -98,7 +101,7 @@ class CommandHandler {
   StreamSubscription<ProjectStreamEvent>? _streamReadySub;
 
   /// One subscription per attached [StreamTransport], keyed by HANDLE
-  /// (`kControlStreamId` = the machine control plane, else a bare projectId —
+  /// (`_kControlHandle` = the machine control plane, else a bare projectId —
   /// since Stage A A4 a project's identity IS its own native stream, so there
   /// is no separate bridge-issued streamId left to key by). Every inbound
   /// frame is republished as an `antgrid-message` event tagged with the
@@ -486,7 +489,7 @@ class CommandHandler {
     // Attach the control plane so machine-scoped frames (agent:projects,
     // stream-ready, host verbs) are observable; project frames get their own
     // transport per `project-start`.
-    _attachStream(kControlStreamId, session.control);
+    _attachStream(_kControlHandle, session.control);
     _emit({'event': 'handshake-complete'});
   }
 
@@ -524,7 +527,7 @@ class CommandHandler {
     }
   }
 
-  /// Send a plain `AbMessage`. `streamId` omitted or `kControlStreamId`
+  /// Send a plain `AbMessage`. `streamId` omitted or `_kControlHandle`
   /// addresses the machine control plane (`session.sendOnSession`); any other
   /// value is a projectId whose stream must already be open
   /// (`project-start` first) — since Stage A A4 a project's traffic rides its
@@ -541,8 +544,8 @@ class CommandHandler {
       });
       return;
     }
-    final handle = cmd['streamId'] as String? ?? kControlStreamId;
-    if (handle == kControlStreamId) {
+    final handle = cmd['streamId'] as String? ?? _kControlHandle;
+    if (handle == _kControlHandle) {
       await session.sendOnSession(data, 'control');
       return;
     }
@@ -581,8 +584,8 @@ class CommandHandler {
       });
       return;
     }
-    final handle = cmd['streamId'] as String? ?? kControlStreamId;
-    final transport = handle == kControlStreamId
+    final handle = cmd['streamId'] as String? ?? _kControlHandle;
+    final transport = handle == _kControlHandle
         ? session.control
         : session.projectTransport(handle);
     if (transport == null) {
@@ -596,7 +599,7 @@ class CommandHandler {
     await transport.refreshSnapshot();
     // The control plane's bus never caches a tree; asking would spend a round
     // trip on an empty answer.
-    if (handle != kControlStreamId) {
+    if (handle != _kControlHandle) {
       await _pullHeavyFrames(transport, handle);
     }
     _emit({'event': 'snapshot-complete', 'streamId': handle});
@@ -658,7 +661,7 @@ class CommandHandler {
       return;
     }
     final checkoutId = cmd['checkoutId'] as String? ?? 'main';
-    final transport = streamId == kControlStreamId
+    final transport = streamId == _kControlHandle
         ? session.control
         : session.projectTransport(streamId);
     if (transport == null) {

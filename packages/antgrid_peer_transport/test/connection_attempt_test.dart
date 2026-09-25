@@ -19,7 +19,7 @@ class FakeLink implements PeerLink {
   @override
   Stream<PeerLinkFailure> get failureStream => const Stream.empty();
   @override
-  Future<PeerSendOutcome> sendFrame(String channel, Uint8List payload) async =>
+  Future<PeerSendOutcome> sendFrame(String kind, Uint8List payload) async =>
       PeerSendOutcome.accepted;
   @override
   Future<void> close() async {

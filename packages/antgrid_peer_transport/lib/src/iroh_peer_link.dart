@@ -10,8 +10,6 @@ import 'relay_origin.dart';
 import 'connection_attempt.dart';
 
 const peerAlpn = 'antgrid/peer/2';
-const maxPeerRecordBytes =
-    kMaxFramePayload + maxPeerFrameHeaderBytes + peerFrameFixedPrefix;
 
 /// Enrollment-scoped storage implemented by the platform secure credential store.
 abstract interface class EndpointKeyStore {
@@ -100,9 +98,9 @@ class NativeEndpointOwner {
           terminal: true,
         );
       // The session stream carries the same open-frame prefix as every later
-      // stream, but its I/O stays on this class's reader/writer: a
-      // NativePeerStream would turn session backpressure into a stream reset
-      // and drop the write timeout the credit/frag path relies on.
+      // stream, but its I/O stays on this class's reader/writer: the session
+      // stream IS the session, so its failures close the whole connection
+      // rather than reset one stream among many.
       final body = encodeStreamOpenFrame(const SessionStreamOpen());
       final prefixed = Uint8List(4 + body.length);
       ByteData.sublistView(prefixed).setUint32(0, body.length, Endian.big);
@@ -114,8 +112,13 @@ class NativeEndpointOwner {
         transport: 'iroh',
         elapsedMs: timer.elapsedMilliseconds,
       );
-      return IrohPeerLink._(connection, send, recv, authorized, diagnostic)
-        .._start();
+      return IrohPeerLink._(
+        connection,
+        _IrohStreamSend(send),
+        recv,
+        authorized,
+        diagnostic,
+      ).._start();
     } catch (_) {
       connection.close(errorCode: 1);
       rethrow;
@@ -139,7 +142,7 @@ class IrohPeerLink implements PeerLink, MultiStreamPeerLink {
         },
       );
   final iroh.Connection _connection;
-  final iroh.SendStream _send;
+  final PeerStreamSend _send;
   final iroh.RecvStream _recv;
   final bool Function() _authorized;
   final PeerStreamOpener _opener;
@@ -188,25 +191,19 @@ class IrohPeerLink implements PeerLink, MultiStreamPeerLink {
       while (!_closed) {
         final prefix = await _recv.readExact(4);
         final length = ByteData.sublistView(prefix).getUint32(0, Endian.big);
-        if (length < 4 || length > maxPeerRecordBytes) {
+        if (length < 4 || length > kPeerMaxBridgeRecordBytes) {
           _fail('INVALID_RECORD_LENGTH', false);
           return;
         }
-        final bytes = await _recv.readExact(length);
+        final bytes = await _readBodyInSlices(length);
         if (!isDispatchAllowed) {
           await close();
           return;
         }
         final frame = decodePeerFrame(bytes);
-        if (frame.payload.length > kMaxFramePayload ||
-            frame.header['type'] != 'message' ||
-            !['control', 'preview'].contains(frame.header['channel'])) {
-          _fail('INVALID_PEER_FRAME', false);
-          return;
-        }
         _messages.add(
           IncomingPeerFrame(
-            channel: frame.header['channel'] as String,
+            kind: frame.header['type'] as String,
             payload: frame.payload,
           ),
         );
@@ -218,29 +215,41 @@ class IrohPeerLink implements PeerLink, MultiStreamPeerLink {
     }
   }
 
+  /// Reads a body of [length] bytes in `readExact` pieces of at most
+  /// [kPeerStreamSliceBytes], mirroring `StreamRecordReader`.
+  Future<Uint8List> _readBodyInSlices(int length) async {
+    final body = Uint8List(length);
+    var offset = 0;
+    while (offset < length) {
+      final chunkLen = math.min(kPeerStreamSliceBytes, length - offset);
+      final chunk = await _recv.readExact(chunkLen);
+      body.setRange(offset, offset + chunkLen, chunk);
+      offset += chunkLen;
+    }
+    return body;
+  }
+
   @override
-  Future<PeerSendOutcome> sendFrame(String channel, Uint8List payload) {
+  Future<PeerSendOutcome> sendFrame(String kind, Uint8List payload) {
     if (!isDispatchAllowed) return Future.value(PeerSendOutcome.closed);
-    if (!['control', 'preview'].contains(channel)) {
+    if (kind != kPeerFrameSession && kind != kPeerFrameMessage) {
       _fail('INVALID_PEER_FRAME', false);
       return Future.value(PeerSendOutcome.failed);
     }
-    if (payload.length > kMaxFramePayload)
+    if (payload.length > kStreamProjectAppRecordMaxBytes) {
       return Future.value(PeerSendOutcome.tooLarge);
-    final frame = encodePeerFrame({'type': 'message', 'channel': channel}, payload);
+    }
+    final frame = encodePeerFrame({'type': kind}, payload);
     final size = frame.length + 4;
-    if (_queued + size > kSocketInflightBytes)
+    if (_queued + size > kSessionStreamMaxQueuedBytes) {
       return Future.value(PeerSendOutcome.backpressured);
+    }
     final record = Uint8List(size);
     ByteData.sublistView(record).setUint32(0, frame.length, Endian.big);
     record.setRange(4, size, frame);
     final completion = Completer<PeerSendOutcome>();
     _pending.add(completion);
     _queued += size;
-    final timer = Timer(
-      const Duration(seconds: 5),
-      () => _fail('WRITE_TIMEOUT', true),
-    );
     _tail = _tail.then((_) async {
       try {
         if (!isDispatchAllowed) {
@@ -248,17 +257,24 @@ class IrohPeerLink implements PeerLink, MultiStreamPeerLink {
             completion.complete(PeerSendOutcome.closed);
           return;
         }
-        await _send.writeAll(record);
-        if (!completion.isCompleted)
+        final wrote = await writeRecordInSlices(
+          _send,
+          record,
+          stop: () => !isDispatchAllowed,
+        );
+        // A stop can land between slices, leaving a partial record on the
+        // session stream; nothing after it could be framed, so the link goes.
+        if (!wrote) await close();
+        if (!completion.isCompleted) {
           completion.complete(
-            isDispatchAllowed
+            wrote && isDispatchAllowed
                 ? PeerSendOutcome.accepted
                 : PeerSendOutcome.closed,
           );
+        }
       } catch (_) {
         _fail('NATIVE_WRITE_UNCLASSIFIED', true);
       } finally {
-        timer.cancel();
         _queued -= size;
         _pending.remove(completion);
         record.fillRange(0, record.length, 0);
@@ -342,6 +358,26 @@ abstract interface class PeerStreamSend {
 /// The receive half a [NativePeerStream] reads through.
 abstract interface class PeerStreamRecv {
   Future<Uint8List> readExact(int length);
+}
+
+/// Writes [record] in `writeAll` calls of at most [kPeerStreamSliceBytes]: a
+/// cancel or reset then waits on one slice, never a whole record. Returns
+/// false if [stop] turned true between slices.
+Future<bool> writeRecordInSlices(
+  PeerStreamSend send,
+  Uint8List record, {
+  bool Function()? stop,
+}) async {
+  for (
+    var offset = 0;
+    offset < record.length;
+    offset += kPeerStreamSliceBytes
+  ) {
+    if (stop != null && stop()) return false;
+    final end = math.min(offset + kPeerStreamSliceBytes, record.length);
+    await send.writeAll(record.sublist(offset, end));
+  }
+  return stop == null || !stop();
 }
 
 /// The UTF-8 JSON body of a stream's first record, with no length prefix —
@@ -491,18 +527,8 @@ class NativePeerStream implements PeerStream {
 
   /// Checks `_writeStopped` between slices, so a cancel or overflow noticed
   /// mid-record stops after the slice already handed to the binding.
-  Future<bool> _writeInSlices(Uint8List bytes) async {
-    for (
-      var offset = 0;
-      offset < bytes.length;
-      offset += kPeerStreamSliceBytes
-    ) {
-      if (_writeStopped) return false;
-      final end = math.min(offset + kPeerStreamSliceBytes, bytes.length);
-      await _send.writeAll(bytes.sublist(offset, end));
-    }
-    return !_writeStopped;
-  }
+  Future<bool> _writeInSlices(Uint8List bytes) =>
+      writeRecordInSlices(_send, bytes, stop: () => _writeStopped);
 
   void _dropQueue() {
     for (final pending in _queue) {

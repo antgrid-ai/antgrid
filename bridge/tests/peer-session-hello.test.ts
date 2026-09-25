@@ -1,82 +1,134 @@
 // Stage B's establishment contract: a native peer gets in through exactly one
-// door — a control-channel `session:hello` naming an admitted identity — and
-// everything else about the session (attribution, credit accounting, the
-// hello's own re-ack/violation rule) follows from `receivePeerFrame`/
-// `handleHello` in peer-session-owner.ts. The lightweight tests here drive
-// that seam directly through `TestPeerSessionOwner`; the two that must see a
-// real close CODE (unauthorized vs. protocol-violation) drive the native
-// layer, since only `NativeHostConnection` has a connection to close.
+// door — a `session`-kind `session:hello` naming an admitted identity — and
+// everything else about the session (attribution, the hello's own re-ack/
+// violation rule) follows from `receivePeerFrame`/`handleHello` in
+// peer-session-owner.ts. The lightweight tests here drive that seam directly
+// through `TestPeerSessionOwner`; the two that must see a real close CODE
+// (unauthorized vs. protocol-violation) drive the native layer, since only
+// `NativeHostConnection` has a connection to close.
 import { describe, expect, it, spyOn, test } from "bun:test";
 import type { Connection } from "@number0/iroh";
-import { PEER_ALPN, encodePeerFrame, encodeStreamOpen } from "antgrid-wire";
+import { MAX_TRANSFER_BYTES, PEER_ALPN, encodePeerFrame, encodeStreamOpen } from "antgrid-wire";
 import { MessageBus } from "../src/message-bus";
 import { createMessage } from "../src/protocol";
 import { netwatch, __resetNetwatchForTest } from "../src/netwatch";
 import { NativeHostConnection } from "../src/peer/native-host-connection";
 import type { PairedPhonesStore } from "../src/paired-phones";
-import { TestPeerSessionOwner } from "./test-peer-session-owner";
+import { TestPeerSessionOwner, ed25519Pair } from "./test-peer-session-owner";
 import vector from "../../evals/fixtures/endpoint-registration-vectors.json";
 
-type SessionsMap = Map<string, {
-  attemptId: string;
-  lastRecvAt: number;
-  rxFlow: { consumed: { control: number; preview: number } };
-}>;
+type SessionsMap = Map<string, Record<string, unknown>>;
 
 function sessionsOf(client: TestPeerSessionOwner): SessionsMap {
   return (client as unknown as { sessions: SessionsMap }).sessions;
 }
 
 describe("establishment: the one door in", () => {
-  it("(a) a frame from a peer with no session is dropped pre-establishment and never reaches a bound stream", () => {
+  it("H1: pre-establishment, a message-kind record is dropped pre-establishment and establishes nothing", () => {
     __resetNetwatchForTest();
     const client = TestPeerSessionOwner.forTest({ sendPayload: () => {}, peerId: "phone-1", deviceId: "dev-1" });
     const bus = new MessageBus();
     const received: unknown[] = [];
     bus.setInboundHandler((msg) => received.push(msg));
-    const handle = client.attachStream(bus, {});
+    client.setBus(bus);
     try {
       // The drop fires purely on "no session for this peer" (receivePeerFrame),
-      // before any envelope shape or routing is even looked at — a bare
-      // AbMessage exercises the same gate the old `{s, m}` mux envelope did.
-      client.sendFromPeer("phone-1", createMessage("agent:turn-start", { sessionId: "s1", turnId: "t1" }));
+      // before any message shape or routing is even looked at.
+      client.sendFromPeer("phone-1", createMessage("agent:turn-start", { sessionId: "s1", turnId: "t1" }), "message");
       expect(received).toHaveLength(0);
       const drops = netwatch.snapshot().filter((e) => e.kind === "drop" && e.reason === "pre-establishment");
       expect(drops).toHaveLength(1);
-    } finally { handle.detach(); client.close(); }
+      expect(client.peerSession("phone-1")).toBeNull();
+    } finally { client.clearBus(); client.close(); }
   });
 
-  it("(c) a frame from peer A never touches peer B's session state", () => {
-    const client = TestPeerSessionOwner.forTest({ sendPayload: () => {}, peerId: "phone-a", deviceId: "dev-1" });
-    client.establish("phone-a");
-    client.establish("phone-b");
+  it("H2: pre-establishment, a session:hello body sent with the message kind does not establish", () => {
+    // `type` is the only discriminator between a liveness/session frame and a
+    // control-plane message (peer-protocol.ts): a hello arriving under the
+    // wrong header kind never reaches `onSessionFrame`/`handleHello` at all.
+    const client = TestPeerSessionOwner.forTest({ sendPayload: () => {}, peerId: "phone-1", deviceId: "dev-1" });
     try {
-      const sessions = sessionsOf(client);
-      const bBefore = { ...sessions.get("phone-b")!.rxFlow.consumed };
-      const bLastRecvBefore = sessions.get("phone-b")!.lastRecvAt;
-      client.sendFromPeer("phone-a", JSON.stringify({ m: createMessage("terminal:input", { terminalId: "t", data: "hi" }) }));
-      expect(sessions.get("phone-b")!.rxFlow.consumed).toEqual(bBefore);
-      expect(sessions.get("phone-b")!.lastRecvAt).toBe(bLastRecvBefore);
-      expect(sessions.get("phone-a")!.rxFlow.consumed.control).toBeGreaterThan(0);
+      // Admitted first, so the only thing standing between this hello and an
+      // established session is its header kind: an unadmitted peer would be
+      // refused `not-admitted` whatever kind it used.
+      (client as unknown as { admitPeer(peerId: string, pub: string): void }).admitPeer("phone-1", ed25519Pair().pubB64);
+      client.sendFromPeer("phone-1", { type: "session:hello", attemptId: "a1" }, "message");
+      expect(client.peerSession("phone-1")).toBeNull();
+      client.sendFromPeer("phone-1", { type: "session:hello", attemptId: "a1" }, "session");
+      expect(client.peerSession("phone-1")).not.toBeNull();
     } finally { client.close(); }
   });
 
-  it("(d) credit consumption charges exactly the plaintext bytes received, with no seal overhead", () => {
+  it("H3: an established message-kind {m: ...} body is dropped unrecognized-plaintext", () => {
+    // The wire body of a `message`-kind record is a bare `AbMessage`, so an
+    // envelope-wrapped one has no string `type` of its own and is dropped
+    // rather than unwrapped.
+    __resetNetwatchForTest();
+    const client = TestPeerSessionOwner.forTest({ sendPayload: () => {}, peerId: "phone-1", deviceId: "dev-1" });
+    client.establish("phone-1");
+    const bus = new MessageBus();
+    const received: unknown[] = [];
+    bus.setInboundHandler((msg) => received.push(msg));
+    client.setBus(bus);
+    try {
+      client.sendFromPeer("phone-1", { m: createMessage("agent:turn-start", { sessionId: "s1", turnId: "t1" }) }, "message");
+      expect(received).toHaveLength(0);
+      const drops = netwatch.snapshot().filter((e) => e.kind === "drop" && e.reason === "unrecognized-plaintext");
+      expect(drops).toHaveLength(1);
+    } finally { client.clearBus(); client.close(); }
+  });
+
+  it("H4: an established message-kind ping AbMessage reaches control-plane dispatch and is not answered with a liveness pong", () => {
+    // `ping`/`pong` are ordinary AbMessage literals too (peer-protocol.ts's
+    // own comment): on the `message` kind they are just control-plane
+    // traffic, dispatched like any other verb, never auto-answered the way a
+    // `session`-kind liveness ping is.
+    const client = TestPeerSessionOwner.forTest({ sendPayload: () => {}, peerId: "phone-1", deviceId: "dev-1" });
+    client.establish("phone-1");
+    const bus = new MessageBus();
+    const received: unknown[] = [];
+    bus.setInboundHandler((msg) => received.push(msg));
+    client.setBus(bus);
+    try {
+      const ping = createMessage("ping", {});
+      client.sendFromPeer("phone-1", ping, "message");
+      expect(received).toEqual([ping]);
+      expect(client.sentTo("phone-1")).toEqual([]);
+    } finally { client.clearBus(); client.close(); }
+  });
+
+  it("H6: a control-plane message over MAX_TRANSFER_BYTES is too-large, writes nothing and reports MESSAGE_TOO_LARGE", async () => {
+    // The app reads a session record only up to PEER_MAX_BRIDGE_RECORD_BYTES,
+    // so an oversized record reaching the writer would retire the whole
+    // connection app-side instead of dropping one message here.
+    const errors: string[] = [];
     const client = TestPeerSessionOwner.forTest({
       sendPayload: () => {}, peerId: "phone-1", deviceId: "dev-1",
-      // Large enough that no credit frame fires mid-loop and steals a write
-      // from `outbox` the assertions below don't care about.
-      creditBatchBytes: 1_000_000,
+      options: { onError: (code) => errors.push(code) },
     });
     client.establish("phone-1");
     try {
-      let total = 0;
-      for (let i = 0; i < 10; i++) {
-        const payload = JSON.stringify({ m: createMessage("terminal:input", { terminalId: "t", data: "x".repeat(i) }) });
-        total += Buffer.byteLength(payload, "utf8");
-        client.sendFromPeer("phone-1", payload, "control");
-      }
-      expect(sessionsOf(client).get("phone-1")!.rxFlow.consumed.control).toBe(total);
+      const huge = createMessage("agent:turn-start", { sessionId: "x".repeat(MAX_TRANSFER_BYTES), turnId: "t1" });
+      const outcome = await (client as unknown as {
+        sendControlPlane(msg: unknown, channel: string): Promise<string>;
+      }).sendControlPlane(huge, "control");
+      expect(outcome).toBe("too-large");
+      expect(client.sentTo("phone-1")).toEqual([]);
+      expect(errors).toEqual(["MESSAGE_TOO_LARGE"]);
+    } finally { client.close(); }
+  });
+
+  it("H5: a credit session frame is dropped unknown-session-frame", () => {
+    // An older app's `credit` must not reach dispatch: it falls through
+    // `handleSessionFrame`'s default arm like any other unrecognized
+    // session-frame type.
+    __resetNetwatchForTest();
+    const client = TestPeerSessionOwner.forTest({ sendPayload: () => {}, peerId: "phone-1", deviceId: "dev-1" });
+    client.establish("phone-1");
+    try {
+      client.sendFromPeer("phone-1", { type: "credit", bytes: 1_024 }, "session");
+      const drops = netwatch.snapshot().filter((e) => e.kind === "drop" && e.reason === "unknown-session-frame");
+      expect(drops).toHaveLength(1);
     } finally { client.close(); }
   });
 
@@ -85,7 +137,7 @@ describe("establishment: the one door in", () => {
     const { attemptId } = client.establish("phone-1");
     try {
       const before = sessionsOf(client).get("phone-1");
-      client.sendFromPeer("phone-1", { type: "session:hello", attemptId });
+      client.sendFromPeer("phone-1", { type: "session:hello", attemptId }, "session");
       expect(client.readToPeer("phone-1")).toEqual({ type: "established", attemptId });
       expect(sessionsOf(client).get("phone-1")).toBe(before);
     } finally { client.close(); }
@@ -95,7 +147,7 @@ describe("establishment: the one door in", () => {
     const client = TestPeerSessionOwner.forTest({ sendPayload: () => {}, peerId: "phone-1", deviceId: "dev-1" });
     client.establish("phone-1", { attemptId: "a1" });
     try {
-      client.sendFromPeer("phone-1", { type: "session:hello", attemptId: "a2" });
+      client.sendFromPeer("phone-1", { type: "session:hello", attemptId: "a2" }, "session");
       expect(client.peerSession("phone-1")).toBeNull();
     } finally { client.close(); }
     // The native layer's equivalent case, plus the CLOSE CODE that has no
@@ -186,7 +238,8 @@ function withSessionOpen<T extends { recv: { readExact: (length: number) => Prom
  *  that the lease refuses, and both outcomes are decided only after the
  *  session stream's open frame is validated. */
 function connection(endpointId: string, firstStream = Promise.resolve(withSessionOpen({
-  send: { writeAll: async (_bytes: number[]) => {} },
+  send: { writeAll: async (_bytes: number[]) => {}, setPriority: async (_p: number) => {},
+    reset: async (_code: bigint) => {}, finish: async () => {} },
   recv: { readExact: (_length: number) => new Promise<number[]>(() => {}) },
 }))) {
   let streams = 0;
@@ -203,27 +256,46 @@ function connection(endpointId: string, firstStream = Promise.resolve(withSessio
   return { native: fake as unknown as Connection, closeCodes: () => codes };
 }
 
-/** A record stream whose first `readExact(4)` call hangs until released —
- *  for putting a peer PAST admission and INTO the read loop before revoking
- *  access, so the close it earns comes from `PeerRecords.checkAdmission`
- *  (code 3) rather than the pre-stream admission check (code 1). The A1 open
- *  frame is served first (`withSessionOpen`); the gate below it is what a
- *  test releases. */
+/** A record stream whose first record hangs until released — for putting a
+ *  peer PAST admission and INTO the read loop before revoking access, so the
+ *  close it earns comes from the read loop's own per-record `authorized()`
+ *  recheck (code 3) rather than the pre-stream admission check (code 1). The
+ *  A1 open frame is served first (`withSessionOpen`); the gate below it is
+ *  what a test releases, with a real frame the reader can decode — a
+ *  malformed one would earn a protocol-violation close instead, before
+ *  `authorized()` is ever consulted. */
 function pausableStream() {
-  const gate = Promise.withResolvers<number[]>();
+  const gate = Promise.withResolvers<Uint8Array>();
+  let stage: 0 | 1 = 0;
   return {
-    resolve: (bytes: number[]) => gate.resolve(bytes),
+    // Takes a whole encoded frame (not raw bytes off the wire): the
+    // StreamRecordReader reads its length prefix and body as two separate
+    // `readExact` calls, so the gate must answer each in turn rather than
+    // handing the same bytes back twice.
+    resolve: (frame: Uint8Array) => gate.resolve(frame),
     stream: withSessionOpen({
-      send: { writeAll: async (_bytes: number[]) => {} },
-      recv: { readExact: (_length: number) => gate.promise },
+      send: { writeAll: async (_bytes: number[]) => {}, setPriority: async (_p: number) => {},
+        reset: async (_code: bigint) => {}, finish: async () => {} },
+      recv: {
+        readExact: async (_length: number) => {
+          const frame = await gate.promise;
+          if (stage === 0) {
+            stage = 1;
+            const prefix = Buffer.alloc(4);
+            prefix.writeUInt32BE(frame.length, 0);
+            return Array.from(prefix);
+          }
+          return Array.from(frame);
+        },
+      },
     }),
   };
 }
 
 /** A record stream that serves each frame's length-prefix then its bytes, in
- *  order, over the actual record framing (`PeerRecords`: a 4-byte BE length,
- *  then the frame) — but frame 0 only; every later frame stays UNAVAILABLE
- *  until `release(index)` is called for it.
+ *  order, over the actual record framing (the session `StreamRecordReader`: a
+ *  4-byte BE length, then the frame) — but frame 0 only; every later frame
+ *  stays UNAVAILABLE until `release(index)` is called for it.
  *
  *  A stream with every frame queued up front resolves the whole read loop —
  *  establish, then process the next frame — inside one microtask flush, which
@@ -251,7 +323,8 @@ function scriptedStream(frames: Uint8Array[]) {
   return {
     release: (index: number) => resolvers[index]?.(),
     stream: withSessionOpen({
-      send: { writeAll: async (_bytes: number[]) => {} },
+      send: { writeAll: async (_bytes: number[]) => {}, setPriority: async (_p: number) => {},
+        reset: async (_code: bigint) => {}, finish: async () => {} },
       recv: {
         readExact: async (_length: number) => {
           if (frameIndex >= perFrame.length) return new Promise<number[]>(() => {});
@@ -282,20 +355,27 @@ test("(b) access revoked mid-session closes the connection unauthorized (code 3)
     await f.access.acceptPeer(peer.native);
     expect(f.access.nativePeers.size).toBe(1);
     f.setAllowed(false);
-    paused.resolve([0, 0, 0, 0]);
+    // Any well-formed record does it — revocation is caught by the read
+    // loop's own `authorized()` check once `reader.read()` returns, not by
+    // anything specific to this frame's content.
+    paused.resolve(encodePeerFrame({ type: "session" }, Buffer.from(JSON.stringify({ type: "ping" }))));
     await until(() => peer.closeCodes().length > 0);
     expect(peer.closeCodes()).toEqual([3n]);
     expect(f.access.nativePeers.size).toBe(0);
   } finally { f.client.close(); }
 });
 
+// A session:hello is only ever processed off a `session`-kind record
+// (peer-protocol.ts's `type` discriminator); every scripted hello below uses it.
+const helloFrame = (attemptId: string) => encodePeerFrame(
+  { type: "session" },
+  Buffer.from(JSON.stringify({ type: "session:hello", attemptId })),
+);
+const slotOf = (f: ReturnType<typeof fixture>) => `${f.peerId}#${f.client.deviceId}`;
+
 test("a second hello naming a different attemptId once established closes the connection as a protocol violation (code 2)", async () => {
   const f = fixture();
-  const hello = (attemptId: string) => encodePeerFrame(
-    { type: "message", channel: "control" },
-    Buffer.from(JSON.stringify({ type: "session:hello", attemptId })),
-  );
-  const scripted = scriptedStream([hello("a1"), hello("a2")]);
+  const scripted = scriptedStream([helloFrame("a1"), helloFrame("a2")]);
   const peer = connection(f.endpointId, Promise.resolve(scripted.stream));
   try {
     await f.access.acceptPeer(peer.native);
@@ -309,12 +389,6 @@ test("a second hello naming a different attemptId once established closes the co
 });
 
 // --- The native layer: admission, the lease re-check, the hello timer ---
-
-const helloFrame = (attemptId: string) => encodePeerFrame(
-  { type: "message", channel: "control" },
-  Buffer.from(JSON.stringify({ type: "session:hello", attemptId })),
-);
-const slotOf = (f: ReturnType<typeof fixture>) => `${f.peerId}#${f.client.deviceId}`;
 
 test("a hello the lease re-check refuses is never established and closes unauthorized (code 3)", async () => {
   const f = fixture();
@@ -341,8 +415,9 @@ test("a lease-authorized peer's envelope before its hello never reaches the cont
   const received: unknown[] = [];
   bus.setInboundHandler((msg) => received.push(msg));
   f.client.setBus(bus);
-  const envelope = encodePeerFrame({ type: "message", channel: "control" },
-    Buffer.from(JSON.stringify({ m: createMessage("agent:turn-start", { sessionId: "s1", turnId: "t1" }) })));
+  // The wire body of a `message`-kind record is a bare AbMessage.
+  const envelope = encodePeerFrame({ type: "message" },
+    Buffer.from(JSON.stringify(createMessage("agent:turn-start", { sessionId: "s1", turnId: "t1" }))));
   const scripted = scriptedStream([envelope, helloFrame("a1"), envelope]);
   const peer = connection(f.endpointId, Promise.resolve(scripted.stream));
   const events: Parameters<typeof netwatch.record>[0][] = [];

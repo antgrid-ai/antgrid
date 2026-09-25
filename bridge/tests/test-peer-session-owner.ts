@@ -1,10 +1,7 @@
 import { generateKeyPairSync } from "node:crypto";
-import { decodePeerFrame } from "antgrid-wire";
-import type { Channel } from "../src/message-bus";
+import { decodePeerFrame, type PeerFrameKind } from "antgrid-wire";
 import type { RemoteHostConnection } from "../src/remote-host-connection";
 import type { NativeHostOptions } from "../src/peer/native-host-connection";
-import type { QueuedAppFrame, PendingSinkWrite } from "../src/send-scheduler";
-import { FragReassembler } from "../src/frag-reassembler";
 import { refuseStream, type AcceptedBiStream, type StreamRefusal } from "../src/peer/stream-dispatch";
 import {
   PeerSessionOwner,
@@ -32,6 +29,7 @@ function createFakeProjectStream() {
   const resets: bigint[] = [];
   const stops: bigint[] = [];
   const order: string[] = [];
+  const writeAllLengths: number[] = [];
   let finished = false;
   let sendBuf = Buffer.alloc(0);
   const allRecords: string[] = [];
@@ -55,8 +53,8 @@ function createFakeProjectStream() {
 
   const send: AcceptedBiStream["send"] = {
     writeAll: (bytes) => {
-      if (heldWrites) return new Promise<void>((resolve) => heldWrites!.push(() => { order.push("writeAll"); absorb(bytes); resolve(); }));
-      return Promise.resolve().then(() => { order.push("writeAll"); absorb(bytes); });
+      if (heldWrites) return new Promise<void>((resolve) => heldWrites!.push(() => { order.push("writeAll"); writeAllLengths.push(bytes.length); absorb(bytes); resolve(); }));
+      return Promise.resolve().then(() => { order.push("writeAll"); writeAllLengths.push(bytes.length); absorb(bytes); });
     },
     setPriority: (p) => Promise.resolve().then(() => { order.push("setPriority"); priorities.push(p); }),
     reset: (code) => Promise.resolve().then(() => { order.push("reset"); resets.push(code); }),
@@ -91,7 +89,7 @@ function createFakeProjectStream() {
 
   return {
     stream: { send, recv } as AcceptedBiStream,
-    priorities, resets, stops, order,
+    priorities, resets, stops, order, writeAllLengths,
     isFinished: () => finished,
     allRecords, afterFirst,
     firstRecordText: () => firstRecordText,
@@ -103,6 +101,15 @@ function createFakeProjectStream() {
     },
     pushAppRecord(obj: unknown): void {
       pushBytes(Buffer.from(typeof obj === "string" ? obj : JSON.stringify(obj), "utf8"));
+    },
+    /** Pushes a bare length prefix with no matching body: enough on its own
+     *  to trip `StreamRecordReader`'s bound check, which reads the prefix
+     *  before ever asking for a body. */
+    pushOverlongPrefix(length: number): void {
+      const prefix = Buffer.alloc(4);
+      prefix.writeUInt32BE(length);
+      recvQueue.push(Array.from(prefix));
+      pump();
     },
     endWith(error: unknown = new Error("app ended")): void {
       endError = error;
@@ -120,12 +127,19 @@ export interface TestProjectStream {
   read(): any;
   written(): ReadonlyArray<any>;
   send(obj: unknown): Promise<void>;
+  /** Pushes a bare overlong length prefix with no body: the shape a real
+   *  `STREAM_PROJECT_APP_RECORD_MAX_BYTES` overflow takes on the wire. */
+  sendOverlongPrefix(length: number): Promise<void>;
   finish(): Promise<void>;
   reset(): Promise<void>;
   readonly resets: bigint[];
   readonly stops: bigint[];
   readonly finished: boolean;
   readonly priorities: number[];
+  /** The byte length of every `writeAll` call on this stream's send half, in
+   *  order — how P3 (project-streams.test.ts) checks that a large record is
+   *  sliced rather than written as one array. */
+  readonly writeAllLengths: number[];
   /** Parks every later `writeAll` until `releaseWrites()`: a peer whose
    *  QUIC send window is full. */
   holdWrites(): void;
@@ -150,8 +164,8 @@ let establishCounter = 0;
 /** Native-neutral peer-session fixture. It exercises the payload/session layer
  * directly; central WebSocket behavior belongs in CentralControlClient tests. */
 export class TestPeerSessionOwner extends PeerSessionOwner {
-  private writer: ((payload: string | Buffer, to: string, channel?: Channel,
-    diagnosticType?: string, streamId?: string) => boolean) = () => false;
+  private writer: ((payload: Buffer, to: string, kind: PeerFrameKind,
+    diagnosticType: string) => boolean) = () => false;
 
   constructor(opts: PeerSessionOwnerOptions) { super(opts); }
 
@@ -184,17 +198,12 @@ export class TestPeerSessionOwner extends PeerSessionOwner {
     this.projectDetachedFn?.(projectId);
   }
 
-  protected override sendNativePayload(payload: string | Buffer, to: string, channel?: Channel,
-    diagnosticType?: string, streamId?: string): boolean {
-    const ok = this.writer(payload, to, channel, diagnosticType, streamId);
-    if (ok) this.recordOutbound(to, payload);
-    return ok;
-  }
-
-  protected override sendNativeScheduled(payload: Buffer, peerId: string, frame: QueuedAppFrame): number | null | PendingSinkWrite {
-    const ok = this.writer(payload, peerId, frame.channel, frame.type, frame.streamId);
-    if (ok) this.recordOutbound(peerId, payload);
-    return ok ? payload.length : null;
+  protected override writeSessionRecord(peerId: string, kind: PeerFrameKind, payload: Buffer,
+    diagnosticType: string): Promise<StreamSendOutcome> | null {
+    const ok = this.writer(payload, peerId, kind, diagnosticType);
+    if (!ok) return null;
+    this.recordOutbound(peerId, kind, payload);
+    return Promise.resolve("sent");
   }
 
   // --- The establish/sendFromPeer/readToPeer seam ---
@@ -206,12 +215,13 @@ export class TestPeerSessionOwner extends PeerSessionOwner {
   // instantly and never touch the wire.
 
   /** Frames this client wrote, queued per addressee in send order, for
-   *  `readToPeer`/`sentTo`. */
-  private outbox = new Map<string, Array<string | Buffer>>();
+   *  `readToPeer`/`sentTo`/`readFrameToPeer`/`sentFramesTo`. */
+  private outbox = new Map<string, Array<{ kind: PeerFrameKind; payload: Buffer }>>();
 
-  private recordOutbound(to: string, payload: string | Buffer): void {
+  private recordOutbound(to: string, kind: PeerFrameKind, payload: Buffer): void {
+    const entry = { kind, payload };
     const list = this.outbox.get(to);
-    if (list) list.push(payload); else this.outbox.set(to, [payload]);
+    if (list) list.push(entry); else this.outbox.set(to, [entry]);
   }
 
   /** Admit `peerId`'s identity and drive a real plaintext `session:hello` ->
@@ -233,6 +243,7 @@ export class TestPeerSessionOwner extends PeerSessionOwner {
         ...(opts.capabilities ? { capabilities: opts.capabilities } : {}),
       })),
       peerId,
+      "session",
     );
     const session = this.sessions.get(peerId);
     if (!session || session.attemptId !== attemptId) {
@@ -246,39 +257,50 @@ export class TestPeerSessionOwner extends PeerSessionOwner {
   }
 
   /** Inject `obj` exactly as a real app's frame from `peerId` would arrive:
-   *  plaintext JSON on the given channel. `obj` may be a pre-serialized string
-   *  (a raw fragment envelope, or a deliberately malformed body) or any
-   *  JSON-able value. */
-  sendFromPeer(peerId: string, obj: unknown, channel: Channel = "control"): void {
+   *  plaintext JSON of the given header kind. `obj` may be a pre-serialized
+   *  string (a deliberately malformed body) or any JSON-able value. */
+  sendFromPeer(peerId: string, obj: unknown, kind: PeerFrameKind = "message"): void {
     const payload = typeof obj === "string" ? obj : JSON.stringify(obj);
-    this.injectPeerPayload(Buffer.from(payload, "utf8"), peerId, channel);
+    this.injectPeerPayload(Buffer.from(payload, "utf8"), peerId, kind);
   }
 
-  /** Pop and parse the next frame this client sent to `peerId`. Throws on an
-   *  empty queue — a test expecting silence should check `sentTo` instead. */
+  /** Pop and parse the next frame this client sent to `peerId`: a bare
+   *  `AbMessage` or session frame, never wrapped. Throws on an empty queue —
+   *  a test expecting silence should check `sentTo` instead. */
   readToPeer(peerId: string): unknown {
+    return this.readFrameToPeer(peerId).body;
+  }
+
+  /** Like `readToPeer`, but also returns the header `kind` the frame carried
+   *  — for rows that assert a liveness frame vs. a control-plane message. */
+  readFrameToPeer(peerId: string): { kind: PeerFrameKind; body: unknown } {
     const list = this.outbox.get(peerId);
     const next = list?.shift();
-    if (next === undefined) throw new Error(`readToPeer(${peerId}): nothing queued`);
-    return JSON.parse(typeof next === "string" ? next : next.toString("utf8"));
+    if (next === undefined) throw new Error(`readFrameToPeer(${peerId}): nothing queued`);
+    return { kind: next.kind, body: JSON.parse(next.payload.toString("utf8")) };
   }
 
-  /** Everything queued for `peerId` so far, without consuming it. */
-  sentTo(peerId: string): ReadonlyArray<string | Buffer> {
+  /** Every payload queued for `peerId` so far, without consuming it. */
+  sentTo(peerId: string): ReadonlyArray<Buffer> {
+    return (this.outbox.get(peerId) ?? []).map((entry) => entry.payload);
+  }
+
+  /** Like `sentTo`, but keeps each entry's header `kind`. */
+  sentFramesTo(peerId: string): ReadonlyArray<{ kind: PeerFrameKind; payload: Buffer }> {
     return this.outbox.get(peerId) ?? [];
   }
 
-  setNativeWriter(writer: (payload: string | Buffer, to: string, channel?: Channel,
-    diagnosticType?: string, streamId?: string) => boolean): void {
+  setNativeWriter(writer: (payload: Buffer, to: string, kind: PeerFrameKind,
+    diagnosticType: string) => boolean): void {
     this.writer = writer;
   }
 
   injectPeerPayload(
     payload: Uint8Array,
     from: string,
-    channel: Channel = "control",
+    kind: PeerFrameKind = "message",
   ): void {
-    this.receivePeerFrame(payload, from, channel);
+    this.receivePeerFrame(payload, from, kind);
   }
 
   injectPeerFrame(frame: Uint8Array, authenticatedPeerId: string): void {
@@ -286,7 +308,7 @@ export class TestPeerSessionOwner extends PeerSessionOwner {
     this.receivePeerFrame(
       decoded.payload,
       authenticatedPeerId,
-      decoded.header.channel,
+      decoded.header.type,
     );
   }
 
@@ -312,7 +334,6 @@ export class TestPeerSessionOwner extends PeerSessionOwner {
     if (refusal) refuseStream(fake.stream, refusal, authorized, () => {});
     await flush();
 
-    let reassembler: FragReassembler | undefined;
     return {
       order: fake.order,
       refusal: () => {
@@ -324,35 +345,21 @@ export class TestPeerSessionOwner extends PeerSessionOwner {
           : undefined;
       },
       written: () => fake.allRecords.map((text) => JSON.parse(text)),
+      // One AbMessage is always exactly one record.
       read: () => {
-        // `out` must live OUTSIDE the loop: the reassembler is built once (on
-        // the first fragment) and its `onComplete` closure captures whichever
-        // binding existed at that moment. A `let out` re-declared per
-        // iteration shadows that binding on every later pass, so a completion
-        // that lands on fragment 2+ sets a variable this loop never reads
-        // again and the next `afterFirst.shift()` finds nothing queued.
-        let out: string | undefined;
-        for (;;) {
-          const text = fake.afterFirst.shift();
-          if (text === undefined) throw new Error(`openProjectStream(${peerId}, ${projectId}).read(): nothing queued`);
-          if (!text.startsWith('{"__frag"')) return JSON.parse(text);
-          reassembler ??= new FragReassembler({
-            timeoutMs: Number.MAX_SAFE_INTEGER,
-            globalBudgetBytes: Number.MAX_SAFE_INTEGER,
-            onComplete: (json) => { out = json; },
-            onAbort: () => {},
-          });
-          reassembler.accept(text);
-          if (out !== undefined) return JSON.parse(out);
-        }
+        const text = fake.afterFirst.shift();
+        if (text === undefined) throw new Error(`openProjectStream(${peerId}, ${projectId}).read(): nothing queued`);
+        return JSON.parse(text);
       },
       send: async (obj) => { fake.pushAppRecord(obj); await flush(); },
+      sendOverlongPrefix: async (length) => { fake.pushOverlongPrefix(length); await flush(); },
       finish: async () => { fake.endWith(); await flush(); },
       reset: async () => { fake.endWith(new Error("app reset")); await flush(); },
       resets: fake.resets,
       stops: fake.stops,
       get finished() { return fake.isFinished(); },
       priorities: fake.priorities,
+      writeAllLengths: fake.writeAllLengths,
       holdWrites: () => fake.holdWrites(),
       releaseWrites: () => { fake.releaseWrites(); },
     };
@@ -361,12 +368,11 @@ export class TestPeerSessionOwner extends PeerSessionOwner {
   async close(): Promise<void> { this.disposeSessions(); }
 
   static forTest(opts: {
-    sendPayload: (payload: string | Buffer, to?: string) => void;
+    sendPayload: (payload: Buffer, to?: string) => void;
     peerId: string;
     deviceId?: string;
     agentEd25519PrivB64?: string;
     phoneEd25519PubB64?: string;
-    creditBatchBytes?: number;
     options?: Partial<PeerSessionOwnerOptions>;
   }): TestPeerSessionOwner {
     const client = new TestPeerSessionOwner({
@@ -384,9 +390,6 @@ export class TestPeerSessionOwner extends PeerSessionOwner {
       ...opts.options,
     });
     client.setNativeWriter((payload, to) => { opts.sendPayload(payload, to); return true; });
-    if (opts.creditBatchBytes !== undefined) {
-      (client as unknown as { creditBatchBytes: number }).creditBatchBytes = opts.creditBatchBytes;
-    }
     if (opts.phoneEd25519PubB64) {
       (client as unknown as { phoneEd25519ByDeviceId: Map<string, string> })
         .phoneEd25519ByDeviceId.set(opts.peerId, opts.phoneEd25519PubB64);
@@ -410,5 +413,5 @@ export class TestRemoteHostConnection extends TestPeerSessionOwner implements Re
   noteResume(): Promise<boolean> { return Promise.resolve(false); }
   recheckAuthorization(): void {}
 }
-export { fragmentForSend, MAX_APP_SESSIONS } from "../src/peer-session-owner";
+export { MAX_APP_SESSIONS } from "../src/peer-session-owner";
 export type { PeerSession };

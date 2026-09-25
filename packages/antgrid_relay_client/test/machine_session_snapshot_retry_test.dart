@@ -41,20 +41,16 @@ void main() {
     await relay.closeStreams();
   });
 
-  /// Every `state.snapshot` request sent so far on [stream] (null: the
-  /// control plane), in order.
-  List<({String id, Map<String, dynamic> params})> snapshotRequests({
-    String? stream,
-  }) {
+  /// Every `state.snapshot` request the control plane has sent so far, in
+  /// order. A project's own pull rides its own native stream (Stage A A4) and
+  /// never reaches [relay.sent] at all.
+  List<({String id, Map<String, dynamic> params})> snapshotRequests() {
     final out = <({String id, Map<String, dynamic> params})>[];
     for (final f in relay.sent) {
+      if (f.kind != kPeerFrameMessage) continue;
       final pt = decodeFromPhone(f.payload);
-      final e = jsonDecode(pt) as Map<String, dynamic>;
-      final m = e['m'];
-      if (m is Map &&
-          m['type'] == 'request' &&
-          m['method'] == 'state.snapshot' &&
-          e['s'] == stream) {
+      final m = jsonDecode(pt) as Map<String, dynamic>;
+      if (m['type'] == 'request' && m['method'] == 'state.snapshot') {
         out.add((
           id: m['requestId'] as String,
           params: (m['params'] as Map).cast<String, dynamic>(),
@@ -74,15 +70,8 @@ void main() {
     return types is List && types.length == 1 && types.single == 'tree:full';
   }
 
-  void injectControl(Map<String, dynamic> m, {String? stream}) {
-    relay.inject(
-      IncomingPeerFrame(
-        channel: 'control',
-        payload: encodeFromAgent(
-          jsonEncode({if (stream != null) 's': stream, 'm': m}),
-        ),
-      ),
-    );
+  void injectControl(Map<String, dynamic> m) {
+    relay.injectFrame(encodeFromAgent(jsonEncode(m)));
   }
 
   Map<String, dynamic> snapshotReply(String requestId) => {

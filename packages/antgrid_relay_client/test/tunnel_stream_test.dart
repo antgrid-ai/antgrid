@@ -48,12 +48,10 @@ void main() {
       await pumpEventQueue();
       link.inject(
         IncomingPeerFrame(
-          channel: 'control',
+          kind: kPeerFrameMessage,
           payload: Uint8List.fromList(
             utf8.encode(
-              jsonEncode({
-                'm': {'type': 'stream-ready', 'projectId': projectId},
-              }),
+              jsonEncode({'type': 'stream-ready', 'projectId': projectId}),
             ),
           ),
         ),
@@ -545,12 +543,10 @@ void main() {
       await pumpEventQueue();
       link.inject(
         IncomingPeerFrame(
-          channel: 'control',
+          kind: kPeerFrameMessage,
           payload: Uint8List.fromList(
             utf8.encode(
-              jsonEncode({
-                'm': {'type': 'stream-ready', 'projectId': projectId},
-              }),
+              jsonEncode({'type': 'stream-ready', 'projectId': projectId}),
             ),
           ),
         ),
@@ -825,7 +821,7 @@ class _PlainPeerLink implements PeerLink {
   PeerLinkDiagnostic? get netTap => null;
 
   @override
-  Future<PeerSendOutcome> sendFrame(String channel, Uint8List payload) async =>
+  Future<PeerSendOutcome> sendFrame(String kind, Uint8List payload) async =>
       PeerSendOutcome.accepted;
 
   @override
@@ -867,7 +863,7 @@ class _FakeMultiStreamLink implements PeerLink, MultiStreamPeerLink {
   PeerLinkDiagnostic? get netTap => null;
 
   @override
-  Future<PeerSendOutcome> sendFrame(String channel, Uint8List payload) async =>
+  Future<PeerSendOutcome> sendFrame(String kind, Uint8List payload) async =>
       PeerSendOutcome.accepted;
 
   @override

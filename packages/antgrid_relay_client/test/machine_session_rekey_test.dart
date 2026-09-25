@@ -6,6 +6,7 @@
 // Replaces the deleted relay_transport_test.dart cases that exercised
 // `RelayTransport.updateAgent` (send/receive silently gated on key presence,
 // keys hot-swapped) — there is no key to hot-swap any more.
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
@@ -64,15 +65,8 @@ void main() {
 
       // MachineSession has no session installed yet — `_onPeerFrame` must
       // drop this on the floor without attempting to dispatch it.
-      relay.inject(
-        IncomingPeerFrame(
-          channel: 'control',
-          payload: encodeFromAgent(
-            jsonEncode({
-              'm': {'type': 'agent:projects'},
-            }),
-          ),
-        ),
+      relay.injectFrame(
+        encodeFromAgent(jsonEncode({'type': 'agent:projects'})),
       );
 
       await Future<void>.delayed(const Duration(milliseconds: 30));
@@ -122,42 +116,80 @@ void main() {
   });
 
   group('session teardown fails in-flight RPCs', () {
-    test('a socket-down fails pending actions and drops queued input', () async {
-      final relay = FakeLiveRelay();
-      // A 64-byte window: the RPC below fills it, so the input stays queued.
-      final session = await establishSession(
-        relay,
-        handshaker: FakeHandshaker(),
-        machineDeviceId: 'm1',
-        channelWindowBytes: 64,
-      );
-      final pending = session.control.request(
-        'config:read',
-        timeout: const Duration(seconds: 30),
-      );
-      final failed = expectLater(
-        pending,
-        throwsA(
-          isA<RpcException>().having((e) => e.code, 'code', 'E_SESSION_DOWN'),
-        ),
-      );
-      await Future<void>.delayed(const Duration(milliseconds: 10));
-      final queued = session.sendOnSession({
-        'type': 'terminal:input',
-        'data': 'must-not-replay',
-      }, 'control');
-      expect(session.debugScheduler.queued('control').bytes, greaterThan(0));
+    test(
+      'G1: a control-plane send chained behind a pending write is dropped, '
+      'not written, when the session generation changes before its turn',
+      () async {
+        final relay = FakeLiveRelay();
+        final session = await establishSession(relay, handshaker: FakeHandshaker());
 
-      relay.setState(
-        const AppState(connectionState: RelayConnectionState.disconnected),
-      );
+        // Holds the first write's own `sendFrame` in flight so the second one
+        // is still queued behind it (on `_sessionSendChain`) when the
+        // generation changes underneath both of them.
+        final gate = Completer<void>();
+        relay.sendGate = gate;
+        final first = session.sendOnSession({'type': 'ping'}, 'control');
+        final second = session.sendOnSession({
+          'type': 'terminal:input',
+          'data': 'must-not-send',
+        }, 'control');
 
-      await failed.timeout(const Duration(seconds: 2));
-      await queued.timeout(const Duration(seconds: 2));
-      expect(session.debugScheduler.queued('control').bytes, 0);
-      await session.dispose();
-      await relay.closeStreams();
-    });
+        // A takeover tears the session down (nulling its generation) without
+        // touching `relay.isDispatchAllowed` — the socket stays up, only the
+        // session does not, which is what isolates the generation fence from
+        // the separate `isDispatchAllowed` gate.
+        relay.injectFrame(
+          encodeFromAgent(jsonEncode({'type': 'session-takeover'})),
+          kind: kPeerFrameSession,
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        gate.complete();
+        await first;
+        await second;
+
+        final sentTypes = relay.sent
+            .map((f) => jsonDecode(decodeFromPhone(f.payload))['type'])
+            .toList();
+        expect(
+          sentTypes,
+          contains('ping'),
+          reason: 'the first write had already passed its generation check',
+        );
+        expect(
+          sentTypes,
+          isNot(contains('terminal:input')),
+          reason: 'its turn on the chain came after the generation changed',
+        );
+
+        await session.dispose();
+        await relay.closeStreams();
+      },
+    );
+
+    test(
+      'G2: sendOnSession over kStreamProjectAppRecordMaxBytes drops '
+      'message-too-large, writes nothing, and emits one MessageTooLarge',
+      () async {
+        final relay = FakeLiveRelay();
+        final session = await establishSession(relay, handshaker: FakeHandshaker());
+
+        final tooLarge = <MessageTooLarge>[];
+        final sub = session.messageTooLarge.listen(tooLarge.add);
+        final blob = 'a' * (kStreamProjectAppRecordMaxBytes + 1);
+        await session.sendOnSession({
+          'type': 'config:write',
+          'body': blob,
+        }, 'control');
+
+        expect(relay.sent, isEmpty);
+        expect(tooLarge, hasLength(1));
+        expect(tooLarge.single.type, 'config:write');
+
+        await sub.cancel();
+        await session.dispose();
+        await relay.closeStreams();
+      },
+    );
 
     test('a socket-down fails per-stream pending RPCs fast (no full-timeout '
         'hang)', () async {

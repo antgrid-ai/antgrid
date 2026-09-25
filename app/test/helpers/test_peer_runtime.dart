@@ -57,7 +57,7 @@ class _TestPayloadLink implements PeerLink {
   @override
   final PeerLinkDiagnostic? netTap;
   @override
-  Future<PeerSendOutcome> sendFrame(String channel, Uint8List payload) async =>
+  Future<PeerSendOutcome> sendFrame(String kind, Uint8List payload) async =>
       PeerSendOutcome.accepted;
   @override
   Future<void> close() async {}

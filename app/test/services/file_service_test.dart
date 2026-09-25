@@ -1,4 +1,3 @@
-import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:antgrid/project/project_session.dart';
@@ -702,40 +701,216 @@ void main() {
     await session.close();
   });
 
-  test('handleFragmentFailure clears a stuck diff spinner', () async {
-    final t = FakeAgentTransport();
-    final session = await _newSession(t);
-    final svc = FileService.fromSession(session);
+  group('reissueAfterStreamReset', () {
+    List<Map<String, dynamic>> diffSends(FakeAgentTransport t) =>
+        t.sent.where((m) => m['type'] == 'git:diff').toList();
+    List<Map<String, dynamic>> commitDiffSends(FakeAgentTransport t) =>
+        t.sent.where((m) => m['type'] == 'git:commit-diff').toList();
+    List<Map<String, dynamic>> fileReadSends(FakeAgentTransport t, String path) =>
+        t.sent
+            .where((m) => m['type'] == 'file:read' && m['path'] == path)
+            .toList();
 
-    svc.requestDiff('lib/main.dart');
-    await Future<void>.delayed(Duration.zero);
-    expect(svc.currentState.git.diffLoading, isTrue);
+    test('F1: re-sends an in-flight git:diff for the pane\'s current path', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = FileService.fromSession(session);
 
-    // The diff transfer aborted (fragment timeout) and exhausted its retries.
-    svc.handleFragmentFailure(
-      const FragHint('git:diff-content', 'lib/main.dart'),
+      svc.requestDiff('lib/main.dart');
+      await Future<void>.delayed(Duration.zero);
+      expect(diffSends(t), hasLength(1));
+
+      svc.reissueAfterStreamReset();
+      await Future<void>.delayed(Duration.zero);
+      expect(diffSends(t), hasLength(2));
+      expect(diffSends(t).every((m) => m['path'] == 'lib/main.dart'), isTrue);
+      expect(svc.currentState.git.diffLoading, isTrue);
+
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('F2: re-sends an in-flight git:commit-diff with its sha', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = FileService.fromSession(session);
+
+      svc.requestCommitDiff('abc123', 'lib/main.dart');
+      await Future<void>.delayed(Duration.zero);
+      expect(commitDiffSends(t), hasLength(1));
+
+      svc.reissueAfterStreamReset();
+      await Future<void>.delayed(Duration.zero);
+      expect(commitDiffSends(t), hasLength(2));
+      expect(
+        commitDiffSends(t).every(
+          (m) => m['sha'] == 'abc123' && m['path'] == 'lib/main.dart',
+        ),
+        isTrue,
+      );
+      expect(svc.currentState.git.diffLoading, isTrue);
+
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('F3: re-sends the Git view\'s file:read and sets viewingLoading', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = FileService.fromSession(session);
+
+      svc.gitViewFile('lib/main.dart');
+      await Future<void>.delayed(Duration.zero);
+      expect(fileReadSends(t, 'lib/main.dart'), hasLength(1));
+
+      svc.reissueAfterStreamReset();
+      await Future<void>.delayed(Duration.zero);
+      expect(fileReadSends(t, 'lib/main.dart'), hasLength(2));
+      expect(svc.currentState.git.viewingLoading, isTrue);
+
+      await svc.dispose();
+      await session.close();
+    });
+
+    test(
+      'F4: does not re-send the selected file or the preview (hydrators own '
+      'them)',
+      () async {
+        final t = FakeAgentTransport();
+        final session = await _newSession(t);
+        final svc = FileService.fromSession(session);
+
+        svc.selectFile('src/main.dart');
+        await Future<void>.delayed(Duration.zero);
+        svc.openPreview('shot.png');
+        await Future<void>.delayed(Duration.zero);
+        expect(fileReadSends(t, 'src/main.dart'), hasLength(1));
+        expect(fileReadSends(t, 'shot.png'), hasLength(1));
+
+        svc.reissueAfterStreamReset();
+        await Future<void>.delayed(Duration.zero);
+        expect(fileReadSends(t, 'src/main.dart'), hasLength(1));
+        expect(fileReadSends(t, 'shot.png'), hasLength(1));
+
+        await svc.dispose();
+        await session.close();
+      },
     );
-    expect(svc.currentState.git.diffLoading, isFalse);
 
-    await svc.dispose();
-    await session.close();
-  });
+    test('F5: does nothing for a diff whose reply already landed', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = FileService.fromSession(session);
 
-  test('handleFragmentFailure surfaces a file:content load error', () async {
-    final t = FakeAgentTransport();
-    final session = await _newSession(t);
-    final svc = FileService.fromSession(session);
+      svc.requestDiff('lib/main.dart');
+      await Future<void>.delayed(Duration.zero);
+      t.emit('git:diff-content', {
+        'projectId': 'p',
+        'path': 'lib/main.dart',
+        'diff': '+x',
+        'additions': 1,
+        'deletions': 0,
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(svc.currentState.git.diffLoading, isFalse);
 
-    svc.selectFile('big.bin');
-    await Future<void>.delayed(Duration.zero);
-    expect(svc.currentState.files.isLoading, isTrue);
+      svc.reissueAfterStreamReset();
+      await Future<void>.delayed(Duration.zero);
+      expect(diffSends(t), hasLength(1));
 
-    svc.handleFragmentFailure(const FragHint('file:content', 'big.bin'));
-    expect(svc.currentState.files.isLoading, isFalse);
-    expect(svc.currentState.files.viewingFile?.error, isNotNull);
+      await svc.dispose();
+      await session.close();
+    });
 
-    await svc.dispose();
-    await session.close();
+    test(
+      'F6: fails the diff pane after kMaxStreamResetReissues consecutive '
+      'resets without a reply',
+      () async {
+        final t = FakeAgentTransport();
+        final session = await _newSession(t);
+        final svc = FileService.fromSession(session);
+
+        svc.requestDiff('lib/main.dart');
+        await Future<void>.delayed(Duration.zero);
+        expect(diffSends(t), hasLength(1));
+
+        for (var i = 0; i < FileService.kMaxStreamResetReissues; i++) {
+          svc.reissueAfterStreamReset();
+          await Future<void>.delayed(Duration.zero);
+        }
+        expect(
+          diffSends(t),
+          hasLength(1 + FileService.kMaxStreamResetReissues),
+          reason: 'each reset within the budget re-sends once',
+        );
+        expect(svc.currentState.git.diffLoading, isTrue);
+
+        // One more reset exceeds the budget: the pane fails instead of
+        // re-sending again.
+        svc.reissueAfterStreamReset();
+        await Future<void>.delayed(Duration.zero);
+        expect(
+          diffSends(t),
+          hasLength(1 + FileService.kMaxStreamResetReissues),
+          reason: 'no further send once the budget is exhausted',
+        );
+        expect(svc.currentState.git.diffLoading, isFalse);
+
+        // A further reset is a no-op — there is nothing left in flight.
+        svc.reissueAfterStreamReset();
+        await Future<void>.delayed(Duration.zero);
+        expect(diffSends(t), hasLength(1 + FileService.kMaxStreamResetReissues));
+
+        await svc.dispose();
+        await session.close();
+      },
+    );
+
+    test('F8: does not re-send a Git view whose error reply already landed', () async {
+      // An error is the machine's answer, not a lost reply: re-asking would
+      // count it against the reset budget and eventually replace the real
+      // error with a transfer failure.
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = FileService.fromSession(session);
+
+      svc.gitViewFile('lib/main.dart');
+      await Future<void>.delayed(Duration.zero);
+      t.emit('file:content', {
+        'projectId': 'p',
+        'path': 'lib/main.dart',
+        'size': 0,
+        'error': 'EACCES',
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(svc.currentState.git.viewingLoading, isFalse);
+
+      svc.reissueAfterStreamReset();
+      await Future<void>.delayed(Duration.zero);
+      expect(fileReadSends(t, 'lib/main.dart'), hasLength(1));
+      expect(svc.currentState.git.viewingFile?.error, 'EACCES');
+
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('F7: does not re-send a diff the user navigated away from', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = FileService.fromSession(session);
+
+      svc.requestDiff('lib/main.dart');
+      await Future<void>.delayed(Duration.zero);
+      svc.clearDiff();
+      await Future<void>.delayed(Duration.zero);
+
+      svc.reissueAfterStreamReset();
+      await Future<void>.delayed(Duration.zero);
+      expect(diffSends(t), hasLength(1));
+
+      await svc.dispose();
+      await session.close();
+    });
   });
 
   test(

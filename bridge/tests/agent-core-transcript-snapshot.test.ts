@@ -163,6 +163,7 @@ test("drops session.transcriptSnapshot from a remote phone while mobile access i
     createMessage("request", { requestId: "r3", method: "session.transcriptSnapshot", params: { sessionId: "ghost" } }),
     "control",
     "relay",
+    "app-dev#machine-dev",
   );
   await new Promise((r) => setTimeout(r, 200));
   expect(findResponse(sent, "r3")).toBeUndefined();
@@ -176,6 +177,7 @@ test("drops session.transcriptSnapshot from a remote phone while mobile access i
     createMessage("request", { requestId: "r3b", method: "session.transcriptSnapshot", params: { sessionId: "ghost" } }),
     "control",
     "relay",
+    "app-dev#machine-dev",
   );
 
   const deadline = Date.now() + 2000;

@@ -1,24 +1,20 @@
 import { randomBytes } from "node:crypto";
 import { Endpoint, EndpointAddr, EndpointId, type Connection } from "@number0/iroh/index.js";
 import { EndpointEnrollment } from "../../bridge/src/peer/enrollment";
-import { PeerRecords } from "../../bridge/src/peer/records";
 import { createMessage, parseMessage, type AbMessage } from "../../bridge/src/protocol";
+import { CONTROL_HANDLE } from "../support/stream";
 import {
   encodePeerFrame,
   decodePeerFrame,
   encodeStreamOpen,
-  CONTROL_STREAM_ID,
   PEER_ALPN,
+  PEER_MAX_BRIDGE_RECORD_BYTES,
   type PeerAuthorizationSnapshot,
+  type PeerFrameKind,
   buildHelloSigBody,
   normalizeRelayHost,
-  TRANSFER_TIMEOUT_MS,
-  GLOBAL_REASSEMBLY_BUDGET,
-  CREDIT_BATCH_BYTES,
-  FRAG_THRESHOLD,
-  MAX_TRANSFER_BYTES,
-  buildFragments,
-  STREAM_PROJECT_RECORD_MAX_BYTES,
+  STREAM_PROJECT_APP_RECORD_MAX_BYTES,
+  STREAM_PROJECT_BRIDGE_RECORD_MAX_BYTES,
   STREAM_TERMINAL_BRIDGE_RECORD_MAX_BYTES,
   STREAM_TUNNEL_RECORD_MAX_BYTES,
   TUNNEL_RECORD_TAG_BODY,
@@ -28,8 +24,12 @@ import {
   encodeTunnelDataRecord,
   decodeTunnelRecord,
 } from "antgrid-wire";
-import { FragReassembler } from "../../bridge/src/frag-reassembler";
-import { StreamRecordReader, STREAM_RECORD_SLICE_BYTES } from "../../bridge/src/peer/stream-records";
+import { StreamRecordReader, StreamRecordWriter, STREAM_RECORD_SLICE_BYTES } from "../../bridge/src/peer/stream-records";
+
+/** Fits two max-size control-plane records on the session stream — the same
+ *  per-stream bound as `SESSION_STREAM_MAX_QUEUED_BYTES` in
+ *  `native-host-connection.ts`, which this eval client does not import. */
+const SESSION_STREAM_MAX_QUEUED_BYTES = 64 * 1024 * 1024;
 
 /** The fake license token the eval relay gate (`fakeLicenseGate`) accepts. v3
  *  requires it for BOTH device types, so an app now sends it too.
@@ -216,7 +216,7 @@ function splitLengthPrefixedRecords(buf: Buffer): Uint8Array[] {
 export class RelayClient {
   private nativeEndpoint: Endpoint | null = null;
   private nativeConnection: Connection | null = null;
-  private nativeRecords: PeerRecords | null = null;
+  private sessionWriter: StreamRecordWriter | null = null;
   private nativeTarget: { endpointId: string; addresses: string[] } | null = null;
   private nativePeerId: string | null = null;
   private nativeGeneration = 0;
@@ -281,25 +281,6 @@ export class RelayClient {
    *  or this project's last stream end — mirrors `MachineSession`'s
    *  `_readyProjects` so `openProjectStream` skips a redundant `project:start`. */
   private readyProjects = new Set<string>();
-  /** Per-sender fragment id counter (the bridge mirrors this with a
-   *  process-global counter; Dart with `$machineDeviceId-$projectId-$counter`). */
-  private projectFragCounter = 0;
-
-  // --- Per-channel flow control (receiver half; see docs/protocol/peer-session.md) ---
-  // Cumulative frame-payload bytes taken off each channel since this session
-  // was established, and how much of that the agent has been told about. An
-  // eval client that never credits wedges the agent's window after one
-  // CHANNEL_WINDOW_BYTES, with liveness still green.
-  private rxConsumed: Record<"control" | "preview", number> = { control: 0, preview: 0 };
-  private rxCredited: Record<"control" | "preview", number> = { control: 0, preview: 0 };
-  private creditsPaused = false;
-
-  private fragReassembler = new FragReassembler({
-    timeoutMs: TRANSFER_TIMEOUT_MS,
-    globalBudgetBytes: GLOBAL_REASSEMBLY_BUDGET,
-    onComplete: (json) => this.routeReassembledEnvelope(json),
-    onAbort: () => {},
-  });
 
   private constructor(
     deviceId: string,
@@ -549,7 +530,7 @@ export class RelayClient {
     const target = this.nativeTarget;
     if (!endpoint || !target) throw new Error("Native endpoint is not configured");
     const generation = ++this.nativeGeneration;
-    this.nativeRecords?.close();
+    this.sessionWriter?.abort();
     this.nativeConnection?.close(1n, []);
     let connection: Connection | null = null;
     let lastError: unknown;
@@ -566,19 +547,28 @@ export class RelayClient {
     }
     if (!connection) throw new Error(`Native dial failed: ${String(lastError)}`);
     const stream = await connection.openBi();
-    const records = new PeerRecords(stream, () => generation === this.nativeGeneration,
-      () => connection.close(1n, []));
+    const writer = new StreamRecordWriter(
+      { send: stream.send },
+      () => generation === this.nativeGeneration,
+      () => connection.close(1n, []),
+      SESSION_STREAM_MAX_QUEUED_BYTES,
+    );
+    const reader = new StreamRecordReader(
+      { recv: stream.recv },
+      PEER_MAX_BRIDGE_RECORD_BYTES,
+      () => connection.close(1n, []),
+    );
     // The first record on every native stream, session included, declares
-    // its kind before anything else — PeerRecords queues in order, so this
-    // goes out ahead of the hello.
-    void records.send(encodeStreamOpen({ kind: "session" }));
+    // its kind before anything else — StreamRecordWriter queues in order, so
+    // this goes out ahead of the hello.
+    void writer.send(encodeStreamOpen({ kind: "session" }));
     this.nativeConnection = connection;
-    this.nativeRecords = records;
+    this.sessionWriter = writer;
     void (async () => {
       try {
-        while (generation === this.nativeGeneration) this.handleBinaryFrame(await records.read());
+        while (generation === this.nativeGeneration) this.handleBinaryFrame(await reader.read());
       } catch {
-        if (generation === this.nativeGeneration) this.nativeRecords = null;
+        if (generation === this.nativeGeneration) this.sessionWriter = null;
       }
     })();
   }
@@ -591,8 +581,8 @@ export class RelayClient {
   /** Interrupt only the native payload path; the central control socket stays authenticated. */
   dropNative(): void {
     this.nativeGeneration++;
-    this.nativeRecords?.close();
-    this.nativeRecords = null;
+    this.sessionWriter?.abort();
+    this.sessionWriter = null;
     // Closing the connection ends every project stream on it (bridge-observed
     // FIN/reset); marking closingLocally first classifies that as "fin" for
     // anyone awaiting `ended`, since this is our own teardown, not a fault.
@@ -1065,56 +1055,26 @@ export class RelayClient {
 
   private handleBinaryFrame(data: ArrayBuffer | Uint8Array): void {
     const buf = Buffer.from(data as Uint8Array);
-    let decoded: { header: unknown; payload: Uint8Array };
+    let decoded: { header: { type: PeerFrameKind }; payload: Uint8Array };
     try {
-      decoded = decodePeerFrame(buf);
+      decoded = decodePeerFrame(buf) as { header: { type: PeerFrameKind }; payload: Uint8Array };
     } catch {
       return; // malformed frame — drop
     }
-    const header = decoded.header as { type?: string; channel?: string };
-    if (header.type !== "message") return;
-    const channel = header.channel === "preview" ? "preview" : "control";
-    this.onPeerPlaintext(Buffer.from(decoded.payload), channel);
-  }
-
-  private noteConsumed(channel: "control" | "preview", bytes: number): void {
-    this.rxConsumed[channel] += bytes;
-    if (this.rxConsumed[channel] - this.rxCredited[channel] >= CREDIT_BATCH_BYTES) this.sendCredit(channel);
-  }
-
-  /** `consumed` is cumulative, so a lost or reordered credit costs nothing —
-   *  the next one carries the whole total. */
-  private sendCredit(channel: "control" | "preview"): void {
-    if (!this.established || !this.nativePeerId || this.creditsPaused) return;
-    this.rxCredited[channel] = this.rxConsumed[channel];
-    this.sendPlaintextFrame({ type: "credit", channel, consumed: this.rxConsumed[channel] }, "control");
-  }
-
-  private resetRxFlow(): void {
-    this.rxConsumed = { control: 0, preview: 0 };
-    this.rxCredited = { control: 0, preview: 0 };
-  }
-
-  /** A frame's payload IS the plaintext now — there is no open-or-buffer step. */
-  private onPeerPlaintext(payload: Buffer, channel: "control" | "preview"): void {
-    if (this.established) this.noteConsumed(channel, payload.length);
-    const plaintext = payload.toString("utf8");
-    if (this.fragReassembler.accept(plaintext)) return;
     let obj: any;
     try {
-      obj = JSON.parse(plaintext);
+      obj = JSON.parse(Buffer.from(decoded.payload).toString("utf8"));
     } catch {
-      return;
+      return; // "plaintext-not-json"
     }
-    if (obj && typeof obj === "object" && typeof obj.type === "string") {
-      // Bare session frame (top-level `type`). App traffic is always wrapped
-      // in `{ s?, m }`, so a top-level `type` is unambiguously a session frame.
+    if (!(obj && typeof obj === "object" && typeof obj.type === "string")) return; // "unrecognized-plaintext"
+    // The header `type` is the discriminator, not the JSON body —
+    // `ping`/`pong`/`session:*` exist as control-plane AbMessage literals too,
+    // so the body alone cannot tell a liveness frame from a control message.
+    if (decoded.header.type === "session") {
       this.handleSessionFrame(obj);
-      return;
-    }
-    if (obj && typeof obj === "object" && "m" in obj) {
-      this.routeAppEnvelope(obj as { s?: string; m: unknown });
-      return;
+    } else if (decoded.header.type === "message") {
+      this.dispatchAbMessage(JSON.stringify(obj));
     }
   }
 
@@ -1124,18 +1084,7 @@ export class RelayClient {
         this.deliver(obj);
         return;
       case "ping":
-        if (this.established) {
-          this.sendPlaintextFrame({ type: "pong" }, "control");
-          // The agent's liveness tick is this client's only clock: re-sending
-          // both cumulative credits here is what heals one the relay dropped,
-          // for two ~60-byte frames per tick.
-          this.sendCredit("control");
-          this.sendCredit("preview");
-        }
-        return;
-      case "credit":
-        // The agent credits this client's own sends. Nothing here writes more
-        // than a window ahead of a reply, so there is no window to release.
+        if (this.established) this.sendSessionFrame({ type: "pong" });
         return;
       case "pong":
         return;
@@ -1148,28 +1097,8 @@ export class RelayClient {
         this.deliver(obj);
         return;
       default:
-        return; // unexpected session frame — drop
+        return; // unexpected session frame — drop (covers a stale "credit")
     }
-  }
-
-  private routeReassembledEnvelope(json: string): void {
-    let env: { s?: string; m?: unknown };
-    try {
-      env = JSON.parse(json);
-    } catch {
-      return;
-    }
-    if (env && typeof env === "object" && "m" in env) this.routeAppEnvelope(env as { s?: string; m: unknown });
-  }
-
-  /** A4: project traffic no longer rides the session stream. A `{s, m}` whose
-   *  `s` names a project is dropped rather than routed (§1.2) — this client's
-   *  mirror of the bridge's `reason:"project-on-session-stream"` diagnostic
-   *  drop, minus the netwatch record. */
-  private routeAppEnvelope(env: { s?: string; m: unknown }): void {
-    const s = env.s;
-    if (typeof s === "string" && s !== CONTROL_STREAM_ID && s !== "0") return;
-    this.dispatchAbMessage(JSON.stringify(env.m));
   }
 
   /** Parse a plaintext AbMessage and route it to waiters/queue. `streamId`
@@ -1245,7 +1174,6 @@ export class RelayClient {
         `Handshake peer ${agentDeviceId} does not match authenticated native peer ${this.nativePeerId}`,
       );
     }
-    this.resetRxFlow();
     const attemptId = randomBytes(8).toString("hex");
     // `capabilities` mirrors the production Dart client (connection_handshake.dart):
     // without checkoutRouting the bridge treats this app as pre-worktree and
@@ -1262,7 +1190,7 @@ export class RelayClient {
       (m: any) => m.type === "established" && m.attemptId === attemptId,
       timeoutMs,
     );
-    this.sendPlaintextFrame({ type: "session:hello", attemptId, capabilities }, "control");
+    this.sendSessionFrame({ type: "session:hello", attemptId, capabilities });
     try {
       await establishedP;
     } catch (error) {
@@ -1348,9 +1276,9 @@ export class RelayClient {
    *  frame, and classifies the first record (§1.1: `stream:refused` then FIN,
    *  or `stream-ready` naming this project). Registers the binding into
    *  `projectStreams`/`readyProjects` only once admitted. Every record after
-   *  the first is a bare `AbMessage` or a `__frag` piece of one, reassembled
-   *  per binding and dispatched with `_streamId = projectId` — the same shape
-   *  `openProjectStream`/`openProjectStreamRaw` both build on. */
+   *  the first is one bare `AbMessage`, with no reassembly — dispatched with
+   *  `_streamId = projectId` — the same shape `openProjectStream`/
+   *  `openProjectStreamRaw` both build on. */
   private async openProjectBiStream(
     projectId: string,
     timeoutMs: number,
@@ -1379,13 +1307,7 @@ export class RelayClient {
       firstResolve = resolve;
     });
 
-    const reader = new StreamRecordReader({ recv: stream.recv }, STREAM_PROJECT_RECORD_MAX_BYTES, () => {});
-    const reassembler = new FragReassembler({
-      timeoutMs: TRANSFER_TIMEOUT_MS,
-      globalBudgetBytes: GLOBAL_REASSEMBLY_BUDGET,
-      onComplete: (json) => this.dispatchAbMessage(json, projectId),
-      onAbort: () => {},
-    });
+    const reader = new StreamRecordReader({ recv: stream.recv }, STREAM_PROJECT_BRIDGE_RECORD_MAX_BYTES, () => {});
 
     let gotFirst = false;
     let cleanRefusal = false;
@@ -1421,7 +1343,8 @@ export class RelayClient {
             void stream.send.reset(0n).catch(() => {});
             continue;
           }
-          if (reassembler.accept(text)) continue; // a __frag piece; onComplete dispatches once the set is whole
+          // A stale `__frag` piece has no string `type`; `dispatchAbMessage`
+          // drops it the same way it drops any other unparseable record.
           this.dispatchAbMessage(text, projectId);
         }
       } catch {
@@ -1440,18 +1363,15 @@ export class RelayClient {
     return { state, first };
   }
 
-  /** Send a message on `handle`: `"0"`/`CONTROL_STREAM_ID` rides the session
+  /** Send a message on `handle`: `"0"`/`CONTROL_HANDLE` rides the session
    *  stream unchanged; any other handle is that project's own QUIC stream,
-   *  fragmenting past `FRAG_THRESHOLD` (§1.1 — all fragment records are
-   *  queued in one synchronous loop so nothing interleaves inside the set).
-   *  `channel` is ignored on a project stream: a project record carries no
-   *  envelope to label (§1.1, "the inbound channel ... is always control").
-   *  `msg` is `object` rather than `AbMessage` because the preview channel on
-   *  the CONTROL stream still carries tunnel-protocol frames, which are
-   *  deliberately not AbMessages. Throws if the project stream is not open. */
-  sendOnStream(handle: string, msg: object, channel: "control" | "preview" = "control"): void {
-    if (handle === CONTROL_STREAM_ID || handle === "0") {
-      this.sendControlEnvelope(msg, channel);
+   *  written as exactly one record — one `AbMessage` is always one record.
+   *  `channel` is vestigial on both paths: the session stream has no channels
+   *  (D2 — only the loopback JSON keeps the label) and a project record
+   *  carries no envelope to label. Throws if the project stream is not open. */
+  sendOnStream(handle: string, msg: object, _channel: "control" | "preview" = "control"): void {
+    if (handle === CONTROL_HANDLE) {
+      this.sendControlMessage(msg);
       return;
     }
     const state = this.projectStreams.get(handle);
@@ -1459,24 +1379,22 @@ export class RelayClient {
     this.writeProjectRecord(state, msg);
   }
 
-  /** Encodes `msg`, fragments it past `FRAG_THRESHOLD`, and chains every
-   *  resulting record onto the binding's write order. Throws synchronously
-   *  past `MAX_TRANSFER_BYTES` (mirrors the bridge's send-time
-   *  `"too-large"`/Dart's `FragSendError`; nothing is written). A write
-   *  failure surfaces as a delivered `error` message, matching `sendBinary`'s
-   *  handling on the session stream. */
+  /** Encodes `msg` as exactly one record and chains it onto the binding's
+   *  write order. Throws synchronously past the app's outbound cap
+   *  (`STREAM_PROJECT_APP_RECORD_MAX_BYTES` — mirrors the bridge's read-side
+   *  refusal and Dart's `message-too-large` drop; nothing is written). A
+   *  write failure surfaces as a delivered `error` message, matching
+   *  `sendBinary`'s handling on the session stream. */
   private writeProjectRecord(state: ProjectStreamState, msg: object): void {
     const json = JSON.stringify(msg);
     const byteLen = Buffer.byteLength(json, "utf8");
-    if (byteLen > MAX_TRANSFER_BYTES) {
-      throw new Error(`project-stream record for ${state.projectId} exceeds MAX_TRANSFER_BYTES (${byteLen} bytes)`);
+    if (byteLen > STREAM_PROJECT_APP_RECORD_MAX_BYTES) {
+      throw new Error(
+        `project-stream record for ${state.projectId} exceeds STREAM_PROJECT_APP_RECORD_MAX_BYTES (${byteLen} bytes)`,
+      );
     }
-    const records =
-      byteLen > FRAG_THRESHOLD ? buildFragments(json, `${this.deviceId}-${state.projectId}-${this.projectFragCounter++}`) : [json];
-    for (const record of records) {
-      const bytes = prefixWithLength(Buffer.from(record, "utf8"));
-      state.writeChain = state.writeChain.then(() => state.stream.send.writeAll(Array.from(bytes)));
-    }
+    const bytes = prefixWithLength(Buffer.from(json, "utf8"));
+    state.writeChain = state.writeChain.then(() => state.stream.send.writeAll(Array.from(bytes)));
     state.writeChain.catch((error) =>
       this.deliver({ type: "error", code: "PROJECT_STREAM_SEND_FAILED", message: String(error) }),
     );
@@ -1521,20 +1439,22 @@ export class RelayClient {
 
   /** Send an AbMessage on the machine CONTROL PLANE (`s` omitted). */
   sendEncrypted(msg: AbMessage): void {
-    this.sendControlEnvelope(msg, "control");
+    this.sendControlMessage(msg);
   }
 
-  /** Wrap `msg` as `{ m }` and send as a plaintext session frame. Project
-   *  traffic no longer shares this envelope (A4) — it rides its own QUIC
-   *  stream via `sendOnStream`/`writeProjectRecord`. */
-  private sendControlEnvelope(msg: unknown, channel: "control" | "preview"): void {
+  /** Write the bare JSON of one control-plane `AbMessage` as a `"message"`-kind
+   *  peer frame, with no envelope. Project traffic never shares this path
+   *  (Stage A wave A4): it rides its own QUIC stream via `sendOnStream`/
+   *  `writeProjectRecord`. */
+  private sendControlMessage(msg: unknown): void {
     if (!this.established || !this.nativePeerId) throw new Error("Native session is not established");
-    this.sendPlaintextFrame({ m: msg }, channel);
+    this.sendBinary(encodePeerFrame({ type: "message" }, Buffer.from(JSON.stringify(msg), "utf8")));
   }
 
-  /** Send one bare session frame as a peer frame. */
-  private sendPlaintextFrame(obj: object, channel: "control" | "preview" = "control"): void {
-    this.sendBinary(encodePeerFrame({ type: "message", channel }, Buffer.from(JSON.stringify(obj), "utf8")));
+  /** Send one bare session frame (`session:hello`, `ping`, `pong`, …) as a
+   *  `"session"`-kind peer frame. */
+  private sendSessionFrame(obj: object): void {
+    this.sendBinary(encodePeerFrame({ type: "session" }, Buffer.from(JSON.stringify(obj), "utf8")));
   }
 
   /** Send raw JSON to the central relay, including retired verbs in rejection tests. */
@@ -1546,29 +1466,9 @@ export class RelayClient {
   }
 
   private sendBinary(data: Uint8Array): void {
-    if (!this.nativeRecords) throw new Error("Native payload is not connected");
-    void this.nativeRecords.send(data).catch((error) =>
+    if (!this.sessionWriter) throw new Error("Native payload is not connected");
+    void this.sessionWriter.send(data).catch((error) =>
       this.deliver({ type: "error", code: "NATIVE_SEND_FAILED", message: String(error) }));
-  }
-
-  /** Test lever: while true this client emits no `credit` frame, so the agent's
-   *  send window on a channel closes after CHANNEL_WINDOW_BYTES and stays
-   *  closed. Liveness is unaffected — session frames bypass the gate — so the
-   *  session survives the stall. Releasing flushes both cumulative totals at
-   *  once, which is all the agent needs to resume. */
-  setCreditsPaused(v: boolean): void {
-    this.creditsPaused = v;
-    if (!v) {
-      this.sendCredit("control");
-      this.sendCredit("preview");
-    }
-  }
-
-  /** Cumulative frame-payload bytes taken off `channel` since this session was
-   *  established — the receiver-side view of what the agent charged to its
-   *  window. */
-  consumedBytes(channel: "control" | "preview"): number {
-    return this.rxConsumed[channel];
   }
 
   // --- Waiters ---

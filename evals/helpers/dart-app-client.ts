@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createMessage, type AbMessage } from "../../bridge/src/protocol";
-import { CONTROL_STREAM_ID } from "antgrid-wire";
+import { CONTROL_HANDLE } from "../support/stream";
 import { TERMINAL_PROTOCOL_VERSION, TerminalScreenFrameSchema } from "../../bridge/src/terminal-frames/protocol";
 
 // `URL.pathname` yields a leading-slash `/C:/…` form that is an invalid cwd on
@@ -249,7 +249,7 @@ export class DartAppClient {
    *  verbs). Project verbs answer on a project stream — see
    *  {@link waitForStreamAbMessage}. */
   waitForAbMessage(type: string, timeoutMs = 10_000): Promise<DartEvent> {
-    return this.waitForStreamAbMessage(CONTROL_STREAM_ID, type, timeoutMs);
+    return this.waitForStreamAbMessage(CONTROL_HANDLE, type, timeoutMs);
   }
 
   /** Await an AbMessage of `type` arriving on a specific project stream. */
@@ -395,7 +395,7 @@ export class DartAppClient {
    * separately before it reports complete — see `_handleSnapshot` in
    * `packages/antgrid_eval_client`.
    */
-  async pullStateSnapshot(streamId = CONTROL_STREAM_ID, timeoutMs = 15_000): Promise<void> {
+  async pullStateSnapshot(streamId = CONTROL_HANDLE, timeoutMs = 15_000): Promise<void> {
     const done = this.waitForEvent(
       (e) => e.event === "snapshot-complete" && e.streamId === streamId,
       timeoutMs,

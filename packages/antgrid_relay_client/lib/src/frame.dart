@@ -3,11 +3,34 @@ import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 
-import 'frag.dart';
+import 'models/stream_open.dart';
 
 const int peerFrameVersion = 0x04;
 const int peerFrameFixedPrefix = 4;
 const int maxPeerFrameHeaderBytes = 1024;
+
+/// Peer-frame header `type` values. The header carries no other
+/// discriminator (§1.1): a `"session"` record is a bare session frame
+/// (`session:hello`, `established`, `ping`, `pong`), and a `"message"`
+/// record is the bare JSON of one control-plane `AbMessage`. The JSON
+/// `type` cannot tell the two apart on its own — `ping`, `pong` and the
+/// whole `session:*` family exist as `AbMessage` literals too.
+const String kPeerFrameSession = 'session';
+const String kPeerFrameMessage = 'message';
+
+/// Bridge's read cap on a session-stream record (app → bridge): the app's
+/// outbound record-size refusal threshold plus the peer-frame header and
+/// length-prefix overhead. Mirrors `PEER_MAX_RECORD_BYTES`
+/// (`packages/antgrid-wire/src/peer-authorization.ts`) — unchanged in value
+/// from before Stage A.
+const int kPeerMaxRecordBytes =
+    kStreamProjectAppRecordMaxBytes + maxPeerFrameHeaderBytes + peerFrameFixedPrefix;
+
+/// The app's read cap on a session-stream record (bridge → app): a whole
+/// [kMaxTransferBytes] control-plane record plus the same overhead. Mirrors
+/// `PEER_MAX_BRIDGE_RECORD_BYTES`.
+const int kPeerMaxBridgeRecordBytes =
+    kMaxTransferBytes + maxPeerFrameHeaderBytes + peerFrameFixedPrefix;
 
 /// Peer-frame kind byte. QUIC/TLS between the two lease-authorized endpoints
 /// is the confidentiality layer now, so the byte carries a single value —
@@ -57,10 +80,10 @@ String frameIdOf(Uint8List payload) =>
 
 Uint8List encodePeerFrame(Map<String, dynamic> header, Uint8List payload) {
   final parsedHeader = _validatePeerHeader(header);
-  if (payload.length > kMaxFramePayload) {
+  if (payload.length > kMaxTransferBytes) {
     throw FrameException(
       FrameErrorReason.payloadTooLarge,
-      'Payload ${payload.length} bytes > $kMaxFramePayload',
+      'Payload ${payload.length} bytes > $kMaxTransferBytes',
     );
   }
   final headerBytes = utf8.encode(jsonEncode(parsedHeader));
@@ -125,10 +148,10 @@ Uint8List encodePeerFrame(Map<String, dynamic> header, Uint8List payload) {
     );
   }
   final payloadLength = buf.length - peerFrameFixedPrefix - headerLen;
-  if (payloadLength > kMaxFramePayload) {
+  if (payloadLength > kMaxTransferBytes) {
     throw FrameException(
       FrameErrorReason.payloadTooLarge,
-      'Payload $payloadLength bytes > $kMaxFramePayload',
+      'Payload $payloadLength bytes > $kMaxTransferBytes',
     );
   }
   final headerBytes = buf.sublist(
@@ -157,14 +180,44 @@ Uint8List encodePeerFrame(Map<String, dynamic> header, Uint8List payload) {
 }
 
 Map<String, dynamic> _validatePeerHeader(Map<String, dynamic> header) {
-  final channel = header['channel'];
-  if (header.length != 2 ||
-      header['type'] != 'message' ||
-      (channel != 'control' && channel != 'preview')) {
+  final type = header['type'];
+  if (header.length != 1 ||
+      (type != kPeerFrameSession && type != kPeerFrameMessage)) {
     throw FrameException(
       FrameErrorReason.badHeader,
       'Invalid peer frame header',
     );
   }
-  return {'type': 'message', 'channel': channel};
+  return {'type': type};
+}
+
+/// UTF-8 byte length of [s] without encoding it. A record-size check wants a
+/// count, and `utf8.encode(s).length` allocates a full copy of a multi-MB
+/// message to produce one — ~25x the cost of this scan on ASCII. Mirrors the
+/// bridge's `Buffer.byteLength(data, "utf8")`, including Dart's substitution
+/// of U+FFFD (3 bytes) for an unpaired surrogate, so both ends agree on one
+/// message's size.
+int utf8ByteLength(String s) {
+  // Every code unit is worth at least one byte; the loop adds only the excess.
+  var bytes = s.length;
+  for (var i = 0; i < s.length; i++) {
+    final u = s.codeUnitAt(i);
+    if (u < 0x80) continue;
+    if (u < 0x800) {
+      bytes += 1;
+      continue;
+    }
+    if (u >= 0xd800 && u < 0xdc00 && i + 1 < s.length) {
+      final low = s.codeUnitAt(i + 1);
+      if (low >= 0xdc00 && low < 0xe000) {
+        bytes += 2; // surrogate PAIR: 2 code units -> 4 bytes
+        i++;
+        continue;
+      }
+    }
+    // BMP char, or an unpaired surrogate the encoder replaces with U+FFFD —
+    // 3 bytes either way.
+    bytes += 2;
+  }
+  return bytes;
 }

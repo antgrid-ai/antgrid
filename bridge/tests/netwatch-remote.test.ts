@@ -101,7 +101,8 @@ function makeClient(onMessage?: (m: AbMessage) => void): TestPeerSessionOwner {
 }
 
 function deliverControlPlane(client: TestPeerSessionOwner, m: unknown): void {
-  client.sendFromPeer("phone-1", { m });
+  // The wire body of a message-kind record is the bare AbMessage.
+  client.sendFromPeer("phone-1", m, "message");
 }
 
 describe("TestPeerSessionOwner netwatch:events ingest", () => {

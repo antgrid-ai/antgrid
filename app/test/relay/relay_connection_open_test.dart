@@ -93,9 +93,9 @@ class _RecordingRelay extends RelayService
   }
 
   @override
-  Future<PeerSendOutcome> sendFrame(String channel, Uint8List payload) async {
+  Future<PeerSendOutcome> sendFrame(String kind, Uint8List payload) async {
     if (!isDispatchAllowed) return PeerSendOutcome.closed;
-    if (channel == 'control') sent.add(payload);
+    sent.add(payload);
     return PeerSendOutcome.accepted;
   }
 
@@ -205,12 +205,10 @@ Future<StreamTransport> _openBound(
 Future<void> _advertiseReady(_RecordingRelay relay, String projectId) async {
   relay.inject(
     IncomingPeerFrame(
-      channel: 'control',
+      kind: kPeerFrameMessage,
       payload: Uint8List.fromList(
         utf8.encode(
-          jsonEncode({
-            'm': {'type': 'stream-ready', 'projectId': projectId},
-          }),
+          jsonEncode({'type': 'stream-ready', 'projectId': projectId}),
         ),
       ),
     ),
@@ -260,7 +258,7 @@ Future<void> _completeFakeAgentHello(
   final attemptId = hello['attemptId'] as String;
   relay.inject(
     IncomingPeerFrame(
-      channel: 'control',
+      kind: kPeerFrameSession,
       payload: Uint8List.fromList(
         utf8.encode(
           jsonEncode({'type': 'established', 'attemptId': attemptId}),
@@ -286,9 +284,12 @@ DeviceIdentity _identity() => DeviceIdentity(
 
 /// The production mechanisms adapter over the fake relay. No pair step: trust
 /// is account-derived, so the ladder is dial -> presence -> plaintext hello.
+/// `FixedPeerConnector`'s `TestPayloadLink` forwards `MultiStreamPeerLink`
+/// straight to the carrier, which is what lets `openProject` open native
+/// streams on [relay].
 PeerConnectionMechanisms _mechanisms(_RecordingRelay relay) =>
     PeerConnectionMechanisms(
-      peerRuntime: _MultiStreamConnector(relay),
+      peerRuntime: FixedPeerConnector(relay),
       machineDeviceId: _machineId,
       resolveCoords: () async => const ConnCoords(
         relayUrl: 'ws://relay.test',
@@ -304,35 +305,6 @@ RelayCentralControlDialer _central(_RecordingRelay relay) =>
       epoch: 1,
       mintToken: () async => 'license-token',
     );
-
-/// [FixedPeerConnector] with a payload link that also opens native streams:
-/// `openProject` needs a [MultiStreamPeerLink], and [TestPayloadLink] alone
-/// hides the relay's.
-class _MultiStreamConnector extends FixedPeerConnector {
-  _MultiStreamConnector(_RecordingRelay super.relay)
-    : _multiStreamLink = _MultiStreamPayloadLink(relay);
-
-  final _MultiStreamPayloadLink _multiStreamLink;
-
-  @override
-  PeerLink get link => _multiStreamLink;
-}
-
-class _MultiStreamPayloadLink extends TestPayloadLink
-    implements MultiStreamPeerLink {
-  _MultiStreamPayloadLink(_RecordingRelay super.carrier);
-
-  @override
-  Future<PeerStream> openStream(
-    StreamOpen open, {
-    required int maxRecordBytes,
-    required int maxQueuedBytes,
-  }) => (carrier as _RecordingRelay).openStream(
-    open,
-    maxRecordBytes: maxRecordBytes,
-    maxQueuedBytes: maxQueuedBytes,
-  );
-}
 
 /// Brings the connection up against the fake agent and returns the resulting
 /// session.

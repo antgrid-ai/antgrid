@@ -4,15 +4,27 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Endpoint, EndpointAddr } from "@number0/iroh/index.js";
-import { decodePeerFrame, encodePeerFrame, encodeStreamOpen, PEER_ALPN } from "antgrid-wire";
+import {
+  decodePeerFrame,
+  encodePeerFrame,
+  encodeStreamOpen,
+  PEER_ALPN,
+  PEER_MAX_BRIDGE_RECORD_BYTES,
+  STREAM_PROJECT_BRIDGE_RECORD_MAX_BYTES,
+} from "antgrid-wire";
 import { HostServer } from "../../bridge/src/host-server";
-import { PeerRecords } from "../../bridge/src/peer/records";
+import { StreamRecordReader, StreamRecordWriter } from "../../bridge/src/peer/stream-records";
 import { computeProjectId } from "../../bridge/src/project-id";
 import { createMessage } from "../../bridge/src/protocol";
 import { setLogLevel } from "../../bridge/src/logger";
 
 import { test } from "bun:test";
 import { startIrohAuthorizationHarness } from "../support/iroh-authorization";
+
+/** Fits two max-size control-plane records on the raw stream this test drives
+ *  directly — mirrors `SESSION_STREAM_MAX_QUEUED_BYTES` in
+ *  `native-host-connection.ts`, which this probe does not import. */
+const SESSION_STREAM_MAX_QUEUED_BYTES = 64 * 1024 * 1024;
 
 // Central discovery is controlled; enrollment and payloads use real HTTP/QUIC.
 test("real backend enrollment authorizes native host projects and revocation closes the pair", async () => {
@@ -72,7 +84,7 @@ test("real backend enrollment authorizes native host projects and revocation clo
       auth: { clientId: enrollmentId, clientSecret: machineDevice.clientSecret, deviceUuid: machine.id,
         userId: accountId, endpointSecret: endpointSecret.toString("base64") }, onAuthRevoked: () => {},
     }, remoteRuntimeFactory: async () => ({ maint: { getToken: () => machineDevice.token, stop: () => {} } }) });
-    let records: PeerRecords | undefined;
+    let writer: StreamRecordWriter | undefined;
     let connection: Awaited<ReturnType<Endpoint["connect"]>> | undefined;
     let timedOut = false;
     const timeout = setTimeout(() => { timedOut = true; void host.shutdown(); }, 55_000);
@@ -101,44 +113,61 @@ test("real backend enrollment authorizes native host projects and revocation clo
         .map((address) => address.replace("0.0.0.0:", "127.0.0.1:"));
       connection = await app.connect(new EndpointAddr(endpoint.id(), undefined, addresses), Array.from(Buffer.from(PEER_ALPN)));
       const stream = await connection.openBi();
-      records = new PeerRecords(stream, () => true, () => connection?.close(1n, []));
-      void records.send(encodeStreamOpen({ kind: "session" }));
+      writer = new StreamRecordWriter(
+        { send: stream.send },
+        () => true,
+        () => connection?.close(1n, []),
+        SESSION_STREAM_MAX_QUEUED_BYTES,
+      );
+      const reader = new StreamRecordReader({ recv: stream.recv }, PEER_MAX_BRIDGE_RECORD_BYTES, () => {});
+      void writer.send(encodeStreamOpen({ kind: "session" }));
       const attemptId = randomUUID();
-      const send = (value: object) =>
-        records!.send(encodePeerFrame({ type: "message", channel: "control" }, Buffer.from(JSON.stringify(value), "utf8")));
+      const sendSession = (value: object) =>
+        writer!.send(encodePeerFrame({ type: "session" }, Buffer.from(JSON.stringify(value), "utf8")));
+      const sendMessage = (value: object) =>
+        writer!.send(encodePeerFrame({ type: "message" }, Buffer.from(JSON.stringify(value), "utf8")));
       const read = async (predicate: (value: any) => boolean): Promise<any> => {
         for (;;) {
-          const frame = decodePeerFrame(await records!.read());
+          const frame = decodePeerFrame(await reader.read());
           const value = JSON.parse(Buffer.from(frame.payload).toString("utf8"));
-          const message = value.m ?? value;
-          if (predicate(message)) return message;
+          if (predicate(value)) return value;
         }
       };
       // QUIC/TLS between the endpoints the lease authorizes is the
       // confidentiality layer now — the hello is a plaintext frame the
       // bridge's lease re-check gates, not a signed transcript exchange.
-      await send({ type: "session:hello", attemptId, capabilities: { checkoutRouting: true, pullsTree: true, terminalFramesV1: true } });
+      await sendSession({ type: "session:hello", attemptId, capabilities: { checkoutRouting: true, pullsTree: true, terminalFramesV1: true } });
       await read((value) => value.type === "established" && value.attemptId === attemptId);
       const nativeConnectionId = connection.stableId();
       centralOnline = false;
       centralSocket?.close();
       for (const project of projects) {
-        await send({ m: createMessage("project:start", { projectId: project.id }) });
+        await sendMessage(createMessage("project:start", { projectId: project.id }));
         await read((value) => value.type === "stream-ready" && value.projectId === project.id);
         // A4: project traffic no longer rides the session stream tagged by a
         // bridge-minted streamId — each project gets its own QUIC stream,
         // opened with the A0b open frame; its first record is a fresh
         // stream-ready naming this project (D-1).
         const projectStream = await connection.openBi();
-        const projectRecords = new PeerRecords(projectStream, () => true, () => connection?.close(1n, []));
-        void projectRecords.send(encodeStreamOpen({ kind: "project", projectId: project.id }));
-        const bound = JSON.parse(Buffer.from(await projectRecords.read()).toString("utf8"));
+        const projectWriter = new StreamRecordWriter(
+          { send: projectStream.send },
+          () => true,
+          () => connection?.close(1n, []),
+          SESSION_STREAM_MAX_QUEUED_BYTES,
+        );
+        const projectReader = new StreamRecordReader(
+          { recv: projectStream.recv },
+          STREAM_PROJECT_BRIDGE_RECORD_MAX_BYTES,
+          () => {},
+        );
+        void projectWriter.send(encodeStreamOpen({ kind: "project", projectId: project.id }));
+        const bound = JSON.parse(Buffer.from(await projectReader.read()).toString("utf8"));
         assert.equal(bound.type, "stream-ready");
         assert.equal(bound.projectId, project.id);
-        await projectRecords.send(
+        await projectWriter.send(
           Buffer.from(JSON.stringify(createMessage("file:read", { projectId: project.id, path: "proof.txt" })), "utf8"),
         );
-        const file = JSON.parse(Buffer.from(await projectRecords.read()).toString("utf8"));
+        const file = JSON.parse(Buffer.from(await projectReader.read()).toString("utf8"));
         assert.equal(file.type, "file:content");
         assert.equal(file.content, `${project.name}:native-host-proof`);
         assert.equal(connection.stableId(), nativeConnectionId);
@@ -163,7 +192,7 @@ test("real backend enrollment authorizes native host projects and revocation clo
         sharedConnection: true, centralOutage: true, revokedDeviceClosed: true, revocationLatencyMs }));
     } finally {
       clearTimeout(timeout);
-      records?.close();
+      writer?.abort();
       await host.shutdown();
       await app.close();
       backend.stop(true);

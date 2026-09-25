@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
-  MAX_FRAME_PAYLOAD,
+  FIXED_PREFIX,
+  MAX_HEADER_LEN,
   MAX_TRANSFER_BYTES,
+  PEER_MAX_BRIDGE_RECORD_BYTES,
   PEER_MAX_RECORD_BYTES,
   ProjectStreamOpen,
   STREAM_MAX_BIDI_STREAMS_PER_CONNECTION,
@@ -11,7 +13,8 @@ import {
   STREAM_MAX_TUNNEL_STREAMS_PER_PEER,
   STREAM_OPEN_MAX_BYTES,
   STREAM_OPEN_MAX_ID_LENGTH,
-  STREAM_PROJECT_RECORD_MAX_BYTES,
+  STREAM_PROJECT_APP_RECORD_MAX_BYTES,
+  STREAM_PROJECT_BRIDGE_RECORD_MAX_BYTES,
   STREAM_TERMINAL_APP_RECORD_MAX_BYTES,
   STREAM_TERMINAL_BRIDGE_RECORD_MAX_BYTES,
   STREAM_TUNNEL_DATA_MAX_BYTES,
@@ -110,9 +113,13 @@ test("the longest valid open frame, fully JSON-escaped, fits STREAM_OPEN_MAX_BYT
   ).toBe(false);
 });
 
-test("MAX_TRANSFER_BYTES and PEER_MAX_RECORD_BYTES are the frag.ts / peer-authorization.ts values by name only", () => {
+test("MAX_TRANSFER_BYTES is 33_554_432 and defined in stream-open.ts", () => {
   expect(MAX_TRANSFER_BYTES).toBe(33_554_432);
-  expect(PEER_MAX_RECORD_BYTES).toBeGreaterThan(0);
+});
+
+test("PEER_MAX_RECORD_BYTES is unchanged at 1_501_028 and PEER_MAX_BRIDGE_RECORD_BYTES is MAX_TRANSFER_BYTES + MAX_HEADER_LEN + FIXED_PREFIX", () => {
+  expect(PEER_MAX_RECORD_BYTES).toBe(1_501_028);
+  expect(PEER_MAX_BRIDGE_RECORD_BYTES).toBe(MAX_TRANSFER_BYTES + MAX_HEADER_LEN + FIXED_PREFIX);
 });
 
 describe("encodeStreamOpen / decodeStreamOpen", () => {
@@ -219,11 +226,9 @@ describe("encodeTunnelDataRecord / decodeTunnelRecord", () => {
   });
 });
 
-test("STREAM_PROJECT_RECORD_MAX_BYTES is MAX_FRAME_PAYLOAD by name only (A4)", () => {
-  // A project-stream record carries the same bare AbMessage JSON the session
-  // path fragmented at this threshold, so the two caps must never drift apart.
-  expect(STREAM_PROJECT_RECORD_MAX_BYTES).toBe(MAX_FRAME_PAYLOAD);
-  expect(STREAM_PROJECT_RECORD_MAX_BYTES).toBe(1_500_000);
+test("project caps are asymmetric: the app's read/send cap is 1_500_000, the bridge's is MAX_TRANSFER_BYTES", () => {
+  expect(STREAM_PROJECT_APP_RECORD_MAX_BYTES).toBe(1_500_000);
+  expect(STREAM_PROJECT_BRIDGE_RECORD_MAX_BYTES).toBe(MAX_TRANSFER_BYTES);
 });
 
 test("D7 cap constants hold the adopted owner values (docs/iroh-reduction/ledger.md)", () => {

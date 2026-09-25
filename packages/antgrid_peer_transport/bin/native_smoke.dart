@@ -87,7 +87,7 @@ Future<void> main(List<String> args) async {
       final failure = link.failureStream.first;
       failure.ignore();
       final sent = await link.sendFrame(
-        'control',
+        kPeerFrameMessage,
         Uint8List.fromList([1, 2, 3]),
       );
       if (sent != PeerSendOutcome.accepted)
@@ -97,13 +97,12 @@ Future<void> main(List<String> args) async {
       final prefix = await recv.readExact(4);
       final size = ByteData.sublistView(prefix).getUint32(0, Endian.big);
       final frame = decodePeerFrame(await recv.readExact(size));
-      if (frame.header['type'] != 'message' ||
-          frame.header['channel'] != 'control') {
+      if (frame.header['type'] != kPeerFrameMessage) {
         throw StateError('peer frame mismatch');
       }
       if (scenario == 'echo') {
         final response = encodePeerFrame(
-          {'type': 'message', 'channel': 'control'},
+          {'type': kPeerFrameMessage},
           frame.payload,
         );
         final length = (ByteData(
@@ -168,7 +167,7 @@ Future<void> main(List<String> args) async {
         // The refusal must cost only the probe stream: the session stream
         // still carries a full round trip, and no failure fires from it.
         final response = encodePeerFrame(
-          {'type': 'message', 'channel': 'control'},
+          {'type': kPeerFrameMessage},
           frame.payload,
         );
         final length = (ByteData(
@@ -193,7 +192,7 @@ Future<void> main(List<String> args) async {
           throw StateError('extra uni stream accepted');
       } else {
         allowed = false;
-        if (await link.sendFrame('control', Uint8List(1)) !=
+        if (await link.sendFrame(kPeerFrameMessage, Uint8List(1)) !=
             PeerSendOutcome.closed)
           throw StateError('revoked write admitted');
       }

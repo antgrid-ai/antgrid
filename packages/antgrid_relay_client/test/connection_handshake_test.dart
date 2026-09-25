@@ -12,7 +12,7 @@ import 'package:test/test.dart';
 
 class _RecordingRelay implements PeerLink {
   final _messages = StreamController<IncomingPeerFrame>.broadcast();
-  final sent = <({String channel, Uint8List payload})>[];
+  final sent = <({String kind, Uint8List payload})>[];
   PeerSendOutcome outcome = PeerSendOutcome.accepted;
 
   @override
@@ -31,8 +31,8 @@ class _RecordingRelay implements PeerLink {
   PeerLinkDiagnostic? get netTap => null;
 
   @override
-  Future<PeerSendOutcome> sendFrame(String channel, Uint8List payload) async {
-    sent.add((channel: channel, payload: payload));
+  Future<PeerSendOutcome> sendFrame(String kind, Uint8List payload) async {
+    sent.add((kind: kind, payload: payload));
     return outcome;
   }
 
@@ -50,11 +50,11 @@ Map<String, dynamic> _decode(Uint8List payload) =>
 void _replyEstablished(
   _RecordingRelay relay,
   String attemptId, {
-  String channel = 'control',
+  String kind = kPeerFrameSession,
 }) {
   relay.inject(
     IncomingPeerFrame(
-      channel: channel,
+      kind: kind,
       payload: Uint8List.fromList(
         utf8.encode(
           jsonEncode({'type': 'established', 'attemptId': attemptId}),
@@ -75,14 +75,14 @@ void main() {
     await relay.closeStreams();
   });
 
-  test('run() sends session:hello on control with a fresh attemptId and the '
-      'hello capability literal', () async {
+  test('run() sends session:hello on the session kind with a fresh attemptId '
+      'and the hello capability literal', () async {
     final hs = ConnectionHandshake(relay: relay);
     final runFuture = hs.run();
     await Future<void>.delayed(Duration.zero);
 
     expect(relay.sent, hasLength(1));
-    expect(relay.sent.single.channel, 'control');
+    expect(relay.sent.single.kind, kPeerFrameSession);
     final hello = _decode(relay.sent.single.payload);
     expect(hello['type'], 'session:hello');
     expect(hello['attemptId'], isA<String>());
@@ -106,7 +106,7 @@ void main() {
     expect(await runFuture, isFalse);
   });
 
-  test('an established on a non-control channel is ignored', () async {
+  test('an established sent as a message-kind frame is ignored', () async {
     final hs = ConnectionHandshake(
       relay: relay,
       attemptTimeout: const Duration(milliseconds: 100),
@@ -115,7 +115,7 @@ void main() {
     await Future<void>.delayed(Duration.zero);
     final attemptId = _decode(relay.sent.single.payload)['attemptId'] as String;
 
-    _replyEstablished(relay, attemptId, channel: 'preview');
+    _replyEstablished(relay, attemptId, kind: kPeerFrameMessage);
     expect(await runFuture, isFalse);
   });
 

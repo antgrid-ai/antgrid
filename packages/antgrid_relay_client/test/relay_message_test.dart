@@ -136,28 +136,4 @@ void main() {
       expect(const PingMessage().toJson(), {'type': 'ping'});
     });
   });
-
-  group('StreamEnvelope', () {
-    test('kControlStreamId is "0"', () {
-      expect(kControlStreamId, '0');
-    });
-
-    test('toJson omits absent stream id', () {
-      expect(const StreamEnvelope(m: {'type': 'x'}).toJson(), {
-        'm': {'type': 'x'},
-      });
-      expect(const StreamEnvelope(s: '3', m: {'type': 'x'}).toJson(), {
-        's': '3',
-        'm': {'type': 'x'},
-      });
-    });
-
-    test('fromJson requires m and rejects non-string s', () {
-      expect(StreamEnvelope.fromJson({'s': '3', 'm': 1})?.s, '3');
-      expect(StreamEnvelope.fromJson({'m': 1})?.s, isNull);
-      expect(StreamEnvelope.fromJson({'s': 3, 'm': 1}), isNull);
-      expect(StreamEnvelope.fromJson({'s': '3'}), isNull);
-    });
-  });
-
 }

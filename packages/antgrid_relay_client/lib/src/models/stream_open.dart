@@ -22,10 +22,24 @@ const int kStreamMaxTerminalAttachmentsPerPeer = 64;
 const int kStreamMaxTunnelStreamsPerPeer = 128;
 const int kStreamMaxPendingOpensPerPeer = 16;
 
-/// Bridge reader's cap for a project-stream record, both directions — equal
-/// to `MAX_FRAME_PAYLOAD`, the same ceiling the session path enforced before
-/// A4 (`packages/antgrid-wire/src/stream-open.ts`).
-const int kStreamProjectRecordMaxBytes = 1500000;
+/// Largest single `AbMessage` JSON the bridge writes on any stream
+/// (`packages/antgrid-wire/src/stream-open.ts`).
+const int kMaxTransferBytes = 33554432;
+
+/// App → bridge: the bridge's read cap on a project-stream record, and the
+/// app's send-refusal threshold on both the project and the session stream
+/// (payload bytes).
+const int kStreamProjectAppRecordMaxBytes = 1500000;
+
+/// Bridge → app: the app's `maxRecordBytes` for a project-stream open. Equal
+/// to [kMaxTransferBytes] — the asymmetry is by direction, not by stream.
+const int kStreamProjectBridgeRecordMaxBytes = kMaxTransferBytes;
+
+/// The app's write-queue bound for its session stream (`PeerLink.sendFrame`).
+/// Sized for the app side, which only ever sends small control-plane
+/// records — well under the bridge's matching `SESSION_STREAM_MAX_QUEUED_BYTES`.
+/// Over it, `sendFrame` returns `PeerSendOutcome.backpressured`.
+const int kSessionStreamMaxQueuedBytes = 4194304;
 
 /// Payload cap on one tunnel data record, after its tag byte
 /// ([kTunnelRecordTagBody] etc.), in both directions.

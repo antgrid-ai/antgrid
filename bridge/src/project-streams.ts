@@ -1,11 +1,10 @@
 /**
- * Project streams (Stage A wave A4, docs/iroh-reduction/stage-A-A4-contract.md
- * §3.1-§3.3). Every project gets its own QUIC bidi stream per app peer: after
- * the A0b open frame `{kind:"project", projectId}`, each record is the bare
- * UTF-8 JSON of one `AbMessage`, or one `{"__frag":…}` fragment of one. There
- * is no `{s, m}` envelope on a project stream — that routing lived in the
- * deleted `stream-mux.ts`; machine control traffic (`s` omitted / `"0"`)
- * never reaches this file.
+ * Project streams (docs/iroh-reduction/stage-A-A4-contract.md §3.1-§3.3 and
+ * stage-A-A5-contract.md §3.3). Every project gets its own QUIC bidi stream per
+ * app peer: after the A0b open frame `{kind:"project", projectId}`, each record is
+ * the bare UTF-8 JSON of exactly one `AbMessage` — one message is always one
+ * record, with no `{"__frag":…}` splitting and no `{s, m}` envelope. Machine
+ * control traffic (`s` omitted / `"0"`) never reaches this file.
  *
  * This registry is plugged into `PeerStreamAcceptor` as the `project`
  * handler, and into `TerminalStreamRegistry`/`TunnelStreamRegistry` as
@@ -13,25 +12,21 @@
  * core, only look up whatever this registry already has attached.
  */
 
-import { randomBytes } from "node:crypto";
 import {
-  buildFragments,
-  FRAG_THRESHOLD,
   MAX_TRANSFER_BYTES,
   STREAM_MAX_PROJECTS_PER_PEER,
-  STREAM_PROJECT_RECORD_MAX_BYTES,
+  STREAM_PROJECT_APP_RECORD_MAX_BYTES,
   type ProjectStreamOpen,
 } from "antgrid-wire";
 import { isSafeProjectId } from "./project-id";
 import { createMessage, parseMessageFast, type AbMessage } from "./protocol";
 import type { Channel, MessageBus } from "./message-bus";
-import type { SendOutcome } from "./send-scheduler";
 import type { TunnelStreamServer } from "./tunnel-manager";
-import type { FragReassembler } from "./frag-reassembler";
 import type { netwatch } from "./netwatch";
 import {
   StreamRecordReader,
   StreamRecordWriter,
+  type SendOutcome,
   type StreamSendOutcome,
   type StreamWriteFailure,
 } from "./peer/stream-records";
@@ -62,33 +57,6 @@ export const INVALID_NOTICE_TTL_MS = 60_000;
 
 const textEncoder = new TextEncoder();
 
-const FRAG_ID_SEED = randomBytes(8).toString("hex");
-let fragIdCounter = 0;
-
-function messageFragKey(msg: unknown): string | undefined {
-  const path = (msg as { path?: unknown } | null)?.path;
-  return typeof path === "string" ? path : undefined;
-}
-
-type FragmentResult =
-  | { ok: true; frames: string[] }
-  | { ok: false; error: { code: "MESSAGE_TOO_LARGE"; message: string } };
-
-/** Own implementation rather than importing `peer-session-owner.ts`'s
- *  `fragmentForSend`: that file constructs this registry, so sharing the
- *  counter would create a circular import for no benefit — fragment ids only
- *  need to be unique per sender, not drawn from one shared counter. */
-function fragmentForProjectSend(json: string, type?: string, key?: string): FragmentResult {
-  const bytes = Buffer.byteLength(json, "utf8");
-  if (bytes <= FRAG_THRESHOLD) return { ok: true, frames: [json] };
-  if (bytes > MAX_TRANSFER_BYTES) {
-    return { ok: false, error: { code: "MESSAGE_TOO_LARGE", message: `${type ?? "message"} exceeds MAX_TRANSFER_BYTES` } };
-  }
-  const hint = type && key ? { type, key } : undefined;
-  const id = `${FRAG_ID_SEED}-${fragIdCounter++}`;
-  return { ok: true, frames: buildFragments(json, id, hint) };
-}
-
 /** A project's attachment to the registry. `detach()` releases it. Terminal
  *  and tunnel traffic never ride this handle (A2/A3): they hold their own
  *  QUIC streams, admitted through {@link TerminalProjectBinding} and
@@ -97,8 +65,8 @@ export interface StreamHandle {
   detach(): void;
   /** "gated" when the switch or the receiver mute says no; "dropped" when the
    *  target peer holds no open project stream for this project; "too-large"
-   *  past MAX_TRANSFER_BYTES; else the writer's outcome ("sent" only once
-   *  every fragment was written). `channel` is ignored natively (§1.1). */
+   *  past MAX_TRANSFER_BYTES; else the writer's outcome. `channel` is ignored
+   *  natively (§1.1). */
   sendTo(msg: unknown, channel: Channel, target: SendTarget): Promise<SendOutcome>;
   /** True iff `peerId` holds an open project stream for this project AND
    *  mayDeliver() AND mayDeliverTo(peerSession(peerId)). Synchronous — what
@@ -226,9 +194,10 @@ export interface ProjectStreamRegistryOptions {
   /** Peer-addressed control-plane send on the SESSION stream (the refused-
    *  sender `control:result` notice). */
   sendSessionMessage(peerId: string, msg: AbMessage): void;
-  /** One reassembler per binding; the owner supplies it over its shared
-   *  reassemblyBudget. */
-  newReassembler(peerId: string, onComplete: (json: string) => void): FragReassembler;
+  /** A message over `MAX_TRANSFER_BYTES` was refused locally, before any
+   *  write: the same hook `PeerSessionOwner` reports its own session-stream
+   *  refusals through. */
+  onError?(code: string, message: string): void;
   /** Retires the whole connection. Only "unauthorized" (writer) or
    *  "protocol-violation" (reader prefix). */
   retirePeer(peerId: string, reason: "unauthorized" | "protocol-violation"): void;
@@ -260,7 +229,6 @@ interface Binding {
   readonly stream: AcceptedBiStream;
   readonly writer: StreamRecordWriter;
   readonly reader: StreamRecordReader;
-  readonly reassembler: FragReassembler;
   /** Removed from every index and its cap slot freed. The staleness guard
    *  every async step checks: once unbound, nothing may act on this binding
    *  again. */
@@ -430,24 +398,27 @@ export class ProjectStreamRegistry {
 
   // ---- Outbound write --------------------------------------------------------
 
-  /** Encodes and fragments `msg` once, then queues every fragment on every
-   *  recipient's writer before awaiting any of them. The enqueue must stay
-   *  synchronous: awaiting a write between fragments lets a later publish
-   *  queue inside this message's fragment set (the app then applies them out
-   *  of order), and awaiting per recipient lets one slow peer hold up every
-   *  other peer's copy. "sent" only once every fragment reached every
-   *  recipient; any other outcome makes the whole call "dropped". */
+  /** Encodes `msg` once, then queues it on every recipient's writer before
+   *  awaiting any of them: awaiting per recipient would let one slow peer
+   *  hold up every other peer's copy. "sent" only once every recipient wrote
+   *  it; any other outcome makes the whole call "dropped". A message over the
+   *  sender's cap is refused before any writer is reached; one `AbMessage` is
+   *  always exactly one record. */
   private async writeToRecipients(recipients: Binding[], msg: unknown, signal?: AbortSignal): Promise<SendOutcome> {
     const type = (msg as { type?: string } | null)?.type;
     const json = JSON.stringify(msg);
-    const fragmented = fragmentForProjectSend(json, type, messageFragKey(msg));
-    if (!fragmented.ok) return "too-large";
-    const encoded = fragmented.frames.map((frame) => textEncoder.encode(frame));
-    const pending: Promise<StreamSendOutcome>[] = [];
-    for (const binding of recipients) {
-      for (const frame of encoded) pending.push(binding.writer.send(frame, signal));
+    const bytes = Buffer.byteLength(json, "utf8");
+    if (bytes > MAX_TRANSFER_BYTES) {
+      const message = `${type ?? "message"} exceeds MAX_TRANSFER_BYTES`;
+      this.opts.onError?.("MESSAGE_TOO_LARGE", message);
+      this.opts.diagnostic?.({
+        dir: "tx", kind: "drop", transport: "iroh", channel: "control",
+        msgType: type, reason: "MESSAGE_TOO_LARGE", detail: { bytes },
+      });
+      return "too-large";
     }
-    const outcomes = await Promise.all(pending);
+    const frame = textEncoder.encode(json);
+    const outcomes = await Promise.all(recipients.map((binding) => binding.writer.send(frame, signal)));
     return outcomes.every((outcome) => outcome === "sent") ? "sent" : "dropped";
   }
 
@@ -505,11 +476,10 @@ export class ProjectStreamRegistry {
     );
     const reader = new StreamRecordReader(
       stream,
-      STREAM_PROJECT_RECORD_MAX_BYTES,
+      STREAM_PROJECT_APP_RECORD_MAX_BYTES,
       () => { if (!binding.unbound) this.opts.retirePeer(peerId, "protocol-violation"); },
     );
-    const reassembler = this.opts.newReassembler(peerId, (json) => this.dispatchJson(binding, json));
-    binding = { peerId, projectId, entry, stream, writer, reader, reassembler, unbound: false };
+    binding = { peerId, projectId, entry, stream, writer, reader, unbound: false };
     this.bind(binding);
     // The bind is complete once this is written — the app treats its project
     // stream as bound only once this first record arrives (D-1).
@@ -539,7 +509,6 @@ export class ProjectStreamRegistry {
         return;
       }
       const text = Buffer.from(bytes).toString("utf-8");
-      if (binding.reassembler.accept(text)) continue; // a __frag record, consumed there
       this.dispatchJson(binding, text);
     }
   }
@@ -694,10 +663,6 @@ export class ProjectStreamRegistry {
     return this.peerBindings.get(peerId)?.size ?? 0;
   }
 
-  sweepFragments(): void {
-    for (const binding of this.bindings.values()) binding.reassembler.sweep();
-  }
-
   /** Tear every entry down (socket close / client shutdown). */
   detachAll(): void {
     for (const entry of [...this.entries]) this.detach(entry);
@@ -727,7 +692,6 @@ export class ProjectStreamRegistry {
       set.delete(binding);
       if (set.size === 0) this.peerBindings.delete(binding.peerId);
     }
-    binding.reassembler.dispose();
   }
 
   private key(peerId: string, projectId: string): string {

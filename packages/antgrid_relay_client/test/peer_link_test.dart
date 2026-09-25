@@ -23,7 +23,7 @@ class _Peer implements PeerLink {
   @override
   PeerLinkDiagnostic? get netTap => null;
   @override
-  Future<PeerSendOutcome> sendFrame(String channel, Uint8List payload) async =>
+  Future<PeerSendOutcome> sendFrame(String kind, Uint8List payload) async =>
       PeerSendOutcome.accepted;
   @override
   Future<void> close() async {

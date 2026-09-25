@@ -1,15 +1,12 @@
 import { z } from "zod";
-import { MAX_FRAME_PAYLOAD, PEER_ALPN, STREAM_MAX_BIDI_STREAMS_PER_CONNECTION, decodePeerFrame, encodePeerFrame } from "antgrid-wire";
+import { PEER_ALPN, PEER_MAX_RECORD_BYTES, STREAM_MAX_BIDI_STREAMS_PER_CONNECTION, decodePeerFrame, encodePeerFrame, type PeerFrameKind } from "antgrid-wire";
 import type { Connection, Endpoint, Incoming } from "@number0/iroh";
 import { CentralControlClient, type CentralControlOptions } from "../central-control-client";
 import { baseSlotDeviceId } from "../relay-slot";
-import type { Channel, MessageBus } from "../message-bus";
 import type { AttachStreamOpts, StreamHandle } from "../project-streams";
-import type { PendingSinkWrite, QueuedAppFrame } from "../send-scheduler";
 import type { SessionHello } from "../protocol";
 import { AuthorizationLease, type EnrollmentIdentity, type LeaseFailure } from "./authorization-lease";
 import { EndpointApiError, EndpointEnrollment } from "./enrollment";
-import { PeerRecords, type PeerRecordFailure } from "./records";
 import { PeerSessionOwner, type PeerSessionOwnerOptions, MAX_APP_SESSIONS } from "../peer-session-owner";
 import { EndpointLifecycle, EndpointFailure } from "./endpoint-lifecycle";
 import type { RemoteHostConnection } from "../remote-host-connection";
@@ -19,7 +16,16 @@ import { PeerStreamAcceptor, readStreamOpen } from "./stream-dispatch";
 import { TerminalStreamRegistry } from "./terminal-streams";
 import { TunnelStreamRegistry } from "./tunnel-streams";
 import type { AbMessage } from "../protocol";
-import type { StreamSendOutcome } from "./stream-records";
+import { StreamRecordWriter, StreamRecordReader, StreamProtocolViolation, type PeerRecordFailure, type StreamSendOutcome } from "./stream-records";
+
+/** Fits two max-size control-plane records; the same per-stream bound as
+ *  `PROJECT_STREAM_MAX_QUEUED_BYTES` (`project-streams.ts`). */
+const SESSION_STREAM_MAX_QUEUED_BYTES = 67_108_864;
+/** Above terminal (1), project (0) and tunnel (-1): liveness frames must not
+ *  wait behind bulk. */
+const STREAM_PRIORITY_SESSION = 2;
+/** The next free reset code after `STREAM_STOP_PROJECT` (`project-streams.ts`). */
+const STREAM_RESET_SESSION = 0x19n;
 
 export interface NativePeerOptions extends PeerSessionOwnerOptions {
   enrollment: EnrollmentIdentity;
@@ -71,7 +77,7 @@ interface NativePeerContext {
   registrationGeneration: string;
   attemptGeneration: number;
   sessionGeneration: number;
-  records?: PeerRecords;
+  sessionWriter?: StreamRecordWriter;
   streams?: PeerStreamAcceptor;
   cancelHelloTimer?: () => void;
   helloAttemptId?: string;
@@ -365,14 +371,24 @@ export class NativePeerSessions extends PeerSessionOwner {
     // frame may be the hello, and `handleHello` fails closed on an absent
     // `peerPubkeyFor`.
     this.admitPeer(peerId, device.ed25519Pub);
-    const records = new PeerRecords(stream, () => this.authorized(peerId, endpointId), (reason) => {
-      if (this.nativePeers.get(peerId)?.records === records) this.retirePeer(peerId, reason);
-    });
-    peer.records = records;
+    // A session-stream overflow retires the whole connection rather than
+    // just this stream (D3's one exception): losing the session stream is
+    // losing the session, and there is no separate stream to reopen.
+    const writer = new StreamRecordWriter(
+      { send: stream.send },
+      () => this.authorized(peerId, endpointId),
+      (reason) => { if (this.nativePeers.get(peerId)?.sessionWriter === writer)
+        this.retirePeer(peerId, reason === "unauthorized" ? "unauthorized"
+          : reason === "overflow" ? "queue-full" : "connection-lost"); },
+      SESSION_STREAM_MAX_QUEUED_BYTES, STREAM_PRIORITY_SESSION, STREAM_RESET_SESSION,
+    );
+    const reader = new StreamRecordReader({ recv: stream.recv }, PEER_MAX_RECORD_BYTES,
+      () => { if (this.nativePeers.get(peerId) === peer) this.retirePeer(peerId, "protocol-violation"); });
+    peer.sessionWriter = writer;
     // Reads `sessions`, not any hello bookkeeping: `handleHello` must have put
     // the peer there by the time this fires, or every connection dies here.
     peer.cancelHelloTimer = this.schedule(() => {
-      if (this.nativePeers.get(peerId) === peer && !this.sessions.has(peerId)) records.close();
+      if (this.nativePeers.get(peerId) === peer && !this.sessions.has(peerId)) this.retirePeer(peerId, "connection-lost");
     }, HELLO_TIMEOUT_MS);
     this.recordDiagnostic({ dir: "event", kind: "lifecycle", transport: "iroh", msgType: "peer:native-accepted",
       detail: {
@@ -382,20 +398,41 @@ export class NativePeerSessions extends PeerSessionOwner {
       } });
     // Later bidi streams belong to `PeerStreamAcceptor` (admitted or refused
     // in-band, never fatal); nothing uses a uni stream, so one is a violation.
-    void connection.acceptUni().then(() => records.close("protocol-violation"), () => {});
+    void connection.acceptUni().then(
+      () => { if (this.nativePeers.get(peerId) === peer) this.retirePeer(peerId, "protocol-violation"); },
+      () => {},
+    );
     void connection.closed().then(() => {
-      if (this.nativePeers.get(peerId) === peer) records.close();
+      if (this.nativePeers.get(peerId) === peer) this.retirePeer(peerId, "connection-lost");
     });
     void (async () => {
       try {
-        while (this.nativePeers.get(peerId) === peer) {
-          const frame = decodePeerFrame(await records.read());
-          if (frame.payload.length > MAX_FRAME_PAYLOAD) throw new Error("Invalid peer payload length");
-          const header = frame.header;
+        for (;;) {
+          // Checked before the read too: the first pass runs synchronously
+          // inside admission, so a peer admitted under a snapshot that no
+          // longer authorizes this endpoint is refused before it idles here.
+          if (!this.authorized(peerId, endpointId)) { this.retirePeer(peerId, "unauthorized"); return; }
+          const record = await reader.read();
           if (this.nativePeers.get(peerId) !== peer) return;
-          this.receivePeerFrame(frame.payload, peerId, header.channel);
+          if (!this.authorized(peerId, endpointId)) { this.retirePeer(peerId, "unauthorized"); return; }
+          let frame;
+          try {
+            frame = decodePeerFrame(record);
+          } catch {
+            this.retirePeer(peerId, "protocol-violation");
+            return;
+          }
+          this.receivePeerFrame(frame.payload, peerId, frame.header.type);
         }
-      } catch { records.close("protocol-violation"); }
+      } catch (error) {
+        // A `StreamProtocolViolation` has already retired the peer through the
+        // reader's own `onFailure` above; retiring it again here would just
+        // relabel the same event under a second reason. Anything else is the
+        // ordinary FIN/reset a live connection eventually takes.
+        if (!(error instanceof StreamProtocolViolation) && this.nativePeers.get(peerId) === peer) {
+          this.retirePeer(peerId, "connection-lost");
+        }
+      }
     })();
     peer.streams = new PeerStreamAcceptor({
       connection,
@@ -473,8 +510,8 @@ export class NativePeerSessions extends PeerSessionOwner {
     this.tunnelStreams.dropPeer(peerId);
     this.projectStreams.dropPeer(peerId);
     peer.connection.close(reason === "unauthorized" ? 3n : reason === "protocol-violation" ? 2n : 1n, []);
-    peer.records?.close(reason);
-    super.dropSession(peerId, "iroh");
+    peer.sessionWriter?.abort();
+    super.dropSession(peerId);
     this.recordDiagnostic({
       dir: "event",
       kind: "lifecycle",
@@ -517,12 +554,12 @@ export class NativePeerSessions extends PeerSessionOwner {
       } });
   }
 
-  protected override receivePeerFrame(payload: Uint8Array, from: string, channel: Channel): void {
+  protected override receivePeerFrame(payload: Uint8Array, from: string, kind: PeerFrameKind): void {
     if (!this.authorized(from, this.nativePeers.get(from)?.endpointId)) {
       void this.lease.refresh().catch(() => {});
       return;
     }
-    super.receivePeerFrame(payload, from, channel);
+    super.receivePeerFrame(payload, from, kind);
   }
 
   /**
@@ -564,42 +601,30 @@ export class NativePeerSessions extends PeerSessionOwner {
     if (this.nativePeers.has(peerId)) this.retirePeer(peerId, reason);
   }
 
-  protected override dropSession(peerId: string, transport = this.payloadTransport(peerId)): void {
+  protected override dropSession(peerId: string): void {
     if (this.nativePeers.has(peerId)) { this.retirePeer(peerId); return; }
-    super.dropSession(peerId, transport);
+    super.dropSession(peerId);
   }
 
-  protected override sendNativeScheduled(payload: Buffer, peerId: string, frame: QueuedAppFrame): number | null | PendingSinkWrite {
-    if (!this.authorized(peerId, this.nativePeers.get(peerId)?.endpointId)) return null;
+  protected override writeSessionRecord(
+    peerId: string,
+    kind: PeerFrameKind,
+    payload: Buffer,
+    diagnosticType: string,
+    signal?: AbortSignal,
+  ): Promise<StreamSendOutcome> | null {
     const peer = this.nativePeers.get(peerId);
-    if (!peer?.records) return null;
-    const session = this.sessions.get(peerId);
-    const record = encodePeerFrame({ type: "message", channel: frame.channel }, payload);
-    return { bytes: payload.length, completed: peer.records.send(record, () =>
-      this.sessions.get(peerId) === session && !frame.signal?.aborted && frame.authorized?.() !== false,
-    ).then((outcome) => {
-      if (outcome === "sent") this.recordNativeWrite(payload, record.length, frame.channel, frame.type, frame.streamId);
-      return outcome === "sent";
-    }) };
-  }
-
-  protected override sendNativePayload(data: Buffer | string, to: string, channel: Channel = "control",
-    diagnosticType = "transport", streamId?: string): boolean {
-    if (!this.authorized(to, this.nativePeers.get(to)?.endpointId)) return false;
-    const peer = this.nativePeers.get(to);
-    if (!peer?.records) return false;
-    const payload = typeof data === "string" ? Buffer.from(data) : data;
-    const record = encodePeerFrame({ type: "message", channel }, payload);
-    void peer.records.send(record).then((outcome) => {
-      if (outcome === "sent") this.recordNativeWrite(payload, record.length, channel, diagnosticType, streamId);
+    if (!peer?.sessionWriter) return null;
+    const record = encodePeerFrame({ type: kind }, payload);
+    return peer.sessionWriter.send(record, signal).then((outcome) => {
+      if (outcome === "sent") this.recordNativeWrite(payload, record.length, diagnosticType);
+      return outcome;
     });
-    return true;
   }
 
-  private recordNativeWrite(payload: Uint8Array, peerFrameBytes: number, channel: Channel,
-    msgType: string, streamId?: string): void {
+  private recordNativeWrite(payload: Uint8Array, peerFrameBytes: number, msgType: string): void {
     this.recordDiagnostic({ dir: "tx", kind: "frame", transport: "iroh",
-      channel, msgType, streamId, bytes: payload.length, frameId: frameIdFor(payload),
+      channel: "control", msgType, bytes: payload.length, frameId: frameIdFor(payload),
       detail: { peerFrameBytes, recordBytes: peerFrameBytes + 4, lengthPrefixBytes: 4 } });
   }
 

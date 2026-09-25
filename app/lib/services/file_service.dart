@@ -1,6 +1,5 @@
 import 'dart:async';
 
-import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:uuid/uuid.dart';
 
 import '../analytics/events.dart';
@@ -73,17 +72,32 @@ class FileService {
 
   String get projectId => session.projectId;
 
-  /// Notified when a fragmentable transfer (file:content, git:diff-content)
-  /// lands, so the recovery coordinator can reset its retry counter.
-  void Function(FragHint hint)? onFragmentSuccess;
-
-  /// Wall-clock bound for the one-shot git:diff verb. The frag-abort backstop
-  /// ([handleFragmentFailure]) only fires once a fragmented transfer STARTS then
-  /// aborts; a send dropped before any frame arrives (keyless relay window /
-  /// session down) has no backstop and would strand [GitState.diffLoading].
-  /// Injectable so tests drive a short window.
+  /// Wall-clock bound for the one-shot git:diff verb. A send dropped before
+  /// any frame arrives (keyless relay window / session down) would otherwise
+  /// strand [GitState.diffLoading] forever. Injectable so tests drive a short
+  /// window.
   final Duration gitActionTimeout;
   ReplyLatch? _diffLatch;
+
+  /// Consecutive stream resets one outstanding request survives before its
+  /// pane is failed instead of re-requested. Bounds a transfer that resets its
+  /// stream every time it is sent.
+  static const int kMaxStreamResetReissues = 2;
+
+  /// The diff pane's in-flight request, set by [requestDiff]/[requestCommitDiff]
+  /// and cleared when the matching reply lands or the diff is cleared or
+  /// superseded. Deliberately NOT cleared by the latch's timeout or a
+  /// [SessionDownException] — those leave the pane still waiting, which is
+  /// exactly what [reissueAfterStreamReset] needs to re-send.
+  ({String path, String? sha})? _inflightDiff;
+
+  /// The Git view pane's in-flight [requestFileContent], set by [gitViewFile]
+  /// and cleared the same way as [_inflightDiff].
+  String? _inflightGitView;
+
+  /// Keyed `'diff <sha?> <path>'` / `'view <path>'`, cleared on the matching
+  /// reply alongside [_inflightDiff]/[_inflightGitView].
+  final Map<String, int> _resetReissues = {};
 
   /// Bounds a `git:log` page fetch the same way [_diffLatch] bounds
   /// `git:diff` — one slot, superseded on the next fetch (a scroll-triggered
@@ -280,6 +294,13 @@ class FileService {
   void _onStatusJson(Map<String, dynamic> json) {
     final parsed = parseAbMessage(json);
     if (parsed == null) return;
+    // An error-bearing file:content is coerced onto this tier by
+    // classifyAbMessage, so the heavy handler never sees it; without this the
+    // pane that asked would spin on a read the machine already refused.
+    if (parsed is FileContentMessage) {
+      _handleFileContent(parsed);
+      return;
+    }
     if (parsed is GitStatusMessage) {
       _handleGitStatus(parsed);
       return;
@@ -455,8 +476,9 @@ class FileService {
       encoding: msg.encoding,
       mimeType: msg.mimeType,
     );
-    if (msg.error == null) {
-      onFragmentSuccess?.call(FragHint('file:content', msg.path));
+    if (msg.path == _inflightGitView) {
+      _inflightGitView = null;
+      _resetReissues.remove('view ${msg.path}');
     }
     final files = msg.path == _state.files.selectedFilePath
         ? _state.files.copyWith(
@@ -491,6 +513,10 @@ class FileService {
     }
     final openPath = _state.git.diffPath ?? _state.git.viewingPath;
     final clearStaleGit = openPath != null && !statuses.containsKey(openPath);
+    if (clearStaleGit) {
+      _inflightDiff = null;
+      _inflightGitView = null;
+    }
     _setState(
       _state.copyWith(
         gitFileStatuses: statuses,
@@ -503,7 +529,10 @@ class FileService {
   }
 
   void _handleGitDiffContent(GitDiffContentMessage msg) {
-    onFragmentSuccess?.call(FragHint('git:diff-content', msg.path));
+    if (_inflightDiff?.path == msg.path && _inflightDiff?.sha == null) {
+      _inflightDiff = null;
+      _resetReissues.remove('diff null ${msg.path}');
+    }
     // Also guards on diffCommitSha being unset: a working-tree diff reply
     // landing after the user has already switched to a commit's diff for the
     // SAME path must not overwrite it.
@@ -608,7 +637,10 @@ class FileService {
   }
 
   void _handleGitCommitDiffContent(GitCommitDiffContentMessage msg) {
-    onFragmentSuccess?.call(FragHint('git:commit-diff-content', msg.path));
+    if (_inflightDiff?.path == msg.path && _inflightDiff?.sha == msg.sha) {
+      _inflightDiff = null;
+      _resetReissues.remove('diff ${msg.sha} ${msg.path}');
+    }
     if (msg.path != _state.git.diffPath ||
         msg.sha != _state.git.diffCommitSha) {
       return;
@@ -627,23 +659,12 @@ class FileService {
     );
   }
 
-  /// A fragmented transfer for [hint] aborted and exhausted its retries. Clear
-  /// the pane that was awaiting it so the UI stops showing a loading spinner.
-  void handleFragmentFailure(FragHint hint) {
-    switch (hint.type) {
-      case 'file:content':
-        _failFileContent(hint.key);
-      case 'git:diff-content':
-      case 'git:commit-diff-content':
-        _failDiff(hint.key);
-    }
-  }
-
   void _failFileContent(String path) {
     final errored = FileContent(
       path: path,
       size: 0,
-      error: 'Transfer failed — file too large to receive over the relay.',
+      error:
+          'Transfer failed — the connection to the machine reset while loading.',
     );
     final files = path == _state.files.selectedFilePath
         ? _state.files.copyWith(
@@ -671,6 +692,50 @@ class FileService {
     _diffLatch?.settle();
     _diffLatch = null;
     _setState(_state.copyWith(git: _state.git.copyWith(diffLoading: false)));
+  }
+
+  /// Re-sends the reads this service is still waiting on, after the project
+  /// stream carrying them was reset and reopened (their replies died with
+  /// it). Called by [ProjectSession] once a checkout's bundle is known to be
+  /// live again — see its `projectStreamEvents` listener.
+  void reissueAfterStreamReset() {
+    final diff = _inflightDiff;
+    if (diff != null &&
+        _state.git.diffPath == diff.path &&
+        _state.git.diffCommitSha == diff.sha) {
+      final key = 'diff ${diff.sha} ${diff.path}';
+      final attempts = (_resetReissues[key] ?? 0) + 1;
+      if (attempts > kMaxStreamResetReissues) {
+        _inflightDiff = null;
+        _resetReissues.remove(key);
+        _failDiff(diff.path);
+      } else {
+        _resetReissues[key] = attempts;
+        final sha = diff.sha;
+        if (sha == null) {
+          requestDiff(diff.path);
+        } else {
+          requestCommitDiff(sha, diff.path);
+        }
+      }
+    }
+
+    final view = _inflightGitView;
+    if (view != null && _state.git.viewingPath == view) {
+      final key = 'view $view';
+      final attempts = (_resetReissues[key] ?? 0) + 1;
+      if (attempts > kMaxStreamResetReissues) {
+        _inflightGitView = null;
+        _resetReissues.remove(key);
+        _failFileContent(view);
+      } else {
+        _resetReissues[key] = attempts;
+        _setState(
+          _state.copyWith(git: _state.git.copyWith(viewingLoading: true)),
+        );
+        requestFileContent(view);
+      }
+    }
   }
 
   FileNode _cloneNode(FileNode node) {
@@ -1078,6 +1143,8 @@ class FileService {
   }
 
   void requestDiff(String path) {
+    _inflightGitView = null;
+    _inflightDiff = (path: path, sha: null);
     _setState(
       _state.copyWith(
         git: _state.git.copyWith(
@@ -1093,7 +1160,7 @@ class FileService {
     // Tier-2 one-shot: bound git:diff on wall-clock so a send dropped before any
     // frame arrives clears diffLoading. Guarded on diffPath so a superseding
     // diff (or a navigate-away) can't have its spinner cleared by a stale
-    // timeout. The frag-abort backstop still handles mid-transfer aborts.
+    // timeout.
     _diffLatch?.settle();
     final latch = _diffLatch = ReplyLatch();
     session.sendForCheckout(
@@ -1380,6 +1447,8 @@ class FileService {
   /// [requestDiff] opens for the working tree, distinguished on screen by
   /// [GitPaneState.diffCommitSha].
   void requestCommitDiff(String sha, String path) {
+    _inflightGitView = null;
+    _inflightDiff = (path: path, sha: sha);
     _setState(
       _state.copyWith(
         git: _state.git.copyWith(
@@ -1445,6 +1514,7 @@ class FileService {
     // Superseded by the user closing the diff — a clean end, not a strand.
     _diffLatch?.settle();
     _diffLatch = null;
+    _inflightDiff = null;
     _setState(_state.copyWith(git: _state.git.copyWith(clearDiff: true)));
   }
 
@@ -1452,6 +1522,8 @@ class FileService {
   /// loading the file's content into the Git pane (separate from any file the
   /// Files tab may have selected).
   void gitViewFile(String path) {
+    _inflightDiff = null;
+    _inflightGitView = path;
     _setState(
       _state.copyWith(
         git: _state.git.copyWith(
@@ -1467,6 +1539,7 @@ class FileService {
   /// Git pane: exit "View File from diff" mode, returning to the changed-files
   /// list (or the active diff, if one is still set).
   void clearGitViewing() {
+    _inflightGitView = null;
     _setState(_state.copyWith(git: _state.git.copyWith(clearViewing: true)));
   }
 

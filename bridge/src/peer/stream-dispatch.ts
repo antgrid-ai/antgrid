@@ -2,8 +2,8 @@
  * Admission for every native bidi stream after the session stream (Stage A
  * wave A1, docs/iroh-reduction/stage-A-A1-contract.md §3.2). The session
  * stream itself never reaches this file — `native-host-connection.ts` reads
- * its open frame and hands the stream straight to `PeerRecords` before this
- * acceptor's loop starts.
+ * its open frame and hands the stream straight to a `StreamRecordWriter` /
+ * `StreamRecordReader` pair before this acceptor's loop starts.
  *
  * A1 ships an empty `handlers` table, so every well-formed later stream is
  * refused `NOT_ALLOWED`; A2–A4 plug in project/terminal/tunnel handlers

@@ -6,11 +6,17 @@ import {
   encodePeerFrame,
   encodeStreamOpen,
   PEER_ALPN,
+  PEER_MAX_BRIDGE_RECORD_BYTES,
   type PeerAuthorizationSnapshot,
 } from "antgrid-wire";
 import { EndpointEnrollment } from "../../bridge/src/peer/enrollment";
-import { PeerRecords } from "../../bridge/src/peer/records";
+import { StreamRecordReader, StreamRecordWriter } from "../../bridge/src/peer/stream-records";
 import { createMessage } from "../../bridge/src/protocol";
+
+/** Fits two max-size control-plane records on the raw stream this test drives
+ *  directly — mirrors `SESSION_STREAM_MAX_QUEUED_BYTES` in
+ *  `native-host-connection.ts`, which this probe does not import. */
+const SESSION_STREAM_MAX_QUEUED_BYTES = 64 * 1024 * 1024;
 import { generateEvalAuth, setupTestEnv } from "../helpers/harness";
 
 /**
@@ -33,7 +39,7 @@ test("an endpoint absent from the lease is refused at accept, and admitted once 
   const env = await setupTestEnv({ fixtureName: "basic" });
   let rawEndpoint: Endpoint | undefined;
   let connection: Awaited<ReturnType<Endpoint["connect"]>> | undefined;
-  let records: PeerRecords | undefined;
+  let writer: StreamRecordWriter | undefined;
   try {
     const credential = generateEvalAuth();
     env.license.provision(credential);
@@ -104,20 +110,27 @@ test("an endpoint absent from the lease is refused at accept, and admitted once 
       await Bun.sleep(5_500);
       connection = await rawEndpoint.connect(addr, alpn);
       const stream = await connection.openBi();
-      records = new PeerRecords(stream, () => true, () => connection?.close(1n, []));
-      void records.send(encodeStreamOpen({ kind: "session" }));
+      writer = new StreamRecordWriter(
+        { send: stream.send },
+        () => true,
+        () => connection?.close(1n, []),
+        SESSION_STREAM_MAX_QUEUED_BYTES,
+      );
+      const reader = new StreamRecordReader({ recv: stream.recv }, PEER_MAX_BRIDGE_RECORD_BYTES, () => {});
+      void writer.send(encodeStreamOpen({ kind: "session" }));
       const attemptId = randomUUID();
-      const send = (value: object) =>
-        records!.send(encodePeerFrame({ type: "message", channel: "control" }, Buffer.from(JSON.stringify(value), "utf8")));
+      const sendSession = (value: object) =>
+        writer!.send(encodePeerFrame({ type: "session" }, Buffer.from(JSON.stringify(value), "utf8")));
+      const sendMessage = (value: object) =>
+        writer!.send(encodePeerFrame({ type: "message" }, Buffer.from(JSON.stringify(value), "utf8")));
       const read = async (predicate: (value: any) => boolean): Promise<any> => {
         for (;;) {
-          const frame = decodePeerFrame(await records!.read());
+          const frame = decodePeerFrame(await reader.read());
           const value = JSON.parse(Buffer.from(frame.payload).toString("utf8"));
-          const message = value.m ?? value;
-          if (predicate(message)) return message;
+          if (predicate(value)) return value;
         }
       };
-      await send({
+      await sendSession({
         type: "session:hello",
         attemptId,
         capabilities: { checkoutRouting: true, pullsTree: true, terminalFramesV1: true },
@@ -125,14 +138,14 @@ test("an endpoint absent from the lease is refused at accept, and admitted once 
       await read((value) => value.type === "established" && value.attemptId === attemptId);
 
       const requestId = "gate-inventory-miss-baseline";
-      await send({ m: createMessage("request", { requestId, method: "state.snapshot", params: { types: ["*"] } }) });
+      await sendMessage(createMessage("request", { requestId, method: "state.snapshot", params: { types: ["*"] } }));
       const response = await read((value) => value.type === "response" && value.requestId === requestId);
       expect(response.ok).toBe(true);
     } finally {
       enrollment.close();
     }
   } finally {
-    records?.close();
+    writer?.abort();
     connection?.close(1n, []);
     await rawEndpoint?.close();
     await env.teardown();

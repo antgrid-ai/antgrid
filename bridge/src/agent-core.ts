@@ -30,10 +30,9 @@ import { FileUploadManager } from "./file-upload";
 import { FileSearcher } from "./file-search";
 import { PortDetector } from "./port-detector";
 import { TunnelManager, type TunnelStreamServer } from "./tunnel-manager";
-import type { SendOutcome } from "./send-scheduler";
+import type { SendOutcome } from "./peer/stream-records";
 import { type DeviceIdentity } from "./device";
 import { displayStartupBanner } from "./banner";
-import { generateEphemeralKeypair, type EphemeralKeypair } from "./key-exchange";
 import { loadConfig, findConfigFile, projectName, type AbConfig } from "./config";
 import { buildConfigFromBootstrap, consoleBootstrapIO, writeConfigYaml } from "./bootstrap";
 import { resolveAgent, listKnownTools, oscTitleForNaming, isOscTitleUnusable } from "./agent-runtime";
@@ -234,7 +233,6 @@ export interface AgentCore {
    *  for why it reads this rather than a project-index snapshot. */
   readonly projectName: string;
   readonly abDir: string;
-  readonly nextKeypair: () => EphemeralKeypair;
   /** Machine-level phone registry (identity, label, push routing), shared across
    *  projects. Not an authorization store — see remote-access-policy.ts. */
   readonly pairedPhones: PairedPhonesStore;
@@ -681,9 +679,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     return config.services ?? [];
   }
 
-  // Shared: generate initial keypair and display banner (same for both modes)
-  const initialKeypair = generateEphemeralKeypair();
-
   // The banner is human-facing. In local mode the agent is spawned headless by
   // the App; banner output goes to a log nobody reads — skip it.
   if (opts.mode === "remote") {
@@ -958,10 +953,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     }
     const stamped = { ...msg, terminalId: externalId } as AbMessage;
     sendFromRuntime(runtime, stamped);
-  }
-
-  function nextKeypair(): EphemeralKeypair {
-    return generateEphemeralKeypair();
   }
 
   // Per-device view of the app sessions attached to this core's transport.
@@ -2497,23 +2488,15 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
    *  authenticated apps share the relay transport. */
   let sendAbTo: (msg: AbMessage, only: ClientKey) => void = (_m, _o) => {};
   let sendTerminalTo: (msg: AbMessage, only: ClientKey, signal: AbortSignal) => Promise<void> = async () => {};
-  /** The same narrowing on the "preview" channel, so a terminal's bulk display
-   *  payloads queue and get credited separately from the control plane, behind
-   *  `send-scheduler.ts`'s control>preview priority, instead of competing with
-   *  it for `CHANNEL_WINDOW_BYTES`. Two paths use this, and only the first
-   *  still needs the isolation: on the session path, terminal bulk rides
-   *  "preview" so that a full terminal budget (`TERMINAL_CONNECTION_MAX_BYTES`,
-   *  `packages/antgrid-wire/src/flow.ts` — equal to, not half of,
-   *  `CHANNEL_WINDOW_BYTES`) cannot occupy the control channel's whole credit
-   *  window and stall every other control-plane message behind it. On the
-   *  native path (A2), an attachment with its own QUIC stream bypasses both
-   *  channels entirely — `route()` in `peer/terminal-streams.ts` intercepts it
-   *  before this sender is ever reached — and `TERMINAL_CONNECTION_MAX_BYTES`
-   *  then bounds only that stream's own unacknowledged frame bytes per client.
-   *  Priority is not isolation on the session path: `SOCKET_INFLIGHT_BYTES` is
-   *  shared across both channels and sits only one window above one channel's,
-   *  so a saturated preview channel still leaves control a bounded headroom
-   *  before it too waits on a credit. */
+  /** The same narrowing on the "preview" channel: a terminal's bulk display
+   *  payloads (a live screen, a requested scrollback page) get their own
+   *  `LocalTransport` queue, separate from the control plane, so a full
+   *  terminal transfer cannot stall every control-plane message queued
+   *  behind it. This is loopback-only plumbing — an attachment with its own
+   *  native QUIC stream (A2) bypasses both channels entirely, since `route()`
+   *  in `peer/terminal-streams.ts` intercepts it before this sender is ever
+   *  reached, so the split matters only for the desktop client, which has no
+   *  stream of its own. */
   let sendPreviewAbTo: (msg: AbMessage, only: ClientKey) => void = (_m, _o) => {};
   /** Which channel a message rides is a property of its TYPE, not of the call
    *  site. `PREVIEW_CHANNEL_MESSAGE_TYPES` is mirrored into the app, which drops
@@ -4839,12 +4822,15 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         (clientGenerations.get(client) ?? 0) === generation &&
         remoteFrameAllowed(source) &&
         peerBusReachAllowed(msg, source);
-      // An RPC response answers one asker. A remote asker holds its own
-      // project stream, so the reply goes there alone; every other device
-      // would only drop it as a late response.
+      // An RPC response belongs to the one asker who sent the request, never
+      // to every device attached to this project — a loopback asker gets it
+      // on the loopback queue alone, and a remote asker gets it addressed to
+      // just its own peer. A relay-origin frame with no `peerId` cannot be
+      // addressed, so it is dropped rather than broadcast to every sibling.
       const answerAsker = (res: AbMessage): void => {
-        if (source === "relay" && peerId !== undefined) bus.publishOnly(res, channel, "relay", peerId);
-        else bus.publish(res, channel);
+        if (source === "loopback") bus.publishOnly(res, channel, "loopback");
+        else if (peerId !== undefined) bus.publishOnly(res, channel, "relay", peerId);
+        else log.warn("Dropping %s: relay asker has no peerId", res.type);
       };
       // Mobile-access gate: the single chokepoint through which both RPC
       // requests and plain Ab messages enter the core dispatch. Drops EVERY
@@ -5035,7 +5021,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     projectId: project.id,
     projectName: project.name,
     abDir,
-    nextKeypair,
     pairedPhones,
     sessionBus,
     setSessionBusListener(fn: ((event: SessionBusEvent) => void) | null): void {

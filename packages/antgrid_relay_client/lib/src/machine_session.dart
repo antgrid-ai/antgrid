@@ -5,16 +5,17 @@ import 'dart:typed_data';
 
 import 'agent_transport.dart';
 import 'buffered_agent_transport.dart';
-import 'flow.dart';
-import 'frag.dart';
 import 'frame.dart';
-import 'models/stream_envelope.dart';
 import 'models/stream_open.dart';
 import 'relay_service.dart';
 import 'peer_link.dart';
-import 'send_scheduler.dart';
 import 'terminal_attachment.dart';
 import 'tunnel_stream.dart';
+
+/// Diagnostic and protocol handle for the machine control plane — `"0"` on
+/// the wire before the peer-frame header carried a kind, kept as the local
+/// key every stream-keyed map and drop/annotate call still uses.
+const String _kSessionStreamLabel = '0';
 
 /// Liveness constants; mirror `bridge/src/relay-client.ts`.
 const int kPingSilenceSeconds = 20;
@@ -29,9 +30,8 @@ const Duration kProjectStreamReopenInitialBackoff = Duration(seconds: 1);
 const Duration kProjectStreamReopenMaxBackoff = Duration(seconds: 30);
 
 /// Local queue cap handed to [MultiStreamPeerLink.openStream] for a project
-/// stream — the same ceiling the per-session scheduler enforced for a
-/// project's traffic before A4 (`MAX_SEND_QUEUE_BYTES`, mirrored from
-/// `bridge/src/project-streams.ts`).
+/// stream; the same per-stream bound as the bridge's
+/// `PROJECT_STREAM_MAX_QUEUED_BYTES` (`bridge/src/project-streams.ts`).
 const int kProjectStreamMaxQueuedBytes = 67108864;
 
 /// Drives ONE hello attempt-cycle over a [MachineSession]'s socket, completing
@@ -83,25 +83,32 @@ class _SessionGeneration {
 /// `(projectId, open)` — see [MachineSession.projectStreamEvents].
 typedef ProjectStreamEvent = ({String projectId, bool open});
 
+/// One outbound message refused locally for exceeding the peer's read cap.
+class MessageTooLarge {
+  const MessageTooLarge(this.type, this.bytes);
+  final String? type;
+  final int bytes;
+}
+
 /// Outcome of reading a project stream's first record — see
 /// [StreamTransport._bindOverStream].
 enum _BindOutcome { bound, notReadyRetry }
 
 /// One phone↔machine session multiplexed over a single [PeerLink] socket for
 /// its control plane, with each project riding its own native QUIC stream
-/// (Stage A A4) when the link supports one ([MultiStreamPeerLink]).
-/// QUIC/TLS between the two lease-authorized endpoints is the confidentiality
-/// layer; this class owns the hello/close driver, the control-plane fragment
-/// reassembler, liveness, and project-stream lifecycle. Session frames
-/// (`session:hello`, `established`, `ping`, `pong`, `credit`) and the
-/// control-plane `{s, m}` envelope (`s` absent/"0") ride the plain [relay]
-/// socket; a project's traffic is bare `AbMessage` JSON on its own stream,
-/// with no envelope.
+/// when the link supports one ([MultiStreamPeerLink]). QUIC/TLS between the
+/// two lease-authorized endpoints is the confidentiality layer; this class
+/// owns the hello/close driver, liveness, and project-stream lifecycle.
+/// Session frames (`session:hello`, `established`, `ping`, `pong`) ride the
+/// session stream with peer-frame header kind [kPeerFrameSession]; every
+/// control-plane `AbMessage` on that same stream rides bare with kind
+/// [kPeerFrameMessage] — the header kind, not the JSON `type`, tells the two
+/// apart, since `ping`/`pong`/`session:*` are `AbMessage` literals too. A
+/// project's traffic is bare `AbMessage` JSON on its own stream.
 class MachineSession {
   final PeerLink relay;
 
-  /// The bare machine deviceUuid — the routing `to` for every outbound frame
-  /// and the fragment-id namespace.
+  /// The bare machine deviceUuid — the routing `to` for every outbound frame.
   final String machineDeviceId;
 
   final SessionHandshaker _handshaker;
@@ -126,11 +133,6 @@ class MachineSession {
   /// real interval.
   final Duration pingSilence;
 
-  /// Bytes consumed on a channel between the credits this side volunteers. A
-  /// tick credits both channels regardless, so this only decides how promptly a
-  /// bulk transfer's window reopens.
-  final int creditBatchBytes;
-
   MachineSession({
     required this.relay,
     required this.machineDeviceId,
@@ -138,14 +140,9 @@ class MachineSession {
     this.projectStartMessageBuilder,
     this.snapshotTimeout = const Duration(seconds: 5),
     this.pingSilence = const Duration(seconds: kPingSilenceSeconds),
-    int? channelWindowBytes,
-    int? socketInflightBytes,
-    this.creditBatchBytes = kCreditBatchBytes,
     RelayLogger? logger,
   }) : _handshaker = handshaker,
-       _logger = logger,
-       _channelWindowBytes = channelWindowBytes ?? kChannelWindowBytes,
-       _socketInflightBytes = socketInflightBytes ?? kSocketInflightBytes {
+       _logger = logger {
     // [ready] is observation-optional: failReady/dispose may completeError
     // before any awaiter attaches (see the getter doc). ignore() pre-registers
     // a swallowing listener so that never trips the unhandled-error zone hook;
@@ -157,14 +154,13 @@ class MachineSession {
   _SessionGeneration? _generation;
   int _epochCounter = 0;
 
-  /// `kControlStreamId` -> the session-stream transport, everything else ->
+  /// `_kSessionStreamLabel` -> the session-stream transport, everything else ->
   /// a project's transport. Unified so disposal (`removeStream`) and the
   /// per-(re)establishment sweep need no special case for the control entry.
   final Map<String, StreamTransport> _streams = {};
 
   StreamSubscription<IncomingPeerFrame>? _msgSub;
   StreamSubscription<PeerLinkState>? _stateSub;
-  Timer? _fragSweep;
   Timer? _livenessTimer;
 
   bool _disposed = false;
@@ -172,8 +168,11 @@ class MachineSession {
   bool _handshakeInFlight = false;
   int _missedPongs = 0;
   int _consecutiveTimeouts = 0;
-  int _fragCounter = 0;
   DateTime _lastRecv = DateTime.now();
+
+  /// Serializes writes on the session stream so a dequeue-time generation
+  /// check (see [sendOnSession]) sees frames in the order they were queued.
+  Future<void> _sessionSendChain = Future<void>.value();
 
   /// The attempt [ensureEstablished] joins instead of starting a second one.
   /// Null whenever no handshake is running.
@@ -190,43 +189,8 @@ class MachineSession {
   final _established$ = StreamController<void>.broadcast();
   final _takeovers = StreamController<void>.broadcast();
   final _sessionDown = StreamController<void>.broadcast();
-  final _fragAborts = StreamController<FragHint>.broadcast();
-  final _fragSendErrors = StreamController<FragSendError>.broadcast();
+  final _messageTooLarge = StreamController<MessageTooLarge>.broadcast();
   final _projectStreamEvents = StreamController<ProjectStreamEvent>.broadcast();
-
-  /// Frame-payload bytes allowed in flight per channel and across the socket
-  /// before the agent must credit them.
-  final int _channelWindowBytes;
-  final int _socketInflightBytes;
-
-  /// Cumulative payload bytes received on each channel this session, and how
-  /// much of that has already been credited back to the agent. Both reset at
-  /// establishment, which is the same instant the agent's send windows reset.
-  final Map<String, int> _consumed = {'control': 0, 'preview': 0};
-  final Map<String, int> _creditSent = {'control': 0, 'preview': 0};
-
-  /// Every outbound session-plane frame passes through here: one drain loop,
-  /// encoded at dequeue, control ahead of preview. Session frames are written
-  /// directly and so overtake any backlog — but they still land behind
-  /// whatever is already inside the socket's own sink, and nothing in this
-  /// stack can read that sink, so the scheduler's accounting is the only bound
-  /// on it there is. A project's traffic no longer passes through here at all
-  /// (Stage A A4): it writes straight to that project's own native stream.
-  late final SendScheduler _scheduler = SendScheduler(
-    sink: _encodeAndSend,
-    window: _channelWindowBytes,
-    socketCap: _socketInflightBytes,
-    // A gate stalled with data queued is the one failure here with no other
-    // observable: the socket keeps heartbeating (liveness frames bypass the
-    // queue), the peer keeps crediting, and meanwhile every frame the user
-    // typed sits in this scheduler. Left unwired, the canary fired into null
-    // and only the agent's side of the same stall was ever visible.
-    log: (m) => _log(RelayLogLevel.warn, m),
-  );
-
-  /// Test-only seam: park the send gate, shrink its limits, release it. Not
-  /// part of the supported API.
-  SendScheduler get debugScheduler => _scheduler;
 
   /// Projects the agent has told us are dialable — from a live or
   /// snapshot-replayed `stream-ready {projectId}`, or an `agent:projects`
@@ -237,15 +201,6 @@ class MachineSession {
   /// [openProject]/a reopen sent `project:start` — resolved by [_markReady],
   /// failed by a rejecting `control:result`.
   final Map<String, Completer<void>> _readyWaiters = {};
-
-  late final FragReassembler _reassembler = FragReassembler(
-    timeoutMs: kTransferTimeoutMs,
-    globalBudgetBytes: kGlobalReassemblyBudget,
-    onComplete: _dispatchDecoded,
-    onAbort: (hint) {
-      if (hint != null && !_fragAborts.isClosed) _fragAborts.add(hint);
-    },
-  );
 
   /// Completes on the FIRST `established`; errors if the session is disposed
   /// beforehand. One-shot — never await it to observe a re-establishment (use
@@ -281,8 +236,7 @@ class MachineSession {
   /// this one deliberately does not double-report them.
   Stream<void> get sessionDownEvents => _sessionDown.stream;
 
-  Stream<FragHint> get fragmentAborts => _fragAborts.stream;
-  Stream<FragSendError> get fragmentSendErrors => _fragSendErrors.stream;
+  Stream<MessageTooLarge> get messageTooLarge => _messageTooLarge.stream;
 
   /// `open:true` once per bind (after the bridge's first `stream-ready`
   /// record); `open:false` once per bound stream's end, or at session loss,
@@ -293,10 +247,10 @@ class MachineSession {
   /// The session-stream transport (the machine control plane). Created on
   /// first use and kept until disposed — a later access rebuilds it.
   StreamTransport get control {
-    final existing = _streams[kControlStreamId];
+    final existing = _streams[_kSessionStreamLabel];
     if (existing != null) return existing;
     final st = StreamTransport._control(this);
-    _streams[kControlStreamId] = st;
+    _streams[_kSessionStreamLabel] = st;
     if (_established) unawaited(st.refreshSnapshot());
     return st;
   }
@@ -307,7 +261,7 @@ class MachineSession {
   /// Live project transports this session holds, excluding the control entry
   /// — what [kStreamMaxProjectsPerPeer] bounds.
   int get _projectStreamCount =>
-      _streams.length - (_streams.containsKey(kControlStreamId) ? 1 : 0);
+      _streams.length - (_streams.containsKey(_kSessionStreamLabel) ? 1 : 0);
 
   /// Returns [projectId]'s transport once its project stream is bound (the
   /// bridge's first record was `stream-ready`). Creates the transport on
@@ -386,19 +340,18 @@ class MachineSession {
     }
   }
 
-  /// Wrap [message] as a control-plane `{m}` envelope and queue it on the
-  /// session stream (fragmenting past the threshold). Dropped when no keys
-  /// are installed (pre-establishment / mid-reconnect) — the bridge replays
-  /// durable state via `state.snapshot`.
+  /// Writes [message] as a bare control-plane `AbMessage` record on the
+  /// session stream. Dropped when no session generation is live
+  /// (pre-establishment / mid-reconnect) — the bridge replays durable state
+  /// via `state.snapshot` on the next establishment.
   ///
-  /// Resolves when the message's last frame has been handed to the socket or
-  /// dropped, never when it has merely been copied into a buffer this layer
-  /// cannot measure. A caller that cannot wait for the channel ahead of it must
-  /// impose its own timeout.
+  /// Resolves once the message has been handed to the link or dropped, never
+  /// when it has merely been queued behind sends already in flight. A caller
+  /// that cannot wait for those to drain first must impose its own timeout.
   Future<void> sendOnSession(
     Map<String, dynamic> message,
     String channel,
-  ) async {
+  ) {
     final type = message['type'] is String ? message['type'] as String : null;
     if (_generation == null) {
       // Usually benign (the bridge replays durable state on establishment),
@@ -410,7 +363,7 @@ class MachineSession {
         'tx',
         'no-e2e-session',
         channel: channel,
-        streamId: kControlStreamId,
+        streamId: _kSessionStreamLabel,
         msgType: type,
       );
       // Info, not warn: the comment above is right that this is usually the
@@ -423,139 +376,79 @@ class MachineSession {
         'send dropped — no session',
         fields: {'channel': channel, 'msgType': type},
       );
-      return;
+      return Future.value();
     }
-    final envelope = <String, dynamic>{'m': message};
-    final plaintext = jsonEncode(envelope);
+    final plaintext = jsonEncode(message);
     final bytes = utf8ByteLength(plaintext);
-    if (bytes > kMaxTransferBytes) {
+    if (bytes > kStreamProjectAppRecordMaxBytes) {
       _dropped(
         'tx',
         'message-too-large',
         channel: channel,
-        streamId: kControlStreamId,
+        streamId: _kSessionStreamLabel,
         msgType: type,
         detail: {'bytes': bytes},
       );
-      if (!_fragSendErrors.isClosed) {
-        _fragSendErrors.add(
-          FragSendError(
-            'MESSAGE_TOO_LARGE',
-            '${message['type'] ?? 'message'} exceeds kMaxTransferBytes',
-          ),
-        );
+      if (!_messageTooLarge.isClosed) {
+        _messageTooLarge.add(MessageTooLarge(type, bytes));
       }
-      return;
+      return Future.value();
     }
-    final List<String> frames;
-    try {
-      if (bytes <= kFragThreshold) {
-        frames = [plaintext];
-      } else {
-        final path = message['path'] as String?;
-        final hint = type == 'file:content' && path != null
-            ? FragHint('file:content', path)
-            : null;
-        final id = '$machineDeviceId-$kControlStreamId-${_fragCounter++}';
-        frames = buildFragments(plaintext, id, hint);
-      }
-    } catch (e) {
-      // The type alone, as everywhere else a drop names an error: a
-      // FormatException or ArgumentError out of the fragmenter prints the
-      // plaintext it choked on. `detail` is shipped to the bridge by
-      // NetwatchUploader and written into an operator's export file — the app's
-      // event has no `body` field precisely so a capture carries no payload,
-      // and this is the one door left open to it.
-      _dropped(
-        'tx',
-        'seal-failed',
-        channel: channel,
-        streamId: kControlStreamId,
-        msgType: type,
-        detail: {'error': '${e.runtimeType}'},
-      );
-      return;
-    }
-    final queued = [
-      for (final p in frames)
-        QueuedAppFrame(
-          channel: channel,
-          streamId: kControlStreamId,
-          plaintext: p,
-          plaintextBytes: utf8ByteLength(p),
-          msgType: type,
-        ),
-    ];
-    if (!_scheduler.enqueue(queued)) {
-      _dropped(
-        'tx',
-        'send-queue-full',
-        channel: channel,
-        streamId: kControlStreamId,
-        msgType: type,
-        detail: {'frames': frames.length},
-      );
-      // Every send on this path is fire-and-forget, so the caller never learns
-      // its message was discarded; without this the loss is visible only to a
-      // netwatch tap nobody has armed.
-      _log(
-        RelayLogLevel.warn,
-        'send queue full — message dropped',
-        fields: {
-          'channel': channel,
-          'msgType': type,
-          'frames': frames.length,
-        },
-      );
-      return;
-    }
-    // A fragment set leaves in order, so the last frame's hand-off is the
-    // message's.
-    await queued.last.done.future;
+    // Captured now, not when this send reaches the front of the chain: a
+    // teardown mid-queue must drop a frame written for a session that is
+    // already gone rather than hand it to a successor session.
+    final gen = _generation;
+    final result = _sessionSendChain.then(
+      (_) => _doSendOnSession(plaintext, channel, type, gen),
+    );
+    // The chain keeps only completion order: one link's throw is its own
+    // caller's to see, and must not reject every later send behind it.
+    _sessionSendChain = result.then<void>((_) {}, onError: (Object _) {});
+    return result;
   }
 
-  /// Encode one queued frame under the session live at THIS moment and write
-  /// it. Returns the length that reached the wire, or null if nothing did.
-  Future<int?> _encodeAndSend(QueuedAppFrame f) async {
-    final gen = _generation;
-    if (gen == null) {
+  /// Writes one session-stream record queued by [sendOnSession], rechecking
+  /// [gen] at dequeue: a session teardown while this send waited its turn in
+  /// [_sessionSendChain] must drop the frame rather than hand it to whatever
+  /// session comes next.
+  Future<void> _doSendOnSession(
+    String plaintext,
+    String channel,
+    String? type,
+    _SessionGeneration? gen,
+  ) async {
+    if (!identical(gen, _generation)) {
       _dropped(
         'tx',
         'no-e2e-session',
-        channel: f.channel,
-        streamId: f.streamId,
-        msgType: f.msgType,
+        channel: channel,
+        streamId: _kSessionStreamLabel,
+        msgType: type,
       );
-      // Warn where [sendOnSession]'s twin is info: this frame was accepted into
-      // the queue, so its sender was told it would go out and is awaiting a
+      // Warn where [sendOnSession]'s twin is info: this frame was accepted for
+      // sending, so its caller was told it would go out and is awaiting a
       // hand-off that now never comes.
       _log(
         RelayLogLevel.warn,
         'queued frame dropped — session went down before it was sent',
         fields: {
-          'channel': f.channel,
-          'streamId': f.streamId,
-          'msgType': f.msgType,
+          'channel': channel,
+          'streamId': _kSessionStreamLabel,
+          'msgType': type,
         },
       );
-      return null;
+      return;
     }
-    final bytes = Uint8List.fromList(utf8.encode(f.plaintext));
-    if (!relay.isDispatchAllowed) return null;
-    final outcome = await relay.sendFrame(f.channel, bytes);
+    final bytes = Uint8List.fromList(utf8.encode(plaintext));
+    if (!relay.isDispatchAllowed) return;
+    final outcome = await relay.sendFrame(kPeerFrameMessage, bytes);
     if (outcome != PeerSendOutcome.accepted || !identical(gen, _generation)) {
       // A generation change between the send and its outcome means a teardown
       // or a fresh hello already retired the session this frame was written
       // for — the peer either never saw it or has since moved on.
-      return null;
+      return;
     }
-    // Each fragment leaves on its own, so one message leaves as N frames with
-    // N unrelated ids. Naming every one with the parent type is what keeps a
-    // large transfer from reading as a burst of anonymous frames. After the
-    // send, not before: the tap records the wire event inside sendFrame, and
-    // this names the event it just made.
-    _annotate(_frameId(bytes), msgType: f.msgType, streamId: f.streamId);
-    return bytes.length;
+    _annotate(_frameId(bytes), msgType: type, streamId: _kSessionStreamLabel);
   }
 
   void notifyRpcResult({required bool timedOut}) {
@@ -575,12 +468,9 @@ class MachineSession {
     }
   }
 
-  /// Detach [streamId]'s transport. A project's send queue lives on its own
-  /// native stream, not [_scheduler] — `dropStream` here only ever matters for
-  /// the control entry.
+  /// Detach [streamId]'s transport.
   void removeStream(String streamId) {
     _streams.remove(streamId);
-    _scheduler.dropStream(streamId);
   }
 
   /// [removeStream] for [st] only: a transport disposed while a fresh one for
@@ -618,7 +508,6 @@ class MachineSession {
     _generation = null;
     _stopLiveness();
     _cancelPendingWork();
-    _resetRxFlow();
     // Readiness is per-CONNECTION too (a fresh hello re-registers the core
     // from scratch on the bridge side) — cleared wholesale rather than left
     // for each stream's own end to trickle it away.
@@ -642,19 +531,6 @@ class MachineSession {
     // the failure for the user to retry.
     for (final s in _streams.values) {
       s.failAllPending(code: 'E_SESSION_DOWN', message: 'relay session down');
-    }
-    // Whatever the send gate was still holding dies with the session it was
-    // queued for. Their futures complete rather than fail: the callers
-    // are fire-and-forget, so an error would land in no handler at all.
-    for (final f in _scheduler.clear()) {
-      _dropped(
-        'tx',
-        'queue-dropped',
-        channel: f.channel,
-        streamId: f.streamId,
-        msgType: f.msgType,
-        detail: {'why': 'session-down'},
-      );
     }
   }
 
@@ -683,12 +559,6 @@ class MachineSession {
   /// ONE attempt, no retry: the app's connection supervisor owns backoff and
   /// give-up, so a loop here would nest inside its backoff and multiply it.
   Future<void> _handshakeAttempt() async {
-    // Windows reset BEFORE the attempt, not after it confirms: there is never
-    // a second hello on the same link, so an attempt that fails closes the
-    // link anyway, and a stale window left behind would misattribute whatever
-    // the peer wrote in the meantime to a session that never existed.
-    _scheduler.resetWindows();
-    _resetRxFlow();
     final ok = await _handshaker.perform();
     if (_disposed) return;
     if (!ok) {
@@ -707,7 +577,6 @@ class MachineSession {
     _startLiveness();
     if (!_readyCompleter.isCompleted) _readyCompleter.complete();
     if (!_established$.isClosed) _established$.add(null);
-    _scheduler.kick();
     // Defensive re-clear: `_teardownSession` already cleared it, and nothing
     // repopulates it while `_generation` is null, but a first-ever
     // establishment never ran a teardown.
@@ -726,46 +595,6 @@ class MachineSession {
     }
   }
 
-  // --- inbound flow control -------------------------------------------------
-
-  void _resetRxFlow() {
-    for (final ch in const ['control', 'preview']) {
-      _consumed[ch] = 0;
-      _creditSent[ch] = 0;
-    }
-  }
-
-  /// Count payload bytes the agent charged to its window. Every frame that
-  /// arrives on a live session counts, whether or not it decoded:
-  /// the agent charged it either way, so skipping the ones that failed would
-  /// leak its window a frame at a time and let a single corrupt frame wedge a
-  /// channel for the session.
-  void _noteConsumed(String channel, int bytes) {
-    final total = _consumed[channel];
-    // A channel this session keeps no window for; the agent keeps none either.
-    if (total == null) return;
-    _consumed[channel] = total + bytes;
-    if (total + bytes - _creditSent[channel]! >= creditBatchBytes) {
-      _sendCredit(channel);
-    }
-  }
-
-  /// Hand the agent this channel's cumulative consumed count. Cumulative rather
-  /// than incremental so a credit lost in transit costs nothing — the next one
-  /// carries the same ground truth.
-  void _sendCredit(String channel) {
-    if (!_established) return;
-    final consumed = _consumed[channel]!;
-    _creditSent[channel] = consumed;
-    unawaited(
-      _sendSessionFrame({
-        'type': 'credit',
-        'channel': channel,
-        'consumed': consumed,
-      }).catchError((_) {}),
-    );
-  }
-
   // --- liveness -------------------------------------------------------------
 
   void _startLiveness() {
@@ -781,16 +610,6 @@ class MachineSession {
 
   void _checkLiveness() {
     if (_disposed || !_established) return;
-    // Unconditional, both channels, every tick. A credit the relay discarded
-    // would otherwise wedge the agent's window until the session ended, and
-    // there is no state here that could go stale: the count is cumulative. It
-    // doubles as the proof of life the agent's own liveness timers read, which
-    // on a slow uplink is what keeps a session up while bulk drains.
-    for (final ch in const ['control', 'preview']) {
-      _sendCredit(ch);
-    }
-    // The flush above is deliberately ahead of this: closing the link still
-    // leaves whatever credit was just queued written to the socket first.
     if (_handshakeInFlight) return;
     final silentFor = DateTime.now().difference(_lastRecv);
     if (silentFor < pingSilence) return;
@@ -875,107 +694,49 @@ class MachineSession {
   /// per-channel tail existed only to keep a slow `open()` from letting a
   /// small frame overtake a large one, and a plain UTF-8 decode never blocks.
   void _onPeerFrame(IncomingPeerFrame msg) {
-    if (_disposed || !relay.isDispatchAllowed) return;
-    final gen = _generation;
-    // Counted even pre-establishment (the hello driver owns dispatch of
-    // those frames, but the bridge already charged them to a window this
-    // side must agree on once the window exists).
-    if (gen != null || _handshakeInFlight) {
-      _noteConsumed(msg.channel, msg.payload.length);
-    }
-    // Frames between `established` and this side's install are counted above
-    // and dropped here; the snapshot re-pull on install covers them.
-    if (gen == null) return;
+    if (_disposed || !relay.isDispatchAllowed || _generation == null) return;
     String plaintext;
     try {
       plaintext = utf8.decode(msg.payload);
     } catch (_) {
-      _dropped('rx', 'bad-utf8', channel: msg.channel);
+      _dropped('rx', 'bad-utf8', channel: msg.kind);
       return;
     }
     final frameId = frameIdOf(msg.payload);
     _lastRecv = DateTime.now();
     _missedPongs = 0;
-    if (_reassembler.accept(
-      plaintext,
-      channel: msg.channel,
-      frameId: frameId,
-      epoch: gen.epoch,
-    )) {
-      // The reassembler consumes a fragment before any type is visible, so this
-      // is the only chance to say what it was. Matches the bridge's `__frag`.
-      _annotate(frameId, msgType: '__frag');
-      return;
-    }
-    _dispatchDecoded(plaintext, msg.channel, frameId, gen.epoch);
+    _dispatchDecoded(plaintext, msg.kind, frameId);
   }
 
-  /// [frameId] and [epoch] name the frame this plaintext arrived in. A
-  /// reassembled message spans N frames and takes them from the fragment that
-  /// completed it — see [FragReassembler.accept].
-  void _dispatchDecoded(
-    String plaintext,
-    String channel,
-    String frameId,
-    int epoch,
-  ) {
+  /// [frameId] names the frame this plaintext arrived in, for the capture tap.
+  void _dispatchDecoded(String plaintext, String kind, String frameId) {
     if (_disposed || _generation == null || !relay.isDispatchAllowed) return;
     Map<String, dynamic> json;
     try {
       json = jsonDecode(plaintext) as Map<String, dynamic>;
     } catch (_) {
-      _dropped('rx', 'plaintext-not-json', channel: channel, frameId: frameId);
+      _dropped('rx', 'plaintext-not-json', channel: kind, frameId: frameId);
       return;
     }
+    if (kind == kPeerFrameSession) {
+      final type = json['type'];
+      _annotate(frameId, msgType: type is String ? type : null);
+      _handleSessionFrame(json, frameId);
+      return;
+    }
+    // kind == kPeerFrameMessage: a bare AbMessage. Every project rides its
+    // own native stream, so this stream carries only the control plane.
     final type = json['type'];
-    // Payload disambiguation: a top-level `type` string is a
-    // session/liveness frame; an `m` field is control-plane traffic.
-    if (type is String) {
-      _annotate(frameId, msgType: type);
-      _handleSessionFrame(json, epoch);
+    if (type is! String) {
+      _dropped('rx', 'unrecognized-plaintext', channel: kind, frameId: frameId);
       return;
     }
-    if (!json.containsKey('m')) {
-      _dropped(
-        'rx',
-        'unrecognized-plaintext',
-        channel: channel,
-        frameId: frameId,
-      );
-      return;
-    }
-    final env = StreamEnvelope.fromJson(json);
-    if (env == null) {
-      _dropped('rx', 'bad-envelope', channel: channel, frameId: frameId);
-      return;
-    }
-    if (env.s != null && env.s != kControlStreamId) {
-      // Stage A A4: a project's traffic rides its own stream now, so a
-      // non-control `s` on the session stream means a peer still speaking
-      // the pre-A4 protocol. No log line — this is a protocol drop, not the
-      // "we hold no transport for a legitimate project" case the deleted
-      // stream-unbound notice used to answer.
-      _dropped(
-        'rx',
-        'project-on-session-stream',
-        channel: channel,
-        streamId: env.s,
-        frameId: frameId,
-      );
-      return;
-    }
-    final m = env.m;
-    final mType = m is Map<String, dynamic> && m['type'] is String
-        ? m['type'] as String
-        : null;
-    _annotate(frameId, msgType: mType, streamId: kControlStreamId);
-    if (m is Map<String, dynamic>) {
-      _snoopControl(m);
-      // Not the `control` getter: creating the transport here would fire a
-      // snapshot pull nobody asked for. Adverts were snooped above, so a
-      // session with no control transport yet loses nothing.
-      _streams[kControlStreamId]?.dispatchFromSession(m, channel);
-    }
+    _annotate(frameId, msgType: type, streamId: _kSessionStreamLabel);
+    _snoopControl(json);
+    // Not the `control` getter: creating the transport here would fire a
+    // snapshot pull nobody asked for. Adverts were snooped above, so a
+    // session with no control transport yet loses nothing.
+    _streams[_kSessionStreamLabel]?.dispatchFromSession(json, 'control');
   }
 
   /// Snoop control-plane adverts for project readiness so [openProject] can
@@ -1065,32 +826,13 @@ class MachineSession {
 
   void _markNotReady(String projectId) => _readyProjects.remove(projectId);
 
-  /// Takes the whole decoded frame, not just its type: `credit` carries fields.
-  void _handleSessionFrame(Map<String, dynamic> json, int epoch) {
+  void _handleSessionFrame(Map<String, dynamic> json, String frameId) {
     switch (json['type']) {
       case 'ping':
         unawaited(_sendSessionFrame({'type': 'pong'}).catchError((_) {}));
         break;
       case 'pong':
         _missedPongs = 0;
-        break;
-      case 'credit':
-        // Hand-validated, like every other session frame: these are bare
-        // objects that never pass through the envelope schemas.
-        final channel = json['channel'];
-        final consumed = json['consumed'];
-        if ((channel != 'control' && channel != 'preview') ||
-            consumed is! int ||
-            consumed < 0) {
-          _log(RelayLogLevel.warn, 'dropping malformed credit frame');
-          break;
-        }
-        // A cumulative total only means anything against the session that
-        // produced it. Banking an earlier session's much larger total would
-        // make every credit of the current one read as stale — the channel
-        // would then ride the resync floor for the rest of it.
-        if (_generation == null || epoch != _generation!.epoch) break;
-        _scheduler.credit(channel as String, consumed);
         break;
       case 'session-takeover':
         // The agent is switching to another device and is about to drop our
@@ -1099,6 +841,8 @@ class MachineSession {
         _teardownSession();
         if (!_takeovers.isClosed) _takeovers.add(null);
         break;
+      default:
+        _dropped('rx', 'unknown-session-frame', frameId: frameId);
     }
   }
 
@@ -1107,10 +851,10 @@ class MachineSession {
     final type = obj['type'] as String?;
     if (gen == null) {
       _dropped('tx', 'no-e2e-session', channel: 'control', msgType: type);
-      // This path carries ping, pong and credit — the frames the peer reads as
-      // proof we are alive and as permission to keep sending. Losing one is
-      // indistinguishable at the far end from a link that has gone dead, so it
-      // must never be diagnosed only from an unarmed tap.
+      // This path carries ping and pong — the frames the peer reads as proof
+      // we are alive. Losing one is indistinguishable at the far end from a
+      // link that has gone dead, so it must never be diagnosed only from an
+      // unarmed tap.
       _log(
         RelayLogLevel.warn,
         'session frame dropped — no session',
@@ -1120,18 +864,13 @@ class MachineSession {
     }
     final ct = Uint8List.fromList(utf8.encode(jsonEncode(obj)));
     if (!relay.isDispatchAllowed) return;
-    final outcome = await relay.sendFrame('control', ct);
+    final outcome = await relay.sendFrame(kPeerFrameSession, ct);
     if (outcome != PeerSendOutcome.accepted || !identical(gen, _generation)) {
       // A generation change between the send and its outcome means a teardown
       // or a fresh hello already retired the session this frame was written
       // for.
       return;
     }
-    // Exempt from the GATE, never from the accounting: a relay drop report
-    // names only a channel and a byte count, so a frame written without being
-    // charged would have its report give back bytes some other frame is still
-    // holding, and the window would grow past what the agent can absorb.
-    _scheduler.charge('control', ct.length);
     // Liveness frames are the cheapest signal that a session is alive at all —
     // a capture where ping goes out and pong never comes back is the whole
     // diagnosis for a silently dead socket.
@@ -1142,7 +881,6 @@ class MachineSession {
     _disposed = true;
     _handshaker.abort();
     _stopLiveness();
-    _fragSweep?.cancel();
     await _msgSub?.cancel();
     await _stateSub?.cancel();
     // Before the transports: a project still waiting on its ready notice
@@ -1160,14 +898,10 @@ class MachineSession {
       if (!w.isCompleted) w.complete(false);
     }
     _tunnelSlotWaiters.clear();
-    // No drop records: the capture tap is read off the socket this dispose is
-    // tearing down.
-    _scheduler.clear();
     await _established$.close();
     await _takeovers.close();
     await _sessionDown.close();
-    await _fragAborts.close();
-    await _fragSendErrors.close();
+    await _messageTooLarge.close();
     await _projectStreamEvents.close();
     _generation = null;
     if (!_readyCompleter.isCompleted) {
@@ -1252,15 +986,6 @@ class MachineSession {
   void start() {
     _msgSub = relay.messageStream.listen(_onPeerFrame);
     _stateSub = relay.payloadStateStream.listen(_onState);
-    _fragSweep = Timer.periodic(
-      const Duration(seconds: 2),
-      (_) {
-        _reassembler.sweep();
-        for (final st in _streams.values) {
-          st._reassembler?.sweep();
-        }
-      },
-    );
   }
 
   /// Drive ONE handshake attempt unless the session is already established (or
@@ -1307,7 +1032,7 @@ class StreamTransport extends BufferedAgentTransport {
     : _bound = false;
 
   /// Diagnostic and eval handle only — `"0"` for control, else [projectId].
-  String get streamId => projectId ?? kControlStreamId;
+  String get streamId => projectId ?? _kSessionStreamLabel;
 
   /// `true` for control, always. For a project, `true` only while its native
   /// stream is open and its first `stream-ready` record has arrived.
@@ -1317,7 +1042,6 @@ class StreamTransport extends BufferedAgentTransport {
   // --- project-stream state (unused, and always default, for control) ------
 
   PeerStream? _peerStream;
-  FragReassembler? _reassembler;
   bool _disposed = false;
   bool _openNotified = false;
   Completer<void>? _bindInFlight;
@@ -1329,7 +1053,6 @@ class StreamTransport extends BufferedAgentTransport {
   final Completer<void> _removed = Completer<void>();
   Timer? _reopenTimer;
   int _reopenAttempt = 0;
-  int _fragCounter = 0;
   Future<void> _sendChain = Future<void>.value();
 
   /// [MachineSession.openProject] calls currently waiting on this transport.
@@ -1466,7 +1189,7 @@ class StreamTransport extends BufferedAgentTransport {
         stream = await link
             .openStream(
               ProjectStreamOpen(pid),
-              maxRecordBytes: kStreamProjectRecordMaxBytes,
+              maxRecordBytes: kStreamProjectBridgeRecordMaxBytes,
               maxQueuedBytes: kProjectStreamMaxQueuedBytes,
             )
             .timeout(_remainingUntil(deadline));
@@ -1519,19 +1242,7 @@ class StreamTransport extends BufferedAgentTransport {
     DateTime deadline,
   ) async {
     final firstCompleter = Completer<_BindOutcome>();
-    final reassembler = FragReassembler(
-      timeoutMs: kTransferTimeoutMs,
-      globalBudgetBytes: kGlobalReassemblyBudget,
-      onComplete: (json, channel, frameId, epoch) =>
-          _dispatchProjectMessage(json),
-      onAbort: (hint) {
-        if (hint != null && !session._fragAborts.isClosed) {
-          session._fragAborts.add(hint);
-        }
-      },
-    );
-    _reassembler = reassembler;
-    unawaited(_runStream(stream, pid, firstCompleter, reassembler));
+    unawaited(_runStream(stream, pid, firstCompleter));
     try {
       return await firstCompleter.future.timeout(_remainingUntil(deadline));
     } on TimeoutException {
@@ -1557,7 +1268,6 @@ class StreamTransport extends BufferedAgentTransport {
     PeerStream stream,
     String pid,
     Completer<_BindOutcome> firstCompleter,
-    FragReassembler reassembler,
   ) async {
     var first = true;
     try {
@@ -1617,7 +1327,7 @@ class StreamTransport extends BufferedAgentTransport {
         // Records still buffered on a stream this transport has let go of
         // (session loss, a replacement open) belong to no live binding.
         if (!_bound || !identical(_peerStream, stream)) continue;
-        _onProjectRecord(record, reassembler);
+        _onProjectRecord(record);
       }
     } catch (_) {
       // The peer's half ending as an error reads the same as a clean FIN
@@ -1634,13 +1344,10 @@ class StreamTransport extends BufferedAgentTransport {
     _onStreamEnded(stream);
   }
 
-  void _onProjectRecord(Uint8List record, FragReassembler reassembler) {
+  void _onProjectRecord(Uint8List record) {
     final text = _safeUtf8Decode(record);
     if (text == null) {
       session._dropped('rx', 'bad-record', channel: 'control', streamId: streamId);
-      return;
-    }
-    if (reassembler.accept(text, channel: 'control', frameId: streamId, epoch: 0)) {
       return;
     }
     _dispatchProjectMessage(text);
@@ -1685,7 +1392,7 @@ class StreamTransport extends BufferedAgentTransport {
     if (stream == null) return; // Defensive: `_bound` implies a live stream.
     final plaintext = jsonEncode(message);
     final bytes = utf8ByteLength(plaintext);
-    if (bytes > kMaxTransferBytes) {
+    if (bytes > kStreamProjectAppRecordMaxBytes) {
       session._dropped(
         'tx',
         'message-too-large',
@@ -1694,47 +1401,23 @@ class StreamTransport extends BufferedAgentTransport {
         msgType: type,
         detail: {'bytes': bytes},
       );
-      if (!session._fragSendErrors.isClosed) {
-        session._fragSendErrors.add(
-          FragSendError(
-            'MESSAGE_TOO_LARGE',
-            '${message['type'] ?? 'message'} exceeds kMaxTransferBytes',
-          ),
-        );
+      if (!session._messageTooLarge.isClosed) {
+        session._messageTooLarge.add(MessageTooLarge(type, bytes));
       }
       return;
     }
-    final List<String> records;
-    if (bytes <= kFragThreshold) {
-      records = [plaintext];
-    } else {
-      final path = message['path'] as String?;
-      final hint = type == 'file:content' && path != null
-          ? FragHint('file:content', path)
-          : null;
-      // Bare-message fragments (no `{s, m}` envelope) — the id is unique per
-      // (machine, project, counter); the bridge reassembles by bare id.
-      final id = '${session.machineDeviceId}-$projectId-${_fragCounter++}';
-      records = buildFragments(plaintext, id, hint);
+    if (!_bound || !identical(_peerStream, stream)) return;
+    PeerSendOutcome outcome;
+    try {
+      outcome = await stream.send(Uint8List.fromList(utf8.encode(plaintext)));
+    } catch (_) {
+      _quietly(stream.reset());
+      return;
     }
-    // Every fragment of one message is handed to the writer in one
-    // synchronous loop (§1.1) — nothing else may interleave inside a
-    // fragment set. `_sendChain` already serializes against other messages.
-    for (final record in records) {
-      if (!_bound || !identical(_peerStream, stream)) return;
-      PeerSendOutcome outcome;
-      try {
-        outcome = await stream.send(Uint8List.fromList(utf8.encode(record)));
-      } catch (_) {
-        _quietly(stream.reset());
-        return;
-      }
-      if (outcome != PeerSendOutcome.accepted) {
-        // A dropped noq SendStream FINs; every error path resets explicitly.
-        // The read loop observes the resulting end and runs `_onStreamEnded`.
-        _quietly(stream.reset());
-        return;
-      }
+    if (outcome != PeerSendOutcome.accepted) {
+      // A dropped SendStream FINs; every error path resets explicitly. The
+      // read loop observes the resulting end and runs `_onStreamEnded`.
+      _quietly(stream.reset());
     }
   }
 
@@ -1773,7 +1456,6 @@ class StreamTransport extends BufferedAgentTransport {
     _reopenTimer = null;
     _bound = false;
     _peerStream = null;
-    _reassembler = null;
     _emitClosed();
   }
 
@@ -1800,7 +1482,6 @@ class StreamTransport extends BufferedAgentTransport {
     if (!identical(_peerStream, stream)) return;
     _bound = false;
     _peerStream = null;
-    _reassembler = null;
     _emitClosed();
     session._markNotReady(projectId!);
     // A bind in flight owns its own failure and reopen.

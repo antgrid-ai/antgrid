@@ -94,14 +94,17 @@ test("a tunnel:http-request on the session stream after establishment reaches no
   client.establish(PHONE_ID, { attemptId: "attempt-a" });
   const tunnelReq = { type: "tunnel:http-request", requestId: "req-1", port: 3000, method: "GET", path: "/" };
 
-  expect(() => client.sendFromPeer(PHONE_ID, { m: tunnelReq }, "preview")).not.toThrow();
+  expect(() => client.sendFromPeer(PHONE_ID, tunnelReq, "message")).not.toThrow();
 });
 
 test("ping is answered with pong", () => {
+  // The liveness ping/pong lives on the `session` kind (handleSessionFrame);
+  // the same AbMessage sent as a `message` is ordinary control-plane traffic
+  // and gets no automatic reply (see peer-session-hello.test.ts's H4).
   const client = freshClient();
   client.establish(PHONE_ID, { attemptId: "attempt-a" });
 
-  client.sendFromPeer(PHONE_ID, { type: "ping" });
+  client.sendFromPeer(PHONE_ID, { type: "ping" }, "session");
 
   expect(client.readToPeer(PHONE_ID)).toEqual({ type: "pong" });
 });
@@ -149,11 +152,9 @@ test("a tunnel:http-request from either admitted device reaches no handler, on t
   client.establish(PHONE_ID, { attemptId: "attempt-a" });
   client.establish(PHONE_2_ID, { attemptId: "attempt-b" });
 
-  const req = (requestId: string) => ({
-    m: { type: "tunnel:http-request", requestId, port: 3000, method: "GET", path: "/" },
-  });
-  expect(() => client.sendFromPeer(PHONE_ID, req("from-a"), "preview")).not.toThrow();
-  expect(() => client.sendFromPeer(PHONE_2_ID, req("from-b"), "preview")).not.toThrow();
+  const req = (requestId: string) => ({ type: "tunnel:http-request", requestId, port: 3000, method: "GET", path: "/" });
+  expect(() => client.sendFromPeer(PHONE_ID, req("from-a"), "message")).not.toThrow();
+  expect(() => client.sendFromPeer(PHONE_2_ID, req("from-b"), "message")).not.toThrow();
 });
 
 test("an outbound broadcast is sent once per established session", () => {
@@ -161,11 +162,12 @@ test("an outbound broadcast is sent once per established session", () => {
   client.establish(PHONE_ID, { attemptId: "attempt-a" });
   client.establish(PHONE_2_ID, { attemptId: "attempt-b" });
 
+  // An outbound AbMessage rides the wire bare, with no `{s, m}` envelope.
   const msg = { type: "pong", id: "1", timestamp: 0 };
   client.send(msg as any);
 
-  expect(client.readToPeer(PHONE_ID)).toEqual({ m: msg });
-  expect(client.readToPeer(PHONE_2_ID)).toEqual({ m: msg });
+  expect(client.readToPeer(PHONE_ID)).toEqual(msg);
+  expect(client.readToPeer(PHONE_2_ID)).toEqual(msg);
 });
 
 test("native loss retires one session; the coarse peer-offline waits for the last", () => {

@@ -421,6 +421,48 @@ void main() {
     expect(send.resetRequests, 0);
     expect(await stream.send(Uint8List.fromList([1])), PeerSendOutcome.closed);
   });
+
+  group('writeRecordInSlices', () {
+    test(
+      'W1: writes a 32 MiB record in writeAll calls of at most '
+      'kPeerStreamSliceBytes',
+      () async {
+        final send = FakeSend();
+        final record = Uint8List(32 * 1024 * 1024);
+        final ok = await writeRecordInSlices(send, record);
+
+        expect(ok, isTrue);
+        expect(send.writeAllCalls, isNotEmpty);
+        expect(
+          send.writeAllCalls.every((s) => s.length <= kPeerStreamSliceBytes),
+          isTrue,
+        );
+        final total = send.writeAllCalls.fold<int>(0, (n, s) => n + s.length);
+        expect(total, record.length);
+      },
+    );
+
+    test('W2: stops between slices when stop turns true', () async {
+      final send = FakeSend();
+      final release = Completer<void>();
+      send.beforeWriteAll = (_) => release.future;
+      final record = Uint8List(3 * kPeerStreamSliceBytes);
+      var stop = false;
+      final result = writeRecordInSlices(send, record, stop: () => stop);
+      await _settle();
+      // The first slice is blocked in flight; flipping `stop` now must still
+      // let that slice land but refuse to start a second one.
+      stop = true;
+      release.complete();
+
+      expect(await result, isFalse);
+      expect(
+        send.writeAllCalls,
+        hasLength(1),
+        reason: 'the in-flight slice completes, but no further slice starts',
+      );
+    });
+  });
 }
 
 /// Holds every read until [gate] completes, then serves [chunks].

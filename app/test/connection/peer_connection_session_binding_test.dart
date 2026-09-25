@@ -63,7 +63,7 @@ class _StubRelay extends RelayService implements PeerLink {
   }
 
   @override
-  Future<PeerSendOutcome> sendFrame(String channel, Uint8List payload) async {
+  Future<PeerSendOutcome> sendFrame(String kind, Uint8List payload) async {
     if (!isDispatchAllowed) return PeerSendOutcome.closed;
     return PeerSendOutcome.accepted;
   }

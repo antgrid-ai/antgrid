@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:math';
 import 'dart:typed_data';
 
+import 'frame.dart';
 import 'machine_session.dart';
 import 'peer_link.dart';
 
@@ -90,7 +91,7 @@ class ConnectionHandshake {
     // Subscribe before sending: the bridge may answer before the send call
     // itself returns.
     final sub = _relay.messageStream.listen((msg) {
-      if (!active() || msg.channel != 'control') return;
+      if (!active() || msg.kind != kPeerFrameSession) return;
       Map<String, dynamic>? json;
       try {
         json = jsonDecode(utf8.decode(msg.payload)) as Map<String, dynamic>;
@@ -111,7 +112,7 @@ class ConnectionHandshake {
         'capabilities': kSessionHelloCapabilities,
       };
       final outcome = await _relay.sendFrame(
-        'control',
+        kPeerFrameSession,
         Uint8List.fromList(utf8.encode(jsonEncode(hello))),
       );
       if (outcome != PeerSendOutcome.accepted) return false;

@@ -37,9 +37,13 @@ void main() {
     await relay.closeStreams();
   });
 
+  /// Every control-plane message sent so far, decoded. There is no envelope
+  /// any more — a session-stream record with the `message` kind is exactly
+  /// one bare `AbMessage` (§1.1).
   Future<List<Map<String, dynamic>>> sentEnvelopes() async {
     final out = <Map<String, dynamic>>[];
     for (final f in relay.sent) {
+      if (f.kind != kPeerFrameMessage) continue;
       out.add(jsonDecode(decodeFromPhone(f.payload)) as Map<String, dynamic>);
     }
     return out;
@@ -47,9 +51,8 @@ void main() {
 
   /// The requestId of the first control-plane `state.snapshot` RPC sent.
   Future<String?> snapshotRequestId() async {
-    for (final e in await sentEnvelopes()) {
-      final m = e['m'];
-      if (m is Map && m['type'] == 'request' && m['method'] == 'state.snapshot') {
+    for (final m in await sentEnvelopes()) {
+      if (m['type'] == 'request' && m['method'] == 'state.snapshot') {
         return m['requestId'] as String?;
       }
     }
@@ -57,12 +60,7 @@ void main() {
   }
 
   Future<void> injectControl(Map<String, dynamic> m) async {
-    relay.inject(
-      IncomingPeerFrame(
-        channel: 'control',
-        payload: encodeFromAgent(jsonEncode({'m': m})),
-      ),
-    );
+    relay.injectFrame(encodeFromAgent(jsonEncode(m)));
   }
 
   /// Completes `openProject`'s native-stream leg: takes the just-opened
@@ -91,7 +89,7 @@ void main() {
       expect(
         (await sentEnvelopes())
             .skip(sentBefore)
-            .where((e) => (e['m'] as Map)['type'] == 'project:start'),
+            .where((e) => e['type'] == 'project:start'),
         isEmpty,
         reason: 'a known-ready project must not re-ask the agent to start it',
       );
@@ -161,7 +159,7 @@ void main() {
       expect(
         (await sentEnvelopes())
             .skip(sentBefore)
-            .where((e) => (e['m'] as Map)['type'] == 'project:start'),
+            .where((e) => e['type'] == 'project:start'),
         isNotEmpty,
         reason:
             'a project no longer vouched for by the advert is not ready — '
@@ -320,14 +318,9 @@ void main() {
       await cold.ensureEstablished();
       await Future<void>.delayed(const Duration(milliseconds: 20));
 
-      coldRelay.inject(
-        IncomingPeerFrame(
-          channel: 'control',
-          payload: encodeFromAgent(
-            jsonEncode({
-              'm': {'type': 'stream-ready', 'projectId': 'proj-d'},
-            }),
-          ),
+      coldRelay.injectFrame(
+        encodeFromAgent(
+          jsonEncode({'type': 'stream-ready', 'projectId': 'proj-d'}),
         ),
       );
       await Future<void>.delayed(const Duration(milliseconds: 20));

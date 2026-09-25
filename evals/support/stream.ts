@@ -2,6 +2,11 @@ import { randomBytes } from "node:crypto";
 import type { RelayClient } from "../helpers/relay-client";
 import { createMessage, type AbMessage } from "../../bridge/src/protocol";
 
+/** The eval-side name for the machine control plane's stream handle — the
+ *  session stream carries no bridge-minted id, so this is just the constant
+ *  every helper compares against (mirrors `sendOnStream`'s own `"0"` check). */
+export const CONTROL_HANDLE = "0";
+
 /**
  * v3 project data-plane helpers.
  *

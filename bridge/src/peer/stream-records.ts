@@ -49,6 +49,16 @@ export type StreamWriteFailure = "unauthorized" | "overflow" | "stream-lost";
 
 export type StreamSendOutcome = "sent" | "dropped";
 
+/** What a bus-facing send reports: `StreamSendOutcome` plus the two refusals
+ *  decided before any writer is reached. `"too-large"` is a message over the
+ *  sender's cap (MESSAGE_TOO_LARGE); `"gated"` is an outbound authorization
+ *  hook (`mayDeliver`/`mayDeliverTo`) saying no. */
+export type SendOutcome = StreamSendOutcome | "too-large" | "gated";
+
+/** Why a peer's whole connection is retired. Mapped to a QUIC close code by
+ *  `native-host-connection.ts`: unauthorized 3, protocol-violation 2, else 1. */
+export type PeerRecordFailure = "connection-lost" | "protocol-violation" | "queue-full" | "unauthorized" | "superseded";
+
 /** Thrown by `StreamRecordReader.read()` for a malformed length prefix.
  *  Distinct from a plain rejection out of the native `readExact` (a peer
  *  reset or FIN on this one stream, which is routine and not a connection
@@ -73,7 +83,7 @@ interface PendingWrite {
 /**
  * Writes `[u32 len][frame]` records onto one stream's send half, queuing
  * ahead of the native binding (which exposes no observable write buffer of
- * its own — mirrors `PeerRecords`, `bridge/src/peer/records.ts`).
+ * its own).
  */
 export class StreamRecordWriter {
   private readonly queue: PendingWrite[] = [];

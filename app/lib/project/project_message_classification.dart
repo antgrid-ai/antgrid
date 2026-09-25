@@ -140,13 +140,15 @@ const Set<String> kCheckoutVariableMessageTypes = <String>{
 /// Authoritative app-side mirror of the bridge's `PREVIEW_CHANNEL_MESSAGE_TYPES`
 /// (`bridge/src/protocol.ts`), gated against it in
 /// `checkout-mirror-contract.test.ts`. Checked by [MessageRouter] before
-/// classification: the preview channel is also the browser tunnel's hot path
-/// (HTTP/WS bulk data at full bandwidth), so anything riding it that is not in
-/// this set is dropped on sight rather than paying for `classifyAbMessage`,
-/// `_retainIfDurable`, and — in debug — the `_isExpectedIgnore` parse. Every
-/// member here must also appear in `_heavyTypes` or `_statusTypes`, or it
-/// would clear this gate only to be silently dropped as [MessageTier.ignore]
-/// one line later.
+/// classification, but only against the LOOPBACK `channel` label — local
+/// mode's own JSON envelope, the one transport this app still labels that
+/// way. A relay-mode connection carries terminal/preview traffic on its own
+/// native stream and never reaches this classifier, so anything riding the
+/// loopback channel that is not in this set is dropped on sight rather than
+/// paying for `classifyAbMessage`, `_retainIfDurable`, and — in debug — the
+/// `_isExpectedIgnore` parse. Every member here must also appear in
+/// `_heavyTypes` or `_statusTypes`, or it would clear this gate only to be
+/// silently dropped as [MessageTier.ignore] one line later.
 ///
 /// Neither member is in [kCheckoutDurableReplayTypes], so nothing here is
 /// retained for replay: a frame that arrives before its checkout's heavy

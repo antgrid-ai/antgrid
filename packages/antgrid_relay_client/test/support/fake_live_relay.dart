@@ -7,9 +7,9 @@ import 'dart:typed_data';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 
 class SentFrame {
-  final String channel;
+  final String kind;
   final Uint8List payload;
-  SentFrame(this.channel, this.payload);
+  SentFrame(this.kind, this.payload);
 }
 
 class FakeLiveRelay implements PeerLink, MultiStreamPeerLink {
@@ -25,6 +25,12 @@ class FakeLiveRelay implements PeerLink, MultiStreamPeerLink {
   final _errors = StreamController<PeerLinkFailure>.broadcast();
   final sent = <SentFrame>[];
   PeerLinkState _state;
+
+  /// When set, the NEXT [sendFrame] call awaits this before completing (and
+  /// clears itself) — lets a test hold one write in flight to observe what
+  /// lands behind it on [MachineSession]'s send chain (e.g. a generation
+  /// change reaching a queued write before its turn comes).
+  Completer<void>? sendGate;
 
   /// Every stream a test's [MachineSession] has opened, in call order — a
   /// project that reopens (a stream end + backoff, or a fresh establishment)
@@ -47,7 +53,11 @@ class FakeLiveRelay implements PeerLink, MultiStreamPeerLink {
       openStreamError = null;
       throw err;
     }
-    final stream = FakePeerStream(open);
+    final stream = FakePeerStream(
+      open,
+      maxRecordBytes: maxRecordBytes,
+      maxQueuedBytes: maxQueuedBytes,
+    );
     openedStreams.add(stream);
     return stream;
   }
@@ -71,12 +81,22 @@ class FakeLiveRelay implements PeerLink, MultiStreamPeerLink {
   final RelayNetTap? netTap;
 
   @override
-  Future<PeerSendOutcome> sendFrame(String channel, Uint8List payload) async {
-    sent.add(SentFrame(channel, payload));
+  Future<PeerSendOutcome> sendFrame(String kind, Uint8List payload) async {
+    final gate = sendGate;
+    if (gate != null) {
+      sendGate = null;
+      await gate.future;
+    }
+    sent.add(SentFrame(kind, payload));
     return PeerSendOutcome.accepted;
   }
 
   void inject(IncomingPeerFrame msg) => _messages.add(msg);
+
+  /// Injects one agent → app frame straight from a payload, skipping the
+  /// [IncomingPeerFrame] boilerplate for the common (bare `AbMessage`) case.
+  void injectFrame(Uint8List payload, {String kind = kPeerFrameMessage}) =>
+      inject(IncomingPeerFrame(kind: kind, payload: payload));
 
   void setState(AppState state) {
     _state = switch (state.connectionState) {
@@ -144,10 +164,14 @@ class FakeHandshaker implements SessionHandshaker {
 /// it ([injectJson]/[injectRecord]), and reads back what the app wrote in
 /// [sent].
 class FakePeerStream implements PeerStream {
-  FakePeerStream(this.open);
+  FakePeerStream(this.open, {required this.maxRecordBytes, required this.maxQueuedBytes});
 
   /// The open frame [MachineSession] sent to create this stream.
   final StreamOpen open;
+
+  /// The caps [MachineSession] passed to `openStream` for this stream.
+  final int maxRecordBytes;
+  final int maxQueuedBytes;
 
   final _records = StreamController<Uint8List>.broadcast();
   final sent = <Uint8List>[];
@@ -226,9 +250,6 @@ Future<MachineSession> establishSession(
   Map<String, dynamic> Function(String projectId)? projectStartMessageBuilder,
   Duration snapshotTimeout = const Duration(seconds: 5),
   Duration pingSilence = const Duration(seconds: kPingSilenceSeconds),
-  int? channelWindowBytes,
-  int? socketInflightBytes,
-  int creditBatchBytes = kCreditBatchBytes,
   RelayLogger? logger,
 }) async {
   final session = MachineSession(
@@ -238,9 +259,6 @@ Future<MachineSession> establishSession(
     projectStartMessageBuilder: projectStartMessageBuilder,
     snapshotTimeout: snapshotTimeout,
     pingSilence: pingSilence,
-    channelWindowBytes: channelWindowBytes,
-    socketInflightBytes: socketInflightBytes,
-    creditBatchBytes: creditBatchBytes,
     logger: logger,
   );
   session.start();

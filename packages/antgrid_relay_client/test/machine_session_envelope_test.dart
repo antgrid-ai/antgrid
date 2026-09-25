@@ -1,8 +1,10 @@
-// MachineSession control-plane envelope/fragmentation coverage. Since Stage A
-// A4 a project's traffic rides its own native QUIC stream as bare AbMessage
-// JSON (see machine_session_project_stream_test.dart) — only the control
-// plane (the session stream) still uses the `{s, m}` envelope, and `s` is
-// always absent on it now that there is no project id left to carry.
+// MachineSession session-stream wire coverage. Every record is one bare
+// `AbMessage` or session frame, and the peer-frame header's `type` — `kPeerFrameSession`
+// or `kPeerFrameMessage` — is what tells a session frame (ping/pong/hello)
+// from a control-plane one, not anything inside the JSON (since `ping` is
+// both a session frame literal AND could in principle be sent as a bare
+// AbMessage on the message kind).
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
@@ -10,15 +12,30 @@ import 'package:test/test.dart';
 
 import 'support/fake_live_relay.dart';
 
+/// A capture that just collects, standing in for `app/lib/util/netwatch.dart`
+/// — see `netwatch_tap_test.dart` for the same shape.
+class _Capture {
+  final events = <Map<String, Object?>>[];
+  RelayNetTap get tap => events.add;
+
+  Iterable<Map<String, Object?>> get frames =>
+      events.where((e) => e['op'] != 'annotate');
+  Iterable<Map<String, Object?>> get drops =>
+      frames.where((e) => e['kind'] == 'drop');
+}
+
 void main() {
   late FakeLiveRelay relay;
   late FakeHandshaker handshaker;
   late MachineSession session;
+  late _Capture capture;
 
   setUp(() async {
-    relay = FakeLiveRelay();
+    capture = _Capture();
+    relay = FakeLiveRelay(netTap: capture.tap);
     handshaker = FakeHandshaker();
     session = await establishSession(relay, handshaker: handshaker);
+    capture.events.clear(); // establishment traffic is not what is under test
   });
 
   tearDown(() async {
@@ -26,135 +43,108 @@ void main() {
     await relay.closeStreams();
   });
 
-  group('outbound envelope', () {
-    test('sendOnSession wraps as a plaintext {m} envelope with no `s`', () async {
-      await session.sendOnSession({'type': 'project:list'}, 'control');
-      expect(relay.sent, hasLength(1));
-      final plaintext = decodeFromPhone(relay.sent.single.payload);
-      final json = jsonDecode(plaintext) as Map<String, dynamic>;
-      expect(json.containsKey('s'), isFalse);
-      expect(json['m'], {'type': 'project:list'});
-    });
+  test('E1: a message-kind bare AbMessage dispatches on the control plane', () async {
+    final control = session.control;
+    final seen = <Map<String, dynamic>>[];
+    final sub = control.messages.listen((m) => seen.add(m.json));
 
-    test('a message above the fragmentation threshold is split into '
-        'multiple frames, and reassembling them recovers the ENVELOPE', () async {
-      final bigContent = List.filled(2000000, 'x').join();
-      final message = {
-        'type': 'file:content',
-        'path': 'a.png',
-        'content': bigContent,
-      };
-      await session.sendOnSession(message, 'control');
+    relay.injectFrame(
+      encodeFromAgent(jsonEncode({'type': 'project:list', 'projects': []})),
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 20));
 
-      expect(
-        relay.sent.length,
-        greaterThan(1),
-        reason: 'a >1.4MB envelope must fragment',
-      );
-
-      final joined = <String>[];
-      final reassembler = FragReassembler(
-        timeoutMs: kTransferTimeoutMs,
-        globalBudgetBytes: kGlobalReassemblyBudget,
-        onComplete: (json, _, __, ___) => joined.add(json),
-        onAbort: (_) {},
-      );
-      for (final f in relay.sent) {
-        final plaintext = decodeFromPhone(f.payload);
-        reassembler.accept(
-          plaintext,
-          frameId: frameIdOf(f.payload),
-          epoch: 1,
-        );
-      }
-
-      expect(joined, hasLength(1));
-      final envelope = jsonDecode(joined.single) as Map<String, dynamic>;
-      expect(envelope.containsKey('s'), isFalse);
-      expect(envelope['m'], message);
-    });
+    expect(seen, hasLength(1));
+    expect(seen.single['type'], 'project:list');
+    await sub.cancel();
   });
 
-  group(
-    'inbound fragment reassembly (replaces relay_transport_frag_test.dart)',
-    () {
-      test('a fragmented inbound envelope is reassembled and dispatched whole '
-          'to the control transport', () async {
-        final control = session.control;
-        final seen = <Map<String, dynamic>>[];
-        final sub = control.messages.listen((m) => seen.add(m.json));
+  test('E2: a message-kind `{m: …}` body is dropped unrecognized-plaintext', () async {
+    relay.injectFrame(
+      encodeFromAgent(
+        jsonEncode({
+          'm': {'type': 'project:list'},
+        }),
+      ),
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 20));
 
-        final bigContent = List.filled(2000000, 'y').join();
-        final envelopeJson = jsonEncode({
-          'm': {'type': 'file:content', 'path': 'b.png', 'content': bigContent},
-        });
-        final fragments = buildFragments(
-          envelopeJson,
-          'transfer-1',
-          const FragHint('file:content', 'b.png'),
+    final drop = capture.drops.single;
+    expect(drop['reason'], 'unrecognized-plaintext');
+  });
+
+  test('E3: a session-kind ping is answered with a session-kind pong', () async {
+    final sentBefore = relay.sent.length;
+    relay.injectFrame(
+      encodeFromAgent(jsonEncode({'type': 'ping'})),
+      kind: kPeerFrameSession,
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+
+    final pongs = relay.sent
+        .skip(sentBefore)
+        .where(
+          (f) =>
+              f.kind == kPeerFrameSession &&
+              jsonDecode(decodeFromPhone(f.payload))['type'] == 'pong',
         );
-        expect(fragments.length, greaterThan(1));
+    expect(pongs, hasLength(1));
+  });
 
-        for (final frag in fragments) {
-          relay.inject(
-            IncomingPeerFrame(
-              channel: 'control',
-              payload: encodeFromAgent(frag),
-            ),
-          );
-        }
+  test('E4: a message-kind ping AbMessage is not answered as liveness', () async {
+    final control = session.control;
+    final seen = <Map<String, dynamic>>[];
+    final sub = control.messages.listen((m) => seen.add(m.json));
+    // Let attaching the control transport's own auto `state.snapshot` pull
+    // land first, so it doesn't get counted as a reply to the ping below.
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    final sentBefore = relay.sent.length;
 
-        await Future<void>.delayed(const Duration(milliseconds: 50));
-        expect(seen, hasLength(1));
-        expect(seen.single['type'], 'file:content');
-        expect(seen.single['content'], bigContent);
+    relay.injectFrame(encodeFromAgent(jsonEncode({'type': 'ping'})));
+    await Future<void>.delayed(const Duration(milliseconds: 20));
 
-        await sub.cancel();
-      });
+    expect(
+      seen.map((j) => j['type']),
+      contains('ping'),
+      reason: 'a message-kind ping is an ordinary control-plane AbMessage',
+    );
+    expect(
+      relay.sent.skip(sentBefore),
+      isEmpty,
+      reason: 'only a SESSION-kind ping triggers the liveness pong',
+    );
+    await sub.cancel();
+  });
 
-      test('a mismatched fragment count aborts the transfer and surfaces the '
-          'hint on fragmentAborts', () async {
-        final aborts = <FragHint?>[];
-        final sub = session.fragmentAborts.listen(aborts.add);
+  test('E5: a session-kind credit is dropped', () async {
+    relay.injectFrame(
+      encodeFromAgent(jsonEncode({'type': 'credit', 'bytes': 1024})),
+      kind: kPeerFrameSession,
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 20));
 
-        const id = 'transfer-bad';
-        final hint = const FragHint('file:content', 'c.png');
-        final frame0 = jsonEncode({
-          '__frag': {
-            'id': id,
-            'i': 0,
-            'n': 2,
-            'hint': {'type': hint.type, 'key': hint.key},
-          },
-          'data': 'part-a',
-        });
-        // Second fragment claims a DIFFERENT total `n` for the same id — the
-        // reassembler discards the whole transfer and reports the hint.
-        final frame1 = jsonEncode({
-          '__frag': {'id': id, 'i': 0, 'n': 3},
-          'data': 'part-b',
-        });
+    final drop = capture.drops.single;
+    expect(drop['reason'], 'unknown-session-frame');
+  });
 
-        relay.inject(
-          IncomingPeerFrame(
-            channel: 'control',
-            payload: encodeFromAgent(frame0),
-          ),
-        );
-        relay.inject(
-          IncomingPeerFrame(
-            channel: 'control',
-            payload: encodeFromAgent(frame1),
-          ),
-        );
+  test('E6: sendOnSession writes the bare message with the message kind', () async {
+    await session.sendOnSession({'type': 'project:list'}, 'control');
 
-        await Future<void>.delayed(const Duration(milliseconds: 20));
-        expect(aborts, hasLength(1));
-        expect(aborts.single?.type, hint.type);
-        expect(aborts.single?.key, hint.key);
+    expect(relay.sent, hasLength(1));
+    expect(relay.sent.single.kind, kPeerFrameMessage);
+    final json = jsonDecode(decodeFromPhone(relay.sent.single.payload));
+    expect(json, {'type': 'project:list'});
+  });
 
-        await sub.cancel();
-      });
-    },
-  );
+  test('E7: a send whose link write throws does not wedge the sends behind it', () async {
+    final gate = Completer<void>();
+    relay.sendGate = gate;
+    final first = session.sendOnSession({'type': 'project:list'}, 'control');
+    final second = session.sendOnSession({'type': 'agent:list'}, 'control');
+    gate.completeError(StateError('native write failed'));
+
+    await expectLater(first, throwsStateError);
+    await second.timeout(const Duration(seconds: 2));
+    expect(relay.sent, hasLength(1));
+    expect(jsonDecode(decodeFromPhone(relay.sent.single.payload)), {'type': 'agent:list'});
+  });
 }

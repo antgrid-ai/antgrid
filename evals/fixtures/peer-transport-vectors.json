@@ -4,31 +4,30 @@
     "version": 4,
     "fixedPrefixBytes": 4,
     "maxHeaderBytes": 1024,
-    "maxPayloadBytes": 1500000,
+    "maxPayloadBytes": 33554432,
     "maxRecordBytes": 1501028,
+    "maxBridgeRecordBytes": 33555460,
     "kinds": {
       "message": 0
     },
     "samples": [
       {
-        "name": "message-control",
+        "name": "message",
         "header": {
-          "type": "message",
-          "channel": "control"
+          "type": "message"
         },
         "kind": 0,
         "payloadHex": "deadbeef",
-        "frameHex": "040000267b2274797065223a226d657373616765222c226368616e6e656c223a22636f6e74726f6c227ddeadbeef"
+        "frameHex": "040000127b2274797065223a226d657373616765227ddeadbeef"
       },
       {
-        "name": "message-preview",
+        "name": "session",
         "header": {
-          "type": "message",
-          "channel": "preview"
+          "type": "session"
         },
         "kind": 0,
         "payloadHex": "000102ff",
-        "frameHex": "040000267b2274797065223a226d657373616765222c226368616e6e656c223a2270726576696577227d000102ff"
+        "frameHex": "040000127b2274797065223a2273657373696f6e227d000102ff"
       }
     ]
   },
@@ -38,23 +37,6 @@
     "refreshMs": 20000,
     "selectionMs": 5000,
     "endpointChallengeMs": 120000
-  },
-  "fragmentation": {
-    "thresholdBytes": 1400000,
-    "dataBudgetBytes": 1400000,
-    "maxTransferBytes": 33554432,
-    "transferTimeoutMs": 10000,
-    "globalReassemblyBudgetBytes": 67108864,
-    "maxRerequests": 1,
-    "maxFragmentCount": 1024
-  },
-  "flowControl": {
-    "channelWindowBytes": 2097152,
-    "socketInflightBytes": 3145728,
-    "creditBatchBytes": 524288,
-    "maxSendQueueBytes": 67108864,
-    "windowResyncAgeMs": 40000,
-    "windowStallWarnMs": 5000
   },
   "authorization": {
     "identityMaxChars": 256,
@@ -74,7 +56,9 @@
       "maxPendingOpensPerPeer": 16
     },
     "projectRecords": {
-      "maxRecordBytes": 1500000
+      "appMaxRecordBytes": 1500000,
+      "bridgeMaxRecordBytes": 33554432,
+      "maxTransferBytes": 33554432
     },
     "terminalRecords": {
       "appMaxRecordBytes": 16384,

@@ -3,15 +3,11 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { buildPeerTransportVectors } from "../scripts/gen-peer-transport-vectors";
 import {
-  decodePeerFrame,
-  FRAG_DATA_BUDGET,
-  FRAG_THRESHOLD,
-  FrameKind,
-  GLOBAL_REASSEMBLY_BUDGET,
-  MAX_FRAGMENT_COUNT,
-  MAX_REREQUESTS,
   MAX_TRANSFER_BYTES,
-  STREAM_PROJECT_RECORD_MAX_BYTES,
+  PEER_MAX_BRIDGE_RECORD_BYTES,
+  PEER_MAX_RECORD_BYTES,
+  STREAM_PROJECT_APP_RECORD_MAX_BYTES,
+  STREAM_PROJECT_BRIDGE_RECORD_MAX_BYTES,
   STREAM_TERMINAL_APP_RECORD_MAX_BYTES,
   STREAM_TERMINAL_BRIDGE_RECORD_MAX_BYTES,
   STREAM_TUNNEL_DATA_MAX_BYTES,
@@ -20,11 +16,11 @@ import {
   StreamOpen,
   StreamRefused,
   StreamRefusedCode,
-  TRANSFER_TIMEOUT_MS,
   TUNNEL_RECORD_TAG_BODY,
   TUNNEL_RECORD_TAG_BODY_GZIP,
   TUNNEL_RECORD_TAG_WS_BINARY,
   TUNNEL_RECORD_TAG_WS_TEXT,
+  decodePeerFrame,
 } from "../src/index";
 
 const fixturePath = resolve(
@@ -37,16 +33,19 @@ test("peer transport fixture is a clean generator product", () => {
   expect(fixture).toEqual(buildPeerTransportVectors());
 });
 
-test("peer transport byte vectors decode with no route identity", () => {
+test("peer transport byte vectors decode with no route identity, one sample per header kind", () => {
+  expect(fixture.framing.samples.map((s: { name: string }) => s.name)).toEqual(["message", "session"]);
   for (const sample of fixture.framing.samples) {
     const decoded = decodePeerFrame(Buffer.from(sample.frameHex, "hex"));
     expect(decoded.header).toEqual(sample.header);
     expect(decoded.header).not.toHaveProperty("to");
     expect(decoded.header).not.toHaveProperty("from");
-    expect(sample.kind).toBe(FrameKind.message);
+    expect(decoded.header).not.toHaveProperty("channel");
     expect(Buffer.from(decoded.payload).toString("hex")).toBe(sample.payloadHex);
   }
-  expect(fixture.framing.kinds).toEqual(FrameKind);
+  expect(fixture.framing.maxPayloadBytes).toBe(MAX_TRANSFER_BYTES);
+  expect(fixture.framing.maxRecordBytes).toBe(PEER_MAX_RECORD_BYTES);
+  expect(fixture.framing.maxBridgeRecordBytes).toBe(PEER_MAX_BRIDGE_RECORD_BYTES);
 });
 
 test("peer transport fixture covers every stream-open kind and refusal code", () => {
@@ -84,11 +83,14 @@ test("peer transport fixture covers every stream-open kind and refusal code", ()
   ).toEqual(StreamRefusedCode.options);
 });
 
-test("peer transport fixture's projectRecords equals STREAM_PROJECT_RECORD_MAX_BYTES (A4)", () => {
-  // The Dart mirror (kStreamProjectRecordMaxBytes) has no import to
-  // cross-check against, only this JSON.
+test("peer transport fixture's projectRecords covers both directions plus the transfer cap", () => {
+  // The Dart mirror (kStreamProjectAppRecordMaxBytes /
+  // kStreamProjectBridgeRecordMaxBytes) has no import to cross-check against,
+  // only this JSON.
   expect(fixture.streamOpen.projectRecords).toEqual({
-    maxRecordBytes: STREAM_PROJECT_RECORD_MAX_BYTES,
+    appMaxRecordBytes: STREAM_PROJECT_APP_RECORD_MAX_BYTES,
+    bridgeMaxRecordBytes: STREAM_PROJECT_BRIDGE_RECORD_MAX_BYTES,
+    maxTransferBytes: MAX_TRANSFER_BYTES,
   });
 });
 
@@ -125,14 +127,7 @@ test("peer transport fixture's rejected stream-open frames are rejected", () => 
   }
 });
 
-test("peer transport fixture covers every mirrored fragmentation bound", () => {
-  expect(fixture.fragmentation).toEqual({
-    thresholdBytes: FRAG_THRESHOLD,
-    dataBudgetBytes: FRAG_DATA_BUDGET,
-    maxTransferBytes: MAX_TRANSFER_BYTES,
-    transferTimeoutMs: TRANSFER_TIMEOUT_MS,
-    globalReassemblyBudgetBytes: GLOBAL_REASSEMBLY_BUDGET,
-    maxRerequests: MAX_REREQUESTS,
-    maxFragmentCount: MAX_FRAGMENT_COUNT,
-  });
+test("the fixture carries no fragmentation or flow-control blocks", () => {
+  expect(fixture.fragmentation).toBeUndefined();
+  expect(fixture.flowControl).toBeUndefined();
 });

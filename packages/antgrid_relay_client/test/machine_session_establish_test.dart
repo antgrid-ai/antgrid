@@ -186,13 +186,9 @@ void main() {
         final takeovers = <void>[];
         final sub = session.takeoverEvents.listen(takeovers.add);
 
-        relay.inject(
-          IncomingPeerFrame(
-            channel: 'control',
-            payload: encodeFromAgent(
-              jsonEncode({'type': 'session-takeover'}),
-            ),
-          ),
+        relay.injectFrame(
+          encodeFromAgent(jsonEncode({'type': 'session-takeover'})),
+          kind: kPeerFrameSession,
         );
         await Future<void>.delayed(const Duration(milliseconds: 40));
 

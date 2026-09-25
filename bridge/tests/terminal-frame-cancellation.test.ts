@@ -1,5 +1,4 @@
 import { afterEach, expect, test } from "bun:test";
-import { SendScheduler, type QueuedAppFrame } from "../src/send-scheduler";
 import { MessageBus } from "../src/message-bus";
 import { createMessage } from "../src/protocol";
 import { TerminalFrameHub } from "../src/terminal-frames/delivery";
@@ -62,23 +61,6 @@ test("a transport blocked before encryption retains only the newest unsent scree
     expect(queued.size).toBe(0);
     expect(budget.bytes).toBe(0);
   } finally { hub.dispose(); source.dispose(); }
-});
-
-test("attachment cancellation releases queued plaintext without sealing it", async () => {
-  const sealed: string[] = [];
-  const scheduler = new SendScheduler({ send: frame => { sealed.push(frame.plaintext); return frame.plaintextBytes; } });
-  scheduler.hold = true;
-  const controller = new AbortController();
-  const dropped: string[] = [];
-  const frames: QueuedAppFrame[] = [1, 2, 3].map(i => ({ channel: "preview", streamId: "project", plaintext: `${i}`, plaintextBytes: 1, type: "terminal:frame", signal: controller.signal, settle: value => dropped.push(value) }));
-  scheduler.enqueue(frames);
-  controller.abort();
-  scheduler.dropAborted();
-  expect(scheduler.queued("preview")).toEqual({ frames: 0, bytes: 0 });
-  scheduler.hold = false;
-  scheduler.drain();
-  expect(sealed).toEqual([]);
-  expect(dropped).toEqual(["dropped", "dropped", "dropped"]);
 });
 
 test("targeted bus delivery reaches the project stream and rechecks mayDeliver at send time", async () => {

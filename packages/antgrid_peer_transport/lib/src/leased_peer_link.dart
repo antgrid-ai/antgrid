@@ -87,9 +87,9 @@ class LeasedPeerLink implements PeerLink, MultiStreamPeerLink {
   @override
   PeerLinkDiagnostic? get netTap => inner.netTap;
   @override
-  Future<PeerSendOutcome> sendFrame(String channel, Uint8List payload) async {
+  Future<PeerSendOutcome> sendFrame(String kind, Uint8List payload) async {
     if (!isDispatchAllowed) return PeerSendOutcome.closed;
-    return inner.sendFrame(channel, payload);
+    return inner.sendFrame(kind, payload);
   }
 
   /// The lease fence covers the open and every read and write on the stream

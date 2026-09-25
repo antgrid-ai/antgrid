@@ -7,7 +7,7 @@ import 'package:antgrid_relay_client/src/frame.dart';
 void main() {
   group('encodePeerFrame', () {
     test('produces [0x04][kind][len BE u16][header][payload] layout', () {
-      final header = {'type': 'message', 'channel': 'control'};
+      final header = {'type': 'message'};
       final payload = Uint8List.fromList([0xde, 0xad, 0xbe, 0xef]);
 
       final frame = encodePeerFrame(header, payload);
@@ -21,7 +21,7 @@ void main() {
     });
 
     test('rejects serialized peer identity and other extra header fields', () {
-      final header = {'type': 'message', 'to': 'agent-1', 'channel': 'control'};
+      final header = {'type': 'message', 'to': 'agent-1'};
       expect(
         () => encodePeerFrame(header, Uint8List(0)),
         throwsA(
@@ -35,9 +35,40 @@ void main() {
     });
   });
 
+  group('peer frame header', () {
+    test('rejects a channel key: the header type is the only discriminator', () {
+      expect(
+        () => encodePeerFrame({
+          'type': 'message',
+          'channel': 'control',
+        }, Uint8List(0)),
+        throwsA(
+          isA<FrameException>().having(
+            (e) => e.reason,
+            'reason',
+            FrameErrorReason.badHeader,
+          ),
+        ),
+      );
+    });
+
+    test('rejects a type outside session and message', () {
+      expect(
+        () => encodePeerFrame({'type': 'credit'}, Uint8List(0)),
+        throwsA(
+          isA<FrameException>().having(
+            (e) => e.reason,
+            'reason',
+            FrameErrorReason.badHeader,
+          ),
+        ),
+      );
+    });
+  });
+
   group('decodePeerFrame', () {
     test('round-trips header and payload', () {
-      final header = {'type': 'message', 'channel': 'preview'};
+      final header = {'type': 'session'};
       final payload = Uint8List.fromList(List.generate(1024, (i) => i & 0xff));
 
       final frame = encodePeerFrame(header, payload);
@@ -47,7 +78,7 @@ void main() {
     });
 
     test('handles empty payload', () {
-      final header = {'type': 'message', 'channel': 'control'};
+      final header = {'type': 'message'};
       final decoded = decodePeerFrame(encodePeerFrame(header, Uint8List(0)));
       expect(decoded.payload.length, 0);
     });

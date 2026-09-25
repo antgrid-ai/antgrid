@@ -177,20 +177,18 @@ void main() {
         expect(attachment.isStream, isFalse);
 
         await pumpEventQueue();
-        final envelopes = link.sent
+        final messages = link.sent
+            .where((f) => f.kind == kPeerFrameMessage)
             .map((f) => jsonDecode(decodeFromPhone(f.payload)) as Map)
             .toList();
         expect(
-          envelopes.any(
-            (e) =>
-                !e.containsKey('s') &&
-                (e['m'] as Map)['type'] == 'terminal:subscribe' &&
-                (e['m'] as Map)['requestId'] == 'r1',
+          messages.any(
+            (m) => m['type'] == 'terminal:subscribe' && m['requestId'] == 'r1',
           ),
           isTrue,
           reason:
-              'the socket path sends subscribe over the control-plane '
-              'envelope, which since A4 never carries `s`',
+              'the socket path sends subscribe as a bare message-kind '
+              'record on the session stream',
         );
       },
     );
@@ -228,12 +226,10 @@ void main() {
       await pumpEventQueue();
       link.inject(
         IncomingPeerFrame(
-          channel: 'control',
+          kind: kPeerFrameMessage,
           payload: Uint8List.fromList(
             utf8.encode(
-              jsonEncode({
-                'm': {'type': 'stream-ready', 'projectId': projectId},
-              }),
+              jsonEncode({'type': 'stream-ready', 'projectId': projectId}),
             ),
           ),
         ),
@@ -657,8 +653,8 @@ class _PlainPeerLink implements PeerLink {
   PeerLinkDiagnostic? get netTap => null;
 
   @override
-  Future<PeerSendOutcome> sendFrame(String channel, Uint8List payload) async {
-    sent.add(SentFrame(channel, payload));
+  Future<PeerSendOutcome> sendFrame(String kind, Uint8List payload) async {
+    sent.add(SentFrame(kind, payload));
     return PeerSendOutcome.accepted;
   }
 
@@ -710,7 +706,7 @@ class _FakeMultiStreamLink implements PeerLink, MultiStreamPeerLink {
   PeerLinkDiagnostic? get netTap => null;
 
   @override
-  Future<PeerSendOutcome> sendFrame(String channel, Uint8List payload) async =>
+  Future<PeerSendOutcome> sendFrame(String kind, Uint8List payload) async =>
       PeerSendOutcome.accepted;
 
   @override

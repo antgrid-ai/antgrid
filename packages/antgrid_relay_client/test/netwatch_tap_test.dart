@@ -139,7 +139,7 @@ void main() {
         final payload = relay.sent.single.payload;
         final note = capture.annotationFor(frameIdOf(payload));
         expect(note['msgType'], 'terminal:input');
-        expect(note['streamId'], kControlStreamId);
+        expect(note['streamId'], session.control.streamId);
       },
     );
 
@@ -156,30 +156,28 @@ void main() {
       final drop = capture.drops.single;
       expect(drop['reason'], 'no-e2e-session');
       expect(drop['msgType'], 'file:read');
-      expect(drop['streamId'], kControlStreamId);
+      expect(drop['streamId'], cold.control.streamId);
       await cold.dispose();
     });
 
     test('names an inbound frame after decode, joined by the frame id', () async {
       final payload = encodeFromAgent(
-        jsonEncode({
-          'm': {'type': 'terminal:output', 'data': 'hi'},
-        }),
+        jsonEncode({'type': 'terminal:output', 'data': 'hi'}),
       );
-      relay.inject(IncomingPeerFrame(channel: 'control', payload: payload));
+      relay.injectFrame(payload);
       await Future<void>.delayed(const Duration(milliseconds: 20));
 
       // The whole point: the id is readable before any parsing, the type only
       // after it, and they meet without either being threaded.
       final note = capture.annotationFor(frameIdOf(payload));
       expect(note['msgType'], 'terminal:output');
-      expect(note['streamId'], kControlStreamId);
+      expect(note['streamId'], session.control.streamId);
     });
 
     test('records an inbound frame that is not valid UTF-8', () async {
       // Lone continuation bytes: never a valid UTF-8 sequence on their own.
       final payload = Uint8List.fromList([0x80, 0x80, 0x80]);
-      relay.inject(IncomingPeerFrame(channel: 'control', payload: payload));
+      relay.injectFrame(payload);
       await Future<void>.delayed(const Duration(milliseconds: 20));
 
       final drop = capture.drops.single;
@@ -187,21 +185,19 @@ void main() {
       expect(drop['frameId'], isNull); // named only once decoded far enough to know a type
     });
 
-    test('a non-control `s` on the session stream is a protocol drop — Stage '
-        'A A4 gave every project its own native stream, so no legitimate '
-        'peer sends one here any more', () async {
+    test('a message-kind frame with no top-level `type` is a protocol drop — '
+        'nothing legitimate wraps a message in an `{s, m}` envelope', () async {
       final payload = encodeFromAgent(
         jsonEncode({
           's': 'ghost-project',
           'm': {'type': 'terminal:output'},
         }),
       );
-      relay.inject(IncomingPeerFrame(channel: 'control', payload: payload));
+      relay.injectFrame(payload);
       await Future<void>.delayed(const Duration(milliseconds: 20));
 
       final drop = capture.drops.single;
-      expect(drop['reason'], 'project-on-session-stream');
-      expect(drop['streamId'], 'ghost-project');
+      expect(drop['reason'], 'unrecognized-plaintext');
     });
   });
 }

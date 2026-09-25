@@ -33,8 +33,9 @@ void main() {
       expect(peerFrameVersion, framing['version']);
       expect(peerFrameFixedPrefix, framing['fixedPrefixBytes']);
       expect(maxPeerFrameHeaderBytes, framing['maxHeaderBytes']);
-      expect(kMaxFramePayload, framing['maxPayloadBytes']);
-      expect(maxPeerRecordBytes, framing['maxRecordBytes']);
+      expect(kMaxTransferBytes, framing['maxPayloadBytes']);
+      expect(kPeerMaxRecordBytes, framing['maxRecordBytes']);
+      expect(kPeerMaxBridgeRecordBytes, framing['maxBridgeRecordBytes']);
       expect(FrameKind.message.wireValue, _map(framing['kinds'])['message']);
 
       final native = _map(fixture['native']);
@@ -69,34 +70,14 @@ void main() {
     }
   });
 
-  test(
-    'Dart flow, fragmentation, and authorization bounds match the vector',
-    () {
-      final frag = _map(fixture['fragmentation']);
-      expect(kFragThreshold, frag['thresholdBytes']);
-      expect(kFragDataBudget, frag['dataBudgetBytes']);
-      expect(kMaxTransferBytes, frag['maxTransferBytes']);
-      expect(kTransferTimeoutMs, frag['transferTimeoutMs']);
-      expect(kGlobalReassemblyBudget, frag['globalReassemblyBudgetBytes']);
-      expect(kMaxRerequests, frag['maxRerequests']);
-      expect(kMaxFragmentCount, frag['maxFragmentCount']);
-
-      final flow = _map(fixture['flowControl']);
-      expect(kChannelWindowBytes, flow['channelWindowBytes']);
-      expect(kSocketInflightBytes, flow['socketInflightBytes']);
-      expect(kCreditBatchBytes, flow['creditBatchBytes']);
-      expect(kMaxSendQueueBytes, flow['maxSendQueueBytes']);
-      expect(kWindowResyncAgeMs, flow['windowResyncAgeMs']);
-      expect(kWindowStallWarnMs, flow['windowStallWarnMs']);
-
-      final authorization = _map(fixture['authorization']);
-      expect(peerIdentityMaxChars, authorization['identityMaxChars']);
-      expect(maxAuthorizedPeers, authorization['maxAuthorizedPeers']);
-      expect(maxPeerRelayUrls, authorization['maxRelayUrls']);
-      expect(maxPeerGeneration, authorization['maxGeneration']);
-      expect(maxPeerLeaseMs, authorization['maxLeaseMs']);
-    },
-  );
+  test('Dart authorization bounds match the shared transport vector', () {
+    final authorization = _map(fixture['authorization']);
+    expect(peerIdentityMaxChars, authorization['identityMaxChars']);
+    expect(maxAuthorizedPeers, authorization['maxAuthorizedPeers']);
+    expect(maxPeerRelayUrls, authorization['maxRelayUrls']);
+    expect(maxPeerGeneration, authorization['maxGeneration']);
+    expect(maxPeerLeaseMs, authorization['maxLeaseMs']);
+  });
 
   test('Dart stream-open caps match the shared transport vector', () {
     final streamOpen = _map(fixture['streamOpen']);
@@ -109,7 +90,12 @@ void main() {
     expect(kStreamMaxTunnelStreamsPerPeer, caps['maxTunnelStreamsPerPeer']);
     expect(kStreamMaxPendingOpensPerPeer, caps['maxPendingOpensPerPeer']);
     final projectRecords = _map(streamOpen['projectRecords']);
-    expect(kStreamProjectRecordMaxBytes, projectRecords['maxRecordBytes']);
+    expect(kStreamProjectAppRecordMaxBytes, projectRecords['appMaxRecordBytes']);
+    expect(
+      kStreamProjectBridgeRecordMaxBytes,
+      projectRecords['bridgeMaxRecordBytes'],
+    );
+    expect(kMaxTransferBytes, projectRecords['maxTransferBytes']);
     final terminalRecords = _map(streamOpen['terminalRecords']);
     expect(kStreamTerminalAppRecordMaxBytes, terminalRecords['appMaxRecordBytes']);
     expect(kStreamTerminalBridgeRecordMaxBytes, terminalRecords['bridgeMaxRecordBytes']);

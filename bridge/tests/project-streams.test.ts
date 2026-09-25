@@ -5,9 +5,10 @@
 // own admission order (session established, the open-frame parse, the
 // pending-opens cap) is `native-host-connection.test.ts`'s to cover.
 import { describe, test, expect, afterEach } from "bun:test";
-import { buildFragments, FRAG_THRESHOLD, MAX_TRANSFER_BYTES, STREAM_MAX_PROJECTS_PER_PEER } from "antgrid-wire";
+import { MAX_TRANSFER_BYTES, STREAM_MAX_PROJECTS_PER_PEER } from "antgrid-wire";
 import { MessageBus, type Channel } from "../src/message-bus";
 import { createMessage, type AbMessage } from "../src/protocol";
+import { STREAM_RECORD_SLICE_BYTES } from "../src/peer/stream-records";
 import {
   STREAM_PRIORITY_PROJECT,
   STREAM_RESET_PROJECT,
@@ -33,7 +34,11 @@ afterEach(() => { for (const c of clients.splice(0)) try { void c.close(); } cat
  *  options under test control; every other caller gets the open-by-default
  *  fixture (`cataloged = {PROJECT}`, remote access on) that
  *  `test-peer-session-owner.ts`'s own `forTest` also defaults to. */
-function makeClient(opts: { cataloged?: Set<string>; remoteAccessEnabled?: () => boolean } = {}) {
+function makeClient(opts: {
+  cataloged?: Set<string>;
+  remoteAccessEnabled?: () => boolean;
+  onError?: (code: string, message: string) => void;
+} = {}) {
   const cataloged = opts.cataloged ?? new Set([PROJECT]);
   const client = new TestPeerSessionOwner({
     identity: {
@@ -42,6 +47,7 @@ function makeClient(opts: { cataloged?: Set<string>; remoteAccessEnabled?: () =>
     },
     remoteAccessEnabled: opts.remoteAccessEnabled ?? (() => true),
     projectCataloged: (id) => cataloged.has(id),
+    onError: opts.onError,
   });
   clients.push(client);
   client.setNativeWriter(() => true);
@@ -210,10 +216,10 @@ describe("ProjectStreamRegistry (A4)", () => {
     await stream.send(createMessage("pong", {}));
     expect(received).toEqual([]);
     expect(client.sentTo(PEER_A)).toHaveLength(1);
-    // Session-stream traffic keeps the `{ m }` envelope (only project streams
-    // dropped it, per §1.2) — see the handshake-pull.test.ts broadcast test.
+    // The session stream carries bare AbMessages too — see the
+    // handshake-pull.test.ts broadcast test.
     expect(client.readToPeer(PEER_A)).toMatchObject({
-      m: { type: "control:result", ok: false, projectId: PROJECT, error: { code: "UPDATE_REQUIRED" } },
+      type: "control:result", ok: false, projectId: PROJECT, error: { code: "UPDATE_REQUIRED" },
     });
 
     // Still stale, within the cooldown: no second notice queued.
@@ -332,9 +338,8 @@ describe("ProjectStreamRegistry (A4)", () => {
     // messages published back-to-back with no `await` between them queue
     // faster than the fake's drain can empty the queue, and their cumulative
     // bytes cross PROJECT_STREAM_MAX_QUEUED_BYTES (64 MiB) before any of them
-    // is actually written. Each one stays under FRAG_THRESHOLD (one frame, no
-    // fragmentation) so every publish contributes its whole size to the
-    // queue, not just a first fragment.
+    // is actually written. Every publish is one record and contributes its
+    // whole size to the queue.
     const content = "x".repeat(1_300_000);
     for (let i = 0; i < 60; i++) {
       bus.publish(createMessage("file:content", {
@@ -355,25 +360,33 @@ describe("ProjectStreamRegistry (A4)", () => {
     expect(other.read()).toEqual(ping);
   });
 
-  test("row 15: a message over FRAG_THRESHOLD fragments and reassembles; one over MAX_TRANSFER_BYTES is too-large and writes nothing; an inbound fragment set dispatches once", async () => {
+  test("P1: a message over the app read cap is written as one record, never fragmented", async () => {
     const { client } = makeClient();
     client.establish(PEER_A, { capabilities: { checkoutRouting: true } });
     const bus = new MessageBus();
-    const received: unknown[] = [];
-    bus.setInboundHandler((msg) => received.push(msg));
-    const handle = client.attachStream(bus, { projectId: PROJECT });
+    client.attachStream(bus, { projectId: PROJECT });
     const stream = await client.openProjectStream(PEER_A, PROJECT);
 
-    const overThreshold = FRAG_THRESHOLD + 100_000;
+    const size = 5 * 1024 * 1024;
     const big = createMessage("file:content", {
-      projectId: PROJECT, path: "a.txt", content: "x".repeat(overThreshold), size: overThreshold, encoding: "utf8",
+      projectId: PROJECT, path: "a.txt", content: "x".repeat(size), size, encoding: "utf8",
     });
     bus.publish(big, "control");
     await flush();
-    const frags = stream.written().slice(1) as Array<{ __frag?: unknown }>;
-    expect(frags.length).toBeGreaterThan(1);
-    expect(frags.every((f) => typeof f.__frag === "object")).toBe(true);
+
+    const records = stream.written().slice(1); // drop the opening stream-ready
+    expect(records).toHaveLength(1);
+    expect(records[0]).not.toHaveProperty("__frag");
     expect(stream.read()).toEqual(big);
+  });
+
+  test("P2: a message over MAX_TRANSFER_BYTES is too-large, writes nothing and reports MESSAGE_TOO_LARGE", async () => {
+    const errors: Array<{ code: string; message: string }> = [];
+    const { client } = makeClient({ onError: (code, message) => errors.push({ code, message }) });
+    client.establish(PEER_A, { capabilities: { checkoutRouting: true } });
+    const bus = new MessageBus();
+    const handle = client.attachStream(bus, { projectId: PROJECT });
+    const stream = await client.openProjectStream(PEER_A, PROJECT);
 
     const huge = createMessage("file:content", {
       projectId: PROJECT, path: "b.txt", content: "x".repeat(MAX_TRANSFER_BYTES + 1),
@@ -383,39 +396,65 @@ describe("ProjectStreamRegistry (A4)", () => {
     const outcome = await handle.sendTo(huge, "control", { kind: "peer", peerId: PEER_A });
     expect(outcome).toBe("too-large");
     expect(stream.written().length).toBe(before); // nothing written for the refused message
-
-    const inbound = createMessage("file:content", {
-      projectId: PROJECT, path: "c.txt", content: "y".repeat(overThreshold), size: overThreshold, encoding: "utf8",
-    });
-    const inboundFrames = buildFragments(JSON.stringify(inbound), "rx-1", undefined, 200_000);
-    expect(inboundFrames.length).toBeGreaterThan(1);
-    for (const frame of inboundFrames) await stream.send(frame);
-    expect(received).toEqual([inbound]);
+    expect(errors).toEqual([expect.objectContaining({ code: "MESSAGE_TOO_LARGE" })]);
   });
 
-  test("row 15b: a fragmented message queues whole — a publish right behind it lands after its last fragment, never inside the set", async () => {
+  test("P3: a 32 MiB record is written as slices, not as one array", async () => {
+    const { client } = makeClient();
+    client.establish(PEER_A, { capabilities: { checkoutRouting: true } });
+    const bus = new MessageBus();
+    const handle = client.attachStream(bus, { projectId: PROJECT });
+    const stream = await client.openProjectStream(PEER_A, PROJECT);
+
+    // Pad content so the whole record's JSON lands at MAX_TRANSFER_BYTES - 1024.
+    const target = MAX_TRANSFER_BYTES - 1024;
+    const shape = createMessage("file:content", {
+      projectId: PROJECT, path: "big.bin", content: "", size: 0, encoding: "utf8",
+    });
+    const overhead = Buffer.byteLength(JSON.stringify(shape), "utf8");
+    const content = "x".repeat(target - overhead);
+    const big = createMessage("file:content", {
+      projectId: PROJECT, path: "big.bin", content, size: content.length, encoding: "utf8",
+    });
+    const json = JSON.stringify(big);
+
+    const outcome = await handle.sendTo(big, "control", { kind: "peer", peerId: PEER_A });
+    expect(outcome).toBe("sent");
+    for (const len of stream.writeAllLengths) expect(len).toBeLessThanOrEqual(STREAM_RECORD_SLICE_BYTES);
+    expect(stream.writeAllLengths.length).toBeGreaterThanOrEqual(128);
+    expect(stream.written().at(-1)).toEqual(JSON.parse(json));
+  });
+
+  test("P4: an inbound __frag record is dropped, not buffered, and a normal verb right behind it still dispatches", async () => {
+    const { client } = makeClient();
+    client.establish(PEER_A, { capabilities: { checkoutRouting: true } });
+    const bus = new MessageBus();
+    const received: unknown[] = [];
+    bus.setInboundHandler((msg) => received.push(msg));
+    client.attachStream(bus, { projectId: PROJECT });
+    const stream = await client.openProjectStream(PEER_A, PROJECT);
+
+    await stream.send('{"__frag":{"id":"rx-1","index":0,"total":2}}');
+    const normal = createMessage("pong", {});
+    await stream.send(normal);
+
+    expect(received).toEqual([normal]);
+  });
+
+  test("P5: an app record over STREAM_PROJECT_APP_RECORD_MAX_BYTES is a protocol violation and retires the connection", async () => {
     const { client } = makeClient();
     client.establish(PEER_A, { capabilities: { checkoutRouting: true } });
     const bus = new MessageBus();
     client.attachStream(bus, { projectId: PROJECT });
     const stream = await client.openProjectStream(PEER_A, PROJECT);
+    expect(stream.refusal()).toBeUndefined();
 
-    const size = FRAG_THRESHOLD + 100_000;
-    const big = createMessage("file:content", {
-      projectId: PROJECT, path: "a.txt", content: "x".repeat(size), size, encoding: "utf8",
-    });
-    const small = createMessage("pong", {});
-    bus.publish(big, "control");
-    bus.publish(small, "control");
-    await flush(50);
+    await stream.sendOverlongPrefix(1_500_001);
+    await flush();
 
-    const records = stream.written().slice(1) as Array<{ __frag?: unknown; type?: string }>;
-    const lastFrag = records.map((r) => typeof r.__frag === "object").lastIndexOf(true);
-    expect(lastFrag).toBeGreaterThan(0);
-    expect(records.slice(0, lastFrag + 1).every((r) => typeof r.__frag === "object")).toBe(true);
-    expect(records.slice(lastFrag + 1)).toEqual([small]);
-    expect(stream.read()).toEqual(big);
-    expect(stream.read()).toEqual(small);
+    // The base class's retirePeerConnection is `dropSession` (§3.5, mirroring
+    // row 6's authorized() check) — a retired peer no longer holds a session.
+    expect((client as unknown as { sessions: Map<string, unknown> }).sessions.has(PEER_A)).toBe(false);
   });
 
   test("row 15c: a peer whose writes are parked does not hold up another peer's copy of the same broadcast", async () => {

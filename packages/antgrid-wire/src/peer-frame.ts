@@ -6,7 +6,7 @@
  * absent from the record.
  */
 import { z } from "zod/v4";
-import { MAX_FRAME_PAYLOAD } from "./frag";
+import { MAX_TRANSFER_BYTES } from "./stream-open";
 import { PeerFrameHeader, type PeerFrameHeader as PeerFrameHeaderValue } from "./peer-protocol";
 
 const FRAME_VERSION = 0x04;
@@ -49,10 +49,10 @@ export function encodePeerFrame(
   payload: Uint8Array,
 ): Uint8Array {
   const parsed = parseHeader(header);
-  if (payload.length > MAX_FRAME_PAYLOAD) {
+  if (payload.length > MAX_TRANSFER_BYTES) {
     throw new FrameError(
       "PAYLOAD_TOO_LARGE",
-      `Payload ${payload.length} bytes > ${MAX_FRAME_PAYLOAD}`,
+      `Payload ${payload.length} bytes > ${MAX_TRANSFER_BYTES}`,
     );
   }
   const headerBytes = Buffer.from(JSON.stringify(parsed), "utf8");
@@ -102,10 +102,10 @@ export function decodePeerFrame(buf: Uint8Array): {
     throw new FrameError("TRUNCATED", "Header extends past frame end");
   }
   const payloadLength = buf.length - FIXED_PREFIX - headerLen;
-  if (payloadLength > MAX_FRAME_PAYLOAD) {
+  if (payloadLength > MAX_TRANSFER_BYTES) {
     throw new FrameError(
       "PAYLOAD_TOO_LARGE",
-      `Payload ${payloadLength} bytes > ${MAX_FRAME_PAYLOAD}`,
+      `Payload ${payloadLength} bytes > ${MAX_TRANSFER_BYTES}`,
     );
   }
   const headerJson = b.toString("utf8", FIXED_PREFIX, FIXED_PREFIX + headerLen);
