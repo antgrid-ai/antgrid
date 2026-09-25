@@ -55,7 +55,8 @@ the code wins over both.
 | A | A1 multi-stream admission, ALPN `antgrid/peer/2` | done | `7523c75a` |
 | A | A2 terminal attachment streams | done | `8a13d83b` |
 | A | A3 tunnel HTTP/WS streams | done | `55c741e8` |
-| A | A4 project streams, A5 deletions, A6 docs | not started | |
+| A | A4 project streams replace the `{s,m}` mux | done | `3d7ecc53` |
+| A | A5 deletions, A6 docs | in progress | |
 
 ### Stage C gate evidence (executed by the wave commit agents)
 
@@ -92,12 +93,17 @@ the code wins over both.
 
 - A2: wire 130; bridge 4902 pass with the 6 known failures; relay 173; relay_client 283; peer_transport 64; app 4210; `flutter analyze` clean in app and the three packages; evals 108 pass, 5 skip, with the only failure the gate-vectors git-clean guard, which clears at the commit; `test:evals:dart-terminal` 7 pass; qualify runs and the relay gate pass.
 - A3: wire 136; bridge 4928 pass with the 6 known failures; relay 173; relay_client 308; peer_transport 64; app 4187; `flutter analyze` clean; evals 113 pass, 5 skip, with the same git-clean guard as the only failure before the commit; qualify runs and the relay gate pass.
+- A4: wire 138; bridge 4923 pass with the 6 known failures; relay 173; relay_client 306; peer_transport 64; app 4188; `flutter analyze` clean; evals 119 pass, 5 skip, gate-vectors green after the commit; qualify runs and the relay gate pass.
 
 ### Stage A open items
+
+- **Regression, not investigated:** `test:evals:native-soak` fails its 128 MiB process-RSS bound about 500s into the 30-minute run, on both A3 and A4. Its duplicate-mutation, stale-admission and ownership assertions pass. The older ledger (`docs/iroh-simplification-ledger.md`) records it passing whole before Stage B; no run between then and A3 exists to bisect against.
+- RPC replies to a relay peer are now addressed to the asking peer instead of broadcast to every peer bound to the project (contract D-10); before A4 the mux stream id scoped them implicitly.
+- If a message's abort signal fires after its first fragment is written, the queued fragments are dropped. The app's reassembler frees the incomplete set after its transfer timeout.
 
 - The bridge and the app can briefly disagree on free slots while a close is in flight, so the bridge may refuse a new stream with `CAP_EXCEEDED`. Accepted.
 - A tunnel request body is reassembled in memory before `serveHttp`, so the worst case per peer is the wire body cap times 128 streams.
 - The bridge frees a tunnel slot when it unbinds, before the app's FIN, so a misbehaving app can hold QUIC streams past 128; the 256 bidi limit bounds it.
 - The tunnel-cap eval opens 128 streams in sequence and takes about 9s, close to other 10s timers.
 - The Dart stream WebSocket channel reports its own close as `TunnelWsClosedByPeer`, where the fake reports `TunnelWsClosedLocally`. Cosmetic: the browser close is forwarded the same way.
-- Carried into A4: the app's terminal attachment releases its slot before the records drain; the promoted local core drops `peerId`; `abortTunnelStreams` is not scoped to the peer that changed; the send-time and drain-time `authorized()` checks have no test of their own.
+- The four A2/A3 carry-overs (terminal slot released before drain, promoted core dropping `peerId`, unscoped `abortTunnelStreams`, untested send- and drain-time `authorized()` checks) were fixed in A4.
