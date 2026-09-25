@@ -29,7 +29,7 @@ import { FileWatcher } from "./file-watcher";
 import { FileUploadManager } from "./file-upload";
 import { FileSearcher } from "./file-search";
 import { PortDetector } from "./port-detector";
-import { TunnelManager } from "./tunnel-manager";
+import { TunnelManager, type TunnelStreamServer } from "./tunnel-manager";
 import type { SendOutcome } from "./send-scheduler";
 import { type DeviceIdentity } from "./device";
 import { displayStartupBanner } from "./banner";
@@ -48,7 +48,6 @@ import { isRefusal } from "./session-bus/errors";
 import { neutralizeFenced } from "./session-bus/delivery";
 import type { QueuedLine } from "./session-bus/delivery-queue";
 import { CHECKOUT_VARIABLE_MESSAGE_TYPES, createMessage, HandlerAnswerWire, HandlerConfigureWire, HandlerDismissWire, HandlerInstructWire, HandlerUndoWire, PREVIEW_CHANNEL_MESSAGE_TYPES, type AbMessage, type RpcRequest, type SessionEntry, type WorkStatus } from "./protocol";
-import { parseTunnelMessage } from "./tunnel-protocol";
 import { startApiServer, type ApiServerHandle } from "./api-server";
 import { MessageBus, clientKeyOf, type ClientKey, type InboundSource } from "./message-bus";
 import { resolveAbDir } from "./antgrid-dir";
@@ -104,11 +103,6 @@ import { WORKTREE_SESSIONS_SUPPORTED } from "./worktree-capability";
  *  to back those walks outlast the app's 2s `project:list` liveness ping, which
  *  reaps a healthy host mid-open (see file-watcher.ts's startWatching note). */
 const yieldToEventLoop = () => new Promise<void>((r) => setImmediate(r));
-
-/** How long a tunnel exchange's origin session stays resolvable, so a response
- *  can be addressed back to the device that asked. Comfortably past the app's
- *  own preview timeouts; an expired entry costs a broadcast, never a body. */
-const TUNNEL_ORIGIN_TTL_MS = 120_000;
 
 type CheckoutAgentSpec = {
   command: string;
@@ -272,17 +266,13 @@ export interface AgentCore {
   /** Host-level checkouts bypass the inbound Git handler, so callers use this
    *  to keep the core's branch and file snapshots coherent immediately. */
   refreshGitState(): Promise<void>;
-  /** Lifecycle hooks the transport invokes. [peerId] names the app session the
-   *  tunnel request arrived on, so its response can be addressed back to the
-   *  device that asked instead of every attached one. */
-  handleTunnelMessage(raw: unknown, peerId?: string): void;
   onHandshakeComplete(): void;
-  /** Wire the transport's plaintext (tunnel) sender. The MessageBus only
-   *  carries strict AbMessages; tunnel-protocol messages bypass the bus
-   *  and are sent through this hook directly. Pass `null` to clear it (the
-   *  promotion controller does this on teardown so a dead relay closure
-   *  isn't retained). */
-  setPlainHook(fn: ((data: object, target?: SendTarget) => Promise<SendOutcome>) | null): void;
+  /** Admits a tunnel (preview) QUIC stream (A3): `TunnelStreamRegistry` calls
+   *  this once a stream's head record names a checkout, after the switch,
+   *  checkout-routing and checkout-existence checks all pass. Never opens or
+   *  promotes a core — `checkoutRuntimes.runtime(checkoutId)` is a lookup over
+   *  what is already running. */
+  readonly tunnelStreams: TunnelStreamServer;
   /** Abort every in-flight tunneled HTTP response, on every checkout runtime
    *  and on main. Driven from the transport's peer-online/peer-offline hooks:
    *  a body in flight across a peer loss or a (re)establishment is dead by
@@ -1065,46 +1055,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     return peerSessionProvider?.(peerId)?.checkoutRouting === true;
   }
 
-  // Which app session a tunnel request came in on, keyed by the id its response
-  // carries back (requestId for HTTP, tunnelId for a websocket). A preview body
-  // answers exactly one request, so fanning it out both wastes the link and
-  // hands one device another device's page. Entries are released on the
-  // terminal frame of the exchange and swept by TTL; a miss falls back to
-  // broadcast — today's behaviour — so a lost entry never costs a response.
-  const tunnelOriginByRef = new Map<string, { peerId: string; at: number }>();
-
-  function tunnelRefOf(data: object): string | null {
-    const d = data as { requestId?: unknown; tunnelId?: unknown };
-    if (typeof d.requestId === "string") return d.requestId;
-    if (typeof d.tunnelId === "string") return d.tunnelId;
-    return null;
-  }
-
-  function noteTunnelOrigin(data: object, peerId: string | undefined): void {
-    if (!peerId) return;
-    const ref = tunnelRefOf(data);
-    if (!ref) return;
-    const now = Date.now();
-    for (const [key, origin] of tunnelOriginByRef) {
-      if (now - origin.at >= TUNNEL_ORIGIN_TTL_MS) tunnelOriginByRef.delete(key);
-    }
-    tunnelOriginByRef.set(ref, { peerId, at: now });
-  }
-
-  function tunnelTargetFor(data: object): SendTarget | undefined {
-    const ref = tunnelRefOf(data);
-    if (!ref) return undefined;
-    const origin = tunnelOriginByRef.get(ref);
-    const type = (data as { type?: unknown }).type;
-    // The frame that ends the exchange releases the entry; a websocket's data
-    // frames keep theirs until the close.
-    if (type === "tunnel:http-response" || type === "tunnel:ws-close") {
-      tunnelOriginByRef.delete(ref);
-    }
-    if (!origin || Date.now() - origin.at >= TUNNEL_ORIGIN_TTL_MS) return undefined;
-    return { kind: "peer", peerId: origin.peerId };
-  }
-
   /** Contexts already warned about for having no route. An unroutable frame is
    *  held and re-tried on every coordinator tick, so a per-attempt warning would
    *  repeat for the life of the bridge. Cleared the next time a route resolves
@@ -1359,52 +1309,38 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     return answers.length > 0 && answers.every((a) => a);
   }
 
-  function handleTunnelMessage(raw: unknown, peerId?: string) {
-    const msg = parseTunnelMessage(raw as string | object);
-    if (!msg) { log.warn("Invalid tunnel message, dropping"); return; }
-    // Tunnel verbs proxy arbitrary HTTP to localhost:<port> and return the body,
-    // so a phone could otherwise read a project's dev-server/preview data
-    // without ever touching the bus dispatch gate. Gate here too. Only relay
-    // traffic reaches this path — the loopback owner speaks the bus.
-    if (!remoteFrameAllowed("relay")) {
-      log.warn("Dropping tunnel %s: mobile access is disabled (project %s)", msg.type, project.id);
-      return;
-    }
-    // Same per-device capability gate the bus dispatch applies, restated here
-    // because this path bypasses the bus entirely: a tunnel proxies arbitrary
-    // HTTP out of a checkout's dev server, so a session that may not address a
-    // checkout must not be answered with one's page either.
-    if (sessions?.hasIsolatedSessions() && !peerCanRouteCheckouts(peerId)) {
-      log.warn("Dropping tunnel %s: remote app lacks checkout routing (project %s)", msg.type, project.id);
-      return;
-    }
-    const runtime = checkoutRuntimes.runtime(msg.checkoutId);
-    if (!runtime) {
-      log.warn("Dropping tunnel request for unknown checkout %s", msg.checkoutId);
-      return;
-    }
-    if (!runtime.tunnelManager) return;
-    noteTunnelOrigin(msg, peerId);
-    switch (msg.type) {
-      case "tunnel:http-request":
-        runtime.tunnelManager.onHttpRequest(msg).catch((err) =>
-          log.error("tunnel:http-request handler failed: %s", err)
-        );
-        break;
-      case "tunnel:http-cancel":
-        runtime.tunnelManager.onHttpCancel(msg);
-        break;
-      case "tunnel:ws-open":
-        runtime.tunnelManager.onWsOpen(msg);
-        break;
-      case "tunnel:ws-data":
-        runtime.tunnelManager.onWsData(msg);
-        break;
-      case "tunnel:ws-close":
-        runtime.tunnelManager.onWsClose(msg);
-        break;
-    }
-  }
+  /** Admits a tunnel QUIC stream (A3): called by `TunnelStreamRegistry` once a
+   *  stream's head record names `checkoutId`, so the checks a tunnel verb used
+   *  to run inline in `handleTunnelMessage` run here instead, in the same
+   *  order. Never opens or promotes a core — `checkoutRuntimes.runtime` is a
+   *  lookup over what is already running. */
+  const tunnelStreams: TunnelStreamServer = {
+    admit(peerId, checkoutId) {
+      // Tunnel streams proxy arbitrary HTTP to localhost:<port> and return the
+      // body, so a phone could otherwise read a project's dev-server/preview
+      // data without ever touching the bus dispatch gate. Gate here too. Only
+      // relay traffic reaches a native stream — the loopback owner speaks the
+      // bus (and opens no such stream).
+      if (!remoteFrameAllowed("relay")) {
+        return { ok: false, refusal: { code: "NOT_ALLOWED", message: "mobile access is disabled" } };
+      }
+      // Same per-device capability gate the bus dispatch applies, restated
+      // here because a tunnel stream carries no bus traffic: it proxies
+      // arbitrary HTTP out of a checkout's dev server, so a session that may
+      // not address a checkout must not be answered with one's page either.
+      if (sessions?.hasIsolatedSessions() && !peerCanRouteCheckouts(peerId)) {
+        return { ok: false, refusal: { code: "UPDATE_REQUIRED", message: "update the app to open this stream" } };
+      }
+      const runtime = checkoutRuntimes.runtime(checkoutId);
+      if (!runtime) {
+        return { ok: false, refusal: { code: "NOT_ALLOWED", message: "unknown checkout" } };
+      }
+      if (!runtime.tunnelManager) {
+        return { ok: false, refusal: { code: "NOT_ALLOWED", message: "tunnels are not available for this checkout" } };
+      }
+      return { ok: true, manager: runtime.tunnelManager };
+    },
+  };
 
   // [client] is who sent this frame — needed only by the work-status read state,
   // which tracks what each client has on screen separately. Everything else in
@@ -2555,7 +2491,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   /** Same bus as [sendAb] but caches for replay WITHOUT delivering — see
    *  MessageBus.retain. */
   let retainAb: (msg: AbMessage) => void = (_m) => {};
-  let sendPlain: (data: object) => Promise<SendOutcome> = async () => "dropped";
   /** Terminal replies belong to the subscribing app, including when several
    *  authenticated apps share the relay transport. */
   let sendAbTo: (msg: AbMessage, only: ClientKey) => void = (_m, _o) => {};
@@ -3567,7 +3502,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     if (runtime.started || !manager) return;
     runtime.started = true;
     runtime.servicesDeferred = opts?.deferServices ?? false;
-    const runtimeId = runtime.checkout.id;
     const send = (msg: AbMessage) => sendFromRuntime(runtime, msg);
     const pd = new PortDetector({
       ports: (runtime.config.ports ?? []).map((p) => ({ port: p.port, name: p.name, onDetect: p.onDetect })),
@@ -3581,7 +3515,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       projectId: project.id,
       portLabels: pd.getPortLabels(),
       previewPorts,
-      sendTunnel: (data) => sendPlain({ ...data, checkoutId: runtimeId }),
       sendEncrypted: send,
       relayHost,
       connState,
@@ -3883,7 +3816,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       projectId: project.id,
       portLabels: pd.getPortLabels(),
       previewPorts,
-      sendTunnel: (data) => sendPlain(data),
       sendEncrypted: (msg) => sendAb(msg),
       relayHost,
       connState,
@@ -4898,9 +4830,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     sendPreviewAbTo = (m, only) => bus.publishOnly(m, "preview", only === "loopback" ? "loopback" : "relay", only === "loopback" || only === "relay" ? undefined : only);
     dropSessionReplay = (sessionId) => bus.dropSessionReplay(sessionId);
     dropCheckoutReplay = (checkoutId) => bus.dropCheckoutReplay(checkoutId);
-    // Plaintext (tunnel) sender bypasses the bus — see setPlainHook.
-    sendPlain = (data) =>
-      busPlainHook?.(data, tunnelTargetFor(data)) ?? Promise.resolve<SendOutcome>("dropped");
     bus.setInboundHandler((msg, channel, source, peerId) => {
       const client = clientKeyOf(source, peerId);
       const generation = clientGenerations.get(client) ?? 0;
@@ -4915,8 +4844,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // design (not the pairing/handshake layer): the phone connects and
       // completes the handshake, but the data plane is inert until the machine
       // switch is on. See remoteFrameAllowed() for the local-mode skip
-      // rationale. The tunnel/HTTP-proxy path is gated separately in
-      // handleTunnelMessage (it bypasses this bus).
+      // rationale. The tunnel/HTTP-proxy path is gated separately, in
+      // `tunnelStreams.admit` (it carries no bus traffic at all — A3).
       //
       // Only RELAY-origin frames are gated. Loopback frames are the desktop
       // owner (trusted by the loopback socket + token); after promotion the
@@ -5037,12 +4966,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     });
   }
 
-  // Plaintext (tunnel) sender wired by the caller after transport construction.
-  let busPlainHook: ((data: object, target?: SendTarget) => Promise<SendOutcome>) | null = null;
-  function setPlainHook(fn: ((data: object, target?: SendTarget) => Promise<SendOutcome>) | null) {
-    busPlainHook = fn;
-  }
-
   function abortTunnelStreams(): void {
     for (const runtime of checkoutRuntimes.values()) runtime.tunnelManager?.abortHttpStreams();
     tunnelManager?.abortHttpStreams();
@@ -5118,9 +5041,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       sendStatus();
       sendGitStatus();
     },
-    handleTunnelMessage,
     onHandshakeComplete,
-    setPlainHook,
+    tunnelStreams,
     abortTunnelStreams,
     setPeerSessionProvider,
     setTerminalStreamHooks,

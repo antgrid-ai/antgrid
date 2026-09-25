@@ -866,3 +866,77 @@ test("retiring a peer drops its terminal bindings", async () => {
     expect(registry.terminalStreams.attachmentCount(slot)).toBe(0);
   } finally { handle.detach(); f.client.close(); }
 });
+
+// --- A3: tunnel streams (docs/iroh-reduction/stage-A-A3-contract.md §3.3) ---
+
+function tunnelHttpOpenRecord(projectId: string): number[][] {
+  const body = Array.from(encodeStreamOpen({ kind: "tunnel-http", projectId, requestId: crypto.randomUUID() }));
+  return [lengthPrefix(body.length), body];
+}
+
+function tunnelWsOpenRecord(projectId: string): number[][] {
+  const body = Array.from(encodeStreamOpen({ kind: "tunnel-ws", projectId, wsId: crypto.randomUUID() }));
+  return [lengthPrefix(body.length), body];
+}
+
+/** A minimal TunnelStreamServer whose admit() always admits, with a manager
+ *  nothing here calls into: these tests exercise stream-kind registration and
+ *  peer retirement, not the HTTP/WS protocol (see tunnel-streams.test.ts and
+ *  tunnel-manager-stream.test.ts for that). */
+function fakeTunnelServer() {
+  return { admit: () => ({ ok: true as const, manager: {} as never }) };
+}
+
+test("a tunnel-http-kind and tunnel-ws-kind stream both reach the tunnel handler (registered in the handler table)", async () => {
+  // A2 shipped a handler table with only `terminal`; before this wave a
+  // tunnel-kind open was refused NOT_ALLOWED ("stream kind not allowed").
+  const f = fixture(undefined, undefined, () => true);
+  const bus = new MessageBus();
+  const handle = f.client.attachStream(bus, { projectId: "p1", tunnels: fakeTunnelServer() as never });
+  const peer = connection(f.endpointId);
+  try {
+    await establishedSlot(f, peer);
+
+    const http = laterStream(tunnelHttpOpenRecord("p1"));
+    peer.pushLaterStream(http.stream);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(http.written).toEqual([]); // admitted: no in-band stream:refused record
+    expect(peer.closeCodes()).toEqual([]);
+
+    const ws = laterStream(tunnelWsOpenRecord("p1"));
+    peer.pushLaterStream(ws.stream);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(ws.written).toEqual([]);
+    expect(peer.closeCodes()).toEqual([]);
+  } finally { handle.detach(); f.client.close(); }
+});
+
+test("retiring a peer drops its tunnel bindings alongside its terminal bindings", async () => {
+  const f = fixture(undefined, undefined, () => true);
+  const bus = new MessageBus();
+  const handle = f.client.attachStream(bus, { projectId: "p1", tunnels: fakeTunnelServer() as never });
+  const peer = connection(f.endpointId);
+  try {
+    const slot = await establishedSlot(f, peer);
+    const terminal = laterStream(terminalOpenRecord("p1"));
+    peer.pushLaterStream(terminal.stream);
+    const http = laterStream(tunnelHttpOpenRecord("p1"));
+    peer.pushLaterStream(http.stream);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const access = f.client.peers as unknown as {
+      terminalStreams: { attachmentCount: (peerId: string) => number };
+      tunnelStreams: { streamCount: (peerId: string) => number };
+    };
+    expect(access.terminalStreams.attachmentCount(slot)).toBe(1);
+    expect(access.tunnelStreams.streamCount(slot)).toBe(1);
+
+    // Drives the real retirePeer() path, like the terminal-only test above.
+    f.setAllowed(false);
+    f.client.recheckAuthorization();
+
+    expect(f.access.nativePeers.size).toBe(0);
+    expect(access.terminalStreams.attachmentCount(slot)).toBe(0);
+    expect(access.tunnelStreams.streamCount(slot)).toBe(0);
+  } finally { handle.detach(); f.client.close(); }
+});

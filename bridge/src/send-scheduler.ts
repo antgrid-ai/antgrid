@@ -12,7 +12,7 @@ import type { Channel } from "./message-bus";
  *  fragmenter refused it, decided synchronously at enqueue; "gated" = the
  *  stream's outbound authorization (`mayDeliver`, the remote-access switch)
  *  refused it before it reached the scheduler — the peer is fine, this
- *  machine is not talking to it. Only StreamHandle.sendTunnel produces it. */
+ *  machine is not talking to it. Only StreamHandle.sendTo produces it. */
 export type SendOutcome = "sent" | "dropped" | "too-large" | "gated";
 
 /** One frame waiting to be written: either a whole envelope or one fragment

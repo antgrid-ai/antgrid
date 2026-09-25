@@ -22,6 +22,25 @@ const int kStreamMaxTerminalAttachmentsPerPeer = 64;
 const int kStreamMaxTunnelStreamsPerPeer = 128;
 const int kStreamMaxPendingOpensPerPeer = 16;
 
+/// Payload cap on one tunnel data record, after its tag byte
+/// ([kTunnelRecordTagBody] etc.), in both directions.
+const int kStreamTunnelDataMaxBytes = 1048576;
+
+/// [kStreamTunnelDataMaxBytes] plus the tag byte — the bridge reader's cap for
+/// a tunnel-stream record.
+const int kStreamTunnelRecordMaxBytes = 1048577;
+
+/// Caps an HTTP tunnel request's `bodyLength`. Equal to `MAX_TRANSFER_BYTES`:
+/// a preview upload is bounded exactly as the session path bounded it.
+const int kStreamTunnelRequestBodyMaxBytes = 33554432;
+
+/// Tunnel data record tags: the first byte after the JSON/data discriminator
+/// (see `tunnel_stream.dart`'s `decodeTunnelRecord`).
+const int kTunnelRecordTagBody = 0x00;
+const int kTunnelRecordTagBodyGzip = 0x01;
+const int kTunnelRecordTagWsText = 0x02;
+const int kTunnelRecordTagWsBinary = 0x03;
+
 /// Bridge reader's cap for the four small app-to-bridge terminal verbs
 /// (subscribe, ack, unsubscribe, history:request).
 const int kStreamTerminalAppRecordMaxBytes = 16384;

@@ -2,7 +2,7 @@
 // queue and what clears it. Payloads are plaintext on the wire (Stage B), so a
 // queued peer frame can be read straight off the wire with no unseal step.
 import { afterEach, describe, expect, it } from "bun:test";
-import { decodePeerFrame, encodePeerFrame } from "antgrid-wire";
+import { CONTROL_STREAM_ID, decodePeerFrame, encodePeerFrame } from "antgrid-wire";
 import { TestPeerSessionOwner } from "./test-peer-session-owner";
 import { MessageBus } from "../src/message-bus";
 import { createMessage } from "../src/protocol";
@@ -48,14 +48,11 @@ function decode(frame: string | Uint8Array): { channel: string; text: string } {
   return { channel: decoded.header.channel, text: Buffer.from(decoded.payload).toString("utf8") };
 }
 
-function tunnelChunk(requestId: string): object {
-  return {
-    type: "tunnel:http-chunk",
-    requestId,
-    seq: 1,
-    data: "ok",
-    bodyEncoding: "base64",
-  };
+// A2 removed the tunnel-specific send wrapper; any preview-channel frame
+// exercises the same scheduler path now that tunnel records ride their own
+// stream instead of the bus (Stage A A3).
+function previewFrame(requestId: string): object {
+  return { type: "preview:test", requestId };
 }
 
 describe("TestPeerSessionOwner send scheduler", () => {
@@ -86,7 +83,7 @@ describe("TestPeerSessionOwner send scheduler", () => {
     const { client, sent, s } = makeClient();
     s.hold = true;
 
-    for (const id of ["r1", "r2", "r3"]) void client.sendTunnel(tunnelChunk(id));
+    for (const id of ["r1", "r2", "r3"]) void (client as any).sendAppEnvelope(CONTROL_STREAM_ID, previewFrame(id), "preview");
     expect(sent).toHaveLength(0);
 
     (client as any).sessions.get(PHONE_ID).lastRecvAt = 0;
@@ -110,7 +107,7 @@ describe("TestPeerSessionOwner send scheduler", () => {
   it("drops the queue when the native session owner closes", () => {
     const { client, sent, s } = makeClient();
     s.hold = true;
-    for (const id of ["r1", "r2", "r3"]) void client.sendTunnel(tunnelChunk(id));
+    for (const id of ["r1", "r2", "r3"]) void (client as any).sendAppEnvelope(CONTROL_STREAM_ID, previewFrame(id), "preview");
     expect(s.queued("preview").frames).toBe(3);
 
     client.close();
@@ -139,8 +136,8 @@ describe("TestPeerSessionOwner send scheduler", () => {
   it("drops the queue when the native peer session is retired", () => {
     const { client, s } = makeClient();
     s.hold = true;
-    void client.sendTunnel(tunnelChunk("r1"));
-    void client.sendTunnel(tunnelChunk("r2"));
+    void (client as any).sendAppEnvelope(CONTROL_STREAM_ID, previewFrame("r1"), "preview");
+    void (client as any).sendAppEnvelope(CONTROL_STREAM_ID, previewFrame("r2"), "preview");
     expect(s.queued("preview").frames).toBe(2);
 
     client.markPeerOffline(PHONE_ID);
@@ -149,14 +146,14 @@ describe("TestPeerSessionOwner send scheduler", () => {
     expect(client.hasEstablishedSession()).toBe(false);
   });
 
-  // The pacing contract the tunnel's chunk loop rides on: the promise says when
-  // the message LEFT the queue, and a cleared queue is a "dropped", not a hang.
+  // The pacing contract any preview-channel sender rides on: the promise says
+  // when the message LEFT the queue, and a cleared queue is a "dropped", not a hang.
   it("settles a queued frame when the hold lifts, and dropped when the queue is cleared first", async () => {
     const held = makeClient();
     held.s.hold = true;
-    const sentPromise = held.client.sendTunnel(tunnelChunk("r1"));
+    const sentPromise = (held.client as any).sendAppEnvelope(CONTROL_STREAM_ID, previewFrame("r1"), "preview");
     let settled: string | undefined;
-    void sentPromise.then((o) => { settled = o; });
+    void sentPromise.then((o: string) => { settled = o; });
     await Promise.resolve();
     expect(settled).toBeUndefined();
 
@@ -166,7 +163,7 @@ describe("TestPeerSessionOwner send scheduler", () => {
 
     const cleared = makeClient();
     cleared.s.hold = true;
-    const dropped = cleared.client.sendTunnel(tunnelChunk("r1"));
+    const dropped = (cleared.client as any).sendAppEnvelope(CONTROL_STREAM_ID, previewFrame("r1"), "preview");
     cleared.client.close();
     expect(await dropped).toBe("dropped");
   });

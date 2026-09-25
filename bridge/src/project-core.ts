@@ -524,7 +524,7 @@ export class ProjectCore {
   }
 
   /** Attach an already-built core+bus as a host-local native project stream and wire
-   *  its plaintext (tunnel) sender, remote-peer provider, and fallback push
+   *  its tunnel-stream server, remote-peer provider, and fallback push
    *  path. The stream is an ADDITIVE bus subscriber, so the live loopback
    *  session is undisturbed. Shared by {@link startRemote} (fresh remote core)
    *  and {@link promote} (already-open local core); the caller owns the returned
@@ -610,10 +610,9 @@ export class ProjectCore {
         core.connState.peerOnline = false;
       },
       onPeerSessionGone: (peerId) => this.noteClientGone(peerId),
-      onTunnel: (raw, peerId) => core.handleTunnelMessage(raw, peerId),
+      tunnels: core.tunnelStreams,
     });
 
-    core.setPlainHook((d, target) => handle.sendTunnel(d, target));
     // Mark this connection as REMOTE for the core's mobile-access gate, and let
     // every per-device question (capabilities, push identity) resolve against the
     // device that asked. Local mode never wires this, so loopback control stays
@@ -725,7 +724,6 @@ export class ProjectCore {
       detach: () => {
         try { unsubscribePush(); } catch { /* best-effort */ }
         try { handle.detach(); } catch { /* best-effort */ }
-        try { core.setPlainHook(null); } catch { /* best-effort */ }
         try { core.setPeerSessionProvider(null); } catch { /* best-effort */ }
         try { core.setTerminalStreamHooks(null); } catch { /* best-effort */ }
       },
@@ -740,7 +738,7 @@ export class ProjectCore {
    *  runtime (remoteDepsFor) — promote constructs no OAuthClient / token timer. */
   promote(remoteDeps: ProjectCoreRemoteDeps): PromotionHandle {
     // A remote-mode core's native binding IS its primary remote session; promoting it would
-    // wire a SECOND client whose PromotionHandle.stop() nulls setPlainHook/
+    // wire a SECOND client whose PromotionHandle.stop() nulls
     // setPeerSessionProvider, tearing down the live primary session's hooks. Only
     // a local-mode core (whose loopback session owns no remote hooks) is promotable.
     if (this.deps.mode === "remote") {
@@ -765,7 +763,6 @@ export class ProjectCore {
         this.relayRegistered = false;
         try { unsubscribePush(); } catch {}
         try { handle.detach(); } catch {}
-        try { core.setPlainHook(null); } catch {}
         try { core.setPeerSessionProvider(null); } catch {}
         try { core.setTerminalStreamHooks(null); } catch {}
       },

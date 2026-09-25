@@ -842,7 +842,6 @@ export class HostServer {
       // re-enroll (index.ts writes auth_revoked + exits). SUPERSEDED never does.
       getLicenseToken,
       pairedPhones: this.pairedPhonesStore,
-      onTunnelMessage: () => {}, // machine-level control has no tunnel handler; project streams install theirs
       // The always-on control plane is the registration a phone's autoOpen dials,
       // so it MUST keep the account inventory's relay_url/machine_name fresh —
       // otherwise the only writers are incidental promotion/remote-core heartbeats,
@@ -2701,7 +2700,6 @@ export class HostServer {
         this.streamIds.set(projectId, handle.streamId);
         return {
           streamId: handle.streamId,
-          sendTunnel: (data, target) => handle.sendTunnel(data, target),
           sendTo: (msg, channel, target) => handle.sendTo(msg, channel, target),
           terminalHooks: handle.terminalHooks,
           detach: () => {

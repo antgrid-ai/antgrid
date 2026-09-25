@@ -3056,8 +3056,7 @@ export const BODY_REDACTED_MESSAGE_TYPES = new Set<string>([
   "terminal:frame",
   "terminal:history:page",
   "tunnel:http-request",
-  "tunnel:http-start",
-  "tunnel:http-chunk",
+  "tunnel:http-head",
   "tunnel:ws-open",
 ]);
 

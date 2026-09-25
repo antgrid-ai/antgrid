@@ -17,6 +17,7 @@ import { frameIdFor } from "../netwatch";
 import { AdmissionRegistry, type AdmissionReservation } from "./admission-registry";
 import { PeerStreamAcceptor, readStreamOpen } from "./stream-dispatch";
 import { TerminalStreamRegistry } from "./terminal-streams";
+import { TunnelStreamRegistry } from "./tunnel-streams";
 import type { AbMessage } from "../protocol";
 import type { StreamSendOutcome } from "./stream-records";
 
@@ -27,7 +28,8 @@ export interface NativePeerOptions extends PeerSessionOwnerOptions {
   getLicenseToken: () => Promise<string> | string;
   remoteAccessEnabled: () => boolean;
   /** `HostServer.seenProjects.has`, threaded through to `TerminalStreamRegistry`
-   *  (A2). Absent fails every terminal-stream open closed, `NOT_ALLOWED`. */
+   *  (A2) and `TunnelStreamRegistry` (A3). Absent fails every terminal- or
+   *  tunnel-stream open closed, `NOT_ALLOWED`. */
   projectCataloged?: (projectId: string) => boolean;
   lifecycle?: {
     now?: () => number;
@@ -85,6 +87,7 @@ export class NativePeerSessions extends PeerSessionOwner {
   private readonly admissions = new AdmissionRegistry(4);
   private readonly enrollment: EndpointEnrollment;
   private readonly terminalStreams: TerminalStreamRegistry;
+  private readonly tunnelStreams: TunnelStreamRegistry;
   private readonly lease: AuthorizationLease;
   private lifetime = 0;
   private stopped = false;
@@ -144,6 +147,15 @@ export class NativePeerSessions extends PeerSessionOwner {
       diagnostic: (type, detail) => this.recordDiagnostic({ dir: "event", kind: "lifecycle", transport: "iroh",
         msgType: type, detail: detail as Record<string, string | number | boolean> }),
     });
+    this.tunnelStreams = new TunnelStreamRegistry({
+      projectCataloged: nativeOpts.projectCataloged,
+      tunnelBinding: (projectId) => this.mux.tunnelBinding(projectId),
+      // Guarded the same way `terminalStreams`'s is: a stale binding from a
+      // superseded connection must never retire the peer's NEWER one.
+      retirePeer: (peerId, reason) => { if (this.nativePeers.has(peerId)) this.retirePeer(peerId, reason); },
+      diagnostic: (type, detail) => this.recordDiagnostic({ dir: "event", kind: "lifecycle", transport: "iroh",
+        msgType: type, detail: detail as Record<string, string | number | boolean> }),
+    });
   }
 
   connect(): void {
@@ -168,6 +180,7 @@ export class NativePeerSessions extends PeerSessionOwner {
 
   protected override terminalProjectDetached(projectId: string): void {
     this.terminalStreams.projectDetached(projectId);
+    this.tunnelStreams.projectDetached(projectId);
   }
 
   private async startEndpoint(): Promise<Endpoint> {
@@ -391,7 +404,11 @@ export class NativePeerSessions extends PeerSessionOwner {
       authorized: () => this.authorized(peerId, endpointId),
       established: () => this.sessions.has(peerId),
       onUnauthorized: () => { if (this.nativePeers.get(peerId) === peer) this.retirePeer(peerId, "unauthorized"); },
-      handlers: { terminal: this.terminalStreams.handler },
+      handlers: {
+        terminal: this.terminalStreams.handler,
+        "tunnel-http": this.tunnelStreams.httpHandler,
+        "tunnel-ws": this.tunnelStreams.wsHandler,
+      },
       schedule: this.nativeOpts.lifecycle?.schedule,
       diagnostic: (type, detail) => this.recordDiagnostic({ dir: "event", kind: "lifecycle", transport: "iroh", msgType: type, detail }),
     });
@@ -452,6 +469,7 @@ export class NativePeerSessions extends PeerSessionOwner {
     peer.cancelHelloTimer?.();
     peer.streams?.stop();
     this.terminalStreams.dropPeer(peerId);
+    this.tunnelStreams.dropPeer(peerId);
     peer.connection.close(reason === "unauthorized" ? 3n : reason === "protocol-violation" ? 2n : 1n, []);
     peer.records?.close(reason);
     super.dropSession(peerId, "iroh");

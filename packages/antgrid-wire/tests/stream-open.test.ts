@@ -12,17 +12,26 @@ import {
   STREAM_OPEN_MAX_ID_LENGTH,
   STREAM_TERMINAL_APP_RECORD_MAX_BYTES,
   STREAM_TERMINAL_BRIDGE_RECORD_MAX_BYTES,
+  STREAM_TUNNEL_DATA_MAX_BYTES,
+  STREAM_TUNNEL_RECORD_MAX_BYTES,
+  STREAM_TUNNEL_REQUEST_BODY_MAX_BYTES,
   SessionStreamOpen,
   StreamOpen,
   StreamRefused,
   StreamRefusedCode,
+  TUNNEL_RECORD_TAG_BODY,
+  TUNNEL_RECORD_TAG_BODY_GZIP,
+  TUNNEL_RECORD_TAG_WS_BINARY,
+  TUNNEL_RECORD_TAG_WS_TEXT,
   TerminalStreamOpen,
   TunnelHttpStreamOpen,
   TunnelWsStreamOpen,
   decodeStreamOpen,
   decodeStreamRefused,
+  decodeTunnelRecord,
   encodeStreamOpen,
   encodeStreamRefused,
+  encodeTunnelDataRecord,
 } from "../src/index";
 
 describe("StreamOpen: every kind round-trips and rejects unknown fields", () => {
@@ -157,6 +166,55 @@ describe("encodeStreamRefused / decodeStreamRefused", () => {
 test("terminal record caps are exported from the package root as 16384 and 2097152", () => {
   expect(STREAM_TERMINAL_APP_RECORD_MAX_BYTES).toBe(16_384);
   expect(STREAM_TERMINAL_BRIDGE_RECORD_MAX_BYTES).toBe(2_097_152);
+});
+
+test("tunnel record caps are exported from the package root", () => {
+  expect(STREAM_TUNNEL_DATA_MAX_BYTES).toBe(1_048_576);
+  expect(STREAM_TUNNEL_RECORD_MAX_BYTES).toBe(STREAM_TUNNEL_DATA_MAX_BYTES + 1);
+  expect(STREAM_TUNNEL_REQUEST_BODY_MAX_BYTES).toBe(MAX_TRANSFER_BYTES);
+});
+
+describe("encodeTunnelDataRecord / decodeTunnelRecord", () => {
+  const tags = [
+    TUNNEL_RECORD_TAG_BODY,
+    TUNNEL_RECORD_TAG_BODY_GZIP,
+    TUNNEL_RECORD_TAG_WS_TEXT,
+    TUNNEL_RECORD_TAG_WS_BINARY,
+  ] as const;
+
+  test("round-trips every tag, including a zero-length payload", () => {
+    for (const tag of tags) {
+      for (const payload of [new Uint8Array(0), new Uint8Array([1, 2, 3, 4])]) {
+        const record = encodeTunnelDataRecord(tag, payload);
+        const decoded = decodeTunnelRecord(record);
+        expect(decoded).toEqual({ kind: "data", tag, payload });
+      }
+    }
+  });
+
+  test("a 0x7B-led record decodes as JSON, never as tagged data, even though 0x7B is not a data tag", () => {
+    const json = JSON.stringify({ type: "tunnel:http-head", requestId: "r1" });
+    const bytes = new TextEncoder().encode(json);
+    expect(bytes[0]).toBe(0x7b);
+    expect(decodeTunnelRecord(bytes)).toEqual({ kind: "json", text: json });
+  });
+
+  test("decodeTunnelRecord returns null for an empty record, an unrecognized tag, and undecodable JSON", () => {
+    expect(decodeTunnelRecord(new Uint8Array(0))).toBeNull();
+    expect(decodeTunnelRecord(new Uint8Array([0x04]))).toBeNull(); // no tag is assigned to 0x04
+    expect(decodeTunnelRecord(new Uint8Array([0x7b, 0xff, 0xfe]))).toBeNull(); // "{" but not valid UTF-8 JSON
+  });
+
+  test("encodeTunnelDataRecord throws RangeError on an unknown tag or a payload over the cap", () => {
+    expect(() => encodeTunnelDataRecord(0x04 as never, new Uint8Array(0))).toThrow(RangeError);
+    expect(() =>
+      encodeTunnelDataRecord(TUNNEL_RECORD_TAG_BODY, new Uint8Array(STREAM_TUNNEL_DATA_MAX_BYTES + 1)),
+    ).toThrow(RangeError);
+    // Exactly at the cap must still succeed.
+    expect(() =>
+      encodeTunnelDataRecord(TUNNEL_RECORD_TAG_BODY, new Uint8Array(STREAM_TUNNEL_DATA_MAX_BYTES)),
+    ).not.toThrow();
+  });
 });
 
 test("D7 cap constants hold the adopted owner values (docs/iroh-reduction/ledger.md)", () => {

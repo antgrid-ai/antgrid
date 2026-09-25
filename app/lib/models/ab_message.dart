@@ -1684,21 +1684,6 @@ Object? parseAbMessage(Map<String, dynamic> json) {
         attributes: attributes,
       );
 
-    case 'tunnel:http-start':
-      return TunnelHttpStartMessage.fromJson(json);
-
-    case 'tunnel:http-chunk':
-      return TunnelHttpChunkMessage.fromJson(json);
-
-    case 'tunnel:http-end':
-      return TunnelHttpEndMessage.fromJson(json);
-
-    case 'tunnel:ws-data':
-      return TunnelWsDataMessage.fromJson(json);
-
-    case 'tunnel:ws-close':
-      return TunnelWsCloseMessage.fromJson(json);
-
     case 'command:output':
       final projectId = json['projectId'];
       final commandName = json['commandName'];

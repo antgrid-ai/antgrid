@@ -40,7 +40,7 @@ function stubRemoteHostConnection(): RemoteHostConnection {
     setBus: () => {},
     connect: () => {},
     close: () => {},
-    attachStream: () => ({ streamId: "s1", detach: () => {}, sendTunnel: () => {} }),
+    attachStream: () => ({ streamId: "s1", detach: () => {} }),
     noteStreamBound: () => {},
     sendPushDeliver: () => {},
   } as unknown as RemoteHostConnection;

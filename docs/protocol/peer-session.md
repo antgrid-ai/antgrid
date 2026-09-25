@@ -62,8 +62,9 @@ stop codes (`STREAM_STOP_REFUSED`, `STREAM_RESET_OPEN_TIMEOUT`, `STREAM_RESET_RE
 stream never costs the connection; only an unauthorized peer or a first-stream protocol violation does.
 
 As of Stage A wave A1 the handler table held nothing, so every well-formed later stream was refused
-`NOT_ALLOWED`. Wave A2 registers the first handler, `{kind:"terminal"}` (§1b); project and tunnel streams
-arrive with theirs in later waves. The QUIC-level cap (`STREAM_MAX_BIDI_STREAMS_PER_CONNECTION`) is set
+`NOT_ALLOWED`. Wave A2 registers `{kind:"terminal"}` (§1b); wave A3 adds `{kind:"tunnel-http"}` and
+`{kind:"tunnel-ws"}` (§1c). Project streams arrive with theirs in a later wave. The QUIC-level cap
+(`STREAM_MAX_BIDI_STREAMS_PER_CONNECTION`) is set
 once per connection via `setMaxConcurrentBiStreams`, synchronously after the ALPN check. All caps are
 defined once in `packages/antgrid-wire/src/stream-open.ts` and hand-mirrored in
 `packages/antgrid_relay_client/lib/src/models/stream_open.dart`.
@@ -111,6 +112,63 @@ beside every other stream cap (§1a); the writer's queue ceiling
 (`TERMINAL_STREAM_MAX_QUEUED_BYTES`) and stream priority (`STREAM_PRIORITY_TERMINAL`) are side-local to
 `bridge/src/peer/terminal-streams.ts`, since Dart has no priority concept and nothing on the app side reads
 them.
+
+## 1c. Tunnel streams
+
+Stage A wave A3 moves HTTP-proxy and browser-side-WebSocket preview traffic off the bus entirely and
+onto its own QUIC streams, one per exchange: `{kind:"tunnel-http", projectId, requestId}` opens one
+stream for exactly one HTTP request/response pair, `{kind:"tunnel-ws", projectId, wsId}` one stream for
+one browser-side WebSocket's whole lifetime. Both are admitted by `TunnelStreamRegistry`
+(`bridge/src/peer/tunnel-streams.ts`), plugged into `PeerStreamAcceptor` as `handlers["tunnel-http"]` /
+`handlers["tunnel-ws"]`, and pass through §1a's cap/pending-open/timeout admission exactly as a terminal
+stream does — including the catalogued-and-safe `projectId` / live mux binding check
+(`StreamMux.tunnelBinding`, the tunnel counterpart of `projectBinding`), a lookup only, never an open or a
+promotion.
+
+**Record framing.** Every record on a tunnel stream is `[u32 BE len][body]`; the body's first byte
+discriminates a JSON control record from a tagged binary data record:
+
+| First byte | Meaning |
+|---|---|
+| `0x7B` (`{`) | UTF-8 JSON control record — the whole body is one JSON object |
+| `0x00` | HTTP body slice, identity encoding |
+| `0x01` | HTTP body slice, gzip encoding |
+| `0x02` | WebSocket frame, text |
+| `0x03` | WebSocket frame, binary |
+
+Codecs and tag constants: `encodeTunnelDataRecord`/`decodeTunnelRecord`, `TUNNEL_RECORD_TAG_BODY`/
+`_BODY_GZIP`/`_WS_TEXT`/`_WS_BINARY` (`packages/antgrid-wire/src/stream-open.ts`). A data record's tag
+selects the compression or frame kind; nothing else on the stream needs to.
+
+**First-record rule.** The checkout a tunnel targets rides this record, not the open frame (D-7 — the
+open-frame schemas above are frozen as of A0b). An HTTP stream's first record must be a JSON
+`tunnel:http-request`, naming the same `requestId` as the open frame plus `checkoutId`, `headers` and
+`bodyLength`; a WS stream's first record must be `tunnel:ws-open`, naming the same `wsId` as the open
+frame's under the field `tunnelId`, plus `checkoutId`. Either is read under the same 5s deadline as §1a's
+open frame. Once the head record parses, `AgentCore.tunnelStreams.admit(peerId, checkoutId)` runs, in
+order: the remote-access switch (`NOT_ALLOWED` if off), checkout-routing capability if the peer's project
+holds any isolated session (`UPDATE_REQUIRED`), the named checkout must be a currently running runtime
+(`NOT_ALLOWED` — "unknown checkout"), and that runtime must have a `TunnelManager` (`NOT_ALLOWED`). Any
+failure refuses in-band exactly as §1a describes, on the tunnel stream itself; a malformed head record, or
+one naming an id other than the open frame's, is refused `INVALID`.
+
+**The end record.** An HTTP stream's response ends with a JSON `tunnel:http-end` (naming `requestId` and
+`checkoutId`) immediately before the bridge FINs its send half — unlike a terminal stream's plain FIN
+(§1b), because Dart cannot tell a clean end from a reset apart on this stream and the app has to be told
+explicitly which one happened. A WS stream ends with `tunnel:ws-close` (optional `code`/`reason`) then
+FIN, mirroring a real WebSocket close frame.
+
+**Cancel.** The app cancels by resetting (or FIN-ing) its own send half; the bridge's pending read on that
+half fails, which it treats as the app's cancel — aborting the upstream fetch or WS and then closing its
+own send half in turn, exactly as if it had reached the end on its own. A record arriving after the
+declared body length, or after the app's own end, is a stream breach. Failure isolation matches §1b: an
+overflow or a lost stream resets only that one stream — every other tunnel, attachment and the connection
+are untouched — and only `unauthorized` (or a first-stream protocol violation, §1a) closes the connection.
+
+**Caps.** `STREAM_MAX_TUNNEL_STREAMS_PER_PEER`, `STREAM_TUNNEL_DATA_MAX_BYTES` (a data record's payload,
+after its tag byte), `STREAM_TUNNEL_RECORD_MAX_BYTES` (payload + tag, what the reader checks against) and
+`STREAM_TUNNEL_REQUEST_BODY_MAX_BYTES` (an HTTP request body, bounded the same as a session-path transfer)
+are defined once in `packages/antgrid-wire/src/stream-open.ts` beside every other stream cap (§1a).
 
 ## 2. The hello
 

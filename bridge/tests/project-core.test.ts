@@ -29,7 +29,6 @@ function fakeRemoteDeps(): { deps: ProjectCoreRemoteDeps; calls: Array<{ bus: Me
       const handle: StreamHandle = {
         streamId: "stream-1",
         detach: () => {},
-        sendTunnel: async () => "sent" as const,
         sendTo: async () => "sent" as const,
       };
       return handle;
@@ -391,7 +390,6 @@ test("attachRelayStream wires handle.terminalHooks into the core, and every tear
       const handle: StreamHandle = {
         streamId: "stream-1",
         detach: () => {},
-        sendTunnel: async () => "sent" as const,
         sendTo: async () => "sent" as const,
         terminalHooks: hooks,
       };

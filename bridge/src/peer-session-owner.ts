@@ -3,7 +3,6 @@ import { logger } from "./logger";
 import type { DeviceIdentity } from "./device";
 import { parseMessageFast, SessionHelloFrame, type AbMessage, type SessionHello } from "./protocol";
 import { baseSlotDeviceId, slotMachineDeviceId } from "./relay-slot";
-import { parseTunnelMessage } from "./tunnel-protocol";
 import { buildFragments, FRAG_THRESHOLD, MAX_TRANSFER_BYTES, TRANSFER_TIMEOUT_MS, GLOBAL_REASSEMBLY_BUDGET, CONTROL_STREAM_ID, CREDIT_BATCH_BYTES, WINDOW_STALL_WARN_MS } from "antgrid-wire";
 import type { MessageBus, Channel, TransportSubscriber } from "./message-bus";
 import type { PairedPhonesStore } from "./paired-phones";
@@ -34,7 +33,6 @@ export interface PeerSessionOwnerOptions {
     capabilities: { checkoutRouting: boolean; pullsTree: boolean; terminalFramesV1: boolean; peerId: string },
   ) => void;
   onMessage?: (msg: AbMessage) => void;
-  onTunnelMessage?: (msg: unknown, peerId: string) => void;
   onDisconnected?: () => void;
   onError?: (code: string, message: string) => void;
   /** Phone identity/push registry. Grants nothing — it is where `admitPeer`
@@ -686,10 +684,7 @@ export abstract class PeerSessionOwner {
       }
       this.opts.onMessage?.(msg);
       this.bus?.dispatchInbound(msg, channel, "relay", peerId);
-      return;
     }
-    const tunnel = parseTunnelMessage(mJson);
-    if (tunnel) this.opts.onTunnelMessage?.(tunnel, peerId);
   }
 
   // --- Session frames ---
@@ -871,22 +866,13 @@ export abstract class PeerSessionOwner {
     void this.sendAppEnvelope(CONTROL_STREAM_ID, msg, channel, target);
   }
 
-  /** Send a tunnel-protocol message on the preview channel (control plane).
-   *  `target` names the session whose request this answers. The promise settles
-   *  when the message left the send queue — see {@link sendAppEnvelope}. */
-  sendTunnel(data: object, target?: SendTarget): Promise<SendOutcome> {
-    return this.sendAppEnvelope(CONTROL_STREAM_ID, data, "preview", target);
-  }
-
   /**
    * Wrap `msg` in the `{ s?, m }` stream envelope, fragment the ENVELOPE json
    * (so `s` survives fragmentation), then hand every fragment to the send
    * scheduler OF EACH RECIPIENT SESSION, which writes them in order — per
    * session by construction, since each device has its own queue and window.
    * Control-plane traffic uses `CONTROL_STREAM_ID` (`s` omitted).
-   * Dropped when no recipient has a session. A too-large `tunnel:http-response`
-   * degrades to a 413 so the phone's preview request fails fast instead of
-   * hanging.
+   * Dropped when no recipient has a session.
    *
    * Fragmenting once and queueing N times is deliberate: every device gets the
    * SAME transfer id, which is what lets an abort be reported the same way to
@@ -894,9 +880,9 @@ export abstract class PeerSessionOwner {
    *
    * The returned promise settles when the message LEFT every recipient's queue:
    * "sent" once every fragment of every copy was written, "dropped" the moment
-   * one is discarded. A caller that paces itself against this (the tunnel's
-   * chunk loop) is therefore throttled by the TIGHTEST of the recipients'
-   * credit windows, which is the one that would overflow first.
+   * one is discarded. A caller that paces itself against this is therefore
+   * throttled by the TIGHTEST of the recipients' credit windows, which is the
+   * one that would overflow first.
    */
   protected sendAppEnvelope(
     streamId: string,
@@ -920,7 +906,6 @@ export abstract class PeerSessionOwner {
         dir: "tx", kind: "drop", transport: this.payloadTransport(target.kind === "peer" ? target.peerId : undefined), channel,
         msgType: type ?? "message", streamId, reason: "no-e2e-session",
       });
-      this.handleUndeliverableTunnel("dropped", channel, msg, target);
       return Promise.resolve<SendOutcome>("dropped");
     }
 
@@ -939,7 +924,6 @@ export abstract class PeerSessionOwner {
         msgType: type ?? "message", streamId, reason: fragmented.error.code,
         detail: { bytes: Buffer.byteLength(json, "utf8") },
       });
-      this.handleUndeliverableTunnel(outcome, channel, msg, target);
       return Promise.resolve(outcome);
     }
 
@@ -1003,44 +987,6 @@ export abstract class PeerSessionOwner {
       out.push(session);
     }
     return out;
-  }
-
-  /** A tunnel HTTP response has no re-sync path (unlike control), so an
-   *  undeliverable one must fail the phone's request fast: too-large → a
-   *  413; no session → loud warn (the request will time out). */
-  protected handleUndeliverableTunnel(
-    outcome: "dropped" | "too-large",
-    channel: Channel,
-    msg: unknown,
-    target: SendTarget,
-  ): void {
-    if (channel !== "preview") return;
-    const type = (msg as { type?: string } | null)?.type;
-    const requestId = (msg as { requestId?: string } | null)?.requestId;
-    if (type !== "tunnel:http-response" || typeof requestId !== "string") return;
-    if (outcome === "too-large") {
-      // Guarded against recursion: the 413 body is tiny (never too-large).
-      this.sendAppEnvelope(
-        CONTROL_STREAM_ID,
-        {
-          type: "tunnel:http-response",
-          requestId,
-          status: 413,
-          headers: {},
-          body: "Preview response too large to tunnel",
-          bodyEncoding: "utf8",
-        },
-        "preview",
-        // Same addressing as the response it replaces: only the device that
-        // made the request is waiting on it.
-        target,
-      );
-    } else {
-      this.diagnostics.warn(
-        "Tunnel response %s dropped (no session established) — preview request will time out",
-        requestId,
-      );
-    }
   }
 
   protected messageFragKey(msg: unknown): string | undefined {

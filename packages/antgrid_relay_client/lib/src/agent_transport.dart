@@ -12,7 +12,10 @@
 /// Flutter layer.
 library;
 
+import 'dart:typed_data';
+
 import 'terminal_attachment.dart';
+import 'tunnel_stream.dart';
 
 /// Lifecycle states an [AgentTransport] can be in.
 enum TransportState { connecting, connected, disconnected, error }
@@ -193,6 +196,32 @@ abstract class AgentTransport {
     required String requestId,
     required String checkoutId,
     required Map<String, dynamic> subscribe,
+  });
+
+  /// Opens one HTTP tunnel exchange. Returns synchronously; never throws —
+  /// every failure (refusal, a local open error, `NOT_SUPPORTED` on a
+  /// transport with no stream-backed implementation) is reported through the
+  /// returned exchange's `head`/`body`.
+  ///
+  /// [head] is the `tunnel:http-request` head, with `type` and [requestId]
+  /// already set. The transport stamps `bodyLength = body.length` and
+  /// [checkoutId] onto it itself.
+  TunnelHttpExchange openTunnelHttp({
+    required String requestId,
+    required String checkoutId,
+    required Map<String, dynamic> head,
+    required Uint8List body,
+  });
+
+  /// Opens one WebSocket tunnel channel. Returns synchronously; never throws
+  /// — see [openTunnelHttp].
+  ///
+  /// [open] is the `tunnel:ws-open` head; the transport stamps `tunnelId`
+  /// and [checkoutId] onto it itself.
+  TunnelWsChannel openTunnelWs({
+    required String tunnelId,
+    required String checkoutId,
+    required Map<String, dynamic> open,
   });
 }
 

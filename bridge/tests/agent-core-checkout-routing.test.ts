@@ -637,39 +637,25 @@ test.skipIf(process.platform === "win32")(
   20000,
 );
 
-test("a tunnel request from a session that cannot route checkouts is refused, while a capable device's is proxied", async () => {
-  // The tunnel route bypasses the bus, so the per-device capability check the
-  // bus dispatch makes had to be restated on it: a preview body IS a checkout's
+test("admit refuses UPDATE_REQUIRED for a non-routing peer while isolated sessions exist, NOT_ALLOWED for an unknown checkout, and admits a routing peer to the checkout runtime's own manager", async () => {
+  // Tunnel streams bypass the bus, so the per-device capability check the bus
+  // dispatch makes had to be restated on admit: a preview body IS a checkout's
   // dev server rendered verbatim, and a device that may not address a checkout
-  // must not be handed one's page instead of an error.
+  // must not be handed one's page instead of a refusal.
   await initRepo();
   const { bus, sent } = await bootCore(true);
-  await createSession(bus, sent, "Isolated", "worktree");
+  const session = await createSession(bus, sent, "Isolated", "worktree");
 
-  // Tunnel answers leave through the plaintext hook, never the bus.
-  const plain: object[] = [];
-  core!.setPlainHook(async (frame) => { plain.push(frame); return "sent"; });
-  let checkoutRouting = false;
   core!.setPeerSessionProvider((peerId) => ({
-    peerId, peerPubkey: "pub-app", checkoutRouting, pullsTree: false,
+    peerId, peerPubkey: "pub-app", checkoutRouting: peerId === "modern-peer", pullsTree: false,
   }));
-  const responses = () => plain.filter((frame) => (frame as { type?: string }).type === "tunnel:http-start");
-  const request = (requestId: string) => core!.handleTunnelMessage({
-    // Nothing listens on this port: an ADMITTED request still answers 502, so a
-    // response frame is proof the gate passed it to the proxy.
-    type: "tunnel:http-request", requestId, port: 65500, method: "GET", path: "/secret",
-  }, "app-dev#machine-dev");
 
-  request("stale");
-  await new Promise((resolve) => setTimeout(resolve, 300));
-  expect(responses()).toEqual([]);
+  const nonRouting = core!.tunnelStreams.admit("stale-peer", session.checkoutId);
+  expect(nonRouting).toMatchObject({ ok: false, refusal: { code: "UPDATE_REQUIRED" } });
 
-  checkoutRouting = true;
-  request("modern");
-  const deadline = Date.now() + 3000;
-  while (Date.now() < deadline && responses().length === 0) {
-    await new Promise((resolve) => setTimeout(resolve, 15));
-  }
-  expect(responses()).toHaveLength(1);
-  expect(responses()[0]).toMatchObject({ requestId: "modern" });
+  const unknownCheckout = core!.tunnelStreams.admit("modern-peer", "not-a-real-checkout");
+  expect(unknownCheckout).toMatchObject({ ok: false, refusal: { code: "NOT_ALLOWED" } });
+
+  const admitted = core!.tunnelStreams.admit("modern-peer", session.checkoutId);
+  expect(admitted.ok).toBe(true);
 }, 20000);

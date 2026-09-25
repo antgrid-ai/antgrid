@@ -1,4 +1,4 @@
-import { base64Length, TUNNEL_CHUNK_BYTES, TUNNEL_CHUNK_FLUSH_MS, TUNNEL_GZIP_ENCODING } from "./tunnel-protocol";
+import { TUNNEL_BODY_SLICE_BYTES, TUNNEL_CHUNK_FLUSH_MS, TUNNEL_GZIP_ENCODING } from "./tunnel-protocol";
 
 /** Hard ceiling on a tunneled body. Enforced, never silently truncated: a known
  *  content-length above it answers 413 before a byte is read, and an unknown
@@ -111,12 +111,12 @@ function isPrecompressedContentType(ct: string): boolean {
 // phone-side decode cost is already noise.
 const GZIP_MIN_BYTES = 4096;
 
-/** One body slice, ready to ride a `tunnel:http-start` or `tunnel:http-chunk`.
- *  [last] means the upstream body ended WITH this slice (see
- *  {@link LocalhostFetchStream.slices}). */
+/** One body slice, ready to ride a `tunnel:http-head`/body/`tunnel:http-end`
+ *  run on its own QUIC stream. [last] means the upstream body ended WITH this
+ *  slice (see {@link LocalhostFetchStream.slices}). */
 export interface TunnelBodySlice {
-  data: string;
-  bodyEncoding: "base64" | typeof TUNNEL_GZIP_ENCODING;
+  bytes: Uint8Array;
+  gzip: boolean;
   last: boolean;
 }
 
@@ -137,8 +137,10 @@ export interface LocalhostFetchStream {
 export class UpstreamBodyError extends Error {}
 
 interface ChunkOpts {
-  contentType: string;
-  acceptsGzip: boolean;
+  /** Already netted against the precompressed-content-type exemption
+   *  (`isPrecompressedContentType`) — computed once per response, before any
+   *  slice exists, since the decision does not vary slice to slice. */
+  acceptGzip: boolean;
   chunkBytes: number;
   flushMs: number;
   readIdleMs: number;
@@ -146,48 +148,33 @@ interface ChunkOpts {
 }
 
 /**
- * Serialize ONE body slice for the tunnel, compressing when the caller
- * advertised support and it actually pays. The phone's cost is dominated by
- * JSON-decoding this string on its UI isolate, and gzip helps that twice over:
- * ~3x fewer bytes, and base64 has no characters JSON must escape — whereas raw
- * JS/CSS is dense with quotes and backslashes, which drops Dart's parser onto
- * its slow unescape path. Every gzip slice is an INDEPENDENT member, so no
- * decoder state crosses slices and a slice that grew under gzip ships plain.
+ * Serialize ONE body slice for the tunnel stream, compressing when the caller
+ * advertised support and it actually pays. Every gzip slice is an INDEPENDENT
+ * member (no decoder state crosses slices), and a slice that grew under gzip
+ * ships identity — so no slice can exceed `STREAM_TUNNEL_DATA_MAX_BYTES`.
  */
-function encodeChunk(buf: Buffer, opts: ChunkOpts, last: boolean): TunnelBodySlice {
-  const plainLength = base64Length(buf.byteLength);
-
-  if (
-    opts.acceptsGzip &&
-    buf.byteLength >= GZIP_MIN_BYTES &&
-    !isPrecompressedContentType(opts.contentType)
-  ) {
-    // Zero-copy view: Buffer.concat never allocates on a SharedArrayBuffer, so
-    // the cast the Uint8Array<ArrayBuffer> parameter needs is sound — and the
-    // alternative would copy the whole slice just to satisfy the type.
-    const gzipped = Bun.gzipSync(
-      new Uint8Array(buf.buffer as ArrayBuffer, buf.byteOffset, buf.byteLength),
-    );
-    // The content-type list is a shortcut, not the authority. Anything it lets
-    // through that turns out incompressible — a pre-minified asset served as
-    // text/plain, an opaque blob under a novel type — is caught here, for the
-    // price of one gzip we discard.
-    if (base64Length(gzipped.byteLength) < plainLength) {
-      return {
-        data: Buffer.from(gzipped).toString("base64"),
-        bodyEncoding: TUNNEL_GZIP_ENCODING,
-        last,
-      };
+export function encodeChunk(raw: Uint8Array, acceptGzip: boolean, last: boolean): TunnelBodySlice {
+  if (acceptGzip && raw.byteLength >= GZIP_MIN_BYTES) {
+    // Every `raw` this module ever builds is ArrayBuffer-backed (concatenation,
+    // TextEncoder, a stream read) and never a SharedArrayBuffer view — the cast
+    // narrows past `Bun.gzipSync`'s stricter generic, not past a real check.
+    const gzipped = Bun.gzipSync(raw as Uint8Array<ArrayBuffer>);
+    if (gzipped.byteLength < raw.byteLength) {
+      return { bytes: gzipped, gzip: true, last };
     }
   }
-
-  return { data: buf.toString("base64"), bodyEncoding: "base64", last };
+  return { bytes: raw, gzip: false, last };
 }
 
-/** One slice carrying `text` verbatim — the shape every bridge-synthesised
- *  answer (403, 413) takes, so the caller has exactly one body path. */
-async function* singleSlice(text: string): AsyncGenerator<TunnelBodySlice, void, void> {
-  yield { data: Buffer.from(text, "utf8").toString("base64"), bodyEncoding: "base64", last: true };
+/** One slice carrying `raw` verbatim, `last: true` — the shape a
+ *  bridge-synthesised answer (403, 413, a synthesized 502) takes, so the
+ *  caller has exactly one body path regardless of source. */
+export function singleSlice(raw: Uint8Array, acceptGzip: boolean): TunnelBodySlice {
+  return encodeChunk(raw, acceptGzip, true);
+}
+
+async function* singleSliceText(text: string): AsyncGenerator<TunnelBodySlice, void, void> {
+  yield singleSlice(new TextEncoder().encode(text), false);
 }
 
 async function* emptySlices(): AsyncGenerator<TunnelBodySlice, void, void> {}
@@ -249,15 +236,13 @@ export interface FetchLocalhostOpts {
   url: string;
   method?: string;
   headers?: Record<string, string>;
-  body?: string;
+  body?: Uint8Array;
   /** Body encodings the phone advertised (`TunnelHttpRequest.acceptEncodings`).
-   *  Only ever compress what this advertised: `bodyEncoding` reaches the app
-   *  as a bare string, so an app that predates the field renders the gzip
-   *  bytes as the body. Compatibility rides on that one field in both
-   *  directions — `z.object` strips it for an old bridge, and an old app
-   *  never sends it. */
+   *  Only ever compress what this advertised: a gzip slice reaches the app
+   *  tagged `TUNNEL_RECORD_TAG_BODY_GZIP`, so an app that predates the field
+   *  never sends it and is never sent one. */
   acceptEncodings?: string[];
-  /** The caller's cancel (`tunnel:http-cancel`, checkout stop). Aborts the head
+  /** The caller's cancel (the app resetting its stream, checkout stop). Aborts the head
    *  fetch or the pending read. */
   signal?: AbortSignal;
   // Test seams; production leaves the defaults.
@@ -275,7 +260,7 @@ export async function fetchLocalhost(opts: FetchLocalhostOpts): Promise<Localhos
       status: 403,
       headers: {},
       setCookies: [],
-      slices: singleSlice("Forbidden: only localhost URLs are allowed"),
+      slices: singleSliceText("Forbidden: only localhost URLs are allowed"),
     };
   }
 
@@ -298,7 +283,11 @@ export async function fetchLocalhost(opts: FetchLocalhostOpts): Promise<Localhos
     resp = await fetchWithSchemeRecovery(parsed, {
       method: opts.method ?? "GET",
       headers: opts.headers ?? {},
-      body: opts.body,
+      // An empty body is sent as no body: some origins treat a zero-length
+      // body differently from an absent one on GET/HEAD (a stricter
+      // Content-Length: 0 requirement, or a method-override check). Cast for
+      // the same reason as `encodeChunk`'s: never a SharedArrayBuffer view.
+      body: opts.body && opts.body.byteLength > 0 ? (opts.body as Uint8Array<ArrayBuffer>) : undefined,
       signal: ctrl.signal,
       // Don't follow 3xx here: the WebView is the real client and must see the
       // redirect itself. Following it would swallow the response headers of the
@@ -330,7 +319,12 @@ export async function fetchLocalhost(opts: FetchLocalhostOpts): Promise<Localhos
   });
 
   const contentType = resp.headers.get("content-type") ?? "";
-  const acceptsGzip = opts.acceptEncodings?.includes(TUNNEL_GZIP_ENCODING) ?? false;
+  // Netted against the precompressed-content-type exemption here, once per
+  // response, rather than inside encodeChunk per slice — the decision does
+  // not vary slice to slice.
+  const acceptGzip =
+    (opts.acceptEncodings?.includes(TUNNEL_GZIP_ENCODING) ?? false) &&
+    !isPrecompressedContentType(contentType);
 
   const declaredLength = Number(resp.headers.get("content-length"));
   if (Number.isFinite(declaredLength) && declaredLength > maxBodyBytes) {
@@ -343,7 +337,7 @@ export async function fetchLocalhost(opts: FetchLocalhostOpts): Promise<Localhos
       status: 413,
       headers: {},
       setCookies: [],
-      slices: singleSlice("Preview response too large to tunnel"),
+      slices: singleSliceText("Preview response too large to tunnel"),
     };
   }
 
@@ -357,9 +351,8 @@ export async function fetchLocalhost(opts: FetchLocalhostOpts): Promise<Localhos
     headers: respHeaders,
     setCookies,
     slices: chunkBody(reader, ctrl, {
-      contentType,
-      acceptsGzip,
-      chunkBytes: opts.chunkBytes ?? TUNNEL_CHUNK_BYTES,
+      acceptGzip,
+      chunkBytes: opts.chunkBytes ?? TUNNEL_BODY_SLICE_BYTES,
       flushMs: opts.flushMs ?? TUNNEL_CHUNK_FLUSH_MS,
       readIdleMs: opts.readIdleMs ?? FETCH_READ_IDLE_MS,
       maxBodyBytes,
@@ -432,12 +425,12 @@ async function* chunkBody(
       clearTimeout(timer);
       if (r.kind === "timer") {
         // The read stays outstanding, so `readIssuedAt` is untouched.
-        if (pendingBytes > 0) { yield encodeChunk(take(pendingBytes), o, false); continue; }
+        if (pendingBytes > 0) { yield encodeChunk(take(pendingBytes), o.acceptGzip, false); continue; }
         throw new UpstreamBodyError("upstream body stalled");
       }
       read = null;
       if (r.v.done) {
-        if (pendingBytes > 0) yield encodeChunk(take(pendingBytes), o, true);
+        if (pendingBytes > 0) yield encodeChunk(take(pendingBytes), o.acceptGzip, true);
         return;
       }
       total += r.v.value.byteLength;
@@ -445,7 +438,7 @@ async function* chunkBody(
       if (pendingBytes === 0) pendingSince = Date.now();
       pending.push(Buffer.from(r.v.value));
       pendingBytes += r.v.value.byteLength;
-      while (pendingBytes >= o.chunkBytes) yield encodeChunk(take(o.chunkBytes), o, false);
+      while (pendingBytes >= o.chunkBytes) yield encodeChunk(take(o.chunkBytes), o.acceptGzip, false);
     }
   } finally {
     clearTimeout(timer);

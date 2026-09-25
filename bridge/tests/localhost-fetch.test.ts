@@ -1,11 +1,13 @@
 import { describe, it, expect, afterAll } from "bun:test";
 import {
+  encodeChunk,
   fetchLocalhost,
+  singleSlice,
   UpstreamBodyError,
   type LocalhostFetchStream,
   type TunnelBodySlice,
 } from "../src/localhost-fetch";
-import { base64Length } from "../src/tunnel-protocol";
+import { TUNNEL_GZIP_ENCODING } from "../src/tunnel-protocol";
 
 const servers: Array<ReturnType<typeof Bun.serve>> = [];
 
@@ -100,6 +102,11 @@ function startTestServer() {
           headers: { "Content-Type": "text/plain" },
         });
       }
+      if (url.pathname === "/allbytes.bin") {
+        return new Response(ALL_BYTE_VALUES, {
+          headers: { "Content-Type": "application/octet-stream" },
+        });
+      }
       return new Response("Hello");
     },
   });
@@ -176,10 +183,7 @@ async function collect(
 
 function decodeSlices(slices: TunnelBodySlice[]): Buffer {
   return Buffer.concat(
-    slices.map((s) => {
-      const raw = Buffer.from(s.data, "base64");
-      return s.bodyEncoding === "gzip-base64" ? Buffer.from(Bun.gunzipSync(raw)) : raw;
-    }),
+    slices.map((s) => (s.gzip ? Buffer.from(Bun.gunzipSync(s.bytes as Uint8Array<ArrayBuffer>)) : Buffer.from(s.bytes))),
   );
 }
 
@@ -215,9 +219,53 @@ const COMPRESSIBLE_MEDIA = Buffer.concat([
   Buffer.alloc(6 * 1024, 0xf8),
   Buffer.alloc(4 * 1024, 0x81),
 ]);
+// Every byte value 0-255, repeated to clear GZIP_MIN_BYTES — a base64 round
+// trip could mask a byte-alignment bug that a raw-bytes pipe cannot: this
+// range includes bytes invalid as UTF-8 lone continuation/lead bytes.
+const ALL_BYTE_VALUES = (() => {
+  const one = new Uint8Array(256);
+  for (let i = 0; i < 256; i++) one[i] = i;
+  const out = new Uint8Array(one.length * 32);
+  for (let i = 0; i < 32; i++) out.set(one, i * one.length);
+  return out;
+})();
 
 afterAll(() => {
   for (const s of servers.splice(0)) s.stop(true);
+});
+
+describe("encodeChunk / singleSlice", () => {
+  it("ships identity when gzip is not requested", () => {
+    const raw = new Uint8Array([1, 2, 3]);
+    expect(encodeChunk(raw, false, true)).toEqual({ bytes: raw, gzip: false, last: true });
+  });
+
+  it("ships identity for a body under the gzip size floor even when requested", () => {
+    const raw = new Uint8Array([1, 2, 3]);
+    const slice = encodeChunk(raw, true, false);
+    expect(slice.gzip).toBe(false);
+    expect(slice.bytes).toEqual(raw);
+  });
+
+  it("gzips a large compressible body when requested, and it inflates back to the input", () => {
+    const raw = new TextEncoder().encode("a".repeat(8192));
+    const slice = encodeChunk(raw, true, false);
+    expect(slice.gzip).toBe(true);
+    expect(slice.bytes.byteLength).toBeLessThan(raw.byteLength);
+    expect(Bun.gunzipSync(slice.bytes as Uint8Array<ArrayBuffer>)).toEqual(raw);
+  });
+
+  it("falls back to identity when gzip would grow the body", () => {
+    const raw = crypto.getRandomValues(new Uint8Array(8192));
+    const slice = encodeChunk(raw, true, false);
+    expect(slice.gzip).toBe(false);
+    expect(slice.bytes).toEqual(raw);
+  });
+
+  it("singleSlice always marks last: true", () => {
+    const raw = new Uint8Array([9, 9]);
+    expect(singleSlice(raw, false)).toEqual({ bytes: raw, gzip: false, last: true });
+  });
 });
 
 describe("fetchLocalhost", () => {
@@ -226,7 +274,7 @@ describe("fetchLocalhost", () => {
     expect(result.status).toBe(403);
     const { slices, bytes } = await collect(result);
     expect(slices).toHaveLength(1);
-    expect(slices[0]).toMatchObject({ bodyEncoding: "base64", last: true });
+    expect(slices[0]).toMatchObject({ gzip: false, last: true });
     expect(bytes.toString("utf8")).toContain("Forbidden");
   });
 
@@ -252,12 +300,12 @@ describe("fetchLocalhost", () => {
     });
     expect(result.status).toBe(200);
     const { slices, bytes } = await collect(result);
-    // No acceptEncodings: every slice is plain base64.
-    expect(slices.map((s) => s.bodyEncoding)).toEqual(["base64"]);
+    // No acceptEncodings: every slice ships identity.
+    expect(slices.map((s) => s.gzip)).toEqual([false]);
     expect(JSON.parse(bytes.toString("utf8")).ok).toBe(true);
   });
 
-  it("returns base64 for binary content", async () => {
+  it("returns raw bytes for binary content", async () => {
     const server = startTestServer();
     const result = await fetchLocalhost({
       url: `http://localhost:${server.port}/binary`,
@@ -266,7 +314,7 @@ describe("fetchLocalhost", () => {
     expect(result.status).toBe(200);
     const { slices, bytes } = await collect(result);
     expect(slices).toHaveLength(1);
-    expect(slices[0]).toMatchObject({ bodyEncoding: "base64", last: true });
+    expect(slices[0]).toMatchObject({ gzip: false, last: true });
     expect(bytes[0]).toBe(0x89);
     expect(bytes[1]).toBe(0x50);
   });
@@ -301,6 +349,26 @@ describe("fetchLocalhost", () => {
     // duplicate (last-only) copy alongside the out-of-band list.
     expect(result.headers["set-cookie"]).toBeUndefined();
   });
+
+  it("round-trips every byte value byte-exact, whether gzipped or not", async () => {
+    const server = startTestServer();
+
+    const plain = await fetchLocalhost({
+      url: `http://localhost:${server.port}/allbytes.bin`,
+      ...NO_FLUSH,
+    });
+    const { bytes: plainBytes } = await collect(plain);
+    expect(plainBytes.equals(Buffer.from(ALL_BYTE_VALUES))).toBe(true);
+
+    const gzipped = await fetchLocalhost({
+      url: `http://localhost:${server.port}/allbytes.bin`,
+      acceptEncodings: [TUNNEL_GZIP_ENCODING],
+      ...NO_FLUSH,
+    });
+    const { slices, bytes: gzippedBytes } = await collect(gzipped);
+    expect(slices.map((s) => s.gzip)).toEqual([true]);
+    expect(gzippedBytes.equals(Buffer.from(ALL_BYTE_VALUES))).toBe(true);
+  });
 });
 
 describe("fetchLocalhost body compression", () => {
@@ -308,21 +376,20 @@ describe("fetchLocalhost body compression", () => {
     const server = startTestServer();
     const result = await fetchLocalhost({
       url: `http://localhost:${server.port}/bundle.js`,
-      acceptEncodings: ["gzip-base64"],
+      acceptEncodings: [TUNNEL_GZIP_ENCODING],
       ...NO_FLUSH,
     });
 
     const { slices, bytes } = await collect(result);
-    expect(slices.map((s) => s.bodyEncoding)).toEqual(["gzip-base64"]);
+    expect(slices.map((s) => s.gzip)).toEqual([true]);
     expect(bytes.toString("utf8")).toBe(BUNDLE_JS);
-    // The point of the exercise: fewer bytes for the phone to decode than the
-    // raw text would have been.
-    expect(slices[0].data.length).toBeLessThan(base64Length(BUNDLE_JS.length) / 2);
+    // The point of the exercise: fewer bytes for the phone than the raw text.
+    expect(slices[0].bytes.byteLength).toBeLessThan(BUNDLE_JS.length / 2);
   });
 
   it("stays uncompressed for a caller that never advertised the encoding", async () => {
     const server = startTestServer();
-    // An app predating acceptEncodings would render gzip bytes as text, so
+    // An app predating acceptEncodings would render gzip bytes as garbage, so
     // silence must mean "send it plain".
     const result = await fetchLocalhost({
       url: `http://localhost:${server.port}/bundle.js`,
@@ -330,7 +397,7 @@ describe("fetchLocalhost body compression", () => {
     });
 
     const { slices, bytes } = await collect(result);
-    expect(slices.map((s) => s.bodyEncoding)).toEqual(["base64"]);
+    expect(slices.map((s) => s.gzip)).toEqual([false]);
     expect(bytes.toString("utf8")).toBe(BUNDLE_JS);
   });
 
@@ -338,24 +405,24 @@ describe("fetchLocalhost body compression", () => {
     const server = startTestServer();
     const result = await fetchLocalhost({
       url: `http://localhost:${server.port}/bundle.js`,
-      acceptEncodings: ["br-base64"],
+      acceptEncodings: ["br"],
       ...NO_FLUSH,
     });
 
     const { slices } = await collect(result);
-    expect(slices.map((s) => s.bodyEncoding)).toEqual(["base64"]);
+    expect(slices.map((s) => s.gzip)).toEqual([false]);
   });
 
   it("leaves a small body alone", async () => {
     const server = startTestServer();
     const result = await fetchLocalhost({
       url: `http://localhost:${server.port}/tiny.js`,
-      acceptEncodings: ["gzip-base64"],
+      acceptEncodings: [TUNNEL_GZIP_ENCODING],
       ...NO_FLUSH,
     });
 
     const { slices, bytes } = await collect(result);
-    expect(slices.map((s) => s.bodyEncoding)).toEqual(["base64"]);
+    expect(slices.map((s) => s.gzip)).toEqual([false]);
     expect(bytes.toString("utf8")).toBe("export const a = 1;");
   });
 
@@ -363,12 +430,12 @@ describe("fetchLocalhost body compression", () => {
     const server = startTestServer();
     const result = await fetchLocalhost({
       url: `http://localhost:${server.port}/big.png`,
-      acceptEncodings: ["gzip-base64"],
+      acceptEncodings: [TUNNEL_GZIP_ENCODING],
       ...NO_FLUSH,
     });
 
     const { slices, bytes } = await collect(result);
-    expect(slices.map((s) => s.bodyEncoding)).toEqual(["base64"]);
+    expect(slices.map((s) => s.gzip)).toEqual([false]);
     expect(bytes.equals(Buffer.from(INCOMPRESSIBLE_RANDOM))).toBe(true);
   });
 
@@ -381,12 +448,12 @@ describe("fetchLocalhost body compression", () => {
     const server = startTestServer();
     const result = await fetchLocalhost({
       url: `http://localhost:${server.port}/clip.mp4`,
-      acceptEncodings: ["gzip-base64"],
+      acceptEncodings: [TUNNEL_GZIP_ENCODING],
       ...NO_FLUSH,
     });
 
     const { slices, bytes } = await collect(result);
-    expect(slices.map((s) => s.bodyEncoding)).toEqual(["base64"]);
+    expect(slices.map((s) => s.gzip)).toEqual([false]);
     expect(bytes.equals(COMPRESSIBLE_MEDIA)).toBe(true);
   });
 
@@ -398,12 +465,12 @@ describe("fetchLocalhost body compression", () => {
     const server = startTestServer();
     const result = await fetchLocalhost({
       url: `http://localhost:${server.port}/favicon.ico`,
-      acceptEncodings: ["gzip-base64"],
+      acceptEncodings: [TUNNEL_GZIP_ENCODING],
       ...NO_FLUSH,
     });
 
     const { slices, bytes } = await collect(result);
-    expect(slices.map((s) => s.bodyEncoding)).toEqual(["gzip-base64"]);
+    expect(slices.map((s) => s.gzip)).toEqual([true]);
     expect(bytes.equals(COMPRESSIBLE_MEDIA)).toBe(true);
   });
 
@@ -415,12 +482,12 @@ describe("fetchLocalhost body compression", () => {
     const server = startTestServer();
     const result = await fetchLocalhost({
       url: `http://localhost:${server.port}/blob.bin`,
-      acceptEncodings: ["gzip-base64"],
+      acceptEncodings: [TUNNEL_GZIP_ENCODING],
       ...NO_FLUSH,
     });
 
     const { slices, bytes } = await collect(result);
-    expect(slices.map((s) => s.bodyEncoding)).toEqual(["base64"]);
+    expect(slices.map((s) => s.gzip)).toEqual([false]);
     expect(bytes.equals(Buffer.from(INCOMPRESSIBLE_RANDOM))).toBe(true);
   });
 
@@ -428,7 +495,7 @@ describe("fetchLocalhost body compression", () => {
     const server = startTestServer();
     const result = await fetchLocalhost({
       url: `http://localhost:${server.port}/prose.txt`,
-      acceptEncodings: ["gzip-base64"],
+      acceptEncodings: [TUNNEL_GZIP_ENCODING],
       chunkBytes: 8192,
       ...NO_FLUSH,
     });
@@ -436,11 +503,11 @@ describe("fetchLocalhost body compression", () => {
     const { slices, bytes } = await collect(result);
     expect(slices).toHaveLength(5);
     for (const slice of slices) {
-      expect(slice.bodyEncoding).toBe("gzip-base64");
+      expect(slice.gzip).toBe(true);
       // Each one inflates ON ITS OWN — no decoder state crosses a slice, which
       // is what lets the app decode 8 KiB at a time and a replayed frame stand
       // alone.
-      expect(() => Bun.gunzipSync(Buffer.from(slice.data, "base64"))).not.toThrow();
+      expect(() => Bun.gunzipSync(slice.bytes as Uint8Array<ArrayBuffer>)).not.toThrow();
     }
     expect(bytes.toString("utf8")).toBe(COMPRESSIBLE_TEXT);
   });
@@ -456,7 +523,7 @@ describe("fetchLocalhost body slicing", () => {
     });
 
     const { slices, bytes } = await collect(result);
-    expect(slices.map((s) => Buffer.from(s.data, "base64").byteLength)).toEqual([4096, 4096, 1808]);
+    expect(slices.map((s) => s.bytes.byteLength)).toEqual([4096, 4096, 1808]);
     expect(slices.map((s) => s.last)).toEqual([false, false, true]);
     expect(bytes.equals(Buffer.from(TEN_THOUSAND_RANDOM))).toBe(true);
   });
@@ -491,7 +558,7 @@ describe("fetchLocalhost body slicing", () => {
     const first = await it.next();
     expect(Date.now() - started).toBeLessThan(200);
     expect(first.done).toBe(false);
-    expect(Buffer.from(first.value!.data, "base64").byteLength).toBe(1024);
+    expect(first.value!.bytes.byteLength).toBe(1024);
 
     const rest: TunnelBodySlice[] = [first.value!];
     for (;;) {

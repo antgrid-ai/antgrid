@@ -301,17 +301,24 @@ Authoritative flow and field types: `docs/protocol/peer-session.md`.
 | `ports:update` | Agent → App | Detected listening ports + metadata |
 | `preview:url` | Agent → App | Proxy URL for a detected port |
 
-### Tunnel Messages (separate protocol)
-| Type | Direction | Purpose |
-|------|-----------|---------|
-| `tunnel:http-request` | App → Agent | HTTP request for a localhost port, forwarded through the relay |
-| `tunnel:http-start` | Agent → App | Response head plus body slice 0; `last` when that slice is the whole body |
-| `tunnel:http-chunk` | Agent → App | Body slice `seq` (1-based, dense) |
-| `tunnel:http-end` | Agent → App | Body is over: `chunks` emitted, `error` when it is incomplete |
-| `tunnel:http-cancel` | App → Agent | Stop streaming a response (tab gone, or the app saw a gap) |
-| `tunnel:ws-open` | App → Agent | Open an upstream WebSocket for the previewed page's own socket |
-| `tunnel:ws-data` | App → Agent, Agent → App | One WebSocket frame, in whichever direction it was sent |
-| `tunnel:ws-close` | App → Agent, Agent → App | Tear the tunnel down; carries `code`/`reason` when the closer had one |
+### Tunnel Messages (own QUIC streams, not the bus)
+
+Each HTTP request/response and each browser-side WebSocket gets its own peer stream
+(`{kind:"tunnel-http"}` / `{kind:"tunnel-ws"}`, `docs/protocol/peer-session.md` §1c) — these
+records never ride the project/session stream's `AbMessage` traffic. A record is either a JSON
+control record (below) or a tagged binary data record carrying an HTTP body slice or one
+WebSocket frame; see that section for the framing and the cap constants.
+
+| Type | Direction | Stream | Purpose |
+|------|-----------|--------|---------|
+| `tunnel:http-request` | App → Agent | `tunnel-http`, 1st record | Head-of-stream: checkoutId, headers, declared `bodyLength` |
+| `tunnel:http-head` | Agent → App | `tunnel-http` | Response status, headers, `setCookies` |
+| `tunnel:http-end` | Agent → App | `tunnel-http`, last record | Response body is over, immediately before the bridge FINs |
+| `tunnel:ws-open` | App → Agent | `tunnel-ws`, 1st record | Head-of-stream: checkoutId plus the upstream target |
+| `tunnel:ws-close` | App → Agent, Agent → App | `tunnel-ws`, last record | Tear the WebSocket down; carries `code`/`reason` when the closer had one |
+
+A request body or WS-cancel needs no verb of its own: the app signals either by resetting or
+FIN-ing its own send half, which the bridge's pending read observes directly.
 
 ---
 

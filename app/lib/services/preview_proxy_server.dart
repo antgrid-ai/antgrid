@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:shelf/shelf.dart' as shelf;
 import 'package:shelf/shelf_io.dart' as shelf_io;
@@ -150,13 +151,14 @@ class PreviewProxyServer {
   Future<shelf.Response> _handleHttpRequest(shelf.Request request) async {
     final requestId = const Uuid().v4();
 
-    // Read request body if present. Any method may carry one (DELETE with a
-    // payload is legal and some dev APIs use it) — only GET/HEAD are defined
-    // as bodyless.
-    String? body;
+    // Read request body if present, as raw bytes — the tunnel stream carries
+    // it untouched (no charset guess). Any method may carry one (DELETE with
+    // a payload is legal and some dev APIs use it) — only GET/HEAD are
+    // defined as bodyless.
+    Uint8List? body;
     if (request.method != 'GET' && request.method != 'HEAD') {
-      body = await request.readAsString();
-      if (body.isEmpty) body = null;
+      final bytes = await request.read().expand((chunk) => chunk).toList();
+      if (bytes.isNotEmpty) body = Uint8List.fromList(bytes);
     }
 
     // Flatten headers (take first value for each key)

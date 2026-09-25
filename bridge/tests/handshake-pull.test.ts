@@ -86,19 +86,15 @@ test("send() drops app messages when no session is established", () => {
   expect(client.sentTo(PHONE_ID)).toHaveLength(0);
 });
 
-test("an app envelope on the preview channel is routed to onTunnelMessage after establishment", () => {
+test("a tunnel:http-request on the session stream after establishment reaches no handler", () => {
+  // Tunnel traffic rides its own QUIC stream now (A3); a `tunnel:http-request`
+  // that still arrives on the session stream parses as no known AbMessage and
+  // falls through to the ordinary drop, with nothing left to observe it.
   const client = freshClient();
   client.establish(PHONE_ID, { attemptId: "attempt-a" });
-  const tunnelMsgs: unknown[] = [];
-  (client as any).opts.onTunnelMessage = (m: unknown) => tunnelMsgs.push(m);
-
-  // App traffic is always the `{ m }` envelope, even non-AbMessage
-  // tunnel-protocol frames, which fall through parseMessageFast to
-  // parseTunnelMessage inside dispatchControlPlane.
   const tunnelReq = { type: "tunnel:http-request", requestId: "req-1", port: 3000, method: "GET", path: "/" };
-  client.sendFromPeer(PHONE_ID, { m: tunnelReq }, "preview");
 
-  expect(tunnelMsgs).toEqual([{ ...tunnelReq, checkoutId: "main" }]);
+  expect(() => client.sendFromPeer(PHONE_ID, { m: tunnelReq }, "preview")).not.toThrow();
 });
 
 test("ping is answered with pong", () => {
@@ -148,26 +144,16 @@ test("a different device's session is admitted ALONGSIDE the live session, displ
   expect(client.establishedPeers().map((p) => p.peerId)).toEqual([PHONE_ID, PHONE_2_ID]);
 });
 
-test("each admitted device's frames are attributed to its own peerId", () => {
+test("a tunnel:http-request from either admitted device reaches no handler, on the session stream", () => {
   const client = freshClient();
   client.establish(PHONE_ID, { attemptId: "attempt-a" });
   client.establish(PHONE_2_ID, { attemptId: "attempt-b" });
 
-  const seen: Array<{ requestId: unknown; peerId: string }> = [];
-  (client as any).opts.onTunnelMessage = (m: unknown, peerId: string) => {
-    seen.push({ requestId: (m as { requestId?: unknown }).requestId, peerId });
-  };
-
   const req = (requestId: string) => ({
     m: { type: "tunnel:http-request", requestId, port: 3000, method: "GET", path: "/" },
   });
-  client.sendFromPeer(PHONE_ID, req("from-a"), "preview");
-  client.sendFromPeer(PHONE_2_ID, req("from-b"), "preview");
-
-  expect(seen).toEqual([
-    { requestId: "from-a", peerId: PHONE_ID },
-    { requestId: "from-b", peerId: PHONE_2_ID },
-  ]);
+  expect(() => client.sendFromPeer(PHONE_ID, req("from-a"), "preview")).not.toThrow();
+  expect(() => client.sendFromPeer(PHONE_2_ID, req("from-b"), "preview")).not.toThrow();
 });
 
 test("an outbound broadcast is sent once per established session", () => {

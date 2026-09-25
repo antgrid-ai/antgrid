@@ -37,7 +37,6 @@ describe("pause-streams end-to-end", () => {
       projectId: "p",
       portLabels: new Map(),
       previewPorts: new Set([3000]),
-      sendTunnel: async () => "sent" as const,
       sendEncrypted: send,
       relayHost: "relay.test",
       connState,

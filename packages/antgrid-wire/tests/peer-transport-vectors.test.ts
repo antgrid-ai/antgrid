@@ -11,10 +11,19 @@ import {
   MAX_FRAGMENT_COUNT,
   MAX_REREQUESTS,
   MAX_TRANSFER_BYTES,
+  STREAM_TERMINAL_APP_RECORD_MAX_BYTES,
+  STREAM_TERMINAL_BRIDGE_RECORD_MAX_BYTES,
+  STREAM_TUNNEL_DATA_MAX_BYTES,
+  STREAM_TUNNEL_RECORD_MAX_BYTES,
+  STREAM_TUNNEL_REQUEST_BODY_MAX_BYTES,
   StreamOpen,
   StreamRefused,
   StreamRefusedCode,
   TRANSFER_TIMEOUT_MS,
+  TUNNEL_RECORD_TAG_BODY,
+  TUNNEL_RECORD_TAG_BODY_GZIP,
+  TUNNEL_RECORD_TAG_WS_BINARY,
+  TUNNEL_RECORD_TAG_WS_TEXT,
 } from "../src/index";
 
 const fixturePath = resolve(
@@ -72,6 +81,27 @@ test("peer transport fixture covers every stream-open kind and refusal code", ()
   expect(
     streamOpen.refusals.map((r: { json: { code: string } }) => r.json.code),
   ).toEqual(StreamRefusedCode.options);
+});
+
+test("peer transport fixture's terminalRecords and tunnelRecords equal the wire package's own constants", () => {
+  // The generator imports these constants directly, so this mostly guards
+  // against the fixture going stale relative to a regenerate — the Dart
+  // mirror has no import to cross-check against, only this JSON.
+  expect(fixture.streamOpen.terminalRecords).toEqual({
+    appMaxRecordBytes: STREAM_TERMINAL_APP_RECORD_MAX_BYTES,
+    bridgeMaxRecordBytes: STREAM_TERMINAL_BRIDGE_RECORD_MAX_BYTES,
+  });
+  expect(fixture.streamOpen.tunnelRecords).toEqual({
+    maxDataBytes: STREAM_TUNNEL_DATA_MAX_BYTES,
+    maxRecordBytes: STREAM_TUNNEL_RECORD_MAX_BYTES,
+    requestBodyMaxBytes: STREAM_TUNNEL_REQUEST_BODY_MAX_BYTES,
+    tags: {
+      body: TUNNEL_RECORD_TAG_BODY,
+      bodyGzip: TUNNEL_RECORD_TAG_BODY_GZIP,
+      wsText: TUNNEL_RECORD_TAG_WS_TEXT,
+      wsBinary: TUNNEL_RECORD_TAG_WS_BINARY,
+    },
+  });
 });
 
 test("peer transport fixture's rejected stream-open frames are rejected", () => {

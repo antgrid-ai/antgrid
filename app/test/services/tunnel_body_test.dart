@@ -1,44 +1,37 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:antgrid/models/preview_models.dart';
+import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:antgrid/services/tunnel_body.dart';
 
 void main() {
-  test('decodes a plain base64 slice', () {
-    final bytes = decodeTunnelSlice(base64Encode(utf8.encode('hello')), 'base64');
+  test('a non-gzip record is returned unchanged', () {
+    final bytes = decodeTunnelBody(
+      TunnelBodyRecord(bytes: Uint8List.fromList(utf8.encode('hello')), gzip: false),
+    );
     expect(utf8.decode(bytes), 'hello');
   });
 
-  // Each gzip slice is an independent member, which is what lets a slice be
+  // Each record is an independent gzip member, which is what lets a record be
   // decoded the moment it lands instead of holding inflater state open.
-  test('inflates a standalone gzip-base64 member', () {
+  test('inflates a standalone gzip member', () {
     const source = 'body { color: red; }';
-    final bytes = decodeTunnelSlice(
-      base64Encode(gzip.encode(utf8.encode(source))),
-      kTunnelGzipEncoding,
+    final bytes = decodeTunnelBody(
+      TunnelBodyRecord(
+        bytes: Uint8List.fromList(gzip.encode(utf8.encode(source))),
+        gzip: true,
+      ),
     );
     expect(utf8.decode(bytes), source);
   });
 
-  test('an unknown encoding throws naming the value', () {
+  test('a gzip record that is not a gzip member throws FormatException', () {
     expect(
-      () => decodeTunnelSlice('aGk=', 'utf8'),
-      throwsA(
-        isA<FormatException>().having((e) => e.message, 'message', contains('utf8')),
+      () => decodeTunnelBody(
+        TunnelBodyRecord(bytes: Uint8List.fromList(utf8.encode('plain')), gzip: true),
       ),
-    );
-  });
-
-  test('undecodable base64 throws', () {
-    expect(() => decodeTunnelSlice('not base64!!', 'base64'),
-        throwsA(isA<FormatException>()));
-  });
-
-  test('a gzip slice that is not a gzip member throws', () {
-    expect(
-      () => decodeTunnelSlice(base64Encode(utf8.encode('plain')), kTunnelGzipEncoding),
       throwsA(isA<FormatException>()),
     );
   });

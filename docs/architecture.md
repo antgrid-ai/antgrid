@@ -22,9 +22,12 @@ App (Flutter) <--QUIC/TLS over Iroh (direct or relayed)--> Agent (Bun)
 The central relay authenticates devices via a signed `hello` frame (Ed25519
 proof-of-possession) — unrelated to peer payload admission, which is decided
 entirely by the authorization lease (`docs/protocol/peer-session.md` §1). The
-payload protocol has two channels: `control` (terminal, files, status) and
-`preview` (HTTP tunnel, streamed as start/chunk/end frames under the credit
-window).
+session stream carries two credit-flow channels, `control` (terminal, files,
+status) and `preview` (small bus verbs, such as `preview:url`); the HTTP-proxy
+and browser-WebSocket preview traffic itself rides its own per-exchange QUIC
+stream instead — one stream per HTTP request/response and one per WebSocket's
+lifetime — framed as tagged records rather than bus frames
+(`docs/protocol/peer-session.md` §1c).
 
 ### Native peer payloads
 

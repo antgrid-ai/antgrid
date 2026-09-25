@@ -101,7 +101,7 @@ describe("StreamMux (unit, stub transport)", () => {
     expect(sent).toEqual([{ streamId: handle.streamId, msg, channel: "control" }]);
   });
 
-  test("mayDeliver gates outbound bus AND tunnel frames, and is re-read on every send", async () => {
+  test("mayDeliver gates outbound bus traffic, and is re-read on every send", () => {
     // The outbound half of the machine mobile-access gate. Read live, not
     // captured: flipping the switch back on must resume the SAME stream â€” the
     // whole point of gating at the send rather than detaching.
@@ -109,42 +109,35 @@ describe("StreamMux (unit, stub transport)", () => {
     const mux = new StreamMux(transport);
     const bus = new MessageBus();
     let allowed = false;
-    const handle = mux.attach(bus, { mayDeliver: () => allowed });
+    mux.attach(bus, { mayDeliver: () => allowed });
 
     bus.publish(createMessage("pong", {}), "control");
-    // "gated", NOT "dropped": the one consumer that awaits this must be able to
-    // tell a closed machine switch from a cleared queue â€” a WS tunnel survives
-    // the first and not the second.
-    expect(await handle.sendTunnel({ t: "tunnel:http-start" })).toBe("gated");
     expect(sent).toEqual([]);
 
     allowed = true;
     const msg = createMessage("pong", {});
     bus.publish(msg, "control");
-    expect(await handle.sendTunnel({ t: "tunnel:http-start" })).toBe("sent");
-    expect(sent).toEqual([
-      { streamId: handle.streamId, msg, channel: "control" },
-      { streamId: handle.streamId, msg: { t: "tunnel:http-start" }, channel: "preview" },
-    ]);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.msg).toBe(msg);
   });
 
   test("mayDeliverTo mutes a PEER-ADDRESSED send too, and a broadcast keeps the caller's own filter under it", () => {
-    // A tunnel answer names the session that asked, and asking was never an
-    // admission: a device that cannot address a checkout would read an isolated
-    // session's preview as the main worktree's whether it requested it or not.
+    // Tunnel traffic never rides sendTo (it has its own stream), but any
+    // peer-addressed send on the bus is gated identically: a device that
+    // cannot address a checkout must not read another session's reply.
     const { transport, sent, targets, peers } = makeTransport();
     const mux = new StreamMux(transport);
     peers.set("stale", peerView("stale", false));
     peers.set("modern", peerView("modern", true));
     const handle = mux.attach(new MessageBus(), { mayDeliverTo: (peer) => peer.checkoutRouting });
 
-    handle.sendTunnel({ t: "tunnel:http-response" }, { kind: "peer", peerId: "stale" });
+    handle.sendTo({ t: "reply" }, "control", { kind: "peer", peerId: "stale" });
     expect(sent).toEqual([]);
 
-    handle.sendTunnel({ t: "tunnel:http-response" }, { kind: "peer", peerId: "modern" });
+    handle.sendTo({ t: "reply" }, "control", { kind: "peer", peerId: "modern" });
     expect(targets).toEqual([{ kind: "peer", peerId: "modern" }]);
 
-    handle.sendTunnel({ t: "tunnel:http-response" }, {
+    handle.sendTo({ t: "reply" }, "control", {
       kind: "broadcast", where: (peer) => peer.peerId !== "modern",
     });
     const target = targets[1];
@@ -155,12 +148,12 @@ describe("StreamMux (unit, stub transport)", () => {
   });
 
   test("a peer target naming a session this machine no longer holds is dropped, never widened to a broadcast", () => {
-    // Falling back to a fan-out is the loud failure: one device's HTTP response
-    // handed to every other device attached to the same project.
+    // Falling back to a fan-out is the loud failure: one device's reply handed
+    // to every other device attached to the same project.
     const { transport, sent } = makeTransport();
     const mux = new StreamMux(transport);
     const handle = mux.attach(new MessageBus(), { mayDeliverTo: () => true });
-    handle.sendTunnel({ t: "tunnel:http-response" }, { kind: "peer", peerId: "evicted" });
+    handle.sendTo({ t: "reply" }, "control", { kind: "peer", peerId: "evicted" });
     expect(sent).toEqual([]);
   });
 
@@ -284,22 +277,76 @@ describe("StreamMux (unit, stub transport)", () => {
     expect(sent).toHaveLength(1);
   });
 
-  test("a refused session's tunnel frames never reach onTunnel", () => {
-    // The tunnel route bypasses the bus entirely, which is why the per-device
-    // gate had to sit ahead of both routes rather than inside the dispatch.
-    const { transport, peers } = makeTransport();
+  test("a tunnel:http-request on a project stream is dropped and dispatches nothing", () => {
+    // Tunnel traffic rides its own QUIC stream now (A3); a project stream that
+    // still receives one (a peer that has not upgraded) parses it as no known
+    // AbMessage and falls through to the ordinary drop, same as any other
+    // unparseable frame.
+    const { transport } = makeTransport();
     const mux = new StreamMux(transport);
-    peers.set("stale", peerView("stale", false));
-    const tunnels: unknown[] = [];
-    const handle = mux.attach(new MessageBus(), {
-      projectId: "p1", onTunnel: (raw) => tunnels.push(raw), mayAcceptFrom: refuseIncapable,
-    });
+    const bus = new MessageBus();
+    const received: unknown[] = [];
+    bus.setInboundHandler((msg) => received.push(msg));
+    const handle = mux.attach(bus, { projectId: "p1" });
     const request = JSON.stringify({
       type: "tunnel:http-request", requestId: "r1", port: 5173, method: "GET", path: "/",
     });
 
     expect(mux.dispatchInbound(handle.streamId, request, "preview", "stale")).toBe(true);
-    expect(tunnels).toEqual([]);
+    expect(received).toEqual([]);
+  });
+
+  test("tunnelBinding(...).refusalFor refuses the incapable device", () => {
+    const { transport, peers } = makeTransport();
+    const mux = new StreamMux(transport);
+    peers.set("stale", peerView("stale", false));
+    peers.set("modern", peerView("modern", true));
+    mux.attach(new MessageBus(), { projectId: "p1", mayAcceptFrom: refuseIncapable });
+    const binding = mux.tunnelBinding("p1")!;
+
+    expect(binding.refusalFor("stale")).toEqual({
+      code: "UPDATE_REQUIRED", message: "update the app to use this project's isolated sessions",
+    });
+    expect(binding.refusalFor("modern")).toBeNull();
+  });
+
+  test("tunnelBinding(...).mayDeliverTo is false with the switch off, refuses a stale device while a modern one passes, and false for an evicted or detached entry", () => {
+    const { transport, peers } = makeTransport();
+    const mux = new StreamMux(transport);
+    peers.set("stale", peerView("stale", false));
+    peers.set("modern", peerView("modern", true));
+    let allowed = false;
+    const handle = mux.attach(new MessageBus(), {
+      projectId: "p1",
+      mayDeliver: () => allowed,
+      mayDeliverTo: (peer) => peer.checkoutRouting,
+    });
+    const binding = mux.tunnelBinding("p1")!;
+
+    // The switch is off: refused regardless of the peer's own capability.
+    expect(binding.mayDeliverTo("modern")).toBe(false);
+
+    allowed = true;
+    expect(binding.mayDeliverTo("stale")).toBe(false);
+    expect(binding.mayDeliverTo("modern")).toBe(true);
+    // A peer this machine no longer holds a session for.
+    expect(binding.mayDeliverTo("evicted")).toBe(false);
+
+    handle.detach();
+    expect(mux.tunnelBinding("p1")).toBeNull();
+  });
+
+  test("tunnelBinding(...).tunnels() re-resolves the entry by streamId", () => {
+    const { transport } = makeTransport();
+    const mux = new StreamMux(transport);
+    const tunnels = { admit: () => ({ ok: false as const, refusal: { code: "NOT_ALLOWED" as const, message: "no" } }) };
+    const handle = mux.attach(new MessageBus(), { projectId: "p1", tunnels });
+    const binding = mux.tunnelBinding("p1")!;
+
+    expect(binding.tunnels()).toBe(tunnels);
+
+    handle.detach();
+    expect(binding.tunnels()).toBeNull();
   });
 
   test("the refusal is rate-limited per (session, stream) â€” a retry loop cannot flood the control plane", () => {

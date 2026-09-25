@@ -86,7 +86,6 @@ async function startRestartedAgent(opts: { mobileAccess: boolean }) {
         return {
           streamId: "s1",
           detach: () => {},
-          sendTunnel: async () => "sent" as const,
           sendTo: async () => "sent" as const,
         };
       },
@@ -195,7 +194,6 @@ async function startAfterDesktopLeft() {
         return {
           streamId: "s1",
           detach: () => {},
-          sendTunnel: async () => "sent" as const,
           sendTo: async () => "sent" as const,
         };
       },
@@ -270,7 +268,6 @@ async function startAfterPhoneLeft() {
         return {
           streamId: "s1",
           detach: () => {},
-          sendTunnel: async () => "sent" as const,
           sendTo: async () => "sent" as const,
         };
       },

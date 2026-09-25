@@ -3,7 +3,7 @@ import { CONTROL_STREAM_ID } from "antgrid-wire";
 import type { Channel, MessageBus } from "./message-bus";
 import type { SendOutcome } from "./send-scheduler";
 import { createMessage, parseMessageFast, type AbMessage } from "./protocol";
-import { parseTunnelMessage } from "./tunnel-protocol";
+import type { TunnelStreamServer } from "./tunnel-manager";
 import { logger } from "./logger";
 import type { StreamSendOutcome } from "./peer/stream-records";
 
@@ -18,26 +18,18 @@ export const INVALID_NOTICE_TTL_MS = 60_000;
 
 /** A project's attachment to the single machine relay socket. Opaque `streamId`
  *  namespaces this project's sealed frames inside the one E2E session;
- *  `detach()` releases it, `sendTunnel` routes a preview/tunnel-protocol
- *  message tagged with the stream. */
+ *  `detach()` releases it. Tunnel (preview) traffic never rides this handle
+ *  (A3): it has its own QUIC streams admitted through
+ *  {@link TunnelProjectBinding}. */
 export interface StreamHandle {
   readonly streamId: string;
   detach(): void;
-  /** Send a tunnel-protocol (preview channel) message tagged with this stream.
-   *  `target` names the app session that asked: a tunnel body answers exactly
-   *  one request, so fanning it out to every attached device both wastes the
-   *  link and hands one device another's response. Absent = every session.
-   *
-   *  Resolves when the message left the send queue — "sent"/"dropped"/
-   *  "too-large" from the send path, or "gated" when this stream's outbound
-   *  authorization refused it. */
-  sendTunnel(data: object, target?: SendTarget): Promise<SendOutcome>;
   /** Send one frame on a named channel to a single app session, bypassing the
    *  bus. The bus has no addressing, so a published frame reaches every
    *  established session — including the human's phone, which is attached here
-   *  too and must never see another agent's bus traffic. Resolves
-   *  the same outcomes as `sendTunnel`, so a caller with an outbox can hold the
-   *  frame rather than assume it left. */
+   *  too and must never see another agent's bus traffic. Resolves once the
+   *  frame left the send queue, so a caller with an outbox can hold it rather
+   *  than assume it landed. */
   sendTo(msg: unknown, channel: Channel, target: SendTarget): Promise<SendOutcome>;
   /** Present iff the transport supports terminal attachment streams (A2). A
    *  terminal stream's `retired`/`subscribeSettled` land here, keyed by this
@@ -66,6 +58,24 @@ export interface TerminalProjectBinding {
    *  calls `entry.bus.dispatchInbound(msg, "control", "relay", peerId)`. False
    *  when the entry has gone or `refusalFor` now refuses. */
   dispatch(msg: AbMessage, peerId: string): boolean;
+}
+
+/** What `TunnelStreamRegistry` needs from a project's mux entry to admit and
+ *  route a tunnel stream without opening or promoting a core itself (A3). A
+ *  tunnel stream carries no bus traffic, so unlike {@link TerminalProjectBinding}
+ *  it has no `dispatch` — only the per-sender gate and the project's own
+ *  {@link TunnelStreamServer}, which the registry calls to admit the stream. */
+export interface TunnelProjectBinding {
+  readonly streamId: string;
+  /** `entry.opts.mayAcceptFrom(peerSession(peerId))`, re-read on every call —
+   *  the same per-sender gate `dispatchInbound` applies to bus traffic. */
+  refusalFor(peerId: string): StreamRefusal | null;
+  /** Per-RECEIVER gate for a stream already admitted: the mirror of
+   *  `refusalFor` for outbound records (head/body/end, or a WS frame). */
+  mayDeliverTo(peerId: string): boolean;
+  /** The project's tunnel server, or null if the entry is gone or declared
+   *  none — either way the registry refuses the stream NOT_ALLOWED. */
+  tunnels(): TunnelStreamServer | null;
 }
 
 /** What one app session looks like to everything outside the relay client. No
@@ -125,9 +135,9 @@ export interface AttachStreamOpts {
    *  vouching for the focus and unread state it had on screen even though a
    *  sibling device is still driving the machine. */
   onPeerSessionGone?: (peerId: string) => void;
-  /** A preview-channel tunnel-protocol message routed to this stream, tagged
-   *  with the session it came from so the answer can be addressed back. */
-  onTunnel?: (raw: unknown, peerId: string) => void;
+  /** The project's tunnel server; absent => tunnel streams for this project are
+   *  refused NOT_ALLOWED. */
+  tunnels?: TunnelStreamServer;
   /** Outbound authorization: consulted on EVERY frame this stream would send.
    *  The mirror of the core's inbound gate — a stream carries project data off
    *  the machine, so it rides the same machine mobile-access switch that every
@@ -142,9 +152,10 @@ export interface AttachStreamOpts {
    *  session. Lets a stale app that cannot route checkouts be muted without
    *  also muting a modern one on the same machine. */
   mayDeliverTo?: (peer: PeerSessionView) => boolean;
-  /** Per-SENDER mirror of {@link mayDeliverTo}, consulted on every inbound frame
-   *  — bus verbs AND tunnel frames, which bypass the bus and so are gated
-   *  nowhere else per device. Absent = accept from every session; a refusal is
+  /** Per-SENDER mirror of {@link mayDeliverTo}, consulted on every inbound bus
+   *  frame — and, via {@link TunnelProjectBinding.refusalFor}, at tunnel-stream
+   *  open, since a tunnel stream now carries its own traffic off the bus
+   *  entirely. Absent = accept from every session; a refusal is
    *  returned rather than thrown so the mux can ANSWER the sender: an app binds
    *  a `streamId` it read off the `agent:projects` advert without a fresh
    *  `project:start`, so the refusal that verb would have given it is never
@@ -233,11 +244,10 @@ export class StreamMux {
     // request; the app times that out and resyncs from a snapshot.
     const mayDeliver = () => opts.mayDeliver?.() ?? true;
     // The per-receiver mute applies to a peer-addressed send too. Being the
-    // session that asked is not an admission: tunnel frames bypass the bus, so
-    // the only producer of peer targets is the one path whose sender was never
-    // checked against this filter — and a device that cannot address a checkout
-    // would read an isolated session's preview as the main worktree's whether it
-    // asked for it or not. `null` = nothing to send to; the caller drops.
+    // session that asked is not an admission — a bus verb can reply straight to
+    // its asker, and a device that cannot address a checkout would read an
+    // isolated session's data as the main worktree's whether it asked for it or
+    // not. `null` = nothing to send to; the caller drops.
     const gated = (target?: SendTarget): SendTarget | null => {
       if (target?.kind !== "peer") {
         return { kind: "broadcast", where: bothOf(target?.where, opts.mayDeliverTo) };
@@ -299,18 +309,6 @@ export class StreamMux {
     return {
       streamId,
       detach: () => this.detach(streamId),
-      // Gated too: tunnel frames bypass the bus (see setPlainHook), so the
-      // subscriber check above never sees them. The refusal is "gated", NOT
-      // "dropped": a WS tunnel must survive the switch being off (the close a
-      // teardown would send is gated too, leaving the browser socket mute for
-      // the life of the page), and a cleared queue and a closed switch are
-      // different facts to the one consumer that awaits this.
-      // The unbound mute stops at the bus deliberately: a tunnel run is driven
-      // by a request arriving ON this stream, and inbound traffic un-mutes it,
-      // so the muted case is a server-pushed frame on a tunnel that predates
-      // the mute. Refusing it would need a third outcome — tunnel-manager.ts
-      // branches on "sent", and "gated" is spoken for above.
-      sendTunnel: (data, target) => sendTo(data, "preview", target),
       sendTo: (msg, channel, target) => sendTo(msg, channel, target),
       terminalHooks: this.transport.terminalHooks,
     };
@@ -355,6 +353,39 @@ export class StreamMux {
         if (entry.unboundAtPeer) this.markBound(streamId);
         entry.bus.dispatchInbound(msg, "control", "relay", peerId);
         return true;
+      },
+    };
+  }
+
+  /** Same lookup as {@link projectBinding}, for a tunnel stream's admission and
+   *  delivery instead of the bus's. No `dispatch`: a tunnel stream carries no
+   *  bus traffic, so `TunnelStreamRegistry` never calls back through the mux to
+   *  route one — it owns the stream outright once admitted. */
+  tunnelBinding(projectId: string): TunnelProjectBinding | null {
+    let found: { streamId: string; entry: StreamEntry } | null = null;
+    for (const [streamId, entry] of this.streams) {
+      if (entry.opts.projectId === projectId) found = { streamId, entry };
+    }
+    if (!found) return null;
+    const { streamId } = found;
+    return {
+      streamId,
+      refusalFor: (peerId) => {
+        const entry = this.streams.get(streamId);
+        if (!entry) return { code: "NOT_ALLOWED", message: "project stream is gone" };
+        return entry.opts.mayAcceptFrom?.(this.transport.peerSession(peerId)) ?? null;
+      },
+      mayDeliverTo: (peerId) => {
+        const entry = this.streams.get(streamId);
+        if (!entry) return false;
+        if (!(entry.opts.mayDeliver?.() ?? true)) return false;
+        if (!entry.opts.mayDeliverTo) return true;
+        const peer = this.transport.peerSession(peerId);
+        return peer !== null && entry.opts.mayDeliverTo(peer);
+      },
+      tunnels: () => {
+        const entry = this.streams.get(streamId);
+        return entry?.opts.tunnels ?? null;
       },
     };
   }
@@ -430,9 +461,6 @@ export class StreamMux {
       this.notifyStreamInvalid(streamId, peerId);
       return false;
     }
-    // Per-sender gate ahead of BOTH routes below, because the tunnel route
-    // bypasses the bus and would otherwise proxy arbitrary HTTP out of a
-    // checkout for a device every other path on this stream refuses.
     const refusal = entry.opts.mayAcceptFrom?.(this.transport.peerSession(peerId)) ?? null;
     if (refusal) {
       this.notifyRefused(streamId, peerId, refusal, entry.opts.projectId);
@@ -443,12 +471,7 @@ export class StreamMux {
     // one that needs no cooperation from whoever muted it.
     if (entry.unboundAtPeer) this.markBound(streamId);
     const msg = parseMessageFast(mJson);
-    if (msg) {
-      entry.bus.dispatchInbound(msg, channel, "relay", peerId);
-      return true;
-    }
-    const tunnel = parseTunnelMessage(mJson);
-    if (tunnel) entry.opts.onTunnel?.(tunnel, peerId);
+    if (msg) entry.bus.dispatchInbound(msg, channel, "relay", peerId);
     return true;
   }
 

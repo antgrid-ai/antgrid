@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/models/preview_models.dart';
@@ -306,9 +307,39 @@ void main() {
     // every preview to the uncompressed path.
     expect(captured!.acceptEncodings, contains(kTunnelGzipEncoding));
     expect(
-      captured!.toJson()['acceptEncodings'],
+      captured!.toHeadJson()['acceptEncodings'],
       contains(kTunnelGzipEncoding),
     );
+  });
+
+  test('a binary POST body reaches the request as raw bytes', () async {
+    final port = await freePort();
+    TunnelHttpRequest? captured;
+    final proxy = PreviewProxyServer(
+      targetPort: port,
+      onRequest: (req) async {
+        captured = req;
+        return _ok();
+      },
+    );
+    final bound = await proxy.start();
+    addTearDown(() async => proxy.stop());
+
+    // Bytes that are not valid UTF-8 — a body decoded as a string (rather
+    // than carried as raw bytes) would corrupt or reject these.
+    final payload = Uint8List.fromList([0, 1, 2, 0xff, 0xfe, 0x80]);
+    final client = HttpClient();
+    addTearDown(() => client.close(force: true));
+    final request = await client.postUrl(Uri.parse('http://localhost:$bound/upload'));
+    request.headers.set('content-type', 'application/octet-stream');
+    request.add(payload);
+    final response = await request.close();
+    await response.drain<void>();
+
+    expect(captured, isNotNull);
+    expect(captured!.body, payload);
+    // toHeadJson never carries a body — it rides its own tunnel-stream record.
+    expect(captured!.toHeadJson().containsKey('body'), isFalse);
   });
 
   test('serves the decoded bytes without claiming an encoding', () async {

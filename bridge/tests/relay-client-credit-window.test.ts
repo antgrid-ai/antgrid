@@ -4,7 +4,7 @@
 // count asserted here is the plaintext length that goes on the wire.
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { randomBytes } from "node:crypto";
-import { WINDOW_RESYNC_AGE_MS } from "antgrid-wire";
+import { CONTROL_STREAM_ID, WINDOW_RESYNC_AGE_MS } from "antgrid-wire";
 import { TestPeerSessionOwner } from "./test-peer-session-owner";
 import { createMessage } from "../src/protocol";
 import { __setRootForTest } from "../src/logger";
@@ -98,14 +98,10 @@ function establish(): Harness {
   };
 }
 
-function tunnelChunk(requestId: string): object {
-  return {
-    type: "tunnel:http-chunk",
-    requestId,
-    seq: 1,
-    data: "x".repeat(BODY),
-    bodyEncoding: "base64",
-  };
+// Tunnel traffic moved off the bus onto its own stream (Stage A A3); any
+// preview-channel frame of the same size exercises this gate identically.
+function previewFrame(requestId: string): object {
+  return { type: "preview:test", requestId, data: "x".repeat(BODY) };
 }
 
 /** A control-plane envelope whose plaintext is exactly `bytes` long. */
@@ -118,7 +114,7 @@ function envelope(bytes: number): string {
 /** Fill the preview window: five bodies queued, three of which fit. */
 function fillWindow(h: Harness): { at: number; written: Buffer[] } {
   const at = h.sent.length;
-  for (let i = 0; i < 5; i++) void h.client.sendTunnel(tunnelChunk(`r${i}`));
+  for (let i = 0; i < 5; i++) void (h.client as any).sendAppEnvelope(CONTROL_STREAM_ID, previewFrame(`r${i}`), "preview");
   const written = h.sent.slice(at) as Buffer[];
   expect(written).toHaveLength(3);
   expect(h.s.queued("preview").frames).toBe(2);

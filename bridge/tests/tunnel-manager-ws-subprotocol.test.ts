@@ -1,8 +1,13 @@
+// Retargeted from onWsOpen/onWsClose to serveWs/sink.closed (Stage A A3) —
+// the assertions below keep the same meaning as before the rewrite, just
+// against the new API: a peer records what the manager sent it instead of a
+// shared `sendTunnel` JSON log.
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import net from "node:net";
 import { createConnState } from "../src/conn-state";
-import { TunnelManager } from "../src/tunnel-manager";
+import { TunnelManager, type TunnelWsFrame, type TunnelWsPeer } from "../src/tunnel-manager";
+import type { TunnelWsOpen } from "../src/tunnel-protocol";
 
 /** A Vite-shaped upstream: the upgrade is answered only when the request
  *  names `vite-hmr`, and is otherwise left unanswered — never refused. */
@@ -28,18 +33,33 @@ function startViteLikeServer(seen: Array<string | null>) {
 }
 
 function makeManager(opts: { wsAbandonedMax?: number } = {}) {
-  const sent: Record<string, unknown>[] = [];
-  const manager = new TunnelManager({
+  return new TunnelManager({
     projectId: "project",
     portLabels: new Map(),
     previewPorts: new Set(),
-    sendTunnel: async (data) => { sent.push(data as Record<string, unknown>); return "sent"; },
     sendEncrypted: () => {},
     relayHost: "relay.test",
     connState: createConnState(),
     ...opts,
   });
-  return { manager, sent };
+}
+
+/** Tags every send/close onto a shared log so a test can filter by which
+ *  `serveWs` call (which peer) produced it — the new API hands the manager a
+ *  distinct peer per stream rather than one shared `sendTunnel` sink. */
+function makePeer(log: Array<Record<string, unknown>>, tag: string): TunnelWsPeer {
+  return {
+    send: async (frame: TunnelWsFrame) => {
+      log.push({
+        kind: "data",
+        tag,
+        binary: frame.binary,
+        text: frame.binary ? undefined : new TextDecoder().decode(frame.bytes),
+      });
+      return "sent";
+    },
+    close: (code, reason) => { log.push({ kind: "close", tag, code, reason }); },
+  };
 }
 
 async function waitUntil(condition: () => boolean, ms = 2_000): Promise<void> {
@@ -50,8 +70,8 @@ async function waitUntil(condition: () => boolean, ms = 2_000): Promise<void> {
   }
 }
 
-function open(manager: TunnelManager, tunnelId: string, port: number, headers?: Record<string, string>) {
-  manager.onWsOpen({
+function openReq(tunnelId: string, port: number, headers?: Record<string, string>): TunnelWsOpen {
+  return {
     type: "tunnel:ws-open",
     tunnelId,
     port,
@@ -59,20 +79,19 @@ function open(manager: TunnelManager, tunnelId: string, port: number, headers?: 
     path: "/",
     ...(headers ? { headers } : {}),
     checkoutId: "main",
-  });
+  };
 }
 
 test("the browser's subprotocol reaches the dev server, and its socket opens", async () => {
   const seen: Array<string | null> = [];
   const server = startViteLikeServer(seen);
-  const { manager, sent } = makeManager();
+  const manager = makeManager();
+  const log: Array<Record<string, unknown>> = [];
   try {
-    open(manager, "hmr", server.port!, { "sec-websocket-protocol": "vite-hmr", cookie: "a=b" });
-    await waitUntil(() => sent.some((m) => m.type === "tunnel:ws-data"));
+    manager.serveWs(openReq("hmr", server.port!, { "sec-websocket-protocol": "vite-hmr", cookie: "a=b" }), makePeer(log, "hmr"));
+    await waitUntil(() => log.some((e) => e.kind === "data"));
     expect(seen).toEqual(["vite-hmr"]);
-    expect(sent.find((m) => m.type === "tunnel:ws-data")).toMatchObject({
-      data: '{"type":"connected"}',
-    });
+    expect(log.find((e) => e.kind === "data")).toMatchObject({ text: '{"type":"connected"}' });
   } finally {
     manager.stop();
     server.stop(true);
@@ -82,10 +101,11 @@ test("the browser's subprotocol reaches the dev server, and its socket opens", a
 test("every requested subprotocol is offered upstream, in order", async () => {
   const seen: Array<string | null> = [];
   const server = startViteLikeServer(seen);
-  const { manager, sent } = makeManager();
+  const manager = makeManager();
+  const log: Array<Record<string, unknown>> = [];
   try {
-    open(manager, "multi", server.port!, { "Sec-WebSocket-Protocol": "graphql-ws, vite-hmr" });
-    await waitUntil(() => sent.some((m) => m.type === "tunnel:ws-data"));
+    manager.serveWs(openReq("multi", server.port!, { "Sec-WebSocket-Protocol": "graphql-ws, vite-hmr" }), makePeer(log, "multi"));
+    await waitUntil(() => log.some((e) => e.kind === "data"));
     expect(seen).toHaveLength(1);
     expect(seen[0]!.split(",").map((s) => s.trim())).toEqual(["graphql-ws", "vite-hmr"]);
   } finally {
@@ -110,10 +130,11 @@ test("a browser that asked for no subprotocol sends none upstream", async () => 
       message() {},
     },
   });
-  const { manager, sent } = makeManager();
+  const manager = makeManager();
+  const log: Array<Record<string, unknown>> = [];
   try {
-    open(manager, "plain", server.port!, { cookie: "a=b" });
-    await waitUntil(() => sent.some((m) => m.type === "tunnel:ws-data"));
+    manager.serveWs(openReq("plain", server.port!, { cookie: "a=b" }), makePeer(log, "plain"));
+    await waitUntil(() => log.some((e) => e.kind === "data"));
     expect(seen).toEqual([null]);
   } finally {
     manager.stop();
@@ -171,13 +192,14 @@ function startSilentUpstream() {
 
 test("closing a tunnel mid-handshake never resets the upstream socket", async () => {
   const upstream = startSilentUpstream();
-  const { manager } = makeManager();
+  const manager = makeManager();
+  const log: Array<Record<string, unknown>> = [];
   try {
-    open(manager, "hanging", upstream.port());
+    const sink = manager.serveWs(openReq("hanging", upstream.port()), makePeer(log, "hanging"));
     await waitUntil(() => upstream.conns.length === 1 && upstream.conns[0]!.request.includes("\r\n\r\n"));
     const conn = upstream.conns[0]!;
 
-    manager.onWsClose({ type: "tunnel:ws-close", tunnelId: "hanging", checkoutId: "main" });
+    sink.closed();
     await Bun.sleep(300);
     // Still connecting, still open on the far side: no FIN, and above all no
     // RESET — a Node dev server that ignored this upgrade holds the socket with
@@ -200,14 +222,15 @@ test("closing a tunnel mid-handshake never resets the upstream socket", async ()
 
 test("a parked handshake that later completes never speaks for its tunnel id", async () => {
   const upstream = startSilentUpstream();
-  const { manager, sent } = makeManager();
+  const manager = makeManager();
+  const log: Array<Record<string, unknown>> = [];
   try {
-    open(manager, "reused", upstream.port());
+    const first = manager.serveWs(openReq("reused", upstream.port()), makePeer(log, "first"));
     await waitUntil(() => upstream.conns.length === 1 && upstream.conns[0]!.request.includes("\r\n\r\n"));
-    manager.onWsClose({ type: "tunnel:ws-close", tunnelId: "reused", checkoutId: "main" });
+    first.closed();
 
     // The same id names a fresh tunnel while the first socket is still parked.
-    open(manager, "reused", upstream.port());
+    manager.serveWs(openReq("reused", upstream.port()), makePeer(log, "second"));
     await waitUntil(() => upstream.conns.length === 2 && upstream.conns[1]!.request.includes("\r\n\r\n"));
 
     // The parked socket opens, is closed, and the server answers its close.
@@ -216,8 +239,7 @@ test("a parked handshake that later completes never speaks for its tunnel id", a
     upstream.answer(parked);
     await waitUntil(() => parked.ended || parked.socket.destroyed);
     await Bun.sleep(100);
-    expect(sent.filter((m) => m.type === "tunnel:ws-close")).toEqual([]);
-    expect(sent.filter((m) => m.type === "tunnel:ws-data")).toEqual([]);
+    expect(log.filter((e) => e.tag === "first")).toEqual([]);
   } finally {
     manager.stop();
     upstream.close();
@@ -226,22 +248,23 @@ test("a parked handshake that later completes never speaks for its tunnel id", a
 
 test("the park is bounded: past the cap the oldest handshake is cut", async () => {
   const upstream = startSilentUpstream();
-  const { manager } = makeManager({ wsAbandonedMax: 1 });
+  const manager = makeManager({ wsAbandonedMax: 1 });
+  const log: Array<Record<string, unknown>> = [];
   try {
-    open(manager, "first", upstream.port());
+    const first = manager.serveWs(openReq("first", upstream.port()), makePeer(log, "first"));
     await waitUntil(() => upstream.conns.length === 1);
-    manager.onWsClose({ type: "tunnel:ws-close", tunnelId: "first", checkoutId: "main" });
+    first.closed();
 
-    open(manager, "second", upstream.port());
+    const second = manager.serveWs(openReq("second", upstream.port()), makePeer(log, "second"));
     await waitUntil(() => upstream.conns.length === 2);
-    manager.onWsClose({ type: "tunnel:ws-close", tunnelId: "second", checkoutId: "main" });
+    second.closed();
 
-    const [first, second] = upstream.conns as [(typeof upstream.conns)[number], (typeof upstream.conns)[number]];
-    await waitUntil(() => first.errors.length > 0 || first.ended || first.socket.destroyed);
+    const [firstConn, secondConn] = upstream.conns as [(typeof upstream.conns)[number], (typeof upstream.conns)[number]];
+    await waitUntil(() => firstConn.errors.length > 0 || firstConn.ended || firstConn.socket.destroyed);
     await Bun.sleep(200);
-    expect(second.errors).toEqual([]);
-    expect(second.ended).toBe(false);
-    expect(second.socket.destroyed).toBe(false);
+    expect(secondConn.errors).toEqual([]);
+    expect(secondConn.ended).toBe(false);
+    expect(secondConn.socket.destroyed).toBe(false);
   } finally {
     manager.stop();
     upstream.close();
@@ -251,25 +274,20 @@ test("the park is bounded: past the cap the oldest handshake is cut", async () =
 test("a subprotocol Bun's constructor refuses ends the one tunnel, not the host", async () => {
   const seen: Array<string | null> = [];
   const server = startViteLikeServer(seen);
-  const { manager, sent } = makeManager();
+  const manager = makeManager();
+  const log: Array<Record<string, unknown>> = [];
   try {
     // `=` is not an RFC 6455 token, and Bun's constructor throws SyntaxError for
-    // it. Nothing between the relay's message listener and here catches, and an
+    // it. Nothing between the registry's read loop and here catches, and an
     // uncaught exception takes down every agent on the machine.
-    open(manager, "bad", server.port!, { "sec-websocket-protocol": "bearer.abc=" });
-    expect(sent).toEqual([
-      {
-        type: "tunnel:ws-close",
-        tunnelId: "bad",
-        reason: "upstream connection could not be opened",
-        checkoutId: "main",
-      },
-    ]);
+    manager.serveWs(openReq("bad", server.port!, { "sec-websocket-protocol": "bearer.abc=" }), makePeer(log, "bad"));
+    expect(log).toEqual([{ kind: "close", tag: "bad", code: undefined, reason: "upstream connection could not be opened" }]);
     expect(seen).toEqual([]);
 
     // The refusal must not have left the id mapped: a browser retry still works.
-    open(manager, "bad", server.port!, { "sec-websocket-protocol": "vite-hmr" });
-    await waitUntil(() => sent.some((m) => m.type === "tunnel:ws-data"));
+    const log2: Array<Record<string, unknown>> = [];
+    manager.serveWs(openReq("bad", server.port!, { "sec-websocket-protocol": "vite-hmr" }), makePeer(log2, "bad2"));
+    await waitUntil(() => log2.some((e) => e.kind === "data"));
   } finally {
     manager.stop();
     server.stop(true);

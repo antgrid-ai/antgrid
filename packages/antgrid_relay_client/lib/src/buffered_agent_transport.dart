@@ -1,7 +1,9 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'agent_transport.dart';
 import 'terminal_attachment.dart';
+import 'tunnel_stream.dart';
 
 /// Shared scaffolding for [AgentTransport] implementations.
 ///
@@ -55,6 +57,32 @@ abstract class BufferedAgentTransport implements AgentTransport {
     requestId: requestId,
     checkoutId: checkoutId,
     subscribe: subscribe,
+  );
+
+  /// Every socket-path transport (`LocalTransport`, `DemoTransport`, the
+  /// test subclasses) inherits this: loopback never tunnels (D2, stage-A-A3
+  /// §9 D-2), and nothing here is wired to a stream, so a preview request
+  /// against one of these fails at once instead of hanging. `StreamTransport`
+  /// overrides both with the real native-stream implementation.
+  @override
+  TunnelHttpExchange openTunnelHttp({
+    required String requestId,
+    required String checkoutId,
+    required Map<String, dynamic> head,
+    required Uint8List body,
+  }) => FailedTunnelHttpExchange(
+    requestId,
+    const TunnelExchangeFailure('NOT_SUPPORTED'),
+  );
+
+  @override
+  TunnelWsChannel openTunnelWs({
+    required String tunnelId,
+    required String checkoutId,
+    required Map<String, dynamic> open,
+  }) => FailedTunnelWsChannel(
+    tunnelId,
+    const TunnelExchangeFailure('NOT_SUPPORTED'),
   );
 
   @override

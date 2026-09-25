@@ -16,10 +16,16 @@ import {
   GLOBAL_REASSEMBLY_BUDGET,
   CREDIT_BATCH_BYTES,
   STREAM_TERMINAL_BRIDGE_RECORD_MAX_BYTES,
+  STREAM_TUNNEL_RECORD_MAX_BYTES,
+  TUNNEL_RECORD_TAG_BODY,
+  TUNNEL_RECORD_TAG_BODY_GZIP,
+  TUNNEL_RECORD_TAG_WS_TEXT,
+  TUNNEL_RECORD_TAG_WS_BINARY,
+  encodeTunnelDataRecord,
+  decodeTunnelRecord,
 } from "antgrid-wire";
 import { FragReassembler } from "../../bridge/src/frag-reassembler";
-import { StreamRecordReader } from "../../bridge/src/peer/stream-records";
-import { TUNNEL_GZIP_ENCODING } from "../../bridge/src/tunnel-protocol";
+import { StreamRecordReader, STREAM_RECORD_SLICE_BYTES } from "../../bridge/src/peer/stream-records";
 
 /** The fake license token the eval relay gate (`fakeLicenseGate`) accepts. v3
  *  requires it for BOTH device types, so an app now sends it too.
@@ -62,17 +68,61 @@ export interface HelloForgeOpts {
   licenseToken?: string;
 }
 
-/** One tunneled HTTP response, reassembled from the frames the bridge streamed
- *  for it. `frames` counts every frame consumed (start + chunks + end), so a
- *  single-frame body reads `frames === 1`; `chunks` is how many
- *  `tunnel:http-chunk` frames carried body after the head's own slice. */
+/** One tunneled HTTP response, reassembled from a dedicated `tunnel-http`
+ *  QUIC stream (Stage A wave A3). `records` counts only the body records
+ *  consumed (the `0x00`/`0x01`-tagged ones), not the head or end control
+ *  records. */
 export interface TunnelHttpResult {
   status: number;
   headers: Record<string, string>;
   setCookies: string[];
   body: Buffer;
-  frames: number;
-  chunks: number;
+  records: number;
+}
+
+/** A `tunnel-http` stream driven directly, mirroring the app's own
+ *  `StreamTransport.openTunnelHttp` without its retry or queueing policy —
+ *  see `openTerminalStream`'s header comment for why this exists beside the
+ *  Dart client at all. */
+export interface TunnelHttpStreamClient {
+  readonly requestId: string;
+  /** The `tunnel:http-head` record, or rejects with an Error carrying
+   *  `.refusal` (the `stream:refused` record) when the open was refused. */
+  head(timeoutMs?: number): Promise<Record<string, any>>;
+  /** Head + every body record (gunzipped per record) + the end record;
+   *  rejects on refusal or a status other than `"end"`. */
+  response(timeoutMs?: number): Promise<TunnelHttpResult>;
+  bodyBytesSoFar(): number;
+  /** Stops/restarts issuing reads, so QUIC flow control pushes back on the
+   *  bridge's writer instead of this client draining as fast as it can. */
+  pauseReading(): void;
+  resumeReading(): void;
+  /** Resets the send half only; the receive half keeps draining (D4: the app
+   *  cancels the same way, and the bridge learns of it through its own
+   *  pending read). */
+  cancel(): void;
+  readonly ended: Promise<"end" | "truncated" | "refused" | "reset-before-head">;
+}
+
+export type TunnelWsRecord =
+  | { kind: "text"; text: string }
+  | { kind: "binary"; bytes: Buffer }
+  | { kind: "close"; code?: number; reason?: string }
+  | { kind: "refused"; refusal: Record<string, any> };
+
+/** A `tunnel-ws` stream driven directly. `records`/`next` see every record in
+ *  arrival order; the caller narrows by `kind`. */
+export interface TunnelWsStreamClient {
+  readonly tunnelId: string;
+  readonly records: TunnelWsRecord[];
+  next(predicate: (r: TunnelWsRecord) => boolean, timeoutMs?: number): Promise<TunnelWsRecord>;
+  sendText(text: string): Promise<void>;
+  sendBinary(bytes: Uint8Array): Promise<void>;
+  /** Writes `tunnel:ws-close` after every queued frame, then `finish()`. */
+  close(code?: number, reason?: string): Promise<void>;
+  /** `reset()` with no close record. */
+  reset(): void;
+  readonly ended: Promise<void>;
 }
 
 /** A terminal-kind native stream driven directly, without the app's own
@@ -96,13 +146,23 @@ export class NativeAuthorizationNotReadyError extends Error {
   }
 }
 
-/** Undo one body slice's encoding. Each gzip slice is an independent member, so
- *  nothing carries over between slices. */
-function decodeTunnelSlice(frame: { data?: unknown; bodyEncoding?: unknown }): Buffer {
-  const data = typeof frame.data === "string" ? frame.data : "";
-  if (data === "") return Buffer.alloc(0);
-  const raw = Buffer.from(data, "base64");
-  return frame.bodyEncoding === TUNNEL_GZIP_ENCODING ? Buffer.from(Bun.gunzipSync(raw)) : raw;
+/** Races `promise` against `timeoutMs` without cancelling it — `promise`
+ *  itself still settles exactly once, so a caller that times out and a later
+ *  caller awaiting the same promise both see its real outcome. */
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`Timed out waiting for ${label} (${timeoutMs}ms)`)), timeoutMs);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
 }
 
 /** `[u32 BE len][bytes]`, the framing every stream-open and refusal record uses. */
@@ -642,6 +702,284 @@ export class RelayClient {
     };
   }
 
+  /** Opens a `kind:"tunnel-http"` stream: the open frame, the
+   *  `tunnel:http-request` head (with `bodyLength` stamped from `body`), then
+   *  `body` as `≤STREAM_RECORD_SLICE_BYTES` `0x00` records (§1.3). It never
+   *  `finish()`es the send half itself — the wire keeps it open until
+   *  `tunnel:http-end` arrives, exactly as the app's own transport does.
+   *  `opts.head` may set its own `requestId` to build a deliberate open/head
+   *  mismatch for a refusal-path row; otherwise it takes the open frame's id. */
+  async openTunnelHttpStream(opts: {
+    projectId: string;
+    requestId?: string;
+    head: Record<string, unknown>;
+    body?: Uint8Array;
+  }): Promise<TunnelHttpStreamClient> {
+    const connection = this.nativeConnection;
+    if (!connection) throw new Error("Native connection is not established");
+    const openRequestId = opts.requestId ?? crypto.randomUUID();
+    const body = opts.body ?? new Uint8Array(0);
+    const stream = await connection.openBi();
+
+    const openFrame = prefixWithLength(
+      encodeStreamOpen({ kind: "tunnel-http", projectId: opts.projectId, requestId: openRequestId }),
+    );
+    await stream.send.writeAll(Array.from(openFrame));
+
+    const head: Record<string, unknown> = {
+      ...opts.head,
+      requestId: (opts.head as { requestId?: unknown }).requestId ?? openRequestId,
+      bodyLength: body.length,
+      checkoutId: (opts.head as { checkoutId?: unknown }).checkoutId ?? "main",
+    };
+    await stream.send.writeAll(Array.from(prefixWithLength(Buffer.from(JSON.stringify(head), "utf8"))));
+
+    for (let offset = 0; offset < body.length; offset += STREAM_RECORD_SLICE_BYTES) {
+      const slice = body.subarray(offset, Math.min(offset + STREAM_RECORD_SLICE_BYTES, body.length));
+      const record = encodeTunnelDataRecord(TUNNEL_RECORD_TAG_BODY, slice);
+      await stream.send.writeAll(Array.from(prefixWithLength(record)));
+    }
+
+    const reader = new StreamRecordReader({ recv: stream.recv }, STREAM_TUNNEL_RECORD_MAX_BYTES, () => {});
+
+    let gotHead = false;
+    let refusal: Record<string, any> | null = null;
+    let sawEnd = false;
+    let bodyBytes = 0;
+    let recordCount = 0;
+    const bodyChunks: Buffer[] = [];
+
+    let headResolve!: (h: Record<string, any>) => void;
+    let headReject!: (e: Error) => void;
+    const headPromise = new Promise<Record<string, any>>((resolve, reject) => {
+      headResolve = resolve;
+      headReject = reject;
+    });
+    // Nobody may ever call `head()`/`response()` (a cap-refused row, say) —
+    // without this, that rejection surfaces as an unhandled rejection instead
+    // of the `ended` status the row actually asserts on.
+    headPromise.catch(() => {});
+
+    let endedResolve!: (v: "end" | "truncated" | "refused" | "reset-before-head") => void;
+    const ended = new Promise<"end" | "truncated" | "refused" | "reset-before-head">((resolve) => {
+      endedResolve = resolve;
+    });
+
+    let paused = false;
+    let resumeWaiters: Array<() => void> = [];
+    const waitIfPaused = async (): Promise<void> => {
+      if (!paused) return;
+      await new Promise<void>((resolve) => resumeWaiters.push(resolve));
+    };
+
+    void (async () => {
+      try {
+        while (true) {
+          await waitIfPaused();
+          const bytes = await reader.read();
+          const decoded = decodeTunnelRecord(bytes);
+          if (!decoded) continue; // malformed record — ignore rather than fail the row
+          if (decoded.kind === "json") {
+            let obj: any;
+            try {
+              obj = JSON.parse(decoded.text);
+            } catch {
+              continue;
+            }
+            if (obj?.type === "stream:refused") {
+              refusal = obj;
+              headReject(
+                Object.assign(new Error(`tunnel-http stream refused: ${obj.code} ${obj.message}`), { refusal: obj }),
+              );
+              continue;
+            }
+            if (obj?.type === "tunnel:http-head" && !gotHead) {
+              gotHead = true;
+              headResolve(obj);
+              continue;
+            }
+            if (obj?.type === "tunnel:http-end") {
+              sawEnd = true;
+              // §1.3: the app finish()es its send half only once the end
+              // record arrives.
+              void stream.send.finish().catch(() => {});
+              continue;
+            }
+            continue; // unexpected JSON — a breach the bridge itself would have retired on
+          }
+          recordCount++;
+          const raw = Buffer.from(decoded.payload);
+          const chunk = decoded.tag === TUNNEL_RECORD_TAG_BODY_GZIP ? Buffer.from(Bun.gunzipSync(raw)) : raw;
+          bodyChunks.push(chunk);
+          bodyBytes += chunk.length;
+        }
+      } catch {
+        // The bridge's half ended — FIN (end/refusal already handled above)
+        // or reset (overflow, a detected cancel) look the same from here.
+      } finally {
+        endedResolve(refusal ? "refused" : !gotHead ? "reset-before-head" : sawEnd ? "end" : "truncated");
+      }
+    })();
+
+    return {
+      requestId: openRequestId,
+      head(timeoutMs = 10_000): Promise<Record<string, any>> {
+        return withTimeout(headPromise, timeoutMs, `tunnel-http head for ${openRequestId}`);
+      },
+      async response(timeoutMs = 10_000): Promise<TunnelHttpResult> {
+        const h = await withTimeout(headPromise, timeoutMs, `tunnel-http head for ${openRequestId}`);
+        const status = await withTimeout(ended, timeoutMs, `tunnel-http end for ${openRequestId}`);
+        if (status !== "end") {
+          throw new Error(`tunnel-http stream ${openRequestId} ended "${status}" instead of "end"`);
+        }
+        return {
+          status: h.status,
+          headers: (h.headers ?? {}) as Record<string, string>,
+          setCookies: (h.setCookies ?? []) as string[],
+          body: Buffer.concat(bodyChunks),
+          records: recordCount,
+        };
+      },
+      bodyBytesSoFar(): number {
+        return bodyBytes;
+      },
+      pauseReading(): void {
+        paused = true;
+      },
+      resumeReading(): void {
+        paused = false;
+        const waiters = resumeWaiters.splice(0);
+        for (const w of waiters) w();
+      },
+      cancel(): void {
+        void stream.send.reset(0n).catch(() => {});
+      },
+      ended,
+    };
+  }
+
+  /** Opens a `kind:"tunnel-ws"` stream: the open frame, then the
+   *  `tunnel:ws-open` head. `opts.tunnelId` (falling back to the open frame's
+   *  own id) is what `close`/records key on; `opts.open` supplies the rest of
+   *  the head (`port`, `path`, …). */
+  async openTunnelWsStream(opts: {
+    projectId: string;
+    tunnelId?: string;
+    open: Record<string, unknown>;
+  }): Promise<TunnelWsStreamClient> {
+    const connection = this.nativeConnection;
+    if (!connection) throw new Error("Native connection is not established");
+    const tunnelId = opts.tunnelId ?? crypto.randomUUID();
+    const checkoutId = (opts.open as { checkoutId?: unknown }).checkoutId ?? "main";
+    const stream = await connection.openBi();
+
+    const openFrame = prefixWithLength(
+      encodeStreamOpen({ kind: "tunnel-ws", projectId: opts.projectId, wsId: tunnelId }),
+    );
+    await stream.send.writeAll(Array.from(openFrame));
+
+    const head = { ...opts.open, type: "tunnel:ws-open", tunnelId, checkoutId };
+    await stream.send.writeAll(Array.from(prefixWithLength(Buffer.from(JSON.stringify(head), "utf8"))));
+
+    const records: TunnelWsRecord[] = [];
+    const waiters: Array<{
+      match: (r: TunnelWsRecord) => boolean;
+      resolve: (r: TunnelWsRecord) => void;
+      timer: ReturnType<typeof setTimeout>;
+    }> = [];
+    let settleEnded = () => {};
+    const ended = new Promise<void>((resolve) => {
+      settleEnded = resolve;
+    });
+
+    const deliver = (record: TunnelWsRecord): void => {
+      for (let i = 0; i < waiters.length; i++) {
+        if (waiters[i]!.match(record)) {
+          const waiter = waiters.splice(i, 1)[0]!;
+          clearTimeout(waiter.timer);
+          waiter.resolve(record);
+          return;
+        }
+      }
+      records.push(record);
+    };
+
+    const reader = new StreamRecordReader({ recv: stream.recv }, STREAM_TUNNEL_RECORD_MAX_BYTES, () => {});
+    void (async () => {
+      try {
+        while (true) {
+          const bytes = await reader.read();
+          const decoded = decodeTunnelRecord(bytes);
+          if (!decoded) continue;
+          if (decoded.kind === "json") {
+            let obj: any;
+            try {
+              obj = JSON.parse(decoded.text);
+            } catch {
+              continue;
+            }
+            if (obj?.type === "stream:refused") {
+              deliver({ kind: "refused", refusal: obj });
+              continue;
+            }
+            if (obj?.type === "tunnel:ws-close") {
+              deliver({ kind: "close", code: obj.code, reason: obj.reason });
+              continue;
+            }
+            continue;
+          }
+          if (decoded.tag === TUNNEL_RECORD_TAG_WS_TEXT) {
+            deliver({ kind: "text", text: Buffer.from(decoded.payload).toString("utf8") });
+          } else if (decoded.tag === TUNNEL_RECORD_TAG_WS_BINARY) {
+            deliver({ kind: "binary", bytes: Buffer.from(decoded.payload) });
+          }
+        }
+      } catch {
+        // bridge half ended — FIN or reset look the same from here.
+      } finally {
+        settleEnded();
+      }
+    })();
+
+    return {
+      tunnelId,
+      records,
+      next(predicate, timeoutMs = 10_000): Promise<TunnelWsRecord> {
+        for (let i = 0; i < records.length; i++) {
+          if (predicate(records[i]!)) return Promise.resolve(records.splice(i, 1)[0]!);
+        }
+        return new Promise((resolve, reject) => {
+          const timer = setTimeout(() => {
+            const idx = waiters.findIndex((w) => w.timer === timer);
+            if (idx !== -1) waiters.splice(idx, 1);
+            reject(new Error(`Timed out waiting for tunnel-ws record (${timeoutMs}ms)`));
+          }, timeoutMs);
+          waiters.push({ match: predicate, resolve, timer });
+        });
+      },
+      async sendText(text: string): Promise<void> {
+        const record = encodeTunnelDataRecord(TUNNEL_RECORD_TAG_WS_TEXT, Buffer.from(text, "utf8"));
+        await stream.send.writeAll(Array.from(prefixWithLength(record)));
+      },
+      async sendBinary(bytes: Uint8Array): Promise<void> {
+        const record = encodeTunnelDataRecord(TUNNEL_RECORD_TAG_WS_BINARY, bytes);
+        await stream.send.writeAll(Array.from(prefixWithLength(record)));
+      },
+      async close(code?: number, reason?: string): Promise<void> {
+        const record = Buffer.from(
+          JSON.stringify({ type: "tunnel:ws-close", tunnelId, code, reason, checkoutId }),
+          "utf8",
+        );
+        await stream.send.writeAll(Array.from(prefixWithLength(record)));
+        await stream.send.finish();
+      },
+      reset(): void {
+        void stream.send.reset(0n).catch(() => {});
+      },
+      ended,
+    };
+  }
+
   /** Connects from the configured native endpoint to the configured target
    *  with `alpn`. Returns "refused" if connect rejects or the connection
    *  closes within `timeoutMs`, otherwise "connected" (and closes it). */
@@ -792,24 +1130,15 @@ export class RelayClient {
     this.dispatchAbMessage(JSON.stringify(env.m), streamId);
   }
 
-  /** Parse a plaintext AbMessage (or tunnel frame) and route it to waiters/queue.
-   *  `streamId` tags it so `waitForStreamAbType` can distinguish project streams
-   *  from the control plane; control-plane messages carry none. */
+  /** Parse a plaintext AbMessage and route it to waiters/queue. `streamId`
+   *  tags it so `waitForStreamAbType` can distinguish project streams from
+   *  the control plane; control-plane messages carry none. Tunnel traffic
+   *  rides its own QUIC streams, never a project stream, so anything that
+   *  fails to parse as an AbMessage is dropped, matching the bridge's own
+   *  handling of a stray one. */
   private dispatchAbMessage(json: string, streamId?: string): void {
     const msg = parseMessage(json);
-    if (!msg) {
-      // Tunnel-protocol frames aren't AbMessages — surface them raw by requestId.
-      try {
-        const raw = JSON.parse(json);
-        if (typeof raw?.type === "string" && raw.type.startsWith("tunnel:")) {
-          if (streamId) raw._streamId = streamId;
-          this.deliver(raw);
-        }
-      } catch {
-        /* not JSON — drop */
-      }
-      return;
-    }
+    if (!msg) return;
     // `stream-ready` teaches the phone the streamId for a project.
     if (msg.type === ("stream-ready" as AbMessage["type"])) {
       const anyMsg = msg as any;
@@ -1047,66 +1376,6 @@ export class RelayClient {
     timeoutMs = 5_000,
   ): Promise<Extract<AbMessage, { type: T }>> {
     return this.waitFor((msg: any) => msg.type === type, timeoutMs);
-  }
-
-  /**
-   * Assemble one tunneled HTTP response: the `tunnel:http-start` for `requestId`
-   * (head + first body slice), then — unless that start was `last` — every
-   * `tunnel:http-chunk` up to the `tunnel:http-end`. `timeoutMs` bounds the
-   * WHOLE response, not each frame, so a stalled body fails on the same clock a
-   * whole-body reply used to.
-   *
-   * The seq and count checks are the app's own loss detection, restated here:
-   * the relay drops single frames on rate limit or backpressure and a FIFO
-   * cannot show a hole, so a body that quietly lost a chunk must fail the test
-   * rather than come back short.
-   */
-  async waitForTunnelResponse(requestId: string, timeoutMs = 10_000): Promise<TunnelHttpResult> {
-    const deadline = Date.now() + timeoutMs;
-    const left = () => Math.max(1, deadline - Date.now());
-
-    const start = await this.waitFor(
-      (m: any) => m?.type === "tunnel:http-start" && m.requestId === requestId,
-      left(),
-    );
-    const parts: Buffer[] = [decodeTunnelSlice(start)];
-    let frames = 1;
-    let chunks = 0;
-
-    while (start.last !== true) {
-      // Each waitFor takes the OLDEST match, and the bridge emits a stream's
-      // frames in order on one channel, so this walks the body in seq order.
-      const frame = await this.waitFor(
-        (m: any) =>
-          (m?.type === "tunnel:http-chunk" || m?.type === "tunnel:http-end") && m.requestId === requestId,
-        left(),
-      );
-      frames++;
-      if (frame.type === "tunnel:http-chunk") {
-        if (frame.seq !== chunks + 1) {
-          throw new Error(`seq gap on ${requestId}: chunk ${frame.seq} arrived, expected ${chunks + 1}`);
-        }
-        chunks++;
-        parts.push(decodeTunnelSlice(frame));
-        continue;
-      }
-      if (typeof frame.error === "string") {
-        throw new Error(`tunnel stream ${requestId} ended with error: ${frame.error}`);
-      }
-      if (frame.chunks !== chunks) {
-        throw new Error(`chunk count mismatch on ${requestId}: end claims ${frame.chunks}, received ${chunks}`);
-      }
-      break;
-    }
-
-    return {
-      status: start.status,
-      headers: (start.headers ?? {}) as Record<string, string>,
-      setCookies: (start.setCookies ?? []) as string[],
-      body: Buffer.concat(parts),
-      frames,
-      chunks,
-    };
   }
 
   /**

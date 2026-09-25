@@ -1,86 +1,119 @@
-// The streamed-tunnel wire: the slice-size arithmetic the flow-control window
-// depends on, and what parseTunnelMessage does and does not accept.
+// The tunnel record schemas: what a request/head/end/ws-open/ws-close record
+// parses to, and what it defaults or rejects. A record's body rides as binary
+// tagged slices on a dedicated QUIC stream, never as a JSON `data` field.
 import { describe, expect, it } from "bun:test";
-import { CHANNEL_WINDOW_BYTES, CREDIT_BATCH_BYTES, FRAG_THRESHOLD } from "antgrid-wire";
-import { base64Length, parseTunnelMessage, TUNNEL_CHUNK_BYTES } from "../src/tunnel-protocol";
+import {
+  TUNNEL_BODY_SLICE_BYTES,
+  TUNNEL_GZIP_ENCODING,
+  TunnelHttpEnd,
+  TunnelHttpHead,
+  TunnelHttpRequest,
+  TunnelWsClose,
+  TunnelWsOpen,
+} from "../src/tunnel-protocol";
 
-// Envelope + header slack. A start carrying more than this in headers may
-// fragment, which frag1 still delivers — it is simply not single-frame.
-const FRAME_SLACK = 4096;
+describe("TunnelHttpRequest", () => {
+  const base = {
+    type: "tunnel:http-request" as const,
+    requestId: "r1",
+    port: 3000,
+    method: "GET",
+    path: "/",
+  };
 
-describe("TUNNEL_CHUNK_BYTES sizing", () => {
-  it("is a multiple of 3, so base64 has no padding and its length is exact", () => {
-    expect(TUNNEL_CHUNK_BYTES % 3).toBe(0);
-    expect(base64Length(TUNNEL_CHUNK_BYTES)).toBe(262_144);
+  it("defaults bodyLength to 0 and checkoutId to main", () => {
+    expect(TunnelHttpRequest.parse(base)).toEqual({
+      ...base,
+      bodyLength: 0,
+      checkoutId: "main",
+    });
   });
 
-  it("keeps an encoded slice inside one fragment", () => {
-    expect(base64Length(TUNNEL_CHUNK_BYTES) + FRAME_SLACK).toBeLessThanOrEqual(FRAG_THRESHOLD);
+  it("accepts an explicit bodyLength and checkoutId", () => {
+    expect(TunnelHttpRequest.parse({ ...base, bodyLength: 1024, checkoutId: "wt-1" })).toMatchObject({
+      bodyLength: 1024,
+      checkoutId: "wt-1",
+    });
   });
 
-  it("earns a credit within every two chunks", () => {
-    // Stage B: the wire carries plaintext, so a chunk's charge is its own
-    // base64 length with no seal overhead added on top.
-    expect(2 * base64Length(TUNNEL_CHUNK_BYTES))
-      .toBeGreaterThanOrEqual(CREDIT_BATCH_BYTES);
+  it("rejects a negative bodyLength", () => {
+    expect(TunnelHttpRequest.safeParse({ ...base, bodyLength: -1 }).success).toBe(false);
   });
 
-  it("lets seven chunks pipeline inside one channel window", () => {
-    expect(7 * (base64Length(TUNNEL_CHUNK_BYTES) + FRAME_SLACK))
-      .toBeLessThanOrEqual(CHANNEL_WINDOW_BYTES);
+  it("strips a legacy body field rather than carrying it through", () => {
+    // The record carries no body of its own — it rides as tagged
+    // binary slices on the stream. A stale `body` key must not survive parse,
+    // or a caller reading it back would believe it round-tripped.
+    const parsed = TunnelHttpRequest.parse({ ...base, body: "hi" });
+    expect(parsed).not.toHaveProperty("body");
   });
 });
 
-describe("parseTunnelMessage: the streamed HTTP frames", () => {
-  it("accepts a start with and without a body slice, with and without last", () => {
-    const base = { type: "tunnel:http-start" as const, requestId: "r1", status: 200, headers: {} };
+describe("TunnelHttpHead", () => {
+  const base = {
+    type: "tunnel:http-head" as const,
+    requestId: "r1",
+    status: 200,
+    headers: { "content-type": "text/plain" },
+  };
 
-    expect(parseTunnelMessage({ ...base, data: "", bodyEncoding: "base64", last: true })).toEqual({
-      ...base, data: "", bodyEncoding: "base64", last: true, checkoutId: "main",
+  it("parses and defaults checkoutId to main", () => {
+    expect(TunnelHttpHead.parse(base)).toEqual({ ...base, checkoutId: "main" });
+  });
+
+  it("carries setCookies and a non-main checkoutId", () => {
+    expect(
+      TunnelHttpHead.parse({ ...base, setCookies: ["a=1"], checkoutId: "wt-1" }),
+    ).toMatchObject({ setCookies: ["a=1"], checkoutId: "wt-1" });
+  });
+});
+
+describe("TunnelHttpEnd", () => {
+  it("parses and defaults checkoutId to main", () => {
+    expect(TunnelHttpEnd.parse({ type: "tunnel:http-end", requestId: "r1" })).toEqual({
+      type: "tunnel:http-end",
+      requestId: "r1",
+      checkoutId: "main",
     });
-    expect(parseTunnelMessage({ ...base, data: "aGk=", bodyEncoding: "base64", last: true })).toMatchObject({
-      data: "aGk=", last: true,
+  });
+
+  it("keeps a non-main checkoutId", () => {
+    expect(
+      TunnelHttpEnd.parse({ type: "tunnel:http-end", requestId: "r1", checkoutId: "wt-1" }),
+    ).toMatchObject({ checkoutId: "wt-1" });
+  });
+});
+
+describe("TunnelWsOpen / TunnelWsClose", () => {
+  it("TunnelWsOpen defaults checkoutId to main and carries the browser's handshake headers", () => {
+    const base = {
+      type: "tunnel:ws-open" as const,
+      tunnelId: "w1",
+      port: 3000,
+      path: "/ws",
+      headers: { cookie: "session=1" },
+    };
+    expect(TunnelWsOpen.parse(base)).toEqual({ ...base, checkoutId: "main" });
+  });
+
+  it("TunnelWsClose parses with and without a code/reason, defaulting checkoutId", () => {
+    expect(TunnelWsClose.parse({ type: "tunnel:ws-close", tunnelId: "w1" })).toEqual({
+      type: "tunnel:ws-close",
+      tunnelId: "w1",
+      checkoutId: "main",
     });
-    const streaming = parseTunnelMessage({ ...base, data: "aGk=", bodyEncoding: "gzip-base64" });
-    expect(streaming).toMatchObject({ bodyEncoding: "gzip-base64", checkoutId: "main" });
-    expect((streaming as { last?: unknown }).last).toBeUndefined();
-    expect(parseTunnelMessage({ ...base, data: "", bodyEncoding: "base64" })).toMatchObject({ data: "" });
+    expect(
+      TunnelWsClose.parse({ type: "tunnel:ws-close", tunnelId: "w1", code: 1001, reason: "bye", checkoutId: "wt-1" }),
+    ).toMatchObject({ code: 1001, reason: "bye", checkoutId: "wt-1" });
+  });
+});
+
+describe("wire constants", () => {
+  it("TUNNEL_GZIP_ENCODING is the plain token, not the retired base64-of-gzip spelling", () => {
+    expect(TUNNEL_GZIP_ENCODING).toBe("gzip");
   });
 
-  it("accepts a chunk, an end with and without error, and a cancel", () => {
-    expect(parseTunnelMessage({ type: "tunnel:http-chunk", requestId: "r1", seq: 1, data: "aGk=", bodyEncoding: "base64" }))
-      .toEqual({ type: "tunnel:http-chunk", requestId: "r1", seq: 1, data: "aGk=", bodyEncoding: "base64", checkoutId: "main" });
-    expect(parseTunnelMessage({ type: "tunnel:http-end", requestId: "r1", chunks: 0 }))
-      .toEqual({ type: "tunnel:http-end", requestId: "r1", chunks: 0, checkoutId: "main" });
-    expect(parseTunnelMessage({ type: "tunnel:http-end", requestId: "r1", chunks: 3, error: "upstream body stalled" }))
-      .toMatchObject({ chunks: 3, error: "upstream body stalled" });
-    expect(parseTunnelMessage({ type: "tunnel:http-cancel", requestId: "r1" }))
-      .toEqual({ type: "tunnel:http-cancel", requestId: "r1", checkoutId: "main" });
-  });
-
-  it("keeps a non-main checkoutId on every frame", () => {
-    for (const frame of [
-      { type: "tunnel:http-start", requestId: "r1", status: 200, headers: {}, data: "", bodyEncoding: "base64", last: true },
-      { type: "tunnel:http-chunk", requestId: "r1", seq: 1, data: "aGk=", bodyEncoding: "base64" },
-      { type: "tunnel:http-end", requestId: "r1", chunks: 1 },
-      { type: "tunnel:http-cancel", requestId: "r1" },
-    ]) {
-      expect(parseTunnelMessage({ ...frame, checkoutId: "wt-1" })).toMatchObject({ checkoutId: "wt-1" });
-    }
-  });
-
-  it("rejects a non-positive seq, a retired encoding, a negative chunk count and the retired response type", () => {
-    const chunk = { type: "tunnel:http-chunk", requestId: "r1", data: "aGk=", bodyEncoding: "base64" };
-    expect(parseTunnelMessage({ ...chunk, seq: 0 })).toBeNull();
-    expect(parseTunnelMessage({ ...chunk, seq: -1 })).toBeNull();
-    // `utf8` left the enum with the whole-body path: every slice is base64 now.
-    expect(parseTunnelMessage({ ...chunk, seq: 1, bodyEncoding: "utf8" })).toBeNull();
-    expect(parseTunnelMessage({
-      type: "tunnel:http-start", requestId: "r1", status: 200, headers: {}, data: "hi", bodyEncoding: "utf8",
-    })).toBeNull();
-    expect(parseTunnelMessage({ type: "tunnel:http-end", requestId: "r1", chunks: -1 })).toBeNull();
-    expect(parseTunnelMessage({
-      type: "tunnel:http-response", requestId: "r1", status: 200, headers: {}, body: "hi", bodyEncoding: "utf8",
-    })).toBeNull();
+  it("TUNNEL_BODY_SLICE_BYTES matches the app's own upload slicing", () => {
+    expect(TUNNEL_BODY_SLICE_BYTES).toBe(262_144);
   });
 });

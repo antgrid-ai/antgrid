@@ -111,6 +111,15 @@ void main() {
     final terminalRecords = _map(streamOpen['terminalRecords']);
     expect(kStreamTerminalAppRecordMaxBytes, terminalRecords['appMaxRecordBytes']);
     expect(kStreamTerminalBridgeRecordMaxBytes, terminalRecords['bridgeMaxRecordBytes']);
+    final tunnelRecords = _map(streamOpen['tunnelRecords']);
+    expect(kStreamTunnelDataMaxBytes, tunnelRecords['maxDataBytes']);
+    expect(kStreamTunnelRecordMaxBytes, tunnelRecords['maxRecordBytes']);
+    expect(kStreamTunnelRequestBodyMaxBytes, tunnelRecords['requestBodyMaxBytes']);
+    final tags = _map(tunnelRecords['tags']);
+    expect(kTunnelRecordTagBody, tags['body']);
+    expect(kTunnelRecordTagBodyGzip, tags['bodyGzip']);
+    expect(kTunnelRecordTagWsText, tags['wsText']);
+    expect(kTunnelRecordTagWsBinary, tags['wsBinary']);
   });
 
   test('Dart parses every stream-open kind golden vector, and round-trips it', () {

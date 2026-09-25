@@ -1,9 +1,13 @@
-// The streaming half of TunnelManager: read-side pacing on the send promise,
-// what ends a stream, and how a cancel reaches the upstream connection.
+// The streaming half of TunnelManager: read-side pacing on the exchange's send
+// promise, what ends a stream (end() vs fail()), and how a cancel/abort reaches
+// the upstream connection. Duplicate requestIds are the registry's concern
+// (tunnel-streams.test.ts): each tunnel owns its own QUIC stream, so there is
+// no shared queue here to join or interleave on.
 import { afterEach, describe, expect, test } from "bun:test";
-import { TunnelManager, type TunnelFetchOpts } from "../src/tunnel-manager";
+import { TunnelManager, type TunnelFetchOpts, type TunnelHttpExchange } from "../src/tunnel-manager";
+import type { TunnelBodySlice } from "../src/localhost-fetch";
+import type { StreamSendOutcome } from "../src/peer/stream-records";
 import { createConnState } from "../src/conn-state";
-import type { SendOutcome } from "../src/send-scheduler";
 import type { TunnelHttpRequest } from "../src/tunnel-protocol";
 
 const servers: Array<ReturnType<typeof Bun.serve>> = [];
@@ -58,44 +62,69 @@ function startRoute(opts: {
   return { port: server.port!, hits: () => hits, state };
 }
 
-type Verdict = SendOutcome | "hold";
+type Verdict = StreamSendOutcome | "hold";
+type SentEntry =
+  | { kind: "head"; value: { status: number; headers: Record<string, string>; setCookies?: string[] } }
+  | { kind: "body"; value: TunnelBodySlice }
+  | { kind: "end" };
 
-/** The send path as a lever: each frame's promise resolves when this test says
- *  it does, which is the whole pacing contract the chunk loop rides on. */
-function makeSender() {
-  const sent: Record<string, unknown>[] = [];
-  const waiting: Array<(o: SendOutcome) => void> = [];
+/** The exchange as a lever: each call's promise resolves when this test says
+ *  it does, which is the whole pacing contract the read loop rides on. */
+function makeExchange() {
+  const sent: SentEntry[] = [];
+  const waiting: Array<(o: StreamSendOutcome) => void> = [];
+  const ctrl = new AbortController();
+  let failReason: string | undefined;
+
+  const push = (entry: SentEntry): Promise<StreamSendOutcome> => {
+    sent.push(entry);
+    const verdict = api.plan?.(entry) ?? "sent";
+    if (verdict !== "hold") return Promise.resolve(verdict);
+    return new Promise<StreamSendOutcome>((resolve) => waiting.push(resolve));
+  };
+
   const api = {
     sent,
-    plan: undefined as ((frame: Record<string, unknown>) => Verdict) | undefined,
+    plan: undefined as ((entry: SentEntry) => Verdict) | undefined,
     waiting: () => waiting.length,
-    release(outcome: SendOutcome = "sent") {
+    failReason: () => failReason,
+    abort: () => ctrl.abort(),
+    release(outcome: StreamSendOutcome = "sent") {
       const resolve = waiting.shift();
       if (!resolve) throw new Error("nothing is waiting on the send gate");
       resolve(outcome);
     },
-    releaseAll(outcome: SendOutcome = "sent") {
+    releaseAll(outcome: StreamSendOutcome = "sent") {
       for (const resolve of waiting.splice(0)) resolve(outcome);
     },
-    send: async (data: object): Promise<SendOutcome> => {
-      const frame = data as Record<string, unknown>;
-      sent.push(frame);
-      const verdict = api.plan?.(frame) ?? "sent";
-      if (verdict !== "hold") return verdict;
-      return new Promise<SendOutcome>((resolve) => waiting.push(resolve));
-    },
+    bodyCalls: () => sent.filter((e): e is Extract<SentEntry, { kind: "body" }> => e.kind === "body"),
+    exchange: {
+      signal: ctrl.signal,
+      head: (h) => push({ kind: "head", value: h }),
+      body: (s) => push({ kind: "body", value: s }),
+      end: () => push({ kind: "end" }),
+      fail: (reason: string) => { failReason = reason; },
+    } satisfies TunnelHttpExchange,
   };
   return api;
 }
 
+/** Holds exactly the body() call at 0-indexed position `n` among body calls. */
+function holdBody(exchange: ReturnType<typeof makeExchange>, n: number) {
+  return (entry: SentEntry): Verdict => {
+    if (entry.kind !== "body") return "sent";
+    const index = exchange.bodyCalls().length - 1; // this call is already pushed
+    return index === n ? "hold" : "sent";
+  };
+}
+
 /** The flush clock is off by default so a slice count is exact on a loaded
  *  host; the cases that exercise it pass their own `flushMs`. */
-function makeManager(sender: ReturnType<typeof makeSender>, fetchOpts: TunnelFetchOpts = {}) {
+function makeManager(fetchOpts: TunnelFetchOpts = {}) {
   return new TunnelManager({
     projectId: "proj",
     portLabels: new Map(),
     previewPorts: new Set(),
-    sendTunnel: sender.send,
     sendEncrypted: () => {},
     relayHost: "relay.test",
     connState: createConnState(),
@@ -104,7 +133,7 @@ function makeManager(sender: ReturnType<typeof makeSender>, fetchOpts: TunnelFet
 }
 
 function request(port: number, requestId: string): TunnelHttpRequest {
-  return { type: "tunnel:http-request", requestId, port, method: "GET", path: "/asset", checkoutId: "main" };
+  return { type: "tunnel:http-request", requestId, port, method: "GET", path: "/asset", bodyLength: 0, checkoutId: "main" };
 }
 
 async function waitUntil(condition: () => boolean, ms = 2_000): Promise<void> {
@@ -115,335 +144,268 @@ async function waitUntil(condition: () => boolean, ms = 2_000): Promise<void> {
   }
 }
 
-function rawBytes(frames: Record<string, unknown>[]): Buffer {
+function rawBytes(exchange: ReturnType<typeof makeExchange>): Buffer {
   return Buffer.concat(
-    frames
-      .filter((f) => typeof f.data === "string")
-      .map((f) => {
-        const raw = Buffer.from(f.data as string, "base64");
-        return f.bodyEncoding === "gzip-base64" ? Buffer.from(Bun.gunzipSync(raw)) : raw;
-      }),
+    exchange.bodyCalls().map((e) => (e.value.gzip ? Buffer.from(Bun.gunzipSync(e.value.bytes as Uint8Array<ArrayBuffer>)) : Buffer.from(e.value.bytes))),
   );
 }
 
-const holdChunk = (seq: number) => (frame: Record<string, unknown>): Verdict =>
-  frame.type === "tunnel:http-chunk" && frame.seq === seq ? "hold" : "sent";
-
 describe("TunnelManager HTTP streaming", () => {
   // The pacing contract: without awaiting the settle promise the loop reads the
-  // whole body straight into the send queue, and `sent` runs past 2 while the
-  // first chunk is still held.
-  test("chunks are read only after the previous frame settled", async () => {
+  // whole body straight into the send queue, and `sent` runs past head+1 body
+  // while the first slice is still held.
+  test("body slices are read only after the previous one settled", async () => {
     const route = startRoute({ writes: 8, writeBytes: 1024 });
-    const sender = makeSender();
-    sender.plan = holdChunk(1);
-    const mgr = makeManager(sender);
+    const exchange = makeExchange();
+    exchange.plan = holdBody(exchange, 0);
+    const mgr = makeManager();
 
-    const run = mgr.onHttpRequest(request(route.port, "paced"));
-    await waitUntil(() => sender.waiting() === 1);
+    const run = mgr.serveHttp(request(route.port, "paced"), new Uint8Array(0), exchange.exchange);
+    await waitUntil(() => exchange.waiting() === 1);
     await Bun.sleep(200);
-    expect(sender.sent).toHaveLength(2);
-    expect(sender.sent[0].type).toBe("tunnel:http-start");
-    expect(sender.sent[1]).toMatchObject({ type: "tunnel:http-chunk", seq: 1 });
+    expect(exchange.sent).toHaveLength(2);
+    expect(exchange.sent[0].kind).toBe("head");
+    expect(exchange.sent[1].kind).toBe("body");
 
-    sender.plan = undefined;
-    sender.release();
+    exchange.plan = undefined;
+    exchange.release();
     await run;
-    expect(sender.sent.length).toBeGreaterThan(2);
+    expect(exchange.sent.length).toBeGreaterThan(2);
+    expect(exchange.sent[exchange.sent.length - 1].kind).toBe("end");
   });
 
   // A held settle is the bridge waiting on the link, never the dev server going
   // quiet — so the upstream idle clock must not be running against it.
   test("a settle held longer than the read idle limit does not fail a healthy body", async () => {
     const route = startRoute({ writes: 4, writeBytes: 1024, gapMs: 5 });
-    const sender = makeSender();
-    sender.plan = holdChunk(1);
-    const mgr = makeManager(sender, { readIdleMs: 100 });
+    const exchange = makeExchange();
+    exchange.plan = holdBody(exchange, 0);
+    const mgr = makeManager({ readIdleMs: 100 });
 
-    const run = mgr.onHttpRequest(request(route.port, "parked"));
-    await waitUntil(() => sender.waiting() === 1);
+    const run = mgr.serveHttp(request(route.port, "parked"), new Uint8Array(0), exchange.exchange);
+    await waitUntil(() => exchange.waiting() === 1);
     await Bun.sleep(300);
-    sender.plan = undefined;
-    sender.release();
+    exchange.plan = undefined;
+    exchange.release();
     await run;
 
-    const last = sender.sent[sender.sent.length - 1];
-    expect(last.type).toBe("tunnel:http-end");
-    expect(last.error).toBeUndefined();
-    expect(rawBytes(sender.sent).byteLength).toBe(4 * 1024);
+    expect(exchange.sent[exchange.sent.length - 1].kind).toBe("end");
+    expect(exchange.failReason()).toBeUndefined();
+    expect(rawBytes(exchange).byteLength).toBe(4 * 1024);
   });
 
-  for (const outcome of ["dropped", "gated"] as const) {
-    test(`a frame the transport reports ${outcome} aborts the stream: the upstream is cancelled and no end is sent`, async () => {
-      const route = startRoute({ writes: 8, writeBytes: 1024, gapMs: 20 });
-      const sender = makeSender();
-      sender.plan = (frame) =>
-        frame.type === "tunnel:http-chunk" && frame.seq === 2 ? outcome : "sent";
-      const mgr = makeManager(sender);
-
-      await mgr.onHttpRequest(request(route.port, "lost"));
-
-      expect(sender.sent.map((f) => f.type)).toEqual([
-        "tunnel:http-start",
-        "tunnel:http-chunk",
-        "tunnel:http-chunk",
-      ]);
-      await waitUntil(() => route.state.cancelled);
-
-      // Nothing partial is retained, so the app's retry gets a real answer.
-      sender.plan = undefined;
-      await mgr.onHttpRequest(request(route.port, "lost"));
-      expect(route.hits()).toBe(2);
-    });
-  }
-
-  test("tunnel:http-cancel stops the fetch and no further frames follow", async () => {
+  test("a body() call the transport reports dropped aborts the stream: the upstream is cancelled and no end is sent", async () => {
     const route = startRoute({ writes: 8, writeBytes: 1024, gapMs: 20 });
-    const sender = makeSender();
-    sender.plan = holdChunk(1);
-    const mgr = makeManager(sender);
+    const exchange = makeExchange();
+    exchange.plan = (entry) => (entry.kind === "body" && exchange.bodyCalls().length - 1 === 1 ? "dropped" : "sent");
+    const mgr = makeManager();
 
-    const run = mgr.onHttpRequest(request(route.port, "cancelled"));
-    await waitUntil(() => sender.waiting() === 1);
-    mgr.onHttpCancel({ type: "tunnel:http-cancel", requestId: "cancelled", checkoutId: "main" });
-    sender.plan = undefined;
-    sender.release();
+    await mgr.serveHttp(request(route.port, "lost"), new Uint8Array(0), exchange.exchange);
+
+    expect(exchange.sent.map((e) => e.kind)).toEqual(["head", "body", "body"]);
+    await waitUntil(() => route.state.cancelled);
+  });
+
+  test("aborting the exchange's signal stops the fetch and no further frames follow", async () => {
+    const route = startRoute({ writes: 8, writeBytes: 1024, gapMs: 20 });
+    const exchange = makeExchange();
+    exchange.plan = holdBody(exchange, 0);
+    const mgr = makeManager();
+
+    const run = mgr.serveHttp(request(route.port, "cancelled"), new Uint8Array(0), exchange.exchange);
+    await waitUntil(() => exchange.waiting() === 1);
+    exchange.abort();
+    exchange.plan = undefined;
+    exchange.release();
     await run;
 
     await Bun.sleep(100);
     // The held frame was already handed over; NOTHING after it — the aborted
     // check sits before the send, not after it.
-    expect(sender.sent).toHaveLength(2);
-    expect(sender.sent.some((f) => f.type === "tunnel:http-end")).toBe(false);
+    expect(exchange.sent).toHaveLength(2);
+    expect(exchange.sent.some((e) => e.kind === "end")).toBe(false);
     await waitUntil(() => route.state.cancelled);
   });
 
-  // Two waiters resuming together would stream one requestId twice at once,
-  // splicing two independent seq spaces into one body.
-  test("duplicates for one requestId never run concurrently", async () => {
-    const route = startRoute({ writes: 4, writeBytes: 1024, gapMs: 20 });
-    const sender = makeSender();
-    const mgr = makeManager(sender);
-
-    await Promise.all([
-      mgr.onHttpRequest(request(route.port, "dup")),
-      mgr.onHttpRequest(request(route.port, "dup")),
-      mgr.onHttpRequest(request(route.port, "dup")),
-    ]);
-
-    let expected = 0;
-    let runs = 0;
-    for (const frame of sender.sent) {
-      expect(frame.requestId).toBe("dup");
-      if (frame.type === "tunnel:http-start") { expected = 1; runs += 1; continue; }
-      if (frame.type === "tunnel:http-chunk") { expect(frame.seq).toBe(expected); expected += 1; continue; }
-      expect(frame.type).toBe("tunnel:http-end");
-      expect(frame.chunks).toBe(expected - 1);
-      expected = 0;
-    }
-    expect(runs).toBe(3);
-    expect(route.hits()).toBeLessThanOrEqual(2);
-  });
-
-  test("an upstream that stalls mid-body ends the stream with an error end", async () => {
+  test("an upstream that stalls mid-body fails the exchange rather than ending it", async () => {
     const route = startRoute({ writes: 1, writeBytes: 1500, stall: true });
-    const sender = makeSender();
-    const mgr = makeManager(sender, { readIdleMs: 100, flushMs: 50 });
+    const exchange = makeExchange();
+    const mgr = makeManager({ readIdleMs: 100, flushMs: 50 });
 
-    await mgr.onHttpRequest(request(route.port, "stalled"));
+    await mgr.serveHttp(request(route.port, "stalled"), new Uint8Array(0), exchange.exchange);
 
-    const last = sender.sent[sender.sent.length - 1];
-    expect(last.type).toBe("tunnel:http-end");
-    expect(String(last.error)).toMatch(/stalled/);
-    expect(last.chunks).toBe(sender.sent.filter((f) => f.type === "tunnel:http-chunk").length);
+    // The head already went out (the read failed AFTER it), so the caller must
+    // end the stream with an error rather than a clean end record — that is
+    // exactly what fail() communicates and end() does not.
+    expect(exchange.sent.some((e) => e.kind === "end")).toBe(false);
+    expect(exchange.failReason()).toMatch(/stalled/);
   });
 
-  test("a body that fails before the head goes out answers 502, not a bare end", async () => {
-    // A start the app never got and an end it did are the same two frames as a
-    // start the RELAY dropped, so a bare end here sends the app back to re-issue
-    // the request that has just failed. The cap is tested against the first read
-    // before anything is sliced, and a streamed origin declares no length, so
-    // the pre-check upstream of this cannot answer it first.
+  test("a body that fails before the head goes out answers a synthesized 502, not a bare end", async () => {
+    // A head the app never got and an end it did are indistinguishable from a
+    // head the relay dropped, so a bare end here would send the app back to
+    // re-issue the request that has just failed. The cap is tested against the
+    // first read before anything is sliced, and a streamed origin declares no
+    // length, so the pre-check upstream of this cannot answer it first.
     const route = startRoute({ writes: 1, writeBytes: 4096 });
-    const sender = makeSender();
-    const mgr = makeManager(sender, { maxBodyBytes: 1024 });
+    const exchange = makeExchange();
+    const mgr = makeManager({ maxBodyBytes: 1024 });
 
-    await mgr.onHttpRequest(request(route.port, "headless"));
+    await mgr.serveHttp(request(route.port, "headless"), new Uint8Array(0), exchange.exchange);
 
-    expect(sender.sent).toHaveLength(1);
-    expect(sender.sent[0]).toMatchObject({
-      type: "tunnel:http-start",
-      status: 502,
-      last: true,
-    });
-    expect(rawBytes(sender.sent).toString("utf8")).toMatch(/MAX_BODY_SIZE/);
+    expect(exchange.sent.map((e) => e.kind)).toEqual(["head", "body", "end"]);
+    expect(exchange.sent[0]).toMatchObject({ kind: "head", value: { status: 502 } });
+    expect(rawBytes(exchange).toString("utf8")).toMatch(/MAX_BODY_SIZE/);
   });
 
-  test("an end frame's chunk count equals the chunks sent", async () => {
+  test("a large body is sliced at chunkBytes, and the slices reassemble byte-exact", async () => {
     const route = startRoute({ writes: 1, writeBytes: 10_000 });
-    const sender = makeSender();
-    const mgr = makeManager(sender, { chunkBytes: 4096 });
+    const exchange = makeExchange();
+    const mgr = makeManager({ chunkBytes: 4096 });
 
-    await mgr.onHttpRequest(request(route.port, "counted"));
+    await mgr.serveHttp(request(route.port, "counted"), new Uint8Array(0), exchange.exchange);
 
-    const sizes = sender.sent
-      .filter((f) => typeof f.data === "string")
-      .map((f) => Buffer.from(f.data as string, "base64").byteLength);
-    expect(sizes).toEqual([4096, 4096, 1808]);
-    expect(sender.sent.map((f) => f.type)).toEqual([
-      "tunnel:http-start",
-      "tunnel:http-chunk",
-      "tunnel:http-chunk",
-      "tunnel:http-end",
-    ]);
-    expect(sender.sent[3].chunks).toBe(2);
-    expect(rawBytes(sender.sent).byteLength).toBe(10_000);
+    expect(exchange.bodyCalls().map((e) => e.value.bytes.byteLength)).toEqual([4096, 4096, 1808]);
+    expect(exchange.sent.map((e) => e.kind)).toEqual(["head", "body", "body", "body", "end"]);
+    expect(rawBytes(exchange).byteLength).toBe(10_000);
   });
 
-  test("a single-slice body is one frame with last", async () => {
-    const route = startRoute({ writes: 1, writeBytes: 500 });
-    const sender = makeSender();
-    const mgr = makeManager(sender);
-
-    await mgr.onHttpRequest(request(route.port, "small"));
-
-    expect(sender.sent).toHaveLength(1);
-    expect(sender.sent[0]).toMatchObject({ type: "tunnel:http-start", last: true });
-    expect(rawBytes(sender.sent).byteLength).toBe(500);
-  });
-
-  test("an empty body is a start with empty data and last", async () => {
-    const route = startRoute({ writes: 0, writeBytes: 0, empty: true, status: 204 });
-    const sender = makeSender();
-    const mgr = makeManager(sender);
-
-    await mgr.onHttpRequest(request(route.port, "empty"));
-
-    expect(sender.sent).toHaveLength(1);
-    expect(sender.sent[0]).toMatchObject({
-      type: "tunnel:http-start",
-      status: 204,
-      data: "",
-      bodyEncoding: "base64",
-      last: true,
+  test("a request body reaches the upstream byte-exact", async () => {
+    let received: Uint8Array | undefined;
+    const server = Bun.serve({
+      port: 0,
+      async fetch(req) {
+        received = new Uint8Array(await req.arrayBuffer());
+        return new Response("ok", { headers: { "content-type": "text/plain" } });
+      },
     });
+    servers.push(server);
+    const payload = new Uint8Array(3000).map((_, i) => (i * 7) & 0xff);
+    const exchange = makeExchange();
+
+    await makeManager().serveHttp(
+      { ...request(server.port!, "post"), method: "POST", bodyLength: payload.byteLength },
+      payload,
+      exchange.exchange,
+    );
+
+    expect(received && Buffer.from(received).equals(Buffer.from(payload))).toBe(true);
+    expect(exchange.sent.map((e) => e.kind)).toEqual(["head", "body", "end"]);
   });
 
-  // One request must not monopolise the link: each stream holds at most one
-  // queued frame, so the credit window hands the next slot to whoever is next.
-  test("two requests interleave chunk by chunk", async () => {
-    const routeA = startRoute({ writes: 6, writeBytes: 1024, gapMs: 5 });
-    const routeB = startRoute({ writes: 6, writeBytes: 1024, gapMs: 5 });
-    const sender = makeSender();
-    sender.plan = () => "hold";
-    const mgr = makeManager(sender);
+  test("a compressible body is gzipped only when the app accepted gzip", async () => {
+    const text = "a".repeat(6000);
+    const server = Bun.serve({
+      port: 0,
+      fetch: () => new Response(text, { headers: { "content-type": "text/plain" } }),
+    });
+    servers.push(server);
 
-    const runs = Promise.all([
-      mgr.onHttpRequest(request(routeA.port, "a")),
-      mgr.onHttpRequest(request(routeB.port, "b")),
-    ]);
+    // One slice, well above the gzip floor, so every call must carry the flag.
+    const mgr = () => makeManager({ chunkBytes: 8192 });
+    const plain = makeExchange();
+    await mgr().serveHttp(request(server.port!, "plain"), new Uint8Array(0), plain.exchange);
+    expect(plain.bodyCalls().every((e) => !e.value.gzip)).toBe(true);
 
-    for (let round = 1; round <= 3; round++) {
-      await waitUntil(() => sender.waiting() === 2);
-      // Both are parked, so each has emitted exactly `round` frames: neither
-      // ran ahead while the other still had one pending.
-      const ids = sender.sent.map((f) => f.requestId);
-      expect(ids.filter((id) => id === "a")).toHaveLength(round);
-      expect(ids.filter((id) => id === "b")).toHaveLength(round);
-      sender.release();
-      sender.release();
-    }
-
-    sender.plan = undefined;
-    sender.releaseAll();
-    await runs;
+    const gz = makeExchange();
+    await mgr().serveHttp(
+      { ...request(server.port!, "gz"), acceptEncodings: ["gzip"] },
+      new Uint8Array(0),
+      gz.exchange,
+    );
+    expect(gz.bodyCalls().length).toBeGreaterThan(0);
+    expect(gz.bodyCalls().every((e) => e.value.gzip)).toBe(true);
+    expect(rawBytes(gz).toString("utf8")).toBe(text);
   });
 
-  test("a replayed stream is paced and cancellable", async () => {
-    const route = startRoute({ writes: 3, writeBytes: 1024 });
-    const sender = makeSender();
-    const mgr = makeManager(sender);
+  test("a single-slice body is head, one body call with last, then end", async () => {
+    const route = startRoute({ writes: 1, writeBytes: 500 });
+    const exchange = makeExchange();
+    const mgr = makeManager();
 
-    await mgr.onHttpRequest(request(route.port, "replayed"));
-    expect(sender.sent[sender.sent.length - 1].type).toBe("tunnel:http-end");
-    sender.sent.length = 0;
+    await mgr.serveHttp(request(route.port, "small"), new Uint8Array(0), exchange.exchange);
 
-    sender.plan = () => "hold";
-    const replay = mgr.onHttpRequest(request(route.port, "replayed"));
-    await waitUntil(() => sender.waiting() === 1);
-    mgr.onHttpCancel({ type: "tunnel:http-cancel", requestId: "replayed", checkoutId: "main" });
-    sender.release();
-    await replay;
+    expect(exchange.sent.map((e) => e.kind)).toEqual(["head", "body", "end"]);
+    expect(exchange.bodyCalls()[0].value.last).toBe(true);
+    expect(rawBytes(exchange).byteLength).toBe(500);
+  });
 
-    expect(route.hits()).toBe(1);
-    expect(sender.sent).toHaveLength(1);
-    expect(sender.sent[0].type).toBe("tunnel:http-start");
+  test("an empty body is a head with no body call, then end", async () => {
+    const route = startRoute({ writes: 0, writeBytes: 0, empty: true, status: 204 });
+    const exchange = makeExchange();
+    const mgr = makeManager();
+
+    await mgr.serveHttp(request(route.port, "empty"), new Uint8Array(0), exchange.exchange);
+
+    expect(exchange.sent.map((e) => e.kind)).toEqual(["head", "end"]);
+    expect(exchange.sent[0]).toMatchObject({ kind: "head", value: { status: 204 } });
   });
 
   test("stop() aborts an in-flight stream", async () => {
     const route = startRoute({ writes: 8, writeBytes: 1024, gapMs: 20 });
-    const sender = makeSender();
-    sender.plan = holdChunk(1);
-    const mgr = makeManager(sender);
+    const exchange = makeExchange();
+    exchange.plan = holdBody(exchange, 0);
+    const mgr = makeManager();
 
-    const run = mgr.onHttpRequest(request(route.port, "stopped"));
-    await waitUntil(() => sender.waiting() === 1);
+    const run = mgr.serveHttp(request(route.port, "stopped"), new Uint8Array(0), exchange.exchange);
+    await waitUntil(() => exchange.waiting() === 1);
     mgr.stop();
     await waitUntil(() => route.state.cancelled);
 
-    sender.plan = undefined;
-    sender.release();
+    exchange.plan = undefined;
+    exchange.release();
     await run;
     await Bun.sleep(50);
-    expect(sender.sent).toHaveLength(2);
+    expect(exchange.sent).toHaveLength(2);
+    expect(exchange.failReason()).toBeDefined();
   });
 
-  // Both shapes of in-flight run must go: the relay client's queue clear only
-  // ever reaches one that happens to be parked on a settle at that instant.
+  // Both shapes of in-flight run must go: a caller that only reaches a run
+  // parked on a settle at a given instant would miss the one still reading.
   test("abortHttpStreams() aborts every in-flight run whether or not it is parked", async () => {
     const parked = startRoute({ writes: 8, writeBytes: 1024, gapMs: 20 });
     const running = startRoute({ writes: 20, writeBytes: 1024, gapMs: 20 });
-    const sender = makeSender();
-    sender.plan = (frame) =>
-      frame.requestId === "parked" && frame.type === "tunnel:http-chunk" ? "hold" : "sent";
-    const mgr = makeManager(sender);
+    const parkedExchange = makeExchange();
+    const runningExchange = makeExchange();
+    parkedExchange.plan = holdBody(parkedExchange, 0);
+    const mgr = makeManager();
 
     const runs = Promise.all([
-      mgr.onHttpRequest(request(parked.port, "parked")),
-      mgr.onHttpRequest(request(running.port, "running")),
+      mgr.serveHttp(request(parked.port, "parked"), new Uint8Array(0), parkedExchange.exchange),
+      mgr.serveHttp(request(running.port, "running"), new Uint8Array(0), runningExchange.exchange),
     ]);
-    await waitUntil(() => sender.waiting() === 1);
-    await waitUntil(() => sender.sent.some((f) => f.requestId === "running" && f.type === "tunnel:http-chunk"));
+    await waitUntil(() => parkedExchange.waiting() === 1);
+    await waitUntil(() => runningExchange.bodyCalls().length > 0);
 
     mgr.abortHttpStreams();
-    sender.plan = undefined;
-    sender.releaseAll();
+    parkedExchange.plan = undefined;
+    parkedExchange.releaseAll();
     await runs;
     await waitUntil(() => parked.state.cancelled && running.state.cancelled);
-    expect(sender.sent.some((f) => f.type === "tunnel:http-end")).toBe(false);
-
-    const before = sender.sent.length;
-    await Bun.sleep(100);
-    expect(sender.sent).toHaveLength(before);
-
-    // Nothing was retained, so each id re-fetches.
-    await Promise.all([
-      mgr.onHttpRequest(request(parked.port, "parked")),
-      mgr.onHttpRequest(request(running.port, "running")),
-    ]);
-    expect(parked.hits()).toBe(2);
-    expect(running.hits()).toBe(2);
+    expect(parkedExchange.sent.some((e) => e.kind === "end")).toBe(false);
+    expect(runningExchange.sent.some((e) => e.kind === "end")).toBe(false);
+    // The app on the other end is still alive: without an explicit fail() its
+    // stream would neither end nor reset, and it would wait out its idle timer
+    // holding a tunnel slot on both ends.
+    expect(parkedExchange.failReason()).toBeDefined();
+    expect(runningExchange.failReason()).toBeDefined();
   });
 
-  // Register-before-invoke: a third request joining mid-registration must find
-  // the entry, or it starts a second upstream run for the same id.
-  test("a run registered by a duplicate is visible to a third waiter before its first await", async () => {
-    const route = startRoute({ writes: 1, writeBytes: 512 });
-    const sender = makeSender();
-    const mgr = makeManager(sender);
+  test("an abort that came through the exchange's own signal does not also fail() it", async () => {
+    const route = startRoute({ writes: 8, writeBytes: 1024, gapMs: 20 });
+    const exchange = makeExchange();
+    exchange.plan = holdBody(exchange, 0);
+    const mgr = makeManager();
 
-    const run = mgr.onHttpRequest(request(route.port, "sync"));
-    expect((mgr as unknown as { inflight: Map<string, unknown> }).inflight.has("sync")).toBe(true);
+    const run = mgr.serveHttp(request(route.port, "self-aborted"), new Uint8Array(0), exchange.exchange);
+    await waitUntil(() => exchange.waiting() === 1);
+    exchange.abort();
+    exchange.plan = undefined;
+    // A cancelled stream's writer has already reset, so the held send settles
+    // "dropped" — which aborts the run's own controller as well.
+    exchange.releaseAll("dropped");
     await run;
+    await waitUntil(() => route.state.cancelled);
+    expect(exchange.failReason()).toBeUndefined();
   });
 });

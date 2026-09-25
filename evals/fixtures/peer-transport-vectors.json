@@ -77,6 +77,17 @@
       "appMaxRecordBytes": 16384,
       "bridgeMaxRecordBytes": 2097152
     },
+    "tunnelRecords": {
+      "maxDataBytes": 1048576,
+      "maxRecordBytes": 1048577,
+      "requestBodyMaxBytes": 33554432,
+      "tags": {
+        "body": 0,
+        "bodyGzip": 1,
+        "wsText": 2,
+        "wsBinary": 3
+      }
+    },
     "opens": [
       {
         "name": "session",
