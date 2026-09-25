@@ -5,6 +5,7 @@ import 'package:antgrid/models/recent_session_row.dart';
 import 'package:antgrid/models/session_entry.dart';
 import 'package:antgrid/providers/recent_sessions.dart';
 import 'package:antgrid/providers/session_search.dart';
+import 'package:antgrid/widgets/recent_sessions/recent_session_row_widget.dart';
 import 'package:antgrid/widgets/session_search_field.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -165,6 +166,55 @@ void main() {
     await tester.sendKeyEvent(LogicalKeyboardKey.escape);
     await tester.pumpAndSettle();
     expect(find.byKey(SessionSearchField.popupKey), findsNothing);
+  });
+
+  group('arrow keys', () {
+    /// The session whose result row holds the keyboard, or null.
+    String? focusedRow() => FocusManager.instance.primaryFocus?.context
+        ?.findAncestorWidgetOfExactType<RecentSessionRowWidget>()
+        ?.row
+        .session
+        .name;
+
+    Future<void> press(WidgetTester tester, LogicalKeyboardKey key) async {
+      await tester.sendKeyEvent(key);
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('down walks from the field through the results and back', (
+      tester,
+    ) async {
+      await pump(
+        tester,
+        rows: [_row('Refactor the relay'), _row('Ship the installer')],
+      );
+      await focusField(tester);
+
+      await press(tester, LogicalKeyboardKey.arrowDown);
+      expect(focusedRow(), 'Refactor the relay');
+
+      await press(tester, LogicalKeyboardKey.arrowDown);
+      expect(focusedRow(), 'Ship the installer');
+
+      await press(tester, LogicalKeyboardKey.arrowUp);
+      await press(tester, LogicalKeyboardKey.arrowUp);
+      expect(focusedRow(), isNull);
+      expect(
+        FocusManager.instance.primaryFocus?.context
+            ?.findAncestorWidgetOfExactType<SessionSearchField>(),
+        isNotNull,
+      );
+    });
+
+    testWidgets('escape on a result closes the popup', (tester) async {
+      await pump(tester, rows: [_row('Refactor the relay')]);
+      await focusField(tester);
+      await press(tester, LogicalKeyboardKey.arrowDown);
+      expect(focusedRow(), 'Refactor the relay');
+
+      await press(tester, LogicalKeyboardKey.escape);
+      expect(find.byKey(SessionSearchField.popupKey), findsNothing);
+    });
   });
 
   test('sessionMatchesQuery is a case-insensitive name match', () {

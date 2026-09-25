@@ -39,6 +39,9 @@ abstract final class BackPriority {
   // CONTAINS one of those views: a back press with a file open inside it must
   // close the file, not the surface out from under it.
   static const int workspaceSurface = 700;
+  // A page inside a surface (settings → Keyboard shortcuts) unwinds before the
+  // surface itself closes.
+  static const int settingsPage = 750;
   static const int mobileAgentPage = 400;
 
   /// Last registered handler, below every surface the demo can open: a back

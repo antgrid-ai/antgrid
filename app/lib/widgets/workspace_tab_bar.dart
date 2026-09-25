@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../design/ab_icons.dart';
@@ -6,8 +7,10 @@ import '../design/ab_tokens.dart';
 import '../design/ab_colors.dart';
 import '../design/widgets/ab_button.dart';
 import '../design/widgets/ab_icon.dart';
+import '../design/widgets/ab_focus_ring.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../keyboard/app_shortcuts.dart';
+import '../keyboard/focus_regions.dart';
 import '../models/workspace_view.dart';
 import '../providers/visible_surface.dart';
 
@@ -76,9 +79,59 @@ class _WorkspaceTabBarState extends ConsumerState<WorkspaceTabBar> {
   final _tabKeys = {for (final view in WorkspaceView.values) view: GlobalKey()};
   final _scrollController = ScrollController();
 
+  /// ONE stop for the whole strip, not one per tab. With a stop per tab, ↑
+  /// from a row in the tab's content would land on whichever tab happens to
+  /// sit above that row and switch to it; one stop spanning the strip always
+  /// lands here, on the tab that is already showing.
+  final _stripFocus = FocusNode(debugLabel: 'workspace-tabs');
+  bool _stripFocused = false;
+  late final WorkspaceTabsFocus _tabsFocus;
+
+  void _focusStrip() => _stripFocus.requestFocus();
+
+  /// ←/→ switch tabs (the tab shows at once), Enter/↓ go into it.
+  KeyEventResult _onStripKey(FocusNode node, KeyEvent event) {
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
+      return KeyEventResult.ignored;
+    }
+    final keyboard = HardwareKeyboard.instance;
+    if (keyboard.isControlPressed ||
+        keyboard.isAltPressed ||
+        keyboard.isMetaPressed) {
+      return KeyEventResult.ignored;
+    }
+    final views = ref.read(visibleWorkspaceViewsProvider);
+    final i = views.indexOf(widget.selected);
+    final key = event.logicalKey;
+    if (key == LogicalKeyboardKey.arrowLeft ||
+        key == LogicalKeyboardKey.arrowRight) {
+      final step = key == LogicalKeyboardKey.arrowRight ? 1 : -1;
+      widget.onSelected(views[(i + step) % views.length]);
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.home || key == LogicalKeyboardKey.end) {
+      widget.onSelected(
+        key == LogicalKeyboardKey.home ? views.first : views.last,
+      );
+      return KeyEventResult.handled;
+    }
+    if (event is KeyDownEvent &&
+        (key == LogicalKeyboardKey.arrowDown ||
+            key == LogicalKeyboardKey.enter ||
+            key == LogicalKeyboardKey.numpadEnter ||
+            key == LogicalKeyboardKey.space)) {
+      // The nearest stop below the strip: the tab's toolbar or its first row.
+      node.focusInDirection(TraversalDirection.down);
+      return KeyEventResult.handled;
+    }
+    return KeyEventResult.ignored;
+  }
+
   @override
   void initState() {
     super.initState();
+    // Kept for dispose, where `ref` may no longer be read.
+    _tabsFocus = ref.read(workspaceTabsFocusProvider)..publish(_focusStrip);
     // The pane can open onto a tab that was never on screen (the popup selects
     // while the pane is closed), so the first layout needs the same reveal a
     // later selection change gets.
@@ -116,6 +169,8 @@ class _WorkspaceTabBarState extends ConsumerState<WorkspaceTabBar> {
 
   @override
   void dispose() {
+    _tabsFocus.retract(_focusStrip);
+    _stripFocus.dispose();
     _scrollController.dispose();
     super.dispose();
   }
@@ -147,27 +202,34 @@ class _WorkspaceTabBarState extends ConsumerState<WorkspaceTabBar> {
           // strip actually overflows — a scrollbar has nothing to paint once
           // every tab already fits.
           Expanded(
-            child: RawScrollbar(
-              controller: _scrollController,
-              thumbVisibility: true,
-              thickness: 3,
-              radius: const Radius.circular(2),
-              scrollbarOrientation: ScrollbarOrientation.top,
-              child: SingleChildScrollView(
+            child: Focus(
+              focusNode: _stripFocus,
+              onKeyEvent: _onStripKey,
+              onFocusChange: (v) => setState(() => _stripFocused = v),
+              child: RawScrollbar(
                 controller: _scrollController,
-                scrollDirection: Axis.horizontal,
-                physics: const ClampingScrollPhysics(),
-                child: Row(
-                  children: [
-                    for (final view in views)
-                      _TabItem(
-                        key: _tabKeys[view],
-                        view: view,
-                        isActive: view == widget.selected,
-                        onTap: () => widget.onSelected(view),
-                        badgeCount: widget.badges[view] ?? 0,
-                      ),
-                  ],
+                thumbVisibility: true,
+                thickness: 3,
+                radius: const Radius.circular(2),
+                scrollbarOrientation: ScrollbarOrientation.top,
+                child: SingleChildScrollView(
+                  controller: _scrollController,
+                  scrollDirection: Axis.horizontal,
+                  physics: const ClampingScrollPhysics(),
+                  child: Row(
+                    children: [
+                      for (final view in views)
+                        _TabItem(
+                          key: _tabKeys[view],
+                          view: view,
+                          isActive: view == widget.selected,
+                          keyboardFocused:
+                              _stripFocused && view == widget.selected,
+                          onTap: () => widget.onSelected(view),
+                          badgeCount: widget.badges[view] ?? 0,
+                        ),
+                    ],
+                  ),
                 ),
               ),
             ),
@@ -282,10 +344,15 @@ class _TabItem extends StatefulWidget {
     required this.isActive,
     required this.onTap,
     required this.badgeCount,
+    this.keyboardFocused = false,
   });
 
   final WorkspaceView view;
   final bool isActive;
+
+  /// The strip has the keyboard and this is its tab — ringed, so ←/→ visibly
+  /// move something.
+  final bool keyboardFocused;
   final VoidCallback onTap;
   final int badgeCount;
 
@@ -323,41 +390,45 @@ class _TabItemState extends State<_TabItem> {
         child: GestureDetector(
           behavior: HitTestBehavior.opaque,
           onTap: widget.onTap,
-          child: Container(
-            // Pin each tab to the bar's full height so the active-tab accent
-            // underline anchors flush at the bottom edge instead of floating
-            // mid-bar at the tab's intrinsic content height.
-            height: AbTokens.statusHeaderHeight,
-            padding: const EdgeInsets.symmetric(horizontal: AbTokens.space12),
-            decoration: BoxDecoration(
-              border: Border(
-                bottom: BorderSide(
-                  color: widget.isActive
-                      ? context.antgrid.accent
-                      : Colors.transparent,
-                  width: 2,
+          child: AbFocusRing(
+            focused: widget.keyboardFocused,
+            inset: true,
+            child: Container(
+              // Pin each tab to the bar's full height so the active-tab accent
+              // underline anchors flush at the bottom edge instead of floating
+              // mid-bar at the tab's intrinsic content height.
+              height: AbTokens.statusHeaderHeight,
+              padding: const EdgeInsets.symmetric(horizontal: AbTokens.space12),
+              decoration: BoxDecoration(
+                border: Border(
+                  bottom: BorderSide(
+                    color: widget.isActive
+                        ? context.antgrid.accent
+                        : Colors.transparent,
+                    width: 2,
+                  ),
                 ),
               ),
-            ),
-            child: Row(
-              children: [
-                AbIcon(widget.view.icon, size: 14, color: color),
-                const SizedBox(width: AbTokens.space6),
-                Text(
-                  widget.view.label,
-                  style: AbTokens.sansStyle(
-                    fontSize: AbTokens.fontXs,
-                    color: color,
-                  ),
-                ),
-                if (widget.badgeCount > 0) ...[
+              child: Row(
+                children: [
+                  AbIcon(widget.view.icon, size: 14, color: color),
                   const SizedBox(width: AbTokens.space6),
-                  WorkspaceViewBadge(
-                    count: widget.badgeCount,
-                    active: widget.isActive,
+                  Text(
+                    widget.view.label,
+                    style: AbTokens.sansStyle(
+                      fontSize: AbTokens.fontXs,
+                      color: color,
+                    ),
                   ),
+                  if (widget.badgeCount > 0) ...[
+                    const SizedBox(width: AbTokens.space6),
+                    WorkspaceViewBadge(
+                      count: widget.badgeCount,
+                      active: widget.isActive,
+                    ),
+                  ],
                 ],
-              ],
+              ),
             ),
           ),
         ),

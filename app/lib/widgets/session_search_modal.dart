@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart' show Dialog, Navigator, showDialog;
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -100,18 +101,28 @@ class _SessionSearchModalState extends ConsumerState<_SessionSearchModal> {
               child: Row(
                 children: [
                   Expanded(
-                    child: AbSearchField(
-                      controller: _controller,
-                      hint: 'Search sessions…',
-                      // The modal exists only to be typed into, so it opens
-                      // with the keyboard already up.
-                      autofocus: true,
-                      height: AbTokens.rowHeightLg,
-                      // No debounce: filtering is a local pass over the session
-                      // cache, so a keystroke costs a rebuild, not a round trip.
-                      debounce: null,
-                      onChanged: _set,
-                      onClear: () => _set(''),
+                    // ↓ into the results, as on desktop: a one-line field
+                    // would otherwise take it as a caret move.
+                    child: CallbackShortcuts(
+                      bindings: {
+                        const SingleActivator(
+                          LogicalKeyboardKey.arrowDown,
+                        ): () => FocusManager.instance.primaryFocus
+                            ?.focusInDirection(TraversalDirection.down),
+                      },
+                      child: AbSearchField(
+                        controller: _controller,
+                        hint: 'Search sessions…',
+                        // The modal exists only to be typed into, so it opens
+                        // with the keyboard already up.
+                        autofocus: true,
+                        height: AbTokens.rowHeightLg,
+                        // No debounce: filtering is a local pass over the session
+                        // cache, so a keystroke costs a rebuild, not a round trip.
+                        debounce: null,
+                        onChanged: _set,
+                        onClear: () => _set(''),
+                      ),
                     ),
                   ),
                   const SizedBox(width: AbTokens.space8),

@@ -4,6 +4,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../keyboard/focus_regions.dart';
 import '../design/ab_icons.dart';
 import '../design/ab_tokens.dart';
 import '../design/ab_colors.dart';
@@ -107,57 +108,61 @@ class _ProjectsDrawerState extends ConsumerState<ProjectsDrawer> {
     // looking straight at.
     final entries = ref.watch(drawerEntriesProvider);
 
-    return MenuBoundsScope(
-      child: Container(
-        width: 288,
-        // Clipped because [AbDockedColumn] never squeezes its header: on a
-        // window too short for even that, a truncated sidebar beats chrome
-        // bleeding over the workspace beside it.
-        clipBehavior: Clip.hardEdge,
-        decoration: BoxDecoration(
-          color: context.antgrid.bgDeep,
-          border: Border(
-            right: BorderSide(color: context.antgrid.borderDefault),
+    // One F6 area — see FocusRegion.
+    return FocusRegionScope(
+      region: FocusRegion.sidebar,
+      child: MenuBoundsScope(
+        child: Container(
+          width: 288,
+          // Clipped because [AbDockedColumn] never squeezes its header: on a
+          // window too short for even that, a truncated sidebar beats chrome
+          // bleeding over the workspace beside it.
+          clipBehavior: Clip.hardEdge,
+          decoration: BoxDecoration(
+            color: context.antgrid.bgDeep,
+            border: Border(
+              right: BorderSide(color: context.antgrid.borderDefault),
+            ),
           ),
-        ),
-        // Not a Column: on a first run the chrome below the list is ~300px of
-        // fixed height, which a short window cannot pay for — and a Flex
-        // answers that by asserting, because its non-flex children are laid out
-        // unbounded. Here the list yields first and the setup section scrolls
-        // inside its own slot, so no height can overflow.
-        child: AbDockedColumn(
-          // Keeps a strip of the list on screen however short the window gets;
-          // otherwise a tall checklist leaves the sidebar showing no projects at
-          // all. Borrowed from the token scale as a floor rather than measured
-          // off a row — it answers how much list is worth keeping, not how tall
-          // any one row is.
-          //
-          // Scaled all the same, because the rows it holds room for are: a band
-          // floors on [AbIconButton.boxExtent], so above UI Size ~1.15 a fixed
-          // 44 falls short of the FIRST row and the strip stops containing a
-          // whole one. The dock pays for it, and the dock scrolls.
-          minBodyExtent: MediaQuery.textScalerOf(
-            context,
-          ).scale(AbTokens.rowHeightLg),
-          header: _TopChrome(
-            onRefresh: _refreshBusy ? null : _refreshFromButton,
+          // Not a Column: on a first run the chrome below the list is ~300px of
+          // fixed height, which a short window cannot pay for — and a Flex
+          // answers that by asserting, because its non-flex children are laid out
+          // unbounded. Here the list yields first and the setup section scrolls
+          // inside its own slot, so no height can overflow.
+          child: AbDockedColumn(
+            // Keeps a strip of the list on screen however short the window gets;
+            // otherwise a tall checklist leaves the sidebar showing no projects at
+            // all. Borrowed from the token scale as a floor rather than measured
+            // off a row — it answers how much list is worth keeping, not how tall
+            // any one row is.
+            //
+            // Scaled all the same, because the rows it holds room for are: a band
+            // floors on [AbIconButton.boxExtent], so above UI Size ~1.15 a fixed
+            // 44 falls short of the FIRST row and the strip stops containing a
+            // whole one. The dock pays for it, and the dock scrolls.
+            minBodyExtent: MediaQuery.textScalerOf(
+              context,
+            ).scale(AbTokens.rowHeightLg),
+            header: _TopChrome(
+              onRefresh: _refreshBusy ? null : _refreshFromButton,
+            ),
+            body: _Body(entries: entries, refreshKey: _refreshKey),
+            // Docked here, not on the New Session canvas: the drawer is the only
+            // desktop surface mounted on both routes, and the last setup steps
+            // are performed from inside a session.
+            dock: const _SetupDock(),
+            // Both are permanent affordances, so neither may be scrolled out of
+            // reach — the update row in particular stays pending until the app
+            // restarts (see update_row.dart). The account footer is declared last
+            // so it is the last BUDGETED slot to give up a pixel; only the
+            // unbudgeted header outranks it.
+            // Neither belongs to a machine-less demo: the footer's account row
+            // fetches the user, the subscription and the pricing catalogue, and
+            // the update row's only action leaves for the store.
+            pinned: ref.watch(demoModeProvider)
+                ? const []
+                : const [UpdateRow(), _Footer()],
           ),
-          body: _Body(entries: entries, refreshKey: _refreshKey),
-          // Docked here, not on the New Session canvas: the drawer is the only
-          // desktop surface mounted on both routes, and the last setup steps
-          // are performed from inside a session.
-          dock: const _SetupDock(),
-          // Both are permanent affordances, so neither may be scrolled out of
-          // reach — the update row in particular stays pending until the app
-          // restarts (see update_row.dart). The account footer is declared last
-          // so it is the last BUDGETED slot to give up a pixel; only the
-          // unbudgeted header outranks it.
-          // Neither belongs to a machine-less demo: the footer's account row
-          // fetches the user, the subscription and the pricing catalogue, and
-          // the update row's only action leaves for the store.
-          pinned: ref.watch(demoModeProvider)
-              ? const []
-              : const [UpdateRow(), _Footer()],
         ),
       ),
     );

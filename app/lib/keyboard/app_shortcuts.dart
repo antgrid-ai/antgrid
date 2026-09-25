@@ -8,6 +8,7 @@ import '../models/workspace_view.dart';
 enum AppCommandGroup {
   general('General'),
   navigation('Navigation'),
+  keyboard('Moving around'),
   layout('Layout'),
   session('Session'),
   files('Files'),
@@ -29,16 +30,25 @@ enum AppCommand {
   openSettings('Settings', AppCommandGroup.general),
   showShortcuts('Keyboard shortcuts', AppCommandGroup.general),
 
+  nextArea('Next area: projects → agent → panel', AppCommandGroup.keyboard),
+  previousArea('Previous area', AppCommandGroup.keyboard),
+  moveFocus('Move between rows and tabs', AppCommandGroup.keyboard),
+  expandCollapse(
+    'Expand / collapse a folder or project',
+    AppCommandGroup.keyboard,
+  ),
+  activate('Open the focused row / enter a tab', AppCommandGroup.keyboard),
+
   goBack('Back', AppCommandGroup.navigation),
   goForward('Forward', AppCommandGroup.navigation),
   nextSession('Next session', AppCommandGroup.navigation),
   previousSession('Previous session', AppCommandGroup.navigation),
   focusAgent('Focus the agent', AppCommandGroup.navigation),
-  showPreview('Preview tab', AppCommandGroup.navigation),
-  showFiles('Files tab', AppCommandGroup.navigation),
-  showGit('Git tab', AppCommandGroup.navigation),
-  showTerminals('Terminals tab', AppCommandGroup.navigation),
-  showHandler('Handler tab', AppCommandGroup.navigation),
+  showPreview('Go to Preview tab', AppCommandGroup.navigation),
+  showFiles('Go to Files tab', AppCommandGroup.navigation),
+  showGit('Go to Git tab', AppCommandGroup.navigation),
+  showTerminals('Go to Terminals tab', AppCommandGroup.navigation),
+  showHandler('Go to Handler tab', AppCommandGroup.navigation),
 
   toggleSidebar('Show/hide projects', AppCommandGroup.layout),
   toggleContextPanel('Show/hide context panel', AppCommandGroup.layout),
@@ -258,6 +268,26 @@ final Map<AppCommand, List<KeyChord>> _otherChords = {
   AppCommand.showShortcuts: const [
     KeyChord(LogicalKeyboardKey.slash, control: true, shift: true),
   ],
+  // Focused, not global: F6 means something to terminal programs (mc's
+  // rename, htop's sort), so inside the terminal it is theirs. Ctrl+0..5 are
+  // the way out of the terminal; F6 moves on from there.
+  AppCommand.nextArea: const [KeyChord(LogicalKeyboardKey.f6, reach: _focused)],
+  AppCommand.previousArea: const [
+    KeyChord(LogicalKeyboardKey.f6, shift: true, reach: _focused),
+  ],
+  AppCommand.moveFocus: const [
+    KeyChord(LogicalKeyboardKey.arrowUp, reach: _local),
+    KeyChord(LogicalKeyboardKey.arrowDown, reach: _local),
+    KeyChord(LogicalKeyboardKey.arrowLeft, reach: _local),
+    KeyChord(LogicalKeyboardKey.arrowRight, reach: _local),
+  ],
+  AppCommand.expandCollapse: const [
+    KeyChord(LogicalKeyboardKey.arrowRight, reach: _local),
+    KeyChord(LogicalKeyboardKey.arrowLeft, reach: _local),
+  ],
+  AppCommand.activate: const [
+    KeyChord(LogicalKeyboardKey.enter, reach: _local),
+  ],
   AppCommand.goBack: const [
     KeyChord(LogicalKeyboardKey.arrowLeft, alt: true, reach: _focused),
   ],
@@ -353,6 +383,26 @@ final Map<AppCommand, List<KeyChord>> _appleChords = {
   ],
   AppCommand.showShortcuts: const [
     KeyChord(LogicalKeyboardKey.slash, meta: true),
+  ],
+  // Focused, not global: F6 means something to terminal programs (mc's
+  // rename, htop's sort), so inside the terminal it is theirs. Ctrl+0..5 are
+  // the way out of the terminal; F6 moves on from there.
+  AppCommand.nextArea: const [KeyChord(LogicalKeyboardKey.f6, reach: _focused)],
+  AppCommand.previousArea: const [
+    KeyChord(LogicalKeyboardKey.f6, shift: true, reach: _focused),
+  ],
+  AppCommand.moveFocus: const [
+    KeyChord(LogicalKeyboardKey.arrowUp, reach: _local),
+    KeyChord(LogicalKeyboardKey.arrowDown, reach: _local),
+    KeyChord(LogicalKeyboardKey.arrowLeft, reach: _local),
+    KeyChord(LogicalKeyboardKey.arrowRight, reach: _local),
+  ],
+  AppCommand.expandCollapse: const [
+    KeyChord(LogicalKeyboardKey.arrowRight, reach: _local),
+    KeyChord(LogicalKeyboardKey.arrowLeft, reach: _local),
+  ],
+  AppCommand.activate: const [
+    KeyChord(LogicalKeyboardKey.enter, reach: _local),
   ],
   AppCommand.goBack: const [
     KeyChord(LogicalKeyboardKey.bracketLeft, meta: true),

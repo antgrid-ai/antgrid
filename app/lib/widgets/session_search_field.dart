@@ -73,11 +73,16 @@ class _SessionSearchFieldState extends ConsumerState<SessionSearchField> {
   /// reaching for one takes focus off the field. The barrier handles the
   /// outside click instead.
   void _onFocus() {
-    if (_focusNode.hasFocus) _portal.show();
+    if (_focusNode.hasFocus && !_closing) _portal.show();
   }
 
-  void _set(String query) =>
-      ref.read(sessionSearchQueryProvider.notifier).set(query);
+  /// Typing always brings the results back — the box can keep focus after the
+  /// popup closed (see [_closing]), and a query with nowhere to show its
+  /// answer would read as a dead search.
+  void _set(String query) {
+    ref.read(sessionSearchQueryProvider.notifier).set(query);
+    if (!_portal.isShowing) _portal.show();
+  }
 
   void _clear() {
     _controller.clear();
@@ -95,8 +100,17 @@ class _SessionSearchFieldState extends ConsumerState<SessionSearchField> {
     _clear();
   }
 
+  /// Set for the frame a dismiss takes. Closing from a RESULT row removes the
+  /// row that had focus, and its scope hands focus straight back to this field
+  /// — whose focus listener would otherwise reopen the popup Esc just closed.
+  bool _closing = false;
+
   void _dismiss() {
+    _closing = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) => _closing = false);
     _portal.hide();
+    // Whichever holds the keyboard: the field, or a result row reached by ↓.
+    FocusManager.instance.primaryFocus?.unfocus();
     _focusNode.unfocus();
   }
 
@@ -159,6 +173,13 @@ class _SessionSearchFieldState extends ConsumerState<SessionSearchField> {
         child: CallbackShortcuts(
           bindings: {
             const SingleActivator(LogicalKeyboardKey.escape): _onEscape,
+            // Into the results: the rows are focusable, so from the first one
+            // ↓/↑ walk the list, Enter opens, and ↑ off the top returns here.
+            // A one-line field would otherwise swallow ↓ as a caret move.
+            const SingleActivator(LogicalKeyboardKey.arrowDown): () {
+              _portal.show();
+              _focusNode.focusInDirection(TraversalDirection.down);
+            },
           },
           child: AbSearchField(
             controller: _controller,
@@ -199,41 +220,46 @@ class _SearchPopupLayer extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Positioned.fill(
-      // Nothing above the overlay supplies a Material — it is a sibling of the
-      // routes — and the result rows are written for a route, where one always
-      // exists. Transparency, so it paints nothing of its own.
-      child: Material(
-        type: MaterialType.transparency,
-        child: Stack(
-          children: [
-            // Below the panel in paint order, so a click INSIDE the popup never
-            // reaches it, and opaque so a click anywhere else does.
-            Positioned.fill(
-              child: GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onTap: onDismiss,
-              ),
-            ),
-            CompositedTransformFollower(
-              link: link,
-              // Centred under the field rather than anchored to an edge of it:
-              // the field is itself centred in the title bar, so an edge anchor
-              // would visibly lean the popup off to one side.
-              targetAnchor: Alignment.bottomCenter,
-              followerAnchor: Alignment.topCenter,
-              offset: const Offset(0, AbTokens.space6),
-              child: ConstrainedBox(
-                constraints: BoxConstraints(
-                  minWidth: width,
-                  maxWidth: width,
-                  // Past this the list scrolls — a tall window must not turn
-                  // the resting recent list into a full-height wall.
-                  maxHeight: maxHeight,
+      // Esc from a result row. The rows live in the overlay, a sibling of the
+      // field's own bindings, so the field's Esc never sees a key pressed here.
+      child: CallbackShortcuts(
+        bindings: {const SingleActivator(LogicalKeyboardKey.escape): onDismiss},
+        // Nothing above the overlay supplies a Material — it is a sibling of
+        // the routes — and the result rows are written for a route, where one
+        // always exists. Transparency, so it paints nothing of its own.
+        child: Material(
+          type: MaterialType.transparency,
+          child: Stack(
+            children: [
+              // Below the panel in paint order, so a click INSIDE the popup never
+              // reaches it, and opaque so a click anywhere else does.
+              Positioned.fill(
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: onDismiss,
                 ),
-                child: _SearchPanel(onOpened: onDismiss),
               ),
-            ),
-          ],
+              CompositedTransformFollower(
+                link: link,
+                // Centred under the field rather than anchored to an edge of it:
+                // the field is itself centred in the title bar, so an edge anchor
+                // would visibly lean the popup off to one side.
+                targetAnchor: Alignment.bottomCenter,
+                followerAnchor: Alignment.topCenter,
+                offset: const Offset(0, AbTokens.space6),
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(
+                    minWidth: width,
+                    maxWidth: width,
+                    // Past this the list scrolls — a tall window must not turn
+                    // the resting recent list into a full-height wall.
+                    maxHeight: maxHeight,
+                  ),
+                  child: _SearchPanel(onOpened: onDismiss),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );

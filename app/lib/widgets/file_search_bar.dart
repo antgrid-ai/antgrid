@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../design/ab_colors.dart';
 import '../design/ab_tokens.dart';
@@ -60,8 +61,25 @@ class _FileSearchBarState extends State<FileSearchBar> {
     widget.onQueryChanged(value.isEmpty ? null : value);
   }
 
+  /// ↓ to the tree below, ↑ back to the tab strip above. A one-line field
+  /// takes both as caret moves, which would trap arrow navigation here.
+  void _leave(TraversalDirection direction) =>
+      FocusManager.instance.primaryFocus?.focusInDirection(direction);
+
   @override
   Widget build(BuildContext context) {
+    return CallbackShortcuts(
+      bindings: {
+        const SingleActivator(LogicalKeyboardKey.arrowDown): () =>
+            _leave(TraversalDirection.down),
+        const SingleActivator(LogicalKeyboardKey.arrowUp): () =>
+            _leave(TraversalDirection.up),
+      },
+      child: _buildField(context),
+    );
+  }
+
+  Widget _buildField(BuildContext context) {
     return AbSearchField(
       controller: _controller,
       focusNode: widget.focusNode,

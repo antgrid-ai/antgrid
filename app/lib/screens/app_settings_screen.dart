@@ -15,6 +15,7 @@ import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_panel_header.dart';
 import '../design/widgets/ab_snack_bar.dart';
 import '../design/widgets/ab_tap_target.dart';
+import '../keyboard/app_shortcuts.dart';
 import '../models/pending_nav.dart';
 import '../models/settings_section.dart';
 import '../providers/agent_transport.dart';
@@ -27,6 +28,7 @@ import '../widgets/color_swatch_button.dart';
 import '../widgets/delete_account_dialog.dart';
 import '../widgets/settings/help_about_section.dart';
 import '../design/widgets/ab_confirm_dialog.dart';
+import 'keyboard_shortcuts_page.dart';
 import 'upgrade_screen.dart';
 
 class _UiScaleStep {
@@ -63,6 +65,7 @@ extension SettingsSectionUI on SettingsSection {
     SettingsSection.uiSize => 'UI SIZE',
     SettingsSection.accessibility => 'ACCESSIBILITY',
     SettingsSection.files => 'FILES',
+    SettingsSection.shortcuts => 'KEYBOARD SHORTCUTS',
     SettingsSection.privacy => 'PRIVACY',
     SettingsSection.help => 'HELP',
     SettingsSection.account => 'ACCOUNT',
@@ -79,6 +82,11 @@ class AppSettingsScreen extends ConsumerStatefulWidget {
 }
 
 class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
+  /// Whether the Keyboard shortcuts page is showing in place of the list.
+  bool _shortcutsOpen = false;
+
+  void _close() => (widget.onClose ?? () => Navigator.of(context).pop())();
+
   @override
   void initState() {
     super.initState();
@@ -103,10 +111,29 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
     if (pending == null) return;
     ref.read(pendingSettingsSectionProvider.notifier).set(null);
     if (pending.target != ref.read(selectedTargetProvider)) return;
+    // The section is a door to its own page, so a link naming it means the
+    // page, not the one-row block that opens it.
+    if (pending.value == SettingsSection.shortcuts) {
+      setState(() => _shortcutsOpen = true);
+      return;
+    }
+    if (!_shortcutsOpen) {
+      _scrollTo(pending.value);
+      return;
+    }
+    // Any other section lives on the list, which is not built while the page
+    // is up — bring it back, then scroll once it has laid out.
+    setState(() => _shortcutsOpen = false);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _scrollTo(pending.value);
+    });
+  }
+
+  void _scrollTo(SettingsSection section) {
     // Silently does nothing for a section this build omits — BILLING and
     // DESIGN are both conditional — which is the codec's degrade-rather-than-
     // reject contract carried through to the destination.
-    final ctx = settingsSectionKey(pending.value).currentContext;
+    final ctx = settingsSectionKey(section).currentContext;
     if (ctx == null) return;
     unawaited(
       Scrollable.ensureVisible(
@@ -173,18 +200,20 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
       customAccent: settings.customAccent,
     );
 
+    if (_shortcutsOpen) {
+      return KeyboardShortcutsPage(
+        onBack: () => setState(() => _shortcutsOpen = false),
+        onClose: _close,
+      );
+    }
+
     return Scaffold(
       backgroundColor: antgrid.bgDeepest,
       body: Column(
         children: [
           AbPanelHeader(
             title: 'APP SETTINGS',
-            actions: [
-              AbIconButton(
-                icon: AbIcons.close,
-                onTap: widget.onClose ?? () => Navigator.of(context).pop(),
-              ),
-            ],
+            actions: [AbIconButton(icon: AbIcons.close, onTap: _close)],
           ),
           Expanded(
             // Not a ListView: scroll-to-section resolves its target through the
@@ -193,6 +222,9 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
             // is most useful for. A handful of cheap blocks is affordable
             // eagerly.
             child: SingleChildScrollView(
+              // Keeps the offset across a trip to the Keyboard shortcuts page,
+              // which unmounts this list: Back should land where the row was.
+              key: const PageStorageKey('app-settings-list'),
               padding: const EdgeInsets.all(AbTokens.space12),
               child: Column(
                 // ListView stretched its children across the viewport; a Column
@@ -389,6 +421,16 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
                   ),
                   const SizedBox(height: AbTokens.space12),
                   _Section(
+                    section: SettingsSection.shortcuts,
+                    body: [
+                      const SizedBox(height: AbTokens.space4),
+                      _ShortcutsRow(
+                        onTap: () => setState(() => _shortcutsOpen = true),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: AbTokens.space12),
+                  _Section(
                     section: SettingsSection.privacy,
                     body: [
                       const SizedBox(height: AbTokens.space8),
@@ -496,6 +538,60 @@ class _Section extends StatelessWidget {
           Text(section.title, style: AbTokens.sansStyle()),
           ...body,
         ],
+      ),
+    );
+  }
+}
+
+/// The Keyboard shortcuts section's one row: opens [KeyboardShortcutsPage].
+class _ShortcutsRow extends StatelessWidget {
+  const _ShortcutsRow({required this.onTap});
+
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final antgrid = context.antgrid;
+    final sheet = shortcutLabel(AppCommand.showShortcuts);
+    return InkWell(
+      onTap: onTap,
+      borderRadius: AbTokens.borderRadius,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: AbTokens.space8),
+        child: Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'View all shortcuts',
+                    style: AbTokens.sansStyle(color: antgrid.textPrimary),
+                  ),
+                  const SizedBox(height: AbTokens.space2),
+                  Text(
+                    'Every key the app answers to, searchable.',
+                    style: AbTokens.sansStyle(
+                      fontSize: AbTokens.fontXxs,
+                      color: antgrid.textMuted,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            if (sheet != null) ...[
+              Text(
+                sheet,
+                style: AbTokens.monoStyle(
+                  fontSize: AbTokens.fontXxs,
+                  color: antgrid.textMuted,
+                ),
+              ),
+              const SizedBox(width: AbTokens.space8),
+            ],
+            AbIcon(AbIcons.chevronRight, size: 12, color: antgrid.textMuted),
+          ],
+        ),
       ),
     );
   }

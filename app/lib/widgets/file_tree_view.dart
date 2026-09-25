@@ -9,6 +9,7 @@ import '../design/widgets/ab_diff_stat.dart';
 import '../design/widgets/ab_empty_state.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_list_row.dart';
+import '../keyboard/focus_regions.dart';
 import '../design/widgets/ab_loading.dart';
 import '../design/widgets/ab_status_dot.dart';
 import '../design/widgets/ab_swipe_actions.dart';
@@ -873,6 +874,15 @@ class _FileTreeRowState extends State<_FileTreeRow> {
               destructive: true,
             ),
         ],
+        child: row,
+      );
+    }
+
+    final onToggle = widget.onTap;
+    if (isDirectory && onToggle != null) {
+      row = TreeArrowKeys(
+        expanded: widget.isExpanded,
+        onToggle: onToggle,
         child: row,
       );
     }

@@ -13,6 +13,7 @@ enum SettingsSection {
   uiSize,
   accessibility,
   files,
+  shortcuts,
   privacy,
   help,
   account,

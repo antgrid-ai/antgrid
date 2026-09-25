@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../design/ab_colors.dart';
+import '../keyboard/focus_regions.dart';
 import '../screens/file_explorer_screen.dart';
 import '../screens/preview_screen.dart';
 import 'git_panel.dart';
@@ -34,46 +35,51 @@ class WorkspacePanel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return ColoredBox(
-      color: context.antgrid.bgDeep,
-      child: Column(
-        children: [
-          if (showTabBar)
-            WorkspaceTabBar(
-              selected: selectedView,
-              onSelected: onViewSelected,
-              badges: viewBadges,
-              isExpanded: isExpanded,
-              onToggleExpand: onToggleExpand,
-              onClose: onClose,
+    // Marks the panel as one F6 area, so "is the keyboard in the panel" is
+    // answerable from outside it.
+    return FocusRegionScope(
+      region: FocusRegion.panel,
+      child: ColoredBox(
+        color: context.antgrid.bgDeep,
+        child: Column(
+          children: [
+            if (showTabBar)
+              WorkspaceTabBar(
+                selected: selectedView,
+                onSelected: onViewSelected,
+                badges: viewBadges,
+                isExpanded: isExpanded,
+                onToggleExpand: onToggleExpand,
+                onClose: onClose,
+              ),
+            Expanded(
+              child: IndexedStack(
+                // Ordinal-indexed against `WorkspaceView`, which is append-only
+                // (see its own doc) — nothing ties an enum member to its slot
+                // here but this comment, so a new view must be appended AND
+                // given a child in the same position or `selectedView.index`
+                // walks past the last one.
+                index: selectedView.index,
+                children: const [
+                  DisplayVisibility(
+                    workspaceView: WorkspaceView.preview,
+                    child: PreviewScreen(),
+                  ),
+                  DisplayVisibility(
+                    workspaceView: WorkspaceView.files,
+                    child: FileExplorerScreen(),
+                  ),
+                  GitPanel(),
+                  DisplayVisibility(
+                    workspaceView: WorkspaceView.terminals,
+                    child: TerminalListView(),
+                  ),
+                  HandlerScreen(),
+                ],
+              ),
             ),
-          Expanded(
-            child: IndexedStack(
-              // Ordinal-indexed against `WorkspaceView`, which is append-only
-              // (see its own doc) — nothing ties an enum member to its slot
-              // here but this comment, so a new view must be appended AND
-              // given a child in the same position or `selectedView.index`
-              // walks past the last one.
-              index: selectedView.index,
-              children: const [
-                DisplayVisibility(
-                  workspaceView: WorkspaceView.preview,
-                  child: PreviewScreen(),
-                ),
-                DisplayVisibility(
-                  workspaceView: WorkspaceView.files,
-                  child: FileExplorerScreen(),
-                ),
-                GitPanel(),
-                DisplayVisibility(
-                  workspaceView: WorkspaceView.terminals,
-                  child: TerminalListView(),
-                ),
-                HandlerScreen(),
-              ],
-            ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }

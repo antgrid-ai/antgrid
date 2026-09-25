@@ -149,6 +149,7 @@ class _RecentSessionRowWidgetState
                   rowBg: rowBg,
                   deleting: deleting,
                   onDelete: () => _deleteDetached(context, ref),
+                  rowFocused: _focused,
                 )
               : _DesktopLayout(
                   row: row,
@@ -374,12 +375,18 @@ class _DesktopLayout extends StatelessWidget {
                   visible: showDelete,
                   child: IgnorePointer(
                     ignoring: !showDelete,
-                    child: Align(
-                      alignment: Alignment.centerLeft,
-                      child: AbIconButton(
-                        icon: AbIcons.trash,
-                        tooltip: 'Delete session',
-                        onTap: onDelete,
+                    // Faded out is not there for the keyboard either: a hidden
+                    // button that still took focus caught ↓ from the search
+                    // field instead of the row it belongs to.
+                    child: ExcludeFocus(
+                      excluding: !showDelete,
+                      child: Align(
+                        alignment: Alignment.centerLeft,
+                        child: AbIconButton(
+                          icon: AbIcons.trash,
+                          tooltip: 'Delete session',
+                          onTap: onDelete,
+                        ),
                       ),
                     ),
                   ),
@@ -405,6 +412,7 @@ class _MobileLayout extends StatelessWidget {
     required this.rowBg,
     required this.deleting,
     required this.onDelete,
+    this.rowFocused = false,
   });
 
   final RecentSessionRow row;
@@ -414,6 +422,9 @@ class _MobileLayout extends StatelessWidget {
   final String relTime;
   final Color rowBg;
   final bool deleting;
+
+  /// Whether the row holds the keyboard — see the trash button below.
+  final bool rowFocused;
 
   /// Always-visible trash button — mobile has no hover to reveal the desktop
   /// layout's in-place delete, and a hidden swipe gesture proved
@@ -457,10 +468,16 @@ class _MobileLayout extends StatelessWidget {
               // out of, so the only honest option is not to offer it.
               if (!deleting) ...[
                 const SizedBox(width: AbTokens.space4),
-                AbIconButton(
-                  icon: AbIcons.trash,
-                  tooltip: 'Delete session',
-                  onTap: onDelete,
+                // A keyboard stop only while its own row has focus: otherwise
+                // ↓/↑ land on the trash icons down the list instead of on the
+                // rows. → from a focused row still reaches it.
+                ExcludeFocus(
+                  excluding: !rowFocused,
+                  child: AbIconButton(
+                    icon: AbIcons.trash,
+                    tooltip: 'Delete session',
+                    onTap: onDelete,
+                  ),
                 ),
               ],
             ],

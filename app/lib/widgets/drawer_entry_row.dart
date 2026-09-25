@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../connection/relay_mechanisms.dart' show ConnectionBlockedException;
 import '../connection/supervisor_state.dart';
+import '../keyboard/focus_regions.dart';
 import '../design/ab_icons.dart';
 import '../design/ab_status_tone.dart';
 import '../design/ab_tokens.dart';
@@ -125,39 +126,45 @@ class _MachineDrawerHeaderRowState
       above: widget.showRule ? const DrawerBandRule() : null,
       builder: (context, hovered, _) {
         final revealed = hovered || _focused || _latched;
-        return DrawerBand(
-          label: entry.displayName,
-          // Kept on the band, unlike the local one: expanding a machine is what
-          // opens its control-plane socket, so there is something to disclose.
+        return TreeArrowKeys(
           expanded: expanded,
-          // A band's liveness dot lives at the panel edge permanently, so the
-          // action shares its cell rather than claiming one of its own: a
-          // second cell would push the trash a slot inboard of every other
-          // row's, and collapsing the action would slide the dot on
-          // pointer-enter. [_DrawerEntryTrailing] emits no actions here for the
-          // same reason — two owners of one cell is a fight.
-          trailing: AbRowTrailingCell.kit([
-            _DrawerEntryTrailing(
-              entry: entry,
-              revealed: revealed,
-              showRemoteChip: false,
-              hostsActions: false,
-            ),
-            _MachineAggregateDot(machineUuid: machineUuid),
-            if (offersRemove)
-              AbRowTrailingSwap(
-                revealed: revealed,
-                resting: _MachineOnlineDot(machineUuid: machineUuid),
-                action: _RemoveButton(entry: entry, onLatch: _setLatched),
-              )
-            else
-              AbRowTrailingCell(
-                child: _MachineOnlineDot(machineUuid: machineUuid),
-              ),
-          ]),
-          onFocusChange: _setFocused,
-          onTap: () =>
+          onToggle: () =>
               ref.read(expandedDrawerIdsProvider.notifier).toggle(machineUuid),
+          child: DrawerBand(
+            label: entry.displayName,
+            // Kept on the band, unlike the local one: expanding a machine is what
+            // opens its control-plane socket, so there is something to disclose.
+            expanded: expanded,
+            // A band's liveness dot lives at the panel edge permanently, so the
+            // action shares its cell rather than claiming one of its own: a
+            // second cell would push the trash a slot inboard of every other
+            // row's, and collapsing the action would slide the dot on
+            // pointer-enter. [_DrawerEntryTrailing] emits no actions here for the
+            // same reason — two owners of one cell is a fight.
+            trailing: AbRowTrailingCell.kit([
+              _DrawerEntryTrailing(
+                entry: entry,
+                revealed: revealed,
+                showRemoteChip: false,
+                hostsActions: false,
+              ),
+              _MachineAggregateDot(machineUuid: machineUuid),
+              if (offersRemove)
+                AbRowTrailingSwap(
+                  revealed: revealed,
+                  resting: _MachineOnlineDot(machineUuid: machineUuid),
+                  action: _RemoveButton(entry: entry, onLatch: _setLatched),
+                )
+              else
+                AbRowTrailingCell(
+                  child: _MachineOnlineDot(machineUuid: machineUuid),
+                ),
+            ]),
+            onFocusChange: _setFocused,
+            onTap: () => ref
+                .read(expandedDrawerIdsProvider.notifier)
+                .toggle(machineUuid),
+          ),
         );
       },
     );
@@ -474,36 +481,45 @@ class _DrawerEntryRowState extends ConsumerState<DrawerEntryRow> {
       projectSessionRegistryProvider.select((open) => open.contains(entry.id)),
     );
 
+    void toggle() => machineUuid != null
+        ? ref.read(expandedDrawerIdsProvider.notifier).toggle(machineUuid)
+        : ref.read(collapsedDrawerIdsProvider.notifier).toggle(entry.id);
+
     return HoverableDrawerRow(
       onHoverStart: _startPrefetch,
       onHoverEnd: _cancelPrefetch,
-      builder: (context, hovered, pointerOver) => AbListRow(
-        // Folder by default; chevron under the pointer. Both sit in the same
-        // pinned slot so the glyph swap doesn't shift the title.
-        //
-        // Keyed on the POINTER bit, not the affordance one: the affordance bit
-        // is true for the whole life of a touch row, which left every phone
-        // showing a chevron and never the folder.
-        leading: DrawerProjectLeading(
-          expanded: expanded,
-          pointerOver: pointerOver,
-          warm: isWarm,
+      builder: (context, hovered, pointerOver) => TreeArrowKeys(
+        expanded: expanded,
+        onToggle: toggle,
+        child: AbListRow(
+          // Folder by default; chevron under the pointer. Both sit in the same
+          // pinned slot so the glyph swap doesn't shift the title.
+          //
+          // Keyed on the POINTER bit, not the affordance one: the affordance bit
+          // is true for the whole life of a touch row, which left every phone
+          // showing a chevron and never the folder.
+          leading: DrawerProjectLeading(
+            expanded: expanded,
+            pointerOver: pointerOver,
+            warm: isWarm,
+          ),
+          title: Text(
+            entry.displayName,
+            style: drawerProjectTitleStyle(context),
+          ),
+          trailing: _DrawerEntryTrailing(
+            entry: entry,
+            revealed: hovered || _focused || _latched,
+            expanded: expanded,
+            onLatch: _setLatched,
+          ),
+          density: AbRowDensity.sm,
+          horizontalPadding: 0, // gutter lives on the outer Padding
+          contentFloor: AbRowContentFloor.iconButton,
+          margin: const EdgeInsets.symmetric(vertical: AbTokens.space2),
+          onFocusChange: _setFocused,
+          onTap: toggle,
         ),
-        title: Text(entry.displayName, style: drawerProjectTitleStyle(context)),
-        trailing: _DrawerEntryTrailing(
-          entry: entry,
-          revealed: hovered || _focused || _latched,
-          expanded: expanded,
-          onLatch: _setLatched,
-        ),
-        density: AbRowDensity.sm,
-        horizontalPadding: 0, // gutter lives on the outer Padding
-        contentFloor: AbRowContentFloor.iconButton,
-        margin: const EdgeInsets.symmetric(vertical: AbTokens.space2),
-        onFocusChange: _setFocused,
-        onTap: () => machineUuid != null
-            ? ref.read(expandedDrawerIdsProvider.notifier).toggle(machineUuid)
-            : ref.read(collapsedDrawerIdsProvider.notifier).toggle(entry.id),
       ),
     );
   }
