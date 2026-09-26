@@ -1,9 +1,5 @@
 # Peer session protocol (native Iroh payload path)
 
-**Frame version:** `FRAME_VERSION` in `packages/antgrid-wire/src/peer-frame.ts` (currently `0x04`; bumped
-together with the app, never grep-replaced — `0x03` and other small values are reused by unrelated
-protocols, notably the central hello signature version in `relay-auth.ts`/`relay_auth.dart`).
-
 This supersedes the old `docs/protocol/e2e-handshake.md` (v2 handshake crypto, retired). There is no
 app-layer handshake, transcript, key schedule or rekey to specify any more: **QUIC/TLS between two
 Iroh endpoints the authorization snapshot names is the confidentiality layer**, and a native connection
@@ -36,11 +32,11 @@ and codecs: `StreamOpen`/`StreamRefused`, `encodeStreamOpen`/`decodeStreamOpen`,
 **The first stream** the bridge accepts must declare `{kind:"session"}`. A missing, unparseable or
 non-session first open closes the connection (code `2n`, protocol violation) rather than being refused
 in-band — there is no session yet worth keeping alive. Once validated, the session stream carries the
-rest of this document unchanged: peer frames and the hello (§2), all on the same stream, with no open
-acknowledgement. There is no fragmentation and no credit-flow window left to carry (A5 deleted both —
-see §5): one `AbMessage` is one record, sliced only at the transport layer (`StreamRecordWriter`,
-`bridge/src/peer/stream-records.ts`), and `MAX_TRANSFER_BYTES`/`PEER_MAX_RECORD_BYTES` bound a record's
-size instead of a window's.
+rest of this document unchanged: session-stream records (§4) and the hello (§2), all on the same stream,
+with no open acknowledgement. There is no fragmentation and no credit-flow window left to carry (A5
+deleted both — see §5): one `AbMessage` (or one session frame) is one record, sliced only at the
+transport layer (`StreamRecordWriter`, `bridge/src/peer/stream-records.ts`), and
+`MAX_TRANSFER_BYTES`/`PEER_MAX_RECORD_BYTES` bound a record's size instead of a window's.
 
 **Every later stream** is admitted in its own task by `PeerStreamAcceptor`
 (`bridge/src/peer/stream-dispatch.ts`), so stream *N+1* is never blocked behind stream *N*'s open-frame
@@ -184,8 +180,9 @@ transfer) are defined once in `packages/antgrid-wire/src/stream-open.ts` beside 
 Stage A wave A4 gives every project its own stream — `{kind:"project", projectId}`, no `checkoutId`: a
 project stream is per PROJECT, and checkout routing stays per message on it, unchanged. It replaces the
 `{s,m}` mux entirely: a bound stream carries no `s`/`m` envelope, one `AbMessage` is one record, and the
-session stream (§1a) is left carrying only the machine control plane: the hello, the app's wedge-probe ping and its pong, and
-machine-scoped verbs such as `agent:projects`, `stream-ready` and `control:result`. Admitted
+session stream (§1a) is left carrying only the machine control plane: the hello, the app's wedge-probe
+`session:ping` and its `session:pong`, and machine-scoped verbs such as `agent:projects`, `stream-ready`
+and `control:result`. Admitted
 and routed by `ProjectStreamRegistry` (`bridge/src/project-streams.ts`), plugged into `PeerStreamAcceptor`
 as `handlers.project`, and exposed to `TerminalStreamRegistry`/`TunnelStreamRegistry` as
 `projectBinding`/`tunnelBinding` — both lookups only; neither a terminal nor a tunnel open ever opens or
@@ -278,8 +275,8 @@ six types is dropped rather than dispatched.
 One plaintext hello establishes a session per connection:
 
 ```
-peer → host : session:hello   { attemptId, capabilities? }
-host → peer : established     { attemptId }
+peer → host : session:hello        { attemptId, capabilities? }
+host → peer : session:established  { attemptId }
 ```
 
 Schema: `SessionHelloFrame` / `SessionHelloCapabilities` in `bridge/src/protocol.ts`. These are bare
@@ -292,10 +289,10 @@ session that envelope is scoped to.
   protocol violation). A *different* `attemptId` while already established closes the connection.
 - A peer with no session must already be admitted (`peerPubkeyFor`), or the hello is dropped as
   `not-admitted`.
-- **Pre-establishment frames are dropped per peer, fail closed** — `receivePeerFrame`'s only way in for
-  a session-less peer is a control-channel `session:hello`; everything else is dropped before it can
-  reach dispatch, frag reassembly, the session bus or a stream. This is enforced independently of the
-  transport, because nothing above the QUIC layer proves a connected peer has said hello.
+- **Pre-establishment frames are dropped per peer, fail closed** — `receiveSessionRecord`'s only way in
+  for a session-less peer is a `session:hello`; everything else is dropped before it can reach dispatch,
+  the session bus or a stream. This is enforced independently of the transport, because nothing above the
+  QUIC layer proves a connected peer has said hello.
 - `capabilities` is byte-identical in shape to the old `AppReadyMessage.capabilities` (the app's hello
   literals in `connection_handshake.dart` and `local_transport.dart` must keep naming every key
   `SessionHelloCapabilities` declares, and vice versa — Zod strips an undeclared key, and no suite spans
@@ -317,10 +314,10 @@ recorded as `PEER_QUIC_KEEP_ALIVE_INTERVAL_MS`/`PEER_QUIC_MAX_IDLE_TIMEOUT_MS` a
 transport config. A peer that stops acking closes the connection on idle; the bridge retires it from
 `connection.closed()` (`peer/native-host-connection.ts`).
 
-The app additionally sends `ping` after `kPingSilenceSeconds` of session-stream silence and closes the
-`PeerLink` after `kMaxMissedPongs` unanswered (`machine_session.dart`). Its only job is a bridge whose
-event loop is wedged while its QUIC stack still acks — QUIC idle already covers a dead one. The bridge
-answers `ping` with `pong` and never pings.
+The app additionally sends `session:ping` after `kPingSilenceSeconds` of session-stream silence and
+closes the `PeerLink` after `kMaxMissedPongs` unanswered (`machine_session.dart`). Its only job is a
+bridge whose event loop is wedged while its QUIC stack still acks — QUIC idle already covers a dead one.
+The bridge answers `session:ping` with `session:pong` and never pings.
 
 RPC timeouts never close the link. Three consecutive timeouts on one project stream reset and reopen
 that stream alone, rerunning the bind resync (§1d); every other project, terminal, tunnel and upload
@@ -331,25 +328,46 @@ going through admission (§1) and the hello (§2) again. `MachineSession` fences
 reconnect with a per-connection generation token (`_SessionGeneration`/`_generation`,
 `machine_session.dart`), not a key identity check, since there are no keys to compare.
 
-`session-takeover` and the base class's capacity eviction are gone from the native path: `acceptPeer`'s
-own capacity cap (§1) is the only admission-time bound, and nothing sends a takeover notice any more.
+`session:takeover` and the base class's capacity eviction are gone from the native path: `acceptPeer`'s
+own capacity cap (§1) is the only admission-time bound, and nothing sends a takeover notice any more
+(the type stays reserved in `SESSION_FRAME_TYPES` — §4 — because the app's receive arm still exists).
 
-## 4. Frame layout
+## 4. Session-record layout
 
-Wire layout, `FrameKind` and `FRAME_VERSION` are defined in `packages/antgrid-wire/src/peer-frame.ts`
-(canonical) and hand-mirrored in `packages/antgrid_relay_client/lib/src/frame.dart`. This envelope carries
-only the session stream's two record kinds (§1a's `PeerFrameHeader.type`, `session`/`message`) — the `{s,m}`
-mux it once also carried is gone (A4/A5); every other stream (§1b-§1d) frames its records directly with no
-`FrameKind` envelope at all. `FrameKind` carries a single value on purpose — there is no `sealed`/`handshake`
-split left to distinguish, and the kind byte is kept for the same reason the header's `type` field is: a
-future session-stream framing change would otherwise have to re-introduce it. Peer identity is
-authenticated by the connection and deliberately absent from the frame record.
+A session-stream record is `[u32 BE len][UTF-8 JSON]` — byte for byte the same shape as a project-stream
+record (§1d), read and written by the same record reader/writer both use. There is no header, no version
+byte and no kind byte: the old two-value envelope (`PeerFrameHeader.type`, `session`/`message`) that once
+told a liveness/session frame from a control-plane `AbMessage` is gone, because the JSON body's own `type`
+is now sufficient — no `AbMessage` uses a `session:`-prefixed type, and nothing else on this stream uses
+one either.
+
+The five session frames, one scheme (`session:` + verb), are the whole set
+`SESSION_FRAME_TYPES` (`packages/antgrid-wire/src/peer-protocol.ts`, hand-mirrored as
+`kSessionFrameTypes` in `packages/antgrid_relay_client/lib/src/frame.dart`):
+
+| Type | Direction | Body |
+|---|---|---|
+| `session:hello` | app → bridge | `{type, attemptId, capabilities?}` |
+| `session:established` | bridge → app | `{type, attemptId}` |
+| `session:ping` | either direction may receive it | `{type}` |
+| `session:pong` | reply to a ping | `{type}` |
+| `session:takeover` | bridge → app, reserved — nothing sends it (§3) | `{type}` |
+
+`isSessionFrameType(type)` is the dispatch: a record whose `type` is one of these five is a session frame
+(`PeerSessionOwner.onSessionFrame`/`handleSessionFrame`); everything else is the bare JSON of exactly one
+`AbMessage` of the control plane (`onControlMessage`/`dispatchControlPlane`). An old envelope-era name
+(`ping`, `pong`, `established`) is therefore control-plane traffic, not a session frame: `PingMessage`/
+`PongMessage` stay in `AbMessageSchema`/`KNOWN_TYPES` for exactly this reason (see
+`PeerSessionOwner.receiveSessionRecord`). A body that is not JSON, or whose `type` is not a string, is
+dropped (`plaintext-not-json`/`unrecognized-plaintext`) rather than treated as a protocol violation — only
+a zero-length or over-cap length prefix still closes the connection (the record reader enforces it).
+Peer identity is authenticated by the connection and deliberately absent from the record.
 
 Test vectors: `evals/fixtures/peer-transport-vectors.json`, generated by
 `packages/antgrid-wire/scripts/gen-peer-transport-vectors.ts` (`bun run --filter antgrid-wire
 gen:peer-vectors`) and consumed by both `packages/antgrid-wire/tests/peer-transport-vectors.test.ts` and
 `packages/antgrid_peer_transport/test/peer_transport_vectors_test.dart`. Regenerate and commit the fixture
-together with any change to the frame or stream-open constants it pins.
+together with any change to the session-record or stream-open constants it pins.
 
 ## 5. Per-record caps, not per-channel flow control
 

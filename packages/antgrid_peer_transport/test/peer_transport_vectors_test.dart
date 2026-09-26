@@ -9,11 +9,6 @@ import 'package:test/test.dart';
 Map<String, dynamic> _map(Object? value) =>
     Map<String, dynamic>.from(value! as Map);
 
-Uint8List _hex(String value) => Uint8List.fromList([
-  for (var i = 0; i < value.length; i += 2)
-    int.parse(value.substring(i, i + 2), radix: 16),
-]);
-
 String _toHex(Uint8List value) =>
     value.map((byte) => byte.toRadixString(16).padLeft(2, '0')).join();
 
@@ -26,47 +21,52 @@ void main() {
     ),
   );
 
-  test(
-    'Dart framing and native constants match the shared transport vector',
-    () {
-      final framing = _map(fixture['framing']);
-      expect(peerFrameVersion, framing['version']);
-      expect(peerFrameFixedPrefix, framing['fixedPrefixBytes']);
-      expect(maxPeerFrameHeaderBytes, framing['maxHeaderBytes']);
-      expect(kMaxTransferBytes, framing['maxPayloadBytes']);
-      expect(kPeerMaxRecordBytes, framing['maxRecordBytes']);
-      expect(kPeerMaxBridgeRecordBytes, framing['maxBridgeRecordBytes']);
-      expect(FrameKind.message.wireValue, _map(framing['kinds'])['message']);
+  test('Dart native constants match the shared transport vector', () {
+    final native = _map(fixture['native']);
+    expect(peerAlpn, native['alpn']);
+    expect(maxPeerLeaseMs, native['leaseMs']);
+    expect(maxPeerLeaseMs ~/ 3, native['refreshMs']);
+    expect(native['selectionMs'], 5000);
+    expect(native['endpointChallengeMs'], 120000);
+  });
 
-      final native = _map(fixture['native']);
-      expect(peerAlpn, native['alpn']);
-      expect(maxPeerLeaseMs, native['leaseMs']);
-      expect(maxPeerLeaseMs ~/ 3, native['refreshMs']);
-      expect(native['selectionMs'], 5000);
-      expect(native['endpointChallengeMs'], 120000);
+  test(
+    'Dart session-record caps and types match the shared transport vector',
+    () {
+      final sessionRecords = _map(fixture['sessionRecords']);
+      expect(kPeerMaxRecordBytes, sessionRecords['maxAppRecordBytes']);
+      expect(kPeerMaxBridgeRecordBytes, sessionRecords['maxBridgeRecordBytes']);
+      expect(kPeerMaxBridgeRecordBytes, kMaxTransferBytes);
+      expect(
+        kSessionFrameTypes,
+        unorderedEquals((sessionRecords['types'] as List).cast<String>()),
+      );
     },
   );
 
-  test('Dart encodes and decodes every peer-frame golden byte vector', () {
-    final samples = (_map(fixture['framing'])['samples'] as List)
+  test('Dart hashes and frames every session-record golden byte vector', () {
+    final samples = (_map(fixture['sessionRecords'])['samples'] as List)
         .cast<Map<String, dynamic>>();
     for (final sample in samples) {
-      final header = _map(sample['header']);
-      final kind = FrameKind.fromWire(sample['kind'] as int)!;
-      expect(kind, FrameKind.message, reason: sample['name'] as String);
-      final payload = _hex(sample['payloadHex'] as String);
-      final encoded = encodePeerFrame(header, payload);
+      final json = sample['json'] as String;
+      final payload = Uint8List.fromList(utf8.encode(json));
+      expect(frameIdOf(payload), sample['frameId'], reason: sample['name'] as String);
+      final expectedRecord = Uint8List(4 + payload.length);
+      ByteData.sublistView(
+        expectedRecord,
+      ).setUint32(0, payload.length, Endian.big);
+      expectedRecord.setRange(4, expectedRecord.length, payload);
       expect(
-        _toHex(encoded),
-        sample['frameHex'],
+        _toHex(expectedRecord),
+        sample['recordHex'],
         reason: sample['name'] as String,
       );
-
-      final decoded = decodePeerFrame(_hex(sample['frameHex'] as String));
-      expect(decoded.header, header);
-      expect(decoded.payload, payload);
-      expect(decoded.header.containsKey('to'), isFalse);
-      expect(decoded.header.containsKey('from'), isFalse);
+      final type = (jsonDecode(json) as Map<String, dynamic>)['type'];
+      expect(
+        isSessionFrameType(type),
+        sample['session'],
+        reason: sample['name'] as String,
+      );
     }
   });
 

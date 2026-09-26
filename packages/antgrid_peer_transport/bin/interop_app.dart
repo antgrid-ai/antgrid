@@ -186,6 +186,19 @@ Future<void> main(List<String> args) async {
     var (active, live, closed) = await establish();
     _emit({'check': 'established'});
 
+    // Proves the session stream round-trips a plain length-prefixed JSON
+    // record with no envelope, over the real binding, before any project
+    // stream is touched.
+    final pong = active.messageStream.firstWhere((msg) {
+      final decoded = jsonDecode(utf8.decode(msg.payload));
+      return decoded is Map && decoded['type'] == 'session:pong';
+    });
+    await active.sendRecord(
+      Uint8List.fromList(utf8.encode('{"type":"session:ping"}')),
+    );
+    await pong.timeout(const Duration(seconds: 10));
+    _emit({'check': 'session-ping-pong'});
+
     // The host opened every project but the first one local-only, so none of
     // those is relay-registered until a `project:start` promotes it (hazard
     // J): opening its native stream now must be refused NOT_READY in-band,

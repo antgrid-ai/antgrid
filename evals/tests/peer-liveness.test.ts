@@ -12,7 +12,7 @@ test("the bridge never pings an idle app, and still pongs", async () => {
   const env = await setupTestEnv({ fixtureName: "basic" });
   try {
     await Bun.sleep(45_000);
-    expect(env.app.sessionFrameTypes()).not.toContain("ping");
+    expect(env.app.sessionFrameTypes()).not.toContain("session:ping");
 
     const rtMs = await env.app.ping();
     expect(rtMs).toBeGreaterThanOrEqual(0);

@@ -1,6 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { SESSION_FRAME_TYPES } from "antgrid-wire";
 import {
   parseMessage, createMessage, AbMessageSchema, parseMessageFast,
   SessionHelloFrame, SessionHelloCapabilities, SessionEstablishedFrame,
@@ -434,9 +435,10 @@ describe("session:hello / established frame schemas", () => {
     expect(SessionHelloCapabilities.safeParse({ pullsTree: false }).success).toBe(false);
   });
 
-  it("established requires the matching attemptId", () => {
-    expect(SessionEstablishedFrame.safeParse({ type: "established" }).success).toBe(false);
-    expect(SessionEstablishedFrame.safeParse({ type: "established", attemptId: "a1" }).success).toBe(true);
+  it("session:established requires the matching attemptId and rejects the old bare name", () => {
+    expect(SessionEstablishedFrame.safeParse({ type: "session:established" }).success).toBe(false);
+    expect(SessionEstablishedFrame.safeParse({ type: "session:established", attemptId: "a1" }).success).toBe(true);
+    expect(SessionEstablishedFrame.safeParse({ type: "established", attemptId: "a1" }).success).toBe(false);
   });
 
   it("neither frame is a member of AbMessageSchema", () => {
@@ -446,8 +448,25 @@ describe("session:hello / established frame schemas", () => {
     }))).toBeNull();
     expect(parseMessage(JSON.stringify({
       id: "b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e", timestamp: Date.now(),
-      type: "established", attemptId: "a1",
+      type: "session:established", attemptId: "a1",
     }))).toBeNull();
+  });
+});
+
+// D-A9-2: none of the five session-frame names is an AbMessage literal or a
+// KNOWN_TYPES entry — proved here rather than by review, since the two lists
+// are hand-maintained and can drift silently.
+describe("session-frame types are disjoint from the control plane (D-A9-2)", () => {
+  it("no AbMessageSchema option's type literal is a SESSION_FRAME_TYPES name, and none parses", () => {
+    expect(AbMessageSchema.options.length).toBeGreaterThan(0);
+    const controlPlaneTypes = AbMessageSchema.options.map((option) => option.shape.type.value);
+    // The loop below would pass vacuously against an empty or wrongly-scoped
+    // list, so pin that it actually holds ordinary control-plane types.
+    expect(controlPlaneTypes).toContain("ping");
+    for (const sessionType of SESSION_FRAME_TYPES) {
+      expect(controlPlaneTypes).not.toContain(sessionType);
+      expect(parseMessageFast(JSON.stringify({ type: sessionType }))).toBeNull();
+    }
   });
 });
 

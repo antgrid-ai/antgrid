@@ -4,7 +4,7 @@
 // is gone. The connection supervisor drives it explicitly via
 // [MachineSession.ensureEstablished], which is a SINGLE attempt (the supervisor
 // owns retry) and must never resolve ahead of [MachineSession.isEstablished].
-// A `session-takeover` is reported, not repaired.
+// A `session:takeover` is reported, not repaired.
 import 'dart:convert';
 
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
@@ -166,7 +166,7 @@ void main() {
     });
   });
 
-  group('session-takeover', () {
+  group('session:takeover', () {
     test(
       'tears the session down, reports on takeoverEvents, and never re-establishes in place',
       () async {
@@ -186,9 +186,8 @@ void main() {
         final takeovers = <void>[];
         final sub = session.takeoverEvents.listen(takeovers.add);
 
-        relay.injectFrame(
-          encodeFromAgent(jsonEncode({'type': 'session-takeover'})),
-          kind: kPeerFrameSession,
+        relay.injectRecord(
+          encodeFromAgent(jsonEncode({'type': kSessionTakeover})),
         );
         await Future<void>.delayed(const Duration(milliseconds: 40));
 
@@ -203,6 +202,39 @@ void main() {
           1,
           reason: 'a takeover is reported, never auto-repaired',
         );
+
+        await sub.cancel();
+        await session.dispose();
+        await relay.closeStreams();
+      },
+    );
+
+    test(
+      'a bare session-takeover does not tear the session down — it is control '
+      'plane, not a session frame',
+      () async {
+        final relay = FakeLiveRelay(
+          initial: RelayConnectionState.authenticated,
+        );
+        final handshaker = FakeHandshaker.sequence([true, true]);
+        final session = MachineSession(
+          relay: relay,
+          machineDeviceId: 'm1',
+          handshaker: handshaker,
+        );
+        session.start();
+        await session.ensureEstablished();
+
+        final takeovers = <void>[];
+        final sub = session.takeoverEvents.listen(takeovers.add);
+
+        relay.injectRecord(
+          encodeFromAgent(jsonEncode({'type': 'session-takeover'})),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 40));
+
+        expect(takeovers, isEmpty);
+        expect(session.isEstablished, isTrue);
 
         await sub.cancel();
         await session.dispose();

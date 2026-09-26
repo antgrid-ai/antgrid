@@ -70,7 +70,7 @@ class LeasedPeerLink implements PeerLink, MultiStreamPeerLink {
       lease.snapshot?.endpoint?.endpointId == _localEndpoint &&
       lease.snapshot?.endpoint?.generation == _localGeneration;
   @override
-  Stream<IncomingPeerFrame> get messageStream =>
+  Stream<IncomingSessionRecord> get messageStream =>
       inner.messageStream.where((_) => isDispatchAllowed);
   @override
   Stream<PeerLinkState> get payloadStateStream {
@@ -87,9 +87,9 @@ class LeasedPeerLink implements PeerLink, MultiStreamPeerLink {
   @override
   PeerLinkDiagnostic? get netTap => inner.netTap;
   @override
-  Future<PeerSendOutcome> sendFrame(String kind, Uint8List payload) async {
+  Future<PeerSendOutcome> sendRecord(Uint8List payload) async {
     if (!isDispatchAllowed) return PeerSendOutcome.closed;
-    return inner.sendFrame(kind, payload);
+    return inner.sendRecord(payload);
   }
 
   /// The lease fence covers the open and every read and write on the stream

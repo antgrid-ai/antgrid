@@ -37,7 +37,7 @@ const Map<String, bool> kSessionHelloCapabilities = {
   'terminalFramesV1': true,
 };
 
-/// Runs ONE plaintext hello to `established` over a single [PeerLink] socket.
+/// Runs ONE plaintext hello to `session:established` over a single [PeerLink] socket.
 /// QUIC/TLS between the two lease-authorized endpoints is the confidentiality
 /// layer, so the hello carries no crypto of its own: a phone-generated
 /// `attemptId` correlates the exchange, and there is no retransmit — a
@@ -50,7 +50,7 @@ const Map<String, bool> kSessionHelloCapabilities = {
 /// protocol conversation for a full protocol revision while its scenarios
 /// stayed skipped.
 class ConnectionHandshake {
-  /// How long one attempt waits for the bridge's `established`. Sized for a
+  /// How long one attempt waits for the bridge's `session:established`. Sized for a
   /// phone on a real network; a caller that drives its own retry loop wants a
   /// shorter one, so that the loop's worst case stays inside its budget rather
   /// than being set by this single figure.
@@ -69,7 +69,7 @@ class ConnectionHandshake {
   final Duration _attemptTimeout;
 
   bool _cancelled = false;
-  StreamSubscription<IncomingPeerFrame>? _messageSub;
+  StreamSubscription<IncomingSessionRecord>? _messageSub;
 
   void cancel() {
     _cancelled = true;
@@ -91,14 +91,14 @@ class ConnectionHandshake {
     // Subscribe before sending: the bridge may answer before the send call
     // itself returns.
     final sub = _relay.messageStream.listen((msg) {
-      if (!active() || msg.kind != kPeerFrameSession) return;
+      if (!active()) return;
       Map<String, dynamic>? json;
       try {
         json = jsonDecode(utf8.decode(msg.payload)) as Map<String, dynamic>;
       } catch (_) {
         return;
       }
-      if (json['type'] != 'established' || json['attemptId'] != attemptId) {
+      if (json['type'] != kSessionEstablished || json['attemptId'] != attemptId) {
         return;
       }
       if (!established.isCompleted) established.complete(true);
@@ -107,12 +107,11 @@ class ConnectionHandshake {
 
     try {
       final hello = <String, dynamic>{
-        'type': 'session:hello',
+        'type': kSessionHello,
         'attemptId': attemptId,
         'capabilities': kSessionHelloCapabilities,
       };
-      final outcome = await _relay.sendFrame(
-        kPeerFrameSession,
+      final outcome = await _relay.sendRecord(
         Uint8List.fromList(utf8.encode(jsonEncode(hello))),
       );
       if (outcome != PeerSendOutcome.accepted) return false;

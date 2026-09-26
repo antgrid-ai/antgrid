@@ -9,7 +9,7 @@ import { createMessage } from "../../bridge/src/protocol";
  * established session PER APP DEVICE, so a phone and a desktop app signed
  * into the same account drive the same machine at the same time. Before this,
  * the bridge held exactly one session and a second device's verified
- * client-hello displaced the first (`session-takeover`, keys zeroized) —
+ * client-hello displaced the first (`session:takeover`, keys zeroized) —
  * the behaviour `gate-harness-pairfree.test.ts` used to pin.
  *
  * Unit coverage lives in `bridge/tests/handshake-pull.test.ts`, but only a real
@@ -38,12 +38,12 @@ async function assertSnapshot(app: RelayClient, label: string): Promise<void> {
   expect(res.ok).toBe(true);
 }
 
-/** Count `session-takeover` frames this client has received. Reads the
+/** Count `session:takeover` frames this client has received. Reads the
  *  message QUEUE rather than arming a `waitFor` up front: a waiter covers only
  *  its own timeout window, whereas the queue holds anything that ever arrived
  *  for the whole life of the test. */
 function takeoversSeen(app: RelayClient): number {
-  return app.drainQueued("session-takeover");
+  return app.drainQueued("session:takeover");
 }
 
 test("two app devices hold concurrent sessions with one bridge, and neither displaces the other", async () => {

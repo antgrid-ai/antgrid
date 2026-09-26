@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { createHash } from "node:crypto";
-import { encodePeerFrame } from "antgrid-wire";
 import { Netwatch, netwatch, frameIdFor, __resetNetwatchForTest, type NetwatchEvent } from "../src/netwatch";
 import { ControlListener } from "../src/control-listener";
 import { TestPeerSessionOwner } from "./test-peer-session-owner";
@@ -123,8 +122,7 @@ describe("TestPeerSessionOwner netwatch taps", () => {
     __resetNetwatchForTest();
 
     const payload = Buffer.from(JSON.stringify({ type: "terminal:input", terminalId: "t", data: "x" }));
-    const frame = encodePeerFrame({ type: "message" }, payload);
-    client.injectPeerFrame(Buffer.from(frame), "phone-1");
+    client.injectPeerPayload(payload, "phone-1");
 
     const rx = events().filter((e) => e.dir === "rx" && e.kind === "frame");
     expect(rx).toHaveLength(1);

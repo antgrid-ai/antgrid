@@ -45,7 +45,7 @@ class _FakeHandshaker implements SessionHandshaker {
 /// A minimal [PeerLink] + [MultiStreamPeerLink] double: enough to establish a
 /// [MachineSession] and open native project streams over it.
 class _FakeLink implements PeerLink, MultiStreamPeerLink {
-  final _messages = StreamController<IncomingPeerFrame>.broadcast();
+  final _messages = StreamController<IncomingSessionRecord>.broadcast();
   final _states = StreamController<PeerLinkState>.broadcast();
 
   /// Every native project stream opened, in call order — a reopen appends a
@@ -55,7 +55,7 @@ class _FakeLink implements PeerLink, MultiStreamPeerLink {
   @override
   bool get isDispatchAllowed => true;
   @override
-  Stream<IncomingPeerFrame> get messageStream => _messages.stream;
+  Stream<IncomingSessionRecord> get messageStream => _messages.stream;
   @override
   Stream<PeerLinkState> get payloadStateStream => _states.stream;
   @override
@@ -66,7 +66,7 @@ class _FakeLink implements PeerLink, MultiStreamPeerLink {
   PeerLinkDiagnostic? get netTap => null;
 
   @override
-  Future<PeerSendOutcome> sendFrame(String kind, Uint8List payload) async =>
+  Future<PeerSendOutcome> sendRecord(Uint8List payload) async =>
       PeerSendOutcome.accepted;
 
   @override
@@ -97,16 +97,13 @@ class _FakeLink implements PeerLink, MultiStreamPeerLink {
   /// liveness/close path reacts to.
   void simulateSocketClosed() => _states.add(PeerLinkState.closed);
 
-  /// Injects a plaintext control-plane record. `kind` defaults to the bare
-  /// message plane; pass [kPeerFrameSession] for a session-plane message
-  /// (e.g. `session-takeover`).
-  void inject(Map<String, dynamic> message, {String kind = kPeerFrameMessage}) =>
-      _messages.add(
-        IncomingPeerFrame(
-          kind: kind,
-          payload: Uint8List.fromList(utf8.encode(jsonEncode(message))),
-        ),
-      );
+  /// Injects a plaintext record on the session stream — a control-plane
+  /// `AbMessage` or a session frame, told apart only by its own `type`.
+  void inject(Map<String, dynamic> message) => _messages.add(
+    IncomingSessionRecord(
+      payload: Uint8List.fromList(utf8.encode(jsonEncode(message))),
+    ),
+  );
 }
 
 /// One project's native stream, the bridge side.

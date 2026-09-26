@@ -2,8 +2,6 @@ import { test, expect } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { Endpoint, EndpointAddr, EndpointId } from "@number0/iroh/index.js";
 import {
-  decodePeerFrame,
-  encodePeerFrame,
   encodeStreamOpen,
   PEER_ALPN,
   PEER_MAX_BRIDGE_RECORD_BYTES,
@@ -119,14 +117,11 @@ test("an endpoint absent from the lease is refused at accept, and admitted once 
       const reader = new StreamRecordReader({ recv: stream.recv }, PEER_MAX_BRIDGE_RECORD_BYTES, () => {});
       void writer.send(encodeStreamOpen({ kind: "session" }));
       const attemptId = randomUUID();
-      const sendSession = (value: object) =>
-        writer!.send(encodePeerFrame({ type: "session" }, Buffer.from(JSON.stringify(value), "utf8")));
-      const sendMessage = (value: object) =>
-        writer!.send(encodePeerFrame({ type: "message" }, Buffer.from(JSON.stringify(value), "utf8")));
+      const sendSession = (value: object) => writer!.send(Buffer.from(JSON.stringify(value), "utf8"));
+      const sendMessage = (value: object) => writer!.send(Buffer.from(JSON.stringify(value), "utf8"));
       const read = async (predicate: (value: any) => boolean): Promise<any> => {
         for (;;) {
-          const frame = decodePeerFrame(await reader.read());
-          const value = JSON.parse(Buffer.from(frame.payload).toString("utf8"));
+          const value = JSON.parse(Buffer.from(await reader.read()).toString("utf8"));
           if (predicate(value)) return value;
         }
       };
@@ -135,7 +130,7 @@ test("an endpoint absent from the lease is refused at accept, and admitted once 
         attemptId,
         capabilities: { checkoutRouting: true, pullsTree: true, terminalFramesV1: true },
       });
-      await read((value) => value.type === "established" && value.attemptId === attemptId);
+      await read((value) => value.type === "session:established" && value.attemptId === attemptId);
 
       const requestId = "gate-inventory-miss-baseline";
       await sendMessage(createMessage("request", { requestId, method: "state.snapshot", params: { types: ["*"] } }));

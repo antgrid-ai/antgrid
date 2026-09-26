@@ -28,13 +28,13 @@ class _StubRelay extends RelayService implements PeerLink {
   final _states = StreamController<AppState>.broadcast();
   final _payloadStates = StreamController<PeerLinkState>.broadcast();
   final _presence = StreamController<bool>.broadcast();
-  final _messages = StreamController<IncomingPeerFrame>.broadcast();
+  final _messages = StreamController<IncomingSessionRecord>.broadcast();
   AppState _cur = const AppState();
 
   void dropPayload() => _payloadStates.add(PeerLinkState.closed);
 
   @override
-  Stream<IncomingPeerFrame> get messageStream => _messages.stream;
+  Stream<IncomingSessionRecord> get messageStream => _messages.stream;
   @override
   Stream<AppState> get stateStream => _states.stream;
   @override
@@ -63,7 +63,7 @@ class _StubRelay extends RelayService implements PeerLink {
   }
 
   @override
-  Future<PeerSendOutcome> sendFrame(String kind, Uint8List payload) async {
+  Future<PeerSendOutcome> sendRecord(Uint8List payload) async {
     if (!isDispatchAllowed) return PeerSendOutcome.closed;
     return PeerSendOutcome.accepted;
   }

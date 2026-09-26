@@ -4,13 +4,11 @@ import { EndpointEnrollment } from "../../bridge/src/peer/enrollment";
 import { createMessage, parseMessage, type AbMessage } from "../../bridge/src/protocol";
 import { CONTROL_HANDLE } from "../support/stream";
 import {
-  encodePeerFrame,
-  decodePeerFrame,
   encodeStreamOpen,
   PEER_ALPN,
   PEER_MAX_BRIDGE_RECORD_BYTES,
   type PeerAuthorizationSnapshot,
-  type PeerFrameKind,
+  isSessionFrameType,
   buildHelloSigBody,
   normalizeRelayHost,
   STREAM_PROJECT_APP_RECORD_MAX_BYTES,
@@ -318,9 +316,10 @@ export class RelayClient {
   private wsGeneration = 0;
 
   /** Every inbound session frame's `type`, in arrival order — lets a test
-   *  assert a negative (e.g. "no ping arrived" across an idle window) without
-   *  the frame having anywhere else to land, since the bridge never pings
-   *  and `established`/`pong` are otherwise consumed internally. */
+   *  assert a negative (e.g. "no session:ping arrived" across an idle window)
+   *  without the frame having anywhere else to land, since the bridge never
+   *  pings and `session:established`/`session:pong` are otherwise consumed
+   *  internally. */
   private sessionFrameLog: string[] = [];
   /** FIFO: `ping()` calls answer in the order their `pong` arrives, matching
    *  the bridge's own single in-order session-frame writer. */
@@ -648,7 +647,7 @@ export class RelayClient {
     this.sessionWriter = writer;
     void (async () => {
       try {
-        while (generation === this.nativeGeneration) this.handleBinaryFrame(await reader.read());
+        while (generation === this.nativeGeneration) this.handleSessionRecord(await reader.read());
       } catch {
         if (generation === this.nativeGeneration) this.sessionWriter = null;
       }
@@ -1242,10 +1241,10 @@ export class RelayClient {
     connection.close(1n, []);
     return "connected";
   }
-  /** Sends a `{type:"ping"}` session frame and resolves with the round-trip
-   *  ms on the matching `pong` — the app's own wedge-probe, driven from an
-   *  eval so a test can confirm the bridge still answers after a long idle
-   *  window during which it sends no session frame of its own. */
+  /** Sends a `{type:"session:ping"}` session frame and resolves with the
+   *  round-trip ms on the matching `session:pong` — the app's own wedge-probe,
+   *  driven from an eval so a test can confirm the bridge still answers after
+   *  a long idle window during which it sends no session frame of its own. */
   ping(timeoutMs = 5_000): Promise<number> {
     return new Promise((resolve, reject) => {
       const sentAt = Date.now();
@@ -1255,7 +1254,7 @@ export class RelayClient {
         reject(new Error(`Timed out waiting for pong (${timeoutMs}ms)`));
       }, timeoutMs);
       this.pongWaiters.push({ sentAt, resolve, timer });
-      this.sendSessionFrame({ type: "ping" });
+      this.sendSessionFrame({ type: "session:ping" });
     });
   }
 
@@ -1286,27 +1285,19 @@ export class RelayClient {
   // --- Binary receive path (plaintext; QUIC/TLS between leased endpoints is
   //     the confidentiality layer, so a frame's payload is consumed directly) ---
 
-  private handleBinaryFrame(data: ArrayBuffer | Uint8Array): void {
-    const buf = Buffer.from(data as Uint8Array);
-    let decoded: { header: { type: PeerFrameKind }; payload: Uint8Array };
-    try {
-      decoded = decodePeerFrame(buf) as { header: { type: PeerFrameKind }; payload: Uint8Array };
-    } catch {
-      return; // malformed frame — drop
-    }
+  private handleSessionRecord(data: Uint8Array): void {
     let obj: any;
     try {
-      obj = JSON.parse(Buffer.from(decoded.payload).toString("utf8"));
+      obj = JSON.parse(Buffer.from(data).toString("utf8"));
     } catch {
       return; // "plaintext-not-json"
     }
     if (!(obj && typeof obj === "object" && typeof obj.type === "string")) return; // "unrecognized-plaintext"
-    // The header `type` is the discriminator, not the JSON body —
-    // `ping`/`pong`/`session:*` exist as control-plane AbMessage literals too,
-    // so the body alone cannot tell a liveness frame from a control message.
-    if (decoded.header.type === "session") {
+    // `type` alone is the discriminator — a bare `ping`/`pong` is not in
+    // `SESSION_FRAME_TYPES`, so it falls through to the control plane.
+    if (isSessionFrameType(obj.type)) {
       this.handleSessionFrame(obj);
-    } else if (decoded.header.type === "message") {
+    } else {
       this.dispatchAbMessage(JSON.stringify(obj));
     }
   }
@@ -1314,13 +1305,13 @@ export class RelayClient {
   private handleSessionFrame(obj: { type: string; attemptId?: string }): void {
     this.sessionFrameLog.push(obj.type);
     switch (obj.type) {
-      case "established":
+      case "session:established":
         this.deliver(obj);
         return;
-      case "ping":
-        if (this.established) this.sendSessionFrame({ type: "pong" });
+      case "session:ping":
+        if (this.established) this.sendSessionFrame({ type: "session:pong" });
         return;
-      case "pong": {
+      case "session:pong": {
         const waiter = this.pongWaiters.shift();
         if (waiter) {
           clearTimeout(waiter.timer);
@@ -1328,7 +1319,7 @@ export class RelayClient {
         }
         return;
       }
-      case "session-takeover":
+      case "session:takeover":
         // Sent by the bridge to a session it is about to tear down. A bridge
         // now keeps one session per app device, so the only producer left is
         // capacity eviction past that cap. Deliver it like any other session
@@ -1337,7 +1328,7 @@ export class RelayClient {
         this.deliver(obj);
         return;
       default:
-        return; // unexpected session frame — drop (covers a stale "credit")
+        return; // session:hello: this client never receives one (app-> bridge only)
     }
   }
 
@@ -1385,9 +1376,9 @@ export class RelayClient {
    * Establish the native session with the agent through the peer connection.
    *
    * Phone perspective: send a plaintext `session:hello { attemptId,
-   * capabilities }` on the control channel and resolve once `established
-   * { attemptId }` comes back with a matching id. QUIC/TLS between the
-   * lease-authorized endpoints is the confidentiality layer now, so there is
+   * capabilities }` on the control channel and resolve once
+   * `session:established { attemptId }` comes back with a matching id.
+   * QUIC/TLS between the lease-authorized endpoints is the confidentiality layer now, so there is
    * no key derivation or confirm tag — the bridge's lease re-check on the
    * hello is what authorizes this session.
    */
@@ -1427,7 +1418,7 @@ export class RelayClient {
     if (!opts.omitTerminalFramesV1) capabilities.terminalFramesV1 = true;
 
     const establishedP = this.waitFor(
-      (m: any) => m.type === "established" && m.attemptId === attemptId,
+      (m: any) => m.type === "session:established" && m.attemptId === attemptId,
       timeoutMs,
     );
     this.sendSessionFrame({ type: "session:hello", attemptId, capabilities });
@@ -1682,19 +1673,18 @@ export class RelayClient {
     this.sendControlMessage(msg);
   }
 
-  /** Write the bare JSON of one control-plane `AbMessage` as a `"message"`-kind
-   *  peer frame, with no envelope. Project traffic never shares this path
-   *  (Stage A wave A4): it rides its own QUIC stream via `sendOnStream`/
-   *  `writeProjectRecord`. */
+  /** Write the bare JSON of one control-plane `AbMessage` as a session-stream
+   *  record. Project traffic never shares this path (Stage A wave A4): it
+   *  rides its own QUIC stream via `sendOnStream`/`writeProjectRecord`. */
   private sendControlMessage(msg: unknown): void {
     if (!this.established || !this.nativePeerId) throw new Error("Native session is not established");
-    this.sendBinary(encodePeerFrame({ type: "message" }, Buffer.from(JSON.stringify(msg), "utf8")));
+    this.sendBinary(Buffer.from(JSON.stringify(msg), "utf8"));
   }
 
-  /** Send one bare session frame (`session:hello`, `ping`, `pong`, …) as a
-   *  `"session"`-kind peer frame. */
+  /** Send one bare session frame (`session:hello`, `session:ping`,
+   *  `session:pong`, …) as a session-stream record. */
   private sendSessionFrame(obj: object): void {
-    this.sendBinary(encodePeerFrame({ type: "session" }, Buffer.from(JSON.stringify(obj), "utf8")));
+    this.sendBinary(Buffer.from(JSON.stringify(obj), "utf8"));
   }
 
   /** Send raw JSON to the central relay, including retired verbs in rejection tests. */

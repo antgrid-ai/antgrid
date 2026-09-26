@@ -6,10 +6,11 @@ import 'dart:typed_data';
 
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 
-class SentFrame {
-  final String kind;
+class SentRecord {
   final Uint8List payload;
-  SentFrame(this.kind, this.payload);
+  SentRecord(this.payload);
+  Map<String, dynamic> get json =>
+      jsonDecode(utf8.decode(payload)) as Map<String, dynamic>;
 }
 
 class FakeLiveRelay implements PeerLink, MultiStreamPeerLink {
@@ -20,13 +21,13 @@ class FakeLiveRelay implements PeerLink, MultiStreamPeerLink {
            ? PeerLinkState.ready
            : PeerLinkState.connecting;
 
-  final _messages = StreamController<IncomingPeerFrame>.broadcast();
+  final _messages = StreamController<IncomingSessionRecord>.broadcast();
   final _states = StreamController<PeerLinkState>.broadcast();
   final _errors = StreamController<PeerLinkFailure>.broadcast();
-  final sent = <SentFrame>[];
+  final sent = <SentRecord>[];
   PeerLinkState _state;
 
-  /// When set, the NEXT [sendFrame] call awaits this before completing (and
+  /// When set, the NEXT [sendRecord] call awaits this before completing (and
   /// clears itself) — lets a test hold one write in flight to observe what
   /// lands behind it on [MachineSession]'s send chain (e.g. a generation
   /// change reaching a queued write before its turn comes).
@@ -70,7 +71,7 @@ class FakeLiveRelay implements PeerLink, MultiStreamPeerLink {
   bool closeCalled = false;
 
   @override
-  Stream<IncomingPeerFrame> get messageStream => _messages.stream;
+  Stream<IncomingSessionRecord> get messageStream => _messages.stream;
   @override
   Stream<PeerLinkState> get payloadStateStream => _states.stream;
   @override
@@ -83,22 +84,22 @@ class FakeLiveRelay implements PeerLink, MultiStreamPeerLink {
   final RelayNetTap? netTap;
 
   @override
-  Future<PeerSendOutcome> sendFrame(String kind, Uint8List payload) async {
+  Future<PeerSendOutcome> sendRecord(Uint8List payload) async {
     final gate = sendGate;
     if (gate != null) {
       sendGate = null;
       await gate.future;
     }
-    sent.add(SentFrame(kind, payload));
+    sent.add(SentRecord(payload));
     return PeerSendOutcome.accepted;
   }
 
-  void inject(IncomingPeerFrame msg) => _messages.add(msg);
+  void inject(IncomingSessionRecord msg) => _messages.add(msg);
 
-  /// Injects one agent → app frame straight from a payload, skipping the
-  /// [IncomingPeerFrame] boilerplate for the common (bare `AbMessage`) case.
-  void injectFrame(Uint8List payload, {String kind = kPeerFrameMessage}) =>
-      inject(IncomingPeerFrame(kind: kind, payload: payload));
+  /// Injects one agent → app record straight from a payload, skipping the
+  /// [IncomingSessionRecord] boilerplate for the common case.
+  void injectRecord(Uint8List payload) =>
+      inject(IncomingSessionRecord(payload: payload));
 
   void setState(AppState state) {
     _state = switch (state.connectionState) {

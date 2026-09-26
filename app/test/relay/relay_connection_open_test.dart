@@ -40,7 +40,7 @@ class _RecordingRelay extends RelayService
   Stream<PeerLinkFailure> get failureStream => const Stream.empty();
   _RecordingRelay() : super(crypto: CryptoService());
 
-  final _messages = StreamController<IncomingPeerFrame>.broadcast();
+  final _messages = StreamController<IncomingSessionRecord>.broadcast();
   final _states = StreamController<AppState>.broadcast();
   final _presence = StreamController<bool>.broadcast();
   final _errors = StreamController<ErrorMessage>.broadcast();
@@ -51,7 +51,7 @@ class _RecordingRelay extends RelayService
   int failNextConnects = 0;
 
   @override
-  Stream<IncomingPeerFrame> get messageStream => _messages.stream;
+  Stream<IncomingSessionRecord> get messageStream => _messages.stream;
   @override
   Stream<AppState> get stateStream => _states.stream;
   @override
@@ -93,13 +93,13 @@ class _RecordingRelay extends RelayService
   }
 
   @override
-  Future<PeerSendOutcome> sendFrame(String kind, Uint8List payload) async {
+  Future<PeerSendOutcome> sendRecord(Uint8List payload) async {
     if (!isDispatchAllowed) return PeerSendOutcome.closed;
     sent.add(payload);
     return PeerSendOutcome.accepted;
   }
 
-  void inject(IncomingPeerFrame msg) => _messages.add(msg);
+  void inject(IncomingSessionRecord msg) => _messages.add(msg);
 
   void setState(AppState s) {
     _cur = s;
@@ -213,8 +213,7 @@ Future<StreamTransport> _openBound(
 /// before returning.
 Future<void> _advertiseReady(_RecordingRelay relay, String projectId) async {
   relay.inject(
-    IncomingPeerFrame(
-      kind: kPeerFrameMessage,
+    IncomingSessionRecord(
       payload: Uint8List.fromList(
         utf8.encode(
           jsonEncode({'type': 'stream-ready', 'projectId': projectId}),
@@ -266,11 +265,10 @@ Future<void> _completeFakeAgentHello(
   );
   final attemptId = hello['attemptId'] as String;
   relay.inject(
-    IncomingPeerFrame(
-      kind: kPeerFrameSession,
+    IncomingSessionRecord(
       payload: Uint8List.fromList(
         utf8.encode(
-          jsonEncode({'type': 'established', 'attemptId': attemptId}),
+          jsonEncode({'type': kSessionEstablished, 'attemptId': attemptId}),
         ),
       ),
     ),

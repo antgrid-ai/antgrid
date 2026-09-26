@@ -869,7 +869,7 @@ export class HostServer {
       // PEER now that a pre-establishment frame is no longer stopped by a
       // decrypt failure — any lease-authorized endpoint can reach this
       // dispatch with no session at all (see the pre-establishment drop in
-      // PeerSessionOwner.receivePeerFrame). Authorization is still the
+      // PeerSessionOwner.receiveSessionRecord). Authorization is still the
       // machine switch, applied per verb, and the asking session names
       // itself, which is what lets `project:start` answer from THAT device's
       // capabilities.

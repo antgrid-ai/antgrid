@@ -19,7 +19,7 @@ Future<StreamTransport> openReady(
   MachineSession session,
   String pid,
 ) async {
-  relay.injectFrame(
+  relay.injectRecord(
     encodeFromAgent(jsonEncode({'type': 'stream-ready', 'projectId': pid})),
   );
   await Future<void>.delayed(const Duration(milliseconds: 10));
@@ -128,7 +128,7 @@ void main() {
     // The bind resync: X reopens on its own (with backoff) and re-pulls its
     // durable-state snapshot once the fresh stream binds.
     await Future<void>.delayed(const Duration(milliseconds: 1100));
-    relay.injectFrame(
+    relay.injectRecord(
       encodeFromAgent(jsonEncode({'type': 'stream-ready', 'projectId': 'X'})),
     );
     await Future<void>.delayed(const Duration(milliseconds: 20));
@@ -312,7 +312,7 @@ void main() {
         .firstWhere((s) => s.open == const ProjectStreamOpen('X'))
         .end();
     await Future<void>.delayed(const Duration(milliseconds: 1100));
-    relay.injectFrame(
+    relay.injectRecord(
       encodeFromAgent(jsonEncode({'type': 'stream-ready', 'projectId': 'X'})),
     );
     await Future<void>.delayed(const Duration(milliseconds: 20));
@@ -374,7 +374,7 @@ void main() {
         await Future<void>.delayed(const Duration(milliseconds: 10));
       }
       sw.stop();
-      relay.injectFrame(
+      relay.injectRecord(
         encodeFromAgent(jsonEncode({'type': 'stream-ready', 'projectId': 'X'})),
       );
       await Future<void>.delayed(const Duration(milliseconds: 20));

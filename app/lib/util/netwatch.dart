@@ -14,8 +14,8 @@ import 'jsonl_sink.dart';
 /// lockstep BY HAND so the two JSONL streams merge with no translation step —
 /// `antgrid watch --join` reads one file and one SSE snapshot and pairs them on
 /// [frameId] alone. Same hand-mirroring convention as
-/// `kCheckoutVariableMessageTypes` and `FRAME_VERSION`; the two drifting apart
-/// is silent, and shows up only as a join that matches nothing.
+/// `kCheckoutVariableMessageTypes` and `kSessionFrameTypes`; the two drifting
+/// apart is silent, and shows up only as a join that matches nothing.
 ///
 /// This lives in `app/` and NOT in `packages/antgrid_relay_client` on purpose.
 /// That package is Apache-2.0 and the boundary is one-way: the schema, the ring

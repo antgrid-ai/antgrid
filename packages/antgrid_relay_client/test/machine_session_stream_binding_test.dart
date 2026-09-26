@@ -37,14 +37,16 @@ void main() {
     await relay.closeStreams();
   });
 
-  /// Every control-plane message sent so far, decoded. There is no envelope
-  /// any more — a session-stream record with the `message` kind is exactly
-  /// one bare `AbMessage` (§1.1).
+  /// Every control-plane message sent so far, decoded. A session-stream
+  /// record is exactly one bare `AbMessage`
+  /// unless its `type` is one of the five session frames (§1.1).
   Future<List<Map<String, dynamic>>> sentEnvelopes() async {
     final out = <Map<String, dynamic>>[];
     for (final f in relay.sent) {
-      if (f.kind != kPeerFrameMessage) continue;
-      out.add(jsonDecode(decodeFromPhone(f.payload)) as Map<String, dynamic>);
+      final decoded =
+          jsonDecode(decodeFromPhone(f.payload)) as Map<String, dynamic>;
+      if (isSessionFrameType(decoded['type'])) continue;
+      out.add(decoded);
     }
     return out;
   }
@@ -60,7 +62,7 @@ void main() {
   }
 
   Future<void> injectControl(Map<String, dynamic> m) async {
-    relay.injectFrame(encodeFromAgent(jsonEncode(m)));
+    relay.injectRecord(encodeFromAgent(jsonEncode(m)));
   }
 
   /// Completes `openProject`'s native-stream leg: takes the just-opened
@@ -318,7 +320,7 @@ void main() {
       await cold.ensureEstablished();
       await Future<void>.delayed(const Duration(milliseconds: 20));
 
-      coldRelay.injectFrame(
+      coldRelay.injectRecord(
         encodeFromAgent(
           jsonEncode({'type': 'stream-ready', 'projectId': 'proj-d'}),
         ),

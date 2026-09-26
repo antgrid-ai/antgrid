@@ -176,7 +176,7 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
   // instant is NOT when the service is necessarily resolved, and it is not the
   // only time the session this view must hydrate against changes:
   //
-  //  - A reconnect (session-takeover → "take back", a supervisor block the user
+  //  - A reconnect (session:takeover → "take back", a supervisor block the user
   //    retried) invalidates `projectSessionProvider`, which builds a WHOLE new
   //    ProjectSession: new transport, new AgentSessionService, empty transcript.
   //    Its predecessor's hydrator dies with its transport.

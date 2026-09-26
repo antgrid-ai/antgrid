@@ -33,7 +33,7 @@ class TestPayloadLink implements PeerLink, MultiStreamPeerLink {
   @override
   bool get isDispatchAllowed => true;
   @override
-  Stream<IncomingPeerFrame> get messageStream => carrier.messageStream;
+  Stream<IncomingSessionRecord> get messageStream => carrier.messageStream;
   @override
   Stream<PeerLinkState> get payloadStateStream => carrier.payloadStateStream;
   @override
@@ -43,8 +43,8 @@ class TestPayloadLink implements PeerLink, MultiStreamPeerLink {
   @override
   PeerLinkDiagnostic? get netTap => carrier.netTap;
   @override
-  Future<PeerSendOutcome> sendFrame(String kind, Uint8List payload) =>
-      carrier.sendFrame(kind, payload);
+  Future<PeerSendOutcome> sendRecord(Uint8List payload) =>
+      carrier.sendRecord(payload);
   @override
   Future<void> close() async {}
 
@@ -77,7 +77,7 @@ class _NoopPayloadLink implements PeerLink {
   @override
   bool get isDispatchAllowed => true;
   @override
-  Stream<IncomingPeerFrame> get messageStream => const Stream.empty();
+  Stream<IncomingSessionRecord> get messageStream => const Stream.empty();
   @override
   Stream<PeerLinkState> get payloadStateStream => const Stream.empty();
   @override
@@ -87,7 +87,7 @@ class _NoopPayloadLink implements PeerLink {
   @override
   PeerLinkDiagnostic? get netTap => null;
   @override
-  Future<PeerSendOutcome> sendFrame(String kind, Uint8List payload) async =>
+  Future<PeerSendOutcome> sendRecord(Uint8List payload) async =>
       PeerSendOutcome.accepted;
   @override
   Future<void> close() async {}

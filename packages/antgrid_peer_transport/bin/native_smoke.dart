@@ -86,39 +86,31 @@ Future<void> main(List<String> args) async {
       incoming.ignore();
       final failure = link.failureStream.first;
       failure.ignore();
-      final sent = await link.sendFrame(
-        kPeerFrameMessage,
-        Uint8List.fromList([1, 2, 3]),
-      );
+      final sent = await link.sendRecord(Uint8List.fromList([1, 2, 3]));
       if (sent != PeerSendOutcome.accepted)
         throw StateError('native write failed');
       final (send, recv) = await stream;
       await _expectSessionOpen(recv);
       final prefix = await recv.readExact(4);
       final size = ByteData.sublistView(prefix).getUint32(0, Endian.big);
-      final frame = decodePeerFrame(await recv.readExact(size));
-      if (frame.header['type'] != kPeerFrameMessage) {
-        throw StateError('peer frame mismatch');
-      }
+      final payload = await recv.readExact(size);
       if (scenario == 'echo') {
-        final response = encodePeerFrame(
-          {'type': kPeerFrameMessage},
-          frame.payload,
-        );
         final length = (ByteData(
           4,
-        )..setUint32(0, response.length, Endian.big)).buffer.asUint8List();
+        )..setUint32(0, payload.length, Endian.big)).buffer.asUint8List();
         await send.writeAll(Uint8List.sublistView(length, 0, 1));
         await send.writeAll(Uint8List.sublistView(length, 1));
-        await send.writeAll(response);
+        await send.writeAll(payload);
         final message = await incoming.timeout(const Duration(seconds: 5));
         if (message.payload.join(',') != '1,2,3')
           throw StateError('echo mismatch');
       } else if (scenario == 'oversize') {
         await send.writeAll(
-          (ByteData(
-            4,
-          )..setUint32(0, 0xffffffff, Endian.big)).buffer.asUint8List(),
+          (ByteData(4)..setUint32(
+            0,
+            kMaxTransferBytes + 1,
+            Endian.big,
+          )).buffer.asUint8List(),
         );
         if ((await failure.timeout(const Duration(seconds: 5))).code !=
             'INVALID_RECORD_LENGTH')
@@ -166,15 +158,11 @@ Future<void> main(List<String> args) async {
 
         // The refusal must cost only the probe stream: the session stream
         // still carries a full round trip, and no failure fires from it.
-        final response = encodePeerFrame(
-          {'type': kPeerFrameMessage},
-          frame.payload,
-        );
         final length = (ByteData(
           4,
-        )..setUint32(0, response.length, Endian.big)).buffer.asUint8List();
+        )..setUint32(0, payload.length, Endian.big)).buffer.asUint8List();
         await send.writeAll(length);
-        await send.writeAll(response);
+        await send.writeAll(payload);
         final message = await incoming.timeout(const Duration(seconds: 5));
         if (message.payload.join(',') != '1,2,3')
           throw StateError('echo mismatch after stream refusal');
@@ -192,8 +180,7 @@ Future<void> main(List<String> args) async {
           throw StateError('extra uni stream accepted');
       } else {
         allowed = false;
-        if (await link.sendFrame(kPeerFrameMessage, Uint8List(1)) !=
-            PeerSendOutcome.closed)
+        if (await link.sendRecord(Uint8List(1)) != PeerSendOutcome.closed)
           throw StateError('revoked write admitted');
       }
       await link.close();

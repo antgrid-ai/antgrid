@@ -198,6 +198,21 @@ function selected(event: NetwatchEvent, opts: NetwatchCliOptions): boolean {
 }
 
 /**
+ * The transport narrowing a JOIN applies. A join's own file (`--join`) is
+ * always an app-side capture, and either side's capture may carry native
+ * `iroh` rows, so a join with no flag must keep `iroh` rows
+ * alongside `relay` ones — unlike the live stream's `selected`, whose default
+ * of "no flag = both" already includes them. `--local` still exists because a
+ * DESKTOP capture can also carry loopback frames; it has no counterpart in an
+ * app-side `--join` file, but is honoured here for symmetry.
+ */
+export function joinSelected(event: NetwatchEvent, opts: NetwatchCliOptions): boolean {
+  if (opts.local) return transportOf(event) === "local";
+  if (opts.relay) return transportOf(event) === "relay";
+  return transportOf(event) !== "local";
+}
+
+/**
  * The frame's own plaintext, on its own indented line under the row.
  *
  * It goes through the same sanitizer as every other peer-supplied field — a
@@ -291,7 +306,7 @@ function renderJoinedRow(
 
 /** Reads an app-side capture. Tolerates a partial trailing line: the writer
  *  appends in batches and may be running while this reads. */
-function readAppCapture(path: string): NetwatchEvent[] | null {
+export function readAppCapture(path: string): NetwatchEvent[] | null {
   let raw: string;
   try {
     raw = readFileSync(path, "utf8");
@@ -493,14 +508,8 @@ async function runNetwatchJoin(
   const bridge = await fetchBridgeSnapshot(host.controlPort, host.token, opts.limit ?? 4096);
   if (!bridge) return 1;
 
-  // A join with no transport named is RELAY, not both — the one place the
-  // filter's default differs from the live stream's. An app-side capture file
-  // is relay traffic by construction, so a loopback frame in the host's half
-  // has no counterpart to find and would be verdicted `lost` on every run of a
-  // machine that also has a desktop app attached.
-  const scoped: NetwatchCliOptions = opts.local ? opts : { ...opts, relay: true };
-  const appRows = app.filter((e) => selected(e, scoped));
-  const bridgeRows = bridge.filter((e) => selected(e, scoped));
+  const appRows = app.filter((e) => joinSelected(e, opts));
+  const bridgeRows = bridge.filter((e) => joinSelected(e, opts));
 
   const color = Boolean(process.stdout.isTTY);
   const { rows, overlap } = joinCaptures(appRows, bridgeRows);
@@ -534,11 +543,12 @@ async function runNetwatchJoin(
   }
 
   if (opts.json) return 0;
+  const scope = opts.local ? "loopback" : opts.relay ? "relay" : "relay and native (iroh)";
   console.error("");
   console.error(
     paint(
       `# ${appRows.length} app events joined against ${bridgeRows.length} host events ` +
-        `(${scoped.local ? "loopback" : "relay"} frames only)`,
+        `(${scope} frames only)`,
       "dim",
       color,
     ),

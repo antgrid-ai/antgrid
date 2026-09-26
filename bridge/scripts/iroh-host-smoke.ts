@@ -5,8 +5,6 @@ import {
   PEER_ALPN,
   STREAM_PROJECT_BRIDGE_RECORD_MAX_BYTES,
   STREAM_TERMINAL_BRIDGE_RECORD_MAX_BYTES,
-  decodePeerFrame,
-  encodePeerFrame,
   encodeStreamOpen,
 } from "antgrid-wire";
 import { StreamRecordReader, StreamRecordWriter } from "../src/peer/stream-records";
@@ -57,22 +55,25 @@ try {
   // carries anything else, the session stream included.
   void sessionWriter.send(encodeStreamOpen({ kind: "session" }));
   const attemptId = randomUUID();
-  // A4: the session stream carries only machine control-plane frames now —
+  // The session stream carries only machine control-plane frames —
   // terminal:frame (and every other project/terminal record) rides its own
-  // QUIC stream, so this loop needs no ack side-channel of its own.
-  const send = (value: object) => sessionWriter!.send(encodePeerFrame({ type: "message" }, Buffer.from(JSON.stringify(value), "utf8")));
-  const sendHello = (value: object) => sessionWriter!.send(encodePeerFrame({ type: "session" }, Buffer.from(JSON.stringify(value), "utf8")));
+  // QUIC stream, so this loop needs no ack side-channel of its own. A
+  // session-stream record is bare JSON, byte for byte the shape of a project
+  // record.
+  const send = (value: object) => sessionWriter!.send(Buffer.from(JSON.stringify(value), "utf8"));
+  const sendHello = send;
   const read = async (predicate: (value: any) => boolean): Promise<any> => {
     for (;;) {
-      const frame = decodePeerFrame(await sessionReader.read());
-      const message = JSON.parse(Buffer.from(frame.payload).toString("utf8"));
+      const message = JSON.parse(Buffer.from(await sessionReader.read()).toString("utf8"));
       if (predicate(message)) return message;
     }
   };
   // QUIC/TLS between the lease-authorized endpoints is the confidentiality
   // layer post Stage-B; the hello is plaintext and carries no transcript.
   await sendHello({ type: "session:hello", attemptId, capabilities: { checkoutRouting: true, pullsTree: true, terminalFramesV1: true } });
-  await read((value) => value.type === "established" && value.attemptId === attemptId);
+  await read((value) => value.type === "session:established" && value.attemptId === attemptId);
+  await send({ type: "session:ping" });
+  await read((value) => value.type === "session:pong");
   const nativeConnectionId = connection.stableId();
   fixture.takeCentralOffline();
   for (const project of projects) {

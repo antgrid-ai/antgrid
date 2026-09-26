@@ -316,7 +316,7 @@ export class DartAppClient {
   }
   /**
    * Drive the session to `established`: a plaintext `session:hello` on the
-   * native payload, confirmed by the agent's `established`. QUIC/TLS between
+   * native payload, confirmed by the agent's `session:established`. QUIC/TLS between
    * the leased endpoints is the confidentiality layer, so there is no agent
    * key to pin. `machineDeviceId` is the agent's bare deviceUuid: with
    * pairing gone the relay hands out no peer id, so the phone addresses

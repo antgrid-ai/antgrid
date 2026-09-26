@@ -1,12 +1,9 @@
 // Generates the cross-language native peer transport pin.
 // Run: cd packages/antgrid-wire && bun run gen:peer-vectors
+import { createHash } from "node:crypto";
 import {
   ENDPOINT_CHALLENGE_MS,
-  FIXED_PREFIX,
-  FRAME_VERSION,
-  FrameKind,
   MAX_TRANSFER_BYTES,
-  MAX_HEADER_LEN,
   PEER_ALPN,
   PEER_QUIC_KEEP_ALIVE_INTERVAL_MS,
   PEER_QUIC_MAX_IDLE_TIMEOUT_MS,
@@ -19,6 +16,11 @@ import {
   PEER_MAX_RELAY_URLS,
   PEER_REFRESH_MS,
   PEER_SELECTION_MS,
+  SESSION_FRAME_TYPES,
+  SessionFrameTypeSchema,
+  SessionPingFrame,
+  SessionPongFrame,
+  isSessionFrameType,
   STREAM_MAX_BIDI_STREAMS_PER_CONNECTION,
   STREAM_MAX_PENDING_OPENS_PER_PEER,
   STREAM_MAX_PROJECTS_PER_PEER,
@@ -41,7 +43,6 @@ import {
   TUNNEL_RECORD_TAG_WS_BINARY,
   StreamOpen,
   StreamRefused,
-  encodePeerFrame,
 } from "../src/index";
 
 // The bridge's own `streamLabelOf` (`bridge/src/peer/stream-dispatch.ts`) is
@@ -58,40 +59,65 @@ function expectedLabel(open: StreamOpen): { kind: string; id: string } {
   }
 }
 
-export function buildPeerTransportVectors() {
+/** `sha256(json utf8).hex.slice(0, 24)` — the same derivation as the bridge's
+ *  `frameIdFor`/the app's `frameIdOf`. This package cannot import either (one
+ *  is ELv2, the other Dart), so the pin is computed locally instead. */
+function frameIdOfJson(json: string): string {
+  return createHash("sha256").update(json, "utf8").digest("hex").slice(0, 24);
+}
+
+/** `[u32 BE len(json)][UTF-8 json]` — the session-stream record shape. */
+function sessionRecordHex(json: string): string {
+  const body = Buffer.from(json, "utf8");
+  const out = Buffer.alloc(4 + body.length);
+  out.writeUInt32BE(body.length, 0);
+  body.copy(out, 4);
+  return out.toString("hex");
+}
+
+/** hello/established have no exported schema of their own in this package
+ *  (their `capabilities` shape is ELv2 — see `bridge/src/protocol.ts`), so
+ *  their samples are checked shallowly here instead. */
+function assertHelloOrEstablishedShape(name: string, json: string): void {
+  const parsed = JSON.parse(json) as { type?: unknown; attemptId?: unknown };
+  if (typeof parsed.attemptId !== "string" || parsed.attemptId.length < 1) {
+    throw new Error(`session-record vector ${name} needs a non-empty attemptId`);
+  }
+}
+
+function buildSessionRecordVectors() {
   const samples = [
-    {
-      name: "message",
-      header: { type: "message" } as const,
-      kind: FrameKind.message,
-      payloadHex: "deadbeef",
-    },
-    {
-      name: "session",
-      header: { type: "session" } as const,
-      kind: FrameKind.message,
-      payloadHex: "000102ff",
-    },
-  ].map((sample) => ({
-    ...sample,
-    frameHex: Buffer.from(
-      encodePeerFrame(sample.header, Buffer.from(sample.payloadHex, "hex")),
-    ).toString("hex"),
-  }));
+    { name: "hello", json: JSON.stringify({ type: "session:hello", attemptId: "a1" }) },
+    { name: "established", json: JSON.stringify({ type: "session:established", attemptId: "a1" }) },
+    { name: "ping", json: JSON.stringify(SessionPingFrame.parse({ type: "session:ping" })) },
+    { name: "pong", json: JSON.stringify(SessionPongFrame.parse({ type: "session:pong" })) },
+    { name: "control-ping", json: JSON.stringify({ type: "ping", id: "m1", timestamp: 0 }) },
+  ].map((sample) => {
+    const type = (JSON.parse(sample.json) as { type: string }).type;
+    if (sample.name === "hello" || sample.name === "established") assertHelloOrEstablishedShape(sample.name, sample.json);
+    else if (isSessionFrameType(type)) SessionFrameTypeSchema.parse(type);
+    return {
+      ...sample,
+      session: isSessionFrameType(type),
+      recordHex: sessionRecordHex(sample.json),
+      frameId: frameIdOfJson(sample.json),
+    };
+  });
 
   return {
+    maxAppRecordBytes: PEER_MAX_RECORD_BYTES,
+    maxBridgeRecordBytes: PEER_MAX_BRIDGE_RECORD_BYTES,
+    types: SESSION_FRAME_TYPES,
+    samples,
+  };
+}
+
+export function buildPeerTransportVectors() {
+  return {
     comment:
-      "Peer transport v4 cross-language pin. Regenerate: cd packages/antgrid-wire && bun run gen:peer-vectors",
-    framing: {
-      version: FRAME_VERSION,
-      fixedPrefixBytes: FIXED_PREFIX,
-      maxHeaderBytes: MAX_HEADER_LEN,
-      maxPayloadBytes: MAX_TRANSFER_BYTES,
-      maxRecordBytes: PEER_MAX_RECORD_BYTES,
-      maxBridgeRecordBytes: PEER_MAX_BRIDGE_RECORD_BYTES,
-      kinds: FrameKind,
-      samples,
-    },
+      "Native peer transport cross-language pin (session-record shape). " +
+      "Regenerate: cd packages/antgrid-wire && bun run gen:peer-vectors",
+    sessionRecords: buildSessionRecordVectors(),
     native: {
       alpn: PEER_ALPN,
       leaseMs: PEER_LEASE_MS,

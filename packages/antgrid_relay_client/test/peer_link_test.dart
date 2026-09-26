@@ -11,7 +11,7 @@ class _Peer implements PeerLink {
   final paths = StreamController<PeerPath>.broadcast(sync: true);
 
   @override
-  Stream<IncomingPeerFrame> get messageStream => const Stream.empty();
+  Stream<IncomingSessionRecord> get messageStream => const Stream.empty();
   @override
   Stream<PeerLinkState> get payloadStateStream => states.stream;
   @override
@@ -23,7 +23,7 @@ class _Peer implements PeerLink {
   @override
   PeerLinkDiagnostic? get netTap => null;
   @override
-  Future<PeerSendOutcome> sendFrame(String kind, Uint8List payload) async =>
+  Future<PeerSendOutcome> sendRecord(Uint8List payload) async =>
       PeerSendOutcome.accepted;
   @override
   Future<void> close() async {

@@ -65,8 +65,7 @@ void main() {
       });
       await pumpEventQueue();
       link.inject(
-        IncomingPeerFrame(
-          kind: kPeerFrameMessage,
+        IncomingSessionRecord(
           payload: Uint8List.fromList(
             utf8.encode(
               jsonEncode({'type': 'stream-ready', 'projectId': projectId}),
@@ -395,14 +394,14 @@ Future<void> pumpEventQueue() =>
 /// A [PeerLink] that does NOT also implement [MultiStreamPeerLink] — see
 /// `tunnel_stream_test.dart`'s identical fixture.
 class _PlainPeerLink implements PeerLink {
-  final _messages = StreamController<IncomingPeerFrame>.broadcast();
+  final _messages = StreamController<IncomingSessionRecord>.broadcast();
   final _states = StreamController<PeerLinkState>.broadcast();
   final _failures = StreamController<PeerLinkFailure>.broadcast();
 
   @override
   bool get isDispatchAllowed => true;
   @override
-  Stream<IncomingPeerFrame> get messageStream => _messages.stream;
+  Stream<IncomingSessionRecord> get messageStream => _messages.stream;
   @override
   Stream<PeerLinkState> get payloadStateStream => _states.stream;
   @override
@@ -413,7 +412,7 @@ class _PlainPeerLink implements PeerLink {
   PeerLinkDiagnostic? get netTap => null;
 
   @override
-  Future<PeerSendOutcome> sendFrame(String kind, Uint8List payload) async =>
+  Future<PeerSendOutcome> sendRecord(Uint8List payload) async =>
       PeerSendOutcome.accepted;
 
   @override
@@ -423,7 +422,7 @@ class _PlainPeerLink implements PeerLink {
 class _FakeMultiStreamLink implements PeerLink, MultiStreamPeerLink {
   _FakeMultiStreamLink({PeerLinkDiagnostic? netTap}) : _netTap = netTap;
 
-  final _messages = StreamController<IncomingPeerFrame>.broadcast();
+  final _messages = StreamController<IncomingSessionRecord>.broadcast();
   final _states = StreamController<PeerLinkState>.broadcast();
   final _failures = StreamController<PeerLinkFailure>.broadcast();
   final PeerLinkDiagnostic? _netTap;
@@ -440,7 +439,7 @@ class _FakeMultiStreamLink implements PeerLink, MultiStreamPeerLink {
   bool get isDispatchAllowed => true;
 
   @override
-  Stream<IncomingPeerFrame> get messageStream => _messages.stream;
+  Stream<IncomingSessionRecord> get messageStream => _messages.stream;
   @override
   Stream<PeerLinkState> get payloadStateStream => _states.stream;
   @override
@@ -451,13 +450,13 @@ class _FakeMultiStreamLink implements PeerLink, MultiStreamPeerLink {
   PeerLinkDiagnostic? get netTap => _netTap;
 
   @override
-  Future<PeerSendOutcome> sendFrame(String kind, Uint8List payload) async =>
+  Future<PeerSendOutcome> sendRecord(Uint8List payload) async =>
       PeerSendOutcome.accepted;
 
   @override
   Future<void> close() async {}
 
-  void inject(IncomingPeerFrame frame) => _messages.add(frame);
+  void inject(IncomingSessionRecord frame) => _messages.add(frame);
 
   @override
   Future<PeerStream> openStream(

@@ -20,7 +20,7 @@ class _Payload implements PeerLink {
   @override
   bool get isDispatchAllowed => !closed;
   @override
-  Stream<IncomingPeerFrame> get messageStream => const Stream.empty();
+  Stream<IncomingSessionRecord> get messageStream => const Stream.empty();
   @override
   Stream<PeerLinkState> get payloadStateStream => states.stream;
   @override
@@ -30,7 +30,7 @@ class _Payload implements PeerLink {
   @override
   PeerLinkDiagnostic? get netTap => null;
   @override
-  Future<PeerSendOutcome> sendFrame(String kind, Uint8List payload) async =>
+  Future<PeerSendOutcome> sendRecord(Uint8List payload) async =>
       closed ? PeerSendOutcome.closed : PeerSendOutcome.accepted;
   @override
   Future<void> close() async {

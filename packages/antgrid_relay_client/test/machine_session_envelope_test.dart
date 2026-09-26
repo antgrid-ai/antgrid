@@ -1,9 +1,7 @@
 // MachineSession session-stream wire coverage. Every record is one bare
-// `AbMessage` or session frame, and the peer-frame header's `type` — `kPeerFrameSession`
-// or `kPeerFrameMessage` — is what tells a session frame (ping/pong/hello)
-// from a control-plane one, not anything inside the JSON (since `ping` is
-// both a session frame literal AND could in principle be sent as a bare
-// AbMessage on the message kind).
+// JSON body — a session frame or a control-plane `AbMessage`, told apart by
+// the JSON `type` alone (`isSessionFrameType`). A bare `ping`/`pong` is not a
+// session-frame name, so a record naming it is control plane, never liveness.
 import 'dart:async';
 import 'dart:convert';
 
@@ -43,12 +41,12 @@ void main() {
     await relay.closeStreams();
   });
 
-  test('E1: a message-kind bare AbMessage dispatches on the control plane', () async {
+  test('E1: a bare AbMessage dispatches on the control plane', () async {
     final control = session.control;
     final seen = <Map<String, dynamic>>[];
     final sub = control.messages.listen((m) => seen.add(m.json));
 
-    relay.injectFrame(
+    relay.injectRecord(
       encodeFromAgent(jsonEncode({'type': 'project:list', 'projects': []})),
     );
     await Future<void>.delayed(const Duration(milliseconds: 20));
@@ -58,8 +56,8 @@ void main() {
     await sub.cancel();
   });
 
-  test('E2: a message-kind `{m: …}` body is dropped unrecognized-plaintext', () async {
-    relay.injectFrame(
+  test('E2: a `{m: …}` body is dropped unrecognized-plaintext', () async {
+    relay.injectRecord(
       encodeFromAgent(
         jsonEncode({
           'm': {'type': 'project:list'},
@@ -72,67 +70,51 @@ void main() {
     expect(drop['reason'], 'unrecognized-plaintext');
   });
 
-  test('E3: a session-kind ping is answered with a session-kind pong', () async {
+  test(
+    'E3: an old-name ping from the bridge is control plane, not a session '
+    'frame — no session:pong answers it',
+    () async {
+      final control = session.control;
+      final seen = <Map<String, dynamic>>[];
+      final sub = control.messages.listen((m) => seen.add(m.json));
+      // Let the control transport's own auto `state.snapshot` pull land
+      // first, so it isn't counted as a reply to the ping below.
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      final sentBefore = relay.sent.length;
+
+      relay.injectRecord(encodeFromAgent(jsonEncode({'type': 'ping'})));
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      expect(
+        seen.map((j) => j['type']),
+        contains('ping'),
+        reason: 'an old-name ping is an ordinary control-plane AbMessage',
+      );
+      expect(
+        relay.sent.skip(sentBefore),
+        isEmpty,
+        reason: 'only a session:ping triggers the liveness pong',
+      );
+      await sub.cancel();
+    },
+  );
+
+  test('E4: a session:ping is answered with exactly one session:pong', () async {
     final sentBefore = relay.sent.length;
-    relay.injectFrame(
-      encodeFromAgent(jsonEncode({'type': 'ping'})),
-      kind: kPeerFrameSession,
-    );
+    relay.injectRecord(encodeFromAgent(jsonEncode({'type': kSessionPing})));
     await Future<void>.delayed(const Duration(milliseconds: 20));
 
     final pongs = relay.sent
         .skip(sentBefore)
-        .where(
-          (f) =>
-              f.kind == kPeerFrameSession &&
-              jsonDecode(decodeFromPhone(f.payload))['type'] == 'pong',
-        );
+        .where((f) => f.json['type'] == kSessionPong);
     expect(pongs, hasLength(1));
   });
 
-  test('E4: a message-kind ping AbMessage is not answered as liveness', () async {
-    final control = session.control;
-    final seen = <Map<String, dynamic>>[];
-    final sub = control.messages.listen((m) => seen.add(m.json));
-    // Let attaching the control transport's own auto `state.snapshot` pull
-    // land first, so it doesn't get counted as a reply to the ping below.
-    await Future<void>.delayed(const Duration(milliseconds: 20));
-    final sentBefore = relay.sent.length;
-
-    relay.injectFrame(encodeFromAgent(jsonEncode({'type': 'ping'})));
-    await Future<void>.delayed(const Duration(milliseconds: 20));
-
-    expect(
-      seen.map((j) => j['type']),
-      contains('ping'),
-      reason: 'a message-kind ping is an ordinary control-plane AbMessage',
-    );
-    expect(
-      relay.sent.skip(sentBefore),
-      isEmpty,
-      reason: 'only a SESSION-kind ping triggers the liveness pong',
-    );
-    await sub.cancel();
-  });
-
-  test('E5: a session-kind credit is dropped', () async {
-    relay.injectFrame(
-      encodeFromAgent(jsonEncode({'type': 'credit', 'bytes': 1024})),
-      kind: kPeerFrameSession,
-    );
-    await Future<void>.delayed(const Duration(milliseconds: 20));
-
-    final drop = capture.drops.single;
-    expect(drop['reason'], 'unknown-session-frame');
-  });
-
-  test('E6: sendOnSession writes the bare message with the message kind', () async {
+  test('E6: sendOnSession writes the bare message with no header', () async {
     await session.sendOnSession({'type': 'project:list'}, 'control');
 
     expect(relay.sent, hasLength(1));
-    expect(relay.sent.single.kind, kPeerFrameMessage);
-    final json = jsonDecode(decodeFromPhone(relay.sent.single.payload));
-    expect(json, {'type': 'project:list'});
+    expect(relay.sent.single.json, {'type': 'project:list'});
   });
 
   test('E7: a send whose link write throws does not wedge the sends behind it', () async {
@@ -145,6 +127,6 @@ void main() {
     await expectLater(first, throwsStateError);
     await second.timeout(const Duration(seconds: 2));
     expect(relay.sent, hasLength(1));
-    expect(jsonDecode(decodeFromPhone(relay.sent.single.payload)), {'type': 'agent:list'});
+    expect(relay.sent.single.json, {'type': 'agent:list'});
   });
 }

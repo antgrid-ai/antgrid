@@ -94,28 +94,29 @@ test("a tunnel:http-request on the session stream after establishment reaches no
   client.establish(PHONE_ID, { attemptId: "attempt-a" });
   const tunnelReq = { type: "tunnel:http-request", requestId: "req-1", port: 3000, method: "GET", path: "/" };
 
-  expect(() => client.sendFromPeer(PHONE_ID, tunnelReq, "message")).not.toThrow();
+  expect(() => client.sendFromPeer(PHONE_ID, tunnelReq)).not.toThrow();
 });
 
-test("ping is answered with pong", () => {
-  // The liveness ping/pong lives on the `session` kind (handleSessionFrame);
-  // the same AbMessage sent as a `message` is ordinary control-plane traffic
-  // and gets no automatic reply (see peer-session-hello.test.ts's H4).
+test("session:ping is answered with session:pong", () => {
+  // Liveness ping/pong are the `session:ping`/`session:pong` names
+  // (handleSessionFrame); the old bare `ping` AbMessage is ordinary
+  // control-plane traffic and gets no automatic reply (see
+  // peer-session-hello.test.ts's H4).
   const client = freshClient();
   client.establish(PHONE_ID, { attemptId: "attempt-a" });
 
-  client.sendFromPeer(PHONE_ID, { type: "ping" }, "session");
+  client.sendFromPeer(PHONE_ID, { type: "session:ping" });
 
-  expect(client.readToPeer(PHONE_ID)).toEqual({ type: "pong" });
+  expect(client.readToPeer(PHONE_ID)).toEqual({ type: "session:pong" });
 });
 
-test("a pong from the app changes nothing and is not answered", () => {
+test("a session:pong from the app changes nothing and is not answered", () => {
   // The bridge never pings (QUIC keep-alive/idle is the liveness layer), so a
   // pong reaching it carries no state to update and earns no reply.
   const client = freshClient();
   client.establish(PHONE_ID, { attemptId: "attempt-a" });
 
-  client.sendFromPeer(PHONE_ID, { type: "pong" }, "session");
+  client.sendFromPeer(PHONE_ID, { type: "session:pong" });
 
   expect(client.sentTo(PHONE_ID)).toHaveLength(0);
   expect(client.peerSession(PHONE_ID)).not.toBeNull();
@@ -131,14 +132,14 @@ test("establishing a session schedules no interval and sends no ping", () => {
   const interval = spyOn(globalThis, "setInterval");
   try {
     (client as any).admitPeer(PHONE_ID, ed25519Pair().pubB64);
-    client.sendFromPeer(PHONE_ID, { type: "session:hello", attemptId: "attempt-a" }, "session");
+    client.sendFromPeer(PHONE_ID, { type: "session:hello", attemptId: "attempt-a" });
     expect(interval).not.toHaveBeenCalled();
   } finally {
     interval.mockRestore();
   }
   const sentTypes = client.sentTo(PHONE_ID).map((payload) => (JSON.parse(payload.toString("utf8")) as { type?: string }).type);
-  expect(sentTypes).toContain("established");
-  expect(sentTypes).not.toContain("ping");
+  expect(sentTypes).toContain("session:established");
+  expect(sentTypes).not.toContain("session:ping");
 });
 
 test("a different device's session is admitted ALONGSIDE the live session, displacing nobody", () => {
@@ -160,8 +161,8 @@ test("a tunnel:http-request from either admitted device reaches no handler, on t
   client.establish(PHONE_2_ID, { attemptId: "attempt-b" });
 
   const req = (requestId: string) => ({ type: "tunnel:http-request", requestId, port: 3000, method: "GET", path: "/" });
-  expect(() => client.sendFromPeer(PHONE_ID, req("from-a"), "message")).not.toThrow();
-  expect(() => client.sendFromPeer(PHONE_2_ID, req("from-b"), "message")).not.toThrow();
+  expect(() => client.sendFromPeer(PHONE_ID, req("from-a"))).not.toThrow();
+  expect(() => client.sendFromPeer(PHONE_2_ID, req("from-b"))).not.toThrow();
 });
 
 test("an outbound broadcast is sent once per established session", () => {

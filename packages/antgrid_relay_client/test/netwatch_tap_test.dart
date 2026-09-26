@@ -1,6 +1,7 @@
-// Frame-capture coverage for central control frames and native PeerLink annotations.
+// Frame-capture coverage for central control frames and native PeerLink rows.
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
@@ -14,15 +15,11 @@ class _Capture {
   final events = <Map<String, Object?>>[];
   RelayNetTap get tap => events.add;
 
-  Iterable<Map<String, Object?>> get frames =>
-      events.where((e) => e['op'] != 'annotate');
-  Iterable<Map<String, Object?>> get annotations =>
-      events.where((e) => e['op'] == 'annotate');
+  Iterable<Map<String, Object?>> get frames => events;
+  Iterable<Map<String, Object?>> get sessionFrameRows =>
+      frames.where((e) => e['op'] == 'frame' && e['streamKind'] == 'session');
   Iterable<Map<String, Object?>> get drops =>
       frames.where((e) => e['kind'] == 'drop');
-
-  Map<String, Object?> annotationFor(String frameId) =>
-      annotations.singleWhere((e) => e['frameId'] == frameId);
 }
 
 void main() {
@@ -111,7 +108,7 @@ void main() {
     );
   });
 
-  group('MachineSession annotations', () {
+  group('MachineSession session-stream frame rows', () {
     late _Capture capture;
     late FakeLiveRelay relay;
     late MachineSession session;
@@ -129,7 +126,8 @@ void main() {
     });
 
     test(
-      'names an outbound frame with the type the wire could not see',
+      'one outbound record produces exactly one op:frame row naming the '
+      'type the wire could not see',
       () async {
         await session.sendOnSession({
           'type': 'terminal:input',
@@ -137,10 +135,17 @@ void main() {
         }, 'control');
 
         final payload = relay.sent.single.payload;
-        final note = capture.annotationFor(frameIdOf(payload));
-        expect(note['msgType'], 'terminal:input');
-        expect(note['streamId'], session.control.streamId);
-        expect(note['streamKind'], 'session');
+        final row = capture.sessionFrameRows.singleWhere(
+          (e) => e['dir'] == 'tx',
+        );
+        expect(row['kind'], 'frame');
+        expect(row['transport'], 'iroh');
+        expect(row['channel'], 'control');
+        expect(row['msgType'], 'terminal:input');
+        expect(row['streamId'], session.control.streamId);
+        expect(row['streamKind'], 'session');
+        expect(row['bytes'], payload.length);
+        expect(row['frameId'], frameIdOf(payload));
       },
     );
 
@@ -162,29 +167,72 @@ void main() {
       await cold.dispose();
     });
 
-    test('names an inbound frame after decode, joined by the frame id', () async {
-      final payload = encodeFromAgent(
-        jsonEncode({'type': 'terminal:output', 'data': 'hi'}),
-      );
-      relay.injectFrame(payload);
-      await Future<void>.delayed(const Duration(milliseconds: 20));
+    test(
+      'one inbound record produces exactly one op:frame row naming the '
+      'decoded type, joined by the frame id',
+      () async {
+        final payload = encodeFromAgent(
+          jsonEncode({'type': 'terminal:output', 'data': 'hi'}),
+        );
+        relay.injectRecord(payload);
+        await Future<void>.delayed(const Duration(milliseconds: 20));
 
-      // The whole point: the id is readable before any parsing, the type only
-      // after it, and they meet without either being threaded.
-      final note = capture.annotationFor(frameIdOf(payload));
-      expect(note['msgType'], 'terminal:output');
-      expect(note['streamId'], session.control.streamId);
-      expect(note['streamKind'], 'session');
-    });
+        final row = capture.sessionFrameRows.singleWhere(
+          (e) => e['dir'] == 'rx',
+        );
+        expect(row['msgType'], 'terminal:output');
+        expect(row['streamId'], session.control.streamId);
+        expect(row['streamKind'], 'session');
+        expect(row['frameId'], frameIdOf(payload));
+      },
+    );
+
+    test(
+      'a session:ping produces one tx row and one rx row, and the ping row\'s '
+      'frameId matches the shared fixture sample',
+      () async {
+        final fixture =
+            jsonDecode(
+                  File(
+                    '../../evals/fixtures/peer-transport-vectors.json',
+                  ).readAsStringSync(),
+                )
+                as Map<String, dynamic>;
+        final samples =
+            (fixture['sessionRecords'] as Map<String, dynamic>)['samples']
+                as List;
+        final pingSample =
+            samples.cast<Map<String, dynamic>>().singleWhere(
+                  (s) => s['name'] == 'ping',
+                );
+        final pingPayload = Uint8List.fromList(
+          utf8.encode(pingSample['json'] as String),
+        );
+
+        relay.injectRecord(encodeFromAgent(utf8.decode(pingPayload)));
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+
+        final rxPing = capture.sessionFrameRows.singleWhere(
+          (e) => e['dir'] == 'rx' && e['msgType'] == kSessionPing,
+        );
+        expect(rxPing['frameId'], pingSample['frameId']);
+
+        final txPong = capture.sessionFrameRows.singleWhere(
+          (e) => e['dir'] == 'tx' && e['msgType'] == kSessionPong,
+        );
+        expect(txPong['streamKind'], 'session');
+      },
+    );
 
     test('records an inbound frame that is not valid UTF-8', () async {
       // Lone continuation bytes: never a valid UTF-8 sequence on their own.
       final payload = Uint8List.fromList([0x80, 0x80, 0x80]);
-      relay.injectFrame(payload);
+      relay.injectRecord(payload);
       await Future<void>.delayed(const Duration(milliseconds: 20));
 
       final drop = capture.drops.single;
       expect(drop['reason'], 'bad-utf8');
+      expect(drop['channel'], 'control');
       expect(drop['frameId'], isNull); // named only once decoded far enough to know a type
     });
 
@@ -196,11 +244,12 @@ void main() {
           'm': {'type': 'terminal:output'},
         }),
       );
-      relay.injectFrame(payload);
+      relay.injectRecord(payload);
       await Future<void>.delayed(const Duration(milliseconds: 20));
 
       final drop = capture.drops.single;
       expect(drop['reason'], 'unrecognized-plaintext');
+      expect(drop['channel'], 'control');
     });
   });
 }

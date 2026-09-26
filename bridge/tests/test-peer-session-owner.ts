@@ -1,5 +1,4 @@
 import { generateKeyPairSync } from "node:crypto";
-import { decodePeerFrame, type PeerFrameKind } from "antgrid-wire";
 import type { RemoteHostConnection } from "../src/remote-host-connection";
 import type { NativeHostOptions } from "../src/peer/native-host-connection";
 import { refuseStream, type AcceptedBiStream, type StreamRefusal } from "../src/peer/stream-dispatch";
@@ -165,8 +164,7 @@ let establishCounter = 0;
 /** Native-neutral peer-session fixture. It exercises the payload/session layer
  * directly; central WebSocket behavior belongs in CentralControlClient tests. */
 export class TestPeerSessionOwner extends PeerSessionOwner {
-  private writer: ((payload: Buffer, to: string, kind: PeerFrameKind,
-    diagnosticType: string) => boolean) = () => false;
+  private writer: ((payload: Buffer, to: string, diagnosticType: string) => boolean) = () => false;
 
   constructor(opts: PeerSessionOwnerOptions) { super(opts); }
 
@@ -199,11 +197,11 @@ export class TestPeerSessionOwner extends PeerSessionOwner {
     this.projectDetachedFn?.(projectId);
   }
 
-  protected override writeSessionRecord(peerId: string, kind: PeerFrameKind, payload: Buffer,
+  protected override writeSessionRecord(peerId: string, payload: Buffer,
     diagnosticType: string): Promise<StreamSendOutcome> | null {
-    const ok = this.writer(payload, peerId, kind, diagnosticType);
+    const ok = this.writer(payload, peerId, diagnosticType);
     if (!ok) return null;
-    this.recordOutbound(peerId, kind, payload);
+    this.recordOutbound(peerId, payload);
     return Promise.resolve("sent");
   }
 
@@ -215,14 +213,14 @@ export class TestPeerSessionOwner extends PeerSessionOwner {
   // the only OTHER way to put a session on a client, for suites that need one
   // instantly and never touch the wire.
 
-  /** Frames this client wrote, queued per addressee in send order, for
-   *  `readToPeer`/`sentTo`/`readFrameToPeer`/`sentFramesTo`. */
-  private outbox = new Map<string, Array<{ kind: PeerFrameKind; payload: Buffer }>>();
+  /** Records this client wrote, queued per addressee in send order, for
+   *  `readToPeer`/`sentTo`/`readFrameToPeer`/`sentFramesTo`. A record is
+   *  just its payload; there is no header kind to carry alongside it. */
+  private outbox = new Map<string, Buffer[]>();
 
-  private recordOutbound(to: string, kind: PeerFrameKind, payload: Buffer): void {
-    const entry = { kind, payload };
+  private recordOutbound(to: string, payload: Buffer): void {
     const list = this.outbox.get(to);
-    if (list) list.push(entry); else this.outbox.set(to, [entry]);
+    if (list) list.push(payload); else this.outbox.set(to, [payload]);
   }
 
   /** Admit `peerId`'s identity and drive a real plaintext `session:hello` ->
@@ -238,14 +236,10 @@ export class TestPeerSessionOwner extends PeerSessionOwner {
     const identity = opts.identity ?? ed25519Pair();
     const attemptId = opts.attemptId ?? `attempt-${peerId}-${++establishCounter}`;
     this.admitPeer(peerId, identity.pubB64);
-    this.injectPeerPayload(
-      Buffer.from(JSON.stringify({
-        type: "session:hello", attemptId,
-        ...(opts.capabilities ? { capabilities: opts.capabilities } : {}),
-      })),
-      peerId,
-      "session",
-    );
+    this.sendFromPeer(peerId, {
+      type: "session:hello", attemptId,
+      ...(opts.capabilities ? { capabilities: opts.capabilities } : {}),
+    });
     const session = this.sessions.get(peerId);
     if (!session || session.attemptId !== attemptId) {
       throw new Error(`establish(${peerId}): session:hello did not promote to an established session`);
@@ -258,11 +252,11 @@ export class TestPeerSessionOwner extends PeerSessionOwner {
   }
 
   /** Inject `obj` exactly as a real app's frame from `peerId` would arrive:
-   *  plaintext JSON of the given header kind. `obj` may be a pre-serialized
-   *  string (a deliberately malformed body) or any JSON-able value. */
-  sendFromPeer(peerId: string, obj: unknown, kind: PeerFrameKind = "message"): void {
+   *  plaintext JSON, no envelope. `obj` may be a pre-serialized string (a
+   *  deliberately malformed body) or any JSON-able value. */
+  sendFromPeer(peerId: string, obj: unknown): void {
     const payload = typeof obj === "string" ? obj : JSON.stringify(obj);
-    this.injectPeerPayload(Buffer.from(payload, "utf8"), peerId, kind);
+    this.injectPeerPayload(Buffer.from(payload, "utf8"), peerId);
   }
 
   /** Pop and parse the next frame this client sent to `peerId`: a bare
@@ -272,45 +266,33 @@ export class TestPeerSessionOwner extends PeerSessionOwner {
     return this.readFrameToPeer(peerId).body;
   }
 
-  /** Like `readToPeer`, but also returns the header `kind` the frame carried
-   *  — for rows that assert a liveness frame vs. a control-plane message. */
-  readFrameToPeer(peerId: string): { kind: PeerFrameKind; body: unknown } {
+  /** Like `readToPeer`, but returns `{ body }` for call sites that
+   *  destructure the frame. */
+  readFrameToPeer(peerId: string): { body: unknown } {
     const list = this.outbox.get(peerId);
     const next = list?.shift();
     if (next === undefined) throw new Error(`readFrameToPeer(${peerId}): nothing queued`);
-    return { kind: next.kind, body: JSON.parse(next.payload.toString("utf8")) };
+    return { body: JSON.parse(next.toString("utf8")) };
   }
 
   /** Every payload queued for `peerId` so far, without consuming it. */
   sentTo(peerId: string): ReadonlyArray<Buffer> {
-    return (this.outbox.get(peerId) ?? []).map((entry) => entry.payload);
-  }
-
-  /** Like `sentTo`, but keeps each entry's header `kind`. */
-  sentFramesTo(peerId: string): ReadonlyArray<{ kind: PeerFrameKind; payload: Buffer }> {
     return this.outbox.get(peerId) ?? [];
   }
 
-  setNativeWriter(writer: (payload: Buffer, to: string, kind: PeerFrameKind,
-    diagnosticType: string) => boolean): void {
+  /** Like `sentTo`, but parsed. */
+  sentFramesTo(peerId: string): ReadonlyArray<unknown> {
+    return (this.outbox.get(peerId) ?? []).map((payload) => JSON.parse(payload.toString("utf8")));
+  }
+
+  setNativeWriter(writer: (payload: Buffer, to: string, diagnosticType: string) => boolean): void {
     this.writer = writer;
   }
 
-  injectPeerPayload(
-    payload: Uint8Array,
-    from: string,
-    kind: PeerFrameKind = "message",
-  ): void {
-    this.receivePeerFrame(payload, from, kind);
-  }
-
-  injectPeerFrame(frame: Uint8Array, authenticatedPeerId: string): void {
-    const decoded = decodePeerFrame(frame);
-    this.receivePeerFrame(
-      decoded.payload,
-      authenticatedPeerId,
-      decoded.header.type,
-    );
+  /** Deliver `payload` on the session stream exactly as the native layer
+   *  would: a bare record, no envelope to decode. */
+  injectPeerPayload(payload: Uint8Array, from: string): void {
+    this.receiveSessionRecord(payload, from);
   }
 
   markPeerOffline(peerId: string): void {

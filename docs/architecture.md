@@ -22,7 +22,7 @@ App (Flutter) <--QUIC/TLS over Iroh (direct or relayed)--> Agent (Bun)
 The central relay authenticates devices via a signed `hello` frame (Ed25519
 proof-of-possession) — unrelated to peer payload admission, which is decided
 entirely by the authorization lease (`docs/protocol/peer-session.md` §1). The
-session stream carries the hello, the app's wedge-probe ping, and
+session stream carries the hello, the app's wedge-probe `session:ping`, and
 machine-scoped verbs such as `agent:projects` and `stream-ready` — QUIC
 keep-alive/idle is the liveness layer (`docs/protocol/peer-session.md` §3);
 every project gets its own stream (`docs/protocol/peer-session.md` §1d),
@@ -290,19 +290,19 @@ Terminal qualification commands live in `bridge/package.json` and `evals/package
 
 - **`antgrid_relay_client`** — pure Dart relay/crypto client, no Flutter.
 - **`antgrid_eval_client`** — E2E eval fixtures.
-- **`antgrid-wire`** — TS Bun workspace holding the binary peer-frame codec
-  **and** the relay control-envelope Zod schemas (`hello`/`welcome`/`stream-*`/
-  `error`, the `ClientMessage`/`ServerMessage` unions, `ErrorCode`), plus the
-  spoof-safe client-IP/XFF resolver (`client-ip.ts`) used by relay and web.
-  Shared by bridge/relay/web/evals.
+- **`antgrid-wire`** — TS Bun workspace holding the session-stream frame type
+  names (`SESSION_FRAME_TYPES`) **and** the relay control-envelope Zod schemas
+  (`hello`/`welcome`/`stream-*`/`error`, the `ClientMessage`/`ServerMessage`
+  unions, `ErrorCode`), plus the spoof-safe client-IP/XFF resolver
+  (`client-ip.ts`) used by relay and web. Shared by bridge/relay/web/evals.
 
-  Single source of truth for peer `FRAME_VERSION`, which is distinct from the
-  central relay message `protocolVersion`. The peer frame header carries only a
-  `type` discriminator (`session` vs `message`) plus the JSON payload; a
-  `StreamOpen` record (not the frame header) is what tags a stream's kind, and
-  the authenticated native connection supplies peer identity — see
-  `docs/protocol/peer-session.md` for the frame layout, the stream catalogue,
-  and the session hello it carries. `relay/src/protocol.ts` is a thin re-export shim of this package;
+  A session-stream record carries no header, version byte or kind byte: it is
+  one length-prefixed JSON record per session frame or control-plane message,
+  discriminated on the JSON body's own `type` alone (`isSessionFrameType`). A
+  `StreamOpen` record is what tags a stream's kind, and the authenticated
+  native connection supplies peer identity — see `docs/protocol/peer-session.md`
+  for the record layout, the stream catalogue, and the session hello it
+  carries. `relay/src/protocol.ts` is a thin re-export shim of this package;
   the Dart clients mirror these schemas by hand, so drift is silent. Shared
   fixtures under `evals/fixtures/` pin both control envelopes and peer transport
   bytes and constants across TypeScript and Dart.

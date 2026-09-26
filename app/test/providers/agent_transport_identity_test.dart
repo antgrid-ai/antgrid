@@ -57,13 +57,13 @@ class _RecordingRelay extends RelayService implements PeerLink {
 
   final _states = StreamController<AppState>.broadcast();
   final _presence = StreamController<bool>.broadcast();
-  final sent = <({String kind, Uint8List payload})>[];
+  final sent = <Uint8List>[];
   DeviceIdentity? connectedAs;
   String? connectedMachineId;
   AppState _cur = const AppState();
 
   @override
-  Stream<IncomingPeerFrame> get messageStream => const Stream.empty();
+  Stream<IncomingSessionRecord> get messageStream => const Stream.empty();
   @override
   Stream<AppState> get stateStream => _states.stream;
   @override
@@ -96,9 +96,9 @@ class _RecordingRelay extends RelayService implements PeerLink {
   }
 
   @override
-  Future<PeerSendOutcome> sendFrame(String kind, Uint8List payload) async {
+  Future<PeerSendOutcome> sendRecord(Uint8List payload) async {
     if (!isDispatchAllowed) return PeerSendOutcome.closed;
-    sent.add((kind: kind, payload: payload));
+    sent.add(payload);
     return PeerSendOutcome.accepted;
   }
 
@@ -108,12 +108,11 @@ class _RecordingRelay extends RelayService implements PeerLink {
     unawaited(_presence.close());
   }
 
-  /// The decoded `session:hello` frames sent with the session kind, in order.
+  /// The decoded `session:hello` records sent, in order.
   List<Map<String, dynamic>> helloFrames() => [
-    for (final f in sent)
-      if (f.kind == kPeerFrameSession)
-        jsonDecode(utf8.decode(f.payload)) as Map<String, dynamic>,
-  ].where((m) => m['type'] == 'session:hello').toList();
+    for (final payload in sent)
+      jsonDecode(utf8.decode(payload)) as Map<String, dynamic>,
+  ].where((m) => m['type'] == kSessionHello).toList();
 }
 
 class _FakeConnectionManager extends MachineConnectionManager {

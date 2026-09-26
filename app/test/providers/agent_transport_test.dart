@@ -50,7 +50,7 @@ class _FakeRelayService extends RelayService {
 
   AppState _cur = const AppState();
 
-  Stream<IncomingPeerFrame> get messageStream => const Stream.empty();
+  Stream<IncomingSessionRecord> get messageStream => const Stream.empty();
 
   @override
   Stream<AppState> get stateStream => _states.stream;

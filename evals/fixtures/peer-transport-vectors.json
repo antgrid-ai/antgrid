@@ -1,33 +1,50 @@
 {
-  "comment": "Peer transport v4 cross-language pin. Regenerate: cd packages/antgrid-wire && bun run gen:peer-vectors",
-  "framing": {
-    "version": 4,
-    "fixedPrefixBytes": 4,
-    "maxHeaderBytes": 1024,
-    "maxPayloadBytes": 33554432,
-    "maxRecordBytes": 1501028,
-    "maxBridgeRecordBytes": 33555460,
-    "kinds": {
-      "message": 0
-    },
+  "comment": "Native peer transport cross-language pin (session-record shape). Regenerate: cd packages/antgrid-wire && bun run gen:peer-vectors",
+  "sessionRecords": {
+    "maxAppRecordBytes": 1500000,
+    "maxBridgeRecordBytes": 33554432,
+    "types": [
+      "session:hello",
+      "session:established",
+      "session:ping",
+      "session:pong",
+      "session:takeover"
+    ],
     "samples": [
       {
-        "name": "message",
-        "header": {
-          "type": "message"
-        },
-        "kind": 0,
-        "payloadHex": "deadbeef",
-        "frameHex": "040000127b2274797065223a226d657373616765227ddeadbeef"
+        "name": "hello",
+        "json": "{\"type\":\"session:hello\",\"attemptId\":\"a1\"}",
+        "session": true,
+        "recordHex": "000000297b2274797065223a2273657373696f6e3a68656c6c6f222c22617474656d70744964223a226131227d",
+        "frameId": "1e65322bad672889949c1355"
       },
       {
-        "name": "session",
-        "header": {
-          "type": "session"
-        },
-        "kind": 0,
-        "payloadHex": "000102ff",
-        "frameHex": "040000127b2274797065223a2273657373696f6e227d000102ff"
+        "name": "established",
+        "json": "{\"type\":\"session:established\",\"attemptId\":\"a1\"}",
+        "session": true,
+        "recordHex": "0000002f7b2274797065223a2273657373696f6e3a65737461626c6973686564222c22617474656d70744964223a226131227d",
+        "frameId": "005fe56b0fd8b3af903b8f53"
+      },
+      {
+        "name": "ping",
+        "json": "{\"type\":\"session:ping\"}",
+        "session": true,
+        "recordHex": "000000177b2274797065223a2273657373696f6e3a70696e67227d",
+        "frameId": "87de6691fb39ea6cf0dfe208"
+      },
+      {
+        "name": "pong",
+        "json": "{\"type\":\"session:pong\"}",
+        "session": true,
+        "recordHex": "000000177b2274797065223a2273657373696f6e3a706f6e67227d",
+        "frameId": "5bd8f18eec9a79ae8a044822"
+      },
+      {
+        "name": "control-ping",
+        "json": "{\"type\":\"ping\",\"id\":\"m1\",\"timestamp\":0}",
+        "session": false,
+        "recordHex": "000000277b2274797065223a2270696e67222c226964223a226d31222c2274696d657374616d70223a307d",
+        "frameId": "f7db13237d5631f626779a15"
       }
     ]
   },

@@ -46,7 +46,6 @@ void main() {
   List<({String id, Map<String, dynamic> params})> snapshotRequests() {
     final out = <({String id, Map<String, dynamic> params})>[];
     for (final f in relay.sent) {
-      if (f.kind != kPeerFrameMessage) continue;
       final pt = decodeFromPhone(f.payload);
       final m = jsonDecode(pt) as Map<String, dynamic>;
       if (m['type'] == 'request' && m['method'] == 'state.snapshot') {
@@ -70,7 +69,7 @@ void main() {
   }
 
   void injectControl(Map<String, dynamic> m) {
-    relay.injectFrame(encodeFromAgent(jsonEncode(m)));
+    relay.injectRecord(encodeFromAgent(jsonEncode(m)));
   }
 
   Map<String, dynamic> snapshotReply(String requestId) => {
@@ -109,7 +108,6 @@ void main() {
       snapshotDeadline: _baseTimeout * 3,
     );
     int pulls() => shortRelay.sent.where((f) {
-      if (f.kind != kPeerFrameMessage) return false;
       final m = jsonDecode(decodeFromPhone(f.payload)) as Map<String, dynamic>;
       return m['type'] == 'request' && m['method'] == 'state.snapshot';
     }).length;

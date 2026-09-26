@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { buildPeerTransportVectors } from "../scripts/gen-peer-transport-vectors";
@@ -8,6 +9,7 @@ import {
   PEER_MAX_RECORD_BYTES,
   PEER_QUIC_KEEP_ALIVE_INTERVAL_MS,
   PEER_QUIC_MAX_IDLE_TIMEOUT_MS,
+  SESSION_FRAME_TYPES,
   STREAM_MAX_UPLOAD_STREAMS_PER_PEER,
   STREAM_PROJECT_APP_RECORD_MAX_BYTES,
   STREAM_PROJECT_BRIDGE_RECORD_MAX_BYTES,
@@ -24,7 +26,7 @@ import {
   StreamRefusedCode,
   TUNNEL_RECORD_TAG_WS_BINARY,
   TUNNEL_RECORD_TAG_WS_TEXT,
-  decodePeerFrame,
+  isSessionFrameType,
 } from "../src/index";
 
 const fixturePath = resolve(
@@ -37,19 +39,23 @@ test("peer transport fixture is a clean generator product", () => {
   expect(fixture).toEqual(buildPeerTransportVectors());
 });
 
-test("peer transport byte vectors decode with no route identity, one sample per header kind", () => {
-  expect(fixture.framing.samples.map((s: { name: string }) => s.name)).toEqual(["message", "session"]);
-  for (const sample of fixture.framing.samples) {
-    const decoded = decodePeerFrame(Buffer.from(sample.frameHex, "hex"));
-    expect(decoded.header).toEqual(sample.header);
-    expect(decoded.header).not.toHaveProperty("to");
-    expect(decoded.header).not.toHaveProperty("from");
-    expect(decoded.header).not.toHaveProperty("channel");
-    expect(Buffer.from(decoded.payload).toString("hex")).toBe(sample.payloadHex);
+test("peer transport fixture's sessionRecords cover every session-frame type and pin recordHex/frameId", () => {
+  const { sessionRecords } = fixture;
+  expect(sessionRecords.maxAppRecordBytes).toBe(PEER_MAX_RECORD_BYTES);
+  expect(sessionRecords.maxBridgeRecordBytes).toBe(PEER_MAX_BRIDGE_RECORD_BYTES);
+  expect(sessionRecords.types).toEqual(SESSION_FRAME_TYPES);
+  for (const sample of sessionRecords.samples as Array<
+    { name: string; json: string; session: boolean; recordHex: string; frameId: string }
+  >) {
+    const jsonBytes = Buffer.from(sample.json, "utf8");
+    const lenPrefix = Buffer.alloc(4);
+    lenPrefix.writeUInt32BE(jsonBytes.length, 0);
+    expect(sample.recordHex, sample.name).toBe(Buffer.concat([lenPrefix, jsonBytes]).toString("hex"));
+    expect(sample.frameId, sample.name).toBe(
+      createHash("sha256").update(jsonBytes).digest("hex").slice(0, 24),
+    );
+    expect(sample.session, sample.name).toBe(isSessionFrameType(JSON.parse(sample.json).type));
   }
-  expect(fixture.framing.maxPayloadBytes).toBe(MAX_TRANSFER_BYTES);
-  expect(fixture.framing.maxRecordBytes).toBe(PEER_MAX_RECORD_BYTES);
-  expect(fixture.framing.maxBridgeRecordBytes).toBe(PEER_MAX_BRIDGE_RECORD_BYTES);
 });
 
 test("peer transport fixture covers every stream-open kind and refusal code", () => {

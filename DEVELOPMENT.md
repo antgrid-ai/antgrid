@@ -23,7 +23,7 @@ open yet, and bug reports are the thing that helps.
 
 | I want to work on | I need |
 |---|---|
-| `packages/antgrid-wire` — frame codec, relay envelope schemas | Bun |
+| `packages/antgrid-wire` — session-frame types, relay envelope schemas | Bun |
 | `relay/` — routing, auth, epochs, rate limiting, the licence gate | Bun |
 | `bridge/` — PTYs, file watching, git, port scanning, tunnelling | Bun |
 | `web/` — accounts, subscriptions, JWT minting | Bun + Postgres |
@@ -847,9 +847,9 @@ contribution is possible at all.
 
 **Zero credentials, zero accounts, no database:**
 
-- **`packages/antgrid-wire`** — the frame codec, the relay control-envelope
-  schemas, `FRAME_VERSION`, and the spoof-safe client-IP resolver shared by the
-  relay and web. `bun run --filter antgrid-wire test`.
+- **`packages/antgrid-wire`** — the session-frame type names, the relay
+  control-envelope schemas, and the spoof-safe client-IP resolver shared by
+  the relay and web. `bun run --filter antgrid-wire test`.
 - **`relay/` in full** — hello verification order, epoch arbitration, the replay
   cache, routing authorization, stream admission, rate limiting, and the licence
   gate logic itself. `bun run --filter antgrid-relay test`. The tests need no
@@ -904,7 +904,7 @@ migrations. A `postgres:16-alpine` container is enough.
 | `relay/` | TypeScript/Bun. Central WebSocket control plane — authenticates devices and carries presence, policy, heartbeat and encrypted push delivery; rejects application payloads. |
 | `app/` | Flutter/Dart + Riverpod. Desktop and mobile UI: terminal viewer, file explorer, git review, browser preview. |
 | `web/` | TypeScript/Bun + Hono + Postgres. Accounts and sign-in, subscriptions, device registration, Ed25519 JWT minting for the relay's gate. |
-| `packages/antgrid-wire` | TypeScript. Frame codec, relay control-envelope schemas, `FRAME_VERSION`, shared client-IP resolver. Consumed by bridge, relay, web and evals. |
+| `packages/antgrid-wire` | TypeScript. Session-frame type names, stream-open records, relay control-envelope schemas, shared client-IP resolver. Consumed by bridge, relay, web and evals. |
 | `packages/antgrid_relay_client` | Pure Dart central-control, E2E and session protocol, no Flutter. Native payload links are injected by the ELv2 peer transport. |
 | `packages/antgrid_eval_client` | Dart end-to-end test fixtures. |
 | `site/` | Astro. The static marketing site at `antgrid.ai`. Its own Bun project, **not** a root workspace — `bun install` from the root does not cover it. |

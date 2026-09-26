@@ -64,7 +64,7 @@ void main() {
 
       // MachineSession has no session installed yet — `_onPeerFrame` must
       // drop this on the floor without attempting to dispatch it.
-      relay.injectFrame(
+      relay.injectRecord(
         encodeFromAgent(jsonEncode({'type': 'agent:projects'})),
       );
 
@@ -137,9 +137,8 @@ void main() {
         // touching `relay.isDispatchAllowed` — the socket stays up, only the
         // session does not, which is what isolates the generation fence from
         // the separate `isDispatchAllowed` gate.
-        relay.injectFrame(
-          encodeFromAgent(jsonEncode({'type': 'session-takeover'})),
-          kind: kPeerFrameSession,
+        relay.injectRecord(
+          encodeFromAgent(jsonEncode({'type': kSessionTakeover})),
         );
         await Future<void>.delayed(const Duration(milliseconds: 20));
         gate.complete();
@@ -279,12 +278,11 @@ void main() {
         // Session pongs keep the ping quiet while the project binds, so the
         // close below can only come from the silence that follows.
         final setupPongs = Timer.periodic(const Duration(milliseconds: 5), (_) {
-          relay.injectFrame(
-            encodeFromAgent(jsonEncode({'type': 'pong'})),
-            kind: kPeerFrameSession,
+          relay.injectRecord(
+            encodeFromAgent(jsonEncode({'type': kSessionPong})),
           );
         });
-        relay.injectFrame(
+        relay.injectRecord(
           encodeFromAgent(
             jsonEncode({'type': 'stream-ready', 'projectId': 'X'}),
           ),

@@ -40,7 +40,7 @@ void main() {
       handshaker: FakeHandshaker(),
       projectStartMessageBuilder: projectStartMessageBuilder,
     );
-    relay.injectFrame(
+    relay.injectRecord(
       encodeFromAgent(
         jsonEncode({'type': 'stream-ready', 'projectId': projectId}),
       ),
@@ -52,7 +52,7 @@ void main() {
   /// project unknown, …) — used here to settle a filler project's
   /// still-pending open before a test ends.
   void rejectStart(String projectId) {
-    relay.injectFrame(
+    relay.injectRecord(
       encodeFromAgent(
         jsonEncode({
           'type': 'control:result',
@@ -75,7 +75,7 @@ void main() {
       )
       .length;
 
-  void injectReadyNotice(String projectId) => relay.injectFrame(
+  void injectReadyNotice(String projectId) => relay.injectRecord(
     encodeFromAgent(
       jsonEncode({'type': 'stream-ready', 'projectId': projectId}),
     ),
@@ -164,8 +164,7 @@ void main() {
       session.start();
       await session.ensureEstablished();
       link.inject(
-        IncomingPeerFrame(
-          kind: kPeerFrameMessage,
+        IncomingSessionRecord(
           payload: encodeFromAgent(
             jsonEncode({'type': 'stream-ready', 'projectId': 'proj-a'}),
           ),
@@ -371,7 +370,7 @@ void main() {
         reason: 'the backoff elapsed — project:start is resent on its own',
       );
 
-      relay.injectFrame(
+      relay.injectRecord(
         encodeFromAgent(
           jsonEncode({'type': 'stream-ready', 'projectId': 'proj-a'}),
         ),
@@ -522,7 +521,7 @@ void main() {
     test('holds its cap slot until the bridge\'s own FIN drains the stream',
         () async {
       session = await establishSession(relay, handshaker: FakeHandshaker());
-      relay.injectFrame(
+      relay.injectRecord(
         encodeFromAgent(
           jsonEncode({'type': 'stream-ready', 'projectId': 'proj-a'}),
         ),
@@ -674,14 +673,14 @@ void main() {
 /// `FakeLiveRelay` implements both (every native link does), so this stands
 /// in for an older relay to exercise `openProject`'s STREAM_UNSUPPORTED path.
 class _PlainPeerLink implements PeerLink {
-  final _messages = StreamController<IncomingPeerFrame>.broadcast();
+  final _messages = StreamController<IncomingSessionRecord>.broadcast();
   final _states = StreamController<PeerLinkState>.broadcast();
   final _failures = StreamController<PeerLinkFailure>.broadcast();
 
   @override
   bool get isDispatchAllowed => true;
   @override
-  Stream<IncomingPeerFrame> get messageStream => _messages.stream;
+  Stream<IncomingSessionRecord> get messageStream => _messages.stream;
   @override
   Stream<PeerLinkState> get payloadStateStream => _states.stream;
   @override
@@ -691,10 +690,10 @@ class _PlainPeerLink implements PeerLink {
   @override
   PeerLinkDiagnostic? get netTap => null;
 
-  void inject(IncomingPeerFrame frame) => _messages.add(frame);
+  void inject(IncomingSessionRecord frame) => _messages.add(frame);
 
   @override
-  Future<PeerSendOutcome> sendFrame(String kind, Uint8List payload) async =>
+  Future<PeerSendOutcome> sendRecord(Uint8List payload) async =>
       PeerSendOutcome.accepted;
 
   @override

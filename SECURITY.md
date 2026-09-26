@@ -104,8 +104,9 @@ In scope. These are the claims worth attacking:
   one the authorization lease names for it; any way to dispatch a frame from a
   peer that has not completed the plaintext session hello, or to have a frame
   attributed to a peer other than the one the connection actually
-  authenticates as. Cross-language interop vectors for the frame format live in
-  `evals/fixtures/peer-transport-vectors.json` if you want a starting point.
+  authenticates as. Cross-language interop vectors for the session-record and
+  stream-open formats live in `evals/fixtures/peer-transport-vectors.json` if
+  you want a starting point.
 - **The relays' zero-knowledge property**, for both the Iroh relay (packet
   forwarding only) and the central Antgrid relay (control-plane only).
   Anything that lets either one, or someone who controls it, recover payload

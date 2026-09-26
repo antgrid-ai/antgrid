@@ -12,7 +12,7 @@ const ROOT = resolve(import.meta.dir, "../..");
  *   hand-mirrored Dart parser; pinned by
  *   packages/antgrid-wire/tests/relay-envelope-vectors.test.ts and
  *   packages/antgrid_relay_client/test/relay_envelope_vectors_test.dart.
- * - peer-transport-vectors.json: peer-frame bytes plus native, flow-control,
+ * - peer-transport-vectors.json: session-record bytes plus native, flow-control,
  *   and authorization constants shared by the TS and Dart implementations.
  *
  * `git status --porcelain` on purpose, not plain `git diff`: plain diff is

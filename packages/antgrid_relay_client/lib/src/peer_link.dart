@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:typed_data';
 
-import 'frame.dart';
 import 'models/stream_open.dart';
 
 enum PeerLinkState { connecting, ready, closed }
@@ -10,11 +9,13 @@ enum PeerPath { unknown, direct, relay }
 
 enum PeerSendOutcome { accepted, closed, tooLarge, backpressured, failed }
 
-class IncomingPeerFrame {
-  const IncomingPeerFrame({required this.kind, required this.payload});
+/// One decoded record off the session stream: either a session frame
+/// (`session:hello`/`established`/`ping`/`pong`/`takeover`) or a bare
+/// control-plane `AbMessage`. The two are told apart by the JSON `type`
+/// alone (`isSessionFrameType`, `frame.dart`); a record has no header.
+class IncomingSessionRecord {
+  const IncomingSessionRecord({required this.payload});
 
-  /// [kPeerFrameSession] or [kPeerFrameMessage].
-  final String kind;
   final Uint8List payload;
 }
 
@@ -31,7 +32,7 @@ class PeerLinkFailure {
 /// Implementations must bound queued bytes, fence writes by connection generation
 /// and complete sends on admission or rejection, never wait for remote delivery.
 abstract interface class PeerLink {
-  Stream<IncomingPeerFrame> get messageStream;
+  Stream<IncomingSessionRecord> get messageStream;
   Stream<PeerLinkState> get payloadStateStream;
   Stream<PeerPath> get pathStream;
   Stream<PeerLinkFailure> get failureStream;
@@ -43,9 +44,10 @@ abstract interface class PeerLink {
   bool get isDispatchAllowed;
 
   /// Accepted means handed to the local transport, never delivered to the peer.
-  /// No failed outcome may be retried by the link itself. [kind] must be
-  /// [kPeerFrameSession] or [kPeerFrameMessage].
-  Future<PeerSendOutcome> sendFrame(String kind, Uint8List payload);
+  /// No failed outcome may be retried by the link itself. [payload] is the
+  /// exact JSON body of one session frame or one control-plane `AbMessage`,
+  /// with no header.
+  Future<PeerSendOutcome> sendRecord(Uint8List payload);
 
   Future<void> close();
 }

@@ -45,11 +45,11 @@ const Duration kSnapshotPullDeadline = Duration(seconds: 70);
 const int kProjectStreamMaxQueuedBytes = 67108864;
 
 /// Drives ONE hello attempt-cycle over a [MachineSession]'s socket, completing
-/// only once the bridge's `established` arrives. The app implements this
+/// only once the bridge's `session:established` arrives. The app implements this
 /// wrapping `ConnectionHandshake`; the package stays Flutter-free. Each
 /// [perform] must run a FRESH attempt (new `attemptId`).
 abstract interface class SessionHandshaker {
-  /// Runs one hello to `established`. True once it lands, false on timeout /
+  /// Runs one hello to `session:established`. True once it lands, false on timeout /
   /// abort / a link that will not accept the hello.
   Future<bool> perform();
 
@@ -58,7 +58,7 @@ abstract interface class SessionHandshaker {
 }
 
 /// Thrown by [MachineSession.ensureEstablished] when the one handshake attempt
-/// it drove did not reach `established`. Retry pacing and give-up belong to the
+/// it drove did not reach `session:established`. Retry pacing and give-up belong to the
 /// caller (the app's connection supervisor), which is why this reports a single
 /// failed attempt rather than an exhausted budget.
 class HandshakeException implements Exception {
@@ -109,12 +109,11 @@ enum _BindOutcome { bound, notReadyRetry }
 /// when the link supports one ([MultiStreamPeerLink]). QUIC/TLS between the
 /// two lease-authorized endpoints is the confidentiality layer; this class
 /// owns the hello/close driver, liveness, and project-stream lifecycle.
-/// Session frames (`session:hello`, `established`, `ping`, `pong`) ride the
-/// session stream with peer-frame header kind [kPeerFrameSession]; every
-/// control-plane `AbMessage` on that same stream rides bare with kind
-/// [kPeerFrameMessage] — the header kind, not the JSON `type`, tells the two
-/// apart, since `ping`/`pong`/`session:*` are `AbMessage` literals too. A
-/// project's traffic is bare `AbMessage` JSON on its own stream.
+/// A session-stream record is one length-prefixed JSON body — a session
+/// frame (`session:hello`, `session:established`, `session:ping`,
+/// `session:pong`) or a bare control-plane `AbMessage`, told apart by the
+/// JSON `type` alone ([isSessionFrameType]). A project's traffic is bare
+/// `AbMessage` JSON on its own stream.
 class MachineSession {
   final PeerLink relay;
 
@@ -141,7 +140,7 @@ class MachineSession {
   /// before that deadline is still applied.
   final Duration snapshotTimeout;
 
-  /// Silence after which liveness sends a `ping`, and the period the
+  /// Silence after which liveness sends a `session:ping`, and the period the
   /// liveness timer itself runs at. Injectable so a test need not wait out the
   /// real interval.
   final Duration pingSilence;
@@ -177,7 +176,7 @@ class MachineSession {
   /// per-(re)establishment sweep need no special case for the control entry.
   final Map<String, StreamTransport> _streams = {};
 
-  StreamSubscription<IncomingPeerFrame>? _msgSub;
+  StreamSubscription<IncomingSessionRecord>? _msgSub;
   StreamSubscription<PeerLinkState>? _stateSub;
   Timer? _livenessTimer;
 
@@ -219,7 +218,7 @@ class MachineSession {
   /// failed by a rejecting `control:result`.
   final Map<String, Completer<void>> _readyWaiters = {};
 
-  /// Completes on the FIRST `established`; errors if the session is disposed
+  /// Completes on the FIRST `session:established`; errors if the session is disposed
   /// beforehand. One-shot — never await it to observe a re-establishment (use
   /// [ensureEstablished] or [established]).
   ///
@@ -237,13 +236,13 @@ class MachineSession {
   Stream<void> get established => _established$.stream;
 
   /// Fires when the agent hands this machine's session to another device
-  /// (`session-takeover`). Report-only: the session is already torn down
+  /// (`session:takeover`). Report-only: the session is already torn down
   /// when this emits and NOTHING here re-establishes it, because two devices
   /// each reclaiming on takeover would evict each other forever.
   Stream<void> get takeoverEvents => _takeovers.stream;
 
   /// Fires when a hello attempt ends with no live session (the agent never
-  /// answered `established`).
+  /// answered `session:established`).
   ///
   /// Nothing here retries: retry pacing and give-up belong to the caller's
   /// connection supervisor, and a supervisor can only re-drive what it is told
@@ -461,19 +460,14 @@ class MachineSession {
     }
     final bytes = Uint8List.fromList(utf8.encode(plaintext));
     if (!relay.isDispatchAllowed) return;
-    final outcome = await relay.sendFrame(kPeerFrameMessage, bytes);
+    final outcome = await relay.sendRecord(bytes);
     if (outcome != PeerSendOutcome.accepted || !identical(gen, _generation)) {
       // A generation change between the send and its outcome means a teardown
       // or a fresh hello already retired the session this frame was written
       // for — the peer either never saw it or has since moved on.
       return;
     }
-    _annotate(
-      _frameId(bytes),
-      msgType: type,
-      streamId: kSessionStreamLabel,
-      streamKind: 'session',
-    );
+    _emitSessionFrameRow('tx', type, frameId: _frameId(bytes), bytes: bytes.length);
   }
 
   /// Detach [streamId]'s transport.
@@ -639,7 +633,7 @@ class MachineSession {
       return;
     }
     _missedPongs++;
-    unawaited(_sendSessionFrame({'type': 'ping'}).catchError((_) {}));
+    unawaited(_sendSessionFrame({'type': kSessionPing}).catchError((_) {}));
   }
 
   // --- frame capture --------------------------------------------------------
@@ -652,23 +646,28 @@ class MachineSession {
   String? _frameId(Uint8List payload) =>
       _tap == null ? null : frameIdOf(payload);
 
-  /// Name a frame this layer can type but not identify. [RelayService] records
-  /// the wire event synchronously as the frame crosses the socket, so by the
-  /// time this runs the event it is naming is always already buffered.
-  void _annotate(
-    String? frameId, {
-    String? msgType,
-    String? streamId,
-    String? streamKind,
+  /// One row per session-stream record, in each direction: applies to session
+  /// frames and control-plane `AbMessage`s alike, since both ride this
+  /// stream.
+  void _emitSessionFrameRow(
+    String dir,
+    String? type, {
+    required String? frameId,
+    required int bytes,
   }) {
     final tap = _tap;
     if (tap == null || frameId == null) return;
     tap({
-      'op': 'annotate',
+      'op': 'frame',
+      'dir': dir,
+      'kind': 'frame',
+      'transport': 'iroh',
+      'channel': 'control',
+      'streamKind': 'session',
+      'streamId': kSessionStreamLabel,
+      'msgType': type,
+      'bytes': bytes,
       'frameId': frameId,
-      'msgType': msgType,
-      'streamId': streamId,
-      'streamKind': streamKind,
     });
   }
 
@@ -731,50 +730,58 @@ class MachineSession {
   /// there is no per-frame async decrypt step left to chain — the old
   /// per-channel tail existed only to keep a slow `open()` from letting a
   /// small frame overtake a large one, and a plain UTF-8 decode never blocks.
-  void _onPeerFrame(IncomingPeerFrame msg) {
+  void _onSessionRecord(IncomingSessionRecord msg) {
     if (_disposed || !relay.isDispatchAllowed || _generation == null) return;
     String plaintext;
     try {
       plaintext = utf8.decode(msg.payload);
     } catch (_) {
-      _dropped('rx', 'bad-utf8', channel: msg.kind);
+      _dropped('rx', 'bad-utf8', channel: 'control');
       return;
     }
-    final frameId = frameIdOf(msg.payload);
+    // Null unless a tap is armed: a bridge record can be a whole
+    // MAX_TRANSFER_BYTES reply, and hashing it serves only the capture.
+    final frameId = _frameId(msg.payload);
     _lastRecv = DateTime.now();
     _missedPongs = 0;
-    _dispatchDecoded(plaintext, msg.kind, frameId);
+    _dispatchDecoded(plaintext, frameId, msg.payload.length);
   }
 
-  /// [frameId] names the frame this plaintext arrived in, for the capture tap.
-  void _dispatchDecoded(String plaintext, String kind, String frameId) {
+  /// [frameId] names the frame this plaintext arrived in, for the capture tap;
+  /// [bytes] is the record's payload length.
+  void _dispatchDecoded(String plaintext, String? frameId, int bytes) {
     if (_disposed || _generation == null || !relay.isDispatchAllowed) return;
     Map<String, dynamic> json;
     try {
       json = jsonDecode(plaintext) as Map<String, dynamic>;
     } catch (_) {
-      _dropped('rx', 'plaintext-not-json', channel: kind, frameId: frameId);
+      _dropped(
+        'rx',
+        'plaintext-not-json',
+        channel: 'control',
+        streamId: kSessionStreamLabel,
+        streamKind: 'session',
+        frameId: frameId,
+      );
       return;
     }
-    if (kind == kPeerFrameSession) {
-      final type = json['type'];
-      _annotate(frameId, msgType: type is String ? type : null);
+    final type = json['type'];
+    if (type is! String) {
+      _dropped(
+        'rx',
+        'unrecognized-plaintext',
+        channel: 'control',
+        streamId: kSessionStreamLabel,
+        streamKind: 'session',
+        frameId: frameId,
+      );
+      return;
+    }
+    _emitSessionFrameRow('rx', type, frameId: frameId, bytes: bytes);
+    if (isSessionFrameType(type)) {
       _handleSessionFrame(json, frameId);
       return;
     }
-    // kind == kPeerFrameMessage: a bare AbMessage. Every project rides its
-    // own native stream, so this stream carries only the control plane.
-    final type = json['type'];
-    if (type is! String) {
-      _dropped('rx', 'unrecognized-plaintext', channel: kind, frameId: frameId);
-      return;
-    }
-    _annotate(
-      frameId,
-      msgType: type,
-      streamId: kSessionStreamLabel,
-      streamKind: 'session',
-    );
     _snoopControl(json);
     // Not the `control` getter: creating the transport here would fire a
     // snapshot pull nobody asked for. Adverts were snooped above, so a
@@ -869,15 +876,15 @@ class MachineSession {
 
   void _markNotReady(String projectId) => _readyProjects.remove(projectId);
 
-  void _handleSessionFrame(Map<String, dynamic> json, String frameId) {
+  void _handleSessionFrame(Map<String, dynamic> json, String? frameId) {
     switch (json['type']) {
-      case 'ping':
-        unawaited(_sendSessionFrame({'type': 'pong'}).catchError((_) {}));
+      case kSessionPing:
+        unawaited(_sendSessionFrame({'type': kSessionPong}).catchError((_) {}));
         break;
-      case 'pong':
+      case kSessionPong:
         _missedPongs = 0;
         break;
-      case 'session-takeover':
+      case kSessionTakeover:
         // The agent is switching to another device and is about to drop our
         // session. Tear down and REPORT — re-establishing here would fight the
         // other device for it.
@@ -907,7 +914,7 @@ class MachineSession {
     }
     final ct = Uint8List.fromList(utf8.encode(jsonEncode(obj)));
     if (!relay.isDispatchAllowed) return;
-    final outcome = await relay.sendFrame(kPeerFrameSession, ct);
+    final outcome = await relay.sendRecord(ct);
     if (outcome != PeerSendOutcome.accepted || !identical(gen, _generation)) {
       // A generation change between the send and its outcome means a teardown
       // or a fresh hello already retired the session this frame was written
@@ -917,7 +924,7 @@ class MachineSession {
     // Liveness frames are the cheapest signal that a session is alive at all —
     // a capture where ping goes out and pong never comes back is the whole
     // diagnosis for a silently dead socket.
-    _annotate(_frameId(ct), msgType: type);
+    _emitSessionFrameRow('tx', type, frameId: _frameId(ct), bytes: ct.length);
   }
 
   Future<void> dispose() async {
@@ -1062,7 +1069,7 @@ class MachineSession {
   /// having two components decide when to handshake is what the level-triggered
   /// supervisor replaced.
   void start() {
-    _msgSub = relay.messageStream.listen(_onPeerFrame);
+    _msgSub = relay.messageStream.listen(_onSessionRecord);
     _stateSub = relay.payloadStateStream.listen(_onState);
   }
 

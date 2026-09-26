@@ -164,7 +164,7 @@ export const SessionHelloFrame = z.object({
   capabilities: SessionHelloCapabilities.optional(),
 });
 export const SessionEstablishedFrame = z.object({
-  type: z.literal("established"),
+  type: z.literal("session:established"),
   attemptId: z.string().min(1).max(256),
 });
 

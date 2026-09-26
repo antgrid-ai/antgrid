@@ -2,8 +2,11 @@ import { describe, it, expect, spyOn } from "bun:test";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join as joinPath } from "node:path";
-import { joinCaptures, runNetwatchCli } from "../src/cli/netwatch";
+import { joinCaptures, joinSelected, readAppCapture, runNetwatchCli, type NetwatchCliOptions } from "../src/cli/netwatch";
+import { netwatch, __resetNetwatchForTest } from "../src/netwatch";
 import type { NetwatchEvent } from "../src/netwatch";
+import { TestPeerSessionOwner } from "./test-peer-session-owner";
+import peerTransportVectors from "../../evals/fixtures/peer-transport-vectors.json";
 
 let seq = 0;
 function ev(partial: Partial<NetwatchEvent> & { at: number; dir: "tx" | "rx" }): NetwatchEvent {
@@ -313,5 +316,76 @@ describe("antgrid watch --join", () => {
 
     server.stop(true);
     rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe("joinSelected", () => {
+  const iroh = { at: 0, dir: "tx", transport: "iroh" } as NetwatchEvent;
+  const relay = { at: 0, dir: "tx", transport: "relay" } as NetwatchEvent;
+  const local = { at: 0, dir: "tx", transport: "local" } as NetwatchEvent;
+
+  it("with no flags keeps iroh and relay, and drops local", () => {
+    const opts = {} as NetwatchCliOptions;
+    expect(joinSelected(iroh, opts)).toBe(true);
+    expect(joinSelected(relay, opts)).toBe(true);
+    expect(joinSelected(local, opts)).toBe(false);
+  });
+
+  it("--local keeps only local", () => {
+    const opts = { local: true } as NetwatchCliOptions;
+    expect(joinSelected(iroh, opts)).toBe(false);
+    expect(joinSelected(relay, opts)).toBe(false);
+    expect(joinSelected(local, opts)).toBe(true);
+  });
+
+  it("--relay keeps only relay", () => {
+    const opts = { relay: true } as NetwatchCliOptions;
+    expect(joinSelected(iroh, opts)).toBe(false);
+    expect(joinSelected(relay, opts)).toBe(true);
+    expect(joinSelected(local, opts)).toBe(false);
+  });
+});
+
+describe("a native session:ping pairs across a real join", () => {
+  it("the app's tx row and the bridge's rx row both verdict matched", async () => {
+    __resetNetwatchForTest();
+    const sample = (peerTransportVectors as {
+      sessionRecords: { samples: Array<{ name: string; json: string; frameId: string }> };
+    }).sessionRecords.samples.find((s) => s.name === "ping");
+    if (!sample) throw new Error("fixture has no sessionRecords ping sample");
+
+    const dir = mkdtempSync(joinPath(tmpdir(), "netwatch-ping-pair-"));
+    const now = Date.now();
+    const appLine = JSON.stringify({
+      seq: 1, at: now, dir: "tx", kind: "frame", transport: "iroh", origin: "app",
+      channel: "control", streamId: "0", streamKind: "session", msgType: "session:ping",
+      bytes: Buffer.byteLength(sample.json, "utf8"), frameId: sample.frameId,
+    });
+    const appLog = joinPath(dir, "netwatch.log");
+    writeFileSync(appLog, appLine);
+    const app = readAppCapture(appLog);
+    expect(app).not.toBeNull();
+
+    const client = TestPeerSessionOwner.forTest({ sendPayload: () => {}, peerId: "phone-1", deviceId: "dev-1" });
+    try {
+      client.establish("phone-1");
+      __resetNetwatchForTest();
+      client.injectPeerPayload(Buffer.from(sample.json, "utf8"), "phone-1");
+      const bridge = netwatch.snapshot().filter((e) => e.dir === "rx" && e.kind === "frame");
+
+      const appRows = app!.filter((e) => joinSelected(e, {} as NetwatchCliOptions));
+      const bridgeRows = bridge.filter((e) => joinSelected(e, {} as NetwatchCliOptions));
+      // Comfortably past both events' `at` and past the 1s settle margin, so
+      // neither the app's (pre-dated) row nor the bridge's (just-recorded) one
+      // is read as still-buffered ("outside").
+      const { rows } = joinCaptures(appRows, bridgeRows, Date.now() + 5_000);
+      const appRow = rows.find((r) => r.origin === "app");
+      const bridgeRow = rows.find((r) => r.origin === "brg");
+      expect(appRow?.verdict).toBe("matched");
+      expect(bridgeRow?.verdict).toBe("matched");
+    } finally {
+      client.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

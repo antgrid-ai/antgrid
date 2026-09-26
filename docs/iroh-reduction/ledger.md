@@ -61,6 +61,7 @@ the code wins over both.
 | A | follow-up: per-record authorization on project and terminal streams, netwatch stream tags | done | `848df2f2` |
 | A | A7 raw upload streams and raw tunnel HTTP bodies | done | `63b1dca3` |
 | A | A8 liveness: explicit QUIC defaults, one app ping, per-stream RPC timeout recovery | done | `<hash>` |
+| A | A9 session stream drops the peer-frame envelope | done | `<hash>` |
 
 ### Stage C gate evidence (executed by the wave commit agents)
 
@@ -101,6 +102,7 @@ the code wins over both.
 - A6: bridge 4888 pass, 16 skip, 6 fail (the six known stale-runId fixtures), 4910 total, via `bun run --filter antgrid-bridge test`; 4886/4908 before A6, the difference being its two netwatch tests. Only bridge was re-run, since A6 changes no other workspace; A5's own wire/relay/app counts are not recorded here.
 - A7: wire 132; bridge 4943 pass, 16 skip, 6 fail (the six known stale-runId fixtures); relay 173; relay_client 271; peer_transport 67; app 4194; `flutter analyze` clean in app and the three packages; evals 120 pass, 5 skip, with the only failure the gate-vectors git-clean guard before the commit; `test:evals:dart-terminal` 7 pass; qualify runs and the relay gate pass.
 - A8: wire 133; bridge 4949 pass, 16 skip, 6 fail (the six known stale-runId fixtures); relay 173; relay_client 282 (after the adversarial review); peer_transport 68; app 4195; `flutter analyze` clean in app and the three packages; evals 121 pass, 5 skip, with the only failure the gate-vectors git-clean guard before the commit; `test:evals:dart-liveness` 1 pass, measuring a hard-killed Dart app retired 35.0s after the kill (QUIC idle, Dart to napi); qualify runs and the relay gate pass.
+- A9: wire 129 (`peer-frame.test.ts` deleted with the envelope, `peer-protocol.test.ts` added); bridge 4954 pass, 16 skip, 6 fail (the six known stale-runId fixtures), 4976 total; relay 173; relay_client 284; peer_transport 72; app 4200; `flutter analyze` clean in app and the three packages; evals 121 pass, 5 skip, with the only failure the gate-vectors git-clean guard before the commit, and `gen:peer-vectors` regenerates the fixture byte-identically; `test:evals:dart-terminal` 7 pass; `test:evals:dart-liveness` 1 pass (retired 35.0s after the kill); `qualify:iroh-interop` passes with its new `session-ping-pong` check; `qualify:iroh-host` and the relay gate pass. The Dart old-name claims (bare `ping`, `established` and `session-takeover` stay control plane) and the record-length cap test were each shown red against a deliberate break and green after reverting it.
 
 ### Stage A open items
 

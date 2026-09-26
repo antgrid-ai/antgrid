@@ -81,7 +81,7 @@ class _FakeMultiStreamLink implements PeerLink, MultiStreamPeerLink {
   @override
   PeerLinkDiagnostic? get netTap => null;
   @override
-  Stream<IncomingPeerFrame> get messageStream => const Stream.empty();
+  Stream<IncomingSessionRecord> get messageStream => const Stream.empty();
   @override
   Stream<PeerLinkState> get payloadStateStream => const Stream.empty();
   @override
@@ -89,7 +89,7 @@ class _FakeMultiStreamLink implements PeerLink, MultiStreamPeerLink {
   @override
   Stream<PeerLinkFailure> get failureStream => const Stream.empty();
   @override
-  Future<PeerSendOutcome> sendFrame(String kind, Uint8List payload) async =>
+  Future<PeerSendOutcome> sendRecord(Uint8List payload) async =>
       PeerSendOutcome.accepted;
   @override
   Future<void> close() async {
@@ -120,7 +120,7 @@ class _PlainLink implements PeerLink {
   @override
   PeerLinkDiagnostic? get netTap => null;
   @override
-  Stream<IncomingPeerFrame> get messageStream => const Stream.empty();
+  Stream<IncomingSessionRecord> get messageStream => const Stream.empty();
   @override
   Stream<PeerLinkState> get payloadStateStream => const Stream.empty();
   @override
@@ -128,7 +128,7 @@ class _PlainLink implements PeerLink {
   @override
   Stream<PeerLinkFailure> get failureStream => const Stream.empty();
   @override
-  Future<PeerSendOutcome> sendFrame(String kind, Uint8List payload) async =>
+  Future<PeerSendOutcome> sendRecord(Uint8List payload) async =>
       PeerSendOutcome.accepted;
   @override
   Future<void> close() async {

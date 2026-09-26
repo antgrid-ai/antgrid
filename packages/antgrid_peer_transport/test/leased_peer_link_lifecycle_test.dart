@@ -79,7 +79,7 @@ class _QueuedLink implements PeerLink {
   @override
   PeerLinkDiagnostic? get netTap => null;
   @override
-  Stream<IncomingPeerFrame> get messageStream => const Stream.empty();
+  Stream<IncomingSessionRecord> get messageStream => const Stream.empty();
   @override
   Stream<PeerLinkState> get payloadStateStream => const Stream.empty();
   @override
@@ -88,7 +88,7 @@ class _QueuedLink implements PeerLink {
   Stream<PeerLinkFailure> get failureStream => const Stream.empty();
 
   @override
-  Future<PeerSendOutcome> sendFrame(String kind, Uint8List payload) async {
+  Future<PeerSendOutcome> sendRecord(Uint8List payload) async {
     queued++;
     await gate.future;
     if (closed) return PeerSendOutcome.closed;
@@ -126,7 +126,7 @@ void main() {
     final link = _leased(inner, lease);
     addTearDown(link.close);
 
-    final send = link.sendFrame(kPeerFrameMessage, Uint8List.fromList([1]));
+    final send = link.sendRecord(Uint8List.fromList([1]));
     await Future<void>.delayed(Duration.zero);
     expect(inner.queued, 1);
     clock.elapse(100);
@@ -153,10 +153,7 @@ void main() {
     final link = _leased(inner, lease);
     addTearDown(link.close);
 
-    final oldGenerationSend = link.sendFrame(
-      kPeerFrameMessage,
-      Uint8List.fromList([2]),
-    );
+    final oldGenerationSend = link.sendRecord(Uint8List.fromList([2]));
     await Future<void>.delayed(Duration.zero);
     expect(inner.queued, 1);
 

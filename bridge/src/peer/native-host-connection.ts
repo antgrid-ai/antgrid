@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { PEER_ALPN, PEER_MAX_RECORD_BYTES, STREAM_MAX_BIDI_STREAMS_PER_CONNECTION, decodePeerFrame, encodePeerFrame, type PeerFrameKind } from "antgrid-wire";
+import { PEER_ALPN, PEER_MAX_RECORD_BYTES, STREAM_MAX_BIDI_STREAMS_PER_CONNECTION } from "antgrid-wire";
 import type { Connection, Endpoint, Incoming } from "@number0/iroh";
 import { CentralControlClient, type CentralControlOptions } from "../central-control-client";
 import { baseSlotDeviceId } from "../relay-slot";
@@ -432,14 +432,7 @@ export class NativePeerSessions extends PeerSessionOwner {
           const record = await reader.read();
           if (this.nativePeers.get(peerId) !== peer) return;
           if (!this.authorized(peerId, endpointId)) { this.retirePeer(peerId, "unauthorized"); return; }
-          let frame;
-          try {
-            frame = decodePeerFrame(record);
-          } catch {
-            this.retirePeer(peerId, "protocol-violation");
-            return;
-          }
-          this.receivePeerFrame(frame.payload, peerId, frame.header.type);
+          this.receiveSessionRecord(record, peerId);
         }
       } catch (error) {
         // A `StreamProtocolViolation` has already retired the peer through the
@@ -577,12 +570,12 @@ export class NativePeerSessions extends PeerSessionOwner {
       } });
   }
 
-  protected override receivePeerFrame(payload: Uint8Array, from: string, kind: PeerFrameKind): void {
+  protected override receiveSessionRecord(payload: Uint8Array, from: string): void {
     if (!this.authorized(from, this.nativePeers.get(from)?.endpointId)) {
       void this.lease.refresh().catch(() => {});
       return;
     }
-    super.receivePeerFrame(payload, from, kind);
+    super.receiveSessionRecord(payload, from);
   }
 
   /**
@@ -631,25 +624,23 @@ export class NativePeerSessions extends PeerSessionOwner {
 
   protected override writeSessionRecord(
     peerId: string,
-    kind: PeerFrameKind,
     payload: Buffer,
     diagnosticType: string,
     signal?: AbortSignal,
   ): Promise<StreamSendOutcome> | null {
     const peer = this.nativePeers.get(peerId);
     if (!peer?.sessionWriter) return null;
-    const record = encodePeerFrame({ type: kind }, payload);
-    return peer.sessionWriter.send(record, signal).then((outcome) => {
-      if (outcome === "sent") this.recordNativeWrite(payload, record.length, diagnosticType);
+    return peer.sessionWriter.send(payload, signal).then((outcome) => {
+      if (outcome === "sent") this.recordNativeWrite(payload, diagnosticType);
       return outcome;
     });
   }
 
-  private recordNativeWrite(payload: Uint8Array, peerFrameBytes: number, msgType: string): void {
+  private recordNativeWrite(payload: Uint8Array, msgType: string): void {
     this.recordDiagnostic({ dir: "tx", kind: "frame", transport: "iroh",
       channel: "control", streamKind: "session", streamId: NETWATCH_SESSION_STREAM_LABEL,
       msgType, bytes: payload.length, frameId: frameIdFor(payload),
-      detail: { peerFrameBytes, recordBytes: peerFrameBytes + 4, lengthPrefixBytes: 4 } });
+      detail: { recordBytes: payload.length + 4, lengthPrefixBytes: 4 } });
   }
 
   close(): Promise<void> {

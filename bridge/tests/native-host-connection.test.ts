@@ -4,9 +4,9 @@ import type { Connection } from "@number0/iroh";
 import { NativeHostConnection, evalIrohBindAddress } from "../src/peer/native-host-connection";
 import vector from "../../evals/fixtures/endpoint-registration-vectors.json";
 import {
-  FRAME_VERSION, FrameKind, MAX_TRANSFER_BYTES, PEER_ALPN, PEER_MAX_RECORD_BYTES,
-  STREAM_MAX_BIDI_STREAMS_PER_CONNECTION, STREAM_OPEN_MAX_BYTES, decodeStreamRefused, encodePeerFrame,
-  encodeStreamOpen, type PeerFrameKind,
+  MAX_TRANSFER_BYTES, PEER_ALPN, STREAM_MAX_BIDI_STREAMS_PER_CONNECTION,
+  STREAM_OPEN_MAX_BYTES, STREAM_PROJECT_APP_RECORD_MAX_BYTES, decodeStreamRefused,
+  encodeStreamOpen,
 } from "antgrid-wire";
 import { MessageBus } from "../src/message-bus";
 import { STREAM_RECORD_SLICE_BYTES } from "../src/peer/stream-records";
@@ -365,12 +365,12 @@ test("native write diagnostics await the sliced write and separate payload from 
     const owner = f.client.peers as unknown as {
       handleHello: (hello: { type: "session:hello"; attemptId: string }, peerId: string) => void;
       sessions: Map<string, unknown>;
-      writeSessionRecord(peerId: string, kind: PeerFrameKind, payload: Buffer, diagnosticType: string): Promise<unknown> | null;
+      writeSessionRecord(peerId: string, payload: Buffer, diagnosticType: string): Promise<unknown> | null;
     };
     owner.handleHello({ type: "session:hello", attemptId: "a1" }, slot);
     await until(() => owner.sessions.has(slot));
     const payload = Buffer.from("private-test-payload");
-    const outcome = owner.writeSessionRecord(slot, "message", payload, "session:hello");
+    const outcome = owner.writeSessionRecord(slot, payload, "session:hello");
     expect(outcome).not.toBeNull();
     expect(events.filter((event) => event.dir === "tx")).toHaveLength(0);
     written.resolve();
@@ -384,8 +384,7 @@ test("native write diagnostics await the sliced write and separate payload from 
     expect(tx[0].bytes).toBe(payload.length);
     expect(tx[0].streamKind).toBe("session");
     expect(tx[0].streamId).toBe("0");
-    const peerFrame = encodePeerFrame({ type: "message" }, payload);
-    expect(tx[0].detail).toEqual({ peerFrameBytes: peerFrame.length, recordBytes: peerFrame.length + 4, lengthPrefixBytes: 4 });
+    expect(tx[0].detail).toEqual({ recordBytes: payload.length + 4, lengthPrefixBytes: 4 });
     expect(JSON.stringify(events)).not.toContain("private-test-payload");
   } finally { written.resolve(); observer.mockRestore(); f.client.close(); }
 });
@@ -518,13 +517,13 @@ test("missing native carrier never writes payloads to central WebSocket", async 
   const access = f.client.peers as unknown as {
     ws: WebSocket | null;
     lease: { refresh(): Promise<boolean> };
-    writeSessionRecord(peerId: string, kind: PeerFrameKind, payload: Buffer, diagnosticType: string): Promise<unknown> | null;
+    writeSessionRecord(peerId: string, payload: Buffer, diagnosticType: string): Promise<unknown> | null;
     sendJson(data: object): void;
   };
   try {
     await access.lease.refresh();
     f.client.central.ws = { readyState: WebSocket.OPEN, send: (data: unknown) => sent.push(data) } as unknown as WebSocket;
-    expect(access.writeSessionRecord(f.peerId, "message", Buffer.from("payload"), "terminal:input")).toBeNull();
+    expect(access.writeSessionRecord(f.peerId, Buffer.from("payload"), "terminal:input")).toBeNull();
     expect(sent).toEqual([]);
     f.client.central.sendJson({ type: "ping" });
     expect(sent).toEqual([JSON.stringify({ type: "ping" })]);
@@ -1088,22 +1087,6 @@ function queuedStream() {
   };
 }
 
-/** Builds the raw bytes of a peer frame BYPASSING `encodePeerFrame`'s own
- *  header validation, for N4: a real sender can never construct a header
- *  carrying `channel` (`PeerFrameHeader` is a strict zod object), so the only
- *  way to exercise the bridge's OWN rejection of one is to put it on the wire
- *  by hand. */
-function rawPeerFrame(header: unknown, payload: Buffer): Buffer {
-  const headerBytes = Buffer.from(JSON.stringify(header), "utf8");
-  const frame = Buffer.alloc(4 + headerBytes.length + payload.length);
-  frame[0] = FRAME_VERSION;
-  frame[1] = FrameKind.message;
-  frame.writeUInt16BE(headerBytes.length, 2);
-  headerBytes.copy(frame, 4);
-  payload.copy(frame, 4 + headerBytes.length);
-  return frame;
-}
-
 test("N1: the session stream sets priority once, before its first write", async () => {
   const f = fixture();
   const q = queuedStream();
@@ -1111,10 +1094,10 @@ test("N1: the session stream sets priority once, before its first write", async 
   try {
     const slot = await establishedSlot(f, peer);
     const access = f.client.peers as unknown as {
-      writeSessionRecord(peerId: string, kind: PeerFrameKind, payload: Buffer, diagnosticType: string): Promise<unknown> | null;
+      writeSessionRecord(peerId: string, payload: Buffer, diagnosticType: string): Promise<unknown> | null;
     };
-    await access.writeSessionRecord(slot, "message", Buffer.from(JSON.stringify({ type: "pong" })), "pong");
-    await access.writeSessionRecord(slot, "message", Buffer.from(JSON.stringify({ type: "pong" })), "pong");
+    await access.writeSessionRecord(slot, Buffer.from(JSON.stringify({ type: "session:pong" })), "session:pong");
+    await access.writeSessionRecord(slot, Buffer.from(JSON.stringify({ type: "session:pong" })), "session:pong");
     // Above terminal (1), project (0) and tunnel (-1) priorities (see
     // STREAM_PRIORITY_SESSION, native-host-connection.ts): liveness must not
     // queue behind bulk.
@@ -1131,10 +1114,10 @@ test("N2: a record near MAX_TRANSFER_BYTES on the session stream is written in <
   try {
     const slot = await establishedSlot(f, peer);
     const access = f.client.peers as unknown as {
-      writeSessionRecord(peerId: string, kind: PeerFrameKind, payload: Buffer, diagnosticType: string): Promise<unknown> | null;
+      writeSessionRecord(peerId: string, payload: Buffer, diagnosticType: string): Promise<unknown> | null;
     };
     const payload = Buffer.alloc(MAX_TRANSFER_BYTES - 1024, 7);
-    const outcome = await access.writeSessionRecord(slot, "message", payload, "file:content");
+    const outcome = await access.writeSessionRecord(slot, payload, "file:content");
     expect(outcome).toBe("sent");
     for (const bytes of q.written) expect(bytes.length).toBeLessThanOrEqual(STREAM_RECORD_SLICE_BYTES);
     expect(q.written.length).toBeGreaterThanOrEqual(128);
@@ -1148,33 +1131,38 @@ test("N3: an inbound session record read after authorization is revoked retires 
   try {
     const slot = await establishedSlot(f, peer);
     f.setAllowed(false);
-    q.pushRecord(encodePeerFrame({ type: "message" }, Buffer.from(JSON.stringify({ type: "pong" }))));
+    q.pushRecord(Buffer.from(JSON.stringify({ type: "session:pong" })));
     await until(() => peer.closeCodes().length > 0);
     expect(peer.closeCodes()).toEqual([3n]);
     expect(f.access.nativePeers.has(slot)).toBe(false);
   } finally { f.client.close(); }
 });
 
-test("N4: a session header carrying channel retires the peer protocol-violation (close code 2)", async () => {
+test("a non-JSON session record after establishment is a plaintext-not-json drop and the peer stays connected", async () => {
+  // D-A9-4: a record's body is JSON or it is dropped; an unparseable body is
+  // not a protocol violation, so the connection survives it.
   const f = fixture();
   const q = queuedStream();
   const peer = connection(f.endpointId, Promise.resolve(q.stream));
+  const events: Parameters<typeof netwatch.record>[0][] = [];
+  const observer = spyOn(netwatch, "record").mockImplementation((event) => { events.push(event); });
   try {
-    const slot = await establishedSlot(f, peer);
-    q.pushRecord(rawPeerFrame({ type: "message", channel: "control" }, Buffer.from(JSON.stringify({ type: "pong" }))));
-    await until(() => peer.closeCodes().length > 0);
-    expect(peer.closeCodes()).toEqual([2n]);
-    expect(f.access.nativePeers.has(slot)).toBe(false);
-  } finally { f.client.close(); }
+    await establishedSlot(f, peer);
+    q.pushRecord(Buffer.from("{not json", "utf8"));
+    await until(() => events.some((event) => event.reason === "plaintext-not-json"));
+    expect(peer.closeCodes()).toEqual([]);
+  } finally { observer.mockRestore(); f.client.close(); }
 });
 
-test("N5: an inbound session record longer than PEER_MAX_RECORD_BYTES retires the peer protocol-violation", async () => {
+test("N5: an inbound session record longer than STREAM_PROJECT_APP_RECORD_MAX_BYTES retires the peer protocol-violation", async () => {
+  // The literal payload cap plus one: the cap is the bare payload with no
+  // header allowance, so exactly one byte over it must be refused.
   const f = fixture();
   const q = queuedStream();
   const peer = connection(f.endpointId, Promise.resolve(q.stream));
   try {
     await establishedSlot(f, peer);
-    q.push(lengthPrefix(PEER_MAX_RECORD_BYTES + 1));
+    q.push(lengthPrefix(STREAM_PROJECT_APP_RECORD_MAX_BYTES + 1));
     await until(() => peer.closeCodes().length > 0);
     expect(peer.closeCodes()).toEqual([2n]);
   } finally { f.client.close(); }
@@ -1197,9 +1185,9 @@ test("N6: a session-stream write that never completes does not retire the peer o
   try {
     const slot = await establishedSlot(f, peer);
     const access = f.client.peers as unknown as {
-      writeSessionRecord(peerId: string, kind: PeerFrameKind, payload: Buffer, diagnosticType: string): Promise<unknown> | null;
+      writeSessionRecord(peerId: string, payload: Buffer, diagnosticType: string): Promise<unknown> | null;
     };
-    void access.writeSessionRecord(slot, "message", Buffer.from(JSON.stringify({ type: "pong" })), "pong");
+    void access.writeSessionRecord(slot, Buffer.from(JSON.stringify({ type: "session:pong" })), "session:pong");
     await new Promise((resolve) => setTimeout(resolve, 0));
     // Liveness, not a write timer, decides a slow peer is dead: nothing may be
     // armed inside a 5 s write window. Firing every scheduled timer would also

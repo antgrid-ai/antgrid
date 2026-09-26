@@ -1,7 +1,5 @@
 import { describe, expect, test } from "bun:test";
 import {
-  FIXED_PREFIX,
-  MAX_HEADER_LEN,
   MAX_TRANSFER_BYTES,
   PEER_MAX_BRIDGE_RECORD_BYTES,
   PEER_MAX_RECORD_BYTES,
@@ -159,9 +157,10 @@ test("MAX_TRANSFER_BYTES is 33_554_432 and defined in stream-open.ts", () => {
   expect(MAX_TRANSFER_BYTES).toBe(33_554_432);
 });
 
-test("PEER_MAX_RECORD_BYTES is unchanged at 1_501_028 and PEER_MAX_BRIDGE_RECORD_BYTES is MAX_TRANSFER_BYTES + MAX_HEADER_LEN + FIXED_PREFIX", () => {
-  expect(PEER_MAX_RECORD_BYTES).toBe(1_501_028);
-  expect(PEER_MAX_BRIDGE_RECORD_BYTES).toBe(MAX_TRANSFER_BYTES + MAX_HEADER_LEN + FIXED_PREFIX);
+test("a session record carries only its payload: each cap now equals the far side's reader cap exactly", () => {
+  expect(PEER_MAX_RECORD_BYTES).toBe(1_500_000);
+  expect(PEER_MAX_RECORD_BYTES).toBe(STREAM_PROJECT_APP_RECORD_MAX_BYTES);
+  expect(PEER_MAX_BRIDGE_RECORD_BYTES).toBe(MAX_TRANSFER_BYTES);
 });
 
 describe("encodeStreamOpen / decodeStreamOpen", () => {

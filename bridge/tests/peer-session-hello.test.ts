@@ -1,14 +1,14 @@
 // Stage B's establishment contract: a native peer gets in through exactly one
-// door — a `session`-kind `session:hello` naming an admitted identity — and
-// everything else about the session (attribution, the hello's own re-ack/
-// violation rule) follows from `receivePeerFrame`/`handleHello` in
-// peer-session-owner.ts. The lightweight tests here drive that seam directly
-// through `TestPeerSessionOwner`; the two that must see a real close CODE
+// door — a `session:hello` naming an admitted identity — and everything else
+// about the session (attribution, the hello's own re-ack/violation rule)
+// follows from `receiveSessionRecord`/`handleHello` in peer-session-owner.ts.
+// The lightweight tests here drive that seam directly through
+// `TestPeerSessionOwner`; the two that must see a real close CODE
 // (unauthorized vs. protocol-violation) drive the native layer, since only
 // `NativeHostConnection` has a connection to close.
 import { describe, expect, it, spyOn, test } from "bun:test";
 import type { Connection } from "@number0/iroh";
-import { MAX_TRANSFER_BYTES, PEER_ALPN, encodePeerFrame, encodeStreamOpen } from "antgrid-wire";
+import { MAX_TRANSFER_BYTES, PEER_ALPN, encodeStreamOpen } from "antgrid-wire";
 import { MessageBus } from "../src/message-bus";
 import { createMessage } from "../src/protocol";
 import { netwatch, __resetNetwatchForTest } from "../src/netwatch";
@@ -24,7 +24,7 @@ function sessionsOf(client: TestPeerSessionOwner): SessionsMap {
 }
 
 describe("establishment: the one door in", () => {
-  it("H1: pre-establishment, a message-kind record is dropped pre-establishment and establishes nothing", () => {
+  it("H1: pre-establishment, a session:ping and an old-name ping are both dropped pre-establishment and establish nothing", () => {
     __resetNetwatchForTest();
     const client = TestPeerSessionOwner.forTest({ sendPayload: () => {}, peerId: "phone-1", deviceId: "dev-1" });
     const bus = new MessageBus();
@@ -32,37 +32,21 @@ describe("establishment: the one door in", () => {
     bus.setInboundHandler((msg) => received.push(msg));
     client.setBus(bus);
     try {
-      // The drop fires purely on "no session for this peer" (receivePeerFrame),
-      // before any message shape or routing is even looked at.
-      client.sendFromPeer("phone-1", createMessage("agent:turn-start", { sessionId: "s1", turnId: "t1" }), "message");
+      // The drop fires purely on "no session for this peer" (receiveSessionRecord),
+      // before the record's own `type` is even looked at.
+      client.sendFromPeer("phone-1", { type: "session:ping" });
+      client.sendFromPeer("phone-1", createMessage("ping", {}));
       expect(received).toHaveLength(0);
       const drops = netwatch.snapshot().filter((e) => e.kind === "drop" && e.reason === "pre-establishment");
-      expect(drops).toHaveLength(1);
+      expect(drops).toHaveLength(2);
       expect(client.peerSession("phone-1")).toBeNull();
     } finally { client.clearBus(); client.close(); }
   });
 
-  it("H2: pre-establishment, a session:hello body sent with the message kind does not establish", () => {
-    // `type` is the only discriminator between a liveness/session frame and a
-    // control-plane message (peer-protocol.ts): a hello arriving under the
-    // wrong header kind never reaches `onSessionFrame`/`handleHello` at all.
-    const client = TestPeerSessionOwner.forTest({ sendPayload: () => {}, peerId: "phone-1", deviceId: "dev-1" });
-    try {
-      // Admitted first, so the only thing standing between this hello and an
-      // established session is its header kind: an unadmitted peer would be
-      // refused `not-admitted` whatever kind it used.
-      (client as unknown as { admitPeer(peerId: string, pub: string): void }).admitPeer("phone-1", ed25519Pair().pubB64);
-      client.sendFromPeer("phone-1", { type: "session:hello", attemptId: "a1" }, "message");
-      expect(client.peerSession("phone-1")).toBeNull();
-      client.sendFromPeer("phone-1", { type: "session:hello", attemptId: "a1" }, "session");
-      expect(client.peerSession("phone-1")).not.toBeNull();
-    } finally { client.close(); }
-  });
-
-  it("H3: an established message-kind {m: ...} body is dropped unrecognized-plaintext", () => {
-    // The wire body of a `message`-kind record is a bare `AbMessage`, so an
-    // envelope-wrapped one has no string `type` of its own and is dropped
-    // rather than unwrapped.
+  it("H3: an established record with no string type ({m: ...}) is dropped unrecognized-plaintext", () => {
+    // A session record carries only its payload, so a body with no
+    // top-level `type` (an envelope-shaped `{m: ...}` from an outdated app,
+    // say) is dropped rather than unwrapped.
     __resetNetwatchForTest();
     const client = TestPeerSessionOwner.forTest({ sendPayload: () => {}, peerId: "phone-1", deviceId: "dev-1" });
     client.establish("phone-1");
@@ -71,18 +55,18 @@ describe("establishment: the one door in", () => {
     bus.setInboundHandler((msg) => received.push(msg));
     client.setBus(bus);
     try {
-      client.sendFromPeer("phone-1", { m: createMessage("agent:turn-start", { sessionId: "s1", turnId: "t1" }) }, "message");
+      client.sendFromPeer("phone-1", { m: createMessage("agent:turn-start", { sessionId: "s1", turnId: "t1" }) });
       expect(received).toHaveLength(0);
       const drops = netwatch.snapshot().filter((e) => e.kind === "drop" && e.reason === "unrecognized-plaintext");
       expect(drops).toHaveLength(1);
     } finally { client.clearBus(); client.close(); }
   });
 
-  it("H4: an established message-kind ping AbMessage reaches control-plane dispatch and is not answered with a liveness pong", () => {
-    // `ping`/`pong` are ordinary AbMessage literals too (peer-protocol.ts's
-    // own comment): on the `message` kind they are just control-plane
-    // traffic, dispatched like any other verb, never auto-answered the way a
-    // `session`-kind liveness ping is.
+  it("H4: an old-name ping is control plane, not a session frame", () => {
+    // `ping`/`pong` are ordinary AbMessage literals (D-A9-2): dispatch is on
+    // `type` alone, and only the `session:*` names are session frames, so a
+    // bare `ping` is just control-plane traffic, dispatched like any
+    // other verb, never auto-answered the way `session:ping` is.
     const client = TestPeerSessionOwner.forTest({ sendPayload: () => {}, peerId: "phone-1", deviceId: "dev-1" });
     client.establish("phone-1");
     const bus = new MessageBus();
@@ -91,9 +75,13 @@ describe("establishment: the one door in", () => {
     client.setBus(bus);
     try {
       const ping = createMessage("ping", {});
-      client.sendFromPeer("phone-1", ping, "message");
+      client.sendFromPeer("phone-1", ping);
       expect(received).toEqual([ping]);
       expect(client.sentTo("phone-1")).toEqual([]);
+
+      client.sendFromPeer("phone-1", { type: "session:ping" });
+      expect(client.readToPeer("phone-1")).toEqual({ type: "session:pong" });
+      expect(received).toEqual([ping]);
     } finally { client.clearBus(); client.close(); }
   });
 
@@ -118,18 +106,41 @@ describe("establishment: the one door in", () => {
     } finally { client.close(); }
   });
 
-  it("H5: a credit session frame is dropped unknown-session-frame", () => {
-    // An older app's `credit` must not reach dispatch: it falls through
-    // `handleSessionFrame`'s default arm like any other unrecognized
-    // session-frame type.
+  it("H5: a stale credit frame reaches onControlMessage, dispatches to no bus handler, and draws no reply", () => {
+    // `credit` is not a session-frame name, so it never reaches
+    // `handleSessionFrame` — it is just an unrecognized AbMessage type that
+    // `parseMessageFast` refuses.
     __resetNetwatchForTest();
     const client = TestPeerSessionOwner.forTest({ sendPayload: () => {}, peerId: "phone-1", deviceId: "dev-1" });
     client.establish("phone-1");
+    const bus = new MessageBus();
+    const received: unknown[] = [];
+    bus.setInboundHandler((msg) => received.push(msg));
+    client.setBus(bus);
     try {
-      client.sendFromPeer("phone-1", { type: "credit", bytes: 1_024 }, "session");
+      client.sendFromPeer("phone-1", { type: "credit", bytes: 1_024 });
+      expect(received).toHaveLength(0);
+      expect(client.sentTo("phone-1")).toEqual([]);
       const drops = netwatch.snapshot().filter((e) => e.kind === "drop" && e.reason === "unknown-session-frame");
-      expect(drops).toHaveLength(1);
-    } finally { client.close(); }
+      expect(drops).toHaveLength(0);
+    } finally { client.clearBus(); client.close(); }
+  });
+
+  it("a session:takeover or session:established from the app is dropped unknown-session-frame and reaches no bus", () => {
+    __resetNetwatchForTest();
+    const client = TestPeerSessionOwner.forTest({ sendPayload: () => {}, peerId: "phone-1", deviceId: "dev-1" });
+    client.establish("phone-1");
+    const bus = new MessageBus();
+    const received: unknown[] = [];
+    bus.setInboundHandler((msg) => received.push(msg));
+    client.setBus(bus);
+    try {
+      client.sendFromPeer("phone-1", { type: "session:takeover" });
+      client.sendFromPeer("phone-1", { type: "session:established", attemptId: "a1" });
+      expect(received).toHaveLength(0);
+      const drops = netwatch.snapshot().filter((e) => e.kind === "drop" && e.reason === "unknown-session-frame");
+      expect(drops).toHaveLength(2);
+    } finally { client.clearBus(); client.close(); }
   });
 
   it("a repeated hello naming the same attemptId re-acks without tearing down the session", () => {
@@ -137,8 +148,8 @@ describe("establishment: the one door in", () => {
     const { attemptId } = client.establish("phone-1");
     try {
       const before = sessionsOf(client).get("phone-1");
-      client.sendFromPeer("phone-1", { type: "session:hello", attemptId }, "session");
-      expect(client.readToPeer("phone-1")).toEqual({ type: "established", attemptId });
+      client.sendFromPeer("phone-1", { type: "session:hello", attemptId });
+      expect(client.readToPeer("phone-1")).toEqual({ type: "session:established", attemptId });
       expect(sessionsOf(client).get("phone-1")).toBe(before);
     } finally { client.close(); }
   });
@@ -147,7 +158,7 @@ describe("establishment: the one door in", () => {
     const client = TestPeerSessionOwner.forTest({ sendPayload: () => {}, peerId: "phone-1", deviceId: "dev-1" });
     client.establish("phone-1", { attemptId: "a1" });
     try {
-      client.sendFromPeer("phone-1", { type: "session:hello", attemptId: "a2" }, "session");
+      client.sendFromPeer("phone-1", { type: "session:hello", attemptId: "a2" });
       expect(client.peerSession("phone-1")).toBeNull();
     } finally { client.close(); }
     // The native layer's equivalent case, plus the CLOSE CODE that has no
@@ -358,19 +369,16 @@ test("(b) access revoked mid-session closes the connection unauthorized (code 3)
     // Any well-formed record does it — revocation is caught by the read
     // loop's own `authorized()` check once `reader.read()` returns, not by
     // anything specific to this frame's content.
-    paused.resolve(encodePeerFrame({ type: "session" }, Buffer.from(JSON.stringify({ type: "ping" }))));
+    paused.resolve(Buffer.from(JSON.stringify({ type: "ping" })));
     await until(() => peer.closeCodes().length > 0);
     expect(peer.closeCodes()).toEqual([3n]);
     expect(f.access.nativePeers.size).toBe(0);
   } finally { f.client.close(); }
 });
 
-// A session:hello is only ever processed off a `session`-kind record
-// (peer-protocol.ts's `type` discriminator); every scripted hello below uses it.
-const helloFrame = (attemptId: string) => encodePeerFrame(
-  { type: "session" },
-  Buffer.from(JSON.stringify({ type: "session:hello", attemptId })),
-);
+// A session-stream record is the bare JSON body; every scripted hello below
+// is exactly that.
+const helloFrame = (attemptId: string) => Buffer.from(JSON.stringify({ type: "session:hello", attemptId }));
 const slotOf = (f: ReturnType<typeof fixture>) => `${f.peerId}#${f.client.deviceId}`;
 
 test("a second hello naming a different attemptId once established closes the connection as a protocol violation (code 2)", async () => {
@@ -415,9 +423,8 @@ test("a lease-authorized peer's envelope before its hello never reaches the cont
   const received: unknown[] = [];
   bus.setInboundHandler((msg) => received.push(msg));
   f.client.setBus(bus);
-  // The wire body of a `message`-kind record is a bare AbMessage.
-  const envelope = encodePeerFrame({ type: "message" },
-    Buffer.from(JSON.stringify(createMessage("agent:turn-start", { sessionId: "s1", turnId: "t1" }))));
+  // A session-stream record is the bare AbMessage JSON, no envelope.
+  const envelope = Buffer.from(JSON.stringify(createMessage("agent:turn-start", { sessionId: "s1", turnId: "t1" })));
   const scripted = scriptedStream([envelope, helloFrame("a1"), envelope]);
   const peer = connection(f.endpointId, Promise.resolve(scripted.stream));
   const events: Parameters<typeof netwatch.record>[0][] = [];

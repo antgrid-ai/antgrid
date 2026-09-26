@@ -102,7 +102,7 @@ class PeerConnectionMechanisms implements PeerConnectionContract {
   /// forever and the caller waiting on the session sees only a timeout.
 
   /// The agent handed this machine's session to another device
-  /// (`session-takeover`). Wired by `MachineConnection` to the supervisor's
+  /// (`session:takeover`). Wired by `MachineConnection` to the supervisor's
   /// `noteSessionTakenOver`; unset until then.
   ///
   /// Without it the ladder would see only "session down", re-handshake, and the

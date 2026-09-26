@@ -1,5 +1,4 @@
 import { z } from "zod";
-import { FIXED_PREFIX, MAX_HEADER_LEN } from "./peer-frame";
 import { MAX_TRANSFER_BYTES, STREAM_PROJECT_APP_RECORD_MAX_BYTES } from "./stream-open";
 
 // Bump whenever native stream framing changes: an app on the old framing is
@@ -8,14 +7,15 @@ import { MAX_TRANSFER_BYTES, STREAM_PROJECT_APP_RECORD_MAX_BYTES } from "./strea
 export const PEER_ALPN = "antgrid/peer/2";
 /** Bridge's read cap on a session-stream record (app -> bridge): the app only
  *  ever writes small control-plane records, so its ceiling is the project
- *  stream's app-side cap, not the bridge's much larger write ceiling. */
-export const PEER_MAX_RECORD_BYTES =
-  STREAM_PROJECT_APP_RECORD_MAX_BYTES + MAX_HEADER_LEN + FIXED_PREFIX;
+ *  stream's app-side cap, not the bridge's much larger write ceiling. A
+ *  session record carries only its payload (no header), so this equals that
+ *  cap exactly. */
+export const PEER_MAX_RECORD_BYTES = STREAM_PROJECT_APP_RECORD_MAX_BYTES;
 /** App's read cap on a session-stream record (bridge -> app): sized to the
  *  bridge's own write ceiling, `MAX_TRANSFER_BYTES`, since a control-plane
- *  reply (e.g. a large `control:result`) is always one record. */
-export const PEER_MAX_BRIDGE_RECORD_BYTES =
-  MAX_TRANSFER_BYTES + MAX_HEADER_LEN + FIXED_PREFIX;
+ *  reply (e.g. a large `control:result`) is always one record. Equals that
+ *  ceiling exactly — no header allowance. */
+export const PEER_MAX_BRIDGE_RECORD_BYTES = MAX_TRANSFER_BYTES;
 export const PEER_LEASE_MS = 60_000;
 export const PEER_REFRESH_MS = 20_000;
 export const PEER_SELECTION_MS = 5_000;

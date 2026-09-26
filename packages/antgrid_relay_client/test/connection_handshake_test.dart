@@ -11,12 +11,12 @@ import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:test/test.dart';
 
 class _RecordingRelay implements PeerLink {
-  final _messages = StreamController<IncomingPeerFrame>.broadcast();
-  final sent = <({String kind, Uint8List payload})>[];
+  final _messages = StreamController<IncomingSessionRecord>.broadcast();
+  final sent = <Uint8List>[];
   PeerSendOutcome outcome = PeerSendOutcome.accepted;
 
   @override
-  Stream<IncomingPeerFrame> get messageStream => _messages.stream;
+  Stream<IncomingSessionRecord> get messageStream => _messages.stream;
   @override
   Stream<PeerLinkState> get payloadStateStream =>
       const Stream<PeerLinkState>.empty();
@@ -31,12 +31,12 @@ class _RecordingRelay implements PeerLink {
   PeerLinkDiagnostic? get netTap => null;
 
   @override
-  Future<PeerSendOutcome> sendFrame(String kind, Uint8List payload) async {
-    sent.add((kind: kind, payload: payload));
+  Future<PeerSendOutcome> sendRecord(Uint8List payload) async {
+    sent.add(payload);
     return outcome;
   }
 
-  void inject(IncomingPeerFrame msg) => _messages.add(msg);
+  void inject(IncomingSessionRecord msg) => _messages.add(msg);
 
   Future<void> closeStreams() => _messages.close();
 
@@ -47,21 +47,16 @@ class _RecordingRelay implements PeerLink {
 Map<String, dynamic> _decode(Uint8List payload) =>
     jsonDecode(utf8.decode(payload)) as Map<String, dynamic>;
 
-void _replyEstablished(
-  _RecordingRelay relay,
-  String attemptId, {
-  String kind = kPeerFrameSession,
-}) {
+void _reply(_RecordingRelay relay, Map<String, dynamic> body) {
   relay.inject(
-    IncomingPeerFrame(
-      kind: kind,
-      payload: Uint8List.fromList(
-        utf8.encode(
-          jsonEncode({'type': 'established', 'attemptId': attemptId}),
-        ),
-      ),
+    IncomingSessionRecord(
+      payload: Uint8List.fromList(utf8.encode(jsonEncode(body))),
     ),
   );
+}
+
+void _replyEstablished(_RecordingRelay relay, String attemptId) {
+  _reply(relay, {'type': kSessionEstablished, 'attemptId': attemptId});
 }
 
 void main() {
@@ -75,16 +70,15 @@ void main() {
     await relay.closeStreams();
   });
 
-  test('run() sends session:hello on the session kind with a fresh attemptId '
+  test('run() sends a bare session:hello record with a fresh attemptId '
       'and the hello capability literal', () async {
     final hs = ConnectionHandshake(relay: relay);
     final runFuture = hs.run();
     await Future<void>.delayed(Duration.zero);
 
     expect(relay.sent, hasLength(1));
-    expect(relay.sent.single.kind, kPeerFrameSession);
-    final hello = _decode(relay.sent.single.payload);
-    expect(hello['type'], 'session:hello');
+    final hello = _decode(relay.sent.single);
+    expect(hello['type'], kSessionHello);
     expect(hello['attemptId'], isA<String>());
     expect((hello['attemptId'] as String).isNotEmpty, isTrue);
     expect(hello['capabilities'], kSessionHelloCapabilities);
@@ -106,16 +100,16 @@ void main() {
     expect(await runFuture, isFalse);
   });
 
-  test('an established sent as a message-kind frame is ignored', () async {
+  test('a bare established reply does not complete the handshake', () async {
     final hs = ConnectionHandshake(
       relay: relay,
       attemptTimeout: const Duration(milliseconds: 100),
     );
     final runFuture = hs.run();
     await Future<void>.delayed(Duration.zero);
-    final attemptId = _decode(relay.sent.single.payload)['attemptId'] as String;
+    final attemptId = _decode(relay.sent.single)['attemptId'] as String;
 
-    _replyEstablished(relay, attemptId, kind: kPeerFrameMessage);
+    _reply(relay, {'type': 'established', 'attemptId': attemptId});
     expect(await runFuture, isFalse);
   });
 
@@ -131,7 +125,7 @@ void main() {
     final hs = ConnectionHandshake(relay: relay);
     final runFuture = hs.run();
     await Future<void>.delayed(Duration.zero);
-    final attemptId = _decode(relay.sent.single.payload)['attemptId'] as String;
+    final attemptId = _decode(relay.sent.single)['attemptId'] as String;
 
     _replyEstablished(relay, attemptId);
     _replyEstablished(relay, attemptId);
@@ -164,13 +158,13 @@ void main() {
 
       final firstPerform = handshaker.perform();
       await Future<void>.delayed(Duration.zero);
-      final attemptId1 = _decode(relay.sent.single.payload)['attemptId'] as String;
+      final attemptId1 = _decode(relay.sent.single)['attemptId'] as String;
       _replyEstablished(relay, attemptId1);
       expect(await firstPerform, isTrue);
 
       final secondPerform = handshaker.perform();
       await Future<void>.delayed(Duration.zero);
-      final attemptId2 = _decode(relay.sent.last.payload)['attemptId'] as String;
+      final attemptId2 = _decode(relay.sent.last)['attemptId'] as String;
       expect(attemptId2, isNot(attemptId1));
       _replyEstablished(relay, attemptId2);
       expect(await secondPerform, isTrue);

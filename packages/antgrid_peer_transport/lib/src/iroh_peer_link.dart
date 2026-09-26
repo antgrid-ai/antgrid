@@ -148,7 +148,7 @@ class IrohPeerLink implements PeerLink, MultiStreamPeerLink {
   final PeerStreamOpener _opener;
   @override
   final PeerLinkDiagnostic? netTap;
-  final _messages = StreamController<IncomingPeerFrame>.broadcast(sync: true);
+  final _messages = StreamController<IncomingSessionRecord>.broadcast(sync: true);
   final _states = StreamController<PeerLinkState>.broadcast(sync: true);
   final _failures = StreamController<PeerLinkFailure>.broadcast(sync: true);
   bool _closed = false;
@@ -158,7 +158,7 @@ class IrohPeerLink implements PeerLink, MultiStreamPeerLink {
   @override
   bool get isDispatchAllowed => !_closed && _authorized();
   @override
-  Stream<IncomingPeerFrame> get messageStream => _messages.stream;
+  Stream<IncomingSessionRecord> get messageStream => _messages.stream;
   @override
   Stream<PeerLinkState> get payloadStateStream => _states.stream;
   @override
@@ -191,7 +191,7 @@ class IrohPeerLink implements PeerLink, MultiStreamPeerLink {
       while (!_closed) {
         final prefix = await _recv.readExact(4);
         final length = ByteData.sublistView(prefix).getUint32(0, Endian.big);
-        if (length < 4 || length > kPeerMaxBridgeRecordBytes) {
+        if (!peerRecordLengthOk(length, kPeerMaxBridgeRecordBytes)) {
           _fail('INVALID_RECORD_LENGTH', false);
           return;
         }
@@ -200,16 +200,8 @@ class IrohPeerLink implements PeerLink, MultiStreamPeerLink {
           await close();
           return;
         }
-        final frame = decodePeerFrame(bytes);
-        _messages.add(
-          IncomingPeerFrame(
-            kind: frame.header['type'] as String,
-            payload: frame.payload,
-          ),
-        );
+        _messages.add(IncomingSessionRecord(payload: bytes));
       }
-    } on FrameException {
-      _fail('INVALID_RECORD', false);
     } catch (_) {
       if (!_closed) _fail('NATIVE_CLOSE_UNCLASSIFIED', true);
     }
@@ -230,23 +222,18 @@ class IrohPeerLink implements PeerLink, MultiStreamPeerLink {
   }
 
   @override
-  Future<PeerSendOutcome> sendFrame(String kind, Uint8List payload) {
+  Future<PeerSendOutcome> sendRecord(Uint8List payload) {
     if (!isDispatchAllowed) return Future.value(PeerSendOutcome.closed);
-    if (kind != kPeerFrameSession && kind != kPeerFrameMessage) {
-      _fail('INVALID_PEER_FRAME', false);
-      return Future.value(PeerSendOutcome.failed);
-    }
     if (payload.length > kStreamProjectAppRecordMaxBytes) {
       return Future.value(PeerSendOutcome.tooLarge);
     }
-    final frame = encodePeerFrame({'type': kind}, payload);
-    final size = frame.length + 4;
+    final size = payload.length + 4;
     if (_queued + size > kSessionStreamMaxQueuedBytes) {
       return Future.value(PeerSendOutcome.backpressured);
     }
     final record = Uint8List(size);
-    ByteData.sublistView(record).setUint32(0, frame.length, Endian.big);
-    record.setRange(4, size, frame);
+    ByteData.sublistView(record).setUint32(0, payload.length, Endian.big);
+    record.setRange(4, size, payload);
     final completion = Completer<PeerSendOutcome>();
     _pending.add(completion);
     _queued += size;
@@ -348,6 +335,12 @@ class IrohPeerLink implements PeerLink, MultiStreamPeerLink {
 const int kPeerStreamSliceBytes = 262144;
 
 const int _kRecordLengthPrefixBytes = 4;
+
+/// A record's length prefix must be positive and within the reader's cap —
+/// shared by the session stream's read and [NativePeerStream]'s framed read
+/// so the two enforce the same rule.
+bool peerRecordLengthOk(int length, int maxRecordBytes) =>
+    length > 0 && length <= maxRecordBytes;
 
 /// The send half a [NativePeerStream] writes through — narrower than
 /// `iroh.SendStream` so tests can fake it with no native library loaded.
@@ -612,7 +605,7 @@ class NativePeerStream implements PeerStream {
         }
         final prefix = await _recv.readExact(_kRecordLengthPrefixBytes);
         final length = ByteData.sublistView(prefix).getUint32(0, Endian.big);
-        if (length == 0 || length > _maxRecordBytes) {
+        if (!peerRecordLengthOk(length, _maxRecordBytes)) {
           _abandon(PeerStreamFatalCause.protocolViolation);
           return;
         }
