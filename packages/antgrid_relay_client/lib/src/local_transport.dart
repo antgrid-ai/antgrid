@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:web_socket_channel/io.dart';
 
@@ -8,6 +9,7 @@ import 'agent_transport.dart';
 import 'buffered_agent_transport.dart';
 import 'connection_handshake.dart' show kSessionHelloCapabilities;
 import 'relay_service.dart' show RelayNetTap;
+import 'upload_stream.dart';
 
 /// Thrown when the local agent's WebSocket closes during the handshake.
 ///
@@ -70,6 +72,11 @@ class LocalTransport extends BufferedAgentTransport {
 
   IOWebSocketChannel? _ch;
   StreamSubscription? _sub;
+
+  /// Replies awaited by in-flight `file:upload-local` requests, keyed by
+  /// requestId — [dispatchDecoded] claims each `file:upload-result` here
+  /// instead of publishing it to [messages].
+  final _uploadReplies = <String, Completer<Map<String, dynamic>>>{};
 
   /// The WS close code from the socket's last teardown after a successful
   /// handshake (e.g. 4409 = another app superseded ownership of the project).
@@ -405,6 +412,109 @@ class LocalTransport extends BufferedAgentTransport {
     }
   }
 
+  /// The bridge shares this machine's filesystem, so a loopback upload
+  /// writes [bytes] to a temp file and names it in one `file:upload-local`
+  /// instead of carrying the bytes over the socket.
+  @override
+  UploadExchange openUpload({
+    required String requestId,
+    required String projectId,
+    required String checkoutId,
+    required String fileName,
+    required Uint8List bytes,
+    String? mimeType,
+    void Function(int sent, int total)? onProgress,
+  }) {
+    final exchange = _LocalUploadExchange(requestId);
+    // Registered synchronously so a dispose or socket close that lands while
+    // the temp file is still being written fails this upload too.
+    final reply = Completer<Map<String, dynamic>>();
+    reply.future.ignore();
+    _uploadReplies[requestId] = reply;
+    unawaited(
+      _runLocalUpload(exchange, reply.future, {
+        'type': 'file:upload-local',
+        'projectId': projectId,
+        'checkoutId': checkoutId,
+        'requestId': requestId,
+        'fileName': fileName,
+        'mimeType': ?mimeType,
+      }, bytes, onProgress),
+    );
+    return exchange;
+  }
+
+  Future<void> _runLocalUpload(
+    _LocalUploadExchange exchange,
+    Future<Map<String, dynamic>> reply,
+    Map<String, dynamic> request,
+    Uint8List bytes,
+    void Function(int sent, int total)? onProgress,
+  ) async {
+    Directory? dir;
+    try {
+      dir = await Directory.systemTemp.createTemp('antgrid-upload-');
+      // The bridge stages under the request's fileName, never the source's.
+      final source = File('${dir.path}${Platform.pathSeparator}upload');
+      try {
+        await source.writeAsBytes(bytes, flush: true);
+      } catch (e) {
+        throw UploadFailure('WRITE_FAILED', message: '$e');
+      }
+      if (exchange.settled) return;
+      if (_ch == null) throw const UploadFailure('TRANSPORT_CLOSED');
+      onProgress?.call(0, bytes.length);
+      await send({...request, 'sourcePath': source.path});
+      // A cancelled upload still waits here: the bridge may be copying the
+      // temp file, which is deleted only once it answers or times out.
+      final json = await reply.timeout(
+        kUploadResultTimeout,
+        onTimeout: () => throw const UploadFailure('TIMEOUT'),
+      );
+      final result = UploadStreamResult.tryParse(
+        json,
+        requestId: exchange.requestId,
+      );
+      if (result == null) throw const UploadFailure('PROTOCOL');
+      if (result.ok) onProgress?.call(bytes.length, bytes.length);
+      exchange.settle(result);
+    } on UploadFailure catch (failure) {
+      exchange.settle(failure);
+    } catch (e) {
+      exchange.settle(UploadFailure('WRITE_FAILED', message: '$e'));
+    } finally {
+      _uploadReplies.remove(exchange.requestId);
+      if (dir != null) {
+        unawaited(dir.delete(recursive: true).then((_) {}, onError: (_) {}));
+      }
+    }
+  }
+
+  @override
+  void dispatchDecoded(Map<String, dynamic> json, String channel) {
+    if (json['type'] == 'file:upload-result') {
+      final reply = _uploadReplies[json['requestId']];
+      if (reply != null) {
+        if (!reply.isCompleted) reply.complete(json);
+        return;
+      }
+    }
+    super.dispatchDecoded(json, channel);
+  }
+
+  @override
+  void failAllPending({
+    String code = 'E_DISPOSED',
+    String message = 'transport disposed',
+  }) {
+    for (final reply in _uploadReplies.values) {
+      if (!reply.isCompleted) {
+        reply.completeError(const UploadFailure('TRANSPORT_CLOSED'));
+      }
+    }
+    super.failAllPending(code: code, message: message);
+  }
+
   @override
   Future<void> dispose() async {
     failAllPending();
@@ -415,4 +525,31 @@ class LocalTransport extends BufferedAgentTransport {
     await outbound.close();
     await stateController.close();
   }
+}
+
+class _LocalUploadExchange implements UploadExchange {
+  _LocalUploadExchange(this.requestId) {
+    _result.future.ignore();
+  }
+
+  @override
+  final String requestId;
+  final _result = Completer<UploadStreamResult>();
+
+  bool get settled => _result.isCompleted;
+
+  void settle(Object outcome) {
+    if (settled) return;
+    if (outcome is UploadStreamResult) {
+      _result.complete(outcome);
+    } else {
+      _result.completeError(outcome);
+    }
+  }
+
+  @override
+  Future<UploadStreamResult> get result => _result.future;
+
+  @override
+  void cancel() => settle(const UploadFailure('CANCELLED'));
 }

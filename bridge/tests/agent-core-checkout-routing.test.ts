@@ -226,7 +226,10 @@ test("two isolated sessions edit the same relative file without seeing each othe
   expect(await read("main")).toBe("main\n");
 });
 
-/** Drive a whole upload through one checkout and return the file it produced. */
+/** Drive a whole upload through one checkout and return the file it produced.
+ *  `file:upload-local` names an absolute source path on THIS machine
+ *  (loopback only), so the fixture writes the content to a real temp file
+ *  first, the same way `LocalTransport` stages it on the app side. */
 async function uploadThrough(
   bus: MessageBus,
   sent: AbMessage[],
@@ -234,20 +237,11 @@ async function uploadThrough(
   content: string,
 ): Promise<string> {
   const requestId = `upload-${checkoutId}`;
-  bus.dispatchInbound(createMessage("file:upload-start", {
-    projectId: core!.projectId, requestId, fileName: "note.txt",
-    size: Buffer.byteLength(content), checkoutId,
-  }), "control", "loopback");
-  const ready = await waitFor(sent, (m) =>
-    m.type === "file:upload-ready" && m.requestId === requestId,
-  );
-  if (ready.type !== "file:upload-ready") throw new Error("upload was never ready");
-  bus.dispatchInbound(createMessage("file:upload-chunk", {
-    uploadId: ready.uploadId, seq: 0, data: Buffer.from(content).toString("base64"), checkoutId,
-  }), "control", "loopback");
-  await waitFor(sent, (m) => m.type === "file:upload-ack" && m.uploadId === ready.uploadId);
-  bus.dispatchInbound(createMessage("file:upload-done", {
-    uploadId: ready.uploadId, checkoutId,
+  const sourcePath = mkdtempSync(join(tmpdir(), "antgrid-upload-source-"));
+  const sourceFile = join(sourcePath, "note.txt");
+  writeFileSync(sourceFile, content);
+  bus.dispatchInbound(createMessage("file:upload-local", {
+    projectId: core!.projectId, requestId, fileName: "note.txt", sourcePath: sourceFile, checkoutId,
   }), "control", "loopback");
   const result = await waitFor(sent, (m) =>
     m.type === "file:upload-result" && m.requestId === requestId,
@@ -671,29 +665,31 @@ test("admit refuses UPDATE_REQUIRED for a non-routing peer while isolated sessio
   expect(admitted.ok).toBe(true);
 }, 20000);
 
-test("a relay-origin file:upload-start is dropped with a warning, while the identical loopback frame still uploads", async () => {
-  // A remote upload rides its own `upload` stream, never `file:upload-*` bus
-  // frames — those are loopback-only (`LOOPBACK_UPLOAD_MESSAGE_TYPES`), so one
-  // arriving over the relay is a peer that cannot be served this way and must
-  // be dropped rather than answered (§4.4).
+test("a relay-origin file:upload-local is dropped with a warning, while the identical loopback frame still uploads", async () => {
+  // A remote upload rides its own `upload` stream, never a `file:upload-local`
+  // bus frame — that verb names an absolute path on THIS machine and is
+  // loopback-only, so one arriving over the relay is a peer that cannot be
+  // served this way and must be dropped rather than answered (§2).
   const { bus, sent } = await bootCore(true);
+  const sourceDir = mkdtempSync(join(tmpdir(), "antgrid-upload-source-"));
+  const sourceFile = join(sourceDir, "a.bin");
+  writeFileSync(sourceFile, "abc");
 
   const relayLog = await capturingWarnings(async () => {
-    bus.dispatchInbound(createMessage("file:upload-start", {
-      projectId: core!.projectId, requestId: "relay-r1", fileName: "a.bin", size: 3,
+    bus.dispatchInbound(createMessage("file:upload-local", {
+      projectId: core!.projectId, requestId: "relay-r1", fileName: "a.bin", sourcePath: sourceFile,
     }), "control", "relay", "some-peer");
     await new Promise((resolve) => setTimeout(resolve, 200));
   });
   expect(relayLog).toContain("Dropping inbound");
-  expect(sent.find((m) => m.type === "file:upload-ready" && m.requestId === "relay-r1")).toBeUndefined();
   expect(sent.find((m) => m.type === "file:upload-result" && m.requestId === "relay-r1")).toBeUndefined();
 
   sent.length = 0;
-  bus.dispatchInbound(createMessage("file:upload-start", {
-    projectId: core!.projectId, requestId: "loop-r1", fileName: "a.bin", size: 3,
+  bus.dispatchInbound(createMessage("file:upload-local", {
+    projectId: core!.projectId, requestId: "loop-r1", fileName: "a.bin", sourcePath: sourceFile,
   }), "control", "loopback");
-  const ready = await waitFor(sent, (m) => m.type === "file:upload-ready" && m.requestId === "loop-r1");
-  expect(ready).toMatchObject({ type: "file:upload-ready" });
+  const result = await waitFor(sent, (m) => m.type === "file:upload-result" && m.requestId === "loop-r1");
+  expect(result).toMatchObject({ type: "file:upload-result", ok: true });
 });
 
 test("uploadStreams.admit refuses NOT_ALLOWED with the switch off, UPDATE_REQUIRED for a non-routing peer, NOT_ALLOWED for an unknown checkout, and admits a routing peer to the checkout runtime's own manager", async () => {

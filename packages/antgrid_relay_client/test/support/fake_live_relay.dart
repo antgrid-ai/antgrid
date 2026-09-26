@@ -13,7 +13,7 @@ class SentRecord {
       jsonDecode(utf8.decode(payload)) as Map<String, dynamic>;
 }
 
-class FakeLiveRelay implements PeerLink, MultiStreamPeerLink {
+class FakeLiveRelay implements PeerLink {
   FakeLiveRelay({
     RelayConnectionState initial = RelayConnectionState.authenticated,
     this.netTap,

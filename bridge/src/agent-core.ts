@@ -26,7 +26,7 @@ import { AGENT_GRACE_MS, killChildTree, processGroupSpawn } from "./terminal-ses
 import { createConnState, type ConnState } from "./conn-state";
 import type { PeerSessionView, SendTarget, TerminalStreamHooks } from "./project-streams";
 import { FileWatcher } from "./file-watcher";
-import { FileUploadManager, type UploadStreamServer } from "./file-upload";
+import { FileUploadManager, type UploadResultFields, type UploadStreamServer } from "./file-upload";
 import { FileSearcher } from "./file-search";
 import { PortDetector } from "./port-detector";
 import { TunnelManager, type TunnelStreamServer } from "./tunnel-manager";
@@ -46,7 +46,7 @@ import { lineForEvent } from "./session-bus/deliver-event";
 import { isRefusal } from "./session-bus/errors";
 import { neutralizeFenced } from "./session-bus/delivery";
 import type { QueuedLine } from "./session-bus/delivery-queue";
-import { CHECKOUT_VARIABLE_MESSAGE_TYPES, createMessage, HandlerAnswerWire, HandlerConfigureWire, HandlerDismissWire, HandlerInstructWire, HandlerUndoWire, LOOPBACK_UPLOAD_MESSAGE_TYPES, PREVIEW_CHANNEL_MESSAGE_TYPES, type AbMessage, type RpcRequest, type SessionEntry, type WorkStatus } from "./protocol";
+import { CHECKOUT_VARIABLE_MESSAGE_TYPES, createMessage, HandlerAnswerWire, HandlerConfigureWire, HandlerDismissWire, HandlerInstructWire, HandlerUndoWire, PREVIEW_CHANNEL_MESSAGE_TYPES, type AbMessage, type RpcRequest, type SessionEntry, type WorkStatus } from "./protocol";
 import { startApiServer, type ApiServerHandle } from "./api-server";
 import { MessageBus, clientKeyOf, type ClientKey, type InboundSource } from "./message-bus";
 import { resolveAbDir } from "./antgrid-dir";
@@ -1767,15 +1767,35 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         }
         break;
       }
-      case "file:upload-start":
-        runtime.uploadManager?.handleStart(msg);
+      case "file:upload-local": {
+        // Defense in depth: the real chokepoint is the source check in
+        // attachTransport's inbound handler, which never lets a relay-origin
+        // frame reach here at all (see `handleAbMessage`'s caller).
+        if (client !== "loopback") break;
+        const reply = (fields: UploadResultFields) => sendAbTo(createMessage("file:upload-result", {
+          requestId: msg.requestId, checkoutId: runtime.checkout.id, ...fields,
+        }), "loopback");
+        // The loopback socket belongs to one core, already admitted through
+        // seenProjects/isSafeProjectId when it opened — this only catches a
+        // mismatched frame, never selects among projects.
+        if (msg.projectId !== project.id) {
+          reply({ ok: false, error: "NOT_ALLOWED", message: "wrong project" });
+          break;
+        }
+        if (!runtime.uploadManager) {
+          reply({ ok: false, error: "NOT_ALLOWED", message: "uploads are not available for this checkout" });
+          break;
+        }
+        // `.catch` before the reply: an escaped rejection reaches index.ts's
+        // `unhandledRejection` hook, which shuts the whole host down.
+        void runtime.uploadManager.copyLocal({
+          requestId: msg.requestId, fileName: msg.fileName, sourcePath: msg.sourcePath,
+        }).catch((err): UploadResultFields => {
+          log.error("file:upload-local failed: %s", err);
+          return { ok: false, error: "WRITE_FAILED", message: "Could not copy the file" };
+        }).then(reply);
         break;
-      case "file:upload-chunk":
-        runtime.uploadManager?.handleChunk(msg);
-        break;
-      case "file:upload-done":
-        runtime.uploadManager?.handleDone(msg);
-        break;
+      }
       case "file:search": {
         const fs = runtime.fileSearcher;
         if (fs) {
@@ -3585,10 +3605,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     runtime.uploadManager = new FileUploadManager({
       projectId: project.id,
       projectPath: runtime.checkout.path,
-      // A remote app uploads over its own `upload` stream (`uploadStreams.admit`),
-      // never the bus, so these result verbs are addressed to the desktop only
-      // (see `LOOPBACK_UPLOAD_MESSAGE_TYPES`).
-      send: (msg) => sendAbTo({ ...msg, checkoutId: runtime.checkout.id } as AbMessage, "loopback"),
     });
     runtime.uploadManager.startSweeper();
     await yieldToEventLoop();
@@ -4464,10 +4480,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     uploadManager = new FileUploadManager({
       projectId: project.id,
       projectPath: project.path,
-      // A remote app uploads over its own `upload` stream (`uploadStreams.admit`),
-      // never the bus, so these result verbs are addressed to the desktop only
-      // (see `LOOPBACK_UPLOAD_MESSAGE_TYPES`).
-      send: (msg) => sendAbTo(msg, "loopback"),
     });
     uploadManager.startSweeper();
     mainRuntime.uploadManager = uploadManager;
@@ -4922,11 +4934,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         );
         return;
       }
-      // A remote app uploads over its own `upload` stream (`uploadStreams.admit`
-      // above), never the bus — these five verbs plus the shared result type
-      // cross the loopback socket only (`LOOPBACK_UPLOAD_MESSAGE_TYPES`).
-      if (source !== "loopback" && LOOPBACK_UPLOAD_MESSAGE_TYPES.has(msg.type)) {
-        log.warn("Dropping inbound %s: a remote app uploads on its own stream (project %s)", msg.type, project.id);
+      // `file:upload-local` names a path on THIS machine — accepted only from
+      // the desktop's own loopback socket, never a relay-origin frame. A
+      // remote app uploads over its own `upload` stream (`uploadStreams.admit`
+      // above) instead.
+      if (source !== "loopback" && msg.type === "file:upload-local") {
+        log.warn("Dropping inbound %s: it names a local path and is accepted only from loopback (project %s)", msg.type, project.id);
         return;
       }
       if (msg.type === "request") {

@@ -49,6 +49,25 @@ abstract interface class PeerLink {
   /// with no header.
   Future<PeerSendOutcome> sendRecord(Uint8List payload);
 
+  /// Opens one stream and writes [open] as its first record: a fresh native
+  /// stream is invisible to the peer until something is written on it.
+  /// Throws if the link may not dispatch or the open frame cannot be sent.
+  /// A bridge refusal arrives later, in-band, as a `stream:refused` record
+  /// on [PeerStream.records]. The bounds differ by stream kind, so neither
+  /// has a default.
+  ///
+  /// [rawAfterRecords], when set (>= 1), switches the stream to raw reads
+  /// after that many decoded records have been delivered on [PeerStream.records]:
+  /// every later event is an unframed chunk, a FIN closes the stream cleanly,
+  /// and a reset delivers one [PeerStreamReset] before closing it. Used by the
+  /// upload and tunnel-http streams, whose bodies carry no per-record framing.
+  Future<PeerStream> openStream(
+    StreamOpen open, {
+    required int maxRecordBytes,
+    required int maxQueuedBytes,
+    int? rawAfterRecords,
+  });
+
   Future<void> close();
 }
 
@@ -56,7 +75,7 @@ abstract interface class PeerLink {
 /// peer reset its send half, or the connection went, before FIN. Record mode
 /// cannot distinguish a reset from a FIN (both just close [PeerStream.records]),
 /// so this is raised only once a stream has moved into raw reads
-/// ([MultiStreamPeerLink.openStream]'s `rawAfterRecords`).
+/// ([PeerLink.openStream]'s `rawAfterRecords`).
 final class PeerStreamReset implements Exception {
   const PeerStreamReset();
 }
@@ -87,29 +106,4 @@ abstract interface class PeerStream {
 
   /// Writes what is already queued, then ends the send half cleanly.
   Future<void> finish();
-}
-
-/// A link that can open purpose-specific streams. Separate from [PeerLink]
-/// so implementers with a single channel need not grow a stream API.
-abstract interface class MultiStreamPeerLink {
-  bool get isDispatchAllowed;
-
-  /// Opens one stream and writes [open] as its first record: a fresh native
-  /// stream is invisible to the peer until something is written on it.
-  /// Throws if the link may not dispatch or the open frame cannot be sent.
-  /// A bridge refusal arrives later, in-band, as a `stream:refused` record
-  /// on [PeerStream.records]. The bounds differ by stream kind, so neither
-  /// has a default.
-  ///
-  /// [rawAfterRecords], when set (>= 1), switches the stream to raw reads
-  /// after that many decoded records have been delivered on [PeerStream.records]:
-  /// every later event is an unframed chunk, a FIN closes the stream cleanly,
-  /// and a reset delivers one [PeerStreamReset] before closing it. Used by the
-  /// upload and tunnel-http streams, whose bodies carry no per-record framing.
-  Future<PeerStream> openStream(
-    StreamOpen open, {
-    required int maxRecordBytes,
-    required int maxQueuedBytes,
-    int? rawAfterRecords,
-  });
 }

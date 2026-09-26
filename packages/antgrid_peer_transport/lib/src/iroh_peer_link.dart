@@ -128,7 +128,7 @@ class NativeEndpointOwner {
   Future<void> close() => endpoint.close();
 }
 
-class IrohPeerLink implements PeerLink, MultiStreamPeerLink {
+class IrohPeerLink implements PeerLink {
   IrohPeerLink._(
     this._connection,
     this._send,

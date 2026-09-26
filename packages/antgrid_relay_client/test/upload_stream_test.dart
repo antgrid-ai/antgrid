@@ -1,8 +1,7 @@
 // Coverage for `_StreamUploadExchange` (the native-stream path in
-// `machine_session.dart`) plus the socket-path NOT_SUPPORTED fallback. The
-// fake `MultiStreamPeerLink` below is written fresh for this file rather than
-// shared with `tunnel_stream_test.dart` — the two suites drift independently
-// on purpose.
+// `machine_session.dart`). The fake `PeerLink` below is written fresh for
+// this file rather than shared with `tunnel_stream_test.dart` — the two
+// suites drift independently on purpose.
 import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
@@ -352,74 +351,12 @@ void main() {
       );
     });
   });
-
-  group('StreamTransport.openUpload over a non-multi-stream link', () {
-    test('falls back to NOT_SUPPORTED', () async {
-      // Mirrors tunnel_stream_test.dart: since A4 a project's own transport
-      // only ever exists over a MultiStreamPeerLink, so the only reachable
-      // non-multi-stream transport left is session.control.
-      final link = _PlainPeerLink();
-      final session = MachineSession(
-        relay: link,
-        machineDeviceId: 'm1',
-        handshaker: FakeHandshaker(),
-      );
-      session.start();
-      await session.ensureEstablished();
-      addTearDown(() async {
-        await session.dispose();
-      });
-
-      final transport = session.control;
-      final exchange = transport.openUpload(
-        requestId: 'r1',
-        projectId: 'proj-a',
-        checkoutId: 'main',
-        fileName: 'hi.bin',
-        bytes: Uint8List.fromList([1]),
-      );
-      await expectLater(
-        exchange.result,
-        throwsA(
-          isA<UploadFailure>().having((e) => e.code, 'code', 'NOT_SUPPORTED'),
-        ),
-      );
-    });
-  });
 }
 
 Future<void> pumpEventQueue() =>
     Future<void>.delayed(const Duration(milliseconds: 20));
 
-/// A [PeerLink] that does NOT also implement [MultiStreamPeerLink] — see
-/// `tunnel_stream_test.dart`'s identical fixture.
-class _PlainPeerLink implements PeerLink {
-  final _messages = StreamController<IncomingSessionRecord>.broadcast();
-  final _states = StreamController<PeerLinkState>.broadcast();
-  final _failures = StreamController<PeerLinkFailure>.broadcast();
-
-  @override
-  bool get isDispatchAllowed => true;
-  @override
-  Stream<IncomingSessionRecord> get messageStream => _messages.stream;
-  @override
-  Stream<PeerLinkState> get payloadStateStream => _states.stream;
-  @override
-  Stream<PeerPath> get pathStream => const Stream.empty();
-  @override
-  Stream<PeerLinkFailure> get failureStream => _failures.stream;
-  @override
-  PeerLinkDiagnostic? get netTap => null;
-
-  @override
-  Future<PeerSendOutcome> sendRecord(Uint8List payload) async =>
-      PeerSendOutcome.accepted;
-
-  @override
-  Future<void> close() async {}
-}
-
-class _FakeMultiStreamLink implements PeerLink, MultiStreamPeerLink {
+class _FakeMultiStreamLink implements PeerLink {
   _FakeMultiStreamLink({PeerLinkDiagnostic? netTap}) : _netTap = netTap;
 
   final _messages = StreamController<IncomingSessionRecord>.broadcast();

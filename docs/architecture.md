@@ -37,10 +37,10 @@ WS frame is still a tagged record, since one stream multiplexes many of them).
 A remote file upload rides its own stream the same way: the app writes the
 file's raw bytes directly, with no bus frame and no app-layer chunking, and
 the bridge answers with one result record. The desktop app's own local
-upload is unaffected — it still crosses the loopback socket as
-`file:upload-*` bus messages (`LOOPBACK_UPLOAD_MESSAGE_TYPES`,
-`bridge/src/protocol.ts`), since a same-machine caller has no QUIC stream to
-open one over.
+upload writes the bytes to a temp file on the shared filesystem instead —
+it crosses the loopback socket as one `file:upload-local` message
+(`bridge/src/protocol.ts`) naming that path, and gets back one
+`file:upload-result`.
 
 ### Native peer payloads
 

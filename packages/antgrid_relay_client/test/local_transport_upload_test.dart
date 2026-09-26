@@ -1,8 +1,3 @@
-// D2: loopback keeps the socket upload exchange. `LocalTransport` inherits
-// `BufferedAgentTransport.openUpload`, so an upload through it must speak
-// `file:upload-start/chunk/done` on the local socket and settle from the
-// bridge's ready/ack/result replies, none of which may leak onto `messages`.
-// Server fixture modeled on `local_transport_tunnel_test.dart`'s `_EchoServer`.
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -14,7 +9,10 @@ import 'package:test/test.dart';
 class _UploadServer {
   late final HttpServer _server;
   final received = <Map<String, dynamic>>[];
-  final chunks = BytesBuilder();
+
+  /// Set to answer the next `file:upload-local` with a `file:upload-result`;
+  /// `null` sends nothing back, so a case can drive TIMEOUT itself.
+  Map<String, dynamic>? Function(Map<String, dynamic> request)? onUploadLocal;
 
   int get port => _server.port;
 
@@ -38,41 +36,10 @@ class _UploadServer {
                       'error': {'code': 'E_UNSUPPORTED', 'message': 'no'},
                     }),
                   );
-                case 'file:upload-start':
+                case 'file:upload-local':
                   received.add(m);
-                  ws.add(
-                    jsonEncode({
-                      'channel': 'control',
-                      'type': 'file:upload-ready',
-                      'requestId': m['requestId'],
-                      'uploadId': 'up-1',
-                      'checkoutId': m['checkoutId'],
-                    }),
-                  );
-                case 'file:upload-chunk':
-                  received.add(m);
-                  chunks.add(base64Decode(m['data'] as String));
-                  ws.add(
-                    jsonEncode({
-                      'channel': 'control',
-                      'type': 'file:upload-ack',
-                      'uploadId': m['uploadId'],
-                      'seq': m['seq'],
-                    }),
-                  );
-                case 'file:upload-done':
-                  received.add(m);
-                  ws.add(
-                    jsonEncode({
-                      'channel': 'control',
-                      'type': 'file:upload-result',
-                      'requestId': 'req-1',
-                      'uploadId': m['uploadId'],
-                      'ok': true,
-                      'path': '/abs/up-1-a.bin',
-                      'relPath': '.antgrid/uploads/up-1-a.bin',
-                    }),
-                  );
+                  final reply = onUploadLocal?.call(m);
+                  if (reply != null) ws.add(jsonEncode(reply));
                 default:
                   received.add(m);
               }
@@ -103,15 +70,27 @@ void main() {
   });
 
   test(
-    'openUpload rides the socket exchange in chunks and settles from the '
-    'replies, which never reach messages',
+    'openUpload sends one file:upload-local naming a temp file and settles '
+    'from the result, which never reaches messages',
     () async {
       final leaked = <InboundMessage>[];
       final sub = transport.messages.listen(leaked.add);
-      final bytes = Uint8List.fromList(
-        List<int>.generate(kSocketUploadChunkBytes + 5, (i) => i % 251),
-      );
+      final bytes = Uint8List.fromList(List<int>.generate(600000, (i) => i % 251));
       final progress = <int>[];
+      String? sourcePath;
+      List<int>? sourceBytes;
+
+      server.onUploadLocal = (m) {
+        sourcePath = m['sourcePath'] as String?;
+        sourceBytes = File(sourcePath!).readAsBytesSync();
+        return {
+          'type': 'file:upload-result',
+          'requestId': m['requestId'],
+          'ok': true,
+          'path': '/abs/up-1-a.bin',
+          'relPath': '.antgrid/uploads/up-1-a.bin',
+        };
+      };
 
       final exchange = transport.openUpload(
         requestId: 'req-1',
@@ -125,25 +104,71 @@ void main() {
 
       expect(result.ok, isTrue);
       expect(result.path, '/abs/up-1-a.bin');
-      expect(server.chunks.takeBytes(), bytes);
-      expect(
-        server.received.map((m) => m['type']),
-        [
-          'file:upload-start',
-          'file:upload-chunk',
-          'file:upload-chunk',
-          'file:upload-done',
-        ],
-      );
+      expect(server.received.map((m) => m['type']), ['file:upload-local']);
       expect(server.received.first['checkoutId'], 'main');
-      expect(progress, [kSocketUploadChunkBytes, bytes.length]);
+      expect(progress, [0, bytes.length]);
+      expect(sourceBytes, bytes);
+      expect(server.received.first.containsKey('data'), isFalse);
 
       await Future<void>.delayed(const Duration(milliseconds: 20));
       expect(
         leaked.where((m) => (m.json['type'] as String).startsWith('file:upload')),
         isEmpty,
       );
+      // The temp file is cleaned up only once the bridge's answer is in.
+      expect(File(sourcePath!).existsSync(), isFalse);
       await sub.cancel();
     },
   );
+
+  // Waits out the real `kUploadResultTimeout` — the exchange has no injectable
+  // clock, unlike the RPC-health tests' constructor-supplied duration.
+  test('openUpload fails TIMEOUT when the bridge never answers', () async {
+    server.onUploadLocal = (_) => null;
+    final exchange = transport.openUpload(
+      requestId: 'req-timeout',
+      projectId: 'proj-a',
+      checkoutId: 'main',
+      fileName: 'a.bin',
+      bytes: Uint8List.fromList([1, 2, 3]),
+    );
+    await expectLater(
+      exchange.result,
+      throwsA(isA<UploadFailure>().having((f) => f.code, 'code', 'TIMEOUT')),
+    );
+  }, timeout: const Timeout(Duration(seconds: 40)));
+
+  test('cancel() settles CANCELLED without waiting for the bridge', () async {
+    server.onUploadLocal = (_) => null;
+    final exchange = transport.openUpload(
+      requestId: 'req-cancel',
+      projectId: 'proj-a',
+      checkoutId: 'main',
+      fileName: 'a.bin',
+      bytes: Uint8List.fromList([1, 2, 3]),
+    );
+    exchange.cancel();
+    await expectLater(
+      exchange.result,
+      throwsA(isA<UploadFailure>().having((f) => f.code, 'code', 'CANCELLED')),
+    );
+  });
+
+  test('dispose() fails every in-flight upload TRANSPORT_CLOSED', () async {
+    server.onUploadLocal = (_) => null;
+    final exchange = transport.openUpload(
+      requestId: 'req-dispose',
+      projectId: 'proj-a',
+      checkoutId: 'main',
+      fileName: 'a.bin',
+      bytes: Uint8List.fromList([1, 2, 3]),
+    );
+    await transport.dispose();
+    await expectLater(
+      exchange.result,
+      throwsA(
+        isA<UploadFailure>().having((f) => f.code, 'code', 'TRANSPORT_CLOSED'),
+      ),
+    );
+  });
 }

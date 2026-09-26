@@ -1,19 +1,21 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, mkdirSync, utimesSync, readdirSync } from "node:fs";
+import {
+  mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, mkdirSync,
+  utimesSync, readdirSync, openSync, ftruncateSync, closeSync, symlinkSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   FileUploadManager, sanitizeUploadFileName, MAX_UPLOAD_BYTES,
   type UploadResultFields,
 } from "../src/file-upload";
-import { createMessage, type AbMessage, type FileUploadReady } from "../src/protocol";
 import { loadIgnoreRules } from "../src/file-tree";
 import { setLogLevel } from "../src/logger";
 
 setLogLevel("error");
 
-function lastOfType<T extends AbMessage["type"]>(sent: AbMessage[], type: T) {
-  return [...sent].reverse().find((m) => m.type === type) as Extract<AbMessage, { type: T }> | undefined;
+function partFilesIn(dir: string): string[] {
+  return existsSync(dir) ? readdirSync(dir).filter((f: string) => f.endsWith(".part")) : [];
 }
 
 describe("sanitizeUploadFileName", () => {
@@ -38,129 +40,16 @@ describe("sanitizeUploadFileName", () => {
 
 describe("FileUploadManager", () => {
   let projectDir: string;
-  let sent: AbMessage[];
   let mgr: FileUploadManager;
 
   beforeEach(() => {
     projectDir = mkdtempSync(join(tmpdir(), "antgrid-upload-test-"));
-    sent = [];
-    mgr = new FileUploadManager({
-      projectId: "p",
-      projectPath: projectDir,
-      send: (m) => sent.push(m),
-    });
+    mgr = new FileUploadManager({ projectId: "p", projectPath: projectDir });
   });
 
   afterEach(() => {
     mgr.stop();
     rmSync(projectDir, { recursive: true, force: true });
-  });
-
-  function start(size: number, fileName = "data.bin", requestId = "r1"): string {
-    mgr.handleStart(createMessage("file:upload-start", {
-      projectId: "p", requestId, fileName, size,
-    }));
-    const ready = lastOfType(sent, "file:upload-ready");
-    expect(ready).toBeDefined();
-    return (ready as FileUploadReady).uploadId;
-  }
-
-  it("happy path: start → chunks → done writes the file and returns its absolute path", () => {
-    const payload = Buffer.from("hello upload world");
-    const uploadId = start(payload.length);
-
-    mgr.handleChunk(createMessage("file:upload-chunk", {
-      uploadId, seq: 0, data: payload.subarray(0, 10).toString("base64"),
-    }));
-    expect(lastOfType(sent, "file:upload-ack")!.seq).toBe(0);
-    mgr.handleChunk(createMessage("file:upload-chunk", {
-      uploadId, seq: 1, data: payload.subarray(10).toString("base64"),
-    }));
-    expect(lastOfType(sent, "file:upload-ack")!.seq).toBe(1);
-
-    mgr.handleDone(createMessage("file:upload-done", { uploadId }));
-    const result = lastOfType(sent, "file:upload-result")!;
-    expect(result.ok).toBe(true);
-    expect(result.path).toBeDefined();
-    expect(result.path!.startsWith(join(projectDir, ".antgrid", "uploads"))).toBe(true);
-    expect(readFileSync(result.path!).equals(payload)).toBe(true);
-  });
-
-  it("writes a self-ignoring .antgrid/.gitignore", () => {
-    const uploadId = start(1);
-    mgr.handleChunk(createMessage("file:upload-chunk", { uploadId, seq: 0, data: Buffer.from("x").toString("base64") }));
-    mgr.handleDone(createMessage("file:upload-done", { uploadId }));
-    expect(readFileSync(join(projectDir, ".antgrid", ".gitignore"), "utf8")).toContain("*");
-  });
-
-  it("rejects over-cap declared size at start", () => {
-    mgr.handleStart(createMessage("file:upload-start", {
-      projectId: "p", requestId: "r1", fileName: "big.bin", size: MAX_UPLOAD_BYTES + 1,
-    }));
-    const result = lastOfType(sent, "file:upload-result")!;
-    expect(result.ok).toBe(false);
-    expect(result.error).toBe("TOO_LARGE");
-  });
-
-  it("rejects a name that sanitizes to nothing", () => {
-    mgr.handleStart(createMessage("file:upload-start", {
-      projectId: "p", requestId: "r1", fileName: "...", size: 10,
-    }));
-    expect(lastOfType(sent, "file:upload-result")!.error).toBe("INVALID_NAME");
-  });
-
-  it("rejects out-of-order chunk seq and aborts the upload", () => {
-    const uploadId = start(20);
-    mgr.handleChunk(createMessage("file:upload-chunk", { uploadId, seq: 1, data: Buffer.from("x").toString("base64") }));
-    const result = lastOfType(sent, "file:upload-result")!;
-    expect(result.ok).toBe(false);
-    expect(result.error).toBe("BAD_SEQUENCE");
-    // the aborted upload is forgotten — a follow-up chunk gets UPLOAD_NOT_FOUND
-    mgr.handleChunk(createMessage("file:upload-chunk", { uploadId, seq: 0, data: "eA==" }));
-    expect(lastOfType(sent, "file:upload-result")!.error).toBe("UPLOAD_NOT_FOUND");
-  });
-
-  it("rejects cumulative bytes over the declared size", () => {
-    const uploadId = start(4);
-    mgr.handleChunk(createMessage("file:upload-chunk", {
-      uploadId, seq: 0, data: Buffer.from("12345").toString("base64"),
-    }));
-    expect(lastOfType(sent, "file:upload-result")!.error).toBe("SIZE_MISMATCH");
-  });
-
-  it("rejects a chunk whose data is not valid base64", () => {
-    const uploadId = start(10);
-    mgr.handleChunk(createMessage("file:upload-chunk", { uploadId, seq: 0, data: "@@@@" }));
-    expect(lastOfType(sent, "file:upload-result")!.error).toBe("WRITE_FAILED");
-  });
-
-  it("rejects an empty chunk and frees the slot (no indefinite slot-hold)", () => {
-    const uploadId = start(10);
-    mgr.handleChunk(createMessage("file:upload-chunk", { uploadId, seq: 0, data: "" }));
-    expect(lastOfType(sent, "file:upload-result")!.error).toBe("WRITE_FAILED");
-    // the aborted upload is forgotten, so its slot no longer counts against the cap
-    mgr.handleChunk(createMessage("file:upload-chunk", { uploadId, seq: 1, data: "eA==" }));
-    expect(lastOfType(sent, "file:upload-result")!.error).toBe("UPLOAD_NOT_FOUND");
-  });
-
-  it("rejects done when received bytes < declared size", () => {
-    const uploadId = start(10);
-    mgr.handleChunk(createMessage("file:upload-chunk", { uploadId, seq: 0, data: Buffer.from("123").toString("base64") }));
-    mgr.handleDone(createMessage("file:upload-done", { uploadId }));
-    expect(lastOfType(sent, "file:upload-result")!.error).toBe("SIZE_MISMATCH");
-  });
-
-  it("unknown uploadId on done → UPLOAD_NOT_FOUND", () => {
-    mgr.handleDone(createMessage("file:upload-done", { uploadId: "nope" }));
-    expect(lastOfType(sent, "file:upload-result")!.error).toBe("UPLOAD_NOT_FOUND");
-  });
-
-  it("caps concurrent uploads at 4 → BUSY", () => {
-    for (let i = 0; i < 4; i++) start(10, `f${i}.bin`, `r${i}`);
-    mgr.handleStart(createMessage("file:upload-start", {
-      projectId: "p", requestId: "r5", fileName: "f5.bin", size: 10,
-    }));
-    expect(lastOfType(sent, "file:upload-result")!.error).toBe("BUSY");
   });
 
   it("sweepStale removes files older than 24h and leaves fresh ones", () => {
@@ -175,17 +64,6 @@ describe("FileUploadManager", () => {
     mgr.sweepStale();
     expect(existsSync(oldFile)).toBe(false);
     expect(existsSync(freshFile)).toBe(true);
-  });
-
-  it("stop() deletes in-flight .part files", () => {
-    const uploadId = start(10);
-    mgr.handleChunk(createMessage("file:upload-chunk", { uploadId, seq: 0, data: Buffer.from("123").toString("base64") }));
-    mgr.stop();
-    const dir = join(projectDir, ".antgrid", "uploads");
-    const leftovers = existsSync(dir)
-      ? readdirSync(dir).filter((f: string) => f.endsWith(".part"))
-      : [];
-    expect(leftovers.length).toBe(0);
   });
 
   describe("begin()/StreamUpload (the stream-upload path)", () => {
@@ -223,9 +101,7 @@ describe("FileUploadManager", () => {
       if (!begun.ok) return;
       expect(begun.upload.write(Buffer.from("abc"))).toBe("oversize");
       expect(results().length).toBe(0);
-      const dir = join(projectDir, ".antgrid", "uploads");
-      const leftovers = existsSync(dir) ? readdirSync(dir).filter((f) => f.endsWith(".part")) : [];
-      expect(leftovers.length).toBe(0);
+      expect(partFilesIn(join(projectDir, ".antgrid", "uploads")).length).toBe(0);
     });
 
     it("end() short of the declared size reports INCOMPLETE and removes the partial", () => {
@@ -237,9 +113,7 @@ describe("FileUploadManager", () => {
       expect(results().length).toBe(1);
       expect(results()[0]!.ok).toBe(false);
       expect(results()[0]!.error).toBe("INCOMPLETE");
-      const dir = join(projectDir, ".antgrid", "uploads");
-      const leftovers = existsSync(dir) ? readdirSync(dir).filter((f) => f.endsWith(".part")) : [];
-      expect(leftovers.length).toBe(0);
+      expect(partFilesIn(join(projectDir, ".antgrid", "uploads")).length).toBe(0);
     });
 
     it("cancel() removes the partial without ever calling onResult, and is idempotent", () => {
@@ -249,9 +123,7 @@ describe("FileUploadManager", () => {
       begun.upload.write(Buffer.from("abc"));
       begun.upload.cancel();
       expect(results().length).toBe(0);
-      const dir = join(projectDir, ".antgrid", "uploads");
-      const leftovers = existsSync(dir) ? readdirSync(dir).filter((f) => f.endsWith(".part")) : [];
-      expect(leftovers.length).toBe(0);
+      expect(partFilesIn(join(projectDir, ".antgrid", "uploads")).length).toBe(0);
       // idempotent: a second cancel (e.g. a racing stream reset after the app
       // already FIN'd) must not throw or report anything.
       expect(() => begun.upload.cancel()).not.toThrow();
@@ -275,33 +147,149 @@ describe("FileUploadManager", () => {
       mgr.stop();
       expect(results().length).toBe(1);
       expect(results()[0]!.error).toBe("WRITE_FAILED");
-      const dir = join(projectDir, ".antgrid", "uploads");
-      const leftovers = existsSync(dir) ? readdirSync(dir).filter((f) => f.endsWith(".part")) : [];
-      expect(leftovers.length).toBe(0);
+      expect(partFilesIn(join(projectDir, ".antgrid", "uploads")).length).toBe(0);
     });
 
-    it("rejects an over-cap declared size the same way handleStart does", () => {
+    it("rejects an over-cap declared size the same way copyLocal does", () => {
       const begun = mgr.begin({ requestId: "s1", fileName: "big.bin", size: MAX_UPLOAD_BYTES + 1 }, onResult);
       expect(begun.ok).toBe(false);
       if (begun.ok) return;
       expect(begun.result.error).toBe("TOO_LARGE");
     });
+  });
 
-    it("MAX_CONCURRENT_UPLOADS is shared between the socket path and the stream path", () => {
-      start(10, "a.bin", "r1");
-      start(10, "b.bin", "r2");
-      const begun1 = mgr.begin({ requestId: "s1", fileName: "c.bin", size: 10 }, onResult);
-      expect(begun1.ok).toBe(true);
-      const begun2 = mgr.begin({ requestId: "s2", fileName: "d.bin", size: 10 }, onResult);
-      expect(begun2.ok).toBe(true);
-      // Cap (4) is now full across both paths.
-      const begun3 = mgr.begin({ requestId: "s3", fileName: "e.bin", size: 10 }, onResult);
-      expect(begun3.ok).toBe(false);
-      if (!begun3.ok) expect(begun3.result.error).toBe("BUSY");
-      mgr.handleStart(createMessage("file:upload-start", {
-        projectId: "p", requestId: "r5", fileName: "f5.bin", size: 10,
-      }));
-      expect(lastOfType(sent, "file:upload-result")!.error).toBe("BUSY");
+  describe("copyLocal() (the loopback file:upload-local path)", () => {
+    let sourceDir: string;
+
+    beforeEach(() => {
+      sourceDir = mkdtempSync(join(tmpdir(), "antgrid-upload-source-"));
+    });
+
+    afterEach(() => {
+      rmSync(sourceDir, { recursive: true, force: true });
+    });
+
+    it("happy path: copies the source byte-identical, finalizes it, and leaves no .part behind", async () => {
+      const payload = Buffer.from("hello from the desktop's own disk");
+      const src = join(sourceDir, "note.txt");
+      writeFileSync(src, payload);
+      const result = await mgr.copyLocal({ requestId: "r1", fileName: "note.txt", sourcePath: src });
+      expect(result.ok).toBe(true);
+      expect(result.path).toBeDefined();
+      expect(result.path!.startsWith(join(projectDir, ".antgrid", "uploads"))).toBe(true);
+      expect(readFileSync(result.path!).equals(payload)).toBe(true);
+      expect(existsSync(result.path! + ".part")).toBe(false);
+    });
+
+    it("a directory source is refused INVALID_SOURCE", async () => {
+      const result = await mgr.copyLocal({ requestId: "r1", fileName: "dir.bin", sourcePath: sourceDir });
+      expect(result.ok).toBe(false);
+      expect(result.error).toBe("INVALID_SOURCE");
+      expect(partFilesIn(join(projectDir, ".antgrid", "uploads")).length).toBe(0);
+    });
+
+    it("a missing source is refused INVALID_SOURCE", async () => {
+      const result = await mgr.copyLocal({
+        requestId: "r1", fileName: "gone.bin", sourcePath: join(sourceDir, "does-not-exist.bin"),
+      });
+      expect(result.ok).toBe(false);
+      expect(result.error).toBe("INVALID_SOURCE");
+    });
+
+    it("a relative path is refused INVALID_SOURCE before any filesystem check", async () => {
+      const result = await mgr.copyLocal({ requestId: "r1", fileName: "rel.bin", sourcePath: "relative/path.bin" });
+      expect(result.ok).toBe(false);
+      expect(result.error).toBe("INVALID_SOURCE");
+    });
+
+    it("a symlink source is refused INVALID_SOURCE", async () => {
+      const target = join(sourceDir, "target.bin");
+      writeFileSync(target, "x");
+      const link = join(sourceDir, "link.bin");
+      try {
+        symlinkSync(target, link, "file");
+      } catch {
+        // Creating a file symlink on Windows needs Developer Mode or an
+        // elevated shell — nothing to assert if this sandbox can't grant it.
+        return;
+      }
+      const result = await mgr.copyLocal({ requestId: "r1", fileName: "link.bin", sourcePath: link });
+      expect(result.ok).toBe(false);
+      expect(result.error).toBe("INVALID_SOURCE");
+    });
+
+    it("a source over MAX_UPLOAD_BYTES is refused TOO_LARGE and leaves no .part behind", async () => {
+      // A sparse file: ftruncate declares the size without writing real bytes,
+      // so the assertion is on the declared (lstat'd) size, not on content —
+      // exactly what the size check reads before anything is copied.
+      const src = join(sourceDir, "big.bin");
+      const fd = openSync(src, "w");
+      ftruncateSync(fd, MAX_UPLOAD_BYTES + 1);
+      closeSync(fd);
+      const result = await mgr.copyLocal({ requestId: "r1", fileName: "big.bin", sourcePath: src });
+      expect(result.ok).toBe(false);
+      expect(result.error).toBe("TOO_LARGE");
+      expect(partFilesIn(join(projectDir, ".antgrid", "uploads")).length).toBe(0);
+    });
+
+    // The loopback verb is parsed by `parseMessageFast`, which checks `type`
+    // alone — every field reaches copyLocal unvalidated, and a rejection
+    // escaping it reaches index.ts's `unhandledRejection` shutdown.
+    it("never rejects: a staging directory that cannot be created answers WRITE_FAILED", async () => {
+      const src = join(sourceDir, "note.txt");
+      writeFileSync(src, "x");
+      // A plain file where the `.antgrid` directory belongs makes the mkdir fail.
+      writeFileSync(join(projectDir, ".antgrid"), "not a directory");
+      const result = await mgr.copyLocal({ requestId: "r1", fileName: "note.txt", sourcePath: src });
+      expect(result.ok).toBe(false);
+      expect(result.error).toBe("WRITE_FAILED");
+    });
+
+    it("never rejects: non-string fields answer INVALID_SOURCE / INVALID_NAME", async () => {
+      const src = join(sourceDir, "note.txt");
+      writeFileSync(src, "x");
+      const badSource = await mgr.copyLocal({ requestId: "r1", fileName: "a.txt", sourcePath: 42 as unknown as string });
+      expect(badSource.error).toBe("INVALID_SOURCE");
+      const badName = await mgr.copyLocal({ requestId: "r1", fileName: null as unknown as string, sourcePath: src });
+      expect(badName.error).toBe("INVALID_NAME");
+    });
+
+    it("the size cap is read from the source's stat before staging or copying anything", async () => {
+      const src = join(sourceDir, "big.bin");
+      const fd = openSync(src, "w");
+      ftruncateSync(fd, MAX_UPLOAD_BYTES + 1);
+      closeSync(fd);
+      // Staging is made impossible: only a refusal that runs before any
+      // staging/copy step can still answer TOO_LARGE rather than WRITE_FAILED.
+      writeFileSync(join(projectDir, ".antgrid"), "not a directory");
+      const result = await mgr.copyLocal({ requestId: "r1", fileName: "big.bin", sourcePath: src });
+      expect(result.error).toBe("TOO_LARGE");
+    });
+
+    it("a name that sanitizes to nothing is refused INVALID_NAME", async () => {
+      const src = join(sourceDir, "note.txt");
+      writeFileSync(src, "x");
+      const result = await mgr.copyLocal({ requestId: "r1", fileName: "...", sourcePath: src });
+      expect(result.ok).toBe(false);
+      expect(result.error).toBe("INVALID_NAME");
+    });
+
+    it("BUSY beyond the concurrency limit, shared with the stream path", async () => {
+      // Fill the cap (4) with open stream uploads first — deterministic,
+      // unlike racing copyLocal's own async lstat against itself — then prove
+      // copyLocal reads the same counter: one call over the shared cap.
+      const collected: UploadResultFields[] = [];
+      // MAX_CONCURRENT_UPLOADS (file-upload.ts) is private; keep 4 in step
+      // with it.
+      for (let i = 0; i < 4; i++) {
+        const begun = mgr.begin({ requestId: `s${i}`, fileName: `f${i}.bin`, size: 10 }, (r) => collected.push(r));
+        expect(begun.ok).toBe(true);
+      }
+      const src = join(sourceDir, "c.bin");
+      writeFileSync(src, "x");
+      const result = await mgr.copyLocal({ requestId: "r5", fileName: "c.bin", sourcePath: src });
+      expect(result.ok).toBe(false);
+      expect(result.error).toBe("BUSY");
     });
   });
 });

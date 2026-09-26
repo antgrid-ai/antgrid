@@ -265,10 +265,14 @@ fields) are defined once in `packages/antgrid-wire/src/stream-open.ts` beside ev
 (`STREAM_PRIORITY_UPLOAD`, the same as tunnel priority — a background transfer never needs to preempt a
 live terminal or project viewer) are side-local to `bridge/src/peer/upload-streams.ts`.
 
-**Loopback unchanged.** The desktop app's own local upload still crosses the loopback socket as
-`file:upload-start/ready/chunk/ack/done/result` (`LOOPBACK_UPLOAD_MESSAGE_TYPES`, `bridge/src/protocol.ts`)
-— a same-machine caller has no QUIC stream to open one over, and a relay-origin frame naming one of these
-six types is dropped rather than dispatched.
+**Loopback is a different message entirely.** The desktop app shares the bridge's filesystem, so its own
+local upload writes the bytes to a temp file and names that path instead of streaming them — it crosses the loopback socket as one `file:upload-local`
+(`{projectId, requestId, fileName, sourcePath, mimeType?}`, `bridge/src/protocol.ts`) and gets back one
+`file:upload-result`. A relay-origin frame naming `file:upload-local` is dropped before dispatch (it names a
+path on THIS machine, which only the desktop's own loopback caller can mean), so a remote app uploads over
+its own `upload` stream (above) instead. `FileUploadManager.copyLocal` stats `sourcePath` before copying —
+`INVALID_SOURCE` if it is not an absolute path to a readable file, `TOO_LARGE` past the same cap a streamed
+upload enforces — then copies it through the same staging directory and finalizer a streamed upload uses.
 
 ## 2. The hello
 

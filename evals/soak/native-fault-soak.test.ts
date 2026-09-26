@@ -32,8 +32,10 @@ test("seeded loopback native fault soak releases ownership and never duplicates 
   const random = randomSource(seed);
   const owned = new Set<number>();
   const startedAt = Date.now();
+  Bun.gc(true); // force a full collection first — an uncollected sender-side buffer would otherwise inflate the baseline itself
   const initialRss = process.memoryUsage().rss;
   let cycle = 0;
+  let rssDelta = 0;
   try {
     do {
       const current = cycle++;
@@ -77,8 +79,11 @@ test("seeded loopback native fault soak releases ownership and never duplicates 
       }
       await waitForNoConnections(() => relay.connectionCount());
       expect(owned.size).toBe(0);
-      expect(process.memoryUsage().rss - initialRss).toBeLessThan(128 * 1024 * 1024);
+      Bun.gc(true); // same reason as the baseline: without it, GC timing noise dwarfs a real per-cycle leak
+      rssDelta = process.memoryUsage().rss - initialRss;
+      expect(rssDelta).toBeLessThan(128 * 1024 * 1024);
     } while (Date.now() - startedAt < durationMs);
+    console.info(`native soak: ${cycle} cycles, final RSS delta ${rssDelta} bytes`);
   } finally {
     relay.stop();
   }

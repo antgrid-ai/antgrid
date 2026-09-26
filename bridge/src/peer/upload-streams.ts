@@ -13,17 +13,17 @@
  */
 
 import { STREAM_MAX_UPLOAD_STREAMS_PER_PEER, type UploadStreamOpen } from "antgrid-wire";
-import { isSafeProjectId } from "../project-id";
 import { createMessage } from "../protocol";
 import type { StreamUpload, UploadResultFields } from "../file-upload";
 import {
+  gateProjectStream,
   refuseStream,
   type AcceptedBiStream,
   type StreamAdmission,
   type StreamHandler,
   type StreamRefusal as DispatchStreamRefusal,
 } from "./stream-dispatch";
-import { STREAM_RAW_READ_BYTES, StreamRawReader, StreamRecordWriter } from "./stream-records";
+import { STREAM_RAW_READ_BYTES, StreamRawReader, StreamRecordWriter, stopRecvWhenSettled } from "./stream-records";
 import type { UploadProjectBinding } from "../project-streams";
 import type { NetwatchStreamKind } from "../netwatch";
 
@@ -100,31 +100,15 @@ export class UploadStreamRegistry {
     peerId: string,
     open: UploadStreamOpen,
   ): { ok: true; projBinding: UploadProjectBinding } | { ok: false; refusal: DispatchStreamRefusal } {
-    if (this.streamCount(peerId) >= STREAM_MAX_UPLOAD_STREAMS_PER_PEER) {
-      return { ok: false, refusal: { code: "CAP_EXCEEDED", message: "too many uploads" } };
-    }
-    if (!isSafeProjectId(open.projectId)) {
-      return { ok: false, refusal: { code: "NOT_ALLOWED", message: "unsafe project id" } };
-    }
-    if (!this.opts.projectCataloged || !this.opts.projectCataloged(open.projectId)) {
-      return { ok: false, refusal: { code: "NOT_ALLOWED", message: "project not recognized" } };
-    }
-    const projBinding = this.opts.uploadBinding(open.projectId);
-    if (projBinding === null) {
-      return { ok: false, refusal: { code: "NOT_READY", message: "project is not attached" } };
-    }
-    if (!projBinding.hasOpenStream(peerId)) {
-      return { ok: false, refusal: { code: "NOT_ALLOWED", message: "open the project stream first" } };
-    }
-    const refusal = projBinding.refusalFor(peerId);
-    if (refusal) {
-      return {
-        ok: false,
-        refusal: refusal.code === "UPDATE_REQUIRED"
-          ? { code: "UPDATE_REQUIRED", message: refusal.message }
-          : { code: "NOT_ALLOWED", message: refusal.message },
-      };
-    }
+    const gated = gateProjectStream(
+      peerId,
+      open.projectId,
+      { open: this.streamCount(peerId), max: STREAM_MAX_UPLOAD_STREAMS_PER_PEER, message: "too many uploads" },
+      this.opts.projectCataloged,
+      (id) => this.opts.uploadBinding(id),
+    );
+    if (!gated.ok) return gated;
+    const projBinding = gated.binding;
     if (this.bindings.has(this.key(peerId, open.requestId))) {
       return { ok: false, refusal: { code: "INVALID", message: "duplicate id" } };
     }
@@ -292,11 +276,7 @@ export class UploadStreamRegistry {
     await binding.writer.finish();
     const pending = binding.pendingRead;
     this.unbind(binding);
-    if (pending) {
-      void pending.then(() => {}, () => {}).then(() => { void binding.stream.recv.stop(STREAM_STOP_UPLOAD).catch(() => {}); });
-    } else {
-      void binding.stream.recv.stop(STREAM_STOP_UPLOAD).catch(() => {});
-    }
+    stopRecvWhenSettled(pending, () => { void binding.stream.recv.stop(STREAM_STOP_UPLOAD).catch(() => {}); });
   }
 
   // ---- Writer failures, teardown ----------------------------------------------

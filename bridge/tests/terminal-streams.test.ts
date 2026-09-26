@@ -7,7 +7,6 @@ import { describe, test, expect } from "bun:test";
 import {
   TerminalStreamRegistry,
   TERMINAL_STREAM_MAX_QUEUED_BYTES,
-  STREAM_PRIORITY_TERMINAL,
   STREAM_RESET_TERMINAL,
   STREAM_STOP_TERMINAL,
   type TerminalStreamRegistryOptions,
@@ -334,16 +333,6 @@ describe("TerminalStreamRegistry (A2)", () => {
     const { fake, result } = admit(registry, {});
     expect((await refusalOf(result))?.code).toBe("NOT_ALLOWED");
     expect(fake.readCalls).toEqual([]);
-  });
-
-  test("an admitted stream sets STREAM_PRIORITY_TERMINAL once, before its first write", async () => {
-    const { registry, cataloged, bindings } = makeRegistry();
-    cataloged.add(PROJECT);
-    const { binding, dispatched } = fakeBinding();
-    bindings.set(PROJECT, binding);
-    const { fake } = await admitAndBind(registry, binding, dispatched);
-    expect(fake.setPriorityCalls).toEqual([STREAM_PRIORITY_TERMINAL]);
-    expect(fake.order.indexOf("setPriority")).toBeLessThan(fake.order.indexOf("writeAll"));
   });
 
   test("the first record must be the matching terminal:subscribe; anything else aborts only that stream and stops its receive half after the read completed", async () => {

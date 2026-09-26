@@ -7,9 +7,9 @@
  * control traffic (`s` omitted / `"0"`) never reaches this file.
  *
  * This registry is plugged into `PeerStreamAcceptor` as the `project`
- * handler, and into `TerminalStreamRegistry`/`TunnelStreamRegistry` as
- * `projectBinding`/`tunnelBinding` (A2/A3): those never open or promote a
- * core, only look up whatever this registry already has attached.
+ * handler, and into the terminal, tunnel and upload registries as
+ * `projectBinding`: those never open or promote a core, only look up whatever
+ * this registry already has attached.
  */
 
 import {
@@ -84,52 +84,48 @@ export interface TerminalStreamHooks {
   subscribeSettled(peerId: string, requestId: string, attachmentId: string | undefined): void;
 }
 
-/** What `TerminalStreamRegistry` needs from a project's entry to admit and
- *  route a terminal stream without opening or promoting a core itself (A2). */
-export interface TerminalProjectBinding {
+/** What the terminal, tunnel and upload registries need from a project's
+ *  entry to admit and route their own stream kind without opening or
+ *  promoting a core themselves. Each registry is typed against only the slice
+ *  it uses (a tunnel or upload stream carries no bus traffic, so neither calls
+ *  `dispatch`). */
+export interface ProjectBinding {
   /** The peer holds an open project stream for this project (A4's single
    *  per-peer admission point, root CLAUDE.md's checkout-routing invariant). */
   hasOpenStream(peerId: string): boolean;
   /** `entry.opts.mayAcceptFrom(peerSession(peerId))`, re-read on every call —
    *  the same per-sender gate `dispatch` applies. */
   refusalFor(peerId: string): StreamRefusal | null;
+  /** Per-RECEIVER gate for a stream already admitted: the mirror of
+   *  `refusalFor` for outbound records (a tunnel head/body/end, a WS frame,
+   *  or an upload result). */
+  mayDeliverTo(peerId: string): boolean;
   /** Re-runs `refusalFor`, then `entry.bus.dispatchInbound(msg, "control",
    *  "relay", peerId)`. False when the entry has gone or `refusalFor` now
    *  refuses. Does NOT require an open project stream (no cascade, §0). */
   dispatch(msg: AbMessage, peerId: string): boolean;
-}
-
-/** What `TunnelStreamRegistry` needs from a project's entry to admit and
- *  route a tunnel stream without opening or promoting a core itself (A3). A
- *  tunnel stream carries no bus traffic, so unlike {@link TerminalProjectBinding}
- *  it has no `dispatch` — only the per-sender gate and the project's own
- *  {@link TunnelStreamServer}, which the registry calls to admit the stream. */
-export interface TunnelProjectBinding {
-  hasOpenStream(peerId: string): boolean;
-  refusalFor(peerId: string): StreamRefusal | null;
-  /** Per-RECEIVER gate for a stream already admitted: the mirror of
-   *  `refusalFor` for outbound records (head/body/end, or a WS frame). */
-  mayDeliverTo(peerId: string): boolean;
   /** The project's tunnel server, or null if the entry is gone or declared
    *  none — either way the registry refuses the stream NOT_ALLOWED. */
   tunnels(): TunnelStreamServer | null;
-}
-
-/** What `UploadStreamRegistry` needs from a project's entry to admit an
- *  upload stream without opening or promoting a core itself. Mirrors
- *  {@link TunnelProjectBinding}'s shape — an upload stream carries no bus
- *  traffic either, only the per-sender gate and the project's own
- *  {@link UploadStreamServer}. */
-export interface UploadProjectBinding {
-  hasOpenStream(peerId: string): boolean;
-  refusalFor(peerId: string): StreamRefusal | null;
-  /** Per-RECEIVER gate for a stream already admitted: the mirror of
-   *  `refusalFor` for the outbound result record. */
-  mayDeliverTo(peerId: string): boolean;
   /** The project's upload server, or null if the entry is gone or declared
    *  none — either way the registry refuses the stream NOT_ALLOWED. */
   uploads(): UploadStreamServer | null;
 }
+
+/** What `TerminalStreamRegistry` needs from a project's entry (A2). */
+export type TerminalProjectBinding = Pick<ProjectBinding, "hasOpenStream" | "refusalFor" | "dispatch">;
+
+/** What `TunnelStreamRegistry` needs from a project's entry (A3). A tunnel
+ *  stream carries no bus traffic, so unlike {@link TerminalProjectBinding} it
+ *  has no `dispatch` — only the per-sender gate and the project's own
+ *  {@link TunnelStreamServer}. */
+export type TunnelProjectBinding = Pick<ProjectBinding, "hasOpenStream" | "refusalFor" | "mayDeliverTo" | "tunnels">;
+
+/** What `UploadStreamRegistry` needs from a project's entry. Mirrors
+ *  {@link TunnelProjectBinding}'s shape — an upload stream carries no bus
+ *  traffic either, only the per-sender gate and the project's own
+ *  {@link UploadStreamServer}. */
+export type UploadProjectBinding = Pick<ProjectBinding, "hasOpenStream" | "refusalFor" | "mayDeliverTo" | "uploads">;
 
 /** What one app session looks like to everything outside the relay client. No
  *  key material ever leaves that file. */
@@ -643,9 +639,11 @@ export class ProjectStreamRegistry {
     for (const entry of this.entries) entry.opts.onPeerSessionGone?.(peerId);
   }
 
-  // ---- Lookups for terminal/tunnel admission ----------------------------------
+  // ---- Lookup for terminal/tunnel/upload admission ----------------------------
 
-  projectBinding(projectId: string): TerminalProjectBinding | null {
+  /** Lookup only — never opens or promotes a core. `null` once the project
+   *  has no live entry, which every registry treats as `NOT_READY`. */
+  projectBinding(projectId: string): ProjectBinding | null {
     const entry = this.latestEntryFor(projectId);
     if (!entry) return null;
     const live = () => this.entries.includes(entry);
@@ -654,6 +652,13 @@ export class ProjectStreamRegistry {
       refusalFor: (peerId) => {
         if (!live()) return { code: "NOT_ALLOWED", message: "project stream is gone" };
         return entry.opts.mayAcceptFrom?.(this.opts.peerSession(peerId)) ?? null;
+      },
+      mayDeliverTo: (peerId) => {
+        if (!live()) return false;
+        if (!(entry.opts.mayDeliver?.() ?? true)) return false;
+        if (!entry.opts.mayDeliverTo) return true;
+        const peer = this.opts.peerSession(peerId);
+        return peer !== null && entry.opts.mayDeliverTo(peer);
       },
       dispatch: (msg, peerId) => {
         if (!live()) return false;
@@ -662,47 +667,7 @@ export class ProjectStreamRegistry {
         entry.bus.dispatchInbound(msg, "control", "relay", peerId);
         return true;
       },
-    };
-  }
-
-  tunnelBinding(projectId: string): TunnelProjectBinding | null {
-    const entry = this.latestEntryFor(projectId);
-    if (!entry) return null;
-    const live = () => this.entries.includes(entry);
-    return {
-      hasOpenStream: (peerId) => this.hasOpenStream(peerId, projectId),
-      refusalFor: (peerId) => {
-        if (!live()) return { code: "NOT_ALLOWED", message: "project stream is gone" };
-        return entry.opts.mayAcceptFrom?.(this.opts.peerSession(peerId)) ?? null;
-      },
-      mayDeliverTo: (peerId) => {
-        if (!live()) return false;
-        if (!(entry.opts.mayDeliver?.() ?? true)) return false;
-        if (!entry.opts.mayDeliverTo) return true;
-        const peer = this.opts.peerSession(peerId);
-        return peer !== null && entry.opts.mayDeliverTo(peer);
-      },
       tunnels: () => (live() ? entry.opts.tunnels ?? null : null),
-    };
-  }
-
-  uploadBinding(projectId: string): UploadProjectBinding | null {
-    const entry = this.latestEntryFor(projectId);
-    if (!entry) return null;
-    const live = () => this.entries.includes(entry);
-    return {
-      hasOpenStream: (peerId) => this.hasOpenStream(peerId, projectId),
-      refusalFor: (peerId) => {
-        if (!live()) return { code: "NOT_ALLOWED", message: "project stream is gone" };
-        return entry.opts.mayAcceptFrom?.(this.opts.peerSession(peerId)) ?? null;
-      },
-      mayDeliverTo: (peerId) => {
-        if (!live()) return false;
-        if (!(entry.opts.mayDeliver?.() ?? true)) return false;
-        if (!entry.opts.mayDeliverTo) return true;
-        const peer = this.opts.peerSession(peerId);
-        return peer !== null && entry.opts.mayDeliverTo(peer);
-      },
       uploads: () => (live() ? entry.opts.uploads ?? null : null),
     };
   }

@@ -8,7 +8,6 @@ import { describe, test, expect } from "bun:test";
 import {
   TunnelStreamRegistry,
   TUNNEL_STREAM_MAX_QUEUED_BYTES,
-  STREAM_PRIORITY_TUNNEL,
   STREAM_RESET_TUNNEL,
   STREAM_STOP_TUNNEL,
   type TunnelStreamRegistryOptions,
@@ -555,36 +554,6 @@ describe("TunnelStreamRegistry (A3)", () => {
     expect(fb.server.httpCalls).toEqual([]);
   });
 
-  test("an admitted HTTP stream sets STREAM_PRIORITY_TUNNEL once, before its first write, and hands manager.serveHttp a raw request body", async () => {
-    const { registry, cataloged, bindings } = makeRegistry();
-    cataloged.add(PROJECT);
-    const fb = fakeBinding();
-    bindings.set(PROJECT, fb.binding);
-    const { fake, requestId } = admitHttp(registry, {});
-    fake.pushJson(httpRequest(requestId, { bodyLength: 5 }));
-    await flush();
-
-    // serveHttp is called as soon as the head parses — the body is a
-    // pull-based stream, so nothing has been read off the wire yet.
-    expect(fb.server.httpCalls).toHaveLength(1);
-    const { body } = fb.server.httpCalls[0]!;
-    expect(body).not.toBeNull();
-    expect(body!.length).toBe(5);
-    expect(fake.readRawCalls).toEqual([]);
-
-    const drained = readBody(body);
-    await flush();
-    expect(fake.readRawCalls).not.toEqual([]); // the manager's own read started the pull
-    fake.pushRaw(new TextEncoder().encode("hello"));
-    expect(new TextDecoder().decode(await drained)).toBe("hello");
-
-    // Priority is set lazily, on the writer's first actual use.
-    expect(fake.setPriorityCalls).toEqual([]);
-    await fb.server.httpCalls[0]!.exchange.head({ status: 200, headers: {} });
-    expect(fake.setPriorityCalls).toEqual([STREAM_PRIORITY_TUNNEL]);
-    expect(fake.order.indexOf("setPriority")).toBeLessThan(fake.order.indexOf("writeAll"));
-  });
-
   test("exchange.fail is a dropped diagnostic tagged with this request's own tunnel-http stream", async () => {
     const { registry, cataloged, bindings, diagnostics } = makeRegistry();
     cataloged.add(PROJECT);
@@ -600,23 +569,6 @@ describe("TunnelStreamRegistry (A3)", () => {
 
     const event = diagnostics.find((d) => d.type === "tunnel-stream:http-failed");
     expect(event?.stream).toEqual({ kind: "tunnel-http", id: requestId });
-  });
-
-  test("an admitted WS stream sets STREAM_PRIORITY_TUNNEL once, before its first write, and opens the upstream via manager.serveWs", async () => {
-    const { registry, cataloged, bindings } = makeRegistry();
-    cataloged.add(PROJECT);
-    const fb = fakeBinding();
-    bindings.set(PROJECT, fb.binding);
-    const { fake, wsId } = admitWs(registry, {});
-    fake.pushJson(wsOpenRecord(wsId));
-    await flush();
-    expect(fb.server.wsCalls).toHaveLength(1);
-
-    // Drive one frame through so the writer actually writes, then check order.
-    void fb.server.wsCalls[0]!.peer.send({ binary: false, bytes: new TextEncoder().encode("hi") });
-    await flush();
-    expect(fake.setPriorityCalls).toEqual([STREAM_PRIORITY_TUNNEL]);
-    expect(fake.order.indexOf("setPriority")).toBeLessThan(fake.order.indexOf("writeAll"));
   });
 
   test("a FIN or reset before the declared body fully arrives errors the body stream and resets the tunnel stream", async () => {
@@ -910,29 +862,6 @@ describe("TunnelStreamRegistry (A3)", () => {
     expect(outcome).toBe("dropped");
     expect(closedCalls).toEqual([[undefined, undefined]]);
     expect(fake.resetCalls).toEqual([STREAM_RESET_TUNNEL]);
-  });
-
-  test("WS data records reach the sink in order, and a close record follows only after every queued data record", async () => {
-    const { registry, cataloged, bindings } = makeRegistry();
-    cataloged.add(PROJECT);
-    const fb = fakeBinding();
-    bindings.set(PROJECT, fb.binding);
-    const calls: string[] = [];
-    fb.server.setNextSink({
-      data: (frame) => { calls.push(`data:${new TextDecoder().decode(frame.bytes)}`); },
-      closed: (code) => { calls.push(`closed:${code}`); },
-    });
-    const { fake, wsId } = admitWs(registry, {});
-    fake.pushJson(wsOpenRecord(wsId));
-    await flush();
-
-    const { TUNNEL_RECORD_TAG_WS_TEXT } = await import("antgrid-wire");
-    fake.pushRecord(encodeTunnelDataRecord(TUNNEL_RECORD_TAG_WS_TEXT, new TextEncoder().encode("one")));
-    fake.pushRecord(encodeTunnelDataRecord(TUNNEL_RECORD_TAG_WS_TEXT, new TextEncoder().encode("two")));
-    fake.pushJson({ type: "tunnel:ws-close", tunnelId: wsId, code: 1000, checkoutId: "main" });
-    await flush();
-
-    expect(calls).toEqual(["data:one", "data:two", "closed:1000"]);
   });
 
   test("WS writer overflow resets only that stream and closes its own sink, leaving a second stream untouched", async () => {

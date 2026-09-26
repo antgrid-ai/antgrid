@@ -87,12 +87,10 @@ abstract class BufferedAgentTransport implements AgentTransport {
     const TunnelExchangeFailure('NOT_SUPPORTED'),
   );
 
-  /// Loopback path for every [BufferedAgentTransport]: the
-  /// start/ready/chunk/ack/done/result exchange over this transport's own
-  /// [send]. `StreamTransport` overrides [openUpload] to ride its own native
-  /// stream instead when its link supports one.
-  late final SocketUploads socketUploads = SocketUploads((m) => send(m));
-
+  /// Base default: every native-stream transport (`StreamTransport`)
+  /// overrides this with the real implementation. `LocalTransport` overrides
+  /// it too, with the loopback `file:upload-local` exchange; this stays only
+  /// for a test subclass that ignores uploads.
   @override
   UploadExchange openUpload({
     required String requestId,
@@ -102,15 +100,7 @@ abstract class BufferedAgentTransport implements AgentTransport {
     required Uint8List bytes,
     String? mimeType,
     void Function(int sent, int total)? onProgress,
-  }) => socketUploads.open(
-    requestId: requestId,
-    projectId: projectId,
-    checkoutId: checkoutId,
-    fileName: fileName,
-    bytes: bytes,
-    mimeType: mimeType,
-    onProgress: onProgress,
-  );
+  }) => FailedUploadExchange(const UploadFailure('NOT_SUPPORTED'));
 
   @override
   Stream<InboundMessage> get messages {
@@ -236,11 +226,6 @@ abstract class BufferedAgentTransport implements AgentTransport {
     // A reply belonging to an open terminal attachment is claimed there
     // instead of reaching the public stream — see [SocketTerminalAttachments.divert].
     if (terminalAttachments.divert(json)) return;
-    if (type == 'file:upload-ready' ||
-        type == 'file:upload-ack' ||
-        type == 'file:upload-result') {
-      if (socketUploads.dispatch(json)) return;
-    }
     outbound.add(InboundMessage(channel, json));
   }
 

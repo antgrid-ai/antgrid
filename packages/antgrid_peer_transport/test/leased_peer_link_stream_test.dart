@@ -67,7 +67,7 @@ class _FakePeerStream implements PeerStream {
 
 /// A PeerLink that also opens streams — the shape every production
 /// `LeasedPeerLink.inner` has, since it always wraps `NativeEndpointOwner.dial`.
-class _FakeMultiStreamLink implements PeerLink, MultiStreamPeerLink {
+class _FakeMultiStreamLink implements PeerLink {
   bool closed = false;
   StreamOpen? lastOpen;
   _FakePeerStream? lastStream;
@@ -111,31 +111,6 @@ class _FakeMultiStreamLink implements PeerLink, MultiStreamPeerLink {
   }
 }
 
-/// A plain, single-stream link — no [MultiStreamPeerLink] support, the shape
-/// every OTHER production `PeerLink` implementer has today.
-class _PlainLink implements PeerLink {
-  bool closed = false;
-  @override
-  bool get isDispatchAllowed => !closed;
-  @override
-  PeerLinkDiagnostic? get netTap => null;
-  @override
-  Stream<IncomingSessionRecord> get messageStream => const Stream.empty();
-  @override
-  Stream<PeerLinkState> get payloadStateStream => const Stream.empty();
-  @override
-  Stream<PeerPath> get pathStream => const Stream.empty();
-  @override
-  Stream<PeerLinkFailure> get failureStream => const Stream.empty();
-  @override
-  Future<PeerSendOutcome> sendRecord(Uint8List payload) async =>
-      PeerSendOutcome.accepted;
-  @override
-  Future<void> close() async {
-    closed = true;
-  }
-}
-
 LeasedPeerLink _leased(PeerLink inner, AuthorizationLease lease) =>
     LeasedPeerLink(
       inner,
@@ -154,8 +129,8 @@ AuthorizationLease _lease() => AuthorizationLease(
 
 void main() {
   test(
-    'openStream delegates to a MultiStreamPeerLink inner, writing the same '
-    'StreamOpen and wiring both halves through',
+    'openStream delegates to the inner link, writing the same StreamOpen '
+    'and wiring both halves through',
     () async {
       final lease = _lease();
       addTearDown(lease.dispose);
@@ -253,27 +228,6 @@ void main() {
       ),
     );
   });
-
-  test(
-    'openStream throws UnsupportedError when inner has no multi-stream support',
-    () async {
-      final lease = _lease();
-      addTearDown(lease.dispose);
-      expect(await lease.refresh(), isTrue);
-      final inner = _PlainLink();
-      final link = _leased(inner, lease);
-      addTearDown(link.close);
-
-      await expectLater(
-        link.openStream(
-          const SessionStreamOpen(),
-          maxRecordBytes: 1024,
-          maxQueuedBytes: 1024,
-        ),
-        throwsA(isA<UnsupportedError>()),
-      );
-    },
-  );
 
   test(
     'a lease revoked while the inner open is in flight resets the returned '

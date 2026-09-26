@@ -8,7 +8,6 @@
 // `projectStreamEvents`, and the record-size caps on a bound project stream.
 import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:test/test.dart';
@@ -149,42 +148,6 @@ void main() {
         rejectStart('proj-$i');
       }
       await Future.wait(settled);
-    });
-  });
-
-  group('STREAM_UNSUPPORTED', () {
-    test('a ready project on a link with no purpose-specific streams fails '
-        'without ever calling openStream', () async {
-      final link = _PlainPeerLink();
-      session = MachineSession(
-        relay: link,
-        machineDeviceId: 'm1',
-        handshaker: FakeHandshaker(),
-      );
-      session.start();
-      await session.ensureEstablished();
-      link.inject(
-        IncomingSessionRecord(
-          payload: encodeFromAgent(
-            jsonEncode({'type': 'stream-ready', 'projectId': 'proj-a'}),
-          ),
-        ),
-      );
-      await Future<void>.delayed(const Duration(milliseconds: 20));
-
-      await expectLater(
-        session.openProject('proj-a', {
-          'type': 'project:start',
-          'projectId': 'proj-a',
-        }),
-        throwsA(
-          isA<ProjectBindException>().having(
-            (e) => e.code,
-            'code',
-            'STREAM_UNSUPPORTED',
-          ),
-        ),
-      );
     });
   });
 
@@ -667,35 +630,4 @@ void main() {
       },
     );
   });
-}
-
-/// A [PeerLink] that does NOT also implement [MultiStreamPeerLink] —
-/// `FakeLiveRelay` implements both (every native link does), so this stands
-/// in for an older relay to exercise `openProject`'s STREAM_UNSUPPORTED path.
-class _PlainPeerLink implements PeerLink {
-  final _messages = StreamController<IncomingSessionRecord>.broadcast();
-  final _states = StreamController<PeerLinkState>.broadcast();
-  final _failures = StreamController<PeerLinkFailure>.broadcast();
-
-  @override
-  bool get isDispatchAllowed => true;
-  @override
-  Stream<IncomingSessionRecord> get messageStream => _messages.stream;
-  @override
-  Stream<PeerLinkState> get payloadStateStream => _states.stream;
-  @override
-  Stream<PeerPath> get pathStream => const Stream.empty();
-  @override
-  Stream<PeerLinkFailure> get failureStream => _failures.stream;
-  @override
-  PeerLinkDiagnostic? get netTap => null;
-
-  void inject(IncomingSessionRecord frame) => _messages.add(frame);
-
-  @override
-  Future<PeerSendOutcome> sendRecord(Uint8List payload) async =>
-      PeerSendOutcome.accepted;
-
-  @override
-  Future<void> close() async {}
 }

@@ -158,7 +158,7 @@ export class NativePeerSessions extends PeerSessionOwner {
     });
     this.tunnelStreams = new TunnelStreamRegistry({
       projectCataloged: nativeOpts.projectCataloged,
-      tunnelBinding: (projectId) => this.projectStreams.tunnelBinding(projectId),
+      tunnelBinding: (projectId) => this.projectStreams.projectBinding(projectId),
       // Guarded the same way `terminalStreams`'s is: a stale binding from a
       // superseded connection must never retire the peer's NEWER one.
       retirePeer: (peerId, reason) => { if (this.nativePeers.has(peerId)) this.retirePeer(peerId, reason); },
@@ -168,7 +168,7 @@ export class NativePeerSessions extends PeerSessionOwner {
     });
     this.uploadStreams = new UploadStreamRegistry({
       projectCataloged: nativeOpts.projectCataloged,
-      uploadBinding: (projectId) => this.projectStreams.uploadBinding(projectId),
+      uploadBinding: (projectId) => this.projectStreams.projectBinding(projectId),
       // Guarded the same way `terminalStreams`'s / `tunnelStreams`'s is: a
       // stale binding from a superseded connection must never retire the
       // peer's NEWER one.

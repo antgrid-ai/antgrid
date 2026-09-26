@@ -7,7 +7,7 @@ import 'authorization.dart';
 import 'connection_attempt.dart';
 
 /// Fences native payload dispatch with the authoritative enrollment lease.
-class LeasedPeerLink implements PeerLink, MultiStreamPeerLink {
+class LeasedPeerLink implements PeerLink {
   LeasedPeerLink(
     this.inner,
     this.lease, {
@@ -93,8 +93,7 @@ class LeasedPeerLink implements PeerLink, MultiStreamPeerLink {
   }
 
   /// The lease fence covers the open and every read and write on the stream
-  /// it returns. Production always wraps `NativeEndpointOwner.dial`, whose
-  /// link is multi-stream; any other `inner` is a wiring error.
+  /// it returns.
   @override
   Future<PeerStream> openStream(
     StreamOpen open, {
@@ -108,13 +107,7 @@ class LeasedPeerLink implements PeerLink, MultiStreamPeerLink {
         terminal: true,
       );
     }
-    if (inner is! MultiStreamPeerLink) {
-      throw UnsupportedError(
-        'LeasedPeerLink.openStream requires a MultiStreamPeerLink inner link',
-      );
-    }
-    final multiInner = inner as MultiStreamPeerLink;
-    final stream = await multiInner.openStream(
+    final stream = await inner.openStream(
       open,
       maxRecordBytes: maxRecordBytes,
       maxQueuedBytes: maxQueuedBytes,

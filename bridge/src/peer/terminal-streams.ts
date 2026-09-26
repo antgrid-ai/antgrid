@@ -19,7 +19,6 @@ import {
   STREAM_TERMINAL_BRIDGE_RECORD_MAX_BYTES,
   type TerminalStreamOpen,
 } from "antgrid-wire";
-import { isSafeProjectId } from "../project-id";
 import { createMessage, parseMessage, type AbMessage } from "../protocol";
 import type { NetwatchStreamKind } from "../netwatch";
 import {
@@ -28,11 +27,12 @@ import {
   type StreamSendOutcome,
   type StreamWriteFailure,
 } from "./stream-records";
-import type {
-  AcceptedBiStream,
-  StreamAdmission,
-  StreamHandler,
-  StreamRefusal as DispatchStreamRefusal,
+import {
+  gateProjectStream,
+  type AcceptedBiStream,
+  type StreamAdmission,
+  type StreamHandler,
+  type StreamRefusal as DispatchStreamRefusal,
 } from "./stream-dispatch";
 import type { PeerSessionView, TerminalProjectBinding } from "../project-streams";
 
@@ -135,35 +135,22 @@ export class TerminalStreamRegistry {
     const { projectId, requestId } = open;
     const checkoutId = open.checkoutId ?? "main";
 
-    if (this.attachmentCount(peerId) >= STREAM_MAX_TERMINAL_ATTACHMENTS_PER_PEER) {
-      return { code: "CAP_EXCEEDED", message: "too many terminal attachments" };
-    }
     if (!requestIdSchema.safeParse(requestId).success) {
       return { code: "INVALID", message: "requestId must be a uuid" };
-    }
-    if (!isSafeProjectId(projectId)) {
-      return { code: "NOT_ALLOWED", message: "unsafe project id" };
-    }
-    if (!this.opts.projectCataloged || !this.opts.projectCataloged(projectId)) {
-      return { code: "NOT_ALLOWED", message: "project not recognized" };
-    }
-    const projectBinding = this.opts.projectBinding(projectId);
-    if (projectBinding === null) {
-      return { code: "NOT_READY", message: "project is not attached" };
     }
     // A4: the project stream is the single per-peer admission point for a
     // projectId — this is what keeps root CLAUDE.md's "seenProjects +
     // isSafeProjectId are the only bound" true. Closing the project stream
     // does not unbind an already-open terminal stream.
-    if (!projectBinding.hasOpenStream(peerId)) {
-      return { code: "NOT_ALLOWED", message: "open the project stream first" };
-    }
-    const refusal = projectBinding.refusalFor(peerId);
-    if (refusal) {
-      return refusal.code === "UPDATE_REQUIRED"
-        ? { code: "UPDATE_REQUIRED", message: refusal.message }
-        : { code: "NOT_ALLOWED", message: refusal.message };
-    }
+    const gated = gateProjectStream(
+      peerId,
+      projectId,
+      { open: this.attachmentCount(peerId), max: STREAM_MAX_TERMINAL_ATTACHMENTS_PER_PEER, message: "too many terminal attachments" },
+      this.opts.projectCataloged,
+      (id) => this.opts.projectBinding(id),
+    );
+    if (!gated.ok) return gated.refusal;
+    const projectBinding = gated.binding;
     if (this.byRequestId.has(this.key(peerId, requestId))) {
       return { code: "INVALID", message: "duplicate requestId" };
     }

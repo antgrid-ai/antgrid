@@ -423,12 +423,11 @@ export class DartAppClient {
   }
 
   /** Opens a terminal attachment through the Dart eval CLI's `terminal-attach`
-   *  action (§4.5 of the Stage A A2 contract): `openTerminalAttachment` on a
-   *  `MultiStreamPeerLink` session rides its own native stream, and on the
-   *  socket path falls back transparently — `isStream` on the `-opened` event
-   *  tells the caller which. `version` always goes over the wire (defaulting
-   *  to the terminal-frames protocol version), because the Zod schema behind
-   *  `terminal:subscribe` requires it. */
+   *  action (§4.5 of the Stage A A2 contract): `openTerminalAttachment` rides
+   *  its own native stream, so `isStream` on the `-opened` event is always
+   *  true here. `version` always goes over the wire
+   *  (defaulting to the terminal-frames protocol version), because the Zod
+   *  schema behind `terminal:subscribe` requires it. */
   terminalAttach(
     streamId: string,
     opts: { terminalId: string; requestId: string; checkoutId?: string; version?: number },

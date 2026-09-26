@@ -23,11 +23,9 @@ void main() {
         'git:checkout-result',
         'git:status',
         'git:diff-content',
-        'file:upload-ready',
-        'file:upload-ack',
         'file:upload-result',
       ];
-      expect(statusTypes.length, 21);
+      expect(statusTypes.length, 19);
       for (final t in statusTypes) {
         expect(
           classifyAbMessageByType(t),

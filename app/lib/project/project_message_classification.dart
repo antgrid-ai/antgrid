@@ -78,11 +78,7 @@ const Set<String> kCheckoutVariableMessageTypes = <String>{
   'file:search-cancel',
   'file:search-result',
   'file:search-done',
-  'file:upload-start',
-  'file:upload-ready',
-  'file:upload-chunk',
-  'file:upload-ack',
-  'file:upload-done',
+  'file:upload-local',
   'file:upload-result',
   'git:status',
   'git:diff',
@@ -238,8 +234,6 @@ const Set<String> _statusTypes = <String>{
   'session-bus:inbox:result',
   'session-bus:thread:result',
   'session-bus:arrived',
-  'file:upload-ready',
-  'file:upload-ack',
   'file:upload-result',
 };
 

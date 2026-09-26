@@ -68,6 +68,14 @@ class _StubRelay extends RelayService implements PeerLink {
     return PeerSendOutcome.accepted;
   }
 
+  @override
+  Future<PeerStream> openStream(
+    StreamOpen open, {
+    required int maxRecordBytes,
+    required int maxQueuedBytes,
+    int? rawAfterRecords,
+  }) => throw UnimplementedError('not exercised by this suite');
+
   /// The session's only recovery is closing its link; a real link reports
   /// that as a closed payload, which is the teardown under test.
   @override

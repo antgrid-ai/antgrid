@@ -1,9 +1,8 @@
 // Coverage for the native-stream tunnel implementations
 // (`_StreamTunnelHttpExchange` / `_StreamTunnelWsChannel` in
-// `machine_session.dart`) plus the socket-path NOT_SUPPORTED fallback
-// (stage-A-A3-contract.md §4). The fake `MultiStreamPeerLink` below is written
-// fresh for this file rather than imported from `terminal_attachment_test.dart`
-// — the two suites drift independently on purpose.
+// `machine_session.dart`). The fake `PeerLink` below is written fresh for
+// this file rather than imported from `terminal_attachment_test.dart` — the
+// two suites drift independently on purpose.
 import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
@@ -631,25 +630,6 @@ void main() {
       },
     );
 
-    test('frames arrive on frames in record order', () async {
-      final transport = await bind(projectId: 'proj-a');
-      final channel = openChannel(transport);
-      final fakeStream = link.createdStreams.single;
-      await pumpEventQueue();
-
-      fakeStream.emitData(
-        kTunnelRecordTagWsText,
-        Uint8List.fromList(utf8.encode('one')),
-      );
-      fakeStream.emitData(kTunnelRecordTagWsBinary, Uint8List.fromList([9, 8, 7]));
-
-      final frames = await channel.frames.take(2).toList();
-      expect(frames[0].binary, isFalse);
-      expect(utf8.decode(frames[0].bytes), 'one');
-      expect(frames[1].binary, isTrue);
-      expect(frames[1].bytes, [9, 8, 7]);
-    });
-
     test(
       'close() writes tunnel:ws-close after every queued frame, then '
       'finishes',
@@ -797,55 +777,6 @@ void main() {
       },
     );
   });
-
-  group('StreamTransport over a non-multi-stream link', () {
-    test(
-      'openTunnelHttp and openTunnelWs both fall back to NOT_SUPPORTED',
-      () async {
-        // Since A4, a project's own transport only ever exists over a
-        // MultiStreamPeerLink (openProject requires one), so the only
-        // reachable non-multi-stream transport left is session.control.
-        final link = _PlainPeerLink();
-        final session = MachineSession(
-          relay: link,
-          machineDeviceId: 'm1',
-          handshaker: FakeHandshaker(),
-        );
-        session.start();
-        await session.ensureEstablished();
-        addTearDown(() async {
-          await session.dispose();
-        });
-
-        final transport = session.control;
-        final exchange = transport.openTunnelHttp(
-          requestId: 'r1',
-          checkoutId: 'main',
-          head: const {'type': 'tunnel:http-request'},
-          bodyLength: 0,
-        );
-        await expectLater(
-          exchange.head,
-          throwsA(
-            isA<TunnelExchangeFailure>().having(
-              (e) => e.code,
-              'code',
-              'NOT_SUPPORTED',
-            ),
-          ),
-        );
-
-        final channel = transport.openTunnelWs(
-          tunnelId: 'ws1',
-          checkoutId: 'main',
-          open: const {'type': 'tunnel:ws-open'},
-        );
-        final end = await channel.done;
-        expect(end, isA<TunnelWsFailed>());
-        expect((end as TunnelWsFailed).failure.code, 'NOT_SUPPORTED');
-      },
-    );
-  });
 }
 
 /// Lets an unawaited async chain (`_start()`, the send scheduler's drain loop)
@@ -854,36 +785,7 @@ void main() {
 Future<void> pumpEventQueue() =>
     Future<void>.delayed(const Duration(milliseconds: 20));
 
-/// A [PeerLink] that does NOT also implement [MultiStreamPeerLink] —
-/// `FakeLiveRelay` implements both (every native link does), so this stands
-/// in for an older relay to exercise the NOT_SUPPORTED fallback.
-class _PlainPeerLink implements PeerLink {
-  final _messages = StreamController<IncomingSessionRecord>.broadcast();
-  final _states = StreamController<PeerLinkState>.broadcast();
-  final _failures = StreamController<PeerLinkFailure>.broadcast();
-
-  @override
-  bool get isDispatchAllowed => true;
-  @override
-  Stream<IncomingSessionRecord> get messageStream => _messages.stream;
-  @override
-  Stream<PeerLinkState> get payloadStateStream => _states.stream;
-  @override
-  Stream<PeerPath> get pathStream => const Stream.empty();
-  @override
-  Stream<PeerLinkFailure> get failureStream => _failures.stream;
-  @override
-  PeerLinkDiagnostic? get netTap => null;
-
-  @override
-  Future<PeerSendOutcome> sendRecord(Uint8List payload) async =>
-      PeerSendOutcome.accepted;
-
-  @override
-  Future<void> close() async {}
-}
-
-class _FakeMultiStreamLink implements PeerLink, MultiStreamPeerLink {
+class _FakeMultiStreamLink implements PeerLink {
   final _messages = StreamController<IncomingSessionRecord>.broadcast();
   final _states = StreamController<PeerLinkState>.broadcast();
   final _failures = StreamController<PeerLinkFailure>.broadcast();
@@ -1016,15 +918,6 @@ class _FakeStream implements PeerStream {
   void emitRaw(Uint8List bytes) {
     if (_records.isClosed) return;
     _records.add(bytes);
-  }
-
-  /// One tagged binary data record — still how the WS channel's frames work.
-  void emitData(int tag, Uint8List payload) {
-    if (_records.isClosed) return;
-    final out = Uint8List(payload.length + 1);
-    out[0] = tag;
-    out.setRange(1, out.length, payload);
-    _records.add(out);
   }
 
   Future<void> endPeer() async {

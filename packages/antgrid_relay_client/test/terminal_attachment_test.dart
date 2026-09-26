@@ -1,7 +1,7 @@
 // Coverage for `TerminalAttachment` on both paths: the socket-path
 // `SocketTerminalAttachments` used by every `BufferedAgentTransport`, and the
-// native-stream `_StreamTerminalAttachment` `StreamTransport` opens when its
-// session's link is a `MultiStreamPeerLink` (stage-A-A2-contract.md §4.1/§4.3).
+// native-stream `_StreamTerminalAttachment` every `StreamTransport` opens
+// (stage-A-A2-contract.md §4.1/§4.3).
 import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
@@ -146,52 +146,6 @@ void main() {
       expect(await b.done, isA<TerminalAttachmentTransportClosed>());
     });
 
-    test(
-      'the control transport falls back to the socket path over a PeerLink '
-      'that is not multi-stream',
-      () async {
-        // Since A4, a project's own transport only ever exists over a
-        // MultiStreamPeerLink (openProject requires one) — the socket path
-        // survives only as session.control's fallback on an older relay.
-        final link = _PlainPeerLink();
-        final session = MachineSession(
-          relay: link,
-          machineDeviceId: 'm1',
-          handshaker: FakeHandshaker(),
-        );
-        session.start();
-        await session.ensureEstablished();
-        addTearDown(() async {
-          await session.dispose();
-        });
-
-        final attachment = session.control.openTerminalAttachment(
-          requestId: 'r1',
-          checkoutId: 'main',
-          subscribe: {
-            'type': 'terminal:subscribe',
-            'requestId': 'r1',
-            'checkoutId': 'main',
-          },
-        );
-        expect(attachment.isStream, isFalse);
-
-        await pumpEventQueue();
-        final messages = link.sent
-            .map((f) => jsonDecode(decodeFromPhone(f.payload)) as Map)
-            .where((m) => !isSessionFrameType(m['type']))
-            .toList();
-        expect(
-          messages.any(
-            (m) => m['type'] == 'terminal:subscribe' && m['requestId'] == 'r1',
-          ),
-          isTrue,
-          reason:
-              'the socket path sends subscribe as a bare message-kind '
-              'record on the session stream',
-        );
-      },
-    );
   });
 
   group('_StreamTerminalAttachment (native-stream path)', () {
@@ -628,39 +582,6 @@ void main() {
   });
 }
 
-/// A [PeerLink] that does NOT also implement [MultiStreamPeerLink] —
-/// `FakeLiveRelay` implements both (every native link does), so this stands
-/// in for an older relay to exercise `openTerminalAttachment`'s socket-path
-/// fallback.
-class _PlainPeerLink implements PeerLink {
-  final _messages = StreamController<IncomingSessionRecord>.broadcast();
-  final _states = StreamController<PeerLinkState>.broadcast();
-  final _failures = StreamController<PeerLinkFailure>.broadcast();
-  final sent = <SentRecord>[];
-
-  @override
-  bool get isDispatchAllowed => true;
-  @override
-  Stream<IncomingSessionRecord> get messageStream => _messages.stream;
-  @override
-  Stream<PeerLinkState> get payloadStateStream => _states.stream;
-  @override
-  Stream<PeerPath> get pathStream => const Stream.empty();
-  @override
-  Stream<PeerLinkFailure> get failureStream => _failures.stream;
-  @override
-  PeerLinkDiagnostic? get netTap => null;
-
-  @override
-  Future<PeerSendOutcome> sendRecord(Uint8List payload) async {
-    sent.add(SentRecord(payload));
-    return PeerSendOutcome.accepted;
-  }
-
-  @override
-  Future<void> close() async {}
-}
-
 /// Lets an unawaited async chain (every `_StreamTerminalAttachment._start()`
 /// call, `openTerminalAttachment`'s contract, `MachineSession`'s send
 /// scheduler drain loop) settle before the next assertion. A real duration,
@@ -669,7 +590,7 @@ class _PlainPeerLink implements PeerLink {
 Future<void> pumpEventQueue() =>
     Future<void>.delayed(const Duration(milliseconds: 20));
 
-class _FakeMultiStreamLink implements PeerLink, MultiStreamPeerLink {
+class _FakeMultiStreamLink implements PeerLink {
   final _messages = StreamController<IncomingSessionRecord>.broadcast();
   final _states = StreamController<PeerLinkState>.broadcast();
   final _failures = StreamController<PeerLinkFailure>.broadcast();

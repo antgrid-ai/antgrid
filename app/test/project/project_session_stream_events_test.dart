@@ -42,9 +42,9 @@ class _FakeHandshaker implements SessionHandshaker {
   void abort() {}
 }
 
-/// A minimal [PeerLink] + [MultiStreamPeerLink] double: enough to establish a
-/// [MachineSession] and open native project streams over it.
-class _FakeLink implements PeerLink, MultiStreamPeerLink {
+/// A minimal [PeerLink] double: enough to establish a [MachineSession] and
+/// open native project streams over it.
+class _FakeLink implements PeerLink {
   final _messages = StreamController<IncomingSessionRecord>.broadcast();
   final _states = StreamController<PeerLinkState>.broadcast();
 

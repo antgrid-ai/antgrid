@@ -28,8 +28,7 @@ import 'package:flutter_test/flutter_test.dart';
 // settable control state and an explicit payload double for the native link).
 // ---------------------------------------------------------------------------
 
-class _RecordingRelay extends RelayService
-    implements PeerLink, MultiStreamPeerLink {
+class _RecordingRelay extends RelayService implements PeerLink {
   @override
   bool get isDispatchAllowed => true;
   @override
@@ -291,9 +290,9 @@ DeviceIdentity _identity() => DeviceIdentity(
 
 /// The production mechanisms adapter over the fake relay. No pair step: trust
 /// is account-derived, so the ladder is dial -> presence -> plaintext hello.
-/// `FixedPeerConnector`'s `TestPayloadLink` forwards `MultiStreamPeerLink`
-/// straight to the carrier, which is what lets `openProject` open native
-/// streams on [relay].
+/// `FixedPeerConnector`'s `TestPayloadLink` forwards `openStream` straight to
+/// the carrier, which is what lets `openProject` open native streams on
+/// [relay].
 PeerConnectionMechanisms _mechanisms(_RecordingRelay relay) =>
     PeerConnectionMechanisms(
       peerRuntime: FixedPeerConnector(relay),

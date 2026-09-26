@@ -1,16 +1,15 @@
 import { describe, it, expect } from "bun:test";
-import { createMessage, parseMessage, parseMessageFast, LOOPBACK_UPLOAD_MESSAGE_TYPES } from "../src/protocol";
+import {
+  createMessage, parseMessage, parseMessageFast,
+  CHECKOUT_VARIABLE_MESSAGE_TYPES,
+} from "../src/protocol";
 
 describe("file-upload protocol messages", () => {
-  it("round-trips every upload message through full Zod validation", () => {
+  it("round-trips file:upload-local and file:upload-result through full Zod validation", () => {
     const msgs = [
-      createMessage("file:upload-start", {
-        projectId: "p", requestId: "r1", fileName: "photo.png", size: 123, mimeType: "image/png",
+      createMessage("file:upload-local", {
+        projectId: "p", requestId: "r1", fileName: "photo.png", sourcePath: "/tmp/photo.png", mimeType: "image/png",
       }),
-      createMessage("file:upload-ready", { requestId: "r1", uploadId: "u1" }),
-      createMessage("file:upload-chunk", { uploadId: "u1", seq: 0, data: "aGVsbG8=" }),
-      createMessage("file:upload-ack", { uploadId: "u1", seq: 0 }),
-      createMessage("file:upload-done", { uploadId: "u1" }),
       createMessage("file:upload-result", {
         requestId: "r1", uploadId: "u1", ok: true, path: "/abs/path/photo.png",
       }),
@@ -34,18 +33,8 @@ describe("file-upload protocol messages", () => {
     }
   });
 
-  it("rejects a chunk whose base64 data exceeds the wire cap", () => {
-    const m = createMessage("file:upload-chunk", {
-      uploadId: "u1", seq: 0, data: "A".repeat(768 * 1024 + 4),
-    });
-    expect(parseMessage(JSON.stringify(m))).toBeNull();
-  });
-
-  it("parseMessageFast knows all upload types (KNOWN_TYPES registration)", () => {
-    for (const type of [
-      "file:upload-start", "file:upload-ready", "file:upload-chunk",
-      "file:upload-ack", "file:upload-done", "file:upload-result",
-    ]) {
+  it("parseMessageFast knows file:upload-local and file:upload-result (KNOWN_TYPES registration)", () => {
+    for (const type of ["file:upload-local", "file:upload-result"]) {
       const fast = parseMessageFast(JSON.stringify({ type, id: "x", timestamp: 1 }));
       expect(fast).not.toBeNull();
     }
@@ -60,10 +49,16 @@ describe("file-upload protocol messages", () => {
     if (parsed?.type === "file:upload-result") expect(parsed.error).toBe("INCOMPLETE");
   });
 
-  it("LOOPBACK_UPLOAD_MESSAGE_TYPES names exactly the six file:upload-* types: a remote upload rides its own stream, never this loopback-only set", () => {
-    expect(LOOPBACK_UPLOAD_MESSAGE_TYPES).toEqual(new Set([
-      "file:upload-start", "file:upload-ready", "file:upload-chunk",
-      "file:upload-ack", "file:upload-done", "file:upload-result",
-    ]));
+  it("file:upload-local is checkout-variable: it reads/writes a working tree, so its routing must resolve from the session's checkout", () => {
+    expect(CHECKOUT_VARIABLE_MESSAGE_TYPES.has("file:upload-local")).toBe(true);
+  });
+
+  it("none of the five deleted socket-upload verbs parses any longer", () => {
+    for (const type of ["file:upload-start", "file:upload-ready", "file:upload-chunk", "file:upload-ack", "file:upload-done"]) {
+      const parsed = parseMessage(JSON.stringify({
+        type, id: "x", timestamp: 1, projectId: "p", requestId: "r1", uploadId: "u1", seq: 0, data: "", fileName: "a", size: 1,
+      }));
+      expect(parsed).toBeNull();
+    }
   });
 });

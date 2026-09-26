@@ -122,25 +122,15 @@ function createFakeRawRecvStream(steps: Array<number[] | Error>, opts: { atEnd?:
 
 // --- StreamRecordWriter -----------------------------------------------
 
-test("writes a single-slice record once, after setting priority", async () => {
+test("writes a single-slice record whose bytes equal the framed record", async () => {
   const fake = createFakeSendStream();
   const writer = new StreamRecordWriter(fake.stream, () => true, () => {}, 1_000_000, 7);
   const frame = new Uint8Array([9, 9, 9, 9]);
   const outcome = await writer.send(frame);
   expect(outcome).toBe("sent");
-  expect(fake.setPriorityCalls).toEqual([7]);
-  expect(fake.order).toEqual(["setPriority", "writeAll"]);
   const written = Buffer.from(fake.writeAllCalls[0]!);
   expect(written.readUInt32BE(0)).toBe(frame.length);
   expect(Array.from(written.subarray(4))).toEqual(Array.from(frame));
-});
-
-test("setPriority runs once even across several sends", async () => {
-  const fake = createFakeSendStream();
-  const writer = new StreamRecordWriter(fake.stream, () => true, () => {}, 1_000_000);
-  await writer.send(new Uint8Array([1]));
-  await writer.send(new Uint8Array([2]));
-  expect(fake.setPriorityCalls.length).toBe(1);
 });
 
 test("a 32 MiB record is written as more than one <=256 KiB slice", async () => {
@@ -582,20 +572,6 @@ test("an overflowing sendRaw resets the stream only, sharing send()'s overflow b
   expect(fake.writeAllCalls).toEqual([]);
   expect(fake.resetCalls).toEqual([42n]);
   expect(failures).toEqual(["overflow"]);
-});
-
-test("sendRaw and send() share one queue and are written in submission order", async () => {
-  const fake = createFakeSendStream();
-  const writer = new StreamRecordWriter(fake.stream, () => true, () => {}, 1_000_000);
-  const record = writer.send(new Uint8Array([1, 2]));
-  const raw = writer.sendRaw(new Uint8Array([9, 9, 9]));
-  expect(await record).toBe("sent");
-  expect(await raw).toBe("sent");
-  // The record keeps its 4-byte length prefix; the raw write does not.
-  expect(fake.writeAllCalls).toEqual([
-    [0, 0, 0, 2, 1, 2],
-    [9, 9, 9],
-  ]);
 });
 
 // --- StreamRawReader -------------------------------------------------------

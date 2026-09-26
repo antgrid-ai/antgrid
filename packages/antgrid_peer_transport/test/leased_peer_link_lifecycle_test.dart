@@ -97,6 +97,14 @@ class _QueuedLink implements PeerLink {
   }
 
   @override
+  Future<PeerStream> openStream(
+    StreamOpen open, {
+    required int maxRecordBytes,
+    required int maxQueuedBytes,
+    int? rawAfterRecords,
+  }) => throw UnimplementedError('not exercised by this suite');
+
+  @override
   Future<void> close() async => closed = true;
 }
 

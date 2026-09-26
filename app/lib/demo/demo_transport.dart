@@ -64,6 +64,22 @@ class DemoTransport extends BufferedAgentTransport {
   @override
   bool get isLocal => true;
 
+  /// The demo owns no filesystem to stage an upload into, so every attempt
+  /// fails at once with the same refusal the rest of the script uses.
+  @override
+  UploadExchange openUpload({
+    required String requestId,
+    required String projectId,
+    required String checkoutId,
+    required String fileName,
+    required Uint8List bytes,
+    String? mimeType,
+    void Function(int sent, int total)? onProgress,
+  }) => FailedUploadExchange(
+    const UploadFailure(kDemoRefusalCode, message: kDemoRefusalText),
+    requestId,
+  );
+
   @override
   Future<void> connect() async {
     // Idempotent: `connect` is a public contract method, and a second call
@@ -512,18 +528,6 @@ class DemoTransport extends BufferedAgentTransport {
             'checkoutId': 'main',
             'commandName': name,
             'exitCode': 1,
-          },
-        ];
-
-      case 'file:upload-start':
-        return <Map<String, Object?>>[
-          <String, Object?>{
-            'type': 'file:upload-result',
-            'checkoutId': 'main',
-            'requestId': requestId ?? '',
-            'ok': false,
-            'error': kDemoRefusalCode,
-            'message': kDemoRefusalText,
           },
         ];
 

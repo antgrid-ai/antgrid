@@ -27,7 +27,7 @@ class FixedPeerConnector implements PeerConnector {
   }) async => link;
 }
 
-class TestPayloadLink implements PeerLink, MultiStreamPeerLink {
+class TestPayloadLink implements PeerLink {
   TestPayloadLink(this.carrier);
   final PeerLink carrier;
   @override
@@ -48,29 +48,18 @@ class TestPayloadLink implements PeerLink, MultiStreamPeerLink {
   @override
   Future<void> close() async {}
 
-  // Mirrors the production wrapper (`LeasedPeerLink`), which also implements
-  // this interface unconditionally: a project/terminal/tunnel open only works
-  // when the carrier itself is multi-stream.
   @override
   Future<PeerStream> openStream(
     StreamOpen open, {
     required int maxRecordBytes,
     required int maxQueuedBytes,
     int? rawAfterRecords,
-  }) {
-    final carrier = this.carrier;
-    if (carrier is! MultiStreamPeerLink) {
-      throw UnsupportedError(
-        'LeasedPeerLink.openStream requires a MultiStreamPeerLink inner link',
-      );
-    }
-    return (carrier as MultiStreamPeerLink).openStream(
-      open,
-      maxRecordBytes: maxRecordBytes,
-      maxQueuedBytes: maxQueuedBytes,
-      rawAfterRecords: rawAfterRecords,
-    );
-  }
+  }) => carrier.openStream(
+    open,
+    maxRecordBytes: maxRecordBytes,
+    maxQueuedBytes: maxQueuedBytes,
+    rawAfterRecords: rawAfterRecords,
+  );
 }
 
 class _NoopPayloadLink implements PeerLink {
@@ -89,6 +78,13 @@ class _NoopPayloadLink implements PeerLink {
   @override
   Future<PeerSendOutcome> sendRecord(Uint8List payload) async =>
       PeerSendOutcome.accepted;
+  @override
+  Future<PeerStream> openStream(
+    StreamOpen open, {
+    required int maxRecordBytes,
+    required int maxQueuedBytes,
+    int? rawAfterRecords,
+  }) => throw UnimplementedError('not exercised by this suite');
   @override
   Future<void> close() async {}
 }

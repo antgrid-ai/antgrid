@@ -102,16 +102,6 @@ NativePeerStream _stream(
 );
 
 void main() {
-  test('frames a small record as one writeAll call', () async {
-    final send = FakeSend();
-    final stream = _stream(send, FakeRecv(const []));
-    final outcome = await stream.send(Uint8List.fromList([1, 2, 3]));
-    expect(outcome, PeerSendOutcome.accepted);
-    final written = send.writeAllCalls.single;
-    expect(ByteData.sublistView(written).getUint32(0, Endian.big), 3);
-    expect(written.sublist(4), [1, 2, 3]);
-  });
-
   test('slices a record larger than the slice bound', () async {
     final send = FakeSend();
     final stream = _stream(

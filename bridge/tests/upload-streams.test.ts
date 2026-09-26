@@ -7,7 +7,6 @@
 import { describe, test, expect } from "bun:test";
 import {
   UploadStreamRegistry,
-  STREAM_PRIORITY_UPLOAD,
   STREAM_RESET_UPLOAD,
   STREAM_STOP_UPLOAD,
   type UploadStreamRegistryOptions,
@@ -597,13 +596,3 @@ test("dropPeer cancels every upload for that peer without calling retirePeer (th
   expect(rig.retiredPeers).toEqual([]);
 });
 
-// --- priority / labels -------------------------------------------------------
-
-test("the writer sets priority once, at STREAM_PRIORITY_UPLOAD, before its first write", async () => {
-  const rig = makeRegistry();
-  wireProject(rig);
-  const { fake } = admitUpload(rig.registry, { size: 0 });
-  fake.endFin();
-  await until(() => fake.setPriorityCalls.length > 0);
-  expect(fake.setPriorityCalls).toEqual([STREAM_PRIORITY_UPLOAD]);
-});

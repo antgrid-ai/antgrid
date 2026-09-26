@@ -11,7 +11,7 @@ import 'models/stream_open.dart';
 
 /// Bounds one socket-path attachment's [TerminalAttachment.messages] buffer.
 /// Side-local: the stream path bounds its own queue through
-/// `MultiStreamPeerLink.openStream`'s `maxQueuedBytes` instead.
+/// `PeerLink.openStream`'s `maxQueuedBytes` instead.
 const int kTerminalAttachmentMaxQueuedBytes = 65536;
 
 /// Why a [TerminalAttachment.done] completed.

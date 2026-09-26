@@ -1,7 +1,8 @@
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { createHash } from "node:crypto";
-import { readFileSync, existsSync, readdirSync } from "node:fs";
+import { readFileSync, existsSync, readdirSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { setupTestEnv, type TestEnv } from "../helpers/harness";
 import { createMessage } from "../../bridge/src/protocol";
 import { createTestProject } from "../helpers/fixtures";
@@ -10,12 +11,10 @@ import { readHostFile } from "../../bridge/src/host-discovery";
 import { LocalTestClient, type LocalConnectInfo } from "../helpers/local-client";
 import { firstProjectStream, resolveOnFreshAdvert } from "../support/stream";
 
-// Remote uploads ride their own `upload` QUIC stream
-// (docs/protocol/peer-session.md §1e); the file:upload-start/ready/chunk/ack/
-// done/result exchange over the project stream is loopback-only, for the
-// desktop app on the same machine.
-
-const CHUNK = 512 * 1024;
+// Remote uploads ride their own `upload` QUIC stream (docs/protocol/peer-session.md
+// §1e). `file:upload-local` is the loopback-only counterpart: the desktop app on
+// the same machine names an absolute local path and the bridge copies it into the
+// same staging directory the `upload` stream uses.
 
 function makePayload(size: number): Buffer {
   const buf = Buffer.alloc(size);
@@ -124,16 +123,29 @@ describe("upload stream (native)", () => {
     expect(leftover).toEqual([]);
   }, 15_000);
 
-  test("a relay-origin file:upload-start is dropped: no file:upload-ready follows it", async () => {
-    env.app.sendOnStream(streamId, createMessage("file:upload-start", {
-      projectId: env.projectId,
-      requestId: "eval-relay-origin-dropped",
-      fileName: "dropped.bin",
-      size: 16,
-    }));
-    await expect(
-      env.app.waitForStreamAbType(streamId, "file:upload-ready", 2_000),
-    ).rejects.toThrow();
+  test("a relay-origin file:upload-local is dropped: no result follows and nothing is staged", async () => {
+    const srcDir = mkdtempSync(join(tmpdir(), "antgrid-eval-upload-src-"));
+    const sourcePath = join(srcDir, "dropped.bin");
+    writeFileSync(sourcePath, makePayload(16));
+    try {
+      env.app.sendOnStream(streamId, createMessage("file:upload-local", {
+        projectId: env.projectId,
+        requestId: "eval-relay-origin-dropped",
+        fileName: "dropped.bin",
+        sourcePath,
+      }));
+      await expect(
+        env.app.waitForStreamAbType(streamId, "file:upload-result", 2_000),
+      ).rejects.toThrow();
+
+      const uploadsDir = join(env.projectDir, ".antgrid", "uploads");
+      const staged = existsSync(uploadsDir)
+        ? readdirSync(uploadsDir).filter((name) => name.includes("dropped"))
+        : [];
+      expect(staged).toEqual([]);
+    } finally {
+      rmSync(srcDir, { recursive: true, force: true });
+    }
   }, 10_000);
 });
 
@@ -168,9 +180,10 @@ test("an upload with no open project stream on this peer is refused NOT_ALLOWED"
   }
 }, 30_000);
 
-test("a multi-chunk loopback upload still lands byte-identical", async () => {
+test("a loopback file:upload-local lands byte-identical", async () => {
   const env = await setupTestEnv({ fixtureName: "basic" });
   let local: LocalTestClient | null = null;
+  const srcDir = mkdtempSync(join(tmpdir(), "antgrid-eval-upload-src-"));
   try {
     const conn: LocalConnectInfo = (await loopbackControl(env.abDir, {
       id: "file-upload-loopback", type: "project:start", projectId: env.projectId,
@@ -180,29 +193,33 @@ test("a multi-chunk loopback upload still lands byte-identical", async () => {
     local.on((m) => messages.push(m));
     await local.connect(conn);
 
-    const payload = makePayload(CHUNK + CHUNK / 2); // 1.5 chunks → 2 chunks
-    local.send(createMessage("file:upload-start", {
+    // Over 512 KiB and not aligned to any slice/chunk boundary. `.png` puts it
+    // through the renderable-binary branch of `readFile` (bridge/src/file-tree.ts)
+    // so the round trip below gets the bytes back as base64 rather than the
+    // no-viewer "Binary file" refusal a plain `.bin` extension would hit.
+    const payload = makePayload(600 * 1024 + 7);
+    const sourcePath = join(srcDir, "loopback-upload.png");
+    writeFileSync(sourcePath, payload);
+
+    local.send(createMessage("file:upload-local", {
       projectId: env.projectId,
       requestId: "loopback-r1",
-      fileName: "loopback upload.bin",
-      size: payload.length,
+      fileName: "loopback-upload.png",
+      sourcePath,
     }));
-    const ready = await waitForLocal(messages, (m) => m.type === "file:upload-ready");
-    const uploadId = ready.uploadId as string;
-
-    for (let seq = 0, off = 0; off < payload.length; seq++, off += CHUNK) {
-      local.send(createMessage("file:upload-chunk", {
-        uploadId, seq,
-        data: payload.subarray(off, Math.min(off + CHUNK, payload.length)).toString("base64"),
-      }));
-      await waitForLocal(messages, (m) => m.type === "file:upload-ack" && m.seq === seq);
-    }
-    local.send(createMessage("file:upload-done", { uploadId }));
     const result = await waitForLocal(messages, (m) => m.type === "file:upload-result");
     expect(result.ok).toBe(true);
-    expect(readFileSync(result.path as string).equals(payload)).toBe(true);
+
+    local.send(createMessage("file:read", {
+      projectId: env.projectId,
+      path: result.relPath as string,
+    }));
+    const content = await waitForLocal(messages, (m) => m.type === "file:content");
+    expect(content.encoding).toBe("base64");
+    expect(Buffer.from(content.content as string, "base64").equals(payload)).toBe(true);
   } finally {
     local?.close();
     await env.teardown();
+    rmSync(srcDir, { recursive: true, force: true });
   }
 }, 30_000);

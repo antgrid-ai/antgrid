@@ -902,46 +902,17 @@ const FileSearchDoneMessage = BaseMessage.extend({
   ...CheckoutScoped,
 });
 
-const FileUploadStartMessage = BaseMessage.extend({
-  type: z.literal("file:upload-start"),
+// Loopback only: the desktop app shares this machine's filesystem, so it names
+// a local file and the bridge copies it into the same staging directory the
+// `upload` stream uses. `sourcePath` is trusted only from the loopback socket —
+// see the drop in agent-core.ts's inbound handler.
+const FileUploadLocalMessage = BaseMessage.extend({
+  type: z.literal("file:upload-local"),
   projectId: z.string(),
   requestId: z.string(),
   fileName: z.string(),
-  size: z.number().int().nonnegative(),
+  sourcePath: z.string(), // absolute path on THIS machine; loopback-only
   mimeType: z.string().optional(),
-  ...CheckoutScoped,
-});
-
-const FileUploadReadyMessage = BaseMessage.extend({
-  type: z.literal("file:upload-ready"),
-  requestId: z.string(),
-  uploadId: z.string(),
-  ...CheckoutScoped,
-});
-
-// 512 KiB payload → base64 is ~4/3 larger; 768 KiB caps a full chunk with room
-// to spare while keeping a single frame well under the 1 MiB transport limit and
-// bounding how much a malicious chunk can allocate before the size check runs.
-const MAX_UPLOAD_CHUNK_DATA = 768 * 1024;
-
-const FileUploadChunkMessage = BaseMessage.extend({
-  type: z.literal("file:upload-chunk"),
-  uploadId: z.string(),
-  seq: z.number().int().nonnegative(),
-  data: z.string().max(MAX_UPLOAD_CHUNK_DATA), // base64
-  ...CheckoutScoped,
-});
-
-const FileUploadAckMessage = BaseMessage.extend({
-  type: z.literal("file:upload-ack"),
-  uploadId: z.string(),
-  seq: z.number().int().nonnegative(),
-  ...CheckoutScoped,
-});
-
-const FileUploadDoneMessage = BaseMessage.extend({
-  type: z.literal("file:upload-done"),
-  uploadId: z.string(),
   ...CheckoutScoped,
 });
 
@@ -958,7 +929,7 @@ const FileUploadResultMessage = BaseMessage.extend({
   // file:read's own), so a client can offer a preview without duplicating the
   // allowlist. Absent = no viewer for it.
   mimeType: z.string().optional(),
-  error: z.string().optional(), // machine code: TOO_LARGE | INVALID_NAME | WRITE_FAILED | UPLOAD_NOT_FOUND | BAD_SEQUENCE | SIZE_MISMATCH | TIMEOUT | BUSY | INCOMPLETE (the `upload` stream's own FIN-short-of-`size` case)
+  error: z.string().optional(), // machine code: TOO_LARGE | INVALID_NAME | INVALID_SOURCE | NOT_ALLOWED | WRITE_FAILED | TIMEOUT | BUSY | INCOMPLETE
   message: z.string().optional(), // human-readable detail
   ...CheckoutScoped,
 });
@@ -2645,11 +2616,7 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   FileSearchCancelMessage,
   FileSearchResultMessage,
   FileSearchDoneMessage,
-  FileUploadStartMessage,
-  FileUploadReadyMessage,
-  FileUploadChunkMessage,
-  FileUploadAckMessage,
-  FileUploadDoneMessage,
+  FileUploadLocalMessage,
   FileUploadResultMessage,
   PortsUpdateMessage,
   PreviewUrlMessage,
@@ -2880,11 +2847,7 @@ export type FileSearchCancel = z.infer<typeof FileSearchCancelMessage>;
 export type SearchMatch = z.infer<typeof SearchMatchSchema>;
 export type FileSearchResult = z.infer<typeof FileSearchResultMessage>;
 export type FileSearchDone = z.infer<typeof FileSearchDoneMessage>;
-export type FileUploadStart = z.infer<typeof FileUploadStartMessage>;
-export type FileUploadReady = z.infer<typeof FileUploadReadyMessage>;
-export type FileUploadChunk = z.infer<typeof FileUploadChunkMessage>;
-export type FileUploadAck = z.infer<typeof FileUploadAckMessage>;
-export type FileUploadDone = z.infer<typeof FileUploadDoneMessage>;
+export type FileUploadLocal = z.infer<typeof FileUploadLocalMessage>;
 export type FileUploadResult = z.infer<typeof FileUploadResultMessage>;
 export type AgentHelloMessage = z.infer<typeof AgentHelloMessage>;
 export type PortDetectedMessage = z.infer<typeof PortDetectedMessage>;
@@ -3039,7 +3002,7 @@ export const CHECKOUT_VARIABLE_MESSAGE_TYPES = new Set<string>([
   "tree:full", "tree:update", "file:read", "file:content",
   "file:resolve-path", "file:resolve-path-result",
   "file:search", "file:search-cancel", "file:search-result", "file:search-done",
-  "file:upload-start", "file:upload-ready", "file:upload-chunk", "file:upload-ack", "file:upload-done", "file:upload-result",
+  "file:upload-local", "file:upload-result",
   "git:status", "git:diff", "git:diff-content", "git:list-branches", "git:branches", "git:checkout", "git:checkout-result",
   "git:commit", "git:commit-result", "git:discard", "git:discard-result",
   "git:stage", "git:stage-result", "git:unstage", "git:unstage-result",
@@ -3082,19 +3045,6 @@ export const CHECKOUT_VARIABLE_MESSAGE_TYPES = new Set<string>([
 export const PREVIEW_CHANNEL_MESSAGE_TYPES = new Set<string>([
   "terminal:frame",
   "terminal:history:page",
-]);
-
-/** The socket-path upload exchange: a remote app uploads a file over its own
- * `upload` stream (`peer/upload-streams.ts`) instead, so these five verbs plus
- * the shared result type only ever cross the LOOPBACK socket. Bridge-only,
- * the same pattern as `PREVIEW_CHANNEL_MESSAGE_TYPES`: a relay-origin frame of
- * one of these types is dropped rather than dispatched (`attachTransport`'s
- * inbound handler in agent-core.ts), and `FileUploadManager`'s own sends for
- * the socket path are always addressed loopback-only. No Dart mirror is
- * needed — the app only ever emits these via `SocketUploads`, which
- * `StreamTransport` never uses. */
-export const LOOPBACK_UPLOAD_MESSAGE_TYPES = new Set<string>([
-  "file:upload-start", "file:upload-ready", "file:upload-chunk", "file:upload-ack", "file:upload-done", "file:upload-result",
 ]);
 
 type MessagePayload<T extends AbMessage["type"]> = Omit<
@@ -3172,8 +3122,7 @@ const KNOWN_TYPES = new Set<string>([
   "git:commit-diff", "git:commit-diff-content",
   "git:sync", "git:sync-result", "git:sync-status", "git:sync-state",
   "file:search", "file:search-cancel", "file:search-result", "file:search-done",
-  "file:upload-start", "file:upload-ready", "file:upload-chunk",
-  "file:upload-ack", "file:upload-done", "file:upload-result",
+  "file:upload-local", "file:upload-result",
   "agent:hello", "port:detected",
   "agent:enableRelay", "agent:disableRelay",
   "agent:activationPending", "agent:relayReady", "agent:relayError",

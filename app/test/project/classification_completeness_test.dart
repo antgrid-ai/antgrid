@@ -86,8 +86,6 @@ const Map<String, List<String>> serviceWireTypes = {
   ],
   'UploadService': [
     // status
-    'file:upload-ready',
-    'file:upload-ack',
     'file:upload-result',
   ],
 };

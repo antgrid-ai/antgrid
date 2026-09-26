@@ -333,9 +333,9 @@ bytes. The bridge answers with exactly one length-prefixed JSON record, then FIN
 | `stream:refused` | Agent → App | `upload`, only record (open refused) | Refusal `code`/`message` when the stream is rejected up front |
 | `file:upload-result` | Agent → App | `upload`, only record | Terminal outcome (`ok`, or an error code) for the upload |
 
-The desktop app's own local upload path is unchanged: `file:upload-start/ready/chunk/ack/done` plus
-`file:upload-result` still cross the loopback socket (`LOOPBACK_UPLOAD_MESSAGE_TYPES`), since a
-same-machine caller has no QUIC stream to open one over.
+The desktop app's own local upload writes the bytes to a temp file on the shared filesystem instead: it crosses the loopback socket as one `file:upload-local` message (`projectId`, `requestId`,
+`fileName`, `sourcePath`, optional `mimeType`/`checkoutId`) and gets back one `file:upload-result`,
+same as above. A relay-origin frame naming `file:upload-local` is dropped before dispatch.
 
 ---
 

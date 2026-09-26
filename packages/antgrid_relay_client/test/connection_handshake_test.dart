@@ -36,6 +36,14 @@ class _RecordingRelay implements PeerLink {
     return outcome;
   }
 
+  @override
+  Future<PeerStream> openStream(
+    StreamOpen open, {
+    required int maxRecordBytes,
+    required int maxQueuedBytes,
+    int? rawAfterRecords,
+  }) => throw UnimplementedError('not exercised by this suite');
+
   void inject(IncomingSessionRecord msg) => _messages.add(msg);
 
   Future<void> closeStreams() => _messages.close();

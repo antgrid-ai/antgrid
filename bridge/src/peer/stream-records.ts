@@ -362,3 +362,13 @@ export class StreamRawReader {
     return bytes.length === 0 ? null : new Uint8Array(bytes);
   }
 }
+
+/** Stops a stream's receive half once whatever read is currently outstanding
+ *  on it has settled, or immediately if none is — never before, since
+ *  `recv.stop()` would otherwise queue behind that read on the binding's
+ *  shared per-stream mutex. The outcome of `pending` (resolve or reject)
+ *  never matters here: either way the mutex is free once it settles. */
+export function stopRecvWhenSettled(pending: Promise<unknown> | null, stop: () => void): void {
+  if (pending) void pending.then(() => {}, () => {}).then(stop);
+  else stop();
+}

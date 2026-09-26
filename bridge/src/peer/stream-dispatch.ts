@@ -20,6 +20,7 @@ import {
   type StreamRefused,
   type StreamRefusedCode,
 } from "antgrid-wire";
+import { isSafeProjectId } from "../project-id";
 import { StreamRecordWriter, type RawStreamRecv, type StreamRecv, type StreamSend } from "./stream-records";
 
 export const STREAM_OPEN_DEADLINE_MS = 5_000;
@@ -81,6 +82,40 @@ export function refuseStream(stream: AcceptedBiStream, refusal: StreamRefusal,
   void writer.finish().then(() => {
     stream.recv.stop(STREAM_STOP_REFUSED).catch(() => {});
   });
+}
+
+/** The slice of a project's stream binding the shared admission gate reads. */
+export interface GatedProjectBinding {
+  hasOpenStream(peerId: string): boolean;
+  refusalFor(peerId: string): { readonly code: string; readonly message: string } | null;
+}
+
+/**
+ * The admission every project-scoped stream (terminal, tunnel, upload) runs
+ * before its own registry-specific checks, in this order: the per-peer cap,
+ * the safe-id and catalog checks (`seenProjects` + `isSafeProjectId` are the
+ * only bound on which projectId a peer may name), the project's binding
+ * (`NOT_READY` while it has no live entry), an open project stream for this
+ * peer (A4's single admission point), then the entry's own per-sender gate.
+ * Lookup only: nothing here opens or promotes a core.
+ */
+export function gateProjectStream<B extends GatedProjectBinding>(
+  peerId: string,
+  projectId: string,
+  cap: { open: number; max: number; message: string },
+  projectCataloged: ((projectId: string) => boolean) | undefined,
+  lookup: (projectId: string) => B | null,
+): { ok: true; binding: B } | { ok: false; refusal: StreamRefusal } {
+  const refuse = (code: StreamRefusedCode, message: string) => ({ ok: false as const, refusal: { code, message } });
+  if (cap.open >= cap.max) return refuse("CAP_EXCEEDED", cap.message);
+  if (!isSafeProjectId(projectId)) return refuse("NOT_ALLOWED", "unsafe project id");
+  if (!projectCataloged?.(projectId)) return refuse("NOT_ALLOWED", "project not recognized");
+  const binding = lookup(projectId);
+  if (binding === null) return refuse("NOT_READY", "project is not attached");
+  if (!binding.hasOpenStream(peerId)) return refuse("NOT_ALLOWED", "open the project stream first");
+  const refusal = binding.refusalFor(peerId);
+  if (refusal) return refuse(refusal.code === "UPDATE_REQUIRED" ? "UPDATE_REQUIRED" : "NOT_ALLOWED", refusal.message);
+  return { ok: true, binding };
 }
 
 export interface StreamAdmission<O extends StreamOpen = StreamOpen> {

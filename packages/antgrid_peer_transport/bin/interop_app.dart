@@ -208,7 +208,7 @@ Future<void> main(List<String> args) async {
     final coldProjectId =
         ((config['projects'] as List).last as Map<String, dynamic>)['id']
             as String;
-    final probeStream = await (active as MultiStreamPeerLink).openStream(
+    final probeStream = await active.openStream(
       ProjectStreamOpen(coldProjectId),
       maxRecordBytes: kStreamOpenMaxBytes,
       maxQueuedBytes: 2 * kStreamOpenMaxBytes,

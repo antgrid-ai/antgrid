@@ -6,6 +6,8 @@
 // This walks every frame the demo can ever emit — the static fixtures, the
 // opening script, and the reply to every verb the transport handles — through
 // the SAME classifier and parser the live wire goes through.
+import 'dart:typed_data';
+
 import 'package:antgrid/demo/demo_identity.dart';
 import 'package:antgrid/demo/demo_script.dart';
 import 'package:antgrid/demo/demo_transport.dart';
@@ -227,7 +229,6 @@ void main() {
       },
       {'type': 'file:search', 'requestId': 'q', 'query': 'quantity'},
       {'type': 'command:run', 'commandName': 'test'},
-      {'type': 'file:upload-start', 'requestId': 'q'},
       {
         'type': 'agent:prompt',
         'sessionId': kDemoSessionCheckoutId,
@@ -371,20 +372,30 @@ void main() {
     });
   });
 
-  test('the upload refusal names a code and a sentence', () async {
-    final answered = await replies({
-      'type': 'file:upload-start',
-      'requestId': 'q',
-    });
-    final result = answered.firstWhere(
-      (f) => f['type'] == 'file:upload-result',
+  test('openUpload refuses at once, naming a code and a sentence', () async {
+    final transport = DemoTransport();
+    addTearDown(transport.dispose);
+    await transport.connect();
+    transport.drainScript();
+
+    final exchange = transport.openUpload(
+      requestId: 'q',
+      projectId: kDemoProjectId,
+      checkoutId: 'main',
+      fileName: 'a.bin',
+      bytes: Uint8List(0),
     );
-    expect(result['ok'], isFalse);
     // `UploadService._throwIfFailed` reads `error` as the CODE and `message` as
     // the sentence, and `uploadErrorText` shows the code when the sentence is
     // missing — which would put E_DEMO_UNSUPPORTED in front of the user.
-    expect(result['error'], kDemoRefusalCode);
-    expect(result['message'], isNotEmpty);
+    await expectLater(
+      exchange.result,
+      throwsA(
+        isA<UploadFailure>()
+            .having((e) => e.code, 'code', kDemoRefusalCode)
+            .having((e) => e.message, 'message', isNotEmpty),
+      ),
+    );
   });
 
   test('the sessions the list advertises are the ones with transcripts', () {
