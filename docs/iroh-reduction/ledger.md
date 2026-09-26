@@ -58,6 +58,7 @@ the code wins over both.
 | A | A4 project streams replace the `{s,m}` mux | done | `3d7ecc53` |
 | A | A5 delete credits, schedulers, fragmentation, stream envelope | done | `eb67f79b` |
 | A | A6 docs, diagnostics and ledger | done | `4c2f22de` |
+| A | follow-up: per-record authorization on project and terminal streams, netwatch stream tags | done | `848df2f2` |
 
 ### Stage C gate evidence (executed by the wave commit agents)
 
