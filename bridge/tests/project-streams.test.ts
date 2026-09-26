@@ -4,11 +4,12 @@
 // (test-peer-session-owner.ts §5) — never `PeerStreamAcceptor` itself, whose
 // own admission order (session established, the open-frame parse, the
 // pending-opens cap) is `native-host-connection.test.ts`'s to cover.
-import { describe, test, expect, afterEach } from "bun:test";
+import { describe, test, expect, afterEach, spyOn } from "bun:test";
 import { MAX_TRANSFER_BYTES, STREAM_MAX_PROJECTS_PER_PEER } from "antgrid-wire";
 import { MessageBus, type Channel } from "../src/message-bus";
 import { createMessage, type AbMessage } from "../src/protocol";
 import { STREAM_RECORD_SLICE_BYTES } from "../src/peer/stream-records";
+import { netwatch } from "../src/netwatch";
 import {
   STREAM_PRIORITY_PROJECT,
   STREAM_RESET_PROJECT,
@@ -146,6 +147,26 @@ describe("ProjectStreamRegistry (A4)", () => {
 
     // The base class's retirePeerConnection is `dropSession` (§3.5); a
     // retired peer no longer holds a session.
+    expect((client as unknown as { sessions: Map<string, unknown> }).sessions.has(PEER_A)).toBe(false);
+  });
+
+  test("row 6b: an inbound record while authorized() is false retires the connection instead of reaching the bus", async () => {
+    const { client } = makeClient();
+    client.establish(PEER_A, { capabilities: { checkoutRouting: true } });
+    const bus = new MessageBus();
+    const received: unknown[] = [];
+    bus.setInboundHandler((msg) => received.push(msg));
+    client.attachStream(bus, { projectId: PROJECT });
+    let authorized = true;
+    const stream = await client.openProjectStream(PEER_A, PROJECT, { authorized: () => authorized });
+    expect(stream.refusal()).toBeUndefined();
+
+    authorized = false;
+    await stream.send(createMessage("pong", {}));
+
+    expect(received).toEqual([]); // never reached the bus
+    // Mirrors row 6's outbound check: the base class's retirePeerConnection is
+    // `dropSession` (§3.5), so a retired peer no longer holds a session.
     expect((client as unknown as { sessions: Map<string, unknown> }).sessions.has(PEER_A)).toBe(false);
   });
 
@@ -397,6 +418,29 @@ describe("ProjectStreamRegistry (A4)", () => {
     expect(outcome).toBe("too-large");
     expect(stream.written().length).toBe(before); // nothing written for the refused message
     expect(errors).toEqual([expect.objectContaining({ code: "MESSAGE_TOO_LARGE" })]);
+  });
+
+  test("P2b: the too-large and not-ab-message diagnostics both carry streamKind:\"project\" and this project's own streamId, reaching netwatch", async () => {
+    const { client } = makeClient();
+    client.establish(PEER_A, { capabilities: { checkoutRouting: true } });
+    const bus = new MessageBus();
+    const handle = client.attachStream(bus, { projectId: PROJECT });
+    const stream = await client.openProjectStream(PEER_A, PROJECT);
+    const events: Parameters<typeof netwatch.record>[0][] = [];
+    const observer = spyOn(netwatch, "record").mockImplementation((event) => { events.push(event); });
+    try {
+      const huge = createMessage("file:content", {
+        projectId: PROJECT, path: "b.txt", content: "x".repeat(MAX_TRANSFER_BYTES + 1),
+        size: MAX_TRANSFER_BYTES + 1, encoding: "utf8",
+      });
+      await handle.sendTo(huge, "control", { kind: "peer", peerId: PEER_A });
+      const tooLarge = events.find((e) => e.reason === "MESSAGE_TOO_LARGE");
+      expect(tooLarge).toMatchObject({ streamKind: "project", streamId: PROJECT });
+
+      await stream.send('{"nonsense":true}');
+      const notAbMessage = events.find((e) => e.reason === "not-ab-message");
+      expect(notAbMessage).toMatchObject({ streamKind: "project", streamId: PROJECT });
+    } finally { observer.mockRestore(); }
   });
 
   test("P3: a 32 MiB record is written as slices, not as one array", async () => {

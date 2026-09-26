@@ -10,7 +10,7 @@ import { EndpointApiError, EndpointEnrollment } from "./enrollment";
 import { PeerSessionOwner, type PeerSessionOwnerOptions, MAX_APP_SESSIONS } from "../peer-session-owner";
 import { EndpointLifecycle, EndpointFailure } from "./endpoint-lifecycle";
 import type { RemoteHostConnection } from "../remote-host-connection";
-import { frameIdFor } from "../netwatch";
+import { frameIdFor, NETWATCH_SESSION_STREAM_LABEL } from "../netwatch";
 import { AdmissionRegistry, type AdmissionReservation } from "./admission-registry";
 import { PeerStreamAcceptor, readStreamOpen } from "./stream-dispatch";
 import { TerminalStreamRegistry } from "./terminal-streams";
@@ -150,8 +150,9 @@ export class NativePeerSessions extends PeerSessionOwner {
       // file has no reason to enumerate); netwatch's is narrower. Diagnostics
       // are observability only, never a security or routing decision, so the
       // cast is safe here in a way it would not be for an authorization value.
-      diagnostic: (type, detail) => this.recordDiagnostic({ dir: "event", kind: "lifecycle", transport: "iroh",
-        msgType: type, detail: detail as Record<string, string | number | boolean> }),
+      diagnostic: (type, detail, stream) => this.recordDiagnostic({ dir: "event", kind: "lifecycle", transport: "iroh",
+        msgType: type, detail: detail as Record<string, string | number | boolean>,
+        ...(stream ? { streamKind: stream.kind, streamId: stream.id } : {}) }),
     });
     this.tunnelStreams = new TunnelStreamRegistry({
       projectCataloged: nativeOpts.projectCataloged,
@@ -159,8 +160,9 @@ export class NativePeerSessions extends PeerSessionOwner {
       // Guarded the same way `terminalStreams`'s is: a stale binding from a
       // superseded connection must never retire the peer's NEWER one.
       retirePeer: (peerId, reason) => { if (this.nativePeers.has(peerId)) this.retirePeer(peerId, reason); },
-      diagnostic: (type, detail) => this.recordDiagnostic({ dir: "event", kind: "lifecycle", transport: "iroh",
-        msgType: type, detail: detail as Record<string, string | number | boolean> }),
+      diagnostic: (type, detail, stream) => this.recordDiagnostic({ dir: "event", kind: "lifecycle", transport: "iroh",
+        msgType: type, detail: detail as Record<string, string | number | boolean>,
+        ...(stream ? { streamKind: stream.kind, streamId: stream.id } : {}) }),
     });
   }
 
@@ -391,6 +393,7 @@ export class NativePeerSessions extends PeerSessionOwner {
       if (this.nativePeers.get(peerId) === peer && !this.sessions.has(peerId)) this.retirePeer(peerId, "connection-lost");
     }, HELLO_TIMEOUT_MS);
     this.recordDiagnostic({ dir: "event", kind: "lifecycle", transport: "iroh", msgType: "peer:native-accepted",
+      streamKind: "session", streamId: NETWATCH_SESSION_STREAM_LABEL,
       detail: {
         elapsedMs: now() - startedAt,
         attemptGeneration,
@@ -448,7 +451,8 @@ export class NativePeerSessions extends PeerSessionOwner {
         "tunnel-ws": this.tunnelStreams.wsHandler,
       },
       schedule: this.nativeOpts.lifecycle?.schedule,
-      diagnostic: (type, detail) => this.recordDiagnostic({ dir: "event", kind: "lifecycle", transport: "iroh", msgType: type, detail }),
+      diagnostic: (type, detail, stream) => this.recordDiagnostic({ dir: "event", kind: "lifecycle", transport: "iroh", msgType: type, detail,
+        ...(stream ? { streamKind: stream.kind, streamId: stream.id } : {}) }),
     });
     peer.streams.start();
   }
@@ -517,6 +521,8 @@ export class NativePeerSessions extends PeerSessionOwner {
       kind: "lifecycle",
       transport: "iroh",
       msgType: "peer:native-retired",
+      streamKind: "session",
+      streamId: NETWATCH_SESSION_STREAM_LABEL,
       detail: {
         attemptGeneration: peer.attemptGeneration,
         sessionGeneration: peer.sessionGeneration,
@@ -546,6 +552,7 @@ export class NativePeerSessions extends PeerSessionOwner {
     peer.cancelHelloTimer = undefined;
     peer.sessionGeneration = ++this.peerSessionGeneration;
     this.recordDiagnostic({ dir: "event", kind: "lifecycle", transport: "iroh", msgType: "peer:e2e-established",
+      streamKind: "session", streamId: NETWATCH_SESSION_STREAM_LABEL,
       detail: {
         elapsedMs: (this.nativeOpts.lifecycle?.now ?? performance.now.bind(performance))() - peer.acceptedAt,
         attemptGeneration: peer.attemptGeneration,
@@ -624,7 +631,8 @@ export class NativePeerSessions extends PeerSessionOwner {
 
   private recordNativeWrite(payload: Uint8Array, peerFrameBytes: number, msgType: string): void {
     this.recordDiagnostic({ dir: "tx", kind: "frame", transport: "iroh",
-      channel: "control", msgType, bytes: payload.length, frameId: frameIdFor(payload),
+      channel: "control", streamKind: "session", streamId: NETWATCH_SESSION_STREAM_LABEL,
+      msgType, bytes: payload.length, frameId: frameIdFor(payload),
       detail: { peerFrameBytes, recordBytes: peerFrameBytes + 4, lengthPrefixBytes: 4 } });
   }
 

@@ -12,7 +12,11 @@ import {
   STREAM_STOP_TERMINAL,
   type TerminalStreamRegistryOptions,
 } from "../src/peer/terminal-streams";
-import { STREAM_TERMINAL_APP_RECORD_MAX_BYTES, STREAM_MAX_TERMINAL_ATTACHMENTS_PER_PEER } from "antgrid-wire";
+import {
+  STREAM_TERMINAL_APP_RECORD_MAX_BYTES,
+  STREAM_MAX_TERMINAL_ATTACHMENTS_PER_PEER,
+  STREAM_TERMINAL_BRIDGE_RECORD_MAX_BYTES,
+} from "antgrid-wire";
 import type { TerminalProjectBinding, PeerSessionView } from "../src/project-streams";
 import type { StreamRefusal } from "../src/peer/stream-dispatch";
 import { createMessage, type AbMessage } from "../src/protocol";
@@ -154,13 +158,13 @@ function makeRegistry(overrides: Partial<TerminalStreamRegistryOptions> = {}) {
   const cataloged = new Set<string>();
   const peerSessions = new Map<string, PeerSessionView>();
   const retiredPeers: Array<{ peerId: string; reason: "unauthorized" | "protocol-violation" }> = [];
-  const diagnostics: Array<{ type: string; detail: Record<string, unknown> }> = [];
+  const diagnostics: Array<{ type: string; detail: Record<string, unknown>; stream?: { kind: string; id: string } }> = [];
   const opts: TerminalStreamRegistryOptions = {
     projectCataloged: (id) => cataloged.has(id),
     projectBinding: (id) => bindings.get(id) ?? null,
     peerSession: (peerId) => peerSessions.get(peerId) ?? null,
     retirePeer: (peerId, reason) => retiredPeers.push({ peerId, reason }),
-    diagnostic: (type, detail) => diagnostics.push({ type, detail }),
+    diagnostic: (type, detail, stream) => diagnostics.push({ type, detail, stream }),
     ...overrides,
   };
   const registry = new TerminalStreamRegistry(opts);
@@ -568,6 +572,22 @@ describe("TerminalStreamRegistry (A2)", () => {
     expect(registry.attachmentCount(peerId)).toBe(0);
   });
 
+  test("an oversized outbound record is a dropped diagnostic tagged with this attachment's own terminal stream", async () => {
+    const { registry, cataloged, bindings, diagnostics } = makeRegistry();
+    cataloged.add(PROJECT);
+    const { binding, dispatched } = fakeBinding();
+    bindings.set(PROJECT, binding);
+    const { requestId, attachmentId, runId, peerId } = await admitAndBind(registry, binding, dispatched);
+
+    const huge = { ...createMessage("terminal:frame" as any, {} as any),
+      attachmentId, runId, terminalId: "term1", sequence: 0,
+      payload: "x".repeat(STREAM_TERMINAL_BRIDGE_RECORD_MAX_BYTES + 1) } as unknown as AbMessage;
+    expect(await registry.route(peerId, huge)).toBe("dropped");
+
+    const event = diagnostics.find((d) => d.type === "terminal-stream:oversized-record");
+    expect(event?.stream).toEqual({ kind: "terminal", id: requestId });
+  });
+
   test("writer unauthorized retires the connection", async () => {
     const { registry, cataloged, bindings, retiredPeers } = makeRegistry();
     cataloged.add(PROJECT);
@@ -589,6 +609,34 @@ describe("TerminalStreamRegistry (A2)", () => {
     const frame = { ...createMessage("terminal:frame" as any, {} as any), attachmentId, runId, terminalId: "term1", sequence: 0 } as unknown as AbMessage;
     await registry.route(PEER, frame);
 
+    expect(retiredPeers).toEqual([{ peerId: PEER, reason: "unauthorized" }]);
+  });
+
+  test("an inbound record while authorized() is false retires the connection rather than reaching the project binding", async () => {
+    const { registry, cataloged, bindings, retiredPeers } = makeRegistry();
+    cataloged.add(PROJECT);
+    const { binding, dispatched } = fakeBinding();
+    bindings.set(PROJECT, binding);
+    let authorized = true;
+    const fake = createFakeTerminalStream();
+    const requestId = crypto.randomUUID();
+    const open = { kind: "terminal" as const, projectId: PROJECT, checkoutId: "main", requestId };
+    const admission = { peerId: PEER, open, stream: fake.stream, authorized: () => authorized };
+    expect(await refusalOf(registry.handler(admission))).toBeUndefined();
+    fake.pushRecord(subscribeRecord(requestId));
+    await flush();
+    const runId = crypto.randomUUID();
+    const attachmentId = crypto.randomUUID();
+    await registry.route(PEER, subscribedMessage(requestId, { runId, attachmentId }));
+    dispatched.length = 0;
+
+    authorized = false;
+    fake.pushRecord(createMessage("terminal:ack", {
+      terminalId: "term1", runId, attachmentId, sequence: 0, checkoutId: "main",
+    }));
+    await flush();
+
+    expect(dispatched).toEqual([]); // never reaches the project binding
     expect(retiredPeers).toEqual([{ peerId: PEER, reason: "unauthorized" }]);
   });
 

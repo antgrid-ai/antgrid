@@ -102,6 +102,26 @@ export type StreamHandlers = {
 
 export type StreamDiagnosticType = "peer:stream-refused" | "peer:stream-open-timeout";
 
+/** The stream a refused open named, for `NetwatchEvent.streamKind`/`streamId`:
+ *  the same label the registry that would have owned it tags its own records
+ *  with, so a refusal files under the stream it refused. */
+export interface StreamDiagnosticLabel {
+  kind: StreamOpenKind;
+  /** Unset for a `session` open here: a second session stream is a protocol
+   *  error, and labelling it `"0"` would file it under the live one. */
+  id?: string;
+}
+
+export function streamLabelOf(open: StreamOpen): StreamDiagnosticLabel {
+  switch (open.kind) {
+    case "session": return { kind: open.kind };
+    case "project": return { kind: open.kind, id: open.projectId };
+    case "terminal": return { kind: open.kind, id: open.requestId };
+    case "tunnel-http": return { kind: open.kind, id: open.requestId };
+    case "tunnel-ws": return { kind: open.kind, id: open.wsId };
+  }
+}
+
 export interface PeerStreamAcceptorOptions {
   connection: { acceptBi(): Promise<AcceptedBiStream> };
   peerId: string;
@@ -116,8 +136,11 @@ export interface PeerStreamAcceptorOptions {
   /** A1 passes `{}` (or omits it) — there are no handlers yet. */
   handlers?: StreamHandlers;
   schedule?: (callback: () => void, ms: number) => () => void;
+  /** `stream` is set only for a refusal whose open frame parsed; a timeout or
+   *  an unparseable open names no stream. */
   diagnostic?: (type: StreamDiagnosticType,
-    detail: { code?: StreamRefusedCode; kind?: string; pending: number }) => void;
+    detail: { code?: StreamRefusedCode; kind?: string; pending: number },
+    stream?: StreamDiagnosticLabel) => void;
   /** Default `STREAM_MAX_PENDING_OPENS_PER_PEER`; tests may lower it. */
   maxPendingOpens?: number;
 }
@@ -229,26 +252,27 @@ export class PeerStreamAcceptor {
     if (this.stopped || !isCurrent()) return;
     if (!authorized()) { onUnauthorized(); return; }
     if (!opened.ok) { this.refuse(stream, "INVALID", undefined, diagnostic); return; }
-    if (opened.open.kind === "session") { this.refuse(stream, "INVALID", "session", diagnostic); return; }
+    if (opened.open.kind === "session") { this.refuse(stream, "INVALID", opened.open, diagnostic); return; }
     const open = opened.open;
-    if (!established()) { this.refuse(stream, "NOT_READY", open.kind, diagnostic); return; }
+    if (!established()) { this.refuse(stream, "NOT_READY", open, diagnostic); return; }
     const handler = handlers[open.kind as Exclude<StreamOpenKind, "session">] as
       StreamHandler<typeof open> | undefined;
-    if (!handler) { this.refuse(stream, "NOT_ALLOWED", open.kind, diagnostic); return; }
+    if (!handler) { this.refuse(stream, "NOT_ALLOWED", open, diagnostic); return; }
     let result: StreamRefusal | undefined;
     try {
       result = await handler({ peerId, open, stream, authorized });
     } catch {
-      this.refuse(stream, "NOT_ALLOWED", open.kind, diagnostic);
+      this.refuse(stream, "NOT_ALLOWED", open, diagnostic);
       return;
     }
     if (this.stopped) return;
-    if (result) this.refuse(stream, result.code, open.kind, diagnostic, result.message);
+    if (result) this.refuse(stream, result.code, open, diagnostic, result.message);
   }
 
-  private refuse(stream: AcceptedBiStream, code: StreamRefusedCode, kind: string | undefined,
+  private refuse(stream: AcceptedBiStream, code: StreamRefusedCode, open: StreamOpen | undefined,
     diagnostic: PeerStreamAcceptorOptions["diagnostic"], message: string = DEFAULT_REFUSAL_MESSAGE[code]): void {
-    diagnostic?.("peer:stream-refused", { code, kind, pending: this.pending });
+    diagnostic?.("peer:stream-refused", { code, kind: open?.kind, pending: this.pending },
+      open ? streamLabelOf(open) : undefined);
     refuseStream(stream, { code, message }, this.options.authorized, this.options.onUnauthorized);
   }
 }

@@ -20,6 +20,12 @@ export type NetwatchKind = "frame" | "hello" | "control" | "json" | "drop" | "li
  *  stream kind reaches netwatch without a second list to keep in step. */
 export type NetwatchStreamKind = StreamOpenKind;
 
+/** The session stream's own logical `streamId`, matching the app's
+ *  `_kSessionStreamLabel` (`packages/antgrid_relay_client/lib/src/machine_session.dart`)
+ *  bit for bit — a joined capture pairs on `frameId`, never on this field, but
+ *  a display-only label still has to read the same on both ends. */
+export const NETWATCH_SESSION_STREAM_LABEL = "0";
+
 export interface NetwatchEvent {
   /** Monotonic counter of the process that RECORDED this — this bridge, or the
    *  app named by `origin`. Gaps across a capture mean events were evicted
@@ -37,14 +43,22 @@ export interface NetwatchEvent {
    * `streamKind` is what distinguishes native streams.
    */
   channel?: Channel;
-  /** Which native stream a record rode. Optional because only the call sites
-   *  that know their stream set it; the Stage A ledger lists the ones that
-   *  do not yet. Never part of the `joinCaptures` key: the app's capture has
-   *  no such field, and a key only one end can fill would pair nothing. */
+  /** Which native stream a record rode. Optional because a connection- or
+   *  admission-level event (`peer:endpoint-state`, `peer:admissions`) names no
+   *  single stream. Never part of the `joinCaptures` key: the app's capture
+   *  has no such field, and a key only one end can fill would pair nothing. */
   streamKind?: NetwatchStreamKind;
-  /** A per-connection stream label. The app writes its logical one (`"0"` for
-   *  the session stream, else the projectId), not a QUIC stream id; bridge
-   *  records leave it unset. Display only, never joined on. */
+  /**
+   * A per-connection stream label, not a QUIC stream id — display only, never
+   * joined on. Both ends must agree on the LABEL for a given stream kind, or
+   * the capture reads as if bridge and app never touched the same stream:
+   * `NETWATCH_SESSION_STREAM_LABEL` (`"0"`) for the session stream, the
+   * `projectId` for a project stream (the app's `MachineSession.streamId`,
+   * `machine_session.dart`), the terminal open frame's own `requestId` for a
+   * terminal stream, and the tunnel open frame's own `requestId`/`wsId` for a
+   * tunnel stream — the app writes none of the last two today, so only the
+   * bridge side of a terminal/tunnel row currently carries one.
+   */
   streamId?: string;
   /** Plaintext message type, once the pipeline knows it. Never a payload. */
   msgType?: string;

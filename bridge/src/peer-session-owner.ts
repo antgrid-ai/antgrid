@@ -13,7 +13,7 @@ import {
   type SendTarget,
   type StreamHandle,
 } from "./project-streams";
-import { netwatch, frameIdFor, isRemoteIngestArmed } from "./netwatch";
+import { netwatch, frameIdFor, isRemoteIngestArmed, NETWATCH_SESSION_STREAM_LABEL } from "./netwatch";
 import type { SendOutcome, PeerRecordFailure, StreamSendOutcome } from "./peer/stream-records";
 
 const log = logger.child({ component: "native-session" });
@@ -118,6 +118,7 @@ export abstract class PeerSessionOwner {
         if (obj && typeof obj === "object" && (obj as { type?: unknown }).type === "session:hello") {
           this.recordDiagnostic({
             dir: "rx", kind: "frame", transport: this.payloadTransport(from), channel: "control",
+            streamKind: "session", streamId: NETWATCH_SESSION_STREAM_LABEL,
             msgType: "session:hello", frameId, bytes,
           });
           const parsed = SessionHelloFrame.safeParse(obj);
@@ -128,6 +129,7 @@ export abstract class PeerSessionOwner {
       }
       this.recordDiagnostic({
         dir: "rx", kind: "drop", transport: this.payloadTransport(from), channel: "control",
+        streamKind: "session", streamId: NETWATCH_SESSION_STREAM_LABEL,
         frameId, bytes, reason: "pre-establishment",
       });
       return;
@@ -218,6 +220,11 @@ export abstract class PeerSessionOwner {
       peerSession: (peerId) => this.peerSession(peerId),
       sendSessionMessage: (peerId, msg) => void this.sendControlPlane(msg, "control", { kind: "peer", peerId }),
       onError: this.opts.onError,
+      // Without this the registry's own streamKind/streamId-tagged records
+      // (project-streams.ts) never reach netwatch: `diagnostic` here IS the
+      // only wiring from the registry to the ring buffer, same as terminal
+      // and tunnel streams get from NativeHostConnection's constructor.
+      diagnostic: (event) => this.recordDiagnostic(event),
       retirePeer: (peerId, reason) => this.retirePeerConnection(peerId, reason),
       // Late-bound over the protected hooks below (A2), so a subclass such as
       // NativePeerSessions can plug in a TerminalStreamRegistry without this
@@ -276,6 +283,7 @@ export abstract class PeerSessionOwner {
       this.diagnostics.warn("Dropping non-JSON session frame");
       this.recordDiagnostic({
         dir: "rx", kind: "drop", transport: this.payloadTransport(peerId), channel: "control",
+        streamKind: "session", streamId: NETWATCH_SESSION_STREAM_LABEL,
         frameId, bytes, reason: "unknown-session-frame",
       });
       return;
@@ -284,12 +292,14 @@ export abstract class PeerSessionOwner {
       this.diagnostics.warn("Dropping malformed session frame");
       this.recordDiagnostic({
         dir: "rx", kind: "drop", transport: this.payloadTransport(peerId), channel: "control",
+        streamKind: "session", streamId: NETWATCH_SESSION_STREAM_LABEL,
         frameId, bytes, reason: "unknown-session-frame",
       });
       return;
     }
     this.recordDiagnostic({
       dir: "rx", kind: "frame", transport: this.payloadTransport(peerId), channel: "control",
+      streamKind: "session", streamId: NETWATCH_SESSION_STREAM_LABEL,
       msgType: (obj as { type: string }).type, frameId, bytes,
     });
     this.handleSessionFrame(
@@ -312,6 +322,7 @@ export abstract class PeerSessionOwner {
       this.diagnostics.warn("Dropping non-JSON peer plaintext");
       this.recordDiagnostic({
         dir: "rx", kind: "drop", transport: this.payloadTransport(peerId), channel: "control",
+        streamKind: "session", streamId: NETWATCH_SESSION_STREAM_LABEL,
         frameId, bytes, reason: "plaintext-not-json",
       });
       return;
@@ -320,12 +331,14 @@ export abstract class PeerSessionOwner {
       this.diagnostics.warn("Dropping unrecognized peer plaintext");
       this.recordDiagnostic({
         dir: "rx", kind: "drop", transport: this.payloadTransport(peerId), channel: "control",
+        streamKind: "session", streamId: NETWATCH_SESSION_STREAM_LABEL,
         frameId, bytes, reason: "unrecognized-plaintext",
       });
       return;
     }
     this.recordDiagnostic({
       dir: "rx", kind: "frame", transport: this.payloadTransport(peerId), channel: "control",
+      streamKind: "session", streamId: NETWATCH_SESSION_STREAM_LABEL,
       msgType: (obj as { type: string }).type, frameId, bytes,
     });
     this.dispatchControlPlane(plaintext, "control", peerId);
@@ -355,6 +368,7 @@ export abstract class PeerSessionOwner {
         if (typeof msg.dropped === "number" && msg.dropped > 0) {
           this.recordDiagnostic({
             dir: "tx", kind: "drop", transport: this.payloadTransport(peerId), channel,
+            streamKind: "session", streamId: NETWATCH_SESSION_STREAM_LABEL,
             reason: "app-budget-exceeded", origin: "app",
             detail: { dropped: msg.dropped },
           });
@@ -394,6 +408,7 @@ export abstract class PeerSessionOwner {
         this.diagnostics.warn("Dropping unexpected peer session frame (type=%s)", obj.type);
         this.recordDiagnostic({
           dir: "rx", kind: "drop", transport: this.payloadTransport(peerId), channel: "control",
+          streamKind: "session", streamId: NETWATCH_SESSION_STREAM_LABEL,
           msgType: obj.type, reason: "unknown-session-frame",
         });
     }
@@ -470,6 +485,7 @@ export abstract class PeerSessionOwner {
     if (!this.peerPubkeyFor(peerId)) {
       this.recordDiagnostic({
         dir: "rx", kind: "drop", transport: this.payloadTransport(peerId), channel: "control",
+        streamKind: "session", streamId: NETWATCH_SESSION_STREAM_LABEL,
         msgType: "session:hello", frameId, bytes, reason: "not-admitted",
       });
       return;
@@ -537,9 +553,8 @@ export abstract class PeerSessionOwner {
     channel: Channel,
     target: SendTarget = { kind: "broadcast" },
     signal?: AbortSignal,
-    authorized?: () => boolean,
   ): Promise<SendOutcome> {
-    if (signal?.aborted || authorized?.() === false) return Promise.resolve("dropped");
+    if (signal?.aborted) return Promise.resolve("dropped");
     const type = (msg as { type?: string } | null)?.type;
     const recipients = this.resolveRecipients(target);
     if (recipients.length === 0) {
@@ -549,6 +564,7 @@ export abstract class PeerSessionOwner {
       this.diagnostics.debug("Dropping outbound %s — no established session for it", type ?? "message");
       this.recordDiagnostic({
         dir: "tx", kind: "drop", transport: this.payloadTransport(target.kind === "peer" ? target.peerId : undefined), channel,
+        streamKind: "session", streamId: NETWATCH_SESSION_STREAM_LABEL,
         msgType: type ?? "message", reason: "no-e2e-session",
       });
       return Promise.resolve<SendOutcome>("dropped");
@@ -562,6 +578,7 @@ export abstract class PeerSessionOwner {
       this.opts.onError?.("MESSAGE_TOO_LARGE", message);
       this.recordDiagnostic({
         dir: "tx", kind: "drop", transport: this.payloadTransport(target.kind === "peer" ? target.peerId : undefined), channel,
+        streamKind: "session", streamId: NETWATCH_SESSION_STREAM_LABEL,
         msgType: type ?? "message", reason: "MESSAGE_TOO_LARGE", detail: { bytes },
       });
       return Promise.resolve<SendOutcome>("too-large");

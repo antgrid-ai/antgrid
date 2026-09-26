@@ -21,6 +21,7 @@ import {
 } from "antgrid-wire";
 import { isSafeProjectId } from "../project-id";
 import { createMessage, parseMessage, type AbMessage } from "../protocol";
+import type { NetwatchStreamKind } from "../netwatch";
 import {
   StreamRecordReader,
   StreamRecordWriter,
@@ -72,7 +73,12 @@ export interface TerminalStreamRegistryOptions {
   /** Retires the whole connection. Only ever called with "unauthorized" (writer) or
    *  "protocol-violation" (a malformed length prefix from StreamRecordReader). */
   retirePeer: (peerId: string, reason: "unauthorized" | "protocol-violation") => void;
-  diagnostic?: (type: string, detail: Record<string, unknown>) => void;
+  /** `stream` names the record's native stream for `NetwatchEvent.streamKind`/
+   *  `streamId` — always `"terminal"` here, paired with the binding's own
+   *  `requestId` (stable for the attachment's whole life, the same way a
+   *  project stream's `streamId` is its `projectId`). Absent only for an event
+   *  with no single binding to attribute (there are none today). */
+  diagnostic?: (type: string, detail: Record<string, unknown>, stream?: { kind: NetwatchStreamKind; id: string }) => void;
 }
 
 interface Binding {
@@ -86,6 +92,10 @@ interface Binding {
   readonly writer: StreamRecordWriter;
   readonly reader: StreamRecordReader;
   readonly projectBinding: TerminalProjectBinding;
+  /** The admission's own authorization check, re-read on every inbound record
+   *  by `runLoop` — the mirror of the outbound check the writer already runs
+   *  on every send (`tunnel-streams.ts`'s read loops apply the same rule). */
+  readonly authorized: () => boolean;
   attachmentId?: string;
   runId?: string;
   terminalId?: string;
@@ -185,6 +195,7 @@ export class TerminalStreamRegistry {
       writer,
       reader,
       projectBinding,
+      authorized,
       appEnded: false,
       retiring: false,
       unbound: false,
@@ -222,6 +233,10 @@ export class TerminalStreamRegistry {
         void binding.stream.recv.stop(STREAM_STOP_TERMINAL).catch(() => {});
         return;
       }
+      // Re-checked per record, the same as the outbound writer and as
+      // tunnel-streams.ts's own read loops: a lease revoked mid-stream must
+      // not keep dispatching whatever the peer already had in flight.
+      if (!binding.authorized()) { this.opts.retirePeer(binding.peerId, "unauthorized"); return; }
       const msg = parseMessage(Buffer.from(bytes).toString("utf-8"));
       const ok = msg !== null && (first ? this.acceptsFirstRecord(binding, msg) : this.acceptsLaterRecord(binding, msg));
       if (!ok) {
@@ -363,7 +378,7 @@ export class TerminalStreamRegistry {
         peerId: binding.peerId,
         type: msg.type,
         bytes: bytes.length,
-      });
+      }, { kind: "terminal", id: binding.requestId });
       return Promise.resolve("dropped");
     }
     return binding.writer.send(bytes, signal);

@@ -314,15 +314,23 @@ test("peer payload diagnostics classify all production payload frames as native"
     access.onControlMessage("{}", "websocket-peer");
     expect(events.filter((event) => event.reason === "unrecognized-plaintext").map((event) => event.transport))
       .toEqual(["iroh", "iroh"]);
+    // Every one of these frames rides the session stream, so each is tagged
+    // with the same logical label the app writes for it (netwatch.ts).
+    for (const event of events.filter((event) => event.reason === "unrecognized-plaintext")) {
+      expect(event.streamKind).toBe("session");
+      expect(event.streamId).toBe("0");
+    }
     const accepted = events.find((event) => event.kind === "lifecycle" && event.msgType === "peer:native-accepted");
     expect(accepted?.detail?.attemptGeneration).toBe(1);
     expect(accepted?.detail?.leaseRemainingMs).toBeGreaterThan(59_000);
+    expect(accepted).toMatchObject({ streamKind: "session", streamId: "0" });
     const slot = `${f.peerId}#${f.client.deviceId}`;
     f.access.onSessionEstablished(slot);
     const established = events.find((event) => event.msgType === "peer:e2e-established");
     expect(established?.detail?.attemptGeneration).toBe(1);
     expect(established?.detail?.sessionGeneration).toBe(1);
     expect(established?.detail?.leaseRemainingMs).toBeGreaterThan(59_000);
+    expect(established).toMatchObject({ streamKind: "session", streamId: "0" });
     f.setAllowed(false);
     f.client.recheckAuthorization();
     const retired = events.find((event) => event.msgType === "peer:native-retired");
@@ -332,6 +340,7 @@ test("peer payload diagnostics classify all production payload frames as native"
       reason: "unauthorized",
       teardownOutcome: "requested",
     });
+    expect(retired).toMatchObject({ streamKind: "session", streamId: "0" });
     expect(JSON.stringify(events)).not.toContain("private");
     expect(JSON.stringify(events)).not.toContain("test-only");
   } finally { observer.mockRestore(); f.client.close(); }
@@ -370,6 +379,8 @@ test("native write diagnostics await the sliced write and separate payload from 
     expect(tx).toHaveLength(1);
     expect(tx[0].transport).toBe("iroh");
     expect(tx[0].bytes).toBe(payload.length);
+    expect(tx[0].streamKind).toBe("session");
+    expect(tx[0].streamId).toBe("0");
     const peerFrame = encodePeerFrame({ type: "message" }, payload);
     expect(tx[0].detail).toEqual({ peerFrameBytes: peerFrame.length, recordBytes: peerFrame.length + 4, lengthPrefixBytes: 4 });
     expect(JSON.stringify(events)).not.toContain("private-test-payload");
@@ -708,6 +719,22 @@ test("a second bidi stream is refused in-band instead of retiring the connection
     expect(peer.closeCodes()).toEqual([]);
     expect(f.access.nativePeers.size).toBe(1);
   } finally { f.client.close(); }
+});
+
+test("a refused later stream reaches netwatch tagged with the stream its open frame named", async () => {
+  const f = fixture();
+  const peer = connection(f.endpointId);
+  const events: Parameters<typeof netwatch.record>[0][] = [];
+  const observer = spyOn(netwatch, "record").mockImplementation((event) => { events.push(event); });
+  try {
+    await f.access.acceptPeer(peer.native);
+    const body = Array.from(encodeStreamOpen({ kind: "project", projectId: "p1" }));
+    const later = laterStream([lengthPrefix(body.length), body]);
+    peer.pushLaterStream(later.stream);
+    await until(() => later.stops.length > 0);
+    const refused = events.find((event) => event.msgType === "peer:stream-refused");
+    expect(refused).toMatchObject({ streamKind: "project", streamId: "p1", detail: { code: "NOT_READY", kind: "project" } });
+  } finally { observer.mockRestore(); f.client.close(); }
 });
 
 test("an established peer with a catalogued, attached project gets a project open admitted, and the first record is stream-ready", async () => {

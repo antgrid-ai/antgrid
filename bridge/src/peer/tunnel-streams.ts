@@ -53,6 +53,7 @@ import {
   type StreamWriteFailure,
 } from "./stream-records";
 import type { TunnelProjectBinding } from "../project-streams";
+import type { NetwatchStreamKind } from "../netwatch";
 
 export const TUNNEL_STREAM_MAX_QUEUED_BYTES = 4 * 1024 * 1024;
 /** Below the session stream's binding default of 0, and below terminal's `1`
@@ -153,7 +154,13 @@ export interface TunnelStreamRegistryOptions {
   /** Only ever "unauthorized" (a writer, or a per-record authorized() check on read) or
    *  "protocol-violation" (a malformed length prefix from StreamRecordReader). */
   retirePeer: (peerId: string, reason: "unauthorized" | "protocol-violation") => void;
-  diagnostic?: (type: string, detail: Record<string, unknown>) => void;
+  /** `stream` names the record's native stream for `NetwatchEvent.streamKind`/
+   *  `streamId` — `"tunnel-http"` or `"tunnel-ws"` per the binding's own
+   *  `kind`, paired with its `id` (the open frame's `requestId`/`wsId`, stable
+   *  for the exchange's whole life, the same way a project stream's
+   *  `streamId` is its `projectId`). Absent only for an event with no single
+   *  binding to attribute (there are none today). */
+  diagnostic?: (type: string, detail: Record<string, unknown>, stream?: { kind: NetwatchStreamKind; id: string }) => void;
   /** Timer seam for the head deadline; defaults to setTimeout/clearTimeout. */
   schedule?: (callback: () => void, ms: number) => () => void;
 }
@@ -552,7 +559,8 @@ export class TunnelStreamRegistry {
 
   private failHttp(binding: HttpBinding, reason: string): void {
     if (binding.unbound) return;
-    this.opts.diagnostic?.("tunnel-stream:http-failed", { peerId: binding.peerId, requestId: binding.id, reason });
+    this.opts.diagnostic?.("tunnel-stream:http-failed", { peerId: binding.peerId, requestId: binding.id, reason },
+      { kind: "tunnel-http", id: binding.id });
     binding.writer.abort();
     this.unbind(binding);
   }

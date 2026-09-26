@@ -229,6 +229,10 @@ interface Binding {
   readonly stream: AcceptedBiStream;
   readonly writer: StreamRecordWriter;
   readonly reader: StreamRecordReader;
+  /** The admission's own authorization check, re-read on every inbound record
+   *  by `runLoop` — the mirror of the outbound check the writer already runs
+   *  on every send (`tunnel-streams.ts`'s read loops apply the same rule). */
+  readonly authorized: () => boolean;
   /** Removed from every index and its cap slot freed. The staleness guard
    *  every async step checks: once unbound, nothing may act on this binding
    *  again. */
@@ -411,8 +415,11 @@ export class ProjectStreamRegistry {
     if (bytes > MAX_TRANSFER_BYTES) {
       const message = `${type ?? "message"} exceeds MAX_TRANSFER_BYTES`;
       this.opts.onError?.("MESSAGE_TOO_LARGE", message);
+      // Every recipient in `recipients` is bound to the same project entry
+      // (§3.1), so its own projectId stands for the whole batch.
       this.opts.diagnostic?.({
         dir: "tx", kind: "drop", transport: "iroh", channel: "control",
+        streamKind: "project", streamId: recipients[0]?.projectId,
         msgType: type, reason: "MESSAGE_TOO_LARGE", detail: { bytes },
       });
       return "too-large";
@@ -479,7 +486,7 @@ export class ProjectStreamRegistry {
       STREAM_PROJECT_APP_RECORD_MAX_BYTES,
       () => { if (!binding.unbound) this.opts.retirePeer(peerId, "protocol-violation"); },
     );
-    binding = { peerId, projectId, entry, stream, writer, reader, unbound: false };
+    binding = { peerId, projectId, entry, stream, writer, reader, authorized, unbound: false };
     this.bind(binding);
     // The bind is complete once this is written — the app treats its project
     // stream as bound only once this first record arrives (D-1).
@@ -508,6 +515,10 @@ export class ProjectStreamRegistry {
         void binding.stream.recv.stop(STREAM_STOP_PROJECT).catch(() => {});
         return;
       }
+      // Re-checked per record, the same as the outbound writer and as
+      // tunnel-streams.ts's own read loops: a lease revoked mid-stream must
+      // not keep dispatching whatever the peer already had in flight.
+      if (!binding.authorized()) { this.opts.retirePeer(binding.peerId, "unauthorized"); return; }
       const text = Buffer.from(bytes).toString("utf-8");
       this.dispatchJson(binding, text);
     }
@@ -520,6 +531,7 @@ export class ProjectStreamRegistry {
     if (!msg) {
       this.opts.diagnostic?.({
         dir: "rx", kind: "drop", transport: "iroh", channel: "control",
+        streamKind: "project", streamId: binding.projectId,
         reason: "not-ab-message",
       });
       return;

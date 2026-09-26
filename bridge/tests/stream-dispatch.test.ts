@@ -15,6 +15,7 @@ import {
   STREAM_STOP_REFUSED,
   type AcceptedBiStream,
   type PeerStreamAcceptorOptions,
+  type StreamDiagnosticLabel,
   type StreamDiagnosticType,
   type StreamHandlers,
 } from "../src/peer/stream-dispatch";
@@ -129,7 +130,7 @@ function connectionQueue() {
 }
 
 function createAcceptor(overrides: Partial<PeerStreamAcceptorOptions> & { connection: PeerStreamAcceptorOptions["connection"] }) {
-  const diagnostics: Array<{ type: StreamDiagnosticType; detail: unknown }> = [];
+  const diagnostics: Array<{ type: StreamDiagnosticType; detail: unknown; stream?: StreamDiagnosticLabel }> = [];
   const unauthorizedCalls: number[] = [];
   const acceptor = new PeerStreamAcceptor({
     peerId: "peer-1",
@@ -138,7 +139,7 @@ function createAcceptor(overrides: Partial<PeerStreamAcceptorOptions> & { connec
     established: () => true,
     onUnauthorized: () => { unauthorizedCalls.push(1); },
     handlers: {},
-    diagnostic: (type, detail) => diagnostics.push({ type, detail }),
+    diagnostic: (type, detail, stream) => diagnostics.push({ type, detail, stream }),
     ...overrides,
   });
   return { acceptor, diagnostics, unauthorizedCalls };
@@ -248,6 +249,40 @@ test("every non-session kind is refused NOT_ALLOWED once established (A1 has no 
     expect(fake.writtenRefusal()?.code).toBe("NOT_ALLOWED");
     acceptor.stop();
   }
+});
+
+test("a refusal names the stream its open frame named, with the label that stream's own registry records under", async () => {
+  const cases: Array<{ open: StreamOpen; label: StreamDiagnosticLabel }> = [
+    { open: { kind: "project", projectId: "p1" }, label: { kind: "project", id: "p1" } },
+    { open: { kind: "terminal", projectId: "p1", requestId: "r1" }, label: { kind: "terminal", id: "r1" } },
+    { open: { kind: "tunnel-http", projectId: "p1", requestId: "r2" }, label: { kind: "tunnel-http", id: "r2" } },
+    { open: { kind: "tunnel-ws", projectId: "p1", wsId: "w1" }, label: { kind: "tunnel-ws", id: "w1" } },
+    // A second session stream is not THE session stream: no "0".
+    { open: { kind: "session" }, label: { kind: "session" } },
+  ];
+  for (const { open, label } of cases) {
+    const queue = connectionQueue();
+    const { acceptor, diagnostics } = createAcceptor({ connection: queue.connection, established: () => true, handlers: {} });
+    const { prefix, body } = openFrameBytes(open);
+    const fake = createFakeStream(scriptedRecv([prefix, body]));
+    acceptor.start();
+    queue.push(fake.stream);
+    await until(() => fake.writeAllCalls.length > 0);
+    expect(diagnostics.find((d) => d.type === "peer:stream-refused")?.stream).toEqual(label);
+    acceptor.stop();
+  }
+
+  // An open that never parsed names no stream.
+  const queue = connectionQueue();
+  const { acceptor, diagnostics } = createAcceptor({ connection: queue.connection });
+  const fake = createFakeStream(scriptedRecv([lengthPrefix(0)]));
+  acceptor.start();
+  queue.push(fake.stream);
+  await until(() => fake.writeAllCalls.length > 0);
+  const refused = diagnostics.find((d) => d.type === "peer:stream-refused");
+  expect(refused).toBeDefined();
+  expect(refused?.stream).toBeUndefined();
+  acceptor.stop();
 });
 
 test("a non-session open before the session is established is refused NOT_READY", async () => {

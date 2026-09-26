@@ -224,12 +224,12 @@ function makeRegistry(overrides: Partial<TunnelStreamRegistryOptions> = {}) {
   const cataloged = new Set<string>();
   const bindings = new Map<string, TunnelProjectBinding>();
   const retiredPeers: Array<{ peerId: string; reason: "unauthorized" | "protocol-violation" }> = [];
-  const diagnostics: Array<{ type: string; detail: Record<string, unknown> }> = [];
+  const diagnostics: Array<{ type: string; detail: Record<string, unknown>; stream?: { kind: string; id: string } }> = [];
   const opts: TunnelStreamRegistryOptions = {
     projectCataloged: (id) => cataloged.has(id),
     tunnelBinding: (id) => bindings.get(id) ?? null,
     retirePeer: (peerId, reason) => retiredPeers.push({ peerId, reason }),
-    diagnostic: (type, detail) => diagnostics.push({ type, detail }),
+    diagnostic: (type, detail, stream) => diagnostics.push({ type, detail, stream }),
     ...overrides,
   };
   const registry = new TunnelStreamRegistry(opts);
@@ -535,6 +535,23 @@ describe("TunnelStreamRegistry (A3)", () => {
     await fb.server.httpCalls[0]!.exchange.head({ status: 200, headers: {} });
     expect(fake.setPriorityCalls).toEqual([STREAM_PRIORITY_TUNNEL]);
     expect(fake.order.indexOf("setPriority")).toBeLessThan(fake.order.indexOf("writeAll"));
+  });
+
+  test("exchange.fail is a dropped diagnostic tagged with this request's own tunnel-http stream", async () => {
+    const { registry, cataloged, bindings, diagnostics } = makeRegistry();
+    cataloged.add(PROJECT);
+    const fb = fakeBinding();
+    bindings.set(PROJECT, fb.binding);
+    const { fake, requestId } = admitHttp(registry, {});
+    fake.pushJson(httpRequest(requestId, { bodyLength: 0 }));
+    await flush();
+    expect(fb.server.httpCalls).toHaveLength(1);
+
+    fb.server.httpCalls[0]!.exchange.fail("upstream-error");
+    await flush();
+
+    const event = diagnostics.find((d) => d.type === "tunnel-stream:http-failed");
+    expect(event?.stream).toEqual({ kind: "tunnel-http", id: requestId });
   });
 
   test("an admitted WS stream sets STREAM_PRIORITY_TUNNEL once, before its first write, and opens the upstream via manager.serveWs", async () => {
