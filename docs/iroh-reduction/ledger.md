@@ -60,8 +60,8 @@ the code wins over both.
 | A | A6 docs, diagnostics and ledger | done | `4c2f22de` |
 | A | follow-up: per-record authorization on project and terminal streams, netwatch stream tags | done | `848df2f2` |
 | A | A7 raw upload streams and raw tunnel HTTP bodies | done | `63b1dca3` |
-| A | A8 liveness: explicit QUIC defaults, one app ping, per-stream RPC timeout recovery | done | `<hash>` |
-| A | A9 session stream drops the peer-frame envelope | done | `<hash>` |
+| A | A8 liveness: explicit QUIC defaults, one app ping, per-stream RPC timeout recovery | done | `8397c8a3` |
+| A | A9 session stream drops the peer-frame envelope | done | `d92463d6` |
 
 ### Stage C gate evidence (executed by the wave commit agents)
 
