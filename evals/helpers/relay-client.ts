@@ -225,6 +225,17 @@ function prefixWithLength(bytes: Uint8Array): Uint8Array {
   return out;
 }
 
+/** Opens a fresh bi-stream on `connection` and writes `open`'s length-prefixed
+ *  encoding as the first record — the shape every kind's stream-open shares. */
+async function openStreamWithFrame(
+  connection: Connection,
+  open: Parameters<typeof encodeStreamOpen>[0],
+): Promise<Awaited<ReturnType<Connection["openBi"]>>> {
+  const stream = await connection.openBi();
+  await stream.send.writeAll(Array.from(prefixWithLength(encodeStreamOpen(open))));
+  return stream;
+}
+
 /** Splits a byte stream into `[u32 BE len][body]` records, stopping at the
  *  first short or truncated prefix (the tail of a raw readToEnd is never a
  *  partial record in a well-formed reply, but a probe's hand-built input can
@@ -727,16 +738,9 @@ export class RelayClient {
   async openTerminalStream(open: { projectId: string; requestId: string; checkoutId?: string }): Promise<TerminalStreamClient> {
     const connection = this.nativeConnection;
     if (!connection) throw new Error("Native connection is not established");
-    const stream = await connection.openBi();
-    const openFrame = prefixWithLength(
-      encodeStreamOpen({
-        kind: "terminal",
-        projectId: open.projectId,
-        requestId: open.requestId,
-        checkoutId: open.checkoutId,
-      }),
-    );
-    await stream.send.writeAll(Array.from(openFrame));
+    const stream = await openStreamWithFrame(connection, {
+      kind: "terminal", projectId: open.projectId, requestId: open.requestId, checkoutId: open.checkoutId,
+    });
 
     const records: Array<Record<string, any>> = [];
     const waiters: Array<{
@@ -829,12 +833,7 @@ export class RelayClient {
     if (!connection) throw new Error("Native connection is not established");
     const openRequestId = opts.requestId ?? crypto.randomUUID();
     const body = opts.body ?? new Uint8Array(0);
-    const stream = await connection.openBi();
-
-    const openFrame = prefixWithLength(
-      encodeStreamOpen({ kind: "tunnel-http", projectId: opts.projectId, requestId: openRequestId }),
-    );
-    await stream.send.writeAll(Array.from(openFrame));
+    const stream = await openStreamWithFrame(connection, { kind: "tunnel-http", projectId: opts.projectId, requestId: openRequestId });
 
     const head: Record<string, unknown> = {
       ...opts.head,
@@ -998,20 +997,10 @@ export class RelayClient {
     const requestId = opts.requestId ?? crypto.randomUUID();
     const size = opts.size ?? opts.bytes.length;
     const sliceBytes = opts.sliceBytes ?? STREAM_RECORD_SLICE_BYTES;
-    const stream = await connection.openBi();
-
-    const openFrame = prefixWithLength(
-      encodeStreamOpen({
-        kind: "upload",
-        projectId: opts.projectId,
-        checkoutId: opts.checkoutId,
-        requestId,
-        fileName: opts.fileName,
-        size,
-        mimeType: opts.mimeType,
-      }),
-    );
-    await stream.send.writeAll(Array.from(openFrame));
+    const stream = await openStreamWithFrame(connection, {
+      kind: "upload", projectId: opts.projectId, checkoutId: opts.checkoutId, requestId,
+      fileName: opts.fileName, size, mimeType: opts.mimeType,
+    });
 
     let written = 0;
     const writeChunk = async (bytes: Uint8Array): Promise<void> => {
@@ -1107,12 +1096,7 @@ export class RelayClient {
     if (!connection) throw new Error("Native connection is not established");
     const tunnelId = opts.tunnelId ?? crypto.randomUUID();
     const checkoutId = (opts.open as { checkoutId?: unknown }).checkoutId ?? "main";
-    const stream = await connection.openBi();
-
-    const openFrame = prefixWithLength(
-      encodeStreamOpen({ kind: "tunnel-ws", projectId: opts.projectId, wsId: tunnelId }),
-    );
-    await stream.send.writeAll(Array.from(openFrame));
+    const stream = await openStreamWithFrame(connection, { kind: "tunnel-ws", projectId: opts.projectId, wsId: tunnelId });
 
     const head = { ...opts.open, type: "tunnel:ws-open", tunnelId, checkoutId };
     await stream.send.writeAll(Array.from(prefixWithLength(Buffer.from(JSON.stringify(head), "utf8"))));
@@ -1484,9 +1468,7 @@ export class RelayClient {
   ): Promise<{ state: ProjectStreamState; first: { refusal?: { code: string; message: string }; record?: Record<string, any> } }> {
     const connection = this.nativeConnection;
     if (!connection) throw new Error("Native connection is not established");
-    const stream = await connection.openBi();
-    const openFrame = prefixWithLength(encodeStreamOpen({ kind: "project", projectId }));
-    await stream.send.writeAll(Array.from(openFrame));
+    const stream = await openStreamWithFrame(connection, { kind: "project", projectId });
 
     let endedResolve!: (v: "fin" | "error") => void;
     const ended = new Promise<"fin" | "error">((resolve) => {

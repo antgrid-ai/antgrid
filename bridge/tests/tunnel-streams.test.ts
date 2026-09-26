@@ -1,13 +1,13 @@
 // Drives TunnelStreamRegistry directly with fakes — no PeerStreamAcceptor, no
-// real StreamMux, no real TunnelManager. The acceptor's own admission order
-// (authorization, the open-frame read, NOT_READY pre-handler, the pending cap)
-// is covered by stream-dispatch.test.ts; this file starts at the handler
-// boundary, mirroring terminal-streams.test.ts's pattern for the terminal
-// registry.
+// real StreamMux, no real TunnelManager. Admission (authorization, the
+// open-frame read, refusal codes, caps, unauthorized mid-stream, oversize
+// records, projectDetached, dropPeer) is covered once for every kind by
+// stream-admission.test.ts; this file starts at the handler boundary and
+// covers tunnel's own body: the head-record protocol, request-body pumping,
+// and the HTTP/WS exchange lifecycle.
 import { describe, test, expect } from "bun:test";
 import {
   TunnelStreamRegistry,
-  TUNNEL_STREAM_MAX_QUEUED_BYTES,
   STREAM_RESET_TUNNEL,
   STREAM_STOP_TUNNEL,
   type TunnelStreamRegistryOptions,
@@ -15,159 +15,23 @@ import {
 import { STREAM_RAW_READ_BYTES } from "../src/peer/stream-records";
 import {
   encodeTunnelDataRecord,
-  STREAM_MAX_TUNNEL_STREAMS_PER_PEER,
-  STREAM_TUNNEL_DATA_MAX_BYTES,
   STREAM_TUNNEL_REQUEST_BODY_MAX_BYTES,
   TUNNEL_RECORD_TAG_WS_BINARY,
   type TunnelHttpStreamOpen,
   type TunnelWsStreamOpen,
 } from "antgrid-wire";
 import type { TunnelProjectBinding } from "../src/project-streams";
-import type { StreamRefusal } from "../src/peer/stream-dispatch";
 import type {
   TunnelAdmission,
   TunnelHttpExchange,
   TunnelManager,
-  TunnelWsFrame,
   TunnelWsPeer,
   TunnelWsUpstreamSink,
 } from "../src/tunnel-manager";
 import type { TunnelHttpRequest, TunnelWsOpen } from "../src/tunnel-protocol";
 import type { TunnelRequestBody } from "../src/localhost-fetch";
+import { createFakeBiStream, createFakeProjectBinding, flush, manualSchedule, refusalOf, type FakeBiStream } from "./support/fake-bi-stream";
 
-/** Serializes calls exactly like the real binding's `Arc<Mutex<..>>`, mirroring
- *  stream-records.test.ts's FakeMutex: a call queued behind another does not
- *  start running its body until the prior one's promise settles. */
-class FakeMutex {
-  private tail: Promise<unknown> = Promise.resolve();
-  run<T>(fn: () => Promise<T>): Promise<T> {
-    const result = this.tail.then(fn);
-    this.tail = result.then(() => undefined, () => undefined);
-    return result;
-  }
-}
-
-function flush(): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, 0));
-}
-
-function lengthPrefixed(body: Uint8Array): number[][] {
-  const prefix = Buffer.alloc(4);
-  prefix.writeUInt32BE(body.length);
-  return [Array.from(prefix), Array.from(body)];
-}
-
-/** One fake tunnel stream: a send half and a recv half, each behind its own
- *  mutex, matching the binding's independent send/recv locks. */
-function createFakeStream() {
-  const sendMutex = new FakeMutex();
-  const recvMutex = new FakeMutex();
-  const writeAllCalls: number[][] = [];
-  const setPriorityCalls: number[] = [];
-  const resetCalls: bigint[] = [];
-  const stopCalls: bigint[] = [];
-  const readCalls: number[] = [];
-  const readRawCalls: number[] = [];
-  const order: string[] = [];
-  let finishCalls = 0;
-  let pendingGate: Promise<void> | null = null;
-
-  const recvQueue: number[][] = [];
-  const waiters: Array<{ resolve: (v: number[]) => void; reject: (e: unknown) => void }> = [];
-  let endError: unknown = null;
-
-  function pump(): void {
-    while (waiters.length && (recvQueue.length || endError !== null)) {
-      const waiter = waiters.shift()!;
-      if (recvQueue.length) waiter.resolve(recvQueue.shift()!);
-      else waiter.reject(endError);
-    }
-  }
-
-  const send = {
-    writeAll: (bytes: number[]) =>
-      sendMutex.run(async () => {
-        order.push("writeAll");
-        writeAllCalls.push(bytes);
-        const gate = pendingGate;
-        pendingGate = null;
-        if (gate) await gate;
-      }),
-    setPriority: (p: number) => sendMutex.run(async () => { order.push("setPriority"); setPriorityCalls.push(p); }),
-    reset: (code: bigint) => sendMutex.run(async () => { order.push("reset"); resetCalls.push(code); }),
-    finish: () => sendMutex.run(async () => { order.push("finish"); finishCalls++; }),
-  };
-  const recv = {
-    readExact: (size: number) => {
-      readCalls.push(size);
-      return recvMutex.run(() => new Promise<number[]>((resolve, reject) => {
-        waiters.push({ resolve, reject });
-        pump();
-      }));
-    },
-    // The raw (unframed) path `StreamRawReader` uses for tunnel HTTP bodies:
-    // same wire, same queue as `readExact` — a body's bytes are
-    // simply queued without a length prefix via `pushRaw` below.
-    read: (sizeLimit: number) => {
-      readRawCalls.push(sizeLimit);
-      return recvMutex.run(() => new Promise<number[]>((resolve, reject) => {
-        waiters.push({ resolve, reject });
-        pump();
-      }));
-    },
-    stop: (code: bigint) => recvMutex.run(async () => { stopCalls.push(code); }),
-  };
-
-  return {
-    stream: { send, recv },
-    writeAllCalls, setPriorityCalls, resetCalls, stopCalls, readCalls, readRawCalls, order,
-    finishCalls: () => finishCalls,
-    pushRecord(record: Uint8Array): void {
-      for (const chunk of lengthPrefixed(record)) recvQueue.push(chunk);
-      pump();
-    },
-    pushJson(value: unknown): void {
-      this.pushRecord(new TextEncoder().encode(JSON.stringify(value)));
-    },
-    /** Queues raw body bytes for a `read(sizeLimit)` consumer — no length
-     *  prefix, since the wire carries none for a raw stream. */
-    pushRaw(bytes: Uint8Array): void {
-      recvQueue.push(Array.from(bytes));
-      pump();
-    },
-    endWith(error: unknown = new Error("peer ended")): void {
-      endError = error;
-      pump();
-    },
-    /** Blocks the NEXT `writeAll` (through the shared send lock). One-shot. */
-    gateNextWrite(): { release: () => void } {
-      const { promise, resolve } = Promise.withResolvers<void>();
-      pendingGate = promise;
-      return { release: () => resolve() };
-    },
-  };
-}
-
-/** Decodes every `[u32 len][json]` record this stream has written so far. Every
- *  test frame is small enough to land as one `writeAll` slice, so one entry in
- *  `writeAllCalls` is one whole record. */
-function decodedRecords(fake: ReturnType<typeof createFakeStream>): unknown[] {
-  return fake.writeAllCalls.map((bytes) => {
-    const buf = Buffer.from(bytes);
-    const len = buf.readUInt32BE(0);
-    return JSON.parse(buf.subarray(4, 4 + len).toString("utf8"));
-  });
-}
-
-function refusalRecord(fake: ReturnType<typeof createFakeStream>): { code: string; message: string } | undefined {
-  return decodedRecords(fake).find(
-    (r): r is { type: string; code: string; message: string } =>
-      typeof r === "object" && r !== null && (r as { type?: unknown }).type === "stream:refused",
-  );
-}
-
-/** Fake `TunnelManager`: records every `serveHttp`/`serveWs` call instead of
- *  actually fetching anything. */
 /** Drains a `TunnelRequestBody`'s stream to completion, the way a real fetch
  *  call would — a raw body is pull-based, so nothing reads off the wire until
  *  something calls this (or the manager under test does its own draining). */
@@ -205,7 +69,7 @@ function fakeManager() {
   };
 }
 
-/** Fake `TunnelStreamServer`: what `binding.tunnelBinding.tunnels()` returns. */
+/** Fake `TunnelStreamServer`: what `binding.tunnels()` returns. */
 function fakeTunnelServer() {
   let refusal: { code: "NOT_ALLOWED"; message: string } | null = null;
   const { manager, httpCalls, wsCalls, setNextSink } = fakeManager();
@@ -221,39 +85,19 @@ function fakeTunnelServer() {
   };
 }
 
-/** Fake `TunnelProjectBinding`. */
+/** A `TunnelProjectBinding` built on the shared fake, plus tunnel's own fake
+ *  upstream server wired through `setTunnels`. */
 function fakeBinding() {
   const server = fakeTunnelServer();
-  let refuse: ((peerId: string) => StreamRefusal | null) | null = null;
-  let mayDeliver = true;
-  let available = true;
-  // Every peer has an open project stream by default (the project-stream
-  // admission gate), so a suite testing other admission steps doesn't also
-  // have to wire this.
-  let hasOpen: ((peerId: string) => boolean) | null = null;
-  const binding: TunnelProjectBinding = {
-    hasOpenStream: (peerId) => (hasOpen ? hasOpen(peerId) : true),
-    refusalFor: (peerId) => (refuse ? refuse(peerId) : null),
-    mayDeliverTo: () => mayDeliver,
-    tunnels: () => (available ? { admit: server.admit } : null),
-  };
+  const binding = createFakeProjectBinding();
+  const setAvailable = (v: boolean) => binding.setTunnels(v ? { admit: server.admit } : null);
+  setAvailable(true);
   return {
-    binding, server,
-    setRefusal: (fn: ((peerId: string) => StreamRefusal | null) | null) => { refuse = fn; },
-    setMayDeliver: (v: boolean) => { mayDeliver = v; },
-    setAvailable: (v: boolean) => { available = v; },
-    setHasOpenStream: (fn: ((peerId: string) => boolean) | null) => { hasOpen = fn; },
+    binding: binding as TunnelProjectBinding,
+    server,
+    setMayDeliver: binding.setMayDeliver,
+    setAvailable,
   };
-}
-
-function makeControllableSchedule() {
-  const pending: Array<() => void> = [];
-  const schedule = (cb: () => void, _ms: number): (() => void) => {
-    let fired = false;
-    pending.push(() => { if (!fired) { fired = true; cb(); } });
-    return () => { fired = true; };
-  };
-  return { schedule, fireAll: () => { for (const fn of pending.splice(0)) fn(); } };
 }
 
 function makeRegistry(overrides: Partial<TunnelStreamRegistryOptions> = {}) {
@@ -263,7 +107,7 @@ function makeRegistry(overrides: Partial<TunnelStreamRegistryOptions> = {}) {
   const diagnostics: Array<{ type: string; detail: Record<string, unknown>; stream?: { kind: string; id: string } }> = [];
   const opts: TunnelStreamRegistryOptions = {
     projectCataloged: (id) => cataloged.has(id),
-    tunnelBinding: (id) => bindings.get(id) ?? null,
+    projectBinding: (id) => bindings.get(id) ?? null,
     retirePeer: (peerId, reason) => retiredPeers.push({ peerId, reason }),
     diagnostic: (type, detail, stream) => diagnostics.push({ type, detail, stream }),
     ...overrides,
@@ -279,12 +123,11 @@ function admitHttp(
   registry: TunnelStreamRegistry,
   opts: { peerId?: string; projectId?: string; requestId?: string; authorized?: () => boolean } = {},
 ) {
-  const fake = createFakeStream();
+  const fake = createFakeBiStream();
   const requestId = opts.requestId ?? crypto.randomUUID();
   const open: TunnelHttpStreamOpen = { kind: "tunnel-http", projectId: opts.projectId ?? PROJECT, requestId };
   const admission = { peerId: opts.peerId ?? PEER, open, stream: fake.stream, authorized: opts.authorized ?? (() => true) };
-  // The registry decides every refusal synchronously, before any read.
-  const result = registry.httpHandler(admission) as StreamRefusal | undefined;
+  const result = registry.handlerFor("tunnel-http")(admission);
   return { fake, requestId, admission, result };
 }
 
@@ -292,11 +135,11 @@ function admitWs(
   registry: TunnelStreamRegistry,
   opts: { peerId?: string; projectId?: string; wsId?: string; authorized?: () => boolean } = {},
 ) {
-  const fake = createFakeStream();
+  const fake = createFakeBiStream();
   const wsId = opts.wsId ?? crypto.randomUUID();
   const open: TunnelWsStreamOpen = { kind: "tunnel-ws", projectId: opts.projectId ?? PROJECT, wsId };
   const admission = { peerId: opts.peerId ?? PEER, open, stream: fake.stream, authorized: opts.authorized ?? (() => true) };
-  const result = registry.wsHandler(admission) as StreamRefusal | undefined;
+  const result = registry.handlerFor("tunnel-ws")(admission);
   return { fake, wsId, admission, result };
 }
 
@@ -318,237 +161,94 @@ function wsOpenRecord(wsId: string, opts: Partial<TunnelWsOpen> = {}): TunnelWsO
 }
 
 describe("TunnelStreamRegistry", () => {
-  test("every refusal is decided before any read: CAP_EXCEEDED shared across HTTP and WS, NOT_ALLOWED unsafe id, NOT_ALLOWED uncatalogued, NOT_READY unbound, NOT_ALLOWED masked from the binding's own refusal, INVALID duplicate id, NOT_ALLOWED tunnels unavailable", async () => {
-    const { registry, cataloged, bindings } = makeRegistry();
-    cataloged.add(PROJECT);
-    const { binding } = fakeBinding();
-    bindings.set(PROJECT, binding);
-
-    // CAP_EXCEEDED is shared across HTTP and WS admissions for one peer.
-    for (let i = 0; i < STREAM_MAX_TUNNEL_STREAMS_PER_PEER; i++) {
-      const admit = i % 2 === 0 ? admitHttp : admitWs;
-      const { fake, result } = admit(registry, { peerId: "capful" });
-      expect(result).toBeUndefined();
-      expect(fake.readCalls).not.toEqual([]);
-    }
-    {
-      const { fake, result } = admitHttp(registry, { peerId: "capful" });
-      expect(result?.code).toBe("CAP_EXCEEDED");
-      expect(fake.readCalls).toEqual([]);
-    }
-    {
-      const { fake, result } = admitWs(registry, { peerId: "capful" });
-      expect(result?.code).toBe("CAP_EXCEEDED");
-      expect(fake.readCalls).toEqual([]);
-    }
-
-    {
-      const { fake, result } = admitHttp(registry, { projectId: "../evil" });
-      expect(result?.code).toBe("NOT_ALLOWED");
-      expect(fake.readCalls).toEqual([]);
-    }
-
-    {
-      const { fake, result } = admitHttp(registry, { projectId: "uncatalogued-project" });
-      expect(result?.code).toBe("NOT_ALLOWED");
-      expect(fake.readCalls).toEqual([]);
-    }
-
-    {
-      cataloged.add("catalogued-but-unbound");
-      const { fake, result } = admitHttp(registry, { projectId: "catalogued-but-unbound" });
-      expect(result?.code).toBe("NOT_READY");
-      expect(fake.readCalls).toEqual([]);
-    }
-
-    {
-      // Whatever code the binding's own admission check returns is masked to
-      // NOT_ALLOWED.
-      cataloged.add("refused-project");
-      const rebind = fakeBinding();
-      rebind.setRefusal(() => ({ code: "CAP_EXCEEDED", message: "irrelevant" }));
-      bindings.set("refused-project", rebind.binding);
-      const { fake, result } = admitHttp(registry, { projectId: "refused-project" });
-      expect(result?.code).toBe("NOT_ALLOWED");
-      expect(fake.readCalls).toEqual([]);
-    }
-
-    {
-      const dupeId = crypto.randomUUID();
-      const first = admitHttp(registry, { requestId: dupeId });
-      expect(first.result).toBeUndefined();
-      const second = admitHttp(registry, { requestId: dupeId });
-      expect(second.result?.code).toBe("INVALID");
-      expect(second.fake.readCalls).toEqual([]);
-    }
-
-    {
-      cataloged.add("no-tunnels");
-      const noTunnels = fakeBinding();
-      noTunnels.setAvailable(false);
-      bindings.set("no-tunnels", noTunnels.binding);
-      const { fake, result } = admitHttp(registry, { projectId: "no-tunnels" });
-      expect(result?.code).toBe("NOT_ALLOWED");
-      expect(fake.readCalls).toEqual([]);
-    }
-  });
-
-  test("an unsafe projectId is refused NOT_ALLOWED even when the catalog and the mux both hold it", async () => {
-    const consulted: string[] = [];
-    const { registry, cataloged, bindings } = makeRegistry({
-      projectCataloged: (id) => { consulted.push(id); return cataloged.has(id); },
-    });
-    const unsafe = "../evil";
-    cataloged.add(unsafe);
-    bindings.set(unsafe, fakeBinding().binding);
-    const { fake, result } = admitHttp(registry, { projectId: unsafe });
-    expect(result?.code).toBe("NOT_ALLOWED");
-    expect(consulted).toEqual([]);
-    expect(fake.readCalls).toEqual([]);
-  });
-
-  test("an absent projectCataloged fails closed with NOT_ALLOWED", async () => {
-    const { registry, bindings } = makeRegistry({ projectCataloged: undefined });
-    bindings.set(PROJECT, fakeBinding().binding);
-    const { fake, result } = admitHttp(registry, {});
-    expect(result?.code).toBe("NOT_ALLOWED");
-    expect(fake.readCalls).toEqual([]);
-  });
-
-  test("a duplicate id is scoped per kind: the same id may open one HTTP and one WS stream", async () => {
-    const { registry, cataloged, bindings } = makeRegistry();
-    cataloged.add(PROJECT);
-    bindings.set(PROJECT, fakeBinding().binding);
-    const sameId = crypto.randomUUID();
-    const http = admitHttp(registry, { requestId: sameId });
-    const ws = admitWs(registry, { wsId: sameId });
-    expect(http.result).toBeUndefined();
-    expect(ws.result).toBeUndefined();
-  });
-
   test("a head that never arrives resets the writer and frees the slot immediately, stopping the receive half only once the pending read settles", async () => {
-    const ctl = makeControllableSchedule();
+    const ctl = manualSchedule();
     const { registry, cataloged, bindings } = makeRegistry({ schedule: ctl.schedule });
     cataloged.add(PROJECT);
     bindings.set(PROJECT, fakeBinding().binding);
     const { fake, admission } = admitHttp(registry, {});
     expect(registry.streamCount(admission.peerId)).toBe(1);
 
-    ctl.fireAll();
+    ctl.fire();
     await flush();
-    expect(fake.resetCalls).toEqual([STREAM_RESET_TUNNEL]);
+    expect(fake.resets).toEqual([STREAM_RESET_TUNNEL]);
     expect(registry.streamCount(admission.peerId)).toBe(0);
-    expect(fake.stopCalls).toEqual([]); // the read is still outstanding
+    expect(fake.stops).toEqual([]); // the read is still outstanding
 
     // The pending read settling with an ERROR (the app hung up first) means
     // there is nothing left to stop — `stop()` only fires for a read that
     // resolves late, so a fresh record isn't left to leak past the timeout.
     fake.endWith();
     await flush();
-    expect(fake.stopCalls).toEqual([]);
+    expect(fake.stops).toEqual([]);
   });
 
   test("a head record that arrives AFTER the deadline still gets its receive half stopped, once that late read settles", async () => {
-    const ctl = makeControllableSchedule();
+    const ctl = manualSchedule();
     const { registry, cataloged, bindings } = makeRegistry({ schedule: ctl.schedule });
     cataloged.add(PROJECT);
     bindings.set(PROJECT, fakeBinding().binding);
     const { fake, requestId, admission } = admitHttp(registry, {});
 
-    ctl.fireAll();
+    ctl.fire();
     await flush();
-    expect(fake.stopCalls).toEqual([]);
+    expect(fake.stops).toEqual([]);
 
-    fake.pushJson(httpRequest(requestId)); // arrives late, after the timeout fired
+    fake.pushRecord(httpRequest(requestId)); // arrives late, after the timeout fired
     await flush();
-    expect(fake.stopCalls).toEqual([STREAM_STOP_TUNNEL]);
+    expect(fake.stops).toEqual([STREAM_STOP_TUNNEL]);
     expect(registry.streamCount(admission.peerId)).toBe(0);
   });
 
-  test("a head record that isn't the JSON control kind is refused INVALID", async () => {
+  test("a head that fails validation is refused INVALID", async () => {
     const { registry, cataloged, bindings } = makeRegistry();
     cataloged.add(PROJECT);
     bindings.set(PROJECT, fakeBinding().binding);
-    const { fake, requestId } = admitHttp(registry, {});
-    // Any non-JSON record is wrong here — the exact tag doesn't matter, only
-    // that the head slot demands a JSON control record.
-    fake.pushRecord(encodeTunnelDataRecord(TUNNEL_RECORD_TAG_WS_BINARY, new Uint8Array([1, 2, 3])));
-    void requestId;
-    await flush();
-    expect(refusalRecord(fake)).toMatchObject({ code: "INVALID" });
-  });
 
-  test("a head record with malformed JSON is refused INVALID", async () => {
-    const { registry, cataloged, bindings } = makeRegistry();
-    cataloged.add(PROJECT);
-    bindings.set(PROJECT, fakeBinding().binding);
-    const { fake } = admitHttp(registry, {});
-    fake.pushRecord(new TextEncoder().encode("{not json}"));
-    await flush();
-    expect(refusalRecord(fake)).toMatchObject({ code: "INVALID" });
-  });
+    const cases: Array<{ name: string; build: (requestId: string) => unknown; messageContains?: string }> = [
+      { name: "not the JSON control kind", build: () => encodeTunnelDataRecord(TUNNEL_RECORD_TAG_WS_BINARY, new Uint8Array([1, 2, 3])) },
+      { name: "malformed JSON", build: () => new TextEncoder().encode("{not json}") },
+      { name: "id disagrees with the open frame", build: () => ({ type: "tunnel:http-request", requestId: "not-the-bound-id", port: 3000, method: "GET", path: "/" }) },
+      { name: "fails the schema", build: (requestId) => ({ type: "tunnel:http-request", requestId, port: -1, method: "GET", path: "/" }) },
+      { name: "bodyLength over the wire cap", build: (requestId) => httpRequest(requestId, { bodyLength: STREAM_TUNNEL_REQUEST_BODY_MAX_BYTES + 1 }), messageContains: "large" },
+      { name: "content-length disagrees with bodyLength", build: (requestId) => httpRequest(requestId, { bodyLength: 10, headers: { "Content-Length": "999" } }), messageContains: "content-length" },
+    ];
 
-  test("a head record that fails the schema, or whose id disagrees with the open frame, is refused INVALID", async () => {
-    const { registry, cataloged, bindings } = makeRegistry();
-    cataloged.add(PROJECT);
-    bindings.set(PROJECT, fakeBinding().binding);
-    {
+    for (const c of cases) {
       const { fake, requestId } = admitHttp(registry, {});
-      fake.pushJson({ type: "tunnel:http-request", requestId: "not-the-bound-id", port: 3000, method: "GET", path: "/" });
-      void requestId;
+      const record = c.build(requestId);
+      fake.pushRecord(record instanceof Uint8Array ? record : (record as never));
       await flush();
-      expect(refusalRecord(fake)).toMatchObject({ code: "INVALID" });
-    }
-    {
-      const { fake, requestId } = admitHttp(registry, {});
-      fake.pushJson({ type: "tunnel:http-request", requestId, port: -1, method: "GET", path: "/" });
-      await flush();
-      expect(refusalRecord(fake)).toMatchObject({ code: "INVALID" });
+      expect(refusalOf(fake)).toMatchObject(
+        c.messageContains
+          ? { code: "INVALID", message: expect.stringContaining(c.messageContains) }
+          : { code: "INVALID" },
+      );
     }
   });
 
-  test("a bodyLength over the wire cap is refused INVALID", async () => {
-    const { registry, cataloged, bindings } = makeRegistry();
-    cataloged.add(PROJECT);
-    bindings.set(PROJECT, fakeBinding().binding);
-    const { fake, requestId } = admitHttp(registry, {});
-    fake.pushJson(httpRequest(requestId, { bodyLength: STREAM_TUNNEL_REQUEST_BODY_MAX_BYTES + 1 }));
-    await flush();
-    expect(refusalRecord(fake)).toMatchObject({ code: "INVALID", message: expect.stringContaining("large") });
-  });
-
-  test("a content-length header that disagrees with bodyLength is refused INVALID", async () => {
-    const { registry, cataloged, bindings } = makeRegistry();
-    cataloged.add(PROJECT);
-    bindings.set(PROJECT, fakeBinding().binding);
-    const { fake, requestId } = admitHttp(registry, {});
-    fake.pushJson(httpRequest(requestId, { bodyLength: 10, headers: { "Content-Length": "999" } }));
-    await flush();
-    expect(refusalRecord(fake)).toMatchObject({ code: "INVALID", message: expect.stringContaining("content-length") });
-  });
-
-  test("the project's tunnel server going unavailable between admission and the head record is refused NOT_ALLOWED, in-band", async () => {
+  test("a head record whose project has no tunnel server is refused NOT_ALLOWED, whether that was true at admission or only by the time the head arrives", async () => {
     const { registry, cataloged, bindings } = makeRegistry();
     cataloged.add(PROJECT);
     const fb = fakeBinding();
     bindings.set(PROJECT, fb.binding);
     const { fake, requestId } = admitHttp(registry, {});
-    fb.setAvailable(false);
-    fake.pushJson(httpRequest(requestId));
+    fb.setAvailable(false); // becomes unavailable between admission and the head record
+    fake.pushRecord(httpRequest(requestId));
     await flush();
-    expect(refusalRecord(fake)).toMatchObject({ code: "NOT_ALLOWED" });
+    expect(refusalOf(fake)).toMatchObject({ code: "NOT_ALLOWED" });
   });
 
-  test("admit() refusals are passed through in-band, by code", async () => {
+  test("admit() refusals are passed through in-band, by code, and never reach serveHttp", async () => {
     const { registry, cataloged, bindings } = makeRegistry();
     cataloged.add(PROJECT);
     const fb = fakeBinding();
     bindings.set(PROJECT, fb.binding);
     fb.server.setRefusal({ code: "NOT_ALLOWED", message: "mobile access is disabled" });
     const { fake, requestId } = admitHttp(registry, {});
-    fake.pushJson(httpRequest(requestId));
+    fake.pushRecord(httpRequest(requestId));
     await flush();
-    expect(refusalRecord(fake)).toMatchObject({ code: "NOT_ALLOWED", message: "mobile access is disabled" });
+    expect(refusalOf(fake)).toMatchObject({ code: "NOT_ALLOWED", message: "mobile access is disabled" });
     expect(fb.server.httpCalls).toEqual([]);
   });
 
@@ -558,7 +258,7 @@ describe("TunnelStreamRegistry", () => {
     const fb = fakeBinding();
     bindings.set(PROJECT, fb.binding);
     const { fake, requestId } = admitHttp(registry, {});
-    fake.pushJson(httpRequest(requestId, { bodyLength: 0 }));
+    fake.pushRecord(httpRequest(requestId, { bodyLength: 0 }));
     await flush();
     expect(fb.server.httpCalls).toHaveLength(1);
 
@@ -575,7 +275,7 @@ describe("TunnelStreamRegistry", () => {
     const fb = fakeBinding();
     bindings.set(PROJECT, fb.binding);
     const { fake, requestId } = admitHttp(registry, {});
-    fake.pushJson(httpRequest(requestId, { bodyLength: 10 }));
+    fake.pushRecord(httpRequest(requestId, { bodyLength: 10 }));
     await flush();
     // The body is pull-based (highWaterMark 0): serveHttp is called right
     // away, but nothing is read off the wire until the manager drains it.
@@ -589,7 +289,7 @@ describe("TunnelStreamRegistry", () => {
     await flush();
 
     expect(exchange.signal.aborted).toBe(true);
-    expect(fake.resetCalls).toEqual([STREAM_RESET_TUNNEL]);
+    expect(fake.resets).toEqual([STREAM_RESET_TUNNEL]);
     expect(registry.streamCount(PEER)).toBe(0);
   });
 
@@ -600,7 +300,7 @@ describe("TunnelStreamRegistry", () => {
     bindings.set(PROJECT, fb.binding);
     const { fake, requestId } = admitHttp(registry, {});
     const payload = new TextEncoder().encode("the quick brown fox");
-    fake.pushJson(httpRequest(requestId, { bodyLength: payload.byteLength }));
+    fake.pushRecord(httpRequest(requestId, { bodyLength: payload.byteLength }));
     await flush();
     const { body } = fb.server.httpCalls[0]!;
 
@@ -622,23 +322,20 @@ describe("TunnelStreamRegistry", () => {
     const fb = fakeBinding();
     bindings.set(PROJECT, fb.binding);
     const { fake, requestId } = admitHttp(registry, {});
-    fake.pushJson(httpRequest(requestId));
+    fake.pushRecord(httpRequest(requestId));
     await flush();
     const exchange = fb.server.httpCalls[0]!.exchange;
 
     await exchange.head({ status: 200, headers: {} });
-    // Head is the one length-prefixed record on this exchange; the body rides
-    // raw (`sendRaw`), so `decodedRecords` (which assumes every write is a
-    // record) must not be asked to parse it.
-    const writesBeforeBody = fake.writeAllCalls.length;
+    const writesBeforeBody = fake.order.filter((o) => o === "writeAll").length;
     await exchange.body(new TextEncoder().encode("hi"));
-    expect(fake.writeAllCalls.length).toBe(writesBeforeBody + 1);
-    expect(fake.finishCalls()).toBe(0);
+    expect(fake.order.filter((o) => o === "writeAll").length).toBe(writesBeforeBody + 1);
+    expect(fake.isFinished()).toBe(false);
     await exchange.end();
 
     // `finish()` alone is the "done" signal — no end-of-body record.
-    expect(fake.finishCalls()).toBe(1);
-    expect(fake.writeAllCalls.length).toBe(writesBeforeBody + 1);
+    expect(fake.isFinished()).toBe(true);
+    expect(fake.order.filter((o) => o === "writeAll").length).toBe(writesBeforeBody + 1);
   });
 
   test("more bytes than the declared body length is a stream breach: the upstream body errors and the stream resets", async () => {
@@ -647,7 +344,7 @@ describe("TunnelStreamRegistry", () => {
     const fb = fakeBinding();
     bindings.set(PROJECT, fb.binding);
     const { fake, requestId } = admitHttp(registry, {});
-    fake.pushJson(httpRequest(requestId, { bodyLength: 3 }));
+    fake.pushRecord(httpRequest(requestId, { bodyLength: 3 }));
     await flush();
     const { body, exchange } = fb.server.httpCalls[0]!;
 
@@ -658,23 +355,23 @@ describe("TunnelStreamRegistry", () => {
     await flush(); // the body drains, handing the wire to the cancel watcher
 
     // More bytes than declared arrive next — a stream breach the cancel
-    // watcher catches (§3), not the already-closed body.
+    // watcher catches, not the already-closed body.
     fake.pushRaw(new TextEncoder().encode("lo"));
     await flush();
 
     expect(exchange.signal.aborted).toBe(true);
-    expect(fake.resetCalls).toEqual([STREAM_RESET_TUNNEL]);
+    expect(fake.resets).toEqual([STREAM_RESET_TUNNEL]);
     expect(registry.streamCount(PEER)).toBe(0);
   });
 
   test("a request body that stalls short of its declared length times out, erroring the body and resetting the stream", async () => {
-    const ctl = makeControllableSchedule();
+    const ctl = manualSchedule();
     const { registry, cataloged, bindings } = makeRegistry({ schedule: ctl.schedule, requestBodyIdleMs: 5_000 });
     cataloged.add(PROJECT);
     const fb = fakeBinding();
     bindings.set(PROJECT, fb.binding);
     const { fake, requestId } = admitHttp(registry, {});
-    fake.pushJson(httpRequest(requestId, { bodyLength: 10 }));
+    fake.pushRecord(httpRequest(requestId, { bodyLength: 10 }));
     await flush();
     const { body, exchange } = fb.server.httpCalls[0]!;
 
@@ -682,12 +379,12 @@ describe("TunnelStreamRegistry", () => {
     await flush();
     fake.pushRaw(new TextEncoder().encode("abc")); // short of the declared 10
     await flush();
-    ctl.fireAll(); // the idle clock fires before any more bytes arrive
+    ctl.fire(); // the idle clock fires before any more bytes arrive
 
     await expect(drained).rejects.toThrow();
     await flush();
     expect(exchange.signal.aborted).toBe(true);
-    expect(fake.resetCalls).toEqual([STREAM_RESET_TUNNEL]);
+    expect(fake.resets).toEqual([STREAM_RESET_TUNNEL]);
   });
 
   test("the app's FIN after end() is its own orderly close and is ignored, not treated as a cancel", async () => {
@@ -696,7 +393,7 @@ describe("TunnelStreamRegistry", () => {
     const fb = fakeBinding();
     bindings.set(PROJECT, fb.binding);
     const { fake, requestId } = admitHttp(registry, {});
-    fake.pushJson(httpRequest(requestId));
+    fake.pushRecord(httpRequest(requestId));
     await flush();
     const exchange = fb.server.httpCalls[0]!.exchange;
 
@@ -706,7 +403,7 @@ describe("TunnelStreamRegistry", () => {
     await flush();
 
     expect(exchange.signal.aborted).toBe(false);
-    expect(fake.resetCalls).toEqual([]);
+    expect(fake.resets).toEqual([]);
   });
 
   test("the app cancelling while a response is already in flight aborts the exchange and resets the stream", async () => {
@@ -715,7 +412,7 @@ describe("TunnelStreamRegistry", () => {
     const fb = fakeBinding();
     bindings.set(PROJECT, fb.binding);
     const { fake, requestId } = admitHttp(registry, {});
-    fake.pushJson(httpRequest(requestId));
+    fake.pushRecord(httpRequest(requestId));
     await flush();
     const exchange = fb.server.httpCalls[0]!.exchange;
 
@@ -725,7 +422,7 @@ describe("TunnelStreamRegistry", () => {
     await flush();
 
     expect(exchange.signal.aborted).toBe(true);
-    expect(fake.resetCalls).toEqual([STREAM_RESET_TUNNEL]);
+    expect(fake.resets).toEqual([STREAM_RESET_TUNNEL]);
     expect(registry.streamCount(PEER)).toBe(0);
   });
 
@@ -735,7 +432,7 @@ describe("TunnelStreamRegistry", () => {
     const fb = fakeBinding();
     bindings.set(PROJECT, fb.binding);
     const { fake, requestId } = admitHttp(registry, {});
-    fake.pushJson(httpRequest(requestId));
+    fake.pushRecord(httpRequest(requestId));
     await flush();
     expect(fb.server.httpCalls).toHaveLength(1);
     const exchange = fb.server.httpCalls[0]!.exchange;
@@ -745,7 +442,7 @@ describe("TunnelStreamRegistry", () => {
     await flush();
 
     expect(exchange.signal.aborted).toBe(true);
-    expect(fake.resetCalls).toEqual([STREAM_RESET_TUNNEL]);
+    expect(fake.resets).toEqual([STREAM_RESET_TUNNEL]);
     expect(registry.streamCount(PEER)).toBe(0);
   });
 
@@ -755,53 +452,20 @@ describe("TunnelStreamRegistry", () => {
     const fb = fakeBinding();
     bindings.set(PROJECT, fb.binding);
     const { fake, requestId } = admitHttp(registry, {});
-    fake.pushJson(httpRequest(requestId)); // bodyLength 0: nothing more is allowed
+    fake.pushRecord(httpRequest(requestId)); // bodyLength 0: nothing more is allowed
     await flush();
     expect(fb.server.httpCalls).toHaveLength(1);
     const exchange = fb.server.httpCalls[0]!.exchange;
 
-    // The watcher reads raw bytes (§3), so any stray byte is a breach — not
-    // a specific record shape.
+    // The watcher reads raw bytes, so any stray byte is a breach — not a
+    // specific record shape.
     fake.pushRaw(new Uint8Array([1]));
     await flush();
 
     expect(exchange.signal.aborted).toBe(true);
-    expect(fake.resetCalls).toEqual([STREAM_RESET_TUNNEL]);
-    expect(fake.stopCalls).toEqual([STREAM_STOP_TUNNEL]);
+    expect(fake.resets).toEqual([STREAM_RESET_TUNNEL]);
+    expect(fake.stops).toEqual([STREAM_STOP_TUNNEL]);
     expect(retiredPeers).toEqual([]);
-  });
-
-  test("an unauthorized peer at head time retires the connection rather than merely refusing the stream", async () => {
-    const { registry, cataloged, bindings, retiredPeers } = makeRegistry();
-    cataloged.add(PROJECT);
-    bindings.set(PROJECT, fakeBinding().binding);
-    let authorized = false;
-    const { fake, requestId } = admitHttp(registry, { authorized: () => authorized });
-    fake.pushJson(httpRequest(requestId));
-    await flush();
-    expect(retiredPeers).toEqual([{ peerId: PEER, reason: "unauthorized" }]);
-    void authorized;
-  });
-
-  test("an app FIN or reset before the head resets the writer and frees the slot at once, without waiting for the head deadline", async () => {
-    const ctl = makeControllableSchedule();
-    const { registry, cataloged, bindings } = makeRegistry({ schedule: ctl.schedule });
-    cataloged.add(PROJECT);
-    const fb = fakeBinding();
-    bindings.set(PROJECT, fb.binding);
-    const http = admitHttp(registry, {});
-    const ws = admitWs(registry, {});
-    expect(registry.streamCount(PEER)).toBe(2);
-
-    http.fake.endWith(); // the app cancelled while its open was still in flight
-    ws.fake.endWith();
-    await flush();
-
-    expect(http.fake.resetCalls).toEqual([STREAM_RESET_TUNNEL]);
-    expect(ws.fake.resetCalls).toEqual([STREAM_RESET_TUNNEL]);
-    expect(registry.streamCount(PEER)).toBe(0);
-    expect(fb.server.httpCalls).toEqual([]);
-    expect(fb.server.wsCalls).toEqual([]);
   });
 
   test("an upstream WS close after mayDeliverTo turns false writes no ws-close record: it resets and unbinds", async () => {
@@ -810,170 +474,57 @@ describe("TunnelStreamRegistry", () => {
     const fb = fakeBinding();
     bindings.set(PROJECT, fb.binding);
     const { fake, wsId } = admitWs(registry, {});
-    fake.pushJson(wsOpenRecord(wsId));
+    fake.pushRecord(wsOpenRecord(wsId));
     await flush();
     const peer = fb.server.wsCalls[0]!.peer;
-    const writesBefore = fake.writeAllCalls.length;
+    const writesBefore = fake.order.filter((o) => o === "writeAll").length;
 
     fb.setMayDeliver(false);
     peer.close(1000, "bye");
     await flush();
 
-    expect(fake.writeAllCalls.length).toBe(writesBefore);
-    expect(fake.finishCalls()).toBe(0);
-    expect(fake.resetCalls).toEqual([STREAM_RESET_TUNNEL]);
+    expect(fake.order.filter((o) => o === "writeAll").length).toBe(writesBefore);
+    expect(fake.isFinished()).toBe(false);
+    expect(fake.resets).toEqual([STREAM_RESET_TUNNEL]);
     expect(registry.streamCount(PEER)).toBe(0);
   });
 
-  test("false mayDeliverTo on an HTTP send reports dropped, aborts the writer and the exchange, and unbinds", async () => {
-    const { registry, cataloged, bindings } = makeRegistry();
-    cataloged.add(PROJECT);
-    const fb = fakeBinding();
-    bindings.set(PROJECT, fb.binding);
-    const { fake, requestId } = admitHttp(registry, {});
-    fake.pushJson(httpRequest(requestId));
-    await flush();
-    const exchange = fb.server.httpCalls[0]!.exchange;
+  test("false mayDeliverTo on a send reports dropped and aborts the writer: an HTTP exchange as well as a WS sink", async () => {
+    {
+      const { registry, cataloged, bindings } = makeRegistry();
+      cataloged.add(PROJECT);
+      const fb = fakeBinding();
+      bindings.set(PROJECT, fb.binding);
+      const { fake, requestId } = admitHttp(registry, {});
+      fake.pushRecord(httpRequest(requestId));
+      await flush();
+      const exchange = fb.server.httpCalls[0]!.exchange;
 
-    fb.setMayDeliver(false);
-    const outcome = await exchange.head({ status: 200, headers: {} });
-    expect(outcome).toBe("dropped");
-    expect(exchange.signal.aborted).toBe(true);
-    expect(fake.resetCalls).toEqual([STREAM_RESET_TUNNEL]);
-    expect(registry.streamCount(PEER)).toBe(0);
-  });
+      fb.setMayDeliver(false);
+      const outcome = await exchange.head({ status: 200, headers: {} });
+      expect(outcome).toBe("dropped");
+      expect(exchange.signal.aborted).toBe(true);
+      expect(fake.resets).toEqual([STREAM_RESET_TUNNEL]);
+      expect(registry.streamCount(PEER)).toBe(0);
+    }
+    {
+      const { registry, cataloged, bindings } = makeRegistry();
+      cataloged.add(PROJECT);
+      const fb = fakeBinding();
+      bindings.set(PROJECT, fb.binding);
+      const closedCalls: Array<[number?, string?]> = [];
+      fb.server.setNextSink({ data() {}, closed: (code, reason) => { closedCalls.push([code, reason]); } });
+      const { fake, wsId } = admitWs(registry, {});
+      fake.pushRecord(wsOpenRecord(wsId));
+      await flush();
+      const peer = fb.server.wsCalls[0]!.peer;
 
-  test("false mayDeliverTo on a WS send reports dropped, aborts the writer, and closes the sink", async () => {
-    const { registry, cataloged, bindings } = makeRegistry();
-    cataloged.add(PROJECT);
-    const fb = fakeBinding();
-    bindings.set(PROJECT, fb.binding);
-    const closedCalls: Array<[number?, string?]> = [];
-    fb.server.setNextSink({ data() {}, closed: (code, reason) => { closedCalls.push([code, reason]); } });
-    const { fake, wsId } = admitWs(registry, {});
-    fake.pushJson(wsOpenRecord(wsId));
-    await flush();
-    const peer = fb.server.wsCalls[0]!.peer;
-
-    fb.setMayDeliver(false);
-    const outcome = await peer.send({ binary: false, bytes: new TextEncoder().encode("x") });
-    expect(outcome).toBe("dropped");
-    expect(closedCalls).toEqual([[undefined, undefined]]);
-    expect(fake.resetCalls).toEqual([STREAM_RESET_TUNNEL]);
-  });
-
-  test("WS writer overflow resets only that stream and closes its own sink, leaving a second stream untouched", async () => {
-    const { registry, cataloged, bindings, retiredPeers } = makeRegistry();
-    cataloged.add(PROJECT);
-    const fb = fakeBinding();
-    bindings.set(PROJECT, fb.binding);
-
-    const closedA: unknown[] = [];
-    fb.server.setNextSink({ data() {}, closed: (...args) => closedA.push(args) });
-    const a = admitWs(registry, {});
-    a.fake.pushJson(wsOpenRecord(a.wsId));
-    await flush();
-    const peerA = fb.server.wsCalls[0]!.peer;
-
-    const closedB: unknown[] = [];
-    fb.server.setNextSink({ data() {}, closed: (...args) => closedB.push(args) });
-    const b = admitWs(registry, {});
-    b.fake.pushJson(wsOpenRecord(b.wsId));
-    await flush();
-    const peerB = fb.server.wsCalls[1]!.peer;
-
-    // Each frame stays at the wire's own per-message cap
-    // (STREAM_TUNNEL_DATA_MAX_BYTES, 1 MiB) so none is dropped by that check
-    // alone; five of them together overflow the 4 MiB writer queue. No await
-    // between the calls, so none has drained into a real `writeAll` yet when
-    // the later ones run their own synchronous overflow check.
-    const big = new Uint8Array(STREAM_TUNNEL_DATA_MAX_BYTES);
-    const first = peerA.send({ binary: true, bytes: big });
-    const second = peerA.send({ binary: true, bytes: big });
-    const third = peerA.send({ binary: true, bytes: big });
-    const fourth = peerA.send({ binary: true, bytes: big });
-    const fifth = peerA.send({ binary: true, bytes: big });
-    expect(await fifth).toBe("dropped");
-    expect(await fourth).toBe("dropped");
-    await Promise.allSettled([first, second, third]);
-    await flush();
-
-    expect(a.fake.resetCalls).toEqual([STREAM_RESET_TUNNEL]);
-    expect(closedA).toHaveLength(1);
-    expect(retiredPeers).toEqual([]);
-
-    // B is untouched.
-    expect(await peerB.send({ binary: false, bytes: new TextEncoder().encode("still alive") })).toBe("sent");
-    expect(b.fake.resetCalls).toEqual([]);
-    expect(closedB).toEqual([]);
-  });
-
-  test("projectDetached aborts every binding for the project and leaves other projects alone", async () => {
-    const { registry, cataloged, bindings } = makeRegistry();
-    cataloged.add(PROJECT);
-    const fb = fakeBinding();
-    bindings.set(PROJECT, fb.binding);
-    cataloged.add("other");
-    const other = fakeBinding();
-    bindings.set("other", other.binding);
-
-    const { fake: httpFake, requestId } = admitHttp(registry, {});
-    httpFake.pushJson(httpRequest(requestId));
-    await flush();
-    const exchange = fb.server.httpCalls[0]!.exchange;
-
-    const { fake: otherFake, requestId: otherId } = admitHttp(registry, { projectId: "other" });
-    otherFake.pushJson(httpRequest(otherId));
-    await flush();
-
-    registry.projectDetached(PROJECT);
-    await flush();
-
-    expect(exchange.signal.aborted).toBe(true);
-    expect(httpFake.resetCalls).toEqual([STREAM_RESET_TUNNEL]);
-    expect(registry.streamCount(PEER)).toBe(1); // the "other"-project stream survives
-    expect(otherFake.resetCalls).toEqual([]);
-  });
-
-  test("dropPeer unbinds and closes sinks for that peer only, without calling retirePeer", async () => {
-    const { registry, cataloged, bindings, retiredPeers } = makeRegistry();
-    cataloged.add(PROJECT);
-    const fb = fakeBinding();
-    bindings.set(PROJECT, fb.binding);
-
-    const closed: unknown[] = [];
-    fb.server.setNextSink({ data() {}, closed: (...args) => closed.push(args) });
-    const mine = admitWs(registry, { peerId: "mine" });
-    mine.fake.pushJson(wsOpenRecord(mine.wsId));
-    await flush();
-
-    const others = admitWs(registry, { peerId: "someone-else" });
-    others.fake.pushJson(wsOpenRecord(others.wsId));
-    await flush();
-
-    registry.dropPeer("mine");
-
-    expect(registry.streamCount("mine")).toBe(0);
-    expect(closed).toHaveLength(1);
-    expect(retiredPeers).toEqual([]);
-    expect(registry.streamCount("someone-else")).toBe(1);
-  });
-
-  test("open with no open project stream for the peer is refused NOT_ALLOWED; another peer's open stream does not count", async () => {
-    const { registry, cataloged, bindings } = makeRegistry();
-    cataloged.add(PROJECT);
-    const { binding, setHasOpenStream } = fakeBinding();
-    bindings.set(PROJECT, binding);
-    setHasOpenStream((peerId) => peerId === "other-peer");
-
-    const { fake, result } = admitHttp(registry, { peerId: PEER });
-    expect(result?.code).toBe("NOT_ALLOWED");
-    expect(fake.readCalls).toEqual([]);
-
-    // The same projectId's project stream is open for a DIFFERENT peer —
-    // that must not satisfy PEER's own admission, which is per-peer.
-    const other = admitHttp(registry, { peerId: "other-peer" });
-    expect(other.result).toBeUndefined();
+      fb.setMayDeliver(false);
+      const outcome = await peer.send({ binary: false, bytes: new TextEncoder().encode("x") });
+      expect(outcome).toBe("dropped");
+      expect(closedCalls).toEqual([[undefined, undefined]]);
+      expect(fake.resets).toEqual([STREAM_RESET_TUNNEL]);
+    }
   });
 
   test("a request-body raw read never asks for more than the declared bytes still owed", async () => {
@@ -983,7 +534,7 @@ describe("TunnelStreamRegistry", () => {
     bindings.set(PROJECT, fb.binding);
     const { fake, requestId } = admitHttp(registry, {});
     const declared = STREAM_RAW_READ_BYTES + 7;
-    fake.pushJson(httpRequest(requestId, { bodyLength: declared }));
+    fake.pushRecord(httpRequest(requestId, { bodyLength: declared }));
     await flush();
     const drained = readBody(fb.server.httpCalls[0]!.body);
     await flush();
@@ -994,7 +545,7 @@ describe("TunnelStreamRegistry", () => {
 
     // The second read is sized to the 7 bytes left, never a full raw read
     // that could swallow whatever the app sends after its body.
-    expect(fake.readRawCalls.slice(0, 2)).toEqual([STREAM_RAW_READ_BYTES, 7]);
+    expect(fake.readSizes.slice(0, 2)).toEqual([STREAM_RAW_READ_BYTES, 7]);
   });
 
   test("authorized() turning false after a raw request-body read retires the peer and errors the body", async () => {
@@ -1004,7 +555,7 @@ describe("TunnelStreamRegistry", () => {
     bindings.set(PROJECT, fb.binding);
     let authorized = true;
     const { fake, requestId } = admitHttp(registry, { authorized: () => authorized });
-    fake.pushJson(httpRequest(requestId, { bodyLength: 10 }));
+    fake.pushRecord(httpRequest(requestId, { bodyLength: 10 }));
     await flush();
     const drained = readBody(fb.server.httpCalls[0]!.body);
     await flush();
@@ -1022,7 +573,7 @@ describe("TunnelStreamRegistry", () => {
     const fb = fakeBinding();
     bindings.set(PROJECT, fb.binding);
     const { fake, requestId } = admitHttp(registry, {});
-    fake.pushJson(httpRequest(requestId, { bodyLength: 6 }));
+    fake.pushRecord(httpRequest(requestId, { bodyLength: 6 }));
     await flush();
     const body = fb.server.httpCalls[0]!.body!;
 
@@ -1044,7 +595,7 @@ describe("TunnelStreamRegistry", () => {
     const fb = fakeBinding();
     bindings.set(PROJECT, fb.binding);
     const { fake, requestId } = admitHttp(registry, {});
-    fake.pushJson(httpRequest(requestId, { bodyLength: 6 }));
+    fake.pushRecord(httpRequest(requestId, { bodyLength: 6 }));
     await flush();
     const body = fb.server.httpCalls[0]!.body!;
 
@@ -1061,24 +612,5 @@ describe("TunnelStreamRegistry", () => {
     await flush();
     fake.pushRaw(new TextEncoder().encode("def"));
     expect(new TextDecoder().decode(await retry)).toBe("abcdef");
-  });
-
-  test("closing the project stream does not unbind an open tunnel stream", async () => {
-    const { registry, cataloged, bindings } = makeRegistry();
-    cataloged.add(PROJECT);
-    const fb = fakeBinding();
-    bindings.set(PROJECT, fb.binding);
-    const { fake, requestId } = admitHttp(registry, {});
-    fake.pushJson(httpRequest(requestId));
-    await flush();
-    expect(fb.server.httpCalls).toHaveLength(1);
-
-    // The project stream closes: the peer no longer has one open. Admission
-    // is a one-time gate, not a live dependency, so the tunnel exchange
-    // admitted while it WAS open keeps running.
-    fb.setHasOpenStream(() => false);
-    const exchange = fb.server.httpCalls[0]!.exchange;
-    expect(await exchange.head({ status: 200, headers: {} })).toBe("sent");
-    expect(registry.streamCount(PEER)).toBe(1);
   });
 });

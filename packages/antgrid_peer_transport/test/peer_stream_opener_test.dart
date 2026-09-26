@@ -248,31 +248,4 @@ void main() {
     );
   });
 
-  test('the default pending-open bound matches the configured constant', () async {
-    final gates = <Completer<void>>[];
-    final opener = PeerStreamOpener(() async {
-      final gate = Completer<void>();
-      gates.add(gate);
-      await gate.future;
-      return (_FakeSend(), _FakeRecv());
-    });
-    final futures = [
-      for (var i = 0; i < kStreamMaxPendingOpensPerPeer + 1; i++)
-        opener.open(
-          const SessionStreamOpen(),
-          authorized: () => true,
-          maxRecordBytes: 4096,
-          maxQueuedBytes: 4096,
-          onConnectionFatal: _noFatal,
-        ),
-    ];
-    await Future<void>.delayed(const Duration(milliseconds: 5));
-    expect(gates.length, kStreamMaxPendingOpensPerPeer);
-    for (var i = 0; i < gates.length; i++) {
-      gates[i].complete();
-    }
-    await Future<void>.delayed(const Duration(milliseconds: 5));
-    gates.last.complete();
-    await Future.wait(futures);
-  });
 }

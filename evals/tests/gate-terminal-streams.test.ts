@@ -13,12 +13,7 @@
 // `terminal:subscribed`/`frame`/`display:status`/`history:page`
 // bridge-to-app) ride the terminal stream itself.
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
-import { randomBytes } from "node:crypto";
-import { join } from "node:path";
 import { setupTestEnv, type TestEnv } from "../helpers/harness";
-import { createTestProject } from "../helpers/fixtures";
-import { computeProjectId } from "../../bridge/src/project-id";
-import { readHostFile } from "../../bridge/src/host-discovery";
 import { createMessage } from "../../bridge/src/protocol";
 import { firstProjectStream } from "../support/stream";
 import { RelayClient, type TerminalStreamClient } from "../helpers/relay-client";
@@ -27,17 +22,6 @@ import {
   TERMINAL_PROTOCOL_VERSION,
   TERMINAL_VIEWER_MAX_FRAMES,
 } from "../../bridge/src/terminal-frames/protocol";
-
-async function loopbackControl(abDir: string, body: object): Promise<any> {
-  const hf = readHostFile(join(abDir, "host.json"));
-  if (!hf) throw new Error("no host.json for loopback control");
-  const res = await fetch(`http://127.0.0.1:${hf.controlPort}/control`, {
-    method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${hf.token}` },
-    body: JSON.stringify(body),
-  });
-  return res.json();
-}
 
 /** Round-trips `state.snapshot` on the (still-open) SESSION stream and asserts
  *  `ok:true` — proof the connection survived whatever the terminal stream
@@ -303,43 +287,11 @@ describe("gate: terminal attachment streams", () => {
     }
   }, 20_000);
 
-  test("a terminal stream for a catalogued project with no binding is refused NOT_READY in-band and the session stays up", async () => {
-    const projBdir = createTestProject("basic", { "__RELAY_URL__": env.relay.url.replace(/\/ws$/, "") });
-    try {
-      const projB = computeProjectId(projBdir.dir);
-      // Catalogued (seenProjects has it) but stopped, so it has no live mux
-      // entry — projectBinding(projB) === null.
-      expect((await loopbackControl(env.abDir, {
-        id: "open-terminal-streams-b", type: "project:open", projectId: projB, projectPath: projBdir.dir, mode: "remote",
-      })).ok).toBe(true);
-      expect((await loopbackControl(env.abDir, {
-        id: "stop-terminal-streams-b", type: "project:stop", projectId: projB,
-      })).ok).toBe(true);
-
-      const before = env.app.nativeConnectionId;
-      const client = await env.app.openTerminalStream({ projectId: projB, requestId: crypto.randomUUID() });
-      const refusal = await client.next((r) => r.type === "stream:refused");
-      expect(refusal.code).toBe("NOT_READY");
-      await expectEndedSoon(client);
-      expect(env.app.nativeConnectionId).toBe(before);
-      await assertSessionAlive(env.app, "not-ready");
-    } finally {
-      try { projBdir.cleanup(); } catch { /* Windows EBUSY teardown race */ }
-    }
-  }, 30_000);
-
-  test("a terminal stream naming an uncatalogued project is refused NOT_ALLOWED and the session stays up", async () => {
-    const before = env.app.nativeConnectionId;
-    const client = await env.app.openTerminalStream({
-      projectId: randomBytes(8).toString("hex"),
-      requestId: crypto.randomUUID(),
-    });
-    const refusal = await client.next((r) => r.type === "stream:refused");
-    expect(refusal.code).toBe("NOT_ALLOWED");
-    await expectEndedSoon(client);
-    expect(env.app.nativeConnectionId).toBe(before);
-    await assertSessionAlive(env.app, "uncatalogued");
-  });
+  // The catalogued-but-unbound (NOT_READY) and uncatalogued (NOT_ALLOWED)
+  // admission refusals are the same generic project-scoped rules
+  // gate-stream-admission.test.ts already proves end to end; ScopedStreamRegistry
+  // enforces them identically for every kind, so a per-kind repeat here adds
+  // no coverage.
 
   test("a first record that is not the matching subscribe ends only that stream and the session stays up", async () => {
     const before = env.app.nativeConnectionId;

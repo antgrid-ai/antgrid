@@ -9,9 +9,6 @@ import 'dart:async';
 
 import 'models/stream_open.dart';
 
-/// Largest piece the stream path writes per `sendRaw` call.
-const int kUploadStreamSliceBytes = 262144;
-
 /// Bounds the stream path's writer queue (`PeerLink.openStream`'s
 /// `maxQueuedBytes`) — HTTP-sized uploads await every write, so this only
 /// guards against a burst of unusually large slices queuing ahead of the

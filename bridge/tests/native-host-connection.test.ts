@@ -10,6 +10,7 @@ import {
 } from "antgrid-wire";
 import { MessageBus } from "../src/message-bus";
 import { STREAM_RECORD_SLICE_BYTES } from "../src/peer/stream-records";
+import { lengthPrefix, until } from "./support/fake-bi-stream";
 
 // Every native bidi stream, the session stream included, opens with one
 // `[u32 BE len][UTF-8 JSON StreamOpen]` record before it carries anything
@@ -174,20 +175,6 @@ function rawStream(steps: number[][]) {
       },
     },
   };
-}
-
-function lengthPrefix(length: number): number[] {
-  const buf = Buffer.alloc(4);
-  buf.writeUInt32BE(length, 0);
-  return Array.from(buf);
-}
-
-async function until(condition: () => boolean, timeoutMs = 2_000): Promise<void> {
-  const deadlineAt = Date.now() + timeoutMs;
-  while (!condition()) {
-    if (Date.now() > deadlineAt) throw new Error("condition not met in time");
-    await new Promise((resolve) => setTimeout(resolve, 0));
-  }
 }
 
 test("native endpoint identity must be present in authoritative peer inventory", async () => {
@@ -693,6 +680,12 @@ function laterStream(steps: number[][]) {
           if (index >= steps.length) return new Promise<number[]>(() => {});
           return steps[index++]!;
         },
+        // Upload streams read raw bytes (no record framing) after the open
+        // frame, so the wiring proof below needs this alongside readExact.
+        read: async (_sizeLimit: number): Promise<number[]> => {
+          if (index >= steps.length) return new Promise<number[]>(() => {});
+          return steps[index++]!;
+        },
         stop: async (code: bigint) => { stops.push(code); },
       },
     },
@@ -743,7 +736,9 @@ test("a refused later stream reaches netwatch tagged with the stream its open fr
 test("an established peer with a catalogued, attached project gets a project open admitted, and the first record is stream-ready", async () => {
   const f = fixture(undefined, undefined, () => true);
   const bus = new MessageBus();
-  const handle = f.client.attachStream(bus, { projectId: "p1" });
+  const handle = f.client.attachStream(bus, {
+    projectId: "p1", tunnels: fakeTunnelServer() as never, uploads: fakeUploadServer() as never,
+  });
   const peer = connection(f.endpointId);
   try {
     await establishedSlot(f, peer);
@@ -756,6 +751,20 @@ test("an established peer with a catalogued, attached project gets a project ope
     const all = Buffer.concat(later.written.map((bytes) => Buffer.from(bytes)));
     const first = JSON.parse(all.subarray(4, 4 + all.readUInt32BE(0)).toString("utf8"));
     expect(first).toMatchObject({ type: "stream-ready", projectId: "p1" });
+    expect(peer.closeCodes()).toEqual([]);
+
+    // Every kind's open reaches its registry: the handler table native-host-
+    // connection builds covers all five, not just the project kind above.
+    const terminal = laterStream(terminalOpenRecord("p1"));
+    const http = laterStream(tunnelHttpOpenRecord("p1"));
+    const ws = laterStream(tunnelWsOpenRecord("p1"));
+    const upload = laterStream(uploadOpenRecord("p1"));
+    for (const kind of [terminal, http, ws, upload]) peer.pushLaterStream(kind.stream);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(terminal.written).toEqual([]);
+    expect(http.written).toEqual([]);
+    expect(ws.written).toEqual([]);
+    expect(upload.written).toEqual([]);
     expect(peer.closeCodes()).toEqual([]);
   } finally { handle.detach(); f.client.close(); }
 });
@@ -863,69 +872,6 @@ async function openProjectStream(peer: ReturnType<typeof connection>, projectId:
   await until(() => later.written.length > 0);
 }
 
-test("a terminal-kind stream reaches the terminal handler (no longer refused NOT_ALLOWED)", async () => {
-  const f = fixture(undefined, undefined, () => true);
-  const bus = new MessageBus();
-  const handle = f.client.attachStream(bus, { projectId: "p1" });
-  const peer = connection(f.endpointId);
-  try {
-    const slot = await establishedSlot(f, peer);
-    await openProjectStream(peer, "p1");
-    const later = laterStream(terminalOpenRecord("p1"));
-    peer.pushLaterStream(later.stream);
-    await new Promise((resolve) => setTimeout(resolve, 50));
-
-    expect(later.written).toEqual([]); // admitted: no in-band stream:refused record
-    expect(peer.closeCodes()).toEqual([]); // the connection itself is untouched
-    const registry = f.client.peers as unknown as { terminalStreams: { attachmentCount: (peerId: string) => number } };
-    expect(registry.terminalStreams.attachmentCount(slot)).toBe(1);
-  } finally { handle.detach(); f.client.close(); }
-});
-
-test("a terminal-kind stream is refused NOT_ALLOWED when projectCataloged is not supplied", async () => {
-  // `projectCataloged` absent must fail CLOSED — every open is refused
-  // NOT_ALLOWED, never falling back to admitting.
-  const f = fixture();
-  const bus = new MessageBus();
-  const handle = f.client.attachStream(bus, { projectId: "p1" });
-  const peer = connection(f.endpointId);
-  try {
-    const slot = await establishedSlot(f, peer);
-    const later = laterStream(terminalOpenRecord("p1"));
-    peer.pushLaterStream(later.stream);
-    await until(() => later.written.length > 0);
-
-    expect(later.refusalCode()).toBe("NOT_ALLOWED");
-    expect(peer.closeCodes()).toEqual([]); // an in-band refusal, not a connection-fatal one
-    const registry = f.client.peers as unknown as { terminalStreams: { attachmentCount: (peerId: string) => number } };
-    expect(registry.terminalStreams.attachmentCount(slot)).toBe(0);
-  } finally { handle.detach(); f.client.close(); }
-});
-
-test("retiring a peer drops its terminal bindings", async () => {
-  const f = fixture(undefined, undefined, () => true);
-  const bus = new MessageBus();
-  const handle = f.client.attachStream(bus, { projectId: "p1" });
-  const peer = connection(f.endpointId);
-  try {
-    const slot = await establishedSlot(f, peer);
-    await openProjectStream(peer, "p1");
-    const later = laterStream(terminalOpenRecord("p1"));
-    peer.pushLaterStream(later.stream);
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    const registry = f.client.peers as unknown as { terminalStreams: { attachmentCount: (peerId: string) => number } };
-    expect(registry.terminalStreams.attachmentCount(slot)).toBe(1);
-
-    // Drives the real retirePeer() path (as the existing recheckAuthorization
-    // tests do) rather than calling a private method directly.
-    f.setAllowed(false);
-    f.client.recheckAuthorization();
-
-    expect(f.access.nativePeers.size).toBe(0);
-    expect(registry.terminalStreams.attachmentCount(slot)).toBe(0);
-  } finally { handle.detach(); f.client.close(); }
-});
-
 // --- Tunnel streams ---
 
 function tunnelHttpOpenRecord(projectId: string): number[][] {
@@ -946,30 +892,26 @@ function fakeTunnelServer() {
   return { admit: () => ({ ok: true as const, manager: {} as never }) };
 }
 
-test("a tunnel-http-kind and tunnel-ws-kind stream both reach the tunnel handler (registered in the handler table)", async () => {
-  const f = fixture(undefined, undefined, () => true);
-  const bus = new MessageBus();
-  const handle = f.client.attachStream(bus, { projectId: "p1", tunnels: fakeTunnelServer() as never });
-  const peer = connection(f.endpointId);
-  try {
-    await establishedSlot(f, peer);
-    await openProjectStream(peer, "p1");
+function uploadOpenRecord(projectId: string): number[][] {
+  const body = Array.from(encodeStreamOpen({
+    kind: "upload", projectId, requestId: crypto.randomUUID(), fileName: "f.txt", size: 0,
+  }));
+  return [lengthPrefix(body.length), body];
+}
 
-    const http = laterStream(tunnelHttpOpenRecord("p1"));
-    peer.pushLaterStream(http.stream);
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(http.written).toEqual([]); // admitted: no in-band stream:refused record
-    expect(peer.closeCodes()).toEqual([]);
+/** A minimal UploadStreamServer whose admit() always admits: this test only
+ *  proves the upload kind reaches its registry, not the upload protocol
+ *  itself (see upload-streams.test.ts for that). */
+function fakeUploadServer() {
+  return {
+    admit: async () => ({
+      ok: true as const,
+      manager: { begin: () => ({ ok: true as const, upload: { cancel: () => {} } as never }) } as never,
+    }),
+  };
+}
 
-    const ws = laterStream(tunnelWsOpenRecord("p1"));
-    peer.pushLaterStream(ws.stream);
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(ws.written).toEqual([]);
-    expect(peer.closeCodes()).toEqual([]);
-  } finally { handle.detach(); f.client.close(); }
-});
-
-test("retiring a peer drops its tunnel bindings alongside its terminal bindings", async () => {
+test("retiring a peer drops its bindings in every registry", async () => {
   const f = fixture(undefined, undefined, () => true);
   const bus = new MessageBus();
   const handle = f.client.attachStream(bus, { projectId: "p1", tunnels: fakeTunnelServer() as never });
@@ -984,18 +926,19 @@ test("retiring a peer drops its tunnel bindings alongside its terminal bindings"
     await new Promise((resolve) => setTimeout(resolve, 50));
 
     const access = f.client.peers as unknown as {
-      terminalStreams: { attachmentCount: (peerId: string) => number };
+      terminalStreams: { streamCount: (peerId: string) => number };
       tunnelStreams: { streamCount: (peerId: string) => number };
     };
-    expect(access.terminalStreams.attachmentCount(slot)).toBe(1);
+    expect(access.terminalStreams.streamCount(slot)).toBe(1);
     expect(access.tunnelStreams.streamCount(slot)).toBe(1);
 
-    // Drives the real retirePeer() path, like the terminal-only test above.
+    // Drives the real retirePeer() path (as the existing recheckAuthorization
+    // tests do) rather than calling a private method directly.
     f.setAllowed(false);
     f.client.recheckAuthorization();
 
     expect(f.access.nativePeers.size).toBe(0);
-    expect(access.terminalStreams.attachmentCount(slot)).toBe(0);
+    expect(access.terminalStreams.streamCount(slot)).toBe(0);
     expect(access.tunnelStreams.streamCount(slot)).toBe(0);
   } finally { handle.detach(); f.client.close(); }
 });
@@ -1023,11 +966,11 @@ test("a QUIC idle close retires the peer", async () => {
     await new Promise((resolve) => setTimeout(resolve, 50));
 
     const access = f.client.peers as unknown as {
-      terminalStreams: { attachmentCount: (peerId: string) => number };
+      terminalStreams: { streamCount: (peerId: string) => number };
       tunnelStreams: { streamCount: (peerId: string) => number };
       projectStreams: { openStreamCount: (peerId: string) => number };
     };
-    expect(access.terminalStreams.attachmentCount(slot)).toBe(1);
+    expect(access.terminalStreams.streamCount(slot)).toBe(1);
     expect(access.tunnelStreams.streamCount(slot)).toBe(1);
     expect(access.projectStreams.openStreamCount(slot)).toBe(1);
 
@@ -1035,7 +978,7 @@ test("a QUIC idle close retires the peer", async () => {
     await until(() => f.access.nativePeers.size === 0);
 
     expect(f.client.peers.peerSession(slot)).toBeNull();
-    expect(access.terminalStreams.attachmentCount(slot)).toBe(0);
+    expect(access.terminalStreams.streamCount(slot)).toBe(0);
     expect(access.tunnelStreams.streamCount(slot)).toBe(0);
     expect(access.projectStreams.openStreamCount(slot)).toBe(0);
     const retired = events.find((event) => event.msgType === "peer:native-retired");
@@ -1083,7 +1026,7 @@ function queuedStream() {
   };
 }
 
-test("N1: the session stream sets priority once, before its first write", async () => {
+test("the session stream sets priority once, before its first write", async () => {
   const f = fixture();
   const q = queuedStream();
   const peer = connection(f.endpointId, Promise.resolve(q.stream));
@@ -1103,7 +1046,7 @@ test("N1: the session stream sets priority once, before its first write", async 
   } finally { f.client.close(); }
 });
 
-test("N2: a record near MAX_TRANSFER_BYTES on the session stream is written in <=256 KiB slices", async () => {
+test("a record near MAX_TRANSFER_BYTES on the session stream is written in <=256 KiB slices", async () => {
   const f = fixture();
   const q = queuedStream();
   const peer = connection(f.endpointId, Promise.resolve(q.stream));
@@ -1120,7 +1063,7 @@ test("N2: a record near MAX_TRANSFER_BYTES on the session stream is written in <
   } finally { f.client.close(); }
 });
 
-test("N3: an inbound session record read after authorization is revoked retires the peer unauthorized (close code 3)", async () => {
+test("an inbound session record read after authorization is revoked retires the peer unauthorized (close code 3)", async () => {
   const f = fixture();
   const q = queuedStream();
   const peer = connection(f.endpointId, Promise.resolve(q.stream));
@@ -1150,7 +1093,7 @@ test("a non-JSON session record after establishment is a plaintext-not-json drop
   } finally { observer.mockRestore(); f.client.close(); }
 });
 
-test("N5: an inbound session record longer than STREAM_PROJECT_APP_RECORD_MAX_BYTES retires the peer protocol-violation", async () => {
+test("an inbound session record longer than STREAM_PROJECT_APP_RECORD_MAX_BYTES retires the peer protocol-violation", async () => {
   // The literal payload cap plus one: the cap is the bare payload with no
   // header allowance, so exactly one byte over it must be refused.
   const f = fixture();
@@ -1164,7 +1107,7 @@ test("N5: an inbound session record longer than STREAM_PROJECT_APP_RECORD_MAX_BY
   } finally { f.client.close(); }
 });
 
-test("N6: a session-stream write that never completes does not retire the peer on a timer", async () => {
+test("a session-stream write that never completes does not retire the peer on a timer", async () => {
   const timers: Array<{ ms: number; fire: () => void; cancelled: boolean }> = [];
   const schedule = (callback: () => void, ms: number) => {
     const timer = { ms, fire: () => { if (!timer.cancelled) callback(); }, cancelled: false };

@@ -77,6 +77,11 @@ const int kStreamUploadBridgeRecordMaxBytes = 16384;
 const int kStreamUploadMaxFileNameLength = 255;
 const int kStreamUploadMaxMimeTypeLength = 127;
 
+/// Largest raw piece either the tunnel-http body pump or an upload's byte
+/// stream writes in one `sendRaw` call — the two were separately named
+/// constants with the same value.
+const int kStreamRawSliceBytes = 262144;
+
 /// Bridge reader's cap for the four small app-to-bridge terminal verbs
 /// (subscribe, ack, unsubscribe, history:request).
 const int kStreamTerminalAppRecordMaxBytes = 16384;

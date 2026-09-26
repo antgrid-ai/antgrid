@@ -102,33 +102,6 @@ NativePeerStream _stream(
 );
 
 void main() {
-  test('slices a record larger than the slice bound', () async {
-    final send = FakeSend();
-    final stream = _stream(
-      send,
-      FakeRecv(const []),
-      maxQueuedBytes: 1 << 21,
-    );
-    final big = Uint8List(kPeerStreamSliceBytes + 10000);
-    for (var i = 0; i < big.length; i++) {
-      big[i] = i % 256;
-    }
-    expect(await stream.send(big), PeerSendOutcome.accepted);
-    expect(send.writeAllCalls.length, 2);
-    expect(
-      send.writeAllCalls.every((s) => s.length <= kPeerStreamSliceBytes),
-      isTrue,
-    );
-    final reassembled = [...send.writeAllCalls[0], ...send.writeAllCalls[1]];
-    expect(
-      ByteData.sublistView(
-        Uint8List.fromList(reassembled.sublist(0, 4)),
-      ).getUint32(0, Endian.big),
-      big.length,
-    );
-    expect(reassembled.sublist(4), big);
-  });
-
   test(
     'reset() during a stuck multi-slice record waits for the one slice in '
     'flight and writes no further slice',
@@ -417,27 +390,40 @@ void main() {
     expect(await stream.send(Uint8List.fromList([1])), PeerSendOutcome.closed);
   });
 
+  test(
+    'sending a 32 MiB record slices it in writeAll calls of at most '
+    'kPeerStreamSliceBytes, with the length prefix and payload intact across '
+    'the split',
+    () async {
+      final send = FakeSend();
+      final stream = _stream(
+        send,
+        FakeRecv(const []),
+        maxQueuedBytes: 64 * 1024 * 1024,
+      );
+      final record = Uint8List(32 * 1024 * 1024);
+      for (var i = 0; i < record.length; i++) {
+        record[i] = i % 256;
+      }
+      expect(await stream.send(record), PeerSendOutcome.accepted);
+      expect(send.writeAllCalls, isNotEmpty);
+      expect(
+        send.writeAllCalls.every((s) => s.length <= kPeerStreamSliceBytes),
+        isTrue,
+      );
+      final reassembled = send.writeAllCalls.expand((s) => s).toList();
+      expect(
+        ByteData.sublistView(
+          Uint8List.fromList(reassembled.sublist(0, 4)),
+        ).getUint32(0, Endian.big),
+        record.length,
+      );
+      expect(reassembled.sublist(4), record);
+    },
+  );
+
   group('writeRecordInSlices', () {
-    test(
-      'W1: writes a 32 MiB record in writeAll calls of at most '
-      'kPeerStreamSliceBytes',
-      () async {
-        final send = FakeSend();
-        final record = Uint8List(32 * 1024 * 1024);
-        final ok = await writeRecordInSlices(send, record);
-
-        expect(ok, isTrue);
-        expect(send.writeAllCalls, isNotEmpty);
-        expect(
-          send.writeAllCalls.every((s) => s.length <= kPeerStreamSliceBytes),
-          isTrue,
-        );
-        final total = send.writeAllCalls.fold<int>(0, (n, s) => n + s.length);
-        expect(total, record.length);
-      },
-    );
-
-    test('W2: stops between slices when stop turns true', () async {
+    test('stops between slices when stop turns true', () async {
       final send = FakeSend();
       final release = Completer<void>();
       send.beforeWriteAll = (_) => release.future;

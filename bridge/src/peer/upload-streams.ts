@@ -5,27 +5,26 @@
  * answers with exactly one length-prefixed JSON record (a refusal or
  * `file:upload-result`), then FINs its own half.
  *
- * This registry is plugged into `PeerStreamAcceptor` as the `upload` handler.
- * It never opens or promotes a core: `uploadBinding` is a lookup over
- * whatever `ProjectStreamRegistry` already has attached, and the real
- * per-checkout authorization runs through `UploadStreamServer.admit` once the
- * open frame names a checkout.
+ * Registered into `PeerStreamAcceptor` as the `upload` handler via
+ * `handlerFor("upload")`. Admission (the per-peer cap, the safe-id/catalog
+ * checks, the project's own binding lookup) lives once in
+ * `ScopedStreamRegistry` (`stream-dispatch.ts`); this file owns only the
+ * requestId shape, the raw byte-count read loop, and the one result record.
  */
 
 import { STREAM_MAX_UPLOAD_STREAMS_PER_PEER, type UploadStreamOpen } from "antgrid-wire";
 import { createMessage } from "../protocol";
 import type { StreamUpload, UploadResultFields } from "../file-upload";
 import {
-  gateProjectStream,
-  refuseStream,
-  type AcceptedBiStream,
-  type StreamAdmission,
-  type StreamHandler,
-  type StreamRefusal as DispatchStreamRefusal,
+  READ_ENDED,
+  READ_UNBOUND,
+  ScopedStreamRegistry,
+  type ScopedBinding,
+  type ScopedEndCause,
+  type ScopedStreamOptions,
 } from "./stream-dispatch";
-import { STREAM_RAW_READ_BYTES, StreamRawReader, StreamRecordWriter, stopRecvWhenSettled } from "./stream-records";
+import { STREAM_RAW_READ_BYTES, StreamRawReader } from "./stream-records";
 import type { UploadProjectBinding } from "../project-streams";
-import type { NetwatchStreamKind } from "../netwatch";
 
 export const UPLOAD_STREAM_MAX_QUEUED_BYTES = 65_536;
 /** Below the session stream's binding default of 0, the same as tunnel
@@ -42,195 +41,113 @@ function encodeJsonRecord(record: unknown): Uint8Array {
   return textEncoder.encode(JSON.stringify(record));
 }
 
-interface UploadBinding {
-  readonly peerId: string;
-  /** The open frame's own `requestId`. */
-  readonly id: string;
-  readonly projectId: string;
+interface UploadBinding extends ScopedBinding<UploadProjectBinding> {
   readonly checkoutId: string;
-  readonly stream: AcceptedBiStream;
-  readonly writer: StreamRecordWriter;
-  readonly authorized: () => boolean;
-  readonly projBinding: UploadProjectBinding;
-  /** Set once `FileUploadManager.begin()` admits the file; the teardown paths
-   *  (`projectDetached`/`dropPeer`/a writer failure) cancel it here. */
+  readonly fileName: string;
+  readonly size: number;
+  /** Set once `FileUploadManager.begin()` admits the file; an abnormal end
+   *  cancels it here (`onEnded`). A result already delivered on its own
+   *  releases the binding without ever reaching there. */
   upload?: StreamUpload;
-  /** Removed from every index and its cap slot freed. The staleness guard
-   *  every async step checks: once unbound, nothing may act on this binding
-   *  again. */
-  unbound: boolean;
-  /** The raw read currently outstanding on `recv`, if any — lets a result
-   *  delivered out of band (the manager's own inactivity timer) wait for the
-   *  binding's shared per-stream mutex to free before calling `recv.stop()`,
-   *  rather than queuing behind it (stream-records.ts's binding constraints). */
-  pendingRead: Promise<unknown> | null;
 }
 
-export interface UploadStreamRegistryOptions {
-  /** host-server `seenProjects.has`. Absent => every open is refused NOT_ALLOWED (fail closed). */
-  projectCataloged?: (projectId: string) => boolean;
-  /** `ProjectStreamRegistry.uploadBinding`. Lookup only: never opens or promotes a core. */
-  uploadBinding: (projectId: string) => UploadProjectBinding | null;
-  /** Only ever "unauthorized" — this stream carries no length-prefixed
-   *  records to violate a framing protocol on. */
-  retirePeer: (peerId: string, reason: "unauthorized") => void;
-  /** `stream` names the record for `NetwatchEvent.streamKind`/`streamId`, the
-   *  same way `TunnelStreamRegistry`'s does. */
-  diagnostic?: (type: string, detail: Record<string, unknown>, stream?: { kind: NetwatchStreamKind; id: string }) => void;
-}
+export type UploadStreamRegistryOptions = ScopedStreamOptions<UploadProjectBinding>;
 
-/** `(peerId, requestId) -> binding`, registered into `PeerStreamAcceptor`'s
- *  handler table as `{ upload: registry.handler }`. */
-export class UploadStreamRegistry {
-  private readonly bindings = new Map<string, UploadBinding>();
-  private readonly peerBindings = new Map<string, Set<UploadBinding>>();
-
-  constructor(private readonly opts: UploadStreamRegistryOptions) {}
-
-  readonly handler: StreamHandler<UploadStreamOpen> = (admission) => this.admitUpload(admission);
-
-  /** Live bindings holding a cap slot for the peer. */
-  streamCount(peerId: string): number {
-    return this.peerBindings.get(peerId)?.size ?? 0;
+/** `(peerId, requestId) -> binding`, registered via `handlerFor("upload")`. */
+export class UploadStreamRegistry extends ScopedStreamRegistry<UploadStreamOpen, UploadBinding, UploadProjectBinding> {
+  constructor(opts: UploadStreamRegistryOptions) {
+    super({
+      kinds: ["upload"],
+      cap: STREAM_MAX_UPLOAD_STREAMS_PER_PEER,
+      capMessage: "too many uploads",
+      priority: STREAM_PRIORITY_UPLOAD,
+      resetCode: STREAM_RESET_UPLOAD,
+      stopCode: STREAM_STOP_UPLOAD,
+      maxQueuedBytes: UPLOAD_STREAM_MAX_QUEUED_BYTES,
+    }, opts);
   }
 
-  // ---- Admission (steps 1-8, synchronous, before any read) ------------------
-
-  private gate(
-    peerId: string,
-    open: UploadStreamOpen,
-  ): { ok: true; projBinding: UploadProjectBinding } | { ok: false; refusal: DispatchStreamRefusal } {
-    const gated = gateProjectStream(
-      peerId,
-      open.projectId,
-      { open: this.streamCount(peerId), max: STREAM_MAX_UPLOAD_STREAMS_PER_PEER, message: "too many uploads" },
-      this.opts.projectCataloged,
-      (id) => this.opts.uploadBinding(id),
-    );
-    if (!gated.ok) return gated;
-    const projBinding = gated.binding;
-    if (this.bindings.has(this.key(peerId, open.requestId))) {
-      return { ok: false, refusal: { code: "INVALID", message: "duplicate id" } };
-    }
-    if (projBinding.uploads() === null) {
-      return { ok: false, refusal: { code: "NOT_ALLOWED", message: "uploads not available" } };
-    }
-    return { ok: true, projBinding };
+  protected idOf(open: UploadStreamOpen): string {
+    return open.requestId;
   }
 
-  private admitUpload(admission: StreamAdmission<UploadStreamOpen>): DispatchStreamRefusal | undefined {
-    const { peerId, open, stream, authorized } = admission;
-    const gate = this.gate(peerId, open);
-    if (!gate.ok) return gate.refusal;
-
-    // Referenced by the writer failure closure below before it is assigned;
-    // it only ever runs after this function has returned.
-    let binding!: UploadBinding;
-    const writer = new StreamRecordWriter(
-      stream,
-      authorized,
-      (reason) => this.onWriterFailure(binding, reason),
-      UPLOAD_STREAM_MAX_QUEUED_BYTES,
-      STREAM_PRIORITY_UPLOAD,
-      STREAM_RESET_UPLOAD,
-    );
-    binding = {
-      peerId,
-      id: open.requestId,
-      projectId: open.projectId,
-      checkoutId: open.checkoutId ?? "main",
-      stream,
-      writer,
-      authorized,
-      projBinding: gate.projBinding,
-      unbound: false,
-      pendingRead: null,
-    };
-    this.bind(binding);
-    void this.continueAdmission(binding, open);
-    return undefined;
+  protected available(project: UploadProjectBinding) {
+    return project.uploads() === null
+      ? { code: "NOT_ALLOWED" as const, message: "uploads not available" }
+      : undefined;
   }
 
-  /** Steps 9-12: admit against the project's own upload server, then
-   *  hand off to `FileUploadManager.begin()` and the raw read loop. */
-  private async continueAdmission(binding: UploadBinding, open: UploadStreamOpen): Promise<void> {
-    const server = binding.projBinding.uploads();
+  protected createBinding(base: ScopedBinding<UploadProjectBinding>, open: UploadStreamOpen): UploadBinding {
+    return { ...base, checkoutId: open.checkoutId ?? "main", fileName: open.fileName, size: open.size };
+  }
+
+  protected serve(binding: UploadBinding): void {
+    void this.continueAdmission(binding);
+  }
+
+  /** The upload has no other way to learn its stream is gone once it is mid
+   *  transfer, so every abnormal cause cancels it alike. A result already
+   *  delivered (success or failure) releases the binding on its own terms and
+   *  never reaches here. */
+  protected onEnded(binding: UploadBinding, _cause: ScopedEndCause): void {
+    binding.upload?.cancel();
+  }
+
+  /** Past the shared gate: the project's own upload server can still go away
+   *  between the synchronous admission and this await, so it is re-read here
+   *  before admitting against it and handing off to `FileUploadManager.begin()`
+   *  and the raw read loop. */
+  private async continueAdmission(binding: UploadBinding): Promise<void> {
+    const server = binding.project.uploads();
     if (server === null) {
-      this.refuseInline(binding, "NOT_ALLOWED", "uploads not available");
+      this.refuseInline(binding, { code: "NOT_ALLOWED", message: "uploads not available" });
       return;
     }
-    const admission = await server.admit(binding.peerId, open.checkoutId ?? "main");
+    const admission = await server.admit(binding.peerId, binding.checkoutId);
     if (!admission.ok) {
-      this.refuseInline(binding, admission.refusal.code, admission.refusal.message);
+      this.refuseInline(binding, admission.refusal);
       return;
     }
     if (binding.unbound) {
-      void binding.stream.recv.stop(STREAM_STOP_UPLOAD).catch(() => {});
+      // Torn down while `admit()` was outstanding, before any reader existed:
+      // nothing else will ever stop this receive half.
+      this.stopRecv(binding);
       return;
     }
-    if (!binding.authorized()) {
-      this.opts.retirePeer(binding.peerId, "unauthorized");
-      return;
-    }
+    if (!this.stillAuthorized(binding)) return;
 
     const began = admission.manager.begin(
-      { requestId: open.requestId, fileName: open.fileName, size: open.size },
-      (result) => { void this.deliverResult(binding, open.requestId, result); },
+      { requestId: binding.id, fileName: binding.fileName, size: binding.size },
+      (result) => { void this.deliverResult(binding, result); },
     );
     if (!began.ok) {
-      await this.deliverResult(binding, open.requestId, began.result);
+      await this.deliverResult(binding, began.result);
       return;
     }
     binding.upload = began.upload;
-    await this.runUploadBody(binding, began.upload, open.size);
+    await this.runUploadBody(binding, began.upload);
   }
-
-  /** Unbinds first, so `refuseStream`'s own writer is the only one that
-   *  touches the send half. No read is outstanding at either call site. */
-  private refuseInline(binding: UploadBinding, code: DispatchStreamRefusal["code"], message: string): void {
-    this.unbind(binding);
-    refuseStream(
-      binding.stream,
-      { code, message },
-      binding.authorized,
-      () => this.opts.retirePeer(binding.peerId, "unauthorized"),
-    );
-  }
-
-  // ---- The raw read loop -----------------------------------------------
 
   /** Requests `remaining + 1` bytes each time: a well-behaved peer's every
    *  read resolves with at most `remaining` (there is nothing more to send),
    *  so a read that returns MORE than `remaining` is the overrun signal
    *  itself — there is no separate probe once the declared size is reached. */
-  private async runUploadBody(binding: UploadBinding, upload: StreamUpload, declaredSize: number): Promise<void> {
+  private async runUploadBody(binding: UploadBinding, upload: StreamUpload): Promise<void> {
     const raw = new StreamRawReader(binding.stream);
     let received = 0;
     for (;;) {
       if (binding.unbound) return;
-      const remaining = declaredSize - received;
+      const remaining = binding.size - received;
       const want = Math.min(STREAM_RAW_READ_BYTES, remaining + 1);
-      const readPromise = raw.read(want);
-      binding.pendingRead = readPromise;
-      let bytes: Uint8Array | null;
-      try {
-        bytes = await readPromise;
-      } catch {
-        binding.pendingRead = null;
+      const bytes = await this.trackRead(binding, raw.read(want));
+      if (bytes === READ_UNBOUND) return;
+      if (bytes === READ_ENDED) {
         if (binding.unbound) return;
-        this.opts.diagnostic?.("upload-stream:cancelled", { peerId: binding.peerId, requestId: binding.id, received },
-          { kind: "upload", id: binding.id });
-        upload.cancel();
-        binding.writer.abort();
-        this.unbind(binding);
+        this.diag(binding, "upload-stream:cancelled", { peerId: binding.peerId, requestId: binding.id, received });
+        this.end(binding, "app-ended");
         return;
       }
-      binding.pendingRead = null;
-      if (binding.unbound) return;
-      if (!binding.authorized()) {
-        this.opts.retirePeer(binding.peerId, "unauthorized");
-        return;
-      }
+      if (!this.stillAuthorized(binding)) return;
       if (bytes === null) {
         // A clean FIN: `upload.end()` reports ok or INCOMPLETE through the
         // same `onResult` callback `begin()` was given.
@@ -238,12 +155,8 @@ export class UploadStreamRegistry {
         return;
       }
       if (bytes.byteLength > remaining) {
-        this.opts.diagnostic?.("upload-stream:oversize", { peerId: binding.peerId, requestId: binding.id },
-          { kind: "upload", id: binding.id });
-        upload.cancel();
-        binding.writer.abort();
-        this.unbind(binding);
-        void binding.stream.recv.stop(STREAM_STOP_UPLOAD).catch(() => {});
+        this.diag(binding, "upload-stream:oversize", { peerId: binding.peerId, requestId: binding.id });
+        this.end(binding, "breach");
         return;
       }
       received += bytes.byteLength;
@@ -259,90 +172,24 @@ export class UploadStreamRegistry {
   /** Sends the one result record a stream ever gets, FINs, and stops the
    *  receive half once whatever read is outstanding on it settles — never
    *  before, since `recv.stop()` would otherwise queue behind that read on
-   *  the binding's shared per-stream mutex (stream-records.ts). */
-  private async deliverResult(binding: UploadBinding, requestId: string, fields: UploadResultFields): Promise<void> {
+   *  the binding's shared per-stream mutex (stream-records.ts). A voluntary,
+   *  graceful end on the upload's own terms: `release`, not `end` — the
+   *  upload already concluded on its own and must not be cancelled again. */
+  private async deliverResult(binding: UploadBinding, fields: UploadResultFields): Promise<void> {
     if (binding.unbound) return;
-    if (!binding.projBinding.mayDeliverTo(binding.peerId)) {
+    if (!binding.project.mayDeliverTo(binding.peerId)) {
       binding.writer.abort();
-      this.unbind(binding);
+      this.release(binding);
       return;
     }
     await binding.writer.send(encodeJsonRecord(createMessage("file:upload-result", {
-      requestId, checkoutId: binding.checkoutId, ...fields,
+      requestId: binding.id, checkoutId: binding.checkoutId, ...fields,
     })));
-    this.opts.diagnostic?.("upload-stream:result",
-      { peerId: binding.peerId, requestId, ok: fields.ok, ...(fields.error ? { error: fields.error } : {}) },
-      { kind: "upload", id: binding.id });
+    this.diag(binding, "upload-stream:result",
+      { peerId: binding.peerId, requestId: binding.id, ok: fields.ok, ...(fields.error ? { error: fields.error } : {}) });
     await binding.writer.finish();
     const pending = binding.pendingRead;
-    this.unbind(binding);
-    stopRecvWhenSettled(pending, () => { void binding.stream.recv.stop(STREAM_STOP_UPLOAD).catch(() => {}); });
-  }
-
-  // ---- Writer failures, teardown ----------------------------------------------
-
-  private onWriterFailure(binding: UploadBinding, reason: "unauthorized" | "overflow" | "stream-lost"): void {
-    if (binding.unbound) return;
-    if (reason === "unauthorized") {
-      this.opts.retirePeer(binding.peerId, "unauthorized");
-      return;
-    }
-    // "overflow" or "stream-lost": the writer has already reset its own half.
-    binding.upload?.cancel();
-    this.unbind(binding);
-  }
-
-  /** The project's last live `ProjectStreamRegistry` entry detached: its
-   *  upload server is gone, so every bound upload for it is cancelled with no
-   *  result to report. */
-  projectDetached(projectId: string): void {
-    for (const set of this.peerBindings.values()) {
-      for (const binding of [...set]) {
-        if (binding.projectId !== projectId) continue;
-        binding.upload?.cancel();
-        binding.writer.abort();
-        this.unbind(binding);
-      }
-    }
-  }
-
-  /** Connection retired: cancel and unbind everything for the peer. Never
-   *  calls `retirePeer` — the peer is already gone. */
-  dropPeer(peerId: string): void {
-    const set = this.peerBindings.get(peerId);
-    if (!set) return;
-    for (const binding of [...set]) {
-      binding.upload?.cancel();
-      binding.writer.abort();
-      this.unbind(binding);
-    }
-  }
-
-  // ---- Indexing ----------------------------------------------------------------
-
-  private bind(binding: UploadBinding): void {
-    this.bindings.set(this.key(binding.peerId, binding.id), binding);
-    let set = this.peerBindings.get(binding.peerId);
-    if (!set) {
-      set = new Set();
-      this.peerBindings.set(binding.peerId, set);
-    }
-    set.add(binding);
-  }
-
-  /** Removes the index entry and frees the cap slot exactly once. */
-  private unbind(binding: UploadBinding): void {
-    if (binding.unbound) return;
-    binding.unbound = true;
-    this.bindings.delete(this.key(binding.peerId, binding.id));
-    const set = this.peerBindings.get(binding.peerId);
-    if (set) {
-      set.delete(binding);
-      if (set.size === 0) this.peerBindings.delete(binding.peerId);
-    }
-  }
-
-  private key(peerId: string, id: string): string {
-    return `${peerId}\u0000${id}`;
+    this.release(binding);
+    this.stopRecv(binding, pending);
   }
 }

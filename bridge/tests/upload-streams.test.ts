@@ -1,20 +1,23 @@
-// The upload stream's wire and admission order: docs/protocol/peer-session.md §1e.
-// Drives UploadStreamRegistry directly with fakes — no PeerStreamAcceptor, no
-// real FileUploadManager — mirroring tunnel-streams.test.ts's pattern for the
-// tunnel registry: this file proves the registry's own admission order and raw
-// read loop; FileUploadManager's begin/write/end/cancel units (including real
-// disk behaviour) are file-upload.test.ts's job.
-import { describe, test, expect } from "bun:test";
+// The upload stream's wire and body protocol: docs/protocol/peer-session.md
+// §1e. Drives UploadStreamRegistry directly with fakes — no PeerStreamAcceptor,
+// no real FileUploadManager. Admission (authorization, the open-frame read,
+// refusal codes, caps, unauthorized mid-stream, projectDetached, dropPeer) is
+// covered once for every kind by stream-admission.test.ts; this file starts at
+// the handler boundary and covers upload's own body: the raw read loop,
+// begin/write/end sequencing against the fake manager, and the two orderings
+// unique to upload (server.admit before authorized(), begin() before any
+// byte is read). FileUploadManager's real begin/write/end/cancel units
+// (including real disk behaviour) are file-upload.test.ts's job.
+import { test, expect } from "bun:test";
 import {
   UploadStreamRegistry,
   STREAM_RESET_UPLOAD,
   STREAM_STOP_UPLOAD,
   type UploadStreamRegistryOptions,
 } from "../src/peer/upload-streams";
-import { STREAM_MAX_UPLOAD_STREAMS_PER_PEER, type UploadStreamOpen } from "antgrid-wire";
+import type { UploadStreamOpen } from "antgrid-wire";
 import { STREAM_RAW_READ_BYTES, STREAM_RECORD_SLICE_BYTES } from "../src/peer/stream-records";
 import type { UploadProjectBinding } from "../src/project-streams";
-import type { StreamRefusal } from "../src/peer/stream-dispatch";
 import type {
   FileUploadManager,
   StreamUpload,
@@ -24,117 +27,15 @@ import type {
   UploadStreamServer,
 } from "../src/file-upload";
 import { setLogLevel } from "../src/logger";
+import { createFakeBiStream, createFakeProjectBinding, until, type FakeBiStream } from "./support/fake-bi-stream";
 
 setLogLevel("error");
 
-/** Serializes calls exactly like the real binding's `Arc<Mutex<..>>`, mirroring
- *  stream-records.test.ts's FakeMutex: a call queued behind another does not
- *  start running its body until the prior one's promise settles. */
-class FakeMutex {
-  private tail: Promise<unknown> = Promise.resolve();
-  run<T>(fn: () => Promise<T>): Promise<T> {
-    const result = this.tail.then(fn);
-    this.tail = result.then(() => undefined, () => undefined);
-    return result;
-  }
-}
-
-function flush(): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, 0));
-}
-
-async function until(condition: () => boolean, timeoutMs = 2_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!condition()) {
-    if (Date.now() > deadline) throw new Error("condition not met in time");
-    await new Promise((resolve) => setTimeout(resolve, 0));
-  }
-}
-
-/** One fake upload stream: a length-prefixed JSON send half (result/refusal
- *  records) and a RAW recv half fed by a FIFO byte queue — `pushBytes` queues
- *  app-sent body bytes, `endFin`/`endReset` end the queue the way a native
- *  `read(sizeLimit)` resolves `[]` at FIN or rejects on reset. */
-function createFakeUploadStream() {
-  const sendMutex = new FakeMutex();
-  const recvMutex = new FakeMutex();
-  const writeAllCalls: number[][] = [];
-  const setPriorityCalls: number[] = [];
-  const resetCalls: bigint[] = [];
-  const stopCalls: bigint[] = [];
-  const readCalls: number[] = [];
-  let finishCalls = 0;
-  let pendingGate: Promise<void> | null = null;
-
-  const send = {
-    writeAll: (bytes: number[]) =>
-      sendMutex.run(async () => {
-        writeAllCalls.push(bytes);
-        const gate = pendingGate;
-        pendingGate = null;
-        if (gate) await gate;
-      }),
-    setPriority: (p: number) => sendMutex.run(async () => { setPriorityCalls.push(p); }),
-    reset: (code: bigint) => sendMutex.run(async () => { resetCalls.push(code); }),
-    finish: () => sendMutex.run(async () => { finishCalls++; }),
-  };
-
-  let buffer: number[] = [];
-  let ended: "fin" | Error | null = null;
-  const waiters: Array<{ sizeLimit: number; resolve: (v: number[]) => void; reject: (e: unknown) => void }> = [];
-  function pump(): void {
-    while (waiters.length) {
-      const w = waiters[0]!;
-      if (buffer.length > 0) {
-        const n = Math.min(w.sizeLimit, buffer.length);
-        const chunk = buffer.splice(0, n);
-        waiters.shift();
-        w.resolve(chunk);
-      } else if (ended === "fin") {
-        waiters.shift();
-        w.resolve([]);
-      } else if (ended instanceof Error) {
-        waiters.shift();
-        w.reject(ended);
-      } else break;
-    }
-  }
-  const recv = {
-    readExact: async (): Promise<number[]> => {
-      throw new Error("upload stream body is read raw; readExact must never be called on it");
-    },
-    read: (sizeLimit: number) => {
-      readCalls.push(sizeLimit);
-      return recvMutex.run(() => new Promise<number[]>((resolve, reject) => {
-        waiters.push({ sizeLimit, resolve, reject });
-        pump();
-      }));
-    },
-    stop: (code: bigint) => recvMutex.run(async () => { stopCalls.push(code); }),
-  };
-
-  return {
-    stream: { send, recv },
-    writeAllCalls, setPriorityCalls, resetCalls, stopCalls, readCalls,
-    finishCalls: () => finishCalls,
-    pushBytes(bytes: number[] | Uint8Array): void { buffer.push(...Array.from(bytes)); pump(); },
-    endFin(): void { ended = "fin"; pump(); },
-    endReset(err: Error = new Error("peer reset this stream")): void { ended = err; pump(); },
-    /** Blocks the NEXT `writeAll` (through the shared send lock). One-shot. */
-    gateNextWrite(): { release: () => void } {
-      const { promise, resolve } = Promise.withResolvers<void>();
-      pendingGate = promise;
-      return { release: () => resolve() };
-    },
-    /** Decodes the one length-prefixed JSON record this stream has written, if
-     *  any — every test result/refusal here fits one `writeAll` slice. */
-    writtenRecord(): { type: string; [k: string]: unknown } | undefined {
-      if (!writeAllCalls.length) return undefined;
-      const all = Buffer.concat(writeAllCalls.map((b) => Buffer.from(b)));
-      const len = all.readUInt32BE(0);
-      return JSON.parse(all.subarray(4, 4 + len).toString("utf8"));
-    },
-  };
+/** Decodes the one length-prefixed JSON record this stream has written, if
+ *  any — every test result/refusal here fits one framed record. */
+function writtenRecord(fake: FakeBiStream): { type: string; [k: string]: unknown } | undefined {
+  const text = fake.firstRecord();
+  return text === undefined ? undefined : JSON.parse(text);
 }
 
 // --- fake FileUploadManager / StreamUpload ---------------------------------
@@ -234,34 +135,14 @@ function fakeUploadServer(manager: FileUploadManager) {
   return { admit, admitCalls, setRefusal: (r: typeof refusal) => { refusal = r; } };
 }
 
-function fakeUploadBinding(server: ReturnType<typeof fakeUploadServer>) {
-  let refuse: ((peerId: string) => StreamRefusal | null) | null = null;
-  let mayDeliver = true;
-  let available = true;
-  let hasOpen: ((peerId: string) => boolean) | null = null;
-  const binding: UploadProjectBinding = {
-    hasOpenStream: (peerId) => (hasOpen ? hasOpen(peerId) : true),
-    refusalFor: (peerId) => (refuse ? refuse(peerId) : null),
-    mayDeliverTo: () => mayDeliver,
-    uploads: (): UploadStreamServer | null => (available ? { admit: server.admit } : null),
-  };
-  return {
-    binding,
-    setRefusal: (fn: typeof refuse) => { refuse = fn; },
-    setMayDeliver: (v: boolean) => { mayDeliver = v; },
-    setAvailable: (v: boolean) => { available = v; },
-    setHasOpenStream: (fn: typeof hasOpen) => { hasOpen = fn; },
-  };
-}
-
 function makeRegistry(overrides: Partial<UploadStreamRegistryOptions> = {}) {
   const cataloged = new Set<string>();
   const bindings = new Map<string, UploadProjectBinding>();
-  const retiredPeers: Array<{ peerId: string; reason: "unauthorized" }> = [];
+  const retiredPeers: Array<{ peerId: string; reason: "unauthorized" | "protocol-violation" }> = [];
   const diagnostics: Array<{ type: string; detail: Record<string, unknown>; stream?: { kind: string; id: string } }> = [];
   const opts: UploadStreamRegistryOptions = {
     projectCataloged: (id) => cataloged.has(id),
-    uploadBinding: (id) => bindings.get(id) ?? null,
+    projectBinding: (id) => bindings.get(id) ?? null,
     retirePeer: (peerId, reason) => retiredPeers.push({ peerId, reason }),
     diagnostic: (type, detail, stream) => diagnostics.push({ type, detail, stream }),
     ...overrides,
@@ -280,7 +161,7 @@ function admitUpload(
     size?: number; checkoutId?: string; mimeType?: string; authorized?: () => boolean;
   } = {},
 ) {
-  const fake = createFakeUploadStream();
+  const fake = createFakeBiStream();
   const requestId = opts.requestId ?? crypto.randomUUID();
   const open: UploadStreamOpen = {
     kind: "upload",
@@ -292,162 +173,46 @@ function admitUpload(
     ...(opts.mimeType ? { mimeType: opts.mimeType } : {}),
   };
   const admission = { peerId: opts.peerId ?? PEER, open, stream: fake.stream, authorized: opts.authorized ?? (() => true) };
-  // Steps 1-8 are synchronous, exactly like the tunnel gate(): the
-  // handler never returns a Promise.
-  const result = registry.handler(admission) as StreamRefusal | undefined;
+  const result = registry.handlerFor("upload")(admission);
   return { fake, requestId, open, admission, result };
 }
 
-/** Sets up one project fully wired for a successful admission through step 9. */
+/** Sets up one project fully wired for a successful admission through the
+ *  server-admit and begin() steps. */
 function wireProject(rig: ReturnType<typeof makeRegistry>, projectId = PROJECT) {
   rig.cataloged.add(projectId);
   const mgr = fakeManager();
   const server = fakeUploadServer(mgr.manager);
-  const proj = fakeUploadBinding(server);
-  rig.bindings.set(projectId, proj.binding);
+  const proj = createFakeProjectBinding();
+  proj.setUploads({ admit: server.admit } as UploadStreamServer);
+  rig.bindings.set(projectId, proj as UploadProjectBinding);
   return { mgr, server, proj };
 }
 
-// --- admission order ---------------------------------------------------------
-
-describe("admission order", () => {
-  test("no binding at all -> NOT_READY", () => {
-    const rig = makeRegistry();
-    rig.cataloged.add(PROJECT);
-    const { result } = admitUpload(rig.registry);
-    expect(result).toEqual({ code: "NOT_READY", message: "project is not attached" });
-  });
-
-  test("unsafe project id -> NOT_ALLOWED, before catalog or binding are even consulted", () => {
-    const rig = makeRegistry();
-    const { result } = admitUpload(rig.registry, { projectId: "../etc/passwd" });
-    expect(result).toEqual({ code: "NOT_ALLOWED", message: "unsafe project id" });
-  });
-
-  test("uncatalogued project id -> NOT_ALLOWED (fail closed)", () => {
-    const rig = makeRegistry();
-    const { result } = admitUpload(rig.registry, { projectId: "unknown-proj" });
-    expect(result).toEqual({ code: "NOT_ALLOWED", message: "project not recognized" });
-  });
-
-  test("no projectCataloged option at all -> every open refused NOT_ALLOWED (fail closed)", () => {
-    const rig = makeRegistry({ projectCataloged: undefined });
-    const { result } = admitUpload(rig.registry, { projectId: PROJECT });
-    expect(result).toEqual({ code: "NOT_ALLOWED", message: "project not recognized" });
-  });
-
-  test("no open project stream for the peer -> NOT_ALLOWED", () => {
-    const rig = makeRegistry();
-    const { proj } = wireProject(rig);
-    proj.setHasOpenStream(() => false);
-    const { result } = admitUpload(rig.registry);
-    expect(result).toEqual({ code: "NOT_ALLOWED", message: "open the project stream first" });
-  });
-
-  test("refusalFor masks any code from the binding's own refusal to NOT_ALLOWED", () => {
-    const rig = makeRegistry();
-    const { proj } = wireProject(rig);
-    proj.setRefusal(() => ({ code: "CAP_EXCEEDED", message: "irrelevant" }));
-    const { result } = admitUpload(rig.registry);
-    expect(result).toEqual({ code: "NOT_ALLOWED", message: "irrelevant" });
-  });
-
-  test("a duplicate (peerId, requestId) -> INVALID", async () => {
-    const rig = makeRegistry();
-    wireProject(rig);
-    const requestId = "dup-1";
-    const first = admitUpload(rig.registry, { requestId });
-    expect(first.result).toBeUndefined(); // owns the stream
-    const second = admitUpload(rig.registry, { requestId });
-    expect(second.result).toEqual({ code: "INVALID", message: "duplicate id" });
-  });
-
-  test("uploads() null -> NOT_ALLOWED", () => {
-    const rig = makeRegistry();
-    const { proj } = wireProject(rig);
-    proj.setAvailable(false);
-    const { result } = admitUpload(rig.registry);
-    expect(result).toEqual({ code: "NOT_ALLOWED", message: "uploads not available" });
-  });
-
-  test("server admit refusal is written in-band (async, after synchronous admission passed)", async () => {
-    const rig = makeRegistry();
-    const { server } = wireProject(rig);
-    server.setRefusal({ code: "NOT_ALLOWED", message: "checkout is being deleted" });
-    const { fake, result } = admitUpload(rig.registry);
-    expect(result).toBeUndefined(); // synchronous steps all passed; the refusal is in-band
-    await until(() => fake.writtenRecord() !== undefined);
-    expect(fake.writtenRecord()).toEqual({ type: "stream:refused", code: "NOT_ALLOWED", message: "checkout is being deleted" });
-    await until(() => fake.finishCalls() > 0);
-  });
-
-  test("cap: a 5th concurrent open for the same peer -> CAP_EXCEEDED, and completing one frees a slot", async () => {
-    const rig = makeRegistry();
-    wireProject(rig);
-    const opens = [];
-    for (let i = 0; i < STREAM_MAX_UPLOAD_STREAMS_PER_PEER; i++) {
-      const a = admitUpload(rig.registry, { requestId: `r${i}` });
-      expect(a.result).toBeUndefined();
-      opens.push(a);
-    }
-    await until(() => rig.registry.streamCount(PEER) === STREAM_MAX_UPLOAD_STREAMS_PER_PEER);
-    const overCap = admitUpload(rig.registry, { requestId: "over-cap" });
-    expect(overCap.result).toEqual({ code: "CAP_EXCEEDED", message: "too many uploads" });
-
-    // Complete one of the four already-open uploads to free its slot (an
-    // INCOMPLETE end still unbinds and releases the cap, exactly like an ok one).
-    opens[0]!.fake.endFin();
-    await until(() => rig.registry.streamCount(PEER) === STREAM_MAX_UPLOAD_STREAMS_PER_PEER - 1);
-
-    const afterFree = admitUpload(rig.registry, { requestId: "after-free" });
-    expect(afterFree.result).toBeUndefined();
-  });
-
-  test("a stream open never opens or promotes a core: uploadBinding is a pure lookup, called with the open's projectId only", () => {
-    const lookups: string[] = [];
-    const rig = makeRegistry({ uploadBinding: (id) => { lookups.push(id); return null; } });
-    rig.cataloged.add("proj-x");
-    const { result } = admitUpload(rig.registry, { projectId: "proj-x" });
-    expect(result).toEqual({ code: "NOT_READY", message: "project is not attached" });
-    expect(lookups).toEqual(["proj-x"]);
-  });
+test("server admit refusal is written in-band (async, after synchronous admission passed)", async () => {
+  const rig = makeRegistry();
+  const { server } = wireProject(rig);
+  server.setRefusal({ code: "NOT_ALLOWED", message: "checkout is being deleted" });
+  const { fake, result } = admitUpload(rig.registry);
+  expect(result).toBeUndefined(); // synchronous steps all passed; the refusal is in-band
+  await until(() => writtenRecord(fake) !== undefined);
+  expect(writtenRecord(fake)).toEqual({ type: "stream:refused", code: "NOT_ALLOWED", message: "checkout is being deleted" });
+  await until(() => fake.isFinished());
 });
 
-// --- unauthorized at open, and mid-stream -----------------------------------
-
-test("a well-formed open from a peer no longer authorized still reaches server.admit (step 9), but never manager.begin (step 11)", async () => {
-  // The admission order checks `authorized()` at step 10,
-  // AFTER `server.admit` at step 9 — admit is a pure checkout/switch lookup
-  // with no opinion on this peer's live authorization, so it still runs.
+test("a well-formed open from a peer no longer authorized still reaches server.admit, but never manager.begin", async () => {
+  // The admission order checks `authorized()` AFTER server.admit — admit is a
+  // pure checkout/switch lookup with no opinion on this peer's live
+  // authorization, so it still runs.
   const rig = makeRegistry();
   const { server, mgr } = wireProject(rig);
   const { fake } = admitUpload(rig.registry, { authorized: () => false });
-  await flush();
+  await until(() => rig.retiredPeers.length > 0);
   expect(server.admitCalls).toEqual([{ peerId: PEER, checkoutId: "main" }]);
   expect(mgr.beginCalls).toEqual([]);
   expect(rig.retiredPeers).toEqual([{ peerId: PEER, reason: "unauthorized" }]);
-  expect(fake.writeAllCalls).toEqual([]);
+  expect(fake.order).not.toContain("writeAll");
 });
-
-test("authorized() flips false after the first raw read: retirePeer, and no further bytes reach the manager", async () => {
-  const rig = makeRegistry();
-  const { mgr } = wireProject(rig);
-  let allowed = true;
-  const { fake, requestId } = admitUpload(rig.registry, { size: 10, authorized: () => allowed });
-  fake.pushBytes([1, 2, 3, 4, 5]);
-  // Wait for the first chunk to be fully processed (written, authorized() OK)
-  // and the loop to have issued its NEXT read — the deterministic point at
-  // which flipping `allowed` lands strictly after the first chunk's own check.
-  await until(() => fake.readCalls.length >= 2);
-  allowed = false;
-  fake.pushBytes([6, 7, 8, 9, 10]);
-  await until(() => rig.retiredPeers.length > 0);
-  expect(rig.retiredPeers).toEqual([{ peerId: PEER, reason: "unauthorized" }]);
-  const handle = mgr.handles.get(requestId)!;
-  expect(handle.written.length).toBe(5); // only the first (still-authorized) chunk was written
-});
-
-// --- happy path, truncation, oversize, cancel, timeout ----------------------
 
 test("happy path: raw bytes (> one slice, not slice-aligned) reach the upload byte-exact; exactly one result record then FIN", async () => {
   const rig = makeRegistry();
@@ -456,27 +221,27 @@ test("happy path: raw bytes (> one slice, not slice-aligned) reach the upload by
   const payload = new Uint8Array(size).map((_, i) => i % 256);
   const { fake, requestId } = admitUpload(rig.registry, { size });
   // Fed in two pushes to prove the reassembly isn't an artifact of one big read.
-  fake.pushBytes(payload.subarray(0, STREAM_RECORD_SLICE_BYTES));
-  fake.pushBytes(payload.subarray(STREAM_RECORD_SLICE_BYTES));
-  fake.endFin();
-  await until(() => fake.writtenRecord() !== undefined);
+  fake.pushRaw(payload.subarray(0, STREAM_RECORD_SLICE_BYTES));
+  fake.pushRaw(payload.subarray(STREAM_RECORD_SLICE_BYTES));
+  fake.endWith();
+  await until(() => writtenRecord(fake) !== undefined);
   const handle = mgr.handles.get(requestId)!;
   expect(handle.written).toEqual(Array.from(payload));
   expect(handle.ended).toBe(true);
-  expect(fake.writtenRecord()).toMatchObject({ type: "file:upload-result", ok: true });
-  await until(() => fake.finishCalls() > 0);
-  // Every raw read stayed within the bound the spec sets for it.
-  for (const req of fake.readCalls) expect(req).toBeLessThanOrEqual(STREAM_RAW_READ_BYTES);
+  expect(writtenRecord(fake)).toMatchObject({ type: "file:upload-result", ok: true });
+  await until(() => fake.isFinished());
+  // Every raw read stayed within the bound the registry sets for it.
+  for (const req of fake.readSizes) expect(req).toBeLessThanOrEqual(STREAM_RAW_READ_BYTES);
 });
 
 test("a FIN short of the declared size ends the upload as INCOMPLETE", async () => {
   const rig = makeRegistry();
   const { mgr } = wireProject(rig);
   const { fake, requestId } = admitUpload(rig.registry, { size: 10 });
-  fake.pushBytes([1, 2, 3]);
-  fake.endFin();
-  await until(() => fake.writtenRecord() !== undefined);
-  expect(fake.writtenRecord()).toMatchObject({ type: "file:upload-result", ok: false, error: "INCOMPLETE" });
+  fake.pushRaw(new Uint8Array([1, 2, 3]));
+  fake.endWith();
+  await until(() => writtenRecord(fake) !== undefined);
+  expect(writtenRecord(fake)).toMatchObject({ type: "file:upload-result", ok: false, error: "INCOMPLETE" });
   expect(mgr.handles.get(requestId)!.written.length).toBe(3);
 });
 
@@ -488,38 +253,31 @@ test("more than the declared size resets the stream (STREAM_RESET_UPLOAD), write
   const rig = makeRegistry();
   const { mgr } = wireProject(rig);
   const { fake, requestId } = admitUpload(rig.registry, { size: 4 });
-  fake.pushBytes([1, 2, 3, 4, 5]); // one byte over
-  await until(() => fake.resetCalls.length > 0);
-  expect(fake.resetCalls).toEqual([STREAM_RESET_UPLOAD]);
-  expect(fake.writtenRecord()).toBeUndefined();
+  fake.pushRaw(new Uint8Array([1, 2, 3, 4, 5])); // one byte over
+  await until(() => fake.resets.length > 0);
+  expect(fake.resets).toEqual([STREAM_RESET_UPLOAD]);
+  expect(writtenRecord(fake)).toBeUndefined();
   expect(mgr.handles.get(requestId)!.cancelled).toBe(true);
   expect(rig.diagnostics.some((d) => d.type === "upload-stream:oversize")).toBe(true);
-  await until(() => fake.stopCalls.length > 0);
-  expect(fake.stopCalls).toEqual([STREAM_STOP_UPLOAD]);
+  await until(() => fake.stops.length > 0);
+  expect(fake.stops).toEqual([STREAM_STOP_UPLOAD]);
 });
 
-test("the app resetting mid-body (cancel) removes the partial, resets the stream, and frees the cap slot", async () => {
-  const rig = makeRegistry();
-  const { mgr } = wireProject(rig);
-  const { fake, requestId } = admitUpload(rig.registry, { size: 100 });
-  fake.pushBytes([1, 2, 3]);
-  await until(() => fake.readCalls.length > 0);
-  fake.endReset();
-  await until(() => fake.resetCalls.length > 0);
-  expect(mgr.handles.get(requestId)!.cancelled).toBe(true);
-  expect(fake.writtenRecord()).toBeUndefined();
-  await until(() => rig.registry.streamCount(PEER) === 0);
-});
-
-test("connection loss (a native read rejection with no explicit endReset) is treated exactly like a cancel", async () => {
-  const rig = makeRegistry();
-  const { mgr } = wireProject(rig);
-  const { fake, requestId } = admitUpload(rig.registry, { size: 100 });
-  fake.pushBytes([1]);
-  await until(() => fake.readCalls.length > 0);
-  fake.endReset(new Error("connection lost"));
-  await until(() => mgr.handles.get(requestId)!.cancelled);
-  expect(fake.writtenRecord()).toBeUndefined();
+test("the app ending mid-body removes the partial, resets the stream and frees the cap slot: an explicit reset, or a bare connection loss, alike", async () => {
+  for (const end of [
+    (fake: FakeBiStream) => fake.endWith(new Error("peer reset this stream")),
+    (fake: FakeBiStream) => fake.endWith(new Error("connection lost")),
+  ]) {
+    const rig = makeRegistry();
+    const { mgr } = wireProject(rig);
+    const { fake, requestId } = admitUpload(rig.registry, { size: 100 });
+    fake.pushRaw(new Uint8Array([1, 2, 3]));
+    await until(() => fake.readSizes.length > 0);
+    end(fake);
+    await until(() => mgr.handles.get(requestId)!.cancelled);
+    expect(writtenRecord(fake)).toBeUndefined();
+    await until(() => rig.registry.streamCount(PEER) === 0);
+  }
 });
 
 test("an early per-file refusal (begin() itself refuses) writes its result before any byte is read", async () => {
@@ -527,27 +285,27 @@ test("an early per-file refusal (begin() itself refuses) writes its result befor
   const { mgr } = wireProject(rig);
   mgr.setNextBeginRefusal({ ok: false, error: "BUSY", message: "Too many concurrent uploads" });
   const { fake } = admitUpload(rig.registry, { size: 10 });
-  await until(() => fake.writtenRecord() !== undefined);
-  expect(fake.writtenRecord()).toMatchObject({ ok: false, error: "BUSY" });
-  expect(fake.readCalls).toEqual([]); // never read before the early result
-  await until(() => fake.finishCalls() > 0);
+  await until(() => writtenRecord(fake) !== undefined);
+  expect(writtenRecord(fake)).toMatchObject({ ok: false, error: "BUSY" });
+  expect(fake.readSizes).toEqual([]); // never read before the early result
+  await until(() => fake.isFinished());
 });
 
 test("mayDeliverTo turning false before the result is sent resets the stream and writes nothing", async () => {
   const rig = makeRegistry();
   const { proj } = wireProject(rig);
   const { fake } = admitUpload(rig.registry, { size: 3 });
-  fake.pushBytes([1, 2, 3]);
+  fake.pushRaw(new Uint8Array([1, 2, 3]));
   // Wait for the declared bytes to be fully consumed and the FIN-probe read
   // (the `remaining == 0` read(1)) to be outstanding before flipping the
   // outbound gate — the deterministic point at which the result is about to
   // be sent but has not been yet.
-  await until(() => fake.readCalls.length >= 2);
+  await until(() => fake.readSizes.length >= 2);
   proj.setMayDeliver(false);
-  fake.endFin();
-  await until(() => fake.resetCalls.length > 0 || fake.writtenRecord() !== undefined);
-  expect(fake.writtenRecord()).toBeUndefined();
-  expect(fake.resetCalls).toContain(STREAM_RESET_UPLOAD);
+  fake.endWith();
+  await until(() => fake.resets.length > 0 || writtenRecord(fake) !== undefined);
+  expect(writtenRecord(fake)).toBeUndefined();
+  expect(fake.resets).toContain(STREAM_RESET_UPLOAD);
 });
 
 test("an inactivity TIMEOUT fired by the manager writes its result and FINs, and stops recv only once the pending read settles", async () => {
@@ -557,42 +315,14 @@ test("an inactivity TIMEOUT fired by the manager writes its result and FINs, and
   await until(() => mgr.handles.get(requestId) !== undefined);
   const handle = mgr.handles.get(requestId)!;
   handle.forceResult({ ok: false, error: "TIMEOUT", message: "Upload timed out" });
-  await until(() => fake.writtenRecord() !== undefined);
-  expect(fake.writtenRecord()).toMatchObject({ ok: false, error: "TIMEOUT" });
-  await until(() => fake.finishCalls() > 0);
+  await until(() => writtenRecord(fake) !== undefined);
+  expect(writtenRecord(fake)).toMatchObject({ ok: false, error: "TIMEOUT" });
+  await until(() => fake.isFinished());
   // The read the raw loop issued at admission is still outstanding: recv.stop()
   // cannot run yet (the binding's per-stream recv mutex).
-  expect(fake.stopCalls).toEqual([]);
-  fake.endFin();
-  await until(() => fake.stopCalls.length > 0);
-  expect(fake.stopCalls).toEqual([STREAM_STOP_UPLOAD]);
+  expect(fake.stops).toEqual([]);
+  fake.endWith();
+  await until(() => fake.stops.length > 0);
+  expect(fake.stops).toEqual([STREAM_STOP_UPLOAD]);
   void proj; // binding kept alive for the duration of the case; nothing else exercised on it here
 });
-
-// --- teardown: projectDetached / dropPeer -----------------------------------
-
-test("projectDetached cancels every upload for that project and unbinds it, without touching other projects", async () => {
-  const rig = makeRegistry();
-  const { mgr: mgrA } = wireProject(rig, "proj-a");
-  const { mgr: mgrB } = wireProject(rig, "proj-b");
-  const a = admitUpload(rig.registry, { projectId: "proj-a", requestId: "ra", size: 10 });
-  const b = admitUpload(rig.registry, { projectId: "proj-b", requestId: "rb", size: 10 });
-  await until(() => mgrA.handles.get("ra") !== undefined && mgrB.handles.get("rb") !== undefined);
-  rig.registry.projectDetached("proj-a");
-  await until(() => mgrA.handles.get("ra")!.cancelled);
-  expect(mgrB.handles.get("rb")!.cancelled).toBe(false);
-  expect(a.fake.resetCalls).toContain(STREAM_RESET_UPLOAD);
-  expect(b.fake.resetCalls).toEqual([]);
-});
-
-test("dropPeer cancels every upload for that peer without calling retirePeer (the peer is already gone)", async () => {
-  const rig = makeRegistry();
-  const { mgr } = wireProject(rig);
-  const { fake, requestId } = admitUpload(rig.registry, { size: 10 });
-  await until(() => mgr.handles.get(requestId) !== undefined);
-  rig.registry.dropPeer(PEER);
-  await until(() => mgr.handles.get(requestId)!.cancelled);
-  expect(fake.resetCalls).toContain(STREAM_RESET_UPLOAD);
-  expect(rig.retiredPeers).toEqual([]);
-});
-

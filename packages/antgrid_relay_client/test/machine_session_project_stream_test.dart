@@ -1,11 +1,13 @@
 // `MachineSession.openProject` coverage: a project's native stream identity
 // IS the project itself (`StreamTransport.projectId`, fixed for its
 // lifetime) — there is no bridge-issued streamId, and no `{s, m}` envelope,
-// on a project's own stream. Readiness-gating and
-// snapshot-hydration coverage live in `machine_session_stream_binding_test.dart`
-// and `machine_session_snapshot_retry_test.dart`; this file is the bind
-// sequence itself — caps, refusals, protocol errors, reopen,
-// `projectStreamEvents`, and the record-size caps on a bound project stream.
+// on a project's own stream. Readiness-gating and snapshot-hydration coverage
+// live in `machine_session_stream_binding_test.dart` and
+// `machine_session_snapshot_retry_test.dart`; admission (open frame fields,
+// caps, refusals, protocol breaches) is table-driven in
+// `stream_admission_test.dart`. This file covers what stays unique to a
+// bound project transport: reopen/supersede lifecycle, dispose racing a
+// fresh open, `projectStreamEvents`, and the record-size caps.
 import 'dart:async';
 import 'dart:convert';
 
@@ -64,207 +66,11 @@ void main() {
     );
   }
 
-  /// `project:start` frames for [projectId] the app has sent so far.
-  int startsSent(String projectId) => relay.sent
-      .map((f) => decodeFromPhone(f.payload))
-      .where(
-        (t) =>
-            t.contains('"type":"project:start"') &&
-            t.contains('"projectId":"$projectId"'),
-      )
-      .length;
-
   void injectReadyNotice(String projectId) => relay.injectRecord(
     encodeFromAgent(
       jsonEncode({'type': 'stream-ready', 'projectId': projectId}),
     ),
   );
-
-  group('the happy-path bind', () {
-    test('opens a ProjectStreamOpen and binds on the stream\'s own '
-        'stream-ready first record', () async {
-      await establishReady('proj-a');
-      final opening = session.openProject('proj-a', {
-        'type': 'project:start',
-        'projectId': 'proj-a',
-      });
-      await Future<void>.delayed(const Duration(milliseconds: 20));
-
-      expect(relay.openedStreams, hasLength(1));
-      expect(relay.openedStreams.single.open, const ProjectStreamOpen('proj-a'));
-      relay.openedStreams.single.injectStreamReady('proj-a');
-
-      final transport = await opening;
-      expect(transport.projectId, 'proj-a');
-      expect(transport.isProjectBound, isTrue);
-      expect(identical(session.projectTransport('proj-a'), transport), isTrue);
-    });
-  });
-
-  group('CAP_EXCEEDED', () {
-    test('the (N+1)th distinct project fails synchronously, before any '
-        'stream is opened', () async {
-      session = await establishSession(relay, handshaker: FakeHandshaker());
-      // Each one waits on its own stream-ready, which never comes — but the
-      // cap check happens before that wait, so every call below returns
-      // (occupying a slot) without ever touching relay.openedStreams.
-      final fillers = <Future<StreamTransport>>[
-        for (var i = 0; i < kStreamMaxProjectsPerPeer; i++)
-          session.openProject('proj-$i', {
-            'type': 'project:start',
-            'projectId': 'proj-$i',
-          }),
-      ];
-      await Future<void>.delayed(const Duration(milliseconds: 20));
-
-      await expectLater(
-        session.openProject('proj-overflow', {
-          'type': 'project:start',
-          'projectId': 'proj-overflow',
-        }),
-        throwsA(
-          isA<ProjectBindException>().having(
-            (e) => e.code,
-            'code',
-            'CAP_EXCEEDED',
-          ),
-        ),
-      );
-      expect(
-        relay.openedStreams,
-        isEmpty,
-        reason:
-            'none of the N ready-waits ever reached the point of opening a '
-            'native stream, and the overflow must never even try',
-      );
-
-      // Settle every filler before the test ends. The expectations attach
-      // before the rejections land, so no filler's error goes unhandled.
-      final settled = [
-        for (final f in fillers)
-          expectLater(f, throwsA(isA<ProjectBindException>())),
-      ];
-      for (var i = 0; i < kStreamMaxProjectsPerPeer; i++) {
-        rejectStart('proj-$i');
-      }
-      await Future.wait(settled);
-    });
-  });
-
-  group('a NOT_READY refusal', () {
-    test('is retried once, then fails if refused again', () async {
-      await establishReady('proj-a');
-      final opening = session.openProject('proj-a', {
-        'type': 'project:start',
-        'projectId': 'proj-a',
-      });
-      await Future<void>.delayed(const Duration(milliseconds: 20));
-      expect(relay.openedStreams, hasLength(1));
-      final startsBefore = startsSent('proj-a');
-      relay.openedStreams[0].injectRefusal(StreamRefusedCode.notReady);
-      await Future<void>.delayed(const Duration(milliseconds: 20));
-
-      // The refusal proves the ready mark stale: the retry re-sends
-      // project:start and waits for a fresh ready notice before reopening.
-      expect(startsSent('proj-a'), startsBefore + 1);
-      expect(relay.openedStreams, hasLength(1));
-      injectReadyNotice('proj-a');
-      await Future<void>.delayed(const Duration(milliseconds: 20));
-
-      // Dart cannot read a QUIC reset code, so the retry is a brand new
-      // stream, not a re-read of the first one.
-      expect(relay.openedStreams, hasLength(2));
-      relay.openedStreams[1].injectRefusal(StreamRefusedCode.notReady);
-
-      await expectLater(
-        opening,
-        throwsA(
-          isA<ProjectBindException>().having(
-            (e) => e.code,
-            'code',
-            'NOT_READY',
-          ),
-        ),
-      );
-      expect(
-        relay.openedStreams,
-        hasLength(2),
-        reason: 'one retry only — a second NOT_READY must not retry again',
-      );
-    });
-
-    test('a stream-ready on the retry\'s stream still binds', () async {
-      await establishReady('proj-a');
-      final opening = session.openProject('proj-a', {
-        'type': 'project:start',
-        'projectId': 'proj-a',
-      });
-      await Future<void>.delayed(const Duration(milliseconds: 20));
-      relay.openedStreams[0].injectRefusal(StreamRefusedCode.notReady);
-      await Future<void>.delayed(const Duration(milliseconds: 20));
-      injectReadyNotice('proj-a');
-      await Future<void>.delayed(const Duration(milliseconds: 20));
-      relay.openedStreams[1].injectStreamReady('proj-a');
-
-      final transport = await opening;
-      expect(transport.isProjectBound, isTrue);
-    });
-  });
-
-  group('a non-notReady refusal', () {
-    test('fails at once, with no retry', () async {
-      await establishReady('proj-a');
-      final opening = session.openProject('proj-a', {
-        'type': 'project:start',
-        'projectId': 'proj-a',
-      });
-      await Future<void>.delayed(const Duration(milliseconds: 20));
-      relay.openedStreams.single.injectRefusal(
-        StreamRefusedCode.notAllowed,
-        'phone not allowlisted',
-      );
-
-      await expectLater(
-        opening,
-        throwsA(
-          isA<ProjectBindException>().having(
-            (e) => e.code,
-            'code',
-            'NOT_ALLOWED',
-          ),
-        ),
-      );
-      await Future<void>.delayed(const Duration(milliseconds: 20));
-      expect(relay.openedStreams, hasLength(1));
-    });
-  });
-
-  group('a protocol-violating first record', () {
-    test('resets the stream and fails INVALID_RECORD', () async {
-      await establishReady('proj-a');
-      final opening = session.openProject('proj-a', {
-        'type': 'project:start',
-        'projectId': 'proj-a',
-      });
-      await Future<void>.delayed(const Duration(milliseconds: 20));
-      final stream = relay.openedStreams.single;
-      // Neither a refusal nor this project's own stream-ready.
-      stream.injectJson({'type': 'terminal:frame', 'seq': 1});
-
-      await expectLater(
-        opening,
-        throwsA(
-          isA<ProjectBindException>().having(
-            (e) => e.code,
-            'code',
-            'INVALID_RECORD',
-          ),
-        ),
-      );
-      await Future<void>.delayed(const Duration(milliseconds: 20));
-      expect(stream.resetCalled, isTrue);
-    });
-  });
 
   group('projectStreamEvents', () {
     test('fires open:true once bound and open:false once the peer ends the '
@@ -559,7 +365,7 @@ void main() {
 
   group('record-size caps on a bound project stream', () {
     test(
-      'S1: the project stream is opened with '
+      'the project stream is opened with '
       'maxRecordBytes: kStreamProjectBridgeRecordMaxBytes',
       () async {
         await establishReady('proj-a');
@@ -576,7 +382,7 @@ void main() {
       },
     );
 
-    test('S2: a 20 MB inbound project record dispatches as one message', () async {
+    test('a 20 MB inbound project record dispatches as one message', () async {
       await establishReady('proj-a');
       final opening = session.openProject('proj-a', {
         'type': 'project:start',
@@ -599,7 +405,7 @@ void main() {
     });
 
     test(
-      'S3: a project send over kStreamProjectAppRecordMaxBytes drops '
+      'a project send over kStreamProjectAppRecordMaxBytes drops '
       'message-too-large and emits MessageTooLarge',
       () async {
         await establishReady('proj-a');

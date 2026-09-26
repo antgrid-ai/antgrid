@@ -6,13 +6,15 @@
  * no `{s, m}` envelope and no preview-channel frame, so no tunnel traffic
  * ever rides the project stream.
  *
- * This registry is plugged into `PeerStreamAcceptor` as the `tunnel-http` and
- * `tunnel-ws` handlers. It never opens or promotes a core: `tunnelBinding` is
- * a lookup over whatever `ProjectStreamRegistry` already has attached, and the
- * real per-checkout authorization runs through `TunnelStreamServer.admit` once
- * the head record names a checkout — `checkoutId` rides the head rather than
- * the open frame because the stream-open wire schemas are frozen and carry no
- * `checkoutId`.
+ * Registered into `PeerStreamAcceptor` as the `tunnel-http` and `tunnel-ws`
+ * handlers via `handlerFor`, sharing one cap and one bindings index across
+ * both kinds. Admission (the per-peer cap, the safe-id/catalog checks, the
+ * project's own binding lookup) lives once in `ScopedStreamRegistry`
+ * (`stream-dispatch.ts`); this file owns the head-record shape, the HTTP
+ * request-body source, and the WS record loop — the real per-checkout
+ * authorization runs through `TunnelStreamServer.admit` once the head record
+ * names a checkout, since the stream-open wire schemas are frozen and carry
+ * no `checkoutId`.
  */
 
 import {
@@ -23,7 +25,6 @@ import {
   STREAM_TUNNEL_REQUEST_BODY_MAX_BYTES,
   TUNNEL_RECORD_TAG_WS_BINARY,
   TUNNEL_RECORD_TAG_WS_TEXT,
-  type StreamRefusedCode,
   type TunnelHttpStreamOpen,
   type TunnelWsStreamOpen,
 } from "antgrid-wire";
@@ -37,25 +38,25 @@ import type {
   TunnelWsUpstreamSink,
 } from "../tunnel-manager";
 import {
-  gateProjectStream,
-  refuseStream,
+  defaultSchedule,
+  raceDeadline,
+  READ_ENDED,
+  READ_UNBOUND,
+  ScopedStreamRegistry,
+  STREAM_DEADLINE,
   STREAM_OPEN_DEADLINE_MS,
-  type AcceptedBiStream,
-  type StreamAdmission,
-  type StreamHandler,
-  type StreamRefusal as DispatchStreamRefusal,
+  type ScopedBinding,
+  type ScopedEndCause,
+  type ScopedStreamOptions,
+  type Schedule,
 } from "./stream-dispatch";
 import {
   StreamRawReader,
   StreamRecordReader,
-  StreamRecordWriter,
   STREAM_RAW_READ_BYTES,
-  stopRecvWhenSettled,
   type StreamSendOutcome,
-  type StreamWriteFailure,
 } from "./stream-records";
 import type { TunnelProjectBinding } from "../project-streams";
-import type { NetwatchStreamKind } from "../netwatch";
 
 export const TUNNEL_STREAM_MAX_QUEUED_BYTES = 4 * 1024 * 1024;
 /** Below session (2), terminal (1) and project (0). Tunnel traffic is a page
@@ -91,67 +92,10 @@ function parseJsonRecord(text: string): { ok: true; value: unknown } | { ok: fal
   }
 }
 
-const defaultSchedule = (callback: () => void, ms: number): (() => void) => {
-  const timer = setTimeout(callback, ms);
-  timer.unref?.();
-  return () => clearTimeout(timer);
-};
-
-/** Races `promise` against a `ms` deadline scheduled via `schedule`, resolving
- *  to `"timeout"` if the clock fires first. Never cancels `promise` itself —
- *  a caller racing a native read still owns it and must await its eventual
- *  settlement before touching the stream's receive half again
- *  (stream-records.ts's binding mutex) — so a rejection must already be
- *  folded into `promise`'s resolved type before it reaches here, the same
- *  way `pullFresh` and `readHeadRecord` each fold their own reset/FIN case. */
-function withDeadline<T>(
-  promise: Promise<T>,
-  ms: number,
-  schedule: (callback: () => void, ms: number) => () => void,
-): Promise<T | "timeout"> {
-  let settled = false;
-  return new Promise<T | "timeout">((resolve) => {
-    const cancelTimer = schedule(() => { if (settled) return; settled = true; resolve("timeout"); }, ms);
-    promise.then((value) => { if (settled) return; settled = true; cancelTimer(); resolve(value); });
-  });
-}
-
-interface BaseBinding {
-  readonly peerId: string;
-  /** `requestId` (HTTP) or `wsId` (WS) — the open frame's own id. */
-  readonly id: string;
-  readonly projectId: string;
-  /** Normalized once the head record parses; "main" until then, though
-   *  nothing is sent before that point. */
-  checkoutId: string;
-  readonly stream: AcceptedBiStream;
-  readonly writer: StreamRecordWriter;
-  readonly reader: StreamRecordReader;
-  readonly authorized: () => boolean;
-  readonly tunnelBinding: TunnelProjectBinding;
-  /** Removed from every index and its cap slot freed. The staleness guard
-   *  every async step checks: once unbound, nothing may act on this binding
-   *  again — which is what keeps a lagging callback from a torn-down stream
-   *  reaching into whatever now reuses the same peerId or id. */
-  unbound: boolean;
-}
-
-interface HttpBinding extends BaseBinding {
-  readonly kind: "http";
-  bodyLength: number;
-  /** `writer.finish()` has been issued for this exchange's response.
-   *  Marks the app's own FIN afterward as orderly rather than a cancel. */
-  ended: boolean;
-  readonly exchangeAbort: AbortController;
-  /** Set only when `bodyLength > 0`; the cancel watcher does not start until
-   *  it reports a full, successful drain. */
-  bodySource?: TunnelRequestBodySource;
-}
-
 /** Hooks a `TunnelRequestBodySource` calls back into the registry with —
  *  kept separate from the registry's own methods because the source has no
- *  business calling `unbind`/`retirePeer` itself; it only reports what its
- *  own raw reads observed. */
+ *  business calling `end`/`retirePeer` itself; it only reports what its own
+ *  raw reads observed. */
 interface RequestBodySourceHooks {
   unbound: () => boolean;
   authorized: () => boolean;
@@ -164,6 +108,10 @@ interface RequestBodySourceHooks {
    *  This is when the cancel watcher may safely start reading `recv` — before
    *  this, the body source is still the stream's one active reader. */
   onDrained: () => void;
+  /** Mirrors the source's own outstanding native read onto the binding, so
+   *  `end()` can wait for it before stopping the receive half — the same
+   *  mutex constraint `awaitIdle()` exists for, from the other side. */
+  trackRead: (pending: Promise<unknown> | null) => void;
 }
 
 /**
@@ -195,7 +143,7 @@ class TunnelRequestBodySource implements TunnelRequestBody {
     private readonly raw: StreamRawReader,
     length: number,
     private readonly idleMs: number,
-    private readonly schedule: (callback: () => void, ms: number) => () => void,
+    private readonly schedule: Schedule,
     private readonly hooks: RequestBodySourceHooks,
   ) {
     this.length = length;
@@ -264,11 +212,16 @@ class TunnelRequestBodySource implements TunnelRequestBody {
     // Cleared only when the NATIVE read settles, not when the idle clock
     // fires: after a stall the read still holds the receive half's mutex.
     this.pendingRead = readPromise;
-    const clear = () => { if (this.pendingRead === readPromise) this.pendingRead = null; };
+    this.hooks.trackRead(readPromise);
+    const clear = () => {
+      if (this.pendingRead !== readPromise) return;
+      this.pendingRead = null;
+      this.hooks.trackRead(null);
+    };
     readPromise.then(clear, clear);
-    // Resolved directly, not through `withDeadline`: its extra microtask hop
-    // would let a retry's `awaitIdle()`, chained on this same `readPromise`,
-    // run before `this.received` is updated.
+    // Resolved directly, not through a shared deadline helper: the extra
+    // microtask hop would let a retry's `awaitIdle()`, chained on this same
+    // `readPromise`, run before `this.received` is updated.
     const outcome = await new Promise<Uint8Array | null | "timeout">((resolve) => {
       cancelTimer = this.schedule(() => { if (settled) return; settled = true; resolve("timeout"); }, this.idleMs);
       readPromise.then(
@@ -320,218 +273,165 @@ class TunnelRequestBodySource implements TunnelRequestBody {
   }
 }
 
-interface WsBinding extends BaseBinding {
-  readonly kind: "ws";
+interface TunnelHttpBinding extends ScopedBinding<TunnelProjectBinding> {
+  readonly kind: "tunnel-http";
+  checkoutId: string;
+  readonly reader: StreamRecordReader;
+  bodyLength: number;
+  /** `writer.finish()` has been issued for this exchange's response. Marks
+   *  the app's own FIN afterward as orderly rather than a cancel. */
+  ended: boolean;
+  readonly exchangeAbort: AbortController;
+  /** Set only when `bodyLength > 0`; the cancel watcher does not start until
+   *  it reports a full, successful drain. */
+  bodySource?: TunnelRequestBodySource;
+}
+
+interface TunnelWsBinding extends ScopedBinding<TunnelProjectBinding> {
+  readonly kind: "tunnel-ws";
+  checkoutId: string;
+  readonly reader: StreamRecordReader;
   sink: TunnelWsUpstreamSink | undefined;
   /** `tunnel:ws-close` has already been written (or is not needed because the
-   *  peer never got that far) — guards `close()`'s idempotence. */
+   *  peer never got that far) — guards `closeWs`'s idempotence. */
   wsClosed: boolean;
 }
 
-type Binding = HttpBinding | WsBinding;
+type TunnelBinding = TunnelHttpBinding | TunnelWsBinding;
 
-export interface TunnelStreamRegistryOptions {
-  /** host-server `seenProjects.has`. Absent => every open is refused NOT_ALLOWED (fail closed). */
-  projectCataloged?: (projectId: string) => boolean;
-  /** `ProjectStreamRegistry.tunnelBinding`. Lookup only: never opens or promotes a core. */
-  tunnelBinding: (projectId: string) => TunnelProjectBinding | null;
-  /** Only ever "unauthorized" (a writer, or a per-record authorized() check on read) or
-   *  "protocol-violation" (a malformed length prefix from StreamRecordReader). */
-  retirePeer: (peerId: string, reason: "unauthorized" | "protocol-violation") => void;
-  /** `stream` names the record's native stream for `NetwatchEvent.streamKind`/
-   *  `streamId` — `"tunnel-http"` or `"tunnel-ws"` per the binding's own
-   *  `kind`, paired with its `id` (the open frame's `requestId`/`wsId`, stable
-   *  for the exchange's whole life, the same way a project stream's
-   *  `streamId` is its `projectId`). Absent only for an event with no single
-   *  binding to attribute (there are none today). */
-  diagnostic?: (type: string, detail: Record<string, unknown>, stream?: { kind: NetwatchStreamKind; id: string }) => void;
-  /** Timer seam for the head deadline; defaults to setTimeout/clearTimeout. */
-  schedule?: (callback: () => void, ms: number) => () => void;
+export type TunnelStreamRegistryOptions = ScopedStreamOptions<TunnelProjectBinding> & {
   /** Test seam for the request-body idle clock; defaults to `FETCH_READ_IDLE_MS`. */
   requestBodyIdleMs?: number;
-}
+};
 
-/** `(peerId, kind, id) -> binding`, registered into `PeerStreamAcceptor`'s
- *  handler table as `{ "tunnel-http": registry.httpHandler, "tunnel-ws":
- *  registry.wsHandler }`. */
-export class TunnelStreamRegistry {
-  private readonly bindings = new Map<string, Binding>();
-  private readonly peerBindings = new Map<string, Set<Binding>>();
-  private readonly schedule: (callback: () => void, ms: number) => () => void;
+/** `(peerId, kind, id) -> binding`, registered via `handlerFor("tunnel-http")`
+ *  and `handlerFor("tunnel-ws")` — one instance, one cap, shared by both. */
+export class TunnelStreamRegistry extends ScopedStreamRegistry<
+  TunnelHttpStreamOpen | TunnelWsStreamOpen,
+  TunnelBinding,
+  TunnelProjectBinding
+> {
+  private readonly scheduleFn: Schedule;
+  private readonly requestBodyIdleMs: number;
 
-  constructor(private readonly opts: TunnelStreamRegistryOptions) {
-    this.schedule = opts.schedule ?? defaultSchedule;
+  constructor(opts: TunnelStreamRegistryOptions) {
+    super({
+      kinds: ["tunnel-http", "tunnel-ws"],
+      cap: STREAM_MAX_TUNNEL_STREAMS_PER_PEER,
+      capMessage: "too many tunnel streams",
+      priority: STREAM_PRIORITY_TUNNEL,
+      resetCode: STREAM_RESET_TUNNEL,
+      stopCode: STREAM_STOP_TUNNEL,
+      maxQueuedBytes: TUNNEL_STREAM_MAX_QUEUED_BYTES,
+    }, opts);
+    this.scheduleFn = opts.schedule ?? defaultSchedule;
+    this.requestBodyIdleMs = opts.requestBodyIdleMs ?? FETCH_READ_IDLE_MS;
   }
 
-  readonly httpHandler: StreamHandler<TunnelHttpStreamOpen> = (admission) => this.admit("http", admission.open.requestId, admission);
-  readonly wsHandler: StreamHandler<TunnelWsStreamOpen> = (admission) => this.admit("ws", admission.open.wsId, admission);
-
-  /** Live HTTP + WS bindings holding a cap slot for the peer. */
-  streamCount(peerId: string): number {
-    return this.peerBindings.get(peerId)?.size ?? 0;
+  protected idOf(open: TunnelHttpStreamOpen | TunnelWsStreamOpen): string {
+    return open.kind === "tunnel-http" ? open.requestId : open.wsId;
   }
 
-  // ---- Admission (synchronous, before any read) --------------------------
-
-  /** Every check is synchronous and runs before any read is issued on `recv`:
-   *  a handler that has started its read loop never returns a refusal again. */
-  private gate(
-    peerId: string,
-    projectId: string,
-    kind: "http" | "ws",
-    id: string,
-  ): { ok: true; projBinding: TunnelProjectBinding } | { ok: false; refusal: DispatchStreamRefusal } {
-    // The project stream is the single per-peer admission point for a
-    // projectId. Closing the project stream does not unbind an already-open
-    // tunnel stream.
-    const gated = gateProjectStream(
-      peerId,
-      projectId,
-      { open: this.streamCount(peerId), max: STREAM_MAX_TUNNEL_STREAMS_PER_PEER, message: "too many tunnel streams" },
-      this.opts.projectCataloged,
-      (id) => this.opts.tunnelBinding(id),
-    );
-    if (!gated.ok) return gated;
-    const projBinding = gated.binding;
-    if (this.bindings.has(this.key(peerId, kind, id))) {
-      return { ok: false, refusal: { code: "INVALID", message: "duplicate id" } };
-    }
-    if (projBinding.tunnels() === null) {
-      return { ok: false, refusal: { code: "NOT_ALLOWED", message: "tunnels not available" } };
-    }
-    return { ok: true, projBinding };
+  protected available(project: TunnelProjectBinding) {
+    return project.tunnels() === null
+      ? { code: "NOT_ALLOWED" as const, message: "tunnels not available" }
+      : undefined;
   }
 
-  /** `kind`/`id` are pulled from `open` by the two handlers above (`requestId`
-   *  vs `wsId`) rather than read from it here, since a `StreamAdmission<Http |
-   *  Ws>` union does not narrow on `kind` alone. */
-  private admit(
-    kind: "http" | "ws",
-    id: string,
-    admission: StreamAdmission<TunnelHttpStreamOpen | TunnelWsStreamOpen>,
-  ): DispatchStreamRefusal | undefined {
-    const { peerId, open, stream, authorized } = admission;
-    const gate = this.gate(peerId, open.projectId, kind, id);
-    if (!gate.ok) return gate.refusal;
-
-    // Referenced by the writer/reader failure closures below before it is
-    // assigned; both only ever run after this function has returned.
-    let binding!: Binding;
-    const writer = new StreamRecordWriter(
-      stream,
-      authorized,
-      (reason) => this.onWriterFailure(binding, reason),
-      TUNNEL_STREAM_MAX_QUEUED_BYTES,
-      STREAM_PRIORITY_TUNNEL,
-      STREAM_RESET_TUNNEL,
-    );
+  protected createBinding(base: ScopedBinding<TunnelProjectBinding>, open: TunnelHttpStreamOpen | TunnelWsStreamOpen): TunnelBinding {
+    let binding!: TunnelBinding;
     const reader = new StreamRecordReader(
-      stream,
+      base.stream,
       STREAM_TUNNEL_RECORD_MAX_BYTES,
-      () => { if (!binding.unbound) this.opts.retirePeer(peerId, "protocol-violation"); },
+      () => { if (!binding.unbound) this.opts.retirePeer(base.peerId, "protocol-violation"); },
     );
-    const base = {
-      peerId,
-      id,
-      projectId: open.projectId,
-      checkoutId: "main",
-      stream,
-      writer,
-      reader,
-      authorized,
-      tunnelBinding: gate.projBinding,
-      unbound: false,
-    };
-    if (kind === "http") {
-      binding = { ...base, kind: "http", bodyLength: 0, ended: false, exchangeAbort: new AbortController() };
-      this.bind(binding);
-      void this.runHttpHead(binding);
+    if (open.kind === "tunnel-http") {
+      binding = { ...base, kind: "tunnel-http", checkoutId: "main", reader, bodyLength: 0, ended: false, exchangeAbort: new AbortController() };
     } else {
-      binding = { ...base, kind: "ws", sink: undefined, wsClosed: false };
-      this.bind(binding);
-      void this.runWsHead(binding);
+      binding = { ...base, kind: "tunnel-ws", checkoutId: "main", reader, sink: undefined, wsClosed: false };
     }
-    return undefined;
+    return binding;
+  }
+
+  protected serve(binding: TunnelBinding): void {
+    if (binding.kind === "tunnel-http") void this.runHttpHead(binding);
+    else void this.runWsHead(binding);
+  }
+
+  /** No cause-specific cleanup for a tunnel exchange, unlike terminal's
+   *  synthesized unsubscribe: nothing downstream reads WHY a preview request
+   *  or WebSocket ended, only that it did, so every abnormal cause aborts the
+   *  in-flight upstream work the same way. */
+  protected onEnded(binding: TunnelBinding, _cause: ScopedEndCause): void {
+    if (binding.kind === "tunnel-ws") binding.sink?.closed();
+    else binding.exchangeAbort.abort();
   }
 
   // ---- Async phase: head ---------------------------------------------------
 
-  /** Reads exactly one record under `STREAM_OPEN_DEADLINE_MS`. On a timeout,
-   *  aborts the writer and unbinds without writing a refusal, and stops the
-   *  receive half only once that read settles (the binding mutex: `stop`
-   *  would otherwise queue behind a still-pending `readExact`). */
-  private async readHeadRecord(binding: Binding): Promise<Uint8Array | undefined> {
+  /** Reads exactly one record under `STREAM_OPEN_DEADLINE_MS`. On a timeout
+   *  the read is still outstanding and holds the recv mutex, so only the slot
+   *  and the send half go now; the receive half is stopped once that read
+   *  later resolves, but not if it rejects — a reset means the peer's own
+   *  send half is already gone, so there is nothing left to stop. */
+  private async readHeadRecord(binding: TunnelBinding): Promise<Uint8Array | undefined> {
     const readPromise = binding.reader.read();
-    // A rejection (reset) is folded into the same "ended" case as a clean FIN.
-    const outcome = await withDeadline(
-      readPromise.then((bytes) => bytes, () => "ended" as const),
-      STREAM_OPEN_DEADLINE_MS,
-      this.schedule,
-    );
-    if (outcome === "timeout") {
+    binding.pendingRead = readPromise;
+    const outcome = await raceDeadline(readPromise, STREAM_OPEN_DEADLINE_MS, this.scheduleFn)
+      .catch(() => "ended" as const);
+    if (outcome === STREAM_DEADLINE) {
       binding.writer.abort();
-      this.unbind(binding);
-      readPromise.then(() => { void binding.stream.recv.stop(STREAM_STOP_TUNNEL).catch(() => {}); }, () => {});
+      this.release(binding);
+      readPromise.then(() => this.stopRecv(binding), () => {});
       return undefined;
     }
+    binding.pendingRead = null;
     if (outcome === "ended") {
       // The app reset or FIN'd before its head (a cancel while opening): the
       // slot must go now, or every such cancel leaks one of the peer's
-      // STREAM_MAX_TUNNEL_STREAMS_PER_PEER until the connection retires.
+      // STREAM_MAX_TUNNEL_STREAMS_PER_PEER until the connection retires. The
+      // read has already settled, so recv needs no stop.
       binding.writer.abort();
-      this.unbind(binding);
+      this.release(binding);
       return undefined;
     }
     if (binding.unbound) {
-      void binding.stream.recv.stop(STREAM_STOP_TUNNEL).catch(() => {});
+      this.stopRecv(binding);
       return undefined;
     }
     return outcome;
   }
 
-  /** Unbinds first, so `refuseStream`'s own writer is the only one that
-   *  touches the send half and the registry's own writer is never reused. No
-   *  read is outstanding at either call site. */
-  private refuseInline(binding: Binding, code: StreamRefusedCode, message: string): void {
-    this.unbind(binding);
-    refuseStream(
-      binding.stream,
-      { code, message },
-      binding.authorized,
-      () => this.opts.retirePeer(binding.peerId, "unauthorized"),
-    );
-  }
-
   /** The head-record steps neither kind skips: read under the open deadline,
-   *  recheck `authorized()`, decode the one JSON control record, and parse it
+   *  recheck authorization, decode the one JSON control record, and parse it
    *  against the caller's schema — refusing inline (and returning `undefined`)
    *  on any failure. `matches` re-checks the id field HTTP and WS each key
    *  their schema on (`requestId` vs `tunnelId`) against the open frame's own
    *  id, since two different Zod shapes can't share one field name to read
    *  generically. */
   private async parseHead<T>(
-    binding: Binding,
+    binding: TunnelBinding,
     schema: { safeParse(v: unknown): { success: true; data: T } | { success: false } },
     matches: (data: T) => boolean,
     malformedMessage: string,
   ): Promise<T | undefined> {
     const record = await this.readHeadRecord(binding);
     if (record === undefined) return undefined; // timeout, or the app's FIN/reset before a head ever arrived
-    if (!binding.authorized()) { this.opts.retirePeer(binding.peerId, "unauthorized"); return undefined; }
+    if (!this.stillAuthorized(binding)) return undefined;
 
     const decoded = decodeTunnelRecord(record);
     if (!decoded || decoded.kind !== "json") {
-      this.refuseInline(binding, "INVALID", "expected a JSON control record");
+      this.refuseInline(binding, { code: "INVALID", message: "expected a JSON control record" });
       return undefined;
     }
     const parsedJson = parseJsonRecord(decoded.text);
     if (!parsedJson.ok) {
-      this.refuseInline(binding, "INVALID", "malformed JSON");
+      this.refuseInline(binding, { code: "INVALID", message: "malformed JSON" });
       return undefined;
     }
     const parsed = schema.safeParse(parsedJson.value);
     if (!parsed.success || !matches(parsed.data)) {
-      this.refuseInline(binding, "INVALID", malformedMessage);
+      this.refuseInline(binding, { code: "INVALID", message: malformedMessage });
       return undefined;
     }
     return parsed.data;
@@ -540,20 +440,20 @@ export class TunnelStreamRegistry {
   /** The `tunnels()?.admit` call and its refusal handling, shared by both
    *  kinds' head run — only what happens with a granted `TunnelManager`
    *  differs (`runHttpBody` vs. `serveWs`). */
-  private admitTunnel(binding: Binding, checkoutId: string): TunnelManager | undefined {
-    const admission = binding.tunnelBinding.tunnels()?.admit(binding.peerId, checkoutId) ?? null;
+  private admitTunnel(binding: TunnelBinding, checkoutId: string): TunnelManager | undefined {
+    const admission = binding.project.tunnels()?.admit(binding.peerId, checkoutId) ?? null;
     if (admission === null) {
-      this.refuseInline(binding, "NOT_ALLOWED", "tunnels not available");
+      this.refuseInline(binding, { code: "NOT_ALLOWED", message: "tunnels not available" });
       return undefined;
     }
     if (!admission.ok) {
-      this.refuseInline(binding, admission.refusal.code, admission.refusal.message);
+      this.refuseInline(binding, admission.refusal);
       return undefined;
     }
     return admission.manager;
   }
 
-  private async runHttpHead(binding: HttpBinding): Promise<void> {
+  private async runHttpHead(binding: TunnelHttpBinding): Promise<void> {
     const req = await this.parseHead(
       binding,
       TunnelHttpRequest,
@@ -562,12 +462,12 @@ export class TunnelStreamRegistry {
     );
     if (req === undefined) return;
     if (req.bodyLength > STREAM_TUNNEL_REQUEST_BODY_MAX_BYTES) {
-      this.refuseInline(binding, "INVALID", "body too large");
+      this.refuseInline(binding, { code: "INVALID", message: "body too large" });
       return;
     }
     const declared = headerContentLength(req.headers);
     if (declared !== undefined && declared !== req.bodyLength) {
-      this.refuseInline(binding, "INVALID", "content-length does not match bodyLength");
+      this.refuseInline(binding, { code: "INVALID", message: "content-length does not match bodyLength" });
       return;
     }
 
@@ -579,7 +479,7 @@ export class TunnelStreamRegistry {
     await this.runHttpBody(binding, req, manager);
   }
 
-  private async runWsHead(binding: WsBinding): Promise<void> {
+  private async runWsHead(binding: TunnelWsBinding): Promise<void> {
     const open = await this.parseHead(
       binding,
       TunnelWsOpen,
@@ -602,30 +502,21 @@ export class TunnelStreamRegistry {
 
   // ---- Async phase: HTTP body, then run ------------------------------------
 
-  /** The exchange is over and nothing more will be sent on it: abort the
-   *  `AbortSignal` `manager.serveHttp`'s fetch/upstream loop watches, abort
-   *  the writer, and unbind. Shared by every HTTP failure path — a dropped
-   *  send, a stalled/short body, and the cancel watcher's own two cases. */
-  private abandon(binding: HttpBinding): void {
-    binding.exchangeAbort.abort();
-    binding.writer.abort();
-    this.unbind(binding);
-  }
-
-  private async runHttpBody(binding: HttpBinding, req: TunnelHttpRequest, manager: TunnelManager): Promise<void> {
+  private async runHttpBody(binding: TunnelHttpBinding, req: TunnelHttpRequest, manager: TunnelManager): Promise<void> {
     let bodySource: TunnelRequestBodySource | undefined;
     if (req.bodyLength > 0) {
       bodySource = new TunnelRequestBodySource(
         new StreamRawReader(binding.stream),
         req.bodyLength,
-        this.opts.requestBodyIdleMs ?? FETCH_READ_IDLE_MS,
-        this.schedule,
+        this.requestBodyIdleMs,
+        this.scheduleFn,
         {
           unbound: () => binding.unbound,
           authorized: binding.authorized,
           onUnauthorized: () => this.opts.retirePeer(binding.peerId, "unauthorized"),
-          onIncomplete: () => this.abandon(binding),
+          onIncomplete: () => this.end(binding, "app-ended"),
           onDrained: () => { void this.watchHttpCancel(binding); },
+          trackRead: (pending) => { binding.pendingRead = pending; },
         },
       );
       binding.bodySource = bodySource;
@@ -646,14 +537,19 @@ export class TunnelStreamRegistry {
     if (!bodySource) void this.watchHttpCancel(binding);
   }
 
+  /** The per-receiver gate every outbound tunnel record passes: a peer that
+   *  may no longer receive from this project ends the exchange instead. */
+  private undeliverable(binding: TunnelBinding): boolean {
+    if (binding.project.mayDeliverTo(binding.peerId)) return false;
+    this.end(binding, "app-ended");
+    return true;
+  }
+
   private async sendHttpHead(
-    binding: HttpBinding,
+    binding: TunnelHttpBinding,
     head: { status: number; headers: Record<string, string>; setCookies?: string[] },
   ): Promise<StreamSendOutcome> {
-    if (!binding.tunnelBinding.mayDeliverTo(binding.peerId)) {
-      this.abandon(binding);
-      return "dropped";
-    }
+    if (this.undeliverable(binding)) return "dropped";
     return binding.writer.send(encodeJsonRecord({
       type: "tunnel:http-head",
       requestId: binding.id,
@@ -664,48 +560,44 @@ export class TunnelStreamRegistry {
     }));
   }
 
-  private async sendHttpBody(binding: HttpBinding, bytes: Uint8Array): Promise<StreamSendOutcome> {
-    if (!binding.tunnelBinding.mayDeliverTo(binding.peerId)) {
-      this.abandon(binding);
-      return "dropped";
-    }
+  private async sendHttpBody(binding: TunnelHttpBinding, bytes: Uint8Array): Promise<StreamSendOutcome> {
+    if (this.undeliverable(binding)) return "dropped";
     return binding.writer.sendRaw(bytes);
   }
 
   /** A clean FIN and a reset are natively distinguishable on the wire, so
-   *  `writer.finish()` alone is the "done" signal for a response body. */
-  private async endHttp(binding: HttpBinding): Promise<StreamSendOutcome> {
-    if (!binding.tunnelBinding.mayDeliverTo(binding.peerId)) {
-      this.abandon(binding);
-      return "dropped";
-    }
+   *  `writer.finish()` alone is the "done" signal for a response body. A
+   *  voluntary, graceful end on the exchange's own terms: `release`, not
+   *  `end` — nothing failed, so nothing should be re-aborted. */
+  private async endHttp(binding: TunnelHttpBinding): Promise<StreamSendOutcome> {
+    if (this.undeliverable(binding)) return "dropped";
     binding.ended = true;
     await binding.writer.finish();
-    // A request-body read can still be outstanding if the origin answered
-    // before the app finished sending it — `recv.stop` is chained on that
-    // read settling rather than issued now, since it would otherwise queue
-    // behind the binding's shared per-stream mutex. When there is none, the
-    // cancel watcher (`watchHttpCancel`) already owns `recv` and is the one
-    // that stops it, on the word of this same `unbound` flag — calling
-    // `stop()` here too would race its own outstanding read.
-    const pendingBody = binding.bodySource && !binding.bodySource.drained
-      ? binding.bodySource.awaitIdle() : undefined;
-    this.unbind(binding);
-    if (pendingBody) stopRecvWhenSettled(pendingBody, () => { void binding.stream.recv.stop(STREAM_STOP_TUNNEL).catch(() => {}); });
+    this.releaseHttp(binding);
     return "sent";
   }
 
-  private failHttp(binding: HttpBinding, reason: string): void {
-    if (binding.unbound) return;
-    this.opts.diagnostic?.("tunnel-stream:http-failed", { peerId: binding.peerId, requestId: binding.id, reason },
-      { kind: "tunnel-http", id: binding.id });
-    binding.writer.abort();
-    // See `endHttp` above: `watchHttpCancel` owns the stop when there is no
-    // outstanding body read to wait for.
+  /** A request-body read can still be outstanding if the origin answered
+   *  before the app finished sending it; the receive half is stopped once it
+   *  settles. With no body pending the cancel watcher (`watchHttpCancel`)
+   *  owns `recv` and stops it itself — stopping here too would race its
+   *  outstanding read. */
+  private releaseHttp(binding: TunnelHttpBinding): void {
     const pendingBody = binding.bodySource && !binding.bodySource.drained
       ? binding.bodySource.awaitIdle() : undefined;
-    this.unbind(binding);
-    if (pendingBody) stopRecvWhenSettled(pendingBody, () => { void binding.stream.recv.stop(STREAM_STOP_TUNNEL).catch(() => {}); });
+    this.release(binding);
+    if (pendingBody) this.stopRecv(binding, pendingBody);
+  }
+
+  /** The upstream fetch/serve itself failed (origin unreachable, timeout, …):
+   *  no response was ever sent, so the writer resets rather than finishes.
+   *  Still a voluntary end on the exchange's own terms — it is reporting its
+   *  own conclusion, not being cut off from outside. */
+  private failHttp(binding: TunnelHttpBinding, reason: string): void {
+    if (binding.unbound) return;
+    this.diag(binding, "tunnel-stream:http-failed", { peerId: binding.peerId, requestId: binding.id, reason });
+    binding.writer.abort();
+    this.releaseHttp(binding);
   }
 
   /** Starts once the request body (if any) has fully drained — before that,
@@ -713,50 +605,47 @@ export class TunnelStreamRegistry {
    *  `raw.read(1)` stays outstanding for the rest of the run, purely to
    *  detect the app sending anything else: a byte is a breach, and FIN/reset
    *  is the app's own end unless it beat our own orderly one. */
-  private async watchHttpCancel(binding: HttpBinding): Promise<void> {
-    const raw = new StreamRawReader(binding.stream);
-    let bytes: Uint8Array | null;
-    try {
-      bytes = await raw.read(1);
-    } catch {
-      bytes = null; // reset: folded into the same "ended early" handling as FIN
-    }
+  private async watchHttpCancel(binding: TunnelHttpBinding): Promise<void> {
+    const outcome = await this.trackRead(binding, new StreamRawReader(binding.stream).read(1));
+    if (outcome === READ_UNBOUND) return;
+    // A reset is folded into the same "ended early" handling as FIN.
+    const bytes = outcome === READ_ENDED ? null : outcome;
     if (binding.unbound) {
-      void binding.stream.recv.stop(STREAM_STOP_TUNNEL).catch(() => {});
+      // Ended elsewhere while a rejected read was outstanding: nothing else
+      // reads `recv` once the body has drained.
+      this.stopRecv(binding);
       return;
     }
     if (bytes === null) {
       // A rejection or FIN before `end()` was written is the app's cancel.
-      // One after `end()` is the app's own orderly FIN and is ignored.
+      // One after `end()` is the app's own orderly FIN and is ignored. The
+      // receive half already ended itself here, so `end()`'s own stop is a
+      // harmless no-op rather than one this branch must arrange.
       if (binding.ended) return;
-      this.abandon(binding);
+      this.end(binding, "app-ended");
       return;
     }
     // A record here is a stream breach: the app must send nothing more once
     // its run is complete.
-    this.abandon(binding);
-    void binding.stream.recv.stop(STREAM_STOP_TUNNEL).catch(() => {});
+    this.end(binding, "breach");
   }
 
   // ---- Async phase: WS ------------------------------------------------------
 
-  private async sendWsFrame(binding: WsBinding, frame: TunnelWsFrame): Promise<StreamSendOutcome> {
-    if (!binding.tunnelBinding.mayDeliverTo(binding.peerId)) {
-      binding.writer.abort();
-      this.unbind(binding);
-      binding.sink?.closed();
-      return "dropped";
-    }
+  private async sendWsFrame(binding: TunnelWsBinding, frame: TunnelWsFrame): Promise<StreamSendOutcome> {
+    if (this.undeliverable(binding)) return "dropped";
     const tag = frame.binary ? TUNNEL_RECORD_TAG_WS_BINARY : TUNNEL_RECORD_TAG_WS_TEXT;
     return binding.writer.send(encodeTunnelDataRecord(tag, frame.bytes));
   }
 
-  private closeWs(binding: WsBinding, code?: number, reason?: string): void {
+  /** The sink itself asked to close: it already knows, so — unlike every
+   *  other ending here — this never re-notifies it through `onEnded`. */
+  private closeWs(binding: TunnelWsBinding, code?: number, reason?: string): void {
     if (binding.unbound || binding.wsClosed) return;
     binding.wsClosed = true;
-    if (!binding.tunnelBinding.mayDeliverTo(binding.peerId)) {
+    if (!binding.project.mayDeliverTo(binding.peerId)) {
       binding.writer.abort();
-      this.unbind(binding);
+      this.release(binding);
       return;
     }
     const record: TunnelWsClose = {
@@ -769,37 +658,26 @@ export class TunnelStreamRegistry {
     void (async () => {
       await binding.writer.send(encodeJsonRecord(record));
       await binding.writer.finish();
-      this.unbind(binding);
+      this.release(binding);
     })();
   }
 
-  private async runWsLoop(binding: WsBinding): Promise<void> {
+  private async runWsLoop(binding: TunnelWsBinding): Promise<void> {
     let sawClose = false;
     for (;;) {
-      let bytes: Uint8Array;
-      try {
-        bytes = await binding.reader.read();
-      } catch {
-        // The app's own end (FIN or reset): mirror it to the manager, FIN our
-        // own send half if it has not closed yet, then unbind.
-        if (binding.unbound) return;
-        binding.sink?.closed();
-        if (!binding.wsClosed) void binding.writer.finish();
-        this.unbind(binding);
+      if (binding.unbound) return;
+      const bytes = await this.trackRead(binding, binding.reader.read());
+      if (bytes === READ_UNBOUND) return;
+      if (bytes === READ_ENDED) {
+        this.end(binding, "app-ended");
         return;
       }
-      if (binding.unbound) {
-        void binding.stream.recv.stop(STREAM_STOP_TUNNEL).catch(() => {});
-        return;
-      }
-      if (!binding.authorized()) { this.opts.retirePeer(binding.peerId, "unauthorized"); return; }
+      if (!this.stillAuthorized(binding)) return;
       if (sawClose) {
         // Only FIN may follow a close record; the loop was reading solely to
         // observe it, so any further record is a breach.
         binding.sink?.closed(1002);
-        binding.writer.abort();
-        this.unbind(binding);
-        void binding.stream.recv.stop(STREAM_STOP_TUNNEL).catch(() => {});
+        this.end(binding, "breach");
         return;
       }
       const decoded = decodeTunnelRecord(bytes);
@@ -819,84 +697,8 @@ export class TunnelStreamRegistry {
       // Anything else — a wrong-kind tag, a malformed record, a close naming
       // another tunnel — is a breach.
       binding.sink?.closed(1002);
-      binding.writer.abort();
-      this.unbind(binding);
-      void binding.stream.recv.stop(STREAM_STOP_TUNNEL).catch(() => {});
+      this.end(binding, "breach");
       return;
     }
-  }
-
-  // ---- Writer failures, teardown -------------------------------------------
-
-  private onWriterFailure(binding: Binding, reason: StreamWriteFailure): void {
-    if (binding.unbound) return;
-    if (reason === "unauthorized") {
-      // The only connection-closing path; the writer has not reset itself
-      // (that is `retirePeer`'s job once it tears down the whole connection).
-      this.opts.retirePeer(binding.peerId, "unauthorized");
-      return;
-    }
-    // "overflow" or "stream-lost": the writer has already reset its own half.
-    if (binding.kind === "ws") binding.sink?.closed();
-    else binding.exchangeAbort.abort();
-    this.unbind(binding);
-  }
-
-  /** The project's last live `ProjectStreamRegistry` entry detached: its bus is
-   *  gone, so every bound stream is aborted with no synthesized message —
-   *  there is nothing left to dispatch one to. */
-  projectDetached(projectId: string): void {
-    for (const set of this.peerBindings.values()) {
-      for (const binding of [...set]) {
-        if (binding.projectId !== projectId) continue;
-        if (binding.kind === "ws") binding.sink?.closed();
-        else binding.exchangeAbort.abort();
-        binding.writer.abort();
-        this.unbind(binding);
-      }
-    }
-  }
-
-  /** Connection retired: abort and unbind everything for the peer. Never
-   *  calls `retirePeer` — the peer is already gone. */
-  dropPeer(peerId: string): void {
-    const set = this.peerBindings.get(peerId);
-    if (!set) return;
-    for (const binding of [...set]) {
-      if (binding.kind === "ws") binding.sink?.closed();
-      else binding.exchangeAbort.abort();
-      binding.writer.abort();
-      this.unbind(binding);
-    }
-  }
-
-  // ---- Indexing --------------------------------------------------------------
-
-  private bind(binding: Binding): void {
-    this.bindings.set(this.key(binding.peerId, binding.kind, binding.id), binding);
-    let set = this.peerBindings.get(binding.peerId);
-    if (!set) {
-      set = new Set();
-      this.peerBindings.set(binding.peerId, set);
-    }
-    set.add(binding);
-  }
-
-  /** Removes the index entry and frees the cap slot exactly once. An `unbound`
-   *  flag, not a generation counter, is what makes every late callback below a
-   *  no-op once it fires. */
-  private unbind(binding: Binding): void {
-    if (binding.unbound) return;
-    binding.unbound = true;
-    this.bindings.delete(this.key(binding.peerId, binding.kind, binding.id));
-    const set = this.peerBindings.get(binding.peerId);
-    if (set) {
-      set.delete(binding);
-      if (set.size === 0) this.peerBindings.delete(binding.peerId);
-    }
-  }
-
-  private key(peerId: string, kind: "http" | "ws", id: string): string {
-    return `${peerId}\u0000${kind}\u0000${id}`;
   }
 }

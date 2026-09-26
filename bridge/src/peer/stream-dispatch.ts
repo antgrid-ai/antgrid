@@ -7,6 +7,13 @@
  * An unknown or not-yet-registered `kind` is refused `NOT_ALLOWED`; project,
  * terminal and tunnel handlers plug into the same `handlers` table without
  * touching admission order.
+ *
+ * `ScopedStreamRegistry` below is the shared admission path for every
+ * project-scoped kind (terminal, tunnel-http, tunnel-ws, upload): the per-peer
+ * cap, the safe-id/catalog checks, the project's own binding lookup and its
+ * per-sender gate, duplicate-id detection, teardown and the writer-failure
+ * mapping all live once here. A kind supplies only its cap/priority/reset
+ * constants, its own id field, and the body that runs once admitted.
  */
 
 import {
@@ -20,11 +27,12 @@ import {
   type StreamRefusedCode,
 } from "antgrid-wire";
 import { isSafeProjectId } from "../project-id";
-import { StreamRecordWriter, type RawStreamRecv, type StreamRecv, type StreamSend } from "./stream-records";
+import { StreamRecordWriter, stopRecvWhenSettled, type RawStreamRecv, type StreamRecv, type StreamSend, type StreamWriteFailure } from "./stream-records";
+import type { NetwatchStreamKind } from "../netwatch";
 
 export const STREAM_OPEN_DEADLINE_MS = 5_000;
 // Reset/stop codes are bridge diagnostics only — the Dart binding exposes no
-// way to read them back (spec §1.2), so their values are never asserted on
+// way to read them back, so their values are never asserted on
 // the wire, only in bridge-side tests and logs.
 export const STREAM_STOP_REFUSED = 0x10n;
 export const STREAM_RESET_OPEN_TIMEOUT = 0x11n;
@@ -83,41 +91,6 @@ export function refuseStream(stream: AcceptedBiStream, refusal: StreamRefusal,
   });
 }
 
-/** The slice of a project's stream binding the shared admission gate reads. */
-export interface GatedProjectBinding {
-  hasOpenStream(peerId: string): boolean;
-  refusalFor(peerId: string): { readonly code: string; readonly message: string } | null;
-}
-
-/**
- * The admission every project-scoped stream (terminal, tunnel, upload) runs
- * before its own registry-specific checks, in this order: the per-peer cap,
- * the safe-id and catalog checks (`seenProjects` + `isSafeProjectId` are the
- * only bound on which projectId a peer may name), the project's binding
- * (`NOT_READY` while it has no live entry), an open project stream for this
- * peer — the single per-peer admission point for a projectId — then the
- * entry's own per-sender gate. Lookup only: nothing here opens or promotes a
- * core.
- */
-export function gateProjectStream<B extends GatedProjectBinding>(
-  peerId: string,
-  projectId: string,
-  cap: { open: number; max: number; message: string },
-  projectCataloged: ((projectId: string) => boolean) | undefined,
-  lookup: (projectId: string) => B | null,
-): { ok: true; binding: B } | { ok: false; refusal: StreamRefusal } {
-  const refuse = (code: StreamRefusedCode, message: string) => ({ ok: false as const, refusal: { code, message } });
-  if (cap.open >= cap.max) return refuse("CAP_EXCEEDED", cap.message);
-  if (!isSafeProjectId(projectId)) return refuse("NOT_ALLOWED", "unsafe project id");
-  if (!projectCataloged?.(projectId)) return refuse("NOT_ALLOWED", "project not recognized");
-  const binding = lookup(projectId);
-  if (binding === null) return refuse("NOT_READY", "project is not attached");
-  if (!binding.hasOpenStream(peerId)) return refuse("NOT_ALLOWED", "open the project stream first");
-  const refusal = binding.refusalFor(peerId);
-  if (refusal) return refuse("NOT_ALLOWED", refusal.message);
-  return { ok: true, binding };
-}
-
 export interface StreamAdmission<O extends StreamOpen = StreamOpen> {
   peerId: string;
   open: O;
@@ -158,6 +131,53 @@ export function streamLabelOf(open: StreamOpen): StreamDiagnosticLabel {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Shared timer/deadline plumbing. One copy for the acceptor's own open-frame
+// deadline and for every project-scoped kind's own head/record deadlines.
+// ---------------------------------------------------------------------------
+
+export type Schedule = (callback: () => void, ms: number) => () => void;
+
+export const defaultSchedule: Schedule = (callback, ms) => {
+  const timer = setTimeout(callback, ms);
+  timer.unref?.();
+  return () => clearTimeout(timer);
+};
+
+/** Resolved by `raceDeadline` when `ms` elapses before `read` settles. */
+export const STREAM_DEADLINE: unique symbol = Symbol("stream-deadline");
+
+/**
+ * Races `read` against `ms`; resolves `STREAM_DEADLINE` on timeout, or
+ * settles (resolve/reject) exactly as `read` does otherwise. Never cancels
+ * `read` itself — a caller that must stop the receive half on timeout awaits
+ * `read`'s own eventual settlement first (the binding mutex:
+ * stream-records.ts's per-stream lock), never calls `stop()` while it is
+ * still outstanding.
+ */
+export function raceDeadline<T>(read: Promise<T>, ms: number, schedule: Schedule): Promise<T | typeof STREAM_DEADLINE> {
+  let settled = false;
+  return new Promise<T | typeof STREAM_DEADLINE>((resolve, reject) => {
+    const cancelTimer = schedule(() => {
+      if (settled) return;
+      settled = true;
+      resolve(STREAM_DEADLINE);
+    }, ms);
+    read.then(
+      (value) => { if (settled) return; settled = true; cancelTimer(); resolve(value); },
+      (error) => { if (settled) return; settled = true; cancelTimer(); reject(error); },
+    );
+  });
+}
+
+export type StreamDiagnostic =
+  (type: string, detail: Record<string, unknown>, stream?: { kind: NetwatchStreamKind; id: string }) => void;
+
+/** Retires the whole connection. Only ever called with "unauthorized" (a
+ *  writer, or a per-record `authorized()` recheck) or "protocol-violation"
+ *  (a malformed length prefix from `StreamRecordReader`). */
+export type RetirePeer = (peerId: string, reason: "unauthorized" | "protocol-violation") => void;
+
 export interface PeerStreamAcceptorOptions {
   connection: { acceptBi(): Promise<AcceptedBiStream> };
   peerId: string;
@@ -172,7 +192,7 @@ export interface PeerStreamAcceptorOptions {
   /** Omit or pass `{}` when no non-session stream kind is registered yet —
    *  every such open is then refused `NOT_ALLOWED`. */
   handlers?: StreamHandlers;
-  schedule?: (callback: () => void, ms: number) => () => void;
+  schedule?: Schedule;
   /** `stream` is set only for a refusal whose open frame parsed; a timeout or
    *  an unparseable open names no stream. */
   diagnostic?: (type: StreamDiagnosticType,
@@ -181,12 +201,6 @@ export interface PeerStreamAcceptorOptions {
   /** Default `STREAM_MAX_PENDING_OPENS_PER_PEER`; tests may lower it. */
   maxPendingOpens?: number;
 }
-
-const defaultSchedule = (callback: () => void, ms: number): (() => void) => {
-  const timer = setTimeout(callback, ms);
-  timer.unref?.();
-  return () => clearTimeout(timer);
-};
 
 const DEFAULT_REFUSAL_MESSAGE: Record<StreamRefusedCode, string> = {
   NOT_READY: "session not established yet",
@@ -245,29 +259,11 @@ export class PeerStreamAcceptor {
     }
     this.pending++;
 
-    let settled = false;
-    let cancelTimer: (() => void) | undefined;
     const readPromise = readStreamOpen(stream.recv);
-    const outcome = await new Promise<StreamOpenRead | "timeout" | "read-failed">((resolve) => {
-      cancelTimer = schedule(() => {
-        if (settled) return;
-        settled = true;
-        resolve("timeout");
-      }, STREAM_OPEN_DEADLINE_MS);
-      readPromise.then((result) => {
-        if (settled) return;
-        settled = true;
-        resolve(result);
-      }, () => {
-        if (settled) return;
-        settled = true;
-        resolve("read-failed");
-      });
-    });
-    cancelTimer?.();
+    const outcome = await raceDeadline(readPromise, STREAM_OPEN_DEADLINE_MS, schedule).catch(() => "read-failed" as const);
+    this.pending--;
 
-    if (outcome === "timeout") {
-      this.pending--;
+    if (outcome === STREAM_DEADLINE) {
       // The read is still pending and holds the recv mutex — `recv.stop`
       // would queue behind it, so only the send half is reset now. Once a late
       // read settles the mutex is free, and stopping then is what keeps a
@@ -278,11 +274,7 @@ export class PeerStreamAcceptor {
       diagnostic?.("peer:stream-open-timeout", { pending: this.pending });
       return;
     }
-    if (outcome === "read-failed") {
-      this.pending--;
-      return;
-    }
-    this.pending--;
+    if (outcome === "read-failed") return;
     const opened = outcome;
 
     if (this.stopped || !isCurrent()) return;
@@ -310,5 +302,326 @@ export class PeerStreamAcceptor {
     diagnostic?.("peer:stream-refused", { code, kind: open?.kind, pending: this.pending },
       open ? streamLabelOf(open) : undefined);
     refuseStream(stream, { code, message }, this.options.authorized, this.options.onUnauthorized);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Generic admission for every project-scoped kind (terminal, tunnel-http,
+// tunnel-ws, upload). See `bridge/CLAUDE.md`'s project-streams.ts entry for
+// what a "project's binding" means; this is the consumer side of it.
+// ---------------------------------------------------------------------------
+
+/** The slice of a project's stream binding every project-scoped kind's
+ *  admission reads. Pure lookup — never opens or promotes a core. */
+export interface ScopedProjectBinding {
+  hasOpenStream(peerId: string): boolean;
+  /** Any code this returns is masked to `NOT_ALLOWED` by the admission gate:
+   *  the reason a sender is refused is not the app's business past that. */
+  refusalFor(peerId: string): StreamRefusal | undefined;
+}
+
+/** A project-scoped kind's fixed constants — cap, priority and the reset/stop
+ *  codes its writer uses. Every value must be a named constant from
+ *  antgrid-wire (the cap) or the kind's own file (the rest), never a literal
+ *  inlined here. */
+export interface ScopedStreamSpec {
+  readonly kinds: readonly ("terminal" | "tunnel-http" | "tunnel-ws" | "upload")[];
+  readonly cap: number;
+  readonly capMessage: string;
+  readonly priority: number;
+  readonly resetCode: bigint;
+  readonly stopCode: bigint;
+  readonly maxQueuedBytes: number;
+}
+
+export interface ScopedStreamOptions<P extends ScopedProjectBinding> {
+  /** host-server `seenProjects.has`. Absent => every open refused NOT_ALLOWED (fail closed). */
+  projectCataloged?: (projectId: string) => boolean;
+  /** `ProjectStreamRegistry.projectBinding`. Lookup only: never opens or promotes a core. */
+  projectBinding: (projectId: string) => P | null;
+  retirePeer: RetirePeer;
+  diagnostic?: StreamDiagnostic;
+  schedule?: Schedule;
+}
+
+/** The fields every project-scoped binding carries; a kind's own binding type
+ *  extends this with whatever is genuinely its own (a reader, sub-kind
+ *  fields, in-flight state). */
+export interface ScopedBinding<P extends ScopedProjectBinding = ScopedProjectBinding> {
+  readonly peerId: string;
+  readonly kind: ScopedStreamSpec["kinds"][number];
+  /** requestId / wsId: duplicate key within (peerId, kind). */
+  readonly id: string;
+  readonly projectId: string;
+  readonly stream: AcceptedBiStream;
+  readonly writer: StreamRecordWriter;
+  readonly project: P;
+  /** The admission's own authorization check, re-read on every inbound
+   *  record — the mirror of the outbound check the writer already runs on
+   *  every send. */
+  readonly authorized: () => boolean;
+  /** Removed from every index and its cap slot freed. The staleness guard
+   *  every async step checks: once unbound, nothing may act on this binding
+   *  again — which is what keeps a lagging callback from a torn-down stream
+   *  reaching into whatever now reuses the same peerId or id. */
+  unbound: boolean;
+  /** The read currently outstanding on `recv`, if the kind's body tracks one
+   *  (it must, to keep `end()` from stopping the receive half while a read
+   *  still holds the shared per-stream mutex — stream-records.ts's binding
+   *  constraints). `null` when nothing is outstanding. */
+  pendingRead: Promise<unknown> | null;
+}
+
+export const READ_ENDED: unique symbol = Symbol("read-ended");
+export const READ_UNBOUND: unique symbol = Symbol("read-unbound");
+
+export type ScopedEndCause = "app-ended" | "overflow" | "stream-lost" | "detached" | "peer-dropped" | "breach";
+
+/** `stream.priority`/`resetCode`/`maxQueuedBytes` in one call, shared by every
+ *  scoped kind and by `project-streams.ts` (which does not extend
+ *  {@link ScopedStreamRegistry} — the project kind's own admission is not
+ *  gated on an open project stream — but reuses this to build its writer). */
+export function openScopedWriter(
+  stream: AcceptedBiStream,
+  authorized: () => boolean,
+  spec: Pick<ScopedStreamSpec, "priority" | "resetCode" | "maxQueuedBytes">,
+  onFailure: (failure: StreamWriteFailure) => void,
+): StreamRecordWriter {
+  return new StreamRecordWriter(stream, authorized, onFailure, spec.maxQueuedBytes, spec.priority, spec.resetCode);
+}
+
+/**
+ * The shared admission path for a project-scoped stream kind. Registers one
+ * `StreamHandler` per kind (`handlerFor`) into `PeerStreamAcceptor`'s handler
+ * table; `native-host-connection.ts` wires terminal, tunnel-http, tunnel-ws
+ * and upload through one instance each (tunnel-http and tunnel-ws share ONE
+ * `TunnelStreamRegistry` instance and its cap).
+ *
+ * `handlerFor`'s admission order (every step before any read from the
+ * stream): the per-peer cap; the kind's own open-frame validation; the safe-id
+ * and catalog checks (root CLAUDE.md's "seenProjects + isSafeProjectId are the
+ * only bound" invariant); the project's binding (`NOT_READY` while it has no
+ * live entry — a lookup only, never opening or promoting a core); an open
+ * project stream for this peer (the single per-peer admission point for a
+ * projectId); the project's own per-sender gate; a duplicate (peerId, kind,
+ * id); the kind's own availability check (its server disabled/absent).
+ */
+export abstract class ScopedStreamRegistry<
+  O extends Extract<StreamOpen, { kind: ScopedStreamSpec["kinds"][number] }>,
+  B extends ScopedBinding<P>,
+  P extends ScopedProjectBinding,
+> {
+  private readonly bindings = new Map<string, B>();
+  private readonly peerBindings = new Map<string, Set<B>>();
+  private readonly recvStopped = new WeakSet<B>();
+
+  protected constructor(private readonly spec: ScopedStreamSpec, protected readonly opts: ScopedStreamOptions<P>) {}
+
+  /** One `StreamHandler` per stream kind; native-host-connection registers these. */
+  handlerFor(kind: O["kind"]): StreamHandler<O> {
+    return (admission) => this.admit(kind, admission);
+  }
+
+  /** Live bindings holding a cap slot for the peer, across every kind this
+   *  registry instance serves. */
+  streamCount(peerId: string): number {
+    return this.peerBindings.get(peerId)?.size ?? 0;
+  }
+
+  private admit(kind: O["kind"], admission: StreamAdmission<O>): StreamRefusal | undefined {
+    const { peerId, open, stream, authorized } = admission;
+    const refuse = (code: StreamRefusedCode, message: string): StreamRefusal => ({ code, message });
+
+    if (this.streamCount(peerId) >= this.spec.cap) return refuse("CAP_EXCEEDED", this.spec.capMessage);
+    const invalidOpen = this.validateOpen(open);
+    if (invalidOpen) return invalidOpen;
+
+    const { projectId } = open;
+    if (!isSafeProjectId(projectId)) return refuse("NOT_ALLOWED", "unsafe project id");
+    if (!this.opts.projectCataloged?.(projectId)) return refuse("NOT_ALLOWED", "project not recognized");
+    const project = this.opts.projectBinding(projectId);
+    if (project === null) return refuse("NOT_READY", "project is not attached");
+    if (!project.hasOpenStream(peerId)) return refuse("NOT_ALLOWED", "open the project stream first");
+    const refusal = project.refusalFor(peerId);
+    if (refusal) return refuse("NOT_ALLOWED", refusal.message);
+
+    const id = this.idOf(open);
+    if (this.bindings.has(this.key(peerId, kind, id))) return refuse("INVALID", "duplicate id");
+    const unavailable = this.available(project, open);
+    if (unavailable) return unavailable;
+
+    // `binding` is referenced by the writer-failure closure before it is
+    // assigned; it only ever runs after this function has returned.
+    let binding!: B;
+    const writer = openScopedWriter(stream, authorized, this.spec, (reason) => this.onWriterFailure(binding, reason));
+    const base: ScopedBinding<P> = {
+      peerId, kind, id, projectId, stream, writer, project, authorized, unbound: false, pendingRead: null,
+    };
+    binding = this.createBinding(base, open);
+    this.bind(binding);
+    const result = this.serve(binding);
+    if (result) {
+      void Promise.resolve(result).then((maybeRefusal) => {
+        if (maybeRefusal) this.refuseInline(binding, maybeRefusal);
+      });
+    }
+    return undefined;
+  }
+
+  /** Field-level open checks beyond the Zod schema (terminal: uuid requestId). */
+  protected validateOpen(_open: O): StreamRefusal | undefined {
+    return undefined;
+  }
+
+  /** After the shared gate passes: server availability (tunnels()/uploads()
+   *  null → NOT_ALLOWED). */
+  protected available(_project: P, _open: O): StreamRefusal | undefined {
+    return undefined;
+  }
+
+  protected abstract idOf(open: O): string;
+  protected abstract createBinding(base: ScopedBinding<P>, open: O): B;
+  /** The body. May return a refusal only before anything has been read from
+   *  the stream — a kind may also call {@link refuseInline} itself from
+   *  deeper inside its own async admission (a bad head record, a server's own
+   *  async admit refusing) and simply return afterward. */
+  protected abstract serve(binding: B): void | Promise<StreamRefusal | undefined>;
+  /** Kind cleanup when a binding ends for any cause (terminal: synthesize
+   *  unsubscribe; tunnel: abort exchange / close sink; upload: cancel the
+   *  upload). Runs once, before unbind. */
+  protected abstract onEnded(binding: B, cause: ScopedEndCause): void;
+
+  /** Unbinds first, so `refuseStream`'s own writer is the only one that
+   *  touches the send half and the registry's own writer is never reused. A
+   *  no-op once the binding is already unbound (idempotent against a `serve`
+   *  that both calls this itself and returns a refusal). */
+  protected refuseInline(binding: B, refusal: StreamRefusal): void {
+    if (binding.unbound) return;
+    this.unbind(binding);
+    refuseStream(binding.stream, refusal, binding.authorized, () => this.opts.retirePeer(binding.peerId, "unauthorized"));
+  }
+
+  /** Ends a binding for any of the causes above: kind cleanup, then abort the
+   *  writer (a no-op if it already finished), unbind, and stop the receive
+   *  half once whatever read the kind was tracking on `binding.pendingRead`
+   *  settles — never before, since `recv.stop()` would otherwise queue behind
+   *  it on the binding's shared per-stream mutex. */
+  protected end(binding: B, cause: ScopedEndCause): void {
+    if (binding.unbound) return;
+    this.onEnded(binding, cause);
+    binding.writer.abort();
+    const pending = binding.pendingRead;
+    this.unbind(binding);
+    this.stopRecv(binding, pending);
+  }
+
+  /** Stops the receive half with this kind's code once `pending` settles, or
+   *  at once when nothing is outstanding. Once per binding: several teardown
+   *  paths can each be the one that knows the recv mutex is free. */
+  protected stopRecv(binding: B, pending: Promise<unknown> | null = null): void {
+    if (this.recvStopped.has(binding)) return;
+    this.recvStopped.add(binding);
+    stopRecvWhenSettled(pending, () => { void binding.stream.recv.stop(this.spec.stopCode).catch(() => {}); });
+  }
+
+  /** Awaits `read` as the binding's one outstanding read. `READ_ENDED` when it
+   *  rejected (the app's FIN/reset, or a protocol violation the reader already
+   *  reported). `READ_UNBOUND` when the binding was released or ended while it
+   *  was outstanding: the read has settled and freed the recv mutex, so the
+   *  receive half is stopped here, since no other reader is left to do it. */
+  protected async trackRead<T>(binding: B, read: Promise<T>): Promise<T | typeof READ_ENDED | typeof READ_UNBOUND> {
+    binding.pendingRead = read;
+    let value: T;
+    try {
+      value = await read;
+    } catch {
+      return READ_ENDED;
+    } finally {
+      binding.pendingRead = null;
+    }
+    if (!binding.unbound) return value;
+    this.stopRecv(binding);
+    return READ_UNBOUND;
+  }
+
+  /** Per-record recheck, the same rule the outbound writer already applies on
+   *  every send: a lease revoked mid-stream must not keep dispatching what
+   *  the peer already had in flight. False also ends this binding. */
+  protected stillAuthorized(binding: B): boolean {
+    if (binding.authorized()) return true;
+    this.opts.retirePeer(binding.peerId, "unauthorized");
+    this.end(binding, "breach");
+    return false;
+  }
+
+  protected diag(binding: B, type: string, detail: Record<string, unknown>): void {
+    this.opts.diagnostic?.(type, detail, { kind: binding.kind, id: binding.id });
+  }
+
+  /** A voluntary, graceful retirement on the kind's own terms (the writer
+   *  already finished or is about to): just the index/cap-slot removal, with
+   *  no `onEnded` and no abort — unlike {@link end}, which is for the six
+   *  enumerated abnormal causes. */
+  protected release(binding: B): void {
+    this.unbind(binding);
+  }
+
+  private onWriterFailure(binding: B, reason: StreamWriteFailure): void {
+    if (binding.unbound) return;
+    if (reason === "unauthorized") {
+      this.opts.retirePeer(binding.peerId, "unauthorized");
+      this.end(binding, "breach");
+      return;
+    }
+    // "overflow" or "stream-lost": the writer has already reset its own half.
+    this.end(binding, reason);
+  }
+
+  /** The project's last live `ProjectStreamRegistry` entry detached: its bus
+   *  is gone, so every bound stream ends with no synthesized message — there
+   *  is nothing left to dispatch one to. */
+  projectDetached(projectId: string): void {
+    for (const set of this.peerBindings.values()) {
+      for (const binding of [...set]) {
+        if (binding.projectId !== projectId) continue;
+        this.end(binding, "detached");
+      }
+    }
+  }
+
+  /** Connection retired: end every binding for the peer. Never calls
+   *  `retirePeer` — the peer is already gone. */
+  dropPeer(peerId: string): void {
+    const set = this.peerBindings.get(peerId);
+    if (!set) return;
+    for (const binding of [...set]) this.end(binding, "peer-dropped");
+  }
+
+  private key(peerId: string, kind: string, id: string): string {
+    return `${peerId}\u0000${kind}\u0000${id}`;
+  }
+
+  private bind(binding: B): void {
+    this.bindings.set(this.key(binding.peerId, binding.kind, binding.id), binding);
+    let set = this.peerBindings.get(binding.peerId);
+    if (!set) {
+      set = new Set();
+      this.peerBindings.set(binding.peerId, set);
+    }
+    set.add(binding);
+  }
+
+  /** Removes the index entry and frees the cap slot exactly once. An
+   *  `unbound` flag, not a generation counter, is what makes every late
+   *  callback a no-op once it fires. */
+  private unbind(binding: B): void {
+    if (binding.unbound) return;
+    binding.unbound = true;
+    this.bindings.delete(this.key(binding.peerId, binding.kind, binding.id));
+    const set = this.peerBindings.get(binding.peerId);
+    if (set) {
+      set.delete(binding);
+      if (set.size === 0) this.peerBindings.delete(binding.peerId);
+    }
   }
 }

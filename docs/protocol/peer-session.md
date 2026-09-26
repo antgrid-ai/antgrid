@@ -70,9 +70,14 @@ defined once in `packages/antgrid-wire/src/stream-open.ts` and hand-mirrored in
 
 A terminal attachment (§1a's `{kind:"terminal", projectId, checkoutId?, requestId}`) gets its own stream
 once admitted by `TerminalStreamRegistry` (`bridge/src/peer/terminal-streams.ts`), plugged into
-`PeerStreamAcceptor` as `handlers.terminal`. Admission additionally requires a catalogued, safe
-`projectId` whose project currently has a live entry on the mux (`StreamMux.projectBinding`) — a lookup
-only; a stream open never opens or promotes a core. Past admission, refusal reuses §1a's in-band
+`PeerStreamAcceptor` as `handlerFor("terminal")`. Terminal, tunnel and upload streams share one admission
+path, `ScopedStreamRegistry` (`bridge/src/peer/stream-dispatch.ts`), in this order, synchronous and before
+any read: the kind's per-peer cap (`CAP_EXCEEDED`); the kind's own open-frame check (terminal: a uuid
+`requestId`, `INVALID`); `isSafeProjectId` (`NOT_ALLOWED`); the project catalogued (`NOT_ALLOWED`); a live
+entry for the project (`ProjectStreamRegistry.projectBinding`, `NOT_READY`) — a lookup only; a stream open
+never opens or promotes a core; that peer holding the project's stream open (`NOT_ALLOWED`); the project's
+own `refusalFor`, masked to `NOT_ALLOWED`; a duplicate (peer, kind, id) (`INVALID`); and the kind's own
+server being available (tunnel, upload: `NOT_ALLOWED`). Past admission, refusal reuses §1a's in-band
 `stream:refused` codes; a `NOT_READY` here means the project has no live mux entry yet, not that the open
 frame was malformed.
 
@@ -117,10 +122,9 @@ one per exchange: `{kind:"tunnel-http", projectId, requestId}` opens one
 stream for exactly one HTTP request/response pair, `{kind:"tunnel-ws", projectId, wsId}` one stream for
 one browser-side WebSocket's whole lifetime. Both are admitted by `TunnelStreamRegistry`
 (`bridge/src/peer/tunnel-streams.ts`), plugged into `PeerStreamAcceptor` as `handlers["tunnel-http"]` /
-`handlers["tunnel-ws"]`, and pass through §1a's cap/pending-open/timeout admission exactly as a terminal
-stream does — including the catalogued-and-safe `projectId` / live mux binding check
-(`StreamMux.tunnelBinding`, the tunnel counterpart of `projectBinding`), a lookup only, never an open or a
-promotion.
+`handlers["tunnel-ws"]` (one registry, one cap shared by both kinds), and pass through §1a's
+cap/pending-open/timeout admission and §1b's shared project-scoped admission exactly as a terminal stream
+does — a lookup only, never an open or a promotion.
 
 **Record framing.** A tunnel stream carries two shapes of record. The head/close control records are
 length-prefixed, `[u32 BE len][body]`, discriminated by the body's first byte:
@@ -180,9 +184,8 @@ session stream (§1a) is left carrying only the machine control plane: the hello
 `session:ping` and its `session:pong`, and machine-scoped verbs such as `agent:projects`, `stream-ready`
 and `control:result`. Admitted
 and routed by `ProjectStreamRegistry` (`bridge/src/project-streams.ts`), plugged into `PeerStreamAcceptor`
-as `handlers.project`, and exposed to `TerminalStreamRegistry`/`TunnelStreamRegistry` as
-`projectBinding`/`tunnelBinding` — both lookups only; neither a terminal nor a tunnel open ever opens or
-promotes a core.
+as `handlers.project`, and exposed to the terminal, tunnel and upload registries as
+`projectBinding` — a lookup only; none of their opens ever opens or promotes a core.
 
 **Admission order**, synchronous and before any read: a per-peer cap (`STREAM_MAX_PROJECTS_PER_PEER`,
 `CAP_EXCEEDED`); `isSafeProjectId` (`NOT_ALLOWED`); the remote-access switch (`NOT_ALLOWED`); the project
@@ -222,18 +225,13 @@ tunnel priority) are side-local to `bridge/src/project-streams.ts`.
 
 A remote file upload gets its own stream, `{kind:"upload", projectId, checkoutId?, requestId, fileName,
 size, mimeType?}`, admitted by `UploadStreamRegistry` (`bridge/src/peer/upload-streams.ts`), plugged into
-`PeerStreamAcceptor` as `handlers.upload`, and exposed to it via `ProjectStreamRegistry.uploadBinding`
-(`UploadProjectBinding`, the upload counterpart of `tunnelBinding`/`projectBinding`) — a lookup only; an
-upload stream never opens or promotes a core.
+`PeerStreamAcceptor` as `handlers.upload`, and exposed to it via `ProjectStreamRegistry.projectBinding`
+(`UploadProjectBinding`) — a lookup only; an upload stream never opens or promotes a core.
 
-**Admission order.** Steps 1-8 run synchronously, before any read, and bind the stream on success so a
-cap or duplicate check across concurrent opens is race-free: a per-peer cap
-(`STREAM_MAX_UPLOAD_STREAMS_PER_PEER`, `CAP_EXCEEDED`); `isSafeProjectId` (`NOT_ALLOWED`); the project
-catalogued (`NOT_ALLOWED`); a live project-stream entry for the project (`NOT_READY`); that peer already
-holding the project's stream open (`NOT_ALLOWED`); the project's own `refusalFor`
-(`NOT_ALLOWED`); a duplicate open for the same (peer, requestId) pair (`INVALID`); and
-the project declaring an upload server at all (`NOT_ALLOWED`). Steps 9-12 continue asynchronously once
-bound: `UploadStreamServer.admit(peerId, checkoutId)` — unlike `tunnelStreams.admit` (§1c), this may
+**Admission order.** §1b's shared project-scoped steps run synchronously, before any read, and bind the
+stream on success so a cap or duplicate check across concurrent opens is race-free
+(`STREAM_MAX_UPLOAD_STREAMS_PER_PEER`; the last step is the project declaring an upload server at all).
+The rest continues asynchronously once bound: `UploadStreamServer.admit(peerId, checkoutId)` — unlike `tunnelStreams.admit` (§1c), this may
 PREPARE a checkout runtime that is not yet running, replicating the lazy prepare an app's socket-path
 upload verbs relied on before a stream open bypassed that bus-level dispatch — then
 `FileUploadManager.begin()`, which admits the declared `fileName`/`size` and opens the file.

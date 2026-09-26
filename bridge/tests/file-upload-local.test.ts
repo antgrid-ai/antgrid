@@ -16,8 +16,8 @@ import {
   TerminalStreamRegistry,
   type TerminalStreamRegistryOptions,
 } from "../src/peer/terminal-streams";
-import type { TerminalProjectBinding, PeerSessionView } from "../src/project-streams";
-import type { StreamRefusal } from "../src/peer/stream-dispatch";
+import type { TerminalProjectBinding } from "../src/project-streams";
+import { createFakeBiStream, flush } from "./support/fake-bi-stream";
 
 /** Capture pino JSONL lines written during `fn` — the same technique
  *  `agent-core-checkout-routing.test.ts` uses to distinguish "dropped" from
@@ -153,45 +153,11 @@ describe("file:upload-local on a terminal stream", () => {
   const PROJECT = "proj1";
   const PEER = "peer1";
 
-  function lengthPrefixed(body: Buffer): number[][] {
-    const prefix = Buffer.alloc(4);
-    prefix.writeUInt32BE(body.length);
-    return [Array.from(prefix), Array.from(body)];
-  }
-
-  function createFakeStream() {
-    const resetCalls: bigint[] = [];
-    const stopCalls: bigint[] = [];
-    const recvQueue: number[][] = [];
-    const waiters: Array<{ resolve: (v: number[]) => void; reject: (e: unknown) => void }> = [];
-    function pump(): void {
-      while (waiters.length && recvQueue.length) waiters.shift()!.resolve(recvQueue.shift()!);
-    }
-    const send = {
-      writeAll: async () => {},
-      setPriority: async () => {},
-      reset: async (code: bigint) => { resetCalls.push(code); },
-      finish: async () => {},
-    };
-    const recv = {
-      readExact: () => new Promise<number[]>((resolve, reject) => { waiters.push({ resolve, reject }); pump(); }),
-      read: () => new Promise<number[]>((resolve, reject) => { waiters.push({ resolve, reject }); pump(); }),
-      stop: async (code: bigint) => { stopCalls.push(code); },
-    };
-    return {
-      stream: { send, recv }, resetCalls, stopCalls,
-      pushRecord(msg: AbMessage | Record<string, unknown>): void {
-        for (const chunk of lengthPrefixed(Buffer.from(JSON.stringify(msg), "utf8"))) recvQueue.push(chunk);
-        pump();
-      },
-    };
-  }
-
   function fakeBinding() {
     const dispatched: Array<{ msg: AbMessage; peerId: string }> = [];
     const binding: TerminalProjectBinding = {
       hasOpenStream: () => true,
-      refusalFor: () => null,
+      refusalFor: () => undefined,
       dispatch: (msg, peerId) => { dispatched.push({ msg, peerId }); return true; },
     };
     return { binding, dispatched };
@@ -201,14 +167,9 @@ describe("file:upload-local on a terminal stream", () => {
     const opts: TerminalStreamRegistryOptions = {
       projectCataloged: (id) => cataloged.has(id),
       projectBinding: (id) => bindings.get(id) ?? null,
-      peerSession: () => null as PeerSessionView | null,
       retirePeer: () => {},
     };
     return new TerminalStreamRegistry(opts);
-  }
-
-  function flush(): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, 0));
   }
 
   test("file:upload-local as the first record is refused by the terminal-stream allowlist, and never reaches the project binding", async () => {
@@ -218,10 +179,10 @@ describe("file:upload-local on a terminal stream", () => {
     bindings.set(PROJECT, binding);
     const registry = makeRegistry(bindings, cataloged);
 
-    const fake = createFakeStream();
+    const fake = createFakeBiStream();
     const open = { kind: "terminal" as const, projectId: PROJECT, checkoutId: "main", requestId: crypto.randomUUID() };
     const admission = { peerId: PEER, open, stream: fake.stream, authorized: () => true };
-    registry.handler(admission);
+    registry.handlerFor("terminal")(admission);
 
     fake.pushRecord(createMessage("file:upload-local", {
       projectId: PROJECT, requestId: "r1", fileName: "a.bin", sourcePath: "/tmp/a.bin",
@@ -229,7 +190,7 @@ describe("file:upload-local on a terminal stream", () => {
     await flush();
 
     expect(dispatched).toEqual([]); // never reached the project binding, so never reaches copyLocal
-    expect(fake.resetCalls.length).toBe(1);
-    expect(fake.stopCalls.length).toBe(1);
+    expect(fake.resets.length).toBe(1);
+    expect(fake.stops.length).toBe(1);
   });
 });

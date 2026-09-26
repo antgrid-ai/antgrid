@@ -12,10 +12,11 @@ import { EndpointLifecycle, EndpointFailure } from "./endpoint-lifecycle";
 import type { RemoteHostConnection } from "../remote-host-connection";
 import { frameIdFor, NETWATCH_SESSION_STREAM_LABEL } from "../netwatch";
 import { AdmissionRegistry, type AdmissionReservation } from "./admission-registry";
-import { PeerStreamAcceptor, readStreamOpen } from "./stream-dispatch";
+import { PeerStreamAcceptor, readStreamOpen, type ScopedStreamOptions, type StreamDiagnostic } from "./stream-dispatch";
 import { TerminalStreamRegistry } from "./terminal-streams";
 import { TunnelStreamRegistry } from "./tunnel-streams";
 import { UploadStreamRegistry } from "./upload-streams";
+import type { ProjectBinding } from "../project-streams";
 import type { AbMessage } from "../protocol";
 import { StreamRecordWriter, StreamRecordReader, StreamProtocolViolation, type PeerRecordFailure, type StreamSendOutcome } from "./stream-records";
 
@@ -96,6 +97,9 @@ export class NativePeerSessions extends PeerSessionOwner {
   private readonly terminalStreams: TerminalStreamRegistry;
   private readonly tunnelStreams: TunnelStreamRegistry;
   private readonly uploadStreams: UploadStreamRegistry;
+  /** The three project-scoped registries, for the teardown loops every one of
+   *  them needs alike (`retirePeer`, `terminalProjectDetached`). */
+  private readonly scopedStreams: readonly { projectDetached(projectId: string): void; dropPeer(peerId: string): void }[];
   private readonly lease: AuthorizationLease;
   private lifetime = 0;
   private stopped = false;
@@ -140,43 +144,30 @@ export class NativePeerSessions extends PeerSessionOwner {
         this.recheckAuthorization();
         this.reconcileRelays();
       }, nativeOpts.lifecycle?.now, nativeOpts.lifecycle?.random, nativeOpts.lifecycle?.schedule);
-    this.terminalStreams = new TerminalStreamRegistry({
+    // Shared by every project-scoped registry: the lookup never opens or
+    // promotes a core, and `retirePeer` is guarded the same way
+    // `onUnauthorized` above is — a stale binding from a superseded
+    // connection must never retire the peer's NEWER one.
+    const diagnostic: StreamDiagnostic = (type, detail, stream) => this.recordDiagnostic({
+      dir: "event", kind: "lifecycle", transport: "iroh", msgType: type,
+      // The registry's diagnostic detail is `Record<string, unknown>` (generic
+      // over every stream event this file has no reason to enumerate);
+      // netwatch's is narrower. Diagnostics are
+      // observability only, never a security or routing decision, so the
+      // cast is safe here in a way it would not be for an authorization value.
+      detail: detail as Record<string, string | number | boolean>,
+      ...(stream ? { streamKind: stream.kind, streamId: stream.id } : {}),
+    });
+    const scoped: ScopedStreamOptions<ProjectBinding> = {
       projectCataloged: nativeOpts.projectCataloged,
       projectBinding: (projectId) => this.projectStreams.projectBinding(projectId),
-      peerSession: (peerId) => this.peerSession(peerId),
-      // Guarded the same way `onUnauthorized` above is: a stale binding from a
-      // superseded connection must never retire the peer's NEWER one.
       retirePeer: (peerId, reason) => { if (this.nativePeers.has(peerId)) this.retirePeer(peerId, reason); },
-      // The registry's diagnostic detail is `Record<string, unknown>` (§3.2's
-      // contract-pinned shape, generic over every terminal-stream event this
-      // file has no reason to enumerate); netwatch's is narrower. Diagnostics
-      // are observability only, never a security or routing decision, so the
-      // cast is safe here in a way it would not be for an authorization value.
-      diagnostic: (type, detail, stream) => this.recordDiagnostic({ dir: "event", kind: "lifecycle", transport: "iroh",
-        msgType: type, detail: detail as Record<string, string | number | boolean>,
-        ...(stream ? { streamKind: stream.kind, streamId: stream.id } : {}) }),
-    });
-    this.tunnelStreams = new TunnelStreamRegistry({
-      projectCataloged: nativeOpts.projectCataloged,
-      tunnelBinding: (projectId) => this.projectStreams.projectBinding(projectId),
-      // Guarded the same way `terminalStreams`'s is: a stale binding from a
-      // superseded connection must never retire the peer's NEWER one.
-      retirePeer: (peerId, reason) => { if (this.nativePeers.has(peerId)) this.retirePeer(peerId, reason); },
-      diagnostic: (type, detail, stream) => this.recordDiagnostic({ dir: "event", kind: "lifecycle", transport: "iroh",
-        msgType: type, detail: detail as Record<string, string | number | boolean>,
-        ...(stream ? { streamKind: stream.kind, streamId: stream.id } : {}) }),
-    });
-    this.uploadStreams = new UploadStreamRegistry({
-      projectCataloged: nativeOpts.projectCataloged,
-      uploadBinding: (projectId) => this.projectStreams.projectBinding(projectId),
-      // Guarded the same way `terminalStreams`'s / `tunnelStreams`'s is: a
-      // stale binding from a superseded connection must never retire the
-      // peer's NEWER one.
-      retirePeer: (peerId, reason) => { if (this.nativePeers.has(peerId)) this.retirePeer(peerId, reason); },
-      diagnostic: (type, detail, stream) => this.recordDiagnostic({ dir: "event", kind: "lifecycle", transport: "iroh",
-        msgType: type, detail: detail as Record<string, string | number | boolean>,
-        ...(stream ? { streamKind: stream.kind, streamId: stream.id } : {}) }),
-    });
+      diagnostic,
+    };
+    this.terminalStreams = new TerminalStreamRegistry(scoped);
+    this.tunnelStreams = new TunnelStreamRegistry(scoped);
+    this.uploadStreams = new UploadStreamRegistry(scoped);
+    this.scopedStreams = [this.terminalStreams, this.tunnelStreams, this.uploadStreams];
   }
 
   connect(): void {
@@ -200,9 +191,7 @@ export class NativePeerSessions extends PeerSessionOwner {
   }
 
   protected override terminalProjectDetached(projectId: string): void {
-    this.terminalStreams.projectDetached(projectId);
-    this.tunnelStreams.projectDetached(projectId);
-    this.uploadStreams.projectDetached(projectId);
+    for (const registry of this.scopedStreams) registry.projectDetached(projectId);
   }
 
   private async startEndpoint(): Promise<Endpoint> {
@@ -453,10 +442,10 @@ export class NativePeerSessions extends PeerSessionOwner {
       onUnauthorized: () => { if (this.nativePeers.get(peerId) === peer) this.retirePeer(peerId, "unauthorized"); },
       handlers: {
         project: this.projectStreams.handler,
-        terminal: this.terminalStreams.handler,
-        "tunnel-http": this.tunnelStreams.httpHandler,
-        "tunnel-ws": this.tunnelStreams.wsHandler,
-        upload: this.uploadStreams.handler,
+        terminal: this.terminalStreams.handlerFor("terminal"),
+        "tunnel-http": this.tunnelStreams.handlerFor("tunnel-http"),
+        "tunnel-ws": this.tunnelStreams.handlerFor("tunnel-ws"),
+        upload: this.uploadStreams.handlerFor("upload"),
       },
       schedule: this.nativeOpts.lifecycle?.schedule,
       diagnostic: (type, detail, stream) => this.recordDiagnostic({ dir: "event", kind: "lifecycle", transport: "iroh", msgType: type, detail,
@@ -518,9 +507,7 @@ export class NativePeerSessions extends PeerSessionOwner {
     this.nativePeers.delete(peerId);
     peer.cancelHelloTimer?.();
     peer.streams?.stop();
-    this.terminalStreams.dropPeer(peerId);
-    this.tunnelStreams.dropPeer(peerId);
-    this.uploadStreams.dropPeer(peerId);
+    for (const registry of this.scopedStreams) registry.dropPeer(peerId);
     this.projectStreams.dropPeer(peerId);
     peer.connection.close(reason === "unauthorized" ? 3n : reason === "protocol-violation" ? 2n : 1n, []);
     peer.sessionWriter?.abort();

@@ -5,10 +5,14 @@
  * Everything else (`terminal:input`, `terminal:resize`, `terminal:start`, ...)
  * stays on the project stream, unchanged.
  *
- * This registry is plugged into `PeerStreamAcceptor` as the `terminal`
- * handler and into `ProjectStreamRegistry` as `routeTerminal` +
- * `terminalHooks`. It never opens or promotes a core: `projectBinding` is a
- * lookup over whatever the registry already has attached.
+ * This registry is plugged into `PeerStreamAcceptor` (via `handlerFor`) as the
+ * `terminal` handler and into `ProjectStreamRegistry` as `routeTerminal` +
+ * `terminalHooks`. Admission (the per-peer cap, the safe-id/catalog checks,
+ * the project's own binding lookup) lives once in `ScopedStreamRegistry`
+ * (`stream-dispatch.ts`); this file owns only the requestId shape and the
+ * body: which record must come first, how later records are validated, and
+ * what ending a binding for any reason means for this kind (a synthesized
+ * `terminal:unsubscribe`).
  */
 
 import { z } from "zod";
@@ -19,21 +23,16 @@ import {
   type TerminalStreamOpen,
 } from "antgrid-wire";
 import { createMessage, parseMessage, type AbMessage } from "../protocol";
-import type { NetwatchStreamKind } from "../netwatch";
+import { StreamRecordReader, type StreamSendOutcome } from "./stream-records";
 import {
-  StreamRecordReader,
-  StreamRecordWriter,
-  type StreamSendOutcome,
-  type StreamWriteFailure,
-} from "./stream-records";
-import {
-  gateProjectStream,
-  type AcceptedBiStream,
-  type StreamAdmission,
-  type StreamHandler,
-  type StreamRefusal as DispatchStreamRefusal,
+  READ_ENDED,
+  READ_UNBOUND,
+  ScopedStreamRegistry,
+  type ScopedBinding,
+  type ScopedEndCause,
+  type ScopedStreamOptions,
 } from "./stream-dispatch";
-import type { PeerSessionView, TerminalProjectBinding } from "../project-streams";
+import type { TerminalProjectBinding } from "../project-streams";
 
 /** One viewer window (`TERMINAL_VIEWER_MAX_BYTES`) plus four history pages
  *  plus notices. Exceeding it resets only this stream — the app reopens
@@ -63,194 +62,135 @@ export const TERMINAL_STREAM_OUTBOUND_TYPES: ReadonlySet<string> = new Set([
 const requestIdSchema = z.string().uuid();
 const textEncoder = new TextEncoder();
 
-export interface TerminalStreamRegistryOptions {
-  /** host-server `seenProjects.has`. Absent => every open is refused NOT_ALLOWED (fail closed). */
-  projectCataloged?: (projectId: string) => boolean;
-  /** `ProjectStreamRegistry.projectBinding`. Lookup only: never opens or promotes a core. */
-  projectBinding: (projectId: string) => TerminalProjectBinding | null;
-  peerSession: (peerId: string) => PeerSessionView | null;
-  /** Retires the whole connection. Only ever called with "unauthorized" (writer) or
-   *  "protocol-violation" (a malformed length prefix from StreamRecordReader). */
-  retirePeer: (peerId: string, reason: "unauthorized" | "protocol-violation") => void;
-  /** `stream` names the record's native stream for `NetwatchEvent.streamKind`/
-   *  `streamId` — always `"terminal"` here, paired with the binding's own
-   *  `requestId` (stable for the attachment's whole life, the same way a
-   *  project stream's `streamId` is its `projectId`). Absent only for an event
-   *  with no single binding to attribute (there are none today). */
-  diagnostic?: (type: string, detail: Record<string, unknown>, stream?: { kind: NetwatchStreamKind; id: string }) => void;
-}
+export type TerminalStreamRegistryOptions = ScopedStreamOptions<TerminalProjectBinding>;
 
-interface Binding {
-  readonly peerId: string;
-  readonly requestId: string;
-  readonly projectId: string;
+interface TerminalBinding extends ScopedBinding<TerminalProjectBinding> {
   /** Normalized (absent => "main"); re-stamped from the bridge's own
    *  `terminal:subscribed` once it exists, though it never actually changes. */
   checkoutId: string;
-  readonly stream: AcceptedBiStream;
-  readonly writer: StreamRecordWriter;
   readonly reader: StreamRecordReader;
-  readonly projectBinding: TerminalProjectBinding;
-  /** The admission's own authorization check, re-read on every inbound record
-   *  by `runLoop` — the mirror of the outbound check the writer already runs
-   *  on every send (`tunnel-streams.ts`'s read loops apply the same rule). */
-  readonly authorized: () => boolean;
   attachmentId?: string;
   runId?: string;
   terminalId?: string;
-  /** The app's send half ended (FIN or reset) before this binding was unbound. */
+  /** The app's send half ended (FIN or reset) while a subscribe was still
+   *  resolving: the binding stays indexed and bound until `route()` or
+   *  `subscribeSettled()` learns the outcome — see `handleAppEnd`. */
   appEnded: boolean;
   /** `writer.finish()` has been issued by `retired()`/`subscribeSettled()`. */
   retiring: boolean;
-  /** Removed from every index and its cap slot freed. Doubles as the
-   *  staleness guard a torn-down connection's late callbacks check: once a
-   *  binding is unbound (by `dropPeer`, an unauthorized writer failure's
-   *  eventual peer retirement, or its own lifecycle), nothing may act on it
-   *  again — which is what keeps a lagging callback from a dead connection
-   *  reaching into whatever now uses the same peerId. */
-  unbound: boolean;
 }
 
-/** `(peerId, requestId | attachmentId) -> writer`, registered into
- *  `PeerStreamAcceptor`'s handler table as `{ terminal: registry.handler }`. */
-export class TerminalStreamRegistry {
-  private readonly byRequestId = new Map<string, Binding>();
-  private readonly byAttachmentId = new Map<string, Binding>();
-  private readonly peerBindings = new Map<string, Set<Binding>>();
+/** `(peerId, requestId | attachmentId) -> binding`, registered into
+ *  `PeerStreamAcceptor`'s handler table via `handlerFor("terminal")`. */
+export class TerminalStreamRegistry extends ScopedStreamRegistry<TerminalStreamOpen, TerminalBinding, TerminalProjectBinding> {
+  private readonly byRequestId = new Map<string, TerminalBinding>();
+  private readonly byAttachmentId = new Map<string, TerminalBinding>();
 
-  constructor(private readonly opts: TerminalStreamRegistryOptions) {}
-
-  readonly handler: StreamHandler<TerminalStreamOpen> = (admission) => this.admit(admission);
-
-  attachmentCount(peerId: string): number {
-    return this.peerBindings.get(peerId)?.size ?? 0;
+  constructor(opts: TerminalStreamRegistryOptions) {
+    super({
+      kinds: ["terminal"],
+      cap: STREAM_MAX_TERMINAL_ATTACHMENTS_PER_PEER,
+      capMessage: "too many terminal attachments",
+      priority: STREAM_PRIORITY_TERMINAL,
+      resetCode: STREAM_RESET_TERMINAL,
+      stopCode: STREAM_STOP_TERMINAL,
+      maxQueuedBytes: TERMINAL_STREAM_MAX_QUEUED_BYTES,
+    }, opts);
   }
 
-  /** Every check is synchronous and runs before any read is issued on `recv`:
-   *  a handler that has started its read loop never returns a refusal again. */
-  private admit(admission: StreamAdmission<TerminalStreamOpen>): DispatchStreamRefusal | undefined {
-    const { peerId, open, stream, authorized } = admission;
-    const { projectId, requestId } = open;
-    const checkoutId = open.checkoutId ?? "main";
-
-    if (!requestIdSchema.safeParse(requestId).success) {
-      return { code: "INVALID", message: "requestId must be a uuid" };
+  protected validateOpen(open: TerminalStreamOpen) {
+    if (!requestIdSchema.safeParse(open.requestId).success) {
+      return { code: "INVALID" as const, message: "requestId must be a uuid" };
     }
-    // The project stream is the single per-peer admission point for a
-    // projectId — this is what keeps root CLAUDE.md's "seenProjects +
-    // isSafeProjectId are the only bound" true. Closing the project stream
-    // does not unbind an already-open terminal stream.
-    const gated = gateProjectStream(
-      peerId,
-      projectId,
-      { open: this.attachmentCount(peerId), max: STREAM_MAX_TERMINAL_ATTACHMENTS_PER_PEER, message: "too many terminal attachments" },
-      this.opts.projectCataloged,
-      (id) => this.opts.projectBinding(id),
-    );
-    if (!gated.ok) return gated.refusal;
-    const projectBinding = gated.binding;
-    if (this.byRequestId.has(this.key(peerId, requestId))) {
-      return { code: "INVALID", message: "duplicate requestId" };
-    }
-
-    // `binding` is referenced by the writer/reader failure closures below
-    // before it is assigned; both only ever run after `admit` has returned.
-    let binding!: Binding;
-    const writer = new StreamRecordWriter(
-      stream,
-      authorized,
-      (reason) => this.onWriterFailure(binding, reason),
-      TERMINAL_STREAM_MAX_QUEUED_BYTES,
-      STREAM_PRIORITY_TERMINAL,
-      STREAM_RESET_TERMINAL,
-    );
-    const reader = new StreamRecordReader(
-      stream,
-      STREAM_TERMINAL_APP_RECORD_MAX_BYTES,
-      () => {
-        if (!binding.unbound) this.opts.retirePeer(peerId, "protocol-violation");
-      },
-    );
-    binding = {
-      peerId,
-      requestId,
-      projectId,
-      checkoutId,
-      stream,
-      writer,
-      reader,
-      projectBinding,
-      authorized,
-      appEnded: false,
-      retiring: false,
-      unbound: false,
-    };
-    this.bindRequest(binding);
-    void this.runLoop(binding);
     return undefined;
   }
 
-  /** For each record: parse with full Zod, check it against the §1 rules,
-   *  then hand it to `binding.projectBinding.dispatch`. A record that fails
+  protected idOf(open: TerminalStreamOpen): string {
+    return open.requestId;
+  }
+
+  protected createBinding(base: ScopedBinding<TerminalProjectBinding>, open: TerminalStreamOpen): TerminalBinding {
+    let binding!: TerminalBinding;
+    const reader = new StreamRecordReader(
+      base.stream,
+      STREAM_TERMINAL_APP_RECORD_MAX_BYTES,
+      () => { if (!binding.unbound) this.opts.retirePeer(base.peerId, "protocol-violation"); },
+    );
+    binding = { ...base, checkoutId: open.checkoutId ?? "main", reader, appEnded: false, retiring: false };
+    this.byRequestId.set(this.indexKey(binding.peerId, binding.id), binding);
+    return binding;
+  }
+
+  protected serve(binding: TerminalBinding): void {
+    void this.runLoop(binding);
+  }
+
+  /** Kind cleanup for every abnormal end: an attachment already bound (an
+   *  app-side end or a writer overflow/loss) is reported to the core as an
+   *  unsubscribe the app can no longer send itself. A breach, a project
+   *  detach or a peer drop synthesize nothing — the loop below already
+   *  refused a breach before dispatch, and detach/drop have no bus, or nobody,
+   *  left to tell. */
+  protected onEnded(binding: TerminalBinding, cause: ScopedEndCause): void {
+    this.deindex(binding);
+    if (cause !== "app-ended" && cause !== "overflow" && cause !== "stream-lost") return;
+    if (binding.attachmentId === undefined) return;
+    binding.project.dispatch(
+      createMessage("terminal:unsubscribe", {
+        terminalId: binding.terminalId!,
+        runId: binding.runId!,
+        attachmentId: binding.attachmentId!,
+        checkoutId: binding.checkoutId,
+      }),
+      binding.peerId,
+    );
+  }
+
+  /** For each record: parse with full Zod, check it against the terminal record rules,
+   *  then hand it to `binding.project.dispatch`. A record that fails
    *  parsing/the rules, or a `dispatch` that returns false, is a STREAM
    *  breach: abort the writer, unbind, and stop the receive half — never the
    *  connection. The app's FIN or reset (a rejected `read()`) is routine and
    *  exits the loop without a `stop`. */
-  private async runLoop(binding: Binding): Promise<void> {
+  private async runLoop(binding: TerminalBinding): Promise<void> {
     let first = true;
     for (;;) {
-      let bytes: Uint8Array;
-      try {
-        bytes = await binding.reader.read();
-      } catch {
-        // A StreamProtocolViolation already retired the connection through
-        // the reader's own onFailure (synchronously, before it threw), which
-        // unbinds every one of this peer's bindings via dropPeer — so by the
-        // time we get here `unbound` is already true for that case, and this
-        // branch only ever does real work for the app's own FIN/reset.
+      if (binding.unbound) return;
+      const bytes = await this.trackRead(binding, binding.reader.read());
+      if (bytes === READ_UNBOUND) return;
+      if (bytes === READ_ENDED) {
+        // A protocol violation already retired the connection (and so
+        // unbound this) before the read threw; only the app's own FIN/reset
+        // reaches handleAppEnd.
         if (!binding.unbound) this.handleAppEnd(binding);
         return;
       }
-      if (binding.unbound) {
-        // Retired or settled while this read was outstanding. The read has
-        // completed, so the recv lock is free: stop the half rather than
-        // abandon it, or the stream keeps its QUIC stream slot until GC.
-        void binding.stream.recv.stop(STREAM_STOP_TERMINAL).catch(() => {});
-        return;
-      }
-      // Re-checked per record, the same as the outbound writer and as
-      // tunnel-streams.ts's own read loops: a lease revoked mid-stream must
-      // not keep dispatching whatever the peer already had in flight.
-      if (!binding.authorized()) { this.opts.retirePeer(binding.peerId, "unauthorized"); return; }
+      // Re-checked per record: a lease revoked mid-stream must not keep
+      // dispatching whatever the peer already had in flight.
+      if (!this.stillAuthorized(binding)) return;
       const msg = parseMessage(Buffer.from(bytes).toString("utf-8"));
       const ok = msg !== null && (first ? this.acceptsFirstRecord(binding, msg) : this.acceptsLaterRecord(binding, msg));
       if (!ok) {
-        this.breach(binding);
+        this.end(binding, "breach");
         return;
       }
       first = false;
-      if (!binding.projectBinding.dispatch(msg!, binding.peerId)) {
-        this.breach(binding);
+      if (!binding.project.dispatch(msg!, binding.peerId)) {
+        this.end(binding, "breach");
         return;
       }
     }
   }
 
-  private breach(binding: Binding): void {
-    binding.writer.abort();
-    this.unbind(binding);
-    void binding.stream.recv.stop(STREAM_STOP_TERMINAL).catch(() => {});
-  }
-
-  private acceptsFirstRecord(binding: Binding, msg: AbMessage): boolean {
+  private acceptsFirstRecord(binding: TerminalBinding, msg: AbMessage): boolean {
     if (msg.type !== "terminal:subscribe") return false;
-    if (msg.requestId !== binding.requestId) return false;
+    if (msg.requestId !== binding.id) return false;
     if (msg.checkoutId !== binding.checkoutId) return false;
     binding.terminalId = msg.terminalId;
     return true;
   }
 
-  private acceptsLaterRecord(binding: Binding, msg: AbMessage): boolean {
+  private acceptsLaterRecord(binding: TerminalBinding, msg: AbMessage): boolean {
     if (msg.type !== "terminal:ack" && msg.type !== "terminal:unsubscribe" && msg.type !== "terminal:history:request") {
       return false;
     }
@@ -264,54 +204,20 @@ export class TerminalStreamRegistry {
       && msg.runId === binding.runId;
   }
 
-  /** The app's FIN or reset. If an attachment was already bound, synthesize
-   *  the `terminal:unsubscribe` the app can no longer send itself, exactly as
-   *  if it had — FIN/reset means unsubscribe. Otherwise the
-   *  binding stays indexed by requestId, marked `appEnded`, so a
-   *  `terminal:subscribed` or `display:status` still in flight from the core
-   *  resolves through `route()` instead of vanishing — see its handling —
-   *  unless the subscribe itself never arrived. */
-  private handleAppEnd(binding: Binding): void {
-    const hadAttachment = binding.attachmentId !== undefined;
-    // No subscribe was ever dispatched, so no `subscribed` or `subscribeSettled`
-    // will come to unbind it: holding it would leak a cap slot per app close
-    // that lands while its open is still resolving.
-    const subscribeInFlight = binding.terminalId !== undefined;
-    if (hadAttachment) {
-      binding.projectBinding.dispatch(
-        createMessage("terminal:unsubscribe", {
-          terminalId: binding.terminalId!,
-          runId: binding.runId!,
-          attachmentId: binding.attachmentId!,
-          checkoutId: binding.checkoutId,
-        }),
-        binding.peerId,
-      );
-    }
-    binding.appEnded = true;
-    binding.writer.abort();
-    if (hadAttachment || !subscribeInFlight) this.unbind(binding);
-  }
-
-  private onWriterFailure(binding: Binding, reason: StreamWriteFailure): void {
-    if (binding.unbound) return;
-    if (reason === "unauthorized") {
-      this.opts.retirePeer(binding.peerId, "unauthorized");
+  /** The app's FIN or reset. If an attachment was already bound, or none was
+   *  ever requested, the binding is done now. Otherwise a subscribe is still
+   *  resolving (`terminalId` set, no `attachmentId` yet): hold the binding —
+   *  indexed and bound — so `subscribeSettled()`/`route()`'s eventual
+   *  `terminal:subscribed` still finishes it, instead of leaking a cap slot
+   *  per app close that lands while the subscribe is still in flight. */
+  private handleAppEnd(binding: TerminalBinding): void {
+    const subscribeInFlight = binding.attachmentId === undefined && binding.terminalId !== undefined;
+    if (subscribeInFlight) {
+      binding.appEnded = true;
+      binding.writer.abort();
       return;
     }
-    // "overflow" or "stream-lost": the writer has already reset its half.
-    if (binding.attachmentId !== undefined) {
-      binding.projectBinding.dispatch(
-        createMessage("terminal:unsubscribe", {
-          terminalId: binding.terminalId!,
-          runId: binding.runId!,
-          attachmentId: binding.attachmentId!,
-          checkoutId: binding.checkoutId,
-        }),
-        binding.peerId,
-      );
-    }
-    this.unbind(binding);
+    this.end(binding, "app-ended");
   }
 
   /** Routes one outbound terminal message onto its bound stream, called from
@@ -323,7 +229,7 @@ export class TerminalStreamRegistry {
     if (!TERMINAL_STREAM_OUTBOUND_TYPES.has(msg.type)) return undefined;
     switch (msg.type) {
       case "terminal:subscribed": {
-        const binding = this.byRequestId.get(this.key(peerId, msg.requestId));
+        const binding = this.byRequestId.get(this.indexKey(peerId, msg.requestId));
         if (!binding) return undefined;
         binding.attachmentId = msg.attachmentId;
         binding.runId = msg.runId;
@@ -331,21 +237,22 @@ export class TerminalStreamRegistry {
         binding.checkoutId = msg.checkoutId;
         this.indexByAttachment(binding);
         if (binding.appEnded || binding.retiring) {
-          this.unbind(binding);
+          this.deindex(binding);
+          this.release(binding);
           return Promise.resolve("dropped");
         }
         return this.enqueue(binding, msg, signal);
       }
       case "terminal:display:status": {
         const binding =
-          (msg.attachmentId ? this.byAttachmentId.get(this.key(peerId, msg.attachmentId)) : undefined) ??
-          (msg.requestId ? this.byRequestId.get(this.key(peerId, msg.requestId)) : undefined);
+          (msg.attachmentId ? this.byAttachmentId.get(this.indexKey(peerId, msg.attachmentId)) : undefined) ??
+          (msg.requestId ? this.byRequestId.get(this.indexKey(peerId, msg.requestId)) : undefined);
         if (!binding) return undefined;
         return this.enqueue(binding, msg, signal);
       }
       case "terminal:frame":
       case "terminal:history:page": {
-        const binding = this.byAttachmentId.get(this.key(peerId, msg.attachmentId));
+        const binding = this.byAttachmentId.get(this.indexKey(peerId, msg.attachmentId));
         if (!binding) return undefined;
         return this.enqueue(binding, msg, signal);
       }
@@ -354,16 +261,12 @@ export class TerminalStreamRegistry {
     }
   }
 
-  private enqueue(binding: Binding, msg: AbMessage, signal?: AbortSignal): Promise<StreamSendOutcome> {
+  private enqueue(binding: TerminalBinding, msg: AbMessage, signal?: AbortSignal): Promise<StreamSendOutcome> {
     const bytes = textEncoder.encode(JSON.stringify(msg));
     // Unreachable while delivery caps frames at TERMINAL_VIEWER_MAX_BYTES
     // (1 MiB) — this cap is the app reader's, at twice that.
     if (bytes.length > STREAM_TERMINAL_BRIDGE_RECORD_MAX_BYTES) {
-      this.opts.diagnostic?.("terminal-stream:oversized-record", {
-        peerId: binding.peerId,
-        type: msg.type,
-        bytes: bytes.length,
-      }, { kind: "terminal", id: binding.requestId });
+      this.diag(binding, "terminal-stream:oversized-record", { peerId: binding.peerId, type: msg.type, bytes: bytes.length });
       return Promise.resolve("dropped");
     }
     return binding.writer.send(bytes, signal);
@@ -373,11 +276,12 @@ export class TerminalStreamRegistry {
    *  status included), then FIN. A miss means the binding is
    *  already gone — the `appEnded`-before-`subscribed` path unbinds itself. */
   retired(peerId: string, attachmentId: string): void {
-    const binding = this.byAttachmentId.get(this.key(peerId, attachmentId));
+    const binding = this.byAttachmentId.get(this.indexKey(peerId, attachmentId));
     if (!binding) return;
     binding.retiring = true;
     void binding.writer.finish();
-    this.unbind(binding);
+    this.deindex(binding);
+    this.release(binding);
   }
 
   /** Ends a subscribe attempt that produced no attachment (UPGRADE_REQUIRED,
@@ -386,73 +290,27 @@ export class TerminalStreamRegistry {
    *  the app's own subscribe deadline. A no-op once the requestId already
    *  bound an attachment (the ordinary success path). */
   subscribeSettled(peerId: string, requestId: string, attachmentId: string | undefined): void {
-    const binding = this.byRequestId.get(this.key(peerId, requestId));
+    const binding = this.byRequestId.get(this.indexKey(peerId, requestId));
     if (!binding) return;
     if (attachmentId === undefined && binding.attachmentId === undefined) {
       binding.retiring = true;
       void binding.writer.finish();
-      this.unbind(binding);
+      this.deindex(binding);
+      this.release(binding);
     }
   }
 
-  /** The project's last live `ProjectStreamRegistry` entry detached: its bus is
-   *  gone, so every bound stream is aborted with no synthesized unsubscribe
-   *  (there is nothing left to dispatch one to). */
-  projectDetached(projectId: string): void {
-    for (const set of this.peerBindings.values()) {
-      for (const binding of [...set]) {
-        if (binding.projectId !== projectId) continue;
-        binding.writer.abort();
-        this.unbind(binding);
-      }
-    }
-  }
-
-  /** Connection retired: unbind everything for the peer without dispatching
-   *  anything — the peer is gone, so there is nobody to synthesize an
-   *  unsubscribe for. `unbind`'s idempotence and the `unbound` guard every
-   *  other method checks are what keep a callback still in flight for one of
-   *  these bindings from doing anything once this has run. */
-  dropPeer(peerId: string): void {
-    const set = this.peerBindings.get(peerId);
-    if (!set) return;
-    for (const binding of [...set]) {
-      binding.writer.abort();
-      this.unbind(binding);
-    }
-  }
-
-  private bindRequest(binding: Binding): void {
-    this.byRequestId.set(this.key(binding.peerId, binding.requestId), binding);
-    let set = this.peerBindings.get(binding.peerId);
-    if (!set) {
-      set = new Set();
-      this.peerBindings.set(binding.peerId, set);
-    }
-    set.add(binding);
-  }
-
-  private indexByAttachment(binding: Binding): void {
+  private indexByAttachment(binding: TerminalBinding): void {
     if (binding.attachmentId === undefined) return;
-    this.byAttachmentId.set(this.key(binding.peerId, binding.attachmentId), binding);
+    this.byAttachmentId.set(this.indexKey(binding.peerId, binding.attachmentId), binding);
   }
 
-  /** Removes both index entries and frees the cap slot exactly once. */
-  private unbind(binding: Binding): void {
-    if (binding.unbound) return;
-    binding.unbound = true;
-    this.byRequestId.delete(this.key(binding.peerId, binding.requestId));
-    if (binding.attachmentId !== undefined) {
-      this.byAttachmentId.delete(this.key(binding.peerId, binding.attachmentId));
-    }
-    const set = this.peerBindings.get(binding.peerId);
-    if (set) {
-      set.delete(binding);
-      if (set.size === 0) this.peerBindings.delete(binding.peerId);
-    }
+  private deindex(binding: TerminalBinding): void {
+    this.byRequestId.delete(this.indexKey(binding.peerId, binding.id));
+    if (binding.attachmentId !== undefined) this.byAttachmentId.delete(this.indexKey(binding.peerId, binding.attachmentId));
   }
 
-  private key(peerId: string, id: string): string {
+  private indexKey(peerId: string, id: string): string {
     return `${peerId}\u0000${id}`;
   }
 }

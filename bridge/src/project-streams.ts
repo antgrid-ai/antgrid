@@ -25,20 +25,22 @@ import type { UploadStreamServer } from "./file-upload";
 import type { netwatch } from "./netwatch";
 import {
   StreamRecordReader,
-  StreamRecordWriter,
   type SendOutcome,
+  type StreamRecordWriter,
   type StreamSendOutcome,
   type StreamWriteFailure,
 } from "./peer/stream-records";
-import type {
-  AcceptedBiStream,
-  StreamAdmission,
-  StreamHandler,
-  StreamRefusal as DispatchStreamRefusal,
+import {
+  openScopedWriter,
+  type AcceptedBiStream,
+  type ScopedProjectBinding,
+  type StreamAdmission,
+  type StreamHandler,
+  type StreamRefusal,
 } from "./peer/stream-dispatch";
 
 /** A stream carrying what its per-recipient queue held for a project's whole
- *  session-stream lifetime (§2): the same cap the old scheduler applied. */
+ *  session-stream lifetime. */
 export const PROJECT_STREAM_MAX_QUEUED_BYTES = 67_108_864;
 /** Below the session stream's binding default of 0? No — the session stream
  *  carries no binding priority of its own; this sits below terminal streams
@@ -66,7 +68,7 @@ export interface StreamHandle {
   /** "gated" when the switch or the receiver mute says no; "dropped" when the
    *  target peer holds no open project stream for this project; "too-large"
    *  past MAX_TRANSFER_BYTES; else the writer's outcome. `channel` is ignored
-   *  natively (§1.1). */
+   *  natively. */
   sendTo(msg: unknown, channel: Channel, target: SendTarget): Promise<SendOutcome>;
   /** True iff `peerId` holds an open project stream for this project AND
    *  mayDeliver() AND mayDeliverTo(peerSession(peerId)). Synchronous — what
@@ -93,15 +95,17 @@ export interface ProjectBinding {
    *  per-peer admission point, root CLAUDE.md's checkout-routing invariant. */
   hasOpenStream(peerId: string): boolean;
   /** `entry.opts.mayAcceptFrom(peerSession(peerId))`, re-read on every call —
-   *  the same per-sender gate `dispatch` applies. */
-  refusalFor(peerId: string): StreamRefusal | null;
+   *  the same per-sender gate `dispatch` applies. Any code this returns is
+   *  masked to `NOT_ALLOWED` by a project-scoped stream's admission gate: the
+   *  reason a sender is refused is not the app's business past that. */
+  refusalFor(peerId: string): StreamRefusal | undefined;
   /** Per-RECEIVER gate for a stream already admitted: the mirror of
    *  `refusalFor` for outbound records (a tunnel head/body/end, a WS frame,
    *  or an upload result). */
   mayDeliverTo(peerId: string): boolean;
   /** Re-runs `refusalFor`, then `entry.bus.dispatchInbound(msg, "control",
    *  "relay", peerId)`. False when the entry has gone or `refusalFor` now
-   *  refuses. Does NOT require an open project stream (no cascade, §0). */
+   *  refuses. Does NOT require an open project stream (no cascade). */
   dispatch(msg: AbMessage, peerId: string): boolean;
   /** The project's tunnel server, or null if the entry is gone or declared
    *  none — either way the registry refuses the stream NOT_ALLOWED. */
@@ -111,20 +115,21 @@ export interface ProjectBinding {
   uploads(): UploadStreamServer | null;
 }
 
-/** What `TerminalStreamRegistry` needs from a project's entry. */
-export type TerminalProjectBinding = Pick<ProjectBinding, "hasOpenStream" | "refusalFor" | "dispatch">;
+/** What `TerminalStreamRegistry` needs from a project's entry, on top of the
+ *  admission gate every {@link ScopedProjectBinding} already provides. */
+export type TerminalProjectBinding = ScopedProjectBinding & Pick<ProjectBinding, "dispatch">;
 
 /** What `TunnelStreamRegistry` needs from a project's entry. A tunnel
  *  stream carries no bus traffic, so unlike {@link TerminalProjectBinding} it
- *  has no `dispatch` — only the per-sender gate and the project's own
+ *  has no `dispatch` — only the per-receiver gate and the project's own
  *  {@link TunnelStreamServer}. */
-export type TunnelProjectBinding = Pick<ProjectBinding, "hasOpenStream" | "refusalFor" | "mayDeliverTo" | "tunnels">;
+export type TunnelProjectBinding = ScopedProjectBinding & Pick<ProjectBinding, "mayDeliverTo" | "tunnels">;
 
 /** What `UploadStreamRegistry` needs from a project's entry. Mirrors
  *  {@link TunnelProjectBinding}'s shape — an upload stream carries no bus
- *  traffic either, only the per-sender gate and the project's own
+ *  traffic either, only the per-receiver gate and the project's own
  *  {@link UploadStreamServer}. */
-export type UploadProjectBinding = Pick<ProjectBinding, "hasOpenStream" | "refusalFor" | "mayDeliverTo" | "uploads">;
+export type UploadProjectBinding = ScopedProjectBinding & Pick<ProjectBinding, "mayDeliverTo" | "uploads">;
 
 /** What one app session looks like to everything outside the relay client. No
  *  key material ever leaves that file. */
@@ -149,12 +154,6 @@ function bothOf(
   if (!a) return b;
   if (!b) return a;
   return (peer) => a(peer) && b(peer);
-}
-
-/** Why one session may not drive this stream, as the app is told it. */
-export interface StreamRefusal {
-  readonly code: string;
-  readonly message: string;
 }
 
 export interface AttachStreamOpts {
@@ -228,7 +227,7 @@ interface Entry {
   opts: AttachStreamOpts;
   /** Bindings currently attached to THIS entry. A binding stays here until it
    *  is unbound, even after a newer entry for the same projectId replaces
-   *  this one as the admission target ("newest wins", §3.1). */
+   *  this one as the admission target ("newest wins"). */
   bindings: Set<Binding>;
 }
 
@@ -426,7 +425,7 @@ export class ProjectStreamRegistry {
       const message = `${type ?? "message"} exceeds MAX_TRANSFER_BYTES`;
       this.opts.onError?.("MESSAGE_TOO_LARGE", message);
       // Every recipient in `recipients` is bound to the same project entry
-      // (§3.1), so its own projectId stands for the whole batch.
+      // ("newest wins"), so its own projectId stands for the whole batch.
       this.opts.diagnostic?.({
         dir: "tx", kind: "drop", transport: "iroh", channel: "control",
         streamKind: "project", streamId: recipients[0]?.projectId,
@@ -445,7 +444,7 @@ export class ProjectStreamRegistry {
    *  a handler that has started its read loop never returns a refusal again.
    *  The open never opens or promotes a core — step 5 is a lookup only over
    *  whatever `project:start` (or a desktop promotion) already attached. */
-  private admit(admission: StreamAdmission<ProjectStreamOpen>): DispatchStreamRefusal | undefined {
+  private admit(admission: StreamAdmission<ProjectStreamOpen>): StreamRefusal | undefined {
     const { peerId, open, stream, authorized } = admission;
     const { projectId } = open;
 
@@ -481,13 +480,11 @@ export class ProjectStreamRegistry {
     // `binding` is referenced by the writer/reader failure closures below
     // before it is assigned; both only ever run after `admit` has returned.
     let binding!: Binding;
-    const writer = new StreamRecordWriter(
+    const writer = openScopedWriter(
       stream,
       authorized,
+      { priority: STREAM_PRIORITY_PROJECT, resetCode: STREAM_RESET_PROJECT, maxQueuedBytes: PROJECT_STREAM_MAX_QUEUED_BYTES },
       (reason) => this.onWriterFailure(binding, reason),
-      PROJECT_STREAM_MAX_QUEUED_BYTES,
-      STREAM_PRIORITY_PROJECT,
-      STREAM_RESET_PROJECT,
     );
     const reader = new StreamRecordReader(
       stream,
@@ -532,7 +529,7 @@ export class ProjectStreamRegistry {
     }
   }
 
-  /** §3.2 inbound steps 3-5: parse, re-check the per-sender gate, dispatch. */
+  /** Inbound: parse, re-check the per-sender gate, dispatch. */
   private dispatchJson(binding: Binding, json: string): void {
     if (binding.unbound) return;
     const msg = parseMessageFast(json);
@@ -643,7 +640,7 @@ export class ProjectStreamRegistry {
       hasOpenStream: (peerId) => this.hasOpenStream(peerId, projectId),
       refusalFor: (peerId) => {
         if (!live()) return { code: "NOT_ALLOWED", message: "project stream is gone" };
-        return entry.opts.mayAcceptFrom?.(this.opts.peerSession(peerId)) ?? null;
+        return entry.opts.mayAcceptFrom?.(this.opts.peerSession(peerId)) ?? undefined;
       },
       mayDeliverTo: (peerId) => {
         if (!live()) return false;

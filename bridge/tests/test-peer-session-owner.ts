@@ -1,7 +1,7 @@
 import { generateKeyPairSync } from "node:crypto";
 import type { RemoteHostConnection } from "../src/remote-host-connection";
 import type { NativeHostOptions } from "../src/peer/native-host-connection";
-import { refuseStream, type AcceptedBiStream, type StreamRefusal } from "../src/peer/stream-dispatch";
+import { refuseStream, type StreamRefusal } from "../src/peer/stream-dispatch";
 import {
   PeerSessionOwner,
   type PeerSession,
@@ -9,118 +9,12 @@ import {
 } from "../src/peer-session-owner";
 import type { AbMessage } from "../src/protocol";
 import type { StreamSendOutcome } from "../src/peer/stream-records";
+import { createFakeBiStream, flush } from "./support/fake-bi-stream";
 
-function flush(times = 3): Promise<void> {
-  return (async () => {
-    for (let i = 0; i < times; i++) await new Promise<void>((resolve) => setTimeout(resolve, 0));
-  })();
-}
-
-/** One fake project-stream `AcceptedBiStream`: the send half accumulates raw
- *  `writeAll` slices into complete `[u32 len][body]` records (the registry
- *  writes real slices through the real `StreamRecordWriter`, so this fake
- *  must reassemble them, unlike the terminal fake which only inspects
- *  `writeAllCalls` directly), and the recv half is a chunk queue driven by
- *  `pushAppRecord`/`endWith`, mirroring the terminal fixture. */
-function createFakeProjectStream() {
-  const priorities: number[] = [];
-  const resets: bigint[] = [];
-  const stops: bigint[] = [];
-  const order: string[] = [];
-  const writeAllLengths: number[] = [];
-  let finished = false;
-  let sendBuf = Buffer.alloc(0);
-  const allRecords: string[] = [];
-  const afterFirst: string[] = [];
-  let firstRecordText: string | undefined;
-  let heldWrites: Array<() => void> | undefined;
-
-  function absorb(bytes: number[]): void {
-    sendBuf = Buffer.concat([sendBuf, Buffer.from(bytes)]);
-    for (;;) {
-      if (sendBuf.length < 4) return;
-      const len = sendBuf.readUInt32BE(0);
-      if (sendBuf.length < 4 + len) return;
-      const body = sendBuf.subarray(4, 4 + len).toString("utf8");
-      sendBuf = sendBuf.subarray(4 + len);
-      allRecords.push(body);
-      if (firstRecordText === undefined) firstRecordText = body;
-      else afterFirst.push(body);
-    }
-  }
-
-  const send: AcceptedBiStream["send"] = {
-    writeAll: (bytes) => {
-      if (heldWrites) return new Promise<void>((resolve) => heldWrites!.push(() => { order.push("writeAll"); writeAllLengths.push(bytes.length); absorb(bytes); resolve(); }));
-      return Promise.resolve().then(() => { order.push("writeAll"); writeAllLengths.push(bytes.length); absorb(bytes); });
-    },
-    setPriority: (p) => Promise.resolve().then(() => { order.push("setPriority"); priorities.push(p); }),
-    reset: (code) => Promise.resolve().then(() => { order.push("reset"); resets.push(code); }),
-    finish: () => Promise.resolve().then(() => { order.push("finish"); finished = true; }),
-  };
-
-  const recvQueue: number[][] = [];
-  const waiters: Array<{ resolve: (v: number[]) => void; reject: (e: unknown) => void }> = [];
-  let endError: unknown = null;
-  function pump(): void {
-    while (waiters.length && (recvQueue.length || endError !== null)) {
-      const waiter = waiters.shift()!;
-      if (recvQueue.length) waiter.resolve(recvQueue.shift()!);
-      else waiter.reject(endError);
-    }
-  }
-  const recv: AcceptedBiStream["recv"] = {
-    readExact: (size) => {
-      void size;
-      return new Promise<number[]>((resolve, reject) => { waiters.push({ resolve, reject }); pump(); });
-    },
-    read: () => new Promise<number[]>((resolve, reject) => { waiters.push({ resolve, reject }); pump(); }),
-    stop: (code) => Promise.resolve().then(() => { stops.push(code); }),
-  };
-
-  function pushBytes(body: Buffer): void {
-    const prefix = Buffer.alloc(4);
-    prefix.writeUInt32BE(body.length);
-    recvQueue.push(Array.from(prefix));
-    recvQueue.push(Array.from(body));
-    pump();
-  }
-
-  return {
-    stream: { send, recv } as AcceptedBiStream,
-    priorities, resets, stops, order, writeAllLengths,
-    isFinished: () => finished,
-    allRecords, afterFirst,
-    firstRecordText: () => firstRecordText,
-    holdWrites(): void { heldWrites ??= []; },
-    releaseWrites(): void {
-      const held = heldWrites ?? [];
-      heldWrites = undefined;
-      for (const write of held) write();
-    },
-    pushAppRecord(obj: unknown): void {
-      pushBytes(Buffer.from(typeof obj === "string" ? obj : JSON.stringify(obj), "utf8"));
-    },
-    /** Pushes a bare length prefix with no matching body: enough on its own
-     *  to trip `StreamRecordReader`'s bound check, which reads the prefix
-     *  before ever asking for a body. */
-    pushOverlongPrefix(length: number): void {
-      const prefix = Buffer.alloc(4);
-      prefix.writeUInt32BE(length);
-      recvQueue.push(Array.from(prefix));
-      pump();
-    },
-    endWith(error: unknown = new Error("app ended")): void {
-      endError = error;
-      pump();
-    },
-  };
-}
-
-/** The `TestProjectStream` seam (contract §5): drives the real
- *  `ProjectStreamRegistry.handler` with a fake `AcceptedBiStream`, standing
- *  in for the `PeerStreamAcceptor` admission this session never runs — a
- *  refusal is written the same way `PeerStreamAcceptor.refuse` would. */
+/** The `TestProjectStream` seam: drives the real `ProjectStreamRegistry.handler`
+ *  with a fake `AcceptedBiStream`, standing in for the `PeerStreamAcceptor`
+ *  admission this session never runs — a refusal is written the same way
+ *  `PeerStreamAcceptor.refuse` would. */
 export interface TestProjectStream {
   refusal(): { code: string; message: string } | undefined;
   read(): any;
@@ -305,7 +199,7 @@ export class TestPeerSessionOwner extends PeerSessionOwner {
     authorized?: () => boolean;
   } = {}): Promise<TestProjectStream & { readonly order: readonly string[] }> {
     const authorized = opts.authorized ?? (() => true);
-    const fake = createFakeProjectStream();
+    const fake = createFakeBiStream();
     const admission = { peerId, open: { kind: "project" as const, projectId }, stream: fake.stream, authorized };
     const refusal: StreamRefusal | undefined = await this.projectStreams.handler(admission);
     if (refusal) refuseStream(fake.stream, refusal, authorized, () => {});
@@ -314,21 +208,21 @@ export class TestPeerSessionOwner extends PeerSessionOwner {
     return {
       order: fake.order,
       refusal: () => {
-        const text = fake.firstRecordText();
+        const text = fake.firstRecord();
         if (text === undefined) return undefined;
         const parsed = JSON.parse(text) as { type?: string; code?: string; message?: string };
         return parsed.type === "stream:refused"
           ? { code: parsed.code!, message: parsed.message! }
           : undefined;
       },
-      written: () => fake.allRecords.map((text) => JSON.parse(text)),
+      written: () => fake.records().map((text) => JSON.parse(text)),
       // One AbMessage is always exactly one record.
       read: () => {
         const text = fake.afterFirst.shift();
         if (text === undefined) throw new Error(`openProjectStream(${peerId}, ${projectId}).read(): nothing queued`);
         return JSON.parse(text);
       },
-      send: async (obj) => { fake.pushAppRecord(obj); await flush(); },
+      send: async (obj) => { fake.pushRecord(obj); await flush(); },
       sendOverlongPrefix: async (length) => { fake.pushOverlongPrefix(length); await flush(); },
       finish: async () => { fake.endWith(); await flush(); },
       reset: async () => { fake.endWith(new Error("app reset")); await flush(); },

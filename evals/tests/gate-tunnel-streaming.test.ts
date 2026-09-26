@@ -250,14 +250,10 @@ describe("gate: tunnel HTTP and WebSocket streams", () => {
     }
   }, 120_000);
 
-  test("in-band refusals: an uncatalogued project, a mismatched requestId, and a disagreeing content-length", async () => {
-    const uncatalogued = await env.app.openTunnelHttpStream({
-      projectId: randomBytes(8).toString("hex"),
-      head: { type: "tunnel:http-request", port: http.port, method: "GET", path: "/small", headers: {} },
-    });
-    expect(await refusalCodeOf(uncatalogued)).toBe("NOT_ALLOWED");
-    expect(await uncatalogued.ended).toBe("refused");
-
+  // The uncatalogued-project case is the same generic rule
+  // gate-stream-admission.test.ts already proves end to end; this test keeps
+  // only the tunnel-http-specific validation.
+  test("in-band refusals: a mismatched requestId, and a disagreeing content-length", async () => {
     const mismatched = await env.app.openTunnelHttpStream({
       projectId: env.projectId,
       requestId: "req-open-mismatch",

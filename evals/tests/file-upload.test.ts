@@ -5,11 +5,9 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { setupTestEnv, type TestEnv } from "../helpers/harness";
 import { createMessage } from "../../bridge/src/protocol";
-import { createTestProject } from "../helpers/fixtures";
-import { computeProjectId } from "../../bridge/src/project-id";
 import { readHostFile } from "../../bridge/src/host-discovery";
 import { LocalTestClient, type LocalConnectInfo } from "../helpers/local-client";
-import { firstProjectStream, resolveOnFreshAdvert } from "../support/stream";
+import { firstProjectStream } from "../support/stream";
 
 // Remote uploads ride their own `upload` QUIC stream (docs/protocol/peer-session.md
 // §1e). `file:upload-local` is the loopback-only counterpart: the desktop app on
@@ -149,36 +147,9 @@ describe("upload stream (native)", () => {
   }, 10_000);
 });
 
-test("an upload with no open project stream on this peer is refused NOT_ALLOWED", async () => {
-  const env = await setupTestEnv({ fixtureName: "basic" });
-  const projBdir = createTestProject("basic", { "__RELAY_URL__": env.relay.url.replace(/\/ws$/, "") });
-  try {
-    const projB = computeProjectId(projBdir.dir);
-    // Running (mode:"remote", never stopped) — a live entry exists, so the
-    // refusal is the peer-scoped "no open project stream for THIS peer" check,
-    // not the no-live-entry NOT_READY admission covers.
-    expect((await loopbackControl(env.abDir, {
-      id: "file-upload-admission-b", type: "project:open", projectId: projB, projectPath: projBdir.dir, mode: "remote",
-    })).ok).toBe(true);
-    await resolveOnFreshAdvert(env.app, projB, {
-      resolve: (app) => app.waitFor(
-        (m: any) => m.type === "agent:projects" && m.projects.some((p: any) => p.projectId === projB && p.running),
-        3_000,
-      ),
-    });
-
-    const client = await env.app.openUploadStream({
-      projectId: projB,
-      fileName: "no-stream.bin",
-      bytes: makePayload(16),
-    });
-    expect(await client.ended).toBe("refused");
-    expect(client.refusal?.code).toBe("NOT_ALLOWED");
-  } finally {
-    await env.teardown();
-    try { projBdir.cleanup(); } catch { /* Windows EBUSY teardown race */ }
-  }
-}, 30_000);
+// An upload with no open project stream on this peer refuses NOT_ALLOWED —
+// the same peer-scoped rule gate-stream-admission.test.ts proves end to end
+// for the terminal kind, enforced identically for every project-scoped kind.
 
 test("a loopback file:upload-local lands byte-identical", async () => {
   const env = await setupTestEnv({ fixtureName: "basic" });

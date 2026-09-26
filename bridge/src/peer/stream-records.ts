@@ -121,7 +121,7 @@ export class StreamRecordWriter {
   ) {}
 
   /** `signal`, when given, cancels the record only while it is still queued
-   *  (§"Binding constraints": once a slice has reached `writeAll`, a partial
+   *  (once a slice has reached `writeAll`, a partial
    *  record would corrupt the framing, so it always completes from there). */
   send(frame: Uint8Array, signal?: AbortSignal): Promise<StreamSendOutcome> {
     const bytes = Buffer.allocUnsafe(frame.length + LENGTH_PREFIX_BYTES);
@@ -202,7 +202,7 @@ export class StreamRecordWriter {
         try {
           if (!this.prioritySet) {
             // Must land before the first write ever reaches the wire, or the
-            // binding has nothing to reorder ahead of (spec §"Binding constraints").
+            // binding has nothing to reorder ahead of.
             this.prioritySet = true;
             await this.stream.send.setPriority(this.priority);
           }

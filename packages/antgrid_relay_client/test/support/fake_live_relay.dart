@@ -43,6 +43,17 @@ class FakeLiveRelay implements PeerLink {
   /// stream — for a `STREAM_OPEN_FAILED`-shaped test. Consumed on use.
   Object? openStreamError;
 
+  Completer<void>? _openGate;
+
+  /// Holds the NEXT [openStream] call in flight until the returned completer
+  /// resolves — for a test that cancels while the open is still pending.
+  /// One-shot.
+  Completer<void> gateOpen() {
+    final gate = Completer<void>();
+    _openGate = gate;
+    return gate;
+  }
+
   @override
   Future<PeerStream> openStream(
     StreamOpen open, {
@@ -50,6 +61,11 @@ class FakeLiveRelay implements PeerLink {
     required int maxQueuedBytes,
     int? rawAfterRecords,
   }) async {
+    final gate = _openGate;
+    if (gate != null) {
+      _openGate = null;
+      await gate.future;
+    }
     final err = openStreamError;
     if (err != null) {
       openStreamError = null;
@@ -203,6 +219,12 @@ class FakePeerStream implements PeerStream {
   /// or a closed stream without needing a real queue-overflow condition.
   PeerSendOutcome sendRawOutcome = PeerSendOutcome.accepted;
 
+  PeerSendOutcome? _failNextSendOutcome;
+
+  /// Makes the NEXT [send] call resolve with [outcome] instead of `accepted`
+  /// — for a `SEND_FAILED`-shaped test. One-shot.
+  void failNextSend(PeerSendOutcome outcome) => _failNextSendOutcome = outcome;
+
   @override
   Stream<Uint8List> get records => _records.stream;
 
@@ -210,6 +232,11 @@ class FakePeerStream implements PeerStream {
   Future<PeerSendOutcome> send(Uint8List record) async {
     if (_ended) return PeerSendOutcome.closed;
     sent.add(record);
+    final failed = _failNextSendOutcome;
+    if (failed != null) {
+      _failNextSendOutcome = null;
+      return failed;
+    }
     return PeerSendOutcome.accepted;
   }
 
@@ -226,7 +253,7 @@ class FakePeerStream implements PeerStream {
   }
 
   // Real semantics: our own reset()/finish() ends only OUR send half. The
-  // bridge counts the stream until it ALSO sees its own half end (§4.3), so
+  // bridge counts the stream until it ALSO sees its own half end, so
   // records must keep flowing (or a test must explicitly call [end]) until
   // that happens — matching [end]'s own doc comment below.
   @override

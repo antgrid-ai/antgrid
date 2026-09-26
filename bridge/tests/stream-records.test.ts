@@ -122,30 +122,31 @@ function createFakeRawRecvStream(steps: Array<number[] | Error>, opts: { atEnd?:
 
 // --- StreamRecordWriter -----------------------------------------------
 
-test("writes a single-slice record whose bytes equal the framed record", async () => {
-  const fake = createFakeSendStream();
-  const writer = new StreamRecordWriter(fake.stream, () => true, () => {}, 1_000_000, 7);
-  const frame = new Uint8Array([9, 9, 9, 9]);
-  const outcome = await writer.send(frame);
-  expect(outcome).toBe("sent");
-  const written = Buffer.from(fake.writeAllCalls[0]!);
-  expect(written.readUInt32BE(0)).toBe(frame.length);
-  expect(Array.from(written.subarray(4))).toEqual(Array.from(frame));
-});
-
-test("a 32 MiB record is written as more than one <=256 KiB slice", async () => {
-  const fake = createFakeSendStream();
-  const writer = new StreamRecordWriter(fake.stream, () => true, () => {}, 64 * 1024 * 1024);
-  const frame = new Uint8Array(32 * 1024 * 1024).fill(7);
-  const outcome = await writer.send(frame);
-  expect(outcome).toBe("sent");
-  expect(fake.writeAllCalls.length).toBeGreaterThan(1);
-  for (const call of fake.writeAllCalls) {
-    expect(call.length).toBeLessThanOrEqual(STREAM_RECORD_SLICE_BYTES);
+test("a record is framed as [u32 len][body] in exactly the slices its length needs — one slice for a small record, several <=256 KiB slices for a 32 MiB one", async () => {
+  {
+    const fake = createFakeSendStream();
+    const writer = new StreamRecordWriter(fake.stream, () => true, () => {}, 1_000_000, 7);
+    const frame = new Uint8Array([9, 9, 9, 9]);
+    const outcome = await writer.send(frame);
+    expect(outcome).toBe("sent");
+    const written = Buffer.from(fake.writeAllCalls[0]!);
+    expect(written.readUInt32BE(0)).toBe(frame.length);
+    expect(Array.from(written.subarray(4))).toEqual(Array.from(frame));
   }
-  const rebuilt = Buffer.concat(fake.writeAllCalls.map((c) => Buffer.from(c)));
-  expect(rebuilt.readUInt32BE(0)).toBe(frame.length);
-  expect(rebuilt.length).toBe(frame.length + 4);
+  {
+    const fake = createFakeSendStream();
+    const writer = new StreamRecordWriter(fake.stream, () => true, () => {}, 64 * 1024 * 1024);
+    const frame = new Uint8Array(32 * 1024 * 1024).fill(7);
+    const outcome = await writer.send(frame);
+    expect(outcome).toBe("sent");
+    expect(fake.writeAllCalls.length).toBeGreaterThan(1);
+    for (const call of fake.writeAllCalls) {
+      expect(call.length).toBeLessThanOrEqual(STREAM_RECORD_SLICE_BYTES);
+    }
+    const rebuilt = Buffer.concat(fake.writeAllCalls.map((c) => Buffer.from(c)));
+    expect(rebuilt.readUInt32BE(0)).toBe(frame.length);
+    expect(rebuilt.length).toBe(frame.length + 4);
+  }
 });
 
 test("unauthorized drops the record and retires the connection, never the stream", async () => {
@@ -575,19 +576,19 @@ test("an overflowing sendRaw resets the stream only, sharing send()'s overflow b
 
 // --- StreamRawReader -------------------------------------------------------
 
-test("StreamRawReader.read returns the bytes read, clamping maxBytes to [1, STREAM_RAW_READ_BYTES]", async () => {
-  const fake = createFakeRawRecvStream([[1, 2, 3]]);
-  const reader = new StreamRawReader(fake.stream);
-  const result = await reader.read(1_000_000_000);
-  expect(Array.from(result!)).toEqual([1, 2, 3]);
-  expect(fake.requested).toEqual([STREAM_RAW_READ_BYTES]);
-});
-
-test("StreamRawReader.read clamps a request below 1 up to 1", async () => {
-  const fake = createFakeRawRecvStream([[7]]);
-  const reader = new StreamRawReader(fake.stream);
-  await reader.read(0);
-  expect(fake.requested).toEqual([1]);
+test("StreamRawReader.read clamps maxBytes to [1, STREAM_RAW_READ_BYTES], passing anything inside the range straight through", async () => {
+  const cases: Array<{ request: number; expected: number }> = [
+    { request: 1_000_000_000, expected: STREAM_RAW_READ_BYTES }, // clamped down
+    { request: 0, expected: 1 }, // clamped up
+    { request: 5, expected: 5 }, // inside the range: unclamped
+  ];
+  for (const c of cases) {
+    const fake = createFakeRawRecvStream([[1, 2, 3]]);
+    const reader = new StreamRawReader(fake.stream);
+    const result = await reader.read(c.request);
+    expect(Array.from(result!)).toEqual([1, 2, 3]);
+    expect(fake.requested).toEqual([c.expected]);
+  }
 });
 
 test("StreamRawReader.read resolves null at FIN (an empty array), never a zero-length Uint8Array", async () => {
@@ -602,11 +603,4 @@ test("StreamRawReader.read rejects on reset or connection loss, rethrown as-is",
   const fake = createFakeRawRecvStream([boom]);
   const reader = new StreamRawReader(fake.stream);
   await expect(reader.read(100)).rejects.toBe(boom);
-});
-
-test("StreamRawReader.read passes maxBytes through unclamped inside the valid range", async () => {
-  const fake = createFakeRawRecvStream([[1, 2, 3, 4, 5]]);
-  const reader = new StreamRawReader(fake.stream);
-  await reader.read(5);
-  expect(fake.requested).toEqual([5]);
 });

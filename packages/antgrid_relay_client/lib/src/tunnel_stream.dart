@@ -23,13 +23,6 @@ import 'models/stream_open.dart';
 /// which is 4 MiB because it also covers the bridge's own flush cadence).
 const int kTunnelStreamMaxQueuedBytes = 2097152;
 
-/// Largest raw HTTP body piece this side ever writes or expects to read in one
-/// chunk (mirrors the bridge's `TUNNEL_BODY_SLICE_BYTES`). Unlike the deleted
-/// tagged records, a raw body carries no per-piece length of its own — this is
-/// only a slicing bound on the write side, and the read side accepts whatever
-/// size the native layer hands back.
-const int kTunnelBodySliceBytes = 262144;
-
 /// One `tunnel:http-head` record, decoded.
 final class TunnelHttpHead {
   final int status;
@@ -53,9 +46,9 @@ final class TunnelWsFrame {
 
 /// Why a tunnel exchange or channel ended in failure.
 ///
-/// `code` is one of: `REFUSED` ([refusal] set), `NOT_SUPPORTED`,
-/// `STREAM_UNBOUND`, `STREAM_OPEN_FAILED`, `SEND_FAILED`, `STREAM_ENDED`,
-/// `TRUNCATED`, `PROTOCOL`, `CANCELLED`, `TRANSPORT_CLOSED`.
+/// `code` is one of: `REFUSED` ([refusal] set), `NOT_SUPPORTED`, `NO_PROJECT`,
+/// `STREAM_OPEN_FAILED`, `SEND_FAILED`, `STREAM_ENDED`, `TRUNCATED`,
+/// `PROTOCOL`, `CANCELLED`, `TRANSPORT_CLOSED`.
 final class TunnelExchangeFailure implements Exception {
   final String code;
   final StreamRefused? refusal;
@@ -191,7 +184,7 @@ TunnelRecord? decodeTunnelRecord(Uint8List record) {
 
 /// A [TunnelHttpExchange] that never opened a stream — [failure] is already
 /// set. Shared by [BufferedAgentTransport]'s default (`NOT_SUPPORTED`) and by
-/// a `StreamTransport` that fails before attempting an open (`STREAM_UNBOUND`,
+/// a `StreamTransport` that fails before attempting an open (`NO_PROJECT`,
 /// `TRANSPORT_CLOSED`).
 final class FailedTunnelHttpExchange implements TunnelHttpExchange {
   FailedTunnelHttpExchange(this.requestId, TunnelExchangeFailure failure)
