@@ -94,7 +94,12 @@ bun run --filter antgrid-evals test:evals   # E2E; explicit only, never in a swe
 cd app && flutter test                   # -j 2 when other sessions are live — see below
 cd packages/antgrid_relay_client && dart test
 npm run check:font-tokens                # Fails on raw `fontSize:` literals in app/lib (see Design Rules)
+npm run dup-check                        # jscpd over source; fails above .jscpd.json's threshold
+npm run dup-check:tests                  # same over tests and evals (.jscpd-tests.json)
 ```
+Not in CI. Scope either to a directory with `npm run dup-check -- <path>`; the
+threshold is a percentage of whatever was scanned, so a narrow scope can fail
+where the full run passes — read the clone list, not the exit code, there.
 **`flutter test` sizes its own parallelism and is not session-aware** — with no
 `-j` it runs `max(1, cores/2)` testers, each a separate Dart VM loading the whole
 suite. Pass `-j 2` when other sessions share the machine. (Ignored for

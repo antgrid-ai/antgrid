@@ -35,6 +35,7 @@
     "typecheck": "bun run --filter='*' typecheck",
     "check:font-tokens": "bash app/scripts/check_font_tokens.sh",
     "dup-check": "jscpd",
+    "dup-check:tests": "jscpd --config .jscpd-tests.json",
     "test": "bun run --filter='*' test",
     "test:dev-protocol": "cd scripts && bun test windows-dev-protocol.test.ts",
     "test:msix-manifest": "cd scripts && bun test patch-msix-manifest.test.ts",
