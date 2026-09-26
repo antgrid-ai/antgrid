@@ -23,6 +23,13 @@ import 'models/stream_open.dart';
 /// which is 4 MiB because it also covers the bridge's own flush cadence).
 const int kTunnelStreamMaxQueuedBytes = 2097152;
 
+/// Largest raw HTTP body piece this side ever writes or expects to read in one
+/// chunk (mirrors the bridge's `TUNNEL_BODY_SLICE_BYTES`). Unlike the deleted
+/// tagged records, a raw body carries no per-piece length of its own — this is
+/// only a slicing bound on the write side, and the read side accepts whatever
+/// size the native layer hands back.
+const int kTunnelBodySliceBytes = 262144;
+
 /// One `tunnel:http-head` record, decoded.
 final class TunnelHttpHead {
   final int status;
@@ -34,15 +41,6 @@ final class TunnelHttpHead {
     required this.headers,
     this.setCookies = const [],
   });
-}
-
-/// One HTTP body record. [gzip] is true for tag [kTunnelRecordTagBodyGzip];
-/// the reader inflates it, one independent gzip member per record.
-final class TunnelBodyRecord {
-  final Uint8List bytes;
-  final bool gzip;
-
-  const TunnelBodyRecord({required this.bytes, required this.gzip});
 }
 
 /// One WebSocket message. A text message's `bytes` are its UTF-8 encoding.
@@ -77,10 +75,11 @@ abstract interface class TunnelHttpExchange {
   /// an unhandled error.
   Future<TunnelHttpHead> get head;
 
-  /// Single-subscription. Done after `tunnel:http-end`; errors
-  /// [TunnelExchangeFailure] (`TRUNCATED` / `PROTOCOL` / `CANCELLED` /
+  /// Single-subscription. Raw response bytes, in arrival order, exactly as the
+  /// bridge wrote them — no per-piece framing to decode. Done on a clean FIN;
+  /// errors [TunnelExchangeFailure] (`TRUNCATED` / `PROTOCOL` / `CANCELLED` /
   /// `TRANSPORT_CLOSED`).
-  Stream<TunnelBodyRecord> get body;
+  Stream<Uint8List> get body;
 
   /// Idempotent. Waiting for a slot: leave the queue and never open. Opening
   /// or open: reset the send half (or abandon the pending open) and keep
@@ -151,9 +150,10 @@ final class TunnelDataRecord extends TunnelRecord {
 }
 
 /// One tag byte plus [payload]. Throws [RangeError] for an unknown tag or a
-/// payload over [kStreamTunnelDataMaxBytes].
+/// payload over [kStreamTunnelDataMaxBytes]. WS frames only — HTTP bodies ride
+/// raw, with no tag and no record framing.
 Uint8List encodeTunnelDataRecord(int tag, Uint8List payload) {
-  if (tag < kTunnelRecordTagBody || tag > kTunnelRecordTagWsBinary) {
+  if (tag < kTunnelRecordTagWsText || tag > kTunnelRecordTagWsBinary) {
     throw RangeError.value(tag, 'tag', 'unknown tunnel data tag');
   }
   if (payload.length > kStreamTunnelDataMaxBytes) {
@@ -169,8 +169,10 @@ Uint8List encodeTunnelDataRecord(int tag, Uint8List payload) {
   return out;
 }
 
-/// `null` for an empty record, an unknown tag, or a first byte of 0x7B whose
-/// body is not valid UTF-8. The returned payload is a view, not a copy.
+/// `null` for an empty record, an unknown tag (0x00/0x01 included — they are
+/// unassigned now that HTTP bodies carry no tag at all), or a first byte of
+/// 0x7B whose body is not valid UTF-8. The returned payload is a view, not a
+/// copy.
 TunnelRecord? decodeTunnelRecord(Uint8List record) {
   if (record.isEmpty) return null;
   final first = record[0];
@@ -181,7 +183,7 @@ TunnelRecord? decodeTunnelRecord(Uint8List record) {
       return null;
     }
   }
-  if (first < kTunnelRecordTagBody || first > kTunnelRecordTagWsBinary) {
+  if (first < kTunnelRecordTagWsText || first > kTunnelRecordTagWsBinary) {
     return null;
   }
   return TunnelDataRecord(first, Uint8List.sublistView(record, 1));
@@ -194,7 +196,7 @@ TunnelRecord? decodeTunnelRecord(Uint8List record) {
 final class FailedTunnelHttpExchange implements TunnelHttpExchange {
   FailedTunnelHttpExchange(this.requestId, TunnelExchangeFailure failure)
     : _headCompleter = Completer<TunnelHttpHead>(),
-      _bodyController = StreamController<TunnelBodyRecord>() {
+      _bodyController = StreamController<Uint8List>() {
     // A caller that reads only one of head/body must never see the other
     // one's error surface as unhandled (contract §4.1's shared note on this
     // pair) — the buffered stream error below is only ever delivered once
@@ -209,13 +211,13 @@ final class FailedTunnelHttpExchange implements TunnelHttpExchange {
   final String requestId;
 
   final Completer<TunnelHttpHead> _headCompleter;
-  final StreamController<TunnelBodyRecord> _bodyController;
+  final StreamController<Uint8List> _bodyController;
 
   @override
   Future<TunnelHttpHead> get head => _headCompleter.future;
 
   @override
-  Stream<TunnelBodyRecord> get body => _bodyController.stream;
+  Stream<Uint8List> get body => _bodyController.stream;
 
   @override
   void cancel() {}

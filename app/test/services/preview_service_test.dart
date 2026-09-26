@@ -189,8 +189,8 @@ void main() {
     // --- Tunneled HTTP: each request opens its own stream-backed exchange ---
 
     test(
-      'proxyRequest opens an exchange whose head carries acceptEncodings, '
-      'checkoutId and no body',
+      'proxyRequest opens an exchange whose head carries checkoutId and no '
+      'body',
       () async {
         final t = FakeAgentTransport();
         final session = await _newSession(t);
@@ -211,9 +211,9 @@ void main() {
         final exchange = t.tunnelHttpOpens.single;
         expect(exchange.requestId, 'req-1');
         expect(exchange.checkoutId, 'main');
-        expect(exchange.requestHead['acceptEncodings'], [kTunnelGzipEncoding]);
         expect(exchange.requestHead.containsKey('body'), isFalse);
-        expect(exchange.requestBody, isEmpty);
+        expect(exchange.bodyLength, 0);
+        expect(exchange.requestBody, isNull);
 
         exchange.completeHead(
           const TunnelHttpHead(
@@ -221,12 +221,7 @@ void main() {
             headers: {'content-type': 'text/html'},
           ),
         );
-        exchange.addBody(
-          TunnelBodyRecord(
-            bytes: Uint8List.fromList(utf8.encode('<html>Hello</html>')),
-            gzip: false,
-          ),
-        );
+        exchange.addBody(Uint8List.fromList(utf8.encode('<html>Hello</html>')));
         exchange.endBody();
 
         final response = await future;
@@ -250,12 +245,14 @@ void main() {
           method: 'POST',
           path: '/api/save',
           headers: {},
-          body: bodyBytes,
+          bodyLength: bodyBytes.length,
+          body: Stream.value(bodyBytes),
         ),
       );
 
       final exchange = t.tunnelHttpOpens.single;
-      expect(exchange.requestBody, bodyBytes);
+      expect(exchange.bodyLength, bodyBytes.length);
+      expect(await exchange.requestBody!.expand((c) => c).toList(), bodyBytes);
 
       exchange.completeHead(const TunnelHttpHead(status: 200, headers: {}));
       exchange.endBody();
@@ -366,7 +363,7 @@ void main() {
       await reading;
     });
 
-    test('a gzip record is inflated', () async {
+    test('raw body chunks pass through undecoded', () async {
       final t = FakeAgentTransport();
       final session = await _newSession(t);
       addTearDown(session.close);
@@ -374,7 +371,7 @@ void main() {
 
       final future = svc.proxyRequest(
         TunnelHttpRequest(
-          requestId: 'req-gz',
+          requestId: 'req-raw',
           port: 3000,
           method: 'GET',
           path: '/a.js',
@@ -386,13 +383,10 @@ void main() {
       final response = await future;
       final collected = utf8.decodeStream(response.body);
 
-      final compressed = Uint8List.fromList(
-        gzip.encode(utf8.encode('hello gzip')),
-      );
-      exchange.addBody(TunnelBodyRecord(bytes: compressed, gzip: true));
+      exchange.addBody(Uint8List.fromList(utf8.encode('hello raw')));
       exchange.endBody();
 
-      expect(await collected, 'hello gzip');
+      expect(await collected, 'hello raw');
     });
 
     test('dispose cancels every live exchange', () async {

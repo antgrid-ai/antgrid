@@ -142,6 +142,7 @@ void main() {
       );
       expect(request.requestId, 'req-1');
       expect(request.body, isNull);
+      expect(request.bodyLength, 0);
       final json = request.toHeadJson();
       expect(json['type'], 'tunnel:http-request');
       expect(json['requestId'], 'req-1');
@@ -156,39 +157,17 @@ void main() {
     // (`AgentTransport.openTunnelHttp`'s `body` parameter) — the head record
     // this produces never carries one, POST included.
     test('toHeadJson carries no body even for a POST', () {
+      final bytes = Uint8List.fromList(utf8.encode('{"key":"value"}'));
       final request = TunnelHttpRequest(
         requestId: 'req-2',
         port: 3000,
         method: 'POST',
         path: '/api/data',
         headers: {'content-type': 'application/json'},
-        body: Uint8List.fromList(utf8.encode('{"key":"value"}')),
+        bodyLength: bytes.length,
+        body: Stream.value(bytes),
       );
       expect(request.toHeadJson().containsKey('body'), isFalse);
-    });
-
-    test('acceptEncodings defaults to gzip', () {
-      final request = TunnelHttpRequest(
-        requestId: 'req-3',
-        port: 3000,
-        method: 'GET',
-        path: '/',
-        headers: const {},
-      );
-      expect(request.acceptEncodings, [kTunnelGzipEncoding]);
-      expect(kTunnelGzipEncoding, 'gzip');
-    });
-
-    test('an explicitly empty acceptEncodings omits the key', () {
-      final json = TunnelHttpRequest(
-        requestId: 'req-4',
-        port: 3000,
-        method: 'GET',
-        path: '/',
-        headers: const {},
-        acceptEncodings: const [],
-      ).toHeadJson();
-      expect(json.containsKey('acceptEncodings'), false);
     });
   });
 

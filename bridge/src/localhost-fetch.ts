@@ -1,4 +1,4 @@
-import { TUNNEL_BODY_SLICE_BYTES, TUNNEL_CHUNK_FLUSH_MS, TUNNEL_GZIP_ENCODING } from "./tunnel-protocol";
+import { TUNNEL_BODY_SLICE_BYTES, TUNNEL_CHUNK_FLUSH_MS } from "./tunnel-protocol";
 
 /** Hard ceiling on a tunneled body. Enforced, never silently truncated: a known
  *  content-length above it answers 413 before a byte is read, and an unknown
@@ -60,124 +60,49 @@ export function isTlsOnlyPort(port: number): boolean {
   return tlsOnlyPorts.has(port);
 }
 
-// Formats that are already compressed — gzipping them burns CPU on both ends to
-// grow the payload.
-const PRECOMPRESSED_CONTENT_TYPES = new Set([
-  "application/zip",
-  "application/gzip",
-  "application/x-gzip",
-  "application/x-7z-compressed",
-  "application/x-rar-compressed",
-  "application/x-bzip2",
-  "application/pdf",
-  "font/woff",
-  "font/woff2",
-  "application/font-woff",
-  "application/font-woff2",
-]);
-
-// Media types the prefix rule below would wrongly claim: SVG is markup, and the
-// rest are containers that store their samples raw. They need naming because the
-// prefix rule is one-way — a body it lets through that turns out incompressible
-// is caught by the size check in `encodeChunk`, but one it BLOCKS is never
-// reconsidered, and base64 is unconditionally ~33% over the raw bytes. Cheap to
-// exempt: these are small (a multi-size favicon.ico gzips in ~0.05ms), unlike
-// the megabyte media the prefix rule exists to keep off a synchronous gzip.
-const UNCOMPRESSED_MEDIA_CONTENT_TYPES = new Set([
-  "image/svg+xml",
-  "image/x-icon",
-  "image/vnd.microsoft.icon",
-  "image/bmp",
-  "image/x-ms-bmp",
-  "image/tiff",
-  "audio/wav",
-  "audio/x-wav",
-  "audio/wave",
-  "audio/vnd.wave",
-  "audio/aiff",
-  "audio/x-aiff",
-]);
-
-function isPrecompressedContentType(ct: string): boolean {
-  const lower = ct.toLowerCase().split(";")[0].trim();
-  if (UNCOMPRESSED_MEDIA_CONTENT_TYPES.has(lower)) return false;
-  if (lower.startsWith("image/") || lower.startsWith("video/") || lower.startsWith("audio/")) {
-    return true;
-  }
-  return PRECOMPRESSED_CONTENT_TYPES.has(lower);
-}
-
-// Below this, deflate's own framing plus base64 can outweigh the saving, and the
-// phone-side decode cost is already noise.
-const GZIP_MIN_BYTES = 4096;
-
-/** One body slice, ready to ride a `tunnel:http-head`/body/`tunnel:http-end`
- *  run on its own QUIC stream. [last] means the upstream body ended WITH this
- *  slice (see {@link LocalhostFetchStream.slices}). */
-export interface TunnelBodySlice {
-  bytes: Uint8Array;
-  gzip: boolean;
-  last: boolean;
+/** A tunneled request body, sourced from the app's raw stream bytes
+ *  (`peer/tunnel-streams.ts`). `stream()` may be called more than once — once
+ *  per fetch attempt, since `fetchWithSchemeRecovery` may need a second one
+ *  under the other scheme. */
+export interface TunnelRequestBody {
+  /** The declared `bodyLength`, > 0. Sent upstream as `content-length`. */
+  readonly length: number;
+  /** A fresh body per fetch attempt. A second call replays what the first
+   *  attempt pulled, then continues from the wire. Returns `null` once more
+   *  than `TUNNEL_BODY_REPLAY_MAX_BYTES` has been pulled — that attempt is
+   *  not retryable. */
+  stream(): ReadableStream<Uint8Array> | null;
+  /** Resolves once all `length` bytes have been pulled off the wire; never
+   *  rejects (stays pending on failure — the caller times out independently). */
+  readonly complete: Promise<void>;
 }
 
 export interface LocalhostFetchStream {
   status: number;
   headers: Record<string, string>;
   setCookies: string[];
-  /** Body slices in read order, each ≤ `chunkBytes` raw. Single consumer;
+  /** Raw body pieces in read order, each ≤ `chunkBytes`. Single consumer;
    *  calling `return()` (or breaking out of `for await`) cancels the upstream
-   *  read. `last` is true only on a slice yielded at EOF with a pending
-   *  remainder — a body that is an exact multiple of `chunkBytes` ends with a
-   *  `done` read and no remainder, so its final slice carries `last: false`. */
-  slices: AsyncGenerator<TunnelBodySlice, void, void>;
+   *  read. */
+  body: AsyncGenerator<Uint8Array, void, void>;
 }
 
 /** The body failed AFTER the head went out: the caller must end the stream
  *  with an error rather than synthesise a 502 (headers are already out). */
 export class UpstreamBodyError extends Error {}
 
-interface ChunkOpts {
-  /** Already netted against the precompressed-content-type exemption
-   *  (`isPrecompressedContentType`) — computed once per response, before any
-   *  slice exists, since the decision does not vary slice to slice. */
-  acceptGzip: boolean;
+interface CoalesceOpts {
   chunkBytes: number;
   flushMs: number;
   readIdleMs: number;
   maxBodyBytes: number;
 }
 
-/**
- * Serialize ONE body slice for the tunnel stream, compressing when the caller
- * advertised support and it actually pays. Every gzip slice is an INDEPENDENT
- * member (no decoder state crosses slices), and a slice that grew under gzip
- * ships identity — so no slice can exceed `STREAM_TUNNEL_DATA_MAX_BYTES`.
- */
-export function encodeChunk(raw: Uint8Array, acceptGzip: boolean, last: boolean): TunnelBodySlice {
-  if (acceptGzip && raw.byteLength >= GZIP_MIN_BYTES) {
-    // Every `raw` this module ever builds is ArrayBuffer-backed (concatenation,
-    // TextEncoder, a stream read) and never a SharedArrayBuffer view — the cast
-    // narrows past `Bun.gzipSync`'s stricter generic, not past a real check.
-    const gzipped = Bun.gzipSync(raw as Uint8Array<ArrayBuffer>);
-    if (gzipped.byteLength < raw.byteLength) {
-      return { bytes: gzipped, gzip: true, last };
-    }
-  }
-  return { bytes: raw, gzip: false, last };
+async function* singleBodyText(text: string): AsyncGenerator<Uint8Array, void, void> {
+  yield new TextEncoder().encode(text);
 }
 
-/** One slice carrying `raw` verbatim, `last: true` — the shape a
- *  bridge-synthesised answer (403, 413, a synthesized 502) takes, so the
- *  caller has exactly one body path regardless of source. */
-export function singleSlice(raw: Uint8Array, acceptGzip: boolean): TunnelBodySlice {
-  return encodeChunk(raw, acceptGzip, true);
-}
-
-async function* singleSliceText(text: string): AsyncGenerator<TunnelBodySlice, void, void> {
-  yield singleSlice(new TextEncoder().encode(text), false);
-}
-
-async function* emptySlices(): AsyncGenerator<TunnelBodySlice, void, void> {}
+async function* emptyBody(): AsyncGenerator<Uint8Array, void, void> {}
 
 /**
  * One fetch, retried once under the other scheme when the failure says the
@@ -189,8 +114,17 @@ async function* emptySlices(): AsyncGenerator<TunnelBodySlice, void, void> {}
  * page the desktop, whose WebView dials the port directly, renders fine. The
  * mismatched attempt costs nothing upstream: it is rejected at the transport,
  * so no request is ever delivered twice and the retry is safe for any method.
+ *
+ * A request body is pulled fresh per attempt via `body.stream()` — the second
+ * attempt replays what the first pulled, or (past `TUNNEL_BODY_REPLAY_MAX_BYTES`)
+ * fails closed, which the shared catch below turns into the FIRST
+ * attempt's error rather than a confusing "body already consumed" one.
  */
-async function fetchWithSchemeRecovery(target: URL, init: RequestInit): Promise<Response> {
+async function fetchWithSchemeRecovery(
+  target: URL,
+  init: Omit<RequestInit, "body">,
+  body?: TunnelRequestBody,
+): Promise<Response> {
   // Empty for a default-port URL, which the tunnel never builds — memoing 0
   // for every such request would be meaningless, so leave it unkeyed.
   const port = target.port ? Number(target.port) : null;
@@ -198,14 +132,24 @@ async function fetchWithSchemeRecovery(target: URL, init: RequestInit): Promise<
   const first = target.protocol === "https:" || knownTls ? "https:" : "http:";
   const second = first === "https:" ? "http:" : "https:";
 
-  const attempt = (protocol: string) => {
+  const attempt = (protocol: string): Promise<Response> => {
     const url = new URL(target);
     url.protocol = protocol;
+    if (body) {
+      const stream = body.stream();
+      if (stream === null) return Promise.reject(new UpstreamBodyError("request body exceeds the replay cap"));
+      return fetch(url, {
+        ...init,
+        body: stream,
+        duplex: "half",
+        // Dev HTTPS servers almost always use self-signed certs. The hostname
+        // is already gated to localhost by the caller, so skipping cert
+        // verification here is scoped to local dev preview only.
+        ...(protocol === "https:" ? { tls: { rejectUnauthorized: false } } : {}),
+      } as RequestInit);
+    }
     return fetch(url, {
       ...init,
-      // Dev HTTPS servers almost always use self-signed certs. The hostname is
-      // already gated to localhost by the caller, so skipping cert verification
-      // here is scoped to local dev preview only.
       ...(protocol === "https:" ? { tls: { rejectUnauthorized: false } } : {}),
     });
   };
@@ -218,8 +162,9 @@ async function fetchWithSchemeRecovery(target: URL, init: RequestInit): Promise<
     try {
       resp = await attempt(second);
     } catch {
-      // Both schemes failed: the port is simply not answering. Report the
-      // attempt the caller actually asked for, not the speculative one.
+      // Both schemes failed (or the body could not be replayed for a second
+      // try): report the attempt the caller actually asked for, not the
+      // speculative one.
       throw err;
     }
     if (port !== null) {
@@ -236,12 +181,7 @@ export interface FetchLocalhostOpts {
   url: string;
   method?: string;
   headers?: Record<string, string>;
-  body?: Uint8Array;
-  /** Body encodings the phone advertised (`TunnelHttpRequest.acceptEncodings`).
-   *  Only ever compress what this advertised: a gzip slice reaches the app
-   *  tagged `TUNNEL_RECORD_TAG_BODY_GZIP`, so an app that predates the field
-   *  never sends it and is never sent one. */
-  acceptEncodings?: string[];
+  body?: TunnelRequestBody;
   /** The caller's cancel (the app resetting its stream, checkout stop). Aborts the head
    *  fetch or the pending read. */
   signal?: AbortSignal;
@@ -260,7 +200,7 @@ export async function fetchLocalhost(opts: FetchLocalhostOpts): Promise<Localhos
       status: 403,
       headers: {},
       setCookies: [],
-      slices: singleSliceText("Forbidden: only localhost URLs are allowed"),
+      body: singleBodyText("Forbidden: only localhost URLs are allowed"),
     };
   }
 
@@ -274,28 +214,47 @@ export async function fetchLocalhost(opts: FetchLocalhostOpts): Promise<Localhos
   // full uncancellable upstream fetch.
   if (opts.signal?.aborted) ctrl.abort();
   else opts.signal?.addEventListener("abort", () => ctrl.abort(), { once: true });
-  const headTimer = setTimeout(
-    () => ctrl.abort(new Error("upstream headers timed out")),
-    opts.headTimeoutMs ?? FETCH_HEAD_TIMEOUT_MS,
-  );
+
+  const headers = { ...(opts.headers ?? {}) };
+  if (opts.body) {
+    // Whatever the phone sent describes bytes re-chunked crossing the stream;
+    // only our own declared length is honest.
+    for (const k of Object.keys(headers)) {
+      const lower = k.toLowerCase();
+      if (lower === "content-length" || lower === "transfer-encoding") delete headers[k];
+    }
+    headers["content-length"] = String(opts.body.length);
+  }
+
+  let settled = false;
+  let headTimer: ReturnType<typeof setTimeout> | undefined;
+  const armHeadTimer = () => {
+    if (settled) return;
+    headTimer = setTimeout(
+      () => ctrl.abort(new Error("upstream headers timed out")),
+      opts.headTimeoutMs ?? FETCH_HEAD_TIMEOUT_MS,
+    );
+  };
+  // A request body can legitimately outlast the head timeout while it
+  // streams (a large upload through the preview), so the clock starts only
+  // once the body has been fully pulled off the wire — never before.
+  if (opts.body) void opts.body.complete.then(armHeadTimer);
+  else armHeadTimer();
+
   let resp: Response;
   try {
     resp = await fetchWithSchemeRecovery(parsed, {
       method: opts.method ?? "GET",
-      headers: opts.headers ?? {},
-      // An empty body is sent as no body: some origins treat a zero-length
-      // body differently from an absent one on GET/HEAD (a stricter
-      // Content-Length: 0 requirement, or a method-override check). Cast for
-      // the same reason as `encodeChunk`'s: never a SharedArrayBuffer view.
-      body: opts.body && opts.body.byteLength > 0 ? (opts.body as Uint8Array<ArrayBuffer>) : undefined,
+      headers,
       signal: ctrl.signal,
       // Don't follow 3xx here: the WebView is the real client and must see the
       // redirect itself. Following it would swallow the response headers of the
       // intermediate hop — and auth flows put the Set-Cookie on the redirecting
       // response, so a followed redirect silently drops the session/handoff cookie.
       redirect: "manual",
-    });
+    }, opts.body);
   } finally {
+    settled = true;
     clearTimeout(headTimer);
   }
 
@@ -311,20 +270,13 @@ export async function fetchLocalhost(opts: FetchLocalhostOpts): Promise<Localhos
   const respHeaders: Record<string, string> = {};
   resp.headers.forEach((v, k) => {
     // fetch() transparently decompressed the body, so the origin's
-    // content-encoding/content-length describe bytes we no longer have —
-    // forwarding them makes the WebView gunzip plain text (garbled CSS/JS)
-    // or truncate on the stale length. The phone-side proxy re-frames.
+    // content-encoding/content-length describe bytes we do not send —
+    // forwarding them makes the WebView misinterpret the raw bytes we send
+    // instead (garbled CSS/JS) or truncate on the stale length. The phone-side
+    // proxy re-frames.
     if (k === "set-cookie" || k === "content-encoding" || k === "content-length" || k === "transfer-encoding") return;
     respHeaders[k] = v;
   });
-
-  const contentType = resp.headers.get("content-type") ?? "";
-  // Netted against the precompressed-content-type exemption here, once per
-  // response, rather than inside encodeChunk per slice — the decision does
-  // not vary slice to slice.
-  const acceptGzip =
-    (opts.acceptEncodings?.includes(TUNNEL_GZIP_ENCODING) ?? false) &&
-    !isPrecompressedContentType(contentType);
 
   const declaredLength = Number(resp.headers.get("content-length"));
   if (Number.isFinite(declaredLength) && declaredLength > maxBodyBytes) {
@@ -337,21 +289,20 @@ export async function fetchLocalhost(opts: FetchLocalhostOpts): Promise<Localhos
       status: 413,
       headers: {},
       setCookies: [],
-      slices: singleSliceText("Preview response too large to tunnel"),
+      body: singleBodyText("Preview response too large to tunnel"),
     };
   }
 
   const reader = resp.body?.getReader();
   if (!reader) {
-    return { status: resp.status, headers: respHeaders, setCookies, slices: emptySlices() };
+    return { status: resp.status, headers: respHeaders, setCookies, body: emptyBody() };
   }
 
   return {
     status: resp.status,
     headers: respHeaders,
     setCookies,
-    slices: chunkBody(reader, ctrl, {
-      acceptGzip,
+    body: coalesceBody(reader, ctrl, {
       chunkBytes: opts.chunkBytes ?? TUNNEL_BODY_SLICE_BYTES,
       flushMs: opts.flushMs ?? TUNNEL_CHUNK_FLUSH_MS,
       readIdleMs: opts.readIdleMs ?? FETCH_READ_IDLE_MS,
@@ -362,16 +313,17 @@ export async function fetchLocalhost(opts: FetchLocalhostOpts): Promise<Localhos
 
 type ReadResult = Awaited<ReturnType<ReadableStreamDefaultReader<Uint8Array>["read"]>>;
 
-/** Slice the upstream body as it arrives. Paces the caller's SEND QUEUE, not
- *  this process's memory: Bun drains the upstream socket regardless of how
- *  slowly we read (measured on 1.3.14 — 60 MB fully buffered while the reader
- *  sat paused), so nothing here bounds RSS and no "pause the reader to save
- *  memory" rule can be added that would. */
-async function* chunkBody(
+/** Coalesce the upstream body as it arrives, into pieces of at most
+ *  `chunkBytes`. Paces the caller's SEND QUEUE, not this process's memory:
+ *  Bun drains the upstream socket regardless of how slowly we read (measured
+ *  on 1.3.14 — 60 MB fully buffered while the reader sat paused), so nothing
+ *  here bounds RSS and no "pause the reader to save memory" rule can be added
+ *  that would. */
+async function* coalesceBody(
   reader: ReadableStreamDefaultReader<Uint8Array>,
   ctrl: AbortController,
-  o: ChunkOpts,
-): AsyncGenerator<TunnelBodySlice, void, void> {
+  o: CoalesceOpts,
+): AsyncGenerator<Uint8Array, void, void> {
   let pending: Buffer[] = [];
   let pendingBytes = 0;
   let total = 0;
@@ -425,12 +377,12 @@ async function* chunkBody(
       clearTimeout(timer);
       if (r.kind === "timer") {
         // The read stays outstanding, so `readIssuedAt` is untouched.
-        if (pendingBytes > 0) { yield encodeChunk(take(pendingBytes), o.acceptGzip, false); continue; }
+        if (pendingBytes > 0) { yield take(pendingBytes); continue; }
         throw new UpstreamBodyError("upstream body stalled");
       }
       read = null;
       if (r.v.done) {
-        if (pendingBytes > 0) yield encodeChunk(take(pendingBytes), o.acceptGzip, true);
+        if (pendingBytes > 0) yield take(pendingBytes);
         return;
       }
       total += r.v.value.byteLength;
@@ -438,7 +390,7 @@ async function* chunkBody(
       if (pendingBytes === 0) pendingSince = Date.now();
       pending.push(Buffer.from(r.v.value));
       pendingBytes += r.v.value.byteLength;
-      while (pendingBytes >= o.chunkBytes) yield encodeChunk(take(o.chunkBytes), o.acceptGzip, false);
+      while (pendingBytes >= o.chunkBytes) yield take(o.chunkBytes);
     }
   } finally {
     clearTimeout(timer);

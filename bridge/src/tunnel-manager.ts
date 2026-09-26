@@ -3,11 +3,10 @@ const log = logger.child({ component: "tunnel-manager" });
 import {
   fetchLocalhost,
   isTlsOnlyPort,
-  singleSlice,
   UpstreamBodyError,
   type FetchLocalhostOpts,
   type LocalhostFetchStream,
-  type TunnelBodySlice,
+  type TunnelRequestBody,
 } from "./localhost-fetch";
 import { createMessage, type AbMessage, type PortInfo, type PreviewUrlEntry } from "./protocol";
 import type { TunnelHttpRequest, TunnelWsOpen } from "./tunnel-protocol";
@@ -103,8 +102,9 @@ export interface TunnelHttpExchange {
   /** Aborted by the app's cancel, a failed/gated send, projectDetached, dropPeer, or abortHttpStreams. */
   readonly signal: AbortSignal;
   head(head: { status: number; headers: Record<string, string>; setCookies?: string[] }): Promise<StreamSendOutcome>;
-  body(slice: TunnelBodySlice): Promise<StreamSendOutcome>;
-  /** Writes tunnel:http-end, then finish(). Only after the upstream body completed without error. */
+  /** Raw bytes, at most `TUNNEL_BODY_SLICE_BYTES` per call. */
+  body(bytes: Uint8Array): Promise<StreamSendOutcome>;
+  /** FIN's the send half. Only after the upstream body completed without error. */
   end(): Promise<StreamSendOutcome>;
   /** writer.abort(): reset, no end record. Idempotent; a no-op after end(). */
   fail(reason: string): void;
@@ -288,7 +288,7 @@ export class TunnelManager {
    *  through `exchange`, then `end()` or `fail()`. Never rejects — every
    *  failure path is answered on `exchange` (a synthesized 502, or `fail`),
    *  never thrown back at the caller. */
-  async serveHttp(req: TunnelHttpRequest, body: Uint8Array, exchange: TunnelHttpExchange): Promise<void> {
+  async serveHttp(req: TunnelHttpRequest, body: TunnelRequestBody | null, exchange: TunnelHttpExchange): Promise<void> {
     const runAbort = new AbortController();
     this.inflight.set(runAbort, exchange.peerId);
     try {
@@ -305,7 +305,7 @@ export class TunnelManager {
 
   private async runHttp(
     req: TunnelHttpRequest,
-    body: Uint8Array,
+    body: TunnelRequestBody | null,
     exchange: TunnelHttpExchange,
     signal: AbortSignal,
     runAbort: AbortController,
@@ -319,8 +319,7 @@ export class TunnelManager {
         url,
         method: req.method,
         headers: req.headers,
-        body: body.byteLength > 0 ? body : undefined,
-        acceptEncodings: req.acceptEncodings,
+        body: body ?? undefined,
         signal,
         ...this.fetchOpts,
       });
@@ -336,10 +335,10 @@ export class TunnelManager {
       return;
     }
 
-    const it = head.slices;
+    const it = head.body;
     let started = false;
     try {
-      // Peeked BEFORE the real head goes out: a first-slice failure (a stalled
+      // Peeked BEFORE the real head goes out: a first-piece failure (a stalled
       // read, a body over the cap) is answered the same as a head-fetch
       // failure, both being a position with nothing sent yet.
       const first = await it.next();
@@ -350,16 +349,16 @@ export class TunnelManager {
       started = true;
       if (!first.done) {
         if (!(await this.sendOrAbort(exchange.body(first.value), runAbort))) return;
-        if (!first.value.last) {
-          for (;;) {
-            // Read-side pacing: the next slice is pulled only once the
-            // previous one has left the send queue, so a stream holds at most
-            // one queued slice and the credit window is the only thing
-            // setting the rate.
-            const next = await it.next();
-            if (next.done) break;
-            if (!(await this.sendOrAbort(exchange.body(next.value), runAbort))) return;
-          }
+        // Read-side pacing: the next piece is pulled only once the previous
+        // one has left the send queue, so a stream holds at most one queued
+        // piece and the credit window is the only thing setting the rate.
+        // The loop keeps reading until the generator itself reports done —
+        // a clean FIN and a reset are natively distinguishable on the wire,
+        // so no piece needs to carry a `last` flag of its own.
+        for (;;) {
+          const next = await it.next();
+          if (next.done) break;
+          if (!(await this.sendOrAbort(exchange.body(next.value), runAbort))) return;
         }
       }
       await this.sendOrAbort(exchange.end(), runAbort);
@@ -397,7 +396,7 @@ export class TunnelManager {
     text: string,
   ): Promise<void> {
     if (!(await this.sendOrAbort(exchange.head({ status, headers: {} }), runAbort))) return;
-    if (!(await this.sendOrAbort(exchange.body(singleSlice(new TextEncoder().encode(text), false)), runAbort))) return;
+    if (!(await this.sendOrAbort(exchange.body(new TextEncoder().encode(text)), runAbort))) return;
     await this.sendOrAbort(exchange.end(), runAbort);
   }
 

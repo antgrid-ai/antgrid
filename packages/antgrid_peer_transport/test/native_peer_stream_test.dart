@@ -73,6 +73,11 @@ class FakeRecv implements PeerStreamRecv {
     }
     return Uint8List.fromList(chunk);
   }
+
+  // None of this file's streams cross into the raw read phase.
+  @override
+  Future<Uint8List?> read(int maxLength) =>
+      throw UnimplementedError('FakeRecv is framed-only');
 }
 
 Uint8List _lengthPrefix(int length) =>
@@ -478,4 +483,9 @@ class _GatedRecv implements PeerStreamRecv {
     if (_index >= _chunks.length) return Completer<Uint8List>().future;
     return Uint8List.fromList(_chunks[_index++]);
   }
+
+  // None of this file's streams cross into the raw read phase.
+  @override
+  Future<Uint8List?> read(int maxLength) =>
+      throw UnimplementedError('_GatedRecv is framed-only');
 }

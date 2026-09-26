@@ -313,12 +313,29 @@ WebSocket frame; see that section for the framing and the cap constants.
 |------|-----------|--------|---------|
 | `tunnel:http-request` | App → Agent | `tunnel-http`, 1st record | Head-of-stream: checkoutId, headers, declared `bodyLength` |
 | `tunnel:http-head` | Agent → App | `tunnel-http` | Response status, headers, `setCookies` |
-| `tunnel:http-end` | Agent → App | `tunnel-http`, last record | Response body is over, immediately before the bridge FINs |
 | `tunnel:ws-open` | App → Agent | `tunnel-ws`, 1st record | Head-of-stream: checkoutId plus the upstream target |
 | `tunnel:ws-close` | App → Agent, Agent → App | `tunnel-ws`, last record | Tear the WebSocket down; carries `code`/`reason` when the closer had one |
 
 A request body or WS-cancel needs no verb of its own: the app signals either by resetting or
-FIN-ing its own send half, which the bridge's pending read observes directly.
+FIN-ing its own send half, which the bridge's pending read observes directly. A response body
+is also raw bytes with no end-of-body verb: the response is over when the bridge FINs the stream.
+
+### Upload Messages (own QUIC stream, not the bus)
+
+A remote file upload gets its own peer stream (`{kind:"upload"}`, `docs/protocol/peer-session.md`
+§1e) rather than riding the project/session stream's `AbMessage` traffic. The open frame carries
+`projectId`, `requestId`, `fileName`, `size`, and the optional `checkoutId`/`mimeType`; the app then
+writes exactly `size` raw bytes and FINs its send half, needing no verb of its own for the file's
+bytes. The bridge answers with exactly one length-prefixed JSON record, then FINs in turn.
+
+| Type | Direction | Stream | Purpose |
+|------|-----------|--------|---------|
+| `stream:refused` | Agent → App | `upload`, only record (open refused) | Refusal `code`/`message` when the stream is rejected up front |
+| `file:upload-result` | Agent → App | `upload`, only record | Terminal outcome (`ok`, or an error code) for the upload |
+
+The desktop app's own local upload path is unchanged: `file:upload-start/ready/chunk/ack/done` plus
+`file:upload-result` still cross the loopback socket (`LOOPBACK_UPLOAD_MESSAGE_TYPES`), since a
+same-machine caller has no QUIC stream to open one over.
 
 ---
 

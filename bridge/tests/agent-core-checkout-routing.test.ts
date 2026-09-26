@@ -6,6 +6,17 @@ import { buildAgentCore, type AgentCore } from "../src/agent-core";
 import { MessageBus } from "../src/message-bus";
 import { createMessage, type AbMessage, type SessionEntry } from "../src/protocol";
 import { CheckoutStore } from "../src/worktrees/checkout-store";
+import { __setRootForTest } from "../src/logger";
+
+/** Capture pino JSONL lines written during `fn` — a dropped relay frame's only
+ *  trace is the warn line, so reading the stream is how "dropped, not merely
+ *  unanswered" is distinguished from a reply that just hasn't arrived yet. */
+async function capturingWarnings(fn: () => Promise<void>): Promise<string> {
+  const lines: string[] = [];
+  __setRootForTest({ write: (m: string) => { lines.push(m); } }, "warn");
+  try { await fn(); } finally { __setRootForTest(process.stdout, "info"); }
+  return lines.join("");
+}
 
 let root: string;
 let previousAbDir: string | undefined;
@@ -658,4 +669,73 @@ test("admit refuses UPDATE_REQUIRED for a non-routing peer while isolated sessio
 
   const admitted = core!.tunnelStreams.admit("modern-peer", session.checkoutId);
   expect(admitted.ok).toBe(true);
+}, 20000);
+
+test("a relay-origin file:upload-start is dropped with a warning, while the identical loopback frame still uploads", async () => {
+  // A remote upload rides its own `upload` stream, never `file:upload-*` bus
+  // frames — those are loopback-only (`LOOPBACK_UPLOAD_MESSAGE_TYPES`), so one
+  // arriving over the relay is a peer that cannot be served this way and must
+  // be dropped rather than answered (§4.4).
+  const { bus, sent } = await bootCore(true);
+
+  const relayLog = await capturingWarnings(async () => {
+    bus.dispatchInbound(createMessage("file:upload-start", {
+      projectId: core!.projectId, requestId: "relay-r1", fileName: "a.bin", size: 3,
+    }), "control", "relay", "some-peer");
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  });
+  expect(relayLog).toContain("Dropping inbound");
+  expect(sent.find((m) => m.type === "file:upload-ready" && m.requestId === "relay-r1")).toBeUndefined();
+  expect(sent.find((m) => m.type === "file:upload-result" && m.requestId === "relay-r1")).toBeUndefined();
+
+  sent.length = 0;
+  bus.dispatchInbound(createMessage("file:upload-start", {
+    projectId: core!.projectId, requestId: "loop-r1", fileName: "a.bin", size: 3,
+  }), "control", "loopback");
+  const ready = await waitFor(sent, (m) => m.type === "file:upload-ready" && m.requestId === "loop-r1");
+  expect(ready).toMatchObject({ type: "file:upload-ready" });
+});
+
+test("uploadStreams.admit refuses NOT_ALLOWED with the switch off, UPDATE_REQUIRED for a non-routing peer, NOT_ALLOWED for an unknown checkout, and admits a routing peer to the checkout runtime's own manager", async () => {
+  await initRepo();
+
+  core = await buildAgentCore({
+    folder: root,
+    mode: "remote",
+    remoteAccessEnabled: () => false,
+    worktreeSessionsSupported: true,
+    identity: { deviceId: "agent", deviceName: "agent", createdAt: new Date().toISOString() },
+  });
+  const switchOffBus = new MessageBus();
+  const switchOffSent: AbMessage[] = [];
+  switchOffBus.subscribe({ deliver: (message) => switchOffSent.push(message) });
+  core.attachTransport(switchOffBus);
+  core.onHandshakeComplete();
+  await waitFor(switchOffSent, (message) => message.type === "agent:status");
+  // remoteFrameAllowed reads the switch only once a relay peer session
+  // provider is wired — an unwired core answers to no switch at all.
+  core.setPeerSessionProvider((peerId) => ({ peerId, peerPubkey: "pub-app", checkoutRouting: true, pullsTree: false }));
+  const switchOffResult = await core.uploadStreams.admit("any-peer", "main");
+  expect(switchOffResult).toMatchObject({ ok: false, refusal: { code: "NOT_ALLOWED" } });
+  await core.shutdown();
+  core = null;
+
+  const { bus, sent } = await bootCore(true);
+  const session = await createSession(bus, sent, "Isolated", "worktree");
+
+  core!.setPeerSessionProvider((peerId) => ({
+    peerId, peerPubkey: "pub-app", checkoutRouting: peerId === "modern-peer", pullsTree: false,
+  }));
+
+  const nonRouting = await core!.uploadStreams.admit("stale-peer", session.checkoutId);
+  expect(nonRouting).toMatchObject({ ok: false, refusal: { code: "UPDATE_REQUIRED" } });
+
+  const unknownCheckout = await core!.uploadStreams.admit("modern-peer", "not-a-real-checkout");
+  expect(unknownCheckout).toMatchObject({ ok: false, refusal: { code: "NOT_ALLOWED" } });
+
+  const admitted = await core!.uploadStreams.admit("modern-peer", session.checkoutId);
+  expect(admitted.ok).toBe(true);
+
+  const admittedMain = await core!.uploadStreams.admit("modern-peer", "main");
+  expect(admittedMain.ok).toBe(true);
 }, 20000);

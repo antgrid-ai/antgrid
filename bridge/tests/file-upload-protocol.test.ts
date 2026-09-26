@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { createMessage, parseMessage, parseMessageFast } from "../src/protocol";
+import { createMessage, parseMessage, parseMessageFast, LOOPBACK_UPLOAD_MESSAGE_TYPES } from "../src/protocol";
 
 describe("file-upload protocol messages", () => {
   it("round-trips every upload message through full Zod validation", () => {
@@ -49,5 +49,21 @@ describe("file-upload protocol messages", () => {
       const fast = parseMessageFast(JSON.stringify({ type, id: "x", timestamp: 1 }));
       expect(fast).not.toBeNull();
     }
+  });
+
+  it("accepts INCOMPLETE as a result error code", () => {
+    const m = createMessage("file:upload-result", {
+      requestId: "r1", ok: false, error: "INCOMPLETE", message: "fewer bytes than declared",
+    });
+    const parsed = parseMessage(JSON.stringify(m));
+    expect(parsed).not.toBeNull();
+    if (parsed?.type === "file:upload-result") expect(parsed.error).toBe("INCOMPLETE");
+  });
+
+  it("LOOPBACK_UPLOAD_MESSAGE_TYPES names exactly the six file:upload-* types: a remote upload rides its own stream, never this loopback-only set", () => {
+    expect(LOOPBACK_UPLOAD_MESSAGE_TYPES).toEqual(new Set([
+      "file:upload-start", "file:upload-ready", "file:upload-chunk",
+      "file:upload-ack", "file:upload-done", "file:upload-result",
+    ]));
   });
 });

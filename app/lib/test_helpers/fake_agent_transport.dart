@@ -68,15 +68,44 @@ class FakeAgentTransport implements AgentTransport {
     required String requestId,
     required String checkoutId,
     required Map<String, dynamic> head,
-    required Uint8List body,
+    required int bodyLength,
+    Stream<List<int>>? body,
   }) {
     final exchange = FakeTunnelHttpExchange(
       requestId: requestId,
       checkoutId: checkoutId,
       requestHead: head,
+      bodyLength: bodyLength,
       requestBody: body,
     );
     tunnelHttpOpens.add(exchange);
+    return exchange;
+  }
+
+  /// Every [openUpload] call, in order, so a test can both assert on the
+  /// arguments and drive the returned fake's result.
+  final List<FakeUploadExchange> uploadCalls = [];
+
+  @override
+  UploadExchange openUpload({
+    required String requestId,
+    required String projectId,
+    required String checkoutId,
+    required String fileName,
+    required Uint8List bytes,
+    String? mimeType,
+    void Function(int sent, int total)? onProgress,
+  }) {
+    final exchange = FakeUploadExchange(
+      requestId: requestId,
+      projectId: projectId,
+      checkoutId: checkoutId,
+      fileName: fileName,
+      bytes: bytes,
+      mimeType: mimeType,
+      onProgress: onProgress,
+    );
+    uploadCalls.add(exchange);
     return exchange;
   }
 
@@ -370,7 +399,8 @@ class FakeTunnelHttpExchange implements TunnelHttpExchange {
     required this.requestId,
     required this.checkoutId,
     required this.requestHead,
-    required this.requestBody,
+    required this.bodyLength,
+    this.requestBody,
   });
 
   final String checkoutId;
@@ -378,8 +408,11 @@ class FakeTunnelHttpExchange implements TunnelHttpExchange {
   /// The `tunnel:http-request` head this exchange was opened with.
   final Map<String, dynamic> requestHead;
 
-  /// The request body [openTunnelHttp] was called with.
-  final Uint8List requestBody;
+  /// Byte length of the request body [openTunnelHttp] was called with.
+  final int bodyLength;
+
+  /// The request body stream [openTunnelHttp] was called with, if any.
+  final Stream<List<int>>? requestBody;
 
   @override
   final String requestId;
@@ -387,20 +420,20 @@ class FakeTunnelHttpExchange implements TunnelHttpExchange {
   bool cancelled = false;
 
   final _headCompleter = Completer<TunnelHttpHead>();
-  final _bodyController = StreamController<TunnelBodyRecord>();
+  final _bodyController = StreamController<Uint8List>();
 
   @override
   Future<TunnelHttpHead> get head => _headCompleter.future;
 
   @override
-  Stream<TunnelBodyRecord> get body => _bodyController.stream;
+  Stream<Uint8List> get body => _bodyController.stream;
 
   void completeHead(TunnelHttpHead head) {
     if (!_headCompleter.isCompleted) _headCompleter.complete(head);
   }
 
-  void addBody(TunnelBodyRecord record) {
-    if (!_bodyController.isClosed) _bodyController.add(record);
+  void addBody(Uint8List chunk) {
+    if (!_bodyController.isClosed) _bodyController.add(chunk);
   }
 
   void endBody() {
@@ -495,6 +528,54 @@ class FakeTunnelWsChannel implements TunnelWsChannel {
   void abort() {
     aborted = true;
     _end(const TunnelWsClosedLocally());
+  }
+}
+
+/// Test double for [UploadExchange]. Every [openUpload] argument is recorded;
+/// the test then drives [complete]/[fail] to simulate the bridge's result, and
+/// [progress] to simulate a byte-level write completing.
+class FakeUploadExchange implements UploadExchange {
+  FakeUploadExchange({
+    required this.requestId,
+    required this.projectId,
+    required this.checkoutId,
+    required this.fileName,
+    required this.bytes,
+    this.mimeType,
+    this.onProgress,
+  });
+
+  final String projectId;
+  final String checkoutId;
+  final String fileName;
+  final Uint8List bytes;
+  final String? mimeType;
+  final void Function(int sent, int total)? onProgress;
+
+  @override
+  final String requestId;
+
+  bool cancelled = false;
+
+  final _resultCompleter = Completer<UploadStreamResult>();
+
+  @override
+  Future<UploadStreamResult> get result => _resultCompleter.future;
+
+  /// Simulate a write completing — the stream path's only progress signal.
+  void progress(int sent, int total) => onProgress?.call(sent, total);
+
+  void complete(UploadStreamResult result) {
+    if (!_resultCompleter.isCompleted) _resultCompleter.complete(result);
+  }
+
+  void fail(UploadFailure failure) {
+    if (!_resultCompleter.isCompleted) _resultCompleter.completeError(failure);
+  }
+
+  @override
+  void cancel() {
+    cancelled = true;
   }
 }
 

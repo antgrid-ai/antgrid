@@ -93,6 +93,13 @@ function createFakeTerminalStream() {
         pump();
       }));
     },
+    read: (sizeLimit: number) => {
+      readCalls.push(sizeLimit);
+      return recvMutex.run(() => new Promise<number[]>((resolve, reject) => {
+        waiters.push({ resolve, reject });
+        pump();
+      }));
+    },
     stop: (code: bigint) => recvMutex.run(async () => { stopCalls.push(code); }),
   };
 

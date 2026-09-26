@@ -15,6 +15,7 @@ import { AdmissionRegistry, type AdmissionReservation } from "./admission-regist
 import { PeerStreamAcceptor, readStreamOpen } from "./stream-dispatch";
 import { TerminalStreamRegistry } from "./terminal-streams";
 import { TunnelStreamRegistry } from "./tunnel-streams";
+import { UploadStreamRegistry } from "./upload-streams";
 import type { AbMessage } from "../protocol";
 import { StreamRecordWriter, StreamRecordReader, StreamProtocolViolation, type PeerRecordFailure, type StreamSendOutcome } from "./stream-records";
 
@@ -94,6 +95,7 @@ export class NativePeerSessions extends PeerSessionOwner {
   private readonly enrollment: EndpointEnrollment;
   private readonly terminalStreams: TerminalStreamRegistry;
   private readonly tunnelStreams: TunnelStreamRegistry;
+  private readonly uploadStreams: UploadStreamRegistry;
   private readonly lease: AuthorizationLease;
   private lifetime = 0;
   private stopped = false;
@@ -164,6 +166,17 @@ export class NativePeerSessions extends PeerSessionOwner {
         msgType: type, detail: detail as Record<string, string | number | boolean>,
         ...(stream ? { streamKind: stream.kind, streamId: stream.id } : {}) }),
     });
+    this.uploadStreams = new UploadStreamRegistry({
+      projectCataloged: nativeOpts.projectCataloged,
+      uploadBinding: (projectId) => this.projectStreams.uploadBinding(projectId),
+      // Guarded the same way `terminalStreams`'s / `tunnelStreams`'s is: a
+      // stale binding from a superseded connection must never retire the
+      // peer's NEWER one.
+      retirePeer: (peerId, reason) => { if (this.nativePeers.has(peerId)) this.retirePeer(peerId, reason); },
+      diagnostic: (type, detail, stream) => this.recordDiagnostic({ dir: "event", kind: "lifecycle", transport: "iroh",
+        msgType: type, detail: detail as Record<string, string | number | boolean>,
+        ...(stream ? { streamKind: stream.kind, streamId: stream.id } : {}) }),
+    });
   }
 
   connect(): void {
@@ -189,6 +202,7 @@ export class NativePeerSessions extends PeerSessionOwner {
   protected override terminalProjectDetached(projectId: string): void {
     this.terminalStreams.projectDetached(projectId);
     this.tunnelStreams.projectDetached(projectId);
+    this.uploadStreams.projectDetached(projectId);
   }
 
   private async startEndpoint(): Promise<Endpoint> {
@@ -449,6 +463,7 @@ export class NativePeerSessions extends PeerSessionOwner {
         terminal: this.terminalStreams.handler,
         "tunnel-http": this.tunnelStreams.httpHandler,
         "tunnel-ws": this.tunnelStreams.wsHandler,
+        upload: this.uploadStreams.handler,
       },
       schedule: this.nativeOpts.lifecycle?.schedule,
       diagnostic: (type, detail, stream) => this.recordDiagnostic({ dir: "event", kind: "lifecycle", transport: "iroh", msgType: type, detail,
@@ -512,6 +527,7 @@ export class NativePeerSessions extends PeerSessionOwner {
     peer.streams?.stop();
     this.terminalStreams.dropPeer(peerId);
     this.tunnelStreams.dropPeer(peerId);
+    this.uploadStreams.dropPeer(peerId);
     this.projectStreams.dropPeer(peerId);
     peer.connection.close(reason === "unauthorized" ? 3n : reason === "protocol-violation" ? 2n : 1n, []);
     peer.sessionWriter?.abort();

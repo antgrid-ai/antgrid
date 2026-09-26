@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/models/preview_models.dart';
 import 'package:antgrid/services/preview_proxy_server.dart';
@@ -288,31 +289,8 @@ void main() {
     expect(captured?['origin'], 'https://localhost:$port');
   });
 
-  test('advertises the gzip body encoding on every tunneled request', () async {
-    final port = await freePort();
-    TunnelHttpRequest? captured;
-    final proxy = PreviewProxyServer(
-      targetPort: port,
-      onRequest: (req) async {
-        captured = req;
-        return _ok();
-      },
-    );
-    final bound = await proxy.start();
-    addTearDown(() async => proxy.stop());
-
-    await _get(bound);
-
-    // The bridge only compresses when asked, so dropping this silently reverts
-    // every preview to the uncompressed path.
-    expect(captured!.acceptEncodings, contains(kTunnelGzipEncoding));
-    expect(
-      captured!.toHeadJson()['acceptEncodings'],
-      contains(kTunnelGzipEncoding),
-    );
-  });
-
-  test('a binary POST body reaches the request as raw bytes', () async {
+  test('a binary POST body reaches the request as a raw byte stream, sized '
+      'off its declared Content-Length', () async {
     final port = await freePort();
     TunnelHttpRequest? captured;
     final proxy = PreviewProxyServer(
@@ -337,10 +315,97 @@ void main() {
     await response.drain<void>();
 
     expect(captured, isNotNull);
-    expect(captured!.body, payload);
+    expect(captured!.bodyLength, payload.length);
+    expect(
+      await captured!.body!.expand((c) => c).toList(),
+      payload,
+    );
     // toHeadJson never carries a body — it rides its own tunnel-stream record.
     expect(captured!.toHeadJson().containsKey('body'), isFalse);
   });
+
+  test(
+    'a declared Content-Length over the tunnel cap fails locally with 413',
+    () async {
+      final port = await freePort();
+      var requested = false;
+      final proxy = PreviewProxyServer(
+        targetPort: port,
+        onRequest: (req) async {
+          requested = true;
+          return _ok();
+        },
+      );
+      final bound = await proxy.start();
+      addTearDown(() async => proxy.stop());
+
+      final socket = await Socket.connect('localhost', bound);
+      addTearDown(() async => socket.destroy());
+      socket.write(
+        'POST /upload HTTP/1.1\r\n'
+        'Host: localhost:$bound\r\n'
+        'Content-Length: ${kStreamTunnelRequestBodyMaxBytes + 1}\r\n'
+        'Connection: close\r\n'
+        '\r\n',
+      );
+      // dart:io drains an unread request body before it writes the response,
+      // so the 413 only arrives once the declared bytes have been sent.
+      socket.add(Uint8List(kStreamTunnelRequestBodyMaxBytes + 1));
+      await socket.flush();
+      final raw = await socket
+          .cast<List<int>>()
+          .transform(const Utf8Decoder(allowMalformed: true))
+          .join();
+      await socket.close();
+
+      expect(raw, contains('413'));
+      expect(raw, contains('Preview request too large to tunnel'));
+      expect(
+        requested,
+        isFalse,
+        reason: 'an over-cap body must never reach onRequest',
+      );
+    },
+  );
+
+  test(
+    'a chunked body with no Content-Length is buffered and sized before it '
+    'reaches the request, byte-exact across chunks',
+    () async {
+      final port = await freePort();
+      TunnelHttpRequest? captured;
+      final proxy = PreviewProxyServer(
+        targetPort: port,
+        onRequest: (req) async {
+          captured = req;
+          return _ok();
+        },
+      );
+      final bound = await proxy.start();
+      addTearDown(() async => proxy.stop());
+
+      final client = HttpClient();
+      addTearDown(() => client.close(force: true));
+      final request = await client.postUrl(
+        Uri.parse('http://localhost:$bound/upload'),
+      );
+      request.headers.chunkedTransferEncoding = true;
+      final first = Uint8List.fromList([0, 1, 2, 0xff]);
+      final second = Uint8List.fromList([0xfe, 0x80, 7]);
+      request.add(first);
+      await request.flush();
+      request.add(second);
+      final response = await request.close();
+      await response.drain<void>();
+
+      expect(captured, isNotNull);
+      expect(captured!.bodyLength, first.length + second.length);
+      expect(
+        await captured!.body!.expand((c) => c).toList(),
+        [...first, ...second],
+      );
+    },
+  );
 
   test('serves the decoded bytes without claiming an encoding', () async {
     final port = await freePort();

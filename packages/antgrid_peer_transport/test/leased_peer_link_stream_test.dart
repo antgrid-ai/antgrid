@@ -47,6 +47,12 @@ class _FakePeerStream implements PeerStream {
   }
 
   @override
+  Future<PeerSendOutcome> sendRaw(Uint8List bytes) async {
+    sent.add(bytes);
+    return PeerSendOutcome.accepted;
+  }
+
+  @override
   Future<void> reset() async {
     resetCalls++;
   }
@@ -95,6 +101,7 @@ class _FakeMultiStreamLink implements PeerLink, MultiStreamPeerLink {
     StreamOpen open, {
     required int maxRecordBytes,
     required int maxQueuedBytes,
+    int? rawAfterRecords,
   }) async {
     invalidateDuringOpen?.call();
     lastOpen = open;

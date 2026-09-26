@@ -140,6 +140,7 @@ void main() {
         final note = capture.annotationFor(frameIdOf(payload));
         expect(note['msgType'], 'terminal:input');
         expect(note['streamId'], session.control.streamId);
+        expect(note['streamKind'], 'session');
       },
     );
 
@@ -157,6 +158,7 @@ void main() {
       expect(drop['reason'], 'no-e2e-session');
       expect(drop['msgType'], 'file:read');
       expect(drop['streamId'], cold.control.streamId);
+      expect(drop['streamKind'], 'session');
       await cold.dispose();
     });
 
@@ -172,6 +174,7 @@ void main() {
       final note = capture.annotationFor(frameIdOf(payload));
       expect(note['msgType'], 'terminal:output');
       expect(note['streamId'], session.control.streamId);
+      expect(note['streamKind'], 'session');
     });
 
     test('records an inbound frame that is not valid UTF-8', () async {

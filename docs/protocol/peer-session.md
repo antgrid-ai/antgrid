@@ -67,7 +67,7 @@ stream never costs the connection; only an unauthorized peer or a first-stream p
 As of Stage A wave A1 the handler table held nothing, so every well-formed later stream was refused
 `NOT_ALLOWED`. Wave A2 registers `{kind:"terminal"}` (§1b); wave A3 adds `{kind:"tunnel-http"}` and
 `{kind:"tunnel-ws"}` (§1c); wave A4 adds `{kind:"project"}` (§1d), which replaces the session stream's old
-`{s,m}` mux entirely. The QUIC-level cap
+`{s,m}` mux entirely; wave A7 adds `{kind:"upload"}` (§1e). The QUIC-level cap
 (`STREAM_MAX_BIDI_STREAMS_PER_CONNECTION`) is set
 once per connection via `setMaxConcurrentBiStreams`, synchronously after the ALPN check. All caps are
 defined once in `packages/antgrid-wire/src/stream-open.ts` and hand-mirrored in
@@ -129,20 +129,22 @@ stream does — including the catalogued-and-safe `projectId` / live mux binding
 (`StreamMux.tunnelBinding`, the tunnel counterpart of `projectBinding`), a lookup only, never an open or a
 promotion.
 
-**Record framing.** Every record on a tunnel stream is `[u32 BE len][body]`; the body's first byte
-discriminates a JSON control record from a tagged binary data record:
+**Record framing.** A tunnel stream carries two shapes of record. The head/close control records are
+length-prefixed, `[u32 BE len][body]`, discriminated by the body's first byte:
 
 | First byte | Meaning |
 |---|---|
 | `0x7B` (`{`) | UTF-8 JSON control record — the whole body is one JSON object |
-| `0x00` | HTTP body slice, identity encoding |
-| `0x01` | HTTP body slice, gzip encoding |
 | `0x02` | WebSocket frame, text |
 | `0x03` | WebSocket frame, binary |
 
-Codecs and tag constants: `encodeTunnelDataRecord`/`decodeTunnelRecord`, `TUNNEL_RECORD_TAG_BODY`/
-`_BODY_GZIP`/`_WS_TEXT`/`_WS_BINARY` (`packages/antgrid-wire/src/stream-open.ts`). A data record's tag
-selects the compression or frame kind; nothing else on the stream needs to.
+A WS frame still carries a tag because one stream multiplexes many discrete frames of either kind;
+codecs and constants: `encodeTunnelDataRecord`/`decodeTunnelRecord`, `TUNNEL_RECORD_TAG_WS_TEXT`/
+`_WS_BINARY` (`packages/antgrid-wire/src/stream-open.ts`). An HTTP request or response body, by
+contrast, is the ONLY thing that stream carries in that direction once the head has gone by, so it
+needs neither a length prefix nor a tag: it is raw bytes, read with `StreamRawReader` and written with
+`StreamRecordWriter.sendRaw()` (`bridge/src/peer/stream-records.ts`), exactly like an upload's file
+bytes (§1e).
 
 **First-record rule.** The checkout a tunnel targets rides this record, not the open frame (D-7 — the
 open-frame schemas above are frozen as of A0b). An HTTP stream's first record must be a JSON
@@ -156,24 +158,26 @@ holds any isolated session (`UPDATE_REQUIRED`), the named checkout must be a cur
 failure refuses in-band exactly as §1a describes, on the tunnel stream itself; a malformed head record, or
 one naming an id other than the open frame's, is refused `INVALID`.
 
-**The end record.** An HTTP stream's response ends with a JSON `tunnel:http-end` (naming `requestId` and
-`checkoutId`) immediately before the bridge FINs its send half — unlike a terminal stream's plain FIN
-(§1b), because Dart cannot tell a clean end from a reset apart on this stream and the app has to be told
-explicitly which one happened. A WS stream ends with `tunnel:ws-close` (optional `code`/`reason`) then
-FIN, mirroring a real WebSocket close frame.
+**The end of a body.** An HTTP stream's response ends when the bridge `finish()`es its send half — a
+plain FIN, exactly like a terminal stream (§1b). Native FIN and reset are distinguishable on the wire,
+so unlike the old length-prefixed framing this needs no JSON verb to tell the app which one happened.
+A WS stream still ends with a JSON `tunnel:ws-close` (optional `code`/`reason`) then FIN, because a
+close carries a code/reason a bare FIN cannot.
 
 **Cancel.** The app cancels by resetting (or FIN-ing) its own send half; the bridge's pending read on that
 half fails, which it treats as the app's cancel — aborting the upstream fetch or WS and then closing its
-own send half in turn, exactly as if it had reached the end on its own. A record arriving after the
-declared body length, or after the app's own end, is a stream breach. Failure isolation matches §1b: an
-overflow or a lost stream resets only that one stream — every other tunnel, attachment and the connection
-are untouched — and only `unauthorized`, or a protocol violation (a bad first stream, §1a, or an app
-record over the stream's cap), closes the connection.
+own send half in turn, exactly as if it had reached the end on its own. A raw read that would push the
+request body past its declared `bodyLength`, or a record arriving after the app's own end, is a stream
+breach. Failure isolation matches §1b: an overflow or a lost stream resets only that one stream — every
+other tunnel, attachment and the connection are untouched — and only `unauthorized`, or a protocol
+violation (a bad first stream, §1a, or an app record over the stream's cap), closes the connection.
 
-**Caps.** `STREAM_MAX_TUNNEL_STREAMS_PER_PEER`, `STREAM_TUNNEL_DATA_MAX_BYTES` (a data record's payload,
-after its tag byte), `STREAM_TUNNEL_RECORD_MAX_BYTES` (payload + tag, what the reader checks against) and
-`STREAM_TUNNEL_REQUEST_BODY_MAX_BYTES` (an HTTP request body, bounded the same as a session-path transfer)
-are defined once in `packages/antgrid-wire/src/stream-open.ts` beside every other stream cap (§1a).
+**Caps.** `STREAM_MAX_TUNNEL_STREAMS_PER_PEER`; `STREAM_TUNNEL_DATA_MAX_BYTES` and
+`STREAM_TUNNEL_RECORD_MAX_BYTES` (a WS data record's tagged payload, and payload + tag); and
+`STREAM_TUNNEL_REQUEST_BODY_MAX_BYTES` (an HTTP request body, bounded the same as a session-path
+transfer) are defined once in `packages/antgrid-wire/src/stream-open.ts` beside every other stream cap
+(§1a). An HTTP body's raw reads and writes carry no record cap of their own — they use the same
+`STREAM_RAW_READ_BYTES`/`STREAM_RECORD_SLICE_BYTES` as any other raw stream (§5).
 
 ## 1d. Project streams
 
@@ -220,6 +224,54 @@ ever writes small control-plane records) and `STREAM_PROJECT_BRIDGE_RECORD_MAX_B
 `packages/antgrid-wire/src/stream-open.ts` beside every other stream cap (§1a); the writer's queue ceiling
 (`PROJECT_STREAM_MAX_QUEUED_BYTES`) and stream priority (`STREAM_PRIORITY_PROJECT`, between terminal and
 tunnel priority) are side-local to `bridge/src/project-streams.ts`.
+
+## 1e. Upload streams
+
+A remote file upload gets its own stream, `{kind:"upload", projectId, checkoutId?, requestId, fileName,
+size, mimeType?}`, admitted by `UploadStreamRegistry` (`bridge/src/peer/upload-streams.ts`), plugged into
+`PeerStreamAcceptor` as `handlers.upload`, and exposed to it via `ProjectStreamRegistry.uploadBinding`
+(`UploadProjectBinding`, the upload counterpart of `tunnelBinding`/`projectBinding`) — a lookup only; an
+upload stream never opens or promotes a core.
+
+**Admission order.** Steps 1-8 run synchronously, before any read, and bind the stream on success so a
+cap or duplicate check across concurrent opens is race-free: a per-peer cap
+(`STREAM_MAX_UPLOAD_STREAMS_PER_PEER`, `CAP_EXCEEDED`); `isSafeProjectId` (`NOT_ALLOWED`); the project
+catalogued (`NOT_ALLOWED`); a live project-stream entry for the project (`NOT_READY`); that peer already
+holding the project's stream open (`NOT_ALLOWED`); the project's own `refusalFor`
+(`UPDATE_REQUIRED`/`NOT_ALLOWED`); a duplicate open for the same (peer, requestId) pair (`INVALID`); and
+the project declaring an upload server at all (`NOT_ALLOWED`). Steps 9-12 continue asynchronously once
+bound: `UploadStreamServer.admit(peerId, checkoutId)` — unlike `tunnelStreams.admit` (§1c), this may
+PREPARE a checkout runtime that is not yet running, replicating the lazy prepare an app's socket-path
+upload verbs relied on before a stream open bypassed that bus-level dispatch — then
+`FileUploadManager.begin()`, which admits the declared `fileName`/`size` and opens the file.
+
+**Record framing.** The file's bytes need no record framing of their own: once admitted, the app writes
+exactly `size` raw bytes (read with `StreamRawReader`, at most `STREAM_RAW_READ_BYTES` per native read)
+and FINs its send half. The bridge answers with exactly one length-prefixed JSON record —
+`stream:refused` (an early refusal) or `file:upload-result` (`ok`, or an error code including
+`INCOMPLETE` for a FIN short of `size`) — then FINs in turn. There is no ack and no second record: the
+exchange is exactly one file in, one result out.
+
+**Overrun detection.** Each read requests `min(STREAM_RAW_READ_BYTES, remaining + 1)`: a well-behaved
+peer's read never returns more than `remaining` bytes, so a chunk that does is the overrun signal on the
+SAME read — there is no separate probe once the declared size is reached. An overrun resets the stream
+(`STREAM_RESET_UPLOAD`) with no result reported, since the app has already broken the declared contract.
+
+**Cancel.** The app cancels by resetting (or FIN-ing) its own send half; the bridge's pending read
+observes it the same way a tunnel request body's cancel does (§1c), and the in-progress
+`FileUploadManager` upload is cancelled with no result to report.
+
+**Caps.** `STREAM_MAX_UPLOAD_STREAMS_PER_PEER`, `STREAM_UPLOAD_BRIDGE_RECORD_MAX_BYTES` (the one result
+record), `STREAM_UPLOAD_MAX_FILE_NAME_LENGTH` and `STREAM_UPLOAD_MAX_MIME_TYPE_LENGTH` (open-frame
+fields) are defined once in `packages/antgrid-wire/src/stream-open.ts` beside every other stream cap
+(§1a); the writer's queue ceiling (`UPLOAD_STREAM_MAX_QUEUED_BYTES`) and stream priority
+(`STREAM_PRIORITY_UPLOAD`, the same as tunnel priority — a background transfer never needs to preempt a
+live terminal or project viewer) are side-local to `bridge/src/peer/upload-streams.ts`.
+
+**Loopback unchanged.** The desktop app's own local upload still crosses the loopback socket as
+`file:upload-start/ready/chunk/ack/done/result` (`LOOPBACK_UPLOAD_MESSAGE_TYPES`, `bridge/src/protocol.ts`)
+— a same-machine caller has no QUIC stream to open one over, and a relay-origin frame naming one of these
+six types is dropped rather than dispatched.
 
 ## 2. The hello
 
@@ -301,15 +353,24 @@ envelope to multiplex over, a credit window bought nothing a per-record size cap
 
 What replaced it is a cap per record, asymmetric by direction and defined once per stream kind in
 `packages/antgrid-wire` (session: `PEER_MAX_RECORD_BYTES`/`PEER_MAX_BRIDGE_RECORD_BYTES` in
-`peer-authorization.ts`; project, terminal and tunnel: `stream-open.ts`, §1b-§1d) — the app only ever writes
-small control-plane records, so its cap is far below the bridge's, which is sized to `MAX_TRANSFER_BYTES`.
-An app record whose length prefix exceeds its stream's cap is a protocol violation and closes the
-connection. Backpressure is a bounded per-stream write queue ahead of the native binding
-(`StreamRecordWriter`, `bridge/src/peer/stream-records.ts`) rather than a credit window: a project, terminal
-or tunnel stream that fills its queue is reset — that stream alone, per D3 — instead of stalling every
-other stream sharing what used to be one socket's window. The session stream is the one exception: it has
-nothing to reopen, so its overflow retires the connection (`queue-full`, `native-host-connection.ts`).
-There is no credit frame left on the wire, and `flow.ts`/`flow.dart` no longer exist.
+`peer-authorization.ts`; project, terminal, tunnel and upload: `stream-open.ts`, §1b-§1e) — the app only
+ever writes small control-plane records, so its cap is far below the bridge's, which is sized to
+`MAX_TRANSFER_BYTES`. An upload stream's own cap, `STREAM_UPLOAD_BRIDGE_RECORD_MAX_BYTES`, bounds only
+the one `file:upload-result`/`stream:refused` record it ever writes — the file's bytes carry no record
+cap at all, since a raw read/write has no length prefix to check against (§1e). An app record whose
+length prefix exceeds its stream's cap is a protocol violation and closes the connection. Backpressure is
+a bounded per-stream write queue ahead of the native binding (`StreamRecordWriter`,
+`bridge/src/peer/stream-records.ts`) rather than a credit window: a project, terminal, tunnel or upload
+stream that fills its queue is reset — that stream alone, per D3 — instead of stalling every other stream
+sharing what used to be one socket's window. The session stream is the one exception: it has nothing to
+reopen, so its overflow retires the connection (`queue-full`, `native-host-connection.ts`). There is no
+credit frame left on the wire, and `flow.ts`/`flow.dart` no longer exist.
+
+A raw stream (an HTTP tunnel body or an upload's file bytes) carries no length-prefixed records at all,
+so its pacing is per-read/per-write rather than per-record: `StreamRawReader.read()` asks for at most
+`STREAM_RAW_READ_BYTES` (65 536) per native call, and `StreamRecordWriter.sendRaw()` slices anything
+larger into writes of at most `STREAM_RECORD_SLICE_BYTES` (262 144) — both side-local constants in
+`bridge/src/peer/stream-records.ts`, since neither is negotiated with the app.
 
 ## 6. Netwatch frame IDs
 
@@ -322,9 +383,12 @@ hand-mirrored as `frameIdOf` (`packages/antgrid_relay_client/lib/src/frame.dart`
 type declaration for the current set, since it is a poor fit for a frozen list here.
 
 `NetwatchEvent.channel` is the loopback socket's own `control`/`preview` JSON label (D2,
-docs/iroh-reduction/ledger.md) and stays meaningful there; on `transport: "iroh"` it carries no information
-any more — the `{s,m}` mux is gone (A4/A5), and every native record source writes `"control"`.
-`NetwatchEvent.streamKind` (the open frame's `kind`, §1a-§1d) is what names a native record's stream, but
-no bridge call site sets it yet (the Stage A ledger's open items), and it is deliberately not part of the
-join key: the app's capture has no such field. `streamId` is the app's logical stream label (`"0"` for the
-session stream, else the projectId), not a QUIC stream id; bridge records leave it unset.
+docs/iroh-reduction/ledger.md) and stays meaningful there; on `transport: "iroh"` it carries no
+information — the `{s,m}` mux is gone (A4/A5), and every native record source writes `"control"`.
+`NetwatchEvent.streamKind` (the open frame's `kind`, §1a-§1e) is what names a native record's stream
+instead, and both ends now write it — the bridge from `streamLabelOf` (`bridge/src/peer/stream-dispatch.ts`),
+the app from the same lookup in `antgrid_relay_client` — for every stream kind, terminal and tunnel
+included; it is deliberately not part of the join key, since a hash-based pair (above) needs no extra key
+to match on. `streamId` is a per-connection stream LABEL, not a QUIC stream id (`"0"` for the session
+stream, the projectId for a project stream, the open frame's own `requestId`/`wsId` for a terminal,
+tunnel or upload stream) — both ends write it for every stream kind, on the same terms as `streamKind`.

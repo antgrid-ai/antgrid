@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'agent_transport.dart';
 import 'terminal_attachment.dart';
 import 'tunnel_stream.dart';
+import 'upload_stream.dart';
 
 /// Shared scaffolding for [AgentTransport] implementations.
 ///
@@ -69,7 +70,8 @@ abstract class BufferedAgentTransport implements AgentTransport {
     required String requestId,
     required String checkoutId,
     required Map<String, dynamic> head,
-    required Uint8List body,
+    required int bodyLength,
+    Stream<List<int>>? body,
   }) => FailedTunnelHttpExchange(
     requestId,
     const TunnelExchangeFailure('NOT_SUPPORTED'),
@@ -83,6 +85,31 @@ abstract class BufferedAgentTransport implements AgentTransport {
   }) => FailedTunnelWsChannel(
     tunnelId,
     const TunnelExchangeFailure('NOT_SUPPORTED'),
+  );
+
+  /// Loopback path for every [BufferedAgentTransport]: the
+  /// start/ready/chunk/ack/done/result exchange over this transport's own
+  /// [send]. `StreamTransport` overrides [openUpload] to ride its own native
+  /// stream instead when its link supports one.
+  late final SocketUploads socketUploads = SocketUploads((m) => send(m));
+
+  @override
+  UploadExchange openUpload({
+    required String requestId,
+    required String projectId,
+    required String checkoutId,
+    required String fileName,
+    required Uint8List bytes,
+    String? mimeType,
+    void Function(int sent, int total)? onProgress,
+  }) => socketUploads.open(
+    requestId: requestId,
+    projectId: projectId,
+    checkoutId: checkoutId,
+    fileName: fileName,
+    bytes: bytes,
+    mimeType: mimeType,
+    onProgress: onProgress,
   );
 
   @override
@@ -211,6 +238,11 @@ abstract class BufferedAgentTransport implements AgentTransport {
     // A reply belonging to an open terminal attachment is claimed there
     // instead of reaching the public stream — see [SocketTerminalAttachments.divert].
     if (terminalAttachments.divert(json)) return;
+    if (type == 'file:upload-ready' ||
+        type == 'file:upload-ack' ||
+        type == 'file:upload-result') {
+      if (socketUploads.dispatch(json)) return;
+    }
     outbound.add(InboundMessage(channel, json));
   }
 

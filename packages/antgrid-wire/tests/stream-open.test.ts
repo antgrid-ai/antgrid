@@ -11,6 +11,7 @@ import {
   STREAM_MAX_PROJECTS_PER_PEER,
   STREAM_MAX_TERMINAL_ATTACHMENTS_PER_PEER,
   STREAM_MAX_TUNNEL_STREAMS_PER_PEER,
+  STREAM_MAX_UPLOAD_STREAMS_PER_PEER,
   STREAM_OPEN_MAX_BYTES,
   STREAM_OPEN_MAX_ID_LENGTH,
   STREAM_PROJECT_APP_RECORD_MAX_BYTES,
@@ -20,17 +21,19 @@ import {
   STREAM_TUNNEL_DATA_MAX_BYTES,
   STREAM_TUNNEL_RECORD_MAX_BYTES,
   STREAM_TUNNEL_REQUEST_BODY_MAX_BYTES,
+  STREAM_UPLOAD_BRIDGE_RECORD_MAX_BYTES,
+  STREAM_UPLOAD_MAX_FILE_NAME_LENGTH,
+  STREAM_UPLOAD_MAX_MIME_TYPE_LENGTH,
   SessionStreamOpen,
   StreamOpen,
   StreamRefused,
   StreamRefusedCode,
-  TUNNEL_RECORD_TAG_BODY,
-  TUNNEL_RECORD_TAG_BODY_GZIP,
   TUNNEL_RECORD_TAG_WS_BINARY,
   TUNNEL_RECORD_TAG_WS_TEXT,
   TerminalStreamOpen,
   TunnelHttpStreamOpen,
   TunnelWsStreamOpen,
+  UploadStreamOpen,
   decodeStreamOpen,
   decodeStreamRefused,
   decodeTunnelRecord,
@@ -77,6 +80,45 @@ describe("StreamOpen: every kind round-trips and rejects unknown fields", () => 
 
   test("an unknown kind is rejected, not silently dropped", () => {
     expect(StreamOpen.safeParse({ kind: "request", projectId: "proj-1" }).success).toBe(false);
+  });
+
+  test("upload: fileName and size are required, checkoutId and mimeType are optional", () => {
+    const bare = { kind: "upload", projectId: "proj-1", requestId: "req-1", fileName: "notes.txt", size: 12 } as const;
+    expect(StreamOpen.parse(bare)).toEqual(bare);
+    const full = { ...bare, checkoutId: "chk-1", mimeType: "text/plain" };
+    expect(StreamOpen.parse(full)).toEqual(full);
+    expect(() =>
+      UploadStreamOpen.parse({ kind: "upload", projectId: "proj-1", requestId: "req-1", fileName: "a" }),
+    ).toThrow(); // size missing
+  });
+});
+
+describe("UploadStreamOpen: size and length rejections", () => {
+  const base = { kind: "upload", projectId: "proj-1", requestId: "req-1", fileName: "a.txt" } as const;
+
+  test("size must be a non-negative integer", () => {
+    expect(() => UploadStreamOpen.parse({ ...base, size: -1 })).toThrow();
+    expect(() => UploadStreamOpen.parse({ ...base, size: 1.5 })).toThrow();
+    expect(() => UploadStreamOpen.parse({ ...base, size: "12" })).toThrow();
+    expect(UploadStreamOpen.parse({ ...base, size: 0 }).size).toBe(0);
+  });
+
+  test("fileName and mimeType are bounded", () => {
+    expect(() => UploadStreamOpen.parse({ ...base, size: 1, fileName: "" })).toThrow();
+    expect(
+      UploadStreamOpen.parse({ ...base, size: 1, fileName: "a".repeat(STREAM_UPLOAD_MAX_FILE_NAME_LENGTH) }).fileName.length,
+    ).toBe(STREAM_UPLOAD_MAX_FILE_NAME_LENGTH);
+    expect(() =>
+      UploadStreamOpen.parse({ ...base, size: 1, fileName: "a".repeat(STREAM_UPLOAD_MAX_FILE_NAME_LENGTH + 1) }),
+    ).toThrow();
+    expect(() =>
+      UploadStreamOpen.parse({ ...base, size: 1, mimeType: "a".repeat(STREAM_UPLOAD_MAX_MIME_TYPE_LENGTH + 1) }),
+    ).toThrow();
+  });
+
+  test("an empty checkoutId and an unknown field are rejected", () => {
+    expect(() => UploadStreamOpen.parse({ ...base, size: 1, checkoutId: "" })).toThrow();
+    expect(() => UploadStreamOpen.parse({ ...base, size: 1, uploadId: "u" })).toThrow();
   });
 });
 
@@ -131,6 +173,8 @@ describe("encodeStreamOpen / decodeStreamOpen", () => {
       { kind: "terminal", projectId: "proj-1", checkoutId: "chk-1", requestId: "req-1" },
       { kind: "tunnel-http", projectId: "proj-1", requestId: "req-1" },
       { kind: "tunnel-ws", projectId: "proj-1", wsId: "ws-1" },
+      { kind: "upload", projectId: "proj-1", requestId: "req-1", fileName: "notes.txt", size: 12 },
+      { kind: "upload", projectId: "proj-1", checkoutId: "chk-1", requestId: "req-1", fileName: "notes.txt", mimeType: "text/plain", size: 0 },
     ];
     for (const open of samples) {
       expect(decodeStreamOpen(encodeStreamOpen(open))).toEqual(open);
@@ -183,15 +227,10 @@ test("tunnel record caps are exported from the package root", () => {
   expect(STREAM_TUNNEL_REQUEST_BODY_MAX_BYTES).toBe(MAX_TRANSFER_BYTES);
 });
 
-describe("encodeTunnelDataRecord / decodeTunnelRecord", () => {
-  const tags = [
-    TUNNEL_RECORD_TAG_BODY,
-    TUNNEL_RECORD_TAG_BODY_GZIP,
-    TUNNEL_RECORD_TAG_WS_TEXT,
-    TUNNEL_RECORD_TAG_WS_BINARY,
-  ] as const;
+describe("encodeTunnelDataRecord / decodeTunnelRecord (WS tags only, bodies are raw)", () => {
+  const tags = [TUNNEL_RECORD_TAG_WS_TEXT, TUNNEL_RECORD_TAG_WS_BINARY] as const;
 
-  test("round-trips every tag, including a zero-length payload", () => {
+  test("round-trips every remaining tag, including a zero-length payload", () => {
     for (const tag of tags) {
       for (const payload of [new Uint8Array(0), new Uint8Array([1, 2, 3, 4])]) {
         const record = encodeTunnelDataRecord(tag, payload);
@@ -208,20 +247,28 @@ describe("encodeTunnelDataRecord / decodeTunnelRecord", () => {
     expect(decodeTunnelRecord(bytes)).toEqual({ kind: "json", text: json });
   });
 
+  // A tunnel-http body is raw, so its first byte may be anything: no tag
+  // below the WS range may decode as a record.
+  test("0x00 and 0x01 are unknown tags: a raw body byte can never be mistaken for a control record", () => {
+    expect(decodeTunnelRecord(new Uint8Array([0x00, 1, 2, 3]))).toBeNull();
+    expect(decodeTunnelRecord(new Uint8Array([0x01, 1, 2, 3]))).toBeNull();
+  });
+
   test("decodeTunnelRecord returns null for an empty record, an unrecognized tag, and undecodable JSON", () => {
     expect(decodeTunnelRecord(new Uint8Array(0))).toBeNull();
     expect(decodeTunnelRecord(new Uint8Array([0x04]))).toBeNull(); // no tag is assigned to 0x04
     expect(decodeTunnelRecord(new Uint8Array([0x7b, 0xff, 0xfe]))).toBeNull(); // "{" but not valid UTF-8 JSON
   });
 
-  test("encodeTunnelDataRecord throws RangeError on an unknown tag or a payload over the cap", () => {
-    expect(() => encodeTunnelDataRecord(0x04 as never, new Uint8Array(0))).toThrow(RangeError);
+  test("encodeTunnelDataRecord throws RangeError on an unknown tag (including the deleted body tags) or a payload over the cap", () => {
+    expect(() => encodeTunnelDataRecord(0x00 as never, new Uint8Array(0))).toThrow(RangeError);
+    expect(() => encodeTunnelDataRecord(0x01 as never, new Uint8Array(0))).toThrow(RangeError);
     expect(() =>
-      encodeTunnelDataRecord(TUNNEL_RECORD_TAG_BODY, new Uint8Array(STREAM_TUNNEL_DATA_MAX_BYTES + 1)),
+      encodeTunnelDataRecord(TUNNEL_RECORD_TAG_WS_BINARY, new Uint8Array(STREAM_TUNNEL_DATA_MAX_BYTES + 1)),
     ).toThrow(RangeError);
     // Exactly at the cap must still succeed.
     expect(() =>
-      encodeTunnelDataRecord(TUNNEL_RECORD_TAG_BODY, new Uint8Array(STREAM_TUNNEL_DATA_MAX_BYTES)),
+      encodeTunnelDataRecord(TUNNEL_RECORD_TAG_WS_BINARY, new Uint8Array(STREAM_TUNNEL_DATA_MAX_BYTES)),
     ).not.toThrow();
   });
 });
@@ -237,14 +284,30 @@ test("D7 cap constants hold the adopted owner values (docs/iroh-reduction/ledger
   expect(STREAM_MAX_TERMINAL_ATTACHMENTS_PER_PEER).toBe(64);
   expect(STREAM_MAX_TUNNEL_STREAMS_PER_PEER).toBe(128);
   expect(STREAM_MAX_PENDING_OPENS_PER_PEER).toBe(16);
+  expect(STREAM_MAX_UPLOAD_STREAMS_PER_PEER).toBe(4);
   // One peer at every application cap at once, plus its session stream, must
   // fit the QUIC limit, or QUIC flow control stalls an open the application
-  // should have refused in-band.
+  // should have refused in-band. §2.4's stated invariant:
+  // 32 + 64 + 128 + 4 + 1 (session) = 229 < 256.
   expect(
     1 +
       STREAM_MAX_PROJECTS_PER_PEER +
       STREAM_MAX_TERMINAL_ATTACHMENTS_PER_PEER +
       STREAM_MAX_TUNNEL_STREAMS_PER_PEER +
+      STREAM_MAX_UPLOAD_STREAMS_PER_PEER,
+  ).toBe(229);
+  expect(
+    1 +
+      STREAM_MAX_PROJECTS_PER_PEER +
+      STREAM_MAX_TERMINAL_ATTACHMENTS_PER_PEER +
+      STREAM_MAX_TUNNEL_STREAMS_PER_PEER +
+      STREAM_MAX_UPLOAD_STREAMS_PER_PEER +
       STREAM_MAX_PENDING_OPENS_PER_PEER,
   ).toBeLessThanOrEqual(STREAM_MAX_BIDI_STREAMS_PER_CONNECTION);
+});
+
+test("upload record and length caps hold the contract's values", () => {
+  expect(STREAM_UPLOAD_BRIDGE_RECORD_MAX_BYTES).toBe(16_384);
+  expect(STREAM_UPLOAD_MAX_FILE_NAME_LENGTH).toBe(255);
+  expect(STREAM_UPLOAD_MAX_MIME_TYPE_LENGTH).toBe(127);
 });

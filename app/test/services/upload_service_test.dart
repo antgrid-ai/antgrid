@@ -1,6 +1,6 @@
-import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:antgrid/project/project_session.dart';
@@ -28,16 +28,14 @@ void main() {
   }
 
   test(
-    'upload sends start, per-chunk with ack pacing, done; returns path',
+    'upload opens one exchange with the file and returns the bridge\'s '
+    'staged path',
     () async {
       final t = FakeAgentTransport();
       final session = await makeSession(t);
       final svc = UploadService.fromSession(session);
 
-      // 1.5 chunks worth of data → exactly 2 chunks.
-      final bytes = Uint8List.fromList(
-        List<int>.generate(UploadService.kChunkBytes + 100, (i) => i % 251),
-      );
+      final bytes = Uint8List.fromList(List<int>.generate(1000, (i) => i % 251));
       final progress = <int>[];
       final future = svc.upload(
         fileName: 'data.bin',
@@ -46,42 +44,22 @@ void main() {
       );
       await Future<void>.delayed(Duration.zero);
 
-      final start = t.sent.firstWhere((m) => m['type'] == 'file:upload-start');
-      expect(start['fileName'], 'data.bin');
-      expect(start['size'], bytes.length);
-      final requestId = start['requestId'] as String;
+      expect(t.uploadCalls, hasLength(1));
+      final exchange = t.uploadCalls.single;
+      expect(exchange.fileName, 'data.bin');
+      expect(exchange.bytes, bytes);
+      expect(exchange.checkoutId, 'main');
 
-      t.emit('file:upload-ready', {'requestId': requestId, 'uploadId': 'u1'});
-      await Future<void>.delayed(Duration.zero);
+      exchange.progress(bytes.length, bytes.length);
 
-      // Chunk 0 must be sent; chunk 1 must NOT be in flight before ack 0.
-      var chunks = t.sent
-          .where((m) => m['type'] == 'file:upload-chunk')
-          .toList();
-      expect(chunks.length, 1);
-      expect(chunks[0]['seq'], 0);
-      expect(
-        base64Decode(chunks[0]['data'] as String).length,
-        UploadService.kChunkBytes,
+      exchange.complete(
+        const UploadStreamResult(
+          ok: true,
+          uploadId: 'u1',
+          path: '/proj/.antgrid/uploads/u1-data.bin',
+          relPath: '.antgrid/uploads/u1-data.bin',
+        ),
       );
-
-      t.emit('file:upload-ack', {'uploadId': 'u1', 'seq': 0});
-      await Future<void>.delayed(Duration.zero);
-      chunks = t.sent.where((m) => m['type'] == 'file:upload-chunk').toList();
-      expect(chunks.length, 2);
-      expect(chunks[1]['seq'], 1);
-
-      t.emit('file:upload-ack', {'uploadId': 'u1', 'seq': 1});
-      await Future<void>.delayed(Duration.zero);
-      expect(t.sent.any((m) => m['type'] == 'file:upload-done'), isTrue);
-
-      t.emit('file:upload-result', {
-        'requestId': requestId,
-        'uploadId': 'u1',
-        'ok': true,
-        'path': '/proj/.antgrid/uploads/u1-data.bin',
-        'relPath': '.antgrid/uploads/u1-data.bin',
-      });
 
       final result = await future;
       expect(result.path, '/proj/.antgrid/uploads/u1-data.bin');
@@ -90,14 +68,14 @@ void main() {
       // is what withholds the preview affordance.
       expect(result.mimeType, isNull);
       expect(result.isPreviewable, isFalse);
-      expect(progress.last, bytes.length);
+      expect(progress, [bytes.length]);
 
       await svc.dispose();
       await session.close();
     },
   );
 
-  test('rejects over-cap files before sending anything', () async {
+  test('rejects over-cap files before opening an exchange', () async {
     final t = FakeAgentTransport();
     final session = await makeSession(t);
     final svc = UploadService.fromSession(session);
@@ -109,29 +87,28 @@ void main() {
         isA<UploadException>().having((e) => e.code, 'code', 'TOO_LARGE'),
       ),
     );
-    expect(t.sent.where((m) => m['type'] == 'file:upload-start'), isEmpty);
+    expect(t.uploadCalls, isEmpty);
 
     await svc.dispose();
     await session.close();
   });
 
-  test('bridge error result fails the upload with its code', () async {
+  test('a bridge ok:false result fails the upload with its code', () async {
     final t = FakeAgentTransport();
     final session = await makeSession(t);
     final svc = UploadService.fromSession(session);
 
     final future = svc.upload(fileName: 'x.bin', bytes: Uint8List(4));
     await Future<void>.delayed(Duration.zero);
-    final requestId =
-        t.sent.firstWhere((m) => m['type'] == 'file:upload-start')['requestId']
-            as String;
+    final exchange = t.uploadCalls.single;
 
-    t.emit('file:upload-result', {
-      'requestId': requestId,
-      'ok': false,
-      'error': 'BUSY',
-      'message': 'Too many concurrent uploads',
-    });
+    exchange.complete(
+      const UploadStreamResult(
+        ok: false,
+        error: 'BUSY',
+        message: 'Too many concurrent uploads',
+      ),
+    );
 
     await expectLater(
       future,
@@ -142,27 +119,16 @@ void main() {
     await session.close();
   });
 
-  test('mid-transfer error result fails a pending chunk ack', () async {
+  test('an UploadFailure(TIMEOUT) from the exchange passes through', () async {
     final t = FakeAgentTransport();
     final session = await makeSession(t);
     final svc = UploadService.fromSession(session);
 
     final future = svc.upload(fileName: 'x.bin', bytes: Uint8List(8));
     await Future<void>.delayed(Duration.zero);
-    final requestId =
-        t.sent.firstWhere((m) => m['type'] == 'file:upload-start')['requestId']
-            as String;
-    t.emit('file:upload-ready', {'requestId': requestId, 'uploadId': 'u1'});
-    await Future<void>.delayed(Duration.zero);
+    final exchange = t.uploadCalls.single;
 
-    // App is now awaiting ack for chunk 0; the bridge aborts instead.
-    t.emit('file:upload-result', {
-      'requestId': requestId,
-      'uploadId': 'u1',
-      'ok': false,
-      'error': 'TIMEOUT',
-      'message': 'Upload timed out',
-    });
+    exchange.fail(const UploadFailure('TIMEOUT'));
 
     await expectLater(
       future,
@@ -170,6 +136,102 @@ void main() {
     );
 
     await svc.dispose();
+    await session.close();
+  });
+
+  test('a CAP_EXCEEDED refusal maps to BUSY', () async {
+    final t = FakeAgentTransport();
+    final session = await makeSession(t);
+    final svc = UploadService.fromSession(session);
+
+    final future = svc.upload(fileName: 'x.bin', bytes: Uint8List(8));
+    await Future<void>.delayed(Duration.zero);
+    final exchange = t.uploadCalls.single;
+
+    exchange.fail(
+      const UploadFailure('REFUSED', refusedCode: StreamRefusedCode.capExceeded),
+    );
+
+    await expectLater(
+      future,
+      throwsA(isA<UploadException>().having((e) => e.code, 'code', 'BUSY')),
+    );
+
+    await svc.dispose();
+    await session.close();
+  });
+
+  test('every other refusal reason maps to OFFLINE', () async {
+    final t = FakeAgentTransport();
+    final session = await makeSession(t);
+    final svc = UploadService.fromSession(session);
+
+    final future = svc.upload(fileName: 'x.bin', bytes: Uint8List(8));
+    await Future<void>.delayed(Duration.zero);
+    final exchange = t.uploadCalls.single;
+
+    exchange.fail(
+      const UploadFailure('REFUSED', refusedCode: StreamRefusedCode.notAllowed),
+    );
+
+    await expectLater(
+      future,
+      throwsA(isA<UploadException>().having((e) => e.code, 'code', 'OFFLINE')),
+    );
+
+    await svc.dispose();
+    await session.close();
+  });
+
+  test('cancelling the token cancels the exchange', () async {
+    final t = FakeAgentTransport();
+    final session = await makeSession(t);
+    final svc = UploadService.fromSession(session);
+
+    final token = UploadCancelToken();
+    final future = svc.upload(
+      fileName: 'x.bin',
+      bytes: Uint8List(8),
+      cancelToken: token,
+    );
+    await Future<void>.delayed(Duration.zero);
+    final exchange = t.uploadCalls.single;
+
+    token.cancel();
+    await Future<void>.delayed(Duration.zero);
+    expect(exchange.cancelled, isTrue);
+
+    exchange.fail(const UploadFailure('CANCELLED'));
+    await expectLater(
+      future,
+      throwsA(
+        isA<UploadException>().having((e) => e.code, 'code', 'CANCELLED'),
+      ),
+    );
+
+    await svc.dispose();
+    await session.close();
+  });
+
+  test('dispose cancels every in-flight upload and fails it OFFLINE', () async {
+    final t = FakeAgentTransport();
+    final session = await makeSession(t);
+    final svc = UploadService.fromSession(session);
+
+    final future = svc.upload(fileName: 'x.bin', bytes: Uint8List(8));
+    future.ignore();
+    await Future<void>.delayed(Duration.zero);
+    final exchange = t.uploadCalls.single;
+
+    await svc.dispose();
+    expect(exchange.cancelled, isTrue);
+    // What a real exchange does once cancel() lands.
+    exchange.fail(const UploadFailure('CANCELLED'));
+    await expectLater(
+      future,
+      throwsA(isA<UploadException>().having((e) => e.code, 'code', 'OFFLINE')),
+    );
+
     await session.close();
   });
 

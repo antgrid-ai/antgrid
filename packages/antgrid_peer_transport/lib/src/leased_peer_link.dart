@@ -100,6 +100,7 @@ class LeasedPeerLink implements PeerLink, MultiStreamPeerLink {
     StreamOpen open, {
     required int maxRecordBytes,
     required int maxQueuedBytes,
+    int? rawAfterRecords,
   }) async {
     if (!isDispatchAllowed) {
       throw const PeerConnectionFailure(
@@ -117,6 +118,7 @@ class LeasedPeerLink implements PeerLink, MultiStreamPeerLink {
       open,
       maxRecordBytes: maxRecordBytes,
       maxQueuedBytes: maxQueuedBytes,
+      rawAfterRecords: rawAfterRecords,
     );
     if (!isDispatchAllowed) {
       // The lease can change while the inner open is awaited.
@@ -159,6 +161,12 @@ class _LeasedPeerStream implements PeerStream {
   Future<PeerSendOutcome> send(Uint8List record) async {
     if (!_isDispatchAllowed()) return PeerSendOutcome.closed;
     return _inner.send(record);
+  }
+
+  @override
+  Future<PeerSendOutcome> sendRaw(Uint8List bytes) async {
+    if (!_isDispatchAllowed()) return PeerSendOutcome.closed;
+    return _inner.sendRaw(bytes);
   }
 
   @override

@@ -14,7 +14,6 @@ import '../project/project_session.dart';
 import '../util/ab_log.dart';
 import '../util/detached.dart';
 import 'preview_proxy_server.dart';
-import 'tunnel_body.dart';
 
 /// Outcome of [PreviewService.selectPort]. `portInUse` means the exact local
 /// port couldn't be bound and the caller should confirm a fallback before
@@ -279,7 +278,8 @@ class PreviewService {
       requestId: request.requestId,
       checkoutId: checkoutId,
       head: request.toHeadJson(),
-      body: request.body ?? Uint8List(0),
+      bodyLength: request.bodyLength,
+      body: request.body,
     );
     _liveExchanges.add(exchange);
 
@@ -310,13 +310,11 @@ class PreviewService {
       });
     }
 
-    // Guards every terminal path below (a decode failure, the upstream's own
-    // `onDone`/`onError`) against firing twice: a decode failure cancels the
-    // exchange itself, whose body stream then still delivers its own
-    // done/error to this same listener, and `bodyController` throws on a
-    // second close/addError after the first has already settled it.
+    // Guards every terminal path below against firing twice: the upstream's
+    // own `onDone`/`onError` and a cancel triggered elsewhere could otherwise
+    // both try to settle this same listener.
     var settled = false;
-    late final StreamSubscription<TunnelBodyRecord> bodySub;
+    late final StreamSubscription<Uint8List> bodySub;
 
     void settle() {
       if (settled) return;
@@ -329,16 +327,9 @@ class PreviewService {
 
     armIdle();
     bodySub = exchange.body.listen(
-      (record) {
+      (chunk) {
         armIdle();
-        try {
-          bodyController.add(decodeTunnelBody(record));
-        } catch (e) {
-          settle();
-          bodyController.addError(TunnelStreamException(request.requestId, '$e'));
-          unawaited(bodyController.close());
-          exchange.cancel();
-        }
+        bodyController.add(chunk);
       },
       onDone: () {
         settle();

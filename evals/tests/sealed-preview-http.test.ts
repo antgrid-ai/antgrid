@@ -2,18 +2,18 @@ import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { randomBytes } from "node:crypto";
 import type { Server } from "bun";
 import { setupTestEnv, type TestEnv } from "../helpers/harness";
-import { TUNNEL_BODY_SLICE_BYTES } from "../../bridge/src/tunnel-protocol";
+import { RAW_READ_BYTES } from "../helpers/relay-client";
 import { firstProjectStream } from "../support/stream";
 
 // Regression guard for the tunnel-http stream, end to end over a real relay
 // and a real agent (Stage A wave A3, docs/iroh-reduction/stage-A-waves.md §3
 // "A3"; the frozen contract is docs/iroh-reduction/stage-A-A3-contract.md).
 // Every preview HTTP request gets its own native QUIC stream: the app writes
-// the open frame, a `tunnel:http-head`-carrying head record, then the body as
-// tagged records; the bridge answers with `tunnel:http-head`, `0x00`/`0x01`
-// body records and a `tunnel:http-end`. The small case proves a body inside
-// one upstream read is one body record and a clean end; the large
-// case proves a paced, multi-record body reassembles byte for byte.
+// the open frame and a `tunnel:http-head`-carrying head record, then the
+// bridge answers with `tunnel:http-head` and the response body as raw bytes
+// with no framing, ending in a clean FIN. The small case proves a body that
+// arrives inside one upstream read still ends cleanly; the large case proves
+// a body spanning many raw reads reassembles byte for byte.
 //
 // Preview traffic is per-request now, not per-project: `openTunnelHttpStream`
 // opens a stream directly on the native connection, bypassing the project
@@ -65,13 +65,12 @@ describe("tunnel-http stream", () => {
     const res = await client.response(10_000);
     expect(res.status).toBe(200);
     expect(res.body.toString("utf8")).toBe("small-ok");
-    // A body inside one upstream read is exactly one body record; the end
-    // record that follows it is unconditional, so a short body is never
-    // mistaken for a truncated one.
-    expect(res.records).toBe(1);
+    // A body that short fits inside one raw read, and the FIN that follows
+    // it is unconditional, so it is never mistaken for a truncated one.
+    expect(res.chunks).toBe(1);
   }, 20_000);
 
-  test("large response round-trips intact as paced records", async () => {
+  test("large response round-trips intact over many raw reads", async () => {
     const client = await env.app.openTunnelHttpStream({
       projectId: env.projectId,
       head: { type: "tunnel:http-request", port: originPort, method: "GET", path: "/big", headers: {} },
@@ -80,9 +79,9 @@ describe("tunnel-http stream", () => {
     const res = await client.response(20_000);
     expect(res.status).toBe(200);
     expect(res.body.equals(BIG)).toBe(true);
-    expect(res.records).toBeGreaterThanOrEqual(1);
-    // Bounded, not exact: this is the production flush window, and one slow
-    // upstream read on a loaded host legitimately ships a short slice.
-    expect(res.records).toBeLessThanOrEqual(Math.ceil(BIG.length / TUNNEL_BODY_SLICE_BYTES));
+    // Each raw read returns at most RAW_READ_BYTES, so draining a 2 MiB body
+    // structurally needs at least this many — a lower bound, since a slower
+    // upstream or a smaller flush window legitimately ships more, shorter reads.
+    expect(res.chunks).toBeGreaterThanOrEqual(Math.ceil(BIG.length / RAW_READ_BYTES));
   }, 40_000);
 });

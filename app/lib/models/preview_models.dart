@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:typed_data';
 
 class PortInfo {
   final int port;
@@ -132,15 +131,6 @@ class PreviewState {
   }
 }
 
-/// `bodyEncoding` for a gzip response body, riding a `0x01`-tagged tunnel-
-/// stream data record. Mirrors `TUNNEL_GZIP_ENCODING` in the bridge's
-/// `tunnel-protocol.ts`.
-///
-/// Compressing inside the tunnel record is the only compression available
-/// here: each record travels over its own native QUIC stream, which carries
-/// bytes verbatim (no WebSocket permessage-deflate to squeeze it further).
-const String kTunnelGzipEncoding = 'gzip';
-
 class TunnelHttpRequest {
   final String requestId;
   final int port;
@@ -152,12 +142,13 @@ class TunnelHttpRequest {
   final String method;
   final String path;
   final Map<String, String> headers;
-  final Uint8List? body;
 
-  /// Body encodings we can decode. A bridge that predates this field ignores
-  /// it and answers uncompressed, which is why an unknown `bodyEncoding` can
-  /// never reach us unrequested.
-  final List<String> acceptEncodings;
+  /// Byte length of [body]; the transport stamps this onto the head as
+  /// `bodyLength`, which is the request body's only delimiter on the wire.
+  final int bodyLength;
+
+  /// Null iff [bodyLength] is 0.
+  final Stream<List<int>>? body;
 
   const TunnelHttpRequest({
     required this.requestId,
@@ -166,12 +157,12 @@ class TunnelHttpRequest {
     required this.method,
     required this.path,
     required this.headers,
+    this.bodyLength = 0,
     this.body,
-    this.acceptEncodings = const [kTunnelGzipEncoding],
   });
 
   /// The `tunnel:http-request` HEAD record — carries no body; the transport
-  /// sends [body] itself as separate data records (`AgentTransport.openTunnelHttp`).
+  /// sends [body] itself as raw stream writes (`AgentTransport.openTunnelHttp`).
   Map<String, dynamic> toHeadJson() {
     return {
       'type': 'tunnel:http-request',
@@ -181,7 +172,6 @@ class TunnelHttpRequest {
       'method': method,
       'path': path,
       'headers': headers,
-      if (acceptEncodings.isNotEmpty) 'acceptEncodings': acceptEncodings,
     };
   }
 }

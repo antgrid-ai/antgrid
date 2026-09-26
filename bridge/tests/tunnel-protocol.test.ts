@@ -3,9 +3,9 @@
 // tagged slices on a dedicated QUIC stream, never as a JSON `data` field.
 import { describe, expect, it } from "bun:test";
 import {
+  TUNNEL_BODY_REPLAY_MAX_BYTES,
   TUNNEL_BODY_SLICE_BYTES,
-  TUNNEL_GZIP_ENCODING,
-  TunnelHttpEnd,
+  TUNNEL_CHUNK_FLUSH_MS,
   TunnelHttpHead,
   TunnelHttpRequest,
   TunnelWsClose,
@@ -47,6 +47,11 @@ describe("TunnelHttpRequest", () => {
     const parsed = TunnelHttpRequest.parse({ ...base, body: "hi" });
     expect(parsed).not.toHaveProperty("body");
   });
+
+  it("strips a legacy acceptEncodings field: bodies travel raw now, with nothing to negotiate", () => {
+    const parsed = TunnelHttpRequest.parse({ ...base, acceptEncodings: ["gzip"] });
+    expect(parsed).not.toHaveProperty("acceptEncodings");
+  });
 });
 
 describe("TunnelHttpHead", () => {
@@ -65,22 +70,6 @@ describe("TunnelHttpHead", () => {
     expect(
       TunnelHttpHead.parse({ ...base, setCookies: ["a=1"], checkoutId: "wt-1" }),
     ).toMatchObject({ setCookies: ["a=1"], checkoutId: "wt-1" });
-  });
-});
-
-describe("TunnelHttpEnd", () => {
-  it("parses and defaults checkoutId to main", () => {
-    expect(TunnelHttpEnd.parse({ type: "tunnel:http-end", requestId: "r1" })).toEqual({
-      type: "tunnel:http-end",
-      requestId: "r1",
-      checkoutId: "main",
-    });
-  });
-
-  it("keeps a non-main checkoutId", () => {
-    expect(
-      TunnelHttpEnd.parse({ type: "tunnel:http-end", requestId: "r1", checkoutId: "wt-1" }),
-    ).toMatchObject({ checkoutId: "wt-1" });
   });
 });
 
@@ -109,11 +98,15 @@ describe("TunnelWsOpen / TunnelWsClose", () => {
 });
 
 describe("wire constants", () => {
-  it("TUNNEL_GZIP_ENCODING is the plain token, not the retired base64-of-gzip spelling", () => {
-    expect(TUNNEL_GZIP_ENCODING).toBe("gzip");
-  });
-
   it("TUNNEL_BODY_SLICE_BYTES matches the app's own upload slicing", () => {
     expect(TUNNEL_BODY_SLICE_BYTES).toBe(262_144);
+  });
+
+  it("TUNNEL_CHUNK_FLUSH_MS is the flush window measured from the first pending byte", () => {
+    expect(TUNNEL_CHUNK_FLUSH_MS).toBe(50);
+  });
+
+  it("TUNNEL_BODY_REPLAY_MAX_BYTES bounds a scheme-guess retry's replayed request body", () => {
+    expect(TUNNEL_BODY_REPLAY_MAX_BYTES).toBe(262_144);
   });
 });

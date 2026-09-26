@@ -43,6 +43,8 @@ import 'package:antgrid/widgets/terminal_history_scrollbar.dart';
 import 'package:antgrid/widgets/terminal_quick_actions_bar.dart';
 import 'package:antgrid/widgets/terminal_upload_button.dart';
 import 'package:antgrid/widgets/terminal_view_wrapper.dart';
+import 'package:antgrid_relay_client/antgrid_relay_client.dart'
+    show UploadStreamResult;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -1772,7 +1774,7 @@ void main() {
         );
         await tester.pump();
 
-        // The REAL UploadService, driven through the bridge's own protocol and
+        // The REAL UploadService, driven through the transport's upload API and
         // under the cap, so the path genuinely comes back — the multi-second
         // wait every attach gesture's reader check is made before.
         Future<void> upload({required bool openReaderMidUpload}) async {
@@ -1785,28 +1787,20 @@ void main() {
                 ),
           );
           await tester.pump();
-          final requestId =
-              h.transport.sent.lastWhere(
-                    (m) => m['type'] == 'file:upload-start',
-                  )['requestId']
-                  as String;
+          final exchange = h.transport.uploadCalls.last;
           if (openReaderMidUpload) {
             await tester.tap(_historyScrollbar);
             await tester.pump();
           }
-          h.transport.emit('file:upload-ready', {
-            'requestId': requestId,
-            'uploadId': 'u1',
-          });
+          exchange.progress(3, 3);
           await tester.pump();
-          h.transport.emit('file:upload-ack', {'uploadId': 'u1', 'seq': 0});
-          await tester.pump();
-          h.transport.emit('file:upload-result', {
-            'requestId': requestId,
-            'uploadId': 'u1',
-            'ok': true,
-            'path': '/staged/shot.png',
-          });
+          exchange.complete(
+            const UploadStreamResult(
+              ok: true,
+              uploadId: 'u1',
+              path: '/staged/shot.png',
+            ),
+          );
           await tester.pump();
           await tester.pump();
         }

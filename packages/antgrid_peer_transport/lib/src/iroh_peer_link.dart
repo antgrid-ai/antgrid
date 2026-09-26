@@ -288,11 +288,13 @@ class IrohPeerLink implements PeerLink, MultiStreamPeerLink {
     StreamOpen open, {
     required int maxRecordBytes,
     required int maxQueuedBytes,
+    int? rawAfterRecords,
   }) => _opener.open(
     open,
     authorized: () => isDispatchAllowed,
     maxRecordBytes: maxRecordBytes,
     maxQueuedBytes: maxQueuedBytes,
+    rawAfterRecords: rawAfterRecords,
     // Same outcomes as the session stream's reader: lost authorization
     // closes quietly, a malformed record is a non-retryable violation.
     onConnectionFatal: (cause) async {
@@ -358,7 +360,20 @@ abstract interface class PeerStreamSend {
 /// The receive half a [NativePeerStream] reads through.
 abstract interface class PeerStreamRecv {
   Future<Uint8List> readExact(int length);
+
+  /// Reads up to [maxLength] bytes; `null` at a clean FIN. Used only once a
+  /// stream has moved into its raw phase (`rawAfterRecords`) — the framed
+  /// phase reads with [readExact] alone, which cannot tell a FIN from a reset
+  /// (both just throw). Rejects on reset or a lost connection, exactly as
+  /// `iroh_quic`'s own `RecvStream.read` does.
+  Future<Uint8List?> read(int maxLength);
 }
+
+/// Raw-phase read size (`bridge/src/peer/stream-records.ts`'s
+/// `STREAM_RAW_READ_BYTES`, mirrored). Not a protocol bound — a peer may write
+/// smaller or larger native reads than this; it only sizes this side's own
+/// `read` calls.
+const int kPeerStreamRawReadBytes = 65536;
 
 /// Writes [record] in `writeAll` calls of at most [kPeerStreamSliceBytes]: a
 /// cancel or reset then waits on one slice, never a whole record. Returns
@@ -412,6 +427,8 @@ class _IrohStreamRecv implements PeerStreamRecv {
   final iroh.RecvStream _inner;
   @override
   Future<Uint8List> readExact(int length) => _inner.readExact(length);
+  @override
+  Future<Uint8List?> read(int maxLength) => _inner.read(maxLength);
 }
 
 class _PendingSend {
@@ -434,8 +451,10 @@ class NativePeerStream implements PeerStream {
     this._onConnectionFatal, {
     required int maxRecordBytes,
     required int maxQueuedBytes,
+    int? rawAfterRecords,
   }) : _maxRecordBytes = maxRecordBytes,
-       _maxQueuedBytes = maxQueuedBytes;
+       _maxQueuedBytes = maxQueuedBytes,
+       _rawAfterRecords = rawAfterRecords;
 
   final PeerStreamSend _send;
   final PeerStreamRecv _recv;
@@ -443,6 +462,12 @@ class NativePeerStream implements PeerStream {
   final Future<void> Function(PeerStreamFatalCause) _onConnectionFatal;
   final int _maxRecordBytes;
   final int _maxQueuedBytes;
+
+  /// Set once this many decoded records have been delivered on [records]:
+  /// every later read is raw (see [PeerStreamRecv.read]).
+  final int? _rawAfterRecords;
+  int _recordsDelivered = 0;
+  bool _raw = false;
 
   // Single-subscription, not broadcast: a broadcast controller drops what
   // arrives before the caller listens, and the first inbound record (an
@@ -489,6 +514,29 @@ class NativePeerStream implements PeerStream {
     final completer = Completer<PeerSendOutcome>();
     _queue.add(_PendingSend(framed, completer.complete));
     _queuedBytes += size;
+    unawaited(_drain());
+    return completer.future;
+  }
+
+  @override
+  Future<PeerSendOutcome> sendRaw(Uint8List bytes) {
+    if (_writeStopped || _finishing) {
+      return Future.value(PeerSendOutcome.closed);
+    }
+    if (!_authorized()) {
+      _abandon(PeerStreamFatalCause.unauthorized);
+      return Future.value(PeerSendOutcome.closed);
+    }
+    if (bytes.isEmpty) return Future.value(PeerSendOutcome.accepted);
+    if (_queuedBytes + bytes.length > _maxQueuedBytes) {
+      // D3: the caller reopens and resyncs; the connection and every other
+      // stream on it are untouched.
+      unawaited(reset());
+      return Future.value(PeerSendOutcome.backpressured);
+    }
+    final completer = Completer<PeerSendOutcome>();
+    _queue.add(_PendingSend(bytes, completer.complete));
+    _queuedBytes += bytes.length;
     unawaited(_drain());
     return completer.future;
   }
@@ -558,6 +606,10 @@ class NativePeerStream implements PeerStream {
           await (_resumed ??= Completer<void>()).future;
           continue;
         }
+        if (_raw) {
+          await _readRawChunk();
+          continue;
+        }
         final prefix = await _recv.readExact(_kRecordLengthPrefixBytes);
         final length = ByteData.sublistView(prefix).getUint32(0, Endian.big);
         if (length == 0 || length > _maxRecordBytes) {
@@ -570,12 +622,42 @@ class NativePeerStream implements PeerStream {
           return;
         }
         if (!_records.isClosed) _records.add(body);
+        final threshold = _rawAfterRecords;
+        if (threshold != null && ++_recordsDelivered >= threshold) {
+          _raw = true;
+        }
       }
     } catch (_) {
       // The peer finished or reset this stream, or the connection went.
     } finally {
       _closeRecords();
     }
+  }
+
+  /// One iteration of the raw phase: a `null` read is a clean FIN (the outer
+  /// loop's normal exit, via [_records].isClosed after [_closeRecords]), and a
+  /// thrown read is a reset or a lost connection — distinguishable from a FIN
+  /// here in a way record mode never was, so it is surfaced as
+  /// [PeerStreamReset] rather than folded into the same silent close.
+  Future<void> _readRawChunk() async {
+    Uint8List? chunk;
+    try {
+      chunk = await _recv.read(kPeerStreamRawReadBytes);
+    } catch (_) {
+      if (!_records.isClosed) _records.addError(const PeerStreamReset());
+      _closeRecords();
+      return;
+    }
+    if (chunk == null) {
+      _closeRecords();
+      return;
+    }
+    if (chunk.isEmpty) return;
+    if (!_authorized()) {
+      _abandon(PeerStreamFatalCause.unauthorized);
+      return;
+    }
+    if (!_records.isClosed) _records.add(chunk);
   }
 
   // Never awaited: a single-subscription close completes only once a
@@ -668,6 +750,7 @@ class PeerStreamOpener {
     required int maxRecordBytes,
     required int maxQueuedBytes,
     required Future<void> Function(PeerStreamFatalCause) onConnectionFatal,
+    int? rawAfterRecords,
   }) async {
     final openBytes = encodeStreamOpenFrame(open);
     if (!authorized()) {
@@ -692,6 +775,7 @@ class PeerStreamOpener {
         onConnectionFatal,
         maxRecordBytes: maxRecordBytes,
         maxQueuedBytes: maxQueuedBytes,
+        rawAfterRecords: rawAfterRecords,
       );
       // A fresh Dart stream is invisible to the peer until its first write,
       // so the open frame goes out before the stream is handed to anyone.

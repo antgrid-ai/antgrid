@@ -64,12 +64,30 @@ export const TunnelWsStreamOpen = z.strictObject({
   wsId: StreamId,
 });
 
+export const STREAM_UPLOAD_MAX_FILE_NAME_LENGTH = 255;
+export const STREAM_UPLOAD_MAX_MIME_TYPE_LENGTH = 127;
+
+// One stream per file. `checkoutId` follows `TerminalStreamOpen`: absent means
+// the main checkout. `size` is the DECLARED byte count — whether it exceeds
+// the bridge's upload ceiling is a per-file result (TOO_LARGE), never a
+// schema rejection, since only the bridge knows that limit.
+export const UploadStreamOpen = z.strictObject({
+  kind: z.literal("upload"),
+  projectId: StreamId,
+  checkoutId: StreamId.optional(),
+  requestId: StreamId,
+  fileName: z.string().min(1).max(STREAM_UPLOAD_MAX_FILE_NAME_LENGTH),
+  size: z.number().int().nonnegative(),
+  mimeType: z.string().min(1).max(STREAM_UPLOAD_MAX_MIME_TYPE_LENGTH).optional(),
+});
+
 export const StreamOpen = z.discriminatedUnion("kind", [
   SessionStreamOpen,
   ProjectStreamOpen,
   TerminalStreamOpen,
   TunnelHttpStreamOpen,
   TunnelWsStreamOpen,
+  UploadStreamOpen,
 ]);
 
 export type SessionStreamOpen = z.infer<typeof SessionStreamOpen>;
@@ -77,6 +95,7 @@ export type ProjectStreamOpen = z.infer<typeof ProjectStreamOpen>;
 export type TerminalStreamOpen = z.infer<typeof TerminalStreamOpen>;
 export type TunnelHttpStreamOpen = z.infer<typeof TunnelHttpStreamOpen>;
 export type TunnelWsStreamOpen = z.infer<typeof TunnelWsStreamOpen>;
+export type UploadStreamOpen = z.infer<typeof UploadStreamOpen>;
 export type StreamOpen = z.infer<typeof StreamOpen>;
 export type StreamOpenKind = StreamOpen["kind"];
 
@@ -90,9 +109,11 @@ export type StreamOpenKind = StreamOpen["kind"];
 //     (host-server.ts / project-core.ts) for a peer too old to speak this
 //     stream's protocol.
 //   NOT_ALLOWED: remote access is off, the project is unknown or unsafe, or
-//     the peer's project binding does not authorize this stream (a terminal
-//     or tunnel open with no open project stream for the same projectId).
-//   CAP_EXCEEDED: a D7 per-peer cap below is already at its limit.
+//     the peer's project binding does not authorize this stream (a terminal,
+//     tunnel or upload open with no open project stream for the same
+//     projectId).
+//   CAP_EXCEEDED: a D7 per-peer cap below (terminals, tunnels or uploads) is
+//     already at its limit.
 //   INVALID: the open frame failed to parse or exceeded STREAM_OPEN_MAX_BYTES.
 export const StreamRefusedCode = z.enum([
   "NOT_READY",
@@ -120,6 +141,9 @@ export const STREAM_MAX_PROJECTS_PER_PEER = 32;
 export const STREAM_MAX_TERMINAL_ATTACHMENTS_PER_PEER = 64;
 export const STREAM_MAX_TUNNEL_STREAMS_PER_PEER = 128;
 export const STREAM_MAX_PENDING_OPENS_PER_PEER = 16;
+// Sum invariant, restated here because a new per-peer cap has to keep it true:
+// 32 + 64 + 128 + 4 (uploads) + 1 (session) = 229 < 256.
+export const STREAM_MAX_UPLOAD_STREAMS_PER_PEER = 4;
 
 // Per-record caps for the project stream, asymmetric by direction:
 // the app sends small verbs and reads back potentially large payloads
@@ -151,20 +175,22 @@ export const STREAM_TUNNEL_RECORD_MAX_BYTES = STREAM_TUNNEL_DATA_MAX_BYTES + 1;
  *  expressed as an import there — it is a comment instead. */
 export const STREAM_TUNNEL_REQUEST_BODY_MAX_BYTES = MAX_TRANSFER_BYTES;
 
-export const TUNNEL_RECORD_TAG_BODY = 0x00;
-export const TUNNEL_RECORD_TAG_BODY_GZIP = 0x01;
+/** The upload stream's one bridge->app record (a `stream:refused` or a
+ *  `file:upload-result`): generous over the ~2.5 KB a valid result ever needs,
+ *  the same shape as the terminal/tunnel record caps above. */
+export const STREAM_UPLOAD_BRIDGE_RECORD_MAX_BYTES = 16_384;
+
+// Tunnel data records carry only WS frames: an HTTP body rides the stream as
+// raw bytes with no tag byte at all, so `0x00`/`0x01` are retired rather than
+// reassigned.
 export const TUNNEL_RECORD_TAG_WS_TEXT = 0x02;
 export const TUNNEL_RECORD_TAG_WS_BINARY = 0x03;
 
 export type TunnelDataTag =
-  | typeof TUNNEL_RECORD_TAG_BODY
-  | typeof TUNNEL_RECORD_TAG_BODY_GZIP
   | typeof TUNNEL_RECORD_TAG_WS_TEXT
   | typeof TUNNEL_RECORD_TAG_WS_BINARY;
 
 const TUNNEL_DATA_TAGS: ReadonlySet<number> = new Set<number>([
-  TUNNEL_RECORD_TAG_BODY,
-  TUNNEL_RECORD_TAG_BODY_GZIP,
   TUNNEL_RECORD_TAG_WS_TEXT,
   TUNNEL_RECORD_TAG_WS_BINARY,
 ]);

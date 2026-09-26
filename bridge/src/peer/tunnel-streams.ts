@@ -21,8 +21,6 @@ import {
   STREAM_MAX_TUNNEL_STREAMS_PER_PEER,
   STREAM_TUNNEL_RECORD_MAX_BYTES,
   STREAM_TUNNEL_REQUEST_BODY_MAX_BYTES,
-  TUNNEL_RECORD_TAG_BODY,
-  TUNNEL_RECORD_TAG_BODY_GZIP,
   TUNNEL_RECORD_TAG_WS_BINARY,
   TUNNEL_RECORD_TAG_WS_TEXT,
   type StreamRefusedCode,
@@ -30,7 +28,8 @@ import {
   type TunnelWsStreamOpen,
 } from "antgrid-wire";
 import { isSafeProjectId } from "../project-id";
-import { TunnelHttpEnd, TunnelHttpRequest, TunnelWsClose, TunnelWsOpen } from "../tunnel-protocol";
+import { TUNNEL_BODY_REPLAY_MAX_BYTES, TunnelHttpRequest, TunnelWsClose, TunnelWsOpen } from "../tunnel-protocol";
+import { FETCH_READ_IDLE_MS, UpstreamBodyError, type TunnelRequestBody } from "../localhost-fetch";
 import type {
   TunnelHttpExchange,
   TunnelManager,
@@ -47,8 +46,10 @@ import {
   type StreamRefusal as DispatchStreamRefusal,
 } from "./stream-dispatch";
 import {
+  StreamRawReader,
   StreamRecordReader,
   StreamRecordWriter,
+  STREAM_RAW_READ_BYTES,
   type StreamSendOutcome,
   type StreamWriteFailure,
 } from "./stream-records";
@@ -80,17 +81,6 @@ function headerContentLength(headers: Record<string, string> | undefined): numbe
     return Number(v);
   }
   return undefined;
-}
-
-function concatBytes(chunks: Uint8Array[], total: number): Uint8Array {
-  if (chunks.length === 1) return chunks[0]!;
-  const out = new Uint8Array(total);
-  let offset = 0;
-  for (const c of chunks) {
-    out.set(c, offset);
-    offset += c.byteLength;
-  }
-  return out;
 }
 
 function parseJsonRecord(text: string): { ok: true; value: unknown } | { ok: false } {
@@ -130,10 +120,182 @@ interface BaseBinding {
 interface HttpBinding extends BaseBinding {
   readonly kind: "http";
   bodyLength: number;
-  /** `tunnel:http-end` has been written (and `writer.finish()` issued). Marks
-   *  the app's own FIN afterward as orderly rather than a cancel. */
+  /** `writer.finish()` has been issued for this exchange's response.
+   *  Marks the app's own FIN afterward as orderly rather than a cancel. */
   ended: boolean;
   readonly exchangeAbort: AbortController;
+  /** Set only when `bodyLength > 0`; the cancel watcher does not start until
+   *  it reports a full, successful drain. */
+  bodySource?: TunnelRequestBodySource;
+}
+
+/** Hooks a `TunnelRequestBodySource` calls back into the registry with —
+ *  kept separate from the registry's own methods because the source has no
+ *  business calling `unbind`/`retirePeer` itself; it only reports what its
+ *  own raw reads observed. */
+interface RequestBodySourceHooks {
+  unbound: () => boolean;
+  authorized: () => boolean;
+  onUnauthorized: () => void;
+  /** FIN, reset, or a stalled read short of the declared length: never
+   *  `close()`s the `ReadableStream` (a closed short stream reads to `fetch`
+   *  as a complete, truncated body) — `error()`s it instead. */
+  onIncomplete: () => void;
+  /** Every declared byte has been pulled off the wire and handed to `fetch`.
+   *  This is when the cancel watcher may safely start reading `recv` — before
+   *  this, the body source is still the stream's one active reader. */
+  onDrained: () => void;
+}
+
+/**
+ * Backs one HTTP tunnel run's upstream request body: a pull-based
+ * `ReadableStream` (`highWaterMark: 0`, so `fetch` never buffers ahead of what
+ * it has actually written upstream) over the tunnel stream's raw receive
+ * half. `pull()` never asks for more than the declared length remaining
+ * (§3), so an app that sends extra bytes is caught by the cancel watcher that
+ * starts once this source drains, not by this class.
+ *
+ * Keeps everything it has read, up to `TUNNEL_BODY_REPLAY_MAX_BYTES`, so a
+ * second `stream()` call (the http/https scheme retry) can replay the
+ * first attempt's bytes before continuing from the wire; past the cap,
+ * `stream()` returns `null` and the retry is skipped.
+ */
+class TunnelRequestBodySource implements TunnelRequestBody {
+  readonly length: number;
+  readonly complete: Promise<void>;
+  private resolveComplete!: () => void;
+  private received = 0;
+  private replay: Buffer[] = [];
+  private replayBytes = 0;
+  private replayCapped = false;
+  private failure: unknown;
+  private pendingRead: Promise<unknown> | null = null;
+  drained = false;
+
+  constructor(
+    private readonly raw: StreamRawReader,
+    length: number,
+    private readonly idleMs: number,
+    private readonly schedule: (callback: () => void, ms: number) => () => void,
+    private readonly hooks: RequestBodySourceHooks,
+  ) {
+    this.length = length;
+    this.complete = new Promise((resolve) => { this.resolveComplete = resolve; });
+  }
+
+  stream(): ReadableStream<Uint8Array> | null {
+    if (this.replayCapped) return null;
+    if (this.failure !== undefined) {
+      const failure = this.failure;
+      return new ReadableStream<Uint8Array>({ start: (controller) => controller.error(failure) });
+    }
+    // How far into the pulled bytes THIS attempt has delivered. Read live on
+    // every pull rather than snapshotted here: an earlier attempt's read can
+    // still be outstanding, and the bytes it lands belong to this one too.
+    let delivered = 0;
+    return new ReadableStream<Uint8Array>(
+      {
+        pull: async (controller) => {
+          // One reader per receive half: an abandoned attempt's read is
+          // waited out, and its bytes reach this attempt through the replay
+          // buffer instead of being lost between the two.
+          await this.awaitIdle();
+          if (this.failure !== undefined) { controller.error(this.failure); return; }
+          if (delivered < this.received) {
+            if (this.replayCapped) {
+              controller.error(new UpstreamBodyError("request body exceeds the replay cap"));
+              return;
+            }
+            const replayed = Buffer.concat(this.replay, this.replayBytes).subarray(delivered);
+            delivered = this.received;
+            controller.enqueue(new Uint8Array(replayed));
+            if (delivered === this.length) controller.close();
+            return;
+          }
+          if (this.received === this.length) { controller.close(); return; }
+          const bytes = await this.pullFresh();
+          if (bytes === null) { controller.error(this.failure); return; }
+          delivered = this.received;
+          controller.enqueue(bytes);
+          if (delivered === this.length) controller.close();
+        },
+      },
+      { highWaterMark: 0 },
+    );
+  }
+
+  /** Resolves once whatever raw read is currently outstanding has settled (or
+   *  immediately, if none is) — lets a caller that must stop the receive half
+   *  wait for the shared per-stream mutex to free rather than queuing behind
+   *  a still-pending native read (stream-records.ts's binding constraints). */
+  awaitIdle(): Promise<void> {
+    return this.pendingRead ? this.pendingRead.then(() => {}, () => {}) : Promise.resolve();
+  }
+
+  /** One raw read off the wire. Returns the bytes, already counted and
+   *  remembered, or `null` once `failure` is set. The bookkeeping never
+   *  depends on which attempt's controller asked, so bytes landing after that
+   *  attempt was abandoned are still counted toward the drain. */
+  private async pullFresh(): Promise<Uint8Array | null> {
+    if (this.failure !== undefined) return null;
+    const want = Math.min(STREAM_RAW_READ_BYTES, this.length - this.received);
+    let settled = false;
+    let cancelTimer: (() => void) | undefined;
+    const readPromise = this.raw.read(want);
+    // Cleared only when the NATIVE read settles, not when the idle clock
+    // fires: after a stall the read still holds the receive half's mutex.
+    this.pendingRead = readPromise;
+    const clear = () => { if (this.pendingRead === readPromise) this.pendingRead = null; };
+    readPromise.then(clear, clear);
+    const outcome = await new Promise<Uint8Array | null | "timeout">((resolve) => {
+      cancelTimer = this.schedule(() => { if (settled) return; settled = true; resolve("timeout"); }, this.idleMs);
+      readPromise.then(
+        (bytes) => { if (settled) return; settled = true; resolve(bytes); },
+        () => { if (settled) return; settled = true; resolve(null); }, // reset: folded into the same short-body handling as FIN
+      );
+    });
+    cancelTimer?.();
+
+    if (this.hooks.unbound()) {
+      this.failure = new UpstreamBodyError("tunnel stream unbound");
+      return null;
+    }
+    if (!this.hooks.authorized()) {
+      this.failure = new UpstreamBodyError("unauthorized");
+      this.hooks.onUnauthorized();
+      return null;
+    }
+    if (outcome === "timeout") {
+      this.failure = new UpstreamBodyError("request body stalled");
+      this.hooks.onIncomplete();
+      return null;
+    }
+    if (outcome === null) {
+      this.failure = new UpstreamBodyError("request body ended before its declared length");
+      this.hooks.onIncomplete();
+      return null;
+    }
+    this.received += outcome.byteLength;
+    this.remember(outcome);
+    if (this.received === this.length) {
+      this.drained = true;
+      this.resolveComplete();
+      this.hooks.onDrained();
+    }
+    return outcome;
+  }
+
+  private remember(bytes: Uint8Array): void {
+    if (this.replayCapped) return;
+    if (this.replayBytes + bytes.byteLength > TUNNEL_BODY_REPLAY_MAX_BYTES) {
+      this.replayCapped = true;
+      this.replay = [];
+      this.replayBytes = 0;
+      return;
+    }
+    this.replay.push(Buffer.from(bytes));
+    this.replayBytes += bytes.byteLength;
+  }
 }
 
 interface WsBinding extends BaseBinding {
@@ -163,6 +325,8 @@ export interface TunnelStreamRegistryOptions {
   diagnostic?: (type: string, detail: Record<string, unknown>, stream?: { kind: NetwatchStreamKind; id: string }) => void;
   /** Timer seam for the head deadline; defaults to setTimeout/clearTimeout. */
   schedule?: (callback: () => void, ms: number) => () => void;
+  /** Test seam for the request-body idle clock; defaults to `FETCH_READ_IDLE_MS`. */
+  requestBodyIdleMs?: number;
 }
 
 /** `(peerId, kind, id) -> binding`, registered into `PeerStreamAcceptor`'s
@@ -464,48 +628,41 @@ export class TunnelStreamRegistry {
   // ---- Async phase: HTTP body, then run ------------------------------------
 
   private async runHttpBody(binding: HttpBinding, req: TunnelHttpRequest, manager: TunnelManager): Promise<void> {
-    const chunks: Uint8Array[] = [];
-    let received = 0;
-    while (received < req.bodyLength) {
-      let bytes: Uint8Array;
-      try {
-        bytes = await binding.reader.read();
-      } catch {
-        // FIN or reset before the declared body arrived: abandon the request
-        // WITHOUT contacting the upstream (the truncation trap, §1.3).
-        binding.writer.abort();
-        this.unbind(binding);
-        return;
-      }
-      if (binding.unbound) {
-        void binding.stream.recv.stop(STREAM_STOP_TUNNEL).catch(() => {});
-        return;
-      }
-      if (!binding.authorized()) { this.opts.retirePeer(binding.peerId, "unauthorized"); return; }
-      const decoded = decodeTunnelRecord(bytes);
-      if (!decoded || decoded.kind !== "data" || decoded.tag !== TUNNEL_RECORD_TAG_BODY) {
-        this.refuseInline(binding, "INVALID", "expected an HTTP body record");
-        return;
-      }
-      if (received + decoded.payload.byteLength > req.bodyLength) {
-        this.refuseInline(binding, "INVALID", "body exceeded its declared length");
-        return;
-      }
-      chunks.push(decoded.payload);
-      received += decoded.payload.byteLength;
+    let bodySource: TunnelRequestBodySource | undefined;
+    if (req.bodyLength > 0) {
+      bodySource = new TunnelRequestBodySource(
+        new StreamRawReader(binding.stream),
+        req.bodyLength,
+        this.opts.requestBodyIdleMs ?? FETCH_READ_IDLE_MS,
+        this.schedule,
+        {
+          unbound: () => binding.unbound,
+          authorized: binding.authorized,
+          onUnauthorized: () => this.opts.retirePeer(binding.peerId, "unauthorized"),
+          onIncomplete: () => {
+            binding.exchangeAbort.abort();
+            binding.writer.abort();
+            this.unbind(binding);
+          },
+          onDrained: () => { void this.watchHttpCancel(binding); },
+        },
+      );
+      binding.bodySource = bodySource;
     }
-    const body = concatBytes(chunks, received);
 
     const exchange: TunnelHttpExchange = {
       peerId: binding.peerId,
       get signal() { return binding.exchangeAbort.signal; },
       head: (head) => this.sendHttpHead(binding, head),
-      body: (slice) => this.sendHttpBody(binding, slice),
+      body: (bytes) => this.sendHttpBody(binding, bytes),
       end: () => this.endHttp(binding),
       fail: (reason) => this.failHttp(binding, reason),
     };
-    void manager.serveHttp(req, body, exchange);
-    void this.watchHttpCancel(binding);
+    void manager.serveHttp(req, bodySource ?? null, exchange);
+    // With no declared body there is nothing to drain first — the watcher
+    // owns `recv` from the start (§3); with one, `onDrained` above starts it
+    // once every declared byte has been pulled.
+    if (!bodySource) void this.watchHttpCancel(binding);
   }
 
   private async sendHttpHead(
@@ -528,20 +685,18 @@ export class TunnelStreamRegistry {
     }));
   }
 
-  private async sendHttpBody(
-    binding: HttpBinding,
-    slice: { bytes: Uint8Array; gzip: boolean },
-  ): Promise<StreamSendOutcome> {
+  private async sendHttpBody(binding: HttpBinding, bytes: Uint8Array): Promise<StreamSendOutcome> {
     if (!binding.tunnelBinding.mayDeliverTo(binding.peerId)) {
       binding.exchangeAbort.abort();
       binding.writer.abort();
       this.unbind(binding);
       return "dropped";
     }
-    const tag = slice.gzip ? TUNNEL_RECORD_TAG_BODY_GZIP : TUNNEL_RECORD_TAG_BODY;
-    return binding.writer.send(encodeTunnelDataRecord(tag, slice.bytes));
+    return binding.writer.sendRaw(bytes);
   }
 
+  /** A clean FIN and a reset are natively distinguishable on the wire, so
+   *  `writer.finish()` alone is the "done" signal for a response body. */
   private async endHttp(binding: HttpBinding): Promise<StreamSendOutcome> {
     if (!binding.tunnelBinding.mayDeliverTo(binding.peerId)) {
       binding.exchangeAbort.abort();
@@ -549,12 +704,17 @@ export class TunnelStreamRegistry {
       this.unbind(binding);
       return "dropped";
     }
-    const record: TunnelHttpEnd = { type: "tunnel:http-end", requestId: binding.id, checkoutId: binding.checkoutId };
-    const outcome = await binding.writer.send(encodeJsonRecord(record));
     binding.ended = true;
     await binding.writer.finish();
+    // A request-body read can still be outstanding if the origin answered
+    // before the app finished sending it — `recv.stop` is chained on that
+    // read settling rather than issued now, since it would otherwise queue
+    // behind the binding's shared per-stream mutex.
+    const pendingBody = binding.bodySource && !binding.bodySource.drained
+      ? binding.bodySource.awaitIdle() : undefined;
     this.unbind(binding);
-    return outcome;
+    if (pendingBody) void pendingBody.then(() => { void binding.stream.recv.stop(STREAM_STOP_TUNNEL).catch(() => {}); });
+    return "sent";
   }
 
   private failHttp(binding: HttpBinding, reason: string): void {
@@ -562,32 +722,40 @@ export class TunnelStreamRegistry {
     this.opts.diagnostic?.("tunnel-stream:http-failed", { peerId: binding.peerId, requestId: binding.id, reason },
       { kind: "tunnel-http", id: binding.id });
     binding.writer.abort();
+    const pendingBody = binding.bodySource && !binding.bodySource.drained
+      ? binding.bodySource.awaitIdle() : undefined;
     this.unbind(binding);
+    if (pendingBody) void pendingBody.then(() => { void binding.stream.recv.stop(STREAM_STOP_TUNNEL).catch(() => {}); });
   }
 
-  /** Once the declared body has fully arrived, one more `reader.read()` stays
-   *  pending for the rest of the run's life, purely to detect the app's own
-   *  cancel while the response streams out. */
+  /** Starts once the request body (if any) has fully drained — before that,
+   *  the body source is the stream's one active reader (§3). One pending
+   *  `raw.read(1)` stays outstanding for the rest of the run, purely to
+   *  detect the app sending anything else: a byte is a breach, and FIN/reset
+   *  is the app's own end unless it beat our own orderly one. */
   private async watchHttpCancel(binding: HttpBinding): Promise<void> {
+    const raw = new StreamRawReader(binding.stream);
+    let bytes: Uint8Array | null;
     try {
-      await binding.reader.read();
+      bytes = await raw.read(1);
     } catch {
-      // A rejection before `end()` was written is the app's cancel (a reset,
-      // or a FIN — indistinguishable, and treated the same). One after `end()`
-      // is the app's own orderly FIN and is ignored; `unbound` covers the
-      // window where `end()`'s `finish()` is still in flight.
-      if (binding.unbound || binding.ended) return;
-      binding.exchangeAbort.abort();
-      binding.writer.abort();
-      this.unbind(binding);
-      return;
+      bytes = null; // reset: folded into the same "ended early" handling as FIN
     }
     if (binding.unbound) {
       void binding.stream.recv.stop(STREAM_STOP_TUNNEL).catch(() => {});
       return;
     }
+    if (bytes === null) {
+      // A rejection or FIN before `end()` was written is the app's cancel.
+      // One after `end()` is the app's own orderly FIN and is ignored.
+      if (binding.ended) return;
+      binding.exchangeAbort.abort();
+      binding.writer.abort();
+      this.unbind(binding);
+      return;
+    }
     // A record here is a stream breach: the app must send nothing more once
-    // its declared body is complete.
+    // its run is complete.
     binding.exchangeAbort.abort();
     binding.writer.abort();
     this.unbind(binding);

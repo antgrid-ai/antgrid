@@ -615,6 +615,7 @@ export class ProjectCore {
       // the read-state cleanup is the same either way.
       onPeerStreamClosed: (peerId) => this.noteClientGone(peerId),
       tunnels: core.tunnelStreams,
+      uploads: core.uploadStreams,
     });
 
     // Mark this connection as REMOTE for the core's mobile-access gate, and let

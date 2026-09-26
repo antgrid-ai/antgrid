@@ -17,8 +17,7 @@ import {
   STREAM_PROJECT_BRIDGE_RECORD_MAX_BYTES,
   STREAM_TERMINAL_BRIDGE_RECORD_MAX_BYTES,
   STREAM_TUNNEL_RECORD_MAX_BYTES,
-  TUNNEL_RECORD_TAG_BODY,
-  TUNNEL_RECORD_TAG_BODY_GZIP,
+  STREAM_UPLOAD_BRIDGE_RECORD_MAX_BYTES,
   TUNNEL_RECORD_TAG_WS_TEXT,
   TUNNEL_RECORD_TAG_WS_BINARY,
   encodeTunnelDataRecord,
@@ -35,6 +34,13 @@ const SESSION_STREAM_MAX_QUEUED_BYTES = 64 * 1024 * 1024;
  *  requires it for BOTH device types, so an app now sends it too.
  *  Duplicated (not imported from harness.ts) to avoid a helper import cycle. */
 const TEST_LICENSE_TOKEN = "eval-license-token";
+
+/** Mirrors the bridge's own `STREAM_RAW_READ_BYTES` (`bridge/src/peer/stream-records.ts`)
+ *  — kept in lockstep by hand, since this client reads the raw upload and
+ *  tunnel-http bodies directly off the wire rather than through that module.
+ *  Exported so a test can assert a lower bound on how many raw reads a body
+ *  of a given size must have taken. */
+export const RAW_READ_BYTES = 65_536;
 
 /** Monotonic per-launch epoch source. A client (re)started within
  *  one test presents a strictly higher epoch than its predecessor, so the newer
@@ -73,15 +79,15 @@ export interface HelloForgeOpts {
 }
 
 /** One tunneled HTTP response, reassembled from a dedicated `tunnel-http`
- *  QUIC stream (Stage A wave A3). `records` counts only the body records
- *  consumed (the `0x00`/`0x01`-tagged ones), not the head or end control
- *  records. */
+ *  QUIC stream (Stage A wave A3). The body rides the stream as raw bytes with
+ *  no per-record framing, so `chunks` counts only how many separate reads it
+ *  took to drain — a diagnostic on read granularity, not a wire record count. */
 export interface TunnelHttpResult {
   status: number;
   headers: Record<string, string>;
   setCookies: string[];
   body: Buffer;
-  records: number;
+  chunks: number;
 }
 
 /** A `tunnel-http` stream driven directly, mirroring the app's own
@@ -93,8 +99,8 @@ export interface TunnelHttpStreamClient {
   /** The `tunnel:http-head` record, or rejects with an Error carrying
    *  `.refusal` (the `stream:refused` record) when the open was refused. */
   head(timeoutMs?: number): Promise<Record<string, any>>;
-  /** Head + every body record (gunzipped per record) + the end record;
-   *  rejects on refusal or a status other than `"end"`. */
+  /** Head + the raw response body, read to a clean FIN; rejects on refusal
+   *  or a status other than `"end"`. */
   response(timeoutMs?: number): Promise<TunnelHttpResult>;
   bodyBytesSoFar(): number;
   /** Stops/restarts issuing reads, so QUIC flow control pushes back on the
@@ -106,6 +112,32 @@ export interface TunnelHttpStreamClient {
    *  pending read). */
   cancel(): void;
   readonly ended: Promise<"end" | "truncated" | "refused" | "reset-before-head">;
+}
+
+/** An `upload` stream driven directly: the open frame, then the file's raw
+ *  bytes with no framing, then (by default) FIN — mirroring
+ *  `StreamTransport.openUpload` without its slot semaphore or progress
+ *  callback, the same relationship `openTerminalStream` has to the Dart
+ *  client. */
+export interface UploadStreamClient {
+  readonly requestId: string;
+  /** Bytes handed to the native `writeAll` calls so far, across the initial
+   *  write and any `writeMore`. */
+  bytesWritten(): number;
+  /** The bridge's `file:upload-result`, or rejects with an Error carrying
+   *  `.refusal` (a `stream:refused`) or a plain message when the stream ended
+   *  with no result at all. */
+  result(timeoutMs?: number): Promise<Record<string, any>>;
+  /** `"reset"` and `"fin-without-result"` are both "no result arrived", kept
+   *  distinct because a raw read (unlike `readExact`) can tell a clean FIN
+   *  from a reset apart — useful for pinning which one a given row produced. */
+  readonly ended: Promise<"result" | "refused" | "reset" | "fin-without-result">;
+  readonly refusal: Record<string, any> | null;
+  /** Writes more raw bytes on the still-open send half — only meaningful when
+   *  the stream was opened with `finish: false`. */
+  writeMore(bytes: Uint8Array): Promise<void>;
+  /** Resets the send half only, mirroring the app's own cancel (D4). */
+  cancel(): void;
 }
 
 export type TunnelWsRecord =
@@ -211,6 +243,47 @@ function splitLengthPrefixedRecords(buf: Buffer): Uint8Array[] {
     offset += len;
   }
   return records;
+}
+
+/** One outcome of `readOneRawRecord`: a well-formed `[u32 BE len][JSON]`
+ *  record, a clean FIN before any byte of it arrived, or anything else
+ *  (a reset mid-record, a reset before the length prefix, or a malformed
+ *  length) — the last two are collapsed together because neither is a state
+ *  a caller needs to tell apart from a genuine reset. */
+type RawRecordOutcome =
+  | { kind: "record"; bytes: Uint8Array }
+  | { kind: "fin" }
+  | { kind: "reset" };
+
+/** Reads exactly one length-prefixed JSON record off a RAW receive half
+ *  (`recv.read`, not `StreamRecordReader`'s `readExact`): the upload and
+ *  tunnel-http admission replies are each a single such record, and only a
+ *  raw read can tell a clean FIN apart from a reset (`readExact` rejects on
+ *  both, so it collapses the two the caller here wants distinguished). */
+async function readOneRawRecord(
+  recv: { read(maxLen: number): Promise<number[]> },
+  maxBytes: number,
+): Promise<RawRecordOutcome> {
+  let buf = Buffer.alloc(0);
+  // Resolves once `buf` holds at least `n` bytes, or false on a clean FIN
+  // strictly short of it.
+  const need = async (n: number): Promise<boolean> => {
+    while (buf.length < n) {
+      const piece = await recv.read(n - buf.length);
+      if (piece.length === 0) return false;
+      buf = Buffer.concat([buf, Buffer.from(piece)]);
+    }
+    return true;
+  };
+  try {
+    if (!(await need(4))) return buf.length === 0 ? { kind: "fin" } : { kind: "reset" };
+    const length = buf.readUInt32BE(0);
+    if (length === 0 || length > maxBytes) return { kind: "reset" };
+    if (!(await need(4 + length))) return { kind: "reset" };
+    return { kind: "record", bytes: new Uint8Array(buf.subarray(4, 4 + length)) };
+  } catch {
+    return { kind: "reset" };
+  }
 }
 
 export class RelayClient {
@@ -732,11 +805,13 @@ export class RelayClient {
 
   /** Opens a `kind:"tunnel-http"` stream: the open frame, the
    *  `tunnel:http-request` head (with `bodyLength` stamped from `body`), then
-   *  `body` as `≤STREAM_RECORD_SLICE_BYTES` `0x00` records (§1.3). It never
-   *  `finish()`es the send half itself — the wire keeps it open until
-   *  `tunnel:http-end` arrives, exactly as the app's own transport does.
-   *  `opts.head` may set its own `requestId` to build a deliberate open/head
-   *  mismatch for a refusal-path row; otherwise it takes the open frame's id. */
+   *  `body` itself as raw bytes in `≤STREAM_RECORD_SLICE_BYTES` slices (§3).
+   *  The send half stays open after that — a clean response FIN is what
+   *  triggers this side's own `finish()`, since a QUIC reset issued after
+   *  `finish()` is unreliable and that is otherwise the only way left to
+   *  cancel. `opts.head` may set its own `requestId` to build a deliberate
+   *  open/head mismatch for a refusal-path row; otherwise it takes the open
+   *  frame's id. */
   async openTunnelHttpStream(opts: {
     projectId: string;
     requestId?: string;
@@ -764,17 +839,13 @@ export class RelayClient {
 
     for (let offset = 0; offset < body.length; offset += STREAM_RECORD_SLICE_BYTES) {
       const slice = body.subarray(offset, Math.min(offset + STREAM_RECORD_SLICE_BYTES, body.length));
-      const record = encodeTunnelDataRecord(TUNNEL_RECORD_TAG_BODY, slice);
-      await stream.send.writeAll(Array.from(prefixWithLength(record)));
+      await stream.send.writeAll(Array.from(slice));
     }
-
-    const reader = new StreamRecordReader({ recv: stream.recv }, STREAM_TUNNEL_RECORD_MAX_BYTES, () => {});
 
     let gotHead = false;
     let refusal: Record<string, any> | null = null;
-    let sawEnd = false;
     let bodyBytes = 0;
-    let recordCount = 0;
+    let chunkCount = 0;
     const bodyChunks: Buffer[] = [];
 
     let headResolve!: (h: Record<string, any>) => void;
@@ -801,51 +872,62 @@ export class RelayClient {
     };
 
     void (async () => {
+      // "finish" once a clean response FIN is seen, "reset" for anything
+      // else (a reset mid-body, or the stream ending before a head ever
+      // arrived) — that decision is also what closes this side's own send
+      // half (it stays open until the response has ended, so a reset stays a cancel).
+      let sendOutcome: "finish" | "reset" = "reset";
       try {
+        // The head/refusal record is still length-prefixed JSON, so a normal
+        // record read is enough here — the app can't do anything differently
+        // for a clean FIN before it than for a reset before it, and this
+        // stream never carries more than the one record before the head.
+        const reader = new StreamRecordReader({ recv: stream.recv }, STREAM_TUNNEL_RECORD_MAX_BYTES, () => {});
+        const bytes = await reader.read();
+        const text = Buffer.from(bytes).toString("utf8");
+        let obj: any;
+        try {
+          obj = JSON.parse(text);
+        } catch {
+          obj = null;
+        }
+        if (obj?.type === "stream:refused") {
+          refusal = obj;
+          headReject(
+            Object.assign(new Error(`tunnel-http stream refused: ${obj.code} ${obj.message}`), { refusal: obj }),
+          );
+          return;
+        }
+        if (obj?.type !== "tunnel:http-head") {
+          headReject(new Error(`unexpected tunnel-http head record: ${text.slice(0, 200)}`));
+          return;
+        }
+        gotHead = true;
+        headResolve(obj);
+
+        // Everything after the head is the raw body, with no framing — a
+        // clean FIN (an empty read) is the response's orderly end; a reset
+        // rejects.
         while (true) {
           await waitIfPaused();
-          const bytes = await reader.read();
-          const decoded = decodeTunnelRecord(bytes);
-          if (!decoded) continue; // malformed record — ignore rather than fail the row
-          if (decoded.kind === "json") {
-            let obj: any;
-            try {
-              obj = JSON.parse(decoded.text);
-            } catch {
-              continue;
-            }
-            if (obj?.type === "stream:refused") {
-              refusal = obj;
-              headReject(
-                Object.assign(new Error(`tunnel-http stream refused: ${obj.code} ${obj.message}`), { refusal: obj }),
-              );
-              continue;
-            }
-            if (obj?.type === "tunnel:http-head" && !gotHead) {
-              gotHead = true;
-              headResolve(obj);
-              continue;
-            }
-            if (obj?.type === "tunnel:http-end") {
-              sawEnd = true;
-              // §1.3: the app finish()es its send half only once the end
-              // record arrives.
-              void stream.send.finish().catch(() => {});
-              continue;
-            }
-            continue; // unexpected JSON — a breach the bridge itself would have retired on
+          const raw = await stream.recv.read(RAW_READ_BYTES);
+          if (raw.length === 0) {
+            sendOutcome = "finish";
+            return;
           }
-          recordCount++;
-          const raw = Buffer.from(decoded.payload);
-          const chunk = decoded.tag === TUNNEL_RECORD_TAG_BODY_GZIP ? Buffer.from(Bun.gunzipSync(raw)) : raw;
+          chunkCount++;
+          const chunk = Buffer.from(raw);
           bodyChunks.push(chunk);
           bodyBytes += chunk.length;
         }
       } catch {
-        // The bridge's half ended — FIN (end/refusal already handled above)
-        // or reset (overflow, a detected cancel) look the same from here.
+        // A reset after the head is an aborted response; before it, the
+        // stream ended without ever producing one (both fold into
+        // `sendOutcome`'s default above).
       } finally {
-        endedResolve(refusal ? "refused" : !gotHead ? "reset-before-head" : sawEnd ? "end" : "truncated");
+        if (sendOutcome === "finish") void stream.send.finish().catch(() => {});
+        else void stream.send.reset(0n).catch(() => {});
+        endedResolve(refusal ? "refused" : !gotHead ? "reset-before-head" : sendOutcome === "finish" ? "end" : "truncated");
       }
     })();
 
@@ -865,7 +947,7 @@ export class RelayClient {
           headers: (h.headers ?? {}) as Record<string, string>,
           setCookies: (h.setCookies ?? []) as string[],
           body: Buffer.concat(bodyChunks),
-          records: recordCount,
+          chunks: chunkCount,
         };
       },
       bodyBytesSoFar(): number {
@@ -883,6 +965,125 @@ export class RelayClient {
         void stream.send.reset(0n).catch(() => {});
       },
       ended,
+    };
+  }
+
+  /** Opens a `kind:"upload"` stream: the open frame, then `opts.bytes` as raw
+   *  bytes in `≤sliceBytes` slices (default `STREAM_RECORD_SLICE_BYTES`), then
+   *  FIN unless `opts.finish` is `false` — a caller building a cancel-mid-body
+   *  or an over/under-declared-size row passes `finish: false` and drives the
+   *  send half itself with `writeMore`/`cancel`. `size` defaults to
+   *  `bytes.length`; passing a different value is how a row declares more or
+   *  less than it actually sends. */
+  async openUploadStream(opts: {
+    projectId: string;
+    checkoutId?: string;
+    requestId?: string;
+    fileName: string;
+    size?: number;
+    mimeType?: string;
+    bytes: Uint8Array;
+    finish?: boolean;
+    sliceBytes?: number;
+  }): Promise<UploadStreamClient> {
+    const connection = this.nativeConnection;
+    if (!connection) throw new Error("Native connection is not established");
+    const requestId = opts.requestId ?? crypto.randomUUID();
+    const size = opts.size ?? opts.bytes.length;
+    const sliceBytes = opts.sliceBytes ?? STREAM_RECORD_SLICE_BYTES;
+    const stream = await connection.openBi();
+
+    const openFrame = prefixWithLength(
+      encodeStreamOpen({
+        kind: "upload",
+        projectId: opts.projectId,
+        checkoutId: opts.checkoutId,
+        requestId,
+        fileName: opts.fileName,
+        size,
+        mimeType: opts.mimeType,
+      }),
+    );
+    await stream.send.writeAll(Array.from(openFrame));
+
+    let written = 0;
+    const writeChunk = async (bytes: Uint8Array): Promise<void> => {
+      for (let offset = 0; offset < bytes.length; offset += sliceBytes) {
+        const slice = bytes.subarray(offset, Math.min(offset + sliceBytes, bytes.length));
+        await stream.send.writeAll(Array.from(slice));
+        written += slice.length;
+      }
+    };
+    await writeChunk(opts.bytes);
+    if (opts.finish ?? true) await stream.send.finish();
+
+    let refusal: Record<string, any> | null = null;
+    let resultResolve!: (r: Record<string, any>) => void;
+    let resultReject!: (e: Error) => void;
+    const resultPromise = new Promise<Record<string, any>>((resolve, reject) => {
+      resultResolve = resolve;
+      resultReject = reject;
+    });
+    resultPromise.catch(() => {});
+
+    let endedResolve!: (v: "result" | "refused" | "reset" | "fin-without-result") => void;
+    const ended = new Promise<"result" | "refused" | "reset" | "fin-without-result">((resolve) => {
+      endedResolve = resolve;
+    });
+
+    void (async () => {
+      const outcome = await readOneRawRecord(stream.recv, STREAM_UPLOAD_BRIDGE_RECORD_MAX_BYTES);
+      if (outcome.kind === "fin") {
+        resultReject(new Error(`upload stream ${requestId} ended with no result`));
+        endedResolve("fin-without-result");
+        return;
+      }
+      if (outcome.kind === "reset") {
+        resultReject(new Error(`upload stream ${requestId} was reset before any result`));
+        endedResolve("reset");
+        return;
+      }
+      const text = Buffer.from(outcome.bytes).toString("utf8");
+      let obj: any;
+      try {
+        obj = JSON.parse(text);
+      } catch {
+        obj = null;
+      }
+      if (obj?.type === "stream:refused") {
+        refusal = obj;
+        resultReject(Object.assign(new Error(`upload stream refused: ${obj.code} ${obj.message}`), { refusal: obj }));
+        endedResolve("refused");
+        return;
+      }
+      if (obj?.type === "file:upload-result") {
+        resultResolve(obj);
+        endedResolve("result");
+        return;
+      }
+      resultReject(new Error(`unexpected upload-stream record: ${text.slice(0, 200)}`));
+      void stream.send.reset(0n).catch(() => {});
+      endedResolve("reset");
+    })();
+
+    return {
+      requestId,
+      bytesWritten(): number {
+        return written;
+      },
+      result(timeoutMs = 15_000): Promise<Record<string, any>> {
+        return withTimeout(resultPromise, timeoutMs, `upload result for ${requestId}`);
+      },
+      ended,
+      get refusal() {
+        return refusal;
+      },
+      writeMore(bytes: Uint8Array): Promise<void> {
+        return writeChunk(bytes);
+      },
+      cancel(): void {
+        void stream.send.reset(0n).catch(() => {});
+      },
     };
   }
 

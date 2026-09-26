@@ -27,11 +27,19 @@ and machine-scoped verbs such as `agent:projects` and `stream-ready`);
 every project gets its own stream (`docs/protocol/peer-session.md` §1d),
 carrying that project's bus traffic — session-bus frames, `preview:url`, and
 so on — as bare records with no fragmentation and no credit window (Stage A
-deleted both, §5). Terminal attachments and tunnel exchanges get their own
-streams in turn (§1b, §1c): the HTTP-proxy and browser-WebSocket preview
-traffic rides its own per-exchange QUIC stream — one stream per HTTP
-request/response and one per WebSocket's lifetime — framed as tagged records
-rather than bus frames.
+deleted both, §5). Terminal attachments, tunnel exchanges and remote file
+uploads get their own streams in turn (§1b, §1c, §1e): the HTTP-proxy and
+browser-WebSocket preview traffic rides its own per-exchange QUIC stream — one
+stream per HTTP request/response and one per WebSocket's lifetime — with a
+request or response body carried as raw bytes rather than a bus frame (only a
+WS frame is still a tagged record, since one stream multiplexes many of them).
+A remote file upload rides its own stream the same way: the app writes the
+file's raw bytes directly, with no bus frame and no app-layer chunking, and
+the bridge answers with one result record. The desktop app's own local
+upload is unaffected — it still crosses the loopback socket as
+`file:upload-*` bus messages (`LOOPBACK_UPLOAD_MESSAGE_TYPES`,
+`bridge/src/protocol.ts`), since a same-machine caller has no QUIC stream to
+open one over.
 
 ### Native peer payloads
 

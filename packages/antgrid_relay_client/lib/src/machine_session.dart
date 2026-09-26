@@ -11,11 +11,7 @@ import 'relay_service.dart';
 import 'peer_link.dart';
 import 'terminal_attachment.dart';
 import 'tunnel_stream.dart';
-
-/// Diagnostic and protocol handle for the machine control plane — `"0"` on
-/// the wire before the peer-frame header carried a kind, kept as the local
-/// key every stream-keyed map and drop/annotate call still uses.
-const String _kSessionStreamLabel = '0';
+import 'upload_stream.dart';
 
 /// Liveness constants; mirror `bridge/src/relay-client.ts`.
 const int kPingSilenceSeconds = 20;
@@ -154,7 +150,7 @@ class MachineSession {
   _SessionGeneration? _generation;
   int _epochCounter = 0;
 
-  /// `_kSessionStreamLabel` -> the session-stream transport, everything else ->
+  /// `kSessionStreamLabel` -> the session-stream transport, everything else ->
   /// a project's transport. Unified so disposal (`removeStream`) and the
   /// per-(re)establishment sweep need no special case for the control entry.
   final Map<String, StreamTransport> _streams = {};
@@ -247,10 +243,10 @@ class MachineSession {
   /// The session-stream transport (the machine control plane). Created on
   /// first use and kept until disposed — a later access rebuilds it.
   StreamTransport get control {
-    final existing = _streams[_kSessionStreamLabel];
+    final existing = _streams[kSessionStreamLabel];
     if (existing != null) return existing;
     final st = StreamTransport._control(this);
-    _streams[_kSessionStreamLabel] = st;
+    _streams[kSessionStreamLabel] = st;
     if (_established) unawaited(st.refreshSnapshot());
     return st;
   }
@@ -261,7 +257,7 @@ class MachineSession {
   /// Live project transports this session holds, excluding the control entry
   /// — what [kStreamMaxProjectsPerPeer] bounds.
   int get _projectStreamCount =>
-      _streams.length - (_streams.containsKey(_kSessionStreamLabel) ? 1 : 0);
+      _streams.length - (_streams.containsKey(kSessionStreamLabel) ? 1 : 0);
 
   /// Returns [projectId]'s transport once its project stream is bound (the
   /// bridge's first record was `stream-ready`). Creates the transport on
@@ -363,7 +359,8 @@ class MachineSession {
         'tx',
         'no-e2e-session',
         channel: channel,
-        streamId: _kSessionStreamLabel,
+        streamId: kSessionStreamLabel,
+        streamKind: 'session',
         msgType: type,
       );
       // Info, not warn: the comment above is right that this is usually the
@@ -385,7 +382,8 @@ class MachineSession {
         'tx',
         'message-too-large',
         channel: channel,
-        streamId: _kSessionStreamLabel,
+        streamId: kSessionStreamLabel,
+        streamKind: 'session',
         msgType: type,
         detail: {'bytes': bytes},
       );
@@ -422,7 +420,8 @@ class MachineSession {
         'tx',
         'no-e2e-session',
         channel: channel,
-        streamId: _kSessionStreamLabel,
+        streamId: kSessionStreamLabel,
+        streamKind: 'session',
         msgType: type,
       );
       // Warn where [sendOnSession]'s twin is info: this frame was accepted for
@@ -433,7 +432,7 @@ class MachineSession {
         'queued frame dropped — session went down before it was sent',
         fields: {
           'channel': channel,
-          'streamId': _kSessionStreamLabel,
+          'streamId': kSessionStreamLabel,
           'msgType': type,
         },
       );
@@ -448,7 +447,12 @@ class MachineSession {
       // for — the peer either never saw it or has since moved on.
       return;
     }
-    _annotate(_frameId(bytes), msgType: type, streamId: _kSessionStreamLabel);
+    _annotate(
+      _frameId(bytes),
+      msgType: type,
+      streamId: kSessionStreamLabel,
+      streamKind: 'session',
+    );
   }
 
   void notifyRpcResult({required bool timedOut}) {
@@ -646,7 +650,12 @@ class MachineSession {
   /// Name a frame this layer can type but not identify. [RelayService] records
   /// the wire event synchronously as the frame crosses the socket, so by the
   /// time this runs the event it is naming is always already buffered.
-  void _annotate(String? frameId, {String? msgType, String? streamId}) {
+  void _annotate(
+    String? frameId, {
+    String? msgType,
+    String? streamId,
+    String? streamKind,
+  }) {
     final tap = _tap;
     if (tap == null || frameId == null) return;
     tap({
@@ -654,6 +663,7 @@ class MachineSession {
       'frameId': frameId,
       'msgType': msgType,
       'streamId': streamId,
+      'streamKind': streamKind,
     });
   }
 
@@ -670,6 +680,7 @@ class MachineSession {
     String reason, {
     String? channel,
     String? streamId,
+    String? streamKind,
     String? msgType,
     String? frameId,
     Map<String, Object?>? detail,
@@ -680,8 +691,30 @@ class MachineSession {
       'kind': 'drop',
       'channel': channel,
       'streamId': streamId,
+      'streamKind': streamKind,
       'msgType': msgType,
       'frameId': frameId,
+      'reason': reason,
+      'detail': detail,
+    });
+  }
+
+  /// One purpose-specific stream's open/refused/reset/ended, so a capture can
+  /// see the shape of a request even when every record on it stays opaque
+  /// (an upload's raw bytes, a tunnel body). [reason] is `stream-open`,
+  /// `stream-refused`, `stream-reset` or `stream-ended`.
+  void _tapLifecycle(
+    String streamKind,
+    String streamId,
+    String reason, {
+    Map<String, Object?>? detail,
+  }) {
+    _tap?.call({
+      'op': 'frame',
+      'dir': 'tx',
+      'kind': 'lifecycle',
+      'streamKind': streamKind,
+      'streamId': streamId,
       'reason': reason,
       'detail': detail,
     });
@@ -731,12 +764,17 @@ class MachineSession {
       _dropped('rx', 'unrecognized-plaintext', channel: kind, frameId: frameId);
       return;
     }
-    _annotate(frameId, msgType: type, streamId: _kSessionStreamLabel);
+    _annotate(
+      frameId,
+      msgType: type,
+      streamId: kSessionStreamLabel,
+      streamKind: 'session',
+    );
     _snoopControl(json);
     // Not the `control` getter: creating the transport here would fire a
     // snapshot pull nobody asked for. Adverts were snooped above, so a
     // session with no control transport yet loses nothing.
-    _streams[_kSessionStreamLabel]?.dispatchFromSession(json, 'control');
+    _streams[kSessionStreamLabel]?.dispatchFromSession(json, 'control');
   }
 
   /// Snoop control-plane adverts for project readiness so [openProject] can
@@ -898,6 +936,10 @@ class MachineSession {
       if (!w.isCompleted) w.complete(false);
     }
     _tunnelSlotWaiters.clear();
+    for (final w in _uploadSlotWaiters.values) {
+      if (!w.isCompleted) w.complete(false);
+    }
+    _uploadSlotWaiters.clear();
     await _established$.close();
     await _takeovers.close();
     await _sessionDown.close();
@@ -976,6 +1018,37 @@ class MachineSession {
     if (_tunnelSlotsHeld > 0) _tunnelSlotsHeld--;
   }
 
+  /// Upload-stream slots, capped at [kStreamMaxUploadStreamsPerPeer]. FIFO
+  /// wait, exactly like the tunnel pool above — a batch of attachment uploads
+  /// queues rather than failing the ones past the cap.
+  int _uploadSlotsHeld = 0;
+  final _uploadSlotWaiters = <Object, Completer<bool>>{};
+
+  FutureOr<bool> _acquireUploadSlot(Object owner) {
+    if (_uploadSlotsHeld < kStreamMaxUploadStreamsPerPeer) {
+      _uploadSlotsHeld++;
+      return true;
+    }
+    final completer = Completer<bool>();
+    _uploadSlotWaiters[owner] = completer;
+    return completer.future;
+  }
+
+  void _cancelUploadSlotWait(Object owner) {
+    final completer = _uploadSlotWaiters.remove(owner);
+    if (completer != null && !completer.isCompleted) completer.complete(false);
+  }
+
+  void _releaseUploadSlot() {
+    if (_uploadSlotWaiters.isNotEmpty) {
+      final owner = _uploadSlotWaiters.keys.first;
+      final completer = _uploadSlotWaiters.remove(owner)!;
+      completer.complete(true);
+      return;
+    }
+    if (_uploadSlotsHeld > 0) _uploadSlotsHeld--;
+  }
+
   /// Begin driving the session: subscribe to the socket and liveness.
   /// Call once, right after construction.
   ///
@@ -1032,7 +1105,7 @@ class StreamTransport extends BufferedAgentTransport {
     : _bound = false;
 
   /// Diagnostic and eval handle only — `"0"` for control, else [projectId].
-  String get streamId => projectId ?? _kSessionStreamLabel;
+  String get streamId => projectId ?? kSessionStreamLabel;
 
   /// `true` for control, always. For a project, `true` only while its native
   /// stream is open and its first `stream-ready` record has arrived.
@@ -1347,7 +1420,13 @@ class StreamTransport extends BufferedAgentTransport {
   void _onProjectRecord(Uint8List record) {
     final text = _safeUtf8Decode(record);
     if (text == null) {
-      session._dropped('rx', 'bad-record', channel: 'control', streamId: streamId);
+      session._dropped(
+        'rx',
+        'bad-record',
+        channel: 'control',
+        streamId: streamId,
+        streamKind: 'project',
+      );
       return;
     }
     _dispatchProjectMessage(text);
@@ -1356,7 +1435,13 @@ class StreamTransport extends BufferedAgentTransport {
   void _dispatchProjectMessage(String text) {
     final json = _tryDecodeJsonRecord(text);
     if (json == null) {
-      session._dropped('rx', 'bad-record', channel: 'control', streamId: streamId);
+      session._dropped(
+        'rx',
+        'bad-record',
+        channel: 'control',
+        streamId: streamId,
+        streamKind: 'project',
+      );
       return;
     }
     dispatchFromSession(json, 'control');
@@ -1384,6 +1469,7 @@ class StreamTransport extends BufferedAgentTransport {
         'no-project-stream',
         channel: channel,
         streamId: streamId,
+        streamKind: 'project',
         msgType: type,
       );
       return;
@@ -1398,6 +1484,7 @@ class StreamTransport extends BufferedAgentTransport {
         'message-too-large',
         channel: channel,
         streamId: streamId,
+        streamKind: 'project',
         msgType: type,
         detail: {'bytes': bytes},
       );
@@ -1607,7 +1694,8 @@ class StreamTransport extends BufferedAgentTransport {
     required String requestId,
     required String checkoutId,
     required Map<String, dynamic> head,
-    required Uint8List body,
+    required int bodyLength,
+    Stream<List<int>>? body,
   }) {
     final link = session.relay;
     if (link is! MultiStreamPeerLink) {
@@ -1615,6 +1703,7 @@ class StreamTransport extends BufferedAgentTransport {
         requestId: requestId,
         checkoutId: checkoutId,
         head: head,
+        bodyLength: bodyLength,
         body: body,
       );
     }
@@ -1623,6 +1712,7 @@ class StreamTransport extends BufferedAgentTransport {
       requestId: requestId,
       checkoutId: checkoutId,
       head: head,
+      bodyLength: bodyLength,
       body: body,
       // `PeerLink` and `MultiStreamPeerLink` are separate interfaces (see
       // peer_link.dart), so the `is!` check above cannot promote `link`.
@@ -1656,6 +1746,46 @@ class StreamTransport extends BufferedAgentTransport {
     );
     channel._start();
     return channel;
+  }
+
+  /// Opens a native upload stream when the session's link supports one. The
+  /// bridge drops a relay-origin socket upload (D2), so there is no fallback
+  /// to the inherited [SocketUploads] path here — a transport with no stream
+  /// support fails the upload rather than sending it somewhere nothing reads.
+  @override
+  UploadExchange openUpload({
+    required String requestId,
+    required String projectId,
+    required String checkoutId,
+    required String fileName,
+    required Uint8List bytes,
+    String? mimeType,
+    void Function(int sent, int total)? onProgress,
+  }) {
+    final link = session.relay;
+    if (link is! MultiStreamPeerLink) {
+      return FailedUploadExchange(requestId, const UploadFailure('NOT_SUPPORTED'));
+    }
+    if (fileName.length > kStreamUploadMaxFileNameLength) {
+      return FailedUploadExchange(requestId, const UploadFailure('INVALID_NAME'));
+    }
+    final exchange = _StreamUploadExchange(
+      transport: this,
+      requestId: requestId,
+      projectId: projectId,
+      checkoutId: checkoutId,
+      fileName: fileName,
+      bytes: bytes,
+      mimeType: mimeType != null && mimeType.length <= kStreamUploadMaxMimeTypeLength
+          ? mimeType
+          : null,
+      onProgress: onProgress,
+      // `PeerLink` and `MultiStreamPeerLink` are separate interfaces (see
+      // peer_link.dart), so the `is!` check above cannot promote `link`.
+      link: link as MultiStreamPeerLink,
+    );
+    exchange._start();
+    return exchange;
   }
 
   @override
@@ -1985,12 +2115,14 @@ class _StreamTerminalAttachment implements TerminalAttachment {
       _end(TerminalAttachmentFailed('STREAM_OPEN_FAILED', e));
       return;
     }
+    session._tapLifecycle('terminal', requestId, 'stream-open');
     _stream = stream;
     if (_closeRequested) {
       // close() landed while the open was in flight: reset rather than
       // finish() a stream whose subscribe was never sent. The bridge counts
       // this stream against its cap until its own half ends, so the slot is
       // held until the records drain (carry-over 1), never freed here.
+      session._tapLifecycle('terminal', requestId, 'stream-reset');
       _quietly(stream.reset());
       _end(const TerminalAttachmentClosedLocally());
       await _readRecords(stream);
@@ -2007,6 +2139,7 @@ class _StreamTerminalAttachment implements TerminalAttachment {
     }
     if (outcome != PeerSendOutcome.accepted) {
       // Same carry-over 1 as a close() during the open: held until drained.
+      session._tapLifecycle('terminal', requestId, 'stream-reset');
       _quietly(stream.reset());
       _end(TerminalAttachmentFailed('SEND_FAILED', sendError));
       await _readRecords(stream);
@@ -2027,6 +2160,12 @@ class _StreamTerminalAttachment implements TerminalAttachment {
           first = false;
           final refusal = StreamRefused.tryDecode(record);
           if (refusal != null) {
+            session._tapLifecycle(
+              'terminal',
+              requestId,
+              'stream-refused',
+              detail: {'code': refusal.code.wireValue},
+            );
             _quietly(stream.finish());
             _end(TerminalAttachmentRefused(refusal));
             continue;
@@ -2039,6 +2178,7 @@ class _StreamTerminalAttachment implements TerminalAttachment {
           decoded = null;
         }
         if (decoded is! Map<String, dynamic>) {
+          session._tapLifecycle('terminal', requestId, 'stream-reset');
           _quietly(stream.reset());
           _end(const TerminalAttachmentFailed('INVALID_RECORD'));
           continue;
@@ -2048,7 +2188,14 @@ class _StreamTerminalAttachment implements TerminalAttachment {
     } catch (_) {
       // A records error is the bridge's half ending too; handled below.
     }
-    // The bridge's half ended (FIN or reset — Dart cannot tell them apart).
+    // The bridge's half ended (FIN or reset — Dart cannot tell them apart in
+    // record mode, so this side always reports the end it can prove).
+    session._tapLifecycle(
+      'terminal',
+      requestId,
+      'stream-ended',
+      detail: {'end': 'fin'},
+    );
     // Always finish our own send half here (a no-op if already finished),
     // and release the slot now that nothing more is coming.
     try {
@@ -2102,11 +2249,6 @@ class _StreamTerminalAttachment implements TerminalAttachment {
 void _quietly(Future<void> future) =>
     unawaited(future.catchError((Object _) {}));
 
-/// One app-side upload slice, at most this many bytes per `0x00` record
-/// (stage-A-A3-contract.md §1.3 — the same `STREAM_RECORD_SLICE_BYTES` every
-/// stream's writer uses).
-const int _kTunnelBodySliceBytes = 262144;
-
 /// Decodes one record as a JSON object, or null on any failure (bad UTF-8,
 /// bad JSON, not an object) — never throws.
 Map<String, dynamic>? _tryDecodeJsonRecord(String? text) {
@@ -2131,11 +2273,13 @@ class _StreamTunnelHttpExchange implements TunnelHttpExchange {
     required this.requestId,
     required String checkoutId,
     required Map<String, dynamic> head,
-    required Uint8List body,
+    required int bodyLength,
+    required Stream<List<int>>? body,
     required MultiStreamPeerLink link,
   }) : _checkoutId = checkoutId,
        _head = head,
-       _body = body,
+       _bodyLength = bodyLength,
+       _bodySource = body,
        _link = link;
 
   final StreamTransport transport;
@@ -2144,17 +2288,21 @@ class _StreamTunnelHttpExchange implements TunnelHttpExchange {
   final String requestId;
   final String _checkoutId;
   final Map<String, dynamic> _head;
-  final Uint8List _body;
+  final int _bodyLength;
+  final Stream<List<int>>? _bodySource;
   final MultiStreamPeerLink _link;
 
   final _headCompleter = Completer<TunnelHttpHead>();
-  final _bodyController = StreamController<TunnelBodyRecord>();
+  final _bodyController = StreamController<Uint8List>();
 
   bool _slotTaken = false;
   bool _ended = false;
+  // Set by [_fail] alone: a clean response end also sets [_ended], but the
+  // request body must keep flowing after that, since the bridge still owes
+  // the origin every declared byte.
+  bool _failed = false;
   bool _cancelRequested = false;
   bool _headDelivered = false;
-  bool _endRecordSeen = false;
   // Set once a stream exists and its records have fully drained — mirrors
   // _StreamTerminalAttachment's rule: the slot is held until then, never
   // freed early by cancel() alone.
@@ -2165,7 +2313,7 @@ class _StreamTunnelHttpExchange implements TunnelHttpExchange {
   Future<TunnelHttpHead> get head => _headCompleter.future;
 
   @override
-  Stream<TunnelBodyRecord> get body => _bodyController.stream;
+  Stream<Uint8List> get body => _bodyController.stream;
 
   void _releaseSlot() {
     if (!_slotTaken) return;
@@ -2176,6 +2324,7 @@ class _StreamTunnelHttpExchange implements TunnelHttpExchange {
   void _fail(TunnelExchangeFailure failure) {
     if (_ended) return;
     _ended = true;
+    _failed = true;
     if (!_headCompleter.isCompleted) _headCompleter.completeError(failure);
     if (!_bodyController.isClosed) {
       _bodyController.addError(failure);
@@ -2214,16 +2363,19 @@ class _StreamTunnelHttpExchange implements TunnelHttpExchange {
         TunnelHttpStreamOpen(projectId: projectId, requestId: requestId),
         maxRecordBytes: kStreamTunnelRecordMaxBytes,
         maxQueuedBytes: kTunnelStreamMaxQueuedBytes,
+        rawAfterRecords: 1,
       );
     } catch (e) {
       _fail(TunnelExchangeFailure('STREAM_OPEN_FAILED', error: e));
       return;
     }
+    session._tapLifecycle('tunnel-http', requestId, 'stream-open');
     _stream = stream;
     // "Opening: reset once open" (stage-A-A3-contract.md §4.1 cancel()) — a
     // clean CANCELLED, since nothing was ever written for the bridge to
     // answer.
     if (_cancelRequested) {
+      session._tapLifecycle('tunnel-http', requestId, 'stream-reset');
       _quietly(stream.reset());
       _fail(const TunnelExchangeFailure('CANCELLED'));
       // The bridge counts this stream against its cap until it sees the
@@ -2234,9 +2386,14 @@ class _StreamTunnelHttpExchange implements TunnelHttpExchange {
     }
     final headJson = <String, dynamic>{
       ..._head,
-      'bodyLength': _body.length,
+      'bodyLength': _bodyLength,
       'checkoutId': _checkoutId,
     };
+    // Records are read while the body is still going out: a bridge refusal
+    // FINs and then stops our send half, so a body pumped to completion
+    // first would turn every refusal of a large upload into SEND_FAILED.
+    final pumpOk = Completer<bool>();
+    final reading = _readRecords(stream, pumpOk: pumpOk.future);
     PeerSendOutcome? headOutcome;
     Object? headError;
     try {
@@ -2249,41 +2406,81 @@ class _StreamTunnelHttpExchange implements TunnelHttpExchange {
     // "Open: stop the upload, reset() the send half, keep draining records" —
     // cancel() has already reset; just fall through to draining rather than
     // reporting this send's own outcome as a failure.
-    if (!_cancelRequested) {
+    var pumpOutcome = _TunnelBodyPumpOutcome.ok;
+    if (!_cancelRequested && !_failed) {
       if (headOutcome != PeerSendOutcome.accepted) {
+        session._tapLifecycle('tunnel-http', requestId, 'stream-reset');
         _quietly(stream.reset());
         _fail(TunnelExchangeFailure('SEND_FAILED', error: headError));
-        await _readRecords(stream);
+        pumpOk.complete(false);
+        await reading;
         return;
       }
-      var sent = 0;
-      while (sent < _body.length) {
-        final end = min(sent + _kTunnelBodySliceBytes, _body.length);
-        final slice = Uint8List.sublistView(_body, sent, end);
-        PeerSendOutcome? sliceOutcome;
-        Object? sliceError;
-        try {
-          sliceOutcome = await stream.send(
-            encodeTunnelDataRecord(kTunnelRecordTagBody, slice),
-          );
-        } catch (e) {
-          sliceError = e;
-        }
-        if (_cancelRequested) break;
-        if (sliceOutcome != PeerSendOutcome.accepted) {
-          _quietly(stream.reset());
-          _fail(TunnelExchangeFailure('SEND_FAILED', error: sliceError));
-          await _readRecords(stream);
-          return;
-        }
-        sent = end;
+      pumpOutcome = await _pumpBody(stream);
+      if (!_cancelRequested &&
+          !_failed &&
+          pumpOutcome != _TunnelBodyPumpOutcome.ok) {
+        session._tapLifecycle('tunnel-http', requestId, 'stream-reset');
+        _quietly(stream.reset());
+        _fail(
+          TunnelExchangeFailure(
+            pumpOutcome == _TunnelBodyPumpOutcome.sendFailed
+                ? 'SEND_FAILED'
+                : 'PROTOCOL',
+          ),
+        );
       }
     }
-    await _readRecords(stream);
+    pumpOk.complete(pumpOutcome == _TunnelBodyPumpOutcome.ok);
+    await reading;
   }
 
-  Future<void> _readRecords(PeerStream stream) async {
+  /// Writes [_bodyLength] raw bytes from [_bodySource] in
+  /// [kTunnelBodySliceBytes] pieces. `StreamIterator` is what pauses the
+  /// source between pieces — it buffers nothing beyond the value already
+  /// delivered, so the source stays paused for the whole `sendRaw` await.
+  Future<_TunnelBodyPumpOutcome> _pumpBody(PeerStream stream) async {
+    final source = _bodySource;
+    if (source == null) return _TunnelBodyPumpOutcome.ok;
+    var sent = 0;
+    final iterator = StreamIterator<List<int>>(source);
+    try {
+      while (await iterator.moveNext()) {
+        if (_cancelRequested || _failed) break;
+        final chunk = iterator.current;
+        final bytes = chunk is Uint8List ? chunk : Uint8List.fromList(chunk);
+        var offset = 0;
+        while (offset < bytes.length) {
+          if (_cancelRequested || _failed) break;
+          final end = min(offset + kTunnelBodySliceBytes, bytes.length);
+          final slice = Uint8List.sublistView(bytes, offset, end);
+          sent += slice.length;
+          if (sent > _bodyLength) return _TunnelBodyPumpOutcome.protocol;
+          final outcome = await stream.sendRaw(slice);
+          if (outcome != PeerSendOutcome.accepted) {
+            return _TunnelBodyPumpOutcome.sendFailed;
+          }
+          offset = end;
+        }
+      }
+    } catch (_) {
+      return _TunnelBodyPumpOutcome.sendFailed;
+    } finally {
+      unawaited(iterator.cancel());
+    }
+    // Settled elsewhere; this pump outcome decides nothing further.
+    if (_cancelRequested || _failed) return _TunnelBodyPumpOutcome.ok;
+    return sent == _bodyLength
+        ? _TunnelBodyPumpOutcome.ok
+        : _TunnelBodyPumpOutcome.protocol;
+  }
+
+  Future<void> _readRecords(
+    PeerStream stream, {
+    Future<bool>? pumpOk,
+  }) async {
     var first = true;
+    var reset = false;
     try {
       await for (final record in stream.records) {
         if (_ended) continue; // Keep draining without delivering.
@@ -2291,17 +2488,23 @@ class _StreamTunnelHttpExchange implements TunnelHttpExchange {
           first = false;
           final refusal = StreamRefused.tryDecode(record);
           if (refusal != null) {
+            session._tapLifecycle(
+              'tunnel-http',
+              requestId,
+              'stream-refused',
+              detail: {'code': refusal.code.wireValue},
+            );
             _quietly(stream.finish());
             _fail(TunnelExchangeFailure('REFUSED', refusal: refusal));
             continue;
           }
-          final decoded = decodeTunnelRecord(record);
-          final json = decoded is TunnelJsonRecord
-              ? _tryDecodeJsonRecord(decoded.text)
-              : null;
+          final json = _tryDecodeJsonRecord(
+            utf8.decode(record, allowMalformed: true),
+          );
           if (json == null ||
               json['type'] != 'tunnel:http-head' ||
               json['requestId'] != requestId) {
+            session._tapLifecycle('tunnel-http', requestId, 'stream-reset');
             _quietly(stream.reset());
             _fail(const TunnelExchangeFailure('PROTOCOL'));
             continue;
@@ -2328,61 +2531,60 @@ class _StreamTunnelHttpExchange implements TunnelHttpExchange {
           }
           continue;
         }
-        final decoded = decodeTunnelRecord(record);
-        if (decoded is TunnelDataRecord) {
-          if (decoded.tag != kTunnelRecordTagBody &&
-              decoded.tag != kTunnelRecordTagBodyGzip) {
-            _quietly(stream.reset());
-            _fail(const TunnelExchangeFailure('PROTOCOL'));
-            continue;
-          }
-          if (!_bodyController.isClosed) {
-            _bodyController.add(
-              TunnelBodyRecord(
-                bytes: decoded.payload,
-                gzip: decoded.tag == kTunnelRecordTagBodyGzip,
-              ),
-            );
-          }
-          continue;
-        }
-        final json = decoded is TunnelJsonRecord
-            ? _tryDecodeJsonRecord(decoded.text)
-            : null;
-        if (json != null && json['type'] == 'tunnel:http-end') {
-          _endRecordSeen = true;
-          if (!_bodyController.isClosed) unawaited(_bodyController.close());
-          continue;
-        }
-        _quietly(stream.reset());
-        _fail(const TunnelExchangeFailure('PROTOCOL'));
+        // Raw response bytes, delivered exactly as the bridge wrote them.
+        if (!_bodyController.isClosed) _bodyController.add(record);
       }
+    } on PeerStreamReset {
+      reset = true;
     } catch (_) {
       // A records error is the bridge's half ending too; handled below.
     }
-    try {
-      await stream.finish();
-    } catch (_) {
-      // A link already gone has nothing left to finish.
-    }
+    session._tapLifecycle(
+      'tunnel-http',
+      requestId,
+      'stream-ended',
+      // The one exchange where the raw phase actually tells FIN from reset —
+      // every other stream kind stays record-mode and reports
+      // 'fin' unconditionally.
+      detail: {'end': reset ? 'reset' : 'fin'},
+    );
+    // Every branch below settles the body before the slot goes: a clean close
+    // here would let a reset read as a complete response.
     _recordsDone = true;
     if (!_ended) {
       if (_cancelRequested) {
         // The bridge's half ends because our reset told it to; reporting that
         // as STREAM_ENDED or TRUNCATED would blame the peer for our cancel.
+        session._tapLifecycle('tunnel-http', requestId, 'stream-reset');
+        _quietly(stream.reset());
         _fail(const TunnelExchangeFailure('CANCELLED'));
+      } else if (reset) {
+        session._tapLifecycle('tunnel-http', requestId, 'stream-reset');
+        _quietly(stream.reset());
+        _fail(
+          TunnelExchangeFailure(_headDelivered ? 'TRUNCATED' : 'STREAM_ENDED'),
+        );
       } else if (!_headDelivered) {
+        session._tapLifecycle('tunnel-http', requestId, 'stream-reset');
+        _quietly(stream.reset());
         _fail(const TunnelExchangeFailure('STREAM_ENDED'));
-      } else if (!_endRecordSeen) {
-        _fail(const TunnelExchangeFailure('TRUNCATED'));
       } else {
-        // A clean end after tunnel:http-end: nothing more to report, but the
-        // slot this exchange held is still live until now.
-        _releaseSlot();
+        // A clean response FIN: the send half only closes now, because it
+        // stays open for the whole response so that a reset remains the
+        // cancel (a reset after finish() is not reliably delivered).
+        // An origin may answer before it has read the whole request body,
+        // so the response settles now and the send half waits on the pump.
+        _ended = true;
+        if (!_bodyController.isClosed) unawaited(_bodyController.close());
+        if (pumpOk != null && await pumpOk) {
+          await _quietlyAwait(stream.finish());
+        } else {
+          session._tapLifecycle('tunnel-http', requestId, 'stream-reset');
+          await _quietlyAwait(stream.reset());
+        }
       }
-    } else {
-      _releaseSlot();
     }
+    _releaseSlot();
   }
 
   @override
@@ -2395,7 +2597,23 @@ class _StreamTunnelHttpExchange implements TunnelHttpExchange {
     session._cancelTunnelSlotWait(this);
     final stream = _stream;
     if (stream == null) return; // _start() checks _cancelRequested once open resolves.
+    session._tapLifecycle('tunnel-http', requestId, 'stream-reset');
     _quietly(stream.reset());
+  }
+}
+
+/// Whether the app's own request body reached `bodyLength` byte-for-byte —
+/// what decides `finish()` vs `reset()` once the response side has ended,
+/// since the send half stays open until then.
+enum _TunnelBodyPumpOutcome { ok, protocol, sendFailed }
+
+/// Awaited version of [_quietly] for a call whose completion this side must
+/// wait on before proceeding (releasing the slot only once it settles).
+Future<void> _quietlyAwait(Future<void> future) async {
+  try {
+    await future;
+  } catch (_) {
+    // The stream, or the connection under it, may already be gone.
   }
 }
 
@@ -2500,8 +2718,10 @@ class _StreamTunnelWsChannel implements TunnelWsChannel {
       _end(TunnelWsFailed(TunnelExchangeFailure('STREAM_OPEN_FAILED', error: e)));
       return;
     }
+    session._tapLifecycle('tunnel-ws', tunnelId, 'stream-open');
     _stream = stream;
     if (_abortRequested) {
+      session._tapLifecycle('tunnel-ws', tunnelId, 'stream-reset');
       _quietly(stream.reset());
       _streamReady.complete(null);
       _end(TunnelWsFailed(const TunnelExchangeFailure('CANCELLED')));
@@ -2524,6 +2744,7 @@ class _StreamTunnelWsChannel implements TunnelWsChannel {
       sendError = e;
     }
     if (!_abortRequested && outcome != PeerSendOutcome.accepted) {
+      session._tapLifecycle('tunnel-ws', tunnelId, 'stream-reset');
       _quietly(stream.reset());
       _streamReady.complete(null);
       _end(TunnelWsFailed(TunnelExchangeFailure('SEND_FAILED', error: sendError)));
@@ -2543,6 +2764,12 @@ class _StreamTunnelWsChannel implements TunnelWsChannel {
           first = false;
           final refusal = StreamRefused.tryDecode(record);
           if (refusal != null) {
+            session._tapLifecycle(
+              'tunnel-ws',
+              tunnelId,
+              'stream-refused',
+              detail: {'code': refusal.code.wireValue},
+            );
             _quietly(stream.finish());
             _end(TunnelWsFailed(TunnelExchangeFailure('REFUSED', refusal: refusal)));
             continue;
@@ -2552,6 +2779,7 @@ class _StreamTunnelWsChannel implements TunnelWsChannel {
         if (decoded is TunnelDataRecord) {
           if (decoded.tag != kTunnelRecordTagWsText &&
               decoded.tag != kTunnelRecordTagWsBinary) {
+            session._tapLifecycle('tunnel-ws', tunnelId, 'stream-reset');
             _quietly(stream.reset());
             _end(TunnelWsFailed(const TunnelExchangeFailure('PROTOCOL')));
             continue;
@@ -2577,12 +2805,22 @@ class _StreamTunnelWsChannel implements TunnelWsChannel {
           // breach.
           continue;
         }
+        session._tapLifecycle('tunnel-ws', tunnelId, 'stream-reset');
         _quietly(stream.reset());
         _end(TunnelWsFailed(const TunnelExchangeFailure('PROTOCOL')));
       }
     } catch (_) {
       // A records error is the bridge's half ending too; handled below.
     }
+    // Tagged records throughout, so a reset
+    // closes `records` the same way a FIN does — nothing here can tell them
+    // apart, unlike the tunnel-http raw phase.
+    session._tapLifecycle(
+      'tunnel-ws',
+      tunnelId,
+      'stream-ended',
+      detail: {'end': 'fin'},
+    );
     try {
       await stream.finish();
     } catch (_) {
@@ -2601,6 +2839,7 @@ class _StreamTunnelWsChannel implements TunnelWsChannel {
     final stream = await _streamReady.future;
     if (stream == null || _ended) return false;
     if (frame.bytes.length > kStreamTunnelDataMaxBytes) {
+      session._tapLifecycle('tunnel-ws', tunnelId, 'stream-reset');
       _quietly(stream.reset());
       return false;
     }
@@ -2612,6 +2851,7 @@ class _StreamTunnelWsChannel implements TunnelWsChannel {
       // Falls through to the non-accepted branch below.
     }
     if (outcome != PeerSendOutcome.accepted) {
+      session._tapLifecycle('tunnel-ws', tunnelId, 'stream-reset');
       _quietly(stream.reset());
       return false;
     }
@@ -2659,6 +2899,235 @@ class _StreamTunnelWsChannel implements TunnelWsChannel {
     _abortRequested = true;
     session._cancelTunnelSlotWait(this);
     final stream = _stream;
-    if (stream != null) _quietly(stream.reset());
+    if (stream != null) {
+      session._tapLifecycle('tunnel-ws', tunnelId, 'stream-reset');
+      _quietly(stream.reset());
+    }
+  }
+}
+
+/// One file upload riding its own native QUIC stream: the open frame, then
+/// [_bytes] raw with no framing, then FIN — the bridge answers with one
+/// record (a refusal or the result) and its own FIN. Same carry-over-4 shape
+/// as [_StreamTunnelHttpExchange]: every failure ends [result] locally.
+class _StreamUploadExchange implements UploadExchange {
+  _StreamUploadExchange({
+    required this.transport,
+    required this.requestId,
+    required String projectId,
+    required String checkoutId,
+    required String fileName,
+    required Uint8List bytes,
+    required String? mimeType,
+    required void Function(int sent, int total)? onProgress,
+    required MultiStreamPeerLink link,
+  }) : _projectId = projectId,
+       _checkoutId = checkoutId,
+       _fileName = fileName,
+       _bytes = bytes,
+       _mimeType = mimeType,
+       _onProgress = onProgress,
+       _link = link {
+    // [UploadExchange.result] promises never to surface as an unhandled
+    // error: a caller that fires an upload and walks away must not crash the
+    // zone when the stream later ends. Listeners still see the failure.
+    _resultCompleter.future.ignore();
+  }
+
+  final StreamTransport transport;
+  MachineSession get session => transport.session;
+  @override
+  final String requestId;
+  final String _projectId;
+  final String _checkoutId;
+  final String _fileName;
+  final Uint8List _bytes;
+  final String? _mimeType;
+  final void Function(int sent, int total)? _onProgress;
+  final MultiStreamPeerLink _link;
+
+  final _resultCompleter = Completer<UploadStreamResult>();
+  bool _slotTaken = false;
+  bool _ended = false;
+  bool _cancelRequested = false;
+  bool _recordsDone = false;
+  Timer? _resultTimer;
+  PeerStream? _stream;
+
+  @override
+  Future<UploadStreamResult> get result => _resultCompleter.future;
+
+  void _releaseSlot() {
+    if (!_slotTaken) return;
+    _slotTaken = false;
+    session._releaseUploadSlot();
+  }
+
+  void _fail(UploadFailure failure) {
+    if (_ended) return;
+    _ended = true;
+    _resultTimer?.cancel();
+    if (!_resultCompleter.isCompleted) _resultCompleter.completeError(failure);
+    if (_stream == null || _recordsDone) _releaseSlot();
+  }
+
+  void _complete(UploadStreamResult uploadResult) {
+    if (_ended) return;
+    _ended = true;
+    _resultTimer?.cancel();
+    if (!_resultCompleter.isCompleted) _resultCompleter.complete(uploadResult);
+    if (_stream == null || _recordsDone) _releaseSlot();
+  }
+
+  Future<void> _start() async {
+    final slot = session._acquireUploadSlot(this);
+    final gotSlot = slot is bool ? slot : await slot;
+    if (!gotSlot) {
+      _fail(UploadFailure(_cancelRequested ? 'CANCELLED' : 'TRANSPORT_CLOSED'));
+      return;
+    }
+    _slotTaken = true;
+    if (_cancelRequested) {
+      _fail(const UploadFailure('CANCELLED'));
+      return;
+    }
+    PeerStream stream;
+    try {
+      stream = await _link.openStream(
+        UploadStreamOpen(
+          projectId: _projectId,
+          checkoutId: _checkoutId,
+          requestId: requestId,
+          fileName: _fileName,
+          size: _bytes.length,
+          mimeType: _mimeType,
+        ),
+        maxRecordBytes: kStreamUploadBridgeRecordMaxBytes,
+        maxQueuedBytes: kUploadStreamMaxQueuedBytes,
+      );
+    } catch (e) {
+      _fail(UploadFailure('STREAM_OPEN_FAILED', message: '$e'));
+      return;
+    }
+    session._tapLifecycle('upload', requestId, 'stream-open');
+    _stream = stream;
+    if (_cancelRequested) {
+      session._tapLifecycle('upload', requestId, 'stream-reset');
+      _quietly(stream.reset());
+      _fail(const UploadFailure('CANCELLED'));
+      await _readRecords(stream);
+      return;
+    }
+    unawaited(_readRecords(stream));
+    var sent = 0;
+    for (; sent < _bytes.length; sent += kUploadStreamSliceBytes) {
+      if (_cancelRequested || _ended) break;
+      final end = min(sent + kUploadStreamSliceBytes, _bytes.length);
+      final slice = Uint8List.sublistView(_bytes, sent, end);
+      PeerSendOutcome outcome;
+      try {
+        outcome = await stream.sendRaw(slice);
+      } catch (e) {
+        if (_cancelRequested) return; // cancel() already reset.
+        session._tapLifecycle('upload', requestId, 'stream-reset');
+        _quietly(stream.reset());
+        _fail(UploadFailure('SEND_FAILED', message: '$e'));
+        return;
+      }
+      if (_cancelRequested || _ended) break;
+      if (outcome != PeerSendOutcome.accepted) {
+        session._tapLifecycle('upload', requestId, 'stream-reset');
+        _quietly(stream.reset());
+        _fail(const UploadFailure('SEND_FAILED'));
+        return;
+      }
+      _onProgress?.call(end, _bytes.length);
+    }
+    if (_cancelRequested) return;
+    if (_ended) {
+      // Settled by the bridge's result or refusal. A send half dropped
+      // without an explicit end FINs, which would read as a short but
+      // complete body, so an unfinished write is always reset.
+      if (sent < _bytes.length) {
+        session._tapLifecycle('upload', requestId, 'stream-reset');
+        _quietly(stream.reset());
+      } else {
+        _quietly(stream.finish());
+      }
+      return;
+    }
+    await _quietlyAwait(stream.finish());
+    _resultTimer = Timer(kUploadResultTimeout, () {
+      if (!_ended) {
+        session._tapLifecycle('upload', requestId, 'stream-reset');
+        _quietly(stream.reset());
+        _fail(const UploadFailure('TIMEOUT'));
+      }
+    });
+  }
+
+  Future<void> _readRecords(PeerStream stream) async {
+    var first = true;
+    try {
+      await for (final record in stream.records) {
+        if (!first || _ended) continue; // Only the first record ever matters.
+        first = false;
+        final refusal = StreamRefused.tryDecode(record);
+        if (refusal != null) {
+          session._tapLifecycle(
+            'upload',
+            requestId,
+            'stream-refused',
+            detail: {'code': refusal.code.wireValue},
+          );
+          _quietly(stream.finish());
+          _fail(UploadFailure('REFUSED', refusedCode: refusal.code, message: refusal.message));
+          continue;
+        }
+        final json = _tryDecodeJsonRecord(utf8.decode(record, allowMalformed: true));
+        final parsed = json == null
+            ? null
+            : UploadStreamResult.tryParse(json, requestId: requestId);
+        if (parsed == null) {
+          session._tapLifecycle('upload', requestId, 'stream-reset');
+          _quietly(stream.reset());
+          _fail(const UploadFailure('PROTOCOL'));
+          continue;
+        }
+        _complete(parsed);
+      }
+    } catch (_) {
+      // A records error is the bridge's half ending too; handled below.
+    }
+    // Read-side stays record-mode for an upload (its raw phase is send-only),
+    // so a reset reads the same as a FIN here, as with terminal and tunnel-ws.
+    session._tapLifecycle(
+      'upload',
+      requestId,
+      'stream-ended',
+      detail: {'end': 'fin'},
+    );
+    _recordsDone = true;
+    if (!_ended) {
+      _fail(
+        UploadFailure(_cancelRequested ? 'CANCELLED' : 'STREAM_ENDED'),
+      );
+    } else {
+      _releaseSlot();
+    }
+  }
+
+  @override
+  void cancel() {
+    if (_cancelRequested || _ended) return;
+    _cancelRequested = true;
+    session._cancelUploadSlotWait(this);
+    final stream = _stream;
+    if (stream == null) return; // _start() checks _cancelRequested once open resolves.
+    session._tapLifecycle('upload', requestId, 'stream-reset');
+    _quietly(stream.reset());
+    // The result settles now; the slot stays held until the bridge's half
+    // ends, since it counts the stream against its cap until then.
+    _fail(const UploadFailure('CANCELLED'));
   }
 }

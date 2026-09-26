@@ -719,6 +719,7 @@ class _FakeMultiStreamLink implements PeerLink, MultiStreamPeerLink {
     StreamOpen open, {
     required int maxRecordBytes,
     required int maxQueuedBytes,
+    int? rawAfterRecords,
   }) async {
     opens.add((
       open: open,
@@ -750,6 +751,11 @@ class _FakeStream implements PeerStream {
     sent.add(record);
     return sendOutcome;
   }
+
+  /// Terminal attachments never enter the raw read phase, so nothing exercises
+  /// this — it exists only to satisfy [PeerStream].
+  @override
+  Future<PeerSendOutcome> sendRaw(Uint8List bytes) async => sendOutcome;
 
   /// Resets the send half only, as `NativePeerStream.reset` does: the
   /// records keep flowing until the bridge ends its own half ([endPeer]).

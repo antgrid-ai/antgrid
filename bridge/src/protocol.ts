@@ -958,7 +958,7 @@ const FileUploadResultMessage = BaseMessage.extend({
   // file:read's own), so a client can offer a preview without duplicating the
   // allowlist. Absent = no viewer for it.
   mimeType: z.string().optional(),
-  error: z.string().optional(), // machine code: TOO_LARGE | INVALID_NAME | WRITE_FAILED | UPLOAD_NOT_FOUND | BAD_SEQUENCE | SIZE_MISMATCH | TIMEOUT | BUSY
+  error: z.string().optional(), // machine code: TOO_LARGE | INVALID_NAME | WRITE_FAILED | UPLOAD_NOT_FOUND | BAD_SEQUENCE | SIZE_MISMATCH | TIMEOUT | BUSY | INCOMPLETE (the `upload` stream's own FIN-short-of-`size` case)
   message: z.string().optional(), // human-readable detail
   ...CheckoutScoped,
 });
@@ -3082,6 +3082,19 @@ export const CHECKOUT_VARIABLE_MESSAGE_TYPES = new Set<string>([
 export const PREVIEW_CHANNEL_MESSAGE_TYPES = new Set<string>([
   "terminal:frame",
   "terminal:history:page",
+]);
+
+/** The socket-path upload exchange: a remote app uploads a file over its own
+ * `upload` stream (`peer/upload-streams.ts`) instead, so these five verbs plus
+ * the shared result type only ever cross the LOOPBACK socket. Bridge-only,
+ * the same pattern as `PREVIEW_CHANNEL_MESSAGE_TYPES`: a relay-origin frame of
+ * one of these types is dropped rather than dispatched (`attachTransport`'s
+ * inbound handler in agent-core.ts), and `FileUploadManager`'s own sends for
+ * the socket path are always addressed loopback-only. No Dart mirror is
+ * needed — the app only ever emits these via `SocketUploads`, which
+ * `StreamTransport` never uses. */
+export const LOOPBACK_UPLOAD_MESSAGE_TYPES = new Set<string>([
+  "file:upload-start", "file:upload-ready", "file:upload-chunk", "file:upload-ack", "file:upload-done", "file:upload-result",
 ]);
 
 type MessagePayload<T extends AbMessage["type"]> = Omit<

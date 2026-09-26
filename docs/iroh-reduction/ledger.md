@@ -19,7 +19,7 @@ the code wins over both.
 | B: same-endpoint reconnect | Newest authenticated connection wins in `acceptPeer`. |
 | B: pre-establishment frames | Dropped per peer, fail closed; control-plane gate becomes per-peer. |
 | B: app dispatch | Synchronous in-order inbound dispatch replaces `_inboundTails` (Stage A prerequisite). |
-| A: scope | Descoped: terminals and tunnel HTTP/WS get their own streams, project streams replace the mux; file:read, diffs, search, tree snapshot and upload stay on the project stream. |
+| A: scope | Descoped: terminals and tunnel HTTP/WS get their own streams, project streams replace the mux; file:read, diffs, search and tree snapshot stay on the project stream. A7 moves remote file upload off the project stream too, onto its own `upload` stream — the loopback (same-machine) upload path is unaffected. |
 | A: loopback | No loopback wire change; the `channel` label and preview-channel classification stay, loopback-only. |
 | A: refusals | In-band `stream:refused` records (Dart cannot read reset codes); overflow resets the one stream, never the connection. |
 | A: version | `FRAME_VERSION` stays at the value Stage B set, since that value was never released. A1 bumps the ALPN to `antgrid/peer/2`. |
@@ -59,6 +59,7 @@ the code wins over both.
 | A | A5 delete credits, schedulers, fragmentation, stream envelope | done | `eb67f79b` |
 | A | A6 docs, diagnostics and ledger | done | `4c2f22de` |
 | A | follow-up: per-record authorization on project and terminal streams, netwatch stream tags | done | `848df2f2` |
+| A | A7 raw upload streams and raw tunnel HTTP bodies | done | `<hash>` |
 
 ### Stage C gate evidence (executed by the wave commit agents)
 
@@ -97,6 +98,7 @@ the code wins over both.
 - A3: wire 136; bridge 4928 pass with the 6 known failures; relay 173; relay_client 308; peer_transport 64; app 4187; `flutter analyze` clean; evals 113 pass, 5 skip, with the same git-clean guard as the only failure before the commit; qualify runs and the relay gate pass.
 - A4: wire 138; bridge 4923 pass with the 6 known failures; relay 173; relay_client 306; peer_transport 64; app 4188; `flutter analyze` clean; evals 119 pass, 5 skip, gate-vectors green after the commit; qualify runs and the relay gate pass.
 - A6: bridge 4888 pass, 16 skip, 6 fail (the six known stale-runId fixtures), 4910 total, via `bun run --filter antgrid-bridge test`; 4886/4908 before A6, the difference being its two netwatch tests. Only bridge was re-run, since A6 changes no other workspace; A5's own wire/relay/app counts are not recorded here.
+- A7: wire 132; bridge 4943 pass, 16 skip, 6 fail (the six known stale-runId fixtures); relay 173; relay_client 271; peer_transport 67; app 4194; `flutter analyze` clean in app and the three packages; evals 120 pass, 5 skip, with the only failure the gate-vectors git-clean guard before the commit; `test:evals:dart-terminal` 7 pass; qualify runs and the relay gate pass.
 
 ### Stage A open items
 
@@ -113,10 +115,10 @@ the code wins over both.
 - **Fixed:** `PeerSessionOwner.sendControlPlane`'s dead `authorized` parameter is removed.
 - Under the full `test:evals` sweep, three evals have each failed once and then passed when their file ran alone: the tunnel stream cap, the terminal never-acked viewer cap, and `agent-core-checkout-routing` (known EPERM rename race). `chat-session-codex` auto-title failed in the sweep and alone after A5 with `bridge/src` unchanged from a passing run; probably the real Codex title generation, not proven.
 - The native soak was re-run at `848df2f2` (after A5/A6); see the RSS-bound item above.
-- **Fixed:** `NetwatchEvent.streamKind`/`streamId` (`bridge/src/netwatch.ts`) are now set at every record/ingest call site in `peer-session-owner.ts`, `project-streams.ts`, `peer/terminal-streams.ts`, `peer/tunnel-streams.ts`, `peer/native-host-connection.ts` and `peer/stream-dispatch.ts` (a `peer:stream-refused` names the stream its open frame named; an open timeout or an unparseable open names none), so a native capture can be filtered by stream. Both stay out of the `joinCaptures` key, since the app's capture has neither field. `streamId` is a display label, not a QUIC stream id: `NETWATCH_SESSION_STREAM_LABEL` (`"0"`) for the session stream and the `projectId` for a project stream, matching the app's own label; the terminal and tunnel labels (the open frame's `requestId`/`wsId`) are bridge-only today, since the app writes neither.
+- **Fixed:** `NetwatchEvent.streamKind`/`streamId` (`bridge/src/netwatch.ts`) are now set at every record/ingest call site in `peer-session-owner.ts`, `project-streams.ts`, `peer/terminal-streams.ts`, `peer/tunnel-streams.ts`, `peer/upload-streams.ts`, `peer/native-host-connection.ts` and `peer/stream-dispatch.ts` (a `peer:stream-refused` names the stream its open frame named; an open timeout or an unparseable open names none), so a native capture can be filtered by stream. Both stay out of the `joinCaptures` key, since the pairing already matches same-hash occurrences in order. `streamId` is a display label, not a QUIC stream id: `NETWATCH_SESSION_STREAM_LABEL` (`"0"`) for the session stream and the `projectId` for a project stream; the terminal, tunnel and upload labels are the open frame's own `requestId`/`wsId`. The app now writes the terminal, tunnel and upload labels too (A7), matching the bridge's.
 
 - The bridge and the app can briefly disagree on free slots while a close is in flight, so the bridge may refuse a new stream with `CAP_EXCEEDED`. Accepted.
-- A tunnel request body is reassembled in memory before `serveHttp`, so the worst case per peer is the wire body cap times 128 streams.
+- **Resolved (A7):** a tunnel request body is streamed to `serveHttp` rather than reassembled in memory; at most `TUNNEL_BODY_REPLAY_MAX_BYTES` (256 KiB) is buffered per stream, for the http/https scheme retry.
 - The bridge frees a tunnel slot when it unbinds, before the app's FIN, so a misbehaving app can hold QUIC streams past 128; the 256 bidi limit bounds it.
 - The tunnel-cap eval opens 128 streams in sequence and takes about 9s, close to other 10s timers.
 - The Dart stream WebSocket channel reports its own close as `TunnelWsClosedByPeer`, where the fake reports `TunnelWsClosedLocally`. Cosmetic: the browser close is forwarded the same way.

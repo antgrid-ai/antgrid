@@ -7,6 +7,7 @@ export 'src/relay_service.dart';
 export 'src/crypto_service.dart';
 export 'src/terminal_attachment.dart';
 export 'src/tunnel_stream.dart';
+export 'src/upload_stream.dart';
 export 'src/frame.dart';
 export 'src/relay_auth.dart';
 export 'src/relay_slot.dart';

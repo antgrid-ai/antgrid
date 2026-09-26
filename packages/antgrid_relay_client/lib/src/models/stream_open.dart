@@ -20,6 +20,7 @@ const int kStreamMaxBidiStreamsPerConnection = 256;
 const int kStreamMaxProjectsPerPeer = 32;
 const int kStreamMaxTerminalAttachmentsPerPeer = 64;
 const int kStreamMaxTunnelStreamsPerPeer = 128;
+const int kStreamMaxUploadStreamsPerPeer = 4;
 const int kStreamMaxPendingOpensPerPeer = 16;
 
 /// Largest single `AbMessage` JSON the bridge writes on any stream
@@ -41,8 +42,9 @@ const int kStreamProjectBridgeRecordMaxBytes = kMaxTransferBytes;
 /// Over it, `sendFrame` returns `PeerSendOutcome.backpressured`.
 const int kSessionStreamMaxQueuedBytes = 4194304;
 
-/// Payload cap on one tunnel data record, after its tag byte
-/// ([kTunnelRecordTagBody] etc.), in both directions.
+/// Payload cap on one WS tunnel data record, after its tag byte
+/// ([kTunnelRecordTagWsText] etc.), in both directions. An HTTP tunnel body
+/// carries no tag and is bounded by `bodyLength` instead.
 const int kStreamTunnelDataMaxBytes = 1048576;
 
 /// [kStreamTunnelDataMaxBytes] plus the tag byte — the bridge reader's cap for
@@ -53,12 +55,17 @@ const int kStreamTunnelRecordMaxBytes = 1048577;
 /// a preview upload is bounded exactly as the session path bounded it.
 const int kStreamTunnelRequestBodyMaxBytes = 33554432;
 
-/// Tunnel data record tags: the first byte after the JSON/data discriminator
-/// (see `tunnel_stream.dart`'s `decodeTunnelRecord`).
-const int kTunnelRecordTagBody = 0x00;
-const int kTunnelRecordTagBodyGzip = 0x01;
+/// Tunnel-ws data record tags: the first byte after the JSON/data
+/// discriminator (see `tunnel_stream.dart`'s `decodeTunnelRecord`). `0x00` and
+/// `0x01` are unassigned now that HTTP bodies ride raw (no tag, no record
+/// framing) — a stray one decodes to nothing rather than aliasing a WS frame.
 const int kTunnelRecordTagWsText = 0x02;
 const int kTunnelRecordTagWsBinary = 0x03;
+
+/// Upload stream constants (`packages/antgrid-wire/src/stream-open.ts`).
+const int kStreamUploadBridgeRecordMaxBytes = 16384;
+const int kStreamUploadMaxFileNameLength = 255;
+const int kStreamUploadMaxMimeTypeLength = 127;
 
 /// Bridge reader's cap for the four small app-to-bridge terminal verbs
 /// (subscribe, ack, unsubscribe, history:request).
@@ -99,6 +106,8 @@ sealed class StreamOpen {
         return TunnelHttpStreamOpen.fromJson(json);
       case 'tunnel-ws':
         return TunnelWsStreamOpen.fromJson(json);
+      case 'upload':
+        return UploadStreamOpen.fromJson(json);
       default:
         return null;
     }
@@ -293,6 +302,122 @@ final class TunnelWsStreamOpen extends StreamOpen {
   @override
   int get hashCode => Object.hash(kind, projectId, wsId);
 }
+
+/// One stream per uploaded file. `checkoutId` follows [TerminalStreamOpen]:
+/// absent means the main checkout. `size` is the declared byte count the app
+/// commits to sending; whether it exceeds the bridge's byte cap is a per-file
+/// `TOO_LARGE` result, never a schema rejection.
+final class UploadStreamOpen extends StreamOpen {
+  final String projectId;
+  final String? checkoutId;
+  final String requestId;
+  final String fileName;
+  final int size;
+  final String? mimeType;
+
+  const UploadStreamOpen({
+    required this.projectId,
+    required this.requestId,
+    required this.fileName,
+    required this.size,
+    this.checkoutId,
+    this.mimeType,
+  });
+
+  @override
+  String get kind => 'upload';
+
+  @override
+  Map<String, dynamic> toJson() => {
+    'kind': kind,
+    'projectId': projectId,
+    if (checkoutId != null) 'checkoutId': checkoutId,
+    'requestId': requestId,
+    'fileName': fileName,
+    'size': size,
+    if (mimeType != null) 'mimeType': mimeType,
+  };
+
+  static UploadStreamOpen? fromJson(Map<String, dynamic> json) {
+    if (!_onlyKeys(json, {
+      'kind',
+      'projectId',
+      'checkoutId',
+      'requestId',
+      'fileName',
+      'size',
+      'mimeType',
+    })) {
+      return null;
+    }
+    final projectId = json['projectId'];
+    final requestId = json['requestId'];
+    // `containsKey`, not a null check: Zod's `.optional()` rejects an explicit
+    // null, so `{"checkoutId": null}` (or `{"mimeType": null}`) must be
+    // refused here too.
+    final checkoutId = json['checkoutId'];
+    if (json.containsKey('checkoutId') && !_isId(checkoutId)) return null;
+    if (!_isId(projectId)) return null;
+    if (!_isId(requestId)) return null;
+    final fileName = json['fileName'];
+    if (fileName is! String ||
+        fileName.isEmpty ||
+        fileName.length > kStreamUploadMaxFileNameLength) {
+      return null;
+    }
+    final size = json['size'];
+    if (size is! int || size < 0) return null;
+    final mimeType = json['mimeType'];
+    if (json.containsKey('mimeType')) {
+      if (mimeType is! String ||
+          mimeType.isEmpty ||
+          mimeType.length > kStreamUploadMaxMimeTypeLength) {
+        return null;
+      }
+    }
+    return UploadStreamOpen(
+      projectId: projectId as String,
+      requestId: requestId as String,
+      fileName: fileName,
+      size: size,
+      checkoutId: checkoutId as String?,
+      mimeType: mimeType as String?,
+    );
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      other is UploadStreamOpen &&
+      other.projectId == projectId &&
+      other.checkoutId == checkoutId &&
+      other.requestId == requestId &&
+      other.fileName == fileName &&
+      other.size == size &&
+      other.mimeType == mimeType;
+
+  @override
+  int get hashCode =>
+      Object.hash(kind, projectId, checkoutId, requestId, fileName, size, mimeType);
+}
+
+/// `"0"` for the session stream (which carries no id of its own); `id` for
+/// every other stream, mirroring the bridge's `NETWATCH_SESSION_STREAM_LABEL`
+/// fallback in `streamLabelOf` (`bridge/src/peer/stream-dispatch.ts`). Hand
+/// mirror pinned by the shared `streamOpen.labels` vectors
+/// (`peer_transport_vectors_test.dart`).
+const String kSessionStreamLabel = '0';
+
+({String kind, String id}) streamLabelOf(StreamOpen open) => switch (open) {
+  SessionStreamOpen() => (kind: 'session', id: kSessionStreamLabel),
+  ProjectStreamOpen(:final projectId) => (kind: 'project', id: projectId),
+  TerminalStreamOpen(:final requestId) => (kind: 'terminal', id: requestId),
+  TunnelHttpStreamOpen(:final requestId) => (
+    kind: 'tunnel-http',
+    id: requestId,
+  ),
+  TunnelWsStreamOpen(:final wsId) => (kind: 'tunnel-ws', id: wsId),
+  UploadStreamOpen(:final requestId) => (kind: 'upload', id: requestId),
+};
 
 /// Why a stream open was refused. Dart cannot read a QUIC reset code, so every
 /// refusal the app acts on travels as [StreamRefused] followed by FIN.

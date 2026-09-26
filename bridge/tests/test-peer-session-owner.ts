@@ -76,6 +76,7 @@ function createFakeProjectStream() {
       void size;
       return new Promise<number[]>((resolve, reject) => { waiters.push({ resolve, reject }); pump(); });
     },
+    read: () => new Promise<number[]>((resolve, reject) => { waiters.push({ resolve, reject }); pump(); }),
     stop: (code) => Promise.resolve().then(() => { stops.push(code); }),
   };
 

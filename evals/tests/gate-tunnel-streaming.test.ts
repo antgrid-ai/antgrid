@@ -15,7 +15,9 @@ import { firstProjectStream, streamSnapshot } from "../support/stream";
 import type { TunnelHttpStreamClient } from "../helpers/relay-client";
 
 const BIG = randomBytes(6 * 1024 * 1024);
-const POST_BODY = randomBytes(1 * 1024 * 1024);
+// +17: larger than one raw write slice (STREAM_RECORD_SLICE_BYTES), so the
+// echo proves a body spanning several slices reassembles byte-exact.
+const POST_BODY = randomBytes(1 * 1024 * 1024 + 17);
 
 /** The origin every HTTP row tunnels to: a small/big GET, a POST echo that
  *  records whether it was ever reached (the content-length/bodyLength
@@ -293,7 +295,7 @@ describe("gate: tunnel HTTP and WebSocket streams", () => {
     expect(frames.length).toBeGreaterThan(0);
   }, 30_000);
 
-  test("a 1 MiB binary POST body is echoed back byte-exact", async () => {
+  test("a 1 MiB + 17 byte binary POST body, spanning several write slices, is echoed back byte-exact", async () => {
     const client = await env.app.openTunnelHttpStream({
       projectId: env.projectId,
       head: { type: "tunnel:http-request", port: http.port, method: "POST", path: "/echo-body", headers: {} },

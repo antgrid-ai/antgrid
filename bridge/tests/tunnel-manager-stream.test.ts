@@ -5,7 +5,7 @@
 // no shared queue here to join or interleave on.
 import { afterEach, describe, expect, test } from "bun:test";
 import { TunnelManager, type TunnelFetchOpts, type TunnelHttpExchange } from "../src/tunnel-manager";
-import type { TunnelBodySlice } from "../src/localhost-fetch";
+import type { TunnelRequestBody } from "../src/localhost-fetch";
 import type { StreamSendOutcome } from "../src/peer/stream-records";
 import { createConnState } from "../src/conn-state";
 import type { TunnelHttpRequest } from "../src/tunnel-protocol";
@@ -65,8 +65,33 @@ function startRoute(opts: {
 type Verdict = StreamSendOutcome | "hold";
 type SentEntry =
   | { kind: "head"; value: { status: number; headers: Record<string, string>; setCookies?: string[] } }
-  | { kind: "body"; value: TunnelBodySlice }
+  | { kind: "body"; value: Uint8Array }
   | { kind: "end" };
+
+/** A `TunnelRequestBody` that hands back `bytes` from a single `stream()` call,
+ *  resolving `complete` once the stream has finished being read — the shape
+ *  `runHttp` needs to arm its post-body head timer. Fine for these
+ *  tests: none exercise the scheme-retry replay, so a single-use stream never
+ *  needs a second `stream()` call to answer anything but null. */
+function bodyOf(bytes: Uint8Array): TunnelRequestBody {
+  let used = false;
+  const { promise, resolve } = Promise.withResolvers<void>();
+  return {
+    length: bytes.byteLength,
+    stream: () => {
+      if (used) return null;
+      used = true;
+      return new ReadableStream<Uint8Array>({
+        start(c) {
+          c.enqueue(bytes);
+          c.close();
+          resolve();
+        },
+      });
+    },
+    complete: promise,
+  };
+}
 
 /** The exchange as a lever: each call's promise resolves when this test says
  *  it does, which is the whole pacing contract the read loop rides on.
@@ -149,9 +174,8 @@ async function waitUntil(condition: () => boolean, ms = 2_000): Promise<void> {
 }
 
 function rawBytes(exchange: ReturnType<typeof makeExchange>): Buffer {
-  return Buffer.concat(
-    exchange.bodyCalls().map((e) => (e.value.gzip ? Buffer.from(Bun.gunzipSync(e.value.bytes as Uint8Array<ArrayBuffer>)) : Buffer.from(e.value.bytes))),
-  );
+  // A body call's value is the raw slice as-is, nothing to unwrap.
+  return Buffer.concat(exchange.bodyCalls().map((e) => Buffer.from(e.value)));
 }
 
 describe("TunnelManager HTTP streaming", () => {
@@ -164,7 +188,7 @@ describe("TunnelManager HTTP streaming", () => {
     exchange.plan = holdBody(exchange, 0);
     const mgr = makeManager();
 
-    const run = mgr.serveHttp(request(route.port, "paced"), new Uint8Array(0), exchange.exchange);
+    const run = mgr.serveHttp(request(route.port, "paced"), null, exchange.exchange);
     await waitUntil(() => exchange.waiting() === 1);
     await Bun.sleep(200);
     expect(exchange.sent).toHaveLength(2);
@@ -186,7 +210,7 @@ describe("TunnelManager HTTP streaming", () => {
     exchange.plan = holdBody(exchange, 0);
     const mgr = makeManager({ readIdleMs: 100 });
 
-    const run = mgr.serveHttp(request(route.port, "parked"), new Uint8Array(0), exchange.exchange);
+    const run = mgr.serveHttp(request(route.port, "parked"), null, exchange.exchange);
     await waitUntil(() => exchange.waiting() === 1);
     await Bun.sleep(300);
     exchange.plan = undefined;
@@ -204,7 +228,7 @@ describe("TunnelManager HTTP streaming", () => {
     exchange.plan = (entry) => (entry.kind === "body" && exchange.bodyCalls().length - 1 === 1 ? "dropped" : "sent");
     const mgr = makeManager();
 
-    await mgr.serveHttp(request(route.port, "lost"), new Uint8Array(0), exchange.exchange);
+    await mgr.serveHttp(request(route.port, "lost"), null, exchange.exchange);
 
     expect(exchange.sent.map((e) => e.kind)).toEqual(["head", "body", "body"]);
     await waitUntil(() => route.state.cancelled);
@@ -216,7 +240,7 @@ describe("TunnelManager HTTP streaming", () => {
     exchange.plan = holdBody(exchange, 0);
     const mgr = makeManager();
 
-    const run = mgr.serveHttp(request(route.port, "cancelled"), new Uint8Array(0), exchange.exchange);
+    const run = mgr.serveHttp(request(route.port, "cancelled"), null, exchange.exchange);
     await waitUntil(() => exchange.waiting() === 1);
     exchange.abort();
     exchange.plan = undefined;
@@ -236,7 +260,7 @@ describe("TunnelManager HTTP streaming", () => {
     const exchange = makeExchange();
     const mgr = makeManager({ readIdleMs: 100, flushMs: 50 });
 
-    await mgr.serveHttp(request(route.port, "stalled"), new Uint8Array(0), exchange.exchange);
+    await mgr.serveHttp(request(route.port, "stalled"), null, exchange.exchange);
 
     // The head already went out (the read failed AFTER it), so the caller must
     // end the stream with an error rather than a clean end record — that is
@@ -255,7 +279,7 @@ describe("TunnelManager HTTP streaming", () => {
     const exchange = makeExchange();
     const mgr = makeManager({ maxBodyBytes: 1024 });
 
-    await mgr.serveHttp(request(route.port, "headless"), new Uint8Array(0), exchange.exchange);
+    await mgr.serveHttp(request(route.port, "headless"), null, exchange.exchange);
 
     expect(exchange.sent.map((e) => e.kind)).toEqual(["head", "body", "end"]);
     expect(exchange.sent[0]).toMatchObject({ kind: "head", value: { status: 502 } });
@@ -267,9 +291,9 @@ describe("TunnelManager HTTP streaming", () => {
     const exchange = makeExchange();
     const mgr = makeManager({ chunkBytes: 4096 });
 
-    await mgr.serveHttp(request(route.port, "counted"), new Uint8Array(0), exchange.exchange);
+    await mgr.serveHttp(request(route.port, "counted"), null, exchange.exchange);
 
-    expect(exchange.bodyCalls().map((e) => e.value.bytes.byteLength)).toEqual([4096, 4096, 1808]);
+    expect(exchange.bodyCalls().map((e) => e.value.byteLength)).toEqual([4096, 4096, 1808]);
     expect(exchange.sent.map((e) => e.kind)).toEqual(["head", "body", "body", "body", "end"]);
     expect(rawBytes(exchange).byteLength).toBe(10_000);
   });
@@ -289,7 +313,7 @@ describe("TunnelManager HTTP streaming", () => {
 
     await makeManager().serveHttp(
       { ...request(server.port!, "post"), method: "POST", bodyLength: payload.byteLength },
-      payload,
+      bodyOf(payload),
       exchange.exchange,
     );
 
@@ -297,40 +321,17 @@ describe("TunnelManager HTTP streaming", () => {
     expect(exchange.sent.map((e) => e.kind)).toEqual(["head", "body", "end"]);
   });
 
-  test("a compressible body is gzipped only when the app accepted gzip", async () => {
-    const text = "a".repeat(6000);
-    const server = Bun.serve({
-      port: 0,
-      fetch: () => new Response(text, { headers: { "content-type": "text/plain" } }),
-    });
-    servers.push(server);
-
-    // One slice, well above the gzip floor, so every call must carry the flag.
-    const mgr = () => makeManager({ chunkBytes: 8192 });
-    const plain = makeExchange();
-    await mgr().serveHttp(request(server.port!, "plain"), new Uint8Array(0), plain.exchange);
-    expect(plain.bodyCalls().every((e) => !e.value.gzip)).toBe(true);
-
-    const gz = makeExchange();
-    await mgr().serveHttp(
-      { ...request(server.port!, "gz"), acceptEncodings: ["gzip"] },
-      new Uint8Array(0),
-      gz.exchange,
-    );
-    expect(gz.bodyCalls().length).toBeGreaterThan(0);
-    expect(gz.bodyCalls().every((e) => e.value.gzip)).toBe(true);
-    expect(rawBytes(gz).toString("utf8")).toBe(text);
-  });
-
-  test("a single-slice body is head, one body call with last, then end", async () => {
+  test("a single-slice body is head, one raw body call, then end", async () => {
+    // The read loop keeps pulling until the upstream generator itself reports
+    // done, then calls end() — there is no per-call flag marking a body()
+    // call as final, so a single small body still produces exactly one.
     const route = startRoute({ writes: 1, writeBytes: 500 });
     const exchange = makeExchange();
     const mgr = makeManager();
 
-    await mgr.serveHttp(request(route.port, "small"), new Uint8Array(0), exchange.exchange);
+    await mgr.serveHttp(request(route.port, "small"), null, exchange.exchange);
 
     expect(exchange.sent.map((e) => e.kind)).toEqual(["head", "body", "end"]);
-    expect(exchange.bodyCalls()[0].value.last).toBe(true);
     expect(rawBytes(exchange).byteLength).toBe(500);
   });
 
@@ -339,7 +340,7 @@ describe("TunnelManager HTTP streaming", () => {
     const exchange = makeExchange();
     const mgr = makeManager();
 
-    await mgr.serveHttp(request(route.port, "empty"), new Uint8Array(0), exchange.exchange);
+    await mgr.serveHttp(request(route.port, "empty"), null, exchange.exchange);
 
     expect(exchange.sent.map((e) => e.kind)).toEqual(["head", "end"]);
     expect(exchange.sent[0]).toMatchObject({ kind: "head", value: { status: 204 } });
@@ -351,7 +352,7 @@ describe("TunnelManager HTTP streaming", () => {
     exchange.plan = holdBody(exchange, 0);
     const mgr = makeManager();
 
-    const run = mgr.serveHttp(request(route.port, "stopped"), new Uint8Array(0), exchange.exchange);
+    const run = mgr.serveHttp(request(route.port, "stopped"), null, exchange.exchange);
     await waitUntil(() => exchange.waiting() === 1);
     mgr.stop();
     await waitUntil(() => route.state.cancelled);
@@ -375,8 +376,8 @@ describe("TunnelManager HTTP streaming", () => {
     const mgr = makeManager();
 
     const runs = Promise.all([
-      mgr.serveHttp(request(parked.port, "parked"), new Uint8Array(0), parkedExchange.exchange),
-      mgr.serveHttp(request(running.port, "running"), new Uint8Array(0), runningExchange.exchange),
+      mgr.serveHttp(request(parked.port, "parked"), null, parkedExchange.exchange),
+      mgr.serveHttp(request(running.port, "running"), null, runningExchange.exchange),
     ]);
     await waitUntil(() => parkedExchange.waiting() === 1);
     await waitUntil(() => runningExchange.bodyCalls().length > 0);
@@ -407,8 +408,8 @@ describe("TunnelManager HTTP streaming", () => {
     exchangeB.plan = holdBody(exchangeB, 0);
     const mgr = makeManager();
 
-    const runA = mgr.serveHttp(request(routeA.port, "a"), new Uint8Array(0), exchangeA.exchange);
-    const runB = mgr.serveHttp(request(routeB.port, "b"), new Uint8Array(0), exchangeB.exchange);
+    const runA = mgr.serveHttp(request(routeA.port, "a"), null, exchangeA.exchange);
+    const runB = mgr.serveHttp(request(routeB.port, "b"), null, exchangeB.exchange);
     await waitUntil(() => exchangeA.waiting() === 1 && exchangeB.waiting() === 1);
 
     mgr.abortHttpStreams("peer-a");
@@ -441,8 +442,8 @@ describe("TunnelManager HTTP streaming", () => {
     exchangeB.plan = holdBody(exchangeB, 0);
     const mgr = makeManager();
 
-    const runA = mgr.serveHttp(request(routeA.port, "a"), new Uint8Array(0), exchangeA.exchange);
-    const runB = mgr.serveHttp(request(routeB.port, "b"), new Uint8Array(0), exchangeB.exchange);
+    const runA = mgr.serveHttp(request(routeA.port, "a"), null, exchangeA.exchange);
+    const runB = mgr.serveHttp(request(routeB.port, "b"), null, exchangeB.exchange);
     await waitUntil(() => exchangeA.waiting() === 1 && exchangeB.waiting() === 1);
 
     mgr.stop();
@@ -463,7 +464,7 @@ describe("TunnelManager HTTP streaming", () => {
     exchange.plan = holdBody(exchange, 0);
     const mgr = makeManager();
 
-    const run = mgr.serveHttp(request(route.port, "self-aborted"), new Uint8Array(0), exchange.exchange);
+    const run = mgr.serveHttp(request(route.port, "self-aborted"), null, exchange.exchange);
     await waitUntil(() => exchange.waiting() === 1);
     exchange.abort();
     exchange.plan = undefined;

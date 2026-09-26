@@ -20,7 +20,7 @@ import {
   type StreamRefused,
   type StreamRefusedCode,
 } from "antgrid-wire";
-import { StreamRecordWriter, type StreamRecv, type StreamSend } from "./stream-records";
+import { StreamRecordWriter, type RawStreamRecv, type StreamRecv, type StreamSend } from "./stream-records";
 
 export const STREAM_OPEN_DEADLINE_MS = 5_000;
 // Reset/stop codes are bridge diagnostics only — the Dart binding exposes no
@@ -34,7 +34,7 @@ export const STREAM_REFUSAL_MAX_QUEUED_BYTES = 8_192;
 /** Structural subset of `@number0/iroh` `BiStream`; the real one satisfies it. */
 export interface AcceptedBiStream {
   send: StreamSend;
-  recv: StreamRecv & { stop(errorCode: bigint): Promise<void> };
+  recv: RawStreamRecv & { stop(errorCode: bigint): Promise<void> };
 }
 
 export type StreamOpenRead =
@@ -119,6 +119,7 @@ export function streamLabelOf(open: StreamOpen): StreamDiagnosticLabel {
     case "terminal": return { kind: open.kind, id: open.requestId };
     case "tunnel-http": return { kind: open.kind, id: open.requestId };
     case "tunnel-ws": return { kind: open.kind, id: open.wsId };
+    case "upload": return { kind: open.kind, id: open.requestId };
   }
 }
 

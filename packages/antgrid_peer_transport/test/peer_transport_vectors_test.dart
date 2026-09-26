@@ -89,6 +89,11 @@ void main() {
     expect(kStreamMaxTerminalAttachmentsPerPeer, caps['maxTerminalAttachmentsPerPeer']);
     expect(kStreamMaxTunnelStreamsPerPeer, caps['maxTunnelStreamsPerPeer']);
     expect(kStreamMaxPendingOpensPerPeer, caps['maxPendingOpensPerPeer']);
+    expect(kStreamMaxUploadStreamsPerPeer, caps['maxUploadStreamsPerPeer']);
+    final uploadRecords = _map(streamOpen['uploadRecords']);
+    expect(kStreamUploadBridgeRecordMaxBytes, uploadRecords['bridgeMaxRecordBytes']);
+    expect(kStreamUploadMaxFileNameLength, uploadRecords['maxFileNameLength']);
+    expect(kStreamUploadMaxMimeTypeLength, uploadRecords['maxMimeTypeLength']);
     final projectRecords = _map(streamOpen['projectRecords']);
     expect(kStreamProjectAppRecordMaxBytes, projectRecords['appMaxRecordBytes']);
     expect(
@@ -104,10 +109,9 @@ void main() {
     expect(kStreamTunnelRecordMaxBytes, tunnelRecords['maxRecordBytes']);
     expect(kStreamTunnelRequestBodyMaxBytes, tunnelRecords['requestBodyMaxBytes']);
     final tags = _map(tunnelRecords['tags']);
-    expect(kTunnelRecordTagBody, tags['body']);
-    expect(kTunnelRecordTagBodyGzip, tags['bodyGzip']);
     expect(kTunnelRecordTagWsText, tags['wsText']);
     expect(kTunnelRecordTagWsBinary, tags['wsBinary']);
+    expect(tags.keys, unorderedEquals(['wsText', 'wsBinary']));
   });
 
   test('Dart parses every stream-open kind golden vector, and round-trips it', () {
@@ -120,6 +124,8 @@ void main() {
       'terminal-with-checkout',
       'tunnel-http',
       'tunnel-ws',
+      'upload',
+      'upload-with-checkout-and-mime',
     ]);
     for (final sample in opens) {
       final json = _map(sample['json']);
@@ -138,7 +144,23 @@ void main() {
           expect(parsed, isA<TunnelHttpStreamOpen>());
         case 'tunnel-ws':
           expect(parsed, isA<TunnelWsStreamOpen>());
+        case 'upload':
+        case 'upload-with-checkout-and-mime':
+          expect(parsed, isA<UploadStreamOpen>());
       }
+    }
+  });
+
+  test('Dart stream labels match the shared netwatch label vectors', () {
+    final labels = (_map(fixture['streamOpen'])['labels'] as List)
+        .cast<Map<String, dynamic>>();
+    expect(labels, isNotEmpty);
+    for (final sample in labels) {
+      final open = StreamOpen.fromJson(_map(sample['open']));
+      expect(open, isNotNull, reason: sample['name'] as String);
+      final label = streamLabelOf(open!);
+      expect(label.kind, sample['streamKind'], reason: sample['name'] as String);
+      expect(label.id, sample['streamId'], reason: sample['name'] as String);
     }
   });
 

@@ -74,6 +74,7 @@ class _FakeLink implements PeerLink, MultiStreamPeerLink {
     StreamOpen open, {
     required int maxRecordBytes,
     required int maxQueuedBytes,
+    int? rawAfterRecords,
   }) async {
     final stream = _FakeProjectStream(open);
     openedStreams.add(stream);
@@ -123,6 +124,14 @@ class _FakeProjectStream implements PeerStream {
   @override
   Future<PeerSendOutcome> send(Uint8List record) async {
     sent.add(jsonDecode(utf8.decode(record)) as Map<String, dynamic>);
+    return PeerSendOutcome.accepted;
+  }
+
+  final sentRaw = <Uint8List>[];
+
+  @override
+  Future<PeerSendOutcome> sendRaw(Uint8List bytes) async {
+    sentRaw.add(bytes);
     return PeerSendOutcome.accepted;
   }
 

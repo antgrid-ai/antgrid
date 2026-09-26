@@ -1,20 +1,18 @@
 import { describe, it, expect, afterAll } from "bun:test";
 import {
-  encodeChunk,
   fetchLocalhost,
-  singleSlice,
   UpstreamBodyError,
   type LocalhostFetchStream,
-  type TunnelBodySlice,
+  type TunnelRequestBody,
 } from "../src/localhost-fetch";
-import { TUNNEL_GZIP_ENCODING } from "../src/tunnel-protocol";
+import { TUNNEL_BODY_REPLAY_MAX_BYTES } from "../src/tunnel-protocol";
 
 const servers: Array<ReturnType<typeof Bun.serve>> = [];
 
 function startTestServer() {
   const server = Bun.serve({
     port: 0, // random available port
-    fetch(req) {
+    async fetch(req) {
       const url = new URL(req.url);
       if (url.pathname === "/json") {
         return new Response(JSON.stringify({ ok: true }), {
@@ -57,36 +55,6 @@ function startTestServer() {
           },
         });
       }
-      if (url.pathname === "/bundle.js") {
-        return new Response(BUNDLE_JS, {
-          headers: { "Content-Type": "application/javascript" },
-        });
-      }
-      if (url.pathname === "/tiny.js") {
-        return new Response("export const a = 1;", {
-          headers: { "Content-Type": "application/javascript" },
-        });
-      }
-      if (url.pathname === "/big.png") {
-        return new Response(INCOMPRESSIBLE_RANDOM, {
-          headers: { "Content-Type": "image/png" },
-        });
-      }
-      if (url.pathname === "/blob.bin") {
-        return new Response(INCOMPRESSIBLE_RANDOM, {
-          headers: { "Content-Type": "application/octet-stream" },
-        });
-      }
-      if (url.pathname === "/clip.mp4") {
-        return new Response(COMPRESSIBLE_MEDIA, {
-          headers: { "Content-Type": "video/mp4" },
-        });
-      }
-      if (url.pathname === "/favicon.ico") {
-        return new Response(COMPRESSIBLE_MEDIA, {
-          headers: { "Content-Type": "image/x-icon" },
-        });
-      }
       if (url.pathname === "/chunky.bin") {
         return new Response(TEN_THOUSAND_RANDOM, {
           headers: { "Content-Type": "application/octet-stream" },
@@ -97,14 +65,21 @@ function startTestServer() {
           headers: { "Content-Type": "application/octet-stream" },
         });
       }
-      if (url.pathname === "/prose.txt") {
-        return new Response(COMPRESSIBLE_TEXT, {
-          headers: { "Content-Type": "text/plain" },
-        });
-      }
       if (url.pathname === "/allbytes.bin") {
         return new Response(ALL_BYTE_VALUES, {
           headers: { "Content-Type": "application/octet-stream" },
+        });
+      }
+      if (url.pathname === "/echo") {
+        // Echoes the request body byte-exact, plus the content-length the
+        // origin actually saw — what the request-body tests below pin.
+        const bytes = new Uint8Array(await req.arrayBuffer());
+        return new Response(bytes, {
+          headers: {
+            "Content-Type": "application/octet-stream",
+            "X-Echo-Length": String(bytes.byteLength),
+            "X-Echo-Content-Length": req.headers.get("content-length") ?? "",
+          },
         });
       }
       return new Response("Hello");
@@ -173,18 +148,37 @@ function push(c: ReadableStreamDefaultController<Uint8Array>, bytes: number, fil
   try { c.enqueue(new Uint8Array(bytes).fill(fill)); return true; } catch { return false; }
 }
 
-async function collect(
-  stream: LocalhostFetchStream,
-): Promise<{ slices: TunnelBodySlice[]; bytes: Buffer }> {
-  const slices: TunnelBodySlice[] = [];
-  for await (const slice of stream.slices) slices.push(slice);
-  return { slices, bytes: decodeSlices(slices) };
+async function collect(stream: LocalhostFetchStream): Promise<{ chunks: Uint8Array[]; bytes: Buffer }> {
+  const chunks: Uint8Array[] = [];
+  for await (const chunk of stream.body) chunks.push(chunk);
+  return { chunks, bytes: Buffer.concat(chunks.map((c) => Buffer.from(c))) };
 }
 
-function decodeSlices(slices: TunnelBodySlice[]): Buffer {
-  return Buffer.concat(
-    slices.map((s) => (s.gzip ? Buffer.from(Bun.gunzipSync(s.bytes as Uint8Array<ArrayBuffer>)) : Buffer.from(s.bytes))),
-  );
+/** A `TunnelRequestBody` backed by a fixed byte array — the tunnel-streams
+ *  registry's real `TunnelRequestBodySource` does the same thing off the wire
+ *  (§4.1), but a fixed array is all a `fetchLocalhost`-level test needs to pin
+ *  request-body forwarding and replay. `stream()` may be called more than once
+ *  (the scheme retry); `replayCap` models the real cap so a body over
+ *  it becomes un-replayable exactly the way a long-since-drained wire read is. */
+function fixedRequestBody(bytes: Uint8Array, opts: { replayCap?: number } = {}): TunnelRequestBody {
+  const replayCap = opts.replayCap ?? Infinity;
+  const { promise, resolve } = Promise.withResolvers<void>();
+  let calls = 0;
+  return {
+    length: bytes.byteLength,
+    stream: () => {
+      calls++;
+      if (calls > 1 && bytes.byteLength > replayCap) return null;
+      return new ReadableStream<Uint8Array>({
+        start(c) {
+          c.enqueue(bytes);
+          c.close();
+          resolve();
+        },
+      });
+    },
+    complete: promise,
+  };
 }
 
 /** The flush clock off, so a slow read on a loaded host cannot split a slice
@@ -199,29 +193,11 @@ async function waitUntil(condition: () => boolean, ms = 2_000): Promise<void> {
   }
 }
 
-// Well past GZIP_MIN_BYTES and compressible, like a real dev-server chunk.
-const BUNDLE_JS = "export function hello(name) { return `hi ${name}`; }\n".repeat(400);
-// Random bytes: gzip cannot shrink these, so they exercise the size check that
-// backs the content-type list. NOT usable to pin the list itself — a fixture
-// this incompressible is rejected by the size check whichever type it wears.
-const INCOMPRESSIBLE_RANDOM = crypto.getRandomValues(new Uint8Array(16 * 1024));
 const TEN_THOUSAND_RANDOM = crypto.getRandomValues(new Uint8Array(10_000));
 const EIGHT_K_RANDOM = crypto.getRandomValues(new Uint8Array(8192));
-// 40 KiB of compressible text: five 8192-byte slices, each of which must gzip
-// on its own.
-const COMPRESSIBLE_TEXT = "the quick brown fox jumps over the lazy dog\n".repeat(931).slice(0, 40 * 1024);
-// Served under two media content-types that differ ONLY in whether
-// isPrecompressedContentType claims them, so the pair pins that function rather
-// than the size check behind it. Flat runs stand in for the large single-colour
-// fields of an app icon, which is what makes a raw-bitmap .ico compressible.
-const COMPRESSIBLE_MEDIA = Buffer.concat([
-  Buffer.alloc(6 * 1024, 0x00),
-  Buffer.alloc(6 * 1024, 0xf8),
-  Buffer.alloc(4 * 1024, 0x81),
-]);
-// Every byte value 0-255, repeated to clear GZIP_MIN_BYTES — a base64 round
-// trip could mask a byte-alignment bug that a raw-bytes pipe cannot: this
-// range includes bytes invalid as UTF-8 lone continuation/lead bytes.
+// Every byte value 0-255, repeated — a base64 round trip could mask a
+// byte-alignment bug that a raw-bytes pipe cannot: this range includes bytes
+// invalid as UTF-8 lone continuation/lead bytes.
 const ALL_BYTE_VALUES = (() => {
   const one = new Uint8Array(256);
   for (let i = 0; i < 256; i++) one[i] = i;
@@ -234,47 +210,11 @@ afterAll(() => {
   for (const s of servers.splice(0)) s.stop(true);
 });
 
-describe("encodeChunk / singleSlice", () => {
-  it("ships identity when gzip is not requested", () => {
-    const raw = new Uint8Array([1, 2, 3]);
-    expect(encodeChunk(raw, false, true)).toEqual({ bytes: raw, gzip: false, last: true });
-  });
-
-  it("ships identity for a body under the gzip size floor even when requested", () => {
-    const raw = new Uint8Array([1, 2, 3]);
-    const slice = encodeChunk(raw, true, false);
-    expect(slice.gzip).toBe(false);
-    expect(slice.bytes).toEqual(raw);
-  });
-
-  it("gzips a large compressible body when requested, and it inflates back to the input", () => {
-    const raw = new TextEncoder().encode("a".repeat(8192));
-    const slice = encodeChunk(raw, true, false);
-    expect(slice.gzip).toBe(true);
-    expect(slice.bytes.byteLength).toBeLessThan(raw.byteLength);
-    expect(Bun.gunzipSync(slice.bytes as Uint8Array<ArrayBuffer>)).toEqual(raw);
-  });
-
-  it("falls back to identity when gzip would grow the body", () => {
-    const raw = crypto.getRandomValues(new Uint8Array(8192));
-    const slice = encodeChunk(raw, true, false);
-    expect(slice.gzip).toBe(false);
-    expect(slice.bytes).toEqual(raw);
-  });
-
-  it("singleSlice always marks last: true", () => {
-    const raw = new Uint8Array([9, 9]);
-    expect(singleSlice(raw, false)).toEqual({ bytes: raw, gzip: false, last: true });
-  });
-});
-
 describe("fetchLocalhost", () => {
   it("rejects non-localhost URLs", async () => {
     const result = await fetchLocalhost({ url: "http://example.com/test" });
     expect(result.status).toBe(403);
-    const { slices, bytes } = await collect(result);
-    expect(slices).toHaveLength(1);
-    expect(slices[0]).toMatchObject({ gzip: false, last: true });
+    const { bytes } = await collect(result);
     expect(bytes.toString("utf8")).toContain("Forbidden");
   });
 
@@ -299,9 +239,7 @@ describe("fetchLocalhost", () => {
       ...NO_FLUSH,
     });
     expect(result.status).toBe(200);
-    const { slices, bytes } = await collect(result);
-    // No acceptEncodings: every slice ships identity.
-    expect(slices.map((s) => s.gzip)).toEqual([false]);
+    const { bytes } = await collect(result);
     expect(JSON.parse(bytes.toString("utf8")).ok).toBe(true);
   });
 
@@ -312,9 +250,7 @@ describe("fetchLocalhost", () => {
       ...NO_FLUSH,
     });
     expect(result.status).toBe(200);
-    const { slices, bytes } = await collect(result);
-    expect(slices).toHaveLength(1);
-    expect(slices[0]).toMatchObject({ gzip: false, last: true });
+    const { bytes } = await collect(result);
     expect(bytes[0]).toBe(0x89);
     expect(bytes[1]).toBe(0x50);
   });
@@ -350,171 +286,129 @@ describe("fetchLocalhost", () => {
     expect(result.headers["set-cookie"]).toBeUndefined();
   });
 
-  it("round-trips every byte value byte-exact, whether gzipped or not", async () => {
+  it("round-trips every byte value byte-exact", async () => {
     const server = startTestServer();
-
-    const plain = await fetchLocalhost({
+    const result = await fetchLocalhost({
       url: `http://localhost:${server.port}/allbytes.bin`,
       ...NO_FLUSH,
     });
-    const { bytes: plainBytes } = await collect(plain);
-    expect(plainBytes.equals(Buffer.from(ALL_BYTE_VALUES))).toBe(true);
-
-    const gzipped = await fetchLocalhost({
-      url: `http://localhost:${server.port}/allbytes.bin`,
-      acceptEncodings: [TUNNEL_GZIP_ENCODING],
-      ...NO_FLUSH,
-    });
-    const { slices, bytes: gzippedBytes } = await collect(gzipped);
-    expect(slices.map((s) => s.gzip)).toEqual([true]);
-    expect(gzippedBytes.equals(Buffer.from(ALL_BYTE_VALUES))).toBe(true);
+    const { bytes } = await collect(result);
+    expect(bytes.equals(Buffer.from(ALL_BYTE_VALUES))).toBe(true);
   });
 });
 
-describe("fetchLocalhost body compression", () => {
-  it("gzips a compressible body when the caller advertises the encoding", async () => {
+describe("fetchLocalhost request body (raw, streamed via TunnelRequestBody)", () => {
+  it("forwards a request body byte-exact, with content-length set from the body's own declared length", async () => {
     const server = startTestServer();
+    const payload = new TextEncoder().encode("the quick brown fox jumps over the lazy dog");
     const result = await fetchLocalhost({
-      url: `http://localhost:${server.port}/bundle.js`,
-      acceptEncodings: [TUNNEL_GZIP_ENCODING],
+      url: `http://localhost:${server.port}/echo`,
+      method: "POST",
+      body: fixedRequestBody(payload),
       ...NO_FLUSH,
     });
-
-    const { slices, bytes } = await collect(result);
-    expect(slices.map((s) => s.gzip)).toEqual([true]);
-    expect(bytes.toString("utf8")).toBe(BUNDLE_JS);
-    // The point of the exercise: fewer bytes for the phone than the raw text.
-    expect(slices[0].bytes.byteLength).toBeLessThan(BUNDLE_JS.length / 2);
+    expect(result.status).toBe(200);
+    expect(result.headers["x-echo-content-length"]).toBe(String(payload.byteLength));
+    const { bytes } = await collect(result);
+    expect(bytes.equals(Buffer.from(payload))).toBe(true);
   });
 
-  it("stays uncompressed for a caller that never advertised the encoding", async () => {
+  it("sends the request as a streamed body (duplex: half) rather than buffering it whole first", async () => {
+    // A `ReadableStream` request body needs `duplex: "half"` on `fetch()` or
+    // undici/Bun reject it outright — this is the regression a bad refactor
+    // would hit immediately, not a subtle behavior difference.
     const server = startTestServer();
-    // An app predating acceptEncodings would render gzip bytes as garbage, so
-    // silence must mean "send it plain".
+    let pulled = 0;
+    const body: TunnelRequestBody = {
+      length: 6,
+      stream: () => new ReadableStream<Uint8Array>({
+        pull(c) {
+          pulled++;
+          if (pulled === 1) { c.enqueue(new TextEncoder().encode("ab")); return; }
+          if (pulled === 2) { c.enqueue(new TextEncoder().encode("cd")); return; }
+          if (pulled === 3) { c.enqueue(new TextEncoder().encode("ef")); return; }
+          c.close();
+        },
+      }),
+      complete: Promise.resolve(),
+    };
     const result = await fetchLocalhost({
-      url: `http://localhost:${server.port}/bundle.js`,
+      url: `http://localhost:${server.port}/echo`,
+      method: "POST",
+      body,
       ...NO_FLUSH,
     });
-
-    const { slices, bytes } = await collect(result);
-    expect(slices.map((s) => s.gzip)).toEqual([false]);
-    expect(bytes.toString("utf8")).toBe(BUNDLE_JS);
+    const { bytes } = await collect(result);
+    expect(bytes.toString("utf8")).toBe("abcdef");
+    expect(pulled).toBeGreaterThan(1); // proves it streamed rather than being read in one go
   });
 
-  it("ignores an advertisement it does not implement", async () => {
+  it("arms the head timeout only once the request body finishes, so a slow (but eventually complete) body still succeeds", async () => {
     const server = startTestServer();
-    const result = await fetchLocalhost({
-      url: `http://localhost:${server.port}/bundle.js`,
-      acceptEncodings: ["br"],
+    const { promise: gate, resolve: openGate } = Promise.withResolvers<void>();
+    const body: TunnelRequestBody = {
+      length: 3,
+      stream: () => new ReadableStream<Uint8Array>({
+        async start(c) {
+          await gate; // the body is still streaming well past headTimeoutMs below
+          c.enqueue(new TextEncoder().encode("hi!"));
+          c.close();
+        },
+      }),
+      complete: gate.then(() => {}),
+    };
+    const resultPromise = fetchLocalhost({
+      url: `http://localhost:${server.port}/echo`,
+      method: "POST",
+      body,
+      headTimeoutMs: 50, // would fire almost immediately if armed at request start
       ...NO_FLUSH,
     });
-
-    const { slices } = await collect(result);
-    expect(slices.map((s) => s.gzip)).toEqual([false]);
+    await Bun.sleep(150); // well past headTimeoutMs, with the body still gated
+    openGate();
+    const result = await resultPromise;
+    expect(result.status).toBe(200);
+    const { bytes } = await collect(result);
+    expect(bytes.toString("utf8")).toBe("hi!");
   });
 
-  it("leaves a small body alone", async () => {
-    const server = startTestServer();
-    const result = await fetchLocalhost({
-      url: `http://localhost:${server.port}/tiny.js`,
-      acceptEncodings: [TUNNEL_GZIP_ENCODING],
-      ...NO_FLUSH,
-    });
-
-    const { slices, bytes } = await collect(result);
-    expect(slices.map((s) => s.gzip)).toEqual([false]);
-    expect(bytes.toString("utf8")).toBe("export const a = 1;");
-  });
-
-  it("leaves an already-compressed format alone", async () => {
-    const server = startTestServer();
-    const result = await fetchLocalhost({
-      url: `http://localhost:${server.port}/big.png`,
-      acceptEncodings: [TUNNEL_GZIP_ENCODING],
-      ...NO_FLUSH,
-    });
-
-    const { slices, bytes } = await collect(result);
-    expect(slices.map((s) => s.gzip)).toEqual([false]);
-    expect(bytes.equals(Buffer.from(INCOMPRESSIBLE_RANDOM))).toBe(true);
-  });
-
-  // Half of the A/B that pins the image//video//audio prefix rule: the bytes DO
-  // compress, so only the content-type can be rejecting them. Skipping the
-  // attempt is the point — Bun.gzipSync is synchronous and runs ~16ms/MiB on
-  // incompressible input, so at real video sizes the wasted gzip stalls the
-  // bridge's event loop for longer than any plausible win.
-  it("skips the gzip on a media type even when the bytes would have compressed", async () => {
-    const server = startTestServer();
-    const result = await fetchLocalhost({
-      url: `http://localhost:${server.port}/clip.mp4`,
-      acceptEncodings: [TUNNEL_GZIP_ENCODING],
-      ...NO_FLUSH,
-    });
-
-    const { slices, bytes } = await collect(result);
-    expect(slices.map((s) => s.gzip)).toEqual([false]);
-    expect(bytes.equals(COMPRESSIBLE_MEDIA)).toBe(true);
-  });
-
-  // The other half, same bytes: raw-bitmap and PCM containers live under a media
-  // type but store their samples uncompressed, so the prefix rule has to exempt
-  // them. A favicon.ico is the one that recurs — a WebView requests it on every
-  // page load, and the classic multi-size BMP form clears GZIP_MIN_BYTES.
-  it("compresses a raw-bitmap media type the prefix rule would otherwise claim", async () => {
-    const server = startTestServer();
-    const result = await fetchLocalhost({
-      url: `http://localhost:${server.port}/favicon.ico`,
-      acceptEncodings: [TUNNEL_GZIP_ENCODING],
-      ...NO_FLUSH,
-    });
-
-    const { slices, bytes } = await collect(result);
-    expect(slices.map((s) => s.gzip)).toEqual([true]);
-    expect(bytes.equals(COMPRESSIBLE_MEDIA)).toBe(true);
-  });
-
-  // The content-type list can't know every incompressible format, so the size
-  // check behind it is the real guard — and only a type that list MISSES
-  // reaches it. Without this, inverting the comparison passes every test while
-  // making incompressible bodies ~33% larger on the wire.
-  it("discards a gzip that came out bigger than the plain encoding", async () => {
-    const server = startTestServer();
-    const result = await fetchLocalhost({
-      url: `http://localhost:${server.port}/blob.bin`,
-      acceptEncodings: [TUNNEL_GZIP_ENCODING],
-      ...NO_FLUSH,
-    });
-
-    const { slices, bytes } = await collect(result);
-    expect(slices.map((s) => s.gzip)).toEqual([false]);
-    expect(bytes.equals(Buffer.from(INCOMPRESSIBLE_RANDOM))).toBe(true);
-  });
-
-  it("gzips each slice as an independent member", async () => {
-    const server = startTestServer();
-    const result = await fetchLocalhost({
-      url: `http://localhost:${server.port}/prose.txt`,
-      acceptEncodings: [TUNNEL_GZIP_ENCODING],
-      chunkBytes: 8192,
-      ...NO_FLUSH,
-    });
-
-    const { slices, bytes } = await collect(result);
-    expect(slices).toHaveLength(5);
-    for (const slice of slices) {
-      expect(slice.gzip).toBe(true);
-      // Each one inflates ON ITS OWN — no decoder state crosses a slice, which
-      // is what lets the app decode 8 KiB at a time and a replayed frame stand
-      // alone.
-      expect(() => Bun.gunzipSync(slice.bytes as Uint8Array<ArrayBuffer>)).not.toThrow();
+  it("replays a request body already pulled once, for the scheme-guess retry", async () => {
+    // No TLS listener is actually stood up here — the point is only that a
+    // SECOND `stream()` call (whatever triggers it) replays byte-exact rather
+    // than resuming from empty or throwing.
+    const payload = new TextEncoder().encode("replay me");
+    const body = fixedRequestBody(payload);
+    const first = body.stream()!;
+    const firstReader = first.getReader();
+    const firstBytes: Uint8Array[] = [];
+    for (;;) {
+      const { done, value } = await firstReader.read();
+      if (done) break;
+      firstBytes.push(value);
     }
-    expect(bytes.toString("utf8")).toBe(COMPRESSIBLE_TEXT);
+    expect(Buffer.concat(firstBytes.map((b) => Buffer.from(b)))).toEqual(Buffer.from(payload));
+
+    const second = body.stream()!;
+    const secondReader = second.getReader();
+    const secondBytes: Uint8Array[] = [];
+    for (;;) {
+      const { done, value } = await secondReader.read();
+      if (done) break;
+      secondBytes.push(value);
+    }
+    expect(Buffer.concat(secondBytes.map((b) => Buffer.from(b)))).toEqual(Buffer.from(payload));
+  });
+
+  it("a body already over the replay cap refuses a second stream() call", () => {
+    const payload = new Uint8Array(TUNNEL_BODY_REPLAY_MAX_BYTES + 1).fill(1);
+    const body = fixedRequestBody(payload, { replayCap: TUNNEL_BODY_REPLAY_MAX_BYTES });
+    expect(body.stream()).not.toBeNull();
+    expect(body.stream()).toBeNull();
   });
 });
 
 describe("fetchLocalhost body slicing", () => {
-  it("emits full slices then a remainder, in order", async () => {
+  it("emits chunks of at most chunkBytes, byte-exact overall", async () => {
     const server = startTestServer();
     const result = await fetchLocalhost({
       url: `http://localhost:${server.port}/chunky.bin`,
@@ -522,16 +416,12 @@ describe("fetchLocalhost body slicing", () => {
       ...NO_FLUSH,
     });
 
-    const { slices, bytes } = await collect(result);
-    expect(slices.map((s) => s.bytes.byteLength)).toEqual([4096, 4096, 1808]);
-    expect(slices.map((s) => s.last)).toEqual([false, false, true]);
+    const { chunks, bytes } = await collect(result);
+    expect(chunks.map((c) => c.byteLength)).toEqual([4096, 4096, 1808]);
     expect(bytes.equals(Buffer.from(TEN_THOUSAND_RANDOM))).toBe(true);
   });
 
-  // The `last` flag rides the slice yielded at EOF WITH a remainder; a body that
-  // divides evenly ends on a `done` read with nothing pending, so its final
-  // slice is not marked and the caller terminates the stream with an `end`.
-  it("ends a body that is an exact multiple of the slice size without a last slice", async () => {
+  it("handles a body that is an exact multiple of the slice size", async () => {
     const server = startTestServer();
     const result = await fetchLocalhost({
       url: `http://localhost:${server.port}/exact.bin`,
@@ -539,8 +429,8 @@ describe("fetchLocalhost body slicing", () => {
       ...NO_FLUSH,
     });
 
-    const { slices, bytes } = await collect(result);
-    expect(slices.map((s) => s.last)).toEqual([false, false]);
+    const { chunks, bytes } = await collect(result);
+    expect(chunks.map((c) => c.byteLength)).toEqual([4096, 4096]);
     expect(bytes.equals(Buffer.from(EIGHT_K_RANDOM))).toBe(true);
   });
 
@@ -554,25 +444,24 @@ describe("fetchLocalhost body slicing", () => {
     const result = await fetchLocalhost({ url: `http://localhost:${up.port}/`, flushMs: 50 });
 
     const started = Date.now();
-    const it = result.slices;
+    const it = result.body;
     const first = await it.next();
     expect(Date.now() - started).toBeLessThan(200);
     expect(first.done).toBe(false);
-    expect(first.value!.bytes.byteLength).toBe(1024);
+    expect(first.value!.byteLength).toBe(1024);
 
-    const rest: TunnelBodySlice[] = [first.value!];
+    const rest: Uint8Array[] = [first.value!];
     for (;;) {
       const next = await it.next();
       if (next.done) break;
       rest.push(next.value);
     }
-    expect(decodeSlices(rest).byteLength).toBe(2048);
+    expect(Buffer.concat(rest.map((b) => Buffer.from(b))).byteLength).toBe(2048);
   });
 
   // The flush deadline is anchored at the FIRST pending byte, never re-armed by
   // a later read: an event stream ticking faster than the window would
-  // otherwise withhold slice 0 — and with it the response head, which rides the
-  // start frame — until EOF.
+  // otherwise withhold slice 0 — and with it the response head — until EOF.
   it("yields a steady event stream's first slice within the flush window", async () => {
     const up = startStreamServer({
       contentType: "text/event-stream",
@@ -589,18 +478,18 @@ describe("fetchLocalhost body slicing", () => {
     const result = await fetchLocalhost({ url: `http://localhost:${up.port}/`, flushMs: 50 });
 
     const started = Date.now();
-    const it = result.slices;
+    const it = result.body;
     const first = await it.next();
     expect(Date.now() - started).toBeLessThan(150);
     expect(first.done).toBe(false);
 
-    const all: TunnelBodySlice[] = [first.value!];
+    const all: Uint8Array[] = [first.value!];
     for (;;) {
       const next = await it.next();
       if (next.done) break;
       all.push(next.value);
     }
-    expect(decodeSlices(all).byteLength).toBe(50 * 64);
+    expect(Buffer.concat(all.map((b) => Buffer.from(b))).byteLength).toBe(50 * 64);
   });
 });
 
@@ -624,18 +513,18 @@ describe("fetchLocalhost body failures and cancellation", () => {
     });
     const result = await fetchLocalhost({ url: `http://localhost:${up.port}/`, readIdleMs: 100, flushMs: 20 });
 
-    const it = result.slices;
+    const it = result.body;
     const first = await it.next();
     expect(first.done).toBe(false);
     await Bun.sleep(300);
 
-    const rest: TunnelBodySlice[] = [first.value!];
+    const rest: Uint8Array[] = [first.value!];
     for (;;) {
       const next = await it.next();
       if (next.done) break;
       rest.push(next.value);
     }
-    expect(decodeSlices(rest).byteLength).toBe(200);
+    expect(Buffer.concat(rest.map((b) => Buffer.from(b))).byteLength).toBe(200);
   });
 
   it("throws instead of truncating a body past the size cap", async () => {
@@ -659,8 +548,8 @@ describe("fetchLocalhost body failures and cancellation", () => {
         ...NO_FLUSH,
       });
       expect(declared.status).toBe(413);
-      const { slices, bytes } = await collect(declared);
-      expect(slices).toHaveLength(1);
+      const { chunks, bytes } = await collect(declared);
+      expect(chunks).toHaveLength(1);
       expect(bytes.toString("utf8")).toContain("too large");
       await waitUntil(() => sized.state.closed);
     } finally {
@@ -668,7 +557,7 @@ describe("fetchLocalhost body failures and cancellation", () => {
     }
   });
 
-  it("does not apply the head timeout to the body", async () => {
+  it("does not apply the head timeout to the response body", async () => {
     const up = startStreamServer({
       pump: (c) => {
         let n = 0;
@@ -703,7 +592,7 @@ describe("fetchLocalhost body failures and cancellation", () => {
       flushMs: 20,
     });
 
-    const it = result.slices;
+    const it = result.body;
     expect((await it.next()).done).toBe(false);
     ctrl.abort();
     await expect(it.next()).rejects.toThrow();
@@ -722,9 +611,15 @@ describe("fetchLocalhost body failures and cancellation", () => {
       flushMs: 20,
     });
 
-    const it = result.slices;
+    const it = result.body;
     expect((await it.next()).done).toBe(false);
     await it.return(undefined);
     await waitUntil(() => up.state.cancelled);
+  });
+});
+
+describe("UpstreamBodyError", () => {
+  it("is exported for callers (tunnel-streams.ts) to recognize a request-body-originated failure", () => {
+    expect(new UpstreamBodyError("x")).toBeInstanceOf(Error);
   });
 });

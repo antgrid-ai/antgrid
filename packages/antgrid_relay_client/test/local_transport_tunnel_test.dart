@@ -6,7 +6,6 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:test/test.dart';
@@ -73,7 +72,7 @@ void main() {
       requestId: 'r1',
       checkoutId: 'main',
       head: const {'type': 'tunnel:http-request'},
-      body: Uint8List(0),
+      bodyLength: 0,
     );
 
     await expectLater(

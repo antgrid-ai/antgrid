@@ -22,23 +22,39 @@ import {
   STREAM_MAX_PROJECTS_PER_PEER,
   STREAM_MAX_TERMINAL_ATTACHMENTS_PER_PEER,
   STREAM_MAX_TUNNEL_STREAMS_PER_PEER,
+  STREAM_MAX_UPLOAD_STREAMS_PER_PEER,
   STREAM_OPEN_MAX_BYTES,
   STREAM_OPEN_MAX_ID_LENGTH,
   STREAM_PROJECT_APP_RECORD_MAX_BYTES,
   STREAM_PROJECT_BRIDGE_RECORD_MAX_BYTES,
   STREAM_TERMINAL_APP_RECORD_MAX_BYTES,
   STREAM_TERMINAL_BRIDGE_RECORD_MAX_BYTES,
+  STREAM_UPLOAD_BRIDGE_RECORD_MAX_BYTES,
+  STREAM_UPLOAD_MAX_FILE_NAME_LENGTH,
+  STREAM_UPLOAD_MAX_MIME_TYPE_LENGTH,
   STREAM_TUNNEL_DATA_MAX_BYTES,
   STREAM_TUNNEL_RECORD_MAX_BYTES,
   STREAM_TUNNEL_REQUEST_BODY_MAX_BYTES,
-  TUNNEL_RECORD_TAG_BODY,
-  TUNNEL_RECORD_TAG_BODY_GZIP,
   TUNNEL_RECORD_TAG_WS_TEXT,
   TUNNEL_RECORD_TAG_WS_BINARY,
   StreamOpen,
   StreamRefused,
   encodePeerFrame,
 } from "../src/index";
+
+// The bridge's own `streamLabelOf` (`bridge/src/peer/stream-dispatch.ts`) is
+// ELv2 and must not move into this Apache package, so the expected label per
+// open kind is hand-restated here and pinned as a vector instead of imported.
+function expectedLabel(open: StreamOpen): { kind: string; id: string } {
+  switch (open.kind) {
+    case "session": return { kind: open.kind, id: "0" };
+    case "project": return { kind: open.kind, id: open.projectId };
+    case "terminal": return { kind: open.kind, id: open.requestId };
+    case "tunnel-http": return { kind: open.kind, id: open.requestId };
+    case "tunnel-ws": return { kind: open.kind, id: open.wsId };
+    case "upload": return { kind: open.kind, id: open.requestId };
+  }
+}
 
 export function buildPeerTransportVectors() {
   const samples = [
@@ -121,6 +137,22 @@ function buildStreamOpenVectors() {
       name: "tunnel-ws",
       json: { kind: "tunnel-ws", projectId: "proj-1", wsId: "ws-1" },
     },
+    {
+      name: "upload",
+      json: { kind: "upload", projectId: "proj-1", requestId: "req-1", fileName: "notes.txt", size: 12 },
+    },
+    {
+      name: "upload-with-checkout-and-mime",
+      json: {
+        kind: "upload",
+        projectId: "proj-1",
+        checkoutId: "chk-1",
+        requestId: "req-1",
+        fileName: "notes.txt",
+        mimeType: "text/plain",
+        size: 0,
+      },
+    },
   ].map((sample) => {
     // Fails loudly at generation time if a sample and the schema drift,
     // rather than shipping a fixture neither language can actually parse.
@@ -170,6 +202,18 @@ function buildStreamOpenVectors() {
     { name: "tunnel-http-missing-request", json: { kind: "tunnel-http", projectId: "proj-1" } },
     { name: "tunnel-ws-request-not-ws", json: { kind: "tunnel-ws", projectId: "proj-1", requestId: "req-1" } },
     { name: "tunnel-ws-overlong-id", json: { kind: "tunnel-ws", projectId: "proj-1", wsId: overlongId } },
+    { name: "upload-missing-size", json: { kind: "upload", projectId: "proj-1", requestId: "req-1", fileName: "a" } },
+    { name: "upload-negative-size", json: { kind: "upload", projectId: "proj-1", requestId: "req-1", fileName: "a", size: -1 } },
+    { name: "upload-fractional-size", json: { kind: "upload", projectId: "proj-1", requestId: "req-1", fileName: "a", size: 1.5 } },
+    { name: "upload-string-size", json: { kind: "upload", projectId: "proj-1", requestId: "req-1", fileName: "a", size: "12" } },
+    { name: "upload-empty-file-name", json: { kind: "upload", projectId: "proj-1", requestId: "req-1", fileName: "", size: 1 } },
+    {
+      name: "upload-overlong-file-name",
+      json: { kind: "upload", projectId: "proj-1", requestId: "req-1", fileName: "a".repeat(256), size: 1 },
+    },
+    { name: "upload-null-mime", json: { kind: "upload", projectId: "proj-1", requestId: "req-1", fileName: "a", size: 1, mimeType: null } },
+    { name: "upload-empty-checkout", json: { kind: "upload", projectId: "proj-1", checkoutId: "", requestId: "req-1", fileName: "a", size: 1 } },
+    { name: "upload-extra-field", json: { kind: "upload", projectId: "proj-1", requestId: "req-1", fileName: "a", size: 1, uploadId: "u" } },
   ].map((sample) => {
     if (StreamOpen.safeParse(sample.json).success) {
       throw new Error(`rejected open vector ${sample.name} parses`);
@@ -189,6 +233,25 @@ function buildStreamOpenVectors() {
     return sample;
   });
 
+  // One label row per stream kind, generated from the SAME `opens` samples
+  // above rather than hand-duplicated ids, so a changed sample id cannot drift
+  // silently from what the label vector claims for it.
+  const labelSampleByKind: Record<string, string> = {
+    session: "session",
+    project: "project",
+    terminal: "terminal",
+    "tunnel-http": "tunnel-http",
+    "tunnel-ws": "tunnel-ws",
+    upload: "upload",
+  };
+  const labels = Object.entries(labelSampleByKind).map(([kind, sampleName]) => {
+    const sample = opens.find((o) => o.name === sampleName);
+    if (!sample) throw new Error(`no open sample named ${sampleName} for label kind ${kind}`);
+    const open = StreamOpen.parse(sample.json);
+    const label = expectedLabel(open);
+    return { name: kind, open: sample.json, streamKind: label.kind, streamId: label.id };
+  });
+
   return {
     maxOpenBytes: STREAM_OPEN_MAX_BYTES,
     maxIdLength: STREAM_OPEN_MAX_ID_LENGTH,
@@ -198,6 +261,7 @@ function buildStreamOpenVectors() {
       maxTerminalAttachmentsPerPeer: STREAM_MAX_TERMINAL_ATTACHMENTS_PER_PEER,
       maxTunnelStreamsPerPeer: STREAM_MAX_TUNNEL_STREAMS_PER_PEER,
       maxPendingOpensPerPeer: STREAM_MAX_PENDING_OPENS_PER_PEER,
+      maxUploadStreamsPerPeer: STREAM_MAX_UPLOAD_STREAMS_PER_PEER,
     },
     projectRecords: {
       appMaxRecordBytes: STREAM_PROJECT_APP_RECORD_MAX_BYTES,
@@ -208,13 +272,16 @@ function buildStreamOpenVectors() {
       appMaxRecordBytes: STREAM_TERMINAL_APP_RECORD_MAX_BYTES,
       bridgeMaxRecordBytes: STREAM_TERMINAL_BRIDGE_RECORD_MAX_BYTES,
     },
+    uploadRecords: {
+      bridgeMaxRecordBytes: STREAM_UPLOAD_BRIDGE_RECORD_MAX_BYTES,
+      maxFileNameLength: STREAM_UPLOAD_MAX_FILE_NAME_LENGTH,
+      maxMimeTypeLength: STREAM_UPLOAD_MAX_MIME_TYPE_LENGTH,
+    },
     tunnelRecords: {
       maxDataBytes: STREAM_TUNNEL_DATA_MAX_BYTES,
       maxRecordBytes: STREAM_TUNNEL_RECORD_MAX_BYTES,
       requestBodyMaxBytes: STREAM_TUNNEL_REQUEST_BODY_MAX_BYTES,
       tags: {
-        body: TUNNEL_RECORD_TAG_BODY,
-        bodyGzip: TUNNEL_RECORD_TAG_BODY_GZIP,
         wsText: TUNNEL_RECORD_TAG_WS_TEXT,
         wsBinary: TUNNEL_RECORD_TAG_WS_BINARY,
       },
@@ -223,6 +290,7 @@ function buildStreamOpenVectors() {
     refusals,
     rejectedOpens,
     rejectedRefusals,
+    labels,
   };
 }
 

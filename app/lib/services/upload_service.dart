@@ -1,13 +1,10 @@
 import 'dart:async';
-import 'dart:convert';
-import 'dart:math' as math;
 import 'dart:typed_data';
 
+import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:uuid/uuid.dart';
 
-import '../models/ab_message.dart';
 import '../project/project_session.dart';
-import 'pending_reply.dart';
 
 /// Upload failure with a machine [code] (mirrors the bridge's
 /// file:upload-result error codes, plus app-side OFFLINE/TIMEOUT/CANCELLED).
@@ -20,11 +17,9 @@ class UploadException implements Exception {
   String toString() => 'UploadException($code): $message';
 }
 
-/// A one-shot cancel signal for [UploadService.upload]. Cancelling stops the
-/// chunk loop at its next check and races any in-flight ack wait (see
-/// `_raceCancel`), so the upload aborts within one round trip rather than
-/// waiting out the 30s step timeout — the bridge is left to sweep the
-/// abandoned uploadId itself, the same path an expired upload already takes.
+/// A one-shot cancel signal for [UploadService.upload]. Cancelling calls
+/// [UploadExchange.cancel] so the exchange resolves `CANCELLED` within one
+/// round trip rather than waiting out [kUploadResultTimeout].
 class UploadCancelToken {
   final Completer<void> _completer = Completer<void>();
 
@@ -88,81 +83,19 @@ class UploadResult {
   bool get isPreviewable => relPath != null && mimeType != null;
 }
 
-/// Chunked file upload to the bridge's project-local staging dir.
-///
-/// One ack per chunk, next chunk sent only after the ack: every wire message
-/// stays under the local transport's 1 MiB frame cap and the relay's frag
-/// threshold, and a slow mobile uplink can't trip the 10s frag-reassembly
-/// timeout that a single 20 MB message would hit.
+/// File upload to the bridge's project-local staging dir, over whatever
+/// [UploadExchange] `session.transport.openUpload` hands back (its own native
+/// QUIC stream, or the loopback socket's chunked exchange — see
+/// `upload_stream.dart`).
 class UploadService {
   static const int kMaxUploadBytes = 20 * 1024 * 1024;
-  static const int kChunkBytes = 512 * 1024;
-  static const Duration _kStepTimeout = Duration(seconds: 30);
 
   final ProjectSession session;
   final String checkoutId;
-  StreamSubscription<Map<String, dynamic>>? _statusSub;
-  final Map<String, PendingReply<Map<String, dynamic>>> _pending = {};
-  // uploadId → the requestId its done-waiter is keyed by. Lets a failure result
-  // that can only cite the uploadId (the bridge replies requestId:"" for a
-  // swept/expired upload) still wake the pending `done:` wait instead of hanging.
-  final Map<String, String> _requestIdByUpload = {};
   bool _disposed = false;
+  final Set<UploadExchange> _active = {};
 
-  UploadService.fromSession(this.session, {this.checkoutId = 'main'}) {
-    _statusSub = session.checkoutStatusStream(checkoutId).listen(_onStatusJson);
-  }
-
-  void _onStatusJson(Map<String, dynamic> j) {
-    switch (j['type']) {
-      case 'file:upload-ready':
-        _complete('start:${j['requestId']}', j);
-      case 'file:upload-ack':
-        _complete('ack:${j['uploadId']}:${j['seq']}', j);
-      case 'file:upload-result':
-        _complete('start:${j['requestId']}', j);
-        _complete('done:${j['requestId']}', j);
-        // A mid-transfer abort (BAD_SEQUENCE/TIMEOUT/...) arrives while the
-        // uploader is awaiting a chunk ack — fail that wait too.
-        final uploadId = j['uploadId'];
-        if (j['ok'] == false && uploadId is String) {
-          // The result may cite requestId:"" (dead upload) — recover the real
-          // requestId so a pending `done:` wait fails now instead of timing out.
-          final rid = _requestIdByUpload[uploadId];
-          if (rid != null) _complete('done:$rid', j);
-          final ackKeys = _pending.keys
-              .where((k) => k.startsWith('ack:$uploadId:'))
-              .toList();
-          for (final k in ackKeys) {
-            _complete(k, j);
-          }
-        }
-    }
-  }
-
-  void _complete(String key, Map<String, dynamic> j) {
-    _pending.remove(key)?.complete(j);
-  }
-
-  Future<Map<String, dynamic>> _await(String key) {
-    final pending = session.newPending<Map<String, dynamic>>(
-      timeout: _kStepTimeout,
-      onAbandon: () => _pending.remove(key),
-      timeoutError: () =>
-          const UploadException('TIMEOUT', 'No reply from the agent'),
-    );
-    _pending[key] = pending;
-    return pending.future;
-  }
-
-  void _throwIfError(Map<String, dynamic> j) {
-    if (j['ok'] == false || j['error'] != null) {
-      throw UploadException(
-        j['error'] as String? ?? 'UNKNOWN',
-        j['message'] as String? ?? 'Upload failed',
-      );
-    }
-  }
+  UploadService.fromSession(this.session, {this.checkoutId = 'main'});
 
   /// Uploads [bytes] and returns where the bridge staged it. Throws
   /// [UploadException] on any failure, including `CANCELLED` once
@@ -180,108 +113,77 @@ class UploadService {
     if (bytes.length > kMaxUploadBytes) {
       throw const UploadException('TOO_LARGE', 'File exceeds 20 MB limit');
     }
-
-    final requestId = const Uuid().v4();
-    final startReplyF = _await('start:$requestId');
-    await session.sendForCheckout(
-      checkoutId,
-      createAbMessage('file:upload-start', {
-        'projectId': session.projectId,
-        'requestId': requestId,
-        'fileName': fileName,
-        'size': bytes.length,
-        'mimeType': ?mimeType,
-      }),
-    );
-    final startReply = await _raceCancel(startReplyF, cancelToken);
-    _throwIfError(startReply);
-    final uploadId = startReply['uploadId'] as String;
-    _requestIdByUpload[uploadId] = requestId;
-    try {
-      return await _streamChunksAndFinish(
-        uploadId: uploadId,
-        requestId: requestId,
-        bytes: bytes,
-        onProgress: onProgress,
-        cancelToken: cancelToken,
-      );
-    } finally {
-      _requestIdByUpload.remove(uploadId);
-    }
-  }
-
-  /// Races a pending reply against [cancelToken] so a cancel lands within one
-  /// round trip instead of waiting out [_kStepTimeout]. The losing side is
-  /// left to resolve on its own — a late ack just completes an entry nothing
-  /// is awaiting any more, same as it does today for a reply that arrives
-  /// after this request already failed.
-  Future<Map<String, dynamic>> _raceCancel(
-    Future<Map<String, dynamic>> reply,
-    UploadCancelToken? cancelToken,
-  ) {
-    if (cancelToken == null) return reply;
-    return Future.any([
-      reply,
-      cancelToken.whenCancelled.then<Map<String, dynamic>>(
-        (_) => throw const UploadException('CANCELLED', 'Upload cancelled'),
-      ),
-    ]);
-  }
-
-  Future<UploadResult> _streamChunksAndFinish({
-    required String uploadId,
-    required String requestId,
-    required Uint8List bytes,
-    void Function(int sent, int total)? onProgress,
-    UploadCancelToken? cancelToken,
-  }) async {
-    var seq = 0;
-    for (var off = 0; off < bytes.length; off += kChunkBytes) {
-      if (cancelToken?.isCancelled ?? false) {
-        throw const UploadException('CANCELLED', 'Upload cancelled');
-      }
-      final end = math.min(off + kChunkBytes, bytes.length);
-      final ackF = _await('ack:$uploadId:$seq');
-      await session.sendForCheckout(
-        checkoutId,
-        createAbMessage('file:upload-chunk', {
-          'uploadId': uploadId,
-          'seq': seq,
-          'data': base64Encode(Uint8List.sublistView(bytes, off, end)),
-        }),
-      );
-      _throwIfError(await _raceCancel(ackF, cancelToken));
-      onProgress?.call(end, bytes.length);
-      seq++;
-    }
     if (cancelToken?.isCancelled ?? false) {
       throw const UploadException('CANCELLED', 'Upload cancelled');
     }
 
-    final resultF = _await('done:$requestId');
-    await session.sendForCheckout(
-      checkoutId,
-      createAbMessage('file:upload-done', {'uploadId': uploadId}),
+    final exchange = session.transport.openUpload(
+      requestId: const Uuid().v4(),
+      projectId: session.wireProjectId,
+      checkoutId: checkoutId,
+      fileName: fileName,
+      bytes: bytes,
+      mimeType: mimeType,
+      onProgress: onProgress,
     );
-    final result = await _raceCancel(resultF, cancelToken);
-    _throwIfError(result);
-    return UploadResult(
-      path: result['path'] as String,
-      relPath: result['relPath'] as String?,
-      mimeType: result['mimeType'] as String?,
-    );
+    _active.add(exchange);
+    final cancelSub = cancelToken?.whenCancelled.then((_) => exchange.cancel());
+    try {
+      final result = await exchange.result;
+      if (!result.ok) {
+        throw UploadException(
+          result.error ?? 'UNKNOWN',
+          result.message ?? 'Upload failed',
+        );
+      }
+      return UploadResult(
+        path: result.path!,
+        relPath: result.relPath,
+        mimeType: result.mimeType,
+      );
+    } on UploadFailure catch (failure) {
+      // dispose() ends live exchanges through cancel(), but the caller asked
+      // for no cancel: to it the session went away underneath the upload.
+      if (_disposed &&
+          failure.code == 'CANCELLED' &&
+          !(cancelToken?.isCancelled ?? false)) {
+        throw const UploadException('OFFLINE', 'Session closed');
+      }
+      throw _mapFailure(failure);
+    } finally {
+      _active.remove(exchange);
+      // Nothing left to cancel; drop the reference so it can't fire late.
+      unawaited(cancelSub ?? Future.value());
+    }
+  }
+
+  UploadException _mapFailure(UploadFailure failure) {
+    switch (failure.code) {
+      case 'CANCELLED':
+      case 'TIMEOUT':
+      case 'INVALID_NAME':
+        return UploadException(failure.code, failure.message ?? failure.code);
+      case 'REFUSED':
+        // A cap refusal is transient (retry once traffic drains); every other
+        // refusal reason (NOT_READY, NOT_ALLOWED, UPDATE_REQUIRED, INVALID)
+        // reads the same as "can't reach the agent right now" to the user.
+        return failure.refusedCode == StreamRefusedCode.capExceeded
+            ? const UploadException('BUSY', 'Too many uploads in progress')
+            : const UploadException('OFFLINE', 'Not connected to the agent');
+      case 'NOT_SUPPORTED':
+      case 'STREAM_OPEN_FAILED':
+      case 'TRANSPORT_CLOSED':
+        return const UploadException('OFFLINE', 'Not connected to the agent');
+      default:
+        return UploadException(failure.code, failure.message ?? failure.code);
+    }
   }
 
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
-    final pending = _pending.values.toList();
-    _pending.clear();
-    for (final p in pending) {
-      p.fail(const UploadException('OFFLINE', 'Session closed'));
+    for (final exchange in _active.toList()) {
+      exchange.cancel();
     }
-    _requestIdByUpload.clear();
-    await _statusSub?.cancel();
-    _statusSub = null;
   }
 }

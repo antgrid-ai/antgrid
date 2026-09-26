@@ -1,7 +1,10 @@
 import { expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   decodeStreamRefused,
   encodeStreamOpen,
+  StreamOpen as StreamOpenSchema,
   STREAM_OPEN_MAX_BYTES,
   type StreamOpen,
   type StreamRefusedCode,
@@ -10,6 +13,7 @@ import {
   PeerStreamAcceptor,
   readStreamOpen,
   refuseStream,
+  streamLabelOf,
   STREAM_OPEN_DEADLINE_MS,
   STREAM_RESET_OPEN_TIMEOUT,
   STREAM_STOP_REFUSED,
@@ -19,6 +23,7 @@ import {
   type StreamDiagnosticType,
   type StreamHandlers,
 } from "../src/peer/stream-dispatch";
+import { NETWATCH_SESSION_STREAM_LABEL } from "../src/netwatch";
 
 // --- fakes ----------------------------------------------------------------
 
@@ -62,7 +67,10 @@ function scriptedRecv(steps: number[][]) {
   };
 }
 
-function createFakeStream(recv: { readExact: (size: number) => Promise<number[]> }) {
+function createFakeStream(recv: {
+  readExact: (size: number) => Promise<number[]>;
+  read?: (sizeLimit: number) => Promise<number[]>;
+}) {
   const mutex = createFakeMutex();
   const writeAllCalls: number[][] = [];
   const setPriorityCalls: number[] = [];
@@ -78,6 +86,9 @@ function createFakeStream(recv: { readExact: (size: number) => Promise<number[]>
     },
     recv: {
       readExact: recv.readExact,
+      // Only the framed open handshake is exercised in this file — nothing
+      // here dispatches onto a handler that reads raw bytes off the stream.
+      read: recv.read ?? (async () => { throw new Error("read() not scripted for this fake"); }),
       stop: async (code: bigint) => { stopCalls.push(code); },
     },
   };
@@ -386,6 +397,60 @@ test("a stream whose peer is no longer authorized writes nothing and retires the
   await until(() => unauthorizedCalls.length > 0);
   expect(fake.writeAllCalls).toEqual([]);
   acceptor.stop();
+});
+
+test("streamLabelOf labels every kind, including the new upload stream by its requestId", () => {
+  expect(streamLabelOf({ kind: "session" })).toEqual({ kind: "session" });
+  expect(streamLabelOf({ kind: "project", projectId: "p1" })).toEqual({ kind: "project", id: "p1" });
+  expect(streamLabelOf({ kind: "terminal", projectId: "p1", requestId: "r1" })).toEqual({ kind: "terminal", id: "r1" });
+  expect(streamLabelOf({ kind: "tunnel-http", projectId: "p1", requestId: "r1" })).toEqual({ kind: "tunnel-http", id: "r1" });
+  expect(streamLabelOf({ kind: "tunnel-ws", projectId: "p1", wsId: "ws-1" })).toEqual({ kind: "tunnel-ws", id: "ws-1" });
+  expect(streamLabelOf({ kind: "upload", projectId: "p1", requestId: "r1", fileName: "a.bin", size: 1 }))
+    .toEqual({ kind: "upload", id: "r1" });
+});
+
+test("streamLabelOf matches every shared label vector the Dart client asserts too", () => {
+  const fixture = JSON.parse(
+    readFileSync(join(import.meta.dir, "../../evals/fixtures/peer-transport-vectors.json"), "utf8"),
+  ) as { streamOpen: { labels: Array<{ name: string; open: unknown; streamKind: string; streamId: string }> } };
+  const labels = fixture.streamOpen.labels;
+  expect(labels.map((l) => l.streamKind).sort()).toEqual(
+    ["project", "session", "terminal", "tunnel-http", "tunnel-ws", "upload"],
+  );
+  for (const row of labels) {
+    const label = streamLabelOf(StreamOpenSchema.parse(row.open));
+    expect({ name: row.name, kind: label.kind as string, id: label.id ?? NETWATCH_SESSION_STREAM_LABEL })
+      .toEqual({ name: row.name, kind: row.streamKind, id: row.streamId });
+  }
+});
+
+test("an upload open dispatches to the registered upload handler, and an unhandled one is refused NOT_ALLOWED", async () => {
+  {
+    const queue = connectionQueue();
+    let received: StreamOpen | undefined;
+    const handlers: StreamHandlers = { upload: (admission) => { received = admission.open; return undefined; } };
+    const { acceptor } = createAcceptor({ connection: queue.connection, established: () => true, handlers });
+    const open: StreamOpen = { kind: "upload", projectId: "p1", requestId: "r1", fileName: "a.bin", size: 3 };
+    const { prefix, body } = openFrameBytes(open);
+    const fake = createFakeStream(scriptedRecv([prefix, body]));
+    acceptor.start();
+    queue.push(fake.stream);
+    await until(() => received !== undefined);
+    expect(received).toEqual(open);
+    expect(fake.writeAllCalls).toEqual([]);
+    acceptor.stop();
+  }
+  {
+    const queue = connectionQueue();
+    const { acceptor } = createAcceptor({ connection: queue.connection, established: () => true, handlers: {} });
+    const { prefix, body } = openFrameBytes({ kind: "upload", projectId: "p1", requestId: "r1", fileName: "a.bin", size: 3 });
+    const fake = createFakeStream(scriptedRecv([prefix, body]));
+    acceptor.start();
+    queue.push(fake.stream);
+    await until(() => fake.writeAllCalls.length > 0);
+    expect(fake.writtenRefusal()?.code).toBe("NOT_ALLOWED");
+    acceptor.stop();
+  }
 });
 
 test("a refusal stops the receive half without awaiting it", async () => {

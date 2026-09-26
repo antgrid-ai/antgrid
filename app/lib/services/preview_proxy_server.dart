@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:shelf/shelf.dart' as shelf;
 import 'package:shelf/shelf_io.dart' as shelf_io;
 import 'package:shelf_web_socket/shelf_web_socket.dart';
@@ -148,17 +149,44 @@ class PreviewProxyServer {
     return headers;
   }
 
+  static shelf.Response _tooLargeToTunnel() =>
+      shelf.Response(413, body: 'Preview request too large to tunnel');
+
   Future<shelf.Response> _handleHttpRequest(shelf.Request request) async {
     final requestId = const Uuid().v4();
 
-    // Read request body if present, as raw bytes — the tunnel stream carries
-    // it untouched (no charset guess). Any method may carry one (DELETE with
-    // a payload is legal and some dev APIs use it) — only GET/HEAD are
-    // defined as bodyless.
-    Uint8List? body;
+    // Any method may carry a body (DELETE with a payload is legal and some
+    // dev APIs use it) — only GET/HEAD are defined as bodyless. A declared
+    // Content-Length lets the request stream straight through with an
+    // up-front cap check; a chunked body (no declared length) has to be
+    // buffered to find out its size before that check can be made.
+    var bodyLength = 0;
+    Stream<List<int>>? body;
     if (request.method != 'GET' && request.method != 'HEAD') {
-      final bytes = await request.read().expand((chunk) => chunk).toList();
-      if (bytes.isNotEmpty) body = Uint8List.fromList(bytes);
+      final declared = request.contentLength;
+      if (declared != null) {
+        if (declared > kStreamTunnelRequestBodyMaxBytes) {
+          return _tooLargeToTunnel();
+        }
+        if (declared > 0) {
+          bodyLength = declared;
+          body = request.read();
+        }
+      } else {
+        // A growable List<int> costs a machine word per byte, which at the
+        // cap is eight times the body itself.
+        final buffered = BytesBuilder(copy: false);
+        await for (final chunk in request.read()) {
+          buffered.add(chunk);
+          if (buffered.length > kStreamTunnelRequestBodyMaxBytes) {
+            return _tooLargeToTunnel();
+          }
+        }
+        if (buffered.isNotEmpty) {
+          bodyLength = buffered.length;
+          body = Stream.value(buffered.takeBytes());
+        }
+      }
     }
 
     // Flatten headers (take first value for each key)
@@ -184,6 +212,7 @@ class PreviewProxyServer {
       method: request.method,
       path: '/${request.url}',
       headers: headers,
+      bodyLength: bodyLength,
       body: body,
     );
 

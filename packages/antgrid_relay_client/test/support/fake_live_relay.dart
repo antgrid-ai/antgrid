@@ -47,6 +47,7 @@ class FakeLiveRelay implements PeerLink, MultiStreamPeerLink {
     StreamOpen open, {
     required int maxRecordBytes,
     required int maxQueuedBytes,
+    int? rawAfterRecords,
   }) async {
     final err = openStreamError;
     if (err != null) {
@@ -57,6 +58,7 @@ class FakeLiveRelay implements PeerLink, MultiStreamPeerLink {
       open,
       maxRecordBytes: maxRecordBytes,
       maxQueuedBytes: maxQueuedBytes,
+      rawAfterRecords: rawAfterRecords,
     );
     openedStreams.add(stream);
     return stream;
@@ -164,7 +166,12 @@ class FakeHandshaker implements SessionHandshaker {
 /// it ([injectJson]/[injectRecord]), and reads back what the app wrote in
 /// [sent].
 class FakePeerStream implements PeerStream {
-  FakePeerStream(this.open, {required this.maxRecordBytes, required this.maxQueuedBytes});
+  FakePeerStream(
+    this.open, {
+    required this.maxRecordBytes,
+    required this.maxQueuedBytes,
+    this.rawAfterRecords,
+  });
 
   /// The open frame [MachineSession] sent to create this stream.
   final StreamOpen open;
@@ -173,11 +180,27 @@ class FakePeerStream implements PeerStream {
   final int maxRecordBytes;
   final int maxQueuedBytes;
 
+  /// The raw-phase threshold this stream was opened with, if any — a test
+  /// asserts against this rather than re-deriving it, since [PeerStream]
+  /// itself has no getter for it.
+  final int? rawAfterRecords;
+
   final _records = StreamController<Uint8List>.broadcast();
   final sent = <Uint8List>[];
+  final sentRaw = <Uint8List>[];
   bool resetCalled = false;
   bool finishCalled = false;
   bool _ended = false;
+
+  /// When set, the NEXT [sendRaw] call awaits this before completing (and
+  /// clears itself) — holds one raw write in flight, mirroring [FakeLiveRelay
+  /// .sendGate] for the session stream.
+  Completer<void>? sendRawGate;
+
+  /// Outcome the NEXT [sendRaw] call settles with once its gate (if any)
+  /// releases. Defaults to `accepted`; a test sets it to model backpressure
+  /// or a closed stream without needing a real queue-overflow condition.
+  PeerSendOutcome sendRawOutcome = PeerSendOutcome.accepted;
 
   @override
   Stream<Uint8List> get records => _records.stream;
@@ -187,6 +210,18 @@ class FakePeerStream implements PeerStream {
     if (_ended) return PeerSendOutcome.closed;
     sent.add(record);
     return PeerSendOutcome.accepted;
+  }
+
+  @override
+  Future<PeerSendOutcome> sendRaw(Uint8List bytes) async {
+    if (_ended) return PeerSendOutcome.closed;
+    final gate = sendRawGate;
+    if (gate != null) {
+      sendRawGate = null;
+      await gate.future;
+    }
+    sentRaw.add(bytes);
+    return sendRawOutcome;
   }
 
   // Real semantics: our own reset()/finish() ends only OUR send half. The
@@ -219,6 +254,21 @@ class FakePeerStream implements PeerStream {
 
   void injectRecord(Uint8List record) {
     if (!_ended && !_records.isClosed) _records.add(record);
+  }
+
+  /// Injects one raw-phase chunk — only meaningful once the stream has
+  /// passed [rawAfterRecords] decoded records, same as the real
+  /// [NativePeerStream].
+  void injectRaw(Uint8List bytes) => injectRecord(bytes);
+
+  /// Injects a raw-phase reset: the peer reset its send half before FIN, so
+  /// this side sees one [PeerStreamReset] and then the stream ends —
+  /// mirroring [NativePeerStream]'s raw read loop, never a plain [end].
+  void injectReset() {
+    if (_ended || _records.isClosed) return;
+    _ended = true;
+    _records.addError(const PeerStreamReset());
+    unawaited(_records.close());
   }
 
   /// Ends the bridge's send half, as a clean close or right after a refusal.

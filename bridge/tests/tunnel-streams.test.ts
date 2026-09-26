@@ -13,12 +13,13 @@ import {
   STREAM_STOP_TUNNEL,
   type TunnelStreamRegistryOptions,
 } from "../src/peer/tunnel-streams";
+import { STREAM_RAW_READ_BYTES } from "../src/peer/stream-records";
 import {
   encodeTunnelDataRecord,
   STREAM_MAX_TUNNEL_STREAMS_PER_PEER,
   STREAM_TUNNEL_DATA_MAX_BYTES,
   STREAM_TUNNEL_REQUEST_BODY_MAX_BYTES,
-  TUNNEL_RECORD_TAG_BODY,
+  TUNNEL_RECORD_TAG_WS_BINARY,
   type TunnelHttpStreamOpen,
   type TunnelWsStreamOpen,
 } from "antgrid-wire";
@@ -33,6 +34,7 @@ import type {
   TunnelWsUpstreamSink,
 } from "../src/tunnel-manager";
 import type { TunnelHttpRequest, TunnelWsOpen } from "../src/tunnel-protocol";
+import type { TunnelRequestBody } from "../src/localhost-fetch";
 
 /** Serializes calls exactly like the real binding's `Arc<Mutex<..>>`, mirroring
  *  stream-records.test.ts's FakeMutex: a call queued behind another does not
@@ -66,6 +68,7 @@ function createFakeStream() {
   const resetCalls: bigint[] = [];
   const stopCalls: bigint[] = [];
   const readCalls: number[] = [];
+  const readRawCalls: number[] = [];
   const order: string[] = [];
   let finishCalls = 0;
   let pendingGate: Promise<void> | null = null;
@@ -103,12 +106,22 @@ function createFakeStream() {
         pump();
       }));
     },
+    // The raw (unframed) path `StreamRawReader` uses for tunnel HTTP bodies:
+    // same wire, same queue as `readExact` — a body's bytes are
+    // simply queued without a length prefix via `pushRaw` below.
+    read: (sizeLimit: number) => {
+      readRawCalls.push(sizeLimit);
+      return recvMutex.run(() => new Promise<number[]>((resolve, reject) => {
+        waiters.push({ resolve, reject });
+        pump();
+      }));
+    },
     stop: (code: bigint) => recvMutex.run(async () => { stopCalls.push(code); }),
   };
 
   return {
     stream: { send, recv },
-    writeAllCalls, setPriorityCalls, resetCalls, stopCalls, readCalls, order,
+    writeAllCalls, setPriorityCalls, resetCalls, stopCalls, readCalls, readRawCalls, order,
     finishCalls: () => finishCalls,
     pushRecord(record: Uint8Array): void {
       for (const chunk of lengthPrefixed(record)) recvQueue.push(chunk);
@@ -116,6 +129,12 @@ function createFakeStream() {
     },
     pushJson(value: unknown): void {
       this.pushRecord(new TextEncoder().encode(JSON.stringify(value)));
+    },
+    /** Queues raw body bytes for a `read(sizeLimit)` consumer — no length
+     *  prefix, since the wire carries none for a raw stream. */
+    pushRaw(bytes: Uint8Array): void {
+      recvQueue.push(Array.from(bytes));
+      pump();
     },
     endWith(error: unknown = new Error("peer ended")): void {
       endError = error;
@@ -150,8 +169,25 @@ function refusalRecord(fake: ReturnType<typeof createFakeStream>): { code: strin
 
 /** Fake `TunnelManager`: records every `serveHttp`/`serveWs` call instead of
  *  actually fetching anything. */
+/** Drains a `TunnelRequestBody`'s stream to completion, the way a real fetch
+ *  call would — a raw body is pull-based, so nothing reads off the wire until
+ *  something calls this (or the manager under test does its own draining). */
+async function readBody(body: TunnelRequestBody | null): Promise<Uint8Array> {
+  if (!body) return new Uint8Array(0);
+  const stream = body.stream();
+  if (!stream) return new Uint8Array(0);
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+  }
+  return new Uint8Array(Buffer.concat(chunks.map((c) => Buffer.from(c))));
+}
+
 function fakeManager() {
-  const httpCalls: Array<{ req: TunnelHttpRequest; body: Uint8Array; exchange: TunnelHttpExchange }> = [];
+  const httpCalls: Array<{ req: TunnelHttpRequest; body: TunnelRequestBody | null; exchange: TunnelHttpExchange }> = [];
   const wsCalls: Array<{ open: TunnelWsOpen; peer: TunnelWsPeer; sink: TunnelWsUpstreamSink }> = [];
   let nextSink: TunnelWsUpstreamSink | undefined;
   const manager: Pick<TunnelManager, "serveHttp" | "serveWs"> = {
@@ -437,7 +473,9 @@ describe("TunnelStreamRegistry (A3)", () => {
     cataloged.add(PROJECT);
     bindings.set(PROJECT, fakeBinding().binding);
     const { fake, requestId } = admitHttp(registry, {});
-    fake.pushRecord(encodeTunnelDataRecord(TUNNEL_RECORD_TAG_BODY, new Uint8Array([1, 2, 3])));
+    // Any non-JSON record is wrong here — the exact tag doesn't matter, only
+    // that the head slot demands a JSON control record.
+    fake.pushRecord(encodeTunnelDataRecord(TUNNEL_RECORD_TAG_WS_BINARY, new Uint8Array([1, 2, 3])));
     void requestId;
     await flush();
     expect(refusalRecord(fake)).toMatchObject({ code: "INVALID" });
@@ -517,18 +555,28 @@ describe("TunnelStreamRegistry (A3)", () => {
     expect(fb.server.httpCalls).toEqual([]);
   });
 
-  test("an admitted HTTP stream sets STREAM_PRIORITY_TUNNEL once, before its first write, and calls manager.serveHttp with the reassembled body", async () => {
+  test("an admitted HTTP stream sets STREAM_PRIORITY_TUNNEL once, before its first write, and hands manager.serveHttp a raw request body", async () => {
     const { registry, cataloged, bindings } = makeRegistry();
     cataloged.add(PROJECT);
     const fb = fakeBinding();
     bindings.set(PROJECT, fb.binding);
     const { fake, requestId } = admitHttp(registry, {});
     fake.pushJson(httpRequest(requestId, { bodyLength: 5 }));
-    fake.pushRecord(encodeTunnelDataRecord(TUNNEL_RECORD_TAG_BODY, new TextEncoder().encode("hello")));
     await flush();
 
+    // serveHttp is called as soon as the head parses — the body is a
+    // pull-based stream, so nothing has been read off the wire yet.
     expect(fb.server.httpCalls).toHaveLength(1);
-    expect(new TextDecoder().decode(fb.server.httpCalls[0]!.body)).toBe("hello");
+    const { body } = fb.server.httpCalls[0]!;
+    expect(body).not.toBeNull();
+    expect(body!.length).toBe(5);
+    expect(fake.readRawCalls).toEqual([]);
+
+    const drained = readBody(body);
+    await flush();
+    expect(fake.readRawCalls).not.toEqual([]); // the manager's own read started the pull
+    fake.pushRaw(new TextEncoder().encode("hello"));
+    expect(new TextDecoder().decode(await drained)).toBe("hello");
 
     // Priority is set lazily, on the writer's first actual use.
     expect(fake.setPriorityCalls).toEqual([]);
@@ -571,7 +619,7 @@ describe("TunnelStreamRegistry (A3)", () => {
     expect(fake.order.indexOf("setPriority")).toBeLessThan(fake.order.indexOf("writeAll"));
   });
 
-  test("a FIN or reset before the declared body fully arrives abandons the request without ever calling serveHttp", async () => {
+  test("a FIN or reset before the declared body fully arrives errors the body stream and resets the tunnel stream", async () => {
     const { registry, cataloged, bindings } = makeRegistry();
     cataloged.add(PROJECT);
     const fb = fakeBinding();
@@ -579,10 +627,154 @@ describe("TunnelStreamRegistry (A3)", () => {
     const { fake, requestId } = admitHttp(registry, {});
     fake.pushJson(httpRequest(requestId, { bodyLength: 10 }));
     await flush();
+    // The body is pull-based (highWaterMark 0): serveHttp is called right
+    // away, but nothing is read off the wire until the manager drains it.
+    expect(fb.server.httpCalls).toHaveLength(1);
+    const { body, exchange } = fb.server.httpCalls[0]!;
+
+    const drained = readBody(body);
+    await flush();
     fake.endWith(); // the app hangs up mid-body
+    await expect(drained).rejects.toThrow();
     await flush();
 
-    expect(fb.server.httpCalls).toEqual([]);
+    expect(exchange.signal.aborted).toBe(true);
+    expect(fake.resetCalls).toEqual([STREAM_RESET_TUNNEL]);
+    expect(registry.streamCount(PEER)).toBe(0);
+  });
+
+  test("a request body arriving across several raw reads is reassembled byte-exact, even split at odd boundaries", async () => {
+    const { registry, cataloged, bindings } = makeRegistry();
+    cataloged.add(PROJECT);
+    const fb = fakeBinding();
+    bindings.set(PROJECT, fb.binding);
+    const { fake, requestId } = admitHttp(registry, {});
+    const payload = new TextEncoder().encode("the quick brown fox");
+    fake.pushJson(httpRequest(requestId, { bodyLength: payload.byteLength }));
+    await flush();
+    const { body } = fb.server.httpCalls[0]!;
+
+    const drained = readBody(body);
+    await flush();
+    // Three uneven pieces, not aligned to any word or record boundary —
+    // flushed between each so every one lands on its own pending raw read.
+    fake.pushRaw(payload.subarray(0, 3));
+    await flush();
+    fake.pushRaw(payload.subarray(3, 4));
+    await flush();
+    fake.pushRaw(payload.subarray(4));
+    expect(await drained).toEqual(payload);
+  });
+
+  test("a response ends with a clean FIN and no end-of-body record: writer.finish() is the only 'done' signal", async () => {
+    const { registry, cataloged, bindings } = makeRegistry();
+    cataloged.add(PROJECT);
+    const fb = fakeBinding();
+    bindings.set(PROJECT, fb.binding);
+    const { fake, requestId } = admitHttp(registry, {});
+    fake.pushJson(httpRequest(requestId));
+    await flush();
+    const exchange = fb.server.httpCalls[0]!.exchange;
+
+    await exchange.head({ status: 200, headers: {} });
+    // Head is the one length-prefixed record on this exchange; the body rides
+    // raw (`sendRaw`), so `decodedRecords` (which assumes every write is a
+    // record) must not be asked to parse it.
+    const writesBeforeBody = fake.writeAllCalls.length;
+    await exchange.body(new TextEncoder().encode("hi"));
+    expect(fake.writeAllCalls.length).toBe(writesBeforeBody + 1);
+    expect(fake.finishCalls()).toBe(0);
+    await exchange.end();
+
+    // `finish()` alone is the "done" signal — no end-of-body record.
+    expect(fake.finishCalls()).toBe(1);
+    expect(fake.writeAllCalls.length).toBe(writesBeforeBody + 1);
+  });
+
+  test("more bytes than the declared body length is a stream breach: the upstream body errors and the stream resets", async () => {
+    const { registry, cataloged, bindings } = makeRegistry();
+    cataloged.add(PROJECT);
+    const fb = fakeBinding();
+    bindings.set(PROJECT, fb.binding);
+    const { fake, requestId } = admitHttp(registry, {});
+    fake.pushJson(httpRequest(requestId, { bodyLength: 3 }));
+    await flush();
+    const { body, exchange } = fb.server.httpCalls[0]!;
+
+    const drained = readBody(body);
+    await flush();
+    fake.pushRaw(new TextEncoder().encode("hel")); // exactly the declared length
+    expect(await drained).toEqual(new TextEncoder().encode("hel"));
+    await flush(); // the body drains, handing the wire to the cancel watcher
+
+    // More bytes than declared arrive next — a stream breach the cancel
+    // watcher catches (§3), not the already-closed body.
+    fake.pushRaw(new TextEncoder().encode("lo"));
+    await flush();
+
+    expect(exchange.signal.aborted).toBe(true);
+    expect(fake.resetCalls).toEqual([STREAM_RESET_TUNNEL]);
+    expect(registry.streamCount(PEER)).toBe(0);
+  });
+
+  test("a request body that stalls short of its declared length times out, erroring the body and resetting the stream", async () => {
+    const ctl = makeControllableSchedule();
+    const { registry, cataloged, bindings } = makeRegistry({ schedule: ctl.schedule, requestBodyIdleMs: 5_000 });
+    cataloged.add(PROJECT);
+    const fb = fakeBinding();
+    bindings.set(PROJECT, fb.binding);
+    const { fake, requestId } = admitHttp(registry, {});
+    fake.pushJson(httpRequest(requestId, { bodyLength: 10 }));
+    await flush();
+    const { body, exchange } = fb.server.httpCalls[0]!;
+
+    const drained = readBody(body);
+    await flush();
+    fake.pushRaw(new TextEncoder().encode("abc")); // short of the declared 10
+    await flush();
+    ctl.fireAll(); // the idle clock fires before any more bytes arrive
+
+    await expect(drained).rejects.toThrow();
+    await flush();
+    expect(exchange.signal.aborted).toBe(true);
+    expect(fake.resetCalls).toEqual([STREAM_RESET_TUNNEL]);
+  });
+
+  test("the app's FIN after end() is its own orderly close and is ignored, not treated as a cancel", async () => {
+    const { registry, cataloged, bindings } = makeRegistry();
+    cataloged.add(PROJECT);
+    const fb = fakeBinding();
+    bindings.set(PROJECT, fb.binding);
+    const { fake, requestId } = admitHttp(registry, {});
+    fake.pushJson(httpRequest(requestId));
+    await flush();
+    const exchange = fb.server.httpCalls[0]!.exchange;
+
+    await exchange.head({ status: 200, headers: {} });
+    await exchange.end();
+    fake.endWith(); // the app's own FIN, arriving after our end()
+    await flush();
+
+    expect(exchange.signal.aborted).toBe(false);
+    expect(fake.resetCalls).toEqual([]);
+  });
+
+  test("the app cancelling while a response is already in flight aborts the exchange and resets the stream", async () => {
+    const { registry, cataloged, bindings } = makeRegistry();
+    cataloged.add(PROJECT);
+    const fb = fakeBinding();
+    bindings.set(PROJECT, fb.binding);
+    const { fake, requestId } = admitHttp(registry, {});
+    fake.pushJson(httpRequest(requestId));
+    await flush();
+    const exchange = fb.server.httpCalls[0]!.exchange;
+
+    await exchange.head({ status: 200, headers: {} });
+    await exchange.body(new TextEncoder().encode("partial"));
+    fake.endWith(); // the app hangs up before end() — a cancel, not its own FIN
+    await flush();
+
+    expect(exchange.signal.aborted).toBe(true);
     expect(fake.resetCalls).toEqual([STREAM_RESET_TUNNEL]);
     expect(registry.streamCount(PEER)).toBe(0);
   });
@@ -618,7 +810,9 @@ describe("TunnelStreamRegistry (A3)", () => {
     expect(fb.server.httpCalls).toHaveLength(1);
     const exchange = fb.server.httpCalls[0]!.exchange;
 
-    fake.pushRecord(encodeTunnelDataRecord(TUNNEL_RECORD_TAG_BODY, new Uint8Array([1])));
+    // The watcher reads raw bytes (§3), so any stray byte is a breach — not
+    // a specific record shape.
+    fake.pushRaw(new Uint8Array([1]));
     await flush();
 
     expect(exchange.signal.aborted).toBe(true);
@@ -853,6 +1047,93 @@ describe("TunnelStreamRegistry (A3)", () => {
     // that must not satisfy PEER's own admission (A4's single per-peer point).
     const other = admitHttp(registry, { peerId: "other-peer" });
     expect(other.result).toBeUndefined();
+  });
+
+  test("a request-body raw read never asks for more than the declared bytes still owed", async () => {
+    const { registry, cataloged, bindings } = makeRegistry();
+    cataloged.add(PROJECT);
+    const fb = fakeBinding();
+    bindings.set(PROJECT, fb.binding);
+    const { fake, requestId } = admitHttp(registry, {});
+    const declared = STREAM_RAW_READ_BYTES + 7;
+    fake.pushJson(httpRequest(requestId, { bodyLength: declared }));
+    await flush();
+    const drained = readBody(fb.server.httpCalls[0]!.body);
+    await flush();
+    fake.pushRaw(new Uint8Array(STREAM_RAW_READ_BYTES));
+    await flush();
+    fake.pushRaw(new Uint8Array(7));
+    expect((await drained).byteLength).toBe(declared);
+
+    // The second read is sized to the 7 bytes left, never a full raw read
+    // that could swallow whatever the app sends after its body.
+    expect(fake.readRawCalls.slice(0, 2)).toEqual([STREAM_RAW_READ_BYTES, 7]);
+  });
+
+  test("authorized() turning false after a raw request-body read retires the peer and errors the body", async () => {
+    const { registry, cataloged, bindings, retiredPeers } = makeRegistry();
+    cataloged.add(PROJECT);
+    const fb = fakeBinding();
+    bindings.set(PROJECT, fb.binding);
+    let authorized = true;
+    const { fake, requestId } = admitHttp(registry, { authorized: () => authorized });
+    fake.pushJson(httpRequest(requestId, { bodyLength: 10 }));
+    await flush();
+    const drained = readBody(fb.server.httpCalls[0]!.body);
+    await flush();
+
+    authorized = false;
+    fake.pushRaw(new TextEncoder().encode("abc"));
+
+    await expect(drained).rejects.toThrow();
+    expect(retiredPeers).toEqual([{ peerId: PEER, reason: "unauthorized" }]);
+  });
+
+  test("a second body stream (the scheme retry) replays what the first pulled, then continues from the wire", async () => {
+    const { registry, cataloged, bindings } = makeRegistry();
+    cataloged.add(PROJECT);
+    const fb = fakeBinding();
+    bindings.set(PROJECT, fb.binding);
+    const { fake, requestId } = admitHttp(registry, {});
+    fake.pushJson(httpRequest(requestId, { bodyLength: 6 }));
+    await flush();
+    const body = fb.server.httpCalls[0]!.body!;
+
+    const first = body.stream()!.getReader();
+    const firstRead = first.read();
+    fake.pushRaw(new TextEncoder().encode("abc"));
+    expect(new TextDecoder().decode((await firstRead).value)).toBe("abc");
+    void first.cancel();
+
+    const retry = readBody(body);
+    await flush();
+    fake.pushRaw(new TextEncoder().encode("def"));
+    expect(new TextDecoder().decode(await retry)).toBe("abcdef");
+  });
+
+  test("a retry started while the first attempt's read is still outstanding gets that read's bytes, in order", async () => {
+    const { registry, cataloged, bindings } = makeRegistry();
+    cataloged.add(PROJECT);
+    const fb = fakeBinding();
+    bindings.set(PROJECT, fb.binding);
+    const { fake, requestId } = admitHttp(registry, {});
+    fake.pushJson(httpRequest(requestId, { bodyLength: 6 }));
+    await flush();
+    const body = fb.server.httpCalls[0]!.body!;
+
+    // The first attempt's fetch pulls once and fails before the app's bytes
+    // arrive, leaving that raw read outstanding on the stream.
+    const first = body.stream()!.getReader();
+    void first.read().catch(() => {});
+    await flush();
+    void first.cancel().catch(() => {});
+
+    const retry = readBody(body);
+    await flush();
+    fake.pushRaw(new TextEncoder().encode("abc"));
+    await flush();
+    fake.pushRaw(new TextEncoder().encode("def"));
+    expect(new TextDecoder().decode(await retry)).toBe("abcdef");
   });
 
   test("closing the project stream does not unbind an open tunnel stream", async () => {

@@ -16,6 +16,8 @@ import 'package:antgrid/storage/cached_sessions_store.dart';
 import 'package:antgrid/test_helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/clipboard_image.dart';
 import 'package:antgrid/widgets/terminal_view_wrapper.dart';
+import 'package:antgrid_relay_client/antgrid_relay_client.dart'
+    show UploadStreamResult;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -401,26 +403,19 @@ void main() {
         LogicalKeyboardKey.controlLeft,
       ], LogicalKeyboardKey.keyV);
 
-      final start = transport.sent.firstWhere(
-        (m) => m['type'] == 'file:upload-start',
-      );
-      expect(start['fileName'], 'pasted.png');
-      expect(start['size'], 3);
-      final requestId = start['requestId'] as String;
+      final upload = transport.uploadCalls.single;
+      expect(upload.fileName, 'pasted.png');
+      expect(upload.bytes, hasLength(3));
 
-      transport.emit('file:upload-ready', {
-        'requestId': requestId,
-        'uploadId': 'u1',
-      });
+      upload.progress(3, 3);
       await tester.pump();
-      transport.emit('file:upload-ack', {'uploadId': 'u1', 'seq': 0});
-      await tester.pump();
-      transport.emit('file:upload-result', {
-        'requestId': requestId,
-        'uploadId': 'u1',
-        'ok': true,
-        'path': r'C:\proj\.antgrid\uploads\u1-pasted.png',
-      });
+      upload.complete(
+        const UploadStreamResult(
+          ok: true,
+          uploadId: 'u1',
+          path: r'C:\proj\.antgrid\uploads\u1-pasted.png',
+        ),
+      );
       await tester.pump();
 
       final input = transport.sent.firstWhere(
@@ -477,10 +472,7 @@ void main() {
 
       expect(probed, isFalse);
       expect(String.fromCharCodes(written), 'hi');
-      expect(
-        transport.sent.where((m) => m['type'] == 'file:upload-start'),
-        isEmpty,
-      );
+      expect(transport.uploadCalls, isEmpty);
     },
   );
 

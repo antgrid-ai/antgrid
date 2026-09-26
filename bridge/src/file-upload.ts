@@ -18,6 +18,49 @@ const STALE_MS = 24 * 60 * 60 * 1000;
 const SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 const MAX_NAME_LENGTH = 128;
 
+export type UploadErrorCode = "TOO_LARGE" | "INVALID_NAME" | "WRITE_FAILED" | "UPLOAD_NOT_FOUND"
+  | "BAD_SEQUENCE" | "SIZE_MISMATCH" | "TIMEOUT" | "BUSY" | "INCOMPLETE";
+
+export interface UploadResultFields {
+  uploadId?: string;
+  ok: boolean;
+  path?: string;
+  relPath?: string;
+  mimeType?: string;
+  error?: UploadErrorCode;
+  message?: string;
+}
+
+export type StreamUploadWrite = "ok" | "oversize" | "failed";
+
+/** One file's write side over the `upload` stream — `peer/upload-streams.ts`
+ *  is the only caller. */
+export interface StreamUpload {
+  readonly uploadId: string;
+  /** `"oversize"`: the partial is already removed and no result is reported
+   *  — the caller resets the stream itself, since a written result would race
+   *  the bytes still arriving on it.
+   *  `"failed"`: a `WRITE_FAILED` result has already gone through `onResult`,
+   *  partial removed. Touches the inactivity timer on `"ok"`. */
+  write(bytes: Uint8Array): StreamUploadWrite;
+  /** The app FIN'd: reports `ok`, `INCOMPLETE` or `WRITE_FAILED` through
+   *  `onResult`, exactly once. */
+  end(): void;
+  /** Partial removed, `onResult` never called. Idempotent; a no-op once a
+   *  result was already reported. */
+  cancel(): void;
+}
+
+export type UploadAdmission =
+  | { ok: false; refusal: { code: "UPDATE_REQUIRED" | "NOT_ALLOWED"; message: string } }
+  | { ok: true; manager: FileUploadManager };
+
+/** What a project's core exposes to the upload registry; `AgentCore`
+ *  implements it (`agent-core.ts`). Never rejects. */
+export interface UploadStreamServer {
+  admit(peerId: string, checkoutId: string): Promise<UploadAdmission>;
+}
+
 // The phone never chooses the destination path: only a filename crosses the
 // wire, and everything the sanitizer can't vouch for is collapsed. Traversal
 // (`../`), absolute paths, and drive letters all reduce to their basename.
@@ -44,6 +87,10 @@ type UploadSession = {
   // to move or delete a file with a live handle).
   fd: number;
   timer: ReturnType<typeof setTimeout>;
+  /** Set only for an upload begun through `begin()` (the `upload` stream).
+   *  Its presence is what routes a result there instead of onto the socket
+   *  via `opts.send`. */
+  onResult?: (result: UploadResultFields) => void;
 };
 
 export class FileUploadManager {
@@ -70,11 +117,16 @@ export class FileUploadManager {
     if (!existsSync(gi)) writeFileSync(gi, "*\n");
   }
 
-  private sendResult(requestId: string, fields: {
-    uploadId?: string; ok: boolean; path?: string; relPath?: string;
-    mimeType?: string; error?: string; message?: string;
-  }): void {
+  private sendResult(requestId: string, fields: UploadResultFields): void {
     this.opts.send(createMessage("file:upload-result", { requestId, ...fields }));
+  }
+
+  /** Routes a result to whichever side started the upload: the `upload`
+   *  stream's callback, or (absent one) the socket message the app is still
+   *  waiting on. */
+  private deliverResult(u: UploadSession, fields: UploadResultFields): void {
+    if (u.onResult) u.onResult(fields);
+    else this.sendResult(u.requestId, fields);
   }
 
   private closeFd(u: UploadSession): void {
@@ -85,12 +137,12 @@ export class FileUploadManager {
     }
   }
 
-  private abort(u: UploadSession, error: string, message: string): void {
+  private abort(u: UploadSession, error: UploadErrorCode, message: string): void {
     clearTimeout(u.timer);
     this.uploads.delete(u.uploadId);
     this.closeFd(u);
     rmSync(u.partPath, { force: true });
-    this.sendResult(u.requestId, { uploadId: u.uploadId, ok: false, error, message });
+    this.deliverResult(u, { uploadId: u.uploadId, ok: false, error, message });
   }
 
   private touch(u: UploadSession): void {
@@ -99,6 +151,111 @@ export class FileUploadManager {
       log.warn("Upload %s timed out after %dms of inactivity", u.uploadId, INACTIVITY_MS);
       this.abort(u, "TIMEOUT", "Upload timed out");
     }, INACTIVITY_MS);
+  }
+
+  /** Admits one file onto the `upload` stream, sharing the same concurrency
+   *  cap, size limit, sanitizer, staging dir and inactivity timer as the
+   *  socket path (`handleStart`/`handleChunk`/`handleDone`) — a stream upload
+   *  and a loopback upload both count against `MAX_CONCURRENT_UPLOADS`. */
+  begin(
+    start: { requestId: string; fileName: string; size: number },
+    onResult: (result: UploadResultFields) => void,
+  ): { ok: true; upload: StreamUpload } | { ok: false; result: UploadResultFields } {
+    if (this.uploads.size >= MAX_CONCURRENT_UPLOADS) {
+      return { ok: false, result: { ok: false, error: "BUSY", message: "Too many concurrent uploads" } };
+    }
+    if (start.size > MAX_UPLOAD_BYTES) {
+      return { ok: false, result: { ok: false, error: "TOO_LARGE", message: "File exceeds 20 MB limit" } };
+    }
+    const fileName = sanitizeUploadFileName(start.fileName);
+    if (!fileName) {
+      return { ok: false, result: { ok: false, error: "INVALID_NAME", message: "Invalid file name" } };
+    }
+    try {
+      this.ensureStagingDir();
+      const uploadId = crypto.randomUUID();
+      const partPath = join(this.stagingDir, `${uploadId}.part`);
+      const fd = openSync(partPath, "w");
+      const session: UploadSession = {
+        uploadId, requestId: start.requestId, fileName,
+        declaredSize: start.size, received: 0, nextSeq: 0, partPath, fd,
+        timer: setTimeout(() => {}, 0),
+        onResult,
+      };
+      this.uploads.set(uploadId, session);
+      this.touch(session);
+      return { ok: true, upload: this.streamUploadFor(session) };
+    } catch (err) {
+      log.error("upload start failed: %s", err);
+      return { ok: false, result: { ok: false, error: "WRITE_FAILED", message: "Could not create staging file" } };
+    }
+  }
+
+  private streamUploadFor(u: UploadSession): StreamUpload {
+    return {
+      uploadId: u.uploadId,
+      write: (bytes) => this.writeStreamChunk(u, bytes),
+      end: () => this.endStreamUpload(u),
+      cancel: () => this.cancelStreamUpload(u),
+    };
+  }
+
+  private writeStreamChunk(u: UploadSession, bytes: Uint8Array): StreamUploadWrite {
+    if (!this.uploads.has(u.uploadId)) return "failed"; // already resolved by another path
+    if (u.received + bytes.byteLength > u.declaredSize) {
+      // The caller resets the stream itself and reports no result (§2.2).
+      clearTimeout(u.timer);
+      this.uploads.delete(u.uploadId);
+      this.closeFd(u);
+      rmSync(u.partPath, { force: true });
+      return "oversize";
+    }
+    try {
+      writeSync(u.fd, bytes);
+    } catch (err) {
+      log.error("upload chunk write failed: %s", err);
+      this.abort(u, "WRITE_FAILED", "Could not write to staging file");
+      return "failed";
+    }
+    u.received += bytes.byteLength;
+    this.touch(u);
+    return "ok";
+  }
+
+  private endStreamUpload(u: UploadSession): void {
+    if (!this.uploads.has(u.uploadId)) return; // already resolved by another path
+    if (u.received !== u.declaredSize) {
+      this.abort(u, "INCOMPLETE", `Declared ${u.declaredSize} bytes, received ${u.received}`);
+      return;
+    }
+    clearTimeout(u.timer);
+    this.uploads.delete(u.uploadId);
+    this.closeFd(u);
+    // Short uploadId prefix keeps names unique without hiding the original name.
+    const finalPath = join(this.stagingDir, `${u.uploadId.slice(0, 8)}-${u.fileName}`);
+    try {
+      renameSync(u.partPath, finalPath);
+    } catch (err) {
+      log.error("upload finalize failed: %s", err);
+      rmSync(u.partPath, { force: true });
+      this.deliverResult(u, { uploadId: u.uploadId, ok: false, error: "WRITE_FAILED", message: "Could not finalize upload" });
+      return;
+    }
+    this.deliverResult(u, {
+      uploadId: u.uploadId,
+      ok: true,
+      path: finalPath,
+      relPath: relative(this.opts.projectPath, finalPath),
+      mimeType: renderableBinaryMime(finalPath),
+    });
+  }
+
+  private cancelStreamUpload(u: UploadSession): void {
+    if (!this.uploads.has(u.uploadId)) return; // idempotent: already resolved
+    clearTimeout(u.timer);
+    this.uploads.delete(u.uploadId);
+    this.closeFd(u);
+    rmSync(u.partPath, { force: true });
   }
 
   handleStart(msg: FileUploadStart): void {
@@ -250,6 +407,9 @@ export class FileUploadManager {
       clearTimeout(u.timer);
       this.closeFd(u);
       rmSync(u.partPath, { force: true });
+      // A socket upload has no reader waiting on a callback here — the app's
+      // own retry/timeout logic on that path is unchanged.
+      if (u.onResult) u.onResult({ uploadId: u.uploadId, ok: false, error: "WRITE_FAILED", message: "Upload interrupted" });
     }
     this.uploads.clear();
   }

@@ -478,7 +478,7 @@ test("abortTunnelStreams aborts the core's in-flight tunnel exchange: the upstre
       bodyLength: 0,
       checkoutId: "main",
     };
-    const run = admission.manager.serveHttp(req, new Uint8Array(0), fakeExchange(calls));
+    const run = admission.manager.serveHttp(req, null, fakeExchange(calls));
 
     const headBy = Date.now() + 5000;
     while (!calls.includes("head") && Date.now() < headBy) await new Promise((r) => setTimeout(r, 15));
@@ -562,8 +562,8 @@ test("abortTunnelStreams reaches a checkout runtime's manager, not only main", a
       type: "tunnel:http-request" as const, requestId: "abort-checkout", port: route.port!,
       method: "GET", path: "/checkout", bodyLength: 0, checkoutId: checkoutId!,
     };
-    const mainRun = mainAdmission.manager.serveHttp(mainReq, new Uint8Array(0), fakeExchange(mainCalls));
-    const checkoutRun = checkoutAdmission.manager.serveHttp(checkoutReq, new Uint8Array(0), fakeExchange(checkoutCalls));
+    const mainRun = mainAdmission.manager.serveHttp(mainReq, null, fakeExchange(mainCalls));
+    const checkoutRun = checkoutAdmission.manager.serveHttp(checkoutReq, null, fakeExchange(checkoutCalls));
 
     const headBy = Date.now() + 15_000;
     while ((!mainCalls.includes("head") || !checkoutCalls.includes("head")) && Date.now() < headBy) {

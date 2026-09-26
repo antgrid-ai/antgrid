@@ -29,6 +29,11 @@ class _FakeSend implements PeerStreamSend {
 class _FakeRecv implements PeerStreamRecv {
   @override
   Future<Uint8List> readExact(int length) => Completer<Uint8List>().future;
+
+  // None of this file's streams cross into the raw read phase.
+  @override
+  Future<Uint8List?> read(int maxLength) =>
+      throw UnimplementedError('_FakeRecv is framed-only');
 }
 
 Map<String, dynamic> _decodeOpenFrame(Uint8List written) {

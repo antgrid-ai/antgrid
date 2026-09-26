@@ -56,6 +56,7 @@ class TestPayloadLink implements PeerLink, MultiStreamPeerLink {
     StreamOpen open, {
     required int maxRecordBytes,
     required int maxQueuedBytes,
+    int? rawAfterRecords,
   }) {
     final carrier = this.carrier;
     if (carrier is! MultiStreamPeerLink) {
@@ -67,6 +68,7 @@ class TestPayloadLink implements PeerLink, MultiStreamPeerLink {
       open,
       maxRecordBytes: maxRecordBytes,
       maxQueuedBytes: maxQueuedBytes,
+      rawAfterRecords: rawAfterRecords,
     );
   }
 }

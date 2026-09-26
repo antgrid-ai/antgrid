@@ -58,8 +58,7 @@
 /// Posts either `{type:"error", message}` once, or a `{type:"start",
 /// totalChunks}` followed by `totalChunks` `{type:"chunk", seq, data}`
 /// messages and a final `{type:"end"}` — the PNG data URL chunked so no
-/// single postMessage has to carry a multi-megabyte string (mirrors the
-/// bridge's own chunked upload wire, `UploadService.kChunkBytes`).
+/// single postMessage has to carry a multi-megabyte string.
 const String kScreenshotCaptureScript = '''
 (function() {
   // A fixed, curated property list rather than the full computed-style set

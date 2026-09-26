@@ -141,6 +141,34 @@ void main() {
       w.dispose();
     });
 
+    test('streamKind round-trips through tap, beside streamId', () async {
+      final w = make();
+      w.tap({
+        'op': 'frame',
+        'dir': 'tx',
+        'kind': 'lifecycle',
+        'streamKind': 'upload',
+        'streamId': 'req-1',
+        'reason': 'stream-open',
+      });
+      w.tap({'op': 'frame', 'dir': 'rx', 'kind': 'frame', 'frameId': 'ff01'});
+      w.tap({
+        'op': 'annotate',
+        'frameId': 'ff01',
+        'streamKind': 'project',
+        'streamId': 'proj-1',
+      });
+      await w.flush();
+
+      final lines = readLines();
+      expect(lines[0]['streamKind'], 'upload');
+      expect(lines[0]['streamId'], 'req-1');
+      expect(lines[0]['reason'], 'stream-open');
+      expect(lines[1]['streamKind'], 'project');
+      expect(lines[1]['streamId'], 'proj-1');
+      w.dispose();
+    });
+
     test('a malformed event costs a line of capture, never a send', () async {
       final w = make();
       // The tap is a boundary: whatever arrives, the path being observed must

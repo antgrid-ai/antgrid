@@ -55,9 +55,9 @@ export interface NetwatchEvent {
    * `NETWATCH_SESSION_STREAM_LABEL` (`"0"`) for the session stream, the
    * `projectId` for a project stream (the app's `MachineSession.streamId`,
    * `machine_session.dart`), the terminal open frame's own `requestId` for a
-   * terminal stream, and the tunnel open frame's own `requestId`/`wsId` for a
-   * tunnel stream — the app writes none of the last two today, so only the
-   * bridge side of a terminal/tunnel row currently carries one.
+   * terminal stream, the tunnel open frame's own `requestId`/`wsId` for a
+   * tunnel stream, and the upload open frame's own `requestId` for an upload
+   * stream — both ends write it for every stream kind.
    */
   streamId?: string;
   /** Plaintext message type, once the pipeline knows it. Never a payload. */

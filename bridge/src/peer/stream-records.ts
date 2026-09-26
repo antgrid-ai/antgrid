@@ -21,6 +21,11 @@
  *  in-flight slice instead of an entire queued transfer. */
 export const STREAM_RECORD_SLICE_BYTES = 262_144;
 
+/** Cap on one raw (unframed) read, both directions — allocated per call by
+ *  `read(sizeLimit)`, so callers that only need a handful of bytes (an
+ *  overrun probe, a cancel watcher) never pay for a full 256 KiB buffer. */
+export const STREAM_RAW_READ_BYTES = 65_536;
+
 const LENGTH_PREFIX_BYTES = 4;
 
 /** The write half of a native bidirectional stream. Deliberately narrower
@@ -36,6 +41,12 @@ export interface StreamSend {
 /** The read half of a native bidirectional stream. */
 export interface StreamRecv {
   readExact(size: number): Promise<number[]>;
+}
+
+/** The read half needed for unframed streams: resolves `[]` at FIN and
+ *  rejects (same as `readExact`) on a peer reset or connection loss. */
+export interface RawStreamRecv extends StreamRecv {
+  read(sizeLimit: number): Promise<number[]>;
 }
 
 /** Why a writer stopped for good. Only `unauthorized` retires the whole
@@ -112,15 +123,28 @@ export class StreamRecordWriter {
    *  (§"Binding constraints": once a slice has reached `writeAll`, a partial
    *  record would corrupt the framing, so it always completes from there). */
   send(frame: Uint8Array, signal?: AbortSignal): Promise<StreamSendOutcome> {
+    const bytes = Buffer.allocUnsafe(frame.length + LENGTH_PREFIX_BYTES);
+    bytes.writeUInt32BE(frame.length);
+    bytes.set(frame, LENGTH_PREFIX_BYTES);
+    return this.enqueue(bytes, signal);
+  }
+
+  /** Raw bytes, no length prefix, through the same queue, overflow bound and
+   *  per-slice `authorized()` check as `send()`. A zero-length call still
+   *  passes through the queue (so it observes the same authorization and
+   *  overflow checks) but reaches no native write, since `writeInSlices`'s
+   *  loop never executes for an empty buffer. */
+  sendRaw(bytes: Uint8Array, signal?: AbortSignal): Promise<StreamSendOutcome> {
+    return this.enqueue(Buffer.from(bytes), signal);
+  }
+
+  private enqueue(bytes: Buffer, signal?: AbortSignal): Promise<StreamSendOutcome> {
     if (this.stopped || this.finishing) return Promise.resolve("dropped");
     if (signal?.aborted) return Promise.resolve("dropped");
     if (!this.authorized()) {
       this.failConnection("unauthorized");
       return Promise.resolve("dropped");
     }
-    const bytes = Buffer.allocUnsafe(frame.length + LENGTH_PREFIX_BYTES);
-    bytes.writeUInt32BE(frame.length);
-    bytes.set(frame, LENGTH_PREFIX_BYTES);
     if (this.queuedBytes + bytes.length > this.maxQueuedBytes) {
       this.stopStream("overflow");
       return Promise.resolve("dropped");
@@ -317,5 +341,24 @@ export class StreamRecordReader {
   private violate(message: string): never {
     this.onFailure("protocol-violation");
     throw new StreamProtocolViolation(message);
+  }
+}
+
+/**
+ * Reads unframed bytes off one stream's receive half — no length prefix, so
+ * the caller (not this class) knows how much a record is worth reading.
+ */
+export class StreamRawReader {
+  constructor(private readonly stream: { recv: RawStreamRecv }) {}
+
+  /** `null` at FIN; rejects on reset or connection loss (rethrown as-is, same
+   *  as `StreamRecordReader`). `maxBytes` is clamped to
+   *  `[1, STREAM_RAW_READ_BYTES]` so a caller cannot over-allocate the native
+   *  read buffer, and the clamp's floor of 1 keeps this from ever resolving
+   *  an empty (non-null) array. */
+  async read(maxBytes: number): Promise<Uint8Array | null> {
+    const size = Math.max(1, Math.min(maxBytes, STREAM_RAW_READ_BYTES));
+    const bytes = await this.stream.recv.read(size);
+    return bytes.length === 0 ? null : new Uint8Array(bytes);
   }
 }

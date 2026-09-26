@@ -30,6 +30,7 @@ class NetwatchEvent {
     this.transport = 'relay',
     this.channel,
     this.streamId,
+    this.streamKind,
     this.msgType,
     this.bytes,
     this.frameId,
@@ -61,6 +62,12 @@ class NetwatchEvent {
   final String? channel;
   String? streamId;
 
+  /// `session` | `project` | `terminal` | `tunnel-http` | `tunnel-ws` |
+  /// `upload` — the purpose-specific stream kind, mirroring the bridge's
+  /// `streamLabelOf`. Never part of the join key: [frameId] alone pairs the
+  /// two sides' events.
+  String? streamKind;
+
   /// Plaintext message type, filled in by [Netwatch.annotate] once the layer
   /// that knows it has run. Never a payload.
   String? msgType;
@@ -85,6 +92,7 @@ class NetwatchEvent {
     'origin': 'app',
     if (channel != null) 'channel': channel,
     if (streamId != null) 'streamId': streamId,
+    if (streamKind != null) 'streamKind': streamKind,
     if (msgType != null) 'msgType': msgType,
     if (bytes != null) 'bytes': bytes,
     if (frameId != null) 'frameId': frameId,
@@ -155,6 +163,7 @@ class Netwatch {
     String transport = 'relay',
     String? channel,
     String? streamId,
+    String? streamKind,
     String? msgType,
     int? bytes,
     String? frameId,
@@ -171,6 +180,7 @@ class Netwatch {
         transport: transport,
         channel: channel,
         streamId: streamId,
+        streamKind: streamKind,
         msgType: msgType,
         bytes: bytes,
         frameId: frameId,
@@ -198,7 +208,12 @@ class Netwatch {
   /// the buffer is a no-op: the event has already been written and degrades to
   /// a typeless frame, which is honest — better than blocking a send to keep it
   /// annotatable.
-  void annotate(String frameId, {String? msgType, String? streamId}) {
+  void annotate(
+    String frameId, {
+    String? msgType,
+    String? streamId,
+    String? streamKind,
+  }) {
     // Newest first: an annotation almost always follows its own frame right
     // away, so a reverse scan finds it in one step even on a hash collision
     // between two distinct frames sharing identical payload bytes.
@@ -207,6 +222,7 @@ class Netwatch {
       if (e.frameId != frameId) continue;
       if (msgType != null) e.msgType = msgType;
       if (streamId != null) e.streamId = streamId;
+      if (streamKind != null) e.streamKind = streamKind;
       return;
     }
   }
@@ -282,6 +298,7 @@ class Netwatch {
           frameId,
           msgType: event['msgType'] as String?,
           streamId: event['streamId'] as String?,
+          streamKind: event['streamKind'] as String?,
         );
         return;
       }
@@ -294,6 +311,7 @@ class Netwatch {
         transport: event['transport'] as String? ?? 'relay',
         channel: event['channel'] as String?,
         streamId: event['streamId'] as String?,
+        streamKind: event['streamKind'] as String?,
         msgType: event['msgType'] as String?,
         bytes: event['bytes'] as int?,
         frameId: frameId,

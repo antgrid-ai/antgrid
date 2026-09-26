@@ -26,7 +26,7 @@ import { AGENT_GRACE_MS, killChildTree, processGroupSpawn } from "./terminal-ses
 import { createConnState, type ConnState } from "./conn-state";
 import type { PeerSessionView, SendTarget, TerminalStreamHooks } from "./project-streams";
 import { FileWatcher } from "./file-watcher";
-import { FileUploadManager } from "./file-upload";
+import { FileUploadManager, type UploadStreamServer } from "./file-upload";
 import { FileSearcher } from "./file-search";
 import { PortDetector } from "./port-detector";
 import { TunnelManager, type TunnelStreamServer } from "./tunnel-manager";
@@ -46,7 +46,7 @@ import { lineForEvent } from "./session-bus/deliver-event";
 import { isRefusal } from "./session-bus/errors";
 import { neutralizeFenced } from "./session-bus/delivery";
 import type { QueuedLine } from "./session-bus/delivery-queue";
-import { CHECKOUT_VARIABLE_MESSAGE_TYPES, createMessage, HandlerAnswerWire, HandlerConfigureWire, HandlerDismissWire, HandlerInstructWire, HandlerUndoWire, PREVIEW_CHANNEL_MESSAGE_TYPES, type AbMessage, type RpcRequest, type SessionEntry, type WorkStatus } from "./protocol";
+import { CHECKOUT_VARIABLE_MESSAGE_TYPES, createMessage, HandlerAnswerWire, HandlerConfigureWire, HandlerDismissWire, HandlerInstructWire, HandlerUndoWire, LOOPBACK_UPLOAD_MESSAGE_TYPES, PREVIEW_CHANNEL_MESSAGE_TYPES, type AbMessage, type RpcRequest, type SessionEntry, type WorkStatus } from "./protocol";
 import { startApiServer, type ApiServerHandle } from "./api-server";
 import { MessageBus, clientKeyOf, type ClientKey, type InboundSource } from "./message-bus";
 import { resolveAbDir } from "./antgrid-dir";
@@ -271,6 +271,13 @@ export interface AgentCore {
    *  promotes a core — `checkoutRuntimes.runtime(checkoutId)` is a lookup over
    *  what is already running. */
   readonly tunnelStreams: TunnelStreamServer;
+  /** Admits an upload QUIC stream: `UploadStreamRegistry` calls this once
+   *  the open frame names a checkout, after the switch and checkout-routing
+   *  checks pass. Unlike `tunnelStreams.admit`, this may PREPARE a checkout
+   *  runtime that is not yet running, replicating the lazy prepare
+   *  `attachTransport` runs for a `CHECKOUT_VARIABLE_MESSAGE_TYPES` frame —
+   *  a stream open bypasses that bus-level machinery entirely. */
+  readonly uploadStreams: UploadStreamServer;
   /** Abort every in-flight tunneled HTTP response for one peer, on every
    *  checkout runtime and on main. Driven only from `onPeerSessionGone` (A4):
    *  a body in flight across that peer's session loss is dead by construction,
@@ -1332,6 +1339,48 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         return { ok: false, refusal: { code: "NOT_ALLOWED", message: "tunnels are not available for this checkout" } };
       }
       return { ok: true, manager: runtime.tunnelManager };
+    },
+  };
+
+  /** Admits an upload QUIC stream: called by `UploadStreamRegistry` once
+   *  a stream's open frame names `checkoutId`. Shares the switch and
+   *  checkout-routing gate with `tunnelStreams.admit`, but a preview stream
+   *  only ever reads an ALREADY-running checkout while an upload may need to
+   *  start one — a stream open bypasses `attachTransport`'s bus-level dispatch
+   *  entirely, so this replicates its lazy `checkoutRuntimes.resolve` +
+   *  `prepareCheckoutRuntime` for the socket-path upload verbs
+   *  (`CHECKOUT_VARIABLE_MESSAGE_TYPES`) directly. */
+  const uploadStreams: UploadStreamServer = {
+    async admit(peerId, checkoutId) {
+      if (!remoteFrameAllowed("relay")) {
+        return { ok: false, refusal: { code: "NOT_ALLOWED", message: "mobile access is disabled" } };
+      }
+      if (sessions?.hasIsolatedSessions() && !peerCanRouteCheckouts(peerId)) {
+        return { ok: false, refusal: { code: "UPDATE_REQUIRED", message: "update the app to open this stream" } };
+      }
+      if (sessions?.isCheckoutDeleting(checkoutId)) {
+        return { ok: false, refusal: { code: "NOT_ALLOWED", message: "this checkout is being deleted" } };
+      }
+      let runtime: CheckoutRuntime;
+      try {
+        const checkout = await checkoutRuntimes.resolve(checkoutId);
+        if (!checkout) {
+          return { ok: false, refusal: { code: "NOT_ALLOWED", message: "unknown checkout" } };
+        }
+        // Re-checked after the store lookup: a delete that started during that
+        // await would otherwise have its checkout re-prepared right here.
+        if (sessions?.isCheckoutDeleting(checkoutId)) {
+          return { ok: false, refusal: { code: "NOT_ALLOWED", message: "this checkout is being deleted" } };
+        }
+        runtime = checkoutId === "main" ? mainRuntime : await prepareCheckoutRuntime(checkout);
+      } catch (error) {
+        log.warn("Checkout lookup failed for upload stream, checkout %s: %s", checkoutId, error);
+        return { ok: false, refusal: { code: "NOT_ALLOWED", message: "checkout lookup failed" } };
+      }
+      if (!runtime.uploadManager) {
+        return { ok: false, refusal: { code: "NOT_ALLOWED", message: "uploads are not available for this checkout" } };
+      }
+      return { ok: true, manager: runtime.uploadManager };
     },
   };
 
@@ -3536,7 +3585,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     runtime.uploadManager = new FileUploadManager({
       projectId: project.id,
       projectPath: runtime.checkout.path,
-      send,
+      // A remote app uploads over its own `upload` stream (`uploadStreams.admit`),
+      // never the bus, so these result verbs are addressed to the desktop only
+      // (see `LOOPBACK_UPLOAD_MESSAGE_TYPES`).
+      send: (msg) => sendAbTo({ ...msg, checkoutId: runtime.checkout.id } as AbMessage, "loopback"),
     });
     runtime.uploadManager.startSweeper();
     await yieldToEventLoop();
@@ -4412,7 +4464,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     uploadManager = new FileUploadManager({
       projectId: project.id,
       projectPath: project.path,
-      send: (msg) => sendAb(msg),
+      // A remote app uploads over its own `upload` stream (`uploadStreams.admit`),
+      // never the bus, so these result verbs are addressed to the desktop only
+      // (see `LOOPBACK_UPLOAD_MESSAGE_TYPES`).
+      send: (msg) => sendAbTo(msg, "loopback"),
     });
     uploadManager.startSweeper();
     mainRuntime.uploadManager = uploadManager;
@@ -4867,6 +4922,13 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         );
         return;
       }
+      // A remote app uploads over its own `upload` stream (`uploadStreams.admit`
+      // above), never the bus — these five verbs plus the shared result type
+      // cross the loopback socket only (`LOOPBACK_UPLOAD_MESSAGE_TYPES`).
+      if (source !== "loopback" && LOOPBACK_UPLOAD_MESSAGE_TYPES.has(msg.type)) {
+        log.warn("Dropping inbound %s: a remote app uploads on its own stream (project %s)", msg.type, project.id);
+        return;
+      }
       if (msg.type === "request") {
         if (msg.method === "state.snapshot" && snapshotAsksFor(msg.params, ["agent:status"])) {
           // The snapshot is the app's PULL, and for a relay app it is the only
@@ -5037,6 +5099,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     },
     onHandshakeComplete,
     tunnelStreams,
+    uploadStreams,
     abortTunnelStreams,
     setPeerSessionProvider,
     setTerminalStreamHooks,

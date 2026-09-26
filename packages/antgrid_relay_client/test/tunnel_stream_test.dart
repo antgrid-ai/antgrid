@@ -70,7 +70,8 @@ void main() {
     TunnelHttpExchange openExchange(
       StreamTransport transport, {
       String requestId = 'r1',
-      Uint8List? body,
+      int bodyLength = 0,
+      Stream<List<int>>? body,
     }) => transport.openTunnelHttp(
       requestId: requestId,
       checkoutId: 'main',
@@ -80,13 +81,15 @@ void main() {
         'method': 'GET',
         'path': '/',
       },
-      body: body ?? Uint8List(0),
+      bodyLength: bodyLength,
+      body: body,
     );
 
     test('the open head carries bodyLength and checkoutId; the body follows '
-        'as a 0x00-tagged record', () async {
+        'as raw writes', () async {
       final transport = await bind(projectId: 'proj-a');
-      openExchange(transport, body: Uint8List.fromList(utf8.encode('hello')));
+      final bytes = Uint8List.fromList(utf8.encode('hello'));
+      openExchange(transport, bodyLength: bytes.length, body: Stream.value(bytes));
 
       expect(link.opens, hasLength(1));
       expect(
@@ -98,27 +101,26 @@ void main() {
 
       final fakeStream = link.createdStreams.single;
       await pumpEventQueue();
-      final headJson = jsonDecode(utf8.decode(fakeStream.sent[0])) as Map;
+      final headJson = jsonDecode(utf8.decode(fakeStream.sent.single)) as Map;
       expect(headJson['bodyLength'], 5);
       expect(headJson['checkoutId'], 'main');
-      expect(fakeStream.sent[1][0], kTunnelRecordTagBody);
-      expect(utf8.decode(fakeStream.sent[1].sublist(1)), 'hello');
+      expect(utf8.decode(fakeStream.sentRaw.single), 'hello');
     });
 
     test(
-      'a body over the 262144-byte slice ceiling is split across records',
+      'a body over the 262144-byte slice ceiling is split into two raw '
+      'writes',
       () async {
         final transport = await bind(projectId: 'proj-a');
         final big = Uint8List(262144 + 10);
-        openExchange(transport, body: big);
+        openExchange(transport, bodyLength: big.length, body: Stream.value(big));
         final fakeStream = link.createdStreams.single;
         await pumpEventQueue();
 
-        // sent[0] is the head; the body follows as two slices.
-        expect(fakeStream.sent, hasLength(3));
-        expect(fakeStream.sent[1][0], kTunnelRecordTagBody);
-        expect(fakeStream.sent[1].length, 262144 + 1);
-        expect(fakeStream.sent[2].length, 10 + 1);
+        expect(fakeStream.sent, hasLength(1));
+        expect(fakeStream.sentRaw, hasLength(2));
+        expect(fakeStream.sentRaw[0].length, 262144);
+        expect(fakeStream.sentRaw[1].length, 10);
       },
     );
 
@@ -147,8 +149,8 @@ void main() {
     );
 
     test(
-      'head, body records and tunnel:http-end complete the exchange; '
-      'finish() waits for the peer FIN',
+      'head and raw body chunks complete the exchange; finish() waits '
+      'for the peer FIN',
       () async {
         final transport = await bind(projectId: 'proj-a');
         final exchange = openExchange(transport);
@@ -165,31 +167,24 @@ void main() {
         expect(head.status, 200);
         expect(head.headers['content-type'], 'text/plain');
 
-        final records = <TunnelBodyRecord>[];
-        final bodyDone = exchange.body.listen(records.add).asFuture<void>();
-        fakeStream.emitData(
-          kTunnelRecordTagBody,
-          Uint8List.fromList(utf8.encode('abc')),
-        );
-        fakeStream.emit({'type': 'tunnel:http-end', 'requestId': 'r1'});
-        await bodyDone;
+        final chunks = <int>[];
+        final bodyDone = exchange.body.listen(chunks.addAll).asFuture<void>();
+        fakeStream.emitRaw(Uint8List.fromList(utf8.encode('abc')));
+        await pumpEventQueue();
 
-        expect(records, hasLength(1));
-        expect(records.single.gzip, isFalse);
-        expect(utf8.decode(records.single.bytes), 'abc');
-
-        // tunnel:http-end closes the app-visible body, but the record loop
-        // itself only calls finish() once the peer's own FIN arrives.
+        // The read loop only calls finish() once the peer's own FIN arrives.
         expect(fakeStream.finishCalled, isFalse);
         await fakeStream.endPeer();
+        await bodyDone;
+
+        expect(utf8.decode(chunks), 'abc');
         await pumpEventQueue();
         expect(fakeStream.finishCalled, isTrue);
       },
     );
 
     test(
-      'the stream ending after a head but before tunnel:http-end fails '
-      'TRUNCATED',
+      'the stream resetting after a head fails TRUNCATED',
       () async {
         final transport = await bind(projectId: 'proj-a');
         final exchange = openExchange(transport);
@@ -210,23 +205,20 @@ void main() {
             isA<TunnelExchangeFailure>().having((e) => e.code, 'code', 'TRUNCATED'),
           ),
         );
-        await fakeStream.endPeer();
+        await fakeStream.endWithReset();
         await bodyError;
       },
     );
 
     test(
-      'a data record before the head is PROTOCOL and resets the stream',
+      'raw bytes as the first record are PROTOCOL and reset the stream',
       () async {
         final transport = await bind(projectId: 'proj-a');
         final exchange = openExchange(transport);
         final fakeStream = link.createdStreams.single;
         await pumpEventQueue();
 
-        fakeStream.emitData(
-          kTunnelRecordTagBody,
-          Uint8List.fromList(utf8.encode('early')),
-        );
+        fakeStream.emitRaw(Uint8List.fromList(utf8.encode('early')));
 
         await expectLater(
           exchange.head,
@@ -258,30 +250,6 @@ void main() {
         expect(fakeStream.finishCalled, isFalse);
       },
     );
-
-    test('a 0x01-tagged body record decodes with gzip: true', () async {
-      final transport = await bind(projectId: 'proj-a');
-      final exchange = openExchange(transport);
-      final fakeStream = link.createdStreams.single;
-      await pumpEventQueue();
-
-      fakeStream.emit({
-        'type': 'tunnel:http-head',
-        'requestId': 'r1',
-        'status': 200,
-        'headers': <String, String>{},
-      });
-      await exchange.head;
-
-      final records = <TunnelBodyRecord>[];
-      final sub = exchange.body.listen(records.add);
-      fakeStream.emitData(kTunnelRecordTagBodyGzip, Uint8List.fromList([1, 2, 3]));
-      await pumpEventQueue();
-      await sub.cancel();
-
-      expect(records.single.gzip, isTrue);
-      expect(records.single.bytes, [1, 2, 3]);
-    });
 
     test(
       'cancel() after open resets the send half and releases the slot only '
@@ -401,13 +369,101 @@ void main() {
     );
 
     test(
+      'a refusal that lands while the request body is still being written '
+      'fails REFUSED at once, not SEND_FAILED once the write gives up',
+      () async {
+        final gate = Completer<void>();
+        final transport = await bind(projectId: 'proj-a');
+        link.onOpen = (_) => _FakeStream()
+          ..rawGate = gate
+          ..sendRawOutcome = PeerSendOutcome.closed;
+        final exchange = openExchange(
+          transport,
+          bodyLength: 3,
+          body: Stream.value(Uint8List.fromList([1, 2, 3])),
+        );
+        final fakeStream = link.createdStreams.single;
+        Object? failure;
+        exchange.head.then<void>((_) {}, onError: (Object e) {
+          failure = e;
+        });
+        await pumpEventQueue();
+        expect(fakeStream.sentRaw, hasLength(1), reason: 'write in flight');
+
+        const refusal = StreamRefused(
+          code: StreamRefusedCode.capExceeded,
+          message: 'too many tunnels',
+        );
+        fakeStream.emit(refusal.toJson());
+        await fakeStream.endPeer();
+        await pumpEventQueue();
+
+        expect(
+          failure,
+          isA<TunnelExchangeFailure>().having((e) => e.code, 'code', 'REFUSED'),
+        );
+        gate.complete();
+        await pumpEventQueue();
+        expect(
+          failure,
+          isA<TunnelExchangeFailure>().having((e) => e.code, 'code', 'REFUSED'),
+        );
+      },
+    );
+
+    test(
+      'a response that ends while the request body is still being written '
+      'is delivered at once, and the send half FINs only once the body is out',
+      () async {
+        final gate = Completer<void>();
+        final transport = await bind(projectId: 'proj-a');
+        link.onOpen = (_) => _FakeStream()..rawGate = gate;
+        final exchange = openExchange(
+          transport,
+          bodyLength: 3,
+          body: Stream.value(Uint8List.fromList([1, 2, 3])),
+        );
+        final fakeStream = link.createdStreams.single;
+        final chunks = <int>[];
+        var bodyDone = false;
+        exchange.body.listen(chunks.addAll, onDone: () => bodyDone = true);
+        await pumpEventQueue();
+
+        fakeStream.emit({
+          'type': 'tunnel:http-head',
+          'requestId': 'r1',
+          'status': 413,
+          'headers': <String, String>{},
+        });
+        fakeStream.emitRaw(Uint8List.fromList(utf8.encode('no')));
+        await fakeStream.endPeer();
+        await pumpEventQueue();
+
+        final head = await exchange.head.timeout(const Duration(seconds: 1));
+        expect(head.status, 413);
+        expect(utf8.decode(chunks), 'no');
+        expect(bodyDone, isTrue);
+        expect(
+          fakeStream.finishCalled,
+          isFalse,
+          reason: 'a FIN now would end the request body short',
+        );
+
+        gate.complete();
+        await pumpEventQueue();
+        expect(fakeStream.finishCalled, isTrue);
+        expect(fakeStream.resetCalled, isFalse);
+      },
+    );
+
+    test(
       'a SEND_FAILED body slice holds its slot until records drain',
       () async {
         link.onOpen = (open) {
           final s = _FakeStream();
           if (open ==
               const TunnelHttpStreamOpen(projectId: 'proj-a', requestId: 'bad')) {
-            s.failAfterSends = 1; // the head goes, the first body slice fails
+            s.failAfterRawSends = 0; // the head goes, the first raw slice fails
           }
           return s;
         };
@@ -415,7 +471,8 @@ void main() {
         final bad = openExchange(
           transport,
           requestId: 'bad',
-          body: Uint8List.fromList([1, 2, 3]),
+          bodyLength: 3,
+          body: Stream.value(Uint8List.fromList([1, 2, 3])),
         );
         for (var i = 0; i < kStreamMaxTunnelStreamsPerPeer - 1; i++) {
           openExchange(transport, requestId: 'fill-$i');
@@ -429,7 +486,8 @@ void main() {
         );
         await pumpEventQueue();
         final badStream = link.createdStreams.first;
-        expect(badStream.sent, hasLength(2));
+        expect(badStream.sent, hasLength(1));
+        expect(badStream.sentRaw, hasLength(1));
         expect(badStream.resetCalled, isTrue);
         expect(link.opens, hasLength(kStreamMaxTunnelStreamsPerPeer));
 
@@ -460,7 +518,6 @@ void main() {
           'status': 200,
           'headers': <String, String>{},
         });
-        firstStream.emit({'type': 'tunnel:http-end', 'requestId': 'r0'});
         await firstStream.endPeer();
         await pumpEventQueue();
 
@@ -767,7 +824,7 @@ void main() {
           requestId: 'r1',
           checkoutId: 'main',
           head: const {'type': 'tunnel:http-request'},
-          body: Uint8List(0),
+          bodyLength: 0,
         );
         await expectLater(
           exchange.head,
@@ -876,6 +933,7 @@ class _FakeMultiStreamLink implements PeerLink, MultiStreamPeerLink {
     StreamOpen open, {
     required int maxRecordBytes,
     required int maxQueuedBytes,
+    int? rawAfterRecords,
   }) async {
     opens.add((
       open: open,
@@ -896,12 +954,21 @@ class _FakeMultiStreamLink implements PeerLink, MultiStreamPeerLink {
 class _FakeStream implements PeerStream {
   final _records = StreamController<Uint8List>();
   final List<Uint8List> sent = [];
+  final List<Uint8List> sentRaw = [];
   bool resetCalled = false;
   bool finishCalled = false;
   PeerSendOutcome sendOutcome = PeerSendOutcome.accepted;
+  PeerSendOutcome sendRawOutcome = PeerSendOutcome.accepted;
 
-  /// When set, every send after this many answers `backpressured`.
+  /// When set, every framed send after this many answers `backpressured`.
   int? failAfterSends;
+
+  /// When set, every raw send after this many answers `backpressured`.
+  int? failAfterRawSends;
+
+  /// When set, the FIRST raw send waits on this before it settles — one
+  /// request-body write still in flight.
+  Completer<void>? rawGate;
 
   @override
   Stream<Uint8List> get records => _records.stream;
@@ -914,6 +981,18 @@ class _FakeStream implements PeerStream {
       return PeerSendOutcome.backpressured;
     }
     return sendOutcome;
+  }
+
+  @override
+  Future<PeerSendOutcome> sendRaw(Uint8List bytes) async {
+    sentRaw.add(bytes);
+    final gate = rawGate;
+    if (gate != null && sentRaw.length == 1) await gate.future;
+    final limit = failAfterRawSends;
+    if (limit != null && sentRaw.length > limit) {
+      return PeerSendOutcome.backpressured;
+    }
+    return sendRawOutcome;
   }
 
   /// Leaves [records] open: a real [PeerStream]'s records end only on the
@@ -934,7 +1013,14 @@ class _FakeStream implements PeerStream {
     _records.add(Uint8List.fromList(utf8.encode(jsonEncode(json))));
   }
 
-  /// Simulate one tagged binary data record (a tunnel body slice or WS frame).
+  /// A raw body chunk, as it arrives once the stream is past its framed head
+  /// — no tag, no framing, straight bytes.
+  void emitRaw(Uint8List bytes) {
+    if (_records.isClosed) return;
+    _records.add(bytes);
+  }
+
+  /// One tagged binary data record — still how the WS channel's frames work.
   void emitData(int tag, Uint8List payload) {
     if (_records.isClosed) return;
     final out = Uint8List(payload.length + 1);
@@ -945,5 +1031,13 @@ class _FakeStream implements PeerStream {
 
   Future<void> endPeer() async {
     if (!_records.isClosed) await _records.close();
+  }
+
+  /// Ends the peer's send half with a reset rather than a clean FIN — only
+  /// distinguishable once the stream has moved past its framed head.
+  Future<void> endWithReset() async {
+    if (_records.isClosed) return;
+    _records.addError(const PeerStreamReset());
+    await _records.close();
   }
 }

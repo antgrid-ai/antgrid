@@ -22,6 +22,7 @@ import { isSafeProjectId } from "./project-id";
 import { createMessage, parseMessageFast, type AbMessage } from "./protocol";
 import type { Channel, MessageBus } from "./message-bus";
 import type { TunnelStreamServer } from "./tunnel-manager";
+import type { UploadStreamServer } from "./file-upload";
 import type { netwatch } from "./netwatch";
 import {
   StreamRecordReader,
@@ -114,6 +115,22 @@ export interface TunnelProjectBinding {
   tunnels(): TunnelStreamServer | null;
 }
 
+/** What `UploadStreamRegistry` needs from a project's entry to admit an
+ *  upload stream without opening or promoting a core itself. Mirrors
+ *  {@link TunnelProjectBinding}'s shape — an upload stream carries no bus
+ *  traffic either, only the per-sender gate and the project's own
+ *  {@link UploadStreamServer}. */
+export interface UploadProjectBinding {
+  hasOpenStream(peerId: string): boolean;
+  refusalFor(peerId: string): StreamRefusal | null;
+  /** Per-RECEIVER gate for a stream already admitted: the mirror of
+   *  `refusalFor` for the outbound result record. */
+  mayDeliverTo(peerId: string): boolean;
+  /** The project's upload server, or null if the entry is gone or declared
+   *  none — either way the registry refuses the stream NOT_ALLOWED. */
+  uploads(): UploadStreamServer | null;
+}
+
 /** What one app session looks like to everything outside the relay client. No
  *  key material ever leaves that file. */
 export interface PeerSessionView {
@@ -172,6 +189,9 @@ export interface AttachStreamOpts {
   /** The project's tunnel server; absent => tunnel streams for this project
    *  are refused NOT_ALLOWED. */
   tunnels?: TunnelStreamServer;
+  /** The project's upload server; absent => upload streams for this project
+   *  are refused NOT_ALLOWED. */
+  uploads?: UploadStreamServer;
   /** Outbound authorization: consulted on EVERY frame this stream would send.
    *  Read live so a `mobile-access:set` takes effect without tearing the
    *  stream down. Absent = always deliver. */
@@ -663,6 +683,27 @@ export class ProjectStreamRegistry {
         return peer !== null && entry.opts.mayDeliverTo(peer);
       },
       tunnels: () => (live() ? entry.opts.tunnels ?? null : null),
+    };
+  }
+
+  uploadBinding(projectId: string): UploadProjectBinding | null {
+    const entry = this.latestEntryFor(projectId);
+    if (!entry) return null;
+    const live = () => this.entries.includes(entry);
+    return {
+      hasOpenStream: (peerId) => this.hasOpenStream(peerId, projectId),
+      refusalFor: (peerId) => {
+        if (!live()) return { code: "NOT_ALLOWED", message: "project stream is gone" };
+        return entry.opts.mayAcceptFrom?.(this.opts.peerSession(peerId)) ?? null;
+      },
+      mayDeliverTo: (peerId) => {
+        if (!live()) return false;
+        if (!(entry.opts.mayDeliver?.() ?? true)) return false;
+        if (!entry.opts.mayDeliverTo) return true;
+        const peer = this.opts.peerSession(peerId);
+        return peer !== null && entry.opts.mayDeliverTo(peer);
+      },
+      uploads: () => (live() ? entry.opts.uploads ?? null : null),
     };
   }
 

@@ -50,6 +50,15 @@ abstract interface class PeerLink {
   Future<void> close();
 }
 
+/// Delivered as an error on [PeerStream.records] in the raw phase only: the
+/// peer reset its send half, or the connection went, before FIN. Record mode
+/// cannot distinguish a reset from a FIN (both just close [PeerStream.records]),
+/// so this is raised only once a stream has moved into raw reads
+/// ([MultiStreamPeerLink.openStream]'s `rawAfterRecords`).
+final class PeerStreamReset implements Exception {
+  const PeerStreamReset();
+}
+
 /// One purpose-specific native stream. The send and receive halves end
 /// independently: [reset] and [finish] end only the send half.
 abstract interface class PeerStream {
@@ -62,6 +71,12 @@ abstract interface class PeerStream {
   /// Queues one record. A non-`accepted` outcome is final for this record;
   /// `backpressured` means the stream was reset and must be reopened.
   Future<PeerSendOutcome> send(Uint8List record);
+
+  /// [bytes] with no length prefix, queued and bounded exactly as [send] is.
+  /// Completes `accepted` only once every byte has been written to the
+  /// native stream — there is no ack, so a caller measuring progress reads it
+  /// off this future settling, not off anything the peer sends back.
+  Future<PeerSendOutcome> sendRaw(Uint8List bytes);
 
   /// Abandons the send half. Required on every error path: the native
   /// binding FINs a send half that is dropped without a reset, which the
@@ -83,9 +98,16 @@ abstract interface class MultiStreamPeerLink {
   /// A bridge refusal arrives later, in-band, as a `stream:refused` record
   /// on [PeerStream.records]. The bounds differ by stream kind, so neither
   /// has a default.
+  ///
+  /// [rawAfterRecords], when set (>= 1), switches the stream to raw reads
+  /// after that many decoded records have been delivered on [PeerStream.records]:
+  /// every later event is an unframed chunk, a FIN closes the stream cleanly,
+  /// and a reset delivers one [PeerStreamReset] before closing it. Used by the
+  /// upload and tunnel-http streams, whose bodies carry no per-record framing.
   Future<PeerStream> openStream(
     StreamOpen open, {
     required int maxRecordBytes,
     required int maxQueuedBytes,
+    int? rawAfterRecords,
   });
 }

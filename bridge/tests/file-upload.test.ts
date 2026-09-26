@@ -1,8 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, mkdirSync, utimesSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, mkdirSync, utimesSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { FileUploadManager, sanitizeUploadFileName, MAX_UPLOAD_BYTES } from "../src/file-upload";
+import {
+  FileUploadManager, sanitizeUploadFileName, MAX_UPLOAD_BYTES,
+  type UploadResultFields,
+} from "../src/file-upload";
 import { createMessage, type AbMessage, type FileUploadReady } from "../src/protocol";
 import { loadIgnoreRules } from "../src/file-tree";
 import { setLogLevel } from "../src/logger";
@@ -180,9 +183,126 @@ describe("FileUploadManager", () => {
     mgr.stop();
     const dir = join(projectDir, ".antgrid", "uploads");
     const leftovers = existsSync(dir)
-      ? require("node:fs").readdirSync(dir).filter((f: string) => f.endsWith(".part"))
+      ? readdirSync(dir).filter((f: string) => f.endsWith(".part"))
       : [];
     expect(leftovers.length).toBe(0);
+  });
+
+  describe("begin()/StreamUpload (the stream-upload path)", () => {
+    function results(): UploadResultFields[] {
+      return collected;
+    }
+    let collected: UploadResultFields[];
+    function onResult(r: UploadResultFields) {
+      collected.push(r);
+    }
+
+    beforeEach(() => {
+      collected = [];
+    });
+
+    it("happy path: write() then end() finalizes the file and reports ok exactly once", () => {
+      const payload = Buffer.from("stream upload bytes");
+      const begun = mgr.begin({ requestId: "s1", fileName: "s.bin", size: payload.length }, onResult);
+      expect(begun.ok).toBe(true);
+      if (!begun.ok) return;
+      expect(begun.upload.write(payload.subarray(0, 8))).toBe("ok");
+      expect(begun.upload.write(payload.subarray(8))).toBe("ok");
+      begun.upload.end();
+      expect(results().length).toBe(1);
+      const result = results()[0]!;
+      expect(result.ok).toBe(true);
+      expect(result.path).toBeDefined();
+      expect(readFileSync(result.path!).equals(payload)).toBe(true);
+      expect(existsSync(result.path! + ".part")).toBe(false);
+    });
+
+    it("write() past the declared size returns oversize, removes the partial, and never calls onResult", () => {
+      const begun = mgr.begin({ requestId: "s1", fileName: "s.bin", size: 2 }, onResult);
+      expect(begun.ok).toBe(true);
+      if (!begun.ok) return;
+      expect(begun.upload.write(Buffer.from("abc"))).toBe("oversize");
+      expect(results().length).toBe(0);
+      const dir = join(projectDir, ".antgrid", "uploads");
+      const leftovers = existsSync(dir) ? readdirSync(dir).filter((f) => f.endsWith(".part")) : [];
+      expect(leftovers.length).toBe(0);
+    });
+
+    it("end() short of the declared size reports INCOMPLETE and removes the partial", () => {
+      const begun = mgr.begin({ requestId: "s1", fileName: "s.bin", size: 10 }, onResult);
+      expect(begun.ok).toBe(true);
+      if (!begun.ok) return;
+      expect(begun.upload.write(Buffer.from("abc"))).toBe("ok");
+      begun.upload.end();
+      expect(results().length).toBe(1);
+      expect(results()[0]!.ok).toBe(false);
+      expect(results()[0]!.error).toBe("INCOMPLETE");
+      const dir = join(projectDir, ".antgrid", "uploads");
+      const leftovers = existsSync(dir) ? readdirSync(dir).filter((f) => f.endsWith(".part")) : [];
+      expect(leftovers.length).toBe(0);
+    });
+
+    it("cancel() removes the partial without ever calling onResult, and is idempotent", () => {
+      const begun = mgr.begin({ requestId: "s1", fileName: "s.bin", size: 10 }, onResult);
+      expect(begun.ok).toBe(true);
+      if (!begun.ok) return;
+      begun.upload.write(Buffer.from("abc"));
+      begun.upload.cancel();
+      expect(results().length).toBe(0);
+      const dir = join(projectDir, ".antgrid", "uploads");
+      const leftovers = existsSync(dir) ? readdirSync(dir).filter((f) => f.endsWith(".part")) : [];
+      expect(leftovers.length).toBe(0);
+      // idempotent: a second cancel (e.g. a racing stream reset after the app
+      // already FIN'd) must not throw or report anything.
+      expect(() => begun.upload.cancel()).not.toThrow();
+      expect(results().length).toBe(0);
+    });
+
+    it("a result already reported by write() is not re-reported by a later end()", () => {
+      const begun = mgr.begin({ requestId: "s1", fileName: "s.bin", size: 2 }, onResult);
+      expect(begun.ok).toBe(true);
+      if (!begun.ok) return;
+      begun.upload.write(Buffer.from("abc")); // oversize: no result, but the upload is done
+      begun.upload.end();
+      expect(results().length).toBe(0);
+    });
+
+    it("stop() reports WRITE_FAILED for an in-flight stream upload and removes its partial", () => {
+      const begun = mgr.begin({ requestId: "s1", fileName: "s.bin", size: 10 }, onResult);
+      expect(begun.ok).toBe(true);
+      if (!begun.ok) return;
+      begun.upload.write(Buffer.from("abc"));
+      mgr.stop();
+      expect(results().length).toBe(1);
+      expect(results()[0]!.error).toBe("WRITE_FAILED");
+      const dir = join(projectDir, ".antgrid", "uploads");
+      const leftovers = existsSync(dir) ? readdirSync(dir).filter((f) => f.endsWith(".part")) : [];
+      expect(leftovers.length).toBe(0);
+    });
+
+    it("rejects an over-cap declared size the same way handleStart does", () => {
+      const begun = mgr.begin({ requestId: "s1", fileName: "big.bin", size: MAX_UPLOAD_BYTES + 1 }, onResult);
+      expect(begun.ok).toBe(false);
+      if (begun.ok) return;
+      expect(begun.result.error).toBe("TOO_LARGE");
+    });
+
+    it("MAX_CONCURRENT_UPLOADS is shared between the socket path and the stream path", () => {
+      start(10, "a.bin", "r1");
+      start(10, "b.bin", "r2");
+      const begun1 = mgr.begin({ requestId: "s1", fileName: "c.bin", size: 10 }, onResult);
+      expect(begun1.ok).toBe(true);
+      const begun2 = mgr.begin({ requestId: "s2", fileName: "d.bin", size: 10 }, onResult);
+      expect(begun2.ok).toBe(true);
+      // Cap (4) is now full across both paths.
+      const begun3 = mgr.begin({ requestId: "s3", fileName: "e.bin", size: 10 }, onResult);
+      expect(begun3.ok).toBe(false);
+      if (!begun3.ok) expect(begun3.result.error).toBe("BUSY");
+      mgr.handleStart(createMessage("file:upload-start", {
+        projectId: "p", requestId: "r5", fileName: "f5.bin", size: 10,
+      }));
+      expect(lastOfType(sent, "file:upload-result")!.error).toBe("BUSY");
+    });
   });
 });
 

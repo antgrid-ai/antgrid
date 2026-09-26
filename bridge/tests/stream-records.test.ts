@@ -1,9 +1,12 @@
 import { expect, test } from "bun:test";
 import {
+  STREAM_RAW_READ_BYTES,
   STREAM_RECORD_SLICE_BYTES,
   StreamProtocolViolation,
+  StreamRawReader,
   StreamRecordReader,
   StreamRecordWriter,
+  type RawStreamRecv,
   type StreamReadFailure,
   type StreamRecv,
   type StreamSend,
@@ -87,6 +90,30 @@ function createFakeRecvStream(chunks: number[][]) {
       requested.push(size);
       const next = queue.shift();
       if (next === undefined) throw new Error("fake recv stream exhausted");
+      return next;
+    },
+  };
+  return { stream: { recv }, requested };
+}
+
+/** A `RawStreamRecv` fake for `StreamRawReader`: `read(sizeLimit)` resolves
+ *  each queued step in order, then (once `atEnd` is armed) `[]` forever, as
+ *  the binding does at FIN. A queued `Error` rejects instead, as the binding
+ *  does on a peer reset — the trap `StreamRawReader` exists to distinguish
+ *  from a plain empty read. */
+function createFakeRawRecvStream(steps: Array<number[] | Error>, opts: { atEnd?: boolean } = {}) {
+  const queue = [...steps];
+  const requested: number[] = [];
+  const recv: RawStreamRecv = {
+    readExact: async () => { throw new Error("StreamRawReader must use read(), never readExact()"); },
+    read: async (sizeLimit) => {
+      requested.push(sizeLimit);
+      const next = queue.shift();
+      if (next === undefined) {
+        if (opts.atEnd ?? true) return [];
+        return new Promise<number[]>(() => {}); // hangs, like a stream with nothing more queued
+      }
+      if (next instanceof Error) throw next;
       return next;
     },
   };
@@ -469,4 +496,142 @@ test("a native read rejection propagates as-is and is not a protocol violation",
     () => { throw new Error("must not be called for a plain stream end"); },
   );
   await expect(reader.read()).rejects.toBe(boom);
+});
+
+// --- StreamRecordWriter: sendRaw -------------------------------------------
+// sendRaw shares send()'s queue, overflow bound and per-slice authorized()
+// check; the only difference is the wire shape — no [u32 len] prefix.
+
+test("sendRaw writes the bytes verbatim, with no length prefix", async () => {
+  const fake = createFakeSendStream();
+  const writer = new StreamRecordWriter(fake.stream, () => true, () => {}, 1_000_000, 3);
+  const bytes = new Uint8Array([9, 8, 7, 6, 5]);
+  const outcome = await writer.sendRaw(bytes);
+  expect(outcome).toBe("sent");
+  expect(fake.setPriorityCalls).toEqual([3]); // still runs once, before the first write
+  expect(fake.writeAllCalls).toEqual([[9, 8, 7, 6, 5]]);
+});
+
+test("sendRaw slices a large payload to <=256 KiB pieces, byte-exact and unprefixed", async () => {
+  const fake = createFakeSendStream();
+  const writer = new StreamRecordWriter(fake.stream, () => true, () => {}, 64 * 1024 * 1024);
+  const bytes = new Uint8Array(Math.floor(STREAM_RECORD_SLICE_BYTES * 2.5)).map((_, i) => i % 251);
+  const outcome = await writer.sendRaw(bytes);
+  expect(outcome).toBe("sent");
+  expect(fake.writeAllCalls.length).toBeGreaterThan(1);
+  for (const call of fake.writeAllCalls) expect(call.length).toBeLessThanOrEqual(STREAM_RECORD_SLICE_BYTES);
+  const rebuilt = Buffer.concat(fake.writeAllCalls.map((c) => Buffer.from(c)));
+  expect(rebuilt.length).toBe(bytes.length); // no +4 prefix anywhere in the stream
+  expect(Array.from(rebuilt)).toEqual(Array.from(bytes));
+});
+
+test("sendRaw resolves 'sent' without writing for a zero-length call", async () => {
+  const fake = createFakeSendStream();
+  const writer = new StreamRecordWriter(fake.stream, () => true, () => {}, 1_000_000);
+  const outcome = await writer.sendRaw(new Uint8Array(0));
+  expect(outcome).toBe("sent");
+  expect(fake.writeAllCalls).toEqual([]);
+  // The record still passes through drain() (so it observes authorization the
+  // same as any other), which is what sets priority on the FIRST dequeued
+  // record regardless of its length — only `writeInSlices`'s loop is skipped
+  // for zero bytes.
+  expect(fake.setPriorityCalls).toEqual([0]);
+});
+
+test("sendRaw is authorized before send and rechecked per slice, exactly like send()", async () => {
+  const fake = createFakeSendStream();
+  const failures: StreamWriteFailure[] = [];
+  const writer = new StreamRecordWriter(fake.stream, () => false, (r) => failures.push(r), 1_000_000);
+  const outcome = await writer.sendRaw(new Uint8Array([1, 2, 3]));
+  expect(outcome).toBe("dropped");
+  expect(failures).toEqual(["unauthorized"]);
+  expect(fake.writeAllCalls).toEqual([]);
+});
+
+test("revoking authorization mid-sendRaw stops after the in-flight slice, resetting only the stream", async () => {
+  const fake = createFakeSendStream();
+  const gate = fake.gateNextWrite();
+  const failures: StreamWriteFailure[] = [];
+  let allowed = true;
+  const writer = new StreamRecordWriter(fake.stream, () => allowed, (r) => failures.push(r), 64 * 1024 * 1024);
+  const sent = writer.sendRaw(new Uint8Array(STREAM_RECORD_SLICE_BYTES * 3));
+  await flush();
+  expect(fake.writeAllCalls.length).toBe(1);
+  allowed = false;
+  gate.release();
+  expect(await sent).toBe("dropped");
+  expect(fake.writeAllCalls.length).toBe(1);
+  expect(failures).toEqual(["unauthorized"]);
+});
+
+test("an overflowing sendRaw resets the stream only, sharing send()'s overflow bound", async () => {
+  const fake = createFakeSendStream();
+  const failures: StreamWriteFailure[] = [];
+  // Room for exactly one 8-byte raw write. As in the analogous send() test:
+  // all three calls land synchronously, so A is already dequeued (drain is
+  // mid-flight, suspended before its first write) while B still occupies the
+  // 10-byte queue and C's arrival overflows it.
+  const writer = new StreamRecordWriter(fake.stream, () => true, (r) => failures.push(r), 10, 0, 42n);
+  const sentA = writer.sendRaw(new Uint8Array(8));
+  const sentB = writer.sendRaw(new Uint8Array(8));
+  const sentC = writer.sendRaw(new Uint8Array(8)); // 8 (B) + 8 (C) > 10 -> overflow
+  expect(await sentC).toBe("dropped");
+  expect(await sentB).toBe("dropped");
+  expect(await sentA).toBe("dropped"); // aborted before its write ever reached the wire
+  await flush();
+  expect(fake.writeAllCalls).toEqual([]);
+  expect(fake.resetCalls).toEqual([42n]);
+  expect(failures).toEqual(["overflow"]);
+});
+
+test("sendRaw and send() share one queue and are written in submission order", async () => {
+  const fake = createFakeSendStream();
+  const writer = new StreamRecordWriter(fake.stream, () => true, () => {}, 1_000_000);
+  const record = writer.send(new Uint8Array([1, 2]));
+  const raw = writer.sendRaw(new Uint8Array([9, 9, 9]));
+  expect(await record).toBe("sent");
+  expect(await raw).toBe("sent");
+  // The record keeps its 4-byte length prefix; the raw write does not.
+  expect(fake.writeAllCalls).toEqual([
+    [0, 0, 0, 2, 1, 2],
+    [9, 9, 9],
+  ]);
+});
+
+// --- StreamRawReader -------------------------------------------------------
+
+test("StreamRawReader.read returns the bytes read, clamping maxBytes to [1, STREAM_RAW_READ_BYTES]", async () => {
+  const fake = createFakeRawRecvStream([[1, 2, 3]]);
+  const reader = new StreamRawReader(fake.stream);
+  const result = await reader.read(1_000_000_000);
+  expect(Array.from(result!)).toEqual([1, 2, 3]);
+  expect(fake.requested).toEqual([STREAM_RAW_READ_BYTES]);
+});
+
+test("StreamRawReader.read clamps a request below 1 up to 1", async () => {
+  const fake = createFakeRawRecvStream([[7]]);
+  const reader = new StreamRawReader(fake.stream);
+  await reader.read(0);
+  expect(fake.requested).toEqual([1]);
+});
+
+test("StreamRawReader.read resolves null at FIN (an empty array), never a zero-length Uint8Array", async () => {
+  const fake = createFakeRawRecvStream([], { atEnd: true });
+  const reader = new StreamRawReader(fake.stream);
+  const result = await reader.read(100);
+  expect(result).toBeNull();
+});
+
+test("StreamRawReader.read rejects on reset or connection loss, rethrown as-is", async () => {
+  const boom = new Error("peer reset this stream");
+  const fake = createFakeRawRecvStream([boom]);
+  const reader = new StreamRawReader(fake.stream);
+  await expect(reader.read(100)).rejects.toBe(boom);
+});
+
+test("StreamRawReader.read passes maxBytes through unclamped inside the valid range", async () => {
+  const fake = createFakeRawRecvStream([[1, 2, 3, 4, 5]]);
+  const reader = new StreamRawReader(fake.stream);
+  await reader.read(5);
+  expect(fake.requested).toEqual([5]);
 });
