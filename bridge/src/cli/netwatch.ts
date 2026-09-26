@@ -174,6 +174,7 @@ function field(value: unknown, max = 64): string {
 function detailText(event: NetwatchEvent): string {
   const parts: string[] = [];
   if (event.streamId) parts.push(`s:${field(event.streamId, 8)}`);
+  if (event.streamKind) parts.push(field(event.streamKind, 12));
   if (event.reason) parts.push(field(event.reason));
   for (const [k, v] of Object.entries(event.detail ?? {})) parts.push(`${field(k, 24)}=${field(v)}`);
   return parts.join(" ");
@@ -419,8 +420,8 @@ export function joinCaptures(
         : (x.e.dir === y.e.dir ? 0 : x.e.dir === "tx" ? -1 : 1)));
 
   // A hash id (D3) repeats for every byte-identical frame — a ping, a pong, a
-  // credit update — so more than one occurrence can legitimately share a
-  // frameId. Pairing "the first
+  // repeated stream-ready notice — so more than one occurrence can legitimately
+  // share a frameId. Pairing "the first
   // opposite-direction event with this id" wired every later occurrence to that
   // SAME first peer instead of to the one that actually crossed with it, which
   // both double-counted one frame as matched and left its true counterpart
@@ -428,10 +429,12 @@ export function joinCaptures(
   // with the Nth receive, in the causal order established above — pairs the
   // occurrences that actually happened together, and degrades to exactly the
   // old one-shot lookup when an id occurs once per side. Channel joins the key
-  // so two channels sharing an id is never read as the same event twice, and so
-  // does the direction of travel: both ends can send the same bytes, and a send
-  // pairs only with a receive at the far end, never with its own side's receive
-  // of the other end's copy.
+  // so two loopback channels sharing an id are never read as the same event
+  // twice, and so does the direction of travel: both ends can send the same
+  // bytes, and a send pairs only with a receive at the far end, never with its
+  // own side's receive of the other end's copy. `streamKind` stays out of the
+  // key: the app's capture never sets it, so keying on it would leave every
+  // native frame the bridge tags unpairable.
   const txByKey = new Map<string, NetwatchEvent[]>();
   const rxByKey = new Map<string, NetwatchEvent[]>();
   for (const { e, origin } of sorted) {

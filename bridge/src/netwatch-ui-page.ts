@@ -426,6 +426,7 @@ function channelOf(ev){
 function detailOf(ev){
   var parts = [];
   if (ev.streamId) parts.push("s:" + clean(ev.streamId, 8));
+  if (ev.streamKind) parts.push(clean(ev.streamKind, 12));
   if (ev.reason) parts.push(clean(ev.reason, 48));
   if (ev.detail && typeof ev.detail === "object") {
     Object.keys(ev.detail).forEach(function(k){
@@ -442,6 +443,7 @@ function matches(ev){
   if (view.drops && ev.kind !== "drop") return false;
   if (!view.query) return true;
   var hay = (ev.msgType || "") + " " + ev.kind + " " + (ev.channel || "") + " " +
+            (ev.streamKind || "") + " " +
             (ev.reason || "") + " " + (ev.frameId || "") + " " + wireOf(ev) + " " +
             detailOf(ev) + " " + (ev.body || "");
   return hay.toLowerCase().indexOf(view.query) !== -1;
@@ -569,7 +571,7 @@ function mark(text){
 
 /* ---- detail ------------------------------------------------------------ */
 
-var FIELDS = ["seq","dir","kind","transport","channel","streamId","msgType","frameId",
+var FIELDS = ["seq","dir","kind","transport","channel","streamKind","streamId","msgType","frameId",
               "bytes","reason","origin"];
 
 function showDetail(ev){

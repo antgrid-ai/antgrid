@@ -36,8 +36,11 @@ and codecs: `StreamOpen`/`StreamRefused`, `encodeStreamOpen`/`decodeStreamOpen`,
 **The first stream** the bridge accepts must declare `{kind:"session"}`. A missing, unparseable or
 non-session first open closes the connection (code `2n`, protocol violation) rather than being refused
 in-band — there is no session yet worth keeping alive. Once validated, the session stream carries the
-rest of this document unchanged: peer frames, the hello (§2), credits (§5) and frag, all on the same
-stream, with no open acknowledgement.
+rest of this document unchanged: peer frames and the hello (§2), all on the same stream, with no open
+acknowledgement. There is no fragmentation and no credit-flow window left to carry (A5 deleted both —
+see §5): one `AbMessage` is one record, sliced only at the transport layer (`StreamRecordWriter`,
+`bridge/src/peer/stream-records.ts`), and `MAX_TRANSFER_BYTES`/`PEER_MAX_RECORD_BYTES` bound a record's
+size instead of a window's.
 
 **Every later stream** is admitted in its own task by `PeerStreamAcceptor`
 (`bridge/src/peer/stream-dispatch.ts`), so stream *N+1* is never blocked behind stream *N*'s open-frame
@@ -63,7 +66,8 @@ stream never costs the connection; only an unauthorized peer or a first-stream p
 
 As of Stage A wave A1 the handler table held nothing, so every well-formed later stream was refused
 `NOT_ALLOWED`. Wave A2 registers `{kind:"terminal"}` (§1b); wave A3 adds `{kind:"tunnel-http"}` and
-`{kind:"tunnel-ws"}` (§1c). Project streams arrive with theirs in a later wave. The QUIC-level cap
+`{kind:"tunnel-ws"}` (§1c); wave A4 adds `{kind:"project"}` (§1d), which replaces the session stream's old
+`{s,m}` mux entirely. The QUIC-level cap
 (`STREAM_MAX_BIDI_STREAMS_PER_CONNECTION`) is set
 once per connection via `setMaxConcurrentBiStreams`, synchronously after the ALPN check. All caps are
 defined once in `packages/antgrid-wire/src/stream-open.ts` and hand-mirrored in
@@ -96,15 +100,15 @@ breaks either rule aborts only that stream, never the connection.
 
 **Routing keys.** `subscribed`, and a `display:status` naming no bound attachment yet (UPGRADE_REQUIRED,
 UNKNOWN_TERMINAL, a failed attach), route by `(peerId, requestId)`; every other outbound message routes by
-`(peerId, attachmentId)`. A message with no bound stream falls back to the legacy session path unchanged —
+`(peerId, attachmentId)`. A message with no bound stream falls back to that peer's project stream (§1d) —
 this is how the app's own `terminal:subscribe` on the project stream (still accepted; the app itself never
 sends one there) and older builds keep working.
 
 **Ends.** When delivery retires the attachment, the bridge `finish()`es its send half; the app reads that
 FIN as a plain retirement, not an ENDED status. When the app FINs or resets its send half, the bridge
 synthesizes `terminal:unsubscribe` for whatever attachment was bound. An overflow or a lost stream resets
-only that one stream (every other attachment and the connection are untouched); only `unauthorized` closes
-the connection, exactly as in §1a.
+only that one stream (every other attachment and the connection are untouched); only `unauthorized`, or an
+app record whose length prefix exceeds the stream's cap (a protocol violation), closes the connection.
 
 **Caps.** `STREAM_TERMINAL_APP_RECORD_MAX_BYTES`, `STREAM_TERMINAL_BRIDGE_RECORD_MAX_BYTES` and
 `STREAM_MAX_TERMINAL_ATTACHMENTS_PER_PEER` are defined once in `packages/antgrid-wire/src/stream-open.ts`
@@ -163,12 +167,59 @@ half fails, which it treats as the app's cancel — aborting the upstream fetch 
 own send half in turn, exactly as if it had reached the end on its own. A record arriving after the
 declared body length, or after the app's own end, is a stream breach. Failure isolation matches §1b: an
 overflow or a lost stream resets only that one stream — every other tunnel, attachment and the connection
-are untouched — and only `unauthorized` (or a first-stream protocol violation, §1a) closes the connection.
+are untouched — and only `unauthorized`, or a protocol violation (a bad first stream, §1a, or an app
+record over the stream's cap), closes the connection.
 
 **Caps.** `STREAM_MAX_TUNNEL_STREAMS_PER_PEER`, `STREAM_TUNNEL_DATA_MAX_BYTES` (a data record's payload,
 after its tag byte), `STREAM_TUNNEL_RECORD_MAX_BYTES` (payload + tag, what the reader checks against) and
 `STREAM_TUNNEL_REQUEST_BODY_MAX_BYTES` (an HTTP request body, bounded the same as a session-path transfer)
 are defined once in `packages/antgrid-wire/src/stream-open.ts` beside every other stream cap (§1a).
+
+## 1d. Project streams
+
+Stage A wave A4 gives every project its own stream — `{kind:"project", projectId}`, no `checkoutId`: a
+project stream is per PROJECT, and checkout routing stays per message on it, unchanged. It replaces the
+`{s,m}` mux entirely: a bound stream carries no `s`/`m` envelope, one `AbMessage` is one record, and the
+session stream (§1a) is left carrying only the machine control plane: the hello, liveness, and
+machine-scoped verbs such as `agent:projects`, `stream-ready` and `control:result`. Admitted
+and routed by `ProjectStreamRegistry` (`bridge/src/project-streams.ts`), plugged into `PeerStreamAcceptor`
+as `handlers.project`, and exposed to `TerminalStreamRegistry`/`TunnelStreamRegistry` as
+`projectBinding`/`tunnelBinding` — both lookups only; neither a terminal nor a tunnel open ever opens or
+promotes a core.
+
+**Admission order**, synchronous and before any read: a per-peer cap (`STREAM_MAX_PROJECTS_PER_PEER`,
+`CAP_EXCEEDED`); `isSafeProjectId` (`NOT_ALLOWED`); the remote-access switch (`NOT_ALLOWED`); the project
+catalogued (`seenProjects`, `NOT_ALLOWED`); a relay-registered core for this project — else `NOT_READY`
+(hazard J, `docs/iroh-reduction/stage-A-waves.md`: the app waits for `stream-ready {projectId}` on the
+session stream and opens again, never parked); that core's outbound `mayDeliver` (`NOT_ALLOWED`); its
+`mayAcceptFrom` (`UPDATE_REQUIRED` or `NOT_ALLOWED`); and finally a duplicate open for the same (peer,
+project) pair (`INVALID`).
+
+**The bind is the bridge's own first record.** `stream-ready {projectId}` is both the hazard-J ready notice
+on the session stream AND the bridge's first write on a newly admitted project stream — the app treats its
+project stream as bound only once this record arrives; there is no separate open acknowledgement.
+
+**Outbound authorization runs on every send, not just at open.** `mayDeliver` (the remote-access switch,
+outbound half) and `mayDeliverTo` (per-receiver: a peer that becomes stale mid-session because its project
+gained an isolated session) are both re-read on every bus frame a project stream would carry, broadcast or
+peer-addressed — the switch can flip and a core's isolated-session state can change after the stream is
+already bound. `mayAcceptFrom` is the sender-side mirror, re-checked on every inbound record: a refused
+record is dropped and the peer is told why by a `control:result {ok:false}` on the session stream,
+rate-limited per (peer, project) pair (`INVALID_NOTICE_COOLDOWN_MS`).
+
+**Session-bus frames** (`docs/session-messaging.md`) ride this stream, peer-addressed, exactly like any
+other project-scoped bus frame — there is no separate stream for them.
+
+**Failure isolation** matches §1b/§1c: an overflow or a lost stream resets only that one project stream
+(the app reopens and resyncs through `state.snapshot`); only `unauthorized`, or a protocol violation (a bad
+first stream, §1a, or an app record over `STREAM_PROJECT_APP_RECORD_MAX_BYTES`), closes the connection.
+
+**Caps.** `STREAM_MAX_PROJECTS_PER_PEER`, `STREAM_PROJECT_APP_RECORD_MAX_BYTES` (app→bridge; the app only
+ever writes small control-plane records) and `STREAM_PROJECT_BRIDGE_RECORD_MAX_BYTES` (bridge→app, equal to
+`MAX_TRANSFER_BYTES` — a large reply such as `file:content` is still one record) are defined once in
+`packages/antgrid-wire/src/stream-open.ts` beside every other stream cap (§1a); the writer's queue ceiling
+(`PROJECT_STREAM_MAX_QUEUED_BYTES`) and stream priority (`STREAM_PRIORITY_PROJECT`, between terminal and
+tunnel priority) are side-local to `bridge/src/project-streams.ts`.
 
 ## 2. The hello
 
@@ -214,8 +265,9 @@ the ping/pong path, `machine_session.dart`) and the connection supervisor redial
 admission (§1) and the hello (§2) again. Symmetrically, the bridge declares a session dead on missed
 pongs and drops it (`peer-session-owner.ts`), which the peer observes as its connection closing.
 
-This makes every liveness failure and every credit-window wedge a full re-dial, including the
-authorization lease refresh — there is no cheaper in-connection recovery path left. `MachineSession`
+This makes every liveness failure a full re-dial, including the
+authorization lease refresh — there is no cheaper in-connection recovery path left (Stage A deleted
+the credit window that used to wedge independently of liveness — §5). `MachineSession`
 fences sends/receives across a reconnect with a per-connection generation token
 (`_SessionGeneration`/`_generation`, `machine_session.dart`), not a key identity check, since there are
 no keys to compare.
@@ -226,32 +278,53 @@ own capacity cap (§1) is the only admission-time bound, and nothing sends a tak
 ## 4. Frame layout
 
 Wire layout, `FrameKind` and `FRAME_VERSION` are defined in `packages/antgrid-wire/src/peer-frame.ts`
-(canonical) and hand-mirrored in `packages/antgrid_relay_client/lib/src/frame.dart`. `FrameKind` carries
-a single value on purpose — there is no `sealed`/`handshake` split left to distinguish, and the kind
-byte is kept only so a future framing change (Stage A) does not have to re-introduce the field. Peer
-identity is authenticated by the connection and deliberately absent from the frame record.
+(canonical) and hand-mirrored in `packages/antgrid_relay_client/lib/src/frame.dart`. This envelope carries
+only the session stream's two record kinds (§1a's `PeerFrameHeader.type`, `session`/`message`) — the `{s,m}`
+mux it once also carried is gone (A4/A5); every other stream (§1b-§1d) frames its records directly with no
+`FrameKind` envelope at all. `FrameKind` carries a single value on purpose — there is no `sealed`/`handshake`
+split left to distinguish, and the kind byte is kept for the same reason the header's `type` field is: a
+future session-stream framing change would otherwise have to re-introduce it. Peer identity is
+authenticated by the connection and deliberately absent from the frame record.
 
 Test vectors: `evals/fixtures/peer-transport-vectors.json`, generated by
 `packages/antgrid-wire/scripts/gen-peer-transport-vectors.ts` (`bun run --filter antgrid-wire
 gen:peer-vectors`) and consumed by both `packages/antgrid-wire/tests/peer-transport-vectors.test.ts` and
 `packages/antgrid_peer_transport/test/peer_transport_vectors_test.dart`. Regenerate and commit the fixture
-together with any change to the frame or flow-control constants it pins.
+together with any change to the frame or stream-open constants it pins.
 
-## 5. Per-channel flow control
+## 5. Per-record caps, not per-channel flow control
 
-Each direction of a session carries a cumulative credit window per channel (`control`, `preview`) plus one in-flight cap per socket,
-credited by a plaintext `credit { channel, consumed }` session frame. The accounting
-counts plaintext payload bytes only — there is no per-frame overhead to add or subtract, and both the sender and the receiver must agree on that in the same change, or the window drains a
-fixed amount per frame until the next resync. Constants live in `packages/antgrid-wire/src/flow.ts`
-(canonical) and are hand-mirrored in `packages/antgrid_relay_client/lib/src/flow.dart`; read them there
-rather than here, since they move independently of this document.
+Stage A wave A5 deleted the credit-window scheme this section used to describe (`flow.ts`, a cumulative
+per-channel credit consumed by a plaintext `credit` session frame) along with the fragmentation it existed
+to pace: once every purpose-specific stream (§1a-§1d) carries its own records directly, with no `{s,m}`
+envelope to multiplex over, a credit window bought nothing a per-record size cap does not already bound.
+
+What replaced it is a cap per record, asymmetric by direction and defined once per stream kind in
+`packages/antgrid-wire` (session: `PEER_MAX_RECORD_BYTES`/`PEER_MAX_BRIDGE_RECORD_BYTES` in
+`peer-authorization.ts`; project, terminal and tunnel: `stream-open.ts`, §1b-§1d) — the app only ever writes
+small control-plane records, so its cap is far below the bridge's, which is sized to `MAX_TRANSFER_BYTES`.
+An app record whose length prefix exceeds its stream's cap is a protocol violation and closes the
+connection. Backpressure is a bounded per-stream write queue ahead of the native binding
+(`StreamRecordWriter`, `bridge/src/peer/stream-records.ts`) rather than a credit window: a project, terminal
+or tunnel stream that fills its queue is reset — that stream alone, per D3 — instead of stalling every
+other stream sharing what used to be one socket's window. The session stream is the one exception: it has
+nothing to reopen, so its overflow retires the connection (`queue-full`, `native-host-connection.ts`).
+There is no credit frame left on the wire, and `flow.ts`/`flow.dart` no longer exist.
 
 ## 6. Netwatch frame IDs
 
 Both endpoints tag every frame with a hash of its payload bytes — `frameIdFor` (`bridge/src/netwatch.ts`),
 hand-mirrored as `frameIdOf` (`packages/antgrid_relay_client/lib/src/frame.dart`) — and the joiner
 (`joinCaptures`, `bridge/src/cli/netwatch.ts`) pairs same-hash occurrences across the two captures
-**in the order they occur**, not by assuming a hash is unique — a ping, a pong, and a credit
-frame with the same field values are byte-identical and legitimately recur. `NetwatchKind` names
+**in the order they occur**, not by assuming a hash is unique — a ping, a pong, and a repeated
+`stream-ready` with the same field values are byte-identical and legitimately recur. `NetwatchKind` names
 `frame`/`hello` (formerly `sealed`/`handshake`) alongside `control`/`json`/`drop`/`lifecycle` — see the
 type declaration for the current set, since it is a poor fit for a frozen list here.
+
+`NetwatchEvent.channel` is the loopback socket's own `control`/`preview` JSON label (D2,
+docs/iroh-reduction/ledger.md) and stays meaningful there; on `transport: "iroh"` it carries no information
+any more — the `{s,m}` mux is gone (A4/A5), and every native record source writes `"control"`.
+`NetwatchEvent.streamKind` (the open frame's `kind`, §1a-§1d) is what names a native record's stream, but
+no bridge call site sets it yet (the Stage A ledger's open items), and it is deliberately not part of the
+join key: the app's capture has no such field. `streamId` is the app's logical stream label (`"0"` for the
+session stream, else the projectId), not a QUIC stream id; bridge records leave it unset.

@@ -56,7 +56,8 @@ the code wins over both.
 | A | A2 terminal attachment streams | done | `8a13d83b` |
 | A | A3 tunnel HTTP/WS streams | done | `55c741e8` |
 | A | A4 project streams replace the `{s,m}` mux | done | `3d7ecc53` |
-| A | A5 deletions, A6 docs | in progress | |
+| A | A5 delete credits, schedulers, fragmentation, stream envelope | done | `eb67f79b` |
+| A | A6 docs, diagnostics and ledger | in progress | |
 
 ### Stage C gate evidence (executed by the wave commit agents)
 
@@ -94,12 +95,14 @@ the code wins over both.
 - A2: wire 130; bridge 4902 pass with the 6 known failures; relay 173; relay_client 283; peer_transport 64; app 4210; `flutter analyze` clean in app and the three packages; evals 108 pass, 5 skip, with the only failure the gate-vectors git-clean guard, which clears at the commit; `test:evals:dart-terminal` 7 pass; qualify runs and the relay gate pass.
 - A3: wire 136; bridge 4928 pass with the 6 known failures; relay 173; relay_client 308; peer_transport 64; app 4187; `flutter analyze` clean; evals 113 pass, 5 skip, with the same git-clean guard as the only failure before the commit; qualify runs and the relay gate pass.
 - A4: wire 138; bridge 4923 pass with the 6 known failures; relay 173; relay_client 306; peer_transport 64; app 4188; `flutter analyze` clean; evals 119 pass, 5 skip, gate-vectors green after the commit; qualify runs and the relay gate pass.
+- A6: bridge 4888 pass, 16 skip, 6 fail (the six known stale-runId fixtures), 4910 total, via `bun run --filter antgrid-bridge test`; 4886/4908 before A6, the difference being its two netwatch tests. Only bridge was re-run, since A6 changes no other workspace; A5's own wire/relay/app counts are not recorded here.
 
 ### Stage A open items
 
 - **Regression, not investigated:** `test:evals:native-soak` fails its 128 MiB process-RSS bound about 500s into the 30-minute run, on both A3 and A4. Its duplicate-mutation, stale-admission and ownership assertions pass. The older ledger (`docs/iroh-simplification-ledger.md`) records it passing whole before Stage B; no run between then and A3 exists to bisect against.
 - RPC replies to a relay peer are now addressed to the asking peer instead of broadcast to every peer bound to the project (contract D-10); before A4 the mux stream id scoped them implicitly.
-- If a message's abort signal fires after its first fragment is written, the queued fragments are dropped. The app's reassembler frees the incomplete set after its transfer timeout.
+- **Resolved by A5:** the prior item here ("if a message's abort signal fires after its first fragment is written, the queued fragments are dropped") no longer applies — A5 deleted fragmentation and the reassembler entirely; every stream write is one record.
+- **Open:** `NetwatchEvent.streamKind` (`bridge/src/netwatch.ts`, the open frame's `kind`) is rendered by the CLI and `netwatch-ui-page.ts`, but no bridge call site sets it yet: `peer-session-owner.ts`, `project-streams.ts`, `peer/terminal-streams.ts`, `peer/tunnel-streams.ts` and `peer/native-host-connection.ts` still record only `channel: "control"`, so a native capture cannot be filtered by stream. It stays out of the `joinCaptures` key because the app's capture has no such field. `streamId` is not a QUIC stream id: the app writes its logical label (`"0"` or the projectId) and the bridge leaves it unset.
 
 - The bridge and the app can briefly disagree on free slots while a close is in flight, so the bridge may refuse a new stream with `CAP_EXCEEDED`. Accepted.
 - A tunnel request body is reassembled in memory before `serveHttp`, so the worst case per peer is the wire body cap times 128 streams.

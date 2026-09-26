@@ -13,7 +13,7 @@ WebSocket remains for discovery, presence and revocation. Release remains
 unqualified. See [the task ledger](iroh-migration-ledger.md) and
 [qualification checkpoint](iroh-qualification.md) for evidence and release
 gates, and [`docs/protocol/peer-session.md`](protocol/peer-session.md) for the
-session hello, admission and flow-control protocol.
+session hello, stream admission and the stream catalogue.
 
 ```
 App (Flutter) <--QUIC/TLS over Iroh (direct or relayed)--> Agent (Bun)
@@ -22,12 +22,16 @@ App (Flutter) <--QUIC/TLS over Iroh (direct or relayed)--> Agent (Bun)
 The central relay authenticates devices via a signed `hello` frame (Ed25519
 proof-of-possession) — unrelated to peer payload admission, which is decided
 entirely by the authorization lease (`docs/protocol/peer-session.md` §1). The
-session stream carries two credit-flow channels, `control` (terminal, files,
-status) and `preview` (small bus verbs, such as `preview:url`); the HTTP-proxy
-and browser-WebSocket preview traffic itself rides its own per-exchange QUIC
-stream instead — one stream per HTTP request/response and one per WebSocket's
-lifetime — framed as tagged records rather than bus frames
-(`docs/protocol/peer-session.md` §1c).
+session stream carries only the machine control plane (the hello, liveness,
+and machine-scoped verbs such as `agent:projects` and `stream-ready`);
+every project gets its own stream (`docs/protocol/peer-session.md` §1d),
+carrying that project's bus traffic — session-bus frames, `preview:url`, and
+so on — as bare records with no fragmentation and no credit window (Stage A
+deleted both, §5). Terminal attachments and tunnel exchanges get their own
+streams in turn (§1b, §1c): the HTTP-proxy and browser-WebSocket preview
+traffic rides its own per-exchange QUIC stream — one stream per HTTP
+request/response and one per WebSocket's lifetime — framed as tagged records
+rather than bus frames.
 
 ### Native peer payloads
 
@@ -38,8 +42,11 @@ consume the native link; feature services retain their existing interfaces.
 Native implementation and authoritative lease handling live in the ELv2
 `packages/antgrid_peer_transport` package, shared with its standalone CLI smoke.
 
-The bridge's `PeerSessionOwner` owns session establishment, fragmentation,
-scheduling, credits and liveness over Iroh. `CentralControlClient` owns central
+The bridge's `PeerSessionOwner` owns session establishment and liveness over
+Iroh; fragmentation, scheduling and the credit window were deleted with the
+`{s,m}` mux (Stage A, `docs/iroh-reduction/ledger.md`) — each stream now writes
+bare length-prefixed records with its own per-record caps
+(`docs/protocol/peer-session.md` §5). `CentralControlClient` owns central
 authentication, presence, policy invalidation and push delivery; it has no
 binary payload API. `NativeHostConnection` composes those independent owners
 with endpoint lifecycle recovery for authenticated native connections. Native
@@ -175,7 +182,8 @@ pause state, and delivery budget. Relay replies name the subscribing peer before
 they are sent; another connected app receives neither its frames nor its history
 pages. Project streams on the same connection share the terminal byte budget.
 A disconnect retires that peer's attachments while other viewers stay
-attached. Cancellation removes unsent fragments from that peer's send queue.
+attached. Cancellation resets that attachment's own stream, discarding whatever
+it still had queued.
 
 Terminal size ownership is explicit. Passive live viewers show **Take control**;
 activating it sends an immediate `terminal:resize` with `intent: takeover` using
@@ -215,8 +223,9 @@ Subscription identity includes the authenticated connection, project stream,
 checkout, terminal, run, and attachment. A replacement PTY gets a new run ID;
 reconnect gets a new attachment ID. Consumption acknowledgments retire at most
 four frames / 1 MiB per viewer, bounded by 2 MiB across terminal attachments on
-the connection. Terminal payloads are coalesced before encryption and
-fragmentation; existing transport credits and authorization checks still apply.
+the connection. Terminal payloads are coalesced before being written as a
+record on the terminal's own stream (`docs/protocol/peer-session.md` §1b); QUIC/TLS
+is the confidentiality layer and authorization checks still apply per record.
 Acknowledgment is consumption, not evidence that the Flutter engine painted.
 
 Normal-buffer rows are archived at the parser's scroll boundary in indexed
@@ -279,10 +288,12 @@ Terminal qualification commands live in `bridge/package.json` and `evals/package
   Shared by bridge/relay/web/evals.
 
   Single source of truth for peer `FRAME_VERSION`, which is distinct from the
-  central relay message `protocolVersion`. The peer frame carries message type,
-  channel, kind, and payload; the authenticated native connection supplies peer
-  identity — see `docs/protocol/peer-session.md` for the frame layout and the
-  session hello it carries. `relay/src/protocol.ts` is a thin re-export shim of this package;
+  central relay message `protocolVersion`. The peer frame header carries only a
+  `type` discriminator (`session` vs `message`) plus the JSON payload; a
+  `StreamOpen` record (not the frame header) is what tags a stream's kind, and
+  the authenticated native connection supplies peer identity — see
+  `docs/protocol/peer-session.md` for the frame layout, the stream catalogue,
+  and the session hello it carries. `relay/src/protocol.ts` is a thin re-export shim of this package;
   the Dart clients mirror these schemas by hand, so drift is silent. Shared
   fixtures under `evals/fixtures/` pin both control envelopes and peer transport
   bytes and constants across TypeScript and Dart.

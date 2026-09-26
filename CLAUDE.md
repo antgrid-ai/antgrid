@@ -154,7 +154,7 @@ Comments are permanent docs for the next reader, not a log of this chat — writ
 ### Per-component deep reference
 Each file below loads only when you work under its directory — read it before
 editing that component; the repo-wide rules stay in this file.
-- `bridge/CLAUDE.md` — PTY/terminals, relay-client v3 auth, stream mux, host server, OAuth bootstrap, isolated checkouts.
+- `bridge/CLAUDE.md` — PTY/terminals, relay-client v3 auth, native streams, host server, OAuth bootstrap, isolated checkouts.
 - `relay/CLAUDE.md` — hello verification order, epochs, routing, streams, license gate, error contract.
 - `app/CLAUDE.md` — providers, ConnectionSupervisor, per-project services/registry, account auth.
 - `packages/antgrid_relay_client/CLAUDE.md` — relay service + MachineSession (NOT under `app/`, so it loads separately).

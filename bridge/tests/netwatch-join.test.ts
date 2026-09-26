@@ -183,6 +183,17 @@ describe("joinCaptures", () => {
     expect(rx.deltaMs).toBe(19);
   });
 
+  it("pairs a bridge record tagged with a stream kind against the app's untagged copy", () => {
+    // The app's capture carries no stream kind, so the bridge tagging its half
+    // must not split the pair.
+    const app = [ev({ at: 1000, dir: "tx", frameId: "pk", transport: "iroh" })];
+    const bridge = [ev({ at: 1020, dir: "rx", frameId: "pk", transport: "iroh", streamKind: "project" })];
+
+    const { rows } = joinCaptures(app, bridge, NOW);
+    expect(rows.map((r) => r.verdict)).toEqual(["matched", "matched"]);
+    expect(rows.find((r) => r.event.dir === "rx")!.deltaMs).toBe(20);
+  });
+
   it("counts a drop as unpairable, not as a match", () => {
     // A drop never crossed the socket, so it has no counterpart by
     // construction — calling it matched would flatter every report.

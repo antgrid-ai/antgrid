@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { StreamOpenKind } from "antgrid-wire";
 import type { Channel } from "./message-bus";
 import { BODY_REDACTED_MESSAGE_TYPES } from "./protocol";
 
@@ -15,6 +16,10 @@ export type NetwatchDir = "tx" | "rx" | "event";
  */
 export type NetwatchKind = "frame" | "hello" | "control" | "json" | "drop" | "lifecycle";
 
+/** Which native stream carried a record: the `kind` of its open frame, so a new
+ *  stream kind reaches netwatch without a second list to keep in step. */
+export type NetwatchStreamKind = StreamOpenKind;
+
 export interface NetwatchEvent {
   /** Monotonic counter of the process that RECORDED this — this bridge, or the
    *  app named by `origin`. Gaps across a capture mean events were evicted
@@ -25,7 +30,21 @@ export interface NetwatchEvent {
   kind: NetwatchKind;
   /** Keep native peer and loopback bytes out of central payload accounting. */
   transport: "relay" | "local" | "iroh";
+  /**
+   * The loopback socket's own JSON label (`control`/`preview`), which the
+   * loopback wire still carries (docs/iroh-reduction/ledger.md, D2). A native
+   * record has no channel left to name, and its sources all write `"control"`;
+   * `streamKind` is what distinguishes native streams.
+   */
   channel?: Channel;
+  /** Which native stream a record rode. Optional because only the call sites
+   *  that know their stream set it; the Stage A ledger lists the ones that
+   *  do not yet. Never part of the `joinCaptures` key: the app's capture has
+   *  no such field, and a key only one end can fill would pair nothing. */
+  streamKind?: NetwatchStreamKind;
+  /** A per-connection stream label. The app writes its logical one (`"0"` for
+   *  the session stream, else the projectId), not a QUIC stream id; bridge
+   *  records leave it unset. Display only, never joined on. */
   streamId?: string;
   /** Plaintext message type, once the pipeline knows it. Never a payload. */
   msgType?: string;
