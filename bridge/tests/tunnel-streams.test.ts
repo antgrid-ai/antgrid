@@ -1,9 +1,9 @@
-// Stage A wave A3 (docs/iroh-reduction/stage-A-A3-contract.md §3.3, §6).
 // Drives TunnelStreamRegistry directly with fakes — no PeerStreamAcceptor, no
 // real StreamMux, no real TunnelManager. The acceptor's own admission order
 // (authorization, the open-frame read, NOT_READY pre-handler, the pending cap)
 // is covered by stream-dispatch.test.ts; this file starts at the handler
-// boundary, mirroring terminal-streams.test.ts's pattern for the A2 registry.
+// boundary, mirroring terminal-streams.test.ts's pattern for the terminal
+// registry.
 import { describe, test, expect } from "bun:test";
 import {
   TunnelStreamRegistry,
@@ -227,8 +227,9 @@ function fakeBinding() {
   let refuse: ((peerId: string) => StreamRefusal | null) | null = null;
   let mayDeliver = true;
   let available = true;
-  // Every peer has an open project stream by default (A4's admission gate),
-  // so a suite testing other admission steps doesn't also have to wire this.
+  // Every peer has an open project stream by default (the project-stream
+  // admission gate), so a suite testing other admission steps doesn't also
+  // have to wire this.
   let hasOpen: ((peerId: string) => boolean) | null = null;
   const binding: TunnelProjectBinding = {
     hasOpenStream: (peerId) => (hasOpen ? hasOpen(peerId) : true),
@@ -970,7 +971,7 @@ describe("TunnelStreamRegistry (A3)", () => {
     expect(fake.readCalls).toEqual([]);
 
     // The same projectId's project stream is open for a DIFFERENT peer —
-    // that must not satisfy PEER's own admission (A4's single per-peer point).
+    // that must not satisfy PEER's own admission, which is per-peer.
     const other = admitHttp(registry, { peerId: "other-peer" });
     expect(other.result).toBeUndefined();
   });

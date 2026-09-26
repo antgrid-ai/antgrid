@@ -159,11 +159,10 @@ test("unauthorized drops the record and retires the connection, never the stream
   expect(fake.resetCalls).toEqual([]);
 });
 
-// A4 carry-over 4 (docs/iroh-reduction/stage-A-A4-contract.md §6): a project
-// stream's writer is built with the admission's own `authorized()`, which
-// includes the remote-access switch, so these two orderings matter beyond the
-// general case above — a peer refused mid-connection must never be told
-// "overflow" (D3: only the write-time queue check retires the stream itself).
+// A project stream's writer is built with the admission's own `authorized()`,
+// which includes the remote-access switch, so these two orderings matter
+// beyond the general case above — a peer refused mid-connection must never be
+// told "overflow": only the write-time queue check retires the stream itself.
 
 test("send-time authorized() refuses before the overflow check", async () => {
   const fake = createFakeSendStream();
@@ -349,7 +348,7 @@ test("send() after finish() is dropped", async () => {
   expect(fake.writeAllCalls.length).toBe(1); // the post-finish send never reached the wire
 });
 
-// --- StreamRecordWriter: send()'s signal and abort() (A2 §3.1) --------
+// --- StreamRecordWriter: send()'s signal and abort() --------
 
 test("send() with an already-aborted signal is dropped without queueing", async () => {
   const fake = createFakeSendStream();

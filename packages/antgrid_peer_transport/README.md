@@ -52,13 +52,10 @@ bun run --filter antgrid-bridge qualify:iroh-interop
 
 It dials a real `NativeHostConnection` host binding `@number0/iroh` while this side
 binds `iroh_quic`, so it is the only gate covering the pairing the product
-actually ships. It also exercises three host-resume cycles with fresh native/E2E sessions and stable project bindings on the shared app endpoint.
+actually ships. It also exercises three host-resume cycles with fresh native sessions and stable project bindings on the shared app endpoint.
 Set `IROH_INTEROP_NATIVE_LIBRARY` when the library is not on the default search
 path, and `IROH_INTEROP_DART` to choose the Dart executable. `IROH_SMOKE_LOG_LEVEL`
 surfaces host logs, which are the only account of why a host dropped a peer.
 
-Current release limitations and security evidence are in
-[the migration ledger](../../docs/iroh-migration-ledger.md) and
-[qualification](../../docs/iroh-qualification.md). Native release qualification
-remains incomplete. Unknown native close causes remain terminal until upstream
+Native release qualification remains incomplete. Unknown native close causes remain terminal until upstream
 bindings provide a verified retry classification.

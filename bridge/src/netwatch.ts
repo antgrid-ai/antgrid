@@ -37,10 +37,11 @@ export interface NetwatchEvent {
   /** Keep native peer and loopback bytes out of central payload accounting. */
   transport: "relay" | "local" | "iroh";
   /**
-   * The loopback socket's own JSON label (`control`/`preview`), which the
-   * loopback wire still carries (docs/iroh-reduction/ledger.md, D2). A native
-   * record has no channel left to name, and its sources all write `"control"`;
-   * `streamKind` is what distinguishes native streams.
+   * The loopback socket's own JSON label (`control`/`preview`) — the loopback
+   * wire was left unchanged when native traffic moved to per-kind QUIC streams,
+   * so it still carries this label. A native record has no channel left to
+   * name, and its sources all write `"control"`; `streamKind` is what
+   * distinguishes native streams.
    */
   channel?: Channel;
   /** Which native stream a record rode. Optional because a connection- or

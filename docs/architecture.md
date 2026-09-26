@@ -9,10 +9,8 @@ only the cross-cutting shape.
 Remote payloads use Iroh; QUIC/TLS 1.3 between two endpoint IDs the
 authorization snapshot names is the confidentiality layer, with no app-layer
 sealing on top of it and no application-level WebSocket fallback. The central
-WebSocket remains for discovery, presence and revocation. Release remains
-unqualified. See [the task ledger](iroh-migration-ledger.md) and
-[qualification checkpoint](iroh-qualification.md) for evidence and release
-gates, and [`docs/protocol/peer-session.md`](protocol/peer-session.md) for the
+WebSocket remains for discovery, presence and revocation. See
+[`docs/protocol/peer-session.md`](protocol/peer-session.md) for the
 session hello, stream admission and the stream catalogue.
 
 ```

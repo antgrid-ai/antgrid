@@ -58,11 +58,10 @@ stop codes (`STREAM_STOP_REFUSED`, `STREAM_RESET_OPEN_TIMEOUT`, `STREAM_RESET_RE
 `bridge/src/peer/stream-dispatch.ts`) are bridge-side diagnostics only. A refused or timed-out later
 stream never costs the connection; only an unauthorized peer or a first-stream protocol violation does.
 
-As of Stage A wave A1 the handler table held nothing, so every well-formed later stream was refused
-`NOT_ALLOWED`. Wave A2 registers `{kind:"terminal"}` (§1b); wave A3 adds `{kind:"tunnel-http"}` and
-`{kind:"tunnel-ws"}` (§1c); wave A4 adds `{kind:"project"}` (§1d), which replaces the session stream's old
-`{s,m}` mux entirely; wave A7 adds `{kind:"upload"}` (§1e). The QUIC-level cap
-(`STREAM_MAX_BIDI_STREAMS_PER_CONNECTION`) is set
+The handler table registers `{kind:"terminal"}` (§1b), `{kind:"tunnel-http"}` and `{kind:"tunnel-ws"}`
+(§1c), `{kind:"project"}` (§1d — this is what replaces the session stream's old `{s,m}` mux entirely), and
+`{kind:"upload"}` (§1e); a well-formed kind with no registered handler is refused `NOT_ALLOWED`. The
+QUIC-level cap (`STREAM_MAX_BIDI_STREAMS_PER_CONNECTION`) is set
 once per connection via `setMaxConcurrentBiStreams`, synchronously after the ALPN check. All caps are
 defined once in `packages/antgrid-wire/src/stream-open.ts` and hand-mirrored in
 `packages/antgrid_relay_client/lib/src/models/stream_open.dart`.
@@ -113,8 +112,8 @@ them.
 
 ## 1c. Tunnel streams
 
-Stage A wave A3 moves HTTP-proxy and browser-side-WebSocket preview traffic off the bus entirely and
-onto its own QUIC streams, one per exchange: `{kind:"tunnel-http", projectId, requestId}` opens one
+HTTP-proxy and browser-side-WebSocket preview traffic never rides the bus: each gets its own QUIC stream,
+one per exchange: `{kind:"tunnel-http", projectId, requestId}` opens one
 stream for exactly one HTTP request/response pair, `{kind:"tunnel-ws", projectId, wsId}` one stream for
 one browser-side WebSocket's whole lifetime. Both are admitted by `TunnelStreamRegistry`
 (`bridge/src/peer/tunnel-streams.ts`), plugged into `PeerStreamAcceptor` as `handlers["tunnel-http"]` /
@@ -140,8 +139,8 @@ needs neither a length prefix nor a tag: it is raw bytes, read with `StreamRawRe
 `StreamRecordWriter.sendRaw()` (`bridge/src/peer/stream-records.ts`), exactly like an upload's file
 bytes (§1e).
 
-**First-record rule.** The checkout a tunnel targets rides this record, not the open frame (D-7 — the
-open-frame schemas above are frozen as of A0b). An HTTP stream's first record must be a JSON
+**First-record rule.** The checkout a tunnel targets rides this record, not the open frame — the open-frame
+schemas above are frozen and carry no `checkoutId`. An HTTP stream's first record must be a JSON
 `tunnel:http-request`, naming the same `requestId` as the open frame plus `checkoutId`, `headers` and
 `bodyLength`; a WS stream's first record must be `tunnel:ws-open`, naming the same `wsId` as the open
 frame's under the field `tunnelId`, plus `checkoutId`. Either is read under the same 5s deadline as §1a's
@@ -174,7 +173,7 @@ transfer) are defined once in `packages/antgrid-wire/src/stream-open.ts` beside 
 
 ## 1d. Project streams
 
-Stage A wave A4 gives every project its own stream — `{kind:"project", projectId}`, no `checkoutId`: a
+Every project gets its own stream — `{kind:"project", projectId}`, no `checkoutId`: a
 project stream is per PROJECT, and checkout routing stays per message on it, unchanged. It replaces the
 `{s,m}` mux entirely: a bound stream carries no `s`/`m` envelope, one `AbMessage` is one record, and the
 session stream (§1a) is left carrying only the machine control plane: the hello, the app's wedge-probe
@@ -188,12 +187,12 @@ promotes a core.
 **Admission order**, synchronous and before any read: a per-peer cap (`STREAM_MAX_PROJECTS_PER_PEER`,
 `CAP_EXCEEDED`); `isSafeProjectId` (`NOT_ALLOWED`); the remote-access switch (`NOT_ALLOWED`); the project
 catalogued (`seenProjects`, `NOT_ALLOWED`); a relay-registered core for this project — else `NOT_READY`
-(hazard J, `docs/iroh-reduction/stage-A-waves.md`: the app waits for `stream-ready {projectId}` on the
-session stream and opens again, never parked); that core's outbound `mayDeliver` (`NOT_ALLOWED`); its
+(the app waits for `stream-ready {projectId}` on the session stream and opens again, never parked); that
+core's outbound `mayDeliver` (`NOT_ALLOWED`); its
 `mayAcceptFrom` (`NOT_ALLOWED` — fail-closed when the peer resolves to no session); and finally a
 duplicate open for the same (peer, project) pair (`INVALID`).
 
-**The bind is the bridge's own first record.** `stream-ready {projectId}` is both the hazard-J ready notice
+**The bind is the bridge's own first record.** `stream-ready {projectId}` is both the ready notice
 on the session stream AND the bridge's first write on a newly admitted project stream — the app treats its
 project stream as bound only once this record arrives; there is no separate open acknowledgement.
 
@@ -376,7 +375,7 @@ cap at all, since a raw read/write has no length prefix to check against (§1e).
 length prefix exceeds its stream's cap is a protocol violation and closes the connection. Backpressure is
 a bounded per-stream write queue ahead of the native binding (`StreamRecordWriter`,
 `bridge/src/peer/stream-records.ts`): a project, terminal, tunnel or upload
-stream that fills its queue is reset — that stream alone, per D3 — without stalling any other stream. The session stream is the one exception: it has nothing to
+stream that fills its queue is reset — that stream alone — without stalling any other stream. The session stream is the one exception: it has nothing to
 reopen, so its overflow retires the connection (`queue-full`, `native-host-connection.ts`).
 
 A raw stream (an HTTP tunnel body or an upload's file bytes) carries no length-prefixed records at all,
@@ -395,9 +394,9 @@ hand-mirrored as `frameIdOf` (`packages/antgrid_relay_client/lib/src/frame.dart`
 `frame`/`hello` alongside `control`/`json`/`drop`/`lifecycle` — see the
 type declaration for the current set, since it is a poor fit for a frozen list here.
 
-`NetwatchEvent.channel` is the loopback socket's own `control`/`preview` JSON label (D2,
-docs/iroh-reduction/ledger.md) and stays meaningful there; on `transport: "iroh"` it carries no
-information: every native record source writes `"control"`.
+`NetwatchEvent.channel` is the loopback socket's own `control`/`preview` JSON label — the loopback wire was
+left unchanged when native traffic moved to per-kind QUIC streams, so this label stays meaningful there; on
+`transport: "iroh"` it carries no information: every native record source writes `"control"`.
 `NetwatchEvent.streamKind` (the open frame's `kind`, §1a-§1e) is what names a native record's stream
 instead, and both ends now write it — the bridge from `streamLabelOf` (`bridge/src/peer/stream-dispatch.ts`),
 the app from the same lookup in `antgrid_relay_client` — for every stream kind, terminal and tunnel

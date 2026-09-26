@@ -1,18 +1,18 @@
 /**
- * Tunnel HTTP and WebSocket streams (Stage A wave A3,
- * docs/iroh-reduction/stage-A-A3-contract.md §3.3). A tunneled preview request
- * or browser-side WebSocket gets its own QUIC bidi stream: after the A0b open
- * frame, every record is `[u32 len][body]` with the body discriminated by its
- * first byte — `0x7B` JSON control record, or a tagged binary data record
- * (§1.1). There is no `{s, m}` envelope and no preview-channel frame, so no
- * tunnel traffic ever rides the project stream (§1.2).
+ * Tunnel HTTP and WebSocket streams. A tunneled preview request or
+ * browser-side WebSocket gets its own QUIC bidi stream: after the open frame,
+ * every record is `[u32 len][body]` with the body discriminated by its first
+ * byte — `0x7B` JSON control record, or a tagged binary data record. There is
+ * no `{s, m}` envelope and no preview-channel frame, so no tunnel traffic
+ * ever rides the project stream.
  *
  * This registry is plugged into `PeerStreamAcceptor` as the `tunnel-http` and
  * `tunnel-ws` handlers. It never opens or promotes a core: `tunnelBinding` is
  * a lookup over whatever `ProjectStreamRegistry` already has attached, and the
  * real per-checkout authorization runs through `TunnelStreamServer.admit` once
- * the head record names a checkout (D-7: `checkoutId` rides the head, not the
- * open frame, because the A0b open schemas are frozen).
+ * the head record names a checkout — `checkoutId` rides the head rather than
+ * the open frame because the stream-open wire schemas are frozen and carry no
+ * `checkoutId`.
  */
 
 import {
@@ -58,9 +58,8 @@ import type { TunnelProjectBinding } from "../project-streams";
 import type { NetwatchStreamKind } from "../netwatch";
 
 export const TUNNEL_STREAM_MAX_QUEUED_BYTES = 4 * 1024 * 1024;
-/** Below the session stream's binding default of 0, and below terminal's `1`
- *  (§9 D-8 of A2: A4 must place project streams below both). Tunnel traffic
- *  is a page load, not a live viewer — it never needs to preempt either. */
+/** Below session (2), terminal (1) and project (0). Tunnel traffic is a page
+ *  load, not a live viewer — it never needs to preempt any of them. */
 export const STREAM_PRIORITY_TUNNEL = -1;
 // Reset/stop codes are bridge diagnostics only — Dart cannot read them back.
 export const STREAM_RESET_TUNNEL = 0x15n;
@@ -122,7 +121,7 @@ interface BaseBinding {
   /** `requestId` (HTTP) or `wsId` (WS) — the open frame's own id. */
   readonly id: string;
   readonly projectId: string;
-  /** Normalized once the head record parses (D-7); "main" until then, though
+  /** Normalized once the head record parses; "main" until then, though
    *  nothing is sent before that point. */
   checkoutId: string;
   readonly stream: AcceptedBiStream;
@@ -382,7 +381,7 @@ export class TunnelStreamRegistry {
     kind: "http" | "ws",
     id: string,
   ): { ok: true; projBinding: TunnelProjectBinding } | { ok: false; refusal: DispatchStreamRefusal } {
-    // A4: the project stream is the single per-peer admission point for a
+    // The project stream is the single per-peer admission point for a
     // projectId. Closing the project stream does not unbind an already-open
     // tunnel stream.
     const gated = gateProjectStream(

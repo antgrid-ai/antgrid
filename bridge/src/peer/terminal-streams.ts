@@ -1,10 +1,9 @@
 /**
- * Terminal attachment streams (Stage A wave A2,
- * docs/iroh-reduction/stage-A-A2-contract.md §3.2). A terminal attachment gets
- * its own QUIC bidi stream: after the A0b open frame, each record is the raw
- * UTF-8 JSON of one frame-protocol `AbMessage` — no `{s, m}` envelope, no
- * channel label. Everything else (`terminal:input`, `terminal:resize`,
- * `terminal:start`, ...) stays on the project stream, unchanged.
+ * Terminal attachment streams. A terminal attachment gets its own QUIC bidi
+ * stream: after the open frame, each record is the raw UTF-8 JSON of one
+ * frame-protocol `AbMessage` — no `{s, m}` envelope, no channel label.
+ * Everything else (`terminal:input`, `terminal:resize`, `terminal:start`, ...)
+ * stays on the project stream, unchanged.
  *
  * This registry is plugged into `PeerStreamAcceptor` as the `terminal`
  * handler and into `ProjectStreamRegistry` as `routeTerminal` +
@@ -37,11 +36,11 @@ import {
 import type { PeerSessionView, TerminalProjectBinding } from "../project-streams";
 
 /** One viewer window (`TERMINAL_VIEWER_MAX_BYTES`) plus four history pages
- *  plus notices. Exceeding it resets only this stream (D3) — the app reopens
+ *  plus notices. Exceeding it resets only this stream — the app reopens
  *  and resyncs. */
 export const TERMINAL_STREAM_MAX_QUEUED_BYTES = 3 * 1024 * 1024;
-/** Above the session stream's binding default of 0 (§9 D-8: A4 must place
- *  project streams below it too). */
+/** Below session (2), above project (0) and tunnel (-1), so a live terminal
+ *  viewer never waits behind bulk file transfer or preview traffic. */
 export const STREAM_PRIORITY_TERMINAL = 1;
 // Reset/stop codes are bridge diagnostics only — Dart cannot read them back.
 export const STREAM_RESET_TERMINAL = 0x13n;
@@ -127,9 +126,8 @@ export class TerminalStreamRegistry {
     return this.peerBindings.get(peerId)?.size ?? 0;
   }
 
-  /** Every check is synchronous and runs before any read is issued on `recv`
-   *  (carry-over 2): a handler that has started its read loop never returns a
-   *  refusal again. */
+  /** Every check is synchronous and runs before any read is issued on `recv`:
+   *  a handler that has started its read loop never returns a refusal again. */
   private admit(admission: StreamAdmission<TerminalStreamOpen>): DispatchStreamRefusal | undefined {
     const { peerId, open, stream, authorized } = admission;
     const { projectId, requestId } = open;
@@ -138,7 +136,7 @@ export class TerminalStreamRegistry {
     if (!requestIdSchema.safeParse(requestId).success) {
       return { code: "INVALID", message: "requestId must be a uuid" };
     }
-    // A4: the project stream is the single per-peer admission point for a
+    // The project stream is the single per-peer admission point for a
     // projectId — this is what keeps root CLAUDE.md's "seenProjects +
     // isSafeProjectId are the only bound" true. Closing the project stream
     // does not unbind an already-open terminal stream.
@@ -268,7 +266,7 @@ export class TerminalStreamRegistry {
 
   /** The app's FIN or reset. If an attachment was already bound, synthesize
    *  the `terminal:unsubscribe` the app can no longer send itself, exactly as
-   *  if it had (carry-over: FIN/reset means unsubscribe). Otherwise the
+   *  if it had — FIN/reset means unsubscribe. Otherwise the
    *  binding stays indexed by requestId, marked `appEnded`, so a
    *  `terminal:subscribed` or `display:status` still in flight from the core
    *  resolves through `route()` instead of vanishing — see its handling —
@@ -372,7 +370,7 @@ export class TerminalStreamRegistry {
   }
 
   /** Delivery retired the attachment: drain what is already queued (the ENDED
-   *  status included, carry-over 1), then FIN. A miss means the binding is
+   *  status included), then FIN. A miss means the binding is
    *  already gone — the `appEnded`-before-`subscribed` path unbinds itself. */
   retired(peerId: string, attachmentId: string): void {
     const binding = this.byAttachmentId.get(this.key(peerId, attachmentId));

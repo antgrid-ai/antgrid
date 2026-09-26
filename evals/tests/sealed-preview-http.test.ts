@@ -6,19 +6,18 @@ import { RAW_READ_BYTES } from "../helpers/relay-client";
 import { firstProjectStream } from "../support/stream";
 
 // Regression guard for the tunnel-http stream, end to end over a real relay
-// and a real agent (Stage A wave A3, docs/iroh-reduction/stage-A-waves.md §3
-// "A3"; the frozen contract is docs/iroh-reduction/stage-A-A3-contract.md).
-// Every preview HTTP request gets its own native QUIC stream: the app writes
-// the open frame and a `tunnel:http-head`-carrying head record, then the
-// bridge answers with `tunnel:http-head` and the response body as raw bytes
-// with no framing, ending in a clean FIN. The small case proves a body that
-// arrives inside one upstream read still ends cleanly; the large case proves
-// a body spanning many raw reads reassembles byte for byte.
+// and a real agent. Every preview HTTP request gets its own native QUIC
+// stream: the app writes the open frame and a `tunnel:http-head`-carrying
+// head record, then the bridge answers with `tunnel:http-head` and the
+// response body as raw bytes with no framing, ending in a clean FIN. The
+// small case proves a body that arrives inside one upstream read still ends
+// cleanly; the large case proves a body spanning many raw reads reassembles
+// byte for byte.
 //
 // Preview traffic is per-request now, not per-project: `openTunnelHttpStream`
 // opens a stream directly on the native connection, bypassing the project
-// stream entirely (D1/D3 of the contract — the legacy session-stream tunnel
-// is deleted, not kept alongside).
+// stream entirely — the legacy session-stream tunnel is deleted, not kept
+// alongside.
 const BIG = randomBytes(2 * 1024 * 1024);
 
 describe("tunnel-http stream", () => {

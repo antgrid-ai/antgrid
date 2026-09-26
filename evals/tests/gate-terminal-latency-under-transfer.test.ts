@@ -1,10 +1,9 @@
-// Stage A concurrency gate: a dedicated terminal stream and a project stream
-// share one native connection but not one send/receive loop, so a large
-// transfer on the project stream must not stall the terminal stream sitting
-// beside it (docs/iroh-reduction/stage-A-A5-contract.md §6, "A7"). Deviation
-// D-6: a single `file:read` cannot itself reach 32MB (file-tree.ts's 10MB
-// binary cap, ~13.3MB base64), so the load stimulus is three back-to-back
-// reads of one file, not one oversize read.
+// Concurrency gate: a dedicated terminal stream and a project stream share
+// one native connection but not one send/receive loop, so a large transfer on
+// the project stream must not stall the terminal stream sitting beside it. A
+// single `file:read` cannot itself reach 32MB (file-tree.ts's 10MB binary
+// cap, ~13.3MB base64), so the load stimulus is three back-to-back reads of
+// one file, not one oversize read.
 import { test, expect } from "bun:test";
 import { createHash, randomBytes } from "node:crypto";
 import { writeFileSync } from "node:fs";

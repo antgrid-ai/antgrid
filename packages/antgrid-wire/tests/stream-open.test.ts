@@ -277,7 +277,7 @@ test("project caps are asymmetric: the app's read/send cap is 1_500_000, the bri
   expect(STREAM_PROJECT_BRIDGE_RECORD_MAX_BYTES).toBe(MAX_TRANSFER_BYTES);
 });
 
-test("D7 cap constants hold the adopted owner values (docs/iroh-reduction/ledger.md)", () => {
+test("stream cap constants hold their accepted values, and stay under the QUIC bidi limit", () => {
   expect(STREAM_MAX_BIDI_STREAMS_PER_CONNECTION).toBe(256);
   expect(STREAM_MAX_PROJECTS_PER_PEER).toBe(32);
   expect(STREAM_MAX_TERMINAL_ATTACHMENTS_PER_PEER).toBe(64);
@@ -286,7 +286,7 @@ test("D7 cap constants hold the adopted owner values (docs/iroh-reduction/ledger
   expect(STREAM_MAX_UPLOAD_STREAMS_PER_PEER).toBe(4);
   // One peer at every application cap at once, plus its session stream, must
   // fit the QUIC limit, or QUIC flow control stalls an open the application
-  // should have refused in-band. §2.4's stated invariant:
+  // should have refused in-band:
   // 32 + 64 + 128 + 4 + 1 (session) = 229 < 256.
   expect(
     1 +
@@ -305,7 +305,7 @@ test("D7 cap constants hold the adopted owner values (docs/iroh-reduction/ledger
   ).toBeLessThanOrEqual(STREAM_MAX_BIDI_STREAMS_PER_CONNECTION);
 });
 
-test("upload record and length caps hold the contract's values", () => {
+test("upload record and length caps hold their fixed values", () => {
   expect(STREAM_UPLOAD_BRIDGE_RECORD_MAX_BYTES).toBe(16_384);
   expect(STREAM_UPLOAD_MAX_FILE_NAME_LENGTH).toBe(255);
   expect(STREAM_UPLOAD_MAX_MIME_TYPE_LENGTH).toBe(127);

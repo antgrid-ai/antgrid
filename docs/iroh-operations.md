@@ -6,7 +6,7 @@ upstream `iroh-relay` 1.2.0 binary, admission-gated by web's `access.http`
 check. Its unconfigured default is `access = Everyone`, and a missing config
 file or a key under the wrong TOML table silently falls back to it, so an
 allow-all stock relay does not satisfy this deployment contract. The relay
-admission/denial gate is listed in [qualification](iroh-qualification.md) and
+admission/denial gate is `test:evals:iroh-relay-authorization` (`evals/package.json`) and
 has no recorded stock-relay run yet; deployment and native
 forced-relay/platform/performance gates remain open.
 
@@ -160,8 +160,7 @@ Collect payload-free connection-stage timings, native connection failure
 reason, direct/relay bytes, CPU and memory. Native path telemetry is currently
 conservative (`unknown` where bindings do not provide a verified classification).
 No dashboard may turn missing samples into zero latency or zero server bytes.
-Run the matched workload and sample sizes in [the plan](iroh-migration-plan.md),
-including forced relay, blocked UDP, WAN, mobile resume and reconnect storms.
+Run a matched workload with fixed sample sizes, including forced relay, blocked UDP, WAN, mobile resume and reconnect storms.
 
 Promote only after security/platform/performance gates pass: internal, 1%, 10%,
 50%, 100%, at least 48 healthy hours each. No production deployment is

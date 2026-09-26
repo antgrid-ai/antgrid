@@ -1,17 +1,17 @@
-// Stage A wave A2 gate: terminal attachment streams. A subscribed terminal
-// now rides its own native QUIC stream (docs/iroh-reduction/stage-A-waves.md
-// §3 "A2"; the frozen contract is docs/iroh-reduction/stage-A-A2-contract.md).
-// `RelayClient.openTerminalStream` drives the stream directly — it does NOT
-// go through `openTerminalAttachment`'s app-side logic (that is Dart's own
-// production path, exercised by `terminal_attachment_test.dart` and the Dart
-// eval client's `terminal-attach*` actions in
-// `scenarios/dart-client-e2e/dart-terminal.test.ts`) — so a row here is about
-// the WIRE the bridge serves, independent of any one client's reconnect or
-// re-sync policy.
+// Gate: terminal attachment streams. A subscribed terminal rides its own
+// native QUIC stream. `RelayClient.openTerminalStream` drives the stream
+// directly — it does NOT go through `openTerminalAttachment`'s app-side logic
+// (that is Dart's own production path, exercised by
+// `terminal_attachment_test.dart` and the Dart eval client's
+// `terminal-attach*` actions in `scenarios/dart-client-e2e/dart-terminal.test.ts`)
+// — so a row here is about the WIRE the bridge serves, independent of any one
+// client's reconnect or re-sync policy.
 //
 // `terminal:input`, `terminal:resize` and `terminal:start` stay on the
-// project stream throughout (D-3/D1 of the contract); only the eight record
-// types listed in the contract's §0 ride the terminal stream itself.
+// project stream throughout; only eight record types
+// (`terminal:subscribe`/`ack`/`unsubscribe`/`history:request` app-to-bridge,
+// `terminal:subscribed`/`frame`/`display:status`/`history:page`
+// bridge-to-app) ride the terminal stream itself.
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
@@ -191,8 +191,8 @@ describe("gate: terminal attachment streams", () => {
     expect(ended).not.toBeNull();
     expect(ended.exitCode).toBe(0);
     expect(lastFrame?.ansi).toContain(marker);
-    // Carry-over 1: retirement never aborts frames already handed to the
-    // transport, so ENDED is the last record and the FIN right behind it.
+    // Retirement never aborts frames already handed to the transport, so
+    // ENDED is the last record and the FIN right behind it.
     await expectEndedSoon(client);
   }, 30_000);
 
@@ -308,7 +308,7 @@ describe("gate: terminal attachment streams", () => {
     try {
       const projB = computeProjectId(projBdir.dir);
       // Catalogued (seenProjects has it) but stopped, so it has no live mux
-      // entry — projectBinding(projB) === null (§3.2 check 5, D-2).
+      // entry — projectBinding(projB) === null.
       expect((await loopbackControl(env.abDir, {
         id: "open-terminal-streams-b", type: "project:open", projectId: projB, projectPath: projBdir.dir, mode: "remote",
       })).ok).toBe(true);

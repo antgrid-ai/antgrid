@@ -1,13 +1,12 @@
 /**
- * Admission for every native bidi stream after the session stream (Stage A
- * wave A1, docs/iroh-reduction/stage-A-A1-contract.md §3.2). The session
+ * Admission for every native bidi stream after the session stream. The session
  * stream itself never reaches this file — `native-host-connection.ts` reads
  * its open frame and hands the stream straight to a `StreamRecordWriter` /
  * `StreamRecordReader` pair before this acceptor's loop starts.
  *
- * A1 ships an empty `handlers` table, so every well-formed later stream is
- * refused `NOT_ALLOWED`; A2–A4 plug in project/terminal/tunnel handlers
- * through the same table without touching admission order.
+ * An unknown or not-yet-registered `kind` is refused `NOT_ALLOWED`; project,
+ * terminal and tunnel handlers plug into the same `handlers` table without
+ * touching admission order.
  */
 
 import {
@@ -96,8 +95,9 @@ export interface GatedProjectBinding {
  * the safe-id and catalog checks (`seenProjects` + `isSafeProjectId` are the
  * only bound on which projectId a peer may name), the project's binding
  * (`NOT_READY` while it has no live entry), an open project stream for this
- * peer (A4's single admission point), then the entry's own per-sender gate.
- * Lookup only: nothing here opens or promotes a core.
+ * peer — the single per-peer admission point for a projectId — then the
+ * entry's own per-sender gate. Lookup only: nothing here opens or promotes a
+ * core.
  */
 export function gateProjectStream<B extends GatedProjectBinding>(
   peerId: string,
@@ -169,7 +169,8 @@ export interface PeerStreamAcceptorOptions {
   established: () => boolean;
   /** `retirePeer(peerId, "unauthorized")` if still current. */
   onUnauthorized: () => void;
-  /** A1 passes `{}` (or omits it) — there are no handlers yet. */
+  /** Omit or pass `{}` when no non-session stream kind is registered yet —
+   *  every such open is then refused `NOT_ALLOWED`. */
   handlers?: StreamHandlers;
   schedule?: (callback: () => void, ms: number) => () => void;
   /** `stream` is set only for a refusal whose open frame parsed; a timeout or

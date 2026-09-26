@@ -1,4 +1,3 @@
-// Stage A wave A2 (docs/iroh-reduction/stage-A-A2-contract.md §3.2, §6).
 // Drives TerminalStreamRegistry directly with fakes — no PeerStreamAcceptor,
 // no real StreamMux. The acceptor's own admission order (authorization, the
 // open-frame read, NOT_READY pre-handler, the pending cap) is covered by
@@ -133,7 +132,7 @@ type FakeTerminalStream = ReturnType<typeof createFakeTerminalStream>;
 
 /** Fake `TerminalProjectBinding`: records every dispatch, and can be told to
  *  refuse a peer, to disappear (project detached from under it), or to lack
- *  an open project stream for a peer (A4's admission gate). */
+ *  an open project stream for a peer (the project-stream admission gate). */
 function fakeBinding() {
   const dispatched: Array<{ msg: AbMessage; peerId: string }> = [];
   let refuse: ((peerId: string) => StreamRefusal | null) | null = null;
@@ -715,7 +714,7 @@ describe("TerminalStreamRegistry (A2)", () => {
     expect(fake.readCalls).toEqual([]);
 
     // The same projectId's project stream is open for a DIFFERENT peer —
-    // that must not satisfy PEER's own admission (A4's single per-peer point).
+    // that must not satisfy PEER's own admission, which is per-peer.
     const other = admit(registry, { peerId: "other-peer" });
     expect(await refusalOf(other.result)).toBeUndefined();
   });

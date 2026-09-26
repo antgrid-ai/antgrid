@@ -1,10 +1,9 @@
 /**
- * Project streams (docs/iroh-reduction/stage-A-A4-contract.md §3.1-§3.3 and
- * stage-A-A5-contract.md §3.3). Every project gets its own QUIC bidi stream per
- * app peer: after the A0b open frame `{kind:"project", projectId}`, each record is
- * the bare UTF-8 JSON of exactly one `AbMessage` — one message is always one
- * record, with no `{"__frag":…}` splitting and no `{s, m}` envelope. Machine
- * control traffic (`s` omitted / `"0"`) never reaches this file.
+ * Project streams. Every project gets its own QUIC bidi stream per app peer:
+ * after the open frame `{kind:"project", projectId}`, each record is the bare
+ * UTF-8 JSON of exactly one `AbMessage` — one message is always one record,
+ * with no `{"__frag":…}` splitting and no `{s, m}` envelope. Machine control
+ * traffic (`s` omitted / `"0"`) never reaches this file.
  *
  * This registry is plugged into `PeerStreamAcceptor` as the `project`
  * handler, and into the terminal, tunnel and upload registries as
@@ -59,8 +58,8 @@ export const INVALID_NOTICE_TTL_MS = 60_000;
 const textEncoder = new TextEncoder();
 
 /** A project's attachment to the registry. `detach()` releases it. Terminal
- *  and tunnel traffic never ride this handle (A2/A3): they hold their own
- *  QUIC streams, admitted through {@link TerminalProjectBinding} and
+ *  and tunnel traffic never ride this handle: they hold their own QUIC
+ *  streams, admitted through {@link TerminalProjectBinding} and
  *  {@link TunnelProjectBinding}. */
 export interface StreamHandle {
   detach(): void;
@@ -90,8 +89,8 @@ export interface TerminalStreamHooks {
  *  it uses (a tunnel or upload stream carries no bus traffic, so neither calls
  *  `dispatch`). */
 export interface ProjectBinding {
-  /** The peer holds an open project stream for this project (A4's single
-   *  per-peer admission point, root CLAUDE.md's checkout-routing invariant). */
+  /** The peer holds an open project stream for this project — the single
+   *  per-peer admission point, root CLAUDE.md's checkout-routing invariant. */
   hasOpenStream(peerId: string): boolean;
   /** `entry.opts.mayAcceptFrom(peerSession(peerId))`, re-read on every call —
    *  the same per-sender gate `dispatch` applies. */
@@ -112,10 +111,10 @@ export interface ProjectBinding {
   uploads(): UploadStreamServer | null;
 }
 
-/** What `TerminalStreamRegistry` needs from a project's entry (A2). */
+/** What `TerminalStreamRegistry` needs from a project's entry. */
 export type TerminalProjectBinding = Pick<ProjectBinding, "hasOpenStream" | "refusalFor" | "dispatch">;
 
-/** What `TunnelStreamRegistry` needs from a project's entry (A3). A tunnel
+/** What `TunnelStreamRegistry` needs from a project's entry. A tunnel
  *  stream carries no bus traffic, so unlike {@link TerminalProjectBinding} it
  *  has no `dispatch` — only the per-sender gate and the project's own
  *  {@link TunnelStreamServer}. */
@@ -174,8 +173,8 @@ export interface AttachStreamOpts {
    *  only when the LAST session is gone. */
   onPeerSessionGone?: (peerId: string) => void;
   /** This peer's project stream for THIS project ended while its session
-   *  lives on: the app closed it (FIN or reset), or it overflowed or was lost
-   *  (D3). Not fired by `detach()` or `dropPeer()`. */
+   *  lives on: the app closed it (FIN or reset), or it overflowed or was lost.
+   *  Not fired by `detach()` or `dropPeer()`. */
   onPeerStreamClosed?: (peerId: string) => void;
   /** The project's tunnel server; absent => tunnel streams for this project
    *  are refused NOT_ALLOWED. */
@@ -212,9 +211,9 @@ export interface ProjectStreamRegistryOptions {
   /** Retires the whole connection. Only "unauthorized" (writer) or
    *  "protocol-violation" (reader prefix). */
   retirePeer(peerId: string, reason: "unauthorized" | "protocol-violation"): void;
-  /** A2 routing, unchanged: a terminal-bound message for `peerId` goes to its
-   *  terminal stream. `undefined` falls back to that peer's PROJECT stream
-   *  (was: the session stream). */
+  /** A terminal-bound message for `peerId` goes to its terminal stream.
+   *  `undefined` falls back to that peer's PROJECT stream (was: the session
+   *  stream). */
   routeTerminal?(peerId: string, msg: AbMessage, signal?: AbortSignal): Promise<StreamSendOutcome> | undefined;
   terminalHooks?: TerminalStreamHooks;
   /** The project's last live entry detached (unchanged meaning). */
@@ -332,7 +331,7 @@ export class ProjectStreamRegistry {
           if (signal && !signal.aborted) return Promise.reject(new Error("Project delivery gated"));
           return;
         }
-        // A2: a terminal-bound message routes onto its own stream instead of
+        // A terminal-bound message routes onto its own stream instead of
         // this project stream. `mayDeliver`/`gatedTarget` above still gate it
         // at enqueue time; the writer's `authorized()` rechecks remote access
         // per record.
@@ -464,7 +463,7 @@ export class ProjectStreamRegistry {
     }
     const entry = this.latestEntryFor(projectId);
     if (entry === null) {
-      // Hazard J: the core is not relay-registered yet. The app waits for the
+      // The core is not relay-registered yet. The app waits for the
       // ready notice on the session stream and opens again.
       return { code: "NOT_READY", message: "project is not ready; wait for stream-ready" };
     }
@@ -498,7 +497,7 @@ export class ProjectStreamRegistry {
     binding = { peerId, projectId, entry, stream, writer, reader, authorized, unbound: false };
     this.bind(binding);
     // The bind is complete once this is written — the app treats its project
-    // stream as bound only once this first record arrives (D-1).
+    // stream as bound only once this first record arrives.
     void writer.send(textEncoder.encode(JSON.stringify(createMessage("stream-ready", { projectId }))));
     void this.runLoop(binding);
     return undefined;
@@ -594,7 +593,7 @@ export class ProjectStreamRegistry {
       return;
     }
     // "overflow" or "stream-lost": the writer has already reset its own half.
-    // Only this stream resets (D3) — the app reopens and resyncs through
+    // Only this stream resets — the app reopens and resyncs through
     // state.snapshot.
     this.unbind(binding);
     void binding.stream.recv.stop(STREAM_STOP_PROJECT).catch(() => {});

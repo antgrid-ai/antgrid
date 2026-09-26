@@ -4,11 +4,10 @@
  * or admission; those belong to whoever accepted the stream.
  *
  * The binding's `SendStream`/`RecvStream` are each `Arc<Mutex<..>>` on the
- * Rust side (docs/iroh-reduction/stage-A-waves.md §1.1): every method —
- * `write`, `writeAll`, `reset`, `setPriority`, `stopped` — takes the SAME
- * lock and holds it across its await. A write in flight therefore blocks
- * `reset` until that write's slice completes; there is no way to preempt it.
- * Two consequences shape everything below:
+ * Rust side: every method — `write`, `writeAll`, `reset`, `setPriority`,
+ * `stopped` — takes the SAME lock and holds it across its await. A write in
+ * flight therefore blocks `reset` until that write's slice completes; there
+ * is no way to preempt it. Two consequences shape everything below:
  *   - writes are sliced to a bounded size, so an overflow reset waits at
  *     most one slice, never a whole multi-megabyte record;
  *   - `stopped`/`receivedReset` are never awaited — doing so on a live
@@ -18,7 +17,9 @@
 
 /** ≤256 KiB per native call, both directions — the bound that keeps a
  *  stream's `reset()` (or the next inbound record) waiting on at most one
- *  in-flight slice instead of an entire queued transfer. */
+ *  in-flight slice instead of an entire queued transfer. Also bounds the
+ *  per-call `number[]` the binding builds with one element per byte, which
+ *  a whole multi-megabyte record would otherwise allocate in one shot. */
 export const STREAM_RECORD_SLICE_BYTES = 262_144;
 
 /** Cap on one raw (unframed) read, both directions — allocated per call by
@@ -51,8 +52,8 @@ export interface RawStreamRecv extends StreamRecv {
 
 /** Why a writer stopped for good. Only `unauthorized` retires the whole
  *  connection; the other two mean only this stream is dead and the owner
- *  unbinds it (D3, docs/iroh-reduction/ledger.md: a slow or stopped stream
- *  never costs the connection). A native write rejection is `stream-lost`
+ *  unbinds it (a slow or stopped stream never costs the connection). A native
+ *  write rejection is `stream-lost`
  *  rather than connection-fatal because the binding reports a peer's
  *  STOP_SENDING on this one stream the same way it reports a dead connection,
  *  and a real connection loss is already surfaced by the connection itself. */
@@ -73,8 +74,8 @@ export type PeerRecordFailure = "connection-lost" | "protocol-violation" | "queu
 /** Thrown by `StreamRecordReader.read()` for a malformed length prefix.
  *  Distinct from a plain rejection out of the native `readExact` (a peer
  *  reset or FIN on this one stream, which is routine and not a connection
- *  fault) — only THIS is a protocol violation, and per D3 it is the
- *  reader's one connection-fatal signal. */
+ *  fault) — only THIS is a protocol violation, and it is the reader's one
+ *  connection-fatal signal (every other failure retires just the stream). */
 export class StreamProtocolViolation extends Error {
   constructor(message: string) {
     super(message);
@@ -269,7 +270,7 @@ export class StreamRecordWriter {
     return "complete";
   }
 
-  /** Resets only this stream — the app reopens and resyncs (D3). Queued
+  /** Resets only this stream — the app reopens and resyncs. Queued
    *  records are dropped up front so no caller waits on a reset that, per the
    *  shared mutex, can only run after the in-flight slice returns. The reset
    *  is explicit because a dropped native SendStream FINs, which would hand
@@ -310,7 +311,7 @@ export type StreamReadFailure = "protocol-violation";
  * `readExact` rejection (peer reset or FIN on this one stream) is rethrown
  * as-is — routine, and for the caller to interpret — while a malformed
  * length prefix is the reader's own protocol violation and retires the
- * connection (D3).
+ * connection.
  */
 export class StreamRecordReader {
   constructor(

@@ -19,8 +19,8 @@ import { generateEvalAuth, setupTestEnv } from "../helpers/harness";
 
 /**
  * Failure-matrix row: a phone's Iroh endpoint the agent's cached
- * authorization lease has never seen. After the Stage B flip the native path
- * authorizes at QUIC accept time (`acceptPeer` in
+ * authorization lease has never seen. The native path authorizes at QUIC
+ * accept time (`acceptPeer` in
  * `bridge/src/peer/native-host-connection.ts`) — an endpoint absent from the
  * lease is refused outright (the connection is closed) rather than admitted
  * and then silently dropping an unrecognized app-layer identity. The very
@@ -29,9 +29,8 @@ import { generateEvalAuth, setupTestEnv } from "../helpers/harness";
  *
  * Superseded: this used to exercise `TrustedPeersProvider.noteMiss()` racing
  * a phone whose Ed25519 identity reached the account inventory after the
- * agent's own startup fetch (see D6, docs/iroh-reduction/stage-B-waves.md).
- * That provider, and native admission's use of it, are deleted — the lease
- * check below is the only gate left.
+ * agent's own startup fetch. That provider, and native admission's use of it,
+ * are deleted — the lease check below is the only gate left.
  */
 test("an endpoint absent from the lease is refused at accept, and admitted once it registers", async () => {
   const env = await setupTestEnv({ fixtureName: "basic" });

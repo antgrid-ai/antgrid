@@ -1,6 +1,6 @@
-// Stage B's establishment contract: a native peer gets in through exactly one
-// door — a `session:hello` naming an admitted identity — and everything else
-// about the session (attribution, the hello's own re-ack/violation rule)
+// A native peer gets in through exactly one door — a `session:hello` naming
+// an admitted identity — and everything else about the session (attribution,
+// the hello's own re-ack/violation rule)
 // follows from `receiveSessionRecord`/`handleHello` in peer-session-owner.ts.
 // The lightweight tests here drive that seam directly through
 // `TestPeerSessionOwner`; the two that must see a real close CODE
@@ -63,7 +63,7 @@ describe("establishment: the one door in", () => {
   });
 
   it("H4: an old-name ping is control plane, not a session frame", () => {
-    // `ping`/`pong` are ordinary AbMessage literals (D-A9-2): dispatch is on
+    // `ping`/`pong` are ordinary AbMessage literals: dispatch is on
     // `type` alone, and only the `session:*` names are session frames, so a
     // bare `ping` is just control-plane traffic, dispatched like any
     // other verb, never auto-answered the way `session:ping` is.
@@ -212,13 +212,12 @@ function fixture(extra: {
   return { client, access, endpointId, peerId, snapshot, setAllowed: (value: boolean) => { allowed = value; } };
 }
 
-/** A1: every native bidi stream, the session stream included, opens with one
+/** Every native bidi stream, the session stream included, opens with one
  *  `[u32 BE len][UTF-8 JSON StreamOpen]` record before it carries anything
- *  else (docs/iroh-reduction/stage-A-A1-contract.md §0). This prepends the
- *  default `{"kind":"session"}` record ahead of whatever a fixture below
- *  scripts for the session stream itself, so every fixture here keeps
- *  driving the SAME protocol content past the open-frame read `acceptPeer`
- *  now does first. */
+ *  else. This prepends the default `{"kind":"session"}` record ahead of
+ *  whatever a fixture below scripts for the session stream itself, so every
+ *  fixture here keeps driving the SAME protocol content past the open-frame
+ *  read `acceptPeer` now does first. */
 function withSessionOpen<T extends { recv: { readExact: (length: number) => Promise<number[]> } }>(stream: T): T {
   const body = Array.from(encodeStreamOpen({ kind: "session" }));
   const prefix = Buffer.alloc(4);
@@ -275,7 +274,7 @@ function connection(endpointId: string, firstStream = Promise.resolve(withSessio
  *  peer PAST admission and INTO the read loop before revoking access, so the
  *  close it earns comes from the read loop's own per-record `authorized()`
  *  recheck (code 3) rather than the pre-stream admission check (code 1). The
- *  A1 open frame is served first (`withSessionOpen`); the gate below it is
+ *  open frame is served first (`withSessionOpen`); the gate below it is
  *  what a test releases, with a real frame the reader can decode — a
  *  malformed one would earn a protocol-violation close instead, before
  *  `authorized()` is ever consulted. */
@@ -318,7 +317,7 @@ function pausableStream() {
  *  a poll for "session established" never caught it, because by its first
  *  check the second frame had already been read and had torn the session back
  *  down). Gating each later frame behind an explicit release is what gives a
- *  test a real point to poll from. The A1 open frame is served first
+ *  test a real point to poll from. The open frame is served first
  *  (`withSessionOpen`), ungated, ahead of frame 0. */
 function scriptedStream(frames: Uint8Array[]) {
   const perFrame = frames.map((frame): [number[], number[]] => {

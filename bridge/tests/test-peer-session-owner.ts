@@ -16,13 +16,12 @@ function flush(times = 3): Promise<void> {
   })();
 }
 
-/** One fake project-stream `AcceptedBiStream` (docs/iroh-reduction/stage-A-A4-contract.md
- *  §5): the send half accumulates raw `writeAll` slices into complete
- *  `[u32 len][body]` records (the registry writes real slices through the
- *  real `StreamRecordWriter`, so this fake must reassemble them, unlike the
- *  A2 terminal fake which only inspects `writeAllCalls` directly), and the
- *  recv half is a chunk queue driven by `pushAppRecord`/`endWith`, mirroring
- *  the A2 terminal fixture. */
+/** One fake project-stream `AcceptedBiStream`: the send half accumulates raw
+ *  `writeAll` slices into complete `[u32 len][body]` records (the registry
+ *  writes real slices through the real `StreamRecordWriter`, so this fake
+ *  must reassemble them, unlike the terminal fake which only inspects
+ *  `writeAllCalls` directly), and the recv half is a chunk queue driven by
+ *  `pushAppRecord`/`endWith`, mirroring the terminal fixture. */
 function createFakeProjectStream() {
   const priorities: number[] = [];
   const resets: bigint[] = [];
@@ -168,13 +167,12 @@ export class TestPeerSessionOwner extends PeerSessionOwner {
 
   constructor(opts: PeerSessionOwnerOptions) { super(opts); }
 
-  // --- A2/A4 protected-hook seams ---
+  // --- Protected-hook seams ---
   //
   // `PeerSessionOwner` wires these into `ProjectStreamRegistry`'s constructor
   // (routeTerminal, projectDetached), not into `attachStream`'s per-project
-  // `opts` (docs/iroh-reduction/stage-A-A4-contract.md §3.5), so a suite that
-  // wants row 16/17 behavior overrides them here rather than passing them to
-  // `attachStream`.
+  // `opts`, so a suite that wants terminal-routing or detach behavior
+  // overrides them here rather than passing them to `attachStream`.
   private routeTerminalFn: ((peerId: string, msg: AbMessage, signal?: AbortSignal) =>
     Promise<StreamSendOutcome> | undefined) | undefined;
   private projectDetachedFn: ((projectId: string) => void) | undefined;
@@ -292,9 +290,9 @@ export class TestPeerSessionOwner extends PeerSessionOwner {
   }
 
   markPeerOffline(peerId: string): void {
-    // A4 deletes isForeignSlot with the rest of the mux's slot bookkeeping
-    // (docs/iroh-reduction/stage-A-A4-contract.md §7): this seam's only other
-    // caller was the guard itself, so it now just drops the session.
+    // isForeignSlot and the rest of the mux's slot bookkeeping are gone; this
+    // seam's only other caller was that guard itself, so it now just drops
+    // the session.
     this.dropSession(peerId);
   }
 

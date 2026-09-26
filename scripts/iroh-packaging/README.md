@@ -10,4 +10,5 @@ the historical prototype. It is not a digest of the source-built Flutter DLL
 and does not qualify other platforms or final package signatures.
 
 The prototype source and standalone dependency graphs were retired. Run the
-production host and Dart checks listed in [qualification](../../docs/iroh-qualification.md).
+production host and cross-binding checks: `qualify:iroh-host` and
+`qualify:iroh-interop` in `bridge/package.json`.

@@ -1,10 +1,9 @@
-// Stage A wave A3 gate: tunnel HTTP and WebSocket streams
-// (docs/iroh-reduction/stage-A-waves.md §3 "A3"; the frozen contract is
-// docs/iroh-reduction/stage-A-A3-contract.md). Every preview HTTP request and
-// every preview WebSocket now rides its own native QUIC stream instead of the
+// Gate: tunnel HTTP and WebSocket streams. Every preview HTTP request and
+// every preview WebSocket rides its own native QUIC stream instead of the
 // project stream's preview channel — `RelayClient.openTunnelHttpStream` /
 // `openTunnelWsStream` drive that wire directly, the way
-// `gate-terminal-streams.test.ts` drives `openTerminalStream` for A2.
+// `gate-terminal-streams.test.ts` drives `openTerminalStream` for the
+// terminal stream.
 //
 // Known Windows test noise (NOT failures): fs.watch EPERM/EBUSY on teardown.
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";

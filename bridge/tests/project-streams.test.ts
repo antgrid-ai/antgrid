@@ -1,7 +1,6 @@
-// Stage A wave A4 (docs/iroh-reduction/stage-A-A4-contract.md §3, §6). Drives
-// the real `ProjectStreamRegistry` through a `TestPeerSessionOwner` (which
-// owns one internally, per §3.5) plus the `openProjectStream` fake-stream seam
-// (test-peer-session-owner.ts §5) — never `PeerStreamAcceptor` itself, whose
+// Drives the real `ProjectStreamRegistry` through a `TestPeerSessionOwner`
+// (which owns one internally) plus the `openProjectStream` fake-stream seam
+// (`test-peer-session-owner.ts`) — never `PeerStreamAcceptor` itself, whose
 // own admission order (session established, the open-frame parse, the
 // pending-opens cap) is `native-host-connection.test.ts`'s to cover.
 import { describe, test, expect, afterEach, spyOn } from "bun:test";

@@ -11,12 +11,12 @@ import {
 import { MessageBus } from "../src/message-bus";
 import { STREAM_RECORD_SLICE_BYTES } from "../src/peer/stream-records";
 
-// A1: every native bidi stream, the session stream included, opens with one
+// Every native bidi stream, the session stream included, opens with one
 // `[u32 BE len][UTF-8 JSON StreamOpen]` record before it carries anything
-// else (docs/iroh-reduction/stage-A-A1-contract.md §0). `withSessionOpen`
-// prepends the default `{"kind":"session"}` record ahead of whatever a test
-// scripted for the session stream itself, so every existing fixture keeps
-// working unmodified past the open-frame read `acceptPeer` now does first.
+// else. `withSessionOpen` prepends the default `{"kind":"session"}` record
+// ahead of whatever a test scripted for the session stream itself, so every
+// existing fixture keeps working unmodified past the open-frame read
+// `acceptPeer` now does first.
 function sessionOpenRecord(): { prefix: number[]; body: number[] } {
   const body = Array.from(encodeStreamOpen({ kind: "session" }));
   const prefix = Buffer.alloc(4);
@@ -532,9 +532,9 @@ test("missing native carrier never writes payloads to central WebSocket", async 
 
 
 test("a new connection for the same endpoint retires a slow first (newest wins)", async () => {
-  // D4: a second authenticated connection for a peerId already in nativePeers
-  // retires the first rather than being refused — the fix for the
-  // rekey-as-reconnect stall (stage-B-waves.md §1.4).
+  // A second authenticated connection for a peerId already in nativePeers
+  // retires the first rather than being refused — the fix for a
+  // rekey-as-reconnect that would otherwise stall up to the idle timeout.
   const f = fixture(); const stream = Promise.withResolvers<any>();
   const events: Parameters<typeof netwatch.record>[0][] = [];
   const observer = spyOn(netwatch, "record").mockImplementation((event) => { events.push(event); });
@@ -597,7 +597,7 @@ test("pending native admissions are bounded and late arrivals are retired after 
   expect(peers.every((p) => p.closes() === 1)).toBe(true);
 });
 
-// --- A1: multi-stream admission (docs/iroh-reduction/stage-A-A1-contract.md §3.3) ---
+// --- Multi-stream admission ---
 
 test("setMaxConcurrentBiStreams(256n) is called before the first acceptBi", async () => {
   const f = fixture();
@@ -665,8 +665,9 @@ test("a first stream with no open frame within 5s retires the attempt", async ()
     await admission;
     // `deadline()`'s own timeout callback closes once, and the
     // `retireOwnAttempt` it lands in closes again on the same code (1n) —
-    // both calls agree on the code, which is what the retired-not-refused
-    // half of D-3 requires.
+    // both calls agree on the code. A first-stream fault closes the
+    // connection rather than refusing in-band, because there is no session
+    // yet to keep alive.
     expect(peer.closeCodes().length).toBeGreaterThan(0);
     expect(peer.closeCodes().every((code) => code === 1n)).toBe(true);
   } finally { f.client.close(); }
@@ -822,7 +823,7 @@ test("a uni stream still retires the connection as a protocol violation", async 
   } finally { f.client.close(); }
 });
 
-// --- A2: terminal attachment streams (docs/iroh-reduction/stage-A-A2-contract.md §3.4) ---
+// --- Terminal attachment streams ---
 
 /** Accepts `peer`, drives a real `session:hello`/lease-refresh round trip to
  *  the point `established()` reads true, and returns the resulting slot. The
@@ -853,8 +854,8 @@ function projectOpenRecord(projectId: string): number[][] {
   return [lengthPrefix(body.length), body];
 }
 
-/** A4: terminal/tunnel admission now requires this peer to already hold an
- *  open project stream (`binding.hasOpenStream`) — opens it and waits for the
+/** Terminal/tunnel admission requires this peer to already hold an open
+ *  project stream (`binding.hasOpenStream`) — opens it and waits for the
  *  `stream-ready` record so callers can push a terminal/tunnel open next. */
 async function openProjectStream(peer: ReturnType<typeof connection>, projectId: string): Promise<void> {
   const later = laterStream(projectOpenRecord(projectId));
@@ -863,9 +864,6 @@ async function openProjectStream(peer: ReturnType<typeof connection>, projectId:
 }
 
 test("a terminal-kind stream reaches the terminal handler (no longer refused NOT_ALLOWED)", async () => {
-  // A1 shipped an empty `handlers` table, so every terminal-kind open was
-  // refused NOT_ALLOWED ("stream kind not allowed") before this wave wired
-  // `TerminalStreamRegistry` in as `handlers.terminal`.
   const f = fixture(undefined, undefined, () => true);
   const bus = new MessageBus();
   const handle = f.client.attachStream(bus, { projectId: "p1" });
@@ -885,8 +883,8 @@ test("a terminal-kind stream reaches the terminal handler (no longer refused NOT
 });
 
 test("a terminal-kind stream is refused NOT_ALLOWED when projectCataloged is not supplied", async () => {
-  // `projectCataloged` absent must fail CLOSED (§3.2: "Absent => every open is
-  // refused NOT_ALLOWED"), never fall back to admitting.
+  // `projectCataloged` absent must fail CLOSED — every open is refused
+  // NOT_ALLOWED, never falling back to admitting.
   const f = fixture();
   const bus = new MessageBus();
   const handle = f.client.attachStream(bus, { projectId: "p1" });
@@ -928,7 +926,7 @@ test("retiring a peer drops its terminal bindings", async () => {
   } finally { handle.detach(); f.client.close(); }
 });
 
-// --- A3: tunnel streams (docs/iroh-reduction/stage-A-A3-contract.md §3.3) ---
+// --- Tunnel streams ---
 
 function tunnelHttpOpenRecord(projectId: string): number[][] {
   const body = Array.from(encodeStreamOpen({ kind: "tunnel-http", projectId, requestId: crypto.randomUUID() }));
@@ -949,8 +947,6 @@ function fakeTunnelServer() {
 }
 
 test("a tunnel-http-kind and tunnel-ws-kind stream both reach the tunnel handler (registered in the handler table)", async () => {
-  // A2 shipped a handler table with only `terminal`; before this wave a
-  // tunnel-kind open was refused NOT_ALLOWED ("stream kind not allowed").
   const f = fixture(undefined, undefined, () => true);
   const bus = new MessageBus();
   const handle = f.client.attachStream(bus, { projectId: "p1", tunnels: fakeTunnelServer() as never });
@@ -1139,8 +1135,8 @@ test("N3: an inbound session record read after authorization is revoked retires 
 });
 
 test("a non-JSON session record after establishment is a plaintext-not-json drop and the peer stays connected", async () => {
-  // D-A9-4: a record's body is JSON or it is dropped; an unparseable body is
-  // not a protocol violation, so the connection survives it.
+  // A record's body is JSON or it is dropped; an unparseable body is not a
+  // protocol violation, so the connection survives it.
   const f = fixture();
   const q = queuedStream();
   const peer = connection(f.endpointId, Promise.resolve(q.stream));

@@ -1,9 +1,9 @@
-// Stage A wave A4 gate: project streams replace the mux. Each project gets its
-// OWN QUIC stream on the phone's single native connection — there is no
-// shared session-stream envelope (`{s, m}`) and no bridge-minted `streamId`;
-// the eval handle IS the projectId (D-8). The frozen contract is
-// docs/iroh-reduction/stage-A-A4-contract.md; this file is its §6
-// `gate-project-streams` rows 1-6.
+// Gate: project streams replace the mux. Each project gets its OWN QUIC
+// stream on the phone's single native connection — there is no shared
+// session-stream envelope (`{s, m}`) and no bridge-minted `streamId`; the
+// eval handle IS the projectId, which keeps every helper that took a
+// `streamId` source-compatible and stops the handle leaking a bridge-internal
+// id.
 //
 // Known Windows test noise (NOT failures): fs.watch EPERM/EBUSY on teardown.
 import { test, expect } from "bun:test";
@@ -69,7 +69,7 @@ test("hazard J: a raw open before project:start is NOT_READY, project:start's st
     expect(ready.streamId).toBeUndefined();
 
     const streamB = await env.app.openProjectStream(projB, 10_000);
-    expect(streamB).toBe(projB); // D-8: the handle is the literal projectId
+    expect(streamB).toBe(projB); // the eval handle is the literal projectId
     const frames = await streamSnapshot(env.app, streamB, 8_000);
     expect(frames.some((f) => f.type === "agent:status")).toBe(true);
   } finally {

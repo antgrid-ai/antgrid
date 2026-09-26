@@ -1,9 +1,10 @@
 import { z } from "zod";
 
-/** App → bridge, 2nd record on an HTTP tunnel stream (after the A0b open
- *  frame). Carries no body: the body follows as exactly `bodyLength` raw
- *  bytes, which both ends check against
- *  (docs/iroh-reduction/stage-A-A3-contract.md §1.3, the truncation trap). */
+/** App → bridge, 2nd record on an HTTP tunnel stream (after the open frame).
+ *  Carries no body: the body follows as exactly `bodyLength` raw bytes, which
+ *  both ends check the running total against, so a stream cut short by a FIN
+ *  or reset before `bodyLength` bytes arrive is caught as truncated rather
+ *  than silently forwarded as a complete, short body. */
 export const TunnelHttpRequest = z.object({
   type: z.literal("tunnel:http-request"),
   requestId: z.string(),
@@ -18,7 +19,8 @@ export const TunnelHttpRequest = z.object({
 
 /** Bridge → app, first record on an HTTP tunnel stream (unless refused). The
  *  response body follows as raw bytes, then FIN; a reset instead of FIN is a
- *  truncated response (D4: Dart tells the two apart natively). */
+ *  truncated response — the app's binding tells the two apart natively, even
+ *  though it cannot read the reset's error code. */
 export const TunnelHttpHead = z.object({
   type: z.literal("tunnel:http-head"),
   requestId: z.string(),
@@ -35,7 +37,7 @@ export type TunnelHttpHead = z.infer<typeof TunnelHttpHead>;
  *  `ws(s)://localhost:<port><path>` connection for the life of the stream
  *  (one stream per browser-side tab WebSocket — a preview page's own WS, e.g.
  *  Vite HMR or a Blazor Server SignalR circuit). `tunnelId` must equal the
- *  A0b open frame's `wsId`. */
+ *  stream's open frame `wsId`. */
 export const TunnelWsOpen = z.object({
   type: z.literal("tunnel:ws-open"),
   tunnelId: z.string(),

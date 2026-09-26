@@ -44,8 +44,7 @@ these boundaries with `peer/endpoint-lifecycle.ts` and preserves remote
 command source semantics. Project readiness is host-local; the central socket
 has no stream registration or payload frames.
 The controller and local bridge retain distinct protected enrollment records;
-endpoint seeds must never be written to an ordinary bridge file. Native
-platform qualification lives in `docs/iroh-qualification.md`.
+endpoint seeds must never be written to an ordinary bridge file.
 Desktop lifecycle resume notifies the existing host through owner-bearer
 `POST /peer-resume` (`control-listener.ts`), with no body; its 202 acknowledges
 synchronous remote-session fencing, while authorization refresh runs separately.
