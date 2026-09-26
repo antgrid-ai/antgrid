@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { buildAgentCore, type AgentCore } from "../src/agent-core";
+import type { SessionDirectory, SessionDirectoryRow } from "../src/session-bus/directory";
 import { MessageBus } from "../src/message-bus";
 import { loadPairedPhones } from "../src/paired-phones";
 import { createMessage, type AbMessage } from "../src/protocol";
@@ -226,6 +227,120 @@ test("does NOT gate when no relay transport is wired (local/loopback transport)"
     "control",
   );
   expect(await waitForTerminal(sent, t1)).toBe(true);
+});
+
+/** A directory row, minimal but complete: only `machineId` is under test. */
+function localRow(): SessionDirectoryRow {
+  return {
+    machineId: null,
+    projectId: "project-self",
+    sessionId: "session-local",
+    title: "local",
+    branch: null,
+    activity: "idle",
+    lastActiveAt: 0,
+    canReply: true,
+  };
+}
+
+function peerRow(): SessionDirectoryRow {
+  return { ...localRow(), machineId: "machine-peer", projectId: "project-peer", sessionId: "session-peer", title: "peer" };
+}
+
+async function waitForDirectoryResult(
+  frames: AbMessage[],
+  requestId: string,
+  timeoutMs = 2000,
+): Promise<Record<string, unknown>> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const hit = frames.find(
+      (m) => m.type === "session-bus:directory:result" && (m as { requestId?: string }).requestId === requestId,
+    );
+    if (hit) return hit as unknown as Record<string, unknown>;
+    await new Promise((r) => setTimeout(r, 15));
+  }
+  throw new Error("session-bus:directory never answered");
+}
+
+/** Create a session and hand back its id, so a bus verb has a member to name. */
+async function createSession(bus: MessageBus, frames: AbMessage[], name: string): Promise<string> {
+  const requestId = randomUUID();
+  bus.dispatchInbound(createMessage("session:create", { requestId, name }), "control", "loopback");
+  const deadline = Date.now() + 2000;
+  while (Date.now() < deadline) {
+    const hit = frames.find(
+      (m) => m.type === "session:result" && (m as { requestId?: string }).requestId === requestId,
+    );
+    if (hit?.type === "session:result" && hit.ok && hit.session) return hit.session.id;
+    await new Promise((r) => setTimeout(r, 15));
+  }
+  throw new Error(`session:create never answered for ${name}`);
+}
+
+// REGRESSION: the switch's OUTBOUND half must NOT inherit the inbound gate's
+// "never faced the relay" carve-out. A session reaches a peer MACHINE through
+// rows the app pushes into this core's directory, so no relay of its own need
+// ever have attached — which is the configuration a desktop runs in whenever
+// the app sits on the loopback listener. Reading the switch as "on" there made
+// every surface lie at once: the directory offered off-machine rows, `post`
+// accepted a send, and the `dispatch` gate — which reads the policy directly and
+// was therefore right — held the frame while the caller was told "it goes when
+// the link is back" about a link the switch itself was keeping down.
+//
+// The directory is asserted rather than the send because it is the surface an
+// agent consults FIRST: a peer it is never offered is one it cannot try to
+// reach. Caught on two real machines, not by this suite — the eval covering
+// this switch always has a relay attached, so the carve-out is unreachable
+// there and load-bearing in production.
+test("narrows the directory to this machine while the switch is off, with no relay ever attached", async () => {
+  const folder = tempFolder();
+
+  // One row on this machine and one on another, so the assertion below can tell
+  // "narrowed" from "empty". `list` is all `listSessions` asks of a directory.
+  const directory = {
+    list: async () => ({
+      ok: true as const,
+      rows: [localRow(), peerRow()],
+      truncated: 0,
+      reach: { scope: "network" as const, lastPushAgoMs: 0, machines: [], staleMachines: 0, notConnected: 0 },
+    }),
+  } as unknown as SessionDirectory;
+
+  core = await buildAgentCore({
+    folder,
+    mode: "local",
+    identity: { deviceId: "agent-dev", deviceName: "agent-dev", createdAt: new Date().toISOString() },
+    machineId: () => "machine-self",
+    remoteAccessEnabled: () => false,
+    sessionDirectory: directory,
+  });
+
+  const bus = new MessageBus();
+  const sent: AbMessage[] = [];
+  bus.subscribe({ deliver: (m) => sent.push(m) });
+  core.attachTransport(bus);
+  // Local transport sets no peer-session provider, so `relayEverAttached` stays
+  // false for the life of this core. That is the whole point of the fixture.
+  core.onHandshakeComplete();
+  await waitForServices(sent);
+
+  const sessionId = await createSession(bus, sent, "s1");
+
+  const requestId = randomUUID();
+  sent.length = 0;
+  bus.dispatchInbound(
+    createMessage("session-bus:directory", { requestId, sessionId }),
+    "control",
+    "loopback",
+  );
+  const result = await waitForDirectoryResult(sent, requestId);
+
+  // Narrowed to this machine, and it says which fact did it rather than blaming
+  // the carrier. Before the fix the peer row was offered as addressable and the
+  // reach report described the network read the switch should have prevented.
+  expect(result.reach).toEqual({ scope: "machine", why: "remote-access-off" });
+  expect((result.sessions as { machineId: string | null }[]).map((r) => r.machineId)).toEqual([null]);
 });
 
 // REGRESSION: after a local core is promoted onto the relay, the loopback
