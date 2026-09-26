@@ -57,7 +57,7 @@ the code wins over both.
 | A | A3 tunnel HTTP/WS streams | done | `55c741e8` |
 | A | A4 project streams replace the `{s,m}` mux | done | `3d7ecc53` |
 | A | A5 delete credits, schedulers, fragmentation, stream envelope | done | `eb67f79b` |
-| A | A6 docs, diagnostics and ledger | in progress | |
+| A | A6 docs, diagnostics and ledger | done | `4c2f22de` |
 
 ### Stage C gate evidence (executed by the wave commit agents)
 
@@ -101,7 +101,10 @@ the code wins over both.
 
 - **Regression, not investigated:** `test:evals:native-soak` fails its 128 MiB process-RSS bound about 500s into the 30-minute run, on both A3 and A4. Its duplicate-mutation, stale-admission and ownership assertions pass. The older ledger (`docs/iroh-simplification-ledger.md`) records it passing whole before Stage B; no run between then and A3 exists to bisect against.
 - RPC replies to a relay peer are now addressed to the asking peer instead of broadcast to every peer bound to the project (contract D-10); before A4 the mux stream id scoped them implicitly.
-- **Resolved by A5:** the prior item here ("if a message's abort signal fires after its first fragment is written, the queued fragments are dropped") no longer applies — A5 deleted fragmentation and the reassembler entirely; every stream write is one record.
+- **Open:** the bridge read loops for project streams (`project-streams.ts`) and terminal streams do not check `authorized()` per inbound record; tunnel streams do. An unauthorized peer is still retired by the session read loop and refused per send by `mayDeliverTo`, but this breaks the Stage A rule that every stream checks per record.
+- `PeerSessionOwner.sendControlPlane` has an `authorized` parameter that no caller passes.
+- Under the full `test:evals` sweep, three evals have each failed once and then passed when their file ran alone: the tunnel stream cap, the terminal never-acked viewer cap, and `agent-core-checkout-routing` (known EPERM rename race). `chat-session-codex` auto-title failed in the sweep and alone after A5 with `bridge/src` unchanged from a passing run; probably the real Codex title generation, not proven.
+- The native soak was not re-run after A5.
 - **Open:** `NetwatchEvent.streamKind` (`bridge/src/netwatch.ts`, the open frame's `kind`) is rendered by the CLI and `netwatch-ui-page.ts`, but no bridge call site sets it yet: `peer-session-owner.ts`, `project-streams.ts`, `peer/terminal-streams.ts`, `peer/tunnel-streams.ts` and `peer/native-host-connection.ts` still record only `channel: "control"`, so a native capture cannot be filtered by stream. It stays out of the `joinCaptures` key because the app's capture has no such field. `streamId` is not a QUIC stream id: the app writes its logical label (`"0"` or the projectId) and the bridge leaves it unset.
 
 - The bridge and the app can briefly disagree on free slots while a close is in flight, so the bridge may refuse a new stream with `CAP_EXCEEDED`. Accepted.
