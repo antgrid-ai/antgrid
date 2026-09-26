@@ -4,7 +4,7 @@ import 'package:crypto/crypto.dart';
 
 import 'models/stream_open.dart';
 
-/// The five session-stream frame types (mirrors
+/// The four session-stream frame types (mirrors
 /// `SESSION_FRAME_TYPES`/`SessionFrameType` in
 /// `packages/antgrid-wire/src/peer-protocol.ts` — hand-mirrored, kept in
 /// lockstep by the shared vectors fixture, not by any suite that spans both
@@ -13,13 +13,11 @@ const String kSessionHello = 'session:hello';
 const String kSessionEstablished = 'session:established';
 const String kSessionPing = 'session:ping';
 const String kSessionPong = 'session:pong';
-const String kSessionTakeover = 'session:takeover';
 const Set<String> kSessionFrameTypes = {
   kSessionHello,
   kSessionEstablished,
   kSessionPing,
   kSessionPong,
-  kSessionTakeover,
 };
 
 bool isSessionFrameType(Object? type) =>

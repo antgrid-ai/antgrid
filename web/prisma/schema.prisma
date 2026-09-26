@@ -113,9 +113,9 @@ model Plan {
   // active `kind:"agent"` device row is one worker; app rows are never counted.
   workerLimit    Int     @map("worker_limit")
   // Abuse bound on `kind:"app"` rows (phones, desktop controllers) only. Never
-  // shown in pricing and never a lever: each app row mints an OAuth client and
-  // lands in `listAppDevicePeers`, which is returned in full to every bridge, so
-  // unbounded app registration puts an unbounded list on the E2E admission path.
+  // shown in pricing and never a lever: each app row mints an OAuth client, so
+  // unbounded app registration puts an unbounded number of live clients on the
+  // account.
   appDeviceLimit Int     @map("app_device_limit")
   // List-price seat cap. NULL is how an Enterprise contract says "unlimited",
   // which also makes this the one catalog field Prisma treats as optional on

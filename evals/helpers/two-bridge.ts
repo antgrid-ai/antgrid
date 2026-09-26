@@ -158,8 +158,9 @@ export interface TwoBridgeEnv {
 /**
  * One account device, seeded into BOTH fake inventories.
  *
- * Each bridge only ever consults its OWN `/account/devices/me/peers`, so an
- * account id seeded on one machine is unadmittable on the other. Seeded after
+ * Each bridge only ever consults its OWN license API's `/authorization`
+ * inventory, so an account id seeded on one machine is unadmittable on the
+ * other. Seeded after
  * both agents started (and cached their startup inventory), which is why every
  * connect below goes through `establishNativeSession` — it retries on the same
  * socket until the bridge's inventory refresh lands.

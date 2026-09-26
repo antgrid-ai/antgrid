@@ -23,20 +23,6 @@ typedef HandshakeLogger =
       Map<String, Object?>? fields,
     });
 
-/// The app's hello literal. Byte-identical, key for key, to the old
-/// `AppReadyMessage.capabilities` — the bridge strips unknown keys, so a
-/// newer app capability never fails an older bridge.
-///
-/// MUST stay in lockstep with `SessionHelloCapabilities`
-/// (`bridge/src/protocol.ts`). `sessionBusCarrier` is deliberately absent: it
-/// is a loopback-hello key only (`local_transport.dart`), never sent on the
-/// native path.
-const Map<String, bool> kSessionHelloCapabilities = {
-  'checkoutRouting': true,
-  'pullsTree': true,
-  'terminalFramesV1': true,
-};
-
 /// Runs ONE plaintext hello to `session:established` over a single [PeerLink] socket.
 /// QUIC/TLS between the two lease-authorized endpoints is the confidentiality
 /// layer, so the hello carries no crypto of its own: a phone-generated
@@ -109,7 +95,6 @@ class ConnectionHandshake {
       final hello = <String, dynamic>{
         'type': kSessionHello,
         'attemptId': attemptId,
-        'capabilities': kSessionHelloCapabilities,
       };
       final outcome = await _relay.sendRecord(
         Uint8List.fromList(utf8.encode(jsonEncode(hello))),

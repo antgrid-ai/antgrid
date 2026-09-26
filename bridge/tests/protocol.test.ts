@@ -1,10 +1,8 @@
 import { describe, it, expect } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { SESSION_FRAME_TYPES } from "antgrid-wire";
 import {
   parseMessage, createMessage, AbMessageSchema, parseMessageFast,
-  SessionHelloFrame, SessionHelloCapabilities, SessionEstablishedFrame,
+  SessionHelloFrame, SessionEstablishedFrame,
 } from "../src/protocol";
 
 describe("agent:status shape", () => {
@@ -313,52 +311,6 @@ describe("client:focus-state", () => {
   });
 });
 
-describe("terminal:snapshot", () => {
-  it("request shape", () => {
-    const msg = {
-      id: "1306bde2-9272-4ee7-8ed3-c037fc179b46",
-      timestamp: Date.now(),
-      type: "terminal:snapshot:request",
-      terminalId: "t1",
-    };
-    expect(parseMessage(JSON.stringify(msg))?.type).toBe("terminal:snapshot:request");
-  });
-
-  it("reply shape carries seq", () => {
-    const msg = {
-      id: "0cc738bf-c838-4a2e-8af0-47a6bdb19a88",
-      timestamp: Date.now(),
-      type: "terminal:snapshot",
-      terminalId: "t1",
-      scrollback: "hello\nworld\n",
-      seq: 42,
-    };
-    const parsed = parseMessage(JSON.stringify(msg));
-    expect(parsed?.type).toBe("terminal:snapshot");
-    if (parsed?.type !== "terminal:snapshot") throw new Error("unreachable");
-    expect(parsed.seq).toBe(42);
-    expect(parsed.scrollback).toBe("hello\nworld\n");
-    // An older bridge sends no flag at all, and the client must read that as a
-    // mode prelude plus a byte tail it has to erase around itself.
-    expect(parsed.composed).toBeUndefined();
-  });
-
-  it("carries the composed flag through the parse hop", () => {
-    const msg = {
-      id: "b0a1f5c9-4b28-4f0e-8b3b-9c4b1c2d3e4f",
-      timestamp: Date.now(),
-      type: "terminal:snapshot",
-      terminalId: "t1",
-      scrollback: "\u001b[?1049l\u001b[3J\u001b[2J\u001b[H\u001b[0mscreen",
-      seq: 7,
-      composed: true,
-    };
-    const parsed = parseMessage(JSON.stringify(msg));
-    if (parsed?.type !== "terminal:snapshot") throw new Error("unreachable");
-    expect(parsed.composed).toBe(true);
-  });
-});
-
 describe("file:tree:snapshot", () => {
   it("request shape (no params)", () => {
     const msg = {
@@ -420,19 +372,13 @@ describe("session:hello / established frame schemas", () => {
     expect(SessionHelloFrame.safeParse({ type: "session:hello", attemptId: "a1" }).success).toBe(true);
   });
 
-  it("accepts optional capabilities", () => {
+  it("still parses a hello carrying an old app's capabilities key, stripped and ignored", () => {
     const parsed = SessionHelloFrame.safeParse({
       type: "session:hello", attemptId: "a1",
       capabilities: { pullsTree: true, terminalFramesV1: true },
     });
     expect(parsed.success).toBe(true);
-  });
-
-  it("a capability is true-only — false is a parse failure, not a signal", () => {
-    // The read side treats an unknown/absent capability as false already;
-    // accepting `false` here would invite a caller to treat it as a value
-    // that round-trips rather than one the schema refuses outright.
-    expect(SessionHelloCapabilities.safeParse({ pullsTree: false }).success).toBe(false);
+    expect(parsed.success && parsed.data).not.toHaveProperty("capabilities");
   });
 
   it("session:established requires the matching attemptId and rejects the old bare name", () => {
@@ -593,30 +539,3 @@ describe("the session object is unchanged and unextended", () => {
   });
 });
 
-// The app's hello literal lives in Dart and is mirrored here by hand. Zod
-// strips an undeclared key, so a capability the app sends but this schema
-// forgot is silently read as false; nothing else spans both sides.
-describe("session:hello capabilities mirror the app's literal", () => {
-  const dartSource = (file: string) => readFileSync(
-    join(import.meta.dir, "..", "..", "packages", "antgrid_relay_client", "lib", "src", file), "utf8");
-
-  function dartHelloKeys(): string[] {
-    const body = dartSource("connection_handshake.dart")
-      .match(/const Map<String, bool> kSessionHelloCapabilities = \{([^}]*)\};/)?.[1];
-    if (body === undefined) throw new Error("kSessionHelloCapabilities not found in connection_handshake.dart");
-    return [...body.matchAll(/'([A-Za-z0-9]+)'\s*:\s*true/g)].map((m) => m[1]!).sort();
-  }
-
-  it("names exactly the keys SessionHelloCapabilities declares", () => {
-    expect(dartHelloKeys()).toEqual(Object.keys(SessionHelloCapabilities.shape).sort());
-  });
-
-  it("keeps the loopback-only sessionBusCarrier out of the native hello on both sides", () => {
-    expect(dartHelloKeys()).not.toContain("sessionBusCarrier");
-    expect(Object.keys(SessionHelloCapabilities.shape)).not.toContain("sessionBusCarrier");
-  });
-
-  it("is the loopback transport's default capability set too", () => {
-    expect(dartSource("local_transport.dart")).toMatch(/this\.capabilities = kSessionHelloCapabilities,/);
-  });
-});

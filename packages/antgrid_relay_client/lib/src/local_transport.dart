@@ -7,7 +7,6 @@ import 'package:web_socket_channel/io.dart';
 
 import 'agent_transport.dart';
 import 'buffered_agent_transport.dart';
-import 'connection_handshake.dart' show kSessionHelloCapabilities;
 import 'relay_service.dart' show RelayNetTap;
 import 'upload_stream.dart';
 
@@ -61,14 +60,12 @@ class LocalTransport extends BufferedAgentTransport {
   /// accepted the connection; 15s absorbs it, costing nothing on the warm path.
   final Duration connectTimeout;
 
-  /// What this client can do, sent verbatim as the hello's `capabilities`.
-  /// The agent gates behaviour on individual flags in it, so a caller that can
-  /// do more than the default says so here rather than growing a constructor
-  /// flag per capability. A caller that passes its own map REPLACES the
-  /// default, so it owes every key the default carries: dropping `pullsTree`
-  /// fails silently and puts the bridge back to pushing every checkout's
-  /// `tree:full` at each reconnect, the flood pull-first exists to prevent.
-  final Map<String, Object?> capabilities;
+  /// Whether this app forwards session-bus frames for other bridges (the
+  /// desktop app is the only carrier — see `session_bus/` in `app/CLAUDE.md`).
+  /// Sent as the hello's `capabilities.sessionBusCarrier` only when true; the
+  /// key is omitted for a non-carrier owner, which the agent treats the same
+  /// as an owner that sends no `capabilities` at all.
+  final bool sessionBusCarrier;
 
   IOWebSocketChannel? _ch;
   StreamSubscription? _sub;
@@ -92,7 +89,7 @@ class LocalTransport extends BufferedAgentTransport {
     this.appVersion = 'app',
     this.connectTimeout = const Duration(seconds: 15),
     this.netTap,
-    this.capabilities = kSessionHelloCapabilities,
+    this.sessionBusCarrier = false,
   });
 
   /// Records a frame that never left, or never reached dispatch.
@@ -329,7 +326,7 @@ class LocalTransport extends BufferedAgentTransport {
         'token': token,
         'appPid': appPid,
         'appVersion': appVersion,
-        'capabilities': capabilities,
+        if (sessionBusCarrier) 'capabilities': {'sessionBusCarrier': true},
       }),
     );
 
@@ -370,7 +367,8 @@ class LocalTransport extends BufferedAgentTransport {
         }
       }
     } on RpcException {
-      // Pre-RPC agent — fall through, subscribers get live frames only.
+      // A timed-out or refused snapshot is not fatal: subscribers get live
+      // frames only.
     }
     // Born established: fire the tier-3 hydrators once. A local session never
     // re-establishes (no handshake), so this is the only replay — no reconnect

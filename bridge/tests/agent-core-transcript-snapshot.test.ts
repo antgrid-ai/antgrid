@@ -152,9 +152,7 @@ test("drops session.transcriptSnapshot from a remote phone while mobile access i
   const sent: AbMessage[] = [];
   bus.subscribe({ deliver: (m) => sent.push(m) });
   core.attachTransport(bus);
-  core.setPeerSessionProvider(() => ({
-    peerId: "app-dev#machine-dev", peerPubkey: pk1, checkoutRouting: true, pullsTree: false,
-  }));
+  core.setPeerSessionProvider(() => ({ peerId: "app-dev#machine-dev", peerPubkey: pk1 }));
   core.onHandshakeComplete();
   await waitForServices(sent);
 

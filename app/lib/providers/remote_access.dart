@@ -91,7 +91,8 @@ class RemoteDevicesNotifier extends AsyncNotifier<PhonesList> {
 
 /// The account's devices keyed by the id the BRIDGE knows them by
 /// (`PairedPhone.phoneDeviceId` == the account device's `device_id`, which is
-/// what `/account/devices/me/peers` hands the bridge at admission).
+/// what `/account/devices/me/authorization`'s snapshot hands the bridge at
+/// admission).
 ///
 /// This join is what lets a roster row offer a real remedy. Clearing the local
 /// record is not one: admission is account trust, so the device re-creates its

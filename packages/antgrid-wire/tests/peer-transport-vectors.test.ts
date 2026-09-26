@@ -75,7 +75,6 @@ test("peer transport fixture covers every stream-open kind and refusal code", ()
   }
   expect(streamOpen.refusals.map((r: { name: string }) => r.name)).toEqual([
     "not-ready",
-    "update-required",
     "not-allowed",
     "cap-exceeded",
     "invalid",

@@ -126,7 +126,7 @@ describe("establishment: the one door in", () => {
     } finally { client.clearBus(); client.close(); }
   });
 
-  it("a session:takeover or session:established from the app is dropped unknown-session-frame and reaches no bus", () => {
+  it("session:established from the app is dropped unknown-session-frame and reaches no bus; session:takeover is no longer a session-frame name and is refused like H5's stale credit", () => {
     __resetNetwatchForTest();
     const client = TestPeerSessionOwner.forTest({ sendPayload: () => {}, peerId: "phone-1", deviceId: "dev-1" });
     client.establish("phone-1");
@@ -135,11 +135,15 @@ describe("establishment: the one door in", () => {
     bus.setInboundHandler((msg) => received.push(msg));
     client.setBus(bus);
     try {
+      // `session:takeover` is not in SESSION_FRAME_TYPES any more, so it takes
+      // the H5 path (onControlMessage -> parseMessageFast refuses the unknown
+      // AbMessage type) rather than handleSessionFrame's default arm — no
+      // unknown-session-frame drop for this one.
       client.sendFromPeer("phone-1", { type: "session:takeover" });
       client.sendFromPeer("phone-1", { type: "session:established", attemptId: "a1" });
       expect(received).toHaveLength(0);
       const drops = netwatch.snapshot().filter((e) => e.kind === "drop" && e.reason === "unknown-session-frame");
-      expect(drops).toHaveLength(2);
+      expect(drops).toHaveLength(1);
     } finally { client.clearBus(); client.close(); }
   });
 

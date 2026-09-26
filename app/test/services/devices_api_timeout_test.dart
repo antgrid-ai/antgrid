@@ -26,7 +26,6 @@ void main() {
           _ => api.createDevice(
             deviceUuid: 'device',
             ed25519Pub: 'ed',
-            x25519Pub: 'x',
             platform: 'android',
             displayName: 'Phone',
           ),

@@ -49,7 +49,7 @@ export interface StreamUpload {
 }
 
 export type UploadAdmission =
-  | { ok: false; refusal: { code: "UPDATE_REQUIRED" | "NOT_ALLOWED"; message: string } }
+  | { ok: false; refusal: { code: "NOT_ALLOWED"; message: string } }
   | { ok: true; manager: FileUploadManager };
 
 /** What a project's core exposes to the upload registry; `AgentCore`

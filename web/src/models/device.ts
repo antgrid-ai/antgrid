@@ -142,25 +142,4 @@ export async function markDeviceRevoked(db: DB, deviceUuid: string): Promise<voi
   });
 }
 
-export async function listAppDeviceKeys(db: Tx, userId: string): Promise<Buffer[]> {
-  const rows = await db.device.findMany({
-    where: { userId, kind: "app" as DeviceKind, revokedAt: null },
-    select: { publicKey: true },
-  });
-  return rows.map((r) => Buffer.from(r.publicKey));
-}
-
-export async function listAppDevicePeers(
-  db: Tx,
-  userId: string
-): Promise<{ deviceId: string; publicKey: Buffer }[]> {
-  // Same filter as listAppDeviceKeys — keep the two in lockstep; they list the
-  // same active app devices and differ only in the columns selected.
-  const rows = await db.device.findMany({
-    where: { userId, kind: "app" as DeviceKind, revokedAt: null },
-    select: { deviceId: true, publicKey: true },
-  });
-  return rows.map((r) => ({ deviceId: r.deviceId, publicKey: Buffer.from(r.publicKey) }));
-}
-
 export { Prisma };

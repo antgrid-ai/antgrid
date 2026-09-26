@@ -3278,10 +3278,9 @@ class _LocalLaunchErrorScreen extends StatelessWidget {
 
   /// Map specific exception shapes to a user-actionable headline + tip. The
   /// fallback covers everything else without leaving the user staring at a
-  /// raw stack-trace-style message. `retryLabel` defaults to 'retry' — only
-  /// `sessionTakenOver` needs a different verb ("take back"), since retrying
-  /// there specifically reclaims a session another device is holding, rather
-  /// than merely reattempting a failed connection.
+  /// raw stack-trace-style message. A blocked connection takes its
+  /// `retryLabel` from `blockReasonPresentation`; everything else says
+  /// 'retry'.
   ({String headline, String tip, String retryLabel}) _diagnose() {
     final e = error;
     // The supervisor stopped climbing on purpose and named the reason. Each

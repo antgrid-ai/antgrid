@@ -8,7 +8,7 @@
     "test:evals:native-soak": "bun test soak/native-fault-soak.test.ts",
     "test:evals:claude": "bun test tests/chat-session-claude.test.ts",
     "test:evals:codex": "bun test tests/chat-session.test.ts tests/chat-session-codex.test.ts",
-    "test:evals:local": "bun test tests/local-promotion.test.ts tests/local-terminal.test.ts",
+    "test:evals:local": "bun test tests/local-terminal.test.ts",
     "test:evals:iroh-authorization": "bun test tests/gate-iroh-authorization.test.ts",
     "test:evals:iroh-host-authorization": "bun test tests/gate-iroh-host-authorization.test.ts",
     "test:evals:peer-resume": "bun test tests/gate-peer-resume.test.ts",

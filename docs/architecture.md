@@ -27,8 +27,7 @@ machine-scoped verbs such as `agent:projects` and `stream-ready` — QUIC
 keep-alive/idle is the liveness layer (`docs/protocol/peer-session.md` §3);
 every project gets its own stream (`docs/protocol/peer-session.md` §1d),
 carrying that project's bus traffic — session-bus frames, `preview:url`, and
-so on — as bare records with no fragmentation and no credit window (Stage A
-deleted both, §5). Terminal attachments, tunnel exchanges and remote file
+so on — as bare records with per-record caps (§5). Terminal attachments, tunnel exchanges and remote file
 uploads get their own streams in turn (§1b, §1c, §1e): the HTTP-proxy and
 browser-WebSocket preview traffic rides its own per-exchange QUIC stream — one
 stream per HTTP request/response and one per WebSocket's lifetime — with a
@@ -52,10 +51,8 @@ Native implementation and authoritative lease handling live in the ELv2
 `packages/antgrid_peer_transport` package, shared with its standalone CLI smoke.
 
 The bridge's `PeerSessionOwner` owns session establishment over Iroh, not
-liveness; fragmentation, scheduling and the credit window were deleted with the
-`{s,m}` mux (Stage A, `docs/iroh-reduction/ledger.md`) — each stream now writes
-bare length-prefixed records with its own per-record caps
-(`docs/protocol/peer-session.md` §5). `CentralControlClient` owns central
+liveness; each stream writes bare length-prefixed records with its own
+per-record caps (`docs/protocol/peer-session.md` §5). `CentralControlClient` owns central
 authentication, presence, policy invalidation and push delivery; it has no
 binary payload API. `NativeHostConnection` composes those independent owners
 with endpoint lifecycle recovery for authenticated native connections. Native
@@ -127,26 +124,21 @@ message types that carry a `checkoutId`; the app mirrors it **by hand** as
 silent.
 
 Checkout lifecycle and storage live in `bridge/src/worktrees/`, and the checkout path
-itself never crosses the wire. An app must advertise the `checkoutRouting` capability on
-its session hello (`docs/protocol/peer-session.md`) or it is refused a project holding a
-managed session, rather than shown main's workspace beside an isolated agent.
-`WORKTREE_SESSIONS_SUPPORTED` (`bridge/src/worktree-capability.ts`) is the kill switch.
+itself never crosses the wire. `WORKTREE_SESSIONS_SUPPORTED`
+(`bridge/src/worktree-capability.ts`) is the kill switch.
 
-Tree state flows pull-first. `FileService.setTreeInterest` registers one tree
-hydrator while Files is visible or a feature needs tree data, such as file
-mention suggestions. Checkout activation alone does not request a tree. Multiple
-consumers share the hydrator and the last release removes automatic refresh.
-The cached tree survives, with sequence-based unchanged responses on renewed
-demand. A gap invalidates the cached base; recovery waits for demand if no
-consumer is present. Incremental broadcasts still arrive, and Git status,
-badges, selected-file reads, and notifications remain independent. The app
-advertises `pullsTree` on both hellos, so the bridge's re-sync
-(`everyClientPullsTrees` in `bridge/src/agent-core.ts`) skips its `tree:full` push
-whenever every attached client pulls; a client that does not advertise it still gets
-the push. The app's capability literals live in the relay-client package
-(`connection_handshake.dart`, `local_transport.dart`) and are mirrored by hand against
-`SessionHelloCapabilities` in `bridge/src/protocol.ts` — Zod strips a key the
-schema does not declare, and the fail direction is a silent return of the flood.
+Tree state flows pull-first.
+`FileService.setTreeInterest` registers one tree hydrator while Files is visible
+or a feature needs tree data, such as file mention suggestions. Checkout
+activation alone does not request a tree. Multiple consumers share the hydrator
+and the last release removes automatic refresh. The cached tree survives, with
+sequence-based unchanged responses on renewed demand. A gap invalidates the
+cached base; recovery waits for demand if no consumer is present. Incremental
+broadcasts still arrive, and Git status, badges, selected-file reads, and
+notifications remain independent. A re-sync never pushes `tree:full`: pushing
+every checkout's full tree at each reconnect is a multi-megabyte flood that
+stalls the session before the app has asked for anything, so every client pulls
+it per checkout, on demand, with `file:tree:snapshot:request`.
 
 ## Terminal frames and history
 

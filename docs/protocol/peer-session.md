@@ -1,7 +1,6 @@
 # Peer session protocol (native Iroh payload path)
 
-This supersedes the old `docs/protocol/e2e-handshake.md` (v2 handshake crypto, retired). There is no
-app-layer handshake, transcript, key schedule or rekey to specify any more: **QUIC/TLS between two
+There is no app-layer handshake, transcript, key schedule or rekey: **QUIC/TLS between two
 Iroh endpoints the authorization snapshot names is the confidentiality layer**, and a native connection
 carries exactly one plaintext session hello. What follows is the shape of that hello and the invariants
 around it that no single test suite owns end to end.
@@ -33,8 +32,7 @@ and codecs: `StreamOpen`/`StreamRefused`, `encodeStreamOpen`/`decodeStreamOpen`,
 non-session first open closes the connection (code `2n`, protocol violation) rather than being refused
 in-band — there is no session yet worth keeping alive. Once validated, the session stream carries the
 rest of this document unchanged: session-stream records (§4) and the hello (§2), all on the same stream,
-with no open acknowledgement. There is no fragmentation and no credit-flow window left to carry (A5
-deleted both — see §5): one `AbMessage` (or one session frame) is one record, sliced only at the
+with no open acknowledgement. One `AbMessage` (or one session frame) is one record, sliced only at the
 transport layer (`StreamRecordWriter`, `bridge/src/peer/stream-records.ts`), and
 `MAX_TRANSFER_BYTES`/`PEER_MAX_RECORD_BYTES` bound a record's size instead of a window's.
 
@@ -148,9 +146,8 @@ open-frame schemas above are frozen as of A0b). An HTTP stream's first record mu
 `bodyLength`; a WS stream's first record must be `tunnel:ws-open`, naming the same `wsId` as the open
 frame's under the field `tunnelId`, plus `checkoutId`. Either is read under the same 5s deadline as §1a's
 open frame. Once the head record parses, `AgentCore.tunnelStreams.admit(peerId, checkoutId)` runs, in
-order: the remote-access switch (`NOT_ALLOWED` if off), checkout-routing capability if the peer's project
-holds any isolated session (`UPDATE_REQUIRED`), the named checkout must be a currently running runtime
-(`NOT_ALLOWED` — "unknown checkout"), and that runtime must have a `TunnelManager` (`NOT_ALLOWED`). Any
+order: the remote-access switch (`NOT_ALLOWED` if off), the named checkout must be a currently running
+runtime (`NOT_ALLOWED` — "unknown checkout"), and that runtime must have a `TunnelManager` (`NOT_ALLOWED`). Any
 failure refuses in-band exactly as §1a describes, on the tunnel stream itself; a malformed head record, or
 one naming an id other than the open frame's, is refused `INVALID`.
 
@@ -193,20 +190,20 @@ promotes a core.
 catalogued (`seenProjects`, `NOT_ALLOWED`); a relay-registered core for this project — else `NOT_READY`
 (hazard J, `docs/iroh-reduction/stage-A-waves.md`: the app waits for `stream-ready {projectId}` on the
 session stream and opens again, never parked); that core's outbound `mayDeliver` (`NOT_ALLOWED`); its
-`mayAcceptFrom` (`UPDATE_REQUIRED` or `NOT_ALLOWED`); and finally a duplicate open for the same (peer,
-project) pair (`INVALID`).
+`mayAcceptFrom` (`NOT_ALLOWED` — fail-closed when the peer resolves to no session); and finally a
+duplicate open for the same (peer, project) pair (`INVALID`).
 
 **The bind is the bridge's own first record.** `stream-ready {projectId}` is both the hazard-J ready notice
 on the session stream AND the bridge's first write on a newly admitted project stream — the app treats its
 project stream as bound only once this record arrives; there is no separate open acknowledgement.
 
 **Outbound authorization runs on every send, not just at open.** `mayDeliver` (the remote-access switch,
-outbound half) and `mayDeliverTo` (per-receiver: a peer that becomes stale mid-session because its project
-gained an isolated session) are both re-read on every bus frame a project stream would carry, broadcast or
-peer-addressed — the switch can flip and a core's isolated-session state can change after the stream is
-already bound. `mayAcceptFrom` is the sender-side mirror, re-checked on every inbound record: a refused
-record is dropped and the peer is told why by a `control:result {ok:false}` on the session stream,
-rate-limited per (peer, project) pair (`INVALID_NOTICE_COOLDOWN_MS`).
+outbound half) and the optional per-receiver `mayDeliverTo` are both re-read on every bus frame a project
+stream would carry, broadcast or peer-addressed — the switch can flip after the stream is already bound.
+No current caller of `attachStream` supplies `mayDeliverTo`; it stays wired through `ProjectStreamRegistry`
+for a future per-receiver policy. `mayAcceptFrom` is the sender-side mirror, re-checked on every inbound
+record: a refused record is dropped and the peer is told why by a `control:result {ok:false}` on the
+session stream, rate-limited per (peer, project) pair (`INVALID_NOTICE_COOLDOWN_MS`).
 
 **Session-bus frames** (`docs/session-messaging.md`) ride this stream, peer-addressed, exactly like any
 other project-scoped bus frame — there is no separate stream for them.
@@ -235,7 +232,7 @@ cap or duplicate check across concurrent opens is race-free: a per-peer cap
 (`STREAM_MAX_UPLOAD_STREAMS_PER_PEER`, `CAP_EXCEEDED`); `isSafeProjectId` (`NOT_ALLOWED`); the project
 catalogued (`NOT_ALLOWED`); a live project-stream entry for the project (`NOT_READY`); that peer already
 holding the project's stream open (`NOT_ALLOWED`); the project's own `refusalFor`
-(`UPDATE_REQUIRED`/`NOT_ALLOWED`); a duplicate open for the same (peer, requestId) pair (`INVALID`); and
+(`NOT_ALLOWED`); a duplicate open for the same (peer, requestId) pair (`INVALID`); and
 the project declaring an upload server at all (`NOT_ALLOWED`). Steps 9-12 continue asynchronously once
 bound: `UploadStreamServer.admit(peerId, checkoutId)` — unlike `tunnelStreams.admit` (§1c), this may
 PREPARE a checkout runtime that is not yet running, replicating the lazy prepare an app's socket-path
@@ -279,14 +276,13 @@ upload enforces — then copies it through the same staging directory and finali
 One plaintext hello establishes a session per connection:
 
 ```
-peer → host : session:hello        { attemptId, capabilities? }
+peer → host : session:hello        { attemptId }
 host → peer : session:established  { attemptId }
 ```
 
-Schema: `SessionHelloFrame` / `SessionHelloCapabilities` in `bridge/src/protocol.ts`. These are bare
-`{ type, ... }` objects with no `id`/`timestamp` envelope — deliberately outside `AbMessageSchema` /
-`KNOWN_TYPES` (see the comment above `PeerSessionOwner.handleHello`), because a hello precedes the
-session that envelope is scoped to.
+Schema: `SessionHelloFrame` in `bridge/src/protocol.ts`. These are bare `{ type, ... }` objects with no
+`id`/`timestamp` envelope — deliberately outside `AbMessageSchema` / `KNOWN_TYPES` (see the comment above
+`PeerSessionOwner.handleHello`), because a hello precedes the session that envelope is scoped to.
 
 - A hello naming an `attemptId` that already matches the peer's established session is re-acked
   idempotently (the driver has no retransmit loop of its own, but a duplicate must not be treated as a
@@ -297,21 +293,18 @@ session that envelope is scoped to.
   for a session-less peer is a `session:hello`; everything else is dropped before it can reach dispatch,
   the session bus or a stream. This is enforced independently of the transport, because nothing above the
   QUIC layer proves a connected peer has said hello.
-- `capabilities` is byte-identical in shape to the old `AppReadyMessage.capabilities` (the app's hello
-  literals in `connection_handshake.dart` and `local_transport.dart` must keep naming every key
-  `SessionHelloCapabilities` declares, and vice versa — Zod strips an undeclared key, and no suite spans
-  both sides). `sessionBusCarrier` is a loopback-only key (`local-listener.ts`) and must never be copied
-  into this native hello.
+- A hello that still carries an unknown `capabilities` key parses — Zod strips it and it is ignored, not
+  refused. `sessionBusCarrier` is a loopback-only key (`local-listener.ts`) and must never be sent on this
+  native hello.
 
 The Dart driver (`ConnectionHandshake` / `AppSessionHandshaker`, `packages/antgrid_relay_client`) is
-still called "handshake" in code — that name predates this doc and was kept rather than churned twice —
-but it drives no cryptographic exchange: it sends one hello and waits for `established`, with the whole
+called "handshake" in code, but it drives no cryptographic exchange: it sends one hello and waits for `established`, with the whole
 attempt bounded by one timeout. A connection that never establishes is closed by the caller, not retried
 on the same link.
 
 ## 3. Session lifetime — no in-place rekey
 
-There is no live-session key material to rotate, so what used to be "rekey" is now "close the link".
+There is no live-session key material to rotate; a session ends only when its link closes.
 Liveness is QUIC's: both endpoints run iroh 1.0's keep-alive (5s) and connection idle timeout (30s),
 recorded as `PEER_QUIC_KEEP_ALIVE_INTERVAL_MS`/`PEER_QUIC_MAX_IDLE_TIMEOUT_MS` and
 `kPeerQuicKeepAliveInterval`/`kPeerQuicMaxIdleTimeout` rather than set, because neither binding exposes a
@@ -328,36 +321,33 @@ that stream alone, rerunning the bind resync (§1d); every other project, termin
 stream is untouched. The control plane's only connection-level escape is the app's ping.
 
 Closing the link is still the whole recovery for the session, and the connection supervisor redials,
-going through admission (§1) and the hello (§2) again. `MachineSession` fences sends/receives across a
-reconnect with a per-connection generation token (`_SessionGeneration`/`_generation`,
-`machine_session.dart`), not a key identity check, since there are no keys to compare.
+going through admission (§1) and the hello (§2) again. One `MachineSession` per `PeerLink` establishes at
+most once — a failed hello closes the link rather than retrying on it — so sends/receives fence on a
+single `_established` flag and `_firstEstablished` completer (`machine_session.dart`).
 
-`session:takeover` and the base class's capacity eviction are gone from the native path: `acceptPeer`'s
-own capacity cap (§1) is the only admission-time bound, and nothing sends a takeover notice any more
-(the type stays reserved in `SESSION_FRAME_TYPES` — §4 — because the app's receive arm still exists).
+`acceptPeer`'s capacity cap (§1) is the only admission-time bound, and nothing evicts an established
+peer to admit another.
 
 ## 4. Session-record layout
 
 A session-stream record is `[u32 BE len][UTF-8 JSON]` — byte for byte the same shape as a project-stream
 record (§1d), read and written by the same record reader/writer both use. There is no header, no version
-byte and no kind byte: the old two-value envelope (`PeerFrameHeader.type`, `session`/`message`) that once
-told a liveness/session frame from a control-plane `AbMessage` is gone, because the JSON body's own `type`
-is now sufficient — no `AbMessage` uses a `session:`-prefixed type, and nothing else on this stream uses
+byte and no kind byte: the JSON body's own `type` tells a session frame from a control-plane
+`AbMessage` — no `AbMessage` uses a `session:`-prefixed type, and nothing else on this stream uses
 one either.
 
-The five session frames, one scheme (`session:` + verb), are the whole set
+The four session frames, one scheme (`session:` + verb), are the whole set
 `SESSION_FRAME_TYPES` (`packages/antgrid-wire/src/peer-protocol.ts`, hand-mirrored as
 `kSessionFrameTypes` in `packages/antgrid_relay_client/lib/src/frame.dart`):
 
 | Type | Direction | Body |
 |---|---|---|
-| `session:hello` | app → bridge | `{type, attemptId, capabilities?}` |
+| `session:hello` | app → bridge | `{type, attemptId}` |
 | `session:established` | bridge → app | `{type, attemptId}` |
 | `session:ping` | either direction may receive it | `{type}` |
 | `session:pong` | reply to a ping | `{type}` |
-| `session:takeover` | bridge → app, reserved — nothing sends it (§3) | `{type}` |
 
-`isSessionFrameType(type)` is the dispatch: a record whose `type` is one of these five is a session frame
+`isSessionFrameType(type)` is the dispatch: a record whose `type` is one of these four is a session frame
 (`PeerSessionOwner.onSessionFrame`/`handleSessionFrame`); everything else is the bare JSON of exactly one
 `AbMessage` of the control plane (`onControlMessage`/`dispatchControlPlane`). An old envelope-era name
 (`ping`, `pong`, `established`) is therefore control-plane traffic, not a session frame: `PingMessage`/
@@ -375,12 +365,8 @@ together with any change to the session-record or stream-open constants it pins.
 
 ## 5. Per-record caps, not per-channel flow control
 
-Stage A wave A5 deleted the credit-window scheme this section used to describe (`flow.ts`, a cumulative
-per-channel credit consumed by a plaintext `credit` session frame) along with the fragmentation it existed
-to pace: once every purpose-specific stream (§1a-§1d) carries its own records directly, with no `{s,m}`
-envelope to multiplex over, a credit window bought nothing a per-record size cap does not already bound.
-
-What replaced it is a cap per record, asymmetric by direction and defined once per stream kind in
+Every purpose-specific stream (§1a-§1e) carries its own records directly, so a per-record size cap is
+the whole bound: there is a cap per record, asymmetric by direction and defined once per stream kind in
 `packages/antgrid-wire` (session: `PEER_MAX_RECORD_BYTES`/`PEER_MAX_BRIDGE_RECORD_BYTES` in
 `peer-authorization.ts`; project, terminal, tunnel and upload: `stream-open.ts`, §1b-§1e) — the app only
 ever writes small control-plane records, so its cap is far below the bridge's, which is sized to
@@ -389,11 +375,9 @@ the one `file:upload-result`/`stream:refused` record it ever writes — the file
 cap at all, since a raw read/write has no length prefix to check against (§1e). An app record whose
 length prefix exceeds its stream's cap is a protocol violation and closes the connection. Backpressure is
 a bounded per-stream write queue ahead of the native binding (`StreamRecordWriter`,
-`bridge/src/peer/stream-records.ts`) rather than a credit window: a project, terminal, tunnel or upload
-stream that fills its queue is reset — that stream alone, per D3 — instead of stalling every other stream
-sharing what used to be one socket's window. The session stream is the one exception: it has nothing to
-reopen, so its overflow retires the connection (`queue-full`, `native-host-connection.ts`). There is no
-credit frame left on the wire, and `flow.ts`/`flow.dart` no longer exist.
+`bridge/src/peer/stream-records.ts`): a project, terminal, tunnel or upload
+stream that fills its queue is reset — that stream alone, per D3 — without stalling any other stream. The session stream is the one exception: it has nothing to
+reopen, so its overflow retires the connection (`queue-full`, `native-host-connection.ts`).
 
 A raw stream (an HTTP tunnel body or an upload's file bytes) carries no length-prefixed records at all,
 so its pacing is per-read/per-write rather than per-record: `StreamRawReader.read()` asks for at most
@@ -408,12 +392,12 @@ hand-mirrored as `frameIdOf` (`packages/antgrid_relay_client/lib/src/frame.dart`
 (`joinCaptures`, `bridge/src/cli/netwatch.ts`) pairs same-hash occurrences across the two captures
 **in the order they occur**, not by assuming a hash is unique — a ping, a pong, and a repeated
 `stream-ready` with the same field values are byte-identical and legitimately recur. `NetwatchKind` names
-`frame`/`hello` (formerly `sealed`/`handshake`) alongside `control`/`json`/`drop`/`lifecycle` — see the
+`frame`/`hello` alongside `control`/`json`/`drop`/`lifecycle` — see the
 type declaration for the current set, since it is a poor fit for a frozen list here.
 
 `NetwatchEvent.channel` is the loopback socket's own `control`/`preview` JSON label (D2,
 docs/iroh-reduction/ledger.md) and stays meaningful there; on `transport: "iroh"` it carries no
-information — the `{s,m}` mux is gone (A4/A5), and every native record source writes `"control"`.
+information: every native record source writes `"control"`.
 `NetwatchEvent.streamKind` (the open frame's `kind`, §1a-§1e) is what names a native record's stream
 instead, and both ends now write it — the bridge from `streamLabelOf` (`bridge/src/peer/stream-dispatch.ts`),
 the app from the same lookup in `antgrid_relay_client` — for every stream kind, terminal and tunnel

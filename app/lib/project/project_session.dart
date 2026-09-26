@@ -500,14 +500,6 @@ class ProjectSession {
   void unhydrateCheckout(String checkoutId, String key) =>
       unhydrate('checkout:$checkoutId:$key');
 
-  /// Tier-2 bounded fail-fast send: runs [run] under [timeout] so the caller's
-  /// flag lifecycle always settles even if the reply never arrives. NOT
-  /// re-driven on reconnect. See [AgentTransport.action].
-  Future<T> action<T>(
-    Future<T> Function() run, {
-    Duration? timeout = const Duration(seconds: 15),
-  }) => transport.action(run, timeout: timeout);
-
   Future<void> close() async {
     if (_closed) return;
     _closed = true;

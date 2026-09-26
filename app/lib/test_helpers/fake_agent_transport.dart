@@ -221,15 +221,6 @@ class FakeAgentTransport implements AgentTransport {
     }
   }
 
-  @override
-  Future<T> action<T>(
-    Future<T> Function() run, {
-    Duration? timeout = const Duration(seconds: 15),
-  }) {
-    final f = run();
-    return timeout == null ? f : f.timeout(timeout);
-  }
-
   /// Test helper: simulate a (re)establishment, re-driving every registered
   /// hydrator (what StreamTransport.refreshSnapshot does on each handshake).
   void redriveHydrators() {
@@ -317,16 +308,14 @@ class FakeAgentTransport implements AgentTransport {
     Map<String, dynamic>? params,
     Duration timeout = const Duration(seconds: 10),
   }) async {
-    final mutating =
-        classifyRemoteRequest(method) == RemoteRequestKind.mutating;
-    if (mutating && !isEstablished) {
+    if (!isEstablished) {
       return const RemoteRequestResult.notSent();
     }
     try {
       final value = await request(method, params: params, timeout: timeout);
       return RemoteRequestResult.confirmed(value);
     } on RpcException catch (error) {
-      if (mutating && _transportFailureCodes.contains(error.code)) {
+      if (_transportFailureCodes.contains(error.code)) {
         return const RemoteRequestResult.outcomeUnknown();
       }
       rethrow;

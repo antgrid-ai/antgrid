@@ -45,21 +45,6 @@ async function assertSessionAlive(app: RelayClient, label: string): Promise<void
   expect(res.ok).toBe(true);
 }
 
-async function git(cwd: string, args: string[]): Promise<void> {
-  const proc = Bun.spawn(["git", ...args], { cwd, stdout: "ignore", stderr: "pipe" });
-  if (await proc.exited !== 0) throw new Error(await new Response(proc.stderr).text());
-}
-
-/** Isolated sessions need a real repository — the eval fixture project is a
- *  plain folder otherwise. Mirrors gate-worktree-isolation.test.ts. */
-async function initRepo(dir: string): Promise<void> {
-  await git(dir, ["init"]);
-  await git(dir, ["config", "user.email", "eval@antgrid.local"]);
-  await git(dir, ["config", "user.name", "Antgrid Eval"]);
-  await git(dir, ["add", "."]);
-  await git(dir, ["commit", "-m", "initial"]);
-}
-
 test("hazard J: a raw open before project:start is NOT_READY, project:start's stream-ready carries no streamId, and openProjectStream then admits", async () => {
   const env = await setupTestEnv({ fixtureName: "basic" });
   const projBdir = createTestProject("basic", { "__RELAY_URL__": env.relay.url.replace(/\/ws$/, "") });
@@ -112,45 +97,6 @@ test("openProjectStreamRaw refuses NOT_ALLOWED for an uncatalogued id and for an
     await env.teardown();
   }
 });
-
-test("a stale app (no checkoutRouting) opening a project with a managed worktree session is refused UPDATE_REQUIRED", async () => {
-  const env = await setupTestEnv({ fixtureName: "basic", prepareProject: initRepo });
-  let stale: RelayClient | undefined;
-  try {
-    // Give env.projectId a managed-worktree session, over the first (current,
-    // checkoutRouting-advertising) app.
-    const requestId = "gate-project-streams-row3-create";
-    const replyP = env.app.waitFor(
-      (m: any) => m.type === "session:result" && m.requestId === requestId,
-      15_000,
-    );
-    env.app.sendOnStream(env.streamId, createMessage("session:create", {
-      requestId, name: "row3", isolation: "worktree",
-    }));
-    const created = await replyP;
-    expect(created.ok).toBe(true);
-    expect(created.session?.checkoutKind).toBe("managed-worktree");
-
-    // A second, independently-admitted app device that never claims
-    // checkoutRouting in its hello — the pre-worktree-support shape.
-    const second = await env.license.addAccountDevice();
-    stale = await env.connectNativeApp({
-      name: "gate-project-streams-stale-app",
-      identity: second,
-      accountDeviceId: second.deviceId,
-    });
-    await establishNativeSession(stale, env.agentDeviceId, env.agent.ed25519Pubkey, {
-      omitCheckoutRouting: true,
-    });
-
-    const raw = await stale.openProjectStreamRaw(env.projectId, 8_000);
-    expect(raw.refusal?.code).toBe("UPDATE_REQUIRED");
-    expect(await raw.ended).toBe("fin");
-  } finally {
-    await stale?.disconnect();
-    await env.teardown();
-  }
-}, 60_000);
 
 test("two devices, one project: broadcasts reach both, an addressed reply reaches only its requester, and one closing leaves the other live", async () => {
   const env = await setupTestEnv({ fixtureName: "basic" });

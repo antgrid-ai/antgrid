@@ -241,7 +241,7 @@ async function admitAndBind(registry: TerminalStreamRegistry, binding: TerminalP
 }
 
 describe("TerminalStreamRegistry (A2)", () => {
-  test("each refusal is decided before any read: CAP_EXCEEDED, INVALID requestId, NOT_ALLOWED unsafe id, NOT_ALLOWED uncatalogued, NOT_READY unbound, UPDATE_REQUIRED, INVALID duplicate requestId", async () => {
+  test("each refusal is decided before any read: CAP_EXCEEDED, INVALID requestId, NOT_ALLOWED unsafe id, NOT_ALLOWED uncatalogued, NOT_READY unbound, NOT_ALLOWED masked from the binding's own refusal, INVALID duplicate requestId", async () => {
     const { registry, cataloged, bindings } = makeRegistry();
     cataloged.add(PROJECT);
     const { binding } = fakeBinding();
@@ -286,21 +286,16 @@ describe("TerminalStreamRegistry (A2)", () => {
     }
 
     {
-      cataloged.add("update-project");
+      // Whatever code the binding's own admission check returns is masked to
+      // NOT_ALLOWED — the app is told only "this stream is refused", never
+      // handed an arbitrary session-path refusal code.
+      cataloged.add("refused-project");
       const rebind = fakeBinding();
-      rebind.setRefusal(() => ({ code: "UPDATE_REQUIRED", message: "old app" }));
-      bindings.set("update-project", rebind.binding);
-      const { fake, result } = admit(registry, { projectId: "update-project" });
-      expect((await refusalOf(result))?.code).toBe("UPDATE_REQUIRED");
-      expect(fake.readCalls).toEqual([]);
-
-      // A refusal whose OWN code is something other than UPDATE_REQUIRED is
-      // masked to NOT_ALLOWED — the app is told only "this stream is refused",
-      // never handed an arbitrary session-path refusal code.
       rebind.setRefusal(() => ({ code: "CAP_EXCEEDED", message: "irrelevant" }));
-      const second = admit(registry, { projectId: "update-project" });
-      expect((await refusalOf(second.result))?.code).toBe("NOT_ALLOWED");
-      expect(second.fake.readCalls).toEqual([]);
+      bindings.set("refused-project", rebind.binding);
+      const { fake, result } = admit(registry, { projectId: "refused-project" });
+      expect((await refusalOf(result))?.code).toBe("NOT_ALLOWED");
+      expect(fake.readCalls).toEqual([]);
     }
 
     {

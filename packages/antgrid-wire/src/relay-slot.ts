@@ -5,14 +5,14 @@
  * The relay arbitrates per `hello.deviceId` and supersedes an equal epoch, so
  * an app holding several machines open at once needs one slot per machine.
  * A slot identifies the app's machine-scoped control connection and native
- * route. Everything keyed by the ACCOUNT device — the E2E transcript, the
- * bridge's trusted-peers/paired-phones lookups, and central revocation
- * lookup — goes through `baseSlotDeviceId` first.
+ * route. Everything keyed by the ACCOUNT device — the bridge's
+ * `paired-phones.ts` lookups and central revocation lookup — goes through
+ * `baseSlotDeviceId` first.
  *
- * Stripping the scope cannot admit anyone: on the bridge every identity the
- * base id resolves to is still gated by `verifyTranscriptSig`, so a client
- * claiming `<victim>#x` is handed the victim's pubkey and then fails the
- * signature.
+ * Stripping the scope cannot admit anyone: the native payload path
+ * authorizes by endpoint ID from the authorization snapshot
+ * (`acceptPeer`, `bridge/src/peer/native-host-connection.ts`), which a
+ * stripped or forged slot never resolves to.
  *
  * Hand-mirrored by `packages/antgrid_relay_client/lib/src/relay_slot.dart`
  * (which also mints slots — only the app ever does) — keep the two in
@@ -33,12 +33,6 @@ export function relaySlotId(deviceUuid: string, machineDeviceId: string): string
 export function baseSlotDeviceId(routeId: string): string {
   const i = routeId.indexOf(SLOT_SEPARATOR);
   return i < 0 ? routeId : routeId.slice(0, i);
-}
-
-/** The machine a route id is scoped at, or null when it carries no scope. */
-export function slotMachineDeviceId(routeId: string): string | null {
-  const i = routeId.indexOf(SLOT_SEPARATOR);
-  return i < 0 ? null : routeId.slice(i + SLOT_SEPARATOR.length);
 }
 
 /** True when `routeId` is a slot scoped under account device `deviceId`.

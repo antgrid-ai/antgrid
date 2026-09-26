@@ -80,16 +80,6 @@ class ProjectBindException implements Exception {
   String toString() => 'ProjectBindException($code): $message';
 }
 
-/// One established hello, identified by a monotonic epoch rather than a bool:
-/// object identity lets a send fence itself against a rotation that happens
-/// mid-await (`identical(gen, _generation)`), which a bool cannot distinguish
-/// from "still the same state" when it flips false then true again before the
-/// awaited call returns.
-class _SessionGeneration {
-  _SessionGeneration(this.epoch);
-  final int epoch;
-}
-
 /// `(projectId, open)` — see [MachineSession.projectStreamEvents].
 typedef ProjectStreamEvent = ({String projectId, bool open});
 
@@ -160,20 +150,16 @@ class MachineSession {
     RelayLogger? logger,
   }) : _handshaker = handshaker,
        _logger = logger {
-    // [ready] is observation-optional: failReady/dispose may completeError
-    // before any awaiter attaches (see the getter doc). ignore() pre-registers
-    // a swallowing listener so that never trips the unhandled-error zone hook;
-    // every real `await ready` still receives the error.
-    _readyCompleter.future.ignore();
-    _armEstablishedReady();
+    // [_firstEstablished] is observation-optional: dispose() may
+    // completeError before any awaiter attaches. ignore() pre-registers a
+    // swallowing listener so that never trips the unhandled-error zone hook;
+    // every real awaiter still receives the error.
+    _firstEstablished.future.ignore();
   }
-
-  _SessionGeneration? _generation;
-  int _epochCounter = 0;
 
   /// `kSessionStreamLabel` -> the session-stream transport, everything else ->
   /// a project's transport. Unified so disposal (`removeStream`) and the
-  /// per-(re)establishment sweep need no special case for the control entry.
+  /// teardown sweep need no special case for the control entry.
   final Map<String, StreamTransport> _streams = {};
 
   StreamSubscription<IncomingSessionRecord>? _msgSub;
@@ -186,24 +172,21 @@ class MachineSession {
   int _missedPongs = 0;
   DateTime _lastRecv = DateTime.now();
 
-  /// Serializes writes on the session stream so a dequeue-time generation
-  /// check (see [sendOnSession]) sees frames in the order they were queued.
+  /// Serializes writes on the session stream so a dequeue-time
+  /// [_established] check (see [sendOnSession]) sees frames in the order they
+  /// were queued.
   Future<void> _sessionSendChain = Future<void>.value();
 
   /// The attempt [ensureEstablished] joins instead of starting a second one.
   /// Null whenever no handshake is running.
   Future<void>? _handshakeFuture;
 
-  final _readyCompleter = Completer<void>();
+  /// Completes once, at the session's first (and, per-object, only)
+  /// establishment — a fresh connection gets a fresh [MachineSession], so
+  /// there is no "next" establishment to re-arm for. [_attemptBind] awaits
+  /// this because [openProject] can precede establishment.
+  final _firstEstablished = Completer<void>();
 
-  /// Completes each time [_generation] is installed and is re-armed on socket
-  /// loss, so a bind issued across a reconnect can wait for the next
-  /// establishment instead of failing on the transient pre-establishment
-  /// window.
-  late Completer<void> _establishedReady;
-
-  final _established$ = StreamController<void>.broadcast();
-  final _takeovers = StreamController<void>.broadcast();
   final _sessionDown = StreamController<void>.broadcast();
   final _messageTooLarge = StreamController<MessageTooLarge>.broadcast();
   final _projectStreamEvents = StreamController<ProjectStreamEvent>.broadcast();
@@ -218,28 +201,8 @@ class MachineSession {
   /// failed by a rejecting `control:result`.
   final Map<String, Completer<void>> _readyWaiters = {};
 
-  /// Completes on the FIRST `session:established`; errors if the session is disposed
-  /// beforehand. One-shot — never await it to observe a re-establishment (use
-  /// [ensureEstablished] or [established]).
-  ///
-  /// Errors may land before anyone awaits (dispose-before-established) — the
-  /// `ignore()` in the constructor keeps those from surfacing as unhandled
-  /// async errors while real awaiters still observe them.
-  Future<void> get ready => _readyCompleter.future;
-
   /// `true` once the peer session is established at least once and still live.
   bool get isEstablished => _established;
-
-  /// Fires on EVERY (re)establishment. [ready] cannot serve
-  /// that purpose — it is one-shot, so after the first establishment it can no
-  /// longer tell a caller that the session came back.
-  Stream<void> get established => _established$.stream;
-
-  /// Fires when the agent hands this machine's session to another device
-  /// (`session:takeover`). Report-only: the session is already torn down
-  /// when this emits and NOTHING here re-establishes it, because two devices
-  /// each reclaiming on takeover would evict each other forever.
-  Stream<void> get takeoverEvents => _takeovers.stream;
 
   /// Fires when a hello attempt ends with no live session (the agent never
   /// answered `session:established`).
@@ -248,8 +211,8 @@ class MachineSession {
   /// connection supervisor, and a supervisor can only re-drive what it is told
   /// about. Without this signal the socket looks healthy, the `established`
   /// rung reads satisfied off a torn-down session, and the ladder never runs
-  /// again. The socket-death and takeover paths have their own signals, so
-  /// this one deliberately does not double-report them.
+  /// again. The socket-death path has its own signal, so this one
+  /// deliberately does not double-report it.
   Stream<void> get sessionDownEvents => _sessionDown.stream;
 
   Stream<MessageTooLarge> get messageTooLarge => _messageTooLarge.stream;
@@ -355,9 +318,9 @@ class MachineSession {
   }
 
   /// Writes [message] as a bare control-plane `AbMessage` record on the
-  /// session stream. Dropped when no session generation is live
-  /// (pre-establishment / mid-reconnect) — the bridge replays durable state
-  /// via `state.snapshot` on the next establishment.
+  /// session stream. Dropped when the session is not established
+  /// (pre-establishment or torn down) — durable state is re-pulled via
+  /// `state.snapshot` by whichever session establishes next.
   ///
   /// Resolves once the message has been handed to the link or dropped, never
   /// when it has merely been queued behind sends already in flight. A caller
@@ -367,7 +330,7 @@ class MachineSession {
     String channel,
   ) {
     final type = message['type'] is String ? message['type'] as String : null;
-    if (_generation == null) {
+    if (!_established) {
       // Usually benign (the bridge replays durable state on establishment),
       // but it is also where a session that never comes back shows up first,
       // and nothing else on this path observes it. Dropped rather than
@@ -410,12 +373,8 @@ class MachineSession {
       }
       return Future.value();
     }
-    // Captured now, not when this send reaches the front of the chain: a
-    // teardown mid-queue must drop a frame written for a session that is
-    // already gone rather than hand it to a successor session.
-    final gen = _generation;
     final result = _sessionSendChain.then(
-      (_) => _doSendOnSession(plaintext, channel, type, gen),
+      (_) => _doSendOnSession(plaintext, channel, type),
     );
     // The chain keeps only completion order: one link's throw is its own
     // caller's to see, and must not reject every later send behind it.
@@ -424,16 +383,14 @@ class MachineSession {
   }
 
   /// Writes one session-stream record queued by [sendOnSession], rechecking
-  /// [gen] at dequeue: a session teardown while this send waited its turn in
-  /// [_sessionSendChain] must drop the frame rather than hand it to whatever
-  /// session comes next.
+  /// [_established] at dequeue: a session teardown while this send waited its
+  /// turn in [_sessionSendChain] must drop the frame.
   Future<void> _doSendOnSession(
     String plaintext,
     String channel,
     String? type,
-    _SessionGeneration? gen,
   ) async {
-    if (!identical(gen, _generation)) {
+    if (!_established) {
       _dropped(
         'tx',
         'no-established-session',
@@ -459,10 +416,9 @@ class MachineSession {
     final bytes = Uint8List.fromList(utf8.encode(plaintext));
     if (!relay.isDispatchAllowed) return;
     final outcome = await relay.sendRecord(bytes);
-    if (outcome != PeerSendOutcome.accepted || !identical(gen, _generation)) {
-      // A generation change between the send and its outcome means a teardown
-      // or a fresh hello already retired the session this frame was written
-      // for — the peer either never saw it or has since moved on.
+    if (outcome != PeerSendOutcome.accepted || !_established) {
+      // The session went down between the send and its outcome — the peer
+      // either never saw it or has since moved on.
       return;
     }
     _emitSessionFrameRow('tx', type, frameId: _frameId(bytes), bytes: bytes.length);
@@ -492,19 +448,11 @@ class MachineSession {
     }
   }
 
-  void _armEstablishedReady() {
-    _establishedReady = Completer<void>();
-    // dispose() can fail this before any [openProject] awaits it — same
-    // unobserved-error guard as [_readyCompleter].
-    _establishedReady.future.ignore();
-  }
-
   void _teardownSession() {
-    // Drop all session state — called when the socket dies and when the agent
-    // hands the session to another device. A session is per-connection; either
-    // event invalidates it.
+    // Drop all session state — called when the socket dies. A session is
+    // per-connection, so this invalidates it for good; the app opens a fresh
+    // [MachineSession] over a fresh connection rather than reusing this one.
     _established = false;
-    _generation = null;
     _stopLiveness();
     _cancelPendingWork();
     // Readiness is per-CONNECTION too (a fresh hello re-registers the core
@@ -518,9 +466,6 @@ class MachineSession {
     for (final s in _streams.values) {
       s._onConnectionLost();
     }
-    // Re-arm only from the completed state: a second blip before the first
-    // establishment would otherwise orphan whoever is already awaiting.
-    if (_establishedReady.isCompleted) _armEstablishedReady();
   }
 
   void _cancelPendingWork() {
@@ -567,30 +512,20 @@ class MachineSession {
       unawaited(relay.close());
       return;
     }
-    _generation = _SessionGeneration(++_epochCounter);
-    if (!_establishedReady.isCompleted) _establishedReady.complete();
     _established = true;
+    if (!_firstEstablished.isCompleted) _firstEstablished.complete();
     _lastRecv = DateTime.now();
     _missedPongs = 0;
     _startLiveness();
-    if (!_readyCompleter.isCompleted) _readyCompleter.complete();
-    if (!_established$.isClosed) _established$.add(null);
-    // Defensive re-clear: `_teardownSession` already cleared it, and nothing
-    // repopulates it while `_generation` is null, but a first-ever
-    // establishment never ran a teardown.
+    // A first-ever establishment never ran a teardown, so this is a
+    // defensive re-clear rather than a load-bearing one.
     _readyProjects.clear();
-    // Re-pull durable state on every (re)establish so late subscribers
-    // (a ControlPlaneClient, a just-bound project stream) replay it. The
-    // control transport re-pulls; every live project transport reopens AT
-    // ONCE with no backoff — each reopen's own bind is what re-pulls its
-    // durable state (see StreamTransport._onOpen).
-    for (final s in _streams.values) {
-      if (s.projectId == null) {
-        unawaited(s.refreshSnapshot());
-      } else {
-        s._reopenAtEstablish();
-      }
-    }
+    // A project stream created via [openProject] before this establishment
+    // (`_attemptBind` waiting on [_firstEstablished]) drives its own bind
+    // once this future resolves — nothing here needs to reopen it. Only the
+    // control transport, if already created, needs its snapshot kicked here.
+    final control = _streams[kSessionStreamLabel];
+    if (control != null) unawaited(control.refreshSnapshot());
   }
 
   // --- liveness -------------------------------------------------------------
@@ -729,7 +664,7 @@ class MachineSession {
   /// per-channel tail existed only to keep a slow `open()` from letting a
   /// small frame overtake a large one, and a plain UTF-8 decode never blocks.
   void _onSessionRecord(IncomingSessionRecord msg) {
-    if (_disposed || !relay.isDispatchAllowed || _generation == null) return;
+    if (_disposed || !relay.isDispatchAllowed || !_established) return;
     String plaintext;
     try {
       plaintext = utf8.decode(msg.payload);
@@ -748,7 +683,7 @@ class MachineSession {
   /// [frameId] names the frame this plaintext arrived in, for the capture tap;
   /// [bytes] is the record's payload length.
   void _dispatchDecoded(String plaintext, String? frameId, int bytes) {
-    if (_disposed || _generation == null || !relay.isDispatchAllowed) return;
+    if (_disposed || !_established || !relay.isDispatchAllowed) return;
     Map<String, dynamic> json;
     try {
       json = jsonDecode(plaintext) as Map<String, dynamic>;
@@ -882,22 +817,14 @@ class MachineSession {
       case kSessionPong:
         _missedPongs = 0;
         break;
-      case kSessionTakeover:
-        // The agent is switching to another device and is about to drop our
-        // session. Tear down and REPORT — re-establishing here would fight the
-        // other device for it.
-        _teardownSession();
-        if (!_takeovers.isClosed) _takeovers.add(null);
-        break;
       default:
         _dropped('rx', 'unknown-session-frame', frameId: frameId);
     }
   }
 
   Future<void> _sendSessionFrame(Map<String, dynamic> obj) async {
-    final gen = _generation;
     final type = obj['type'] as String?;
-    if (gen == null) {
+    if (!_established) {
       _dropped('tx', 'no-established-session', channel: 'control', msgType: type);
       // This path carries ping and pong — the frames the peer reads as proof
       // we are alive. Losing one is indistinguishable at the far end from a
@@ -913,10 +840,8 @@ class MachineSession {
     final ct = Uint8List.fromList(utf8.encode(jsonEncode(obj)));
     if (!relay.isDispatchAllowed) return;
     final outcome = await relay.sendRecord(ct);
-    if (outcome != PeerSendOutcome.accepted || !identical(gen, _generation)) {
-      // A generation change between the send and its outcome means a teardown
-      // or a fresh hello already retired the session this frame was written
-      // for.
+    if (outcome != PeerSendOutcome.accepted || !_established) {
+      // The session went down between the send and its outcome.
       return;
     }
     // Liveness frames are the cheapest signal that a session is alive at all —
@@ -944,17 +869,11 @@ class MachineSession {
     _readyProjects.clear();
     _tunnelSlots.failAll();
     _uploadSlots.failAll();
-    await _established$.close();
-    await _takeovers.close();
     await _sessionDown.close();
     await _messageTooLarge.close();
     await _projectStreamEvents.close();
-    _generation = null;
-    if (!_readyCompleter.isCompleted) {
-      _readyCompleter.completeError(StateError('session disposed'));
-    }
-    if (!_establishedReady.isCompleted) {
-      _establishedReady.completeError(StateError('session disposed'));
+    if (!_firstEstablished.isCompleted) {
+      _firstEstablished.completeError(StateError('session disposed'));
     }
   }
 
@@ -1086,10 +1005,10 @@ class _StreamSlots {
 }
 
 /// The session-stream (control-plane) or one project's [AgentTransport] view
-/// over a [MachineSession]. Interface-compatible with the pre-A4 transport:
-/// services and `BufferedAgentTransport` RPC plumbing are unchanged; `send()`
-/// delegates to the session (control) or to this project's own native stream,
-/// and `dispatchFromSession` receives only this transport's decoded messages.
+/// over a [MachineSession]. Services and `BufferedAgentTransport` RPC
+/// plumbing address it like any other transport; `send()` delegates to the
+/// session (control) or to this project's own native stream, and
+/// `dispatchFromSession` receives only this transport's decoded messages.
 class StreamTransport extends BufferedAgentTransport {
   final MachineSession session;
 
@@ -1239,12 +1158,12 @@ class StreamTransport extends BufferedAgentTransport {
   ) async {
     final pid = projectId!;
     final deadline = DateTime.now().add(timeout);
-    if (session._generation == null) {
-      try {
-        await session._establishedReady.future.timeout(_remainingUntil(deadline));
-      } on TimeoutException {
-        throw StateError('openProject: session not established');
-      }
+    // A no-op await once the session is already established — [openProject]
+    // can be called before that first happens.
+    try {
+      await session._firstEstablished.future.timeout(_remainingUntil(deadline));
+    } on TimeoutException {
+      throw StateError('openProject: session not established');
     }
     var retriedNotReady = false;
     while (true) {
@@ -1463,8 +1382,7 @@ class StreamTransport extends BufferedAgentTransport {
   ) async {
     final type = message['type'] is String ? message['type'] as String : null;
     if (!_bound) {
-      // The snapshot pull at the next bind is the reconnect contract, as it
-      // was pre-establishment before A4.
+      // The snapshot pull at the next bind is the reconnect contract.
       session._dropped(
         'tx',
         'no-project-stream',
@@ -1519,9 +1437,6 @@ class StreamTransport extends BufferedAgentTransport {
   /// A stream that keeps timing out therefore reopens at 1 s, 2 s, 4 s … up to
   /// [kProjectStreamReopenMaxBackoff] instead of hammering at 1 s; the first
   /// answered RPC ([_noteAnswered]) clears [_healthResets] again.
-  /// [_reopenAtEstablish] zeroes [_reopenAttempt] itself for a fresh session,
-  /// unconditionally — that path starts clean regardless of what happened on
-  /// the last connection.
   void _onOpen() {
     _bindEpoch++;
     _timeoutStreak = 0;
@@ -1548,8 +1463,7 @@ class StreamTransport extends BufferedAgentTransport {
 
   /// Eager, synchronous state reset when the whole session dies — see
   /// `MachineSession._teardownSession`. Letting go of [_peerStream] here makes
-  /// the dying stream's own later end a stale one [_onStreamEnded] ignores:
-  /// by then the next establishment may already have reopened.
+  /// the dying stream's own later end a stale one [_onStreamEnded] ignores.
   void _onConnectionLost() {
     if (projectId == null) return;
     _reopenTimer?.cancel();
@@ -1561,9 +1475,10 @@ class StreamTransport extends BufferedAgentTransport {
 
   /// The read loop ended (peer FIN/reset, connection loss, or our own
   /// disposal draining out). Frees the slot and schedules a reopen — unless
-  /// disposed (frees for good) or the session is currently down (the next
-  /// establishment drives every live project transport's reopen directly, see
-  /// `MachineSession._handshakeAttempt`).
+  /// disposed (frees for good) or the session is currently down. A session
+  /// establishes at most once per [MachineSession] (a fresh connection gets a
+  /// fresh session object), so a stream that outlives its session's teardown
+  /// has nothing left to reopen against.
   ///
   /// Only the end of the CURRENT stream counts: a refused, timed-out or
   /// session-lost stream can end long after a newer one took its place, and
@@ -1586,22 +1501,6 @@ class StreamTransport extends BufferedAgentTransport {
     session._markNotReady(projectId!);
     // A bind in flight owns its own failure and reopen.
     if (session.isEstablished && _bindInFlight == null) _scheduleReopen();
-  }
-
-  /// At each (re)establishment every live project transport reopens AT ONCE,
-  /// with no backoff — called from `MachineSession._handshakeAttempt`.
-  void _reopenAtEstablish() {
-    if (projectId == null || _disposed || _bound) return;
-    _reopenTimer?.cancel();
-    _reopenTimer = null;
-    _reopenAttempt = 0;
-    final builder = session.projectStartMessageBuilder;
-    unawaited(
-      _ensureBound(
-        builder == null ? null : builder(projectId!),
-        const Duration(seconds: 20),
-      ).catchError((_) => this),
-    );
   }
 
   /// Schedules a self-driven reopen with growing backoff. A no-op with no

@@ -119,6 +119,37 @@ test("promoting a LOCAL core attaches its bus as a stream and reflects the admis
   expect(core.isRelayRegistered()).toBe(false);
 });
 
+test("the project stream a core attaches refuses a sender with no session and fails delivery closed", async () => {
+  const folder = mkdtempSync(join(tmpdir(), "antgrid-pc-gate-"));
+  cleanup.push(() => rmSync(folder, { recursive: true, force: true }));
+  writeFileSync(join(folder, "antgrid.yaml"), "");
+
+  let remoteOn = false;
+  const core = new ProjectCore({
+    folder,
+    mode: "local",
+    identity: { deviceId: randomUUID(), deviceName: "local", createdAt: new Date().toISOString() },
+    remoteAccessEnabled: () => remoteOn,
+  });
+  cleanup.push(() => core.shutdown());
+  await core.start();
+
+  const { deps, calls } = fakeRemoteDeps();
+  const handle = core.promote(deps);
+  cleanup.push(() => handle.stop());
+  const { opts } = calls[0];
+
+  // A stream open (or inbound record) whose peer resolves to no session must
+  // be refused, never admitted with nothing to route by.
+  expect(opts.mayAcceptFrom?.(null)).toEqual({ code: "NOT_ALLOWED", message: "no session for this peer" });
+  expect(opts.mayAcceptFrom?.({ peerId: "app#machine", peerPubkey: "pk" })).toBeNull();
+
+  // Outbound is gated live on the machine switch, per send.
+  expect(opts.mayDeliver?.()).toBe(false);
+  remoteOn = true;
+  expect(opts.mayDeliver?.()).toBe(true);
+});
+
 test("promote() throws for a remote-mode core (its relay slot is already the primary session)", async () => {
   const folder = mkdtempSync(join(tmpdir(), "antgrid-pc-promo-remote-"));
   cleanup.push(() => rmSync(folder, { recursive: true, force: true }));
@@ -370,10 +401,9 @@ test("a core built with sessionDirectory deps answers session-bus:directory inst
 });
 
 test("attachRelayStream wires handle.terminalHooks into the core, and every teardown clears them", async () => {
-  // Every one of attachRelayStream's three callers (startRemote, promote,
-  // attachLocalStreamForWizard) shares this one wiring — promote() is used
-  // here only because it is the one whose handle stays reachable after its
-  // own teardown, to prove the clear actually took.
+  // Both of attachRelayStream's callers (startRemote, promote) share this one
+  // wiring — promote() is used here only because it is the one whose handle
+  // stays reachable after its own teardown, to prove the clear actually took.
   const folder = mkdtempSync(join(tmpdir(), "antgrid-pc-term-hooks-"));
   cleanup.push(() => rmSync(folder, { recursive: true, force: true }));
   writeFileSync(join(folder, "antgrid.yaml"), "");
@@ -432,8 +462,8 @@ test("attachRelayStream wires handle.terminalHooks into the core, and every tear
   expect(settled).toEqual([{ peerId: "phone-1", requestId, attachmentId: expect.any(String) }]);
   const attachmentId = settled[0].attachmentId!;
 
-  // Teardown: promote()'s stop() must clear the hooks it wired, same as the
-  // other two callers (attachLocalStreamForWizard's detach, ProjectCore.shutdown).
+  // Teardown: promote()'s stop() must clear the hooks it wired, same as
+  // ProjectCore.shutdown does for startRemote's binding.
   promoted.stop();
 
   bus.dispatchInbound(

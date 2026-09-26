@@ -34,7 +34,6 @@ function stubRelayFactory() {
     ({
       deviceId: "dev-1",
       hasEstablishedSession: () => false,
-      anySessionSupportsCheckoutRouting: () => false,
       establishedPeers: () => [],
       peerSession: () => null,
       setBus: () => {},

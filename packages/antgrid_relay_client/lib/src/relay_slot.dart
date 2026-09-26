@@ -9,8 +9,7 @@
 ///
 /// The scope is the AGENT's deviceUuid, so a bridge receiving a slot can tell
 /// whether it was addressed at itself — see the hand mirror
-/// `packages/antgrid-wire/src/relay-slot.ts` (`relaySlotId`/
-/// `slotMachineDeviceId`).
+/// `packages/antgrid-wire/src/relay-slot.ts` (`relaySlotId`).
 ///
 /// This is only ever a TRANSPORT address, unaffected by how the account
 /// identity behind a handshake is proved.

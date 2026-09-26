@@ -48,7 +48,6 @@ function makeAuthenticatingRelayFactory() {
     ({
       deviceId: "control-plane-dev",
       hasEstablishedSession: () => false,
-      anySessionSupportsCheckoutRouting: () => false,
       establishedPeers: () => [],
       peerSession: () => null,
       setBus: () => {},

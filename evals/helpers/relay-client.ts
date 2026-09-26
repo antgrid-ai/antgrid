@@ -1319,14 +1319,6 @@ export class RelayClient {
         }
         return;
       }
-      case "session:takeover":
-        // Sent by the bridge to a session it is about to tear down. A bridge
-        // now keeps one session per app device, so the only producer left is
-        // capacity eviction past that cap. Deliver it like any other session
-        // frame so a test can `waitFor` the mechanism directly, instead of
-        // only inferring it from a later dead round trip.
-        this.deliver(obj);
-        return;
       default:
         return; // session:hello: this client never receives one (app-> bridge only)
     }
@@ -1375,29 +1367,16 @@ export class RelayClient {
   /**
    * Establish the native session with the agent through the peer connection.
    *
-   * Phone perspective: send a plaintext `session:hello { attemptId,
-   * capabilities }` on the control channel and resolve once
-   * `session:established { attemptId }` comes back with a matching id.
-   * QUIC/TLS between the lease-authorized endpoints is the confidentiality layer now, so there is
-   * no key derivation or confirm tag — the bridge's lease re-check on the
-   * hello is what authorizes this session.
+   * Phone perspective: send a plaintext `session:hello { attemptId }` on the
+   * control channel and resolve once `session:established { attemptId }`
+   * comes back with a matching id. QUIC/TLS between the lease-authorized
+   * endpoints is the confidentiality layer now, so there is no key derivation
+   * or confirm tag — the bridge's lease re-check on the hello is what
+   * authorizes this session.
    */
   async performE2EHandshake(
     agentDeviceId: string,
     timeoutMs = 10_000,
-    opts: {
-      /** Play a pre-`pullsTree` app: omit the capability so the bridge keeps
-       *  pushing the file tree on re-sync (gate-lazy-hydration's legacy row). */
-      omitPullsTree?: boolean;
-      /** Play a pre-`terminalFramesV1` app: omit the capability so the bridge
-       *  keeps this client on the legacy raw-output display path (old-app
-       *  compatibility eval). */
-      omitTerminalFramesV1?: boolean;
-      /** Play a stale, pre-worktree app: omit `checkoutRouting` so the bridge
-       *  refuses a project stream open for any project holding a managed
-       *  worktree session (`UPDATE_REQUIRED` — gate-project-streams row 3). */
-      omitCheckoutRouting?: boolean;
-    } = {},
   ): Promise<void> {
     if (!this.nativePeerId) throw new Error("Native peer is not connected");
     if (agentDeviceId !== this.nativePeerId) {
@@ -1406,22 +1385,12 @@ export class RelayClient {
       );
     }
     const attemptId = randomBytes(8).toString("hex");
-    // `capabilities` mirrors the production Dart client (connection_handshake.dart):
-    // without checkoutRouting the bridge treats this app as pre-worktree and
-    // refuses to stream any project holding a managed session; `pullsTree` tells
-    // it the app fetches its own file tree, so the re-sync need not push one;
-    // `terminalFramesV1` opts this client into rendered-frame terminal display —
-    // omitting it must fail CLOSED to the legacy raw-output path (never assumed).
-    const capabilities: Record<string, true> = {};
-    if (!opts.omitCheckoutRouting) capabilities.checkoutRouting = true;
-    if (!opts.omitPullsTree) capabilities.pullsTree = true;
-    if (!opts.omitTerminalFramesV1) capabilities.terminalFramesV1 = true;
 
     const establishedP = this.waitFor(
       (m: any) => m.type === "session:established" && m.attemptId === attemptId,
       timeoutMs,
     );
-    this.sendSessionFrame({ type: "session:hello", attemptId, capabilities });
+    this.sendSessionFrame({ type: "session:hello", attemptId });
     try {
       await establishedP;
     } catch (error) {

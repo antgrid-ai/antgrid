@@ -720,10 +720,6 @@ void main() {
 
       expect(t.requests.where((r) => r.method == 'terminal.snapshot'), isEmpty);
       expect(
-        t.sent.where((m) => m['type'] == 'terminal:snapshot:request'),
-        isEmpty,
-      );
-      expect(
         t.sent.where((m) => m['type'] == 'terminal:subscribe'),
         isNotEmpty,
       );
@@ -884,33 +880,6 @@ void main() {
     await svc.dispose();
     await session.close();
   });
-
-  test(
-    'terminal:snapshot is dropped once a terminal is in frame mode',
-    () async {
-      if (_skipWithoutNative()) return;
-      final t = FakeAgentTransport();
-      final session = await newSession(t);
-      final svc = TerminalService.fromSession(session);
-      svc.setDisplayInterest('frame-test-pane', 'a');
-
-      await seedRunningTab(t, 'a');
-      await acceptSubscribe(t, 'a');
-      final tab = svc.currentState.tabs['a']!;
-
-      t.emit('terminal:snapshot', {
-        'terminalId': 'a',
-        'scrollback': 'ANOTHER-DEVICES-SCREEN',
-        'seq': 1,
-      });
-      await Future<void>.delayed(Duration.zero);
-
-      expect(tab.ghostty.plainText, isNot(contains('ANOTHER-DEVICES-SCREEN')));
-
-      await svc.dispose();
-      await session.close();
-    },
-  );
 
   test(
     'exit waits for the final consumed frame and keeps history paging after ENDED',

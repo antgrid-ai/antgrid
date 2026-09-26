@@ -21,7 +21,7 @@ import type { TestEnv } from "../helpers/harness";
  * connections under one bare deviceId, so two separate relays would not
  * exercise it. Both envs' fake license APIs seed the SAME account device id
  * (`account`) under the SAME Ed25519 identity (`shared`) — each bridge only
- * ever consults its OWN `/account/devices/me/peers`, so this must be seeded
+ * ever consults its OWN license API's `/authorization` inventory, so this must be seeded
  * into BOTH `envA.license` and `envB.license` explicitly (a freshly-chosen
  * account id is otherwise unadmittable on either bridge — see the task
  * brief's hint on this).

@@ -114,7 +114,7 @@ export function gateProjectStream<B extends GatedProjectBinding>(
   if (binding === null) return refuse("NOT_READY", "project is not attached");
   if (!binding.hasOpenStream(peerId)) return refuse("NOT_ALLOWED", "open the project stream first");
   const refusal = binding.refusalFor(peerId);
-  if (refusal) return refuse(refusal.code === "UPDATE_REQUIRED" ? "UPDATE_REQUIRED" : "NOT_ALLOWED", refusal.message);
+  if (refusal) return refuse("NOT_ALLOWED", refusal.message);
   return { ok: true, binding };
 }
 
@@ -189,7 +189,6 @@ const defaultSchedule = (callback: () => void, ms: number): (() => void) => {
 
 const DEFAULT_REFUSAL_MESSAGE: Record<StreamRefusedCode, string> = {
   NOT_READY: "session not established yet",
-  UPDATE_REQUIRED: "peer requires an update",
   NOT_ALLOWED: "stream kind not allowed",
   CAP_EXCEEDED: "too many pending stream opens",
   INVALID: "invalid stream open frame",

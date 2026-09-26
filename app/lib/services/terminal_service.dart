@@ -436,7 +436,7 @@ class TerminalService {
     this.prefetchTimeout = const Duration(seconds: 5),
     this.endedDrainTimeout = const Duration(seconds: 2),
   }) {
-    // Heavy tier — terminal:output + terminal:snapshot (HEAVY tier messages).
+    // Heavy tier — terminal:output (HEAVY tier messages).
     _heavySub = session.checkoutHeavyStream(checkoutId).listen(_onHeavyJson);
 
     // Status tier — terminal:started, terminal:exited, agent:status,
@@ -2197,7 +2197,7 @@ class TerminalService {
       createAbMessage('git:list-branches', {'projectId': _state.projectId}),
     );
     unawaited(
-      session.action(() => latch.done, timeout: gitActionTimeout).catchError((
+      latch.done.timeout(gitActionTimeout).catchError((
         _,
       ) {
         if (_disposed || _branchesLatch != latch) return;
@@ -2229,7 +2229,7 @@ class TerminalService {
       }),
     );
     unawaited(
-      session.action(() => latch.done, timeout: gitActionTimeout).catchError((
+      latch.done.timeout(gitActionTimeout).catchError((
         _,
       ) {
         if (_disposed || _checkoutLatch != latch) return;

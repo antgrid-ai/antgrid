@@ -4,7 +4,7 @@ import type { CentralControlClient } from "./central-control-client";
 /** Host capabilities shared by native production connections and protocol fixtures. */
 export interface RemoteHostConnection extends Pick<PeerSessionOwner,
   "deviceId" | "setBus" | "attachStream" | "establishedPeers" | "peerSession" |
-  "hasEstablishedSession" | "anySessionSupportsCheckoutRouting" | "sendOnChannel" |
+  "hasEstablishedSession" | "sendOnChannel" |
   "send"> {
   connect(): void;
   close(): Promise<void>;

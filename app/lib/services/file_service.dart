@@ -1111,7 +1111,7 @@ class FileService {
       createAbMessage('git:sync', {'projectId': projectId, 'op': op.name}),
     );
     unawaited(
-      session.action(() => latch.done, timeout: gitSyncTimeout).catchError((_) {
+      latch.done.timeout(gitSyncTimeout).catchError((_) {
         if (_disposed || _syncLatch != latch) return;
         _syncLatch = null;
         _setState(
@@ -1168,7 +1168,7 @@ class FileService {
       createAbMessage('git:diff', {'projectId': projectId, 'path': path}),
     );
     unawaited(
-      session.action(() => latch.done, timeout: gitActionTimeout).catchError((
+      latch.done.timeout(gitActionTimeout).catchError((
         _,
       ) {
         if (_disposed || _diffLatch != latch || _state.git.diffPath != path) {
@@ -1319,7 +1319,7 @@ class FileService {
       }),
     );
     unawaited(
-      session.action(() => latch.done, timeout: gitActionTimeout).catchError((
+      latch.done.timeout(gitActionTimeout).catchError((
         _,
       ) {
         if (_disposed || _historyLatch != latch) return;
@@ -1391,7 +1391,7 @@ class FileService {
       createAbMessage('git:commit-files', {'projectId': projectId, 'sha': sha}),
     );
     unawaited(
-      session.action(() => latch.done, timeout: gitActionTimeout).catchError((
+      latch.done.timeout(gitActionTimeout).catchError((
         _,
       ) {
         if (_disposed || _commitFilesLatches[sha] != latch) return;
@@ -1470,7 +1470,7 @@ class FileService {
       }),
     );
     unawaited(
-      session.action(() => latch.done, timeout: gitActionTimeout).catchError((
+      latch.done.timeout(gitActionTimeout).catchError((
         _,
       ) {
         if (_disposed ||

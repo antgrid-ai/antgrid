@@ -198,10 +198,6 @@ function buildStreamOpenVectors() {
       json: { type: "stream:refused", code: "NOT_READY", message: "project core is still starting" },
     },
     {
-      name: "update-required",
-      json: { type: "stream:refused", code: "UPDATE_REQUIRED", message: "update the app to open this stream" },
-    },
-    {
       name: "not-allowed",
       json: { type: "stream:refused", code: "NOT_ALLOWED", message: "remote access is disabled on this machine" },
     },

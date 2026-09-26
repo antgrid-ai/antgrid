@@ -68,7 +68,7 @@ test("targeted bus delivery reaches the project stream and rechecks mayDeliver a
   clients.push(client);
   const bus = new MessageBus();
   let allowed = true;
-  client.establish(PEER, { capabilities: { checkoutRouting: true } });
+  client.establish(PEER);
   client.attachStream(bus, { projectId: PROJECT, mayDeliver: () => allowed });
   const stream = await client.openProjectStream(PEER, PROJECT);
   expect(stream.refusal()).toBeUndefined();
@@ -97,7 +97,7 @@ test("loopback frames never reach the project stream, and an addressed send drop
   const client = makeClient();
   clients.push(client);
   const bus = new MessageBus();
-  client.establish(PEER, { capabilities: { checkoutRouting: true } });
+  client.establish(PEER);
   client.attachStream(bus, { projectId: PROJECT });
   const signal = new AbortController().signal;
   const status = createMessage("terminal:display:status", {

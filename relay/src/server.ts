@@ -7,7 +7,7 @@ import { ClientMessage, HelloMessage } from "./protocol.js";
 import { MessageRateLimiter, TokenBucketRateLimiter } from "./rate-limiter.js";
 import { logger, setLogLevel } from "./logger.js";
 import { ConnectionLivenessTracker } from "./connection-liveness.js";
-import { buildHelloSigBody, PEER_MAX_RECORD_BYTES } from "antgrid-wire";
+import { buildHelloSigBody } from "antgrid-wire";
 import { JwksCache } from "./license/jwks-cache.js";
 import { LicenseCache } from "./license/cache.js";
 import { createLicenseGate, type LicenseGate } from "./license/gate.js";
@@ -19,6 +19,9 @@ import { SocketAdmissions } from "./socket-admissions.js";
 const VERSION = "0.1.0";
 const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
 const HELLO_TIMEOUT_MS = 10_000;
+// Largest legitimate control frame: push:deliver (pushToken ≤4096 + epk ≤256 + box ≤8192, ~12.7 KiB)
+// or hello (licenseToken ≤8192 …, ~9.2 KiB); 64 KiB leaves ~5x headroom for JSON escaping.
+const MAX_CONTROL_FRAME_BYTES = 64 * 1024;
 
 export interface RelayServer {
   server: ReturnType<typeof Bun.serve>;
@@ -347,16 +350,6 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
       }
       return;
     }
-    if (
-      parsed !== null &&
-      typeof parsed === "object" &&
-      "type" in parsed &&
-      ((parsed as { type?: unknown }).type === "stream-open" ||
-        (parsed as { type?: unknown }).type === "stream-close")
-    ) {
-      sendErrorAndClose(ws, "PROTOCOL_VIOLATION", "Central relay streams are retired", false, 1008);
-      return;
-    }
     if (!jsonRateLimiter.allow(ws.data.connectionId)) {
       sendError(ws, "MESSAGE_RATE_LIMITED", "control message rate limit exceeded", true);
       return;
@@ -515,8 +508,7 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
       return new Response("Not Found", { status: 404 });
     },
     websocket: {
-      // Accept the retired frame size long enough to send its typed 1008 rejection.
-      maxPayloadLength: PEER_MAX_RECORD_BYTES,
+      maxPayloadLength: MAX_CONTROL_FRAME_BYTES,
       open(ws) {
         const timer = setTimeout(() => {
           if (ws.data.phase === "awaiting-hello" || ws.data.phase === "authenticating") {

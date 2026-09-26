@@ -165,8 +165,8 @@ class UploadService {
         return UploadException(failure.code, failure.message ?? failure.code);
       case 'REFUSED':
         // A cap refusal is transient (retry once traffic drains); every other
-        // refusal reason (NOT_READY, NOT_ALLOWED, UPDATE_REQUIRED, INVALID)
-        // reads the same as "can't reach the agent right now" to the user.
+        // refusal reason (NOT_READY, NOT_ALLOWED, INVALID) reads the same as
+        // "can't reach the agent right now" to the user.
         return failure.refusedCode == StreamRefusedCode.capExceeded
             ? const UploadException('BUSY', 'Too many uploads in progress')
             : const UploadException('OFFLINE', 'Not connected to the agent');

@@ -296,8 +296,8 @@ export interface FakeLicenseApi {
    *  mirroring the real app re-minting its account token on every connect. */
   mintAppToken(): string;
   /** Register a fresh account device AFTER construction — visible to a
-   *  bridge only on its NEXT `/account/devices/me/peers` poll, not whatever
-   *  it already cached at startup (the inventory-miss row's whole point).
+   *  bridge only on its NEXT `/authorization` poll, not whatever it already
+   *  cached at startup (the inventory-miss row's whole point).
    *  `deviceId`/`identity` let a caller pin a SPECIFIC device id and/or reuse
    *  an existing Ed25519 keypair (e.g. one account device registered across
    *  two separate `FakeLicenseApi`s for the multi-machine-slots row);
@@ -330,16 +330,14 @@ const fixtureAuthorities = new Map<string, PeerAuthorizationFixture>();
 
 export function startFakeLicenseApi(
   opts: {
-    accountPeerKeys?: string[];
     accountDevices?: AccountDevice[];
     /** Relay HTTP base (`RelayHandle.httpUrl`) — required for `revokeDevice`.
      *  `setupTestEnv` wires this automatically since it always has a relay. */
     relayInternalUrl?: string;
   } = {},
 ): FakeLicenseApi {
-  const peerKeys = opts.accountPeerKeys ?? [];
   // Mutable: addAccountDevice pushes onto this SAME array, so the next
-  // /account/devices/me/peers poll (closure reads it live) sees the addition.
+  // /authorization poll (closure reads it live) sees the addition.
   const devices: AccountDevice[] = opts.accountDevices ? [...opts.accountDevices] : [];
   const authority = new PeerAuthorizationFixture(() => devices);
   let expireNext = false;
@@ -355,12 +353,6 @@ export function startFakeLicenseApi(
           token_type: "Bearer",
           expires_in: 3600,
         });
-      }
-      // Account-membership peer-key set (Bearer-gated in prod; the fake accepts
-      // any token, matching the relay's fakeLicenseGate). Mirrors web's
-      // `GET /account/devices/me/peers` → `{ keys: string[], devices: [{deviceId, ed25519Pub}] }`.
-      if (url.pathname === "/account/devices/me/peers") {
-        return Response.json({ keys: peerKeys, devices });
       }
       // Heartbeat + anything else — agent treats non-2xx as a soft warning.
       return Response.json({ ok: true });
@@ -629,8 +621,6 @@ export async function establishNativeSession(
     attempts?: number;
     perAttemptTimeoutMs?: number;
     gapMs?: number;
-    omitPullsTree?: boolean;
-    omitCheckoutRouting?: boolean;
   } = {},
 ): Promise<void> {
   // `setupTestEnv` calls this with the default before its own STREAM_ADVERT_*
@@ -646,10 +636,7 @@ export async function establishNativeSession(
   let lastErr: unknown;
   for (let i = 0; i < attempts; i++) {
     try {
-      await app.performE2EHandshake(agentDeviceId, perAttemptTimeoutMs, {
-        omitPullsTree: opts.omitPullsTree,
-        omitCheckoutRouting: opts.omitCheckoutRouting,
-      });
+      await app.performE2EHandshake(agentDeviceId, perAttemptTimeoutMs);
       return;
     } catch (err) {
       if (!(err instanceof NativeAuthorizationNotReadyError)) throw err;

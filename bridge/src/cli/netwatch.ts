@@ -417,8 +417,8 @@ export function joinCaptures(
   // the frame did cross the socket and was thrown away on arrival, carrying the
   // sender's own frameId (a receive-side drop such as `pre-establishment` or
   // `not-admitted` is the one that matters here). Excluding it verdicted the
-  // sender's half "never arrived" — turning the rekey race this capture exists
-  // to catch into a report of network loss.
+  // sender's half "never arrived" — turning a receive-side drop into a report
+  // of network loss.
   const eligible = (e: NetwatchEvent): boolean =>
     Boolean(e.frameId) && !(e.kind === "drop" && e.dir !== "rx");
 

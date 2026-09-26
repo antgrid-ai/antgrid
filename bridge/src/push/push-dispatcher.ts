@@ -26,10 +26,9 @@ export interface PushDispatcherDeps {
    *  send. Plural because with no live peer the agent can't know which allowed
    *  device the user holds — see resolveTargets in project-core.ts. */
   resolveTargets: () => PushTarget[];
-  /** The bare machine deviceUuid this host registers under. A getter because the
-   *  two suppliers differ in how well they can answer: host-server reads the live
-   *  machine socket's identity, while the wizard-promotion path can only report
-   *  the uuid the enabling `agent:enableRelay` carried (see relay-promotion.ts). */
+  /** The bare machine deviceUuid this host registers under. A getter because
+   *  host-server reads it off the live machine socket's identity, which may
+   *  not exist yet at construction time. */
   machineUuid: () => string;
   /** True when the Handler is armed on that slot. One block must cost one push,
    *  and an armed slot has two producers for the agent's question: the hook's

@@ -5,8 +5,8 @@
 // the lease refusal, strict per-peer frame attribution, the identical re-ack,
 // the different-attemptId protocol violation, and newest-wins supersession —
 // live in peer-session-hello.test.ts. This suite covers what a session
-// carries once established: capabilities, multi-device isolation, broadcast
-// fan-out, and the liveness/offline lifecycle.
+// carries once established: multi-device isolation, broadcast fan-out, and
+// the liveness/offline lifecycle.
 import { test, expect, afterEach, spyOn } from "bun:test";
 import { TestPeerSessionOwner, ed25519Pair } from "./test-peer-session-owner";
 import { MessageBus } from "../src/message-bus";
@@ -29,54 +29,15 @@ function freshClient(sent: Array<string | Buffer> = []): TestPeerSessionOwner {
   return client;
 }
 
-test("a session carries pullsTree once its app advertises it", () => {
-  const client = freshClient();
-  client.establish(PHONE_ID, { attemptId: "attempt-a", capabilities: { checkoutRouting: true, pullsTree: true } });
-  expect(client.peerSession(PHONE_ID)?.pullsTree).toBe(true);
-});
-
-test("a session carries pullsTree false when its app omits the capability", () => {
-  const client = freshClient();
-  client.establish(PHONE_ID, { attemptId: "attempt-a", capabilities: { checkoutRouting: true } });
-  expect(client.peerSession(PHONE_ID)?.pullsTree).toBe(false);
-});
-
-test("a torn-down session takes its pullsTree with it — the capability does not outlive the app", () => {
-  const client = freshClient();
-  client.establish(PHONE_ID, { attemptId: "attempt-a", capabilities: { checkoutRouting: true, pullsTree: true } });
-  (client as any).dropSession(PHONE_ID);
-  expect(client.peerSession(PHONE_ID)).toBeNull();
-  expect(client.establishedPeers()).toEqual([]);
-});
-
-test("peerSupportsTerminalFramesV1 is true once the app advertises terminalFramesV1", () => {
-  const client = freshClient();
-  client.establish(PHONE_ID, { attemptId: "attempt-a", capabilities: { checkoutRouting: true, terminalFramesV1: true } });
-  expect(client.peerSession(PHONE_ID)?.terminalFramesV1).toBe(true);
-});
-
-test("peerSupportsTerminalFramesV1 is false when the app omits terminalFramesV1", () => {
-  const client = freshClient();
-  client.establish(PHONE_ID, { attemptId: "attempt-a", capabilities: { checkoutRouting: true, pullsTree: true } });
-  expect(client.peerSession(PHONE_ID)?.terminalFramesV1).toBe(false);
-});
-
-test("peerSupportsTerminalFramesV1 reads false once the session is torn down — no app cannot render frames", () => {
-  const client = freshClient();
-  client.establish(PHONE_ID, { attemptId: "attempt-a", capabilities: { checkoutRouting: true, terminalFramesV1: true } });
-  (client as any).dropSession(PHONE_ID);
-  expect(client.peerSession(PHONE_ID)).toBeNull();
-});
-
-test("onHandshakeComplete carries terminalFramesV1 alongside the other capabilities", () => {
+test("onHandshakeComplete fires with the established peer's id", () => {
   // Collected into an array rather than a nullable let: TS narrows a `let x = null`
   // to `null` at the assertion because it cannot see the callback run, and the
   // length also pins that promotion fires the callback exactly once.
-  const seen: Array<{ checkoutRouting: boolean; pullsTree: boolean; terminalFramesV1: boolean; peerId: string }> = [];
+  const seen: Array<{ peerId: string }> = [];
   const client = freshClient();
-  (client as any).opts.onHandshakeComplete = ((caps: any) => { seen.push(caps); }) as () => void;
-  client.establish(PHONE_ID, { attemptId: "attempt-a", capabilities: { checkoutRouting: true, terminalFramesV1: true } });
-  expect(seen).toEqual([{ checkoutRouting: true, pullsTree: false, terminalFramesV1: true, peerId: PHONE_ID }]);
+  (client as any).opts.onHandshakeComplete = ((peer: { peerId: string }) => { seen.push(peer); }) as () => void;
+  client.establish(PHONE_ID, { attemptId: "attempt-a" });
+  expect(seen).toEqual([{ peerId: PHONE_ID }]);
 });
 
 test("send() drops app messages when no session is established", () => {

@@ -74,7 +74,6 @@ class DevicesApi extends CookieApiClient implements DevicesApiCreator {
   Future<CreatedDevice> createDevice({
     required String deviceUuid,
     required String ed25519Pub,
-    required String x25519Pub,
     required String platform,
     required String displayName,
     String? kind,
@@ -93,7 +92,6 @@ class DevicesApi extends CookieApiClient implements DevicesApiCreator {
         body: jsonEncode({
           'deviceUuid': deviceUuid,
           'ed25519Pub': ed25519Pub,
-          'x25519Pub': x25519Pub,
           'platform': platform,
           'displayName': displayName,
           // Omitted (not null) when unset so the server keeps deriving the kind

@@ -10,9 +10,9 @@ enum PeerPath { unknown, direct, relay }
 enum PeerSendOutcome { accepted, closed, tooLarge, backpressured, failed }
 
 /// One decoded record off the session stream: either a session frame
-/// (`session:hello`/`established`/`ping`/`pong`/`takeover`) or a bare
-/// control-plane `AbMessage`. The two are told apart by the JSON `type`
-/// alone (`isSessionFrameType`, `frame.dart`); a record has no header.
+/// (`session:hello`/`established`/`ping`/`pong`) or a bare control-plane
+/// `AbMessage`. The two are told apart by the JSON `type` alone
+/// (`isSessionFrameType`, `frame.dart`); a record has no header.
 class IncomingSessionRecord {
   const IncomingSessionRecord({required this.payload});
 

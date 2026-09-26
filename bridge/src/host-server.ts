@@ -21,8 +21,6 @@ import type { ProjectSummary, ConnectInfo, PairedPhoneSummary, KnownProject } fr
 import { logger } from "./logger";
 const log = logger.child({ component: "host-server" });
 import { NativeHostConnection, type NativeHostOptions } from "./peer/native-host-connection";
-import type { MachineRelaySession } from "./relay-promotion";
-import type { AgentEnableRelay } from "./protocol";
 import { MessageBus, type Channel } from "./message-bus";
 import { dispatchRpc } from "./rpc/methods";
 import { snapshotAsksFor } from "./rpc/state-snapshot";
@@ -70,7 +68,7 @@ import {
 import { resolveProject } from "./worktrees/project-resolver";
 import { WorktreeError, WorktreeManager } from "./worktrees/worktree-manager";
 import { CheckoutStore } from "./worktrees/checkout-store";
-import { isIsolatedCheckoutKind, isManagedCheckoutKind } from "./worktrees/checkout-types";
+import { isManagedCheckoutKind } from "./worktrees/checkout-types";
 export { WORKTREE_SESSIONS_SUPPORTED } from "./worktree-capability";
 import { WORKTREE_SESSIONS_SUPPORTED } from "./worktree-capability";
 
@@ -202,8 +200,7 @@ interface CatalogEntry {
   lastFocusedMs: number;
   // Set when an already-open LOCAL core has gained remote access (an
   // additive native project binding on its existing bus). Absence means not-yet-promoted;
-  // presence makes a re-issued project:start idempotent. Distinct from the
-  // legacy per-project promotion in project-core.ts (relay-promotion.ts).
+  // presence makes a re-issued project:start idempotent.
   promotion?: PromotionHandle;
 }
 
@@ -626,7 +623,7 @@ export class HostServer {
   // The host-owned NativeHostConnection uses the BARE deviceUuid for its central
   // control identity (no projectId), advertises the project catalog there, and accepts
   // mobile-access-gated project verbs over its native control stream. Opened when remote
-  // config is present; each authorized app has its own native E2E session (concurrent
+  // config is present; each authorized app has its own native session (concurrent
   // devices are supported). null until startRemoteControlPlane().
   private controlPlaneRelay: RemoteHostConnection | null = null;
   // retained to prevent GC of the bus before shutdown
@@ -635,10 +632,6 @@ export class HostServer {
   // startRemoteControlPlane; cleared in shutdown()). unref'd so it never keeps
   // the process alive on its own — mirrors owner-watchdog.ts's idiom.
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
-  // Machine remote config synthesized from the desktop wizard's `agent:enableRelay`
-  // credentials when the host was launched WITHOUT remote config (local-only). Lets
-  // `requireRemoteConfig()` bring the native host connection up on demand.
-  private wizardRemote: HostRemoteConfig | null = null;
   // Whether an `invalid_client` verdict may kill the process. Disarmed for the
   // duration of the boot-time control-plane start only — see start().
   private fatalRevokeArmed = true;
@@ -725,7 +718,6 @@ export class HostServer {
     this.controlPlaneBus = bus;
     this.controlPlaneRelay = {
       hasEstablishedSession: () => true,
-      anySessionSupportsCheckoutRouting: () => false,
       close: async () => {},
       recheckAuthorization: () => {},
     } as unknown as RemoteHostConnection;
@@ -792,7 +784,7 @@ export class HostServer {
 
   /** Open the host-owned NativeHostConnection using the
    *  bare deviceUuid for central authentication and native enrollment. It owns
-   *  native E2E payload sessions and project/preview streams. Its machine-level
+   *  native payload sessions and project/preview streams. Its machine-level
    *  bus advertises the project catalog and dispatches mobile-access-gated verbs. */
   private async startRemoteControlPlane(): Promise<void> {
     const r = this.requireRemoteConfig();
@@ -852,8 +844,8 @@ export class HostServer {
       },
       // Native peer admission can complete without a fresh central event. Re-advertise
       // after the peer is reachable so a catalog update that raced native reconnect
-      // is not left stale. Central reconnect and presence never close or rekey
-      // an otherwise healthy native session.
+      // is not left stale. Central reconnect and presence never close an
+      // otherwise healthy native session.
       // No peer-disconnect hook is wired on purpose. A transient native disconnect is
       // NOT a revocation, and multiple apps hold independent peer sessions on this
       // host, so demoting here would tear down project bindings that OTHER
@@ -894,88 +886,6 @@ export class HostServer {
     }
   }
 
-  /** Bring the NativeHostConnection up (from the desktop wizard's credentials if
-   *  the host was launched local-only) and return its native project-stream surface.
-   *  Idempotent: reuses the host-owned connection when present. */
-  async ensureMachineRelay(msg: AgentEnableRelay): Promise<MachineRelaySession> {
-    const auth = msg.auth;
-    if (!auth?.deviceUuid || !auth.ed25519Pub || !auth.ed25519Priv) {
-      throw new Error("enableRelay requires signed-in account device credentials");
-    }
-    const relayBase = msg.relayUrl ?? this.opts.remote?.relayUrl ?? process.env.RELAY_URL ?? null;
-    if (!relayBase) throw new Error("no relay URL configured");
-    // The host's boot credentials arrive once, on stdin, and are never re-read.
-    // If that pair was already dead when the host started, its mint failed and
-    // nothing came up — no token maintenance or native host connection. Adopt the
-    // caller's freshly-authenticated pair instead of retrying a client the web
-    // has deleted. Deliberately gated on "nothing is live and nothing is being
-    // built": swapping under a live runtime would orphan its token maintenance,
-    // and swapping under an IN-FLIGHT mint would leave that build racing this
-    // one, with only the last-assigned runtime ever stopped at shutdown.
-    const existing = this.remoteConfig();
-    if (
-      existing &&
-      auth.clientId &&
-      auth.clientSecret &&
-      auth.clientId !== existing.auth.clientId &&
-      !this.controlPlaneRelay &&
-      !this.remoteRuntime &&
-      !this.remoteRuntimePromise
-    ) {
-      existing.auth = {
-        clientId: auth.clientId,
-        clientSecret: auth.clientSecret,
-        deviceUuid: auth.deviceUuid,
-        userId: auth.userId,
-        endpointSecret: auth.endpointSecret,
-      };
-      // The identity travels WITH the auth block. A sign-out rotates the whole
-      // account device, so keeping the old Ed25519 pair here would sign the
-      // relay's v3 hello with a key that is not the one registered for the new
-      // deviceUuid — AUTH_FAILED, and the socket never comes up at all.
-      existing.identity = {
-        ...existing.identity,
-        deviceId: auth.deviceUuid,
-        ed25519PublicKey: auth.ed25519Pub,
-        ed25519PrivateKey: auth.ed25519Priv,
-      };
-    }
-    // Synthesize a machine remote config from the wizard creds when the host has
-    // none (local-only launch). requireRemoteConfig() then returns it.
-    if (!this.opts.remote && !this.wizardRemote) {
-      this.wizardRemote = {
-        relayUrl: relayBase,
-        licenseApiUrl: msg.licenseApiUrl ?? "",
-        identity: {
-          deviceId: auth.deviceUuid,
-          deviceName: process.env.ANTGRID_HOST_NAME ?? hostname(),
-          createdAt: new Date().toISOString(),
-          ed25519PublicKey: auth.ed25519Pub,
-          ed25519PrivateKey: auth.ed25519Priv,
-        },
-        auth: { clientId: auth.clientId ?? "", clientSecret: auth.clientSecret ?? "", deviceUuid: auth.deviceUuid,
-          userId: auth.userId, endpointSecret: auth.endpointSecret },
-        onAuthRevoked: () => {},
-      };
-    }
-    await this.ensureRemoteRuntime();
-    if (!this.controlPlaneRelay) await this.startRemoteControlPlane();
-    const client = this.controlPlaneRelay!;
-    return {
-      attachStream: (bus, opts) => client.attachStream(bus, opts),
-      establishedPeers: () => client.establishedPeers(),
-      peerSession: (peerId) => client.peerSession(peerId),
-      sendPushDeliver: (m) => client.sendPushDeliver(m),
-      // The LIVE socket's id, like every member beside it — not the inbound
-      // auth's. The credential swap above is gated on nothing being live, so a
-      // re-enable over an already-running socket leaves `client` registered
-      // under the previous deviceUuid; `auth.deviceUuid` would then name a
-      // machine the relay does not have this host on, and every push a
-      // wizard-promoted core seals would be unopenable on the phone.
-      agentDeviceId: client.deviceId,
-    };
-  }
-
   /** Build the project advertisement for the connected phone: the machine's
    *  whole catalog (seen hints ∪ warm cores), each tagged with whether it's
    *  DIALABLE — or NOTHING at all while mobile access is off. Every
@@ -998,18 +908,7 @@ export class HostServer {
       .map((id) => {
         const seen = this.seenProjects.get(id);
         const entry = this.cores.get(id);
-        const needsCheckoutRouting = entry?.core.hasIsolatedSessions() ?? false;
-        // Optimistic across the fleet, because the advert is ONE broadcast frame
-        // (a replay-cached type sealed below any place that could vary it per
-        // receiver). Both refusals behind it are per-device, and BOTH are
-        // needed: project:start refuses the asking device by its own capability,
-        // and the stream's own `mayAcceptFrom` refuses it on the bind path below
-        // — which a reconnecting app takes WITHOUT a project:start, so the verb
-        // alone would leave a stale device on a mixed fleet bound to a stream
-        // that silently drops everything it sends.
-        const peerCanRoute = this.controlPlaneRelay?.anySessionSupportsCheckoutRouting() === true;
-        const dialable = (entry?.core.isRelayRegistered() ?? false)
-          && (!needsCheckoutRouting || peerCanRoute);
+        const dialable = entry?.core.isRelayRegistered() ?? false;
         // Live work status + running-session count for warm cores only. Cold
         // projects omit both (their agent PTY isn't alive → nothing "working");
         // the app falls back to `running` for those, reading them as done/offline.
@@ -1696,7 +1595,7 @@ export class HostServer {
     }
   }
 
-  /** Dispatch an E2E control-plane verb from the connected account-trusted
+  /** Dispatch a control-plane verb from the connected account-trusted
    *  phone. Returns a structured result; callers on the bus path discard it
    *  (void). */
   async handleControlPlaneVerb(
@@ -1716,19 +1615,6 @@ export class HostServer {
       // record is rejected, never opened with a guessed path.
       const seen = this.seenProjects.get(verb.projectId);
       if (!seen) return { ok: false, error: { code: "UNKNOWN_PROJECT", message: "no path on record; open from desktop first" } };
-      // The ASKING device's own capability, not the machine's best: the advert
-      // is deliberately optimistic (any attached app can route), so this is where
-      // a stale device on a mixed fleet gets a precise refusal instead of a
-      // silent dial into a project it would render as the main worktree.
-      const askerCanRoute = peerId
-        ? this.controlPlaneRelay?.peerSession(peerId)?.checkoutRouting === true
-        : false;
-      if (await this.projectRequiresCheckoutRouting(verb.projectId) && !askerCanRoute) {
-        return {
-          ok: false,
-          error: { code: "UPDATE_REQUIRED", message: "update the app to use this project's isolated sessions" },
-        };
-      }
       const entry = this.cores.get(verb.projectId);
       // An already-open LOCAL core (desktop attached over loopback) gets PROMOTED:
       // an additive native project binding is wired onto its EXISTING bus — no close+reopen,
@@ -2300,9 +2186,8 @@ export class HostServer {
     let relayUrl: string | undefined;
     if (mode === "remote") {
       await this.ensureRemoteRuntime();
-      // A remote core attaches to the host-owned native connection; ensure it
-      // is up (startControlPlane already opened it when launched with remote
-      // config — this guards the wizard-bootstrapped path).
+      // A remote core attaches to the host-owned native connection;
+      // startControlPlane opens it only when launched with remote config.
       if (!this.controlPlaneRelay) await this.startRemoteControlPlane();
       remote = this.remoteDepsFor(projectId);
       // The core can't derive this itself — only a standalone agent with an
@@ -2322,19 +2207,16 @@ export class HostServer {
       // Same rule, one layer down: this bit is read only after the switch above
       // says yes, so a core sees it live too.
       agentReachEnabled: () => this.agentReachPolicy.isEnabled(),
-      // Same rule, and for a second reason on top of it: the desktop wizard can
-      // credential a host that launched local-only, and a core already warm at
-      // that moment must move with it rather than stay permanently uncredentialed.
-      // Deliberately NOT scoped to remote-mode cores — a signed-in Free user
-      // opening the same project locally would otherwise route around the gate,
-      // and local is the desktop default.
+      // Read live: the tier resolves only once the remote runtime is up, which
+      // can be after a core warmed. Deliberately NOT scoped to remote-mode
+      // cores — local is the desktop default, so a signed-in Free user opening
+      // the same project locally would otherwise route around the gate.
       tierClaim: () => this.tierClaimNow(),
-      // Read live and given to every mode: the control plane can come up (or a
-      // wizard can credential this host) long after a local core warmed, and the
-      // session bus asks for this the moment a machine is added to one of its
-      // sessions — which is a local core's business as often as a remote one's.
+      // Read live and given to every mode: the control plane can come up long
+      // after a local core warmed, and the session bus asks for this the moment
+      // a machine is added to one of its sessions — which is a local core's
+      // business as often as a remote one's.
       machineDeviceId: () => this.controlPlaneRegistrationId,
-      ensureMachineRelay: (msg) => this.ensureMachineRelay(msg),
       // One coordinator for every project this host has open — see the field's
       // own doc for why the route table and `self()` are keyed off the shared
       // session index rather than this core's own id.
@@ -2434,11 +2316,9 @@ export class HostServer {
     return r;
   }
 
-  /** The machine remote config, or null. `wizardRemote` is the desktop-wizard
-   *  promotion of a host launched local-only, so anything that reads only
-   *  `opts.remote` silently no-ops on that whole path. */
+  /** The machine remote config, or null. */
   private remoteConfig(): HostRemoteConfig | null {
-    return this.opts.remote ?? this.wizardRemote;
+    return this.opts.remote ?? null;
   }
 
   /**
@@ -2692,15 +2572,6 @@ export class HostServer {
       machineDeviceId: () => client.deviceId,
       sendPushDeliver: (m) => client.sendPushDeliver(m),
     };
-  }
-
-  /** Cold projects have no core to inspect, so compatibility derives only from
-   * the host-owned session store. A remote request never supplies a path. */
-  private async projectRequiresCheckoutRouting(projectId: string): Promise<boolean> {
-    const warm = this.cores.get(projectId)?.core;
-    if (warm) return warm.hasIsolatedSessions();
-    const sessions = await SessionManager.readPersisted(resolveAbDir(), projectId, true);
-    return sessions.some((session) => isIsolatedCheckoutKind(session.checkoutKind));
   }
 
   /** Cold deletion still owns the same safe worktree lifecycle as a warm core.

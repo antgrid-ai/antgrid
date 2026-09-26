@@ -21,27 +21,6 @@ import 'upload_stream.dart';
 /// Lifecycle states an [AgentTransport] can be in.
 enum TransportState { connecting, connected, disconnected, error }
 
-/// Whether an RPC only observes authoritative state or may change it.
-///
-/// Classification is allowlist-based: a method added by a newer bridge is
-/// treated as mutating until this client explicitly proves it is safe to
-/// retry as a read.
-enum RemoteRequestKind { readOnly, mutating }
-
-const readOnlyRemoteRequestMethods = <String>{
-  'state.snapshot',
-  'sessions.list',
-  'machine.capability-card',
-  'git.branches',
-  'git.remote-state',
-  'session.transcriptSnapshot',
-};
-
-RemoteRequestKind classifyRemoteRequest(String method) =>
-    readOnlyRemoteRequestMethods.contains(method)
-    ? RemoteRequestKind.readOnly
-    : RemoteRequestKind.mutating;
-
 /// What this process can truthfully say about one mutating remote request.
 enum RemoteCommandOutcome { notSent, confirmed, outcomeUnknown }
 
@@ -68,22 +47,6 @@ class RemoteRequestResult<T> {
 
 const remoteCommandOutcomeUnknownMessage =
     'Connection lost; execution could not be confirmed';
-
-/// Raised by the compatibility [AgentTransport.request] API when a mutation
-/// may have executed but no application response arrived.
-class RemoteCommandOutcomeException extends RpcException {
-  final RemoteCommandOutcome outcome;
-
-  RemoteCommandOutcomeException(this.outcome)
-    : super(
-        outcome == RemoteCommandOutcome.notSent
-            ? 'E_NOT_SENT'
-            : 'E_OUTCOME_UNKNOWN',
-        outcome == RemoteCommandOutcome.notSent
-            ? 'The request was not sent. Reconnect and try again.'
-            : remoteCommandOutcomeUnknownMessage,
-      );
-}
 
 /// A decoded inbound message routed off a specific channel.
 class InboundMessage {
@@ -136,8 +99,11 @@ abstract class AgentTransport {
 
   /// Sends one RPC while preserving the distinction between a request that
   /// never left, an application-confirmed result, and an interrupted mutation
-  /// whose execution cannot be determined. The method name is classified by
-  /// [classifyRemoteRequest]; callers cannot opt a mutation into read retries.
+  /// whose execution cannot be determined. Every call is treated as a
+  /// mutation: not established short-circuits to [RemoteRequestResult.notSent],
+  /// an application-level refusal ([RpcException] carrying the bridge's typed
+  /// error) rethrows, and any other transport failure or timeout reports
+  /// [RemoteRequestResult.outcomeUnknown].
   Future<RemoteRequestResult<Map<String, dynamic>>> requestWithOutcome(
     String method, {
     Map<String, dynamic>? params,
@@ -145,37 +111,30 @@ abstract class AgentTransport {
   });
 
   /// `true` once the transport can carry an RPC — a local session from the
-  /// start, a relay stream once its E2E session is established. Distinct from
-  /// [currentState] == connected: a relay stream stays connected across a
-  /// session-down window where a send would silently drop.
+  /// start, a native stream transport once its session is established (and,
+  /// for a project, its stream is bound). Distinct from [currentState] ==
+  /// connected: a project transport stays connected while its stream is
+  /// unbound, where a send would silently drop.
   bool get isEstablished;
 
-  /// Counts (re)establishments. A revision number a service obtained from the
-  /// agent is only comparable against the SAME establishment: a reconnect may
-  /// have reached a new agent process whose counters restarted, so a claim
-  /// carried across one could match by coincidence and have stale state
-  /// confirmed. Services that cache a server-issued seq record this beside it
+  /// Counts establishments: the session's own for the control transport, each
+  /// stream bind for a project transport. A revision number a service obtained
+  /// from the agent is only comparable against the SAME establishment: a
+  /// project stream can reopen onto a restarted project core whose counters
+  /// restarted, so a claim carried across one could match by coincidence and
+  /// have stale state confirmed. Services that cache a server-issued seq record this beside it
   /// and re-claim only while it still matches.
   int get establishmentEpoch;
 
   /// Tier-3: register [run] as the hydrator for [key], invoking it now when the
   /// transport is already established and re-invoking it on every future
-  /// (re)establishment (the reconciliation checkpoint — a reconnect re-pulls
-  /// idempotent view-state instead of leaving it stale). A re-register under
+  /// establishment (the reconciliation checkpoint — a reopened project stream
+  /// re-pulls idempotent view-state instead of leaving it stale). A re-register under
   /// [key] supersedes. [run] owns its own bounded wait + flag lifecycle.
   Future<void> hydrate(String key, Future<void> Function() run);
 
   /// Deregister the hydrator for [key]. No-op if absent.
   void unhydrate(String key);
-
-  /// Tier-2: run a one-shot user action bounded by [timeout] so the caller's
-  /// flag lifecycle always settles (no reply-clears-the-flag stranding). NOT
-  /// re-driven on reconnect. STREAMING actions pass a [run] with its own
-  /// idle-timeout and leave [timeout] as an outer net (or `null`).
-  Future<T> action<T>(
-    Future<T> Function() run, {
-    Duration? timeout = const Duration(seconds: 15),
-  });
 
   /// Tear down the connection and release resources.
   Future<void> dispose();

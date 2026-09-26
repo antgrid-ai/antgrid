@@ -153,8 +153,6 @@ class MachineConnection {
             supervisor.noteAuthError(code);
           case PeerTerminalError():
             supervisor.notePeerRejected();
-          case PeerSessionTakenOver():
-            supervisor.noteSessionTakenOver();
           case PeerSessionDown():
             supervisor.noteSessionDown();
           case PeerSessionReplaced():

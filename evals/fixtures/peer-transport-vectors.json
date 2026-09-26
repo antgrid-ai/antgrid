@@ -7,8 +7,7 @@
       "session:hello",
       "session:established",
       "session:ping",
-      "session:pong",
-      "session:takeover"
+      "session:pong"
     ],
     "samples": [
       {
@@ -173,14 +172,6 @@
           "type": "stream:refused",
           "code": "NOT_READY",
           "message": "project core is still starting"
-        }
-      },
-      {
-        "name": "update-required",
-        "json": {
-          "type": "stream:refused",
-          "code": "UPDATE_REQUIRED",
-          "message": "update the app to open this stream"
         }
       },
       {

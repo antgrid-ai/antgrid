@@ -8,7 +8,6 @@ import 'package:flutter_test/flutter_test.dart';
 void main() {
   test('a live action-required block surfaces over a healthy workspace', () {
     for (final reason in <BlockReason>[
-      BlockReason.sessionTakenOver,
       BlockReason.deviceRevoked,
       BlockReason.licenseExpired,
       BlockReason.peerRejected,

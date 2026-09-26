@@ -45,7 +45,6 @@ class _GatedDevicesApi implements DevicesApiCreator {
   Future<CreatedDevice> createDevice({
     required String deviceUuid,
     required String ed25519Pub,
-    required String x25519Pub,
     required String platform,
     required String displayName,
     String? kind,

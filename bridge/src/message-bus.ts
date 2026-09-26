@@ -164,17 +164,6 @@ export class MessageBus {
     await Promise.all(pending);
   }
 
-  /** Publish to every wire EXCEPT the ones listed, plus every audience-less
-   *  subscriber.
-   *
-   *  For a stream one client has opted out of while the others have not — the
-   *  terminal-frame mode exclusivity gate, where a phone watching frames must
-   *  not silence the desktop's legacy output for the same terminal. Same
-   *  restriction as [publishOnly]: streaming types only. */
-  publishExcept(msg: AbMessage, channel: Channel, except: ReadonlySet<InboundSource>): void {
-    this.emit(msg, channel, { audience: { except } });
-  }
-
   private emit(
     msg: AbMessage,
     channel: Channel,
@@ -182,7 +171,7 @@ export class MessageBus {
       peerId?: string;
       force?: boolean;
       deliver?: boolean;
-      audience?: { only?: InboundSource; except?: ReadonlySet<InboundSource> };
+      audience?: { only?: InboundSource };
     },
   ): void {
     const key = this.replayKey(msg);
@@ -204,11 +193,9 @@ export class MessageBus {
     if (!deliver) return;
     for (const s of this.subs) {
       // PTY bytes remain observable internally; app displays are frame-only.
-      if (s.audience !== undefined &&
-          (msg.type === "terminal:output" || msg.type === "terminal:snapshot")) continue;
+      if (s.audience !== undefined && msg.type === "terminal:output") continue;
       if (audience && s.audience !== undefined) {
         if (audience.only !== undefined && s.audience !== audience.only) continue;
-        if (audience.except?.has(s.audience)) continue;
       }
       s.deliver(msg, channel, undefined, peerId);
     }

@@ -48,10 +48,7 @@ function registerPhone(store: PairedPhonesStore, phonePubkey: string, pushToken:
 }
 
 function session(peerPubkey: string): PeerSessionView {
-  return {
-    peerId: `${peerPubkey.toLowerCase()}#machine`, peerPubkey,
-    checkoutRouting: true, pullsTree: true,
-  };
+  return { peerId: `${peerPubkey.toLowerCase()}#machine`, peerPubkey };
 }
 
 /** A remote core whose native transport reports [peers] as established. */
@@ -144,9 +141,7 @@ test("a push-incapable sibling holding a live session does not suppress the away
   // registers no push token, so "some session is established" silenced the
   // fallback entirely — the desktop is backgrounded, the phone's session was
   // reaped, and nothing reached the user at all.
-  const desktop: PeerSessionView = {
-    peerId: "desktop#machine", peerPubkey: "PK_DESKTOP", checkoutRouting: true, pullsTree: true,
-  };
+  const desktop: PeerSessionView = { peerId: "desktop#machine", peerPubkey: "PK_DESKTOP" };
   const { notify, delivered, focus } = await startCore(
     [desktop],
     (store) => registerPhone(store, "PK_PHONE", "TOKEN_PHONE", "fcm"),
@@ -163,12 +158,8 @@ test("a push-incapable sibling holding a live session does not suppress the away
 test("a phone whose own session is reachable and unpaused is not pushed to while a backgrounded sibling opens the fallback", async () => {
   // The per-device half of the same question: the fallback is machine-wide, but
   // a device that can read the frame on its live stream must not also be buzzed.
-  const held: PeerSessionView = {
-    peerId: "pk_held#machine", peerPubkey: "PK_HELD", checkoutRouting: true, pullsTree: true,
-  };
-  const pocketed: PeerSessionView = {
-    peerId: "pk_pocket#machine", peerPubkey: "PK_POCKET", checkoutRouting: true, pullsTree: true,
-  };
+  const held: PeerSessionView = { peerId: "pk_held#machine", peerPubkey: "PK_HELD" };
+  const pocketed: PeerSessionView = { peerId: "pk_pocket#machine", peerPubkey: "PK_POCKET" };
   const { notify, delivered, focus } = await startCore(
     [held, pocketed],
     (store) => {

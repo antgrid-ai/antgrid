@@ -21,11 +21,9 @@ const UuidSchema = z.uuid();
 const CreateDeviceBody = z.object({
   deviceUuid: z.string().uuid(),
   ed25519Pub: z.string().min(1),
-  x25519Pub: z.string().min(1),
   platform: z.enum(["macos", "windows", "linux", "ios", "android"]),
   displayName: z.string().min(1).max(120),
-  // Desktop controllers register as kind:"app" despite a desktop platform —
-  // the peers inventory (bridge E2E admission) serves kind:"app" rows only.
+  // Desktop controllers register as kind:"app" despite a desktop platform.
   kind: z.enum(["app", "agent"]).optional(),
 });
 
@@ -56,8 +54,7 @@ export function deviceRoutes(deps: { db: DB; auth: Auth; relay: RelayPushConfig 
 
     // Phones are `app` devices; desktops/servers that host agents are `agent`.
     // The kind is load-bearing: `listMobileEnabledAgents` (the machine picker)
-    // reads `agent`, while `listAppDeviceKeys` (same-account pair-membership
-    // proof) reads `app`.
+    // reads `agent` rows only.
     const kind: DeviceKind =
       body.kind ?? (body.platform === "ios" || body.platform === "android" ? "app" : "agent");
 

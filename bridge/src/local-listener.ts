@@ -9,10 +9,7 @@ const log = logger.child({ component: "local-listener" });
 interface ConnState {
   state: "awaiting-hello" | "connected" | "rejected";
   appPid?: number;
-  checkoutRouting?: boolean;
   sessionBusCarrier?: boolean;
-  pullsTree?: boolean;
-  terminalFramesV1?: boolean;
 }
 
 export interface LocalListenerOptions {
@@ -42,7 +39,6 @@ export interface LocalListenerOptions {
 
 const CLOSE_UNAUTHORIZED = 4401;
 const CLOSE_CONFLICT = 4409;
-export const CLOSE_CHECKOUT_ROUTING_REQUIRED = 4410;
 
 export class LocalListener implements TransportSubscriber {
   private server: ReturnType<typeof Bun.serve> | null = null;
@@ -67,47 +63,12 @@ export class LocalListener implements TransportSubscriber {
     return this.ownerSocket !== null;
   }
 
-  /** Compatibility signal supplied by the loopback app hello. It is deliberately
-   * not an authorization signal; routing gates still run after socket/token
-   * authentication. */
-  get ownerSupportsCheckoutRouting(): boolean {
-    return this.ownerSocket?.data.checkoutRouting === true;
-  }
-
   /** Whether this owner forwards session-bus frames on to the machine each one
    * is addressed to. An app that does not is not broken, it is older: the
    * coordinator holds the frame in its outbox instead of sending it into a
    * client that would drop it. */
   get ownerCarriesSessionBus(): boolean {
     return this.ownerSocket?.data.sessionBusCarrier === true;
-  }
-
-  /** Whether the loopback owner pulls its own file tree (`file:tree:snapshot:request`),
-   *  so a re-sync push would only duplicate it. True with no owner attached —
-   *  there is then nothing the push could reach. */
-  get ownerPullsTree(): boolean {
-    return this.ownerSocket === null || this.ownerSocket.data.pullsTree === true;
-  }
-
-  /** Whether the loopback owner renders terminals from `terminal:frame`.
-   *  Fail-CLOSED, unlike {@link ownerPullsTree}: no owner, or an owner that
-   *  never named the capability, reads false so the legacy `terminal:output`
-   *  path stays selected — a desktop switched into a display mode it cannot
-   *  render shows nothing at all. */
-  get ownerSupportsTerminalFramesV1(): boolean {
-    return this.ownerSocket?.data.terminalFramesV1 === true;
-  }
-
-  /** Fail closed before a managed-checkout frame can reach an older desktop. */
-  requireCheckoutRouting(): boolean {
-    if (!this.ownerSocket || this.ownerSupportsCheckoutRouting) return true;
-    const stale = this.ownerSocket;
-    this.ownerSocket = null;
-    this.busUnsubscribe?.();
-    this.busUnsubscribe = null;
-    stale.data.state = "rejected";
-    stale.close(CLOSE_CHECKOUT_ROUTING_REQUIRED, "checkout routing update required");
-    return false;
   }
 
   get port(): number {
@@ -208,8 +169,8 @@ export class LocalListener implements TransportSubscriber {
   }
 
   /**
-   * A refused hello is the one failure a relay-path capture can never show:
-   * both halves of that capture ride the sealed session, so a session that never
+   * A refused hello is the one failure a native-path capture can never show:
+   * both halves of that capture ride the session, so a session that never
    * came up records nothing at all and "it just never connected" is invisible by
    * construction. On loopback it is an ordinary event.
    *
@@ -269,10 +230,9 @@ export class LocalListener implements TransportSubscriber {
     }
 
     const newPid = typeof envelope.appPid === "number" ? envelope.appPid : undefined;
-    const checkoutRouting = envelope?.capabilities?.checkoutRouting === true;
+    // An owner that sends no `capabilities` (or omits the key) is a valid
+    // non-carrier owner, not a malformed hello.
     const sessionBusCarrier = envelope?.capabilities?.sessionBusCarrier === true;
-    const pullsTree = envelope?.capabilities?.pullsTree === true;
-    const terminalFramesV1 = envelope?.capabilities?.terminalFramesV1 === true;
 
     // A second hello carrying the VALID token is the same trusted app
     // reconnecting (a provider rebuild, retry, or eviction+reopen on the app
@@ -301,10 +261,7 @@ export class LocalListener implements TransportSubscriber {
 
     ws.data.state = "connected";
     ws.data.appPid = newPid;
-    ws.data.checkoutRouting = checkoutRouting;
     ws.data.sessionBusCarrier = sessionBusCarrier;
-    ws.data.pullsTree = pullsTree;
-    ws.data.terminalFramesV1 = terminalFramesV1;
     this.ownerSocket = ws;
     // The accepted hello and its answer, so a capture opens with the moment the
     // desktop attached rather than with unexplained traffic from a socket the

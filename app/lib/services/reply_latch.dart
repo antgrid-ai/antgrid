@@ -1,16 +1,14 @@
 import 'dart:async';
 
-/// Bridges a single-reply verb to the tier-2 [AgentTransport.action]
-/// wall-clock timeout.
+/// Bridges a single-reply verb to a caller-imposed wall-clock timeout.
 ///
 /// A one-shot verb (git:list-branches, git:checkout, git:diff) sets a loading
 /// flag on send and clears it only when its ONE terminal reply lands. If that
 /// send is dropped (keyless relay window) or the session drops before the reply,
-/// the reply never comes and the flag strands. Pass [done] to
-/// `session.action(() => latch.done, timeout: ...)`: [settle] on the reply (or a
-/// supersede / dispose) resolves it cleanly and cancels the action's timer; if
-/// the timeout fires first the action future errors and the caller clears the
-/// flag.
+/// the reply never comes and the flag strands. Callers apply
+/// `latch.done.timeout(...)`: [settle] on the reply (or a supersede / dispose)
+/// resolves it cleanly and cancels the pending timer; if the timeout fires
+/// first the future errors and the caller clears the flag.
 ///
 /// Unlike [IdleActionGuard] this is a WALL-CLOCK bound — correct here because
 /// these verbs reply exactly once and quickly; they never stream N frames the

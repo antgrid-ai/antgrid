@@ -6,8 +6,6 @@ import type { Env } from "../env.js";
 import { requireUser, type AuthVars } from "../auth/middleware.js";
 import { requireBearerJwt } from "../auth/jwt-bearer.js";
 import { listMobileEnabledAgents } from "../models/agent-inventory.js";
-import { listAppDevicePeers } from "../models/device.js";
-import { endpointInventory } from "../models/peer-authorization.js";
 
 // mobileAccessEnabled/relayUrl/machineName are agent-only concepts (the
 // bridge always sends them); an app (phone) heartbeat sends only deviceUuid,
@@ -30,16 +28,6 @@ export function agentRoutes(deps: { db: DB; auth: Auth; env: Env }) {
     requireBearerJwt({ auth: deps.auth, env: deps.env })
   );
 
-  // Peers is called by the bridge to discover enrolled app-device Ed25519 keys
-  // for the same account. Bearer-JWT gated (same OAuth client_credentials path
-  // as heartbeat). Path uses `me/peers` (two segments after /devices) to avoid
-  // Hono matching `/account/devices/:id` in deviceRoutes, which gates on a
-  // cookie-based requireUser and would reject Bearer tokens.
-  r.use(
-    "/account/devices/me/peers",
-    requireBearerJwt({ auth: deps.auth, env: deps.env })
-  );
-
   // All other `/account/*` routes are called by the Flutter app's UI session
   // (signed-in user cookie). Keep them on the cookie-based gate.
   r.use("/account/agents", requireUser({ auth: deps.auth }));
@@ -47,7 +35,6 @@ export function agentRoutes(deps: { db: DB; auth: Auth; env: Env }) {
   r.get("/account/agents", async (c) => {
     const userId = c.get("userId");
     const agents = await listMobileEnabledAgents(deps.db, userId);
-    const endpoints = await inventoryEndpoints(userId);
     return c.json({
       agents: agents.map((a) => ({
         deviceUuid: a.deviceId,
@@ -57,23 +44,6 @@ export function agentRoutes(deps: { db: DB; auth: Auth; env: Env }) {
         relayUrl: a.relayUrl,
         machineName: a.machineName,
         lastSeenAt: a.lastSeenAt?.toISOString() ?? null,
-        ...(endpoints.get(a.deviceId) ? { endpoint: endpoints.get(a.deviceId), transportCapabilities: { iroh: true } } : {}),
-      })),
-    });
-  });
-
-  r.get("/account/devices/me/peers", async (c) => {
-    const userId = c.get("userId");
-    const peers = await listAppDevicePeers(deps.db, userId);
-    const endpoints = await inventoryEndpoints(userId);
-    return c.json({
-      // keys: unconsumed by any current client; devices below is what
-      // bridge/src/trusted-peers.ts reads.
-      keys: peers.map((p) => p.publicKey.toString("base64")),
-      devices: peers.map((p) => ({
-        deviceId: p.deviceId,
-        ed25519Pub: p.publicKey.toString("base64"),
-        ...(endpoints.get(p.deviceId) ? { endpoint: endpoints.get(p.deviceId), transportCapabilities: { iroh: true } } : {}),
       })),
     });
   });
@@ -100,11 +70,5 @@ export function agentRoutes(deps: { db: DB; auth: Auth; env: Env }) {
     return c.json({ ok: true });
   });
 
-  async function inventoryEndpoints(userId: string) {
-    const endpoints = await endpointInventory(deps.db, userId);
-    const devices = await deps.db.device.findMany({ where: { userId, revokedAt: null },
-      select: { deviceId: true, oauthClientId: true } });
-    return new Map(devices.map((device) => [device.deviceId, endpoints.get(device.oauthClientId ?? "")]));
-  }
   return r;
 }

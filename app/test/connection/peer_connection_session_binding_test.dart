@@ -176,7 +176,7 @@ void main() {
       await mech.connectPayload(coords);
       final stale = mech.session!;
       var staleDisposed = false;
-      stale.takeoverEvents.listen(null, onDone: () => staleDisposed = true);
+      stale.sessionDownEvents.listen(null, onDone: () => staleDisposed = true);
 
       await mech.connectPayload(coords);
 

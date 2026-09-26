@@ -38,7 +38,7 @@ abstract class BufferedAgentTransport implements AgentTransport {
 
   /// Tier-3 hydrator registry: idempotent view-state pulls (session list,
   /// config, the reopened file, the transcript) re-driven on every
-  /// (re)establishment — the reconciliation checkpoint. Keyed so a re-register
+  /// establishment — the reconciliation checkpoint. Keyed so a re-register
   /// supersedes rather than duplicates; torn down with the transport.
   final _hydrators = <String, Future<void> Function()>{};
 
@@ -141,8 +141,7 @@ abstract class BufferedAgentTransport implements AgentTransport {
     Map<String, dynamic>? params,
     Duration timeout = const Duration(seconds: 10),
   }) async {
-    final kind = classifyRemoteRequest(method);
-    if (kind == RemoteRequestKind.mutating && !isEstablished) {
+    if (!isEstablished) {
       return const RemoteRequestResult.notSent();
     }
     try {
@@ -154,10 +153,7 @@ abstract class BufferedAgentTransport implements AgentTransport {
       // a transport uncertainty.
       rethrow;
     } on RpcException {
-      if (kind == RemoteRequestKind.mutating) {
-        return const RemoteRequestResult.outcomeUnknown();
-      }
-      rethrow;
+      return const RemoteRequestResult.outcomeUnknown();
     }
   }
 
@@ -251,8 +247,9 @@ abstract class BufferedAgentTransport implements AgentTransport {
 
   /// Tier-3: register [run] as the hydrator for [key] and, when the transport
   /// is already established, invoke it now. Re-invoked on every future
-  /// (re)establishment via [redriveHydrators] — that replay is the whole point:
-  /// a reconnect re-pulls this view-state instead of leaving it stale. A
+  /// establishment via [redriveHydrators] — that replay is the whole point:
+  /// a reopened project stream re-pulls this view-state instead of leaving it
+  /// stale. A
   /// re-register under the same [key] supersedes the prior run (e.g. a focus
   /// switch re-registering the same pull). [run] must be idempotent and own its
   /// OWN bounded wait + flag lifecycle (tier-3 pulls are already timed); this
@@ -271,29 +268,10 @@ abstract class BufferedAgentTransport implements AgentTransport {
   /// absent.
   void unhydrate(String key) => _hydrators.remove(key);
 
-  /// Tier-2: a one-shot user action expecting a reply (search, command:run,
-  /// git:diff/checkout, create/rename/delete). Runs [run] bounded by [timeout]
-  /// and surfaces the outcome so the caller's flag lifecycle ALWAYS settles —
-  /// no reply-clears-the-flag stranding. NOT re-driven on reconnect (a user
-  /// action is one-shot; only tier-3 [hydrate] re-drives).
-  ///
-  /// STREAMING actions (N replies terminated by a `*-done`, e.g. command:run
-  /// that runs for minutes) MUST pass a [run] whose bound is an IDLE-timeout or
-  /// send-failure-only — never a wall-clock cap, which would wrongly kill a
-  /// long-running command. In that case leave [timeout] as the outer safety net
-  /// (or `null`) and let [run] own the idle bound.
-  Future<T> action<T>(
-    Future<T> Function() run, {
-    Duration? timeout = const Duration(seconds: 15),
-  }) {
-    final f = run();
-    return timeout == null ? f : f.timeout(timeout);
-  }
-
   /// Replay every registered hydrator. Subclasses call this on each
-  /// (re)establishment: [LocalTransport] once after connect (born established),
-  /// a [StreamTransport] on each handshake establishment (from
-  /// `refreshSnapshot`). One failing hydrator never blocks the others.
+  /// establishment: [LocalTransport] once after connect (born established),
+  /// a [StreamTransport] from `refreshSnapshot` — the session's establishment
+  /// for the control transport, each bind for a project transport. One failing hydrator never blocks the others.
   void redriveHydrators() {
     // Bumped BEFORE the replay, so a hydrator running as part of this
     // establishment already sees the new epoch and re-pulls unconditionally

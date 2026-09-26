@@ -96,8 +96,8 @@ export interface NetwatchEvent {
  * documents: "the route header carries no message id — so a listener learns
  * that something in flight died, never which one."
  *
- * More than one occurrence can legitimately share an id (a ping, a pong, a
- * credit update are byte-identical every time they recur) — `joinCaptures`
+ * More than one occurrence can legitimately share an id (a ping and a pong
+ * are byte-identical every time they recur) — `joinCaptures`
  * (`cli/netwatch.ts`) pairs occurrences in order rather than assuming the id
  * is unique.
  */

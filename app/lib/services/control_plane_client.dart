@@ -640,7 +640,7 @@ class ControlPlaneClient {
       }
       return true;
     } on RpcException {
-      // Pre-RPC agent, offline target, or timeout — the live stream still feeds
+      // Offline target, refusal or timeout — the live stream still feeds
       // updates; the caller decides whether to clear the now-stale advert.
       return false;
     }
@@ -670,21 +670,21 @@ class ControlPlaneClient {
   /// surface a retry now instead of waiting it out.
   Future<void> startProject(String projectId) async {
     if (_disposed) return;
-    await transport.action(() async {
+    await (() async {
       if (!transport.isEstablished) {
         throw RpcException(
           'E_NOT_ESTABLISHED',
           'project:start not delivered — the session is reconnecting',
         );
       }
-      // Deliberately un-timed inside the action's own bound: the send resolves
-      // at hand-off to the socket, and every path that abandons a queued frame
+      // Deliberately un-timed inside the outer bound: the send resolves at
+      // hand-off to the socket, and every path that abandons a queued frame
       // — session teardown, dispose, the stream detaching — completes it, so
       // this cannot outlive the session that owns it.
       await transport.send(
         createAbMessage('project:start', {'projectId': projectId}),
       );
-    });
+    })().timeout(const Duration(seconds: 15));
   }
 
   /// Fetch the persisted session list for [projectId] over the control plane —
@@ -704,9 +704,11 @@ class ControlPlaneClient {
 
   /// Delete a session over the control plane — the Recent tab's delete path for
   /// a remote project (works whether the project is running or stopped; the
-  /// bridge routes warm-core vs disk). Lets an [RpcException] (NOT_ALLOWED,
-  /// `WORKTREE_DIRTY`, timeout) propagate so the caller can either climb its
-  /// confirm ladder or toast a failure.
+  /// bridge routes warm-core vs disk). A bridge refusal raises [RpcException]
+  /// (NOT_ALLOWED, `WORKTREE_DIRTY`), because that is an application-confirmed
+  /// answer; only loss before/after dispatch is represented by the result enum,
+  /// so the caller can reconcile uncertainty instead of only climbing a confirm
+  /// ladder or toasting a failure.
   ///
   /// [force] and [deleteBranch] are omitted when null rather than sent as
   /// `false`, because they carry the user's answer to a question that is only
@@ -718,30 +720,7 @@ class ControlPlaneClient {
   /// The only verb here that overrides the transport's 10s default: removing an
   /// isolated checkout is unbounded work on the bridge (see
   /// [kSessionDeleteAckTimeout]), so inheriting a fast-read default made every
-  /// slow-but-successful delete arrive as a timeout. The compatibility return
-  /// type stays a bool; callers that reconcile uncertainty use
-  /// [deleteSessionWithOutcome].
-  Future<bool> deleteSession(
-    String projectId,
-    String sessionId, {
-    bool? force,
-    bool? deleteBranch,
-  }) async {
-    final result = await deleteSessionWithOutcome(
-      projectId,
-      sessionId,
-      force: force,
-      deleteBranch: deleteBranch,
-    );
-    if (result.outcome != RemoteCommandOutcome.confirmed) {
-      throw RemoteCommandOutcomeException(result.outcome);
-    }
-    return result.value;
-  }
-
-  /// Delete with an explicit local transport outcome. A bridge refusal still
-  /// raises [RpcException], because that is an application-confirmed answer;
-  /// only loss before/after dispatch is represented by the result enum.
+  /// slow-but-successful delete arrive as a timeout.
   Future<RemoteRequestResult<bool>> deleteSessionWithOutcome(
     String projectId,
     String sessionId, {

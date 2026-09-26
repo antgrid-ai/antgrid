@@ -5,12 +5,10 @@ import { resolveOnFreshAdvert } from "../support/stream";
 import { createMessage } from "../../bridge/src/protocol";
 
 /**
- * Failure-matrix row for concurrent app sessions: ONE bridge now keeps an
+ * Failure-matrix row for concurrent app sessions: ONE bridge keeps an
  * established session PER APP DEVICE, so a phone and a desktop app signed
- * into the same account drive the same machine at the same time. Before this,
- * the bridge held exactly one session and a second device's verified
- * client-hello displaced the first (`session:takeover`, keys zeroized) —
- * the behaviour `gate-harness-pairfree.test.ts` used to pin.
+ * into the same account drive the same machine at the same time; two devices
+ * are two independent sessions, and neither one's traffic displaces the other.
  *
  * Unit coverage lives in `bridge/tests/handshake-pull.test.ts`, but only a real
  * relay plus a real bridge exercises the parts that unit tests stub: two
@@ -36,14 +34,6 @@ async function assertSnapshot(app: RelayClient, label: string): Promise<void> {
   app.sendEncrypted(createMessage("request", { requestId, method: "state.snapshot", params: { types: ["*"] } }));
   const res = (await responseP) as { ok?: boolean };
   expect(res.ok).toBe(true);
-}
-
-/** Count `session:takeover` frames this client has received. Reads the
- *  message QUEUE rather than arming a `waitFor` up front: a waiter covers only
- *  its own timeout window, whereas the queue holds anything that ever arrived
- *  for the whole life of the test. */
-function takeoversSeen(app: RelayClient): number {
-  return app.drainQueued("session:takeover");
 }
 
 test("two app devices hold concurrent sessions with one bridge, and neither displaces the other", async () => {
@@ -106,8 +96,6 @@ test("two app devices hold concurrent sessions with one bridge, and neither disp
 
     // (1) Nothing was displaced, on either side, at any point above. Checked
     // for app2 here, while it is still connected.
-    expect(takeoversSeen(app2)).toBe(0);
-    expect(takeoversSeen(env.app)).toBe(0);
     expect(env.app.isClosed).toBe(false);
     expect(app2.isClosed).toBe(false);
 
@@ -117,7 +105,6 @@ test("two app devices hold concurrent sessions with one bridge, and neither disp
     app2 = undefined;
     await Bun.sleep(500);
     await assertSnapshot(env.app, "app1-after-app2-left");
-    expect(takeoversSeen(env.app)).toBe(0);
   } finally {
     await app2?.disconnect();
     await env.teardown();

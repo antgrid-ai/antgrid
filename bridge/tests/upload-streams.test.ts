@@ -225,7 +225,7 @@ function fakeManager() {
 
 function fakeUploadServer(manager: FileUploadManager) {
   const admitCalls: Array<{ peerId: string; checkoutId: string }> = [];
-  let refusal: { code: "UPDATE_REQUIRED" | "NOT_ALLOWED"; message: string } | null = null;
+  let refusal: { code: "NOT_ALLOWED"; message: string } | null = null;
   const admit = async (peerId: string, checkoutId: string): Promise<UploadAdmission> => {
     admitCalls.push({ peerId, checkoutId });
     if (refusal) return { ok: false, refusal };
@@ -344,12 +344,12 @@ describe("admission order", () => {
     expect(result).toEqual({ code: "NOT_ALLOWED", message: "open the project stream first" });
   });
 
-  test("refusalFor UPDATE_REQUIRED passes through as-is", () => {
+  test("refusalFor masks any code from the binding's own refusal to NOT_ALLOWED", () => {
     const rig = makeRegistry();
     const { proj } = wireProject(rig);
-    proj.setRefusal(() => ({ code: "UPDATE_REQUIRED", message: "please update" }));
+    proj.setRefusal(() => ({ code: "CAP_EXCEEDED", message: "irrelevant" }));
     const { result } = admitUpload(rig.registry);
-    expect(result).toEqual({ code: "UPDATE_REQUIRED", message: "please update" });
+    expect(result).toEqual({ code: "NOT_ALLOWED", message: "irrelevant" });
   });
 
   test("a duplicate (peerId, requestId) -> INVALID", async () => {

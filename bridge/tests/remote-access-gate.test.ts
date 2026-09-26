@@ -7,12 +7,11 @@ import { buildAgentCore, type AgentCore } from "../src/agent-core";
 import { MessageBus } from "../src/message-bus";
 import { createMessage, type AbMessage } from "../src/protocol";
 import { TestPeerSessionOwner } from "./test-peer-session-owner";
-import { createRelayPromotion, type MachineRelaySession } from "../src/relay-promotion";
 import type { PeerSessionView } from "../src/project-streams";
 
 /** One established app session, as the relay transport would report it. */
 function session(peerPubkey: string, peerId = "app-dev#machine-dev"): PeerSessionView {
-  return { peerId, peerPubkey, checkoutRouting: true, pullsTree: true };
+  return { peerId, peerPubkey };
 }
 
 // Isolate ANTGRID_DIR so the core writes its session/catalog state into a temp
@@ -302,78 +301,6 @@ test("core.tunnelStreams.admit refuses NOT_ALLOWED while mobile access is off, a
   mobileAccess = true;
   const admitted = core.tunnelStreams.admit("phone-pubkey-tunnel-base64", "main");
   expect(admitted.ok).toBe(true);
-});
-
-// CRITICAL #2: a localâ†’relay-promoted connection must be gated too. In v3
-// relay-promotion.ts no longer builds its own TestPeerSessionOwner â€” it asks the host
-// to bring the ONE machine socket up (ensureMachineRelay) and hands the result
-// to ProjectCore's `attach` (which owns the real setPeerSessionProvider wiring;
-// see project-core.ts's attachRelayStream). This test stubs `attach` the same
-// way ProjectCore really implements it, so the load-bearing assertion â€”
-// enabling relay wires the gate to the promoted session's attached devices, and
-// disabling clears it â€” still holds under the new dependency split.
-test("promotion wires (and clears) the gate's session provider", async () => {
-  const bus = new MessageBus();
-  bus.setInboundHandler(() => {});
-
-  type Provider = (peerId: string) => PeerSessionView | null;
-  let provider: Provider | null | undefined = undefined;
-  const setCalls: Array<Provider | null> = [];
-
-  const setPeerSessionProvider = (fn: Provider | null) => {
-    setCalls.push(fn);
-    provider = fn;
-  };
-
-  // Stub machine relay session whose attached device is observable through the
-  // wired provider â€” mirrors what HostServer.ensureMachineRelay() returns.
-  const promoted = session("promoted-phone-pk", "promoted-phone#machine-dev");
-  const machineSession: MachineRelaySession = {
-    attachStream: () => ({ detach: () => {}, sendTo: async () => "sent" as const, deliverableTo: () => true }),
-    establishedPeers: () => [promoted],
-    peerSession: (peerId) => (peerId === promoted.peerId ? promoted : null),
-    sendPushDeliver: () => {},
-    agentDeviceId: "0bbd1111-2222-3333-4444-555566667777",
-  };
-
-  const ctrl = createRelayPromotion({
-    bus,
-    ensureMachineRelay: async () => machineSession,
-    // Reproduces ProjectCore.attachLocalStreamForWizard's real wiring: wire
-    // the gate's provider to the attached stream's peer, clear it on detach.
-    attach: (remote) => {
-      setPeerSessionProvider((peerId) => remote.peerSession(peerId));
-      return {
-        handle: { detach: () => {}, sendTo: async () => "sent" as const, deliverableTo: () => true },
-        detach: () => { setPeerSessionProvider(null); },
-      };
-    },
-  });
-
-  ctrl.handleInbound(
-    createMessage("agent:enableRelay", {
-      relayUrl: "https://relay.example.com",
-      auth: {
-        deviceUuid: "0bbd1111-2222-3333-4444-555566667777",
-        ed25519Pub: Buffer.from("edpub").toString("base64url"),
-        ed25519Priv: Buffer.from("edpriv").toString("base64url"),
-        licenseToken: "static-token",
-      },
-    }) as AbMessage,
-  );
-  await new Promise((r) => setTimeout(r, 20));
-
-  // Provider was wired and resolves the promoted session's attached device.
-  expect(typeof provider).toBe("function");
-  const wired = provider as unknown as Provider;
-  expect(wired(promoted.peerId)?.peerPubkey).toBe("promoted-phone-pk");
-  // ...and only that device: an address it holds no session for resolves null,
-  // which is what makes every per-device answer fail closed.
-  expect(wired("someone-else#machine-dev")).toBe(null);
-
-  // Teardown clears it (so the demoted local session is ungated again).
-  ctrl.stop();
-  expect(setCalls[setCalls.length - 1]).toBe(null);
 });
 
 // The core-level half of the abort: `project-core`'s peer hooks reach every

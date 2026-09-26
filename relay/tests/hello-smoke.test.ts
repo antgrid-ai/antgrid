@@ -38,7 +38,7 @@ test("non-hello first message → PROTOCOL_VIOLATION + close 1008", async () => 
     ws.onclose = (e) => resolve(e.code);
   });
   const first = waitForMessage(ws);
-  ws.send(JSON.stringify({ type: "stream-open", streamId: "s1" }));
+  ws.send(JSON.stringify({ type: "ping" }));
   const err = await first;
   expect(err.type).toBe("error");
   expect(err.code).toBe("PROTOCOL_VIOLATION");

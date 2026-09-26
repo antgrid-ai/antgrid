@@ -57,8 +57,6 @@ const Set<String> kCheckoutVariableMessageTypes = <String>{
   'terminal:notification',
   'terminal:bell',
   'terminal:size',
-  'terminal:snapshot:request',
-  'terminal:snapshot',
   'terminal:subscribe',
   'terminal:subscribed',
   'terminal:frame',
@@ -266,7 +264,6 @@ const Set<String> _statusTypes = <String>{
 ///     not carried frames, and belong in [_statusTypes] instead.
 const Set<String> kUnroutedInboundTypes = <String>{
   'client:focus-state',
-  'terminal:snapshot:request',
   'file:tree:snapshot:request',
   'preview:snapshot:request',
   'session-bus:post',
@@ -278,7 +275,6 @@ const Set<String> kUnroutedInboundTypes = <String>{
 
 const Set<String> _heavyTypes = <String>{
   'terminal:output',
-  'terminal:snapshot',
   'terminal:frame',
   'terminal:history:page',
   'tree:full',

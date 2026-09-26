@@ -46,10 +46,9 @@ export function isManagedCheckoutKind(kind: CheckoutKind): boolean {
 }
 
 /** This session's workspace is not the project's primary working tree, so every
- *  checkout-variable message must route to it and an app without the
- *  `checkoutRouting` capability must be refused the project. Deliberately NOT
- *  the same question as ownership: `main` is neither, and an external worktree
- *  would be isolated without ever being ours to delete. */
+ *  checkout-variable message must route to it. Deliberately NOT the same
+ *  question as ownership: `main` is neither, and an external worktree would be
+ *  isolated without ever being ours to delete. */
 export function isIsolatedCheckoutKind(kind: CheckoutKind): boolean {
   return kind !== "main";
 }

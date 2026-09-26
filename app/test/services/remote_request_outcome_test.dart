@@ -52,20 +52,6 @@ class _OutcomeTransport extends BufferedAgentTransport {
 }
 
 void main() {
-  test(
-    'read allowlist is explicit and unknown methods default to mutating',
-    () {
-      expect(
-        classifyRemoteRequest('state.snapshot'),
-        RemoteRequestKind.readOnly,
-      );
-      expect(
-        classifyRemoteRequest('future.method'),
-        RemoteRequestKind.mutating,
-      );
-    },
-  );
-
   test('disconnect before send reports notSent', () async {
     final transport = _OutcomeTransport();
     addTearDown(transport.dispose);
@@ -149,10 +135,6 @@ void main() {
   );
 
   test('uncertainty exposes the required user-facing message', () {
-    final error = RemoteCommandOutcomeException(
-      RemoteCommandOutcome.outcomeUnknown,
-    );
-    expect(error.message, remoteCommandOutcomeUnknownMessage);
     expect(
       remoteCommandOutcomeUnknownMessage,
       'Connection lost; execution could not be confirmed',

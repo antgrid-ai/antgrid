@@ -117,14 +117,14 @@ void main() {
   group('session teardown fails in-flight RPCs', () {
     test(
       'G1: a control-plane send chained behind a pending write is dropped, '
-      'not written, when the session generation changes before its turn',
+      'not written, when the session is torn down before its turn',
       () async {
         final relay = FakeLiveRelay();
         final session = await establishSession(relay, handshaker: FakeHandshaker());
 
         // Holds the first write's own `sendFrame` in flight so the second one
-        // is still queued behind it (on `_sessionSendChain`) when the
-        // generation changes underneath both of them.
+        // is still queued behind it (on `_sessionSendChain`) when the session
+        // is torn down underneath both of them.
         final gate = Completer<void>();
         relay.sendGate = gate;
         final first = session.sendOnSession({'type': 'ping'}, 'control');
@@ -133,14 +133,22 @@ void main() {
           'data': 'must-not-send',
         }, 'control');
 
-        // A takeover tears the session down (nulling its generation) without
-        // touching `relay.isDispatchAllowed` — the socket stays up, only the
-        // session does not, which is what isolates the generation fence from
-        // the separate `isDispatchAllowed` gate.
-        relay.injectRecord(
-          encodeFromAgent(jsonEncode({'type': kSessionTakeover})),
+        // Let the first write reach the gated `sendRecord`.
+        await Future<void>.delayed(Duration.zero);
+        // The socket dying tears the session down (`_established` flips
+        // false) while the second write is still queued behind the first on
+        // `_sessionSendChain`. The link then reports ready again so
+        // `isDispatchAllowed` is true at the second write's turn, leaving the
+        // established fence as the only thing that can drop it.
+        relay.setState(
+          const AppState(connectionState: RelayConnectionState.disconnected),
         );
         await Future<void>.delayed(const Duration(milliseconds: 20));
+        relay.setState(
+          const AppState(connectionState: RelayConnectionState.authenticated),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        expect(session.isEstablished, isFalse);
         gate.complete();
         await first;
         await second;
@@ -151,12 +159,12 @@ void main() {
         expect(
           sentTypes,
           contains('ping'),
-          reason: 'the first write had already passed its generation check',
+          reason: 'the first write had already passed its established check',
         );
         expect(
           sentTypes,
           isNot(contains('terminal:input')),
-          reason: 'its turn on the chain came after the generation changed',
+          reason: 'its turn on the chain came after the session was torn down',
         );
 
         await session.dispose();

@@ -29,7 +29,6 @@ describe("DELETE /account/devices/:id", () => {
       body: JSON.stringify({
         deviceUuid,
         ed25519Pub: Buffer.alloc(32, 1).toString("base64"),
-        x25519Pub: Buffer.alloc(32, 2).toString("base64"),
         platform: "macos",
         displayName: "Alice's Mac",
       }),

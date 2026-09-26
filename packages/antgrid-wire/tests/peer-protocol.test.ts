@@ -4,7 +4,6 @@ import {
   SessionFrameTypeSchema,
   SessionPingFrame,
   SessionPongFrame,
-  SessionTakeoverFrame,
   isSessionFrameType,
 } from "../src/index";
 
@@ -35,15 +34,13 @@ describe("session frame body schemas are non-strict", () => {
   // An extra key on a ping must never cost a pong: these schemas exist only
   // for the vectors generator to validate its samples against, not as a
   // runtime gate on dispatch.
-  test("ping/pong/takeover accept an unknown extra field", () => {
+  test("ping/pong accept an unknown extra field", () => {
     expect(SessionPingFrame.safeParse({ type: "session:ping", extra: 1 }).success).toBe(true);
     expect(SessionPongFrame.safeParse({ type: "session:pong", extra: 1 }).success).toBe(true);
-    expect(SessionTakeoverFrame.safeParse({ type: "session:takeover", extra: 1 }).success).toBe(true);
   });
 
   test("each schema rejects the wrong literal type", () => {
     expect(SessionPingFrame.safeParse({ type: "session:pong" }).success).toBe(false);
     expect(SessionPongFrame.safeParse({ type: "session:ping" }).success).toBe(false);
-    expect(SessionTakeoverFrame.safeParse({ type: "session:ping" }).success).toBe(false);
   });
 });

@@ -69,14 +69,6 @@ BlockReasonPresentation blockReasonPresentation(
     retryLabel: 'retry',
     interruptsWorkspace: true,
   ),
-  BlockReason.sessionTakenOver => const BlockReasonPresentation(
-    statusLabel: 'Taken over',
-    connectFailure: 'Connect failed: another device took over this machine.',
-    workspaceHeadline: 'another device took over this agent',
-    workspaceTip: 'Another of your devices took over this agent.',
-    retryLabel: 'take back',
-    interruptsWorkspace: true,
-  ),
   BlockReason.deviceRevoked => const BlockReasonPresentation(
     statusLabel: 'Device revoked',
     connectFailure: "Connect failed: this device's access was revoked.",

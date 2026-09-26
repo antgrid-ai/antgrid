@@ -115,9 +115,6 @@ export type StreamOpenKind = StreamOpen["kind"];
 //     starting (hazard J, §1.5); the app should wait for the session-stream
 //     ready notice and retry, not park the open. Also covers a project
 //     stream itself opened before the project has a relay-registered core.
-//   UPDATE_REQUIRED: mirrors the existing `UPDATE_REQUIRED` code
-//     (host-server.ts / project-core.ts) for a peer too old to speak this
-//     stream's protocol.
 //   NOT_ALLOWED: remote access is off, the project is unknown or unsafe, or
 //     the peer's project binding does not authorize this stream (a terminal,
 //     tunnel or upload open with no open project stream for the same
@@ -127,7 +124,6 @@ export type StreamOpenKind = StreamOpen["kind"];
 //   INVALID: the open frame failed to parse or exceeded STREAM_OPEN_MAX_BYTES.
 export const StreamRefusedCode = z.enum([
   "NOT_READY",
-  "UPDATE_REQUIRED",
   "NOT_ALLOWED",
   "CAP_EXCEEDED",
   "INVALID",

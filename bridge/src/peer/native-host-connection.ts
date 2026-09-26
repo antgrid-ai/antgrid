@@ -683,7 +683,6 @@ export class NativeHostConnection implements RemoteHostConnection {
   establishedPeers() { return this.peers.establishedPeers(); }
   peerSession(...args: Parameters<NativePeerSessions["peerSession"]>) { return this.peers.peerSession(...args); }
   hasEstablishedSession() { return this.peers.hasEstablishedSession(); }
-  anySessionSupportsCheckoutRouting() { return this.peers.anySessionSupportsCheckoutRouting(); }
   send(...args: Parameters<NativePeerSessions["send"]>) { return this.peers.send(...args); }
   sendOnChannel(...args: Parameters<NativePeerSessions["sendOnChannel"]>) { return this.peers.sendOnChannel(...args); }
   noteResume(): Promise<boolean> { return this.peers.noteResume(); }

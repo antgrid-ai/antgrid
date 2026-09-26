@@ -93,12 +93,6 @@ void _expectNoLegacyRequests(FakeAgentTransport transport) {
     ),
     isEmpty,
   );
-  expect(
-    transport.sent.where(
-      (message) => message['type'] == 'terminal:snapshot:request',
-    ),
-    isEmpty,
-  );
 }
 
 void main() {

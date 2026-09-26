@@ -112,7 +112,7 @@ class SearchService {
     // search's timeout can't clear the newer one.
     final guard = _searchGuard = IdleActionGuard(searchIdleTimeout);
     unawaited(
-      session.action(() => guard.done, timeout: null).catchError((_) {
+      guard.done.catchError((_) {
         if (_disposed || _state.currentRequestId != requestId) return;
         _setState(
           _state.copyWith(

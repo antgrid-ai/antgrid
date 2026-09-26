@@ -131,7 +131,7 @@ test("real backend enrollment authorizes native host projects and revocation clo
       // QUIC/TLS between the endpoints the lease authorizes is the
       // confidentiality layer now — the hello is a plaintext frame the
       // bridge's lease re-check gates, not a signed transcript exchange.
-      await sendSession({ type: "session:hello", attemptId, capabilities: { checkoutRouting: true, pullsTree: true, terminalFramesV1: true } });
+      await sendSession({ type: "session:hello", attemptId });
       await read((value) => value.type === "session:established" && value.attemptId === attemptId);
       const nativeConnectionId = connection.stableId();
       centralOnline = false;

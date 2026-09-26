@@ -175,9 +175,7 @@ test("native handshake re-advertises to the established session", async () => {
   // again (→ phonePubkey via phoneEd25519ByDeviceId) before the callback fires.
   installFakeSession(client, "phone-1");
   (client as any).phoneEd25519ByDeviceId.set("phone-1", "pub-1");
-  client.hostOptions.native.onHandshakeComplete?.({
-    checkoutRouting: true, pullsTree: true, terminalFramesV1: true, peerId: "phone-1",
-  });
+  client.hostOptions.native.onHandshakeComplete?.({ peerId: "phone-1" });
 
   const advert = delivered.find((m) => m.type === "agent:projects");
   expect(advert).toBeDefined();

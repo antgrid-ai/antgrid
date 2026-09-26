@@ -21,8 +21,9 @@ test("post-auth binary frame -> PROTOCOL_VIOLATION + close 1008", async () => {
   const error = waitForMessage(ws);
   const closed = waitForClose(ws);
 
-  // Larger than any control frame, but within the retired payload-frame bound.
-  ws.send(new Uint8Array(128 * 1024));
+  // The relay is control-only: any binary frame is a violation regardless of
+  // size, so a small one is enough to prove the rejection isn't size-gated.
+  ws.send(new Uint8Array(1024));
 
   expect(await error).toMatchObject({
     type: "error",
@@ -30,6 +31,38 @@ test("post-auth binary frame -> PROTOCOL_VIOLATION + close 1008", async () => {
     retryable: false,
   });
   expect(await closed).toBe(1008);
+});
+
+test("over-bound text frame closes the socket", async () => {
+  relay = startServer(defaultConfig);
+  const { ws } = await connectHello(relay, { deviceId: "oversized-agent" });
+  const closed = waitForClose(ws);
+
+  // One byte past MAX_CONTROL_FRAME_BYTES (server.ts `maxPayloadLength`).
+  // Bun/uWebSockets enforces that cap by dropping the connection without a
+  // close frame, so the client observes 1006, not 1009.
+  const oversized = "x".repeat(64 * 1024 + 1);
+  ws.send(oversized);
+
+  expect(await closed).toBe(1006);
+});
+
+test("push:deliver at the schema maximum for every field is accepted", async () => {
+  relay = startServer(defaultConfig);
+  const { ws } = await connectHello(relay, { deviceId: "push-agent-max" });
+  const resultP = waitForMessage(ws);
+
+  ws.send(JSON.stringify({
+    type: "push:deliver",
+    pushToken: "t".repeat(4096),
+    provider: "fcm",
+    blob: { epk: "e".repeat(256), box: "b".repeat(8192) },
+  }));
+
+  const result = await resultP;
+  // No fcmSender configured on this server; "unconfigured" still proves the
+  // frame parsed and was routed, not rejected on size or schema.
+  expect(result).toEqual({ type: "push:result", pushToken: "t".repeat(4096), ok: false, reason: "unconfigured" });
 });
 
 test("JSON control-message flood is rate limited without closing the socket", async () => {
@@ -70,16 +103,4 @@ test("unknown control messages remain recoverable INVALID_MESSAGE errors", async
     retryable: false,
   });
   expect(ws.readyState).toBe(WebSocket.OPEN);
-});
-test("metrics expose control-plane state only", async () => {
-  relay = startServer(defaultConfig);
-  await connectHello(relay, { deviceId: "metrics-agent" });
-
-  const response = await fetch(`http://localhost:${relay.server.port}/metrics`);
-  expect(response.status).toBe(200);
-  const metrics = (await response.json()) as Record<string, unknown>;
-  expect(metrics).toMatchObject({ activeConnections: 1 });
-  for (const retired of ["messagesPerSec", "backpressureDrops", "routeRateLimitDrops"]) {
-    expect(metrics).not.toHaveProperty(retired);
-  }
 });

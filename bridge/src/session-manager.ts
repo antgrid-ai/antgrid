@@ -34,7 +34,6 @@ import {
   CHECKOUT_KINDS,
   CHECKOUT_STATES,
   DURABLE_SETUP_STATES,
-  isIsolatedCheckoutKind,
   isManagedCheckoutKind,
   type CheckoutKind,
   type CheckoutRecord,
@@ -630,18 +629,6 @@ export class SessionManager {
     }
     out.sort((a, b) => b.lastUsedAt - a.lastUsedAt);
     return out;
-  }
-
-  /** Whether any persisted session requires checkout-scoped workspace routing.
-   *  This is the ROUTING question, not the ownership one — any checkout that is
-   *  not main's working tree needs it, whoever created it, so it must stay on
-   *  `isIsolatedCheckoutKind` even though every kind that answers true today is
-   *  also one Antgrid created. */
-  hasIsolatedSessions(): boolean {
-    for (const entry of this.entries.values()) {
-      if (isIsolatedCheckoutKind(entry.checkoutKind)) return true;
-    }
-    return false;
   }
 
   /** Whether a delete is currently tearing this checkout down. The ONLY read

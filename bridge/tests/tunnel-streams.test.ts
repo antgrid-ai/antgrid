@@ -207,7 +207,7 @@ function fakeManager() {
 
 /** Fake `TunnelStreamServer`: what `binding.tunnelBinding.tunnels()` returns. */
 function fakeTunnelServer() {
-  let refusal: { code: "UPDATE_REQUIRED" | "NOT_ALLOWED"; message: string } | null = null;
+  let refusal: { code: "NOT_ALLOWED"; message: string } | null = null;
   const { manager, httpCalls, wsCalls, setNextSink } = fakeManager();
   const admitCalls: Array<{ peerId: string; checkoutId: string }> = [];
   const admit = (peerId: string, checkoutId: string): TunnelAdmission => {
@@ -217,7 +217,7 @@ function fakeTunnelServer() {
   };
   return {
     admit, httpCalls, wsCalls, admitCalls, setNextSink,
-    setRefusal: (r: { code: "UPDATE_REQUIRED" | "NOT_ALLOWED"; message: string } | null) => { refusal = r; },
+    setRefusal: (r: { code: "NOT_ALLOWED"; message: string } | null) => { refusal = r; },
   };
 }
 
@@ -317,7 +317,7 @@ function wsOpenRecord(wsId: string, opts: Partial<TunnelWsOpen> = {}): TunnelWsO
 }
 
 describe("TunnelStreamRegistry (A3)", () => {
-  test("every refusal is decided before any read: CAP_EXCEEDED shared across HTTP and WS, NOT_ALLOWED unsafe id, NOT_ALLOWED uncatalogued, NOT_READY unbound, UPDATE_REQUIRED masks a non-UPDATE_REQUIRED code, INVALID duplicate id, NOT_ALLOWED tunnels unavailable", async () => {
+  test("every refusal is decided before any read: CAP_EXCEEDED shared across HTTP and WS, NOT_ALLOWED unsafe id, NOT_ALLOWED uncatalogued, NOT_READY unbound, NOT_ALLOWED masked from the binding's own refusal, INVALID duplicate id, NOT_ALLOWED tunnels unavailable", async () => {
     const { registry, cataloged, bindings } = makeRegistry();
     cataloged.add(PROJECT);
     const { binding } = fakeBinding();
@@ -361,18 +361,15 @@ describe("TunnelStreamRegistry (A3)", () => {
     }
 
     {
-      cataloged.add("update-project");
+      // Whatever code the binding's own admission check returns is masked to
+      // NOT_ALLOWED.
+      cataloged.add("refused-project");
       const rebind = fakeBinding();
-      rebind.setRefusal(() => ({ code: "UPDATE_REQUIRED", message: "old app" }));
-      bindings.set("update-project", rebind.binding);
-      const { fake, result } = admitHttp(registry, { projectId: "update-project" });
-      expect(result?.code).toBe("UPDATE_REQUIRED");
-      expect(fake.readCalls).toEqual([]);
-
       rebind.setRefusal(() => ({ code: "CAP_EXCEEDED", message: "irrelevant" }));
-      const second = admitHttp(registry, { projectId: "update-project" });
-      expect(second.result?.code).toBe("NOT_ALLOWED");
-      expect(second.fake.readCalls).toEqual([]);
+      bindings.set("refused-project", rebind.binding);
+      const { fake, result } = admitHttp(registry, { projectId: "refused-project" });
+      expect(result?.code).toBe("NOT_ALLOWED");
+      expect(fake.readCalls).toEqual([]);
     }
 
     {

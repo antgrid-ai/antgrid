@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HostServer, type HostRemoteConfig, type RemoteRuntime } from "../src/host-server";
 import { computeProjectId } from "../src/project-id";
-import { createMessage, type AgentEnableRelay } from "../src/protocol";
+import { createMessage } from "../src/protocol";
 import type { RemoteHostConnection } from "../src/remote-host-connection";
 import type { SessionBusCoordinator } from "../src/session-bus/coordinator";
 import { loadHeld } from "../src/session-bus/held-store";
@@ -34,7 +34,6 @@ function stubRemoteHostConnection(): RemoteHostConnection {
   return {
     deviceId: "control-plane-dev",
     hasEstablishedSession: () => false,
-    anySessionSupportsCheckoutRouting: () => false,
     establishedPeers: () => [],
     peerSession: () => null,
     setBus: () => {},
@@ -439,49 +438,6 @@ test("startControlPlane's remote control plane runs pushHeartbeat on an actual c
   const callsAtShutdown = calls;
   await new Promise((r) => setTimeout(r, 40));
   expect(calls).toBe(callsAtShutdown); // no ticks survive shutdown
-});
-
-// A host launched local-only and promoted by the desktop wizard has no
-// `opts.remote` — its machine config lives in `wizardRemote`. The heartbeat
-// cadence has to answer to the SAME resolution the rest of
-// startRemoteControlPlane uses, or the timer ticks into a no-op and the
-// account inventory's relayUrl/machineName never refresh on exactly the path
-// the wizard creates.
-test("a wizard-promoted host (no opts.remote) actually pushes on the heartbeat cadence", async () => {
-  const calls: string[] = [];
-  const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (input: any) => {
-    calls.push(String(input));
-    return new Response(null, { status: 200 });
-  }) as unknown as typeof fetch);
-  try {
-    host = createHostPolicyFixture({
-      remoteRuntimeFactory: () => Promise.resolve(fakeRuntime()),
-      remoteHostFactory: () => stubRemoteHostConnection(),
-      heartbeatIntervalMs: 15,
-    });
-
-    await host.ensureMachineRelay({
-      id: "1",
-      type: "agent:enableRelay",
-      relayUrl: "ws://127.0.0.1:1",
-      licenseApiUrl: "http://127.0.0.1:1",
-      auth: {
-        deviceUuid: "11111111-2222-3333-4444-555555555555",
-        ed25519Pub: "cHVi",
-        ed25519Priv: "cHJpdg==",
-        clientId: "cid",
-        clientSecret: "secret",
-        userId: "user-1",
-        endpointSecret: Buffer.alloc(32, 1).toString("base64"),
-      },
-    } as AgentEnableRelay);
-
-    await new Promise((r) => setTimeout(r, 80));
-    const heartbeats = calls.filter((url) => url.endsWith("/account/devices/me/heartbeat"));
-    expect(heartbeats.length).toBeGreaterThanOrEqual(2);
-  } finally {
-    fetchSpy.mockRestore();
-  }
 });
 
 test("prunes seen-catalog entries whose folder no longer exists, on load", () => {

@@ -14,7 +14,6 @@ DevicesApi _apiReturning(int status, String body) => DevicesApi(
 Future<void> _create(DevicesApi api) => api.createDevice(
   deviceUuid: 'new-uuid',
   ed25519Pub: 'ed',
-  x25519Pub: 'x',
   platform: 'macos',
   displayName: 'New machine',
 );

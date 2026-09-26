@@ -132,14 +132,9 @@ export type UploadProjectBinding = Pick<ProjectBinding, "hasOpenStream" | "refus
 export interface PeerSessionView {
   readonly peerId: string;
   readonly peerPubkey: string;
-  readonly checkoutRouting: boolean;
-  /** Whether this device pulls trees on demand rather than being pushed them.
-   *  Per-device: the bridge may only stop pushing when EVERY attached one does. */
-  readonly pullsTree: boolean;
-  readonly terminalFramesV1?: boolean;
 }
 
-/** Who an outbound frame is for. A bridge holds one E2E session per attached
+/** Who an outbound frame is for. A bridge holds one session per attached
  *  app device, so every send either fans out (optionally filtered per
  *  receiver) or names the single session that asked. */
 export type SendTarget =
@@ -478,9 +473,7 @@ export class ProjectStreamRegistry {
     }
     const refusal = entry.opts.mayAcceptFrom?.(this.opts.peerSession(peerId)) ?? null;
     if (refusal) {
-      return refusal.code === "UPDATE_REQUIRED"
-        ? { code: "UPDATE_REQUIRED", message: refusal.message }
-        : { code: "NOT_ALLOWED", message: refusal.message };
+      return { code: "NOT_ALLOWED", message: refusal.message };
     }
     if (this.bindings.has(this.key(peerId, projectId))) {
       return { code: "INVALID", message: "project stream already open" };
@@ -561,8 +554,8 @@ export class ProjectStreamRegistry {
   }
 
   /** Tell one session why its records are being dropped. Addressed, because a
-   *  healthy sibling banner-ing someone else's UPDATE_REQUIRED is worse than
-   *  the silence this replaces. Rate-limited per (peer, project). */
+   *  healthy sibling banner-ing someone else's refusal is worse than the
+   *  silence this replaces. Rate-limited per (peer, project). */
   private notifyRefused(peerId: string, projectId: string, refusal: StreamRefusal): void {
     if (!this.noticeDue(`${peerId}\u0000${projectId}`)) return;
     this.opts.sendSessionMessage(peerId, createMessage("control:result", {

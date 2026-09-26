@@ -683,7 +683,7 @@ async function expectNoStreamAfterInput(bus: MessageBus, sent: AbMessage[], data
   // remained frame-only, including when no attachment can deliver a screen.
   await waitFor(internal, (m) => m.type === "terminal:output" && m.terminalId === "adhoc", "internal PTY output");
   await new Promise((resolve) => setTimeout(resolve, 100));
-  expect(sent.some((m) => m.type === "terminal:output" || m.type === "terminal:snapshot")).toBe(false);
+  expect(sent.some((m) => m.type === "terminal:output")).toBe(false);
 }
 
 async function bootWithTerminal(): Promise<{ bus: MessageBus; sent: AbMessage[]; relaySent: AbMessage[] }> {

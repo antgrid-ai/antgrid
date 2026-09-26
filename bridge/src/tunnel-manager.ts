@@ -131,7 +131,7 @@ export interface TunnelWsUpstreamSink {
 }
 
 export type TunnelAdmission =
-  | { ok: false; refusal: { code: "UPDATE_REQUIRED" | "NOT_ALLOWED"; message: string } }
+  | { ok: false; refusal: { code: "NOT_ALLOWED"; message: string } }
   | { ok: true; manager: TunnelManager };
 
 /** What a project's core exposes to the tunnel registry: `AgentCore`
@@ -351,7 +351,7 @@ export class TunnelManager {
         if (!(await this.sendOrAbort(exchange.body(first.value), runAbort))) return;
         // Read-side pacing: the next piece is pulled only once the previous
         // one has left the send queue, so a stream holds at most one queued
-        // piece and the credit window is the only thing setting the rate.
+        // piece and QUIC flow control is the only thing setting the rate.
         // The loop keeps reading until the generator itself reports done —
         // a clean FIN and a reset are natively distinguishable on the wire,
         // so no piece needs to carry a `last` flag of its own.
@@ -405,8 +405,8 @@ export class TunnelManager {
    *  upstream connection closed, nothing retained — instead of streaming the
    *  rest of a body toward a stream that is already gone. A sibling peer's
    *  runs are untouched, so a second phone establishing does not abort the
-   *  first phone's preview load (A3 trap). WS tunnels are left alone: they
-   *  survive a rekey today and the app re-opens them on loss. */
+   *  first phone's preview load. WS tunnels are left alone: the app re-opens
+   *  them on loss. */
   abortHttpStreams(peerId: string): void {
     for (const [controller, p] of this.inflight) {
       if (p === peerId) controller.abort();

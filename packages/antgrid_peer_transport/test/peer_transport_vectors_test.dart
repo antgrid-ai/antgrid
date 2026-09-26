@@ -195,7 +195,6 @@ void main() {
         .cast<Map<String, dynamic>>();
     expect(refusals.map((r) => r['name']), [
       'not-ready',
-      'update-required',
       'not-allowed',
       'cap-exceeded',
       'invalid',
@@ -206,10 +205,11 @@ void main() {
       expect(parsed, isNotNull, reason: sample['name'] as String);
       expect(parsed!.toJson(), json, reason: sample['name'] as String);
     }
-    // A Dart-only code would pass every other check here.
+    // A Dart-only code would pass every other check here. Unordered: the
+    // fixture's entry order is not required to match enum declaration order.
     expect(
       refusals.map((r) => _map(r['json'])['code']).toList(),
-      StreamRefusedCode.values.map((c) => c.wireValue).toList(),
+      unorderedEquals(StreamRefusedCode.values.map((c) => c.wireValue)),
     );
   });
 

@@ -39,9 +39,10 @@ The server may send `welcome`, typed `error`, `peer-online`, `peer-offline`,
 `retryable` boolean.
 
 Any post-auth binary frame is a `PROTOCOL_VIOLATION` and closes with 1008.
-Retired `stream-open` and `stream-close` messages receive the same outcome.
 Unknown future JSON control messages remain `INVALID_MESSAGE` errors so current
-clients can ignore unsupported extensions without losing a healthy socket.
+clients can ignore unsupported extensions without losing a healthy socket. A
+text frame over `MAX_CONTROL_FRAME_BYTES` drops the connection without a close
+frame (the client sees 1006) before it reaches JSON parsing.
 
 The checked-in cross-language samples are generated from
 `packages/antgrid-wire/scripts/gen-envelope-vectors.ts` into

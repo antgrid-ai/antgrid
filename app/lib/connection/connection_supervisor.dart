@@ -35,10 +35,6 @@ class PeerTerminalError extends PeerConnectionEvent {
   const PeerTerminalError();
 }
 
-class PeerSessionTakenOver extends PeerConnectionEvent {
-  const PeerSessionTakenOver();
-}
-
 class PeerSessionDown extends PeerConnectionEvent {
   const PeerSessionDown();
 }
@@ -173,11 +169,6 @@ class NativeConnectionSupervisor {
   void noteSessionDown() => _kick();
   void notePeerRejected() {
     _block(BlockReason.peerRejected);
-    _kick();
-  }
-
-  void noteSessionTakenOver() {
-    _block(BlockReason.sessionTakenOver);
     _kick();
   }
 

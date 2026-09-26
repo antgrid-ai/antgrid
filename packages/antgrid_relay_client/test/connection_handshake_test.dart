@@ -79,17 +79,16 @@ void main() {
   });
 
   test('run() sends a bare session:hello record with a fresh attemptId '
-      'and the hello capability literal', () async {
+      'and nothing else', () async {
     final hs = ConnectionHandshake(relay: relay);
     final runFuture = hs.run();
     await Future<void>.delayed(Duration.zero);
 
     expect(relay.sent, hasLength(1));
     final hello = _decode(relay.sent.single);
-    expect(hello['type'], kSessionHello);
     expect(hello['attemptId'], isA<String>());
     expect((hello['attemptId'] as String).isNotEmpty, isTrue);
-    expect(hello['capabilities'], kSessionHelloCapabilities);
+    expect(hello, {'type': kSessionHello, 'attemptId': hello['attemptId']});
 
     _replyEstablished(relay, hello['attemptId'] as String);
     expect(await runFuture, isTrue);

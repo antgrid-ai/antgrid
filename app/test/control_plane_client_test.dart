@@ -5,7 +5,6 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart'
     show RpcException;
 import 'package:antgrid/services/control_plane_client.dart';
-import 'package:antgrid/services/session_delete_policy.dart';
 import 'package:antgrid/test_helpers/fake_agent_transport.dart';
 
 void main() {
@@ -437,65 +436,6 @@ void main() {
 
       await expectLater(
         () => client.listSessions('p1'),
-        throwsA(
-          isA<RpcException>().having((e) => e.code, 'code', 'NOT_ALLOWED'),
-        ),
-      );
-    });
-  });
-
-  group('deleteSession', () {
-    test(
-      'deleteSession sends sessions.delete and returns result.deleted',
-      () async {
-        final t = FakeAgentTransport();
-        final client = ControlPlaneClient(transport: t);
-        addTearDown(client.dispose);
-
-        t.requestHandler = (method, params) => {'deleted': true};
-
-        final ok = await client.deleteSession('projA', 's1');
-
-        expect(ok, isTrue);
-        expect(t.requests.single.method, 'sessions.delete');
-        expect(t.requests.single.params, {
-          'projectId': 'projA',
-          'sessionId': 's1',
-        });
-      },
-    );
-
-    // Removing an isolated checkout is unbounded work on the bridge, so this
-    // one verb must not inherit the transport's fast-read default; its siblings
-    // are ordinary reads and must keep it.
-    test(
-      'deleteSession overrides the transport timeout, siblings do not',
-      () async {
-        final t = FakeAgentTransport();
-        final client = ControlPlaneClient(transport: t);
-        addTearDown(client.dispose);
-
-        t.requestHandler = (method, params) =>
-            method == 'sessions.delete' ? {'deleted': true} : {'sessions': []};
-
-        await client.deleteSession('projA', 's1');
-        await client.listSessions('projA');
-
-        final byMethod = {for (final r in t.requests) r.method: r.timeout};
-        expect(byMethod['sessions.delete'], kSessionDeleteAckTimeout);
-        expect(byMethod['sessions.list'], isNot(kSessionDeleteAckTimeout));
-      },
-    );
-
-    test('propagates a NOT_ALLOWED RpcException on delete', () async {
-      final t = FakeAgentTransport();
-      final client = ControlPlaneClient(transport: t);
-      addTearDown(client.dispose);
-
-      t.requestHandler = (_, _) => throw RpcException('NOT_ALLOWED', 'no');
-
-      await expectLater(
-        () => client.deleteSession('projA', 's1'),
         throwsA(
           isA<RpcException>().having((e) => e.code, 'code', 'NOT_ALLOWED'),
         ),

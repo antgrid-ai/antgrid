@@ -9,7 +9,6 @@ enum ConnRung { wanted, coords, payload, established }
 /// terminal condition from being retried in a hot loop.
 enum BlockReason {
   licenseExpired, // unblocks: noteFreshToken()
-  sessionTakenOver, // unblocks: retry() only (prevents two-device ping-pong)
   peerRejected, // unblocks: explicit retry() after fresh authorization
   deviceRevoked, // unblocks: retry() (after re-provision)
   handshakeFailing, // unblocks: retry()

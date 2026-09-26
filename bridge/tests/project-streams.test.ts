@@ -58,7 +58,7 @@ function makeClient(opts: {
 describe("ProjectStreamRegistry (A4)", () => {
   test("row 1: the admitted open's first record is stream-ready; setPriority(0) runs once before the first write; a broadcast lands as a bare AbMessage", async () => {
     const { client } = makeClient();
-    client.establish(PEER_A, { capabilities: { checkoutRouting: true } });
+    client.establish(PEER_A);
     const bus = new MessageBus();
     client.attachStream(bus, { projectId: PROJECT });
 
@@ -76,7 +76,7 @@ describe("ProjectStreamRegistry (A4)", () => {
 
   test("row 2: an unsafe id is NOT_ALLOWED even when catalogued; an uncatalogued id is NOT_ALLOWED", async () => {
     const { client } = makeClient({ cataloged: new Set([PROJECT, "../evil"]) });
-    client.establish(PEER_A, { capabilities: { checkoutRouting: true } });
+    client.establish(PEER_A);
 
     const unsafe = await client.openProjectStream(PEER_A, "../evil");
     expect(unsafe.refusal()?.code).toBe("NOT_ALLOWED");
@@ -87,7 +87,7 @@ describe("ProjectStreamRegistry (A4)", () => {
 
   test("row 3: remoteAccessEnabled false at open is NOT_ALLOWED", async () => {
     const { client } = makeClient({ remoteAccessEnabled: () => false });
-    client.establish(PEER_A, { capabilities: { checkoutRouting: true } });
+    client.establish(PEER_A);
     const bus = new MessageBus();
     client.attachStream(bus, { projectId: PROJECT });
     const stream = await client.openProjectStream(PEER_A, PROJECT);
@@ -96,7 +96,7 @@ describe("ProjectStreamRegistry (A4)", () => {
 
   test("row 4: catalogued but unattached is NOT_READY then FIN and creates no core; the same open after attach is admitted", async () => {
     const { client } = makeClient();
-    client.establish(PEER_A, { capabilities: { checkoutRouting: true } });
+    client.establish(PEER_A);
 
     const before = await client.openProjectStream(PEER_A, PROJECT);
     expect(before.refusal()?.code).toBe("NOT_READY");
@@ -111,7 +111,7 @@ describe("ProjectStreamRegistry (A4)", () => {
 
   test("row 5: mayDeliver false at open is NOT_ALLOWED; flipped off after open gates both the next broadcast and the next addressed send", async () => {
     const { client } = makeClient();
-    client.establish(PEER_A, { capabilities: { checkoutRouting: true } });
+    client.establish(PEER_A);
     let allowed = false;
     const bus = new MessageBus();
     const handle = client.attachStream(bus, { projectId: PROJECT, mayDeliver: () => allowed });
@@ -134,7 +134,7 @@ describe("ProjectStreamRegistry (A4)", () => {
 
   test("row 6: authorized() flipping false on an open stream retires the peer through retirePeerConnection", async () => {
     const { client } = makeClient();
-    client.establish(PEER_A, { capabilities: { checkoutRouting: true } });
+    client.establish(PEER_A);
     const bus = new MessageBus();
     client.attachStream(bus, { projectId: PROJECT });
     let authorized = true;
@@ -152,7 +152,7 @@ describe("ProjectStreamRegistry (A4)", () => {
 
   test("row 6b: an inbound record while authorized() is false retires the connection instead of reaching the bus", async () => {
     const { client } = makeClient();
-    client.establish(PEER_A, { capabilities: { checkoutRouting: true } });
+    client.establish(PEER_A);
     const bus = new MessageBus();
     const received: unknown[] = [];
     bus.setInboundHandler((msg) => received.push(msg));
@@ -170,17 +170,15 @@ describe("ProjectStreamRegistry (A4)", () => {
     expect((client as unknown as { sessions: Map<string, unknown> }).sessions.has(PEER_A)).toBe(false);
   });
 
-  test("row 7: mid-stream staleness — flipping hasIsolatedSessions mutes the stale peer's broadcast and gates its addressed send, leaving the capable peer untouched", async () => {
+  test("row 7: mid-stream staleness — flipping a mayDeliverTo gate mutes one peer's broadcast and gates its addressed send, leaving the other untouched", async () => {
     const { client } = makeClient();
-    client.establish(PEER_A, { capabilities: { checkoutRouting: true } });
-    // checkoutRouting is `true` or absent on the wire (SessionHelloCapabilities
-    // is `z.literal(true).optional()`) — omitting it is how a hello declares false.
+    client.establish(PEER_A);
     client.establish(PEER_B);
-    let isolated = false;
+    let restricted = false;
     const bus = new MessageBus();
     const handle = client.attachStream(bus, {
       projectId: PROJECT,
-      mayDeliverTo: (peer: PeerSessionView) => !isolated || peer.checkoutRouting === true,
+      mayDeliverTo: (peer: PeerSessionView) => !restricted || peer.peerId === PEER_A,
     });
     const a = await client.openProjectStream(PEER_A, PROJECT);
     const b = await client.openProjectStream(PEER_B, PROJECT);
@@ -191,7 +189,7 @@ describe("ProjectStreamRegistry (A4)", () => {
     expect(a.read()).toEqual(first);
     expect(b.read()).toEqual(first);
 
-    isolated = true;
+    restricted = true;
     const second = createMessage("pong", {});
     bus.publish(second, "control");
     await flush();
@@ -202,33 +200,35 @@ describe("ProjectStreamRegistry (A4)", () => {
     expect(outcome).toBe("gated");
   });
 
-  test("row 8: a stale app with no checkoutRouting is refused UPDATE_REQUIRED at open", async () => {
+  test("row 8: a project-stream open for a peer the session provider does not know is refused NOT_ALLOWED (the §2.3 fail-closed check)", async () => {
     const { client } = makeClient();
-    // checkoutRouting is `true` or absent on the wire — omitting it declares false.
-    client.establish(PEER_A);
+    // Deliberately un-established: `admit()` calls `mayAcceptFrom` with
+    // whatever `peerSession(peerId)` returns, and PEER_A never ran a
+    // session:hello here, so that lookup is null — proving the fail-closed
+    // arm rather than the allowed one a real session would take.
     const bus = new MessageBus();
     client.attachStream(bus, {
       projectId: PROJECT,
-      mayAcceptFrom: (peer) => (peer?.checkoutRouting
-        ? null
-        : { code: "UPDATE_REQUIRED", message: "update the app to use this project's isolated sessions" }),
+      mayAcceptFrom: (peer) => (peer === null
+        ? { code: "NOT_ALLOWED", message: "no session for this peer" }
+        : null),
     });
     const stream = await client.openProjectStream(PEER_A, PROJECT);
     expect(stream.refusal()).toEqual({
-      code: "UPDATE_REQUIRED", message: "update the app to use this project's isolated sessions",
+      code: "NOT_ALLOWED", message: "no session for this peer",
     });
   });
 
   test("row 9: a peer that goes stale after open has its records dropped, with one rate-limited control:result notice on the session stream", async () => {
     const { client } = makeClient();
-    client.establish(PEER_A, { capabilities: { checkoutRouting: true } });
+    client.establish(PEER_A);
     let stale = false;
     const bus = new MessageBus();
     const received: unknown[] = [];
     bus.setInboundHandler((msg) => received.push(msg));
     client.attachStream(bus, {
       projectId: PROJECT,
-      mayAcceptFrom: () => (stale ? { code: "UPDATE_REQUIRED", message: "update the app" } : null),
+      mayAcceptFrom: () => (stale ? { code: "NOT_ALLOWED", message: "no longer allowed" } : null),
     });
     const stream = await client.openProjectStream(PEER_A, PROJECT);
     expect(stream.refusal()).toBeUndefined();
@@ -240,7 +240,7 @@ describe("ProjectStreamRegistry (A4)", () => {
     // The session stream carries bare AbMessages too — see the
     // handshake-pull.test.ts broadcast test.
     expect(client.readToPeer(PEER_A)).toMatchObject({
-      type: "control:result", ok: false, projectId: PROJECT, error: { code: "UPDATE_REQUIRED" },
+      type: "control:result", ok: false, projectId: PROJECT, error: { code: "NOT_ALLOWED" },
     });
 
     // Still stale, within the cooldown: no second notice queued.
@@ -250,7 +250,7 @@ describe("ProjectStreamRegistry (A4)", () => {
 
   test("row 10: deliverableTo(peer) is false before open, true after, false once mayDeliverTo mutes it, and false once the app FINs", async () => {
     const { client } = makeClient();
-    client.establish(PEER_A, { capabilities: { checkoutRouting: true } });
+    client.establish(PEER_A);
     let allowed = true;
     const bus = new MessageBus();
     const handle = client.attachStream(bus, { projectId: PROJECT, mayDeliverTo: () => allowed });
@@ -271,8 +271,8 @@ describe("ProjectStreamRegistry (A4)", () => {
 
   test("row 11: two peers on one project — an addressed reply reaches only its target, a broadcast reaches both, and A's FIN unbinds only A", async () => {
     const { client } = makeClient();
-    client.establish(PEER_A, { capabilities: { checkoutRouting: true } });
-    client.establish(PEER_B, { capabilities: { checkoutRouting: true } });
+    client.establish(PEER_A);
+    client.establish(PEER_B);
     const closed: string[] = [];
     const bus = new MessageBus();
     const handle = client.attachStream(bus, { projectId: PROJECT, onPeerStreamClosed: (id) => closed.push(id) });
@@ -301,7 +301,7 @@ describe("ProjectStreamRegistry (A4)", () => {
 
   test("row 12: an inbound record is dispatched as bus.dispatchInbound(msg, 'control', 'relay', peerId)", async () => {
     const { client } = makeClient();
-    client.establish(PEER_A, { capabilities: { checkoutRouting: true } });
+    client.establish(PEER_A);
     const bus = new MessageBus();
     const received: Array<{ msg: unknown; channel: Channel; source: string; peerId?: string }> = [];
     bus.setInboundHandler((msg, channel, source, peerId) => received.push({ msg, channel, source, peerId }));
@@ -315,7 +315,7 @@ describe("ProjectStreamRegistry (A4)", () => {
 
   test("row 13: a duplicate open for the same (peer, project) is INVALID; the 33rd concurrent project stream for one peer is CAP_EXCEEDED", async () => {
     const { client, cataloged } = makeClient();
-    client.establish(PEER_A, { capabilities: { checkoutRouting: true } });
+    client.establish(PEER_A);
     client.attachStream(new MessageBus(), { projectId: PROJECT });
 
     const first = await client.openProjectStream(PEER_A, PROJECT);
@@ -341,7 +341,7 @@ describe("ProjectStreamRegistry (A4)", () => {
   test("row 14: overflow resets only that stream and stops its receive half, leaves the peer's other project stream and the connection untouched, and fires onPeerStreamClosed", async () => {
     const { client, cataloged } = makeClient();
     cataloged.add("other");
-    client.establish(PEER_A, { capabilities: { checkoutRouting: true } });
+    client.establish(PEER_A);
     const closed: string[] = [];
     const bus = new MessageBus();
     client.attachStream(bus, { projectId: PROJECT, onPeerStreamClosed: (id) => closed.push(id) });
@@ -383,7 +383,7 @@ describe("ProjectStreamRegistry (A4)", () => {
 
   test("P1: a message over the app read cap is written as one record, never fragmented", async () => {
     const { client } = makeClient();
-    client.establish(PEER_A, { capabilities: { checkoutRouting: true } });
+    client.establish(PEER_A);
     const bus = new MessageBus();
     client.attachStream(bus, { projectId: PROJECT });
     const stream = await client.openProjectStream(PEER_A, PROJECT);
@@ -404,7 +404,7 @@ describe("ProjectStreamRegistry (A4)", () => {
   test("P2: a message over MAX_TRANSFER_BYTES is too-large, writes nothing and reports MESSAGE_TOO_LARGE", async () => {
     const errors: Array<{ code: string; message: string }> = [];
     const { client } = makeClient({ onError: (code, message) => errors.push({ code, message }) });
-    client.establish(PEER_A, { capabilities: { checkoutRouting: true } });
+    client.establish(PEER_A);
     const bus = new MessageBus();
     const handle = client.attachStream(bus, { projectId: PROJECT });
     const stream = await client.openProjectStream(PEER_A, PROJECT);
@@ -422,7 +422,7 @@ describe("ProjectStreamRegistry (A4)", () => {
 
   test("P2b: the too-large and not-ab-message diagnostics both carry streamKind:\"project\" and this project's own streamId, reaching netwatch", async () => {
     const { client } = makeClient();
-    client.establish(PEER_A, { capabilities: { checkoutRouting: true } });
+    client.establish(PEER_A);
     const bus = new MessageBus();
     const handle = client.attachStream(bus, { projectId: PROJECT });
     const stream = await client.openProjectStream(PEER_A, PROJECT);
@@ -445,7 +445,7 @@ describe("ProjectStreamRegistry (A4)", () => {
 
   test("P3: a 32 MiB record is written as slices, not as one array", async () => {
     const { client } = makeClient();
-    client.establish(PEER_A, { capabilities: { checkoutRouting: true } });
+    client.establish(PEER_A);
     const bus = new MessageBus();
     const handle = client.attachStream(bus, { projectId: PROJECT });
     const stream = await client.openProjectStream(PEER_A, PROJECT);
@@ -471,7 +471,7 @@ describe("ProjectStreamRegistry (A4)", () => {
 
   test("P4: an inbound __frag record is dropped, not buffered, and a normal verb right behind it still dispatches", async () => {
     const { client } = makeClient();
-    client.establish(PEER_A, { capabilities: { checkoutRouting: true } });
+    client.establish(PEER_A);
     const bus = new MessageBus();
     const received: unknown[] = [];
     bus.setInboundHandler((msg) => received.push(msg));
@@ -487,7 +487,7 @@ describe("ProjectStreamRegistry (A4)", () => {
 
   test("P5: an app record over STREAM_PROJECT_APP_RECORD_MAX_BYTES is a protocol violation and retires the connection", async () => {
     const { client } = makeClient();
-    client.establish(PEER_A, { capabilities: { checkoutRouting: true } });
+    client.establish(PEER_A);
     const bus = new MessageBus();
     client.attachStream(bus, { projectId: PROJECT });
     const stream = await client.openProjectStream(PEER_A, PROJECT);
@@ -503,8 +503,8 @@ describe("ProjectStreamRegistry (A4)", () => {
 
   test("row 15c: a peer whose writes are parked does not hold up another peer's copy of the same broadcast", async () => {
     const { client } = makeClient();
-    client.establish(PEER_A, { capabilities: { checkoutRouting: true } });
-    client.establish(PEER_B, { capabilities: { checkoutRouting: true } });
+    client.establish(PEER_A);
+    client.establish(PEER_B);
     const bus = new MessageBus();
     client.attachStream(bus, { projectId: PROJECT });
     const a = await client.openProjectStream(PEER_A, PROJECT);
@@ -524,7 +524,7 @@ describe("ProjectStreamRegistry (A4)", () => {
 
   test("row 16: a terminal-bound message falls back to the project stream with no terminal stream, and routes through routeTerminal once one is bound", async () => {
     const { client } = makeClient();
-    client.establish(PEER_A, { capabilities: { checkoutRouting: true } });
+    client.establish(PEER_A);
     const bus = new MessageBus();
     const routedCalls: Array<{ peerId: string; msg: AbMessage }> = [];
     let router: ((peerId: string, msg: AbMessage, signal?: AbortSignal) =>
@@ -550,8 +550,8 @@ describe("ProjectStreamRegistry (A4)", () => {
 
   test("row 17: detach() finishes every binding and fires projectDetached once, never onPeerStreamClosed", async () => {
     const { client } = makeClient();
-    client.establish(PEER_A, { capabilities: { checkoutRouting: true } });
-    client.establish(PEER_B, { capabilities: { checkoutRouting: true } });
+    client.establish(PEER_A);
+    client.establish(PEER_B);
     const detached: string[] = [];
     const closed: string[] = [];
     const bus = new MessageBus();
@@ -574,7 +574,7 @@ describe("ProjectStreamRegistry (A4)", () => {
 
   test("row 17b: dropPeer resets and stops the peer's binding without dispatching, awaiting, or firing onPeerStreamClosed", async () => {
     const { client } = makeClient();
-    client.establish(PEER_A, { capabilities: { checkoutRouting: true } });
+    client.establish(PEER_A);
     const closed: string[] = [];
     const bus = new MessageBus();
     client.attachStream(bus, { projectId: PROJECT, onPeerStreamClosed: (id) => closed.push(id) });
@@ -590,7 +590,7 @@ describe("ProjectStreamRegistry (A4)", () => {
 
   test("row 18: onPeerOnline fires at attach when a session exists; onPeerSessionGone/onPeerOffline are session-driven — opening or closing a project stream fires neither", async () => {
     const { client } = makeClient();
-    client.establish(PEER_A, { capabilities: { checkoutRouting: true } });
+    client.establish(PEER_A);
     const events: string[] = [];
     const bus = new MessageBus();
     client.attachStream(bus, {

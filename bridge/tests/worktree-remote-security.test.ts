@@ -7,7 +7,7 @@ import { createHostPolicyFixture } from "./host-policy-fixture";
 // `sessions.create` control-plane verb); the path/branch gates live inside
 // WorktreeManager. Both halves are asserted here.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { HostServer, type HostRemoteConfig, type RemoteRuntime } from "../src/host-server";
@@ -71,19 +71,6 @@ describe("remote isolated-session security", () => {
     (host as any).seenProjects.set(projectId, { path, label: projectId });
   }
 
-  /** Write a persisted session store for a cold project. */
-  function seedManagedSession(projectId: string): void {
-    const dir = join(abDir, "agents", projectId);
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, "sessions.json"), JSON.stringify({
-      version: 1,
-      sessions: [{
-        id: "s1", name: "Isolated", createdAt: 1, lastUsedAt: 1, archived: false,
-        checkoutId: "checkout-1", checkoutKind: "managed-worktree",
-      }],
-    }));
-  }
-
   test("gate 1: the machine remote-access switch is checked before any core exists", async () => {
     const projectId = computeProjectId(repo);
     seedCatalog(projectId, repo);
@@ -105,28 +92,6 @@ describe("remote isolated-session security", () => {
     );
     expect(res).toMatchObject({ ok: false, error: { code: "UNKNOWN_PROJECT" } });
     expect(host!.list()).toHaveLength(0);
-  });
-
-  test("gate 3: a peer without checkoutRouting cannot start a project holding a managed session", async () => {
-    await host!.handleRemoteAccessVerb({ id: "t", type: "mobile-access:set", enabled: true });
-    const projectId = computeProjectId(repo);
-    seedCatalog(projectId, repo);
-    seedManagedSession(projectId);
-
-    const res = await host!.handleControlPlaneVerb(
-      { type: "project:start", projectId } as never,
-      new MessageBus(),
-    );
-    expect(res).toMatchObject({ ok: false, error: { code: "UPDATE_REQUIRED" } });
-    expect(host!.get(projectId)).toBeNull();
-
-    // ...and the same project is advertised `running: false` (A4: a project
-    // stream is admitted by projectId alone, off Hazard J's stream-ready
-    // notice — there is no separate dialable id to withhold any more), so an
-    // old app has nothing that tells it to open one.
-    const advert = host!.buildProjectsAdvertisement().find((p) => p.projectId === projectId);
-    expect(advert).toBeDefined();
-    expect(advert?.running).toBe(false);
   });
 
   test("catalog ids are always path-segment safe, so seenProjects cannot smuggle traversal", () => {

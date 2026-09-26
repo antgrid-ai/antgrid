@@ -374,69 +374,6 @@ test("a configured terminal in a managed checkout is attributed to that checkout
   )).toBe(true);
 });
 
-test("a retired terminal snapshot request returns one checkout-scoped upgrade error", async () => {
-  await initRepo();
-  const { bus, sent } = await startWithIsolatedSession();
-  // cwd deliberately outside the project: on Windows a live PTY holds its own
-  // cwd open and the fixture's teardown rm would hit EBUSY.
-  bus.dispatchInbound(
-    createMessage("terminal:start", { terminalId: "adhoc", cwd: tmpdir() }),
-    "control",
-    "loopback",
-  );
-  await waitFor(sent, (message) =>
-    message.type === "terminal:started" && message.terminalId === "adhoc",
-  );
-  sent.length = 0;
-
-  bus.dispatchInbound(
-    createMessage("terminal:snapshot:request", { terminalId: "adhoc" }),
-    "control",
-    "loopback",
-  );
-  const reply = await waitFor(sent, (message) => message.type === "terminal:display:status");
-  expect(reply).toMatchObject({ code: "UPGRADE_REQUIRED", checkoutId: "main" });
-  await new Promise((resolve) => setTimeout(resolve, 100));
-  expect(sent.filter((message) => message.type === "terminal:display:status").length).toBe(1);
-  expect(sent.filter((message) => message.type === "terminal:snapshot")).toEqual([]);
-});
-
-test("a terminal.snapshot RPC is answered once, with no broadcast alongside it", async () => {
-  await initRepo();
-  const { bus, sent } = await startWithIsolatedSession();
-  // cwd deliberately outside the project: on Windows a live PTY holds its own
-  // cwd open and the fixture's teardown rm would hit EBUSY.
-  bus.dispatchInbound(
-    createMessage("terminal:start", { terminalId: "adhoc", cwd: tmpdir() }),
-    "control",
-    "loopback",
-  );
-  await waitFor(sent, (message) =>
-    message.type === "terminal:started" && message.terminalId === "adhoc",
-  );
-  sent.length = 0;
-
-  const requestId = crypto.randomUUID();
-  bus.dispatchInbound(
-    createMessage("request", { requestId, method: "terminal.snapshot", params: { terminalId: "adhoc" } }),
-    "control",
-    "loopback",
-  );
-  await waitFor(sent, (message) =>
-    message.type === "response" && (message as { requestId?: string }).requestId === requestId,
-  );
-  // Same isolation concern as the message-path test above: every runtime sees
-  // the inbound frame, so the guard has to short-circuit before the isolated
-  // runtime serializes anything, and the reply must never fan out a second
-  // `terminal:snapshot` broadcast that an old app on the same bus would apply
-  // over its own history claim.
-  await new Promise((resolve) => setTimeout(resolve, 400));
-  expect(sent.filter((message) =>
-    message.type === "response" && (message as { requestId?: string }).requestId === requestId,
-  ).length).toBe(1);
-  expect(sent.filter((message) => message.type === "terminal:snapshot")).toEqual([]);
-});
-
 /** Dispatch `fire` from inside the very delivery of the first `session:updated`
  *  that carries `deleting: true`, then run the isolated session's delete to
  *  completion. Dispatching from the subscriber removes the scheduler gap, so the
@@ -642,21 +579,16 @@ test.skipIf(process.platform === "win32")(
   20000,
 );
 
-test("admit refuses UPDATE_REQUIRED for a non-routing peer while isolated sessions exist, NOT_ALLOWED for an unknown checkout, and admits a routing peer to the checkout runtime's own manager", async () => {
-  // Tunnel streams bypass the bus, so the per-device capability check the bus
-  // dispatch makes had to be restated on admit: a preview body IS a checkout's
-  // dev server rendered verbatim, and a device that may not address a checkout
-  // must not be handed one's page instead of a refusal.
+test("admit refuses NOT_ALLOWED for an unknown checkout, and admits a known peer to the checkout runtime's own manager", async () => {
+  // Tunnel streams bypass the bus, so the per-device admission check has to be
+  // restated here: a preview body IS a checkout's dev server rendered
+  // verbatim, and a checkout id that does not resolve must not be handed a
+  // page instead of a refusal.
   await initRepo();
   const { bus, sent } = await bootCore(true);
   const session = await createSession(bus, sent, "Isolated", "worktree");
 
-  core!.setPeerSessionProvider((peerId) => ({
-    peerId, peerPubkey: "pub-app", checkoutRouting: peerId === "modern-peer", pullsTree: false,
-  }));
-
-  const nonRouting = core!.tunnelStreams.admit("stale-peer", session.checkoutId);
-  expect(nonRouting).toMatchObject({ ok: false, refusal: { code: "UPDATE_REQUIRED" } });
+  core!.setPeerSessionProvider((peerId) => ({ peerId, peerPubkey: "pub-app" }));
 
   const unknownCheckout = core!.tunnelStreams.admit("modern-peer", "not-a-real-checkout");
   expect(unknownCheckout).toMatchObject({ ok: false, refusal: { code: "NOT_ALLOWED" } });
@@ -692,7 +624,7 @@ test("a relay-origin file:upload-local is dropped with a warning, while the iden
   expect(result).toMatchObject({ type: "file:upload-result", ok: true });
 });
 
-test("uploadStreams.admit refuses NOT_ALLOWED with the switch off, UPDATE_REQUIRED for a non-routing peer, NOT_ALLOWED for an unknown checkout, and admits a routing peer to the checkout runtime's own manager", async () => {
+test("uploadStreams.admit refuses NOT_ALLOWED with the switch off, NOT_ALLOWED for an unknown checkout, and admits a peer to the checkout runtime's own manager", async () => {
   await initRepo();
 
   core = await buildAgentCore({
@@ -710,7 +642,7 @@ test("uploadStreams.admit refuses NOT_ALLOWED with the switch off, UPDATE_REQUIR
   await waitFor(switchOffSent, (message) => message.type === "agent:status");
   // remoteFrameAllowed reads the switch only once a relay peer session
   // provider is wired — an unwired core answers to no switch at all.
-  core.setPeerSessionProvider((peerId) => ({ peerId, peerPubkey: "pub-app", checkoutRouting: true, pullsTree: false }));
+  core.setPeerSessionProvider((peerId) => ({ peerId, peerPubkey: "pub-app" }));
   const switchOffResult = await core.uploadStreams.admit("any-peer", "main");
   expect(switchOffResult).toMatchObject({ ok: false, refusal: { code: "NOT_ALLOWED" } });
   await core.shutdown();
@@ -719,12 +651,7 @@ test("uploadStreams.admit refuses NOT_ALLOWED with the switch off, UPDATE_REQUIR
   const { bus, sent } = await bootCore(true);
   const session = await createSession(bus, sent, "Isolated", "worktree");
 
-  core!.setPeerSessionProvider((peerId) => ({
-    peerId, peerPubkey: "pub-app", checkoutRouting: peerId === "modern-peer", pullsTree: false,
-  }));
-
-  const nonRouting = await core!.uploadStreams.admit("stale-peer", session.checkoutId);
-  expect(nonRouting).toMatchObject({ ok: false, refusal: { code: "UPDATE_REQUIRED" } });
+  core!.setPeerSessionProvider((peerId) => ({ peerId, peerPubkey: "pub-app" }));
 
   const unknownCheckout = await core!.uploadStreams.admit("modern-peer", "not-a-real-checkout");
   expect(unknownCheckout).toMatchObject({ ok: false, refusal: { code: "NOT_ALLOWED" } });

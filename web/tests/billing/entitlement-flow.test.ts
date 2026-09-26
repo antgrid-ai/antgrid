@@ -88,7 +88,6 @@ describe("paddle webhook → entitlement", () => {
       body: JSON.stringify({
         deviceUuid: crypto.randomUUID(),
         ed25519Pub: pub,
-        x25519Pub: Buffer.alloc(32, 0xcd).toString("base64"),
         platform: "macos",
         displayName: "dave's mac",
       }),
@@ -121,7 +120,6 @@ async function mintAgentClaims(
     body: JSON.stringify({
       deviceUuid: crypto.randomUUID(),
       ed25519Pub: Buffer.alloc(32, 0x11).toString("base64"),
-      x25519Pub: Buffer.alloc(32, 0x22).toString("base64"),
       platform: "linux",
       displayName: "member's box",
     }),

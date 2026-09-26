@@ -251,12 +251,12 @@ void main() {
     expect(relay.connectedMachineId, _machine);
 
     // QUIC/TLS between lease-authorized endpoints is the confidentiality layer
-    // now, so the native hello carries capabilities only — no transcript, no
-    // signature, nothing naming the connection DeviceRecord at all.
+    // now, so the native hello carries only a type and an attemptId — no
+    // capabilities, no transcript, no signature, nothing naming the
+    // connection DeviceRecord at all.
     final hello = relay.helloFrames().single;
-    expect(hello['type'], 'session:hello');
     expect(hello['attemptId'], isA<String>());
-    expect(hello['capabilities'], kSessionHelloCapabilities);
+    expect(hello, {'type': 'session:hello', 'attemptId': hello['attemptId']});
   }, timeout: const Timeout(Duration(seconds: 30)));
 
   test(

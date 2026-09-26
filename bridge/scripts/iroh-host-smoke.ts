@@ -70,7 +70,7 @@ try {
   };
   // QUIC/TLS between the lease-authorized endpoints is the confidentiality
   // layer post Stage-B; the hello is plaintext and carries no transcript.
-  await sendHello({ type: "session:hello", attemptId, capabilities: { checkoutRouting: true, pullsTree: true, terminalFramesV1: true } });
+  await sendHello({ type: "session:hello", attemptId });
   await read((value) => value.type === "session:established" && value.attemptId === attemptId);
   await send({ type: "session:ping" });
   await read((value) => value.type === "session:pong");

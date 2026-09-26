@@ -1220,50 +1220,6 @@ class ClientFocusStateMessage {
   });
 }
 
-class TerminalSnapshotRequestMessage {
-  final String id;
-  final int timestamp;
-  final String terminalId;
-
-  const TerminalSnapshotRequestMessage({
-    required this.id,
-    required this.timestamp,
-    required this.terminalId,
-  });
-}
-
-class TerminalSnapshotMessage {
-  final String id;
-  final int timestamp;
-  final String terminalId;
-  final String scrollback;
-  final int seq;
-
-  /// Whether [scrollback] is a COMPLETE attach sequence — preamble, serialized
-  /// screen, supplemental modes — to be applied verbatim with nothing prepended
-  /// or appended. False (an older agent) means it is a mode prelude plus a raw
-  /// byte tail, and the client must place its own erase.
-  final bool composed;
-
-  /// Whether [scrollback] carries history ABOVE the screen, behind a `3J`
-  /// that erases what the engine already holds.
-  ///
-  /// A reply is broadcast to every client on the project, so this frame may
-  /// be the answer to a DIFFERENT device's cold attach. Only the client that
-  /// asked has an empty engine; for anyone else the erase is pure loss.
-  final bool history;
-
-  const TerminalSnapshotMessage({
-    required this.id,
-    required this.timestamp,
-    required this.terminalId,
-    required this.scrollback,
-    required this.seq,
-    this.composed = false,
-    this.history = false,
-  });
-}
-
 class FileTreeSnapshotRequestMessage {
   final String id;
   final int timestamp;
@@ -2120,36 +2076,6 @@ Object? parseAbMessage(Map<String, dynamic> json) {
         id: id,
         timestamp: timestamp,
         paused: paused,
-      );
-
-    case 'terminal:snapshot:request':
-      final terminalId = json['terminalId'];
-      if (terminalId is! String) return null;
-      return TerminalSnapshotRequestMessage(
-        id: id,
-        timestamp: timestamp,
-        terminalId: terminalId,
-      );
-
-    case 'terminal:snapshot':
-      final terminalId = json['terminalId'];
-      final scrollback = json['scrollback'];
-      final seq = json['seq'];
-      if (terminalId is! String || scrollback is! String || seq is! int) {
-        return null;
-      }
-      return TerminalSnapshotMessage(
-        id: id,
-        timestamp: timestamp,
-        terminalId: terminalId,
-        scrollback: scrollback,
-        seq: seq,
-        // Anything but a literal `true` reads false, which selects the legacy
-        // branch — the one that is safe against a blob it cannot interpret.
-        composed: json['composed'] == true,
-        // Same conservative read as `composed`: anything but a literal
-        // `true` is a blob that erases nothing above the screen.
-        history: json['history'] == true,
       );
 
     case 'terminal:subscribed':

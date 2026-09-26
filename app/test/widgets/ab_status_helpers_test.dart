@@ -17,10 +17,6 @@ void main() {
       blockReasonPresentation(BlockReason.handshakeFailing).interruptsWorkspace,
       isFalse,
     );
-    expect(
-      blockReasonPresentation(BlockReason.sessionTakenOver).interruptsWorkspace,
-      isTrue,
-    );
   });
 
   group('sessionRefusalCopy', () {

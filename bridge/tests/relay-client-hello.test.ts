@@ -8,8 +8,11 @@ import { buildHelloSigBody, normalizeRelayHost } from "antgrid-wire";
 import { CentralControlClient } from "../src/central-control-client";
 import { MessageBus } from "../src/message-bus";
 import { rawSeedToPkcs8 } from "../src/ed25519-pkcs8";
-import { ED25519_SPKI_PREFIX } from "../src/ed25519-der";
 import vector from "../../evals/fixtures/relay-hello-vector.json";
+
+// The fixed 12-byte SubjectPublicKeyInfo prefix for a raw 32-byte Ed25519 key
+// (DER: SEQUENCE { SEQUENCE { OID 1.3.101.112 }, BIT STRING }).
+const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
 
 function verifyEd25519(data: Uint8Array, pubB64: string, sigB64: string): boolean {
   const spki = Buffer.concat([ED25519_SPKI_PREFIX, Buffer.from(pubB64, "base64")]);

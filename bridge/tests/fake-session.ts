@@ -17,10 +17,7 @@ export function installFakeSession(
   const session: Record<string, unknown> = {
     attemptId: "a1",
     peerId,
-    checkoutRouting: false,
     unreachableSince: 0,
-    pullsTree: false,
-    terminalFramesV1: false,
     ...over,
   };
   c.sessions.set(peerId, session);

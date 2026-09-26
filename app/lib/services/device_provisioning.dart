@@ -77,7 +77,6 @@ class DeviceProvisioning {
     final created = await api.createDevice(
       deviceUuid: deviceUuid,
       ed25519Pub: keys.ed25519PubBase64,
-      x25519Pub: keys.x25519PubBase64,
       platform: platform,
       displayName: displayName,
       // Overrides the platform derivation, which would make a desktop an
@@ -159,7 +158,6 @@ class DeviceProvisioning {
     final created = await api.createDevice(
       deviceUuid: deviceUuid,
       ed25519Pub: keys.ed25519PubBase64,
-      x25519Pub: keys.x25519PubBase64,
       platform: platform,
       displayName: displayName,
     );

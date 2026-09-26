@@ -7,7 +7,6 @@ import {
   createTestSubscription,
   addTestMember,
 } from "../helpers/fixtures.js";
-import { listAppDeviceKeys } from "../../src/models/device.js";
 
 let pg: PgHandle;
 beforeAll(async () => {
@@ -30,7 +29,6 @@ describe("POST /account/devices", () => {
     const body = {
       deviceUuid: crypto.randomUUID(),
       ed25519Pub: Buffer.alloc(32, 1).toString("base64"),
-      x25519Pub: Buffer.alloc(32, 2).toString("base64"),
       platform: "macos",
       displayName: "Alice's Mac",
     };
@@ -62,7 +60,6 @@ describe("POST /account/devices", () => {
     const body = {
       deviceUuid: crypto.randomUUID(),
       ed25519Pub: Buffer.alloc(32, 1).toString("base64"),
-      x25519Pub: Buffer.alloc(32, 2).toString("base64"),
       platform: "macos",
       displayName: "Alice's Mac",
     };
@@ -98,7 +95,6 @@ describe("POST /account/devices", () => {
     const phone = {
       deviceUuid: crypto.randomUUID(),
       ed25519Pub: phonePub.toString("base64"),
-      x25519Pub: Buffer.alloc(32, 8).toString("base64"),
       platform: "ios",
       displayName: "Alice's iPhone",
     };
@@ -114,8 +110,11 @@ describe("POST /account/devices", () => {
 
     // The end the kind serves: a phone's key must reach the same-account
     // membership peer set (else its control-plane auto-pair is rejected).
-    const keys = await listAppDeviceKeys(pg.db, user.id);
-    expect(keys.map((k) => k.toString("base64"))).toContain(phonePub.toString("base64"));
+    const rows = await pg.db.device.findMany({
+      where: { userId: user.id, kind: "app", revokedAt: null },
+      select: { publicKey: true },
+    });
+    expect(rows.map((r) => Buffer.from(r.publicKey).toString("base64"))).toContain(phonePub.toString("base64"));
   });
 
   test("provisions a desktop (macos/windows/linux) as kind 'agent'", async () => {
@@ -131,7 +130,6 @@ describe("POST /account/devices", () => {
       body: JSON.stringify({
         deviceUuid,
         ed25519Pub: Buffer.alloc(32, 1).toString("base64"),
-        x25519Pub: Buffer.alloc(32, 2).toString("base64"),
         platform: "windows",
         displayName: "Alice's PC",
       }),
@@ -140,6 +138,25 @@ describe("POST /account/devices", () => {
 
     const dev = await pg.db.device.findFirst({ where: { deviceId: deviceUuid } });
     expect(dev?.kind).toBe("agent");
+  });
+
+  test("registers without x25519Pub", async () => {
+    const { app } = buildTestApp(pg.db, pg.url);
+    const user = await createTestUser(pg.db, "no-x25519@example.com");
+    const { cookie } = await createTestSession(pg.db, user.id);
+    await createTestSubscription(pg.db, user.id, { tier: "pro" });
+
+    const res = await app.request("/account/devices", {
+      method: "POST",
+      headers: { cookie, "content-type": "application/json" },
+      body: JSON.stringify({
+        deviceUuid: crypto.randomUUID(),
+        ed25519Pub: Buffer.alloc(32, 1).toString("base64"),
+        platform: "macos",
+        displayName: "No push key",
+      }),
+    });
+    expect(res.status).toBe(201);
   });
 
   test("rejects requests without a session cookie", async () => {
@@ -165,7 +182,6 @@ describe("POST /account/devices", () => {
       body: JSON.stringify({
         deviceUuid: crypto.randomUUID(),
         ed25519Pub: Buffer.alloc(32, 1).toString("base64"),
-        x25519Pub: Buffer.alloc(32, 2).toString("base64"),
         platform: "linux",
         displayName: "Bob's box",
       }),
@@ -186,7 +202,6 @@ describe("POST /account/devices", () => {
         body: JSON.stringify({
           deviceUuid: crypto.randomUUID(),
           ed25519Pub: Buffer.alloc(32, i + 1).toString("base64"),
-          x25519Pub: Buffer.alloc(32, i + 10).toString("base64"),
           platform: "ios",
           displayName: `Phone ${i + 1}`,
         }),
@@ -200,7 +215,6 @@ describe("POST /account/devices", () => {
       body: JSON.stringify({
         deviceUuid: crypto.randomUUID(),
         ed25519Pub: Buffer.alloc(32, 99).toString("base64"),
-        x25519Pub: Buffer.alloc(32, 98).toString("base64"),
         platform: "android",
         displayName: "One too many",
       }),
@@ -224,7 +238,6 @@ function registerBody(overrides: Record<string, unknown> = {}) {
   return {
     deviceUuid: crypto.randomUUID(),
     ed25519Pub: Buffer.alloc(32, seed % 251).toString("base64"),
-    x25519Pub: Buffer.alloc(32, (seed + 97) % 251).toString("base64"),
     platform: "linux",
     displayName: `Device ${seed}`,
     ...overrides,

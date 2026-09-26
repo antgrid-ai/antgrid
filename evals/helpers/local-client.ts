@@ -11,13 +11,12 @@ export class LocalTestClient {
   private listeners = new Set<(msg: AbMessage, channel: string) => void>();
 
   /** `capabilities` mirrors the desktop app's hello envelope — a loopback owner
-   *  only receives session-bus frames once it declares itself the carrier. It
-   *  OVERLAYS the defaults rather than replacing them (the app's own map
-   *  replaces), because a test that wants one extra capability never means to
-   *  give up checkout routing. */
+   *  only receives session-bus frames once it declares itself the carrier
+   *  (`sessionBusCarrier: true`). Omitted entirely, the hello has no
+   *  `capabilities` key, which is a valid non-carrier owner. */
   async connect(
     disc: LocalConnectInfo,
-    opts: { pullsTree?: boolean; terminalFramesV1?: boolean; capabilities?: Record<string, unknown> } = {},
+    opts: { capabilities?: Record<string, unknown> } = {},
   ): Promise<void> {
     this.ws = new WebSocket(`ws://127.0.0.1:${disc.port}`);
     await new Promise<void>((resolve, reject) => {
@@ -43,14 +42,7 @@ export class LocalTestClient {
 
     this.ws.send(JSON.stringify({
       type: "hello", token: disc.token, appPid: process.pid, appVersion: "eval",
-      // checkoutRouting always: a core holding managed sessions force-closes an
-      // owner without it on the next session:updated (project-core.ts).
-      capabilities: {
-        checkoutRouting: true,
-        ...(opts.pullsTree === false ? {} : { pullsTree: true }),
-        ...(opts.terminalFramesV1 === false ? {} : { terminalFramesV1: true }),
-        ...opts.capabilities,
-      },
+      ...(opts.capabilities ? { capabilities: opts.capabilities } : {}),
     }));
     await readyPromise;
   }

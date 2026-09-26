@@ -13,7 +13,7 @@
  * plan files don't bury real hits. Pass --all to search every tracked file.
  *
  * Replaces the dozens of one-off `rg "Foo\b" path/to/one/file.ts` invocations:
- * cross-package symbols (RelayClient, dispatchInbound, deviceUuid, enableRelay,
+ * cross-package symbols (RelayClient, dispatchInbound, deviceUuid, checkoutId,
  * attachTransport …) live in TS on one side and are mirrored by hand in Dart on
  * the other, so a single whole-repo, word-boundary search beats guessing files.
  *

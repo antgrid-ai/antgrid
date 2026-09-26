@@ -39,7 +39,6 @@ import 'providers.dart';
 import 'recent_agents.dart';
 import 'relay_connection.dart';
 import 'peer_runtime.dart';
-import 'relay_error_banner.dart';
 import 'value_controller.dart';
 
 final selectedTargetProvider =
@@ -534,9 +533,9 @@ Future<AgentTransport?> _buildLocalTransportFor(
   // parallel `openFolder()` calls against the agent's single-owner socket
   // lock — symptom: `LocalTransport` reports "socket closed before ready"
   // because the new WS opens while the old one is still half-closed.
-  // We also deliberately do not watch `hostDeviceUuid`: a relay-promotion
-  // flow updates it via `upsert`, and a watcher there would dispose the
-  // very transport that is driving the flow.
+  // We also deliberately do not watch `hostDeviceUuid`: `ProjectsNotifier.rehost`
+  // updates it via `upsert` when this device's persisted host identity moves,
+  // and a watcher here would dispose the very transport driving that project.
   final folder = ref.watch(
     projectsProvider.select((projects) {
       for (final p in projects) {
@@ -611,20 +610,6 @@ Future<AgentTransport?> _buildLocalTransportFor(
     }
   });
   ref.onDispose(eventSub.cancel);
-
-  // Parallel listener for agent:relayError → inline AbBanner. Unlike the
-  // mobileEnabled-only sub below, this one fires for every project mode so
-  // any runtime relay error surfaces above the workspace body instead of
-  // being swallowed.
-  final errSub = result.transport.messages.listen((m) {
-    if (m.json['type'] != 'agent:relayError') return;
-    final code = (m.json['code'] as String?) ?? 'UNKNOWN';
-    final msg = (m.json['message'] as String?) ?? '';
-    ref
-        .read(relayErrorBannerProvider.notifier)
-        .set(RelayErrorBanner(code, msg));
-  });
-  ref.onDispose(errSub.cancel);
 
   // The one consumer of a LocalTransport's post-ready teardown: a 4409
   // (another app superseded ownership) or any other close leaves the

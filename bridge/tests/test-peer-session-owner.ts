@@ -229,17 +229,13 @@ export class TestPeerSessionOwner extends PeerSessionOwner {
    *  `injectPeerPayload`/`sendFromPeer` directly instead, since this seam only
    *  speaks for a hello that succeeds. */
   establish(peerId: string, opts: {
-    capabilities?: { checkoutRouting?: boolean; pullsTree?: boolean; terminalFramesV1?: boolean };
     identity?: PeerIdentity;
     attemptId?: string;
   } = {}): { attemptId: string; identity: PeerIdentity } {
     const identity = opts.identity ?? ed25519Pair();
     const attemptId = opts.attemptId ?? `attempt-${peerId}-${++establishCounter}`;
     this.admitPeer(peerId, identity.pubB64);
-    this.sendFromPeer(peerId, {
-      type: "session:hello", attemptId,
-      ...(opts.capabilities ? { capabilities: opts.capabilities } : {}),
-    });
+    this.sendFromPeer(peerId, { type: "session:hello", attemptId });
     const session = this.sessions.get(peerId);
     if (!session || session.attemptId !== attemptId) {
       throw new Error(`establish(${peerId}): session:hello did not promote to an established session`);

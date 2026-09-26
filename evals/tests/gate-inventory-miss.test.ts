@@ -125,11 +125,7 @@ test("an endpoint absent from the lease is refused at accept, and admitted once 
           if (predicate(value)) return value;
         }
       };
-      await sendSession({
-        type: "session:hello",
-        attemptId,
-        capabilities: { checkoutRouting: true, pullsTree: true, terminalFramesV1: true },
-      });
+      await sendSession({ type: "session:hello", attemptId });
       await read((value) => value.type === "session:established" && value.attemptId === attemptId);
 
       const requestId = "gate-inventory-miss-baseline";

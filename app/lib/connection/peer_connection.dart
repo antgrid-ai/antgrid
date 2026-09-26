@@ -101,13 +101,6 @@ class PeerConnectionMechanisms implements PeerConnectionContract {
   /// the native ladder (a token mint the account rejected) is retried on the 30s cap
   /// forever and the caller waiting on the session sees only a timeout.
 
-  /// The agent handed this machine's session to another device
-  /// (`session:takeover`). Wired by `MachineConnection` to the supervisor's
-  /// `noteSessionTakenOver`; unset until then.
-  ///
-  /// Without it the ladder would see only "session down", re-handshake, and the
-  /// two devices would evict each other forever.
-
   /// The [MachineSession] was REPLACED (not merely torn down) because a redial
   /// produced a new payload link. Wired by `MachineConnection` to its
   /// `sessionReplacements` stream.
@@ -302,8 +295,8 @@ class PeerConnectionMechanisms implements PeerConnectionContract {
     final existing = _session;
     if (existing != null) {
       if (identical(_sessionLink, payloadLink)) return existing;
-      // Dispose first so nothing from the old session (its streams, its
-      // generation fence) outlives the link it was derived on.
+      // Dispose first so nothing from the old session (its streams) outlives
+      // the link it was derived on.
       _session = null;
       _sessionLink = null;
       await _payloadDownSub?.cancel();
@@ -326,9 +319,6 @@ class PeerConnectionMechanisms implements PeerConnectionContract {
           createAbMessage('project:start', {'projectId': projectId}),
       logger: _logMachineSession,
     );
-    session.takeoverEvents.listen((_) {
-      _emit(const PeerSessionTakenOver());
-    });
     session.sessionDownEvents.listen((_) {
       _emit(const PeerSessionDown());
     });

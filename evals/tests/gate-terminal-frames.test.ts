@@ -1,7 +1,6 @@
 // Terminal-frame mode end to end, over a real relay and a real agent (see
 // docs/terminal-frame-implementation-plan.md, "Validation and release gates").
-// A frame-capable viewer (`env.app`) negotiates `terminalFramesV1` in its
-// `session:hello` capabilities (the harness default), then opts a specific
+// Every viewer renders frames unconditionally now; `env.app` opts a specific
 // terminal into the protocol with `terminal:subscribe` — everything here rides
 // the firstProject STREAM (`sendOnStream`), never the control plane.
 //

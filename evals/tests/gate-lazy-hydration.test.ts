@@ -1,8 +1,6 @@
 // D-B4 end to end: a client that pulls its own file tree
 // (`file:tree:snapshot:request`) must not also receive the bridge's resync
-// tree:full push, while everything else the resync re-sends still arrives; a
-// client that does NOT advertise pulling it keeps getting the push (legacy
-// path preserved).
+// tree:full push, while everything else the resync re-sends still arrives.
 //
 // Only a LOOPBACK owner hello triggers `resyncState` (see D-B4's brief, §0a) —
 // a relay stream attach or re-handshake runs no resync at all. So the trigger
@@ -75,10 +73,9 @@ async function waitFor(predicate: () => boolean, what: string, timeoutMs: number
   throw new Error(`timed out waiting for ${what}`);
 }
 
-test("a pulling client is not re-sent the tree on resync, but a non-pulling one still is", async () => {
+test("a pulling client is not re-sent the tree on resync", async () => {
   const env = await setupTestEnv({ fixtureName: "basic", prepareProject: initRepo });
   let local: LocalTestClient | null = null;
-  let legacy: LocalTestClient | null = null;
   try {
     const { streamId } = await bindFirstProject(env.app, env.projectId);
     const one = await createIsolated(env.app, streamId, "one");
@@ -95,7 +92,7 @@ test("a pulling client is not re-sent the tree on resync, but a non-pulling one 
     const seen: AbMessage[] = [];
     local = new LocalTestClient();
     local.on((m) => seen.push(m));
-    await local.connect(conn); // pullsTree defaults on.
+    await local.connect(conn);
 
     // Wait for the resync's POSITIVE evidence (git:sync-state is forced per
     // runtime, ahead of the tree loop in program order) before trusting the
@@ -141,29 +138,8 @@ test("a pulling client is not re-sent the tree on resync, but a non-pulling one 
 
     // Widen row 1's negative window cheaply now that more time has passed.
     expect(seen.filter((m) => m.type === "tree:full")).toHaveLength(0);
-
-    // --- Row 3: a client that does NOT advertise pullsTree still gets the ---
-    // --- legacy push (this owner supersedes `local`, firing a fresh resync). ---
-    const legacySeen: AbMessage[] = [];
-    legacy = new LocalTestClient();
-    legacy.on((m) => legacySeen.push(m));
-    await legacy.connect(conn, { pullsTree: false });
-
-    await waitFor(
-      () => new Set(
-        legacySeen.filter((m) => m.type === "tree:full").map((m: any) => m.checkoutId),
-      ).size >= checkoutIds.length,
-      "a tree:full per checkout",
-      30_000,
-    );
-    // A concurrent filesystem change could add an extra tree:full for a
-    // checkout at any moment, so this asserts the SET of checkouts covered,
-    // never an exact frame count.
-    expect(new Set(legacySeen.filter((m) => m.type === "tree:full").map((m: any) => m.checkoutId)))
-      .toEqual(new Set(checkoutIds));
   } finally {
     local?.close();
-    legacy?.close();
     await env.teardown();
   }
 }, 180_000);

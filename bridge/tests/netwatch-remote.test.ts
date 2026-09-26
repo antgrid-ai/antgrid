@@ -93,8 +93,10 @@ function makeClient(onMessage?: (m: AbMessage) => void): TestPeerSessionOwner {
       ed25519PublicKey: "pk",
       ed25519PrivateKey: "sk",
     },
-    onMessage,
   });
+  // Anything forwarded past the ingest lands on the bus, so a spy there is
+  // what "never forwarded" is measured against.
+  if (onMessage) (c as any).bus = { dispatchInbound: (m: AbMessage) => onMessage(m) };
   installFakeSession(c, "phone-1");
   (c as any).ws = { readyState: WebSocket.OPEN, send: () => {}, close: () => {} };
   return c;

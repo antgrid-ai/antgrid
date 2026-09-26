@@ -437,10 +437,6 @@ enum StreamRefusedCode {
   /// retry, not park the open.
   notReady('NOT_READY'),
 
-  /// Mirrors the existing `UPDATE_REQUIRED` code (host-server.ts /
-  /// project-core.ts) for a peer too old to speak this stream's protocol.
-  updateRequired('UPDATE_REQUIRED'),
-
   /// Remote access is off, the project is unknown or unsafe, or the peer's
   /// project binding does not authorize this stream.
   notAllowed('NOT_ALLOWED'),

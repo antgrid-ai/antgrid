@@ -38,7 +38,6 @@ async function provisionAndMintToken(
     body: JSON.stringify({
       deviceUuid,
       ed25519Pub: pub,
-      x25519Pub: Buffer.alloc(32, 0xcd).toString("base64"),
       platform: "linux",
       displayName: "heartbeat-test-agent",
     }),
