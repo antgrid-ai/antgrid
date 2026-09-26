@@ -121,6 +121,46 @@ void main() {
     },
   );
 
+  test('the temp file is written under uploadTempDir when one is given',
+      () async {
+    final shared = await Directory.systemTemp.createTemp('shared-host-');
+    final tempDir = '${shared.path}${Platform.pathSeparator}upload-tmp';
+    final scoped = LocalTransport(
+      port: server.port,
+      token: 't',
+      appPid: 1,
+      uploadTempDir: tempDir,
+    );
+    await scoped.connect();
+    String? sourcePath;
+    server.onUploadLocal = (m) {
+      sourcePath = m['sourcePath'] as String?;
+      return {
+        'type': 'file:upload-result',
+        'requestId': m['requestId'],
+        'ok': true,
+        'path': '/abs/up-2-b.bin',
+        'relPath': '.antgrid/uploads/up-2-b.bin',
+      };
+    };
+
+    final result = await scoped
+        .openUpload(
+          requestId: 'req-2',
+          projectId: 'proj-a',
+          checkoutId: 'main',
+          fileName: 'b.bin',
+          bytes: Uint8List.fromList([1, 2, 3]),
+        )
+        .result
+        .timeout(const Duration(seconds: 5));
+
+    expect(result.ok, isTrue);
+    expect(File(sourcePath!).parent.parent.path, tempDir);
+    await scoped.dispose();
+    await shared.delete(recursive: true);
+  });
+
   // Waits out the real `kUploadResultTimeout` — the exchange has no injectable
   // clock, unlike the RPC-health tests' constructor-supplied duration.
   test('openUpload fails TIMEOUT when the bridge never answers', () async {

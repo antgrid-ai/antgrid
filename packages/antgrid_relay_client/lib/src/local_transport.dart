@@ -67,6 +67,14 @@ class LocalTransport extends BufferedAgentTransport {
   /// as an owner that sends no `capabilities` at all.
   final bool sessionBusCarrier;
 
+  /// Where a loopback upload writes the temp file whose path it hands the
+  /// bridge. Must be a directory the bridge process can read too: a packaged
+  /// app's system temp can be redirected into a package-private folder, and
+  /// the bridge may belong to another install sharing the same host directory.
+  /// Null falls back to the system temp, which is only safe when app and
+  /// bridge share one filesystem view (tests, unpackaged dev builds).
+  final String? uploadTempDir;
+
   IOWebSocketChannel? _ch;
   StreamSubscription? _sub;
 
@@ -90,6 +98,7 @@ class LocalTransport extends BufferedAgentTransport {
     this.connectTimeout = const Duration(seconds: 15),
     this.netTap,
     this.sessionBusCarrier = false,
+    this.uploadTempDir,
   });
 
   /// Records a frame that never left, or never reached dispatch.
@@ -451,7 +460,10 @@ class LocalTransport extends BufferedAgentTransport {
   ) async {
     Directory? dir;
     try {
-      dir = await Directory.systemTemp.createTemp('antgrid-upload-');
+      final parent = uploadTempDir == null
+          ? Directory.systemTemp
+          : await Directory(uploadTempDir!).create(recursive: true);
+      dir = await parent.createTemp('antgrid-upload-');
       // The bridge stages under the request's fileName, never the source's.
       final source = File('${dir.path}${Platform.pathSeparator}upload');
       try {

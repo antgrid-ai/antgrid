@@ -7,6 +7,7 @@ import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 
 import 'host_control_client.dart';
 import 'host_controller.dart';
+import 'host_discovery.dart';
 import 'project_resolve.dart';
 import '../config/build_info.dart';
 import '../util/ab_log.dart';
@@ -317,6 +318,10 @@ class LocalAgentLauncher {
         // carrier for session-bus frames addressed to another machine (the
         // bridge hands them to the owner only when it claims this).
         sessionBusCarrier: true,
+        // The host directory is the one place app and bridge are known to
+        // share a filesystem view: the bridge publishes host.json there for
+        // this app to read.
+        uploadTempDir: '${hostDir()}/upload-tmp',
       );
       await t.connect();
       _log('opened project $projectId (port ${connect.port})');
