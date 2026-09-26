@@ -1136,24 +1136,35 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // drive this project only while the machine is mobile-reachable. A LOOPBACK
   // frame is never gated: local control's trust boundary is the loopback socket
   // + token, and the desktop must keep driving its own machine with mobile
-  // access off. The skip for a core that has never faced the relay is the same
-  // carve-out one step out — a local/bare/test core answers to no switch — and
-  // is what the old "no phone pubkey right now" test always meant. Fail-closed
+  // access off. The skip for a core that has never faced the relay is what the
+  // old "no phone pubkey right now" test always meant: there is no relay-origin
+  // frame for the switch to refuse, so the question does not arise. Fail-closed
   // otherwise: an unwired host provider reads as disabled.
   function remoteFrameAllowed(source: InboundSource): boolean {
     if (source === "loopback") return true;
-    return offMachineSendAllowed();
+    // NOT delegated to the outbound twin below, though the two read the same
+    // switch. This carve-out is about where a frame CAME FROM, and only an
+    // inbound gate can conclude anything from that; see `offMachineSendAllowed`.
+    if (!relayEverAttached) return true;
+    return remoteAccessEnabled();
   }
 
   /** {@link remoteFrameAllowed}'s outbound twin: whether a session here may
-   *  send to another MACHINE — and, with the loopback exemption stripped off,
-   *  the switch itself, which is why the inbound gate above is written in terms
-   *  of it. Deliberately no loopback carve-out of its own: the caller is always
-   *  loopback (an agent through the MCP surface), so the source says nothing
-   *  about whether the frame crosses a machine boundary; the destination does,
-   *  and `api.ts` has already decided that before it asks. */
+   *  send to another MACHINE. Deliberately no loopback carve-out of its own:
+   *  the caller is always loopback (an agent through the MCP surface), so the
+   *  source says nothing about whether the frame crosses a machine boundary;
+   *  the destination does, and `api.ts` has already decided that before it asks.
+   *
+   *  And deliberately NO `relayEverAttached` carve-out, which is the whole
+   *  difference from the inbound gate: by that same argument the source cannot
+   *  settle this, and a core reaches a peer MACHINE through rows the app pushes
+   *  into its directory — no relay of its own need ever have attached. Reading
+   *  the switch as "on" there let `api.ts` offer an off-machine peer as
+   *  addressable, accept the send, and hand it to a `dispatch` gate that holds
+   *  it forever: the caller was told "it goes when the link is back" about a
+   *  link the switch is what is keeping down. Fail-closed when unwired, for the
+   *  same reason the inbound gate is. */
   function offMachineSendAllowed(): boolean {
-    if (!relayEverAttached) return true;
     return remoteAccessEnabled();
   }
 
