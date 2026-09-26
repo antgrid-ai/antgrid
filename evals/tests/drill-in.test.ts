@@ -8,7 +8,7 @@
 //   3. Drill into the STOPPED projB via the control-plane `project:start`; the
 //      agent starts the core, replies `stream-ready {projectId}` on the session
 //      stream, and admits projB's OWN QUIC stream on the SAME native connection
-//      (Stage A wave A4 — 0 new sockets, 0 pairs).
+//      — 0 new sockets, 0 pairs.
 //   4. Workspace traffic flows over projB's stream (session:list round-trip).
 //
 // The v3 headline (vs v2's per-project socket + drill-in pairing race): drilling

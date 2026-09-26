@@ -1,7 +1,7 @@
 // `MachineSession.openProject` coverage: a project's native stream identity
 // IS the project itself (`StreamTransport.projectId`, fixed for its
 // lifetime) — there is no bridge-issued streamId, and no `{s, m}` envelope,
-// on a project's own stream. Readiness-gating (hazard J) and
+// on a project's own stream. Readiness-gating and
 // snapshot-hydration coverage live in `machine_session_stream_binding_test.dart`
 // and `machine_session_snapshot_retry_test.dart`; this file is the bind
 // sequence itself — caps, refusals, protocol errors, reopen,

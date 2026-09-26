@@ -2,7 +2,7 @@ import '../helpers/fixed_peer_connector.dart';
 // End-to-end coverage for supervisor-driven `RelayConnection` bring-up against
 // the plaintext `session:hello` -> `established` exchange (via a fake agent
 // responder). QUIC/TLS between lease-authorized Iroh endpoints is the
-// confidentiality layer since Stage B, so the fake agent below answers with no
+// confidentiality layer, so the fake agent below answers with no
 // crypto of its own — mirroring antgrid_relay_client's
 // connection_handshake_test.dart harness.
 //
@@ -207,7 +207,7 @@ Future<StreamTransport> _openBound(
 
 /// Advertises [projectId] ready on the control plane, plaintext, exactly as
 /// an unprompted `agent:projects` push would — this is what lets a later
-/// `openProject` skip the `project:start` round trip (hazard J). Awaits a
+/// `openProject` skip the `project:start` round trip. Awaits a
 /// beat for the session's broadcast listener to process the injected frame
 /// before returning.
 Future<void> _advertiseReady(_RecordingRelay relay, String projectId) async {
@@ -415,7 +415,7 @@ void main() {
 
     // Two distinct project streams, ONE underlying session/relay — each
     // needs its own control-plane ready notice before its native stream
-    // binds (hazard J).
+    // binds.
     await _advertiseReady(relay, 'proj-a');
     await _advertiseReady(relay, 'proj-b');
     final streamA = await _openBound(relay, session1, 'proj-a');
@@ -442,7 +442,7 @@ void main() {
 
     // The agent advertises a project ready unprompted (e.g. as part of
     // `agent:projects` on connect) — plaintext, exactly as MachineSession's
-    // own outbound traffic is since Stage B.
+    // own outbound traffic is.
     await _advertiseReady(relay, 'proj-a');
 
     final sentBefore = relay.sent.length;

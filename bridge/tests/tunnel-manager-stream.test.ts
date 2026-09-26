@@ -396,7 +396,7 @@ describe("TunnelManager HTTP streaming", () => {
     expect(runningExchange.failReason()).toBeDefined();
   });
 
-  // A3 trap (§3.8): the abort is keyed by peerId, never by project, so a
+  // The abort is keyed by peerId, never by project, so a
   // second phone establishing its own tunnel must not cut the first phone's
   // in-flight preview load.
   test("abortHttpStreams(peerId) aborts only that peer's run and leaves a sibling peer's run alone", async () => {

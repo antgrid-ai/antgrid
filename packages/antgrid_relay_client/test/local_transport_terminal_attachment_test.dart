@@ -1,5 +1,5 @@
 // LocalTransport's `openTerminalAttachment` is entirely inherited from
-// `BufferedAgentTransport` (the socket path, D2: loopback is unchanged on the
+// `BufferedAgentTransport` (the socket path: loopback is unchanged on the
 // wire) — this pins that the subscribe still goes out over the same socket
 // and that a diverted reply never reaches the ordinary `messages` stream.
 // Server fixture modeled on `local_transport_connect_test.dart`'s

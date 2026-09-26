@@ -77,7 +77,7 @@ export interface HelloForgeOpts {
 }
 
 /** One tunneled HTTP response, reassembled from a dedicated `tunnel-http`
- *  QUIC stream (Stage A wave A3). The body rides the stream as raw bytes with
+ *  QUIC stream. The body rides the stream as raw bytes with
  *  no per-record framing, so `chunks` counts only how many separate reads it
  *  took to drain — a diagnostic on read granularity, not a wire record count. */
 export interface TunnelHttpResult {
@@ -105,7 +105,7 @@ export interface TunnelHttpStreamClient {
    *  bridge's writer instead of this client draining as fast as it can. */
   pauseReading(): void;
   resumeReading(): void;
-  /** Resets the send half only; the receive half keeps draining (D4: the app
+  /** Resets the send half only; the receive half keeps draining (the app
    *  cancels the same way, and the bridge learns of it through its own
    *  pending read). */
   cancel(): void;
@@ -134,7 +134,7 @@ export interface UploadStreamClient {
   /** Writes more raw bytes on the still-open send half — only meaningful when
    *  the stream was opened with `finish: false`. */
   writeMore(bytes: Uint8Array): Promise<void>;
-  /** Resets the send half only, mirroring the app's own cancel (D4). */
+  /** Resets the send half only, mirroring the app's own cancel. */
   cancel(): void;
 }
 
@@ -161,8 +161,7 @@ export interface TunnelWsStreamClient {
 
 /** A terminal-kind native stream driven directly, without the app's own
  *  subscribe/re-sync logic — the test sends `terminal:subscribe` itself so it
- *  can assert on the raw record sequence (hazards A and B, §1 of the A2
- *  contract). `records` and `next` see every record (AbMessage bodies AND a
+ *  can assert on the raw record sequence. `records` and `next` see every record (AbMessage bodies AND a
  *  `stream:refused`) as plain parsed JSON; the caller narrows by `type`. */
 export interface TerminalStreamClient {
   readonly records: Array<Record<string, any>>;
@@ -173,13 +172,13 @@ export interface TerminalStreamClient {
   readonly ended: Promise<void>;
 }
 
-/** One project's admitted QUIC stream (Stage A wave A4: project streams
- *  replace the mux). `open` is true only between the bound `stream-ready` and
+/** One project's admitted QUIC stream (project streams replace the old mux).
+ *  `open` is true only between the bound `stream-ready` and
  *  this half's end. `closingLocally` distinguishes a clean local close from a
  *  bridge-initiated FIN/reset for `ended`'s classification — the two are
- *  otherwise wire-indistinguishable (D4: `stopped()`/`receivedReset()` are
+ *  otherwise wire-indistinguishable: `stopped()`/`receivedReset()` are
  *  never awaited, mirroring the binding-constraint hard rule bridge-src and
- *  Dart both follow). */
+ *  Dart both follow. */
 interface ProjectStreamState {
   readonly projectId: string;
   readonly stream: Awaited<ReturnType<Connection["openBi"]>>;
@@ -353,7 +352,7 @@ export class RelayClient {
   /** True once the hello resolves `established`. */
   private sessionConfirmed = false;
 
-  // --- Project streams (Stage A wave A4: project streams replace the mux) ---
+  // --- Project streams (project streams replace the old mux) ---
   /** projectId → the project's admitted QUIC stream, once bound. Absent for a
    *  project that was never opened, or whose stream has ended. */
   private projectStreams = new Map<string, ProjectStreamState>();
@@ -776,7 +775,7 @@ export class RelayClient {
       } catch {
         // The bridge's half ended — FIN (orderly retirement/refusal) or reset
         // (overflow, stream-lost) look the same from here; `ended` doesn't
-        // distinguish them (D4: Dart can't either).
+        // distinguish them, and Dart can't either.
       } finally {
         settleEnded();
       }
@@ -813,7 +812,7 @@ export class RelayClient {
 
   /** Opens a `kind:"tunnel-http"` stream: the open frame, the
    *  `tunnel:http-request` head (with `bodyLength` stamped from `body`), then
-   *  `body` itself as raw bytes in `≤STREAM_RECORD_SLICE_BYTES` slices (§3).
+   *  `body` itself as raw bytes in `≤STREAM_RECORD_SLICE_BYTES` slices.
    *  The send half stays open after that — a clean response FIN is what
    *  triggers this side's own `finish()`, since a QUIC reset issued after
    *  `finish()` is unreliable and that is otherwise the only way left to
@@ -1333,7 +1332,7 @@ export class RelayClient {
     const msg = parseMessage(json);
     if (!msg) return;
     // Ready-notice bookkeeping (mirrors MachineSession's `_readyProjects`):
-    // `stream-ready` no longer carries a streamId (A4) — it is only ever this
+    // `stream-ready` no longer carries a streamId — it is only ever this
     // project's readiness signal now. An `agent:projects` advert is the other
     // source, keyed on `running`.
     const anyMsg = msg as any;
@@ -1407,12 +1406,12 @@ export class RelayClient {
   // --- Streams ---
 
   /**
-   * Opens `projectId`'s own QUIC stream (Stage A wave A4: project streams
-   * replace the mux). Drives control-plane `project:start` and waits for the
+   * Opens `projectId`'s own QUIC stream (project streams replace the old
+   * mux). Drives control-plane `project:start` and waits for the
    * ready notice UNLESS one has already been seen since establishment or
    * since this project's last stream end (mirrors `MachineSession.openProject`
    * step 2). Then `openBi`s `{kind:"project", projectId}` and awaits the first
-   * record. Resolves to the handle, which IS `projectId` (D-8: every helper
+   * record. Resolves to the handle, which IS `projectId` (every helper
    * that took a bridge-minted streamId keeps its signature; the handle no
    * longer leaks a bridge-internal id). Idempotent while the stream is open.
    */
@@ -1472,8 +1471,8 @@ export class RelayClient {
     ]);
   }
 
-  /** Opens `projectId`'s bi-directional QUIC stream, writes the A0b open
-   *  frame, and classifies the first record (§1.1: `stream:refused` then FIN,
+  /** Opens `projectId`'s bi-directional QUIC stream, writes the open
+   *  frame, and classifies the first record (`stream:refused` then FIN,
    *  or `stream-ready` naming this project). Registers the binding into
    *  `projectStreams`/`readyProjects` only once admitted. Every record after
    *  the first is one bare `AbMessage`, with no reassembly — dispatched with
@@ -1529,7 +1528,7 @@ export class RelayClient {
               cleanRefusal = true;
               state.refusal = { code: obj.code, message: obj.message };
               firstResolve({ refusal: state.refusal });
-              continue; // §1.1: a clean FIN follows a refusal (D4)
+              continue; // A clean FIN follows a refusal
             }
             if (obj?.type === "stream-ready" && obj.projectId === projectId) {
               state.open = true;
@@ -1538,7 +1537,7 @@ export class RelayClient {
               firstResolve({ record: obj });
               continue;
             }
-            // Protocol error (§1.1): neither refused nor a matching stream-ready.
+            // Protocol error: neither refused nor a matching stream-ready.
             firstResolve({ refusal: { code: "INVALID_RECORD", message: `unexpected first record: ${text.slice(0, 200)}` } });
             void stream.send.reset(0n).catch(() => {});
             continue;
@@ -1549,7 +1548,7 @@ export class RelayClient {
         }
       } catch {
         // The bridge's half ended — FIN (orderly close/refusal) or reset
-        // (overflow, stream-lost) are wire-indistinguishable here (D4).
+        // (overflow, stream-lost) are wire-indistinguishable here.
       } finally {
         state.open = false;
         this.readyProjects.delete(projectId);
@@ -1567,7 +1566,7 @@ export class RelayClient {
    *  stream unchanged; any other handle is that project's own QUIC stream,
    *  written as exactly one record — one `AbMessage` is always one record.
    *  `channel` is vestigial on both paths: the session stream has no channels
-   *  (D2 — only the loopback JSON keeps the label) and a project record
+   *  (only the loopback JSON keeps the label) and a project record
    *  carries no envelope to label. Throws if the project stream is not open. */
   sendOnStream(handle: string, msg: object, _channel: "control" | "preview" = "control"): void {
     if (handle === CONTROL_HANDLE) {
@@ -1612,7 +1611,7 @@ export class RelayClient {
   }
 
   /** Resolves once `handle`'s project stream has ended, `"fin"` for a clean
-   *  close (ours or a refusal's) and `"error"` otherwise (D4: reset and
+   *  close (ours or a refusal's) and `"error"` otherwise (reset and
    *  stream-lost are wire-indistinguishable from here). Throws if `handle`
    *  was never opened. */
   projectStreamEnded(handle: string): Promise<"fin" | "error"> {
@@ -1643,7 +1642,7 @@ export class RelayClient {
   }
 
   /** Write the bare JSON of one control-plane `AbMessage` as a session-stream
-   *  record. Project traffic never shares this path (Stage A wave A4): it
+   *  record. Project traffic never shares this path: it
    *  rides its own QUIC stream via `sendOnStream`/`writeProjectRecord`. */
   private sendControlMessage(msg: unknown): void {
     if (!this.established || !this.nativePeerId) throw new Error("Native session is not established");

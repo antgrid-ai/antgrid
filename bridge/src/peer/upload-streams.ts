@@ -151,7 +151,7 @@ export class UploadStreamRegistry {
     return undefined;
   }
 
-  /** Steps 9-12 (§2.3): admit against the project's own upload server, then
+  /** Steps 9-12: admit against the project's own upload server, then
    *  hand off to `FileUploadManager.begin()` and the raw read loop. */
   private async continueAdmission(binding: UploadBinding, open: UploadStreamOpen): Promise<void> {
     const server = binding.projBinding.uploads();
@@ -197,7 +197,7 @@ export class UploadStreamRegistry {
     );
   }
 
-  // ---- The raw read loop (§2.2) -----------------------------------------------
+  // ---- The raw read loop -----------------------------------------------
 
   /** Requests `remaining + 1` bytes each time: a well-behaved peer's every
    *  read resolves with at most `remaining` (there is nothing more to send),

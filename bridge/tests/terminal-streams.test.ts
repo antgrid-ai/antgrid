@@ -239,7 +239,7 @@ async function admitAndBind(registry: TerminalStreamRegistry, binding: TerminalP
   return { fake, requestId, runId, attachmentId, peerId: admission.peerId };
 }
 
-describe("TerminalStreamRegistry (A2)", () => {
+describe("TerminalStreamRegistry", () => {
   test("each refusal is decided before any read: CAP_EXCEEDED, INVALID requestId, NOT_ALLOWED unsafe id, NOT_ALLOWED uncatalogued, NOT_READY unbound, NOT_ALLOWED masked from the binding's own refusal, INVALID duplicate requestId", async () => {
     const { registry, cataloged, bindings } = makeRegistry();
     cataloged.add(PROJECT);
@@ -431,7 +431,7 @@ describe("TerminalStreamRegistry (A2)", () => {
     expect(registry.route(peerId, page)).toBeUndefined();
   });
 
-  test("retired() writes every frame and the ENDED queued before it, then FINs (carry-over 1)", async () => {
+  test("retired() writes every frame and the ENDED queued before it, then FINs", async () => {
     const { registry, cataloged, bindings } = makeRegistry();
     cataloged.add(PROJECT);
     const { binding, dispatched } = fakeBinding();

@@ -45,7 +45,7 @@ async function assertSessionAlive(app: RelayClient, label: string): Promise<void
   expect(res.ok).toBe(true);
 }
 
-test("hazard J: a raw open before project:start is NOT_READY, project:start's stream-ready carries no streamId, and openProjectStream then admits", async () => {
+test("a raw open before project:start is NOT_READY, project:start's stream-ready carries no streamId, and openProjectStream then admits", async () => {
   const env = await setupTestEnv({ fixtureName: "basic" });
   const projBdir = createTestProject("basic", { "__RELAY_URL__": env.relay.url.replace(/\/ws$/, "") });
   try {

@@ -496,7 +496,7 @@ class NativePeerStream implements PeerStream {
     }
     final size = record.length + _kRecordLengthPrefixBytes;
     if (_queuedBytes + size > _maxQueuedBytes) {
-      // D3: the caller reopens and resyncs; the connection and every other
+      // The caller reopens and resyncs; the connection and every other
       // stream on it are untouched.
       unawaited(reset());
       return Future.value(PeerSendOutcome.backpressured);
@@ -522,7 +522,7 @@ class NativePeerStream implements PeerStream {
     }
     if (bytes.isEmpty) return Future.value(PeerSendOutcome.accepted);
     if (_queuedBytes + bytes.length > _maxQueuedBytes) {
-      // D3: the caller reopens and resyncs; the connection and every other
+      // The caller reopens and resyncs; the connection and every other
       // stream on it are untouched.
       unawaited(reset());
       return Future.value(PeerSendOutcome.backpressured);

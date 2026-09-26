@@ -669,7 +669,7 @@ export interface TestEnv {
    *  agent serves (e.g. seeding an oversize file for the fragmentation test). */
   projectDir: string;
   /** The default project's own QUIC stream, opened during setup — the handle
-   *  every project verb rides. Equals `projectId` (D-8: the eval handle is
+   *  every project verb rides. Equals `projectId` (the eval handle is
    *  never a bridge-minted id). */
   streamId: string;
   /** Bare machine `deviceUuid` — the id the app handshakes against (one machine
@@ -810,9 +810,9 @@ async function buildTestEnv(opts: SetupTestEnvOptions, cleanup: CleanupStack): P
   // beat after the E2E handshake establishes. The old pair-request round trip
   // (and its own AGENT_OFFLINE retries) incidentally absorbed this; the
   // pair-free path is fast enough to win the race and land before the project
-  // registers — so poll until the advert shows it `running`, per Stage A wave
-  // A4's hazard J (a project stream opened before the core is relay-registered
-  // is refused NOT_READY). Once dialable, it stays dialable for the rest of
+  // registers — so poll until the advert shows it `running` (a project
+  // stream opened before the core is relay-registered is refused NOT_READY).
+  // Once dialable, it stays dialable for the rest of
   // the test, so the final pull below leaves a genuinely fresh advert queued
   // for callers like `firstProjectStream`.
   // Bounded well under the tightest caller timeout: gate-harness-pairfree's

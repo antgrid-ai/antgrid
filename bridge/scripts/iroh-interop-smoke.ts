@@ -99,7 +99,7 @@ try {
   await next("session-ping-pong");
   // The Dart app probes a project the host opened local-only: it is
   // cataloged, but no core for it is relay-registered until a project:start
-  // promotes it, so the open is refused in-band as NOT_READY (hazard J).
+  // promotes it, so the open is refused in-band as NOT_READY.
   const refused = await next("stream-refused");
   assert.equal(refused.code, "NOT_READY");
   // Central goes down only after E2E is up, so everything below proves the

@@ -25,7 +25,7 @@ void main() {
       await session.dispose();
     });
 
-    // Binds `projectId` over its own native stream (Stage A A4: a stream's
+    // Binds `projectId` over its own native stream (a stream's
     // identity IS its project, so binding is a real `openStream` round trip
     // — the ready notice on the control plane, then the bridge's
     // `stream-ready` as the new stream's first record) and then clears the

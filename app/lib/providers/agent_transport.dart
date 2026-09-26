@@ -157,8 +157,8 @@ final agentTransportForProvider = FutureProvider.family<AgentTransport?, String>
 /// single [MachineSession] via `RelayConnectionManager.connectionFor(uuid)`,
 /// then binds [projectId] to a stream over it: the control plane
 /// (`session.control`) for a bare machine id, or a dedicated native project
-/// stream for a compound `<uuid>.<projectId>` (`session.openProject`, Stage A
-/// A4) — 0 RTT when the agent already advertised the project ready, else
+/// stream for a compound `<uuid>.<projectId>` (`session.openProject`)
+/// — 0 RTT when the agent already advertised the project ready, else
 /// `project:start` + await its own stream-ready. No new socket, no
 /// per-project handshake, so the v2 drill-in race is gone. A liveness failure
 /// inside [MachineSession] closes the connection and re-dials through a fresh

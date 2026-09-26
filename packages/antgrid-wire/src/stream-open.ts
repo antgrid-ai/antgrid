@@ -34,7 +34,7 @@ export const STREAM_OPEN_MAX_ID_LENGTH = 200;
 const StreamId = z.string().min(1).max(STREAM_OPEN_MAX_ID_LENGTH);
 
 // The first stream on a connection must declare this kind and keeps carrying
-// the full legacy protocol (A1). It is part of the union so a dispatch table
+// the full legacy protocol. It is part of the union so a dispatch table
 // keyed by `kind` has one shape to switch on, not a special case beside it.
 export const SessionStreamOpen = z.strictObject({
   kind: z.literal("session"),
@@ -112,14 +112,14 @@ export type StreamOpenKind = StreamOpen["kind"];
 // Dart cannot read a QUIC reset code, so every refusal the app must act on is
 // this in-band record followed by FIN; a reset code is bridge diagnostics only.
 //   NOT_READY: the project core this stream would bind to has not finished
-//     starting (hazard J, §1.5); the app should wait for the session-stream
+//     starting; the app should wait for the session-stream
 //     ready notice and retry, not park the open. Also covers a project
 //     stream itself opened before the project has a relay-registered core.
 //   NOT_ALLOWED: remote access is off, the project is unknown or unsafe, or
 //     the peer's project binding does not authorize this stream (a terminal,
 //     tunnel or upload open with no open project stream for the same
 //     projectId).
-//   CAP_EXCEEDED: a D7 per-peer cap below (terminals, tunnels or uploads) is
+//   CAP_EXCEEDED: a per-peer cap below (terminals, tunnels or uploads) is
 //     already at its limit.
 //   INVALID: the open frame failed to parse or exceeded STREAM_OPEN_MAX_BYTES.
 export const StreamRefusedCode = z.enum([
@@ -158,7 +158,7 @@ export const STREAM_MAX_UPLOAD_STREAMS_PER_PEER = 4;
 export const STREAM_PROJECT_APP_RECORD_MAX_BYTES = 1_500_000;
 export const STREAM_PROJECT_BRIDGE_RECORD_MAX_BYTES = MAX_TRANSFER_BYTES;
 
-// Per-record caps for the terminal attachment stream (A2). The app-to-bridge
+// Per-record caps for the terminal attachment stream. The app-to-bridge
 // direction only ever carries the four small subscribe/ack/unsubscribe/
 // history-request verbs; the bridge-to-app direction carries frames and
 // history pages, so its cap is set to twice the bridge's
@@ -202,7 +202,7 @@ const TUNNEL_DATA_TAGS: ReadonlySet<number> = new Set<number>([
 ]);
 
 /** A tunnel-stream record's first byte, discriminating JSON control records
- *  from tagged binary data records (§1.1). */
+ *  from tagged binary data records. */
 const JSON_RECORD_FIRST_BYTE = 0x7b; // "{"
 
 const textEncoder = new TextEncoder();
@@ -227,7 +227,7 @@ export type TunnelRecord =
   | { kind: "json"; text: string }
   | { kind: "data"; tag: TunnelDataTag; payload: Uint8Array };
 
-/** Decodes one already length-delimited tunnel-stream record (§1.1): a `0x7B`
+/** Decodes one already length-delimited tunnel-stream record: a `0x7B`
  *  first byte is UTF-8 JSON, any other recognized byte is a tagged data
  *  record whose payload is a VIEW into `record`, not a copy. `null` for an
  *  empty record, an unrecognized tag, or a `0x7B`-led body that fails to

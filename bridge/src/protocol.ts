@@ -747,9 +747,9 @@ const AgentToolsMessage = BaseMessage.extend({
   agents: z.array(AgentDescriptorSchema).optional(),
 });
 
-// Outbound agent→app, control plane only (A4): the project is ready to open a
-// stream for. Two meanings share the one frame — a Hazard-J ready notice
-// (gates the app's project-stream open: opening before this arrives gets an
+// Outbound agent→app, control plane only: the project is ready to open a
+// stream for. Two meanings share the one frame — a ready notice that gates
+// the app's project-stream open (opening before this arrives gets an
 // in-band `NOT_READY` refusal, never a park) and, per `ProjectStreamRegistry`
 // (`project-streams.ts`), the bridge's own FIRST record on an admitted project
 // stream, so the bind itself is observable to the app. An `agent:projects`

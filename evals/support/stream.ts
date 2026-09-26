@@ -11,11 +11,11 @@ export const CONTROL_HANDLE = "0";
  * v3 project data-plane helpers.
  *
  * In v3 a machine holds ONE sealed session; each project gets its OWN QUIC
- * stream inside it (Stage A wave A4). The machine control plane (`s` omitted)
+ * stream inside it. The machine control plane (`s` omitted)
  * carries only host verbs, pairing UX, and the catalog adverts
  * (`agent:projects` / `agent:tools`); every project verb (`file:read`,
  * `terminal:*`, `git:*`, …) rides that project's stream, addressed by its
- * handle — which IS `projectId` (D-8), never a bridge-minted id. `setupTestEnv`
+ * handle — which IS `projectId`, never a bridge-minted id. `setupTestEnv`
  * admits the app, turns the machine's mobile-access switch on and pulls the
  * control-plane snapshot, which seeds the `agent:projects` advert but NOT the
  * per-project state — so a migrated scenario waits for that advert to show the
@@ -27,7 +27,7 @@ export const CONTROL_HANDLE = "0";
  */
 
 /** Wait for `projectId` to show `running:true` in a fresh `agent:projects`
- *  advert (hazard J: opening a project stream before the core is
+ *  advert (opening a project stream before the core is
  *  relay-registered is refused `NOT_READY`), then open its stream and return
  *  the handle (`projectId`). */
 export async function firstProjectStream(

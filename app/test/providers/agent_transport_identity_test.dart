@@ -4,7 +4,7 @@ import '../helpers/test_peer_runtime.dart';
 // Task 9 cutover: the remote transport connects and authenticates the CENTRAL
 // relay hello AS the app's own `kind:"app"` DeviceRecord on every resolve path.
 //
-// The native peer hello carries no crypto of its own since Stage B: QUIC/TLS
+// The native peer hello carries no crypto of its own: QUIC/TLS
 // between lease-authorized Iroh endpoints is the confidentiality layer, so a
 // plaintext `session:hello {attemptId, capabilities}` replaces the old
 // transcript-signed `handshake:client-hello` — there is no signature left to

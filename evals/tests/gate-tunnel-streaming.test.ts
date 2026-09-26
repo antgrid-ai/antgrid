@@ -179,7 +179,7 @@ describe("gate: tunnel HTTP and WebSocket streams", () => {
     expect(client.bodyBytesSoFar()).toBeGreaterThan(stalled);
   }, 90_000);
 
-  test("A7: cancelling a stalled body closes the upstream request within 5s and leaves the connection usable", async () => {
+  test("cancelling a stalled body closes the upstream request within 5s and leaves the connection usable", async () => {
     http.state.stallCancelled = false;
     const before = env.app.nativeConnectionId;
     const client = await env.app.openTunnelHttpStream({

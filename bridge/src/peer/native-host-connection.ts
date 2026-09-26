@@ -35,7 +35,7 @@ export interface NativePeerOptions extends PeerSessionOwnerOptions {
   getLicenseToken: () => Promise<string> | string;
   remoteAccessEnabled: () => boolean;
   /** `HostServer.seenProjects.has`, threaded through to `TerminalStreamRegistry`
-   *  (A2) and `TunnelStreamRegistry` (A3). Absent fails every terminal- or
+   *  and `TunnelStreamRegistry`. Absent fails every terminal- or
    *  tunnel-stream open closed, `NOT_ALLOWED`. */
   projectCataloged?: (projectId: string) => boolean;
   lifecycle?: {

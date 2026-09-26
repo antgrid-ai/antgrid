@@ -170,8 +170,8 @@ interface RequestBodySourceHooks {
  * Backs one HTTP tunnel run's upstream request body: a pull-based
  * `ReadableStream` (`highWaterMark: 0`, so `fetch` never buffers ahead of what
  * it has actually written upstream) over the tunnel stream's raw receive
- * half. `pull()` never asks for more than the declared length remaining
- * (§3), so an app that sends extra bytes is caught by the cancel watcher that
+ * half. `pull()` never asks for more than the declared length remaining, so
+ * an app that sends extra bytes is caught by the cancel watcher that
  * starts once this source drains, not by this class.
  *
  * Keeps everything it has read, up to `TUNNEL_BODY_REPLAY_MAX_BYTES`, so a
@@ -491,7 +491,7 @@ export class TunnelStreamRegistry {
 
   /** Unbinds first, so `refuseStream`'s own writer is the only one that
    *  touches the send half and the registry's own writer is never reused. No
-   *  read is outstanding at either call site (§3.3). */
+   *  read is outstanding at either call site. */
   private refuseInline(binding: Binding, code: StreamRefusedCode, message: string): void {
     this.unbind(binding);
     refuseStream(
@@ -641,7 +641,7 @@ export class TunnelStreamRegistry {
     };
     void manager.serveHttp(req, bodySource ?? null, exchange);
     // With no declared body there is nothing to drain first — the watcher
-    // owns `recv` from the start (§3); with one, `onDrained` above starts it
+    // owns `recv` from the start; with one, `onDrained` above starts it
     // once every declared byte has been pulled.
     if (!bodySource) void this.watchHttpCancel(binding);
   }
@@ -709,7 +709,7 @@ export class TunnelStreamRegistry {
   }
 
   /** Starts once the request body (if any) has fully drained — before that,
-   *  the body source is the stream's one active reader (§3). One pending
+   *  the body source is the stream's one active reader. One pending
    *  `raw.read(1)` stays outstanding for the rest of the run, purely to
    *  detect the app sending anything else: a byte is a breach, and FIN/reset
    *  is the app's own end unless it beat our own orderly one. */

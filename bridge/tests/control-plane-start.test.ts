@@ -30,7 +30,7 @@ function fakeRuntime(): RemoteRuntime {
 
 // A machine-relay-client stub whose promoted stream is admitted the instant it
 // attaches (mirrors host-promotion.test.ts) — flips isRelayRegistered() true.
-// A4: there is no per-project streamId any more — the project stream itself
+// There is no per-project streamId — the project stream itself
 // (admitted by projectId off the open frame) is the binding.
 function makeAuthenticatingRelayFactory() {
   return (_opts: NativeHostOptions): RemoteHostConnection =>

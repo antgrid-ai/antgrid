@@ -61,8 +61,8 @@ abstract class BufferedAgentTransport implements AgentTransport {
   );
 
   /// Every socket-path transport (`LocalTransport`, `DemoTransport`, the
-  /// test subclasses) inherits this: loopback never tunnels (D2, stage-A-A3
-  /// §9 D-2), and nothing here is wired to a stream, so a preview request
+  /// test subclasses) inherits this: loopback never tunnels, and nothing here
+  /// is wired to a stream, so a preview request
   /// against one of these fails at once instead of hanging. `StreamTransport`
   /// overrides both with the real native-stream implementation.
   @override

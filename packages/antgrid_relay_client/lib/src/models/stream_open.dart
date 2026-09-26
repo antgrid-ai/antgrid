@@ -432,8 +432,8 @@ const String kSessionStreamLabel = '0';
 /// Why a stream open was refused. Dart cannot read a QUIC reset code, so every
 /// refusal the app acts on travels as [StreamRefused] followed by FIN.
 enum StreamRefusedCode {
-  /// The project core this stream would bind to has not finished starting
-  /// (hazard J); the app should wait for the session-stream ready notice and
+  /// The project core this stream would bind to has not finished starting;
+  /// the app should wait for the session-stream ready notice and
   /// retry, not park the open.
   notReady('NOT_READY'),
 

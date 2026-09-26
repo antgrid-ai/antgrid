@@ -218,7 +218,7 @@ test("outbound rides the machine switch: output stops while off and resumes only
     // === Switch OFF: the same bound stream goes quiet ===
     await setMobileAccess(env.abDir, false);
     cp.drainQueued("terminal:frame"); // in-flight frames sent before the flip
-    // A4: the switch tears down the whole native connection, which ends
+    // The switch tears down the whole native connection, which ends
     // every project stream on it — the client's own registry drops the
     // handle, so a post-flip send throws "not open" rather than reaching a
     // gate on the wire.

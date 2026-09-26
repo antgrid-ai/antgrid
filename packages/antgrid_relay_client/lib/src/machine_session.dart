@@ -27,7 +27,7 @@ const int kMaxMissedPongs = 2;
 const int kProjectStreamTimeoutsToReset = 3;
 
 /// Reopen backoff for a project stream that ended while its transport is
-/// still wanted (Stage A A4): the first retry follows almost immediately,
+/// still wanted: the first retry follows almost immediately,
 /// later ones back off toward [kProjectStreamReopenMaxBackoff] rather than
 /// hammering a bridge that is itself restarting.
 const Duration kProjectStreamReopenInitialBackoff = Duration(seconds: 1);
@@ -881,8 +881,8 @@ class MachineSession {
 
   /// Terminal attachments fail fast over the cap (`CAP_EXCEEDED`) instead of
   /// stalling on `openBi` against the bridge's own per-peer limit. Tunnel
-  /// (HTTP and WS share one pool) and upload streams instead wait FIFO
-  /// (stage-A-A3-contract.md §9 D-5): a page load issues more parallel
+  /// (HTTP and WS share one pool) and upload streams instead wait FIFO:
+  /// a page load issues more parallel
   /// requests than any cap, and that is not the user's error.
   final _terminalSlots = _StreamSlots(kStreamMaxTerminalAttachmentsPerPeer);
   final _tunnelSlots = _StreamSlots(kStreamMaxTunnelStreamsPerPeer);
@@ -1015,7 +1015,7 @@ class StreamTransport extends BufferedAgentTransport {
   /// Null for the control (session-stream) transport; the project id for a
   /// project transport. Fixed for the transport's lifetime — a project's
   /// identity IS its stream now, so there is nothing left to re-point after a
-  /// restart (Stage A A4 retired the old streamId-migration dance).
+  /// restart.
   final String? projectId;
 
   StreamTransport._control(this.session) : projectId = null, _bound = true;
@@ -1304,7 +1304,7 @@ class StreamTransport extends BufferedAgentTransport {
             continue;
           }
           // A first record that is neither `stream:refused` nor a
-          // `stream-ready` naming this project is a protocol error (§1.1):
+          // `stream-ready` naming this project is a protocol error:
           // reset our send half and fail the bind.
           _quietly(stream.reset());
           if (!firstCompleter.isCompleted) {
@@ -1899,8 +1899,8 @@ class StreamTransport extends BufferedAgentTransport {
       return;
     }
     // The bridge counts this stream against its per-peer cap until it sees
-    // our end AND its own half's end (§4.3 — the same reason as the terminal-
-    // attachment carry-over, §4.4): freeing the slot before the records
+    // our end AND its own half's end — the same reason as the terminal-
+    // attachment carry-over: freeing the slot before the records
     // drain would let the very next openProject race that and draw a
     // spurious CAP_EXCEEDED.
     final drained = Completer<void>();
@@ -1986,8 +1986,8 @@ Uint8List _jsonRecord(Map<String, dynamic> message) =>
 
 /// A terminal attachment riding its own native QUIC stream. Opens
 /// asynchronously and never throws: every failure — including the open
-/// itself — ends [done] with a [TerminalAttachmentFailed] instead (carry-over
-/// 4), so a bridge that briefly cannot serve one attachment never surfaces
+/// itself — ends [done] with a [TerminalAttachmentFailed] instead,
+/// so a bridge that briefly cannot serve one attachment never surfaces
 /// through [PeerLink.failureStream] or the connection supervisor.
 class _StreamTerminalAttachment extends _StreamExchange
     implements TerminalAttachment {
@@ -2074,7 +2074,7 @@ class _StreamTerminalAttachment extends _StreamExchange
       // close() landed while the open was in flight: reset rather than
       // finish() a stream whose subscribe was never sent. The bridge counts
       // this stream against its cap until its own half ends, so the slot is
-      // held until the records drain (carry-over 1), never freed here.
+      // held until the records drain, never freed here.
       _reset(stream);
       _end(const TerminalAttachmentClosedLocally());
       await _readRecords(stream);
@@ -2090,7 +2090,7 @@ class _StreamTerminalAttachment extends _StreamExchange
       sendError = e;
     }
     if (outcome != PeerSendOutcome.accepted) {
-      // Same carry-over 1 as a close() during the open: held until drained.
+      // Same slot-holding rule as a close() during the open: held until drained.
       _reset(stream);
       _end(TerminalAttachmentFailed('SEND_FAILED', sendError));
       await _readRecords(stream);
@@ -2188,8 +2188,8 @@ Map<String, dynamic>? _tryDecodeJsonRecord(String? text) {
 
 /// One HTTP tunnel request/response pair riding its own native QUIC stream.
 /// Opens asynchronously and never throws: every failure — including the open
-/// itself — ends [head]/[body] with a [TunnelExchangeFailure] instead (the
-/// same carry-over 4 as [_StreamTerminalAttachment]), so a bridge that briefly
+/// itself — ends [head]/[body] with a [TunnelExchangeFailure] instead, the
+/// same slot-holding shape as [_StreamTerminalAttachment], so a bridge that briefly
 /// cannot serve one preview request never surfaces through
 /// [PeerLink.failureStream] or the connection supervisor.
 class _StreamTunnelHttpExchange extends _StreamExchange
@@ -2243,8 +2243,8 @@ class _StreamTunnelHttpExchange extends _StreamExchange
   }
 
   Future<void> _start() async {
-    // Resolve the project BEFORE the slot wait (stage-A-A3-contract.md
-    // §4.3): an unbound stream should fail at once rather than sit in the
+    // Resolve the project BEFORE the slot wait: an unbound stream should
+    // fail at once rather than sit in the
     // FIFO behind opens that could actually succeed. Same code either way a
     // project stream is missing — control transport (no project) or an
     // unbound project transport.
@@ -2280,7 +2280,7 @@ class _StreamTunnelHttpExchange extends _StreamExchange
     }
     _tap('stream-open');
     _stream = stream;
-    // "Opening: reset once open" (stage-A-A3-contract.md §4.1 cancel()) — a
+    // "Opening: reset once open" — a
     // clean CANCELLED, since nothing was ever written for the bridge to
     // answer.
     if (_cancelRequested) {
@@ -2506,7 +2506,7 @@ Future<void> _quietlyAwait(Future<void> future) async {
 }
 
 /// One browser-side WebSocket's tunnel, riding its own native QUIC stream for
-/// the socket's lifetime. Same carry-over-4 shape as
+/// the socket's lifetime. Same slot-holding shape as
 /// [_StreamTunnelHttpExchange]: every failure ends [done] locally rather than
 /// surfacing through [PeerLink.failureStream].
 class _StreamTunnelWsChannel extends _StreamExchange
@@ -2538,7 +2538,7 @@ class _StreamTunnelWsChannel extends _StreamExchange
   String? _peerCloseReason;
 
   /// Serializes every [send]/[close] call in arrival order, including ones
-  /// made before the stream opens (stage-A-A3-contract.md §4.1).
+  /// made before the stream opens.
   Future<bool> _sendChain = Future<bool>.value(true);
 
   @override
@@ -2760,7 +2760,7 @@ class _StreamTunnelWsChannel extends _StreamExchange
 
 /// One file upload riding its own native QUIC stream: the open frame, then
 /// [_bytes] raw with no framing, then FIN — the bridge answers with one
-/// record (a refusal or the result) and its own FIN. Same carry-over-4 shape
+/// record (a refusal or the result) and its own FIN. Same slot-holding shape
 /// as [_StreamTunnelHttpExchange]: every failure ends [result] locally.
 class _StreamUploadExchange extends _StreamExchange implements UploadExchange {
   _StreamUploadExchange({

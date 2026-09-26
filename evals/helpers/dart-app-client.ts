@@ -344,11 +344,11 @@ export class DartAppClient {
   }
 
   /**
-   * Opens `projectId`'s own QUIC stream (Stage A wave A4): control-plane
+   * Opens `projectId`'s own QUIC stream: control-plane
    * `project:start`, then `MachineSession.openProject` — resolved at 0 RTT
    * when the `agent:projects` advert already showed the project running. No
    * new socket. The Dart CLI's `project-started` event still carries a
-   * `streamId` field; its VALUE is now `projectId` (D-8), not a bridge-minted
+   * `streamId` field; its VALUE is now `projectId`, not a bridge-minted
    * id.
    */
   async openProjectStream(projectId: string, timeoutMs = 25_000): Promise<string> {
@@ -373,7 +373,7 @@ export class DartAppClient {
     this.sendCommand({ action: "send-encrypted", data: msg });
   }
 
-  /** Send an AbMessage on `streamId`'s own project stream (A4: no `{s, m}`
+  /** Send an AbMessage on `streamId`'s own project stream (no `{s, m}`
    *  envelope on the wire — the Dart CLI command shape is unchanged, but
    *  `streamId` is the handle, which equals the projectId, not a bridge-minted
    *  id). */
@@ -423,7 +423,7 @@ export class DartAppClient {
   }
 
   /** Opens a terminal attachment through the Dart eval CLI's `terminal-attach`
-   *  action (§4.5 of the Stage A A2 contract): `openTerminalAttachment` rides
+   *  action: `openTerminalAttachment` rides
    *  its own native stream, so `isStream` on the `-opened` event is always
    *  true here. `version` always goes over the wire
    *  (defaulting to the terminal-frames protocol version), because the Zod

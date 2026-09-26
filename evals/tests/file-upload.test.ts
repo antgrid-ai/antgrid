@@ -155,8 +155,8 @@ test("an upload with no open project stream on this peer is refused NOT_ALLOWED"
   try {
     const projB = computeProjectId(projBdir.dir);
     // Running (mode:"remote", never stopped) — a live entry exists, so the
-    // refusal is the peer-scoped "no open project stream for THIS peer" check
-    // (§2.3 step 5), not the no-live-entry NOT_READY admission covers.
+    // refusal is the peer-scoped "no open project stream for THIS peer" check,
+    // not the no-live-entry NOT_READY admission covers.
     expect((await loopbackControl(env.abDir, {
       id: "file-upload-admission-b", type: "project:open", projectId: projB, projectPath: projBdir.dir, mode: "remote",
     })).ok).toBe(true);

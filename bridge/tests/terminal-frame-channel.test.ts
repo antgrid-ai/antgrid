@@ -179,11 +179,11 @@ describe("terminal viewer replies ride the channel the contract names", () => {
   }, 30_000);
 });
 
-// A2: routing itself moved into the mux subscriber (below the core, D-4), so
+// Routing itself moved into the mux subscriber (below the core), so
 // the channel expectations above are unchanged. What IS new at the core is
 // that a relay terminal:subscribe's own lifecycle reaches a registry through
 // these hooks — never for loopback, which never binds a native stream.
-describe("terminal stream hooks (A2)", () => {
+describe("terminal stream hooks for a relay-bound native stream", () => {
   function hooksRecorder() {
     const retired: Array<{ peerId: string; attachmentId: string }> = [];
     const settled: Array<{ peerId: string; requestId: string; attachmentId: string | undefined }> = [];
@@ -304,7 +304,7 @@ describe("terminal stream hooks (A2)", () => {
 
     // Attach failure: restoreArchivedTerminal itself rejects, driving the
     // `.catch` exit, whose DISPLAY_FAILED notice must be handed to the
-    // transport before subscribeSettled fires (§3.5).
+    // transport before subscribeSettled fires.
     restoreArchived.mockImplementationOnce(() => Promise.reject(new Error("archive unavailable")));
     const failRequestId = crypto.randomUUID();
     bus.dispatchInbound(

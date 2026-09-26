@@ -97,7 +97,7 @@ function splitUpstreamWsHeaders(
 export interface TunnelHttpExchange {
   /** Whose stream this run is on — `abortHttpStreams(peerId)` aborts by this,
    *  never by project or checkout, so a second phone establishing does not
-   *  abort a first phone's in-flight preview load (A3 trap, §3.8). */
+   *  abort a first phone's in-flight preview load. */
   readonly peerId: string;
   /** Aborted by the app's cancel, a failed/gated send, projectDetached, dropPeer, or abortHttpStreams. */
   readonly signal: AbortSignal;

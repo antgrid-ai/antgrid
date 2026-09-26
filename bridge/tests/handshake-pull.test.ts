@@ -1,4 +1,4 @@
-// Stage B: the crypto handshake (client-hello -> agent-hello -> agent-ready ->
+// The crypto handshake (client-hello -> agent-hello -> agent-ready ->
 // app:ready) is gone. Establishment is now a plaintext `session:hello` ->
 // `established`, and identity comes from the QUIC/lease layer, not a
 // transcript signature. Core hello mechanics — the pre-establishment drop,
@@ -48,7 +48,7 @@ test("send() drops app messages when no session is established", () => {
 });
 
 test("a tunnel:http-request on the session stream after establishment reaches no handler", () => {
-  // Tunnel traffic rides its own QUIC stream now (A3); a `tunnel:http-request`
+  // Tunnel traffic rides its own QUIC stream now; a `tunnel:http-request`
   // that still arrives on the session stream parses as no known AbMessage and
   // falls through to the ordinary drop, with nothing left to observe it.
   const client = freshClient();

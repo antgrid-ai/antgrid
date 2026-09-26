@@ -199,7 +199,7 @@ void main() {
     },
   );
 
-  test('a full send queue resets only this stream (D3)', () async {
+  test('a full send queue resets only this stream', () async {
     final send = FakeSend();
     final release = Completer<void>();
     send.beforeWriteAll = (_) => release.future;
@@ -363,7 +363,7 @@ void main() {
 
   test(
     'reset() (a cancel) ends only the send half; records drain until the '
-    'peer ends (D4)',
+    'peer ends',
     () async {
       final send = FakeSend();
       final body = [5, 6];

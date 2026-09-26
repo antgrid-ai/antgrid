@@ -1,4 +1,4 @@
-// Retargeted from onWsOpen/onWsClose to serveWs/sink.closed (Stage A A3) —
+// Retargeted from onWsOpen/onWsClose to serveWs/sink.closed —
 // the assertions below keep the same meaning as before the rewrite, just
 // against the new API: a peer records what the manager sent it instead of a
 // shared `sendTunnel` JSON log.

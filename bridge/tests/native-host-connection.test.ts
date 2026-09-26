@@ -140,7 +140,7 @@ function connection(endpointId: string, firstStream = Promise.resolve({
 /** Like `connection()`, but the caller controls the EXACT bytes served for
  *  the session stream's own open frame, instead of the well-formed
  *  `{"kind":"session"}` record `withSessionOpen` injects — for exercising the
- *  bridge's validation of that first record itself (§3.3 step 6). */
+ *  bridge's validation of that first record itself. */
 function connectionWithRawFirstStream(endpointId: string, firstStream: Promise<{
   send: { writeAll: (bytes: number[]) => Promise<void> };
   recv: { readExact: (length: number) => Promise<number[]> };

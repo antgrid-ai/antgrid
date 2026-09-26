@@ -77,9 +77,10 @@ try {
   const nativeConnectionId = connection.stableId();
   fixture.takeCentralOffline();
   for (const project of projects) {
-    // A4: `project:start` still rides the session stream, but the stream it
+    // `project:start` still rides the session stream, but the stream it
     // readies is the project's OWN QUIC stream — the `stream-ready` notice
-    // carries no id to bind to, it only gates opening that stream (Hazard J).
+    // carries no id to bind to, it only gates opening that stream (a raw
+    // open before this arrives is refused in-band NOT_READY).
     await send(createMessage("project:start", { projectId: project.id }));
     await read((value) => value.type === "stream-ready" && value.projectId === project.id);
 
@@ -96,7 +97,7 @@ try {
         if (predicate(value)) return value;
       }
     };
-    // D-1: the bridge's first record on an admitted project stream is its own
+    // The bridge's first record on an admitted project stream is its own
     // `stream-ready {projectId}` — this is what makes the bind observable.
     const bound = await pRead((value) => true);
     assert.equal(bound.type, "stream-ready");
@@ -120,7 +121,7 @@ try {
       assert.equal(branches.current, created.session.checkoutBranch);
 
       const terminalId = "native-echo";
-      // terminal:start/:input/:stop stay on the project stream (A2); only
+      // terminal:start/:input/:stop stay on the project stream; only
       // frame delivery (terminal:subscribe/:subscribed/:frame/:display:status)
       // moves to the terminal's own dedicated stream below.
       await pSend(createMessage("terminal:start", {

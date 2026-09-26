@@ -155,8 +155,8 @@ async function collect(stream: LocalhostFetchStream): Promise<{ chunks: Uint8Arr
 }
 
 /** A `TunnelRequestBody` backed by a fixed byte array — the tunnel-streams
- *  registry's real `TunnelRequestBodySource` does the same thing off the wire
- *  (§4.1), but a fixed array is all a `fetchLocalhost`-level test needs to pin
+ *  registry's real `TunnelRequestBodySource` does the same thing off the wire,
+ *  but a fixed array is all a `fetchLocalhost`-level test needs to pin
  *  request-body forwarding and replay. `stream()` may be called more than once
  *  (the scheme retry); `replayCap` models the real cap so a body over
  *  it becomes un-replayable exactly the way a long-since-drained wire read is. */

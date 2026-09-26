@@ -139,10 +139,10 @@ test("real backend enrollment authorizes native host projects and revocation clo
       for (const project of projects) {
         await sendMessage(createMessage("project:start", { projectId: project.id }));
         await read((value) => value.type === "stream-ready" && value.projectId === project.id);
-        // A4: project traffic no longer rides the session stream tagged by a
+        // Project traffic no longer rides the session stream tagged by a
         // bridge-minted streamId — each project gets its own QUIC stream,
-        // opened with the A0b open frame; its first record is a fresh
-        // stream-ready naming this project (D-1).
+        // opened with its own open frame; its first record is a fresh
+        // stream-ready naming this project.
         const projectStream = await connection.openBi();
         const projectWriter = new StreamRecordWriter(
           { send: projectStream.send },

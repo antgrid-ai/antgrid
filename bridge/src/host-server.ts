@@ -819,7 +819,7 @@ export class HostServer {
       endpointSecret: r.auth.endpointSecret,
       licenseApiUrl: r.licenseApiUrl,
       remoteAccessEnabled: () => this.remoteAccessPolicy.isEnabled(),
-      // A terminal-stream open (A2) has no `project:start` to catalogue a
+      // A terminal-stream open has no `project:start` to catalogue a
       // project through, so it consults this machine's own catalog directly —
       // the same bound `isSafeProjectId` pairs with everywhere else.
       projectCataloged: (projectId) => this.seenProjects.has(projectId),

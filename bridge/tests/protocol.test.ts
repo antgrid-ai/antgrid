@@ -361,7 +361,7 @@ describe("preview:snapshot", () => {
   });
 });
 
-// Stage B: the native peer session opens on one plaintext `session:hello` /
+// The native peer session opens on one plaintext `session:hello` /
 // `established` pair — no transcript, no confirm tag. These frames carry no
 // id/timestamp envelope (see the comment above their definition in
 // protocol.ts), so they are validated directly, never through parseMessage.
@@ -399,10 +399,10 @@ describe("session:hello / established frame schemas", () => {
   });
 });
 
-// D-A9-2: none of the five session-frame names is an AbMessage literal or a
+// None of the five session-frame names is an AbMessage literal or a
 // KNOWN_TYPES entry — proved here rather than by review, since the two lists
 // are hand-maintained and can drift silently.
-describe("session-frame types are disjoint from the control plane (D-A9-2)", () => {
+describe("session-frame types are disjoint from the control plane", () => {
   it("no AbMessageSchema option's type literal is a SESSION_FRAME_TYPES name, and none parses", () => {
     expect(AbMessageSchema.options.length).toBeGreaterThan(0);
     const controlPlaneTypes = AbMessageSchema.options.map((option) => option.shape.type.value);

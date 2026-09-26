@@ -7,17 +7,17 @@ import { createTestProject } from "../helpers/fixtures";
 import { computeProjectId } from "../../bridge/src/project-id";
 
 /**
- * Stage A wave A1: later streams (anything after the first, session-declaring
- * one) are admitted by `PeerStreamAcceptor`. A1 registered no handlers, so
- * every well-formed non-session open from an established peer was refused
+ * Later streams (anything after the first, session-declaring
+ * one) are admitted by `PeerStreamAcceptor`. With no handler registered for a
+ * kind, every well-formed non-session open from an established peer is refused
  * `NOT_ALLOWED`, and a malformed or duplicate-session open is refused
- * `INVALID` — both in-band, followed by FIN (D4), never by tearing down the
- * connection (D3). This is the one seam bridge-tests' fakes cannot cover: a
+ * `INVALID` — both in-band, followed by FIN, never by tearing down the
+ * connection. This is the one seam bridge-tests' fakes cannot cover: a
  * real binding, a real `PeerStreamAcceptor` and a real second QUIC stream on
  * the SAME connection the session stream is live on.
  *
- * Stage A wave A4 wires the `"project"` handler into that acceptor, so the
- * project-kind case below now exercises real admission (`gate-project-streams`
+ * The `"project"` handler is wired into that acceptor, so the
+ * project-kind case below exercises real admission (`gate-project-streams`
  * covers the admitted path end to end).
  */
 
@@ -73,7 +73,7 @@ test("an oversized open-frame length prefix is refused INVALID and the session s
   }
 });
 
-// A4: a project stream open never opens or promotes a core (§3.3 step 5) — it
+// A project stream open never opens or promotes a core — it
 // only looks up an entry `project:start` already attached. `env.projectId` is
 // unsuitable here: `setupTestEnv` already drives its `project:start` and opens
 // its stream, so a second raw open for it would hit "already open" (INVALID),

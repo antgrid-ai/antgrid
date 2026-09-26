@@ -190,7 +190,7 @@ export abstract class PeerSessionOwner {
       // and tunnel streams get from NativeHostConnection's constructor.
       diagnostic: (event) => this.recordDiagnostic(event),
       retirePeer: (peerId, reason) => this.retirePeerConnection(peerId, reason),
-      // Late-bound over the protected hooks below (A2), so a subclass such as
+      // Late-bound over the protected hooks below, so a subclass such as
       // NativePeerSessions can plug in a TerminalStreamRegistry without this
       // constructor knowing it exists. The base class's defaults are no-ops.
       routeTerminal: (peerId, msg, signal) => this.routeTerminalMessage(peerId, msg, signal),

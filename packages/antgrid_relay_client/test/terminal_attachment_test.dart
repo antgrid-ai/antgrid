@@ -1,7 +1,6 @@
 // Coverage for `TerminalAttachment` on both paths: the socket-path
 // `SocketTerminalAttachments` used by every `BufferedAgentTransport`, and the
-// native-stream `_StreamTerminalAttachment` every `StreamTransport` opens
-// (stage-A-A2-contract.md §4.1/§4.3).
+// native-stream `_StreamTerminalAttachment` every `StreamTransport` opens.
 import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
@@ -160,7 +159,7 @@ void main() {
       await session.dispose();
     });
 
-    // Binds `projectId` over its own native stream (Stage A A4: the identity
+    // Binds `projectId` over its own native stream (the identity
     // of a project's stream IS the project, so binding requires an actual
     // `openStream` round trip — the ready notice on the control plane, then
     // the bridge's `stream-ready` as the new stream's first record — rather
@@ -232,7 +231,7 @@ void main() {
       },
     );
 
-    test('records arrive on messages in record order (hazards A and B)', () async {
+    test('records arrive on messages in record order', () async {
       final transport = await bind(projectId: 'proj-a');
       final attachment = transport.openTerminalAttachment(
         requestId: 'r1',
@@ -348,7 +347,7 @@ void main() {
 
     test(
       'an openStream throw ends Failed(STREAM_OPEN_FAILED) and never '
-      'reaches failureStream (carry-over 4)',
+      'reaches failureStream',
       () async {
         final failures = <PeerLinkFailure>[];
         link.failureStream.listen(failures.add);
@@ -446,7 +445,7 @@ void main() {
     test(
       'close() while the open is in flight resets the stream once it '
       'resolves, never sends subscribe, and holds the slot until the '
-      "bridge's half ends (carry-over 1)",
+      "bridge's half ends",
       () async {
         final transport = await bind(projectId: 'proj-a');
         link.openGate = Completer<void>();
@@ -483,8 +482,7 @@ void main() {
     );
 
     test(
-      "a failed subscribe send holds the slot until the bridge's half ends "
-      '(carry-over 1)',
+      "a failed subscribe send holds the slot until the bridge's half ends",
       () async {
         final transport = await bind(projectId: 'proj-a');
         link.onOpen = (_) => _FakeStream()..sendOutcome = PeerSendOutcome.closed;

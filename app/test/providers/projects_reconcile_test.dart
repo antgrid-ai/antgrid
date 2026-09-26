@@ -1,4 +1,4 @@
-// Regression tests for ProjectsNotifier.reconcileWithHost (D-A3): folding an
+// Regression tests for ProjectsNotifier.reconcileWithHost: folding an
 // app-minted duplicate row onto the primary project a host resolver now
 // names for the same repository, and the backfillFromHost guard that keeps
 // a folded alias id from resurrecting via the host's seen-catalog.

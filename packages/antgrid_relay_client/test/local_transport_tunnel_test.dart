@@ -1,4 +1,4 @@
-// D2: loopback never tunnels. `LocalTransport` declares no
+// Loopback never tunnels. `LocalTransport` declares no
 // `openTunnelHttp`/`openTunnelWs` override, so both inherit
 // `BufferedAgentTransport`'s NOT_SUPPORTED stub — this pins that neither call
 // writes anything to the local socket. Server fixture modeled on

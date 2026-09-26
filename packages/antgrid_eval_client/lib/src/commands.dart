@@ -49,11 +49,11 @@ final class _CleanupStack {
 ///
 /// Central control and native payload setup have independent lifetimes.
 /// [MachineSession] owns the session and the app's wedge-probe ping, and
-/// (Stage A A4) opens each project its own native QUIC stream on demand. This
+/// opens each project its own native QUIC stream on demand. This
 /// handler only translates stdin JSON actions into the production client
 /// object graph.
 
-/// The eval protocol's handle for the machine control plane (A4 D-8) — a bare
+/// The eval protocol's handle for the machine control plane — a bare
 /// local id, unrelated to the wire's peer-frame `kind`.
 const String _kControlHandle = '0';
 class _MemoryEndpointKeys implements EndpointKeyStore {
@@ -103,7 +103,7 @@ class CommandHandler {
 
   /// One subscription per attached [StreamTransport], keyed by HANDLE
   /// (`_kControlHandle` = the machine control plane, else a bare projectId —
-  /// since Stage A A4 a project's identity IS its own native stream, so there
+  /// a project's identity IS its own native stream, so there
   /// is no separate bridge-issued streamId left to key by). Every inbound
   /// frame is republished as an `antgrid-message` event tagged with the
   /// handle it arrived on.
@@ -531,7 +531,7 @@ class CommandHandler {
   /// Send a plain `AbMessage`. `streamId` omitted or `_kControlHandle`
   /// addresses the machine control plane (`session.sendOnSession`); any other
   /// value is a projectId whose stream must already be open
-  /// (`project-start` first) — since Stage A A4 a project's traffic rides its
+  /// (`project-start` first) — a project's traffic rides its
   /// own native QUIC stream, not a `{s, m}` envelope on the session socket.
   Future<void> _handleSendEncrypted(Map<String, dynamic> cmd) async {
     final session = _session;

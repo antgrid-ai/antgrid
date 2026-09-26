@@ -317,7 +317,7 @@ function wsOpenRecord(wsId: string, opts: Partial<TunnelWsOpen> = {}): TunnelWsO
   return { type: "tunnel:ws-open", tunnelId: wsId, port: 3000, path: "/", checkoutId: "main", ...opts };
 }
 
-describe("TunnelStreamRegistry (A3)", () => {
+describe("TunnelStreamRegistry", () => {
   test("every refusal is decided before any read: CAP_EXCEEDED shared across HTTP and WS, NOT_ALLOWED unsafe id, NOT_ALLOWED uncatalogued, NOT_READY unbound, NOT_ALLOWED masked from the binding's own refusal, INVALID duplicate id, NOT_ALLOWED tunnels unavailable", async () => {
     const { registry, cataloged, bindings } = makeRegistry();
     cataloged.add(PROJECT);

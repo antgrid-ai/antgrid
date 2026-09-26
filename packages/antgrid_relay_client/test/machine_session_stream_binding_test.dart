@@ -5,11 +5,11 @@
 // app kill+reopen, so the live push is best-effort and the snapshot is the
 // reconnect contract.
 //
-// Since Stage A A4 a project's native stream identity IS the project
+// A project's native stream identity IS the project
 // (`StreamTransport.projectId`, fixed for its lifetime) — there is no more
 // bridge-issued streamId to migrate on a host restart, so the old
 // `stream-invalid` self-heal and "re-advert under a NEW streamId re-points
-// the live transport" groups have no A4 equivalent and are gone. What
+// the live transport" groups have no equivalent here and are gone. What
 // survives is readiness itself: `openProject` must resolve from a ready
 // notice seen live OR replayed from a snapshot, and a rejected `project:start`
 // must fail the pending open with the agent's own reason.
@@ -39,7 +39,7 @@ void main() {
 
   /// Every control-plane message sent so far, decoded. A session-stream
   /// record is exactly one bare `AbMessage`
-  /// unless its `type` is one of the five session frames (§1.1).
+  /// unless its `type` is one of the five session frames.
   Future<List<Map<String, dynamic>>> sentEnvelopes() async {
     final out = <Map<String, dynamic>>[];
     for (final f in relay.sent) {

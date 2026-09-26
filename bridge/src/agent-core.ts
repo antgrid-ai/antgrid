@@ -265,7 +265,7 @@ export interface AgentCore {
    *  to keep the core's branch and file snapshots coherent immediately. */
   refreshGitState(): Promise<void>;
   onHandshakeComplete(): void;
-  /** Admits a tunnel (preview) QUIC stream (A3): `TunnelStreamRegistry` calls
+  /** Admits a tunnel (preview) QUIC stream: `TunnelStreamRegistry` calls
    *  this once a stream's head record names a checkout, after the switch,
    *  checkout-routing and checkout-existence checks all pass. Never opens or
    *  promotes a core — `checkoutRuntimes.runtime(checkoutId)` is a lookup over
@@ -279,7 +279,7 @@ export interface AgentCore {
    *  a stream open bypasses that bus-level machinery entirely. */
   readonly uploadStreams: UploadStreamServer;
   /** Abort every in-flight tunneled HTTP response for one peer, on every
-   *  checkout runtime and on main. Driven only from `onPeerSessionGone` (A4):
+   *  checkout runtime and on main. Driven only from `onPeerSessionGone`:
    *  a body in flight across that peer's session loss is dead by construction,
    *  and the relay client's queue clear only reaches a run that happens to be
    *  parked on a send at that instant. A still-live sibling peer's runs are
@@ -298,7 +298,7 @@ export interface AgentCore {
    *  the gate is skipped — the loopback socket + token is that trust boundary.
    *  Pass `null` to clear it when the transport detaches. */
   setPeerSessionProvider(fn: ((peerId: string) => PeerSessionView | null) | null): void;
-  /** Wire the project-stream registry's terminal-stream hooks (A2): `retired` and `subscribeSettled`
+  /** Wire the project-stream registry's terminal-stream hooks: `retired` and `subscribeSettled`
    *  callbacks so this core can end a terminal attachment's stream from the
    *  ordinary session-teardown and subscribe-reply paths without knowing a
    *  stream exists. Pass `null` to clear it alongside {@link setPeerSessionProvider}. */
@@ -949,7 +949,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   function setPeerSessionProvider(fn: ((peerId: string) => PeerSessionView | null) | null) {
     peerSessionProvider = fn;
   }
-  // A2: the project-stream registry's terminal-stream hooks, wired alongside peerSessionProvider so
+  // The project-stream registry's terminal-stream hooks, wired alongside peerSessionProvider so
   // a relay attachment's own QUIC stream can be ended from the ordinary
   // retirement/subscribe-reply paths without those paths knowing it exists.
   let terminalStreamHooks: TerminalStreamHooks | null = null;
@@ -1241,7 +1241,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     remoteAccessEnabled,
   });
 
-  /** Admits a tunnel QUIC stream (A3): called by `TunnelStreamRegistry` once a
+  /** Admits a tunnel QUIC stream: called by `TunnelStreamRegistry` once a
    *  stream's head record names `checkoutId`, so the checks a tunnel verb used
    *  to run inline in `handleTunnelMessage` run here instead, in the same
    *  order. Never opens or promotes a core — `checkoutRuntimes.runtime` is a
@@ -2199,7 +2199,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // `viewerConnectionFor` and `TerminalViewerTransport.authorized` key on.
       case "terminal:subscribe": {
         const checkoutId = checkoutIdOf(msg);
-        // A2: every exit below settles the requestId with the terminal-stream
+        // Every exit below settles the requestId with the terminal-stream
         // registry, or a relay attachment that got no attachmentId here waits
         // out its own subscribe deadline with its stream still open. Never for
         // loopback, which never binds a stream.
@@ -2475,7 +2475,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
    *  `LocalTransport` queue, separate from the control plane, so a full
    *  terminal transfer cannot stall every control-plane message queued
    *  behind it. This is loopback-only plumbing — an attachment with its own
-   *  native QUIC stream (A2) bypasses both channels entirely, since `route()`
+   *  native QUIC stream bypasses both channels entirely, since `route()`
    *  in `peer/terminal-streams.ts` intercepts it before this sender is ever
    *  reached, so the split matters only for the desktop client, which has no
    *  stream of its own. */

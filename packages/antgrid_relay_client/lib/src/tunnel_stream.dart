@@ -7,7 +7,7 @@
 /// record codec, and never talks to a `PeerStream` directly.
 ///
 /// `preview_service.dart`'s queue and policy stay in `app/` — nothing here was
-/// moved or adapted from it (stage-A-A3-contract.md §4.1).
+/// moved or adapted from it.
 library;
 
 import 'dart:async';
@@ -198,8 +198,7 @@ final class FailedTunnelHttpExchange implements TunnelHttpExchange {
     : _headCompleter = Completer<TunnelHttpHead>(),
       _bodyController = StreamController<Uint8List>() {
     // A caller that reads only one of head/body must never see the other
-    // one's error surface as unhandled (contract §4.1's shared note on this
-    // pair) — the buffered stream error below is only ever delivered once
+    // one's error surface as unhandled — the buffered stream error below is only ever delivered once
     // something actually listens, so only the Future side needs a silencer.
     _headCompleter.future.ignore();
     _headCompleter.completeError(failure);

@@ -54,7 +54,7 @@ function makeClient(opts: {
   return { client, cataloged };
 }
 
-describe("ProjectStreamRegistry (A4)", () => {
+describe("ProjectStreamRegistry", () => {
   test("row 1: the admitted open's first record is stream-ready; setPriority(0) runs once before the first write; a broadcast lands as a bare AbMessage", async () => {
     const { client } = makeClient();
     client.establish(PEER_A);

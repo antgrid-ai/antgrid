@@ -292,7 +292,7 @@ function admitUpload(
     ...(opts.mimeType ? { mimeType: opts.mimeType } : {}),
   };
   const admission = { peerId: opts.peerId ?? PEER, open, stream: fake.stream, authorized: opts.authorized ?? (() => true) };
-  // Steps 1-8 are synchronous, exactly like the tunnel gate() (§2.3): the
+  // Steps 1-8 are synchronous, exactly like the tunnel gate(): the
   // handler never returns a Promise.
   const result = registry.handler(admission) as StreamRefusal | undefined;
   return { fake, requestId, open, admission, result };
@@ -308,7 +308,7 @@ function wireProject(rig: ReturnType<typeof makeRegistry>, projectId = PROJECT) 
   return { mgr, server, proj };
 }
 
-// --- admission order (§2.3) -------------------------------------------------
+// --- admission order ---------------------------------------------------------
 
 describe("admission order", () => {
   test("no binding at all -> NOT_READY", () => {
@@ -416,7 +416,7 @@ describe("admission order", () => {
 // --- unauthorized at open, and mid-stream -----------------------------------
 
 test("a well-formed open from a peer no longer authorized still reaches server.admit (step 9), but never manager.begin (step 11)", async () => {
-  // The admission order (contract §2.3) checks `authorized()` at step 10,
+  // The admission order checks `authorized()` at step 10,
   // AFTER `server.admit` at step 9 — admit is a pure checkout/switch lookup
   // with no opinion on this peer's live authorization, so it still runs.
   const rig = makeRegistry();
@@ -447,7 +447,7 @@ test("authorized() flips false after the first raw read: retirePeer, and no furt
   expect(handle.written.length).toBe(5); // only the first (still-authorized) chunk was written
 });
 
-// --- happy path, truncation, oversize, cancel, timeout (§2.2) --------------
+// --- happy path, truncation, oversize, cancel, timeout ----------------------
 
 test("happy path: raw bytes (> one slice, not slice-aligned) reach the upload byte-exact; exactly one result record then FIN", async () => {
   const rig = makeRegistry();
@@ -539,7 +539,7 @@ test("mayDeliverTo turning false before the result is sent resets the stream and
   const { fake } = admitUpload(rig.registry, { size: 3 });
   fake.pushBytes([1, 2, 3]);
   // Wait for the declared bytes to be fully consumed and the FIN-probe read
-  // (§2.2's `remaining == 0` read(1)) to be outstanding before flipping the
+  // (the `remaining == 0` read(1)) to be outstanding before flipping the
   // outbound gate — the deterministic point at which the result is about to
   // be sent but has not been yet.
   await until(() => fake.readCalls.length >= 2);
@@ -561,7 +561,7 @@ test("an inactivity TIMEOUT fired by the manager writes its result and FINs, and
   expect(fake.writtenRecord()).toMatchObject({ ok: false, error: "TIMEOUT" });
   await until(() => fake.finishCalls() > 0);
   // The read the raw loop issued at admission is still outstanding: recv.stop()
-  // cannot run yet (the binding's per-stream recv mutex, spec §1.1/1.2).
+  // cannot run yet (the binding's per-stream recv mutex).
   expect(fake.stopCalls).toEqual([]);
   fake.endFin();
   await until(() => fake.stopCalls.length > 0);

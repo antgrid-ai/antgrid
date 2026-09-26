@@ -41,7 +41,7 @@ void main() {
   });
 
   /// Every `state.snapshot` request the control plane has sent so far, in
-  /// order. A project's own pull rides its own native stream (Stage A A4) and
+  /// order. A project's own pull rides its own native stream and
   /// never reaches [relay.sent] at all.
   List<({String id, Map<String, dynamic> params})> snapshotRequests() {
     final out = <({String id, Map<String, dynamic> params})>[];
@@ -293,7 +293,7 @@ void main() {
   });
 
   group('the tree is left to the hydrators (now on a project\'s own native '
-      'stream, Stage A A4)', () {
+      'stream)', () {
     Map<String, dynamic> reply(
       String requestId,
       List<Map<String, Object?>> frames,

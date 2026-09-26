@@ -1,14 +1,14 @@
 // E2E v3 multi-STREAM coexistence (one connection, one QUIC stream per project):
 //   ONE phone holds ONE relay socket and ONE sealed native connection. The
 //   machine control plane rides that connection's session stream; each project
-//   gets its OWN QUIC stream on the SAME connection (Stage A wave A4) — no
+//   gets its OWN QUIC stream on the SAME connection — no
 //   separate sockets, and no `{ s, m }` envelope tagging a shared stream. This
 //   replaces the v2 "one phone pubkey, N per-registration sockets via
 //   sub-deviceIds" model — sub-deviceIds and compound `deviceUuid.projectId`
 //   registrations are gone.
 //
 // Asserts: (1) traffic on each project stream comes back tagged with THAT
-// stream's handle (`_streamId`, which equals its projectId — D-8) — the
+// stream's handle (`_streamId`, which equals its projectId) — the
 // streams are isolated; (2) exactly ONE relay connection exists per side
 // (agent + phone = 2 total) — the whole point of multiplexing every project
 // onto one native connection.

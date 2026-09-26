@@ -248,7 +248,7 @@ void main() {
     );
   });
 
-  test('the default pending-open bound is the D7 constant', () async {
+  test('the default pending-open bound matches the configured constant', () async {
     final gates = <Completer<void>>[];
     final opener = PeerStreamOpener(() async {
       final gate = Completer<void>();

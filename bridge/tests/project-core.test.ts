@@ -534,7 +534,7 @@ test("sendToAppSession returns false and sends nothing when deliverableTo(peer) 
 test("onPeerStreamClosed(peer) clears that peer's focus claim", async () => {
   // A device that closed its project stream stops vouching for whatever it had
   // on screen — same effect as clientGone, just triggered by the stream rather
-  // than the whole peer session ending (§3.9).
+  // than the whole peer session ending.
   const folder = mkdtempSync(join(tmpdir(), "antgrid-pc-streamclosed-"));
   cleanup.push(() => rmSync(folder, { recursive: true, force: true }));
   writeFileSync(join(folder, "antgrid.yaml"), "");
