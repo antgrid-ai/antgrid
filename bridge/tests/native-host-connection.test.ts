@@ -95,7 +95,10 @@ function connection(endpointId: string, firstStream = Promise.resolve({
   send: { writeAll: async (_bytes: number[]) => {}, setPriority: async (_p: number) => {},
     reset: async (_code: bigint) => {}, finish: async () => {} },
   recv: { readExact: (_length: number) => new Promise<number[]>(() => {}) },
-}), alpn = PEER_ALPN, acceptUni: () => Promise<unknown> = () => new Promise(() => {})) {
+}), alpn = PEER_ALPN, acceptUni: () => Promise<unknown> = () => new Promise(() => {}),
+  // Never settles by default, like a connection that never idles out; a test
+  // proving a QUIC idle close resolves this itself with `{reason:"timed out"}`.
+  closed: Promise<{ reason: string }> = new Promise(() => {})) {
   let streams = 0;
   let acceptBiCalls = 0;
   const closeCodes: bigint[] = [];
@@ -116,7 +119,7 @@ function connection(endpointId: string, firstStream = Promise.resolve({
       return streams++ === 0 ? firstStream.then(withSessionOpen) : (laterStreams.length ? Promise.resolve(laterStreams.shift()) : new Promise((resolve) => laterWaiters.push(resolve)));
     },
     acceptUni: () => acceptUni(),
-    closed: () => new Promise(() => {}),
+    closed: () => closed,
     close: (code: bigint) => { closeCodes.push(code); },
   };
   return {
@@ -1000,6 +1003,50 @@ test("retiring a peer drops its tunnel bindings alongside its terminal bindings"
     expect(access.terminalStreams.attachmentCount(slot)).toBe(0);
     expect(access.tunnelStreams.streamCount(slot)).toBe(0);
   } finally { handle.detach(); f.client.close(); }
+});
+
+// --- QUIC idle is the only liveness check the bridge runs on an app. ---
+
+test("a QUIC idle close retires the peer", async () => {
+  // The bridge never pings; a peer that stops acking is detected only through
+  // `connection.closed()` resolving (QUIC keep-alive/idle), which must drop
+  // exactly the same registries an explicit `retirePeer` does.
+  const f = fixture(undefined, undefined, () => true);
+  const bus = new MessageBus();
+  const handle = f.client.attachStream(bus, { projectId: "p1", tunnels: fakeTunnelServer() as never });
+  const closedGate = Promise.withResolvers<{ reason: string }>();
+  const peer = connection(f.endpointId, undefined, PEER_ALPN, undefined, closedGate.promise);
+  const events: Parameters<typeof netwatch.record>[0][] = [];
+  const observer = spyOn(netwatch, "record").mockImplementation((event) => { events.push(event); });
+  try {
+    const slot = await establishedSlot(f, peer);
+    await openProjectStream(peer, "p1");
+    const terminal = laterStream(terminalOpenRecord("p1"));
+    peer.pushLaterStream(terminal.stream);
+    const http = laterStream(tunnelHttpOpenRecord("p1"));
+    peer.pushLaterStream(http.stream);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const access = f.client.peers as unknown as {
+      terminalStreams: { attachmentCount: (peerId: string) => number };
+      tunnelStreams: { streamCount: (peerId: string) => number };
+      projectStreams: { openStreamCount: (peerId: string) => number };
+    };
+    expect(access.terminalStreams.attachmentCount(slot)).toBe(1);
+    expect(access.tunnelStreams.streamCount(slot)).toBe(1);
+    expect(access.projectStreams.openStreamCount(slot)).toBe(1);
+
+    closedGate.resolve({ reason: "timed out" });
+    await until(() => f.access.nativePeers.size === 0);
+
+    expect(f.client.peers.peerSession(slot)).toBeNull();
+    expect(access.terminalStreams.attachmentCount(slot)).toBe(0);
+    expect(access.tunnelStreams.streamCount(slot)).toBe(0);
+    expect(access.projectStreams.openStreamCount(slot)).toBe(0);
+    const retired = events.find((event) => event.msgType === "peer:native-retired");
+    expect(retired?.detail).toMatchObject({ reason: "connection-lost" });
+    expect(events.some((event) => event.dir === "tx" && event.msgType === "ping")).toBe(false);
+  } finally { observer.mockRestore(); handle.detach(); f.client.close(); }
 });
 
 // --- The session stream: StreamRecordWriter/Reader, like every other stream. ---

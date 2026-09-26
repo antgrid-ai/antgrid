@@ -59,7 +59,8 @@ the code wins over both.
 | A | A5 delete credits, schedulers, fragmentation, stream envelope | done | `eb67f79b` |
 | A | A6 docs, diagnostics and ledger | done | `4c2f22de` |
 | A | follow-up: per-record authorization on project and terminal streams, netwatch stream tags | done | `848df2f2` |
-| A | A7 raw upload streams and raw tunnel HTTP bodies | done | `<hash>` |
+| A | A7 raw upload streams and raw tunnel HTTP bodies | done | `63b1dca3` |
+| A | A8 liveness: explicit QUIC defaults, one app ping, per-stream RPC timeout recovery | done | `<hash>` |
 
 ### Stage C gate evidence (executed by the wave commit agents)
 
@@ -99,9 +100,15 @@ the code wins over both.
 - A4: wire 138; bridge 4923 pass with the 6 known failures; relay 173; relay_client 306; peer_transport 64; app 4188; `flutter analyze` clean; evals 119 pass, 5 skip, gate-vectors green after the commit; qualify runs and the relay gate pass.
 - A6: bridge 4888 pass, 16 skip, 6 fail (the six known stale-runId fixtures), 4910 total, via `bun run --filter antgrid-bridge test`; 4886/4908 before A6, the difference being its two netwatch tests. Only bridge was re-run, since A6 changes no other workspace; A5's own wire/relay/app counts are not recorded here.
 - A7: wire 132; bridge 4943 pass, 16 skip, 6 fail (the six known stale-runId fixtures); relay 173; relay_client 271; peer_transport 67; app 4194; `flutter analyze` clean in app and the three packages; evals 120 pass, 5 skip, with the only failure the gate-vectors git-clean guard before the commit; `test:evals:dart-terminal` 7 pass; qualify runs and the relay gate pass.
+- A8: wire 133; bridge 4949 pass, 16 skip, 6 fail (the six known stale-runId fixtures); relay 173; relay_client 282 (after the adversarial review); peer_transport 68; app 4195; `flutter analyze` clean in app and the three packages; evals 121 pass, 5 skip, with the only failure the gate-vectors git-clean guard before the commit; `test:evals:dart-liveness` 1 pass, measuring a hard-killed Dart app retired 35.0s after the kill (QUIC idle, Dart to napi); qualify runs and the relay gate pass.
 
 ### Stage A open items
 
+- **A8: D-A8-1's QUIC keep-alive/idle values are recorded, not set.** Neither binding
+  (`@number0/iroh` on the bridge, `iroh_quic` on the app) exposes a transport-config setter, so
+  `PEER_QUIC_KEEP_ALIVE_INTERVAL_MS`/`PEER_QUIC_MAX_IDLE_TIMEOUT_MS` and their Dart mirrors document
+  the defaults both bindings already apply rather than configuring them. If either binding later
+  exposes a transport config, set these values there and drop the "recorded, not set" wording.
 - **Native soak RSS bound: still fails at `848df2f2`, but no leak was found in the soak's process.** The bound samples `process.memoryUsage().rss` of the `bun test` process. That process holds the in-process relay, each cycle's fake license API (`Bun.serve`) and the eval `RelayClient` with its `@number0/iroh` endpoint. It does not sample the bridge child.
   - *Executed:* the unmodified soak failed at 550s, cycle ~207, with an RSS delta of 135,352,320 bytes against the 134,217,728 bound. Its other assertions passed.
   - *Executed, per-cycle trace with the bound disabled and no forced GC:* the RSS delta grows linearly by about 0.58 MiB per cycle: 14 MiB at cycle 0, 73 at 100, 128 at 200 (536s), and 158 at 251. The JSC heap and object count grow with it (16.8 → 48.7 MiB, 244k → 522k objects), as do `arrayBuffers` (0 → 14.9 MiB). At cycle 252 (682s) the first natural full collection fired. RSS fell from 285 to 172 MiB and objects fell back to 259k. After that the sawtooth stayed at a delta of about 43–51 MiB.

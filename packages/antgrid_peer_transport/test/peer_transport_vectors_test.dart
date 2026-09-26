@@ -213,4 +213,9 @@ void main() {
     );
   });
 
+  test('Dart QUIC timing constants match the shared transport vector', () {
+    final quic = _map(fixture['quic']);
+    expect(kPeerQuicKeepAliveInterval.inMilliseconds, quic['keepAliveIntervalMs']);
+    expect(kPeerQuicMaxIdleTimeout.inMilliseconds, quic['maxIdleTimeoutMs']);
+  });
 }

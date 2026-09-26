@@ -144,7 +144,7 @@ void main() {
       },
     );
 
-    test('records the send dropped for want of an E2E session', () async {
+    test('records the send dropped for want of an established session', () async {
       // A fresh session has not yet completed a hello, so this is the
       // pre-establishment window the app hits on every reconnect.
       final cold = MachineSession(
@@ -155,7 +155,7 @@ void main() {
       await cold.sendOnSession({'type': 'file:read'}, 'control');
 
       final drop = capture.drops.single;
-      expect(drop['reason'], 'no-e2e-session');
+      expect(drop['reason'], 'no-established-session');
       expect(drop['msgType'], 'file:read');
       expect(drop['streamId'], cold.control.streamId);
       expect(drop['streamKind'], 'session');

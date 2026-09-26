@@ -22,8 +22,8 @@ import { StreamRecordWriter, StreamRecordReader, StreamProtocolViolation, type P
 /** Fits two max-size control-plane records; the same per-stream bound as
  *  `PROJECT_STREAM_MAX_QUEUED_BYTES` (`project-streams.ts`). */
 const SESSION_STREAM_MAX_QUEUED_BYTES = 67_108_864;
-/** Above terminal (1), project (0) and tunnel (-1): liveness frames must not
- *  wait behind bulk. */
+/** Above terminal (1), project (0) and tunnel (-1), so the hello, `established`
+ *  and the pong that answers the app's wedge probe never wait behind bulk. */
 const STREAM_PRIORITY_SESSION = 2;
 /** The next free reset code after `STREAM_STOP_PROJECT` (`project-streams.ts`). */
 const STREAM_RESET_SESSION = 0x19n;

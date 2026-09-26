@@ -8,12 +8,12 @@
 /// sockets never arbitrate against each other.
 ///
 /// The scope is the AGENT's deviceUuid, so a bridge receiving a slot can tell
-/// whether it was addressed at itself — see the presence guard in
-/// `bridge/src/relay-client.ts`.
+/// whether it was addressed at itself — see the hand mirror
+/// `packages/antgrid-wire/src/relay-slot.ts` (`relaySlotId`/
+/// `slotMachineDeviceId`).
 ///
-/// This is only ever a TRANSPORT address. The E2E transcript binds the bare
-/// account `deviceUuid` on both sides, so the account identity a handshake
-/// proves is unaffected by how the socket is addressed.
+/// This is only ever a TRANSPORT address, unaffected by how the account
+/// identity behind a handshake is proved.
 ///
 /// The relay's `DEVICE_ID` schema (`packages/antgrid-wire/src/relay-protocol.ts`)
 /// must admit the separator, in `hello.deviceId` AND in a route header's `to` —
@@ -25,8 +25,8 @@ String relaySlotId(String deviceUuid, String machineDeviceId) =>
     '$deviceUuid$kRelaySlotSeparator$machineDeviceId';
 
 /// Reduce a relay slot id to the bare account `deviceUuid` that identity
-/// lookups and the E2E transcript are keyed by. Returns the input unchanged
-/// when it carries no scope.
+/// lookups are keyed by. Returns the input unchanged when it carries no
+/// scope.
 String baseSlotDeviceId(String slotId) {
   final i = slotId.indexOf(kRelaySlotSeparator);
   return i < 0 ? slotId : slotId.substring(0, i);

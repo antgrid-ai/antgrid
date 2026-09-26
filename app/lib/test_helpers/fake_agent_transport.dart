@@ -260,7 +260,6 @@ class FakeAgentTransport implements AgentTransport {
     String method, {
     Map<String, dynamic>? params,
     Duration timeout = const Duration(seconds: 10),
-    bool countsTowardHealth = true,
   }) async {
     requests.add((method: method, params: params, timeout: timeout));
     // Appended on the same ordinal as `send`, so an ordering assertion over
@@ -317,7 +316,6 @@ class FakeAgentTransport implements AgentTransport {
     String method, {
     Map<String, dynamic>? params,
     Duration timeout = const Duration(seconds: 10),
-    bool countsTowardHealth = true,
   }) async {
     final mutating =
         classifyRemoteRequest(method) == RemoteRequestKind.mutating;
@@ -325,12 +323,7 @@ class FakeAgentTransport implements AgentTransport {
       return const RemoteRequestResult.notSent();
     }
     try {
-      final value = await request(
-        method,
-        params: params,
-        timeout: timeout,
-        countsTowardHealth: countsTowardHealth,
-      );
+      final value = await request(method, params: params, timeout: timeout);
       return RemoteRequestResult.confirmed(value);
     } on RpcException catch (error) {
       if (mutating && _transportFailureCodes.contains(error.code)) {

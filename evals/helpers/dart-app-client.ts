@@ -62,7 +62,7 @@ type Waiter = {
  * can either poll queued events or async-wait for future ones.
  */
 export class DartAppClient {
-  private proc: { kill(): void };
+  private proc: { pid: number; kill(): void };
   private stdin: import("bun").FileSink;
   private eventQueue: DartEvent[] = [];
   private waiters: Waiter[] = [];
@@ -75,7 +75,7 @@ export class DartAppClient {
   readonly ed25519PublicKey: string;
 
   private constructor(
-    proc: { kill(): void },
+    proc: { pid: number; kill(): void },
     stdin: import("bun").FileSink,
     deviceId: string,
     x25519PublicKey: string,
@@ -643,6 +643,67 @@ export class DartAppClient {
       this.proc.kill();
     } catch {
       // Already dead
+    }
+  }
+
+  /**
+   * Kills the whole process tree with no chance for the Dart VM to exit on
+   * its own (which can send a graceful QUIC CONNECTION_CLOSE the bridge would
+   * retire the peer on immediately, defeating a test of the idle timeout).
+   *
+   * `dart.exe run` spawns a child `dartvm.exe` holding the actual native
+   * endpoint; killing only the Bun-spawned pid lets that child drain stdin
+   * EOF and exit cleanly. Safe to call on an already-dead process.
+   */
+  async hardKill(): Promise<void> {
+    const pid = this.proc.pid;
+    if (process.platform === "win32") {
+      try {
+        const killer = Bun.spawn(["taskkill", "/PID", String(pid), "/T", "/F"], {
+          stdout: "ignore",
+          stderr: "ignore",
+        });
+        await killer.exited;
+      } catch {
+        // Already dead, or taskkill itself failed to spawn.
+      }
+      return;
+    }
+
+    // POSIX: no /T equivalent, so walk the tree via pgrep and SIGKILL every
+    // descendant before the root, bottom-up.
+    const descendants: number[] = [];
+    let frontier = [pid];
+    while (frontier.length > 0) {
+      const next: number[] = [];
+      for (const parent of frontier) {
+        try {
+          const out = Bun.spawnSync(["pgrep", "-P", String(parent)]);
+          const text = new TextDecoder().decode(out.stdout).trim();
+          if (text) {
+            for (const line of text.split("\n")) {
+              const child = Number(line);
+              if (Number.isFinite(child)) next.push(child);
+            }
+          }
+        } catch {
+          // No children, or pgrep unavailable — nothing more under this pid.
+        }
+      }
+      descendants.push(...next);
+      frontier = next;
+    }
+    for (const child of [...descendants].reverse()) {
+      try {
+        process.kill(child, "SIGKILL");
+      } catch {
+        // Already dead.
+      }
+    }
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      // Already dead.
     }
   }
 }

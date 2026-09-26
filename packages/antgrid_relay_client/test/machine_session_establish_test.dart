@@ -168,7 +168,7 @@ void main() {
 
   group('session-takeover', () {
     test(
-      'tears the session down, reports on takeoverEvents, and never rekeys',
+      'tears the session down, reports on takeoverEvents, and never re-establishes in place',
       () async {
         final relay = FakeLiveRelay(
           initial: RelayConnectionState.authenticated,

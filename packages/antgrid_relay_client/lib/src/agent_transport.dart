@@ -124,21 +124,14 @@ abstract class AgentTransport {
   /// `result` map on success; throws [RpcException] on `ok: false` or
   /// timeout. Default timeout 10s.
   ///
-  /// Each transport implements correlation by `requestId`.
-  ///
-  /// [countsTowardHealth] gates whether a [StreamTransport] folds this call's
-  /// outcome into the session's consecutive-timeout rekey trigger (see
-  /// `MachineSession.notifyRpcResult`), success and timeout alike. A caller
-  /// that re-issues the SAME pull on every re-establishment — including the
-  /// one a rekey itself causes — must pass `false`, or a run of timeouts on a
-  /// link that cannot carry the pull forces a rekey, the rekey re-establishes,
-  /// the re-establish re-drives the same pull, and the loop never breaks. `LocalTransport` and
-  /// `FakeAgentTransport` accept and ignore it (no rekey counter to feed).
+  /// Each transport implements correlation by `requestId`. On a remote project
+  /// transport, a timeout counts toward that stream's own health accounting —
+  /// three consecutive ones reset and reopen the stream (never the link). On
+  /// the control transport and on loopback, a timeout is only a failed call.
   Future<Map<String, dynamic>> request(
     String method, {
     Map<String, dynamic>? params,
     Duration timeout = const Duration(seconds: 10),
-    bool countsTowardHealth = true,
   });
 
   /// Sends one RPC while preserving the distinction between a request that
@@ -149,7 +142,6 @@ abstract class AgentTransport {
     String method, {
     Map<String, dynamic>? params,
     Duration timeout = const Duration(seconds: 10),
-    bool countsTowardHealth = true,
   });
 
   /// `true` once the transport can carry an RPC — a local session from the

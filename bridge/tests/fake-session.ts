@@ -19,8 +19,6 @@ export function installFakeSession(
     peerId,
     checkoutRouting: false,
     unreachableSince: 0,
-    lastRecvAt: Date.now(),
-    missedPongs: 0,
     pullsTree: false,
     terminalFramesV1: false,
     ...over,

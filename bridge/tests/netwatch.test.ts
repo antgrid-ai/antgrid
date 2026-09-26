@@ -104,7 +104,7 @@ describe("TestPeerSessionOwner netwatch taps", () => {
     __resetNetwatchForTest();
   });
 
-  it("records a send dropped for want of an E2E session", () => {
+  it("records a send dropped for want of an established session", () => {
     client = TestPeerSessionOwner.forTest({ sendPayload: () => {}, peerId: "phone-1", deviceId: "dev-1" });
     client.establish("phone-1", { attemptId: "a1" });
     (client as any).sessions.clear();
@@ -112,7 +112,7 @@ describe("TestPeerSessionOwner netwatch taps", () => {
 
     const drops = events().filter((e) => e.kind === "drop");
     expect(drops).toHaveLength(1);
-    expect(drops[0].reason).toBe("no-e2e-session");
+    expect(drops[0].reason).toBe("no-established-session");
   });
 
   it("classifies a received frame by its message type and its own payload hash", () => {

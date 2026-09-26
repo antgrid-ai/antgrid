@@ -483,5 +483,9 @@
         "streamId": "req-1"
       }
     ]
+  },
+  "quic": {
+    "keepAliveIntervalMs": 5000,
+    "maxIdleTimeoutMs": 30000
   }
 }

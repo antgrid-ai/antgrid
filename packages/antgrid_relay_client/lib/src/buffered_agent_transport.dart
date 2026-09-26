@@ -143,7 +143,6 @@ abstract class BufferedAgentTransport implements AgentTransport {
     String method, {
     Map<String, dynamic>? params,
     Duration timeout = const Duration(seconds: 10),
-    bool countsTowardHealth = true,
   }) => _requestRaw(method, params: params, timeout: timeout);
 
   @override
@@ -151,7 +150,6 @@ abstract class BufferedAgentTransport implements AgentTransport {
     String method, {
     Map<String, dynamic>? params,
     Duration timeout = const Duration(seconds: 10),
-    bool countsTowardHealth = true,
   }) async {
     final kind = classifyRemoteRequest(method);
     if (kind == RemoteRequestKind.mutating && !isEstablished) {

@@ -48,9 +48,10 @@ final class _CleanupStack {
 /// JSON-line command surface the TS eval harness drives (`DartAppClient`).
 ///
 /// Central control and native payload setup have independent lifetimes.
-/// [MachineSession] owns the E2E session and liveness, and (Stage A A4) opens
-/// each project its own native QUIC stream on demand. This handler only
-/// translates stdin JSON actions into the production client object graph.
+/// [MachineSession] owns the session and the app's wedge-probe ping, and
+/// (Stage A A4) opens each project its own native QUIC stream on demand. This
+/// handler only translates stdin JSON actions into the production client
+/// object graph.
 
 /// The eval protocol's handle for the machine control plane (A4 D-8) — a bare
 /// local id, unrelated to the wire's peer-frame `kind`.

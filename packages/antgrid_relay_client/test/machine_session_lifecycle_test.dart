@@ -1,11 +1,10 @@
 // MachineSession session-lifecycle coverage: nothing dispatches before the
 // first hello establishes, and a session with no application-layer key to
-// rotate cannot repair itself in place — every "this session is dead" trigger
-// (a run of RPC timeouts, missed liveness pongs, a failed hello) closes the
-// whole link instead, and the supervisor (outside this package) redials.
-// Replaces the deleted relay_transport_test.dart cases that exercised
-// `RelayTransport.updateAgent` (send/receive silently gated on key presence,
-// keys hot-swapped) — there is no key to hot-swap any more.
+// rotate cannot repair itself in place — every "this session is dead"
+// trigger (missed liveness pongs, a failed hello) closes the whole link
+// instead, and the supervisor (outside this package) redials. RPC-timeout
+// accounting is per PROJECT STREAM now, not session-wide — see
+// `machine_session_rpc_health_test.dart`.
 import 'dart:async';
 import 'dart:convert';
 
@@ -238,97 +237,7 @@ void main() {
   });
 
   group('closing the link on failure', () {
-    test('3 consecutive RPC timeouts close the link, and the session goes '
-        'down once the closed state lands — never a second hello on the same '
-        'link', () async {
-      final relay = FakeLiveRelay();
-      final handshaker = FakeHandshaker();
-      final session = MachineSession(
-        relay: relay,
-        machineDeviceId: 'm1',
-        handshaker: handshaker,
-      );
-      session.start();
-      await session.ensureEstablished();
-      expect(session.isEstablished, isTrue);
-
-      for (var i = 0; i < 3; i++) {
-        session.notifyRpcResult(timedOut: true);
-      }
-
-      for (var i = 0; i < 50 && !relay.closeCalled; i++) {
-        await Future<void>.delayed(const Duration(milliseconds: 10));
-      }
-      expect(relay.closeCalled, isTrue);
-      await Future<void>.delayed(const Duration(milliseconds: 20));
-      expect(
-        session.isEstablished,
-        isFalse,
-        reason: 'the closed link must break the established rung honestly '
-            'so the supervisor can re-drive it',
-      );
-      expect(
-        handshaker.performCalls,
-        1,
-        reason:
-            'there is no in-place repair — retry ownership stays entirely '
-            'with the supervisor',
-      );
-
-      await session.dispose();
-      await relay.closeStreams();
-    });
-
-    test('a successful RPC resets the timeout streak — no close', () async {
-      final relay = FakeLiveRelay();
-      final session = await establishSession(relay, handshaker: FakeHandshaker());
-
-      session.notifyRpcResult(timedOut: true);
-      session.notifyRpcResult(timedOut: true);
-      session.notifyRpcResult(timedOut: false); // resets the streak
-      session.notifyRpcResult(timedOut: true);
-      session.notifyRpcResult(timedOut: true);
-      await Future<void>.delayed(const Duration(milliseconds: 30));
-
-      expect(
-        relay.closeCalled,
-        isFalse,
-        reason: 'only 2 timeouts have accumulated since the reset',
-      );
-
-      await session.dispose();
-      await relay.closeStreams();
-    });
-
-    test('a timeout streak before establishment completes never closes the '
-        'link', () async {
-      final relay = FakeLiveRelay();
-      final handshaker = FakeHandshaker()
-        ..delayFor = (_) => const Duration(milliseconds: 300);
-      final session = MachineSession(
-        relay: relay,
-        machineDeviceId: 'm1',
-        handshaker: handshaker,
-      );
-      session.start();
-      final establishing = session.ensureEstablished();
-
-      for (var i = 0; i < 5; i++) {
-        session.notifyRpcResult(timedOut: true);
-      }
-      await Future<void>.delayed(const Duration(milliseconds: 50));
-      expect(
-        relay.closeCalled,
-        isFalse,
-        reason: 'the close trigger is gated on an already-established session',
-      );
-
-      await establishing;
-      await session.dispose();
-      await relay.closeStreams();
-    });
-
-    test('2 missed liveness pongs close the link', () async {
+    test('a stalled session stream closes the link', () async {
       final relay = FakeLiveRelay();
       final session = await establishSession(
         relay,
@@ -347,5 +256,76 @@ void main() {
       await session.dispose();
       await relay.closeStreams();
     });
+
+    test(
+      'a wedged bridge is declared dead by the ping while project records '
+      'keep flowing',
+      () async {
+        // A bridge whose event loop is stuck can still have a QUIC stack that
+        // acks (and, on a stream it already had open, a backlog that keeps
+        // draining) — only the app's own wedge-probe ping notices, never a
+        // project stream staying busy.
+        final relay = FakeLiveRelay();
+        final session = await establishSession(
+          relay,
+          handshaker: FakeHandshaker(),
+          pingSilence: const Duration(milliseconds: 30),
+          projectStartMessageBuilder: (pid) => {
+            'type': 'project:start',
+            'projectId': pid,
+          },
+        );
+
+        // Session pongs keep the ping quiet while the project binds, so the
+        // close below can only come from the silence that follows.
+        final setupPongs = Timer.periodic(const Duration(milliseconds: 5), (_) {
+          relay.injectFrame(
+            encodeFromAgent(jsonEncode({'type': 'pong'})),
+            kind: kPeerFrameSession,
+          );
+        });
+        relay.injectFrame(
+          encodeFromAgent(
+            jsonEncode({'type': 'stream-ready', 'projectId': 'X'}),
+          ),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+        final opening = session.openProject('X', {
+          'type': 'project:start',
+          'projectId': 'X',
+        });
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+        final streamX = relay.openedStreams.firstWhere(
+          (s) => s.open == const ProjectStreamOpen('X'),
+        );
+        streamX.injectStreamReady('X');
+        await opening;
+        expect(relay.closeCalled, isFalse);
+
+        final feed = Timer.periodic(const Duration(milliseconds: 10), (_) {
+          streamX.injectJson({
+            'type': 'agent:status',
+            'checkoutId': 'main',
+            'terminals': <Object?>[],
+          });
+        });
+
+        setupPongs.cancel();
+
+        for (var i = 0; i < 50 && !relay.closeCalled; i++) {
+          await Future<void>.delayed(const Duration(milliseconds: 10));
+        }
+        feed.cancel();
+        expect(
+          relay.closeCalled,
+          isTrue,
+          reason: 'project records must never refresh the session-stream '
+              'liveness clock',
+        );
+
+        await session.dispose();
+        await relay.closeStreams();
+      },
+    );
   });
 }

@@ -8,6 +8,8 @@ import {
   MAX_TRANSFER_BYTES,
   MAX_HEADER_LEN,
   PEER_ALPN,
+  PEER_QUIC_KEEP_ALIVE_INTERVAL_MS,
+  PEER_QUIC_MAX_IDLE_TIMEOUT_MS,
   PEER_IDENTITY_MAX_CHARS,
   PEER_LEASE_MS,
   PEER_MAX_AUTHORIZED_PEERS,
@@ -105,6 +107,10 @@ export function buildPeerTransportVectors() {
       maxLeaseMs: PEER_LEASE_MS,
     },
     streamOpen: buildStreamOpenVectors(),
+    quic: {
+      keepAliveIntervalMs: PEER_QUIC_KEEP_ALIVE_INTERVAL_MS,
+      maxIdleTimeoutMs: PEER_QUIC_MAX_IDLE_TIMEOUT_MS,
+    },
   };
 }
 

@@ -9,6 +9,16 @@ import { z } from "zod/v4";
  *  message is one record, so this is the sender's hard ceiling. */
 export const MAX_TRANSFER_BYTES = 33_554_432;
 
+// iroh 1.0's QUIC transport defaults, RECORDED here rather than set: neither
+// binding (`@number0/iroh` on the bridge, `iroh_quic` on the app) exposes a
+// transport-config setter, so both sides simply run what iroh applies. The
+// negotiated idle timeout is the minimum of both sides' values. Mirror by
+// hand as `kPeerQuicKeepAliveInterval`/`kPeerQuicMaxIdleTimeout`
+// (`packages/antgrid_relay_client/lib/src/models/stream_open.dart`), pinned by
+// `peer-transport-vectors.json`'s `quic` block.
+export const PEER_QUIC_KEEP_ALIVE_INTERVAL_MS = 5_000;
+export const PEER_QUIC_MAX_IDLE_TIMEOUT_MS = 30_000;
+
 /** Wire cap on a serialized open frame, checked before Zod ever runs — a
  *  `{kind, projectId, ...}` record needs a few hundred bytes at most, so this
  *  is generous headroom against a hostile or corrupt peer forcing an

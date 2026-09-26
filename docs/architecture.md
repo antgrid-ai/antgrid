@@ -22,8 +22,9 @@ App (Flutter) <--QUIC/TLS over Iroh (direct or relayed)--> Agent (Bun)
 The central relay authenticates devices via a signed `hello` frame (Ed25519
 proof-of-possession) — unrelated to peer payload admission, which is decided
 entirely by the authorization lease (`docs/protocol/peer-session.md` §1). The
-session stream carries only the machine control plane (the hello, liveness,
-and machine-scoped verbs such as `agent:projects` and `stream-ready`);
+session stream carries the hello, the app's wedge-probe ping, and
+machine-scoped verbs such as `agent:projects` and `stream-ready` — QUIC
+keep-alive/idle is the liveness layer (`docs/protocol/peer-session.md` §3);
 every project gets its own stream (`docs/protocol/peer-session.md` §1d),
 carrying that project's bus traffic — session-bus frames, `preview:url`, and
 so on — as bare records with no fragmentation and no credit window (Stage A
@@ -50,8 +51,8 @@ consume the native link; feature services retain their existing interfaces.
 Native implementation and authoritative lease handling live in the ELv2
 `packages/antgrid_peer_transport` package, shared with its standalone CLI smoke.
 
-The bridge's `PeerSessionOwner` owns session establishment and liveness over
-Iroh; fragmentation, scheduling and the credit window were deleted with the
+The bridge's `PeerSessionOwner` owns session establishment over Iroh, not
+liveness; fragmentation, scheduling and the credit window were deleted with the
 `{s,m}` mux (Stage A, `docs/iroh-reduction/ledger.md`) — each stream now writes
 bare length-prefixed records with its own per-record caps
 (`docs/protocol/peer-session.md` §5). `CentralControlClient` owns central

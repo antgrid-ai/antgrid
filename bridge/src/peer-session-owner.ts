@@ -41,12 +41,6 @@ export interface PeerSessionOwnerOptions {
   projectCataloged?: (projectId: string) => boolean;
 }
 
-/** Send a ping after this much receive silence. */
-const PING_SILENCE_MS = 20_000;
-
-/** Consecutive unanswered pings before the session is declared dead. */
-const MAX_MISSED_PONGS = 2;
-
 /** How many app devices may hold a session on one machine at once. A ceiling,
  *  not a policy: real use is a desktop plus a phone or two, and each session
  *  costs a receive context and its own copy of every broadcast frame.
@@ -63,8 +57,6 @@ export interface PeerSession {
    *  sibling's bare presence from repointing frames away from their owner. */
   peerId: string;
   checkoutRouting: boolean;
-  lastRecvAt: number;
-  missedPongs: number;
   /** Whether THIS device pulls trees on demand. Per-session because the bridge
    *  may only stop pushing `tree:full` when every attached device pulls. */
   pullsTree: boolean;
@@ -134,8 +126,6 @@ export abstract class PeerSessionOwner {
       });
       return;
     }
-    session.lastRecvAt = Date.now();
-    session.missedPongs = 0;
     const plaintext = Buffer.from(payload).toString("utf8");
     if (kind === "session") {
       this.onSessionFrame(plaintext, from, frameId, bytes);
@@ -147,10 +137,6 @@ export abstract class PeerSessionOwner {
   // Session state, keyed by the app's relay SLOT (the route address) — one
   // entry per device, so tearing one down cannot disturb another's.
   protected readonly sessions = new Map<string, PeerSession>();
-
-  /** One timer for every session: liveness is cheap per session and a timer
-   *  each would be N unrefed intervals to leak. */
-  protected livenessTimer: ReturnType<typeof setInterval> | null = null;
 
   // Phone Ed25519 pubkeys (standard base64, raw 32 bytes) resolved from the
   // account peers inventory at admission, keyed by the phone's deviceId (==
@@ -270,8 +256,8 @@ export abstract class PeerSessionOwner {
 
   protected terminalProjectDetached(_projectId: string): void {}
 
-  /** An established peer's liveness/session-establishment traffic (header
-   *  `type: "session"`): `session:hello`, `ping`, `pong`. Any other shape,
+  /** An established peer's session-establishment and wedge-probe traffic
+   *  (header `type: "session"`): `session:hello`, `ping`, `pong`. Any other shape,
    *  including a stale `credit` frame or an `AbMessage` sent under this kind
    *  by mistake, falls through `handleSessionFrame`'s default arm and is
    *  dropped as `unknown-session-frame`. */
@@ -402,7 +388,9 @@ export abstract class PeerSessionOwner {
         return;
       }
       case "pong":
-        // Liveness reset already applied in receivePeerFrame on arrival.
+        // The bridge never pings: QUIC keep-alive and idle timeout
+        // (PEER_QUIC_MAX_IDLE_TIMEOUT_MS) are what detect a dead app, so a
+        // pong carries nothing this side needs.
         return;
       default:
         this.diagnostics.warn("Dropping unexpected peer session frame (type=%s)", obj.type);
@@ -494,8 +482,6 @@ export abstract class PeerSessionOwner {
       attemptId,
       peerId,
       checkoutRouting: hello.capabilities?.checkoutRouting === true,
-      lastRecvAt: Date.now(),
-      missedPongs: 0,
       pullsTree: hello.capabilities?.pullsTree === true,
       terminalFramesV1: hello.capabilities?.terminalFramesV1 === true,
     };
@@ -503,7 +489,6 @@ export abstract class PeerSessionOwner {
     // whether to close an idle connection, so a send before this line could
     // race a timer firing on a still-empty table.
     this.sessions.set(peerId, session);
-    this.startLiveness();
     this.onSessionEstablished(peerId);
     this.sendSessionFrame({ type: "established", attemptId }, peerId);
     this.opts.onHandshakeComplete?.({
@@ -565,7 +550,7 @@ export abstract class PeerSessionOwner {
       this.recordDiagnostic({
         dir: "tx", kind: "drop", transport: this.payloadTransport(target.kind === "peer" ? target.peerId : undefined), channel,
         streamKind: "session", streamId: NETWATCH_SESSION_STREAM_LABEL,
-        msgType: type ?? "message", reason: "no-e2e-session",
+        msgType: type ?? "message", reason: "no-established-session",
       });
       return Promise.resolve<SendOutcome>("dropped");
     }
@@ -607,7 +592,7 @@ export abstract class PeerSessionOwner {
     return out;
   }
 
-  /** Send one bare session/liveness frame to `to`, addressed to whichever
+  /** Send one bare session frame to `to`, addressed to whichever
    *  session is live for that device right now. */
   protected sendSessionFrame(obj: object, to: string): void {
     const type = (obj as { type?: string }).type ?? "session";
@@ -632,14 +617,13 @@ export abstract class PeerSessionOwner {
     this.bus = null;
   }
 
-  // --- Session teardown + timers ---
+  // --- Session teardown ---
 
   /** End ONE device's session: tell the cores that device is gone. */
   protected dropSession(peerId: string): void {
     const session = this.sessions.get(peerId);
     if (!session) return;
     this.sessions.delete(peerId);
-    if (this.sessions.size === 0) this.stopLiveness();
     this.projectStreams.dropPeer(peerId);
     this.projectStreams.notifyPeerSessionOffline(peerId);
     if (this.sessions.size === 0) this.projectStreams.notifyPeerOffline();
@@ -649,41 +633,6 @@ export abstract class PeerSessionOwner {
    *  our routes, so nothing addressed to them could be delivered. */
   resetSessions(): void {
     for (const peerId of [...this.sessions.keys()]) this.dropSession(peerId);
-    this.stopLiveness();
-  }
-
-  /** Idempotent: the one interval covers every session, so a second device
-   *  establishing must not restart it (which would reset the whole sweep's
-   *  phase and delay every other session's next probe). */
-  protected startLiveness(): void {
-    if (this.livenessTimer) return;
-    this.livenessTimer = setInterval(() => this.checkLiveness(), PING_SILENCE_MS);
-    this.livenessTimer?.unref?.();
-  }
-
-  protected stopLiveness(): void {
-    if (this.livenessTimer) {
-      clearInterval(this.livenessTimer);
-      this.livenessTimer = null;
-    }
-  }
-
-  protected checkLiveness(): void {
-    const now = Date.now();
-    for (const session of [...this.sessions.values()]) {
-      // Recent traffic → healthy.
-      if (now - session.lastRecvAt < PING_SILENCE_MS) continue;
-      if (session.missedPongs >= MAX_MISSED_PONGS) {
-        // Unresponsive: end this device's session and wait for a fresh
-        // connection (the app owns retry pacing). Every sibling session
-        // stays up.
-        this.diagnostics.warn("Session with %s declared dead (%d missed pongs) — dropping", session.peerId, MAX_MISSED_PONGS);
-        this.dropSession(session.peerId);
-        continue;
-      }
-      session.missedPongs++;
-      this.sendSessionFrame({ type: "ping" }, session.peerId);
-    }
   }
 
   /** True once at least one session is established (test seam). */

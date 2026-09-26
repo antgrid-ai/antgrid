@@ -129,14 +129,14 @@ void main() {
         'kind': 'drop',
         'channel': 'control',
         'msgType': 'file:read',
-        'reason': 'no-e2e-session',
+        'reason': 'no-established-session',
         'detail': {'why': 'pre-establishment'},
       });
       await w.flush();
 
       final o = readLines().single;
       expect(o['kind'], 'drop');
-      expect(o['reason'], 'no-e2e-session');
+      expect(o['reason'], 'no-established-session');
       expect(o['detail'], {'why': 'pre-establishment'});
       w.dispose();
     });

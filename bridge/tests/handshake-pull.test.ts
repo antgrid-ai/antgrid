@@ -7,8 +7,8 @@
 // live in peer-session-hello.test.ts. This suite covers what a session
 // carries once established: capabilities, multi-device isolation, broadcast
 // fan-out, and the liveness/offline lifecycle.
-import { test, expect, afterEach } from "bun:test";
-import { TestPeerSessionOwner } from "./test-peer-session-owner";
+import { test, expect, afterEach, spyOn } from "bun:test";
+import { TestPeerSessionOwner, ed25519Pair } from "./test-peer-session-owner";
 import { MessageBus } from "../src/message-bus";
 
 const AGENT_DEVICE_ID = "agent-1";
@@ -109,29 +109,36 @@ test("ping is answered with pong", () => {
   expect(client.readToPeer(PHONE_ID)).toEqual({ type: "pong" });
 });
 
-test("2 missed pongs declare the session dead (peer-offline notified)", () => {
-  const offlineEvents: string[] = [];
+test("a pong from the app changes nothing and is not answered", () => {
+  // The bridge never pings (QUIC keep-alive/idle is the liveness layer), so a
+  // pong reaching it carries no state to update and earns no reply.
   const client = freshClient();
   client.establish(PHONE_ID, { attemptId: "attempt-a" });
-  client.attachStream(new MessageBus(), { onPeerOffline: () => offlineEvents.push("offline") });
 
-  // startLiveness() (run at establishment) stamped lastRecvAt = now; push it
-  // into the past so checkLiveness sees the silence window as elapsed without
-  // waiting out the real PING_SILENCE_MS.
-  const session = (client as any).sessions.get(PHONE_ID);
-  session.lastRecvAt = 0;
+  client.sendFromPeer(PHONE_ID, { type: "pong" }, "session");
 
-  (client as any).checkLiveness(); // 1st missed pong: sends a ping
-  expect(session.missedPongs).toBe(1);
-  expect((client as any).sessions.has(PHONE_ID)).toBe(true);
+  expect(client.sentTo(PHONE_ID)).toHaveLength(0);
+  expect(client.peerSession(PHONE_ID)).not.toBeNull();
+});
 
-  (client as any).checkLiveness(); // 2nd missed pong: sends another ping
-  expect(session.missedPongs).toBe(2);
-  expect((client as any).sessions.has(PHONE_ID)).toBe(true);
-
-  (client as any).checkLiveness(); // MAX_MISSED_PONGS reached: declare dead
-  expect((client as any).sessions.has(PHONE_ID)).toBe(false);
-  expect(offlineEvents).toEqual(["offline"]);
+test("establishing a session schedules no interval and sends no ping", () => {
+  // QUIC keep-alive/idle is the liveness layer; the bridge never arms a
+  // sweep of its own and never speaks first. Driven off the raw hello (rather
+  // than the `establish()` seam, which drops its own `established` reply from
+  // the outbox) so every frame the owner sent during establishment is still
+  // visible to inspect.
+  const client = freshClient();
+  const interval = spyOn(globalThis, "setInterval");
+  try {
+    (client as any).admitPeer(PHONE_ID, ed25519Pair().pubB64);
+    client.sendFromPeer(PHONE_ID, { type: "session:hello", attemptId: "attempt-a" }, "session");
+    expect(interval).not.toHaveBeenCalled();
+  } finally {
+    interval.mockRestore();
+  }
+  const sentTypes = client.sentTo(PHONE_ID).map((payload) => (JSON.parse(payload.toString("utf8")) as { type?: string }).type);
+  expect(sentTypes).toContain("established");
+  expect(sentTypes).not.toContain("ping");
 });
 
 test("a different device's session is admitted ALONGSIDE the live session, displacing nobody", () => {
@@ -197,7 +204,7 @@ test("native loss retires one session; the coarse peer-offline waits for the las
   expect(coarseOffline).toBe(1); // fired exactly once, on the last one
 });
 
-test("a session declared dead by liveness fires the coarse peer-offline only when it was the last", () => {
+test("a dropped session fires the coarse peer-offline only when it was the last", () => {
   const client = freshClient();
   client.establish(PHONE_ID, { attemptId: "attempt-a" });
   client.establish(PHONE_2_ID, { attemptId: "attempt-b" });
@@ -205,16 +212,13 @@ test("a session declared dead by liveness fires the coarse peer-offline only whe
   let coarseOffline = 0;
   client.attachStream(new MessageBus(), { onPeerOffline: () => { coarseOffline++; } });
 
-  const sessions = (client as any).sessions as Map<string, { lastRecvAt: number }>;
-  sessions.get(PHONE_ID)!.lastRecvAt = 0;
-  for (let i = 0; i < 3; i++) (client as any).checkLiveness();
+  (client as any).dropSession(PHONE_ID);
 
-  expect(sessions.has(PHONE_ID)).toBe(false);
+  expect((client as any).sessions.has(PHONE_ID)).toBe(false);
   expect(coarseOffline).toBe(0); // phone B's session is still live
   expect(client.establishedPeers().map((p) => p.peerId)).toEqual([PHONE_2_ID]);
 
-  sessions.get(PHONE_2_ID)!.lastRecvAt = 0;
-  for (let i = 0; i < 3; i++) (client as any).checkLiveness();
+  (client as any).dropSession(PHONE_2_ID);
 
   expect(client._handshakeComplete()).toBe(false);
   expect(coarseOffline).toBe(1);

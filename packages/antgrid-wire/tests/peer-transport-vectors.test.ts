@@ -6,6 +6,8 @@ import {
   MAX_TRANSFER_BYTES,
   PEER_MAX_BRIDGE_RECORD_BYTES,
   PEER_MAX_RECORD_BYTES,
+  PEER_QUIC_KEEP_ALIVE_INTERVAL_MS,
+  PEER_QUIC_MAX_IDLE_TIMEOUT_MS,
   STREAM_MAX_UPLOAD_STREAMS_PER_PEER,
   STREAM_PROJECT_APP_RECORD_MAX_BYTES,
   STREAM_PROJECT_BRIDGE_RECORD_MAX_BYTES,
@@ -173,6 +175,16 @@ test("peer transport fixture's rejected stream-open frames are rejected", () => 
   for (const sample of streamOpen.rejectedRefusals) {
     expect(StreamRefused.safeParse(sample.json).success, sample.name).toBe(false);
   }
+});
+
+test("fixture's quic block equals PEER_QUIC_KEEP_ALIVE_INTERVAL_MS/PEER_QUIC_MAX_IDLE_TIMEOUT_MS", () => {
+  // Neither binding exposes a transport config, so these are iroh 1.0's own
+  // defaults, recorded rather than set — this is the Dart mirror's only
+  // cross-check, same as every other quic/stream-open constant here.
+  expect(fixture.quic).toEqual({
+    keepAliveIntervalMs: PEER_QUIC_KEEP_ALIVE_INTERVAL_MS,
+    maxIdleTimeoutMs: PEER_QUIC_MAX_IDLE_TIMEOUT_MS,
+  });
 });
 
 test("the fixture carries no fragmentation or flow-control blocks", () => {

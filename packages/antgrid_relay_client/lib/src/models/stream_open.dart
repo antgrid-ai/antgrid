@@ -13,6 +13,16 @@ const int kStreamOpenMaxBytes = 4096;
 /// Per-id length bound, in UTF-16 code units (Zod's `.max()` counts the same).
 const int kStreamOpenMaxIdLength = 200;
 
+// iroh 1.0's own keep-alive/idle defaults, recorded here rather than set:
+// neither the bridge's napi binding nor the app's `iroh_quic` exposes a
+// transport config to set them with. Both endpoints apply the same defaults,
+// so the negotiated idle timeout is the minimum of both sides' values (here,
+// itself). Mirror `PEER_QUIC_KEEP_ALIVE_INTERVAL_MS`/
+// `PEER_QUIC_MAX_IDLE_TIMEOUT_MS` (`packages/antgrid-wire/src/stream-open.ts`)
+// by hand, pinned by `peer-transport-vectors.json`.
+const Duration kPeerQuicKeepAliveInterval = Duration(seconds: 5);
+const Duration kPeerQuicMaxIdleTimeout = Duration(seconds: 30);
+
 // Only the bridge can set the QUIC bidi limit; Dart has no setter. The app's
 // open semaphores sit at the per-peer caps so an over-cap open fails locally
 // instead of stalling on `openBi`.

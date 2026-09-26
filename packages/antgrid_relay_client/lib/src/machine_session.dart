@@ -13,10 +13,18 @@ import 'terminal_attachment.dart';
 import 'tunnel_stream.dart';
 import 'upload_stream.dart';
 
-/// Liveness constants; mirror `bridge/src/relay-client.ts`.
+/// The app's own wedge probe: a bridge whose event loop is stuck but whose
+/// QUIC stack still acks would otherwise look alive forever. A dead bridge is
+/// `kPeerQuicMaxIdleTimeout`'s job, not this one's — nothing on the bridge
+/// mirrors these.
 const int kPingSilenceSeconds = 20;
 const int kMaxMissedPongs = 2;
-const int _kConsecutiveTimeoutsToClose = 3;
+
+/// Consecutive RPC timeouts on one project stream before it resets and
+/// reopens (`StreamTransport._resetForHealth`) — that stream only, never the
+/// whole link. The control transport counts nothing; its only connection-level
+/// escape is the ping above.
+const int kProjectStreamTimeoutsToReset = 3;
 
 /// Reopen backoff for a project stream that ended while its transport is
 /// still wanted (Stage A A4): the first retry follows almost immediately,
@@ -24,6 +32,12 @@ const int _kConsecutiveTimeoutsToClose = 3;
 /// hammering a bridge that is itself restarting.
 const Duration kProjectStreamReopenInitialBackoff = Duration(seconds: 1);
 const Duration kProjectStreamReopenMaxBackoff = Duration(seconds: 30);
+
+/// Deadline for the one `state.snapshot` request a (re)establishment, bind or
+/// [StreamTransport.refreshDurableState] call sends — long enough that a
+/// reply landing after a caller's own [MachineSession.snapshotTimeout] wait is
+/// still applied rather than discarded as late.
+const Duration kSnapshotPullDeadline = Duration(seconds: 70);
 
 /// Local queue cap handed to [MultiStreamPeerLink.openStream] for a project
 /// stream; the same per-stream bound as the bridge's
@@ -120,14 +134,21 @@ class MachineSession {
   final Map<String, dynamic> Function(String projectId)?
   projectStartMessageBuilder;
 
-  /// Base wait for a `state.snapshot` pull. Each retry doubles it — see
-  /// [StreamTransport.refreshSnapshot] for why a pull is retried at all.
+  /// How long a caller of [StreamTransport.refreshSnapshot] or
+  /// [StreamTransport.refreshDurableState] (and [StreamTransport.connect], at
+  /// twice this) waits before moving on. The pull itself keeps running until
+  /// [snapshotDeadline] regardless — a reply landing after this wait but
+  /// before that deadline is still applied.
   final Duration snapshotTimeout;
 
   /// Silence after which liveness sends a `ping`, and the period the
   /// liveness timer itself runs at. Injectable so a test need not wait out the
   /// real interval.
   final Duration pingSilence;
+
+  /// Deadline for the `state.snapshot` request itself. Defaults to
+  /// [kSnapshotPullDeadline].
+  final Duration snapshotDeadline;
 
   MachineSession({
     required this.relay,
@@ -136,6 +157,7 @@ class MachineSession {
     this.projectStartMessageBuilder,
     this.snapshotTimeout = const Duration(seconds: 5),
     this.pingSilence = const Duration(seconds: kPingSilenceSeconds),
+    this.snapshotDeadline = kSnapshotPullDeadline,
     RelayLogger? logger,
   }) : _handshaker = handshaker,
        _logger = logger {
@@ -163,7 +185,6 @@ class MachineSession {
   bool _established = false;
   bool _handshakeInFlight = false;
   int _missedPongs = 0;
-  int _consecutiveTimeouts = 0;
   DateTime _lastRecv = DateTime.now();
 
   /// Serializes writes on the session stream so a dequeue-time generation
@@ -357,7 +378,7 @@ class MachineSession {
       // contract, not a backlog of messages the peer has since moved past.
       _dropped(
         'tx',
-        'no-e2e-session',
+        'no-established-session',
         channel: channel,
         streamId: kSessionStreamLabel,
         streamKind: 'session',
@@ -418,7 +439,7 @@ class MachineSession {
     if (!identical(gen, _generation)) {
       _dropped(
         'tx',
-        'no-e2e-session',
+        'no-established-session',
         channel: channel,
         streamId: kSessionStreamLabel,
         streamKind: 'session',
@@ -455,23 +476,6 @@ class MachineSession {
     );
   }
 
-  void notifyRpcResult({required bool timedOut}) {
-    if (!timedOut) {
-      _consecutiveTimeouts = 0;
-      return;
-    }
-    _consecutiveTimeouts++;
-    if (_consecutiveTimeouts >= _kConsecutiveTimeoutsToClose &&
-        _established &&
-        !_handshakeInFlight) {
-      _consecutiveTimeouts = 0;
-      // A session with no application-layer keys to rotate cannot repair
-      // itself in place: closing the link is the whole recovery, and the
-      // supervisor redials with a fresh session.
-      unawaited(relay.close());
-    }
-  }
-
   /// Detach [streamId]'s transport.
   void removeStream(String streamId) {
     _streams.remove(streamId);
@@ -506,8 +510,7 @@ class MachineSession {
   void _teardownSession() {
     // Drop all session state — called when the socket dies and when the agent
     // hands the session to another device. A session is per-connection; either
-    // event invalidates it. Clearing `_established` is also what silences the
-    // RPC-timeout close trigger, which is gated on a live session.
+    // event invalidates it.
     _established = false;
     _generation = null;
     _stopLiveness();
@@ -577,7 +580,6 @@ class MachineSession {
     _established = true;
     _lastRecv = DateTime.now();
     _missedPongs = 0;
-    _consecutiveTimeouts = 0;
     _startLiveness();
     if (!_readyCompleter.isCompleted) _readyCompleter.complete();
     if (!_established$.isClosed) _established$.add(null);
@@ -612,6 +614,9 @@ class MachineSession {
     _missedPongs = 0;
   }
 
+  /// The app's own wedge probe: a bridge whose event loop is stuck but whose
+  /// QUIC stack still acks would otherwise look alive forever. A dead bridge
+  /// is caught instead by `kPeerQuicMaxIdleTimeout` closing the connection.
   void _checkLiveness() {
     if (_disposed || !_established) return;
     if (_handshakeInFlight) return;
@@ -888,7 +893,7 @@ class MachineSession {
     final gen = _generation;
     final type = obj['type'] as String?;
     if (gen == null) {
-      _dropped('tx', 'no-e2e-session', channel: 'control', msgType: type);
+      _dropped('tx', 'no-established-session', channel: 'control', msgType: type);
       // This path carries ping and pong — the frames the peer reads as proof
       // we are alive. Losing one is indistinguishable at the far end from a
       // link that has gone dead, so it must never be diagnosed only from an
@@ -1085,6 +1090,24 @@ Duration _remainingUntil(DateTime deadline) {
   return left.isNegative ? Duration.zero : left;
 }
 
+/// Completes when [future] settles or [wait] elapses, whichever is first —
+/// never with [future]'s error, since a caller bounded by [wait] only wants to
+/// know when to stop waiting. [future] itself is never cancelled and keeps
+/// running to its own conclusion; the timer is cancelled the moment it
+/// settles, so it never outlives this call.
+Future<void> _firstOf(Future<void> future, Duration wait) {
+  final completer = Completer<void>();
+  Timer? timer;
+  void settle() {
+    timer?.cancel();
+    if (!completer.isCompleted) completer.complete();
+  }
+
+  future.then((_) => settle(), onError: (Object _) => settle());
+  timer = Timer(wait, settle);
+  return completer.future;
+}
+
 /// The session-stream (control-plane) or one project's [AgentTransport] view
 /// over a [MachineSession]. Interface-compatible with the pre-A4 transport:
 /// services and `BufferedAgentTransport` RPC plumbing are unchanged; `send()`
@@ -1128,6 +1151,18 @@ class StreamTransport extends BufferedAgentTransport {
   int _reopenAttempt = 0;
   Future<void> _sendChain = Future<void>.value();
 
+  /// Per-project-stream RPC-timeout accounting (meaningful only when
+  /// [projectId] is non-null). Bumped on every fresh bind so an outcome from a
+  /// binding this transport has since left behind — a superseded reopen — can
+  /// never count against the current one.
+  int _bindEpoch = 0;
+  int _timeoutStreak = 0;
+
+  /// Consecutive health resets with no answered RPC in between — what
+  /// [_onOpen] uses to back the reopen off instead of hammering a stream that
+  /// keeps timing out.
+  int _healthResets = 0;
+
   /// [MachineSession.openProject] calls currently waiting on this transport.
   int _openCallers = 0;
 
@@ -1161,7 +1196,7 @@ class StreamTransport extends BufferedAgentTransport {
     // timeout to report what is already known. Nothing is lost, since every
     // attached stream is refreshed on each (re)establish.
     if (!session.isEstablished) return;
-    await _fetchSnapshot(timeout: session.snapshotTimeout * 2);
+    await _fetchSnapshot(wait: session.snapshotTimeout * 2);
   }
 
   @override
@@ -1207,7 +1242,6 @@ class StreamTransport extends BufferedAgentTransport {
     StackTrace? stack;
     try {
       await _attemptBind(startMessage, _remainingUntil(deadline));
-      _reopenAttempt = 0;
     } catch (e, s) {
       error = e;
       stack = s;
@@ -1508,11 +1542,23 @@ class StreamTransport extends BufferedAgentTransport {
     }
   }
 
-  /// Fresh bind (first ever, or a reopen): reset backoff, tell
-  /// [MachineSession.projectStreamEvents], then re-pull durable state — the
-  /// per-stream reconciliation checkpoint (see [refreshSnapshot]).
+  /// Fresh bind (first ever, or a reopen): bump the epoch that fences RPC
+  /// timeout/answer accounting to THIS binding, reset backoff unless a
+  /// still-unanswered run of health resets says the stream keeps failing,
+  /// tell [MachineSession.projectStreamEvents], then
+  /// re-pull durable state — the per-stream reconciliation checkpoint (see
+  /// [refreshSnapshot]).
+  ///
+  /// A stream that keeps timing out therefore reopens at 1 s, 2 s, 4 s … up to
+  /// [kProjectStreamReopenMaxBackoff] instead of hammering at 1 s; the first
+  /// answered RPC ([_noteAnswered]) clears [_healthResets] again.
+  /// [_reopenAtEstablish] zeroes [_reopenAttempt] itself for a fresh session,
+  /// unconditionally — that path starts clean regardless of what happened on
+  /// the last connection.
   void _onOpen() {
-    _reopenAttempt = 0;
+    _bindEpoch++;
+    _timeoutStreak = 0;
+    if (_healthResets == 0) _reopenAttempt = 0;
     if (!_openNotified) {
       _openNotified = true;
       if (!session._projectStreamEvents.isClosed) {
@@ -1624,31 +1670,89 @@ class StreamTransport extends BufferedAgentTransport {
 
   // --- RPC / hydration (shared by control and project transports) ----------
 
+  /// RPC failures a project stream's own health accounting must not read as
+  /// "the bridge answered": each already means this binding produced no
+  /// application reply, so folding one into [_noteAnswered] would let a
+  /// stream that cannot carry traffic at all look healthy. Any other code is
+  /// the bridge's own application error, which proves the stream carried a
+  /// reply.
+  static const _kLocalRpcFailureCodes = {
+    'E_TIMEOUT',
+    'E_SEND_FAILED',
+    'E_SESSION_DOWN',
+    'E_STREAM_RESET',
+    'E_DISPOSED',
+  };
+
   @override
   Future<Map<String, dynamic>> request(
     String method, {
     Map<String, dynamic>? params,
     Duration timeout = const Duration(seconds: 10),
-    bool countsTowardHealth = true,
   }) async {
+    final epoch = (projectId != null && _bound) ? _bindEpoch : null;
     try {
       final r = await super.request(method, params: params, timeout: timeout);
-      // Both outcomes are gated, not just the timeout: an exempt call's
-      // SUCCESS resetting the run would let a pull that is re-driven on every
-      // re-establishment keep clearing the evidence of a link that is failing
-      // every other RPC — the same loop wearing the opposite sign.
-      if (countsTowardHealth) session.notifyRpcResult(timedOut: false);
+      _noteAnswered(epoch);
       return r;
     } on RpcException catch (e) {
-      // ≥3 consecutive E_TIMEOUTs close the link. Skipped when the caller
-      // re-issues this same pull on every re-establishment — including the
-      // one that close itself causes — since folding those in makes the retry
-      // loop its own trigger (see the doc on [AgentTransport.request]).
-      if (countsTowardHealth) {
-        session.notifyRpcResult(timedOut: e.code == 'E_TIMEOUT');
+      if (e.code == 'E_TIMEOUT') {
+        _noteTimeout(epoch);
+      } else if (!_kLocalRpcFailureCodes.contains(e.code)) {
+        _noteAnswered(epoch);
       }
       rethrow;
     }
+  }
+
+  /// No-op for the control transport (whose [epoch] is always null) or for an
+  /// outcome from a binding this transport has since left behind — a
+  /// superseded reopen must not clear the streak the CURRENT binding is
+  /// counting.
+  void _noteAnswered(int? epoch) {
+    if (epoch == null || epoch != _bindEpoch) return;
+    _timeoutStreak = 0;
+    _healthResets = 0;
+  }
+
+  void _noteTimeout(int? epoch) {
+    if (epoch == null || epoch != _bindEpoch || !_bound) return;
+    _timeoutStreak++;
+    if (_timeoutStreak >= kProjectStreamTimeoutsToReset) _resetForHealth();
+  }
+
+  /// Three consecutive RPC timeouts on this project stream: reset and reopen
+  /// THAT stream only, never the link — the control transport's only
+  /// connection-level escape is the ping, and a project stream wedged while
+  /// every other stream is fine is not the whole session's problem.
+  void _resetForHealth() {
+    final stream = _peerStream;
+    session._log(
+      RelayLogLevel.warn,
+      'project stream reset after consecutive RPC timeouts',
+      fields: {
+        'streamId': streamId,
+        'projectId': projectId,
+        'timeouts': _timeoutStreak,
+        'healthResets': _healthResets + 1,
+      },
+    );
+    _timeoutStreak = 0;
+    _healthResets++;
+    if (stream != null) _quietly(stream.reset());
+    failAllPending(
+      code: 'E_STREAM_RESET',
+      message: 'project stream reset after repeated timeouts',
+    );
+    // Mirrors what `_onStreamEnded` does for the current stream: the old
+    // stream's later end is then stale and ignored, and its buffered records
+    // are dropped by the existing identity guard.
+    _bound = false;
+    _peerStream = null;
+    _emitClosed();
+    session._markNotReady(projectId!);
+    // A bind in flight owns its own failure and reopen.
+    if (session.isEstablished && _bindInFlight == null) _scheduleReopen();
   }
 
   /// Deliver a decoded message that the session (or this project's own
@@ -1790,6 +1894,13 @@ class StreamTransport extends BufferedAgentTransport {
 
   @override
   void noteOrphanResponse(String? requestId, String channel) {
+    // A late reply is proof the stream carried a request all the way to an
+    // answer, even though it arrived after this transport gave up waiting —
+    // the read loop only ever dispatches from the CURRENT bound stream (see
+    // `_runStream`'s `!_bound || !identical(_peerStream, stream)` guard), so
+    // an orphan did cross this binding. It clears the timeout streak but not
+    // `_healthResets`: a stream this slow is not yet proven healthy.
+    if (projectId != null && _bound) _timeoutStreak = 0;
     session.relay.netTap?.call({
       'op': 'frame',
       'dir': 'rx',
@@ -1826,13 +1937,14 @@ class StreamTransport extends BufferedAgentTransport {
   /// fragment cost the terminal its tab — a running session opened afterwards
   /// sat on "waiting for agent" with nothing left to deliver it.
   ///
-  /// The pull is retried on timeout, since a reply that lands after the wait
-  /// is discarded like any late RPC response. Only the first attempt is
-  /// awaited: the hydrators do not depend on the snapshot having landed (a
-  /// bundle built before it reads the frames live when they arrive), so they
-  /// must not wait out a bad link's retries.
+  /// One request carries the whole pull, under [MachineSession.snapshotDeadline]
+  /// — long enough that a reply landing after this call's own wait
+  /// ([MachineSession.snapshotTimeout]) is still applied rather than discarded
+  /// as late (see [_fetchSnapshot]). The hydrators do not depend on the
+  /// snapshot having landed (a bundle built before it reads the frames live
+  /// when they arrive), so they must not wait out a slow pull either.
   Future<void> refreshSnapshot() async {
-    await _fetchSnapshot(timeout: session.snapshotTimeout);
+    await _fetchSnapshot(wait: session.snapshotTimeout);
     redriveHydrators();
   }
 
@@ -1849,67 +1961,51 @@ class StreamTransport extends BufferedAgentTransport {
   /// tap.
   ///
   /// Shares [_fetchSnapshot]'s generation stamp, so a pull already airborne is
-  /// superseded rather than duplicated. The returned future completes when the
-  /// FIRST round trip settles, not when the snapshot lands: the retries run
-  /// detached, exactly as they do for [refreshSnapshot].
+  /// superseded rather than duplicated. The returned future completes when
+  /// the pull settles or this call's own wait elapses, whichever is first —
+  /// the pull itself keeps running to [MachineSession.snapshotDeadline]
+  /// regardless.
   Future<void> refreshDurableState() =>
-      _fetchSnapshot(timeout: session.snapshotTimeout);
+      _fetchSnapshot(wait: session.snapshotTimeout);
 
-  /// Round trips a pull gets before it is given up on, the first included.
-  /// Each retry doubles the previous wait, so the last one gives a slow reply
-  /// four times the room the first did.
-  static const _kSnapshotAttempts = 3;
-
-  /// Stamps each pull so the retries of a superseded one stop: a
-  /// (re)establish or a second bind starts a fresh pull on the live session,
-  /// and [dispose] ends them all.
+  /// Stamps each pull so a superseded one's reply is discarded rather than
+  /// applied: a (re)establish or a second bind starts a fresh pull on the
+  /// live session, and [dispose] ends them all.
   int _snapshotGen = 0;
 
-  Future<void> _fetchSnapshot({required Duration timeout}) async {
+  /// One `state.snapshot` request, under [MachineSession.snapshotDeadline].
+  /// [wait] only bounds how long THIS call waits for it — a reply landing
+  /// after [wait] but before the deadline is still applied, because the
+  /// request behind it is still pending. That is the point of the long
+  /// deadline: a caller that cannot wait moves on, but the eventual reply is
+  /// not wasted.
+  Future<void> _fetchSnapshot({required Duration wait}) {
     final gen = ++_snapshotGen;
-    if (await _pullSnapshot(timeout, attempt: 1)) return;
-    unawaited(_retrySnapshot(gen, timeout));
+    final pull = _pullSnapshot(gen);
+    return _firstOf(pull, wait);
   }
 
-  Future<void> _retrySnapshot(int gen, Duration timeout) async {
-    for (var attempt = 2; attempt <= _kSnapshotAttempts; attempt++) {
-      timeout *= 2;
-      if (gen != _snapshotGen || outbound.isClosed || !isEstablished) {
-        return;
-      }
-      if (await _pullSnapshot(timeout, attempt: attempt)) return;
-    }
-    session._log(
-      RelayLogLevel.warn,
-      'state.snapshot gave up; frames stay as they were until the next '
-      'establishment',
-      fields: {'streamId': streamId, 'attempts': _kSnapshotAttempts},
-    );
-  }
-
-  /// One `state.snapshot` round trip. True once the pull is settled — the
-  /// reply landed, or it failed in a way no retry changes (a pre-RPC agent, a
-  /// send that never left) — and false only on a timeout, the one failure a
-  /// slower second try can turn around.
-  Future<bool> _pullSnapshot(Duration timeout, {required int attempt}) async {
+  /// The pull itself. Goes through the counted [request], so a project
+  /// stream's pull counts once per binding like any other RPC. Never throws:
+  /// a timeout is logged and left for the next establishment, bind or
+  /// [refreshDurableState] call to re-ask; any other error leaves the cache as
+  /// it is.
+  Future<void> _pullSnapshot(int gen) async {
     const method = 'state.snapshot';
     const params = <String, dynamic>{
       'types': ['*'],
       'exclude': _kHeavyReplayTypes,
     };
     try {
-      // Only the first attempt counts toward the session's consecutive-timeout
-      // close trigger. A retry re-asks a question already counted, and letting
-      // it count too made the chain itself the trigger: three waits on a slow
-      // link forced a re-establish, the re-establish started a fresh chain, and the
-      // loop re-requested the reply forever over a link that could not carry
-      // it. A pull that lands still clears the counter — the session has just
-      // proven itself.
-      final counts = attempt == 1;
-      final snap = counts
-          ? await request(method, params: params, timeout: timeout)
-          : await super.request(method, params: params, timeout: timeout);
-      if (!counts) session.notifyRpcResult(timedOut: false);
+      final snap = await request(
+        method,
+        params: params,
+        timeout: session.snapshotDeadline,
+      );
+      // Superseded by a fresher pull, or the transport disposed while this
+      // one was in flight: leave the cache, outbound and readiness snooping
+      // untouched.
+      if (gen != _snapshotGen || _disposed) return;
       final frames = (snap['frames'] as List?) ?? const [];
       final fresh = <InboundMessage>[];
       for (final raw in frames) {
@@ -1932,21 +2028,16 @@ class StreamTransport extends BufferedAgentTransport {
           outbound.add(m);
         }
       }
-      return true;
     } on RpcException catch (e) {
-      // Leave the existing cache untouched either way.
-      if (e.code != 'E_TIMEOUT') return true;
+      if (e.code != 'E_TIMEOUT') return; // Leave the cache as it is.
       session._log(
         RelayLogLevel.info,
         'state.snapshot timed out',
         fields: {
           'streamId': streamId,
-          'timeoutMs': timeout.inMilliseconds,
-          'attempt': attempt,
-          'of': _kSnapshotAttempts,
+          'deadlineMs': session.snapshotDeadline.inMilliseconds,
         },
       );
-      return false;
     }
   }
 

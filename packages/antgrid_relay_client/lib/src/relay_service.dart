@@ -135,9 +135,11 @@ class RelayService {
   Stream<ErrorMessage> get errorStream => _errorController.stream;
 
   /// Peer-presence transitions derived from `peer-online`/`peer-offline` for
-  /// THIS machine (and a socket drop). Drives [MachineSession]'s
-  /// online-after-offline rekey trigger, and is the ONLY agent-presence signal —
-  /// the connection state tracks the socket, not the peer.
+  /// THIS machine (and a socket drop). Discovery only: presence tells a
+  /// consumer whether the bridge looks reachable, but no native link derives a
+  /// close or a restart from it — that stays QUIC's job and the app's own
+  /// wedge-probe ping (`MachineSession`). The ONLY agent-presence signal — the
+  /// connection state tracks the socket, not the peer.
   Stream<bool> get peerPresenceStream => _peerPresenceController.stream;
 
   AppState get currentState => _currentState;
@@ -629,9 +631,8 @@ class RelayService {
     // close the socket itself.
     _channel = null;
     // A socket drop makes the peer unreachable regardless of the grant — feed
-    // presence=false so consumers (ControlPlaneClient advert, MachineSession
-    // rekey arming) react without waiting for a peer-offline frame that a
-    // network drop never delivers.
+    // presence=false so consumers (ControlPlaneClient advert) react without
+    // waiting for a peer-offline frame that a network drop never delivers.
     if (!_peerPresenceController.isClosed) _peerPresenceController.add(false);
     _setState(
       _currentState.copyWith(

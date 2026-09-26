@@ -300,6 +300,7 @@ Future<MachineSession> establishSession(
   Map<String, dynamic> Function(String projectId)? projectStartMessageBuilder,
   Duration snapshotTimeout = const Duration(seconds: 5),
   Duration pingSilence = const Duration(seconds: kPingSilenceSeconds),
+  Duration? snapshotDeadline,
   RelayLogger? logger,
 }) async {
   final session = MachineSession(
@@ -309,6 +310,7 @@ Future<MachineSession> establishSession(
     projectStartMessageBuilder: projectStartMessageBuilder,
     snapshotTimeout: snapshotTimeout,
     pingSilence: pingSilence,
+    snapshotDeadline: snapshotDeadline ?? kSnapshotPullDeadline,
     logger: logger,
   );
   session.start();

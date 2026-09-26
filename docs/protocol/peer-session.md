@@ -184,7 +184,7 @@ transfer) are defined once in `packages/antgrid-wire/src/stream-open.ts` beside 
 Stage A wave A4 gives every project its own stream — `{kind:"project", projectId}`, no `checkoutId`: a
 project stream is per PROJECT, and checkout routing stays per message on it, unchanged. It replaces the
 `{s,m}` mux entirely: a bound stream carries no `s`/`m` envelope, one `AbMessage` is one record, and the
-session stream (§1a) is left carrying only the machine control plane: the hello, liveness, and
+session stream (§1a) is left carrying only the machine control plane: the hello, the app's wedge-probe ping and its pong, and
 machine-scoped verbs such as `agent:projects`, `stream-ready` and `control:result`. Admitted
 and routed by `ProjectStreamRegistry` (`bridge/src/project-streams.ts`), plugged into `PeerStreamAcceptor`
 as `handlers.project`, and exposed to `TerminalStreamRegistry`/`TunnelStreamRegistry` as
@@ -310,19 +310,26 @@ on the same link.
 
 ## 3. Session lifetime — no in-place rekey
 
-There is no live-session key material to rotate, so what used to be "rekey" is now "close the link":
-a phone-side liveness failure (missed pongs, a run of consecutive RPC
-timeouts while established) closes the `PeerLink` (`MachineSession.notifyRpcResult` /
-the ping/pong path, `machine_session.dart`) and the connection supervisor redials, going through
-admission (§1) and the hello (§2) again. Symmetrically, the bridge declares a session dead on missed
-pongs and drops it (`peer-session-owner.ts`), which the peer observes as its connection closing.
+There is no live-session key material to rotate, so what used to be "rekey" is now "close the link".
+Liveness is QUIC's: both endpoints run iroh 1.0's keep-alive (5s) and connection idle timeout (30s),
+recorded as `PEER_QUIC_KEEP_ALIVE_INTERVAL_MS`/`PEER_QUIC_MAX_IDLE_TIMEOUT_MS` and
+`kPeerQuicKeepAliveInterval`/`kPeerQuicMaxIdleTimeout` rather than set, because neither binding exposes a
+transport config. A peer that stops acking closes the connection on idle; the bridge retires it from
+`connection.closed()` (`peer/native-host-connection.ts`).
 
-This makes every liveness failure a full re-dial, including the
-authorization lease refresh — there is no cheaper in-connection recovery path left (Stage A deleted
-the credit window that used to wedge independently of liveness — §5). `MachineSession`
-fences sends/receives across a reconnect with a per-connection generation token
-(`_SessionGeneration`/`_generation`, `machine_session.dart`), not a key identity check, since there are
-no keys to compare.
+The app additionally sends `ping` after `kPingSilenceSeconds` of session-stream silence and closes the
+`PeerLink` after `kMaxMissedPongs` unanswered (`machine_session.dart`). Its only job is a bridge whose
+event loop is wedged while its QUIC stack still acks — QUIC idle already covers a dead one. The bridge
+answers `ping` with `pong` and never pings.
+
+RPC timeouts never close the link. Three consecutive timeouts on one project stream reset and reopen
+that stream alone, rerunning the bind resync (§1d); every other project, terminal, tunnel and upload
+stream is untouched. The control plane's only connection-level escape is the app's ping.
+
+Closing the link is still the whole recovery for the session, and the connection supervisor redials,
+going through admission (§1) and the hello (§2) again. `MachineSession` fences sends/receives across a
+reconnect with a per-connection generation token (`_SessionGeneration`/`_generation`,
+`machine_session.dart`), not a key identity check, since there are no keys to compare.
 
 `session-takeover` and the base class's capacity eviction are gone from the native path: `acceptPeer`'s
 own capacity cap (§1) is the only admission-time bound, and nothing sends a takeover notice any more.

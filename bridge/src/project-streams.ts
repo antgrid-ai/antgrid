@@ -178,7 +178,7 @@ export interface AttachStreamOpts {
    *  session is already established, so a drill-in stream resumes immediately. */
   onPeerOnline?: () => void;
   onPeerOffline?: () => void;
-  /** One app session ended (liveness, presence, eviction, socket close) while
+  /** One app session ended (QUIC idle close, presence, eviction, socket close) while
    *  others may still be attached. Distinct from `onPeerOffline`, which fires
    *  only when the LAST session is gone. */
   onPeerSessionGone?: (peerId: string) => void;

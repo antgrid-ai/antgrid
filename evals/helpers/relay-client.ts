@@ -317,6 +317,15 @@ export class RelayClient {
    *  clobber the fresh connection's `wsClosed`/`lastCloseCode`. */
   private wsGeneration = 0;
 
+  /** Every inbound session frame's `type`, in arrival order — lets a test
+   *  assert a negative (e.g. "no ping arrived" across an idle window) without
+   *  the frame having anywhere else to land, since the bridge never pings
+   *  and `established`/`pong` are otherwise consumed internally. */
+  private sessionFrameLog: string[] = [];
+  /** FIFO: `ping()` calls answer in the order their `pong` arrives, matching
+   *  the bridge's own single in-order session-frame writer. */
+  private pongWaiters: Array<{ sentAt: number; resolve: (rtMs: number) => void; timer: ReturnType<typeof setTimeout> }> = [];
+
   readonly deviceId: string;
   /** The ACCOUNT device the peer enrollment binds — `deviceId` may be a
    *  per-machine SLOT (`<transcriptDeviceId>#<machineDeviceId>`). Defaults to
@@ -1233,6 +1242,29 @@ export class RelayClient {
     connection.close(1n, []);
     return "connected";
   }
+  /** Sends a `{type:"ping"}` session frame and resolves with the round-trip
+   *  ms on the matching `pong` — the app's own wedge-probe, driven from an
+   *  eval so a test can confirm the bridge still answers after a long idle
+   *  window during which it sends no session frame of its own. */
+  ping(timeoutMs = 5_000): Promise<number> {
+    return new Promise((resolve, reject) => {
+      const sentAt = Date.now();
+      const timer = setTimeout(() => {
+        const idx = this.pongWaiters.findIndex((w) => w.timer === timer);
+        if (idx !== -1) this.pongWaiters.splice(idx, 1);
+        reject(new Error(`Timed out waiting for pong (${timeoutMs}ms)`));
+      }, timeoutMs);
+      this.pongWaiters.push({ sentAt, resolve, timer });
+      this.sendSessionFrame({ type: "ping" });
+    });
+  }
+
+  /** Every inbound session frame's `type`, in arrival order, since this
+   *  client was created. */
+  sessionFrameTypes(): string[] {
+    return [...this.sessionFrameLog];
+  }
+
   /** Resolve once the underlying socket has closed (true), or false on timeout.
    *  Observes relay-initiated supersession/close. */
   waitForClose(timeoutMs = 5_000): Promise<boolean> {
@@ -1280,6 +1312,7 @@ export class RelayClient {
   }
 
   private handleSessionFrame(obj: { type: string; attemptId?: string }): void {
+    this.sessionFrameLog.push(obj.type);
     switch (obj.type) {
       case "established":
         this.deliver(obj);
@@ -1287,8 +1320,14 @@ export class RelayClient {
       case "ping":
         if (this.established) this.sendSessionFrame({ type: "pong" });
         return;
-      case "pong":
+      case "pong": {
+        const waiter = this.pongWaiters.shift();
+        if (waiter) {
+          clearTimeout(waiter.timer);
+          waiter.resolve(Date.now() - waiter.sentAt);
+        }
         return;
+      }
       case "session-takeover":
         // Sent by the bridge to a session it is about to tear down. A bridge
         // now keeps one session per app device, so the only producer left is

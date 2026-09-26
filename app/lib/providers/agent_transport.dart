@@ -163,8 +163,8 @@ final agentTransportForProvider = FutureProvider.family<AgentTransport?, String>
 /// `project:start` + await its own stream-ready. No new socket, no
 /// per-project handshake, so the v2 drill-in race is gone. A liveness failure
 /// inside [MachineSession] closes the connection and re-dials through a fresh
-/// session hello rather than rekeying in place; live streams re-bind onto the
-/// new session with no invalidate here.
+/// session hello — a session has no in-place repair; live streams re-bind onto
+/// the new session with no invalidate here.
 ///
 /// Admission is ACCOUNT trust: there is no pair-request and no relay grant. The
 /// app connects with its own `kind:"app"` [DeviceRecord] identity, and the
