@@ -18,7 +18,7 @@ import 'package:antgrid/providers/sessions.dart';
 import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import 'package:antgrid/storage/first_run_store.dart';
-import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+import '../helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/agent_panel.dart';
 import 'package:antgrid/widgets/handler/handler_arm_explainer.dart';
 import 'package:antgrid/widgets/handler/handler_away_hint.dart';

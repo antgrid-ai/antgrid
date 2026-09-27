@@ -15,7 +15,7 @@ import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/providers/visible_surface.dart';
 import 'package:antgrid/screens/file_explorer_screen.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
-import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+import '../helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/file_viewer_router.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';

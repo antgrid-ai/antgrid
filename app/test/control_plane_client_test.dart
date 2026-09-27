@@ -5,7 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart'
     show RpcException;
 import 'package:antgrid/services/control_plane_client.dart';
-import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+import 'helpers/fake_agent_transport.dart';
 
 void main() {
   test('service-backed agents do not need an executable path', () {

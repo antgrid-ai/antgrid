@@ -18,7 +18,7 @@ import 'package:antgrid/services/pending_reply.dart';
 import 'package:antgrid/services/sessions_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import 'package:antgrid/storage/recent_agents_store.dart';
-import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+import '../helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/new_session/picker_sources.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';

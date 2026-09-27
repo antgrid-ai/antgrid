@@ -10,7 +10,7 @@ import 'package:antgrid/models/preview_models.dart';
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/services/preview_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
-import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+import '../helpers/fake_agent_transport.dart';
 import '../helpers/free_port.dart';
 import '../helpers/prefs_test_mock.dart';
 

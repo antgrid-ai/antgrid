@@ -14,7 +14,7 @@ import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/providers/sessions.dart';
 import 'package:antgrid/services/agent_session_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
-import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+import '../../helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/agent_transcript_view.dart';
 import 'package:antgrid/widgets/transcript/composer/rich_composer.dart';
 import 'package:antgrid/widgets/transcript/composer_selectors.dart';

@@ -10,7 +10,7 @@ import 'package:ghostty_vte_flutter/ghostty_vte_flutter.dart';
 import 'package:antgrid/models/terminal_models.dart';
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
-import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+import '../helpers/fake_agent_transport.dart';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import '../helpers/prefs_test_mock.dart';
 

@@ -13,7 +13,7 @@ import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/services/app_settings_service.dart';
 import 'package:antgrid/services/terminal_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
-import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+import '../helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/clipboard_image.dart';
 import 'package:antgrid/widgets/terminal_view_wrapper.dart';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart'

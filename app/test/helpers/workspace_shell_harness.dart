@@ -14,7 +14,7 @@ import 'package:antgrid/providers/device_provisioning.dart';
 import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/screens/app_shell.dart';
-import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+import 'fake_agent_transport.dart';
 import 'package:antgrid/window/window_chrome.dart';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart'
     show AgentTransport;

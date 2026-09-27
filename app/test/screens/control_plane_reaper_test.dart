@@ -19,7 +19,7 @@ import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/screens/app_shell.dart';
 import 'package:antgrid/services/account_agents_api.dart';
 import 'package:antgrid/services/control_plane_client.dart';
-import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+import '../helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/new_session/picker_sources.dart';
 
 import '../helpers/prefs_test_mock.dart';

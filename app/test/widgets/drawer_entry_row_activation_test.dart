@@ -7,7 +7,7 @@ import 'package:antgrid/providers/recent_agents.dart';
 import 'package:antgrid/services/account_agents_api.dart';
 import 'package:antgrid/services/control_plane_client.dart';
 import 'package:antgrid/storage/recent_agents_store.dart';
-import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+import '../helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/drawer_entry_row.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';

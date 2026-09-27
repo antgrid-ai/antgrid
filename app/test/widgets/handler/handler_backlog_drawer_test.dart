@@ -19,7 +19,7 @@ import 'package:antgrid/providers/first_run.dart';
 import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import 'package:antgrid/storage/first_run_store.dart';
-import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+import '../../helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/handler/handler_backlog_drawer.dart';
 import 'package:antgrid/widgets/handler/handler_instruction_composer.dart';
 import 'package:flutter/material.dart';

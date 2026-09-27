@@ -12,7 +12,7 @@ import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/providers/recent_sessions.dart';
 import 'package:antgrid/services/control_plane_client.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
-import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+import '../helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/agent_work_status_dot.dart';
 import 'package:antgrid/widgets/session_row.dart';
 import 'package:flutter/material.dart';

@@ -11,7 +11,7 @@ import 'package:antgrid/providers/relay_connection.dart';
 import 'package:antgrid/providers/ui_attention_providers.dart';
 import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/services/account_agents_api.dart';
-import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+import '../helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/new_session/picker_sources.dart';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 

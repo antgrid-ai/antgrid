@@ -10,7 +10,7 @@ import 'package:antgrid/providers/recent_sessions.dart';
 import 'package:antgrid/services/control_plane_client.dart';
 import 'package:antgrid/services/sessions_service.dart'
     show SessionOperationException;
-import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+import '../helpers/fake_agent_transport.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 

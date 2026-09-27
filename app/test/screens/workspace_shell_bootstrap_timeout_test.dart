@@ -7,7 +7,7 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+import '../helpers/fake_agent_transport.dart';
 import 'package:antgrid/providers/cached_sessions.dart';
 import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/models/session_target.dart';

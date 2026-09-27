@@ -13,7 +13,7 @@ import 'package:antgrid/providers/ui_attention_providers.dart';
 import 'package:antgrid/providers/visible_surface.dart';
 import 'package:antgrid/screens/file_explorer_screen.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
-import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+import '../helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/workspace_tab_bar.dart';
 import '../helpers/prefs_test_mock.dart';
 

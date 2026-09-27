@@ -3,7 +3,7 @@ import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/project/project_session_registry.dart';
 import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
-import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+import '../helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/session_row.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
