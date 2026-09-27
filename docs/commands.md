@@ -473,3 +473,39 @@ An export file is written to be pasted into a bug report, and it outlives
 the run, the window and the arm's own TTL. `--json` is the mode that withholds
 nothing: it goes to a pipe the operator is watching, not to a file they attach to
 a ticket a week later.
+
+## Iroh evidence gates
+
+Run from the repository root unless a directory is named. Dart/Flutter commands
+must run serially; never run bare root `bun test`.
+
+```powershell
+bun run --filter antgrid-wire test
+bun run --filter antgrid-relay test
+bun run --filter antgrid-web test
+bun run --filter antgrid-bridge test
+bun run --filter antgrid-evals test:evals
+bun run --filter antgrid-evals test:evals:native-soak
+```
+
+The default serialized eval sweep excludes gates that require a separately
+installed native binary. Resolve the stock relay from
+`ANTGRID_IROH_RELAY_BIN`, or `iroh-relay` on `PATH`
+(`cargo install iroh-relay --version 1.2.0 --locked --features server`), then
+run `bun run --filter antgrid-evals test:evals:iroh-relay-authorization`.
+Set `IROH_INTEROP_NATIVE_LIBRARY` to the verified Dart native library before
+running `test:evals:dart-client-e2e` and `test:evals:peer-resume`.
+Backend gates also require the existing PostgreSQL/Prisma test prerequisites.
+
+In `packages/antgrid_peer_transport`, run `dart analyze` and `dart test`.
+Configure the upstream signed native DLL through `iroh_quic:setup` or the
+verified prototype cache. Never use `--no-verify`. Cross-binding qualification
+against a real bridge is `test:evals:dart-client-e2e` and `test:evals:peer-resume`
+above, not a standalone script. They do not reach the raw NOT_READY admission
+refusal or the close on remote access switched off; those are proved over the
+TS binding only. The same package supplies app and CLI native code, and FRB
+disposal occurs only at process-final teardown.
+
+The native soak is intentionally excluded from the default eval sweep. It runs
+for 30 minutes unless its documented test-only duration override is set, records
+its seed, and must settle owned-resource counts after every fault cycle.

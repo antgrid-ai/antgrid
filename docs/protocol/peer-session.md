@@ -402,3 +402,29 @@ included; it is deliberately not part of the join key, since a hash-based pair (
 to match on. `streamId` is a per-connection stream LABEL, not a QUIC stream id (`"0"` for the session
 stream, the projectId for a project stream, the open frame's own `requestId`/`wsId` for a terminal,
 tunnel or upload stream) — both ends write it for every stream kind, on the same terms as `streamKind`.
+
+## 7. Lifecycle and interrupted commands
+
+Native shutdown first fences generations, dispatch, timers, and queued work.
+Graceful teardown has five seconds, followed by forced carrier closure and five
+seconds for ownership confirmation. A `cleanupIncomplete` result means the
+runtime still owns work or a carrier; keep the identity locked and do not start
+a replacement. Repeated stop calls share the same completion.
+
+An interrupted mutating request has three local outcomes: `notSent`,
+`confirmed`, or `outcomeUnknown`. A completed socket write is not execution
+confirmation. After `outcomeUnknown`, refresh authoritative state with reads
+and require a fresh user action before submitting another mutation. Never
+replay terminal input, reconnect hydration mutations, or host-restart recovery
+mutations automatically.
+
+Authorization refresh starts after roughly one third of the accepted lease,
+with jitter. Each request is bounded by ten seconds or the remaining lease,
+whichever is shorter. Backend failure, central reconnect, and native success do
+not move the original deadline. Denial, revocation, rotation, remote-access-off,
+or expiry fence dispatch immediately.
+
+Backend registration and lease code is not evidence that a deployed relay
+enforces admission. That needs the relay gate run against the deployed
+configuration, including an unregistered endpoint being denied, before staging
+preference can pass.
