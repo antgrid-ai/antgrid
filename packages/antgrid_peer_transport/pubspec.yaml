@@ -1,5 +1,5 @@
 name: antgrid_peer_transport
-description: Antgrid authenticated native peer transport (ELv2).
+description: Antgrid authenticated native peer transport (MPL-2.0).
 publish_to: none
 version: 0.1.0
 environment:

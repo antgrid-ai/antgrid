@@ -1,9 +1,9 @@
 # Antgrid peer transport
 
-ELv2, Flutter-free transport implementation shared by the app and standalone
-qualification CLI. Apache `antgrid_relay_client` supplies the `PeerLink` contract
-and E2E session machinery. Native transport never replaces application E2E or
-host command authorization.
+MPL-2.0, Flutter-free transport implementation shared by the app and standalone
+qualification CLI. `antgrid_relay_client` supplies the `PeerLink` contract and the
+peer session protocol. An authenticated connection never replaces host command
+authorization.
 
 The embedding process supplies protected `EndpointKeyStore` storage,
 device-authenticated enrollment HTTP requests, and an `AuthorizationLease`.
