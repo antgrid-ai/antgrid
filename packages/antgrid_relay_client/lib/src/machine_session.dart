@@ -1052,6 +1052,9 @@ class StreamTransport extends BufferedAgentTransport {
   int _bindEpoch = 0;
   int _timeoutStreak = 0;
 
+  /// The latest bind's [refreshSnapshot]; [connect] awaits it (see there).
+  Future<void>? _bindRefresh;
+
   /// Consecutive health resets with no answered RPC in between — what
   /// [_onOpen] uses to back the reopen off instead of hammering a stream that
   /// keeps timing out.
@@ -1080,9 +1083,12 @@ class StreamTransport extends BufferedAgentTransport {
   Future<void> connect() async {
     setState(TransportState.connected);
     if (projectId != null) {
-      // The bind that produced this (bound) transport already ran
-      // refreshSnapshot(); an unbound one has nothing to pull yet and will
-      // when it binds.
+      // The bind that produced this transport started refreshSnapshot(); wait
+      // for it, because its redrive bumps establishmentEpoch. A service built
+      // before that bump stamps its first requests with the old epoch and then
+      // drops their replies as stale, so an awaited sessions:list times out.
+      // An unbound transport has nothing to pull yet and will when it binds.
+      await _bindRefresh;
       return;
     }
     // Seed durable state — but only when the session can carry the request:
@@ -1445,7 +1451,7 @@ class StreamTransport extends BufferedAgentTransport {
         session._projectStreamEvents.add((projectId: projectId!, open: true));
       }
     }
-    unawaited(refreshSnapshot());
+    unawaited(_bindRefresh = refreshSnapshot());
   }
 
   /// Idempotent "the stream is not open any more" notice — called from BOTH

@@ -101,6 +101,47 @@ void main() {
     });
   });
 
+  group('connect', () {
+    // A service built on the transport stamps its requests with the epoch it
+    // reads after connect(); if the bind's snapshot bumped it later, every
+    // reply to those requests would be dropped as stale.
+    test('returns only after the bind\'s snapshot has bumped the '
+        'establishment epoch', () async {
+      await establishReady('proj-a');
+      final opening = session.openProject('proj-a', {
+        'type': 'project:start',
+        'projectId': 'proj-a',
+      });
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      final stream = relay.openedStreams.single;
+      stream.injectStreamReady('proj-a');
+      final transport = await opening;
+
+      var connected = false;
+      final connecting = transport.connect().then((_) => connected = true);
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(connected, isFalse,
+          reason: 'the bind\'s state.snapshot is still unanswered');
+
+      final snapshot = stream.sent
+          .map((r) => jsonDecode(utf8.decode(r)) as Map<String, dynamic>)
+          .firstWhere((m) => m['method'] == 'state.snapshot');
+      final epochBefore = transport.establishmentEpoch;
+      stream.injectJson({
+        'type': 'response',
+        'requestId': snapshot['requestId'],
+        'ok': true,
+        'result': {'frames': <Object>[]},
+      });
+      await connecting;
+
+      expect(transport.establishmentEpoch, greaterThan(epochBefore));
+      final epochAtConnect = transport.establishmentEpoch;
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(transport.establishmentEpoch, epochAtConnect);
+    });
+  });
+
   group('reopen', () {
     test('a stream that ends while still wanted backs off, then re-asks and '
         'rebinds the SAME transport once a fresh ready notice answers it',
