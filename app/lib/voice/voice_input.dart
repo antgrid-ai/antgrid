@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -6,10 +7,13 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../providers/agent_transport.dart';
+import '../providers/demo_mode.dart';
 import '../providers/sessions.dart';
 import '../util/detached.dart';
+import 'sherpa_speech_engine.dart';
 import 'simulated_speech_engine.dart';
 import 'speech_engine.dart';
+import 'voice_model_store.dart';
 
 enum VoicePhase {
   idle,
@@ -37,10 +41,15 @@ class VoiceDraft {
 }
 
 class VoiceInputController extends ChangeNotifier with WidgetsBindingObserver {
-  VoiceInputController(this._engine) {
+  VoiceInputController(this._default) : _engine = _default {
     WidgetsBinding.instance.addObserver(this);
   }
+
+  /// The platform's engine, owned by [speechEngineProvider]; [_engine] differs
+  /// only while the debug harness has swapped in a scenario.
+  final SpeechEngine _default;
   SpeechEngine _engine;
+  bool get hasRealEngine => _default is! SimulatedSpeechEngine;
   SpeechEngine get engine => _engine;
   final Map<VoiceTarget, VoiceDraft> _drafts = {};
   VoiceDraft draft(VoiceTarget target) =>
@@ -76,10 +85,22 @@ class VoiceInputController extends ChangeNotifier with WidgetsBindingObserver {
   /// Debug harness only: swaps in a fresh simulated engine for [value].
   void configure(VoiceScenario value) {
     if (active != null) return;
-    _prepare?.cancel();
-    _engine = SimulatedSpeechEngine(value);
+    _swap(SimulatedSpeechEngine(value));
     availability = SimulatedSpeechEngine.initial(value);
     notifyListeners();
+  }
+
+  /// Leaves the debug harness for the platform's engine.
+  Future<void> useDefaultEngine() async {
+    if (active != null) return;
+    _swap(_default);
+    await refresh();
+  }
+
+  void _swap(SpeechEngine next) {
+    _prepare?.cancel();
+    if (!identical(_engine, _default)) _engine.dispose();
+    _engine = next;
   }
 
   void start(VoiceTarget target) {
@@ -283,6 +304,7 @@ class VoiceInputController extends ChangeNotifier with WidgetsBindingObserver {
     _disposed = true;
     _release();
     _prepare?.cancel();
+    if (!identical(_engine, _default)) _engine.dispose();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -292,10 +314,20 @@ String terminalDictationText(String text) => text
     .replaceAll(RegExp(r'[\r\n\t\u2028\u2029]+'), ' ')
     .replaceAll(RegExp(r'[\x00-\x1f\x7f-\x9f]'), '');
 
-/// Every platform runs the simulator until a real engine lands for it.
-final speechEngineProvider = Provider<SpeechEngine>(
-  (ref) => SimulatedSpeechEngine(),
-);
+/// Platforms without a real engine yet run the simulator. So do the demo,
+/// which must never write to disk, and the test suite, which has no
+/// path_provider or microphone plugin.
+final speechEngineProvider = Provider<SpeechEngine>((ref) {
+  final real =
+      (Platform.isWindows || Platform.isLinux) &&
+      !ref.watch(demoModeProvider) &&
+      !Platform.environment.containsKey('FLUTTER_TEST');
+  final engine = real
+      ? SherpaSpeechEngine(VoiceModelStore(voiceModelsRoot))
+      : SimulatedSpeechEngine();
+  ref.onDispose(engine.dispose);
+  return engine;
+});
 
 final voiceInputProvider = Provider<VoiceInputController>((ref) {
   final controller = VoiceInputController(ref.watch(speechEngineProvider));

@@ -104,6 +104,11 @@ dependencies:
   super_drag_and_drop: ^0.9.1
   in_app_update: ^4.2.3
   device_info_plus: ^11.5.0
+  # On-device dictation (lib/voice/): mic PCM capture and the speech models.
+  # sherpa_onnx is federated, so its Android libs ship in every APK on purpose
+  # — it is the fallback on phones with no on-device OS recognizer.
+  record: ^7.1.1
+  sherpa_onnx: ^1.13.8
   window_manager: ^0.5.2
   # macOS in-place updates via Sparkle (Windows uses the Microsoft Store
   # instead — see lib/update/). Feed: appcast.xml on the antgrid repo releases.

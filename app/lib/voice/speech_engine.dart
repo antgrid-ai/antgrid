@@ -61,4 +61,5 @@ abstract interface class SpeechEngine {
   void start(int capture, void Function(SpeechEvent) emit);
   void stop();
   void cancel();
+  void dispose();
 }

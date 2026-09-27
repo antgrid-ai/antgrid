@@ -135,4 +135,7 @@ class SimulatedSpeechEngine implements SpeechEngine {
     _timer?.cancel();
     _timer = null;
   }
+
+  @override
+  void dispose() => cancel();
 }

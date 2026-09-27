@@ -11,6 +11,7 @@ import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_text_field.dart';
 import '../util/detached.dart';
 import '../widgets/transcript/composer/composer_controller.dart';
+import 'sherpa_speech_engine.dart';
 import 'simulated_speech_engine.dart';
 import 'speech_engine.dart';
 import 'voice_composer_binding.dart';
@@ -34,7 +35,9 @@ class VoiceMic extends ConsumerWidget {
               ? 'Stop dictation'
               : d.text.isNotEmpty
               ? 'Review dictation below'
-              : 'Start dictation (simulated)',
+              : controller.engine is SimulatedSpeechEngine
+              ? 'Start dictation (simulated)'
+              : 'Start dictation',
           onTap:
               d.phase == VoicePhase.finalizing || d.text.isNotEmpty && !d.busy
               ? null
@@ -47,7 +50,7 @@ class VoiceMic extends ConsumerWidget {
                   if (!controller.canCapture) {
                     detached(
                       'Voice',
-                      'show simulated setup',
+                      'show voice setup',
                       () => showAbAdaptiveSheet<void>(
                         context,
                         child: VoiceSetup(
@@ -131,6 +134,7 @@ class _VoicePanelState extends ConsumerState<VoicePanel> {
           );
         }
         if (d.busy) _followLiveText(d.text);
+        final simulated = _voice.engine is SimulatedSpeechEngine;
         final status = switch (d.phase) {
           VoicePhase.listening =>
             'Listening… ${d.seconds ~/ 60}:${(d.seconds % 60).toString().padLeft(2, '0')}',
@@ -146,10 +150,12 @@ class _VoicePanelState extends ConsumerState<VoicePanel> {
             children: [
               Semantics(
                 liveRegion: true,
-                label: '${d.phase.name}, simulated dictation',
+                label: simulated
+                    ? '${d.phase.name}, simulated dictation'
+                    : '${d.phase.name}, dictation',
                 excludeSemantics: true,
                 child: Text(
-                  '$status · Simulated',
+                  simulated ? '$status · Simulated' : status,
                   style: AbTokens.sansStyle(color: context.antgrid.accent),
                 ),
               ),
@@ -303,6 +309,17 @@ class _VoiceSetupState extends State<VoiceSetup> {
         SpeechReadiness.needsModel || SpeechReadiness.unavailable => false,
       };
       final downloadMb = (c.availability.downloadBytes / 1e6).round();
+      final sherpa = switch (c.engine) {
+        final SherpaSpeechEngine e => e,
+        _ => null,
+      };
+      final simulated = sherpa == null;
+      final modelLine = sherpa == null
+          ? installed
+                ? 'Model: simulated, ready · Storage: 0 B'
+                : 'Model: simulated, setup required · Download: 0 B'
+          : 'Models: ${sherpa.models.map((m) => m.label).join(' + ')} · '
+                '${installed ? 'installed' : 'download $downloadMb MB'}';
       return Focus(
         focusNode: _focus,
         autofocus: true,
@@ -351,26 +368,39 @@ class _VoiceSetupState extends State<VoiceSetup> {
                   ],
                 ),
                 Text(
-                  'Simulated speech. No microphone access, audio storage, network requests, or real model downloads. Review text before sending or inserting.',
+                  simulated
+                      ? 'Simulated speech. No microphone access, audio storage, network requests, or real model downloads. Review text before sending or inserting.'
+                      : 'Speech is recognized on this device. Audio is never stored or sent anywhere; the models download once from Hugging Face. Review text before sending or inserting.',
                   style: AbTokens.sansStyle(),
                 ),
                 const SizedBox(height: AbTokens.space12),
                 Text(
-                  'Language: English · Input: simulated microphone',
+                  'Language: English · Input: '
+                  '${simulated ? 'simulated microphone' : 'default microphone'}',
                   style: AbTokens.sansStyle(),
                 ),
-                Text(
-                  installed
-                      ? 'Model: simulated, ready · Storage: 0 B'
-                      : 'Model: simulated, setup required · Download: 0 B',
-                  style: AbTokens.sansStyle(),
-                ),
+                Text(modelLine, style: AbTokens.sansStyle()),
                 const SizedBox(height: AbTokens.space12),
                 Text('Test scenario', style: AbTokens.sansStyle()),
                 Wrap(
                   spacing: AbTokens.space8,
                   runSpacing: AbTokens.space8,
                   children: [
+                    if (c.hasRealEngine)
+                      AbButton(
+                        wrapLabel: true,
+                        label: '${simulated ? '' : '✓ '}real engine',
+                        onTap: c.active != null
+                            ? null
+                            : () {
+                                if (d.text.isEmpty) d.phase = VoicePhase.idle;
+                                detached(
+                                  'Voice',
+                                  'use real speech engine',
+                                  c.useDefaultEngine,
+                                );
+                              },
+                      ),
                     for (final scenario in VoiceScenario.values)
                       AbButton(
                         wrapLabel: true,
@@ -412,17 +442,21 @@ class _VoiceSetupState extends State<VoiceSetup> {
                 const SizedBox(height: AbTokens.space12),
                 if (d.phase == VoicePhase.preparing)
                   Text(
-                    'Preparing simulated model… ${(d.progress * 100).round()}%',
+                    'Preparing ${simulated ? 'simulated ' : ''}model… ${(d.progress * 100).round()}%',
                     style: AbTokens.sansStyle(),
                   ),
                 if (d.phase == VoicePhase.downloading)
                   Text(
-                    'Downloading (simulated)… ${(d.progress * downloadMb).round()} / $downloadMb MB. No data is transferred.',
+                    simulated
+                        ? 'Downloading (simulated)… ${(d.progress * downloadMb).round()} / $downloadMb MB. No data is transferred.'
+                        : 'Downloading… ${(d.progress * downloadMb).round()} / $downloadMb MB. Cancel keeps what has arrived; setup resumes from there.',
                     style: AbTokens.sansStyle(),
                   ),
                 if (d.phase == VoicePhase.denied)
                   Text(
-                    'Microphone access denied (simulated). Choose another scenario to retry.',
+                    simulated
+                        ? 'Microphone access denied (simulated). Choose another scenario to retry.'
+                        : 'Microphone access is blocked. Allow it in the system privacy settings, then try again.',
                     style: AbTokens.sansStyle(),
                   ),
                 if (d.message != null)
@@ -439,12 +473,26 @@ class _VoiceSetupState extends State<VoiceSetup> {
                     ),
                     if (installed)
                       AbButton(
-                        label: 'Remove simulated model',
+                        label: simulated
+                            ? 'Remove simulated model'
+                            : 'Remove models',
                         wrapLabel: true,
-                        onTap: () =>
-                            c.configure(c.scenario ?? VoiceScenario.streaming),
+                        onTap: c.active != null
+                            ? null
+                            : sherpa == null
+                            ? () => c.configure(
+                                c.scenario ?? VoiceScenario.streaming,
+                              )
+                            : () => detached(
+                                'Voice',
+                                'remove speech models',
+                                () async {
+                                  await sherpa.removeModels();
+                                  await c.refresh();
+                                },
+                              ),
                       ),
-                    if (d.phase == VoicePhase.denied)
+                    if (d.phase == VoicePhase.denied && simulated)
                       AbButton(
                         label: 'Simulate enabling microphone',
                         wrapLabel: true,
@@ -463,7 +511,9 @@ class _VoiceSetupState extends State<VoiceSetup> {
                             ? 'Back to review'
                             : !installed
                             ? 'Set up'
-                            : 'Allow & start (simulated)',
+                            : simulated
+                            ? 'Allow & start (simulated)'
+                            : 'Start',
                         onTap: () {
                           if (d.text.isNotEmpty) {
                             Navigator.of(context).pop();
