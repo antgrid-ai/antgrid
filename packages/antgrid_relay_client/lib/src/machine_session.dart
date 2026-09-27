@@ -230,7 +230,7 @@ class MachineSession {
     if (existing != null) return existing;
     final st = StreamTransport._control(this);
     _streams[kSessionStreamLabel] = st;
-    if (_established) unawaited(st.refreshSnapshot());
+    if (_established) st._establish();
     return st;
   }
 
@@ -535,7 +535,7 @@ class MachineSession {
     // once this future resolves — nothing here needs to reopen it. Only the
     // control transport, if already created, needs its snapshot kicked here.
     final control = _streams[kSessionStreamLabel];
-    if (control != null) unawaited(control.refreshSnapshot());
+    control?._establish();
   }
 
   // --- liveness -------------------------------------------------------------
@@ -1062,9 +1062,6 @@ class StreamTransport extends BufferedAgentTransport {
   int _bindEpoch = 0;
   int _timeoutStreak = 0;
 
-  /// The latest bind's [refreshSnapshot]; [connect] awaits it (see there).
-  Future<void>? _bindRefresh;
-
   /// Consecutive health resets with no answered RPC in between — what
   /// [_onOpen] uses to back the reopen off instead of hammering a stream that
   /// keeps timing out.
@@ -1092,15 +1089,9 @@ class StreamTransport extends BufferedAgentTransport {
   @override
   Future<void> connect() async {
     setState(TransportState.connected);
-    if (projectId != null) {
-      // The bind that produced this transport started refreshSnapshot(); wait
-      // for it, because its redrive bumps establishmentEpoch. A service built
-      // before that bump stamps its first requests with the old epoch and then
-      // drops their replies as stale, so an awaited sessions:list times out.
-      // An unbound transport has nothing to pull yet and will when it binds.
-      await _bindRefresh;
-      return;
-    }
+    // A project transport's pull belongs to its bind (see [_onOpen]); an
+    // unbound one has nothing to pull yet.
+    if (projectId != null) return;
     // Seed durable state — but only when the session can carry the request:
     // without keys sendOnSession drops it and the RPC would burn its full
     // timeout to report what is already known. Nothing is lost, since every
@@ -1444,9 +1435,8 @@ class StreamTransport extends BufferedAgentTransport {
   /// Fresh bind (first ever, or a reopen): bump the epoch that fences RPC
   /// timeout/answer accounting to THIS binding, reset backoff unless a
   /// still-unanswered run of health resets says the stream keeps failing,
-  /// tell [MachineSession.projectStreamEvents], then
-  /// re-pull durable state — the per-stream reconciliation checkpoint (see
-  /// [refreshSnapshot]).
+  /// tell [MachineSession.projectStreamEvents], then begin the establishment
+  /// (see [_establish]).
   ///
   /// A stream that keeps timing out therefore reopens at 1 s, 2 s, 4 s … up to
   /// [kProjectStreamReopenMaxBackoff] instead of hammering at 1 s; the first
@@ -1461,7 +1451,7 @@ class StreamTransport extends BufferedAgentTransport {
         session._projectStreamEvents.add((projectId: projectId!, open: true));
       }
     }
-    unawaited(_bindRefresh = refreshSnapshot());
+    _establish();
   }
 
   /// Idempotent "the stream is not open any more" notice — called from BOTH
@@ -1768,7 +1758,19 @@ class StreamTransport extends BufferedAgentTransport {
   /// when they arrive), so they must not wait out a slow pull either.
   Future<void> refreshSnapshot() async {
     await _fetchSnapshot(wait: session.snapshotTimeout);
-    redriveHydrators();
+    replayHydrators();
+  }
+
+  /// A new establishment: the session's own for the control transport, a bind
+  /// for a project transport. The epoch moves NOW, synchronously, while only
+  /// the reconciliation waits for the pull ([refreshSnapshot]). A service
+  /// sending in the gap stamps its request with the epoch its reply is later
+  /// compared against, and a frame pushed in the gap is recorded under the
+  /// establishment it actually arrived on; with the bump deferred to the
+  /// pull's end, both were discarded as stale.
+  void _establish() {
+    beginEstablishment();
+    unawaited(refreshSnapshot());
   }
 
   /// Re-pull the durable state alone, leaving the tier-3 hydrators as they are.

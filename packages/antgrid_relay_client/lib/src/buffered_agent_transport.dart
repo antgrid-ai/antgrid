@@ -268,15 +268,24 @@ abstract class BufferedAgentTransport implements AgentTransport {
   /// absent.
   void unhydrate(String key) => _hydrators.remove(key);
 
-  /// Replay every registered hydrator. Subclasses call this on each
-  /// establishment: [LocalTransport] once after connect (born established),
-  /// a [StreamTransport] from `refreshSnapshot` — the session's establishment
-  /// for the control transport, each bind for a project transport. One failing hydrator never blocks the others.
+  /// A new establishment, then a replay of every registered hydrator.
+  /// [LocalTransport] calls this once after connect (born established). A
+  /// [StreamTransport] splits the two, because it replays only after the
+  /// establishment's snapshot pull settles and the epoch cannot wait that long.
   void redriveHydrators() {
-    // Bumped BEFORE the replay, so a hydrator running as part of this
-    // establishment already sees the new epoch and re-pulls unconditionally
-    // rather than claiming a revision the previous agent issued.
-    _establishmentEpoch++;
+    beginEstablishment();
+    replayHydrators();
+  }
+
+  /// Advance [establishmentEpoch]. Call at the moment the transport can first
+  /// carry traffic on the new establishment, before anything is sent on it: a
+  /// request or pushed frame stamped in between carries the previous epoch
+  /// and is then discarded as stale by every service that compares it.
+  void beginEstablishment() => _establishmentEpoch++;
+
+  /// Replay every registered hydrator without advancing the epoch. One
+  /// failing hydrator never blocks the others.
+  void replayHydrators() {
     for (final run in _hydrators.values) {
       unawaited(_runHydrator(run));
     }

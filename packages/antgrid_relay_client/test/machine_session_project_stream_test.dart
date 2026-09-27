@@ -101,12 +101,18 @@ void main() {
     });
   });
 
-  group('connect', () {
-    // A service built on the transport stamps its requests with the epoch it
-    // reads after connect(); if the bind's snapshot bumped it later, every
-    // reply to those requests would be dropped as stale.
-    test('returns only after the bind\'s snapshot has bumped the '
-        'establishment epoch', () async {
+  group('establishment epoch', () {
+    // A service stamps each request with the epoch it reads when sending and
+    // drops a reply whose stamp no longer matches. The epoch must therefore
+    // move when the bind makes the stream usable, not when the bind's
+    // snapshot answers: a request sent in between would otherwise carry the
+    // old epoch and have its reply discarded as stale.
+    Map<String, dynamic> snapshotRequest(FakePeerStream stream) => stream.sent
+        .map((r) => jsonDecode(utf8.decode(r)) as Map<String, dynamic>)
+        .lastWhere((m) => m['method'] == 'state.snapshot');
+
+    test('moves at the bind; connect() and the snapshot reply leave it be',
+        () async {
       await establishReady('proj-a');
       final opening = session.openProject('proj-a', {
         'type': 'project:start',
@@ -117,28 +123,50 @@ void main() {
       stream.injectStreamReady('proj-a');
       final transport = await opening;
 
-      var connected = false;
-      final connecting = transport.connect().then((_) => connected = true);
-      await Future<void>.delayed(const Duration(milliseconds: 20));
-      expect(connected, isFalse,
-          reason: 'the bind\'s state.snapshot is still unanswered');
+      expect(transport.establishmentEpoch, 1,
+          reason: 'the bind itself is the establishment');
+      await transport.connect().timeout(const Duration(milliseconds: 100));
 
-      final snapshot = stream.sent
-          .map((r) => jsonDecode(utf8.decode(r)) as Map<String, dynamic>)
-          .firstWhere((m) => m['method'] == 'state.snapshot');
-      final epochBefore = transport.establishmentEpoch;
       stream.injectJson({
         'type': 'response',
-        'requestId': snapshot['requestId'],
+        'requestId': snapshotRequest(stream)['requestId'],
         'ok': true,
         'result': {'frames': <Object>[]},
       });
-      await connecting;
-
-      expect(transport.establishmentEpoch, greaterThan(epochBefore));
-      final epochAtConnect = transport.establishmentEpoch;
       await Future<void>.delayed(const Duration(milliseconds: 20));
-      expect(transport.establishmentEpoch, epochAtConnect);
+      expect(transport.establishmentEpoch, 1);
+    });
+
+    test('a reopen moves it at the rebind, before its snapshot answers',
+        () async {
+      await establishReady(
+        'proj-a',
+        projectStartMessageBuilder: (pid) => {
+          'type': 'project:start',
+          'projectId': pid,
+        },
+      );
+      final opening = session.openProject('proj-a', {
+        'type': 'project:start',
+        'projectId': 'proj-a',
+      });
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      relay.openedStreams.single.injectStreamReady('proj-a');
+      final transport = await opening;
+      final firstEpoch = transport.establishmentEpoch;
+
+      relay.openedStreams.single.end();
+      await Future<void>.delayed(const Duration(milliseconds: 1200));
+      injectReadyNotice('proj-a');
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      final reopened = relay.openedStreams[1];
+      reopened.injectStreamReady('proj-a');
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      expect(transport.isProjectBound, isTrue);
+      expect(snapshotRequest(reopened), isNotNull);
+      expect(transport.establishmentEpoch, firstEpoch + 1,
+          reason: "the rebind's snapshot is still unanswered");
     });
   });
 
