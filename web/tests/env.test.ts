@@ -23,6 +23,14 @@ describe("loadEnv", () => {
   test("Iroh relay discovery is explicit HTTPS and private policy targets stay separate", () => {
     expect(loadEnv(baseSource).IROH_RELAY_URLS).toEqual([]);
     expect(loadEnv(baseSource).PEER_POLICY_TARGETS).toEqual([]);
+    const target = { url: "http://relay-blue:8080/internal/peer-policy", secret: "0123456789abcdef" };
+    expect(loadEnv({ ...baseSource, PEER_POLICY_TARGETS: JSON.stringify([target]) }).PEER_POLICY_TARGETS)
+      .toEqual([target]);
+    // Nothing answers any other path, and one unanswered target holds every
+    // row pending, so it must fail the boot rather than the outbox.
+    for (const url of ["http://iroh:9001/internal/disconnect", "http://relay-blue:8080/internal/revoke"]) {
+      expect(() => loadEnv({ ...baseSource, PEER_POLICY_TARGETS: JSON.stringify([{ ...target, url }]) })).toThrow();
+    }
     expect(loadEnv({ ...baseSource, IROH_RELAY_URLS: "https://relay.example/" }).IROH_RELAY_URLS).toEqual(["https://relay.example/"]);
     for (const url of ["http://relay.example/", "https://user:secret@relay.example/", "https://relay.example/?token=secret"]) {
       expect(() => loadEnv({ ...baseSource, IROH_RELAY_URLS: url })).toThrow();

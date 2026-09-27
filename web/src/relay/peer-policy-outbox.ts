@@ -5,21 +5,23 @@ import { createHmac } from "node:crypto";
 import { z } from "zod";
 import type { DB } from "../db/index.js";
 
+// Every target must be a central relay's receiver. A row is delivered only
+// once ALL targets acknowledge it, so a target nothing answers (such as a
+// retired relay's admin route) would hold every revocation pending forever;
+// refusing it here fails web's boot instead.
 export const PeerPolicyTargetsSchema = z.array(z.strictObject({
   url: z.url().refine((value) => {
     const url = new URL(value);
     return ["https:", "http:"].includes(url.protocol) && !url.username && !url.password &&
-      !url.search && !url.hash && url.pathname.startsWith("/internal/");
-  }),
+      !url.search && !url.hash && url.pathname === "/internal/peer-policy";
+  }, { message: "Expected a central relay's /internal/peer-policy URL" }),
   secret: z.string().min(16),
 })).max(16);
 export type PeerPolicyTarget = z.infer<typeof PeerPolicyTargetsSchema>[number];
 
 export async function deliverPeerPolicyBatch(db: DB, targets: PeerPolicyTarget[], fetchImpl: typeof fetch = fetch) {
   PeerPolicyTargetsSchema.parse(targets);
-  if (!targets.some((target) => new URL(target.url).pathname === "/internal/peer-policy")) {
-    return { attempted: 0, delivered: 0 };
-  }
+  if (targets.length === 0) return { attempted: 0, delivered: 0 };
   return db.$transaction(async (tx) => {
     // A transaction lock spans selection and delivery, including other web processes.
     const [lock] = await tx.$queryRaw<{ acquired: boolean }[]>`SELECT pg_try_advisory_xact_lock(1784629101) AS acquired`;

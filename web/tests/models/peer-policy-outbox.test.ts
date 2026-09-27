@@ -7,8 +7,8 @@ import { startTestPg, type PgHandle } from "../helpers/pg.js";
 import { deliverPeerPolicyBatch } from "../../src/relay/peer-policy-outbox.js";
 
 let pg: PgHandle;
-const targets = [{ url: "http://central.internal/internal/peer-policy", secret: "central-test-secret" },
-  { url: "https://iroh.internal/internal/disconnect", secret: "iroh-test-secret" }];
+const targets = [{ url: "http://relay-blue.internal/internal/peer-policy", secret: "blue-test-secret" },
+  { url: "http://relay-green.internal/internal/peer-policy", secret: "green-test-secret" }];
 beforeAll(async () => { pg = await startTestPg(); });
 afterAll(async () => { await pg?.stop(); });
 beforeEach(async () => {
@@ -16,9 +16,8 @@ beforeEach(async () => {
   await pg.db.peerAuthorizationOutbox.create({ data: { userId: "account", generation: 4n } });
 });
 
-test("no central target leaves durable rows pending", async () => {
+test("no target leaves durable rows pending", async () => {
   expect(await deliverPeerPolicyBatch(pg.db, [])).toEqual({ attempted: 0, delivered: 0 });
-  expect(await deliverPeerPolicyBatch(pg.db, [targets[1]])).toEqual({ attempted: 0, delivered: 0 });
   expect((await pg.db.peerAuthorizationOutbox.findFirstOrThrow()).deliveredAt).toBeNull();
 });
 
