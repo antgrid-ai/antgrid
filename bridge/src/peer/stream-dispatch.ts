@@ -37,6 +37,10 @@ export const STREAM_OPEN_DEADLINE_MS = 5_000;
 export const STREAM_STOP_REFUSED = 0x10n;
 export const STREAM_RESET_OPEN_TIMEOUT = 0x11n;
 export const STREAM_RESET_REFUSED = 0x12n;
+// One reset and one stop code shared by every stream kind, the session stream
+// included: nothing reads a code back to tell the kinds apart.
+export const STREAM_RESET_SCOPED = 0x13n;
+export const STREAM_STOP_SCOPED = 0x14n;
 export const STREAM_REFUSAL_MAX_QUEUED_BYTES = 8_192;
 
 /** Structural subset of `@number0/iroh` `BiStream`; the real one satisfies it. */

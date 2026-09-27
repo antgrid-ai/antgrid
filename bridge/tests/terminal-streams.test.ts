@@ -8,13 +8,11 @@
 import { describe, test, expect } from "bun:test";
 import {
   TerminalStreamRegistry,
-  STREAM_RESET_TERMINAL,
-  STREAM_STOP_TERMINAL,
   type TerminalStreamRegistryOptions,
 } from "../src/peer/terminal-streams";
 import { STREAM_TERMINAL_BRIDGE_RECORD_MAX_BYTES } from "antgrid-wire";
 import type { TerminalProjectBinding } from "../src/project-streams";
-import type { StreamRefusal } from "../src/peer/stream-dispatch";
+import { STREAM_RESET_SCOPED, STREAM_STOP_SCOPED, type StreamRefusal } from "../src/peer/stream-dispatch";
 import { createMessage, type AbMessage } from "../src/protocol";
 import { TERMINAL_PROTOCOL_VERSION } from "../src/terminal-frames/protocol";
 import { createFakeBiStream, flush } from "./support/fake-bi-stream";
@@ -130,8 +128,8 @@ describe("TerminalStreamRegistry", () => {
     fake.pushRecord(createMessage("pong", {})); // not a subscribe at all
     await flush();
     expect(dispatched).toEqual([]);
-    expect(fake.resets).toEqual([STREAM_RESET_TERMINAL]);
-    expect(fake.stops).toEqual([STREAM_STOP_TERMINAL]);
+    expect(fake.resets).toEqual([STREAM_RESET_SCOPED]);
+    expect(fake.stops).toEqual([STREAM_STOP_SCOPED]);
     expect(retiredPeers).toEqual([]); // stream-scoped, not connection-fatal
   });
 
@@ -148,8 +146,8 @@ describe("TerminalStreamRegistry", () => {
     }));
     await flush();
     expect(dispatched).toEqual([]);
-    expect(fake.resets).toEqual([STREAM_RESET_TERMINAL]);
-    expect(fake.stops).toEqual([STREAM_STOP_TERMINAL]);
+    expect(fake.resets).toEqual([STREAM_RESET_SCOPED]);
+    expect(fake.stops).toEqual([STREAM_STOP_SCOPED]);
     expect(retiredPeers).toEqual([]);
     void requestId; void peerId;
   });
@@ -256,7 +254,7 @@ describe("TerminalStreamRegistry", () => {
     expect(dispatched[0]!.msg).toMatchObject({
       type: "terminal:unsubscribe", terminalId: "term1", runId, attachmentId, checkoutId: "main",
     });
-    expect(fake.resets).toEqual([STREAM_RESET_TERMINAL]);
+    expect(fake.resets).toEqual([STREAM_RESET_SCOPED]);
     expect(registry.streamCount(peerId)).toBe(0);
 
     // A second stream whose app FINs before its subscribe was ever answered
@@ -287,7 +285,7 @@ describe("TerminalStreamRegistry", () => {
     await flush();
 
     expect(dispatched).toEqual([]);
-    expect(fake.stops).toEqual([STREAM_STOP_TERMINAL]);
+    expect(fake.stops).toEqual([STREAM_STOP_SCOPED]);
   });
 
   test("writer overflow resets only that stream, synthesizes unsubscribe and frees the slot; the connection lives", async () => {
@@ -316,7 +314,7 @@ describe("TerminalStreamRegistry", () => {
     await flush();
 
     expect(dispatched.map((d) => d.msg.type)).toEqual(["terminal:unsubscribe"]);
-    expect(fake.resets).toEqual([STREAM_RESET_TERMINAL]);
+    expect(fake.resets).toEqual([STREAM_RESET_SCOPED]);
     expect(retiredPeers).toEqual([]);
     expect(registry.streamCount(peerId)).toBe(0);
   });

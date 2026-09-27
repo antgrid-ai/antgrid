@@ -11,10 +11,9 @@
 import { test, expect } from "bun:test";
 import {
   UploadStreamRegistry,
-  STREAM_RESET_UPLOAD,
-  STREAM_STOP_UPLOAD,
   type UploadStreamRegistryOptions,
 } from "../src/peer/upload-streams";
+import { STREAM_RESET_SCOPED, STREAM_STOP_SCOPED } from "../src/peer/stream-dispatch";
 import type { UploadStreamOpen } from "antgrid-wire";
 import { STREAM_RAW_READ_BYTES, STREAM_RECORD_SLICE_BYTES } from "../src/peer/stream-records";
 import type { UploadProjectBinding } from "../src/project-streams";
@@ -249,18 +248,18 @@ test("a FIN short of the declared size ends the upload as INCOMPLETE", async () 
 // `remaining + 1` probe removed (i.e. reading exactly `remaining` bytes and no
 // more), a peer sending one byte too many would be accepted as a complete,
 // correctly-sized upload instead of being caught here.
-test("more than the declared size resets the stream (STREAM_RESET_UPLOAD), writes no result, and cancels the upload", async () => {
+test("more than the declared size resets the stream, writes no result, and cancels the upload", async () => {
   const rig = makeRegistry();
   const { mgr } = wireProject(rig);
   const { fake, requestId } = admitUpload(rig.registry, { size: 4 });
   fake.pushRaw(new Uint8Array([1, 2, 3, 4, 5])); // one byte over
   await until(() => fake.resets.length > 0);
-  expect(fake.resets).toEqual([STREAM_RESET_UPLOAD]);
+  expect(fake.resets).toEqual([STREAM_RESET_SCOPED]);
   expect(writtenRecord(fake)).toBeUndefined();
   expect(mgr.handles.get(requestId)!.cancelled).toBe(true);
   expect(rig.diagnostics.some((d) => d.type === "upload-stream:oversize")).toBe(true);
   await until(() => fake.stops.length > 0);
-  expect(fake.stops).toEqual([STREAM_STOP_UPLOAD]);
+  expect(fake.stops).toEqual([STREAM_STOP_SCOPED]);
 });
 
 test("the app ending mid-body removes the partial, resets the stream and frees the cap slot: an explicit reset, or a bare connection loss, alike", async () => {
@@ -305,7 +304,7 @@ test("mayDeliverTo turning false before the result is sent resets the stream and
   fake.endWith();
   await until(() => fake.resets.length > 0 || writtenRecord(fake) !== undefined);
   expect(writtenRecord(fake)).toBeUndefined();
-  expect(fake.resets).toContain(STREAM_RESET_UPLOAD);
+  expect(fake.resets).toContain(STREAM_RESET_SCOPED);
 });
 
 test("an inactivity TIMEOUT fired by the manager writes its result and FINs, and stops recv only once the pending read settles", async () => {
@@ -323,6 +322,6 @@ test("an inactivity TIMEOUT fired by the manager writes its result and FINs, and
   expect(fake.stops).toEqual([]);
   fake.endWith();
   await until(() => fake.stops.length > 0);
-  expect(fake.stops).toEqual([STREAM_STOP_UPLOAD]);
+  expect(fake.stops).toEqual([STREAM_STOP_SCOPED]);
   void proj; // binding kept alive for the duration of the case; nothing else exercised on it here
 });

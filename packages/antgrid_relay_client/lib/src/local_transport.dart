@@ -357,7 +357,7 @@ class LocalTransport extends BufferedAgentTransport {
         'state.snapshot',
         params: {
           'types': ['*'],
-          // The relay path excludes the same type for the same reason
+          // The native path excludes the same type for the same reason
           // (`_kHeavyReplayTypes` in machine_session.dart): the agent caches a
           // `tree:full` per checkout at open, so a replay of everything hands a
           // local project one full tree per managed worktree — measured at

@@ -1,7 +1,7 @@
 /// Terminal attachment handles: the transport-agnostic surface `terminal_service.dart`
 /// drives regardless of whether the attachment rides its own native QUIC
 /// stream ([MachineSession]'s `StreamTransport`, see `machine_session.dart`)
-/// or the legacy socket path ([SocketTerminalAttachments], used by every
+/// or the in-band socket path ([SocketTerminalAttachments], used by every
 /// [BufferedAgentTransport] and by `FakeAgentTransport`).
 library;
 

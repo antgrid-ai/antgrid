@@ -6,8 +6,7 @@
 /// interfaces); this file holds only the shapes both sides share plus the
 /// record codec, and never talks to a `PeerStream` directly.
 ///
-/// `preview_service.dart`'s queue and policy stay in `app/` — nothing here was
-/// moved or adapted from it.
+/// `preview_service.dart`'s queue and policy stay in `app/`.
 library;
 
 import 'dart:async';
@@ -162,8 +161,8 @@ Uint8List encodeTunnelDataRecord(int tag, Uint8List payload) {
   return out;
 }
 
-/// `null` for an empty record, an unknown tag (0x00/0x01 included — they are
-/// unassigned now that HTTP bodies carry no tag at all), or a first byte of
+/// `null` for an empty record, an unknown tag (0x00/0x01 included — HTTP
+/// bodies carry no tag at all), or a first byte of
 /// 0x7B whose body is not valid UTF-8. The returned payload is a view, not a
 /// copy.
 TunnelRecord? decodeTunnelRecord(Uint8List record) {

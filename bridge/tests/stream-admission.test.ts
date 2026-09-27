@@ -35,7 +35,9 @@ import {
   streamLabelOf,
   STREAM_OPEN_DEADLINE_MS,
   STREAM_RESET_OPEN_TIMEOUT,
+  STREAM_RESET_SCOPED,
   STREAM_STOP_REFUSED,
+  STREAM_STOP_SCOPED,
   type AcceptedBiStream,
   type PeerStreamAcceptorOptions,
   type StreamHandlers,
@@ -47,28 +49,21 @@ import { createMessage } from "../src/protocol";
 import { MessageBus } from "../src/message-bus";
 import {
   ProjectStreamRegistry,
-  STREAM_RESET_PROJECT,
   type ProjectStreamRegistryOptions,
 } from "../src/project-streams";
 import {
   TerminalStreamRegistry,
   STREAM_PRIORITY_TERMINAL,
-  STREAM_RESET_TERMINAL,
-  STREAM_STOP_TERMINAL,
   type TerminalStreamRegistryOptions,
 } from "../src/peer/terminal-streams";
 import {
   TunnelStreamRegistry,
   STREAM_PRIORITY_TUNNEL,
-  STREAM_RESET_TUNNEL,
-  STREAM_STOP_TUNNEL,
   type TunnelStreamRegistryOptions,
 } from "../src/peer/tunnel-streams";
 import {
   UploadStreamRegistry,
   STREAM_PRIORITY_UPLOAD,
-  STREAM_RESET_UPLOAD,
-  STREAM_STOP_UPLOAD,
   type UploadStreamRegistryOptions,
 } from "../src/peer/upload-streams";
 import { TERMINAL_PROTOCOL_VERSION } from "../src/terminal-frames/protocol";
@@ -466,8 +461,8 @@ function terminalCase(): KindCase {
     kind: "terminal",
     cap: STREAM_MAX_TERMINAL_ATTACHMENTS_PER_PEER,
     priority: STREAM_PRIORITY_TERMINAL,
-    resetCode: STREAM_RESET_TERMINAL,
-    stopCode: STREAM_STOP_TERMINAL,
+    resetCode: STREAM_RESET_SCOPED,
+    stopCode: STREAM_STOP_SCOPED,
     hasAvailability: false,
     open: (projectId, id) => ({ kind: "terminal", projectId, requestId: id }),
     make() {
@@ -523,8 +518,8 @@ function tunnelCase(subKind: "tunnel-http" | "tunnel-ws"): KindCase {
     kind: subKind,
     cap: STREAM_MAX_TUNNEL_STREAMS_PER_PEER,
     priority: STREAM_PRIORITY_TUNNEL,
-    resetCode: STREAM_RESET_TUNNEL,
-    stopCode: STREAM_STOP_TUNNEL,
+    resetCode: STREAM_RESET_SCOPED,
+    stopCode: STREAM_STOP_SCOPED,
     hasAvailability: true,
     open: (projectId, id) => subKind === "tunnel-http"
       ? { kind: "tunnel-http", projectId, requestId: id }
@@ -595,8 +590,8 @@ function uploadCase(): KindCase {
     kind: "upload",
     cap: STREAM_MAX_UPLOAD_STREAMS_PER_PEER,
     priority: STREAM_PRIORITY_UPLOAD,
-    resetCode: STREAM_RESET_UPLOAD,
-    stopCode: STREAM_STOP_UPLOAD,
+    resetCode: STREAM_RESET_SCOPED,
+    stopCode: STREAM_STOP_SCOPED,
     hasAvailability: true,
     open: (projectId, id) => ({ kind: "upload", projectId, requestId: id, fileName: "a.bin", size: 0 }),
     make() {
@@ -1152,7 +1147,7 @@ describe("ProjectStreamRegistry: own admission gate, same invariants as the scop
     fakeA.failNextWrite(); // fails the admission's own stream-ready write
     expect(registry.handler(openProject(PEER, PROJECT, fakeA.stream))).toBeUndefined();
     await flush();
-    expect(fakeA.resets).toEqual([STREAM_RESET_PROJECT]);
+    expect(fakeA.resets).toEqual([STREAM_RESET_SCOPED]);
     expect(retired).toEqual([]);
 
     const fakeB = createFakeBiStream();

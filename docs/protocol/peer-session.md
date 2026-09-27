@@ -246,7 +246,7 @@ exchange is exactly one file in, one result out.
 **Overrun detection.** Each read requests `min(STREAM_RAW_READ_BYTES, remaining + 1)`: a well-behaved
 peer's read never returns more than `remaining` bytes, so a chunk that does is the overrun signal on the
 SAME read — there is no separate probe once the declared size is reached. An overrun resets the stream
-(`STREAM_RESET_UPLOAD`) with no result reported, since the app has already broken the declared contract.
+(`STREAM_RESET_SCOPED`) with no result reported, since the app has already broken the declared contract.
 
 **Cancel.** The app cancels by resetting (or FIN-ing) its own send half; the bridge's pending read
 observes it the same way a tunnel request body's cancel does (§1c), and the in-progress

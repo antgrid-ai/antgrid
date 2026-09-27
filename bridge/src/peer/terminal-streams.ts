@@ -1,9 +1,9 @@
 /**
  * Terminal attachment streams. A terminal attachment gets its own QUIC bidi
  * stream: after the open frame, each record is the raw UTF-8 JSON of one
- * frame-protocol `AbMessage` — no `{s, m}` envelope, no channel label.
- * Everything else (`terminal:input`, `terminal:resize`, `terminal:start`, ...)
- * stays on the project stream, unchanged.
+ * frame-protocol `AbMessage`, with no channel label. Everything else
+ * (`terminal:input`, `terminal:resize`, `terminal:start`, ...) stays on the
+ * project stream.
  *
  * This registry is plugged into `PeerStreamAcceptor` (via `handlerFor`) as the
  * `terminal` handler and into `ProjectStreamRegistry` as `routeTerminal` +
@@ -28,6 +28,8 @@ import {
   READ_ENDED,
   READ_UNBOUND,
   ScopedStreamRegistry,
+  STREAM_RESET_SCOPED,
+  STREAM_STOP_SCOPED,
   type ScopedBinding,
   type ScopedEndCause,
   type ScopedStreamOptions,
@@ -41,9 +43,6 @@ export const TERMINAL_STREAM_MAX_QUEUED_BYTES = 3 * 1024 * 1024;
 /** Below session (2), above project (0) and tunnel (-1), so a live terminal
  *  viewer never waits behind bulk file transfer or preview traffic. */
 export const STREAM_PRIORITY_TERMINAL = 1;
-// Reset/stop codes are bridge diagnostics only — Dart cannot read them back.
-export const STREAM_RESET_TERMINAL = 0x13n;
-export const STREAM_STOP_TERMINAL = 0x14n;
 
 export const TERMINAL_STREAM_INBOUND_TYPES: ReadonlySet<string> = new Set([
   "terminal:subscribe",
@@ -92,8 +91,8 @@ export class TerminalStreamRegistry extends ScopedStreamRegistry<TerminalStreamO
       cap: STREAM_MAX_TERMINAL_ATTACHMENTS_PER_PEER,
       capMessage: "too many terminal attachments",
       priority: STREAM_PRIORITY_TERMINAL,
-      resetCode: STREAM_RESET_TERMINAL,
-      stopCode: STREAM_STOP_TERMINAL,
+      resetCode: STREAM_RESET_SCOPED,
+      stopCode: STREAM_STOP_SCOPED,
       maxQueuedBytes: TERMINAL_STREAM_MAX_QUEUED_BYTES,
     }, opts);
   }

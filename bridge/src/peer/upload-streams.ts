@@ -19,6 +19,8 @@ import {
   READ_ENDED,
   READ_UNBOUND,
   ScopedStreamRegistry,
+  STREAM_RESET_SCOPED,
+  STREAM_STOP_SCOPED,
   type ScopedBinding,
   type ScopedEndCause,
   type ScopedStreamOptions,
@@ -31,9 +33,6 @@ export const UPLOAD_STREAM_MAX_QUEUED_BYTES = 65_536;
  *  traffic (`STREAM_PRIORITY_TUNNEL`): a background file transfer never needs
  *  to preempt a live terminal or project viewer. */
 export const STREAM_PRIORITY_UPLOAD = -1;
-// Reset/stop codes are bridge diagnostics only — Dart cannot read them back.
-export const STREAM_RESET_UPLOAD = 0x1an;
-export const STREAM_STOP_UPLOAD = 0x1bn;
 
 const textEncoder = new TextEncoder();
 
@@ -61,8 +60,8 @@ export class UploadStreamRegistry extends ScopedStreamRegistry<UploadStreamOpen,
       cap: STREAM_MAX_UPLOAD_STREAMS_PER_PEER,
       capMessage: "too many uploads",
       priority: STREAM_PRIORITY_UPLOAD,
-      resetCode: STREAM_RESET_UPLOAD,
-      stopCode: STREAM_STOP_UPLOAD,
+      resetCode: STREAM_RESET_SCOPED,
+      stopCode: STREAM_STOP_SCOPED,
       maxQueuedBytes: UPLOAD_STREAM_MAX_QUEUED_BYTES,
     }, opts);
   }

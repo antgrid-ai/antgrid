@@ -12,6 +12,44 @@ Map<String, dynamic> _map(Object? value) =>
 String _toHex(Uint8List value) =>
     value.map((byte) => byte.toRadixString(16).padLeft(2, '0')).join();
 
+// The app only encodes stream-open frames, so the vectors build each
+// [StreamOpen] by hand and pin the wire shape through `toJson()`.
+StreamOpen _openFrom(Map<String, dynamic> json) {
+  switch (json['kind']) {
+    case 'session':
+      return const SessionStreamOpen();
+    case 'project':
+      return ProjectStreamOpen(json['projectId'] as String);
+    case 'terminal':
+      return TerminalStreamOpen(
+        projectId: json['projectId'] as String,
+        requestId: json['requestId'] as String,
+        checkoutId: json['checkoutId'] as String?,
+      );
+    case 'tunnel-http':
+      return TunnelHttpStreamOpen(
+        projectId: json['projectId'] as String,
+        requestId: json['requestId'] as String,
+      );
+    case 'tunnel-ws':
+      return TunnelWsStreamOpen(
+        projectId: json['projectId'] as String,
+        wsId: json['wsId'] as String,
+      );
+    case 'upload':
+      return UploadStreamOpen(
+        projectId: json['projectId'] as String,
+        requestId: json['requestId'] as String,
+        fileName: json['fileName'] as String,
+        size: json['size'] as int,
+        checkoutId: json['checkoutId'] as String?,
+        mimeType: json['mimeType'] as String?,
+      );
+    default:
+      throw StateError('unknown stream-open kind ${json['kind']}');
+  }
+}
+
 void main() {
   final fixture = _map(
     jsonDecode(
@@ -82,7 +120,6 @@ void main() {
   test('Dart stream-open caps match the shared transport vector', () {
     final streamOpen = _map(fixture['streamOpen']);
     expect(kStreamOpenMaxBytes, streamOpen['maxOpenBytes']);
-    expect(kStreamOpenMaxIdLength, streamOpen['maxIdLength']);
     final caps = _map(streamOpen['caps']);
     expect(kStreamMaxBidiStreamsPerConnection, caps['maxBidiStreamsPerConnection']);
     expect(kStreamMaxProjectsPerPeer, caps['maxProjectsPerPeer']);
@@ -114,7 +151,7 @@ void main() {
     expect(tags.keys, unorderedEquals(['wsText', 'wsBinary']));
   });
 
-  test('Dart parses every stream-open kind golden vector, and round-trips it', () {
+  test('Dart encodes every stream-open kind golden vector', () {
     final opens = (_map(fixture['streamOpen'])['opens'] as List)
         .cast<Map<String, dynamic>>();
     expect(opens.map((o) => o['name']), [
@@ -129,25 +166,7 @@ void main() {
     ]);
     for (final sample in opens) {
       final json = _map(sample['json']);
-      final parsed = StreamOpen.fromJson(json);
-      expect(parsed, isNotNull, reason: sample['name'] as String);
-      expect(parsed!.toJson(), json, reason: sample['name'] as String);
-      switch (sample['name']) {
-        case 'session':
-          expect(parsed, isA<SessionStreamOpen>());
-        case 'project':
-          expect(parsed, isA<ProjectStreamOpen>());
-        case 'terminal':
-        case 'terminal-with-checkout':
-          expect(parsed, isA<TerminalStreamOpen>());
-        case 'tunnel-http':
-          expect(parsed, isA<TunnelHttpStreamOpen>());
-        case 'tunnel-ws':
-          expect(parsed, isA<TunnelWsStreamOpen>());
-        case 'upload':
-        case 'upload-with-checkout-and-mime':
-          expect(parsed, isA<UploadStreamOpen>());
-      }
+      expect(_openFrom(json).toJson(), json, reason: sample['name'] as String);
     }
   });
 
@@ -156,24 +175,9 @@ void main() {
         .cast<Map<String, dynamic>>();
     expect(labels, isNotEmpty);
     for (final sample in labels) {
-      final open = StreamOpen.fromJson(_map(sample['open']));
-      expect(open, isNotNull, reason: sample['name'] as String);
-      final label = streamLabelOf(open!);
+      final label = streamLabelOf(_openFrom(_map(sample['open'])));
       expect(label.kind, sample['streamKind'], reason: sample['name'] as String);
       expect(label.id, sample['streamId'], reason: sample['name'] as String);
-    }
-  });
-
-  test('Dart rejects every stream-open frame the schema rejects', () {
-    final rejected = (_map(fixture['streamOpen'])['rejectedOpens'] as List)
-        .cast<Map<String, dynamic>>();
-    expect(rejected, isNotEmpty);
-    for (final sample in rejected) {
-      expect(
-        StreamOpen.fromJson(_map(sample['json'])),
-        isNull,
-        reason: sample['name'] as String,
-      );
     }
   });
 

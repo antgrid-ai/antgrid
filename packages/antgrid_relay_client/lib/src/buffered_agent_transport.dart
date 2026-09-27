@@ -9,11 +9,11 @@ import 'upload_stream.dart';
 /// Shared scaffolding for [AgentTransport] implementations.
 ///
 /// Holds the request/response correlation table, the snapshot-replay buffer,
-/// and the broadcast state/message controllers that the local and relay
+/// and the broadcast state/message controllers that the local and native
 /// transports need identically. Subclasses supply only the wire-specific
-/// pieces: [connect], [send] (raw JSON vs. encrypted + fragmented), [dispose],
-/// and the decode path — which, once it has a decoded frame and its channel,
-/// funnels through [dispatchDecoded].
+/// pieces: [connect], [send] (loopback WebSocket vs. this project's own
+/// native stream), [dispose], and the decode path — which, once it has a
+/// decoded frame and its channel, funnels through [dispatchDecoded].
 ///
 /// The non-private members below ([outbound], [snapshotCache],
 /// [stateController], [pending], [dispatchDecoded], [failAllPending],
@@ -235,7 +235,7 @@ abstract class BufferedAgentTransport implements AgentTransport {
 
   /// `true` once the transport can carry an RPC (and hence a hydrator's pull).
   /// The base answer — "connected" — is right for [LocalTransport] (born
-  /// established, no handshake). [StreamTransport] overrides it with the E2E
+  /// established, no handshake). [StreamTransport] overrides it with the peer
   /// session's live establishment, since a stream stays `connected` across a
   /// session-down window where a send would silently drop.
   bool get isEstablished => _currentState == TransportState.connected;

@@ -12,7 +12,7 @@ import { EndpointLifecycle, EndpointFailure } from "./endpoint-lifecycle";
 import type { RemoteHostConnection } from "../remote-host-connection";
 import { frameIdFor, NETWATCH_SESSION_STREAM_LABEL } from "../netwatch";
 import { AdmissionRegistry, type AdmissionReservation } from "./admission-registry";
-import { PeerStreamAcceptor, readStreamOpen, type ScopedStreamOptions, type StreamDiagnostic } from "./stream-dispatch";
+import { PeerStreamAcceptor, readStreamOpen, STREAM_RESET_SCOPED, type ScopedStreamOptions, type StreamDiagnostic } from "./stream-dispatch";
 import { TerminalStreamRegistry } from "./terminal-streams";
 import { TunnelStreamRegistry } from "./tunnel-streams";
 import { UploadStreamRegistry } from "./upload-streams";
@@ -26,8 +26,6 @@ const SESSION_STREAM_MAX_QUEUED_BYTES = 67_108_864;
 /** Above terminal (1), project (0) and tunnel (-1), so the hello, `established`
  *  and the pong that answers the app's wedge probe never wait behind bulk. */
 const STREAM_PRIORITY_SESSION = 2;
-/** The next free reset code after `STREAM_STOP_PROJECT` (`project-streams.ts`). */
-const STREAM_RESET_SESSION = 0x19n;
 
 export interface NativePeerOptions extends PeerSessionOwnerOptions {
   enrollment: EnrollmentIdentity;
@@ -385,7 +383,7 @@ export class NativePeerSessions extends PeerSessionOwner {
       (reason) => { if (this.nativePeers.get(peerId)?.sessionWriter === writer)
         this.retirePeer(peerId, reason === "unauthorized" ? "unauthorized"
           : reason === "overflow" ? "queue-full" : "connection-lost"); },
-      SESSION_STREAM_MAX_QUEUED_BYTES, STREAM_PRIORITY_SESSION, STREAM_RESET_SESSION,
+      SESSION_STREAM_MAX_QUEUED_BYTES, STREAM_PRIORITY_SESSION, STREAM_RESET_SCOPED,
     );
     const reader = new StreamRecordReader({ recv: stream.recv }, PEER_MAX_RECORD_BYTES,
       () => { if (this.nativePeers.get(peerId) === peer) this.retirePeer(peerId, "protocol-violation"); });

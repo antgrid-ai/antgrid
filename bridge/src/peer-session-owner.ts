@@ -211,12 +211,12 @@ export abstract class PeerSessionOwner {
    *  (a writer) or "protocol-violation" (a malformed length prefix). The base
    *  class has no connection to close, so it can only end the session;
    *  `NativePeerSessions` overrides this with its `retirePeer`, guarded on
-   *  `nativePeers.has(peerId)` as the A2/A3 registries are. */
+   *  `nativePeers.has(peerId)` as the scoped stream registries are. */
   protected retirePeerConnection(peerId: string, _reason: "unauthorized" | "protocol-violation"): void {
     this.dropSession(peerId);
   }
 
-  /** A2 terminal-stream hooks: no-op on the base class. `NativePeerSessions`
+  /** Terminal-stream hooks: no-op on the base class. `NativePeerSessions`
    *  overrides all four to delegate to its `TerminalStreamRegistry`; a
    *  transport with no native stream support (or a test double) keeps every
    *  terminal message on the legacy session path. */

@@ -439,8 +439,8 @@ class MachineSession {
   // --- socket transitions ---------------------------------------------------
 
   /// A session is per-CONNECTION, so only the socket dying invalidates it.
-  /// Every other transition is left alone: with pairing gone there is no
-  /// grant whose loss could strand an otherwise-live session, and the
+  /// Every other transition is left alone: there is no grant whose loss
+  /// could strand an otherwise-live session, and the
   /// supervisor re-drives [ensureEstablished] on whatever it observes.
   void _onState(PeerLinkState s) {
     if (s == PeerLinkState.closed) {
@@ -659,10 +659,8 @@ class MachineSession {
 
   // --- inbound dispatch (session stream) -------------------------------------
 
-  /// Synchronous and in order: QUIC/TLS is the confidentiality layer now, so
-  /// there is no per-frame async decrypt step left to chain — the old
-  /// per-channel tail existed only to keep a slow `open()` from letting a
-  /// small frame overtake a large one, and a plain UTF-8 decode never blocks.
+  /// Synchronous and in order: nothing here awaits, so a small frame can
+  /// never overtake a large one.
   void _onSessionRecord(IncomingSessionRecord msg) {
     if (_disposed || !relay.isDispatchAllowed || !_established) return;
     String plaintext;
@@ -1621,8 +1619,8 @@ class StreamTransport extends BufferedAgentTransport {
     if (session.isEstablished && _bindInFlight == null) _scheduleReopen();
   }
 
-  /// Deliver a decoded message that the session (or this project's own
-  /// stream) demuxed to this transport.
+  /// Delivers one decoded control- or project-stream message to this
+  /// transport.
   void dispatchFromSession(Map<String, dynamic> json, String channel) =>
       dispatchDecoded(json, channel);
 
@@ -1739,7 +1737,7 @@ class StreamTransport extends BufferedAgentTransport {
   /// config, the reopened file, the transcript). This is the per-stream
   /// reconciliation checkpoint.
   ///
-  /// The pull carries every durable frame but the file tree, and for a relay
+  /// The pull carries every durable frame but the file tree, and for a remote
   /// app it is the ONLY carrier of a checkout's `agent:status` — the frame its
   /// terminal tabs are built from: `terminal:started` is not durable, the
   /// bridge republishes a checkout's status on nothing an app can trigger
@@ -1748,13 +1746,8 @@ class StreamTransport extends BufferedAgentTransport {
   /// purpose, and not pulled separately either: it is the one unbounded frame
   /// (every checkout's whole tree, megabytes for a project with several
   /// worktrees), and the hydrators below already ask the bridge for each
-  /// checkout's tree on every establishment — pulling it here as well sent the
-  /// same megabytes two and three times over on every connect, and on a slow
-  /// uplink that backlog starved the bridge's relay pongs until the relay
-  /// closed its socket, so the session dropped and the whole cycle re-ran.
-  /// While the tree rode in this reply at all, a slow link or one lost
-  /// fragment cost the terminal its tab — a running session opened afterwards
-  /// sat on "waiting for agent" with nothing left to deliver it.
+  /// checkout's tree on every establishment, so pulling it here too would
+  /// send the same megabytes again on every connect.
   ///
   /// One request carries the whole pull, under [MachineSession.snapshotDeadline]
   /// — long enough that a reply landing after this call's own wait

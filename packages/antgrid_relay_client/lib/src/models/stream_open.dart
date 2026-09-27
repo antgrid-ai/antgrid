@@ -1,6 +1,7 @@
-// Hand mirror of `packages/antgrid-wire/src/stream-open.ts`, including which
-// frames it rejects. Nothing but the shared fixture spans both languages, so
-// every kind, refusal code and rejection case needs a vector there
+// Hand mirror of `packages/antgrid-wire/src/stream-open.ts`. The app only
+// encodes open frames and decodes only `stream:refused`, including which
+// refusals it rejects. Nothing but the shared fixture spans both languages, so
+// every kind, refusal code and rejected refusal needs a vector there
 // (`peer_transport_vectors_test.dart`).
 
 import 'dart:convert';
@@ -9,9 +10,6 @@ import 'dart:typed_data';
 /// Wire cap on a serialized open frame, checked before decoding — a
 /// `{kind, projectId, ...}` record needs a few hundred bytes at most.
 const int kStreamOpenMaxBytes = 4096;
-
-/// Per-id length bound, in UTF-16 code units (Zod's `.max()` counts the same).
-const int kStreamOpenMaxIdLength = 200;
 
 // iroh 1.0's own keep-alive/idle defaults, recorded here rather than set:
 // neither the bridge's napi binding nor the app's `iroh_quic` exposes a
@@ -61,14 +59,14 @@ const int kStreamTunnelDataMaxBytes = 1048576;
 /// a tunnel-stream record.
 const int kStreamTunnelRecordMaxBytes = 1048577;
 
-/// Caps an HTTP tunnel request's `bodyLength`. Equal to `MAX_TRANSFER_BYTES`:
-/// a preview upload is bounded exactly as the session path bounded it.
+/// Caps an HTTP tunnel request's `bodyLength`. Equal to `MAX_TRANSFER_BYTES`,
+/// so a preview upload is bounded like every other transfer.
 const int kStreamTunnelRequestBodyMaxBytes = 33554432;
 
 /// Tunnel-ws data record tags: the first byte after the JSON/data
 /// discriminator (see `tunnel_stream.dart`'s `decodeTunnelRecord`). `0x00` and
-/// `0x01` are unassigned now that HTTP bodies ride raw (no tag, no record
-/// framing) — a stray one decodes to nothing rather than aliasing a WS frame.
+/// `0x01` are unassigned (HTTP bodies ride raw, with no tag and no record
+/// framing), so a stray one decodes to nothing rather than aliasing a WS frame.
 const int kTunnelRecordTagWsText = 0x02;
 const int kTunnelRecordTagWsBinary = 0x03;
 
@@ -78,8 +76,7 @@ const int kStreamUploadMaxFileNameLength = 255;
 const int kStreamUploadMaxMimeTypeLength = 127;
 
 /// Largest raw piece either the tunnel-http body pump or an upload's byte
-/// stream writes in one `sendRaw` call — the two were separately named
-/// constants with the same value.
+/// stream writes in one `sendRaw` call.
 const int kStreamRawSliceBytes = 262144;
 
 /// Bridge reader's cap for the four small app-to-bridge terminal verbs
@@ -95,11 +92,6 @@ const int kStreamTerminalBridgeRecordMaxBytes = 2097152;
 bool _onlyKeys(Map<String, dynamic> json, Set<String> allowed) =>
     json.keys.every(allowed.contains);
 
-bool _isId(Object? value) =>
-    value is String &&
-    value.isNotEmpty &&
-    value.length <= kStreamOpenMaxIdLength;
-
 /// The first record written on every native peer stream, the session stream
 /// included.
 sealed class StreamOpen {
@@ -108,25 +100,6 @@ sealed class StreamOpen {
   String get kind;
 
   Map<String, dynamic> toJson();
-
-  static StreamOpen? fromJson(Map<String, dynamic> json) {
-    switch (json['kind']) {
-      case 'session':
-        return SessionStreamOpen.fromJson(json);
-      case 'project':
-        return ProjectStreamOpen.fromJson(json);
-      case 'terminal':
-        return TerminalStreamOpen.fromJson(json);
-      case 'tunnel-http':
-        return TunnelHttpStreamOpen.fromJson(json);
-      case 'tunnel-ws':
-        return TunnelWsStreamOpen.fromJson(json);
-      case 'upload':
-        return UploadStreamOpen.fromJson(json);
-      default:
-        return null;
-    }
-  }
 }
 
 final class SessionStreamOpen extends StreamOpen {
@@ -137,11 +110,6 @@ final class SessionStreamOpen extends StreamOpen {
 
   @override
   Map<String, dynamic> toJson() => {'kind': kind};
-
-  static SessionStreamOpen? fromJson(Map<String, dynamic> json) {
-    if (!_onlyKeys(json, {'kind'})) return null;
-    return const SessionStreamOpen();
-  }
 
   @override
   bool operator ==(Object other) => other is SessionStreamOpen;
@@ -162,13 +130,6 @@ final class ProjectStreamOpen extends StreamOpen {
 
   @override
   Map<String, dynamic> toJson() => {'kind': kind, 'projectId': projectId};
-
-  static ProjectStreamOpen? fromJson(Map<String, dynamic> json) {
-    if (!_onlyKeys(json, {'kind', 'projectId'})) return null;
-    final projectId = json['projectId'];
-    if (!_isId(projectId)) return null;
-    return ProjectStreamOpen(projectId as String);
-  }
 
   @override
   bool operator ==(Object other) =>
@@ -205,25 +166,6 @@ final class TerminalStreamOpen extends StreamOpen {
     'requestId': requestId,
   };
 
-  static TerminalStreamOpen? fromJson(Map<String, dynamic> json) {
-    if (!_onlyKeys(json, {'kind', 'projectId', 'checkoutId', 'requestId'})) {
-      return null;
-    }
-    final projectId = json['projectId'];
-    final requestId = json['requestId'];
-    // `containsKey`, not a null check: Zod's `.optional()` rejects an explicit
-    // null, so `{"checkoutId": null}` must be refused here too.
-    final checkoutId = json['checkoutId'];
-    if (json.containsKey('checkoutId') && !_isId(checkoutId)) return null;
-    if (!_isId(projectId)) return null;
-    if (!_isId(requestId)) return null;
-    return TerminalStreamOpen(
-      projectId: projectId as String,
-      requestId: requestId as String,
-      checkoutId: checkoutId as String?,
-    );
-  }
-
   @override
   bool operator ==(Object other) =>
       other is TerminalStreamOpen &&
@@ -256,18 +198,6 @@ final class TunnelHttpStreamOpen extends StreamOpen {
     'requestId': requestId,
   };
 
-  static TunnelHttpStreamOpen? fromJson(Map<String, dynamic> json) {
-    if (!_onlyKeys(json, {'kind', 'projectId', 'requestId'})) return null;
-    final projectId = json['projectId'];
-    final requestId = json['requestId'];
-    if (!_isId(projectId)) return null;
-    if (!_isId(requestId)) return null;
-    return TunnelHttpStreamOpen(
-      projectId: projectId as String,
-      requestId: requestId as String,
-    );
-  }
-
   @override
   bool operator ==(Object other) =>
       other is TunnelHttpStreamOpen &&
@@ -295,18 +225,6 @@ final class TunnelWsStreamOpen extends StreamOpen {
     'projectId': projectId,
     'wsId': wsId,
   };
-
-  static TunnelWsStreamOpen? fromJson(Map<String, dynamic> json) {
-    if (!_onlyKeys(json, {'kind', 'projectId', 'wsId'})) return null;
-    final projectId = json['projectId'];
-    final wsId = json['wsId'];
-    if (!_isId(projectId)) return null;
-    if (!_isId(wsId)) return null;
-    return TunnelWsStreamOpen(
-      projectId: projectId as String,
-      wsId: wsId as String,
-    );
-  }
 
   @override
   bool operator ==(Object other) =>
@@ -352,53 +270,6 @@ final class UploadStreamOpen extends StreamOpen {
     'size': size,
     if (mimeType != null) 'mimeType': mimeType,
   };
-
-  static UploadStreamOpen? fromJson(Map<String, dynamic> json) {
-    if (!_onlyKeys(json, {
-      'kind',
-      'projectId',
-      'checkoutId',
-      'requestId',
-      'fileName',
-      'size',
-      'mimeType',
-    })) {
-      return null;
-    }
-    final projectId = json['projectId'];
-    final requestId = json['requestId'];
-    // `containsKey`, not a null check: Zod's `.optional()` rejects an explicit
-    // null, so `{"checkoutId": null}` (or `{"mimeType": null}`) must be
-    // refused here too.
-    final checkoutId = json['checkoutId'];
-    if (json.containsKey('checkoutId') && !_isId(checkoutId)) return null;
-    if (!_isId(projectId)) return null;
-    if (!_isId(requestId)) return null;
-    final fileName = json['fileName'];
-    if (fileName is! String ||
-        fileName.isEmpty ||
-        fileName.length > kStreamUploadMaxFileNameLength) {
-      return null;
-    }
-    final size = json['size'];
-    if (size is! int || size < 0) return null;
-    final mimeType = json['mimeType'];
-    if (json.containsKey('mimeType')) {
-      if (mimeType is! String ||
-          mimeType.isEmpty ||
-          mimeType.length > kStreamUploadMaxMimeTypeLength) {
-        return null;
-      }
-    }
-    return UploadStreamOpen(
-      projectId: projectId as String,
-      requestId: requestId as String,
-      fileName: fileName,
-      size: size,
-      checkoutId: checkoutId as String?,
-      mimeType: mimeType as String?,
-    );
-  }
 
   @override
   bool operator ==(Object other) =>
@@ -487,10 +358,9 @@ class StreamRefused {
     return StreamRefused(code: parsed, message: message);
   }
 
-  /// Decodes one stream record's bytes as a [StreamRefused]. Dart cannot read
-  /// a QUIC reset code, so every refusal an app-side reader acts on arrives
-  /// this way instead — any decode failure (bad UTF-8, bad JSON, not an
-  /// object, wrong shape) is `null`, never a thrown exception.
+  /// Decodes one stream record's bytes as a [StreamRefused]. Any decode
+  /// failure (bad UTF-8, bad JSON, not an object, wrong shape) is `null`,
+  /// never a thrown exception.
   static StreamRefused? tryDecode(Uint8List record) {
     try {
       final decoded = jsonDecode(utf8.decode(record, allowMalformed: false));

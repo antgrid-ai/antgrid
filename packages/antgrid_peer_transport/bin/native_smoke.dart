@@ -31,8 +31,7 @@ Future<void> _expectSessionOpen(iroh.RecvStream recv) async {
   final prefix = await recv.readExact(4);
   final length = ByteData.sublistView(prefix).getUint32(0, Endian.big);
   final body = jsonDecode(utf8.decode(await recv.readExact(length)));
-  if (body is! Map<String, dynamic> ||
-      StreamOpen.fromJson(body) is! SessionStreamOpen) {
+  if (body is! Map<String, dynamic> || body['kind'] != 'session') {
     throw StateError('session open frame missing');
   }
 }
@@ -130,7 +129,8 @@ Future<void> main(List<String> args) async {
           utf8.decode(await probeRecv.readExact(openLength)),
         );
         if (openJson is! Map<String, dynamic> ||
-            StreamOpen.fromJson(openJson) != const ProjectStreamOpen('smoke'))
+            openJson['kind'] != 'project' ||
+            openJson['projectId'] != 'smoke')
           throw StateError('project open frame mismatch');
         final refusalBytes = utf8.encode(
           jsonEncode(

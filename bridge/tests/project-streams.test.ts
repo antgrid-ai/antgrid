@@ -13,11 +13,8 @@ import { MAX_TRANSFER_BYTES } from "antgrid-wire";
 import { MessageBus, type Channel } from "../src/message-bus";
 import { createMessage, type AbMessage } from "../src/protocol";
 import { netwatch } from "../src/netwatch";
-import {
-  STREAM_RESET_PROJECT,
-  STREAM_STOP_PROJECT,
-  type PeerSessionView,
-} from "../src/project-streams";
+import { STREAM_RESET_SCOPED, STREAM_STOP_SCOPED } from "../src/peer/stream-dispatch";
+import { type PeerSessionView } from "../src/project-streams";
 import { flush } from "./support/fake-bi-stream";
 import { ed25519Pair, TestPeerSessionOwner } from "./test-peer-session-owner";
 
@@ -382,8 +379,8 @@ describe("ProjectStreamRegistry", () => {
 
       (client as unknown as { projectStreams: { dropPeer(peerId: string): void } }).projectStreams.dropPeer(PEER_A);
       await flush();
-      expect(stream.resets).toEqual([STREAM_RESET_PROJECT]);
-      expect(stream.stops).toEqual([STREAM_STOP_PROJECT]);
+      expect(stream.resets).toEqual([STREAM_RESET_SCOPED]);
+      expect(stream.stops).toEqual([STREAM_STOP_SCOPED]);
       expect(closed).toEqual([]); // session-driven hooks are the owner's to fire, not dropPeer's
     }
     {

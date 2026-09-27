@@ -8,10 +8,9 @@
 import { describe, test, expect } from "bun:test";
 import {
   TunnelStreamRegistry,
-  STREAM_RESET_TUNNEL,
-  STREAM_STOP_TUNNEL,
   type TunnelStreamRegistryOptions,
 } from "../src/peer/tunnel-streams";
+import { STREAM_RESET_SCOPED, STREAM_STOP_SCOPED } from "../src/peer/stream-dispatch";
 import { STREAM_RAW_READ_BYTES } from "../src/peer/stream-records";
 import {
   encodeTunnelDataRecord,
@@ -171,7 +170,7 @@ describe("TunnelStreamRegistry", () => {
 
     ctl.fire();
     await flush();
-    expect(fake.resets).toEqual([STREAM_RESET_TUNNEL]);
+    expect(fake.resets).toEqual([STREAM_RESET_SCOPED]);
     expect(registry.streamCount(admission.peerId)).toBe(0);
     expect(fake.stops).toEqual([]); // the read is still outstanding
 
@@ -196,7 +195,7 @@ describe("TunnelStreamRegistry", () => {
 
     fake.pushRecord(httpRequest(requestId)); // arrives late, after the timeout fired
     await flush();
-    expect(fake.stops).toEqual([STREAM_STOP_TUNNEL]);
+    expect(fake.stops).toEqual([STREAM_STOP_SCOPED]);
     expect(registry.streamCount(admission.peerId)).toBe(0);
   });
 
@@ -289,7 +288,7 @@ describe("TunnelStreamRegistry", () => {
     await flush();
 
     expect(exchange.signal.aborted).toBe(true);
-    expect(fake.resets).toEqual([STREAM_RESET_TUNNEL]);
+    expect(fake.resets).toEqual([STREAM_RESET_SCOPED]);
     expect(registry.streamCount(PEER)).toBe(0);
   });
 
@@ -360,7 +359,7 @@ describe("TunnelStreamRegistry", () => {
     await flush();
 
     expect(exchange.signal.aborted).toBe(true);
-    expect(fake.resets).toEqual([STREAM_RESET_TUNNEL]);
+    expect(fake.resets).toEqual([STREAM_RESET_SCOPED]);
     expect(registry.streamCount(PEER)).toBe(0);
   });
 
@@ -384,7 +383,7 @@ describe("TunnelStreamRegistry", () => {
     await expect(drained).rejects.toThrow();
     await flush();
     expect(exchange.signal.aborted).toBe(true);
-    expect(fake.resets).toEqual([STREAM_RESET_TUNNEL]);
+    expect(fake.resets).toEqual([STREAM_RESET_SCOPED]);
   });
 
   test("the app's FIN after end() is its own orderly close and is ignored, not treated as a cancel", async () => {
@@ -422,7 +421,7 @@ describe("TunnelStreamRegistry", () => {
     await flush();
 
     expect(exchange.signal.aborted).toBe(true);
-    expect(fake.resets).toEqual([STREAM_RESET_TUNNEL]);
+    expect(fake.resets).toEqual([STREAM_RESET_SCOPED]);
     expect(registry.streamCount(PEER)).toBe(0);
   });
 
@@ -442,7 +441,7 @@ describe("TunnelStreamRegistry", () => {
     await flush();
 
     expect(exchange.signal.aborted).toBe(true);
-    expect(fake.resets).toEqual([STREAM_RESET_TUNNEL]);
+    expect(fake.resets).toEqual([STREAM_RESET_SCOPED]);
     expect(registry.streamCount(PEER)).toBe(0);
   });
 
@@ -463,8 +462,8 @@ describe("TunnelStreamRegistry", () => {
     await flush();
 
     expect(exchange.signal.aborted).toBe(true);
-    expect(fake.resets).toEqual([STREAM_RESET_TUNNEL]);
-    expect(fake.stops).toEqual([STREAM_STOP_TUNNEL]);
+    expect(fake.resets).toEqual([STREAM_RESET_SCOPED]);
+    expect(fake.stops).toEqual([STREAM_STOP_SCOPED]);
     expect(retiredPeers).toEqual([]);
   });
 
@@ -485,7 +484,7 @@ describe("TunnelStreamRegistry", () => {
 
     expect(fake.order.filter((o) => o === "writeAll").length).toBe(writesBefore);
     expect(fake.isFinished()).toBe(false);
-    expect(fake.resets).toEqual([STREAM_RESET_TUNNEL]);
+    expect(fake.resets).toEqual([STREAM_RESET_SCOPED]);
     expect(registry.streamCount(PEER)).toBe(0);
   });
 
@@ -504,7 +503,7 @@ describe("TunnelStreamRegistry", () => {
       const outcome = await exchange.head({ status: 200, headers: {} });
       expect(outcome).toBe("dropped");
       expect(exchange.signal.aborted).toBe(true);
-      expect(fake.resets).toEqual([STREAM_RESET_TUNNEL]);
+      expect(fake.resets).toEqual([STREAM_RESET_SCOPED]);
       expect(registry.streamCount(PEER)).toBe(0);
     }
     {
@@ -523,7 +522,7 @@ describe("TunnelStreamRegistry", () => {
       const outcome = await peer.send({ binary: false, bytes: new TextEncoder().encode("x") });
       expect(outcome).toBe("dropped");
       expect(closedCalls).toEqual([[undefined, undefined]]);
-      expect(fake.resets).toEqual([STREAM_RESET_TUNNEL]);
+      expect(fake.resets).toEqual([STREAM_RESET_SCOPED]);
     }
   });
 

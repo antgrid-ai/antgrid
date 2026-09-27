@@ -2,9 +2,8 @@
  * Tunnel HTTP and WebSocket streams. A tunneled preview request or
  * browser-side WebSocket gets its own QUIC bidi stream: after the open frame,
  * every record is `[u32 len][body]` with the body discriminated by its first
- * byte — `0x7B` JSON control record, or a tagged binary data record. There is
- * no `{s, m}` envelope and no preview-channel frame, so no tunnel traffic
- * ever rides the project stream.
+ * byte — `0x7B` JSON control record, or a tagged binary data record. No
+ * tunnel traffic ever rides the project stream.
  *
  * Registered into `PeerStreamAcceptor` as the `tunnel-http` and `tunnel-ws`
  * handlers via `handlerFor`, sharing one cap and one bindings index across
@@ -45,6 +44,8 @@ import {
   ScopedStreamRegistry,
   STREAM_DEADLINE,
   STREAM_OPEN_DEADLINE_MS,
+  STREAM_RESET_SCOPED,
+  STREAM_STOP_SCOPED,
   type ScopedBinding,
   type ScopedEndCause,
   type ScopedStreamOptions,
@@ -62,9 +63,6 @@ export const TUNNEL_STREAM_MAX_QUEUED_BYTES = 4 * 1024 * 1024;
 /** Below session (2), terminal (1) and project (0). Tunnel traffic is a page
  *  load, not a live viewer — it never needs to preempt any of them. */
 export const STREAM_PRIORITY_TUNNEL = -1;
-// Reset/stop codes are bridge diagnostics only — Dart cannot read them back.
-export const STREAM_RESET_TUNNEL = 0x15n;
-export const STREAM_STOP_TUNNEL = 0x16n;
 
 const textEncoder = new TextEncoder();
 
@@ -320,8 +318,8 @@ export class TunnelStreamRegistry extends ScopedStreamRegistry<
       cap: STREAM_MAX_TUNNEL_STREAMS_PER_PEER,
       capMessage: "too many tunnel streams",
       priority: STREAM_PRIORITY_TUNNEL,
-      resetCode: STREAM_RESET_TUNNEL,
-      stopCode: STREAM_STOP_TUNNEL,
+      resetCode: STREAM_RESET_SCOPED,
+      stopCode: STREAM_STOP_SCOPED,
       maxQueuedBytes: TUNNEL_STREAM_MAX_QUEUED_BYTES,
     }, opts);
     this.scheduleFn = opts.schedule ?? defaultSchedule;

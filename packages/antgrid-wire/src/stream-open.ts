@@ -33,9 +33,10 @@ export const STREAM_OPEN_MAX_ID_LENGTH = 200;
 
 const StreamId = z.string().min(1).max(STREAM_OPEN_MAX_ID_LENGTH);
 
-// The first stream on a connection must declare this kind and keeps carrying
-// the full legacy protocol. It is part of the union so a dispatch table
-// keyed by `kind` has one shape to switch on, not a special case beside it.
+// The first stream on a connection must declare this kind; every machine
+// control-plane `AbMessage` rides it. It is part of the union so a dispatch
+// table keyed by `kind` has one shape to switch on, not a special case
+// beside it.
 export const SessionStreamOpen = z.strictObject({
   kind: z.literal("session"),
 });
@@ -169,7 +170,7 @@ export const STREAM_PROJECT_BRIDGE_RECORD_MAX_BYTES = MAX_TRANSFER_BYTES;
 export const STREAM_TERMINAL_APP_RECORD_MAX_BYTES = 16_384;
 export const STREAM_TERMINAL_BRIDGE_RECORD_MAX_BYTES = 2_097_152;
 
-// Per-record caps for the tunnel stream (A3, one stream per HTTP request or
+// Per-record caps for the tunnel stream (one stream per HTTP request or
 // browser-side WebSocket). `STREAM_TUNNEL_DATA_MAX_BYTES` bounds the payload
 // after a data record's tag byte; `STREAM_TUNNEL_RECORD_MAX_BYTES` is what the
 // reader checks against (payload + the tag), and applies in both directions.

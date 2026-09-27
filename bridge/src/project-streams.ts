@@ -1,9 +1,8 @@
 /**
  * Project streams. Every project gets its own QUIC bidi stream per app peer:
  * after the open frame `{kind:"project", projectId}`, each record is the bare
- * UTF-8 JSON of exactly one `AbMessage` — one message is always one record,
- * with no `{"__frag":…}` splitting and no `{s, m}` envelope. Machine control
- * traffic (`s` omitted / `"0"`) never reaches this file.
+ * UTF-8 JSON of exactly one `AbMessage` — one message is always one record.
+ * Machine control traffic rides the session stream and never reaches this file.
  *
  * This registry is plugged into `PeerStreamAcceptor` as the `project`
  * handler, and into the terminal, tunnel and upload registries as
@@ -32,6 +31,8 @@ import {
 } from "./peer/stream-records";
 import {
   openScopedWriter,
+  STREAM_RESET_SCOPED,
+  STREAM_STOP_SCOPED,
   type AcceptedBiStream,
   type ScopedProjectBinding,
   type StreamAdmission,
@@ -46,9 +47,6 @@ export const PROJECT_STREAM_MAX_QUEUED_BYTES = 67_108_864;
  *  carries no binding priority of its own; this sits below terminal streams
  *  (1) and above tunnel streams (-1), as `terminal-streams.ts` requires. */
 export const STREAM_PRIORITY_PROJECT = 0;
-// Reset/stop codes are bridge diagnostics only — Dart cannot read them back.
-export const STREAM_RESET_PROJECT = 0x17n;
-export const STREAM_STOP_PROJECT = 0x18n;
 
 /** One `control:result` refusal notice per dead (peer, project) pair per this
  *  window: a stale app replays a burst of verbs, and one notice is enough for
@@ -79,7 +77,7 @@ export interface StreamHandle {
 
 /** Delivered to whichever core owns a terminal stream's bound project, so it
  *  can react to a native attachment's lifecycle the same way it reacts to the
- *  loopback and legacy session-stream paths. See `peer/terminal-streams.ts`. */
+ *  loopback path. See `peer/terminal-streams.ts`. */
 export interface TerminalStreamHooks {
   retired(peerId: string, attachmentId: string): void;
   subscribeSettled(peerId: string, requestId: string, attachmentId: string | undefined): void;
@@ -211,11 +209,10 @@ export interface ProjectStreamRegistryOptions {
    *  "protocol-violation" (reader prefix). */
   retirePeer(peerId: string, reason: "unauthorized" | "protocol-violation"): void;
   /** A terminal-bound message for `peerId` goes to its terminal stream.
-   *  `undefined` falls back to that peer's PROJECT stream (was: the session
-   *  stream). */
+   *  `undefined` falls back to that peer's PROJECT stream. */
   routeTerminal?(peerId: string, msg: AbMessage, signal?: AbortSignal): Promise<StreamSendOutcome> | undefined;
   terminalHooks?: TerminalStreamHooks;
-  /** The project's last live entry detached (unchanged meaning). */
+  /** The project's last live entry detached. */
   projectDetached?(projectId: string): void;
   diagnostic?(event: Parameters<typeof netwatch.record>[0]): void;
   now?: () => number;
@@ -315,9 +312,9 @@ export class ProjectStreamRegistry {
     };
 
     entry.unsub = bus.subscribe({
-      // This stream IS the relay wire for this project, so an audience-
+      // This stream IS the remote wire for this project, so an audience-
       // targeted publish meant for the desktop's loopback socket must not be
-      // enveloped onto it.
+      // written to it.
       audience: "relay",
       deliver: (msg, _channel, signal, peerId) => {
         if (!mayDeliver()) {
@@ -382,7 +379,7 @@ export class ProjectStreamRegistry {
     for (const binding of [...entry.bindings]) {
       this.unbind(binding);
       void binding.writer.finish();
-      void binding.stream.recv.stop(STREAM_STOP_PROJECT).catch(() => {});
+      void binding.stream.recv.stop(STREAM_STOP_SCOPED).catch(() => {});
     }
     const projectId = entry.opts.projectId;
     if (projectId !== undefined && !this.hasLiveEntryFor(projectId)) {
@@ -483,7 +480,7 @@ export class ProjectStreamRegistry {
     const writer = openScopedWriter(
       stream,
       authorized,
-      { priority: STREAM_PRIORITY_PROJECT, resetCode: STREAM_RESET_PROJECT, maxQueuedBytes: PROJECT_STREAM_MAX_QUEUED_BYTES },
+      { priority: STREAM_PRIORITY_PROJECT, resetCode: STREAM_RESET_SCOPED, maxQueuedBytes: PROJECT_STREAM_MAX_QUEUED_BYTES },
       (reason) => this.onWriterFailure(binding, reason),
     );
     const reader = new StreamRecordReader(
@@ -517,7 +514,7 @@ export class ProjectStreamRegistry {
         return;
       }
       if (binding.unbound) {
-        void binding.stream.recv.stop(STREAM_STOP_PROJECT).catch(() => {});
+        void binding.stream.recv.stop(STREAM_STOP_SCOPED).catch(() => {});
         return;
       }
       // Re-checked per record, the same as the outbound writer and as
@@ -593,7 +590,7 @@ export class ProjectStreamRegistry {
     // Only this stream resets — the app reopens and resyncs through
     // state.snapshot.
     this.unbind(binding);
-    void binding.stream.recv.stop(STREAM_STOP_PROJECT).catch(() => {});
+    void binding.stream.recv.stop(STREAM_STOP_SCOPED).catch(() => {});
     binding.entry.opts.onPeerStreamClosed?.(binding.peerId);
   }
 
@@ -605,7 +602,7 @@ export class ProjectStreamRegistry {
     if (!set) return;
     for (const binding of [...set]) {
       binding.writer.abort();
-      void binding.stream.recv.stop(STREAM_STOP_PROJECT).catch(() => {});
+      void binding.stream.recv.stop(STREAM_STOP_SCOPED).catch(() => {});
       this.unbind(binding);
     }
   }
