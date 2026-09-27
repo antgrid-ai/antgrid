@@ -18,6 +18,7 @@ import '../../providers/first_run.dart';
 import '../../providers/providers.dart';
 import '../../providers/session_opening_prompt.dart';
 import '../../screens/upgrade_screen.dart';
+import '../../billing/pricing_visibility.dart';
 import '../../services/handler_service.dart';
 import 'handler_instruction_composer.dart';
 import 'handler_item_status.dart';
@@ -529,6 +530,7 @@ class _HandlerRefusalSheet extends StatelessWidget {
   Widget build(BuildContext context) {
     final p = context.antgrid;
     final upgradable =
+        kPricingSurfacesEnabled &&
         entitlement.reason == HandlerEntitlementReason.notEntitled;
     return SingleChildScrollView(
       child: Column(

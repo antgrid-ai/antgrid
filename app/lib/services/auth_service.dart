@@ -8,6 +8,7 @@ import 'package:url_launcher/url_launcher.dart' as url_launcher;
 
 import '../config/build_info.dart';
 import '../config/storage_scope.dart';
+import '../util/ab_log.dart';
 
 /// Abstract over secure storage so tests can substitute an in-memory impl.
 ///
@@ -340,8 +341,16 @@ class AuthService {
         return;
       }
       await storage.writeCookie(cookie);
-    } catch (_) {
-      // Offline, server unreachable, or malformed response — never rethrow.
+    } catch (e) {
+      // Offline, server unreachable, malformed response, or a keychain that
+      // refuses the write — never rethrow. Logged because the user-facing
+      // copy is the same for all of them, and only a keychain failure means
+      // every retry will fail too.
+      AbLog.warn(
+        'AuthService',
+        'OAuth callback redemption failed',
+        fields: {'error': '$e'},
+      );
       _emitOAuthFailure();
     }
   }

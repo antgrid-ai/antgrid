@@ -463,8 +463,8 @@ if (process.argv.includes("--preview")) {
     // The four-agent mark for INLINING, which is what both headers carry. Same
     // art as the transparent cut, but inheriting `currentColor` instead of
     // carrying a `<style>` block: that block keys off the reader's OS scheme,
-    // and both sites force dark, so an on-page copy flips the wrong way for a
-    // light-OS visitor.
+    // and both sites let a reader pin the other one (the `data-theme`
+    // override), so an on-page copy would flip the wrong way for them.
     put(`${pub}/logo/antgrid-mark-full.svg`, markSvg(TIER_FULL, INHERIT, 48));
     // Its reduction, for chrome with no room to hold four agents.
     put(`${pub}/logo/antgrid-mark-small.svg`, markSvg(TIER_TWO, INHERIT, 48));

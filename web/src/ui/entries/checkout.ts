@@ -12,6 +12,7 @@
  * price.
  */
 import { initializePaddle, type Paddle } from "@paddle/paddle-js";
+import { resolvedScheme } from "../scheme.js";
 
 type CheckoutPlan = {
   id: string;
@@ -258,11 +259,14 @@ function initCheckout(data: WizardData, session: CheckoutSession | null) {
     document.getElementById("checkout-retry")!.classList.remove("hidden");
   }
 
-  /** Razorpay injects backdrop after open(); patch it for transparent blur on dark theme. */
+  /** Razorpay injects its backdrop after open(); patch it into a translucent
+   *  blur of the page's own scheme. A pair rather than a literal: the element
+   *  is a body child, so it inherits the html `color-scheme` and resolves the
+   *  right half itself. */
   function patchRazorpayBackdrop() {
     const apply = () => {
       for (const el of document.querySelectorAll<HTMLElement>(".razorpay-backdrop")) {
-        el.style.background = "rgb(9 9 11 / 55%)";
+        el.style.background = "light-dark(rgb(255 255 255 / 55%), rgb(9 9 11 / 55%))";
         el.style.backdropFilter = "blur(8px)";
         el.style.setProperty("-webkit-backdrop-filter", "blur(8px)");
       }
@@ -312,11 +316,14 @@ function initCheckout(data: WizardData, session: CheckoutSession | null) {
 
   async function openPaddleSession(paddleSession: PaddleSession) {
     if (!paddleInstance) {
+      // The overlay draws outside our stylesheet, so it is told the scheme the
+      // page is showing. Read once, when the instance is memoised: a scheme
+      // change mid-checkout leaves the overlay on the old one until reload.
       paddleInstance = await initializePaddle({
         token: paddleSession.clientToken,
         environment: paddleSession.environment,
         checkout: {
-          settings: { displayMode: "overlay", theme: "dark", locale: "en", variant: "one-page" },
+          settings: { displayMode: "overlay", theme: resolvedScheme(), locale: "en", variant: "one-page" },
         },
         eventCallback: (event) => {
           if (event.name === "checkout.completed") redirectSuccess();

@@ -11,6 +11,7 @@
     "test": "playwright test",
     "test:scripts": "node --test scripts/*.test.mjs",
     "test:blog": "bun test tests/unit/blog.test.ts",
+    "test:unit": "bun test tests/unit",
     "build:og": "node scripts/shoot-og.mjs",
     "sync:changelog": "node scripts/sync-changelog.mjs"
   },

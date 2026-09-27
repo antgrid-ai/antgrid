@@ -9,57 +9,100 @@
    before this the paragraphs rewrapped to more lines and the document grew
    ~146px under the reader after load. */
 
+/* ---- Colour scheme ------------------------------------------------------
+   Every colour token is a `light-dark(<light>, <dark>)` pair and `html` sets
+   `color-scheme: light dark`, so the OS preference picks the half and a
+   `data-theme="light|dark"` attribute on <html> (Base.astro's head script, from
+   the `antgrid-theme` cookie) pins it. One block, one name per colour, and the
+   daisyUI-free utilities (`bg-panel/50` and friends) keep working because
+   Tailwind passes `light-dark()` through into `color-mix()` untouched.
+
+   Never nest `@theme` inside `@media (prefers-color-scheme)`: Tailwind lifts
+   the block out and drops the condition without a warning, so the pair is the
+   ONLY place a scheme-specific value may live.
+
+   Floor: `light-dark()` needs Chrome/Edge 123, Firefox 120, Safari 17.5. Below
+   that every token is invalid and the page renders unstyled — accepted for a
+   developer audience in 2026. web/src/ui/styles.css carries the same floor. */
 @theme {
-  /* Surface ramp, dark → light: page < group < panel < chrome. Perceived
+  /* Surface ramp, page < group < panel < chrome in the dark half. Perceived
      difference compresses hard at the bottom of the luminance scale, so each
-     step needs ~6+ points of RGB to read as a distinct elevation — a 3-4 point
-     step here is invisible even though the same step is obvious at mid-grey.
-     Keep page off the #000 floor: ink-on-page above ~19:1 reads as glare. */
-  --color-page: #131110;
-  --color-panel: #211d19;
-  --color-chrome: #282320;
-  --color-group: #1a1715;
+     dark step needs ~6+ points of RGB to read as a distinct elevation — a 3-4
+     point step there is invisible even though the same step is obvious at
+     mid-grey. Keep page off the #000 floor: ink-on-page above ~19:1 reads as
+     glare. The light half runs the other way (panel is the brightest, the
+     raised card on a warm parchment page) but keeps the same roles. */
+  --color-page: light-dark(#f7f4ee, #131110);
+  --color-panel: light-dark(#fdfcfa, #211d19);
+  --color-chrome: light-dark(#f1ede6, #282320);
+  --color-group: light-dark(#f2eee7, #1a1715);
   /* The one surface BELOW page, for full-bleed bands that should read as inset
      rather than raised. Held above the #000 floor for the same glare reason as
      page — ink lands on it at ~18.9:1, just inside the ceiling noted above. */
-  --color-well: #0d0c0b;
+  --color-well: light-dark(#ece7de, #0d0c0b);
 
   /* Warm, not zinc. Every value in this ramp has R > G > B: the page is the
      bench and the app windows (the `ab-` ramp below, zinc-neutral) are the
      cool glass objects sitting on it. That temperature gap is what makes a
      window read as the product rather than as another card — with both ramps
      blue-black, as they were, the site had to fake it with borders. */
-  --color-edge: #35302b;
-  --color-edge-inner: #2b2724;
-  --color-edge-emph: #4d463f;
+  --color-edge: light-dark(#d8d1c6, #35302b);
+  --color-edge-inner: light-dark(#e5dfd5, #2b2724);
+  --color-edge-emph: light-dark(#b9b0a3, #4d463f);
 
-  --color-ink: #f4f1ec;
-  --color-ink2: #d8d3cc;
-  --color-muted: #a6a098;
-  /* muted2/faint are picked for contrast on --color-page, not panel: 4.5:1 (AA
-     body) and 3:1 (AA UI) respectively. Darkening either drops muted2 below AA. */
-  --color-muted2: #827b73;
-  --color-faint: #675f58;
+  --color-ink: light-dark(#131110, #f4f1ec);
+  --color-ink2: light-dark(#2e2926, #d8d3cc);
+  --color-muted: light-dark(#5c554e, #a6a098);
+  /* Every tier below `muted` clears 4.5:1 on the DARKEST surface it lands on
+     (`well`), not just on page, so the same token is safe wherever it is used.
+     That compresses the ramp -- muted/muted2/faint sit at roughly 6.7/5.9/5.1
+     on page -- and the separation between them is carried by size, weight and
+     letter-spacing, which these tiers already vary. There is only one AA-legal
+     step below body text, so contrast cannot also pay for hierarchy. */
+  --color-muted2: light-dark(#655d56, #9b958e);
+  --color-faint: light-dark(#6e6760, #938980);
 
   /* Signal, the brand accent. `signal` is the TEXT tier — it clears 4.5:1 on
-     page, panel and chrome, which pure #d2542a does not (3.75:1 on chrome).
-     `signalbtn` is the pure brand orange and is a FILL only: white on it is
-     4.16:1, under AA, so its label is page ink at 4.55:1. Lighten signalbtn and
-     that pairing breaks silently. */
-  --color-signal: #db6f4b;
-  --color-signal2: #ea997f;
-  --color-signal3: #eec6b9;
-  --color-signalbtn: #d2542a;
-  --color-signaldeep: #401405;
-  --color-signaldeep2: #6a2109;
+     page, panel and chrome, which pure #d2542a does not (3.75:1 on dark chrome).
+     `signalbtn` is a FILL only, and its label is `signalink` below: in the dark
+     half it is the pure brand orange, on which white is 4.16:1 (under AA), so
+     the label is page ink at 4.55:1; in the light half it is the app's
+     accentMuted #a03e1f and the label is white. Lighten either signalbtn and
+     that pairing breaks silently — tests/ui/accent-contrast.test.ts in web/
+     reads this file and says so. */
+  --color-signal: light-dark(#b3431f, #db6f4b);
+  --color-signal2: light-dark(#a63d1c, #ea997f);
+  --color-signal3: light-dark(#7a2c12, #eec6b9);
+  --color-signalbtn: light-dark(#a03e1f, #d2542a);
+  --color-signaldeep: light-dark(#fdece4, #401405);
+  --color-signaldeep2: light-dark(#f6cdbd, #6a2109);
+  /* The ink on ANY saturated fill (signalbtn, signal, ok, amber): never
+     `text-page` or `text-ink` there, because page inverts with the scheme and
+     the fill does not invert with it. */
+  --color-signalink: light-dark(#ffffff, #131110);
 
-  --color-amber: #fbbf24;
-  --color-amber2: #fcd34d;
+  --color-amber: light-dark(#945805, #fbbf24);
+  --color-amber2: light-dark(#854d0e, #fcd34d);
   /* Tinted surfaces, kept at panel luminance so `bg-amberbg/40` still reads as a
      raised highlight over --color-panel rather than dimming it. */
-  --color-amberbg: #231c10;
-  --color-amberbg2: #35291a;
-  --color-ok: #4ade80;
+  --color-amberbg: light-dark(#fdf3d7, #231c10);
+  --color-amberbg2: light-dark(#f5e4b7, #35291a);
+  /* Text tier on chrome too (Readout marks sit there): #15803d is 4.30:1. */
+  --color-ok: light-dark(#116e35, #4ade80);
+
+  /* The gridfield's hairlines; the cells are in .bg-gridfield below. */
+  --color-gridline: light-dark(rgba(0, 0, 0, 0.07), rgba(255, 255, 255, 0.04));
+
+  /* Shadows whose darkness has to change with the scheme. A drop shadow that
+     reads as depth on a dark page is a smudge on a light one, and one soft
+     enough for light vanishes on dark — so the colour half is a pair here and
+     the geometry stays in one place. Keep the light window alpha at or above
+     .22: the hero window's ab-deep is 1.01:1 against light page, and this
+     shadow is the only thing giving it an edge. */
+  --shadow-window: 0 24px 70px -30px light-dark(rgb(0 0 0 / 0.25), rgb(0 0 0 / 0.9));
+  --shadow-menu: 0 16px 40px light-dark(rgb(0 0 0 / 0.14), rgb(0 0 0 / 0.55));
+  --shadow-float: 0 14px 36px -12px light-dark(rgb(0 0 0 / 0.25), rgb(0 0 0 / 0.8)),
+    inset 0 1px 0 rgb(255 255 255 / 0.18);
 
   /* Three faces, three jobs, no overlap. Display carries the voice, sans carries
      the reading, mono carries anything a machine produced. Archivo is the only
@@ -131,46 +174,101 @@
   --container-shell: 72rem;
 
   /* ---- App material -----------------------------------------------------
-     The APP's palette (app/lib/design/ab_colors.dart), carried here so the
-     hand-built app shell reads as the product sitting on the page rather than
-     as more page with a border around it.
+     The APP's palette, carried here so the hand-built app shell reads as the
+     product sitting on the page rather than as more page with a border around
+     it. The dark half is `_zincFallback` (app/lib/design/ab_colors.dart), the
+     light half is the `_light` preset (app/lib/design/theme_presets.dart), so
+     the windows invert with the page exactly as the desktop app does.
 
      These are deliberately NOT reconciled with the site ramp above. The app is
      Zinc-neutral and the site is warm-neutral, and that difference is the only
      thing doing the work — an app window painted in --color-panel is just a
      card. Keep every `ab-` token pointing at the Dart value it mirrors; the two
-     drifting apart is silent and shows up as a window that looks almost right.
+     drifting apart is silent and shows up as a window that looks almost right,
+     which is why tests/unit/ab-ramp.test.ts parses both Dart files.
 
-     The accent is absent on purpose: the app's `accent`/`accentHighlight`/
-     `accentMuted` are ALREADY #db6f4b / #ea997f / #d2542a, byte-identical to
-     --color-signal / signal2 / signalbtn above, so the shell uses those. */
-  --color-ab-deepest: #09090b;
-  --color-ab-deep: #0c0c0f;
-  --color-ab-surface: #18181b;
-  --color-ab-raised: #1f1f23;
-  --color-ab-elevated: #27272a;
-  --color-ab-selected: #2f2f35;
-  --color-ab-line-soft: #1a1a1f;
-  --color-ab-line: #27272a;
-  --color-ab-line-strong: #3f3f46;
-  --color-ab-text: #e4e4e7;
-  --color-ab-text2: #a1a1aa;
-  --color-ab-mute: #71717a;
-  --color-ab-dim: #52525b;
+     The accent is absent on purpose: the app's dark `accent`/`accentHighlight`/
+     `accentMuted` are #db6f4b / #ea997f / #d2542a, byte-identical to the dark
+     --color-signal / signal2 / signalbtn above, and `signalbtn` is the app's
+     accentMuted in the light half too, so the shell uses those. (The light
+     app accent is #bd4b25 where the site's text tier is #b3431f: the site
+     needs 4.5:1 on parchment, the app only on white.) */
+  --color-ab-deepest: light-dark(#fafafa, #09090b);
+  --color-ab-deep: light-dark(#f5f5f5, #0c0c0f);
+  --color-ab-surface: light-dark(#ffffff, #18181b);
+  --color-ab-raised: light-dark(#ffffff, #1f1f23);
+  --color-ab-elevated: light-dark(#ffffff, #27272a);
+  --color-ab-selected: light-dark(#e8e8e8, #2f2f35);
+  --color-ab-line-soft: light-dark(#e8e8e8, #1a1a1f);
+  --color-ab-line: light-dark(#e0e0e0, #27272a);
+  --color-ab-line-strong: light-dark(#bdbdbd, #3f3f46);
+  --color-ab-text: light-dark(#18181b, #e4e4e7);
+  --color-ab-text2: light-dark(#3f3f46, #a1a1aa);
+  /* `mute` and `dim` are the two ramp entries that deliberately DIVERGE from
+     the app (tests/unit/ab-ramp.test.ts pins the divergence and its floor).
+     The app's textMuted #71717a and textDisabled #a1a1aa/#52525b run 2.1-4.4:1
+     on these surfaces: legible in a dense native window the reader works in,
+     not on a page they scan once. Both also paint ICONS, so an -ink text tier
+     like the status hues below could not have fixed them. */
+  --color-ab-mute: light-dark(#5a5a62, #95959c);
+  --color-ab-dim: light-dark(#676772, #878793);
   /* Status tones. `attn` is the app's statusAttention and it means what amber
      means everywhere else on this site: a human is needed. Nothing else in a
-     scene may take it. */
+     scene may take it. The app keeps the same three hues in its light preset
+     (they are dots and tints there), so they are single values. */
   --color-ab-run: #8fcfae;
   --color-ab-think: #e2c792;
   --color-ab-attn: #e5a055;
-  --color-ab-ok: #22c55e;
-  --color-ab-err: #f87171;
+  --color-ab-ok: light-dark(#15803d, #22c55e);
+  /* Light half nudged off the app's #dc2626, 4.43:1 on ab-deep -- it carries
+     diff counts, which are data rather than decoration. */
+  --color-ab-err: light-dark(#d62323, #f87171);
+  /* Site-only TEXT tiers for the two status hues that carry words in a scene
+     ("Needs you", "Remote on"): on white, attn is 2.21:1 and run is 1.79:1.
+     Dots, icons and the tinted chips keep the app hue above; only the words
+     take these. */
+  --color-ab-attn-ink: light-dark(#b45309, #e5a055);
+  --color-ab-run-ink: light-dark(#1f7a4d, #8fcfae);
 }
 
+/* `light:`/`dark:` variants that honour the override attribute. Tailwind's
+   built-in `dark:` keys off the OS alone, so a reader who pinned Light on a
+   dark OS would get dark-only utilities; both are redefined on the same
+   resolution `color-scheme` uses: the attribute if set, else the OS. */
+@custom-variant light {
+  &:where(:root[data-theme="light"], :root[data-theme="light"] *) {
+    @slot;
+  }
+  @media (prefers-color-scheme: light) {
+    &:where(:root:not([data-theme="dark"]), :root:not([data-theme="dark"]) *) {
+      @slot;
+    }
+  }
+}
+@custom-variant dark {
+  &:where(:root[data-theme="dark"], :root[data-theme="dark"] *) {
+    @slot;
+  }
+  @media (prefers-color-scheme: dark) {
+    &:where(:root:not([data-theme="light"]), :root:not([data-theme="light"]) *) {
+      @slot;
+    }
+  }
+}
+
+/* The scheme follows the OS unless the override attribute pins it. This is
+   what resolves every light-dark() pair above, so it must stay unlayered and
+   on html: nothing above it in the tree can be asked. */
 html {
-  color-scheme: dark;
+  color-scheme: light dark;
   background-color: var(--color-page);
   scroll-behavior: smooth;
+}
+html[data-theme="light"] {
+  color-scheme: light;
+}
+html[data-theme="dark"] {
+  color-scheme: dark;
 }
 body {
   background-color: var(--color-page);
@@ -193,7 +291,7 @@ body {
    Only safe where a frame contains it (the closing CTA's bordered card); the hero
    is full-bleed and needs .glow-hero below. */
 .glow-signal {
-  background: radial-gradient(closest-side, rgba(210, 84, 42, 0.16), transparent 70%);
+  background: radial-gradient(closest-side, light-dark(rgba(210, 84, 42, 0.1), rgba(210, 84, 42, 0.16)), transparent 70%);
 }
 
 /* The hero's light, which is two different devices because a phone has no room
@@ -212,7 +310,7 @@ body {
   position: absolute;
   inset: 0 0 auto 0;
   height: 340px;
-  background: radial-gradient(ellipse 150% 100% at 50% 0%, rgba(210, 84, 42, 0.13), transparent 72%);
+  background: radial-gradient(ellipse 150% 100% at 50% 0%, light-dark(rgba(210, 84, 42, 0.08), rgba(210, 84, 42, 0.13)), transparent 72%);
 }
 @media (min-width: 48rem) {
   .glow-hero {
@@ -220,7 +318,7 @@ body {
     height: 620px;
     width: min(980px, 68vw);
     transform: translateX(-50%);
-    background: radial-gradient(closest-side, rgba(210, 84, 42, 0.16), transparent 70%);
+    background: radial-gradient(closest-side, light-dark(rgba(210, 84, 42, 0.1), rgba(210, 84, 42, 0.16)), transparent 70%);
   }
 }
 
@@ -234,10 +332,20 @@ body {
 .bg-gridfield {
   background-image:
     url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='960' height='960'%3E%3Cg fill='rgba(255,255,255,0.022)'%3E%3Crect x='32' y='64' width='64' height='32'/%3E%3Crect x='256' y='32' width='32' height='32'/%3E%3Crect x='512' y='128' width='96' height='32'/%3E%3Crect x='800' y='64' width='32' height='32'/%3E%3Crect x='128' y='224' width='32' height='32'/%3E%3Crect x='416' y='256' width='64' height='32'/%3E%3Crect x='672' y='192' width='32' height='32'/%3E%3Crect x='896' y='288' width='64' height='32'/%3E%3Crect x='192' y='416' width='96' height='32'/%3E%3Crect x='544' y='480' width='32' height='32'/%3E%3Crect x='320' y='544' width='64' height='32'/%3E%3Crect x='736' y='512' width='96' height='32'/%3E%3Crect x='64' y='672' width='64' height='32'/%3E%3Crect x='448' y='704' width='32' height='32'/%3E%3Crect x='864' y='640' width='32' height='32'/%3E%3Crect x='224' y='800' width='64' height='32'/%3E%3Crect x='608' y='864' width='96' height='32'/%3E%3Crect x='384' y='928' width='32' height='32'/%3E%3C/g%3E%3Cg fill='rgba(255,255,255,0.04)'%3E%3Crect x='352' y='160' width='32' height='32'/%3E%3Crect x='704' y='352' width='64' height='32'/%3E%3Crect x='128' y='576' width='32' height='32'/%3E%3Crect x='832' y='736' width='64' height='32'/%3E%3Crect x='288' y='672' width='96' height='32'/%3E%3Crect x='576' y='256' width='32' height='32'/%3E%3Crect x='640' y='96' width='32' height='32'/%3E%3Crect x='96' y='320' width='64' height='32'/%3E%3Crect x='768' y='608' width='32' height='32'/%3E%3Crect x='416' y='832' width='64' height='32'/%3E%3C/g%3E%3C/svg%3E"),
-    linear-gradient(to right, rgba(255, 255, 255, 0.04) 1px, transparent 1px),
-    linear-gradient(to bottom, rgba(255, 255, 255, 0.04) 1px, transparent 1px);
+    linear-gradient(to right, var(--color-gridline) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--color-gridline) 1px, transparent 1px);
   background-size: 960px 960px, 32px 32px, 32px 32px;
   mask-image: radial-gradient(130% 85% at 50% 8%, black 8%, transparent 72%);
+  /* The cells are baked into an SVG data URI, so they cannot take a
+     light-dark() fill the way the hairlines do; the same rects in ink instead
+     of white. Must be a scheme variant, not a media query: a reader who pinned
+     a scheme on the opposite OS setting would get the wrong cells. */
+  @variant light {
+    background-image:
+      url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='960' height='960'%3E%3Cg fill='rgba(0,0,0,0.05)'%3E%3Crect x='32' y='64' width='64' height='32'/%3E%3Crect x='256' y='32' width='32' height='32'/%3E%3Crect x='512' y='128' width='96' height='32'/%3E%3Crect x='800' y='64' width='32' height='32'/%3E%3Crect x='128' y='224' width='32' height='32'/%3E%3Crect x='416' y='256' width='64' height='32'/%3E%3Crect x='672' y='192' width='32' height='32'/%3E%3Crect x='896' y='288' width='64' height='32'/%3E%3Crect x='192' y='416' width='96' height='32'/%3E%3Crect x='544' y='480' width='32' height='32'/%3E%3Crect x='320' y='544' width='64' height='32'/%3E%3Crect x='736' y='512' width='96' height='32'/%3E%3Crect x='64' y='672' width='64' height='32'/%3E%3Crect x='448' y='704' width='32' height='32'/%3E%3Crect x='864' y='640' width='32' height='32'/%3E%3Crect x='224' y='800' width='64' height='32'/%3E%3Crect x='608' y='864' width='96' height='32'/%3E%3Crect x='384' y='928' width='32' height='32'/%3E%3C/g%3E%3Cg fill='rgba(0,0,0,0.09)'%3E%3Crect x='352' y='160' width='32' height='32'/%3E%3Crect x='704' y='352' width='64' height='32'/%3E%3Crect x='128' y='576' width='32' height='32'/%3E%3Crect x='832' y='736' width='64' height='32'/%3E%3Crect x='288' y='672' width='96' height='32'/%3E%3Crect x='576' y='256' width='32' height='32'/%3E%3Crect x='640' y='96' width='32' height='32'/%3E%3Crect x='96' y='320' width='64' height='32'/%3E%3Crect x='768' y='608' width='32' height='32'/%3E%3Crect x='416' y='832' width='64' height='32'/%3E%3C/g%3E%3C/svg%3E"),
+      linear-gradient(to right, var(--color-gridline) 1px, transparent 1px),
+      linear-gradient(to bottom, var(--color-gridline) 1px, transparent 1px);
+  }
 }
 
 /* The only motion in the hero background, and it is ambient rather than
@@ -275,8 +383,8 @@ body {
 /* Card elevation: soft drop shadow + a brighter top edge, as if lit from above. */
 .card-lit {
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.05),
-    0 24px 64px -24px rgba(0, 0, 0, 0.7);
+    inset 0 1px 0 light-dark(rgb(255 255 255 / 0.6), rgb(255 255 255 / 0.05)),
+    0 24px 64px -24px light-dark(rgb(0 0 0 / 0.12), rgb(0 0 0 / 0.7));
 }
 
 /* ---- Ledger --------------------------------------------------------------
@@ -292,6 +400,16 @@ body {
 }
 
 /* ---- Motion ------------------------------------------------------------ */
+
+/* The footer's scheme toggle does nothing without its script, so it is shown
+   only once the reveal script below has marked the document. Unlayered for the
+   same reason as the app-shell rules: no utility can half-win against it. */
+[data-theme-toggle] {
+  display: none;
+}
+html.js [data-theme-toggle] {
+  display: inline-flex;
+}
 
 /* Scroll reveal: only hidden once JS has confirmed it can reveal again. */
 html.js .reveal {

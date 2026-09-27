@@ -1,5 +1,6 @@
 import 'package:flutter/widgets.dart';
 
+import '../../billing/pricing_visibility.dart';
 import '../../design/ab_colors.dart';
 import '../../design/ab_tokens.dart';
 import '../../design/widgets/ab_list_row.dart';
@@ -317,6 +318,8 @@ String _planLabel(String tier) =>
 /// sentence for still has to say that arming will not work, since silence is
 /// the failure being fixed.
 String handlerEntitlementNotice(HandlerEntitlement e) => switch (e.reason) {
+  HandlerEntitlementReason.notEntitled when !kPricingSurfacesEnabled =>
+    "Handler isn't available for this account yet.",
   HandlerEntitlementReason.notEntitled =>
     e.tier == null
         ? 'Handler is part of Pro, and the plan this machine is signed in on '

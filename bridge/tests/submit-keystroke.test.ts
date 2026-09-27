@@ -4,6 +4,7 @@ import {
   isInterruptKeystroke,
   isSubmitKeystroke,
   isTerminalReport,
+  opensCommandLine,
   submittedLine,
 } from "../src/keystrokes";
 
@@ -158,4 +159,28 @@ test("the escape sequences a human produces still count", () => {
 test("the submit split is untouched by pointer reports", () => {
   expect(submittedLine("\x1b[<0;12;5M")).toBeNull();
   expect(submittedLine("hello\r")).toBe("hello");
+});
+
+// The third half of the submit gate: a line the CLI answers itself runs no model
+// turn, so no turn-end hook closes the turn an inferred start would open.
+test("a leading slash opens a command line", () => {
+  expect(opensCommandLine("/")).toBe(true);
+  // Whole-line frames: a paste, or the app's send-to-agent composer.
+  expect(opensCommandLine("/compact\r")).toBe(true);
+  expect(opensCommandLine("/model opus\r")).toBe(true);
+});
+
+test("a slash anywhere but the front is ordinary content", () => {
+  expect(opensCommandLine("fix /etc/hosts\r")).toBe(false);
+  expect(opensCommandLine("f")).toBe(false);
+  expect(opensCommandLine("\r")).toBe(false);
+  // History recall and cursor movement open no line of their own.
+  expect(opensCommandLine("\x1b[A")).toBe(false);
+});
+
+// The viewer's VT engine writes on this channel too, and nothing it wrote is a
+// line the user opened.
+test("a pointer report never opens a command line", () => {
+  expect(opensCommandLine("\x1b[<0;12;5M")).toBe(false);
+  expect(opensCommandLine("\x1b[I")).toBe(false);
 });

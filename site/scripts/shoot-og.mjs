@@ -6,7 +6,12 @@ import { chromium } from "@playwright/test";
 
 const url = process.env.OG_URL ?? "http://localhost:4321/og-card";
 const browser = await chromium.launch();
-const page = await browser.newPage({ viewport: { width: 1200, height: 630 } });
+// colorScheme: Playwright emulates a light OS by default and the site follows
+// the OS. The card page pins itself dark too; this is the belt to that brace.
+const page = await browser.newPage({
+  viewport: { width: 1200, height: 630 },
+  colorScheme: "dark",
+});
 await page.goto(url, { waitUntil: "networkidle" });
 // Settle the self-hosted webfonts so the shot never captures fallback metrics.
 await page.evaluate(() => document.fonts.ready);

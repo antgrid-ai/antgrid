@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
+import 'package:clock/clock.dart';
 import 'package:flutter/foundation.dart';
 
 import '../models/terminal_models.dart' show kTerminalFrameProtocolVersion;
@@ -849,10 +850,14 @@ class DemoTransport extends BufferedAgentTransport {
   }
 
   // ── playback ──
+  //
+  // Due times read `clock`, never `DateTime.now()`: the timers below run on
+  // fake time under `testWidgets`, and a due time stamped from the real clock
+  // is never reached there, so replies would never arrive in a test.
 
   void _enqueue(List<DemoBeat> beats) {
     if (_disposed) return;
-    final now = DateTime.now();
+    final now = clock.now();
     for (final beat in beats) {
       _queue.add(
         _PendingBeat(now.add(beat.at), _beatSeq++, beat.channel, beat.frame),
@@ -863,7 +868,7 @@ class DemoTransport extends BufferedAgentTransport {
 
   void _enqueueAll(Duration at, List<Map<String, Object?>> frames) {
     if (_disposed || frames.isEmpty) return;
-    final due = DateTime.now().add(at);
+    final due = clock.now().add(at);
     for (final frame in frames) {
       _queue.add(_PendingBeat(due, _beatSeq++, 'control', frame));
     }
@@ -885,14 +890,14 @@ class DemoTransport extends BufferedAgentTransport {
       // meaning in the order alone.
       return byDue != 0 ? byDue : a.seq.compareTo(b.seq);
     });
-    final wait = _queue.first.due.difference(DateTime.now());
+    final wait = _queue.first.due.difference(clock.now());
     _timer = Timer(wait.isNegative ? Duration.zero : wait, _fire);
   }
 
   void _fire() {
     _timer = null;
     if (_disposed) return;
-    final now = DateTime.now();
+    final now = clock.now();
     while (_queue.isNotEmpty && !_queue.first.due.isAfter(now)) {
       final beat = _queue.removeAt(0);
       _dispatchBeat(beat);

@@ -362,14 +362,17 @@ jobs:
       # Signing — runs only when the Apple secrets are present AND the build is
       # `release`. debug/profile bundles carry `get-task-allow` (which notarization
       # later rejects) and need the JIT entitlement (DebugProfile.entitlements) that a
-      # hardened-runtime re-sign would have to special-case; release uses the empty
-      # Release.entitlements + AOT, so it is the only signable/notarizable mode.
+      # hardened-runtime re-sign would have to special-case; release is AOT and needs
+      # only DeveloperID.entitlements, so it is the only signable/notarizable mode.
       # Notarization is a SEPARATE step below, targeting the packaged .dmg (sign the
       # app here → package the dmg → notarize+staple the dmg).
       # Required secrets (this step):
       #   APPLE_CERTIFICATE_BASE64   base64 of a "Developer ID Application" .p12
       #   APPLE_CERTIFICATE_PASSWORD password for that .p12
       #   APPLE_SIGNING_IDENTITY     e.g. "Developer ID Application: Name (TEAMID)"
+      #   MACOS_PROVISIONING_PROFILE_BASE64
+      #                              base64 of the "Developer ID" provisioning profile
+      #                              for ai.radhaai.antgrid (see the embed below)
       # (the notarize step below additionally needs APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID)
       - name: Code sign (optional)
         if: ${{ env.APPLE_SIGNING_IDENTITY != '' && env.BUILD_MODE == 'release' }}
@@ -378,8 +381,32 @@ jobs:
           CERT_B64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
           CERT_PW: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          PROFILE_B64: ${{ secrets.MACOS_PROVISIONING_PROFILE_BASE64 }}
+          APP_IDENTIFIER: VK5VFQQ4P6.ai.radhaai.antgrid
         run: |
           set -euo pipefail
+          # flutter_secure_storage uses the data-protection keychain on macOS,
+          # which refuses every read and write (errSecMissingEntitlement, -34018)
+          # from an app without an application-identifier. Xcode's Automatic
+          # signing adds one to local builds, so only a Developer ID re-sign
+          # loses it — and a shipped app then cannot keep a sign-in or device
+          # credential. The identifier is a restricted entitlement: it needs this
+          # embedded profile or AMFI kills the app at launch, so a missing or
+          # mismatched profile fails the release here rather than on a user's Mac.
+          if [ -z "$PROFILE_B64" ]; then
+            echo "::error::MACOS_PROVISIONING_PROFILE_BASE64 is not set; a Developer ID build without it cannot use the keychain"
+            exit 1
+          fi
+          echo "$PROFILE_B64" | base64 --decode > "$RUNNER_TEMP/antgrid.provisionprofile"
+          security cms -D -i "$RUNNER_TEMP/antgrid.provisionprofile" > "$RUNNER_TEMP/profile.plist"
+          PROFILE_APP_ID="$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:com.apple.application-identifier' \
+            "$RUNNER_TEMP/profile.plist" 2>/dev/null || true)"
+          if [ "$PROFILE_APP_ID" != "$APP_IDENTIFIER" ]; then
+            echo "::error::provisioning profile is for '$PROFILE_APP_ID', expected '$APP_IDENTIFIER'"
+            exit 1
+          fi
+          cp "$RUNNER_TEMP/antgrid.provisionprofile" "$APP/Contents/embedded.provisionprofile"
+
           # Import the signing cert into a throwaway keychain.
           KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
           KP="$(uuidgen)"
@@ -390,6 +417,24 @@ jobs:
           security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$CERT_PW" -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KP" "$KEYCHAIN"
           security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+
+          # AMFI also kills the app when the signing cert is not one the profile
+          # names, or the profile has expired — neither codesign nor notarization
+          # notices, so a renewed cert with a stale profile would otherwise ship.
+          SIGNING_CERT_SHA1="$(security find-identity -v -p codesigning "$KEYCHAIN" | awk '/\)/ {print $2; exit}')"
+          python3 - "$RUNNER_TEMP/profile.plist" "$SIGNING_CERT_SHA1" <<'PY'
+          import datetime, hashlib, plistlib, sys
+          with open(sys.argv[1], "rb") as f:
+              profile = plistlib.load(f)
+          want = sys.argv[2].upper()
+          certs = {hashlib.sha1(c).hexdigest().upper() for c in profile.get("DeveloperCertificates", [])}
+          if want not in certs:
+              print(f"::error::provisioning profile does not include the signing certificate {want or '(none found)'}")
+              sys.exit(1)
+          if profile["ExpirationDate"] <= datetime.datetime.utcnow():
+              print(f"::error::provisioning profile expired {profile['ExpirationDate']}")
+              sys.exit(1)
+          PY
 
           # Sign nested Mach-O inside-out, THEN the outer bundle. `--deep` is
           # unreliable for Flutter .app bundles (Apple discourages it and it can
@@ -436,10 +481,20 @@ jobs:
           codesign --force --options runtime --timestamp \
             --entitlements app/macos/Runner/Bridge.entitlements \
             --sign "$IDENTITY" "$APP/Contents/MacOS/antgrid-bridge"
+          # DeveloperID.entitlements, not Release.entitlements: Xcode's Automatic
+          # signing reads the latter, and restricted keys there would demand a
+          # provisioning profile from every local and unsigned release build.
           codesign --force --options runtime --timestamp \
-            --entitlements app/macos/Runner/Release.entitlements \
+            --entitlements app/macos/Runner/DeveloperID.entitlements \
             --sign "$IDENTITY" "$APP"
           codesign --verify --strict --verbose=2 "$APP"
+          codesign -d --entitlements :- "$APP" > "$RUNNER_TEMP/signed-entitlements.plist" 2>/dev/null
+          SIGNED_APP_ID="$(/usr/libexec/PlistBuddy -c 'Print :com.apple.application-identifier' \
+            "$RUNNER_TEMP/signed-entitlements.plist" 2>/dev/null || true)"
+          if [ "$SIGNED_APP_ID" != "$APP_IDENTIFIER" ]; then
+            echo "::error::signed app carries application-identifier '$SIGNED_APP_ID', expected '$APP_IDENTIFIER'"
+            exit 1
+          fi
 
       # Always package the DMG when the BUILD succeeded, even if the optional sign
       # step didn't run (unsigned/dispatch builds) — a good build is never discarded.

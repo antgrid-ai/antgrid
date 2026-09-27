@@ -79,7 +79,7 @@ import { BETA_FREE, OFFER_ACTIVE, YEARLY_OFFER_USD, YEARLY_LIST_USD } from "../.
           {/* Forwards, never as a discount off a struck price — same rule
               PlanCard.astro states and for the same reason: $99 has never been
               charged, so "% off" would invent a reference price. */}
-          <span class="rounded-full bg-signalbtn px-1.5 py-px text-pip font-medium text-page">Founding</span>
+          <span class="rounded-full bg-signalbtn px-1.5 py-px text-pip font-medium text-signalink">Founding</span>
           Pro ${YEARLY_OFFER_USD} per seat / year — ${YEARLY_LIST_USD} at launch
           <Icon name="tabler:arrow-right" width="12" height="12" />
         </a>
@@ -188,7 +188,7 @@ import { BETA_FREE, OFFER_ACTIVE, YEARLY_OFFER_USD, YEARLY_LIST_USD } from "../.
               right-anchored it runs off the LEFT edge at 360px. */}
           <div
             id="buildsMenu"
-            class="absolute left-0 top-full z-20 mt-3 hidden w-60 rounded-lg border border-edge-emph bg-panel p-1.5 shadow-[0_16px_40px_rgba(0,0,0,0.55)]"
+            class="absolute left-0 top-full z-20 mt-3 hidden w-60 rounded-lg border border-edge-emph bg-panel p-1.5 shadow-menu"
           >
             {PLATFORMS.map((p) => (
               <a
