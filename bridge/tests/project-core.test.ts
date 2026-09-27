@@ -425,7 +425,12 @@ test("attachRelayStream wires handle.terminalHooks into the core, and every tear
   const bus = (core as unknown as { bus: MessageBus }).bus;
   const sent: AbMessage[] = [];
   bus.subscribe({ deliver: (m) => sent.push(m) });
-  bus.dispatchInbound(createMessage("terminal:start", { terminalId: "adhoc", cwd: tmpdir() }) as any, "control", "loopback");
+  // Not the default shell: an interactive POSIX shell ignores the polite stop
+  // shutdown sends first, so cleanup would sit out the whole 5s grace and time
+  // the test out on Linux. This process exits when asked.
+  bus.dispatchInbound(createMessage("terminal:start", {
+    terminalId: "adhoc", cwd: tmpdir(), command: process.execPath, args: ["-e", "setInterval(() => {}, 1000)"],
+  }) as any, "control", "loopback");
   await waitFor(() => sent.some((m) => m.type === "terminal:started" && (m as any).terminalId === "adhoc"), "terminal:started");
 
   const promoted = core.promote(deps);
