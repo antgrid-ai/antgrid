@@ -1,5 +1,6 @@
-// The remote session directory's widget half: owns exactly the `Timer` and the `ref.read`/`ref.listenManual`
-// calls [RemoteDirectoryPumpEngine] needs, and nothing else — every decision
+// The remote session directory's widget half: owns exactly the `Timer` and
+// the `ref.read`/`ref.listenManual` calls [RemoteDirectoryPumpEngine] needs,
+// and nothing else — every decision
 // about when to push, whom to ask, and how a peer's answer is classified
 // lives in `remote_directory_source.dart`, pure and testable without this
 // widget.

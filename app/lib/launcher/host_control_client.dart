@@ -683,10 +683,10 @@ class HostControlClient {
   }
 
   /// The asking half of the remote session directory (`session-bus:remote-
-  /// directory`): hand the local bridge
-  /// what this cycle's pump learned peeking peer capability cards. `machines`
-  /// is sent verbatim — the bridge's own `RemoteDirectoryCache.replace`
-  /// validates and sanitises each row, so nothing here re-checks one.
+  /// directory`): hand the local bridge what this cycle's pump learned peeking
+  /// peer capability cards. `machines` is sent verbatim — the bridge's own
+  /// `RemoteDirectoryCache.replace` validates and sanitises each row, so
+  /// nothing here re-checks one.
   /// `BAD_REQUEST` covers ANY rejection of `ControlRequestSchema`, not only an
   /// unrecognised verb — `RemoteDirectoryPumpEngine` is what tells a bridge
   /// that predates this verb apart from a payload bug on this side, by

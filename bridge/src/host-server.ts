@@ -422,8 +422,9 @@ export class HostServer {
   // state of its own. Persisted to <abDir>/projects.json; if that file is lost,
   // worst case a stopped project isn't advertised until reopened.
   private readonly seenProjects: Map<string, SeenProject> = loadSeenProjects(seenProjectsPath());
-  // Machine-wide sessionId -> owning project. `liveSessions` defers to whichever core is warm right now, so
-  // an open project's own answer never lags its own sessions.json flush; see
+  // Machine-wide sessionId -> owning project. `liveSessions` defers to
+  // whichever core is warm right now, so an open project's own answer never
+  // lags its own sessions.json flush; see
   // SessionBusSessionIndex's own doc for what that buys and what it costs.
   private readonly sessionIndex = new SessionBusSessionIndex({
     liveSessions: (projectId) => this.cores.get(projectId)?.core.listSessions(true) ?? null,
@@ -1009,9 +1010,9 @@ export class HostServer {
    *  `bus.publish` fans a response out to the desktop and the phone alike, and a
    *  client tells its own answer from a sibling's only by `requestId` — fine for
    *  a verb whose answer every session would have asked for anyway, wrong for
-   *  any answer assembled from ONE asker's params. The session-bearing capability card is the
-   *  loudest case — this machine's session titles and work status — but the
-   *  quieter reason covers the rest: a client correlates a response by
+   *  any answer assembled from ONE asker's params. The session-bearing
+   *  capability card is the loudest case — this machine's session titles and
+   *  work status — but the quieter reason covers the rest: a client correlates a response by
    *  `requestId` alone, and those are per-transport counters that two devices
    *  attached to this bridge both start at zero, so a fanned answer can complete
    *  a DIFFERENT device's pending request with a payload it never asked for.

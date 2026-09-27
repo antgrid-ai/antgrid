@@ -368,9 +368,11 @@ Future<AgentTransport?> _buildRelayTransportFor(
       createAbMessage('project:start', {'projectId': projId}),
     );
   }
-  await transport.connect();
   // Detach only THIS stream on teardown; the machine connection's lifetime is
   // governed by the control-plane reaper / registry eviction, not here.
+  // Registered before connect(), which can wait out the bind's snapshot: an
+  // onDispose attempted after this provider was disposed in that window
+  // throws, leaving the stream bound with no owner to release it.
   ref.onDispose(
     () => detached(
       'AgentTransport',
@@ -378,6 +380,7 @@ Future<AgentTransport?> _buildRelayTransportFor(
       transport.dispose,
     ),
   );
+  await transport.connect();
   return transport;
 }
 

@@ -92,7 +92,8 @@ itself holds no per-account registry and performs no further check afterward.
 Mid-connection revocation is not enforced by the relay: a revoked endpoint keeps
 its relay connection, and the bridge closes its own peer connection instead,
 immediately on the central `peer-policy-changed` push or at the latest when its
-lease expires (60 seconds; see [peer session §7](protocol/peer-session.md)). Native error classification and key erasure
+lease expires (`PEER_LEASE_MS`, `packages/antgrid-wire/src/peer-authorization.ts`;
+refresh timing in [peer session §7](protocol/peer-session.md)). Native error classification and key erasure
 also require qualification. Nothing in this branch authorizes enabling
 production preference before those gates pass.
 
