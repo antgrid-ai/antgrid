@@ -1,5 +1,5 @@
-// The session bus never hands one participant another participant's words. Spec
-// 5.2 makes every delivered line a prompt the BRIDGE authored: provenance first,
+// The session bus never hands one participant another participant's words.
+// Every delivered line is a prompt the BRIDGE authored: provenance first,
 // one expected action, and the other side's content fenced as data. This module
 // owns those templates — one exported renderer per delivery kind, so a wording
 // change is a reviewed diff against a test rather than drift inside a handler.
@@ -67,8 +67,9 @@ const UNPRINTABLE = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g;
  * half-written prompt, and none of it is visible in the transcript afterwards.
  * Every other producer on this channel is held to the same rule by
  * `checkReplyShape`, which REJECTS. A delivery cannot be rejected — a message
- * with nowhere to go is the silence D11 forbids — so it is reduced instead, and
- * the character is dropped rather than laundered into something typeable.
+ * with nowhere to go would be exactly the silent drop this bus refuses to
+ * allow — so it is reduced instead, and the character is dropped rather than
+ * laundered into something typeable.
  *
  * It is also what makes the bracketed-paste framing on the submit path safe:
  * with ESC gone the content cannot carry the `\x1b[201~` that would close its
@@ -226,7 +227,7 @@ function toLine(labels: ProvenanceLabels): string {
 
 /** Said on every delivery, because an agent that reads bus traffic as its human
  *  is one line away from acting on another machine's say-so. The sending agent
- *  is named rather than its role: spec 4.2 leaves the two ends symmetric, so a
+ *  is named rather than its role: the two ends of a thread are symmetric, so a
  *  wrapper that claimed a role would be describing a hierarchy the protocol no
  *  longer has. */
 function composedByBridge(): string[] {
@@ -240,7 +241,7 @@ function composedByBridge(): string[] {
  *
  *  Both kinds say the same thing because both are answerable the same way: the
  *  thread id is the whole address of a reply, and an agent told to answer
- *  without one would have to invent an id spec 4.3 makes the bridge's to mint. */
+ *  without one would have to invent an id only the bridge may mint. */
 function answerLine(labels: ProvenanceLabels): string {
   return labels.thread
     ? `What to do: read it below. To answer, use antgrid_reply on thread "${labels.thread}".`
@@ -298,15 +299,15 @@ function unexpectedBlock(unexpected: string | undefined): string[] {
 
 /** An artifact the sender attached: a handle and a summary, never the bytes. The
  *  reader pulls what it decides it needs, which is what keeps another machine's
- *  evidence out of this prompt (6.3). */
+ *  evidence out of this prompt. */
 export interface BusArtifactHandle {
   artifactId: string;
   name: string;
   summary: string;
 }
 
-/** What one message carries into the receiving session, for either verb: spec
- *  6.2 makes everything after the send decision identical for the two. */
+/** What one message carries into the receiving session, for either verb:
+ *  everything after the send decision is identical for the two. */
 export interface BusDelivery {
   /** The session that sent it — the provenance line's content. */
   peer: SessionMemberRef;

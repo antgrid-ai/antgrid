@@ -382,7 +382,7 @@ export class TerminalViewerConnection {
 
   private tickAttachment(attachment: Attachment, now: number): void {
     const run = attachment.run;
-    // D5's "retire pending viewer work" on a revocation edge, and no more than
+    // Retires pending viewer work on a revocation edge, and no more than
     // that. The common cause here is `connState.suppressed` — the app
     // backgrounded, or the peer went briefly offline — which is an everyday
     // event that ends by itself, so destroying the attachment would freeze the

@@ -3744,7 +3744,7 @@ export class HandlerEngine {
    * parsers disagreeing: a preparable shape the floor recognized but the planner
    * produced no plan for would otherwise pass in complete silence, which reads to
    * the user exactly like an action that was fully snapshotted. A flagged shape no
-   * §5.2 action can EVER cover reports that fact rather than passing in silence.
+   * snapshot action can EVER cover reports that fact rather than passing in silence.
    */
   private recordSnapshots(
     terminalId: string, s: ArmedSession, outcomes: SnapshotOutcome[], flagged: FloorWarning[],
@@ -3778,11 +3778,11 @@ export class HandlerEngine {
   }
 
   /**
-   * The row for a flagged shape §5.2 can never cover, because the state it moves
-   * lives outside the project — a remote's default branch, a registry. Fires even
-   * when §5.4 authorization suppressed the advisory: the user authorized the
-   * operation and never the loss of its undo, the same rule `recordSnapshots`
-   * states for a snapshot that could not be taken.
+   * The row for a flagged shape no snapshot can ever cover, because the state it
+   * moves lives outside the project — a remote's default branch, a registry.
+   * Fires even when the pattern-lift authorization suppressed the advisory: the
+   * user authorized the operation and never the loss of its undo, the same rule
+   * `recordSnapshots` states for a snapshot that could not be taken.
    *
    * The one unprotected-style row that is NOT fed to the next decide prompt, so it
    * takes no `ArmedSession` and calls no `rememberWarning`: the warning already

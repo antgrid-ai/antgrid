@@ -375,8 +375,9 @@ export class NativePeerSessions extends PeerSessionOwner {
     // `peerPubkeyFor`.
     this.admitPeer(peerId, device.ed25519Pub);
     // A session-stream overflow retires the whole connection rather than
-    // just this stream (D3's one exception): losing the session stream is
-    // losing the session, and there is no separate stream to reopen.
+    // just this stream (the one exception to that per-stream isolation):
+    // losing the session stream is losing the session, and there is no
+    // separate stream to reopen.
     const writer = new StreamRecordWriter(
       { send: stream.send },
       () => this.authorized(peerId, endpointId),

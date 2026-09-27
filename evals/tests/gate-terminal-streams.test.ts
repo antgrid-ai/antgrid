@@ -297,7 +297,7 @@ describe("gate: terminal attachment streams", () => {
     const before = env.app.nativeConnectionId;
     const client = await env.app.openTerminalStream({ projectId: env.projectId, requestId: crypto.randomUUID() });
     // Any well-formed message other than the matching terminal:subscribe
-    // breaches the first-record rule (§1).
+    // breaches the first-record rule.
     await client.send(createMessage("terminal:ack", {
       terminalId: "stream-first-record-breach",
       runId: crypto.randomUUID(),

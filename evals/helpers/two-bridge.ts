@@ -25,8 +25,8 @@ import { RelayClient, type PhoneIdentity } from "./relay-client";
  * each half is exactly the env every single-machine row already runs against.
  *
  * The carrier here is a TEST OBJECT, never a third bridge: no bridge can dial
- * another (D7). It holds FOUR legs, because that is what the desktop apps hold
- * in production and because both directions have to work (§6.1 — a peer
+ * another. It holds FOUR legs, because that is what the desktop apps hold
+ * in production and because both directions have to work (a peer
  * initiates too, and its own app carries that leg):
  *
  * - a LOOPBACK owner socket on each machine. It is what `carrierPresent()`

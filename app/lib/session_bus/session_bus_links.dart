@@ -89,7 +89,7 @@ const Duration kSessionBusLinkIdle = Duration(minutes: 5);
 /// (`registry_lru_test.dart` pins that behaviour), so the growth is unbounded
 /// in the one place nothing else would stop it. Well above any real fan-out:
 /// this is a backstop, not a working limit, and a machine exchanging with more
-/// peers than this at once is already the shape E13 refused.
+/// peers than this at once is already outside normal use.
 const int kSessionBusMaxLinks = 24;
 
 /// The idle window the demand actually uses, as a provider so a test can shrink

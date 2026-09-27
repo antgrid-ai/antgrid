@@ -93,7 +93,7 @@ export class ProjectCore {
   // the app's Recent/sidebar reflect activity WITHOUT warming this core. The
   // reduction is a pure fold over outbound bus frames — see work-status.ts.
   private _work: WorkStatusState = initialWorkStatus;
-  /** Turn-boundary delivery for this project's session-bus lines (spec 5.2).
+  /** Turn-boundary delivery for this project's session-bus lines.
    *  Owned here because the turn-open set it waits on is THIS reduction, and
    *  nothing below the core can see one. */
   private deliveries: SessionBusDeliveryQueue | null = null;
@@ -433,7 +433,7 @@ export class ProjectCore {
       ...(this.deps.sessionDirectory ? { sessionDirectory: this.deps.sessionDirectory } : {}),
       // Host-injected for the same reason and forwarded the same way: a bridge
       // with no host (evals, most of this file's own test callers) offers no
-      // wake at all, and the §7.3 refusal falls back to its unconditional shape.
+      // wake at all, and the refusal falls back to its unconditional shape.
       ...(this.deps.startSession ? { startSession: this.deps.startSession } : {}),
       queueBusLine: (line: Omit<QueuedLine, "queuedAt">) => this.deliveries?.queue(line),
       forgetBusLines: (sessionId: string) => this.deliveries?.forget(sessionId),

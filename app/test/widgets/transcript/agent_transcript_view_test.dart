@@ -674,7 +674,7 @@ void main() {
       await _typeIntoComposer(tester, '@ut');
       final sent = t.sent.lastWhere((m) => m['type'] == 'file:find');
       expect(sent['query'], 'ut');
-      // D10: mentions hand a path to the agent, so ignored files are noise —
+      // Mentions hand a path to the agent, so ignored files are noise —
       // unlike the tree's own browse default.
       expect(sent['includeIgnored'], isFalse);
 

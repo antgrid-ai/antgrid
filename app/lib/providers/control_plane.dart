@@ -420,7 +420,7 @@ final controlPlaneAliveTargetsProvider = Provider<Set<String>>((ref) {
   // unchanged emission), which is what keeps this fan-in — whose rebuilds have
   // crashed the frame before — off the path of ordinary bus traffic.
   alive.addAll(ref.watch(sessionBusLinksProvider).peerMachineIds);
-  // Machines a directory read MISSED, warm until their own deadline (E13). The
+  // Machines a directory read MISSED, warm until their own deadline. The
   // link set above covers a peer this app is already carrying an exchange for;
   // this covers the peer nobody has reached yet, which is the case the
   // peek-only directory otherwise answers "none asked" forever.

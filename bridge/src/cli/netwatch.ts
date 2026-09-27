@@ -434,7 +434,7 @@ export function joinCaptures(
         ? (x.e.seq ?? 0) - (y.e.seq ?? 0)
         : (x.e.dir === y.e.dir ? 0 : x.e.dir === "tx" ? -1 : 1)));
 
-  // A hash id (D3) repeats for every byte-identical frame — a ping, a pong, a
+  // A hash id repeats for every byte-identical frame — a ping, a pong, a
   // repeated stream-ready notice — so more than one occurrence can legitimately
   // share a frameId. Pairing "the first
   // opposite-direction event with this id" wired every later occurrence to that

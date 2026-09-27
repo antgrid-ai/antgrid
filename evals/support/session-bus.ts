@@ -104,7 +104,7 @@ export function hookDoneMarker(event: string): string {
 }
 
 /** The origin every bus project is given. A session is addressed through its
- *  repo key (spec 5.1), so two projects that must see each other need the SAME
+ *  repo key, so two projects that must see each other need the SAME
  *  remote — and one with no remote at all offers no row on either machine. */
 export const BUS_REMOTE_URL = "https://github.com/antgrid/Eval-Fixture.git";
 /** What `normalizeRemoteUrl` (bridge/src/capability-card.ts) makes of it — a

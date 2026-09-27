@@ -41,7 +41,7 @@ void main() {
     await relay.closeStreams();
   });
 
-  test('E1: a bare AbMessage dispatches on the control plane', () async {
+  test('a bare AbMessage dispatches on the control plane', () async {
     final control = session.control;
     final seen = <Map<String, dynamic>>[];
     final sub = control.messages.listen((m) => seen.add(m.json));
@@ -56,7 +56,7 @@ void main() {
     await sub.cancel();
   });
 
-  test('E2: a `{m: …}` body is dropped unrecognized-plaintext', () async {
+  test('a `{m: …}` body is dropped unrecognized-plaintext', () async {
     relay.injectRecord(
       encodeFromAgent(
         jsonEncode({
@@ -71,7 +71,7 @@ void main() {
   });
 
   test(
-    'E3: an old-name ping from the bridge is control plane, not a session '
+    'an old-name ping from the bridge is control plane, not a session '
     'frame — no session:pong answers it',
     () async {
       final control = session.control;
@@ -99,7 +99,7 @@ void main() {
     },
   );
 
-  test('E4: a session:ping is answered with exactly one session:pong', () async {
+  test('a session:ping is answered with exactly one session:pong', () async {
     final sentBefore = relay.sent.length;
     relay.injectRecord(encodeFromAgent(jsonEncode({'type': kSessionPing})));
     await Future<void>.delayed(const Duration(milliseconds: 20));
@@ -110,14 +110,14 @@ void main() {
     expect(pongs, hasLength(1));
   });
 
-  test('E6: sendOnSession writes the bare message with no header', () async {
+  test('sendOnSession writes the bare message with no header', () async {
     await session.sendOnSession({'type': 'project:list'}, 'control');
 
     expect(relay.sent, hasLength(1));
     expect(relay.sent.single.json, {'type': 'project:list'});
   });
 
-  test('E7: a send whose link write throws does not wedge the sends behind it', () async {
+  test('a send whose link write throws does not wedge the sends behind it', () async {
     final gate = Completer<void>();
     relay.sendGate = gate;
     final first = session.sendOnSession({'type': 'project:list'}, 'control');

@@ -1,7 +1,7 @@
 // The addressable set is keyed on a normalized git remote, not on a project id:
 // a managed worktree and the repo it was cut
 // from hash to different project ids and must still reach each other, which is
-// the whole reason Wave 1 moved the bus to the machine.
+// the whole reason the bus is keyed machine-wide rather than per project.
 //
 // The probe is a `git` spawn and every reader of this map is synchronous — the
 // outbox needs a synchronous boolean, which is what shaped `SessionBusSessionIndex`
@@ -77,7 +77,7 @@ export class SessionBusRepoKeys {
 
   /** Every project sharing `key`. Empty for a null key — a project with no
    *  remote is not addressable and, crucially, is not addressable BY the other
-   *  projects that also have none (§5.1 fails closed). */
+   *  projects that also have none. */
   projectsSharing(key: string | null): string[] {
     if (!key) return [];
     return [...this.keys].filter(([, v]) => v === key).map(([id]) => id);

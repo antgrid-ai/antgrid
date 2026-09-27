@@ -105,7 +105,7 @@ function logRemoteStateDetail(projectPath: string, status: BranchRemoteStatus): 
 
 /** Omitted `projectIds` means the most recently active projects in this
  *  machine's catalog — the add-machine dialog fills one dropdown from all of
- *  them (§7.5), so asking per project would be N round trips for one card. Both
+ *  them, so asking per project would be N round trips for one card. Both
  *  paths are held to the same bound: the catalog never shrinks, so "all of them"
  *  has to cost the same as an explicit list. */
 const CapabilityCardParams = z.object({
@@ -267,7 +267,7 @@ function clampCaptureTtl(ttlMs: number): number {
 
 /**
  * Host-side, memory-first cache over `session-bus/pair-budget.ts`'s per-session
- * store (§7.4): one row array per session, hydrated from disk on first touch
+ * store: one row array per session, hydrated from disk on first touch
  * and kept in memory after that, written back throttled like
  * `SessionBusCoordinator`'s own route table beside it
  * (`BUS_ROUTE_PERSIST_INTERVAL_MS`), because every send charges the budget and
@@ -278,8 +278,8 @@ function clampCaptureTtl(ttlMs: number): number {
  *
  * A HALT is the one thing here that must not wait for a throttle window, in
  * either direction: {@link write} forces the write that sets one and
- * {@link clearHalt} the write that lifts one, so the state §7.4 says only a
- * human may change is never the state a crash decides.
+ * {@link clearHalt} the write that lifts one, so the state only a human may
+ * change is never the state a crash decides.
  */
 export class PairBudgetStore {
   private readonly bySession = new Map<string, PairBudgetState[]>();
@@ -322,7 +322,7 @@ export class PairBudgetStore {
   }
 
   /**
-   * Lift every halt [sessionId] is a SENDER in (§7.4: "cleared only by a
+   * Lift every halt [sessionId] is a SENDER in ("cleared only by a
    * human"). Reads the memory-first cache, never disk: the budget belongs to
    * the host, not to any one project's core, so a keystroke has to be able to
    * lift a halt on a session whose project is not currently warm — a
@@ -429,9 +429,10 @@ export class HostServer {
   private readonly sessionIndex = new SessionBusSessionIndex({
     liveSessions: (projectId) => this.cores.get(projectId)?.core.listSessions(true) ?? null,
   });
-  // The other half of §5.1's addressable set: the index says which project holds
-  // a session, this says which projects are the same repository. Refreshed on
-  // the same three edges as the index, for the reason its `note` doc gives.
+  // The other half of the addressable-session lookup: the index says which
+  // project holds a session, this says which projects are the same
+  // repository. Refreshed on the same three edges as the index, for the
+  // reason its `note` doc gives.
   private readonly repoKeys = new SessionBusRepoKeys();
   // The asking half of the remote directory: an in-memory mirror of what the
   // app's pump last learned peeking peer capability cards.
@@ -439,8 +440,8 @@ export class HostServer {
   // `session-bus:remote-directory` loopback verb and read by `sessionDirectory`
   // below — declared first so that construction can hand it over.
   private readonly remoteDirectory = new RemoteDirectoryCache();
-  // §5.5's directory, assembled from the two machine-level halves above. The
-  // machine id is read live rather than captured: a core can be built before the
+  // The session directory, assembled from the two machine-level halves above.
+  // The machine id is read live rather than captured: a core can be built before the
   // relay has one, and a row's address is only ever read after it is.
   private readonly sessionDirectory = new SessionDirectory({
     repoKeys: this.repoKeys,
@@ -456,7 +457,7 @@ export class HostServer {
   // home for a peer, no desktop attached to this machine) get separate sets.
   private readonly busRouteMissWarned = new Set<string>();
   private readonly busOwnerMissWarned = new Set<string>();
-  // The host-side no-progress-halt store (§7.4), machine-wide like
+  // The host-side no-progress-halt store, machine-wide like
   // `sessionIndex`/`repoKeys` beside it — see PairBudgetStore's own doc.
   // `sessionIndex.lookup` is what lets it answer for a session whose project
   // is not currently warm.
@@ -464,7 +465,7 @@ export class HostServer {
     resolveAbDir(),
     (sessionId) => this.sessionIndex.lookup(sessionId)?.projectId ?? null,
   );
-  // The ONE session bus for this machine (E9/§5.4): every project core built
+  // The ONE session bus for this machine: every project core built
   // by `startCore` below is handed this exact instance rather than building
   // its own, so a route learned while handling project A's inbound frame is
   // visible to project B's outbound send for the same context, and a
@@ -479,7 +480,7 @@ export class HostServer {
     self: (sessionId) => {
       // A relay registration is the NETWORK address; LOCAL_MACHINE_ID is this
       // bridge's name for itself when it has none. The two sessions a purely
-      // local exchange (§6.1) involves never leave this machine, so a host
+      // local exchange involves never leave this machine, so a host
       // launched local-only — or one whose control-plane mint threw — must
       // still be able to name itself for that exchange rather than refuse it
       // `AGENT_NOT_READY` over an address neither side needs. `addressable()`
@@ -494,9 +495,10 @@ export class HostServer {
       // way. The index's own label is a folder-basename snapshot kept for a
       // project with no core warm right now (SessionIndexEntry's own doc), so
       // it is the fallback here, never the first answer: preferring it
-      // unconditionally is the Wave 1 regression this resolves.
+      // unconditionally would show a stale label even while a live core knows
+      // the current one.
       const projectLabel = this.cores.get(entry.projectId)?.core.projectName || entry.projectLabel;
-      // Labels travel because the other machine cannot look them up (E4), and
+      // Labels travel because the other machine cannot look them up, and
       // this one has to travel on a LOCAL exchange too: `deliverLocal` folds
       // through the same `handleInbound`, so a same-machine delivery renders
       // from this ref exactly as a cross-machine one does. Sourced through
@@ -522,7 +524,7 @@ export class HostServer {
     // policy is: `mobile-access:set` has to take effect without restarting
     // anything.
     offMachineSendAllowed: () => this.remoteAccessPolicy.isEnabled(),
-    // §6.1: a target on THIS host is handed straight into the SAME fold the
+    // A target on THIS host is handed straight into the SAME fold the
     // remote path folds through (`handleInbound`) — no relay, no carrier, no
     // route table — so wrapping, queueing and turn-boundary injection are
     // byte-identical for both paths. `dispatch()` (coordinator.ts) already
@@ -565,7 +567,7 @@ export class HostServer {
         return false;
       }
     },
-    // The one human signal that lifts a no-progress halt (§7.4) — delegated to
+    // The one human signal that lifts a no-progress halt — delegated to
     // the host-wide store so it can answer for a session this host is not
     // currently holding warm; see PairBudgetStore.clearHalt.
     clearHalt: (sessionId) => this.pairBudgetStore.clearHalt(sessionId),
@@ -633,7 +635,7 @@ export class HostServer {
     return true;
   }
 
-  /** The §7.3 same-machine wake: start a session this host holds, resolved the
+  /** The same-machine wake: start a session this host holds, resolved the
    *  same way `deliverLocal` resolves a delivery target — `sessionIndex` names
    *  the owning project, and only a WARM core (`this.cores`) is asked. A cold
    *  project (known but not open) answers false rather than being brought up:
@@ -685,7 +687,7 @@ export class HostServer {
     // would read every cold project's on-disk session as unaddressable (a
     // warned miss, per the index's own doc) instead of re-arming its held
     // retries. Route-table hydration reads the one machine-level route table
-    // (E9/§5.4/C5) and needs no project list to do it, so it has nothing to
+    // and needs no project list to do it, so it has nothing to
     // wait for — it is only kept alongside `resume()` here so both land before
     // the same first inbound frame this process folds. `.finally` rather than
     // chaining off the resolved promise: a hydrate that fails for one project
@@ -1169,7 +1171,7 @@ export class HostServer {
         const changed = this.remoteAccessPolicy.setEnabled(req.enabled);
         if (changed && !req.enabled) {
           this.controlPlaneRelay?.recheckAuthorization();
-          // The mirror deliberately SURVIVES this (E15): it holds what peers
+          // The mirror deliberately SURVIVES this: it holds what peers
           // offered about themselves, and turning this machine's own door
           // shut is not a reason to forget who is out there — a session here
           // may still open an exchange, and OPENING one is the half no thread
@@ -1191,8 +1193,9 @@ export class HostServer {
     }
   }
 
-  /** The subordinate half of the gate (E12): whether an agent on another of this
-   *  account's machines may see what runs here and reach into it.
+  /** The subordinate half of the agent-reach gate (`agent-reach-policy.ts`):
+   *  whether an agent on another of this account's machines may see what runs
+   *  here and reach into it.
    *
    *  INBOUND ONLY, and deliberately not symmetric. Turning it off does not empty
    *  this machine's mirror of its peers and does not stop an agent here opening
@@ -1342,7 +1345,7 @@ export class HostServer {
     return createMessage("response", { requestId: req.requestId, ok: true, result: { deleted } });
   }
 
-  /** The Capability Card (§3.3): OS plus one repo entry per project. It reads
+  /** The Capability Card: OS plus one repo entry per project. It reads
    *  the seen-projects catalog rather than a warm core, so it answers for COLD
    *  projects — which is what "the card exists before any agent runs" means. An
    *  id the catalog does not hold is OMITTED from `projects` rather than failing
@@ -1378,8 +1381,9 @@ export class HostServer {
         error: { code: "NOT_ALLOWED", message: "mobile access is disabled on this machine" },
       });
     }
-    // The disclosure half of E12. Only the SESSION-bearing card is gated: the
-    // repo/OS half answers a device the user is holding, where remote access is
+    // The disclosure half of the agent-reach gate. Only the SESSION-bearing
+    // card is gated: the repo/OS half answers a device the user is holding,
+    // where remote access is
     // the whole question, while `sessions` is this machine's own titles and work
     // status assembled for another machine's AGENT.
     //
@@ -2113,7 +2117,7 @@ export class HostServer {
   /** The asking half of the remote directory's fill path: the app's pump
    *  hands over one cycle of what it learned peeking peer capability cards.
    *  Exempt from THIS machine's own remote-access switch, like the rest of this
-   *  plane (E15): every row here was offered by the peer that owns it, under
+   *  plane: every row here was offered by the peer that owns it, under
    *  that peer's own switch, and mirroring one discloses nothing about this
    *  machine. `clear()` on the refusal branch is what makes losing a relay
    *  identity take effect immediately rather than riding out the mirror's
@@ -2268,7 +2272,7 @@ export class HostServer {
       // session index rather than this core's own id.
       sessionBus: this.sessionBus,
       sessionDirectory: this.sessionDirectory,
-      // §7.3's same-machine wake: resolves the OWNING core exactly as
+      // The same-machine wake: resolves the OWNING core exactly as
       // `deliverLocal` does, so it only ever starts a session this host
       // already holds warm — a cold project is not brought up over a notify.
       startSession: (sessionId) => this.startLocalSession(sessionId),
@@ -2587,7 +2591,7 @@ export class HostServer {
     this.cores.clear();
     for (const e of entries) { try { e.promotion?.stop(); } catch (err) { log.warn("Failed to stop promotion for %s during shutdown: %s", e.core.projectId, err instanceof Error ? err.message : String(err)); } }
     await Promise.all(entries.map((e) => e.core.shutdown(reason).catch(() => {})));
-    // Every core's `TerminalManager` shares this ONE store (D3); close it only
+    // Every core's `TerminalManager` shares this ONE store; close it only
     // once every core has stopped using it, which the await above guarantees.
     closeTerminalHistoryStore();
   }

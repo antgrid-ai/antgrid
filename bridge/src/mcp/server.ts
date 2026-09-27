@@ -440,7 +440,7 @@ function selfLines(data: any): string[] {
   ];
 }
 
-/** What a send owes its caller. The thread id because §4.3 makes it
+/** What a send owes its caller. The thread id because it is
  *  bridge-owned — an agent never told it cannot answer on the exchange it just
  *  opened — and whether the frame LEFT this machine, which is never a claim that
  *  it arrived: the receipt on antgrid_thread is the only witness that the peer's

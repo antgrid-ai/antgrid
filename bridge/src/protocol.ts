@@ -1768,7 +1768,7 @@ export const SessionMemberKeySchema = z.object({
   sessionId: z.string().min(1).max(200),
 });
 
-// The Capability Card as it travels on an address (spec 5.3): the two MVP
+// The Capability Card as it travels on an address: the two MVP
 // fields, both observed by that machine's own bridge before any agent ran
 // there. Mirrors `OsCard`/`RepoCard` in capability-card.ts, which is where the
 // values are actually read — a second shape would be two things to keep true.
@@ -2332,7 +2332,7 @@ const ResponseMessage = BaseMessage.extend({
 // still has one import site.
 // ---------------------------------------------------------------------------
 
-/** One unit of content. `artifact` carries the HANDLE only — spec 6.3's
+/** One unit of content. `artifact` carries the HANDLE only —
  *  reference-over-value: the bytes stay on the machine that made them and are
  *  pulled with `session-bus:fetch` when the other side decides it wants them. */
 export const BusPartSchema = z.discriminatedUnion("kind", [
@@ -2353,7 +2353,7 @@ export type BusPart = z.infer<typeof BusPartSchema>;
 export const BusEnvelopeSchema = z.object({
   messageId: z.string().min(1).max(200),
   /** The thread this belongs to, or null to open a new one. A correlation id
-   *  with no state machine (spec 4.2): it is carried and never validated, and
+   *  with no state machine: it is carried and never validated, and
    *  a thread is simply garbage once both sides stop writing to it. */
   threadId: z.string().min(1).max(200).nullable(),
   contextId: z.string().min(1).max(200),
@@ -2362,12 +2362,12 @@ export const BusEnvelopeSchema = z.object({
     /** Stamped from the connection by the receiving bridge, never a tool
      *  parameter: an agent must not be able to author its own provenance. */
     peer: SessionMemberRefSchema,
-    /** The one agent-authored envelope field (spec 3.4). MANDATORY, and never
+    /** The one agent-authored envelope field. MANDATORY, and never
      *  defaulted — it is what the human and the other agent read first, so
      *  inventing one would hide the omission instead of reporting it. */
     summary: z.string().min(1).max(MAX_SUMMARY_CHARS),
     timestamp: z.number().int().nonnegative(),
-    /** Spec 6.2's first-class channel for "here is what you asked for, and
+    /** A first-class channel for "here is what you asked for, and
      *  separately, here is something you did not ask about". First-class so it
      *  is not a smuggled instruction inside a text part. */
     unexpected: z.string().max(MAX_UNEXPECTED_CHARS).optional(),
@@ -2384,10 +2384,10 @@ const SessionBusBaseWire = {
   contextId: z.string().min(1).max(200),
 };
 
-/** The body both verbs carry, since spec 6.2 makes everything after the send
- *  decision identical for the two. No `seq`: spec 6 makes messages lossy on
- *  purpose, and reliable delivery behind text that changes no state would be
- *  unbounded retry buying nothing. The E6 receipt witnesses arrival without
+/** The body both verbs carry, since everything after the send decision is
+ *  identical for the two. No `seq`: messages are lossy on purpose, and
+ *  reliable delivery behind text that changes no state would be
+ *  unbounded retry buying nothing. The delivery receipt witnesses arrival without
  *  making it reliable — it is never retried either. */
 export const SessionBusMessageWire = z.object({
   ...SessionBusBaseWire,
@@ -2415,7 +2415,7 @@ export const SessionBusFetchResultWire = z.object({
   dataBase64: z.string().max(ARTIFACT_CHUNK_B64_MAX),
 });
 
-/** The delivery receipt (E6), keyed by the id of the message it answers — the
+/** The delivery receipt, keyed by the id of the message it answers — the
  *  only honest witness that a frame arrived, since everything this side of the
  *  relay reports only that it left. It is fire-and-forget: an unacked ack is
  *  never retried. `ok: false` is still a receipt — "this reached me", not "I
@@ -2429,7 +2429,7 @@ export const SessionBusAckWire = z.object({
   error: z.string().max(500).optional(),
 });
 
-/** Two verbs rather than one verb and a flag (spec 7.1), and the shape is
+/** Two verbs rather than one verb and a flag, and the shape is
  *  identical because everything after the send decision is: a bridge that does
  *  not know a verb REFUSES it, where a bridge that does not know a flag would
  *  silently do the wrong thing — and a required Zod field is only fail-closed
@@ -2481,7 +2481,7 @@ const SessionBusRefusalWire = {
   code: z.string().max(80).optional(),
 };
 
-/** One directory row (§5.5). Mirrors `SessionDirectoryRow`
+/** One directory row. Mirrors `SessionDirectoryRow`
  *  (`session-bus/directory.ts`) field for field rather than importing it, the
  *  same one-way edge that module already keeps against the remote mirror's row:
  *  the wire vocabulary lives here and the bus's internals must be free to gain
@@ -2498,7 +2498,7 @@ const SessionBusDirectoryRowSchema = z.object({
   activity: z.enum(["running", "idle", "stopped"]),
   workStatus: WorkStatusSchema.optional(),
   lastActiveAt: z.number(),
-  /** Whether that session's agent can be messaged back at all (§9). A
+  /** Whether that session's agent can be messaged back at all. A
    *  receive-only vendor is offered saying so, never as a peer that will
    *  silently never answer. */
   canReply: z.boolean(),
@@ -2608,7 +2608,7 @@ const SessionBusInboxResultMessage = BaseMessage.extend({
   /** A PEEK: answering this does not mark anything read. The agent's own read
    *  is what spends the unread flag — see `SessionBusApi.inboxPeek`. */
   posts: z.array(SessionBusInboxPostSchema).optional(),
-  /** Posts this session will never see, zero included (§7.4): a reader that
+  /** Posts this session will never see, zero included: a reader that
    *  cannot tell an empty inbox from an emptied one has been told the wrong
    *  thing, not merely told less. */
   dropped: z.number().optional(),

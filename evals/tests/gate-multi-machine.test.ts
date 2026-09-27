@@ -419,7 +419,7 @@ test("a message crosses to the other machine, comes back receipted, and refuses 
   expect((await inbox(b, sessionB)).posts).toHaveLength(0);
 }, ROW_TIMEOUT_MS);
 
-test("the RECEIVING end's two switches decide a cross-machine send, and the sender's own has no say (E15)", async () => {
+test("the RECEIVING end's two switches decide a cross-machine send, and the sender's own has no say", async () => {
   const sinks = newSinks();
   env = await setupTwoBridgeEnv({
     prepareProject: prepareBusProject,
@@ -464,11 +464,12 @@ test("the RECEIVING end's two switches decide a cross-machine send, and the send
   expect(openerMail.posts[0].summary).toBe(OPENER);
   expect((await awaitReceipt(a, sessionA, opened.body.threadId, OPENER)).deliveredAt).toBeGreaterThan(0);
 
-  // The first of the receiving end's two switches (§8.1's subordinate bit),
-  // against a mirror that is still warm. Deliberately not pumped: b refuses
-  // the session-bearing card with reach off, so a push in this window empties
-  // a's rows for b, and the send would then be refused by machine a's own row
-  // lookup without the frame ever reaching machine b's inbound gate.
+  // The first of the receiving end's two switches (the agent-reach
+  // subordinate bit), against a mirror that is still warm. Deliberately not
+  // pumped: b refuses the session-bearing card with reach off, so a push in
+  // this window empties a's rows for b, and the send would then be refused by
+  // machine a's own row lookup without the frame ever reaching machine b's
+  // inbound gate.
   //
   // Nothing travels back to say the frame was dropped, so the sender is told it
   // left — which is the whole failure this row exists to pin.
@@ -512,11 +513,12 @@ test("the RECEIVING end's two switches decide a cross-machine send, and the send
   await pumpAndExpectRows(carrier);
   await peerRow(a, sessionA, b, sessionB);
 
-  // Machine a shuts its OWN door, and stops talking with it. This reverses E15,
-  // which held that the switch governs only what may be done TO a: the leg did
-  // leave over a's own loopback carrier, but b's reply came back through a's
-  // relay ingress, which the same switch refuses — so what E15 actually shipped
-  // was a machine that could speak and could not be answered.
+  // Machine a shuts its OWN door, and stops talking with it. This refutes the
+  // assumption that the remote-access switch governs only what may be done TO
+  // a: the leg did leave over a's own loopback carrier, but b's reply came
+  // back through a's relay ingress, which the same switch refuses — so the
+  // switch actually gates a machine that could speak and could not be
+  // answered.
   await setMobileAccess(a.env.abDir, false);
   const DOOR_SHUT = "My own switch is off, so this does not leave.";
   const outbound = await busCall(a.env.abDir, "post", { terminalId: sessionA, body: body(DOOR_SHUT) });

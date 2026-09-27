@@ -211,7 +211,7 @@ export class FileUploadManager {
   private writeStreamChunk(u: UploadSession, bytes: Uint8Array): StreamUploadWrite {
     if (!this.uploads.has(u.uploadId)) return "failed"; // already resolved by another path
     if (u.received + bytes.byteLength > u.declaredSize) {
-      // The caller resets the stream itself and reports no result (§2.2).
+      // The caller resets the stream itself and reports no result.
       clearTimeout(u.timer);
       this.uploads.delete(u.uploadId);
       this.closeFd(u);

@@ -678,10 +678,10 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(armFrame(transport)['role'], 'qa');
-      // A preset is exclusive with the user's own stance (redesign spec §6), so
-      // it clears the brief explicitly rather than omitting it — an omitted
-      // field means "leave the stored one alone", which would run this preset
-      // on top of a user lens the sheet no longer shows.
+      // A preset is exclusive with the user's own stance, so it clears the
+      // brief explicitly rather than omitting it — an omitted field means
+      // "leave the stored one alone", which would run this preset on top of
+      // a user lens the sheet no longer shows.
       expect(armFrame(transport)['brief'], '');
       await confirmArmed(tester, transport);
     });
@@ -783,8 +783,7 @@ void main() {
       // JOINED brief on every keystroke. The panel must not read that echo of
       // the user's own typing as the bridge correcting it: writing it back
       // replaces their line breaks with "; " under the cursor, one keystroke
-      // behind, and one rule per line is the whole shape the panel teaches
-      // (redesign spec §7, §8).
+      // behind, and one rule per line is the whole shape the panel teaches.
       final (transport, container, context) = await pumpArm(tester);
       await advertiseLenses(tester, transport);
 
@@ -823,7 +822,7 @@ void main() {
       await tester.pumpAndSettle();
 
       // The wire still gets the one line the bridge will store, each rule kept
-      // bounded through `oneLine`'s newline-to-space collapse (§8).
+      // bounded through `oneLine`'s newline-to-space collapse.
       expect(
         armFrame(transport)['brief'],
         'not done until the tests pass; ask before the payment path',
@@ -850,7 +849,7 @@ void main() {
       );
       await tester.pumpAndSettle();
       // "Your own" reveals the panel — the free-text field is no longer always
-      // on screen (redesign spec §3, §6).
+      // on screen.
       await tester.tap(find.text('Your own'));
       await tester.pumpAndSettle();
       await tester.enterText(
@@ -868,8 +867,8 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(armFrame(transport)['brief'], 'watch the migrations');
-      // "Your own" is a tap on the same radio the four presets sit in
-      // (redesign spec §3.2, §9), so it touches the role same as they do —
+      // "Your own" is a tap on the same radio the four presets sit in, so it
+      // touches the role same as they do —
       // clearing it explicitly (`''`) rather than omitting it is what keeps a
       // role this arm never asked for from riding along from a stale seed.
       expect(armFrame(transport)['role'], '');

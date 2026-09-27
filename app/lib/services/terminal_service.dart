@@ -316,7 +316,7 @@ class TerminalService {
   _attachmentMsgSubs = {};
 
   /// terminalId -> guards a bare [TerminalAttachmentPeerEnded] (a bridge
-  /// overflow or lost-stream reset, D3) from re-subscribing more than once
+  /// overflow or lost-stream reset) from re-subscribing more than once
   /// before a frame is next accepted -- otherwise a link that cannot carry
   /// the terminal at all would resubscribe in a tight loop. Cleared in
   /// [_applyAcceptedFrame].
@@ -759,7 +759,7 @@ class TerminalService {
   }
 
   /// Applies (or drops) one `terminal:frame` and acks it. Ack is delivery,
-  /// not proof of rendering (D5): sent whenever a frame is accepted as
+  /// not proof of rendering: sent whenever a frame is accepted as
   /// belonging to the live attachment, whether or not its geometry let it
   /// actually paint.
   void _handleTerminalFrame(TerminalFrameMessage msg) {
@@ -770,7 +770,7 @@ class TerminalService {
     final tab = _state.tabs[msg.terminalId];
     if (tab == null || tab.mode != TerminalDisplayMode.frame) return;
     final attachment = _frameAttachment[msg.terminalId];
-    // D5: never apply or ack a frame for a superseded attachment -- a
+    // Never apply or ack a frame for a superseded attachment -- a
     // resubscribe (reconnect, respawn, retry) can still have one of the old
     // attachment's frames in flight, addressed by a runId/attachmentId this
     // client no longer considers live.
@@ -874,7 +874,7 @@ class TerminalService {
     );
     tab.ghostty.resize(cols: msg.cols, rows: msg.rows);
     tab.ghostty.appendOutputBytes(utf8.encode(msg.ansi));
-    // D10: every cell a live selection's row/col anchors pointed at was
+    // Every cell a live selection's row/col anchors pointed at was
     // just replaced wholesale. See TerminalTab.replaceEpoch's doc comment.
     tab.replaceEpoch.value++;
     final firstPaint = _framePaintedIds.add(msg.terminalId);
@@ -1011,7 +1011,7 @@ class TerminalService {
     }
     _forgetAttachmentHandle(terminalId);
     // A bare PeerEnded this service did not cause (a bridge overflow or
-    // lost-stream reset, D3): clear tracking and re-subscribe once, but only
+    // lost-stream reset): clear tracking and re-subscribe once, but only
     // while the terminal is still displayed and the transport can carry it,
     // and never more than once until a frame is next accepted (the guard).
     if ((_visible(terminalId) || _prefetchId == terminalId) &&
@@ -1247,9 +1247,9 @@ class TerminalService {
     final attachment =
         _frameAttachment[msg.terminalId] ??
         _endedHistoryAttachment[msg.terminalId];
-    // D5, applied to the archive: a page answering an attachment this client
-    // has since replaced describes a run it is no longer reading, and its row
-    // ids belong to that run's epoch counter, not this one's.
+    // The same rule, applied to the archive: a page answering an attachment
+    // this client has since replaced describes a run it is no longer reading,
+    // and its row ids belong to that run's epoch counter, not this one's.
     if (attachment == null ||
         attachment.runId != msg.runId ||
         attachment.attachmentId != msg.attachmentId) {
@@ -1450,7 +1450,7 @@ class TerminalService {
     // Only the LIVE attachment's own notice may act on it -- a superseded
     // attachment's late ENDED/failure racing a fresh resubscribe must never
     // touch the one that replaced it. A notice carrying no attachmentId
-    // addresses the terminal itself and is taken at face value (D7: an
+    // addresses the terminal itself and is taken at face value (an
     // unrecognized notice must surface, never be dropped).
     if (attachment == null) return;
     if (msg.attachmentId != null &&
@@ -1495,7 +1495,7 @@ class TerminalService {
         );
         return;
       }
-      // D7: lifecycle, not failure. The only notice that definitionally ends
+      // Lifecycle, not failure. The only notice that definitionally ends
       // the attachment, so the only one that drops it here.
       _retireEndedAttachment(
         terminalId,

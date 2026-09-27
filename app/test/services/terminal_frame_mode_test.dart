@@ -832,7 +832,7 @@ void main() {
     await acceptSubscribe(t, 'a');
     final tab = svc.currentState.tabs['a']!;
     // Tab defaults to 80x24; a frame claiming a different size predates a
-    // resize the driver already believes it sent (D4).
+    // resize the driver already believes it sent.
     expect(tab.cols, 80);
     expect(tab.rows, 24);
 
@@ -851,7 +851,7 @@ void main() {
 
     expect(tab.ghostty.plainText, contains('STALE-GEOMETRY'));
     expect(svc.currentState.tabs['a']!.cols, 100);
-    // Ack is delivery, not proof of rendering (D5) — still sent.
+    // Ack is delivery, not proof of rendering — still sent.
     final ack = t.sent.lastWhere((m) => m['type'] == 'terminal:ack');
     expect(ack['sequence'], 1);
     // Never painted, so hydration must not read painted either.
@@ -2241,7 +2241,7 @@ void main() {
       await Future<void>.delayed(Duration.zero);
       expect(tab.history.boundary!.nextRowId, 10);
 
-      // Mismatched geometry: deferred, never painted (D4) -- the boundary
+      // Mismatched geometry: deferred, never painted -- the boundary
       // must still move, because the archive scrolled off regardless of
       // whether this screen fit.
       t.emit(

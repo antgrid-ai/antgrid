@@ -248,7 +248,7 @@ export interface AgentCore {
   /** The session bus this project's sessions read and write through: the
    *  message log, the held store and the carrier routes for their contexts.
    *  Host-injected, this is shared with every other project the host has
-   *  open (E9/§5.4) — a MACHINE-level object that happens to be reachable
+   *  open — a MACHINE-level object that happens to be reachable
    *  from here, not "this project's own" — so a caller that means to affect
    *  only this project's sessions must go through this core's own methods
    *  (`setSessionBusListener`, `injectBusLine`) rather than the coordinator's
@@ -333,8 +333,8 @@ export interface AgentCore {
    *  prompt — the same bare restart `session:start` drives. Fire-and-forget: a
    *  caller that needs the outcome watches `session:updated` rather than
    *  awaiting this. A no-op for an id this core does not hold, or one already
-   *  running. Exists for the session-bus wake path (§7.3's same-machine
-   *  carve-out) — `host-server.ts` resolves the owning core by session id and
+   *  running. Exists for the session-bus wake path's same-machine carve-out —
+   *  `host-server.ts` resolves the owning core by session id and
    *  calls through here, since only that core's own `SessionManager` can start
    *  a session it persists. */
   startSession(id: string): void;
@@ -486,9 +486,9 @@ export interface BuildAgentCoreOptions {
   relayUrl?: string;
   /** Hand one session-bus frame to the loopback owner — this machine's own
    *  desktop app — and to nothing else. The lead bridge can never reach the peer
-   *  bridge (D7), so the owner is its only carrier; and the MessageBus has no
+   *  bridge, so the owner is its only carrier; and the MessageBus has no
    *  addressing, so publishing instead would put agent traffic on the human's
-   *  phone (spec 4.1). False when there is no owner, or the owner did not
+   *  phone. False when there is no owner, or the owner did not
    *  declare itself a carrier: the frame is held until one attaches. */
   sendToOwner?: (msg: AbMessage) => boolean;
   /** Hand one session-bus frame to ONE attached app session — the peer bridge
@@ -505,7 +505,7 @@ export interface BuildAgentCoreOptions {
    *  whether a peer is reachable at all; absent means no carrier, which is the
    *  honest answer for a core nothing has connected to. */
   carrierPresent?: () => boolean;
-  /** A host-injected, MACHINE-level session bus (E9/§5.4) shared with every
+  /** A host-injected, MACHINE-level session bus shared with every
    *  other project the host has open. Absent means a per-core fallback is
    *  built instead, scoped to this project alone — the same
    *  `opts.X ?? new Y(...)` idiom `pairedPhones` and the rest of this file
@@ -513,7 +513,7 @@ export interface BuildAgentCoreOptions {
    *  coordinator itself, once, machine-wide, at process start; a fallback
    *  resumes itself on construction — see where `sessionBus` is built below. */
   sessionBus?: SessionBusCoordinator;
-  /** The host's machine-level session directory (§5.5), which answers who else
+  /** The host's machine-level session directory, which answers who else
    *  shares this project's repository. Travels with `sessionBus` and for the
    *  same reason: both are machine-wide facts a single core cannot hold. Absent
    *  means `listSessions` is refused rather than narrowed — see
@@ -523,14 +523,14 @@ export interface BuildAgentCoreOptions {
    *  it lives — this core's own project or a sibling one. Travels with
    *  `sessionDirectory` and resolves the same way `deliverLocal` does
    *  (`host-server.ts`'s `sessionIndex.lookup` → the owning warm core →
-   *  `ProjectCore.startSession`). Absent means the session-bus §7.3 wake never
+   *  `ProjectCore.startSession`). Absent means the session-bus wake never
    *  fires — a bare core with no host, or a session on a project this host has
    *  not warmed, cannot be started from here. Returns false when no warm core
    *  holds that session (never throws); true only means the start was asked
    *  for, not that it finished — see `SessionBusApiDeps.startSession`. */
   startSession?: (sessionId: string) => boolean;
-  /** Hand one rendered line to the turn-boundary queue that owns delivery
-   *  (spec 5.2). Absent means there is no queue to hold it: the turn-open set
+  /** Hand one rendered line to the turn-boundary queue that owns delivery.
+   *  Absent means there is no queue to hold it: the turn-open set
    *  lives in the reduction ABOVE this core, so a core built without one has
    *  nothing to wait on and submits immediately instead. */
   queueBusLine?: (line: Omit<QueuedLine, "queuedAt">) => void;
@@ -771,7 +771,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // that minted it can. Session PTYs are keyed by their own id, unnamespaced.
   const terminalOwners = new Map<string, { checkoutId: string; externalId: string }>();
 
-  // --- Wave 5: terminal-frame delivery -----------------------------------
+  // --- Terminal-frame delivery ---------------------------------------------
   //
   // One hub per project core, mirroring `manager` (one `TerminalManager` per
   // core too) — `TerminalAddress` already carries `projectId`, so a
@@ -853,7 +853,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     const budget = terminalConnectionBudgets.get(source);
     if (budget && --budget.users === 0) terminalConnectionBudgets.delete(source);
   }
-  // --- end Wave 5 state ----------------------------------------------------
+  // --- end terminal-frame delivery state ------------------------------------
 
   // What each client last said is on screen (`session:focus`), dropped when it
   // declares it can render nothing here (`client:focus-state`) or when its
@@ -1079,8 +1079,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     return remoteAccessEnabled();
   }
 
-  /** E12's interruption half: whether an UNSOLICITED session-bus frame from a
-   *  peer machine may reach a session here.
+  /** The interruption half of the agent-reach gate (`agent-reach-policy.ts`):
+   *  whether an UNSOLICITED session-bus frame from a peer machine may reach a
+   *  session here.
    *
    *  Same two carve-outs as {@link remoteFrameAllowed}, for the same reasons,
    *  and layered under it rather than beside it — a machine that is not
@@ -1129,9 +1130,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // to stamp an address with. The coordinator's `addressable` is what tells
   // those two nulls apart for the caller.
   //
-  // This is not the consent gate. §5.1's repo key and the machine's
-  // remote-access switch are, and they sit in front of the directory rather than
-  // here; a carrier can still only reach a session it was told the id of.
+  // This is not the consent gate. The session directory's repo-key check and
+  // the machine's remote-access switch are, and they sit in front of the
+  // directory rather than here; a carrier can still only reach a session it
+  // was told the id of.
   //
   // Used only by the per-core FALLBACK coordinator below: when `opts.sessionBus`
   // is injected, the host answers `self` machine-wide through its own session
@@ -1163,7 +1165,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   let busEventListener: ((event: SessionBusEvent) => void) | null = null;
 
   // The session bus for this project's sessions. Host-supplied and shared with
-  // every other project the host has open (E9/§5.4: one coordinator per
+  // every other project the host has open (one coordinator per
   // MACHINE, not one per project) whenever a host built this core; a bare
   // agent with no host (14+ test files call `buildAgentCore` directly) falls
   // back to a coordinator scoped to this project alone — the exact idiom
@@ -1210,7 +1212,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // True here means the owner ACCEPTED the frame, which is the whole of what
       // this process can observe: the app classifies and forwards afterwards, and
       // an app that finds no leg for it drops it with no way to say so back.
-      // Nothing downstream reports the rest today — the receipt E6 keeps is
+      // Nothing downstream reports the rest today — the delivery receipt is
       // reserved and dark until it is re-keyed to a message id.
       const sentToOwner = opts.sendToOwner?.(frame) ?? false;
       if (sentToOwner) {
@@ -1244,8 +1246,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // Fallback path only: a standalone/test core with no host to have hydrated
     // this on its behalf. Routes live in one machine-level table regardless of
     // which core loads them (`bus-db.ts`), so this reads whatever this abDir
-    // holds — for a fallback core that is exactly what the pre-E9 coordinator
-    // always loaded for itself, since nothing else shares its abDir.
+    // holds — for a fallback core that is exactly what a per-project
+    // coordinator always loaded for itself, since nothing else shares its abDir.
     sessionBus.hydrateRoutes();
     // Hydrate whatever a previous process left in flight. Without it a cold
     // coordinator holds no sessions, so nothing re-arms the retries a killed
@@ -1784,7 +1786,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           command: opensCommandLine(msg.data),
         });
         // ...and lifts a session-bus no-progress halt. The halt waits on a human
-        // looking (spec 8); a human submitting into that session is the only such
+        // looking; a human submitting into that session is the only such
         // signal a bridge can observe, and an agent cannot forge it because
         // nothing an agent submits arrives as terminal input.
         if (isSubmitKeystroke(msg.data)) {
@@ -2507,9 +2509,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         log.info("focus-state: paused=%s", msg.paused);
         break;
       }
-      // Wave 5: the frame display protocol. All four arrive here already
+      // The frame display protocol. All four arrive here already
       // checkout-resolved — `attachTransport`'s CHECKOUT_VARIABLE_MESSAGE_TYPES
-      // branch (these eight types are all in that set, registered in Wave 1)
+      // branch (these eight types are all in that set)
       // has already run `isCheckoutDeleting` -> `checkoutRuntimes.resolve` ->
       // re-`isCheckoutDeleting` -> `prepareCheckoutRuntime` before calling this
       // function at all. The single re-check below is the extra one that
@@ -4136,7 +4138,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         terminalOwners.delete(id);
         setupTerminalIds.delete(id);
       },
-      // Wave 5: register/evict this terminal's run with the frame-delivery
+      // Register/evict this terminal's run with the frame-delivery
       // hub. `terminalOwner` (not `runtimeFor`/`?? mainRuntime`) is the same
       // resolution `sendTerminalFrame` itself uses for this id, so a hub
       // `TerminalAddress` and the legacy stream's rewritten checkout can never
@@ -5358,7 +5360,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // of the core — a reconnecting app re-declares both halves itself.
       if (focusPausedByClient.delete(client)) recomputeFocusPaused();
       pausedFocusByClient.delete(client);
-      // D5: a dropped connection retires every attachment it held (see
+      // A dropped connection retires every attachment it held (see
       // `TerminalViewerConnection.close`) rather than leaving them to time out
       // one ack-timeout at a time, and a reconnect gets a fresh connection —
       // `viewerConnectionFor` rebuilds lazily on the next subscribe. Each

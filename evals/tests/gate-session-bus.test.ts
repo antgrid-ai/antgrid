@@ -39,11 +39,12 @@ import {
  * The session bus with nothing underneath it: one bridge, no relay, no desktop
  * carrier, and the machine's remote-access switch off.
  *
- * That trio is the whole of §6.1 — two sessions one bridge spawned reach each
- * other with no network, no identity and no switch — and it is the one claim no
- * bridge unit test can make. A unit test builds the coordinator with `send` as a
- * closure and `self` supplied, so it proves the coordinator's arithmetic while
- * assuming away the two things §6.1 is about: that the bridge names itself when
+ * That trio is the whole of the local exchange — two sessions one bridge
+ * spawned reach each other with no network, no identity and no switch — and it
+ * is the one claim no bridge unit test can make. A unit test builds the
+ * coordinator with `send` as a closure and `self` supplied, so it proves the
+ * coordinator's arithmetic while assuming away the two things the local
+ * exchange is about: that the bridge names itself when
  * nothing else will, and that the local arm of `dispatch` is what carries the
  * frame. Only a real process, booted with no relay at all, exercises either.
  *
@@ -55,8 +56,9 @@ import {
 const ROOT = resolve(import.meta.dir, "../..");
 
 /** How long a "it must NOT have arrived yet" window stays open. Long enough
- *  that an immediate delivery — the bug §7.2 guards against — would have landed
- *  many times over; the delivery queue drains on an edge, not on a timer, so
+ *  that an immediate delivery — the bug the turn-boundary delivery rule
+ *  guards against — would have landed many times over; the delivery queue
+ *  drains on an edge, not on a timer, so
  *  waiting longer proves nothing more. */
 const NOT_YET_MS = 1_500;
 
@@ -256,10 +258,10 @@ async function startSession(bridge: LocalBridge, sessionId: string): Promise<voi
 /**
  * Wait until this project offers rows at all.
  *
- * §5.1 resolves the repo key by spawning git, so for the first moments after a
- * boot the project is addressable-but-not-yet-read and every send answers
- * `AGENT_NOT_READY`. Gating on the directory answering keeps that startup race
- * out of every assertion below it.
+ * The session directory resolves the repo key by spawning git, so for the
+ * first moments after a boot the project is addressable-but-not-yet-read and
+ * every send answers `AGENT_NOT_READY`. Gating on the directory answering
+ * keeps that startup race out of every assertion below it.
  */
 async function awaitAddressable(bridge: LocalBridge, terminalId: string): Promise<BusCall> {
   const deadline = Date.now() + 30_000;
@@ -277,8 +279,8 @@ async function awaitAddressable(bridge: LocalBridge, terminalId: string): Promis
 }
 
 function localTarget(bridge: LocalBridge, sessionId: string): { projectId: string; sessionId: string } {
-  // No `machineId`, which is the §6.1 address: an omitted machine IS this
-  // machine, and this machine has no id to spell.
+  // No `machineId`, which is the local-exchange address: an omitted machine
+  // IS this machine, and this machine has no id to spell.
   return { projectId: bridge.projectId, sessionId };
 }
 
@@ -317,14 +319,14 @@ test("a post reaches a sibling session's mailbox on a bridge with no relay ident
     await startSession(bridge, sender);
     await startSession(bridge, target);
 
-    // Each leg of §6.1's trio witnessed before anything relies on it, because
-    // all three fail OPEN in the same direction: a bridge that had quietly
-    // acquired an identity, a carrier or the switch would pass every assertion
-    // below while proving something else entirely.
+    // Each leg of the local exchange's trio witnessed before anything relies
+    // on it, because all three fail OPEN in the same direction: a bridge that
+    // had quietly acquired an identity, a carrier or the switch would pass
+    // every assertion below while proving something else entirely.
     const directory = await awaitAddressable(bridge, sender);
     expect(directory.body.machineId).toBeNull();
     expect(directory.body.sessions.map((s: { sessionId: string }) => s.sessionId)).toContain(target);
-    // §5.1's match key, read through the same probe the bus addresses by. The
+    // The repo key, read through the same probe the bus addresses by. The
     // local rows above do not carry it, so nothing else here would notice the
     // fixture's remote and the key two machines are matched on drifting apart —
     // and a drift costs no local row at all, only every cross-machine one.
@@ -354,7 +356,7 @@ test("a post reaches a sibling session's mailbox on a bridge with no relay ident
     expect(posted.body.sent).toBe(true);
     expect(posted.body.held).toBe(false);
     expect(posted.body.opensThread).toBe(true);
-    // §4.3: the id is bridge-owned, and a sender never told it cannot answer on
+    // The id is bridge-owned, and a sender never told it cannot answer on
     // the thread it just opened.
     const threadId = posted.body.threadId;
     expect(typeof threadId).toBe("string");
@@ -374,12 +376,12 @@ test("a post reaches a sibling session's mailbox on a bridge with no relay ident
     const drained = await busCall(bridge.abDir, "inbox", { terminalId: target });
     expect(drained.body.posts).toHaveLength(0);
 
-    // §7.1: a post is read when its target chooses, so it owes the receiving
+    // A post is read when its target chooses, so it owes the receiving
     // terminal no line at all.
     expect(countMarkers(sinkText(bridge.sinkPath), NOTIFY_MARKER)).toBe(0);
 
-    // E6's receipt, and the only end-to-end proof it travels: the ack takes
-    // `dispatch`'s LOCAL arm, and a build that let it fall through to the
+    // The delivery receipt, and the only end-to-end proof it travels: the ack
+    // takes `dispatch`'s LOCAL arm, and a build that let it fall through to the
     // ordinary send would drop it against no route and stamp nothing here.
     const entry = await untilAsync(async () => {
       const view = await busCall(bridge.abDir, "thread", { terminalId: sender, query: { threadId } });
@@ -415,8 +417,9 @@ test("a notify waits for the target's next turn boundary and arrives there exact
     expect(notified.status).toBe(200);
     expect(notified.body.sent).toBe(true);
 
-    // Half one of §7.2, and the half an "it arrived" assertion never tests: mid
-    // turn the line exists and has NOT been submitted.
+    // Half one of the turn-boundary delivery rule, and the half an "it
+    // arrived" assertion never tests: mid turn the line exists and has NOT
+    // been submitted.
     await sleep(NOT_YET_MS);
     expect(countMarkers(sinkText(bridge.sinkPath), NOTIFY_MARKER)).toBe(0);
     const held = await awaitDeliveryLines(
@@ -467,7 +470,7 @@ test("a notify to a stopped same-machine session wakes it and the line arrives o
     const sender = await createSession(bridge, "sender");
     const target = await createSession(bridge, "sleepy-target");
     await startSession(bridge, sender);
-    // Deliberately never started — this is the §7.3 wake case, not the
+    // Deliberately never started — this is the same-machine wake case, not the
     // already-running one the test above covers.
     await awaitAddressable(bridge, sender);
 
@@ -483,7 +486,7 @@ test("a notify to a stopped same-machine session wakes it and the line arrives o
     expect(notified.body.sent).toBe(true);
 
     // No turn was ever opened for a session that just booted, so the queue's
-    // own "idle reaches it at once" rule (§7.2) applies the moment it comes up
+    // own "idle reaches it at once" rule applies the moment it comes up
     // — the same edge a line held across an ordinary restart already rides.
     await untilAsync(
       async () => (countMarkers(sinkText(bridge.sinkPath), NOTIFY_MARKER) === 1 ? true : undefined),
@@ -525,7 +528,7 @@ test("a reply answers on the thread it was given and reaches the opener at its o
     const threadId = posted.body.threadId;
 
     // The id the answerer replies on is the one it was HANDED, never one it
-    // spelled: §4.3 makes the id bridge-owned, and a reply is the verb that
+    // spelled: the id is bridge-owned, and a reply is the verb that
     // needs no address at all because the thread already records one.
     const inbox = await busCall(bridge.abDir, "inbox", { terminalId: answerer });
     expect(inbox.body.posts[0].threadId).toBe(threadId);
@@ -539,7 +542,7 @@ test("a reply answers on the thread it was given and reaches the opener at its o
     expect(replied.status).toBe(200);
     expect(replied.body.sent).toBe(true);
 
-    // A reply takes the interrupting verb (§7.1), so it waits for the asker's
+    // A reply takes the interrupting verb, so it waits for the asker's
     // boundary exactly as a notify does — and mid-turn it must not have landed.
     await sleep(NOT_YET_MS);
     expect(countMarkers(sinkText(bridge.sinkPath), REPLY_MARKER)).toBe(0);
@@ -590,7 +593,7 @@ test("the pair budget refuses through the real verbs, survives a restart, and li
     await startSession(bridge, haltTarget);
     await awaitAddressable(bridge, sender);
 
-    // §7.4's rolling-hour ceiling. Each of these opens its own thread, which is
+    // The rolling-hour ceiling. Each of these opens its own thread, which is
     // progress — so what refuses below is the notify ceiling and never the halt.
     for (let i = 0; i < MAX_NOTIFIES_PER_PAIR_HOUR; i++) {
       const sent = await busCall(bridge.abDir, "notify", {
@@ -616,9 +619,9 @@ test("the pair budget refuses through the real verbs, survives a restart, and li
     });
     expect(stillReaches.status).toBe(200);
 
-    // §7.4's halt, on a pair of its own so the ceiling above cannot be what
-    // stops it. The first send opens a thread (progress); every one after it
-    // rides that same thread and publishes nothing, which is the exchange the
+    // The pair-budget halt, on a pair of its own so the ceiling above cannot
+    // be what stops it. The first send opens a thread (progress); every one
+    // after it rides that same thread and publishes nothing, which is the exchange the
     // counter exists to notice.
     const opener = await busCall(bridge.abDir, "post", {
       terminalId: sender,
@@ -637,7 +640,7 @@ test("the pair budget refuses through the real verbs, survives a restart, and li
 
     // The one a reader assumes is wrong: a POST is refused too. A halt that
     // gated only `notify` would leave the pair looping on the unbudgeted verb
-    // forever and bound nothing (§8.2).
+    // forever and bound nothing.
     const halted = await busCall(bridge.abDir, "post", {
       terminalId: sender,
       body: { to: localTarget(bridge, haltTarget), summary: "round again", text: "round again" },

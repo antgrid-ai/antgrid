@@ -2,9 +2,9 @@ import os from "node:os";
 import { runGitRemote } from "./git-branches";
 
 /**
- * The machine half of the Capability Card (§3.3): what a human needs to
+ * The machine half of the Capability Card: what a human needs to
  * recognise a machine in the add-machine dialog before any agent runs on it.
- * Every field here is bridge-observed — nothing is asked of an agent (§3.4).
+ * Every field here is bridge-observed — nothing is asked of an agent.
  */
 export interface OsCard {
   name: string;
@@ -12,7 +12,7 @@ export interface OsCard {
   arch: string;
 }
 
-/** The per-project half. `remote` is the normalized match key (§7.5), never the
+/** The per-project half. `remote` is the normalized match key, never the
  *  raw URL; `branch` is read fresh, so it is never stale by a checkout. */
 export interface RepoCard {
   label?: string;

@@ -188,7 +188,7 @@ void main() {
     expect(netwatchLogPath(abDir: '/tmp/ag'), '/tmp/ag/netwatch.log');
   });
 
-  // Pin, not a behavior change: MachineSession's §7.1 session-record row
+  // Pin, not a behavior change: MachineSession's session-record row
   // already carries every field complete (no annotate step), so this is a
   // lockstep check that the existing tap adapter writes it through verbatim —
   // the same literal shape bridge-tests pins on its own half of the join.

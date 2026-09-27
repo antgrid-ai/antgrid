@@ -30,7 +30,7 @@ import { atomicWriteFile } from "./discovery";
 export interface AgentReachPolicyStore {
   isEnabled(): boolean;
   /** True if the value changed. Unlike `RemoteAccessPolicyStore`'s, nothing
-   *  branches on it: flipping this bit claws nothing back by design (E12), so
+   *  branches on it: flipping this bit claws nothing back by design, so
    *  there is no re-advertise or mirror clear for a no-op to skip. It is
    *  reported because "set to what it already was" and "set to something new"
    *  are different facts, not because a caller acts on the difference. */
