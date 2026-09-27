@@ -56,9 +56,8 @@ configuration still needs deployment and load qualification.
 ## Staging checks
 
 The relay is the stock `iroh-relay` 1.2.0 binary, installed rather than built
-from source; `deploy/iroh/relay.example.toml` configures it and `deploy/iroh/`
-supplies Compose/private-proxy integration. Prometheus scraping, alert rules
-and an importable Grafana dashboard are in `deploy/iroh/monitoring/`,
+from source. Its image, config template, Compose integration, Prometheus
+scraping, alert rules and Grafana dashboard live in the private ops repo,
 rewritten onto upstream's own metric names. Their JSON/YAML syntax is checked;
 deployment, `promtool` validation and live dashboard queries remain staging
 work.

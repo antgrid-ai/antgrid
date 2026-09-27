@@ -24,7 +24,7 @@ updated transitive/native redistribution inventory remains a release gate.
 
 The self-hosted relay service ships the stock upstream `iroh-relay` 1.2.0
 binary (MIT OR Apache-2.0), built unmodified by `cargo install --locked` (see
-`aspire/apphost.ts` and `deploy/iroh/Dockerfile`); no source is vendored here.
+`aspire/apphost.ts` and the ops repo's relay image); no source is vendored here.
 The container redistributes that binary and its statically linked Rust
 dependencies, so their notices and license texts still require release review.
 
