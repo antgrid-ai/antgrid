@@ -16,6 +16,8 @@ import 'package:antgrid/services/agent_session_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import 'package:antgrid/test_helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/agent_transcript_view.dart';
+import 'package:antgrid/voice/simulated_speech_engine.dart';
+import 'package:antgrid/voice/speech_engine.dart';
 import 'package:antgrid/voice/voice_input.dart';
 import 'package:antgrid/widgets/transcript/composer/rich_composer.dart';
 import 'package:antgrid/widgets/transcript/composer_selectors.dart';
@@ -208,9 +210,8 @@ void main() {
     testWidgets('voice suspends suggestion acceptance for $token', (
       tester,
     ) async {
-      final voice = VoiceInputController()
-        ..ready = true
-        ..permission = true;
+      final voice = VoiceInputController(SimulatedSpeechEngine())
+        ..availability = SpeechAvailability.ready;
       addTearDown(voice.dispose);
       final transport = await _pumpWithService(
         tester,

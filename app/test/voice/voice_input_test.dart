@@ -1,3 +1,5 @@
+import 'package:antgrid/voice/simulated_speech_engine.dart';
+import 'package:antgrid/voice/speech_engine.dart';
 import 'package:antgrid/voice/voice_input.dart';
 import 'package:antgrid/voice/voice_composer_binding.dart';
 import 'package:antgrid/widgets/transcript/composer/composer_controller.dart';
@@ -55,9 +57,8 @@ void main() {
   testWidgets('settings and restart cannot erase a pending terminal draft', (
     tester,
   ) async {
-    final c = VoiceInputController()
-      ..ready = true
-      ..permission = true;
+    final c = VoiceInputController(SimulatedSpeechEngine())
+      ..availability = SpeechAvailability.ready;
     c.draft(a)
       ..text = 'keep this prompt'
       ..phase = VoicePhase.review;
@@ -73,14 +74,19 @@ void main() {
   testWidgets('simulated download can be cancelled without late readiness', (
     tester,
   ) async {
-    final c = VoiceInputController()..scenario = VoiceScenario.modelDownload;
+    final c = VoiceInputController(SimulatedSpeechEngine())
+      ..configure(VoiceScenario.modelDownload);
     c.prepare(a);
     expect(c.draft(a).phase, VoicePhase.downloading);
     await tester.pump(const Duration(milliseconds: 300));
     expect(c.draft(a).progress, greaterThan(0));
     c.cancelSetup(a);
     await tester.pump(const Duration(seconds: 2));
-    expect(c.ready, false);
+    expect(c.availability.readiness, SpeechReadiness.needsModel);
+    expect(
+      (await c.engine.availability()).readiness,
+      SpeechReadiness.needsModel,
+    );
     expect(c.draft(a).phase, VoicePhase.idle);
     c.dispose();
   });
@@ -111,9 +117,8 @@ void main() {
   testWidgets(
     'hold release finalizes and Escape keeps the text without terminal keys',
     (tester) async {
-      final c = VoiceInputController()
-        ..ready = true
-        ..permission = true
+      final c = VoiceInputController(SimulatedSpeechEngine())
+        ..availability = SpeechAvailability.ready
         ..holdToTalk = true
         ..shortcut = LogicalKeyboardKey.f8;
       expect(
@@ -161,9 +166,8 @@ void main() {
   testWidgets('Escape while listening stops and keeps the text', (
     tester,
   ) async {
-    final c = VoiceInputController()
-      ..ready = true
-      ..permission = true;
+    final c = VoiceInputController(SimulatedSpeechEngine())
+      ..availability = SpeechAvailability.ready;
     c.start(a);
     await tester.pump(const Duration(seconds: 2));
     expect(c.draft(a).text, isNotEmpty);
@@ -182,12 +186,14 @@ void main() {
     expect(c.draft(a).phase, VoicePhase.finalizing);
     await tester.pump(const Duration(seconds: 1));
     expect(c.draft(a).phase, VoicePhase.review);
-    expect(c.draft(a).text, SimulatedSpeechBackend.sample);
+    expect(c.draft(a).text, SimulatedSpeechEngine.sample);
     c.dispose();
   });
-  VoiceInputController ready() => VoiceInputController()
-    ..ready = true
-    ..permission = true;
+  VoiceInputController ready([
+    VoiceScenario scenario = VoiceScenario.streaming,
+  ]) =>
+      VoiceInputController(SimulatedSpeechEngine(scenario))
+        ..availability = SpeechAvailability.ready;
 
   testWidgets('partials stay local and insert only reviewed sanitized text', (
     tester,
@@ -262,7 +268,7 @@ void main() {
 
   for (final scenario in [VoiceScenario.finalOnly, VoiceScenario.noSpeech]) {
     testWidgets('${scenario.name} has no invented partials', (tester) async {
-      final c = ready()..scenario = scenario;
+      final c = ready(scenario);
       c.start(a);
       await tester.pump(const Duration(seconds: 2));
       expect(c.draft(a).text, isEmpty);
@@ -289,23 +295,26 @@ void main() {
   testWidgets('setup failure and permission denial are recoverable', (
     tester,
   ) async {
-    final c = VoiceInputController()
-      ..scenario = VoiceScenario.preparationFailure;
+    final c = VoiceInputController(SimulatedSpeechEngine())
+      ..configure(VoiceScenario.preparationFailure);
     c.start(a);
     c.prepare(a);
     await tester.pump(const Duration(seconds: 2));
     expect(c.draft(a).phase, VoicePhase.error);
+    expect(c.draft(a).message, contains('Retry setup'));
     c.configure(VoiceScenario.permissionDenied);
     c.prepare(a);
     await tester.pump(const Duration(seconds: 2));
-    c.grant(a);
+    expect(c.draft(a).phase, VoicePhase.permission);
+    await c.grant(a);
     expect(c.draft(a).phase, VoicePhase.denied);
     expect(c.active, isNull);
     c.configure(VoiceScenario.streaming);
     c.prepare(a);
     await tester.pump(const Duration(seconds: 2));
-    c.grant(a);
+    await c.grant(a);
     expect(c.active, a);
+    expect(c.canCapture, true);
     c.dispose();
   });
 

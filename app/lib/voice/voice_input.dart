@@ -7,6 +7,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../providers/agent_transport.dart';
 import '../providers/sessions.dart';
+import '../util/detached.dart';
+import 'simulated_speech_engine.dart';
+import 'speech_engine.dart';
 
 enum VoicePhase {
   idle,
@@ -21,19 +24,6 @@ enum VoicePhase {
   error,
 }
 
-enum VoiceScenario {
-  streaming,
-  finalOnly,
-  revised,
-  longPrompt,
-  noSpeech,
-  permissionDenied,
-  preparationFailure,
-  interrupted,
-  modelDownload,
-  unavailable,
-}
-
 typedef VoiceTarget = ({String project, String session, String surface});
 
 class VoiceDraft {
@@ -46,112 +36,49 @@ class VoiceDraft {
       phase == VoicePhase.listening || phase == VoicePhase.finalizing;
 }
 
-class SpeechEvent {
-  const SpeechEvent(
-    this.capture,
-    this.text, {
-    this.finalized = false,
-    this.error,
-  });
-  final int capture;
-  final String text;
-  final bool finalized;
-  final String? error;
-}
-
-abstract interface class SpeechInputBackend {
-  bool get supportsPartials;
-  void start(int capture, void Function(SpeechEvent) emit);
-  void stop();
-  void cancel();
-}
-
-/// Scripted input never requests microphone access or leaves the UI process.
-class SimulatedSpeechBackend implements SpeechInputBackend {
-  SimulatedSpeechBackend(this.scenario);
-  final VoiceScenario scenario;
-  Timer? _timer;
-  int _capture = 0;
-  void Function(SpeechEvent)? _emit;
-  String _text = '';
-  static const sample =
-      'Explain the failing Riverpod test in agent-core.ts and suggest a fix.';
-  String get result => scenario == VoiceScenario.noSpeech
-      ? ''
-      : scenario == VoiceScenario.longPrompt
-      ? List.filled(12, sample).join(' ')
-      : sample;
-  @override
-  bool get supportsPartials => scenario != VoiceScenario.finalOnly;
-  @override
-  void start(int capture, void Function(SpeechEvent) emit) {
-    cancel();
-    _capture = capture;
-    _emit = emit;
-    var tick = 0;
-    _timer = Timer.periodic(const Duration(milliseconds: 700), (_) {
-      tick++;
-      if (scenario == VoiceScenario.interrupted && tick == 4) {
-        _timer?.cancel();
-        emit(
-          SpeechEvent(
-            capture,
-            _text,
-            error: 'Microphone disconnected (simulated).',
-          ),
-        );
-        return;
-      }
-      if (!supportsPartials || scenario == VoiceScenario.noSpeech) return;
-      final words = result.split(' ');
-      _text = words.take(tick * 3).join(' ');
-      if (scenario == VoiceScenario.revised && tick == 2) {
-        _text = 'Explain the failing river pod test';
-      }
-      emit(SpeechEvent(capture, _text));
-    });
-  }
-
-  @override
-  void stop() {
-    _timer?.cancel();
-    _timer = Timer(const Duration(milliseconds: 600), () {
-      _emit?.call(SpeechEvent(_capture, result, finalized: true));
-    });
-  }
-
-  @override
-  void cancel() {
-    _timer?.cancel();
-    _timer = null;
-  }
-}
-
 class VoiceInputController extends ChangeNotifier with WidgetsBindingObserver {
-  VoiceInputController() {
+  VoiceInputController(this._engine) {
     WidgetsBinding.instance.addObserver(this);
   }
+  SpeechEngine _engine;
+  SpeechEngine get engine => _engine;
   final Map<VoiceTarget, VoiceDraft> _drafts = {};
   VoiceDraft draft(VoiceTarget target) =>
       _drafts.putIfAbsent(target, VoiceDraft.new);
   VoiceTarget? active;
-  VoiceScenario scenario = VoiceScenario.streaming;
-  bool ready = false;
-  bool permission = false;
+
+  /// The engine's last answer. [start] reads it synchronously, so it is
+  /// refreshed after each setup step rather than queried per keystroke.
+  SpeechAvailability availability = const SpeechAvailability(
+    SpeechReadiness.needsModel,
+  );
+  bool get canCapture => availability.readiness == SpeechReadiness.ready;
   bool holdToTalk = false;
   LogicalKeyboardKey? shortcut;
-  SpeechInputBackend? _backend;
+  bool _capturing = false;
   Timer? _clock;
-  Timer? _prepare;
+  StreamSubscription<SpeechSetupProgress>? _prepare;
   int _capture = 0;
   bool _disposed = false;
 
+  VoiceScenario? get scenario => switch (_engine) {
+    final SimulatedSpeechEngine e => e.scenario,
+    _ => null,
+  };
+
+  Future<void> refresh() async {
+    final next = await _engine.availability();
+    if (_disposed) return;
+    availability = next;
+    notifyListeners();
+  }
+
+  /// Debug harness only: swaps in a fresh simulated engine for [value].
   void configure(VoiceScenario value) {
     if (active != null) return;
-    scenario = value;
     _prepare?.cancel();
-    ready = false;
-    permission = false;
+    _engine = SimulatedSpeechEngine(value);
+    availability = SimulatedSpeechEngine.initial(value);
     notifyListeners();
   }
 
@@ -160,29 +87,30 @@ class VoiceInputController extends ChangeNotifier with WidgetsBindingObserver {
     if (active != null) preserve(active!);
     final d = draft(target);
     d.message = null;
-    if (scenario == VoiceScenario.unavailable) {
-      d.phase = VoicePhase.error;
-      d.message =
-          'On-device dictation is unavailable for this simulated device.';
-      notifyListeners();
-      return;
-    }
-    if (!ready) {
-      d.phase = VoicePhase.setup;
-      notifyListeners();
-      return;
-    }
-    if (!permission) {
-      d.phase = VoicePhase.permission;
-      notifyListeners();
-      return;
+    switch (availability.readiness) {
+      case SpeechReadiness.unavailable:
+        d.phase = VoicePhase.error;
+        d.message =
+            availability.reason ?? 'Voice input is unavailable on this device.';
+        notifyListeners();
+        return;
+      case SpeechReadiness.needsModel:
+        d.phase = VoicePhase.setup;
+        notifyListeners();
+        return;
+      case SpeechReadiness.needsPermission:
+        d.phase = VoicePhase.permission;
+        notifyListeners();
+        return;
+      case SpeechReadiness.ready:
     }
     d.text = '';
     d.seconds = 0;
     d.phase = VoicePhase.listening;
     active = target;
     final capture = ++_capture;
-    _backend = SimulatedSpeechBackend(scenario)..start(capture, accept);
+    _capturing = true;
+    _engine.start(capture, accept);
     _clock = Timer.periodic(const Duration(seconds: 1), (_) {
       d.seconds++;
       notifyListeners();
@@ -193,36 +121,78 @@ class VoiceInputController extends ChangeNotifier with WidgetsBindingObserver {
   void prepare(VoiceTarget target) {
     _prepare?.cancel();
     final d = draft(target)
-      ..phase = scenario == VoiceScenario.modelDownload
+      ..phase = availability.downloadBytes > 0
           ? VoicePhase.downloading
-          : VoicePhase.preparing;
-    d.message = null;
-    d.progress = 0;
-    _prepare = Timer.periodic(const Duration(milliseconds: 250), (timer) {
-      d.progress = (d.progress + .25).clamp(0, 1);
-      if (d.progress == 1) {
-        timer.cancel();
-        if (scenario == VoiceScenario.preparationFailure) {
-          d.phase = VoicePhase.error;
-          d.message = 'Model preparation failed (simulated). Retry setup.';
-        } else {
-          ready = true;
-          d.phase = VoicePhase.permission;
+          : VoicePhase.preparing
+      ..message = null
+      ..progress = 0;
+    _prepare = _engine.prepare().listen(
+      (step) {
+        d
+          ..phase = step.downloading
+              ? VoicePhase.downloading
+              : VoicePhase.preparing
+          ..progress = step.fraction.clamp(0, 1);
+        notifyListeners();
+      },
+      onError: (Object error) {
+        _prepare = null;
+        d
+          ..phase = VoicePhase.error
+          ..message = error is SpeechEngineException
+              ? error.message
+              : 'Voice setup failed. Retry setup.';
+        notifyListeners();
+      },
+      onDone: () async {
+        _prepare = null;
+        final next = await _engine.availability();
+        if (_disposed ||
+            (d.phase != VoicePhase.preparing &&
+                d.phase != VoicePhase.downloading)) {
+          return;
         }
-      }
-      notifyListeners();
-    });
+        availability = next;
+        switch (next.readiness) {
+          case SpeechReadiness.needsPermission:
+            d.phase = VoicePhase.permission;
+          case SpeechReadiness.ready:
+            d.phase = VoicePhase.idle;
+          case SpeechReadiness.needsModel || SpeechReadiness.unavailable:
+            d
+              ..phase = VoicePhase.error
+              ..message =
+                  next.reason ?? 'Voice setup did not finish. Retry setup.';
+        }
+        notifyListeners();
+      },
+      cancelOnError: true,
+    );
     notifyListeners();
   }
 
-  void grant(VoiceTarget target) {
-    if (scenario == VoiceScenario.permissionDenied) {
-      draft(target).phase = VoicePhase.denied;
+  Future<void> grant(VoiceTarget target) async {
+    final d = draft(target);
+    final bool granted;
+    try {
+      granted = await _engine.requestPermission();
+    } on SpeechEngineException catch (error) {
+      if (_disposed || d.busy) return;
+      d
+        ..phase = VoicePhase.error
+        ..message = error.message;
       notifyListeners();
-    } else {
-      permission = true;
-      start(target);
+      return;
     }
+    if (_disposed || d.busy) return;
+    if (!granted) {
+      d.phase = VoicePhase.denied;
+      notifyListeners();
+      return;
+    }
+    availability = await _engine.availability();
+    if (_disposed) return;
+    start(target);
   }
 
   void accept(SpeechEvent event) {
@@ -242,7 +212,7 @@ class VoiceInputController extends ChangeNotifier with WidgetsBindingObserver {
     if (active != target || draft(target).phase != VoicePhase.listening) return;
     draft(target).phase = VoicePhase.finalizing;
     _clock?.cancel();
-    _backend?.stop();
+    _engine.stop();
     notifyListeners();
   }
 
@@ -297,8 +267,8 @@ class VoiceInputController extends ChangeNotifier with WidgetsBindingObserver {
 
   void _release() {
     _capture++;
-    _backend?.cancel();
-    _backend = null;
+    if (_capturing) _engine.cancel();
+    _capturing = false;
     _clock?.cancel();
     active = null;
   }
@@ -322,8 +292,14 @@ String terminalDictationText(String text) => text
     .replaceAll(RegExp(r'[\r\n\t\u2028\u2029]+'), ' ')
     .replaceAll(RegExp(r'[\x00-\x1f\x7f-\x9f]'), '');
 
+/// Every platform runs the simulator until a real engine lands for it.
+final speechEngineProvider = Provider<SpeechEngine>(
+  (ref) => SimulatedSpeechEngine(),
+);
+
 final voiceInputProvider = Provider<VoiceInputController>((ref) {
-  final controller = VoiceInputController();
+  final controller = VoiceInputController(ref.watch(speechEngineProvider));
+  detached('Voice', 'read speech availability', controller.refresh);
   void stopForNavigation() {
     final target = controller.active;
     if (target != null) controller.preserve(target, deferNotification: true);

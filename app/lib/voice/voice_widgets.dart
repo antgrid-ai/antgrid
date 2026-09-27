@@ -11,6 +11,8 @@ import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_text_field.dart';
 import '../util/detached.dart';
 import '../widgets/transcript/composer/composer_controller.dart';
+import 'simulated_speech_engine.dart';
+import 'speech_engine.dart';
 import 'voice_composer_binding.dart';
 import 'voice_input.dart';
 
@@ -42,7 +44,7 @@ class VoiceMic extends ConsumerWidget {
                     return;
                   }
                   controller.start(target);
-                  if (!controller.ready || !controller.permission) {
+                  if (!controller.canCapture) {
                     detached(
                       'Voice',
                       'show simulated setup',
@@ -282,12 +284,25 @@ class _VoiceSetupState extends State<VoiceSetup> {
     super.dispose();
   }
 
+  void _grantAndClose(BuildContext context, VoiceInputController c) {
+    final navigator = Navigator.of(context);
+    detached('Voice', 'grant microphone', () async {
+      await c.grant(widget.target);
+      if (mounted && c.active == widget.target) navigator.pop();
+    });
+  }
+
   @override
   Widget build(BuildContext context) => ListenableBuilder(
     listenable: widget.controller,
     builder: (context, _) {
       final c = widget.controller;
       final d = c.draft(widget.target);
+      final installed = switch (c.availability.readiness) {
+        SpeechReadiness.ready || SpeechReadiness.needsPermission => true,
+        SpeechReadiness.needsModel || SpeechReadiness.unavailable => false,
+      };
+      final downloadMb = (c.availability.downloadBytes / 1e6).round();
       return Focus(
         focusNode: _focus,
         autofocus: true,
@@ -345,7 +360,7 @@ class _VoiceSetupState extends State<VoiceSetup> {
                   style: AbTokens.sansStyle(),
                 ),
                 Text(
-                  c.ready
+                  installed
                       ? 'Model: simulated, ready · Storage: 0 B'
                       : 'Model: simulated, setup required · Download: 0 B',
                   style: AbTokens.sansStyle(),
@@ -402,7 +417,7 @@ class _VoiceSetupState extends State<VoiceSetup> {
                   ),
                 if (d.phase == VoicePhase.downloading)
                   Text(
-                    'Downloading (simulated)… ${(d.progress * 487).round()} / 487 MB. No data is transferred.',
+                    'Downloading (simulated)… ${(d.progress * downloadMb).round()} / $downloadMb MB. No data is transferred.',
                     style: AbTokens.sansStyle(),
                   ),
                 if (d.phase == VoicePhase.denied)
@@ -422,20 +437,22 @@ class _VoiceSetupState extends State<VoiceSetup> {
                         Navigator.of(context).pop();
                       },
                     ),
-                    if (c.ready)
+                    if (installed)
                       AbButton(
                         label: 'Remove simulated model',
                         wrapLabel: true,
-                        onTap: () => c.configure(c.scenario),
+                        onTap: () =>
+                            c.configure(c.scenario ?? VoiceScenario.streaming),
                       ),
                     if (d.phase == VoicePhase.denied)
                       AbButton(
                         label: 'Simulate enabling microphone',
                         wrapLabel: true,
                         onTap: () {
-                          c.permission = true;
-                          c.start(widget.target);
-                          Navigator.of(context).pop();
+                          if (c.engine case final SimulatedSpeechEngine e) {
+                            e.allowAfterDenial = true;
+                          }
+                          _grantAndClose(context, c);
                         },
                       ),
                     if (d.phase != VoicePhase.preparing &&
@@ -444,7 +461,7 @@ class _VoiceSetupState extends State<VoiceSetup> {
                         wrapLabel: true,
                         label: d.text.isNotEmpty
                             ? 'Back to review'
-                            : !c.ready
+                            : !installed
                             ? 'Set up'
                             : 'Allow & start (simulated)',
                         onTap: () {
@@ -452,18 +469,16 @@ class _VoiceSetupState extends State<VoiceSetup> {
                             Navigator.of(context).pop();
                             return;
                           }
-                          if (c.scenario == VoiceScenario.unavailable) {
+                          if (c.availability.readiness ==
+                              SpeechReadiness.unavailable) {
                             c.start(widget.target);
                             return;
                           }
-                          if (!c.ready) {
+                          if (!installed) {
                             c.prepare(widget.target);
                             return;
                           }
-                          c.grant(widget.target);
-                          if (c.active == widget.target) {
-                            Navigator.of(context).pop();
-                          }
+                          _grantAndClose(context, c);
                         },
                       ),
                   ],
@@ -557,7 +572,7 @@ KeyEventResult handleVoiceKey(
     if (event is KeyDownEvent) c.stop(target);
     return KeyEventResult.handled;
   }
-  if (event.logicalKey != c.shortcut || !c.ready || !c.permission) {
+  if (event.logicalKey != c.shortcut || !c.canCapture) {
     return KeyEventResult.ignored;
   }
   if (event is KeyDownEvent) {

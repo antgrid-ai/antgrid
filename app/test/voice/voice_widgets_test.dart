@@ -1,4 +1,6 @@
 import 'package:antgrid/design/ab_theme.dart';
+import 'package:antgrid/voice/simulated_speech_engine.dart';
+import 'package:antgrid/voice/speech_engine.dart';
 import 'package:antgrid/voice/voice_input.dart';
 import 'package:antgrid/voice/voice_widgets.dart';
 import 'package:antgrid/widgets/transcript/composer/composer_controller.dart';
@@ -25,9 +27,8 @@ void main() {
   testWidgets(
     'unmounting chat preserves transcript without poisoning next capture',
     (tester) async {
-      final c = VoiceInputController()
-        ..ready = true
-        ..permission = true;
+      final c = VoiceInputController(SimulatedSpeechEngine())
+        ..availability = SpeechAvailability.ready;
       final input = ComposerController();
       await tester.pumpWidget(
         host(
@@ -54,7 +55,7 @@ void main() {
   );
 
   testWidgets('production gate hides preview controls', (tester) async {
-    final c = VoiceInputController();
+    final c = VoiceInputController(SimulatedSpeechEngine());
     await tester.pumpWidget(
       host(
         c,
@@ -76,9 +77,8 @@ void main() {
   testWidgets('terminal review survives refusal and sends no Return', (
     tester,
   ) async {
-    final c = VoiceInputController()
-      ..ready = true
-      ..permission = true;
+    final c = VoiceInputController(SimulatedSpeechEngine())
+      ..availability = SpeechAvailability.ready;
     var allow = false;
     final sent = <String>[];
     await tester.pumpWidget(
@@ -124,9 +124,8 @@ void main() {
   testWidgets('chat preview commits final text without submitting', (
     tester,
   ) async {
-    final c = VoiceInputController()
-      ..ready = true
-      ..permission = true;
+    final c = VoiceInputController(SimulatedSpeechEngine())
+      ..availability = SpeechAvailability.ready;
     final input = ComposerController();
     var sends = 0;
     await tester.pumpWidget(
@@ -145,7 +144,7 @@ void main() {
     expect(input.isEmpty, true);
     c.stop(target);
     await tester.pump(const Duration(seconds: 1));
-    expect(input.toMarkdown(), SimulatedSpeechBackend.sample);
+    expect(input.toMarkdown(), SimulatedSpeechEngine.sample);
     expect(sends, 0);
     await tester.pumpWidget(const SizedBox());
     c.dispose();
@@ -159,7 +158,7 @@ void main() {
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
-    final c = VoiceInputController();
+    final c = VoiceInputController(SimulatedSpeechEngine());
     await tester.pumpWidget(
       host(
         c,
