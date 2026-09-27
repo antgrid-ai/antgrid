@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 import { inCidr, parseCidr, parseIp } from "antgrid-wire";
 
 type GeoCacheEntry = { country: string | null; expiresAt: number };

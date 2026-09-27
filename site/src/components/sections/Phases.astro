@@ -1,53 +1,100 @@
 ---
-import Eyebrow from "../ui/Eyebrow.astro";
-import HandlerScene from "../shell/HandlerScene.astro";
 import UseCase from "../ui/UseCase.astro";
 
-// The phase-gated workflow (research → validate → plan → implement, a human
-// checkpoint between each) is the industry-standard agent loop — Anthropic's
-// explore/plan/code/commit, GitHub Spec Kit's specify/plan/tasks/implement.
-// This section names that loop and puts Handler at the gates. Honesty line:
-// Handler answers the agent within the session and holds items on conditions —
-// it never starts work on its own, so "implement" below is WAITING on the
-// human's pick, not auto-dispatched.
-// Three numbers, and the third changes register — the first two size the chore,
-// the last is the guarantee. Kept to figures the page can stand behind: 4 and 0
-// are the mechanism, ~30 min is stated as a human delay, not a measured metric.
-const stats = [
-  { value: "4", label: "phases in a serious run — research, validate, plan, implement", accent: false },
-  { value: "~30 min", label: "your delay at each gate, on the days you're at the desk", accent: false },
-  { value: "0", label: "phases advanced on the agent's say-so", accent: true },
-];
-
+// Claims verified against antgrid@583e988: bridge/src/handler/{evidence,decision,engine}.ts.
+//
+// The right column is a mocked run drawn in the app's own idiom, not a
+// captured one: a task started normally, handed to Handler from the Arm sheet,
+// Handler doing the follow-ups, one question to the phone. It is rendered from
+// the creatives repo's HandlerTerminal composition, whose notes.md carries the
+// beat-by-beat script and the app symbols its strings are copied from; when
+// the app's Handler surfaces change, that clip is what goes stale.
+//
+// The poster is the frame with the one question to the phone: the still that
+// no-JS, prefers-reduced-motion and the OG screenshot get. Amber appears on
+// that card alone, the rule every scene on the page keeps.
 ---
-<section id="handler" class="reveal mx-auto max-w-shell px-6 py-24">
-  <Eyebrow class="mb-5">Hand over the follow-ups</Eyebrow>
-  <h2 class="mb-5 max-w-3xl font-display text-title font-semibold text-ink">Every phase has a checkpoint.<br />It doesn't have to be you.</h2>
-  <div class="mb-10 grid max-w-4xl gap-x-10 gap-y-4 md:grid-cols-2">
-    <p class="text-lede text-muted">
-      Research, validate, plan, implement — serious agent work moves in phases, and between each one someone reads the response, judges whether it's deep enough, and writes the next prompt. Usually that someone is you, on a thirty-minute delay.
-    </p>
-    <p class="text-lede text-muted">
-      Arm Handler with the sequence instead — in plain text, mid-session, after you've driven as much as you want to drive. It reads each response, pushes back when the answer is shallow, advances a phase only when its condition holds, and wakes you when the call is genuinely yours.
-    </p>
-  </div>
+<section id="handler" class="mx-auto max-w-shell px-6 py-16 md:py-24">
+  <div class="grid gap-x-16 gap-y-10 md:grid-cols-2 md:items-center">
+    <div>
+      <h2 class="mb-6 font-display text-title font-bold text-ink">Long-running task? Hand over the follow-ups.</h2>
+      <p class="mb-6 max-w-xl text-lede text-muted">
+        Start a task with your coding agent. When you're ready to step away, tell Handler what's left, how to proceed and when to ask you. It checks the agent's responses against your instructions, asks for missing evidence and guides the remaining work.
+      </p>
+      <UseCase class="max-w-xl">Research and plan together. Let Handler guide implementation and reviews, and notify you when it needs your input or reaches a checkpoint you set.</UseCase>
+      {/* The limitation, on the page rather than in a code comment — a reader
+          who assumes autonomy here and discovers otherwise has been mis-sold. */}
+      <p class="mt-6 max-w-xl text-meta leading-relaxed text-muted2">
+        Handler works inside a session you arm. Review its decisions; its judgement can be wrong.
+      </p>
+      <a href="#download" class="mt-6 inline-block text-note font-medium text-signal2 underline decoration-signaldeep2 underline-offset-4 hover:text-signal hover:decoration-signal">Try one handoff</a>
+    </div>
 
-  <div class="mb-11 flex flex-wrap gap-x-14 gap-y-7">
-    {stats.map((s) => (
-      <div>
-        <div class={`font-mono text-kicker ${s.accent ? "text-signal" : "text-ink"}`}>{s.value}</div>
-        <div class="mt-2 max-w-52 text-meta leading-relaxed text-muted2">{s.label}</div>
+    <div>
+      <p class="mb-3 text-note text-muted2">An example handoff</p>
+      {/* The clip frames its own pane in 40px of page colour on every side
+          of a 1200px frame, and that gutter cannot hold #131110 through a
+          video encode: limited-range 8-bit loses a level of it before
+          quantisation starts, and rate control gives up more on the beats
+          with a dark scrim over the pane — while the Arm sheet is up the
+          bottom gutter decodes 12,10,8 against the page's 19,17,16, which
+          reads as a dark inset frame around the clip. So the page clips the
+          gutter off rather than trying to match it: this box is the column,
+          the clip is 1200/1120 of it and hangs out by half the difference on
+          all four sides, and what shows is exactly the pane. Anything else
+          embedded from creatives needs the same treatment.
+          width/height reserve the box before the poster arrives. preload=none:
+          the poster is the page until the section is in view, and the video is
+          fetched only then. H.264 only: every browser the page targets plays
+          it, so a WebM source would never be picked and would only sit in the
+          repo. */}
+      <div class="relative overflow-hidden rounded-lg">
+        <video
+          data-handler-clip
+          class="m-[-3.571429%] block h-auto w-[107.142857%] max-w-none"
+          width="1200"
+          height="1040"
+          muted
+          loop
+          playsinline
+          preload="none"
+          poster="/handler/terminal.png"
+          aria-label="A terminal session handed to Handler: it answers the agent from your plan, asks for evidence, and sends the one decision that is yours to your phone."
+        >
+          <source src="/handler/terminal.mp4" type="video/mp4" />
+        </video>
+        {/* The pane's edge is the clip's edge now, so this ring carries the
+            pane's border across the seam. It is the app's line colour, which
+            the site's warm ramp has no token for, and it also covers the dark
+            hairline Chrome draws down the right and bottom of a video whose
+            box is a fractional number of device pixels. That hairline is made
+            at composite time: no encode, poster or CSS colour reaches it, no
+            screenshot captures it, and Firefox never draws it. */}
+        <span aria-hidden="true" class="pointer-events-none absolute inset-0 rounded-lg border border-[#27272a]"></span>
       </div>
-    ))}
+    </div>
   </div>
-
-  <HandlerScene />
-
-  <UseCase class="mt-7 max-w-2xl">Type the sequence once, before you leave. You get woken for the call that's actually yours.</UseCase>
-
-  {/* The limitation, on the page rather than in a code comment — a reader who
-      assumes autonomy here and discovers otherwise has been mis-sold. */}
-  <p class="mt-4 max-w-2xl text-meta leading-relaxed text-muted2">
-    Handler answers the agent inside a running session and holds a phase until its condition is met. It never starts work on its own, and it never advances a phase on the agent's say-so.
-  </p>
 </section>
+
+<script>
+  // Plays while the section is on screen and pauses when it leaves, so the
+  // loop costs nothing off-screen. Under reduced motion the poster stands;
+  // without JS there is no autoplay attribute, so the poster stands there too.
+  const clip = document.querySelector<HTMLVideoElement>("[data-handler-clip]");
+  const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (clip && !reduce) {
+    const io = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) {
+            clip.play().catch(() => {});
+          } else {
+            clip.pause();
+          }
+        }
+      },
+      { threshold: 0.25 },
+    );
+    io.observe(clip);
+  }
+</script>

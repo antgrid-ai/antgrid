@@ -23,9 +23,10 @@ import {
   SINK_SCRIPT_NAME,
   apiPort,
   awaitDeliveryLines,
-  awaitSinkRunId,
   busCall,
   countMarkers,
+  hookDoneMarker,
+  hookTriggerData,
   postJson,
   prepareBusProject,
   sinkText,
@@ -257,8 +258,8 @@ async function startSession(bridge: LocalBridge, sessionId: string): Promise<voi
  *
  * §5.1 resolves the repo key by spawning git, so for the first moments after a
  * boot the project is addressable-but-not-yet-read and every send answers
- * `UNKNOWN_PEER`. Gating on the directory answering keeps that startup race out
- * of every assertion below it.
+ * `AGENT_NOT_READY`. Gating on the directory answering keeps that startup race
+ * out of every assertion below it.
  */
 async function awaitAddressable(bridge: LocalBridge, terminalId: string): Promise<BusCall> {
   const deadline = Date.now() + 30_000;
@@ -275,42 +276,37 @@ async function awaitAddressable(bridge: LocalBridge, terminalId: string): Promis
   }
 }
 
-/** A synthetic turn hook is valid only after the process has published the
- * live row that a production hook necessarily follows. */
-async function awaitLiveSession(
-  bridge: LocalBridge,
-  callerId: string,
-  sessionId: string,
-): Promise<void> {
-  await untilAsync(async () => {
-    const directory = await busCall(bridge.abDir, "sessions", { terminalId: callerId });
-    return directory.status === 200 && (directory.body.sessions ?? []).some(
-      (session: { sessionId?: string; activity?: string }) =>
-        session.sessionId === sessionId && session.activity !== "stopped",
-    ) ? true : undefined;
-  }, 30_000, `session ${sessionId} to publish its live directory row`);
-}
-
-async function openSyntheticTurn(
-  bridge: LocalBridge,
-  callerId: string,
-  terminalId: string,
-): Promise<void> {
-  await awaitLiveSession(bridge, callerId, terminalId);
-  const api = `http://127.0.0.1:${await apiPort(bridge.abDir)}`;
-  const result = await postJson(`${api}/turn-start`, {
-    terminalId,
-    runId: await awaitSinkRunId(bridge.sinkPath, terminalId),
-  });
-  if (result.ok !== true || result.stale === true) {
-    throw new Error(`turn-start was not accepted: ${JSON.stringify(result)}`);
-  }
-}
-
 function localTarget(bridge: LocalBridge, sessionId: string): { projectId: string; sessionId: string } {
   // No `machineId`, which is the §6.1 address: an omitted machine IS this
   // machine, and this machine has no id to spell.
   return { projectId: bridge.projectId, sessionId };
+}
+
+/**
+ * Simulate one real agent hook firing for [sessionId] — a turn-start
+ * (`user-prompt`) or a turn-end (`stop`, which is what carries `task_complete`).
+ *
+ * Not a loopback `/turn-start`/`/notify` POST: those need a `runId` matching
+ * the session's own (`SessionManager.acceptsHookRun`), which only the sink's
+ * own PTY environment holds. Writing `hookTriggerData` into that PTY's stdin
+ * makes the sink script spawn `run-hook.ts` as ITS OWN child, so the real hook
+ * runner reads the correct `ANTGRID_RUN_ID` off its inherited environment —
+ * see `session-bus.ts`'s doc on `hookTriggerData`.
+ *
+ * Waits for `hookDoneMarker` rather than assuming completion: the trigger
+ * crosses PTY write → sink script → child spawn → loopback POST, and nothing
+ * about that chain is synchronous with this call returning.
+ */
+async function fireHook(bridge: LocalBridge, sessionId: string, agent: string, event: string): Promise<void> {
+  // Counted, not merely present: the sink keeps every earlier marker, so a
+  // second firing of the same event would otherwise return before it ran.
+  const before = countMarkers(sinkText(bridge.sinkPath), hookDoneMarker(event));
+  bridge.client.send(createMessage("terminal:input", { terminalId: sessionId, data: hookTriggerData(agent, event) }));
+  await untilAsync(
+    async () => (countMarkers(sinkText(bridge.sinkPath), hookDoneMarker(event)) > before ? true : undefined),
+    20_000,
+    `the simulated "${event}" hook to run for session ${sessionId}`,
+  );
 }
 
 test("a post reaches a sibling session's mailbox on a bridge with no relay identity, no carrier and remote access off", async () => {
@@ -339,12 +335,10 @@ test("a post reaches a sibling session's mailbox on a bridge with no relay ident
       summary: "off-machine probe",
       text: "probe",
     };
-    const switchedOff = await busCall(bridge.abDir, "post", { terminalId: sender, body: offMachine });
-    expect(switchedOff.status).toBe(403);
-    expect(switchedOff.body.code).toBe("REMOTE_ACCESS_OFF");
-
-    // Flipped on only to reach the rung underneath it: with the switch off, the
-    // carrier is never asked, so the absent desktop leg has no other witness.
+    // The switch is turned ON for this probe. It now gates the send path AHEAD
+    // of the carrier, so leaving it off would witness `REMOTE_ACCESS_OFF` and
+    // prove nothing about the carrier rung this block exists to pin. (That
+    // precedence has its own case in `api-server-session-bus.test.ts`.)
     await setMobileAccess(bridge.abDir, true);
     const noCarrier = await busCall(bridge.abDir, "post", { terminalId: sender, body: offMachine });
     expect(noCarrier.status).toBe(503);
@@ -408,10 +402,11 @@ test("a notify waits for the target's next turn boundary and arrives there exact
     await startSession(bridge, sender);
     await startSession(bridge, target);
     await awaitAddressable(bridge, sender);
-    // The production hook comes from the running process. This synthetic hook
-    // therefore uses the same live-run generation fence before opening a turn.
-    await openSyntheticTurn(bridge, sender, target);
-    const api = `http://127.0.0.1:${await apiPort(bridge.abDir)}`;
+
+    // A turn-start naming a session the work-status reduction has not seen
+    // running yet is HELD and promoted when it appears, so this needs no race
+    // with `session:start`'s own bookkeeping.
+    await fireHook(bridge, target, "claude", "user-prompt");
 
     const notified = await busCall(bridge.abDir, "notify", {
       terminalId: sender,
@@ -436,12 +431,7 @@ test("a notify waits for the target's next turn boundary and arrives there exact
     expect(held[0]!.kind).toBe("notify");
 
     // Half two: the closing edge, which is what a turn-ending notification is.
-    await postJson(`${api}/notify`, {
-      type: "task_complete",
-      terminalId: target,
-      runId: await awaitSinkRunId(bridge.sinkPath, target),
-      message: randomUUID(),
-    });
+    await fireHook(bridge, target, "claude", "stop");
     await untilAsync(
       async () => (countMarkers(sinkText(bridge.sinkPath), NOTIFY_MARKER) === 1 ? true : undefined),
       20_000,
@@ -452,14 +442,66 @@ test("a notify waits for the target's next turn boundary and arrives there exact
     // than fail anything.
     await sleep(NOT_YET_MS);
     expect(countMarkers(sinkText(bridge.sinkPath), NOTIFY_MARKER)).toBe(1);
-    expect(await awaitDeliveryLines(
+
+    // Claude announces the turn a submitted line opens, and that announcement —
+    // not the write — is what retires the line. Until it arrives the queue is
+    // holding a line it has already submitted, which is the state that lets a
+    // line sitting unsubmitted in a composer be retried instead of lost.
+    await fireHook(bridge, target, "claude", "user-prompt");
+    await awaitDeliveryLines(
       bridge.abDir,
       bridge.projectId,
       target,
       0,
       20_000,
-      "the delivered notify to leave the target queue",
-    )).toHaveLength(0);
+      "the submitted notify to be retired by the turn it opened",
+    );
+  } finally {
+    await bridge.teardown();
+  }
+}, 180_000);
+
+test("a notify to a stopped same-machine session wakes it and the line arrives once it settles idle", async () => {
+  const bridge = await bootLocalBridge();
+  try {
+    const sender = await createSession(bridge, "sender");
+    const target = await createSession(bridge, "sleepy-target");
+    await startSession(bridge, sender);
+    // Deliberately never started — this is the §7.3 wake case, not the
+    // already-running one the test above covers.
+    await awaitAddressable(bridge, sender);
+
+    const before = await busCall(bridge.abDir, "sessions", { terminalId: sender });
+    expect(before.body.sessions.find((s: { sessionId: string }) => s.sessionId === target)?.activity).toBe("stopped");
+
+    const notified = await busCall(bridge.abDir, "notify", {
+      terminalId: sender,
+      body: { to: localTarget(bridge, target), summary: "wake up", text: "ping" },
+    });
+    expect(notified.status).toBe(200);
+    expect(notified.body.ok).toBe(true);
+    expect(notified.body.sent).toBe(true);
+
+    // No turn was ever opened for a session that just booted, so the queue's
+    // own "idle reaches it at once" rule (§7.2) applies the moment it comes up
+    // — the same edge a line held across an ordinary restart already rides.
+    await untilAsync(
+      async () => (countMarkers(sinkText(bridge.sinkPath), NOTIFY_MARKER) === 1 ? true : undefined),
+      30_000,
+      "the notify line once the woken session settles idle",
+    );
+    await fireHook(bridge, target, "claude", "user-prompt");
+    await awaitDeliveryLines(
+      bridge.abDir,
+      bridge.projectId,
+      target,
+      0,
+      20_000,
+      "the submitted notify to be retired by the turn it opened",
+    );
+
+    const after = await busCall(bridge.abDir, "sessions", { terminalId: sender });
+    expect(after.body.sessions.find((s: { sessionId: string }) => s.sessionId === target)?.activity).not.toBe("stopped");
   } finally {
     await bridge.teardown();
   }
@@ -488,9 +530,7 @@ test("a reply answers on the thread it was given and reaches the opener at its o
     const inbox = await busCall(bridge.abDir, "inbox", { terminalId: answerer });
     expect(inbox.body.posts[0].threadId).toBe(threadId);
 
-    const api = `http://127.0.0.1:${await apiPort(bridge.abDir)}`;
-    await startSession(bridge, asker);
-    await openSyntheticTurn(bridge, answerer, asker);
+    await fireHook(bridge, asker, "claude", "user-prompt");
 
     const replied = await busCall(bridge.abDir, "reply", {
       terminalId: answerer,
@@ -516,12 +556,7 @@ test("a reply answers on the thread it was given and reaches the opener at its o
     // which is the only thing separating an answer from a first contact.
     expect(held[0]!.kind).toBe("reply");
 
-    await postJson(`${api}/notify`, {
-      type: "task_complete",
-      terminalId: asker,
-      runId: await awaitSinkRunId(bridge.sinkPath, asker),
-      message: randomUUID(),
-    });
+    await fireHook(bridge, asker, "claude", "stop");
     await untilAsync(
       async () => (countMarkers(sinkText(bridge.sinkPath), REPLY_MARKER) === 1 ? true : undefined),
       20_000,
@@ -549,22 +584,11 @@ test("the pair budget refuses through the real verbs, survives a restart, and li
   try {
     const sender = await createSession(bridge, "sender");
     const rateTarget = await createSession(bridge, "rate-target");
-    const stopped = await createSession(bridge, "never-started");
     const haltTarget = await createSession(bridge, "halt-target");
     await startSession(bridge, sender);
     await startSession(bridge, rateTarget);
     await startSession(bridge, haltTarget);
     await awaitAddressable(bridge, sender);
-
-    // §7.3: a stopped session never reaches the boundary a notify waits for, so
-    // the refusal has to hand the caller the verb that still reaches.
-    const notRunning = await busCall(bridge.abDir, "notify", {
-      terminalId: sender,
-      body: { to: localTarget(bridge, stopped), summary: "are you there", text: "ping" },
-    });
-    expect(notRunning.status).toBe(409);
-    expect(notRunning.body.code).toBe("NOT_RUNNING");
-    expect(notRunning.body.error).toContain("antgrid_post");
 
     // §7.4's rolling-hour ceiling. Each of these opens its own thread, which is
     // progress — so what refuses below is the notify ceiling and never the halt.
@@ -631,9 +655,13 @@ test("the pair budget refuses through the real verbs, survives a restart, and li
         terminalId: sender,
         body: { to: localTarget(bridge, haltTarget), summary: "round after restart", text: "round after restart" },
       });
+      // Two startup races, both answered before the pair is ever consulted —
+      // the row read runs ahead of `pairRefusal`, so either one wins the poll.
       // The fresh process has to re-read the repo key before it can resolve any
-      // address at all; until it has, the refusal is about the row, not the pair.
-      return answer.body.code === "UNKNOWN_PEER" ? undefined : answer;
+      // address at all (AGENT_NOT_READY), and the target session has to be back
+      // in the host's index before a local row for it exists (UNKNOWN_PEER).
+      // Both clear on their own; neither is an answer about the halt.
+      return answer.body.code === "AGENT_NOT_READY" || answer.body.code === "UNKNOWN_PEER" ? undefined : answer;
     }, 30_000, "the restarted bridge to answer about the pair");
     expect(afterRestart.status).toBe(429);
     expect(afterRestart.body.code).toBe("NO_PROGRESS");

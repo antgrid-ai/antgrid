@@ -12,6 +12,7 @@ import { z } from "zod";
 import { BusEnvelopeSchema, trimEnvelopeForLog, type BusEnvelope } from "./envelope";
 import { MAX_LOG_ENTRIES } from "./constants";
 import { SessionMemberKeySchema, type SessionMemberKey } from "../protocol";
+import { addressesSameSession } from "./address";
 import { readBusDb, readRecords, replaceRecords, withBusDb } from "./bus-db";
 
 export const LoggedEnvelopeSchema = z.object({
@@ -21,10 +22,8 @@ export const LoggedEnvelopeSchema = z.object({
    *  address, and a label is display text that goes stale under a rename. */
   peer: SessionMemberKeySchema,
   envelope: BusEnvelopeSchema,
-  /** When the other end's receipt arrived, on an outbound entry. Absent is "no
-   *  receipt yet" and never "it failed": a receipt is fire-and-forget and an
-   *  unacked one is not retried, so its absence is the only thing a reader may
-   *  conclude from it. */
+  /** Outbound entries only. `SessionBusThreadEntrySchema` (protocol.ts) carries
+   *  what the stamp does and does not attest to. */
   deliveredAt: z.number().optional(),
 });
 export type LoggedEnvelope = z.infer<typeof LoggedEnvelopeSchema>;
@@ -62,6 +61,33 @@ export function appendLog(s: MessageLogState, e: LogInput): MessageLogState {
  *  it would answer "what has this thread said" with the whole conversation. */
 export function entriesForThread(s: MessageLogState, threadId: string): LoggedEnvelope[] {
   return s.entries.filter((e) => e.envelope.threadId === threadId);
+}
+
+/** When [peer] last put a frame on [contextId] here, or null if nothing the ring
+ *  still holds says it ever did.
+ *
+ *  BOTH halves of the filter are load-bearing where the send path reads this. A
+ *  context is named by the session that opened it and carries every exchange
+ *  that session started, and the carrier route table is keyed by that id alone —
+ *  so one correspondent still answering restamps the entry all of them share,
+ *  and a context-only read would let it vouch for a peer that has been dark for
+ *  hours. Matching the peer too is what makes the answer about the machine being
+ *  written to.
+ *
+ *  Inbound only, which is what makes it evidence rather than an echo: an "in"
+ *  entry is written from `onMessage`, on a frame that already cleared the
+ *  address check, while an "out" entry records only that this session spoke. The
+ *  ring is bounded, so a peer whose last frame has been displaced reads the same
+ *  as one that never wrote — wrong in the direction that refuses, which is the
+ *  direction a liveness probe may be wrong in. */
+export function lastInboundAt(s: MessageLogState, contextId: string, peer: SessionMemberKey): number | null {
+  for (let i = s.entries.length - 1; i >= 0; i -= 1) {
+    const e = s.entries[i]!;
+    if (e.direction !== "in") continue;
+    if (e.envelope.contextId !== contextId) continue;
+    if (addressesSameSession(peer, e.peer)) return e.at;
+  }
+  return null;
 }
 
 /** What this session last said on [threadId], so a reply's header can place it.

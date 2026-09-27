@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 import { raw } from "hono/html";
 // The master file itself, not a copy of its path data — hand-copying the markup
 // into this file is how the header and the URL handed out for external brand

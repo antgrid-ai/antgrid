@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 /**
  * The service's own public origin, for the few tags that must carry an absolute
  * URL. A link-preview scraper fetches `og:image` out of band, with no page to

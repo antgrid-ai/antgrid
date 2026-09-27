@@ -1,25 +1,21 @@
 ---
-import Eyebrow from "../ui/Eyebrow.astro";
 import FleetScene from "../shell/FleetScene.astro";
 import UseCase from "../ui/UseCase.astro";
 ---
 {/* The band the page is widest at — this is the "one screen" claim, so the
-    window gets the full shell and an inset floor to sit on. */}
-<section id="fleet" class="reveal border-y border-edge-inner bg-well">
-  <div class="mx-auto max-w-shell px-6 py-24">
-    <Eyebrow class="mb-5">Fleet view</Eyebrow>
-    {/* The hero carries "every agent, every machine, one screen" now, so this
-        section takes the narrower claim it is the actual evidence for. Keep the
-        needs-you line in exactly one place here — heading, lede and the frame's
-        own marker all stated it before, which read as padding around the one
-        picture that proves it. */}
-    <h2 class="mb-4 font-display text-title font-semibold text-ink">The one that needs you is never below the fold.</h2>
-    <p class="mb-10 max-w-2xl text-lede text-muted">
-      Grouped by the machine it's on, sorted so the one that's blocked is never the one you have to go looking for.
-    </p>
+    window gets the full shell and an inset floor to sit on. Well, not group:
+    a band has to be a step the eye can see, or it is a slab. */}
+<section id="fleet" class="border-y border-edge-inner bg-well">
+  <div class="mx-auto max-w-shell px-6 py-16 md:py-24">
+    <div class="mb-10 grid gap-x-16 gap-y-4 md:grid-cols-2 md:items-end">
+      <h2 class="font-display text-title font-bold text-ink">See which session needs you.</h2>
+      <p class="text-lede text-muted md:max-w-md">
+        Every session on every machine, with its current status, in one list.
+      </p>
+    </div>
 
     <FleetScene />
 
-    <UseCase class="mt-7 max-w-2xl">Glance once, answer the one that's blocked, close the phone. No tabbing through six terminals to find it.</UseCase>
+    <UseCase class="mt-8 max-w-2xl">Several agents running. One needs a decision. Find it without opening every terminal.</UseCase>
   </div>
 </section>

@@ -6,7 +6,7 @@ import Wordmark from "./ui/Wordmark.astro";
 ---
 <footer class="border-t border-edge-inner">
   <div class="mx-auto max-w-shell px-6 pb-8 pt-12">
-    <div class="grid grid-cols-2 gap-8 md:grid-cols-[1.7fr_1fr_1fr_1fr]">
+    <div class="grid grid-cols-2 gap-8 lg:grid-cols-[1.7fr_1fr_1fr_1fr]">
       <div>
         {/* The full lockup, as in the nav — the wordmark alone was the only
             place on the site the mark was dropped, so the page opened and closed
@@ -18,15 +18,15 @@ import Wordmark from "./ui/Wordmark.astro";
           <Mark class="h-8 w-auto" />
           <Wordmark class="h-6 w-auto" />
         </div>
-        <p class="mb-3.5 max-w-[230px] text-meta leading-relaxed text-muted">
-          Every agent you run, on every machine you own, in one control plane — and a gate on every phase when you arm Handler.
+        <p class="mb-3.5 max-w-57.5 text-meta leading-relaxed text-muted">
+          Your agents and machines in one place. Hand over the follow-ups on long-running tasks to Handler.
         </p>
         <span class="inline-flex items-center gap-1.5 rounded border border-edge px-2.5 py-1 font-mono text-marker text-muted2">
           <Icon name="tabler:lock" class="text-signal" width="12" height="12" />end-to-end encrypted · zero-knowledge relay
         </span>
       </div>
       <div>
-        <p class="mb-3 text-marker font-medium uppercase tracking-[0.14em] text-faint">Product</p>
+        <p class="mb-3 text-meta text-muted2">Product</p>
         <div class="flex flex-col gap-2.5 text-note text-muted">
           <a href={links.features} class="hover:text-ink">Features</a>
           <a href={links.pricing} class="hover:text-ink">Pricing</a>
@@ -35,19 +35,21 @@ import Wordmark from "./ui/Wordmark.astro";
           <a href={links.support} class="hover:text-ink">Support</a>
           <a href={links.security} class="hover:text-ink">Security</a>
           <a href={links.changelog} class="hover:text-ink">Changelog</a>
+          <a href={links.blog} class="hover:text-ink">Blog</a>
         </div>
       </div>
       <div>
-        <p class="mb-3 text-marker font-medium uppercase tracking-[0.14em] text-faint">Account</p>
+        <p class="mb-3 text-meta text-muted2">Account</p>
         <div class="flex flex-col gap-2.5 text-note text-muted">
           <a href={links.signIn} class="hover:text-ink">Sign in</a>
         </div>
       </div>
       <div>
-        <p class="mb-3 text-marker font-medium uppercase tracking-[0.14em] text-faint">Legal</p>
+        <p class="mb-3 text-meta text-muted2">Legal</p>
         <div class="flex flex-col gap-2.5 text-note text-muted">
           <a href={links.privacy} class="hover:text-ink">Privacy</a>
           <a href={links.terms} class="hover:text-ink">Terms</a>
+          <a href={links.license} class="hover:text-ink">MPL-2.0 licence</a>
           <a href={links.refunds} class="hover:text-ink">Refunds</a>
         </div>
       </div>
@@ -65,11 +67,53 @@ import Wordmark from "./ui/Wordmark.astro";
         <Icon name="tabler:brand-github" width="13" height="13" />GitHub
       </a>
       <span aria-hidden="true">·</span>
+      <a href={links.exactSource} class="text-muted hover:text-ink">Exact source</a>
+      <span aria-hidden="true">·</span>
       <a href={links.company} class="group inline-flex items-center gap-1.5 text-muted hover:text-ink">
         <span>a product of</span>
         <img src="/logo/radhaai-mark.svg" alt="" width="13" height="13" class="rounded-[2px]" />
         <span class="group-hover:text-ink">Radha AI Products</span>
       </a>
+      {/* The colour-scheme override, and the only place on the site it lives.
+          The page follows the OS by itself, so this is a preference control
+          rather than a feature, and it is set in the same small print as the
+          links beside it -- dot-separated, no chrome of its own, so it adds
+          nothing to this row's height. Hidden until JS has run (global.css
+          keys it on html.js) because without the script it is three buttons
+          that do nothing. `aria-pressed` is the state; the pressed style hangs
+          off it so the two cannot disagree.
+
+          Hover and selected have to differ, or hovering an unselected choice
+          makes it look chosen: hover only reaches `ink`, selection adds the
+          accent rule under it.
+
+          These are 16px tall, under the 24px target minimum, which they are
+          allowed to be only because they are inline text whose size is set by
+          the line-height around them -- the same exemption the sibling links
+          rely on. That is why the type treatment, not padding, has to carry
+          the selected state: padding would forfeit it.
+
+          `ml-auto` is `md`-only. Below that the control wraps to its own line,
+          and pushed right it lands under the fixed support launcher in the
+          same corner, which made Dark unreachable on a phone. */}
+      <div role="group" aria-label="Colour scheme" data-theme-toggle class="items-center gap-x-2 md:ml-auto">
+        <span aria-hidden="true">Theme</span>
+        {([["system", "System"], ["light", "Light"], ["dark", "Dark"]] as const).map(([choice, label], i) => (
+          <>
+            {i > 0 && <span aria-hidden="true">·</span>}
+            <button
+              type="button"
+              data-theme-choice={choice}
+              aria-pressed={choice === "system" ? "true" : "false"}
+              class="text-muted transition-colors hover:text-ink aria-pressed:text-ink aria-pressed:underline aria-pressed:decoration-signal aria-pressed:underline-offset-4 motion-reduce:transition-none"
+            >{label}</button>
+          </>
+        ))}
+      </div>
     </div>
   </div>
 </footer>
+<script>
+  import { mountThemeToggle } from "../scripts/theme";
+  mountThemeToggle();
+</script>

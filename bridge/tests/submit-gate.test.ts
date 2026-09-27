@@ -93,3 +93,62 @@ test("a reset releases what is held and takes readiness back", async () => {
   await tick();
   expect(sent).toEqual(["held", "next"]);
 });
+
+// The guest swapped interfaces without dying -- a modal, or the mount that
+// follows Claude Code's pre-TUI phase. Nothing is reading in the gap, which is
+// the state that welds a line to its own CR.
+test("a guest that stopped reading holds the next submit", async () => {
+  const sent: string[] = [];
+  const gate = new SubmitGate(60_000);
+  gate.markReady("t1");
+  gate.markUnready("t1");
+
+  gate.run("t1", () => sent.push("card"));
+  await tick();
+  expect(sent).toEqual([]);
+
+  gate.markReady("t1");
+  await tick();
+  expect(sent).toEqual(["card"]);
+});
+
+// The process is the same one the held submit was asked for, so the identity
+// check must not fire: a guest bump here would resolve the wait instead of
+// extending it, and a release would write into the gap it exists to skip.
+test("a submit held across a lost interface keeps waiting for the new one", async () => {
+  const sent: string[] = [];
+  const gate = new SubmitGate(60_000);
+
+  gate.run("t1", () => sent.push("card"));
+  gate.markUnready("t1");
+  await tick();
+  expect(sent).toEqual([]);
+
+  gate.markReady("t1");
+  await tick();
+  expect(sent).toEqual(["card"]);
+});
+
+test("a guest that has been reading once waits a swap out, not a cold start", async () => {
+  const sent: string[] = [];
+  const gate = new SubmitGate(60_000, 5);
+  gate.markReady("t1");
+  gate.markUnready("t1");
+
+  gate.run("t1", () => sent.push("card"));
+  await new Promise((resolve) => setTimeout(resolve, 40));
+
+  expect(sent).toEqual(["card"]);
+});
+
+test("a respawn is a cold start again", async () => {
+  const sent: string[] = [];
+  const gate = new SubmitGate(60_000, 5);
+  gate.markReady("t1");
+  gate.reset("t1");
+
+  gate.run("t1", () => sent.push("card"));
+  await new Promise((resolve) => setTimeout(resolve, 40));
+
+  expect(sent).toEqual([]);
+});

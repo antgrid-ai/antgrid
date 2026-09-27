@@ -40,7 +40,6 @@ const Set<String> kCheckoutDurableReplayTypes = <String>{
   'agent:status',
   'git:status',
   'git:sync-state',
-  'tree:full',
 };
 
 /// Authoritative app-side mirror of the bridge checkout-variable contract.
@@ -122,9 +121,14 @@ const Set<String> kCheckoutVariableMessageTypes = <String>{
   'ports:update',
   'port:detected',
   'preview:url',
-  'file:tree:snapshot:request',
-  'file:tree:snapshot',
   'file:tree:unchanged',
+  'file:tree:root:request',
+  'file:tree:children:request',
+  'file:tree:children',
+  'file:tree:invalidated',
+  'file:tree:subscribe',
+  'file:find',
+  'file:find-result',
   'preview:snapshot:request',
   'preview:snapshot',
   'session:result',
@@ -250,7 +254,11 @@ const Set<String> _statusTypes = <String>{
 ///   - `client:focus-state` is app→agent (outbound); it parses only for the
 ///     agent / loopback side.
 ///   - the three `*:snapshot:request` types are snapshot REQUESTS serviced
-///     outside the heavy/status reducers.
+///     outside the heavy/status reducers. `file:tree:root:request` and
+///     `file:tree:children:request` are also app->bridge requests, but have
+///     no `parseAbMessage` case at all (the app only ever SENDS them), so
+///     they never enter this inbound set in the first place — see
+///     `classification_gate_test.dart`'s stale-entry check.
 ///   - `session-bus:post`, `session-bus:notify`, `session-bus:fetch`,
 ///     `session-bus:fetch:result` and `session-bus:ack` are CARRIED between two
 ///     bridges by `SessionBusCarrier`, which reads them off the transport
@@ -264,7 +272,6 @@ const Set<String> _statusTypes = <String>{
 ///     not carried frames, and belong in [_statusTypes] instead.
 const Set<String> kUnroutedInboundTypes = <String>{
   'client:focus-state',
-  'file:tree:snapshot:request',
   'preview:snapshot:request',
   'session-bus:post',
   'session-bus:notify',
@@ -279,10 +286,12 @@ const Set<String> _heavyTypes = <String>{
   'terminal:history:page',
   'tree:full',
   'tree:update',
-  'file:tree:snapshot',
   'file:tree:unchanged',
+  'file:tree:children',
+  'file:tree:invalidated',
   'file:content',
   'file:resolve-path-result',
+  'file:find-result',
   'preview:url',
   'preview:snapshot',
   'command:output',
@@ -290,6 +299,11 @@ const Set<String> _heavyTypes = <String>{
   'file:search-done',
   'handler:escalation',
   'handler:activity',
+  // Beside handler:activity, whose rows it carries. Heavy rather than status
+  // because it is a page of feed rows, not a latest-wins snapshot — and
+  // HandlerService subscribes to both tiers for its whole life, so a page
+  // cannot be dropped for want of a listener.
+  'handler:history:page',
   'handler:snapshot',
   'agent:item-added',
   'agent:item-delta',

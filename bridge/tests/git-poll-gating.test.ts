@@ -112,13 +112,13 @@ function statusesFor(sent: AbMessage[], checkoutId: string, from: number): AbMes
   return sent.slice(from).filter((m) => m.type === "git:status" && m.checkoutId === checkoutId);
 }
 
-/** Restart the checkout's cadence ladder at a known instant. The tree-snapshot
+/** Restart the checkout's cadence ladder at a known instant. The tree-root
  *  request is a non-poll trigger, so it resets the cadence WITHOUT marking the
  *  checkout attended — which is exactly the phase reference these windows are
  *  measured from. */
 function restartLadder(bus: MessageBus, checkoutId: string): void {
   bus.dispatchInbound(
-    createMessage("file:tree:snapshot:request", { checkoutId }),
+    createMessage("file:tree:root:request", { checkoutId }),
     "control",
     "loopback",
   );

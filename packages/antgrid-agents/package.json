@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "license": "Elastic-2.0",
+  "license": "MPL-2.0",
   "exports": {
     "./runtime": "./src/runtime.ts",
     "./contracts": "./src/contracts.ts",

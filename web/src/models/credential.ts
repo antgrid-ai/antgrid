@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 import type { Tx } from "../db/index.js";
 
 /** `providerId` Better-Auth writes on the account row holding a password hash.

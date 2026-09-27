@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 /**
  * Capacity drawn as discrete cells — the product's namesake made literal, and
  * the one thing this console can show that the marketing site can only

@@ -13,8 +13,10 @@ interface Props {
   ogImageAlt?: string;
   path?: string;
   robots?: string;
+  article?: { publishedAt: string; updatedAt?: string; author: string };
+  rss?: boolean;
 }
-const { title, description, ogImage, ogImageAlt, path, robots } = Astro.props;
+const { title, description, ogImage, ogImageAlt, path, robots, article, rss } = Astro.props;
 ---
 <html lang="en">
   <head>
@@ -28,7 +30,7 @@ const { title, description, ogImage, ogImageAlt, path, robots } = Astro.props;
     <Font cssVariable="--font-archivo" preload />
     <Font cssVariable="--font-inter" preload />
     <Font cssVariable="--font-jetbrains" preload />
-    <Seo title={title} description={description} ogImage={ogImage} ogImageAlt={ogImageAlt} path={path} robots={robots} />
+    <Seo title={title} description={description} ogImage={ogImage} ogImageAlt={ogImageAlt} path={path} robots={robots} article={article} rss={rss} />
     {/* Two things follow the reader's own OS off this one attribute: the
         mockup's window chrome, because the app's does (Windows paints its own
         caption buttons, macOS keeps the real NSWindow traffic lights —
@@ -76,6 +78,25 @@ const { title, description, ogImage, ogImageAlt, path, robots } = Astro.props;
         if (/iphone|ipad|ipod|android|mobile/i.test(s) || (apple && navigator.maxTouchPoints > 1)) {
           d.dataset.form = "mobile";
         }
+      })();
+    </script>
+    {/* The colour-scheme override, on the same pre-paint terms as the OS script:
+        the page follows the OS through `color-scheme: light dark` until this
+        attribute pins it, and a pin that lands after first paint is a flash of
+        the wrong scheme on every load. Only a stored choice is acted on — with
+        no cookie the attribute stays absent and the OS decides, so a scriptless
+        reader loses nothing. The theme-color metas are already in the head
+        (Seo.astro precedes this) and are switched by `media`, not reordered.
+        Must stay after <Seo>. The same logic is hand-mirrored in the web
+        service's layout.tsx, server-side, from the same cookie. */}
+    <script is:inline>
+      (function () {
+        var m = document.cookie.match(/(?:^|;\s*)antgrid-theme=(light|dark)(?:;|$)/);
+        if (!m) return;
+        document.documentElement.dataset.theme = m[1];
+        document.querySelectorAll('meta[name="theme-color"][data-scheme]').forEach(function (el) {
+          el.setAttribute("media", el.dataset.scheme === m[1] ? "all" : "not all");
+        });
       })();
     </script>
     {/* For a page that needs its own pre-paint work, on the same terms as the

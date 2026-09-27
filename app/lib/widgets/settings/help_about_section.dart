@@ -5,9 +5,11 @@ import '../../design/ab_colors.dart';
 import '../../design/ab_icons.dart';
 import '../../design/ab_tokens.dart';
 import '../../design/widgets/ab_icon_button.dart';
+import '../../config/build_info.dart';
 import '../../providers/app_version.dart';
 import '../../providers/support_chat.dart';
 import '../../util/external_url.dart';
+import 'legal_notices_sheet.dart';
 
 /// Body rows of the settings HELP section. Renders rows only — the `_Section`
 /// frame is private to `app_settings_screen.dart`, which mounts this inside it.
@@ -40,6 +42,14 @@ class HelpAboutSection extends ConsumerWidget {
         _LinkRow(
           label: 'Support centre',
           onTap: () => openUrl(context, 'https://antgrid.ai/support'),
+        ),
+        _LinkRow(
+          label: 'Licences & notices',
+          onTap: () => showLegalNotices(context),
+        ),
+        _LinkRow(
+          label: 'Source code',
+          onTap: () => openUrl(context, BuildInfo.sourceUrl),
         ),
         Padding(
           padding: const EdgeInsets.symmetric(vertical: AbTokens.space8),

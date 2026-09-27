@@ -1,0 +1,6 @@
+---
+import { formatDate, readingMinutes, topics, type BlogPost } from "../../data/blog-policy";
+interface Props { post: BlogPost }
+const { post } = Astro.props;
+---
+<p class="blog-meta"><span>{topics[post.data.topic]}</span><span aria-hidden="true">/</span><time datetime={post.data.publishedAt.toISOString()}>{formatDate(post.data.publishedAt)}</time><span aria-hidden="true">/</span><span>{readingMinutes(post.body)} min read</span></p>

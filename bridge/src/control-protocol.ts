@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { LOG_LEVELS } from "./logger";
 import type { AgentDescriptor, SessionEntry } from "./protocol";
 import type { BranchRemoteStatus, StashEntry } from "./git-branches";
 import { MAX_CAPABILITY_CARD_PROJECTS, type OsCard, type RepoCard } from "./capability-card";
@@ -155,6 +156,23 @@ export const ControlRequestSchema = z.discriminatedUnion("type", [
   // tab: which feed a link lands on is not carried in the ticket, so a caller
   // that wants the calls view has to say so on the page.
   z.object({ id: z.string().min(1), type: z.literal("modelwatch:ui") }),
+  // Raises THIS process's log level for a bounded window (`antgrid log-level`),
+  // answered in-process by `armLogLevel`.
+  //
+  // A ControlRequest and never an AbMessage, and that is not a style choice:
+  // `dispatchControlPlane` runs on account trust alone, BEFORE the machine's
+  // remote-access switch is consulted, so a wire verb for this would hand any
+  // account-trusted peer a lever on how much a machine writes to `host.log` —
+  // the one file on the machine the app asks users to send. This plane is bound
+  // to 127.0.0.1 behind host.json's bearer, which is the authorization.
+  z.object({
+    id: z.string().min(1),
+    type: z.literal("log:level"),
+    level: z.enum(LOG_LEVELS),
+    // Optional and zero-admitting for netwatch:local's reason — a disarm has no
+    // window to state. Positivity is the arming path's concern, enforced there.
+    ttlMs: z.number().int().nonnegative().optional(),
+  }),
   // Discloses a checkout's absolute path to the caller. Deliberately confined
   // to THIS plane: checkout paths are host-local (checkout-types.ts) and the
   // loopback socket + token is the only transport that can reach this schema —
@@ -166,13 +184,13 @@ export const ControlRequestSchema = z.discriminatedUnion("type", [
     checkoutId: z.string().min(1),
   }),
   // The asking half of the remote session directory: the app's pump hands
-  // over what it learned peeking peer capability cards this cycle. Unlike
-  // every verb above, this ONE is gated behind the remote-access switch at
-  // the handler (host-server.ts) — the rest of this plane is exempt because a
-  // loopback caller is this machine's own desktop asking about its own data;
-  // this verb instead hands ANOTHER machine's session inventory into this
-  // machine's agents' reach, which is precisely what the switch authorizes.
-  // The gate is on the data's provenance, not on the caller.
+  // over what it learned peeking peer capability cards this cycle. Exempt from
+  // the remote-access switch like every other verb on this plane (E15): the
+  // switch governs what may be done TO this machine, and every row here was
+  // offered by the peer that owns it, under that peer's own switch and its own
+  // agent-reach bit. What a machine may be TOLD about willing peers is not
+  // what the switch authorizes — only the handler's relay-identity check
+  // (host-server.ts) applies.
   //
   // `rows` is deliberately `z.unknown()`, not `RemoteDirectoryRowSchema` — a
   // strict per-row schema here would 400 the WHOLE push over one hostile or
@@ -311,4 +329,10 @@ export type ControlResponse =
   | { id: string; ok: true; type: "modelwatch:arm"; prompts: boolean; context: boolean; ttlMs: number }
   /** The same fragment-carried ticket as netwatch:ui's, for the same document. */
   | { id: string; ok: true; type: "modelwatch:ui"; url: string; expiresInMs: number }
+  /** `level` is what the process is running at after this request — the armed
+   *  one, or the configured one a disarm restored — and `ttlMs` is the window
+   *  actually armed after the host's clamp, `0` while nothing is armed. Both
+   *  describe the state rather than echo the request, for the reason
+   *  netwatch:remote's `ttlMs` does. */
+  | { id: string; ok: true; type: "log:level"; level: string; ttlMs: number }
   | { id: string; ok: false; error: { code: string; message: string } };

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 import { buildApp } from "../../src/app.js";
 import { createAuth } from "../../src/auth/better-auth.js";
 import { createEmailSender, type SendEmail } from "../../src/auth/email.js";

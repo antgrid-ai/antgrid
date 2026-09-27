@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 // The marketing site is a separate deploy; these public URLs are the contract.
 // Keep in lockstep with site/src/config.ts links.download / links.getStarted.
 const SITE_DOWNLOAD_URL = "https://antgrid.ai/download";

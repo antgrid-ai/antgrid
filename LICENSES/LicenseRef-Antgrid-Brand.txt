@@ -1,0 +1,28 @@
+# Antgrid Brand Assets Licence
+
+Copyright © 2026 Radha AI Products. All rights reserved.
+
+This licence applies only to the Antgrid names, logos, icons, wordmarks,
+application identifiers, and product-identifying artwork at these paths:
+
+- `app/assets/icon/**`
+- `app/assets/logo/**`
+- `app/android/app/src/main/res/mipmap-*/ic_launcher.png`
+- `app/ios/Runner/Assets.xcassets/AppIcon.appiconset/**`
+- `app/macos/Runner/Assets.xcassets/AppIcon.appiconset/**`
+- `app/web/favicon.png` and `app/web/icons/**`
+- `app/windows/runner/resources/app_icon.ico`
+- `site/public/favicon.ico` and `site/public/logo/antgrid-**`
+- `web/public/logo/**`
+
+You may copy and redistribute these assets, unmodified, only as part of an
+unmodified official Antgrid build. A modified build or fork must use a
+different product name, application identifiers, logos, icons, wordmarks, and
+other product-identifying artwork, and must not imply sponsorship, origin, or
+endorsement by Antgrid or Radha AI Products.
+
+No broader copyright licence is granted for these assets. No trademark rights
+are granted. Nominative text references that truthfully identify Antgrid are
+governed by applicable trademark law and [TRADEMARK.md](TRADEMARK.md), not by
+this asset permission.
+

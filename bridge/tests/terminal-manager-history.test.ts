@@ -200,7 +200,7 @@ describe("terminal history lifecycle", () => {
     }
   });
 
-  test("parser failure preserves committed history and never reseeds from a raw tail", async () => {
+  test("a dropped chunk preserves committed history and never reseeds from a raw tail", async () => {
     const manager = makeManager();
     try {
       spawnPty(manager);
@@ -210,11 +210,16 @@ describe("terminal history lifecycle", () => {
       await emit(manager, lines(40, "committed"));
       const count = reader.record(runId)!.nextRowId;
       const screen = (manager as unknown as { screens: Map<string, TerminalFrameSource> }).screens.get("t1")!;
-      screen.feed("x".repeat(1_000_001));
-      expect(() => screen.capture(performance.now())).toThrow("backlog");
-      expect(() => screen.capture(performance.now())).toThrow("backlog");
+      screen.feed("x".repeat(16_000_001));
+      // Synchronous to the assertions below: nothing the live PTY emits can
+      // land between them, so the row count is the dropped chunk's alone.
+      expect(() => screen.capture(performance.now())).not.toThrow();
       expect(reader.record(runId)!.nextRowId).toBe(count);
-      expect(screen.failure).toBeDefined();
+      // A chunk that never reached the parser scrolled no rows into the
+      // archive, so what was committed stands and history says it has stopped
+      // describing the buffer. Nothing reseeds the screen from the scrollback.
+      expect(screen.failure).toBeUndefined();
+      expect(screen.historyStatus.degraded).toBe(true);
     } finally {
       manager.killAll();
     }

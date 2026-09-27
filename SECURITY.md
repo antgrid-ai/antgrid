@@ -54,11 +54,10 @@ socket's admission and routing (a separate concern from the payload path
 below).
 
 The Dart implementation and the wire protocol it speaks
-(`packages/antgrid_relay_client` and `packages/antgrid-wire`) are Apache-2.0, not
-ELv2, precisely so this claim can be checked: the licence lets you read, fork and
-reimplement that code, and publish your own work built on it, without asking us.
-That is a copyright grant and nothing more — the disclosure window above still
-applies to anything you find.
+(`packages/antgrid_relay_client` and `packages/antgrid-wire`) are MPL-2.0, and
+their source and cross-language vectors are public. That is a copyright grant
+and nothing more — the disclosure window above still applies to anything you
+find.
 
 **App to bridge payload traffic is end-to-end encrypted between your devices
 (QUIC/TLS 1.3); relays cannot read content.** Every native connection is a QUIC
@@ -114,9 +113,10 @@ In scope. These are the claims worth attacking:
   devices on different accounts.
 - **The command-execution authorization path.** Any way a remote device runs
   commands, reads files, opens a terminal, or reaches a preview tunnel on a
-  machine whose remote-access switch is off; any way to reach a project outside
-  the host's catalog; any way to be treated as account-trusted without being on
-  the account.
+  machine whose remote-access switch is off; any way an agent on such a machine
+  exchanges session-bus messages with another machine, in either direction; any
+  way to reach a project outside the host's catalog; any way to be treated as
+  account-trusted without being on the account.
 - **The licence and relay gate.** Connecting to the relay without a valid device
   token, with a revoked or expired one, or with a token bound to a different
   device's key.

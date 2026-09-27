@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 import { parseTrustedProxies, type Cidr } from "antgrid-wire";
 import { z } from "zod/v4";
 

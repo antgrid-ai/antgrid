@@ -76,9 +76,10 @@ wordmark and lockup are *inlined* into markup here, where a generic `.ink`
 selector would leak into the host document's global scope — those use
 `currentColor` instead. The transparent mark is only ever fetched as an
 image, so its scoped `<style>` is safe. Note its media query keys off the
-**reader's** OS scheme, not the page's: both sites force `color-scheme: dark`,
-so an on-page copy would flip the wrong way for a light-OS visitor. That is
-why nothing here inlines it — it is a download/external-use asset.
+**reader's** OS scheme, not the page's: both sites follow the OS but let the
+reader pin the other scheme (the `data-theme` override), so an on-page copy
+would flip the wrong way for anyone who did. That is why nothing here inlines
+it — it is a download/external-use asset.
 
 ## Geometry (source of truth for regeneration)
 

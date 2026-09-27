@@ -18,6 +18,29 @@ class FileNode {
   /// every rebuild below, or a tree:update silently repairs a partial tree.
   final bool truncated;
 
+  /// Directories only — for a [FileNodeType.file] this is always `true` and
+  /// carries no meaning (a file has nothing to load, so nothing may treat it
+  /// as pending). For a directory, `false` means [children] is NOT the
+  /// directory's contents: it has not been fetched by a
+  /// `file:tree:children:request`, and any entries already sitting in
+  /// [children] are stale leftovers from before a collapse. `true` with an
+  /// EMPTY [children] is a directory the bridge listed and found nothing in
+  /// — collapsing that with the unfetched case leaves a genuinely empty
+  /// folder rendering as loading forever. Must survive every rebuild below,
+  /// the same hazard [truncated] already names.
+  final bool childrenLoaded;
+
+  /// True while a `file:tree:children:request` for this directory is in
+  /// flight. Never arrives over the wire — [fromJson] always reads `false` —
+  /// set and cleared by [FileService] around the round trip.
+  final bool childrenLoading;
+
+  /// Set by the bridge when this entry is present only because the request
+  /// that listed it asked to include git-ignored files. The tree view dims
+  /// it. Must survive every rebuild below, the same hazard [truncated]
+  /// already names.
+  final bool ignored;
+
   const FileNode({
     required this.name,
     required this.path,
@@ -26,6 +49,9 @@ class FileNode {
     this.extension,
     this.children = const [],
     this.truncated = false,
+    this.childrenLoaded = true,
+    this.childrenLoading = false,
+    this.ignored = false,
   });
 
   static FileNode? fromJson(Map<String, dynamic> json) {
@@ -46,8 +72,13 @@ class FileNode {
     }
 
     final childrenJson = json['children'];
+    // Present (even as an empty list) means the bridge fetched this
+    // directory's contents; absent means a depth-1 listing named this
+    // directory as an entry but did not recurse into it — the distinction
+    // [childrenLoaded] exists to carry.
+    final hasListedChildren = childrenJson is List;
     final children = <FileNode>[];
-    if (childrenJson is List) {
+    if (hasListedChildren) {
       for (final c in childrenJson) {
         if (c is Map<String, dynamic>) {
           final child = FileNode.fromJson(c);
@@ -77,6 +108,10 @@ class FileNode {
       extension: json['extension'] as String?,
       children: children,
       truncated: json['truncated'] == true,
+      // A file has nothing to load, so it reads as always-loaded; a
+      // directory is loaded exactly when this node carried a `children` key.
+      childrenLoaded: type == FileNodeType.file || hasListedChildren,
+      ignored: json['ignored'] == true,
     );
   }
 }
@@ -414,7 +449,6 @@ class PreviewPaneState {
 class FileTreeState {
   final FileNode? root;
   final Set<String> expandedPaths;
-  final String? filterQuery;
   final String? projectId;
   final Map<String, String> gitFileStatuses; // path → M/A/D/R/U/! (deduped)
   /// Raw per-entry list (a path can appear twice — once staged, once
@@ -436,7 +470,6 @@ class FileTreeState {
   const FileTreeState({
     this.root,
     this.expandedPaths = const {},
-    this.filterQuery,
     this.projectId,
     this.gitFileStatuses = const {},
     this.gitFileEntries = const [],
@@ -451,8 +484,6 @@ class FileTreeState {
   FileTreeState copyWith({
     FileNode? root,
     Set<String>? expandedPaths,
-    String? filterQuery,
-    bool clearFilterQuery = false,
     String? projectId,
     Map<String, String>? gitFileStatuses,
     List<GitFileStatusEntry>? gitFileEntries,
@@ -466,7 +497,6 @@ class FileTreeState {
     return FileTreeState(
       root: root ?? this.root,
       expandedPaths: expandedPaths ?? this.expandedPaths,
-      filterQuery: clearFilterQuery ? null : (filterQuery ?? this.filterQuery),
       projectId: projectId ?? this.projectId,
       gitFileStatuses: gitFileStatuses ?? this.gitFileStatuses,
       gitFileEntries: gitFileEntries ?? this.gitFileEntries,
@@ -573,5 +603,65 @@ class FileResolvePathResultMessage {
     this.relPath,
     this.isDirectory = false,
     this.externalImagePath,
+  });
+}
+
+/// One path returned by `file:find` — a project-relative POSIX path plus
+/// whether it is a directory. Directories are derived bridge-side from file
+/// path prefixes, so an empty directory never appears.
+class FileFindEntry {
+  final String path;
+  final bool isDir;
+
+  /// Git excludes this path and the request asked to see ignored paths anyway
+  /// — the same mark [FileNode.ignored] carries, and it must render the same
+  /// way: the filter box REPLACES the tree on screen, so a path that reads as
+  /// project content in the results and as throwaway in the tree is the app
+  /// contradicting itself about one file.
+  final bool ignored;
+
+  const FileFindEntry({
+    required this.path,
+    required this.isDir,
+    this.ignored = false,
+  });
+
+  static FileFindEntry? fromJson(Map<String, dynamic> json) {
+    final path = json['path'];
+    final isDir = json['isDir'];
+    if (path is! String || isDir is! bool) return null;
+    return FileFindEntry(
+      path: path,
+      isDir: isDir,
+      ignored: json['ignored'] == true,
+    );
+  }
+}
+
+/// Reply to `file:find` — already matched and ranked bridge-side (basename
+/// match beats path-only, then shallow-first, then alpha; see the bridge's
+/// `matchFindEntries`), capped at the request's `limit`. [truncated] means the
+/// underlying listing itself hit the bridge's scan cap, not that the match set
+/// was cut down to `limit`. [error] is set only on a listing failure (e.g. a
+/// killed process); [entries] is empty in that case.
+class FileFindResultMessage {
+  final String id;
+  final int timestamp;
+  final String projectId;
+  final String requestId;
+  final List<FileFindEntry> entries;
+  final bool truncated;
+  final String engine; // 'ripgrep' | 'git-ls-files' | 'walk'
+  final String? error;
+
+  const FileFindResultMessage({
+    required this.id,
+    required this.timestamp,
+    required this.projectId,
+    required this.requestId,
+    this.entries = const [],
+    this.truncated = false,
+    required this.engine,
+    this.error,
   });
 }

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 type Bucket = { tokens: number; lastRefill: number };
 
 export type RateLimiter = (key: string) => boolean;

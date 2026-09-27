@@ -245,9 +245,8 @@ void main() {
     // Exactly what a reviewer poking around the sample project does, and the
     // only thing that makes the write observable: an untouched tree emits a
     // state equal to the defaults, which `update` drops on its own.
-    session.fileService
-      ..toggleExpanded('src')
-      ..selectFile(kDemoFileContents.keys.first);
+    await session.fileService.toggleExpanded('src');
+    session.fileService.selectFile(kDemoFileContents.keys.first);
     await Future<void>.delayed(Duration.zero);
 
     expect(written, isEmpty);

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 import { test, expect } from "bun:test";
 import { ApnsSender, Http2ApnsTransport, type ApnsTransport } from "../../src/push/apns";
 

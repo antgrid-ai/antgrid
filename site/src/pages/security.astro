@@ -63,7 +63,7 @@ const gaps = [
   },
   {
     title: "Denial of service is out of scope.",
-    body: "There is per-IP and per-channel rate limiting, but it protects the relay, not your availability. A rate-limited frame is dropped unrecoverably and only the sender is told. Do not read it as an uptime guarantee.",
+    body: "There is per-IP and per-connection rate limiting, but it protects the relay, not your availability. A rate-limited frame is dropped unrecoverably and only the sender is told. Do not read it as an uptime guarantee.",
   },
   {
     title: "A machine that is already compromised is out of scope.",
@@ -72,10 +72,10 @@ const gaps = [
 ];
 
 const sources = [
-  { label: "Repository", href: links.repo, note: "the whole product, source-available" },
+  { label: "Repository", href: links.repo, note: "MPL-2.0 source and exact releases" },
   { label: "SECURITY.md", href: links.securityPolicyFile, note: "scope, reporting, what to expect" },
-  { label: "packages/antgrid_relay_client", href: links.relayClient, note: "the Dart peer-session client, Apache-2.0" },
-  { label: "packages/antgrid-wire", href: links.wirePackage, note: "the wire protocol, Apache-2.0" },
+  { label: "packages/antgrid_relay_client", href: links.relayClient, note: "the Dart peer-session client, MPL-2.0" },
+  { label: "packages/antgrid-wire", href: links.wirePackage, note: "the wire protocol, MPL-2.0" },
   { label: "docs/protocol/peer-session.md", href: links.handshakeSpec, note: "peer admission and the session protocol, specified in full" },
   { label: "peer-transport-vectors.json", href: links.handshakeVectors, note: "the frame vectors both implementations must pass" },
 ];
@@ -200,13 +200,13 @@ const sources = [
           <div>
             <h3 class="mb-2 text-kicker font-medium text-ink">Routing</h3>
             <p class="max-w-xl text-note leading-relaxed text-muted">
-              The relay routes only between devices that belong to the same account, and that check runs fresh on every frame. It is the only routing authorization there is. A blocked route and an offline device get the identical answer, so the relay cannot be used to discover which of your machines are up, and presence is announced only to other live connections on your own account.
+              The central relay routes no payload between your devices at all. Once a socket is admitted it accepts only control messages — presence, policy and revocation, heartbeats and push delivery — and closes any socket that sends it a binary payload frame. Presence is announced only to other live connections on your own account.
             </p>
           </div>
           <div>
             <h3 class="mb-2 text-kicker font-medium text-ink">Admission</h3>
             <p class="max-w-xl text-note leading-relaxed text-muted">
-              Every connection is admitted by a single signed hello frame, verified in a fixed order: schema, clock window, Ed25519 signature over a body that binds the relay hostname, replay cache, licence, then connection arbitration. Nothing is queued for a device that is not connected — a frame addressed to one is refused and dropped.
+              Every connection is admitted by a single signed hello frame, verified in a fixed order: schema, clock window, Ed25519 signature over a body that binds the relay hostname, replay cache, licence, then connection arbitration. Nothing is queued for a device that is not connected.
             </p>
           </div>
           <div>
@@ -340,10 +340,10 @@ const sources = [
         <Eyebrow class="mb-5">Verify it</Eyebrow>
         <h2 class="mb-5 max-w-3xl font-display text-title font-semibold text-ink">Check the crypto claims yourself.</h2>
         <p class="mb-4 max-w-2xl text-lede text-muted">
-          The peer session protocol — admission, the plaintext session hello, and per-channel flow control — is specified in public, and the frame layout is pinned by cross-language test vectors that both the TypeScript and the Dart implementation must pass. The wire protocol and the Dart client are Apache-2.0 and carry their own licence files, so you can read, reimplement and publish work built on them without asking us.
+          The peer session protocol — admission, the plaintext session hello, and per-channel flow control — is specified in public, and the frame layout is pinned by cross-language test vectors that both the TypeScript and the Dart implementation must pass. The wire protocol and the Dart client are MPL-2.0 and carry their own licence files.
         </p>
         <p class="mb-8 max-w-2xl text-note leading-relaxed text-muted2">
-          The rest of antgrid is source-available under the Elastic License 2.0. That is not OSI-approved open source and we do not call it that.
+          Antgrid's first-party distributed code is MPL-2.0, except the relay and web services, which remain Elastic-2.0. MPL applies to covered files, not to code you use Antgrid to work on.
         </p>
         <ul class="grid gap-x-10 gap-y-3 md:grid-cols-2">
           {sources.map((s) => (

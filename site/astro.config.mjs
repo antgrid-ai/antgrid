@@ -2,6 +2,8 @@ import { defineConfig, fontProviders } from "astro/config";
 import tailwindcss from "@tailwindcss/vite";
 import icon from "astro-icon";
 import sitemap from "@astrojs/sitemap";
+import blogMarkdown from "./scripts/blog-markdown.mjs";
+import { satteri } from "@astrojs/markdown-satteri";
 
 // The local provider pointed at the installed @fontsource-variable packages,
 // not fontProviders.fontsource(): the hosted provider fetches at build time, so
@@ -31,9 +33,10 @@ import sitemap from "@astrojs/sitemap";
 //  2. The generated faces are PREPENDED to the list. They therefore win over the
 //     real families named after them — which is why naming Consolas did nothing
 //     while a "fallback: Courier New" face sat in front of it.
-const variant = (pkg, file, weight) => ({
+const variant = (pkg, file, weight, stretch) => ({
   weight,
   style: "normal",
+  ...(stretch ? { stretch } : {}),
   src: [`./node_modules/@fontsource-variable/${pkg}/files/${file}`],
 });
 
@@ -55,7 +58,12 @@ const fonts = [
     name: "Archivo Variable",
     cssVariable: "--font-archivo",
     fallbacks: ["Segoe UI", "Helvetica Neue", "Arial", "system-ui"],
-    options: { variants: [variant("archivo", "archivo-latin-wght-normal.woff2", "100 900")] },
+    // The two-axis file, not the weight-only one: the display face is set
+    // condensed (`--font-display--font-variation-settings` in global.css), and
+    // the wdth axis only exists in this build of the font. `stretch` declares
+    // the axis range on the @font-face so the browser does not synthesise or
+    // reject the width.
+    options: { variants: [variant("archivo", "archivo-latin-wdth-normal.woff2", "100 900", "62% 125%")] },
   },
   // Deliberately NOT terminated with a generic, which suppresses metric matching
   // entirely for this family. Both mono generics map to Courier New alone, and a
@@ -75,6 +83,7 @@ const fonts = [
 // PUBLIC_SITE_URL kept in lockstep with Seo's PUBLIC_SITE_URL so canonical and sitemap never diverge.
 export default defineConfig({
   site: process.env.PUBLIC_SITE_URL ?? "https://antgrid.ai",
+  markdown: { processor: satteri({ features: { rawHtml: true }, hastPlugins: [blogMarkdown] }) },
   // There is no ClientRouter here, so every navigation is a full document load.
   // `hover` buys the one that matters back: the download CTAs are deliberate,
   // aimed clicks, and the page is fetched while the pointer is still travelling.

@@ -1,0 +1,31 @@
+# Owners of the licence boundary.
+#
+# Antgrid is dual-licensed by path (LICENSING.md): MPL-2.0 everywhere except
+# relay/ and web/, which are Elastic-2.0. GitHub reports ONE licence for a
+# repository — MPL-2.0, detected from the root LICENSE.md — and GitHub ToS D.6
+# licenses a contribution under "the same terms" as that notice. An outside
+# patch to an ELv2 directory would therefore arrive under terms that contradict
+# the file it lands in, and nothing in either licence lets us relicense it.
+#
+# So these paths take maintainer review, and outside patches to them are refused
+# outright: CONTRIBUTING.md states the policy and contribution-policy.yml
+# enforces it. Ownership here is about licensing authority, not code review —
+# add reviewers for that separately.
+#
+# packages/antgrid-wire is listed because relay/ and web/ both import it. A
+# contribution there is MPL-2.0 permanently and can never cross the boundary,
+# which is the same trap arriving from the other side.
+
+/relay/                   @bharathm03
+/web/                     @bharathm03
+/packages/antgrid-wire/   @bharathm03
+
+# The licence map itself, and the files that have to agree with it.
+/LICENSE.md               @bharathm03
+/LICENSING.md             @bharathm03
+/REUSE.toml               @bharathm03
+/LICENSES/                @bharathm03
+/CONTRIBUTING.md          @bharathm03
+/scripts/license-map.ts   @bharathm03
+/scripts/check-licenses.ts @bharathm03
+/.github/CODEOWNERS       @bharathm03

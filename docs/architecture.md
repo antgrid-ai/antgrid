@@ -42,10 +42,10 @@ it crosses the loopback socket as one `file:upload-local` message
 ### Native peer payloads
 
 The authenticated central WebSocket retains inventory, presence and policy
-invalidation. The Apache Dart `PeerLink` interface separates that control
+invalidation. The Dart `PeerLink` interface separates that control
 connection from payload lifecycle. `MachineSession` and the session-hello driver
 consume the native link; feature services retain their existing interfaces.
-Native implementation and authoritative lease handling live in the ELv2
+Native implementation and authoritative lease handling live in the
 `packages/antgrid_peer_transport` package, shared with its standalone CLI smoke.
 
 The bridge's `PeerSessionOwner` owns session establishment over Iroh, not
@@ -105,9 +105,9 @@ nowhere else (`ProjectCore.sendToOwner`), and only to an owner that declared
 app is the only carrier, and it forwards the frame verbatim onto the target
 machine's own relay connection. The receiving bridge answers on the one app
 session that carried the exchange in (`ProjectCore.sendToAppSession`), never by
-broadcast, so the traffic is invisible to the human's phone by design. The spec
-is `docs/session-messaging.md`; the host-side invariants are in
-`bridge/CLAUDE.md`.
+broadcast, so the traffic is invisible to the human's phone by design. There is
+no separate spec document: the host-side invariants are in `bridge/CLAUDE.md`,
+and the rest is documented at its definitions under `bridge/src/session-bus/`.
 
 ## Checkout-scoped routing
 
@@ -125,18 +125,19 @@ Checkout lifecycle and storage live in `bridge/src/worktrees/`, and the checkout
 itself never crosses the wire. `WORKTREE_SESSIONS_SUPPORTED`
 (`bridge/src/worktree-capability.ts`) is the kill switch.
 
-Tree state flows pull-first.
-`FileService.setTreeInterest` registers one tree hydrator while Files is visible
-or a feature needs tree data, such as file mention suggestions. Checkout
-activation alone does not request a tree. Multiple consumers share the hydrator
-and the last release removes automatic refresh. The cached tree survives, with
-sequence-based unchanged responses on renewed demand. A gap invalidates the
-cached base; recovery waits for demand if no consumer is present. Incremental
-broadcasts still arrive, and Git status, badges, selected-file reads, and
-notifications remain independent. A re-sync never pushes `tree:full`: pushing
-every checkout's full tree at each reconnect is a multi-megabyte flood that
-stalls the session before the app has asked for anything, so every client pulls
-it per checkout, on demand, with `file:tree:snapshot:request`.
+Tree state flows pull-first, one directory at a time. `FileService.setTreeInterest`
+registers one tree hydrator while Files is visible; checkout activation alone does
+not request a tree. The app asks for the root (`file:tree:root:request`) and for a
+directory's contents as it is expanded (`file:tree:children:request` →
+`file:tree:children`), and re-lists from disk on every expand, so there is no cache
+to go stale. The bridge pushes no whole tree under any condition. A watcher overflow
+sends `file:tree:invalidated` rather than a resend; the app clears what it loaded and
+re-lists. Incremental `tree:update` deltas still arrive, narrowed to the directories
+each client named with `file:tree:subscribe`, and Git status, badges, selected-file
+reads, and notifications remain independent. There is no whole-tree path left at
+all: the `file:tree:snapshot:request` pull and the `buildTree` walk behind it are
+removed, so an app that predates this protocol gets no tree rather than a large
+one.
 
 ## Terminal frames and history
 
@@ -269,7 +270,7 @@ Terminal qualification commands live in `bridge/package.json` and `evals/package
 
 ## Shared packages (`packages/`)
 
-- **`antgrid-agents`** - ELv2 Bun workspace for agent contracts, built-in adapters,
+- **`antgrid-agents`** - MPL-2.0 Bun workspace for agent contracts, built-in adapters,
   shared chat runtime, and integration assets. Bridge consumes public exports;
   this package never imports bridge. Terminal preparation accepts conversation
   intent and returns a complete invocation, while bridge retains checkout and
@@ -278,7 +279,10 @@ Terminal qualification commands live in `bridge/package.json` and `evals/package
   and materialized into content-addressed directories for external runtimes.
   Built-in registration remains static; dynamic plugin loading is not implemented.
 
-- **`antgrid_relay_client`** — pure Dart relay/crypto client, no Flutter.
+- **`antgrid_relay_client`** — pure Dart central-control client plus the peer session
+  protocol over an injected native `PeerLink`, no Flutter.
+- **`antgrid_peer_transport`** — native Iroh transport and authorization leases, shared
+  by the app and its standalone CLI smoke.
 - **`antgrid_eval_client`** — E2E eval fixtures.
 - **`antgrid-wire`** — TS Bun workspace holding the session-stream frame type
   names (`SESSION_FRAME_TYPES`) **and** the relay control-envelope Zod schemas

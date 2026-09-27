@@ -148,7 +148,8 @@ void main() {
     expect(await hs.run(), isFalse);
   });
 
-  test('cancel() before established resolves the attempt false', () async {
+  test('cancel() before established resolves the attempt false at once, '
+      'not at the attempt timeout', () async {
     final hs = ConnectionHandshake(
       relay: relay,
       attemptTimeout: const Duration(seconds: 5),
@@ -156,7 +157,40 @@ void main() {
     final runFuture = hs.run();
     await Future<void>.delayed(Duration.zero);
     hs.cancel();
+    expect(
+      await runFuture.timeout(const Duration(seconds: 1)),
+      isFalse,
+    );
+  });
+
+  test('a timed-out attempt logs what it was waiting for', () async {
+    final logged = <(String, Map<String, Object?>?)>[];
+    final hs = ConnectionHandshake(
+      relay: relay,
+      attemptTimeout: const Duration(milliseconds: 100),
+      logger: (level, message, {fields}) => logged.add((message, fields)),
+    );
+    expect(await hs.run(), isFalse);
+
+    final timeout = logged.where((l) => l.$1 == 'attempt timed out').toList();
+    expect(timeout, hasLength(1));
+    expect(timeout.single.$2?['awaiting'], 'established');
+    expect(timeout.single.$2?['timeoutMs'], 100);
+  });
+
+  test('a cancelled attempt logs no timeout', () async {
+    final logged = <String>[];
+    final hs = ConnectionHandshake(
+      relay: relay,
+      attemptTimeout: const Duration(milliseconds: 100),
+      logger: (level, message, {fields}) => logged.add(message),
+    );
+    final runFuture = hs.run();
+    await Future<void>.delayed(Duration.zero);
+    hs.cancel();
     expect(await runFuture, isFalse);
+    await Future<void>.delayed(const Duration(milliseconds: 150));
+    expect(logged, isEmpty);
   });
 
   group('AppSessionHandshaker', () {

@@ -86,12 +86,14 @@ export class TerminalFrameHub {
   register(address: TerminalAddress, source: TerminalFrameSource, runId: string): string {
     const existing = this.runs.get(key(address));
     if (existing && existing.runId === runId) {
-      // Same run, new emulator: `TerminalManager.ensureLiveScreen` rebuilds a
-      // source that latched a parse failure and re-registers it under the run
-      // the PTY is STILL running (see `onRunStarted`'s doc there). Removing
-      // and re-adding would retire every viewer of a terminal that never
-      // stopped, so the Run is kept and only what belongs to the old emulator
-      // is reset. Revision counters restart at 0 in the replacement, so every
+      // Same run, new emulator: `TerminalManager.restoreArchivedTerminal`
+      // reconstructs a stopped run's final screen and re-registers it under
+      // that run's OWN id (see `onRunStarted`'s doc there). Nothing rebuilds a
+      // source under a PTY that is still running — a latched one stays latched
+      // for the rest of its run, which is why `feed()` drops a backlog instead
+      // of latching on one. Removing and re-adding would retire every viewer
+      // bound to the run, so the Run is kept and only what belongs to the old
+      // emulator is reset. Revision counters restart at 0 in the replacement, so every
       // attachment's high-water mark has to go with them or no frame ever
       // clears `frame.revision <= attachment.revision` again.
       // `finalRevision` counts in the OLD emulator's numbering, which the

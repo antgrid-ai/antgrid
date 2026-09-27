@@ -1,36 +1,42 @@
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { setupTestEnv, type TestEnv } from "../../helpers/harness";
-import { createMessage, type AbMessage } from "../../../bridge/src/protocol";
+import { createMessage } from "../../../bridge/src/protocol";
 import { bindFirstProject } from "../../support/stream";
 
 describe("file-explorer", () => {
   let env: TestEnv;
   let streamId: string;
-  let snapshot: AbMessage[];
 
   beforeAll(async () => {
     env = await setupTestEnv({ fixtureName: "basic" });
     // v3: project state + verbs run on the firstProject stream, not the control
     // plane. bindFirstProject resolves the streamId and pulls the per-project
-    // snapshot (agent:status / tree:full / git:status) the app caches on bind.
-    ({ streamId, frames: snapshot } = await bindFirstProject(env.app, env.projectId, 10_000));
+    // snapshot (agent:status / git:status / …) the app caches on bind; the file
+    // tree is no longer part of it — it is fetched lazily below.
+    ({ streamId } = await bindFirstProject(env.app, env.projectId, 10_000));
   }, 60_000);
 
   afterAll(async () => {
     await env?.teardown();
   });
 
-  test("receives full tree on bind", async () => {
-    const tree = snapshot.find((f) => f.type === "tree:full") as Extract<AbMessage, { type: "tree:full" }> | undefined;
-    expect(tree).toBeDefined();
-    expect(tree!.projectId).toBe(env.projectId);
-    expect(tree!.root).toBeDefined();
-    expect(tree!.root.type).toBe("directory");
+  test("lists the root on request, then lazily expands a subdirectory", async () => {
+    env.app.sendOnStream(streamId, createMessage("file:tree:root:request", {}));
+    const root = await env.app.waitForStreamAbType(streamId, "file:tree:children", 5_000);
+    const rootListing = root.listings.find((l) => l.path === "");
+    expect(rootListing).toBeDefined();
+    expect(rootListing!.missing).toBeUndefined();
+    const rootNames = rootListing!.children.map((n) => n.name);
+    expect(rootNames).toContain("README.md");
+    expect(rootNames).toContain("src");
 
-    const flatNames = flattenTree(tree!.root);
-    expect(flatNames).toContain("README.md");
-    expect(flatNames).toContain("index.ts");
-    expect(flatNames).toContain("utils.ts");
+    env.app.sendOnStream(streamId, createMessage("file:tree:children:request", { paths: ["src"] }));
+    const children = await env.app.waitForStreamAbType(streamId, "file:tree:children", 5_000);
+    const srcListing = children.listings.find((l) => l.path === "src");
+    expect(srcListing).toBeDefined();
+    const srcNames = srcListing!.children.map((n) => n.name);
+    expect(srcNames).toContain("index.ts");
+    expect(srcNames).toContain("utils.ts");
   });
 
   test("can read file content over the stream", async () => {
@@ -44,14 +50,3 @@ describe("file-explorer", () => {
     expect(content.content).toContain("Eval Test Project");
   });
 });
-
-function flattenTree(node: any): string[] {
-  const names: string[] = [];
-  if (node.name) names.push(node.name);
-  if (node.children) {
-    for (const child of node.children) {
-      names.push(...flattenTree(child));
-    }
-  }
-  return names;
-}

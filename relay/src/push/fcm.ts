@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 import { SignJWT, importPKCS8 } from "jose";
 
 const FCM_SCOPE = "https://www.googleapis.com/auth/firebase.messaging";

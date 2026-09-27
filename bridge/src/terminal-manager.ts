@@ -269,6 +269,15 @@ export class TerminalManager {
   confirmHookAlive(terminalId: string): void {
     this.sessions.get(terminalId)?.confirmHookAlive();
   }
+  /** The agent expected to ping `/hook-alive`, or undefined when it declares no
+   *  probe. Read live: a same-id respawn replaces the TerminalSession. */
+  hookAliveProbeAgent(terminalId: string): string | undefined {
+    return this.sessions.get(terminalId)?.hookAliveProbeAgent;
+  }
+  /** Live and not already on its way out — narrower than {@link has}. */
+  isRunning(terminalId: string): boolean {
+    return this.sessions.get(terminalId)?.isRunning ?? false;
+  }
   private sessions = new Map<string, TerminalSession>();
   private agentRunIds = new WeakMap<TerminalSession, string>();
   private scrollbacks = new Map<string, ScrollbackBuffer>();
@@ -426,13 +435,24 @@ export class TerminalManager {
       onTitle: (title: string) => this.callbacks.onTerminalTitle?.(terminalId, title),
       onMessage: (msg: AbMessage) => {
         if (msg.type === "terminal:output") {
-          modes.feed(msg.data);
-          // The guest has drawn its interface with input encoding configured,
-          // which is as close to "reading" as a PTY ever says. The mode comes off
-          // the same tracker the paste decision is taken from, so the two can
-          // never disagree about the guest.
-          if (readiness.observe(modes.isSet(BRACKETED_PASTE), msg.data)) {
-            this.submitGate.markReady(terminalId);
+          const moved = modes.feed(msg.data);
+          // The guest drawing its interface with input encoding configured is
+          // as close to "reading" as a PTY ever says, and it stops saying it
+          // when the interface goes away. The mode comes off the same tracker
+          // the paste decision is taken from, so the two can never disagree
+          // about the guest.
+          const verdict = readiness.observe(msg.data, {
+            on: modes.isSet(BRACKETED_PASTE),
+            changed: moved.has(BRACKETED_PASTE),
+          });
+          // Only while no OTHER session holds the slot, the gate the exit
+          // handler applies: a replaced PTY keeps emitting until its tree is
+          // reaped, and its teardown would otherwise retract readiness the live
+          // guest earned.
+          const owner = this.sessions.get(terminalId);
+          if (owner === undefined || owner === session) {
+            if (verdict === "ready") this.submitGate.markReady(terminalId);
+            else if (verdict === "lost") this.submitGate.markUnready(terminalId);
           }
           // Rebuild only while THIS generation still owns the map slot, by
           // SESSION identity rather than by comparing `screen` against the
@@ -971,32 +991,46 @@ export class TerminalManager {
    * service terminal's is not. The read boundary the gate protects is a raw-mode
    * TUI's, and a shell's line discipline delivers on the newline whenever it
    * arrives, so gating a shell would only delay a line that was never at risk.
+   *
+   * `sha` is the caller's join key (`line-key.ts`), and is given only for a
+   * line a renderer produced. A composer send arrives here as `terminal:input`,
+   * and a digest of a short typed line can be confirmed against a guess — an
+   * oracle over user text in a durable file the app asks users to send.
    */
-  submit(terminalId: string, line: string): void {
+  submit(terminalId: string, line: string, sha?: string): void {
     const session = this.sessions.get(terminalId);
     if (!session) {
       log.warn(`Terminal "${terminalId}" not found for submit`);
       return;
     }
     if (session.type !== "agent") {
-      this.dispatchSubmit(terminalId, session, line);
+      this.dispatchSubmit(terminalId, session, line, sha);
       return;
     }
-    this.submitGate.run(terminalId, () => {
-      // The identity check the exit handler makes, for the same reason: a line
-      // held across a restart belongs to the run it was asked for, and the agent
-      // now holding the id never saw what it would be answering.
-      if (this.sessions.get(terminalId) !== session) return;
-      this.dispatchSubmit(terminalId, session, line);
-    });
+    this.submitGate.run(
+      terminalId,
+      () => {
+        // The identity check the exit handler makes, for the same reason: a line
+        // held across a restart belongs to the run it was asked for, and the agent
+        // now holding the id never saw what it would be answering.
+        if (this.sessions.get(terminalId) !== session) return;
+        this.dispatchSubmit(terminalId, session, line, sha);
+      },
+      sha,
+    );
   }
 
   /** The paste plan is taken at DELIVERY, not when the submit was asked for: a
    *  guest that announced the mode while the line waited can carry it whole, and
    *  flattening it against an answer taken before the announcement would cost
    *  the block's line breaks for nothing. */
-  private dispatchSubmit(terminalId: string, session: TerminalSession, line: string): void {
-    const plan = submitPlan(line, this.modeTrackers.get(terminalId)?.isSet(BRACKETED_PASTE) === true);
+  private dispatchSubmit(terminalId: string, session: TerminalSession, line: string, sha?: string): void {
+    const bracketedPaste = this.modeTrackers.get(terminalId)?.isSet(BRACKETED_PASTE) === true;
+    const plan = submitPlan(line, bracketedPaste);
+    // The last stage a delivery can be followed to. The key is the caller's,
+    // never recomputed from `plan.text`: the plan wraps and may flatten, so a
+    // key taken here would name a string no earlier stage ever held.
+    log.debug({ ...(sha ? { sha } : {}), terminalId, paste: plan.paste, bracketedPaste }, "submit: writing to the pty");
     if (plan.paste) session.submitPaste(plan.text);
     else session.submit(plan.text);
   }
@@ -1093,8 +1127,15 @@ export class TerminalManager {
     const history = store.openRun(saved.runId);
     // A saved display is not PTY output and must never archive rows or replay
     // a history clear while reconstructing the stopped viewport.
+    // `noteGap` is a no-op rather than absent: replaying a saved screen loses
+    // nothing, and `TerminalFrameSource.archive` calls it from inside its own
+    // catch — a shim missing it would raise a TypeError out of the xterm parse
+    // loop and freeze the restored screen. `boundary` still forwards, so the
+    // stopped run's OWN gap reaches the app with the rest of its archive state:
+    // `gapped` is a column on the run, so the handle `openRun` rebuilt above
+    // carries it even though `disposeScreen` released the one that recorded it.
     const readOnlyHistory = {
-      runId: saved.runId, append: () => {}, clear: () => {},
+      runId: saved.runId, append: () => {}, clear: () => {}, noteGap: () => {},
       flush: () => history.flush(), boundary: () => history.boundary(),
     } as unknown as TerminalRunHistory;
     const source = new TerminalFrameSource(saved.frame?.cols ?? 80, saved.frame?.rows ?? 24, readOnlyHistory);

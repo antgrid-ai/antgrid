@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 import { Hono } from "hono";
 import { isAPIError } from "better-auth/api";
 import type { Auth } from "../auth/better-auth.js";

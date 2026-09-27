@@ -153,6 +153,36 @@ describe("ProjectStreamRegistry", () => {
     expect(client.sentTo(PEER_A)).toHaveLength(0);
   });
 
+  test("a refused request is answered on its own requestId, every time, beside the throttled notice", async () => {
+    const { client } = makeClient();
+    client.establish(PEER_A);
+    let stale = false;
+    const bus = new MessageBus();
+    const received: unknown[] = [];
+    bus.setInboundHandler((msg) => received.push(msg));
+    client.attachStream(bus, {
+      projectId: PROJECT,
+      mayAcceptFrom: () => (stale ? { code: "NOT_ALLOWED", message: "no longer allowed" } : null),
+    });
+    const stream = await client.openProjectStream(PEER_A, PROJECT);
+    expect(stream.refusal()).toBeUndefined();
+
+    stale = true;
+    for (const requestId of ["req-1", "req-2"]) {
+      await stream.send(createMessage("request", { requestId, method: "state.snapshot", params: {} }));
+      await flush();
+      expect(stream.read()).toMatchObject({
+        type: "response", requestId, ok: false, error: { code: "NOT_ALLOWED", message: "no longer allowed" },
+      });
+    }
+    expect(received).toEqual([]);
+
+    // A refused non-request still gets no correlated reply on the stream.
+    await stream.send(createMessage("pong", {}));
+    await flush();
+    expect(() => stream.read()).toThrow();
+  });
+
   test("deliverableTo(peer) is false before open, true after, false once mayDeliverTo mutes it, and false once the app FINs", async () => {
     const { client } = makeClient();
     client.establish(PEER_A);

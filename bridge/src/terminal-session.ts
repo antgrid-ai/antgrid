@@ -630,8 +630,15 @@ export class TerminalSession {
     // they emit rich desktop notifications (with a message) instead of bare
     // BEL. Ghostty is fitting — the app renderer is ghostty-VTE. See design
     // doc; revisit if kitty-graphics attempts cause rendering issues.
+    //
+    // TERM must be set here, not left to the spawn's `name` option: bun-pty
+    // ignores `name` (node-pty is the one that copies it into TERM), so a
+    // bridge launched without a TERM of its own — the packaged app, started by
+    // the OS rather than a shell — would hand every PTY a colorless env.
     const env = stripInheritedCertOverrides({
       ...process.env,
+      TERM: "xterm-256color",
+      COLORTERM: "truecolor",
       TERM_PROGRAM: "ghostty",
       TERM_PROGRAM_VERSION: "1.0.0",
       ...this.extraEnv,

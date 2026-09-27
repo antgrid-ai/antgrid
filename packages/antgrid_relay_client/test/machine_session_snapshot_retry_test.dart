@@ -5,11 +5,9 @@
 // still outstanding, and a pull superseded by a fresher one discards whatever
 // its own reply turns out to be.
 //
-// It also leaves the file tree out — the one unbounded frame — and does not
-// pull it in a round trip of its own either: the per-checkout hydrators ask
-// for it, and a second carrier sent the same megabytes again on every connect,
-// enough on a slow uplink to starve the bridge's relay pongs and drop the
-// socket the pull had just come up on.
+// It also leaves `tree:full` out, and does not pull it in a round trip of its
+// own either: this app lists the tree per directory on demand and has no
+// handler for a whole-tree frame, which would be one per checkout.
 import 'dart:async';
 import 'dart:convert';
 
@@ -276,7 +274,7 @@ void main() {
     expect(
       hydrated,
       1,
-      reason: 'a checkout retry must not fan a tree:full out to every checkout',
+      reason: 'a checkout retry must not re-drive every hydrator',
     );
 
     unawaited(st.refreshSnapshot());

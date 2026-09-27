@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 import { test, expect } from "bun:test";
 import { generateKeyPair, exportJWK, SignJWT } from "jose";
 import { startServer as startServerReal, type RelayServer, type RelayServerDeps } from "../../src/server.js";

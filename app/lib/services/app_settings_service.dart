@@ -20,6 +20,9 @@ final _kFollowSystemBrightness = scopedStorageKey(
 );
 final _kTelemetryEnabled = scopedStorageKey('app.telemetry.enabled');
 final _kSidebarHidden = scopedStorageKey('antgrid.sidebar_hidden.v1');
+final _kHideGitIgnoredFiles = scopedStorageKey(
+  'antgrid.hide_git_ignored_files.v1',
+);
 
 /// Every key AppSettings persists. The WithCache instance backing app settings
 /// must allow exactly these — reads/writes of any other key throw.
@@ -35,6 +38,7 @@ final appSettingsPrefsKeys = <String>{
   _kFollowSystemBrightness,
   _kTelemetryEnabled,
   _kSidebarHidden,
+  _kHideGitIgnoredFiles,
 };
 
 @immutable
@@ -51,6 +55,7 @@ class AppSettings {
     this.followSystemBrightness = false,
     this.telemetryEnabled = true,
     this.sidebarHidden = false,
+    this.hideGitIgnoredFiles = false,
   });
 
   final String? defaultRelayUrl;
@@ -70,6 +75,19 @@ class AppSettings {
   /// every switch.
   final bool sidebarHidden;
 
+  /// Overrides the file tree's own `includeIgnored` default. Off means the
+  /// tree shows everything, which is the out-of-the-box behavior — the tree,
+  /// unlike `file:find`'s @-mention path, defaults to showing git-ignored
+  /// entries.
+  ///
+  /// Machine-wide rather than per-project: it is a statement about how this
+  /// person browses, not about a repository, so a `ProjectPreferences` entry
+  /// would make them set it once per project. It reaches a checkout's
+  /// FileService when `fileTreeStateProvider` resolves that checkout as the
+  /// focused one, so a background checkout keeps the show-everything default
+  /// until focus lands on it.
+  final bool hideGitIgnoredFiles;
+
   static const defaults = AppSettings();
 
   AppSettings copyWith({
@@ -85,6 +103,7 @@ class AppSettings {
     bool? followSystemBrightness,
     bool? telemetryEnabled,
     bool? sidebarHidden,
+    bool? hideGitIgnoredFiles,
   }) {
     return AppSettings(
       defaultRelayUrl: clearDefaultRelayUrl
@@ -101,6 +120,7 @@ class AppSettings {
           followSystemBrightness ?? this.followSystemBrightness,
       telemetryEnabled: telemetryEnabled ?? this.telemetryEnabled,
       sidebarHidden: sidebarHidden ?? this.sidebarHidden,
+      hideGitIgnoredFiles: hideGitIgnoredFiles ?? this.hideGitIgnoredFiles,
     );
   }
 
@@ -127,6 +147,7 @@ class AppSettings {
       followSystemBrightness: prefs.getBool(_kFollowSystemBrightness) ?? false,
       telemetryEnabled: prefs.getBool(_kTelemetryEnabled) ?? true,
       sidebarHidden: prefs.getBool(_kSidebarHidden) ?? false,
+      hideGitIgnoredFiles: prefs.getBool(_kHideGitIgnoredFiles) ?? false,
     );
   }
 }
@@ -234,6 +255,11 @@ class AppSettingsService extends Notifier<AppSettings> {
     await _prefs.setBool(_kSidebarHidden, hidden);
   }
 
+  Future<void> setHideGitIgnoredFiles(bool hidden) async {
+    state = state.copyWith(hideGitIgnoredFiles: hidden);
+    await _prefs.setBool(_kHideGitIgnoredFiles, hidden);
+  }
+
   Future<void> reset() async {
     state = AppSettings.defaults;
     await Future.wait([
@@ -248,6 +274,7 @@ class AppSettingsService extends Notifier<AppSettings> {
       _prefs.remove(_kFollowSystemBrightness),
       _prefs.remove(_kTelemetryEnabled),
       _prefs.remove(_kSidebarHidden),
+      _prefs.remove(_kHideGitIgnoredFiles),
     ]);
   }
 }

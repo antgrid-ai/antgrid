@@ -181,81 +181,37 @@ describe("MessageBus", () => {
 describe("MessageBus.getSnapshot", () => {
   test("returns cached state frames for requested types", () => {
     const bus = new MessageBus();
-    const tree = createMessage("tree:full", {
-      projectId: "p1",
-      root: { name: "root", path: "/", type: "directory" as const, children: [] },
-    });
+    const status = createMessage("agent:status", { terminals: [], agent: { version: "test" } });
     const git = createMessage("git:status", { projectId: "p1", files: [] });
-    bus.publish(tree, "control");
+    bus.publish(status, "control");
     bus.publish(git, "control");
 
-    const snap = bus.getSnapshot(["tree:full", "git:status"]);
-    expect(snap.map((m) => m.type).sort()).toEqual(["git:status", "tree:full"]);
+    const snap = bus.getSnapshot(["agent:status", "git:status"]);
+    expect(snap.map((m) => m.type).sort()).toEqual(["agent:status", "git:status"]);
   });
 
   test("returns all cached state frames when called with ['*']", () => {
     const bus = new MessageBus();
-    const tree = createMessage("tree:full", {
-      projectId: "p1",
-      root: { name: "root", path: "/", type: "directory" as const, children: [] },
-    });
-    bus.publish(tree, "control");
-    expect(bus.getSnapshot(["*"]).map((m) => m.type)).toEqual(["tree:full"]);
+    const git = createMessage("git:status", { projectId: "p1", files: [] });
+    bus.publish(git, "control");
+    expect(bus.getSnapshot(["*"]).map((m) => m.type)).toEqual(["git:status"]);
   });
 
-  test("returns empty array for an unknown type with no cached frame", () => {
+  test("returns empty array when nothing has been cached for the type yet", () => {
     const bus = new MessageBus();
-    expect(bus.getSnapshot(["tree:full"])).toEqual([]);
-  });
-
-  test("retain caches a frame for replay without delivering it", () => {
-    const bus = new MessageBus();
-    const delivered: string[] = [];
-    bus.subscribe({ deliver: (m) => delivered.push(m.type) });
-    const tree = createMessage("tree:full", {
-      projectId: "p1",
-      root: { name: "root", path: "/", type: "directory" as const, children: [] },
-    });
-
-    bus.retain(tree, "control");
-
-    // The pull answers with it; the wire never carried it. This is what makes
-    // the open-time tree free: every client asks for its own copy anyway.
-    expect(bus.getSnapshot(["tree:full"]).map((m) => m.type)).toEqual(["tree:full"]);
-    expect(delivered).toEqual([]);
-  });
-
-  test("a retained frame still counts as the cached one a republish must beat", () => {
-    const bus = new MessageBus();
-    const delivered: string[] = [];
-    bus.subscribe({ deliver: (m) => delivered.push(m.type) });
-    const tree = () => createMessage("tree:full", {
-      projectId: "p1",
-      root: { name: "root", path: "/", type: "directory" as const, children: [] },
-    });
-
-    bus.retain(tree(), "control");
-    // Byte-identical, so the ordinary dedup would swallow it — which is exactly
-    // the case a resync exists to defeat.
-    bus.publish(tree(), "control");
-    expect(delivered).toEqual([]);
-    bus.republish(tree(), "control");
-    expect(delivered).toEqual(["tree:full"]);
+    expect(bus.getSnapshot(["git:status"])).toEqual([]);
   });
 
   test("exclude drops a type from both the ['*'] and the named answer", () => {
     const bus = new MessageBus();
-    const tree = createMessage("tree:full", {
-      projectId: "p1",
-      root: { name: "root", path: "/", type: "directory" as const, children: [] },
-    });
+    const status = createMessage("agent:status", { terminals: [], agent: { version: "test" } });
     const git = createMessage("git:status", { projectId: "p1", files: [] });
-    bus.publish(tree, "control");
+    bus.publish(status, "control");
     bus.publish(git, "control");
 
-    expect(bus.getSnapshot(["*"], ["tree:full"]).map((m) => m.type)).toEqual(["git:status"]);
-    expect(bus.getSnapshot(["tree:full", "git:status"], ["tree:full"]).map((m) => m.type)).toEqual(["git:status"]);
-    expect(bus.getSnapshot(["tree:full"], ["tree:full"])).toEqual([]);
+    expect(bus.getSnapshot(["*"], ["agent:status"]).map((m) => m.type)).toEqual(["git:status"]);
+    expect(bus.getSnapshot(["agent:status", "git:status"], ["agent:status"]).map((m) => m.type)).toEqual(["git:status"]);
+    expect(bus.getSnapshot(["agent:status"], ["agent:status"])).toEqual([]);
   });
 });
 
@@ -324,32 +280,32 @@ describe("session-scoped replay (agent:capabilities)", () => {
     expect(bus.getSnapshot(["*"]).map((m) => m.type)).toEqual(["agent:status"]);
   });
 
-  const tree = (checkoutId: string, name: string) => ({
-    ...createMessage("tree:full", {
+  const gitStatus = (checkoutId: string, label: string) => ({
+    ...createMessage("git:status", {
       projectId: "p",
-      root: { name, path: "", type: "directory" as const, children: [] },
+      files: [{ path: label, status: "M" as const, staged: false }],
     }),
     checkoutId,
   });
 
   it("keeps one replayed snapshot per checkout", () => {
-    // An isolated session's worktree publishes its own tree:full. Keyed by type
-    // alone it evicted main's, and the app — which filters replayed frames by
-    // checkoutId — was left with nothing to draw the main file tree from.
+    // An isolated session's worktree publishes its own git:status. Keyed by
+    // type alone it evicted main's, and the app — which filters replayed
+    // frames by checkoutId — was left with nothing to draw main's status from.
     const bus = new MessageBus();
-    bus.publish(tree("main", "primary"), "control");
-    bus.publish(tree("wt-1", "isolated"), "control");
-    const frames = bus.getSnapshot(["tree:full"]) as any[];
+    bus.publish(gitStatus("main", "primary"), "control");
+    bus.publish(gitStatus("wt-1", "isolated"), "control");
+    const frames = bus.getSnapshot(["git:status"]) as any[];
     expect(frames.map((f) => f.checkoutId).sort()).toEqual(["main", "wt-1"]);
-    expect(frames.find((f) => f.checkoutId === "main").root.name).toBe("primary");
+    expect(frames.find((f) => f.checkoutId === "main").files[0].path).toBe("primary");
   });
 
   it("dropCheckoutReplay evicts one checkout's entries and leaves the rest", () => {
     const bus = new MessageBus();
-    bus.publish(tree("main", "primary"), "control");
-    bus.publish(tree("wt-1", "isolated"), "control");
+    bus.publish(gitStatus("main", "primary"), "control");
+    bus.publish(gitStatus("wt-1", "isolated"), "control");
     bus.dropCheckoutReplay("wt-1");
-    const frames = bus.getSnapshot(["tree:full"]) as any[];
+    const frames = bus.getSnapshot(["git:status"]) as any[];
     expect(frames).toHaveLength(1);
     expect(frames[0].checkoutId).toBe("main");
   });

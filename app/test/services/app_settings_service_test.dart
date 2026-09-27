@@ -229,4 +229,46 @@ void main() {
       expect(service.state.followSystemBrightness, isFalse);
     });
   });
+
+  group('AppSettings.hideGitIgnoredFiles', () {
+    test('defaults to false when no key is set', () async {
+      useInMemoryPrefs();
+      final prefs = await openAppSettingsPrefs();
+
+      final settings = AppSettings.fromPrefs(prefs);
+
+      // The tree shows everything out of the box — the decision most
+      // likely to be "tidied" into the opposite by someone who finds a
+      // show-everything tree surprising.
+      expect(settings.hideGitIgnoredFiles, isFalse);
+    });
+
+    test('round-trips through SharedPreferences', () async {
+      useInMemoryPrefs({'antgrid.hide_git_ignored_files.v1': true});
+      final prefs = await openAppSettingsPrefs();
+
+      final settings = AppSettings.fromPrefs(prefs);
+
+      expect(settings.hideGitIgnoredFiles, isTrue);
+    });
+
+    test('setHideGitIgnoredFiles persists the value', () async {
+      final service = await makeService();
+
+      await service.setHideGitIgnoredFiles(true);
+
+      expect(service.state.hideGitIgnoredFiles, isTrue);
+    });
+
+    test('reset() clears hideGitIgnoredFiles back to false', () async {
+      final service = await makeService(
+        seed: {'antgrid.hide_git_ignored_files.v1': true},
+      );
+      expect(service.state.hideGitIgnoredFiles, isTrue);
+
+      await service.reset();
+
+      expect(service.state.hideGitIgnoredFiles, isFalse);
+    });
+  });
 }

@@ -541,6 +541,20 @@ export class ProjectStreamRegistry {
     const refusal = binding.entry.opts.mayAcceptFrom?.(this.opts.peerSession(binding.peerId)) ?? null;
     if (refusal) {
       this.notifyRefused(binding.peerId, binding.projectId, refusal);
+      // The notice above is uncorrelated and rate-limited, so on its own it
+      // ends no wait: the app's snapshot pull settles only on a `response`
+      // carrying its requestId, and `state.snapshot` is the only carrier of a
+      // checkout's agent:status — left unanswered, the app reads the machine as
+      // dead and retries until its deadline. Never throttled, because each
+      // reply ends one specific wait, and sent on the stream the request came in
+      // on, the way the core answers an admitted one.
+      if (msg.type === "request") {
+        void this.writeToRecipients([binding], createMessage("response", {
+          requestId: msg.requestId,
+          ok: false,
+          error: { code: refusal.code, message: refusal.message },
+        }));
+      }
       return;
     }
     binding.entry.bus.dispatchInbound(msg, "control", "relay", binding.peerId);

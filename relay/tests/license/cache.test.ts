@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 import { test, expect, describe } from "bun:test";
 import { LicenseCache, type LicenseCacheEntry } from "../../src/license/cache.js";
 

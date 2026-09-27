@@ -34,7 +34,7 @@ interface Props {
 
 const { panes = 2, remote = true, class: cls = "" } = Astro.props;
 ---
-<div class={`appwin overflow-hidden rounded-lg border border-ab-line-strong bg-ab-deep shadow-[0_24px_70px_-30px_rgba(0,0,0,0.9)] ${cls}`}>
+<div class={`appwin overflow-hidden rounded-lg border border-ab-line-strong bg-ab-deep shadow-window ${cls}`}>
   {/* Decorative throughout: nothing in this bar is a control anyone can press,
       so it is hidden from assistive tech rather than announced as a toolbar of
       dead buttons. The scenes below it carry the readable content. */}
@@ -63,7 +63,7 @@ const { panes = 2, remote = true, class: cls = "" } = Astro.props;
     </span>
 
     {remote && (
-      <span class="hidden shrink-0 items-center gap-1.5 rounded-md border border-ab-run/35 bg-ab-run/10 px-2 py-1 text-meta text-ab-run sm:flex">
+      <span class="hidden shrink-0 items-center gap-1.5 rounded-md border border-ab-run/35 bg-ab-run/10 px-2 py-1 text-meta text-ab-run-ink sm:flex">
         <Icon name="tabler:antenna-bars-5" width="12" height="12" />
         Remote on
       </span>

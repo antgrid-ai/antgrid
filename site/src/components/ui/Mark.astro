@@ -2,8 +2,8 @@
 // The four-agent mark, inheriting `currentColor`. NOT antgrid-mark-transparent
 // .svg, which carries the same art: that one adapts through
 // `prefers-color-scheme`, which keys off the reader's OS rather than the page,
-// and this site forces dark — an inlined copy would flip the wrong way for a
-// light-OS visitor.
+// and the page's scheme is the `data-theme` override when one is set — an
+// inlined copy would flip the wrong way for a reader who pinned the other.
 //
 // Imported out of public/ for the same reason as Wordmark.astro — the file the
 // nav renders and the file the brand URL hands out stay the same bytes — and

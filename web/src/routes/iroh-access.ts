@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 import { createHash, timingSafeEqual } from "node:crypto";
 import { Hono } from "hono";
 import { EndpointIdSchema, peerAuthorizationSnapshotSchema } from "antgrid-wire";

@@ -21,7 +21,7 @@
 /**
  * Product lines web can mint. Hand-mirrors `DEVICE_TIERS` in
  * relay/src/license/verify.ts and the `tier` column of web's plan catalog —
- * three workspaces, no shared type (the Apache/ELv2 boundary forbids hoisting
+ * three workspaces, no shared type (the MPL/ELv2 service boundary forbids hoisting
  * one into a package). An unrecognised label is treated as unreadable rather
  * than as a tier that happens to grant nothing, so widening the vocabulary is a
  * deliberate edit here rather than a silent grant.

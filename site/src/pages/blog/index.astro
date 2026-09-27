@@ -1,0 +1,24 @@
+---
+import Base from "../../layouts/Base.astro";
+import PostMeta from "../../components/blog/PostMeta.astro";
+import { getPublishedPosts } from "../../data/blog";
+import { leadPost, postPath } from "../../data/blog-policy";
+import "../../styles/blog.css";
+const posts = await getPublishedPosts();
+const lead = leadPost(posts);
+const latest = posts.filter((post) => post.id !== lead?.id);
+---
+<Base title="Blog | antgrid" description="Notes from building agents that have to prove they're done." path="/blog" rss>
+  <main class="blog-shell blog-index">
+    <header class="blog-index-heading"><h1>Blog</h1><p class="blog-deck">Notes from building agents that have to prove they're done.</p></header>
+    {lead ? <>
+      <article class="blog-lead" aria-label="Featured article">
+        <p class="blog-eyebrow">Featured</p>
+        <h2><a href={postPath(lead)}>{lead.data.title}</a></h2>
+        <p class="blog-deck">{lead.data.description}</p>
+        <PostMeta post={lead} />
+      </article>
+      {latest.length > 0 && <section aria-labelledby="latest"><h2 id="latest" class="blog-section-title">Latest</h2><div class="blog-list">{latest.map((post) => <article class="blog-row"><h3><a href={postPath(post)}>{post.data.title}</a></h3><p>{post.data.description}</p><PostMeta post={post} /></article>)}</div></section>}
+    </> : <p class="blog-empty">Articles are on the way.</p>}
+  </main>
+</Base>

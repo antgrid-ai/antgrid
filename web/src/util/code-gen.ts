@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 import { randomBytes } from "node:crypto";
 
 // A-Z + 2-9, excluding I/L/O/U/0/1 to avoid visual confusion.

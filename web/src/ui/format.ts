@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 /** Compact age string (e.g. "5s", "3m", "2h", "4d") from a ms timestamp. */
 export function fmtAge(ts: number, now: number): string {
   const s = Math.max(0, Math.floor((now - ts) / 1000));

@@ -129,13 +129,6 @@ const List<Map<String, Object?>> kDemoDurableFrames = <Map<String, Object?>>[
       },
     ],
   },
-  <String, Object?>{
-    'type': 'tree:full',
-    'projectId': kDemoProjectId,
-    'checkoutId': 'main',
-    'seq': 1,
-    'root': kDemoTreeRoot,
-  },
 ];
 
 /// The `antgrid.yaml` Project Settings shows for the sample project.

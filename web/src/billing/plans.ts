@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 export type ProviderId = "paddle" | "razorpay";
 export type PlanId = "trial" | "pro_yearly";
 
@@ -18,7 +21,7 @@ export const FREE_WORKER_LIMIT = 1;
  *  first person to buy Pro during a running beta must keep the badge on the
  *  nav while losing it on their plan card. Keep in lockstep with BETA_FREE in
  *  site/src/data/pricing.ts — separate deploys, so the two cannot be one
- *  const, and packages/antgrid-wire is Apache-2.0 and must not absorb it. */
+ *  const, and packages/antgrid-wire is MPL-2.0 and must not absorb ELv2 service logic. */
 export const BETA = true;
 
 export interface PlanPricing {

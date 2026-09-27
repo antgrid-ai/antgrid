@@ -632,6 +632,11 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     FocusManager.instance.addEarlyKeyEventHandler(_handleEarlyKey);
     _focusScope.addListener(_onFocusChange);
     _watchConnection();
+    // Above the listeners, not below them: restoring the screen bumps
+    // `replaceEpoch`, and `_onFrameReplaced` calls `setState`, which throws
+    // this early in the lifecycle. See `TerminalService.primeDisplay` for why
+    // the restore cannot wait for `_syncDisplay`'s post-frame pass.
+    widget.terminalService.primeDisplay(widget.tab.terminalId);
     widget.tab.replaceEpoch.addListener(_onFrameReplaced);
     widget.tab.history.addListener(_onHistoryChanged);
     _hasArchivedRows = widget.tab.history.hasHistory;

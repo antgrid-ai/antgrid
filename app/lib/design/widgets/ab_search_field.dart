@@ -26,6 +26,9 @@ class AbSearchField extends StatefulWidget {
     this.onSubmitted,
     this.onClear,
     this.height = AbTokens.rowHeightMd,
+    this.border = true,
+    this.prefixIconWidth,
+    this.fillColor,
   });
 
   final TextEditingController? controller;
@@ -41,6 +44,18 @@ class AbSearchField extends StatefulWidget {
 
   /// Field height. Forwarded to [AbTextField.height].
   final double height;
+
+  /// Draws the box outline. See [AbControlBox.border].
+  final bool border;
+
+  /// Box fill. Defaults to [AbColors.bgDeepest]. A borderless field passes
+  /// the fill of whatever it sits on, so nothing reads as a box at all.
+  final Color? fillColor;
+
+  /// Width of the prefix square. Defaults to [height], which centres the
+  /// glyph with equal margins on all four sides. A caller aligning the glyph
+  /// to a column outside the field passes that column's width instead.
+  final double? prefixIconWidth;
 
   @override
   State<AbSearchField> createState() => _AbSearchFieldState();
@@ -98,10 +113,11 @@ class _AbSearchFieldState extends State<AbSearchField> {
       prefixIcon: widget.prefixIcon,
       showClearButton: widget.showClearButton,
       autofocus: widget.autofocus,
-      fillColor: context.antgrid.bgDeepest,
+      fillColor: widget.fillColor ?? context.antgrid.bgDeepest,
       height: widget.height,
+      border: widget.border,
       prefixIconSize: AbTokens.iconButtonGlyph,
-      prefixIconWidth: widget.height,
+      prefixIconWidth: widget.prefixIconWidth ?? widget.height,
       suffixSlotWidth: widget.height,
       contentPadding: EdgeInsets.only(
         left: hasPrefix ? 0 : AbTokens.space8,

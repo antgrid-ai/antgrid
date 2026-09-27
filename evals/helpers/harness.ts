@@ -806,7 +806,7 @@ async function buildTestEnv(opts: SetupTestEnvOptions, cleanup: CleanupStack): P
   });
   await establishNativeSession(app, deviceUuid, auth.ed25519Pub);
 
-  // Welcome-replay: pull the cached snapshot (agent:status/tree:full/git:status)
+  // Welcome-replay: pull the cached snapshot (agent:status/git:status/…)
   // like the production app, instead of racing the agent's de-duped live burst.
   //
   // `state.snapshot` recomputes `agent:projects` fresh (host-server.ts's
@@ -1030,7 +1030,7 @@ async function buildDartTestEnv(
         `${STREAM_BIND_ATTEMPTS} attempts: ${String(lastBindErr)}`,
     );
   }
-  // Per-project durable state (agent:status / tree:full / git:status) lives on
+  // Per-project durable state (agent:status / git:status / …) lives on
   // the stream, not the control plane — pull it the way a ProjectSession does.
   await app.pullStateSnapshot(streamId);
 

@@ -8,7 +8,7 @@ What may be written in any `CLAUDE.md`, this one included, is governed by
 
 ## Agent adapters
 
-Agent definitions and runtime live in the ELv2 workspace package
+Agent definitions and runtime live in the MPL-2.0 workspace package
 `packages/antgrid-agents`. Its `src/agents/registry.ts` is the built-in registration
 entry point; `src/contracts.ts` and `package.json` describe the public interface.
 Bridge imports public package exports only. Provider invocation, storage knowledge,
@@ -61,6 +61,8 @@ what is here is identity plus the contracts that span more than one of them.
   - chat resolve (`agent:permission-resolve`/`-question-resolve`) → `answerRequest`: same, but ONLY if something was actually pending — a resolve racing a retraction would otherwise open a turn no turn-end closes.
   - bare PTY keystroke → `userReply`: clears the block only. Typing in an idle session is not work.
   - PTY keystroke that SUBMITTED (`isSubmitKeystroke` in `keystrokes.ts`: a trailing CR, but not `\x1b\r` — alt+enter inserts a newline and may never be sent) → `userReply({submitted:true})`: also opens a turn, but only for a session in `keystrokeTurnSessions` — an agent with turn-END hooks and no turn-start (codex/cursor/copilot; see `needsKeystrokeTurnStart` in `packages/antgrid-agents/src/agents/registry.ts`, which reads it off each agent's own `hooks.turnBoundaryEvents`). Never for Claude (it has a real signal) nor for the hookless agents (opencode/antigravity/kilo/kimi/mistral-vibe — nothing would close the inferred turn).
+  - `/handler-event` with `event:"turn_end"` → `hookTurnEnd`: the SECOND closer, and the only one not carried by a notification — codex's `notify` argv and its Stop hook fire independently. It must never clear the notifications map, and never fires for `turn_failed`.
+  - `invalidateHookObservation` → `noteHookChannelLost`: a session whose hooks are written off leaves `keystrokeTurnSessions` until a `/hook-alive` ping undoes it (`noteHookChannelRestored` + `SessionManager.restoreHookObservation`). **Nothing else reconsiders an invalidation**, which is why the ping has to undo it in both places.
 
   Not every `terminal:input` frame is a keystroke. A viewer's VT engine answers
   the modes the guest turned on over the SAME channel, so a session with DEC
@@ -72,7 +74,7 @@ what is here is identity plus the contracts that span more than one of them.
   Without it, clicking back into the window to ANSWER a blocked agent was itself
   what cleared its "needs you" dot.
 
-  The submit gate has **two** halves and both are required. A PTY delivers one keystroke per frame, so the submitting CR normally arrives alone and `isSubmitKeystroke` alone cannot tell a prompt from enter on an empty line or on a TUI menu — which start no turn, so the stop hook the inference depends on never fires. `hasTypedContent` (also `keystrokes.ts`) marks the session in `typedSessions`, and only a submit with that marker opens a turn; opening consumes it. Which agent a session runs is `s.tool ?? defaultTool`, where `defaultTool` is folded from `agent:hello` — a `SessionEntry` carries `tool` only when it OVERRODE the project's `agent.tool`, so reading the entry alone silently opted every default-spec session out of the inference.
+  The submit gate has **three** halves and every one is required, because each rules out a different submit that starts no model turn — and a turn opened without one has nothing that can close it: `isSubmitKeystroke`, then `hasTypedContent` (a bare enter submits nothing), then `opensCommandLine` (a `/` line the CLI answers itself). The submit consumes the recorded line either way. Which agent a session runs is `s.tool ?? defaultTool`, where `defaultTool` is folded from `agent:hello` — a `SessionEntry` carries `tool` only when it OVERRODE the project's `agent.tool`, so reading the entry alone silently opted every default-spec session out of the inference.
 
   Two ordering rules fall out of the fold being keyed by session id: an attributed turn-start that beats its session's first `session:updated` is HELD in `pendingTurns` for exactly one session list, and a notification whose `terminalId` is not a running session (config-`terminals:` slots stamp one too) falls back to the project-wide key rather than being filed where nothing can read it. That fallback FANS OUT — `statusFor` reads it for every running session — and a turn-start clears it on the word of one session; both are accepted (losing the signal is worse than over-reporting it), and both are the reason a config-`terminals:` error dots every session on the project.
 - `port-scanner.ts` — platform-specific dev-port detection (polling).
@@ -115,21 +117,26 @@ invariant, which is why the reasoning lives beside the code rather than here.
 
 ## The session bus (`src/session-bus/`)
 
-The agent-to-agent plane: one session on one machine reaching another.
-`docs/session-messaging.md` is the spec; this is the set of invariants a future
-edit breaks silently.
+The agent-to-agent plane: one session on one machine reaching another. This is
+the set of invariants a future edit breaks silently.
 
-- **Outbound on the machine that opened the exchange goes to the loopback owner
-  and nowhere else.** `ProjectCore.sendToOwner` is the only path, and
+- **Which way a bus frame leaves is decided by the CONTEXT, not by the
+  address.** A session whose own id is the context id opened the exchange and
+  reaches out through the loopback owner — `ProjectCore.sendToOwner`, and
   `local-listener.ts` hands a bus frame to an owner only if its hello declared
   `capabilities.sessionBusCarrier` (`ownerCarriesSessionBus`, surfaced to the
-  loopback API as `carrierPresent`). The desktop app is the carrier; no
-  attached carrier means the frame is HELD and retried by the coordinator, never
-  dropped, so a closed desktop is an indefinitely delayed exchange rather than a
-  failed one — on every path except the agent-initiated verbs, which read
-  `carrierPresent` up front and refuse `PEER_UNREACHABLE`
-  (`session-bus/api.ts`) rather than report a held frame to an agent that reads
-  every answer but a refusal as delivered.
+  loopback API as `carrierPresent`). Any other context is one this session was
+  contacted on, and its only way back is the route that brought the context in
+  (`routeFor` → `sendToAppSession`). No attached carrier means the frame is HELD
+  and retried by the coordinator, never dropped, so a closed desktop is an
+  indefinitely delayed exchange rather than a failed one — except on the
+  agent-initiated verbs, which refuse up front rather than report a held frame
+  to an agent that reads every answer but a refusal as delivered.
+- **The machine's remote-access switch gates the bus in BOTH directions, and the
+  two halves must stay in lockstep.** Outbound is `offMachineSendAllowed`, wired
+  into `session-bus/api.ts`; inbound is `remoteFrameAllowed` beside it in
+  `agent-core.ts`. Gating one and not the other ships a machine that can speak
+  and cannot be answered, because the peer's reply dies at our own inbound gate.
 - **The remote half of the directory arrives by loopback push and by nothing
   else.** The app peeks at control-plane sessions it already holds, asks each
   machine for a session-bearing `machine.capability-card`, and pushes the
@@ -215,11 +222,12 @@ edit breaks silently.
   entry that could retry it. A broadcast would additionally leak the whole
   exchange to the human's phone, which is the mirror of the sending-side
   invariant above.
-- **Every delivery into an agent is rendered, and lands at a TURN BOUNDARY.**
-  `session-bus/delivery.ts` wraps the other agent's content as fenced data —
-  never raw, never a bare instruction — and `delivery-queue.ts` holds the line
-  until the turn closes. `DeliveryKindSchema` there is the whole set of queued
-  kinds.
+- **Every delivery into an agent is rendered, and lands where a boundary is
+  observable.** `session-bus/delivery.ts` wraps the other agent's content as
+  fenced data — never raw, never a bare instruction — and `delivery-queue.ts`
+  holds the line until `busDeliverable` (`work-status.ts`) says the session is
+  clear. `DeliveryKindSchema` there is the whole set of queued kinds. An adapter
+  that declares no turn-start silently skips the turn half of that gate.
 - **The Capability Card travels on the address and may only ever be FENCED.**
   It is `SessionMemberCardSchema` on `SessionMemberRefSchema` (`protocol.ts`),
   observed by that machine's own bridge (`capability-card.ts`), and it is what
@@ -244,6 +252,11 @@ edit breaks silently.
   nothing and exists so the verb layer can order its own ladder (a halted pair
   aimed at a stopped session has to hear about the halt, which only a human
   lifts). It never replaces the check inside `message`.
+- **Nothing on the delivery path may log a character of what was said** — not
+  message text, not a summary, not a thrown adapter error's message. A log line
+  carries `lineKey`'s digest instead; why a digest and never a prefix is written
+  at `line-key.ts`. `session-bus-logging.test.ts` scans the path it drives, so a
+  new log site anywhere else is on you.
 - **`/session-bus/*` in `api-server.ts` is the loopback route table**, keyed off
   `?terminalId=` — which is what says whose session a request is about, and the
   same slot that resolves an isolated session's checkout. Bus frames route by

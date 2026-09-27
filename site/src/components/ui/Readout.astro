@@ -32,10 +32,9 @@ const marks = {
 const { source, state, label, tone = "panel", class: cls = "" } = Astro.props;
 const mark = marks[state];
 const surface = tone === "well" ? "bg-group" : "bg-panel";
-const strip = tone === "well" ? "bg-[#202027]" : "bg-chrome";
 ---
 <div class={`card-lit overflow-hidden rounded-lg border border-edge ${surface} ${cls}`}>
-  <div class={`flex items-center justify-between gap-3 border-b border-edge-inner ${strip} px-4 py-2.5`}>
+  <div class={`flex items-center justify-between gap-3 border-b border-edge-inner bg-chrome px-4 py-2.5`}>
     <span class="min-w-0 truncate font-mono text-marker text-muted2">{source}</span>
     <span class={`flex shrink-0 items-center gap-1.5 rounded border px-2 py-0.5 font-mono text-marker ${mark.chip} ${mark.text}`}>
       {mark.dot

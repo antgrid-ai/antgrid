@@ -83,7 +83,7 @@ const rowsOf = (m: Machine) => [...m.rows].sort((a, b) => Number(!!b.needs) - Nu
           >{g}</span>
         ))}
       </span>
-      <span class="shrink-0 font-mono text-pip text-ab-attn">1 needs you</span>
+      <span class="shrink-0 font-mono text-pip text-ab-attn-ink">1 needs you</span>
     </div>
 
     <div class="flex flex-col gap-1.5 pb-3">
@@ -102,9 +102,9 @@ const rowsOf = (m: Machine) => [...m.rows].sort((a, b) => Number(!!b.needs) - Nu
                 height="13"
                 aria-hidden="true"
               />
-              <span class={`min-w-0 flex-1 truncate text-row ${r.needs ? "text-ab-attn" : "text-ab-text"}`}>{r.title}</span>
+              <span class={`min-w-0 flex-1 truncate text-row ${r.needs ? "text-ab-attn-ink" : "text-ab-text"}`}>{r.title}</span>
               {r.needs && (
-                <span class="hidden shrink-0 rounded border border-ab-attn/35 bg-ab-attn/10 px-1.5 font-mono text-pip text-ab-attn sm:inline">Needs you</span>
+                <span class="hidden shrink-0 rounded border border-ab-attn/35 bg-ab-attn/10 px-1.5 font-mono text-pip text-ab-attn-ink sm:inline">Needs you</span>
               )}
               <span class="hidden w-20 shrink-0 truncate font-mono text-pip text-ab-mute md:inline">{r.project}</span>
               <span class="w-14 shrink-0 text-right font-mono text-pip text-ab-dim">{r.time}</span>

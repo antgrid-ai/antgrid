@@ -2,7 +2,7 @@
 import { existsSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
-import { readTranscriptTail } from "../../transcript-tail";
+import { readTailUntil } from "../../transcript-tail";
 import { codexHomeDir } from "./home";
 
 // codex wraps typed input in a contextual template; everything before this
@@ -70,8 +70,14 @@ export async function findCodexRolloutPath(threadId: string, codexHome?: string)
  */
 export async function readLastCodexMessages(path: string, n: number): Promise<string[]> {
   if (n <= 0) return []; // slice(-0) === slice(0) — the whole array, not none
-  const raw = await readTranscriptTail(path);
-  if (!raw) return [];
+  // Widened until it HAS n — same bound, same reason, as the Claude reader. A
+  // rollout interleaves its conversation with response_item twins and tool
+  // traffic this drops, so the share of a byte window that survives to here is
+  // small and varies by session.
+  return (await readTailUntil(path, n, codexMessagesIn)).slice(-n);
+}
+
+function codexMessagesIn(raw: string): string[] {
   let out: string[] = [];
   for (const line of raw.split("\n")) {
     if (!line.trim()) continue;
@@ -96,5 +102,5 @@ export async function readLastCodexMessages(path: string, n: number): Promise<st
       if (text) out.push(text);
     }
   }
-  return out.slice(-n);
+  return out;
 }

@@ -67,9 +67,10 @@ export class SessionBusRepoKeys {
     return this.keys.get(projectId) ?? null;
   }
 
-  /** Whether this project has ever answered the probe. Only the directory's
-   *  refusal text reads this: "no git remote" and "not read yet" are the same
-   *  empty list and very different bug reports. */
+  /** Whether this project has ever answered the probe. Only refusal TEXT reads
+   *  this — the directory's, and a send's when the caller's own project has no
+   *  key: "no git remote" and "not read yet" are the same empty list and very
+   *  different bug reports, and one of them clears on its own. */
   probed(projectId: string): boolean {
     return this.keys.has(projectId);
   }

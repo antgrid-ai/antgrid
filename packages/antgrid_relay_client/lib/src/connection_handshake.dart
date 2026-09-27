@@ -57,10 +57,18 @@ class ConnectionHandshake {
   bool _cancelled = false;
   StreamSubscription<IncomingSessionRecord>? _messageSub;
 
+  /// Held so [cancel] ends the wait for `established` now rather than at
+  /// [_attemptTimeout]: the socket this attempt used is usually already gone.
+  Completer<bool>? _established;
+
   void cancel() {
     _cancelled = true;
     _messageSub?.cancel();
     _messageSub = null;
+    final established = _established;
+    if (established != null && !established.isCompleted) {
+      established.complete(false);
+    }
   }
 
   /// Runs one hello attempt (fresh `attemptId`). Resolves true once the
@@ -72,7 +80,8 @@ class ConnectionHandshake {
     final attemptId = _secureNonceB64();
     var finished = false;
     bool active() => !finished && !_cancelled && _relay.isDispatchAllowed;
-    final established = Completer<bool>();
+    final established = _established = Completer<bool>();
+    final startedAt = DateTime.now();
 
     // Subscribe before sending: the bridge may answer before the send call
     // itself returns.
@@ -103,8 +112,23 @@ class ConnectionHandshake {
       if (!active()) return false;
       return await established.future.timeout(_attemptTimeout);
     } on TimeoutException {
+      // A bridge that never answered is otherwise indistinguishable in the log
+      // from a link that refused the hello or a cancelled attempt.
+      if (!_cancelled) {
+        _log(
+          HandshakeLogLevel.debug,
+          'attempt timed out',
+          fields: {
+            'awaiting': 'established',
+            'timeoutMs': _attemptTimeout.inMilliseconds,
+            'elapsedMs': DateTime.now().difference(startedAt).inMilliseconds,
+          },
+        );
+      }
       return false;
     } catch (e, st) {
+      // A cancel is the session's event to log, not a failure of this attempt.
+      if (_cancelled) return false;
       _log(
         HandshakeLogLevel.error,
         'run error',
@@ -114,6 +138,7 @@ class ConnectionHandshake {
     } finally {
       finished = true;
       if (identical(_messageSub, sub)) _messageSub = null;
+      if (identical(_established, established)) _established = null;
       await sub.cancel();
     }
   }

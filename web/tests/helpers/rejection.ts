@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 /**
  * Await a promise that is expected to reject and hand back the error, instead of
  * asserting through `expect(...).rejects`.

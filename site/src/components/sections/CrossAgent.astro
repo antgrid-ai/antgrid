@@ -1,52 +1,28 @@
 ---
-import { Icon } from "astro-icon/components";
-import Eyebrow from "../ui/Eyebrow.astro";
 import UseCase from "../ui/UseCase.astro";
 
 const steps = [
-  { n: 1, icon: "tabler:download", title: "Install on your machine", body: "The desktop app runs your agents in real terminals and links them to your phone — Windows, macOS, Linux.", accent: false },
-  { n: 2, icon: "tabler:terminal-2", title: "Run any agent", body: "Start Claude Code, Codex or Cursor exactly how you do now — same flags, same prompts, in a real terminal.", accent: false },
-  // Deliberately the same length as the other two: three columns of one length
-  // and one of a paragraph reads as a step that went wrong. Handler's full case
-  // is Phases.astro's job, so this names it and stops.
-  { n: 3, icon: "tabler:device-mobile", title: "Take it with you", body: "Watch, steer and approve from your phone — or step away and let Handler answer, waking you only when a call needs a human.", accent: true },
+  { title: "Install on your machine", body: "Download the desktop app for Windows, macOS or Linux. Open a project on that machine." },
+  { title: "Start a session", body: "Run your installed coding agent in antgrid's terminal, using your existing agent account and prompts." },
+  { title: "Hand over when you're ready", body: "Tell Handler what's left, how to proceed and when to ask you. Arm it, then review its next decision." },
 ];
 ---
-{/* The page's quiet section, on purpose: it sits between two readout-heavy
-    bands and the closing CTA, so the steps are ruled rather than boxed. */}
-<section class="reveal mx-auto max-w-shell px-6 py-24">
-  <Eyebrow class="mb-5">Setup</Eyebrow>
-  <h2 class="mb-5 font-display text-title font-semibold text-ink">Running in about five minutes.</h2>
-  {/* Compatibility is answered in Compat.astro, directly under the hero: "does
-      this work with my agent" gates whether a reader keeps scrolling, so it
-      cannot be answered in section eight. What is left here is onboarding, and
-      a second section re-arguing the roster's point only reads as a page that
-      repeats itself. */}
-  <p class="mb-12 max-w-xl text-lede text-muted">
-    Install the desktop app, start your agent the way you always do, and pick it up on your phone. Nothing about how you work changes.
-  </p>
+<section class="mx-auto max-w-shell px-6 py-16 md:py-24">
+  <h2 class="mb-10 font-display text-title font-bold text-ink">Start with one session.</h2>
 
   {/* Numbered because setup genuinely is ordered — you can't run an agent
-      through antgrid before installing it. */}
-  <div class="grid gap-y-9 border-t border-edge md:grid-cols-3 md:gap-x-0">
+      through antgrid before installing it. The ordinals are set in the display
+      face at ordinal size: the same signage as the headlines, used as a
+      graphic, which is what lets the columns stand without boxes. */}
+  <ol class="grid gap-y-8 md:grid-cols-3 md:gap-x-10">
     {steps.map((s, i) => (
-      <div class={`pt-6 md:px-8 ${i === 0 ? "md:pl-0" : "md:border-l md:border-edge-inner"} ${i === steps.length - 1 ? "md:pr-0" : ""}`}>
-        {/* Ordinal and icon, and no rule across the row. The grid's own top
-            border and dividers already rule this block; a third hairline per
-            column filled the row without saying anything, and three of them
-            plus the grid read as ruling for its own sake. */}
-        <div class="mb-4 flex items-center gap-2.5">
-          <span class="font-mono text-marker text-muted2">0{s.n}</span>
-          <Icon name={s.icon} class={s.accent ? "text-signal" : "text-muted2"} width="16" height="16" />
-        </div>
-        <div class="mb-2 text-note font-medium text-ink">{s.title}</div>
-        <div class="text-note leading-relaxed text-muted">{s.body}</div>
-      </div>
+      <li class="border-t border-edge-emph pt-5">
+        <span class="mb-5 block font-display text-ordinal font-bold text-muted2" aria-hidden="true">{i + 1}</span>
+        <h3 class="mb-2 text-note font-medium text-ink">{s.title}</h3>
+        <p class="text-note leading-relaxed text-muted">{s.body}</p>
+      </li>
     ))}
-  </div>
+  </ol>
 
-  {/* Placed after the steps like every other UseCase on the page: it is the
-      "and therefore?" line for the mechanism above it, and one sitting ahead of
-      its mechanism reads as an aside nothing has earned yet. */}
-  <UseCase class="mt-7 max-w-2xl">No migration and no new CLI — install it and keep working exactly the way you did this morning.</UseCase>
+  <UseCase class="mt-10 max-w-2xl">For your first run, research and plan a new feature with your agent. Then ask Handler to guide it through implementation, code review, security review and smoke tests, compacting context between steps.</UseCase>
 </section>

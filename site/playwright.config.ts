@@ -2,6 +2,7 @@ import { defineConfig, devices } from "@playwright/test";
 
 export default defineConfig({
   testDir: "./tests",
+  testIgnore: ["**/unit/**"],
   fullyParallel: true,
   webServer: {
     command: "bun run build && bun run preview --port 4321",
@@ -16,8 +17,11 @@ export default defineConfig({
     timeout: 120_000,
   },
   use: { baseURL: "http://localhost:4321" },
+  // Playwright emulates a light OS unless told otherwise, and the site follows
+  // the OS. One project per scheme so every spec runs against both without
+  // being written twice; theme.spec.ts pins its own with `test.use`.
   projects: [
-    { name: "desktop", use: { ...devices["Desktop Chrome"] } },
-    { name: "mobile", use: { ...devices["Pixel 7"] } },
+    { name: "desktop", use: { ...devices["Desktop Chrome"], colorScheme: "dark" } },
+    { name: "mobile", use: { ...devices["Pixel 7"], colorScheme: "light" } },
   ],
 });

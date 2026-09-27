@@ -207,7 +207,7 @@ for a future per-receiver policy. `mayAcceptFrom` is the sender-side mirror, re-
 record: a refused record is dropped and the peer is told why by a `control:result {ok:false}` on the
 session stream, rate-limited per (peer, project) pair (`INVALID_NOTICE_COOLDOWN_MS`).
 
-**Session-bus frames** (`docs/session-messaging.md`) ride this stream, peer-addressed, exactly like any
+**Session-bus frames** (`session-bus:*`, `bridge/src/protocol.ts`) ride this stream, peer-addressed, exactly like any
 other project-scoped bus frame — there is no separate stream for them.
 
 **Failure isolation** matches §1b/§1c: an overflow or a lost stream resets only that one project stream

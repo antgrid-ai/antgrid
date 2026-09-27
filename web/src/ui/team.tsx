@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 import { Layout, PageHead, type LayoutUser } from "./layout.js";
 import { CellMeter } from "./cell-meter.js";
 import type { AccountMemberRole } from "../models/account-member.js";

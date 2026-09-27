@@ -43,6 +43,11 @@ You retain all rights to your own source code, files, prompts, and data. Antgrid
 
 We are the owner or licensee of all intellectual property rights in the Services, including our software, source code, designs, text, graphics, trademarks, service marks, and logos (the "Content" and "Marks"). The Content and Marks are protected by law. Except as expressly permitted, no part of the Services may be copied, reproduced, republished, decompiled, reverse-engineered, distributed, sold, or otherwise exploited without our prior written permission.
 
+This restriction does not limit rights granted by the MPL-2.0, Elastic-2.0, or
+third-party licences that accompany distributed software. If these Legal Terms
+conflict with a software licence for licensed code, that software licence
+controls for that code.
+
 ### License to use the Services
 
 Subject to your compliance with these Legal Terms, we grant you a limited, non-exclusive, non-transferable, revocable license to access and use the Services for your personal or internal business purposes. We reserve all rights not expressly granted.

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 import { Layout, type LayoutUser } from "./layout.js";
 import { asset } from "./asset.js";
 import { FREE_WORKER_LIMIT } from "../billing/plans.js";

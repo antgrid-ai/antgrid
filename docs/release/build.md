@@ -17,11 +17,24 @@ empty string and the Sentry SDK initialises in no-op mode.
 flutter build appbundle --release
 ```
 
+Android ships through Play only; the release workflow attaches no APK. Play
+App Signing re-signs store installs with an app-signing key the CI upload key
+cannot match, and Android accepts an in-place update only between matching
+certificates — so publishing both channels creates two install bases that can
+never update across to each other.
+
 ## iOS
 
 ```bash
 flutter build ipa --release
 ```
+
+iOS ships through TestFlight and the App Store only; the release workflow
+attaches no IPA. The export above uses `method: app-store`, which App Store
+Connect accepts and no device will install — it carries no provisioned devices.
+Re-signing one to sideload it rewrites the team ID, which breaks the
+`aps-environment` entitlement and the App Group shared with the notification
+service extension, so push would be dead in exactly the builds that needed it.
 
 ---
 
@@ -36,6 +49,15 @@ flutter build ipa --release --dart-define=SENTRY_DSN=https://...@errex.example.c
 
 All other build flags and environment overrides (e.g. `RELAY_URL`, `LICENSE_API_URL`)
 work the same way via `--dart-define`.
+
+Every release build must also pass the full immutable revision:
+
+```bash
+--dart-define=SOURCE_COMMIT="$(git rev-parse HEAD)"
+```
+
+Short hashes are not sufficient: Help/About uses this value for the exact-source
+link and release inspection verifies it against the tag-specific source archive.
 
 ---
 

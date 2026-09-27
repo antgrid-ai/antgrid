@@ -104,12 +104,11 @@ void main() {
   setUp(() async => agent = await _FakeAgent.start());
   tearDown(() => agent.stop());
 
-  // The agent caches a `tree:full` per checkout at open time, so a replay of
-  // everything hands a local project one full tree per managed worktree. The
-  // relay path already excludes it (`_kHeavyReplayTypes`); this is the loopback
-  // half, and nothing else fails if it goes missing — the trees simply arrive
-  // and are thrown away.
-  test('the welcome replay excludes the cached full trees', () async {
+  // A whole-tree frame folded into the replay would be one per managed
+  // worktree, and this app has no handler for one. The native path excludes
+  // the same type (`_kHeavyReplayTypes` in machine_session.dart); this is the
+  // loopback half, and nothing else fails if it goes missing.
+  test('the welcome replay excludes whole-tree frames', () async {
     final t = LocalTransport(port: agent.port, token: _token, appPid: 1);
     addTearDown(t.dispose);
     await t.connect();

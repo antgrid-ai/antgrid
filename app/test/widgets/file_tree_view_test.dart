@@ -1,7 +1,9 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/design/widgets/ab_empty_state.dart';
+import 'package:antgrid/design/widgets/ab_list_row.dart';
 import 'package:antgrid/design/widgets/ab_status_dot.dart';
 import 'package:antgrid/design/widgets/ab_swipe_actions.dart';
 import 'package:antgrid/models/ab_message.dart';
@@ -9,6 +11,12 @@ import 'package:antgrid/models/file_tree_models.dart';
 import 'package:antgrid/widgets/file_tree_view.dart';
 
 import '../helpers/hover.dart';
+
+/// The rendered color of the row's name label — reads the actual [Text]
+/// style rather than inspecting [FileNode.ignored] directly, since the
+/// dimming this pins lives entirely in how the widget renders that flag.
+Color _labelColor(WidgetTester tester, String name) =>
+    tester.widget<Text>(find.text(name)).style!.color!;
 
 void main() {
   FileNode makeTree() {
@@ -50,7 +58,6 @@ void main() {
     FileNode? root,
     Set<String> expandedPaths = const {},
     String? selectedFilePath,
-    String? filterQuery,
     List<GitFileStatusEntry> gitFileEntries = const [],
     bool changesOnly = false,
     Set<String> collapsedPaths = const {},
@@ -67,7 +74,6 @@ void main() {
           root: root,
           expandedPaths: expandedPaths,
           selectedFilePath: selectedFilePath,
-          filterQuery: filterQuery,
           gitFileEntries: gitFileEntries,
           changesOnly: changesOnly,
           collapsedPaths: collapsedPaths,
@@ -150,16 +156,24 @@ void main() {
       expect(find.text('utils.dart'), findsOneWidget);
     });
 
-    testWidgets('filter shows matching files across all directories', (
+    testWidgets('an empty directory (root with no children) says so', (
       tester,
     ) async {
-      final tree = makeTree();
-      await tester.pumpWidget(buildTestWidget(root: tree, filterQuery: 'main'));
+      // Distinct from `root: null` above: this is a real, loaded listing
+      // that came back empty, not "nothing has arrived yet". Name filtering
+      // moved out of this widget (see file_explorer_screen.dart's
+      // _FileFilterResults) — a bridge-backed `file:find`, not a local
+      // substring pass over whatever this tree has loaded — so this is the
+      // only way this empty state is reached now.
+      const tree = FileNode(
+        name: 'project',
+        path: 'project',
+        type: FileNodeType.directory,
+        children: [],
+      );
+      await tester.pumpWidget(buildTestWidget(root: tree));
 
-      expect(find.text('main.dart'), findsOneWidget);
-      // Non-matching files should not appear
-      expect(find.text('utils.dart'), findsNothing);
-      expect(find.text('README.md'), findsNothing);
+      expect(find.text('This folder is empty'), findsOneWidget);
     });
 
     testWidgets('selecting a file off the current viewport scrolls to reveal it', (
@@ -952,6 +966,128 @@ void main() {
     });
   });
 
+  group('ignored rows', () {
+    testWidgets(
+      'an ignored node renders with the muted token and a normal sibling does not',
+      (tester) async {
+        const tree = FileNode(
+          name: 'project',
+          path: 'project',
+          type: FileNodeType.directory,
+          children: [
+            FileNode(
+              name: 'kept.dart',
+              path: 'project/kept.dart',
+              type: FileNodeType.file,
+            ),
+            FileNode(
+              name: 'build.log',
+              path: 'project/build.log',
+              // Present only because includeIgnored asked for it.
+              ignored: true,
+              type: FileNodeType.file,
+            ),
+          ],
+        );
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: ThemeData(extensions: const [kDefaultPalette]),
+            home: Scaffold(
+              body: FileTreeView(
+                root: tree,
+                expandedPaths: const {},
+                onToggleExpanded: (_) {},
+                onFileSelected: (_) {},
+              ),
+            ),
+          ),
+        );
+
+        expect(_labelColor(tester, 'build.log'), kDefaultPalette.textMuted);
+        expect(
+          _labelColor(tester, 'kept.dart'),
+          isNot(kDefaultPalette.textMuted),
+        );
+      },
+    );
+
+    // A directory's UNDIMMED colour is textSecondary, not textPrimary, so the
+    // step this pins is secondary→muted. Asserted positively on both rows: an
+    // `isNot(textMuted)` on the sibling would hold even if the ignored arm
+    // were never reached for a directory at all.
+    testWidgets('an ignored directory dims from textSecondary to textMuted', (
+      tester,
+    ) async {
+      const tree = FileNode(
+        name: 'project',
+        path: 'project',
+        type: FileNodeType.directory,
+        children: [
+          FileNode(name: 'lib', path: 'project/lib', type: FileNodeType.directory),
+          FileNode(
+            name: 'build',
+            path: 'project/build',
+            ignored: true,
+            type: FileNodeType.directory,
+          ),
+        ],
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: ThemeData(extensions: const [kDefaultPalette]),
+          home: Scaffold(
+            body: FileTreeView(
+              root: tree,
+              expandedPaths: const {},
+              onToggleExpanded: (_) {},
+              onFileSelected: (_) {},
+            ),
+          ),
+        ),
+      );
+
+      expect(_labelColor(tester, 'build'), kDefaultPalette.textMuted);
+      expect(_labelColor(tester, 'lib'), kDefaultPalette.textSecondary);
+    });
+
+    // Selection outranks the dim. Swapping the two arms of the ternary leaves
+    // every other assertion in this group green while a selected ignored row
+    // silently stops reading as selected.
+    testWidgets('a selected ignored row still reads as selected', (
+      tester,
+    ) async {
+      const tree = FileNode(
+        name: 'project',
+        path: 'project',
+        type: FileNodeType.directory,
+        children: [
+          FileNode(
+            name: 'build.log',
+            path: 'project/build.log',
+            ignored: true,
+            type: FileNodeType.file,
+          ),
+        ],
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: ThemeData(extensions: const [kDefaultPalette]),
+          home: Scaffold(
+            body: FileTreeView(
+              root: tree,
+              expandedPaths: const {},
+              selectedFilePath: 'project/build.log',
+              onToggleExpanded: (_) {},
+              onFileSelected: (_) {},
+            ),
+          ),
+        ),
+      );
+
+      expect(_labelColor(tester, 'build.log'), kDefaultPalette.accent);
+    });
+  });
+
   // On touch the swipe tray is the ONLY per-file affordance, so these cover
   // both halves of that bargain: every action has to be reachable through it,
   // and no action may fire from a gesture the user did not mean.
@@ -1349,5 +1485,178 @@ void main() {
 
       expect(find.text('more items not shown'), findsNothing);
     });
+
+    testWidgets(
+      'a truncated directory still carries its notice beside a loading one',
+      (tester) async {
+        // Two directories, one cut and one still fetching — the loading row
+        // must not crowd out or get confused with the truncation row.
+        const tree = FileNode(
+          name: 'project',
+          path: 'project',
+          type: FileNodeType.directory,
+          children: [
+            FileNode(
+              name: 'lib',
+              path: 'project/lib',
+              type: FileNodeType.directory,
+              truncated: true,
+              children: [
+                FileNode(
+                  name: 'main.dart',
+                  path: 'project/lib/main.dart',
+                  type: FileNodeType.file,
+                ),
+              ],
+            ),
+            FileNode(
+              name: 'src',
+              path: 'project/src',
+              type: FileNodeType.directory,
+              childrenLoaded: false,
+              childrenLoading: true,
+            ),
+          ],
+        );
+
+        await tester.pumpWidget(
+          buildTestWidget(
+            root: tree,
+            expandedPaths: const {'project/lib', 'project/src'},
+          ),
+        );
+
+        expect(find.text('more items not shown'), findsOneWidget);
+        expect(find.text('Loading…'), findsOneWidget);
+      },
+    );
+
+    // _FileTreeViewState._revealSelected jumps to an off-screen row by
+    // multiplying ONE measured row extent by a flat index, so a notice row
+    // that renders at a different height puts every row below it out by that
+    // difference per notice. The loading row's leading is a fixed-size dot
+    // where every other row's is text, which is exactly how it drifts.
+    testWidgets('every row renders at the same height', (tester) async {
+      const tree = FileNode(
+        name: 'project',
+        path: 'project',
+        type: FileNodeType.directory,
+        children: [
+          FileNode(
+            name: 'lib',
+            path: 'project/lib',
+            type: FileNodeType.directory,
+            truncated: true,
+            children: [
+              FileNode(
+                name: 'main.dart',
+                path: 'project/lib/main.dart',
+                type: FileNodeType.file,
+              ),
+            ],
+          ),
+          FileNode(
+            name: 'src',
+            path: 'project/src',
+            type: FileNodeType.directory,
+            childrenLoaded: false,
+            childrenLoading: true,
+          ),
+        ],
+      );
+
+      await tester.pumpWidget(
+        buildTestWidget(
+          root: tree,
+          expandedPaths: const {'project/lib', 'project/src'},
+        ),
+      );
+
+      final rows = find.byType(AbListRow);
+      final count = rows.evaluate().length;
+      expect(count, greaterThan(4));
+      final heights = <double>{
+        for (var i = 0; i < count; i++) tester.getSize(rows.at(i)).height,
+      };
+      expect(heights, hasLength(1));
+    });
+  });
+
+  group('loading notice', () {
+    const expandingDirectory = FileNode(
+      name: 'project',
+      path: 'project',
+      type: FileNodeType.directory,
+      children: [
+        FileNode(
+          name: 'lib',
+          path: 'project/lib',
+          type: FileNodeType.directory,
+          childrenLoaded: false,
+          childrenLoading: true,
+        ),
+      ],
+    );
+
+    testWidgets(
+      'an expanded directory with a request in flight and no children shows a loading row',
+      (tester) async {
+        await tester.pumpWidget(
+          buildTestWidget(
+            root: expandingDirectory,
+            expandedPaths: const {'project/lib'},
+          ),
+        );
+
+        expect(find.text('Loading…'), findsOneWidget);
+      },
+    );
+
+    testWidgets('a collapsed loading directory carries no loading row', (
+      tester,
+    ) async {
+      await tester.pumpWidget(buildTestWidget(root: expandingDirectory));
+
+      expect(find.text('Loading…'), findsNothing);
+    });
+
+    testWidgets(
+      'stale children stay on screen instead of being replaced by a loading row',
+      (tester) async {
+        // A collapse-then-re-expand re-requests even an already-loaded
+        // directory — while that round trip is in flight the OLD
+        // children keep rendering rather than being cleared for it.
+        const staleWhileRefetching = FileNode(
+          name: 'project',
+          path: 'project',
+          type: FileNodeType.directory,
+          children: [
+            FileNode(
+              name: 'lib',
+              path: 'project/lib',
+              type: FileNodeType.directory,
+              childrenLoading: true,
+              children: [
+                FileNode(
+                  name: 'main.dart',
+                  path: 'project/lib/main.dart',
+                  type: FileNodeType.file,
+                ),
+              ],
+            ),
+          ],
+        );
+
+        await tester.pumpWidget(
+          buildTestWidget(
+            root: staleWhileRefetching,
+            expandedPaths: const {'project/lib'},
+          ),
+        );
+
+        expect(find.text('main.dart'), findsOneWidget);
+        expect(find.text('Loading…'), findsNothing);
+      },
+    );
   });
 }

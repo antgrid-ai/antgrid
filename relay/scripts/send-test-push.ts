@@ -1,4 +1,7 @@
 #!/usr/bin/env bun
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 /**
  * Sends a data-only FCM push to one device token — the relay's own FcmSender,
  * driven by hand. The Firebase console cannot send data-only messages, so this

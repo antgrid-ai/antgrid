@@ -21,6 +21,11 @@ name: Sync changelog spine
 # `allowed_actions: selected` with an explicit patterns_allowed list, so a
 # create-pull-request action would fail to resolve with an error that reads like
 # a typo. `gh` is pre-installed on the runner and needs no allowlist entry.
+#
+# Opening the PR needs "Allow GitHub Actions to create and approve pull
+# requests" to be ON for the org. While it is off, `gh pr create` is refused
+# and the last step degrades to pushing the branch and saying where to click —
+# see the case statement there for why that one refusal does not fail the job.
 
 on:
   # GITHUB_TOKEN release events do not start workflows, so build-desktop calls
@@ -90,8 +95,37 @@ jobs:
           what changed, and where it helps, what was wrong before.
           BODY
 
-          gh pr create \
+          if out=$(gh pr create \
             --base development \
             --head "$BRANCH" \
             --title "chore(site): sync changelog spine" \
-            --body-file /tmp/pr-body.md
+            --body-file /tmp/pr-body.md 2>&1); then
+            echo "$out"
+            exit 0
+          fi
+          echo "$out"
+
+          # ONE refusal is tolerated, and only this one: the org/repo setting
+          # "Allow GitHub Actions to create and approve pull requests" being
+          # off. That is a policy answer rather than a broken release — this
+          # job runs after publish, the spine branch is already pushed, and
+          # failing here reports a release that shipped fine as a release that
+          # did not. Every other failure still fails, because every other
+          # failure means something actually went wrong.
+          case "$out" in
+            *'not permitted to create or approve pull requests'*) ;;
+            *) exit 1 ;;
+          esac
+
+          url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/compare/development...${BRANCH}?expand=1"
+          echo "::error title=Changelog spine PR was not opened::Actions is not permitted to create pull requests. ${BRANCH} is pushed; open it at ${url}"
+          {
+            echo '### Changelog spine PR was not opened'
+            echo
+            echo "\`${BRANCH}\` is pushed and carries the new release row, but Actions"
+            echo 'is not permitted to create pull requests in this org.'
+            echo
+            echo "[Open the PR](${url}), or turn on *Allow GitHub Actions to create and"
+            echo 'approve pull requests* in the org Actions settings so this stops'
+            echo 'needing a human.'
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 import { beforeAll, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";

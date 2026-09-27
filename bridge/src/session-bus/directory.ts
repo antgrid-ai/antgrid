@@ -123,11 +123,6 @@ export interface SessionDirectoryDeps {
    *  SessionDirectory.list} then reports `no-carrier` rather than treating a
    *  wire that was never wired as an empty network. */
   remoteDirectory?: DirectoryRemote;
-  /** Whether THIS machine's remote-access switch is on — checked first in the
-   *  private `remoteHalfFor`, see its own comment for the ordering. Absent
-   *  behaves as on: keeping the mirror empty while the switch is off is the
-   *  ingest gate's job, not this dependency's default. */
-  remoteAccessEnabled?(): boolean;
   /** Injectable clock, so a remote-half test can control TTL and silence
    *  expiry without a real timer. */
   now?(): number;
@@ -271,7 +266,7 @@ export function withLocalFloor(
  *  reasons mean no network read was attempted at all; `"network"` means one
  *  was, and names what it found. */
 export type DirectoryReach =
-  | { scope: "machine"; why: "remote-access-off" | "no-machine-id" | "no-carrier" }
+  | { scope: "machine"; why: "no-machine-id" | "no-carrier" | "remote-access-off" }
   | { scope: "network"; lastPushAgoMs: number; machines: ReachMachine[]; staleMachines: number; notConnected: number };
 
 /**
@@ -359,6 +354,27 @@ export class SessionDirectory {
   }
 
   /**
+   * §5.1's fail-closed bound about the CALLER, read on its own, so a refusal
+   * can tell "this project can address nobody" from "that address resolves to
+   * nobody".
+   *
+   * {@link rowFor} folds the two together: it returns null on its first line
+   * for a keyless caller, which leaves a refusal naming the PEER for a fact
+   * about the CALLER. Three states rather than a boolean for the reason
+   * {@link list} already answers three: a key that has not been PROBED yet is a
+   * startup race that clears on its own — every restarted bridge is briefly in
+   * it — and telling that caller "this project has no git remote" is a second
+   * wrong answer in place of the first.
+   *
+   * Narrow on purpose: it speaks only about the asking side, and touches
+   * neither the mirror nor the session index.
+   */
+  repoKeyState(projectId: string): "keyed" | "no-remote" | "not-probed" {
+    if (this.deps.repoKeys.keyFor(projectId) !== null) return "keyed";
+    return this.deps.repoKeys.probed(projectId) ? "no-remote" : "not-probed";
+  }
+
+  /**
    * The one row a send needs, resolved with no branch probe and no git spawn —
    * `list()` is documented as the bus's one async read precisely so a send
    * never goes through it. `branch` is always null here: §5.3 makes branch a
@@ -412,36 +428,36 @@ export class SessionDirectory {
   /**
    * The remote half of one directory read: rows this machine's mirror can
    * currently offer for `repoKey`, plus the reach report that says why there
-   * are or are not any. The four checks run in exactly this order, and the
+   * are or are not any. The three checks run in exactly this order, and the
    * order is the point — see each arm.
+   *
+   * THIS machine's own remote-access switch is deliberately not among them.
+   * Reading a peer's row discloses nothing about this machine, and the peer
+   * whose row it is decided for itself whether to offer it — so the mirror
+   * stays warm and reach returns the instant the switch does. The narrowing
+   * happens one layer out, at `api.ts`'s `listSessions`, which drops the
+   * off-machine rows and reports `remote-access-off`: a caller that cannot be
+   * sent to must not be offered, but that is a fact about the ANSWER, not about
+   * what this half is allowed to know.
    */
   private remoteHalfFor(
     repoKey: string,
     machineId: string | null,
     now: number,
   ): { rows: SessionDirectoryRow[]; truncated: number; reach: DirectoryReach } {
-    // 1. The switch, first. If this machine's own remote access is off, the
-    //    mirror is kept empty by the ingest gate (`clear()` on the refusal
-    //    path) — but checking carrier presence FIRST would report "no
-    //    carrier" in the one state that is actually "this machine refuses to
-    //    ingest", which reads to a user with a perfectly good desktop app as
-    //    their desktop app being missing.
-    if (this.deps.remoteAccessEnabled?.() === false) {
-      return { rows: [], truncated: 0, reach: { scope: "machine", why: "remote-access-off" } };
-    }
-    // 2. No relay identity: a row this machine cannot be reached at is a row
+    // 1. No relay identity: a row this machine cannot be reached at is a row
     //    that renders as sendable and then refuses at the first reply.
     if (machineId === null) {
       return { rows: [], truncated: 0, reach: { scope: "machine", why: "no-machine-id" } };
     }
-    // 3. No carrier: nothing wired the mirror in this process, or nobody has
+    // 2. No carrier: nothing wired the mirror in this process, or nobody has
     //    pushed to it recently enough to trust. `lastPushAt` is a fact the app
     //    proves by pushing, never a capability flag Zod could strip silently.
     const view = this.deps.remoteDirectory?.view(repoKey, machineId, now);
     if (view === undefined || view.lastPushAt === null || now - view.lastPushAt > REMOTE_CARRIER_SILENCE_MS) {
       return { rows: [], truncated: 0, reach: { scope: "machine", why: "no-carrier" } };
     }
-    // 4. Served: whatever the mirror currently holds for this repo.
+    // 3. Served: whatever the mirror currently holds for this repo.
     return {
       rows: view.rows,
       truncated: view.truncated,

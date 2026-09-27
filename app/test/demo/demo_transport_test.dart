@@ -237,6 +237,57 @@ void main() {
       expect(contents.last.json['content'], contains(kDemoRefusalText));
     });
 
+    // The demo renders through the real FileService, which asks for the tree
+    // one directory at a time. Both verbs have to be answered or the Files
+    // tab is empty for the whole demo and nothing else says so.
+    test('the file tree answers a root pull and an expand', () async {
+      final transport = DemoTransport();
+      addTearDown(transport.dispose);
+      await transport.connect();
+
+      final seen = <InboundMessage>[];
+      _collect(transport, seen);
+      await transport.send({
+        'type': 'file:tree:root:request',
+        'includeIgnored': true,
+      });
+      await transport.send({
+        'type': 'file:tree:children:request',
+        'paths': <String>['src', 'nope'],
+        'includeIgnored': true,
+      });
+      transport.drainScript();
+      await Future<void>.delayed(Duration.zero);
+
+      final frames = seen
+          .where((m) => m.json['type'] == 'file:tree:children')
+          .toList();
+      expect(frames, hasLength(2));
+
+      final rootListing =
+          (frames.first.json['listings'] as List).single
+              as Map<String, Object?>;
+      expect(rootListing['path'], '');
+      final rootChildren = (rootListing['children'] as List)
+          .cast<Map<String, Object?>>();
+      expect(rootChildren.map((c) => c['name']), contains('src'));
+      // A depth-1 listing names a subdirectory without recursing into it —
+      // a carried `children` key would mark it loaded and the demo would
+      // never exercise the expand path at all.
+      final srcEntry = rootChildren.firstWhere((c) => c['name'] == 'src');
+      expect(srcEntry.containsKey('children'), isFalse);
+
+      final listings = (frames.last.json['listings'] as List)
+          .cast<Map<String, Object?>>();
+      final src = listings.firstWhere((l) => l['path'] == 'src');
+      expect(
+        (src['children'] as List).map((c) => (c as Map)['name']),
+        contains('cart.ts'),
+      );
+      final missing = listings.firstWhere((l) => l['path'] == 'nope');
+      expect(missing['missing'], isTrue);
+    });
+
     test('file:search really searches the sample bodies', () async {
       final transport = DemoTransport();
       addTearDown(transport.dispose);

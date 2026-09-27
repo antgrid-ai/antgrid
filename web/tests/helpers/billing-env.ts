@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 import type { CheckoutEnv } from "../../src/billing/checkout.js";
 import type { Env } from "../../src/env.js";
 

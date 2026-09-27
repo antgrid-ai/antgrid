@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 import { describe, expect, test } from "bun:test";
 import type { Auth } from "../../src/auth/better-auth.js";
 import { uiRoutes } from "../../src/routes/ui.js";

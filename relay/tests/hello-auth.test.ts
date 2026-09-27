@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 // The happy paths (agent/app hello -> welcome, non-hello first frame, clock
 // skew) live in hello-smoke.test.ts. This file covers the remaining R10 hello
 // assertions: replay, forged signature, host mismatch, JWKS outage, and the

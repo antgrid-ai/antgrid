@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
+import 'package:clock/clock.dart';
 import 'package:flutter/foundation.dart';
 
 import '../models/terminal_models.dart' show kTerminalFrameProtocolVersion;
@@ -259,6 +260,65 @@ class DemoTransport extends BufferedAgentTransport {
   /// through to nothing while its caller waits is the one failure mode a demo
   /// cannot recover from on its own, so the mutating session verbs answer with
   /// a refusal rather than silence.
+  /// One `file:tree:children` frame answering [paths] out of [kDemoTreeRoot].
+  ///
+  /// The listings are DEPTH-1, as a real bridge's are: a subdirectory entry
+  /// carries no `children` key, so the app reads it as unlisted and asks for
+  /// it when the user expands it. Handing back the nested fixture whole would
+  /// make the demo the one client whose tree never exercises the expand path.
+  /// The seq is constant because nothing in the demo ever changes on disk.
+  Map<String, Object?> _childrenFrame(List<String> paths) {
+    return <String, Object?>{
+      'type': 'file:tree:children',
+      'checkoutId': 'main',
+      'seq': 1,
+      'listings': <Map<String, Object?>>[
+        for (final path in paths) _listingAt(path),
+      ],
+    };
+  }
+
+  Map<String, Object?> _listingAt(String path) {
+    final dir = _demoDirAt(path);
+    if (dir == null) {
+      return <String, Object?>{
+        'path': path,
+        'children': const <Map<String, Object?>>[],
+        'missing': true,
+      };
+    }
+    final children =
+        (dir['children'] as List?)?.whereType<Map<String, Object?>>() ??
+        const <Map<String, Object?>>[];
+    return <String, Object?>{
+      'path': path,
+      'children': <Map<String, Object?>>[
+        for (final child in children)
+          <String, Object?>{
+            for (final field in child.entries)
+              if (field.key != 'children') field.key: field.value,
+          },
+      ],
+    };
+  }
+
+  Map<String, Object?>? _demoDirAt(String path) {
+    var node = kDemoTreeRoot;
+    if (path.isEmpty) return node;
+    for (final segment in path.split('/')) {
+      final children = (node['children'] as List?)
+          ?.whereType<Map<String, Object?>>();
+      if (children == null) return null;
+      Map<String, Object?>? next;
+      for (final child in children) {
+        if (child['name'] == segment) next = child;
+      }
+      if (next == null || next['type'] != 'directory') return null;
+      node = next;
+    }
+    return node;
+  }
+
   List<Map<String, Object?>> _repliesFor(Map<String, dynamic> message) {
     final type = message['type'] as String?;
     final requestId = message['requestId'] as String?;
@@ -296,15 +356,15 @@ class DemoTransport extends BufferedAgentTransport {
       case 'file:read':
         return <Map<String, Object?>>[_fileContent(message['path'] as String?)];
 
-      case 'file:tree:snapshot:request':
-        return <Map<String, Object?>>[
-          <String, Object?>{
-            'type': 'file:tree:snapshot',
-            'checkoutId': 'main',
-            'seq': 1,
-            'tree': kDemoTreeRoot,
-          },
-        ];
+      case 'file:tree:root:request':
+        return <Map<String, Object?>>[_childrenFrame(const <String>[''])];
+
+      case 'file:tree:children:request':
+        final paths =
+            (message['paths'] as List?)?.whereType<String>().toList() ??
+            const <String>[];
+        if (paths.isEmpty) return const [];
+        return <Map<String, Object?>>[_childrenFrame(paths)];
 
       case 'preview:snapshot:request':
         return <Map<String, Object?>>[kDemoPreviewSnapshot, kDemoPortsUpdate];
@@ -793,10 +853,14 @@ class DemoTransport extends BufferedAgentTransport {
   }
 
   // ── playback ──
+  //
+  // Due times read `clock`, never `DateTime.now()`: the timers below run on
+  // fake time under `testWidgets`, and a due time stamped from the real clock
+  // is never reached there, so replies would never arrive in a test.
 
   void _enqueue(List<DemoBeat> beats) {
     if (_disposed) return;
-    final now = DateTime.now();
+    final now = clock.now();
     for (final beat in beats) {
       _queue.add(
         _PendingBeat(now.add(beat.at), _beatSeq++, beat.channel, beat.frame),
@@ -807,7 +871,7 @@ class DemoTransport extends BufferedAgentTransport {
 
   void _enqueueAll(Duration at, List<Map<String, Object?>> frames) {
     if (_disposed || frames.isEmpty) return;
-    final due = DateTime.now().add(at);
+    final due = clock.now().add(at);
     for (final frame in frames) {
       _queue.add(_PendingBeat(due, _beatSeq++, 'control', frame));
     }
@@ -829,14 +893,14 @@ class DemoTransport extends BufferedAgentTransport {
       // meaning in the order alone.
       return byDue != 0 ? byDue : a.seq.compareTo(b.seq);
     });
-    final wait = _queue.first.due.difference(DateTime.now());
+    final wait = _queue.first.due.difference(clock.now());
     _timer = Timer(wait.isNegative ? Duration.zero : wait, _fire);
   }
 
   void _fire() {
     _timer = null;
     if (_disposed) return;
-    final now = DateTime.now();
+    final now = clock.now();
     while (_queue.isNotEmpty && !_queue.first.due.isAfter(now)) {
       final beat = _queue.removeAt(0);
       _dispatchBeat(beat);

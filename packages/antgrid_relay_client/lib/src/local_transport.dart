@@ -358,11 +358,9 @@ class LocalTransport extends BufferedAgentTransport {
         params: {
           'types': ['*'],
           // The native path excludes the same type for the same reason
-          // (`_kHeavyReplayTypes` in machine_session.dart): the agent caches a
-          // `tree:full` per checkout at open, so a replay of everything hands a
-          // local project one full tree per managed worktree — measured at
-          // ~2 MB for a project with several — and no reader wants them.
-          // FileService pulls the tree for the checkout on screen itself.
+          // (`_kHeavyReplayTypes` in machine_session.dart): the tree is listed
+          // per directory on demand, and a whole-tree frame folded into the
+          // replay would be one per managed worktree that no reader wants.
           'exclude': const ['tree:full'],
         },
         timeout: const Duration(seconds: 5),

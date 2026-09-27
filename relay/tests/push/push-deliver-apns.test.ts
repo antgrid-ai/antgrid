@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 import { test, expect, afterAll, beforeAll } from "bun:test";
 import { startServer, connectHello, defaultConfig, waitForMessage } from "../helpers/relay-harness.js";
 import type { RelayServer } from "../../src/server.js";

@@ -1,4 +1,7 @@
 #!/usr/bin/env bun
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 /**
  * APNs counterpart to send-test-push.ts, driving the relay's own ApnsSender
  * pieces by hand against the same five env vars the relay reads.

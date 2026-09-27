@@ -118,13 +118,17 @@ interface IsolatedFixture {
 }
 
 /** Boot a core over the committed repo, attached to a fresh bus. `remote` boots
- *  it the way a relay-attached core runs, machine switch already on, so a refusal
- *  can only come from a per-device gate. */
-async function bootCore(remote = false): Promise<{ bus: MessageBus; sent: AbMessage[] }> {
+ *  it the way a relay-attached core runs, machine switch on unless the test
+ *  hands it a switch of its own, so a refusal can only come from a per-device
+ *  gate. */
+async function bootCore(
+  remote = false,
+  remoteAccessEnabled: () => boolean = () => true,
+): Promise<{ bus: MessageBus; sent: AbMessage[] }> {
   core = await buildAgentCore({
     folder: root,
     mode: remote ? "remote" : "local",
-    ...(remote ? { remoteAccessEnabled: () => true } : {}),
+    ...(remote ? { remoteAccessEnabled } : {}),
     worktreeSessionsSupported: true,
     identity: { deviceId: "agent", deviceName: "agent", createdAt: new Date().toISOString() },
   });
@@ -153,6 +157,12 @@ async function createSession(
   expect(result).toMatchObject({ type: "session:result", ok: true });
   if (result.type !== "session:result" || !result.session) throw new Error("session missing");
   return result.session;
+}
+
+const APP_PEER = "app-dev#machine-dev";
+
+function snapshotRequest(requestId: string): AbMessage {
+  return createMessage("request", { requestId, method: "state.snapshot", params: { types: ["*"] } });
 }
 
 async function checkoutPathOf(checkoutId: string): Promise<string> {
@@ -578,6 +588,28 @@ test.skipIf(process.platform === "win32")(
   },
   20000,
 );
+
+test("clearing the provider does not hand a relay frame the local-core carve-out", async () => {
+  // A core that has faced remote peers stays gated for life: with mobile
+  // access off the pull goes unanswered, and with it on the same pull is
+  // served — so the switch is what decided.
+  await initRepo();
+  let mobileAccess = true;
+  const { bus, sent } = await bootCore(true, () => mobileAccess);
+  core!.setPeerSessionProvider((peerId) => ({ peerId, peerPubkey: "pub-app" }));
+  core!.setPeerSessionProvider(null);
+  mobileAccess = false;
+
+  sent.length = 0;
+  bus.dispatchInbound(snapshotRequest("snap-3"), "control", "relay", APP_PEER);
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  expect(sent.filter((m) => m.type === "response" || m.type === "control:result")).toEqual([]);
+
+  mobileAccess = true;
+  bus.dispatchInbound(snapshotRequest("snap-3b"), "control", "relay", APP_PEER);
+  const served = await waitFor(sent, (m) => m.type === "response" && m.requestId === "snap-3b");
+  expect(served).toMatchObject({ type: "response", ok: true });
+});
 
 test("admit refuses NOT_ALLOWED for an unknown checkout, and admits a known peer to the checkout runtime's own manager", async () => {
   // Tunnel streams bypass the bus, so the per-device admission check has to be

@@ -70,6 +70,7 @@ const FileTreeNodeSchema: z.ZodType<{
   extension?: string;
   children?: any[];
   truncated?: true;
+  ignored?: true;
 }> = z.lazy(() =>
   z.object({
     name: z.string(),
@@ -78,9 +79,15 @@ const FileTreeNodeSchema: z.ZodType<{
     size: z.number().optional(),
     extension: z.string().optional(),
     children: z.array(FileTreeNodeSchema).optional(),
-    // The directory's listing was cut at the tree's node budget — see
-    // MAX_TREE_NODES in file-tree.ts.
+    // The directory's listing was cut at a budget — MAX_LISTING_ENTRIES for a
+    // single listing, MAX_BATCH_NODES across a batch. See file-tree.ts.
     truncated: z.literal(true).optional(),
+    // Git ignores this entry but includeIgnored was true for the request
+    // that listed it — set by listDirectory/listDirectoryBatch's
+    // markAgainst second verdict (file-tree.ts). The watcher's own ignore
+    // prune never consults this and never updates a marked entry live: an
+    // ignored row goes stale until the directory is re-listed.
+    ignored: z.literal(true).optional(),
   }),
 );
 
@@ -775,14 +782,17 @@ const ControlResultMessage = BaseMessage.extend({
 });
 
 // File tree & code viewer messages
+
+/** Nothing in `bridge/src` produces this any more — apps list per directory on
+ *  demand. The type stays declared only because the Dart clients still name it
+ *  in their replay `exclude`; it retires together with that exclude. */
 const TreeFullMessage = BaseMessage.extend({
   type: z.literal("tree:full"),
   projectId: z.string(),
   root: FileTreeNodeSchema,
-  // Which revision of the watcher's tree this is. A resync push is the only
-  // full tree that still reaches an app unasked, and an app that cannot name
-  // the revision it holds cannot ask "still this one?" on the next resume —
-  // see `sinceSeq` below. Optional so a pre-seq bridge still parses.
+  // Which revision of the watcher's tree this is, so an app that holds one
+  // from an older bridge can ask "still this one?" on the next resume — see
+  // `sinceSeq` below. Optional so a pre-seq bridge still parses.
   seq: z.number().int().nonnegative().optional(),
   ...CheckoutScoped,
 });
@@ -968,6 +978,12 @@ const NotificationPushMessage = BaseMessage.extend({
   // (notification_routing.dart).
   sessionId: z.string().optional(),
   projectId: z.string().optional(),
+  // WHO reported this: the agent itself, not the bridge speaking about it — the
+  // two are one shape, and the Handler's wrap-up is `task_complete` on the slot
+  // it is armed on (see push-dispatcher.ts). Absent must mean "keep it", so this
+  // marks the suppressible half. Stamped by {@link agentNotification}, not by
+  // hand. Not mirrored in the app — nothing on the far side reads it.
+  origin: z.literal("agent").optional(),
 });
 
 /** The app encodes its persistent X25519 push key as standard base64 of the raw
@@ -1330,7 +1346,9 @@ const HandlerSnapshotMessage = BaseMessage.extend({
 // the snapshots are: the wrap-up is what DISARMS the session, so by the time the
 // report is worth reading its session is gone from `sessions` and nothing else on
 // this frame names it. The activity row that carries the same prose cannot stand
-// in — `handler:activity` is not replayed, and its jsonl is never read back.
+// in — `handler:activity` is not replayed, and the jsonl behind it is read back
+// only as the newest HANDLER_HISTORY_RECORDS of one project's feed, which a
+// finished session's report is not guaranteed to still be inside.
 //
 // What this shape freezes, deliberately: MAX_STORED_WRAPUPS (5) records, each up
 // to 4 outcome groups x 8 sampled items x 120 chars, plus 3 blocked reasons and a
@@ -1583,6 +1601,77 @@ const HandlerActivityMessage = BaseMessage.extend({
   ]),
   reason: z.string(),
   detail: z.string().optional(),
+});
+
+/**
+ * How many records one `handler:history:page` carries.
+ *
+ * The app's own buffer caps at 200 and nothing establishes the feed is
+ * scrolled, so this is a single answer rather than the first of a series —
+ * `terminal:history:request` pages because scrollback is unbounded and people
+ * genuinely scroll it, which is not this feed. Adding `beforeRecordId` later
+ * keeps every field below, so nothing here has to be unpicked for it.
+ */
+export const HANDLER_HISTORY_RECORDS = 50;
+
+/**
+ * One record as `handler:history:page` carries it — the `handler:activity`
+ * payload minus `type`/`projectId`, which is also exactly the on-disk shape, so
+ * a page needs no transformation.
+ *
+ * `decision` is a bare string where the live frame's is an enum, and the
+ * difference is deliberate. A live frame is written by THIS build, so it can
+ * only hold a kind this build knows. A page is read off a log that any past or
+ * future build may have appended to, and that log is the only durable,
+ * decision-by-decision account of a finished session — so a kind not in the
+ * enum must still arrive. Rejecting it would drop the whole page over one old
+ * row. The app types the field as a String for the same reason and renders an
+ * unknown kind as that row's raw reason.
+ */
+const HandlerActivityRecordWire = z.object({
+  recordId: z.string(),
+  at: z.number(),
+  terminalId: z.string(),
+  decision: z.string(),
+  reason: z.string(),
+  detail: z.string().optional(),
+});
+
+/**
+ * Ask for the newest slice of a project's activity log.
+ *
+ * Project-scoped, not checkout-scoped, matching `handler:activity`: the bridge
+ * resolves the log from `projectId` alone, and a `checkoutId` here would be a
+ * second, conflicting answer to a question already settled.
+ */
+export const HandlerHistoryRequestWire = z.object({
+  requestId: z.string().uuid(),
+});
+
+const HandlerHistoryRequestMessage = BaseMessage.extend({
+  type: z.literal("handler:history:request"),
+  // Carried so the app can file the answer, and echoed back from the receiving
+  // core's OWN id rather than from this field — a frame naming another project
+  // must not read that project's log.
+  projectId: z.string(),
+}).extend(HandlerHistoryRequestWire.shape);
+
+const HandlerHistoryPageMessage = BaseMessage.extend({
+  type: z.literal("handler:history:page"),
+  projectId: z.string(),
+  requestId: z.string().uuid(),
+  /**
+   * Newest first, matching the app's buffer, which prepends live rows at index
+   * 0 and renders unreversed. The log is oldest-first, so the reader reverses
+   * it — a silent order flip renders a correct feed upside down.
+   */
+  records: z.array(HandlerActivityRecordWire).max(HANDLER_HISTORY_RECORDS),
+  /**
+   * Older records exist that this page does not carry. It must be RENDERED, not
+   * merely carried: a feed showing the newest 50 of 300 with nothing saying so
+   * presents a truncated history as a complete one.
+   */
+  truncated: z.boolean(),
 });
 
 const AgentHelloMessage = BaseMessage.extend({
@@ -2054,32 +2143,137 @@ const TerminalDisplayStatusMessage = BaseMessage.extend({
   ...CheckoutScoped,
 });
 
-const FileTreeSnapshotRequestMessage = BaseMessage.extend({
-  type: z.literal("file:tree:snapshot:request"),
-  /** The revision the caller's tree is already at. Matched against the
-   *  watcher's current seq: still equal means the caller is current and is
-   *  answered `file:tree:unchanged` instead of the whole tree. Only a caller
-   *  that can vouch the seq came from THIS agent process may send it — a
-   *  restarted agent counts from zero again, so a stale claim would be
-   *  confirmed rather than corrected (see file_service.dart). */
-  sinceSeq: z.number().int().nonnegative().optional(),
-  ...CheckoutScoped,
-});
-
-const FileTreeSnapshotMessage = BaseMessage.extend({
-  type: z.literal("file:tree:snapshot"),
-  tree: FileTreeNodeSchema,
-  seq: z.number().int().nonnegative(),
-  ...CheckoutScoped,
-});
-
 /** The cheap answer to a `sinceSeq` request the watcher has not moved past.
- *  Its own type rather than a tree-less `file:tree:snapshot`: a snapshot whose
- *  tree is sometimes absent puts a "when is this null?" question on every
- *  future reader of the frame that normally carries the tree. */
+ *  Its own type rather than a tree-less `file:tree:children`: a listing whose
+ *  payload is sometimes absent puts a "when is this null?" question on every
+ *  future reader of the frame that normally carries it. */
 const FileTreeUnchangedMessage = BaseMessage.extend({
   type: z.literal("file:tree:unchanged"),
   seq: z.number().int().nonnegative(),
+  ...CheckoutScoped,
+});
+
+// ── On-demand file tree listings ── Depth-1 directory listings fetched when
+// a folder is opened; the only way a client gets a tree. Every
+// default and bound below is documentation only: parseMessageFast (the
+// encrypted/local hot path) validates the message TYPE alone, so a real
+// inbound frame's Zod defaults and bounds never run — see the MAX_LOG_PAGE
+// comment in git-log.ts. The handlers in agent-core.ts clamp by hand.
+
+const FileTreeRootRequestMessage = BaseMessage.extend({
+  type: z.literal("file:tree:root:request"),
+  /** The revision the caller's tree is already at. Matched against the
+   *  watcher's current seq: still equal means the caller is current and is
+   *  answered `file:tree:unchanged` instead of a listing. Only a caller that
+   *  can vouch the seq came from THIS agent process may send it — a restarted
+   *  agent counts from zero again, so a stale claim would be confirmed rather
+   *  than corrected (see file_service.dart). */
+  sinceSeq: z.number().int().nonnegative().optional(),
+  /** Omitted reads as TRUE here and as FALSE on file:find (a later wave) —
+   *  the tree browses and wants to show everything, find hands a path to an
+   *  agent and wants to hide node_modules. Declared `.optional()` rather than
+   *  `.default(true)` because the default would never fire on the wire yet
+   *  would make the field REQUIRED in `MessagePayload`, forcing every sender
+   *  to spell out the value the default exists to supply. */
+  includeIgnored: z.boolean().optional(),
+  ...CheckoutScoped,
+});
+
+const FileTreeChildrenRequestMessage = BaseMessage.extend({
+  type: z.literal("file:tree:children:request"),
+  /** Checkout-relative, `/`-separated. "" is the root. */
+  paths: z.array(z.string()).min(1).max(64),
+  /** Omitted reads as TRUE — see FileTreeRootRequestMessage. */
+  includeIgnored: z.boolean().optional(),
+  ...CheckoutScoped,
+});
+
+const DirectoryListingSchema = z.object({
+  path: z.string(),
+  children: z.array(FileTreeNodeSchema),
+  /** Cut at the per-listing cap or the batch budget — `children` is an
+   *  ordered prefix, not the whole directory. See MAX_LISTING_ENTRIES /
+   *  MAX_BATCH_NODES in file-tree.ts. */
+  truncated: z.literal(true).optional(),
+  /** The directory no longer exists, or its resolved path escaped the
+   *  checkout. Distinct from a genuinely empty directory, which answers
+   *  `children: []` with no `missing` — collapsing the two leaves a deleted
+   *  folder spinning forever in the app. */
+  missing: z.literal(true).optional(),
+});
+
+const FileTreeChildrenMessage = BaseMessage.extend({
+  type: z.literal("file:tree:children"),
+  listings: z.array(DirectoryListingSchema),
+  seq: z.number().int().nonnegative(),
+  ...CheckoutScoped,
+});
+
+/** Replaces a forced tree(-full) resend: the app clears childrenLoaded
+ *  everywhere and re-lists the root plus its subscribed set itself, rather
+ *  than being pushed a tree it may not want at whole-checkout size. */
+const FileTreeInvalidatedMessage = BaseMessage.extend({
+  type: z.literal("file:tree:invalidated"),
+  seq: z.number().int().nonnegative(),
+  ...CheckoutScoped,
+});
+
+// ── Delta-bandwidth subscription ── Purely a hint for which directories
+// flushBatch's tree:update filters down to; it never reaches the watcher's
+// own ignore rules or what it watches. Same parseMessageFast caveat as every
+// frame above — file-watcher.ts hand-validates `paths` itself.
+
+const FileTreeSubscribeMessage = BaseMessage.extend({
+  type: z.literal("file:tree:subscribe"),
+  /** REPLACES the sender's whole set — idempotent, so a reconnect hydrator
+   *  can just re-send it. Empty array unsubscribes. Checkout-relative,
+   *  `/`-separated; "" is the root. No reply, no ack. */
+  paths: z.array(z.string()).max(512),
+  ...CheckoutScoped,
+});
+
+// ── Path search ── Backs
+// @-mentions and the tree's filter box. No file:find-cancel: supersede by
+// requestId, killing the previous process the way FileSearcher.search does,
+// and let the app drop replies for a requestId it no longer wants. Same
+// parseMessageFast caveat as the listing frames above — handlers clamp by hand.
+
+const FileFindMessage = BaseMessage.extend({
+  type: z.literal("file:find"),
+  projectId: z.string(),
+  requestId: z.string(),
+  query: z.string().max(256),
+  /** FALSE by default — the opposite of the tree's frames: find hands a
+   *  path to an agent, and node_modules is noise there. */
+  includeIgnored: z.boolean().default(false),
+  /** Directories are DERIVED from file path prefixes; an empty one is
+   *  invisible to find even though the tree shows it. */
+  kinds: z.enum(["files", "dirs", "both"]).default("both"),
+  limit: z.number().int().positive().max(500).default(100),
+  ...CheckoutScoped,
+});
+
+const FileFindResultMessage = BaseMessage.extend({
+  type: z.literal("file:find-result"),
+  projectId: z.string(),
+  requestId: z.string(),
+  entries: z.array(z.object({
+    path: z.string(),
+    isDir: z.boolean(),
+    // Same meaning as FileTreeNodeSchema's `ignored`, and set only when the
+    // request carried includeIgnored: true — the filter box replaces the tree
+    // on screen, so a path both surfaces can show must read the same in both.
+    ignored: z.literal(true).optional(),
+  })),
+  /** The scan hit its cap — entries is the best-scoring prefix. */
+  truncated: z.boolean(),
+  /** `"none"` when no engine ran at all — a listing that was superseded,
+   *  timed out, or was refused before a finder existed. Without that member
+   *  every error path had to claim `"walk"`, which sent anyone debugging an
+   *  empty result toward the readdir fallback on machines that have both
+   *  binaries and never touched it. */
+  engine: z.enum(["ripgrep", "git-ls-files", "walk", "none"]),
+  error: z.string().optional(),
   ...CheckoutScoped,
 });
 
@@ -2224,8 +2418,10 @@ export const SessionBusFetchResultWire = z.object({
 /** The delivery receipt (E6), keyed by the id of the message it answers — the
  *  only honest witness that a frame arrived, since everything this side of the
  *  relay reports only that it left. It is fire-and-forget: an unacked ack is
- *  never retried, and `ok: false` is still a receipt — "this reached me", not
- *  "I liked it". No `seq`, because messages have none. */
+ *  never retried. `ok: false` is still a receipt — "this reached me", not "I
+ *  liked it" — but it stamps nothing here: the stamp renders as the peer having
+ *  taken the frame, so stamping a refusal would tell the sender the opposite of
+ *  what the peer said. No `seq`, because messages have none. */
 export const SessionBusAckWire = z.object({
   ...SessionBusBaseWire,
   messageId: z.string().min(1).max(200),
@@ -2329,7 +2525,7 @@ const SessionBusReachMachineSchema = z.object({
 const SessionBusDirectoryReachSchema = z.discriminatedUnion("scope", [
   z.object({
     scope: z.literal("machine"),
-    why: z.enum(["remote-access-off", "no-machine-id", "no-carrier"]),
+    why: z.enum(["no-machine-id", "no-carrier", "remote-access-off"]),
   }),
   z.object({
     scope: z.literal("network"),
@@ -2368,9 +2564,11 @@ const SessionBusThreadEntrySchema = z.object({
   peer: SessionMemberKeySchema,
   summary: z.string().max(MAX_SUMMARY_CHARS),
   text: z.array(z.string()),
-  /** Outbound entries only, and its absence is "no receipt yet" rather than a
-   *  failure: a receipt is fire-and-forget and an unacked message is never
-   *  retried. This read is the only surface that stamp is visible on. */
+  /** Outbound entries only: when a receipt saying the peer BRIDGE took the
+   *  frame arrived. Never that the peer's agent read it, and never that a
+   *  message from that peer can reach back here. Absent covers silence and a
+   *  refusing receipt alike — a receipt is fire-and-forget and an unacked
+   *  message is never retried. This read is the only surface it is visible on. */
   deliveredAt: z.number().optional(),
 });
 
@@ -2526,6 +2724,8 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   HandlerStatusMessage,
   HandlerEscalationMessage,
   HandlerActivityMessage,
+  HandlerHistoryRequestMessage,
+  HandlerHistoryPageMessage,
   HandlerSnapshotMessage,
   HandlerUndoMessage,
   HandlerDismissMessage,
@@ -2593,9 +2793,14 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   TerminalHistoryRequestMessage,
   TerminalHistoryPageMessage,
   TerminalDisplayStatusMessage,
-  FileTreeSnapshotRequestMessage,
-  FileTreeSnapshotMessage,
   FileTreeUnchangedMessage,
+  FileTreeRootRequestMessage,
+  FileTreeChildrenRequestMessage,
+  FileTreeChildrenMessage,
+  FileTreeInvalidatedMessage,
+  FileTreeSubscribeMessage,
+  FileFindMessage,
+  FileFindResultMessage,
   PreviewSnapshotRequestMessage,
   PreviewSnapshotMessage,
   RequestMessage,
@@ -2687,6 +2892,9 @@ export type HandlerStatusMsg = z.infer<typeof HandlerStatusMessage>;
 export type HandlerEntitlement = z.infer<typeof HandlerEntitlementWire>;
 export type HandlerEscalationMsg = z.infer<typeof HandlerEscalationMessage>;
 export type HandlerActivityMsg = z.infer<typeof HandlerActivityMessage>;
+export type HandlerActivityRecordPayload = z.infer<typeof HandlerActivityRecordWire>;
+export type HandlerHistoryRequestMsg = z.infer<typeof HandlerHistoryRequestMessage>;
+export type HandlerHistoryPageMsg = z.infer<typeof HandlerHistoryPageMessage>;
 export type HandlerSnapshotMsg = z.infer<typeof HandlerSnapshotMessage>;
 export type HandlerUndoMsg = z.infer<typeof HandlerUndoMessage>;
 export type HandlerDismissMsg = z.infer<typeof HandlerDismissMessage>;
@@ -2776,9 +2984,14 @@ export type TerminalUnsubscribe = z.infer<typeof TerminalUnsubscribeMessage>;
 export type TerminalHistoryRequest = z.infer<typeof TerminalHistoryRequestMessage>;
 export type TerminalHistoryPage = z.infer<typeof TerminalHistoryPageMessage>;
 export type TerminalDisplayStatus = z.infer<typeof TerminalDisplayStatusMessage>;
-export type FileTreeSnapshotRequest = z.infer<typeof FileTreeSnapshotRequestMessage>;
-export type FileTreeSnapshot = z.infer<typeof FileTreeSnapshotMessage>;
 export type FileTreeUnchanged = z.infer<typeof FileTreeUnchangedMessage>;
+export type FileTreeRootRequest = z.infer<typeof FileTreeRootRequestMessage>;
+export type FileTreeChildrenRequest = z.infer<typeof FileTreeChildrenRequestMessage>;
+export type FileTreeChildren = z.infer<typeof FileTreeChildrenMessage>;
+export type FileTreeInvalidated = z.infer<typeof FileTreeInvalidatedMessage>;
+export type FileTreeSubscribe = z.infer<typeof FileTreeSubscribeMessage>;
+export type FileFind = z.infer<typeof FileFindMessage>;
+export type FileFindResult = z.infer<typeof FileFindResultMessage>;
 export type PreviewSnapshotRequest = z.infer<typeof PreviewSnapshotRequestMessage>;
 export type PreviewSnapshot = z.infer<typeof PreviewSnapshotMessage>;
 export type PreviewUrlEntry = z.infer<typeof PreviewUrlEntrySchema>;
@@ -2885,7 +3098,10 @@ export const CHECKOUT_VARIABLE_MESSAGE_TYPES = new Set<string>([
   "git:sync", "git:sync-result", "git:sync-status", "git:sync-state",
   "command:run", "command:output", "command:done",
   "config:read", "config:read-result", "config:write", "config:write-result", "config:changed", "config:detect-tools", "config:detect-tools-result",
-  "ports:update", "port:detected", "preview:url", "file:tree:snapshot:request", "file:tree:snapshot", "file:tree:unchanged", "preview:snapshot:request", "preview:snapshot",
+  "ports:update", "port:detected", "preview:url", "file:tree:unchanged", "preview:snapshot:request", "preview:snapshot",
+  "file:tree:root:request", "file:tree:children:request", "file:tree:children", "file:tree:invalidated",
+  "file:tree:subscribe",
+  "file:find", "file:find-result",
   "session:result", "control:result",
 ]);
 
@@ -2937,6 +3153,15 @@ export function createMessage<T extends AbMessage["type"]>(
   } as Extract<AbMessage, { type: T }>;
 }
 
+/** A `notification:push` the AGENT reported about itself (see `origin` on
+ *  NotificationPushMessage). A constructor rather than a stamped field because
+ *  forgetting the field fails silently — safely, but with no test to catch it. */
+export function agentNotification(
+  payload: Omit<MessagePayload<"notification:push">, "origin">,
+): Extract<AbMessage, { type: "notification:push" }> {
+  return createMessage("notification:push", { ...payload, origin: "agent" });
+}
+
 /**
  * Wrap a resume-replay as a single `agent:transcript-replay` frame, or null
  * when there is nothing to replay.
@@ -2983,6 +3208,7 @@ const KNOWN_TYPES = new Set<string>([
   "agent:projects", "agent:tools", "stream-ready", "control:result",
   "command:run", "command:output", "command:done", "notification:push", "push:register",
   "handler:configure", "handler:instruct", "handler:status", "handler:escalation", "handler:activity",
+  "handler:history:request", "handler:history:page",
   "handler:snapshot", "handler:undo", "handler:dismiss", "handler:answer",
   "git:status", "git:diff", "git:diff-content",
   "git:list-branches", "git:branches", "git:checkout", "git:checkout-result",
@@ -3007,7 +3233,10 @@ const KNOWN_TYPES = new Set<string>([
   "client:focus-state",
   "terminal:subscribe", "terminal:subscribed", "terminal:frame", "terminal:ack",
   "terminal:unsubscribe", "terminal:history:request", "terminal:history:page", "terminal:display:status",
-  "file:tree:snapshot:request", "file:tree:snapshot", "file:tree:unchanged",
+  "file:tree:unchanged",
+  "file:tree:root:request", "file:tree:children:request", "file:tree:children", "file:tree:invalidated",
+  "file:tree:subscribe",
+  "file:find", "file:find-result",
   "preview:snapshot:request", "preview:snapshot",
   "request", "response",
   "agent:turn-start", "agent:session-reset", "agent:turn-end",

@@ -46,6 +46,19 @@ describe("terminal frame manager wiring", () => {
     return (manager as unknown as { sessions: Map<string, ReturnType<typeof session>> }).sessions.get("t1")!;
   }
 
+  /** Puts a source into its one latching state. A backlog is NOT one — `feed()`
+   *  drops the chunk and carries on — so the trigger is a resize that throws,
+   *  which is what the latch is for: a resize rewrites the grid and the row
+   *  archive's geometry together, and a throw inside one leaves neither
+   *  describing the guest. */
+  async function latch(screen: TerminalFrameSource): Promise<void> {
+    (screen as unknown as { term: { resize(cols: number, rows: number): void } }).term.resize = () => {
+      throw new Error("resize: grid gone");
+    };
+    screen.resize(100, 40);
+    await screen.settle();
+  }
+
   test("a same-id respawn gets a new run and authoritative emulator", () => {
     const first = spawn();
     const firstRun = manager.runId("t1");
@@ -65,24 +78,39 @@ describe("terminal frame manager wiring", () => {
     expect(spawn()).toBeInstanceOf(TerminalFrameSource);
   });
 
-  test("parser overflow stays failed across snapshot attempts and further output", async () => {
+  test("a latched parser stays failed across snapshot attempts and further output", async () => {
     const screen = spawn();
     const runId = manager.runId("t1");
-    screen.feed("x".repeat(1_000_001));
+    await latch(screen);
     const failure = screen.failure;
     expect(failure).toBeDefined();
     for (let attempt = 0; attempt < 5; attempt++) {
-      expect(() => screen.capture(performance.now())).toThrow("backlog");
+      expect(() => screen.capture(performance.now())).toThrow("resize");
       screen.feed("new output");
     }
     expect(screen.failure).toBe(failure);
     expect(manager.runId("t1")).toBe(runId);
     expect((manager as unknown as { screens: Map<string, TerminalFrameSource> }).screens.get("t1")).toBe(screen);
-    expect(() => screen.capture(performance.now())).toThrow("backlog");
+    expect(() => screen.capture(performance.now())).toThrow("resize");
     expect(manager.has("t1")).toBe(true);
   });
 
-  test("a viewer is told DISPLAY_FAILED when an already-painted source overflows", async () => {
+  test("a backlog costs the chunk and not the run's display", async () => {
+    const screen = spawn();
+    const runId = manager.runId("t1");
+    screen.feed("x".repeat(16_000_001));
+    expect(screen.failure).toBeUndefined();
+    expect(() => screen.capture(performance.now())).not.toThrow();
+    // The same slot, the same run, still attached — and the next thing the
+    // guest paints is on screen.
+    screen.feed("after the drop");
+    await screen.settle();
+    expect(screen.capture(performance.now())?.ansi).toContain("after the drop");
+    expect(manager.runId("t1")).toBe(runId);
+    expect((manager as unknown as { screens: Map<string, TerminalFrameSource> }).screens.get("t1")).toBe(screen);
+  });
+
+  test("a viewer is told DISPLAY_FAILED when an already-painted source latches", async () => {
     const screen = spawn();
     await screen.settle();
     let now = 100;
@@ -100,7 +128,7 @@ describe("terminal frame manager wiring", () => {
       hub.tick();
       expect(sent.some((message) => message.type === "terminal:frame")).toBe(true);
       now += 100;
-      screen.feed("x".repeat(1_000_001));
+      await latch(screen);
       hub.tick();
       await Promise.resolve();
       expect(sent.some((message) => message.type === "terminal:display:status" && message.code === "DISPLAY_FAILED")).toBe(true);
@@ -114,7 +142,7 @@ describe("terminal frame manager wiring", () => {
     const target = session();
     const writes: string[] = [];
     target.write = (data) => { writes.push(data); };
-    screen.feed("x".repeat(1_000_001));
+    await latch(screen);
     expect(() => screen.capture(performance.now())).toThrow();
     const burst = "\x1b[c\x1b[6n\x1b[?25$p";
     target.respondToCapabilityQueries(burst);

@@ -7,6 +7,7 @@ import 'agent_catalog.dart';
 import 'cached_sessions.dart';
 import 'projects.dart' show projectsProvider;
 import 'providers.dart' show preferencesServiceProvider, storageServiceProvider;
+import 'session_workspace_state.dart' show sessionLayoutStoreProvider;
 
 /// One purge step: a store name (for error reporting) plus the async clear
 /// itself.
@@ -141,6 +142,13 @@ Future<void> purgeAccountCaches(
     (
       store: 'pairedAgents',
       clear: () => ref.read(storageServiceProvider).clearPairedAgents(),
+    ),
+    (
+      // Keyed by session id, so unlike the project preferences below there is
+      // nothing local to filter by and keep — every entry names a session of
+      // the account being signed out of.
+      store: 'sessionLayout',
+      clear: () => ref.read(sessionLayoutStoreProvider).clear(),
     ),
     (
       store: 'projectPreferences',

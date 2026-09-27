@@ -17,20 +17,23 @@ class RecordingHistory {
   readonly rows: TerminalHistoryRow[] = [];
   private epoch = 0;
   private nextRowId = 0;
+  private gapped = false;
 
   append(row: Omit<TerminalHistoryRow, "rowId">): void {
     this.rows.push(TerminalHistoryRowSchema.parse({ ...row, rowId: this.nextRowId++ }));
   }
   flush(): void {}
+  noteGap(): void { this.gapped = true; }
   clear(): void {
     this.epoch++;
     this.nextRowId = 0;
     this.rows.length = 0;
+    this.gapped = false;
   }
   boundary(): TerminalHistoryBoundary {
     return {
       epoch: this.epoch, firstRowId: this.rows[0]?.rowId ?? this.nextRowId,
-      nextRowId: this.nextRowId, status: "recording",
+      nextRowId: this.nextRowId, status: "recording", gapped: this.gapped,
     };
   }
   /** Archived rows as trimmed text, which is what an eviction assertion is about. */
@@ -418,6 +421,37 @@ describe("terminal frame row archive", () => {
       expect(rec.source.revision).toBe(3);
     });
   }
+
+  test("a dropped chunk marks every later frame's boundary gapped", async () => {
+    const rec = recorder();
+    await feed(rec, SIX_LINES);
+    expect(rec.source.capture(0)?.history.gapped).toBe(false);
+    // Refused whole by `feed()`, so the rows it would have scrolled into the
+    // archive never exist while the ids on either side of them run straight on.
+    // Nothing else on the boundary moves, which is the reason for the flag.
+    rec.source.feed("x".repeat(16_000_001));
+    await feed(rec, "\r\nafter");
+    expect(rec.source.capture(1)?.history.gapped).toBe(true);
+    // Still true for a viewer that arrives afterwards: the loss belongs to the
+    // epoch, not to the frame it happened on.
+    await feed(rec, "\r\nlater");
+    expect(rec.source.capture(2)?.history.gapped).toBe(true);
+  });
+
+  test("a history clear leaves the gap with the epoch that owned it", async () => {
+    const rec = recorder();
+    rec.source.feed("x".repeat(16_000_001));
+    await feed(rec, "gapped");
+    expect(rec.source.capture(0)?.history.gapped).toBe(true);
+    const epoch = rec.source.capture(0)!.history.epoch;
+    // CSI H, CSI 2J, CSI 3J — what `clear` and ncurses' E3 send, and the app's
+    // discontinuity signal in its own right. The new epoch archives from
+    // nothing, so it has no hole to report.
+    await feed(rec, "\x1b[H\x1b[2J\x1b[3J");
+    const next = rec.source.capture(1)!.history;
+    expect(next.epoch).toBe(epoch + 1);
+    expect(next.gapped).toBe(false);
+  });
 
   test("archived rows carry SGR and OSC 8 metadata in their spans", async () => {
     const rec = recorder(20, 4);

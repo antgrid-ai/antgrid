@@ -34,6 +34,10 @@ export const suppressesOscNotifications = (tool: string, available: boolean | Te
 export const suppressesOscTitle = (tool: string, available: boolean | TerminalObservationAvailability | undefined) =>
   titleSourceFor(tool) === "structured" && (typeof available === "object" ? available.titles : available !== false);
 export const injectsHookAliveProbe = (tool: string) => agentSpec(tool)?.observation?.hookAlive === true;
+/** Does this agent announce the start of a turn? Only claude-code does, so a
+ *  caller that waits for one needs an answer for every other agent rather than
+ *  a wait nothing ends. */
+export const reportsTurnStart = (tool: string | undefined) => !!tool && agentSpec(tool)?.observation?.turnStart === true;
 export const needsKeystrokeTurnStart = (tool: string | undefined) => {
   return !!tool && agentSpec(tool)?.inferTurnStart === true;
 };

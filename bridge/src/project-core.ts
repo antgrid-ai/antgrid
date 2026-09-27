@@ -5,8 +5,8 @@ import { LocalListener } from "./local-listener";
 import type { AttachStreamOpts, PeerSessionView, StreamHandle } from "./project-streams";
 import type { AbMessage, SessionEntry, WorkStatus } from "./protocol";
 import type { DeleteSessionOptions } from "./session-manager";
-import { answerRequest, clientFocusState, clientGone, closeTurn, initialWorkStatus, isStaleIdleNudge, reduceWorkStatus, sessionFocus, turnOpenFor, turnStart, UNATTRIBUTED_TURN, userReply, type WorkStatusState } from "./work-status";
-import { SessionBusDeliveryQueue, closedTurns, type QueuedLine } from "./session-bus/delivery-queue";
+import { answerRequest, becameDeliverable, busDeliverable, clientFocusState, clientGone, closeTurn, hookTurnEnd, initialWorkStatus, isStaleIdleNudge, noteHookChannelLost, noteHookChannelRestored, openedTurns, reduceWorkStatus, sessionFocus, turnStart, UNATTRIBUTED_TURN, userReply, type WorkStatusState } from "./work-status";
+import { SessionBusDeliveryQueue, type QueuedLine } from "./session-bus/delivery-queue";
 import { logger } from "./logger";
 const log = logger.child({ component: "project-core" });
 import { createPushDispatcher } from "./push/push-dispatcher";
@@ -74,12 +74,17 @@ export class ProjectCore {
   private core: AgentCore | null = null;
   private bus: MessageBus | null = null;
   private listener: LocalListener | null = null;
-  /** The primary remote-mode core's host-local stream over native peer sessions. */
-  private streamHandle: StreamHandle | null = null;
-  /** Unsubscribe for the primary (remote-mode) stream's push dispatcher bus
-   *  subscription. Torn down in shutdown() alongside the stream. The promote()
-   *  slot owns its own unsub in its PromotionHandle.stop() instead. */
-  private relayPushUnsub: (() => void) | null = null;
+  /** This core's project stream with the push subscriber that rides it: the
+   *  primary binding for a remote-mode core, the promoted one for a local-mode
+   *  core. {@link sendToAppSession} has no other way to reach the wire, so a
+   *  promoted core that left this unset could carry a session-bus exchange IN
+   *  and never answer it. Written only by {@link attachRelayStream}. */
+  private slot: {
+    handle: StreamHandle;
+    /** An ADDITIVE subscriber on a bus that outlives the stream, so whoever
+     *  detaches the handle must drop this too. */
+    unsubscribePush: () => void;
+  } | null = null;
   private relayFirstRegister: Promise<void> | null = null;
   private relayRegistered = false;
   private _localConnectInfo: { port: number; token: string } | null = null;
@@ -137,8 +142,9 @@ export class ProjectCore {
     // the caller has to decide whether to hold it. "The session is live" is the
     // strongest fact available synchronously and is exactly what the boolean
     // used to mean.
-    if (!this.streamHandle?.deliverableTo(peerId)) return false;
-    void this.streamHandle.sendTo(msg, "control", { kind: "peer", peerId });
+    const slot = this.slot;
+    if (!slot?.handle.deliverableTo(peerId)) return false;
+    void slot.handle.sendTo(msg, "control", { kind: "peer", peerId });
     return true;
   }
   /** Current reduced work status (working/attention/done/error) for the
@@ -216,11 +222,16 @@ export class ProjectCore {
       || next.runningCount !== this._work.runningCount
       || perSessionChanged;
     // Computed against the OLD state and drained against the new one: the
-    // closing edge is the whole delivery boundary, and reading it after the
+    // releasing edge is the whole delivery boundary, and reading it after the
     // swap would compare the new state with itself.
-    const closed = closedTurns(this._work, next);
+    const released = becameDeliverable(this._work, next);
+    // The other half of the same edge pair: a line already submitted is retired
+    // by the turn it opened, which is the only evidence this bridge gets that
+    // the agent read it rather than left it sitting in its composer.
+    const opened = openedTurns(this._work, next);
     this._work = next;
-    for (const sessionId of closed) {
+    for (const sessionId of opened) this.deliveries?.confirm(sessionId);
+    for (const sessionId of released) {
       // An agent with no per-session turn reporting closes the UNATTRIBUTED_TURN
       // key instead of its own id (see work-status.ts), and that close is a real
       // boundary for every session in the project — the same reading `statusFor`
@@ -265,10 +276,12 @@ export class ProjectCore {
   }
 
   /** The user typed into [sessionId]'s PTY — the only "I answered" signal a
-   *  terminal-mode session has. Clears its block; claims a turn only for an
-   *  agent that can't report its own turn starts, and only when the session has
-   *  typed content to submit. See {@link userReply}. */
-  noteUserReply(sessionId: string, opts: { submitted: boolean; typed: boolean }): void {
+   *  terminal-mode session has. Claims a turn only for an agent that cannot
+   *  report its own starts, and only for a typed PROMPT. See {@link userReply}. */
+  noteUserReply(
+    sessionId: string,
+    opts: { submitted: boolean; typed: boolean; command?: boolean },
+  ): void {
     this.commitWork(userReply(this._work, sessionId, opts));
   }
 
@@ -312,6 +325,23 @@ export class ProjectCore {
     this.commitWork(closeTurn(this._work, sessionId));
   }
 
+  /** A hook reported [sessionId]'s turn over on a channel that files no
+   *  notification — the second closer. See {@link hookTurnEnd}. */
+  noteHookTurnEnd(sessionId: string): void {
+    this.commitWork(hookTurnEnd(this._work, sessionId));
+  }
+
+  /** [sessionId]'s injected hooks have been written off, so nothing is left to
+   *  close a turn inferred from a keystroke. See {@link noteHookChannelLost}. */
+  noteHookChannelLost(sessionId: string): void {
+    this.commitWork(noteHookChannelLost(this._work, sessionId));
+  }
+
+  /** ...and they answered after all. See {@link noteHookChannelRestored}. */
+  noteHookChannelRestored(sessionId: string): void {
+    this.commitWork(noteHookChannelRestored(this._work, sessionId));
+  }
+
   /** Resolves when a remote core's host-local project binding is ready. */
   whenRelayRegistered(): Promise<void> | null { return this.relayFirstRegister; }
 
@@ -325,6 +355,12 @@ export class ProjectCore {
   /** Forward a session delete to the live AgentCore. False if not started. */
   deleteSession(id: string, options?: DeleteSessionOptions): boolean | Promise<boolean> {
     return this.core?.deleteSession(id, options) ?? false;
+  }
+
+  /** Forward a session start to the live AgentCore. A no-op if not started —
+   *  the host only calls this for a project it already found warm. */
+  startSession(id: string): void {
+    this.core?.startSession(id);
   }
 
   /** Forward the live session list (with true per-session `running`) to the
@@ -359,6 +395,9 @@ export class ProjectCore {
       onUserReply: (sessionId, replyOpts) => this.noteUserReply(sessionId, replyOpts),
       onAnswer: (sessionId, requestId) => this.noteAnswer(sessionId, requestId),
       onInterrupt: (sessionId) => this.noteInterrupt(sessionId),
+      onHookTurnEnd: (sessionId) => this.noteHookTurnEnd(sessionId),
+      onHookChannelLost: (sessionId) => this.noteHookChannelLost(sessionId),
+      onHookChannelRestored: (sessionId) => this.noteHookChannelRestored(sessionId),
       onSessionFocus: (sessionId, client) => this.noteSessionFocus(sessionId, client),
       onClientFocusState: (paused, client) => this.noteClientFocusState(paused, client),
       // The single source of per-session work status: SessionManager stamps it
@@ -392,6 +431,10 @@ export class ProjectCore {
       // refuses AGENT_NOT_READY ahead of every other gate on a real bridge
       // while every in-process test that injects a directory stays green.
       ...(this.deps.sessionDirectory ? { sessionDirectory: this.deps.sessionDirectory } : {}),
+      // Host-injected for the same reason and forwarded the same way: a bridge
+      // with no host (evals, most of this file's own test callers) offers no
+      // wake at all, and the §7.3 refusal falls back to its unconditional shape.
+      ...(this.deps.startSession ? { startSession: this.deps.startSession } : {}),
       queueBusLine: (line: Omit<QueuedLine, "queuedAt">) => this.deliveries?.queue(line),
       forgetBusLines: (sessionId: string) => this.deliveries?.forget(sessionId),
       relayUrl: this.deps.relayUrl,
@@ -403,11 +446,11 @@ export class ProjectCore {
     this.deliveries = new SessionBusDeliveryQueue({
       abDir: core.abDir,
       projectId: core.projectId,
-      // The reduction's own predicate, not a second reading of the same set: an
+      // The reduction's own predicate, not a second reading of its inputs: an
       // agent that cannot attribute its turn-starts records them under
       // UNATTRIBUTED_TURN, and a delivery submitted against one lands mid-turn.
-      isTurnOpen: (sessionId) => turnOpenFor(this._work.activeTurns, sessionId),
-      inject: (line) => this.core?.injectBusLine(line.sessionId, line.text) ?? false,
+      canDeliver: (sessionId) => busDeliverable(this._work, sessionId),
+      inject: (line) => this.core?.injectBusLine(line.sessionId, line.text) ?? "refused",
     });
     const bus = new MessageBus();
     this.bus = bus;
@@ -486,10 +529,7 @@ export class ProjectCore {
 
     await this.bindLoopback(core, bus);
 
-    const slot = this.attachRelayStream(core, bus, remote);
-    this.streamHandle = slot.handle;
-    this.relayPushUnsub = slot.unsubscribePush;
-    this.relayFirstRegister = slot.firstRegister;
+    this.relayFirstRegister = this.attachRelayStream(core, bus, remote).firstRegister;
   }
 
   /** Attach an already-built core+bus as a host-local native project stream and wire
@@ -503,7 +543,14 @@ export class ProjectCore {
     core: AgentCore,
     bus: MessageBus,
     remote: ProjectCoreRemoteDeps,
-  ): { handle: StreamHandle; firstRegister: Promise<void>; unsubscribePush: () => void } {
+  ): {
+    handle: StreamHandle;
+    firstRegister: Promise<void>;
+    unsubscribePush: () => void;
+    /** Full teardown for this attach; idempotent, and safe once a re-attach
+     *  has taken the slot over. False once it has. */
+    detachSlot: () => boolean;
+  } {
     // A binding is ready synchronously once the host's project-stream registry
     // admits it. Keep the promise-shaped seam so callers cannot race the ready
     // advertisement.
@@ -601,6 +648,7 @@ export class ProjectCore {
       // Read live, never captured: a slot is armed and disarmed under a stream
       // that outlives both.
       isHandlerArmed: (terminalId) => core.isHandlerArmed(terminalId),
+      handlerOwnsCompletion: (terminalId) => core.handlerOwnsCompletion(terminalId),
       // Target every registered phone that CANNOT receive this in band right
       // now, which is the question push actually answers. A device is in band
       // only while it holds an established native session AND that session's
@@ -667,7 +715,34 @@ export class ProjectCore {
       },
     });
 
-    return { handle, firstRegister, unsubscribePush };
+    // Claimed here, not by the caller: an attach leaving the slot unset can carry
+    // a session-bus exchange IN and never answer it, the reply expiring at the
+    // TTL with the send having reported itself on its way. `promote` refuses a
+    // remote-mode core, so a takeover means a second promote without a stop —
+    // warn rather than throw, since the overwrite would fail a live path.
+    if (this.slot) {
+      log.warn(
+        "project stream slot for %s taken over by a second attach — the earlier stream can no longer be answered on",
+        core.projectId,
+      );
+    }
+    this.slot = { handle, unsubscribePush };
+
+    // Push and stream go first, so `sendToAppSession` refuses rather than
+    // reporting a send onto a dead stream. The core's hooks are its single copy,
+    // which a second attach now owns, so they are cleared only by the attach
+    // that still holds the slot.
+    const detachSlot = (): boolean => {
+      try { unsubscribePush(); } catch { /* best-effort */ }
+      try { handle.detach(); } catch { /* best-effort */ }
+      if (this.slot?.handle !== handle) return false;
+      this.slot = null;
+      try { core.setPeerSessionProvider(null); } catch { /* best-effort */ }
+      try { core.setTerminalStreamHooks(null); } catch { /* best-effort */ }
+      return true;
+    };
+
+    return { handle, firstRegister, unsubscribePush, detachSlot };
   }
 
   /** Promote an already-open (typically LOCAL) core to remote access by adding a
@@ -688,7 +763,7 @@ export class ProjectCore {
     const bus = this.bus;
     if (!core || !bus) throw new Error("ProjectCore.promote: core not started (call start() first)");
 
-    const { handle, firstRegister, unsubscribePush } = this.attachRelayStream(core, bus, remoteDeps);
+    const { firstRegister, detachSlot } = this.attachRelayStream(core, bus, remoteDeps);
 
     let stopped = false;
     return {
@@ -696,15 +771,10 @@ export class ProjectCore {
       stop: () => {
         if (stopped) return;
         stopped = true;
-        // The stream is gone → no longer dialable; the advert reads not-running
-        // again (a re-promote re-attaches and flips it back). Detach the push
-        // dispatcher and the stream BEFORE clearing the hooks so the gate stays
-        // active until the stream is gone.
-        this.relayRegistered = false;
-        try { unsubscribePush(); } catch {}
-        try { handle.detach(); } catch {}
-        try { core.setPeerSessionProvider(null); } catch {}
-        try { core.setTerminalStreamHooks(null); } catch {}
+        // No stream → not dialable, so the advert reads not-running (a re-promote
+        // flips it back). Unless a second attach owns the slot: ITS stream is
+        // still admitted.
+        if (detachSlot()) this.relayRegistered = false;
       },
     };
   }
@@ -713,12 +783,19 @@ export class ProjectCore {
   async shutdown(reason?: string): Promise<void> {
     try { this.core?.setPeerSessionProvider(null); } catch {}
     try { this.core?.setTerminalStreamHooks(null); } catch {}
-    // Remove the primary stream's push dispatcher (additive bus subscriber) before
-    // detaching — deliver() would otherwise hand a frame to a torn-down stream.
-    try { this.relayPushUnsub?.(); } catch {}
-    this.relayPushUnsub = null;
+    // Before detaching — deliver() would otherwise hand a frame to a torn-down
+    // stream.
+    try { this.slot?.unsubscribePush(); } catch {}
+    // After the core, not before: the bus subscriber stays attached for the
+    // bus's lifetime, and the `session:updated` frames a shutdown emits as
+    // sessions stop reach `drainAll` — which arms a fresh timer on a queue that
+    // has just been disposed.
     try { await this.core?.shutdown(); } catch {}
+    try { this.deliveries?.dispose(); } catch {}
     try { await this.listener?.stop(); } catch {}
-    try { this.streamHandle?.detach(); } catch {}
+    try { this.slot?.handle.detach(); } catch {}
+    // Match promote().stop(): a detached handle left in the slot would have
+    // `sendToAppSession` still answering true onto a dead stream.
+    this.slot = null;
   }
 }

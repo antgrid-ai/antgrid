@@ -10,12 +10,6 @@ import { links, offerUrlFor, PLATFORMS } from "../../config";
 // script needs the pair together to answer "did this URL ask for a build this
 // reader can actually run". Derived rather than written out, so an id still
 // only ever exists in config.ts.
-//
-// `<` is escaped on the way out because JSON.stringify does not escape it and
-// set:html inserts this verbatim: the HTML tokenizer ends a <script> at the
-// first `</script` in its raw text no matter what quoting it sits inside, so a
-// URL that ever contained one would close the tag and parse the rest of the
-// page's head as markup. < is the same character to a JS parser.
 const SCRIPT_BUILDS = JSON.stringify(
   Object.fromEntries(PLATFORMS.map((p) => [p.id, { os: p.os, url: p.url }]))
 ).replace(/</g, "\\u003c");
@@ -307,10 +301,10 @@ const STEPS = [
           been handed their build or is one click from it, and an ask any higher
           would be asking to be paid before delivering.
 
-          "Source-available", not "open source". Most of the tree is ELv2 (see
-          LICENSING.md); only the wire and relay-client packages are Apache. A
-          reader who clicks through expecting MIT is a reader we misled, and this
-          is the page where we are asking them for something. */}
+          Open source under MPL-2.0, with the relay and web services under ELv2
+          (see LICENSING.md). A reader who clicks through expecting MIT is a
+          reader we misled, and this is the page where we are asking them for
+          something. */}
       <a
         href={links.repo}
         class="group mt-3 flex items-center gap-4 rounded-lg border border-edge bg-panel/50 p-5 transition-colors duration-200 motion-reduce:transition-none hover:border-edge-emph hover:bg-panel"
@@ -324,7 +318,7 @@ const STEPS = [
         <span class="min-w-0 flex-1">
           <span class="block text-note font-medium text-ink">Star antgrid on GitHub</span>
           <span class="mt-1 block text-meta leading-relaxed text-muted">
-            The bridge, the relay and both apps are source-available — protocol, crypto client and all. Stars are how the next person finds it.
+            The bridge and both apps are MPL-2.0; the relay service is ELv2. Every release links to its exact source. Stars are how the next person finds it.
           </span>
         </span>
         <span class="hidden shrink-0 items-center gap-1.5 text-meta text-muted2 transition-colors duration-200 motion-reduce:transition-none group-hover:text-signal2 sm:inline-flex">

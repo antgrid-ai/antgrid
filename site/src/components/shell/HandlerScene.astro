@@ -28,11 +28,11 @@ const { class: cls = "" } = Astro.props;
 const wrapUp = [
   { verdict: "Done", label: "validate cart and email", tone: "text-ab-ok" },
   { verdict: "Skipped", label: "fix lint", tone: "text-ab-dim" },
-  { verdict: "Blocked", label: "open a PR", tone: "text-ab-attn" },
+  { verdict: "Blocked", label: "open a PR", tone: "text-ab-attn-ink" },
 ];
 
 const activity = [
-  { label: "Completion not verified: no test command ran", at: "02:58", tone: "text-ab-attn" },
+  { label: "Completion not verified: no test command ran", at: "02:58", tone: "text-ab-attn-ink" },
   { label: "Auto-answered: allow write to tests/checkout.test.ts", at: "02:52", tone: "text-ab-mute" },
   { label: "Armed", at: "02:41", tone: "text-ab-mute" },
 ];
@@ -67,7 +67,7 @@ const activity = [
         </div>
         <div class="text-meta leading-relaxed text-ab-mute">
           The goal says <span class="text-ab-text2">tests green before a PR</span>. This phase produced three file
-          edits and no test run, so <span class="text-ab-attn">completion is not verified</span>. Wrap-up held.
+          edits and no test run, so <span class="text-ab-attn-ink">completion is not verified</span>. Wrap-up held.
         </div>
         <div class="mt-2 flex flex-wrap gap-1.5">
           <span class="rounded border border-signalbtn bg-signalbtn px-2 py-0.5 text-meta font-medium text-ab-deepest">Run the suite, then report</span>

@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:antgrid/billing/pricing_visibility.dart';
 import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/design/widgets/ab_button.dart';
 import 'package:antgrid/design/widgets/ab_text_field.dart';
@@ -272,7 +273,9 @@ void main() {
             tier: 'free',
           ),
         ),
-        contains('Free plan'),
+        kPricingSurfacesEnabled
+            ? contains('Free plan')
+            : contains("isn't available"),
       );
       expect(
         handlerShieldTooltip(
@@ -307,7 +310,18 @@ void main() {
   });
 
   group('handlerEntitlementNotice', () {
-    test('names the plan the machine is on when the bridge could read one', () {
+    test('names no plan while pricing is hidden', () {
+      final notice = handlerEntitlementNotice(
+        const HandlerEntitlement(
+          reason: HandlerEntitlementReason.notEntitled,
+          tier: 'free',
+        ),
+      );
+      expect(notice, isNot(contains('Pro')));
+      expect(notice, isNot(contains('plan')));
+    }, skip: kPricingSurfacesEnabled);
+
+    test('names the plan the machine is on when the bridge could read one', skip: !kPricingSurfacesEnabled, () {
       // "You need Pro" alone leaves a paying user unable to tell whether they
       // already have it.
       expect(
@@ -655,22 +669,29 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      await tester.tap(find.text('QA'));
+      await tester.tap(find.text('Proof it works'));
       await tester.pumpAndSettle();
-      await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
+      final armButton = find.widgetWithText(AbButton, 'Arm Handler');
+      await tester.ensureVisible(armButton);
+      await tester.pumpAndSettle();
+      await tester.tap(armButton);
       await tester.pumpAndSettle();
 
       expect(armFrame(transport)['role'], 'qa');
-      expect(armFrame(transport).containsKey('brief'), isFalse);
+      // A preset is exclusive with the user's own stance (redesign spec §6), so
+      // it clears the brief explicitly rather than omitting it — an omitted
+      // field means "leave the stored one alone", which would run this preset
+      // on top of a user lens the sheet no longer shows.
+      expect(armFrame(transport)['brief'], '');
       await confirmArmed(tester, transport);
     });
 
-    testWidgets('a lens moved away from and back still rides the arm', (
+    testWidgets('the last lens tapped is the one that rides the arm', (
       tester,
     ) async {
-      // The default is a real answer, not the absence of one: the bridge may
-      // hold a lens this app has never been told about, so landing back on the
-      // rules alone has to go out as a clear.
+      // The row is a radio and the arm collects rather than commits, so only
+      // the final pick may reach the wire — an earlier one arriving instead
+      // would arm the session under a lens the user moved off.
       final (transport, container, context) = await pumpArm(tester);
       await advertiseLenses(tester, transport);
 
@@ -683,23 +704,26 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      await tester.tap(find.text('CRITIC'));
+      await tester.tap(find.text('What could break'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('INTENT AND COMPLETION'));
+      await tester.tap(find.text('Stays in scope'));
       await tester.pumpAndSettle();
-      await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
+      final armButton = find.widgetWithText(AbButton, 'Arm Handler');
+      await tester.ensureVisible(armButton);
+      await tester.pumpAndSettle();
+      await tester.tap(armButton);
       await tester.pumpAndSettle();
 
-      expect(armFrame(transport)['role'], '');
+      expect(armFrame(transport)['role'], 'pm');
       await confirmArmed(tester, transport);
     });
 
-    testWidgets('the default picked over a cold cache goes out as a clear', (
+    testWidgets('the arm sheet offers no chip for adding nothing', (
       tester,
     ) async {
-      // Nothing is selected when this app has not been told what the session
-      // runs, so the one tap that says "the rules alone" is the only thing that
-      // can replace a lens the bridge is holding.
+      // A session with no lens is still judged — the floor line above the row
+      // says so — so a chip for it asked the user to choose the state they are
+      // already in.
       final (transport, container, context) = await pumpArm(tester);
       await advertiseLenses(tester, transport);
 
@@ -712,12 +736,98 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      await tester.tap(find.text('INTENT AND COMPLETION'));
-      await tester.pumpAndSettle();
-      await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
+
+      expect(find.text('Nothing extra'), findsNothing);
+      for (final label in const [
+        'Stays in scope',
+        'Proof it works',
+        'What could break',
+        'Ready to ship',
+        'Your own',
+      ]) {
+        expect(find.text(label), findsOneWidget, reason: label);
+      }
+    });
+
+    testWidgets('the arm sheet opens with the cursor in the instruction box', (
+      tester,
+    ) async {
+      // The sheet exists to be answered with a sentence; making the user aim
+      // at the box first is a step between them and the only act on it.
+      final (transport, container, context) = await pumpArm(tester);
+      await advertiseLenses(tester, transport);
+
+      unawaited(
+        armWithSheet(
+          context: context,
+          container: container,
+          terminalId: 't1',
+          agentObservable: true,
+        ),
+      );
       await tester.pumpAndSettle();
 
-      expect(armFrame(transport)['role'], '');
+      expect(
+        tester
+            .widget<EditableText>(find.byType(EditableText).first)
+            .focusNode
+            .hasFocus,
+        isTrue,
+      );
+    });
+
+    testWidgets('a multi-line draft survives the sheet echoing it back', (
+      tester,
+    ) async {
+      // Under commitBriefOnEdit the sheet re-renders this control from the
+      // JOINED brief on every keystroke. The panel must not read that echo of
+      // the user's own typing as the bridge correcting it: writing it back
+      // replaces their line breaks with "; " under the cursor, one keystroke
+      // behind, and one rule per line is the whole shape the panel teaches
+      // (redesign spec §7, §8).
+      final (transport, container, context) = await pumpArm(tester);
+      await advertiseLenses(tester, transport);
+
+      unawaited(
+        armWithSheet(
+          context: context,
+          container: container,
+          terminalId: 't1',
+          agentObservable: true,
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Your own'));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const ValueKey('handlerOwnLensField')),
+        'not done until the tests pass\nask before the payment path',
+      );
+      await tester.pumpAndSettle();
+
+      final draft = tester.widget<EditableText>(
+        find.descendant(
+          of: find.byKey(const ValueKey('handlerOwnLensField')),
+          matching: find.byType(EditableText),
+        ),
+      );
+      expect(
+        draft.controller.text,
+        'not done until the tests pass\nask before the payment path',
+      );
+
+      final armButton = find.widgetWithText(AbButton, 'Arm Handler');
+      await tester.ensureVisible(armButton);
+      await tester.pumpAndSettle();
+      await tester.tap(armButton);
+      await tester.pumpAndSettle();
+
+      // The wire still gets the one line the bridge will store, each rule kept
+      // bounded through `oneLine`'s newline-to-space collapse (§8).
+      expect(
+        armFrame(transport)['brief'],
+        'not done until the tests pass; ask before the payment path',
+      );
       await confirmArmed(tester, transport);
     });
 
@@ -739,16 +849,30 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
+      // "Your own" reveals the panel — the free-text field is no longer always
+      // on screen (redesign spec §3, §6).
+      await tester.tap(find.text('Your own'));
+      await tester.pumpAndSettle();
       await tester.enterText(
         find.byType(AbTextField),
         '  watch the migrations  ',
       );
       await tester.pumpAndSettle();
-      await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
+      // The panel's minimum three lines push the button past the fold that
+      // fit it before the redesign, so it needs a scroll into view rather
+      // than a bare tap.
+      final armButton = find.widgetWithText(AbButton, 'Arm Handler');
+      await tester.ensureVisible(armButton);
+      await tester.pumpAndSettle();
+      await tester.tap(armButton);
       await tester.pumpAndSettle();
 
       expect(armFrame(transport)['brief'], 'watch the migrations');
-      expect(armFrame(transport).containsKey('role'), isFalse);
+      // "Your own" is a tap on the same radio the four presets sit in
+      // (redesign spec §3.2, §9), so it touches the role same as they do —
+      // clearing it explicitly (`''`) rather than omitting it is what keeps a
+      // role this arm never asked for from riding along from a stale seed.
+      expect(armFrame(transport)['role'], '');
       await confirmArmed(tester, transport);
     });
 
@@ -785,12 +909,23 @@ void main() {
 
       // The arm sheet is a form that could not have committed, so it never
       // opens: the refusal takes its place and offers the one fix it has.
-      expect(find.text('Handler needs Pro'), findsOneWidget);
-      expect(find.textContaining('Free plan'), findsOneWidget);
-      expect(find.widgetWithText(AbButton, 'See plans'), findsOneWidget);
+      if (kPricingSurfacesEnabled) {
+        expect(find.text('Handler needs Pro'), findsOneWidget);
+        expect(find.textContaining('Free plan'), findsOneWidget);
+        expect(find.widgetWithText(AbButton, 'See plans'), findsOneWidget);
+      } else {
+        expect(find.text('Handler is unavailable'), findsOneWidget);
+        expect(find.textContaining('Pro'), findsNothing);
+        expect(find.widgetWithText(AbButton, 'See plans'), findsNothing);
+      }
       expect(find.widgetWithText(AbButton, 'Arm Handler'), findsNothing);
 
-      await tester.tap(find.widgetWithText(AbButton, 'Not now'));
+      await tester.tap(
+        find.widgetWithText(
+          AbButton,
+          kPricingSurfacesEnabled ? 'Not now' : 'Close',
+        ),
+      );
       await tester.pumpAndSettle();
       expect(
         transport.sent.where((m) => m['type'] == 'handler:configure'),
@@ -860,7 +995,12 @@ void main() {
       await refuse(tester, transport, {'reason': 'not_entitled', 'tier': 'free'});
 
       expect(find.text('Handler not armed'), findsOneWidget);
-      expect(find.textContaining('Free plan'), findsOneWidget);
+      expect(
+        find.textContaining(
+          kPricingSurfacesEnabled ? 'Free plan' : "isn't available",
+        ),
+        findsOneWidget,
+      );
       await settleToast(tester);
     });
 

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 // web/src/billing/reconcile-seats.ts
 //
 // The daily sweep that compares what each gateway is billing against what

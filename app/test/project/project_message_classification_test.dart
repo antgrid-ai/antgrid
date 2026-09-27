@@ -40,7 +40,7 @@ void main() {
         'terminal:output',
         'tree:full',
         'tree:update',
-        'file:tree:snapshot',
+        'file:tree:children',
         'file:content',
         'preview:url',
         'preview:snapshot',
@@ -59,7 +59,7 @@ void main() {
     });
 
     test('snapshot replies are heavy', () {
-      expect(classifyAbMessageByType('file:tree:snapshot'), MessageTier.heavy);
+      expect(classifyAbMessageByType('file:tree:children'), MessageTier.heavy);
       expect(classifyAbMessageByType('preview:snapshot'), MessageTier.heavy);
     });
 
@@ -78,7 +78,6 @@ void main() {
         'hello',
         'something-unknown',
         '',
-        'file:tree:snapshot:request',
         'preview:snapshot:request',
         'client:focus-state',
       ];

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 // web/scripts/reconcile-seats.ts
 //
 // Daily seat reconciliation, invoked from OUTSIDE the process — a systemd timer,

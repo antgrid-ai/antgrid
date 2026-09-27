@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 // web/src/billing/capabilities.ts
 
 // Capabilities: what a plan or a negotiated contract unlocks, beyond the numeric

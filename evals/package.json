@@ -1,5 +1,6 @@
 {
   "name": "antgrid-evals",
+  "license": "MPL-2.0",
   "private": true,
   "scripts": {
     "typecheck": "tsc --noEmit",

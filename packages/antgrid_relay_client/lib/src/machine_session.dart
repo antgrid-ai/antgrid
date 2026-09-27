@@ -503,6 +503,7 @@ class MachineSession {
   /// ONE attempt, no retry: the app's connection supervisor owns backoff and
   /// give-up, so a loop here would nest inside its backoff and multiply it.
   Future<void> _handshakeAttempt() async {
+    final startedAt = DateTime.now();
     final ok = await _handshaker.perform();
     if (_disposed) return;
     if (!ok) {
@@ -512,6 +513,15 @@ class MachineSession {
       unawaited(relay.close());
       return;
     }
+    // The failure is the supervisor's to report; this line is what lets a
+    // slow establishment be told apart from a session that never came up.
+    _log(
+      RelayLogLevel.info,
+      'session established',
+      fields: {
+        'elapsedMs': DateTime.now().difference(startedAt).inMilliseconds,
+      },
+    );
     _established = true;
     if (!_firstEstablished.isCompleted) _firstEstablished.complete();
     _lastRecv = DateTime.now();
@@ -1743,17 +1753,12 @@ class StreamTransport extends BufferedAgentTransport {
   /// config, the reopened file, the transcript). This is the per-stream
   /// reconciliation checkpoint.
   ///
-  /// The pull carries every durable frame but the file tree, and for a remote
-  /// app it is the ONLY carrier of a checkout's `agent:status` — the frame its
-  /// terminal tabs are built from: `terminal:started` is not durable, the
-  /// bridge republishes a checkout's status on nothing an app can trigger
-  /// short of starting a session that is already running, and the next
-  /// establishment is the only other re-pull. `tree:full` is left out on
-  /// purpose, and not pulled separately either: it is the one unbounded frame
-  /// (every checkout's whole tree, megabytes for a project with several
-  /// worktrees), and the hydrators below already ask the bridge for each
-  /// checkout's tree on every establishment, so pulling it here too would
-  /// send the same megabytes again on every connect.
+  /// The pull carries every durable frame but [_kHeavyReplayTypes], and
+  /// for a remote app it is the ONLY carrier of a checkout's `agent:status` —
+  /// the frame its terminal tabs are built from: `terminal:started` is not
+  /// durable, the bridge republishes a checkout's status on nothing an app can
+  /// trigger short of starting a session that is already running, and the next
+  /// establishment is the only other re-pull.
   ///
   /// One request carries the whole pull, under [MachineSession.snapshotDeadline]
   /// — long enough that a reply landing after this call's own wait
@@ -1771,12 +1776,11 @@ class StreamTransport extends BufferedAgentTransport {
   /// [refreshSnapshot] exists for a (re)establishment, where the view-state the
   /// snapshot does not carry is stale too. A user asking one checkout to try
   /// attaching again is not that: the hydrator replay re-asks every ACTIVE
-  /// checkout for its whole `tree:full`, so routing a tap through it would
-  /// answer one stalled workspace with megabytes for every workspace on
-  /// screen beside it. This carries the frame
-  /// that tap is actually after — the bridge recomputes each checkout's
-  /// `agent:status` while serving the pull, so the reply is no older than the
-  /// tap.
+  /// checkout for its full listing state, so routing a tap through it would
+  /// answer one stalled workspace with extra round trips for every workspace
+  /// on screen beside it. This carries the frame that tap is actually after —
+  /// the bridge recomputes each checkout's `agent:status` while serving the
+  /// pull, so the reply is no older than the tap.
   ///
   /// Shares [_fetchSnapshot]'s generation stamp, so a pull already airborne is
   /// superseded rather than duplicated. The returned future completes when
@@ -1910,9 +1914,10 @@ class StreamTransport extends BufferedAgentTransport {
   }
 }
 
-/// Durable frames the snapshot pull leaves out: the only unbounded ones the
-/// bridge caches, each delivered by a per-checkout hydrator instead — see
-/// [StreamTransport.refreshSnapshot].
+/// Whole-tree frames the snapshot pull leaves out. The file tree is listed per
+/// directory on demand and this app has no handler for a whole-tree frame, so
+/// one folded into the pull would be megabytes (one per checkout) received
+/// only to be dropped — see [StreamTransport.refreshSnapshot].
 const _kHeavyReplayTypes = <String>['tree:full'];
 
 /// Decodes [record] as UTF-8, or null on any failure — never throws.

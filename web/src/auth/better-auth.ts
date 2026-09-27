@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 import { betterAuth } from "better-auth";
 import { oneTimeToken } from "better-auth/plugins";
 import { crossDeviceMagicLink } from "./cross-device-plugin.js";

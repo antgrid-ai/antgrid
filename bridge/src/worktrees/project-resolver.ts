@@ -2,6 +2,7 @@ import { realpathSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { resolveAbDir } from "../antgrid-dir";
+import { spawnGit } from "../git-spawn";
 import { computeProjectId } from "../project-id";
 import { CheckoutStore } from "./checkout-store";
 import { parseWorktreeList } from "./git-worktree-list";
@@ -68,7 +69,7 @@ export const runGit: GitRunner = async (args, cwd) => {
   // HostServer.open — which resolves before anything else — fail for plain
   // non-Git projects on a machine without Git.
   try {
-    const proc = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
+    const proc = spawnGit(cwd, args);
     const [stdout, stderr, exitCode] = await Promise.all([
       readBounded(proc.stdout),
       readBounded(proc.stderr),

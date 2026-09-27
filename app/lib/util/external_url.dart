@@ -263,7 +263,7 @@ Future<void> _openFileLink(
     }
     revealView(WorkspaceView.files);
     if (result.isDirectory) {
-      service.revealDirectory(relPath);
+      await service.revealDirectory(relPath);
     } else {
       service.selectFile(relPath);
     }

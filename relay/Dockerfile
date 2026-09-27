@@ -28,6 +28,9 @@ COPY relay/tsconfig.json ./relay/
 
 # Shared workspace dep imported by relay/src at runtime (antgrid-wire -> ./src/index.ts).
 COPY packages/antgrid-wire/src ./packages/antgrid-wire/src
+COPY packages/antgrid-wire/LICENSE ./packages/antgrid-wire/LICENSE
+COPY LICENSE.md LICENSING.md THIRD-PARTY.md SOURCE_OFFER.md ./
+COPY relay/LICENSE.md ./relay/LICENSE.md
 
 WORKDIR /app/relay
 EXPOSE 8080

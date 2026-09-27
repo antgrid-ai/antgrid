@@ -1,23 +1,13 @@
-> ## Antgrid is not accepting external pull requests yet
->
-> Please close this and [open an issue](https://github.com/antgrid-ai/antgrid/issues)
-> instead — a clear bug report is worth more to us right now than a patch we
-> cannot merge.
->
-> This is not about the change. Most of Antgrid ships under the [Elastic License
-> 2.0](https://github.com/antgrid-ai/antgrid/blob/development/LICENSE.md), whose
-> grant is non-sublicensable, so merging outside contributions needs a
-> contributor licence agreement that does not exist yet. Until it does, we cannot
-> take patches from anyone outside the project — no exceptions, including small
-> ones. [CONTRIBUTING.md](https://github.com/antgrid-ai/antgrid/blob/development/CONTRIBUTING.md)
-> explains the whole position.
->
-> Sorry to meet you with a closed door. Forking, modifying and self-hosting are
-> all fully permitted and need no permission from us — it is only sending changes
-> back that is on hold, and it is temporary.
-
 <!--
-Maintainers: delete everything above this line.
+Thanks for this. Two rules — CONTRIBUTING.md has the reasoning:
+https://github.com/antgrid-ai/antgrid/blob/development/CONTRIBUTING.md
+
+1. Docs, site, typos and tests can come straight here. Anything else in
+   bridge/, app/, packages/, evals/ or scripts/ wants an issue first.
+2. relay/, web/ and packages/antgrid-wire are closed to outside patches —
+   a licensing constraint, not a judgement on the change. Open an issue.
+
+Delete this comment and fill in the rest.
 -->
 
 ## What changed

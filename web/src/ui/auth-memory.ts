@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 /** Client-side memory of how each address signed in last time.
  *
  *  This is what makes the email-first flow's step 2 land on the right method

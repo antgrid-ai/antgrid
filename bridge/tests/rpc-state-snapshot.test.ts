@@ -8,11 +8,8 @@ import { snapshotAsksFor } from "../src/rpc/state-snapshot";
 describe("rpc: state.snapshot", () => {
   test("returns cached frames as a response", async () => {
     const bus = new MessageBus();
-    const tree = createMessage("tree:full", {
-      projectId: "p1",
-      root: { name: "root", path: "/", type: "directory" as const, children: [] },
-    });
-    bus.publish(tree, "control");
+    const git = createMessage("git:status", { projectId: "p1", files: [] });
+    bus.publish(git, "control");
 
     const req: RpcRequest = createMessage("request", {
       requestId: "r1",
@@ -25,24 +22,22 @@ describe("rpc: state.snapshot", () => {
     expect(res.requestId).toBe("r1");
     expect(res.ok).toBe(true);
     const result = res.result as { frames: any[] };
-    expect(result.frames.map((f) => f.type)).toEqual(["tree:full"]);
+    expect(result.frames.map((f) => f.type)).toEqual(["git:status"]);
   });
 
-  // The app pulls its durable state in two round trips split by weight: the
-  // status/git frames the terminal is built from, then every checkout's file
-  // tree on its own. `exclude` is what keeps the tree out of the first.
+  // The app pulls its durable state in ONE round trip and names the types it
+  // has no handler for, so a bridge older than it cannot spend the uplink on
+  // frames it would only discard (today that is `tree:full`). The field is a
+  // generic filter — this drives it with a type this bridge still caches.
   test("a ['*'] pull with exclude leaves the excluded types out", async () => {
     const bus = new MessageBus();
-    bus.publish(createMessage("tree:full", {
-      projectId: "p1",
-      root: { name: "root", path: "/", type: "directory" as const, children: [] },
-    }), "control");
+    bus.publish(createMessage("agent:status", { terminals: [], agent: { version: "test" } }), "control");
     bus.publish(createMessage("git:status", { projectId: "p1", files: [] }), "control");
 
     const res = (await dispatchRpc(bus, createMessage("request", {
       requestId: "r1",
       method: "state.snapshot",
-      params: { types: ["*"], exclude: ["tree:full"] },
+      params: { types: ["*"], exclude: ["agent:status"] },
     }))) as RpcResponse;
     expect(res.ok).toBe(true);
     expect((res.result as { frames: any[] }).frames.map((f) => f.type)).toEqual(["git:status"]);

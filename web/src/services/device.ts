@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 import type { DB } from "../db/index.js";
 import { markDeviceRevoked } from "../models/device.js";
 import { deleteDeviceOAuthClient } from "../models/device-oauth.js";

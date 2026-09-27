@@ -1,6 +1,7 @@
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:antgrid/design/widgets/ab_button.dart';
 import 'package:antgrid/widgets/code_syntax.dart';
 import 'package:antgrid/widgets/diff_viewer.dart';
 
@@ -36,7 +37,11 @@ ${List.generate(30, (i) => ' const filler = $i;').join('\n')}
 Widget _host({
   double width = 320,
   double height = 400,
+  String path = 'lib/a.dart',
   String? diff,
+  int additions = 1,
+  int deletions = 1,
+  VoidCallback? onViewFile,
   TextScaler textScaler = TextScaler.noScaling,
 }) => MaterialApp(
   home: Scaffold(
@@ -47,12 +52,12 @@ Widget _host({
           width: width,
           height: height,
           child: DiffViewer(
-            path: 'lib/a.dart',
+            path: path,
             gitStatus: 'M',
             diff: diff ?? _diff,
-            additions: 1,
-            deletions: 1,
-            onViewFile: () {},
+            additions: additions,
+            deletions: deletions,
+            onViewFile: onViewFile ?? () {},
             onClose: () {},
             onSendToAgent: (context, message) async {},
           ),
@@ -347,27 +352,71 @@ void main() {
       );
     });
 
+    /// The whole of what git emits for a changed image: one line, no content.
+    const binaryDiff = 'Binary files a/assets/logo.png and b/... differ';
+
+    Widget binaryHost({required double width, VoidCallback? onViewFile}) =>
+        _host(
+          width: width,
+          path: 'assets/logo.png',
+          diff: binaryDiff,
+          additions: 0,
+          deletions: 0,
+          onViewFile: onViewFile,
+        );
+
     testWidgets('binary diffs still short-circuit to the empty state', (
       tester,
     ) async {
-      await tester.pumpWidget(
-        MaterialApp(
-          home: Scaffold(
-            body: DiffViewer(
-              path: 'assets/logo.png',
-              diff: 'Binary files a/assets/logo.png and b/... differ',
-              additions: 0,
-              deletions: 0,
-              onViewFile: () {},
-              onClose: () {},
-              onSendToAgent: (context, message) async {},
-            ),
-          ),
-        ),
-      );
+      await tester.pumpWidget(binaryHost(width: 600));
       await tester.pumpAndSettle();
 
       expect(find.text('Binary file changed: logo.png'), findsOneWidget);
+    });
+
+    // The regression this guards is the whole reason a changed image was
+    // unreachable: the placeholder used to be returned INSTEAD of the header,
+    // and the header is where `View file` lives.
+    testWidgets('binary diffs keep the header that routes to the file', (
+      tester,
+    ) async {
+      await tester.pumpWidget(binaryHost(width: 600));
+      await tester.pumpAndSettle();
+
+      expect(find.text('assets/logo.png'), findsOneWidget);
+    });
+
+    testWidgets('the binary placeholder action opens the file', (
+      tester,
+    ) async {
+      var viewed = 0;
+      await tester.pumpWidget(
+        binaryHost(width: 600, onViewFile: () => viewed++),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.widgetWithText(AbButton, 'View file'));
+      await tester.pumpAndSettle();
+
+      expect(viewed, 1);
+    });
+
+    // A phone collapses the header's written link to a bare icon, so the
+    // placeholder's own action is the only labelled route left. Asserting both
+    // widths is what makes this a test of the collapse rather than of the
+    // placeholder, which is present either way.
+    testWidgets('the placeholder action survives a compact header', (
+      tester,
+    ) async {
+      await tester.pumpWidget(binaryHost(width: 600));
+      await tester.pumpAndSettle();
+      final wide = find.text('View file').evaluate().length;
+
+      await tester.pumpWidget(binaryHost(width: 300));
+      await tester.pumpAndSettle();
+
+      expect(wide, greaterThan(find.text('View file').evaluate().length));
+      expect(find.widgetWithText(AbButton, 'View file'), findsOneWidget);
     });
   });
 }

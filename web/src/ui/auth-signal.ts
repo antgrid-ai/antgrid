@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Radha AI Products
+// SPDX-License-Identifier: LicenseRef-Elastic-2.0
+
 /** Cross-tab notice that this browser now holds a session.
  *
  *  The waiting page cannot see the session cookie — it is httpOnly — so it only

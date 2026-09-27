@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { Database } from "bun:sqlite";
 import type { AbMessage } from "../../bridge/src/protocol";
 import { renderNotify, renderReply } from "../../bridge/src/session-bus/delivery";
@@ -19,24 +19,89 @@ import type { RelayClient } from "../helpers/relay-client";
  * frozen shared surface.
  */
 
+const RUN_HOOK_SCRIPT = resolve(import.meta.dir, "run-hook.ts");
+// This process IS the bun binary running the eval suite (`bun test`), so its
+// own execPath is a reliable absolute path to spawn a sibling `bun run` from —
+// unlike a bare "bun", which depends on the sink PTY's inherited PATH agreeing
+// with this one.
+const BUN_EXECUTABLE = process.execPath;
+
+// Framing for a simulated hook call written into the sink PTY's own stdin (see
+// `hookTriggerData`). Never appears in real delivered content — the delivery
+// templates are plain prose — so scanning the raw stdin stream for it is safe
+// alongside the sink's own verbatim logging.
+const HOOK_TRIGGER_MARKER = "ANTGRID_HOOK";
+
 // The receiving session's PTY is a stdin sink rather than an agent: these
 // scenarios assert WHEN a line reaches the terminal, so the guest only has to
 // record what it was given. Raw mode keeps the ConPTY line discipline from
 // holding the write back until a newline the bridge never sends on its own.
+//
+// It ALSO doubles as a hook trigger: a chunk containing `HOOK_TRIGGER_MARKER`
+// spawns `run-hook.ts` as ITS OWN child — inheriting this PTY's real
+// `ANTGRID_RUN_ID`/`ANTGRID_API_PORT`/`ANTGRID_TERMINAL_ID`, exactly as a real
+// agent's hook subprocess does — instead of a test faking the loopback POST
+// body directly, which `acceptsHookRun`'s runId-staleness gate now refuses
+// (see `hookTriggerData`'s doc).
+//
+// It also announces itself the way a mounted TUI does — bracketed paste and
+// then a glyph, which is what `GuestReadiness` (bridge/src/submit-gate.ts) reads
+// as a guest that is reading. A sink that writes nothing never latches, so every
+// submit in every bus scenario would wait out `SUBMIT_READY_TIMEOUT_MS` and then
+// take the unheld path — leaving the gated path with no coverage at all. One
+// write, because readiness credits paint by its POSITION relative to the mode:
+// whether ConPTY delivers this as one read or ten changes nothing.
 export const SINK_SCRIPT = `const fs = require("node:fs");
+const { spawn } = require("node:child_process");
 const sink = process.env.ANTGRID_EVAL_SINK;
-try {
-  fs.appendFileSync(sink + ".runs", JSON.stringify({
-    terminalId: process.env.ANTGRID_TERMINAL_ID,
-    runId: process.env.ANTGRID_RUN_ID,
-  }) + "\\n");
-} catch {}
+const MARKER = ${JSON.stringify(HOOK_TRIGGER_MARKER)};
+const RUN_HOOK = ${JSON.stringify(RUN_HOOK_SCRIPT)};
+const BUN_EXE = ${JSON.stringify(BUN_EXECUTABLE)};
 try { process.stdin.setRawMode(true); } catch {}
-process.stdin.on("data", (d) => { try { fs.appendFileSync(sink, d); } catch {} });
+process.stdout.write("\\u001b[?2004h.");
+process.stdin.on("data", (d) => {
+  try { fs.appendFileSync(sink, d); } catch {}
+  const text = d.toString("utf8");
+  const idx = text.indexOf(MARKER);
+  if (idx === -1) return;
+  try {
+    const spec = JSON.parse(text.slice(idx + MARKER.length));
+    const child = spawn(BUN_EXE, ["run", RUN_HOOK, spec.agent, spec.event], {
+      env: process.env,
+      stdio: ["ignore", "ignore", "ignore"],
+    });
+    child.unref();
+  } catch {}
+});
 process.stdin.resume();
 setInterval(() => {}, 1 << 30);
 `;
 export const SINK_SCRIPT_NAME = "antgrid-eval-sink.cjs";
+
+/**
+ * The `terminal:input` payload that simulates one real agent hook firing for
+ * the receiving sink session, written raw into its PTY's stdin.
+ *
+ * This is the faithful alternative to POSTing `/turn-start`/`/notify` on the
+ * loopback API directly: a bare loopback POST with no `runId` is exactly what
+ * `SessionManager.acceptsHookRun` exists to reject as stale, and a bare
+ * terminal-mode sink session has no real agent hook config to fire it for
+ * real. Routing the trigger through the sink's OWN stdin lets `run-hook.ts`
+ * spawn as that session's own child process, inheriting the correct
+ * `ANTGRID_RUN_ID` the bridge stamped on it at spawn.
+ */
+export function hookTriggerData(agent: string, event: string): string {
+  return `${HOOK_TRIGGER_MARKER}${JSON.stringify({ agent, event })}`;
+}
+
+/** The marker `run-hook.ts` appends to the sink once it has attempted its
+ *  simulated hook POST — not that the bridge accepted it, since hooks are
+ *  advisory and swallow their own failures, but enough to know the async spawn
+ *  chain (PTY → sink script → `run-hook.ts` → loopback POST) has actually run,
+ *  which no fixed sleep can promise across machines. */
+export function hookDoneMarker(event: string): string {
+  return `HOOK_DONE:${event}`;
+}
 
 /** The origin every bus project is given. A session is addressed through its
  *  repo key (spec 5.1), so two projects that must see each other need the SAME
@@ -70,11 +135,10 @@ async function git(cwd: string, args: string[]): Promise<void> {
  * repository the Capability Card can normalise into a match key.
  *
  * Both halves are load-bearing and neither is obvious from a failure. Without
- * the remote the directory refuses outright (`NOT_ADDRESSABLE`) and every send
- * answers `UNKNOWN_PEER`, on ONE machine as much as two — a repo key is how a
- * row is offered at all, not only how two machines match. Pass this as
- * `prepareProject`, which runs before the agent boots: repository identity is
- * resolved once at startup.
+ * the remote the directory and every send alike refuse `NOT_ADDRESSABLE`, on
+ * ONE machine as much as two — a repo key is how a row is offered at all, not
+ * only how two machines match. Pass this as `prepareProject`, which runs before
+ * the agent boots: repository identity is resolved once at startup.
  */
 export async function prepareBusProject(dir: string): Promise<void> {
   writeFileSync(join(dir, SINK_SCRIPT_NAME), SINK_SCRIPT);
@@ -101,24 +165,6 @@ export function persistedSessions(abDir: string, projectId: string): any[] {
 
 export function sinkText(path: string): string {
   return existsSync(path) ? readFileSync(path, "utf8") : "";
-}
-
-export function awaitSinkRunId(
-  sinkPath: string,
-  terminalId: string,
-  timeoutMs = 20_000,
-): Promise<string> {
-  return untilAsync(async () => {
-    const path = sinkPath + ".runs";
-    if (!existsSync(path)) return undefined;
-    for (const line of readFileSync(path, "utf8").trim().split(/\r?\n/).reverse()) {
-      try {
-        const row = JSON.parse(line) as { terminalId?: unknown; runId?: unknown };
-        if (row.terminalId === terminalId && typeof row.runId === "string") return row.runId;
-      } catch { /* a concurrent append is retried on the next poll */ }
-    }
-    return undefined;
-  }, timeoutMs, `terminal generation ${terminalId}`);
 }
 
 export function countMarkers(text: string, marker: string): number {

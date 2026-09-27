@@ -44,6 +44,22 @@ Map<String, dynamic> _statusFor(String checkoutId, String terminalId) => {
   'services': <dynamic>[],
 };
 
+/// Seeds a checkout's tree the way production does — the root's own depth-1
+/// listing on `file:tree:children`, not the superseded whole-tree snapshot.
+void _emitRootTree(FakeAgentTransport t, Map<String, dynamic> payload) {
+  final root = payload['tree'] as Map<String, dynamic>;
+  t.emit('file:tree:children', {
+    if (payload['checkoutId'] != null) 'checkoutId': payload['checkoutId'],
+    'listings': [
+      {
+        'path': '',
+        'children': root['children'] ?? const <Map<String, dynamic>>[],
+      },
+    ],
+    'seq': payload['seq'],
+  });
+}
+
 Future<ProjectSession> _openSession(FakeAgentTransport t) async {
   final cache = await CachedSessionsStore.open();
   return ProjectSession(
@@ -96,7 +112,7 @@ void main() {
     await Future<void>.delayed(Duration.zero);
     await Future<void>.delayed(Duration.zero);
 
-    expect(_sentOf(t, 'file:tree:snapshot:request'), isEmpty);
+    expect(_sentOf(t, 'file:tree:root:request'), isEmpty);
     expect(_sentOf(t, 'config:read'), isEmpty);
     expect(_sentOf(t, 'preview:snapshot:request'), isEmpty);
     expect(_sentOf(t, 'git:sync-status').map((m) => m['checkoutId']).toSet(), {
@@ -305,7 +321,7 @@ void main() {
     bundle.activate();
     await Future<void>.delayed(Duration.zero);
 
-    t.emit('file:tree:snapshot', {
+    _emitRootTree(t, {
       'checkoutId': 'A',
       'seq': 1,
       'tree': {

@@ -24,8 +24,8 @@ class MessageRouter {
   /// inbound stream — BEFORE tiering — so a frame is retained even when the
   /// tier it belongs to has no subscriber yet. The tier is re-derived from the
   /// TYPE at replay ([replayFor]), never stored: `classifyAbMessage` coerces an
-  /// error-bearing frame to status, which would file a `tree:full` where no
-  /// heavy subscriber looks.
+  /// error-bearing frame to status, which would file a durable heavy-tier
+  /// frame where no heavy subscriber looks.
   ///
   /// This is what makes a per-checkout service bundle recoverable. The
   /// bridge's `state.snapshot` replays one `agent:status` per checkout at
@@ -83,12 +83,12 @@ class MessageRouter {
   /// The checkouts holding retained frames. [ProjectSession] sweeps against
   /// this rather than its own bundle map: a checkout can produce durable frames
   /// it never gets a bundle for (an archived session still in the bridge's
-  /// replay cache), and those entries pin a whole `tree:full` with nothing to
+  /// replay cache), and those entries pin the retained state with nothing to
   /// ever evict them.
   Iterable<String> get replayCheckoutIds => _durable.keys;
 
   /// Forgets a checkout's durable frames. Called when its worktree is gone, so
-  /// a deleted checkout's tree/status stop seeding new subscribers.
+  /// a deleted checkout's status stops seeding new subscribers.
   void dropCheckoutReplay(String checkoutId) => _durable.remove(checkoutId);
 
   void _onInbound(InboundMessage raw) {
