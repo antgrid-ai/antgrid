@@ -1,45 +1,39 @@
-// MachineSession envelope/fragmentation/stream-demux coverage — the
-// replacement for the deleted relay_transport_test.dart /
-// relay_transport_frag_test.dart suites, now exercised at the MachineSession
-// level (one E2E session multiplexing project streams via sealed `{s, m}`
-// envelopes) instead of the old socket-per-project
-// RelayTransport.
+// MachineSession session-stream wire coverage. Every record is one bare
+// JSON body — a session frame or a control-plane `AbMessage`, told apart by
+// the JSON `type` alone (`isSessionFrameType`). A bare `ping`/`pong` is not a
+// session-frame name, so a record naming it is control plane, never liveness.
+import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:test/test.dart';
 
 import 'support/fake_live_relay.dart';
 
-/// Opens the payload MachineSession sealed with the phone's send key (p2a) —
-/// i.e. the transport's perspective when reading what MachineSession sent.
-Future<String?> _openFromPhone(SessionKeys keys, Uint8List payload) =>
-    E2eTransportDart(sendKey: keys.a2p, recvKey: keys.p2a).open(payload);
+/// A capture that just collects, standing in for `app/lib/util/netwatch.dart`
+/// — see `netwatch_tap_test.dart` for the same shape.
+class _Capture {
+  final events = <Map<String, Object?>>[];
+  RelayNetTap get tap => events.add;
 
-/// Seals a plaintext as if it came from the agent (a2p) — what an inbound
-/// IncomingRouteMessage's payload must look like for MachineSession to accept
-/// it (`_decryptAndDispatch` decrypts with recvKey: a2p).
-Future<Uint8List> _sealFromAgent(SessionKeys keys, String plaintext) =>
-    E2eTransportDart(sendKey: keys.a2p, recvKey: keys.p2a).seal(plaintext);
+  Iterable<Map<String, Object?>> get frames =>
+      events.where((e) => e['op'] != 'annotate');
+  Iterable<Map<String, Object?>> get drops =>
+      frames.where((e) => e['kind'] == 'drop');
+}
 
 void main() {
   late FakeLiveRelay relay;
   late FakeHandshaker handshaker;
-  late SessionKeys keys;
   late MachineSession session;
+  late _Capture capture;
 
   setUp(() async {
-    relay = FakeLiveRelay();
-    keys = fixedKeys(1);
-    handshaker = FakeHandshaker(keys);
-    session = MachineSession(
-      relay: relay,
-      machineDeviceId: 'machine-1',
-      handshaker: handshaker,
-    );
-    session.start();
-    await session.ensureEstablished();
+    capture = _Capture();
+    relay = FakeLiveRelay(netTap: capture.tap);
+    handshaker = FakeHandshaker();
+    session = await establishSession(relay, handshaker: handshaker);
+    capture.events.clear(); // establishment traffic is not what is under test
   });
 
   tearDown(() async {
@@ -47,260 +41,92 @@ void main() {
     await relay.closeStreams();
   });
 
-  group('outbound envelope', () {
-    test(
-      'sendOnStream wraps as sealed {s, m} addressed to the machine',
-      () async {
-        await session.sendOnStream('proj-1', {'type': 'ping'}, 'control');
-        expect(relay.sent, hasLength(1));
-        final frame = relay.sent.single;
-        expect(frame.to, 'machine-1');
-        expect(frame.kind, FrameKind.sealed);
+  test('a bare AbMessage dispatches on the control plane', () async {
+    final control = session.control;
+    final seen = <Map<String, dynamic>>[];
+    final sub = control.messages.listen((m) => seen.add(m.json));
 
-        final plaintext = await _openFromPhone(keys, frame.payload);
-        expect(plaintext, isNotNull);
-        final json = jsonDecode(plaintext!) as Map<String, dynamic>;
-        expect(json['s'], 'proj-1');
-        expect(json['m'], {'type': 'ping'});
-      },
+    relay.injectRecord(
+      encodeFromAgent(jsonEncode({'type': 'project:list', 'projects': []})),
     );
+    await Future<void>.delayed(const Duration(milliseconds: 20));
 
-    test('the control stream ("0") omits `s` entirely', () async {
-      await session.sendOnStream(kControlStreamId, {
-        'type': 'project:list',
-      }, 'control');
-      final plaintext = await _openFromPhone(keys, relay.sent.single.payload);
-      final json = jsonDecode(plaintext!) as Map<String, dynamic>;
-      expect(json.containsKey('s'), isFalse);
-      expect(json['m'], {'type': 'project:list'});
-    });
-
-    test('a message above the fragmentation threshold is split into '
-        'multiple frames, and reassembling them recovers the ENVELOPE '
-        '(streamId `s` survives fragmentation)', () async {
-      final bigContent = List.filled(2000000, 'x').join();
-      final message = {
-        'type': 'file:content',
-        'path': 'a.png',
-        'content': bigContent,
-      };
-      await session.sendOnStream('proj-1', message, 'control');
-
-      expect(
-        relay.sent.length,
-        greaterThan(1),
-        reason: 'a >1.4MB envelope must fragment',
-      );
-      for (final f in relay.sent) {
-        expect(f.kind, FrameKind.sealed);
-      }
-
-      final joined = <String>[];
-      final reassembler = FragReassembler(
-        timeoutMs: kTransferTimeoutMs,
-        globalBudgetBytes: kGlobalReassemblyBudget,
-        onComplete: (json, _, __, ___) => joined.add(json),
-        onAbort: (_) {},
-      );
-      for (final f in relay.sent) {
-        final plaintext = await _openFromPhone(keys, f.payload);
-        expect(plaintext, isNotNull);
-        reassembler.accept(
-          plaintext!,
-          frameId: frameIdOf(f.payload, f.kind),
-          epoch: 1,
-        );
-      }
-
-      expect(joined, hasLength(1));
-      final envelope = jsonDecode(joined.single) as Map<String, dynamic>;
-      expect(
-        envelope['s'],
-        'proj-1',
-        reason: 'the streamId must survive fragmentation intact',
-      );
-      expect(envelope['m'], message);
-    });
+    expect(seen, hasLength(1));
+    expect(seen.single['type'], 'project:list');
+    await sub.cancel();
   });
 
-  group('StreamTransport isolation', () {
-    test('two streams on one session never cross-deliver', () async {
-      final s1 = session.streamFor('proj-1');
-      final s2 = session.streamFor('proj-2');
-      expect(identical(s1, s2), isFalse);
+  test('a `{m: …}` body is dropped unrecognized-plaintext', () async {
+    relay.injectRecord(
+      encodeFromAgent(
+        jsonEncode({
+          'm': {'type': 'project:list'},
+        }),
+      ),
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 20));
 
-      final seen1 = <Map<String, dynamic>>[];
-      final seen2 = <Map<String, dynamic>>[];
-      final sub1 = s1.messages.listen((m) => seen1.add(m.json));
-      final sub2 = s2.messages.listen((m) => seen2.add(m.json));
+    final drop = capture.drops.single;
+    expect(drop['reason'], 'unrecognized-plaintext');
+  });
 
-      relay.inject(
-        IncomingRouteMessage(
-          from: 'machine-1',
-          channel: 'control',
-          kind: FrameKind.sealed,
-          payload: await _sealFromAgent(
-            keys,
-            jsonEncode({
-              's': 'proj-1',
-              'm': {'type': 'a'},
-            }),
-          ),
-        ),
-      );
-      relay.inject(
-        IncomingRouteMessage(
-          from: 'machine-1',
-          channel: 'control',
-          kind: FrameKind.sealed,
-          payload: await _sealFromAgent(
-            keys,
-            jsonEncode({
-              's': 'proj-2',
-              'm': {'type': 'b'},
-            }),
-          ),
-        ),
-      );
-
-      await Future<void>.delayed(const Duration(milliseconds: 20));
-
-      expect(seen1.map((j) => j['type']), ['a']);
-      expect(seen2.map((j) => j['type']), ['b']);
-
-      await sub1.cancel();
-      await sub2.cancel();
-    });
-
-    test('a control-plane envelope with `s` absent (or "0") routes to the '
-        'control stream, not a project stream', () async {
-      final control = session.streamFor(kControlStreamId);
+  test(
+    'an old-name ping from the bridge is control plane, not a session '
+    'frame — no session:pong answers it',
+    () async {
+      final control = session.control;
       final seen = <Map<String, dynamic>>[];
       final sub = control.messages.listen((m) => seen.add(m.json));
-
-      // `s` absent entirely.
-      relay.inject(
-        IncomingRouteMessage(
-          from: 'machine-1',
-          channel: 'control',
-          kind: FrameKind.sealed,
-          payload: await _sealFromAgent(
-            keys,
-            jsonEncode({
-              'm': {'type': 'agent:projects'},
-            }),
-          ),
-        ),
-      );
-      // `s` explicitly "0".
-      relay.inject(
-        IncomingRouteMessage(
-          from: 'machine-1',
-          channel: 'control',
-          kind: FrameKind.sealed,
-          payload: await _sealFromAgent(
-            keys,
-            jsonEncode({
-              's': '0',
-              'm': {'type': 'agent:tools'},
-            }),
-          ),
-        ),
-      );
-
+      // Let the control transport's own auto `state.snapshot` pull land
+      // first, so it isn't counted as a reply to the ping below.
       await Future<void>.delayed(const Duration(milliseconds: 20));
-      expect(seen.map((j) => j['type']), ['agent:projects', 'agent:tools']);
+      final sentBefore = relay.sent.length;
+
+      relay.injectRecord(encodeFromAgent(jsonEncode({'type': 'ping'})));
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      expect(
+        seen.map((j) => j['type']),
+        contains('ping'),
+        reason: 'an old-name ping is an ordinary control-plane AbMessage',
+      );
+      expect(
+        relay.sent.skip(sentBefore),
+        isEmpty,
+        reason: 'only a session:ping triggers the liveness pong',
+      );
       await sub.cancel();
-    });
-  });
-
-  group(
-    'inbound fragment reassembly (replaces relay_transport_frag_test.dart)',
-    () {
-      test('a fragmented inbound envelope is reassembled and dispatched whole '
-          'to the addressed stream', () async {
-        final stream = session.streamFor('proj-1');
-        final seen = <Map<String, dynamic>>[];
-        final sub = stream.messages.listen((m) => seen.add(m.json));
-
-        final bigContent = List.filled(2000000, 'y').join();
-        final envelopeJson = jsonEncode({
-          's': 'proj-1',
-          'm': {'type': 'file:content', 'path': 'b.png', 'content': bigContent},
-        });
-        final fragments = buildFragments(
-          envelopeJson,
-          'transfer-1',
-          const FragHint('file:content', 'b.png'),
-        );
-        expect(fragments.length, greaterThan(1));
-
-        for (final frag in fragments) {
-          relay.inject(
-            IncomingRouteMessage(
-              from: 'machine-1',
-              channel: 'control',
-              kind: FrameKind.sealed,
-              payload: await _sealFromAgent(keys, frag),
-            ),
-          );
-        }
-
-        await Future<void>.delayed(const Duration(milliseconds: 50));
-        expect(seen, hasLength(1));
-        expect(seen.single['type'], 'file:content');
-        expect(seen.single['content'], bigContent);
-
-        await sub.cancel();
-      });
-
-      test('a mismatched fragment count aborts the transfer and surfaces the '
-          'hint on fragmentAborts', () async {
-        final aborts = <FragHint?>[];
-        final sub = session.fragmentAborts.listen(aborts.add);
-
-        const id = 'transfer-bad';
-        final hint = const FragHint('file:content', 'c.png');
-        final frame0 = jsonEncode({
-          '__frag': {
-            'id': id,
-            'i': 0,
-            'n': 2,
-            'hint': {'type': hint.type, 'key': hint.key},
-          },
-          'data': 'part-a',
-        });
-        // Second fragment claims a DIFFERENT total `n` for the same id — the
-        // reassembler discards the whole transfer and reports the hint.
-        final frame1 = jsonEncode({
-          '__frag': {'id': id, 'i': 0, 'n': 3},
-          'data': 'part-b',
-        });
-
-        relay.inject(
-          IncomingRouteMessage(
-            from: 'machine-1',
-            channel: 'control',
-            kind: FrameKind.sealed,
-            payload: await _sealFromAgent(keys, frame0),
-          ),
-        );
-        relay.inject(
-          IncomingRouteMessage(
-            from: 'machine-1',
-            channel: 'control',
-            kind: FrameKind.sealed,
-            payload: await _sealFromAgent(keys, frame1),
-          ),
-        );
-
-        await Future<void>.delayed(const Duration(milliseconds: 20));
-        expect(aborts, hasLength(1));
-        expect(aborts.single?.type, hint.type);
-        expect(aborts.single?.key, hint.key);
-
-        await sub.cancel();
-      });
     },
   );
+
+  test('a session:ping is answered with exactly one session:pong', () async {
+    final sentBefore = relay.sent.length;
+    relay.injectRecord(encodeFromAgent(jsonEncode({'type': kSessionPing})));
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+
+    final pongs = relay.sent
+        .skip(sentBefore)
+        .where((f) => f.json['type'] == kSessionPong);
+    expect(pongs, hasLength(1));
+  });
+
+  test('sendOnSession writes the bare message with no header', () async {
+    await session.sendOnSession({'type': 'project:list'}, 'control');
+
+    expect(relay.sent, hasLength(1));
+    expect(relay.sent.single.json, {'type': 'project:list'});
+  });
+
+  test('a send whose link write throws does not wedge the sends behind it', () async {
+    final gate = Completer<void>();
+    relay.sendGate = gate;
+    final first = session.sendOnSession({'type': 'project:list'}, 'control');
+    final second = session.sendOnSession({'type': 'agent:list'}, 'control');
+    gate.completeError(StateError('native write failed'));
+
+    await expectLater(first, throwsStateError);
+    await second.timeout(const Duration(seconds: 2));
+    expect(relay.sent, hasLength(1));
+    expect(relay.sent.single.json, {'type': 'agent:list'});
+  });
 }

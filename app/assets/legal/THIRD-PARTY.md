@@ -7,6 +7,27 @@ Antgrid vendors, bundles, links against, or otherwise redistributes.
 
 ## Scope
 
+### Native peer transport additions
+
+The optional Iroh transport adds upstream `@number0/iroh` (MIT OR Apache-2.0),
+`iroh_quic` and `iroh_flutter` (Apache-2.0), and `flutter_rust_bridge` (MIT).
+Version pins and package integrity are recorded in `bun.lock`,
+`app/pubspec.lock` and `packages/antgrid_peer_transport/pubspec.lock`.
+The Flutter plugin includes its upstream Rust `Cargo.lock`; it builds native
+artifacts through upstream cargokit. The signed standalone Windows artifact
+used by the CLI probe is recorded in
+`scripts/iroh-packaging/native-artifacts.json`.
+
+These additions were inspected at their installed package licence files. The
+historical bulk scan below predates the native peer dependencies; a complete
+updated transitive/native redistribution inventory remains a release gate.
+
+The self-hosted relay service ships the stock upstream `iroh-relay` 1.2.0
+binary (MIT OR Apache-2.0), built unmodified by `cargo install --locked` (see
+`aspire/apphost.ts` and the ops repo's relay image); no source is vendored here.
+The container redistributes that binary and its statically linked Rust
+dependencies, so their notices and license texts still require release review.
+
 This file lists **direct** dependencies, plus anything whose compiled output ends
 up inside a shipped artefact. The transitive dependency tree is **not** enumerated
 here — it is too large to maintain by hand and it changes on every lockfile update.

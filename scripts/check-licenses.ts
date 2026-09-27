@@ -58,6 +58,7 @@ for (const path of [
   "packages/antgrid-wire/LICENSE",
   "packages/antgrid_relay_client/LICENSE",
   "packages/antgrid_eval_client/LICENSE",
+  "packages/antgrid_peer_transport/LICENSE",
 ]) {
   if (await Bun.file(path).text() !== canonicalMpl) {
     errors.push(`${path}: not an exact copy of the canonical MPL-2.0 text`);

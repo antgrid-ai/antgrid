@@ -1,13 +1,13 @@
-// Proves the negatives the Wave 6 scout only asserted: a preview-channel
-// terminal frame reaches its checkout's slice of the heavy tier, and a
-// preview-channel tunnel frame — the browser tunnel's own hot path on the
-// same wire channel — never does, driven through a real MessageRouter (via
-// ProjectSession) over a fake AgentTransport rather than trusted by inspection.
+// Drives the routing decision through a real MessageRouter (via
+// ProjectSession) over a fake AgentTransport instead of trusting it by
+// inspection: a preview-channel terminal frame reaches its checkout's slice
+// of the heavy tier, and a preview-channel tunnel frame — the browser
+// tunnel's own hot path on the same wire channel — never does.
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
-import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+import '../helpers/fake_agent_transport.dart';
 import '../helpers/prefs_test_mock.dart';
 
 Future<ProjectSession> _openSession(FakeAgentTransport transport) async {

@@ -1,15 +1,19 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'agent_transport.dart';
+import 'terminal_attachment.dart';
+import 'tunnel_stream.dart';
+import 'upload_stream.dart';
 
 /// Shared scaffolding for [AgentTransport] implementations.
 ///
 /// Holds the request/response correlation table, the snapshot-replay buffer,
-/// and the broadcast state/message controllers that the local and relay
+/// and the broadcast state/message controllers that the local and native
 /// transports need identically. Subclasses supply only the wire-specific
-/// pieces: [connect], [send] (raw JSON vs. encrypted + fragmented), [dispose],
-/// and the decode path — which, once it has a decoded frame and its channel,
-/// funnels through [dispatchDecoded].
+/// pieces: [connect], [send] (loopback WebSocket vs. this project's own
+/// native stream), [dispose], and the decode path — which, once it has a
+/// decoded frame and its channel, funnels through [dispatchDecoded].
 ///
 /// The non-private members below ([outbound], [snapshotCache],
 /// [stateController], [pending], [dispatchDecoded], [failAllPending],
@@ -26,12 +30,6 @@ abstract class BufferedAgentTransport implements AgentTransport {
 
   final stateController = StreamController<TransportState>.broadcast();
 
-  /// Fires [droppedFrames]. Only a relay-backed transport ever adds to it.
-  final droppedFrameController = StreamController<void>.broadcast();
-
-  @override
-  Stream<void> get droppedFrames => droppedFrameController.stream;
-
   /// In-flight RPCs keyed by `requestId`, completed by [dispatchDecoded].
   final pending = <String, Completer<Map<String, dynamic>>>{};
 
@@ -40,9 +38,69 @@ abstract class BufferedAgentTransport implements AgentTransport {
 
   /// Tier-3 hydrator registry: idempotent view-state pulls (session list,
   /// config, the reopened file, the transcript) re-driven on every
-  /// (re)establishment — the reconciliation checkpoint. Keyed so a re-register
+  /// establishment — the reconciliation checkpoint. Keyed so a re-register
   /// supersedes rather than duplicates; torn down with the transport.
   final _hydrators = <String, Future<void> Function()>{};
+
+  /// Socket-path terminal attachments — the default [openTerminalAttachment].
+  /// `StreamTransport` (`machine_session.dart`) overrides it to open a native
+  /// stream instead when its link supports one, falling back to this over the
+  /// same `send`.
+  late final SocketTerminalAttachments terminalAttachments =
+      SocketTerminalAttachments((m) => send(m));
+
+  @override
+  TerminalAttachment openTerminalAttachment({
+    required String requestId,
+    required String checkoutId,
+    required Map<String, dynamic> subscribe,
+  }) => terminalAttachments.open(
+    requestId: requestId,
+    checkoutId: checkoutId,
+    subscribe: subscribe,
+  );
+
+  /// Every socket-path transport (`LocalTransport`, `DemoTransport`, the
+  /// test subclasses) inherits this: loopback never tunnels, and nothing here
+  /// is wired to a stream, so a preview request
+  /// against one of these fails at once instead of hanging. `StreamTransport`
+  /// overrides both with the real native-stream implementation.
+  @override
+  TunnelHttpExchange openTunnelHttp({
+    required String requestId,
+    required String checkoutId,
+    required Map<String, dynamic> head,
+    required int bodyLength,
+    Stream<List<int>>? body,
+  }) => FailedTunnelHttpExchange(
+    requestId,
+    const TunnelExchangeFailure('NOT_SUPPORTED'),
+  );
+
+  @override
+  TunnelWsChannel openTunnelWs({
+    required String tunnelId,
+    required String checkoutId,
+    required Map<String, dynamic> open,
+  }) => FailedTunnelWsChannel(
+    tunnelId,
+    const TunnelExchangeFailure('NOT_SUPPORTED'),
+  );
+
+  /// Base default: every native-stream transport (`StreamTransport`)
+  /// overrides this with the real implementation. `LocalTransport` overrides
+  /// it too, with the loopback `file:upload-local` exchange; this stays only
+  /// for a test subclass that ignores uploads.
+  @override
+  UploadExchange openUpload({
+    required String requestId,
+    required String projectId,
+    required String checkoutId,
+    required String fileName,
+    required Uint8List bytes,
+    String? mimeType,
+    void Function(int sent, int total)? onProgress,
+  }) => FailedUploadExchange(const UploadFailure('NOT_SUPPORTED'));
 
   @override
   Stream<InboundMessage> get messages {
@@ -75,7 +133,34 @@ abstract class BufferedAgentTransport implements AgentTransport {
     String method, {
     Map<String, dynamic>? params,
     Duration timeout = const Duration(seconds: 10),
-    bool countsTowardHealth = true,
+  }) => _requestRaw(method, params: params, timeout: timeout);
+
+  @override
+  Future<RemoteRequestResult<Map<String, dynamic>>> requestWithOutcome(
+    String method, {
+    Map<String, dynamic>? params,
+    Duration timeout = const Duration(seconds: 10),
+  }) async {
+    if (!isEstablished) {
+      return const RemoteRequestResult.notSent();
+    }
+    try {
+      final value = await _requestRaw(method, params: params, timeout: timeout);
+      return RemoteRequestResult.confirmed(value);
+    } on _ApplicationRpcException {
+      // A negative application response is still authoritative. Preserve the
+      // bridge's typed refusal for existing callers instead of turning it into
+      // a transport uncertainty.
+      rethrow;
+    } on RpcException {
+      return const RemoteRequestResult.outcomeUnknown();
+    }
+  }
+
+  Future<Map<String, dynamic>> _requestRaw(
+    String method, {
+    Map<String, dynamic>? params,
+    required Duration timeout,
   }) {
     final requestId = 'r${_nextRequestId++}';
     final completer = Completer<Map<String, dynamic>>();
@@ -126,7 +211,7 @@ abstract class BufferedAgentTransport implements AgentTransport {
       } else {
         final err = (json['error'] as Map?)?.cast<String, dynamic>();
         completer.completeError(
-          RpcException(
+          _ApplicationRpcException(
             err?['code'] as String? ?? 'E_UNKNOWN',
             err?['message'] as String? ?? '',
           ),
@@ -134,12 +219,15 @@ abstract class BufferedAgentTransport implements AgentTransport {
       }
       return;
     }
+    // A reply belonging to an open terminal attachment is claimed there
+    // instead of reaching the public stream — see [SocketTerminalAttachments.divert].
+    if (terminalAttachments.divert(json)) return;
     outbound.add(InboundMessage(channel, json));
   }
 
   /// A `response` arrived for a request that is already gone — it timed out and
   /// dropped its completer, so the reply is discarded (never leaked to the
-  /// public stream). Default no-op; a relay-backed transport overrides it to
+  /// public stream). Default no-op; a remote transport overrides it to
   /// record the frame, because "the RPC timed out and the answer landed 200ms
   /// later" is otherwise invisible at BOTH endpoints — the timeout is local,
   /// and the agent only ever saw a request it answered.
@@ -147,7 +235,7 @@ abstract class BufferedAgentTransport implements AgentTransport {
 
   /// `true` once the transport can carry an RPC (and hence a hydrator's pull).
   /// The base answer — "connected" — is right for [LocalTransport] (born
-  /// established, no handshake). [StreamTransport] overrides it with the E2E
+  /// established, no handshake). [StreamTransport] overrides it with the peer
   /// session's live establishment, since a stream stays `connected` across a
   /// session-down window where a send would silently drop.
   bool get isEstablished => _currentState == TransportState.connected;
@@ -159,8 +247,9 @@ abstract class BufferedAgentTransport implements AgentTransport {
 
   /// Tier-3: register [run] as the hydrator for [key] and, when the transport
   /// is already established, invoke it now. Re-invoked on every future
-  /// (re)establishment via [redriveHydrators] — that replay is the whole point:
-  /// a reconnect re-pulls this view-state instead of leaving it stale. A
+  /// establishment via [redriveHydrators] — that replay is the whole point:
+  /// a reopened project stream re-pulls this view-state instead of leaving it
+  /// stale. A
   /// re-register under the same [key] supersedes the prior run (e.g. a focus
   /// switch re-registering the same pull). [run] must be idempotent and own its
   /// OWN bounded wait + flag lifecycle (tier-3 pulls are already timed); this
@@ -179,34 +268,24 @@ abstract class BufferedAgentTransport implements AgentTransport {
   /// absent.
   void unhydrate(String key) => _hydrators.remove(key);
 
-  /// Tier-2: a one-shot user action expecting a reply (search, command:run,
-  /// git:diff/checkout, create/rename/delete). Runs [run] bounded by [timeout]
-  /// and surfaces the outcome so the caller's flag lifecycle ALWAYS settles —
-  /// no reply-clears-the-flag stranding. NOT re-driven on reconnect (a user
-  /// action is one-shot; only tier-3 [hydrate] re-drives).
-  ///
-  /// STREAMING actions (N replies terminated by a `*-done`, e.g. command:run
-  /// that runs for minutes) MUST pass a [run] whose bound is an IDLE-timeout or
-  /// send-failure-only — never a wall-clock cap, which would wrongly kill a
-  /// long-running command. In that case leave [timeout] as the outer safety net
-  /// (or `null`) and let [run] own the idle bound.
-  Future<T> action<T>(
-    Future<T> Function() run, {
-    Duration? timeout = const Duration(seconds: 15),
-  }) {
-    final f = run();
-    return timeout == null ? f : f.timeout(timeout);
+  /// A new establishment, then a replay of every registered hydrator.
+  /// [LocalTransport] calls this once after connect (born established). A
+  /// [StreamTransport] splits the two, because it replays only after the
+  /// establishment's snapshot pull settles and the epoch cannot wait that long.
+  void redriveHydrators() {
+    beginEstablishment();
+    replayHydrators();
   }
 
-  /// Replay every registered hydrator. Subclasses call this on each
-  /// (re)establishment: [LocalTransport] once after connect (born established),
-  /// a [StreamTransport] on each handshake establishment (from
-  /// `refreshSnapshot`). One failing hydrator never blocks the others.
-  void redriveHydrators() {
-    // Bumped BEFORE the replay, so a hydrator running as part of this
-    // establishment already sees the new epoch and re-pulls unconditionally
-    // rather than claiming a revision the previous agent issued.
-    _establishmentEpoch++;
+  /// Advance [establishmentEpoch]. Call at the moment the transport can first
+  /// carry traffic on the new establishment, before anything is sent on it: a
+  /// request or pushed frame stamped in between carries the previous epoch
+  /// and is then discarded as stale by every service that compares it.
+  void beginEstablishment() => _establishmentEpoch++;
+
+  /// Replay every registered hydrator without advancing the epoch. One
+  /// failing hydrator never blocks the others.
+  void replayHydrators() {
     for (final run in _hydrators.values) {
       unawaited(_runHydrator(run));
     }
@@ -222,10 +301,16 @@ abstract class BufferedAgentTransport implements AgentTransport {
     }
   }
 
-  /// Drop all registered hydrators. Call from a subclass [dispose] so the
-  /// registry lifetime tracks the transport (and the warm-LRU eviction that
-  /// disposes it).
-  void clearHydrators() => _hydrators.clear();
+  /// Drop all registered hydrators, and end every open terminal attachment
+  /// [TerminalAttachmentTransportClosed]. Call from a subclass [dispose] so
+  /// the registry lifetime tracks the transport (and the warm-LRU eviction
+  /// that disposes it) — every subclass already calls this first in its own
+  /// [dispose], which is what lets a terminal attachment's teardown live here
+  /// instead of needing its own call at each of them.
+  void clearHydrators() {
+    _hydrators.clear();
+    terminalAttachments.closeAll();
+  }
 
   /// Fail every in-flight request and clear the table. Defaults describe a
   /// [dispose] (call it first from a subclass dispose); a session-down teardown
@@ -249,4 +334,8 @@ abstract class BufferedAgentTransport implements AgentTransport {
     _currentState = state;
     stateController.add(state);
   }
+}
+
+class _ApplicationRpcException extends RpcException {
+  _ApplicationRpcException(super.code, super.message);
 }

@@ -7,7 +7,7 @@ import 'package:antgrid/providers/device_provisioning.dart';
 import 'package:antgrid/session_bus/session_bus_carrier.dart';
 import 'package:antgrid/session_bus/session_bus_links.dart';
 import 'package:antgrid/util/ab_log.dart';
-import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+import '../helpers/fake_agent_transport.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 

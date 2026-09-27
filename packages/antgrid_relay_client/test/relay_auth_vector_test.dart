@@ -18,7 +18,7 @@ String _hexEncode(List<int> b) =>
     b.map((x) => x.toRadixString(16).padLeft(2, '0')).join();
 
 void main() {
-  // Fixture path resolved the same way as e2e_vectors_test.dart.
+  // Relative to the package root, which is `dart test`'s working directory.
   final v =
       jsonDecode(
             File(

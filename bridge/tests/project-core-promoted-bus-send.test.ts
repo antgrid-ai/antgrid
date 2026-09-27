@@ -4,9 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { ProjectCore, type ProjectCoreDeps, type ProjectCoreRemoteDeps } from "../src/project-core";
-import type { AttachStreamOpts, SendTarget } from "../src/stream-mux";
+import type { AttachStreamOpts, SendTarget } from "../src/project-streams";
 import type { MessageBus } from "../src/message-bus";
-import type { MachineRelaySession } from "../src/relay-promotion";
 import { fakeStreamHandle, peerView } from "./relay-stubs";
 import { createMessage } from "../src/protocol";
 
@@ -35,30 +34,25 @@ function busReplyFrame() {
 }
 
 /** A live peer session and a recording `sendTo` — what a bus reply needs to
- *  leave. One object serves both doors onto the slot: `promote`'s and the
- *  wizard's, which differ only in how they name this machine. */
+ *  leave. */
 function peerStreamStub() {
   const sent: Array<SendTarget | undefined> = [];
-  const stub = {
+  const deps: ProjectCoreRemoteDeps = {
     attachStream: (_bus: MessageBus, opts: AttachStreamOpts) => {
       const handle = fakeStreamHandle({
         sendTo: async (_msg, _channel, target) => { sent.push(target); return "sent" as const; },
+        deliverableTo: (peerId) => peerId === PEER,
       });
-      // The relay's admission ack, which is what flips `isRelayRegistered`.
-      opts.onAdmitted?.(handle.streamId);
+      // The registry's admission, which is what flips `isRelayRegistered`.
+      opts.onAdmitted?.();
       return handle;
     },
     establishedPeers: () => [peerView({ peerId: PEER })],
     peerSession: (peerId: string) => (peerId === PEER ? peerView({ peerId }) : null),
     sendPushDeliver: () => {},
     machineDeviceId: () => "machine-uuid",
-    agentDeviceId: "machine-uuid",
   };
-  return {
-    deps: stub satisfies ProjectCoreRemoteDeps,
-    session: stub satisfies MachineRelaySession,
-    sent,
-  };
+  return { deps, sent };
 }
 
 function localCore(prefix: string, deps: Partial<ProjectCoreDeps> = {}): ProjectCore {
@@ -86,54 +80,11 @@ test("a promoted local-mode core can answer a session-bus message addressed at t
   expect(sent).toEqual([{ kind: "peer", peerId: PEER }]);
 });
 
-test("a core promoted by the desktop enable-relay wizard can answer one too", async () => {
-  const { session, sent } = peerStreamStub();
-  const core = localCore("antgrid-pc-wizreply-", { ensureMachineRelay: async () => session });
-  await core.start();
-
-  const connect = core.localConnectInfo!;
-  const ws = new WebSocket(`ws://127.0.0.1:${connect.port}`);
-  await new Promise<void>((resolve, reject) => {
-    ws.addEventListener("open", () => resolve());
-    ws.addEventListener("error", () => reject(new Error("loopback connect failed")));
-  });
-
-  // The attach happens inside an async start(), so awaiting this path's one
-  // success signal is what makes it deterministic. `agent:relayError` too, so a
-  // refusal fails with its own message instead of timing out.
-  const attached = new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("no agent:relayReady within 5s")), 5000);
-    ws.addEventListener("message", (ev) => {
-      const msg = JSON.parse(String(ev.data)) as { type?: string; message?: string };
-      if (msg.type === "agent:relayReady") { clearTimeout(timer); resolve(); }
-      if (msg.type === "agent:relayError") { clearTimeout(timer); reject(new Error(msg.message ?? "relayError")); }
-    });
-  });
-
-  ws.send(JSON.stringify({ type: "hello", token: connect.token }));
-  ws.send(JSON.stringify(createMessage("agent:enableRelay", {
-    auth: {
-      deviceUuid: "11111111-1111-4111-8111-111111111111",
-      ed25519Pub: "cHVi",
-      ed25519Priv: "cHJpdg",
-    },
-  })));
-  await attached;
-
-  expect(core.sendToAppSession(PEER, busReplyFrame())).toBe(true);
-  expect(sent).toEqual([{ kind: "peer", peerId: PEER }]);
-
-  // The owner goes away before the core does, in that order: closing the socket
-  // after shutdown would race the listener's own teardown.
-  await new Promise<void>((resolve) => { ws.addEventListener("close", () => resolve()); ws.close(); });
-});
-
 test("tearing down a slot a second attach has taken over leaves the live one answering", async () => {
   const core = localCore("antgrid-pc-staleslot-");
   await core.start();
 
-  // The wizard and host promotion guard different fields and neither sees the
-  // other's, so a core enabled both ways really does attach twice.
+  // A second promote without a stop in between attaches twice.
   const first = peerStreamStub();
   const stale = core.promote(first.deps);
   const second = peerStreamStub();
@@ -145,6 +96,6 @@ test("tearing down a slot a second attach has taken over leaves the live one ans
   expect(second.sent).toEqual([{ kind: "peer", peerId: PEER }]);
   expect(first.sent).toEqual([]);
   // The surviving stream is still admitted, so the advert must not read
-  // not-running — host-server suppresses `stream-ready` on that.
+  // not-running.
   expect(core.isRelayRegistered()).toBe(true);
 });

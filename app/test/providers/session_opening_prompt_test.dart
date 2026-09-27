@@ -7,7 +7,7 @@ import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/providers/new_session_action.dart';
 import 'package:antgrid/providers/new_session_picker.dart';
 import 'package:antgrid/providers/session_opening_prompt.dart';
-import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+import '../helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/new_session/picker_sources.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';

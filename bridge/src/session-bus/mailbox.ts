@@ -5,7 +5,7 @@
 // ring over BOTH directions that trims every part on the way in, so it can say
 // what crossed and never what is still waiting — a mailbox folded out of it
 // would hand the agent a trimmed body and re-offer a message already read. A
-// post is read when the target chooses (§7.1); nothing interrupts a turn to
+// post is read when the target chooses; nothing interrupts a turn to
 // deliver one, which is the whole reason it has to be parked somewhere.
 //
 // The bound is spent VISIBLY. Past MAX_MAILBOX_POSTS the oldest goes, past

@@ -1,7 +1,10 @@
+import '../helpers/test_license_token_minter.dart';
+import '../helpers/test_peer_runtime.dart';
 import 'dart:convert';
 
 import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/providers/connection_identity.dart';
+import 'package:antgrid/providers/peer_runtime.dart';
 import 'package:antgrid/providers/device_provisioning.dart';
 import 'package:antgrid/providers/recent_agents.dart';
 import 'package:antgrid/providers/relay_connection.dart';
@@ -75,7 +78,15 @@ void main() {
           connectionDeviceRecordProvider.overrideWith(
             (_) async => _connectionRecord(),
           ),
-          connectionTokenMinterProvider.overrideWith((_) async => null),
+          connectionTokenMinterProvider.overrideWith(
+            (_) async => TestLicenseTokenMinter(),
+          ),
+          // Machine routing is independent of which enrolled native endpoint connects.
+          peerRuntimeProvider.overrideWith((ref) async {
+            final runtime = TestPeerRuntime();
+            ref.onDispose(runtime.dispose);
+            return runtime;
+          }),
         ],
       );
       addTearDown(c.dispose);
@@ -115,7 +126,14 @@ void main() {
         connectionDeviceRecordProvider.overrideWith(
           (_) async => _connectionRecord(),
         ),
-        connectionTokenMinterProvider.overrideWith((_) async => null),
+        connectionTokenMinterProvider.overrideWith(
+          (_) async => TestLicenseTokenMinter(),
+        ),
+        peerRuntimeProvider.overrideWith((ref) async {
+          final runtime = TestPeerRuntime();
+          ref.onDispose(runtime.dispose);
+          return runtime;
+        }),
       ],
     );
     addTearDown(c.dispose);

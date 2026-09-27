@@ -1150,8 +1150,7 @@ void main() {
     });
   });
 
-  group('the redesign spec copy (handler-arm-sheet-redesign-spec.md §7, §12)',
-      () {
+  group('the handler lens picker copy', () {
     test('the four presets read as a stance, not a job title', () {
       expect(handlerLensLabel(HandlerLens.pm), 'Stays in scope');
       expect(handlerLensLabel(HandlerLens.qa), 'Proof it works');

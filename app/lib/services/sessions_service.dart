@@ -500,7 +500,7 @@ class SessionsService {
   /// Delete [id]. Three-way, and none of the three is "failed":
   /// a bridge refusal raises [SessionOperationException] (the confirm ladder's
   /// input), an `ok` reply completes [SessionDeleteAck.deleted], and no reply
-  /// at all completes [SessionDeleteAck.accepted] — see
+  /// at all completes [SessionDeleteAck.outcomeUnknown] — see
   /// [kSessionDeleteAckTimeout] for why silence cannot mean failure here.
   ///
   /// The lapse is converted at this call site rather than by teaching
@@ -536,7 +536,7 @@ class SessionsService {
       ),
     );
     return pending.future.catchError(
-      (_) => SessionDeleteAck.accepted,
+      (_) => SessionDeleteAck.outcomeUnknown,
       // StateError alongside the lapse: `dispose()` fails everything pending,
       // and a project switch mid-delete would otherwise surface as a generic
       // "couldn't delete" toast for a removal the bridge is still running.

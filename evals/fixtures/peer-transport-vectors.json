@@ -1,0 +1,499 @@
+{
+  "comment": "Native peer transport cross-language pin (session-record shape). Regenerate: cd packages/antgrid-wire && bun run gen:peer-vectors",
+  "sessionRecords": {
+    "maxAppRecordBytes": 1500000,
+    "maxBridgeRecordBytes": 33554432,
+    "types": [
+      "session:hello",
+      "session:established",
+      "session:ping",
+      "session:pong"
+    ],
+    "samples": [
+      {
+        "name": "hello",
+        "json": "{\"type\":\"session:hello\",\"attemptId\":\"a1\"}",
+        "session": true,
+        "recordHex": "000000297b2274797065223a2273657373696f6e3a68656c6c6f222c22617474656d70744964223a226131227d",
+        "frameId": "1e65322bad672889949c1355"
+      },
+      {
+        "name": "established",
+        "json": "{\"type\":\"session:established\",\"attemptId\":\"a1\"}",
+        "session": true,
+        "recordHex": "0000002f7b2274797065223a2273657373696f6e3a65737461626c6973686564222c22617474656d70744964223a226131227d",
+        "frameId": "005fe56b0fd8b3af903b8f53"
+      },
+      {
+        "name": "ping",
+        "json": "{\"type\":\"session:ping\"}",
+        "session": true,
+        "recordHex": "000000177b2274797065223a2273657373696f6e3a70696e67227d",
+        "frameId": "87de6691fb39ea6cf0dfe208"
+      },
+      {
+        "name": "pong",
+        "json": "{\"type\":\"session:pong\"}",
+        "session": true,
+        "recordHex": "000000177b2274797065223a2273657373696f6e3a706f6e67227d",
+        "frameId": "5bd8f18eec9a79ae8a044822"
+      },
+      {
+        "name": "control-ping",
+        "json": "{\"type\":\"ping\",\"id\":\"m1\",\"timestamp\":0}",
+        "session": false,
+        "recordHex": "000000277b2274797065223a2270696e67222c226964223a226d31222c2274696d657374616d70223a307d",
+        "frameId": "f7db13237d5631f626779a15"
+      }
+    ]
+  },
+  "native": {
+    "alpn": "antgrid/peer/2",
+    "leaseMs": 60000,
+    "refreshMs": 20000,
+    "selectionMs": 5000,
+    "endpointChallengeMs": 120000
+  },
+  "authorization": {
+    "identityMaxChars": 256,
+    "maxAuthorizedPeers": 1024,
+    "maxRelayUrls": 16,
+    "maxGeneration": "9223372036854775807",
+    "maxLeaseMs": 60000
+  },
+  "streamOpen": {
+    "maxOpenBytes": 4096,
+    "maxIdLength": 200,
+    "caps": {
+      "maxBidiStreamsPerConnection": 256,
+      "maxProjectsPerPeer": 32,
+      "maxTerminalAttachmentsPerPeer": 64,
+      "maxTunnelStreamsPerPeer": 128,
+      "maxPendingOpensPerPeer": 16,
+      "maxUploadStreamsPerPeer": 4
+    },
+    "projectRecords": {
+      "appMaxRecordBytes": 1500000,
+      "bridgeMaxRecordBytes": 33554432,
+      "maxTransferBytes": 33554432
+    },
+    "terminalRecords": {
+      "appMaxRecordBytes": 16384,
+      "bridgeMaxRecordBytes": 2097152
+    },
+    "uploadRecords": {
+      "bridgeMaxRecordBytes": 16384,
+      "maxFileNameLength": 255,
+      "maxMimeTypeLength": 127
+    },
+    "tunnelRecords": {
+      "maxDataBytes": 1048576,
+      "maxRecordBytes": 1048577,
+      "requestBodyMaxBytes": 33554432,
+      "tags": {
+        "wsText": 2,
+        "wsBinary": 3
+      }
+    },
+    "opens": [
+      {
+        "name": "session",
+        "json": {
+          "kind": "session"
+        }
+      },
+      {
+        "name": "project",
+        "json": {
+          "kind": "project",
+          "projectId": "proj-1"
+        }
+      },
+      {
+        "name": "terminal",
+        "json": {
+          "kind": "terminal",
+          "projectId": "proj-1",
+          "requestId": "req-1"
+        }
+      },
+      {
+        "name": "terminal-with-checkout",
+        "json": {
+          "kind": "terminal",
+          "projectId": "proj-1",
+          "checkoutId": "chk-1",
+          "requestId": "req-1"
+        }
+      },
+      {
+        "name": "tunnel-http",
+        "json": {
+          "kind": "tunnel-http",
+          "projectId": "proj-1",
+          "requestId": "req-1"
+        }
+      },
+      {
+        "name": "tunnel-ws",
+        "json": {
+          "kind": "tunnel-ws",
+          "projectId": "proj-1",
+          "wsId": "ws-1"
+        }
+      },
+      {
+        "name": "upload",
+        "json": {
+          "kind": "upload",
+          "projectId": "proj-1",
+          "requestId": "req-1",
+          "fileName": "notes.txt",
+          "size": 12
+        }
+      },
+      {
+        "name": "upload-with-checkout-and-mime",
+        "json": {
+          "kind": "upload",
+          "projectId": "proj-1",
+          "checkoutId": "chk-1",
+          "requestId": "req-1",
+          "fileName": "notes.txt",
+          "mimeType": "text/plain",
+          "size": 0
+        }
+      }
+    ],
+    "refusals": [
+      {
+        "name": "not-ready",
+        "json": {
+          "type": "stream:refused",
+          "code": "NOT_READY",
+          "message": "project core is still starting"
+        }
+      },
+      {
+        "name": "not-allowed",
+        "json": {
+          "type": "stream:refused",
+          "code": "NOT_ALLOWED",
+          "message": "remote access is disabled on this machine"
+        }
+      },
+      {
+        "name": "cap-exceeded",
+        "json": {
+          "type": "stream:refused",
+          "code": "CAP_EXCEEDED",
+          "message": "too many terminal attachments for this peer"
+        }
+      },
+      {
+        "name": "invalid",
+        "json": {
+          "type": "stream:refused",
+          "code": "INVALID",
+          "message": "the open frame did not parse"
+        }
+      }
+    ],
+    "rejectedOpens": [
+      {
+        "name": "missing-kind",
+        "json": {
+          "projectId": "proj-1"
+        }
+      },
+      {
+        "name": "unknown-kind",
+        "json": {
+          "kind": "request",
+          "projectId": "proj-1"
+        }
+      },
+      {
+        "name": "non-string-kind",
+        "json": {
+          "kind": 1
+        }
+      },
+      {
+        "name": "session-extra-field",
+        "json": {
+          "kind": "session",
+          "projectId": "proj-1"
+        }
+      },
+      {
+        "name": "project-with-checkout",
+        "json": {
+          "kind": "project",
+          "projectId": "proj-1",
+          "checkoutId": "main"
+        }
+      },
+      {
+        "name": "project-empty-id",
+        "json": {
+          "kind": "project",
+          "projectId": ""
+        }
+      },
+      {
+        "name": "project-numeric-id",
+        "json": {
+          "kind": "project",
+          "projectId": 7
+        }
+      },
+      {
+        "name": "project-overlong-id",
+        "json": {
+          "kind": "project",
+          "projectId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        }
+      },
+      {
+        "name": "terminal-missing-request",
+        "json": {
+          "kind": "terminal",
+          "projectId": "proj-1"
+        }
+      },
+      {
+        "name": "terminal-null-checkout",
+        "json": {
+          "kind": "terminal",
+          "projectId": "proj-1",
+          "checkoutId": null,
+          "requestId": "req-1"
+        }
+      },
+      {
+        "name": "terminal-empty-checkout",
+        "json": {
+          "kind": "terminal",
+          "projectId": "proj-1",
+          "checkoutId": "",
+          "requestId": "req-1"
+        }
+      },
+      {
+        "name": "tunnel-http-missing-request",
+        "json": {
+          "kind": "tunnel-http",
+          "projectId": "proj-1"
+        }
+      },
+      {
+        "name": "tunnel-ws-request-not-ws",
+        "json": {
+          "kind": "tunnel-ws",
+          "projectId": "proj-1",
+          "requestId": "req-1"
+        }
+      },
+      {
+        "name": "tunnel-ws-overlong-id",
+        "json": {
+          "kind": "tunnel-ws",
+          "projectId": "proj-1",
+          "wsId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        }
+      },
+      {
+        "name": "upload-missing-size",
+        "json": {
+          "kind": "upload",
+          "projectId": "proj-1",
+          "requestId": "req-1",
+          "fileName": "a"
+        }
+      },
+      {
+        "name": "upload-negative-size",
+        "json": {
+          "kind": "upload",
+          "projectId": "proj-1",
+          "requestId": "req-1",
+          "fileName": "a",
+          "size": -1
+        }
+      },
+      {
+        "name": "upload-fractional-size",
+        "json": {
+          "kind": "upload",
+          "projectId": "proj-1",
+          "requestId": "req-1",
+          "fileName": "a",
+          "size": 1.5
+        }
+      },
+      {
+        "name": "upload-string-size",
+        "json": {
+          "kind": "upload",
+          "projectId": "proj-1",
+          "requestId": "req-1",
+          "fileName": "a",
+          "size": "12"
+        }
+      },
+      {
+        "name": "upload-empty-file-name",
+        "json": {
+          "kind": "upload",
+          "projectId": "proj-1",
+          "requestId": "req-1",
+          "fileName": "",
+          "size": 1
+        }
+      },
+      {
+        "name": "upload-overlong-file-name",
+        "json": {
+          "kind": "upload",
+          "projectId": "proj-1",
+          "requestId": "req-1",
+          "fileName": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "size": 1
+        }
+      },
+      {
+        "name": "upload-null-mime",
+        "json": {
+          "kind": "upload",
+          "projectId": "proj-1",
+          "requestId": "req-1",
+          "fileName": "a",
+          "size": 1,
+          "mimeType": null
+        }
+      },
+      {
+        "name": "upload-empty-checkout",
+        "json": {
+          "kind": "upload",
+          "projectId": "proj-1",
+          "checkoutId": "",
+          "requestId": "req-1",
+          "fileName": "a",
+          "size": 1
+        }
+      },
+      {
+        "name": "upload-extra-field",
+        "json": {
+          "kind": "upload",
+          "projectId": "proj-1",
+          "requestId": "req-1",
+          "fileName": "a",
+          "size": 1,
+          "uploadId": "u"
+        }
+      }
+    ],
+    "rejectedRefusals": [
+      {
+        "name": "unknown-code",
+        "json": {
+          "type": "stream:refused",
+          "code": "EXTRA_STREAM",
+          "message": "x"
+        }
+      },
+      {
+        "name": "missing-message",
+        "json": {
+          "type": "stream:refused",
+          "code": "INVALID"
+        }
+      },
+      {
+        "name": "extra-field",
+        "json": {
+          "type": "stream:refused",
+          "code": "INVALID",
+          "message": "x",
+          "streamId": "1"
+        }
+      },
+      {
+        "name": "wrong-type",
+        "json": {
+          "type": "stream-refused",
+          "code": "INVALID",
+          "message": "x"
+        }
+      }
+    ],
+    "labels": [
+      {
+        "name": "session",
+        "open": {
+          "kind": "session"
+        },
+        "streamKind": "session",
+        "streamId": "0"
+      },
+      {
+        "name": "project",
+        "open": {
+          "kind": "project",
+          "projectId": "proj-1"
+        },
+        "streamKind": "project",
+        "streamId": "proj-1"
+      },
+      {
+        "name": "terminal",
+        "open": {
+          "kind": "terminal",
+          "projectId": "proj-1",
+          "requestId": "req-1"
+        },
+        "streamKind": "terminal",
+        "streamId": "req-1"
+      },
+      {
+        "name": "tunnel-http",
+        "open": {
+          "kind": "tunnel-http",
+          "projectId": "proj-1",
+          "requestId": "req-1"
+        },
+        "streamKind": "tunnel-http",
+        "streamId": "req-1"
+      },
+      {
+        "name": "tunnel-ws",
+        "open": {
+          "kind": "tunnel-ws",
+          "projectId": "proj-1",
+          "wsId": "ws-1"
+        },
+        "streamKind": "tunnel-ws",
+        "streamId": "ws-1"
+      },
+      {
+        "name": "upload",
+        "open": {
+          "kind": "upload",
+          "projectId": "proj-1",
+          "requestId": "req-1",
+          "fileName": "notes.txt",
+          "size": 12
+        },
+        "streamKind": "upload",
+        "streamId": "req-1"
+      }
+    ]
+  },
+  "quic": {
+    "keepAliveIntervalMs": 5000,
+    "maxIdleTimeoutMs": 30000
+  }
+}

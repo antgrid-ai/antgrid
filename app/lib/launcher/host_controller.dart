@@ -107,6 +107,7 @@ class HostController {
     Future<HostFile?> Function()? readHost,
     Future<bool> Function(int pid)? pidAlive,
     Future<bool> Function(HostFile host)? ping,
+    Future<void> Function(HostFile host)? notifyPeerResume,
     Future<HostFile> Function()? spawnHost,
     Future<void> Function(int pid)? terminate,
     Future<void> Function(int pid)? terminateTree,
@@ -117,6 +118,7 @@ class HostController {
   }) : _readHost = readHost ?? _defaultReadHost,
        _pidAlive = pidAlive ?? isPidAlive,
        _ping = ping ?? _defaultPing,
+       _notifyPeerResume = notifyPeerResume ?? _defaultNotifyPeerResume,
        _terminate = terminate ?? terminatePid,
        _terminateTree = terminateTree ?? _defaultTerminateTree,
        _now = now ?? DateTime.now,
@@ -132,6 +134,7 @@ class HostController {
   final Future<HostFile?> Function() _readHost;
   final Future<bool> Function(int pid) _pidAlive;
   final Future<bool> Function(HostFile host) _ping;
+  final Future<void> Function(HostFile host) _notifyPeerResume;
   final Future<void> Function(int pid) _terminate;
   final Future<void> Function(int pid) _terminateTree;
   final DateTime Function() _now;
@@ -301,6 +304,21 @@ class HostController {
     } finally {
       client.close();
     }
+  }
+
+  static Future<void> _defaultNotifyPeerResume(HostFile host) async {
+    final client = HostControlClient(port: host.controlPort, token: host.token);
+    try {
+      await client.peerResume();
+    } finally {
+      client.close();
+    }
+  }
+
+  /// Discovery never starts or replaces a host during a resume notification.
+  Future<void> notifyPeerResume() async {
+    final host = await _readHost();
+    if (host != null) await _notifyPeerResume(host);
   }
 
   /// Refuse to bring a host up until [unsealSpawns].

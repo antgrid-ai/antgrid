@@ -1,3 +1,4 @@
+import '../helpers/fixed_peer_connector.dart';
 // Revoking a device from the web must sign THIS app out — the relay kicks the
 // socket while it is live, and the token mint answers 401 once it isn't. These
 // pin the three properties the feature rests on: the teardown runs exactly once
@@ -5,9 +6,8 @@
 // anyone out, and LICENSE_INVALID stays a connection fault rather than an
 // account verdict.
 import 'dart:async';
-import 'dart:typed_data';
 
-import 'package:antgrid/connection/relay_mechanisms.dart';
+import 'package:antgrid/connection/peer_connection.dart';
 import 'package:antgrid/providers/device_revocation.dart';
 import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/providers/relay_connection.dart';
@@ -132,15 +132,6 @@ class _ErrorOnlyRelay extends RelayService {
   }
 }
 
-DeviceIdentity _identity() => DeviceIdentity(
-  deviceId: 'phone-1',
-  name: 'Test Phone',
-  ed25519PrivateKey: Uint8List(64),
-  ed25519PublicKey: Uint8List(32),
-  x25519PrivateKey: Uint8List(32),
-  x25519PublicKey: Uint8List(32),
-);
-
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -245,8 +236,8 @@ void main() {
     setUp(() => relay = _ErrorOnlyRelay());
     tearDown(() async => relay.closeStreams());
 
-    RelayConnection started({required void Function() onRevoked}) {
-      final conn = RelayConnection(
+    MachineConnection started({required void Function() onRevoked}) {
+      final conn = MachineConnection(
         machineDeviceId: 'M',
         crypto: CryptoService(),
         relayOverride: relay,
@@ -254,18 +245,12 @@ void main() {
       );
       addTearDown(conn.dispose);
       conn.ensureStarted(
-        mechanisms: RelayMechanisms(
-          relay: relay,
-          crypto: CryptoService(),
+        mechanisms: PeerConnectionMechanisms(
+          peerRuntime: FixedPeerConnector.stub(),
           machineDeviceId: 'M',
-          identity: _identity(),
-          phoneDeviceId: 'phone-1',
-          phoneEd25519Seed: List<int>.filled(32, 7),
-          epoch: 1,
           // Null coords park the ladder before the dial: this test is about the
           // error stream, not the climb.
           resolveCoords: () async => null,
-          mintToken: () async => 'token',
         ),
       );
       return conn;

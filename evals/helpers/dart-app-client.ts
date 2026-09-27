@@ -2,7 +2,8 @@ import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createMessage, type AbMessage } from "../../bridge/src/protocol";
-import { CONTROL_STREAM_ID } from "antgrid-wire";
+import { CONTROL_HANDLE } from "../support/stream";
+import { TERMINAL_PROTOCOL_VERSION, TerminalScreenFrameSchema } from "../../bridge/src/terminal-frames/protocol";
 
 // `URL.pathname` yields a leading-slash `/C:/…` form that is an invalid cwd on
 // Windows (uv_spawn rejects it with ENOENT). `fileURLToPath` gives a native path.
@@ -36,7 +37,15 @@ function dartRunArgv(): string[] {
 const MAX_QUEUE_LENGTH = 1_000;
 
 /** An event emitted by the Dart CLI over stdout (JSON line). */
-type DartEvent = Record<string, any>;
+type DartLifecycleEvent =
+  | { event: "initialized"; deviceId: string; publicKey: string; x25519PublicKey: string }
+  | { event: "control-connected" }
+  | { event: "peer-connected"; endpointId: string; leaseRemainingMs: number }
+  | { event: "peer-disconnected" }
+  | { event: "control-disconnected" }
+  | { event: "disconnected" };
+
+type DartEvent = (DartLifecycleEvent | { event: string }) & Record<string, any>;
 
 type Waiter = {
   match: (event: DartEvent) => boolean;
@@ -53,7 +62,7 @@ type Waiter = {
  * can either poll queued events or async-wait for future ones.
  */
 export class DartAppClient {
-  private proc: { kill(): void };
+  private proc: { pid: number; kill(): void };
   private stdin: import("bun").FileSink;
   private eventQueue: DartEvent[] = [];
   private waiters: Waiter[] = [];
@@ -66,7 +75,7 @@ export class DartAppClient {
   readonly ed25519PublicKey: string;
 
   private constructor(
-    proc: { kill(): void },
+    proc: { pid: number; kill(): void },
     stdin: import("bun").FileSink,
     deviceId: string,
     x25519PublicKey: string,
@@ -88,7 +97,7 @@ export class DartAppClient {
       cwd: DART_CLIENT_DIR,
       stdin: "pipe",
       stdout: "pipe",
-      stderr: "ignore",
+      stderr: "inherit",
     });
 
     const procStdin = proc.stdin as import("bun").FileSink;
@@ -111,17 +120,21 @@ export class DartAppClient {
       const timer = setTimeout(() => {
         const i = earlyWaiters.findIndex((w) => w.timer === timer);
         if (i !== -1) earlyWaiters.splice(i, 1);
-        reject(new Error("Timed out waiting for Dart client initialized event (15s)"));
-      }, 15_000);
+        reject(new Error("Timed out waiting for Dart client initialized event (30s)"));
+      }, 30_000);
 
       earlyWaiters.push({
-        match: (e) => e.event === "initialized",
+        match: (e) => e.event === "initialized" || e.event === "error",
         resolve,
         reject,
         timer,
       });
     });
 
+    if (initEvent.event === "error") {
+      proc.kill();
+      throw new Error(`Dart client init failed: ${String(initEvent.message)}`);
+    }
     const client = new DartAppClient(
       proc,
       procStdin,
@@ -236,7 +249,7 @@ export class DartAppClient {
    *  verbs). Project verbs answer on a project stream — see
    *  {@link waitForStreamAbMessage}. */
   waitForAbMessage(type: string, timeoutMs = 10_000): Promise<DartEvent> {
-    return this.waitForStreamAbMessage(CONTROL_STREAM_ID, type, timeoutMs);
+    return this.waitForStreamAbMessage(CONTROL_HANDLE, type, timeoutMs);
   }
 
   /** Await an AbMessage of `type` arriving on a specific project stream. */
@@ -247,23 +260,68 @@ export class DartAppClient {
     );
   }
 
-  async connect(relayUrl: string, licenseToken: string): Promise<void> {
-    // Mandatory in v3: the app hello carries the account's own license token.
-    // Omitting it makes the Dart CLI reject the command outright rather than
-    // dial token-free, so this stays required here.
-    this.sendCommand({ action: "connect", relayUrl, licenseToken });
-    await this.waitForState("authenticated");
+  /** Await a `terminal-attach-*` event for `requestId` matching `predicate`
+   *  (checked against the full event, so a caller can narrow on `end`,
+   *  `data?.type` or anything else the CLI attaches). */
+  waitForTerminalAttach(
+    requestId: string,
+    predicate: (event: DartEvent) => boolean,
+    timeoutMs = 10_000,
+  ): Promise<DartEvent> {
+    return this.waitForEvent(
+      (e) => typeof e.event === "string" && e.event.startsWith("terminal-attach-") &&
+        e.requestId === requestId && predicate(e),
+      timeoutMs,
+    );
   }
 
+  async connectControl(
+    relayUrl: string,
+    licenseToken: string,
+    machineDeviceId: string,
+  ): Promise<void> {
+    const connected = this.waitForEvent((e) => e.event === "control-connected", 30_000);
+    this.sendCommand({
+      action: "control-connect",
+      relayUrl,
+      licenseToken,
+      machineDeviceId,
+    });
+    await connected;
+  }
+
+  async connectPeer(options: {
+    licenseApiUrl: string;
+    accountId: string;
+    enrollmentId: string;
+    clientSecret: string;
+    machineDeviceId: string;
+    addresses: string[];
+  }): Promise<{ endpointId: string; leaseRemainingMs: number }> {
+    const connected = this.waitForEvent((e) => e.event === "peer-connected", 30_000);
+    this.sendCommand({
+      action: "peer-connect",
+      machineDeviceId: options.machineDeviceId,
+      licenseApiUrl: options.licenseApiUrl,
+      accountId: options.accountId,
+      enrollmentId: options.enrollmentId,
+      clientSecret: options.clientSecret,
+      nativeAddresses: options.addresses,
+    });
+    const event = await connected;
+    return {
+      endpointId: event.endpointId as string,
+      leaseRemainingMs: event.leaseRemainingMs as number,
+    };
+  }
   /**
-   * Drive the pull-model E2E handshake to `established`. The eval-client
-   * (phone) signs its client-hello and verifies the agent's signed agent-hello
-   * against the agent's pinned Ed25519 pubkey before deriving — mirroring the
-   * production app. `agentEd25519Pub` (raw 32 bytes, base64) comes from the
-   * agent's bootstrap keypair; without it the Dart client refuses to derive.
-   * `machineDeviceId` is the agent's bare deviceUuid: with pairing gone the
-   * relay hands out no peer id, so the phone addresses coordinates it already
-   * holds — exactly as the app dials from its account inventory.
+   * Drive the session to `established`: a plaintext `session:hello` on the
+   * native payload, confirmed by the agent's `session:established`. QUIC/TLS between
+   * the leased endpoints is the confidentiality layer, so there is no agent
+   * key to pin. `machineDeviceId` is the agent's bare deviceUuid: with
+   * pairing gone the relay hands out no peer id, so the phone addresses
+   * coordinates it already holds — exactly as the app dials from its account
+   * inventory.
    *
    * Runs ONE attempt: the Dart driver leaves give-up to the caller's
    * supervisor, which no eval has, so callers racing agent startup must retry.
@@ -271,7 +329,6 @@ export class DartAppClient {
    * looping so the loop's worst case stays bounded.
    */
   async performHandshake(
-    agentEd25519Pub: string,
     machineDeviceId: string,
     attemptTimeoutMs?: number,
   ): Promise<void> {
@@ -281,15 +338,18 @@ export class DartAppClient {
         (e.event === "error" && String(e.message).startsWith("Handshake failed")),
       30_000,
     );
-    this.sendCommand({ action: "handshake", agentEd25519Pub, machineDeviceId, attemptTimeoutMs });
+    this.sendCommand({ action: "handshake", machineDeviceId, attemptTimeoutMs });
     const result = await done;
     if (result.event !== "handshake-complete") throw new Error(String(result.message));
   }
 
   /**
-   * Drill into a project: control-plane `project:start`, then the agent's
-   * `stream-ready { projectId, streamId }` — resolved at 0 RTT
-   * when the `agent:projects` advert already carried the stream. No new socket.
+   * Opens `projectId`'s own QUIC stream: control-plane
+   * `project:start`, then `MachineSession.openProject` — resolved at 0 RTT
+   * when the `agent:projects` advert already showed the project running. No
+   * new socket. The Dart CLI's `project-started` event still carries a
+   * `streamId` field; its VALUE is now `projectId`, not a bridge-minted
+   * id.
    */
   async openProjectStream(projectId: string, timeoutMs = 25_000): Promise<string> {
     const done = this.waitForEvent(
@@ -304,12 +364,19 @@ export class DartAppClient {
     return result.streamId as string;
   }
 
-  /** Send an AbMessage on the machine CONTROL PLANE (`s` omitted), sealed. */
+  /**
+   * Send an AbMessage on the machine CONTROL PLANE (`s` omitted), plaintext.
+   * Name/action kept as `send(-encrypted)` — the wire command the Dart CLI
+   * (`packages/antgrid_eval_client`) still expects — not a claim about sealing.
+   */
   sendEncrypted(msg: AbMessage): void {
     this.sendCommand({ action: "send-encrypted", data: msg });
   }
 
-  /** Send an AbMessage tagged with a project stream (`{ s: streamId, m }`). */
+  /** Send an AbMessage on `streamId`'s own project stream (no `{s, m}`
+   *  envelope on the wire — the Dart CLI command shape is unchanged, but
+   *  `streamId` is the handle, which equals the projectId, not a bridge-minted
+   *  id). */
   sendOnStream(streamId: string, msg: AbMessage): void {
     this.sendCommand({ action: "send-encrypted", streamId, data: msg });
   }
@@ -326,7 +393,7 @@ export class DartAppClient {
    * directory (see {@link fetchRootListing} / {@link fetchChildListings})
    * rather than replayed at connect time.
    */
-  async pullStateSnapshot(streamId = CONTROL_STREAM_ID, timeoutMs = 15_000): Promise<void> {
+  async pullStateSnapshot(streamId = CONTROL_HANDLE, timeoutMs = 15_000): Promise<void> {
     const done = this.waitForEvent(
       (e) => e.event === "snapshot-complete" && e.streamId === streamId,
       timeoutMs,
@@ -351,6 +418,36 @@ export class DartAppClient {
 
   waitForAgentStatus(streamId: string, timeoutMs = 10_000): Promise<DartEvent> {
     return this.waitForStreamAbMessage(streamId, "agent:status", timeoutMs);
+  }
+
+  /** Opens a terminal attachment through the Dart eval CLI's `terminal-attach`
+   *  action: `openTerminalAttachment` rides
+   *  its own native stream, so `isStream` on the `-opened` event is always
+   *  true here. `version` always goes over the wire
+   *  (defaulting to the terminal-frames protocol version), because the Zod
+   *  schema behind `terminal:subscribe` requires it. */
+  terminalAttach(
+    streamId: string,
+    opts: { terminalId: string; requestId: string; checkoutId?: string; version?: number },
+  ): void {
+    this.sendCommand({
+      action: "terminal-attach",
+      streamId,
+      terminalId: opts.terminalId,
+      requestId: opts.requestId,
+      checkoutId: opts.checkoutId ?? "main",
+      version: opts.version ?? TERMINAL_PROTOCOL_VERSION,
+    });
+  }
+
+  /** `handle.send(data)` for an open terminal attachment. */
+  terminalAttachSend(requestId: string, data: Record<string, any>): void {
+    this.sendCommand({ action: "terminal-attach-send", requestId, data });
+  }
+
+  /** `handle.close()` for an open terminal attachment. Idempotent. */
+  terminalAttachClose(requestId: string): void {
+    this.sendCommand({ action: "terminal-attach-close", requestId });
   }
 
   sendTerminalInput(streamId: string, terminalId: string, data: string): void {
@@ -480,9 +577,63 @@ export class DartAppClient {
     );
   }
 
+  /** Frame-capable Dart sessions opt each visible terminal in explicitly and
+   * acknowledge every frame, including screens that precede the marker. */
+  async waitForTerminalFrameContaining(
+    streamId: string,
+    terminalId: string,
+    marker: string,
+    timeoutMs = 10_000,
+  ): Promise<DartEvent> {
+    const deadline = Date.now() + timeoutMs;
+    const remaining = () => Math.max(1, deadline - Date.now());
+    const requestId = crypto.randomUUID();
+    this.sendOnStream(streamId, createMessage("terminal:subscribe", {
+      terminalId, version: TERMINAL_PROTOCOL_VERSION, requestId,
+    }));
+    const subscribed = await this.waitForEvent((event) =>
+      event.event === "antgrid-message" && event.streamId === streamId &&
+      event.data?.type === "terminal:subscribed" && event.data.requestId === requestId,
+      remaining());
+    const { runId, attachmentId } = subscribed.data;
+    try {
+      while (Date.now() < deadline) {
+        const frame = await this.waitForEvent((event) =>
+          event.event === "antgrid-message" && event.streamId === streamId &&
+          event.data?.type === "terminal:frame" && event.data.terminalId === terminalId &&
+          event.data.runId === runId && event.data.attachmentId === attachmentId,
+          remaining());
+        const screen = TerminalScreenFrameSchema.parse(frame.data);
+        this.sendOnStream(streamId, createMessage("terminal:ack", {
+          terminalId, runId, attachmentId, sequence: frame.data.sequence,
+        }));
+        if (screen.ansi.includes(marker)) return frame;
+      }
+      throw new Error(`Timed out waiting for terminal frame marker (${timeoutMs}ms)`);
+    } finally {
+      this.sendOnStream(streamId, createMessage("terminal:unsubscribe", {
+        terminalId, runId, attachmentId,
+      }));
+    }
+  }
+
+  async disconnectPeer(): Promise<void> {
+    const disconnected = this.waitForEvent((e) => e.event === "peer-disconnected", 10_000);
+    this.sendCommand({ action: "peer-disconnect" });
+    await disconnected;
+  }
+
+  async disconnectControl(): Promise<void> {
+    const disconnected = this.waitForEvent((e) => e.event === "control-disconnected", 10_000);
+    this.sendCommand({ action: "control-disconnect" });
+    await disconnected;
+  }
+
   async disconnect(): Promise<void> {
     try {
-      this.sendCommand({ action: "disconnect" });
+      const disconnected = this.waitForEvent((e) => e.event === "disconnected", 10_000);
+      this.sendCommand({ action: "dispose" });
+      await disconnected;
     } catch {
       // Ignore write errors if process already died
     }
@@ -498,6 +649,67 @@ export class DartAppClient {
       this.proc.kill();
     } catch {
       // Already dead
+    }
+  }
+
+  /**
+   * Kills the whole process tree with no chance for the Dart VM to exit on
+   * its own (which can send a graceful QUIC CONNECTION_CLOSE the bridge would
+   * retire the peer on immediately, defeating a test of the idle timeout).
+   *
+   * `dart.exe run` spawns a child `dartvm.exe` holding the actual native
+   * endpoint; killing only the Bun-spawned pid lets that child drain stdin
+   * EOF and exit cleanly. Safe to call on an already-dead process.
+   */
+  async hardKill(): Promise<void> {
+    const pid = this.proc.pid;
+    if (process.platform === "win32") {
+      try {
+        const killer = Bun.spawn(["taskkill", "/PID", String(pid), "/T", "/F"], {
+          stdout: "ignore",
+          stderr: "ignore",
+        });
+        await killer.exited;
+      } catch {
+        // Already dead, or taskkill itself failed to spawn.
+      }
+      return;
+    }
+
+    // POSIX: no /T equivalent, so walk the tree via pgrep and SIGKILL every
+    // descendant before the root, bottom-up.
+    const descendants: number[] = [];
+    let frontier = [pid];
+    while (frontier.length > 0) {
+      const next: number[] = [];
+      for (const parent of frontier) {
+        try {
+          const out = Bun.spawnSync(["pgrep", "-P", String(parent)]);
+          const text = new TextDecoder().decode(out.stdout).trim();
+          if (text) {
+            for (const line of text.split("\n")) {
+              const child = Number(line);
+              if (Number.isFinite(child)) next.push(child);
+            }
+          }
+        } catch {
+          // No children, or pgrep unavailable — nothing more under this pid.
+        }
+      }
+      descendants.push(...next);
+      frontier = next;
+    }
+    for (const child of [...descendants].reverse()) {
+      try {
+        process.kill(child, "SIGKILL");
+      } catch {
+        // Already dead.
+      }
+    }
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      // Already dead.
     }
   }
 }

@@ -8,7 +8,7 @@ import { logger } from "./logger.js";
 /**
  * Per-socket state stamped at HTTP upgrade and mutated once, when the socket
  * clears `hello`. `phase` gates the message dispatcher: only `ready` sockets may
- * send route frames or control verbs.
+ * send control verbs.
  */
 export interface WsData {
   connectionId: string;
@@ -20,18 +20,7 @@ export interface WsData {
    */
   relayHost: string;
   deviceId?: string;
-  phase: "awaiting-hello" | "ready";
-  /** License credential id (`azp`) — lets /internal/revoke find the socket. */
-  jti?: string;
-}
-
-/** Verified identity carried by a live connection past hello. */
-export interface ConnectionClaims {
-  /** Account id (`claims.uid`) — the routing-authorization key (`mayRoute`). */
-  uid: string;
-  tier?: string;
-  /** License credential id (`azp`) for revocation lookup. */
-  jti?: string;
+  phase: "awaiting-hello" | "authenticating" | "ready" | "closed";
 }
 
 /** A live connection — an entry exists iff a socket is open and past hello. */
@@ -39,7 +28,7 @@ export interface Connection {
   connectionId: string;
   deviceId: string;
   deviceType: "agent" | "app";
-  name: string;
+  uid: string;
   publicKey: string;
   epoch: number;
   /**
@@ -56,30 +45,20 @@ export interface Connection {
   helloNonce: string;
   helloTs: number;
   ws: ServerWebSocket<WsData>;
-  ip: string;
   connectedAt: number;
   /** Transport diagnostics only — NEVER consulted for arbitration. */
   lastSeen: number;
-  claims?: ConnectionClaims;
-  /** Agents only: opaque stream ids, released wholesale when the entry drops. */
-  openStreams: Set<string>;
 }
 
 /**
  * Identity-free row for the internal connections view (web enriches the rest).
  * Keep in lockstep with web's `src/relay/push.ts` ConnectionSummary.
- *
- * `openStreamCount` is liveness telemetry, not a billable quantity — an agent
- * registers under a bare `deviceUuid` and multiplexes every project as a sealed
- * stream. The COUNT is all that crosses: stream ids are opaque and the relay
- * cannot see the projectIds behind them.
  */
 export interface ConnectionSummary {
   deviceId: string;
   deviceType: "agent" | "app";
   connectedAt: number;
   lastSeen: number;
-  openStreamCount: number;
 }
 
 /**
@@ -93,43 +72,34 @@ export interface ConnectionSummary {
 export class Connections {
   private readonly byConnectionId = new Map<string, Connection>();
   private readonly byDeviceId = new Map<string, Connection>();
-  // Per-account index so same-account fan-out (presencePeers) is O(peers), not
+  // Per-account index so same-account presence fan-out is O(peers), not
   // an O(n) scan of every live connection on every hello/disconnect.
   private readonly byUid = new Map<string, Set<Connection>>();
-  private readonly ipCounts = new Map<string, number>();
 
   insert(conn: Connection): void {
     this.byConnectionId.set(conn.connectionId, conn);
     this.byDeviceId.set(conn.deviceId, conn);
-    const uid = conn.claims?.uid;
-    if (uid !== undefined) {
-      let set = this.byUid.get(uid);
-      if (!set) {
-        set = new Set<Connection>();
-        this.byUid.set(uid, set);
-      }
-      set.add(conn);
+    let set = this.byUid.get(conn.uid);
+    if (!set) {
+      set = new Set<Connection>();
+      this.byUid.set(conn.uid, set);
     }
+    set.add(conn);
   }
 
   /**
    * Remove a connection from both indexes (used both on socket close and on
-   * epoch supersession). Removing the entry drops its `openStreams` set, which
-   * is how a superseded agent's streams are released before the successor is
-   * inserted.
+   * epoch supersession).
    */
   remove(conn: Connection): void {
     this.byConnectionId.delete(conn.connectionId);
     if (this.byDeviceId.get(conn.deviceId) === conn) {
       this.byDeviceId.delete(conn.deviceId);
     }
-    const uid = conn.claims?.uid;
-    if (uid !== undefined) {
-      const set = this.byUid.get(uid);
-      if (set) {
-        set.delete(conn);
-        if (set.size === 0) this.byUid.delete(uid);
-      }
+    const set = this.byUid.get(conn.uid);
+    if (set) {
+      set.delete(conn);
+      if (set.size === 0) this.byUid.delete(conn.uid);
     }
   }
 
@@ -168,46 +138,9 @@ export class Connections {
     return set ? [...set] : [];
   }
 
-  /**
-   * Count open streams across ALL live agent connections owned by [userId].
-   *
-   * No production caller: stream admission is uncapped and `/internal/connections`
-   * builds each row from `c.openStreams.size` directly. It survives as the
-   * assertion helper `tests/epochs.test.ts` uses to prove a superseded epoch
-   * releases its streams. Do NOT delete it as dead, and do NOT re-introduce a
-   * per-account stream cap against it — metering open streams taxes the fleet
-   * view and warm-project LRU, and the paid axis is a worker (agent-device) cap
-   * enforced by web at device registration (relay/CLAUDE.md, the Streams bullet).
-   */
-  countOpenStreamsForUser(userId: string): number {
-    let count = 0;
-    for (const c of this.byDeviceId.values()) {
-      if (c.deviceType !== "agent") continue;
-      if (c.claims?.uid !== userId) continue;
-      count += c.openStreams.size;
-    }
-    return count;
-  }
-
   updateLastSeen(deviceId: string): void {
     const c = this.byDeviceId.get(deviceId);
     if (c) c.lastSeen = Date.now();
-  }
-
-  incrementIpCount(ip: string): number {
-    const count = (this.ipCounts.get(ip) ?? 0) + 1;
-    this.ipCounts.set(ip, count);
-    return count;
-  }
-
-  decrementIpCount(ip: string): void {
-    const count = this.ipCounts.get(ip) ?? 0;
-    if (count <= 1) this.ipCounts.delete(ip);
-    else this.ipCounts.set(ip, count - 1);
-  }
-
-  getConnectionCountByIp(ip: string): number {
-    return this.ipCounts.get(ip) ?? 0;
   }
 
   getConnectionCount(): number {
@@ -220,7 +153,6 @@ export class Connections {
       deviceType: c.deviceType,
       connectedAt: c.connectedAt,
       lastSeen: c.lastSeen,
-      openStreamCount: c.openStreams.size,
     };
   }
 
@@ -231,7 +163,7 @@ export class Connections {
   listConnectionsForUser(userId: string): ConnectionSummary[] {
     const out: ConnectionSummary[] = [];
     for (const c of this.byDeviceId.values()) {
-      if (c.claims?.uid === userId) out.push(this.toSummary(c));
+      if (c.uid === userId) out.push(this.toSummary(c));
     }
     return out;
   }
@@ -240,7 +172,6 @@ export class Connections {
     this.byConnectionId.clear();
     this.byDeviceId.clear();
     this.byUid.clear();
-    this.ipCounts.clear();
     logger.debug("connections cleared");
   }
 }

@@ -1,117 +1,49 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
-import '../analytics/events.dart';
-import '../config/storage_scope.dart';
 import '../services/auth_service.dart';
-import '../services/devices_api.dart' show ProvisioningException;
+import '../services/devices_api.dart';
 import '../util/ab_log.dart';
-import 'analytics.dart';
+import '../util/detached.dart';
 import 'auth.dart';
-import 'connection_identity.dart';
-import 'device_provisioning.dart';
-import 'providers.dart';
-import 'subscription.dart';
+import 'provisioning_coordinator.dart';
 
-/// Activates an idempotent provisioning hook tied to `currentUserProvider`:
+/// Activates the account provisioning hook for the app lifetime.
 ///
-///   - Signed out (`null`) → no-op.
-///   - Signed in (`CurrentUser`) → call `DeviceProvisioning.ensureProvisioned`
-///     (which short-circuits if a record for that user already exists in the
-///     keychain). After it succeeds, invalidate both `licenseTokenMinterProvider`
-///     and `localDeviceUuidProvider` so subsequent reads pick up the new keychain
-///     record.
-///
-/// The hook MUST be kept subscribed for the whole app lifetime — `main.dart`
-/// does `container.listen(postSignInProvisioningProvider, ...)`.
+/// main.dart keeps this provider subscribed. The listener captures a
+/// [ProviderContainer] and a typed coordinator before starting asynchronous
+/// work, so disposing a widget cannot invalidate an in-flight attempt.
 final postSignInProvisioningProvider = Provider<void>((ref) {
+  final container = ref.container;
   ref.listen<AsyncValue<CurrentUser?>>(currentUserProvider, (prev, next) {
+    final coordinator = container.read(provisioningCoordinatorProvider);
     final user = next.value;
     if (user == null) {
-      // Deferred: `fireImmediately` runs this synchronously while this very
-      // provider is still building, and writing another provider's state
-      // mid-build trips riverpod's "modified while building" assertion.
-      Future.microtask(() {
-        // The container may have disposed before this tick; ref.mounted guards
-        // the post-async-gap read (a bare read would throw UnmountedRefException).
-        if (ref.mounted) ref.read(deviceCapProvider.notifier).set(null);
-      });
+      // fireImmediately runs during this provider's build. Defer the write so
+      // Riverpod does not see another provider modified mid-build.
+      Future<void>.microtask(coordinator.clearDeviceCap);
       return;
     }
-    () async {
+
+    detached('postSignInProvisioning', 'provision signed-in device', () async {
       try {
-        final prefs = SharedPreferencesAsync(
-          options: desktopSharedPreferencesOptions,
-        );
-        final existing = await prefs.getString(kLocalHostUuidKey);
-        final rec = await ref
-            .read(deviceProvisioningProvider)
-            .ensureProvisioned(
-              userId: user.userId,
-              displayName: await hostDisplayName(),
-              existingDeviceUuid: existing,
-            );
-        if (await prefs.getString(kLocalHostUuidKey) != rec.deviceUuid) {
-          await prefs.setString(kLocalHostUuidKey, rec.deviceUuid);
-        }
-        // The container may have disposed during the awaits above (e.g. test
-        // teardown); a bare ref.read/invalidate past that point throws
-        // UnmountedRefException.
-        if (!ref.mounted) return;
-        ref
-            .read(analyticsServiceProvider)
-            ?.track(AnalyticsEvents.deviceProvisioned);
-        ref.read(deviceCapProvider.notifier).set(null);
-        ref.invalidate(licenseTokenMinterProvider);
-        ref.invalidate(connectionTokenMinterProvider);
-        ref.invalidate(localDeviceUuidProvider);
-        prefetchSubscriptionCache(ref);
-      } on ProvisioningException catch (e) {
-        // This closure is fire-and-forget: the user may have signed out (which
-        // already cleared deviceCapProvider) or switched accounts while the
-        // network round-trip was in flight. Re-check identity before writing —
-        // otherwise a late cap rejection pops a phantom dialog over the
-        // signed-out auth screen.
-        if (!ref.mounted) return;
-        if (ref.read(currentUserProvider).value?.userId != user.userId) {
-          return;
-        }
-        final capped = e.code == 'APP_DEVICE_CAP' || e.code == 'WORKER_CAP';
-        if (capped && e.cap != null) {
-          // Both caps reach the user mid-sign-in — desktop registers its
-          // `kind:"agent"` record here, so signing in on one machine too many
-          // is rejected by the worker cap right at this call. Surface the
-          // actionable free-a-slot flow (see deviceCapProvider watcher); a
-          // WORKER_CAP left to fall through would land as a generic failure
-          // with no remediation at all.
-          ref.read(deviceCapProvider.notifier).set(e.cap);
-        } else {
+        await coordinator.provisionSignedInUser(user.userId);
+      } on ProvisioningException catch (error) {
+        final capped =
+            error.code == 'APP_DEVICE_CAP' || error.code == 'WORKER_CAP';
+        if (!capped) {
           AbLog.error(
             'postSignInProvisioning',
             'provisioning failed',
-            fields: {'code': e.code, 'message': e.message},
+            fields: {'code': error.code, 'message': error.message},
           );
         }
-      } catch (e) {
+      } catch (error) {
         AbLog.error(
           'postSignInProvisioning',
           'device provisioning failed',
-          fields: {'error': '$e'},
+          fields: {'error': '$error'},
         );
       }
-    }();
+    });
   }, fireImmediately: true);
 });
-
-/// Re-attempt machine provisioning after the user freed a device slot from the
-/// device-cap dialog. Mirrors the success side-effects of
-/// [postSignInProvisioningProvider]. Rethrows [ProvisioningException] (e.g.
-/// still over cap) so the caller can keep the remediation UI open.
-Future<void> retryDeviceProvisioning(WidgetRef ref) async {
-  await ensureCurrentUserDeviceRecord(ref);
-  ref.read(deviceCapProvider.notifier).set(null);
-  ref.invalidate(licenseTokenMinterProvider);
-  ref.invalidate(connectionTokenMinterProvider);
-  ref.invalidate(localDeviceUuidProvider);
-  prefetchSubscriptionCache(ref);
-}

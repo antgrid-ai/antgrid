@@ -21,7 +21,10 @@ const aspireDir = resolve(import.meta.dir, "..", "aspire");
 const child = spawn("aspire", ["run"], {
   cwd: aspireDir,
   stdio: "inherit",
-  env: { ...process.env, ANTGRID_APP_TARGETS: targets },
+  env: {
+    ...process.env,
+    ANTGRID_APP_TARGETS: targets,
+  },
   shell: process.platform === "win32",
 });
 child.on("exit", (code, signal) => process.exit(code ?? (signal ? 1 : 0)));

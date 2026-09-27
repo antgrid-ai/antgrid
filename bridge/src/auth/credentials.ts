@@ -3,6 +3,8 @@ import { z } from "zod";
 const Base64 = z.string().min(1).regex(/^[A-Za-z0-9+/=_-]+$/, "base64-ish");
 
 const AuthFields = z.object({
+  userId: z.string().min(1).optional(),
+  endpointSecret: z.string().regex(/^[A-Za-z0-9+/]{43}=$/).optional(),
   clientId: z.string().min(1),
   clientSecret: z.string().min(1),
   ed25519Pub: Base64,

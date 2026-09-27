@@ -1,4 +1,6 @@
 import 'dart:io';
+import 'dart:convert';
+import 'dart:math';
 import 'package:uuid/uuid.dart';
 import 'agent_keys.dart';
 import 'devices_api.dart' show ProvisioningException;
@@ -65,7 +67,7 @@ class DeviceProvisioning {
     required String displayName,
   }) async {
     final cached = await store.readControllerIfMatchesUser(userId);
-    if (cached != null) return cached;
+    if (cached != null) return _ensureEndpointSecret(cached, controller: true);
     await store.clearController();
 
     final keys = await AgentKeys.generate();
@@ -75,11 +77,10 @@ class DeviceProvisioning {
     final created = await api.createDevice(
       deviceUuid: deviceUuid,
       ed25519Pub: keys.ed25519PubBase64,
-      x25519Pub: keys.x25519PubBase64,
       platform: platform,
       displayName: displayName,
       // Overrides the platform derivation, which would make a desktop an
-      // `agent`. The peers inventory (bridge E2E admission) serves `app` rows.
+      // `agent`. The peers inventory (bridge peer admission) serves `app` rows.
       kind: 'app',
     );
 
@@ -99,6 +100,7 @@ class DeviceProvisioning {
       ed25519Priv: keys.ed25519PrivBase64,
       x25519Pub: keys.x25519PubBase64,
       x25519Priv: keys.x25519PrivBase64,
+      endpointSecret: _newEndpointSecret(),
     );
     try {
       await store.writeController(rec);
@@ -108,13 +110,37 @@ class DeviceProvisioning {
     return rec;
   }
 
+  Future<DeviceRecord> _ensureEndpointSecret(
+    DeviceRecord record, {
+    required bool controller,
+  }) async {
+    if (record.endpointSecret != null) return record;
+    final updated = DeviceRecord.fromJson({
+      ...record.toJson(),
+      'endpointSecret': _newEndpointSecret(),
+    });
+    try {
+      if (controller) {
+        await store.writeController(updated);
+      } else {
+        await store.write(updated);
+      }
+    } catch (_) {
+      throw ProvisioningException(
+        'UNKNOWN',
+        'Endpoint key could not be saved to secure storage',
+      );
+    }
+    return updated;
+  }
+
   Future<DeviceRecord> _doEnsureProvisioned({
     required String userId,
     required String displayName,
     String? existingDeviceUuid,
   }) async {
     final cached = await store.readIfMatchesUser(userId);
-    if (cached != null) return cached;
+    if (cached != null) return _ensureEndpointSecret(cached, controller: false);
     // Either no record or a userId mismatch — clear and start fresh.
     await store.clear();
 
@@ -132,7 +158,6 @@ class DeviceProvisioning {
     final created = await api.createDevice(
       deviceUuid: deviceUuid,
       ed25519Pub: keys.ed25519PubBase64,
-      x25519Pub: keys.x25519PubBase64,
       platform: platform,
       displayName: displayName,
     );
@@ -155,6 +180,7 @@ class DeviceProvisioning {
       ed25519Priv: keys.ed25519PrivBase64,
       x25519Pub: keys.x25519PubBase64,
       x25519Priv: keys.x25519PrivBase64,
+      endpointSecret: _newEndpointSecret(),
     );
     try {
       await store.write(rec);
@@ -172,4 +198,9 @@ String detectPlatform() {
   if (Platform.isIOS) return 'ios';
   if (Platform.isAndroid) return 'android';
   return 'linux';
+}
+
+String _newEndpointSecret() {
+  final random = Random.secure();
+  return base64Encode(List<int>.generate(32, (_) => random.nextInt(256)));
 }

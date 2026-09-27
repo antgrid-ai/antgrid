@@ -13,7 +13,7 @@ import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/providers/auth.dart';
 import 'package:antgrid/providers/sessions.dart';
 import 'package:antgrid/providers/ui_attention_providers.dart';
-import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+import '../helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/projects_drawer.dart';
 import 'package:antgrid/widgets/session_row.dart';
 import 'package:flutter/material.dart';

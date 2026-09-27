@@ -101,71 +101,6 @@ describe("LocalListener handshake", () => {
     ws2.close();
   });
 
-  test("old owner is closed before managed-checkout frames can be delivered", async () => {
-    const ws = await openWs(); // legacy hello omits capabilities.checkoutRouting
-    await nextMessage(ws);
-    const closed = nextClose(ws);
-
-    expect(listener.requireCheckoutRouting()).toBe(false);
-    expect(await closed).toEqual({
-      code: 4410,
-      reason: 'checkout routing update required',
-    });
-
-    bus.publish(createMessage('terminal:input', { terminalId: 's', data: 'must not arrive' }), 'control');
-  });
-
-  test("ownerPullsTree is true with no owner attached", () => {
-    expect(listener.ownerPullsTree).toBe(true);
-  });
-
-  test("ownerPullsTree reflects a present pullsTree capability", async () => {
-    const ws = await openWs("secret-token", 1, { checkoutRouting: true, pullsTree: true });
-    await nextMessage(ws);
-    expect(listener.ownerPullsTree).toBe(true);
-    ws.close();
-  });
-
-  test("ownerPullsTree is false when the capability is absent", async () => {
-    const ws = await openWs("secret-token", 1, { checkoutRouting: true });
-    await nextMessage(ws);
-    expect(listener.ownerPullsTree).toBe(false);
-    ws.close();
-  });
-
-  test("ownerPullsTree is false for a wrong-typed capability", async () => {
-    const ws = await openWs("secret-token", 1, { pullsTree: "yes" });
-    await nextMessage(ws);
-    expect(listener.ownerPullsTree).toBe(false);
-    ws.close();
-  });
-
-  // Opposite polarity to ownerPullsTree above: this one selects a display mode,
-  // so "no owner" and "owner said nothing" must both read false.
-  test("ownerSupportsTerminalFramesV1 is false with no owner attached", () => {
-    expect(listener.ownerSupportsTerminalFramesV1).toBe(false);
-  });
-
-  test("ownerSupportsTerminalFramesV1 reflects a present terminalFramesV1 capability", async () => {
-    const ws = await openWs("secret-token", 1, { checkoutRouting: true, terminalFramesV1: true });
-    await nextMessage(ws);
-    expect(listener.ownerSupportsTerminalFramesV1).toBe(true);
-    ws.close();
-  });
-
-  test("ownerSupportsTerminalFramesV1 is false when the capability is absent", async () => {
-    const ws = await openWs("secret-token", 1, { checkoutRouting: true, pullsTree: true });
-    await nextMessage(ws);
-    expect(listener.ownerSupportsTerminalFramesV1).toBe(false);
-    ws.close();
-  });
-
-  test("ownerSupportsTerminalFramesV1 is false for a wrong-typed capability", async () => {
-    const ws = await openWs("secret-token", 1, { terminalFramesV1: "yes" });
-    await nextMessage(ws);
-    expect(listener.ownerSupportsTerminalFramesV1).toBe(false);
-    ws.close();
-  });
 });
 
 describe("LocalListener routing", () => {
@@ -238,6 +173,8 @@ describe("LocalListener.deliverToOwner", () => {
 
     const ws = await openWs("secret-token", 1, { sessionBusCarrier: true });
     expect((await nextMessage(ws)).type).toBe("ready");
+    // An owner that declared the key is the carrier.
+    expect(listener.ownerCarriesSessionBus).toBe(true);
 
     expect(listener.deliverToOwner(frame())).toBe(true);
     const got = await nextMessage(ws);

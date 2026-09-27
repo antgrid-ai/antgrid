@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "packages": {
+    "iroh_flutter": {
+      "version": "1.0.3",
+      "archiveSha256": "7189b305868c88ee790107b1e1359e63667dd42b97efa8e282851aa80a5cb398"
+    },
+    "iroh_quic": {
+      "version": "1.0.3",
+      "archiveSha256": "e262a88f4f02a287197d691851b6e0418fd168280a59f581cbe41d8c6b29aa13"
+    },
+    "flutter_rust_bridge": {
+      "version": "2.12.0",
+      "archiveSha256": "e87d6b9ee934dcd24a128ccb2bd91905d2d5fe5c06245d6a8f5477d4907a437a"
+    }
+  },
+  "rustFiles": {
+    "Cargo.lock": "3554b2db648edf2ab0009c02ad930010501a214b1eacf53d97d8e1aaf481c030",
+    "Cargo.toml": "6597874c1e976209bfb8fa2ef193a1110c181e8d1ace0d458a8df11cc2b5b183"
+  }
+}

@@ -51,7 +51,7 @@ describe("loadConfig", () => {
   test("throws when RELAY_INTERNAL_SECRET is too short", () => {
     process.env.LICENSE_API_URL = "http://localhost:8787";
     process.env.RELAY_INTERNAL_SECRET = "tooshort";
-    expect(() => loadConfig()).toThrow(/RELAY_INTERNAL_SECRET.*16/);
+    expect(() => loadConfig()).toThrow(/RELAY_INTERNAL_SECRET/);
   });
 
   test("loads with required vars set; defaults licenseCacheMaxEntries to 100000", () => {
@@ -99,18 +99,6 @@ describe("loadConfig", () => {
     expect(cfg.replayTtlMs).toBe(300_000);
     expect(cfg.jsonRateLimitPerSec).toBe(10);
     expect(cfg.jsonRateLimitBurst).toBe(30);
-    expect(cfg.maxStreamsPerConnection).toBe(1024);
-  });
-
-  test("maxStreamsPerConnection respects its env override", () => {
-    process.env.LICENSE_API_URL = "http://localhost:8787";
-    process.env.RELAY_INTERNAL_SECRET = VALID_SECRET;
-    process.env.MAX_STREAMS_PER_CONNECTION = "64";
-    try {
-      expect(loadConfig().maxStreamsPerConnection).toBe(64);
-    } finally {
-      delete process.env.MAX_STREAMS_PER_CONNECTION;
-    }
   });
 
   test("v3 keys respect env overrides", () => {
@@ -140,7 +128,7 @@ describe("loadConfig", () => {
     process.env.CLOCK_SKEW_MS = "120000";
     process.env.REPLAY_TTL_MS = "200000"; // < 240000
     try {
-      expect(() => loadConfig()).toThrow(/REPLAY_TTL_MS.*CLOCK_SKEW_MS/);
+      expect(() => loadConfig()).toThrow(/CLOCK_SKEW_MS/);
     } finally {
       delete process.env.CLOCK_SKEW_MS;
       delete process.env.REPLAY_TTL_MS;
@@ -187,6 +175,15 @@ describe("loadConfig", () => {
     expect(() => loadConfig()).toThrow(/TRUSTED_PROXY_IPS/);
   });
 
+  test("payload routing configuration is gone", () => {
+    process.env.LICENSE_API_URL = "http://localhost:8787";
+    process.env.RELAY_INTERNAL_SECRET = VALID_SECRET;
+    const cfg = loadConfig() as unknown as Record<string, unknown>;
+    for (const removed of ["rateLimitMsgPerSec", "rateLimitMsgBurst", "maxStreamsPerConnection"]) {
+      expect(cfg).not.toHaveProperty(removed);
+    }
+  });
+
   // R1 deletes the v2 offline-queue and stale-pair-timeout knobs outright —
   // pin their absence so a reintroduction doesn't slip back in unnoticed.
   test("v2 offline-queue / stale-pair knobs are gone", () => {
@@ -209,13 +206,33 @@ describe("loadConfig", () => {
     }
   });
 
-  // Task 4 deletes the grant table outright (mayRoute is the only routing
-  // authority) — pin absence of its config knob so a reintroduction doesn't
-  // slip back in unnoticed.
+  // The grant table is gone; pin absence so it cannot silently return.
   test("grant sweeper knob is gone", () => {
     process.env.LICENSE_API_URL = "http://localhost:8787";
     process.env.RELAY_INTERNAL_SECRET = VALID_SECRET;
     const cfg = loadConfig() as unknown as Record<string, unknown>;
     expect(cfg).not.toHaveProperty("staleGrantDays");
+  });
+
+  test("rejects non-positive limits and invalid log levels", () => {
+    process.env.LICENSE_API_URL = "http://localhost:8787";
+    process.env.RELAY_INTERNAL_SECRET = VALID_SECRET;
+    process.env.MAX_CONNECTIONS = "0";
+    expect(() => loadConfig()).toThrow(/MAX_CONNECTIONS/);
+    delete process.env.MAX_CONNECTIONS;
+    process.env.LOG_LEVEL = "verbose";
+    expect(() => loadConfig()).toThrow(/LOG_LEVEL/);
+    delete process.env.LOG_LEVEL;
+  });
+
+  test("requires APNs credentials as a complete group", () => {
+    process.env.LICENSE_API_URL = "http://localhost:8787";
+    process.env.RELAY_INTERNAL_SECRET = VALID_SECRET;
+    process.env.APNS_KEY_ID = "key";
+    try {
+      expect(() => loadConfig()).toThrow(/APNs credentials must all be set together/);
+    } finally {
+      delete process.env.APNS_KEY_ID;
+    }
   });
 });

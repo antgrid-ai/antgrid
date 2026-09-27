@@ -1,7 +1,6 @@
 // Terminal-frame mode end to end, over a real relay and a real agent (see
 // docs/terminal-frame-implementation-plan.md, "Validation and release gates").
-// A frame-capable viewer (`env.app`) negotiates `terminalFramesV1` in its
-// `app:ready` capabilities (the harness default), then opts a specific
+// Every viewer renders frames unconditionally now; `env.app` opts a specific
 // terminal into the protocol with `terminal:subscribe` — everything here rides
 // the firstProject STREAM (`sendOnStream`), never the control plane.
 //
@@ -84,8 +83,11 @@ test("session listing and checkout deletion remain responsive beside a slow term
     expect(created.ok).toBe(true);
     expect(created.session.checkoutKind).toBe("managed-worktree");
     const terminalId = "slow-control-viewer";
+    // Bound the guest by wall time. Windows rounds short intervals up under
+    // load, so counting 1,200 nominal 10 ms ticks can consume the entire 20 s
+    // completion budget before the final frame is available to acknowledge.
     await startTerminal(env.app, streamId, terminalId, "node", ["-e",
-      "let i=0;const timer=setInterval(()=>{process.stdout.write('output '+i+++'\\n');if(i===1200){clearInterval(timer);process.stdout.write('FINAL-CONTROL-SCREEN');}},10);"]);
+      "let i=0;const timer=setInterval(()=>process.stdout.write('output '+i+++'\\n'),10);setTimeout(()=>{clearInterval(timer);process.stdout.write('FINAL-CONTROL-SCREEN');},6000);"]);
     await subscribeFrames(env.app, streamId, terminalId);
     let finalSeen = false;
     let consumed = 0;

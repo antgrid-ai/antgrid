@@ -9,7 +9,7 @@ import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
-import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+import '../helpers/fake_agent_transport.dart';
 import '../helpers/prefs_test_mock.dart';
 
 // Stand-in for a per-project service façade: throws while [_facadeReady] is

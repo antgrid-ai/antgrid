@@ -5,11 +5,14 @@
 import { test, expect, afterEach } from "bun:test";
 import { sign, verify } from "node:crypto";
 import { buildHelloSigBody, normalizeRelayHost } from "antgrid-wire";
-import { RelayClient } from "../src/relay-client";
+import { CentralControlClient } from "../src/central-control-client";
 import { MessageBus } from "../src/message-bus";
-import { rawSeedToPkcs8 } from "../src/e2e";
-import { ED25519_SPKI_PREFIX } from "../src/ed25519-der";
+import { rawSeedToPkcs8 } from "../src/ed25519-pkcs8";
 import vector from "../../evals/fixtures/relay-hello-vector.json";
+
+// The fixed 12-byte SubjectPublicKeyInfo prefix for a raw 32-byte Ed25519 key
+// (DER: SEQUENCE { SEQUENCE { OID 1.3.101.112 }, BIT STRING }).
+const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
 
 function verifyEd25519(data: Uint8Array, pubB64: string, sigB64: string): boolean {
   const spki = Buffer.concat([ED25519_SPKI_PREFIX, Buffer.from(pubB64, "base64")]);
@@ -20,7 +23,7 @@ function signEd25519(seedB64: string, data: Uint8Array): string {
   return sign(null, data, { key: rawSeedToPkcs8(Buffer.from(seedB64, "base64")), format: "der", type: "pkcs8" }).toString("base64");
 }
 
-let clients: RelayClient[] = [];
+let clients: CentralControlClient[] = [];
 afterEach(() => { for (const c of clients.splice(0)) try { c.close(); } catch {} });
 
 /** A stand-in WebSocket so `redialWithFreshToken` can drive a real `doConnect()`
@@ -48,7 +51,7 @@ class FakeWS {
 function makeClient(overrides: Partial<{ getLicenseToken: () => string; onError: (c: string, m: string) => void }> = {}) {
   const seed = Buffer.from(vector.ed25519.seedHex, "hex").toString("base64");
   const sent: string[] = [];
-  const client = new RelayClient({
+  const client = new CentralControlClient({
     url: "ws://relay.antgrid.ai:8443/ws",
     identity: {
       deviceId: vector.fields.deviceId,
@@ -57,7 +60,6 @@ function makeClient(overrides: Partial<{ getLicenseToken: () => string; onError:
       ed25519PublicKey: vector.fields.publicKey,
       ed25519PrivateKey: seed,
     },
-    generateKeypair: () => { throw new Error("not used"); },
     getLicenseToken: overrides.getLicenseToken ?? (() => vector.fields.licenseToken),
     onError: overrides.onError,
   });
@@ -69,7 +71,7 @@ function makeClient(overrides: Partial<{ getLicenseToken: () => string; onError:
 test("buildHelloSigBody + signing reproduces the cross-language golden vector", () => {
   // Cross-checks antgrid-wire's buildHelloSigBody against the fixture BOTH
   // Dart and TS implementations pin (evals/fixtures/relay-hello-vector.json),
-  // independent of RelayClient's own hello construction below.
+  // independent of CentralControlClient's own hello construction below.
   const body = buildHelloSigBody(vector.fields as any);
   expect(Buffer.from(body).toString("hex")).toBe(vector.sigBodyHex);
   const seed = Buffer.from(vector.ed25519.seedHex, "hex").toString("base64");
@@ -181,7 +183,7 @@ test("close after a retryable:true error (or no error at all) schedules a jitter
   };
 
   (client as any).handleTextMessage(JSON.stringify({
-    type: "error", code: "PEER_OFFLINE", message: "peer gone", retryable: true,
+    type: "error", code: "LICENSE_UNAVAILABLE", message: "peer gone", retryable: true,
   }));
   const terminal = (client as any).lastError?.retryable === false;
   expect(terminal).toBe(false);
@@ -312,22 +314,4 @@ test("SUPERSEDED (retryable:false) does NOT fire onAuthRevoked — only the lice
   (client as any).handleErrorFrame({ code: "SUPERSEDED", message: "newer connection", retryable: false });
 
   expect(revoked).toBe(false);
-});
-
-test("a stream-open rejection (ref===streamId) is routed to the mux and never recorded as lastError", () => {
-  const { client } = makeClient();
-  const rejected: Array<{ code: string; message: string }> = [];
-  const handle = client.attachStream(new MessageBus(), {
-    onRejected: (code: string, message: string) => rejected.push({ code, message }),
-  });
-
-  (client as any).handleErrorFrame({
-    code: "SESSION_LIMIT_EXCEEDED", message: "cap reached", retryable: false, ref: handle.streamId,
-  });
-
-  expect(rejected).toEqual([{ code: "SESSION_LIMIT_EXCEEDED", message: "cap reached" }]);
-  // The load-bearing assertion: lastError must stay null so an unrelated
-  // later close doesn't read this stream rejection's retryable:false and wrongly
-  // stop reconnecting the whole socket.
-  expect((client as any).lastError).toBeNull();
 });

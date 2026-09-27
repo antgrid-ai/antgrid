@@ -1,6 +1,6 @@
 import { test, expect } from "bun:test";
 import { relaySlotId } from "antgrid-wire";
-import { setupTestEnv, generateAppIdentity, handshakeWithoutPairing } from "../helpers/harness";
+import { establishNativeSession, setupTestEnv, generateAppIdentity } from "../helpers/harness";
 import { RelayClient, type PhoneIdentity } from "../helpers/relay-client";
 import { TestApp } from "../helpers/test-app";
 import type { TestEnv } from "../helpers/harness";
@@ -21,14 +21,14 @@ import type { TestEnv } from "../helpers/harness";
  * connections under one bare deviceId, so two separate relays would not
  * exercise it. Both envs' fake license APIs seed the SAME account device id
  * (`account`) under the SAME Ed25519 identity (`shared`) — each bridge only
- * ever consults its OWN `/account/devices/me/peers`, so this must be seeded
+ * ever consults its OWN license API's `/authorization` inventory, so this must be seeded
  * into BOTH `envA.license` and `envB.license` explicitly (a freshly-chosen
  * account id is otherwise unadmittable on either bridge — see the task
  * brief's hint on this).
  *
  * `addAccountDevice` here runs AFTER each env's agent already started (and
  * cached its startup inventory) — same miss-then-refresh dynamic as
- * `gate-inventory-miss.test.ts` — so connecting uses `handshakeWithoutPairing`
+ * `gate-inventory-miss.test.ts` — so connecting uses `establishNativeSession`
  * (retries on the SAME socket) rather than `TestApp.connect` (documented
  * single-shot; a bare attempt here would deterministically time out on the
  * first, pre-refresh, hello).
@@ -55,14 +55,13 @@ async function connectSlotted(
   account: string,
   machineDeviceId: string,
 ): Promise<TestApp> {
-  const client = await RelayClient.connectAndAuth(env.relay.url, {
-    deviceType: "app",
+  const client = await env.connectNativeApp({
     name: "gate-multi-machine-slots-app",
     identity,
-    deviceId: relaySlotId(account, machineDeviceId),
-    transcriptDeviceId: account,
+    accountDeviceId: account,
+    helloDeviceId: relaySlotId(account, machineDeviceId),
   });
-  await handshakeWithoutPairing(client, env.agentDeviceId, env.agent.ed25519Pubkey);
+  await establishNativeSession(client, env.agentDeviceId, env.agent.ed25519Pubkey);
   return TestApp.wrap(client, env);
 }
 
@@ -90,7 +89,9 @@ test("one account device holds two machines at once — neither supersedes the o
 
     // And a sibling slot naming the OTHER machine must not have repointed
     // this bridge's reply address or torn its session down — the same-account
-    // presence fan-out reaches both agents with both slots (isForeignSlot).
+    // presence fan-out reaches both agents with both slots (A4 deleted the
+    // `isForeignSlot` guard along with stream-mux.ts: `dropSession` no longer
+    // needs it to tell a foreign-slot loss apart from its own).
     expect((await a.waitForStateSnapshot()).ok).toBe(true);
 
     await a.disconnect();

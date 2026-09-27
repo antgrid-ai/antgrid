@@ -1,19 +1,30 @@
 import { createHash } from "node:crypto";
+import type { StreamOpenKind } from "antgrid-wire";
 import type { Channel } from "./message-bus";
 import { BODY_REDACTED_MESSAGE_TYPES } from "./protocol";
 
-/** Which way the frame crossed the socket. */
-export type NetwatchDir = "tx" | "rx";
+/** Lifecycle observations have no socket direction. */
+export type NetwatchDir = "tx" | "rx" | "event";
 
 /**
  * Frame classification at the transport edge:
- *   - `sealed`    — an E2E-encrypted app or session frame (FrameKind.sealed)
- *   - `handshake` — a kind-1 plaintext handshake frame
+ *   - `frame`     — a native peer frame (app or session), plaintext under QUIC/TLS
+ *   - `hello`     — the loopback hello/ready exchange
  *   - `control`   — a relay control JSON message (welcome / error / peer-*)
  *   - `json`      — a loopback frame: plain JSON, no seal, no frames, no streams
  *   - `drop`      — a frame that never left, or never reached dispatch
  */
-export type NetwatchKind = "sealed" | "handshake" | "control" | "json" | "drop";
+export type NetwatchKind = "frame" | "hello" | "control" | "json" | "drop" | "lifecycle";
+
+/** Which native stream carried a record: the `kind` of its open frame, so a new
+ *  stream kind reaches netwatch without a second list to keep in step. */
+export type NetwatchStreamKind = StreamOpenKind;
+
+/** The session stream's own logical `streamId`, matching the app's
+ *  `_kSessionStreamLabel` (`packages/antgrid_relay_client/lib/src/machine_session.dart`)
+ *  bit for bit — a joined capture pairs on `frameId`, never on this field, but
+ *  a display-only label still has to read the same on both ends. */
+export const NETWATCH_SESSION_STREAM_LABEL = "0";
 
 export interface NetwatchEvent {
   /** Monotonic counter of the process that RECORDED this — this bridge, or the
@@ -23,17 +34,32 @@ export interface NetwatchEvent {
   at: number;
   dir: NetwatchDir;
   kind: NetwatchKind;
+  /** Keep native peer and loopback bytes out of central payload accounting. */
+  transport: "relay" | "local" | "iroh";
   /**
-   * Which transport carried this. The two are not the same wire — the relay
-   * path is sealed frames over a routed socket, the loopback LocalListener path
-   * is plain JSON with no seal, no frames and no streams — so a capture that
-   * did not say which one it came from could be read as relay traffic it never
-   * was. The app picks relay first and falls back to loopback
-   * (app/lib/providers/agent_transport.dart), and nothing else tells you which
-   * one you got.
+   * The loopback socket's own JSON label (`control`/`preview`) — the loopback
+   * wire was left unchanged when native traffic moved to per-kind QUIC streams,
+   * so it still carries this label. A native record has no channel left to
+   * name, and its sources all write `"control"`; `streamKind` is what
+   * distinguishes native streams.
    */
-  transport: "relay" | "local";
   channel?: Channel;
+  /** Which native stream a record rode. Optional because a connection- or
+   *  admission-level event (`peer:endpoint-state`, `peer:admissions`) names no
+   *  single stream. Never part of the `joinCaptures` key: the app's capture
+   *  has no such field, and a key only one end can fill would pair nothing. */
+  streamKind?: NetwatchStreamKind;
+  /**
+   * A per-connection stream label, not a QUIC stream id — display only, never
+   * joined on. Both ends must agree on the LABEL for a given stream kind, or
+   * the capture reads as if bridge and app never touched the same stream:
+   * `NETWATCH_SESSION_STREAM_LABEL` (`"0"`) for the session stream, the
+   * `projectId` for a project stream (the app's `MachineSession.streamId`,
+   * `machine_session.dart`), the terminal open frame's own `requestId` for a
+   * terminal stream, the tunnel open frame's own `requestId`/`wsId` for a
+   * tunnel stream, and the upload open frame's own `requestId` for an upload
+   * stream — both ends write it for every stream kind.
+   */
   streamId?: string;
   /** Plaintext message type, once the pipeline knows it. Never a payload. */
   msgType?: string;
@@ -59,27 +85,24 @@ export interface NetwatchEvent {
   origin?: "app";
 }
 
-/** Sealed framing is `nonce(12) || ciphertext || tag(16)` — see e2e/transport.ts. */
-const NONCE_LENGTH = 12;
-
 /**
  * The cross-endpoint join key.
  *
- * A sealed payload opens with a per-seal RANDOM nonce, and the relay forwards
- * the payload byte-for-byte (`decoded.payload` in relay/src/server.ts), so that
- * nonce is already a unique id for this exact frame that BOTH endpoints can
- * compute — with no wire change, no header space, and no key material. This is
- * what closes the gap `AgentTransport.droppedFrames` documents: "the route
- * header carries no message id — so a listener learns that something in flight
- * died, never which one."
+ * QUIC/TLS is the confidentiality layer for a native peer frame, so the
+ * payload the relay-era nonce used to key off of no longer exists — every
+ * frame is hashed instead. The relay forwards a loopback/relay payload
+ * byte-for-byte, so the same hash is already a unique id for this exact frame
+ * that BOTH endpoints can compute — with no wire change, no header space, and
+ * no key material. This is what closes the gap `AgentTransport.droppedFrames`
+ * documents: "the route header carries no message id — so a listener learns
+ * that something in flight died, never which one."
  *
- * Plaintext frames (kind-1 handshake, relay control JSON) carry no nonce, and
- * are rare enough that a hash prefix costs nothing.
+ * More than one occurrence can legitimately share an id (a ping and a pong
+ * are byte-identical every time they recur) — `joinCaptures`
+ * (`cli/netwatch.ts`) pairs occurrences in order rather than assuming the id
+ * is unique.
  */
-export function frameIdFor(payload: Uint8Array, sealed: boolean): string {
-  if (sealed && payload.length >= NONCE_LENGTH) {
-    return Buffer.from(payload.subarray(0, NONCE_LENGTH)).toString("hex");
-  }
+export function frameIdFor(payload: Uint8Array): string {
   return createHash("sha256").update(payload).digest("hex").slice(0, 24);
 }
 
@@ -305,7 +328,7 @@ export class Netwatch {
       // CAPTURE: it renders as NaN:NaN:NaN, collapses `joinCaptures`' overlap
       // window to nothing, and the join then reports that the two halves share
       // no window — a tool that lies rather than one that is missing a row.
-      if ((dir !== "tx" && dir !== "rx") || typeof kind !== "string" || !Number.isFinite(at)) continue;
+      if ((dir !== "tx" && dir !== "rx" && !(dir === "event" && kind === "lifecycle")) || typeof kind !== "string" || !Number.isFinite(at)) continue;
       // The field set is otherwise passed through verbatim (see above), with
       // `body` the one exception: the app's own event has no such field, so a
       // body here was not captured on the app's side of the socket — it is a
@@ -373,11 +396,10 @@ export class Netwatch {
 }
 
 /**
- * Process-global, because the bridge holds exactly ONE machine relay socket
- * (host-server.ts builds the single RelayClient; promoted project cores attach
- * to it as streams rather than opening their own). Threading a recorder through
- * every construction site would buy nothing and be missed by the next one.
- */
+ * Process-global because HostServer owns one NativeHostConnection for the
+ * machine and project cores attach host-owned native streams to it. Threading a
+ * recorder through every construction site would buy nothing and be missed by
+ * the next one. */
 export const netwatch = new Netwatch();
 
 /**

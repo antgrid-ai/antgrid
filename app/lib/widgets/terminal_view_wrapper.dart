@@ -184,8 +184,8 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   /// selection, and nothing in it drops anchors a frame invalidated — a
   /// resize, a `setSessionRunning`, or a focus assertion is enough to
   /// repopulate [_selectedText] with whatever the frame put at those cells.
-  /// Clearing the mirror alone is therefore undone by the very next notify,
-  /// which is the harm D10 exists to prevent.
+  /// Clearing the mirror alone is therefore undone by the very next notify --
+  /// exactly the harm this field exists to prevent.
   ///
   /// [_selectionController] now drops the view's selection outright, which
   /// stops the re-offer at its source -- the view re-resolves only while it
@@ -304,7 +304,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   final GhosttyTerminalSoftKeyboardController _historySoftKeyboardController =
       GhosttyTerminalSoftKeyboardController();
 
-  /// D10: the engine's own selection, dropped on every frame that replaces
+  /// The engine's own selection, dropped on every frame that replaces
   /// the screen its row/col anchors point into. The view cannot do this
   /// itself -- a frame is ordinary output to it -- and until it does, its
   /// highlight stays painted over glyphs nobody chose and its native copy
@@ -769,7 +769,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     _realModifierState.clear();
   }
 
-  /// D10: fires whenever [TerminalTab.replaceEpoch] bumps -- an applied frame
+  /// Fires whenever [TerminalTab.replaceEpoch] bumps -- an applied frame
   /// just replaced the whole screen this selection's row/col anchors point
   /// into. Ctrl+C and [SendToAgentButton] both read [_selectedText], so a
   /// stale mirror hands the user a copy of glyphs the screen no longer shows;
@@ -1389,7 +1389,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       retry: false,
       dim: false,
     ),
-    // D7: lifecycle, not failure -- the pane's last painted frame IS its true
+    // Lifecycle, not failure -- the pane's last painted frame IS its true
     // final state, so this never dims the screen and offers no Retry (there
     // is nothing left to retry: the run is over, not stuck).
     TerminalAttachStage.ended => (

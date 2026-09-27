@@ -1,24 +1,27 @@
+import '../helpers/test_license_token_minter.dart';
+import '../helpers/test_peer_runtime.dart';
 // The coords step must keep answering from the LIVE account inventory for as
 // long as the ladder runs — including after a user Retry, which disposes and
 // rebuilds the transport element while the connection it started keeps running.
 //
 // `retryAgentConnection()` calls `supervisor.retry()` and then
 // `ref.invalidate(agentTransportForProvider(id))` without releasing the
-// connection. The rebuilt element's freshly-built `RelayMechanisms` is
+// connection. The rebuilt element's freshly-built `PeerConnectionMechanisms` is
 // discarded by `ensureStarted` (the supervisor already exists), so whatever
 // owns the coords resolution has to outlive the element that first built it.
 import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:antgrid/providers/account_agents.dart';
 import 'package:antgrid/providers/agent_transport.dart';
+import 'package:antgrid/providers/peer_runtime.dart';
 import 'package:antgrid/providers/connection_identity.dart';
 import 'package:antgrid/providers/device_provisioning.dart';
 import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/providers/relay_connection.dart';
 import 'package:antgrid/services/account_agents_api.dart';
 import 'package:antgrid/services/keychain_device_store.dart';
+import 'package:antgrid/connection/connection_supervisor.dart';
 import 'package:antgrid/storage/recent_agents_store.dart';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:cryptography/cryptography.dart';
@@ -45,8 +48,7 @@ class _DialRecordingRelay extends RelayService {
   final dialedUrls = <String>[];
   final AppState _cur = const AppState();
 
-  @override
-  Stream<IncomingRouteMessage> get messageStream => const Stream.empty();
+  Stream<IncomingSessionRecord> get messageStream => const Stream.empty();
   @override
   Stream<AppState> get stateStream => _states.stream;
   @override
@@ -66,7 +68,7 @@ class _DialRecordingRelay extends RelayService {
   }) async {
     dialedUrls.add(relayUrl);
     throw RelayConnectException(
-      code: 'PEER_OFFLINE',
+      code: 'NATIVE_CONNECT_FAILED',
       retryable: true,
       message: 'nothing listening',
     );
@@ -74,14 +76,6 @@ class _DialRecordingRelay extends RelayService {
 
   @override
   void disconnect() {}
-
-  @override
-  void sendMessage(
-    String to,
-    String channel,
-    Uint8List payload, {
-    FrameKind kind = FrameKind.sealed,
-  }) {}
 
   @override
   void dispose() => unawaited(closeStreams());
@@ -93,16 +87,16 @@ class _DialRecordingRelay extends RelayService {
   }
 }
 
-class _FakeConnectionManager extends RelayConnectionManager {
+class _FakeConnectionManager extends MachineConnectionManager {
   _FakeConnectionManager(this._relay) : super(crypto: CryptoService());
 
   final RelayService _relay;
-  final Map<String, RelayConnection> _conns = {};
+  final Map<String, MachineConnection> _conns = {};
 
   @override
-  RelayConnection connectionFor(String machineDeviceId) => _conns.putIfAbsent(
+  MachineConnection connectionFor(String machineDeviceId) => _conns.putIfAbsent(
     machineDeviceId,
-    () => RelayConnection(
+    () => MachineConnection(
       machineDeviceId: machineDeviceId,
       crypto: CryptoService(),
       relayOverride: _relay,
@@ -110,7 +104,7 @@ class _FakeConnectionManager extends RelayConnectionManager {
   );
 
   @override
-  RelayConnection? peek(String machineDeviceId) => _conns[machineDeviceId];
+  MachineConnection? peek(String machineDeviceId) => _conns[machineDeviceId];
 }
 
 Future<DeviceRecord> _connectionRecord() async {
@@ -180,16 +174,68 @@ void main() {
     }
   }
 
+  test(
+    'initial coordinates await loading inventory before using a cached key',
+    () async {
+      await stores.recentAgentsStore.upsert(_recent(_machine, _urlA));
+      final pending = Completer<List<InventoryAgent>>();
+      final c = ProviderContainer(
+        overrides: [
+          ...stores.overrides,
+          accountAgentsProvider.overrideWith((_) => pending.future),
+        ],
+      );
+      addTearDown(c.dispose);
+      var resolved = false;
+      final result = c
+          .read(connectionCoordsResolverProvider)
+          .resolve(
+            base: _machine,
+            refreshInventory: false,
+            fallback: const ConnCoords(
+              relayUrl: _urlA,
+              agentEd25519PubB64: _agentPubB64,
+            ),
+          )
+          .then((value) {
+            resolved = true;
+            return value;
+          });
+      await Future<void>.delayed(Duration.zero);
+      expect(resolved, isFalse);
+      pending.complete([
+        InventoryAgent(
+          deviceUuid: _machine,
+          displayName: 'Remote',
+          platform: 'linux',
+          ed25519Pub: 'fresh-key',
+          relayUrl: _urlB,
+        ),
+      ]);
+      final coords = await result;
+      expect(coords.agentEd25519PubB64, 'fresh-key');
+      expect(coords.relayUrl, _urlB);
+    },
+  );
+
   test('a Retry that disposes the transport element must not freeze the coords '
       'step on its build-time endpoint', () async {
     await stores.recentAgentsStore.upsert(_recent(_machine, _urlA));
     final c = ProviderContainer(
       overrides: [
         ...stores.overrides,
+        // These fixtures isolate coordinates and E2E identity from HTTP enrollment.
+        peerRuntimeProvider.overrideWith((ref) async {
+          final runtime = TestPeerRuntime();
+          ref.onDispose(runtime.dispose);
+          return runtime;
+        }),
         accountAgentsProvider.overrideWith((_) async => inventory),
         localDeviceUuidProvider.overrideWith((_) async => 'this-device'),
         connectionDeviceRecordProvider.overrideWith((_) async => record),
-        connectionTokenMinterProvider.overrideWith((_) async => null),
+        connectionTokenMinterProvider.overrideWith(
+          (_) async => TestLicenseTokenMinter(),
+        ),
         cryptoServiceProvider.overrideWith((_) => CryptoService()),
         relayConnectionManagerProvider.overrideWithValue(
           _FakeConnectionManager(relay),

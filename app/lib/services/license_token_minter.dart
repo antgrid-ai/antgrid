@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
+import 'bounded_http_request.dart';
 
 /// Thrown when the web rejects our client credentials with 401
 /// `invalid_client`. Caller (the provisioning hook) should clear the
@@ -23,12 +24,14 @@ class LicenseTokenMinter {
     required this.clientId,
     required this.clientSecret,
     http.Client? httpClient,
+    this.requestTimeout = const Duration(seconds: 15),
   }) : _http = httpClient ?? http.Client();
 
   final String licenseApiUrl;
   final String clientId;
   final String clientSecret;
   final http.Client _http;
+  final Duration requestTimeout;
 
   String? _current;
   DateTime? _expiresAt;
@@ -45,17 +48,20 @@ class LicenseTokenMinter {
   /// `Exception` on other transport/server failures.
   Future<String> mint() async {
     final base = _base();
-    final res = await _http.post(
+    final res = await boundedHttpRequest(
+      _http,
+      'POST',
       Uri.parse('$base/api/auth/oauth2/token'),
       headers: {
         'authorization': _basicAuth(),
         'content-type': 'application/x-www-form-urlencoded',
       },
-      body: {
+      bodyFields: {
         'grant_type': 'client_credentials',
         'scope': 'agent',
         'resource': '$base/api/auth',
       },
+      timeout: requestTimeout,
     );
     if (res.statusCode == 401) {
       throw const DeviceRevokedException();
@@ -108,25 +114,25 @@ class LicenseTokenMinter {
     final ttl = expiresAt.difference(DateTime.now());
     // For short-TTL test scenarios use raw 80%; for production-scale TTLs
     // (>=60s) honor a 60s floor.
-    // Clamp at 0 so a stale `_expiresAt` (e.g. when a retry inherits the
-    // previous token's expiry after mint() threw) never produces a negative
-    // Duration that fires next-tick and undercuts the 30s retry backoff.
+    // The wall clock can advance past expiry before scheduling resumes.
     final refreshMs = (ttl.inMilliseconds * 0.8).floor().clamp(0, 1 << 30);
     final refreshIn = ttl.inSeconds < 60
         ? Duration(milliseconds: refreshMs)
         : Duration(milliseconds: refreshMs.clamp(60 * 1000, 1 << 30));
-    _refreshTimer = Timer(refreshIn, () async {
-      if (_stopped) return;
-      try {
-        await mint();
-      } catch (_) {
-        // Retry in 30s on transient failures.
-        if (!_stopped) {
-          _refreshTimer = Timer(const Duration(seconds: 30), _scheduleRefresh);
-        }
-        return;
+    _refreshTimer = Timer(refreshIn, _refresh);
+  }
+
+  Future<void> _refresh() async {
+    if (_stopped) return;
+    try {
+      await mint();
+    } catch (_) {
+      // Retry in 30s on transient failures.
+      if (!_stopped) {
+        _refreshTimer = Timer(const Duration(seconds: 30), _refresh);
       }
-      _scheduleRefresh();
-    });
+      return;
+    }
+    _scheduleRefresh();
   }
 }
