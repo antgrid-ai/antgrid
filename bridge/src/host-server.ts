@@ -422,8 +422,7 @@ export class HostServer {
   // state of its own. Persisted to <abDir>/projects.json; if that file is lost,
   // worst case a stopped project isn't advertised until reopened.
   private readonly seenProjects: Map<string, SeenProject> = loadSeenProjects(seenProjectsPath());
-  // Machine-wide sessionId -> owning project (docs/session-messaging.md §5.4's
-  // directory). `liveSessions` defers to whichever core is warm right now, so
+  // Machine-wide sessionId -> owning project. `liveSessions` defers to whichever core is warm right now, so
   // an open project's own answer never lags its own sessions.json flush; see
   // SessionBusSessionIndex's own doc for what that buys and what it costs.
   private readonly sessionIndex = new SessionBusSessionIndex({
@@ -1010,8 +1009,7 @@ export class HostServer {
    *  `bus.publish` fans a response out to the desktop and the phone alike, and a
    *  client tells its own answer from a sibling's only by `requestId` — fine for
    *  a verb whose answer every session would have asked for anyway, wrong for
-   *  any answer assembled from ONE asker's params (E14,
-   *  `docs/session-messaging.md`). The session-bearing capability card is the
+   *  any answer assembled from ONE asker's params. The session-bearing capability card is the
    *  loudest case — this machine's session titles and work status — but the
    *  quieter reason covers the rest: a client correlates a response by
    *  `requestId` alone, and those are per-transport counters that two devices
@@ -1350,8 +1348,8 @@ export class HostServer {
    *  the request: the dialog asks about a catalog it was advertised, and one
    *  stale id must not blank the card for every other project.
    *
-   *  `includeSessions` widens the answer with the session half of
-   *  `docs/session-messaging.md` §5.5's directory: `sessions` (possibly `[]`)
+   *  `includeSessions` widens the answer with the session half of the
+   *  directory: `sessions` (possibly `[]`)
    *  is present iff it was asked AND honoured — that presence is the only
    *  signal a caller has that it is talking to a bridge old enough not to
    *  know the flag, so an unasked card must never carry the key. */

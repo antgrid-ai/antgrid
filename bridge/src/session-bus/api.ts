@@ -10,8 +10,7 @@
 //
 // THE CALLER NAMES A TERMINAL AND NOTHING ELSE. The terminal names a session and
 // the session is the identity; there is no role, and a body field claiming one
-// would let an agent that guessed the field name act as somebody else
-// (`docs/session-messaging.md` §4.3).
+// would let an agent that guessed the field name act as somebody else.
 
 import { z } from "zod";
 import {

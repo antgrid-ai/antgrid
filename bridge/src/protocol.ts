@@ -2322,7 +2322,7 @@ const ResponseMessage = BaseMessage.extend({
 // never require touching KNOWN_TYPES. AgentItem uses z.string() for `kind` so
 // the bridge can forward unknown kinds without a schema change.
 // ---------------------------------------------------------------------------
-// Session bus (`docs/session-messaging.md`) — the agent-to-agent frames.
+// Session bus — the agent-to-agent frames.
 //
 // The envelope lives HERE rather than in bridge/src/session-bus/, which is
 // where the rest of the bus lives: it is a wire schema, the stores under
@@ -2461,8 +2461,7 @@ const SessionBusAckMessage = BaseMessage.extend({
 // asking the bridge it is attached to about its own sessions, and consuming the
 // answer. Same plane all the same — `SessionBusApi` is built inside the project
 // core with the machine-level directory injected into it, so machine-scoped
-// STATE never implied machine-scoped transport (`docs/session-messaging.md`
-// §5.4: "The transport did not move with it").
+// STATE never implied machine-scoped transport.
 //
 // Every one is answered from that single api rather than re-derived here. A
 // human surface and an agent tool that each computed who is reachable would

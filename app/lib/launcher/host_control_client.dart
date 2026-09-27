@@ -683,7 +683,7 @@ class HostControlClient {
   }
 
   /// The asking half of the remote session directory (`session-bus:remote-
-  /// directory`, `docs/session-messaging.md` §5.3): hand the local bridge
+  /// directory`): hand the local bridge
   /// what this cycle's pump learned peeking peer capability cards. `machines`
   /// is sent verbatim — the bridge's own `RemoteDirectoryCache.replace`
   /// validates and sanitises each row, so nothing here re-checks one.

@@ -1,5 +1,4 @@
-// The remote session directory's widget half (`docs/session-messaging.md`
-// §5.3-5.4): owns exactly the `Timer` and the `ref.read`/`ref.listenManual`
+// The remote session directory's widget half: owns exactly the `Timer` and the `ref.read`/`ref.listenManual`
 // calls [RemoteDirectoryPumpEngine] needs, and nothing else — every decision
 // about when to push, whom to ask, and how a peer's answer is classified
 // lives in `remote_directory_source.dart`, pure and testable without this
@@ -156,7 +155,7 @@ class _RemoteDirectoryPumpHostState
 
   /// An agent asked this machine something its mirror could not answer
   /// (`unservedReads`), so the peers nobody has reached become worth a socket —
-  /// thin once, then real (E13, `docs/session-messaging.md`).
+  /// thin once, then real.
   ///
   /// Marking is not connecting: the warm set only stops the reaper closing what
   /// is already open, so the dial has to happen here. Both halves are bounded by

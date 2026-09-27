@@ -1,4 +1,4 @@
-// The other half of the peek-only directory (E13, `docs/session-messaging.md`):
+// The other half of the peek-only directory:
 // what a MISS does. The pump only ever asks the peer control planes this app
 // already holds, and a desktop at rest holds none, so the ordinary first answer
 // to `list_sessions` is "3 machines, none connected, none asked" — honest, and

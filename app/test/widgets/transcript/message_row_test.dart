@@ -258,7 +258,7 @@ void main() {
   });
 
   // A session-bus thread reuses these same rows rather than growing a screen of
-  // its own (`docs/session-messaging.md` §10.2). These pin the two things that
+  // its own. These pin the two things that
   // reuse has to get right, and that nothing in the panel's own test can see.
   group('session-bus thread view', () {
     // Both halves of an exchange, in the transcript's own two treatments: what

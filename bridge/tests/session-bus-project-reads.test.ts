@@ -4,8 +4,7 @@
 // and the push that says one of those mailboxes grew. All four ride the
 // PROJECT STREAM, because the object that answers them (`SessionBusApi`) is
 // built inside the project core with the machine-level directory injected into
-// it: machine-scoped state never implied machine-scoped transport
-// (`docs/session-messaging.md` §5.4, "The transport did not move with it").
+// it: machine-scoped state never implied machine-scoped transport.
 //
 // Every case here is driven through `bus.dispatchInbound` rather than by calling
 // the api directly, because the wiring is what fails silently: `handleAbMessage`

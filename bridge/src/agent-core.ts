@@ -1124,7 +1124,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
 
   // A session this bridge may address on the bus. Every session this bridge
   // holds is addressable — a session is the unit and there is no membership to
-  // join (`docs/session-messaging.md` E1/E2) — so the only two refusals left are
+  // join — so the only two refusals left are
   // a session id this bridge does not hold and a machine with no relay device id
   // to stamp an address with. The coordinator's `addressable` is what tells
   // those two nulls apart for the caller.

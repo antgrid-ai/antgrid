@@ -1,4 +1,4 @@
-// Turn-boundary delivery (`docs/session-messaging.md` §7.2). Two guarantees are
+// Turn-boundary delivery. Two guarantees are
 // load-bearing and both fail silently if broken: a line never lands mid-turn,
 // and a line never vanishes — the sending machine is told a message left the
 // moment it does, so a line dropped here is one nothing on either side can

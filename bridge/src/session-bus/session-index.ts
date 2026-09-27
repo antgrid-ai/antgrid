@@ -1,5 +1,4 @@
-// The machine-level directory `docs/session-messaging.md` §5.4 asks for, in
-// the sense that matters: resolving a session id to the project core that
+// The machine-level session directory, in the sense that matters: resolving a session id to the project core that
 // holds it, from whichever project's stream a frame naming it arrived on.
 // Nothing on this bridge calls `lookup` yet — it lands on its own so it gets
 // its own unit test rather than being an untested implementation detail

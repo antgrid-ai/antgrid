@@ -116,7 +116,7 @@ final sessionBusLocalSessionsProvider = Provider.family<Set<String>, String>((
 /// A leg is asked for when a local bridge hands over a frame naming a machine
 /// and project this app has no leg for, and released when nothing has been
 /// carried over it for [kSessionBusLinkIdle]. Discovery stays peek-only and
-/// separate: E13 (`docs/session-messaging.md` §14) refuses pinning peers by
+/// separate: the directory refuses pinning peers by
 /// shared repo key precisely because it would hold standing connections on an
 /// idle desktop to keep fresh an answer nobody asked for. Demand cannot do
 /// that — a leg exists only after an agent has actually addressed one.

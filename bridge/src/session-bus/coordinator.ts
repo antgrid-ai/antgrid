@@ -620,7 +620,7 @@ export class SessionBusCoordinator {
   }
 
   /**
-   * Lift a no-progress halt (`docs/session-messaging.md` §7.4).
+   * Lift a no-progress halt.
    *
    * A human's own submitted reply into the halted session is what reaches here.
    * The halt says two agents exchanged messages while the work stood still, and

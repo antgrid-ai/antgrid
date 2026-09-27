@@ -4,7 +4,7 @@ import { atomicWriteFile } from "./discovery";
 
 /**
  * Whether an agent on ANOTHER of this account's machines may see what is
- * running here and reach into it — E12, `docs/session-messaging.md`.
+ * running here and reach into it.
  *
  * Subordinate to the remote-access switch, never a replacement for it: this
  * store answers only the second question, and every call site consults it AFTER

@@ -132,7 +132,7 @@ class CapabilityCard {
   /// rather than reported empty, so one stale id cannot blank the rest.
   final Map<String, RepoCard> projects;
 
-  /// Session half of the directory (`docs/session-messaging.md` §5.5), read
+  /// Session half of the directory, read
   /// only when `capabilityCard(includeSessions: true)` asked for it.
   ///
   /// `null` means the key was ABSENT — a bridge predating the field, or a call
@@ -761,7 +761,7 @@ class ControlPlaneClient {
   /// [repoKeys] narrows the answer to projects whose `RepoCard.remote`
   /// matches one of these — a key from a prior card, never re-derived here.
   /// [includeSessions] widens the answer with [CapabilityCard.sessions] (the
-  /// session half of `docs/session-messaging.md` §5.5) and narrows the target
+  /// session half of the directory) and narrows the target
   /// set further, to projects holding an addressable session. Omitting both
   /// sends a request BYTE-IDENTICAL to a plain card ask, so an older bridge
   /// sees no change at all — widening an existing method produces no error on

@@ -91,7 +91,7 @@ export function readOsCard(): OsCard {
 }
 
 /**
- * The repo-identity key (`docs/session-messaging.md` §5.1): scheme-less,
+ * The repo-identity key: scheme-less,
  * credential-free, lowercase `host[:port]/path`, e.g. `github.com/owner/repo`.
  * `null` for anything that cannot identify the same repository from another
  * machine.
@@ -166,7 +166,7 @@ async function readBranch(projectPath: string): Promise<string | null> {
  * The normalized repo key for a checkout, or null when it has none.
  *
  * Exported because the session-bus directory keys the addressable set on it
- * (`docs/session-messaging.md` §5.1) and must reach the SAME answer the
+ * and must reach the SAME answer the
  * add-machine dialog does — two probes with two caches would let a project be
  * addressable in one surface and not the other, with nothing to point at.
  */

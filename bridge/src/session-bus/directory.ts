@@ -1,4 +1,4 @@
-// The answer to "who could I talk to" (`docs/session-messaging.md` §5.5), and
+// The answer to "who could I talk to", and
 // deliberately not to "who should I talk to": the bridge sorts on facts it can
 // check and hands the agent a judgeable row, because it is guessing with
 // strictly less context than the agent asking.

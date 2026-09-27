@@ -1,5 +1,5 @@
-// The addressable set is keyed on a normalized git remote, not on a project id
-// (`docs/session-messaging.md` §5.1): a managed worktree and the repo it was cut
+// The addressable set is keyed on a normalized git remote, not on a project id:
+// a managed worktree and the repo it was cut
 // from hash to different project ids and must still reach each other, which is
 // the whole reason Wave 1 moved the bus to the machine.
 //
