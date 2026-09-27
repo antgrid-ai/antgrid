@@ -154,97 +154,74 @@ void main() {
     await relay.closeStreams();
   });
 
-  test('an answered RPC clears the streak', () async {
-    final relay = FakeLiveRelay();
-    final session = await establish(relay);
-    final transportX = await openReady(relay, session, 'X');
-    final streamX = relay.openedStreams.firstWhere(
-      (s) => s.open == const ProjectStreamOpen('X'),
-    );
+  // A completed RPC clears the timeout streak whether the bridge answered it
+  // with a result or with its own application-level error — either way the
+  // stream carried a reply, which is all the health count cares about.
+  for (final case_ in [
+    (
+      label: 'an answered RPC clears the streak',
+      response: {'ok': true, 'result': <String, dynamic>{}},
+    ),
+    (
+      label: 'an application error clears the streak',
+      response: {
+        'ok': false,
+        'error': {'code': 'E_NOT_FOUND', 'message': 'not found'},
+      },
+    ),
+  ]) {
+    test(case_.label, () async {
+      final relay = FakeLiveRelay();
+      final session = await establish(relay);
+      final transportX = await openReady(relay, session, 'X');
+      final streamX = relay.openedStreams.firstWhere(
+        (s) => s.open == const ProjectStreamOpen('X'),
+      );
 
-    Future<void> timeOut() => expectLater(
-      transportX.request('x', timeout: const Duration(milliseconds: 10)),
-      throwsA(isA<RpcException>()),
-    );
+      Future<void> timeOut() => expectLater(
+        transportX.request('x', timeout: const Duration(milliseconds: 10)),
+        throwsA(isA<RpcException>()),
+      );
 
-    await timeOut();
-    await timeOut();
+      await timeOut();
+      await timeOut();
 
-    final answered = transportX.request(
-      'y',
-      timeout: const Duration(seconds: 5),
-    );
-    await Future<void>.delayed(const Duration(milliseconds: 10));
-    final sentReq =
-        jsonDecode(utf8.decode(streamX.sent.last)) as Map<String, dynamic>;
-    streamX.injectJson({
-      'type': 'response',
-      'requestId': sentReq['requestId'],
-      'ok': true,
-      'result': <String, dynamic>{},
+      final answered = transportX.request(
+        'y',
+        timeout: const Duration(seconds: 5),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      final sentReq =
+          jsonDecode(utf8.decode(streamX.sent.last)) as Map<String, dynamic>;
+      streamX.injectJson({
+        'type': 'response',
+        'requestId': sentReq['requestId'],
+        ...case_.response,
+      });
+      if (case_.response['ok'] == true) {
+        await answered;
+      } else {
+        await expectLater(
+          answered,
+          throwsA(
+            isA<RpcException>().having((e) => e.code, 'code', 'E_NOT_FOUND'),
+          ),
+        );
+      }
+
+      await timeOut();
+      await timeOut();
+      await Future<void>.delayed(const Duration(milliseconds: 30));
+      expect(
+        streamX.resetCalled,
+        isFalse,
+        reason: 'the completed RPC in between must clear the streak',
+      );
+
+      await session.dispose();
+      await relay.closeStreams();
     });
-    await answered;
-
-    await timeOut();
-    await timeOut();
-    await Future<void>.delayed(const Duration(milliseconds: 30));
-    expect(
-      streamX.resetCalled,
-      isFalse,
-      reason: 'the answered RPC in between must clear the streak',
-    );
-
-    await session.dispose();
-    await relay.closeStreams();
-  });
-
-  test('an application error clears the streak', () async {
-    final relay = FakeLiveRelay();
-    final session = await establish(relay);
-    final transportX = await openReady(relay, session, 'X');
-    final streamX = relay.openedStreams.firstWhere(
-      (s) => s.open == const ProjectStreamOpen('X'),
-    );
-
-    Future<void> timeOut() => expectLater(
-      transportX.request('x', timeout: const Duration(milliseconds: 10)),
-      throwsA(isA<RpcException>()),
-    );
-
-    await timeOut();
-    await timeOut();
-
-    final answered = transportX.request(
-      'y',
-      timeout: const Duration(seconds: 5),
-    );
-    await Future<void>.delayed(const Duration(milliseconds: 10));
-    final sentReq =
-        jsonDecode(utf8.decode(streamX.sent.last)) as Map<String, dynamic>;
-    streamX.injectJson({
-      'type': 'response',
-      'requestId': sentReq['requestId'],
-      'ok': false,
-      'error': {'code': 'E_NOT_FOUND', 'message': 'not found'},
-    });
-    await expectLater(
-      answered,
-      throwsA(isA<RpcException>().having((e) => e.code, 'code', 'E_NOT_FOUND')),
-    );
-
-    await timeOut();
-    await timeOut();
-    await Future<void>.delayed(const Duration(milliseconds: 30));
-    expect(
-      streamX.resetCalled,
-      isFalse,
-      reason: 'the bridge\'s own application error still proves the stream '
-          'carried a reply',
-    );
-
-    await session.dispose();
-    await relay.closeStreams();
-  });
+  }
 
   test('a late reply clears the streak', () async {
     final relay = FakeLiveRelay();

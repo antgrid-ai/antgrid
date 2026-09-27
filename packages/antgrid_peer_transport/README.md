@@ -33,29 +33,31 @@ Run these commands serially from this directory:
 dart analyze
 dart test
 dart run iroh_quic:setup
-dart run bin/native_smoke.dart
-dart compile exe bin/native_smoke.dart -o ../../.tmp/iroh-native-smoke.exe
 ```
 
-Use the upstream signed setup process without disabling verification. The native
-smoke uses synthetic admission to exercise the production record adapter and
-its cleanup/rejection paths. It does not qualify account authorization or host
-features. The app bundles native code through pinned upstream `iroh_flutter`;
-that separate source build needs platform packaging qualification.
+Use the upstream signed setup process without disabling verification.
 
-`bin/interop_app.dart` is the app role of the cross-binding gate and is driven
-by the bridge, never run directly:
+Cross-binding qualification — a real `IrohPeerLink` (this package, over
+`iroh_quic`) against a real `NativeHostConnection` host (the bridge, over
+`@number0/iroh`) — runs from the repository root, not from this directory:
 
 ```text
-bun run --filter antgrid-bridge qualify:iroh-interop
+IROH_INTEROP_NATIVE_LIBRARY=<path> bun run --filter antgrid-evals test:evals:dart-client-e2e
+IROH_INTEROP_NATIVE_LIBRARY=<path> bun run --filter antgrid-evals test:evals:peer-resume
 ```
 
-It dials a real `NativeHostConnection` host binding `@number0/iroh` while this side
-binds `iroh_quic`, so it is the only gate covering the pairing the product
-actually ships. It also exercises three host-resume cycles with fresh native sessions and stable project bindings on the shared app endpoint.
-Set `IROH_INTEROP_NATIVE_LIBRARY` when the library is not on the default search
-path, and `IROH_INTEROP_DART` to choose the Dart executable. `IROH_SMOKE_LOG_LEVEL`
-surfaces host logs, which are the only account of why a host dropped a peer.
+`test:evals:dart-client-e2e` drives the production Dart relay/transport code
+against a real bridge (project, file, terminal and managed-checkout traffic);
+`test:evals:peer-resume` has the bridge close the Dart peer on a host resume and
+checks it comes back on the same endpoint identity. Two paths are proved over
+the TS binding only: the raw NOT_READY admission refusal
+(`gate-stream-admission.test.ts`), because `MachineSession.openProject` sends
+`project:start` first and so never reaches it, and the close on remote access
+switched off, because the eval client reports no peer close of its own.
+Set `IROH_INTEROP_NATIVE_LIBRARY` when the native library is not on
+the default search path. The app bundles native code through pinned upstream
+`iroh_flutter`; that separate source build needs platform packaging
+qualification of its own.
 
 Native release qualification remains incomplete. Unknown native close causes remain terminal until upstream
 bindings provide a verified retry classification.

@@ -135,14 +135,14 @@ Set `IROH_INTEROP_NATIVE_LIBRARY` to the verified Dart native library before
 running `test:evals:dart-client-e2e` and `test:evals:peer-resume`.
 Backend gates also require the existing PostgreSQL/Prisma test prerequisites.
 
-In `packages/antgrid_peer_transport`, run `dart analyze`, `dart test`, and the
-explicit record-only `dart run bin/native_smoke.dart`. Configure the upstream
-signed native DLL through `iroh_quic:setup` or the verified prototype cache.
-Never use `--no-verify`. The native smoke uses synthetic admission and validates
-the production record adapter, shared endpoint cleanup and rejection paths; it
-does not qualify backend authorization, real host features, WAN or performance.
-The same package supplies app and CLI native code; FRB disposal in the smoke
-executable occurs only at process-final teardown.
+In `packages/antgrid_peer_transport`, run `dart analyze` and `dart test`.
+Configure the upstream signed native DLL through `iroh_quic:setup` or the
+verified prototype cache. Never use `--no-verify`. Cross-binding qualification
+against a real bridge is `test:evals:dart-client-e2e` and `test:evals:peer-resume`
+above, not a standalone script. They do not reach the raw NOT_READY admission
+refusal or the close on remote access switched off; those are proved over the
+TS binding only. The same package supplies app and CLI native code, and FRB
+disposal occurs only at process-final teardown.
 
 The native soak is intentionally excluded from the default eval sweep. It runs
 for 30 minutes unless its documented test-only duration override is set, records

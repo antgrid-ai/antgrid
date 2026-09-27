@@ -707,6 +707,11 @@ export interface DartTestEnv {
   projectId: string;
   streamId: string;
   agentDeviceId: string;
+  /** Tears down the Dart client's peer and session, dials the same machine
+   *  again on the same endpoint identity, re-runs the hello and rebinds the
+   *  default project. The eval client has no supervisor, so this stands in for
+   *  the app's own reconnect. Resolves to the project streamId. */
+  reestablishPeer(): Promise<string>;
   teardown(): Promise<void>;
 }
 
@@ -918,6 +923,10 @@ interface SetupDartTestEnvOptions {
   fixtureName: string;
   replacements?: Record<string, string>;
   clientName?: string;
+  /** Runs against the project dir BEFORE the agent boots — see the same option
+   *  on `SetupTestEnvOptions` (a row that needs a real repository has to
+   *  create it here, since the agent resolves Git-ness once at startup). */
+  prepareProject?: (dir: string) => void | Promise<void>;
 }
 
 async function buildDartTestEnv(
@@ -957,6 +966,7 @@ async function buildDartTestEnv(
     ...opts.replacements,
   });
   cleanup.add(() => project.cleanup());
+  await opts.prepareProject?.(project.dir);
 
   const agent = await spawnAgent({
     relayUrl: relay.url,
@@ -1033,6 +1043,20 @@ async function buildDartTestEnv(
     projectId,
     streamId,
     agentDeviceId: deviceUuid,
+    async reestablishPeer() {
+      await app.disconnectPeer();
+      await app.connectPeer({
+        licenseApiUrl: licenseApi.url,
+        accountId: appAuth.userId,
+        enrollmentId: appAuth.clientId,
+        clientSecret: appAuth.clientSecret,
+        machineDeviceId: deviceUuid,
+        addresses: [`127.0.0.1:${nativePort}`],
+      });
+      await app.performHandshake(deviceUuid, 10_000);
+      await app.pullStateSnapshot();
+      return app.openProjectStream(projectId, 10_000);
+    },
     async teardown() {
       await cleanup.run();
     },
