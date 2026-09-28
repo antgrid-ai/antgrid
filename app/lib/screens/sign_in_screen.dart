@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show TextInput;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -31,6 +32,12 @@ final lastAuthMethodStoreProvider = Provider<LastAuthMethodStore>(
   (ref) => LastAuthMethodStore(),
 );
 
+/// App Store guideline 4.8: an iOS app that offers a third-party login such as
+/// Google must also offer Sign in with Apple, which this app does not yet
+/// have. iOS keeps GitHub by choice, although 4.8 has no developer-account
+/// exemption; if App Review objects, gate GitHub the same way.
+bool get _offersGoogleSignIn => defaultTargetPlatform != TargetPlatform.iOS;
+
 /// Sign-in screen.
 ///
 /// Sign-in is optional on desktop — signed-out users land in [AppShell] and
@@ -49,8 +56,9 @@ final lastAuthMethodStoreProvider = Provider<LastAuthMethodStore>(
 ///
 /// Magic-link is that fallback and the primary method: it drives the web
 /// cross-device flow ([AuthService.startMagicLink] / [AuthService.pollStatus])
-/// entirely over HTTPS — no browser, no deeplink. GitHub/Google remain as
-/// secondary options on the existing browser+deeplink path.
+/// entirely over HTTPS — no browser, no deeplink. GitHub and Google (not on
+/// iOS, see [_offersGoogleSignIn]) remain as secondary options on the existing
+/// browser+deeplink path.
 ///
 /// There is no password SIGN-UP here. Creating an account with one lands on
 /// "check your email" and then needs a second trip back to sign in (the server
@@ -303,10 +311,13 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
         _goToStep(_Step.password);
       case AuthMethod.github:
         await _startOAuth('github');
-      case AuthMethod.google:
+      case AuthMethod.google when _offersGoogleSignIn:
         await _startOAuth('google');
       // A remembered link, and an address this device has never seen, take the
-      // same path — the link is what works without knowing anything.
+      // same path — the link is what works without knowing anything. So does a
+      // Google hint on a platform that does not offer Google, which an earlier
+      // build can have recorded.
+      case AuthMethod.google:
       case AuthMethod.link:
       case null:
         await _sendLink();
@@ -822,7 +833,7 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
         const SizedBox(height: AbTokens.space12),
         const _OrDivider(),
         const SizedBox(height: AbTokens.space12),
-        // One bordered group rather than three stacked buttons: these are three
+        // One bordered group rather than stacked buttons: these are all
         // answers to a single question — how to prove the address is yours —
         // and [AbSegmented]'s construction is how this app already asks a small
         // closed set where the alternatives must stay visible. Not AbSegmented
@@ -840,11 +851,12 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
               label: 'GitHub',
               onTap: busy ? null : () => _startOAuth('github'),
             ),
-            _AuthMethodSpec(
-              icon: _googleMark,
-              label: 'Google',
-              onTap: busy ? null : () => _startOAuth('google'),
-            ),
+            if (_offersGoogleSignIn)
+              _AuthMethodSpec(
+                icon: _googleMark,
+                label: 'Google',
+                onTap: busy ? null : () => _startOAuth('google'),
+              ),
             // Unconditional, never keyed on what the store recalls: visibility
             // that tracked the hint would flicker as the address is typed and
             // would tell anyone watching the screen which addresses this device
