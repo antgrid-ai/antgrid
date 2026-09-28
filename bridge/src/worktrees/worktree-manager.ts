@@ -2,6 +2,7 @@ import { existsSync, realpathSync, statSync } from "node:fs";
 import { readdir, rm, rmdir } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 import { resolveAbDir } from "../antgrid-dir";
+import { removeWithRetries } from "../fs-retry";
 import { listProcessesWithCwdUnder, terminateProcesses, type DirectoryHolder } from "../win32-process";
 import { branchSlug, checkoutDirName, projectRootName, sessionWords } from "./checkout-names";
 import { readCheckoutOwner, sameRepository } from "./checkout-owner";
@@ -25,34 +26,6 @@ const WORKTREE_ROOT_DIR = "wt";
  * racer it cannot serialize; an orphan is by definition unreferenced, so
  * nothing writes into it and its mtime ages past this. */
 const RECONCILE_GRACE_MS = 60_000;
-
-/** Backoff for [removeWithRetries]. Each entry is the wait BEFORE that attempt,
- * so the first is free and the budget is ~2.3s over five tries. Sized for the
- * holder it exists to outlast — a killed PTY's grandchildren, which can outlive
- * the leader because `taskkill /F /T` walks the tree from the parent down — and
- * no longer: a handle nothing is closing needs the caller's error, not more
- * patience. */
-const RECLAIM_BACKOFF_MS = [0, 100, 300, 700, 1200];
-
-/** Recursive delete that actually retries a transient Windows sharing
- * violation. `fs.rm`'s own `maxRetries`/`retryDelay` cannot be used: Bun
- * accepts both options and honours NEITHER — measured on the pinned runtime
- * (1.3.14), `rm` against a directory held as a live child's cwd returns in 0ms
- * with EBUSY where Node retries for the full budget. The bridge runs on Bun in
- * both `bun run` and `bun build --compile` form, so the options were a no-op
- * everywhere it ships. */
-async function removeWithRetries(path: string): Promise<void> {
-  for (const wait of RECLAIM_BACKOFF_MS) {
-    if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
-    try {
-      await rm(path, { recursive: true, force: true });
-      return;
-    } catch {
-      // Caller re-tests the directory and reports the failure — whatever holds
-      // it open is worth surfacing rather than retrying blindly.
-    }
-  }
-}
 
 /** How many holders one message names before it stops counting. The message
  * reaches a dialog, and a directory this thoroughly held is one story rather

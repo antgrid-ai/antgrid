@@ -123,10 +123,8 @@ export type ApplyOpSkipReason =
   | "integration_revoked"
   | "fields_blocked"
   /** The op's own `integrationId`, pinned at enqueue, no longer matches the
-   *  task's current target. Reachable only through the one op `cancelPendingOps`
-   *  deliberately spares a re-publish: an attempted `issue.create` whose outcome
-   *  is unknown. Sending it would resolve credentials for the installation it
-   *  was queued under while addressing the repository the task points at now. */
+   *  task's current target — see `CancelPendingOpsResult.keptCreate`
+   *  (`tasks/sync-op.ts`) for why this op survives long enough to hit it. */
   | "integration_mismatch";
 
 export type ApplyOpOutcome =
@@ -363,14 +361,11 @@ async function decide(tx: Tx, op: TaskSyncOpRecord, at: Date): Promise<Decision>
 
   // `row.integrationId` is pinned at enqueue and normally always matches: any
   // ordinary edit re-resolves the target through `enqueueForTask`, and a
-  // re-publish cancels everything else pending. The one op that survives a
-  // re-publish is an attempted `issue.create` whose outcome GitHub never
-  // confirmed (`cancelPendingOps`'s `keptCreate`) — and by the time this runs
-  // the task may already point at a different installation. Sending it there
-  // would sign the request with the OLD installation's token while addressing
-  // the NEW repository, which is not this op's to write to under any
-  // credentials. The task's current link is untouched: unlike the guards
-  // above, nothing is wrong with it, only this op is stale.
+  // re-publish cancels everything else pending except an attempted
+  // `issue.create` — see `CancelPendingOpsResult.keptCreate` (sync-op.ts) for
+  // why that op alone survives and can reach this point stale. The task's
+  // current link is untouched: unlike the guards above, nothing is wrong with
+  // it, only this op is stale.
   if (row.integrationId !== repo.integrationId) {
     await cancelOp(tx, op.id, "the task now targets a different installation");
     return stop({

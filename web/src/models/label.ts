@@ -178,22 +178,48 @@ export async function deleteLabel(
     });
     if (!label) return false;
 
-    const rows = await tx.taskLabel.findMany({
+    const linked = await tx.taskLabel.findMany({
       where: { labelId: args.labelId },
       select: { taskId: true },
     });
-    const taskIds = [...new Set(rows.map((row) => row.taskId))].sort();
+    // `TaskLabel`'s `@@id([taskId, labelId])` already makes each taskId unique
+    // for a given labelId.
+    const taskIds = linked.map((row) => row.taskId).sort();
 
-    const before = new Map<string, string[]>();
     for (const taskId of taskIds) {
       await lockTaskSync(tx, taskId);
-      before.set(taskId, await labelNames(tx, taskId));
+    }
+
+    // One read for every affected task's full label set, taken only once every
+    // lock above is held — a single round trip in place of the per-task reads
+    // the lock loop used to interleave with, in the same lock-then-read order.
+    const rows =
+      taskIds.length === 0
+        ? []
+        : await tx.taskLabel.findMany({
+            where: { taskId: { in: taskIds } },
+            select: { taskId: true, labelId: true, label: { select: { name: true } } },
+          });
+    const byTask = new Map<string, { labelId: string; name: string }[]>();
+    for (const taskId of taskIds) byTask.set(taskId, []);
+    for (const row of rows) {
+      byTask.get(row.taskId)?.push({ labelId: row.labelId, name: row.label.name });
     }
 
     await tx.label.delete({ where: { id: args.labelId } });
 
     for (const taskId of taskIds) {
-      await enqueueLabelPush(tx, args.accountId, taskId, before.get(taskId)!);
+      const entries = byTask.get(taskId) ?? [];
+      const before = entries.map((entry) => entry.name);
+      // "After" is derived from the snapshot above rather than re-read: the
+      // delete just above removes exactly this labelId from every task's set,
+      // so filtering it out of the entries already read says the same thing a
+      // fresh query would — matched on labelId, not name, since two different
+      // labels (an account-wide one and a project one) can share a name.
+      const after = entries
+        .filter((entry) => entry.labelId !== args.labelId)
+        .map((entry) => entry.name);
+      await enqueueLabelPush(tx, args.accountId, taskId, before, after);
     }
     return true;
   });
@@ -374,16 +400,21 @@ async function labelNames(tx: Tx, taskId: string): Promise<string[]> {
  * on a double-tap by design — re-attaching an attached label, detaching one the
  * task never had — and a content-creating provider write per double-tap is not
  * something the user can see coming.
+ *
+ * `after` is read fresh when the caller has not already computed it (every
+ * caller but `deleteLabel`, which derives it for every affected task from one
+ * batched read rather than paying for a re-read here per task).
  */
 async function enqueueLabelPush(
   tx: Tx,
   accountId: string,
   taskId: string,
-  before: readonly string[]
+  before: readonly string[],
+  after?: readonly string[]
 ): Promise<void> {
-  const after = await labelNames(tx, taskId);
-  if (sameLabelSet(after, before)) return;
-  await enqueueForTask(tx, { accountId, taskId, payloads: [issueLabelsPayload(after)] });
+  const names = after ?? (await labelNames(tx, taskId));
+  if (sameLabelSet(names, before)) return;
+  await enqueueForTask(tx, { accountId, taskId, payloads: [issueLabelsPayload(names)] });
 }
 
 async function liveTask(

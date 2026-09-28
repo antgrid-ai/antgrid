@@ -41,6 +41,16 @@ final currentUserProvider = FutureProvider<CurrentUser?>((ref) async {
   return ref.watch(authServiceProvider).fetchCurrentUser();
 }, retry: noProviderRetry);
 
+/// [currentUserProvider]'s id alone, behind `.select` so an identity-only
+/// consumer rebuilds on the id changing and nothing else `CurrentUser`
+/// carries. Watching this from a plain `Provider` doubles as the reset for
+/// per-account state: Riverpod rebuilds that provider from scratch the
+/// moment the id changes, so state built under one account never survives
+/// into another's.
+final currentUserIdProvider = Provider<String?>((ref) {
+  return ref.watch(currentUserProvider.select((u) => u.value?.userId));
+});
+
 /// Stored-cookie presence — a synchronous, network-free signal that we *think*
 /// we're signed in. Used as the optimistic fallback when [currentUserProvider]
 /// is loading (cold start) or errored (offline) so we don't bounce signed-in

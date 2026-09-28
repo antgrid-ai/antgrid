@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io'
-    show HandshakeException, HttpException, SocketException, TlsException;
+import 'dart:io' show HttpException, SocketException, TlsException;
 
 import 'package:http/http.dart' as http;
 
@@ -397,41 +396,16 @@ class TasksApi extends CookieApiClient {
         body: payload != null ? jsonEncode(payload) : null,
       );
     } on SocketException catch (e) {
-      throw TaskApiException(
-        TaskApiError.network,
-        _message(TaskApiError.network, subject),
-        detail: e.message,
-      );
+      _network(e.message, subject);
     } on HttpException catch (e) {
-      throw TaskApiException(
-        TaskApiError.network,
-        _message(TaskApiError.network, subject),
-        detail: e.message,
-      );
+      _network(e.message, subject);
     } on http.ClientException catch (e) {
-      throw TaskApiException(
-        TaskApiError.network,
-        _message(TaskApiError.network, subject),
-        detail: e.message,
-      );
-    } on HandshakeException catch (e) {
-      throw TaskApiException(
-        TaskApiError.network,
-        _message(TaskApiError.network, subject),
-        detail: e.message,
-      );
+      _network(e.message, subject);
     } on TlsException catch (e) {
-      throw TaskApiException(
-        TaskApiError.network,
-        _message(TaskApiError.network, subject),
-        detail: e.message,
-      );
+      // Covers HandshakeException too (it extends TlsException).
+      _network(e.message, subject);
     } on TimeoutException catch (e) {
-      throw TaskApiException(
-        TaskApiError.network,
-        _message(TaskApiError.network, subject),
-        detail: e.message,
-      );
+      _network(e.message, subject);
     }
 
     final decoded = _decode(res.body);
@@ -520,6 +494,17 @@ class TaskApiException implements Exception {
 /// What the failing call was about, which is all that separates "that task no
 /// longer exists" from "that label no longer exists" on a shared 404.
 enum _Subject { task, label }
+
+/// Throws the [TaskApiError.network] exception every carrier-level failure
+/// in `_send`'s try maps to, with [detail] carrying whatever the underlying
+/// exception's own `.message` said.
+Never _network(String? detail, _Subject subject) {
+  throw TaskApiException(
+    TaskApiError.network,
+    _message(TaskApiError.network, subject),
+    detail: detail,
+  );
+}
 
 TaskApiException _refusal(
   int status,

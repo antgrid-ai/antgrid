@@ -513,13 +513,21 @@ describe("purgeProcessedWebhookEvents", () => {
     // Every row survives — the [provider, provider_event_id] key is what a
     // redelivery is deduplicated against, and deleting it would let a captured
     // (body, signature) pair replay once retention has run.
-    const left = await pg.db.webhookEvent.findMany({ select: { id: true, payload: true } });
+    const left = await pg.db.webhookEvent.findMany({
+      select: { id: true, payload: true, payloadPurgedAt: true },
+    });
     expect(left.map((r) => r.id).sort()).toEqual(
       [staleProcessed.id, freshProcessed.id, staleUnprocessed.id, otherProvider.id].sort()
     );
     expect(left.find((r) => r.id === staleProcessed.id)?.payload).toEqual({ purged: true });
     expect(left.find((r) => r.id === freshProcessed.id)?.payload).not.toEqual({ purged: true });
     expect(left.find((r) => r.id === staleUnprocessed.id)?.payload).not.toEqual({ purged: true });
+
+    // `payload_purged_at` is the purge's own claim marker, independent of the
+    // payload value — the filter that finds unpurged rows is on this column.
+    expect(left.find((r) => r.id === staleProcessed.id)?.payloadPurgedAt).not.toBeNull();
+    expect(left.find((r) => r.id === freshProcessed.id)?.payloadPurgedAt).toBeNull();
+    expect(left.find((r) => r.id === staleUnprocessed.id)?.payloadPurgedAt).toBeNull();
   });
 
   test("a row already purged is left alone on a later pass", async () => {

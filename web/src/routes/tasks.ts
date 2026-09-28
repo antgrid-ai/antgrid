@@ -224,8 +224,8 @@ export function taskRoutes(deps: { db: DB; auth: Auth; env: Env }) {
   const account = requireAccount(deps.db);
   // `/tasks/*` already matches the literal `/tasks` (and `/labels/*` matches
   // `/labels`) — Hono's wildcard is not "one or more segments below". Listing
-  // both patterns here registered each middleware twice on the exact path, so
-  // every request to it ran the session lookup and the membership query twice.
+  // the bare path here too would register each middleware twice on the exact
+  // path, running the session lookup and the membership query twice per request.
   for (const path of ["/tasks/*", "/labels/*"]) {
     r.use(path, gate);
     r.use(path, account);

@@ -18,10 +18,7 @@ import 'sessions.dart'
 /// Only *running* a task needs a live bridge.
 
 final tasksApiProvider = Provider<TasksApi>((ref) {
-  // Watched so an account switch tears down every provider built on this one
-  // (list, projects, labels) instead of leaving them wired to a client that
-  // still answers for the previous session.
-  ref.watch(currentUserProvider.select((u) => u.value?.userId));
+  ref.watch(currentUserIdProvider);
   final auth = ref.read(authServiceProvider);
   return TasksApi(
     licenseApiUrl: ref.read(licenseApiUrlProvider),
@@ -168,10 +165,7 @@ class TaskFilter {
 class TaskFilterController extends Notifier<TaskFilter> {
   @override
   TaskFilter build() {
-    // A filter chosen under one account (an assignee id, a project uuid) is
-    // meaningless — or worse, silently wrong — under another, so an account
-    // switch rebuilds this back to the default rather than carrying it over.
-    ref.watch(currentUserProvider.select((u) => u.value?.userId));
+    ref.watch(currentUserIdProvider);
     return const TaskFilter();
   }
 
@@ -748,9 +742,7 @@ final selectedTaskNumberProvider =
 class SelectedTaskController extends Notifier<int?> {
   @override
   int? build() {
-    // A task number selected under one account cannot name anything sane
-    // under another, so an account switch drops the selection.
-    ref.watch(currentUserProvider.select((u) => u.value?.userId));
+    ref.watch(currentUserIdProvider);
     return null;
   }
 
@@ -768,7 +760,7 @@ final selectedTaskProvider = Provider<Task?>((ref) {
 });
 
 final taskLabelsProvider = FutureProvider<List<TaskLabel>>((ref) async {
-  final userId = ref.watch(currentUserProvider.select((u) => u.value?.userId));
+  final userId = ref.watch(currentUserIdProvider);
   if (userId == null) return const <TaskLabel>[];
   return ref.watch(tasksApiProvider).listLabels();
 });
@@ -890,11 +882,7 @@ final focusedSessionTaskProvider = Provider<Task?>((ref) {
 final openTaskCountProvider = Provider<int?>((ref) {
   final tasks = ref.watch(taskListProvider).value;
   if (tasks == null) return null;
-  // An unknown status is neither claim this client can honestly make — not
-  // closed, but not open either — so it counts toward neither.
-  return tasks
-      .where((t) => t.status != TaskStatus.unknown && !t.status.isClosed)
-      .length;
+  return tasks.where((t) => t.status.isOpen).length;
 });
 
 /// Starts an agent session from a task.
@@ -918,7 +906,7 @@ final taskLauncherProvider = Provider<TaskLauncher?>((ref) => null);
 /// per-machine: this is the `projectId` uuid a task actually carries, and the
 /// only thing a publish destination can be resolved from.
 final taskProjectsProvider = FutureProvider<List<TaskProject>>((ref) async {
-  final userId = ref.watch(currentUserProvider.select((u) => u.value?.userId));
+  final userId = ref.watch(currentUserIdProvider);
   if (userId == null) return const <TaskProject>[];
   return ref.watch(tasksApiProvider).listProjects();
 });
@@ -969,7 +957,7 @@ final openTasksForProjectProvider = Provider.family<List<Task>, String>((
 ) {
   final tasks = ref.watch(taskListProvider).value ?? const [];
   return tasks
-      .where((t) => t.projectId == projectId && !t.status.isClosed)
+      .where((t) => t.projectId == projectId && t.status.isOpen)
       .toList(growable: false)
     ..sort(_bySortKey);
 });

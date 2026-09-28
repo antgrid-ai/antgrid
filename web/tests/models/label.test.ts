@@ -3,7 +3,7 @@
 
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from "bun:test";
 import { startTestPg, type PgHandle } from "../helpers/pg.js";
-import { createTestUser, createTestSubscription } from "../helpers/fixtures.js";
+import { createTestUser, createTestSubscription, createLinkedTestTask } from "../helpers/fixtures.js";
 import {
   attachLabel,
   deleteLabel,
@@ -13,7 +13,6 @@ import {
   setTaskLabels,
 } from "../../src/models/label.js";
 import { createTask, getTaskByNumber } from "../../src/models/task.js";
-import { upsertIntegration, upsertIntegrationRepo } from "../../src/models/integration.js";
 
 let pg: PgHandle;
 beforeAll(async () => {
@@ -299,47 +298,9 @@ describe("attach and detach", () => {
     expect(await pg.db.label.count()).toBe(1);
   });
 
-  /** A task already linked to an issue, the way the inbound importer leaves
-   *  one — the state `deleteLabel`'s own push has to reach. */
-  async function linkedTask(a: Account, pushEnabled = true) {
-    const integration = await upsertIntegration(pg.db, {
-      accountId: a.accountId,
-      provider: "github",
-      externalAccountId: "org-del",
-      installationId: `${Math.floor(Math.random() * 1_000_000)}`,
-      displayName: "acme",
-      installedBy: a.userId,
-    });
-    if (integration.kind !== "ok") throw new Error(`upsertIntegration: ${integration.kind}`);
-    const repo = await upsertIntegrationRepo(pg.db, {
-      accountId: a.accountId,
-      integrationId: integration.integration.id,
-      repoKey: `github.com/acme/${crypto.randomUUID()}`,
-      externalRepoId: crypto.randomUUID(),
-      visibility: "private",
-      syncEnabled: true,
-      pushEnabled,
-    });
-    if (repo.kind !== "ok") throw new Error(`upsertIntegrationRepo: ${repo.kind}`);
-    const created = ok(
-      await createTask(pg.db, { accountId: a.accountId, createdBy: a.userId, title: "linked" })
-    );
-    await pg.db.task.update({
-      where: { id: created.task.id },
-      data: {
-        integrationRepoId: repo.repo.id,
-        externalProvider: "github",
-        externalId: crypto.randomUUID(),
-        externalKey: "acme/delete-label-repo#1",
-        syncState: "synced",
-      },
-    });
-    return created.task;
-  }
-
   test("deleting a label queues the surviving set for every task it was on", async () => {
     const a = await makeAccount();
-    const task = await linkedTask(a);
+    const { task } = await createLinkedTestTask(pg.db, a, true);
     const bug = ok(await getOrCreateLabel(pg.db, { accountId: a.accountId, name: "bug", color: "d73a4a" }));
     const keep = ok(await getOrCreateLabel(pg.db, { accountId: a.accountId, name: "keep", color: "0e8a16" }));
     ok(
@@ -362,7 +323,7 @@ describe("attach and detach", () => {
 
   test("deleting a label whose repo has pushEnabled off queues nothing", async () => {
     const a = await makeAccount();
-    const task = await linkedTask(a, false);
+    const { task } = await createLinkedTestTask(pg.db, a, false);
     const label = ok(await getOrCreateLabel(pg.db, { accountId: a.accountId, name: "bug", color: "d73a4a" }));
     ok(await attachLabel(pg.db, { accountId: a.accountId, taskId: task.id, labelId: label.label.id }));
     await pg.db.taskSyncOp.deleteMany({ where: { taskId: task.id } });

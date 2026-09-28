@@ -117,14 +117,13 @@ export function requireUserOrRedirect(deps: { auth: Auth }): MiddlewareHandler<{
  * to check against.
  *
  * On a mismatch this only REDIRECTS (GET, no side effect) to a page that asks
- * before signing out. Signing out here used to be the whole response to a
- * mismatch, which made the mismatch itself forgeable: `?asEmail=` is read
+ * before signing out. A GET must never sign out directly: `?asEmail=` is read
  * from the query string, so any page could force this browser to navigate
  * here — a top-level GET still carries a `SameSite=Lax` cookie — and log a
- * signed-in victim out with no interaction beyond loading a page. The actual
- * sign-out now happens only behind a POST (`/ui/integrations/switch-account`
- * in `routes/ui.tsx`), which the router's same-origin check on non-GET
- * requests is what a forged cross-site request cannot pass.
+ * signed-in victim out with no interaction beyond loading a page. The sign-out
+ * sits behind a same-origin POST instead (`/ui/integrations/switch-account` in
+ * `routes/ui.tsx`), which the router's same-origin check on non-GET requests
+ * is what a forged cross-site request cannot pass.
  */
 export function requireMatchingAccount(deps: { auth: Auth }): MiddlewareHandler<{ Variables: AuthVars }> {
   return async (c, next) => {

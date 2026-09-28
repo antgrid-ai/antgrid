@@ -150,8 +150,8 @@ export async function recordTaskRun(db: DB, args: RecordTaskRunArgs): Promise<Ta
     // would move a finished run's branch and PR onto a task that never ran it.
     if (existing && existing.taskId !== task.id) {
       // Same account by construction (the lookup above is scoped to it), so the
-      // bound task's own number is safe to read straight off it — unlike before
-      // this row carried `accountId`, this can never resolve to a stranger's.
+      // bound task's own number is safe to read straight off it: this can never
+      // resolve to a stranger's task.
       const bound = await tx.task.findFirst({
         where: { id: existing.taskId, accountId: args.accountId },
         select: { number: true },

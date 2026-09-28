@@ -88,12 +88,10 @@ export function ensureAntigravityHook(
       { event: "PreInvocation", command: antigravityHookCommand(scriptPath, "PreInvocation") },
       { event: "Stop", command: antigravityHookCommand(scriptPath, "Stop") },
     ]);
-    if (merged === null) {
-      if (cleaned === data) return true; // both hooks already present, nothing to remove
-      atomicWriteFile(hooksPath, `${JSON.stringify(cleaned, null, 2)}\n`);
-      return true;
-    }
-    atomicWriteFile(hooksPath, `${JSON.stringify(merged, null, 2)}\n`);
+    // merged === null means nothing needed adding; still write back cleaned if
+    // the legacy-hook strip actually changed something.
+    const out = merged ?? (cleaned !== data ? cleaned : null);
+    if (out) atomicWriteFile(hooksPath, `${JSON.stringify(out, null, 2)}\n`);
     return true;
   } catch (err) {
     log.warn("failed to write global antigravity hooks.json (%s): %s", hooksPath, err);

@@ -634,7 +634,12 @@ export type CancelPendingOpsResult = {
    * pending. Its outcome is unknown: the issue may exist with nothing linking
    * to it, and cancelling it blind leaves an orphan in a public repository that
    * our own retry created and our own delete forgot. It has to run its
-   * resolution step and record what it finds.
+   * resolution step and record what it finds — and by the time it does, the
+   * task may already point at a different installation than the one this op
+   * was queued under (a re-publish targeting a new repository). That is what
+   * `apply-op.ts`'s `integration_mismatch` guard exists to catch: without it,
+   * the op would be sent under the OLD installation's credentials while
+   * addressing the NEW repository.
    */
   keptCreate: { id: string; opKey: string } | null;
 };
@@ -654,9 +659,7 @@ export type CancelPendingOpsResult = {
  * and `enqueueSyncOp`'s own supersede rule already rewrites a pending,
  * un-attempted create of the same kind in place — cancelling it here first
  * would only make that call queue a second row instead of reusing the first.
- * An attempted create is spared either way, for the reason `keptCreate`
- * documents; it is left to `apply-op.ts`'s cross-installation guard if the
- * repository this publish points at has changed.
+ * An attempted create is spared either way — see `keptCreate` above for why.
  */
 export async function cancelPendingOps(
   tx: Tx,

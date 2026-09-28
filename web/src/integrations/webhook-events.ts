@@ -4,6 +4,10 @@
 import { createHash } from "node:crypto";
 import type { DB, Tx } from "../db/index.js";
 import type { Prisma } from "../generated/prisma/client.js";
+import {
+  SYNC_OP_BACKOFF_BASE_SECONDS,
+  SYNC_OP_BACKOFF_MAX_SECONDS,
+} from "../tasks/sync-op.js";
 
 /**
  * The `webhook_events` store, for providers that insert a delivery and respond
@@ -31,16 +35,6 @@ export const MAX_WEBHOOK_ATTEMPTS = 5;
 
 /** Errors carry provider text; the column is unbounded and the log line is not. */
 const MAX_ERROR_CHARS = 1000;
-
-/**
- * Exponential-backoff bounds for a failed delivery's `next_attempt_at`, mirroring
- * `task_sync_ops`' outbox backoff (`SYNC_OP_BACKOFF_BASE_SECONDS`/`_MAX_SECONDS`
- * in `tasks/sync-op.ts`). Without it a failing row was reclaimed on the very
- * next drain pass and burned `MAX_WEBHOOK_ATTEMPTS` inside one invocation's
- * first few passes rather than over any real spread of time.
- */
-export const WEBHOOK_BACKOFF_BASE_SECONDS = 30;
-export const WEBHOOK_BACKOFF_MAX_SECONDS = 30 * 60;
 
 /**
  * The idempotency key for a delivery whose provider signs the body and nothing
@@ -174,9 +168,13 @@ export async function markDeliveryProcessed(
 }
 
 /**
- * Count the failure and lease the row out by an exponential backoff, mirroring
- * `failOp` in `tasks/sync-op.ts`. Returns the new attempt count so the caller
- * can see the pass that hit the ceiling.
+ * Count the failure and lease the row out by an exponential backoff, using the
+ * same base and ceiling `failOp` uses for the sync outbox
+ * (`SYNC_OP_BACKOFF_BASE_SECONDS`/`_MAX_SECONDS` in `tasks/sync-op.ts`):
+ * without a lease, a failing row is reclaimed on the very next drain pass and
+ * burns `MAX_WEBHOOK_ATTEMPTS` inside one invocation's first few passes rather
+ * than over any real spread of time. Returns the new attempt count so the
+ * caller can see the pass that hit the ceiling.
  *
  * Left claimable (never `given_up`) at the ceiling, unlike the outbox: a
  * poison delivery stays `processed_at IS NULL` so `listGivenUpDeliveries` can
@@ -194,8 +192,8 @@ export async function recordDeliveryFailure(
       last_error = ${truncate(error)},
       next_attempt_at = now() + make_interval(secs =>
         LEAST(
-          ${WEBHOOK_BACKOFF_MAX_SECONDS}::double precision,
-          ${WEBHOOK_BACKOFF_BASE_SECONDS}::double precision * power(2, attempts)
+          ${SYNC_OP_BACKOFF_MAX_SECONDS}::double precision,
+          ${SYNC_OP_BACKOFF_BASE_SECONDS}::double precision * power(2, attempts)
         ))
     WHERE id = ${id}::uuid
     RETURNING attempts`;
@@ -247,9 +245,8 @@ export function retentionCutoff(now: Date, days = WEBHOOK_EVENT_RETENTION_DAYS):
 }
 
 /** What a purged row's payload becomes. Never `null` — the column is `NOT
- *  NULL` — and distinct from any real delivery body, so a purge run is
- *  idempotent: a row already carrying this is excluded rather than rewritten
- *  every day for the rest of its retained life. */
+ *  NULL` — and distinct from any real delivery body, so the value alone still
+ *  reads as "purged" wherever it is displayed or logged. */
 const PURGED_PAYLOAD = { purged: true } satisfies Prisma.InputJsonValue;
 
 /**
@@ -260,30 +257,31 @@ const PURGED_PAYLOAD = { purged: true } satisfies Prisma.InputJsonValue;
  * dedup work: `[provider, provider_event_id]` is the unique it upserts against,
  * and a captured `(body, signature)` pair GitHub's provider-side retry would
  * otherwise redeliver for ever, hashed to the same key, replays into the SAME
- * key however long ago it was first seen. Deleting the row — the previous
- * shape of this function — reopened that: a replay past the retention cutoff
- * inserted as new and was processed a second time. Only the `payload` column is
- * cleared, which is what retention is actually for: the billing rows sharing
- * this table are the idempotency guard a late gateway redelivery is checked
- * against, and it is their BODY that is unbounded growth, never their key.
- * Unprocessed rows are never touched — they are the backlog, including the
- * deferred event types a later phase turns on.
+ * key however long ago it was first seen. Deleting the row would reopen that: a
+ * replay past the retention cutoff would insert as new and be processed a
+ * second time. Only the `payload` column is cleared, which is what retention is
+ * actually for: the billing rows sharing this table are the idempotency guard a
+ * late gateway redelivery is checked against, and it is their BODY that is
+ * unbounded growth, never their key. Unprocessed rows are never touched — they
+ * are the backlog, including the deferred event types a later phase turns on.
+ *
+ * Filtered on `payload_purged_at IS NULL`, indexed alongside `provider` and
+ * `processed_at`, rather than on the payload's own value: a tick then scans
+ * only the rows it has not yet retired, instead of the whole processed range
+ * every time retention's cutoff moves forward.
  */
 export async function purgeProcessedWebhookEvents(
   db: DB,
   args: { provider: string; before: Date }
 ): Promise<number> {
+  const purgedAt = new Date();
   const result = await db.webhookEvent.updateMany({
     where: {
       provider: args.provider,
       processedAt: { not: null, lt: args.before },
-      // NOT `{ not: { equals: PURGED_PAYLOAD } } }` — Prisma's JSON filter takes
-      // the comparison value directly under `not`, and a nested `equals` is
-      // itself a JSON object no stored payload is ever shaped like, so that
-      // form matches every row and this purge would never become a no-op.
-      payload: { not: PURGED_PAYLOAD },
+      payloadPurgedAt: null,
     },
-    data: { payload: PURGED_PAYLOAD },
+    data: { payload: PURGED_PAYLOAD, payloadPurgedAt: purgedAt },
   });
   return result.count;
 }

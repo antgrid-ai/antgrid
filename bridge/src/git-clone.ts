@@ -1,5 +1,6 @@
-import { existsSync, rmSync, statSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
+import { removeWithRetries } from "./fs-retry";
 import { runGitRemote } from "./git-branches";
 
 /** Cloning a large repo over a slow link is legitimately minutes, unlike the
@@ -90,8 +91,10 @@ export async function cloneRepository(args: {
     // started, so anything left here after a failure is a partial clone THIS
     // call created — a kill on timeout (TerminateProcess on Windows) leaves it
     // behind rather than cleaning up after itself, and every retry would
-    // otherwise fail TARGET_EXISTS forever.
-    try { rmSync(target, { recursive: true, force: true }); } catch { /* best-effort cleanup */ }
+    // otherwise fail TARGET_EXISTS forever. The killed child can still hold a
+    // Windows handle into it briefly, so this retries rather than a one-shot
+    // `rmSync`.
+    await removeWithRetries(target);
     throw new GitCloneError("CLONE_FAILED", reason);
   }
   return target;

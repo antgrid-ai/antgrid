@@ -597,9 +597,10 @@ const LIST_LIMIT_MAX = 500;
  * tied row. `number` is unique per account and never reused, so it is what
  * breaks the tie for both.
  */
-function taskOrderBy(): Prisma.TaskOrderByWithRelationInput[] {
-  return [{ sortKey: "asc" }, { number: "asc" }];
-}
+const TASK_ORDER_BY: Prisma.TaskOrderByWithRelationInput[] = [
+  { sortKey: "asc" },
+  { number: "asc" },
+];
 
 function encodeTaskCursor(sortKey: string, number: number): string {
   return Buffer.from(`${sortKey}:${number}`, "utf8").toString("base64url");
@@ -651,7 +652,7 @@ export async function listTasksPage(db: Tx, args: ListTasksArgs): Promise<ListTa
             ],
           }),
     },
-    orderBy: taskOrderBy(),
+    orderBy: TASK_ORDER_BY,
     // One extra row, dropped below: its presence is how a page tells "this was
     // everything" from "there is more but the limit cut it here" without a
     // separate count query.
@@ -661,13 +662,15 @@ export async function listTasksPage(db: Tx, args: ListTasksArgs): Promise<ListTa
 
   const hasMore = rows.length > limit;
   const page = hasMore ? rows.slice(0, limit) : rows;
+  // `limit` is at least 1 (clamped above), so `hasMore` alone guarantees a last
+  // row: no separate existence check needed.
   const last = page[page.length - 1];
-  const nextCursor = hasMore && last ? encodeTaskCursor(last.sortKey, last.number) : null;
+  const nextCursor = hasMore ? encodeTaskCursor(last.sortKey, last.number) : null;
   return { tasks: page.map(toRecord), nextCursor };
 }
 
-/** The plain list, for callers that do not paginate. Every existing caller
- *  before pagination existed wanted exactly this. */
+/** The plain list, for callers that read the whole thing rather than a page at
+ *  a time — a client that has not adopted the cursor yet. */
 export async function listTasks(db: Tx, args: ListTasksArgs): Promise<TaskRecord[]> {
   return (await listTasksPage(db, args)).tasks;
 }

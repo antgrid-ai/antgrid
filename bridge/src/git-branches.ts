@@ -411,7 +411,7 @@ export async function runGitRemote(
   timeoutMs?: number,
   env?: Record<string, string | undefined>,
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-  return runGitShared(cwd, args, { englishProse: true, timeoutMs, ...(env ? { env } : {}) });
+  return runGitShared(cwd, args, { englishProse: true, timeoutMs, env });
 }
 
 /** Short branch name this branch pushes to, from tracking config; falls back to

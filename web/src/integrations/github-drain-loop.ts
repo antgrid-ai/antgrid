@@ -148,10 +148,11 @@ export async function drainGithubBacklog(
   }
 
   // Retention runs on every invocation rather than on a schedule of its own: it
-  // is one DELETE along the `[provider, processed_at]` index that removes
-  // nothing on a normal day, and it cannot contend with the drain, which claims
-  // only rows whose `processed_at` is null. A second scheduler entry buys
-  // nothing and is one more thing to forget when the job moves.
+  // is one UPDATE along the `[provider, payload_purged_at, processed_at]`
+  // index that touches only rows not yet purged, and it cannot contend with the
+  // drain, which claims only rows whose `processed_at` is null. A second
+  // scheduler entry buys nothing and is one more thing to forget when the job
+  // moves.
   //
   // It is retention over APPLIED rows and nothing else, by construction:
   // `purgeProcessedWebhookEvents` matches `processed_at IS NOT NULL`. The

@@ -3,7 +3,14 @@
 
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from "bun:test";
 import { startTestPg, type PgHandle } from "../helpers/pg.js";
-import { createTestUser, createTestSubscription, addTestMember } from "../helpers/fixtures.js";
+import {
+  createTestUser,
+  createTestSubscription,
+  addTestMember,
+  createTestIntegrationRepo,
+  linkTestTaskToRepo,
+  createLinkedTestTask,
+} from "../helpers/fixtures.js";
 import {
   createTask,
   getTaskByNumber,
@@ -20,7 +27,6 @@ import {
   getOrCreateLabel,
   setTaskLabels,
 } from "../../src/models/label.js";
-import { upsertIntegration, upsertIntegrationRepo } from "../../src/models/integration.js";
 
 let pg: PgHandle;
 beforeAll(async () => {
@@ -511,66 +517,17 @@ describe("ordering", () => {
  * its own rather than through one happy path.
  */
 describe("sync ops", () => {
-  let installations = 0;
-
-  type Repo = { integrationId: string; repoId: string };
-
-  async function makeRepo(account: Account, pushEnabled: boolean): Promise<Repo> {
-    const n = ++installations;
-    const integration = await upsertIntegration(pg.db, {
-      accountId: account.accountId,
-      provider: "github",
-      externalAccountId: `org-${n}`,
-      installationId: `${n}`,
-      displayName: "acme",
-      installedBy: account.userId,
-    });
-    if (integration.kind !== "ok") throw new Error(`upsertIntegration: ${integration.kind}`);
-    const repo = await upsertIntegrationRepo(pg.db, {
-      accountId: account.accountId,
-      integrationId: integration.integration.id,
-      repoKey: `github.com/acme/repo-${n}`,
-      externalRepoId: `${n}`,
-      visibility: "private",
-      syncEnabled: true,
-      pushEnabled,
-    });
-    if (repo.kind !== "ok") throw new Error(`upsertIntegrationRepo: ${repo.kind}`);
-    return { integrationId: integration.integration.id, repoId: repo.repo.id };
-  }
-
-  /** What the inbound importer leaves on a task it linked — the external
-   *  columns plus the repository the issue lives in. */
-  async function link(taskId: string, repo: Repo, syncState = "synced"): Promise<void> {
-    await pg.db.task.update({
-      where: { id: taskId },
-      data: {
-        integrationRepoId: repo.repoId,
-        externalProvider: "github",
-        externalId: crypto.randomUUID(),
-        externalKey: "acme/repo#1",
-        syncState,
-      },
-    });
-  }
-
-  async function linkedTask(
+  // Thin, file-local names over the shared fixtures (`tests/helpers/fixtures.js`)
+  // so the many call sites below read the same as before the move.
+  const makeRepo = (account: Account, pushEnabled: boolean) =>
+    createTestIntegrationRepo(pg.db, account, pushEnabled);
+  const link = (taskId: string, repo: { integrationId: string; repoId: string }, syncState = "synced") =>
+    linkTestTaskToRepo(pg.db, taskId, repo, syncState);
+  const linkedTask = (
     account: Account,
     pushEnabled: boolean,
     args: { title?: string; body?: string; status?: TaskStatus } = {}
-  ) {
-    const repo = await makeRepo(account, pushEnabled);
-    const created = ok(
-      await createTask(pg.db, {
-        ...owner(account),
-        title: args.title ?? "linked",
-        body: args.body,
-        status: args.status,
-      })
-    ).task;
-    await link(created.id, repo);
-    return { task: created, repo };
-  }
+  ) => createLinkedTestTask(pg.db, account, pushEnabled, args);
 
   async function ops(taskId: string) {
     return pg.db.taskSyncOp.findMany({ where: { taskId }, orderBy: { seq: "asc" } });

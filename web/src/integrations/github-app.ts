@@ -499,16 +499,16 @@ export function createGithubAppClient(opts: {
       org: string
     ): Promise<{ state: string; role: string } | null> {
       const endpoint = `/user/memberships/orgs/${encodeURIComponent(org)}`;
-      const res = await send(endpoint, `${API_BASE}${endpoint}`, {
-        method: "GET",
-        headers: apiHeaders(`Bearer ${userToken}`),
-      });
-      // A non-member is a normal answer, not a failure: the caller reads it as
-      // "does not administer" the same as an explicit non-admin role would.
-      if (res.status === 404) return null;
-      if (!res.ok) throw new GithubApiError(statusFailure(res.status), endpoint, res.status, "failed");
-      const body = await decode(OrgMembershipSchema, res, endpoint);
-      return { state: body.state, role: body.role };
+      try {
+        const body = await apiGet(OrgMembershipSchema, endpoint, `Bearer ${userToken}`);
+        return { state: body.state, role: body.role };
+      } catch (err) {
+        // A non-member is a normal answer, not a failure: the caller reads it
+        // as "does not administer" the same as an explicit non-admin role
+        // would.
+        if (err instanceof GithubApiError && err.status === 404) return null;
+        throw err;
+      }
     },
 
     async getInstallation(installationId: string): Promise<GithubInstallationAccount> {

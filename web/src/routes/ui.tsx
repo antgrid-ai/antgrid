@@ -88,6 +88,7 @@ import {
   findActiveMembership,
   isBillingAccountOwner,
   listActiveMembers,
+  resolveBillingAccountAccess,
   resolveBillingAccountId,
 } from "../models/account-member.js";
 import type { SendEmail } from "../auth/email.js";
@@ -1059,25 +1060,25 @@ export function uiRoutes(deps: {
   });
 
   /**
-   * The actual sign-out `requireMatchingAccount` used to perform on a bare
-   * GET. Reachable only as a POST, so the router's same-origin check above
-   * gates it — a cross-site page can navigate a browser to a GET, but cannot
-   * submit a cross-origin POST past that check.
+   * The sign-out `requireMatchingAccount` redirects to on a mismatch. Reachable
+   * only as a POST, so the router's same-origin check above gates it — a
+   * cross-site page can navigate a browser to a GET, but cannot submit a
+   * cross-origin POST past that check.
    */
   r.post("/ui/integrations/switch-account", async (c) => {
     const form = await c.req.formData();
     const asEmail = String(form.get("asEmail") ?? "");
     const res = await deps.auth.api.signOut({ headers: c.req.raw.headers, asResponse: true });
-    for (const sc of res.headers.getSetCookie()) {
-      c.header("set-cookie", sc, { append: true });
-    }
+    forwardSetCookies(c, res);
     // `error`, not `notice`: LoginPage renders `notice` in success (green)
     // styling, which reads wrong for "you were signed out and need to try
     // again" — `error` is the tone Login already uses for that.
     const message =
       "This browser was signed in to a different Antgrid account. Sign in again to continue.";
-    const emailParam = asEmail ? `&email=${encodeURIComponent(asEmail)}` : "";
-    return c.redirect(`/login?error=${encodeURIComponent(message)}${emailParam}`);
+    return redirectWith(c, "/login", {
+      error: message,
+      ...(asEmail ? { email: asEmail } : {}),
+    });
   });
 
   r.post("/ui/subscription/cancel", requireUserOrRedirect({ auth: deps.auth }), async (c) => {
@@ -1919,6 +1920,19 @@ export function uiRoutes(deps: {
   });
 
   /**
+   * Where `requireMatchingAccount` sends a mismatched browser — a GET, so
+   * loading it has no effect; the sign-out it offers only happens behind the
+   * POST form's own request, `/ui/integrations/switch-account` above.
+   */
+  r.get("/integrations/switch-account", requireUserOrRedirect({ auth: deps.auth }), (c) => {
+    const asEmail = c.req.query("asEmail");
+    if (!asEmail) return c.redirect("/integrations");
+    return c.html(
+      <SwitchAccountPage currentEmail={c.get("userEmail")} expectedEmail={asEmail} />
+    );
+  });
+
+  /**
    * Where the browser goes to start an install.
    *
    * Our own route rather than a link straight to github.com, because the CSRF
@@ -1934,19 +1948,6 @@ export function uiRoutes(deps: {
    * browser signed in as a different Antgrid account would bind the
    * installation to itself instead.
    */
-  /**
-   * Where `requireMatchingAccount` sends a mismatched browser — a GET, so
-   * loading it has no effect; the sign-out it offers only happens behind the
-   * POST form's own request, `/ui/integrations/switch-account` below.
-   */
-  r.get("/integrations/switch-account", requireUserOrRedirect({ auth: deps.auth }), (c) => {
-    const asEmail = c.req.query("asEmail");
-    if (!asEmail) return c.redirect("/integrations");
-    return c.html(
-      <SwitchAccountPage currentEmail={c.get("userEmail")} expectedEmail={asEmail} />
-    );
-  });
-
   r.get(
     "/integrations/connect",
     requireUserOrRedirect({ auth: deps.auth }),
@@ -1999,7 +2000,8 @@ export function uiRoutes(deps: {
     // state cookie, so this is defense in depth against reaching the bind
     // directly — but it is the check that actually matters: this handler, not
     // that one, is what calls `completeGithubInstall`.
-    if (!(await isBillingAccountOwner(deps.db, userId))) return done("not_owner");
+    const access = await resolveBillingAccountAccess(deps.db, userId);
+    if (!access.isOwner) return done("not_owner");
 
     // A member who cannot install the App on an org asks its owners instead;
     // GitHub sends them back here with no installation and nothing to bind.
@@ -2009,9 +2011,10 @@ export function uiRoutes(deps: {
     const code = c.req.query("code");
     if (!installationId || !code) return done("code_rejected");
 
-    await provisionProductAccountForUser(deps.db, userId);
-    const accountId = await resolveBillingAccountId(deps.db, userId);
-    if (!accountId) return c.redirect("/login");
+    // Re-read from the provisioning call rather than `access.accountId`: for a
+    // first-time personal account, provisioning is what creates the row the
+    // earlier membership lookup found nothing for.
+    const { id: accountId } = await provisionProductAccountForUser(deps.db, userId);
 
     const directory = installDirectory(createGithubAppClient({ config }));
     const result = await completeGithubInstall(deps.db, directory, {
@@ -2085,7 +2088,8 @@ export function uiRoutes(deps: {
    */
   r.post("/ui/integrations/repos/:id/sync", requireUser({ auth: deps.auth }), async (c) => {
     const userId = c.get("userId");
-    const accountId = await resolveBillingAccountId(deps.db, userId);
+    const access = await resolveBillingAccountAccess(deps.db, userId);
+    const accountId = access.accountId;
     if (!accountId) return c.text("Forbidden", 403);
 
     const repoId = c.req.param("id");
@@ -2113,8 +2117,8 @@ export function uiRoutes(deps: {
     // import copies a private repository's content to everyone on the account
     // — both are account-wide commitments the billing routes gate the same way,
     // not a per-repository preference a member should be able to flip alone.
-    const isOwner = await isBillingAccountOwner(deps.db, userId);
-    const readOnly = !isOwner || integration?.status === IntegrationStatusSchema.enum.revoked;
+    const readOnly =
+      !access.isOwner || integration?.status === IntegrationStatusSchema.enum.revoked;
     // Two states the page freezes and the route must freeze again: a connection
     // that routes nothing, and a repository GitHub no longer lists. Turning sync
     // on for either promises an import that cannot run.

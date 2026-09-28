@@ -183,11 +183,9 @@ export async function publishTaskInTx(
 ): Promise<void> {
   const { taskId, target, fields } = args;
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`tasksync:${taskId}`}))`;
-  // Any create — attempted or not — is spared: the `enqueueSyncOp` call below
-  // supersedes an un-attempted one in place, and an attempted one with an
-  // unknown outcome is left for `apply-op.ts`'s cross-installation guard to
-  // retire once the drain reaches it, since this publish may target a
-  // different repository than the one it was queued under.
+  // Any create — attempted or not — is spared: `enqueueSyncOp` below
+  // supersedes an un-attempted one in place, and an attempted one is left for
+  // `apply-op.ts` to retire — see `CancelPendingOpsResult.keptCreate`.
   await cancelPendingOps(tx, taskId, { spareCreates: true });
 
   await tx.task.update({

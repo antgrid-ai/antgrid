@@ -158,9 +158,8 @@ export async function drainGithubWebhooks(
     WHERE provider = ${GITHUB_PROVIDER}
       AND processed_at IS NULL
       AND attempts < ${MAX_WEBHOOK_ATTEMPTS}
-      -- A prior failure's backoff lease; without it a failing row was
-      -- reclaimed on the very next pass and burned the attempt ceiling in
-      -- milliseconds rather than over any real spread of time.
+      -- A prior failure's backoff lease — see recordDeliveryFailure in
+      -- webhook-events.ts for why it exists.
       AND next_attempt_at <= now()
       AND type IN (${Prisma.join([...GITHUB_HANDLED_EVENTS])})
     ORDER BY received_at ASC
@@ -718,7 +717,7 @@ async function mergeImportedTask(
   // it already merged. Applying it regardless would revert the task and, absent
   // a later delivery to correct it, leave it reverted for good. Only a
   // provably-older pair is refused: an unparseable timestamp on either side is
-  // "unknown", not "stale", and is let through exactly as before.
+  // "unknown", not "stale", and the delivery is applied rather than dropped.
   if (
     row.remoteUpdatedAt !== null &&
     context.remoteUpdatedAt !== null &&

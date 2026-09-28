@@ -704,29 +704,15 @@ final fileTreeStateProvider = StreamProvider<FileTreeState>((ref) {
   // See provider_retry.dart.
 }, retry: noProviderRetry);
 
-/// [fileTreeStateProvider] for an EXPLICIT checkout of the focused project,
-/// rather than whichever checkout is currently on screen.
-///
-/// What the task detail view's Changes section watches: a task's own session
-/// is rarely the checkout the Git tab happens to have open (or the Git tab
-/// may not even be the visible workspace view), so it needs the tree for its
-/// OWN checkout id on demand. No prefs binding here — that binding is for the
-/// focused checkout's persisted UI state (expanded paths, selection), which
-/// this read-only summary has none of.
-final checkoutFileTreeStateProvider =
-    StreamProvider.family<FileTreeState, String>((ref, checkoutId) {
-      final session = focusedSessionOrNull(ref);
-      if (session == null) return const Stream<FileTreeState>.empty();
-      final service = session.servicesForCheckout(checkoutId).fileService;
-      return seededStream(() => service.currentState, service.stateStream);
-    }, retry: noProviderRetry);
-
-/// [checkoutFileTreeStateProvider] for an EXPLICIT project too, not just an
-/// explicit checkout — the task detail view's Changes section reads a task's
-/// OWN checkout, which is rarely the focused project [checkoutFileTreeStateProvider]
-/// resolves against (see [checkoutServiceOrNull], the `.read` equivalent this
-/// mirrors for a reactive `.watch`).
-final taskCheckoutFileTreeStateProvider = StreamProvider.family<
+/// [fileTreeStateProvider] for an EXPLICIT project and checkout — what the
+/// task detail view's Changes section watches, since a task's own checkout is
+/// rarely the focused project's on-screen one (see [checkoutServiceOrNull],
+/// the `.read` equivalent this mirrors for a reactive `.watch`). No prefs
+/// binding here — that binding is for the focused checkout's persisted UI
+/// state (expanded paths, selection), which this read-only summary has none
+/// of. `autoDispose` so a task's entry is released once its detail view
+/// closes rather than staying warm for every checkout ever viewed.
+final taskCheckoutFileTreeStateProvider = StreamProvider.autoDispose.family<
   FileTreeState,
   ({String registrationId, String checkoutId})
 >((ref, key) {

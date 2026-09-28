@@ -111,8 +111,10 @@ function splitRemote(url: string): { host: string; port: string; path: string } 
   const authority = url.slice(0, colon);
   // A Windows drive letter is a local path, not a host.
   if (authority.length === 1) return null;
-  const at = authority.lastIndexOf("@");
-  return { host: at >= 0 ? authority.slice(at + 1) : authority, port: "", path: url.slice(colon + 1) };
+  // No colon of its own to give splitHostPort a port to find (the first colon
+  // in the whole URL is the one just consumed above), so this only strips the
+  // user@ prefix.
+  return { ...splitHostPort(authority), path: url.slice(colon + 1) };
 }
 
 function splitHostPort(authority: string): { host: string; port: string } {

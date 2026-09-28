@@ -33,26 +33,25 @@ enum TaskStatus {
   /// Never matches [unknown]'s placeholder wire value — that variant exists to
   /// be assigned by [Task.fromJson] on a lookup miss, not to be looked up into.
   static TaskStatus? fromWire(Object? raw) {
-    for (final s in TaskStatus.values) {
-      if (s != TaskStatus.unknown && s.wire == raw) return s;
+    for (final s in selectable) {
+      if (s.wire == raw) return s;
     }
     return null;
   }
 
   /// Every status a person may choose from — pickers and filter chips iterate
   /// this instead of [values] so [unknown] can never be selected or set.
-  static const List<TaskStatus> selectable = [
-    open,
-    inProgress,
-    blocked,
-    done,
-    cancelled,
-  ];
+  static Iterable<TaskStatus> get selectable =>
+      values.where((s) => s != unknown);
 
   /// The two statuses that close a task. The server derives `closedAt` from
   /// this same split, so a client filter that disagrees would show a "not done"
   /// task carrying a close date.
   bool get isClosed => this == TaskStatus.done || this == TaskStatus.cancelled;
+
+  /// Neither closed nor [unknown] — a status this client can honestly count
+  /// toward an "open" total (see [unknown]'s own doc).
+  bool get isOpen => !isClosed && this != unknown;
 }
 
 /// Null until the task is linked to a provider issue. `unlinked` is a

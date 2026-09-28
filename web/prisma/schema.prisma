@@ -223,17 +223,25 @@ model WebhookEvent {
   processedAt     DateTime? @map("processed_at") @db.Timestamptz(6)
   attempts        Int       @default(0)
   lastError       String?   @map("last_error")
-  /// Exponential-backoff lease, mirroring `task_sync_ops.next_attempt_at`: a
-  /// failure pushes this forward instead of leaving the row claimable on the
-  /// very next drain pass, which is what let a persistently failing row burn
-  /// `MAX_WEBHOOK_ATTEMPTS` inside one invocation's first few passes.
+  /// Backoff lease; the base/ceiling constants live with
+  /// `SYNC_OP_BACKOFF_BASE_SECONDS`/`_MAX_SECONDS` in `tasks/sync-op.ts`,
+  /// which this column's writer imports rather than restates.
   nextAttemptAt   DateTime  @default(now()) @map("next_attempt_at") @db.Timestamptz(6)
+  /// Set when `payload` is retired to the purge marker. Null for every row not
+  /// yet purged, which is what lets the purge query find its own remaining
+  /// work through an index instead of re-scanning rows it already cleared.
+  payloadPurgedAt DateTime? @map("payload_purged_at") @db.Timestamptz(6)
 
   @@unique([provider, providerEventId], map: "webhook_events_provider_event_key")
   /// The drain reads `WHERE provider = ? AND processed_at IS NULL`, and this
   /// table is on course to be the largest in the database once a busy repo is
   /// connected — a sequential scan per poll is not a starting position.
   @@index([provider, processedAt], map: "webhook_events_provider_processed_idx")
+  /// The purge's own working set: unpurged rows for one provider, ordered by
+  /// how they age past the retention cutoff. Without it the purge revisits
+  /// every already-purged row in the processed range on every tick, which only
+  /// grows as retention keeps more of them below the cutoff.
+  @@index([provider, payloadPurgedAt, processedAt], map: "webhook_events_provider_purge_idx")
   @@map("webhook_events")
 }
 

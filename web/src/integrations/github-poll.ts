@@ -451,8 +451,8 @@ async function walkRepo(
   // because the next request asks for it directly instead of assuming it
   // still sits at a particular numeric offset. `page` only keeps climbing when
   // the floor could NOT be trusted to move (`cursorBlocked`, or a page that
-  // moved nothing) — the same page-number fallback this walk always used, now
-  // scoped to just that narrower, already-accepted edge case.
+  // moved nothing) — an ordinary page-number fallback, scoped to just that
+  // narrower, already-accepted edge case.
   let pageSince = since;
   let apiPage = 1;
 
@@ -522,8 +522,8 @@ async function walkRepo(
     // Re-anchor the next request's floor to what this page actually proved,
     // rather than trusting a numeric page offset against a query GitHub
     // re-evaluates live (see the comment above the loop). Falls back to the
-    // old page-number walk, still bounded by `iteration`, whenever the floor
-    // did not move — a blocked cursor, or a page that touched nothing newer.
+    // page-number walk, still bounded by `iteration`, whenever the floor did
+    // not move — a blocked cursor, or a page that touched nothing newer.
     const pageMovedFloor =
       !cursorBlocked && cursor !== null && (cursorBeforePage === null || cursor > cursorBeforePage);
     if (pageMovedFloor) {

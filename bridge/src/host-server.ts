@@ -2245,10 +2245,8 @@ export class HostServer {
     if (existing) {
       existing.lastFocusedMs = this.tick();
       this.touchSeenProject(projectId);
-      // startCore() only reports once, at open time — a project warmed before
-      // credentials existed (not signed in yet, or a swallowed mint failure)
-      // would otherwise never bind. A reopen is the cheapest re-trigger: the
-      // reporter's own memo makes an already-bound project a no-op.
+      // Cheapest re-trigger for a project that warmed before credentials
+      // existed — see reportBinding.
       this.reportBinding(projectId, existing.path);
       return this.resultFor(existing);
     }
@@ -2371,11 +2369,7 @@ export class HostServer {
     // The one place the repository identity and the resolved checkout path are
     // both settled, so it is where the account learns the pair. Fire-and-forget
     // for the same reason the flush above is best-effort.
-    this.bindingReporter.report({
-      localProjectId: projectId,
-      localPath: projectPath,
-      repoKey: seenRepoKey,
-    });
+    this.reportBinding(projectId, entry.path);
     // Push the newly-warm project to the connected phone NOW — without this,
     // a project opened from the desktop reaches the phone only when its first
     // work-status transition happens to re-advertise (i.e. late or never).
@@ -2415,19 +2409,15 @@ export class HostServer {
     // reads controlPlaneRelay lazily at each re-mint. A LICENSE_EXPIRED stop keeps
     // maintenance re-minting; the first fresh mint redials the stopped socket. The
     // `?.` no-ops before the client exists and after a real revoke.
-    // Also re-offers every warm core's binding: a re-mint is credentials
-    // becoming available again exactly as the FIRST mint below is, and a
-    // project that warmed with accountCredentials() still null only ever
-    // reports once, at its own open().
+    // Also re-offers every warm core's binding — see reportAllBindings.
     const onMinted = () => {
       this.controlPlaneRelay?.redialWithFreshToken();
       this.reportAllBindings();
     };
     const promise = (async () => {
       this.remoteRuntime = await build(cfg, onMinted);
-      // onMinted fires on every RE-mint but never this initial one — this is
-      // the first moment accountCredentials() can answer non-null, so it gets
-      // the same re-offer.
+      // onMinted fires on every RE-mint but never this initial one, so the
+      // first mint needs its own call here.
       this.reportAllBindings();
       return this.remoteRuntime;
     })();

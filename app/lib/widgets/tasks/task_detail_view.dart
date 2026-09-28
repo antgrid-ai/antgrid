@@ -656,10 +656,10 @@ class _LoadedState extends ConsumerState<_Loaded> {
     // A task filed against a project must never fall back to "whichever project
     // is focused" just because the account's project list has not arrived: the
     // session would start in the wrong repository, silently.
-    final projectUnknown = resolution.blocksLaunch && !_task.status.isClosed;
+    final projectUnknown = resolution.blocksLaunch && _task.status.isOpen;
     // Neither a local folder nor a project on an open machine is this repo.
     final projectMissing =
-        source != null && !source.reachable && !_task.status.isClosed;
+        source != null && !source.reachable && _task.status.isOpen;
     // The task's own repo is reachable — here or on another machine — but is
     // not the focused project: Start focuses it first rather than refusing, or
     // worse, launching into whichever unrelated project happens to be focused.
@@ -667,7 +667,7 @@ class _LoadedState extends ConsumerState<_Loaded> {
     final needsFocus =
         targets.isNotEmpty &&
         !targets.contains(ref.watch(selectedRegistrationIdProvider)) &&
-        !_task.status.isClosed;
+        _task.status.isOpen;
     final blockedReason = projectUnknown
         ? (resolution.phase == TaskProjectPhase.loading
               ? 'Loading this task’s project…'

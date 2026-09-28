@@ -42,6 +42,27 @@ void main() {
     test('is not counted as closed', () {
       expect(TaskStatus.unknown.isClosed, isFalse);
     });
+
+    // Neither claim ("open" nor "closed") is one this client can honestly
+    // make about a status it does not understand.
+    test('is not counted as open either', () {
+      expect(TaskStatus.unknown.isOpen, isFalse);
+    });
+  });
+
+  group('TaskStatus.isOpen', () {
+    test('is every selectable status except the two that close a task', () {
+      expect(
+        TaskStatus.selectable.where((s) => s.isOpen),
+        containsAll([
+          TaskStatus.open,
+          TaskStatus.inProgress,
+          TaskStatus.blocked,
+        ]),
+      );
+      expect(TaskStatus.done.isOpen, isFalse);
+      expect(TaskStatus.cancelled.isOpen, isFalse);
+    });
   });
 
   group('Task.fromJson', () {

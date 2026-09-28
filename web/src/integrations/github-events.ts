@@ -108,6 +108,21 @@ const GithubRepoRefSchema = z
 export type GithubRepoRef = z.infer<typeof GithubRepoRefSchema>;
 
 /**
+ * Every key used anywhere below to tell one handled event's payload from
+ * another's — `distinctEventShape` forbids whichever of these a schema does
+ * not itself declare. `action` and `installation` are deliberately absent:
+ * every handled event carries both, so neither discriminates anything.
+ */
+const DISCRIMINATING_EVENT_KEYS = [
+  "repository",
+  "issue",
+  "comment",
+  "repositories",
+  "repositories_added",
+  "repositories_removed",
+] as const;
+
+/**
  * Rejects a body carrying a key that belongs to a DIFFERENT handled event's
  * shape.
  *
@@ -120,13 +135,14 @@ export type GithubRepoRef = z.infer<typeof GithubRepoRefSchema>;
  * against `InstallationEventSchema` and reach `applyInstallation`'s
  * `"deleted"` case — revoking the whole integration from a payload that was
  * never an installation event. Each handled event's schema therefore forbids
- * every key another handled event's payload carries and this one's does not,
- * so a body shaped for one event can only ever validate as itself.
+ * every key from `DISCRIMINATING_EVENT_KEYS` that its own shape does not
+ * declare, so a body shaped for one event can only ever validate as itself —
+ * and a schema that grows a new discriminating field closes the gap against
+ * every other handled event without anyone updating a second list by hand.
  */
-function distinctEventShape<T extends z.ZodObject<z.ZodRawShape>>(
-  schema: T,
-  foreignKeys: readonly string[]
-): T {
+function distinctEventShape<T extends z.ZodObject<z.ZodRawShape>>(schema: T): T {
+  const ownKeys = new Set(Object.keys(schema.shape));
+  const foreignKeys = DISCRIMINATING_EVENT_KEYS.filter((key) => !ownKeys.has(key));
   // zod v4 attaches a `.refine` check in place rather than wrapping the
   // schema in a distinct type, so the return type is still `T` — annotating
   // it as a fresh `z.ZodType<z.infer<T>>` does not typecheck, since TS cannot
@@ -155,8 +171,7 @@ export const InstallationEventSchema = distinctEventShape(
         .loose(),
       repositories: z.array(GithubRepoRefSchema).max(1000).optional(),
     })
-    .loose(),
-  ["repository", "issue", "comment", "repositories_added", "repositories_removed"]
+    .loose()
 );
 
 export const InstallationRepositoriesEventSchema = distinctEventShape(
@@ -167,8 +182,7 @@ export const InstallationRepositoriesEventSchema = distinctEventShape(
       repositories_added: z.array(GithubRepoRefSchema).max(1000).optional(),
       repositories_removed: z.array(GithubRepoRefSchema).max(1000).optional(),
     })
-    .loose(),
-  ["repository", "issue", "comment", "repositories"]
+    .loose()
 );
 
 export const RepositoryEventSchema = distinctEventShape(
@@ -178,8 +192,7 @@ export const RepositoryEventSchema = distinctEventShape(
       installation: z.object({ id: ExternalIdSchema }).loose(),
       repository: GithubRepoRefSchema,
     })
-    .loose(),
-  ["issue", "comment", "repositories", "repositories_added", "repositories_removed"]
+    .loose()
 );
 
 /** A provider identity we snapshot but never resolve to an account member —
@@ -256,8 +269,7 @@ export const IssuesEventSchema = distinctEventShape(
       repository: GithubRepoRefSchema,
       issue: GithubIssueSchema,
     })
-    .loose(),
-  ["comment", "repositories", "repositories_added", "repositories_removed"]
+    .loose()
 );
 
 export const IssueCommentEventSchema = distinctEventShape(
@@ -269,8 +281,7 @@ export const IssueCommentEventSchema = distinctEventShape(
       issue: GithubIssueSchema,
       comment: GithubIssueCommentSchema,
     })
-    .loose(),
-  ["repositories", "repositories_added", "repositories_removed"]
+    .loose()
 );
 
 /**
