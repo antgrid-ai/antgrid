@@ -785,7 +785,10 @@ class _GitHistorySectionHeader extends StatelessWidget {
                 onTap: toggle,
                 child: Row(
                   children: [
-                    if (toggle != null) AbDisclosureChevron(expanded: !collapsed),
+                    if (toggle != null) ...[
+                      AbDisclosureChevron(expanded: !collapsed),
+                      const SizedBox(width: AbListRow.leadingGap),
+                    ],
                     Expanded(
                       child: Text(
                         'History',
@@ -1767,18 +1770,31 @@ class _CommitHeaderRow extends StatelessWidget {
             message: commit.subject,
             child: Text(commit.subject),
           ),
+          // Author and time share one Expanded, not a Flexible beside a Spacer:
+          // two flex children split the free space evenly, the author leaves
+          // its half unused, and the sha landed mid-row at a spot set by the
+          // author's name length rather than at the edge.
           subtitle: Row(
             children: [
-              Flexible(
-                child: Text(commit.authorName, overflow: TextOverflow.ellipsis),
-              ),
-              const SizedBox(width: AbTokens.space6),
-              if (when != null)
-                AbTooltip(
-                  message: absoluteTime(when),
-                  child: Text(relativeTime(when)),
+              Expanded(
+                child: Row(
+                  children: [
+                    Flexible(
+                      child: Text(
+                        commit.authorName,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    const SizedBox(width: AbTokens.space6),
+                    if (when != null)
+                      AbTooltip(
+                        message: absoluteTime(when),
+                        child: Text(relativeTime(when)),
+                      ),
+                  ],
                 ),
-              const Spacer(),
+              ),
+              const SizedBox(width: AbTokens.space8),
               Text(
                 commit.shortSha,
                 style: AbTokens.monoStyle(
