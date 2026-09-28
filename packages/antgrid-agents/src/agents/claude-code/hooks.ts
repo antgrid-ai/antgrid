@@ -44,7 +44,16 @@ function materializeClaudePlugin(
       // A turn that died on a provider fault fires StopFailure INSTEAD of Stop,
       // so without this an armed Handler sees nothing for the whole limit window.
       StopFailure: [{ hooks: [claudeHook(command, "stop-failure")] }],
-      Notification: [{ hooks: [claudeHook(command, "notification")] }],
+      // Claude matches a Notification hook's `matcher` against `notification_type`
+      // (its own hook metadata says so), so this is what keeps the hook process
+      // from spawning for the types `toPosts` below throws away — an installed
+      // CLI old enough to send no type at all ignores the matcher and sends
+      // every Notification regardless, which is why `toPosts` still has to keep
+      // its no-type fallback rather than trusting this to gate them. The two
+      // elicitation types are included because the CLI's own dialog registry
+      // classes them a session-level block (`waitingFor: "input needed"`), same
+      // as a permission prompt, not a background event.
+      Notification: [{ matcher: "permission_prompt|idle_prompt|elicitation_dialog|elicitation_url_dialog", hooks: [claudeHook(command, "notification")] }],
       // The trio that makes a terminal session's own question visible. The
       // `matcher` is a RegEx over the tool name, so all three run for this one
       // tool and nothing else. The post hooks are not decoration: they carry the
@@ -374,59 +383,68 @@ export async function toPosts(
     });
   }
   if (invocation.event === "notification") {
-    // Three states reach this one hook: a live permission prompt, the generic
-    // post-completion idle nudge, and a question — Claude renders
-    // AskUserQuestion through its permission dialog, so that one arrives here
-    // wearing the permission prompt's clothes. `notification_type` separates
-    // the first two exactly; nothing here can single out the third, which is
-    // why the question has a producer of its own above.
+    // A present `notification_type` is the CLI naming the event; only some of
+    // those names are THIS session's own turn stalling on the user, and words
+    // in `message` cannot recover that distinction (a background agent's own
+    // completion reads as "<label> finished", not visibly different in shape
+    // from a real block). A type outside the allow-list is silence, not a
+    // guess. AskUserQuestion wears the permission prompt's clothes here too,
+    // but it has a producer of its own above and never reaches this
+    // classification.
     //
-    // The message-text test is the fallback for an installed CLI old enough to
-    // send no `notification_type` at all, and for any value added upstream:
-    // guessing from the words is worse than today's behaviour on neither.
-    const notificationType = input.notification_type ?? "";
-    const isWaitingNudge = notificationType === "idle_prompt" ? true
-      : notificationType === "permission_prompt" ? false
-      : !!input.message && /waiting/i.test(input.message);
-    // Only a block names a tool; the idle nudge is about the session, not about
-    // any one call, so asking it for one could only produce a false match.
-    const promptTool = isWaitingNudge ? undefined : permissionPromptTool(input.message);
-    if (terminalId) {
+    // The message-text fallback survives ONLY for a payload with no
+    // `notification_type` at all — an installed CLI old enough to predate the
+    // field, for which the words are the only signal there is.
+    const notificationType = input.notification_type;
+    const isWaitingNudge = notificationType == null
+      ? !!input.message && /waiting/i.test(input.message)
+      : notificationType === "idle_prompt" ? true
+      : notificationType === "permission_prompt"
+        || notificationType === "elicitation_dialog"
+        || notificationType === "elicitation_url_dialog" ? false
+      : undefined;
+    if (isWaitingNudge !== undefined) {
+      // Only a block names a tool; the idle nudge is about the session, not
+      // about any one call, so asking it for one could only produce a false
+      // match.
+      const promptTool = isWaitingNudge ? undefined : permissionPromptTool(input.message);
+      if (terminalId) {
+        posts.push({
+          port,
+          path: "/handler-event",
+          body: {
+            terminalId,
+            // Still "awaiting_input" for a live permission prompt, not
+            // "permission_request": the payload carries no tool_use_id, so an
+            // escalation raised from it would have no deterministic retirement
+            // signal — the very trap the question hooks exist to avoid.
+            agent: "claude",
+            event: "awaiting_input",
+            transcriptPath: input.transcript_path ?? "",
+            sessionId: input.session_id ?? "",
+            // The same reading the /notify below branches on, carried so the host's
+            // stale-nudge drop cannot classify as an idle nudge the very invocation
+            // it is about to record as a live block: this POST is decided before
+            // that one has folded into the reduction it reads.
+            idleNudge: isWaitingNudge,
+            // Carried on both posts of this invocation because the two routes ask
+            // the host the same question and must not be answered differently —
+            // and this body has no `message` of its own to re-read the tool from.
+            ...(promptTool ? { promptTool } : {}),
+          },
+        });
+      }
       posts.push({
         port,
-        path: "/handler-event",
+        path: "/notify",
         body: {
-          terminalId,
-          // Still "awaiting_input" for a live permission prompt, not
-          // "permission_request": the payload carries no tool_use_id, so an
-          // escalation raised from it would have no deterministic retirement
-          // signal — the very trap the question hooks exist to avoid.
-          agent: "claude",
-          event: "awaiting_input",
-          transcriptPath: input.transcript_path ?? "",
-          sessionId: input.session_id ?? "",
-          // The same reading the /notify below branches on, carried so the host's
-          // stale-nudge drop cannot classify as an idle nudge the very invocation
-          // it is about to record as a live block: this POST is decided before
-          // that one has folded into the reduction it reads.
-          idleNudge: isWaitingNudge,
-          // Carried on both posts of this invocation because the two routes ask
-          // the host the same question and must not be answered differently —
-          // and this body has no `message` of its own to re-read the tool from.
+          type: isWaitingNudge ? "awaiting_input" : "permission_request",
+          ...(terminalId ? { terminalId } : {}),
+          ...(input.message ? { message: input.message } : {}),
           ...(promptTool ? { promptTool } : {}),
         },
       });
     }
-    posts.push({
-      port,
-      path: "/notify",
-      body: {
-        type: isWaitingNudge ? "awaiting_input" : "permission_request",
-        ...(terminalId ? { terminalId } : {}),
-        ...(input.message ? { message: input.message } : {}),
-        ...(promptTool ? { promptTool } : {}),
-      },
-    });
   }
 
   return compact(posts);

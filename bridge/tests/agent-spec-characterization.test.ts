@@ -533,7 +533,7 @@ describe("materialized files", () => {
           SessionStart: [{ hooks: [hook("session-start")] }],
           Stop: [{ hooks: [hook("stop")] }],
           StopFailure: [{ hooks: [hook("stop-failure")] }],
-          Notification: [{ hooks: [hook("notification")] }],
+          Notification: [{ matcher: "permission_prompt|idle_prompt|elicitation_dialog|elicitation_url_dialog", hooks: [hook("notification")] }],
           PreToolUse: [{ matcher: "AskUserQuestion", hooks: [hook("question")] }],
           PostToolUse: [{ matcher: "AskUserQuestion", hooks: [hook("question-answered")] }],
           PostToolUseFailure: [{ matcher: "AskUserQuestion", hooks: [hook("question-answered")] }],

@@ -1,4 +1,7 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { PassThrough, Readable } from "node:stream";
 import {
   MAX_HOOK_STDIN_BYTES,
@@ -7,6 +10,10 @@ import {
   type HookPost,
 } from "../src/hook-runner";
 import { MAX_NOTIFICATION_BODY_LEN } from "../src/transcript-tail";
+import { augmentAgentLaunch } from "../src/agent-runtime";
+
+const pluginDirs: string[] = [];
+afterEach(() => { for (const d of pluginDirs.splice(0)) try { rmSync(d, { recursive: true, force: true }); } catch {} });
 
 function harness(opts: {
   agent: string;
@@ -424,19 +431,68 @@ describe("Claude hooks", () => {
     ]));
   });
 
-  test("a notification_type the CLI added falls back to the message", async () => {
-    // The fallback covers an installed CLI old enough to send no type at all
-    // (pinned by the two message-only cases above) AND a value added upstream,
-    // where guessing from the words is no worse than what shipped.
+  test.each(["elicitation_dialog", "elicitation_url_dialog"])(
+    "%s classifies as a block, same as a permission prompt",
+    async (notification_type) => {
+      // An MCP elicitation form/link stalls the main turn on the user exactly
+      // like a permission prompt does, so it must not fall through to silence.
+      const h = harness({
+        agent: "claude",
+        event: "notification",
+        stdin: JSON.stringify({ notification_type, message: "Claude Code needs your input" }),
+      });
+      await h.run();
+      expect(h.posts).toEqual(expect.arrayContaining([
+        { port: 43123, path: "/notify", body: { type: "permission_request", terminalId: "term-1", message: "Claude Code needs your input" } },
+        {
+          port: 43123,
+          path: "/handler-event",
+          body: {
+            terminalId: "term-1", agent: "claude", event: "awaiting_input",
+            transcriptPath: "", sessionId: "", idleNudge: false,
+          },
+        },
+      ]));
+    },
+  );
+
+  test("a notification_type the CLI added but does not classify posts nothing", async () => {
+    // A present type outside the allow-list is a real, named event — not a
+    // gap the message text should be asked to fill.
     const h = harness({
       agent: "claude",
       event: "notification",
       stdin: JSON.stringify({ notification_type: "agent_needs_input", message: "Claude is waiting for your input" }),
     });
     await h.run();
-    expect(h.posts).toEqual(expect.arrayContaining([
-      { port: 43123, path: "/notify", body: { type: "awaiting_input", terminalId: "term-1", message: "Claude is waiting for your input" } },
-    ]));
+    expect(h.posts).toEqual([]);
+  });
+
+  test("a background agent finishing posts nothing", async () => {
+    // A background agent's own completion is not this slot stalling; its
+    // message text ("<label> finished") must never be read as a block.
+    const h = harness({
+      agent: "claude",
+      event: "notification",
+      stdin: JSON.stringify({ notification_type: "agent_completed", message: "reviewer finished" }),
+    });
+    await h.run();
+    expect(h.posts).toEqual([]);
+  });
+
+  test("every other present notification_type posts nothing", async () => {
+    for (const notification_type of [
+      "worker_permission_prompt", "push_notification", "auth_success",
+      "elicitation_complete", "elicitation_response", "computer_use_exit",
+    ]) {
+      const h = harness({
+        agent: "claude",
+        event: "notification",
+        stdin: JSON.stringify({ notification_type, message: "anything at all" }),
+      });
+      await h.run();
+      expect(h.posts).toEqual([]);
+    }
   });
 
   test("an interrupted question reports the same completion as an answered one", async () => {
@@ -521,6 +577,23 @@ describe("Claude hooks", () => {
     });
     await reworded.run();
     for (const post of reworded.posts) expect(post.body).not.toHaveProperty("promptTool");
+  });
+
+  test("the Notification group is matched to only the types toPosts classifies", () => {
+    // Claude matches a Notification hook's `matcher` against `notification_type`,
+    // so this is the other half of the silence above: it keeps the hook process
+    // from spawning at all for a type `toPosts` throws away, rather than
+    // spawning it and posting nothing.
+    const abDir = mkdtempSync(join(tmpdir(), "ab-hookrunner-"));
+    pluginDirs.push(abDir);
+    const a = augmentAgentLaunch("claude-code", {
+      abDir,
+      self: { compiled: true, binary: "C:\\Program Files\\Antgrid\\antgrid-bridge.exe" },
+    });
+    const hooks = JSON.parse(readFileSync(join(a.args[1]!, "hooks", "hooks.json"), "utf8"));
+    expect(hooks.hooks.Notification[0].matcher).toBe(
+      "permission_prompt|idle_prompt|elicitation_dialog|elicitation_url_dialog",
+    );
   });
 });
 
