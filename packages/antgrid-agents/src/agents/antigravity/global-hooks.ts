@@ -55,23 +55,13 @@ export function antigravityScriptPath(directory: string): string {
  * the fix, so a spaced path is instead neutralized upstream — antigravityScriptPath
  * folds it to a space-free 8.3 short path on Windows (see spaceSafePath).
  */
-export function antigravityHookCommand(scriptPath: string, event: "PreInvocation" | "Stop" | "PreToolUse"): string {
+export function antigravityHookCommand(scriptPath: string, event: "PreInvocation" | "Stop"): string {
   return `node ${scriptPath} ${event}`;
 }
 
-// PreInvocation/Stop are FLAT (a bare handler-object array keys the event
-// directly); PreToolUse is GROUPED — agy requires a `matcher` wrapper for any
-// per-tool event (confirmed against the hooks.json doc bundled in the agy
-// binary itself: "For tool-specific events (PreToolUse, PostToolUse), you must
-// wrap the handlers in a group with a matcher regex"). The two shapes cannot be
-// unified, so the spec carries `matcher` only where it applies.
-export type AntigravityHookSpec =
-  | { event: "PreInvocation" | "Stop"; command: string }
-  | { event: "PreToolUse"; command: string; matcher: string };
-
-function canonicalHookEntry(spec: AntigravityHookSpec): unknown {
-  const handler: AntigravityCommandHook = { type: "command", command: spec.command, timeout: 5 };
-  return spec.event === "PreToolUse" ? [{ matcher: spec.matcher, hooks: [handler] }] : [handler];
+export interface AntigravityHookSpec {
+  event: "PreInvocation" | "Stop";
+  command: string;
 }
 
 /**
@@ -93,14 +83,45 @@ export function mergeAntigravityHookEntries(
     ? { ...existingGroup }
     : {};
   let changed = false;
-  for (const spec of specs) {
+  for (const { event, command } of specs) {
+    const existing: AntigravityCommandHook[] = Array.isArray(group[event]) ? group[event] : [];
+    if (existing.length === 1 && existing[0]?.type === "command"
+      && existing[0].command === command && existing[0].timeout === 5) continue;
     // Asset hashes change across upgrades; retaining old paths executes every version.
-    const entry = canonicalHookEntry(spec);
-    if (JSON.stringify(group[spec.event]) === JSON.stringify(entry)) continue;
-    group[spec.event] = entry;
+    group[event] = [{ type: "command", command, timeout: 5 }];
     changed = true;
   }
   if (!changed) return null;
   next[ANTIGRAVITY_HOOK_GROUP] = group;
   return next;
+}
+
+/**
+ * A withdrawn feature briefly shipped a `PreToolUse` entry under our own
+ * group (fires on every agy tool call and always answers `{"decision":"ask"}`,
+ * which turned into a phone push per tool). An install that already ran that
+ * build has it sitting in its global hooks.json with no code left to keep
+ * refreshing it, so the merge in ensureAntigravityHook can't undo it on its
+ * own — this strips it so those machines heal on their next launch. Matched
+ * by the command it ran (post-title.js), not just the key name, so a future
+ * legitimate PreToolUse entry under this group isn't silently eaten. Returns
+ * `null` if there is nothing to remove.
+ */
+export function stripLegacyAntigravityPreToolUseHook(data: any): any | null {
+  const group = data && typeof data === "object" && !Array.isArray(data) ? data[ANTIGRAVITY_HOOK_GROUP] : undefined;
+  if (!group || typeof group !== "object" || Array.isArray(group) || !("PreToolUse" in group)) return null;
+  if (!isOwnPreToolUseEntry(group.PreToolUse)) return null;
+  const { PreToolUse: _removed, ...restGroup } = group;
+  return { ...data, [ANTIGRAVITY_HOOK_GROUP]: restGroup };
+}
+
+// The withdrawn feature used agy's matcher/hooks group shape (required for any
+// per-tool event, unlike the flat PreInvocation/Stop arrays), so that's the
+// only shape checked here.
+function isOwnPreToolUseEntry(entry: unknown): boolean {
+  if (!Array.isArray(entry)) return false;
+  return entry.some((matcherGroup: any) =>
+    Array.isArray(matcherGroup?.hooks)
+    && matcherGroup.hooks.some((h: any) => typeof h?.command === "string" && h.command.includes("post-title.js")),
+  );
 }

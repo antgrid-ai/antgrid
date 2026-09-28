@@ -6,6 +6,7 @@ import {
   antigravityScriptPath,
   antigravityHookCommand,
   mergeAntigravityHookEntries,
+  stripLegacyAntigravityPreToolUseHook,
   ANTIGRAVITY_HOOK_GROUP,
 } from "../../packages/antgrid-agents/src/agents/antigravity/global-hooks";
 
@@ -43,17 +44,6 @@ test("mergeAntigravityHookEntries adds both entries under the named group on an 
   expect(JSON.stringify(merged)).not.toContain('"args"');
 });
 
-test("mergeAntigravityHookEntries wraps PreToolUse in the matcher/hooks group shape, unlike the flat PreInvocation/Stop arrays", () => {
-  const merged = mergeAntigravityHookEntries({}, [
-    { event: "PreToolUse", command: "node a.js PreToolUse", matcher: "*" },
-  ]);
-  expect(merged).toEqual({
-    [ANTIGRAVITY_HOOK_GROUP]: {
-      PreToolUse: [{ matcher: "*", hooks: [{ type: "command", command: "node a.js PreToolUse", timeout: 5 }] }],
-    },
-  });
-});
-
 test("mergeAntigravityHookEntries is idempotent and preserves other top-level groups", () => {
   const existing = {
     "some-other-plugin": { Stop: [{ type: "command", command: "echo mine", timeout: 5 }] },
@@ -76,14 +66,6 @@ test("mergeAntigravityHookEntries is idempotent and preserves other top-level gr
   expect(second).toBeNull(); // both entries already present, no-op
 });
 
-test("mergeAntigravityHookEntries treats a PreToolUse matcher change as a real diff, not a no-op", () => {
-  const spec = (matcher: string) => [{ event: "PreToolUse" as const, command: "node a.js PreToolUse", matcher }];
-  const first = mergeAntigravityHookEntries({}, spec("*"));
-  expect(mergeAntigravityHookEntries(first, spec("*"))).toBeNull(); // unchanged → no-op
-  const second = mergeAntigravityHookEntries(first, spec("run_command"));
-  expect(second[ANTIGRAVITY_HOOK_GROUP].PreToolUse[0].matcher).toBe("run_command");
-});
-
 test("asset upgrades replace accumulated managed hooks without mutating other groups", () => {
   const specs = (hash: string) => (["PreInvocation", "Stop"] as const).map((event) => ({
     event, command: antigravityHookCommand(`C:/agent-assets/${hash}/antigravity/post-title.js`, event),
@@ -98,4 +80,37 @@ test("asset upgrades replace accumulated managed hooks without mutating other gr
     expect(upgraded[ANTIGRAVITY_HOOK_GROUP][event]).toEqual([{ type: "command", command, timeout: 5 }]);
   }
   expect(mergeAntigravityHookEntries(upgraded, specs("new"))).toBeNull();
+});
+
+test("stripLegacyAntigravityPreToolUseHook removes a withdrawn PreToolUse entry installed by an earlier build", () => {
+  const installed = {
+    "some-other-plugin": { Stop: [{ type: "command", command: "echo mine", timeout: 5 }] },
+    [ANTIGRAVITY_HOOK_GROUP]: {
+      PreInvocation: [{ type: "command", command: "node C:/agent-assets/old/antigravity/post-title.js PreInvocation", timeout: 5 }],
+      Stop: [{ type: "command", command: "node C:/agent-assets/old/antigravity/post-title.js Stop", timeout: 5 }],
+      PreToolUse: [{
+        matcher: "*",
+        hooks: [{ type: "command", command: "node C:/agent-assets/old/antigravity/post-title.js PreToolUse", timeout: 5 }],
+      }],
+    },
+  };
+  const cleaned = stripLegacyAntigravityPreToolUseHook(installed);
+  expect(cleaned).not.toBeNull();
+  expect(cleaned[ANTIGRAVITY_HOOK_GROUP].PreToolUse).toBeUndefined();
+  expect(cleaned[ANTIGRAVITY_HOOK_GROUP].PreInvocation).toEqual(installed[ANTIGRAVITY_HOOK_GROUP].PreInvocation);
+  expect(cleaned["some-other-plugin"]).toEqual(installed["some-other-plugin"]);
+});
+
+test("stripLegacyAntigravityPreToolUseHook is a no-op with no PreToolUse entry, and never touches an unrelated group's own", () => {
+  expect(stripLegacyAntigravityPreToolUseHook({})).toBeNull();
+  const withoutOurs = { [ANTIGRAVITY_HOOK_GROUP]: { PreInvocation: [{ type: "command", command: "node a.js PreInvocation", timeout: 5 }] } };
+  expect(stripLegacyAntigravityPreToolUseHook(withoutOurs)).toBeNull();
+
+  // Same key, but not our command — never eaten by name alone.
+  const someoneElses = {
+    [ANTIGRAVITY_HOOK_GROUP]: {
+      PreToolUse: [{ matcher: "*", hooks: [{ type: "command", command: "node other-tool.js PreToolUse", timeout: 5 }] }],
+    },
+  };
+  expect(stripLegacyAntigravityPreToolUseHook(someoneElses)).toBeNull();
 });
