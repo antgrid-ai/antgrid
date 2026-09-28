@@ -14,19 +14,40 @@ enum TaskStatus {
   inProgress('in_progress', 'In progress'),
   blocked('blocked', 'Blocked'),
   done('done', 'Done'),
-  cancelled('cancelled', 'Cancelled');
+  cancelled('cancelled', 'Cancelled'),
+
+  /// A status this build does not recognize — the server's vocabulary can move
+  /// ahead of an installed client's. [Task.fromJson] falls back to this rather
+  /// than dropping the whole row, so an unrecognized status can never make a
+  /// task vanish from a list or fail a single-task read. Never offered as a
+  /// choice ([TaskStatus.selectable] excludes it) and never counted as open
+  /// (`openTaskCountProvider`), since neither claim is one this client can
+  /// honestly make about a status it does not understand.
+  unknown('', 'Unknown');
 
   const TaskStatus(this.wire, this.label);
 
   final String wire;
   final String label;
 
+  /// Never matches [unknown]'s placeholder wire value — that variant exists to
+  /// be assigned by [Task.fromJson] on a lookup miss, not to be looked up into.
   static TaskStatus? fromWire(Object? raw) {
     for (final s in TaskStatus.values) {
-      if (s.wire == raw) return s;
+      if (s != TaskStatus.unknown && s.wire == raw) return s;
     }
     return null;
   }
+
+  /// Every status a person may choose from — pickers and filter chips iterate
+  /// this instead of [values] so [unknown] can never be selected or set.
+  static const List<TaskStatus> selectable = [
+    open,
+    inProgress,
+    blocked,
+    done,
+    cancelled,
+  ];
 
   /// The two statuses that close a task. The server derives `closedAt` from
   /// this same split, so a client filter that disagrees would show a "not done"
@@ -423,8 +444,12 @@ class Task {
   static Task? fromJson(Object? raw) {
     if (raw is! Map) return null;
     final number = raw['number'];
-    final status = TaskStatus.fromWire(raw['status']);
-    if (number is! int || status == null) return null;
+    if (number is! int) return null;
+    // Never drop the row for a status this build doesn't recognize — the
+    // account service's vocabulary can move ahead of an installed client (see
+    // TaskStatus.unknown). A dropped row disappears from lists and throws
+    // `_task()` on a single-task read; falling back here does neither.
+    final status = TaskStatus.fromWire(raw['status']) ?? TaskStatus.unknown;
     return Task(
       number: number,
       title: raw['title'] is String ? raw['title'] as String : '',

@@ -33,10 +33,30 @@ void main() {
     });
   });
 
+  group('TaskStatus.unknown', () {
+    test('is never matched by fromWire and never offered as a choice', () {
+      expect(TaskStatus.fromWire(''), isNull);
+      expect(TaskStatus.selectable.contains(TaskStatus.unknown), isFalse);
+    });
+
+    test('is not counted as closed', () {
+      expect(TaskStatus.unknown.isClosed, isFalse);
+    });
+  });
+
   group('Task.fromJson', () {
-    test('refuses a payload with no number or an unknown status', () {
+    test('refuses a payload with no readable number', () {
       expect(Task.fromJson(_wire({'number': '14'})), isNull);
-      expect(Task.fromJson(_wire({'status': 'archived'})), isNull);
+    });
+
+    // The account service's status vocabulary can move ahead of an installed
+    // client's. Falling back — rather than refusing the whole row like the
+    // missing-number case above — is what keeps an unrecognized status from
+    // making a task vanish from a list or fail a single-task read.
+    test('an unrecognized status falls back to unknown, not a refusal', () {
+      final task = Task.fromJson(_wire({'status': 'archived'}));
+      expect(task, isNotNull);
+      expect(task!.status, TaskStatus.unknown);
     });
 
     test('keeps an external assignee unwritable', () {

@@ -721,6 +721,21 @@ final checkoutFileTreeStateProvider =
       return seededStream(() => service.currentState, service.stateStream);
     }, retry: noProviderRetry);
 
+/// [checkoutFileTreeStateProvider] for an EXPLICIT project too, not just an
+/// explicit checkout — the task detail view's Changes section reads a task's
+/// OWN checkout, which is rarely the focused project [checkoutFileTreeStateProvider]
+/// resolves against (see [checkoutServiceOrNull], the `.read` equivalent this
+/// mirrors for a reactive `.watch`).
+final taskCheckoutFileTreeStateProvider = StreamProvider.family<
+  FileTreeState,
+  ({String registrationId, String checkoutId})
+>((ref, key) {
+  final session = ref.watch(projectSessionProvider(key.registrationId)).value;
+  if (session == null) return const Stream<FileTreeState>.empty();
+  final service = session.servicesForCheckout(key.checkoutId).fileService;
+  return seededStream(() => service.currentState, service.stateStream);
+}, retry: noProviderRetry);
+
 /// Per-project SearchService façade.
 final searchServiceProvider = _focusedCheckoutService<SearchService>(
   (s) => s.searchService,

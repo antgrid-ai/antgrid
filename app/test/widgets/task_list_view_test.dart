@@ -4,7 +4,9 @@ import 'dart:convert';
 import 'package:antgrid/design/ab_theme.dart';
 import 'package:antgrid/models/agent_work_status.dart';
 import 'package:antgrid/models/task.dart';
+import 'package:antgrid/providers/auth.dart';
 import 'package:antgrid/providers/tasks.dart';
+import 'package:antgrid/services/auth_service.dart';
 import 'package:antgrid/services/tasks_api.dart';
 import 'package:antgrid/widgets/tasks/task_list_view.dart';
 import 'package:antgrid/widgets/tasks/task_provenance_view.dart';
@@ -74,6 +76,11 @@ ProviderContainer _container({
           cookieProvider: () async => 'session=abc',
           httpClient: client,
         ),
+      ),
+      // taskListProvider now gates its fetch on a signed-in identity; without
+      // this every test here would see it short-circuit to an empty list.
+      currentUserProvider.overrideWith(
+        (_) async => CurrentUser(userId: 'u-1', email: 'me@antgrid.ai'),
       ),
       ...overrides,
     ],

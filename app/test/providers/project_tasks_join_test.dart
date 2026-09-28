@@ -7,6 +7,7 @@ import 'dart:convert';
 
 import 'package:antgrid/models/task.dart';
 import 'package:antgrid/providers/auth.dart';
+import 'package:antgrid/providers/provider_retry.dart';
 import 'package:antgrid/providers/tasks.dart';
 import 'package:antgrid/services/auth_service.dart';
 import 'package:antgrid/services/tasks_api.dart';
@@ -92,6 +93,10 @@ void main() {
               httpClient: client,
             ),
           ),
+          // taskListProvider now gates its fetch on a signed-in identity.
+          currentUserProvider.overrideWith(
+            (_) async => CurrentUser(userId: 'u-1', email: 'u-1@test'),
+          ),
         ],
       );
       addTearDown(container.dispose);
@@ -121,6 +126,7 @@ void main() {
           ),
         );
 
+        await container.read(currentUserProvider.future);
         await container.read(taskProjectsProvider.future);
         final map = container.read(taskProjectIdByRepoKeyProvider);
         expect(map['github.com/acme/site'], 'p-1');
@@ -151,6 +157,7 @@ void main() {
         }),
       );
 
+      await container.read(currentUserProvider.future);
       await container.read(taskListProvider.future);
       final rows = container.read(openTasksForProjectProvider('p-1'));
       expect(rows.map((t) => t.number), [1, 2]);
@@ -185,6 +192,7 @@ void main() {
         }),
       );
 
+      await container.read(currentUserProvider.future);
       await container.read(taskListProvider.future);
       expect(container.read(openTasksForProjectProvider('p-1')), hasLength(2));
 
@@ -276,5 +284,77 @@ void main() {
         2,
       ]);
     });
+  });
+
+  group('an account switch clears the previous account\'s tasks', () {
+    test(
+      "user B never sees user A's tasks, including when B's fetch fails",
+      () async {
+        var userId = 'u-a';
+        var refuseFetch = false;
+        final container = ProviderContainer(
+          // A throwing build otherwise schedules Riverpod's default backoff
+          // retry (a real `Timer`), which keeps `.future` pending instead of
+          // settling into the `AsyncError` this test asserts on.
+          retry: noProviderRetry,
+          overrides: [
+            tasksApiProvider.overrideWithValue(
+              TasksApi(
+                licenseApiUrl: 'https://api.test',
+                cookieProvider: () async => 'session=abc',
+                httpClient: MockClient((req) async {
+                  if (req.url.path == '/labels') {
+                    return http.Response(jsonEncode({'labels': []}), 200);
+                  }
+                  if (refuseFetch) {
+                    return http.Response(
+                      jsonEncode({'error': 'NO_ACCOUNT'}),
+                      403,
+                    );
+                  }
+                  return http.Response(
+                    jsonEncode({
+                      'tasks': [_task(number: 1, sortKey: 'a')],
+                    }),
+                    200,
+                  );
+                }),
+              ),
+            ),
+            // Reads `userId` at call time, so flipping the variable below and
+            // invalidating is enough to simulate a second account signing in.
+            currentUserProvider.overrideWith(
+              (_) async => CurrentUser(userId: userId, email: '$userId@test'),
+            ),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        await container.read(currentUserProvider.future);
+        await container.read(taskListProvider.future);
+        expect(
+          container.read(taskListProvider).value!.map((t) => t.number),
+          [1],
+        );
+
+        // Switch accounts, and make the new account's own fetch fail.
+        userId = 'u-b';
+        refuseFetch = true;
+        container.invalidate(currentUserProvider);
+        await container.read(currentUserProvider.future);
+        await container.read(taskListProvider.future).catchError((_) {
+          return const <Task>[];
+        });
+
+        final state = container.read(taskListProvider);
+        expect(
+          state.value,
+          isEmpty,
+          reason:
+              "a failed fetch under the new account must not read back "
+              "the old account's tasks via AsyncError.copyWithPrevious",
+        );
+      },
+    );
   });
 }

@@ -3,7 +3,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/agent_work_status.dart';
 import '../models/session_entry.dart';
 import '../models/task.dart';
+import '../services/auth_service.dart' show CurrentUser;
 import '../services/tasks_api.dart';
+import '../util/detached.dart';
 import 'auth.dart';
 import 'sessions.dart'
     show activeSessionOrCachedProvider, selectableSessionsProvider;
@@ -16,6 +18,10 @@ import 'sessions.dart'
 /// Only *running* a task needs a live bridge.
 
 final tasksApiProvider = Provider<TasksApi>((ref) {
+  // Watched so an account switch tears down every provider built on this one
+  // (list, projects, labels) instead of leaving them wired to a client that
+  // still answers for the previous session.
+  ref.watch(currentUserProvider.select((u) => u.value?.userId));
   final auth = ref.read(authServiceProvider);
   return TasksApi(
     licenseApiUrl: ref.read(licenseApiUrlProvider),
@@ -161,7 +167,13 @@ class TaskFilter {
 
 class TaskFilterController extends Notifier<TaskFilter> {
   @override
-  TaskFilter build() => const TaskFilter();
+  TaskFilter build() {
+    // A filter chosen under one account (an assignee id, a project uuid) is
+    // meaningless — or worse, silently wrong — under another, so an account
+    // switch rebuilds this back to the default rather than carrying it over.
+    ref.watch(currentUserProvider.select((u) => u.value?.userId));
+    return const TaskFilter();
+  }
 
   /// Switching scope drops the status chips: they were narrowing a different
   /// set, and carrying them across is how a scope lands empty for no visible
@@ -215,8 +227,62 @@ final taskListProvider = AsyncNotifierProvider<TaskListController, List<Task>>(
 class TaskListController extends AsyncNotifier<List<Task>> {
   TasksApi get _api => ref.read(tasksApiProvider);
 
+  /// The account this controller last built state for. Compared against on
+  /// every dependency change so an account switch is detected even though the
+  /// notifier instance survives it (Riverpod re-runs [build], it does not
+  /// recreate the class).
+  String? _lastUserId;
+
+  /// Set once this controller's own `build()` has resolved [_lastUserId] for
+  /// the first time. Guards the listener below against the identity settling
+  /// WHILE that very first `build()` is still suspended awaiting the same
+  /// resolution — without it, the listener would race the build's own
+  /// `await` and reset `state` on a build that is still in flight (see the
+  /// comment on that assignment).
+  bool _identityKnown = false;
+
   @override
   Future<List<Task>> build() async {
+    // A watched dependency (`ref.watch(currentUserProvider...)`) would make
+    // Riverpod's own seamless-refresh machinery run for every account switch
+    // — and `AsyncError.copyWithPrevious` carries the OLD value forward
+    // UNCONDITIONALLY on a failed rebuild, ignoring the seamless flag. That
+    // would let a failed fetch for a NEW account still read back through
+    // `.value` as the OLD account's tasks. `ref.listen` sidesteps it: the
+    // reset below runs as an ordinary post-build mutation (like [_upsert]),
+    // never from inside an in-flight `build()` — assigning `state` there
+    // would instead complete THIS build's `.future` early with the reset
+    // value, corrupting whatever `.future` callers are awaiting.
+    ref.listen<AsyncValue<CurrentUser?>>(currentUserProvider, (prev, next) {
+      // Before the first build has ever resolved an identity, this build's
+      // own `await` below is already handling that resolution — bail out so
+      // this callback cannot beat it to `state` and complete this build's
+      // future early with a bogus reset.
+      if (!_identityKnown) return;
+      final userId = next.value?.userId;
+      if (userId == _lastUserId) return;
+      _lastUserId = userId;
+      state = const AsyncData<List<Task>>([]);
+      if (userId != null) {
+        detached('taskListProvider', 'refetch after account switch', refresh);
+      }
+    });
+    // `ref.read` (not `.watch`): waiting for the CURRENT resolution must not
+    // itself become a watch dependency, or a later account change would drive
+    // this build through the same automatic seamless-refresh path the
+    // `ref.listen` above exists to avoid. A cold start (identity still
+    // loading) genuinely awaits it here instead of racing it — treating
+    // "unresolved" the same as "signed out" would flash the empty state on
+    // every launch, not just an actual sign-out.
+    String? userId;
+    try {
+      userId = (await ref.read(currentUserProvider.future))?.userId;
+    } catch (_) {
+      userId = null;
+    }
+    _lastUserId = userId;
+    _identityKnown = true;
+    if (userId == null) return const <Task>[];
     final query = ref.watch(taskQueryProvider);
     return _api.listTasks(
       status: query.statuses,
@@ -681,7 +747,12 @@ final selectedTaskNumberProvider =
 
 class SelectedTaskController extends Notifier<int?> {
   @override
-  int? build() => null;
+  int? build() {
+    // A task number selected under one account cannot name anything sane
+    // under another, so an account switch drops the selection.
+    ref.watch(currentUserProvider.select((u) => u.value?.userId));
+    return null;
+  }
 
   void select(int? number) => state = number;
 }
@@ -697,6 +768,8 @@ final selectedTaskProvider = Provider<Task?>((ref) {
 });
 
 final taskLabelsProvider = FutureProvider<List<TaskLabel>>((ref) async {
+  final userId = ref.watch(currentUserProvider.select((u) => u.value?.userId));
+  if (userId == null) return const <TaskLabel>[];
   return ref.watch(tasksApiProvider).listLabels();
 });
 
@@ -759,6 +832,11 @@ class TaskRunPresence {
 /// was pressed (`AppTaskLauncher.start`) — there is nowhere else to look.
 /// A task run from a different Antgrid install, or in a project this one
 /// does not currently have open, is simply not visible here.
+///
+/// Joined on `number` alone, which [TaskRef] shares with the display id a
+/// user actually sees: `GET /tasks` (`taskJson` in `web/src/routes/tasks.ts`)
+/// never serializes the task's own opaque id, so [Task] has nothing to compare
+/// against `taskRef.taskId` — closing this needs a wire change outside `app/`.
 final taskSessionProvider = Provider.family<SessionEntry?, int>((
   ref,
   taskNumber,
@@ -812,7 +890,11 @@ final focusedSessionTaskProvider = Provider<Task?>((ref) {
 final openTaskCountProvider = Provider<int?>((ref) {
   final tasks = ref.watch(taskListProvider).value;
   if (tasks == null) return null;
-  return tasks.where((t) => !t.status.isClosed).length;
+  // An unknown status is neither claim this client can honestly make — not
+  // closed, but not open either — so it counts toward neither.
+  return tasks
+      .where((t) => t.status != TaskStatus.unknown && !t.status.isClosed)
+      .length;
 });
 
 /// Starts an agent session from a task.
@@ -836,6 +918,8 @@ final taskLauncherProvider = Provider<TaskLauncher?>((ref) => null);
 /// per-machine: this is the `projectId` uuid a task actually carries, and the
 /// only thing a publish destination can be resolved from.
 final taskProjectsProvider = FutureProvider<List<TaskProject>>((ref) async {
+  final userId = ref.watch(currentUserProvider.select((u) => u.value?.userId));
+  if (userId == null) return const <TaskProject>[];
   return ref.watch(tasksApiProvider).listProjects();
 });
 

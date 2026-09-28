@@ -4,7 +4,9 @@
 // down with it.
 import 'dart:convert';
 
+import 'package:antgrid/providers/auth.dart';
 import 'package:antgrid/providers/tasks.dart';
+import 'package:antgrid/services/auth_service.dart';
 import 'package:antgrid/services/tasks_api.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -20,6 +22,10 @@ ProviderContainer _container(MockClient client) {
           cookieProvider: () async => 'session=abc',
           httpClient: client,
         ),
+      ),
+      // taskProjectsProvider now gates its fetch on a signed-in identity.
+      currentUserProvider.overrideWith(
+        (_) async => CurrentUser(userId: 'u-1', email: 'u-1@test'),
       ),
     ],
   );
@@ -56,6 +62,7 @@ void main() {
         ),
       );
 
+      await container.read(currentUserProvider.future);
       await container.read(taskProjectsProvider.future);
       expect(container.read(taskProjectNamesProvider), {
         'p-1': 'Site',
@@ -75,6 +82,10 @@ void main() {
         MockClient((_) async => http.Response('{"error":"NO_ACCOUNT"}', 403)),
       );
 
+      // Wait for identity to resolve first — the gate reads as "no names"
+      // rather than "an error" while it does, which this asserts is
+      // transient, not the permanent refusal this test is actually about.
+      await container.read(currentUserProvider.future);
       // Not `await …future`: riverpod retries a failed provider with backoff,
       // so the future of a refusal this permanent never settles.
       await Future<void>.delayed(Duration.zero);

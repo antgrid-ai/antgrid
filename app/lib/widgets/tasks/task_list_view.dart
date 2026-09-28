@@ -233,7 +233,7 @@ class _FilterBar extends ConsumerWidget {
                     const _RepoFilterChip(),
                     if (showStatusRow) ...[
                       const SizedBox(width: AbTokens.space8),
-                      for (final status in TaskStatus.values)
+                      for (final status in TaskStatus.selectable)
                         Padding(
                           padding: const EdgeInsets.only(
                             right: AbTokens.space4,

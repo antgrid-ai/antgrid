@@ -452,7 +452,7 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen>
                             label: 'MANAGE PASSWORD',
                             leading: AbIcon(
                               AbIcons.link,
-                              size: 10,
+                              size: AbTokens.iconButtonGlyph,
                               color: antgrid.textSecondary,
                             ),
                             onTap: () => openAccountInBrowser(ref.container),
@@ -490,7 +490,7 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen>
                                   connected
                                       ? AbIcons.circleCheck
                                       : AbIcons.openExternal,
-                                  size: 10,
+                                  size: AbTokens.iconButtonGlyph,
                                   color: connected
                                       ? antgrid.success
                                       : antgrid.textSecondary,

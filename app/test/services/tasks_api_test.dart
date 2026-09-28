@@ -231,13 +231,35 @@ void main() {
           jsonEncode({
             'tasks': [
               _taskJson,
-              {'number': 8, 'status': 'invented_status'},
+              // No `number` at all — the one field Task.fromJson cannot fall
+              // back on, unlike an unrecognized status (see the next test).
+              {'title': 'no number'},
             ],
           }),
           200,
         ),
       );
       expect(await api.listTasks(), hasLength(1));
+    });
+
+    test('an unrecognized status keeps the row instead of dropping it', () async {
+      final api = _api(
+        _answers(
+          jsonEncode({
+            'tasks': [
+              _taskJson,
+              {'number': 8, 'status': 'invented_status'},
+            ],
+          }),
+          200,
+        ),
+      );
+      final tasks = await api.listTasks();
+      expect(tasks, hasLength(2));
+      expect(
+        tasks.firstWhere((t) => t.number == 8).status,
+        TaskStatus.unknown,
+      );
     });
 
     test('a body with no task at all is a refusal, not a null', () async {

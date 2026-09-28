@@ -24,6 +24,7 @@ AbStatusTone taskStatusTone(TaskStatus status) => switch (status) {
   TaskStatus.blocked => AbStatusTone.warning,
   TaskStatus.done => AbStatusTone.success,
   TaskStatus.cancelled => AbStatusTone.disabled,
+  TaskStatus.unknown => AbStatusTone.neutral,
 };
 
 /// The labelled form. Persistent and user-owned, which is why it is a pill and

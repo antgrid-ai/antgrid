@@ -1,9 +1,12 @@
+import 'dart:async';
 import 'dart:convert';
-import 'dart:io' show HttpException, SocketException;
+import 'dart:io'
+    show HandshakeException, HttpException, SocketException, TlsException;
 
 import 'package:http/http.dart' as http;
 
 import '../models/task.dart';
+import 'bounded_http_request.dart';
 import 'cookie_api_client.dart';
 
 /// Tasks and labels over HTTPS against the account service
@@ -381,17 +384,18 @@ class TasksApi extends CookieApiClient {
         _message(TaskApiError.unauthenticated, subject),
       );
     }
-    final request = http.Request(method, uri)
-      ..headers['cookie'] = cookie
-      ..headers['accept'] = 'application/json';
-    if (payload != null) {
-      request.headers['content-type'] = 'application/json';
-      request.body = jsonEncode(payload);
-    }
+    final headers = {'cookie': cookie, 'accept': 'application/json'};
+    if (payload != null) headers['content-type'] = 'application/json';
 
     http.Response res;
     try {
-      res = await http.Response.fromStream(await client.send(request));
+      res = await boundedHttpRequest(
+        client,
+        method,
+        uri,
+        headers: headers,
+        body: payload != null ? jsonEncode(payload) : null,
+      );
     } on SocketException catch (e) {
       throw TaskApiException(
         TaskApiError.network,
@@ -405,6 +409,24 @@ class TasksApi extends CookieApiClient {
         detail: e.message,
       );
     } on http.ClientException catch (e) {
+      throw TaskApiException(
+        TaskApiError.network,
+        _message(TaskApiError.network, subject),
+        detail: e.message,
+      );
+    } on HandshakeException catch (e) {
+      throw TaskApiException(
+        TaskApiError.network,
+        _message(TaskApiError.network, subject),
+        detail: e.message,
+      );
+    } on TlsException catch (e) {
+      throw TaskApiException(
+        TaskApiError.network,
+        _message(TaskApiError.network, subject),
+        detail: e.message,
+      );
+    } on TimeoutException catch (e) {
       throw TaskApiException(
         TaskApiError.network,
         _message(TaskApiError.network, subject),

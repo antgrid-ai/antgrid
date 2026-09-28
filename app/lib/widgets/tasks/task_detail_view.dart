@@ -30,7 +30,7 @@ import '../../providers/new_session_action.dart'
 import '../../util/device_id.dart' show baseDeviceUuid, baseProjectId;
 import '../../providers/task_launcher.dart' show pendingTaskLaunchProvider;
 import '../../providers/providers.dart'
-    show checkoutFileTreeStateProvider, checkoutServiceOrNull;
+    show taskCheckoutFileTreeStateProvider, checkoutServiceOrNull;
 import '../../providers/task_project_source.dart';
 import '../../providers/tasks.dart';
 import '../../services/tasks_api.dart';
@@ -296,12 +296,15 @@ class _LoadedState extends ConsumerState<_Loaded> {
   }
 
   Future<void> _pickStatus() async {
+    // Captured before the sheet: a list refresh under it can retire this
+    // widget, and reading `ref` on a dead element throws.
+    final container = ref.container;
     final picked = await showAbSelect<TaskStatus>(
       context,
       title: 'Status',
       single: true,
       options: [
-        for (final status in TaskStatus.values)
+        for (final status in TaskStatus.selectable)
           AbSelectOption(
             value: status,
             label: status.label,
@@ -312,12 +315,15 @@ class _LoadedState extends ConsumerState<_Loaded> {
     );
     final next = picked?.firstOrNull;
     if (next != null && next != _task.status) {
-      await ref.read(taskListProvider.notifier).setStatus(_task.number, next);
+      await container
+          .read(taskListProvider.notifier)
+          .setStatus(_task.number, next);
     }
   }
 
   Future<void> _pickAssignee() async {
-    final candidates = ref.read(taskAssigneeCandidatesProvider);
+    final container = ref.container;
+    final candidates = container.read(taskAssigneeCandidatesProvider);
     final current = _task.assignee;
     // An imported identity has no Antgrid account to replace it with anything
     // but a member, and clearing it would drop a fact the provider owns.
@@ -340,7 +346,7 @@ class _LoadedState extends ConsumerState<_Loaded> {
     );
     final choice = picked?.firstOrNull;
     if (choice == null) return;
-    await ref
+    await container
         .read(taskListProvider.notifier)
         .setAssignee(
           _task.number,
@@ -349,6 +355,7 @@ class _LoadedState extends ConsumerState<_Loaded> {
   }
 
   Future<void> _pickPriority() async {
+    final container = ref.container;
     final picked = await showAbSelect<int>(
       context,
       title: 'Priority',
@@ -364,13 +371,14 @@ class _LoadedState extends ConsumerState<_Loaded> {
     );
     final choice = picked?.firstOrNull;
     if (choice == null) return;
-    await ref
+    await container
         .read(taskListProvider.notifier)
         .setPriority(_task.number, choice < 0 ? null : choice);
   }
 
   Future<void> _pickProject() async {
-    final names = ref.read(taskProjectNamesProvider);
+    final container = ref.container;
+    final names = container.read(taskProjectNamesProvider);
     final picked = await showAbSelect<String>(
       context,
       title: 'Project',
@@ -386,7 +394,9 @@ class _LoadedState extends ConsumerState<_Loaded> {
     if (choice == null) return;
     final next = choice.isEmpty ? null : choice;
     if (next == _task.projectId) return;
-    await ref.read(taskListProvider.notifier).setProject(_task.number, next);
+    await container
+        .read(taskListProvider.notifier)
+        .setProject(_task.number, next);
   }
 
   /// The disabled button is the affordance; this guard is what makes it safe.
@@ -1709,7 +1719,14 @@ class _TaskChangesSectionState extends ConsumerState<_TaskChangesSection> {
     final palette = context.antgrid;
     final registrationId = widget.registrationId;
     final checkoutId = widget.checkoutId;
-    final state = ref.watch(checkoutFileTreeStateProvider(checkoutId)).value;
+    final state = ref
+        .watch(
+          taskCheckoutFileTreeStateProvider((
+            registrationId: registrationId,
+            checkoutId: checkoutId,
+          )),
+        )
+        .value;
     if (state == null) {
       return const Padding(
         padding: EdgeInsets.symmetric(
@@ -1819,7 +1836,12 @@ Future<void> _openTaskFileDiff(
           child: Consumer(
             builder: (consumerContext, consumerRef, _) {
               final state = consumerRef
-                  .watch(checkoutFileTreeStateProvider(checkoutId))
+                  .watch(
+                    taskCheckoutFileTreeStateProvider((
+                      registrationId: registrationId,
+                      checkoutId: checkoutId,
+                    )),
+                  )
                   .value;
               final git = state?.git;
               if (git?.viewingPath == path) {

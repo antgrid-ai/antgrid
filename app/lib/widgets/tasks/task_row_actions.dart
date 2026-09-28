@@ -32,12 +32,15 @@ Future<void> showTaskRowActions(
   required Task task,
   required List<Task> neighbours,
 }) async {
+  // Captured before the first await: a long-pressed row can be scrolled away
+  // and disposed under the sheet, and reading `ref` on a dead element throws.
+  final container = ref.container;
   final action = await showAbAdaptiveSheet<_RowAction>(
     context,
     child: _TaskRowActionsSheet(task: task, canMove: neighbours.length > 1),
   );
   if (action == null || !context.mounted) return;
-  final tasks = ref.read(taskListProvider.notifier);
+  final tasks = container.read(taskListProvider.notifier);
   final index = neighbours.indexWhere((t) => t.number == task.number);
 
   switch (action) {
@@ -47,7 +50,7 @@ Future<void> showTaskRowActions(
         title: 'Status',
         single: true,
         options: [
-          for (final status in TaskStatus.values)
+          for (final status in TaskStatus.selectable)
             AbSelectOption(
               value: status,
               label: status.label,
@@ -61,7 +64,7 @@ Future<void> showTaskRowActions(
         await tasks.setStatus(task.number, next);
       }
     case _RowAction.assignToMe:
-      final me = ref.read(taskAssigneeCandidatesProvider).firstOrNull;
+      final me = container.read(taskAssigneeCandidatesProvider).firstOrNull;
       if (me != null) {
         await tasks.setAssignee(task.number, TaskMemberAssignee(me.userId));
       }
@@ -91,8 +94,8 @@ Future<void> showTaskRowActions(
       if (!context.mounted) return;
       final confirmed = await showTaskDeleteConfirm(context, task);
       if (confirmed) {
-        if (ref.read(selectedTaskNumberProvider) == task.number) {
-          ref.read(selectedTaskNumberProvider.notifier).select(null);
+        if (container.read(selectedTaskNumberProvider) == task.number) {
+          container.read(selectedTaskNumberProvider.notifier).select(null);
         }
         await tasks.delete(task.number);
       }
@@ -120,7 +123,10 @@ Future<void> editTaskLabels(
   WidgetRef ref,
   Task task,
 ) async {
-  final all = await ref.read(taskLabelsProvider.future);
+  // Captured before the first await: the sheet this opens under can outlive
+  // the row that triggered it, and reading `ref` on a dead element throws.
+  final container = ref.container;
+  final all = await container.read(taskLabelsProvider.future);
   if (!context.mounted) return;
   // Filled by onCreateNew below — a label created mid-sheet isn't in [all],
   // which was fetched before the sheet opened, so the picked-id -> TaskLabel
@@ -151,7 +157,7 @@ Future<void> editTaskLabels(
   if (picked == null) return;
   final before = task.labels.map((l) => l.id).toSet();
   if (before.length == picked.length && before.containsAll(picked)) return;
-  await ref
+  await container
       .read(taskListProvider.notifier)
       .setLabels(
         task.number,

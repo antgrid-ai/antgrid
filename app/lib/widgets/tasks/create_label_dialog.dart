@@ -54,6 +54,10 @@ Future<bool> confirmDeleteLabel(
   WidgetRef ref,
   TaskLabel label,
 ) async {
+  // Captured before the confirm dialog: the picker underneath can close and
+  // retire this widget while it waits on the person, and reading `ref` on a
+  // dead element throws.
+  final container = ref.container;
   final confirmed = await AbConfirmDialog.show(
     context: context,
     title: 'Delete "${label.name}"?',
@@ -63,8 +67,8 @@ Future<bool> confirmDeleteLabel(
     destructive: true,
   );
   if (!confirmed) return false;
-  await ref.read(tasksApiProvider).deleteLabel(label.id);
-  ref.invalidate(taskLabelsProvider);
+  await container.read(tasksApiProvider).deleteLabel(label.id);
+  container.invalidate(taskLabelsProvider);
   return true;
 }
 
@@ -90,15 +94,18 @@ class _CreateLabelSheetState extends ConsumerState<_CreateLabelSheet> {
   Future<void> _submit() async {
     final name = _name.text.trim();
     if (name.isEmpty || _submitting) return;
+    // Captured before the request: the sheet can be dismissed from elsewhere
+    // while it is in flight, and reading `ref` on a dead element throws.
+    final container = ref.container;
     setState(() {
       _submitting = true;
       _error = null;
     });
     try {
-      final label = await ref
+      final label = await container
           .read(tasksApiProvider)
           .createLabel(name: name, color: _color);
-      ref.invalidate(taskLabelsProvider);
+      container.invalidate(taskLabelsProvider);
       if (!mounted) return;
       Navigator.of(context).pop(label);
     } on TaskApiException catch (e) {
