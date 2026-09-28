@@ -12,7 +12,7 @@ import {
   clearTaskPushBlockByNumber,
   createTask,
   getTaskByNumber,
-  listTasks,
+  listTasksPage,
   moveTask,
   publishTaskByNumber,
   resolveTaskConflict,
@@ -176,6 +176,8 @@ const ListTasksQuery = z.object({
    *  the model, which anchors the query on `accountId` either way. */
   assignee: z.string().min(1).optional(),
   limit: z.coerce.number().int().min(1).max(500).optional(),
+  /** Opaque; echoes a previous response's `nextCursor`. */
+  cursor: z.string().min(1).optional(),
 });
 
 const CreateLabelBody = z.object({
@@ -222,7 +224,11 @@ export function taskRoutes(deps: { db: DB; auth: Auth; env: Env }) {
 
   const gate = requireUserOrBearer(deps);
   const account = requireAccount(deps.db);
-  for (const path of ["/tasks", "/tasks/*", "/labels", "/labels/*"]) {
+  // `/tasks/*` already matches the literal `/tasks` (and `/labels/*` matches
+  // `/labels`) — Hono's wildcard is not "one or more segments below". Listing
+  // both patterns here registered each middleware twice on the exact path, so
+  // every request to it ran the session lookup and the membership query twice.
+  for (const path of ["/tasks/*", "/labels/*"]) {
     r.use(path, gate);
     r.use(path, account);
   }
@@ -233,11 +239,12 @@ export function taskRoutes(deps: { db: DB; auth: Auth; env: Env }) {
       projectId: c.req.query("projectId"),
       assignee: c.req.query("assignee"),
       limit: c.req.query("limit"),
+      cursor: c.req.query("cursor"),
     });
     if (!parsed.success) return c.json({ error: "BAD_REQUEST", issues: parsed.error.issues }, 400);
     const query = parsed.data;
 
-    const tasks = await listTasks(deps.db, {
+    const page = await listTasksPage(deps.db, {
       accountId: c.get("accountId"),
       status: query.status,
       projectId: query.projectId,
@@ -248,8 +255,11 @@ export function taskRoutes(deps: { db: DB; auth: Auth; env: Env }) {
             ? c.get("userId")
             : query.assignee,
       limit: query.limit,
+      cursor: query.cursor,
     });
-    return c.json({ tasks: tasks.map(taskJson) });
+    // `nextCursor` is additive: a client that does not read it keeps getting
+    // exactly the page it always got, at the same default size.
+    return c.json({ tasks: page.tasks.map(taskJson), nextCursor: page.nextCursor });
   });
 
   // `source` is deliberately not accepted: it records which system the task was

@@ -419,6 +419,50 @@ describe("pollDueRepos — bounds", () => {
     expect(report.repos[0]!.stoppedBecause).toBe("refused");
     expect(githubPollNeedsAttention(report)).toBe(true);
   });
+
+  test("an issue edited between two page fetches is not skipped", async () => {
+    await connectedRepo();
+
+    // Item 10 starts near the front of the ascending walk. Between the walk's
+    // first and second requests it is edited on GitHub, jumping past item 100 —
+    // the sole item that would otherwise have been page 2. A page-number
+    // request for page 2 asks GitHub's live, re-sorted list for positions
+    // 100-199 at THAT moment, and item 100 has since slid back to position 99 —
+    // inside the range page 1 already returned and will never ask for again.
+    const before = [
+      ...Array.from({ length: GITHUB_PER_PAGE }, (_, i) => anIssue(i + 1, minute(i + 1))),
+      anIssue(GITHUB_PER_PAGE + 1, minute(GITHUB_PER_PAGE + 1)),
+    ];
+    const afterEdit = [
+      ...before.slice(0, 9),
+      ...before.slice(10),
+      anIssue(10, minute(500)),
+    ];
+
+    let calls = 0;
+    const lister: GithubIssueLister = {
+      async listRepoIssuesSince(_ref, args) {
+        calls += 1;
+        const live = calls === 1 ? before : afterEdit;
+        const visible =
+          args.since === null
+            ? live
+            : live.filter((item) => Date.parse(item.updated_at ?? "") >= args.since!.getTime());
+        const start = (args.page - 1) * GITHUB_PER_PAGE;
+        return visible.slice(start, start + GITHUB_PER_PAGE);
+      },
+    };
+
+    const report = await pollDueRepos(pg.db, deps(lister));
+
+    expect(report.repos[0]).toMatchObject({ stoppedBecause: "caught_up" });
+    expect(calls).toBe(2);
+    const numbers = (await pg.db.task.findMany({ select: { externalKey: true } }))
+      .map((t) => t.externalKey)
+      .sort();
+    expect(numbers).toContain(`acme/relay#${GITHUB_PER_PAGE + 1}`);
+    expect(await pg.db.task.count()).toBe(GITHUB_PER_PAGE + 1);
+  });
 });
 
 describe("pollDueRepos — the claim lock", () => {

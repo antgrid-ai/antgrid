@@ -138,6 +138,7 @@ export function projectRoutes(deps: { db: DB; auth: Auth; env: Env }) {
       if (owned.count === 0) return null;
       return bindLocalProject(tx, {
         accountId: membership.accountId,
+        userId,
         repoKey: body.repoKey,
         // Falls back to the repository's own name rather than the folder's: the
         // label belongs to a repository shared across machines, and the last

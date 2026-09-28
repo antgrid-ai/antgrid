@@ -6,7 +6,7 @@ import type { DB, Tx } from "../db/index.js";
 import { Prisma } from "../generated/prisma/client.js";
 import { ACCOUNT_MEMBER_STATUS_ACTIVE } from "./account-member.js";
 import { resolveLabelIds, type LabelResolution } from "./label.js";
-import { keyBetween } from "../tasks/sort-key.js";
+import { isSortKey, keyBetween } from "../tasks/sort-key.js";
 import { isUuid } from "../util/uuid.js";
 import { sameRemoteState, toRemote, type Assignee, type TaskStatus } from "../tasks/merge.js";
 import {
@@ -515,6 +515,14 @@ function statePayload(status: TaskStatus): TaskSyncOpPayload {
  * `keyBetween`, which raises for them. Every other bad input in this file is a
  * refusal, and a caller that has to catch for one of them will eventually
  * forget — the exception surfaces as a 500 on a plainly bad request.
+ *
+ * **Serialized on the same `task:` lock `createTask` takes for numbering.**
+ * Without it, two concurrent moves into the same gap both read the same pair
+ * of neighbours and write the same `keyBetween` result — a duplicate sort key
+ * that `listTasks`' tiebreaker only papers over, and every move dropped into
+ * that gap afterwards raises `neighbours_out_of_order` for good. The neighbour
+ * reads happen only after the lock, not before, or two callers can still race
+ * the read that decides the key.
  */
 export async function moveTask(
   db: DB,
@@ -529,6 +537,8 @@ export async function moveTask(
 ): Promise<TaskResult> {
   const { accountId, number } = args;
   return db.$transaction(async (tx): Promise<TaskResult> => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`task:${accountId}`}))`;
+
     const [moving, previousKey, nextKey] = await Promise.all([
       tx.task.findFirst({ where: { accountId, number, deletedAt: null }, select: { id: true } }),
       neighbourKey(tx, accountId, args.previousNumber),
@@ -563,15 +573,67 @@ export type ListTasksArgs = {
    *  former employer's tasks the moment a membership closes. */
   assigneeUserId?: string;
   limit?: number;
+  /** An opaque `nextCursor` from a previous page. A cursor this process cannot
+   *  read (malformed, or from a build that encoded it differently) is treated
+   *  as no cursor at all — the first page is always answerable, where a 400 on
+   *  a stored bookmark is not. */
+  cursor?: string;
+};
+
+export type ListTasksPage = {
+  tasks: TaskRecord[];
+  /** Null when this page reached the end of the list. */
+  nextCursor: string | null;
 };
 
 const LIST_LIMIT_DEFAULT = 100;
 const LIST_LIMIT_MAX = 500;
 
-export async function listTasks(db: Tx, args: ListTasksArgs): Promise<TaskRecord[]> {
+/**
+ * `sortKey` is not unique — a drag-reorder writes one row, so two tasks can
+ * legitimately share a key until the next move splits them — so `sortKey`
+ * alone is neither a stable `ORDER BY` nor a keyset cursor: two reads of the
+ * same page could disagree, and a cursor built from it could skip or repeat a
+ * tied row. `number` is unique per account and never reused, so it is what
+ * breaks the tie for both.
+ */
+function taskOrderBy(): Prisma.TaskOrderByWithRelationInput[] {
+  return [{ sortKey: "asc" }, { number: "asc" }];
+}
+
+function encodeTaskCursor(sortKey: string, number: number): string {
+  return Buffer.from(`${sortKey}:${number}`, "utf8").toString("base64url");
+}
+
+function decodeTaskCursor(cursor: string): { sortKey: string; number: number } | null {
+  let raw: string;
+  try {
+    raw = Buffer.from(cursor, "base64url").toString("utf8");
+  } catch {
+    return null;
+  }
+  const at = raw.lastIndexOf(":");
+  if (at < 0) return null;
+  const sortKey = raw.slice(0, at);
+  const number = Number(raw.slice(at + 1));
+  if (!isSortKey(sortKey) || !Number.isInteger(number)) return null;
+  return { sortKey, number };
+}
+
+/**
+ * The account's tasks, keyset-paginated on `(sortKey, number)`.
+ *
+ * Keyset rather than offset: an offset is counted against a list this account
+ * keeps reordering, so page 2 silently skips or repeats rows around whichever
+ * move landed between the two requests. A cursor names the last row actually
+ * seen instead, which a reorder elsewhere in the list cannot invalidate.
+ */
+export async function listTasksPage(db: Tx, args: ListTasksArgs): Promise<ListTasksPage> {
   const status = args.status === undefined ? undefined : [args.status].flat();
   const limit = Math.min(Math.max(args.limit ?? LIST_LIMIT_DEFAULT, 1), LIST_LIMIT_MAX);
-  if (args.projectId !== undefined && !isUuid(args.projectId)) return [];
+  if (args.projectId !== undefined && !isUuid(args.projectId)) return { tasks: [], nextCursor: null };
+
+  const after = args.cursor === undefined ? null : decodeTaskCursor(args.cursor);
 
   const rows = await db.task.findMany({
     where: {
@@ -580,12 +642,34 @@ export async function listTasks(db: Tx, args: ListTasksArgs): Promise<TaskRecord
       ...(status ? { status: { in: status } } : {}),
       ...(args.projectId === undefined ? {} : { projectId: args.projectId }),
       ...(args.assigneeUserId === undefined ? {} : { assigneeUserId: args.assigneeUserId }),
+      ...(after === null
+        ? {}
+        : {
+            OR: [
+              { sortKey: { gt: after.sortKey } },
+              { sortKey: after.sortKey, number: { gt: after.number } },
+            ],
+          }),
     },
-    orderBy: { sortKey: "asc" },
-    take: limit,
+    orderBy: taskOrderBy(),
+    // One extra row, dropped below: its presence is how a page tells "this was
+    // everything" from "there is more but the limit cut it here" without a
+    // separate count query.
+    take: limit + 1,
     select: TASK_SELECT,
   });
-  return rows.map(toRecord);
+
+  const hasMore = rows.length > limit;
+  const page = hasMore ? rows.slice(0, limit) : rows;
+  const last = page[page.length - 1];
+  const nextCursor = hasMore && last ? encodeTaskCursor(last.sortKey, last.number) : null;
+  return { tasks: page.map(toRecord), nextCursor };
+}
+
+/** The plain list, for callers that do not paginate. Every existing caller
+ *  before pagination existed wanted exactly this. */
+export async function listTasks(db: Tx, args: ListTasksArgs): Promise<TaskRecord[]> {
+  return (await listTasksPage(db, args)).tasks;
 }
 
 export async function getTaskByNumber(

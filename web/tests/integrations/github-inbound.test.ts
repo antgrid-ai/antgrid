@@ -19,6 +19,7 @@ import {
   MAX_WEBHOOK_ATTEMPTS,
   listGivenUpDeliveries,
   purgeProcessedWebhookEvents,
+  recordDelivery,
   recordDeliveryFailure,
   retentionCutoff,
 } from "../../src/integrations/webhook-events.js";
@@ -101,6 +102,20 @@ async function record(type: string, body: unknown, provider = "github") {
 
 async function reload(id: string) {
   return pg.db.webhookEvent.findUniqueOrThrow({ where: { id } });
+}
+
+/**
+ * The backoff columns are stamped with Postgres' `now()`, so comparisons
+ * belong against the same clock — `@prisma/adapter-pg` has been observed to
+ * mis-parse a `timestamptz` back into a JS `Date` when the server session's
+ * `TimeZone` GUC isn't UTC (reproduced outside this suite by forcing the pg
+ * pool's `options: "-c TimeZone=UTC"`, which makes the discrepancy vanish),
+ * so pinning the reference to `Date.now()` makes the assertion hostage to
+ * that environment setting rather than to the backoff logic under test.
+ */
+async function dbNow(): Promise<number> {
+  const rows = await pg.db.$queryRaw<{ n: Date }[]>`SELECT now() as n`;
+  return rows[0]!.n.getTime();
 }
 
 const repoRef = (id: string, fullName: string, isPrivate = true) => ({
@@ -411,6 +426,46 @@ describe("drainGithubWebhooks — claim discipline", () => {
     expect(after.lastError).toBe("transient");
   });
 
+  test("a failure leases the row out; the very next pass does not reclaim it", async () => {
+    const account = await makeAccount();
+    const integration = await connect(account);
+    // Same collision as the "fails and retries" case above, chosen because it
+    // fails deterministically without a fake clock.
+    await addRepo(account, integration, { externalRepoId: "gh-100", repoKey: "github.com/acme/a" });
+    await addRepo(account, integration, { externalRepoId: "gh-200", repoKey: "github.com/acme/b" });
+    const row = await record("repository", {
+      action: "transferred",
+      installation: { id: 42 },
+      repository: repoRef("gh-200", "acme/a"),
+    });
+
+    expect(await drainGithubWebhooks(pg.db)).toMatchObject({ failed: 1 });
+    const backedOff = await reload(row.id);
+    expect(backedOff.nextAttemptAt.getTime()).toBeGreaterThan(Date.now());
+
+    // The row is still open (attempts=1, well under the ceiling) but its lease
+    // is not due, so a pass run immediately after must not burn a second
+    // attempt on it.
+    expect(await drainGithubWebhooks(pg.db)).toMatchObject({ scanned: 0 });
+    expect((await reload(row.id)).attempts).toBe(1);
+  });
+
+  test("a manual redelivery is claimable immediately, ignoring a prior backoff", async () => {
+    const row = await record("installation", { action: "suspend", installation: { id: 1 } });
+    await recordDeliveryFailure(pg.db, row.id, "transient");
+    expect((await reload(row.id)).nextAttemptAt.getTime()).toBeGreaterThan(await dbNow());
+
+    const before = await reload(row.id);
+    const replay = await recordDelivery(pg.db, {
+      provider: before.provider,
+      providerEventId: before.providerEventId,
+      type: before.type,
+      payload: before.payload,
+    });
+    expect(replay.inserted).toBe(false);
+    expect((await reload(row.id)).nextAttemptAt.getTime()).toBeLessThanOrEqual(await dbNow());
+  });
+
   test("the batch size bounds one pass", async () => {
     const account = await makeAccount();
     await connect(account);
@@ -423,7 +478,7 @@ describe("drainGithubWebhooks — claim discipline", () => {
 });
 
 describe("purgeProcessedWebhookEvents", () => {
-  test("deletes processed rows past the cutoff and leaves the rest", async () => {
+  test("clears the payload of processed rows past the cutoff, but keeps the row", async () => {
     const old = new Date("2026-01-01T00:00:00.000Z");
     const recent = new Date();
 
@@ -449,16 +504,63 @@ describe("purgeProcessedWebhookEvents", () => {
       data: { processedAt: old, receivedAt: old },
     });
 
-    const deleted = await purgeProcessedWebhookEvents(pg.db, {
+    const purged = await purgeProcessedWebhookEvents(pg.db, {
       provider: "github",
       before: retentionCutoff(new Date()),
     });
-    expect(deleted).toBe(1);
+    expect(purged).toBe(1);
 
-    const left = await pg.db.webhookEvent.findMany({ select: { id: true } });
+    // Every row survives — the [provider, provider_event_id] key is what a
+    // redelivery is deduplicated against, and deleting it would let a captured
+    // (body, signature) pair replay once retention has run.
+    const left = await pg.db.webhookEvent.findMany({ select: { id: true, payload: true } });
     expect(left.map((r) => r.id).sort()).toEqual(
-      [freshProcessed.id, staleUnprocessed.id, otherProvider.id].sort()
+      [staleProcessed.id, freshProcessed.id, staleUnprocessed.id, otherProvider.id].sort()
     );
+    expect(left.find((r) => r.id === staleProcessed.id)?.payload).toEqual({ purged: true });
+    expect(left.find((r) => r.id === freshProcessed.id)?.payload).not.toEqual({ purged: true });
+    expect(left.find((r) => r.id === staleUnprocessed.id)?.payload).not.toEqual({ purged: true });
+  });
+
+  test("a row already purged is left alone on a later pass", async () => {
+    const old = new Date("2026-01-01T00:00:00.000Z");
+    const row = await record("installation", { action: "suspend" });
+    await pg.db.webhookEvent.update({
+      where: { id: row.id },
+      data: { processedAt: old, receivedAt: old },
+    });
+
+    const first = await purgeProcessedWebhookEvents(pg.db, {
+      provider: "github",
+      before: retentionCutoff(new Date()),
+    });
+    expect(first).toBe(1);
+
+    const second = await purgeProcessedWebhookEvents(pg.db, {
+      provider: "github",
+      before: retentionCutoff(new Date()),
+    });
+    expect(second).toBe(0);
+  });
+
+  test("a redelivery of a purged event's exact bytes is still recognized as a duplicate", async () => {
+    const old = new Date("2026-01-01T00:00:00.000Z");
+    const row = await record("installation", { action: "suspend" });
+    await pg.db.webhookEvent.update({
+      where: { id: row.id },
+      data: { processedAt: old, receivedAt: old },
+    });
+    const before = await reload(row.id);
+    await purgeProcessedWebhookEvents(pg.db, { provider: "github", before: retentionCutoff(new Date()) });
+
+    const replay = await recordDelivery(pg.db, {
+      provider: before.provider,
+      providerEventId: before.providerEventId,
+      type: before.type,
+      payload: before.payload,
+    });
+    expect(replay.inserted).toBe(false);
+    expect(replay.alreadyProcessed).toBe(true);
   });
 
   test("the cutoff is the retention window back from now", async () => {
@@ -783,6 +885,41 @@ describe("drainGithubWebhooks — the three-way merge", () => {
     expect(after.status).toBe("done");
     expect(after.closedAt).not.toBeNull();
     expect(after.syncState).toBe("synced");
+  });
+
+  test("a delivery older than the task's stored remote update is dropped, not applied", async () => {
+    const account = await makeAccount();
+    await importedTask(account); // remoteUpdatedAt = 2026-08-18T10:00:00Z
+
+    // The legitimate, later edit lands first.
+    await record(
+      "issues",
+      issuesEvent("edited", { title: "second", updated_at: "2026-08-18T11:00:00Z" })
+    );
+    expect(await drainGithubWebhooks(pg.db)).toMatchObject({ applied: 1 });
+    expect((await onlyTask()).title).toBe("second");
+
+    // An OLDER delivery then arrives out of order — a redelivery, or a poll
+    // walk resuming behind the webhook that already landed — and must not
+    // revert the task to a state older than what it already reflects.
+    await record(
+      "issues",
+      issuesEvent("edited", { title: "reordered-stale", updated_at: "2026-08-18T10:30:00Z" })
+    );
+    expect(await drainGithubWebhooks(pg.db)).toMatchObject({ applied: 0, dropped: 1 });
+
+    const after = await onlyTask();
+    expect(after.title).toBe("second");
+    expect(after.remoteUpdatedAt?.toISOString()).toBe("2026-08-18T11:00:00.000Z");
+  });
+
+  test("a delivery with no parseable updated_at is never treated as stale", async () => {
+    const account = await makeAccount();
+    await importedTask(account);
+
+    await record("issues", issuesEvent("edited", { title: "no timestamp", updated_at: null }));
+    expect(await drainGithubWebhooks(pg.db)).toMatchObject({ applied: 1 });
+    expect((await onlyTask()).title).toBe("no timestamp");
   });
 
   test("an unreadable snapshot is treated as absent and the remote is taken whole", async () => {

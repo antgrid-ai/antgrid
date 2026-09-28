@@ -115,6 +115,16 @@ export function requireUserOrRedirect(deps: { auth: Auth }): MiddlewareHandler<{
  * No-op (never reads or writes anything) when the route was reached without
  * `asEmail` — a plain visit to the page in a browser carries no expectation
  * to check against.
+ *
+ * On a mismatch this only REDIRECTS (GET, no side effect) to a page that asks
+ * before signing out. Signing out here used to be the whole response to a
+ * mismatch, which made the mismatch itself forgeable: `?asEmail=` is read
+ * from the query string, so any page could force this browser to navigate
+ * here — a top-level GET still carries a `SameSite=Lax` cookie — and log a
+ * signed-in victim out with no interaction beyond loading a page. The actual
+ * sign-out now happens only behind a POST (`/ui/integrations/switch-account`
+ * in `routes/ui.tsx`), which the router's same-origin check on non-GET
+ * requests is what a forged cross-site request cannot pass.
  */
 export function requireMatchingAccount(deps: { auth: Auth }): MiddlewareHandler<{ Variables: AuthVars }> {
   return async (c, next) => {
@@ -123,22 +133,6 @@ export function requireMatchingAccount(deps: { auth: Auth }): MiddlewareHandler<
     const actual = c.get("userEmail");
     if (actual && actual.toLowerCase() === asEmail.toLowerCase()) return next();
 
-    // Mismatched account: sign this browser session out (mirrors /logout's
-    // own Set-Cookie forwarding — see there for why each header is forwarded
-    // individually) and send the user back to sign in, with the expected
-    // address pre-filled so they land on the right account instead of
-    // guessing which one the app meant.
-    const res = await deps.auth.api.signOut({ headers: c.req.raw.headers, asResponse: true });
-    for (const sc of res.headers.getSetCookie()) {
-      c.header("set-cookie", sc, { append: true });
-    }
-    // `error`, not `notice`: LoginPage renders `notice` in success (green)
-    // styling, which reads wrong for "you were signed out and need to try
-    // again" — `error` is the tone Login already uses for that.
-    const message =
-      "This browser was signed in to a different Antgrid account. Sign in again to continue.";
-    return c.redirect(
-      `/login?error=${encodeURIComponent(message)}&email=${encodeURIComponent(asEmail)}`
-    );
+    return c.redirect(`/integrations/switch-account?asEmail=${encodeURIComponent(asEmail)}`);
   };
 }

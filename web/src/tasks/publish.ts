@@ -7,7 +7,7 @@ import { githubRepoFromKey } from "../integrations/github-import.js";
 import { isUuid } from "../util/uuid.js";
 import { toRemote, type TaskStatus } from "./merge.js";
 import { TaskSyncStateSchema } from "./sync-state.js";
-import { enqueueSyncOp, TaskSyncOpKindSchema } from "./sync-op.js";
+import { cancelPendingOps, enqueueSyncOp, TaskSyncOpKindSchema } from "./sync-op.js";
 
 /**
  * Publishing a local task to a provider: which repositories may receive one,
@@ -164,6 +164,17 @@ export type PublishFields = {
  * refuses an `issue.create` outright while `externalId` is non-null, which makes
  * this load-bearing rather than tidiness.
  *
+ * **Every op the previous link left pending is cancelled here too.**
+ * `unlinkTask` deliberately leaves them for the drain to cancel one at a time,
+ * but a re-publish can land before the drain ever gets there — and a stale
+ * `issue.patch.*` keeps the low `seq` it was allocated under the old link,
+ * ahead of the `issue.create` this call is about to queue. An edit made after
+ * republishing then supersedes that stale row in place, inheriting its seq and
+ * so its place ahead of the create — and the drain gives it up once it gets
+ * there, because `externalKey` is still null. Cancelling first means the
+ * create is always the task's lowest pending op after a publish, which is the
+ * order every reader of `seq` assumes holds.
+ *
  * `source` is deliberately untouched: it records where the task was born, not
  * where it now lives.
  */
@@ -173,6 +184,12 @@ export async function publishTaskInTx(
 ): Promise<void> {
   const { taskId, target, fields } = args;
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`tasksync:${taskId}`}))`;
+  // Any create — attempted or not — is spared: the `enqueueSyncOp` call below
+  // supersedes an un-attempted one in place, and an attempted one with an
+  // unknown outcome is left for `apply-op.ts`'s cross-installation guard to
+  // retire once the drain reaches it, since this publish may target a
+  // different repository than the one it was queued under.
+  await cancelPendingOps(tx, taskId, { spareCreates: true });
 
   await tx.task.update({
     where: { id: taskId },

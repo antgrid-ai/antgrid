@@ -4,8 +4,12 @@
 import type { DB, Tx } from "../db/index.js";
 
 export type BindLocalProjectArgs = {
-  /** Resolved from the caller, never from the request body. */
+  /** Resolved from the caller's ACTIVE membership, never from the request body.
+   *  Which project the binding points at; see `userId` for who it belongs to. */
   accountId: string;
+  /** The signed-in user, already proven to own `deviceId`. Recorded on the
+   *  binding so a later account switch can be told from a stranger's device. */
+  userId: string;
   /** Shape-gated by `util/repo-key.ts` before it gets here. */
   repoKey: string;
   displayName: string;
@@ -26,13 +30,17 @@ export type BindLocalProjectResult =
  * can be found at.
  *
  * A machine re-binding a folder whose origin remote changed is ordinary, so the
- * binding is re-pointed at the new project rather than refused.
+ * binding is re-pointed at the new project rather than refused. So is a machine
+ * whose ACCOUNT changed — joining or leaving a team flips `findActiveMembership`
+ * without touching a single device — so a binding is re-pointed whenever its
+ * existing owner is the caller's own user, and refused only when it belongs to
+ * someone else.
  */
 export async function bindLocalProject(
   tx: Tx,
   args: BindLocalProjectArgs
 ): Promise<BindLocalProjectResult> {
-  const { accountId, repoKey, displayName, deviceId, localProjectId, localPath } = args;
+  const { accountId, userId, repoKey, displayName, deviceId, localProjectId, localPath } = args;
 
   // The tenancy check below is a check-then-act over a globally unique pair that
   // two accounts can both name, so without serialization the loser of a race
@@ -44,15 +52,18 @@ export async function bindLocalProject(
 
   const existing = await tx.projectBinding.findUnique({
     where: { deviceId_localProjectId: { deviceId, localProjectId } },
-    select: { id: true, project: { select: { accountId: true } } },
+    select: { id: true, userId: true },
   });
   // A device uuid is chosen by the client at registration and unique only per
   // user, so two accounts can present the same (deviceId, localProjectId) pair —
-  // and the unique index on it is global. Without this check the second caller's
-  // upsert would silently re-point the first account's binding at its own
-  // project. Refuse instead; the index is what makes the pair addressable at all,
-  // so this is the only place tenancy can be asserted for it.
-  if (existing && existing.project.accountId !== accountId) return { kind: "device_conflict" };
+  // and the unique index on it is global. `userId`, not `accountId`, is what
+  // decides ownership here: the same person's active membership moves between
+  // accounts (joining or leaving a team) with no device involved at all, and
+  // that must re-point the binding rather than read as a stranger's. Only a
+  // binding whose SAVED owner differs from the caller is refused — the index is
+  // what makes the pair addressable at all, so this is the only place tenancy
+  // can be asserted for it.
+  if (existing && existing.userId !== userId) return { kind: "device_conflict" };
 
   const project = await tx.project.upsert({
     where: { accountId_repoKey: { accountId, repoKey } },
@@ -79,11 +90,15 @@ export async function bindLocalProject(
     create: {
       projectId: project.id,
       deviceId,
+      userId,
       localProjectId,
       localPath,
       lastSeenAt: now,
     },
-    update: { projectId: project.id, localPath, lastSeenAt: now },
+    // `userId` moves with the account switch this upsert exists to allow: the
+    // row must record the CURRENT owner, or the next call's tenancy check
+    // compares against a name that is already stale.
+    update: { projectId: project.id, userId, localPath, lastSeenAt: now },
     select: { id: true },
   });
 

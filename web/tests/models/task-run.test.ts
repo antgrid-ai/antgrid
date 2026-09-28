@@ -274,21 +274,23 @@ describe("recordTaskRun: identity and scope", () => {
     expect(await pg.db.taskRun.count()).toBe(1);
   });
 
-  // The session id is the machine's own and carries no tenancy, so the same
-  // pair can name a run on a task the caller may not see. It still refuses, and
-  // the refusal says nothing about the other account's task.
-  test("a session attached to another account's task refuses without naming it", async () => {
+  // `deviceId` is client-chosen and unique only per user, so two different
+  // accounts can legitimately present the identical (deviceId, sessionId)
+  // pair — the row's true identity is the triple including `accountId`. Two
+  // accounts sharing both strings are simply two independent runs, neither
+  // able to see or move the other's task.
+  test("the same deviceId and sessionId on two different accounts are two independent runs", async () => {
     const mine = await makeAccount();
     const theirs = await makeAccount();
     const theirTask = await makeTask(theirs);
     const myTask = await makeTask(mine);
 
-    ok(await report(theirs, theirTask.number, "working"));
-    const conflict = await report(mine, myTask.number, "working");
+    const theirResult = ok(await report(theirs, theirTask.number, "working"));
+    const myResult = ok(await report(mine, myTask.number, "working"));
 
-    expect(conflict.kind).toBe("session_task_conflict");
-    expect(conflict).toMatchObject({ boundNumber: null });
-    expect(await pg.db.taskRun.count()).toBe(1);
+    expect(theirResult.task.status).toBe("in_progress");
+    expect(myResult.task.status).toBe("in_progress");
+    expect(await pg.db.taskRun.count()).toBe(2);
   });
 
   // Whether or not the two overlap, one of them refuses: the advisory lock

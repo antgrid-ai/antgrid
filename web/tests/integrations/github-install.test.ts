@@ -42,6 +42,8 @@ const MINE: InstallationIdentity = {
   installationId: "4242",
   externalAccountId: "9001",
   displayName: "acme",
+  accountType: "Organization",
+  accountLogin: "acme",
 };
 
 function repo(overrides: Partial<DiscoveredRepo> = {}): DiscoveredRepo {
@@ -71,6 +73,16 @@ function directory(overrides: DirectoryOverrides = {}): GithubInstallDirectory &
     async listUserInstallations(token) {
       calls.push(`installations:${token}`);
       return overrides.listUserInstallations ? overrides.listUserInstallations(token) : [MINE];
+    },
+    async authenticatedUserId(token) {
+      calls.push(`user:${token}`);
+      // Matches MINE's externalAccountId by default, so a bare `directory()`
+      // administers the fixture installation whichever account type it names.
+      return overrides.authenticatedUserId ? overrides.authenticatedUserId(token) : "9001";
+    },
+    async isActiveOrgAdmin(token, org) {
+      calls.push(`org-admin:${token}:${org}`);
+      return overrides.isActiveOrgAdmin ? overrides.isActiveOrgAdmin(token, org) : true;
     },
     async listInstallationRepos(id) {
       calls.push(`repos:${id}`);
@@ -173,6 +185,82 @@ describe("completeGithubInstall", () => {
     // No repository listing either: a refused installation must not become a
     // reason to spend an installation token on it.
     expect(gh.calls).toEqual(["exchange:code-1", "installations:user-token"]);
+  });
+
+  test("an org member who is not an admin is refused, even though GET /user/installations lists it", async () => {
+    const account = await makeAccount();
+    const gh = directory({
+      // GitHub's own docs: this endpoint lists every installation the user can
+      // reach at read, write OR admin level, so listing it is not proof of
+      // administrative control.
+      async isActiveOrgAdmin() {
+        return false;
+      },
+    });
+
+    const result = await completeGithubInstall(pg.db, gh, {
+      accountId: account.accountId,
+      userId: account.userId,
+      installationId: "4242",
+      code: "code-1",
+    });
+
+    expect(result).toEqual({ kind: "not_your_installation" });
+    expect(await listIntegrations(pg.db, account.accountId)).toHaveLength(0);
+    expect(gh.calls).toEqual([
+      "exchange:code-1",
+      "installations:user-token",
+      "org-admin:user-token:acme",
+    ]);
+  });
+
+  test("an active org admin is accepted", async () => {
+    const account = await makeAccount();
+    const gh = directory({
+      async isActiveOrgAdmin(token, org) {
+        return token === "user-token" && org === "acme";
+      },
+    });
+
+    const result = await completeGithubInstall(pg.db, gh, {
+      accountId: account.accountId,
+      userId: account.userId,
+      installationId: "4242",
+      code: "code-1",
+    });
+
+    expect(result).toMatchObject({ kind: "ok" });
+  });
+
+  test("a personal installation is refused to anyone but the account itself", async () => {
+    const account = await makeAccount();
+    const personal: InstallationIdentity = {
+      installationId: "5000",
+      externalAccountId: "9002",
+      displayName: "someone-else",
+      accountType: "User",
+      accountLogin: "someone-else",
+    };
+    const gh = directory({
+      async listUserInstallations() {
+        return [personal];
+      },
+      // A different GitHub user's id than the installation's own account —
+      // e.g. an outside collaborator this endpoint also lists.
+      async authenticatedUserId() {
+        return "1234";
+      },
+    });
+
+    const result = await completeGithubInstall(pg.db, gh, {
+      accountId: account.accountId,
+      userId: account.userId,
+      installationId: "5000",
+      code: "code-1",
+    });
+
+    expect(result).toEqual({ kind: "not_your_installation" });
+    expect(await listIntegrations(pg.db, account.accountId)).toHaveLength(0);
   });
 
   test("an installation another account holds is refused, not taken over", async () => {

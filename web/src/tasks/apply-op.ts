@@ -121,7 +121,13 @@ export type ApplyOpSkipReason =
   | "already_created"
   | "push_disabled"
   | "integration_revoked"
-  | "fields_blocked";
+  | "fields_blocked"
+  /** The op's own `integrationId`, pinned at enqueue, no longer matches the
+   *  task's current target. Reachable only through the one op `cancelPendingOps`
+   *  deliberately spares a re-publish: an attempted `issue.create` whose outcome
+   *  is unknown. Sending it would resolve credentials for the installation it
+   *  was queued under while addressing the repository the task points at now. */
+  | "integration_mismatch";
 
 export type ApplyOpOutcome =
   | {
@@ -290,7 +296,7 @@ async function decide(tx: Tx, op: TaskSyncOpRecord, at: Date): Promise<Decision>
   // sent must be the current intent.
   const row = await tx.taskSyncOp.findUnique({
     where: { id: op.id },
-    select: { status: true, opKey: true, payload: true, attemptedAt: true },
+    select: { status: true, opKey: true, payload: true, attemptedAt: true, integrationId: true },
   });
   if (!row || row.status !== "pending") {
     return stop({ kind: "skipped", opId: op.id, taskId: op.taskId, reason: "op_not_pending" });
@@ -353,6 +359,26 @@ async function decide(tx: Tx, op: TaskSyncOpRecord, at: Date): Promise<Decision>
     await cancelOp(tx, op.id, "outbound writes are off for this repository");
     await abandonStuckCreate();
     return stop({ kind: "skipped", opId: op.id, taskId: op.taskId, reason: "push_disabled" });
+  }
+
+  // `row.integrationId` is pinned at enqueue and normally always matches: any
+  // ordinary edit re-resolves the target through `enqueueForTask`, and a
+  // re-publish cancels everything else pending. The one op that survives a
+  // re-publish is an attempted `issue.create` whose outcome GitHub never
+  // confirmed (`cancelPendingOps`'s `keptCreate`) — and by the time this runs
+  // the task may already point at a different installation. Sending it there
+  // would sign the request with the OLD installation's token while addressing
+  // the NEW repository, which is not this op's to write to under any
+  // credentials. The task's current link is untouched: unlike the guards
+  // above, nothing is wrong with it, only this op is stale.
+  if (row.integrationId !== repo.integrationId) {
+    await cancelOp(tx, op.id, "the task now targets a different installation");
+    return stop({
+      kind: "skipped",
+      opId: op.id,
+      taskId: op.taskId,
+      reason: "integration_mismatch",
+    });
   }
 
   const target = githubRepoFromKey(repo.repoKey);

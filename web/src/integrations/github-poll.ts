@@ -439,7 +439,24 @@ async function walkRepo(
     else cursor = at;
   };
 
-  for (let page = 1; page <= maxPages; page++) {
+  // `since` is a live filter, re-evaluated by GitHub on every request: with a
+  // fixed `since` and a growing numeric `page`, an issue that gets updated
+  // between two of our requests moves later in the `direction=asc` ordering,
+  // shifting every page boundary behind it — the previous page's tail is now
+  // some other issue, and whichever issue that displaces never gets fetched at
+  // any page number this walk asks for. Re-anchoring `since` to the highest
+  // `updated_at` actually seen, and going back to `page: 1`, turns each
+  // request into its own query rather than an offset into one that may have
+  // reordered under it: nothing at or after the new floor can be missed,
+  // because the next request asks for it directly instead of assuming it
+  // still sits at a particular numeric offset. `page` only keeps climbing when
+  // the floor could NOT be trusted to move (`cursorBlocked`, or a page that
+  // moved nothing) — the same page-number fallback this walk always used, now
+  // scoped to just that narrower, already-accepted edge case.
+  let pageSince = since;
+  let apiPage = 1;
+
+  for (let iteration = 1; iteration <= maxPages; iteration++) {
     if (now().getTime() >= claim.deadline.getTime()) {
       report.stoppedBecause = "time_budget";
       return report;
@@ -452,7 +469,7 @@ async function walkRepo(
 
     let items: GithubIssue[];
     try {
-      items = await lister.listRepoIssuesSince(claim.target, { since, page });
+      items = await lister.listRepoIssuesSince(claim.target, { since: pageSince, page: apiPage });
     } catch (err) {
       const classified = classifyReadFailure(err, now());
       report.stoppedBecause = classified.stop;
@@ -461,6 +478,8 @@ async function walkRepo(
     }
     report.pages += 1;
     report.seen += items.length;
+
+    const cursorBeforePage = cursor;
 
     for (const issue of items) {
       // The listing carries pull requests exactly as the webhook does, and the
@@ -498,6 +517,20 @@ async function walkRepo(
       }
 
       advanceCursor(issue);
+    }
+
+    // Re-anchor the next request's floor to what this page actually proved,
+    // rather than trusting a numeric page offset against a query GitHub
+    // re-evaluates live (see the comment above the loop). Falls back to the
+    // old page-number walk, still bounded by `iteration`, whenever the floor
+    // did not move — a blocked cursor, or a page that touched nothing newer.
+    const pageMovedFloor =
+      !cursorBlocked && cursor !== null && (cursorBeforePage === null || cursor > cursorBeforePage);
+    if (pageMovedFloor) {
+      pageSince = cursor;
+      apiPage = 1;
+    } else {
+      apiPage += 1;
     }
 
     // Never backwards. The overlap makes a run re-list issues the previous run

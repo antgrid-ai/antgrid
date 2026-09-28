@@ -4,12 +4,18 @@
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from "bun:test";
 import { startTestPg, type PgHandle } from "../helpers/pg.js";
 import { buildTestApp } from "../helpers/app.js";
-import { createTestSession, createTestSubscription, createTestUser } from "../helpers/fixtures.js";
+import {
+  addTestMember,
+  createTestSession,
+  createTestSubscription,
+  createTestUser,
+} from "../helpers/fixtures.js";
 import {
   upsertIntegration,
   upsertIntegrationRepo,
   type RepoVisibility,
 } from "../../src/models/integration.js";
+import { startGithubInstall } from "../../src/integrations/github-install.js";
 import type { Env } from "../../src/env.js";
 
 let pg: PgHandle;
@@ -46,6 +52,16 @@ async function signIn(email: string) {
   const { cookie } = await createTestSession(pg.db, user.id);
   const account = await pg.db.productAccount.findUniqueOrThrow({ where: { userId: user.id } });
   return { user, accountId: account.id, cookie };
+}
+
+/** A second user joined onto `accountId` as a non-owner — the shape every
+ *  owner-only-route test needs, since a solo signed-up user is always the
+ *  owner of their own account (`isBillingAccountOwner`'s fallback). */
+async function signInMember(accountId: string, email: string) {
+  const user = await createTestUser(pg.db, email);
+  await addTestMember(pg.db, accountId, user.id, "member");
+  const { cookie } = await createTestSession(pg.db, user.id);
+  return { user, cookie };
 }
 
 async function connect(app: App, cookie: string): Promise<Response> {
@@ -162,7 +178,7 @@ describe("GET /integrations/connect", () => {
       expect(new URL(res.headers.get("location") ?? "").origin).toBe("https://github.com");
     });
 
-    test("a browser signed in as someone else is signed out and sent to sign in as the app's user, with no install state minted", async () => {
+    test("a browser signed in as someone else is sent to confirm the switch, not signed out yet", async () => {
       const app = build();
       const { cookie } = await signIn("nia@example.com");
       const res = await app.request(
@@ -170,16 +186,97 @@ describe("GET /integrations/connect", () => {
         { headers: { cookie } }
       );
       const location = res.headers.get("location") ?? "";
-      expect(location).toContain("/login");
-      expect(location).toContain(encodeURIComponent("someone-else@example.com"));
+      expect(location).toBe(
+        `/integrations/switch-account?asEmail=${encodeURIComponent("someone-else@example.com")}`
+      );
       // Nothing bound to the wrong account: the install-state cookie is never
       // set on this path.
       expect(res.headers.get("set-cookie") ?? "").not.toContain("antgrid.gh_install=");
 
-      // The mismatched session is actually gone, not just redirected past.
+      // A GET is side-effect-free: the mismatched session is still alive. This
+      // is the property the old behaviour (sign out on the redirect itself)
+      // broke — any page could force this same GET as a top-level navigation
+      // and ride the session cookie into a logout the person never asked for.
       const stillSignedIn = await app.request("/integrations", { headers: { cookie } });
-      expect(stillSignedIn.headers.get("location")).toContain("/login");
+      expect(stillSignedIn.status).toBe(200);
     });
+  });
+
+  test("a member of the account cannot start a connect, and no install state is minted", async () => {
+    const app = build();
+    const owner = await signIn("nia@example.com");
+    const { cookie: memberCookie } = await signInMember(owner.accountId, "member@example.com");
+
+    const res = await connect(app, memberCookie);
+    expect(res.headers.get("location")).toBe("/integrations?github=not_owner");
+    expect(res.headers.get("set-cookie") ?? "").not.toContain("antgrid.gh_install=");
+  });
+});
+
+describe("GET /integrations/switch-account", () => {
+  test("shows the account the app expects without touching the session", async () => {
+    const app = build();
+    const { cookie } = await signIn("nia@example.com");
+    const res = await app.request(
+      "/integrations/switch-account?asEmail=someone-else@example.com",
+      { headers: { cookie } }
+    );
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain("someone-else@example.com");
+    expect(html).toContain("/ui/integrations/switch-account");
+
+    const stillSignedIn = await app.request("/integrations", { headers: { cookie } });
+    expect(stillSignedIn.status).toBe(200);
+  });
+
+  test("with no asEmail there is nothing to confirm", async () => {
+    const app = build();
+    const { cookie } = await signIn("nia@example.com");
+    const res = await app.request("/integrations/switch-account", { headers: { cookie } });
+    expect(res.headers.get("location")).toBe("/integrations");
+  });
+
+  test("an unauthenticated browser is sent to sign in first", async () => {
+    const app = build();
+    const res = await app.request("/integrations/switch-account?asEmail=x@example.com");
+    expect(res.headers.get("location")).toBe("/login");
+  });
+});
+
+describe("POST /ui/integrations/switch-account", () => {
+  test("an actual same-origin submit signs the browser out and sends it to sign in", async () => {
+    const app = build();
+    const { cookie } = await signIn("nia@example.com");
+    const res = await app.request("/ui/integrations/switch-account", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded", origin: ORIGIN, cookie },
+      body: new URLSearchParams({ asEmail: "someone-else@example.com" }).toString(),
+    });
+    const location = res.headers.get("location") ?? "";
+    expect(location).toContain("/login");
+    expect(location).toContain(encodeURIComponent("someone-else@example.com"));
+
+    const stillSignedIn = await app.request("/integrations", { headers: { cookie } });
+    expect(stillSignedIn.headers.get("location")).toContain("/login");
+  });
+
+  test("a cross-site submit is refused by the router's same-origin check, and the session survives", async () => {
+    const app = build();
+    const { cookie } = await signIn("nia@example.com");
+    const res = await app.request("/ui/integrations/switch-account", {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        origin: "https://evil.example",
+        cookie,
+      },
+      body: new URLSearchParams({ asEmail: "someone-else@example.com" }).toString(),
+    });
+    expect(res.status).toBe(403);
+
+    const stillSignedIn = await app.request("/integrations", { headers: { cookie } });
+    expect(stillSignedIn.status).toBe(200);
   });
 });
 
@@ -231,6 +328,30 @@ describe("GET /integrations/callback", () => {
     );
     expect(res.headers.get("location")).toBe("/integrations?github=code_rejected");
     expect(await pg.db.integration.count({ where: { accountId } })).toBe(0);
+  });
+
+  test("a member is refused here too, independent of /connect refusing them first", async () => {
+    const app = build();
+    const owner = await signIn("nia@example.com");
+    const { user: member, cookie: memberCookie } = await signInMember(
+      owner.accountId,
+      "member@example.com"
+    );
+    // `/integrations/connect` already refuses this member before minting a
+    // state, so a valid one is only reachable in practice through this route's
+    // own check — minted directly here to prove that check exists on its own,
+    // not only as a side effect of the earlier refusal.
+    const start = startGithubInstall({ userId: member.id, appSlug: "antgrid-dev" });
+    const res = await app.request(
+      `/integrations/callback?installation_id=42&code=c&state=${start.url.match(/state=([^&]+)/)?.[1]}`,
+      {
+        headers: {
+          cookie: `${memberCookie}; antgrid.gh_install=${encodeURIComponent(start.cookie)}`,
+        },
+      }
+    );
+    expect(res.headers.get("location")).toBe("/integrations?github=not_owner");
+    expect(await pg.db.integration.count({ where: { accountId: owner.accountId } })).toBe(0);
   });
 });
 
@@ -345,6 +466,25 @@ describe("POST /ui/integrations/repos/:id/sync", () => {
     expect(res.status).toBe(404);
     const row = await pg.db.integrationRepo.findUniqueOrThrow({ where: { id: repoId } });
     expect(row.syncEnabled).toBe(false);
+  });
+
+  test("a member of the account cannot change what it syncs — same boundary as billing", async () => {
+    const app = build();
+    const owner = await signIn("nia@example.com");
+    const { repoId } = await seedRepo(owner.accountId, owner.user.id);
+    const { cookie: memberCookie } = await signInMember(owner.accountId, "member@example.com");
+
+    const res = await postSync(app, repoId, memberCookie, {
+      syncEnabled: "on",
+      pushEnabled: "on",
+      importFilterKind: "all",
+    });
+    // Same shape as the other frozen cases: 200 with the unchanged row, so an
+    // htmx swap cannot leave the toggle showing a state that was never stored.
+    expect(res.status).toBe(200);
+    const row = await pg.db.integrationRepo.findUniqueOrThrow({ where: { id: repoId } });
+    expect(row.syncEnabled).toBe(false);
+    expect(row.pushEnabled).toBe(false);
   });
 });
 

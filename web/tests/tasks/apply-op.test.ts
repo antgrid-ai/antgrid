@@ -524,6 +524,89 @@ describe("applyOp — a create whose outcome is unknown", () => {
   });
 });
 
+describe("applyOp — an op left behind by a re-publish", () => {
+  // `cancelPendingOps` spares exactly one shape of op across a re-publish: an
+  // `issue.create` already attempted, whose outcome GitHub never confirmed —
+  // cancelling it blind could orphan an issue it actually created. That op
+  // keeps the OLD integration id while the task, moments later, points at a
+  // different installation's repository. Sending it would mint credentials
+  // for the installation it was queued under and address the repository the
+  // task targets now — a write under the wrong tenant's token.
+  test("a kept create whose task was re-pointed at another installation is cancelled, not sent", async () => {
+    const account = await makeAccount();
+    const oldIntegration = await connect(account);
+    const oldRepo = await addRepo(account, oldIntegration);
+
+    const created = await createTask(pg.db, {
+      accountId: account.accountId,
+      createdBy: account.userId,
+      title: "publish me",
+    });
+    if (created.kind !== "ok") throw new Error(created.kind);
+    const taskId = created.task.id;
+    await pg.db.task.update({
+      where: { id: taskId },
+      data: { integrationRepoId: oldRepo.id, syncState: "pending" },
+    });
+    await enqueue(oldIntegration.id, taskId, {
+      kind: "issue.create",
+      title: "publish me",
+      body: "the body",
+      state: "open",
+      stateReason: null,
+      labels: [],
+    });
+    const pending = await pg.db.taskSyncOp.findFirstOrThrow({ where: { taskId } });
+    // The lost-response state `cancelPendingOps` refuses to cancel blind.
+    await pg.db.taskSyncOp.update({
+      where: { id: pending.id },
+      data: { attemptedAt: new Date(Date.now() - 120_000) },
+    });
+
+    // A second installation, a different repository — what a re-publish to a
+    // new target leaves the task pointing at, with the kept create above still
+    // carrying the first installation's id.
+    const newIntegration = await upsertIntegration(pg.db, {
+      accountId: account.accountId,
+      provider: "github",
+      externalAccountId: "org-y",
+      installationId: "43",
+      displayName: "other-org",
+      installedBy: account.userId,
+    });
+    if (newIntegration.kind !== "ok") throw new Error(`upsertIntegration: ${newIntegration.kind}`);
+    const newRepo = await upsertIntegrationRepo(pg.db, {
+      accountId: account.accountId,
+      integrationId: newIntegration.integration.id,
+      repoKey: "github.com/other-org/widget",
+      externalRepoId: "gh-200",
+      visibility: "private",
+      syncEnabled: true,
+    });
+    if (newRepo.kind !== "ok") throw new Error(`upsertIntegrationRepo: ${newRepo.kind}`);
+    await pg.db.integrationRepo.update({ where: { id: newRepo.repo.id }, data: { pushEnabled: true } });
+    await pg.db.task.update({ where: { id: taskId }, data: { integrationRepoId: newRepo.repo.id } });
+
+    const { writer, calls } = fakeWriter();
+    const claimed = await claimOne();
+    expect(claimed.integrationId).toBe(oldIntegration.id);
+    expect(expectKind(await run(writer, claimed), "skipped").reason).toBe("integration_mismatch");
+    expect(calls.get).toHaveLength(0);
+    expect(calls.create).toHaveLength(0);
+    expect(calls.list).toHaveLength(0);
+
+    const cancelledOp = await opRow(claimed.id);
+    expect(cancelledOp.status).toBe("cancelled");
+    expect(cancelledOp.lastError).toContain("different installation");
+
+    // The task's current link is the new, valid one and is left exactly as the
+    // re-publish set it — only the stale op is cancelled.
+    const after = await taskRow(taskId);
+    expect(after.integrationRepoId).toBe(newRepo.repo.id);
+    expect(after.syncState).toBe("pending");
+  });
+});
+
 describe("applyOp — echo suppression end to end", () => {
   test("the delivery echoing our own push is dropped, a different one is merged", async () => {
     const account = await makeAccount();

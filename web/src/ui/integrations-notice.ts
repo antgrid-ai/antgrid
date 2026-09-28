@@ -28,6 +28,7 @@ export const IntegrationsNoticeSchema = z.enum([
   "install_requested",
   "provider_error",
   "not_configured",
+  "not_owner",
 ]);
 export type IntegrationsNotice = z.infer<typeof IntegrationsNoticeSchema>;
 

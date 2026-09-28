@@ -125,7 +125,12 @@ export type DropReason =
   | "own_echo"
   /** A push abort handed us an issue for a task whose repository or installation
    *  no longer resolves. */
-  | "unknown_integration";
+  | "unknown_integration"
+  /** `issue.updated_at` is older than the task's own `remoteUpdatedAt` — a
+   *  delivery that arrived out of order, or a poll walk resuming behind a
+   *  webhook that already landed. Applying it would revert the task to a state
+   *  older than what it already reflects. */
+  | "stale_delivery";
 
 type ApplyOutcome =
   | { kind: "applied"; detail: string }
@@ -153,6 +158,10 @@ export async function drainGithubWebhooks(
     WHERE provider = ${GITHUB_PROVIDER}
       AND processed_at IS NULL
       AND attempts < ${MAX_WEBHOOK_ATTEMPTS}
+      -- A prior failure's backoff lease; without it a failing row was
+      -- reclaimed on the very next pass and burned the attempt ceiling in
+      -- milliseconds rather than over any real spread of time.
+      AND next_attempt_at <= now()
       AND type IN (${Prisma.join([...GITHUB_HANDLED_EVENTS])})
     ORDER BY received_at ASC
     LIMIT ${batchSize}`;
@@ -416,6 +425,7 @@ const IMPORT_TASK_SELECT = {
   assigneeLogin: true,
   assigneeAvatarUrl: true,
   remoteSnapshot: true,
+  remoteUpdatedAt: true,
   localConflict: true,
   pushedHash: true,
   labels: { select: { label: { select: { name: true } } } },
@@ -699,6 +709,23 @@ async function mergeImportedTask(
   // too; cleared below by the next merge that actually applies a remote change,
   // because after that the last thing both sides agreed on is no longer our push.
   if (isOwnEcho(row.pushedHash, issue)) return { kind: "dropped", reason: "own_echo" };
+
+  // The monotonic floor: a delivery whose issue is OLDER than what this task
+  // already reflects is a reorder, not a change. GitHub does not guarantee
+  // webhook delivery order, and the reconcile poll's own resume window
+  // (`POLL_OVERLAP_SECONDS`) deliberately re-lists issues a webhook may already
+  // have applied — either can hand this function a snapshot from before the one
+  // it already merged. Applying it regardless would revert the task and, absent
+  // a later delivery to correct it, leave it reverted for good. Only a
+  // provably-older pair is refused: an unparseable timestamp on either side is
+  // "unknown", not "stale", and is let through exactly as before.
+  if (
+    row.remoteUpdatedAt !== null &&
+    context.remoteUpdatedAt !== null &&
+    context.remoteUpdatedAt.getTime() < row.remoteUpdatedAt.getTime()
+  ) {
+    return { kind: "dropped", reason: "stale_delivery" };
+  }
 
   const local: LocalFields = {
     title: row.title,

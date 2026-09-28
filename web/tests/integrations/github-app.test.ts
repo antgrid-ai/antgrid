@@ -228,8 +228,8 @@ describe("listUserInstallations", () => {
     const rows = await client.listUserInstallations("ghu_user");
 
     expect(rows).toEqual([
-      { installationId: "1", accountLogin: "org-1", accountId: "900" },
-      { installationId: "2", accountLogin: "org-2", accountId: "901" },
+      { installationId: "1", accountLogin: "org-1", accountId: "900", accountType: "Organization" },
+      { installationId: "2", accountLogin: "org-2", accountId: "901", accountType: "Organization" },
     ]);
     expect(calls).toHaveLength(1);
     expect(calls[0]!.url).toBe(
@@ -270,8 +270,43 @@ describe("listUserInstallations", () => {
     ]);
     const client = createGithubAppClient({ config: config(), fetch });
     expect(await client.listUserInstallations("ghu_user")).toEqual([
-      { installationId: "77", accountLogin: null, accountId: null },
+      { installationId: "77", accountLogin: null, accountId: null, accountType: null },
     ]);
+  });
+});
+
+describe("getAuthenticatedUser", () => {
+  test("resolves the id behind the user token", async () => {
+    const { fetch, calls } = recordingFetch([json({ id: 501, login: "nia" })]);
+    const client = createGithubAppClient({ config: config(), fetch });
+    expect(await client.getAuthenticatedUser("ghu_user")).toEqual({ id: "501" });
+    expect(calls[0]!.url).toBe("https://api.github.com/user");
+    expect(headerOf(calls[0]!, "authorization")).toBe("Bearer ghu_user");
+  });
+});
+
+describe("getOrgMembershipForUser", () => {
+  test("returns the state and role for a member", async () => {
+    const { fetch, calls } = recordingFetch([json({ state: "active", role: "admin" })]);
+    const client = createGithubAppClient({ config: config(), fetch });
+    expect(await client.getOrgMembershipForUser("ghu_user", "acme")).toEqual({
+      state: "active",
+      role: "admin",
+    });
+    expect(calls[0]!.url).toBe("https://api.github.com/user/memberships/orgs/acme");
+  });
+
+  test("a 404 is null, not a thrown refusal", async () => {
+    const { fetch } = recordingFetch([json({ message: "Not Found" }, 404)]);
+    const client = createGithubAppClient({ config: config(), fetch });
+    expect(await client.getOrgMembershipForUser("ghu_user", "acme")).toBeNull();
+  });
+
+  test("a 500 is a thrown, retryable failure", async () => {
+    const { fetch } = recordingFetch([json({}, 500)]);
+    const client = createGithubAppClient({ config: config(), fetch });
+    const err = await captureError(() => client.getOrgMembershipForUser("ghu_user", "acme"));
+    expect(err.failure).toBe("retryable");
   });
 });
 

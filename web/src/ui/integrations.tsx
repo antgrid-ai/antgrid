@@ -95,6 +95,10 @@ const NOTICE: Record<IntegrationsNotice, { tone: "ok" | "warn" | "error"; text: 
     text: "Your request went to the people who own that GitHub organisation. It connects here once one of them approves it.",
   },
   not_configured: { tone: "error", text: "This server has no GitHub App set up." },
+  not_owner: {
+    tone: "error",
+    text: "Only the account owner can connect GitHub or change what it syncs.",
+  },
 };
 
 const NOTICE_ALERT: Record<"ok" | "warn" | "error", string> = {

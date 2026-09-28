@@ -129,6 +129,8 @@ export async function getOrCreateLabel(
   }
 }
 
+const LABEL_LIST_LIMIT = 1000;
+
 /**
  * Every label a task in `projectId` may carry: the account-wide vocabulary plus
  * that project's own. Passing no project lists the account-wide set alone,
@@ -142,22 +144,59 @@ export async function listLabels(
   const scoped = projectId !== null && isUuid(projectId) ? [{ projectId }] : [];
   return db.label.findMany({
     where: { accountId: args.accountId, OR: [{ projectId: null }, ...scoped] },
-    orderBy: { name: "asc" },
+    orderBy: [{ name: "asc" }, { id: "asc" }],
+    take: LABEL_LIST_LIMIT,
     select: LABEL_SELECT,
   });
 }
 
-/** Deleting a label detaches it from every task by cascade — a label nobody can
- *  see must not stay on rows the merge will later push. */
+/**
+ * Deleting a label detaches it from every task by cascade — a label nobody can
+ * see must not stay on rows the merge will later push.
+ *
+ * That cascade is invisible to the outbox: a task linked to an issue keeps the
+ * deleted label's name in whatever it last pushed until something enqueues the
+ * new set. So every task the label was on gets its own diffed label-set push,
+ * same as `attachLabel`/`detachLabel`, inside the transaction that removes it —
+ * a delete that outran its own push would let the label come back on the next
+ * webhook that reads the (now stale) provider state.
+ *
+ * Affected tasks are locked in sorted `taskId` order before the delete, the
+ * same deadlock-avoidance rule `integration-identity.ts` documents for its own
+ * sorted upsert: two deletes (or a delete racing a label edit) touching an
+ * overlapping task set must acquire `tasksync:` locks in one fixed order.
+ */
 export async function deleteLabel(
-  db: Tx,
+  db: DB,
   args: { accountId: string; labelId: string }
 ): Promise<boolean> {
   if (!isUuid(args.labelId)) return false;
-  const result = await db.label.deleteMany({
-    where: { id: args.labelId, accountId: args.accountId },
+  return db.$transaction(async (tx) => {
+    const label = await tx.label.findFirst({
+      where: { id: args.labelId, accountId: args.accountId },
+      select: { id: true },
+    });
+    if (!label) return false;
+
+    const rows = await tx.taskLabel.findMany({
+      where: { labelId: args.labelId },
+      select: { taskId: true },
+    });
+    const taskIds = [...new Set(rows.map((row) => row.taskId))].sort();
+
+    const before = new Map<string, string[]>();
+    for (const taskId of taskIds) {
+      await lockTaskSync(tx, taskId);
+      before.set(taskId, await labelNames(tx, taskId));
+    }
+
+    await tx.label.delete({ where: { id: args.labelId } });
+
+    for (const taskId of taskIds) {
+      await enqueueLabelPush(tx, args.accountId, taskId, before.get(taskId)!);
+    }
+    return true;
   });
-  return result.count > 0;
 }
 
 export type LabelResolution =

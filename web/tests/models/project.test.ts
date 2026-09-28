@@ -61,6 +61,7 @@ describe("bindLocalProject: the other half of the repoKey join", () => {
     const bound = ok(
       await bindLocalProject(pg.db, {
         accountId: a.accountId,
+        userId: a.userId,
         repoKey: "github.com/acme/relay",
         displayName: "relay",
         deviceId: device.deviceId,
@@ -100,6 +101,7 @@ describe("bindLocalProject: the other half of the repoKey join", () => {
 
     await bindLocalProject(pg.db, {
       accountId: b.accountId,
+      userId: b.userId,
       repoKey: "github.com/acme/relay",
       displayName: "relay",
       deviceId: device.deviceId,
@@ -143,6 +145,7 @@ describe("bindLocalProject: the other half of the repoKey join", () => {
 
     await bindLocalProject(pg.db, {
       accountId: a.accountId,
+      userId: a.userId,
       repoKey: "github.com/acme/relay",
       displayName: "relay",
       deviceId: device.deviceId,

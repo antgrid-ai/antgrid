@@ -108,40 +108,79 @@ const GithubRepoRefSchema = z
 export type GithubRepoRef = z.infer<typeof GithubRepoRefSchema>;
 
 /**
+ * Rejects a body carrying a key that belongs to a DIFFERENT handled event's
+ * shape.
+ *
+ * `X-GitHub-Event` is a header, outside the signed bytes, so a captured
+ * `(body, signature)` pair replays under any header the caller likes — the
+ * dedup key hashes the raw bytes and does not care what the replay claims to
+ * be. `.loose()` alone does not close this: it accepts and ignores unknown
+ * keys, so an `issues` delivery whose `action` happens to be `"deleted"`
+ * replayed with the header `installation` would otherwise parse cleanly
+ * against `InstallationEventSchema` and reach `applyInstallation`'s
+ * `"deleted"` case — revoking the whole integration from a payload that was
+ * never an installation event. Each handled event's schema therefore forbids
+ * every key another handled event's payload carries and this one's does not,
+ * so a body shaped for one event can only ever validate as itself.
+ */
+function distinctEventShape<T extends z.ZodObject<z.ZodRawShape>>(
+  schema: T,
+  foreignKeys: readonly string[]
+): T {
+  // zod v4 attaches a `.refine` check in place rather than wrapping the
+  // schema in a distinct type, so the return type is still `T` — annotating
+  // it as a fresh `z.ZodType<z.infer<T>>` does not typecheck, since TS cannot
+  // prove a generic object schema's inferred output matches `output<T>`.
+  return schema.refine(
+    (body) => foreignKeys.every((key) => !(key in body)),
+    { message: "payload shape belongs to a different event type" }
+  );
+}
+
+/**
  * Actions are `z.string()` rather than an enum on purpose: GitHub adds them
  * (`new_permissions_accepted` arrived years after `installation` shipped), and
  * an enum turns a new one into a payload that fails validation five times and
  * gives up. An unrecognized action is a no-op the drain marks processed.
  */
-export const InstallationEventSchema = z
-  .object({
-    action: z.string().max(64),
-    installation: z
-      .object({
-        id: ExternalIdSchema,
-        account: z.object({ login: z.string().max(200) }).loose().optional(),
-      })
-      .loose(),
-    repositories: z.array(GithubRepoRefSchema).max(1000).optional(),
-  })
-  .loose();
+export const InstallationEventSchema = distinctEventShape(
+  z
+    .object({
+      action: z.string().max(64),
+      installation: z
+        .object({
+          id: ExternalIdSchema,
+          account: z.object({ login: z.string().max(200) }).loose().optional(),
+        })
+        .loose(),
+      repositories: z.array(GithubRepoRefSchema).max(1000).optional(),
+    })
+    .loose(),
+  ["repository", "issue", "comment", "repositories_added", "repositories_removed"]
+);
 
-export const InstallationRepositoriesEventSchema = z
-  .object({
-    action: z.string().max(64),
-    installation: z.object({ id: ExternalIdSchema }).loose(),
-    repositories_added: z.array(GithubRepoRefSchema).max(1000).optional(),
-    repositories_removed: z.array(GithubRepoRefSchema).max(1000).optional(),
-  })
-  .loose();
+export const InstallationRepositoriesEventSchema = distinctEventShape(
+  z
+    .object({
+      action: z.string().max(64),
+      installation: z.object({ id: ExternalIdSchema }).loose(),
+      repositories_added: z.array(GithubRepoRefSchema).max(1000).optional(),
+      repositories_removed: z.array(GithubRepoRefSchema).max(1000).optional(),
+    })
+    .loose(),
+  ["repository", "issue", "comment", "repositories"]
+);
 
-export const RepositoryEventSchema = z
-  .object({
-    action: z.string().max(64),
-    installation: z.object({ id: ExternalIdSchema }).loose(),
-    repository: GithubRepoRefSchema,
-  })
-  .loose();
+export const RepositoryEventSchema = distinctEventShape(
+  z
+    .object({
+      action: z.string().max(64),
+      installation: z.object({ id: ExternalIdSchema }).loose(),
+      repository: GithubRepoRefSchema,
+    })
+    .loose(),
+  ["issue", "comment", "repositories", "repositories_added", "repositories_removed"]
+);
 
 /** A provider identity we snapshot but never resolve to an account member —
  *  there is no provider-identity → member mapping table, so `avatar_url` and
@@ -205,25 +244,34 @@ export type GithubIssueComment = z.infer<typeof GithubIssueCommentSchema>;
 
 /** `repository` is required on both: it is the only thing in the payload that
  *  names which repo of the installation the issue lives in, and that lookup is
- *  what the per-repo consents hang off. */
-export const IssuesEventSchema = z
-  .object({
-    action: z.string().max(64),
-    installation: z.object({ id: ExternalIdSchema }).loose(),
-    repository: GithubRepoRefSchema,
-    issue: GithubIssueSchema,
-  })
-  .loose();
+ *  what the per-repo consents hang off. Forbids `comment`, the one key an
+ *  `issue_comment` body adds on top of this exact shape — without it a captured
+ *  `issue_comment` delivery replayed as `issues` would import the embedded issue
+ *  a second time under the wrong event's action semantics. */
+export const IssuesEventSchema = distinctEventShape(
+  z
+    .object({
+      action: z.string().max(64),
+      installation: z.object({ id: ExternalIdSchema }).loose(),
+      repository: GithubRepoRefSchema,
+      issue: GithubIssueSchema,
+    })
+    .loose(),
+  ["comment", "repositories", "repositories_added", "repositories_removed"]
+);
 
-export const IssueCommentEventSchema = z
-  .object({
-    action: z.string().max(64),
-    installation: z.object({ id: ExternalIdSchema }).loose(),
-    repository: GithubRepoRefSchema,
-    issue: GithubIssueSchema,
-    comment: GithubIssueCommentSchema,
-  })
-  .loose();
+export const IssueCommentEventSchema = distinctEventShape(
+  z
+    .object({
+      action: z.string().max(64),
+      installation: z.object({ id: ExternalIdSchema }).loose(),
+      repository: GithubRepoRefSchema,
+      issue: GithubIssueSchema,
+      comment: GithubIssueCommentSchema,
+    })
+    .loose(),
+  ["repositories", "repositories_added", "repositories_removed"]
+);
 
 /**
  * True when an issue object is really a pull request.

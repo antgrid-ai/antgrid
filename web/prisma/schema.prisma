@@ -223,6 +223,11 @@ model WebhookEvent {
   processedAt     DateTime? @map("processed_at") @db.Timestamptz(6)
   attempts        Int       @default(0)
   lastError       String?   @map("last_error")
+  /// Exponential-backoff lease, mirroring `task_sync_ops.next_attempt_at`: a
+  /// failure pushes this forward instead of leaving the row claimable on the
+  /// very next drain pass, which is what let a persistently failing row burn
+  /// `MAX_WEBHOOK_ATTEMPTS` inside one invocation's first few passes.
+  nextAttemptAt   DateTime  @default(now()) @map("next_attempt_at") @db.Timestamptz(6)
 
   @@unique([provider, providerEventId], map: "webhook_events_provider_event_key")
   /// The drain reads `WHERE provider = ? AND processed_at IS NULL`, and this
@@ -498,6 +503,13 @@ model ProjectBinding {
   /// user (`devices_user_id_device_id_key`), so there is nothing global to
   /// reference — the route proves ownership by scoping to the caller's userId.
   deviceId       String    @map("device_id")
+  /// The user whose device this is, snapshotted at bind time. `deviceId` alone
+  /// cannot answer "same device" across two accounts: it is client-chosen and
+  /// unique only per user, so two different users can hold one that collides
+  /// (`project-bindings.test.ts`, "reusing its device uuid"). This is what lets
+  /// `bindLocalProject` tell its own caller moving accounts (join/leave a team)
+  /// from a stranger presenting the same string.
+  userId         String    @map("user_id")
   localProjectId String    @map("local_project_id")
   localPath      String    @map("local_path")
   lastSeenAt     DateTime? @map("last_seen_at") @db.Timestamptz(6)
@@ -648,6 +660,14 @@ model Task {
 model TaskRun {
   id     String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   taskId String @map("task_id") @db.Uuid
+  /// Denormalized from the target task at write time, and part of the unique
+  /// key below for the same reason `project_bindings` learned to carry
+  /// `userId`: `deviceId` is client-chosen and unique only per user, so two
+  /// different ACCOUNTS can present the same `(deviceId, sessionId)` pair.
+  /// Without this column that pair is a single global row two tenants can
+  /// collide on; with it, the row a report resolves to can never leave the
+  /// account it was written for.
+  accountId String @map("account_id") @db.Uuid
   /// `devices.device_id`, not `devices.id`, and FK-less for the same reason as
   /// `project_bindings.device_id`: that column is unique only per user, so there
   /// is no global key to reference. The route proves it by taking it from the
@@ -680,8 +700,10 @@ model TaskRun {
   /// A run is identified by the session it is attached to, and a session id is
   /// minted per bridge with no global registry — so the machine is part of the
   /// key. This is what makes the bridge's repeated status reports an upsert
-  /// rather than a row per advert.
-  @@unique([deviceId, sessionId], map: "task_runs_device_session_key")
+  /// rather than a row per advert. Scoped by `accountId` first: `deviceId` is
+  /// unique only per user, so the pair alone is addressable by more than one
+  /// tenant.
+  @@unique([accountId, deviceId, sessionId], map: "task_runs_account_device_session_key")
   @@index([taskId, startedAt], map: "task_runs_task_started_idx")
   @@map("task_runs")
 }

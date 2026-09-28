@@ -141,10 +141,14 @@ export function webhookRoutes(deps: {
    */
   r.post("/webhooks/github", async (c) => {
     // 503 rather than accepting the delivery: an unverifiable body must never be
-    // ingested because configuration is missing. GitHub retries, so a secret
-    // added later loses nothing.
+    // ingested because configuration is missing. GitHub's automatic redelivery
+    // covers a 5xx like this one, so a secret added later loses nothing.
     if (!deps.githubWebhookSecret) return c.json({ error: "GITHUB_NOT_CONFIGURED" }, 503);
 
+    // That redelivery does NOT extend to this 429: GitHub treats a 4xx as a
+    // permanent refusal of the delivery and never retries it on its own, so a
+    // burst this limiter turns away is gone unless someone redelivers it by
+    // hand from GitHub's own UI.
     const ip = deps.clientIp(c);
     if (!githubLimiter(`github-webhook:${ip ?? "unknown"}`)) {
       return c.json({ error: "RATE_LIMITED" }, 429);

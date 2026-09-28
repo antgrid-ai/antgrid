@@ -209,6 +209,10 @@ export type GithubUserInstallation = {
   installationId: string;
   accountLogin: string | null;
   accountId: string | null;
+  /** `"User"` or `"Organization"` — which admin check the install flow must run.
+   *  Null alongside the other account fields when GitHub reports no account at
+   *  all (a deleted installation). */
+  accountType: string | null;
 };
 
 export type GithubInstallationAccount = {
@@ -240,8 +244,13 @@ export interface GithubAppClient {
    *  and must not be logged or persisted. */
   exchangeUserCode(code: string): Promise<string>;
   /**
-   * The installations the authenticated GitHub user can administer — the whole
-   * basis for accepting a callback's `installation_id`.
+   * The installations the authenticated GitHub user can reach at ANY
+   * permission level — org membership or a single repository's collaborator
+   * access both qualify, per GitHub's own docs for this endpoint. That is
+   * accountability enough for nothing on its own; the install flow additionally
+   * requires administrative control via `getAuthenticatedUser` (personal
+   * accounts) or `getOrgMembershipForUser` (organizations) before it accepts a
+   * callback's `installation_id`.
    */
   listUserInstallations(userToken: string): Promise<GithubUserInstallation[]>;
   /**
@@ -249,10 +258,25 @@ export interface GithubAppClient {
    *
    * **This call authorizes nothing.** It is signed with the App JWT, so it
    * succeeds for every installation of the App including installations of orgs
-   * the caller has never heard of. Call it only after `listUserInstallations`
-   * has already proven the id belongs to the person at the keyboard.
+   * the caller has never heard of. Call it only after the install flow has
+   * confirmed administrative control (`getAuthenticatedUser` or
+   * `getOrgMembershipForUser`, per the account type) — `listUserInstallations`
+   * alone proves only that the user can reach the installation at some
+   * permission level, not that they administer it.
    */
   getInstallation(installationId: string): Promise<GithubInstallationAccount>;
+  /** The GitHub identity behind `userToken` — the admin check for a personal
+   *  (`account.type === "User"`) installation, which has no membership
+   *  endpoint: the installation IS administered by its own account. */
+  getAuthenticatedUser(userToken: string): Promise<{ id: string }>;
+  /** `userToken`'s membership in `org`, or null when they are not a member at
+   *  all (GitHub answers 404 rather than a body). The admin check for an
+   *  Organization-type installation: only `state: "active"` and `role: "admin"`
+   *  administers it — an ordinary member or a billing manager does not. */
+  getOrgMembershipForUser(
+    userToken: string,
+    org: string
+  ): Promise<{ state: string; role: string } | null>;
   createInstallationToken(installationId: string): Promise<GithubInstallationToken>;
   listInstallationRepos(installationToken: string): Promise<GithubInstallationRepo[]>;
 }
@@ -288,12 +312,28 @@ const UserInstallationsPageSchema = z
         .object({
           id: ExternalIdSchema,
           account: z
-            .object({ id: ExternalIdSchema, login: z.string().min(1).max(200) })
+            .object({
+              id: ExternalIdSchema,
+              login: z.string().min(1).max(200),
+              type: z.string().min(1).max(64),
+            })
             .loose()
             .nullish(),
         })
         .loose()
     ),
+  })
+  .loose();
+
+const AuthenticatedUserSchema = z.object({ id: ExternalIdSchema }).loose();
+
+/** GitHub answers with a body on every membership state (`active`, `pending`)
+ *  and 404s outright for a non-member, which `getOrgMembershipForUser` turns
+ *  into `null` before this schema ever sees a body. */
+const OrgMembershipSchema = z
+  .object({
+    state: z.string().min(1).max(32),
+    role: z.string().min(1).max(32),
   })
   .loose();
 
@@ -444,8 +484,31 @@ export function createGithubAppClient(opts: {
           installationId: row.id,
           accountLogin: row.account?.login ?? null,
           accountId: row.account?.id ?? null,
+          accountType: row.account?.type ?? null,
         }));
       });
+    },
+
+    async getAuthenticatedUser(userToken: string): Promise<{ id: string }> {
+      const body = await apiGet(AuthenticatedUserSchema, "/user", `Bearer ${userToken}`);
+      return { id: body.id };
+    },
+
+    async getOrgMembershipForUser(
+      userToken: string,
+      org: string
+    ): Promise<{ state: string; role: string } | null> {
+      const endpoint = `/user/memberships/orgs/${encodeURIComponent(org)}`;
+      const res = await send(endpoint, `${API_BASE}${endpoint}`, {
+        method: "GET",
+        headers: apiHeaders(`Bearer ${userToken}`),
+      });
+      // A non-member is a normal answer, not a failure: the caller reads it as
+      // "does not administer" the same as an explicit non-admin role would.
+      if (res.status === 404) return null;
+      if (!res.ok) throw new GithubApiError(statusFailure(res.status), endpoint, res.status, "failed");
+      const body = await decode(OrgMembershipSchema, res, endpoint);
+      return { state: body.state, role: body.role };
     },
 
     async getInstallation(installationId: string): Promise<GithubInstallationAccount> {

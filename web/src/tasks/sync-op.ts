@@ -4,6 +4,7 @@
 import { randomBytes } from "node:crypto";
 import { z } from "zod";
 import type { DB, Tx } from "../db/index.js";
+import { Prisma } from "../generated/prisma/client.js";
 import type { RemoteState } from "./merge.js";
 import { TaskSyncStateSchema } from "./sync-state.js";
 
@@ -646,22 +647,38 @@ export type CancelPendingOpsResult = {
  * transaction as the delete that motivated it — a `title := X` applied after
  * the user stopped tracking the task writes to a repository they walked away
  * from.
+ *
+ * `spareCreates` widens the one exception `cancelPendingOps` already makes for
+ * an attempted create to cover an UN-attempted one too. `publishTaskInTx`
+ * passes it: the caller enqueues a fresh `issue.create` immediately afterwards,
+ * and `enqueueSyncOp`'s own supersede rule already rewrites a pending,
+ * un-attempted create of the same kind in place — cancelling it here first
+ * would only make that call queue a second row instead of reusing the first.
+ * An attempted create is spared either way, for the reason `keptCreate`
+ * documents; it is left to `apply-op.ts`'s cross-installation guard if the
+ * repository this publish points at has changed.
  */
 export async function cancelPendingOps(
   tx: Tx,
-  taskId: string
+  taskId: string,
+  opts: { spareCreates?: boolean } = {}
 ): Promise<CancelPendingOpsResult> {
+  const createKind = TaskSyncOpKindSchema.enum["issue.create"];
+  const spareGuard = opts.spareCreates
+    ? Prisma.sql`AND NOT (kind = ${createKind})`
+    : Prisma.sql`AND NOT (kind = ${createKind} AND attempted_at IS NOT NULL)`;
+
   const cancelled = await tx.$queryRaw<{ id: string; kind: string }[]>`
     UPDATE task_sync_ops SET status = ${TaskSyncOpStatusSchema.enum.cancelled}
     WHERE task_id = ${taskId}::uuid
       AND status = ${TaskSyncOpStatusSchema.enum.pending}
-      AND NOT (kind = ${TaskSyncOpKindSchema.enum["issue.create"]} AND attempted_at IS NOT NULL)
+      ${spareGuard}
     RETURNING id::text AS id, kind`;
 
   const keptCreate = await tx.taskSyncOp.findFirst({
     where: {
       taskId,
-      kind: TaskSyncOpKindSchema.enum["issue.create"],
+      kind: createKind,
       status: TaskSyncOpStatusSchema.enum.pending,
       attemptedAt: { not: null },
     },

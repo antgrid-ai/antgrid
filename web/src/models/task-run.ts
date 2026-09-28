@@ -12,7 +12,7 @@ import type { TaskStatus } from "../tasks/merge.js";
  *
  * The bridge reports the same session repeatedly as its status changes, so
  * every report is an upsert on the session rather than a new row — see
- * `task_runs_device_session_key`.
+ * `task_runs_account_device_session_key`.
  *
  * Two things here are authorization, not bookkeeping. `deviceId` is the
  * caller's own verified device and never a value it named, so a machine can
@@ -32,6 +32,12 @@ export type TaskRunStatus = z.infer<typeof TaskRunStatusSchema>;
 /** The column is `VARCHAR(200)`, so this bound is a floor rather than a
  *  formality: over it, Postgres raises instead of returning a refusal. */
 export const RESULT_SUMMARY_MAX = 200;
+
+/** A long-lived task accumulates one row per session ever attached to it, with
+ *  no natural retention — unlike `listTasksPage`, there is no client-facing
+ *  cursor for this list yet, so the cap is enforced here rather than left
+ *  unbounded until one exists. */
+const RUN_LIST_LIMIT = 500;
 
 const RUN_SELECT = {
   taskId: true,
@@ -115,7 +121,11 @@ export async function recordTaskRun(db: DB, args: RecordTaskRunArgs): Promise<Ta
     // refuses. Same pattern and same namespacing rule as `bindLocalProject`:
     // `hashtext` collapses every key into one global int4 space, so a bare key
     // would contend with billing, task numbering and project binding.
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`taskrun:${args.deviceId}:${args.sessionId}`}))`;
+    // `accountId` is part of the key for the same reason it is part of the
+    // unique index: without it, two accounts reporting the same `deviceId` (a
+    // client-chosen string, unique only per user) would serialize on and
+    // resolve to each other's row.
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`taskrun:${args.accountId}:${args.deviceId}:${args.sessionId}`}))`;
 
     const task = await tx.task.findFirst({
       where: { accountId: args.accountId, number: args.number, deletedAt: null },
@@ -127,15 +137,21 @@ export async function recordTaskRun(db: DB, args: RecordTaskRunArgs): Promise<Ta
     if (!task) return { kind: "not_found" };
 
     const existing = await tx.taskRun.findUnique({
-      where: { deviceId_sessionId: { deviceId: args.deviceId, sessionId: args.sessionId } },
+      where: {
+        accountId_deviceId_sessionId: {
+          accountId: args.accountId,
+          deviceId: args.deviceId,
+          sessionId: args.sessionId,
+        },
+      },
       select: { id: true, taskId: true, endedAt: true },
     });
     // A session belongs to one task for its whole life. Silently re-pointing it
     // would move a finished run's branch and PR onto a task that never ran it.
     if (existing && existing.taskId !== task.id) {
-      // Re-read under `accountId` rather than following the relation: the run
-      // this session is bound to may be another account's, and the display
-      // number is a small sequential key that must not cross that line.
+      // Same account by construction (the lookup above is scoped to it), so the
+      // bound task's own number is safe to read straight off it — unlike before
+      // this row carried `accountId`, this can never resolve to a stranger's.
       const bound = await tx.task.findFirst({
         where: { id: existing.taskId, accountId: args.accountId },
         select: { number: true },
@@ -155,9 +171,16 @@ export async function recordTaskRun(db: DB, args: RecordTaskRunArgs): Promise<Ta
     };
 
     const row = await tx.taskRun.upsert({
-      where: { deviceId_sessionId: { deviceId: args.deviceId, sessionId: args.sessionId } },
+      where: {
+        accountId_deviceId_sessionId: {
+          accountId: args.accountId,
+          deviceId: args.deviceId,
+          sessionId: args.sessionId,
+        },
+      },
       create: {
         taskId: task.id,
+        accountId: args.accountId,
         deviceId: args.deviceId,
         localProjectId: args.localProjectId,
         sessionId: args.sessionId,
@@ -249,6 +272,7 @@ export async function listTaskRuns(
   const rows = await db.taskRun.findMany({
     where: { task: { accountId: args.accountId, number: args.number, deletedAt: null } },
     orderBy: { startedAt: "desc" },
+    take: RUN_LIST_LIMIT,
     select: RUN_SELECT,
   });
   return rows.map(toRecord);

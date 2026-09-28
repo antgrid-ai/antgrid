@@ -99,12 +99,20 @@ function equals(a: string, b: string): boolean {
   return timingSafeEqual(left, right);
 }
 
-/** One installation the authenticated GitHub user administers. */
+/** One installation the authenticated GitHub user can reach — at whatever
+ *  permission level `GET /user/installations` used to resolve it. Reaching it
+ *  is not administering it; see `userAdministersInstallation`. */
 export type InstallationIdentity = {
   installationId: string;
   /** The org or user the App was installed on — `Integration.externalAccountId`. */
   externalAccountId: string;
   displayName: string;
+  /** `"User"` or `"Organization"` — which admin check applies. Null only for an
+   *  installation GitHub reports with no account at all. */
+  accountType: string | null;
+  /** The org login, required to ask `GET /user/memberships/orgs/{org}`. Null
+   *  makes an Organization-type installation unprovable and therefore refused. */
+  accountLogin: string | null;
 };
 
 export type DiscoveredRepo = {
@@ -127,6 +135,12 @@ export interface GithubInstallDirectory {
    *  client that only checks the status hands back a token that is not one. */
   exchangeUserCode(code: string): Promise<string | null>;
   listUserInstallations(userToken: string): Promise<InstallationIdentity[]>;
+  /** The admin check for a `"User"`-type installation: the installation's
+   *  account IS the user, so nothing but the user's own id needs proving. */
+  authenticatedUserId(userToken: string): Promise<string>;
+  /** The admin check for an `"Organization"`-type installation: only an active
+   *  admin membership counts, never an ordinary member or a billing manager. */
+  isActiveOrgAdmin(userToken: string, org: string): Promise<boolean>;
   listInstallationRepos(installationId: string): Promise<DiscoveredRepo[]>;
 }
 
@@ -164,10 +178,20 @@ export function installDirectory(client: GithubAppClient): GithubInstallDirector
                 installationId: row.installationId,
                 externalAccountId: row.accountId,
                 displayName: row.accountLogin ?? row.accountId,
+                accountType: row.accountType,
+                accountLogin: row.accountLogin,
               },
             ]
           : []
       );
+    },
+    async authenticatedUserId(userToken) {
+      const user = await client.getAuthenticatedUser(userToken);
+      return user.id;
+    },
+    async isActiveOrgAdmin(userToken, org) {
+      const membership = await client.getOrgMembershipForUser(userToken, org);
+      return membership?.state === "active" && membership?.role === "admin";
     },
     async listInstallationRepos(installationId) {
       const { token } = await client.createInstallationToken(installationId);
@@ -179,6 +203,34 @@ export function installDirectory(client: GithubAppClient): GithubInstallDirector
       }));
     },
   };
+}
+
+/**
+ * The strong half of the ownership check: does this GitHub user administer
+ * `owned`, as opposed to merely being able to see it.
+ *
+ * The two account types have no common membership endpoint, so each takes its
+ * own question: a personal installation's account IS the user, and an
+ * organization's is answered by `GET /user/memberships/orgs/{org}`, which
+ * `state`/`role` a member, an outside collaborator or a billing manager all
+ * fail. An account type this cannot classify, or an org with no login to ask
+ * about, is refused rather than guessed at — the failure mode of this check
+ * must always be closed, never open.
+ */
+async function userAdministersInstallation(
+  directory: GithubInstallDirectory,
+  userToken: string,
+  owned: InstallationIdentity
+): Promise<boolean> {
+  if (owned.accountType === "User") {
+    const userId = await directory.authenticatedUserId(userToken);
+    return userId === owned.externalAccountId;
+  }
+  if (owned.accountType === "Organization") {
+    if (!owned.accountLogin) return false;
+    return directory.isActiveOrgAdmin(userToken, owned.accountLogin);
+  }
+  return false;
 }
 
 export type CompleteInstallArgs = {
@@ -217,11 +269,18 @@ export type CompleteInstallResult =
  *   GitHub user is; the two identities are unrelated until something ties them.
  *
  * So the question is put to GitHub as the GitHub user: exchange the callback's
- * `code` for a user-to-server token and accept the id only if it appears in
- * `GET /user/installations`, which returns exactly the installations that user
- * administers. This requires the App to be registered with "Request user
- * authorization (OAuth) during installation" — without it no `code` arrives and
- * this flow has nothing to check.
+ * `code` for a user-to-server token, confirm the id appears in
+ * `GET /user/installations`, and then confirm ADMINISTRATIVE control of it —
+ * `GET /user/installations` documents itself as every installation the user can
+ * reach at read, write, OR admin level (an org member or a repo collaborator
+ * both qualify), so membership there is not enough on its own; an org member
+ * with no admin rights could otherwise rebind the whole installation to their
+ * own account. `userAdministersInstallation` asks the stronger question: for a
+ * personal account the installation's account must BE the authenticated user
+ * (`GET /user`); for an organization the user must hold an active `admin`
+ * membership (`GET /user/memberships/orgs/{org}`). This requires the App to be
+ * registered with "Request user authorization (OAuth) during installation" —
+ * without it no `code` arrives and this flow has nothing to check.
  *
  * Deliberately not one transaction. `upsertIntegrationRepo` reports a repo-key
  * conflict from a unique violation, and Postgres aborts the surrounding
@@ -252,6 +311,14 @@ export async function completeGithubInstall(
 
   const owned = installations.find((i) => i.installationId === args.installationId);
   if (!owned) return { kind: "not_your_installation" };
+
+  let administers: boolean;
+  try {
+    administers = await userAdministersInstallation(directory, userToken, owned);
+  } catch (err) {
+    return { kind: "provider_error", detail: describe(err) };
+  }
+  if (!administers) return { kind: "not_your_installation" };
 
   const integration = await upsertIntegration(db, {
     accountId: args.accountId,

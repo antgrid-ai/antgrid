@@ -448,6 +448,59 @@ describe("ordering", () => {
     const keys = ordered.map((t) => t.sortKey);
     expect([...keys].sort()).toEqual(keys);
   });
+
+  test("two concurrent moves into the same gap serialize instead of racing the neighbour read", async () => {
+    const a = await makeAccount();
+    const x = ok(await createTask(pg.db, { ...owner(a), title: "x" })).task;
+    const first = ok(await createTask(pg.db, { ...owner(a), title: "first" })).task;
+    const second = ok(await createTask(pg.db, { ...owner(a), title: "second" })).task;
+    const y = ok(await createTask(pg.db, { ...owner(a), title: "y" })).task;
+
+    // Both target the identical gap (between x and y) for two different
+    // subjects — the one case serialization cannot give each its own key,
+    // since `keyBetween` is a pure function of the two neighbour keys and
+    // neither neighbour moves. What the lock guarantees is that this stays the
+    // ONLY casualty: no interleaved read corrupts the two transactions into an
+    // unhandled DB error, and the result is deterministic rather than a race.
+    const [firstResult, secondResult] = await Promise.all([
+      moveTask(pg.db, {
+        accountId: a.accountId,
+        number: first.number,
+        previousNumber: x.number,
+        nextNumber: y.number,
+      }),
+      moveTask(pg.db, {
+        accountId: a.accountId,
+        number: second.number,
+        previousNumber: x.number,
+        nextNumber: y.number,
+      }),
+    ]);
+    const movedFirst = ok(firstResult);
+    const movedSecond = ok(secondResult);
+    expect(movedFirst.task.sortKey > x.sortKey).toBe(true);
+    expect(movedFirst.task.sortKey < y.sortKey).toBe(true);
+    expect(movedSecond.task.sortKey).toBe(movedFirst.task.sortKey);
+
+    // `listTasks`' tiebreaker (sortKey, then number) is what keeps this tie
+    // from reading as a coin flip: the same two rows in the same order on
+    // every call.
+    const titles = (await listTasks(pg.db, { accountId: a.accountId })).map((t) => t.title);
+    const onceMore = (await listTasks(pg.db, { accountId: a.accountId })).map((t) => t.title);
+    expect(titles).toEqual(onceMore);
+
+    // The gap the tie left behind has no room, and that is a refusal like any
+    // other bad neighbour pair — not the thrown `SortKeyError` a caller would
+    // otherwise have to catch.
+    expect(
+      await moveTask(pg.db, {
+        accountId: a.accountId,
+        number: x.number,
+        previousNumber: first.number,
+        nextNumber: second.number,
+      })
+    ).toEqual({ kind: "neighbours_out_of_order" });
+  });
 });
 
 /**

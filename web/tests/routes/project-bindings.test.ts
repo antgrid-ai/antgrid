@@ -5,6 +5,7 @@ import { describe, test, expect, beforeAll, afterAll, beforeEach } from "bun:tes
 import { startTestPg, type PgHandle } from "../helpers/pg.js";
 import { buildTestApp } from "../helpers/app.js";
 import {
+  addTestMember,
   createTestUser,
   createTestSession,
   createTestSubscription,
@@ -309,6 +310,55 @@ describe("POST /account/projects/bindings", () => {
     // The refusal lands before any write, so A gets no project row out of it
     // either — otherwise a retry loop would mint one repository per attempt.
     expect(await pg.db.project.count()).toBe(1);
+  });
+
+  test("a machine whose user moved to a team re-points its own binding, rather than 409ing forever", async () => {
+    // Joining or leaving a team flips `findActiveMembership` for the same user
+    // and the same device — no re-registration involved — so the binding this
+    // machine already holds must move with it rather than reading as owned by
+    // a stranger.
+    const { app } = buildTestApp(pg.db, pg.url);
+    const { user, token, deviceUuid } = await setupAgent(app, "gina@example.com");
+
+    const personal = await bind(app, token, {
+      deviceUuid,
+      localProjectId: "p1",
+      localPath: "/home/gina/antgrid",
+      repoKey: "github.com/antgrid/antgrid",
+    });
+    expect(personal.status).toBe(200);
+    const personalProjectId = ((await personal.json()) as { projectId: string }).projectId;
+
+    const teamOwner = await createTestUser(pg.db, "gina-team-owner@example.com");
+    await createTestSubscription(pg.db, teamOwner.id, { tier: "pro", seats: 5 });
+    const team = await pg.db.productAccount.findUniqueOrThrow({
+      where: { userId: teamOwner.id },
+    });
+    await addTestMember(pg.db, team.id, user.id, "member");
+
+    const teamBind = await bind(app, token, {
+      deviceUuid,
+      localProjectId: "p1",
+      localPath: "/home/gina/antgrid",
+      repoKey: "github.com/antgrid/antgrid",
+    });
+    expect(teamBind.status).toBe(200);
+    const teamProjectId = ((await teamBind.json()) as { projectId: string }).projectId;
+
+    // A new project under the team's own account, not the stale 409 that a
+    // globally-unique (deviceId, localProjectId) pair with no owner tracking
+    // would produce — and still one binding row, re-pointed rather than
+    // duplicated.
+    expect(teamProjectId).not.toBe(personalProjectId);
+    expect(await pg.db.project.count()).toBe(2);
+    expect(await pg.db.projectBinding.count()).toBe(1);
+    const binding = await pg.db.projectBinding.findUniqueOrThrow({
+      where: { deviceId_localProjectId: { deviceId: deviceUuid, localProjectId: "p1" } },
+    });
+    expect(binding.projectId).toBe(teamProjectId);
+    expect(binding.userId).toBe(user.id);
+    const teamProject = await pg.db.project.findUniqueOrThrow({ where: { id: teamProjectId } });
+    expect(teamProject.accountId).toBe(team.id);
   });
 
   // 401, not the handler's 404: the gate resolves the token's own device and a
