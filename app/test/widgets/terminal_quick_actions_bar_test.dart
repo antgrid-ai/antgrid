@@ -1,67 +1,114 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:ghostty_vte_flutter/ghostty_vte_flutter.dart';
 
 import 'package:antgrid/design/ab_theme.dart';
 import 'package:antgrid/design/widgets/ab_icon_button.dart';
+import 'package:antgrid/widgets/terminal_modifier_keys.dart';
 import 'package:antgrid/widgets/terminal_quick_actions_bar.dart';
 
-Widget _harness(
-  GhosttyTerminalSoftKeyboardController controller, {
+Widget _harness({
   VoidCallback? onZoomOut,
   VoidCallback? onZoomIn,
   VoidCallback? onZoomReset,
-}) => MaterialApp(
-  debugShowCheckedModeBanner: false,
-  theme: buildAbTheme(),
-  home: Scaffold(
-    body: Align(
-      alignment: Alignment.bottomCenter,
-      child: SizedBox(
-        width: 412, // typical phone logical width
-        child: TerminalQuickActionsBar(
-          softKeyboardController: controller,
-          onPick: () async => null,
-          onPicked: (_) async {},
-          uploadBusy: false,
-          onUploadError: (_) {},
-          onSendInput: (_) {},
-          onZoomOut: onZoomOut ?? () {},
-          onZoomIn: onZoomIn ?? () {},
-          onZoomReset: onZoomReset ?? () {},
+  TerminalModifierLatch? latch,
+  void Function(String)? onSendInput,
+  bool composeOpen = false,
+  VoidCallback? onToggleCompose,
+}) {
+  final modifiers = latch ?? TerminalModifierLatch();
+  return MaterialApp(
+    debugShowCheckedModeBanner: false,
+    theme: buildAbTheme(),
+    home: Scaffold(
+      body: Align(
+        alignment: Alignment.bottomCenter,
+        child: SizedBox(
+          width: 412, // typical phone logical width
+          child: TerminalQuickActionsBar(
+            onPick: () async => null,
+            onPicked: (_) async {},
+            uploadBusy: false,
+            onUploadError: (_) {},
+            onSendInput: onSendInput ?? (_) {},
+            onZoomOut: onZoomOut ?? () {},
+            onZoomIn: onZoomIn ?? () {},
+            onZoomReset: onZoomReset ?? () {},
+            modifiers: modifiers,
+            onToggleModifier: modifiers.toggle,
+            composeOpen: composeOpen,
+            onToggleCompose: onToggleCompose ?? () {},
+          ),
         ),
       ),
     ),
-  ),
-);
+  );
+}
 
 void main() {
   testWidgets('renders pinned keyboard toggle + scrolling actions', (
     tester,
   ) async {
-    final controller = GhosttyTerminalSoftKeyboardController();
-    await tester.pumpWidget(_harness(controller));
+    await tester.pumpWidget(_harness());
     await tester.pumpAndSettle();
 
-    // Pinned Keyboard toggle sits before the divider and the upload button.
-    // The keyboard control is a chevron+glyph stack (GestureDetector), so the
-    // upload button is the only AbIconButton left. No IME is up in the test, so
-    // the toggle shows the "raise keyboard" affordance (up-chevron).
+    // Closed, the toggle shows the "raise" affordance (up-chevron). The upload
+    // button is the only AbIconButton, and there is no separate compose key.
     expect(find.byTooltip('Show keyboard'), findsOneWidget);
+    expect(find.byTooltip('Compose multi-line input'), findsNothing);
     expect(find.byType(AbIconButton), findsNWidgets(1));
-    // The control-key strip is present (and scrollable past the fixed edge).
-    expect(find.text('Ctrl+C'), findsOneWidget);
     expect(find.text('Esc'), findsOneWidget);
+    expect(find.text('Ctrl'), findsOneWidget);
+    expect(find.text('Alt'), findsOneWidget);
+    expect(find.text('Shift'), findsOneWidget);
+  });
+
+  testWidgets('the keyboard key toggles the prompt box and follows its state', (
+    tester,
+  ) async {
+    var toggles = 0;
+    await tester.pumpWidget(_harness(onToggleCompose: () => toggles++));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('Show keyboard'));
+    expect(toggles, 1);
+
+    await tester.pumpWidget(
+      _harness(composeOpen: true, onToggleCompose: () => toggles++),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byTooltip('Hide keyboard'), findsOneWidget);
+    await tester.tap(find.byTooltip('Hide keyboard'));
+    expect(toggles, 2);
+  });
+
+  testWidgets('an armed modifier applies to the next bar key, then releases', (
+    tester,
+  ) async {
+    final latch = TerminalModifierLatch();
+    final sent = <String>[];
+    await tester.pumpWidget(
+      _harness(latch: latch, onSendInput: (d) => sent.add(latch.apply(d))),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.ensureVisible(find.text('Shift'));
+    await tester.tap(find.text('Shift'));
+    await tester.pump();
+    expect(latch.value.shift, isTrue);
+
+    await tester.ensureVisible(find.text('Tab'));
+    await tester.tap(find.text('Tab'));
+    await tester.pump();
+    expect(sent, ['\x1b[Z']);
+    expect(latch.value.isEmpty, isTrue);
   });
 
   testWidgets('zoom keys step out/in and long-press resets', (tester) async {
-    final controller = GhosttyTerminalSoftKeyboardController();
     var out = 0;
     var zin = 0;
     var reset = 0;
     await tester.pumpWidget(
       _harness(
-        controller,
         onZoomOut: () => out++,
         onZoomIn: () => zin++,
         onZoomReset: () => reset++,

@@ -54,16 +54,18 @@ class _RecordingLauncher extends LocalAgentLauncher {
   }
 }
 
-DeviceRecord _device({String clientId = 'cid'}) => DeviceRecord(
-  userId: 'u-1',
-  deviceUuid: 'uuid-1',
-  clientId: clientId,
-  clientSecret: 'csec',
-  ed25519Pub: 'e-pub',
-  ed25519Priv: 'e-priv',
-  x25519Pub: 'x-pub',
-  x25519Priv: 'x-priv',
-);
+DeviceRecord _device({String clientId = 'cid', String? endpointSecret}) =>
+    DeviceRecord(
+      userId: 'u-1',
+      deviceUuid: 'uuid-1',
+      clientId: clientId,
+      clientSecret: 'csec',
+      ed25519Pub: 'e-pub',
+      ed25519Priv: 'e-priv',
+      x25519Pub: 'x-pub',
+      x25519Priv: 'x-priv',
+      endpointSecret: endpointSecret,
+    );
 
 // Two microtask turns: enough for a FutureProvider override returning a sync
 // value to propagate through `.future` → AsyncData → the `ref.listen` callback.
@@ -231,8 +233,11 @@ void main() {
 
   test('sign-in on the SAME device does not respawn', () async {
     final launcher = _RecordingLauncher();
+    // Already enrolled: a record without an endpoint secret gains one on the
+    // signed-in resolve, which is a real change (see the test below).
     final keychain = _FakeKeychain(
-      read: () async => _device(clientId: 'cid-1'),
+      read: () async =>
+          _device(clientId: 'cid-1', endpointSecret: 'ZW5kcG9pbnQ='),
     );
 
     final container = ProviderContainer(
@@ -258,6 +263,42 @@ void main() {
     // A respawn tears down the live host (and any open project's loopback
     // transport), so an unchanged device must not trigger one.
     expect(launcher.calls, [(hasDevice: true, forceRespawn: false)]);
+  });
+
+  // A record provisioned before endpoint enrollment gains its endpoint secret
+  // in place on the first signed-in resolve, keeping the same OAuth client. A
+  // cold launch resolves before the user does, so the host comes up on the
+  // stale record and refuses to start its remote control plane; phones then
+  // see the machine as "Connection rejected" until the app is restarted.
+  test('sign-in that adds an endpoint secret respawns the host', () async {
+    final launcher = _RecordingLauncher();
+    var stored = _device(clientId: 'cid-1');
+    final keychain = _FakeKeychain(read: () async => stored);
+
+    final container = ProviderContainer(
+      overrides: [
+        localAgentLauncherProvider.overrideWithValue(launcher),
+        keychainDeviceStoreProvider.overrideWithValue(keychain),
+        currentUserProvider.overrideWith((ref) => ref.watch(_authState)),
+        defaultRelayUrlProvider.overrideWithValue('ws://test.relay'),
+        licenseApiUrlProvider.overrideWithValue('http://test.license'),
+        telemetryEnabledProvider.overrideWithValue(true),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    container.listen(localHostWarmupProvider, (_, _) {});
+    await _settle();
+    expect(launcher.calls, [(hasDevice: true, forceRespawn: false)]);
+
+    stored = _device(clientId: 'cid-1', endpointSecret: 'ZW5kcG9pbnQ=');
+    container
+        .read(_authState.notifier)
+        .set(CurrentUser(userId: 'u-1', email: 'a@b.c', tier: 'pro'));
+    await _settle();
+
+    expect(launcher.calls.last, (hasDevice: true, forceRespawn: true));
+    expect(launcher.clientIds, ['cid-1', 'cid-1']);
   });
 
   test('warm-up failure is swallowed (does not throw)', () async {

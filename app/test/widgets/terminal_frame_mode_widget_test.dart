@@ -94,8 +94,6 @@ const _keysWithdrawn = 'Keys are off while the scrollback is open';
 const _touchKeys = <String, String>{
   'Tab': '\t',
   'Esc': '\x1b',
-  'Ctrl+C': '\x03',
-  'Ctrl+D': '\x04',
   '↑': '\x1b[A',
   '↓': '\x1b[B',
   '→': '\x1b[C',
@@ -1496,6 +1494,8 @@ void main() {
         expect(find.byType(TerminalQuickActionsBar), findsOneWidget);
         expect(find.text(_keysWithdrawn), findsNothing);
         h.transport.sent.clear();
+        await tester.ensureVisible(find.text(entry.key));
+        await tester.pump();
         await tester.tap(find.text(entry.key));
         await tester.pump();
         expect(find.byType(TerminalHistoryView), findsNothing);

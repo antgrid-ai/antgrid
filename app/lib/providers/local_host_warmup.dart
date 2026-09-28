@@ -30,6 +30,12 @@ final localHostWarmupProvider = Provider<void>((ref) {
   // from stdin, and never re-reads them, so this is the only record of what it
   // is actually running on — compared on sign-in to decide whether to respawn.
   String? spawnedClientId;
+  // Whether that host also received an endpoint secret. A record provisioned
+  // before endpoint enrollment gains one in place on the first signed-in
+  // resolve, keeping its OAuth client — so a host spawned on the stale record
+  // (a cold launch resolves before the user does) matches on clientId alone,
+  // and would keep refusing to start its remote control plane forever.
+  var spawnedWithEndpoint = false;
   var warmedOnce = false;
   // A respawn spans two awaits (keychain resolve, then teardown + spawn) and
   // `spawnedClientId` only updates at the end, so every sign-in event arriving
@@ -68,6 +74,7 @@ final localHostWarmupProvider = Provider<void>((ref) {
         telemetryEnabled: ref.read(telemetryEnabledProvider),
       );
       spawnedClientId = device?.clientId;
+      spawnedWithEndpoint = device?.endpointSecret != null;
       warmedOnce = true;
     } catch (e) {
       AbLog.warn(
@@ -104,7 +111,11 @@ final localHostWarmupProvider = Provider<void>((ref) {
       try {
         final device = await resolve();
         // Nothing better to spawn with, or already running on it — leave it be.
-        if (device == null || device.clientId == spawnedClientId) return;
+        if (device == null) return;
+        if (device.clientId == spawnedClientId &&
+            (device.endpointSecret != null) == spawnedWithEndpoint) {
+          return;
+        }
         await warm(device, forceRespawn: true);
       } finally {
         respawning = false;

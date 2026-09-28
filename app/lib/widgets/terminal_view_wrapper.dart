@@ -28,6 +28,7 @@ import '../providers/visible_surface.dart';
 import '../services/app_settings_service.dart';
 import '../services/terminal_service.dart';
 import '../util/detached.dart';
+import '../util/wrapped_url.dart';
 import '../util/external_url.dart';
 import 'clipboard_image.dart';
 import 'send_capture_to_agent.dart';
@@ -36,6 +37,8 @@ import 'send_to_agent_comment.dart';
 import 'terminal_attachment_uploader.dart';
 import 'terminal_cell_metrics.dart';
 import 'terminal_drop_target.dart';
+import 'terminal_compose_box.dart';
+import 'terminal_modifier_keys.dart';
 import 'terminal_history_view.dart';
 import 'terminal_history_capture.dart';
 import 'terminal_history_scrollbar.dart';
@@ -304,6 +307,12 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   final GhosttyTerminalSoftKeyboardController _historySoftKeyboardController =
       GhosttyTerminalSoftKeyboardController();
 
+  /// The key bar's sticky Ctrl/Alt/Shift. Installed on the service as an
+  /// input transform so it also reaches IME keystrokes, which go straight from
+  /// the engine to the wire without passing through this widget.
+  final TerminalModifierLatch _modifiers = TerminalModifierLatch();
+  late final String Function(String) _modifierTransform = _modifiers.apply;
+
   /// The engine's own selection, dropped on every frame that replaces
   /// the screen its row/col anchors point into. The view cannot do this
   /// itself -- a frame is ordinary output to it -- and until it does, its
@@ -569,10 +578,14 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   /// and a dropped one leaves no trace on screen at all.
   ///
   /// Returning live is shared by asynchronous uploads and immediate inputs.
-  void _typeIntoTerminal(String text) {
+  bool _typeIntoTerminal(String text) {
     if (_historyOpen) _closeHistory();
-    if (widget.terminalService.sendInput(widget.tab.terminalId, text)) return;
+    final data = _modifiers.apply(text);
+    if (widget.terminalService.sendInput(widget.tab.terminalId, data)) {
+      return true;
+    }
     if (mounted) showSendRefusedSnackBar(context);
+    return false;
   }
 
   Future<void> _dropAttach({
@@ -637,6 +650,10 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     // this early in the lifecycle. See `TerminalService.primeDisplay` for why
     // the restore cannot wait for `_syncDisplay`'s post-frame pass.
     widget.terminalService.primeDisplay(widget.tab.terminalId);
+    widget.terminalService.setInputTransform(
+      widget.tab.terminalId,
+      _modifierTransform,
+    );
     widget.tab.replaceEpoch.addListener(_onFrameReplaced);
     widget.tab.history.addListener(_onHistoryChanged);
     _hasArchivedRows = widget.tab.history.hasHistory;
@@ -673,6 +690,19 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     if (oldWidget.terminalService != widget.terminalService) {
       _cancelTakeover();
       _watchConnection();
+    }
+    if (oldWidget.terminalService != widget.terminalService ||
+        oldWidget.tab.terminalId != widget.tab.terminalId) {
+      oldWidget.terminalService.setInputTransform(
+        oldWidget.tab.terminalId,
+        null,
+        replacing: _modifierTransform,
+      );
+      widget.terminalService.setInputTransform(
+        widget.tab.terminalId,
+        _modifierTransform,
+      );
+      _modifiers.clear();
     }
     if (oldWidget.tab.terminalId != widget.tab.terminalId ||
         oldWidget.tab.sizeEpoch != widget.tab.sizeEpoch ||
@@ -738,6 +768,14 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   @override
   void dispose() {
     _cancelTakeover();
+    widget.terminalService.setInputTransform(
+      widget.tab.terminalId,
+      null,
+      replacing: _modifierTransform,
+    );
+    _modifiers.dispose();
+    _composeDraft.dispose();
+    _composeFocus.dispose();
     _connectionSub?.cancel();
     _displayService?.setDisplayInterest(this, null);
     FocusManager.instance.removeEarlyKeyEventHandler(_handleEarlyKey);
@@ -1333,6 +1371,8 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
                       right: 0,
                       child: _buildHydrationStrip(hydration, inputPaused),
                     ),
+                    if (_composeOpen && !_hasPhysicalKeyboard)
+                      _buildComposeBox(),
                   ],
                 ),
         ),
@@ -1735,13 +1775,41 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
                               : terminalView,
                         ),
                       );
-                      return amDriver
-                          ? _TerminalGridFreeze(
-                              onMoving: _onRenderSizeMoving,
-                              onSettled: _onRenderSizeSettled,
-                              child: authoritativeView,
-                            )
-                          : authoritativeView;
+                      if (amDriver) {
+                        return _TerminalGridFreeze(
+                          onMoving: _onRenderSizeMoving,
+                          onSettled: _onRenderSizeSettled,
+                          child: authoritativeView,
+                        );
+                      }
+                      if (_historyOpen ||
+                          tab.sessionState != TerminalSessionState.running) {
+                        return authoritativeView;
+                      }
+                      // Its own strip under the grid rather than an overlay:
+                      // floated over the pane it covered the output it exists
+                      // to let the user read. Laid out inside this builder, so
+                      // the takeover grid above is still measured against the
+                      // full pane — the size this device claims is the size it
+                      // will have once the strip is gone.
+                      return Column(
+                        children: [
+                          Expanded(child: authoritativeView),
+                          _TakeControlStrip(
+                            busy: _takeoverTimer != null,
+                            onTap:
+                                _takeoverTimer == null &&
+                                    widget
+                                        .terminalService
+                                        .session
+                                        .transport
+                                        .isEstablished &&
+                                    myClientId != null
+                                ? _takeControl
+                                : null,
+                          ),
+                        ],
+                      );
                     },
                   ),
                 ),
@@ -1788,7 +1856,10 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
                       child: FocusScope(
                         node: _readerScope,
                         onKeyEvent: (_, event) => _handleReaderKey(event),
-                        child: TerminalHistoryView(
+                        child: _readerLetterbox(
+                          amDriver: amDriver,
+                          cell: cell,
+                          child: TerminalHistoryView(
                           key: _historyKey,
                           initialRowId: _historyRow,
                           screenRows: _historyScreen,
@@ -1815,6 +1886,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
                           minimumContrastRatio: _minContrastRatio,
                           onOpenHyperlink: _openHyperlink,
                           onHyperlinkHover: _onHyperlinkHover,
+                          ),
                         ),
                       ),
                     ),
@@ -1875,33 +1947,6 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
                       },
                     ),
                   ),
-                if (!_historyOpen &&
-                    !amDriver &&
-                    tab.sessionState == TerminalSessionState.running)
-                  Positioned(
-                    top: AbTokens.space8,
-                    right: AbTokens.space24 + AbTokens.space8,
-                    child: AbTooltip(
-                      message:
-                          'Fit the shared terminal to this device. Other viewers will follow this size.',
-                      child: AbButton(
-                        compact: true,
-                        label: _takeoverTimer == null
-                            ? 'Take control'
-                            : 'Taking control\u2026',
-                        onTap:
-                            _takeoverTimer == null &&
-                                widget
-                                    .terminalService
-                                    .session
-                                    .transport
-                                    .isEstablished &&
-                                myClientId != null
-                            ? _takeControl
-                            : null,
-                      ),
-                    ),
-                  ),
                 if (_historyOpen)
                   Positioned(
                     bottom: AbTokens.space8,
@@ -1927,6 +1972,41 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     );
   }
 
+  /// Sizes the scrollback reader like the live pane it covers. The reader
+  /// re-wraps rows to its own width, and while another device drives the
+  /// terminal the live pane is that device's grid scaled into this one — so a
+  /// full-bleed reader re-flowed the driver's TUI to a width it was never drawn
+  /// at (box rules broken across lines) and did not line up with the pane
+  /// under it. Held at the driver's grid, the reader's rows are the rows the
+  /// driver saw.
+  Widget _readerLetterbox({
+    required bool amDriver,
+    required ({double charWidth, double linePixels}) cell,
+    required Widget child,
+  }) {
+    if (amDriver) return child;
+    return ColoredBox(
+      color: context.antgrid.bgDeepest,
+      child: FittedBox(
+        fit: BoxFit.scaleDown,
+        alignment: Alignment.center,
+        child: SizedBox(
+          width: gridExtentFor(
+            cells: widget.tab.cols,
+            metric: cell.charWidth,
+            padding: _hPad,
+          ),
+          height: gridExtentFor(
+            cells: widget.tab.rows,
+            metric: cell.linePixels,
+            padding: _hPad,
+          ),
+          child: child,
+        ),
+      ),
+    );
+  }
+
   /// Opens a terminal-authored link, for the live pane and the scrollback
   /// reader alike — a link reached by scrolling up has to behave exactly as
   /// one still on screen does.
@@ -1942,7 +2022,16 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   /// and a link that scrolled out from under a resting pointer all reach here
   /// with nothing shown, and all of them get the sheet — which a
   /// `defaultTargetPlatform` test silently exempted the first of.
-  Future<void> _openHyperlink(String uri) => openContentLink(
+  Future<void> _openHyperlink(String detected) {
+    final uri = extendWrappedUrl(
+      detected,
+      widget.tab.ghostty.lines,
+      widget.tab.ghostty.cols,
+    );
+    return _openContentLink(uri);
+  }
+
+  Future<void> _openContentLink(String uri) => openContentLink(
     context,
     uri,
     fileService: () => widget.terminalService.session
@@ -2136,9 +2225,6 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   /// Keep the key strip mounted so entering history cannot resize the PTY.
   Widget _buildQuickActions(bool uploadBusy) {
     final bar = TerminalQuickActionsBar(
-      softKeyboardController: _historyOpen
-          ? _historySoftKeyboardController
-          : _softKeyboardController,
       onPick: pickUploadFile,
       onPicked: (picked) =>
           _dropAttach(bytes: picked.bytes, fileName: picked.name),
@@ -2151,8 +2237,127 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       onZoomIn: () => _stepZoom(0.1),
       onZoomReset: () =>
           ref.read(appSettingsServiceProvider.notifier).setTerminalZoom(1.0),
+      modifiers: _modifiers,
+      onToggleModifier: _modifiers.toggle,
+      composeOpen: _composeOpen,
+      onToggleCompose: _toggleCompose,
     );
     return bar;
+  }
+
+  /// Held across openings so a closed box keeps what was typed.
+  final TextEditingController _composeDraft = TextEditingController();
+  final FocusNode _composeFocus = FocusNode(debugLabel: 'TerminalCompose');
+  bool _composeOpen = false;
+
+  void _toggleCompose() => _composeOpen ? _closeCompose() : _openCompose();
+
+  void _openCompose() {
+    // The box's field takes the IME; the terminal's own connection would
+    // otherwise sit under it and come back up when the box closes.
+    _softKeyboardController.hide();
+    if (_historyOpen) _closeHistory();
+    setState(() => _composeOpen = true);
+    // Explicit, not the field's `autofocus`: that only claims focus when its
+    // scope holds none, and the terminal already does — the box opened with no
+    // keyboard and needed a second tap.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _composeOpen) _composeFocus.requestFocus();
+    });
+  }
+
+  void _closeCompose() {
+    _composeFocus.unfocus();
+    setState(() => _composeOpen = false);
+  }
+
+  void _composeSend(String text) {
+    // A trailing CR makes the bridge treat the frame as one submit, and its
+    // submit carries the block whole (bracketed paste, or one line when the
+    // guest never announced it) — see `submitPlan` in bridge/src/pty-submit.ts.
+    final sent = _typeIntoTerminal(
+      '${text.replaceAll('\r\n', '\n').replaceAll('\r', '\n')}\r',
+    );
+    if (!sent) return;
+    _composeDraft.clear();
+    _closeCompose();
+  }
+
+  /// Height the box needs besides its text lines: padding and the field's own
+  /// insets.
+  static const double _composeChromeHeight = 48;
+
+  Widget _buildComposeBox() {
+    return Positioned.fill(
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final lineHeight = AbTokens.fontSm * 1.5;
+          final maxLines =
+              ((constraints.maxHeight - _composeChromeHeight) / lineHeight)
+                  .floor()
+                  .clamp(1, 10);
+          return Padding(
+            padding: const EdgeInsets.all(AbTokens.space8),
+            child: Align(
+              alignment: Alignment.bottomCenter,
+              child: TerminalComposeBox(
+                draft: _composeDraft,
+                focusNode: _composeFocus,
+                onSend: _composeSend,
+                maxLines: maxLines,
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
+
+/// The fixed row under a terminal another device is sizing: says so, and holds
+/// the one action that changes it.
+class _TakeControlStrip extends StatelessWidget {
+  const _TakeControlStrip({required this.busy, required this.onTap});
+
+  final bool busy;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.antgrid;
+    return Container(
+      decoration: BoxDecoration(
+        color: p.bgElevated,
+        border: Border(top: BorderSide(color: p.borderSubtle)),
+      ),
+      padding: const EdgeInsets.symmetric(
+        horizontal: AbTokens.space8,
+        vertical: AbTokens.space4,
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              'Sized by another device',
+              overflow: TextOverflow.ellipsis,
+              style: AbTokens.sansStyle(
+                fontSize: AbTokens.fontSm,
+                color: p.textMuted,
+              ),
+            ),
+          ),
+          AbTooltip(
+            message:
+                'Fit the shared terminal to this device. Other viewers will follow this size.',
+            child: AbButton(
+              compact: true,
+              label: busy ? 'Taking control…' : 'Take control',
+              onTap: onTap,
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }
 

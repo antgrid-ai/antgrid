@@ -66,6 +66,7 @@ import '../utils/platform_utils.dart';
 import '../widgets/agent_panel.dart';
 import '../widgets/handler/handler_why.dart' show handlerFallbackQuestion;
 import '../widgets/mobile_bottom_nav.dart';
+import '../widgets/pane_swipe_exclusion.dart';
 import '../widgets/operational_error_toaster.dart';
 import '../widgets/projects_drawer.dart';
 import '../widgets/session_search_modal.dart';
@@ -2147,6 +2148,10 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
   static const double _tabletFlingMinDistance = 40.0;
 
   void _onTabletFlingDown(PointerDownEvent event, BuildContext context) {
+    if (PaneSwipeExclusion.claims(event.pointer)) {
+      _tabletFlingTracker = null;
+      return;
+    }
     _tabletFlingTracker = VelocityTracker.withKind(event.kind)
       ..addPosition(event.timeStamp, event.position);
     _tabletFlingOrigin = _tabletFlingLatest = event.position;
@@ -2598,6 +2603,10 @@ class _HorizontalFlingDetectorState extends State<_HorizontalFlingDetector> {
   double get _sign => widget.towards == AxisDirection.right ? 1.0 : -1.0;
 
   void _onDown(PointerDownEvent event) {
+    if (PaneSwipeExclusion.claims(event.pointer)) {
+      _tracker = null;
+      return;
+    }
     _tracker = VelocityTracker.withKind(event.kind)
       ..addPosition(event.timeStamp, event.position);
     _origin = _latest = event.position;
