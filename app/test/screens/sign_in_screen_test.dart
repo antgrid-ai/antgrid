@@ -367,6 +367,49 @@ void main() {
       expect(paths, isEmpty);
     });
 
+    testWidgets('iOS offers no Google sign-in', (tester) async {
+      await _pumpScreen(tester);
+
+      expect(find.text('GitHub'), findsOneWidget);
+      expect(find.text('Google'), findsNothing);
+      expect(find.text('Password'), findsOneWidget);
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+    testWidgets('on iOS a remembered Google hint falls through to the link', (
+      tester,
+    ) async {
+      final store = _FakeAuthMethodStore({
+        'user@example.com': AuthMethod.google,
+      });
+      final paths = await _pumpScreen(tester, store: store);
+
+      await _continueWith(tester, 'user@example.com');
+
+      expect(find.text('Could not open the browser'), findsNothing);
+      expect(paths, contains(_startPath));
+      expect(store.memory['user@example.com'], AuthMethod.link);
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+    testWidgets('off iOS a remembered Google hint starts Google', (
+      tester,
+    ) async {
+      final launched = <Uri>[];
+      final paths = await _pumpScreen(
+        tester,
+        store: _FakeAuthMethodStore({'user@example.com': AuthMethod.google}),
+        launchUrl: (url) async {
+          launched.add(url);
+          return false;
+        },
+      );
+
+      await _continueWith(tester, 'user@example.com');
+
+      expect(find.text('Could not open the browser'), findsOneWidget);
+      expect(launched.single.queryParameters['provider'], 'google');
+      expect(paths, isEmpty);
+    }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
     testWidgets('a remembered provider can still be escaped for the link', (
       tester,
     ) async {
