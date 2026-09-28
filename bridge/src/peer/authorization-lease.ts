@@ -7,14 +7,18 @@ export interface EnrollmentIdentity {
   enrollmentId: string;
 }
 
-export type LeaseFailure = "expired" | "denied" | "revoked" | "rotated" | "resume" | "closed";
+export type LeaseFailure = "expired" | "denied" | "revoked" | "rotated" | "closed";
+
+const SUPERSEDED = Symbol("superseded");
 
 /** A response can consume the request's lifetime, but cannot extend it. */
 export class AuthorizationLease {
   private snapshot: PeerAuthorizationSnapshot | null = null;
   private deadline = 0;
+  private wallDeadline = 0;
   private generation = 0;
   private policyGeneration = -1n;
+  private policyChanges = 0;
   private pending: Promise<boolean> | null = null;
   private cancelExpiry: (() => void) | null = null;
   private cancelRefresh: (() => void) | null = null;
@@ -33,15 +37,22 @@ export class AuthorizationLease {
       timer.unref?.();
       return () => clearTimeout(timer);
     },
+    // The monotonic clock stops across a system suspend on macOS and Linux, so
+    // on its own it would carry a lease through a sleep of any length.
+    private readonly wall: () => number = () => Date.now(),
   ) {}
 
+  private leftMs(): number {
+    return Math.min(this.deadline - this.now(), this.wallDeadline - this.wall());
+  }
+
   get current(): PeerAuthorizationSnapshot | null {
-    if (this.snapshot && this.now() >= this.deadline) this.invalidate("expired");
+    if (this.snapshot && this.leftMs() <= 0) this.invalidate("expired");
     return this.snapshot;
   }
 
   get remainingMs(): number {
-    return this.snapshot ? Math.max(0, this.deadline - this.now()) : 0;
+    return this.snapshot ? Math.max(0, this.leftMs()) : 0;
   }
 
   allows(deviceId: string, endpointId?: string): boolean {
@@ -49,11 +60,20 @@ export class AuthorizationLease {
       (endpointId === undefined || peer.endpoint?.endpointId === endpointId)) ?? false;
   }
 
+  /**
+   * Drops the current snapshot but lets a request already in flight finish:
+   * its answer is judged by the policy generation the server read, and one
+   * from before this change is asked again rather than refused. Fencing it by
+   * request instead discarded the answer to this host's own endpoint
+   * registration, whose policy change is pushed back while that answer is
+   * still on the way, and startup failed on it.
+   */
   observePolicyGeneration(generation: string): void {
     const next = BigInt(generation);
-    if (next <= this.policyGeneration) return;
+    if (this.stopped || next <= this.policyGeneration) return;
     this.policyGeneration = next;
-    this.invalidate("revoked");
+    this.policyChanges++;
+    this.drop("revoked");
   }
 
   refresh(): Promise<boolean> {
@@ -61,92 +81,106 @@ export class AuthorizationLease {
     if (this.pending) return this.pending;
     this.cancelRefresh?.();
     this.cancelRefresh = null;
-    const generation = this.generation;
-    const started = this.now();
     const operation = (async () => {
-      // Must stay the schema `EndpointEnrollment` registers against. A host
-      // that enrolls for an origin and then refuses every snapshot carrying it
-      // kills its own transport at startup, and a rejected parse surfaces as a
-      // Zod dump under PEER_TRANSPORT_UNAVAILABLE rather than a scheme refusal.
-      const remaining = this.snapshot ? Math.max(0, this.deadline - started) : 10_000;
-      const timeoutMs = Math.min(10_000, remaining);
-      if (timeoutMs <= 0) {
-        this.invalidate("expired");
-        return false;
+      // Every caller joined to this request gets an answer from after the
+      // last pushed policy change, not the one that change superseded.
+      for (;;) {
+        const outcome = await this.attempt();
+        if (outcome !== SUPERSEDED) return outcome;
       }
-      let cancelTimeout: () => void = () => {};
-      let response: unknown;
-      try {
-        response = await Promise.race([
-          this.request(),
-          new Promise<never>((_, reject) => {
-            cancelTimeout = this.schedule(() => reject(new Error("AUTHORIZATION_TIMEOUT")), timeoutMs);
-          }),
-        ]);
-      } catch (error) {
-        if (this.stopped || generation !== this.generation) return false;
-        const valid = this.snapshot !== null && this.now() < this.deadline;
-        if (valid) this.scheduleTransientRetry();
-        if (valid) return true;
-        throw error;
-      } finally {
-        cancelTimeout();
-      }
-      const parsed = AcceptedAuthorizationSnapshotSchema.parse(response);
-      if (this.stopped || generation !== this.generation) return false;
-      if (parsed.accountId !== this.identity.accountId || parsed.deviceId !== this.identity.deviceId ||
-          parsed.enrollmentId !== this.identity.enrollmentId) {
-        this.invalidate("rotated");
-        return false;
-      }
-      const policy = BigInt(parsed.policyGeneration);
-      if (policy < this.policyGeneration) return false;
-      this.policyGeneration = policy;
-      if (!parsed.allowed) {
-        this.invalidate("denied");
-        return false;
-      }
-      const deadline = started + Math.min(parsed.leaseMs, PEER_LEASE_MS);
-      if (this.now() >= deadline) {
-        this.invalidate("expired");
-        return false;
-      }
-      const previous = this.snapshot?.endpoint;
-      if (previous && (previous.endpointId !== parsed.endpoint?.endpointId ||
-          previous.generation !== parsed.endpoint?.generation)) {
-        this.invalidate("rotated");
-        return false;
-      }
-      this.snapshot = parsed;
-      this.deadline = deadline;
-      this.transientFailures = 0;
-      this.cancelExpiry?.();
-      this.cancelExpiry = this.schedule(() => this.invalidate("expired"), Math.max(0, deadline - this.now()));
-      const acceptedDuration = deadline - started;
-      const refreshAt = started + acceptedDuration / 3 * (0.9 + this.random() * 0.2);
-      this.cancelRefresh = this.schedule(() => {
-        this.cancelRefresh = null;
-        void this.refresh().catch(() => {});
-      }, Math.max(0, refreshAt - this.now()));
-      // Session owners synchronously recheck each peer before dispatch resumes.
-      this.onSnapshot(parsed);
-      return true;
     })();
     this.pending = operation.finally(() => { this.pending = null; });
     return this.pending;
   }
 
-  resume(): Promise<boolean> {
-    const pending = this.pending;
-    this.invalidate("resume");
-    // An in-flight pre-sleep response is fenced, then a new request starts.
-    return pending ? pending.catch(() => false).then(() => this.refresh()) : this.refresh();
+  private async attempt(): Promise<boolean | typeof SUPERSEDED> {
+    const generation = this.generation;
+    const policyChanges = this.policyChanges;
+    const started = this.now();
+    const startedWall = this.wall();
+    // Must stay the schema `EndpointEnrollment` registers against. A host
+    // that enrolls for an origin and then refuses every snapshot carrying it
+    // kills its own transport at startup, and a rejected parse surfaces as a
+    // Zod dump under PEER_TRANSPORT_UNAVAILABLE rather than a scheme refusal.
+    const remaining = this.snapshot ? Math.max(0, this.leftMs()) : 10_000;
+    const timeoutMs = Math.min(10_000, remaining);
+    if (timeoutMs <= 0) {
+      this.invalidate("expired");
+      return false;
+    }
+    let cancelTimeout: () => void = () => {};
+    let response: unknown;
+    try {
+      response = await Promise.race([
+        this.request(),
+        new Promise<never>((_, reject) => {
+          cancelTimeout = this.schedule(() => reject(new Error("AUTHORIZATION_TIMEOUT")), timeoutMs);
+        }),
+      ]);
+    } catch (error) {
+      if (this.stopped || generation !== this.generation) return false;
+      // An error carries no policy generation, so one that lands after a
+      // policy change cannot show which side of it the server answered from.
+      if (policyChanges !== this.policyChanges) return SUPERSEDED;
+      const valid = this.snapshot !== null && this.leftMs() > 0;
+      if (valid) this.scheduleTransientRetry();
+      if (valid) return true;
+      throw error;
+    } finally {
+      cancelTimeout();
+    }
+    const parsed = AcceptedAuthorizationSnapshotSchema.parse(response);
+    if (this.stopped || generation !== this.generation) return false;
+    if (parsed.accountId !== this.identity.accountId || parsed.deviceId !== this.identity.deviceId ||
+        parsed.enrollmentId !== this.identity.enrollmentId) {
+      this.invalidate("rotated");
+      return false;
+    }
+    const policy = BigInt(parsed.policyGeneration);
+    if (policy < this.policyGeneration) return policyChanges !== this.policyChanges ? SUPERSEDED : false;
+    this.policyGeneration = policy;
+    if (!parsed.allowed) {
+      this.invalidate("denied");
+      return false;
+    }
+    const acceptedDuration = Math.min(parsed.leaseMs, PEER_LEASE_MS);
+    const deadline = started + acceptedDuration;
+    const wallDeadline = startedWall + acceptedDuration;
+    if (this.now() >= deadline || this.wall() >= wallDeadline) {
+      this.invalidate("expired");
+      return false;
+    }
+    const previous = this.snapshot?.endpoint;
+    if (previous && (previous.endpointId !== parsed.endpoint?.endpointId ||
+        previous.generation !== parsed.endpoint?.generation)) {
+      this.invalidate("rotated");
+      return false;
+    }
+    this.snapshot = parsed;
+    this.deadline = deadline;
+    this.wallDeadline = wallDeadline;
+    this.transientFailures = 0;
+    this.cancelExpiry?.();
+    this.cancelExpiry = this.schedule(() => this.invalidate("expired"), Math.max(0, deadline - this.now()));
+    const refreshAt = started + acceptedDuration / 3 * (0.9 + this.random() * 0.2);
+    this.cancelRefresh = this.schedule(() => {
+      this.cancelRefresh = null;
+      void this.refresh().catch(() => {});
+    }, Math.max(0, refreshAt - this.now()));
+    // Session owners synchronously recheck each peer before dispatch resumes.
+    this.onSnapshot(parsed);
+    return true;
   }
 
   invalidate(reason: LeaseFailure): void {
     this.generation++;
+    this.drop(reason);
+  }
+
+  private drop(reason: LeaseFailure): void {
     this.snapshot = null;
     this.deadline = 0;
+    this.wallDeadline = 0;
     this.cancelExpiry?.();
     this.cancelExpiry = null;
     this.cancelRefresh?.();
@@ -158,7 +192,7 @@ export class AuthorizationLease {
   private scheduleTransientRetry(): void {
     const ceiling = Math.min(5_000, 500 * 2 ** this.transientFailures++);
     const delay = ceiling / 2 + this.random() * ceiling / 2;
-    const remaining = this.deadline - this.now();
+    const remaining = this.leftMs();
     if (remaining <= 0) {
       this.invalidate("expired");
       return;

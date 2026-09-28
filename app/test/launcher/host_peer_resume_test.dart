@@ -26,7 +26,7 @@ void main() {
   );
 
   for (final status in [200, 401, 500]) {
-    test('resume requires the host fence acknowledgement ($status)', () async {
+    test('resume requires the host acknowledgement ($status)', () async {
       final client = HostControlClient(
         port: 54321,
         token: 'owner-secret',

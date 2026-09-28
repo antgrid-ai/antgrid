@@ -4,12 +4,12 @@ import { join } from "node:path";
 import { setupDartTestEnv, waitForHostFile, type DartTestEnv } from "../helpers/harness";
 
 /**
- * Native peer resume over the real Dart binding: the bridge closes a live
- * `iroh_quic` peer on a host resume, and the Dart side must observe that close
- * and come back on the same endpoint identity. Bridge-side resume is
- * unit-tested against a mocked transport (`native-host-connection.test.ts`);
- * only a real Dart VM on the other end catches a close the Dart binding never
- * surfaces.
+ * Native peer resume over the real Dart binding. A desktop reports every window
+ * focus as a resume, so the host must refresh authorization without touching a
+ * live `iroh_quic` peer: the same session and project stream keep serving.
+ * Bridge-side resume is unit-tested against a mocked transport
+ * (`native-host-connection.test.ts`); only a real Dart VM on the other end
+ * catches a close the Dart binding would surface.
  */
 async function hostPeerResume(env: DartTestEnv): Promise<void> {
   const hf = await waitForHostFile(env.abDir);
@@ -20,20 +20,18 @@ async function hostPeerResume(env: DartTestEnv): Promise<void> {
   expect(res.status).toBe(202);
 }
 
-test("a host resume closes the Dart peer, which re-establishes and reads fresh project state", async () => {
+test("a host resume keeps the Dart peer's session and project stream", async () => {
   const env = await setupDartTestEnv({ fixtureName: "basic", clientName: "eval-dart-resume" });
   try {
     for (let cycle = 0; cycle < 3; cycle++) {
       const proof = `resume:${cycle}`;
       writeFileSync(join(env.projectDir, "proof.txt"), proof);
-      const ended = env.app.waitForEvent(
-        (e) => e.event === "stream-ended" && e.projectId === env.projectId, 20_000);
       await hostPeerResume(env);
-      await ended;
-      const streamId = await env.reestablishPeer();
-      const content = await env.app.requestFileContent(streamId, env.projectId, "proof.txt", 10_000);
+      const content = await env.app.requestFileContent(env.streamId, env.projectId, "proof.txt", 10_000);
       expect(content.data.content).toBe(proof);
     }
+    await expect(env.app.waitForEvent(
+      (e) => e.event === "stream-ended" && e.projectId === env.projectId, 2_000)).rejects.toThrow("Timed out");
   } finally {
     await env.teardown();
   }

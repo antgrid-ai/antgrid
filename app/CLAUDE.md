@@ -44,7 +44,7 @@ these are the ones that span more than one file.
 
 **Lifecycle invariants:** one lifetime authority (`ProjectSessionRegistry`); per-project services (focus switch = rebind, no attach/detach race); welcome-replay safe (subscribe at construction).
 
-Desktop resume also notifies the existing local host through owner-token-authenticated `POST /peer-resume`; its acknowledgement means old remote leases are fenced, while fresh authorization remains asynchronous. Keep `AppShell`'s resume notification aligned with the bridge control listener, and never spawn a host solely to send it.
+Desktop resume also notifies the existing local host through owner-token-authenticated `POST /peer-resume`, which refreshes its authorization and fences nothing: on desktop `onResume` is window focus, not a suspend. A suspend is bounded by the leases themselves, which expire on the wall clock as well as the monotonic one (`AuthorizationLease` in `antgrid_peer_transport` and in `bridge/src/peer/authorization-lease.ts`); only a phone's own lease fences on resume (`PeerRuntime.fenceOnResume`). Keep `AppShell`'s resume notification aligned with the bridge control listener, and never spawn a host solely to send it.
 
 **Terminal display is a coordinated app/bridge protocol.** `TerminalService`
 consumes independent frames and paged history; unsupported versions require an

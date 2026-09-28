@@ -116,12 +116,14 @@ void main() {
       await Future<void>.delayed(Duration.zero);
       final b = lease.refreshFresh();
       final admission = lease.refresh();
+      expect(calls, 1);
       lease.notePolicyGeneration(BigInt.two);
       fresh.complete(AuthorizationSnapshot.fromJson(snapshot()));
       expect(await a, isFalse);
       expect(await b, isFalse);
       expect(await admission, isFalse);
-      expect(calls, 1);
+      // The superseded answer is asked again once; still stale, it is denied.
+      expect(calls, 2);
       expect(lease.permits(peer), isFalse);
     },
   );
@@ -130,11 +132,14 @@ void main() {
     'stale denied response cannot overwrite a newer lifecycle fence',
     () async {
       final pending = Completer<AuthorizationSnapshot>();
+      var calls = 0;
       final lease = AuthorizationLease(
         accountId: 'account',
         deviceId: local,
         enrollmentId: 'credential',
-        fetchSnapshot: () => pending.future,
+        fetchSnapshot: () async => ++calls == 1
+            ? pending.future
+            : AuthorizationSnapshot.fromJson(snapshot(policy: '2')),
       );
       var changes = 0;
       final sub = lease.changes.listen((_) => changes++);
@@ -142,9 +147,10 @@ void main() {
       lease.notePolicyGeneration(BigInt.two);
       expect(changes, 1);
       pending.completeError(const PeerAuthorizationDenied());
-      expect(await refresh, isFalse);
-      expect(changes, 1);
+      expect(await refresh, isTrue);
+      expect(calls, 2);
       expect(lease.lastRefreshFailure, isNull);
+      expect(lease.permits(peer), isTrue);
       await sub.cancel();
       await lease.dispose();
     },
@@ -166,6 +172,90 @@ void main() {
     lease.notePolicyGeneration(BigInt.one);
     expect(lease.isValid, isTrue);
     await lease.dispose();
+  });
+  test(
+    'a policy change pushed during a refresh keeps an answer that already reflects it',
+    () async {
+      final pending = Completer<AuthorizationSnapshot>();
+      final lease = AuthorizationLease(
+        accountId: 'account',
+        deviceId: local,
+        enrollmentId: 'credential',
+        fetchSnapshot: () => pending.future,
+      );
+      addTearDown(lease.dispose);
+      final refresh = lease.refresh();
+      lease.notePolicyGeneration(BigInt.two);
+      expect(lease.permits(peer), isFalse);
+      pending.complete(AuthorizationSnapshot.fromJson(snapshot(policy: '2')));
+      expect(await refresh, isTrue);
+      expect(lease.permits(peer), isTrue);
+      lease.notePolicyGeneration(BigInt.two);
+      expect(lease.permits(peer), isTrue);
+    },
+  );
+  test(
+    'a policy change pushed during a refresh re-asks an answer read before it',
+    () async {
+      final pending = Completer<AuthorizationSnapshot>();
+      final next = Completer<AuthorizationSnapshot>();
+      var calls = 0;
+      final lease = AuthorizationLease(
+        accountId: 'account',
+        deviceId: local,
+        enrollmentId: 'credential',
+        fetchSnapshot: () => ++calls == 1 ? pending.future : next.future,
+      );
+      addTearDown(lease.dispose);
+      final refresh = lease.refresh();
+      final joined = lease.refresh();
+      lease.notePolicyGeneration(BigInt.two);
+      pending.complete(AuthorizationSnapshot.fromJson(snapshot(policy: '1')));
+      await Future<void>.delayed(Duration.zero);
+      expect(calls, 2);
+      expect(lease.permits(peer), isFalse);
+      expect(lease.lastRefreshFailure, isNull);
+      next.complete(AuthorizationSnapshot.fromJson(snapshot(policy: '2')));
+      expect(await refresh, isTrue);
+      expect(await joined, isTrue);
+      expect(lease.permits(peer), isTrue);
+    },
+  );
+  test('a suspend the monotonic clock did not see still expires the lease', () async {
+    var wall = 1000000;
+    final lease = AuthorizationLease(
+      accountId: 'account',
+      deviceId: local,
+      enrollmentId: 'credential',
+      nowMs: () => 0,
+      wallMs: () => wall,
+      fetchSnapshot: () async => AuthorizationSnapshot.fromJson(snapshot()),
+    );
+    addTearDown(lease.dispose);
+    expect(await lease.refresh(), isTrue);
+    wall += 59999;
+    expect(lease.permits(peer), isTrue);
+    wall += 1;
+    expect(lease.permits(peer), isFalse);
+    expect(lease.remainingMs, 0);
+  });
+  test('an answer requested before a suspend is not accepted after it', () async {
+    var wall = 1000000;
+    final pending = Completer<AuthorizationSnapshot>();
+    final lease = AuthorizationLease(
+      accountId: 'account',
+      deviceId: local,
+      enrollmentId: 'credential',
+      nowMs: () => 0,
+      wallMs: () => wall,
+      fetchSnapshot: () => pending.future,
+    );
+    addTearDown(lease.dispose);
+    final refresh = lease.refresh();
+    wall += 60000;
+    pending.complete(AuthorizationSnapshot.fromJson(snapshot()));
+    expect(await refresh, isFalse);
+    expect(lease.permits(peer), isFalse);
   });
   test('decimal generations retain precision and reject alternate forms', () {
     expect(

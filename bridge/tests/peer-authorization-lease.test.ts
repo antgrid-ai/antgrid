@@ -17,25 +17,32 @@ function manualScheduler() {
   return { jobs, schedule };
 }
 
-test("resume fences an in-flight lease then requests new authorization", async () => {
-  const old = Promise.withResolvers<unknown>();
-  const fresh = Promise.withResolvers<unknown>();
-  let requests = 0;
-  const reasons: string[] = [];
-  const lease = new AuthorizationLease(identity, () => ++requests === 1 ? old.promise : fresh.promise,
-    (reason) => reasons.push(reason));
-  const before = lease.refresh();
-  const resumed = lease.resume();
-  expect(reasons).toEqual(["resume"]);
-  expect(lease.allows(peerId)).toBe(false);
-  old.resolve(snapshot());
-  expect(await before).toBe(false);
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  expect(requests).toBe(2);
-  expect(lease.current).toBeNull();
-  fresh.resolve(snapshot());
-  expect(await resumed).toBe(true);
+// A suspend stops the monotonic clock on macOS and Linux; the wall clock is
+// the only one of the two that saw the time pass.
+test("a suspend the monotonic clock did not see still expires the lease", async () => {
+  let wall = 1_000_000;
+  const invalidated: string[] = [];
+  const lease = new AuthorizationLease(identity, async () => snapshot(), (reason) => invalidated.push(reason),
+    undefined, () => 0, undefined, undefined, () => wall);
+  expect(await lease.refresh()).toBe(true);
+  wall += 59_999;
   expect(lease.allows(peerId)).toBe(true);
+  wall += 1;
+  expect(lease.allows(peerId)).toBe(false);
+  expect(invalidated).toEqual(["expired"]);
+  lease.invalidate("closed");
+});
+
+test("an answer requested before a suspend is not accepted after it", async () => {
+  let wall = 1_000_000;
+  const pending = Promise.withResolvers<unknown>();
+  const lease = new AuthorizationLease(identity, () => pending.promise, () => {},
+    undefined, () => 0, undefined, undefined, () => wall);
+  const refreshed = lease.refresh();
+  wall += 60_000;
+  pending.resolve(snapshot());
+  expect(await refreshed).toBe(false);
+  expect(lease.allows(peerId)).toBe(false);
   lease.invalidate("closed");
 });
 
@@ -64,6 +71,55 @@ test("in-flight refresh cannot resurrect admission after revocation", async () =
   pending.resolve(snapshot());
   expect(await refreshed).toBe(false);
   expect(lease.allows(peerId)).toBe(false);
+  lease.invalidate("closed");
+});
+
+test("a policy change pushed during a refresh keeps an answer that already reflects it", async () => {
+  const pending = Promise.withResolvers<unknown>();
+  let requests = 0;
+  const reasons: string[] = [];
+  const lease = new AuthorizationLease(identity, () => { requests++; return pending.promise; },
+    (reason) => reasons.push(reason));
+  const refreshed = lease.refresh();
+  lease.observePolicyGeneration("2");
+  expect(reasons).toEqual(["revoked"]);
+  expect(lease.allows(peerId)).toBe(false);
+  pending.resolve({ ...snapshot(), policyGeneration: "2" });
+  expect(await refreshed).toBe(true);
+  expect(requests).toBe(1);
+  expect(lease.allows(peerId)).toBe(true);
+  lease.invalidate("closed");
+});
+
+test("a policy change pushed during a refresh re-asks an answer read before it", async () => {
+  const before = Promise.withResolvers<unknown>();
+  const after = Promise.withResolvers<unknown>();
+  let requests = 0;
+  const lease = new AuthorizationLease(identity, () => ++requests === 1 ? before.promise : after.promise, () => {});
+  const refreshed = lease.refresh();
+  lease.observePolicyGeneration("2");
+  const joined = lease.refresh();
+  before.resolve(snapshot());
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(requests).toBe(2);
+  expect(lease.allows(peerId)).toBe(false);
+  after.resolve({ ...snapshot(), policyGeneration: "2" });
+  expect(await refreshed).toBe(true);
+  expect(await joined).toBe(true);
+  expect(lease.allows(peerId)).toBe(true);
+  lease.invalidate("closed");
+});
+
+test("an error that lands after a pushed policy change is re-asked, not thrown", async () => {
+  const before = Promise.withResolvers<unknown>();
+  let requests = 0;
+  const lease = new AuthorizationLease(identity,
+    () => ++requests === 1 ? before.promise : Promise.resolve({ ...snapshot(), policyGeneration: "2" }), () => {});
+  const refreshed = lease.refresh();
+  lease.observePolicyGeneration("2");
+  before.reject(new Error("backend unavailable"));
+  expect(await refreshed).toBe(true);
+  expect(requests).toBe(2);
   lease.invalidate("closed");
 });
 

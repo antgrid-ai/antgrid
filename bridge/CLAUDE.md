@@ -46,8 +46,10 @@ has no stream registration or payload frames.
 The controller and local bridge retain distinct protected enrollment records;
 endpoint seeds must never be written to an ordinary bridge file.
 Desktop lifecycle resume notifies the existing host through owner-bearer
-`POST /peer-resume` (`control-listener.ts`), with no body; its 202 acknowledges
-synchronous remote-session fencing, while authorization refresh runs separately.
+`POST /peer-resume` (`control-listener.ts`), with no body. It refreshes the
+lease and retries a blocked endpoint but fences nothing, because the desktop
+reports window focus as a resume; a suspend is bounded by the lease's
+wall-clock deadline instead.
 Keep that contract mirrored in the app's `HostControlClient` lifecycle caller.
 
 What each area owns. Mechanism lives at the definitions in the files themselves;

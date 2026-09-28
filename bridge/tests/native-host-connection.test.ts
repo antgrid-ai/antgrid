@@ -391,38 +391,43 @@ test("throwing payload observer cannot reject native admission or local binding"
   } finally { observer.mockRestore(); f.client.close(); }
 });
 
-test("resume closes native peers synchronously and fences pre-resume stream admission", async () => {
+test("a desktop resume refreshes authorization and keeps admitted peers", async () => {
+  const f = fixture();
+  try {
+    let requests = 0;
+    f.access.enrollment.authorization = async () => { requests++; return f.snapshot; };
+    const peer = connection(f.endpointId);
+    await f.access.acceptPeer(peer.native);
+    const before = requests;
+    expect(f.access.nativePeers.size).toBe(1);
+    expect(await f.client.noteResume()).toBe(true);
+    expect(requests).toBe(before + 1);
+    expect(peer.closes()).toBe(0);
+    expect(f.access.nativePeers.size).toBe(1);
+  } finally { f.client.close(); }
+});
+
+test("a resume whose refresh is denied retires admitted peers", async () => {
   const f = fixture();
   try {
     const peer = connection(f.endpointId);
     await f.access.acceptPeer(peer.native);
-    const resumed = f.client.noteResume();
+    f.access.enrollment.authorization = async () => ({ ...f.snapshot, allowed: false });
+    expect(await f.client.noteResume()).toBe(false);
     expect(peer.closes()).toBe(1);
-    expect(f.access.nativePeers.size).toBe(0);
-    expect(await resumed).toBe(true);
-
-    const stream = Promise.withResolvers<any>();
-    const late = connection(f.endpointId, stream.promise);
-    const accepted = f.access.acceptPeer(late.native);
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    await f.client.noteResume();
-    stream.resolve({ send: { writeAll: async () => {}, setPriority: async () => {}, reset: async () => {}, finish: async () => {} }, recv: { readExact: () => new Promise(() => {}) } });
-    await accepted;
-    expect(late.closes()).toBe(1);
     expect(f.access.nativePeers.size).toBe(0);
   } finally { f.client.close(); }
 });
 
-test("native-only resume does not churn the central control connection", async () => {
+test("resume does not churn the central control connection", async () => {
   const f = fixture();
   let centralCloses = 0;
-  const access = f.client.peers as unknown as { ws: WebSocket | null };
   try {
     const peer = connection(f.endpointId);
     await f.access.acceptPeer(peer.native);
     f.client.central.ws = { readyState: WebSocket.OPEN, close: () => centralCloses++ } as unknown as WebSocket;
     await f.client.noteResume();
-    expect(peer.closes()).toBe(1);
+    expect(peer.closes()).toBe(0);
     expect(centralCloses).toBe(0);
   } finally { f.client.central.ws = null; f.client.close(); }
 });
