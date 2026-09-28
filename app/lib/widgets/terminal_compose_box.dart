@@ -35,6 +35,14 @@ class TerminalComposeBox extends StatefulWidget {
   /// pane is short (the keyboard is up) so the box never runs off the top.
   final int maxLines;
 
+  /// What one line of the draft costs, for the host's line budget and the
+  /// growth cap alike. Generous against the field's real line height
+  /// ([AbPromptField] sets none, so it is the sans body size times the font's
+  /// own leading), so the cap never clips a row that [maxLines] promised. One
+  /// constant on purpose: a budget computed from a different size than the cap
+  /// hands the field lines it then cannot show.
+  static const double lineHeight = AbTokens.fontBody * 1.5;
+
   @override
   State<TerminalComposeBox> createState() => _TerminalComposeBoxState();
 }
@@ -66,9 +74,6 @@ class _TerminalComposeBoxState extends State<TerminalComposeBox> {
   @override
   Widget build(BuildContext context) {
     final p = context.antgrid;
-    // Generous against the field's own line height (AbPromptField sets none),
-    // so the cap never clips a row that [maxLines] promised.
-    final lineHeight = AbTokens.fontBody * 1.5;
     return AnimatedContainer(
       duration: AbTokens.motionDefault,
       curve: Curves.easeOut,
@@ -98,7 +103,7 @@ class _TerminalComposeBoxState extends State<TerminalComposeBox> {
           Expanded(
             child: ConstrainedBox(
               constraints: BoxConstraints(
-                maxHeight: lineHeight * widget.maxLines,
+                maxHeight: TerminalComposeBox.lineHeight * widget.maxLines,
               ),
               child: AbPromptField(
                 controller: widget.draft,

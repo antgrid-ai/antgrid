@@ -46,6 +46,22 @@ void main() {
     expect(extendWrappedUrl(lines[0], lines, cols), lines[0]);
   });
 
+  test('a closing parenthesis is kept while the URL opened it', () {
+    const head = 'https://en.example.org/wiki/Foo_(programming_lang';
+    const row = '  $head';
+    // The pane is exactly as wide as the first row, so it reaches the edge.
+    final wide = row.length;
+    expect(
+      extendWrappedUrl(head, [row, 'uage)'], wide),
+      'https://en.example.org/wiki/Foo_(programming_language)',
+    );
+    // The sentence's own `)` and `.` still go.
+    expect(
+      extendWrappedUrl(head, [row, 'uage)).'], wide),
+      'https://en.example.org/wiki/Foo_(programming_language)',
+    );
+  });
+
   test('trailing sentence punctuation is dropped from the joined URL', () {
     final lines = ['  https://example.com/path/to/page?query', '=1.'];
     expect(

@@ -13,7 +13,8 @@ import 'terminal_upload_button.dart';
 /// The touch-input helper bar shown under the terminal on devices without a
 /// physical keyboard (mobile/remote). A horizontally-scrolling strip of upload
 /// + control-key shortcuts, with a large Keyboard toggle pinned to the right
-/// corner (thumb-reachable, key-sized) that opens and closes the prompt box.
+/// corner (thumb-reachable, key-sized) that opens and closes the prompt box,
+/// and on a long press raises the raw soft keyboard onto the terminal instead.
 ///
 /// All dependencies are plain callbacks so the bar renders without a session,
 /// a picker, or the Ghostty engine (see the golden test).
@@ -32,6 +33,7 @@ class TerminalQuickActionsBar extends StatelessWidget {
     required this.onToggleModifier,
     required this.composeOpen,
     required this.onToggleCompose,
+    required this.onDirectInput,
   });
 
   /// Sticky Ctrl/Alt/Shift, armed here and spent by the next keystroke from
@@ -43,6 +45,13 @@ class TerminalQuickActionsBar extends StatelessWidget {
   /// the box and reaches the terminal on Send, never key by key — and closes it.
   final bool composeOpen;
   final VoidCallback onToggleCompose;
+
+  /// Long press on the keyboard key: the raw soft keyboard on the terminal,
+  /// key by key. The prompt box always submits, and terminal taps never raise
+  /// the IME, so without this a phone has no way to send one keystroke — no
+  /// letter for an armed Ctrl or Alt to land on, no tab completion, no
+  /// single-key TUI.
+  final VoidCallback onDirectInput;
   final Future<PickedUpload?> Function() onPick;
   final Future<void> Function(PickedUpload picked) onPicked;
 
@@ -98,6 +107,10 @@ class TerminalQuickActionsBar extends StatelessWidget {
                     onTap: onZoomIn,
                   ),
                   _actionButton(context, 'Esc', '\x1b'),
+                  // Interrupt stays one tap: Ctrl then a letter is two taps
+                  // plus a keyboard, which is the wrong price for the chord a
+                  // phone reaches for most.
+                  _actionButton(context, 'Ctrl+C', '\x03'),
                   _actionButton(context, 'Tab', '\t'),
                   ValueListenableBuilder<TerminalModifiers>(
                     valueListenable: modifiers,
@@ -147,9 +160,14 @@ class TerminalQuickActionsBar extends StatelessWidget {
           ),
           // Pinned trailing control in the right corner (thumb-reachable),
           // kept OUT of the horizontal scroll so it never slides off-screen.
-          // Taps no longer summon the IME (showKeyboardOnInteraction false), so
-          // this is the one way in, and a 2nd press dismisses it.
-          _KeyboardToggleButton(open: composeOpen, onTap: onToggleCompose),
+          // Terminal taps never summon the IME (showKeyboardOnInteraction
+          // false), so this key is the one way in: a tap for the prompt box,
+          // a long press for the raw keyboard.
+          _KeyboardToggleButton(
+            open: composeOpen,
+            onTap: onToggleCompose,
+            onLongPress: onDirectInput,
+          ),
         ],
       ),
     );
@@ -268,12 +286,17 @@ class TerminalQuickActionsBar extends StatelessWidget {
 /// arrowhead — an up-chevron ABOVE it while the prompt box is closed (tap to
 /// raise), a down-chevron BELOW it while it is open (tap to dismiss). Only one
 /// arrowhead shows at a time, so the glyph always points the way the tap moves
-/// the box.
+/// the box. A long press bypasses the box and raises the raw keyboard.
 class _KeyboardToggleButton extends StatelessWidget {
-  const _KeyboardToggleButton({required this.open, required this.onTap});
+  const _KeyboardToggleButton({
+    required this.open,
+    required this.onTap,
+    required this.onLongPress,
+  });
 
   final bool open;
   final VoidCallback onTap;
+  final VoidCallback onLongPress;
 
   @override
   Widget build(BuildContext context) {
@@ -292,9 +315,14 @@ class _KeyboardToggleButton extends StatelessWidget {
       padding: const EdgeInsets.only(left: AbTokens.space2),
       child: Tooltip(
         message: open ? 'Hide keyboard' : 'Show keyboard',
+        // The tooltip's own long-press trigger would race the one below for
+        // the pointer; this bar only mounts on touch, where hover never shows
+        // it anyway, so the message is left as the key's accessible name.
+        triggerMode: TooltipTriggerMode.manual,
         child: GestureDetector(
           behavior: HitTestBehavior.opaque,
           onTap: onTap,
+          onLongPress: onLongPress,
           child: SizedBox(
             width: AbTokens.rowHeightXl,
             height: AbTokens.rowHeightXl,

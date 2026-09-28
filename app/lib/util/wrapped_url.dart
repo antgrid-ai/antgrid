@@ -48,7 +48,27 @@ String extendWrappedUrl(String uri, List<String> lines, int cols) {
       }
       next++;
     }
-    return buffer.toString().replaceFirst(RegExp(r'[),.;:!?]+$'), '');
+    return _trimSentencePunctuation(buffer.toString());
   }
   return uri;
+}
+
+/// Drops the punctuation a sentence leaves after a URL. A closing parenthesis
+/// counts only while it is unmatched: `Foo_(bar)` is a common path shape, and
+/// stripping its `)` sends the reader to a page that does not exist.
+String _trimSentencePunctuation(String url) {
+  var end = url.length;
+  while (end > 0) {
+    final ch = url[end - 1];
+    if (ch == ')') {
+      final head = url.substring(0, end);
+      final closers = ')'.allMatches(head).length;
+      final openers = '('.allMatches(head).length;
+      if (closers <= openers) break;
+    } else if (!'.,;:!?'.contains(ch)) {
+      break;
+    }
+    end--;
+  }
+  return url.substring(0, end);
 }

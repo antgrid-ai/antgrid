@@ -14,6 +14,7 @@ Widget _harness({
   void Function(String)? onSendInput,
   bool composeOpen = false,
   VoidCallback? onToggleCompose,
+  VoidCallback? onDirectInput,
 }) {
   final modifiers = latch ?? TerminalModifierLatch();
   return MaterialApp(
@@ -37,6 +38,7 @@ Widget _harness({
             onToggleModifier: modifiers.toggle,
             composeOpen: composeOpen,
             onToggleCompose: onToggleCompose ?? () {},
+            onDirectInput: onDirectInput ?? () {},
           ),
         ),
       ),
@@ -60,6 +62,50 @@ void main() {
     expect(find.text('Ctrl'), findsOneWidget);
     expect(find.text('Alt'), findsOneWidget);
     expect(find.text('Shift'), findsOneWidget);
+  });
+
+  // The sticky Ctrl needs a letter to land on, and the prompt box never sends
+  // one on its own: interrupt has to stay a single key of its own.
+  testWidgets('Ctrl+C is one tap and does not spend an armed modifier', (
+    tester,
+  ) async {
+    final latch = TerminalModifierLatch();
+    final sent = <String>[];
+    await tester.pumpWidget(
+      _harness(latch: latch, onSendInput: (d) => sent.add(latch.apply(d))),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.ensureVisible(find.text('Ctrl+C'));
+    await tester.tap(find.text('Ctrl+C'));
+    await tester.pump();
+    expect(sent, ['\x03']);
+    expect(latch.value.isEmpty, isTrue);
+  });
+
+  // A tap and a long press on the one pinned key are two different
+  // instruments: the box, or the raw keyboard on the terminal.
+  testWidgets('long-pressing the keyboard key asks for direct input, a tap '
+      'does not', (tester) async {
+    var toggles = 0;
+    var direct = 0;
+    await tester.pumpWidget(
+      _harness(
+        onToggleCompose: () => toggles++,
+        onDirectInput: () => direct++,
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.longPress(find.byTooltip('Show keyboard'));
+    await tester.pumpAndSettle();
+    expect(direct, 1);
+    expect(toggles, 0);
+
+    await tester.tap(find.byTooltip('Show keyboard'));
+    await tester.pumpAndSettle();
+    expect(direct, 1);
+    expect(toggles, 1);
   });
 
   testWidgets('the keyboard key toggles the prompt box and follows its state', (

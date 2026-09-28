@@ -300,12 +300,20 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   );
 
   /// Explicit soft-keyboard handle for mobile. Terminal taps scroll/select
-  /// only (`showKeyboardOnInteraction: false`); the IME is summoned solely by
-  /// the Keyboard quick-action, so reading output never pops the keyboard.
+  /// only (`showKeyboardOnInteraction: false`); the IME lands on the terminal
+  /// solely through a long press on the Keyboard quick-action
+  /// ([_toggleDirectInput]), so reading output never pops the keyboard. A tap
+  /// on that key opens the prompt box instead, whose field takes the IME for
+  /// itself. The reader has a controller of its own: text typed into it
+  /// closes the reader and lands on the live pane, and closing the reader
+  /// hands a keyboard it held back to the live view.
   final GhosttyTerminalSoftKeyboardController _softKeyboardController =
       GhosttyTerminalSoftKeyboardController();
   final GhosttyTerminalSoftKeyboardController _historySoftKeyboardController =
       GhosttyTerminalSoftKeyboardController();
+
+  GhosttyTerminalSoftKeyboardController get _activeSoftKeyboard =>
+      _historyOpen ? _historySoftKeyboardController : _softKeyboardController;
 
   /// The key bar's sticky Ctrl/Alt/Shift. Installed on the service as an
   /// input transform so it also reaches IME keystrokes, which go straight from
@@ -2241,8 +2249,29 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       onToggleModifier: _modifiers.toggle,
       composeOpen: _composeOpen,
       onToggleCompose: _toggleCompose,
+      onDirectInput: _toggleDirectInput,
     );
     return bar;
+  }
+
+  /// Raises the raw soft keyboard onto the pane in view, or lowers it. Every
+  /// keystroke then reaches the PTY on its own, through the engine and the
+  /// modifier transform — the only way a phone can spend an armed Ctrl or Alt
+  /// on a letter, complete a path with Tab, or drive a single-key TUI. Over
+  /// the reader it is the reader's keyboard that comes up, and the first
+  /// character typed closes the reader on its way to the PTY. The prompt box
+  /// is closed first: its field holds the IME on a node of its own, and the
+  /// view's show requests focus for itself, which lands only once that node
+  /// has let go — a frame away.
+  void _toggleDirectInput() {
+    if (_activeSoftKeyboard.isVisible) {
+      _activeSoftKeyboard.hide();
+      return;
+    }
+    if (_composeOpen) _closeCompose();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && !_composeOpen) _activeSoftKeyboard.show();
+    });
   }
 
   /// Held across openings so a closed box keeps what was typed.
@@ -2291,9 +2320,9 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     return Positioned.fill(
       child: LayoutBuilder(
         builder: (context, constraints) {
-          final lineHeight = AbTokens.fontSm * 1.5;
           final maxLines =
-              ((constraints.maxHeight - _composeChromeHeight) / lineHeight)
+              ((constraints.maxHeight - _composeChromeHeight) /
+                      TerminalComposeBox.lineHeight)
                   .floor()
                   .clamp(1, 10);
           return Padding(
