@@ -468,7 +468,7 @@ void main() {
       expect(find.text('What could break'), findsNothing);
       expect(find.text('Ready to ship'), findsNothing);
       // No preset id, so unconditional regardless of what the machine
-      // advertised (redesign spec §7).
+      // advertised.
       expect(find.text(_ownChip), findsOneWidget);
     });
 
@@ -641,8 +641,8 @@ void main() {
     });
 
     testWidgets('the chips are one radio group', (tester) async {
-      // Redesign spec §3.2, §9: one selection lives at a time, whichever of
-      // them it lands on — never a preset row plus a separate disclosure.
+      // One selection lives at a time, whichever of them it lands on — never
+      // a preset row plus a separate disclosure.
       await _pump(tester, value: _value(judgeTool: 'claude'));
 
       await tester.tap(find.text('What could break'));
@@ -745,9 +745,9 @@ void main() {
     testWidgets(
       'picking any other chip keeps the draft locally and sends an empty brief',
       (tester) async {
-        // Redesign spec §6: two stances cannot both run, so a preset always
-        // clears the WIRE brief — but the draft itself rides in the panel's
-        // own controller until "Your own" is picked again.
+        // Two stances cannot both run, so a preset always clears the WIRE
+        // brief — but the draft itself rides in the panel's own controller
+        // until "Your own" is picked again.
         HandlerSessionSettingsValue? sent;
         await _pump(
           tester,
@@ -775,7 +775,7 @@ void main() {
       tester,
     ) async {
       // The bridge's `oneLine` (decision.ts) collapses a bare newline to a
-      // space, which would fuse two typed rules into one — redesign spec §8.
+      // space, which would fuse two typed rules into one.
       HandlerSessionSettingsValue? sent;
       await _pump(
         tester,

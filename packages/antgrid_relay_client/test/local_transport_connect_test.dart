@@ -97,9 +97,7 @@ void main() {
   );
 
   group('hello capabilities', () {
-    Future<Map<String, dynamic>> helloFrom({
-      Map<String, Object?>? capabilities,
-    }) async {
+    Future<Map<String, dynamic>> helloFrom({bool sessionBusCarrier = false}) async {
       final agent = _HelloRecorder();
       await agent.start();
       addTearDown(agent.close);
@@ -107,34 +105,21 @@ void main() {
         port: agent.port,
         token: 't',
         appPid: 1,
-        capabilities: capabilities ?? const {'checkoutRouting': true},
+        sessionBusCarrier: sessionBusCarrier,
       );
       addTearDown(t.dispose);
       await t.connect();
       return agent.hello.future;
     }
 
-    test('sends the default map when the caller names none', () async {
+    test('omits capabilities entirely when the caller names none', () async {
       final hello = await helloFrom();
-      expect(hello['capabilities'], {'checkoutRouting': true});
+      expect(hello.containsKey('capabilities'), isFalse);
     });
 
-    test('sends a caller-supplied map verbatim', () async {
-      // Verbatim is the contract: the agent gates on individual flags, and a
-      // client that filtered to flags it recognized could never announce one
-      // added after it shipped.
-      final hello = await helloFrom(
-        capabilities: const {
-          'checkoutRouting': true,
-          'sessionBusCarrier': true,
-          'somethingNewerThanThisClient': 'yes',
-        },
-      );
-      expect(hello['capabilities'], {
-        'checkoutRouting': true,
-        'sessionBusCarrier': true,
-        'somethingNewerThanThisClient': 'yes',
-      });
+    test('sends sessionBusCarrier when the caller is a bus owner', () async {
+      final hello = await helloFrom(sessionBusCarrier: true);
+      expect(hello['capabilities'], {'sessionBusCarrier': true});
     });
   });
 }

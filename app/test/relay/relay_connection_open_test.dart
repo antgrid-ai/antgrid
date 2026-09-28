@@ -1,47 +1,56 @@
+import '../helpers/fixed_peer_connector.dart';
 // End-to-end coverage for supervisor-driven `RelayConnection` bring-up against
-// the REAL v3 crypto handshake (via a fake agent responder, mirroring
-// antgrid_relay_client's connection_handshake_test.dart harness).
+// the plaintext `session:hello` -> `established` exchange (via a fake agent
+// responder). QUIC/TLS between lease-authorized Iroh endpoints is the
+// confidentiality layer, so the fake agent below answers with no
+// crypto of its own — mirroring antgrid_relay_client's
+// connection_handshake_test.dart harness.
 //
 // Also covers two "provider wiring" claims that are naturally proven at this
-// layer, one connection/one handshake for real:
+// layer, one connection/one hello for real:
 //   - two projects on ONE machine share the ONE MachineSession the connection
-//     produces (no second dial / handshake for the second project).
+//     produces (no second dial / hello for the second project).
 //   - drill-in binds via `stream-ready` at 0 RTT: once the control plane has
-//     advertised a project's streamId, `bindProject` resolves immediately
-//     with no new `project:start` send.
+//     advertised a project ready, `openProject` opens its native stream with
+//     no new `project:start` send.
 import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:antgrid/connection/connection_supervisor.dart';
-import 'package:antgrid/connection/relay_mechanisms.dart';
+import 'package:antgrid/connection/peer_connection.dart';
 import 'package:antgrid/providers/relay_connection.dart';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
-import 'package:cryptography/cryptography.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 // ---------------------------------------------------------------------------
 // Fakes (same shape as antgrid_relay_client's connection_handshake_test.dart harness, plus a
-// settable state stream and a peer-presence controller: the routable rung is
-// fed by the relay's peer-online, which it emits right after welcome for a
-// same-account agent).
+// settable control state and an explicit payload double for the native link).
 // ---------------------------------------------------------------------------
 
-class _RecordingRelay extends RelayService {
+class _RecordingRelay extends RelayService implements PeerLink {
+  @override
+  bool get isDispatchAllowed => true;
+  @override
+  Stream<PeerLinkState> get payloadStateStream => const Stream.empty();
+  @override
+  Stream<PeerPath> get pathStream => const Stream.empty();
+  @override
+  Stream<PeerLinkFailure> get failureStream => const Stream.empty();
   _RecordingRelay() : super(crypto: CryptoService());
 
-  final _messages = StreamController<IncomingRouteMessage>.broadcast();
+  final _messages = StreamController<IncomingSessionRecord>.broadcast();
   final _states = StreamController<AppState>.broadcast();
   final _presence = StreamController<bool>.broadcast();
   final _errors = StreamController<ErrorMessage>.broadcast();
-  final sent = <({Uint8List payload, FrameKind kind})>[];
+  final sent = <Uint8List>[];
   AppState _cur = const AppState();
 
   /// How many upcoming connect() calls must fail before one succeeds.
   int failNextConnects = 0;
 
   @override
-  Stream<IncomingRouteMessage> get messageStream => _messages.stream;
+  Stream<IncomingSessionRecord> get messageStream => _messages.stream;
   @override
   Stream<AppState> get stateStream => _states.stream;
   @override
@@ -83,20 +92,35 @@ class _RecordingRelay extends RelayService {
   }
 
   @override
-  void sendMessage(
-    String to,
-    String channel,
-    Uint8List payload, {
-    FrameKind kind = FrameKind.sealed,
-  }) {
-    if (channel == 'control') sent.add((payload: payload, kind: kind));
+  Future<PeerSendOutcome> sendRecord(Uint8List payload) async {
+    if (!isDispatchAllowed) return PeerSendOutcome.closed;
+    sent.add(payload);
+    return PeerSendOutcome.accepted;
   }
 
-  void inject(IncomingRouteMessage msg) => _messages.add(msg);
+  void inject(IncomingSessionRecord msg) => _messages.add(msg);
 
   void setState(AppState s) {
     _cur = s;
     _states.add(s);
+  }
+
+  /// Every native project stream opened, in call order — a project bound at
+  /// 0 RTT still opens exactly one of these; only an extra `project:start`
+  /// round trip would add a second control-plane send, not a second entry
+  /// here.
+  final openedStreams = <_FakeProjectStream>[];
+
+  @override
+  Future<PeerStream> openStream(
+    StreamOpen open, {
+    required int maxRecordBytes,
+    required int maxQueuedBytes,
+    int? rawAfterRecords,
+  }) async {
+    final stream = _FakeProjectStream(open);
+    openedStreams.add(stream);
+    return stream;
   }
 
   @override
@@ -112,14 +136,94 @@ class _RecordingRelay extends RelayService {
   }
 }
 
-Future<(List<int> seed, Uint8List pub)> _agentEd25519Keypair() async {
-  final seed = List.filled(32, 0xA1);
-  final kp = await Ed25519().newKeyPairFromSeed(seed);
-  final pub = await kp.extractPublicKey();
-  return (seed, Uint8List.fromList(pub.bytes));
+/// One project's native stream, the bridge side. Mirrors
+/// `antgrid_relay_client`'s own `FakePeerStream` test fake at the shape this
+/// suite needs: inject the bridge's first `stream-ready` record, read back
+/// what the app sent.
+class _FakeProjectStream implements PeerStream {
+  _FakeProjectStream(this.open);
+
+  final StreamOpen open;
+  // Single-subscription, so a record injected before the session's read loop
+  // subscribes is buffered rather than dropped.
+  final _records = StreamController<Uint8List>();
+  final sent = <Uint8List>[];
+  bool resetCalled = false;
+  bool finishCalled = false;
+
+  @override
+  Stream<Uint8List> get records => _records.stream;
+
+  @override
+  Future<PeerSendOutcome> send(Uint8List record) async {
+    sent.add(record);
+    return PeerSendOutcome.accepted;
+  }
+
+  final sentRaw = <Uint8List>[];
+
+  @override
+  Future<PeerSendOutcome> sendRaw(Uint8List bytes) async {
+    sentRaw.add(bytes);
+    return PeerSendOutcome.accepted;
+  }
+
+  @override
+  Future<void> reset() async => resetCalled = true;
+
+  @override
+  Future<void> finish() async => finishCalled = true;
+
+  void injectStreamReady(String projectId) => _injectJson({
+    'type': 'stream-ready',
+    'projectId': projectId,
+  });
+
+  void _injectJson(Map<String, dynamic> json) {
+    if (!_records.isClosed) {
+      _records.add(Uint8List.fromList(utf8.encode(jsonEncode(json))));
+    }
+  }
 }
 
-Future<Map<String, dynamic>> _waitForHandshakeFrame(
+/// Opens [projectId] on [session] and answers its native stream's first
+/// record, as the bridge does once it admits the open.
+Future<StreamTransport> _openBound(
+  _RecordingRelay relay,
+  MachineSession session,
+  String projectId,
+) async {
+  final openBefore = relay.openedStreams.length;
+  final opening = session.openProject(projectId, {
+    'type': 'project:start',
+    'projectId': projectId,
+  }, timeout: const Duration(seconds: 2));
+  for (var i = 0; i < 50 && relay.openedStreams.length == openBefore; i++) {
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+  }
+  relay.openedStreams.last.injectStreamReady(projectId);
+  return opening;
+}
+
+/// Advertises [projectId] ready on the control plane, plaintext, exactly as
+/// an unprompted `agent:projects` push would — this is what lets a later
+/// `openProject` skip the `project:start` round trip. Awaits a
+/// beat for the session's broadcast listener to process the injected frame
+/// before returning.
+Future<void> _advertiseReady(_RecordingRelay relay, String projectId) async {
+  relay.inject(
+    IncomingSessionRecord(
+      payload: Uint8List.fromList(
+        utf8.encode(
+          jsonEncode({'type': 'stream-ready', 'projectId': projectId}),
+        ),
+      ),
+    ),
+  );
+  await Future<void>.delayed(const Duration(milliseconds: 20));
+}
+
+Future<Map<String, dynamic>> _waitForControlFrame(
   _RecordingRelay relay,
   String type, {
   Duration timeout = const Duration(seconds: 5),
@@ -131,11 +235,9 @@ Future<Map<String, dynamic>> _waitForHandshakeFrame(
       throw TimeoutException('fake agent: "$type" not received');
     }
     for (var i = startIndex; i < relay.sent.length; i++) {
-      final f = relay.sent[i];
-      if (f.kind != FrameKind.handshake) continue;
       Map<String, dynamic> j;
       try {
-        j = jsonDecode(utf8.decode(f.payload)) as Map<String, dynamic>;
+        j = jsonDecode(utf8.decode(relay.sent[i])) as Map<String, dynamic>;
       } catch (_) {
         continue;
       }
@@ -145,120 +247,31 @@ Future<Map<String, dynamic>> _waitForHandshakeFrame(
   }
 }
 
-/// Fully drives the fake-agent side of one handshake attempt to
-/// `established`, so the phone's `open()` resolves.
-Future<SessionKeys> _completeFakeAgentHandshake(
+/// Answers the phone's plaintext `session:hello` with `established`, so the
+/// handshaker's `perform()` resolves. QUIC/TLS between the two lease-
+/// authorized endpoints is the confidentiality layer now, so there is nothing
+/// here to sign or seal.
+Future<void> _completeFakeAgentHello(
   _RecordingRelay relay, {
-  required List<int> agentSeed,
-  required String machineDeviceId,
-  required String phoneDeviceId,
   int startIndex = 0,
   Duration timeout = const Duration(seconds: 5),
 }) async {
-  final clientHello = await _waitForHandshakeFrame(
+  final hello = await _waitForControlFrame(
     relay,
-    'handshake:client-hello',
+    'session:hello',
     startIndex: startIndex,
     timeout: timeout,
   );
-  final attemptId = clientHello['attemptId'] as String;
-  final phoneX25519Pub = base64.decode(clientHello['pubkey'] as String);
-  final nonce = base64.decode(clientHello['nonce'] as String);
-
-  final agentX25519KP = await X25519().newKeyPair();
-  final agentX25519Priv = Uint8List.fromList(
-    await agentX25519KP.extractPrivateKeyBytes(),
-  );
-  final agentX25519Pub = Uint8List.fromList(
-    (await agentX25519KP.extractPublicKey()).bytes,
-  );
-
-  final agentTranscript = buildTranscriptV2(
-    TranscriptFields(
-      registrationId: machineDeviceId,
-      role: 'agent',
-      agentDeviceId: machineDeviceId,
-      phoneDeviceId: phoneDeviceId,
-      agentX25519Pub: agentX25519Pub,
-      phoneX25519Pub: phoneX25519Pub,
-      nonce: nonce,
-    ),
-  );
-  final agentSig = await signTranscriptV2(
-    transcript: agentTranscript,
-    ed25519Seed: agentSeed,
-  );
-  final ss = await x25519SharedSecret(
-    privateKey: agentX25519Priv,
-    peerPublicKey: phoneX25519Pub,
-  );
-  final keys = await deriveSessionKeysV2(ss, agentTranscript);
-
+  final attemptId = hello['attemptId'] as String;
   relay.inject(
-    IncomingRouteMessage(
-      from: machineDeviceId,
-      channel: 'control',
-      kind: FrameKind.handshake,
+    IncomingSessionRecord(
       payload: Uint8List.fromList(
         utf8.encode(
-          jsonEncode({
-            'type': 'handshake:agent-hello',
-            'attemptId': attemptId,
-            'pubkey': base64.encode(agentX25519Pub),
-            'sig': agentSig,
-          }),
+          jsonEncode({'type': kSessionEstablished, 'attemptId': attemptId}),
         ),
       ),
     ),
   );
-
-  final t = E2eTransportDart(sendKey: keys.a2p, recvKey: keys.p2a);
-  relay.inject(
-    IncomingRouteMessage(
-      from: machineDeviceId,
-      channel: 'control',
-      kind: FrameKind.sealed,
-      payload: await t.seal(
-        jsonEncode({
-          'type': 'handshake:agent-ready',
-          'attemptId': attemptId,
-          'confirm': base64.encode(await agentConfirmTagV2(keys.confirm)),
-        }),
-      ),
-    ),
-  );
-
-  // Wait for the resulting sealed app:ready before answering established —
-  // matches the real protocol's causal order.
-  final deadline = DateTime.now().add(const Duration(seconds: 5));
-  while (DateTime.now().isBefore(deadline)) {
-    var found = false;
-    for (final f in relay.sent) {
-      if (f.kind != FrameKind.sealed) continue;
-      final dec = await t.open(f.payload);
-      if (dec == null) continue;
-      final j = jsonDecode(dec) as Map<String, dynamic>;
-      if (j['type'] == 'app:ready' && j['attemptId'] == attemptId) {
-        found = true;
-        break;
-      }
-    }
-    if (found) break;
-    await Future<void>.delayed(const Duration(milliseconds: 5));
-  }
-
-  relay.inject(
-    IncomingRouteMessage(
-      from: machineDeviceId,
-      channel: 'control',
-      kind: FrameKind.sealed,
-      payload: await t.seal(
-        jsonEncode({'type': 'established', 'attemptId': attemptId}),
-      ),
-    ),
-  );
-
-  return keys;
 }
 
 const _machineId = 'machine-1';
@@ -276,99 +289,70 @@ DeviceIdentity _identity() => DeviceIdentity(
 );
 
 /// The production mechanisms adapter over the fake relay. No pair step: trust
-/// is account-derived, so the ladder is dial -> presence -> E2E handshake.
-RelayMechanisms _mechanisms(
-  _RecordingRelay relay, {
-  required Uint8List agentPub,
-}) => RelayMechanisms(
-  relay: relay,
-  crypto: CryptoService(),
-  machineDeviceId: _machineId,
-  identity: _identity(),
-  phoneDeviceId: _phoneId,
-  phoneEd25519Seed: List<int>.filled(32, 3),
-  epoch: 1,
-  resolveCoords: () async => ConnCoords(
-    relayUrl: 'ws://relay.test',
-    agentEd25519PubB64: base64.encode(agentPub),
-  ),
-  mintToken: () async => 'license-token',
-);
+/// is account-derived, so the ladder is dial -> presence -> plaintext hello.
+/// `FixedPeerConnector`'s `TestPayloadLink` forwards `openStream` straight to
+/// the carrier, which is what lets `openProject` open native streams on
+/// [relay].
+PeerConnectionMechanisms _mechanisms(_RecordingRelay relay) =>
+    PeerConnectionMechanisms(
+      peerRuntime: FixedPeerConnector(relay),
+      machineDeviceId: _machineId,
+      resolveCoords: () async => const ConnCoords(
+        relayUrl: 'ws://relay.test',
+        agentEd25519PubB64: 'AGENT_PUB',
+      ),
+    );
 
-/// Brings the connection up against the fake agent and returns both the
-/// resulting session and the derived [SessionKeys], so a caller can seal
-/// further control-plane traffic (e.g. a `stream-ready` advert) as the agent
-/// would.
-Future<(MachineSession, SessionKeys)> _openConnectionWithKeys(
-  RelayConnection conn, {
-  required List<int> agentSeed,
-  required Uint8List agentPub,
-}) async {
+RelayCentralControlDialer _central(_RecordingRelay relay) =>
+    RelayCentralControlDialer(
+      relay: relay,
+      machineDeviceId: _machineId,
+      identity: _identity(),
+      epoch: 1,
+      mintToken: () async => 'license-token',
+    );
+
+/// Brings the connection up against the fake agent and returns the resulting
+/// session.
+Future<MachineSession> _openConnection(MachineConnection conn) async {
   final relay = conn.relay as _RecordingRelay;
-  final agentFuture = _completeFakeAgentHandshake(
-    relay,
-    agentSeed: agentSeed,
-    machineDeviceId: _machineId,
-    phoneDeviceId: _phoneId,
-  );
-  conn.ensureStarted(mechanisms: _mechanisms(relay, agentPub: agentPub));
+  final agentFuture = _completeFakeAgentHello(relay);
+  conn.ensureStarted(mechanisms: _mechanisms(relay), central: _central(relay));
   final session = await conn.awaitSession();
-  final keys = await agentFuture;
-  return (session, keys);
-}
-
-Future<MachineSession> _openConnection(
-  RelayConnection conn, {
-  required List<int> agentSeed,
-  required Uint8List agentPub,
-}) async {
-  final (session, _) = await _openConnectionWithKeys(
-    conn,
-    agentSeed: agentSeed,
-    agentPub: agentPub,
-  );
+  await agentFuture;
   return session;
 }
 
 void main() {
   late _RecordingRelay relay;
-  late List<int> agentSeed;
-  late Uint8List agentPub;
 
-  setUp(() async {
+  setUp(() {
     relay = _RecordingRelay();
-    final (seed, pub) = await _agentEd25519Keypair();
-    agentSeed = seed;
-    agentPub = pub;
   });
 
   tearDown(() async {
     await relay.closeStreams();
   });
 
-  test('the supervisor drives dial → presence → E2E handshake and resolves '
+  test('the supervisor drives dial → presence → plaintext hello and resolves '
       'a usable MachineSession', () async {
-    final conn = RelayConnection(
+    final conn = MachineConnection(
       machineDeviceId: _machineId,
       crypto: CryptoService(),
       relayOverride: relay,
     );
     addTearDown(conn.dispose);
 
-    final session = await _openConnection(
-      conn,
-      agentSeed: agentSeed,
-      agentPub: agentPub,
-    );
+    final session = await _openConnection(conn);
 
     expect(relay.connectCalls, 1);
     expect(session.isEstablished, isTrue);
     expect(conn.session, same(session));
   });
 
-  test('a dial that fails once is retried by the supervisor, not left '
-      'poisoned for the lifetime of the connection', () async {
-    final conn = RelayConnection(
+  test('a central hello failure does not poison the native session and is '
+      'retried independently', () async {
+    final conn = MachineConnection(
       machineDeviceId: _machineId,
       crypto: CryptoService(),
       relayOverride: relay,
@@ -380,22 +364,25 @@ void main() {
     // recovery. Recovery is now a level-triggered re-evaluation, with nobody
     // re-invoking anything.
     relay.failNextConnects = 1;
-    final agentFuture = _completeFakeAgentHandshake(
+    final agentFuture = _completeFakeAgentHello(
       relay,
-      agentSeed: agentSeed,
-      machineDeviceId: _machineId,
-      phoneDeviceId: _phoneId,
       timeout: const Duration(seconds: 15),
     );
-    conn.ensureStarted(mechanisms: _mechanisms(relay, agentPub: agentPub));
+    conn.ensureStarted(
+      mechanisms: _mechanisms(relay),
+      central: _central(relay),
+    );
 
     final session = await conn.awaitSession();
     await agentFuture;
+    for (var i = 0; i < 200 && relay.connectCalls < 2; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+    }
 
     expect(
       relay.connectCalls,
       2,
-      reason: 'the supervisor re-dialled on its own',
+      reason: 'central control retries without rebuilding the payload',
     );
     expect(session.isEstablished, isTrue);
     expect(conn.session, same(session));
@@ -403,33 +390,39 @@ void main() {
 
   test('two projects on the SAME machine share the ONE MachineSession — a '
       'second bring-up reuses the running supervisor with no second '
-      'dial/handshake', () async {
-    final conn = RelayConnection(
+      'dial/hello', () async {
+    final conn = MachineConnection(
       machineDeviceId: _machineId,
       crypto: CryptoService(),
       relayOverride: relay,
     );
     addTearDown(conn.dispose);
 
-    final session1 = await _openConnection(
-      conn,
-      agentSeed: agentSeed,
-      agentPub: agentPub,
-    );
+    final session1 = await _openConnection(conn);
 
     // Simulate a SECOND project on this machine resolving its transport —
     // agentTransportForProvider calls ensureStarted/awaitSession again for
     // every project id; the machine's supervisor must already be running and
     // must not re-dial.
-    conn.ensureStarted(mechanisms: _mechanisms(relay, agentPub: agentPub));
+    conn.ensureStarted(
+      mechanisms: _mechanisms(relay),
+      central: _central(relay),
+    );
     final session2 = await conn.awaitSession();
 
     expect(relay.connectCalls, 1);
     expect(session2, same(session1));
 
-    // Two distinct project streams, ONE underlying session/relay.
-    final streamA = session1.streamFor('stream-a');
-    final streamB = session1.streamFor('stream-b');
+    // Two distinct project streams, ONE underlying session/relay — each
+    // needs its own control-plane ready notice before its native stream
+    // binds.
+    await _advertiseReady(relay, 'proj-a');
+    await _advertiseReady(relay, 'proj-b');
+    final streamA = await _openBound(relay, session1, 'proj-a');
+    await streamA.connect();
+    final streamB = await _openBound(relay, session1, 'proj-b');
+    await streamB.connect();
+
     expect(identical(streamA, streamB), isFalse);
     expect(streamA.session, same(session1));
     expect(streamB.session, same(session1));
@@ -437,64 +430,45 @@ void main() {
   });
 
   test('drill-in binds via a control-plane stream-ready advert at 0 RTT — no '
-      'new project:start once the streamId is already known', () async {
-    final conn = RelayConnection(
+      'new project:start once the project is already known ready', () async {
+    final conn = MachineConnection(
       machineDeviceId: _machineId,
       crypto: CryptoService(),
       relayOverride: relay,
     );
     addTearDown(conn.dispose);
 
-    final (session, keys) = await _openConnectionWithKeys(
-      conn,
-      agentSeed: agentSeed,
-      agentPub: agentPub,
-    );
+    final session = await _openConnection(conn);
 
-    // The agent advertises a project's stream unprompted (e.g. as part of
-    // `agent:projects` on connect) — sealed under the established keys,
-    // exactly as MachineSession's own outbound traffic is.
-    final agentSend = E2eTransportDart(sendKey: keys.a2p, recvKey: keys.p2a);
-    relay.inject(
-      IncomingRouteMessage(
-        from: _machineId,
-        channel: 'control',
-        kind: FrameKind.sealed,
-        payload: await agentSend.seal(
-          jsonEncode({
-            'm': {
-              'type': 'stream-ready',
-              'projectId': 'proj-a',
-              'streamId': 'stream-a',
-            },
-          }),
-        ),
-      ),
-    );
-
-    String? knownStreamId;
-    for (var i = 0; i < 50; i++) {
-      knownStreamId = session.streamIdForProject('proj-a');
-      if (knownStreamId != null) break;
-      await Future<void>.delayed(const Duration(milliseconds: 10));
-    }
-    expect(knownStreamId, 'stream-a');
+    // The agent advertises a project ready unprompted (e.g. as part of
+    // `agent:projects` on connect) — plaintext, exactly as MachineSession's
+    // own outbound traffic is.
+    await _advertiseReady(relay, 'proj-a');
 
     final sentBefore = relay.sent.length;
-    final streamId = await session.bindProject('proj-a', {
+    final openBefore = relay.openedStreams.length;
+    final openFuture = session.openProject('proj-a', {
       'type': 'project:start',
       'projectId': 'proj-a',
     }, timeout: const Duration(seconds: 2));
-    expect(streamId, 'stream-a');
+    for (var i = 0; i < 50 && relay.openedStreams.length == openBefore; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+    }
+    expect(
+      relay.openedStreams.length,
+      openBefore + 1,
+      reason: 'a project already known ready opens its native stream at once',
+    );
+    relay.openedStreams.last.injectStreamReady('proj-a');
+    final transport = await openFuture;
+
     expect(
       relay.sent.length,
       sentBefore,
       reason:
-          'a known streamId resolves at 0 RTT — bindProject must '
-          'not send project:start when the mapping is already known',
+          'a project already known ready resolves at 0 RTT — openProject '
+          'must not send project:start when readiness is already known',
     );
-
-    final transport = session.streamFor(streamId);
     expect(
       transport.session,
       same(session),
@@ -503,45 +477,4 @@ void main() {
           'machine session — no new socket/handshake',
     );
   });
-
-  // The relay discards a routed frame for two different reasons and names a
-  // different code for each: the rate limiter's, and a recipient whose socket
-  // refused the write. Both are the sender losing an outbound frame nobody will
-  // ever resend on its own, so both have to reach the streams — a service
-  // holding re-issuable work recovers on this signal instead of waiting out its
-  // timeout.
-  for (final code in ['MESSAGE_RATE_LIMITED', 'ROUTE_FAILED']) {
-    test('a relay $code report reaches the project streams as a dropped '
-        'frame', () async {
-      final conn = RelayConnection(
-        machineDeviceId: _machineId,
-        crypto: CryptoService(),
-        relayOverride: relay,
-      );
-      addTearDown(conn.dispose);
-
-      final session = await _openConnection(
-        conn,
-        agentSeed: agentSeed,
-        agentPub: agentPub,
-      );
-      final drops = <void>[];
-      session.streamFor('stream-a').droppedFrames.listen(drops.add);
-
-      relay.injectError(
-        ErrorMessage(
-          code: code,
-          message: 'discarded',
-          retryable: true,
-          channel: 'control',
-          bytes: 4096,
-        ),
-      );
-
-      for (var i = 0; i < 100 && drops.isEmpty; i++) {
-        await Future<void>.delayed(const Duration(milliseconds: 5));
-      }
-      expect(drops, hasLength(1));
-    });
-  }
 }

@@ -92,14 +92,15 @@ class MessageRouter {
   void dropCheckoutReplay(String checkoutId) => _durable.remove(checkoutId);
 
   void _onInbound(InboundMessage raw) {
-    // The preview channel also carries the browser tunnel's hot path (HTTP/WS
-    // bulk data at full bandwidth) — accepting it wholesale here would run
-    // every one of those frames through `classifyAbMessage`,
-    // `_retainIfDurable` and the debug `_isExpectedIgnore` parse for nothing,
-    // since PreviewService reads that traffic off its own direct transport
-    // subscription. A Set lookup on the type keeps everything but the two
-    // terminal bulk payloads (`terminal:frame`, `terminal:history:page`) off
-    // this path entirely.
+    // `raw.channel` is local mode's own loopback label, not a relay-mode
+    // concept — a relay connection's terminal/preview traffic rides its own
+    // native stream and never reaches this router at all. Accepting the
+    // loopback 'preview' channel wholesale here would run every one of those
+    // frames through `classifyAbMessage`, `_retainIfDurable` and the debug
+    // `_isExpectedIgnore` parse for nothing, since PreviewService reads that
+    // traffic off its own direct transport subscription. A Set lookup on the
+    // type keeps everything but the two terminal bulk payloads
+    // (`terminal:frame`, `terminal:history:page`) off this path entirely.
     if (raw.channel != 'control' &&
         !kPreviewChannelInboundTypes.contains(raw.json['type'])) {
       return;

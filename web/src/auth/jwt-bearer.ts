@@ -12,6 +12,21 @@ import type { Auth } from "./better-auth.js";
 import type { DB } from "../db/index.js";
 import type { Env } from "../env.js";
 import type { AuthVars } from "./middleware.js";
+import { z } from "zod";
+import { parseDeviceOAuthMetadata } from "../models/device-oauth.js";
+
+const DeviceClaims = z.object({
+  uid: z.string().min(1),
+  deviceUuid: z.string().uuid(),
+  azp: z.string().min(1),
+  pk: z.string().regex(/^[A-Za-z0-9+/]{43}=$/),
+  exp: z.number().int(),
+  iat: z.number().int(),
+});
+
+export function requireDeviceBearerJwt(deps: { auth: Auth; env: Env; db: DB }) {
+  return requireBearerJwt({ ...deps, deviceDb: deps.db });
+}
 
 /**
  * Issuer pinned by Better-Auth's `jwt` plugin: `${baseURL}/api/auth`.
@@ -80,12 +95,12 @@ async function fetchJwks(auth: Auth, env: Env): Promise<JSONWebKeySet> {
  *    audience and the issuer Better-Auth stamps onto the token).
  *  - `uid` (verified claim) is the only source of `userId` set on the context.
  *  - `scope` must carry `agent`.
- *  - The `deviceUuid` claim must resolve to a live device OWNED BY `uid`.
- *    Device tokens live an hour (`m2mAccessTokenExpiresIn`), so without this a
- *    revoked device would keep its access until the token expired on its own;
- *    it is deliberately part of the one gate rather than a composable second
- *    middleware, because a route added later cannot forget what it never had
- *    to remember. The resolved id lands on the context as `deviceId`.
+ *  - With `deviceDb` (`requireDeviceBearerJwt`), the token's `azp` must
+ *    resolve to a live, unrevoked device OWNED BY `uid` whose key matches
+ *    `pk`. Device tokens live an hour (`m2mAccessTokenExpiresIn`), so without
+ *    this a revoked device keeps its access until the token expires on its own.
+ *    Only that arm sets `deviceId`, which routes read as the actor-type signal —
+ *    so a route that needs either must be gated by `requireDeviceBearerJwt`.
  *  - On any failure (missing header, bad shape, expired, bad signature,
  *    wrong issuer, missing uid, missing scope, dead device) responds 401 — no
  *    claims are trusted.
@@ -95,8 +110,8 @@ async function fetchJwks(auth: Auth, env: Env): Promise<JSONWebKeySet> {
  */
 export function requireBearerJwt(deps: {
   auth: Auth;
-  db: DB;
   env: Env;
+  deviceDb?: DB;
 }): MiddlewareHandler<{ Variables: AuthVars }> {
   let cache: CachedJwks | undefined;
 
@@ -127,6 +142,7 @@ export function requireBearerJwt(deps: {
         const verified = await jwtVerify(token, keySet, {
           algorithms: ["EdDSA"],
           issuer,
+          ...(deps.deviceDb ? { audience: [issuer, ...(deps.env.EXTRA_TOKEN_AUDIENCES ?? [])] } : {}),
         });
         payload = verified.payload;
         break;
@@ -156,25 +172,35 @@ export function requireBearerJwt(deps: {
       return c.json({ error: "UNAUTHENTICATED" }, 401);
     }
 
-    // Reading `deviceUuid` off the token is safe in a way a body-supplied id is
-    // not: it is only ever a lookup key scoped by the already-verified `uid`,
-    // so a claim naming a foreign device resolves to nothing.
-    const deviceUuid = claims.deviceUuid;
-    if (typeof deviceUuid !== "string" || deviceUuid.length === 0) {
-      return c.json({ error: "UNAUTHENTICATED" }, 401);
-    }
-    const device = await deps.db.device.findFirst({
-      where: { userId: uid, deviceId: deviceUuid, revokedAt: null },
-      select: { deviceId: true },
-    });
-    if (!device) {
-      return c.json({ error: "UNAUTHENTICATED" }, 401);
+    let deviceId: string | undefined;
+    if (deps.deviceDb) {
+      const parsed = DeviceClaims.safeParse(payload);
+      if (!parsed.success) return c.json({ error: "UNAUTHENTICATED" }, 401);
+      const claims = parsed.data;
+      const [device, credential] = await Promise.all([
+        deps.deviceDb.device.findUnique({ where: { oauthClientId: claims.azp } }),
+        deps.deviceDb.oauthClient.findUnique({ where: { clientId: claims.azp } }),
+      ]);
+      const metadata = parseDeviceOAuthMetadata(credential?.metadata);
+      if (!device || device.revokedAt || !credential || credential.disabled === true ||
+          !credential.grantTypes.includes("client_credentials") || !metadata.success ||
+          device.userId !== claims.uid || device.deviceId !== claims.deviceUuid ||
+          Buffer.from(device.publicKey).toString("base64") !== claims.pk ||
+          metadata.data.userId !== claims.uid || metadata.data.deviceUuid !== claims.deviceUuid ||
+          metadata.data.ed25519Pub !== claims.pk) {
+        return c.json({ error: "UNAUTHENTICATED" }, 401);
+      }
+      c.set("deviceAuthorization", {
+        id: device.id, deviceId: device.deviceId, enrollmentId: claims.azp,
+        publicKey: device.publicKey, kind: device.kind,
+      });
+      deviceId = device.deviceId;
     }
 
     c.set("userId", uid);
     c.set("sessionId", "");
     c.set("userEmail", typeof claims.email === "string" ? claims.email : null);
-    c.set("deviceId", device.deviceId);
+    if (deviceId !== undefined) c.set("deviceId", deviceId);
     await next();
   };
 }

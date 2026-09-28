@@ -7,7 +7,7 @@ import type { DB } from "../db/index.js";
 import type { Auth } from "../auth/better-auth.js";
 import type { Env } from "../env.js";
 import type { AuthVars } from "../auth/middleware.js";
-import { requireBearerJwt } from "../auth/jwt-bearer.js";
+import { requireDeviceBearerJwt } from "../auth/jwt-bearer.js";
 import { requireUser, requireUserOrBearer } from "../auth/middleware.js";
 import { findActiveMembership } from "../models/account-member.js";
 import { bindLocalProject, projectFromIntegrationRepo } from "../models/project.js";
@@ -33,7 +33,7 @@ export function projectRoutes(deps: { db: DB; auth: Auth; env: Env }) {
   // than a session cookie.
   r.use(
     "/account/projects/bindings",
-    requireBearerJwt({ auth: deps.auth, db: deps.db, env: deps.env })
+    requireDeviceBearerJwt({ auth: deps.auth, db: deps.db, env: deps.env })
   );
 
   // The list is read by the app as well as the bridge, so it takes either

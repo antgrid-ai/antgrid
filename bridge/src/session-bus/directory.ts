@@ -1,4 +1,4 @@
-// The answer to "who could I talk to" (`docs/session-messaging.md` §5.5), and
+// The answer to "who could I talk to", and
 // deliberately not to "who should I talk to": the bridge sorts on facts it can
 // check and hands the agent a judgeable row, because it is guessing with
 // strictly less context than the agent asking.
@@ -8,7 +8,7 @@
 // memory is what bounds the candidate set to one repository before anything
 // expensive happens. The branch is then probed FRESH, at request time, for that
 // bounded set only: it moves on every checkout, it is what the sort's first key
-// reads, and §5.5 puts the whole set at 3-15 rows rather than the 149 a
+// reads, and the design keeps the whole set at 3-15 rows rather than the 149 a
 // directory-name list degrades to. Probing branches for every project on the
 // machine would invert that — the cheap cached fact exists to scope the
 // expensive fresh one.
@@ -20,15 +20,16 @@ import { LOCAL_MACHINE_ID, LOCAL_ROW_FLOOR, REMOTE_CARRIER_SILENCE_MS } from "./
 import { namesMachine } from "./address";
 import type { ReachMachine } from "./remote-directory";
 
-/** Rows one directory read may return. Generous against §5.5's expected 3-15:
+/** Rows one directory read may return. Generous against the expected 3-15:
  *  the bound exists so a machine that has opened one repository under many
  *  project ids cannot hand an agent an unreadable list, not to ration a normal
  *  answer. A read that hits it says so — see {@link SessionDirectory.list}. */
 export const MAX_DIRECTORY_ROWS = 60;
 
-/** What a session is doing, reduced to the three ranks §5.5 sorts on. Narrower
- *  than {@link WorkStatus} because a directory row is scanned, not diagnosed:
- *  the full status rides `workStatus` for a caller that wants it. */
+/** What a session is doing, reduced to the three ranks {@link sortDirectory}
+ *  sorts on. Narrower than {@link WorkStatus} because a directory row is
+ *  scanned, not diagnosed: the full status rides `workStatus` for a caller
+ *  that wants it. */
 export type DirectoryActivity = "running" | "idle" | "stopped";
 
 export interface SessionDirectoryRow {
@@ -50,7 +51,7 @@ export interface SessionDirectoryRow {
   workStatus?: WorkStatus;
   lastActiveAt: number;
   /** Whether this session's agent can be messaged back — it declares an `mcp`
-   *  profile (§9). A receive-only vendor is listed and says so, rather than
+   *  profile. A receive-only vendor is listed and says so, rather than
    *  being offered as a peer that will never answer. */
   canReply: boolean;
 }
@@ -183,7 +184,7 @@ export function directoryRowsFor(
  *  session across the given projects, keyed to the repo key and branch the
  *  card already paid to read. A project with no repo key contributes no
  *  row — a session is addressed by repo key, so one it cannot carry is not
- *  offerable (§5.1 fails closed here too). */
+ *  offerable. */
 export function machineDirectoryRows(
   sessionIndex: DirectorySessions,
   projects: Array<{ projectId: string; repoKey: string | null; branch: string | null }>,
@@ -213,9 +214,9 @@ export function machineDirectoryRows(
 const ACTIVITY_RANK: Record<DirectoryActivity, number> = { running: 0, idle: 1, stopped: 2 };
 
 /**
- * §5.5's sort, and all of it: same branch, then activity, then recency, then
- * can-reply. Objective ordering rather than a relevance score, and the line is
- * deliberate — every key here is a fact the bridge can check.
+ * The directory's sort, and all of it: same branch, then activity, then
+ * recency, then can-reply. Objective ordering rather than a relevance score,
+ * and the line is deliberate — every key here is a fact the bridge can check.
  *
  * `callerBranch` of null (a detached HEAD, or a project with no path) simply
  * makes the first key inert, which is the right degradation: nothing is ranked
@@ -300,8 +301,8 @@ export class SessionDirectory {
    * session: a row you cannot message is worse than no row, because it costs a
    * turn to find out.
    *
-   * A caller whose project has no repo key gets a refusal, never an empty list — §5.1 fails
-   * closed, and the surface above states which of the two reasons it was.
+   * A caller whose project has no repo key gets a refusal, never an empty
+   * list, and the surface above states which of the two reasons it was.
    */
   async list(caller: { projectId: string; sessionId: string }): Promise<SessionDirectoryResult> {
     const key = this.deps.repoKeys.keyFor(caller.projectId);
@@ -354,7 +355,7 @@ export class SessionDirectory {
   }
 
   /**
-   * §5.1's fail-closed bound about the CALLER, read on its own, so a refusal
+   * The fail-closed bound about the CALLER, read on its own, so a refusal
    * can tell "this project can address nobody" from "that address resolves to
    * nobody".
    *
@@ -377,17 +378,18 @@ export class SessionDirectory {
   /**
    * The one row a send needs, resolved with no branch probe and no git spawn —
    * `list()` is documented as the bus's one async read precisely so a send
-   * never goes through it. `branch` is always null here: §5.3 makes branch a
+   * never goes through it. `branch` is always null here: branch is only a
    * ranking hint, and a lookup by exact address does not rank.
    *
    * BOTH halves are scoped to the CALLER's own repo key, and the local one is
    * the half that matters: the session index is host-wide, so without the
    * scope a caller in one repository could address a session in an unrelated
-   * one on the same machine — and §8.2 lists exactly that among the things an
-   * addressable session cannot do. E5 names the repo key as one of the three
-   * bounds the bridge enforces rather than an agent's judgment, and E4 makes
-   * the local path the common case, so a bound that held only on the remote
-   * path would be the bound holding where it is least needed.
+   * one on the same machine, which is exactly what an addressable session
+   * must never be able to do. The repo key is one of the three bounds the
+   * bridge enforces rather than an agent's judgment, and the local path is
+   * the common case — a bridge cannot dial another bridge, so most sessions
+   * reach only their own machine's peers — so a bound that held only on the
+   * remote path would be the bound holding where it is least needed.
    *
    * A local target (`target.machineId` null, or naming this machine) answers
    * from the session index, deriving `canReply` the way {@link
@@ -401,7 +403,7 @@ export class SessionDirectory {
     caller: { projectId: string },
     target: { machineId: string | null; projectId: string; sessionId: string },
   ): SessionDirectoryRow | null {
-    // §5.1 fails closed here as it does in `list()`, which refuses a keyless
+    // This fails closed here as it does in `list()`, which refuses a keyless
     // caller outright: a project with no git remote has no key, so it can name
     // nobody and nobody can name it.
     const key = this.deps.repoKeys.keyFor(caller.projectId);

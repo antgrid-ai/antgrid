@@ -1,5 +1,9 @@
 import { describe, it, expect } from "bun:test";
-import { parseMessage, createMessage, AbMessageSchema, parseMessageFast } from "../src/protocol";
+import { SESSION_FRAME_TYPES } from "antgrid-wire";
+import {
+  parseMessage, createMessage, AbMessageSchema, parseMessageFast,
+  SessionHelloFrame, SessionEstablishedFrame,
+} from "../src/protocol";
 
 describe("agent:status shape", () => {
   it("accepts services + ports in place of terminals/proxies/layout", () => {
@@ -307,52 +311,6 @@ describe("client:focus-state", () => {
   });
 });
 
-describe("terminal:snapshot", () => {
-  it("request shape", () => {
-    const msg = {
-      id: "1306bde2-9272-4ee7-8ed3-c037fc179b46",
-      timestamp: Date.now(),
-      type: "terminal:snapshot:request",
-      terminalId: "t1",
-    };
-    expect(parseMessage(JSON.stringify(msg))?.type).toBe("terminal:snapshot:request");
-  });
-
-  it("reply shape carries seq", () => {
-    const msg = {
-      id: "0cc738bf-c838-4a2e-8af0-47a6bdb19a88",
-      timestamp: Date.now(),
-      type: "terminal:snapshot",
-      terminalId: "t1",
-      scrollback: "hello\nworld\n",
-      seq: 42,
-    };
-    const parsed = parseMessage(JSON.stringify(msg));
-    expect(parsed?.type).toBe("terminal:snapshot");
-    if (parsed?.type !== "terminal:snapshot") throw new Error("unreachable");
-    expect(parsed.seq).toBe(42);
-    expect(parsed.scrollback).toBe("hello\nworld\n");
-    // An older bridge sends no flag at all, and the client must read that as a
-    // mode prelude plus a byte tail it has to erase around itself.
-    expect(parsed.composed).toBeUndefined();
-  });
-
-  it("carries the composed flag through the parse hop", () => {
-    const msg = {
-      id: "b0a1f5c9-4b28-4f0e-8b3b-9c4b1c2d3e4f",
-      timestamp: Date.now(),
-      type: "terminal:snapshot",
-      terminalId: "t1",
-      scrollback: "\u001b[?1049l\u001b[3J\u001b[2J\u001b[H\u001b[0mscreen",
-      seq: 7,
-      composed: true,
-    };
-    const parsed = parseMessage(JSON.stringify(msg));
-    if (parsed?.type !== "terminal:snapshot") throw new Error("unreachable");
-    expect(parsed.composed).toBe(true);
-  });
-});
-
 describe("file:tree listings", () => {
   it("root request shape (no params)", () => {
     const msg = {
@@ -416,37 +374,58 @@ describe("preview:snapshot", () => {
   });
 });
 
-describe("v2 handshake message schemas", () => {
-  it("client-hello requires nonce", () => {
-    expect(parseMessage(JSON.stringify({
-      id: "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
-      type: "handshake:client-hello", timestamp: Date.now(),
-      pubkey: "AA==", sig: "AA==",
-    }))).toBeNull();
-    expect(parseMessage(JSON.stringify({
-      id: "b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e",
-      type: "handshake:client-hello", timestamp: Date.now(),
-      pubkey: "AA==", sig: "AA==", nonce: "AA==",
-    }))).not.toBeNull();
+// The native peer session opens on one plaintext `session:hello` /
+// `established` pair — no transcript, no confirm tag. These frames carry no
+// id/timestamp envelope (see the comment above their definition in
+// protocol.ts), so they are validated directly, never through parseMessage.
+describe("session:hello / established frame schemas", () => {
+  it("session:hello requires a non-empty attemptId", () => {
+    expect(SessionHelloFrame.safeParse({ type: "session:hello" }).success).toBe(false);
+    expect(SessionHelloFrame.safeParse({ type: "session:hello", attemptId: "" }).success).toBe(false);
+    expect(SessionHelloFrame.safeParse({ type: "session:hello", attemptId: "a1" }).success).toBe(true);
   });
 
-  it("agent-ready and app:ready require confirm", () => {
+  it("still parses a hello carrying an old app's capabilities key, stripped and ignored", () => {
+    const parsed = SessionHelloFrame.safeParse({
+      type: "session:hello", attemptId: "a1",
+      capabilities: { pullsTree: true, terminalFramesV1: true },
+    });
+    expect(parsed.success).toBe(true);
+    expect(parsed.success && parsed.data).not.toHaveProperty("capabilities");
+  });
+
+  it("session:established requires the matching attemptId and rejects the old bare name", () => {
+    expect(SessionEstablishedFrame.safeParse({ type: "session:established" }).success).toBe(false);
+    expect(SessionEstablishedFrame.safeParse({ type: "session:established", attemptId: "a1" }).success).toBe(true);
+    expect(SessionEstablishedFrame.safeParse({ type: "established", attemptId: "a1" }).success).toBe(false);
+  });
+
+  it("neither frame is a member of AbMessageSchema", () => {
     expect(parseMessage(JSON.stringify({
-      id: "c3d4e5f6-a7b8-4c9d-ae0f-1a2b3c4d5e6f",
-      type: "handshake:agent-ready", timestamp: Date.now(),
+      id: "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d", timestamp: Date.now(),
+      type: "session:hello", attemptId: "a1",
     }))).toBeNull();
     expect(parseMessage(JSON.stringify({
-      id: "d4e5f6a7-b8c9-4d0e-bf1a-2b3c4d5e6f7a",
-      type: "handshake:agent-ready", timestamp: Date.now(), confirm: "AA==",
-    }))).not.toBeNull();
-    expect(parseMessage(JSON.stringify({
-      id: "e5f6a7b8-c9d0-4e1f-80a2-3b4c5d6e7f8a",
-      type: "app:ready", timestamp: Date.now(),
+      id: "b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e", timestamp: Date.now(),
+      type: "session:established", attemptId: "a1",
     }))).toBeNull();
-    expect(parseMessage(JSON.stringify({
-      id: "f6a7b8c9-d0e1-4f2a-81b3-4c5d6e7f8a9b",
-      type: "app:ready", timestamp: Date.now(), confirm: "AA==",
-    }))).not.toBeNull();
+  });
+});
+
+// None of the five session-frame names is an AbMessage literal or a
+// KNOWN_TYPES entry — proved here rather than by review, since the two lists
+// are hand-maintained and can drift silently.
+describe("session-frame types are disjoint from the control plane", () => {
+  it("no AbMessageSchema option's type literal is a SESSION_FRAME_TYPES name, and none parses", () => {
+    expect(AbMessageSchema.options.length).toBeGreaterThan(0);
+    const controlPlaneTypes = AbMessageSchema.options.map((option) => option.shape.type.value);
+    // The loop below would pass vacuously against an empty or wrongly-scoped
+    // list, so pin that it actually holds ordinary control-plane types.
+    expect(controlPlaneTypes).toContain("ping");
+    for (const sessionType of SESSION_FRAME_TYPES) {
+      expect(controlPlaneTypes).not.toContain(sessionType);
+      expect(parseMessageFast(JSON.stringify({ type: sessionType }))).toBeNull();
+    }
   });
 });
 
@@ -541,7 +520,7 @@ describe("the session object is unchanged and unextended", () => {
   const envelope = { id: "3f2a0f5e-1c3b-4c2b-9f2e-2b7c1d4e5a60", timestamp: 1_700_000_000_000 };
   const address = { machineId: "m1", projectId: "p1", sessionId: "s1" };
 
-  // `docs/session-messaging.md` §4.1: the bus addresses a session by its id and
+  // The bus addresses a session by its id and
   // adds nothing to it. Asserted on the wire rather than left to review, because
   // re-growing a field here costs nothing at the schema and is invisible
   // afterwards — a wave that wants one has to delete this test to get it.
@@ -572,3 +551,4 @@ describe("the session object is unchanged and unextended", () => {
     expect(parsed).not.toHaveProperty("brief");
   });
 });
+

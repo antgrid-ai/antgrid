@@ -1,9 +1,7 @@
-import 'dart:async';
-
 import 'package:test/test.dart';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 
-/// Minimal [BufferedAgentTransport] exercising the tier-2/tier-3 contract in
+/// Minimal [BufferedAgentTransport] exercising the tier-3 hydrate contract in
 /// isolation (no sockets, no E2E). [connect] flips to `connected` (which the
 /// base treats as established); [redriveHydrators] is invoked directly to
 /// simulate a (re)establishment the way `StreamTransport.refreshSnapshot` does.
@@ -139,47 +137,6 @@ void main() {
       t.redriveHydrators();
       await Future<void>.delayed(Duration.zero);
       expect(calls, 1, reason: 'dispose deregisters everything');
-    });
-  });
-
-  group('action (tier-2)', () {
-    test('returns the run result when it completes in time', () async {
-      final t = _TestTransport();
-      final r = await t.action(() async => 42);
-      expect(r, 42);
-    });
-
-    test('times out a run that never completes', () async {
-      final t = _TestTransport();
-      final never = Completer<int>();
-      await expectLater(
-        t.action(() => never.future, timeout: const Duration(milliseconds: 50)),
-        throwsA(isA<TimeoutException>()),
-      );
-    });
-
-    test(
-      'timeout: null leaves the run unbounded (streaming idle-timeout owns it)',
-      () async {
-        final t = _TestTransport();
-        final gate = Completer<int>();
-        final f = t.action(() => gate.future, timeout: null);
-        // Would have thrown by now if a default cap applied; complete it late.
-        await Future<void>.delayed(const Duration(milliseconds: 20));
-        gate.complete(7);
-        expect(await f, 7, reason: 'null timeout = no wall-clock cap');
-      },
-    );
-
-    test('is NOT re-driven on re-establishment (one-shot)', () async {
-      final t = _TestTransport();
-      await t.connect();
-      var runs = 0;
-      await t.action(() async => runs++);
-      expect(runs, 1);
-      t.reestablish();
-      await Future<void>.delayed(Duration.zero);
-      expect(runs, 1, reason: 'actions never re-drive; only hydrate does');
     });
   });
 }

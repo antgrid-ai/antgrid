@@ -13,7 +13,7 @@ import {
   createTestSubscription,
   createTestDevice,
 } from "../helpers/fixtures.js";
-import { requireBearerJwt } from "../../src/auth/jwt-bearer.js";
+import { requireDeviceBearerJwt } from "../../src/auth/jwt-bearer.js";
 import type { AuthVars } from "../../src/auth/middleware.js";
 
 const ISSUER = "http://localhost:8787/api/auth";
@@ -36,7 +36,7 @@ beforeEach(async () => {
  */
 function buildProbe(built: ReturnType<typeof buildTestApp>) {
   const r = new Hono<{ Variables: AuthVars }>();
-  r.use("/probe", requireBearerJwt({ auth: built.auth, db: pg.db, env: built.env }));
+  r.use("/probe", requireDeviceBearerJwt({ auth: built.auth, db: pg.db, env: built.env }));
   r.get("/probe", (c) =>
     c.json({
       userId: c.get("userId"),
@@ -55,7 +55,7 @@ function probe(r: ReturnType<typeof buildProbe>, token: string) {
 async function provisionAndMint(
   built: ReturnType<typeof buildTestApp>,
   cookie: string
-): Promise<{ token: string; deviceUuid: string }> {
+): Promise<{ token: string; deviceUuid: string; azp: string; pk: string }> {
   const deviceUuid = crypto.randomUUID();
   const provision = await built.app.request("/account/devices", {
     method: "POST",
@@ -89,7 +89,12 @@ async function provisionAndMint(
   if (mint.status !== 200) {
     throw new Error(`mint failed: ${mint.status} ${await mint.text()}`);
   }
-  return { token: ((await mint.json()) as { access_token: string }).access_token, deviceUuid };
+  return {
+    token: ((await mint.json()) as { access_token: string }).access_token,
+    deviceUuid,
+    azp: creds.clientId,
+    pk: Buffer.alloc(32, 0xab).toString("base64"),
+  };
 }
 
 /**
@@ -197,10 +202,10 @@ describe("requireBearerJwt scope enforcement", () => {
   test("a token without the agent scope is refused, the same claims with it pass", async () => {
     const built = buildTestApp(pg.db, pg.url);
     const { user, cookie } = await payingUser("dave@example.com");
-    const { deviceUuid } = await provisionAndMint(built, cookie);
+    const { deviceUuid, azp, pk } = await provisionAndMint(built, cookie);
     const r = buildProbe(built);
 
-    const base = { uid: user.id, deviceUuid, email: "dave@example.com" };
+    const base = { uid: user.id, deviceUuid, azp, pk, email: "dave@example.com" };
     expect((await probe(r, await forgeToken(built, base))).status).toBe(401);
     expect((await probe(r, await forgeToken(built, { ...base, scope: "openid" }))).status).toBe(401);
     // Scope is the only variable, so the two 401s above cannot be blamed on the
@@ -211,11 +216,13 @@ describe("requireBearerJwt scope enforcement", () => {
   test("a space-delimited scope list containing agent passes", async () => {
     const built = buildTestApp(pg.db, pg.url);
     const { user, cookie } = await payingUser("erin@example.com");
-    const { deviceUuid } = await provisionAndMint(built, cookie);
+    const { deviceUuid, azp, pk } = await provisionAndMint(built, cookie);
 
     const token = await forgeToken(built, {
       uid: user.id,
       deviceUuid,
+      azp,
+      pk,
       scope: "openid agent",
     });
     expect((await probe(buildProbe(built), token)).status).toBe(200);

@@ -5,7 +5,8 @@ import '../storage/recent_agents_store.dart';
 import '../util/device_id.dart';
 
 /// An agent's endpoint/identity coordinates: where to dial it and which
-/// Ed25519 pubkey its handshake must verify against, plus display metadata.
+/// Ed25519 pubkey identifies it in the account inventory, plus display
+/// metadata.
 ///
 /// These are the fields that go STALE on a stored [RecentAgent] — the durable
 /// trust record (agentDeviceId + phone keypair + pairedAt) never changes, but
@@ -19,10 +20,11 @@ class AgentCoordinates {
   /// null (autoOpen/reconnect already throw on a missing relayUrl).
   final String? relayUrl;
 
-  /// The agent's Ed25519 pubkey — the relay-independent MITM anchor the E2E
-  /// handshake verifies against. Authoritative from inventory: a
-  /// re-provisioned agent would otherwise loop the handshake against a stale
-  /// pinned pubkey, unrecoverable until the inventory refreshes.
+  /// The agent's Ed25519 pubkey, used to resolve its identity from the
+  /// account inventory (display, push targeting) — admission itself is
+  /// endpoint-ID-based, not a signature this key verifies. Authoritative
+  /// from inventory: a re-provisioned agent would otherwise show a stale
+  /// identity until the inventory refreshes.
   final String ed25519Pub;
 
   final String label;

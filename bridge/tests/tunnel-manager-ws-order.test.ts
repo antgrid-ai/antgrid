@@ -1,7 +1,13 @@
+// The WS half of TunnelManager: serveWs(open, peer) opens the real upstream
+// and hands back the sink the caller feeds app-side traffic into. A WS tunnel
+// is its own ordered QUIC stream whose open record precedes any data, so the
+// only buffering here is while the upstream TCP connect is still in flight.
 import { expect, test } from "bun:test";
+import { STREAM_TUNNEL_DATA_MAX_BYTES } from "antgrid-wire";
 import { createConnState } from "../src/conn-state";
-import { TunnelManager } from "../src/tunnel-manager";
-import type { SendOutcome } from "../src/send-scheduler";
+import { TunnelManager, type TunnelWsFrame, type TunnelWsPeer } from "../src/tunnel-manager";
+import type { StreamSendOutcome } from "../src/peer/stream-records";
+import type { TunnelWsOpen } from "../src/tunnel-protocol";
 
 /** Echoes what it is sent, and counts the sockets it currently holds open —
  *  the only way to tell a tunnel the bridge tore down from one it merely
@@ -25,321 +31,177 @@ function startEchoServer() {
   return Object.assign(server, { upstream: state });
 }
 
-function makeManager(
-  opts: {
-    wsPreopenTtlMs?: number;
-    outcomeFor?: (frame: Record<string, unknown>) => SendOutcome;
-  } = {},
-) {
-  const { outcomeFor, ...ctorOpts } = opts;
-  const sent: Record<string, unknown>[] = [];
-  const manager = new TunnelManager({
+function makeManager() {
+  return new TunnelManager({
     projectId: "project",
     portLabels: new Map(),
     previewPorts: new Set(),
-    sendTunnel: async (data) => {
-      const frame = data as Record<string, unknown>;
-      sent.push(frame);
-      return outcomeFor?.(frame) ?? "sent";
-    },
     sendEncrypted: () => {},
     relayHost: "relay.test",
     connState: createConnState(),
-    ...ctorOpts,
   });
-  return { manager, sent };
 }
 
-async function waitUntil(condition: () => boolean): Promise<void> {
-  const deadline = Date.now() + 2_000;
+/** A fake `TunnelWsPeer`: records what the manager sent toward the app and how
+ *  it closed the tunnel. `outcomeFor` stands in for the registry's own send
+ *  path — the only two outcomes a real writer reports are "sent" and
+ *  "dropped" (`StreamSendOutcome`). */
+function makePeer(outcomeFor?: (frame: TunnelWsFrame) => StreamSendOutcome) {
+  const sent: TunnelWsFrame[] = [];
+  const closes: Array<{ code?: number; reason?: string }> = [];
+  const peer: TunnelWsPeer = {
+    send: async (frame) => {
+      sent.push(frame);
+      return outcomeFor?.(frame) ?? "sent";
+    },
+    close: (code, reason) => { closes.push({ code, reason }); },
+  };
+  return { sent, closes, peer };
+}
+
+function open(tunnelId: string, port: number): TunnelWsOpen {
+  return { type: "tunnel:ws-open", tunnelId, port, scheme: "http", path: "/", checkoutId: "main" };
+}
+
+async function waitUntil(condition: () => boolean, ms = 2_000): Promise<void> {
+  const deadline = Date.now() + ms;
   while (!condition()) {
     if (Date.now() > deadline) throw new Error("condition was not met");
     await Bun.sleep(10);
   }
 }
 
-test("data arriving before open is replayed upstream in order", async () => {
+test("frames sent while the upstream handshake is still connecting are replayed in order once it opens", async () => {
   const server = startEchoServer();
-  const { manager, sent } = makeManager();
+  const mgr = makeManager();
+  const { sent, peer } = makePeer();
   try {
-    manager.onWsData({
-      type: "tunnel:ws-data",
-      tunnelId: "early",
-      data: "signalr-handshake",
-      checkoutId: "main",
-    });
-    manager.onWsData({
-      type: "tunnel:ws-data",
-      tunnelId: "early",
-      data: Buffer.from([0, 1, 2, 255]).toString("base64"),
-      binary: true,
-      checkoutId: "main",
-    });
-    manager.onWsOpen({
-      type: "tunnel:ws-open",
-      tunnelId: "early",
-      port: server.port!,
-      scheme: "http",
-      path: "/",
-      checkoutId: "main",
-    });
+    const sink = mgr.serveWs(open("early", server.port!), peer);
+    // The upstream TCP connect is async, so calling data() right after serveWs
+    // returns lands on the pre-connect buffer, not a live socket.
+    sink.data({ binary: false, bytes: new TextEncoder().encode("signalr-handshake") });
+    sink.data({ binary: true, bytes: new Uint8Array([0, 1, 2, 255]) });
 
-    await waitUntil(
-      () => sent.filter((m) => m.type === "tunnel:ws-data").length === 2,
-    );
-    const frames = sent.filter((m) => m.type === "tunnel:ws-data");
-    expect(frames[0]).toMatchObject({ data: "signalr-handshake" });
-    expect(frames[0].binary).toBeUndefined();
-    expect(frames[1]).toMatchObject({ data: "AAEC/w==", binary: true });
+    await waitUntil(() => sent.length === 2);
+    expect(new TextDecoder().decode(sent[0].bytes)).toBe("signalr-handshake");
+    expect(sent[0].binary).toBe(false);
+    expect(sent[1]).toEqual({ binary: true, bytes: new Uint8Array([0, 1, 2, 255]) });
   } finally {
-    manager.stop();
+    mgr.stop();
     server.stop(true);
   }
 });
 
-test("an open that misses the pre-open TTL is refused, not started mid-stream", async () => {
-  const server = startEchoServer();
-  const { manager, sent } = makeManager({ wsPreopenTtlMs: 20 });
+test("upstream messages then its close reach the peer as sends, then close", async () => {
+  const server = Bun.serve({
+    port: 0,
+    fetch(req, server) {
+      if (server.upgrade(req)) return;
+      return new Response("upgrade required", { status: 426 });
+    },
+    websocket: {
+      open(ws) {
+        for (const m of ["one", "two", "three"]) ws.send(m);
+        ws.close(4000, "bye");
+      },
+      message() {},
+    },
+  });
+  const mgr = makeManager();
+  const events: string[] = [];
+  const peer: TunnelWsPeer = {
+    send: async (frame) => {
+      events.push(`send:${new TextDecoder().decode(frame.bytes)}`);
+      return "sent";
+    },
+    close: (code) => { events.push(`close:${code}`); },
+  };
   try {
-    manager.onWsData({
-      type: "tunnel:ws-data",
-      tunnelId: "expired",
-      data: "stale",
-      checkoutId: "main",
-    });
-    await Bun.sleep(50);
-    manager.onWsOpen({
-      type: "tunnel:ws-open",
-      tunnelId: "expired",
-      port: server.port!,
-      scheme: "http",
-      path: "/",
-      checkoutId: "main",
-    });
-
-    await waitUntil(() => sent.some((m) => m.type === "tunnel:ws-close"));
-    // The lost prefix must reach the browser as a close it can reconnect from.
-    // Relaying the tail into a live upstream is the failure this guards.
-    expect(sent.filter((m) => m.type === "tunnel:ws-data")).toHaveLength(0);
-
-    // And the refusal is durable: frames still in flight behind the open must
-    // not quietly start a second, tail-only buffer for the same tunnelId.
-    manager.onWsData({
-      type: "tunnel:ws-data",
-      tunnelId: "expired",
-      data: "post-expiry",
-      checkoutId: "main",
-    });
-    manager.onWsOpen({
-      type: "tunnel:ws-open",
-      tunnelId: "expired",
-      port: server.port!,
-      scheme: "http",
-      path: "/",
-      checkoutId: "main",
-    });
-    await Bun.sleep(50);
-    expect(sent.filter((m) => m.type === "tunnel:ws-data")).toHaveLength(0);
-    expect(sent.filter((m) => m.type === "tunnel:ws-close")).toHaveLength(2);
+    mgr.serveWs(open("drain", server.port!), peer);
+    await waitUntil(() => events.some((e) => e.startsWith("close:")));
+    expect(events).toEqual(["send:one", "send:two", "send:three", "close:4000"]);
   } finally {
-    manager.stop();
+    mgr.stop();
     server.stop(true);
   }
 });
 
-test("a pre-open buffer that overflows refuses its open rather than splicing", async () => {
+test("a pre-connect buffer that overflows closes the tunnel rather than splicing", async () => {
   const server = startEchoServer();
-  const { manager, sent } = makeManager();
+  const mgr = makeManager();
+  const { sent, closes, peer } = makePeer();
   try {
+    const sink = mgr.serveWs(open("overflow", server.port!), peer);
     // 1 MB ceiling: the first frame is over it on its own, so the frames that
     // follow are a stream missing its head.
-    manager.onWsData({
-      type: "tunnel:ws-data",
-      tunnelId: "overflow",
-      data: "x".repeat(1024 * 1024 + 10),
-      checkoutId: "main",
-    });
-    for (const data of ["frame-2", "frame-3"]) {
-      manager.onWsData({
-        type: "tunnel:ws-data",
-        tunnelId: "overflow",
-        data,
-        checkoutId: "main",
-      });
-    }
-    manager.onWsOpen({
-      type: "tunnel:ws-open",
-      tunnelId: "overflow",
-      port: server.port!,
-      scheme: "http",
-      path: "/",
-      checkoutId: "main",
-    });
+    sink.data({ binary: false, bytes: new TextEncoder().encode("x".repeat(1024 * 1024 + 10)) });
+    sink.data({ binary: false, bytes: new TextEncoder().encode("frame-2") });
+    sink.data({ binary: false, bytes: new TextEncoder().encode("frame-3") });
 
-    await waitUntil(() => sent.some((m) => m.type === "tunnel:ws-close"));
+    await waitUntil(() => closes.length > 0);
+    expect(closes[0].reason).toContain("buffer overflow");
     await Bun.sleep(50);
-    expect(sent.filter((m) => m.type === "tunnel:ws-data")).toHaveLength(0);
+    expect(sent).toHaveLength(0);
   } finally {
-    manager.stop();
-    server.stop(true);
-  }
-});
-
-test("closed tunnels do not starve a live one out of the pre-open table", async () => {
-  const server = startEchoServer();
-  const { manager, sent } = makeManager();
-  try {
-    // A dev server in a reconnect loop churns a fresh tunnelId per attempt.
-    for (let i = 0; i < 200; i++) {
-      manager.onWsData({
-        type: "tunnel:ws-data",
-        tunnelId: `dead-${i}`,
-        data: "x".repeat(1024 * 1024 + 10), // poisons its tunnel immediately
-        checkoutId: "main",
-      });
-    }
-    manager.onWsData({
-      type: "tunnel:ws-data",
-      tunnelId: "live",
-      data: "signalr-handshake",
-      checkoutId: "main",
-    });
-    manager.onWsOpen({
-      type: "tunnel:ws-open",
-      tunnelId: "live",
-      port: server.port!,
-      scheme: "http",
-      path: "/",
-      checkoutId: "main",
-    });
-
-    await waitUntil(() => sent.some((m) => m.type === "tunnel:ws-data"));
-    expect(sent.filter((m) => m.type === "tunnel:ws-data")).toMatchObject([
-      { tunnelId: "live", data: "signalr-handshake" },
-    ]);
-  } finally {
-    manager.stop();
+    mgr.stop();
     server.stop(true);
   }
 });
 
 test("stop() closes tunnels the app still believes are live", async () => {
   const server = startEchoServer();
-  const { manager, sent } = makeManager();
+  const mgr = makeManager();
+  const { closes, peer } = makePeer();
   try {
-    manager.onWsOpen({
-      type: "tunnel:ws-open",
-      tunnelId: "live",
-      port: server.port!,
-      scheme: "http",
-      path: "/",
-      checkoutId: "main",
-    });
+    mgr.serveWs(open("live", server.port!), peer);
     // Deliberately NOT awaiting the upstream handshake: a session deleted
     // while a preview page is mid-connect is the case where the socket's own
     // close event never fires, so stop() has to send the frame itself.
-    manager.stop();
+    mgr.stop();
 
-    expect(sent.filter((m) => m.type === "tunnel:ws-close")).toMatchObject([
-      { tunnelId: "live" },
-    ]);
+    expect(closes).toMatchObject([{ code: 1001, reason: "tunnel manager stopped" }]);
   } finally {
     server.stop(true);
   }
 });
 
-function openTunnel(
-  manager: TunnelManager,
-  tunnelId: string,
-  port: number,
-): void {
-  manager.onWsOpen({
-    type: "tunnel:ws-open",
-    tunnelId,
-    port,
-    scheme: "http",
-    path: "/",
-    checkoutId: "main",
-  });
-}
-
-// A WS carries a byte stream, so a frame the transport could not deliver leaves
-// a hole no later frame can fill — the page's own reconnect is the only repair,
-// and it needs a close event to start.
-test("an upstream frame the transport reports too large closes the tunnel with 1009", async () => {
+// A WS carries a byte stream, so an upstream message the transport could not
+// deliver leaves a hole no later frame can fill — the page's own reconnect is
+// the only repair, and it needs a close event to start.
+test("an upstream message over the tunnel cap closes the tunnel with 1009", async () => {
   const server = startEchoServer();
-  const { manager, sent } = makeManager({
-    outcomeFor: (frame) => (frame.type === "tunnel:ws-data" ? "too-large" : "sent"),
-  });
+  const mgr = makeManager();
+  const { sent, closes, peer } = makePeer();
   try {
-    openTunnel(manager, "big", server.port!);
+    const sink = mgr.serveWs(open("big", server.port!), peer);
     await waitUntil(() => server.upstream.open === 1);
-    manager.onWsData({ type: "tunnel:ws-data", tunnelId: "big", data: "echo-me", checkoutId: "main" });
+    // The echo server hands this straight back, oversized on receipt.
+    sink.data({ binary: false, bytes: new TextEncoder().encode("x".repeat(STREAM_TUNNEL_DATA_MAX_BYTES + 1)) });
 
-    await waitUntil(() => sent.some((m) => m.type === "tunnel:ws-close"));
-    const close = sent.find((m) => m.type === "tunnel:ws-close")!;
-    expect(close.tunnelId).toBe("big");
-    expect(close.code).toBe(1009);
-    expect(String(close.reason)).toContain("too large");
+    await waitUntil(() => closes.length > 0);
+    expect(closes[0].code).toBe(1009);
     await waitUntil(() => server.upstream.open === 0);
-
-    // The id is poisoned by the teardown, so a frame still in flight behind the
-    // close cannot start a second, tail-only tunnel on it.
-    manager.onWsData({ type: "tunnel:ws-data", tunnelId: "big", data: "late", checkoutId: "main" });
-    openTunnel(manager, "big", server.port!);
-    await Bun.sleep(50);
-    expect(server.upstream.open).toBe(0);
-    expect(sent.filter((m) => m.type === "tunnel:ws-close")).toHaveLength(2);
+    expect(sent).toHaveLength(0);
   } finally {
-    manager.stop();
+    mgr.stop();
     server.stop(true);
   }
 });
 
 test("a dropped upstream frame closes the tunnel with 1001", async () => {
   const server = startEchoServer();
-  const { manager, sent } = makeManager({
-    outcomeFor: (frame) => (frame.type === "tunnel:ws-data" ? "dropped" : "sent"),
-  });
+  const mgr = makeManager();
+  const { closes, peer } = makePeer(() => "dropped");
   try {
-    openTunnel(manager, "gone", server.port!);
+    const sink = mgr.serveWs(open("gone", server.port!), peer);
     await waitUntil(() => server.upstream.open === 1);
-    manager.onWsData({ type: "tunnel:ws-data", tunnelId: "gone", data: "echo-me", checkoutId: "main" });
+    sink.data({ binary: false, bytes: new TextEncoder().encode("echo-me") });
 
-    await waitUntil(() => sent.some((m) => m.type === "tunnel:ws-close"));
-    const close = sent.find((m) => m.type === "tunnel:ws-close")!;
-    expect(close.code).toBe(1001);
+    await waitUntil(() => closes.length > 0);
+    expect(closes[0].code).toBe(1001);
     await waitUntil(() => server.upstream.open === 0);
   } finally {
-    manager.stop();
-    server.stop(true);
-  }
-});
-
-// The switch being off is not a delivery failure: the close would be gated too,
-// so tearing down leaves the app holding a mute socket for the life of the page.
-test("a gated upstream frame is dropped and the tunnel kept", async () => {
-  const server = startEchoServer();
-  let gate = true;
-  const { manager, sent } = makeManager({
-    outcomeFor: (frame) => (gate && frame.type === "tunnel:ws-data" ? "gated" : "sent"),
-  });
-  try {
-    openTunnel(manager, "quiet", server.port!);
-    await waitUntil(() => server.upstream.open === 1);
-    manager.onWsData({ type: "tunnel:ws-data", tunnelId: "quiet", data: "while-gated", checkoutId: "main" });
-    await waitUntil(() => sent.some((m) => m.data === "while-gated" && m.type === "tunnel:ws-data"));
-
-    await Bun.sleep(50);
-    expect(sent.filter((m) => m.type === "tunnel:ws-close")).toHaveLength(0);
-    expect(server.upstream.open).toBe(1);
-
-    gate = false;
-    manager.onWsData({ type: "tunnel:ws-data", tunnelId: "quiet", data: "after-gate", checkoutId: "main" });
-    await waitUntil(() => sent.some((m) => m.data === "after-gate" && m.type === "tunnel:ws-data"));
-    expect(sent.filter((m) => m.type === "tunnel:ws-close")).toHaveLength(0);
-  } finally {
-    manager.stop();
+    mgr.stop();
     server.stop(true);
   }
 });

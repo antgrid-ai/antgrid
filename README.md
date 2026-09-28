@@ -76,16 +76,14 @@ Antgrid exists to let you control an agent over the internet without handing you
 prompts or terminal to a server in the middle. That is a design constraint, not a
 feature flag.
 
-- **Encryption is never optional.** Every app↔agent message after the handshake is
-  encrypted. There is no plaintext mode to fall back to and no setting that disables it.
-- **X25519 ECDH + AES-256-GCM**, with ephemeral keys generated per connection. Session
-  keys are never persisted, and a connection rekeys on receive-silence or repeated
-  failure rather than running indefinitely on one set.
-- **Authenticated handshake.** Both sides pin the peer's Ed25519 identity in advance and
-  sign a transcript that binds both ephemeral keys; HMAC key-confirmation tags must
-  verify before either side sends traffic. Specification:
-  [`docs/protocol/e2e-handshake.md`](docs/protocol/e2e-handshake.md); implementation in
-  [`bridge/src/e2e/`](bridge/src/e2e/) and `packages/antgrid_relay_client/lib/src/e2e/`.
+- **Encryption is never optional.** Every app↔agent message travels inside a QUIC
+  connection (TLS 1.3) between two Iroh endpoints. There is no plaintext mode to fall back
+  to and no setting that disables it.
+- **Authenticated endpoints.** Each device's Iroh endpoint ID is its public key, and the
+  QUIC handshake proves it. The machine admits a connection only from an endpoint ID its
+  authorization lease names for your account, and it never trusts anything the peer
+  claims after that. Specification:
+  [`docs/protocol/peer-session.md`](docs/protocol/peer-session.md).
 - **The relay is zero-knowledge.** It authenticates devices from a single signed `hello`
   frame and then routes opaque blobs. It holds no decryption keys, so terminal output,
   prompts, file contents and diffs are unreadable to it — and to anyone who compromises
@@ -114,12 +112,12 @@ reporting policy if you find something wrong with them.
 | Component | Path | Stack | Role |
 |---|---|---|---|
 | **Bridge** | `bridge/` | TypeScript / Bun | Runs on your machine: agent terminals (PTY), file watching, git, port scanning, HTTP tunnelling. Ships inside the desktop app. |
-| **Relay** | `relay/` | TypeScript / Bun | Zero-knowledge WebSocket router. Forwards encrypted frames; never reads payloads. |
+| **Relay** | `relay/` | TypeScript / Bun | Central WebSocket control plane for authentication, presence, policy, heartbeat and encrypted push delivery; rejects application payloads. |
 | **App** | `app/` | Flutter / Dart + Riverpod | Desktop and mobile UI: terminal viewer, file explorer, git review, browser preview. |
 | **Web** | `web/` | TypeScript / Bun + Hono + Postgres | Accounts and sign-in, subscriptions, OAuth device flow, Ed25519 JWT minting for the relay's gate. |
 
-Shared code lives in `packages/`: `antgrid_relay_client` (pure Dart relay and crypto
-client), `antgrid-wire` (the TypeScript frame codec and relay control-envelope schemas),
+Shared code lives in `packages/`: `antgrid_relay_client` (pure Dart central-control,
+E2E and session protocol over native peer links), `antgrid-wire` (the TypeScript native peer-frame codec and central control-envelope schemas),
 and `antgrid_eval_client` (end-to-end test fixtures).
 
 Message flow, the shared-package breakdown and the `antgrid.yaml` schema:
@@ -133,7 +131,7 @@ The desktop app bundles the bridge that runs your agents — there is nothing el
 install on the machine.
 
 - **Windows** — [Microsoft Store](https://get.microsoft.com/installer/download/9N0P7ZRL4D9W?referrer=appbadge&cid=site)
-- **macOS** — [`antgrid-macos.dmg`](https://github.com/antgrid-ai/antgrid/releases/latest/download/antgrid-macos.dmg)
+- **macOS (Apple Silicon)** — [`antgrid-macos-arm64.dmg`](https://github.com/antgrid-ai/antgrid/releases/latest/download/antgrid-macos-arm64.dmg)
 - **Linux** — [`antgrid-linux.AppImage`](https://github.com/antgrid-ai/antgrid/releases/latest/download/antgrid-linux.AppImage)
 
 Every build, with release notes:

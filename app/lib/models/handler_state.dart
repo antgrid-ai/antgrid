@@ -78,10 +78,11 @@ String handlerLensLabel(HandlerLens l) => switch (l) {
 const String handlerLensDefaultLabel = 'Nothing extra';
 
 /// The sixth chip: a user-authored stance, exclusive with the four presets and
-/// with [handlerLensDefaultLabel] (§9 of the redesign spec — the rules do not
-/// compose). Never a wire id: choosing it clears [HandlerLensPick.roleId] and
-/// carries the user's own text as [HandlerLensPick.brief] instead, so the bar
-/// and the sheet need this label for a pick no [HandlerLens] value can name.
+/// with [handlerLensDefaultLabel] — picking one always clears the others
+/// rather than combining with them. Never a wire id: choosing it clears
+/// [HandlerLensPick.roleId] and carries the user's own text as
+/// [HandlerLensPick.brief] instead, so the bar and the sheet need this label
+/// for a pick no [HandlerLens] value can name.
 const String handlerLensOwnLabel = 'Your own';
 
 /// One line of what the judge additionally asks under a lens, shown beneath the

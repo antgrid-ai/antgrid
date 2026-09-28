@@ -343,7 +343,7 @@ export const SNAPSHOT_PATTERNS: ReadonlyMap<string, SnapshotAction> = new Map(
 );
 
 /**
- * Floor patterns for which no §5.2 action exists BY CONSTRUCTION.
+ * Floor patterns for which no snapshot action exists BY CONSTRUCTION.
  *
  * A separate set rather than more rows in the map above, because it answers a
  * different question: these move state that is not in the project at all — a

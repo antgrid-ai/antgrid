@@ -1,3 +1,4 @@
+import { createHostPolicyFixture } from "./host-policy-fixture";
 import { test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -43,7 +44,7 @@ beforeEach(() => {
   prevAbDir = process.env.ANTGRID_DIR;
   abDir = mkdtempSync(join(tmpdir(), "antgrid-cp-sessions-"));
   process.env.ANTGRID_DIR = abDir;
-  host = new HostServer({ remote: fakeRemoteConfig(), remoteRuntimeFactory: () => Promise.resolve(fakeRuntime()) });
+  host = createHostPolicyFixture({ remote: fakeRemoteConfig(), remoteRuntimeFactory: () => Promise.resolve(fakeRuntime()) });
 });
 afterEach(async () => {
   await host?.shutdown();
@@ -106,7 +107,6 @@ test("buildProjectsAdvertisement carries a warm core's work status", async () =>
     core: {
       workStatus: "attention",
       isRelayRegistered: () => true,
-      hasIsolatedSessions: () => false,
       shutdown: async () => {},
     },
     path: "/p", mode: "local", lastFocusedMs: 0,

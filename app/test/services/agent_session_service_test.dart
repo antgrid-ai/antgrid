@@ -2,7 +2,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/services/agent_session_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
-import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+import '../helpers/fake_agent_transport.dart';
 import '../helpers/prefs_test_mock.dart';
 
 void main() {
@@ -992,6 +992,282 @@ void main() {
     final turns = svc.stateFor('p').turns;
     expect(turns.map((t) => t.turnId), ['resumed:0', 'live-1']);
     expect(svc.stateFor('p').openTurn?.turnId, 'live-1');
+  });
+
+  group('a snapshot that names the bridge live turn', () {
+    // A phone that went away mid-turn and came back after it finished: the
+    // turn-end never reached it, so it still holds the half-streamed turn open.
+    // The reconnect's snapshot carries the finished turn renumbered, which is
+    // why only the named live turn can say whether the open one survives.
+    Map<String, dynamic> snapshot(Object? activeTurnId) => {
+      'frames': [
+        {
+          'type': 'agent:turn-start',
+          'sessionId': 'p',
+          'turnId': 'resumed:0',
+        },
+        {
+          'type': 'agent:item-added',
+          'sessionId': 'p',
+          'turnId': 'resumed:0',
+          'itemId': 'a1',
+          'item': {
+            'itemId': 'a1',
+            'kind': 'message',
+            'role': 'assistant',
+            'text': 'the whole answer',
+          },
+        },
+        {
+          'type': 'agent:turn-end',
+          'sessionId': 'p',
+          'turnId': 'resumed:0',
+          'stopReason': 'end_turn',
+        },
+      ],
+      'activeTurnId': activeTurnId,
+    };
+
+    Future<AgentSessionService> midTurn(FakeAgentTransport t) async {
+      final svc = AgentSessionService.fromSession(await newSession(t));
+      t.emit('agent:turn-start', {'sessionId': 'p', 'turnId': 'turn-0'});
+      t.emit('agent:item-added', {
+        'sessionId': 'p',
+        'turnId': 'turn-0',
+        'itemId': 'a1',
+        'item': {
+          'itemId': 'a1',
+          'kind': 'message',
+          'role': 'assistant',
+          'text': 'the whole',
+        },
+      });
+      await Future<void>.delayed(Duration.zero);
+      return svc;
+    }
+
+    test('drops the open turn once the bridge is idle', () async {
+      final t = FakeAgentTransport();
+      final svc = await midTurn(t);
+      t.requestHandler = (method, params) => snapshot(null);
+
+      await svc.hydrateIfNeeded('p');
+
+      final s = svc.stateFor('p');
+      expect(s.turns.map((t) => t.turnId), ['resumed:0']);
+      expect(s.openTurn, isNull);
+      expect(s.turns.single.items.single.text, 'the whole answer');
+    });
+
+    test('drops the open turn when a different turn is live', () async {
+      final t = FakeAgentTransport();
+      final svc = await midTurn(t);
+      t.requestHandler = (method, params) => snapshot('turn-1');
+
+      await svc.hydrateIfNeeded('p');
+
+      expect(svc.stateFor('p').turns.map((t) => t.turnId), ['resumed:0']);
+    });
+
+    test('closes an ended open turn even when the snapshot is empty', () async {
+      final t = FakeAgentTransport();
+      final svc = await midTurn(t);
+      t.requestHandler = (method, params) => {
+        'frames': <dynamic>[],
+        'activeTurnId': null,
+      };
+
+      await svc.hydrateIfNeeded('p');
+
+      final s = svc.stateFor('p');
+      expect(s.turns.single.turnId, 'turn-0');
+      expect(s.openTurn, isNull);
+    });
+
+    test('merges the live turn when the snapshot carries it', () async {
+      final t = FakeAgentTransport();
+      final svc = await midTurn(t);
+      // The bridge relabelled its mid-turn replay to the live id: it carries
+      // what streamed while we were away (a2), we carry the rest (a1).
+      t.requestHandler = (method, params) => {
+        'frames': [
+          {'type': 'agent:turn-start', 'sessionId': 'p', 'turnId': 'turn-0'},
+          for (final id in ['a1', 'a2'])
+            {
+              'type': 'agent:item-added',
+              'sessionId': 'p',
+              'turnId': 'turn-0',
+              'itemId': id,
+              'item': {
+                'itemId': id,
+                'kind': 'message',
+                'role': 'assistant',
+                'text': 'disk $id',
+              },
+            },
+        ],
+        'activeTurnId': 'turn-0',
+      };
+
+      await svc.hydrateIfNeeded('p');
+
+      final s = svc.stateFor('p');
+      expect(s.turns, hasLength(1));
+      expect(s.openTurn?.turnId, 'turn-0');
+      expect(s.openTurn!.items.map((i) => i.text), ['the whole', 'disk a2']);
+    });
+
+    test('keeps the open turn the bridge is still streaming', () async {
+      final t = FakeAgentTransport();
+      final svc = await midTurn(t);
+      t.requestHandler = (method, params) => snapshot('turn-0');
+
+      await svc.hydrateIfNeeded('p');
+
+      final s = svc.stateFor('p');
+      expect(s.turns.map((t) => t.turnId), ['resumed:0', 'turn-0']);
+      expect(s.openTurn?.turnId, 'turn-0');
+    });
+  });
+
+  group('a snapshot live set', () {
+    Map<String, dynamic> perm(String id) => {
+      'type': 'agent:permission-request',
+      'sessionId': 'p',
+      'permissionId': id,
+      'title': 'Run?',
+      'options': [
+        {'optionId': 'ok', 'label': 'Allow', 'kind': 'allow_once'},
+      ],
+    };
+
+    test('replaces the prompts: missed ones appear, answered-elsewhere ones '
+        'go', () async {
+      final t = FakeAgentTransport();
+      final svc = AgentSessionService.fromSession(await newSession(t));
+      t.emit('agent:permission-request', perm('answered-on-desktop'));
+      await Future<void>.delayed(Duration.zero);
+      t.requestHandler = (method, params) => {
+        'frames': <dynamic>[],
+        'live': [
+          perm('raised-while-away'),
+          {
+            'type': 'agent:question',
+            'sessionId': 'p',
+            'questionId': 'q1',
+            'kind': 'text',
+            'prompt': '?',
+          },
+        ],
+      };
+
+      await svc.hydrateIfNeeded('p');
+
+      final s = svc.stateFor('p');
+      expect(s.pendingPermissions.map((p) => p.permissionId), [
+        'raised-while-away',
+      ]);
+      expect(s.pendingQuestions.map((q) => q.questionId), ['q1']);
+    });
+
+    test('a prompt answered here that the bridge read before the answer '
+        'returns, then clears on its retraction', () async {
+      final t = FakeAgentTransport();
+      final svc = AgentSessionService.fromSession(await newSession(t));
+      t.emit('agent:permission-request', perm('perm-0'));
+      await Future<void>.delayed(Duration.zero);
+      svc.resolvePermission('p', 'perm-0', 'ok');
+      t.requestHandler = (method, params) => {
+        'frames': <dynamic>[],
+        'live': [perm('perm-0')],
+      };
+
+      await svc.hydrateIfNeeded('p');
+      expect(
+        svc.stateFor('p').pendingPermissions.map((p) => p.permissionId),
+        ['perm-0'],
+      );
+
+      t.emit('agent:request-retracted', {
+        'sessionId': 'p',
+        'permissionId': 'perm-0',
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      expect(svc.stateFor('p').pendingPermissions, isEmpty);
+    });
+
+    test('restores the usage meter', () async {
+      final t = FakeAgentTransport();
+      final svc = AgentSessionService.fromSession(await newSession(t));
+      t.requestHandler = (method, params) => {
+        'frames': <dynamic>[],
+        'live': [
+          {
+            'type': 'agent:usage',
+            'sessionId': 'p',
+            'total': {'totalTokens': 42},
+            'contextWindow': 1000,
+          },
+        ],
+      };
+
+      await svc.hydrateIfNeeded('p');
+
+      expect(svc.stateFor('p').usage?.contextWindow, 1000);
+    });
+  });
+
+  group('a snapshot update state', () {
+    Map<String, dynamic> result(String sessionId) => {
+      'type': 'agent:updateResult',
+      'tool': 'claude-code',
+      'sessionId': sessionId,
+      'ok': true,
+    };
+
+    test('settles a spinner whose result landed while away', () async {
+      final t = FakeAgentTransport();
+      final svc = AgentSessionService.fromSession(await newSession(t));
+      svc.requestUpdate('p', 'claude-code');
+      t.requestHandler = (method, params) => {
+        'frames': <dynamic>[],
+        'update': {'running': false, 'result': result('other-session')},
+      };
+
+      await svc.hydrateIfNeeded('p');
+
+      final s = svc.stateFor('p');
+      expect(s.updating, isFalse);
+      expect(s.updateResult?.ok, isTrue);
+    });
+
+    test('keeps spinning while the update still runs', () async {
+      final t = FakeAgentTransport();
+      final svc = AgentSessionService.fromSession(await newSession(t));
+      svc.requestUpdate('p', 'claude-code');
+      t.requestHandler = (method, params) => {
+        'frames': <dynamic>[],
+        'update': {'running': true},
+      };
+
+      await svc.hydrateIfNeeded('p');
+
+      expect(svc.stateFor('p').updating, isTrue);
+    });
+
+    test('never re-raises a result nobody is waiting for', () async {
+      final t = FakeAgentTransport();
+      final svc = AgentSessionService.fromSession(await newSession(t));
+      t.requestHandler = (method, params) => {
+        'frames': <dynamic>[],
+        'update': {'running': false, 'result': result('p')},
+      };
+
+      await svc.hydrateIfNeeded('p');
+
+      expect(svc.stateFor('p').updateResult, isNull);
+    });
   });
 
   test(

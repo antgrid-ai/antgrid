@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
+import 'bounded_http_request.dart';
 
 class InventoryAgent {
   final String deviceUuid;
@@ -50,7 +51,9 @@ class AccountAgentsApi {
     // (`__Secure-`-prefixed over https) — a bare name is silently ignored.
     final cookie = await sessionCookieProvider();
     if (cookie == null) throw Exception('Not signed in');
-    final res = await _http.get(
+    final res = await boundedHttpRequest(
+      _http,
+      'GET',
       Uri.parse('$baseUrl/account/agents'),
       headers: {'cookie': cookie},
     );

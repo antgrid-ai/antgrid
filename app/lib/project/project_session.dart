@@ -19,7 +19,6 @@ import '../services/pending_reply.dart';
 import '../storage/cached_sessions_store.dart';
 import '../util/device_id.dart';
 import '../util/detached.dart';
-import 'fragment_recovery.dart';
 import 'message_router.dart';
 import 'project_message_classification.dart';
 import 'project_status.dart';
@@ -77,8 +76,7 @@ class ProjectSession {
   late final HandlerService handlerService;
   late final AgentSessionService agentSessionService;
   UploadService get uploadService => _mainCheckoutServices.uploadService;
-  StreamSubscription? _fragAbortSub;
-  StreamSubscription? _fragSendErrSub;
+  StreamSubscription? _messageTooLargeSub;
   StreamSubscription? _streamReadySub;
   StreamSubscription? _sessionDownSub;
   StreamSubscription<TransportState>? _transportStateSub;
@@ -96,6 +94,12 @@ class ProjectSession {
   /// `sessionDownEvents` and the next `streamReadyEvents` for this project.
   /// Drives [newPending]'s immediate-fail path; see [_markDown]/[_markUp].
   bool _down;
+
+  /// Set while this project's stream is down (relay mode only) so the next
+  /// rebind knows to re-issue the in-flight requests every [FileService] in
+  /// [checkoutServiceBundles] dropped mid-flight, instead of on every ordinary
+  /// up edge (the first bind after construction re-issues nothing).
+  bool _projectStreamLost = false;
 
   ProjectSession({
     required this.projectId,
@@ -155,26 +159,20 @@ class ProjectSession {
     handlerService = HandlerService.fromSession(this);
     agentSessionService = AgentSessionService.fromSession(this);
     if (transport is StreamTransport) {
-      // Fragmentation is per-machine in v3, so the abort/send-error signals live
-      // on the shared MachineSession (every project stream on a machine sees
-      // them; the recovery hint carries the file path, so a re-request keyed to
-      // the wrong project is a harmless miss).
+      // MessageTooLarge is per-machine (every project stream on a machine
+      // shares the session it fires from); the type/bytes it carries are
+      // logged, not routed: nothing carries a per-request handle to match it
+      // back to the send that produced it.
       final session = (transport as StreamTransport).session;
-      final coordinator = FragmentRecoveryCoordinator(
-        requestFileContent: fileService.requestFileContent,
-        requestDiff: fileService.requestDiff,
-        onFailed: fileService.handleFragmentFailure,
-      );
-      _fragAbortSub = session.fragmentAborts.listen(coordinator.onAbort);
-      fileService.onFragmentSuccess = coordinator.onSuccess;
-      _fragSendErrSub = session.fragmentSendErrors.listen(_onFragmentSendError);
+      _messageTooLargeSub = session.messageTooLarge.listen(_onMessageTooLarge);
       // Relay only: the agent resets `appFocusPaused` for each connection, and
       // sends before the handshake are dropped silently — so re-declare focus
-      // once this project's stream is ready. Local mode has no handshake and no
-      // such window. Deferred transcript hydration is NOT wired here anymore: it
-      // rides the transport's hydrator registry, which refreshSnapshot re-drives
-      // on every (re)establish (see AgentSessionService.hydrateIfNeeded).
-      // Matched on wireProjectId: streamReadyEvents carries the BARE id the
+      // once this project's stream is (re)bound. Local mode has no handshake
+      // and no such window. Deferred transcript hydration is NOT wired here
+      // anymore: it rides the transport's hydrator registry, which
+      // refreshSnapshot re-drives on every (re)establish (see
+      // AgentSessionService.hydrateIfNeeded).
+      // Matched on wireProjectId: projectStreamEvents carries the BARE id the
       // bridge advertises in `agent:projects`, not the compound registrationId.
       //
       // BOTH halves of the focus declaration have to be restated, and the
@@ -182,19 +180,34 @@ class ProjectSession {
       // client's focused SESSION when the socket closes but keeps read tracking
       // armed, so re-arming it without re-naming the session is exactly the
       // state in which the next turn-end paints an unread dot on whatever the
-      // user is currently looking at.
-      _streamReadySub = session.streamReadyEvents
+      // user is currently looking at. Losing this hook entirely would paint
+      // that wrong unread dot with nothing to catch it — see
+      // project_session_stream_events_test.dart.
+      _streamReadySub = session.projectStreamEvents
           .where((e) => e.projectId == wireProjectId)
-          .listen((_) {
-            _router.resyncFocusState();
-            sessionsService.resyncFocus();
-            _markUp();
+          .listen((e) {
+            if (e.open) {
+              _router.resyncFocusState();
+              sessionsService.resyncFocus();
+              _markUp();
+              if (_projectStreamLost) {
+                _projectStreamLost = false;
+                for (final bundle in checkoutServiceBundles) {
+                  bundle.fileService.reissueAfterStreamReset();
+                }
+              }
+            } else {
+              _projectStreamLost = true;
+              _markDown();
+            }
           });
-      // The machine session dropping is the relay-side "down": a stream that
-      // loses its session cannot answer anything until the next handshake
-      // rebinds this project, which is exactly what the streamReadyEvents
-      // listener above reports back as "up".
-      _sessionDownSub = session.sessionDownEvents.listen((_) => _markDown());
+      // The machine session dropping is also relay-side "down" for a project
+      // whose own stream hasn't yet reported its end — the projectStreamEvents
+      // listener above is what reports back "up" once a fresh bind lands.
+      _sessionDownSub = session.sessionDownEvents.listen((_) {
+        _projectStreamLost = true;
+        _markDown();
+      });
     } else {
       // Local transport (and every test double that is neither this nor a
       // StreamTransport, e.g. FakeAgentTransport/DemoTransport): the socket's
@@ -267,12 +280,12 @@ class ProjectSession {
     }
   }
 
-  void _onFragmentSendError(FragSendError err) {
-    // An outbound control message exceeded kMaxTransferBytes and was dropped
-    // before sealing. Log rather than fail silently — symmetric with the
-    // bridge's onError path; no app message realistically reaches the cap.
+  void _onMessageTooLarge(MessageTooLarge err) {
+    // An outbound record exceeded the peer's read cap and was refused before
+    // it ever reached the wire. Log rather than fail silently — no app
+    // message realistically reaches the cap.
     developer.log(
-      'fragment send dropped: ${err.code} ${err.message}',
+      'send dropped: MESSAGE_TOO_LARGE ${err.type} ${err.bytes}',
       name: 'antgrid.relay',
     );
   }
@@ -487,14 +500,6 @@ class ProjectSession {
   void unhydrateCheckout(String checkoutId, String key) =>
       unhydrate('checkout:$checkoutId:$key');
 
-  /// Tier-2 bounded fail-fast send: runs [run] under [timeout] so the caller's
-  /// flag lifecycle always settles even if the reply never arrives. NOT
-  /// re-driven on reconnect. See [AgentTransport.action].
-  Future<T> action<T>(
-    Future<T> Function() run, {
-    Duration? timeout = const Duration(seconds: 15),
-  }) => transport.action(run, timeout: timeout);
-
   Future<void> close() async {
     if (_closed) return;
     _closed = true;
@@ -509,8 +514,7 @@ class ProjectSession {
     // AFTER, so it only ever catches a reply none of them cleaned up, rather
     // than racing ahead of a more specific message with a generic one.
     await Future.wait([
-      if (_fragAbortSub != null) _fragAbortSub!.cancel(),
-      if (_fragSendErrSub != null) _fragSendErrSub!.cancel(),
+      if (_messageTooLargeSub != null) _messageTooLargeSub!.cancel(),
       if (_streamReadySub != null) _streamReadySub!.cancel(),
       if (_sessionDownSub != null) _sessionDownSub!.cancel(),
       if (_transportStateSub != null) _transportStateSub!.cancel(),

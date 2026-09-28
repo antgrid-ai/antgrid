@@ -26,7 +26,6 @@ import 'package:antgrid/project/project_message_classification.dart';
 const Map<String, List<String>> serviceWireTypes = {
   'TerminalService': [
     // heavy
-    'terminal:snapshot',
     'terminal:output',
     // heavy — frame-mode display
     'terminal:frame',
@@ -88,8 +87,6 @@ const Map<String, List<String>> serviceWireTypes = {
   ],
   'UploadService': [
     // status
-    'file:upload-ready',
-    'file:upload-ack',
     'file:upload-result',
   ],
 };

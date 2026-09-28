@@ -12,7 +12,7 @@ import 'relay_connection.dart';
 /// `RelayConnectionState`, which stopped being able to say "the agent showed
 /// up" once the pairing rung was deleted.
 ///
-/// Subscribes to [RelayConnection.statusStream], never to `supervisor` — the
+/// Subscribes to [MachineConnection.statusStream], never to `supervisor` — the
 /// supervisor is built several awaits after the connection appears, so a
 /// one-shot peek at it would dead-end on the normal cold-launch ordering.
 final supervisorStatusProvider = StreamProvider.autoDispose
@@ -26,4 +26,18 @@ final supervisorStatusProvider = StreamProvider.autoDispose
         return;
       }
       yield* conn.statusStream;
+    });
+
+/// Central slot conflict is deliberately separate from native payload health.
+final centralControlConflictProvider = StreamProvider.autoDispose
+    .family<bool, String>((ref, bareDeviceUuid) async* {
+      ref.watch(relayConnectionChangesProvider);
+      final conn = ref
+          .read(relayConnectionManagerProvider)
+          .peek(bareDeviceUuid);
+      if (conn == null) {
+        yield false;
+        return;
+      }
+      yield* conn.centralConflictStream;
     });

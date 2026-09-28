@@ -4,21 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { buildAgentCore, type AgentCore } from "../src/agent-core";
+import type { SessionDirectory, SessionDirectoryRow } from "../src/session-bus/directory";
 import { MessageBus } from "../src/message-bus";
-import { loadPairedPhones } from "../src/paired-phones";
 import { createMessage, type AbMessage } from "../src/protocol";
-import { RelayClient } from "../src/relay-client";
-import { createRelayPromotion, type MachineRelaySession } from "../src/relay-promotion";
-import type { PeerSessionView } from "../src/stream-mux";
-import { peerView } from "./relay-stubs";
-import { generateEphemeralKeypair } from "../src/key-exchange";
+import { TestPeerSessionOwner } from "./test-peer-session-owner";
+import type { PeerSessionView } from "../src/project-streams";
 
 function session(peerPubkey: string, peerId = "app-dev#machine-dev"): PeerSessionView {
-  return peerView({ peerId, peerPubkey });
-}
-
-function tunnelResponses(frames: object[]): object[] {
-  return frames.filter((f) => (f as { type?: string }).type === "tunnel:http-start");
+  return { peerId, peerPubkey };
 }
 
 // Isolate ANTGRID_DIR so the core writes its session/catalog state into a temp
@@ -74,7 +67,7 @@ afterEach(async () => {
   // cleaned once at the end of the suite (afterAll), after all watchers are gone.
   // 30s, not the 5s Bun gives a hook by default: a core holding a managed
   // worktree drains git children that still have the checkout as their cwd
-  // before shutdown() returns, and an overrun hook is not cancelled — its body
+  // before shutdown() returns, and an overrun hook is not cancelled â€” its body
   // would resume inside the NEXT test, against the already-reassigned abDir.
 }, 30_000);
 
@@ -102,7 +95,7 @@ function statusListsTerminal(frames: AbMessage[], terminalId: string): boolean {
 }
 
 /** Wait until the bus has emitted an agent:status frame listing `terminalId`,
- *  or the timeout elapses. Used for the honored path, where spawn → sendStatus
+ *  or the timeout elapses. Used for the honored path, where spawn â†’ sendStatus
  *  is async relative to the inbound dispatch (local-mode setupServices defers
  *  manager creation). */
 async function waitForTerminal(frames: AbMessage[], terminalId: string, timeoutMs = 2000): Promise<boolean> {
@@ -143,7 +136,7 @@ test("drops project verbs from an account-trusted phone while mobile access is o
   // Wire the attached-session lookup exactly as the remote transport does.
   core.setPeerSessionProvider(() => session("phone-pubkey-1-base64"));
 
-  // Spin up managers (the relay does this after the E2E handshake confirms).
+  // Spin up managers (the relay does this once the peer session is established).
   core.onHandshakeComplete();
   await waitForServices(sent);
 
@@ -199,6 +192,47 @@ test("a core with no host-supplied switch fails closed for a remote phone", asyn
   expect(statusListsTerminal(sent, t1)).toBe(false);
 });
 
+test("clearing the peer-session provider does not hand relay frames the local-core carve-out", async () => {
+  // A promotion's stop() and a shutdown both null the provider while the core
+  // stays warm on its bus. The core must keep answering to the switch: it has
+  // faced remote peers, so a relay-origin frame is still one.
+  const folder = tempFolder();
+  core = await buildAgentCore({
+    folder,
+    mode: "local",
+    identity: { deviceId: "agent-dev", deviceName: "agent-dev", createdAt: new Date().toISOString() },
+    remoteAccessEnabled: () => false,
+  });
+
+  const bus = new MessageBus();
+  const sent: AbMessage[] = [];
+  bus.subscribe({ deliver: (m) => sent.push(m) });
+  core.attachTransport(bus);
+  core.setPeerSessionProvider(() => session("phone-pubkey-demoted"));
+  core.setPeerSessionProvider(null);
+
+  core.onHandshakeComplete();
+  await waitForServices(sent);
+
+  const t1 = `t-${randomUUID()}`;
+  sent.length = 0;
+  bus.dispatchInbound(
+    createMessage("terminal:start", { terminalId: t1, command: "node", args: ["-e", "0"] }),
+    "control", "relay", "app-dev#machine-dev",
+  );
+  await new Promise((r) => setTimeout(r, 200));
+  expect(statusListsTerminal(sent, t1)).toBe(false);
+
+  // The desktop's own loopback frames are still honoured with the switch off.
+  const t2 = `t-${randomUUID()}`;
+  sent.length = 0;
+  bus.dispatchInbound(
+    createMessage("terminal:start", { terminalId: t2, command: "node", args: ["-e", "0"] }),
+    "control", "loopback",
+  );
+  expect(await waitForTerminal(sent, t2)).toBe(true);
+});
+
 test("does NOT gate when no relay transport is wired (local/loopback transport)", async () => {
   const folder = tempFolder();
 
@@ -214,7 +248,7 @@ test("does NOT gate when no relay transport is wired (local/loopback transport)"
   const sent: AbMessage[] = [];
   bus.subscribe({ deliver: (m) => sent.push(m) });
   core.attachTransport(bus);
-  // Local transport never sets a provider → no relay transport → not gated.
+  // Local transport never sets a provider â†’ no relay transport â†’ not gated.
 
   core.onHandshakeComplete();
   await waitForServices(sent);
@@ -228,10 +262,124 @@ test("does NOT gate when no relay transport is wired (local/loopback transport)"
   expect(await waitForTerminal(sent, t1)).toBe(true);
 });
 
+/** A directory row, minimal but complete: only `machineId` is under test. */
+function localRow(): SessionDirectoryRow {
+  return {
+    machineId: null,
+    projectId: "project-self",
+    sessionId: "session-local",
+    title: "local",
+    branch: null,
+    activity: "idle",
+    lastActiveAt: 0,
+    canReply: true,
+  };
+}
+
+function peerRow(): SessionDirectoryRow {
+  return { ...localRow(), machineId: "machine-peer", projectId: "project-peer", sessionId: "session-peer", title: "peer" };
+}
+
+async function waitForDirectoryResult(
+  frames: AbMessage[],
+  requestId: string,
+  timeoutMs = 2000,
+): Promise<Record<string, unknown>> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const hit = frames.find(
+      (m) => m.type === "session-bus:directory:result" && (m as { requestId?: string }).requestId === requestId,
+    );
+    if (hit) return hit as unknown as Record<string, unknown>;
+    await new Promise((r) => setTimeout(r, 15));
+  }
+  throw new Error("session-bus:directory never answered");
+}
+
+/** Create a session and hand back its id, so a bus verb has a member to name. */
+async function createSession(bus: MessageBus, frames: AbMessage[], name: string): Promise<string> {
+  const requestId = randomUUID();
+  bus.dispatchInbound(createMessage("session:create", { requestId, name }), "control", "loopback");
+  const deadline = Date.now() + 2000;
+  while (Date.now() < deadline) {
+    const hit = frames.find(
+      (m) => m.type === "session:result" && (m as { requestId?: string }).requestId === requestId,
+    );
+    if (hit?.type === "session:result" && hit.ok && hit.session) return hit.session.id;
+    await new Promise((r) => setTimeout(r, 15));
+  }
+  throw new Error(`session:create never answered for ${name}`);
+}
+
+// REGRESSION: the switch's OUTBOUND half must NOT inherit the inbound gate's
+// "never faced the relay" carve-out. A session reaches a peer MACHINE through
+// rows the app pushes into this core's directory, so no relay of its own need
+// ever have attached — which is the configuration a desktop runs in whenever
+// the app sits on the loopback listener. Reading the switch as "on" there made
+// every surface lie at once: the directory offered off-machine rows, `post`
+// accepted a send, and the `dispatch` gate — which reads the policy directly and
+// was therefore right — held the frame while the caller was told "it goes when
+// the link is back" about a link the switch itself was keeping down.
+//
+// The directory is asserted rather than the send because it is the surface an
+// agent consults FIRST: a peer it is never offered is one it cannot try to
+// reach. Caught on two real machines, not by this suite — the eval covering
+// this switch always has a relay attached, so the carve-out is unreachable
+// there and load-bearing in production.
+test("narrows the directory to this machine while the switch is off, with no relay ever attached", async () => {
+  const folder = tempFolder();
+
+  // One row on this machine and one on another, so the assertion below can tell
+  // "narrowed" from "empty". `list` is all `listSessions` asks of a directory.
+  const directory = {
+    list: async () => ({
+      ok: true as const,
+      rows: [localRow(), peerRow()],
+      truncated: 0,
+      reach: { scope: "network" as const, lastPushAgoMs: 0, machines: [], staleMachines: 0, notConnected: 0 },
+    }),
+  } as unknown as SessionDirectory;
+
+  core = await buildAgentCore({
+    folder,
+    mode: "local",
+    identity: { deviceId: "agent-dev", deviceName: "agent-dev", createdAt: new Date().toISOString() },
+    machineId: () => "machine-self",
+    remoteAccessEnabled: () => false,
+    sessionDirectory: directory,
+  });
+
+  const bus = new MessageBus();
+  const sent: AbMessage[] = [];
+  bus.subscribe({ deliver: (m) => sent.push(m) });
+  core.attachTransport(bus);
+  // Local transport sets no peer-session provider, so `relayEverAttached` stays
+  // false for the life of this core. That is the whole point of the fixture.
+  core.onHandshakeComplete();
+  await waitForServices(sent);
+
+  const sessionId = await createSession(bus, sent, "s1");
+
+  const requestId = randomUUID();
+  sent.length = 0;
+  bus.dispatchInbound(
+    createMessage("session-bus:directory", { requestId, sessionId }),
+    "control",
+    "loopback",
+  );
+  const result = await waitForDirectoryResult(sent, requestId);
+
+  // Narrowed to this machine, and it says which fact did it rather than blaming
+  // the carrier. Before the fix the peer row was offered as addressable and the
+  // reach report described the network read the switch should have prevented.
+  expect(result.reach).toEqual({ scope: "machine", why: "remote-access-off" });
+  expect((result.sessions as { machineId: string | null }[]).map((r) => r.machineId)).toEqual([null]);
+});
+
 // REGRESSION: after a local core is promoted onto the relay, the loopback
 // session and the relay slot share ONE bus + inbound handler. The desktop's own
 // loopback frames (source "loopback") must NEVER be gated by the machine switch
-// — even with mobile access off — or the user's local typing would be silently
+// â€” even with mobile access off â€” or the user's local typing would be silently
 // dropped. Relay-origin frames must still be gated.
 test("loopback frames bypass the gate even when mobile access is off", async () => {
   const folder = tempFolder();
@@ -276,11 +424,11 @@ test("loopback frames bypass the gate even when mobile access is off", async () 
   expect(await waitForTerminal(sent, tLoop)).toBe(true);
 });
 
-// CRITICAL #1: tunnel:* frames bypass the bus (they route via onTunnelMessage →
-// core.handleTunnelMessage → TunnelManager's localhost HTTP proxy). A phone must
-// NOT be able to read a project's dev-server data through them with the machine
+// CRITICAL #1: tunnel streams bypass the bus (they admit via
+// core.tunnelStreams.admit onto their own QUIC stream, A3). A phone must NOT be
+// able to read a project's dev-server data through them with the machine
 // switch off.
-test("drops tunnel:http-request while mobile access is off, honors it once on", async () => {
+test("core.tunnelStreams.admit refuses NOT_ALLOWED while mobile access is off, and admits once it is on", async () => {
   const folder = tempFolder();
   let mobileAccess = false;
 
@@ -297,161 +445,17 @@ test("drops tunnel:http-request while mobile access is off, honors it once on", 
   core.attachTransport(bus);
   core.setPeerSessionProvider(() => session("phone-pubkey-tunnel-base64"));
 
-  // The tunnel response frames are emitted via the plaintext hook (they bypass
-  // the bus); capture them to detect whether the proxy actually ran.
-  const plain: object[] = [];
-  core.setPlainHook(async (d) => { plain.push(d); return "sent"; });
-
   core.onHandshakeComplete();
   await waitForServices(sent);
 
-  // --- Off: the proxy must NOT run → no tunnel:http-start. ---
-  plain.length = 0;
-  core.handleTunnelMessage({
-    type: "tunnel:http-request",
-    requestId: "req-1",
-    port: 65500, // nothing listening; an admitted request would still emit a 502
-    method: "GET",
-    path: "/secret",
-  });
-  await new Promise((r) => setTimeout(r, 300));
-  expect(tunnelResponses(plain).length).toBe(0);
+  // --- Off: refused in-band, never parked. ---
+  const refused = core.tunnelStreams.admit("phone-pubkey-tunnel-base64", "main");
+  expect(refused).toMatchObject({ ok: false, refusal: { code: "NOT_ALLOWED" } });
 
-  // --- On: the same request now reaches the proxy (a 502 from the dead port is
-  //     still proof the gate let it through). ---
+  // --- On: the same peer/checkout is admitted with a live manager. ---
   mobileAccess = true;
-  plain.length = 0;
-  core.handleTunnelMessage({
-    type: "tunnel:http-request",
-    requestId: "req-2",
-    port: 65500,
-    method: "GET",
-    path: "/secret",
-  });
-  // Poll for the async fetch → response.
-  const deadline = Date.now() + 2000;
-  while (Date.now() < deadline && tunnelResponses(plain).length === 0) {
-    await new Promise((r) => setTimeout(r, 15));
-  }
-  expect(tunnelResponses(plain).length).toBe(1);
-  expect((tunnelResponses(plain)[0] as { requestId?: string }).requestId).toBe("req-2");
-});
-
-// SOFT CONCERN: on a trusted reconnect the relay sends peer-online (NOT a fresh
-// pair-request), so onApproved never repopulates the pubkey map. After an agent
-// RESTART the map starts empty, so nothing could name the device behind a route
-// address — and push, which seals to a phone's registry row, has no row to find.
-// The peer-online handler must backfill the pubkey from the persistent
-// pairedPhones store.
-test("peer-online backfills the peer pubkey from the phone store (empty map)", async () => {
-  const store = loadPairedPhones(abDir);
-  const pk1 = "phone-pubkey-reconnect-base64";
-  const phoneDeviceId = "phone-dev-reconnect";
-  store.upsert({
-    phonePubkey: pk1,
-    phoneDeviceId,
-    pairedAt: new Date().toISOString(),
-    lastSeenAt: new Date().toISOString(),
-  });
-
-  // A fresh RelayClient simulates the post-restart state: phoneEd25519ByDeviceId
-  // starts empty (it's in-memory, never persisted).
-  const client = new RelayClient({
-    url: "ws://127.0.0.1:1",
-    identity: { deviceId: "agent-dev", deviceName: "agent-dev", createdAt: new Date().toISOString() },
-    generateKeypair: () => generateEphemeralKeypair(),
-    getLicenseToken: () => "tok",
-    pairedPhones: store,
-  });
-
-  // Before reconnect the address resolves to nothing.
-  expect(client.peerPubkeyFor(phoneDeviceId)).toBe(null);
-
-  // Drive the real peer-online server message (the reconnect-restore path).
-  (client as unknown as { handleTextMessage(raw: string): void }).handleTextMessage(
-    JSON.stringify({ type: "peer-online", peerId: phoneDeviceId }),
-  );
-
-  // The gate can now identify the reconnected phone even though no fresh
-  // pair-request (and thus no onApproved) ran this process.
-  expect(client.peerPubkeyFor(phoneDeviceId)).toBe(pk1);
-
-  client.close();
-});
-
-// CRITICAL #2: a local→relay-promoted connection must be gated too. In v3
-// relay-promotion.ts no longer builds its own RelayClient — it asks the host
-// to bring the ONE machine socket up (ensureMachineRelay) and hands the result
-// to ProjectCore's `attach` (which owns the real setPeerSessionProvider wiring;
-// see project-core.ts's attachRelayStream). This test stubs `attach` the same
-// way ProjectCore really implements it, so the load-bearing assertion —
-// enabling relay wires the gate to the promoted session's attached devices, and
-// disabling clears it — still holds under the new dependency split.
-test("promotion wires (and clears) the gate's session provider", async () => {
-  const bus = new MessageBus();
-  bus.setInboundHandler(() => {});
-
-  type Provider = (peerId: string) => PeerSessionView | null;
-  let provider: Provider | null | undefined = undefined;
-  const setCalls: Array<Provider | null> = [];
-
-  const setPeerSessionProvider = (fn: Provider | null) => {
-    setCalls.push(fn);
-    provider = fn;
-  };
-
-  // Stub machine relay session whose attached device is observable through the
-  // wired provider — mirrors what HostServer.ensureMachineRelay() returns.
-  const promoted = session("promoted-phone-pk", "promoted-phone#machine-dev");
-  const machineSession: MachineRelaySession = {
-    attachStream: () => ({ streamId: "s1", detach: () => {}, sendTunnel: async () => "sent" as const, sendTo: async () => "sent" as const }),
-    establishedPeers: () => [promoted],
-    peerSession: (peerId) => (peerId === promoted.peerId ? promoted : null),
-    sendPushDeliver: () => {},
-    agentDeviceId: "0bbd1111-2222-3333-4444-555566667777",
-  };
-
-  const ctrl = createRelayPromotion({
-    bus,
-    ensureMachineRelay: async () => machineSession,
-    // Reproduces ProjectCore.attachLocalStreamForWizard's real wiring: wire
-    // the gate's provider to the attached stream's peer, clear it on detach.
-    attach: (remote) => {
-      setPeerSessionProvider((peerId) => remote.peerSession(peerId));
-      return {
-        handle: { streamId: "s1", detach: () => {}, sendTunnel: async () => "sent" as const, sendTo: async () => "sent" as const },
-        detach: () => { setPeerSessionProvider(null); },
-      };
-    },
-  });
-
-  ctrl.handleInbound(
-    createMessage("agent:enableRelay", {
-      relayUrl: "https://relay.example.com",
-      auth: {
-        deviceUuid: "0bbd1111-2222-3333-4444-555566667777",
-        ed25519Pub: Buffer.from("edpub").toString("base64url"),
-        ed25519Priv: Buffer.from("edpriv").toString("base64url"),
-        licenseToken: "static-token",
-      },
-    }) as AbMessage,
-  );
-  await new Promise((r) => setTimeout(r, 20));
-
-  // Provider was wired and resolves the promoted session's attached device.
-  expect(typeof provider).toBe("function");
-  const wired = provider as unknown as Provider;
-  expect(wired(promoted.peerId)?.peerPubkey).toBe("promoted-phone-pk");
-  // ...and only that device: an address it holds no session for resolves null,
-  // which is what makes every per-device answer fail closed.
-  expect(wired("someone-else#machine-dev")).toBe(null);
-
-  // Teardown clears the LOOKUP. It does not make the core local again: the
-  // core latches `relayEverAttached` on the first wire and never unlatches
-  // (`agent-core.ts`), so a demoted core still answers to the machine switch
-  // rather than handing a relay frame the local-core carve-out.
-  ctrl.stop();
-  expect(setCalls[setCalls.length - 1]).toBe(null);
+  const admitted = core.tunnelStreams.admit("phone-pubkey-tunnel-base64", "main");
+  expect(admitted.ok).toBe(true);
 });
 
 // The core-level half of the abort: `project-core`'s peer hooks reach every
@@ -503,7 +507,25 @@ async function initRepo(folder: string): Promise<void> {
   await gitIn(folder, ["commit", "-m", "initial"]);
 }
 
-test("abortTunnelStreams aborts the core's in-flight tunnel streams", async () => {
+/** Tracks a fake `TunnelHttpExchange`'s calls in arrival order, so a test can
+ *  assert `serveHttp` never reaches `end()` without a real app on the other
+ *  end of the stream. The signal is never aborted by the test itself —
+ *  `abortTunnelStreams()` fires `serveHttp`'s own per-run controller, which is
+ *  combined with (not replaced by) this one, and a run aborted that way must
+ *  `fail()` its exchange: the app is still attached and would otherwise wait
+ *  on a stream that neither ends nor resets. */
+function fakeExchange(calls: string[], peerId = "app-dev#machine-dev") {
+  return {
+    peerId,
+    signal: new AbortController().signal,
+    head: async () => { calls.push("head"); return "sent" as const; },
+    body: async () => { calls.push("body"); return "sent" as const; },
+    end: async () => { calls.push("end"); return "sent" as const; },
+    fail: (_reason: string) => { calls.push("fail"); },
+  };
+}
+
+test("abortTunnelStreams aborts the core's in-flight tunnel exchange: the upstream is cancelled and end() never runs", async () => {
   const folder = tempFolder();
   const upstream = { cancelled: false };
   const route = trickleServer(() => { upstream.cancelled = true; });
@@ -522,43 +544,36 @@ test("abortTunnelStreams aborts the core's in-flight tunnel streams", async () =
     core.attachTransport(bus);
     core.setPeerSessionProvider(() => session("phone-pubkey-abort-base64"));
 
-    const plain: object[] = [];
-    const held: Array<(o: "sent") => void> = [];
-    core.setPlainHook(async (d) => {
-      plain.push(d);
-      // Park on the first chunk so the run is mid-body when the abort lands.
-      if ((d as { type?: string }).type === "tunnel:http-chunk" && held.length === 0) {
-        return new Promise<"sent">((resolve) => held.push(resolve));
-      }
-      return "sent";
-    });
-
     core.onHandshakeComplete();
     await waitForServices(sent);
 
-    core.handleTunnelMessage({
-      type: "tunnel:http-request",
+    const admission = core.tunnelStreams.admit("app-dev#machine-dev", "main");
+    if (!admission.ok) throw new Error("expected admission");
+
+    const calls: string[] = [];
+    const req = {
+      type: "tunnel:http-request" as const,
       requestId: "abort-me",
       port: route.port!,
       method: "GET",
       path: "/big",
-    });
+      bodyLength: 0,
+      checkoutId: "main",
+    };
+    const run = admission.manager.serveHttp(req, null, fakeExchange(calls));
 
-    const heldBy = Date.now() + 5000;
-    while (held.length === 0 && Date.now() < heldBy) await new Promise((r) => setTimeout(r, 15));
-    expect(held.length).toBe(1);
+    const headBy = Date.now() + 5000;
+    while (!calls.includes("head") && Date.now() < headBy) await new Promise((r) => setTimeout(r, 15));
+    expect(calls).toContain("head");
 
-    core.abortTunnelStreams();
-    for (const resolve of held.splice(0)) resolve("sent");
+    core.abortTunnelStreams("app-dev#machine-dev");
+    await run;
 
     const cancelledBy = Date.now() + 2000;
     while (!upstream.cancelled && Date.now() < cancelledBy) await new Promise((r) => setTimeout(r, 15));
     expect(upstream.cancelled).toBe(true);
-
-    const before = plain.length;
-    await new Promise((r) => setTimeout(r, 200));
-    expect(plain.length).toBe(before);
-    expect(plain.some((f) => (f as { type?: string }).type === "tunnel:http-end")).toBe(false);
+    expect(calls).not.toContain("end");
+    expect(calls).toContain("fail");
   } finally {
     route.stop(true);
   }
@@ -589,22 +604,6 @@ test("abortTunnelStreams reaches a checkout runtime's manager, not only main", a
     core.attachTransport(bus);
     core.setPeerSessionProvider(() => session("phone-pubkey-abort-checkout-base64"));
 
-    const plain: object[] = [];
-    const held = new Map<string, (o: "sent") => void>();
-    const parked = new Set<string>();
-    core.setPlainHook(async (d) => {
-      plain.push(d);
-      const frame = d as { type?: string; requestId?: string };
-      // Park each run on ITS first chunk, so both are mid-body when the abort
-      // lands and neither can finish while the other is still climbing.
-      if (frame.type === "tunnel:http-chunk" && frame.requestId && !parked.has(frame.requestId)) {
-        parked.add(frame.requestId);
-        const requestId = frame.requestId;
-        return new Promise<"sent">((resolve) => held.set(requestId, resolve));
-      }
-      return "sent";
-    });
-
     core.onHandshakeComplete();
     await waitForServices(sent);
 
@@ -631,39 +630,41 @@ test("abortTunnelStreams reaches a checkout runtime's manager, not only main", a
     expect(typeof checkoutId).toBe("string");
     expect(checkoutId).not.toBe("main");
 
-    core.handleTunnelMessage({
-      type: "tunnel:http-request",
-      requestId: "abort-main",
-      port: route.port!,
-      method: "GET",
-      path: "/main",
-      checkoutId: "main",
-    }, "app-dev#machine-dev");
-    core.handleTunnelMessage({
-      type: "tunnel:http-request",
-      requestId: "abort-checkout",
-      port: route.port!,
-      method: "GET",
-      path: "/checkout",
-      checkoutId,
-    }, "app-dev#machine-dev");
+    const mainAdmission = core.tunnelStreams.admit("app-dev#machine-dev", "main");
+    const checkoutAdmission = core.tunnelStreams.admit("app-dev#machine-dev", checkoutId!);
+    if (!mainAdmission.ok || !checkoutAdmission.ok) throw new Error("expected both admissions to succeed");
 
-    const heldBy = Date.now() + 15_000;
-    while (held.size < 2 && Date.now() < heldBy) await new Promise((r) => setTimeout(r, 15));
-    expect(held.size).toBe(2);
+    const mainCalls: string[] = [];
+    const checkoutCalls: string[] = [];
+    const mainReq = {
+      type: "tunnel:http-request" as const, requestId: "abort-main", port: route.port!,
+      method: "GET", path: "/main", bodyLength: 0, checkoutId: "main",
+    };
+    const checkoutReq = {
+      type: "tunnel:http-request" as const, requestId: "abort-checkout", port: route.port!,
+      method: "GET", path: "/checkout", bodyLength: 0, checkoutId: checkoutId!,
+    };
+    const mainRun = mainAdmission.manager.serveHttp(mainReq, null, fakeExchange(mainCalls));
+    const checkoutRun = checkoutAdmission.manager.serveHttp(checkoutReq, null, fakeExchange(checkoutCalls));
 
-    core.abortTunnelStreams();
-    for (const resolve of held.values()) resolve("sent");
-    held.clear();
+    const headBy = Date.now() + 15_000;
+    while ((!mainCalls.includes("head") || !checkoutCalls.includes("head")) && Date.now() < headBy) {
+      await new Promise((r) => setTimeout(r, 15));
+    }
+    expect(mainCalls).toContain("head");
+    expect(checkoutCalls).toContain("head");
+
+    core.abortTunnelStreams("app-dev#machine-dev");
+    await Promise.all([mainRun, checkoutRun]);
 
     const cancelledBy = Date.now() + 5000;
     while (cancelled.size < 2 && Date.now() < cancelledBy) await new Promise((r) => setTimeout(r, 15));
     expect([...cancelled].sort()).toEqual(["/checkout", "/main"]);
 
-    const before = plain.length;
-    await new Promise((r) => setTimeout(r, 300));
-    expect(plain.length).toBe(before);
-    expect(plain.some((f) => (f as { type?: string }).type === "tunnel:http-end")).toBe(false);
+    expect(mainCalls).not.toContain("end");
+    expect(checkoutCalls).not.toContain("end");
+    expect(mainCalls).toContain("fail");
+    expect(checkoutCalls).toContain("fail");
   } finally {
     route.stop(true);
   }

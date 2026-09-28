@@ -12,7 +12,7 @@ import {
 } from "./session-bus/constants";
 // The frame-display payload sub-schemas and their byte/row budgets live with the
 // implementation that has to honour them; only the eight wire ENVELOPES are
-// declared here (see the block below TerminalSnapshotMessage for why).
+// declared here (see the comment above their block for why).
 import {
   TERMINAL_HISTORY_PAGE_ROWS,
   TERMINAL_PROTOCOL_VERSION,
@@ -150,49 +150,23 @@ const PongMessage = BaseMessage.extend({
   type: z.literal("pong"),
 });
 
-const HandshakeClientHelloMessage = BaseMessage.extend({
-  type: z.literal("handshake:client-hello"),
-  pubkey: z.string(),
-  nonce: z.string(),
-  sig: z.string(),
+// A native peer session is established by one plaintext hello per connection —
+// QUIC/TLS between authorized endpoints is the confidentiality layer, so
+// there is no transcript to sign and nothing to confirm. Bare session frames
+// like this one carry no `id`/`timestamp` envelope, so they are deliberately
+// NOT members of `AbMessageSchema`/`KNOWN_TYPES` — see the comment above
+// `PeerSessionOwner.handleHello` (peer-session-owner.ts) for why, and never
+// add them there.
+// A hello that still carries `capabilities` parses — the key is stripped and
+// ignored by Zod's default unknown-key behavior, not refused, so an old peer
+// is never disconnected for sending a field this version no longer declares.
+export const SessionHelloFrame = z.object({
+  type: z.literal("session:hello"),
+  attemptId: z.string().min(1).max(256),
 });
-
-const HandshakeAgentHelloMessage = BaseMessage.extend({
-  type: z.literal("handshake:agent-hello"),
-  pubkey: z.string(),
-  sig: z.string(),
-});
-
-const HandshakeAgentReadyMessage = BaseMessage.extend({
-  type: z.literal("handshake:agent-ready"),
-  confirm: z.string(),
-});
-
-const AppReadyMessage = BaseMessage.extend({
-  type: z.literal("app:ready"),
-  confirm: z.string(),
-  // Neither live reader parses `app:ready` through Zod — relay-client.ts and
-  // local-listener.ts both read the raw JSON — so this object is union typing
-  // and documentation, not the runtime gate. Adding a key here does not make
-  // the bridge honour it; the reads are hand-written on both transports.
-  capabilities: z.object({
-    checkoutRouting: z.literal(true).optional(),
-    /** Parsed and ignored. Nothing in `bridge/src` reads it any more — the
-     *  whole-tree push it used to select is gone, and every app lists the tree
-     *  per directory on demand. It is kept, along with `LocalListener.ownerPullsTree`,
-     *  `PeerSession.pullsTree` and `ownerPullsTreeProvider`, only because an
-     *  app that still declares it would go treeless with no error against a
-     *  bridge that dropped it — the app's hello literals are hand-mirrored
-     *  across the licence boundary and no suite spans the two sides.
-     *  TODO(bharath): drop the whole chain, with the Dart clients'
-     *  `exclude: ['tree:full']`, once no app in the field predates the
-     *  on-demand listing protocol. */
-    pullsTree: z.literal(true).optional(),
-    // The app can render `terminal:frame` display mode. Absent means it cannot,
-    // and the read of it MUST fail closed (unknown peer reads false) or an old
-    // app is switched into a mode it has no renderer for.
-    terminalFramesV1: z.literal(true).optional(),
-  }).optional(),
+export const SessionEstablishedFrame = z.object({
+  type: z.literal("session:established"),
+  attemptId: z.string().min(1).max(256),
 });
 
 const TerminalStartCommand = BaseMessage.extend({
@@ -675,11 +649,6 @@ const PreviewUrlMessage = BaseMessage.extend({
   ...CheckoutScoped,
 });
 
-const AgentDisconnectingMessage = BaseMessage.extend({
-  type: z.literal("agent:disconnecting"),
-  reason: z.string().optional(),
-});
-
 // Per-project agent work status carried on the always-on control plane so the
 // app's Recent/sidebar reflect live activity WITHOUT opening (warming) a
 // project. Distinct from `running` (which means "dialable / holds a relay
@@ -700,7 +669,8 @@ export type WorkStatus = z.infer<typeof WorkStatusSchema>;
 
 // Outbound agent→app: the always-on control plane advertises which of the
 // phone's allowed projects exist (allowed ∩ catalog), with a running flag per
-// project. E2E-opaque to the relay (like preview:url). No inbound switch case.
+// project. Travels only on the native session, never the relay (like
+// preview:url). No inbound switch case.
 const AgentProjectsMessage = BaseMessage.extend({
   type: z.literal("agent:projects"),
   projects: z.array(
@@ -725,10 +695,6 @@ const AgentProjectsMessage = BaseMessage.extend({
       // `status` for every session.
       sessionStatuses: z.record(z.string(), WorkStatusSchema).optional(),
       lastActiveAt: z.string().optional(),
-      // Present when the project has an admitted relay data-plane stream: the
-      // phone binds its ProjectSession services to this streamId without a fresh
-      // project:start. Absent for a stopped/unpromoted project.
-      streamId: z.string().optional(),
       // Cross-machine repository identity (see repo-key.ts) — what binds this
       // folder's tasks to the same repository checked out elsewhere. Unlike
       // `status`, carried for COLD projects too: it comes from the seen catalog,
@@ -771,8 +737,8 @@ export type AgentDescriptor = z.infer<typeof AgentDescriptorSchema>;
 
 // Outbound agent→app, control plane only: the machine's installed coding-agent
 // tools (AGENTS ∩ PATH). Machine-level, NOT project-scoped — so it is not
-// gated by the per-phone allowlist (which scopes projects, not tools). E2E-opaque
-// to the relay. No inbound switch case.
+// gated by the per-phone allowlist (which scopes projects, not tools). Travels
+// only on the native session. No inbound switch case.
 const AgentToolsMessage = BaseMessage.extend({
   type: z.literal("agent:tools"),
   // `chatCapable`/`label` are optional for back-compat only — a current bridge
@@ -795,41 +761,17 @@ const AgentToolsMessage = BaseMessage.extend({
   agents: z.array(AgentDescriptorSchema).optional(),
 });
 
-// Outbound agent→app, control plane only: announces the streamId a phone binds
-// its ProjectSession services to for `projectId`. Sent when a
-// project's relay data-plane stream is admitted; also carried per-project in the
-// `agent:projects` advertisement so a reconnecting phone can bind without a
-// fresh project:start. E2E-opaque to the relay. No inbound switch case.
+// Outbound agent→app, control plane only: the project is ready to open a
+// stream for. Two meanings share the one frame — a ready notice that gates
+// the app's project-stream open (opening before this arrives gets an
+// in-band `NOT_READY` refusal, never a park) and, per `ProjectStreamRegistry`
+// (`project-streams.ts`), the bridge's own FIRST record on an admitted project
+// stream, so the bind itself is observable to the app. An `agent:projects`
+// entry with `running:true` is the same ready notice for a project the app
+// learns about from the advert. No inbound switch case.
 const StreamReadyMessage = BaseMessage.extend({
   type: z.literal("stream-ready"),
   projectId: z.string(),
-  streamId: z.string(),
-});
-
-// Outbound agent→app, control plane only: the phone addressed a streamId this
-// host process holds no stream for — almost always a host restart, whose fresh
-// process re-attaches every project under newly random ids (stream-mux.ts). The
-// old id is dead forever, so without this the phone replays onto it and every
-// verb times out with no signal to renegotiate. The phone answers by re-driving
-// `project:start` for the project it had bound to `streamId`. E2E-opaque to the
-// relay. No inbound switch case.
-const StreamInvalidMessage = BaseMessage.extend({
-  type: z.literal("stream-invalid"),
-  streamId: z.string(),
-});
-
-// Inbound app→agent, control plane only: the MIRROR of stream-invalid. The app
-// received a frame on a streamId it holds no transport for, so everything this
-// host pushes onto that stream is being discarded. Without it the loss is
-// unobservable from here and unbounded — stream ids outlive the app process that
-// bound them (a core keeps its stream across the peer's restart, and a re-open
-// reuses the same id), so a live PTY on a stream the new app never bound drops
-// one frame per frame for as long as the terminal runs.
-// Advisory, never authorization: it only mutes a stream this host already
-// chose to open, and delivery resumes the moment the app proves it is bound.
-const StreamUnboundMessage = BaseMessage.extend({
-  type: z.literal("stream-unbound"),
-  streamId: z.string(),
 });
 
 // Outbound result for a control-plane verb (e.g. project:start). Success is
@@ -849,12 +791,8 @@ const ControlResultMessage = BaseMessage.extend({
 // File tree & code viewer messages
 
 /** Nothing in `bridge/src` produces this any more — apps list per directory on
- *  demand. The type stays declared for the OPPOSITE skew to the one the rest
- *  of this file guards: the Dart clients name it in their replay `exclude` to
- *  suppress an OLDER BRIDGE's per-checkout full tree, which that bridge still
- *  caches and replays on `state.snapshot`. Dropping the schema drops the
- *  suppression, so this outlives the whole-tree pull and retires with
- *  `pullsTree` (see AppReadyMessage). */
+ *  demand. The type stays declared only because the Dart clients still name it
+ *  in their replay `exclude`; it retires together with that exclude. */
 const TreeFullMessage = BaseMessage.extend({
   type: z.literal("tree:full"),
   projectId: z.string(),
@@ -971,46 +909,17 @@ const FileSearchDoneMessage = BaseMessage.extend({
   ...CheckoutScoped,
 });
 
-const FileUploadStartMessage = BaseMessage.extend({
-  type: z.literal("file:upload-start"),
+// Loopback only: the desktop app shares this machine's filesystem, so it names
+// a local file and the bridge copies it into the same staging directory the
+// `upload` stream uses. `sourcePath` is trusted only from the loopback socket —
+// see the drop in agent-core.ts's inbound handler.
+const FileUploadLocalMessage = BaseMessage.extend({
+  type: z.literal("file:upload-local"),
   projectId: z.string(),
   requestId: z.string(),
   fileName: z.string(),
-  size: z.number().int().nonnegative(),
+  sourcePath: z.string(), // absolute path on THIS machine; loopback-only
   mimeType: z.string().optional(),
-  ...CheckoutScoped,
-});
-
-const FileUploadReadyMessage = BaseMessage.extend({
-  type: z.literal("file:upload-ready"),
-  requestId: z.string(),
-  uploadId: z.string(),
-  ...CheckoutScoped,
-});
-
-// 512 KiB payload → base64 is ~4/3 larger; 768 KiB caps a full chunk with room
-// to spare while keeping a single frame well under the 1 MiB transport limit and
-// bounding how much a malicious chunk can allocate before the size check runs.
-const MAX_UPLOAD_CHUNK_DATA = 768 * 1024;
-
-const FileUploadChunkMessage = BaseMessage.extend({
-  type: z.literal("file:upload-chunk"),
-  uploadId: z.string(),
-  seq: z.number().int().nonnegative(),
-  data: z.string().max(MAX_UPLOAD_CHUNK_DATA), // base64
-  ...CheckoutScoped,
-});
-
-const FileUploadAckMessage = BaseMessage.extend({
-  type: z.literal("file:upload-ack"),
-  uploadId: z.string(),
-  seq: z.number().int().nonnegative(),
-  ...CheckoutScoped,
-});
-
-const FileUploadDoneMessage = BaseMessage.extend({
-  type: z.literal("file:upload-done"),
-  uploadId: z.string(),
   ...CheckoutScoped,
 });
 
@@ -1027,7 +936,7 @@ const FileUploadResultMessage = BaseMessage.extend({
   // file:read's own), so a client can offer a preview without duplicating the
   // allowlist. Absent = no viewer for it.
   mimeType: z.string().optional(),
-  error: z.string().optional(), // machine code: TOO_LARGE | INVALID_NAME | WRITE_FAILED | UPLOAD_NOT_FOUND | BAD_SEQUENCE | SIZE_MISMATCH | TIMEOUT | BUSY
+  error: z.string().optional(), // machine code: TOO_LARGE | INVALID_NAME | INVALID_SOURCE | NOT_ALLOWED | WRITE_FAILED | TIMEOUT | BUSY | INCOMPLETE
   message: z.string().optional(), // human-readable detail
   ...CheckoutScoped,
 });
@@ -1794,69 +1703,6 @@ const PortDetectedMessage = BaseMessage.extend({
   ...CheckoutScoped,
 });
 
-// ── Local-mode promotion: App↔Agent control messages ─────────────────
-//
-// The App (already account-authenticated) triggers promotion via
-// `agent:enableRelay`, passing the signed-in device's credentials. The agent
-// stands up a RelayClient with them and responds with the lifecycle messages
-// below. Disabling tears the relay client down without touching the local
-// loopback session.
-// Mirror of the validators in auth/credentials.ts (kept inline to avoid an
-// import cycle — credentials.ts must stay free of protocol.ts deps). base64-ish
-// keys and a lenient UUID, so malformed creds fail at parse, not late in
-// Ed25519 ops.
-const Base64ish = z.string().min(1).regex(/^[A-Za-z0-9+/=_-]+$/, "base64-ish");
-const DeviceUuid = z
-  .string()
-  .regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i, "UUID format");
-const AgentEnableRelayAuth = z.object({
-  deviceUuid: DeviceUuid,
-  ed25519Pub: Base64ish,
-  ed25519Priv: Base64ish,
-  // Production path — agent mints + refreshes via OAuth client_credentials.
-  clientId: z.string().min(1).optional(),
-  clientSecret: z.string().min(1).optional(),
-  // Offline/test path — caller supplies a pre-minted token (no refresh).
-  licenseToken: z.string().min(1).optional(),
-});
-
-// Exported so the local-mode promotion controller can re-validate an
-// `agent:enableRelay` that reached it over the loopback listener — which uses
-// parseMessageFast (skips Zod). See relay-promotion.ts `start()`.
-export const AgentEnableRelayMessage = BaseMessage.extend({
-  type: z.literal("agent:enableRelay"),
-  // App-supplied relay base. local-listener uses parseMessageFast (skips Zod),
-  // so `.url()` only bites for relay-sourced messages until the controller
-  // re-validates the whole message via `AgentEnableRelayMessage.safeParse`.
-  relayUrl: z.string().url().optional(),
-  // Web base used to mint OAuth tokens; required when `auth.clientId` is used.
-  licenseApiUrl: z.string().url().optional(),
-  // Account-device credentials, supplied by the app at enable-time. Optional so
-  // older app builds and the bare/test forms still parse.
-  auth: AgentEnableRelayAuth.optional(),
-});
-const AgentDisableRelayMessage = BaseMessage.extend({
-  type: z.literal("agent:disableRelay"),
-});
-const AgentActivationPendingMessage = BaseMessage.extend({
-  type: z.literal("agent:activationPending"),
-  verificationUri: z.string(),
-  userCode: z.string(),
-  expiresAt: z.string(),
-});
-// The one success signal of the enable-relay path: the machine socket is up and
-// the local core is attached as a stream. Its counterpart `agent:relayError`
-// covers every failure, so without this the path is silent on success.
-const AgentRelayReadyMessage = BaseMessage.extend({
-  type: z.literal("agent:relayReady"),
-  agentDeviceId: z.string(),
-});
-const AgentRelayErrorMessage = BaseMessage.extend({
-  type: z.literal("agent:relayError"),
-  code: z.string(),
-  message: z.string(),
-});
-
 // Inbound app→agent control-plane verb: the paired phone asks the host to start
 // one of its ALLOWED projects. SECURITY: carries `projectId` ONLY — never a
 // path/folder. The host resolves the path from its own seenProjects catalog, so
@@ -1939,7 +1785,7 @@ export const SessionMemberKeySchema = z.object({
   sessionId: z.string().min(1).max(200),
 });
 
-// The Capability Card as it travels on an address (spec 5.3): the two MVP
+// The Capability Card as it travels on an address: the two MVP
 // fields, both observed by that machine's own bridge before any agent ran
 // there. Mirrors `OsCard`/`RepoCard` in capability-card.ts, which is where the
 // values are actually read — a second shape would be two things to keep true.
@@ -2055,7 +1901,7 @@ const SessionEntrySchema = z.object({
     // an older bridge still parses, and absent for a state recovered from disk,
     // which knows how many steps ran but not what they were called.
     stepNames: z.array(z.string()).optional(),
-    // The setup transcript's terminal, replayable via terminal:snapshot:request.
+    // The setup transcript's terminal, replayable via terminal:subscribe.
     terminalId: z.string().optional(),
     exitCode: z.number().int().optional(),
     // One-line failure summary.
@@ -2207,40 +2053,7 @@ const ClientFocusStateMessage = BaseMessage.extend({
   paused: z.boolean(),
 });
 
-const TerminalSnapshotRequestMessage = BaseMessage.extend({
-  type: z.literal("terminal:snapshot:request"),
-  terminalId: z.string(),
-  // COLD attach: the client's engine has rendered nothing for this terminal, so
-  // the reply should carry the emulator's scrollback as well as the screen and
-  // erase before painting. Only the client can answer this — it is the only side
-  // that knows what its engine holds — and answering it wrongly costs the user's
-  // own (far deeper) history. Absent/false means re-attach: screen only.
-  history: z.boolean().optional(),
-  ...CheckoutScoped,
-});
-
-const TerminalSnapshotMessage = BaseMessage.extend({
-  type: z.literal("terminal:snapshot"),
-  terminalId: z.string(),
-  scrollback: z.string(),
-  seq: z.number().int().nonnegative(),
-  // Absent/false: `scrollback` is a mode prelude plus a raw byte tail, and the
-  // client must place its own erase (an older bridge). True: `scrollback` is a
-  // COMPLETE attach sequence — preamble, serialized screen, supplemental modes —
-  // to be applied verbatim with nothing prepended or appended.
-  composed: z.boolean().optional(),
-  // True: the body carries scrollback ABOVE the screen and its preamble
-  // leads with `3J`. A reply is published on the project bus, so every
-  // client attached to this terminal receives the one that ONE of them
-  // asked for -- and that erase would take a warm client's own history
-  // with it. The requester cannot be addressed (there is no per-client
-  // routing on this path), so the frame is labelled instead and a client
-  // whose engine is already painted drops it.
-  history: z.boolean().optional(),
-  ...CheckoutScoped,
-});
-
-// The frame display protocol (advertised as `terminalFramesV1`). These eight
+// The frame display protocol. These eight
 // envelopes are declared HERE, as literal source text, rather than imported from
 // terminal-frames/protocol.ts: checkout-protocol-contract.test.ts scrapes this
 // file for `BaseMessage.extend({ ... ...CheckoutScoped ... })` blocks and
@@ -2530,7 +2343,7 @@ const ResponseMessage = BaseMessage.extend({
 // never require touching KNOWN_TYPES. AgentItem uses z.string() for `kind` so
 // the bridge can forward unknown kinds without a schema change.
 // ---------------------------------------------------------------------------
-// Session bus (`docs/session-messaging.md`) — the agent-to-agent frames.
+// Session bus — the agent-to-agent frames.
 //
 // The envelope lives HERE rather than in bridge/src/session-bus/, which is
 // where the rest of the bus lives: it is a wire schema, the stores under
@@ -2540,7 +2353,7 @@ const ResponseMessage = BaseMessage.extend({
 // still has one import site.
 // ---------------------------------------------------------------------------
 
-/** One unit of content. `artifact` carries the HANDLE only — spec 6.3's
+/** One unit of content. `artifact` carries the HANDLE only —
  *  reference-over-value: the bytes stay on the machine that made them and are
  *  pulled with `session-bus:fetch` when the other side decides it wants them. */
 export const BusPartSchema = z.discriminatedUnion("kind", [
@@ -2561,7 +2374,7 @@ export type BusPart = z.infer<typeof BusPartSchema>;
 export const BusEnvelopeSchema = z.object({
   messageId: z.string().min(1).max(200),
   /** The thread this belongs to, or null to open a new one. A correlation id
-   *  with no state machine (spec 4.2): it is carried and never validated, and
+   *  with no state machine: it is carried and never validated, and
    *  a thread is simply garbage once both sides stop writing to it. */
   threadId: z.string().min(1).max(200).nullable(),
   contextId: z.string().min(1).max(200),
@@ -2570,12 +2383,12 @@ export const BusEnvelopeSchema = z.object({
     /** Stamped from the connection by the receiving bridge, never a tool
      *  parameter: an agent must not be able to author its own provenance. */
     peer: SessionMemberRefSchema,
-    /** The one agent-authored envelope field (spec 3.4). MANDATORY, and never
+    /** The one agent-authored envelope field. MANDATORY, and never
      *  defaulted — it is what the human and the other agent read first, so
      *  inventing one would hide the omission instead of reporting it. */
     summary: z.string().min(1).max(MAX_SUMMARY_CHARS),
     timestamp: z.number().int().nonnegative(),
-    /** Spec 6.2's first-class channel for "here is what you asked for, and
+    /** A first-class channel for "here is what you asked for, and
      *  separately, here is something you did not ask about". First-class so it
      *  is not a smuggled instruction inside a text part. */
     unexpected: z.string().max(MAX_UNEXPECTED_CHARS).optional(),
@@ -2592,10 +2405,10 @@ const SessionBusBaseWire = {
   contextId: z.string().min(1).max(200),
 };
 
-/** The body both verbs carry, since spec 6.2 makes everything after the send
- *  decision identical for the two. No `seq`: spec 6 makes messages lossy on
- *  purpose, and reliable delivery behind text that changes no state would be
- *  unbounded retry buying nothing. The E6 receipt witnesses arrival without
+/** The body both verbs carry, since everything after the send decision is
+ *  identical for the two. No `seq`: messages are lossy on purpose, and
+ *  reliable delivery behind text that changes no state would be
+ *  unbounded retry buying nothing. The delivery receipt witnesses arrival without
  *  making it reliable — it is never retried either. */
 export const SessionBusMessageWire = z.object({
   ...SessionBusBaseWire,
@@ -2623,7 +2436,7 @@ export const SessionBusFetchResultWire = z.object({
   dataBase64: z.string().max(ARTIFACT_CHUNK_B64_MAX),
 });
 
-/** The delivery receipt (E6), keyed by the id of the message it answers — the
+/** The delivery receipt, keyed by the id of the message it answers — the
  *  only honest witness that a frame arrived, since everything this side of the
  *  relay reports only that it left. It is fire-and-forget: an unacked ack is
  *  never retried. `ok: false` is still a receipt — "this reached me", not "I
@@ -2637,7 +2450,7 @@ export const SessionBusAckWire = z.object({
   error: z.string().max(500).optional(),
 });
 
-/** Two verbs rather than one verb and a flag (spec 7.1), and the shape is
+/** Two verbs rather than one verb and a flag, and the shape is
  *  identical because everything after the send decision is: a bridge that does
  *  not know a verb REFUSES it, where a bridge that does not know a flag would
  *  silently do the wrong thing — and a required Zod field is only fail-closed
@@ -2669,8 +2482,7 @@ const SessionBusAckMessage = BaseMessage.extend({
 // asking the bridge it is attached to about its own sessions, and consuming the
 // answer. Same plane all the same — `SessionBusApi` is built inside the project
 // core with the machine-level directory injected into it, so machine-scoped
-// STATE never implied machine-scoped transport (`docs/session-messaging.md`
-// §5.4: "The transport did not move with it").
+// STATE never implied machine-scoped transport.
 //
 // Every one is answered from that single api rather than re-derived here. A
 // human surface and an agent tool that each computed who is reachable would
@@ -2690,7 +2502,7 @@ const SessionBusRefusalWire = {
   code: z.string().max(80).optional(),
 };
 
-/** One directory row (§5.5). Mirrors `SessionDirectoryRow`
+/** One directory row. Mirrors `SessionDirectoryRow`
  *  (`session-bus/directory.ts`) field for field rather than importing it, the
  *  same one-way edge that module already keeps against the remote mirror's row:
  *  the wire vocabulary lives here and the bus's internals must be free to gain
@@ -2707,7 +2519,7 @@ const SessionBusDirectoryRowSchema = z.object({
   activity: z.enum(["running", "idle", "stopped"]),
   workStatus: WorkStatusSchema.optional(),
   lastActiveAt: z.number(),
-  /** Whether that session's agent can be messaged back at all (§9). A
+  /** Whether that session's agent can be messaged back at all. A
    *  receive-only vendor is offered saying so, never as a peer that will
    *  silently never answer. */
   canReply: z.boolean(),
@@ -2817,7 +2629,7 @@ const SessionBusInboxResultMessage = BaseMessage.extend({
   /** A PEEK: answering this does not mark anything read. The agent's own read
    *  is what spends the unread flag — see `SessionBusApi.inboxPeek`. */
   posts: z.array(SessionBusInboxPostSchema).optional(),
-  /** Posts this session will never see, zero included (§7.4): a reader that
+  /** Posts this session will never see, zero included: a reader that
    *  cannot tell an empty inbox from an emptied one has been told the wrong
    *  thing, not merely told less. */
   dropped: z.number().optional(),
@@ -2904,9 +2716,6 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   AgentStatusMessage,
   PingMessage,
   PongMessage,
-  HandshakeClientHelloMessage,
-  HandshakeAgentHelloMessage,
-  HandshakeAgentReadyMessage,
   TreeFullMessage,
   TreeUpdateMessage,
   FileReadMessage,
@@ -2917,22 +2726,14 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   FileSearchCancelMessage,
   FileSearchResultMessage,
   FileSearchDoneMessage,
-  FileUploadStartMessage,
-  FileUploadReadyMessage,
-  FileUploadChunkMessage,
-  FileUploadAckMessage,
-  FileUploadDoneMessage,
+  FileUploadLocalMessage,
   FileUploadResultMessage,
   PortsUpdateMessage,
   PreviewUrlMessage,
-  AgentDisconnectingMessage,
   AgentProjectsMessage,
   AgentToolsMessage,
   StreamReadyMessage,
-  StreamInvalidMessage,
-  StreamUnboundMessage,
   ControlResultMessage,
-  AppReadyMessage,
   CommandRunMessage,
   CommandOutputMessage,
   CommandDoneMessage,
@@ -2980,11 +2781,6 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   GitSyncResultMessage,
   GitSyncStatusMessage,
   GitSyncStateMessage,
-  AgentEnableRelayMessage,
-  AgentDisableRelayMessage,
-  AgentActivationPendingMessage,
-  AgentRelayReadyMessage,
-  AgentRelayErrorMessage,
   ProjectStartMessage,
   ConfigReadMessage,
   ConfigReadResultMessage,
@@ -3009,8 +2805,6 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   SessionResultMessage,
   SessionUpdatedMessage,
   ClientFocusStateMessage,
-  TerminalSnapshotRequestMessage,
-  TerminalSnapshotMessage,
   TerminalSubscribeMessage,
   TerminalSubscribedMessage,
   TerminalFrameMessage,
@@ -3084,9 +2878,8 @@ export type TerminalOutput = z.infer<typeof TerminalOutputMessage>;
 export type TerminalInput = z.infer<typeof TerminalInputMessage>;
 export type TerminalStarted = z.infer<typeof TerminalStartedMessage>;
 export type TerminalExited = z.infer<typeof TerminalExitedMessage>;
-export type HandshakeClientHello = z.infer<typeof HandshakeClientHelloMessage>;
-export type HandshakeAgentHello = z.infer<typeof HandshakeAgentHelloMessage>;
-export type HandshakeAgentReady = z.infer<typeof HandshakeAgentReadyMessage>;
+export type SessionHello = z.infer<typeof SessionHelloFrame>;
+export type SessionEstablished = z.infer<typeof SessionEstablishedFrame>;
 export type TerminalStart = z.infer<typeof TerminalStartCommand>;
 export type TerminalStop = z.infer<typeof TerminalStopCommand>;
 export type TerminalResize = z.infer<typeof TerminalResizeCommand>;
@@ -3101,15 +2894,11 @@ export type FileResolvePathResult = z.infer<typeof FileResolvePathResultMessage>
 export type PortInfo = z.infer<typeof PortInfoSchema>;
 export type PortsUpdate = z.infer<typeof PortsUpdateMessage>;
 export type PreviewUrl = z.infer<typeof PreviewUrlMessage>;
-export type AgentDisconnecting = z.infer<typeof AgentDisconnectingMessage>;
 export type AgentProjects = z.infer<typeof AgentProjectsMessage>;
 export type ProjectAdvertEntry = AgentProjects["projects"][number];
 export type AgentTools = z.infer<typeof AgentToolsMessage>;
 export type StreamReady = z.infer<typeof StreamReadyMessage>;
-export type StreamInvalid = z.infer<typeof StreamInvalidMessage>;
-export type StreamUnbound = z.infer<typeof StreamUnboundMessage>;
 export type ControlResult = z.infer<typeof ControlResultMessage>;
-export type AppReady = z.infer<typeof AppReadyMessage>;
 export type CommandRun = z.infer<typeof CommandRunMessage>;
 export type CommandOutput = z.infer<typeof CommandOutputMessage>;
 export type CommandDone = z.infer<typeof CommandDoneMessage>;
@@ -3169,20 +2958,10 @@ export type FileSearchCancel = z.infer<typeof FileSearchCancelMessage>;
 export type SearchMatch = z.infer<typeof SearchMatchSchema>;
 export type FileSearchResult = z.infer<typeof FileSearchResultMessage>;
 export type FileSearchDone = z.infer<typeof FileSearchDoneMessage>;
-export type FileUploadStart = z.infer<typeof FileUploadStartMessage>;
-export type FileUploadReady = z.infer<typeof FileUploadReadyMessage>;
-export type FileUploadChunk = z.infer<typeof FileUploadChunkMessage>;
-export type FileUploadAck = z.infer<typeof FileUploadAckMessage>;
-export type FileUploadDone = z.infer<typeof FileUploadDoneMessage>;
+export type FileUploadLocal = z.infer<typeof FileUploadLocalMessage>;
 export type FileUploadResult = z.infer<typeof FileUploadResultMessage>;
 export type AgentHelloMessage = z.infer<typeof AgentHelloMessage>;
 export type PortDetectedMessage = z.infer<typeof PortDetectedMessage>;
-export type AgentEnableRelay = z.infer<typeof AgentEnableRelayMessage>;
-export type AgentEnableRelayAuth = z.infer<typeof AgentEnableRelayAuth>;
-export type AgentDisableRelay = z.infer<typeof AgentDisableRelayMessage>;
-export type AgentActivationPending = z.infer<typeof AgentActivationPendingMessage>;
-export type AgentRelayReady = z.infer<typeof AgentRelayReadyMessage>;
-export type AgentRelayError = z.infer<typeof AgentRelayErrorMessage>;
 export type ProjectStart = z.infer<typeof ProjectStartMessage>;
 export type ConfigRead = z.infer<typeof ConfigReadMessage>;
 export type ConfigReadResult = z.infer<typeof ConfigReadResultMessage>;
@@ -3212,8 +2991,6 @@ export type SessionFocus = z.infer<typeof SessionFocusMessage>;
 export type SessionResult = z.infer<typeof SessionResultMessage>;
 export type SessionUpdated = z.infer<typeof SessionUpdatedMessage>;
 export type ClientFocusState = z.infer<typeof ClientFocusStateMessage>;
-export type TerminalSnapshotRequest = z.infer<typeof TerminalSnapshotRequestMessage>;
-export type TerminalSnapshot = z.infer<typeof TerminalSnapshotMessage>;
 // The wire types for the frame display protocol. This file is their single
 // home — the same eight names are also exported from terminal-frames/protocol.ts
 // (whose envelopes predate registration and lack CheckoutScoped's `main`
@@ -3291,11 +3068,10 @@ export type SessionBusArrived = z.infer<typeof SessionBusArrivedMessage>;
  * `antgrid watch --bodies` exists to show what crossed a socket, and its output
  * is printed to a terminal, streamed over `/netwatch`, and appended to an
  * `--export` file that ends up pasted into bug reports. That is fine for a
- * `tree:full` and catastrophic for these three: `agent:enableRelay` carries the
- * account device's Ed25519 PRIVATE key plus `clientSecret` and `licenseToken`;
- * `agent:question-resolve` is the answer to a question the agent may have
- * flagged `isSecret`, which the UI masks on the way in; `terminal:input` is
- * literally the user's keystrokes, password prompts inside the PTY included.
+ * `tree:full` and catastrophic for these two: `agent:question-resolve` is the
+ * answer to a question the agent may have flagged `isSecret`, which the UI
+ * masks on the way in; `terminal:input` is literally the user's keystrokes,
+ * password prompts inside the PTY included.
  * The `tunnel:*` set is the preview proxy's own wire (tunnel-protocol.ts) and
  * carries the proxied site's request and response headers verbatim — `Cookie`,
  * `Authorization`, `Set-Cookie`. They are named here rather than there because
@@ -3309,18 +3085,16 @@ export type SessionBusArrived = z.infer<typeof SessionBusArrivedMessage>;
  * Add a type here in the same commit that gives it a secret-bearing field.
  */
 export const BODY_REDACTED_MESSAGE_TYPES = new Set<string>([
-  "agent:enableRelay",
   "agent:question-resolve",
   "terminal:input",
   // Rendered screen content, which is the same secret class `terminal:input` is
   // redacted for: whatever the user typed is echoed back into these two, so a
   // capture would otherwise hold the pasted token that the keystroke frames
-  // withheld. `terminal:snapshot` predates this rule and is knowingly not here.
+  // withheld.
   "terminal:frame",
   "terminal:history:page",
   "tunnel:http-request",
-  "tunnel:http-start",
-  "tunnel:http-chunk",
+  "tunnel:http-head",
   "tunnel:ws-open",
 ]);
 
@@ -3328,14 +3102,13 @@ export const BODY_REDACTED_MESSAGE_TYPES = new Set<string>([
  * type belongs here (and gets an explicit schema decision + contract test). */
 export const CHECKOUT_VARIABLE_MESSAGE_TYPES = new Set<string>([
   "terminal:start", "terminal:stop", "terminal:input", "terminal:resize", "terminal:output", "terminal:started", "terminal:exited", "terminal:notification", "terminal:bell", "terminal:size",
-  "terminal:snapshot:request", "terminal:snapshot",
   "terminal:subscribe", "terminal:subscribed", "terminal:frame", "terminal:ack",
   "terminal:unsubscribe", "terminal:history:request", "terminal:history:page", "terminal:display:status",
   "agent:status",
   "tree:full", "tree:update", "file:read", "file:content",
   "file:resolve-path", "file:resolve-path-result",
   "file:search", "file:search-cancel", "file:search-result", "file:search-done",
-  "file:upload-start", "file:upload-ready", "file:upload-chunk", "file:upload-ack", "file:upload-done", "file:upload-result",
+  "file:upload-local", "file:upload-result",
   "git:status", "git:diff", "git:diff-content", "git:list-branches", "git:branches", "git:checkout", "git:checkout-result",
   "git:commit", "git:commit-result", "git:discard", "git:discard-result",
   "git:stage", "git:stage-result", "git:unstage", "git:unstage-result",
@@ -3354,19 +3127,20 @@ export const CHECKOUT_VARIABLE_MESSAGE_TYPES = new Set<string>([
 ]);
 
 /** The subset of CHECKOUT_VARIABLE_MESSAGE_TYPES carried on the "preview"
- * channel rather than "control" (see MessageBus.publish's channel argument
- * and send-scheduler.ts's control>preview priority): the two BULK per-frame
- * terminal payloads, `terminal:frame` (a viewer's live screen) and
- * `terminal:history:page` (a requested scrollback page). The frame
- * protocol's other six wire types — `terminal:subscribe`/`subscribed`,
+ * channel rather than "control" (see MessageBus.publish's channel argument):
+ * the two BULK per-frame terminal payloads, `terminal:frame` (a viewer's live
+ * screen) and `terminal:history:page` (a requested scrollback page). The
+ * frame protocol's other six wire types — `terminal:subscribe`/`subscribed`,
  * `ack`, `unsubscribe`, `history:request`, `display:status` — are small,
  * latched, one-shot exchanges the requester is actively waiting on, so they
- * stay on "control" and are drained ahead of preview's bulk traffic rather
- * than queuing behind it; see the comment on `TerminalViewerTransport.send`
- * in agent-core.ts. Priority is not isolation: `SendScheduler.fits` also gates
- * on `SOCKET_INFLIGHT_BYTES`, which is shared by both channels and sits only
- * one channel-window above one, so a saturated preview channel leaves control
- * a bounded headroom and then it too waits for a credit.
+ * stay on "control" rather than queuing behind preview's bulk traffic; see
+ * the comment on `TerminalViewerTransport.send` in agent-core.ts.
+ *
+ * The channel label is a LOOPBACK concept: `LocalTransport` and
+ * `message_router.dart` gate delivery on it. On Iroh a terminal payload rides
+ * its own terminal stream (`peer/terminal-streams.ts`), and the session
+ * stream carries no channels at all — this set's only job there is picking
+ * which loopback queue a frame lands on.
  *
  * Mirrored BY HAND as `kPreviewChannelInboundTypes` in
  * app/lib/project/project_message_classification.dart, gated against this set
@@ -3413,10 +3187,10 @@ export function agentNotification(
  * Wrap a resume-replay as a single `agent:transcript-replay` frame, or null
  * when there is nothing to replay.
  *
- * Drivers MUST push replays through this rather than sending each frame:
- * over the relay a per-frame replay exceeds the per-pair rate limit, and
- * rejected frames are dropped with no retransmit — silently truncating the
- * transcript (see AgentTranscriptReplayMessage).
+ * Drivers MUST push replays through this rather than sending each frame: an
+ * overflowing project stream is reset, so a per-frame replay can lose its
+ * tail — including the closing `agent:turn-end` — while one record arrives
+ * whole or not at all.
  *
  * Returns null on an empty replay so a history-less resume stays silent: the
  * resume builders return [] for a thread with no turns, and the per-frame loop
@@ -3448,11 +3222,11 @@ export function parseMessage(raw: string): AbMessage | null {
 const KNOWN_TYPES = new Set<string>([
   "terminal:output", "terminal:input", "terminal:started", "terminal:exited", "terminal:notification", "terminal:bell",
   "terminal:start", "terminal:stop", "terminal:resize", "terminal:size", "agent:status",
-  "ping", "pong", "handshake:client-hello", "handshake:agent-hello", "handshake:agent-ready",
+  "ping", "pong",
   "tree:full", "tree:update", "file:read", "file:content",
   "file:resolve-path", "file:resolve-path-result",
   "ports:update", "preview:url",
-  "agent:disconnecting", "agent:projects", "agent:tools", "stream-ready", "stream-invalid", "stream-unbound", "control:result", "app:ready",
+  "agent:projects", "agent:tools", "stream-ready", "control:result",
   "command:run", "command:output", "command:done", "notification:push", "push:register",
   "handler:configure", "handler:instruct", "handler:status", "handler:escalation", "handler:activity",
   "handler:history:request", "handler:history:page",
@@ -3467,11 +3241,8 @@ const KNOWN_TYPES = new Set<string>([
   "git:commit-diff", "git:commit-diff-content",
   "git:sync", "git:sync-result", "git:sync-status", "git:sync-state",
   "file:search", "file:search-cancel", "file:search-result", "file:search-done",
-  "file:upload-start", "file:upload-ready", "file:upload-chunk",
-  "file:upload-ack", "file:upload-done", "file:upload-result",
+  "file:upload-local", "file:upload-result",
   "agent:hello", "port:detected",
-  "agent:enableRelay", "agent:disableRelay",
-  "agent:activationPending", "agent:relayReady", "agent:relayError",
   "project:start",
   "config:read", "config:read-result", "config:write", "config:write-result",
   "config:changed", "config:detect-tools", "config:detect-tools-result",
@@ -3481,7 +3252,6 @@ const KNOWN_TYPES = new Set<string>([
   "session:delete", "session:set-mode", "session:setup", "session:focus",
   "session:result", "session:updated",
   "client:focus-state",
-  "terminal:snapshot:request", "terminal:snapshot",
   "terminal:subscribe", "terminal:subscribed", "terminal:frame", "terminal:ack",
   "terminal:unsubscribe", "terminal:history:request", "terminal:history:page", "terminal:display:status",
   "file:tree:unchanged",

@@ -2,38 +2,49 @@ import { randomBytes } from "node:crypto";
 import type { RelayClient } from "../helpers/relay-client";
 import { createMessage, type AbMessage } from "../../bridge/src/protocol";
 
+/** The eval-side name for the machine control plane's stream handle — the
+ *  session stream carries no bridge-minted id, so this is just the constant
+ *  every helper compares against (mirrors `sendOnStream`'s own `"0"` check). */
+export const CONTROL_HANDLE = "0";
+
 /**
  * v3 project data-plane helpers.
  *
- * In v3 a machine holds ONE sealed session; project traffic runs as streams
- * inside it. The machine control plane (`s` omitted) carries only
- * host verbs, pairing UX, and the catalog adverts (`agent:projects` /
- * `agent:tools`); every project verb (`file:read`, `terminal:*`, `git:*`, …)
- * must be tagged with the project's `streamId`. `setupTestEnv` admits the app,
- * turns the machine's mobile-access switch on and pulls the control-plane
- * snapshot, which seeds the `agent:projects` advert but NOT the per-project
- * state (nor the file tree, which is fetched lazily per directory via
- * `file:tree:root:request`/`file:tree:children:request`) — so a migrated
- * scenario resolves the firstProject's stream from that advert and drives
- * verbs over it via `sendOnStream` / `waitForStreamAbType`.
+ * In v3 a machine holds ONE authenticated Iroh connection; each project gets
+ * its OWN QUIC stream inside it. The machine control plane (`s` omitted)
+ * carries only host verbs, pairing UX, and the catalog adverts
+ * (`agent:projects` / `agent:tools`); every project verb (`file:read`,
+ * `terminal:*`, `git:*`, …) rides that project's stream, addressed by its
+ * handle — which IS `projectId`, never a bridge-minted id. `setupTestEnv`
+ * admits the app, turns the machine's mobile-access switch on and pulls the
+ * control-plane snapshot, which seeds the `agent:projects` advert but NOT the
+ * per-project state (nor the file tree, which is fetched lazily per directory
+ * via `file:tree:root:request`/`file:tree:children:request`) — so a migrated
+ * scenario waits for that advert to show the project running, opens its
+ * stream, and drives verbs over it via `sendOnStream` / `waitForStreamAbType`.
  *
  * These live outside `evals/helpers/` because the harness is a shared,
  * frozen surface (the gate agent consumes it too); this is additive test glue.
  */
 
-/** Resolve the streamId the agent allocated for `projectId`, read from the
- *  `agent:projects` advert setupTestEnv seeds via its control-plane snapshot. */
+/** Wait for `projectId` to show `running:true` in a fresh `agent:projects`
+ *  advert (opening a project stream before the core is
+ *  relay-registered is refused `NOT_READY`), then open its stream and return
+ *  the handle (`projectId`). */
 export async function firstProjectStream(
   app: RelayClient,
   projectId: string,
   timeoutMs = 8_000,
 ): Promise<string> {
-  const advert = await app.waitForAbType("agent:projects", timeoutMs);
-  const entry = advert.projects.find((p) => p.projectId === projectId);
-  if (!entry?.streamId) {
-    throw new Error(`no streamId advertised for project ${projectId} (running=${entry?.running})`);
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw new Error(`project ${projectId} was never advertised running`);
+    const advert = await app.waitForAbType("agent:projects", remaining);
+    const entry = advert.projects.find((p) => p.projectId === projectId);
+    if (entry?.running) break;
   }
-  return entry.streamId;
+  return app.openProjectStream(projectId, Math.max(1, deadline - Date.now()));
 }
 
 /**

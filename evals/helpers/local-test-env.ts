@@ -2,27 +2,11 @@ import { spawn } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { generateKeyPairSync } from "node:crypto";
 import { computeProjectId } from "../../bridge/src/project-id";
 import { readHostFile, type HostFile } from "../../bridge/src/host-discovery";
 import { LocalTestClient, type LocalConnectInfo } from "./local-client";
 
-export interface LocalTestEnvOpts {
-  /**
-   * Static license token threaded into the `promo` fixture for the
-   * relay-promotion path. The agent presents it on relay `register`; the eval
-   * relay's `fakeLicenseGate` accepts any non-empty token, so this is the
-   * offline static-token path (no OAuth refresh). Defaults to undefined; the
-   * promotion eval passes `TEST_LICENSE_TOKEN`.
-   */
-  licenseToken?: string;
-  /**
-   * Relay HTTP(S) base (WITHOUT a trailing `/ws`) the promotion controller
-   * connects to. The controller re-appends `/ws` and upgrades http→ws via
-   * `joinRelayWsPath`, so pass the bare base. Used by the promotion eval.
-   */
-  relayUrl?: string;
-}
+export interface LocalTestEnvOpts {}
 
 export interface LocalTestEnv {
   client: LocalTestClient;
@@ -30,25 +14,7 @@ export interface LocalTestEnv {
   projectId: string;
   abDir: string;
   connect: LocalConnectInfo;
-  /**
-   * Promotion fixture: a device UUID + an Ed25519 keypair (raw 32-byte keys,
-   * standard-base64, matching the encoding `DeviceIdentity`/`RelayClient`
-   * expect) for the `agent:enableRelay` `auth`. The keypair is freshly
-   * generated: the eval relay's `fakeLicenseGate` does no `pk`→pubkey binding,
-   * so the keys only need to be a valid matching pair for the relay's Ed25519
-   * challenge-response, not derived from the license token's `pk` claim.
-   */
-  promo: { deviceUuid: string; ed25519Pub: string; ed25519Priv: string };
   cleanup: () => Promise<void>;
-}
-
-/**
- * Export the raw 32-byte Ed25519 key as standard base64 — the encoding the
- * agent's `DeviceIdentity` / `RelayClient` decode via `Buffer.from(.., "base64")`
- * when signing the relay challenge-response. Mirrors `harness.ts`'s `b64Raw`.
- */
-function b64RawKey(key: import("node:crypto").KeyObject, type: "spki" | "pkcs8"): string {
-  return Buffer.from(key.export({ format: "der", type }).subarray(-32)).toString("base64");
 }
 
 /**
@@ -60,18 +26,6 @@ function b64RawKey(key: import("node:crypto").KeyObject, type: "spki" | "pkcs8")
  * the returned `LocalTestClient` over the connect info's port + token.
  */
 export async function setupLocalTestEnv(_opts: LocalTestEnvOpts = {}): Promise<LocalTestEnv> {
-  // Promotion fixture keypair. Freshly generated: the eval relay's
-  // `fakeLicenseGate` accepts any non-empty token and does NOT compare the
-  // token's `pk` claim to the presented pubkey, so these keys need only be a
-  // valid Ed25519 pair for the relay's challenge-response — not bound to the
-  // license token. Fixed UUID for a stable relay-auth identity across runs.
-  const promoEd = generateKeyPairSync("ed25519");
-  const promo = {
-    deviceUuid: "0bbd1111-2222-3333-4444-555566667777",
-    ed25519Pub: b64RawKey(promoEd.publicKey, "spki"),
-    ed25519Priv: b64RawKey(promoEd.privateKey, "pkcs8"),
-  };
-
   const folder = mkdtempSync(join(tmpdir(), "antgrid-local-eval-"));
   const abDir = mkdtempSync(join(tmpdir(), "antgrid-local-eval-home-"));
   // Pin `name` for the human-facing agent label; projectId is derived from folder.
@@ -146,7 +100,7 @@ export async function setupLocalTestEnv(_opts: LocalTestEnvOpts = {}): Promise<L
   }
 
   return {
-    client, folder, projectId, abDir, connect, promo,
+    client, folder, projectId, abDir, connect,
     cleanup: async () => {
       client.close();
       child.kill("SIGTERM");

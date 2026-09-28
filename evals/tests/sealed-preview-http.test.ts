@@ -2,26 +2,26 @@ import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { randomBytes } from "node:crypto";
 import type { Server } from "bun";
 import { setupTestEnv, type TestEnv } from "../helpers/harness";
-import { TUNNEL_CHUNK_BYTES } from "../../bridge/src/tunnel-protocol";
+import { RAW_READ_BYTES } from "../helpers/relay-client";
 import { firstProjectStream } from "../support/stream";
 
-// Regression guard for the sealed preview tunnel, end to end over a real relay
-// and a real agent. An HTTP response rides the preview channel as
-// `tunnel:http-start` (head + first body slice), `tunnel:http-chunk` and
-// `tunnel:http-end`; the bridge reads the next slice only once the previous
-// frame has left its send queue, so a body many slices long crosses the credit
-// window under the app's credits alone. The small case proves a body that fits
-// one slice is still exactly one frame; the large case proves a paced multi-
-// slice body reassembles byte for byte.
+// Regression guard for the tunnel-http stream, end to end over a real relay
+// and a real agent. Every preview HTTP request gets its own native QUIC
+// stream: the app writes the open frame and a `tunnel:http-head`-carrying
+// head record, then the bridge answers with `tunnel:http-head` and the
+// response body as raw bytes with no framing, ending in a clean FIN. The
+// small case proves a body that arrives inside one upstream read still ends
+// cleanly; the large case proves a body spanning many raw reads reassembles
+// byte for byte.
 //
-// Preview traffic is per-project: it must ride the project STREAM's preview
-// channel, because the machine control plane drops tunnel messages
-// (`onTunnelMessage: () => {}` in host-server.ts).
+// Preview traffic is per-request now, not per-project: `openTunnelHttpStream`
+// opens a stream directly on the native connection, bypassing the project
+// stream entirely — the legacy session-stream tunnel is deleted, not kept
+// alongside.
 const BIG = randomBytes(2 * 1024 * 1024);
 
-describe("sealed preview HTTP tunnel", () => {
+describe("tunnel-http stream", () => {
   let env: TestEnv;
-  let streamId: string;
   let origin: Server<unknown>;
   let originPort: number;
 
@@ -34,7 +34,7 @@ describe("sealed preview HTTP tunnel", () => {
       fetch(req) {
         const url = new URL(req.url);
         // Random bytes served as a binary type: gzip cannot collapse them, so
-        // the slice count reflects the real body size rather than its entropy.
+        // the record count reflects the real body size rather than its entropy.
         if (url.pathname === "/big") {
           return new Response(BIG, { headers: { "content-type": "application/octet-stream" } });
         }
@@ -45,7 +45,9 @@ describe("sealed preview HTTP tunnel", () => {
     originPort = origin.port!;
 
     env = await setupTestEnv({ fixtureName: "basic" });
-    streamId = await firstProjectStream(env.app, env.projectId, 10_000);
+    // Proves a project stream still exists beside the tunnel stream, though
+    // no row here drives verbs on it.
+    await firstProjectStream(env.app, env.projectId, 10_000);
   }, 60_000);
 
   afterAll(async () => {
@@ -53,51 +55,32 @@ describe("sealed preview HTTP tunnel", () => {
     await env?.teardown();
   });
 
-  test("small response round-trips sealed over the preview channel", async () => {
-    const requestId = "req-small-1";
-    env.app.sendOnStream(
-      streamId,
-      {
-        type: "tunnel:http-request",
-        requestId,
-        port: originPort,
-        method: "GET",
-        path: "/small",
-        headers: {},
-      },
-      "preview",
-    );
+  test("small response round-trips over its own stream", async () => {
+    const client = await env.app.openTunnelHttpStream({
+      projectId: env.projectId,
+      head: { type: "tunnel:http-request", port: originPort, method: "GET", path: "/small", headers: {} },
+    });
 
-    const res = await env.app.waitForTunnelResponse(requestId, 10_000);
+    const res = await client.response(10_000);
     expect(res.status).toBe(200);
     expect(res.body.toString("utf8")).toBe("small-ok");
-    // A body inside one slice folds into the start: no chunk, no end.
-    expect(res.frames).toBe(1);
-    expect(res.chunks).toBe(0);
+    // A body that short fits inside one raw read, and the FIN that follows
+    // it is unconditional, so it is never mistaken for a truncated one.
+    expect(res.chunks).toBe(1);
   }, 20_000);
 
-  test("large response round-trips intact as paced chunks", async () => {
-    const requestId = "req-big-1";
-    env.app.sendOnStream(
-      streamId,
-      {
-        type: "tunnel:http-request",
-        requestId,
-        port: originPort,
-        method: "GET",
-        path: "/big",
-        headers: {},
-      },
-      "preview",
-    );
+  test("large response round-trips intact over many raw reads", async () => {
+    const client = await env.app.openTunnelHttpStream({
+      projectId: env.projectId,
+      head: { type: "tunnel:http-request", port: originPort, method: "GET", path: "/big", headers: {} },
+    });
 
-    const res = await env.app.waitForTunnelResponse(requestId, 20_000);
+    const res = await client.response(20_000);
     expect(res.status).toBe(200);
     expect(res.body.equals(BIG)).toBe(true);
-    expect(res.chunks).toBeGreaterThanOrEqual(1);
-    expect(res.frames).toBe(res.chunks + 2);
-    // Bounded, not exact: this is the production flush window, and one slow
-    // upstream read on a loaded host legitimately ships a short slice.
-    expect(res.chunks).toBeLessThanOrEqual(Math.ceil(BIG.length / TUNNEL_CHUNK_BYTES) - 1 + 2);
+    // Each raw read returns at most RAW_READ_BYTES, so draining a 2 MiB body
+    // structurally needs at least this many — a lower bound, since a slower
+    // upstream or a smaller flush window legitimately ships more, shorter reads.
+    expect(res.chunks).toBeGreaterThanOrEqual(Math.ceil(BIG.length / RAW_READ_BYTES));
   }, 40_000);
 });

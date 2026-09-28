@@ -9,7 +9,7 @@ import {
 } from "../src/project-binding";
 import { HostServer, type HostRemoteConfig, type RemoteRuntime } from "../src/host-server";
 import { computeProjectId } from "../src/project-id";
-import type { RelayClient } from "../src/relay-client";
+import { TestRemoteHostConnection } from "./test-peer-session-owner";
 
 interface Call {
   url: string;
@@ -258,20 +258,6 @@ describe("HostServer wiring", () => {
     return { maint: { getToken: () => "tok", stop: () => {} } };
   }
 
-  // Inert machine relay client: keeps startRemoteControlPlane off a real socket.
-  function stubRelayClient(): RelayClient {
-    return {
-      deviceId: "control-plane-dev",
-      currentPeerPubkey: () => null,
-      hasEstablishedSession: () => false,
-      setBus: () => {},
-      connect: () => {},
-      close: () => {},
-      attachStream: () => ({ streamId: "s1", detach: () => {}, sendTunnel: () => {} }),
-      sendPushDeliver: () => {},
-    } as unknown as RelayClient;
-  }
-
   function remoteFolder(): string {
     const f = mkdtempSync(join(tmpdir(), "antgrid-binding-"));
     folders.push(f);
@@ -318,7 +304,7 @@ describe("HostServer wiring", () => {
     host = new HostServer({
       remote: fakeRemoteConfig(),
       remoteRuntimeFactory: async () => fakeRuntime(),
-      relayClientFactory: () => stubRelayClient(),
+      remoteHostFactory: (options) => new TestRemoteHostConnection(options),
     });
     const folder = remoteFolder();
     const id = computeProjectId(folder);
@@ -344,7 +330,7 @@ describe("HostServer wiring", () => {
     host = new HostServer({
       remote: fakeRemoteConfig(),
       remoteRuntimeFactory: async () => fakeRuntime(),
-      relayClientFactory: () => stubRelayClient(),
+      remoteHostFactory: (options) => new TestRemoteHostConnection(options),
     });
     const folder = remoteFolder();
     const id = computeProjectId(folder);

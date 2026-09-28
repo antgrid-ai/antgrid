@@ -3,7 +3,7 @@
 *.log
 *.pyc
 *.swp
-/.tmp/
+.tmp/
 
 # Android signing keys — never commit
 *.jks
@@ -60,6 +60,7 @@ node_modules
 /app/coverage/
 /packages/*/build/
 /packages/*/pubspec.lock
+!/packages/antgrid_peer_transport/pubspec.lock
 
 # Symbolication related
 app.*.symbols

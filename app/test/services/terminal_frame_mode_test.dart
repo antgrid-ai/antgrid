@@ -9,7 +9,7 @@ import 'package:antgrid/models/terminal_models.dart';
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/services/terminal_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
-import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+import '../helpers/fake_agent_transport.dart';
 import '../helpers/prefs_test_mock.dart';
 
 /// A transport whose sends stop leaving, without the socket reporting anything
@@ -720,10 +720,6 @@ void main() {
 
       expect(t.requests.where((r) => r.method == 'terminal.snapshot'), isEmpty);
       expect(
-        t.sent.where((m) => m['type'] == 'terminal:snapshot:request'),
-        isEmpty,
-      );
-      expect(
         t.sent.where((m) => m['type'] == 'terminal:subscribe'),
         isNotEmpty,
       );
@@ -836,7 +832,7 @@ void main() {
     await acceptSubscribe(t, 'a');
     final tab = svc.currentState.tabs['a']!;
     // Tab defaults to 80x24; a frame claiming a different size predates a
-    // resize the driver already believes it sent (D4).
+    // resize the driver already believes it sent.
     expect(tab.cols, 80);
     expect(tab.rows, 24);
 
@@ -855,7 +851,7 @@ void main() {
 
     expect(tab.ghostty.plainText, contains('STALE-GEOMETRY'));
     expect(svc.currentState.tabs['a']!.cols, 100);
-    // Ack is delivery, not proof of rendering (D5) — still sent.
+    // Ack is delivery, not proof of rendering — still sent.
     final ack = t.sent.lastWhere((m) => m['type'] == 'terminal:ack');
     expect(ack['sequence'], 1);
     // Never painted, so hydration must not read painted either.
@@ -884,33 +880,6 @@ void main() {
     await svc.dispose();
     await session.close();
   });
-
-  test(
-    'terminal:snapshot is dropped once a terminal is in frame mode',
-    () async {
-      if (_skipWithoutNative()) return;
-      final t = FakeAgentTransport();
-      final session = await newSession(t);
-      final svc = TerminalService.fromSession(session);
-      svc.setDisplayInterest('frame-test-pane', 'a');
-
-      await seedRunningTab(t, 'a');
-      await acceptSubscribe(t, 'a');
-      final tab = svc.currentState.tabs['a']!;
-
-      t.emit('terminal:snapshot', {
-        'terminalId': 'a',
-        'scrollback': 'ANOTHER-DEVICES-SCREEN',
-        'seq': 1,
-      });
-      await Future<void>.delayed(Duration.zero);
-
-      expect(tab.ghostty.plainText, isNot(contains('ANOTHER-DEVICES-SCREEN')));
-
-      await svc.dispose();
-      await session.close();
-    },
-  );
 
   test(
     'exit waits for the final consumed frame and keeps history paging after ENDED',
@@ -966,6 +935,215 @@ void main() {
       await session.close();
     },
   );
+
+  test(
+    'ENDED arriving before its final frame keeps draining until that frame '
+    'is accepted (hazard B)',
+    () async {
+      if (_skipWithoutNative()) return;
+      final t = FakeAgentTransport();
+      final session = await newSession(t);
+      final svc = TerminalService.fromSession(session);
+      svc.setDisplayInterest('frame-test-pane', 'a');
+
+      await seedRunningTab(t, 'a');
+      await acceptSubscribe(t, 'a');
+      final tab = svc.currentState.tabs['a']!;
+
+      // The bridge prioritizes control traffic over the preview channel, so
+      // ENDED can overtake the frames it names as the run's last output --
+      // here neither sequence 1 nor 2 has arrived yet.
+      t.emit('terminal:display:status', {
+        'terminalId': 'a',
+        'runId': 'run-1',
+        'attachmentId': 'att-1',
+        'code': 'ENDED',
+        'message': 'Terminal completed.',
+        'finalSequence': 2,
+        'exitCode': 3,
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      // Still draining: retiring now would drop sequences 1 and 2 for good,
+      // since a dropped attachment cannot be recovered by a later frame.
+      expect(
+        svc.currentState.tabs['a']!.sessionState,
+        TerminalSessionState.running,
+      );
+      expect(
+        svc.currentState.hydration['a']!.stage,
+        isNot(TerminalAttachStage.ended),
+      );
+
+      t.emit(
+        'terminal:frame',
+        _frameExtra(
+          terminalId: 'a',
+          runId: 'run-1',
+          attachmentId: 'att-1',
+          sequence: 1,
+          ansi: 'BEFORE-BOUNDARY',
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      // Below finalSequence: applied and acked, attachment still draining.
+      expect(tab.ghostty.plainText, contains('BEFORE-BOUNDARY'));
+      expect(
+        t.sent.lastWhere((m) => m['type'] == 'terminal:ack')['sequence'],
+        1,
+      );
+      expect(
+        svc.currentState.tabs['a']!.sessionState,
+        TerminalSessionState.running,
+      );
+
+      t.emit(
+        'terminal:frame',
+        _frameExtra(
+          terminalId: 'a',
+          runId: 'run-1',
+          attachmentId: 'att-1',
+          sequence: 2,
+          ansi: 'AT-BOUNDARY',
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      // The frame that reaches finalSequence is still applied and acked
+      // before the attachment retires.
+      expect(tab.ghostty.plainText, contains('AT-BOUNDARY'));
+      expect(
+        t.sent.lastWhere((m) => m['type'] == 'terminal:ack')['sequence'],
+        2,
+      );
+      expect(
+        svc.currentState.tabs['a']!.sessionState,
+        TerminalSessionState.exited,
+      );
+      expect(svc.currentState.tabs['a']!.exitCode, 3);
+      expect(
+        svc.currentState.hydration['a']!.stage,
+        TerminalAttachStage.ended,
+      );
+
+      await svc.dispose();
+      await session.close();
+    },
+  );
+
+  /// An ENDED that overtook its frames, announced before any of them lands.
+  void emitEarlyEnded(FakeAgentTransport t, {required int finalSequence}) {
+    t.emit('terminal:display:status', {
+      'terminalId': 'a',
+      'runId': 'run-1',
+      'attachmentId': 'att-1',
+      'code': 'ENDED',
+      'message': 'Terminal completed.',
+      'finalSequence': finalSequence,
+      'exitCode': 3,
+    });
+  }
+
+  test(
+    'an ENDED whose overtaken frames never arrive still retires at its '
+    'deadline (hazard B)',
+    () async {
+      final t = FakeAgentTransport();
+      final session = await newSession(t);
+      final svc = TerminalService.fromSession(
+        session,
+        endedDrainTimeout: const Duration(milliseconds: 20),
+      );
+      svc.setDisplayInterest('frame-test-pane', 'a');
+      await seedRunningTab(t, 'a');
+      await acceptSubscribe(t, 'a');
+
+      // The bridge aborts a retired attachment's queued sends, so the frames
+      // this ENDED names may simply never come.
+      emitEarlyEnded(t, finalSequence: 2);
+      await Future<void>.delayed(Duration.zero);
+      expect(
+        svc.currentState.tabs['a']!.sessionState,
+        TerminalSessionState.running,
+      );
+      expect(svc.canSendInput('a'), isFalse);
+
+      await Future<void>.delayed(const Duration(milliseconds: 60));
+      expect(
+        svc.currentState.tabs['a']!.sessionState,
+        TerminalSessionState.exited,
+      );
+      expect(svc.currentState.tabs['a']!.exitCode, 3);
+      expect(
+        svc.currentState.hydration['a']!.stage,
+        TerminalAttachStage.ended,
+      );
+
+      await svc.dispose();
+      await session.close();
+    },
+  );
+
+  test(
+    'a drained final frame that resizes the screen does not resurrect the run',
+    () async {
+      if (_skipWithoutNative()) return;
+      final t = FakeAgentTransport();
+      final session = await newSession(t);
+      final svc = TerminalService.fromSession(session);
+      svc.setDisplayInterest('frame-test-pane', 'a');
+      await seedRunningTab(t, 'a');
+      await acceptSubscribe(t, 'a');
+
+      emitEarlyEnded(t, finalSequence: 1);
+      await Future<void>.delayed(Duration.zero);
+      t.emit(
+        'terminal:frame',
+        _frameExtra(
+          terminalId: 'a',
+          runId: 'run-1',
+          attachmentId: 'att-1',
+          sequence: 1,
+          ansi: 'LAST-SCREEN',
+          cols: 100,
+          rows: 30,
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      final tab = svc.currentState.tabs['a']!;
+      expect(tab.cols, 100);
+      expect(tab.sessionState, TerminalSessionState.exited);
+      expect(tab.exitCode, 3);
+
+      await svc.dispose();
+      await session.close();
+    },
+  );
+
+  test('a display retired mid-drain still completes the run', () async {
+    final t = FakeAgentTransport();
+    final session = await newSession(t);
+    final svc = TerminalService.fromSession(session);
+    svc.setDisplayInterest('frame-test-pane', 'a');
+    await seedRunningTab(t, 'a');
+    await acceptSubscribe(t, 'a');
+
+    emitEarlyEnded(t, finalSequence: 2);
+    await Future<void>.delayed(Duration.zero);
+    svc.setDisplayInterest('frame-test-pane', null);
+    await Future<void>.delayed(Duration.zero);
+
+    expect(
+      svc.currentState.tabs['a']!.sessionState,
+      TerminalSessionState.exited,
+    );
+    expect(svc.currentState.tabs['a']!.exitCode, 3);
+
+    await svc.dispose();
+    await session.close();
+  });
 
   test(
     'display:status ENDED is a lifecycle stage, never rendered as a failure',
@@ -2063,7 +2241,7 @@ void main() {
       await Future<void>.delayed(Duration.zero);
       expect(tab.history.boundary!.nextRowId, 10);
 
-      // Mismatched geometry: deferred, never painted (D4) -- the boundary
+      // Mismatched geometry: deferred, never painted -- the boundary
       // must still move, because the archive scrolled off regardless of
       // whether this screen fit.
       t.emit(

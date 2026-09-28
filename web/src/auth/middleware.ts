@@ -5,19 +5,26 @@ import type { Context, MiddlewareHandler } from "hono";
 import type { Auth } from "./better-auth.js";
 import type { DB } from "../db/index.js";
 import type { Env } from "../env.js";
-import { requireBearerJwt } from "./jwt-bearer.js";
+import { requireDeviceBearerJwt } from "./jwt-bearer.js";
 
 export type AuthVars = {
   userId: string;
   sessionId: string;
   userEmail: string | null;
   /**
-   * The caller's live device, set only by `requireBearerJwt`. Its presence is
+   * The caller's live device, set only by `requireDeviceBearerJwt`. Its presence is
    * the actor-type signal — a Bearer-gated request leaves `sessionId` empty, so
    * the credential is all that distinguishes a bridge from a browser session.
    */
   deviceId?: string;
   userName: string | null;
+  deviceAuthorization?: {
+    id: string;
+    deviceId: string;
+    enrollmentId: string;
+    publicKey: Uint8Array;
+    kind: string;
+  };
 };
 
 type Session = {
@@ -75,7 +82,7 @@ export function requireUserOrBearer(deps: {
 }): MiddlewareHandler<{ Variables: AuthVars }> {
   // Built once: the bearer gate caches the JWKS per instance, and rebuilding it
   // per request would refetch on every call.
-  const bearer = requireBearerJwt(deps);
+  const bearer = requireDeviceBearerJwt(deps);
   const cookie = requireUser({ auth: deps.auth });
   return async (c, next) => {
     // One lookup: `header()` reads through the Fetch Headers API, which folds

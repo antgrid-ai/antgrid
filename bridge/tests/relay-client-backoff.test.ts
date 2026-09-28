@@ -2,16 +2,16 @@
 // `welcome` (not v2 `authenticated`) is the only reset point, and the schedule
 // keeps equal jitter over a deterministic doubling curve.
 import { test, expect, afterEach } from "bun:test";
-import { RelayClient } from "../src/relay-client";
+import { CentralControlClient } from "../src/central-control-client";
 import vector from "../../evals/fixtures/relay-hello-vector.json";
 
-let clients: RelayClient[] = [];
+let clients: CentralControlClient[] = [];
 afterEach(() => { for (const c of clients.splice(0)) try { c.close(); } catch {} });
 
-function makeClient(url: string): RelayClient {
+function makeClient(url: string): CentralControlClient {
   // Real Ed25519 material: v3 signs `hello` on socket open, so fake keys
   // would throw inside sendHello before the backoff path is ever exercised.
-  const client = new RelayClient({
+  const client = new CentralControlClient({
     url,
     identity: {
       deviceId: vector.fields.deviceId,
@@ -20,7 +20,6 @@ function makeClient(url: string): RelayClient {
       ed25519PublicKey: vector.fields.publicKey,
       ed25519PrivateKey: Buffer.from(vector.ed25519.seedHex, "hex").toString("base64"),
     },
-    generateKeypair: () => { throw new Error("not used"); },
     getLicenseToken: () => "tok",
     autoReconnect: false,
   });

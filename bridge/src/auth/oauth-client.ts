@@ -21,6 +21,7 @@ export interface OAuthClientOptions {
    */
   onAuthRevoked?: () => void;
   fetchImpl?: typeof fetch;
+  requestTimeoutMs?: number;
 }
 
 /** True when an OAuth error body carries `error: "invalid_client"`. Falls back
@@ -36,7 +37,7 @@ function isInvalidClient(body: string): boolean {
 /**
  * Thin OAuth `client_credentials` minter. No persistence — caller holds the
  * returned [MintedToken] in memory and pushes its `accessToken` into
- * RelayClient's `getLicenseToken` callback.
+ * CentralControlClient's `getLicenseToken` callback.
  *
  * The `resource` parameter is required: Better-Auth's oauth-provider only
  * emits a JWT (vs opaque token) when `resource` matches the auth base URL.
@@ -47,6 +48,7 @@ export class OAuthClient {
   private readonly basic: string;
   private readonly onAuthRevoked?: () => void;
   private readonly fetchImpl: typeof fetch;
+  private readonly requestTimeoutMs: number;
 
   constructor(opts: OAuthClientOptions) {
     const base = opts.licenseApiUrl.replace(/\/+$/, "");
@@ -55,6 +57,7 @@ export class OAuthClient {
     this.basic = `Basic ${Buffer.from(`${opts.clientId}:${opts.clientSecret}`).toString("base64")}`;
     this.onAuthRevoked = opts.onAuthRevoked;
     this.fetchImpl = opts.fetchImpl ?? fetch;
+    this.requestTimeoutMs = opts.requestTimeoutMs ?? 15_000;
   }
 
   async mint(): Promise<MintedToken> {
@@ -63,16 +66,36 @@ export class OAuthClient {
       scope: "agent",
       resource: this.resource,
     });
-    const res = await this.fetchImpl(this.tokenUrl, {
-      method: "POST",
-      headers: {
-        authorization: this.basic,
-        "content-type": "application/x-www-form-urlencoded",
-      },
-      body: body.toString(),
+    const abort = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    // Include body consumption in the deadline; headers alone do not retire
+    // a stalled request. Parse and apply authorization only after the race.
+    const response = (async () => {
+      const res = await this.fetchImpl(this.tokenUrl, {
+        method: "POST",
+        headers: {
+          authorization: this.basic,
+          "content-type": "application/x-www-form-urlencoded",
+        },
+        body: body.toString(),
+        signal: abort.signal,
+      });
+      const text = await res.text().catch((error) => {
+        if (res.ok) throw error;
+        return "";
+      });
+      return { res, text };
+    })();
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        const error = new Error("oauth: token request timed out");
+        reject(error);
+        abort.abort(error);
+      }, this.requestTimeoutMs);
     });
+    const { res, text } = await Promise.race([response, deadline])
+      .finally(() => clearTimeout(timer));
     if (!res.ok) {
-      const text = await res.text().catch(() => "");
       // Better-Auth answers an unknown/deleted OAuth client with 400
       // `invalid_client` ("missing client"), NOT 401 — signing out rotates the
       // account device and drops its client row, so cached credentials die the
@@ -86,7 +109,7 @@ export class OAuthClient {
       }
       throw new Error(`oauth: token endpoint returned ${res.status}: ${text.slice(0, 200)}`);
     }
-    const json = (await res.json()) as { access_token?: string; expires_in?: number };
+    const json = JSON.parse(text) as { access_token?: string; expires_in?: number };
     if (!json.access_token || typeof json.expires_in !== "number") {
       throw new Error("oauth: malformed token response");
     }
@@ -99,7 +122,7 @@ export class OAuthClient {
 
 /**
  * Maintain an always-fresh access token. Re-mints at 80% of TTL. Returns a
- * synchronous `getToken` suitable for RelayClient's `getLicenseToken`, and a
+ * synchronous `getToken` suitable for CentralControlClient's `getLicenseToken`, and a
  * `getTier` reading the server-signed product line off that same token. Caller
  * invokes `stop()` on shutdown to cancel the timer.
  */
@@ -108,7 +131,7 @@ export function startTokenMaintenance(
   initial: MintedToken,
   opts?: {
     /** Fired after every successful RE-mint (never the caller-supplied initial
-     *  token). Lets the machine RelayClient redial after a LICENSE_EXPIRED stop
+     *  token). Lets the machine central-control client redial after a LICENSE_EXPIRED stop
      *  the instant a renewed subscription's token lands. */
     onMinted?: () => void;
   },
@@ -139,24 +162,26 @@ export function startTokenMaintenance(
     if (stopped) return;
     const ttlMs = Math.max(60_000, current.expiresAt - Date.now());
     const refreshIn = Math.floor(ttlMs * 0.8);
-    timer = setTimeout(async () => {
+    timer = setTimeout(refresh, refreshIn);
+  }
+
+  async function refresh(): Promise<void> {
+    if (stopped) return;
+    try {
+      const next = await client.mint();
       if (stopped) return;
-      try {
-        current = await client.mint();
-        opts?.onMinted?.();
-        log.info(
-          "Refreshed OAuth access token; expires_in=%ds",
-          Math.round((current.expiresAt - Date.now()) / 1000),
-        );
-      } catch (err) {
-        log.warn("OAuth re-mint failed: %s — will retry in 30s", err);
-        timer = setTimeout(() => {
-          if (!stopped) schedule();
-        }, 30_000);
-        return;
-      }
-      schedule();
-    }, refreshIn);
+      current = next;
+      opts?.onMinted?.();
+      log.info(
+        "Refreshed OAuth access token; expires_in=%ds",
+        Math.round((current.expiresAt - Date.now()) / 1000),
+      );
+    } catch (err) {
+      log.warn("OAuth re-mint failed: %s — will retry in 30s", err);
+      if (!stopped) timer = setTimeout(refresh, 30_000);
+      return;
+    }
+    schedule();
   }
   schedule();
 

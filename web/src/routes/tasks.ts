@@ -463,7 +463,7 @@ export function taskRoutes(deps: { db: DB; auth: Auth; env: Env }) {
    * The bridge reporting where one session has got to.
    *
    * Bearer-only, enforced on the actor-type signal rather than by a second gate
-   * on the same path: `deviceId` is set by `requireBearerJwt` and by nothing
+   * on the same path: `deviceId` is set by `requireDeviceBearerJwt` and by nothing
    * else, so its absence is a cookie caller — and a browser has no session to
    * report. Registering a bearer-only middleware here would not narrow the
    * route anyway, since the `/tasks/*` gate above already matches it.
@@ -827,7 +827,7 @@ function refuseTask(c: Context<{ Variables: TaskVars }>, refusal: TaskRefusal): 
 /**
  * Publishing is the one verb on this router a programmatic caller may not reach.
  *
- * `requireBearerJwt` blanks `sessionId`, so nothing inside a Bearer request
+ * The bearer gate blanks `sessionId`, so nothing inside a Bearer request
  * separates a person from an agent driving the bridge — and a publish cannot be
  * taken back: deleting a GitHub issue is admin-only and the content is already
  * in every watcher's inbox. The required `publish` field is the primary defence

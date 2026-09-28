@@ -5,7 +5,7 @@ import 'package:antgrid_relay_client/antgrid_relay_client.dart'
 import 'package:antgrid/services/account_agents_api.dart';
 import 'package:antgrid/services/control_plane_client.dart';
 import 'package:antgrid/session_bus/remote_directory_source.dart';
-import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+import '../helpers/fake_agent_transport.dart';
 
 ControlPlaneClient _clientAnswering(
   Map<String, dynamic> Function(String method, Map<String, dynamic>? params)

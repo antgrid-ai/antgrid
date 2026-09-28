@@ -60,7 +60,7 @@ export const links = {
   // and it carries ?platform= (see downloadUrlFor) to fire a specific build.
   download: "/download",
   getStarted: "/get-started",
-  downloadMacos: `${RELEASES_URL}/releases/latest/download/antgrid-macos.dmg`,
+  downloadMacos: `${RELEASES_URL}/releases/latest/download/antgrid-macos-arm64.dmg`,
   // The Store's stub installer (product 9N0P7ZRL4D9W). Version-stable like the
   // GitHub URLs above, so a new build never needs a site deploy — but it answers
   // `Content-Disposition: attachment` to EVERY user agent, with no sniffing and
@@ -90,8 +90,8 @@ export const links = {
   exactSource: `${RELEASES_URL}/tree/${SOURCE_COMMIT}`,
   securityPolicyFile: `${RELEASES_URL}/blob/HEAD/SECURITY.md`,
   securityAdvisory: `${RELEASES_URL}/security/advisories/new`,
-  handshakeSpec: `${RELEASES_URL}/blob/HEAD/docs/protocol/e2e-handshake.md`,
-  handshakeVectors: `${RELEASES_URL}/blob/HEAD/evals/fixtures/e2e-handshake-vectors.json`,
+  handshakeSpec: `${RELEASES_URL}/blob/HEAD/docs/protocol/peer-session.md`,
+  handshakeVectors: `${RELEASES_URL}/blob/HEAD/evals/fixtures/peer-transport-vectors.json`,
   relayClient: `${RELEASES_URL}/tree/HEAD/packages/antgrid_relay_client`,
   wirePackage: `${RELEASES_URL}/tree/HEAD/packages/antgrid-wire`,
   securityEmail: "mailto:contact@radhaai.com?subject=Security",
@@ -151,7 +151,7 @@ export type Platform = {
 
 export const PLATFORMS: Platform[] = [
   { id: "windows", os: "win", name: "Windows", icon: "tabler:brand-windows", url: links.downloadWindows, awayUrl: links.storeListing },
-  { id: "macos", os: "mac", name: "macOS", icon: "tabler:brand-apple", url: links.downloadMacos },
+  { id: "macos", os: "mac", name: "macOS (Apple Silicon)", icon: "tabler:brand-apple", url: links.downloadMacos },
   { id: "linux", os: "linux", name: "Linux", icon: "tabler:brand-open-source", url: links.downloadLinux },
 ];
 

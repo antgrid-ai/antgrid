@@ -1,45 +1,134 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
+import 'package:antgrid_peer_transport/antgrid_peer_transport.dart';
+import 'package:iroh_quic/iroh_quic.dart' as iroh;
 import 'package:uuid/uuid.dart';
 
 typedef EmitFn = void Function(Map<String, dynamic> response);
+typedef _Cleanup = FutureOr<void> Function();
+
+final class _CleanupStack {
+  final List<_Cleanup> _entries = [];
+  bool _finished = false;
+
+  void add(_Cleanup cleanup) {
+    if (_finished) throw StateError('Cleanup stack already finished');
+    _entries.add(cleanup);
+  }
+
+  void disarm() {
+    _entries.clear();
+    _finished = true;
+  }
+
+  Future<void> run() async {
+    if (_finished) return;
+    _finished = true;
+    Object? firstError;
+    StackTrace? firstStack;
+    for (final cleanup in _entries.reversed) {
+      try {
+        await cleanup();
+      } catch (error, stack) {
+        firstError ??= error;
+        firstStack ??= stack;
+      }
+    }
+    _entries.clear();
+    if (firstError != null) {
+      Error.throwWithStackTrace(firstError, firstStack!);
+    }
+  }
+}
 
 /// JSON-line command surface the TS eval harness drives (`DartAppClient`).
 ///
-/// Everything after the relay socket is delegated to the PRODUCTION Dart
-/// client: [MachineSession] owns the E2E session, the sealed `{s, m}` stream
-/// demux, fragment reassembly and liveness, exactly as the app's
-/// `RelayConnection` does. This handler is only a translation layer between
-/// stdin JSON actions and that object graph — anything it reimplements is a
-/// place where an eval could pass against code the app does not ship.
+/// Central control and native payload setup have independent lifetimes.
+/// [MachineSession] owns the session and the app's wedge-probe ping, and
+/// opens each project its own native QUIC stream on demand. This
+/// handler only translates stdin JSON actions into the production client
+/// object graph.
+
+/// The eval protocol's handle for the machine control plane — a bare
+/// local id, unrelated to the wire's peer-frame `kind`.
+const String _kControlHandle = '0';
+class _MemoryEndpointKeys implements EndpointKeyStore {
+  final Map<String, Uint8List> _values = {};
+
+  @override
+  Future<Uint8List?> read(String enrollmentId) async {
+    final value = _values[enrollmentId];
+    return value == null ? null : Uint8List.fromList(value);
+  }
+
+  @override
+  Future<void> write(String enrollmentId, Uint8List secret) async {
+    final previous = _values[enrollmentId];
+    previous?.fillRange(0, previous.length, 0);
+    _values[enrollmentId] = Uint8List.fromList(secret);
+  }
+
+  @override
+  Future<void> delete(String enrollmentId) async {
+    final value = _values.remove(enrollmentId);
+    value?.fillRange(0, value.length, 0);
+  }
+
+  Future<void> clear() async {
+    for (final value in _values.values) {
+      value.fillRange(0, value.length, 0);
+    }
+    _values.clear();
+  }
+}
+
 class CommandHandler {
   final EmitFn _emit;
 
-  CryptoService? _crypto;
   RelayService? _relay;
+  NativeEndpointOwner? _endpoint;
+  PeerLink? _payload;
+  AuthorizationLease? _lease;
+  final _endpointKeys = _MemoryEndpointKeys();
   DeviceIdentity? _identity;
   MachineSession? _session;
   AppSessionHandshaker? _handshaker;
 
   StreamSubscription<AppState>? _stateSub;
-  StreamSubscription<({String projectId, String streamId})>? _streamReadySub;
+  StreamSubscription<ProjectStreamEvent>? _streamReadySub;
 
-  /// One subscription per attached [StreamTransport], keyed by streamId
-  /// (`"0"` = the machine control plane). Every inbound frame is republished
-  /// as an `antgrid-message` event tagged with the stream it arrived on.
+  /// One subscription per attached [StreamTransport], keyed by HANDLE
+  /// (`_kControlHandle` = the machine control plane, else a bare projectId —
+  /// a project's identity IS its own native stream, so there
+  /// is no separate bridge-issued streamId left to key by). Every inbound
+  /// frame is republished as an `antgrid-message` event tagged with the
+  /// handle it arrived on.
   final Map<String, StreamSubscription<InboundMessage>> _streamSubs = {};
 
+  /// Open terminal attachments (`terminal-attach`), keyed by the caller's own
+  /// `requestId` — the same id used to open them and to address
+  /// `terminal-attach-send`/`-close`.
+  final Map<String, TerminalAttachment> _attachmentHandles = {};
+  final Map<String, StreamSubscription<Map<String, dynamic>>>
+  _attachmentMsgSubs = {};
+
   CommandHandler(this._emit);
+
+  Future<void> dispose() => _disposeAll();
 
   Future<void> handle(Map<String, dynamic> cmd) async {
     final action = cmd['action'] as String?;
     switch (action) {
       case 'init':
         await _handleInit(cmd);
-      case 'connect':
-        await _handleConnect(cmd);
+      case 'control-connect':
+        await _handleControlConnect(cmd);
+      case 'peer-connect':
+        await _handlePeerConnect(cmd);
       case 'handshake':
         await _handleHandshake(cmd);
       case 'project-start':
@@ -48,55 +137,77 @@ class CommandHandler {
         await _handleSendEncrypted(cmd);
       case 'snapshot':
         await _handleSnapshot(cmd);
-      case 'disconnect':
-        await _handleDisconnect();
+      case 'terminal-attach':
+        await _handleTerminalAttach(cmd);
+      case 'terminal-attach-send':
+        await _handleTerminalAttachSend(cmd);
+      case 'terminal-attach-close':
+        await _handleTerminalAttachClose(cmd);
+      case 'peer-disconnect':
+        await _handlePeerDisconnect();
+      case 'control-disconnect':
+        _handleControlDisconnect();
+      case 'dispose':
+        await _handleDispose();
       default:
         _emit({'event': 'error', 'message': 'Unknown action: $action'});
     }
   }
 
   Future<void> _handleInit(Map<String, dynamic> cmd) async {
-    _crypto = CryptoService();
-    final (ed25519Private, ed25519Public) = await _crypto!
-        .generateEd25519KeyPair();
-    final (x25519Private, x25519Public) = await _crypto!
-        .generateX25519KeyPair();
+    await _disposeAll();
+    final cleanup = _CleanupStack();
+    try {
+      final crypto = CryptoService();
+      final (ed25519Private, ed25519Public) = await crypto
+          .generateEd25519KeyPair();
+      final (x25519Private, x25519Public) = await crypto
+          .generateX25519KeyPair();
+      cleanup.add(() {
+        ed25519Private.fillRange(0, ed25519Private.length, 0);
+        x25519Private.fillRange(0, x25519Private.length, 0);
+      });
 
-    final deviceId = const Uuid().v4();
-    final name = cmd['name'] as String? ?? 'eval-client';
-    _identity = DeviceIdentity(
-      deviceId: deviceId,
-      name: name,
-      ed25519PrivateKey: ed25519Private,
-      ed25519PublicKey: ed25519Public,
-      x25519PrivateKey: x25519Private,
-      x25519PublicKey: x25519Public,
-    );
+      final deviceId = const Uuid().v4();
+      final identity = DeviceIdentity(
+        deviceId: deviceId,
+        name: cmd['name'] as String? ?? 'eval-client',
+        ed25519PrivateKey: ed25519Private,
+        ed25519PublicKey: ed25519Public,
+        x25519PrivateKey: x25519Private,
+        x25519PublicKey: x25519Public,
+      );
+      final relay = RelayService(crypto: crypto);
+      cleanup.add(relay.dispose);
+      final stateSub = relay.stateStream.listen((state) {
+        final out = <String, dynamic>{
+          'event': 'state',
+          'connectionState': state.connectionState.name,
+        };
+        if (state.peerName != null) out['peerName'] = state.peerName;
+        if (state.error != null) out['error'] = state.error;
+        _emit(out);
+      });
+      cleanup.add(stateSub.cancel);
 
-    _relay = RelayService(crypto: _crypto!);
-    _stateSub = _relay!.stateStream.listen((state) {
-      final out = <String, dynamic>{
-        'event': 'state',
-        'connectionState': state.connectionState.name,
-      };
-      if (state.peerName != null) out['peerName'] = state.peerName;
-      if (state.error != null) out['error'] = state.error;
-      _emit(out);
-    });
-
-    _emit({
-      'event': 'initialized',
-      'deviceId': deviceId,
-      'publicKey': base64.encode(ed25519Public),
-      'x25519PublicKey': base64.encode(x25519Public),
-    });
+      _identity = identity;
+      _relay = relay;
+      _stateSub = stateSub;
+      cleanup.disarm();
+      _emit({
+        'event': 'initialized',
+        'deviceId': deviceId,
+        'publicKey': base64.encode(ed25519Public),
+        'x25519PublicKey': base64.encode(x25519Public),
+      });
+    } catch (_) {
+      await cleanup.run();
+      rethrow;
+    }
   }
 
-  Future<void> _handleConnect(Map<String, dynamic> cmd) async {
+  Future<void> _handleControlConnect(Map<String, dynamic> cmd) async {
     final relayUrl = cmd['relayUrl'] as String?;
-    // v3 admission: every app hello carries its own account license token.
-    // There is no token-free app dial to fall back to, so a missing token is
-    // a caller bug, not a mode.
     final licenseToken = cmd['licenseToken'] as String?;
     if (relayUrl == null ||
         licenseToken == null ||
@@ -105,7 +216,7 @@ class CommandHandler {
       _emit({
         'event': 'error',
         'message':
-            'Must init before connect; relayUrl and licenseToken are required',
+            'Must init before control-connect; relayUrl and licenseToken are required',
       });
       return;
     }
@@ -113,21 +224,201 @@ class CommandHandler {
       relayUrl,
       _identity!,
       licenseToken: licenseToken,
-      // One dial per (freshly keyed) process, so there is never a prior
-      // connection instance of this deviceId for the relay to arbitrate
-      // against — the counter has nothing to advance past.
+      machineDeviceId: cmd['machineDeviceId'] as String?,
       epoch: cmd['epoch'] as int? ?? 1,
     );
+    _emit({'event': 'control-connected'});
+  }
+
+  Future<void> _handlePeerConnect(Map<String, dynamic> cmd) async {
+    final baseUrl = cmd['licenseApiUrl'] as String?;
+    final accountId = cmd['accountId'] as String?;
+    final enrollmentId = cmd['enrollmentId'] as String?;
+    final clientSecret = cmd['clientSecret'] as String?;
+    final machineDeviceId = cmd['machineDeviceId'] as String?;
+    final addresses = (cmd['nativeAddresses'] as List?)?.cast<String>();
+    final identity = _identity;
+    if (identity == null ||
+        baseUrl == null ||
+        accountId == null ||
+        enrollmentId == null ||
+        clientSecret == null ||
+        machineDeviceId == null ||
+        addresses == null ||
+        addresses.isEmpty) {
+      throw ArgumentError('Native enrollment coordinates are required');
+    }
+    await _disconnectPeerState();
+
+    Future<Map<String, dynamic>> request(
+      String method,
+      String path,
+      Map<String, dynamic>? body,
+    ) async {
+      final client = HttpClient();
+      try {
+        final tokenRequest = await client.postUrl(
+          Uri.parse('$baseUrl/api/auth/oauth2/token'),
+        );
+        tokenRequest.headers.set(
+          HttpHeaders.authorizationHeader,
+          'Basic ${base64Encode(utf8.encode('$enrollmentId:$clientSecret'))}',
+        );
+        final tokenResponse = await tokenRequest.close();
+        final tokenText = await utf8.decodeStream(tokenResponse);
+        if (tokenResponse.statusCode < 200 || tokenResponse.statusCode >= 300) {
+          throw HttpException(
+            'Endpoint token failed: ${tokenResponse.statusCode}',
+          );
+        }
+        final token =
+            (jsonDecode(tokenText) as Map<String, dynamic>)['access_token']
+                as String;
+        final peerRequest = await client.openUrl(
+          method,
+          Uri.parse('$baseUrl$path'),
+        );
+        peerRequest.headers.set(
+          HttpHeaders.authorizationHeader,
+          'Bearer $token',
+        );
+        if (body != null) {
+          peerRequest.headers.contentType = ContentType.json;
+          peerRequest.write(jsonEncode(body));
+        }
+        final response = await peerRequest.close();
+        final responseText = await utf8.decodeStream(response);
+        if (response.statusCode < 200 || response.statusCode >= 300) {
+          if (response.statusCode == HttpStatus.unauthorized ||
+              response.statusCode == HttpStatus.forbidden) {
+            throw const PeerAuthorizationDenied();
+          }
+          throw HttpException(
+            'Peer authorization failed: ${response.statusCode}',
+          );
+        }
+        return (jsonDecode(responseText) as Map).cast<String, dynamic>();
+      } finally {
+        client.close(force: true);
+      }
+    }
+
+    final cleanup = _CleanupStack();
+    try {
+      final enrollment = EndpointEnrollmentClient(
+        request: request,
+        accountId: accountId,
+        deviceId: identity.deviceId,
+        enrollmentId: enrollmentId,
+      );
+      final lease = AuthorizationLease(
+        accountId: accountId,
+        deviceId: identity.deviceId,
+        enrollmentId: enrollmentId,
+        fetchSnapshot: enrollment.fetchSnapshot,
+      );
+      cleanup.add(lease.dispose);
+      if (!await lease.refresh()) {
+        throw StateError('Initial native authorization was refused');
+      }
+      var snapshot = lease.snapshot!;
+      final endpoint = await NativeEndpointOwner.create(
+        enrollmentId: enrollmentId,
+        keyStore: _endpointKeys,
+        approvedRelays: snapshot.relayUrls,
+        initializeNative: () => iroh.Iroh.init(
+          libraryPath: Platform.environment['IROH_INTEROP_NATIVE_LIBRARY'],
+        ),
+      );
+      cleanup.add(endpoint.close);
+      final endpointSecret = await _endpointKeys.read(enrollmentId);
+      if (endpointSecret == null) {
+        throw StateError('Native endpoint key missing');
+      }
+      try {
+        if (snapshot.endpoint == null) {
+          await enrollment.register(
+            deviceSecret: identity.ed25519PrivateKey,
+            endpointSecret: endpointSecret,
+            expectedGeneration: snapshot.registrationGeneration,
+          );
+        }
+      } finally {
+        endpointSecret.fillRange(0, endpointSecret.length, 0);
+      }
+      if (snapshot.endpoint == null) {
+        if (!await lease.refreshFresh()) {
+          throw StateError('Registered endpoint was not authorized');
+        }
+        snapshot = lease.snapshot!;
+      }
+      final localEndpointId = endpoint.endpoint.id.toHex();
+      if (snapshot.endpoint?.endpointId != localEndpointId) {
+        throw StateError(
+          'Native endpoint identity does not match authorization',
+        );
+      }
+
+      PeerRegistration? target;
+      for (var attempt = 0; attempt < 100 && target == null; attempt++) {
+        snapshot = lease.snapshot!;
+        for (final peer in snapshot.peers) {
+          if (peer.deviceId == machineDeviceId) target = peer.endpoint;
+        }
+        if (target == null) {
+          await Future<void>.delayed(const Duration(milliseconds: 100));
+          final refreshed = await lease.refresh();
+          if (!refreshed && !lease.isValid) break;
+        }
+      }
+      if (target == null) {
+        throw StateError('Machine did not publish a native endpoint');
+      }
+      final registration = target;
+      bool authorized() =>
+          lease.snapshot?.endpoint?.endpointId == localEndpointId &&
+          lease.permits(
+            machineDeviceId,
+            endpointId: registration.endpointId,
+            generation: registration.generation,
+          );
+      final raw = await endpoint.dial(
+        endpointId: registration.endpointId,
+        authorized: authorized,
+        ipAddresses: addresses,
+      );
+      cleanup.add(raw.close);
+      final payload = LeasedPeerLink(
+        raw,
+        lease,
+        peerId: machineDeviceId,
+        endpointId: registration.endpointId,
+        registrationGeneration: registration.generation,
+      );
+      cleanup.add(payload.close);
+      lease.startRefreshing();
+
+      _endpoint = endpoint;
+      _lease = lease;
+      _payload = payload;
+      cleanup.disarm();
+      _emit({
+        'event': 'peer-connected',
+        'endpointId': localEndpointId,
+        'leaseRemainingMs': lease.remainingMs,
+      });
+    } catch (_) {
+      await cleanup.run();
+      rethrow;
+    }
   }
 
   /// Establish the E2E session with the machine at [cmd]`['machineDeviceId']`.
   ///
-  /// The agent is addressed explicitly: with pairing gone there is no
-  /// relay-supplied peer id to infer it from, and the app has the same problem
-  /// — it dials coordinates it already holds (`RecentAgent` / the account
-  /// inventory) rather than learning them from the relay.
+  /// The agent is addressed explicitly: native coordinates come from the
+  /// authenticated account inventory, independently of central presence.
   Future<void> _handleHandshake(Map<String, dynamic> cmd) async {
-    if (_relay == null || _identity == null || _crypto == null) {
+    if (_payload == null || _identity == null) {
       _emit({'event': 'error', 'message': 'Must init before handshake'});
       return;
     }
@@ -141,37 +432,19 @@ class CommandHandler {
       return;
     }
 
-    // The agent's pinned Ed25519 pubkey (raw 32 bytes, base64) anchors
-    // agent-hello verification. In production the app pins this from the
-    // account inventory (a relay-independent anchor); the eval harness threads
-    // it in from the agent's bootstrap auth keypair. Abort if absent — we cannot
-    // authenticate the agent's X25519 pubkey without it, and deriving on an
-    // unverified pubkey re-opens the active-relay DH MITM this signing defeats.
-    final agentEd25519PubB64 = cmd['agentEd25519Pub'] as String?;
-    if (agentEd25519PubB64 == null) {
-      _emit({
-        'event': 'error',
-        'message': 'handshake requires agentEd25519Pub to verify agent-hello',
-      });
-      return;
-    }
+    // `agentEd25519Pub` is accepted and ignored: QUIC/TLS between the two
+    // lease-authorized endpoints is the confidentiality layer now, so there is
+    // no agent-hello signature left to verify it against. Not reading it here
+    // is what lets older scenario fixtures that still pass it go unedited.
 
     final attemptTimeoutMs = cmd['attemptTimeoutMs'] as int?;
 
     await _teardownSession();
 
-    // The eval-client plays the "phone" role: the agent resolves this same
-    // Ed25519 identity from the signed-in account's device inventory, so the
-    // raw 32-byte seed signs the client-hello transcript. The driver itself is
-    // the one the app ships — a second copy here is exactly the drift these
-    // scenarios exist to catch.
+    // The driver itself is the one the app ships — a second copy here is
+    // exactly the drift these scenarios exist to catch.
     final handshaker = _handshaker = AppSessionHandshaker(
-      relay: _relay!,
-      crypto: _crypto!,
-      machineDeviceId: machineDeviceId,
-      phoneDeviceId: _identity!.deviceId,
-      agentEd25519PubB64: agentEd25519PubB64,
-      phoneEd25519Seed: _identity!.ed25519PrivateKey,
+      relay: _payload!,
       logger: (level, message, {fields}) => _emit({
         'event': 'handshake-diagnostic',
         'level': level.name,
@@ -186,29 +459,29 @@ class CommandHandler {
           : Duration(milliseconds: attemptTimeoutMs),
     );
     final session = _session = MachineSession(
-      relay: _relay!,
+      relay: _payload!,
       machineDeviceId: machineDeviceId,
       handshaker: handshaker,
       projectStartMessageBuilder: (projectId) =>
           _createAbMessage('project:start', {'projectId': projectId}),
     );
     session.start();
-    _streamReadySub = session.streamReadyEvents.listen(
+    // `open:false` covers a stream ending too, but nothing here has a
+    // 'stream-unbound'-style waiter left to feed a distinct event for it — a
+    // scenario that cares can watch `stream-ended` fire instead.
+    _streamReadySub = session.projectStreamEvents.listen(
       (e) => _emit({
-        'event': 'stream-ready',
+        'event': e.open ? 'stream-ready' : 'stream-ended',
         'projectId': e.projectId,
-        'streamId': e.streamId,
+        'streamId': e.projectId,
       }),
     );
 
     try {
       await session.ensureEstablished();
     } catch (e) {
-      // `start()` armed the session supervisor, which keeps re-driving a
-      // handshake on every peer-online. Leaving it up after reporting failure
-      // both churns in the background and leaves `_session` non-null, so a
-      // later send-encrypted/snapshot passes its guard and acts on a session
-      // that never established.
+      // Leaving a failed session installed would let later commands pass their
+      // lifecycle guard even though no authenticated session was established.
       await _teardownSession();
       _emit({'event': 'error', 'message': 'Handshake failed: $e'});
       return;
@@ -217,13 +490,13 @@ class CommandHandler {
     // Attach the control plane so machine-scoped frames (agent:projects,
     // stream-ready, host verbs) are observable; project frames get their own
     // transport per `project-start`.
-    _attachStream(kControlStreamId);
+    _attachStream(_kControlHandle, session.control);
     _emit({'event': 'handshake-complete'});
   }
 
-  /// Drill into a project: `project:start` on the control plane, then await the
-  /// agent's `stream-ready`. Resolves at 0 RTT when the advert
-  /// already carried the stream.
+  /// Drill into a project: opens its own native QUIC stream, sending
+  /// `project:start` on the control plane first unless the agent already
+  /// advertised it ready. Resolves at 0 RTT in that case.
   Future<void> _handleProjectStart(Map<String, dynamic> cmd) async {
     final session = _session;
     final projectId = cmd['projectId'] as String?;
@@ -237,23 +510,29 @@ class CommandHandler {
       return;
     }
     try {
-      final streamId = await session.bindProject(
+      final transport = await session.openProject(
         projectId,
         _createAbMessage('project:start', {'projectId': projectId}),
       );
-      _attachStream(streamId);
+      _attachStream(projectId, transport);
       _emit({
         'event': 'project-started',
         'projectId': projectId,
-        'streamId': streamId,
+        // A project's identity IS its own stream now — the handle is just
+        // its projectId, kept under the old key so scenario fixtures that
+        // read `streamId` to address later commands still work.
+        'streamId': projectId,
       });
     } catch (e) {
       _emit({'event': 'error', 'message': 'project-start failed: $e'});
     }
   }
 
-  /// Send an AbMessage sealed inside a `{s, m}` envelope. `streamId` omitted =
-  /// the machine control plane (`s` absent).
+  /// Send a plain `AbMessage`. `streamId` omitted or `_kControlHandle`
+  /// addresses the machine control plane (`session.sendOnSession`); any other
+  /// value is a projectId whose stream must already be open
+  /// (`project-start` first) — a project's traffic rides its
+  /// own native QUIC stream, not a `{s, m}` envelope on the session socket.
   Future<void> _handleSendEncrypted(Map<String, dynamic> cmd) async {
     final session = _session;
     final data = cmd['data'] as Map<String, dynamic>?;
@@ -266,11 +545,20 @@ class CommandHandler {
       });
       return;
     }
-    await session.sendOnStream(
-      cmd['streamId'] as String? ?? kControlStreamId,
-      data,
-      'control',
-    );
+    final handle = cmd['streamId'] as String? ?? _kControlHandle;
+    if (handle == _kControlHandle) {
+      await session.sendOnSession(data, 'control');
+      return;
+    }
+    final transport = session.projectTransport(handle);
+    if (transport == null) {
+      _emit({
+        'event': 'error',
+        'message': 'send-encrypted: project $handle has no open stream',
+      });
+      return;
+    }
+    await transport.send(data, channel: 'control');
   }
 
   /// Pull-then-replay durable state — mirrors what a `ProjectSession` does on
@@ -290,34 +578,220 @@ class CommandHandler {
       });
       return;
     }
-    final streamId = cmd['streamId'] as String? ?? kControlStreamId;
-    _attachStream(streamId);
-    final transport = session.streamFor(streamId);
+    final handle = cmd['streamId'] as String? ?? _kControlHandle;
+    final transport = handle == _kControlHandle
+        ? session.control
+        : session.projectTransport(handle);
+    if (transport == null) {
+      _emit({
+        'event': 'error',
+        'message': 'snapshot: project $handle has no open stream',
+      });
+      return;
+    }
+    _attachStream(handle, transport);
     await transport.refreshSnapshot();
-    _emit({'event': 'snapshot-complete', 'streamId': streamId});
+    _emit({'event': 'snapshot-complete', 'streamId': handle});
   }
 
-  Future<void> _handleDisconnect() async {
-    await _teardownSession();
-    await _stateSub?.cancel();
-    _stateSub = null;
-    _relay?.dispose();
-    _relay = null;
-    _crypto = null;
-    _identity = null;
+  /// Opens one terminal viewer attachment (native stream when the session's
+  /// link supports one, else the legacy socket path) and republishes its
+  /// lifecycle as `terminal-attach-*` events, exactly as
+  /// `terminal_service.dart` consumes the same [TerminalAttachment] surface.
+  Future<void> _handleTerminalAttach(Map<String, dynamic> cmd) async {
+    final session = _session;
+    final streamId = cmd['streamId'] as String?;
+    final terminalId = cmd['terminalId'] as String?;
+    final requestId = cmd['requestId'] as String?;
+    final version = cmd['version'] as int?;
+    if (session == null ||
+        streamId == null ||
+        terminalId == null ||
+        requestId == null ||
+        version == null) {
+      _emit({
+        'event': 'error',
+        'message':
+            'Must complete handshake before terminal-attach, and streamId, '
+            'terminalId, requestId and version are required',
+      });
+      return;
+    }
+    final checkoutId = cmd['checkoutId'] as String? ?? 'main';
+    final transport = streamId == _kControlHandle
+        ? session.control
+        : session.projectTransport(streamId);
+    if (transport == null) {
+      _emit({
+        'event': 'error',
+        'message': 'terminal-attach: project $streamId has no open stream',
+      });
+      return;
+    }
+    final subscribe = _createAbMessage('terminal:subscribe', {
+      'terminalId': terminalId,
+      'version': version,
+      'requestId': requestId,
+      'checkoutId': checkoutId,
+    });
+    final handle = transport.openTerminalAttachment(
+      requestId: requestId,
+      checkoutId: checkoutId,
+      subscribe: subscribe,
+    );
+    _attachmentHandles[requestId] = handle;
+    _emit({
+      'event': 'terminal-attach-opened',
+      'requestId': requestId,
+      'isStream': handle.isStream,
+    });
+    _attachmentMsgSubs[requestId] = handle.messages.listen((data) {
+      _emit({
+        'event': 'terminal-attach-message',
+        'requestId': requestId,
+        'data': data,
+      });
+    });
+    unawaited(
+      handle.done.then((end) {
+        _attachmentHandles.remove(requestId);
+        unawaited(_attachmentMsgSubs.remove(requestId)?.cancel() ?? Future.value());
+        final out = <String, dynamic>{
+          'event': 'terminal-attach-end',
+          'requestId': requestId,
+        };
+        switch (end) {
+          case TerminalAttachmentPeerEnded():
+            out['end'] = 'peerEnded';
+          case TerminalAttachmentRefused(:final refusal):
+            out['end'] = 'refused';
+            out['code'] = refusal.code.wireValue;
+          case TerminalAttachmentFailed(:final code):
+            out['end'] = 'failed';
+            out['code'] = code;
+          case TerminalAttachmentTransportClosed():
+            out['end'] = 'transportClosed';
+          case TerminalAttachmentClosedLocally():
+            out['end'] = 'closedLocally';
+        }
+        _emit(out);
+      }),
+    );
+  }
+
+  Future<void> _handleTerminalAttachSend(Map<String, dynamic> cmd) async {
+    final requestId = cmd['requestId'] as String?;
+    final data = cmd['data'] as Map<String, dynamic>?;
+    final handle = requestId == null ? null : _attachmentHandles[requestId];
+    if (handle == null || data == null) {
+      _emit({
+        'event': 'error',
+        'message':
+            'terminal-attach-send requires a requestId with an open '
+            'attachment, and data',
+      });
+      return;
+    }
+    await handle.send(data);
+  }
+
+  Future<void> _handleTerminalAttachClose(Map<String, dynamic> cmd) async {
+    final requestId = cmd['requestId'] as String?;
+    final handle = requestId == null ? null : _attachmentHandles[requestId];
+    if (handle == null) {
+      _emit({
+        'event': 'error',
+        'message': 'terminal-attach-close requires a requestId with an open attachment',
+      });
+      return;
+    }
+    await handle.close();
+  }
+
+  Future<void> _handlePeerDisconnect() async {
+    await _disconnectPeerState();
+    _emit({'event': 'peer-disconnected'});
+  }
+
+  void _handleControlDisconnect() {
+    _relay?.disconnect();
+    _emit({'event': 'control-disconnected'});
+  }
+
+  Future<void> _handleDispose() async {
+    await _disposeAll();
     _emit({'event': 'disconnected'});
   }
 
-  /// Republish every frame the session demuxes to [streamId]. Idempotent: the
-  /// transport is created on first use and reused after (a second subscription
-  /// would double-emit, since `messages` also replays the snapshot cache).
-  void _attachStream(String streamId) {
-    if (_streamSubs.containsKey(streamId)) return;
-    final transport = _session!.streamFor(streamId);
-    _streamSubs[streamId] = transport.messages.listen((msg) {
+  Future<void> _disconnectPeerState() async {
+    final payload = _payload;
+    final lease = _lease;
+    final endpoint = _endpoint;
+    _payload = null;
+    _lease = null;
+    _endpoint = null;
+    final payloadClose = payload?.close();
+    lease?.invalidate();
+
+    final cleanup = _CleanupStack();
+    if (endpoint != null) cleanup.add(endpoint.close);
+    if (lease != null) cleanup.add(lease.dispose);
+    if (payloadClose != null) cleanup.add(() => payloadClose);
+    cleanup.add(_teardownSession);
+    await cleanup.run();
+  }
+
+  Future<void> _disposeAll() async {
+    final stateSub = _stateSub;
+    final relay = _relay;
+    final identity = _identity;
+    _stateSub = null;
+    _relay = null;
+    _identity = null;
+
+    final cleanup = _CleanupStack();
+    cleanup.add(_endpointKeys.clear);
+    if (identity != null) {
+      cleanup.add(() {
+        identity.ed25519PrivateKey.fillRange(
+          0,
+          identity.ed25519PrivateKey.length,
+          0,
+        );
+        identity.x25519PrivateKey.fillRange(
+          0,
+          identity.x25519PrivateKey.length,
+          0,
+        );
+      });
+    }
+    if (relay != null) cleanup.add(relay.dispose);
+    if (stateSub != null) cleanup.add(stateSub.cancel);
+    cleanup.add(_closeAllAttachments);
+    cleanup.add(_disconnectPeerState);
+    await cleanup.run();
+  }
+
+  /// Closes every open terminal attachment. Their own `done` handlers already
+  /// remove each from [_attachmentHandles] and cancel its message
+  /// subscription, so this only needs to trigger [TerminalAttachment.close]
+  /// on whatever is still open.
+  Future<void> _closeAllAttachments() async {
+    for (final handle in _attachmentHandles.values.toList()) {
+      await handle.close();
+    }
+  }
+
+  /// Republish every frame [transport] demuxes, tagged with its [handle].
+  /// Idempotent: a second call for a handle already attached is a no-op (a
+  /// second subscription would double-emit, since `messages` also replays the
+  /// snapshot cache).
+  void _attachStream(String handle, StreamTransport transport) {
+    if (_streamSubs.containsKey(handle)) return;
+    _streamSubs[handle] = transport.messages.listen((msg) {
       _emit({
         'event': 'antgrid-message',
-        'streamId': streamId,
+        'streamId': handle,
         'channel': msg.channel,
         'data': msg.json,
       });

@@ -114,7 +114,7 @@ class _BusLeg {
 /// App-wide relay for `session-bus:*` frames between the bridges of two
 /// machines.
 ///
-/// The app is a transport leg and nothing else (§6.1): frames are forwarded
+/// The app is a transport leg and nothing else: frames are forwarded
 /// VERBATIM, never parsed into a model and rebuilt, so a field a later bridge
 /// adds survives an older app. Threads, receipts and retry live entirely in the
 /// two bridges; the carrier keeps no bus state.

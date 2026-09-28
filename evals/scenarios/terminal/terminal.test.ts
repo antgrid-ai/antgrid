@@ -2,12 +2,12 @@ import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { setupTestEnv, type TestEnv } from "../../helpers/harness";
 import { createMessage } from "../../../bridge/src/protocol";
 import { firstProjectStream } from "../../support/stream";
+import { frameContaining } from "./frame-output";
 
 /**
  * v3: terminals run on the firstProject STREAM, not the control
  * plane. A late-binding phone can't observe the config-autostarted service's
- * live terminal:started/output (they precede the bind and the snapshot carries no
- * scrollback), so these drive terminals the phone STARTS itself — the same E2E
+ * live terminal:started events (they precede the bind), so these drive terminals the phone STARTS itself — the same E2E
  * relay path, fully observable on the stream.
  */
 describe("terminal", () => {
@@ -46,16 +46,9 @@ describe("terminal", () => {
     }));
     await env.app.waitForStreamAbType(streamId, "terminal:started", 5_000);
 
-    const deadline = Date.now() + 10_000;
-    let output = "";
-    while (Date.now() < deadline) {
-      try {
-        const msg = await env.app.waitForStreamAbType(streamId, "terminal:output", 2_000);
-        if ((msg as any).terminalId === "output-probe") output += (msg as any).data;
-        if (output.includes("EVAL_READY")) break;
-      } catch { break; }
-    }
-    expect(output).toContain("EVAL_READY");
+    const frame = await frameContaining(env.app, streamId, "output-probe", "EVAL_READY");
+    expect(frame.terminalId).toBe("output-probe");
+    expect(frame.ansi).toContain("EVAL_READY");
   });
 
   test("can send terminal input and receive echoed output", async () => {
@@ -74,15 +67,8 @@ describe("terminal", () => {
       data: `console.log("${marker}")\n`,
     }));
 
-    const deadline = Date.now() + 10_000;
-    let output = "";
-    while (Date.now() < deadline) {
-      try {
-        const msg = await env.app.waitForStreamAbType(streamId, "terminal:output", 2_000);
-        if ((msg as any).terminalId === "input-repl") output += (msg as any).data;
-        if (output.includes(marker)) break;
-      } catch { break; }
-    }
-    expect(output).toContain(marker);
+    const frame = await frameContaining(env.app, streamId, "input-repl", marker);
+    expect(frame.terminalId).toBe("input-repl");
+    expect(frame.ansi).toContain(marker);
   });
 });

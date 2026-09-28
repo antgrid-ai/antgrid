@@ -12,6 +12,8 @@ import { deviceRoutes } from "./routes/devices.js";
 import { agentRoutes } from "./routes/agents.js";
 import { projectRoutes } from "./routes/projects.js";
 import { taskRoutes } from "./routes/tasks.js";
+import { peerAuthorizationRoutes } from "./routes/peer-authorization.js";
+import { irohAccessRoutes } from "./routes/iroh-access.js";
 import { subscriptionRoutes } from "./routes/subscriptions.js";
 import { billingRoutes } from "./routes/billing.js";
 import { webhookRoutes } from "./routes/webhooks.js";
@@ -137,6 +139,8 @@ export function buildApp(deps: AppDeps) {
   app.route("/", agentRoutes({ db: deps.db, auth: deps.auth, env: deps.env }));
   app.route("/", projectRoutes({ db: deps.db, auth: deps.auth, env: deps.env }));
   app.route("/", taskRoutes({ db: deps.db, auth: deps.auth, env: deps.env }));
+  app.route("/", peerAuthorizationRoutes(deps));
+  app.route("/", irohAccessRoutes(deps));
   app.route("/", subscriptionRoutes({ db: deps.db, auth: deps.auth }));
   app.route("/", billingRoutes({ db: deps.db, auth: deps.auth, env: deps.env, relay: deps.relay, clientIp }));
   app.route(
