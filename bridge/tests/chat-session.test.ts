@@ -306,14 +306,34 @@ describe("ChatSession prompt retraction", () => {
     expect(s.calls).toContain("dispose");
   });
 
-  it("does not retract a prompt that was already answered", async () => {
+  it("an answer retracts its prompt once, ahead of the answer, for every other client", async () => {
+    const { s, sent } = make();
+    await s.start();
+    await s.prompt("hi");
+    let retractedBeforeAnswer = false;
+    const perm = s.permission("Run?", () => {
+      retractedBeforeAnswer = sent.some((m) => m.type === "agent:request-retracted");
+    });
+    const q = s.question(() => {});
+    s.resolvePermission(perm, "ok");
+    s.resolveQuestion(q, "yes");
+    s.resolvePermission(perm, "ok"); // already answered: nothing more
+    expect(retractedBeforeAnswer).toBe(true);
+    expect(sent.filter((m) => m.type === "agent:request-retracted")).toEqual([
+      expect.objectContaining({ sessionId: "s1", permissionId: perm }),
+      expect.objectContaining({ sessionId: "s1", questionId: q }),
+    ]);
+  });
+
+  it("does not retract an answered prompt again when the turn ends", async () => {
     const { s, sent } = make();
     await s.start();
     await s.prompt("hi");
     const id = s.permission("Run?", () => {});
     s.resolvePermission(id, "ok");
+    const before = sent.filter((m) => m.type === "agent:request-retracted").length;
     s.close({ stopReason: "end_turn" });
-    expect(sent.some((m) => m.type === "agent:request-retracted")).toBe(false);
+    expect(sent.filter((m) => m.type === "agent:request-retracted")).toHaveLength(before);
   });
 
   it("disposes the backend and withdraws other requests when an answer callback throws", async () => {
@@ -336,10 +356,11 @@ describe("ChatSession prompt retraction", () => {
     const a = (s as any).askQuestion({ kind: "text", prompt: "1" }, (v: any) => seen.push(v), { group });
     (s as any).askQuestion({ kind: "text", prompt: "2" }, (v: any) => seen.push(v), { group });
     s.resolveQuestion(a, "answered");
+    const before = sent.filter((m) => m.type === "agent:request-retracted").length;
     group.retract();
     group.retract(); // idempotent
     expect(seen).toEqual(["answered", null]);
-    expect(sent.filter((m) => m.type === "agent:request-retracted")).toHaveLength(1);
+    expect(sent.filter((m) => m.type === "agent:request-retracted")).toHaveLength(before + 1);
   });
 
   it("translates the app's synthetic option index back to the label the backend answers by", async () => {
@@ -474,6 +495,30 @@ describe("ChatSession transcript snapshot", () => {
     expect(await s.getTranscriptSnapshot()).toEqual([]);
     s.close({ stopReason: "end_turn" });
     expect(await s.getTranscriptSnapshot()).toHaveLength(1);
+  });
+
+  it("names the streaming turn, and null once it closes", async () => {
+    const { s } = make();
+    await s.start();
+    expect(s.liveTurnId()).toBeNull();
+    await s.prompt("hi");
+    const live = s.liveTurnId();
+    expect(live).toEqual(expect.any(String));
+    s.close({ stopReason: "end_turn" });
+    expect(s.liveTurnId()).toBeNull();
+  });
+
+  it("liveFrames serves the open prompts until they are answered", async () => {
+    const { s, sent } = make();
+    await s.start();
+    const pid = s.permission("Run?", () => {});
+    const qid = s.question(() => {});
+    const live = s.liveFrames();
+    expect(live.map((m) => m.type)).toEqual(["agent:permission-request", "agent:question"]);
+    expect(live[0]).toBe(sent.find((m) => m.type === "agent:permission-request")!);
+    s.resolvePermission(pid, "ok");
+    s.resolveQuestion(qid, "0");
+    expect(s.liveFrames()).toEqual([]);
   });
 
   it("fails soft to [] when the backend read throws", async () => {

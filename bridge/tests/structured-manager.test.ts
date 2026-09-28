@@ -15,6 +15,8 @@ function makeFakeDriver(overrides: Partial<StructuredDriver> & { onStart?: () =>
     setConfig: overrides.setConfig ?? (() => {}),
     dispose: overrides.dispose ?? (overrides.onDispose ? overrides.onDispose : () => {}),
     ...(overrides.getTranscriptSnapshot ? { getTranscriptSnapshot: overrides.getTranscriptSnapshot } : {}),
+    ...(overrides.liveTurnId ? { liveTurnId: overrides.liveTurnId } : {}),
+    ...(overrides.liveFrames ? { liveFrames: overrides.liveFrames } : {}),
   };
 }
 
@@ -329,6 +331,33 @@ describe("StructuredAgentManager", () => {
     });
     await mgr.startChat({ sessionId: "s1", tool: "codex" });
     expect(await mgr.getTranscriptSnapshot("s1")).toEqual([]);
+  });
+
+  it("liveTurnId reports the driver's turn, null with no driver, undefined when the driver cannot say", async () => {
+    const mgr = new StructuredAgentManager({
+      driverFactory: (sessionId) => makeFakeDriver(sessionId === "s1" ? { liveTurnId: () => "turn-3" } : {}),
+      sendMessage: () => {},
+      onAgentSession: () => {},
+    });
+    await mgr.startChat({ sessionId: "s1", tool: "codex" });
+    await mgr.startChat({ sessionId: "s2", tool: "codex" });
+    expect(mgr.liveTurnId("s1")).toBe("turn-3");
+    expect(mgr.liveTurnId("s2")).toBeUndefined();
+    expect(mgr.liveTurnId("ghost")).toBeNull();
+  });
+
+  it("liveFrames reports the driver's frames, [] with no driver, undefined when the driver cannot say", async () => {
+    const frames = [createMessage("agent:question", { sessionId: "s1", questionId: "q", kind: "text", prompt: "?" })];
+    const mgr = new StructuredAgentManager({
+      driverFactory: (sessionId) => makeFakeDriver(sessionId === "s1" ? { liveFrames: () => frames } : {}),
+      sendMessage: () => {},
+      onAgentSession: () => {},
+    });
+    await mgr.startChat({ sessionId: "s1", tool: "codex" });
+    await mgr.startChat({ sessionId: "s2", tool: "codex" });
+    expect(mgr.liveFrames("s1")).toBe(frames);
+    expect(mgr.liveFrames("s2")).toBeUndefined();
+    expect(mgr.liveFrames("ghost")).toEqual([]);
   });
 
   it("replays persisted config through setConfig after start()", async () => {

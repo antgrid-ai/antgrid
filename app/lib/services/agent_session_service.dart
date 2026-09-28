@@ -247,15 +247,91 @@ class AgentSessionService {
   /// transcript we watched arrive live. And the open turn is re-appended,
   /// because neither batch carries it — it has not ended, which is the very
   /// reason that retry exists.
-  void _applyFullTranscript(String sessionId, List<Object?> frames) {
-    if (frames.isEmpty) return;
-    final open = stateFor(sessionId).openTurn;
+  ///
+  /// Unless [liveTurnId] says it HAS ended. A client that missed the turn-end
+  /// (backgrounded, reconnected) still holds that turn open with the text it
+  /// last saw, while the batch carries the finished turn under a renumbered id —
+  /// re-appending would pin the stale half-turn under the real one, spinning
+  /// forever. The pulled snapshot names the bridge's live turn (null when
+  /// idle); the pushed replay names none ([reportsLiveTurn] false), so there
+  /// the open turn is kept. An empty batch still closes an ended turn: there
+  /// is nothing to replace its text with, but it must stop spinning.
+  ///
+  /// A batch read mid-turn may carry the live turn itself, under its live id
+  /// (see claude's adoptLiveTurn). Then the two are merged rather than one
+  /// kept: what we held carries live-only detail (reasoning, tool output), the
+  /// batch carries what streamed while we were away.
+  void _applyFullTranscript(
+    String sessionId,
+    List<Object?> frames, {
+    bool reportsLiveTurn = false,
+    String? liveTurnId,
+  }) {
+    final held = stateFor(sessionId).openTurn;
+    final ended = reportsLiveTurn && held != null && held.turnId != liveTurnId;
+    if (frames.isEmpty) {
+      if (held != null && ended) {
+        _setState(
+          sessionId,
+          stateFor(sessionId).copyWith(
+            turns: _replaceTurn(
+              sessionId,
+              held.copyWith(stopReason: 'end_turn', endedAt: DateTime.now()),
+            ),
+          ),
+        );
+      }
+      return;
+    }
+    final open = ended ? null : held;
     _setState(sessionId, stateFor(sessionId).copyWith(turns: const []));
     _dispatchFrames(frames);
     if (open == null) return;
     final s = stateFor(sessionId);
-    if (s.turns.any((t) => t.turnId == open.turnId)) return;
-    _setState(sessionId, s.copyWith(turns: [...s.turns, open]));
+    final carried = _turnById(sessionId, open.turnId);
+    if (carried == null) {
+      _setState(sessionId, s.copyWith(turns: [...s.turns, open]));
+      return;
+    }
+    final heldIds = {for (final i in open.items) i.itemId};
+    final merged = carried.copyWith(
+      items: [
+        ...open.items,
+        ...carried.items.where((i) => !heldIds.contains(i.itemId)),
+      ],
+    );
+    _setState(sessionId, s.copyWith(turns: _replaceTurn(sessionId, merged)));
+  }
+
+  /// Install the snapshot's `live` frames: the session's open prompts and its
+  /// latest usage. The prompt set is the bridge's whole set, so it REPLACES
+  /// ours — a card missing from it was answered or withdrawn while we were
+  /// away, and those withdrawals were live frames we never received.
+  ///
+  /// A prompt answered here can come back if the bridge read the set before
+  /// the answer reached it; the retraction the answer produces follows this
+  /// response on the same stream and takes it down again.
+  void _applyLive(String sessionId, List<Object?> live) {
+    _setState(
+      sessionId,
+      stateFor(
+        sessionId,
+      ).copyWith(pendingPermissions: const [], pendingQuestions: const []),
+    );
+    _dispatchFrames(live);
+  }
+
+  /// Settle an update spinner whose result landed while we were away. Acts
+  /// only while we show one, so a result the user already dismissed is not
+  /// raised again on every reconnect.
+  void _applyUpdateState(String sessionId, Map update) {
+    if (!stateFor(sessionId).updating || update['running'] == true) return;
+    final result = update['result'];
+    if (result is Map) {
+      _onJson({...result.cast<String, dynamic>(), 'sessionId': sessionId});
+    } else {
+      _setState(sessionId, stateFor(sessionId).copyWith(updating: false));
+    }
   }
 
   void _onJson(Map<String, dynamic> json) {
@@ -840,7 +916,16 @@ class AgentSessionService {
         params: {'sessionId': sessionId},
       );
       _hydrating.remove(sessionId);
-      _applyFullTranscript(sessionId, (res['frames'] as List?) ?? const []);
+      _applyFullTranscript(
+        sessionId,
+        (res['frames'] as List?) ?? const [],
+        reportsLiveTurn: res.containsKey('activeTurnId'),
+        liveTurnId: res['activeTurnId'] as String?,
+      );
+      final live = res['live'];
+      if (live is List) _applyLive(sessionId, live);
+      final update = res['update'];
+      if (update is Map) _applyUpdateState(sessionId, update);
       if (armRetryOnEmpty && stateFor(sessionId).turns.isEmpty) {
         _pendingHydrationRetry.add(sessionId);
       } else {

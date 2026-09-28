@@ -88,6 +88,9 @@ test("session.transcriptSnapshot returns empty frames for an unknown/not-running
   if (res?.type === "response") {
     expect(res.ok).toBe(true);
     expect((res.result as { frames?: unknown[] })?.frames).toEqual([]);
+    // A session that is not running has no live turn, no open prompts and no
+    // update in flight — said explicitly, so a client holding stale state drops it.
+    expect(res.result).toMatchObject({ activeTurnId: null, live: [], update: { running: false } });
   }
 });
 

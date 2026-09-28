@@ -2286,6 +2286,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           .filter((s) => s.mode === "chat" && agentKeyFor(s.id) === spec.tool && s.running)
           .map((s) => s.id);
         log.info("agent:update — quiescing %d %s session(s) to update", chatIds.length, spec.tool);
+        updatingTools.set(spec.tool, (updatingTools.get(spec.tool) ?? 0) + 1);
+        // A run that dies without an outcome must not let the previous run's
+        // result settle a client waiting on this one.
+        lastUpdateResults.delete(spec.tool);
         void runAgentUpdate({
           sessionIds: chatIds,
           // stopChat resolves only once the process has exited (its dispose awaits
@@ -2299,13 +2303,19 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           execUpdate: () => execToolUpdate(spec),
           installedAfter: async () => parseAgentVersion(await execToolVersion(spec)),
         }).then((outcome) => {
-          sendAb(createMessage("agent:updateResult", {
+          const result = createMessage("agent:updateResult", {
             tool: spec.tool, sessionId: msg.sessionId, ok: outcome.ok,
             exitCode: outcome.exitCode,
             installed: outcome.installed ?? undefined,
             // Bound the tail so a chatty updater can't bloat the encrypted frame.
             output: outcome.output.slice(-4_000) || undefined,
-          }));
+          });
+          lastUpdateResults.set(spec.tool, result);
+          sendAb(result);
+        }).finally(() => {
+          const left = (updatingTools.get(spec.tool) ?? 1) - 1;
+          if (left > 0) updatingTools.set(spec.tool, left);
+          else updatingTools.delete(spec.tool);
         });
         break;
       }
@@ -2801,6 +2811,13 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // only a custom `agent.command` — an arbitrary binary attributable to no spec.
   const agentKeyFor = (terminalId?: string): string | undefined =>
     (terminalId ? sessions?.get(terminalId)?.tool : undefined) ?? config.agent?.tool;
+  // A self-update's outcome is one live frame, so an app away when it lands
+  // would spin forever; the transcript snapshot re-serves both, keyed by tool
+  // because the update replaces one machine-global binary.
+  // A count, not a set: the first of two overlapping runs to finish must not
+  // report the other as done.
+  const updatingTools = new Map<string, number>();
+  const lastUpdateResults = new Map<string, AbMessage>();
   // Judging needs *a* CLI to spawn, so an unattributable slot still resolves to
   // one. Observability must NOT: reporting the default agent's hooks for a
   // binary we cannot identify is the "armed and quiet" lie observability exists
@@ -5050,8 +5067,33 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         },
       });
     }
-    const frames = (await structured?.getTranscriptSnapshot(parsed.data.sessionId)) ?? [];
-    return createMessage("response", { requestId: msg.requestId, ok: true, result: { frames } });
+    // Read before the snapshot, not after: a turn that ends during the read is
+    // then still reported live, so the client keeps the open turn its own
+    // turn-end will close, instead of dropping content the read may have missed.
+    // A turn that STARTS during the read is re-read after it for the same
+    // reason: reporting idle would close the turn the client just received.
+    const { sessionId } = parsed.data;
+    const liveBefore = structured?.liveTurnId(sessionId);
+    const frames = (await structured?.getTranscriptSnapshot(sessionId)) ?? [];
+    const activeTurnId = liveBefore ?? structured?.liveTurnId(sessionId);
+    // Read after the await: a prompt answered or raised during the read must be
+    // reported as it now stands, since the client replaces its cards with this.
+    const live = structured?.liveFrames(sessionId);
+    const tool = agentKeyFor(sessionId);
+    const lastUpdate = tool === undefined ? undefined : lastUpdateResults.get(tool);
+    return createMessage("response", {
+      requestId: msg.requestId,
+      ok: true,
+      result: {
+        frames,
+        ...(activeTurnId === undefined ? {} : { activeTurnId }),
+        ...(live === undefined ? {} : { live }),
+        update: {
+          running: tool !== undefined && (updatingTools.get(tool) ?? 0) > 0,
+          ...(lastUpdate ? { result: lastUpdate } : {}),
+        },
+      },
+    });
   }
 
   function attachTransport(bus: MessageBus) {
