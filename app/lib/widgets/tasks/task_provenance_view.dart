@@ -12,9 +12,8 @@ import '../../util/external_url.dart';
 
 /// Where a task came from, on every surface a task appears on.
 ///
-/// This is the visible half of the untrusted-body mitigation
-/// (`docs/tasks-and-integrations-plan.md`, "A task body is untrusted input to
-/// an agent"): an imported task's body was written by whoever opened the issue
+/// This is the visible half of the untrusted-body mitigation (a task body is
+/// untrusted input to an agent): an imported task's body was written by whoever opened the issue
 /// — on a public repo, a stranger — and one Start turns that text into the
 /// opening instruction to an agent holding shell access on a real checkout.
 /// Delimiting the span inside the prompt is not enough on its own, because a

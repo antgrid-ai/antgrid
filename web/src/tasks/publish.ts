@@ -18,8 +18,7 @@ import { cancelPendingOps, enqueueSyncOp, TaskSyncOpKindSchema } from "./sync-op
  * positions a control the submitter can see; it is a UI hint and is deliberately
  * never read here, so an older client or a field dropped on retry fails rather
  * than posting to a public repository. The required `publish` boolean on the
- * create route is the enforcement point (`docs/tasks-and-integrations-plan.md`,
- * "Publishing a local task to GitHub").
+ * create route is the enforcement point.
  *
  * A publish is irreversible in the way that matters: deleting a GitHub issue is
  * admin-only and the content is already in every watcher's inbox. So every

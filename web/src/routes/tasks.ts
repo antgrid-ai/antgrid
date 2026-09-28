@@ -78,8 +78,7 @@ import {
  * small sequential key, so a miss and another account's task must be the same
  * 404 — see `models/task.ts`, whose reads are built for it.
  *
- * No subscription gate: task routes ship free
- * (`docs/tasks-open-decisions.md`), so membership is the only thing between a
+ * No subscription gate: task routes ship free, so membership is the only thing between a
  * caller and an account's tasks.
  */
 
@@ -103,8 +102,7 @@ const AssigneeSchema = z.object({ kind: z.literal("member"), userId: z.string().
  * dropped on retry fails loudly instead of posting a private note into a public
  * repository. `IntegrationRepo.publishNewByDefault` positions the toggle in the
  * UI and is never consulted on this path — a default that can decide the outcome
- * is the auto-publish the whole design rules out
- * (`docs/tasks-and-integrations-plan.md`, "Publishing a local task to GitHub").
+ * is the auto-publish the whole design rules out.
  */
 const CreateTaskBody = z.object({
   title: z.string(),
@@ -842,8 +840,7 @@ function refuseTask(c: Context<{ Variables: TaskVars }>, refusal: TaskRefusal): 
  * taken back: deleting a GitHub issue is admin-only and the content is already
  * in every watcher's inbox. The required `publish` field is the primary defence
  * and holds whatever the carrier, but it records an intent rather than proving
- * who formed it, so the carrier that cannot be asked is refused outright
- * (`docs/tasks-and-integrations-plan.md`, "Publishing a local task to GitHub").
+ * who formed it, so the carrier that cannot be asked is refused outright.
  *
  * `deviceId` is set by exactly one gate, so this tests the credential rather
  * than anything the caller supplies. It costs the app nothing — it is already

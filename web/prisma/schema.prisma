@@ -525,7 +525,7 @@ model ProjectBinding {
 
 /// A unit of work the account owns. Deliberately not a mirror of a provider
 /// issue: it exists with no integration at all, and an external identity is a
-/// set of columns it may later acquire (docs/tasks-and-integrations-plan.md).
+/// set of columns it may later acquire.
 model Task {
   id        String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   accountId String  @map("account_id") @db.Uuid
