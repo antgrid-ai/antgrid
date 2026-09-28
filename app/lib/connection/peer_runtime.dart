@@ -66,6 +66,7 @@ class PeerRuntime implements PeerConnector {
     required this.record,
     required String licenseApiUrl,
     required Future<String> Function() mintToken,
+    this.fenceOnResume = true,
     http.Client? httpClient,
   }) : _http = httpClient ?? http.Client(),
        _endpointSecret = base64Decode(record.endpointSecret!),
@@ -140,6 +141,11 @@ class PeerRuntime implements PeerConnector {
     );
   }
   final DeviceRecord record;
+  /// Whether a resume discards the current lease before asking again. A phone
+  /// resumes from real backgrounding, where policy pushes may have been
+  /// missed; a desktop "resumes" on every window focus, and fencing there
+  /// closed every machine link on each alt-tab.
+  final bool fenceOnResume;
   final http.Client _http;
   final Uint8List _endpointSecret, _deviceSecret;
   late final EndpointEnrollmentClient enrollment;
@@ -173,8 +179,10 @@ class PeerRuntime implements PeerConnector {
   @override
   void invalidate() => lease.invalidate();
   @override
-  Future<bool> resume() =>
-      _resuming ??= lease.refreshFresh().whenComplete(() => _resuming = null);
+  Future<bool> resume() => _resuming ??=
+      (fenceOnResume ? lease.refreshFresh() : lease.refresh()).whenComplete(
+        () => _resuming = null,
+      );
 
   AuthorizationSnapshot _currentSnapshot() {
     final snapshot = lease.snapshot;

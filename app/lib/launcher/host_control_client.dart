@@ -341,8 +341,9 @@ class HostControlClient {
 
   Uri get _uri => Uri.parse('http://127.0.0.1:$port/control');
 
-  /// Acknowledges that old remote leases are blocked. Fresh authorization is
-  /// asynchronous on the host, so this never promises a usable remote session.
+  /// Asks the host to refresh its remote authorization and retry a blocked
+  /// endpoint. It fences nothing: a desktop reports window focus as a resume.
+  /// The refresh is asynchronous, so this never promises a usable session.
   Future<void> peerResume({
     Duration timeout = const Duration(seconds: 2),
   }) async {

@@ -4,6 +4,7 @@ import '../connection/peer_runtime_owner.dart';
 import '../services/keychain_device_store.dart';
 import '../services/devices_api.dart' show ProvisioningException;
 import '../util/detached.dart';
+import '../utils/platform_utils.dart';
 import 'auth.dart';
 import 'connection_identity.dart';
 import 'provider_retry.dart';
@@ -28,6 +29,7 @@ final peerRuntimeOwnerProvider = Provider<AppPeerRuntimeOwner>((ref) {
       record: request.record,
       licenseApiUrl: request.licenseApiUrl,
       mintToken: request.mintToken,
+      fenceOnResume: isMobilePlatform,
     ),
     dispose: (runtime) async {
       if (await runtime.dispose()) {

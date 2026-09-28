@@ -484,8 +484,11 @@ export class NativePeerSessions extends PeerSessionOwner {
     }
   }
 
+  /** A hint, never a fence: desktop window focus arrives here as a resume, and
+   *  dropping every phone on it cost each one a reconnect per alt-tab. What a
+   *  suspend could stretch, the lease's wall-clock deadline already bounds. */
   noteResume(): Promise<boolean> {
-    return this.lease.resume().then((allowed) => {
+    return this.lease.refresh().then((allowed) => {
       if (allowed && this.lifecycle.state === "blocked") this.lifecycle.retry();
       return allowed;
     });
@@ -537,7 +540,7 @@ export class NativePeerSessions extends PeerSessionOwner {
 
   private invalidatePeerConnections(reason: LeaseFailure): void {
     if (reason === "denied" || reason === "rotated") this.lifecycle.block(reason);
-    this.dropAllPeers(reason === "resume" ? "connection-lost" : "unauthorized");
+    this.dropAllPeers("unauthorized");
   }
 
   protected override onSessionEstablished(peerId: string): void {

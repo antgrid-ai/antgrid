@@ -202,7 +202,9 @@ class _TimerScheduleHandle implements LeaseScheduleHandle {
   void cancel() => _timer.cancel();
 }
 
-/// An authenticated HTTP client is injected; wall-clock dates never extend a lease.
+/// An authenticated HTTP client is injected. The wall clock never extends a
+/// lease, but can end one: on most platforms the monotonic clock stops across
+/// a device suspend, and alone would carry a lease through a sleep of any length.
 class AuthorizationLease {
   AuthorizationLease({
     required this.accountId,
@@ -212,15 +214,18 @@ class AuthorizationLease {
     int Function()? nowMs,
     LeaseScheduler? schedule,
     double Function()? random,
+    int Function()? wallMs,
   }) {
     final stopwatch = Stopwatch()..start();
     _nowMs = nowMs ?? () => stopwatch.elapsedMilliseconds;
+    _wallMs = wallMs ?? () => DateTime.now().millisecondsSinceEpoch;
     _schedule = schedule ?? _TimerScheduleHandle.new;
     _random = random ?? math.Random.secure().nextDouble;
   }
   final String accountId, deviceId, enrollmentId;
   final Future<AuthorizationSnapshot> Function() fetchSnapshot;
   late final int Function() _nowMs;
+  late final int Function() _wallMs;
   late final LeaseScheduler _schedule;
   late final double Function() _random;
   final _changes = StreamController<void>.broadcast(sync: true);
@@ -229,7 +234,9 @@ class AuthorizationLease {
   AuthorizationSnapshot? get snapshot => isValid ? _snapshot : null;
   BigInt? _policy;
   int _deadline = 0;
+  int _wallDeadline = 0;
   int _generation = 0;
+  int _policyChanges = 0;
   bool _disposed = false;
   LeaseScheduleHandle? _expiry, _refresh;
   bool _refreshing = false;
@@ -238,8 +245,10 @@ class AuthorizationLease {
   Future<bool>? _freshPending;
   Object? lastRefreshFailure;
   bool get isValid =>
-      !_disposed && _snapshot?.allowed == true && _nowMs() < _deadline;
-  int get remainingMs => math.max(0, _deadline - _nowMs());
+      !_disposed && _snapshot?.allowed == true && _leftMs() > 0;
+  int get remainingMs => math.max(0, _leftMs());
+  int _leftMs() =>
+      math.min(_deadline - _nowMs(), _wallDeadline - _wallMs());
 
   bool permits(String peerId, {String? endpointId, BigInt? generation}) =>
       isValid &&
@@ -254,11 +263,24 @@ class AuthorizationLease {
   Future<bool> refresh() => _freshPending ?? _refreshCurrent();
 
   Future<bool> _refreshCurrent() =>
-      _pending ??= _runRefresh().whenComplete(() => _pending = null);
-  Future<bool> _runRefresh() async {
+      _pending ??= _refreshUntilCurrent().whenComplete(() => _pending = null);
+
+  /// Every caller joined to the request gets an answer from after the last
+  /// pushed policy change, not the one that change superseded.
+  Future<bool> _refreshUntilCurrent() async {
+    while (true) {
+      final outcome = await _runRefresh();
+      if (outcome != null) return outcome;
+    }
+  }
+
+  /// Null when a policy change pushed while in flight superseded the answer.
+  Future<bool?> _runRefresh() async {
     lastRefreshFailure = null;
     final generation = _generation;
+    final policyChanges = _policyChanges;
     final start = _nowMs();
+    final startWall = _wallMs();
     final timeoutMs = isValid ? math.min(10000, remainingMs) : 10000;
     if (timeoutMs <= 0) {
       invalidate();
@@ -269,17 +291,24 @@ class AuthorizationLease {
         Duration(milliseconds: timeoutMs),
       );
       if (_disposed || generation != _generation) return false;
+      final stale = _policy != null && result.policyGeneration < _policy!;
+      // Read before a policy change that was pushed while it was in flight:
+      // superseded, not denied.
+      if (stale && policyChanges != _policyChanges) return null;
       if (result.accountId != accountId ||
           result.deviceId != deviceId ||
           result.enrollmentId != enrollmentId ||
-          (_policy != null && result.policyGeneration < _policy!)) {
+          stale) {
         lastRefreshFailure = const PeerAuthorizationDenied();
         invalidate();
         return false;
       }
       _policy = result.policyGeneration;
       final deadline = start + result.leaseMs;
-      if (!result.allowed || _nowMs() >= deadline) {
+      final wallDeadline = startWall + result.leaseMs;
+      if (!result.allowed ||
+          _nowMs() >= deadline ||
+          _wallMs() >= wallDeadline) {
         if (!result.allowed)
           lastRefreshFailure = const PeerAuthorizationDenied();
         invalidate();
@@ -287,17 +316,18 @@ class AuthorizationLease {
       }
       _snapshot = result;
       _deadline = deadline;
+      _wallDeadline = wallDeadline;
       _expiry?.cancel();
-      _expiry = _schedule(
-        Duration(milliseconds: deadline - _nowMs()),
-        invalidate,
-      );
+      _expiry = _schedule(Duration(milliseconds: remainingMs), invalidate);
       _retryAttempt = 0;
       if (_refreshing) _scheduleNormalRefresh(result.leaseMs);
       _changes.add(null);
       return true;
     } catch (error) {
+      // An error carries no policy generation, so one that lands after a policy
+      // change cannot show which side of it the server answered from.
       if (_disposed || generation != _generation) return false;
+      if (policyChanges != _policyChanges) return null;
       lastRefreshFailure = error;
       if (error is PeerAuthorizationDenied || error is FormatException) {
         invalidate();
@@ -341,10 +371,16 @@ class AuthorizationLease {
     _scheduleRefresh(_jittered(baseMs));
   }
 
+  /// Drops the current snapshot but lets a request already in flight finish:
+  /// its answer is judged by the policy generation the server read, so one
+  /// that already reflects this change is kept. Fencing it by request instead
+  /// discarded the answer to this device's own endpoint registration, whose
+  /// policy change is pushed back to it while that answer is still on the way.
   void notePolicyGeneration(BigInt generation) {
     if (_disposed || (_policy != null && generation <= _policy!)) return;
     _policy = generation;
-    invalidate();
+    _policyChanges++;
+    _dropSnapshot();
   }
 
   Future<bool> refreshFresh() {
@@ -383,8 +419,14 @@ class AuthorizationLease {
   void invalidate() {
     if (_disposed) return;
     _generation++;
+    _dropSnapshot();
+  }
+
+  void _dropSnapshot() {
+    if (_disposed) return;
     _snapshot = null;
     _deadline = 0;
+    _wallDeadline = 0;
     _expiry?.cancel();
     _expiry = null;
     _refresh?.cancel();

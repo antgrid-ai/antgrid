@@ -707,11 +707,6 @@ export interface DartTestEnv {
   projectId: string;
   streamId: string;
   agentDeviceId: string;
-  /** Tears down the Dart client's peer and session, dials the same machine
-   *  again on the same endpoint identity, re-runs the hello and rebinds the
-   *  default project. The eval client has no supervisor, so this stands in for
-   *  the app's own reconnect. Resolves to the project streamId. */
-  reestablishPeer(): Promise<string>;
   teardown(): Promise<void>;
 }
 
@@ -1043,20 +1038,6 @@ async function buildDartTestEnv(
     projectId,
     streamId,
     agentDeviceId: deviceUuid,
-    async reestablishPeer() {
-      await app.disconnectPeer();
-      await app.connectPeer({
-        licenseApiUrl: licenseApi.url,
-        accountId: appAuth.userId,
-        enrollmentId: appAuth.clientId,
-        clientSecret: appAuth.clientSecret,
-        machineDeviceId: deviceUuid,
-        addresses: [`127.0.0.1:${nativePort}`],
-      });
-      await app.performHandshake(deviceUuid, 10_000);
-      await app.pullStateSnapshot();
-      return app.openProjectStream(projectId, 10_000);
-    },
     async teardown() {
       await cleanup.run();
     },

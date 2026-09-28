@@ -5,19 +5,19 @@ import type { ControlRequest, ControlResponse } from "../src/control-protocol";
 let listener: ControlListener | null = null;
 afterEach(async () => { await listener?.stop(); listener = null; });
 
-test("peer resume requires owner bearer and fences before acknowledgement", async () => {
-  let fenced = false;
-  listener = new ControlListener({ token: "owner-secret", onPeerResume: () => { fenced = true; },
+test("peer resume requires owner bearer and notifies before acknowledgement", async () => {
+  let notified = false;
+  listener = new ControlListener({ token: "owner-secret", onPeerResume: () => { notified = true; },
     handler: async (req) => ({ id: req.id, ok: true, type: "project:list", projects: [] }) });
   await listener.start();
   const url = `http://127.0.0.1:${listener.port}/peer-resume`;
   for (const authorization of [undefined, "Bearer wrong"]) {
     expect((await fetch(url, { method: "POST", headers: authorization ? { authorization } : {} })).status).toBe(401);
-    expect(fenced).toBe(false);
+    expect(notified).toBe(false);
   }
   const response = await fetch(url, { method: "POST", headers: { authorization: "Bearer owner-secret" } });
   expect(response.status).toBe(202);
-  expect(fenced).toBe(true);
+  expect(notified).toBe(true);
   expect(await response.json()).toEqual({ ok: true });
 });
 
