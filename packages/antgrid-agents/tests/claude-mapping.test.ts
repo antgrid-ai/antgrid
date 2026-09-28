@@ -1,5 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import { mapToolKind, mapAssistantContent, mapUsage, mapResultError, addUsage } from "../src/agents/claude-code/mapping";
+import { toPosts } from "../src/agents/claude-code/hooks";
 
 describe("mapToolKind", () => {
   it("maps known Claude Code tools to toolKinds", () => {
@@ -57,6 +58,53 @@ describe("mapResultError", () => {
     expect(withEmpty.message).toBe("turn failed (error_max_turns)");
     const withMissing = mapResultError({ type: "result", subtype: "error_during_execution", is_error: true });
     expect(withMissing.message).toBe("turn failed (error_during_execution)");
+  });
+});
+
+describe("StopFailure posts (every class ends the turn as error)", () => {
+  const invoke = (errorClass: string) => toPosts(
+    { agent: "claude", event: "stop-failure" },
+    {
+      port: 43123,
+      terminalId: "term-1",
+      readStdin: async () => JSON.stringify({ session_id: "s1", transcript_path: "/t", error: errorClass }),
+    },
+  );
+
+  it("rate_limit still parks (limit_hit) but now also posts /notify error", async () => {
+    const posts = await invoke("rate_limit");
+    expect(posts).toEqual([
+      {
+        port: 43123,
+        path: "/handler-event",
+        body: { terminalId: "term-1", agent: "claude", event: "limit_hit", transcriptPath: "/t", sessionId: "s1", errorClass: "rate_limit" },
+      },
+      { port: 43123, path: "/notify", body: { type: "error", terminalId: "term-1" } },
+    ]);
+  });
+
+  it("overloaded (transient, non-rate-limit) still counts toward the ceiling (turn_failed) but now also posts /notify error", async () => {
+    const posts = await invoke("overloaded");
+    expect(posts).toEqual([
+      {
+        port: 43123,
+        path: "/handler-event",
+        body: { terminalId: "term-1", agent: "claude", event: "turn_failed", transcriptPath: "/t", sessionId: "s1", errorClass: "overloaded" },
+      },
+      { port: 43123, path: "/notify", body: { type: "error", terminalId: "term-1" } },
+    ]);
+  });
+
+  it("a class Claude has never sent before still reads as turn_failed and still posts /notify error", async () => {
+    const posts = await invoke("something_new_upstream");
+    expect(posts).toEqual([
+      {
+        port: 43123,
+        path: "/handler-event",
+        body: { terminalId: "term-1", agent: "claude", event: "turn_failed", transcriptPath: "/t", sessionId: "s1", errorClass: "something_new_upstream" },
+      },
+      { port: 43123, path: "/notify", body: { type: "error", terminalId: "term-1" } },
+    ]);
   });
 });
 

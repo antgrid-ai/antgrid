@@ -306,21 +306,20 @@ export async function toPosts(
     });
     // StopFailure fires INSTEAD of Stop, so nothing else ever answers the
     // "working" that UserPromptSubmit set — the session would read as actively
-    // working while the agent sits dead at its prompt. Only the fatal classes:
-    // they never park, so the engine sends no push of its own, whereas a park IS
-    // covered (once, on the first park of an episode) and must not be re-alerted
-    // here.
-    if (event === "turn_end") {
-      posts.push({
-        port,
-        path: "/notify",
-        body: {
-          type: "error",
-          ...(terminalId ? { terminalId } : {}),
-          ...(input.message ? { message: input.message } : {}),
-        },
-      });
-    }
+    // working while the agent sits dead at its prompt, whatever the error
+    // class. The hook always reports; whether a phone also hears about it is
+    // the dispatcher's call — push-dispatcher.ts suppresses this push on a
+    // slot the Handler is armed on, so a park, wrap-up or escalation the
+    // Handler already announced does not double as a second alert.
+    posts.push({
+      port,
+      path: "/notify",
+      body: {
+        type: "error",
+        ...(terminalId ? { terminalId } : {}),
+        ...(input.message ? { message: input.message } : {}),
+      },
+    });
   }
   // Both halves of the question pair need a slot: an escalation nobody can
   // route to a session is not supervision, it is a stuck row.

@@ -170,7 +170,7 @@ describe("Claude hooks", () => {
     expect(notify?.body).toEqual({ type: "task_complete", agent: "claude", transcriptPath: "/tmp/t.jsonl" });
   });
 
-  test("stop-failure maps a rate limit to limit_hit and nothing else", async () => {
+  test("stop-failure maps a rate limit to limit_hit", async () => {
     const h = harness({
       agent: "claude",
       event: "stop-failure",
@@ -195,6 +195,7 @@ describe("Claude hooks", () => {
           errorClass: "rate_limit",
         },
       },
+      { port: 43123, path: "/notify", body: { type: "error", terminalId: "term-1" } },
     ]);
   });
 
@@ -219,6 +220,7 @@ describe("Claude hooks", () => {
             errorClass: error,
           },
         },
+        { port: 43123, path: "/notify", body: { type: "error", terminalId: "term-1" } },
       ]);
     }
   });
@@ -241,7 +243,8 @@ describe("Claude hooks", () => {
       // StopFailure fires INSTEAD of Stop, so this is the only thing that ever
       // answers the "working" UserPromptSubmit set — without it the session
       // reads as actively working while the agent sits dead at its prompt.
-      // Fatal only: a park is already covered by the engine's own push.
+      // Posted for every error class; whether a phone also hears it is decided
+      // downstream, by push-dispatcher.ts.
       expect(h.posts[1]!.path).toBe("/notify");
       expect(h.posts[1]!.body).toMatchObject({ type: "error", terminalId: "term-1" });
     }
@@ -267,6 +270,7 @@ describe("Claude hooks", () => {
           errorClass: "unknown",
         },
       },
+      { port: 43123, path: "/notify", body: { type: "error", terminalId: "term-1" } },
     ]);
   });
 
