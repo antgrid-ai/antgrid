@@ -97,6 +97,30 @@ Future<void> openAccountInBrowser(ProviderContainer ref) async {
   );
 }
 
+/// Open the web GitHub connect flow directly, skipping the Integrations
+/// overview page — Connect GitHub is the only reason the app links here.
+///
+/// Browser hand-off for the same reason as [openAccountInBrowser]: the app's
+/// session cookie can't be lent to the browser, so the user may have to sign
+/// in there. [appUserEmail] (the app's own signed-in user, when known) rides
+/// along as `asEmail` so the web side can tell a browser that is ALREADY
+/// signed in, just as someone else, from one with no session at all — see
+/// `requireMatchingAccount` in `web/src/auth/middleware.ts`. Without it the
+/// GitHub installation would silently bind to whichever Antgrid account the
+/// browser happened to be signed into.
+Future<void> openGitHubIntegrationsInBrowser(
+  ProviderContainer ref, {
+  String? appUserEmail,
+}) async {
+  final base = ref.read(licenseApiUrlProvider).replaceAll(RegExp(r'/+$'), '');
+  final uri = Uri.parse('$base/integrations/connect').replace(
+    queryParameters: (appUserEmail == null || appUserEmail.isEmpty)
+        ? null
+        : {'asEmail': appUserEmail},
+  );
+  await launchUrl(uri, mode: LaunchMode.externalApplication);
+}
+
 Future<void> openUpgradeInBrowser(
   ProviderContainer ref, {
   String? planId,

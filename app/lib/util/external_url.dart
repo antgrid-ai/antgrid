@@ -310,7 +310,11 @@ Future<void> _openPreviewLink(
   try {
     final service = previewService();
     if (service == null) return;
-    final result = await service.openTab(port, scheme: scheme, path: path);
+    final result = await service.openTabAtLink(
+      port,
+      scheme: scheme,
+      path: path,
+    );
     if (!context.mounted) return;
     if (result != SelectPortResult.portInUse) {
       revealView(WorkspaceView.preview);

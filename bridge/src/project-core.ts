@@ -5,6 +5,7 @@ import { LocalListener } from "./local-listener";
 import type { AttachStreamOpts, PeerSessionView, StreamHandle } from "./project-streams";
 import type { AbMessage, SessionEntry, WorkStatus } from "./protocol";
 import type { DeleteSessionOptions } from "./session-manager";
+import { taskRunObservations, type TaskRunObserver } from "./task-run";
 import { answerRequest, becameDeliverable, busDeliverable, clientFocusState, clientGone, closeTurn, hookTurnEnd, initialWorkStatus, isStaleIdleNudge, noteHookChannelLost, noteHookChannelRestored, openedTurns, reduceWorkStatus, sessionFocus, turnStart, UNATTRIBUTED_TURN, userReply, type WorkStatusState } from "./work-status";
 import { SessionBusDeliveryQueue, type QueuedLine } from "./session-bus/delivery-queue";
 import { logger } from "./logger";
@@ -47,6 +48,10 @@ export interface ProjectCoreDeps extends BuildAgentCoreOptions {
    *  rather than a session this bridge does not hold — see the coordinator's
    *  `addressable`. */
   machineDeviceId?: () => string | null;
+  /** Reports each task-bound session's work status to the account, so a run row
+   *  exists with no phone watching. Absent for a bare agent, which has no
+   *  machine credentials to report under. */
+  taskRuns?: TaskRunObserver;
 }
 
 /** Handle for a native project binding added to an already-open core via {@link ProjectCore.promote}.
@@ -265,6 +270,22 @@ export class ProjectCore {
     this.commitWork(next);
   }
 
+  /** Push this project's task-bound live sessions to the account's run reporter.
+   *
+   *  Statuses are read from the reduction rather than from the `workStatus`
+   *  stamped on each entry: this runs after {@link observeWorkStatus} folded the
+   *  same frame, so the reduction is one fold ahead of the values the emitter
+   *  stamped — and a session that just stopped is already out of the map, which
+   *  is exactly the signal the reporter ends a run on. */
+  private reportTaskRuns(projectId: string, sessions: readonly SessionEntry[]): void {
+    const observer = this.deps.taskRuns;
+    if (!observer) return;
+    observer.observe(
+      projectId,
+      taskRunObservations(sessions, this._work.sessionStatuses, this._work.defaultTool),
+    );
+  }
+
   /** A turn-start hook fired (user submitted a prompt), or the user answered
    *  what was blocking [sessionId]: open its turn and clear its stale
    *  notification/pending request, so the session reads "working" for as long as
@@ -466,6 +487,7 @@ export class ProjectCore {
         // or stops — is the edge that gets it delivered. A no-op on an empty
         // queue, which is every ordinary project.
         this.deliveries?.drainAll();
+        this.reportTaskRuns(core.projectId, msg.sessions);
       }
     } });
     if (this.deps.mode === "local") {

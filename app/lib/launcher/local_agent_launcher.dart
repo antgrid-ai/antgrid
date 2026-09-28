@@ -142,6 +142,11 @@ class LaunchResult {
   final bool owned;
   final String projectId;
 
+  /// The host's repository identity for this folder, carried out so the caller
+  /// can persist it onto [AbProject]. Null when the host could not fold one (no
+  /// origin remote) or predates the verb returning it — never synthesized here.
+  final String? repoKey;
+
   /// Structured events emitted by the agent via stderr JSON lines.
   /// Closed when the agent process exits.
   /// Empty stream for orphan-attached agents (no process to listen to).
@@ -152,6 +157,7 @@ class LaunchResult {
     required this.agentPid,
     required this.owned,
     required this.projectId,
+    this.repoKey,
     Stream<AgentEvent>? events,
   }) : events = events ?? const Stream.empty();
 }
@@ -204,6 +210,10 @@ class LocalAgentLauncher {
     }
     final projectId = resolved.projectId;
     final repoPath = resolved.repoPath;
+    // Null both when the host folded no origin remote and when the app fell
+    // back to its own path hash — neither may invent a key, and both mean
+    // "nothing to join account-scoped tasks to".
+    final repoKey = resolved.repoKey;
     final existing = _inFlight[projectId];
     if (existing != null) {
       _log('openProject: projectId=$projectId — coalescing with in-flight');
@@ -216,6 +226,7 @@ class LocalAgentLauncher {
       licenseApiUrl,
       relayUrl,
       telemetryEnabled,
+      repoKey,
     );
     _inFlight[projectId] = fut;
     try {
@@ -276,6 +287,7 @@ class LocalAgentLauncher {
     String? licenseApiUrl,
     String? relayUrl,
     bool telemetryEnabled,
+    String? repoKey,
   ) async {
     // The host's stdin bootstrap, consumed only if ensureHost must spawn fresh.
     // `??=`: the FIRST project to open wins, so whichever device record was
@@ -330,6 +342,7 @@ class LocalAgentLauncher {
         agentPid: host.pid,
         owned: _host.ownedHostPid != null,
         projectId: projectId,
+        repoKey: repoKey,
         events: _host.hostEvents,
       );
     } catch (_) {

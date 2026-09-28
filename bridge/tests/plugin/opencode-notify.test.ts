@@ -1,5 +1,18 @@
-import { test, expect } from "bun:test";
+import { test, expect, beforeEach, afterEach } from "bun:test";
 import { AntgridSessionNamer } from "../../../packages/antgrid-agents/assets/opencode/plugin";
+
+// This suite's own host process may be an Antgrid-managed terminal (dogfooding),
+// which would otherwise leak a real ANTGRID_RUN_ID into these in-process plugin
+// calls and stamp it onto the posted body the tests assert against.
+let hostRunId: string | undefined;
+beforeEach(() => {
+  hostRunId = process.env.ANTGRID_RUN_ID;
+  delete process.env.ANTGRID_RUN_ID;
+});
+afterEach(() => {
+  if (hostRunId === undefined) delete process.env.ANTGRID_RUN_ID;
+  else process.env.ANTGRID_RUN_ID = hostRunId;
+});
 
 /** Port 0 lets the OS pick: a fixed port collides with whatever else the suite
  *  is listening on, and the loser fails to bind rather than failing an assert. */
@@ -68,7 +81,6 @@ test("a missing terminal id still notifies, without the field", async () => {
 });
 
 test("native runtime posts carry the launching run ID", async () => {
-  const previous = process.env.ANTGRID_RUN_ID;
   const { hits, server } = collector();
   process.env.ANTGRID_API_PORT = String(server.port);
   process.env.ANTGRID_TERMINAL_ID = "t1";
@@ -80,7 +92,5 @@ test("native runtime posts carry the launching run ID", async () => {
     for (const hit of hits) expect(JSON.parse(hit.body).runId).toBe("run-2");
   } finally {
     server.stop(true);
-    if (previous === undefined) delete process.env.ANTGRID_RUN_ID;
-    else process.env.ANTGRID_RUN_ID = previous;
   }
 });

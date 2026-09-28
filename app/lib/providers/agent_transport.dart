@@ -634,5 +634,27 @@ Future<AgentTransport?> _buildLocalTransportFor(
   });
   ref.onDispose(faultSub.cancel);
 
+  // Persist the host's repository identity the first time we learn it: it is
+  // the key that joins this folder to its account-scoped tasks, and only a host
+  // can fold a linked worktree onto its primary checkout, so it cannot be known
+  // at folder-pick time. Guarded on change because an unconditional upsert
+  // would churn every projectsProvider listener on every open — this build
+  // watches `folder` alone, but the others do not. Fire-and-forget: a prefs
+  // write failing here must not fail opening the project, and it is queued
+  // after the listeners above are wired so it can never race them.
+  final learnedRepoKey = result.repoKey;
+  if (learnedRepoKey != null) {
+    for (final p in ref.read(projectsProvider)) {
+      if (p.projectId != projectId || p.repoKey == learnedRepoKey) continue;
+      p.repoKey = learnedRepoKey;
+      detached(
+        'AgentTransport',
+        'persisting learned repoKey failed',
+        () => ref.read(projectsProvider.notifier).upsert(p),
+      );
+      break;
+    }
+  }
+
   return result.transport;
 }

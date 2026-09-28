@@ -9,6 +9,7 @@ import {
   antigravityHookCommand,
   antigravityScriptPath,
   mergeAntigravityHookEntries,
+  stripLegacyAntigravityPreToolUseHook,
 } from "./global-hooks";
 
 const log = logger.child({ component: "agent-launch" });
@@ -80,11 +81,18 @@ export function ensureAntigravityHook(
         }
       }
     }
-    const merged = mergeAntigravityHookEntries(data, [
+    // Undo a withdrawn feature (PreToolUse permission-request notify) that
+    // some installs already picked up; see stripLegacyAntigravityPreToolUseHook.
+    const cleaned = stripLegacyAntigravityPreToolUseHook(data) ?? data;
+    const merged = mergeAntigravityHookEntries(cleaned, [
       { event: "PreInvocation", command: antigravityHookCommand(scriptPath, "PreInvocation") },
       { event: "Stop", command: antigravityHookCommand(scriptPath, "Stop") },
     ]);
-    if (merged === null) return true; // both hooks already present
+    if (merged === null) {
+      if (cleaned === data) return true; // both hooks already present, nothing to remove
+      atomicWriteFile(hooksPath, `${JSON.stringify(cleaned, null, 2)}\n`);
+      return true;
+    }
     atomicWriteFile(hooksPath, `${JSON.stringify(merged, null, 2)}\n`);
     return true;
   } catch (err) {

@@ -28,6 +28,19 @@ export function canonicalize(hit: UrlHit): UrlHit {
   return hit;
 }
 
+const PRIVATE_IPV4_RE =
+  /^(?:127|10)\.\d{1,3}\.\d{1,3}\.\d{1,3}$|^192\.168\.\d{1,3}\.\d{1,3}$|^172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}$/;
+
+/** Whether a URL host can plausibly be THIS machine's dev server — loopback,
+ *  `0.0.0.0`, or a private-network address (Vite's "Network:" line prints a
+ *  LAN IP). Agent/tool output is full of unrelated public URLs (docs, repo
+ *  links, package registries); without this a link to github.com would be
+ *  treated the same as a real dev server on localhost. */
+export function isLocalHost(host: string): boolean {
+  if (host === "localhost" || host === "0.0.0.0" || host === "::1") return true;
+  return PRIVATE_IPV4_RE.test(host);
+}
+
 export function toUrlString(hit: UrlHit): string {
   const defaultPort = hit.scheme === "https" ? 443 : 80;
   const portPart = hit.port === defaultPort ? "" : `:${hit.port}`;

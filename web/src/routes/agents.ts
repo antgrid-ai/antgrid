@@ -7,7 +7,7 @@ import type { DB } from "../db/index.js";
 import type { Auth } from "../auth/better-auth.js";
 import type { Env } from "../env.js";
 import { requireUser, type AuthVars } from "../auth/middleware.js";
-import { requireBearerJwt } from "../auth/jwt-bearer.js";
+import { requireDeviceBearerJwt } from "../auth/jwt-bearer.js";
 import { listMobileEnabledAgents } from "../models/agent-inventory.js";
 
 // mobileAccessEnabled/relayUrl/machineName are agent-only concepts (the
@@ -28,7 +28,7 @@ export function agentRoutes(deps: { db: DB; auth: Auth; env: Env }) {
   // cookie). Gate it with Bearer-JWT verification against web's own JWKS.
   r.use(
     "/account/devices/me/heartbeat",
-    requireBearerJwt({ auth: deps.auth, env: deps.env })
+    requireDeviceBearerJwt({ auth: deps.auth, db: deps.db, env: deps.env })
   );
 
   // All other `/account/*` routes are called by the Flutter app's UI session

@@ -56,11 +56,17 @@ class PreviewTab {
   /// logical `scheme://localhost:port` origin in local mode.
   final String? currentUrl;
 
+  /// Bumped by an explicit link navigation so the screen reloads the tab even
+  /// when [currentUrl] is unchanged — the webview may have followed in-page
+  /// links elsewhere since [currentUrl] was last set.
+  final int navRevision;
+
   const PreviewTab({
     required this.port,
     required this.scheme,
     this.localProxyPort,
     this.currentUrl,
+    this.navRevision = 0,
   });
 
   PreviewTab copyWith({
@@ -69,6 +75,7 @@ class PreviewTab {
     bool clearLocalProxyPort = false,
     String? currentUrl,
     bool clearCurrentUrl = false,
+    int? navRevision,
   }) {
     return PreviewTab(
       port: port,
@@ -77,6 +84,7 @@ class PreviewTab {
           ? null
           : (localProxyPort ?? this.localProxyPort),
       currentUrl: clearCurrentUrl ? null : (currentUrl ?? this.currentUrl),
+      navRevision: navRevision ?? this.navRevision,
     );
   }
 }

@@ -30,6 +30,7 @@ Uri navLocationToUri(NavLocation loc) {
       final seg = switch (loc.surface) {
         WorkbenchSurface.appSettings => 'settings',
         WorkbenchSurface.remoteDevices => 'devices',
+        WorkbenchSurface.tasks => 'tasks',
         // workspace/newSession with no project is not a meaningful deep link;
         // encode defensively as settings-less root.
         _ => 'workspace',
@@ -175,6 +176,8 @@ NavLocation? navLocationFromUri(Uri uri) {
         target: null,
         surface: WorkbenchSurface.remoteDevices,
       );
+    case 'tasks':
+      return const NavLocation(target: null, surface: WorkbenchSurface.tasks);
     case 'workspace':
       // Symmetric with the defensive null-target encoding in navLocationToUri.
       return const NavLocation(

@@ -695,6 +695,13 @@ const AgentProjectsMessage = BaseMessage.extend({
       // `status` for every session.
       sessionStatuses: z.record(z.string(), WorkStatusSchema).optional(),
       lastActiveAt: z.string().optional(),
+      // Cross-machine repository identity (see repo-key.ts) — what binds this
+      // folder's tasks to the same repository checked out elsewhere. Unlike
+      // `status`, carried for COLD projects too: it comes from the seen catalog,
+      // and a task list that only appears once a project is warm is useless.
+      // Optional on the wire — an older bridge omits it and the app simply has
+      // no tasks to show for the project; an older app ignores it.
+      repoKey: z.string().optional(),
     }),
   ),
   // Machine-level: the remote-access switch's live state, stamped on every
@@ -1758,6 +1765,16 @@ const ConfigDetectToolsResultMessage = BaseMessage.extend({
   ...CheckoutScoped,
 });
 
+/** The account-scoped task a session was launched for. `taskId` is opaque here
+ *  — the bridge stores and echoes it, and never resolves or interprets it;
+ *  `number` is the per-account display id (`ANT-14`), carried alongside so a
+ *  session can be labelled with its task from persisted state alone, with no
+ *  round trip to the account. */
+export const TaskRefSchema = z.object({
+  taskId: z.string().min(1),
+  number: z.number().int().positive(),
+});
+
 // Identity of one session on one machine, and the address every bus frame
 // carries. `machineId` is the account device uuid — the value the app already
 // addresses a machine by. Opaque to both bridges: neither derives it, the app
@@ -1895,6 +1912,9 @@ const SessionEntrySchema = z.object({
     startedAt: z.number(),
     finishedAt: z.number().optional(),
   }).optional(),
+  // Carried on every session list so the label survives a host restart; a
+  // session created before this field, or created without a task, has none.
+  taskRef: TaskRefSchema.optional(),
 });
 
 const SessionListMessage = BaseMessage.extend({
@@ -1923,6 +1943,7 @@ const SessionCreateMessage = BaseMessage.extend({
   // shared before invoking SessionManager.
   isolation: z.enum(["shared", "worktree"]).optional(),
   baseBranch: z.string().min(1).optional(),
+  taskRef: TaskRefSchema.optional(),
 }).superRefine((value, ctx) => {
   if (value.baseBranch && value.isolation !== "worktree") {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["baseBranch"], message: "baseBranch requires worktree isolation" });
@@ -2949,6 +2970,7 @@ export type ConfigWriteResult = z.infer<typeof ConfigWriteResultMessage>;
 export type ConfigChanged = z.infer<typeof ConfigChangedMessage>;
 export type ConfigDetectTools = z.infer<typeof ConfigDetectToolsMessage>;
 export type ConfigDetectToolsResult = z.infer<typeof ConfigDetectToolsResultMessage>;
+export type TaskRef = z.infer<typeof TaskRefSchema>;
 export type SessionEntry = z.infer<typeof SessionEntrySchema>;
 export type SessionList = z.infer<typeof SessionListMessage>;
 export type SessionListResult = z.infer<typeof SessionListResultMessage>;
