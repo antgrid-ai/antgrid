@@ -988,6 +988,20 @@ describe("ClaudeDriver getTranscriptSnapshot", () => {
     expect(assistantItem?.text).toBe("hello");
   });
 
+  it("a mid-turn snapshot carries the live turn under its live id, still open", async () => {
+    const { driver, fake, sent } = await started();
+    await driver.prompt("hi");
+    fake.emit({ type: "assistant", message: { content: [{ type: "text", text: "partial" }] }, uuid: "u1", session_id: "sess-1" });
+    await flush();
+    const liveTurnId = (sent.find((m) => m.type === "agent:turn-start") as any).turnId;
+
+    const snap = await driver.getTranscriptSnapshot();
+    expect(snap.some((m) => m.type === "agent:turn-end")).toBe(false);
+    expect(snap.every((m) => (m as any).turnId === liveTurnId)).toBe(true);
+    const ids = snap.filter((m) => m.type === "agent:item-added").map((m) => (m as any).itemId);
+    expect(ids).toEqual([`user:${liveTurnId}`, "msg:u1"]);
+  });
+
   it("includes itemId-anchored usage for a live assistant message", async () => {
     const { driver, fake } = await started();
     await driver.prompt("hi");

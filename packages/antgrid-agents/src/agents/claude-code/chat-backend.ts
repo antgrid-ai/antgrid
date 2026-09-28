@@ -11,7 +11,7 @@ import {
   mapAssistantContent, mapToolKind, mapUsage, addUsage, mapResultError, mapFailureError,
   type ClaudeUsageTotals, type ClaudeRateLimit,
 } from "./mapping";
-import { claudeResumeReplay } from "./resume-replay";
+import { adoptLiveTurn, claudeResumeReplay } from "./resume-replay";
 import { readClaudeTranscript } from "./transcript-read";
 import { logger } from "../../host";
 const log = logger.child({ component: "claude-driver" });
@@ -208,6 +208,8 @@ export class ClaudeDriver extends ChatSession {
   // Real user prompts only (not the "/compact" push) and each turn's final
   // assistant text, capped so a long-lived session can't grow unbounded.
   private history: any[] = [];
+  /** The prompt that opened the live turn, for [adoptLiveTurn]. */
+  private livePrompt?: { turnId: string; prompt: string; at: number };
 
   // ── Background tasks ─────────────────────────────────────────────────────
   // The SDK reports backgrounded work (run_in_background Bash, subagents,
@@ -817,6 +819,8 @@ export class ClaudeDriver extends ChatSession {
     // emit the user message ourselves — otherwise it renders only on resume via
     // claudeResumeReplay, never live. Shape mirrors that replay path.
     this.emitItem(`user:${turnId}`, { kind: "message", role: "user", text: body }, { turnId });
+    // Taken before the push, so the CLI's on-disk stamp for this prompt is never earlier.
+    this.livePrompt = { turnId, prompt: body, at: Date.now() };
     this.pushHistory({ type: "user", message: { role: "user", content: body } });
     this.controller?.push({ type: "user", message: { role: "user", content: body }, parent_tool_use_id: null } as any);
   }
@@ -946,6 +950,12 @@ export class ClaudeDriver extends ChatSession {
   async revert(_t: { turnId?: string; itemId?: string; messageId?: string }): Promise<void> {}
 
   protected async transcriptSnapshot(): Promise<AbMessage[]> {
+    const frames = await this.replayTranscript();
+    const live = this.livePrompt;
+    return live && live.turnId === this.activeTurnId ? adoptLiveTurn(frames, live) : frames;
+  }
+
+  private async replayTranscript(): Promise<AbMessage[]> {
     // The SDK restores model context on resume but exposes no transcript-read
     // API and re-emits no history on the stream (probe-verified against SDK
     // 0.3.201 — see .superpowers/sdd/sdk-probe-report.md, Q2). So read Claude
