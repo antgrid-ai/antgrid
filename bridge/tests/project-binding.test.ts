@@ -181,7 +181,7 @@ describe("ProjectBindingReporter", () => {
     expect(bodyOf(calls[2]!).localPath).toBe("/home/me/moved");
   });
 
-  it("does not retry a 409 — no retry can resolve another account's claim", async () => {
+  it("does not retry a 409 before its backoff elapses — repeated opens must not hammer the route", async () => {
     const calls: Call[] = [];
     const reporter = new ProjectBindingReporter({
       credentials: () => creds,
@@ -195,6 +195,62 @@ describe("ProjectBindingReporter", () => {
     await settle();
 
     expect(calls).toHaveLength(1);
+  });
+
+  it("retries a 409 once its backoff elapses, and doubles the wait on each consecutive one", async () => {
+    const calls: Call[] = [];
+    const reporter = new ProjectBindingReporter({
+      credentials: () => creds,
+      fetchFn: recordingFetch(calls, () => 409),
+    });
+    const realNow = Date.now;
+    let now = 1_700_000_000_000;
+    Date.now = () => now;
+    try {
+      reporter.report(binding);
+      await settle();
+      expect(calls).toHaveLength(1); // 1st conflict: backs off 1 minute
+
+      now += 30_000; // still inside the 1-minute backoff
+      reporter.report({ ...binding });
+      await settle();
+      expect(calls).toHaveLength(1);
+
+      now += 31_000; // 61s since the 1st conflict — backoff elapsed
+      reporter.report({ ...binding });
+      await settle();
+      expect(calls).toHaveLength(2); // 2nd conflict: backs off 2 minutes (doubled)
+
+      now += 61_000; // 61s since the 2nd conflict — still inside its 2-minute backoff
+      reporter.report({ ...binding });
+      await settle();
+      expect(calls).toHaveLength(2);
+
+      now += 60_000; // 121s since the 2nd conflict — elapsed
+      reporter.report({ ...binding });
+      await settle();
+      expect(calls).toHaveLength(3);
+    } finally {
+      Date.now = realNow;
+    }
+  });
+
+  it("a 409 backoff resets once the pair itself changes, and never survives credentials becoming available for a DIFFERENT pair", async () => {
+    const calls: Call[] = [];
+    const reporter = new ProjectBindingReporter({
+      credentials: () => creds,
+      fetchFn: recordingFetch(calls, () => 409),
+    });
+
+    reporter.report(binding);
+    await settle();
+    expect(calls).toHaveLength(1);
+
+    // A different repoKey for the same project is a fresh pair, not a
+    // continuation of the old one's backoff — it is not made to wait.
+    reporter.report({ ...binding, repoKey: "github.com/acme/renamed" });
+    await settle();
+    expect(calls).toHaveLength(2);
   });
 
   it("survives a non-2xx and lets the next open retry it", async () => {
@@ -339,5 +395,37 @@ describe("HostServer wiring", () => {
     await settle();
 
     expect(calls).toHaveLength(0);
+  });
+
+  test("a local project warmed before sign-in binds once the machine's first remote open mints credentials", async () => {
+    host = new HostServer({
+      remote: fakeRemoteConfig(),
+      remoteRuntimeFactory: async () => fakeRuntime(),
+      remoteHostFactory: (options) => new TestRemoteHostConnection(options),
+    });
+    const localFolder = remoteFolder();
+    const localId = computeProjectId(localFolder);
+
+    // Warmed with no OAuth runtime yet — same as the guard test above.
+    await host.open(localId, localFolder, "local");
+    await settle();
+    expect(calls).toHaveLength(0);
+
+    // The FIRST remote open on the machine is what mints credentials
+    // (ensureRemoteRuntime) — that must re-offer every already-warm core's
+    // binding, not just the project this open() call is for.
+    const remoteFolder2 = remoteFolder();
+    const remoteId = computeProjectId(remoteFolder2);
+    await host.open(remoteId, remoteFolder2, "remote");
+    await settle();
+
+    const reportedIds = calls.map((c) => bodyOf(c).localProjectId as string).sort();
+    expect(reportedIds).toEqual([localId, remoteId].sort());
+
+    // Re-opening the already-bound local project afterwards must stay a no-op —
+    // the reporter's memo, not the re-offer trigger, is what dedupes it.
+    await host.open(localId, localFolder, "local");
+    await settle();
+    expect(calls).toHaveLength(2);
   });
 });

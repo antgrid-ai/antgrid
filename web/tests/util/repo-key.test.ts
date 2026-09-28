@@ -13,7 +13,9 @@ import { isValidRepoKey } from "../../src/util/repo-key.js";
 const BRIDGE_OUTPUTS: Record<string, string> = {
   "git@github.com:antgrid/antgrid.git": "github.com/antgrid/antgrid",
   "https://github.com/Antgrid/Antgrid.git": "github.com/antgrid/antgrid",
-  "ssh://git@github.com:2222/antgrid/antgrid.git": "github.com/antgrid/antgrid",
+  // A non-default port is KEPT, not dropped — see bridge/src/repo-key.ts.
+  "ssh://git@github.com:2222/antgrid/antgrid.git": "github.com:2222/antgrid/antgrid",
+  "ssh://git@github.com:22/antgrid/antgrid.git": "github.com/antgrid/antgrid",
   "https://user:pw@gitlab.com/group/subgroup/repo.git": "gitlab.com/group/subgroup/repo",
   "https://git.self-hosted.example.com/team/tool": "git.self-hosted.example.com/team/tool",
   "git@github.com:owner/repo.with.dots.git": "github.com/owner/repo.with.dots",
@@ -33,6 +35,8 @@ const NEVER_A_KEY = [
   "github.com/owner/repo space",
   "-github.com/owner/repo",
   "github.com//owner",
+  "github.com:abc/owner/repo",
+  "github.com:80:81/owner/repo",
   "",
 ];
 

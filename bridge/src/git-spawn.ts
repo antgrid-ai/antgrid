@@ -53,6 +53,12 @@ export interface GitSpawnOptions {
    * deadline: a slow disk is not a failure.
    */
   timeoutMs?: number;
+
+  /** Extra environment on top of the fixed defaults below, for a caller with
+   *  its own per-invocation variable (e.g. git-clone.ts's GIT_SSH_COMMAND).
+   *  Applied AFTER `process.env`, same as the fixed ones, so it can override an
+   *  inherited value the same way they do — the caller decides when that's safe. */
+  env?: Record<string, string | undefined>;
 }
 
 function gitEnv(opts: GitSpawnOptions): Record<string, string | undefined> {
@@ -60,6 +66,7 @@ function gitEnv(opts: GitSpawnOptions): Record<string, string | undefined> {
     ...process.env,
     GIT_OPTIONAL_LOCKS: "0",
     GIT_TERMINAL_PROMPT: "0",
+    ...opts.env,
   };
   if (opts.englishProse) env.LC_ALL = "C";
   return env;

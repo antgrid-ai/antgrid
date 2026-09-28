@@ -11,12 +11,15 @@
  * callers turn that into a synthetic per-machine key, never into a guess.
  */
 
+import { DEFAULT_PORTS } from "./capability-card";
+
 // Bounds the key before it reaches a column or a match path rather than at each
 // of them.
 const MAX_LENGTH = 512;
 
 const HOST = /^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/;
 const SEGMENT = /^[a-z0-9._-]+$/;
+const PORT = /^\d+$/;
 
 /** `null` for any remote that does not name a shareable repository. */
 export function normalizeRepoKey(remoteUrl: string | null | undefined): string | null {
@@ -29,6 +32,11 @@ export function normalizeRepoKey(remoteUrl: string | null | undefined): string |
 
   const host = split.host.toLowerCase();
   if (!HOST.test(host)) return null;
+  // Kept, not dropped, for a non-default port: capability-card.ts's
+  // normalizeRemoteUrl (the session-bus directory's own repo-key source) keeps
+  // it too, and the two must fold the same repository to the same key.
+  if (split.port && !PORT.test(split.port)) return null;
+  const authority = split.port && !DEFAULT_PORTS.has(split.port) ? `${host}:${split.port}` : host;
 
   // Owner and name are lowercased with the host: GitHub treats them
   // case-insensitively, and two keys differing only in case would be two
@@ -43,7 +51,7 @@ export function normalizeRepoKey(remoteUrl: string | null | undefined): string |
   segments[segments.length - 1] = name;
   if (segments.some((s) => s === "." || s === ".." || !SEGMENT.test(s))) return null;
 
-  const key = `${host}/${segments.join("/")}`;
+  const key = `${authority}/${segments.join("/")}`;
   return key.length > MAX_LENGTH ? null : key;
 }
 
@@ -73,11 +81,15 @@ export function isValidRepoKey(value: string): boolean {
   }
   const parts = value.split("/");
   if (parts.length < 3) return false;
-  const [host, ...path] = parts;
+  const [authority, ...path] = parts;
+  const authoritySegments = authority!.split(":");
+  if (authoritySegments.length > 2) return false;
+  const [host, port] = authoritySegments;
+  if (port !== undefined && !PORT.test(port)) return false;
   return HOST.test(host!) && path.every((p) => p !== "." && p !== ".." && SEGMENT.test(p));
 }
 
-function splitRemote(url: string): { host: string; path: string } | null {
+function splitRemote(url: string): { host: string; port: string; path: string } | null {
   const scheme = /^([a-z][a-z0-9+.-]*):\/\//i.exec(url);
   if (scheme) {
     // `file://` names a directory on one machine, so it is not an identity two
@@ -86,11 +98,12 @@ function splitRemote(url: string): { host: string; path: string } | null {
     const rest = url.slice(scheme[0]!.length);
     const slash = rest.indexOf("/");
     if (slash <= 0) return null;
-    return { host: stripUserAndPort(rest.slice(0, slash)), path: rest.slice(slash + 1) };
+    return { ...splitHostPort(rest.slice(0, slash)), path: rest.slice(slash + 1) };
   }
 
   // scp-like `[user@]host:path`, which Git recognizes by a colon appearing
-  // before any slash.
+  // before any slash. This form has no port of its own (Git's scp-like syntax
+  // has no way to express one — a non-default port needs ssh:// instead).
   const colon = url.indexOf(":");
   if (colon <= 0) return null;
   const slash = url.indexOf("/");
@@ -98,14 +111,13 @@ function splitRemote(url: string): { host: string; path: string } | null {
   const authority = url.slice(0, colon);
   // A Windows drive letter is a local path, not a host.
   if (authority.length === 1) return null;
-  return { host: stripUserAndPort(authority), path: url.slice(colon + 1) };
+  const at = authority.lastIndexOf("@");
+  return { host: at >= 0 ? authority.slice(at + 1) : authority, port: "", path: url.slice(colon + 1) };
 }
 
-function stripUserAndPort(authority: string): string {
+function splitHostPort(authority: string): { host: string; port: string } {
   const at = authority.lastIndexOf("@");
-  const host = at >= 0 ? authority.slice(at + 1) : authority;
-  // The port is dropped on purpose: the same repository cloned over ssh on 2222
-  // and https on 443 has to be one key, which is the entire point of folding.
-  const colon = host.indexOf(":");
-  return colon >= 0 ? host.slice(0, colon) : host;
+  const hostport = at >= 0 ? authority.slice(at + 1) : authority;
+  const colon = hostport.indexOf(":");
+  return colon >= 0 ? { host: hostport.slice(0, colon), port: hostport.slice(colon + 1) } : { host: hostport, port: "" };
 }

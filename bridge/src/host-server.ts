@@ -2245,6 +2245,11 @@ export class HostServer {
     if (existing) {
       existing.lastFocusedMs = this.tick();
       this.touchSeenProject(projectId);
+      // startCore() only reports once, at open time — a project warmed before
+      // credentials existed (not signed in yet, or a swallowed mint failure)
+      // would otherwise never bind. A reopen is the cheapest re-trigger: the
+      // reporter's own memo makes an already-bound project a no-op.
+      this.reportBinding(projectId, existing.path);
       return this.resultFor(existing);
     }
     // The host is authoritative for project identity: resolveProject, not the
@@ -2410,9 +2415,20 @@ export class HostServer {
     // reads controlPlaneRelay lazily at each re-mint. A LICENSE_EXPIRED stop keeps
     // maintenance re-minting; the first fresh mint redials the stopped socket. The
     // `?.` no-ops before the client exists and after a real revoke.
-    const onMinted = () => this.controlPlaneRelay?.redialWithFreshToken();
+    // Also re-offers every warm core's binding: a re-mint is credentials
+    // becoming available again exactly as the FIRST mint below is, and a
+    // project that warmed with accountCredentials() still null only ever
+    // reports once, at its own open().
+    const onMinted = () => {
+      this.controlPlaneRelay?.redialWithFreshToken();
+      this.reportAllBindings();
+    };
     const promise = (async () => {
       this.remoteRuntime = await build(cfg, onMinted);
+      // onMinted fires on every RE-mint but never this initial one — this is
+      // the first moment accountCredentials() can answer non-null, so it gets
+      // the same re-offer.
+      this.reportAllBindings();
       return this.remoteRuntime;
     })();
     // Hold the in-flight promise so concurrent callers share it; clear it on
@@ -2894,6 +2910,26 @@ export class HostServer {
     if (recorded) return recorded;
     const deviceId = this.remoteConfig()?.auth.deviceUuid;
     return deviceId ? syntheticRepoKey(deviceId, projectId) : undefined;
+  }
+
+  /** Re-offer one project's binding using its already-recorded repoKey. A no-op
+   *  through the reporter's own memo unless credentials were unavailable (or the
+   *  pair was refused) the last time this project reported. */
+  private reportBinding(projectId: string, localPath: string): void {
+    this.bindingReporter.report({
+      localProjectId: projectId,
+      localPath,
+      repoKey: this.seenProjects.get(projectId)?.repoKey,
+    });
+  }
+
+  /** Re-offer every currently warm core's binding. Called once credentials
+   *  become available (first remote-runtime mint, and every re-mint) so a
+   *  project warmed before sign-in — which startCore() reported exactly once,
+   *  when accountCredentials() was still null — is not bound-for-life to
+   *  nothing. */
+  private reportAllBindings(): void {
+    for (const [projectId, entry] of this.cores) this.reportBinding(projectId, entry.path);
   }
 
   /** Best-effort persist of the non-authoritative seen-projects hint catalog. A

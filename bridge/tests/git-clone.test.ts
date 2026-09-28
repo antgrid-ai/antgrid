@@ -1,8 +1,9 @@
 import { test, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { GitCloneError, cloneRepository, defaultCloneDirName, isCloneableUrl } from "../src/git-clone";
+import { GitCloneError, cloneRepository, cloneSshEnv, defaultCloneDirName, isCloneableUrl } from "../src/git-clone";
 import { ControlRequestSchema } from "../src/control-protocol";
 
 async function git(cwd: string, args: string[]) {
@@ -16,8 +17,18 @@ beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "antgrid-clone-"));
 });
 
-afterEach(() => {
-  rmSync(root, { recursive: true, force: true });
+afterEach(async () => {
+  // A killed (not exited) git subprocess can hold a Windows file handle open
+  // for a moment past its own reported kill, so a plain rmSync can lose a race
+  // against the OS releasing it — retry rather than flake the whole file.
+  for (let i = 0; i < 20; i++) {
+    try {
+      rmSync(root, { recursive: true, force: true });
+      break;
+    } catch {
+      await new Promise((r) => setTimeout(r, 25));
+    }
+  }
 });
 
 test("only network transports are cloneable", () => {
@@ -57,6 +68,48 @@ test("a failing clone reports CLONE_FAILED", async () => {
   const err = await cloneRepository({ url: "https://127.0.0.1:1/o/r.git", parentDir: root }).catch((e) => e);
   expect(err.code).toBe("CLONE_FAILED");
 });
+
+test("refuses a non-absolute parentDir", async () => {
+  const err = await cloneRepository({ url: "https://h/o/r.git", parentDir: "relative/dir" }).catch((e) => e);
+  expect(err).toBeInstanceOf(GitCloneError);
+  expect(err.code).toBe("BAD_TARGET");
+});
+
+test("cloneSshEnv sets BatchMode so ssh never blocks on a prompt, but leaves an operator's own GIT_SSH_COMMAND alone", () => {
+  const prev = process.env.GIT_SSH_COMMAND;
+  try {
+    delete process.env.GIT_SSH_COMMAND;
+    expect(cloneSshEnv()).toEqual({ GIT_SSH_COMMAND: "ssh -o BatchMode=yes" });
+
+    process.env.GIT_SSH_COMMAND = "custom-ssh-wrapper";
+    expect(cloneSshEnv()).toBeUndefined();
+  } finally {
+    if (prev === undefined) delete process.env.GIT_SSH_COMMAND;
+    else process.env.GIT_SSH_COMMAND = prev;
+  }
+});
+
+test("a killed (timed-out) clone removes the partial target it created, so a retry never fails TARGET_EXISTS", async () => {
+  // Accept the TCP connection but never answer, forcing the clone past our
+  // short deadline into git-spawn.ts's kill (TerminateProcess on Windows) —
+  // the ungraceful kill that leaves a partial directory behind in production,
+  // unlike an ordinary connection failure (which git cleans up after itself).
+  const server = createServer((socket) => socket.on("error", () => {}));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+  const port = (server.address() as { port: number }).port;
+  try {
+    const err = await cloneRepository({
+      url: `https://127.0.0.1:${port}/o/r.git`,
+      parentDir: root,
+      timeoutMs: 300,
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(GitCloneError);
+    expect(err.code).toBe("CLONE_FAILED");
+    expect(existsSync(join(root, "r"))).toBe(false);
+  } finally {
+    server.close();
+  }
+}, 15_000);
 
 test("git:clone request schema", () => {
   expect(

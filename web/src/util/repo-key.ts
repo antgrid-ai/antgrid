@@ -17,6 +17,7 @@ const MAX_LENGTH = 512;
 
 const HOST = /^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/;
 const SEGMENT = /^[a-z0-9._-]+$/;
+const PORT = /^\d+$/;
 
 export function isValidRepoKey(value: string): boolean {
   if (!value || value.length > MAX_LENGTH) return false;
@@ -27,6 +28,10 @@ export function isValidRepoKey(value: string): boolean {
   }
   const parts = value.split("/");
   if (parts.length < 3) return false;
-  const [host, ...path] = parts;
+  const [authority, ...path] = parts;
+  const authoritySegments = authority!.split(":");
+  if (authoritySegments.length > 2) return false;
+  const [host, port] = authoritySegments;
+  if (port !== undefined && !PORT.test(port)) return false;
   return HOST.test(host!) && path.every((p) => p !== "." && p !== ".." && SEGMENT.test(p));
 }

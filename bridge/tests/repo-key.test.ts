@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { normalizeRemoteUrl } from "../src/capability-card";
 import { isValidRepoKey, normalizeRepoKey, syntheticRepoKey } from "../src/repo-key";
 
 // Every task table keys off this string, so a rule that changes after keys exist
@@ -12,11 +13,16 @@ const FOLDS: Array<[label: string, remote: string, key: string]> = [
   ["plain http", "http://github.com/antgrid/antgrid.git", "github.com/antgrid/antgrid"],
   ["scp form", "git@github.com:antgrid/antgrid.git", "github.com/antgrid/antgrid"],
   ["ssh url", "ssh://git@github.com/antgrid/antgrid.git", "github.com/antgrid/antgrid"],
-  ["ssh url on a non-default port", "ssh://git@github.com:2222/antgrid/antgrid.git", "github.com/antgrid/antgrid"],
+  // A non-default port is KEPT, not dropped — it must match capability-card.ts's
+  // normalizeRemoteUrl, the session-bus directory's own repoKey source, or the
+  // same repository folds to two different keys depending which probe ran.
+  ["ssh url on a non-default port", "ssh://git@github.com:2222/antgrid/antgrid.git", "github.com:2222/antgrid/antgrid"],
+  ["ssh url on the default ssh port", "ssh://git@github.com:22/antgrid/antgrid.git", "github.com/antgrid/antgrid"],
+  ["https url on the default https port", "https://github.com:443/antgrid/antgrid.git", "github.com/antgrid/antgrid"],
   ["git protocol", "git://github.com/antgrid/antgrid.git", "github.com/antgrid/antgrid"],
   ["mixed case host, owner and name", "https://GitHub.COM/AntGrid/AntGrid.GIT", "github.com/antgrid/antgrid"],
   ["GitLab subgroup", "https://gitlab.com/group/sub/repo.git", "gitlab.com/group/sub/repo"],
-  ["self-hosted host with a port", "ssh://git@git.example.co.uk:2222/team/repo.git", "git.example.co.uk/team/repo"],
+  ["self-hosted host with a non-default port", "ssh://git@git.example.co.uk:2222/team/repo.git", "git.example.co.uk:2222/team/repo"],
 ];
 
 const REFUSED: Array<[label: string, remote: string | null | undefined]> = [
@@ -45,10 +51,29 @@ describe("normalizeRepoKey", () => {
   }
 
   test("every github.com spelling of one repository is a single key", () => {
+    // Excludes the non-default-port variant on purpose: a different port is a
+    // different key now (see the FOLDS comment above it), not another spelling
+    // of the same one.
     const keys = new Set(
-      FOLDS.filter(([, remote]) => /github\.com/i.test(remote)).map(([, remote]) => normalizeRepoKey(remote)),
+      FOLDS.filter(([, remote]) => /github\.com/i.test(remote) && !remote.includes(":2222"))
+        .map(([, remote]) => normalizeRepoKey(remote)),
     );
     expect([...keys]).toEqual(["github.com/antgrid/antgrid"]);
+  });
+
+  test("keeping a non-default port matches capability-card.ts's normalizeRemoteUrl, byte for byte", () => {
+    // These two functions feed fields both named repoKey from different code
+    // paths (agent:projects vs. the session-bus directory) — they must produce
+    // the identical string for the identical remote.
+    const remotes = [
+      "ssh://git@gitlab.corp:2222/team/app.git",
+      "https://git.example.co.uk:8443/team/app.git",
+      "ssh://git@github.com:22/antgrid/antgrid.git",
+      "https://github.com/antgrid/antgrid.git",
+    ];
+    for (const remote of remotes) {
+      expect(normalizeRepoKey(remote)).toBe(normalizeRemoteUrl(remote));
+    }
   });
 
   for (const [label, remote] of REFUSED) {
