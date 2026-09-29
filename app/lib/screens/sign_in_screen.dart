@@ -5,7 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show TextInput;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:sign_in_with_apple/sign_in_with_apple.dart'
-    show SignInWithAppleButton, SignInWithAppleButtonStyle;
+    show AppleLogoPainter;
 import '../demo/demo_identity.dart';
 import '../design/ab_colors.dart';
 import '../design/ab_icons.dart';
@@ -906,7 +906,9 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
         const _OrDivider(),
         const SizedBox(height: AbTokens.space12),
         if (_offersAppleSignIn) ...[
-          _AppleSignInButton(
+          _SignInButton(
+            label: 'Continue with Apple',
+            leading: (color) => _AppleMark(color: color),
             onPressed: busy
                 ? null
                 : () => detached(
@@ -1366,10 +1368,14 @@ class _SignInButton extends StatefulWidget {
     required this.label,
     required this.onPressed,
     this.variant = _SignInButtonVariant.normal,
+    this.leading,
   });
   final String label;
   final VoidCallback? onPressed;
   final _SignInButtonVariant variant;
+
+  /// A mark before the label, drawn in the label's colour.
+  final Widget Function(Color color)? leading;
 
   @override
   State<_SignInButton> createState() => _SignInButtonState();
@@ -1384,6 +1390,9 @@ class _SignInButtonState extends State<_SignInButton> {
     final antgrid = context.antgrid;
     final enabled = widget.onPressed != null;
     final isPrimary = widget.variant == _SignInButtonVariant.primary;
+    final foreground = isPrimary
+        ? antgrid.accentForeground
+        : antgrid.textPrimary;
     final visual = Container(
       padding: const EdgeInsets.symmetric(vertical: AbTokens.space10),
       decoration: BoxDecoration(
@@ -1395,12 +1404,21 @@ class _SignInButtonState extends State<_SignInButton> {
         ),
         borderRadius: AbTokens.borderRadius5,
       ),
-      child: Text(
-        widget.label,
-        textAlign: TextAlign.center,
-        style: AbTokens.sansStyle(
-          color: isPrimary ? antgrid.accentForeground : antgrid.textPrimary,
-        ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          if (widget.leading case final leading?) ...[
+            leading(foreground),
+            const SizedBox(width: AbTokens.space6),
+          ],
+          Flexible(
+            child: Text(
+              widget.label,
+              textAlign: TextAlign.center,
+              style: AbTokens.sansStyle(color: foreground),
+            ),
+          ),
+        ],
       ),
     );
     if (!enabled) return Opacity(opacity: 0.4, child: visual);
@@ -1448,39 +1466,24 @@ const String _googleMark =
     's5.56 12 12.173 12c3.573 0 6.267-1.173 8.373-3.36c2.16-2.16 2.84-5.213 '
     '2.84-7.667c0-.76-.053-1.467-.173-2.053z"/></svg>';
 
-/// Apple's own button, not a cell in [_AuthMethodRow], because App Review holds
-/// a Sign in with Apple button to Apple's design: the title must be one of
-/// Apple's three, the logo Apple's artwork, and logo, title and fill black or
-/// white — none of which the row's token-coloured cells can be. The fill
-/// follows the theme, black on light and white on dark, as Apple's guidelines
-/// pair them. Corner radius and height are the parts Apple lets a custom
-/// button match to its neighbours.
-class _AppleSignInButton extends StatelessWidget {
-  const _AppleSignInButton({required this.onPressed});
+/// Apple's logo artwork, sized to sit beside a [_SignInButton] title.
+///
+/// Sign in with Apple is a full-width outlined [_SignInButton] rather than a
+/// cell in [_AuthMethodRow]: Apple's guidelines want its title spelled out,
+/// and it may be no less prominent than the other providers. It is not the
+/// plugin's `SignInWithAppleButton`, whose solid black or white fill competed
+/// with the primary Continue button.
+class _AppleMark extends StatelessWidget {
+  const _AppleMark({required this.color});
 
-  final VoidCallback? onPressed;
+  final Color color;
 
   @override
-  Widget build(BuildContext context) {
-    final button = SignInWithAppleButton(
-      text: 'Continue with Apple',
-      height: AbTokens.rowHeightLg,
-      borderRadius: AbTokens.borderRadius5,
-      style: Theme.of(context).brightness == Brightness.dark
-          ? SignInWithAppleButtonStyle.white
-          : SignInWithAppleButtonStyle.black,
-      // Never null: a disabled CupertinoButton swaps the fill for a system
-      // grey, which Apple's rules do not allow. Dimmed like every other
-      // control on this screen instead.
-      onPressed: onPressed ?? () {},
-    );
-    if (onPressed == null) {
-      return IgnorePointer(
-        child: Opacity(opacity: AbTokens.opacityDisabled, child: button),
-      );
-    }
-    return button;
-  }
+  Widget build(BuildContext context) => SizedBox(
+    width: AbTokens.fontBody * 25 / 31,
+    height: AbTokens.fontBody,
+    child: CustomPaint(painter: AppleLogoPainter(color: color)),
+  );
 }
 
 /// One way to prove the address is yours, as rendered by [_AuthMethodRow].
