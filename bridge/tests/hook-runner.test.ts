@@ -630,6 +630,37 @@ describe("Claude hooks", () => {
       { port: 43123, path: "/turn-activity", body: { terminalId: "term-1" } },
     ]);
   });
+
+  test("tool-failed posts /turn-activity — a failed tool is still activity", async () => {
+    const h = harness({
+      agent: "claude",
+      event: "tool-failed",
+      stdin: JSON.stringify({ session_id: "s1" }),
+    });
+    await h.run();
+    expect(h.posts).toEqual([
+      { port: 43123, path: "/turn-activity", body: { terminalId: "term-1" } },
+    ]);
+  });
+
+  test("PostToolUseFailure carries both the AskUserQuestion group and an async catch-all, and only the catch-all is async", () => {
+    // Same shape as PostToolUse's catch-all: the re-assert reports a fact off
+    // the critical path, not an ordering the synchronous AskUserQuestion pair
+    // depends on.
+    const abDir = mkdtempSync(join(tmpdir(), "ab-hookrunner-"));
+    pluginDirs.push(abDir);
+    const a = augmentAgentLaunch("claude-code", {
+      abDir,
+      self: { compiled: true, binary: "C:\\Program Files\\Antgrid\\antgrid-bridge.exe" },
+    });
+    const hooks = JSON.parse(readFileSync(join(a.args[1]!, "hooks", "hooks.json"), "utf8"));
+    const groups = hooks.hooks.PostToolUseFailure;
+    expect(groups).toHaveLength(2);
+    expect(groups[0].matcher).toBe("AskUserQuestion");
+    expect(groups[0].hooks[0].async).toBeUndefined();
+    expect(groups[1].matcher).toBe("");
+    expect(groups[1].hooks[0].async).toBe(true);
+  });
 });
 
 describe("Codex hooks", () => {
@@ -669,6 +700,31 @@ describe("Codex hooks", () => {
     expect(permission.posts).toEqual([]);
     expect(stop.posts).toEqual([{ port: 43123, path: "/notify", body: { type: "task_complete", terminalId: "term-1" } }]);
     expect(start.posts).toEqual([{ port: 43123, path: "/hook-alive", body: { terminalId: "term-1" } }]);
+  });
+
+  test("session-start forwards transcript_path via session-title, alongside hook-alive", async () => {
+    const h = harness({
+      agent: "codex",
+      event: "session-start",
+      stdin: JSON.stringify({ session_id: "s1", transcript_path: "/home/u/.codex/sessions/rollout-s1.jsonl" }),
+    });
+    await h.run();
+    expect(h.posts).toEqual(expect.arrayContaining([
+      { port: 43123, path: "/hook-alive", body: { terminalId: "term-1" } },
+      {
+        port: 43123, path: "/session-title",
+        body: {
+          terminalId: "term-1", sessionId: "s1", agent: "codex",
+          transcriptPath: "/home/u/.codex/sessions/rollout-s1.jsonl",
+        },
+      },
+    ]));
+  });
+
+  test("session-start with no transcript_path posts only hook-alive", async () => {
+    const h = harness({ agent: "codex", event: "session-start", stdin: JSON.stringify({ session_id: "s1" }) });
+    await h.run();
+    expect(h.posts).toEqual([{ port: 43123, path: "/hook-alive", body: { terminalId: "term-1" } }]);
   });
 
   test("codex stop forwards last_assistant_message as the notification body", async () => {

@@ -5,7 +5,7 @@ import { LocalListener } from "./local-listener";
 import type { AttachStreamOpts, PeerSessionView, StreamHandle } from "./project-streams";
 import type { AbMessage, SessionEntry, WorkStatus } from "./protocol";
 import type { DeleteSessionOptions } from "./session-manager";
-import { answerRequest, becameDeliverable, busDeliverable, clientFocusState, clientGone, closeTurn, hookTurnEnd, initialWorkStatus, isStaleIdleNudge, noteHookChannelLost, noteHookChannelRestored, openedTurns, reduceWorkStatus, sessionFocus, turnActivity, turnStart, UNATTRIBUTED_TURN, userReply, type WorkStatusState } from "./work-status";
+import { answerRequest, becameDeliverable, busDeliverable, clientFocusState, clientGone, closeInterruptedTurn, hookTurnEnd, initialWorkStatus, isStaleIdleNudge, noteHookChannelLost, noteHookChannelRestored, openedTurns, reduceWorkStatus, sessionFocus, turnActivity, turnOpenFor, turnStart, UNATTRIBUTED_TURN, userReply, type WorkStatusState } from "./work-status";
 import { SessionBusDeliveryQueue, type QueuedLine } from "./session-bus/delivery-queue";
 import { logger } from "./logger";
 const log = logger.child({ component: "project-core" });
@@ -326,11 +326,21 @@ export class ProjectCore {
     this.core?.noteClientGone(client);
   }
 
-  /** The user pressed a bare Esc into [sessionId]'s PTY — close its turn now
-   *  rather than wait on a Stop hook the CLI may never fire for a manual
-   *  interrupt. See {@link closeTurn}. */
+  /** The user pressed an interrupt key into [sessionId]'s PTY — close its turn
+   *  now rather than wait on a Stop hook the CLI may never fire for a manual
+   *  interrupt. See {@link closeInterruptedTurn}.
+   *
+   *  Gated on {@link turnOpenFor}: closeInterruptedTurn clears whatever the
+   *  session (or the project's unattributed slot) was blocked on
+   *  unconditionally, with no notion of whether a turn was actually open to
+   *  close. An idle session's Ctrl+C — reflexive after Claude/Codex added it
+   *  as an interrupt key, where Esc rarely fired outside a live turn — would
+   *  otherwise delete its own `task_complete` record and defeat
+   *  {@link isStaleIdleNudge}, or (via the unattributed fallback) another
+   *  session's live call-to-action. */
   noteInterrupt(sessionId: string): void {
-    this.commitWork(closeTurn(this._work, sessionId));
+    if (!turnOpenFor(this._work.activeTurns, sessionId)) return;
+    this.commitWork(closeInterruptedTurn(this._work, sessionId));
   }
 
   /** A hook reported [sessionId]'s turn over on a channel that files no
@@ -419,6 +429,9 @@ export class ProjectCore {
       // Handler never pays a context assemble plus a judge spawn for a nudge on
       // a turn that already finished.
       isStaleIdleNudge: (id) => isStaleIdleNudge(this._work, id),
+      // Gates whether a lone Esc/Ctrl+C is even worth confirming against the
+      // transcript — see shouldArmInterruptConfirm in agent-core.ts.
+      isTurnOpenFor: (id) => turnOpenFor(this._work.activeTurns, id),
       sendToOwner: (msg) => this.sendToOwner(msg),
       sendToAppSession: (peerId, msg) => this.sendToAppSession(peerId, msg),
       // This machine's half of every session-bus address. The remote device id

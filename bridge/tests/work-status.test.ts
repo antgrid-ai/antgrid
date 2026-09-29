@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { answerRequest, attentionEdges, becameDeliverable, busDeliverable, clientFocusState, clientGone, closeTurn, hookTurnEnd, initialWorkStatus, isStaleIdleNudge, noteHookChannelLost, noteHookChannelRestored, openedTurns, reduceWorkStatus, sessionFocus, turnActivity, turnOpenFor, turnStart, UNATTRIBUTED_TURN, userReply, type WorkStatusState } from "../src/work-status";
+import { answerRequest, attentionEdges, becameDeliverable, busDeliverable, clientFocusState, clientGone, closeInterruptedTurn, closeTurn, hookTurnEnd, initialWorkStatus, isStaleIdleNudge, noteHookChannelLost, noteHookChannelRestored, openedTurns, reduceWorkStatus, sessionFocus, turnActivity, turnOpenFor, turnStart, UNATTRIBUTED_TURN, userReply, type WorkStatusState } from "../src/work-status";
 import type { InboundSource } from "../src/message-bus";
 
 /** The two client classes the read state distinguishes: the phone reaches a core
@@ -102,9 +102,10 @@ test("a turn-end notification closes the hook-opened turn (terminal-mode session
 
 test("closeTurn ends a hook-based session's turn on a bare Esc, with no stop hook required", () => {
   // Terminal-mode sessions have no cancel RPC — project-core's onInterrupt
-  // (keystrokes.ts' isInterruptKeystroke) calls closeTurn directly the instant
-  // the user presses Esc, rather than waiting on a Stop hook most CLIs never
-  // fire for a manual interrupt.
+  // calls closeInterruptedTurn (built on closeTurn, exercised directly here)
+  // once the transcript confirms the Esc actually interrupted the turn (see
+  // agent-core.ts' shouldArmInterruptConfirm and interrupt-confirm.ts), rather
+  // than waiting on a Stop hook most CLIs never fire for a manual interrupt.
   const working = turnStart(fold([sessions(1)]), "r0");
   expect(working.status).toBe("working");
   const interrupted = closeTurn(working, "r0");
@@ -131,6 +132,64 @@ test("closeTurn leaves a sibling session's turn running", () => {
   const interrupted = closeTurn(s, "r0");
   expect(interrupted.sessionStatuses.get("r0")).toBe("done");
   expect(interrupted.sessionStatuses.get("r1")).toBe("working");
+});
+
+test("closeInterruptedTurn closes the turn exactly like closeTurn and additionally marks it", () => {
+  const working = turnStart(fold([sessions(1)]), "r0");
+  const interrupted = closeInterruptedTurn(working, "r0");
+  expect(interrupted.status).toBe("done");
+  expect(interrupted.activeTurns.has("r0")).toBe(false);
+  expect(interrupted.interruptedTurns.has("r0")).toBe(true);
+});
+
+test("closeInterruptedTurn on an already-closed turn still marks it (not a no-op)", () => {
+  // closeTurn alone is a no-op here, but the mark itself has to land even when
+  // there was nothing left for closeTurn to close — a confirmation racing a
+  // Stop hook that beat it must still block turnActivity from reopening.
+  const idle = fold([sessions(1)]);
+  const marked = closeInterruptedTurn(idle, "r0");
+  expect(marked.interruptedTurns.has("r0")).toBe(true);
+});
+
+test("closeInterruptedTurn is a true no-op (SAME object) the second time", () => {
+  const working = turnStart(fold([sessions(1)]), "r0");
+  const once = closeInterruptedTurn(working, "r0");
+  expect(closeInterruptedTurn(once, "r0")).toBe(once);
+});
+
+test("turnActivity cannot reopen a turn closeInterruptedTurn just closed", () => {
+  // The race the mark exists for: a catch-all tool-completion hook already in
+  // flight when the confirmation lands resolves afterward, and must not undo it.
+  const working = turnStart(fold([sessions(1)]), "r0");
+  const interrupted = closeInterruptedTurn(working, "r0");
+  expect(turnActivity(interrupted, "r0")).toBe(interrupted);
+});
+
+test("a fresh turnStart lifts the interrupted mark, so a LATER turnActivity can reopen again", () => {
+  const working = turnStart(fold([sessions(1)]), "r0");
+  const interrupted = closeInterruptedTurn(working, "r0");
+  const restarted = turnStart(interrupted, "r0");
+  expect(restarted.interruptedTurns.has("r0")).toBe(false);
+  // An ordinary turn-end for this new turn, then a tool-completion hook — with
+  // the mark lifted, this reopens rather than staying a no-op the way it did
+  // right after the interrupt.
+  const closedOrdinary = closeTurn(restarted, "r0");
+  expect(turnActivity(closedOrdinary, "r0").activeTurns.has("r0")).toBe(true);
+});
+
+test("a submitted keystroke that opens a new turn lifts the interrupted mark", () => {
+  const keystroked = fold([sessions(1, { tool: "codex" })]);
+  const working = turnStart(keystroked, "r0");
+  const interrupted = closeInterruptedTurn(working, "r0");
+  const resubmitted = userReply(interrupted, "r0", { submitted: true, typed: true });
+  expect(resubmitted.interruptedTurns.has("r0")).toBe(false);
+});
+
+test("a stopped session's interrupted mark is pruned, not carried forever", () => {
+  const working = turnStart(fold([sessions(1)]), "r0");
+  const interrupted = closeInterruptedTurn(working, "r0");
+  const stopped = fold([sessions(0)], interrupted);
+  expect(stopped.interruptedTurns.size).toBe(0);
 });
 
 test("awaiting_input yields attention when the turn hasn't resolved yet (a genuine mid-turn block)", () => {

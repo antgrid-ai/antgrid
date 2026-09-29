@@ -2,6 +2,7 @@ import { describe, it, expect } from "bun:test";
 import { mapToolKind, mapAssistantContent, mapUsage, mapResultError, addUsage } from "../src/agents/claude-code/mapping";
 import { toPosts } from "../src/agents/claude-code/hooks";
 import { toPosts as codexToPosts } from "../src/agents/codex/hooks";
+import { isInterruptRecord } from "../src/agents/claude-code/transcript";
 
 describe("mapToolKind", () => {
   it("maps known Claude Code tools to toolKinds", () => {
@@ -139,6 +140,67 @@ describe("turn-activity re-assert (tool completion between turn-start and turn-e
         { port: 43123, terminalId: undefined, readStdin: async () => "{}" },
       ),
     ).toEqual([]);
+  });
+});
+
+describe("tool-failed re-assert (a failed tool call is still activity)", () => {
+  it("Claude's catch-all PostToolUseFailure posts /turn-activity with the terminal id", async () => {
+    const posts = await toPosts(
+      { agent: "claude", event: "tool-failed" },
+      { port: 43123, terminalId: "term-1", readStdin: async () => JSON.stringify({ session_id: "s1" }) },
+    );
+    expect(posts).toEqual([{ port: 43123, path: "/turn-activity", body: { terminalId: "term-1" } }]);
+  });
+
+  it("omits the terminal id rather than sending an empty one", async () => {
+    expect(
+      await toPosts(
+        { agent: "claude", event: "tool-failed" },
+        { port: 43123, terminalId: undefined, readStdin: async () => "{}" },
+      ),
+    ).toEqual([{ port: 43123, path: "/turn-activity", body: {} }]);
+  });
+});
+
+describe("isInterruptRecord (transcript-confirmed manual interrupt)", () => {
+  it("matches a user entry whose text starts with the interrupted marker", () => {
+    expect(isInterruptRecord({
+      type: "user",
+      message: { role: "user", content: [{ type: "text", text: "[Request interrupted by user]" }] },
+    })).toBe(true);
+  });
+
+  it("matches the 'for tool use' variant, nested inside a tool_result", () => {
+    expect(isInterruptRecord({
+      type: "user",
+      message: {
+        role: "user",
+        content: [{
+          type: "tool_result", tool_use_id: "t1", is_error: true,
+          content: [{ type: "text", text: "[Request interrupted by user for tool use]" }],
+        }],
+      },
+    })).toBe(true);
+  });
+
+  it("rejects an ordinary user entry", () => {
+    expect(isInterruptRecord({
+      type: "user",
+      message: { role: "user", content: [{ type: "text", text: "please continue" }] },
+    })).toBe(false);
+  });
+
+  it("rejects an assistant entry, even one carrying the marker text", () => {
+    expect(isInterruptRecord({
+      type: "assistant",
+      message: { role: "assistant", content: [{ type: "text", text: "[Request interrupted by user]" }] },
+    })).toBe(false);
+  });
+
+  it("rejects a record with no message content, or a malformed record", () => {
+    expect(isInterruptRecord({ type: "user", message: { role: "user" } })).toBe(false);
+    expect(isInterruptRecord(null)).toBe(false);
+    expect(isInterruptRecord("not an object")).toBe(false);
   });
 });
 

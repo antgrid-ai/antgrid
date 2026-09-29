@@ -84,7 +84,16 @@ function materializeClaudePlugin(
         { matcher: ASK_QUESTION_TOOL, hooks: [claudeHook(command, "question-answered")] },
         { matcher: "", hooks: [{ ...claudeHook(command, "tool-done"), async: true }] },
       ],
-      PostToolUseFailure: [{ matcher: ASK_QUESTION_TOOL, hooks: [claudeHook(command, "question-answered")] }],
+      PostToolUseFailure: [
+        { matcher: ASK_QUESTION_TOOL, hooks: [claudeHook(command, "question-answered")] },
+        // A second, catch-all group on the SAME event, same reasoning as
+        // PostToolUse's catch-all above: a failed tool call is still activity,
+        // and this is the only re-assert a turn gets when the failing call is
+        // the last thing before an otherwise-silent stretch. Async because it
+        // reports a fact, not the ordering PreToolUse/PostToolUse/
+        // PostToolUseFailure's AskUserQuestion trio depends on.
+        { matcher: "", hooks: [{ ...claudeHook(command, "tool-failed"), async: true }] },
+      ],
       // A fresh turn: resets control-plane work status to "working" so a
       // re-prompt of an existing session (the Stop hook already fired
       // task_complete) no longer reads as done/attention. See hook-runner's
@@ -158,7 +167,7 @@ type ClaudePayload = z.infer<typeof ClaudePayloadSchema>;
 // of one.
 export const events = [
   "session-start", "stop", "stop-failure", "notification", "user-prompt",
-  "question", "question-answered", "tool-done",
+  "question", "question-answered", "tool-done", "tool-failed",
 ] as const;
 
 // "stop-failure" is deliberately not an `end`: it posts a turn-end notify only
@@ -277,6 +286,18 @@ export async function toPosts(
     // call finishing while the turn is otherwise idle (a background Task,
     // a slow Bash) is itself evidence the agent is still working, and this is
     // the only signal that re-asserts it between UserPromptSubmit and Stop.
+    posts.push({
+      port,
+      path: "/turn-activity",
+      body: { ...(terminalId ? { terminalId } : {}) },
+    });
+  }
+  if (invocation.event === "tool-failed") {
+    // A failed tool call is still activity — no installed Claude build fires
+    // this (or any) hook on a manual Esc/Ctrl+C interrupt, so there is no
+    // signal here to split an ordinary failure from one. A real interrupt is
+    // confirmed against the transcript instead (see
+    // AgentSpec.transcriptInterrupt).
     posts.push({
       port,
       path: "/turn-activity",

@@ -3,7 +3,7 @@
 // Pinned per agent because the whole point of pushing them into the profiles is
 // that a per-agent change cannot silently move a cross-agent verdict.
 import { describe, expect, test } from "bun:test";
-import { AGENTS, handlerObservable, needsKeystrokeTurnStart } from "../../packages/antgrid-agents/src/agents/registry";
+import { AGENTS, handlerObservable, needsKeystrokeTurnStart, transcriptInterruptFor } from "../../packages/antgrid-agents/src/agents/registry";
 import { injectsHookAliveProbe } from "../src/agent-runtime";
 import type { AgentKey } from "../../packages/antgrid-agents/src/agents/types";
 
@@ -121,5 +121,38 @@ describe("handlerObservable", () => {
       expect(handlerObservable("some-shell", mode)).toBe(false);
       expect(handlerObservable(undefined, mode)).toBe(false);
     }
+  });
+});
+
+describe("transcriptInterruptFor", () => {
+  test("claude and codex are the only agents that declare a transcript-interrupt predicate", () => {
+    for (const key of AGENT_KEYS) {
+      const predicate = transcriptInterruptFor(key);
+      if (key === "claude-code" || key === "codex") expect(typeof predicate).toBe("function");
+      else expect(predicate).toBeUndefined();
+    }
+  });
+
+  test("an unknown tool and an unnamed one both decline", () => {
+    expect(transcriptInterruptFor("some-shell")).toBeUndefined();
+    expect(transcriptInterruptFor(undefined)).toBeUndefined();
+  });
+
+  test("claude's predicate matches the transcript's own interrupted-turn entry", () => {
+    const predicate = transcriptInterruptFor("claude-code")!;
+    expect(predicate({
+      type: "user",
+      message: { role: "user", content: [{ type: "text", text: "[Request interrupted by user]" }] },
+    })).toBe(true);
+    expect(predicate({
+      type: "user",
+      message: { role: "user", content: [{ type: "text", text: "hello" }] },
+    })).toBe(false);
+  });
+
+  test("codex's predicate matches turn_aborted/interrupted", () => {
+    const predicate = transcriptInterruptFor("codex")!;
+    expect(predicate({ type: "event_msg", payload: { type: "turn_aborted", reason: "interrupted" } })).toBe(true);
+    expect(predicate({ type: "event_msg", payload: { type: "agent_message" } })).toBe(false);
   });
 });

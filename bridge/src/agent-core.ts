@@ -18,12 +18,15 @@ import {
 import { createKeyedLock } from "./keyed-lock";
 import {
   hasTypedContent,
-  isInterruptKeystroke,
+  isCtrlC,
+  isLoneEsc,
   isSubmitKeystroke,
   isTerminalReport,
   opensCommandLine,
   submittedLine,
 } from "./keystrokes";
+import { transcriptInterruptFor } from "antgrid-agents/builtins";
+import { createInterruptConfirmer, type InterruptConfirmDeps } from "./interrupt-confirm";
 import { AGENT_GRACE_MS, killChildTree, processGroupSpawn } from "./terminal-session";
 import { createConnState, type ConnState } from "./conn-state";
 import type { PeerSessionView, SendTarget, TerminalStreamHooks } from "./project-streams";
@@ -187,6 +190,32 @@ interface CheckoutRuntime {
 // Where each terminal stands with the /hook-alive probe. Only a respawn clears
 // an entry, which is what keeps the verdict — and the warning — one per spawn.
 const hookAliveState = new Map<string, "armed" | "pinged">();
+
+/**
+ * Whether a lone Esc/Ctrl+C keystroke on [sessionId] (agent [tool]) should arm
+ * the transcript-interrupt confirmation (`interrupt-confirm.ts`), given
+ * whether its turn is currently open and whether its transcript path is known.
+ *
+ * A bare key is ambiguous — it closes a picker, a dialog or a task view as
+ * readily as it aborts a turn — so this answers only "is there anything to
+ * confirm", never "did the key interrupt": [data] not being a lone Esc/Ctrl+C,
+ * an idle turn, an agent with no {@link transcriptInterruptFor} predicate
+ * (every agent but claude and codex), or an unknown transcript path each mean
+ * nothing happens and answer undefined here.
+ *
+ * Exported and pure so a test can drive it directly, without a real PTY, a
+ * real transcript file, or a running core.
+ */
+export function shouldArmInterruptConfirm(
+  tool: string | undefined,
+  data: string,
+  turnOpen: boolean,
+  transcriptPath: string | undefined,
+): ((record: unknown) => boolean) | undefined {
+  if (!turnOpen || !transcriptPath) return undefined;
+  if (!isLoneEsc(data) && !isCtrlC(data)) return undefined;
+  return transcriptInterruptFor(tool);
+}
 
 // How long an agent has to ping /hook-alive after a prompt is submitted into it.
 // Measured at 3s on a cold codex TUI; firing early is a false "hooks are dead".
@@ -440,16 +469,18 @@ export interface BuildAgentCoreOptions {
    *  {@link onTurnStart}: it opens a turn only if something was actually
    *  pending. Bridge-internal — never surfaces to the app. */
   onAnswer?: (sessionId: string, requestId?: string) => void;
-  /** Fired when the user presses a bare Escape key into [sessionId]'s PTY (see
-   *  {@link isInterruptKeystroke}), so the owning ProjectCore can close the
+  /** Fired once [sessionId]'s own transcript confirms a keystroke actually
+   *  interrupted its turn (see `interrupt-confirm.ts` and
+   *  {@link shouldArmInterruptConfirm}), so the owning ProjectCore can close the
    *  turn the hook model has no other way to end. A hook-based session's only
-   *  turn-end signal is its own Stop/completion hook, which most agent CLIs
-   *  never fire on a manual interrupt — without this the working dot outlives
-   *  an Esc that genuinely aborted the turn. Bridge-internal — never surfaces
-   *  to the app, and purely a work-status close: the keystroke itself already
-   *  reached the CLI via the normal PTY write and is what actually interrupts
-   *  it. A later real turn-end/notification for the same turn is harmless
-   *  (closeTurn is idempotent on an already-closed turn). */
+   *  turn-end signal is its own Stop/completion hook, which neither Claude nor
+   *  Codex has been OBSERVED to fire on a manual interrupt — without this the
+   *  working dot outlives one that genuinely aborted the turn. Bridge-internal
+   *  — never surfaces to the app, and purely a work-status close: the
+   *  keystroke itself already reached the CLI via the normal PTY write and is
+   *  what actually interrupts it. A later real turn-end/notification for the
+   *  same turn is harmless (closeTurn is idempotent on an already-closed
+   *  turn). */
   onInterrupt?: (sessionId: string) => void;
   /** A hook reported [sessionId]'s turn ENDED on a channel filing no notification
    *  (codex's `notify` argv) — the second closer, so a turn opened by keystroke
@@ -486,6 +517,19 @@ export interface BuildAgentCoreOptions {
    *  nudge's phone push; an absent hook forwards, which is the direction a
    *  supervisor has to fail in. */
   isStaleIdleNudge?: (sessionId: string) => boolean;
+  /** True while [sessionId] has an open turn, per the owner's own work-status
+   *  reduction — the gate {@link shouldArmInterruptConfirm} asks before arming a
+   *  transcript-interrupt confirmation on a lone Esc/Ctrl+C: idle Ctrl+C is
+   *  reflexive on some CLIs (it exits Codex outright) and an idle double-Esc
+   *  opens Codex's transcript overlay, neither of which has anything for a
+   *  confirmation to watch for. Absent means never open, which only costs the
+   *  confirmation a keystroke it would have declined to arm anyway. */
+  isTurnOpenFor?: (sessionId: string) => boolean;
+  /** Test-only: replaces the transcript-interrupt confirmer's real clock, timer
+   *  and file I/O (`interrupt-confirm.ts`) so a test can drive a confirmation
+   *  window deterministically, with no real sleep and no real file on disk.
+   *  Never set outside a test. */
+  interruptConfirmDeps?: InterruptConfirmDeps;
   /** Relay base URL of the machine socket this core attaches to. Host-supplied
    *  in remote mode: only a standalone agent with an explicit `relayUrl:` in its
    *  antgrid.yaml can learn it from config, so without this a host-spawned
@@ -1768,6 +1812,23 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // they arrive, which gives the phone no way to time the gap itself.
         const id = internalTerminalId(runtime, msg.terminalId);
         const line = submittedLine(msg.data);
+        // Baseline the transcript-interrupt confirmation BEFORE the key reaches
+        // the PTY — Codex's own interrupt marker lands ~36ms after the key, so
+        // reading the transcript's size after the write below risks losing that
+        // race on a fast CLI. sessions?.get, not agentKeyFor: the latter falls
+        // back to the project's default tool for ANY terminal id, including a
+        // service PTY or a config `terminals:` slot — neither runs a turn a
+        // transcript could confirm interrupted. See shouldArmInterruptConfirm.
+        if (sessions?.get(msg.terminalId)) {
+          const transcriptPath = sessions.getAgentTranscriptPath(msg.terminalId);
+          const predicate = shouldArmInterruptConfirm(
+            agentKeyFor(msg.terminalId), msg.data,
+            opts.isTurnOpenFor?.(msg.terminalId) ?? false, transcriptPath,
+          );
+          if (predicate) {
+            interruptConfirmer.arm(msg.terminalId, transcriptPath!, predicate, () => opts.onInterrupt?.(msg.terminalId));
+          }
+        }
         if (line === null) manager.write(id, msg.data);
         else manager.submit(id, line);
         // Everything below reads the frame as "the user did something". A focus
@@ -1802,7 +1863,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           // codex runs SessionStart on its first THREAD. Internal id on purpose.
           armHookAliveProbe(id);
         }
-        if (isInterruptKeystroke(msg.data)) opts.onInterrupt?.(msg.terminalId);
         break;
       }
       case "handler:configure": {
@@ -2916,6 +2976,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
    *  of the CLI's second announcement of one block. See {@link OpenAgentPrompts}
    *  for why it is keyed by prompt and tool rather than by slot. */
   const openAgentPrompts = new OpenAgentPrompts();
+
+  /** Watches a session's transcript for its agent's own interrupt marker after
+   *  a lone Esc/Ctrl+C — see {@link shouldArmInterruptConfirm} and
+   *  `interrupt-confirm.ts`. Per-core rather than module-scoped: unlike
+   *  `hookAliveState` above, its deps are test-injected. */
+  const interruptConfirmer = createInterruptConfirmer(opts.interruptConfirmDeps);
 
   /** Slots with an ARMED Handler session, mirrored off the engine's own
    *  `handler:status` — a full replacement snapshot that every arm, disarm and
@@ -4122,6 +4188,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // run's every block.
         openAgentPrompts.clear(id);
         sessions?.noteExited(id, runId);
+        // A pending confirmation's timer is unref'd, so a leaked one costs
+        // nothing at process exit — but a same-id restart must not inherit a
+        // dead run's watch on a transcript the new run may never touch.
+        interruptConfirmer.cancel(id);
         // Drop buffered title state so a stale title from this run can't leak
         // into a restarted same-id session (start() reuses the entry id). A
         // mode flip is exempt for the same reason the handler's arming is: the
@@ -4917,6 +4987,13 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // the reused title plugin's hooks still POST here for claude/codex chat
       // spawns — drop those or every turn_end fires twice.
       if (sessions?.get(body.terminalId)?.mode === "chat") return;
+      // Backstop for the /session-title pipeline's setAgentSession, which
+      // withholds the path when it refuses the accompanying agent-session id
+      // (an ephemeral helper thread — see setAgentSession's doc): the
+      // transcript-interrupt confirmation only needs a file to read, not a
+      // matched conversation identity, so a session with no path yet takes
+      // whatever a hook reports here instead of never arming at all.
+      if (body.transcriptPath) sessions?.noteTranscriptPath(body.terminalId, body.transcriptPath);
       sessions?.confirmHookRun(body.terminalId, body.runId);
       // The work reduction's SECOND closer: codex fires this and its Stop hook
       // independently. `turn_end` alone, never `turn_failed` — that is claude

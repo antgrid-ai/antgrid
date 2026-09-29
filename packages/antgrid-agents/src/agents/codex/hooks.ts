@@ -89,6 +89,16 @@ const CodexPayloadSchema = z.object({
   thread_id: z.string().nullish(),
 });
 
+// SessionStart's stdin (measured): the only Codex hook payload observed to
+// carry transcript_path at all — the notify argv (after-agent) and Stop never
+// do. Without forwarding it here, a codex session's agentTranscriptPath stays
+// unset forever, and shouldArmInterruptConfirm (agent-core.ts) can never arm
+// its transcript-interrupt confirmation for it.
+const CodexSessionStartPayloadSchema = z.object({
+  session_id: z.string().nullish(),
+  transcript_path: z.string().nullish(),
+});
+
 // Codex's Stop hook stdin (StopCommandInput). last_assistant_message is a Rust
 // NullableString — it arrives as null, not absent, so .nullish() is load-bearing:
 // .optional() would reject null.
@@ -148,6 +158,14 @@ export async function toPosts(
           ...(message ? { message: message.slice(0, MAX_NOTIFICATION_BODY_LEN) } : {}),
         },
       });
+    } else if (invocation.event === "session-start") {
+      if (terminalId) posts.push({ port, path: "/hook-alive", body: { terminalId } });
+      const input = parseOrEmpty(CodexSessionStartPayloadSchema, raw);
+      if (input?.transcript_path) {
+        posts.push(titlePost(port, terminalId, input.session_id, "codex", {
+          transcriptPath: input.transcript_path,
+        }));
+      }
     } else if (terminalId) {
       posts.push({ port, path: "/hook-alive", body: { terminalId } });
     }

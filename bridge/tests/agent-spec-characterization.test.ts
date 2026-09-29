@@ -543,7 +543,10 @@ describe("materialized files", () => {
             { matcher: "AskUserQuestion", hooks: [hook("question-answered")] },
             { matcher: "", hooks: [{ ...hook("tool-done"), async: true }] },
           ],
-          PostToolUseFailure: [{ matcher: "AskUserQuestion", hooks: [hook("question-answered")] }],
+          PostToolUseFailure: [
+            { matcher: "AskUserQuestion", hooks: [hook("question-answered")] },
+            { matcher: "", hooks: [{ ...hook("tool-failed"), async: true }] },
+          ],
           UserPromptSubmit: [{ hooks: [hook("user-prompt")] }],
         },
       }),

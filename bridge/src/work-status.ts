@@ -42,6 +42,16 @@ export interface WorkStatusState {
    *  STATIC spec — so without this the bridge goes on inferring starts that
    *  nothing can close. See {@link noteHookChannelLost}. */
   readonly deadHookSessions: ReadonlySet<string>;
+  /** Sessions {@link closeInterruptedTurn} just closed on a confirmed manual
+   *  interrupt. {@link turnActivity} refuses to reopen a session in this set —
+   *  a catch-all PostToolUse/PostToolUseFailure hook already in flight when the
+   *  confirmation lands (`interrupt-confirm.ts` polls on a timer; the hook spawn
+   *  itself costs several hundred ms) can still resolve afterward, and with
+   *  nothing recorded to check against it reopened a turn the interrupt had just
+   *  closed for good. Cleared by whatever opens the NEXT turn ({@link turnStart},
+   *  a submitted {@link userReply}), the same window {@link isStaleIdleNudge}
+   *  documents. */
+  readonly interruptedTurns: ReadonlySet<string>;
   /** What is sitting in each session's composer since its last inferred turn,
    *  classified by the first thing typed on it. The evidence half of the keystroke
    *  inference: a bare enter and a `/` command both start no turn, so neither has
@@ -185,6 +195,7 @@ interface WorkInputs {
   pendingTurns: ReadonlySet<string>;
   keystrokeTurnSessions: ReadonlySet<string>;
   deadHookSessions: ReadonlySet<string>;
+  interruptedTurns: ReadonlySet<string>;
   typedSessions: ReadonlyMap<string, TypedLine>;
   focusedSessions: ReadonlyMap<ClientKey, string>;
   readTracking: boolean;
@@ -356,6 +367,7 @@ function build(i: WorkInputs, prev?: WorkStatusState): WorkStatusState {
     pendingTurns: i.pendingTurns,
     keystrokeTurnSessions: i.keystrokeTurnSessions,
     deadHookSessions: i.deadHookSessions,
+    interruptedTurns: i.interruptedTurns,
     typedSessions: i.typedSessions,
     defaultTool: i.defaultTool,
     status,
@@ -372,6 +384,7 @@ function inputsOf(s: WorkStatusState): WorkInputs {
     pendingTurns: s.pendingTurns,
     keystrokeTurnSessions: s.keystrokeTurnSessions,
     deadHookSessions: s.deadHookSessions,
+    interruptedTurns: s.interruptedTurns,
     typedSessions: s.typedSessions,
     focusedSessions: s.focusedSessions,
     readTracking: s.readTracking,
@@ -388,6 +401,7 @@ export const initialWorkStatus: WorkStatusState = build({
   pendingTurns: EMPTY_IDS,
   keystrokeTurnSessions: EMPTY_IDS,
   deadHookSessions: EMPTY_IDS,
+  interruptedTurns: EMPTY_IDS,
   typedSessions: EMPTY_TYPED,
   focusedSessions: EMPTY_FOCUS,
   readTracking: false,
@@ -500,13 +514,18 @@ export function turnStart(
   const notifications = clearNotifications(prev.notifications, id);
   const pendingRequests = clearRequests(prev.pendingRequests, id, answered);
   const open = prev.activeTurns.has(id);
-  if (notifications === prev.notifications && pendingRequests === prev.pendingRequests && open) {
+  // A fresh turn retires the confirmed-interrupt mark {@link closeInterruptedTurn}
+  // left on [id] — see {@link WorkStatusState.interruptedTurns}.
+  const interruptedTurns = withoutTurn(prev.interruptedTurns, id);
+  if (notifications === prev.notifications && pendingRequests === prev.pendingRequests && open
+    && interruptedTurns === prev.interruptedTurns) {
     return prev;
   }
   return build({
     ...inputsOf(prev),
     notifications,
     pendingRequests,
+    interruptedTurns,
     activeTurns: open ? prev.activeTurns : new Set(prev.activeTurns).add(id),
   }, prev);
 }
@@ -532,10 +551,12 @@ export function turnStart(
  *  session no answer is coming to unblock (`error`), or defeat
  *  {@link isStaleIdleNudge} by deleting the very `task_complete` record that
  *  suppresses the next post-completion nudge. Recording is left untouched so
- *  that suppression keeps working. The turn a genuinely early Stop closed is
- *  still repaired: the keystroke-driven {@link closeTurn} (an Esc) clears
- *  notifications on its way out, so a tool-done racing THAT still finds
- *  nothing recorded and reopens normally.
+ *  that suppression keeps working. A confirmed manual interrupt is the OTHER
+ *  early close this races: {@link closeInterruptedTurn} clears notifications
+ *  on its way out (same as an ordinary {@link closeTurn}), which would leave
+ *  nothing here to check against — so it also marks the session in
+ *  {@link WorkStatusState.interruptedTurns}, and this reads that mark
+ *  alongside the notification check below.
  *
  *  The not-yet-listed hold mirrors {@link turnStart}'s, for the same race — a
  *  tool-completion hook can beat the session's first `session:updated` just
@@ -560,7 +581,8 @@ export function turnActivity(
   const id = sessionId ?? UNATTRIBUTED_TURN;
   const alreadyEnded = (n: NotificationType | undefined): boolean => n !== undefined && endsTurn(n);
   if ((sessionId !== undefined && alreadyEnded(prev.notifications.get(sessionId)))
-    || alreadyEnded(prev.notifications.get(UNATTRIBUTED_TURN))) {
+    || alreadyEnded(prev.notifications.get(UNATTRIBUTED_TURN))
+    || (sessionId !== undefined && prev.interruptedTurns.has(sessionId))) {
     return prev;
   }
   const activeTurns = prev.activeTurns.has(id)
@@ -668,6 +690,9 @@ export function userReply(
     notifications,
     pendingRequests: clearRequests(prev.pendingRequests, sessionId),
     activeTurns: opens ? new Set(prev.activeTurns).add(sessionId) : prev.activeTurns,
+    // A submitted prompt that actually opens a turn retires a confirmed-interrupt
+    // mark the same way turnStart does — see WorkStatusState.interruptedTurns.
+    interruptedTurns: opens ? withoutTurn(prev.interruptedTurns, sessionId) : prev.interruptedTurns,
     typedSessions,
   }, prev);
 }
@@ -694,12 +719,12 @@ function withTurnEnded(prev: WorkStatusState, sessionId: string): {
   };
 }
 
-/** The turn on [sessionId] is over — its turn-end frame, a chat cancel, or a
- *  hook-based session's Esc interrupt (see {@link isInterruptKeystroke} in
- *  keystrokes.ts, dispatched from agent-core.ts, the only other
- *  caller). Anything it was blocked on died with it. Pure; SAME object
- *  when there was nothing open to close, so a
- *  second Esc — or one after the real turn-end already landed — is a no-op. */
+/** The turn on [sessionId] is over — its turn-end frame or a chat cancel.
+ *  Anything it was blocked on died with it. Pure; SAME object when there was
+ *  nothing open to close.
+ *
+ *  NOT the confirmed-interrupt path — see {@link closeInterruptedTurn} — which
+ *  needs everything here plus a mark the chat case has no use for. */
 export function closeTurn(prev: WorkStatusState, sessionId: string): WorkStatusState {
   const { changed, ...ended } = withTurnEnded(prev, sessionId);
   // A chat session's block lives in pendingRequests; a terminal-mode session's
@@ -713,6 +738,24 @@ export function closeTurn(prev: WorkStatusState, sessionId: string): WorkStatusS
   const notifications = clearNotifications(prev.notifications, sessionId);
   if (!changed && notifications === prev.notifications) return prev;
   return build({ ...inputsOf(prev), ...ended, notifications }, prev);
+}
+
+/** A hook-based session's manual interrupt, confirmed against its own
+ *  transcript (`interrupt-confirm.ts` and `shouldArmInterruptConfirm` in
+ *  agent-core.ts, the only caller) — {@link closeTurn}, plus a mark in
+ *  {@link WorkStatusState.interruptedTurns} so {@link turnActivity} cannot
+ *  reopen what this just closed. See that field's own doc for why the mark
+ *  exists and {@link turnStart}/{@link userReply} for where it is lifted.
+ *  Pure; SAME object when {@link closeTurn} was already a no-op and the
+ *  session was already marked (a second Esc, or one after the mark's own
+ *  turn-start already cleared it). */
+export function closeInterruptedTurn(prev: WorkStatusState, sessionId: string): WorkStatusState {
+  const closed = closeTurn(prev, sessionId);
+  if (closed.interruptedTurns.has(sessionId)) return closed;
+  return build({
+    ...inputsOf(closed),
+    interruptedTurns: new Set(closed.interruptedTurns).add(sessionId),
+  }, closed);
 }
 
 /** A hook reported [sessionId]'s turn over on a channel carrying no notification
@@ -982,6 +1025,8 @@ function foldSessions(
   }
   const typedSessions = new Map<string, TypedLine>();
   for (const [id, line] of prev.typedSessions) if (live.has(id)) typedSessions.set(id, line);
+  const interruptedTurns = new Set<string>();
+  for (const id of prev.interruptedTurns) if (live.has(id)) interruptedTurns.add(id);
   // A newly-started session is a fresh turn of work — clear a stale done-type
   // UNATTRIBUTED notification so a turn-start on the new session isn't masked by
   // a fallback that predates it. The call-to-action signals ({@link
@@ -1001,7 +1046,8 @@ function foldSessions(
     && pendingRequests.size === prev.pendingRequests.size
     && notifications.size === prev.notifications.size
     && deadHookSessions.size === prev.deadHookSessions.size
-    && typedSessions.size === prev.typedSessions.size) {
+    && typedSessions.size === prev.typedSessions.size
+    && interruptedTurns.size === prev.interruptedTurns.size) {
     return prev;
   }
   return build({
@@ -1012,6 +1058,7 @@ function foldSessions(
     keystrokeTurnSessions,
     deadHookSessions,
     typedSessions,
+    interruptedTurns,
     pendingRequests,
     notifications,
   }, prev);
