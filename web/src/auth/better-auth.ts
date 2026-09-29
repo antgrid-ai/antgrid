@@ -137,7 +137,8 @@ export function createAuth(deps: CreateAuthDeps) {
     baseURL: deps.env.BETTER_AUTH_URL,
     // Apple returns the web flow by POSTing the authorization to our callback
     // from its own origin; Better-Auth's origin check refuses it otherwise.
-    trustedOrigins: ["https://appleid.apple.com"],
+    // Trusted only where Apple is offered, so no other deployment widens it.
+    trustedOrigins: appleSignInConfigured(deps.env) ? ["https://appleid.apple.com"] : [],
     account: {
       accountLinking: {
         enabled: true,

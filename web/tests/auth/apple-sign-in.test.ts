@@ -128,8 +128,11 @@ describe("Apple provider", () => {
 });
 
 describe("Apple web callback", () => {
-  test("trusts Apple's origin for the form_post return", async () => {
-    const auth = createAuth({ env: loadEnv(baseSource), db: {} as never, sendEmail: async () => {} });
-    expect((await auth.$context).trustedOrigins).toContain("https://appleid.apple.com");
+  test("trusts Apple's origin for the form_post return, only where Apple is offered", async () => {
+    const trusted = async (source: Record<string, string>) =>
+      (await createAuth({ env: loadEnv(source), db: {} as never, sendEmail: async () => {} }).$context)
+        .trustedOrigins;
+    expect(await trusted({ ...baseSource, ...apple })).toContain("https://appleid.apple.com");
+    expect(await trusted(baseSource)).not.toContain("https://appleid.apple.com");
   });
 });

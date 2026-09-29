@@ -85,11 +85,21 @@ export async function revokeAppleAuthorizations(
   apple: AppleTokenClient,
   userId: string,
 ): Promise<void> {
-  const ctx = await tokenContext(auth);
-  const accounts = await db.account.findMany({
-    where: { userId, providerId: APPLE_PROVIDER_ID, refreshToken: { not: null } },
-    select: { id: true, refreshToken: true, idToken: true },
-  });
+  let ctx: AuthContext;
+  let accounts: { id: string; refreshToken: string | null; idToken: string | null }[];
+  try {
+    ctx = await tokenContext(auth);
+    accounts = await db.account.findMany({
+      where: { userId, providerId: APPLE_PROVIDER_ID, refreshToken: { not: null } },
+      select: { id: true, refreshToken: true, idToken: true },
+    });
+  } catch (err) {
+    console.error("[account] Apple accounts could not be read during deletion; continuing", {
+      userId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return;
+  }
   await Promise.all(
     accounts.map(async (account) => {
       const clientId = apple.clientIdOf(account.idToken);
