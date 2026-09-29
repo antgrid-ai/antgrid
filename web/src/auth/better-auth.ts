@@ -3,6 +3,7 @@
 
 import { betterAuth } from "better-auth";
 import { oneTimeToken } from "better-auth/plugins";
+import { appleClientSecret } from "./apple-client-secret.js";
 import { crossDeviceMagicLink } from "./cross-device-plugin.js";
 import { abOAuthProviderPlugins } from "./oauth-provider.js";
 import { prismaAdapter } from "better-auth/adapters/prisma";
@@ -59,7 +60,7 @@ const RESET_PASSWORD_CALLBACK = "/reset-password";
  *  the providers whose link can verify that address as a side effect. Feeds
  *  both `accountLinking.trustedProviders` and the credential purge below, so
  *  the two cannot drift. */
-const TRUSTED_SOCIAL_PROVIDERS = ["github", "google"] as const;
+const TRUSTED_SOCIAL_PROVIDERS = ["github", "google", "apple"] as const;
 
 /** Floor for a password guarding remote control of the user's dev machine.
  *  Above Better-Auth's default of 8; the reset and account forms state it. */
@@ -70,6 +71,35 @@ export const MIN_PASSWORD_LENGTH = 12;
  *  every other check, so an unhandled one reads as a generic "try again" that
  *  can never succeed. Keep in lockstep with the option below. */
 export const MAX_PASSWORD_LENGTH = 128;
+
+/**
+ * Apple's provider options, or undefined when the deployment has not
+ * configured Sign in with Apple (env.ts accepts the four keys only as a set).
+ *
+ * `clientSecret` is a getter, not a value: Better-Auth hands this same object
+ * to the provider and reads the property at each token exchange, which is
+ * what lets the six-month JWT re-mint on a long-running process.
+ */
+function appleProvider(env: Env) {
+  if (!env.APPLE_CLIENT_ID || !env.APPLE_TEAM_ID || !env.APPLE_KEY_ID || !env.APPLE_PRIVATE_KEY) {
+    return undefined;
+  }
+  const secret = appleClientSecret({
+    teamId: env.APPLE_TEAM_ID,
+    keyId: env.APPLE_KEY_ID,
+    clientId: env.APPLE_CLIENT_ID,
+    privateKey: env.APPLE_PRIVATE_KEY,
+  });
+  return {
+    clientId: env.APPLE_CLIENT_ID,
+    get clientSecret() {
+      return secret();
+    },
+    // An identity token's audience is whoever asked Apple for it: the bundle
+    // ID from the native iOS and macOS apps, the Services ID from the web.
+    audience: [env.APPLE_APP_BUNDLE_ID, env.APPLE_CLIENT_ID],
+  };
+}
 
 export function createAuth(deps: CreateAuthDeps) {
   const database =
@@ -248,6 +278,7 @@ export function createAuth(deps: CreateAuthDeps) {
         clientId: deps.env.GOOGLE_CLIENT_ID,
         clientSecret: deps.env.GOOGLE_CLIENT_SECRET,
       },
+      apple: appleProvider(deps.env),
     },
     plugins: [
       crossDeviceMagicLink({
