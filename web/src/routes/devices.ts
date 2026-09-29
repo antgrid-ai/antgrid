@@ -18,6 +18,7 @@ import { createDeviceOAuthClient, deleteDeviceOAuthClient } from "../models/devi
 import { countActiveSeatHolders, findActiveMembership } from "../models/account-member.js";
 import { tokenBucket } from "../util/rate-limit.js";
 import type { RelayPushConfig } from "../relay/push.js";
+import type { AppleTokenClient } from "../auth/apple-tokens.js";
 
 const UuidSchema = z.uuid();
 
@@ -30,7 +31,12 @@ const CreateDeviceBody = z.object({
   kind: z.enum(["app", "agent"]).optional(),
 });
 
-export function deviceRoutes(deps: { db: DB; auth: Auth; relay: RelayPushConfig }) {
+export function deviceRoutes(deps: {
+  db: DB;
+  auth: Auth;
+  relay: RelayPushConfig;
+  apple?: AppleTokenClient;
+}) {
   const r = new Hono<{ Variables: AuthVars }>();
   // Scoped narrowly to the routes this router actually defines. Using a
   // `/account/*` wildcard here would also intercept routes mounted on other
@@ -224,6 +230,7 @@ export function deviceRoutes(deps: { db: DB; auth: Auth; relay: RelayPushConfig 
     const result = await deleteUserAccount(deps.db, deps.relay, deps.auth, {
       userId,
       headers: c.req.raw.headers,
+      apple: deps.apple,
     });
     if (result === "blocked_subscription") {
       return c.json({ error: "SUBSCRIPTION_ACTIVE" }, 409);

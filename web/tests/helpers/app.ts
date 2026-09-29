@@ -7,6 +7,7 @@ import { createAuth } from "../../src/auth/better-auth.js";
 import { createEmailSender, type SendEmail } from "../../src/auth/email.js";
 import type { PrismaClient } from "../../src/generated/prisma/client.js";
 import type { Env } from "../../src/env.js";
+import type { AppleTokenClient } from "../../src/auth/apple-tokens.js";
 
 /**
  * Fixed Better-Auth secret shared across all test runs so that
@@ -28,6 +29,8 @@ export type BuildTestAppOptions = {
   usePrismaAdapter?: boolean;
   /** Optional overrides applied on top of the default test env. */
   envOverrides?: Partial<Env>;
+  /** Stands in for Apple's token and revoke endpoints. */
+  appleTokens?: AppleTokenClient;
 };
 
 /** Env overrides that turn Sign in with Apple on, with a throwaway P-256 key
@@ -76,7 +79,15 @@ export function buildTestApp(
   const auth = createAuth({ env, db, sendEmail });
   const relay = { baseUrl: env.RELAY_INTERNAL_URL, secret: env.RELAY_INTERNAL_SECRET };
   return {
-    app: buildApp({ db, auth, env, corsOrigins: env.CORS_ORIGINS, relay, sendEmail }),
+    app: buildApp({
+      db,
+      auth,
+      env,
+      corsOrigins: env.CORS_ORIGINS,
+      relay,
+      sendEmail,
+      ...("appleTokens" in opts ? { appleTokens: opts.appleTokens } : {}),
+    }),
     env,
     // Exposed so a test can drive an internal Better-Auth step the HTTP surface
     // can't reach on its own — OAuth linking, which needs a live provider.

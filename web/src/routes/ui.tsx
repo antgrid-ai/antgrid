@@ -34,6 +34,7 @@ import { ForgotPasswordPage } from "../ui/forgot-password.js";
 import { ResetPasswordPage, ResetLinkInvalidPage } from "../ui/reset-password.js";
 import { CheckEmailPage, VerifyEmailFailedPage } from "../ui/check-email.js";
 import { SignUpPage } from "../ui/signup.js";
+import type { AppleTokenClient } from "../auth/apple-tokens.js";
 import { appleSignInConfigured, MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH } from "../auth/better-auth.js";
 import {
   hasPasswordCredential,
@@ -165,6 +166,7 @@ export function uiRoutes(deps: {
   relay: RelayPushConfig;
   clientIp: ClientIpResolver;
   sendEmail: SendEmail;
+  apple?: AppleTokenClient;
 }) {
   const r = new Hono<{ Variables: AuthVars }>();
   const startLimiter = tokenBucket(5, 0.2); // 5 burst, 1 per 5s, per IP
@@ -1956,6 +1958,7 @@ export function uiRoutes(deps: {
     const result = await deleteUserAccount(deps.db, deps.relay, deps.auth, {
       userId,
       headers: c.req.raw.headers,
+      apple: deps.apple,
     });
     // Both blocked results land back on /account, which renders the reason.
     if (result === "blocked_subscription" || result === "blocked_team") {
