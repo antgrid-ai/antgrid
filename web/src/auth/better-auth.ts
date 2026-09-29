@@ -72,6 +72,12 @@ export const MIN_PASSWORD_LENGTH = 12;
  *  can never succeed. Keep in lockstep with the option below. */
 export const MAX_PASSWORD_LENGTH = 128;
 
+/** Whether this deployment offers Sign in with Apple. env.ts accepts the four
+ *  keys only as a set, so any one of them stands for all. */
+export function appleSignInConfigured(env: Env): boolean {
+  return env.APPLE_CLIENT_ID !== undefined;
+}
+
 /**
  * Apple's provider options, or undefined when the deployment has not
  * configured Sign in with Apple (env.ts accepts the four keys only as a set).

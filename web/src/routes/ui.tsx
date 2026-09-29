@@ -34,7 +34,7 @@ import { ForgotPasswordPage } from "../ui/forgot-password.js";
 import { ResetPasswordPage, ResetLinkInvalidPage } from "../ui/reset-password.js";
 import { CheckEmailPage, VerifyEmailFailedPage } from "../ui/check-email.js";
 import { SignUpPage } from "../ui/signup.js";
-import { MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH } from "../auth/better-auth.js";
+import { appleSignInConfigured, MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH } from "../auth/better-auth.js";
 import {
   hasPasswordCredential,
   pruneDuplicatePasswordCredentials,
@@ -359,7 +359,14 @@ export function uiRoutes(deps: {
     // Round-tripped by step 2's "change" link, so stepping back never costs the
     // user the address they already typed.
     const email = c.req.query("email") ?? null;
-    return c.html(<LoginPage error={error} notice={notice} email={email} />);
+    return c.html(
+      <LoginPage
+        error={error}
+        notice={notice}
+        email={email}
+        apple={appleSignInConfigured(deps.env)}
+      />,
+    );
   });
 
   /** Send a cross-device magic link and hand the browser its pending page.
@@ -447,13 +454,20 @@ export function uiRoutes(deps: {
     switch (method) {
       case "password":
         return redirectWith(c, "/login/password", { email });
-      // Switched on the two literals rather than forwarded: `method` is
+      // Switched on the literals rather than forwarded: `method` is
       // client-supplied, and a value it chose must never reach the `provider`
       // param.
       case "github":
         return c.redirect("/oauth/start?provider=github&callbackURL=/dashboard");
       case "google":
         return c.redirect("/oauth/start?provider=google&callbackURL=/dashboard");
+      // Only while this deployment offers Apple: a hint remembered before the
+      // keys were withdrawn would otherwise relaunch a provider that 400s.
+      case "apple":
+        if (appleSignInConfigured(deps.env)) {
+          return c.redirect("/oauth/start?provider=apple&callbackURL=/dashboard");
+        }
+        return sendLink();
       default:
         // Absent, unrecognised, or simply wrong about this address — one answer
         // for all three. The link is the only branch that needs no server-side

@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Radha AI Products
 // SPDX-License-Identifier: LicenseRef-Elastic-2.0
 
+import { generateKeyPairSync } from "node:crypto";
 import { buildApp } from "../../src/app.js";
 import { createAuth } from "../../src/auth/better-auth.js";
 import { createEmailSender, type SendEmail } from "../../src/auth/email.js";
@@ -28,6 +29,19 @@ export type BuildTestAppOptions = {
   /** Optional overrides applied on top of the default test env. */
   envOverrides?: Partial<Env>;
 };
+
+/** Env overrides that turn Sign in with Apple on, with a throwaway P-256 key
+ *  standing in for the `.p8`. */
+export function appleEnvOverrides(): Partial<Env> {
+  const { privateKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  return {
+    APPLE_CLIENT_ID: "ai.radhaai.antgrid.web",
+    APPLE_TEAM_ID: "TEAM123456",
+    APPLE_KEY_ID: "KEY1234567",
+    APPLE_PRIVATE_KEY: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+    APPLE_APP_BUNDLE_ID: "ai.radhaai.antgrid",
+  };
+}
 
 export function buildTestApp(
   db: PrismaClient,

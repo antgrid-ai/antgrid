@@ -158,7 +158,7 @@ export function buildApp(deps: AppDeps) {
   }
 
   app.route("/", oauthHandoffRoutes({ auth: deps.auth }));
-  app.route("/", oauthStartRoutes({ auth: deps.auth }));
+  app.route("/", oauthStartRoutes({ auth: deps.auth, env: deps.env }));
   app.route("/", uiRoutes({
     db: deps.db,
     auth: deps.auth,

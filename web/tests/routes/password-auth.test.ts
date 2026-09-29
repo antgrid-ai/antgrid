@@ -3,7 +3,7 @@
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { startTestPg, type PgHandle } from "../helpers/pg.js";
-import { buildTestApp } from "../helpers/app.js";
+import { appleEnvOverrides, buildTestApp } from "../helpers/app.js";
 import { createTestUser, createTestSession } from "../helpers/fixtures.js";
 import { CREDENTIAL_PROVIDER_ID } from "../../src/models/credential.js";
 
@@ -533,6 +533,34 @@ describe("POST /ui/login/continue", () => {
       expect(loc.pathname).not.toBe("/oauth/start");
       expect(loc.search).not.toContain("provider=");
     }
+  });
+
+  test("an apple hint reaches Apple only while this deployment offers it", async () => {
+    const cap = makeCapture();
+    const body = { email: "fay@example.com", method: "apple" };
+
+    const on = buildTestApp(pg.db, pg.url, { envOverrides: appleEnvOverrides() }).app;
+    const offered = location(await post(on, "/ui/login/continue", body));
+    expect(offered.pathname).toBe("/oauth/start");
+    expect(offered.searchParams.get("provider")).toBe("apple");
+
+    // Keys withdrawn after the browser remembered Apple: a provider redirect
+    // would dead-end in a 400, so the hint falls through like any unknown one.
+    const off = buildTestApp(pg.db, pg.url, { sendEmail: cap.sendEmail }).app;
+    const withdrawn = location(await post(off, "/ui/login/continue", body));
+    expect(withdrawn.pathname).toMatch(/^\/login\/pending\/[0-9a-f-]{36}$/);
+    expect(cap.captured.map((e) => e.to)).toEqual(["fay@example.com"]);
+  });
+
+  test("the login page offers Apple only when it is configured", async () => {
+    const on = buildTestApp(pg.db, pg.url, { envOverrides: appleEnvOverrides() }).app;
+    const off = buildTestApp(pg.db, pg.url).app;
+    const offered = await (await on.request("/login")).text();
+    const absent = await (await off.request("/login")).text();
+    expect(offered).toContain("Continue with Apple");
+    expect(offered).toContain('href="/oauth/start?provider=apple&amp;callbackURL=/dashboard"');
+    expect(absent).not.toContain("Continue with Apple");
+    expect(absent).toContain("Continue with GitHub");
   });
 
   test("an empty address never leaves step 1", async () => {
