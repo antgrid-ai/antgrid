@@ -1,4 +1,4 @@
-import { needsKeystrokeTurnStart } from "./agent-runtime";
+import { needsKeystrokeTurnStart, opensProvisionalTurn } from "./agent-runtime";
 import type { ClientKey } from "./message-bus";
 import type { AbMessage, NotificationType, WorkStatus } from "./protocol";
 
@@ -37,6 +37,20 @@ export interface WorkStatusState {
    *  submitted keystroke is the only thing that can open their turn — see
    *  {@link needsKeystrokeTurnStart} and {@link userReply}. */
   readonly keystrokeTurnSessions: ReadonlySet<string>;
+  /** Running sessions whose agent DOES report its turn starts, but too late to
+   *  show work the moment the user submits (codex runs its start hook through a
+   *  fresh shell, a second or more after Enter). A submitted prompt opens their
+   *  turn at once as a {@link provisionalTurns} entry for the hook to confirm.
+   *  See {@link opensProvisionalTurn}. */
+  readonly provisionalStartSessions: ReadonlySet<string>;
+  /** Turns {@link userReply} opened on a keystroke for a
+   *  {@link provisionalStartSessions} session that nothing has confirmed yet,
+   *  keyed to the clock reading that opened them. A turn-start, a tool
+   *  completion or any turn end settles one; the bridge retracts one still here
+   *  after a grace period ({@link retractProvisionalTurn}), which is what keeps
+   *  an Enter the agent swallowed (an overlay, a dialog) from reading "working"
+   *  until the idle decay. */
+  readonly provisionalTurns: ReadonlyMap<string, number>;
   /** Running sessions whose hook channel has been declared dead. Subtracted from
    *  {@link keystrokeTurnSessions} on every fold, which recomputes from the agent's
    *  STATIC spec — so without this the bridge goes on inferring starts that
@@ -216,6 +230,8 @@ interface WorkInputs {
   activeTurns: ReadonlySet<string>;
   pendingTurns: ReadonlySet<string>;
   keystrokeTurnSessions: ReadonlySet<string>;
+  provisionalStartSessions: ReadonlySet<string>;
+  provisionalTurns: ReadonlyMap<string, number>;
   deadHookSessions: ReadonlySet<string>;
   interruptedTurns: ReadonlySet<string>;
   lastActivityAt: ReadonlyMap<string, number>;
@@ -397,6 +413,8 @@ function build(i: WorkInputs, prev?: WorkStatusState, decayed?: ReadonlySet<stri
     activeTurns: i.activeTurns,
     pendingTurns: i.pendingTurns,
     keystrokeTurnSessions: i.keystrokeTurnSessions,
+    provisionalStartSessions: i.provisionalStartSessions,
+    provisionalTurns: i.provisionalTurns,
     deadHookSessions: i.deadHookSessions,
     interruptedTurns: i.interruptedTurns,
     lastActivityAt: i.lastActivityAt,
@@ -416,6 +434,8 @@ function inputsOf(s: WorkStatusState): WorkInputs {
     activeTurns: s.activeTurns,
     pendingTurns: s.pendingTurns,
     keystrokeTurnSessions: s.keystrokeTurnSessions,
+    provisionalStartSessions: s.provisionalStartSessions,
+    provisionalTurns: s.provisionalTurns,
     deadHookSessions: s.deadHookSessions,
     interruptedTurns: s.interruptedTurns,
     lastActivityAt: s.lastActivityAt,
@@ -435,6 +455,8 @@ export const initialWorkStatus: WorkStatusState = build({
   activeTurns: EMPTY_IDS,
   pendingTurns: EMPTY_IDS,
   keystrokeTurnSessions: EMPTY_IDS,
+  provisionalStartSessions: EMPTY_IDS,
+  provisionalTurns: EMPTY_ACTIVITY,
   deadHookSessions: EMPTY_IDS,
   interruptedTurns: EMPTY_IDS,
   lastActivityAt: EMPTY_ACTIVITY,
@@ -581,8 +603,11 @@ export function turnStart(
   const lastActivityAt = now !== undefined && prev.lastActivityAt.get(id) !== now
     ? new Map(prev.lastActivityAt).set(id, now)
     : prev.lastActivityAt;
+  // The agent's own word that the turn is real — see WorkStatusState.provisionalTurns.
+  const provisionalTurns = withoutActivity(prev.provisionalTurns, id);
   if (notifications === prev.notifications && pendingRequests === prev.pendingRequests && open
-    && interruptedTurns === prev.interruptedTurns && lastActivityAt === prev.lastActivityAt) {
+    && interruptedTurns === prev.interruptedTurns && lastActivityAt === prev.lastActivityAt
+    && provisionalTurns === prev.provisionalTurns) {
     return prev;
   }
   return build({
@@ -591,6 +616,7 @@ export function turnStart(
     pendingRequests,
     interruptedTurns,
     lastActivityAt,
+    provisionalTurns,
     activeTurns: open ? prev.activeTurns : new Set(prev.activeTurns).add(id),
   }, prev);
 }
@@ -665,8 +691,11 @@ export function turnActivity(
   const lastActivityAt = now !== undefined && prev.lastActivityAt.get(id) !== now
     ? new Map(prev.lastActivityAt).set(id, now)
     : prev.lastActivityAt;
-  if (activeTurns === prev.activeTurns && lastActivityAt === prev.lastActivityAt) return prev;
-  return build({ ...inputsOf(prev), activeTurns, lastActivityAt }, prev);
+  // A tool completing is the agent at work, so it confirms a provisional turn.
+  const provisionalTurns = withoutActivity(prev.provisionalTurns, id);
+  if (activeTurns === prev.activeTurns && lastActivityAt === prev.lastActivityAt
+    && provisionalTurns === prev.provisionalTurns) return prev;
+  return build({ ...inputsOf(prev), activeTurns, lastActivityAt, provisionalTurns }, prev);
 }
 
 /** The user answered the permission/question [requestId] that [sessionId] was
@@ -741,9 +770,10 @@ export function userReply(
   // and every frame after the first carries the middle of a line.
   const held = prev.typedSessions.get(sessionId);
   const line = held ?? opening;
+  const provisional = prev.provisionalStartSessions.has(sessionId);
   const opens = opts.submitted === true
     && line === "prompt"
-    && prev.keystrokeTurnSessions.has(sessionId)
+    && (prev.keystrokeTurnSessions.has(sessionId) || provisional)
     && !prev.activeTurns.has(sessionId);
   // A frame that both types and submits (a paste) leaves nothing behind: the
   // line it opens is the line the same frame consumes.
@@ -780,6 +810,9 @@ export function userReply(
     lastActivityAt: opens && now !== undefined
       ? new Map(prev.lastActivityAt).set(sessionId, now)
       : prev.lastActivityAt,
+    provisionalTurns: opens && provisional
+      ? new Map(prev.provisionalTurns).set(sessionId, now ?? 0)
+      : prev.provisionalTurns,
     typedSessions,
   }, prev);
 }
@@ -792,21 +825,25 @@ function withTurnEnded(prev: WorkStatusState, sessionId: string): {
   pendingTurns: ReadonlySet<string>;
   pendingRequests: ReadonlyMap<string, ReadonlySet<string>>;
   lastActivityAt: ReadonlyMap<string, number>;
+  provisionalTurns: ReadonlyMap<string, number>;
   changed: boolean;
 } {
   const activeTurns = withoutTurn(prev.activeTurns, sessionId);
   const pendingTurns = withoutTurn(prev.pendingTurns, sessionId);
   const pendingRequests = clearRequests(prev.pendingRequests, sessionId);
   const lastActivityAt = withoutActivity(prev.lastActivityAt, sessionId);
+  const provisionalTurns = withoutActivity(prev.provisionalTurns, sessionId);
   return {
     activeTurns,
     pendingTurns,
     pendingRequests,
     lastActivityAt,
+    provisionalTurns,
     changed: activeTurns !== prev.activeTurns
       || pendingTurns !== prev.pendingTurns
       || pendingRequests !== prev.pendingRequests
-      || lastActivityAt !== prev.lastActivityAt,
+      || lastActivityAt !== prev.lastActivityAt
+      || provisionalTurns !== prev.provisionalTurns,
   };
 }
 
@@ -872,6 +909,8 @@ export function noteHookChannelLost(prev: WorkStatusState, sessionId: string): W
     ...inputsOf(prev),
     deadHookSessions: new Set(prev.deadHookSessions).add(sessionId),
     keystrokeTurnSessions,
+    // Nothing is left to confirm one; foldSessions drops it again on every list.
+    provisionalStartSessions: withoutTurn(prev.provisionalStartSessions, sessionId),
     activeTurns: inferred ? withoutTurn(prev.activeTurns, sessionId) : prev.activeTurns,
     pendingTurns: inferred ? withoutTurn(prev.pendingTurns, sessionId) : prev.pendingTurns,
   }, prev);
@@ -1026,10 +1065,11 @@ function foldNotification(
   let pendingTurns = prev.pendingTurns;
   let pendingRequests = prev.pendingRequests;
   let lastActivityAt = prev.lastActivityAt;
+  let provisionalTurns = prev.provisionalTurns;
   // A turn-end notification closes the turn even when the reduction ignores the
   // notification itself (below) — the primary closer; hookTurnEnd only backs it up.
   if (endsTurn(msg.notificationType)) {
-    ({ activeTurns, pendingTurns, pendingRequests, lastActivityAt } = withTurnEnded(prev, raw));
+    ({ activeTurns, pendingTurns, pendingRequests, lastActivityAt, provisionalTurns } = withTurnEnded(prev, raw));
   }
   const own = prev.notifications.get(key);
   // "awaiting_input" fires from the same idle-timeout signal whether the agent
@@ -1049,10 +1089,11 @@ function foldNotification(
     if (activeTurns === prev.activeTurns
       && pendingTurns === prev.pendingTurns
       && pendingRequests === prev.pendingRequests
-      && lastActivityAt === prev.lastActivityAt) {
+      && lastActivityAt === prev.lastActivityAt
+      && provisionalTurns === prev.provisionalTurns) {
       return prev;
     }
-    return build({ ...inputsOf(prev), activeTurns, pendingTurns, pendingRequests, lastActivityAt }, prev);
+    return build({ ...inputsOf(prev), activeTurns, pendingTurns, pendingRequests, lastActivityAt, provisionalTurns }, prev);
   }
   return build({
     ...inputsOf(prev),
@@ -1061,6 +1102,7 @@ function foldNotification(
     activeTurns,
     pendingTurns,
     lastActivityAt,
+    provisionalTurns,
   }, prev);
 }
 
@@ -1091,6 +1133,14 @@ function foldSessions(
       .filter((s) => s.mode !== "chat"
         && !deadHookSessions.has(s.id)
         && needsKeystrokeTurnStart(s.tool ?? prev.defaultTool))
+      .map((s) => s.id),
+  );
+  // Same exclusions: a dead channel has no start hook left to confirm with.
+  const provisionalStartSessions = new Set(
+    running
+      .filter((s) => s.mode !== "chat"
+        && !deadHookSessions.has(s.id)
+        && opensProvisionalTurn(s.tool ?? prev.defaultTool))
       .map((s) => s.id),
   );
 
@@ -1125,6 +1175,8 @@ function foldSessions(
   for (const [id, t] of prev.lastActivityAt) {
     if (id === UNATTRIBUTED_TURN ? live.size > 0 : live.has(id)) lastActivityAt.set(id, t);
   }
+  const provisionalTurns = new Map<string, number>();
+  for (const [id, t] of prev.provisionalTurns) if (live.has(id)) provisionalTurns.set(id, t);
   // A promoted pendingTurns id carries its HELD clock reading forward the same
   // way its turn itself is promoted above — see WorkStatusState.pendingActivityAt
   // — so the exact race pendingTurns holds for does not also produce a turn
@@ -1150,6 +1202,8 @@ function foldSessions(
   if (sameIds(live, prev.runningSessions)
     && sameIds(activeTurns, prev.activeTurns)
     && sameIds(keystrokeTurnSessions, prev.keystrokeTurnSessions)
+    && sameIds(provisionalStartSessions, prev.provisionalStartSessions)
+    && provisionalTurns.size === prev.provisionalTurns.size
     && prev.pendingTurns.size === 0
     && pendingRequests.size === prev.pendingRequests.size
     && notifications.size === prev.notifications.size
@@ -1166,6 +1220,8 @@ function foldSessions(
     pendingTurns: EMPTY_IDS,
     pendingActivityAt: EMPTY_ACTIVITY,
     keystrokeTurnSessions,
+    provisionalStartSessions,
+    provisionalTurns,
     deadHookSessions,
     typedSessions,
     interruptedTurns,
@@ -1212,6 +1268,12 @@ export function reduceWorkStatus(prev: WorkStatusState, msg: AbMessage): WorkSta
 /** How long a turn may go with no recorded activity before {@link expireTurns}
  *  treats it as abandoned rather than working. */
 export const DEFAULT_TURN_IDLE_MS = 45 * 60_000;
+
+/** How long a provisional turn waits for its agent's start hook before
+ *  {@link retractProvisionalTurn} takes it back. Several times the slowest start
+ *  measured (codex's first prompt, about 4 s), because a retraction that comes
+ *  too early flips a working session to done until its next tool completes. */
+export const PROVISIONAL_TURN_GRACE_MS = 30_000;
 
 /** Close every OPEN turn idle longer than [maxIdleMs], measured against [now]
  *  and each turn's {@link WorkStatusState.lastActivityAt} — the backstop for
@@ -1269,9 +1331,11 @@ export function expireTurns(prev: WorkStatusState, now: number, maxIdleMs: numbe
   if (expired.size === 0) return prev;
   const activeTurns = new Set(prev.activeTurns);
   const lastActivityAt = new Map(prev.lastActivityAt);
+  const provisionalTurns = new Map(prev.provisionalTurns);
   for (const id of expired) {
     activeTurns.delete(id);
     lastActivityAt.delete(id);
+    provisionalTurns.delete(id);
   }
   // A decayed UNATTRIBUTED_TURN was the ONLY reason every other running session
   // read "working" (see turnOpenFor's fallback) — deriveUnread's exclusion has
@@ -1282,5 +1346,23 @@ export function expireTurns(prev: WorkStatusState, now: number, maxIdleMs: numbe
     : expired;
   // decayed excludes these closes from deriveUnread's transition scan — see its
   // own doc for why a decay must not raise the "come and look" mark.
-  return build({ ...inputsOf(prev), activeTurns, lastActivityAt }, prev, decayed);
+  return build({ ...inputsOf(prev), activeTurns, lastActivityAt, provisionalTurns }, prev, decayed);
+}
+
+/** Take back the turn {@link userReply} opened provisionally at [openedAt] on
+ *  [sessionId], because nothing confirmed it inside the bridge's grace period —
+ *  the Enter never reached the agent as a prompt. Keyed to [openedAt] so a timer
+ *  from an earlier Enter cannot retract the turn a later one opened.
+ *
+ *  Closed the way {@link expireTurns} closes a turn, and for the same reason: a
+ *  guess, not the agent's word, so it records no notification and raises no
+ *  unread mark. Pure; SAME object when that turn is no longer provisional. */
+export function retractProvisionalTurn(prev: WorkStatusState, sessionId: string, openedAt: number): WorkStatusState {
+  if (prev.provisionalTurns.get(sessionId) !== openedAt) return prev;
+  return build({
+    ...inputsOf(prev),
+    activeTurns: withoutTurn(prev.activeTurns, sessionId),
+    lastActivityAt: withoutActivity(prev.lastActivityAt, sessionId),
+    provisionalTurns: withoutActivity(prev.provisionalTurns, sessionId),
+  }, prev, new Set([sessionId]));
 }

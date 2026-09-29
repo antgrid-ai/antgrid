@@ -541,6 +541,14 @@ export interface HookProfile {
    */
   turnBoundaryEvents: { start: readonly string[]; end: readonly string[] };
   /**
+   * True when this agent's START hook is real but lands too late to show work
+   * the moment the user submits, so a submitted prompt line opens the turn
+   * provisionally and the hook confirms it (work-status.ts's `provisionalTurns`).
+   * Needs a non-empty `turnBoundaryEvents.start`: the confirmation is what lets
+   * the bridge take back an Enter the agent swallowed.
+   */
+  provisionalTurnStart?: boolean;
+  /**
    * True when this agent's plugin host may drop our environment, so a hook
    * invocation that arrives with no ANTGRID_API_PORT falls back to reading
    * `<ANTGRID_DIR>/api.port`. Copilot's plugin host does.

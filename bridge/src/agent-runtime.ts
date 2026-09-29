@@ -41,6 +41,12 @@ export const reportsTurnStart = (tool: string | undefined) => !!tool && agentSpe
 export const needsKeystrokeTurnStart = (tool: string | undefined) => {
   return !!tool && agentSpec(tool)?.inferTurnStart === true;
 };
+/** Does a submitted prompt open this agent's turn ahead of its own start hook?
+ *  See `provisionalTurnStart` on the agent's hook profile. */
+export const opensProvisionalTurn = (tool: string | undefined) => {
+  const hooks = tool ? agentSpec(tool)?.hooks : undefined;
+  return hooks?.provisionalTurnStart === true && hooks.turnBoundaryEvents.start.length > 0;
+};
 export const augmentAgentLaunch = (tool: string, { self, ...options }: AugmentOptions & { self?: ResolveBridgeCommandOptions } = {}) =>
   withAgentHost(agentRuntime.host, () => augment(tool, {
     ...options,

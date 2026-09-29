@@ -5,7 +5,7 @@ import { LocalListener } from "./local-listener";
 import type { AttachStreamOpts, PeerSessionView, StreamHandle } from "./project-streams";
 import type { AbMessage, SessionEntry, WorkStatus } from "./protocol";
 import type { DeleteSessionOptions } from "./session-manager";
-import { answerRequest, becameDeliverable, busDeliverable, clientFocusState, clientGone, closeInterruptedTurn, DEFAULT_TURN_IDLE_MS, expireTurns, hookTurnEnd, initialWorkStatus, isStaleIdleNudge, noteHookChannelLost, noteHookChannelRestored, openedTurns, reduceWorkStatus, sessionFocus, turnActivity, turnOpenFor, turnStart, UNATTRIBUTED_TURN, userReply, type WorkStatusState } from "./work-status";
+import { answerRequest, becameDeliverable, busDeliverable, clientFocusState, clientGone, closeInterruptedTurn, DEFAULT_TURN_IDLE_MS, expireTurns, hookTurnEnd, initialWorkStatus, isStaleIdleNudge, noteHookChannelLost, noteHookChannelRestored, openedTurns, PROVISIONAL_TURN_GRACE_MS, reduceWorkStatus, retractProvisionalTurn, sessionFocus, turnActivity, turnOpenFor, turnStart, UNATTRIBUTED_TURN, userReply, type WorkStatusState } from "./work-status";
 import { SessionBusDeliveryQueue, type QueuedLine } from "./session-bus/delivery-queue";
 import { logger } from "./logger";
 const log = logger.child({ component: "project-core" });
@@ -107,6 +107,7 @@ export class ProjectCore {
    *  closes. Unref'd so it never keeps the process alive on its own; cleared in
    *  {@link shutdown}. */
   private expireInterval: ReturnType<typeof setInterval> | null = null;
+  private readonly provisionalTimers = new Set<ReturnType<typeof setTimeout>>();
   private _onWorkStatusChange: (() => void) | null = null;
   private _onSessionsChange: (() => void) | null = null;
   /** Identity signature (id/name/archived, sorted) of the last `session:updated`
@@ -300,7 +301,17 @@ export class ProjectCore {
     sessionId: string,
     opts: { submitted: boolean; typed: boolean; command?: boolean },
   ): void {
-    this.commitWork(userReply(this._work, sessionId, opts, Date.now()));
+    const now = Date.now();
+    const before = this._work.provisionalTurns.get(sessionId);
+    this.commitWork(userReply(this._work, sessionId, opts, now));
+    const openedAt = this._work.provisionalTurns.get(sessionId);
+    if (openedAt === undefined || openedAt === before) return;
+    const timer = setTimeout(() => {
+      this.provisionalTimers.delete(timer);
+      this.commitWork(retractProvisionalTurn(this._work, sessionId, openedAt));
+    }, PROVISIONAL_TURN_GRACE_MS);
+    if (typeof timer.unref === "function") timer.unref();
+    this.provisionalTimers.add(timer);
   }
 
   /** The user answered the permission/question [requestId] on [sessionId].
@@ -823,6 +834,8 @@ export class ProjectCore {
   /** Tear down transport + subsystems. */
   async shutdown(reason?: string): Promise<void> {
     if (this.expireInterval) { clearInterval(this.expireInterval); this.expireInterval = null; }
+    for (const timer of this.provisionalTimers) clearTimeout(timer);
+    this.provisionalTimers.clear();
     try { this.core?.setPeerSessionProvider(null); } catch {}
     try { this.core?.setTerminalStreamHooks(null); } catch {}
     // Before detaching — deliver() would otherwise hand a frame to a torn-down

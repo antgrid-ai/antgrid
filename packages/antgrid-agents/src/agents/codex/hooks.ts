@@ -43,10 +43,8 @@ export function buildCodexNotifyInjection(
     // hook_config.rs support for that field on a command handler is unconfirmed
     // against the pinned version, and a wrong guess there breaks trusted_hash
     // silently (see the fingerprint comment above) rather than merely costing
-    // CPU. The per-tool-call hook-spawn cost this accepts on every Codex tool
-    // call is therefore unmeasured against a live session — confirm codex runs
-    // this off the critical path, or measure it, before relying on the
-    // Claude-side cost argument covering this agent too.
+    // CPU. The cost is one hook spawn on every Codex tool call: about 0.6 s on
+    // Windows with the packaged bridge (PowerShell is 0.16 s of it).
     { event: "PostToolUse", label: EVENT_LABELS.PostToolUse, commandEvent: "post-tool-use" },
     // A real turn-start: measured (bun-pty probe) to fire exactly once per
     // submitted prompt, before the model turn, and not for /status, /new or
@@ -130,6 +128,11 @@ export const turnBoundaryEvents = {
   start: ["user-prompt"],
   end: ["after-agent", "stop"],
 } as const;
+
+// codex runs `user-prompt` through a fresh PowerShell/sh plus a bridge process,
+// measured at 1.7 s after Enter and about 4 s on a session's first prompt,
+// where SessionStart runs first.
+export const provisionalTurnStart = true;
 
 export const posts = ["/session-title", "/handler-event", "/notify", "/hook-alive", "/turn-activity", "/turn-start"] as const;
 export const observation = { notifications: true, titles: true, handler: true, turnStart: true, turnEnd: true, hookAlive: true } as const;

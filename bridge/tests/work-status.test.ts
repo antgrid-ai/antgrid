@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { answerRequest, attentionEdges, becameDeliverable, busDeliverable, clientFocusState, clientGone, closeInterruptedTurn, closeTurn, DEFAULT_TURN_IDLE_MS, expireTurns, hookTurnEnd, initialWorkStatus, isStaleIdleNudge, noteHookChannelLost, noteHookChannelRestored, openedTurns, reduceWorkStatus, sessionFocus, turnActivity, turnOpenFor, turnStart, UNATTRIBUTED_TURN, userReply, type WorkStatusState } from "../src/work-status";
+import { answerRequest, attentionEdges, becameDeliverable, busDeliverable, clientFocusState, clientGone, closeInterruptedTurn, closeTurn, DEFAULT_TURN_IDLE_MS, expireTurns, hookTurnEnd, initialWorkStatus, isStaleIdleNudge, noteHookChannelLost, noteHookChannelRestored, openedTurns, reduceWorkStatus, retractProvisionalTurn, sessionFocus, turnActivity, turnOpenFor, turnStart, UNATTRIBUTED_TURN, userReply, type WorkStatusState } from "../src/work-status";
 import type { InboundSource } from "../src/message-bus";
 
 /** The two client classes the read state distinguishes: the phone reaches a core
@@ -810,19 +810,87 @@ test("a bare keystroke (no CR) is not a submitted prompt", () => {
   expect(userReply(idle, "r0", { submitted: false })).toBe(idle);
 });
 
-test("a submitted prompt is NOT inferred for an agent that reports its own turns", () => {
-  // Claude has a real /turn-start hook and chat sessions have turn frames, and
-  // codex now has its own real UserPromptSubmit hook too — guessing from
-  // keystrokes there could only be wrong for either.
-  // Typed content is present in every case below, so the tool gate is the only
-  // thing keeping these sessions out of an inferred turn.
+test("a submitted prompt is NOT inferred for an agent that reports its own turns in time", () => {
+  // Claude has a real /turn-start hook that lands fast enough on its own —
+  // guessing from keystrokes there could only be wrong.
+  // Typed content is present, so the tool gate is the only thing keeping this
+  // session out of an inferred turn.
   const submit = (s: WorkStatusState) =>
     userReply(userReply(s, "r0", { typed: true }), "r0", { submitted: true });
 
   const claude = fold([sessions(1, { tool: "claude-code" })]);
   expect(submit(claude).status).toBe("done");
-  const codex = fold([sessions(1, { tool: "codex" })]);
-  expect(submit(codex).status).toBe("done");
+  expect(submit(claude).provisionalTurns.size).toBe(0);
+});
+
+// codex's UserPromptSubmit hook is real but lands seconds after Enter, so a
+// submitted prompt opens its turn provisionally and the hook confirms it.
+const codexSubmit = (s: WorkStatusState, now = 1_000) =>
+  userReply(userReply(s, "r0", { typed: true }, now), "r0", { submitted: true }, now);
+const codexIdle = () => fold([sessions(1, { tool: "codex" })]);
+
+test("a submitted codex prompt reads working at once, provisionally", () => {
+  const s = codexSubmit(codexIdle());
+  expect(s.status).toBe("working");
+  expect(s.provisionalTurns.get("r0")).toBe(1_000);
+});
+
+test("codex's own turn-start confirms a provisional turn, so its retraction finds nothing", () => {
+  const confirmed = turnStart(codexSubmit(codexIdle()), "r0", undefined, 2_000);
+  expect(confirmed.provisionalTurns.has("r0")).toBe(false);
+  expect(confirmed.status).toBe("working");
+  expect(retractProvisionalTurn(confirmed, "r0", 1_000)).toBe(confirmed);
+});
+
+test("a tool completion confirms a provisional turn too", () => {
+  const s = turnActivity(codexSubmit(codexIdle()), "r0", 2_000);
+  expect(s.provisionalTurns.has("r0")).toBe(false);
+  expect(s.status).toBe("working");
+});
+
+test("an unconfirmed provisional turn is retracted to done, with no unread mark", () => {
+  // Someone is watching a DIFFERENT session, so a real turn ending here would
+  // turn blue; a retraction is a guess taken back and must not.
+  const watching = sessionFocus(fold([sessions(2, { tool: "codex" })]), "r1", APP);
+  const retracted = retractProvisionalTurn(codexSubmit(watching), "r0", 1_000);
+  expect(retracted.sessionStatuses.get("r0")).toBe("done");
+  expect(retracted.unreadSessions.has("r0")).toBe(false);
+  expect(retracted.provisionalTurns.has("r0")).toBe(false);
+});
+
+test("a retraction armed by an earlier Enter leaves a later provisional turn alone", () => {
+  const second = codexSubmit(hookTurnEnd(codexSubmit(codexIdle(), 1_000), "r0"), 5_000);
+  expect(retractProvisionalTurn(second, "r0", 1_000)).toBe(second);
+  expect(second.status).toBe("working");
+});
+
+test("a turn end settles a provisional turn", () => {
+  const s = reduceWorkStatus(codexSubmit(codexIdle()), push("task_complete", "r0"));
+  expect(s.provisionalTurns.has("r0")).toBe(false);
+  expect(s.status).toBe("done");
+});
+
+test("a codex slash command or bare enter opens no provisional turn", () => {
+  const idle = codexIdle();
+  const command = userReply(userReply(idle, "r0", { typed: true, command: true }), "r0", { submitted: true });
+  expect(command.status).toBe("done");
+  expect(userReply(idle, "r0", { submitted: true })).toBe(idle);
+});
+
+test("a codex session whose hook channel is dead opens no provisional turn", () => {
+  const dead = noteHookChannelLost(codexIdle(), "r0");
+  expect(codexSubmit(dead).status).toBe("done");
+  expect(codexSubmit(reduceWorkStatus(dead, sessions(1, { tool: "codex" }))).status).toBe("done");
+});
+
+test("a chat codex session opens no provisional turn", () => {
+  expect(codexSubmit(fold([sessions(1, { tool: "codex", mode: "chat" })])).status).toBe("done");
+});
+
+test("a provisional codex turn is not exempt from the idle decay", () => {
+  const decayed = expireTurns(codexSubmit(codexIdle(), 1_000), 1_000 + DEFAULT_TURN_IDLE_MS + 1, DEFAULT_TURN_IDLE_MS);
+  expect(decayed.status).toBe("done");
+  expect(decayed.provisionalTurns.has("r0")).toBe(false);
 });
 
 test("a submitted prompt is NOT inferred for a hookless agent (nothing would close it)", () => {
