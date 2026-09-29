@@ -112,7 +112,14 @@ class PreviewPortForwarder {
     // Small request/response exchanges dominate a dev-server preview; Nagle
     // would add its delay to every one of them.
     socket.setOption(SocketOption.tcpNoDelay, true);
-    final connection = _Connection(socket, _open(_mintConnId()), _live.remove);
+    final connId = _mintConnId();
+    final connection = _Connection(
+      socket,
+      _open(connId),
+      _live.remove,
+      connId: connId,
+      port: _port,
+    );
     _live.add(connection);
     connection.start();
   }
@@ -136,14 +143,31 @@ class PreviewPortForwarder {
 /// direction winds down the whole connection because the bridge cannot model a
 /// half-close.
 class _Connection {
-  _Connection(this._socket, this._channel, this._onGone);
+  _Connection(
+    this._socket,
+    this._channel,
+    this._onGone, {
+    required this.connId,
+    required this.port,
+  });
 
   final Socket _socket;
   final TunnelTcpChannel _channel;
   final void Function(_Connection) _onGone;
 
+  /// The bridge logs the same id, so the two ends of one connection can be
+  /// lined up across the phone's and the host's logs.
+  final String connId;
+  final int port;
+
+  final Stopwatch _age = Stopwatch()..start();
+  int? _readyMs;
+  int _toBridge = 0;
+  int _toLocal = 0;
+
   StreamSubscription<Uint8List>? _localSub;
   StreamSubscription<Uint8List>? _remoteSub;
+  bool _localEnded = false;
   bool _ended = false;
 
   void start() {
@@ -152,16 +176,17 @@ class _Connection {
     _localSub = _socket.listen(
       _onLocalData,
       onDone: _onLocalDone,
-      onError: (Object _) => end(abort: true),
+      onError: (Object _) => _end(abort: true, cause: 'local socket error'),
       cancelOnError: true,
     )..pause();
     _channel.ready.then(
       (_) {
         if (_ended) return;
+        _readyMs = _age.elapsedMilliseconds;
         _remoteSub = _channel.incoming.listen(
           _onRemoteData,
           onDone: _onRemoteDone,
-          onError: (Object _) => end(abort: true),
+          onError: (Object _) => _end(abort: true, cause: 'tunnel error'),
           cancelOnError: true,
         );
         _localSub?.resume();
@@ -170,9 +195,14 @@ class _Connection {
         AbLog.warn(
           'preview',
           'tunnel connection failed to open',
-          fields: {'error': '$error'},
+          fields: {
+            'connId': connId,
+            'port': port,
+            'ms': _age.elapsedMilliseconds,
+            'error': '$error',
+          },
         );
-        end(abort: true);
+        _end(abort: true, cause: 'open failed');
       },
     );
   }
@@ -183,38 +213,43 @@ class _Connection {
     // The channel's queue resets the stream past its cap, so the socket stays
     // paused until each chunk has been handed over.
     sub.pause();
+    _toBridge += data.length;
     _channel
         .send(data)
         .then((accepted) {
           if (_ended) return;
           if (!accepted) {
-            end(abort: true);
+            _end(abort: true, cause: 'send refused');
             return;
           }
           sub.resume();
         })
         .catchError((Object _) {
-          end(abort: true);
+          _end(abort: true, cause: 'send failed');
         });
   }
 
   void _onLocalDone() {
     if (_ended) return;
+    _localEnded = true;
     // Our send half is over; the bridge answers with its own FIN once the
     // upstream has ended, which is what closes the local socket.
     unawaited(_channel.finish());
     // A bridge that never answers must not keep the connection alive.
-    if (_remoteSub == null) end(abort: true);
+    if (_remoteSub == null) {
+      _end(abort: true, cause: 'local closed before ready');
+    }
   }
 
   void _onRemoteData(Uint8List data) {
     final sub = _remoteSub;
     if (sub == null) return;
     sub.pause();
+    _toLocal += data.length;
     _socket.add(data);
     _socket.flush().then((_) {
       if (!_ended) sub.resume();
-    }, onError: (Object _) => end(abort: true));
+    }, onError: (Object _) => _end(abort: true, cause: 'local write failed'));
   }
 
   Future<void> _onRemoteDone() async {
@@ -224,14 +259,34 @@ class _Connection {
     } on Object {
       // The peer is already gone; closing below is all that is left.
     }
-    end(abort: false);
+    _end(
+      abort: false,
+      cause: _localEnded ? 'closed by local' : 'closed by bridge',
+    );
   }
 
   /// Idempotent. [abort] resets the tunnel stream; otherwise the bridge already
   /// ended its half and ours only needs a graceful finish.
-  void end({required bool abort}) {
+  void end({required bool abort}) =>
+      _end(abort: abort, cause: abort ? 'aborted' : 'closed');
+
+  void _end({required bool abort, required String cause}) {
     if (_ended) return;
     _ended = true;
+    final fields = {
+      'connId': connId,
+      'port': port,
+      'readyMs': _readyMs,
+      'toBridge': _toBridge,
+      'toLocal': _toLocal,
+      'ms': _age.elapsedMilliseconds,
+      'cause': cause,
+    };
+    if (abort) {
+      AbLog.warn('preview', 'tunnel connection aborted', fields: fields);
+    } else {
+      AbLog.info('preview', 'tunnel connection closed', fields: fields);
+    }
     unawaited(_localSub?.cancel());
     unawaited(_remoteSub?.cancel());
     if (abort) {

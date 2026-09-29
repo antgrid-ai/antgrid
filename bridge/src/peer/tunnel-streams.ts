@@ -33,6 +33,7 @@ import {
   type ScopedEndCause,
   type ScopedStreamOptions,
   type Schedule,
+  type StreamRefusal,
 } from "./stream-dispatch";
 import {
   StreamRawReader,
@@ -41,6 +42,9 @@ import {
   type StreamSendOutcome,
 } from "./stream-records";
 import type { TunnelProjectBinding } from "../project-streams";
+import { logger } from "../logger";
+
+const log = logger.child({ component: "tunnel-streams" });
 
 export const TUNNEL_STREAM_MAX_QUEUED_BYTES = 4 * 1024 * 1024;
 /** Below session (2), terminal (1) and project (0). Tunnel traffic is a page
@@ -73,6 +77,16 @@ interface TunnelTcpBinding extends ScopedBinding<TunnelProjectBinding> {
   closing: boolean;
   /** `writer.finish()` has been issued for the stream's final record or FIN. */
   finishing: boolean;
+  /** What the one log line this connection gets is built from. Nothing else
+   *  on this path logs: the bytes are the browser's own, so a per-connection
+   *  summary is the only view the host log has of a preview load. */
+  readonly openedAt: number;
+  port: number | undefined;
+  readyMs: number | undefined;
+  toUpstream: number;
+  toApp: number;
+  endedBy: "app" | "upstream" | undefined;
+  logged: boolean;
 }
 
 export type TunnelStreamRegistryOptions = ScopedStreamOptions<TunnelProjectBinding>;
@@ -116,8 +130,38 @@ export class TunnelStreamRegistry extends ScopedStreamRegistry<
       STREAM_TUNNEL_TCP_RECORD_MAX_BYTES,
       () => { if (!binding.unbound) this.opts.retirePeer(base.peerId, "protocol-violation"); },
     );
-    binding = { ...base, kind: "tunnel-tcp", reader, sink: undefined, closing: false, finishing: false };
+    binding = {
+      ...base, kind: "tunnel-tcp", reader, sink: undefined, closing: false, finishing: false,
+      openedAt: performance.now(), port: undefined, readyMs: undefined, toUpstream: 0, toApp: 0,
+      endedBy: undefined, logged: false,
+    };
     return binding;
+  }
+
+  private elapsedMs(binding: TunnelTcpBinding): number {
+    return Math.round(performance.now() - binding.openedAt);
+  }
+
+  /** The connection's one summary line, written by whichever ending gets there
+   *  first. `ready: null` means the upstream never came up. */
+  private summarize(binding: TunnelTcpBinding, outcome: string): void {
+    if (binding.logged) return;
+    binding.logged = true;
+    const fields = {
+      connId: binding.id, port: binding.port, readyMs: binding.readyMs ?? null,
+      toUpstream: binding.toUpstream, toApp: binding.toApp, ms: this.elapsedMs(binding),
+    };
+    if (outcome === "closed") log.info({ ...fields, endedBy: binding.endedBy ?? "bridge" }, "tunnel: connection closed");
+    else log.warn({ ...fields, cause: outcome }, "tunnel: connection ended abnormally");
+  }
+
+  protected override refuseInline(binding: TunnelTcpBinding, refusal: StreamRefusal): void {
+    if (!binding.unbound && !binding.logged) {
+      binding.logged = true;
+      log.warn({ connId: binding.id, port: binding.port, code: refusal.code, reason: refusal.message, ms: this.elapsedMs(binding) },
+        "tunnel: stream refused");
+    }
+    super.refuseInline(binding, refusal);
   }
 
   protected serve(binding: TunnelTcpBinding): void {
@@ -128,7 +172,8 @@ export class TunnelStreamRegistry extends ScopedStreamRegistry<
    *  goes up first because the upstream answers `end()` with its own
    *  "finished" callback, which would otherwise queue a FIN behind the abort
    *  this teardown is about to issue. */
-  protected onEnded(binding: TunnelTcpBinding, _cause: ScopedEndCause): void {
+  protected onEnded(binding: TunnelTcpBinding, cause: ScopedEndCause): void {
+    this.summarize(binding, cause);
     binding.closing = true;
     binding.sink?.end();
   }
@@ -146,6 +191,7 @@ export class TunnelStreamRegistry extends ScopedStreamRegistry<
     const outcome = await raceDeadline(readPromise, STREAM_OPEN_DEADLINE_MS, this.scheduleFn)
       .catch(() => "ended" as const);
     if (outcome === STREAM_DEADLINE) {
+      this.summarize(binding, "no head record before the deadline");
       binding.writer.abort();
       this.release(binding);
       readPromise.then(() => this.stopRecv(binding), () => {});
@@ -157,6 +203,7 @@ export class TunnelStreamRegistry extends ScopedStreamRegistry<
       // slot must go now, or every such cancel leaks one of the peer's
       // STREAM_MAX_TUNNEL_STREAMS_PER_PEER until the connection retires. The
       // read has already settled, so recv needs no stop.
+      this.summarize(binding, "app ended before its head record");
       binding.writer.abort();
       this.release(binding);
       return undefined;
@@ -206,6 +253,7 @@ export class TunnelStreamRegistry extends ScopedStreamRegistry<
   private async runHead(binding: TunnelTcpBinding): Promise<void> {
     const open = await this.parseHead(binding);
     if (open === undefined) return;
+    binding.port = open.port;
 
     const manager = this.admitTunnel(binding, open.checkoutId);
     if (!manager) return;
@@ -223,9 +271,12 @@ export class TunnelStreamRegistry extends ScopedStreamRegistry<
     const result = await manager.probeTcp(open.port);
     // Ended while probing (peer dropped, project detached): nothing to answer.
     if (binding.unbound) return;
+    binding.logged = true;
     if (result.reachable) {
+      log.info({ connId: binding.id, port: open.port, tls: result.tls, ms: this.elapsedMs(binding) }, "tunnel: probe");
       await this.replyThenFinish(binding, { type: "tunnel:tcp-ready", connId: binding.id, tls: result.tls } satisfies TunnelTcpReady);
     } else {
+      log.warn({ connId: binding.id, port: open.port, reason: result.message, ms: this.elapsedMs(binding) }, "tunnel: probe found nothing listening");
       this.diag(binding, "tunnel-stream:tcp-unreachable", { peerId: binding.peerId, connId: binding.id, reason: result.message });
       await this.replyThenFinish(binding, { type: "tunnel:tcp-error", connId: binding.id, message: result.message } satisfies TunnelTcpError);
     }
@@ -237,20 +288,27 @@ export class TunnelStreamRegistry extends ScopedStreamRegistry<
     const peer: TunnelTcpPeer = {
       ready: async () => {
         const outcome = await this.sendRecord(binding, { type: "tunnel:tcp-ready", connId: binding.id } satisfies TunnelTcpReady);
+        binding.readyMs = this.elapsedMs(binding);
         // The app may not send before it has read the ready record, so the raw
         // pump only starts once that record is queued.
         if (outcome === "sent") void this.pumpFromApp(binding);
         return outcome;
       },
       unreachable: (message) => {
+        this.summarize(binding, `upstream unreachable: ${message}`);
         this.diag(binding, "tunnel-stream:tcp-unreachable", { peerId: binding.peerId, connId: binding.id, reason: message });
         void this.replyThenFinish(binding, { type: "tunnel:tcp-error", connId: binding.id, message } satisfies TunnelTcpError);
       },
       data: async (bytes) => {
         if (this.undeliverable(binding)) return "dropped";
-        return binding.writer.sendRaw(bytes);
+        const outcome = await binding.writer.sendRaw(bytes);
+        if (outcome === "sent") binding.toApp += bytes.byteLength;
+        return outcome;
       },
-      end: () => { void this.finishStream(binding); },
+      end: () => {
+        binding.endedBy ??= "upstream";
+        void this.finishStream(binding);
+      },
     };
     binding.sink = manager.serveTcp(open, peer);
     // A manager may fail a run before it returns, and the teardown that
@@ -294,6 +352,7 @@ export class TunnelStreamRegistry extends ScopedStreamRegistry<
     const pending = binding.pendingRead;
     this.release(binding);
     this.stopRecv(binding, pending);
+    this.summarize(binding, "closed");
   }
 
   /** App bytes into the upstream socket, one read at a time: the next read is
@@ -308,9 +367,11 @@ export class TunnelStreamRegistry extends ScopedStreamRegistry<
       if (bytes === READ_UNBOUND) return;
       if (!this.stillAuthorized(binding)) return;
       if (bytes === READ_ENDED || bytes === null) {
+        binding.endedBy ??= "app";
         binding.sink?.end();
         return;
       }
+      binding.toUpstream += bytes.byteLength;
       await binding.sink?.write(bytes);
     }
   }
