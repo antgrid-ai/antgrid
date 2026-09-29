@@ -634,6 +634,14 @@ class AuthService {
       throw AuthException('Too many attempts. Try again in a minute.');
     }
     if (res.statusCode < 200 || res.statusCode >= 300) {
+      // Apple's sheet has already succeeded by now, so the one copy the user
+      // sees stands for every server-side cause — a deployment without Apple
+      // configured (PROVIDER_NOT_FOUND) reads the same as a rejected token.
+      AbLog.warn(
+        'AuthService',
+        'Apple sign-in rejected by server',
+        fields: {'status': res.statusCode, 'code': _errorCode(res)},
+      );
       throw AuthException('Could not sign in with Apple. Try again.');
     }
     final cookie = _extractSessionCookie(res.headers['set-cookie']);
