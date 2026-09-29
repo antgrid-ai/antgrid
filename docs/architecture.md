@@ -25,12 +25,11 @@ machine-scoped verbs such as `agent:projects` and `stream-ready` — QUIC
 keep-alive/idle is the liveness layer (`docs/protocol/peer-session.md` §3);
 every project gets its own stream (`docs/protocol/peer-session.md` §1d),
 carrying that project's bus traffic — session-bus frames, `preview:url`, and
-so on — as bare records with per-record caps (§5). Terminal attachments, tunnel exchanges and remote file
-uploads get their own streams in turn (§1b, §1c, §1e): the HTTP-proxy and
-browser-WebSocket preview traffic rides its own per-exchange QUIC stream — one
-stream per HTTP request/response and one per WebSocket's lifetime — with a
-request or response body carried as raw bytes rather than a bus frame (only a
-WS frame is still a tagged record, since one stream multiplexes many of them).
+so on — as bare records with per-record caps (§5). Terminal attachments, tunnel connections and remote file
+uploads get their own streams in turn (§1b, §1c, §1e): preview traffic is raw TCP:
+each connection the previewing device accepts on its loopback forwarder port rides
+one `tunnel-tcp` QUIC stream, with one JSON head record each way and then raw
+bytes in both directions (§1c), never a bus frame.
 A remote file upload rides its own stream the same way: the app writes the
 file's raw bytes directly, with no bus frame and no app-layer chunking, and
 the bridge answers with one result record. The desktop app's own local

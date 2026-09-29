@@ -3050,12 +3050,6 @@ export type SessionBusArrived = z.infer<typeof SessionBusArrivedMessage>;
  * answer to a question the agent may have flagged `isSecret`, which the UI
  * masks on the way in; `terminal:input` is literally the user's keystrokes,
  * password prompts inside the PTY included.
- * The `tunnel:*` set is the preview proxy's own wire (tunnel-protocol.ts) and
- * carries the proxied site's request and response headers verbatim — `Cookie`,
- * `Authorization`, `Set-Cookie`. They are named here rather than there because
- * one list is the only way this stays checkable; they are also the case that
- * proves the check must key off the CLAIMED type, since `parseMessageFast`
- * refuses them and they reach the ring down the `unparseable` path.
  *
  * Metadata (type, id, byte count) is still recorded — only the payload is
  * withheld, so a capture still shows that the frame crossed and when.
@@ -3071,9 +3065,6 @@ export const BODY_REDACTED_MESSAGE_TYPES = new Set<string>([
   // withheld.
   "terminal:frame",
   "terminal:history:page",
-  "tunnel:http-request",
-  "tunnel:http-head",
-  "tunnel:ws-open",
 ]);
 
 /** The exhaustive checkout-variable protocol set. Any new filesystem-facing

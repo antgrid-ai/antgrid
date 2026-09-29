@@ -9,7 +9,7 @@
  * touching admission order.
  *
  * `ScopedStreamRegistry` below is the shared admission path for every
- * project-scoped kind (terminal, tunnel-http, tunnel-ws, upload): the per-peer
+ * project-scoped kind (terminal, tunnel-tcp, upload): the per-peer
  * cap, the safe-id/catalog checks, the project's own binding lookup and its
  * per-sender gate, duplicate-id detection, teardown and the writer-failure
  * mapping all live once here. A kind supplies only its cap/priority/reset
@@ -129,8 +129,7 @@ export function streamLabelOf(open: StreamOpen): StreamDiagnosticLabel {
     case "session": return { kind: open.kind };
     case "project": return { kind: open.kind, id: open.projectId };
     case "terminal": return { kind: open.kind, id: open.requestId };
-    case "tunnel-http": return { kind: open.kind, id: open.requestId };
-    case "tunnel-ws": return { kind: open.kind, id: open.wsId };
+    case "tunnel-tcp": return { kind: open.kind, id: open.connId };
     case "upload": return { kind: open.kind, id: open.requestId };
   }
 }
@@ -310,8 +309,8 @@ export class PeerStreamAcceptor {
 }
 
 // ---------------------------------------------------------------------------
-// Generic admission for every project-scoped kind (terminal, tunnel-http,
-// tunnel-ws, upload). See `bridge/CLAUDE.md`'s project-streams.ts entry for
+// Generic admission for every project-scoped kind (terminal, tunnel-tcp,
+// upload). See `bridge/CLAUDE.md`'s project-streams.ts entry for
 // what a "project's binding" means; this is the consumer side of it.
 // ---------------------------------------------------------------------------
 
@@ -329,7 +328,7 @@ export interface ScopedProjectBinding {
  *  antgrid-wire (the cap) or the kind's own file (the rest), never a literal
  *  inlined here. */
 export interface ScopedStreamSpec {
-  readonly kinds: readonly ("terminal" | "tunnel-http" | "tunnel-ws" | "upload")[];
+  readonly kinds: readonly ("terminal" | "tunnel-tcp" | "upload")[];
   readonly cap: number;
   readonly capMessage: string;
   readonly priority: number;
@@ -354,7 +353,7 @@ export interface ScopedStreamOptions<P extends ScopedProjectBinding> {
 export interface ScopedBinding<P extends ScopedProjectBinding = ScopedProjectBinding> {
   readonly peerId: string;
   readonly kind: ScopedStreamSpec["kinds"][number];
-  /** requestId / wsId: duplicate key within (peerId, kind). */
+  /** requestId / connId: duplicate key within (peerId, kind). */
   readonly id: string;
   readonly projectId: string;
   readonly stream: AcceptedBiStream;
@@ -397,9 +396,8 @@ export function openScopedWriter(
 /**
  * The shared admission path for a project-scoped stream kind. Registers one
  * `StreamHandler` per kind (`handlerFor`) into `PeerStreamAcceptor`'s handler
- * table; `native-host-connection.ts` wires terminal, tunnel-http, tunnel-ws
- * and upload through one instance each (tunnel-http and tunnel-ws share ONE
- * `TunnelStreamRegistry` instance and its cap).
+ * table; `native-host-connection.ts` wires terminal, tunnel-tcp and upload
+ * through one instance each.
  *
  * `handlerFor`'s admission order (every step before any read from the
  * stream): the per-peer cap; the kind's own open-frame validation; the safe-id

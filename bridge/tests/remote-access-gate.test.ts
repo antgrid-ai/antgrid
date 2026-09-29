@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
+import net from "node:net";
 import { buildAgentCore, type AgentCore } from "../src/agent-core";
 import type { SessionDirectory, SessionDirectoryRow } from "../src/session-bus/directory";
 import { MessageBus } from "../src/message-bus";
@@ -458,39 +459,6 @@ test("core.tunnelStreams.admit refuses NOT_ALLOWED while mobile access is off, a
   expect(admitted.ok).toBe(true);
 });
 
-// The core-level half of the abort: `project-core`'s peer hooks reach every
-// checkout runtime's TunnelManager only through this one call, and a body left
-// streaming past a peer loss burns the whole credit window on frames nobody
-// will read. (It lives here because this file is the only place that builds a
-// real core with a plaintext hook.)
-/** A dev server whose body trickles, so the flush window turns a response into
- *  a start plus chunks rather than one whole-body frame. `onCancel` is handed
- *  the request path, which is how a caller with two concurrent runs tells which
- *  upstream the bridge let go of. */
-function trickleServer(onCancel: (path: string) => void) {
-  return Bun.serve({
-    port: 0,
-    fetch(req) {
-      const path = new URL(req.url).pathname;
-      return new Response(
-        new ReadableStream<Uint8Array>({
-          start(c) {
-            let n = 0;
-            const timer = setInterval(() => {
-              try {
-                if (n++ >= 200) { clearInterval(timer); c.close(); return; }
-                c.enqueue(new Uint8Array(4096).fill(0x61));
-              } catch { clearInterval(timer); }
-            }, 20);
-          },
-          cancel() { onCancel(path); },
-        }),
-        { headers: { "content-type": "application/octet-stream" } },
-      );
-    },
-  });
-}
-
 async function gitIn(folder: string, args: string[]): Promise<void> {
   const proc = Bun.spawn(["git", ...args], { cwd: folder, stdout: "ignore", stderr: "pipe" });
   const code = await proc.exited;
@@ -507,28 +475,50 @@ async function initRepo(folder: string): Promise<void> {
   await gitIn(folder, ["commit", "-m", "initial"]);
 }
 
-/** Tracks a fake `TunnelHttpExchange`'s calls in arrival order, so a test can
- *  assert `serveHttp` never reaches `end()` without a real app on the other
- *  end of the stream. The signal is never aborted by the test itself —
- *  `abortTunnelStreams()` fires `serveHttp`'s own per-run controller, which is
- *  combined with (not replaced by) this one, and a run aborted that way must
- *  `fail()` its exchange: the app is still attached and would otherwise wait
- *  on a stream that neither ends nor resets. */
-function fakeExchange(calls: string[], peerId = "app-dev#machine-dev") {
+/** A local TCP server that echoes every byte back, standing in for a dev
+ *  server: the tunnel manager under test dials it exactly as it would a real
+ *  one. */
+function echoServer() {
+  return net.createServer((socket) => {
+    socket.on("error", () => {});
+    socket.on("data", (chunk) => socket.write(chunk));
+  });
+}
+
+async function listen(server: net.Server): Promise<number> {
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return (server.address() as net.AddressInfo).port;
+}
+
+/** A tunnel peer that records what a run reports, so a test can wait on the
+ *  echo without a real stream. */
+function recordingPeer() {
+  const events: string[] = [];
+  const received: number[] = [];
   return {
-    peerId,
-    signal: new AbortController().signal,
-    head: async () => { calls.push("head"); return "sent" as const; },
-    body: async () => { calls.push("body"); return "sent" as const; },
-    end: async () => { calls.push("end"); return "sent" as const; },
-    fail: (_reason: string) => { calls.push("fail"); },
+    events,
+    received,
+    peer: {
+      ready: async () => { events.push("ready"); return "sent" as const; },
+      unreachable: (message: string) => { events.push(`unreachable:${message}`); },
+      data: async (bytes: Uint8Array) => { received.push(...bytes); return "sent" as const; },
+      end: () => { events.push("end"); },
+    },
   };
 }
 
-test("abortTunnelStreams aborts the core's in-flight tunnel exchange: the upstream is cancelled and end() never runs", async () => {
+async function eventually(condition: () => boolean, timeoutMs = 5000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 15));
+  expect(condition()).toBe(true);
+}
+
+// The manager a core hands out is the only thing that dials a dev server on a
+// phone's behalf, so this proves the admitted manager really forwards bytes.
+test("core.tunnelStreams.admit hands out a manager that pipes raw TCP to a local port and back", async () => {
   const folder = tempFolder();
-  const upstream = { cancelled: false };
-  const route = trickleServer(() => { upstream.cancelled = true; });
+  const server = echoServer();
+  const port = await listen(server);
 
   try {
     core = await buildAgentCore({
@@ -542,7 +532,7 @@ test("abortTunnelStreams aborts the core's in-flight tunnel exchange: the upstre
     const sent: AbMessage[] = [];
     bus.subscribe({ deliver: (m) => sent.push(m) });
     core.attachTransport(bus);
-    core.setPeerSessionProvider(() => session("phone-pubkey-abort-base64"));
+    core.setPeerSessionProvider(() => session("phone-pubkey-tcp-base64"));
 
     core.onHandshakeComplete();
     await waitForServices(sent);
@@ -550,44 +540,30 @@ test("abortTunnelStreams aborts the core's in-flight tunnel exchange: the upstre
     const admission = core.tunnelStreams.admit("app-dev#machine-dev", "main");
     if (!admission.ok) throw new Error("expected admission");
 
-    const calls: string[] = [];
-    const req = {
-      type: "tunnel:http-request" as const,
-      requestId: "abort-me",
-      port: route.port!,
-      method: "GET",
-      path: "/big",
-      bodyLength: 0,
-      checkoutId: "main",
-    };
-    const run = admission.manager.serveHttp(req, null, fakeExchange(calls));
+    const rec = recordingPeer();
+    const sink = admission.manager.serveTcp(
+      { type: "tunnel:tcp-open", connId: "c1", port, checkoutId: "main" },
+      rec.peer,
+    );
+    await eventually(() => rec.events.includes("ready"));
+    await sink.write(Uint8Array.from([1, 2, 3, 4]));
+    await eventually(() => rec.received.length === 4);
+    expect(rec.received).toEqual([1, 2, 3, 4]);
 
-    const headBy = Date.now() + 5000;
-    while (!calls.includes("head") && Date.now() < headBy) await new Promise((r) => setTimeout(r, 15));
-    expect(calls).toContain("head");
-
-    core.abortTunnelStreams("app-dev#machine-dev");
-    await run;
-
-    const cancelledBy = Date.now() + 2000;
-    while (!upstream.cancelled && Date.now() < cancelledBy) await new Promise((r) => setTimeout(r, 15));
-    expect(upstream.cancelled).toBe(true);
-    expect(calls).not.toContain("end");
-    expect(calls).toContain("fail");
+    sink.end();
+    await eventually(() => rec.events.includes("end"));
   } finally {
-    route.stop(true);
+    server.close();
   }
 });
 
-// The other half of the same call: an isolated session runs its own
-// TunnelManager, so a core that aborted only the main one would leave a managed
-// checkout streaming a dead body past the peer loss. Nothing but this fan-out
-// reaches those managers.
-test("abortTunnelStreams reaches a checkout runtime's manager, not only main", async () => {
+// An isolated session runs its own TunnelManager, so a preview stream that
+// names a checkout must be handed that checkout's manager, not main's.
+test("core.tunnelStreams.admit hands a checkout its own manager, which also forwards", async () => {
   const folder = tempFolder();
   await initRepo(folder);
-  const cancelled = new Set<string>();
-  const route = trickleServer((path) => cancelled.add(path));
+  const server = echoServer();
+  const port = await listen(server);
 
   try {
     core = await buildAgentCore({
@@ -602,7 +578,7 @@ test("abortTunnelStreams reaches a checkout runtime's manager, not only main", a
     const sent: AbMessage[] = [];
     bus.subscribe({ deliver: (m) => sent.push(m) });
     core.attachTransport(bus);
-    core.setPeerSessionProvider(() => session("phone-pubkey-abort-checkout-base64"));
+    core.setPeerSessionProvider(() => session("phone-pubkey-tcp-checkout-base64"));
 
     core.onHandshakeComplete();
     await waitForServices(sent);
@@ -633,39 +609,19 @@ test("abortTunnelStreams reaches a checkout runtime's manager, not only main", a
     const mainAdmission = core.tunnelStreams.admit("app-dev#machine-dev", "main");
     const checkoutAdmission = core.tunnelStreams.admit("app-dev#machine-dev", checkoutId!);
     if (!mainAdmission.ok || !checkoutAdmission.ok) throw new Error("expected both admissions to succeed");
+    expect(checkoutAdmission.manager).not.toBe(mainAdmission.manager);
 
-    const mainCalls: string[] = [];
-    const checkoutCalls: string[] = [];
-    const mainReq = {
-      type: "tunnel:http-request" as const, requestId: "abort-main", port: route.port!,
-      method: "GET", path: "/main", bodyLength: 0, checkoutId: "main",
-    };
-    const checkoutReq = {
-      type: "tunnel:http-request" as const, requestId: "abort-checkout", port: route.port!,
-      method: "GET", path: "/checkout", bodyLength: 0, checkoutId: checkoutId!,
-    };
-    const mainRun = mainAdmission.manager.serveHttp(mainReq, null, fakeExchange(mainCalls));
-    const checkoutRun = checkoutAdmission.manager.serveHttp(checkoutReq, null, fakeExchange(checkoutCalls));
-
-    const headBy = Date.now() + 15_000;
-    while ((!mainCalls.includes("head") || !checkoutCalls.includes("head")) && Date.now() < headBy) {
-      await new Promise((r) => setTimeout(r, 15));
-    }
-    expect(mainCalls).toContain("head");
-    expect(checkoutCalls).toContain("head");
-
-    core.abortTunnelStreams("app-dev#machine-dev");
-    await Promise.all([mainRun, checkoutRun]);
-
-    const cancelledBy = Date.now() + 5000;
-    while (cancelled.size < 2 && Date.now() < cancelledBy) await new Promise((r) => setTimeout(r, 15));
-    expect([...cancelled].sort()).toEqual(["/checkout", "/main"]);
-
-    expect(mainCalls).not.toContain("end");
-    expect(checkoutCalls).not.toContain("end");
-    expect(mainCalls).toContain("fail");
-    expect(checkoutCalls).toContain("fail");
+    const rec = recordingPeer();
+    const sink = checkoutAdmission.manager.serveTcp(
+      { type: "tunnel:tcp-open", connId: "c-checkout", port, checkoutId: checkoutId! },
+      rec.peer,
+    );
+    await eventually(() => rec.events.includes("ready"));
+    await sink.write(Uint8Array.from([9]));
+    await eventually(() => rec.received.length === 1);
+    sink.end();
+    await eventually(() => rec.events.includes("end"));
   } finally {
-    route.stop(true);
+    server.close();
   }
 }, 60_000);

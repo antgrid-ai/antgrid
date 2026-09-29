@@ -289,14 +289,6 @@ export interface AgentCore {
    *  `attachTransport` runs for a `CHECKOUT_VARIABLE_MESSAGE_TYPES` frame —
    *  a stream open bypasses that bus-level machinery entirely. */
   readonly uploadStreams: UploadStreamServer;
-  /** Abort every in-flight tunneled HTTP response for one peer, on every
-   *  checkout runtime and on main. Driven only from `onPeerSessionGone`:
-   *  a body in flight across that peer's session loss is dead by construction,
-   *  and the relay client's queue clear only reaches a run that happens to be
-   *  parked on a send at that instant. A still-live sibling peer's runs are
-   *  untouched, so a second phone establishing does not abort a first phone's
-   *  in-flight preview load. WS tunnels are untouched. */
-  abortTunnelStreams(peerId: string): void;
   /** Wire a lookup from an app session's route id to what this core may know
    *  about it: the verified pubkey behind it (the push registry's key) and the
    *  capabilities it declared. A machine holds one session per attached device,
@@ -1043,7 +1035,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     terminalStreamHooks = hooks;
   }
   // Mobile-access gate, shared by every inbound path (bus verbs AND the
-  // tunnel/HTTP-proxy path, which bypasses the bus). An account-trusted app may
+  // tunnel path, which bypasses the bus). An account-trusted app may
   // drive this project only while the machine is mobile-reachable. A LOOPBACK
   // frame is never gated: local control's trust boundary is the loopback socket
   // + token, and the desktop must keep driving its own machine with mobile
@@ -1394,8 +1386,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
    *  lookup over what is already running. */
   const tunnelStreams: TunnelStreamServer = {
     admit(peerId, checkoutId) {
-      // Tunnel streams proxy arbitrary HTTP to localhost:<port> and return the
-      // body, so a phone could otherwise read a project's dev-server/preview
+      // Tunnel streams forward raw TCP to localhost:<port> and return what it
+      // answers, so a phone could otherwise read a project's dev-server/preview
       // data without ever touching the bus dispatch gate. Gate here too. Only
       // relay traffic reaches a native stream — the loopback owner speaks the
       // bus (and opens no such stream).
@@ -5129,7 +5121,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // design (not the pairing/handshake layer): the phone connects and
       // completes the handshake, but the data plane is inert until the machine
       // switch is on. See remoteFrameAllowed() for the local-mode skip
-      // rationale. The tunnel/HTTP-proxy path is gated separately, in
+      // rationale. The tunnel path is gated separately, in
       // `tunnelStreams.admit` (it carries no bus traffic at all — A3).
       //
       // Only RELAY-origin frames are gated. Loopback frames are the desktop
@@ -5243,11 +5235,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     });
   }
 
-  function abortTunnelStreams(peerId: string): void {
-    for (const runtime of checkoutRuntimes.values()) runtime.tunnelManager?.abortHttpStreams(peerId);
-    tunnelManager?.abortHttpStreams(peerId);
-  }
-
   return {
     attachTransport,
     async shutdown() {
@@ -5320,7 +5307,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     onHandshakeComplete,
     tunnelStreams,
     uploadStreams,
-    abortTunnelStreams,
     setPeerSessionProvider,
     setTerminalStreamHooks,
     connState,
