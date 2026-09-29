@@ -1,5 +1,5 @@
-import { describe, test, expect } from "bun:test";
-import { answerRequest, asReducedNotification, attentionEdges, becameDeliverable, busDeliverable, clientFocusState, clientGone, closeInterruptedTurn, closeTurn, DEFAULT_TURN_IDLE_MS, expireTurns, hookTurnEnd, initialWorkStatus, isStaleIdleNudge, noteHookChannelLost, noteHookChannelRestored, openedTurns, reduceWorkStatus, retractProvisionalTurn, sessionFocus, turnActivity, turnOpenFor, turnStart, UNATTRIBUTED_TURN, userReply, type WorkStatusState } from "../src/work-status";
+import { test, expect } from "bun:test";
+import { answerRequest, attentionEdges, becameDeliverable, busDeliverable, clientFocusState, clientGone, closeInterruptedTurn, closeTurn, DEFAULT_TURN_IDLE_MS, expireTurns, hookTurnEnd, initialWorkStatus, isStaleIdleNudge, noteHookChannelLost, noteHookChannelRestored, openedTurns, reduceWorkStatus, retractProvisionalTurn, sessionFocus, turnActivity, turnOpenFor, turnStart, UNATTRIBUTED_TURN, userReply, type WorkStatusState } from "../src/work-status";
 import type { InboundSource } from "../src/message-bus";
 
 /** The two client classes the read state distinguishes: the phone reaches a core
@@ -1545,29 +1545,47 @@ test("a turnActivity held for a not-yet-listed session also carries its clock re
   expect(s.sessionStatuses.get("r0")).toBe("done");
 });
 
-describe("asReducedNotification", () => {
-  const agentError = (sessionId?: string) =>
-    ({ ...push("error", sessionId), origin: "agent" }) as AbMessage;
-  const armed = (id: string) => id === "r0";
+// A Handler-armed session's own error is a park the Handler announces and will
+// resume from, so it reads done; the error stays on record for when it disarms.
+const handlerStatus = (...armed: string[]): AbMessage =>
+  ({ id: "m", timestamp: 0, type: "handler:status", projectId: "p",
+    sessions: armed.map((terminalId) => ({ terminalId, backlog: [] })), snapshots: [] }) as any;
+const agentError = (sessionId?: string) => ({ ...push("error", sessionId), origin: "agent" }) as AbMessage;
+// Someone is watching r1, so a real turn end on r0 would raise an unread mark.
+const watchingR1 = () => sessionFocus(fold([sessions(2, { tool: "claude-code" })]), "r1", APP);
 
-  test("an agent error on a Handler-armed session reads done, not error", () => {
-    const working = turnStart(fold([sessions(1, { tool: "claude-code" })]), "r0", undefined, 1_000);
-    const s = reduceWorkStatus(working, asReducedNotification(agentError("r0"), armed));
-    expect(s.sessionStatuses.get("r0")).toBe("done");
-  });
+test("an error on a Handler-armed session reads done, with no unread mark", () => {
+  const working = turnStart(reduceWorkStatus(watchingR1(), handlerStatus("r0")), "r0", undefined, 1_000);
+  const parked = reduceWorkStatus(working, agentError("r0"));
+  expect(parked.sessionStatuses.get("r0")).toBe("done");
+  expect(parked.unreadSessions.has("r0")).toBe(false);
+  expect(parked.notifications.get("r0")).toBe("error");
+});
 
-  test("the same error on an unarmed session still reads error", () => {
-    const working = turnStart(fold([sessions(2, { tool: "claude-code" })]), "r1", undefined, 1_000);
-    const s = reduceWorkStatus(working, asReducedNotification(agentError("r1"), armed));
-    expect(s.sessionStatuses.get("r1")).toBe("error");
-  });
+test("the same error on an unarmed session still reads error", () => {
+  const working = turnStart(reduceWorkStatus(watchingR1(), handlerStatus("r1")), "r0", undefined, 1_000);
+  expect(reduceWorkStatus(working, agentError("r0")).sessionStatuses.get("r0")).toBe("error");
+});
 
-  test("only an agent-origin error on a named slot is rewritten", () => {
-    const bridgeError = push("error", "r0");
-    expect(asReducedNotification(bridgeError, armed)).toBe(bridgeError);
-    const unattributed = agentError();
-    expect(asReducedNotification(unattributed, armed)).toBe(unattributed);
-    const block = { ...push("permission_request", "r0"), origin: "agent" } as AbMessage;
-    expect(asReducedNotification(block, armed)).toBe(block);
-  });
+test("disarming during a park turns the error back on at once", () => {
+  const parked = reduceWorkStatus(reduceWorkStatus(watchingR1(), handlerStatus("r0")), agentError("r0"));
+  expect(reduceWorkStatus(parked, handlerStatus()).sessionStatuses.get("r0")).toBe("error");
+});
+
+test("arming after an error reads done, with no unread mark", () => {
+  const failed = reduceWorkStatus(watchingR1(), agentError("r0"));
+  expect(failed.sessionStatuses.get("r0")).toBe("error");
+  const armed = reduceWorkStatus(failed, handlerStatus("r0"));
+  expect(armed.sessionStatuses.get("r0")).toBe("done");
+  expect(armed.unreadSessions.has("r0")).toBe(false);
+});
+
+test("an unattributed error is not a park, even for an armed session", () => {
+  const s = reduceWorkStatus(reduceWorkStatus(watchingR1(), handlerStatus("r0")), agentError());
+  expect(s.sessionStatuses.get("r0")).toBe("error");
+});
+
+test("a handler:status that arms nothing new leaves the state untouched", () => {
+  const armed = reduceWorkStatus(watchingR1(), handlerStatus("r0"));
+  expect(reduceWorkStatus(armed, handlerStatus("r0"))).toBe(armed);
 });

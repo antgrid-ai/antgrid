@@ -127,6 +127,11 @@ export interface WorkStatusState {
    *  agentSpec.name` — without it every default-spec session looked toolless and
    *  silently opted out of the keystroke inference. */
   readonly defaultTool: string | undefined;
+  /** Sessions an armed Handler is driving, from the latest `handler:status`
+   *  (a full snapshot listing ARMED sessions only). Read by
+   *  {@link parkedByHandler}; the push dispatcher asks AgentCore's own mirror of
+   *  the same frame, so the two cannot disagree for long. */
+  readonly handlerArmedSessions: ReadonlySet<string>;
   /** Rollup of {@link sessionStatuses} — what the project row shows. */
   readonly status: WorkStatus;
   readonly sessionStatuses: ReadonlyMap<string, WorkStatus>;
@@ -241,6 +246,7 @@ interface WorkInputs {
   readTracking: boolean;
   unreadSessions: ReadonlySet<string>;
   defaultTool: string | undefined;
+  handlerArmedSessions: ReadonlySet<string>;
 }
 
 /** Notification types that mean "the turn is over" (as opposed to the
@@ -302,12 +308,25 @@ function statusFor(sessionId: string, i: WorkInputs): WorkStatus {
     case "permission_request":
     case "awaiting_input":
     case "question": return "attention";
-    case "error": return "error";
+    case "error": return parkedByHandler(sessionId, i) ? "done" : "error";
     case "task_complete":
     case "idle": return "done";
     default:
       return turnOpenFor(i.activeTurns, sessionId) ? "working" : "done";
   }
+}
+
+/** Did [sessionId]'s turn end in its OWN error while an armed Handler drives it?
+ *
+ *  Such a session reads done, not error: the Handler announces that stop itself
+ *  (a park notice, a wrap-up or an escalation) and resumes the agent when a
+ *  limit lifts, so a red dot held for the length of a park would contradict it.
+ *  The error stays on record, so disarming turns the dot red again at once —
+ *  a stopped agent nothing will resume is exactly what error is for. The
+ *  unattributed fallback never qualifies: arming names one session, and that
+ *  error could belong to any of them. */
+function parkedByHandler(sessionId: string, i: WorkInputs): boolean {
+  return i.handlerArmedSessions.has(sessionId) && i.notifications.get(sessionId) === "error";
 }
 
 /** Sessions holding an answer nobody has looked at, for the state {@link build}
@@ -338,7 +357,8 @@ function deriveUnread(
   if (i.readTracking && prev) {
     for (const [id, s] of raw) {
       // A decay is silence, never an answer nobody looked at — see expireTurns.
-      if (s !== "done" || decayed?.has(id)) continue;
+      // Nor is a Handler park: the Handler's own notice is that announcement.
+      if (s !== "done" || decayed?.has(id) || parkedByHandler(id, i)) continue;
       const before = prev.sessionStatuses.get(id);
       if (before !== undefined && before !== "done" && before !== "unread") unread.add(id);
     }
@@ -421,6 +441,7 @@ function build(i: WorkInputs, prev?: WorkStatusState, decayed?: ReadonlySet<stri
     pendingActivityAt: i.pendingActivityAt,
     typedSessions: i.typedSessions,
     defaultTool: i.defaultTool,
+    handlerArmedSessions: i.handlerArmedSessions,
     status,
     sessionStatuses,
   };
@@ -445,6 +466,7 @@ function inputsOf(s: WorkStatusState): WorkInputs {
     readTracking: s.readTracking,
     unreadSessions: s.unreadSessions,
     defaultTool: s.defaultTool,
+    handlerArmedSessions: s.handlerArmedSessions,
   };
 }
 
@@ -466,6 +488,7 @@ export const initialWorkStatus: WorkStatusState = build({
   readTracking: false,
   unreadSessions: EMPTY_IDS,
   defaultTool: undefined,
+  handlerArmedSessions: EMPTY_IDS,
 });
 
 /** Drop [id]'s notification AND the unattributed one. The latter has no id to
@@ -1261,29 +1284,16 @@ export function reduceWorkStatus(prev: WorkStatusState, msg: AbMessage): WorkSta
       return msg.tool === prev.defaultTool
         ? prev
         : build({ ...inputsOf(prev), defaultTool: msg.tool }, prev);
+    case "handler:status": {
+      const armed = new Set(msg.sessions.map((s) => s.terminalId));
+      // Every emit repeats the whole map, most of them for a backlog or goal
+      // change that arms nothing; an unchanged set must return [prev] itself.
+      return sameIds(armed, prev.handlerArmedSessions)
+        ? prev
+        : build({ ...inputsOf(prev), handlerArmedSessions: armed }, prev);
+    }
     default: return prev;
   }
-}
-
-/** [msg] as the work-status reduction should read it when [isHandlerArmed] says
- *  who owns its slot: an agent's own `error` on an armed slot folds as a plain
- *  turn end, so the session reads done rather than error.
- *
- *  The armed Handler announces that stop itself (a park notice, a wrap-up or an
- *  escalation) and resumes the agent when a limit lifts, so a red dot held for
- *  the length of a park would contradict it. Keyed on `isHandlerArmed`, the same
- *  predicate push-dispatcher.ts drops the error push on, so the dot and the push
- *  agree. Only the reduction's view changes: the frame the app receives still
- *  says `error`. */
-export function asReducedNotification(
-  msg: AbMessage,
-  isHandlerArmed: (sessionId: string) => boolean,
-): AbMessage {
-  if (msg.type !== "notification:push" || msg.notificationType !== "error"
-    || msg.origin !== "agent" || !msg.sessionId || !isHandlerArmed(msg.sessionId)) {
-    return msg;
-  }
-  return { ...msg, notificationType: "task_complete" };
 }
 
 /** How long a turn may go with no recorded activity before {@link expireTurns}

@@ -5,7 +5,7 @@ import { LocalListener } from "./local-listener";
 import type { AttachStreamOpts, PeerSessionView, StreamHandle } from "./project-streams";
 import type { AbMessage, SessionEntry, WorkStatus } from "./protocol";
 import type { DeleteSessionOptions } from "./session-manager";
-import { answerRequest, asReducedNotification, becameDeliverable, busDeliverable, clientFocusState, clientGone, closeInterruptedTurn, DEFAULT_TURN_IDLE_MS, expireTurns, hookTurnEnd, initialWorkStatus, isStaleIdleNudge, noteHookChannelLost, noteHookChannelRestored, openedTurns, PROVISIONAL_TURN_GRACE_MS, reduceWorkStatus, retractProvisionalTurn, sessionFocus, turnActivity, turnOpenFor, turnStart, UNATTRIBUTED_TURN, userReply, type WorkStatusState } from "./work-status";
+import { answerRequest, becameDeliverable, busDeliverable, clientFocusState, clientGone, closeInterruptedTurn, DEFAULT_TURN_IDLE_MS, expireTurns, hookTurnEnd, initialWorkStatus, isStaleIdleNudge, noteHookChannelLost, noteHookChannelRestored, openedTurns, PROVISIONAL_TURN_GRACE_MS, reduceWorkStatus, retractProvisionalTurn, sessionFocus, turnActivity, turnOpenFor, turnStart, UNATTRIBUTED_TURN, userReply, type WorkStatusState } from "./work-status";
 import { SessionBusDeliveryQueue, type QueuedLine } from "./session-bus/delivery-queue";
 import { logger } from "./logger";
 const log = logger.child({ component: "project-core" });
@@ -263,11 +263,7 @@ export class ProjectCore {
    *  throw — the bus lets subscriber throws propagate, and this rides the same
    *  publish() as the live native-stream subscriber (reduceWorkStatus is pure/total). */
   private observeWorkStatus(msg: AbMessage): void {
-    const core = this.core;
-    const next = reduceWorkStatus(
-      this._work,
-      core ? asReducedNotification(msg, (id) => core.isHandlerArmed(id)) : msg,
-    );
+    const next = reduceWorkStatus(this._work, msg);
     // Redundant = the notification told us nothing new (exact repeat on the same
     // session, or the awaiting_input-after-task_complete stale nudge). Keyed on
     // the notification MAP's identity, not on the state object's: a repeat
