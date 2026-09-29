@@ -1,10 +1,20 @@
 // SPDX-FileCopyrightText: 2026 Radha AI Products
 // SPDX-License-Identifier: LicenseRef-Elastic-2.0
 
+import type { AuthContext } from "better-auth";
+import { decryptOAuthToken, setTokenUtil } from "better-auth/oauth2";
 import type { DB } from "../db/index.js";
+import type { Auth } from "../auth/better-auth.js";
 import { AppleTokenError, type AppleTokenClient } from "../auth/apple-tokens.js";
 
 const APPLE_PROVIDER_ID = "apple";
+
+/** The context Better-Auth's token codec takes. `$context` is typed against
+ *  our exact options, which the codec's general signature does not accept;
+ *  it is the same object at runtime. */
+async function tokenContext(auth: Auth): Promise<AuthContext> {
+  return (await auth.$context) as unknown as AuthContext;
+}
 
 export type StoreAppleAuthorizationResult = "stored" | "invalid_code" | "not_this_user";
 
@@ -21,11 +31,12 @@ export type StoreAppleAuthorizationResult = "stored" | "invalid_code" | "not_thi
  * Antgrid user did it, so without that check a signed-in user could park
  * someone else's Apple tokens on their own row.
  *
- * Written raw: `account.encryptOAuthTokens` is off, so Better-Auth stores the
- * web flow's tokens raw too and `revokeAppleAuthorizations` reads both alike.
+ * Written through Better-Auth's own token codec, so the row reads back exactly
+ * like one its web callback wrote under `account.encryptOAuthTokens`.
  */
 export async function storeAppleNativeAuthorization(
   db: DB,
+  auth: Auth,
   apple: AppleTokenClient,
   args: { userId: string; code: string },
 ): Promise<StoreAppleAuthorizationResult> {
@@ -39,12 +50,13 @@ export async function storeAppleNativeAuthorization(
     if (err instanceof AppleTokenError && err.code === "invalid_grant") return "invalid_code";
     throw err;
   }
+  const ctx = await tokenContext(auth);
   const { count } = await db.account.updateMany({
     where: { userId: args.userId, providerId: APPLE_PROVIDER_ID, accountId: tokens.appleUserId },
     data: {
-      refreshToken: tokens.refreshToken,
+      refreshToken: await setTokenUtil(tokens.refreshToken, ctx),
       idToken: tokens.idToken,
-      accessToken: tokens.accessToken ?? null,
+      accessToken: tokens.accessToken ? await setTokenUtil(tokens.accessToken, ctx) : null,
       accessTokenExpiresAt: tokens.accessTokenExpiresAt ?? null,
     },
   });
@@ -69,9 +81,11 @@ export async function storeAppleNativeAuthorization(
  */
 export async function revokeAppleAuthorizations(
   db: DB,
+  auth: Auth,
   apple: AppleTokenClient,
   userId: string,
 ): Promise<void> {
+  const ctx = await tokenContext(auth);
   const accounts = await db.account.findMany({
     where: { userId, providerId: APPLE_PROVIDER_ID, refreshToken: { not: null } },
     select: { id: true, refreshToken: true, idToken: true },
@@ -87,7 +101,8 @@ export async function revokeAppleAuthorizations(
         return;
       }
       try {
-        await apple.revoke({ refreshToken: account.refreshToken!, clientId });
+        const refreshToken = await decryptOAuthToken(account.refreshToken!, ctx);
+        await apple.revoke({ refreshToken, clientId });
       } catch (err) {
         console.error("[account] Apple token revocation failed during deletion; continuing", {
           userId,

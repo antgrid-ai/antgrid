@@ -39,7 +39,7 @@ export function appleRoutes(deps: { db: DB; auth: Auth; apple?: AppleTokenClient
 
     let result;
     try {
-      result = await storeAppleNativeAuthorization(deps.db, apple, {
+      result = await storeAppleNativeAuthorization(deps.db, deps.auth, apple, {
         userId,
         code: parsed.data.code,
       });

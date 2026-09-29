@@ -144,6 +144,13 @@ export function createAuth(deps: CreateAuthDeps) {
         trustedProviders: [...TRUSTED_SOCIAL_PROVIDERS],
         allowDifferentEmails: false,
       },
+      // Keyed on BETTER_AUTH_SECRET, so rotating that secret also makes every
+      // stored provider token unreadable, not just every session. Rows written
+      // before this was on stay readable: a token that does not look like
+      // ciphertext is returned as-is, and the next sign-in rewrites it
+      // encrypted. Code outside Better-Auth that touches these columns goes
+      // through setTokenUtil / decryptOAuthToken (services/apple-account.ts).
+      encryptOAuthTokens: true,
     },
     databaseHooks: {
       user: {

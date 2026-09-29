@@ -127,7 +127,7 @@ export async function deleteUserAccount(
   // finish before the transaction deletes the account rows holding its tokens.
   const devices = await listActiveDevices(db, userId);
   await Promise.all([
-    args.apple ? revokeAppleAuthorizations(db, args.apple, userId) : undefined,
+    args.apple ? revokeAppleAuthorizations(db, auth, args.apple, userId) : undefined,
     ...devices.map(async (d) => {
       try {
         await revokeUserDevice(db, relay, auth, { userId, deviceUuid: d.id, headers });

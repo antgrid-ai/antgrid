@@ -56,15 +56,27 @@ function postCode(app: ReturnType<typeof appWithApple>["app"], cookie: string, c
 }
 
 describe("POST /account/apple/authorization-code", () => {
-  test("keeps the refresh token on the user's own Apple account", async () => {
+  test("keeps the refresh token, encrypted, on the user's own Apple account", async () => {
     const idToken = appleIdToken({ sub: "apple-1", aud: BUNDLE_ID });
-    const { app } = appWithApple(() => Response.json({ refresh_token: "r-native", id_token: idToken }));
+    const { app, calls } = appWithApple((call) =>
+      call.url.endsWith("/token")
+        ? Response.json({ refresh_token: "r-native", id_token: idToken })
+        : new Response(null, { status: 200 }),
+    );
     const { user, cookie } = await appleUser("apple-1");
 
     expect((await postCode(app, cookie, "code")).status).toBe(204);
     const row = await pg.db.account.findFirstOrThrow({ where: { userId: user.id, providerId: "apple" } });
-    expect(row.refreshToken).toBe("r-native");
+    expect(row.refreshToken).not.toBeNull();
+    expect(row.refreshToken).not.toContain("r-native");
     expect(row.idToken).toBe(idToken);
+
+    // The stored ciphertext has to come back as the token Apple issued.
+    const res = await app.request("/account/me", { method: "DELETE", headers: { cookie } });
+    expect(res.status).toBe(200);
+    const revoke = calls.find((c) => c.url.endsWith("/revoke"));
+    expect(revoke?.form.get("token")).toBe("r-native");
+    expect(revoke?.form.get("client_id")).toBe(BUNDLE_ID);
   });
 
   test("refuses tokens for an Apple user this account is not, and revokes them", async () => {
@@ -106,6 +118,9 @@ describe("POST /account/apple/authorization-code", () => {
   });
 });
 
+// These rows hold their tokens in plain text, as every row written before
+// `encryptOAuthTokens` was switched on does, so they also pin that those stay
+// readable.
 describe("account deletion revokes Apple", () => {
   test("each token is revoked as the client that obtained it", async () => {
     const { app, calls } = appWithApple(() => new Response(null, { status: 200 }));
