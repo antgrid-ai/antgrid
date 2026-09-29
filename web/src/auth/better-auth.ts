@@ -92,11 +92,13 @@ function appleProvider(env: Env) {
   });
   return {
     clientId: env.APPLE_CLIENT_ID,
+    appBundleIdentifier: env.APPLE_APP_BUNDLE_ID,
     get clientSecret() {
       return secret();
     },
     // An identity token's audience is whoever asked Apple for it: the bundle
     // ID from the native iOS and macOS apps, the Services ID from the web.
+    // When set, this list overrides appBundleIdentifier in token verification.
     audience: [env.APPLE_APP_BUNDLE_ID, env.APPLE_CLIENT_ID],
   };
 }
@@ -127,6 +129,9 @@ export function createAuth(deps: CreateAuthDeps) {
     database,
     secret: deps.env.BETTER_AUTH_SECRET,
     baseURL: deps.env.BETTER_AUTH_URL,
+    // Apple returns the web flow by POSTing the authorization to our callback
+    // from its own origin; Better-Auth's origin check refuses it otherwise.
+    trustedOrigins: ["https://appleid.apple.com"],
     account: {
       accountLinking: {
         enabled: true,

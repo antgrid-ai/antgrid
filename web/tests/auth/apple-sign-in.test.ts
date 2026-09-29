@@ -126,3 +126,10 @@ describe("Apple provider", () => {
     await jwtVerify(provider.options!.clientSecret as string, publicKey);
   });
 });
+
+describe("Apple web callback", () => {
+  test("trusts Apple's origin for the form_post return", async () => {
+    const auth = createAuth({ env: loadEnv(baseSource), db: {} as never, sendEmail: async () => {} });
+    expect((await auth.$context).trustedOrigins).toContain("https://appleid.apple.com");
+  });
+});
