@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:antgrid/design/widgets/ab_disclosure_chevron.dart';
 import 'package:antgrid/design/widgets/ab_loading.dart';
 import 'package:antgrid/design/widgets/ab_icon.dart';
 import 'package:antgrid/design/widgets/ab_toolbar.dart';
@@ -350,9 +351,8 @@ void main() {
       await tester.pumpWidget(widget);
       await tester.pump();
 
-      // LEFT edges, not centres: the two glyphs are different widths, and a
-      // chevron is text whose advance the test font exaggerates, so a centre
-      // comparison would assert the font rather than the layout. The inset
+      // LEFT edges, not centres: the two glyphs are different widths, so a
+      // centre comparison would assert icon sizes rather than the layout. The inset
       // itself is what has to agree — AbListRow's own horizontal padding on
       // one side, the toolbar's padding plus its centre-slot gap on the other.
       final icon = find.descendant(
@@ -361,7 +361,7 @@ void main() {
       );
       expect(
         tester.getTopLeft(icon.first).dx,
-        tester.getTopLeft(find.text('▶ ').first).dx,
+        tester.getTopLeft(find.byType(AbDisclosureChevron).first).dx,
       );
     });
 

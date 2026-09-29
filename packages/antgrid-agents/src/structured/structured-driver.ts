@@ -22,6 +22,14 @@ export interface StructuredDriver {
   // Returns [] when there's nothing to backfill, or a turn is actively
   // streaming and can't be safely partial-included.
   getTranscriptSnapshot?(): Promise<AbMessage[]>;
+  // The turn streaming right now, or null when idle. Sent beside a snapshot so a
+  // client can tell whether the turn it last saw open is still running: the
+  // snapshot renumbers turns (`resumed:N`), so its frames cannot say.
+  liveTurnId?(): string | null;
+  // What is open right now that no transcript carries: unanswered permission
+  // requests and questions, and the latest session usage. The full set, so a
+  // client replaces its prompts with it — one missing is one answered elsewhere.
+  liveFrames?(): AbMessage[];
   resolvePermission(permissionId: string, optionId: string): void;
   resolveQuestion(questionId: string, answer: string | string[]): void;
   // Stop one background task (agent:task-stop). Optional for the same reason as

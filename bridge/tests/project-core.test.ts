@@ -544,37 +544,6 @@ test("onPeerStreamClosed(peer) clears that peer's focus claim", async () => {
   expect(work().focusedSessions.get("phone-1")).toBeUndefined();
 });
 
-test("tunnel aborts follow the peer's session: another phone coming online aborts nothing, and a session going aborts only its own runs", async () => {
-  const folder = mkdtempSync(join(tmpdir(), "antgrid-pc-tunnelabort-"));
-  cleanup.push(() => rmSync(folder, { recursive: true, force: true }));
-  writeFileSync(join(folder, "antgrid.yaml"), "");
-
-  const core = new ProjectCore({
-    folder,
-    mode: "local",
-    identity: { deviceId: randomUUID(), deviceName: "local", createdAt: new Date().toISOString() },
-  });
-  cleanup.push(() => core.shutdown());
-  await core.start();
-  const { deps, calls } = fakeRemoteDeps();
-  core.promote(deps);
-  const opts = calls[0].opts;
-
-  const agent = (core as unknown as { core: { abortTunnelStreams(peerId: string): void } }).core;
-  const aborted: string[] = [];
-  agent.abortTunnelStreams = (peerId) => { aborted.push(peerId); };
-
-  opts.onPeerOnline?.();
-  opts.onPeerOnline?.();
-  expect(aborted).toEqual([]);
-
-  opts.onPeerSessionGone?.("phone-a");
-  expect(aborted).toEqual(["phone-a"]);
-
-  opts.onPeerOffline?.();
-  expect(aborted).toEqual(["phone-a"]);
-});
-
 test("start() wires the expireTurns sweep to the interval, and shutdown() clears it", async () => {
   // Regression: every existing expiry test drives the pure `expireTurns`
   // directly, so a break in the wiring itself — the sweep never scheduled, or

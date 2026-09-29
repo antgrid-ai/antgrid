@@ -70,6 +70,9 @@ class PromptGroupImpl implements PromptGroup {
 
 interface Pending<V> {
   answer: (value: V | null) => void;
+  /** The prompt as it went to the app, re-served by [liveFrames] to a client
+   *  that was away when it was raised. */
+  frame: AbMessage;
   group?: PromptGroupImpl;
   /** Option labels indexed by the synthetic id the app echoes back. */
   labels?: readonly string[];
@@ -155,6 +158,9 @@ export abstract class ChatSession implements StructuredDriver {
   private pendingQuestions = new Map<string, Pending<string | string[]>>();
   private approvalCounter = 0;
   private questionCounter = 0;
+  /** The last session-level agent:usage, re-served by [liveFrames]: the meter
+   *  is latest-wins and otherwise stays stale until the next turn reports. */
+  private lastUsage?: AbMessage;
 
   // --- capabilities + selection ---
   protected capModels: CapModel[] = [];
@@ -290,6 +296,18 @@ export abstract class ChatSession implements StructuredDriver {
     if (this.applyConfig(key, value)) this.emitCapabilities();
   }
 
+  liveTurnId(): string | null {
+    return this.activeTurnId;
+  }
+
+  liveFrames(): AbMessage[] {
+    return [
+      ...[...this.pendingApprovals.values()].map((p) => p.frame),
+      ...[...this.pendingQuestions.values()].map((p) => p.frame),
+      ...(this.lastUsage ? [this.lastUsage] : []),
+    ];
+  }
+
   async getTranscriptSnapshot(): Promise<AbMessage[]> {
     if (!this.profile.snapshotDuringTurn && this.activeTurnId !== null) return [];
     try {
@@ -320,11 +338,16 @@ export abstract class ChatSession implements StructuredDriver {
     return promptable.length ? promptable : undefined;
   }
 
+  // An answer retracts the prompt too: only the client that answered knows it
+  // is gone, and every other client — plus a reconnect snapshot read before
+  // the answer landed — would otherwise keep a card nothing clears. Sent before
+  // the backend hears the answer, so the card leaves ahead of what follows it.
   resolvePermission(permissionId: string, optionId: string): void {
     const pending = this.pendingApprovals.get(permissionId);
     if (!pending) return;
     this.pendingApprovals.delete(permissionId);
     this.settleGroup(permissionId, pending.group);
+    this.send(createMessage("agent:request-retracted", { sessionId: this.sessionId, permissionId }));
     pending.answer(optionId);
   }
 
@@ -333,6 +356,7 @@ export abstract class ChatSession implements StructuredDriver {
     if (!pending) return this.resolveUnknownQuestion(questionId, answer);
     this.pendingQuestions.delete(questionId);
     this.settleGroup(questionId, pending.group);
+    this.send(createMessage("agent:request-retracted", { sessionId: this.sessionId, questionId }));
     pending.answer(translateAnswer(answer, pending));
   }
 
@@ -477,13 +501,15 @@ export abstract class ChatSession implements StructuredDriver {
     last?: UsageBreakdown;
     contextWindow?: number | null;
   }): void {
-    this.send(createMessage("agent:usage", {
+    const frame = createMessage("agent:usage", {
       sessionId: this.sessionId,
       ...(u.turnId !== undefined ? { turnId: u.turnId } : {}),
       total: u.total,
       ...(u.last !== undefined ? { last: u.last } : {}),
       ...(u.contextWindow !== undefined ? { contextWindow: u.contextWindow } : {}),
-    }));
+    });
+    this.lastUsage = frame;
+    this.send(frame);
   }
 
   protected emitError(error: AgentError): void {
@@ -531,16 +557,17 @@ export abstract class ChatSession implements StructuredDriver {
   ): string {
     const permissionId = req.permissionId ?? `perm-${this.approvalCounter++}`;
     const g = group as PromptGroupImpl | undefined;
-    this.pendingApprovals.set(permissionId, { answer, group: g });
-    g?.ids.add(permissionId);
-    this.send(createMessage("agent:permission-request", {
+    const frame = createMessage("agent:permission-request", {
       sessionId: this.sessionId,
       permissionId,
       ...(req.itemId !== undefined ? { itemId: req.itemId } : {}),
       title: req.title,
       ...(req.reason !== undefined ? { reason: req.reason } : {}),
       options: req.options as Array<{ optionId: string; label: string; kind: "allow_once" | "allow_always" | "reject" }>,
-    }));
+    });
+    this.pendingApprovals.set(permissionId, { answer, group: g, frame });
+    g?.ids.add(permissionId);
+    this.send(frame);
     return permissionId;
   }
 
@@ -553,14 +580,7 @@ export abstract class ChatSession implements StructuredDriver {
   ): string {
     const questionId = req.questionId ?? `q-${this.questionCounter++}`;
     const g = o?.group as PromptGroupImpl | undefined;
-    this.pendingQuestions.set(questionId, {
-      answer,
-      group: g,
-      ...(o?.labels ? { labels: o.labels } : {}),
-      ...(o?.single ? { single: true } : {}),
-    });
-    g?.ids.add(questionId);
-    this.send(createMessage("agent:question", {
+    const frame = createMessage("agent:question", {
       sessionId: this.sessionId,
       questionId,
       ...(req.itemId !== undefined ? { itemId: req.itemId } : {}),
@@ -568,7 +588,16 @@ export abstract class ChatSession implements StructuredDriver {
       prompt: req.prompt,
       ...(req.isSecret ? { isSecret: true } : {}),
       ...(req.options ? { options: req.options as Array<{ id: string; label: string; description?: string }> } : {}),
-    }));
+    });
+    this.pendingQuestions.set(questionId, {
+      answer,
+      group: g,
+      frame,
+      ...(o?.labels ? { labels: o.labels } : {}),
+      ...(o?.single ? { single: true } : {}),
+    });
+    g?.ids.add(questionId);
+    this.send(frame);
     return questionId;
   }
 

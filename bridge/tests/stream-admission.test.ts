@@ -2,7 +2,7 @@
 // stream. `PeerStreamAcceptor`'s connection-level order (stream-dispatch.ts)
 // and `ScopedStreamRegistry`'s project-scoped order (the same file) are each
 // exercised exactly once here, generically over every kind they serve —
-// terminal, tunnel-http, tunnel-ws and upload share one base class and one
+// terminal, tunnel-tcp and upload share one base class and one
 // admission order, so this file proves that shared order once instead of
 // four times. `project` is its own registry (it does not extend
 // `ScopedStreamRegistry` — it IS the binding the other four look up) and gets
@@ -19,8 +19,6 @@ import { join } from "node:path";
 import {
   decodeStreamRefused,
   encodeStreamOpen,
-  encodeTunnelDataRecord,
-  TUNNEL_RECORD_TAG_WS_TEXT,
   StreamOpen as StreamOpenSchema,
   STREAM_MAX_TERMINAL_ATTACHMENTS_PER_PEER,
   STREAM_MAX_TUNNEL_STREAMS_PER_PEER,
@@ -143,8 +141,7 @@ function realHandlerTable(): StreamHandlers {
   return {
     project: project.handler,
     terminal: terminal.handlerFor("terminal"),
-    "tunnel-http": tunnel.handlerFor("tunnel-http"),
-    "tunnel-ws": tunnel.handlerFor("tunnel-ws"),
+    "tunnel-tcp": tunnel.handlerFor("tunnel-tcp"),
     upload: upload.handlerFor("upload"),
   };
 }
@@ -166,8 +163,7 @@ function createAcceptor(overrides: Partial<PeerStreamAcceptorOptions> & { connec
 const EVERY_KIND_OPEN: StreamOpen[] = [
   { kind: "project", projectId: PROJECT },
   { kind: "terminal", projectId: PROJECT, requestId: crypto.randomUUID() },
-  { kind: "tunnel-http", projectId: PROJECT, requestId: crypto.randomUUID() },
-  { kind: "tunnel-ws", projectId: PROJECT, wsId: crypto.randomUUID() },
+  { kind: "tunnel-tcp", projectId: PROJECT, connId: crypto.randomUUID() },
   { kind: "upload", projectId: PROJECT, requestId: crypto.randomUUID(), fileName: "a.bin", size: 0 },
 ];
 
@@ -380,8 +376,7 @@ describe("PeerStreamAcceptor: shared admission order (every kind through the rea
     expect(streamLabelOf({ kind: "session" })).toEqual({ kind: "session" });
     expect(streamLabelOf({ kind: "project", projectId: "p1" })).toEqual({ kind: "project", id: "p1" });
     expect(streamLabelOf({ kind: "terminal", projectId: "p1", requestId: "r1" })).toEqual({ kind: "terminal", id: "r1" });
-    expect(streamLabelOf({ kind: "tunnel-http", projectId: "p1", requestId: "r1" })).toEqual({ kind: "tunnel-http", id: "r1" });
-    expect(streamLabelOf({ kind: "tunnel-ws", projectId: "p1", wsId: "ws-1" })).toEqual({ kind: "tunnel-ws", id: "ws-1" });
+    expect(streamLabelOf({ kind: "tunnel-tcp", projectId: "p1", connId: "c1" })).toEqual({ kind: "tunnel-tcp", id: "c1" });
     expect(streamLabelOf({ kind: "upload", projectId: "p1", requestId: "r1", fileName: "a.bin", size: 1 }))
       .toEqual({ kind: "upload", id: "r1" });
 
@@ -390,7 +385,7 @@ describe("PeerStreamAcceptor: shared admission order (every kind through the rea
     ) as { streamOpen: { labels: Array<{ name: string; open: unknown; streamKind: string; streamId: string }> } };
     const labels = fixture.streamOpen.labels;
     expect(labels.map((l) => l.streamKind).sort()).toEqual(
-      ["project", "session", "terminal", "tunnel-http", "tunnel-ws", "upload"],
+      ["project", "session", "terminal", "tunnel-tcp", "upload"],
     );
     for (const row of labels) {
       const label = streamLabelOf(StreamOpenSchema.parse(row.open));
@@ -402,7 +397,7 @@ describe("PeerStreamAcceptor: shared admission order (every kind through the rea
 
 // ============================================================================
 // 2. Registry-level: ScopedStreamRegistry's shared order, generic over the
-//    four project-scoped kinds (terminal, tunnel-http, tunnel-ws, upload).
+//    three project-scoped kinds (terminal, tunnel-tcp, upload).
 // ============================================================================
 
 // `ScopedStreamRegistry.admit` never actually returns a Promise (only a
@@ -437,13 +432,12 @@ interface MadeKind {
    *  inbound read that write depends on has already passed its own check. */
   setBeforeWrite(fn: () => void): void;
   /** A record the kind accepts after its first traffic has been consumed;
-   *  absent for tunnel-http, which reads nothing after its head but the
-   *  cancel signal. */
+   *  absent for a kind whose only later traffic is a FIN. */
   pushLaterTraffic?(fake: FakeBiStream, id: string): void;
 }
 
 interface KindCase {
-  kind: "terminal" | "tunnel-http" | "tunnel-ws" | "upload";
+  kind: "terminal" | "tunnel-tcp" | "upload";
   cap: number;
   priority: number;
   resetCode: bigint;
@@ -513,17 +507,15 @@ function terminalCase(): KindCase {
   };
 }
 
-function tunnelCase(subKind: "tunnel-http" | "tunnel-ws"): KindCase {
+function tunnelCase(): KindCase {
   return {
-    kind: subKind,
+    kind: "tunnel-tcp",
     cap: STREAM_MAX_TUNNEL_STREAMS_PER_PEER,
     priority: STREAM_PRIORITY_TUNNEL,
     resetCode: STREAM_RESET_SCOPED,
     stopCode: STREAM_STOP_SCOPED,
     hasAvailability: true,
-    open: (projectId, id) => subKind === "tunnel-http"
-      ? { kind: "tunnel-http", projectId, requestId: id }
-      : { kind: "tunnel-ws", projectId, wsId: id },
+    open: (projectId, id) => ({ kind: "tunnel-tcp", projectId, connId: id }),
     make() {
       const cataloged = new Set<string>();
       const bindings = new Map<string, FakeProjectBinding>();
@@ -534,26 +526,25 @@ function tunnelCase(subKind: "tunnel-http" | "tunnel-ws"): KindCase {
         projectBinding: (id) => { lookups.push(id); return bindings.get(id) ?? null; },
         retirePeer: (peerId, reason) => retired.push({ peerId, reason }),
       } satisfies TunnelStreamRegistryOptions);
-      // A manager whose serveHttp/serveWs each immediately produce exactly
-      // one outbound record, so `driveOneWrite` needs only to let it settle.
+      // A manager whose serveTcp immediately produces exactly one outbound
+      // record (the ready reply), so `driveOneWrite` needs only to let it settle.
       let reached = 0;
       let beforeWrite = () => {};
-      const manager: Pick<TunnelManager, "serveHttp" | "serveWs"> = {
-        serveHttp: async (_req, _body, exchange) => {
+      const manager: Pick<TunnelManager, "serveTcp"> = {
+        serveTcp: (_open, peer) => {
           reached++;
-          beforeWrite();
-          await exchange.head({ status: 200, headers: {} });
-        },
-        serveWs: (_open, peer) => {
-          reached++;
-          beforeWrite();
-          peer.send({ binary: false, bytes: new TextEncoder().encode("hi") });
-          return { data() { reached++; }, closed() {} };
+          // Async like a real connect: the reply must never precede the
+          // registry recording the sink this call returns.
+          void Promise.resolve().then(() => {
+            beforeWrite();
+            return peer.ready();
+          });
+          return { write() { reached++; return Promise.resolve(); }, end() {} };
         },
       };
       const server = { admit: (_peerId: string, _checkoutId: string) => ({ ok: true as const, manager: manager as TunnelManager }) };
       return {
-        handler: registry.handlerFor(subKind) as unknown as SyncAdmit,
+        handler: registry.handlerFor("tunnel-tcp") as unknown as SyncAdmit,
         cataloged, lookups, retired,
         count: (peerId) => registry.streamCount(peerId),
         reached: () => reached,
@@ -567,19 +558,13 @@ function tunnelCase(subKind: "tunnel-http" | "tunnel-ws"): KindCase {
           return b;
         },
         pushFirstTraffic(fake, id) {
-          if (subKind === "tunnel-http") {
-            fake.pushRecord({ type: "tunnel:http-request", requestId: id, port: 3000, method: "GET", path: "/", bodyLength: 0, checkoutId: "main" });
-          } else {
-            fake.pushRecord({ type: "tunnel:ws-open", tunnelId: id, port: 3000, path: "/", checkoutId: "main" });
-          }
+          fake.pushRecord({ type: "tunnel:tcp-open", connId: id, port: 3000, checkoutId: "main" });
         },
         async driveOneWrite() {
           await flush(5); // the head record's async read + parse + admit chain
         },
         setBeforeWrite(fn) { beforeWrite = fn; },
-        pushLaterTraffic: subKind === "tunnel-ws"
-          ? (fake) => fake.pushRecord(encodeTunnelDataRecord(TUNNEL_RECORD_TAG_WS_TEXT, new TextEncoder().encode("later")))
-          : undefined,
+        pushLaterTraffic: (fake) => fake.pushRaw(new Uint8Array([1])),
       };
     },
   };
@@ -649,13 +634,13 @@ function uploadCase(): KindCase {
   };
 }
 
-const SCOPED_KINDS: KindCase[] = [terminalCase(), tunnelCase("tunnel-http"), tunnelCase("tunnel-ws"), uploadCase()];
+const SCOPED_KINDS: KindCase[] = [terminalCase(), tunnelCase(), uploadCase()];
 
 function open(kc: KindCase, peerId: string, projectId: string, id: string, stream: AcceptedBiStream, authorized: () => boolean = () => true) {
   return { peerId, open: kc.open(projectId, id), stream, authorized };
 }
 
-describe("ScopedStreamRegistry: shared admission order (generic over terminal, tunnel-http, tunnel-ws, upload)", () => {
+describe("ScopedStreamRegistry: shared admission order (generic over terminal, tunnel-tcp, upload)", () => {
   for (const kc of SCOPED_KINDS) {
     test(`${kc.kind}: an unsafe project id is refused NOT_ALLOWED even when catalogued and bound`, () => {
       const made = kc.make();
@@ -930,34 +915,11 @@ describe("ScopedStreamRegistry: shared admission order (generic over terminal, t
     await flush(5);
     expect(made.retired).toEqual([{ peerId: PEER, reason: "protocol-violation" }]);
   });
-
-  test("tunnel-http and tunnel-ws share one cap and one bindings index on the same registry instance", async () => {
-    const cataloged = new Set([PROJECT]);
-    const binding = createFakeProjectBinding();
-    binding.setTunnels({ admit: () => ({ ok: true as const, manager: {} as TunnelManager }) });
-    const registry = new TunnelStreamRegistry({
-      projectCataloged: (id) => cataloged.has(id),
-      projectBinding: () => binding,
-      retirePeer: () => {},
-    });
-    const httpFake = createFakeBiStream();
-    const wsFake = createFakeBiStream();
-    expect(registry.handlerFor("tunnel-http")({
-      peerId: PEER, stream: httpFake.stream, authorized: () => true,
-      open: { kind: "tunnel-http", projectId: PROJECT, requestId: crypto.randomUUID() },
-    })).toBeUndefined();
-    expect(registry.streamCount(PEER)).toBe(1);
-    expect(registry.handlerFor("tunnel-ws")({
-      peerId: PEER, stream: wsFake.stream, authorized: () => true,
-      open: { kind: "tunnel-ws", projectId: PROJECT, wsId: crypto.randomUUID() },
-    })).toBeUndefined();
-    expect(registry.streamCount(PEER)).toBe(2); // shared count across both kinds
-  });
 });
 
 // ============================================================================
 // 3. `ProjectStreamRegistry`'s own admission — a structurally different
-//    registry (it IS the binding the four kinds above look up), proving the
+//    registry (it IS the binding the kinds above look up), proving the
 //    same invariants through its own gate and its own knobs.
 // ============================================================================
 

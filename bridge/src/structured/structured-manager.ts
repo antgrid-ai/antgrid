@@ -424,6 +424,22 @@ export class StructuredAgentManager {
     return this.drivers.get(sessionId) === driver ? frames : [];
   }
 
+  /** `sessionId`'s streaming turn: null when idle or not running, undefined
+   *  when its driver cannot say. */
+  liveTurnId(sessionId: string): string | null | undefined {
+    const driver = this.drivers.get(sessionId);
+    if (!driver) return null;
+    return driver.liveTurnId?.();
+  }
+
+  /** `sessionId`'s open prompts and latest usage: [] when not running,
+   *  undefined when its driver cannot say. */
+  liveFrames(sessionId: string): AbMessage[] | undefined {
+    const driver = this.drivers.get(sessionId);
+    if (!driver) return [];
+    return driver.liveFrames?.();
+  }
+
   /** `sessionId`'s slash commands, or undefined when none are available — the
    *  session isn't running, its driver reports no catalog, or discovery has
    *  produced nothing yet. All three are the same answer to the one caller that

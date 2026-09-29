@@ -368,7 +368,7 @@ describe("OpencodeDriver", () => {
     expect(retracted[0]?.type === "agent:request-retracted" ? retracted[0].permissionId : "").toBe("perm1");
   });
 
-  it("does not retract prompts that were already answered", async () => {
+  it("does not retract answered prompts again when the session goes idle", async () => {
     const { driver, sent, push } = await startedDriver();
     await driver.prompt("x");
     push({ type: "permission.asked", properties: { id: "perm1", sessionID: "ses_root", permission: "Run rm?" } });
@@ -376,9 +376,10 @@ describe("OpencodeDriver", () => {
     await tick();
     driver.resolvePermission("perm1", "once");
     driver.resolveQuestion("q1", "0");
+    const before = sent.filter((m) => m.type === "agent:request-retracted").length;
     push({ type: "session.idle", properties: { sessionID: "ses_root" } });
     await tick();
-    expect(sent.filter((m) => m.type === "agent:request-retracted")).toHaveLength(0);
+    expect(sent.filter((m) => m.type === "agent:request-retracted")).toHaveLength(before);
   });
 
   it("assistant message tokens emit agent:usage", async () => {

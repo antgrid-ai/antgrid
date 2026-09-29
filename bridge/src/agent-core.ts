@@ -318,14 +318,6 @@ export interface AgentCore {
    *  `attachTransport` runs for a `CHECKOUT_VARIABLE_MESSAGE_TYPES` frame —
    *  a stream open bypasses that bus-level machinery entirely. */
   readonly uploadStreams: UploadStreamServer;
-  /** Abort every in-flight tunneled HTTP response for one peer, on every
-   *  checkout runtime and on main. Driven only from `onPeerSessionGone`:
-   *  a body in flight across that peer's session loss is dead by construction,
-   *  and the relay client's queue clear only reaches a run that happens to be
-   *  parked on a send at that instant. A still-live sibling peer's runs are
-   *  untouched, so a second phone establishing does not abort a first phone's
-   *  in-flight preview load. WS tunnels are untouched. */
-  abortTunnelStreams(peerId: string): void;
   /** Wire a lookup from an app session's route id to what this core may know
    *  about it: the verified pubkey behind it (the push registry's key) and the
    *  capabilities it declared. A machine holds one session per attached device,
@@ -1094,7 +1086,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     terminalStreamHooks = hooks;
   }
   // Mobile-access gate, shared by every inbound path (bus verbs AND the
-  // tunnel/HTTP-proxy path, which bypasses the bus). An account-trusted app may
+  // tunnel path, which bypasses the bus). An account-trusted app may
   // drive this project only while the machine is mobile-reachable. A LOOPBACK
   // frame is never gated: local control's trust boundary is the loopback socket
   // + token, and the desktop must keep driving its own machine with mobile
@@ -1445,8 +1437,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
    *  lookup over what is already running. */
   const tunnelStreams: TunnelStreamServer = {
     admit(peerId, checkoutId) {
-      // Tunnel streams proxy arbitrary HTTP to localhost:<port> and return the
-      // body, so a phone could otherwise read a project's dev-server/preview
+      // Tunnel streams forward raw TCP to localhost:<port> and return what it
+      // answers, so a phone could otherwise read a project's dev-server/preview
       // data without ever touching the bus dispatch gate. Gate here too. Only
       // relay traffic reaches a native stream — the loopback owner speaks the
       // bus (and opens no such stream).
@@ -2353,6 +2345,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           .filter((s) => s.mode === "chat" && agentKeyFor(s.id) === spec.tool && s.running)
           .map((s) => s.id);
         log.info("agent:update — quiescing %d %s session(s) to update", chatIds.length, spec.tool);
+        updatingTools.set(spec.tool, (updatingTools.get(spec.tool) ?? 0) + 1);
+        // A run that dies without an outcome must not let the previous run's
+        // result settle a client waiting on this one.
+        lastUpdateResults.delete(spec.tool);
         void runAgentUpdate({
           sessionIds: chatIds,
           // stopChat resolves only once the process has exited (its dispose awaits
@@ -2366,13 +2362,19 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           execUpdate: () => execToolUpdate(spec),
           installedAfter: async () => parseAgentVersion(await execToolVersion(spec)),
         }).then((outcome) => {
-          sendAb(createMessage("agent:updateResult", {
+          const result = createMessage("agent:updateResult", {
             tool: spec.tool, sessionId: msg.sessionId, ok: outcome.ok,
             exitCode: outcome.exitCode,
             installed: outcome.installed ?? undefined,
             // Bound the tail so a chatty updater can't bloat the encrypted frame.
             output: outcome.output.slice(-4_000) || undefined,
-          }));
+          });
+          lastUpdateResults.set(spec.tool, result);
+          sendAb(result);
+        }).finally(() => {
+          const left = (updatingTools.get(spec.tool) ?? 1) - 1;
+          if (left > 0) updatingTools.set(spec.tool, left);
+          else updatingTools.delete(spec.tool);
         });
         break;
       }
@@ -2868,6 +2870,13 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // only a custom `agent.command` — an arbitrary binary attributable to no spec.
   const agentKeyFor = (terminalId?: string): string | undefined =>
     (terminalId ? sessions?.get(terminalId)?.tool : undefined) ?? config.agent?.tool;
+  // A self-update's outcome is one live frame, so an app away when it lands
+  // would spin forever; the transcript snapshot re-serves both, keyed by tool
+  // because the update replaces one machine-global binary.
+  // A count, not a set: the first of two overlapping runs to finish must not
+  // report the other as done.
+  const updatingTools = new Map<string, number>();
+  const lastUpdateResults = new Map<string, AbMessage>();
   // Judging needs *a* CLI to spawn, so an unattributable slot still resolves to
   // one. Observability must NOT: reporting the default agent's hooks for a
   // binary we cannot identify is the "armed and quiet" lie observability exists
@@ -5140,8 +5149,33 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         },
       });
     }
-    const frames = (await structured?.getTranscriptSnapshot(parsed.data.sessionId)) ?? [];
-    return createMessage("response", { requestId: msg.requestId, ok: true, result: { frames } });
+    // Read before the snapshot, not after: a turn that ends during the read is
+    // then still reported live, so the client keeps the open turn its own
+    // turn-end will close, instead of dropping content the read may have missed.
+    // A turn that STARTS during the read is re-read after it for the same
+    // reason: reporting idle would close the turn the client just received.
+    const { sessionId } = parsed.data;
+    const liveBefore = structured?.liveTurnId(sessionId);
+    const frames = (await structured?.getTranscriptSnapshot(sessionId)) ?? [];
+    const activeTurnId = liveBefore ?? structured?.liveTurnId(sessionId);
+    // Read after the await: a prompt answered or raised during the read must be
+    // reported as it now stands, since the client replaces its cards with this.
+    const live = structured?.liveFrames(sessionId);
+    const tool = agentKeyFor(sessionId);
+    const lastUpdate = tool === undefined ? undefined : lastUpdateResults.get(tool);
+    return createMessage("response", {
+      requestId: msg.requestId,
+      ok: true,
+      result: {
+        frames,
+        ...(activeTurnId === undefined ? {} : { activeTurnId }),
+        ...(live === undefined ? {} : { live }),
+        update: {
+          running: tool !== undefined && (updatingTools.get(tool) ?? 0) > 0,
+          ...(lastUpdate ? { result: lastUpdate } : {}),
+        },
+      },
+    });
   }
 
   function attachTransport(bus: MessageBus) {
@@ -5177,7 +5211,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // design (not the pairing/handshake layer): the phone connects and
       // completes the handshake, but the data plane is inert until the machine
       // switch is on. See remoteFrameAllowed() for the local-mode skip
-      // rationale. The tunnel/HTTP-proxy path is gated separately, in
+      // rationale. The tunnel path is gated separately, in
       // `tunnelStreams.admit` (it carries no bus traffic at all — A3).
       //
       // Only RELAY-origin frames are gated. Loopback frames are the desktop
@@ -5291,11 +5325,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     });
   }
 
-  function abortTunnelStreams(peerId: string): void {
-    for (const runtime of checkoutRuntimes.values()) runtime.tunnelManager?.abortHttpStreams(peerId);
-    tunnelManager?.abortHttpStreams(peerId);
-  }
-
   return {
     attachTransport,
     async shutdown() {
@@ -5368,7 +5397,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     onHandshakeComplete,
     tunnelStreams,
     uploadStreams,
-    abortTunnelStreams,
     setPeerSessionProvider,
     setTerminalStreamHooks,
     connState,

@@ -60,7 +60,7 @@ abstract interface class PeerLink {
   /// after that many decoded records have been delivered on [PeerStream.records]:
   /// every later event is an unframed chunk, a FIN closes the stream cleanly,
   /// and a reset delivers one [PeerStreamReset] before closing it. Used by the
-  /// upload and tunnel-http streams, whose bodies carry no per-record framing.
+  /// upload and tunnel-tcp streams, whose payloads carry no per-record framing.
   Future<PeerStream> openStream(
     StreamOpen open, {
     required int maxRecordBytes,

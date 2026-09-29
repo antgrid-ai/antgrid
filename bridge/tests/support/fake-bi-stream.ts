@@ -39,7 +39,7 @@ export interface FakeBiStream {
    *  tunnel head, refusals). */
   records(): string[];
   /** Every byte written, concatenated and unframed — for a kind that writes
-   *  raw slices (tunnel-http body, `sendRaw`). */
+   *  raw slices (tunnel-tcp payload, `sendRaw`). */
   rawWritten(): Uint8Array;
   firstRecord(): string | undefined;
   afterFirst: string[];
@@ -53,7 +53,7 @@ export interface FakeBiStream {
   failNextWrite(e?: unknown): void;
   /** Queues a length-prefixed record onto the recv side, for a
    *  `readExact`-based (framed) reader: JSON-encoded unless `obj` is already
-   *  a `Uint8Array` (a non-JSON tagged record, e.g. tunnel binary data). */
+   *  a `Uint8Array` (a non-JSON record). */
   pushRecord(obj: unknown): void;
   /** Queues raw, unframed bytes onto the recv side, for a `read`-based (raw)
    *  reader. */
@@ -206,7 +206,7 @@ export function createFakeBiStream(): FakeBiStream {
     isFinished: () => finished,
     records: () => (firstRecordText === undefined ? [] : [firstRecordText, ...afterFirst]),
     // Whatever a complete framed parse never consumed: for a kind that writes
-    // one framed head then raw slices (tunnel-http), the head is fully
+    // one framed head then raw slices (tunnel-tcp), the head is fully
     // absorbed above and this tail is exactly the raw bytes after it.
     rawWritten: () => Uint8Array.from(sendBuf),
     firstRecord: () => firstRecordText,

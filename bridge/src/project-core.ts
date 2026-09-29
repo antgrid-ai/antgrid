@@ -654,15 +654,7 @@ export class ProjectCore {
         if (this.listener?.hasOwner) return;
         core.connState.peerOnline = false;
       },
-      // A peer's session, not the coarse online/offline flag, is what a
-      // tunneled body in flight is actually keyed to — the peer-session owner
-      // clears its queues at binding and at peer loss, but that clear only
-      // reaches a run parked on a send at that instant; a run between sends
-      // keeps streaming into a session that is already gone, competing for the
-      // preview window with the page reload the app is doing. Scoping the abort
-      // to THIS peerId keeps a still-live sibling peer's in-flight loads intact.
       onPeerSessionGone: (peerId) => {
-        core.abortTunnelStreams(peerId);
         this.noteClientGone(peerId);
       },
       // Fired when this peer's project-stream binding itself closes (unbind,

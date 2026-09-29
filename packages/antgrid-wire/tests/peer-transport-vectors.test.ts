@@ -15,17 +15,13 @@ import {
   STREAM_PROJECT_BRIDGE_RECORD_MAX_BYTES,
   STREAM_TERMINAL_APP_RECORD_MAX_BYTES,
   STREAM_TERMINAL_BRIDGE_RECORD_MAX_BYTES,
-  STREAM_TUNNEL_DATA_MAX_BYTES,
-  STREAM_TUNNEL_RECORD_MAX_BYTES,
-  STREAM_TUNNEL_REQUEST_BODY_MAX_BYTES,
+  STREAM_TUNNEL_TCP_RECORD_MAX_BYTES,
   STREAM_UPLOAD_BRIDGE_RECORD_MAX_BYTES,
   STREAM_UPLOAD_MAX_FILE_NAME_LENGTH,
   STREAM_UPLOAD_MAX_MIME_TYPE_LENGTH,
   StreamOpen,
   StreamRefused,
   StreamRefusedCode,
-  TUNNEL_RECORD_TAG_WS_BINARY,
-  TUNNEL_RECORD_TAG_WS_TEXT,
   isSessionFrameType,
 } from "../src/index";
 
@@ -65,8 +61,7 @@ test("peer transport fixture covers every stream-open kind and refusal code", ()
     "project",
     "terminal",
     "terminal-with-checkout",
-    "tunnel-http",
-    "tunnel-ws",
+    "tunnel-tcp",
     "upload",
     "upload-with-checkout-and-mime",
   ]);
@@ -113,18 +108,9 @@ test("peer transport fixture's terminalRecords and tunnelRecords equal the wire 
     appMaxRecordBytes: STREAM_TERMINAL_APP_RECORD_MAX_BYTES,
     bridgeMaxRecordBytes: STREAM_TERMINAL_BRIDGE_RECORD_MAX_BYTES,
   });
-  // Tunnel HTTP bodies travel raw, so only the WS tags exist on the wire.
   expect(fixture.streamOpen.tunnelRecords).toEqual({
-    maxDataBytes: STREAM_TUNNEL_DATA_MAX_BYTES,
-    maxRecordBytes: STREAM_TUNNEL_RECORD_MAX_BYTES,
-    requestBodyMaxBytes: STREAM_TUNNEL_REQUEST_BODY_MAX_BYTES,
-    tags: {
-      wsText: TUNNEL_RECORD_TAG_WS_TEXT,
-      wsBinary: TUNNEL_RECORD_TAG_WS_BINARY,
-    },
+    maxRecordBytes: STREAM_TUNNEL_TCP_RECORD_MAX_BYTES,
   });
-  expect(fixture.streamOpen.tunnelRecords.tags).not.toHaveProperty("body");
-  expect(fixture.streamOpen.tunnelRecords.tags).not.toHaveProperty("bodyGzip");
 });
 
 test("peer transport fixture's caps.maxUploadStreamsPerPeer and uploadRecords equal the wire package's own constants", () => {
@@ -159,8 +145,7 @@ test("peer transport fixture's streamOpen.labels match every kind's own registry
   expect(byName.get("session")).toMatchObject({ streamKind: "session", streamId: "0" });
   expect(byName.get("project")).toMatchObject({ streamKind: "project", streamId: "proj-1" });
   expect(byName.get("terminal")).toMatchObject({ streamKind: "terminal", streamId: "req-1" });
-  expect(byName.get("tunnel-http")).toMatchObject({ streamKind: "tunnel-http", streamId: "req-1" });
-  expect(byName.get("tunnel-ws")).toMatchObject({ streamKind: "tunnel-ws", streamId: "ws-1" });
+  expect(byName.get("tunnel-tcp")).toMatchObject({ streamKind: "tunnel-tcp", streamId: "conn-1" });
   expect(byName.get("upload")).toMatchObject({ streamKind: "upload", streamId: "req-1" });
   // Every label's `open` must itself be a valid StreamOpen — the generator
   // hand-writes these labels (bridge's streamLabelOf is ELv2 and can't be

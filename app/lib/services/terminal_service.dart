@@ -26,6 +26,7 @@ class TerminalService {
   final Map<Object, String> _displayOwners = {};
   final Set<String> _freshScreens = {};
   final Set<String> _materialized = {};
+  final Map<String, String Function(String data)> _inputTransforms = {};
   final Map<String, TerminalFrameMessage> _visibleFrames = {};
   final Map<String, Stopwatch> _screenWaits = {};
   final Map<String, int> _lastViewed = {};
@@ -1889,7 +1890,9 @@ class TerminalService {
         // becomes KeyEventResult.ignored, so the keystroke would escape into
         // the app's global shortcut layer, and the IME/soft-keyboard path
         // discards the bool entirely — the platform this bug bites hardest.
-        sendInput(terminalId, utf8.decode(bytes, allowMalformed: true));
+        final data = utf8.decode(bytes, allowMalformed: true);
+        final transform = _inputTransforms[terminalId];
+        sendInput(terminalId, transform == null ? data : transform(data));
         return true;
       },
       onResize: null,
@@ -1910,6 +1913,23 @@ class TerminalService {
     // the focus coordinator overrides to focused only while the user is viewing.
     if (tab.isAgent) {
       tab.ghostty.setFocused(false);
+    }
+  }
+
+  /// Rewrites what the pane's own engine emits for [terminalId] before it is
+  /// sent — the touch key bar's sticky modifiers, which have to reach IME
+  /// keystrokes that never pass through the bar. Pass null to remove; a
+  /// remove only takes effect for the [transform] that is still installed, so
+  /// a remounted pane's dispose cannot strip its replacement's.
+  void setInputTransform(
+    String terminalId,
+    String Function(String data)? transform, {
+    String Function(String data)? replacing,
+  }) {
+    if (transform != null) {
+      _inputTransforms[terminalId] = transform;
+    } else if (identical(_inputTransforms[terminalId], replacing)) {
+      _inputTransforms.remove(terminalId);
     }
   }
 

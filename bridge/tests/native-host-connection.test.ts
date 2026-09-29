@@ -761,14 +761,12 @@ test("an established peer with a catalogued, attached project gets a project ope
     // Every kind's open reaches its registry: the handler table native-host-
     // connection builds covers all five, not just the project kind above.
     const terminal = laterStream(terminalOpenRecord("p1"));
-    const http = laterStream(tunnelHttpOpenRecord("p1"));
-    const ws = laterStream(tunnelWsOpenRecord("p1"));
+    const tcp = laterStream(tunnelTcpOpenRecord("p1"));
     const upload = laterStream(uploadOpenRecord("p1"));
-    for (const kind of [terminal, http, ws, upload]) peer.pushLaterStream(kind.stream);
+    for (const kind of [terminal, tcp, upload]) peer.pushLaterStream(kind.stream);
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(terminal.written).toEqual([]);
-    expect(http.written).toEqual([]);
-    expect(ws.written).toEqual([]);
+    expect(tcp.written).toEqual([]);
     expect(upload.written).toEqual([]);
     expect(peer.closeCodes()).toEqual([]);
   } finally { handle.detach(); f.client.close(); }
@@ -879,20 +877,15 @@ async function openProjectStream(peer: ReturnType<typeof connection>, projectId:
 
 // --- Tunnel streams ---
 
-function tunnelHttpOpenRecord(projectId: string): number[][] {
-  const body = Array.from(encodeStreamOpen({ kind: "tunnel-http", projectId, requestId: crypto.randomUUID() }));
-  return [lengthPrefix(body.length), body];
-}
-
-function tunnelWsOpenRecord(projectId: string): number[][] {
-  const body = Array.from(encodeStreamOpen({ kind: "tunnel-ws", projectId, wsId: crypto.randomUUID() }));
+function tunnelTcpOpenRecord(projectId: string): number[][] {
+  const body = Array.from(encodeStreamOpen({ kind: "tunnel-tcp", projectId, connId: crypto.randomUUID() }));
   return [lengthPrefix(body.length), body];
 }
 
 /** A minimal TunnelStreamServer whose admit() always admits, with a manager
  *  nothing here calls into: these tests exercise stream-kind registration and
- *  peer retirement, not the HTTP/WS protocol (see tunnel-streams.test.ts and
- *  tunnel-manager-stream.test.ts for that). */
+ *  peer retirement, not the TCP protocol (see tunnel-streams.test.ts for
+ *  that). */
 function fakeTunnelServer() {
   return { admit: () => ({ ok: true as const, manager: {} as never }) };
 }
@@ -926,8 +919,8 @@ test("retiring a peer drops its bindings in every registry", async () => {
     await openProjectStream(peer, "p1");
     const terminal = laterStream(terminalOpenRecord("p1"));
     peer.pushLaterStream(terminal.stream);
-    const http = laterStream(tunnelHttpOpenRecord("p1"));
-    peer.pushLaterStream(http.stream);
+    const tcp = laterStream(tunnelTcpOpenRecord("p1"));
+    peer.pushLaterStream(tcp.stream);
     await new Promise((resolve) => setTimeout(resolve, 50));
 
     const access = f.client.peers as unknown as {
@@ -966,8 +959,8 @@ test("a QUIC idle close retires the peer", async () => {
     await openProjectStream(peer, "p1");
     const terminal = laterStream(terminalOpenRecord("p1"));
     peer.pushLaterStream(terminal.stream);
-    const http = laterStream(tunnelHttpOpenRecord("p1"));
-    peer.pushLaterStream(http.stream);
+    const tcp = laterStream(tunnelTcpOpenRecord("p1"));
+    peer.pushLaterStream(tcp.stream);
     await new Promise((resolve) => setTimeout(resolve, 50));
 
     const access = f.client.peers as unknown as {
