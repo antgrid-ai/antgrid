@@ -1,4 +1,3 @@
-import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../analytics/events.dart';
@@ -90,17 +89,11 @@ bool requiresProForRemote(String? tier) =>
 /// cookie is its own and cannot be lent out (`/one-time-token/generate` refuses
 /// any request that arrives over HTTP) — so the user may have to sign in there;
 /// the magic link works cross-device for exactly this.
-///
-/// iOS opens it in an in-app Safari view: App Review rejects a sign-in that
-/// leaves the app for the default browser (guideline 4), and the page can ask
-/// the user to sign in.
 Future<void> openAccountInBrowser(ProviderContainer ref) async {
   final base = ref.read(licenseApiUrlProvider).replaceAll(RegExp(r'/+$'), '');
   await launchUrl(
     Uri.parse('$base/account'),
-    mode: defaultTargetPlatform == TargetPlatform.iOS
-        ? LaunchMode.inAppBrowserView
-        : LaunchMode.externalApplication,
+    mode: LaunchMode.externalApplication,
   );
 }
 

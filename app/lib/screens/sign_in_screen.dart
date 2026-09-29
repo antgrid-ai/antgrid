@@ -847,18 +847,18 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
         // step 2 — and the link it carries — whatever the hint says.
         _AuthMethodRow(
           methods: [
-            if (_offersOAuthSignIn)
+            if (_offersOAuthSignIn) ...[
               _AuthMethodSpec(
                 icon: AbIcons.github,
                 label: 'GitHub',
                 onTap: busy ? null : () => _startOAuth('github'),
               ),
-            if (_offersOAuthSignIn)
               _AuthMethodSpec(
                 icon: _googleMark,
                 label: 'Google',
                 onTap: busy ? null : () => _startOAuth('google'),
               ),
+            ],
             // Unconditional, never keyed on what the store recalls: visibility
             // that tracked the hint would flicker as the address is typed and
             // would tell anyone watching the screen which addresses this device
