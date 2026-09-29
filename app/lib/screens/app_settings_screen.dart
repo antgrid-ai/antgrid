@@ -1,6 +1,5 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -417,12 +416,7 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
                   _Section(
                     section: SettingsSection.account,
                     body: [
-                      // Not on iOS: the web account page signs in with GitHub
-                      // and Google but not with Apple, which App Review rejects
-                      // under guideline 4.8 even inside an in-app Safari view.
-                      // The sign-in screen's password reset covers iOS.
-                      if (ref.watch(currentUserProvider).value != null &&
-                          defaultTargetPlatform != TargetPlatform.iOS) ...[
+                      if (ref.watch(currentUserProvider).value != null) ...[
                         const SizedBox(height: AbTokens.space8),
                         Text(
                           'Set or change your password on the web, where a '

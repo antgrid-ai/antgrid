@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'dart:async';
 import 'package:fake_async/fake_async.dart';
+import 'package:flutter/foundation.dart'
+    show TargetPlatform, debugDefaultTargetPlatformOverride;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -1224,6 +1226,123 @@ void main() {
           throwsA(isA<AuthException>()),
         );
         expect(requested, isFalse);
+      });
+    });
+
+    group('OAuth on iOS', () {
+      const verifyPath = '/api/auth/one-time-token/verify';
+
+      setUp(() => debugDefaultTargetPlatformOverride = TargetPlatform.iOS);
+      tearDown(() => debugDefaultTargetPlatformOverride = null);
+
+      AuthService iosService({
+        required AuthStorage storage,
+        required List<http.Request> requests,
+        required InAppWebAuth sheet,
+        int verifyStatus = 200,
+      }) => AuthService(
+        licenseApiUrl: 'https://lic.test',
+        storage: storage,
+        httpClient: MockClient((req) async {
+          requests.add(req);
+          return http.Response(
+            '{}',
+            verifyStatus,
+            headers: verifyStatus == 200
+                ? {
+                    'set-cookie':
+                        '__Secure-better-auth.session_token=signed.gh; Path=/',
+                  }
+                : {},
+          );
+        }),
+        launchUrl: (_) async => fail('iOS must not open Safari'),
+        authenticateInApp: sheet,
+      );
+
+      test('runs in the in-app sheet and redeems its callback', () async {
+        final storage = _InMemoryStorage();
+        final requests = <http.Request>[];
+        late Uri opened;
+        final service = iosService(
+          storage: storage,
+          requests: requests,
+          sheet: (url, scheme) async {
+            opened = url;
+            expect(scheme, 'antgrid');
+            return Uri.parse('antgrid://auth/callback?token=ott-1');
+          },
+        );
+
+        expect(await service.startOAuth('github'), OAuthStart.signedIn);
+        expect(opened.path, '/oauth/start');
+        expect(opened.queryParameters['provider'], 'github');
+        expect(requests.single.url.path, verifyPath);
+        expect(jsonDecode(requests.single.body), {'token': 'ott-1'});
+        expect(
+          await storage.readCookie(),
+          '__Secure-better-auth.session_token=signed.gh',
+        );
+      });
+
+      test('a closed sheet is not signed in and asks nothing', () async {
+        final requests = <http.Request>[];
+        final service = iosService(
+          storage: _InMemoryStorage(),
+          requests: requests,
+          sheet: (_, _) async => null,
+        );
+
+        expect(await service.startOAuth('google'), OAuthStart.notSignedIn);
+        expect(requests, isEmpty);
+      });
+
+      test('an error bounce is reported, not signed in', () async {
+        final failures = <String>[];
+        final service = iosService(
+          storage: _InMemoryStorage(),
+          requests: [],
+          sheet: (_, _) async =>
+              Uri.parse('antgrid://auth/callback?error=no_session'),
+        );
+        final sub = service.oauthFailures.listen(failures.add);
+
+        expect(await service.startOAuth('github'), OAuthStart.notSignedIn);
+        await Future<void>.delayed(Duration.zero);
+        expect(failures, ["GitHub sign-in didn't complete. Try again."]);
+        await sub.cancel();
+      });
+
+      test('a refused token stores no session', () async {
+        final storage = _InMemoryStorage();
+        final service = iosService(
+          storage: storage,
+          requests: [],
+          verifyStatus: 401,
+          sheet: (_, _) async =>
+              Uri.parse('antgrid://auth/callback?token=ott-1'),
+        );
+
+        expect(await service.startOAuth('github'), OAuthStart.notSignedIn);
+        expect(await storage.readCookie(), isNull);
+      });
+
+      test('other platforms hand off to the browser', () async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.android;
+        var sheetShown = false;
+        final service = AuthService(
+          licenseApiUrl: 'https://lic.test',
+          storage: _InMemoryStorage(),
+          httpClient: MockClient((_) async => http.Response('', 500)),
+          launchUrl: (_) async => true,
+          authenticateInApp: (_, _) async {
+            sheetShown = true;
+            return null;
+          },
+        );
+
+        expect(await service.startOAuth('github'), OAuthStart.handedOff);
+        expect(sheetShown, isFalse);
       });
     });
 

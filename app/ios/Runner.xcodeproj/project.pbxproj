@@ -22,6 +22,7 @@
 		97C147011CF9000F007C117D /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FF1CF9000F007C117D /* LaunchScreen.storyboard */; };
 		9A894890A20F56989A737F83 /* NotificationService.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = DF9B7923432AD1F95A3E3160 /* NotificationService.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		A1B2C3D52EC4001100C636F2 /* KeychainChannel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D42EC4001100C636F2 /* KeychainChannel.swift */; };
+		A1B2C3D82EC4001100C636F2 /* WebAuthChannel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D72EC4001100C636F2 /* WebAuthChannel.swift */; };
 		AB60D0C12D0E0001007C117D /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = AB60D0C12D0E0002007C117D /* PrivacyInfo.xcprivacy */; };
 		B04E90F3F11830C92976AA40 /* NotificationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = C308D6681F465CC544E85545 /* NotificationService.swift */; };
 		CD0D93639173DA8882B85EE1 /* PushCryptoTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 05B42D8443A37D5BBE7B23A2 /* PushCryptoTests.swift */; };
@@ -101,6 +102,7 @@
 		98B97CA38D785AC6DF3B55AA /* Pods-RunnerTests.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-RunnerTests.debug.xcconfig"; path = "Target Support Files/Pods-RunnerTests/Pods-RunnerTests.debug.xcconfig"; sourceTree = "<group>"; };
 		98C07EB6C896372EEFBD922B /* Pods_Runner.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_Runner.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		A1B2C3D42EC4001100C636F2 /* KeychainChannel.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = KeychainChannel.swift; sourceTree = "<group>"; };
+		A1B2C3D72EC4001100C636F2 /* WebAuthChannel.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = WebAuthChannel.swift; sourceTree = "<group>"; };
 		AB60D0C12D0E0002007C117D /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		BE2C9F531FA157EEF85A979F /* Pods-Runner.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Runner.release.xcconfig"; path = "Target Support Files/Pods-Runner/Pods-Runner.release.xcconfig"; sourceTree = "<group>"; };
 		C2A86C7538BE4F1C395EC9A1 /* Runner.entitlements */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.entitlements; path = Runner.entitlements; sourceTree = "<group>"; };
@@ -232,6 +234,7 @@
 				74858FAE1ED2DC5600515810 /* AppDelegate.swift */,
 				7884E8672EC3CC0400C636F2 /* SceneDelegate.swift */,
 				A1B2C3D42EC4001100C636F2 /* KeychainChannel.swift */,
+				A1B2C3D72EC4001100C636F2 /* WebAuthChannel.swift */,
 				74858FAD1ED2DC5600515810 /* Runner-Bridging-Header.h */,
 				C2A86C7538BE4F1C395EC9A1 /* Runner.entitlements */,
 			);
@@ -532,6 +535,7 @@
 				1498D2341E8E89220040F4C2 /* GeneratedPluginRegistrant.m in Sources */,
 				7884E8682EC3CC0700C636F2 /* SceneDelegate.swift in Sources */,
 				A1B2C3D52EC4001100C636F2 /* KeychainChannel.swift in Sources */,
+				A1B2C3D82EC4001100C636F2 /* WebAuthChannel.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

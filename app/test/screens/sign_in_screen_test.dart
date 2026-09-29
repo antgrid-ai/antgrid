@@ -102,6 +102,7 @@ AuthService _authFor(
   List<String>? paths,
   Future<bool> Function(Uri url)? launchUrl,
   AppleCredentialRequest? requestAppleCredential,
+  InAppWebAuth? authenticateInApp,
 }) => AuthService(
   licenseApiUrl: 'https://lic.test',
   storage: storage,
@@ -119,6 +120,8 @@ AuthService _authFor(
   // The real sheet is a platform channel no widget test answers; a dismissed
   // sheet is the inert default.
   requestAppleCredential: requestAppleCredential ?? (_) async => null,
+  // iOS's in-app OAuth sheet is a platform channel too; closed by default.
+  authenticateInApp: authenticateInApp ?? (_, _) async => null,
 );
 
 Widget _wrap(AuthStorage storage) => _wrapService(_authFor(storage));
@@ -151,6 +154,7 @@ Future<List<String>> _pumpScreen(
   _GatedStorage? storage,
   Future<bool> Function(Uri url)? launchUrl,
   AppleCredentialRequest? requestAppleCredential,
+  InAppWebAuth? authenticateInApp,
 }) async {
   final paths = <String>[];
   final tickets = storage ?? (_GatedStorage(null)..gate.complete());
@@ -162,6 +166,7 @@ Future<List<String>> _pumpScreen(
         paths: paths,
         launchUrl: launchUrl,
         requestAppleCredential: requestAppleCredential,
+        authenticateInApp: authenticateInApp,
       ),
       store: store,
     ),
@@ -379,12 +384,55 @@ void main() {
       expect(paths, isEmpty);
     });
 
-    testWidgets('iOS offers no OAuth sign-in', (tester) async {
-      await _pumpScreen(tester);
+    testWidgets('on iOS GitHub signs in without leaving the app', (
+      tester,
+    ) async {
+      final launched = <Uri>[];
+      final sheets = <Uri>[];
+      final store = _FakeAuthMethodStore();
+      final paths = await _pumpScreen(
+        tester,
+        store: store,
+        respond: (req) async => http.Response(
+          '{}',
+          200,
+          headers: {'set-cookie': 'better-auth.session_token=signed.gh; Path=/'},
+        ),
+        launchUrl: (url) async {
+          launched.add(url);
+          return true;
+        },
+        authenticateInApp: (url, scheme) async {
+          sheets.add(url);
+          expect(scheme, 'antgrid');
+          return Uri.parse('antgrid://auth/callback?token=ott-1');
+        },
+      );
 
-      expect(find.text('GitHub'), findsNothing);
-      expect(find.text('Google'), findsNothing);
-      expect(find.text('Password'), findsOneWidget);
+      await tester.enterText(find.byType(TextField), 'user@example.com');
+      await tester.tap(find.text('GitHub'));
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+
+      expect(launched, isEmpty, reason: 'Safari is never opened');
+      expect(sheets.single.queryParameters['provider'], 'github');
+      expect(paths, ['/api/auth/one-time-token/verify']);
+      expect(store.memory['user@example.com'], AuthMethod.github);
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+    testWidgets('on iOS a closed OAuth sheet records no hint', (tester) async {
+      final store = _FakeAuthMethodStore();
+      final paths = await _pumpScreen(tester, store: store);
+
+      await tester.enterText(find.byType(TextField), 'user@example.com');
+      await tester.tap(find.text('Google'));
+      await tester.pump();
+      await tester.pump();
+
+      expect(paths, isEmpty);
+      expect(store.memory, isEmpty);
+      expect(find.text('Continue'), findsOneWidget);
     }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
     testWidgets('Apple is offered on iOS and macOS only', (tester) async {
@@ -506,24 +554,22 @@ void main() {
     }, variant: TargetPlatformVariant.only(TargetPlatform.android));
 
     for (final hint in [AuthMethod.github, AuthMethod.google]) {
-      testWidgets('on iOS a remembered ${hint.name} hint falls through to the '
-          'link', (tester) async {
-        final launched = <Uri>[];
-        final store = _FakeAuthMethodStore({'user@example.com': hint});
+      testWidgets('on iOS a remembered ${hint.name} hint opens the in-app '
+          'sheet', (tester) async {
+        final sheets = <Uri>[];
         final paths = await _pumpScreen(
           tester,
-          store: store,
-          launchUrl: (url) async {
-            launched.add(url);
-            return false;
+          store: _FakeAuthMethodStore({'user@example.com': hint}),
+          authenticateInApp: (url, _) async {
+            sheets.add(url);
+            return null;
           },
         );
 
         await _continueWith(tester, 'user@example.com');
 
-        expect(launched, isEmpty);
-        expect(paths, contains(_startPath));
-        expect(store.memory['user@example.com'], AuthMethod.link);
+        expect(sheets.single.queryParameters['provider'], hint.name);
+        expect(paths, isEmpty);
       }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
     }
 

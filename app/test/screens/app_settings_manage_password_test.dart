@@ -31,15 +31,9 @@ Future<void> _pumpSignedIn(WidgetTester tester) async {
 }
 
 void main() {
-  testWidgets('iOS offers no web account page', (tester) async {
-    await _pumpSignedIn(tester);
-
-    expect(find.text('MANAGE PASSWORD'), findsNothing);
-  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
-
-  testWidgets('other platforms link the web account page', (tester) async {
+  testWidgets('every platform links the web account page', (tester) async {
     await _pumpSignedIn(tester);
 
     expect(find.text('MANAGE PASSWORD'), findsOneWidget);
-  }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+  }, variant: TargetPlatformVariant.all());
 }
