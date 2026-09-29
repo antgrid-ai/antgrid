@@ -22,11 +22,11 @@ import 'support/stream_kind_cases.dart';
 /// about the exchange (open, slot, first record) already succeeded.
 void injectProtocolBreach(FakePeerStream stream, String kind) {
   switch (kind) {
-    case 'tunnel-ws':
-      stream.injectJson({'type': 'not-a-close'});
+    case 'tunnel-tcp':
+      stream.injectJson({'type': 'not-a-reply'});
     case 'upload':
       stream.injectJson({'type': 'not-a-result'});
-    default: // terminal, tunnel-http: neither decodes non-JSON text.
+    default: // terminal: does not decode non-JSON text.
       stream.injectRecord(Uint8List.fromList(utf8.encode('not json')));
   }
 }
@@ -102,7 +102,7 @@ void main() {
         final transport = await bindProject();
         final fillers = [for (var i = 0; i < c.cap; i++) c.open(transport, i)];
         // Listen before any filler can end, or a kind whose end is a future
-        // error (tunnel-http's head) surfaces it as unhandled.
+        // error (tunnel-tcp's ready) surfaces it as unhandled.
         for (final f in fillers) {
           unawaited(c.failureCode(f));
         }
@@ -296,7 +296,9 @@ void main() {
         final handle = c.open(transport, 0);
         await pump();
         relay.openedStreams.single.end();
-        final expected = c.kind == 'tunnel-http' || c.kind == 'upload'
+        final expected = c.kind == 'tunnel-tcp'
+            ? 'STREAM_LOST'
+            : c.kind == 'upload'
             ? 'STREAM_ENDED'
             : null;
         expect(await c.failureCode(handle), expected);

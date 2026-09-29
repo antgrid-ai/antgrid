@@ -1,6 +1,6 @@
 // Not a `_test.dart` file - the DSA table `stream_admission_test.dart` drives.
 // One entry per `_StreamExchange` subclass in `machine_session.dart`
-// (terminal, tunnel-http, tunnel-ws, upload); the project stream keeps its
+// (terminal, tunnel-tcp, upload); the project stream keeps its
 // own bind machinery (unchanged) and its admission rows live directly in
 // `stream_admission_test.dart` instead of here.
 import 'dart:async';
@@ -74,54 +74,22 @@ List<StreamKindCase> streamKindCases() => [
     cancel: (h) => unawaited((h as TerminalAttachment).close()),
   ),
   StreamKindCase(
-    kind: 'tunnel-http',
+    kind: 'tunnel-tcp',
     cap: kStreamMaxTunnelStreamsPerPeer,
     failsFastAtCap: false,
-    maxRecordBytes: kStreamTunnelRecordMaxBytes,
+    maxRecordBytes: kStreamTunnelTcpRecordMaxBytes,
     maxQueuedBytes: kTunnelStreamMaxQueuedBytes,
     sendsFirstRecord: true,
-    open: (t, i) => t.openTunnelHttp(
-      requestId: 'http-$i',
-      checkoutId: 'main',
-      head: {
-        'type': 'tunnel:http-request',
-        'requestId': 'http-$i',
-        'method': 'GET',
-        'path': '/',
-      },
-      bodyLength: 0,
-    ),
+    open: (t, i) => t.openTunnelTcp(connId: 'tcp-$i', port: 3000),
     failureCode: (h) async {
       try {
-        await (h as TunnelHttpExchange).head;
+        await (h as TunnelTcpChannel).ready;
         return null;
       } on TunnelExchangeFailure catch (e) {
         return e.code;
       }
     },
-    cancel: (h) => (h as TunnelHttpExchange).cancel(),
-  ),
-  StreamKindCase(
-    kind: 'tunnel-ws',
-    cap: kStreamMaxTunnelStreamsPerPeer,
-    failsFastAtCap: false,
-    maxRecordBytes: kStreamTunnelRecordMaxBytes,
-    maxQueuedBytes: kTunnelStreamMaxQueuedBytes,
-    sendsFirstRecord: true,
-    open: (t, i) => t.openTunnelWs(
-      tunnelId: 'ws-$i',
-      checkoutId: 'main',
-      open: {'type': 'tunnel:ws-open', 'port': 3000, 'scheme': 'http', 'path': '/'},
-    ),
-    failureCode: (h) async {
-      final end = await (h as TunnelWsChannel).done;
-      return switch (end) {
-        TunnelWsFailed(:final failure) => failure.code,
-        TunnelWsClosedByPeer() => null,
-        TunnelWsClosedLocally() => null,
-      };
-    },
-    cancel: (h) => (h as TunnelWsChannel).abort(),
+    cancel: (h) => (h as TunnelTcpChannel).abort(),
   ),
   StreamKindCase(
     kind: 'upload',

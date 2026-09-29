@@ -59,20 +59,14 @@ export const TerminalStreamOpen = z.strictObject({
   requestId: StreamId,
 });
 
-// One stream per HTTP request/response pair; `requestId` is the same id the
-// app already mints for `tunnel:http-request`.
-export const TunnelHttpStreamOpen = z.strictObject({
-  kind: z.literal("tunnel-http"),
+// One stream per TCP connection the previewing device accepted on its local
+// port, piped byte-for-byte to the same port on the bridge's loopback — HTTP,
+// WebSocket and TLS alike, with no header ever parsed on either side.
+// `connId` is minted by the app per accepted connection.
+export const TunnelTcpStreamOpen = z.strictObject({
+  kind: z.literal("tunnel-tcp"),
   projectId: StreamId,
-  requestId: StreamId,
-});
-
-// One stream per browser-side WebSocket for the tunnel's lifetime; `wsId`
-// carries the `tunnelId` the app mints for `tunnel:ws-open`.
-export const TunnelWsStreamOpen = z.strictObject({
-  kind: z.literal("tunnel-ws"),
-  projectId: StreamId,
-  wsId: StreamId,
+  connId: StreamId,
 });
 
 export const STREAM_UPLOAD_MAX_FILE_NAME_LENGTH = 255;
@@ -96,16 +90,14 @@ export const StreamOpen = z.discriminatedUnion("kind", [
   SessionStreamOpen,
   ProjectStreamOpen,
   TerminalStreamOpen,
-  TunnelHttpStreamOpen,
-  TunnelWsStreamOpen,
+  TunnelTcpStreamOpen,
   UploadStreamOpen,
 ]);
 
 export type SessionStreamOpen = z.infer<typeof SessionStreamOpen>;
 export type ProjectStreamOpen = z.infer<typeof ProjectStreamOpen>;
 export type TerminalStreamOpen = z.infer<typeof TerminalStreamOpen>;
-export type TunnelHttpStreamOpen = z.infer<typeof TunnelHttpStreamOpen>;
-export type TunnelWsStreamOpen = z.infer<typeof TunnelWsStreamOpen>;
+export type TunnelTcpStreamOpen = z.infer<typeof TunnelTcpStreamOpen>;
 export type UploadStreamOpen = z.infer<typeof UploadStreamOpen>;
 export type StreamOpen = z.infer<typeof StreamOpen>;
 export type StreamOpenKind = StreamOpen["kind"];
@@ -170,83 +162,18 @@ export const STREAM_PROJECT_BRIDGE_RECORD_MAX_BYTES = MAX_TRANSFER_BYTES;
 export const STREAM_TERMINAL_APP_RECORD_MAX_BYTES = 16_384;
 export const STREAM_TERMINAL_BRIDGE_RECORD_MAX_BYTES = 2_097_152;
 
-// Per-record caps for the tunnel stream (one stream per HTTP request or
-// browser-side WebSocket). `STREAM_TUNNEL_DATA_MAX_BYTES` bounds the payload
-// after a data record's tag byte; `STREAM_TUNNEL_RECORD_MAX_BYTES` is what the
-// reader checks against (payload + the tag), and applies in both directions.
-export const STREAM_TUNNEL_DATA_MAX_BYTES = 1_048_576;
-export const STREAM_TUNNEL_RECORD_MAX_BYTES = STREAM_TUNNEL_DATA_MAX_BYTES + 1;
-/** = MAX_TRANSFER_BYTES: a tunneled request body is bounded exactly as a
- *  session-path transfer is. Restated as its own constant because antgrid-wire
- *  sits across the licence boundary from bridge/, so the derivation can't be
- *  expressed as an import there — it is a comment instead. */
-export const STREAM_TUNNEL_REQUEST_BODY_MAX_BYTES = MAX_TRANSFER_BYTES;
+/** A TCP tunnel stream's control records — the app's `tunnel:tcp-open` and
+ *  the bridge's one reply — are small JSON; every byte after them is raw, so
+ *  this bounds only the framed prefix, in both directions. */
+export const STREAM_TUNNEL_TCP_RECORD_MAX_BYTES = 4096;
 
 /** The upload stream's one bridge->app record (a `stream:refused` or a
  *  `file:upload-result`): generous over the ~2.5 KB a valid result ever needs,
  *  the same shape as the terminal/tunnel record caps above. */
 export const STREAM_UPLOAD_BRIDGE_RECORD_MAX_BYTES = 16_384;
 
-// Tunnel data records carry only WS frames: an HTTP body rides the stream as
-// raw bytes with no tag byte at all, so `0x00`/`0x01` are retired rather than
-// reassigned.
-export const TUNNEL_RECORD_TAG_WS_TEXT = 0x02;
-export const TUNNEL_RECORD_TAG_WS_BINARY = 0x03;
-
-export type TunnelDataTag =
-  | typeof TUNNEL_RECORD_TAG_WS_TEXT
-  | typeof TUNNEL_RECORD_TAG_WS_BINARY;
-
-const TUNNEL_DATA_TAGS: ReadonlySet<number> = new Set<number>([
-  TUNNEL_RECORD_TAG_WS_TEXT,
-  TUNNEL_RECORD_TAG_WS_BINARY,
-]);
-
-/** A tunnel-stream record's first byte, discriminating JSON control records
- *  from tagged binary data records. */
-const JSON_RECORD_FIRST_BYTE = 0x7b; // "{"
-
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder("utf-8", { fatal: true });
-
-/** One tag byte + payload, the wire shape of a tunnel stream's binary data
- *  records. Throws `RangeError` for an unknown tag or a payload over
- *  `STREAM_TUNNEL_DATA_MAX_BYTES` — both are this side's own bug to catch
- *  before ever reaching the wire, never a hostile peer's to trigger. */
-export function encodeTunnelDataRecord(tag: TunnelDataTag, payload: Uint8Array): Uint8Array {
-  if (!TUNNEL_DATA_TAGS.has(tag)) throw new RangeError(`Unknown tunnel data tag: ${tag}`);
-  if (payload.length > STREAM_TUNNEL_DATA_MAX_BYTES) {
-    throw new RangeError(`Tunnel data payload (${payload.length}) exceeds STREAM_TUNNEL_DATA_MAX_BYTES`);
-  }
-  const out = new Uint8Array(payload.length + 1);
-  out[0] = tag;
-  out.set(payload, 1);
-  return out;
-}
-
-export type TunnelRecord =
-  | { kind: "json"; text: string }
-  | { kind: "data"; tag: TunnelDataTag; payload: Uint8Array };
-
-/** Decodes one already length-delimited tunnel-stream record: a `0x7B`
- *  first byte is UTF-8 JSON, any other recognized byte is a tagged data
- *  record whose payload is a VIEW into `record`, not a copy. `null` for an
- *  empty record, an unrecognized tag, or a `0x7B`-led body that fails to
- *  decode as UTF-8 — never throws, so a malformed record is refusable by its
- *  caller rather than connection-fatal. */
-export function decodeTunnelRecord(record: Uint8Array): TunnelRecord | null {
-  if (record.length === 0) return null;
-  const first = record[0]!;
-  if (first === JSON_RECORD_FIRST_BYTE) {
-    try {
-      return { kind: "json", text: textDecoder.decode(record) };
-    } catch {
-      return null;
-    }
-  }
-  if (!TUNNEL_DATA_TAGS.has(first)) return null;
-  return { kind: "data", tag: first as TunnelDataTag, payload: record.subarray(1) };
-}
 
 /** The open-frame body: `StreamOpen.parse(open)` then UTF-8 JSON. There is no
  *  length prefix here — the caller frames it (`[u32 BE len][body]`), matching

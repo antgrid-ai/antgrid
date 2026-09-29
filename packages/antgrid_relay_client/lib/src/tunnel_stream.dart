@@ -1,246 +1,109 @@
-/// Tunnel-stream wire records and the transport-agnostic handles
-/// (`TunnelHttpExchange`, `TunnelWsChannel`) that `terminal_service.dart`'s
-/// preview counterpart drives. The stream-backed implementations live in
+/// The transport-agnostic handle (`TunnelTcpChannel`) that the app's preview
+/// forwarder drives. The stream-backed implementation lives in
 /// `machine_session.dart`'s `StreamTransport` (mirroring how
 /// `_StreamTerminalAttachment` sits beside `terminal_attachment.dart`'s
-/// interfaces); this file holds only the shapes both sides share plus the
-/// record codec, and never talks to a `PeerStream` directly.
-///
-/// `preview_service.dart`'s queue and policy stay in `app/`.
+/// interfaces); this file holds only the shapes both sides share and never
+/// talks to a `PeerStream` directly.
 library;
 
 import 'dart:async';
-import 'dart:convert';
 import 'dart:typed_data';
 
 import 'models/stream_open.dart';
 
-/// Bounds one tunnel stream's writer queue on the app side. HTTP awaits every
-/// send, so it never approaches this; WS upstream messages are events the app
-/// cannot await, so this is how many maximum-size frames may queue before the
-/// stream is reset (mirrors the bridge's `TUNNEL_STREAM_MAX_QUEUED_BYTES`,
-/// which is 4 MiB because it also covers the bridge's own flush cadence).
+/// Bounds one tunnel stream's writer queue on the app side. The forwarder
+/// awaits every send, so it never approaches this; the bound is the backstop
+/// that resets a stream whose caller stops awaiting. The bridge's own bound,
+/// `TUNNEL_STREAM_MAX_QUEUED_BYTES`, is deliberately larger (4 MiB) than this
+/// one; the two are independent limits on opposite writers.
 const int kTunnelStreamMaxQueuedBytes = 2097152;
 
-/// One `tunnel:http-head` record, decoded.
-final class TunnelHttpHead {
-  final int status;
-  final Map<String, String> headers;
-  final List<String> setCookies;
-
-  const TunnelHttpHead({
-    required this.status,
-    required this.headers,
-    this.setCookies = const [],
-  });
-}
-
-/// One WebSocket message. A text message's `bytes` are its UTF-8 encoding.
-final class TunnelWsFrame {
-  final bool binary;
-  final Uint8List bytes;
-
-  const TunnelWsFrame({required this.binary, required this.bytes});
-}
-
-/// Why a tunnel exchange or channel ended in failure.
+/// Why a tunnel channel ended in failure.
 ///
-/// `code` is one of: `REFUSED` ([refusal] set), `NOT_SUPPORTED`, `NO_PROJECT`,
-/// `STREAM_OPEN_FAILED`, `SEND_FAILED`, `STREAM_ENDED`, `TRUNCATED`,
-/// `PROTOCOL`, `CANCELLED`, `TRANSPORT_CLOSED`.
+/// `code` is `REFUSED` when the bridge refused the open ([refusal] carries its
+/// code and message), otherwise one of: `UNREACHABLE` (the bridge could not
+/// reach the port), `STREAM_LOST` (the stream ended before the bridge
+/// replied), `NOT_SUPPORTED`, `NO_PROJECT`, `STREAM_OPEN_FAILED`,
+/// `SEND_FAILED`, `PROTOCOL`, `CANCELLED`, `TRANSPORT_CLOSED`.
 final class TunnelExchangeFailure implements Exception {
   final String code;
   final StreamRefused? refusal;
   final Object? error;
 
-  const TunnelExchangeFailure(this.code, {this.refusal, this.error});
+  /// The bridge's human-readable reason, when it sent one.
+  final String? message;
+
+  const TunnelExchangeFailure(
+    this.code, {
+    this.refusal,
+    this.error,
+    this.message,
+  });
 
   @override
   String toString() => 'TunnelExchangeFailure($code)';
 }
 
-/// One HTTP request/response pair riding its own stream.
-abstract interface class TunnelHttpExchange {
-  String get requestId;
+/// The bridge's reply to a `tunnel:tcp-open`.
+final class TunnelTcpReady {
+  /// Whether the port speaks TLS. Non-null only for a probe.
+  final bool? tls;
 
-  /// Completes with the head, or errors with [TunnelExchangeFailure]. Never
-  /// an unhandled error.
-  Future<TunnelHttpHead> get head;
-
-  /// Single-subscription. Raw response bytes, in arrival order, exactly as the
-  /// bridge wrote them — no per-piece framing to decode. Done on a clean FIN;
-  /// errors [TunnelExchangeFailure] (`TRUNCATED` / `PROTOCOL` / `CANCELLED` /
-  /// `TRANSPORT_CLOSED`).
-  Stream<Uint8List> get body;
-
-  /// Idempotent. Waiting for a slot: leave the queue and never open. Opening
-  /// or open: reset the send half (or abandon the pending open) and keep
-  /// draining any records already in flight.
-  void cancel();
+  const TunnelTcpReady({this.tls});
 }
 
-/// Why a [TunnelWsChannel.done] completed.
-sealed class TunnelWsEnd {
-  const TunnelWsEnd();
-}
+/// One forwarded TCP connection.
+abstract interface class TunnelTcpChannel {
+  String get connId;
 
-final class TunnelWsClosedByPeer extends TunnelWsEnd {
-  final int? code;
-  final String? reason;
+  /// Completes when the bridge's reply record arrives. Errors with
+  /// [TunnelExchangeFailure]: `REFUSED` (with `refusal`) for a refusal, `UNREACHABLE`
+  /// for a bridge that could not reach the port, `STREAM_LOST` when the stream
+  /// ends or resets first, `NOT_SUPPORTED` from a transport that cannot
+  /// tunnel.
+  Future<TunnelTcpReady> get ready;
 
-  const TunnelWsClosedByPeer(this.code, this.reason);
-}
+  /// Single-subscription. Raw upstream bytes after [ready], exactly as the
+  /// upstream wrote them. Done on the bridge's FIN; errors
+  /// ([PeerStreamReset] or [TunnelExchangeFailure]) on a reset.
+  Stream<Uint8List> get incoming;
 
-final class TunnelWsClosedLocally extends TunnelWsEnd {
-  const TunnelWsClosedLocally();
-}
+  /// Queues raw bytes toward the upstream and completes once they are handed
+  /// to the stream. Must be awaited before the next call — the queue resets
+  /// the stream past [kTunnelStreamMaxQueuedBytes]. `false` once the channel
+  /// is over, and before [ready] has completed.
+  Future<bool> send(Uint8List bytes);
 
-final class TunnelWsFailed extends TunnelWsEnd {
-  final TunnelExchangeFailure failure;
+  /// Graceful end of the send half (FIN). Idempotent.
+  Future<void> finish();
 
-  const TunnelWsFailed(this.failure);
-}
-
-/// One browser-side WebSocket's tunnel for its whole lifetime.
-abstract interface class TunnelWsChannel {
-  String get tunnelId;
-
-  /// bridge -> browser, in order; closes when [done] completes.
-  Stream<TunnelWsFrame> get frames;
-
-  /// Completes once, never errors.
-  Future<TunnelWsEnd> get done;
-
-  /// Serialized in call order, including calls made before the stream opens.
-  /// `true` = accepted. `false` = the channel is dead (it has already
-  /// reset). A frame over [kStreamTunnelDataMaxBytes] resets it.
-  Future<bool> send(TunnelWsFrame frame);
-
-  /// Writes `tunnel:ws-close` after every queued frame, then finishes.
-  /// Idempotent.
-  void close({int? code, String? reason});
-
-  /// Resets with no close record. Idempotent.
+  /// Resets both halves. Idempotent.
   void abort();
 }
 
-/// One decoded tunnel-stream record body (the framing length prefix is
-/// already stripped by [PeerStream]).
-sealed class TunnelRecord {}
-
-final class TunnelJsonRecord extends TunnelRecord {
-  final String text;
-
-  TunnelJsonRecord(this.text);
-}
-
-final class TunnelDataRecord extends TunnelRecord {
-  final int tag;
-  final Uint8List payload;
-
-  TunnelDataRecord(this.tag, this.payload);
-}
-
-/// One tag byte plus [payload]. Throws [RangeError] for an unknown tag or a
-/// payload over [kStreamTunnelDataMaxBytes]. WS frames only — HTTP bodies ride
-/// raw, with no tag and no record framing.
-Uint8List encodeTunnelDataRecord(int tag, Uint8List payload) {
-  if (tag < kTunnelRecordTagWsText || tag > kTunnelRecordTagWsBinary) {
-    throw RangeError.value(tag, 'tag', 'unknown tunnel data tag');
-  }
-  if (payload.length > kStreamTunnelDataMaxBytes) {
-    throw RangeError.value(
-      payload.length,
-      'payload.length',
-      'over kStreamTunnelDataMaxBytes',
-    );
-  }
-  final out = Uint8List(payload.length + 1);
-  out[0] = tag;
-  out.setRange(1, out.length, payload);
-  return out;
-}
-
-/// `null` for an empty record, an unknown tag (0x00/0x01 included — HTTP
-/// bodies carry no tag at all), or a first byte of
-/// 0x7B whose body is not valid UTF-8. The returned payload is a view, not a
-/// copy.
-TunnelRecord? decodeTunnelRecord(Uint8List record) {
-  if (record.isEmpty) return null;
-  final first = record[0];
-  if (first == 0x7B) {
-    try {
-      return TunnelJsonRecord(utf8.decode(record, allowMalformed: false));
-    } catch (_) {
-      return null;
-    }
-  }
-  if (first < kTunnelRecordTagWsText || first > kTunnelRecordTagWsBinary) {
-    return null;
-  }
-  return TunnelDataRecord(first, Uint8List.sublistView(record, 1));
-}
-
-/// A [TunnelHttpExchange] that never opened a stream — [failure] is already
-/// set. Shared by [BufferedAgentTransport]'s default (`NOT_SUPPORTED`) and by
-/// a `StreamTransport` that fails before attempting an open (`NO_PROJECT`,
-/// `TRANSPORT_CLOSED`).
-final class FailedTunnelHttpExchange implements TunnelHttpExchange {
-  FailedTunnelHttpExchange(this.requestId, TunnelExchangeFailure failure)
-    : _headCompleter = Completer<TunnelHttpHead>(),
-      _bodyController = StreamController<Uint8List>() {
-    // A caller that reads only one of head/body must never see the other
-    // one's error surface as unhandled — the buffered stream error below is only ever delivered once
-    // something actually listens, so only the Future side needs a silencer.
-    _headCompleter.future.ignore();
-    _headCompleter.completeError(failure);
-    _bodyController.addError(failure);
-    unawaited(_bodyController.close());
-  }
+/// A [TunnelTcpChannel] that never opened a stream — [ready] has already
+/// failed with the given failure. Shared by [BufferedAgentTransport]'s default
+/// (`NOT_SUPPORTED`).
+final class FailedTunnelTcpChannel implements TunnelTcpChannel {
+  FailedTunnelTcpChannel(this.connId, TunnelExchangeFailure failure)
+    : _ready = Future<TunnelTcpReady>.error(failure)..ignore();
 
   @override
-  final String requestId;
+  final String connId;
 
-  final Completer<TunnelHttpHead> _headCompleter;
-  final StreamController<Uint8List> _bodyController;
-
-  @override
-  Future<TunnelHttpHead> get head => _headCompleter.future;
+  final Future<TunnelTcpReady> _ready;
 
   @override
-  Stream<Uint8List> get body => _bodyController.stream;
+  Future<TunnelTcpReady> get ready => _ready;
 
   @override
-  void cancel() {}
-}
-
-/// A [TunnelWsChannel] that never opened a stream — [done] already completed
-/// [TunnelWsFailed]. Same role as [FailedTunnelHttpExchange].
-final class FailedTunnelWsChannel implements TunnelWsChannel {
-  FailedTunnelWsChannel(this.tunnelId, TunnelExchangeFailure failure)
-    : _framesController = StreamController<TunnelWsFrame>(),
-      _doneCompleter = Completer<TunnelWsEnd>() {
-    _doneCompleter.complete(TunnelWsFailed(failure));
-    unawaited(_framesController.close());
-  }
+  Stream<Uint8List> get incoming => const Stream<Uint8List>.empty();
 
   @override
-  final String tunnelId;
-
-  final StreamController<TunnelWsFrame> _framesController;
-  final Completer<TunnelWsEnd> _doneCompleter;
+  Future<bool> send(Uint8List bytes) async => false;
 
   @override
-  Stream<TunnelWsFrame> get frames => _framesController.stream;
-
-  @override
-  Future<TunnelWsEnd> get done => _doneCompleter.future;
-
-  @override
-  Future<bool> send(TunnelWsFrame frame) async => false;
-
-  @override
-  void close({int? code, String? reason}) {}
+  Future<void> finish() async {}
 
   @override
   void abort() {}

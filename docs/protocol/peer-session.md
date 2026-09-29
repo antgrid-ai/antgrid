@@ -58,7 +58,7 @@ stop codes (`STREAM_STOP_REFUSED`, `STREAM_RESET_OPEN_TIMEOUT`, `STREAM_RESET_RE
 `bridge/src/peer/stream-dispatch.ts`) are bridge-side diagnostics only. A refused or timed-out later
 stream never costs the connection; only an unauthorized peer or a first-stream protocol violation does.
 
-The handler table registers `{kind:"terminal"}` (§1b), `{kind:"tunnel-http"}` and `{kind:"tunnel-ws"}`
+The handler table registers `{kind:"terminal"}` (§1b), `{kind:"tunnel-tcp"}`
 (§1c), `{kind:"project"}` (§1d — this is what replaces the session stream's old `{s,m}` mux entirely), and
 `{kind:"upload"}` (§1e); a well-formed kind with no registered handler is refused `NOT_ALLOWED`. The
 QUIC-level cap (`STREAM_MAX_BIDI_STREAMS_PER_CONNECTION`) is set
@@ -117,63 +117,58 @@ them.
 
 ## 1c. Tunnel streams
 
-HTTP-proxy and browser-side-WebSocket preview traffic never rides the bus: each gets its own QUIC stream,
-one per exchange: `{kind:"tunnel-http", projectId, requestId}` opens one
-stream for exactly one HTTP request/response pair, `{kind:"tunnel-ws", projectId, wsId}` one stream for
-one browser-side WebSocket's whole lifetime. Both are admitted by `TunnelStreamRegistry`
-(`bridge/src/peer/tunnel-streams.ts`), plugged into `PeerStreamAcceptor` as `handlers["tunnel-http"]` /
-`handlers["tunnel-ws"]` (one registry, one cap shared by both kinds), and pass through §1a's
-cap/pending-open/timeout admission and §1b's shared project-scoped admission exactly as a terminal stream
-does — a lookup only, never an open or a promotion.
+Preview traffic never rides the bus and is never parsed. The phone listens on `localhost:<port>` and every
+TCP connection it accepts becomes ONE QUIC stream, `{kind:"tunnel-tcp", projectId, connId}` (`connId` is
+app-minted and unique per peer); the bridge dials `localhost:<port>` and pipes raw bytes. HTTP, WebSocket,
+TLS, cookies and redirects are all just bytes here. `TunnelStreamRegistry`
+(`bridge/src/peer/tunnel-streams.ts`) is plugged into `PeerStreamAcceptor` as `handlers["tunnel-tcp"]`, and
+its streams pass through §1a's cap/pending-open/timeout admission and §1b's shared project-scoped admission
+exactly as a terminal stream does — a lookup only, never an open or a promotion.
 
-**Record framing.** A tunnel stream carries two shapes of record. The head/close control records are
-length-prefixed, `[u32 BE len][body]`, discriminated by the body's first byte:
+**Framing.** Exactly one length-prefixed record, `[u32 BE len][UTF-8 JSON]`, goes each way, each bounded by
+`STREAM_TUNNEL_TCP_RECORD_MAX_BYTES`; everything after the bridge's record is raw bytes with no framing,
+read with `StreamRawReader` and written with `StreamRecordWriter.sendRaw()`
+(`bridge/src/peer/stream-records.ts`), exactly like an upload's file bytes (§1e).
 
-| First byte | Meaning |
+**First-record rule.** The target rides the app's first record, not the open frame. It must be
+`{type:"tunnel:tcp-open", connId, port, checkoutId?, probe?}`: `connId` equals the open frame's, `port` is
+1..65535, `checkoutId` defaults to `main`. It is read under the same 5s deadline as §1a's open frame. Once it
+parses, `AgentCore.tunnelStreams.admit(peerId, checkoutId)` runs, in order: the remote-access switch
+(`NOT_ALLOWED` if off), the named checkout must be a currently running runtime (`NOT_ALLOWED` — "unknown
+checkout"), and that runtime must have a `TunnelManager` (`NOT_ALLOWED`). A malformed record, or one naming a
+`connId` other than the open frame's, is refused `INVALID`. The bridge dials only the host `localhost`; the
+port is the one thing the app chooses.
+
+**The bridge's one reply record**, then FIN or raw bytes:
+
+| Reply | Then |
 |---|---|
-| `0x7B` (`{`) | UTF-8 JSON control record — the whole body is one JSON object |
-| `0x02` | WebSocket frame, text |
-| `0x03` | WebSocket frame, binary |
+| `stream:refused` (§1a) — cap, catalog, remote access, checkout, bad head | FIN |
+| `tunnel:tcp-error {connId, message}` — the upstream connect failed or timed out | FIN |
+| `tunnel:tcp-ready {connId, tls}` — only for `probe:true`, after a TLS handshake attempt against the port; nothing is piped | FIN |
+| `tunnel:tcp-ready {connId}` | raw bytes both ways until either end closes |
 
-A WS frame still carries a tag because one stream multiplexes many discrete frames of either kind;
-codecs and constants: `encodeTunnelDataRecord`/`decodeTunnelRecord`, `TUNNEL_RECORD_TAG_WS_TEXT`/
-`_WS_BINARY` (`packages/antgrid-wire/src/stream-open.ts`). An HTTP request or response body, by
-contrast, is the ONLY thing that stream carries in that direction once the head has gone by, so it
-needs neither a length prefix nor a tag: it is raw bytes, read with `StreamRawReader` and written with
-`StreamRecordWriter.sendRaw()` (`bridge/src/peer/stream-records.ts`), exactly like an upload's file
-bytes (§1e).
+The app must not send raw bytes before it has read the ready record; the bridge holds the upstream's
+bytes back until the ready record is queued.
 
-**First-record rule.** The checkout a tunnel targets rides this record, not the open frame — the open-frame
-schemas above are frozen and carry no `checkoutId`. An HTTP stream's first record must be a JSON
-`tunnel:http-request`, naming the same `requestId` as the open frame plus `checkoutId`, `headers` and
-`bodyLength`; a WS stream's first record must be `tunnel:ws-open`, naming the same `wsId` as the open
-frame's under the field `tunnelId`, plus `checkoutId`. Either is read under the same 5s deadline as §1a's
-open frame. Once the head record parses, `AgentCore.tunnelStreams.admit(peerId, checkoutId)` runs, in
-order: the remote-access switch (`NOT_ALLOWED` if off), the named checkout must be a currently running
-runtime (`NOT_ALLOWED` — "unknown checkout"), and that runtime must have a `TunnelManager` (`NOT_ALLOWED`). Any
-failure refuses in-band exactly as §1a describes, on the tunnel stream itself; a malformed head record, or
-one naming an id other than the open frame's, is refused `INVALID`.
+**Endings.** Half-close is not modelled: an end in either direction winds the whole connection down. An
+upstream close or error makes the bridge FIN after the bytes already queued and release the slot. An app FIN
+or reset makes the bridge stop relaying, keep reading and discarding upstream bytes, and half-close the upstream once it
+has ended or a short drain window has passed (`TCP_END_DRAIN_MS`), then finish its own half; a socket still open
+after `TCP_END_DESTROY_MS` is destroyed. The bridge never resets an upstream on its own initiative, but an upstream
+still streaming when the browser gives up can still see a reset, exactly as it would from a real browser. A peer that is dropped ends every one of
+its forwards the same way. Failure isolation matches §1b: an overflow or a lost stream resets only that one
+stream, and only `unauthorized`, or a protocol violation (a bad first stream, §1a, or an app record over the
+stream's cap), closes the connection.
 
-**The end of a body.** An HTTP stream's response ends when the bridge `finish()`es its send half — a
-plain FIN, exactly like a terminal stream (§1b). Native FIN and reset are distinguishable on the wire,
-so unlike the old length-prefixed framing this needs no JSON verb to tell the app which one happened.
-A WS stream still ends with a JSON `tunnel:ws-close` (optional `code`/`reason`) then FIN, because a
-close carries a code/reason a bare FIN cannot.
+**Pacing.** The bridge pauses the upstream socket until each `sendRaw` resolves, and the app awaits each send
+before pulling more from the local socket: a Dart `sendRaw` does not block, and overflowing the per-stream
+queue resets the stream.
 
-**Cancel.** The app cancels by resetting (or FIN-ing) its own send half; the bridge's pending read on that
-half fails, which it treats as the app's cancel — aborting the upstream fetch or WS and then closing its
-own send half in turn, exactly as if it had reached the end on its own. A raw read that would push the
-request body past its declared `bodyLength`, or a record arriving after the app's own end, is a stream
-breach. Failure isolation matches §1b: an overflow or a lost stream resets only that one stream — every
-other tunnel, attachment and the connection are untouched — and only `unauthorized`, or a protocol
-violation (a bad first stream, §1a, or an app record over the stream's cap), closes the connection.
-
-**Caps.** `STREAM_MAX_TUNNEL_STREAMS_PER_PEER`; `STREAM_TUNNEL_DATA_MAX_BYTES` and
-`STREAM_TUNNEL_RECORD_MAX_BYTES` (a WS data record's tagged payload, and payload + tag); and
-`STREAM_TUNNEL_REQUEST_BODY_MAX_BYTES` (an HTTP request body, bounded the same as a session-path
-transfer) are defined once in `packages/antgrid-wire/src/stream-open.ts` beside every other stream cap
-(§1a). An HTTP body's raw reads and writes carry no record cap of their own — they use the same
-`STREAM_RAW_READ_BYTES`/`STREAM_RECORD_SLICE_BYTES` as any other raw stream (§5).
+**Caps.** `STREAM_MAX_TUNNEL_STREAMS_PER_PEER` counts open connections, not requests;
+`STREAM_TUNNEL_TCP_RECORD_MAX_BYTES` is defined once in `packages/antgrid-wire/src/stream-open.ts` beside every
+other stream cap (§1a). The raw bytes use the same `STREAM_RAW_READ_BYTES`/`STREAM_RECORD_SLICE_BYTES` as any
+other raw stream (§5).
 
 ## 1d. Project streams
 
@@ -249,7 +244,7 @@ SAME read — there is no separate probe once the declared size is reached. An o
 (`STREAM_RESET_SCOPED`) with no result reported, since the app has already broken the declared contract.
 
 **Cancel.** The app cancels by resetting (or FIN-ing) its own send half; the bridge's pending read
-observes it the same way a tunnel request body's cancel does (§1c), and the in-progress
+observes it the same way a tunnel connection's reset does (§1c), and the in-progress
 `FileUploadManager` upload is cancelled with no result to report.
 
 **Caps.** `STREAM_MAX_UPLOAD_STREAMS_PER_PEER`, `STREAM_UPLOAD_BRIDGE_RECORD_MAX_BYTES` (the one result
@@ -376,7 +371,7 @@ a bounded per-stream write queue ahead of the native binding (`StreamRecordWrite
 stream that fills its queue is reset — that stream alone — without stalling any other stream. The session stream is the one exception: it has nothing to
 reopen, so its overflow retires the connection (`queue-full`, `native-host-connection.ts`).
 
-A raw stream (an HTTP tunnel body or an upload's file bytes) carries no length-prefixed records at all,
+A raw stream (a tunnel connection's bytes or an upload's file bytes) carries no length-prefixed records at all,
 so its pacing is per-read/per-write rather than per-record: `StreamRawReader.read()` asks for at most
 `STREAM_RAW_READ_BYTES` (65 536) per native call, and `StreamRecordWriter.sendRaw()` slices anything
 larger into writes of at most `STREAM_RECORD_SLICE_BYTES` (262 144) — both side-local constants in
@@ -400,8 +395,8 @@ instead, and both ends now write it — the bridge from `streamLabelOf` (`bridge
 the app from the same lookup in `antgrid_relay_client` — for every stream kind, terminal and tunnel
 included; it is deliberately not part of the join key, since a hash-based pair (above) needs no extra key
 to match on. `streamId` is a per-connection stream LABEL, not a QUIC stream id (`"0"` for the session
-stream, the projectId for a project stream, the open frame's own `requestId`/`wsId` for a terminal,
-tunnel or upload stream) — both ends write it for every stream kind, on the same terms as `streamKind`.
+stream, the projectId for a project stream, the open frame's own `requestId` for a terminal or upload stream, `connId` for a
+tunnel-tcp stream) — both ends write it for every stream kind, on the same terms as `streamKind`.
 
 ## 7. Lifecycle and interrupted commands
 

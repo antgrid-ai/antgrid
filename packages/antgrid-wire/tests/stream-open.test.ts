@@ -16,9 +16,7 @@ import {
   STREAM_PROJECT_BRIDGE_RECORD_MAX_BYTES,
   STREAM_TERMINAL_APP_RECORD_MAX_BYTES,
   STREAM_TERMINAL_BRIDGE_RECORD_MAX_BYTES,
-  STREAM_TUNNEL_DATA_MAX_BYTES,
-  STREAM_TUNNEL_RECORD_MAX_BYTES,
-  STREAM_TUNNEL_REQUEST_BODY_MAX_BYTES,
+  STREAM_TUNNEL_TCP_RECORD_MAX_BYTES,
   STREAM_UPLOAD_BRIDGE_RECORD_MAX_BYTES,
   STREAM_UPLOAD_MAX_FILE_NAME_LENGTH,
   STREAM_UPLOAD_MAX_MIME_TYPE_LENGTH,
@@ -26,18 +24,13 @@ import {
   StreamOpen,
   StreamRefused,
   StreamRefusedCode,
-  TUNNEL_RECORD_TAG_WS_BINARY,
-  TUNNEL_RECORD_TAG_WS_TEXT,
   TerminalStreamOpen,
-  TunnelHttpStreamOpen,
-  TunnelWsStreamOpen,
+  TunnelTcpStreamOpen,
   UploadStreamOpen,
   decodeStreamOpen,
   decodeStreamRefused,
-  decodeTunnelRecord,
   encodeStreamOpen,
   encodeStreamRefused,
-  encodeTunnelDataRecord,
 } from "../src/index";
 
 describe("StreamOpen: every kind round-trips and rejects unknown fields", () => {
@@ -64,16 +57,17 @@ describe("StreamOpen: every kind round-trips and rejects unknown fields", () => 
     ).toThrow();
   });
 
-  test("tunnel-http", () => {
-    const value = { kind: "tunnel-http", projectId: "proj-1", requestId: "req-1" } as const;
+  test("tunnel-tcp", () => {
+    const value = { kind: "tunnel-tcp", projectId: "proj-1", connId: "conn-1" } as const;
     expect(StreamOpen.parse(value)).toEqual(value);
-    expect(() => TunnelHttpStreamOpen.parse({ kind: "tunnel-http", projectId: "proj-1" })).toThrow();
+    expect(() => TunnelTcpStreamOpen.parse({ kind: "tunnel-tcp", projectId: "proj-1" })).toThrow();
+    // The port rides the head record, where the checkout that authorizes it is named too.
+    expect(StreamOpen.safeParse({ ...value, port: 3000 }).success).toBe(false);
   });
 
-  test("tunnel-ws", () => {
-    const value = { kind: "tunnel-ws", projectId: "proj-1", wsId: "ws-1" } as const;
-    expect(StreamOpen.parse(value)).toEqual(value);
-    expect(() => TunnelWsStreamOpen.parse({ kind: "tunnel-ws", projectId: "proj-1" })).toThrow();
+  test("the retired per-request tunnel kinds are rejected", () => {
+    expect(StreamOpen.safeParse({ kind: "tunnel-http", projectId: "proj-1", requestId: "req-1" }).success).toBe(false);
+    expect(StreamOpen.safeParse({ kind: "tunnel-ws", projectId: "proj-1", wsId: "ws-1" }).success).toBe(false);
   });
 
   test("an unknown kind is rejected, not silently dropped", () => {
@@ -141,8 +135,7 @@ test("the longest valid open frame, fully JSON-escaped, fits STREAM_OPEN_MAX_BYT
     { kind: "session" },
     { kind: "project", projectId: id },
     { kind: "terminal", projectId: id, checkoutId: id, requestId: id },
-    { kind: "tunnel-http", projectId: id, requestId: id },
-    { kind: "tunnel-ws", projectId: id, wsId: id },
+    { kind: "tunnel-tcp", projectId: id, connId: id },
   ];
   for (const sample of samples) {
     expect(StreamOpen.safeParse(sample).success).toBe(true);
@@ -170,8 +163,7 @@ describe("encodeStreamOpen / decodeStreamOpen", () => {
       { kind: "project", projectId: "proj-1" },
       { kind: "terminal", projectId: "proj-1", requestId: "req-1" },
       { kind: "terminal", projectId: "proj-1", checkoutId: "chk-1", requestId: "req-1" },
-      { kind: "tunnel-http", projectId: "proj-1", requestId: "req-1" },
-      { kind: "tunnel-ws", projectId: "proj-1", wsId: "ws-1" },
+      { kind: "tunnel-tcp", projectId: "proj-1", connId: "conn-1" },
       { kind: "upload", projectId: "proj-1", requestId: "req-1", fileName: "notes.txt", size: 12 },
       { kind: "upload", projectId: "proj-1", checkoutId: "chk-1", requestId: "req-1", fileName: "notes.txt", mimeType: "text/plain", size: 0 },
     ];
@@ -220,56 +212,8 @@ test("terminal record caps are exported from the package root as 16384 and 20971
   expect(STREAM_TERMINAL_BRIDGE_RECORD_MAX_BYTES).toBe(2_097_152);
 });
 
-test("tunnel record caps are exported from the package root", () => {
-  expect(STREAM_TUNNEL_DATA_MAX_BYTES).toBe(1_048_576);
-  expect(STREAM_TUNNEL_RECORD_MAX_BYTES).toBe(STREAM_TUNNEL_DATA_MAX_BYTES + 1);
-  expect(STREAM_TUNNEL_REQUEST_BODY_MAX_BYTES).toBe(MAX_TRANSFER_BYTES);
-});
-
-describe("encodeTunnelDataRecord / decodeTunnelRecord (WS tags only, bodies are raw)", () => {
-  const tags = [TUNNEL_RECORD_TAG_WS_TEXT, TUNNEL_RECORD_TAG_WS_BINARY] as const;
-
-  test("round-trips every remaining tag, including a zero-length payload", () => {
-    for (const tag of tags) {
-      for (const payload of [new Uint8Array(0), new Uint8Array([1, 2, 3, 4])]) {
-        const record = encodeTunnelDataRecord(tag, payload);
-        const decoded = decodeTunnelRecord(record);
-        expect(decoded).toEqual({ kind: "data", tag, payload });
-      }
-    }
-  });
-
-  test("a 0x7B-led record decodes as JSON, never as tagged data, even though 0x7B is not a data tag", () => {
-    const json = JSON.stringify({ type: "tunnel:http-head", requestId: "r1" });
-    const bytes = new TextEncoder().encode(json);
-    expect(bytes[0]).toBe(0x7b);
-    expect(decodeTunnelRecord(bytes)).toEqual({ kind: "json", text: json });
-  });
-
-  // A tunnel-http body is raw, so its first byte may be anything: no tag
-  // below the WS range may decode as a record.
-  test("0x00 and 0x01 are unknown tags: a raw body byte can never be mistaken for a control record", () => {
-    expect(decodeTunnelRecord(new Uint8Array([0x00, 1, 2, 3]))).toBeNull();
-    expect(decodeTunnelRecord(new Uint8Array([0x01, 1, 2, 3]))).toBeNull();
-  });
-
-  test("decodeTunnelRecord returns null for an empty record, an unrecognized tag, and undecodable JSON", () => {
-    expect(decodeTunnelRecord(new Uint8Array(0))).toBeNull();
-    expect(decodeTunnelRecord(new Uint8Array([0x04]))).toBeNull(); // no tag is assigned to 0x04
-    expect(decodeTunnelRecord(new Uint8Array([0x7b, 0xff, 0xfe]))).toBeNull(); // "{" but not valid UTF-8 JSON
-  });
-
-  test("encodeTunnelDataRecord throws RangeError on an unknown tag (including the deleted body tags) or a payload over the cap", () => {
-    expect(() => encodeTunnelDataRecord(0x00 as never, new Uint8Array(0))).toThrow(RangeError);
-    expect(() => encodeTunnelDataRecord(0x01 as never, new Uint8Array(0))).toThrow(RangeError);
-    expect(() =>
-      encodeTunnelDataRecord(TUNNEL_RECORD_TAG_WS_BINARY, new Uint8Array(STREAM_TUNNEL_DATA_MAX_BYTES + 1)),
-    ).toThrow(RangeError);
-    // Exactly at the cap must still succeed.
-    expect(() =>
-      encodeTunnelDataRecord(TUNNEL_RECORD_TAG_WS_BINARY, new Uint8Array(STREAM_TUNNEL_DATA_MAX_BYTES)),
-    ).not.toThrow();
-  });
+test("the TCP tunnel's framed prefix is capped at 4096 bytes", () => {
+  expect(STREAM_TUNNEL_TCP_RECORD_MAX_BYTES).toBe(4096);
 });
 
 test("project caps are asymmetric: the app's read/send cap is 1_500_000, the bridge's is MAX_TRANSFER_BYTES", () => {
