@@ -367,28 +367,35 @@ void main() {
       expect(paths, isEmpty);
     });
 
-    testWidgets('iOS offers no Google sign-in', (tester) async {
+    testWidgets('iOS offers no OAuth sign-in', (tester) async {
       await _pumpScreen(tester);
 
-      expect(find.text('GitHub'), findsOneWidget);
+      expect(find.text('GitHub'), findsNothing);
       expect(find.text('Google'), findsNothing);
       expect(find.text('Password'), findsOneWidget);
     }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
-    testWidgets('on iOS a remembered Google hint falls through to the link', (
-      tester,
-    ) async {
-      final store = _FakeAuthMethodStore({
-        'user@example.com': AuthMethod.google,
-      });
-      final paths = await _pumpScreen(tester, store: store);
+    for (final hint in [AuthMethod.github, AuthMethod.google]) {
+      testWidgets('on iOS a remembered ${hint.name} hint falls through to the '
+          'link', (tester) async {
+        final launched = <Uri>[];
+        final store = _FakeAuthMethodStore({'user@example.com': hint});
+        final paths = await _pumpScreen(
+          tester,
+          store: store,
+          launchUrl: (url) async {
+            launched.add(url);
+            return false;
+          },
+        );
 
-      await _continueWith(tester, 'user@example.com');
+        await _continueWith(tester, 'user@example.com');
 
-      expect(find.text('Could not open the browser'), findsNothing);
-      expect(paths, contains(_startPath));
-      expect(store.memory['user@example.com'], AuthMethod.link);
-    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+        expect(launched, isEmpty);
+        expect(paths, contains(_startPath));
+        expect(store.memory['user@example.com'], AuthMethod.link);
+      }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+    }
 
     testWidgets('off iOS a remembered Google hint starts Google', (
       tester,
