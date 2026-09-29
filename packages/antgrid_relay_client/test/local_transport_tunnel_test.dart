@@ -1,11 +1,12 @@
 // Loopback never tunnels. `LocalTransport` declares no
-// `openTunnelHttp`/`openTunnelWs` override, so both inherit
-// `BufferedAgentTransport`'s NOT_SUPPORTED stub — this pins that neither call
+// `openTunnelTcp` override, so it inherits
+// `BufferedAgentTransport`'s NOT_SUPPORTED stub — this pins that the call never
 // writes anything to the local socket. Server fixture modeled on
 // `local_transport_terminal_attachment_test.dart`'s `_EchoServer`.
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:test/test.dart';
@@ -67,42 +68,19 @@ void main() {
     await server.close();
   });
 
-  test('openTunnelHttp fails NOT_SUPPORTED and writes nothing to the socket', () async {
-    final exchange = transport.openTunnelHttp(
-      requestId: 'r1',
-      checkoutId: 'main',
-      head: const {'type': 'tunnel:http-request'},
-      bodyLength: 0,
-    );
+  test('openTunnelTcp fails NOT_SUPPORTED and writes nothing to the socket', () async {
+    final channel = transport.openTunnelTcp(connId: 'c1', port: 3000);
 
     await expectLater(
-      exchange.head,
+      channel.ready,
       throwsA(
         isA<TunnelExchangeFailure>().having((e) => e.code, 'code', 'NOT_SUPPORTED'),
       ),
     );
-    await expectLater(
-      exchange.body,
-      emitsError(
-        isA<TunnelExchangeFailure>().having((e) => e.code, 'code', 'NOT_SUPPORTED'),
-      ),
-    );
-
-    await Future<void>.delayed(const Duration(milliseconds: 20));
-    expect(server.received, isEmpty);
-  });
-
-  test('openTunnelWs fails NOT_SUPPORTED and writes nothing to the socket', () async {
-    final channel = transport.openTunnelWs(
-      tunnelId: 'ws1',
-      checkoutId: 'main',
-      open: const {'type': 'tunnel:ws-open'},
-    );
-
-    final end = await channel.done;
-    expect(end, isA<TunnelWsFailed>());
-    expect((end as TunnelWsFailed).failure.code, 'NOT_SUPPORTED');
-    expect(await channel.frames.isEmpty, isTrue);
+    expect(await channel.incoming.isEmpty, isTrue);
+    expect(await channel.send(Uint8List.fromList([1])), isFalse);
+    await channel.finish();
+    channel.abort();
 
     await Future<void>.delayed(const Duration(milliseconds: 20));
     expect(server.received, isEmpty);

@@ -26,15 +26,10 @@ StreamOpen _openFrom(Map<String, dynamic> json) {
         requestId: json['requestId'] as String,
         checkoutId: json['checkoutId'] as String?,
       );
-    case 'tunnel-http':
-      return TunnelHttpStreamOpen(
+    case 'tunnel-tcp':
+      return TunnelTcpStreamOpen(
         projectId: json['projectId'] as String,
-        requestId: json['requestId'] as String,
-      );
-    case 'tunnel-ws':
-      return TunnelWsStreamOpen(
-        projectId: json['projectId'] as String,
-        wsId: json['wsId'] as String,
+        connId: json['connId'] as String,
       );
     case 'upload':
       return UploadStreamOpen(
@@ -142,13 +137,8 @@ void main() {
     expect(kStreamTerminalAppRecordMaxBytes, terminalRecords['appMaxRecordBytes']);
     expect(kStreamTerminalBridgeRecordMaxBytes, terminalRecords['bridgeMaxRecordBytes']);
     final tunnelRecords = _map(streamOpen['tunnelRecords']);
-    expect(kStreamTunnelDataMaxBytes, tunnelRecords['maxDataBytes']);
-    expect(kStreamTunnelRecordMaxBytes, tunnelRecords['maxRecordBytes']);
-    expect(kStreamTunnelRequestBodyMaxBytes, tunnelRecords['requestBodyMaxBytes']);
-    final tags = _map(tunnelRecords['tags']);
-    expect(kTunnelRecordTagWsText, tags['wsText']);
-    expect(kTunnelRecordTagWsBinary, tags['wsBinary']);
-    expect(tags.keys, unorderedEquals(['wsText', 'wsBinary']));
+    expect(kStreamTunnelTcpRecordMaxBytes, tunnelRecords['maxRecordBytes']);
+    expect(tunnelRecords.keys, unorderedEquals(['maxRecordBytes']));
   });
 
   test('Dart encodes every stream-open kind golden vector', () {
@@ -159,8 +149,7 @@ void main() {
       'project',
       'terminal',
       'terminal-with-checkout',
-      'tunnel-http',
-      'tunnel-ws',
+      'tunnel-tcp',
       'upload',
       'upload-with-checkout-and-mime',
     ]);

@@ -67,7 +67,7 @@ abstract class AgentTransport {
   TransportState get currentState;
 
   /// `true` when the agent runs on the same host as this app. Lets services
-  /// skip relay-only machinery (e.g. PreviewProxyServer) when localhost ports
+  /// skip relay-only machinery (e.g. PreviewPortForwarder) when localhost ports
   /// are directly reachable.
   bool get isLocal;
 
@@ -75,7 +75,7 @@ abstract class AgentTransport {
   Future<void> connect();
 
   /// Send a JSON-encodable message on the named channel.
-  /// Defaults to `control`; preview/HTTP-tunnel callers pass `preview`.
+  /// Defaults to `control`.
   ///
   /// Completes when the message has been handed to the socket, or dropped —
   /// never when a peer has received it. A relay transport writes it behind
@@ -150,31 +150,19 @@ abstract class AgentTransport {
     required Map<String, dynamic> subscribe,
   });
 
-  /// Opens one HTTP tunnel exchange. Returns synchronously; never throws —
-  /// every failure (refusal, a local open error, `NOT_SUPPORTED` on a
-  /// transport with no stream-backed implementation) is reported through the
-  /// returned exchange's `head`/`body`.
+  /// Opens one forwarded TCP connection to [port] on the agent's loopback.
+  /// Returns synchronously; never throws — every failure (refusal, a local
+  /// open error, `NOT_SUPPORTED` on a transport with no stream-backed
+  /// implementation) is reported through the returned channel's `ready`.
   ///
-  /// [head] is the `tunnel:http-request` head, with `type` and [requestId]
-  /// already set. The transport stamps [bodyLength] and [checkoutId] onto it
-  /// itself. [body] is null iff `bodyLength == 0`.
-  TunnelHttpExchange openTunnelHttp({
-    required String requestId,
-    required String checkoutId,
-    required Map<String, dynamic> head,
-    required int bodyLength,
-    Stream<List<int>>? body,
-  });
-
-  /// Opens one WebSocket tunnel channel. Returns synchronously; never throws
-  /// — see [openTunnelHttp].
-  ///
-  /// [open] is the `tunnel:ws-open` head; the transport stamps `tunnelId`
-  /// and [checkoutId] onto it itself.
-  TunnelWsChannel openTunnelWs({
-    required String tunnelId,
-    required String checkoutId,
-    required Map<String, dynamic> open,
+  /// [probe] asks the bridge only to check reachability and whether the port
+  /// speaks TLS: `ready` reports `tls` and the stream then ends with nothing
+  /// piped.
+  TunnelTcpChannel openTunnelTcp({
+    required String connId,
+    required int port,
+    String checkoutId = 'main',
+    bool probe = false,
   });
 
   /// Opens one file upload. Returns synchronously; never throws — every
