@@ -327,7 +327,9 @@ const CODEX_INJECTION_WIN32: string[] = [
   "-c",
   'hooks.SessionStart=[{hooks=[{type="command",command="& \\"/opt/antgrid/antgrid-bridge\\" \\"hook\\" \\"codex\\" \\"session-start\\""}]}]',
   "-c",
-  "hooks.state={'C:\\<session-flags>\\config.toml:stop:0:0'={trusted_hash=\"sha256:1d7caa27559a541b2c55656844ac9e3586b9d87f70873f623bb3b93bde490e94\"},'C:\\<session-flags>\\config.toml:session_start:0:0'={trusted_hash=\"sha256:61c27f2f55cc14d58631afd9d17d783e02066f5a4251859af01ff1779b5d21b3\"}}",
+  'hooks.PostToolUse=[{hooks=[{type="command",command="& \\"/opt/antgrid/antgrid-bridge\\" \\"hook\\" \\"codex\\" \\"post-tool-use\\""}]}]',
+  "-c",
+  "hooks.state={'C:\\<session-flags>\\config.toml:stop:0:0'={trusted_hash=\"sha256:1d7caa27559a541b2c55656844ac9e3586b9d87f70873f623bb3b93bde490e94\"},'C:\\<session-flags>\\config.toml:session_start:0:0'={trusted_hash=\"sha256:61c27f2f55cc14d58631afd9d17d783e02066f5a4251859af01ff1779b5d21b3\"},'C:\\<session-flags>\\config.toml:post_tool_use:0:0'={trusted_hash=\"sha256:5ee23c6ace979a23712a5b3c2ca3e3edf0d87975c9823116b5fd200f5d6dc1f5\"}}",
 ];
 
 const CODEX_INJECTION_POSIX: string[] = [
@@ -336,7 +338,9 @@ const CODEX_INJECTION_POSIX: string[] = [
   "-c",
   `hooks.SessionStart=[{hooks=[{type="command",command="'/opt/antgrid/antgrid-bridge' 'hook' 'codex' 'session-start'"}]}]`,
   "-c",
-  `hooks.state={'/<session-flags>/config.toml:stop:0:0'={trusted_hash="sha256:d14f3ab0bb0201bcccdc987a0cbbf4418627d4f2bd725ed8be61ec81c8c65e9e"},'/<session-flags>/config.toml:session_start:0:0'={trusted_hash="sha256:ec29560fd4a6819f16dd77fe0e7a9d0507e66d8188c269e9fe6b70a64a070f3f"}}`,
+  `hooks.PostToolUse=[{hooks=[{type="command",command="'/opt/antgrid/antgrid-bridge' 'hook' 'codex' 'post-tool-use'"}]}]`,
+  "-c",
+  `hooks.state={'/<session-flags>/config.toml:stop:0:0'={trusted_hash="sha256:d14f3ab0bb0201bcccdc987a0cbbf4418627d4f2bd725ed8be61ec81c8c65e9e"},'/<session-flags>/config.toml:session_start:0:0'={trusted_hash="sha256:ec29560fd4a6819f16dd77fe0e7a9d0507e66d8188c269e9fe6b70a64a070f3f"},'/<session-flags>/config.toml:post_tool_use:0:0'={trusted_hash="sha256:83edf9d0c13f3d373af9589462c6d02caf3ce63cb495d46c7283765f5a985a0d"}}`,
 ];
 
 const CODEX_INJECTION = WIN ? CODEX_INJECTION_WIN32 : CODEX_INJECTION_POSIX;
@@ -365,7 +369,7 @@ describe("codex hook trust", () => {
   test("the -c hooks.state string is byte-for-byte stable", () => {
     const args = augmentAgentLaunch("codex", { abDir: tmp("ab-spec-"), cursorDir: tmp("ab-cursor-"), self: BRIDGE_SELF }).args;
     const state = args.find((a) => a.startsWith("hooks.state="));
-    expect(state).toBe(CODEX_INJECTION[5]);
+    expect(state).toBe(CODEX_INJECTION[CODEX_INJECTION.length - 1]);
   });
 
   test("the hook defs and their order are byte-for-byte stable", () => {
@@ -535,7 +539,10 @@ describe("materialized files", () => {
           StopFailure: [{ hooks: [hook("stop-failure")] }],
           Notification: [{ matcher: "permission_prompt|idle_prompt|elicitation_dialog|elicitation_url_dialog", hooks: [hook("notification")] }],
           PreToolUse: [{ matcher: "AskUserQuestion", hooks: [hook("question")] }],
-          PostToolUse: [{ matcher: "AskUserQuestion", hooks: [hook("question-answered")] }],
+          PostToolUse: [
+            { matcher: "AskUserQuestion", hooks: [hook("question-answered")] },
+            { matcher: "", hooks: [{ ...hook("tool-done"), async: true }] },
+          ],
           PostToolUseFailure: [{ matcher: "AskUserQuestion", hooks: [hook("question-answered")] }],
           UserPromptSubmit: [{ hooks: [hook("user-prompt")] }],
         },
@@ -821,6 +828,11 @@ describe("hook posts", () => {
     test("an event outside the allowlist posts nothing", async () => {
       expect(await hookPosts({ agent: name, event: "agent-stop", stdin: "{}" })).toEqual([]);
     });
+
+    test("tool-done posts /turn-activity", async () => {
+      const posts = await hookPosts({ agent: name, event: "tool-done", stdin: JSON.stringify({ session_id: "s1" }) });
+      expect(posts).toEqual([{ port: PORT, path: "/turn-activity", body: { terminalId: TERM } }]);
+    });
   });
 
   describe("codex (hook name: codex)", () => {
@@ -892,6 +904,12 @@ describe("hook posts", () => {
           env: { ANTGRID_TERMINAL_ID: undefined },
         }),
       ).toEqual([]);
+    });
+
+    test("post-tool-use posts /turn-activity", async () => {
+      expect(await hookPosts({ agent: name, event: "post-tool-use", stdin: "{}" })).toEqual([
+        { port: PORT, path: "/turn-activity", body: { terminalId: TERM } },
+      ]);
     });
   });
 

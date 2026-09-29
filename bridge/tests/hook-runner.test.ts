@@ -599,6 +599,37 @@ describe("Claude hooks", () => {
       "permission_prompt|idle_prompt|elicitation_dialog|elicitation_url_dialog",
     );
   });
+
+  test("PostToolUse carries both the AskUserQuestion group and an async catch-all, and only the catch-all is async", () => {
+    // The catch-all re-asserts a status the turn already has, so it may run
+    // off the critical path; the AskUserQuestion pair orders against the
+    // Notification Claude schedules afterward and must stay synchronous.
+    const abDir = mkdtempSync(join(tmpdir(), "ab-hookrunner-"));
+    pluginDirs.push(abDir);
+    const a = augmentAgentLaunch("claude-code", {
+      abDir,
+      self: { compiled: true, binary: "C:\\Program Files\\Antgrid\\antgrid-bridge.exe" },
+    });
+    const hooks = JSON.parse(readFileSync(join(a.args[1]!, "hooks", "hooks.json"), "utf8"));
+    const groups = hooks.hooks.PostToolUse;
+    expect(groups).toHaveLength(2);
+    expect(groups[0].matcher).toBe("AskUserQuestion");
+    expect(groups[0].hooks[0].async).toBeUndefined();
+    expect(groups[1].matcher).toBe("");
+    expect(groups[1].hooks[0].async).toBe(true);
+  });
+
+  test("tool-done posts /turn-activity", async () => {
+    const h = harness({
+      agent: "claude",
+      event: "tool-done",
+      stdin: JSON.stringify({ session_id: "s1" }),
+    });
+    await h.run();
+    expect(h.posts).toEqual([
+      { port: 43123, path: "/turn-activity", body: { terminalId: "term-1" } },
+    ]);
+  });
 });
 
 describe("Codex hooks", () => {
@@ -695,6 +726,20 @@ describe("Codex hooks", () => {
       type: "task_complete",
       terminalId: "term-1",
     });
+  });
+
+  test("post-tool-use posts /turn-activity", async () => {
+    const h = harness({ agent: "codex", event: "post-tool-use", stdin: "{}" });
+    await h.run();
+    expect(h.posts).toEqual([
+      { port: 43123, path: "/turn-activity", body: { terminalId: "term-1" } },
+    ]);
+  });
+
+  test("post-tool-use posts nothing without a terminal id", async () => {
+    const h = harness({ agent: "codex", event: "post-tool-use", stdin: "{}", env: { ANTGRID_TERMINAL_ID: undefined } });
+    await h.run();
+    expect(h.posts).toEqual([]);
   });
 });
 

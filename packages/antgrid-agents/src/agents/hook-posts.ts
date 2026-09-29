@@ -9,6 +9,7 @@ export type HookPath =
   | "/notify"
   | "/handler-event"
   | "/turn-start"
+  | "/turn-activity"
   | "/hook-alive";
 
 export interface HookPost {

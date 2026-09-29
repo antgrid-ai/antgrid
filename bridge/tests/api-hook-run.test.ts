@@ -19,6 +19,7 @@ test("all hook channels discard old and unversioned posts after a run replacemen
     onSessionTitle: (body) => { seen.push(body); },
     onHandlerEvent: (body) => { seen.push(body); },
     onTurnStart: (id) => { seen.push(id); },
+    onTurnActivity: (id) => { seen.push(id); },
     onHookAlive: (id) => { seen.push(id); },
   });
   const routes = [
@@ -26,6 +27,7 @@ test("all hook channels discard old and unversioned posts after a run replacemen
     ["/session-title", { sessionId: "native" }],
     ["/handler-event", { event: "turn_end" }],
     ["/turn-start", {}],
+    ["/turn-activity", {}],
     ["/hook-alive", {}],
   ] as const;
   try {

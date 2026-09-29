@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { answerRequest, attentionEdges, becameDeliverable, busDeliverable, clientFocusState, clientGone, closeTurn, hookTurnEnd, initialWorkStatus, isStaleIdleNudge, noteHookChannelLost, noteHookChannelRestored, openedTurns, reduceWorkStatus, sessionFocus, turnOpenFor, turnStart, UNATTRIBUTED_TURN, userReply, type WorkStatusState } from "../src/work-status";
+import { answerRequest, attentionEdges, becameDeliverable, busDeliverable, clientFocusState, clientGone, closeTurn, hookTurnEnd, initialWorkStatus, isStaleIdleNudge, noteHookChannelLost, noteHookChannelRestored, openedTurns, reduceWorkStatus, sessionFocus, turnActivity, turnOpenFor, turnStart, UNATTRIBUTED_TURN, userReply, type WorkStatusState } from "../src/work-status";
 import type { InboundSource } from "../src/message-bus";
 
 /** The two client classes the read state distinguishes: the phone reaches a core
@@ -393,6 +393,82 @@ test("an unattributed notification is cleared by any turn-start", () => {
   const blocked = fold([sessions(2), push("permission_request")]);
   expect(blocked.status).toBe("attention");
   expect(reduceWorkStatus(blocked, turnStartFrame("r1")).status).toBe("working");
+});
+
+test("turn-activity does not reopen a turn its own task_complete already closed (SAME object)", () => {
+  // The catch-all is async and can race behind the REAL last Stop of a turn,
+  // with no further tool call coming to close what it would reopen — the agent
+  // has stopped, and only a fresh prompt starts it again. Reopening here would
+  // also delete the task_complete record isStaleIdleNudge depends on.
+  const done = fold([sessions(1), turnStartFrame("r0"), push("task_complete", "r0")]);
+  expect(done.status).toBe("done");
+  const after = turnActivity(done, "r0");
+  expect(after).toBe(done);
+  expect(isStaleIdleNudge(after, "r0")).toBe(true);
+});
+
+test("a late tool-done after task_complete leaves the post-completion nudge suppressed", () => {
+  const done = fold([sessions(1), turnStartFrame("r0"), push("task_complete", "r0")]);
+  const after = turnActivity(done, "r0");
+  // The generic idle nudge and a genuine mid-turn block share one hook message
+  // — isStaleIdleNudge is what tells them apart, so it must survive the race.
+  const nudged = reduceWorkStatus(after, push("awaiting_input", "r0"));
+  expect(nudged.status).toBe("done");
+});
+
+test("turn-activity on an open turn with a pending question is a no-op (SAME object)", () => {
+  // The AskUserQuestion tool fires its own synchronous hook AND the catch-all
+  // this reducer answers to — the second must never clear the question the
+  // first just opened.
+  const asked = fold([sessions(1), turnStartFrame("r0"), question("r0")]);
+  expect(asked.status).toBe("attention");
+  expect(turnActivity(asked, "r0")).toBe(asked);
+});
+
+test("turn-activity leaves an own permission_request untouched", () => {
+  const blocked = fold([sessions(1), turnStartFrame("r0"), push("permission_request", "r0")]);
+  expect(blocked.status).toBe("attention");
+  expect(turnActivity(blocked, "r0")).toBe(blocked);
+});
+
+test("turn-activity on a not-yet-listed session is held, then promoted", () => {
+  const held = turnActivity(initialWorkStatus, "r0");
+  expect(held.status).toBe("done");
+  expect(held.pendingTurns.has("r0")).toBe(true);
+  const promoted = reduceWorkStatus(held, sessions(1));
+  expect(promoted.status).toBe("working");
+  expect(promoted.pendingTurns.size).toBe(0);
+});
+
+test("turn-activity leaves an unattributed task_complete standing and keeps an unattributed awaiting_input", () => {
+  // Same race as the attributed case: a config-terminal's unattributed
+  // task_complete is that project-wide slot's own word that it is done, and a
+  // sibling session's tool-done must not undo it on nothing else's behalf.
+  const doneAnon = fold([sessions(1), turnStartFrame("r0"), push("task_complete")]);
+  expect(doneAnon.status).toBe("done");
+  expect(turnActivity(doneAnon, "r0")).toBe(doneAnon);
+
+  const waitingAnon = fold([sessions(1), turnStartFrame("r0"), push("awaiting_input")]);
+  expect(waitingAnon.status).toBe("attention");
+  const after = turnActivity(waitingAnon, "r0");
+  expect(after.notifications.get(UNATTRIBUTED_TURN)).toBe("awaiting_input");
+  expect(after.status).toBe("attention");
+});
+
+test("turn-activity does not reopen a turn a StopFailure already ended in error (SAME object)", () => {
+  // No answer is coming to lift an `error` — the agent is stopped — so
+  // reopening the turn here would only flip busDeliverable false and confirm a
+  // session-bus line against a turn nobody is reading, with nothing left to
+  // close it again.
+  const errored = fold([sessions(1), turnStartFrame("r0"), push("error", "r0")]);
+  expect(errored.status).toBe("error");
+  expect(busDeliverable(errored, "r0")).toBe(true);
+  const after = turnActivity(errored, "r0");
+  expect(after).toBe(errored);
+  expect(after.notifications.get("r0")).toBe("error");
+  expect(after.status).toBe("error");
+  expect(busDeliverable(after, "r0")).toBe(true);
+  expect(openedTurns(errored, after)).toEqual([]);
 });
 
 test("a count change with an unchanged status yields a NEW state (advert re-push trigger)", () => {

@@ -417,6 +417,13 @@ export interface BuildAgentCoreOptions {
    *  on a fresh turn. Bridge-internal — never surfaces to the app.
    *  [sessionId] is the session the hook fired for, when it carried one. */
   onTurnStart?: (sessionId?: string) => void;
+  /** Fired when a per-tool-call hook pings the api-server (`POST /turn-activity`)
+   *  — a catch-all "the agent is still here" signal, not a turn boundary. Unlike
+   *  {@link onTurnStart} it must never clear a pending request or a
+   *  call-to-action notification (see {@link turnActivity} in work-status.ts).
+   *  Bridge-internal — never surfaces to the app. [sessionId] is the session the
+   *  hook fired for, when it carried one. */
+  onTurnActivity?: (sessionId?: string) => void;
   /** Fired when the user types into [sessionId]'s PTY, so the owning ProjectCore
    *  can clear a block the hook reported. Bridge-internal, and NOT a turn-start
    *  on its own: typing in an idle session is not work. `submitted` (the input
@@ -5025,6 +5032,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     onTurnStart: (terminalId) => {
       if (terminalId) openAgentPrompts.clear(terminalId);
       opts.onTurnStart?.(terminalId);
+    },
+    // Deliberately does not touch openAgentPrompts: a sibling tool completing
+    // must not clear a pending AskUserQuestion's open-prompt latch the way a
+    // real new turn does above.
+    onTurnActivity: (terminalId) => {
+      opts.onTurnActivity?.(terminalId);
     },
     isStaleIdleNudge: (terminalId) => opts.isStaleIdleNudge?.(terminalId) ?? false,
     hasOpenAgentPrompt: (terminalId, promptTool) => openAgentPrompts.has(terminalId, promptTool),

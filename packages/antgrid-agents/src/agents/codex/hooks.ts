@@ -35,6 +35,17 @@ export function buildCodexNotifyInjection(
   const events: Array<{ event: string; label: string; commandEvent: string }> = [
     { event: "Stop", label: EVENT_LABELS.Stop, commandEvent: "stop" },
     { event: "SessionStart", label: EVENT_LABELS.SessionStart, commandEvent: "session-start" },
+    // Codex has no pre-turn hook, so nothing re-asserts "working" mid-turn
+    // without this — the Claude side's catch-all PostToolUse has the same job.
+    // Registered synchronous (no `async=true`, unlike the Claude side): codex's
+    // hook_config.rs support for that field on a command handler is unconfirmed
+    // against the pinned version, and a wrong guess there breaks trusted_hash
+    // silently (see the fingerprint comment above) rather than merely costing
+    // CPU. The per-tool-call hook-spawn cost this accepts on every Codex tool
+    // call is therefore unmeasured against a live session — confirm codex runs
+    // this off the critical path, or measure it, before relying on the
+    // Claude-side cost argument covering this agent too.
+    { event: "PostToolUse", label: EVENT_LABELS.PostToolUse, commandEvent: "post-tool-use" },
   ];
   const stateEntries = events
     .map(({ label, commandEvent }) => {
@@ -85,7 +96,7 @@ const CodexStopPayloadSchema = z.object({
   last_assistant_message: z.string().nullish(),
 });
 
-export const events = ["after-agent", "permission-request", "stop", "session-start"] as const;
+export const events = ["after-agent", "permission-request", "stop", "session-start", "post-tool-use"] as const;
 
 // Two closers, not one: `after-agent` is the `notify` channel and `stop` is the
 // Stop command hook, and codex fires them independently.
@@ -94,7 +105,7 @@ export const turnBoundaryEvents = {
   end: ["after-agent", "stop"],
 } as const;
 
-export const posts = ["/session-title", "/handler-event", "/notify", "/hook-alive"] as const;
+export const posts = ["/session-title", "/handler-event", "/notify", "/hook-alive", "/turn-activity"] as const;
 export const observation = { notifications: true, titles: true, handler: true, turnStart: false, turnEnd: true, hookAlive: true } as const;
 
 export async function toPosts(
@@ -119,6 +130,11 @@ export async function toPosts(
     if (invocation.event === "permission-request") {
       // Older running terminals may still invoke the pre-review hook.
       return [];
+    } else if (invocation.event === "post-tool-use") {
+      // Codex has no turn-start hook, so this is what re-asserts "working"
+      // between the notify channel's turn-end posts rather than leaving a
+      // multi-tool turn reading stale until the next one.
+      if (terminalId) posts.push({ port, path: "/turn-activity", body: { terminalId } });
     } else if (invocation.event === "stop") {
       // Parse failures fall through to a bare notify rather than returning:
       // a turn-end notification must survive a payload we can't read.

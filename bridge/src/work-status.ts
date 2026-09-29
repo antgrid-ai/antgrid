@@ -511,6 +511,65 @@ export function turnStart(
   }, prev);
 }
 
+/** A tool call completed on [sessionId] — a catch-all "the agent is still
+ *  here" signal fired after every tool use, not just at turn boundaries.
+ *  Re-opens the turn if a Stop hook closed it early (an agent whose own tools
+ *  keep firing cannot really be idle), and never clears a live block.
+ *
+ *  Deliberately not {@link turnStart}: that clears pendingRequests and every
+ *  call-to-action notification, which is right for an actual new turn but
+ *  wrong here — a sibling tool call finishing while the SAME turn is waiting
+ *  on a question or a permission prompt must not make that block disappear
+ *  out from under the user.
+ *
+ *  A session's own turn-end notification ({@link endsTurn}) — or the
+ *  unattributed fallback it may be reading — is left standing rather than
+ *  reopened under it. This signal is `async` and races the hook that actually
+ *  ends a turn, so it can arrive after the REAL last Stop of a turn, with no
+ *  further tool call coming to close what it would reopen: the agent has
+ *  stopped, and the only thing that reopens its turn from here is the user
+ *  prompting again. Reopening anyway would flip `busDeliverable` false on a
+ *  session no answer is coming to unblock (`error`), or defeat
+ *  {@link isStaleIdleNudge} by deleting the very `task_complete` record that
+ *  suppresses the next post-completion nudge. Recording is left untouched so
+ *  that suppression keeps working. The turn a genuinely early Stop closed is
+ *  still repaired: the keystroke-driven {@link closeTurn} (an Esc) clears
+ *  notifications on its way out, so a tool-done racing THAT still finds
+ *  nothing recorded and reopens normally.
+ *
+ *  The not-yet-listed hold mirrors {@link turnStart}'s, for the same race — a
+ *  tool-completion hook can beat the session's first `session:updated` just
+ *  as a turn-start can, and {@link foldSessions} promotes both holds off the
+ *  same set. Unlike turnStart's hold, there is no block to clear on the way
+ *  in (this signal never carries an answer), so the hold does nothing but
+ *  wait.
+ *
+ *  Pure; SAME object when nothing changes. */
+export function turnActivity(
+  prev: WorkStatusState,
+  sessionId?: string,
+): WorkStatusState {
+  if (sessionId !== undefined && !prev.runningSessions.has(sessionId)) {
+    if (prev.pendingTurns.has(sessionId)) return prev;
+    return build({
+      ...inputsOf(prev),
+      pendingTurns: new Set(prev.pendingTurns).add(sessionId),
+    }, prev);
+  }
+  if (prev.runningSessions.size === 0) return prev;
+  const id = sessionId ?? UNATTRIBUTED_TURN;
+  const alreadyEnded = (n: NotificationType | undefined): boolean => n !== undefined && endsTurn(n);
+  if ((sessionId !== undefined && alreadyEnded(prev.notifications.get(sessionId)))
+    || alreadyEnded(prev.notifications.get(UNATTRIBUTED_TURN))) {
+    return prev;
+  }
+  const activeTurns = prev.activeTurns.has(id)
+    ? prev.activeTurns
+    : new Set(prev.activeTurns).add(id);
+  if (activeTurns === prev.activeTurns) return prev;
+  return build({ ...inputsOf(prev), activeTurns }, prev);
+}
+
 /** The user answered the permission/question [requestId] that [sessionId] was
  *  blocked on (a chat `agent:permission-resolve` / `agent:question-resolve`).
  *

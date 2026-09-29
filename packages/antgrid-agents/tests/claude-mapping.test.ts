@@ -1,6 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import { mapToolKind, mapAssistantContent, mapUsage, mapResultError, addUsage } from "../src/agents/claude-code/mapping";
 import { toPosts } from "../src/agents/claude-code/hooks";
+import { toPosts as codexToPosts } from "../src/agents/codex/hooks";
 
 describe("mapToolKind", () => {
   it("maps known Claude Code tools to toolKinds", () => {
@@ -105,6 +106,39 @@ describe("StopFailure posts (every class ends the turn as error)", () => {
       },
       { port: 43123, path: "/notify", body: { type: "error", terminalId: "term-1" } },
     ]);
+  });
+});
+
+describe("turn-activity re-assert (tool completion between turn-start and turn-end)", () => {
+  it("Claude's catch-all PostToolUse posts /turn-activity with the terminal id", async () => {
+    const posts = await toPosts(
+      { agent: "claude", event: "tool-done" },
+      { port: 43123, terminalId: "term-1", readStdin: async () => JSON.stringify({ session_id: "s1" }) },
+    );
+    expect(posts).toEqual([{ port: 43123, path: "/turn-activity", body: { terminalId: "term-1" } }]);
+  });
+
+  it("Codex's injected PostToolUse posts /turn-activity with the terminal id", async () => {
+    const posts = await codexToPosts(
+      { agent: "codex", event: "post-tool-use" },
+      { port: 43123, terminalId: "term-1", readStdin: async () => "{}" },
+    );
+    expect(posts).toEqual([{ port: 43123, path: "/turn-activity", body: { terminalId: "term-1" } }]);
+  });
+
+  it("neither posts without a terminal id", async () => {
+    expect(
+      await toPosts(
+        { agent: "claude", event: "tool-done" },
+        { port: 43123, terminalId: undefined, readStdin: async () => JSON.stringify({ session_id: "s1" }) },
+      ),
+    ).toEqual([{ port: 43123, path: "/turn-activity", body: {} }]);
+    expect(
+      await codexToPosts(
+        { agent: "codex", event: "post-tool-use" },
+        { port: 43123, terminalId: undefined, readStdin: async () => "{}" },
+      ),
+    ).toEqual([]);
   });
 });
 

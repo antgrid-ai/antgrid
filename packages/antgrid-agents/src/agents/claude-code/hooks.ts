@@ -75,7 +75,15 @@ function materializeClaudePlugin(
       // the permission Notification Claude schedules seconds later — and that
       // ordering is the whole basis for suppressing the second one.
       PreToolUse: [{ matcher: ASK_QUESTION_TOOL, hooks: [claudeHook(command, "question")] }],
-      PostToolUse: [{ matcher: ASK_QUESTION_TOOL, hooks: [claudeHook(command, "question-answered")] }],
+      // A second, catch-all group on the SAME event: Claude runs every matching
+      // group for one tool call, so AskUserQuestion still fires both. This one
+      // is `async` — unlike its sibling above — because it re-asserts a status
+      // the turn already has rather than reporting a fact only a synchronous
+      // hook can order against the Notification Claude schedules afterward.
+      PostToolUse: [
+        { matcher: ASK_QUESTION_TOOL, hooks: [claudeHook(command, "question-answered")] },
+        { matcher: "", hooks: [{ ...claudeHook(command, "tool-done"), async: true }] },
+      ],
       PostToolUseFailure: [{ matcher: ASK_QUESTION_TOOL, hooks: [claudeHook(command, "question-answered")] }],
       // A fresh turn: resets control-plane work status to "working" so a
       // re-prompt of an existing session (the Stop hook already fired
@@ -150,7 +158,7 @@ type ClaudePayload = z.infer<typeof ClaudePayloadSchema>;
 // of one.
 export const events = [
   "session-start", "stop", "stop-failure", "notification", "user-prompt",
-  "question", "question-answered",
+  "question", "question-answered", "tool-done",
 ] as const;
 
 // "stop-failure" is deliberately not an `end`: it posts a turn-end notify only
@@ -160,7 +168,7 @@ export const turnBoundaryEvents = {
   end: ["stop"],
 } as const;
 
-export const posts = ["/session-title", "/turn-start", "/notify", "/handler-event"] as const;
+export const posts = ["/session-title", "/turn-start", "/turn-activity", "/notify", "/handler-event"] as const;
 export const observation = { notifications: true, titles: true, handler: true, turnStart: true, turnEnd: true, hookAlive: false } as const;
 
 // StopFailure reasons no amount of waiting fixes. They take the ordinary
@@ -263,6 +271,17 @@ export async function toPosts(
         ...(input.transcript_path ? { transcriptPath: input.transcript_path } : {}),
       }),
     );
+  }
+  if (invocation.event === "tool-done") {
+    // Every tool completion, not just the one that ends the turn: a sibling
+    // call finishing while the turn is otherwise idle (a background Task,
+    // a slow Bash) is itself evidence the agent is still working, and this is
+    // the only signal that re-asserts it between UserPromptSubmit and Stop.
+    posts.push({
+      port,
+      path: "/turn-activity",
+      body: { ...(terminalId ? { terminalId } : {}) },
+    });
   }
   if (invocation.event === "stop") {
     posts.push({

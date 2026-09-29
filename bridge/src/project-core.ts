@@ -5,7 +5,7 @@ import { LocalListener } from "./local-listener";
 import type { AttachStreamOpts, PeerSessionView, StreamHandle } from "./project-streams";
 import type { AbMessage, SessionEntry, WorkStatus } from "./protocol";
 import type { DeleteSessionOptions } from "./session-manager";
-import { answerRequest, becameDeliverable, busDeliverable, clientFocusState, clientGone, closeTurn, hookTurnEnd, initialWorkStatus, isStaleIdleNudge, noteHookChannelLost, noteHookChannelRestored, openedTurns, reduceWorkStatus, sessionFocus, turnStart, UNATTRIBUTED_TURN, userReply, type WorkStatusState } from "./work-status";
+import { answerRequest, becameDeliverable, busDeliverable, clientFocusState, clientGone, closeTurn, hookTurnEnd, initialWorkStatus, isStaleIdleNudge, noteHookChannelLost, noteHookChannelRestored, openedTurns, reduceWorkStatus, sessionFocus, turnActivity, turnStart, UNATTRIBUTED_TURN, userReply, type WorkStatusState } from "./work-status";
 import { SessionBusDeliveryQueue, type QueuedLine } from "./session-bus/delivery-queue";
 import { logger } from "./logger";
 const log = logger.child({ component: "project-core" });
@@ -275,6 +275,14 @@ export class ProjectCore {
     this.commitWork(turnStart(this._work, sessionId));
   }
 
+  /** A per-tool-call hook re-asserted that [sessionId] is still working. Unlike
+   *  {@link noteTurnStart}, never clears a pending request or a call-to-action
+   *  notification — see {@link turnActivity}. Routed here from the per-core
+   *  api-server via {@link AgentContext.onTurnActivity}. */
+  noteTurnActivity(sessionId?: string): void {
+    this.commitWork(turnActivity(this._work, sessionId));
+  }
+
   /** The user typed into [sessionId]'s PTY — the only "I answered" signal a
    *  terminal-mode session has. Claims a turn only for an agent that cannot
    *  report its own starts, and only for a typed PROMPT. See {@link userReply}. */
@@ -392,6 +400,7 @@ export class ProjectCore {
       agentReachEnabled: this.deps.agentReachEnabled,
       tierClaim: this.deps.tierClaim,
       onTurnStart: (sessionId) => this.noteTurnStart(sessionId),
+      onTurnActivity: (sessionId) => this.noteTurnActivity(sessionId),
       onUserReply: (sessionId, replyOpts) => this.noteUserReply(sessionId, replyOpts),
       onAnswer: (sessionId, requestId) => this.noteAnswer(sessionId, requestId),
       onInterrupt: (sessionId) => this.noteInterrupt(sessionId),
