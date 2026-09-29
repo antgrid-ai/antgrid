@@ -5,12 +5,18 @@ import { LocalListener } from "./local-listener";
 import type { AttachStreamOpts, PeerSessionView, StreamHandle } from "./project-streams";
 import type { AbMessage, SessionEntry, WorkStatus } from "./protocol";
 import type { DeleteSessionOptions } from "./session-manager";
-import { answerRequest, becameDeliverable, busDeliverable, clientFocusState, clientGone, closeInterruptedTurn, hookTurnEnd, initialWorkStatus, isStaleIdleNudge, noteHookChannelLost, noteHookChannelRestored, openedTurns, reduceWorkStatus, sessionFocus, turnActivity, turnOpenFor, turnStart, UNATTRIBUTED_TURN, userReply, type WorkStatusState } from "./work-status";
+import { answerRequest, becameDeliverable, busDeliverable, clientFocusState, clientGone, closeInterruptedTurn, DEFAULT_TURN_IDLE_MS, expireTurns, hookTurnEnd, initialWorkStatus, isStaleIdleNudge, noteHookChannelLost, noteHookChannelRestored, openedTurns, reduceWorkStatus, sessionFocus, turnActivity, turnOpenFor, turnStart, UNATTRIBUTED_TURN, userReply, type WorkStatusState } from "./work-status";
 import { SessionBusDeliveryQueue, type QueuedLine } from "./session-bus/delivery-queue";
 import { logger } from "./logger";
 const log = logger.child({ component: "project-core" });
 import { createPushDispatcher } from "./push/push-dispatcher";
 import { sealPush } from "./push/seal";
+
+/** How often {@link ProjectCore} checks for turns {@link expireTurns} should
+ *  close. Five minutes is coarse enough that the check never shows up as work,
+ *  and precise enough against a 45-minute idle bound that nobody watching the
+ *  dot would notice the difference from an exact deadline. */
+const EXPIRE_CHECK_INTERVAL_MS = 5 * 60_000;
 
 /** Host-level dependencies injected into a remote-mode ProjectCore. In local
  * mode these are unused. The host owns the machine's native peer sessions; a
@@ -97,6 +103,10 @@ export class ProjectCore {
    *  Owned here because the turn-open set it waits on is THIS reduction, and
    *  nothing below the core can see one. */
   private deliveries: SessionBusDeliveryQueue | null = null;
+  /** Periodic {@link expireTurns} sweep — the backstop for a turn nothing else
+   *  closes. Unref'd so it never keeps the process alive on its own; cleared in
+   *  {@link shutdown}. */
+  private expireInterval: ReturnType<typeof setInterval> | null = null;
   private _onWorkStatusChange: (() => void) | null = null;
   private _onSessionsChange: (() => void) | null = null;
   /** Identity signature (id/name/archived, sorted) of the last `session:updated`
@@ -272,7 +282,7 @@ export class ProjectCore {
    *  bus frame — the app must not see it as a notification) and from the inbound
    *  permission/question resolves, via {@link AgentContext.onTurnStart}. */
   noteTurnStart(sessionId?: string): void {
-    this.commitWork(turnStart(this._work, sessionId));
+    this.commitWork(turnStart(this._work, sessionId, undefined, Date.now()));
   }
 
   /** A per-tool-call hook re-asserted that [sessionId] is still working. Unlike
@@ -280,7 +290,7 @@ export class ProjectCore {
    *  notification — see {@link turnActivity}. Routed here from the per-core
    *  api-server via {@link AgentContext.onTurnActivity}. */
   noteTurnActivity(sessionId?: string): void {
-    this.commitWork(turnActivity(this._work, sessionId));
+    this.commitWork(turnActivity(this._work, sessionId, Date.now()));
   }
 
   /** The user typed into [sessionId]'s PTY — the only "I answered" signal a
@@ -290,14 +300,14 @@ export class ProjectCore {
     sessionId: string,
     opts: { submitted: boolean; typed: boolean; command?: boolean },
   ): void {
-    this.commitWork(userReply(this._work, sessionId, opts));
+    this.commitWork(userReply(this._work, sessionId, opts, Date.now()));
   }
 
   /** The user answered the permission/question [requestId] on [sessionId].
    *  Clears that block and resumes the turn, but only if it was pending; see
    *  {@link answerRequest}. */
   noteAnswer(sessionId: string, requestId?: string): void {
-    this.commitWork(answerRequest(this._work, sessionId, requestId));
+    this.commitWork(answerRequest(this._work, sessionId, requestId, Date.now()));
   }
 
   /** [client] is looking at [sessionId] (`session:focus`) — clear its unread
@@ -495,6 +505,15 @@ export class ProjectCore {
     } else {
       await this.startRemote(core, bus);
     }
+    // Bounds a turn nothing else closes (a missed interrupt key, a lost loopback
+    // POST, a bridge restart mid-turn). Committed through the same path as every
+    // other reducer transition, so a real expiry still re-advertises and drains
+    // whatever the delivery queue was holding on it.
+    this.expireInterval = setInterval(
+      () => this.commitWork(expireTurns(this._work, Date.now(), DEFAULT_TURN_IDLE_MS)),
+      EXPIRE_CHECK_INTERVAL_MS,
+    );
+    if (typeof this.expireInterval.unref === "function") this.expireInterval.unref();
   }
 
   /** Binds the loopback listener, sets `_localConnectInfo`, and eagerly primes
@@ -803,6 +822,7 @@ export class ProjectCore {
 
   /** Tear down transport + subsystems. */
   async shutdown(reason?: string): Promise<void> {
+    if (this.expireInterval) { clearInterval(this.expireInterval); this.expireInterval = null; }
     try { this.core?.setPeerSessionProvider(null); } catch {}
     try { this.core?.setTerminalStreamHooks(null); } catch {}
     // Before detaching — deliver() would otherwise hand a frame to a torn-down

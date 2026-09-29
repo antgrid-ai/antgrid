@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { answerRequest, attentionEdges, becameDeliverable, busDeliverable, clientFocusState, clientGone, closeInterruptedTurn, closeTurn, hookTurnEnd, initialWorkStatus, isStaleIdleNudge, noteHookChannelLost, noteHookChannelRestored, openedTurns, reduceWorkStatus, sessionFocus, turnActivity, turnOpenFor, turnStart, UNATTRIBUTED_TURN, userReply, type WorkStatusState } from "../src/work-status";
+import { answerRequest, attentionEdges, becameDeliverable, busDeliverable, clientFocusState, clientGone, closeInterruptedTurn, closeTurn, DEFAULT_TURN_IDLE_MS, expireTurns, hookTurnEnd, initialWorkStatus, isStaleIdleNudge, noteHookChannelLost, noteHookChannelRestored, openedTurns, reduceWorkStatus, sessionFocus, turnActivity, turnOpenFor, turnStart, UNATTRIBUTED_TURN, userReply, type WorkStatusState } from "../src/work-status";
 import type { InboundSource } from "../src/message-bus";
 
 /** The two client classes the read state distinguishes: the phone reaches a core
@@ -1367,4 +1367,112 @@ test("a session still blocked on a second condition is not released", () => {
   const answered = fold([retracted("r0", { permissionId: "p1" })], both);
   expect(busDeliverable(answered, "r0")).toBe(false);
   expect(becameDeliverable(both, answered)).toEqual([]);
+});
+
+// ── expireTurns (staleness decay) ───────────────────────────────────────────
+
+test("expireTurns closes only turns idle longer than the limit", () => {
+  const now = DEFAULT_TURN_IDLE_MS + 10_000;
+  const both = turnStart(turnStart(fold([sessions(2)]), "r0", undefined, 0), "r1", undefined, now - 1_000);
+  const s = expireTurns(both, now, DEFAULT_TURN_IDLE_MS);
+  expect(s.sessionStatuses.get("r0")).toBe("done");
+  expect(s.sessionStatuses.get("r1")).toBe("working");
+});
+
+test("activity refreshes the clock, delaying expiry", () => {
+  const started = turnStart(fold([sessions(1)]), "r0", undefined, 0);
+  const nudged = turnActivity(started, "r0", DEFAULT_TURN_IDLE_MS - 1);
+  const s = expireTurns(nudged, DEFAULT_TURN_IDLE_MS + 1, DEFAULT_TURN_IDLE_MS);
+  expect(s.sessionStatuses.get("r0")).toBe("working");
+});
+
+test("a decayed turn reads done without going unread", () => {
+  const watching = sessionFocus(fold([sessions(2)]), "r1", APP);
+  const started = turnStart(watching, "r0", undefined, 0);
+  const s = expireTurns(started, DEFAULT_TURN_IDLE_MS + 1, DEFAULT_TURN_IDLE_MS);
+  expect(s.sessionStatuses.get("r0")).toBe("done");
+  expect(s.unreadSessions.has("r0")).toBe(false);
+});
+
+test("expireTurns is a no-op (SAME object) when nothing has expired", () => {
+  const started = turnStart(fold([sessions(1)]), "r0", undefined, 0);
+  expect(expireTurns(started, DEFAULT_TURN_IDLE_MS - 1, DEFAULT_TURN_IDLE_MS)).toBe(started);
+  // Never stamped: nothing to measure against, so never expired either.
+  const untimed = turnStart(fold([sessions(1)]), "r0");
+  expect(expireTurns(untimed, DEFAULT_TURN_IDLE_MS + 1, DEFAULT_TURN_IDLE_MS)).toBe(untimed);
+});
+
+test("a pending request or call-to-action is excluded from decay entirely (SAME object)", () => {
+  // Both start from an OPEN, idle-since-0 turn, so expireTurns would have
+  // something to close if it read the turn alone; the block must keep it out
+  // of consideration rather than merely hide the effect of closing it — see
+  // the next test for why "hide the effect" is not enough on its own.
+  const withTurn = turnStart(fold([sessions(1)]), "r0", undefined, 0);
+
+  const blocked = reduceWorkStatus(withTurn, permission("r0"));
+  expect(blocked.activeTurns.has("r0")).toBe(true);
+  expect(blocked.sessionStatuses.get("r0")).toBe("attention");
+  expect(expireTurns(blocked, DEFAULT_TURN_IDLE_MS + 1, DEFAULT_TURN_IDLE_MS)).toBe(blocked);
+
+  const cta = reduceWorkStatus(withTurn, push("awaiting_input", "r0"));
+  expect(cta.activeTurns.has("r0")).toBe(true);
+  expect(cta.sessionStatuses.get("r0")).toBe("attention");
+  expect(expireTurns(cta, DEFAULT_TURN_IDLE_MS + 1, DEFAULT_TURN_IDLE_MS)).toBe(cta);
+});
+
+test("a request answered after a long wait resumes working, not done — decay never touched it", () => {
+  // Regression: a decay that quietly dropped activeTurns underneath a pending
+  // request read "attention" right up until the retraction, at which point
+  // nothing had a turn left to fall back to and the session read "done" (and
+  // went bus-deliverable) while the agent was actually still resuming.
+  const withTurn = turnStart(fold([sessions(1)]), "r0", undefined, 0);
+  const blocked = reduceWorkStatus(withTurn, permission("r0"));
+  const idled = expireTurns(blocked, DEFAULT_TURN_IDLE_MS + 1, DEFAULT_TURN_IDLE_MS);
+  const retracted_ = reduceWorkStatus(idled, retracted("r0", { permissionId: "p1" }));
+  expect(retracted_.sessionStatuses.get("r0")).toBe("working");
+});
+
+test("a keystroke-inferred session (no per-tool activity hook) never decays", () => {
+  // cursor/copilot have no PostToolUse-equivalent to repair a false close, so a
+  // decay here would never self-heal before the turn's real end — see expireTurns.
+  const started = userReply(fold([sessions(1, { tool: "cursor-agent" })]), "r0", { typed: true, submitted: true }, 0);
+  expect(started.sessionStatuses.get("r0")).toBe("working");
+  expect(expireTurns(started, DEFAULT_TURN_IDLE_MS + 1, DEFAULT_TURN_IDLE_MS)).toBe(started);
+});
+
+test("a decayed UNATTRIBUTED turn marks every sibling it was carrying as decayed, not unread", () => {
+  // Regression: the exclusion from deriveUnread's transition scan must reach the
+  // sessions the anonymous turn was holding "working" for, keyed by their own
+  // id — decayed itself only ever holds UNATTRIBUTED_TURN's own empty-string key.
+  const watching = sessionFocus(fold([sessions(2)]), "r1", APP);
+  const started = turnStart(watching, undefined, undefined, 0);
+  expect(started.sessionStatuses.get("r0")).toBe("working");
+  expect(started.sessionStatuses.get("r1")).toBe("working");
+  const s = expireTurns(started, DEFAULT_TURN_IDLE_MS + 1, DEFAULT_TURN_IDLE_MS);
+  expect(s.sessionStatuses.get("r0")).toBe("done");
+  expect(s.sessionStatuses.get("r1")).toBe("done");
+  expect(s.unreadSessions.has("r0")).toBe(false);
+  expect(s.unreadSessions.has("r1")).toBe(false);
+});
+
+test("a turn-start held for a not-yet-listed session carries its clock reading through promotion", () => {
+  // Regression: the held branch of turnStart recorded no clock reading at all,
+  // so a promoted turn had nothing in lastActivityAt and could never expire —
+  // the exact race pendingTurns holds for stayed unbounded forever.
+  const held = turnStart(initialWorkStatus, "r0", undefined, 0);
+  expect(held.pendingTurns.has("r0")).toBe(true);
+  const promoted = fold([sessions(1)], held);
+  expect(promoted.activeTurns.has("r0")).toBe(true);
+  expect(promoted.sessionStatuses.get("r0")).toBe("working");
+  const s = expireTurns(promoted, DEFAULT_TURN_IDLE_MS + 1, DEFAULT_TURN_IDLE_MS);
+  expect(s.sessionStatuses.get("r0")).toBe("done");
+});
+
+test("a turnActivity held for a not-yet-listed session also carries its clock reading through promotion", () => {
+  const held = turnActivity(initialWorkStatus, "r0", 0);
+  expect(held.pendingTurns.has("r0")).toBe(true);
+  const promoted = fold([sessions(1)], held);
+  expect(promoted.activeTurns.has("r0")).toBe(true);
+  const s = expireTurns(promoted, DEFAULT_TURN_IDLE_MS + 1, DEFAULT_TURN_IDLE_MS);
+  expect(s.sessionStatuses.get("r0")).toBe("done");
 });
