@@ -1,6 +1,3 @@
-import 'dart:convert';
-import 'dart:typed_data';
-
 import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/models/preview_models.dart';
 import 'package:antgrid/models/ab_message.dart';
@@ -71,7 +68,7 @@ void main() {
       const tab = PreviewTab(
         port: 3000,
         scheme: 'http',
-        localProxyPort: 3000,
+        localPort: 3000,
         currentUrl: 'http://localhost:3000',
       );
       final updated = state.copyWith(
@@ -109,14 +106,14 @@ void main() {
   });
 
   group('PreviewTab', () {
-    test('copyWith with clearLocalProxyPort resets localProxyPort', () {
+    test('copyWith with clearLocalPort resets localPort', () {
       const tab = PreviewTab(
         port: 3000,
         scheme: 'http',
-        localProxyPort: 8080,
+        localPort: 8080,
       );
-      final cleared = tab.copyWith(clearLocalProxyPort: true);
-      expect(cleared.localProxyPort, isNull);
+      final cleared = tab.copyWith(clearLocalPort: true);
+      expect(cleared.localPort, isNull);
       expect(cleared.port, 3000);
     });
 
@@ -128,46 +125,6 @@ void main() {
       );
       final cleared = tab.copyWith(clearCurrentUrl: true);
       expect(cleared.currentUrl, isNull);
-    });
-  });
-
-  group('TunnelHttpRequest', () {
-    test('holds all fields; toHeadJson carries no body', () {
-      final request = TunnelHttpRequest(
-        requestId: 'req-1',
-        port: 3000,
-        method: 'GET',
-        path: '/index.html',
-        headers: {'accept': 'text/html'},
-      );
-      expect(request.requestId, 'req-1');
-      expect(request.body, isNull);
-      expect(request.bodyLength, 0);
-      final json = request.toHeadJson();
-      expect(json['type'], 'tunnel:http-request');
-      expect(json['requestId'], 'req-1');
-      expect(json['port'], 3000);
-      expect(json['method'], 'GET');
-      expect(json['path'], '/index.html');
-      expect(json['headers'], {'accept': 'text/html'});
-      expect(json.containsKey('body'), false);
-    });
-
-    // The body rides the tunnel stream as its own record
-    // (`AgentTransport.openTunnelHttp`'s `body` parameter) — the head record
-    // this produces never carries one, POST included.
-    test('toHeadJson carries no body even for a POST', () {
-      final bytes = Uint8List.fromList(utf8.encode('{"key":"value"}'));
-      final request = TunnelHttpRequest(
-        requestId: 'req-2',
-        port: 3000,
-        method: 'POST',
-        path: '/api/data',
-        headers: {'content-type': 'application/json'},
-        bodyLength: bytes.length,
-        body: Stream.value(bytes),
-      );
-      expect(request.toHeadJson().containsKey('body'), isFalse);
     });
   });
 

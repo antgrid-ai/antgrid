@@ -1,12 +1,9 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:antgrid/demo/demo_identity.dart';
-import 'package:antgrid/models/preview_models.dart';
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/services/preview_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
@@ -76,25 +73,29 @@ void main() {
     );
 
     test(
-      'explicit navigation uses the existing fallback proxy origin',
+      'explicit navigation uses the fallback forwarder origin when the port '
+      'is taken locally',
       () async {
-        final occupied = await ServerSocket.bind('localhost', 0);
+        final occupied = await ServerSocket.bind(
+          InternetAddress.loopbackIPv4,
+          0,
+        );
         addTearDown(occupied.close);
         final session = await _newSession(FakeAgentTransport());
         addTearDown(session.close);
         final svc = session.previewService;
-        await svc.selectPortWithFallback(occupied.port, scheme: 'https');
-        final proxyPort = svc.currentState.activeTab!.localProxyPort;
-        expect(proxyPort, isNot(occupied.port));
+        await svc.openTab(occupied.port);
+        final localPort = svc.currentState.activeTab!.localPort;
+        expect(localPort, isNot(occupied.port));
         expect(
           svc
               .existingTabNavigationUrl(
                 occupied.port,
-                scheme: 'https',
+                scheme: 'http',
                 path: '/login?q=1#form',
               )
               .toString(),
-          'http://localhost:$proxyPort/login?q=1#form',
+          'http://localhost:$localPort/login?q=1#form',
         );
       },
     );
@@ -186,407 +187,6 @@ void main() {
       await session.close();
     });
 
-    // --- Tunneled HTTP: each request opens its own stream-backed exchange ---
-
-    test(
-      'proxyRequest opens an exchange whose head carries checkoutId and no '
-      'body',
-      () async {
-        final t = FakeAgentTransport();
-        final session = await _newSession(t);
-        addTearDown(session.close);
-        final svc = session.previewService;
-
-        final future = svc.proxyRequest(
-          TunnelHttpRequest(
-            requestId: 'req-1',
-            port: 3000,
-            method: 'GET',
-            path: '/index.html',
-            headers: {'accept': 'text/html'},
-          ),
-        );
-
-        expect(t.tunnelHttpOpens, hasLength(1));
-        final exchange = t.tunnelHttpOpens.single;
-        expect(exchange.requestId, 'req-1');
-        expect(exchange.checkoutId, 'main');
-        expect(exchange.requestHead.containsKey('body'), isFalse);
-        expect(exchange.bodyLength, 0);
-        expect(exchange.requestBody, isNull);
-
-        exchange.completeHead(
-          const TunnelHttpHead(
-            status: 200,
-            headers: {'content-type': 'text/html'},
-          ),
-        );
-        exchange.addBody(Uint8List.fromList(utf8.encode('<html>Hello</html>')));
-        exchange.endBody();
-
-        final response = await future;
-        expect(response.requestId, 'req-1');
-        expect(response.status, 200);
-        expect(await utf8.decodeStream(response.body), '<html>Hello</html>');
-      },
-    );
-
-    test("a POST's bytes reach openTunnelHttp.body intact", () async {
-      final t = FakeAgentTransport();
-      final session = await _newSession(t);
-      addTearDown(session.close);
-      final svc = session.previewService;
-
-      final bodyBytes = Uint8List.fromList(utf8.encode('{"a":1}'));
-      final future = svc.proxyRequest(
-        TunnelHttpRequest(
-          requestId: 'req-post',
-          port: 3000,
-          method: 'POST',
-          path: '/api/save',
-          headers: {},
-          bodyLength: bodyBytes.length,
-          body: Stream.value(bodyBytes),
-        ),
-      );
-
-      final exchange = t.tunnelHttpOpens.single;
-      expect(exchange.bodyLength, bodyBytes.length);
-      expect(await exchange.requestBody!.expand((c) => c).toList(), bodyBytes);
-
-      exchange.completeHead(const TunnelHttpHead(status: 200, headers: {}));
-      exchange.endBody();
-      await future;
-    });
-
-    test('a head timeout cancels the exchange', () async {
-      final t = FakeAgentTransport();
-      final session = await _newSession(t);
-      addTearDown(session.close);
-      final svc = session.previewService;
-
-      final future = svc.proxyRequest(
-        TunnelHttpRequest(
-          requestId: 'req-t',
-          port: 3000,
-          method: 'GET',
-          path: '/slow',
-          headers: {},
-        ),
-        timeout: const Duration(milliseconds: 50),
-      );
-
-      await expectLater(future, throwsA(isA<TimeoutException>()));
-      expect(t.tunnelHttpOpens.single.cancelled, isTrue);
-    });
-
-    test('a body idle timeout cancels it', () async {
-      final t = FakeAgentTransport();
-      final session = await _newSession(t);
-      addTearDown(session.close);
-      final svc = session.previewService;
-
-      final future = svc.proxyRequest(
-        TunnelHttpRequest(
-          requestId: 'req-idle',
-          port: 3000,
-          method: 'GET',
-          path: '/a.js',
-          headers: {},
-        ),
-        chunkIdleTimeout: const Duration(milliseconds: 60),
-      );
-      final exchange = t.tunnelHttpOpens.single;
-      exchange.completeHead(const TunnelHttpHead(status: 200, headers: {}));
-      await future;
-
-      await Future<void>.delayed(const Duration(milliseconds: 100));
-      expect(exchange.cancelled, isTrue);
-    });
-
-    test('the browser cancelling the body cancels it', () async {
-      final t = FakeAgentTransport();
-      final session = await _newSession(t);
-      addTearDown(session.close);
-      final svc = session.previewService;
-
-      final future = svc.proxyRequest(
-        TunnelHttpRequest(
-          requestId: 'req-cancel',
-          port: 3000,
-          method: 'GET',
-          path: '/big.js',
-          headers: {},
-        ),
-      );
-      final exchange = t.tunnelHttpOpens.single;
-      exchange.completeHead(const TunnelHttpHead(status: 200, headers: {}));
-      final response = await future;
-
-      final sub = response.body.listen((_) {});
-      await sub.cancel();
-      await Future<void>.delayed(Duration.zero);
-
-      expect(exchange.cancelled, isTrue);
-    });
-
-    test('TRUNCATED surfaces as TunnelStreamException', () async {
-      final t = FakeAgentTransport();
-      final session = await _newSession(t);
-      addTearDown(session.close);
-      final svc = session.previewService;
-
-      final future = svc.proxyRequest(
-        TunnelHttpRequest(
-          requestId: 'req-trunc',
-          port: 3000,
-          method: 'GET',
-          path: '/a.js',
-          headers: {},
-        ),
-      );
-      final exchange = t.tunnelHttpOpens.single;
-      exchange.completeHead(const TunnelHttpHead(status: 200, headers: {}));
-      final response = await future;
-      final reading = expectLater(
-        utf8.decodeStream(response.body),
-        throwsA(
-          isA<TunnelStreamException>().having(
-            (e) => e.reason,
-            'reason',
-            'TRUNCATED',
-          ),
-        ),
-      );
-
-      exchange.failWith(const TunnelExchangeFailure('TRUNCATED'));
-      await reading;
-    });
-
-    test('raw body chunks pass through undecoded', () async {
-      final t = FakeAgentTransport();
-      final session = await _newSession(t);
-      addTearDown(session.close);
-      final svc = session.previewService;
-
-      final future = svc.proxyRequest(
-        TunnelHttpRequest(
-          requestId: 'req-raw',
-          port: 3000,
-          method: 'GET',
-          path: '/a.js',
-          headers: {},
-        ),
-      );
-      final exchange = t.tunnelHttpOpens.single;
-      exchange.completeHead(const TunnelHttpHead(status: 200, headers: {}));
-      final response = await future;
-      final collected = utf8.decodeStream(response.body);
-
-      exchange.addBody(Uint8List.fromList(utf8.encode('hello raw')));
-      exchange.endBody();
-
-      expect(await collected, 'hello raw');
-    });
-
-    test('dispose cancels every live exchange', () async {
-      final t = FakeAgentTransport();
-      final session = await _newSession(t);
-      final svc = session.previewService;
-
-      final headless = svc.proxyRequest(
-        TunnelHttpRequest(
-          requestId: 'req-d',
-          port: 3000,
-          method: 'GET',
-          path: '/',
-          headers: {},
-        ),
-      );
-      // The head is never completed — dispose must not leave it dangling as
-      // an unhandled rejection once nothing awaits it any more.
-      headless.ignore();
-      final headlessExchange = t.tunnelHttpOpens.single;
-
-      final live = svc.proxyRequest(
-        TunnelHttpRequest(
-          requestId: 'req-live',
-          port: 3000,
-          method: 'GET',
-          path: '/live.js',
-          headers: {},
-        ),
-      );
-      final liveExchange = t.tunnelHttpOpens.last;
-      liveExchange.completeHead(const TunnelHttpHead(status: 200, headers: {}));
-      final response = await live;
-      unawaited(response.body.drain<void>().catchError((_) {}));
-
-      await session.close();
-
-      expect(headlessExchange.cancelled, isTrue);
-      expect(liveExchange.cancelled, isTrue);
-    });
-
-    // --- WebSocket tunnel: one native stream per browser socket ---
-
-    test('an inbound close from the bridge carries a forwardable code to '
-        'the browser socket', () async {
-      final t = FakeAgentTransport();
-      final session = await _newSession(t);
-      addTearDown(() async => session.close());
-      final svc = session.previewService;
-      final port = await freePort();
-      expect(await svc.openTab(port), SelectPortResult.opened);
-      addTearDown(() async => svc.closeTab(port));
-
-      final ws = await WebSocket.connect('ws://localhost:$port/_hmr');
-      await _waitUntil(() => t.tunnelWsOpens.isNotEmpty);
-      final channel = t.tunnelWsOpens.single;
-
-      channel.closeFromPeer(code: 4001, reason: 'upstream said so');
-
-      await ws.drain<void>().timeout(const Duration(seconds: 2));
-      expect(ws.closeCode, 4001);
-      expect(ws.closeReason, 'upstream said so');
-    });
-
-    test('a close code the browser sink refuses closes it bare', () async {
-      final t = FakeAgentTransport();
-      final session = await _newSession(t);
-      addTearDown(() async => session.close());
-      final svc = session.previewService;
-      final port = await freePort();
-      expect(await svc.openTab(port), SelectPortResult.opened);
-      addTearDown(() async => svc.closeTab(port));
-
-      final ws = await WebSocket.connect('ws://localhost:$port/_hmr');
-      await _waitUntil(() => t.tunnelWsOpens.isNotEmpty);
-      final channel = t.tunnelWsOpens.single;
-
-      // The sink throws an ArgumentError for anything outside 1000 and
-      // 3000-4999, which would take the transport subscription down with it;
-      // the bridge's own too-large code is exactly such a value.
-      channel.closeFromPeer(
-        code: 1009,
-        reason: 'upstream message too large to tunnel',
-      );
-
-      await ws.drain<void>().timeout(const Duration(seconds: 2));
-      expect(ws.closeCode, isNot(1009));
-    });
-
-    test('a tunnel that fails at open closes the browser socket', () async {
-      final t = FakeAgentTransport();
-      final session = await _newSession(t);
-      addTearDown(() async => session.close());
-      final svc = session.previewService;
-      final port = await freePort();
-      expect(await svc.openTab(port), SelectPortResult.opened);
-      addTearDown(() async => svc.closeTab(port));
-
-      final ws = await WebSocket.connect('ws://localhost:$port/_blazor');
-      await _waitUntil(() => t.tunnelWsOpens.isNotEmpty);
-      t.tunnelWsOpens.single.failWith(
-        const TunnelExchangeFailure('NOT_SUPPORTED'),
-      );
-
-      // The browser must see a real close it can reconnect from, rather than
-      // holding a socket against a tunnel that never opened.
-      await ws.drain<void>().timeout(const Duration(seconds: 2));
-    });
-
-    test('an outbound WS frame over the queue ceiling aborts the tunnel '
-        'before any send', () async {
-      final t = FakeAgentTransport();
-      final session = await _newSession(t);
-      addTearDown(() async => session.close());
-      final svc = session.previewService;
-      final port = await freePort();
-      expect(await svc.openTab(port), SelectPortResult.opened);
-      addTearDown(() async => svc.closeTab(port));
-
-      final ws = await WebSocket.connect('ws://localhost:$port/_hmr');
-      await _waitUntil(() => t.tunnelWsOpens.isNotEmpty);
-      final channel = t.tunnelWsOpens.single;
-
-      ws.add('x' * (1024 * 1024 + 1));
-      await ws.drain<void>().timeout(const Duration(seconds: 2));
-
-      expect(channel.sent, isEmpty);
-      await _waitUntil(() => channel.aborted);
-    });
-
-    test('the queue ceiling counts UTF-8 bytes, not UTF-16 units', () async {
-      final t = FakeAgentTransport();
-      final session = await _newSession(t);
-      addTearDown(() async => session.close());
-      final svc = session.previewService;
-      final port = await freePort();
-      expect(await svc.openTab(port), SelectPortResult.opened);
-      addTearDown(() async => svc.closeTab(port));
-
-      final ws = await WebSocket.connect('ws://localhost:$port/_hmr');
-      await _waitUntil(() => t.tunnelWsOpens.isNotEmpty);
-      final channel = t.tunnelWsOpens.single;
-
-      // 400k three-byte characters is 1.2 MB on the wire and 400k UTF-16
-      // units: a length-based ceiling would wave it through.
-      ws.add('☃' * 400000);
-      await ws.drain<void>().timeout(const Duration(seconds: 5));
-
-      expect(channel.sent, isEmpty);
-      await _waitUntil(() => channel.aborted);
-    });
-
-    test(
-      'WebSocket frames retain browser order and the close follows them',
-      () async {
-        final t = FakeAgentTransport();
-        final session = await _newSession(t);
-        addTearDown(() async => session.close());
-        final svc = session.previewService;
-        final port = await freePort();
-        expect(await svc.openTab(port), SelectPortResult.opened);
-        addTearDown(() async => svc.closeTab(port));
-
-        final ws = await WebSocket.connect('ws://localhost:$port/_blazor');
-        addTearDown(() async => ws.close());
-        await _waitUntil(() => t.tunnelWsOpens.isNotEmpty);
-        final channel = t.tunnelWsOpens.single;
-
-        ws.add('signalr-handshake');
-        ws.add(<int>[0, 1, 2, 255]);
-        await Future<void>.delayed(const Duration(milliseconds: 50));
-
-        expect(channel.sent.map((f) => f.binary), <bool>[false, true]);
-        expect(utf8.decode(channel.sent[0].bytes), 'signalr-handshake');
-        expect(channel.sent[1].bytes, <int>[0, 1, 2, 255]);
-        // The close hasn't been asked for yet.
-        expect(channel.closedWith, isNull);
-
-        await ws.close();
-        await _waitUntil(() => channel.closedWith != null);
-      },
-    );
-
-    test('dispose closes every open WS channel with 1001', () async {
-      final t = FakeAgentTransport();
-      final session = await _newSession(t);
-      final svc = session.previewService;
-      final port = await freePort();
-      expect(await svc.openTab(port), SelectPortResult.opened);
-
-      final ws = await WebSocket.connect('ws://localhost:$port/_blazor');
-      addTearDown(() async => ws.close());
-      await _waitUntil(() => t.tunnelWsOpens.isNotEmpty);
-      final channel = t.tunnelWsOpens.single;
-
-      await session.close();
-
-      expect(channel.closedWith?.code, 1001);
-    });
-
     test(
       'openTab in local mode sets the tab currentUrl to localhost:port',
       () async {
@@ -597,7 +197,7 @@ void main() {
         await svc.openTab(3000);
 
         expect(svc.currentState.activeTabId, 3000);
-        expect(svc.currentState.activeTab?.localProxyPort, 3000);
+        expect(svc.currentState.activeTab?.localPort, 3000);
         expect(svc.currentState.activeTab?.currentUrl, 'http://localhost:3000');
 
         await svc.closeTab(3000);
@@ -626,58 +226,80 @@ void main() {
       },
     );
 
-    test('openTab (relay) binds the exact port and returns opened', () async {
+    test('openTab (relay) probes, then forwards the exact port', () async {
       final t = FakeAgentTransport();
       final session = await _newSession(t);
       final svc = session.previewService;
 
       final port = await freePort();
+      await svc.openTab(port);
 
-      final result = await svc.openTab(port);
-
-      expect(result, SelectPortResult.opened);
+      expect(t.tunnelTcpOpens.first.probe, isTrue);
+      expect(t.tunnelTcpOpens.first.port, port);
+      expect(t.tunnelTcpOpens.first.checkoutId, 'main');
       expect(svc.currentState.activeTabId, port);
-      expect(svc.currentState.activeTab?.localProxyPort, port);
+      expect(svc.currentState.activeTab?.localPort, port);
+      expect(svc.currentState.activeTab?.scheme, 'http');
       expect(svc.currentState.activeTab?.currentUrl, 'http://localhost:$port');
 
       await svc.closeTab(port);
       await session.close();
     });
 
-    test(
-      'openTab (relay) with a path lands the tab there behind the proxy',
-      () async {
-        final t = FakeAgentTransport();
-        final session = await _newSession(t);
-        final svc = session.previewService;
+    test('a TLS probe opens an https tab and a path lands behind it', () async {
+      final t = FakeAgentTransport()..probeTls = true;
+      final session = await _newSession(t);
+      final svc = session.previewService;
 
-        final port = await freePort();
-        await svc.openTab(port, path: '/dashboard');
+      final port = await freePort();
+      await svc.openTab(port, path: '/dashboard');
 
-        expect(
-          svc.currentState.activeTab?.currentUrl,
-          'http://localhost:$port/dashboard',
-        );
+      expect(svc.currentState.activeTab?.scheme, 'https');
+      expect(
+        svc.currentState.activeTab?.currentUrl,
+        'https://localhost:$port/dashboard',
+      );
 
-        await svc.closeTab(port);
-        await session.close();
-      },
-    );
+      await svc.closeTab(port);
+      await session.close();
+    });
 
-    test('openTab (relay) returns portInUse and leaves state unchanged '
-        'when the port is taken', () async {
+    test('a browser connection on the forwarded port opens a tunnel stream',
+        () async {
       final t = FakeAgentTransport();
       final session = await _newSession(t);
       final svc = session.previewService;
 
-      final blocker = await ServerSocket.bind('localhost', 0);
-      addTearDown(() async => blocker.close());
+      final port = await freePort();
+      await svc.openTab(port);
+      final socket = await Socket.connect(InternetAddress.loopbackIPv4, port);
+      addTearDown(socket.destroy);
+      await _waitUntil(() => t.tunnelTcpOpens.length == 2);
 
-      final result = await svc.openTab(blocker.port);
+      final conn = t.tunnelTcpOpens.last;
+      expect(conn.probe, isFalse);
+      expect(conn.port, port);
+      expect(conn.checkoutId, 'main');
 
-      expect(result, SelectPortResult.portInUse);
-      expect(svc.currentState.activeTabId, isNull);
+      await svc.closeTab(port);
+      await _waitUntil(() => conn.aborted);
+      await session.close();
+    });
+
+    test('an unreachable probe opens no tab and reports the error', () async {
+      final t = FakeAgentTransport()
+        ..probeFailure = const TunnelExchangeFailure(
+          'UNREACHABLE',
+          message: 'connection refused',
+        );
+      final session = await _newSession(t);
+      final svc = session.previewService;
+
+      await svc.openTab(3000);
+
       expect(svc.currentState.tabs, isEmpty);
+      expect(svc.currentState.activeTabId, isNull);
+      expect(svc.currentState.error, contains('3000'));
 
       await session.close();
     });
@@ -691,76 +313,55 @@ void main() {
       await svc.openTab(port);
       final tabBefore = svc.currentState.activeTab;
 
-      // Same port, same scheme — must not rebind the proxy or replace the
-      // tab (the whole point of the no-op: no reload on re-detection).
-      final result = await svc.openTab(port);
+      await svc.openTab(port);
 
-      expect(result, SelectPortResult.opened);
+      expect(t.tunnelTcpOpens, hasLength(1));
       expect(svc.currentState.tabs, hasLength(1));
+      expect(svc.currentState.activeTab?.localPort, tabBefore?.localPort);
+
+      await svc.closeTab(port);
+      await session.close();
+    });
+
+    test('openTab binds a different local port when the port is taken',
+        () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = session.previewService;
+
+      final blocker = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() async => blocker.close());
+      final port = blocker.port;
+
+      await svc.openTab(port);
+
+      expect(svc.currentState.activeTabId, port);
+      expect(svc.currentState.activeTab?.localPort, isNot(port));
       expect(
-        svc.currentState.activeTab?.localProxyPort,
-        tabBefore?.localProxyPort,
+        svc.currentState.activeTab?.currentUrl,
+        'http://localhost:${svc.currentState.activeTab?.localPort}',
       );
 
       await svc.closeTab(port);
       await session.close();
     });
 
-    test(
-      'selectPortWithFallback binds a different local port when taken',
-      () async {
-        final t = FakeAgentTransport();
-        final session = await _newSession(t);
-        final svc = session.previewService;
-
-        final blocker = await ServerSocket.bind('localhost', 0);
-        addTearDown(() async => blocker.close());
-        final port = blocker.port;
-
-        await svc.selectPortWithFallback(port);
-
-        expect(svc.currentState.activeTabId, port);
-        expect(svc.currentState.activeTab?.localProxyPort, isNotNull);
-        expect(svc.currentState.activeTab?.localProxyPort, isNot(port));
-        expect(
-          svc.currentState.activeTab?.currentUrl,
-          'http://localhost:${svc.currentState.activeTab?.localProxyPort}',
-        );
-
-        await svc.closeTab(port);
-        await session.close();
-      },
-    );
-
-    test('openTab portInUse keeps the previously-opened tab live', () async {
+    test('closing a tab releases its forwarded port', () async {
       final t = FakeAgentTransport();
       final session = await _newSession(t);
       final svc = session.previewService;
 
-      // Open port A successfully (exact bind).
-      final portA = await freePort();
-      final r1 = await svc.openTab(portA);
-      expect(r1, SelectPortResult.opened);
-      expect(svc.currentState.activeTab?.localProxyPort, portA);
-
-      // Attempt an in-use port B → portInUse. Backgrounded so it can't steal
-      // focus from A even on success.
-      final blocker = await ServerSocket.bind('localhost', 0);
-      addTearDown(() async => blocker.close());
-      final r2 = await svc.openTab(blocker.port, focus: false);
-
-      expect(r2, SelectPortResult.portInUse);
-      // Port A's tab must remain open AND its proxy still live.
-      expect(svc.currentState.activeTabId, portA);
-      expect(svc.currentState.tabs, hasLength(1));
-      expect(svc.currentState.activeTab?.localProxyPort, portA);
-      // Proof the A proxy is still bound: an external bind of portA fails.
+      final port = await freePort();
+      await svc.openTab(port);
       await expectLater(
-        ServerSocket.bind('localhost', portA),
+        ServerSocket.bind(InternetAddress.loopbackIPv4, port),
         throwsA(isA<SocketException>()),
       );
 
-      await svc.closeTab(portA);
+      await svc.closeTab(port);
+
+      final rebound = await ServerSocket.bind(InternetAddress.loopbackIPv4, port);
+      await rebound.close();
       await session.close();
     });
 
@@ -965,6 +566,142 @@ void main() {
       expect(svc.currentState.tabs, isEmpty);
 
       await sub.cancel();
+      await session.close();
+    });
+
+    test('a probed https tab is reused when the caller hints http', () async {
+      final t = FakeAgentTransport()..probeTls = true;
+      final session = await _newSession(t);
+      final svc = session.previewService;
+
+      final port = await freePort();
+      await svc.openTab(port);
+      await svc.openTab(port, scheme: 'http');
+
+      expect(t.tunnelTcpOpens.where((c) => c.probe), hasLength(1));
+      expect(svc.currentState.activeTab?.scheme, 'https');
+      expect(
+        svc.existingTabNavigationUrl(port, scheme: 'http', path: '/x'),
+        Uri.parse('https://localhost:$port/x'),
+      );
+
+      await svc.closeTab(port);
+      await session.close();
+    });
+
+    test('concurrent opens of one port share a single probe and forwarder',
+        () async {
+      final t = FakeAgentTransport()..probeTls = null;
+      final session = await _newSession(t);
+      final svc = session.previewService;
+
+      final port = await freePort();
+      final first = svc.openTab(port, focus: false);
+      final second = svc.openTab(port);
+      await Future<void>.delayed(Duration.zero);
+      expect(t.tunnelTcpOpens, hasLength(1));
+
+      t.tunnelTcpOpens.single.completeReady(tls: false);
+      await Future.wait([first, second]);
+
+      expect(svc.currentState.tabs, hasLength(1));
+      expect(svc.currentState.activeTabId, port);
+      await svc.closeTab(port);
+      final rebound = await ServerSocket.bind(InternetAddress.loopbackIPv4, port);
+      await rebound.close();
+      await session.close();
+    });
+
+    test('closing a tab while its probe is pending keeps it closed', () async {
+      final t = FakeAgentTransport()..probeTls = null;
+      final session = await _newSession(t);
+      final svc = session.previewService;
+
+      final port = await freePort();
+      final opening = svc.openTab(port);
+      await Future<void>.delayed(Duration.zero);
+      await svc.closeTab(port);
+      t.tunnelTcpOpens.single.completeReady(tls: false);
+      await opening;
+
+      expect(svc.currentState.tabs, isEmpty);
+      final rebound = await ServerSocket.bind(InternetAddress.loopbackIPv4, port);
+      await rebound.close();
+      await session.close();
+    });
+
+    test('a reopen after a close supersedes the stale open', () async {
+      final t = FakeAgentTransport()..probeTls = null;
+      final session = await _newSession(t);
+      final svc = session.previewService;
+
+      final port = await freePort();
+      final stale = svc.openTab(port);
+      await Future<void>.delayed(Duration.zero);
+      await svc.closeTab(port);
+      final fresh = svc.openTab(port);
+      await Future<void>.delayed(Duration.zero);
+      expect(t.tunnelTcpOpens, hasLength(2));
+
+      t.tunnelTcpOpens[0].completeReady(tls: false);
+      await stale;
+      expect(svc.currentState.tabs, isEmpty);
+      t.tunnelTcpOpens[1].completeReady(tls: false);
+      await fresh;
+
+      expect(svc.currentState.tabs, hasLength(1));
+      await svc.closeTab(port);
+      final rebound = await ServerSocket.bind(InternetAddress.loopbackIPv4, port);
+      await rebound.close();
+      await session.close();
+    });
+
+    test('a failed auto-open sets no panel error and is retried later',
+        () async {
+      final t = FakeAgentTransport()
+        ..probeFailure = const TunnelExchangeFailure('UNREACHABLE');
+      final session = await _newSession(t);
+      final svc = session.previewService;
+      final sub = session.heavyStream.listen((_) {});
+      final port = await freePort();
+
+      void announce() => t.emit('ports:update', {
+        'projectId': 'p',
+        'ports': [
+          {'port': port, 'scheme': 'http', 'onDetect': 'notify'},
+        ],
+      });
+
+      announce();
+      await _waitUntil(() => t.tunnelTcpOpens.isNotEmpty);
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(svc.currentState.tabs, isEmpty);
+      expect(svc.currentState.error, isNull);
+
+      t.probeFailure = null;
+      announce();
+      await _waitUntil(() => svc.currentState.tabs.length == 1);
+
+      await svc.closeTab(port);
+      await sub.cancel();
+      await session.close();
+    });
+
+    test('a probe that never answers times out with an error', () async {
+      final t = FakeAgentTransport()..probeTls = null;
+      final session = await _newSession(t);
+      final svc = PreviewService.fromSession(
+        session,
+        probeTimeout: const Duration(milliseconds: 50),
+      );
+
+      await svc.openTab(3000);
+
+      expect(svc.currentState.tabs, isEmpty);
+      expect(svc.currentState.error, contains('3000'));
+      expect(t.tunnelTcpOpens.single.aborted, isTrue);
+
+      await svc.dispose();
       await session.close();
     });
 

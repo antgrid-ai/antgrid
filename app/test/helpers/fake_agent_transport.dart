@@ -56,30 +56,40 @@ class FakeAgentTransport implements AgentTransport {
   late final SocketTerminalAttachments _streamTerminalAttachments =
       SocketTerminalAttachments((message) async => attachmentSent.add(message));
 
-  /// Every [openTunnelHttp] call, in order, so a test can both assert on the
-  /// arguments and drive the returned fake's head/body.
-  final List<FakeTunnelHttpExchange> tunnelHttpOpens = [];
+  /// Every [openTunnelTcp] call, in order, so a test can both assert on the
+  /// arguments and drive the returned fake's ready/bytes/end.
+  final List<FakeTunnelTcpChannel> tunnelTcpOpens = [];
 
-  /// Every [openTunnelWs] call, in order.
-  final List<FakeTunnelWsChannel> tunnelWsOpens = [];
+  /// How a probe open is answered as soon as it is made: `false`/`true` reply
+  /// ready with that `tls`, null leaves it pending for the test to drive.
+  bool? probeTls = false;
+
+  /// When set, a probe open fails with this instead of answering [probeTls].
+  TunnelExchangeFailure? probeFailure;
 
   @override
-  TunnelHttpExchange openTunnelHttp({
-    required String requestId,
-    required String checkoutId,
-    required Map<String, dynamic> head,
-    required int bodyLength,
-    Stream<List<int>>? body,
+  TunnelTcpChannel openTunnelTcp({
+    required String connId,
+    required int port,
+    String checkoutId = 'main',
+    bool probe = false,
   }) {
-    final exchange = FakeTunnelHttpExchange(
-      requestId: requestId,
+    final channel = FakeTunnelTcpChannel(
+      connId: connId,
+      port: port,
       checkoutId: checkoutId,
-      requestHead: head,
-      bodyLength: bodyLength,
-      requestBody: body,
+      probe: probe,
     );
-    tunnelHttpOpens.add(exchange);
-    return exchange;
+    tunnelTcpOpens.add(channel);
+    if (probe) {
+      final failure = probeFailure;
+      if (failure != null) {
+        channel.failReady(failure);
+      } else if (probeTls != null) {
+        channel.completeReady(tls: probeTls);
+      }
+    }
+    return channel;
   }
 
   /// Every [openUpload] call, in order, so a test can both assert on the
@@ -107,21 +117,6 @@ class FakeAgentTransport implements AgentTransport {
     );
     uploadCalls.add(exchange);
     return exchange;
-  }
-
-  @override
-  TunnelWsChannel openTunnelWs({
-    required String tunnelId,
-    required String checkoutId,
-    required Map<String, dynamic> open,
-  }) {
-    final channel = FakeTunnelWsChannel(
-      tunnelId: tunnelId,
-      checkoutId: checkoutId,
-      open: open,
-    );
-    tunnelWsOpens.add(channel);
-    return channel;
   }
 
   @override
@@ -373,143 +368,93 @@ const _transportFailureCodes = <String>{
   'E_SUPERSEDED',
 };
 
-/// Test double for [TunnelHttpExchange]. Every argument [openTunnelHttp] was
-/// called with is recorded; the test then drives [completeHead]/[addBody]/
-/// [endBody]/[failWith] to simulate the bridge's side.
-class FakeTunnelHttpExchange implements TunnelHttpExchange {
-  FakeTunnelHttpExchange({
-    required this.requestId,
+/// Test double for [TunnelTcpChannel]. The test drives [completeReady] /
+/// [failReady] / [addIncoming] / [endFromBridge] to play the bridge, and reads
+/// [sent] / [finished] / [aborted] to see what the app did.
+class FakeTunnelTcpChannel implements TunnelTcpChannel {
+  FakeTunnelTcpChannel({
+    required this.connId,
+    required this.port,
     required this.checkoutId,
-    required this.requestHead,
-    required this.bodyLength,
-    this.requestBody,
+    required this.probe,
   });
 
+  @override
+  final String connId;
+  final int port;
   final String checkoutId;
+  final bool probe;
 
-  /// The `tunnel:http-request` head this exchange was opened with.
-  final Map<String, dynamic> requestHead;
+  /// Every chunk [send] accepted, in call order.
+  final List<Uint8List> sent = [];
 
-  /// Byte length of the request body [openTunnelHttp] was called with.
-  final int bodyLength;
-
-  /// The request body stream [openTunnelHttp] was called with, if any.
-  final Stream<List<int>>? requestBody;
-
-  @override
-  final String requestId;
-
-  bool cancelled = false;
-
-  final _headCompleter = Completer<TunnelHttpHead>();
-  final _bodyController = StreamController<Uint8List>();
-
-  @override
-  Future<TunnelHttpHead> get head => _headCompleter.future;
-
-  @override
-  Stream<Uint8List> get body => _bodyController.stream;
-
-  void completeHead(TunnelHttpHead head) {
-    if (!_headCompleter.isCompleted) _headCompleter.complete(head);
-  }
-
-  void addBody(Uint8List chunk) {
-    if (!_bodyController.isClosed) _bodyController.add(chunk);
-  }
-
-  void endBody() {
-    unawaited(_bodyController.close());
-  }
-
-  void failWith(TunnelExchangeFailure failure) {
-    if (!_headCompleter.isCompleted) {
-      _headCompleter.future.ignore();
-      _headCompleter.completeError(failure);
-    }
-    if (!_bodyController.isClosed) {
-      _bodyController.addError(failure);
-      unawaited(_bodyController.close());
-    }
-  }
-
-  @override
-  void cancel() {
-    cancelled = true;
-  }
-}
-
-/// Test double for [TunnelWsChannel]. The test drives [emit]/[closeFromPeer]
-/// to simulate frames and a close arriving from the bridge, and inspects
-/// [sent]/[closedWith]/[aborted] to see what the app sent.
-class FakeTunnelWsChannel implements TunnelWsChannel {
-  FakeTunnelWsChannel({
-    required this.tunnelId,
-    required this.checkoutId,
-    required this.open,
-  });
-
-  final String checkoutId;
-
-  /// The `tunnel:ws-open` head this channel was opened with.
-  final Map<String, dynamic> open;
-
-  @override
-  final String tunnelId;
-
-  /// Every frame [send] was called with, in call order.
-  final List<TunnelWsFrame> sent = [];
-
-  /// Set by [close]; null if the channel ended some other way.
-  ({int? code, String? reason})? closedWith;
-
+  bool finished = false;
   bool aborted = false;
 
-  final _framesController = StreamController<TunnelWsFrame>();
-  final _doneCompleter = Completer<TunnelWsEnd>();
+  /// When set, [send] completes only once this future does, so a test can hold
+  /// the app's socket paused.
+  Future<void>? sendGate;
+
+  final _ready = Completer<TunnelTcpReady>();
+  final _incoming = StreamController<Uint8List>();
+
+  bool get isReady => _ready.isCompleted;
 
   @override
-  Stream<TunnelWsFrame> get frames => _framesController.stream;
+  Future<TunnelTcpReady> get ready => _ready.future;
 
   @override
-  Future<TunnelWsEnd> get done => _doneCompleter.future;
+  Stream<Uint8List> get incoming => _incoming.stream;
 
-  /// Simulate a frame arriving from the bridge.
-  void emit(TunnelWsFrame frame) {
-    if (!_framesController.isClosed) _framesController.add(frame);
+  void completeReady({bool? tls}) {
+    if (!_ready.isCompleted) _ready.complete(TunnelTcpReady(tls: tls));
   }
 
-  /// Simulate the bridge's side closing.
-  void closeFromPeer({int? code, String? reason}) {
-    _end(TunnelWsClosedByPeer(code, reason));
+  void failReady(TunnelExchangeFailure failure) {
+    if (!_ready.isCompleted) {
+      _ready.future.ignore();
+      _ready.completeError(failure);
+    }
   }
 
-  void failWith(TunnelExchangeFailure failure) {
-    _end(TunnelWsFailed(failure));
+  void addIncoming(Uint8List bytes) {
+    if (!_incoming.isClosed) _incoming.add(bytes);
   }
 
-  void _end(TunnelWsEnd end) {
-    if (_doneCompleter.isCompleted) return;
-    _doneCompleter.complete(end);
-    unawaited(_framesController.close());
+  /// The bridge's FIN.
+  void endFromBridge() {
+    if (!_incoming.isClosed) unawaited(_incoming.close());
+  }
+
+  /// The bridge's reset.
+  void resetFromBridge() {
+    if (!_incoming.isClosed) {
+      _incoming.addError(const TunnelExchangeFailure('STREAM_LOST'));
+      unawaited(_incoming.close());
+    }
   }
 
   @override
-  Future<bool> send(TunnelWsFrame frame) async {
-    sent.add(frame);
-    return !aborted && !_doneCompleter.isCompleted;
+  Future<bool> send(Uint8List bytes) async {
+    if (!isReady || finished || aborted) return false;
+    sent.add(bytes);
+    await sendGate;
+    return !aborted;
   }
 
   @override
-  void close({int? code, String? reason}) {
-    closedWith = (code: code, reason: reason);
-    _end(const TunnelWsClosedLocally());
+  Future<void> finish() async {
+    finished = true;
   }
 
   @override
   void abort() {
     aborted = true;
-    _end(const TunnelWsClosedLocally());
+    if (!_ready.isCompleted) {
+      _ready.future.ignore();
+      _ready.completeError(const TunnelExchangeFailure('CANCELLED'));
+    }
+    endFromBridge();
   }
 }
 
