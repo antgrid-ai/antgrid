@@ -14,7 +14,7 @@ import { sealPush } from "./push/seal";
 
 /** How often {@link ProjectCore} checks for turns {@link expireTurns} should
  *  close. Five minutes is coarse enough that the check never shows up as work,
- *  and precise enough against a 45-minute idle bound that nobody watching the
+ *  and precise enough against a 30-minute idle bound that nobody watching the
  *  dot would notice the difference from an exact deadline. */
 const EXPIRE_CHECK_INTERVAL_MS = 5 * 60_000;
 

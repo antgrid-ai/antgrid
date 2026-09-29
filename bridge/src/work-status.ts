@@ -1267,7 +1267,7 @@ export function reduceWorkStatus(prev: WorkStatusState, msg: AbMessage): WorkSta
 
 /** How long a turn may go with no recorded activity before {@link expireTurns}
  *  treats it as abandoned rather than working. */
-export const DEFAULT_TURN_IDLE_MS = 45 * 60_000;
+export const DEFAULT_TURN_IDLE_MS = 30 * 60_000;
 
 /** How long a provisional turn waits for its agent's start hook before
  *  {@link retractProvisionalTurn} takes it back. Several times the slowest start
