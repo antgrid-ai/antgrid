@@ -26,6 +26,7 @@ import '../providers/device_revocation.dart';
 import '../providers/subscription.dart';
 import '../services/auth_service.dart';
 import '../storage/last_auth_method_store.dart';
+import '../util/detached.dart';
 
 /// Declared here rather than under `providers/` so `storage/` stays free of
 /// Riverpod: this screen is the only consumer, and tests override it to
@@ -129,6 +130,10 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
   int _pollTicks = 0;
   StreamSubscription<String>? _oauthFailureSub;
 
+  /// An in-app OAuth round trip is running under the spinner, so its failures
+  /// belong to this screen even though the form is not showing.
+  bool _oauthInApp = false;
+
   /// Bumped every time the user walks away from the flow they were in
   /// ([_backToForm], [_goToStep]). A request that snapshots this and finds it
   /// changed knows its flow was abandoned mid-air. [_pollOnce]'s
@@ -187,7 +192,7 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
   void _onOAuthFailure(String message) {
     // A late bounce must not clobber an in-progress magic-link flow — OAuth is
     // only ever started from the form, so only the form shows its failures.
-    if (!mounted || _phase != _Phase.form) return;
+    if (!mounted || (_phase != _Phase.form && !_oauthInApp)) return;
     setState(() => _error = message);
   }
 
@@ -219,20 +224,35 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
     final store = ref.read(lastAuthMethodStoreProvider);
     final auth = ref.read(authServiceProvider);
     final container = ref.container;
-    // Back to the form even if Continue routed us here from [_Phase.submitting]:
-    // OAuth's outcome arrives as a deep link much later, and [_onOAuthFailure]
-    // only shows itself on the form.
+    // A hand-off returns to the form even if Continue routed us here from
+    // [_Phase.submitting]: its outcome arrives as a deep link much later, and
+    // [_onOAuthFailure] only shows itself on the form. An in-app round trip
+    // holds the spinner until the session is redeemed, so a second tap cannot
+    // start another sign-in underneath it.
+    final inApp = auth.oauthRunsInApp;
     setState(() {
-      _phase = _Phase.form;
+      _phase = inApp ? _Phase.submitting : _Phase.form;
       _error = null;
+      _oauthInApp = inApp;
     });
     final OAuthStart started;
     try {
       started = await auth.startOAuth(provider);
     } on AuthException catch (e) {
       if (!mounted) return;
-      setState(() => _error = e.message);
+      setState(() {
+        _phase = _Phase.form;
+        _oauthInApp = false;
+        _error = e.message;
+      });
       return;
+    } finally {
+      _oauthInApp = false;
+    }
+    // Signed in, the root replaces this screen; anything else is back to the
+    // form, where a failure reported during the round trip is already shown.
+    if (mounted && started != OAuthStart.signedIn) {
+      setState(() => _phase = _Phase.form);
     }
     if (started == OAuthStart.notSignedIn) return;
     // Only once the browser is actually up: written before the launch, the hint
@@ -250,9 +270,16 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
     if (started != OAuthStart.signedIn) return;
     // The in-app round trip has no deep link behind it, so nothing else will
     // tell the root the user signed in.
-    container.read(analyticsServiceProvider)?.track(
-      AnalyticsEvents.signInCompleted,
-    );
+    _warmSignedIn(container);
+  }
+
+  /// The session cookie is already stored: tell the root, and warm billing in
+  /// parallel with the user refresh so pricing is ready when the shell opens.
+  /// Takes a container so a caller past an await need not touch [ref].
+  static void _warmSignedIn(ProviderContainer container) {
+    container
+        .read(analyticsServiceProvider)
+        ?.track(AnalyticsEvents.signInCompleted);
     container.invalidate(currentUserProvider);
     container.invalidate(subscriptionProvider);
     container.invalidate(pricingCatalogProvider);
@@ -261,9 +288,10 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
 
   Future<void> _signInWithApple() async {
     final email = _emailController.text.trim();
-    final analytics = ref.read(analyticsServiceProvider);
     final auth = ref.read(authServiceProvider);
-    analytics?.track(AnalyticsEvents.signInStarted, props: {'provider': 'apple'});
+    ref
+        .read(analyticsServiceProvider)
+        ?.track(AnalyticsEvents.signInStarted, props: {'provider': 'apple'});
     setState(() {
       _phase = _Phase.submitting;
       _error = null;
@@ -272,11 +300,16 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
     final bool signedIn;
     try {
       signedIn = await auth.signInWithApple();
-    } on AuthException catch (e) {
+    } catch (e) {
+      // Anything, not just AuthException: a keychain that refuses the cookie
+      // write throws its own type, and leaving the phase at submitting would
+      // disable every control on the screen for good.
       if (!mounted) return;
       setState(() {
         _phase = _Phase.form;
-        _error = e.message;
+        _error = e is AuthException
+            ? e.message
+            : 'Apple sign-in failed. Try again.';
       });
       return;
     }
@@ -290,11 +323,7 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
     // Keyed on the TYPED address, like the OAuth hint: the sheet may answer
     // with a private relay address the user never typed here.
     _remember(email, AuthMethod.apple);
-    analytics?.track(AnalyticsEvents.signInCompleted);
-    ref.invalidate(currentUserProvider);
-    ref.invalidate(subscriptionProvider);
-    ref.invalidate(pricingCatalogProvider);
-    prefetchSubscriptionCache(ref);
+    _warmSignedIn(ref.container);
   }
 
   /// Reclaim a sign-in started before this process existed.
@@ -614,15 +643,7 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
         // rejected credential would offer to save a password the server just
         // refused, and this screen is about to be popped out from under it.
         TextInput.finishAutofillContext();
-        ref
-            .read(analyticsServiceProvider)
-            ?.track(AnalyticsEvents.signInCompleted);
-        // Cookie already persisted by the service. Same warm-up as the
-        // magic-link ready path so pricing is ready when the shell opens.
-        ref.invalidate(currentUserProvider);
-        ref.invalidate(subscriptionProvider);
-        ref.invalidate(pricingCatalogProvider);
-        prefetchSubscriptionCache(ref);
+        _warmSignedIn(ref.container);
       case PasswordSignIn.invalidCredentials:
         setState(() {
           _phase = _Phase.form;
@@ -730,15 +751,7 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
       switch (poll.status) {
         case MagicLinkStatus.ready:
           _pollTimer?.cancel();
-          ref
-              .read(analyticsServiceProvider)
-              ?.track(AnalyticsEvents.signInCompleted);
-          // Cookie already persisted by pollStatus. Warm billing in parallel
-          // with the user refresh so pricing is ready as soon as the shell opens.
-          ref.invalidate(currentUserProvider);
-          ref.invalidate(subscriptionProvider);
-          ref.invalidate(pricingCatalogProvider);
-          prefetchSubscriptionCache(ref);
+          _warmSignedIn(ref.container);
         case MagicLinkStatus.expired:
         case MagicLinkStatus.consumed:
         case MagicLinkStatus.unbound:
@@ -893,7 +906,15 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
         const _OrDivider(),
         const SizedBox(height: AbTokens.space12),
         if (_offersAppleSignIn) ...[
-          _AppleSignInButton(onPressed: busy ? null : _signInWithApple),
+          _AppleSignInButton(
+            onPressed: busy
+                ? null
+                : () => detached(
+                    'SignInScreen',
+                    'Apple sign-in failed',
+                    _signInWithApple,
+                  ),
+          ),
           const SizedBox(height: AbTokens.space8),
         ],
         // One bordered group rather than stacked buttons: these are all
@@ -1454,7 +1475,9 @@ class _AppleSignInButton extends StatelessWidget {
       onPressed: onPressed ?? () {},
     );
     if (onPressed == null) {
-      return IgnorePointer(child: Opacity(opacity: 0.4, child: button));
+      return IgnorePointer(
+        child: Opacity(opacity: AbTokens.opacityDisabled, child: button),
+      );
     }
     return button;
   }

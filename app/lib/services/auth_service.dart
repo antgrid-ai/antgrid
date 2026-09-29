@@ -375,6 +375,10 @@ class AuthService {
   ///
   /// Throws [AuthException] when the browser or sheet cannot be opened;
   /// failures of the round-trip itself are reported on [oauthFailures].
+  /// Whether [startOAuth] runs the whole round trip before returning, rather
+  /// than handing off to the system browser.
+  bool get oauthRunsInApp => defaultTargetPlatform == TargetPlatform.iOS;
+
   Future<OAuthStart> startOAuth(String provider) async {
     _lastOAuthProvider = provider;
     // Better-Auth's social sign-in is POST-only; `/oauth/start` is the
@@ -383,7 +387,7 @@ class AuthService {
       licenseApiUrl: licenseApiUrl,
       provider: provider,
     );
-    if (defaultTargetPlatform == TargetPlatform.iOS) {
+    if (oauthRunsInApp) {
       final callback = await _authenticateInApp(url, 'antgrid');
       if (callback == null) return OAuthStart.notSignedIn;
       return await handleDeepLink(callback)

@@ -421,6 +421,50 @@ void main() {
       expect(store.memory['user@example.com'], AuthMethod.github);
     }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
+    testWidgets('on iOS the form stays busy until the round trip ends', (
+      tester,
+    ) async {
+      final sheet = Completer<Uri?>();
+      var sheets = 0;
+      await _pumpScreen(
+        tester,
+        authenticateInApp: (_, _) {
+          sheets++;
+          return sheet.future;
+        },
+      );
+
+      await tester.tap(find.text('GitHub'));
+      await tester.pump();
+      await tester.tap(find.text('Google'), warnIfMissed: false);
+      await tester.pump();
+      expect(sheets, 1, reason: 'a second tap must not start another sign-in');
+
+      sheet.complete(null);
+      await tester.pump();
+      await tester.pump();
+      await tester.tap(find.text('Google'));
+      await tester.pump();
+      expect(sheets, 2, reason: 'a closed sheet hands the form back');
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+    testWidgets('on iOS a failure inside the round trip reaches the form', (
+      tester,
+    ) async {
+      await _pumpScreen(
+        tester,
+        authenticateInApp: (_, _) async =>
+            Uri.parse('antgrid://auth/callback?error=no_session'),
+      );
+
+      await tester.tap(find.text('GitHub'));
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.text("GitHub sign-in didn't complete. Try again."), findsOneWidget);
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
     testWidgets('on iOS a closed OAuth sheet records no hint', (tester) async {
       final store = _FakeAuthMethodStore();
       final paths = await _pumpScreen(tester, store: store);
