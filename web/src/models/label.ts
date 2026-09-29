@@ -190,9 +190,8 @@ export async function deleteLabel(
       await lockTaskSync(tx, taskId);
     }
 
-    // One read for every affected task's full label set, taken only once every
-    // lock above is held — a single round trip in place of the per-task reads
-    // the lock loop used to interleave with, in the same lock-then-read order.
+    // Every affected task's full label set in one read, taken only once every
+    // lock above is held so it observes the same state the delete below acts on.
     const rows =
       taskIds.length === 0
         ? []

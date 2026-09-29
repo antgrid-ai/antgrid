@@ -11,7 +11,12 @@
  * callers turn that into a synthetic per-machine key, never into a guess.
  */
 
-import { DEFAULT_PORTS } from "./capability-card";
+/** Ports a key never carries. Shared with capability-card.ts's
+ *  normalizeRemoteUrl: the two feed fields both named `repoKey` (agent:projects
+ *  rows vs. session-bus directory rows), so a port dropped here and kept there
+ *  would fold one repository into two keys. Defined here, not there, so this
+ *  pure normalizer does not pull the git-spawn module graph in behind it. */
+export const DEFAULT_PORTS = new Set(["22", "80", "443"]);
 
 // Bounds the key before it reaches a column or a match path rather than at each
 // of them.

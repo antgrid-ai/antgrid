@@ -30,12 +30,14 @@ export function isCloneableUrl(url: string): boolean {
 /** `ssh -o BatchMode=yes`, so a private repo with no cached credential fails
  *  fast instead of hanging the clone on a passphrase or host-key prompt that
  *  nothing here has a terminal to answer. Never clobbers an operator's own
- *  `GIT_SSH_COMMAND` (a wrapper script may already be handling auth its own
- *  way) — leaving that case alone is the whole preservation this does; it does
- *  not also check `core.sshCommand`, which would need a config probe of its
- *  own. */
+ *  `GIT_SSH_COMMAND` OR `GIT_SSH`: git gives `GIT_SSH_COMMAND` precedence over
+ *  both `GIT_SSH` and `core.sshCommand`, so setting it over a `GIT_SSH=plink`
+ *  (the Pageant setup Git for Windows offers) would swap the operator's
+ *  authenticating ssh for a stock one that has no key to offer. `core.sshCommand`
+ *  is still overridden — checking it would need a config probe of its own. */
 export function cloneSshEnv(): Record<string, string | undefined> | undefined {
-  return process.env.GIT_SSH_COMMAND ? undefined : { GIT_SSH_COMMAND: "ssh -o BatchMode=yes" };
+  if (process.env.GIT_SSH_COMMAND || process.env.GIT_SSH) return undefined;
+  return { GIT_SSH_COMMAND: "ssh -o BatchMode=yes" };
 }
 
 /** Last path segment of a clone URL without `.git` — the folder git itself

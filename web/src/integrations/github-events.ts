@@ -39,8 +39,8 @@ export const GITHUB_HANDLED_EVENTS = [
  * meantime then drain in receipt order.
  *
  * `label` stays here for a reason that is not "no time yet". The App's
- * configured event list does not
- * include it, so nothing is being recorded to drain; and every `issues` payload
+ * configured event list does not include it, so nothing is being recorded to
+ * drain; and every `issues` payload
  * already carries the issue's own label array, so the import gets label
  * membership without it. What a `label` event would add is only the label's own
  * rename and delete — the two cases the plan's merge section calls out as

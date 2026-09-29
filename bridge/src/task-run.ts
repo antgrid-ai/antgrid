@@ -8,8 +8,8 @@ const log = logger.child({ component: "task-run" });
  *  `resultSummary` is deliberately absent from this type rather than left unset
  *  at the call site: the route accepts it, but the bridge holds nothing it is
  *  allowed to put there — agent output, diffs and transcripts never leave the
- *  machine as task text. Absent from the shape, it cannot be
- *  filled in by a later edit that only reads the route contract. */
+ *  machine as task text. Absent from the shape, it cannot be filled in by a
+ *  later edit that only reads the route contract. */
 export interface TaskRunBody {
   localProjectId: string;
   sessionId: string;

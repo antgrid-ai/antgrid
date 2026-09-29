@@ -149,9 +149,13 @@ export class ProjectBindingReporter {
         return;
       }
       // Transient by assumption, so let the next open of this project retry —
-      // but only if nothing newer has claimed the memo since.
+      // but only if nothing newer has claimed the memo since. The streak is
+      // kept rather than the entry deleted: a blip on a pair that was already
+      // backing off a 409 must not restart that backoff at its base.
       const cur = this.reported.get(binding.localProjectId);
-      if (cur && cur.memo === memo) this.reported.delete(binding.localProjectId);
+      if (cur && cur.memo === memo) {
+        this.reported.set(binding.localProjectId, { memo, conflictStreak, retryNotBefore: 0 });
+      }
       log.warn("project binding POST failed (non-2xx or network error)", {
         localProjectId: binding.localProjectId,
       });

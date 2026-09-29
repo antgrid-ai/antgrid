@@ -75,17 +75,27 @@ test("refuses a non-absolute parentDir", async () => {
   expect(err.code).toBe("BAD_TARGET");
 });
 
-test("cloneSshEnv sets BatchMode so ssh never blocks on a prompt, but leaves an operator's own GIT_SSH_COMMAND alone", () => {
-  const prev = process.env.GIT_SSH_COMMAND;
+test("cloneSshEnv sets BatchMode so ssh never blocks on a prompt, but leaves an operator's own GIT_SSH_COMMAND or GIT_SSH alone", () => {
+  const prevCommand = process.env.GIT_SSH_COMMAND;
+  const prevSsh = process.env.GIT_SSH;
   try {
     delete process.env.GIT_SSH_COMMAND;
+    delete process.env.GIT_SSH;
     expect(cloneSshEnv()).toEqual({ GIT_SSH_COMMAND: "ssh -o BatchMode=yes" });
 
     process.env.GIT_SSH_COMMAND = "custom-ssh-wrapper";
     expect(cloneSshEnv()).toBeUndefined();
+
+    // GIT_SSH_COMMAND outranks GIT_SSH in git, so a Pageant/plink operator would
+    // otherwise have their authenticating ssh silently replaced.
+    delete process.env.GIT_SSH_COMMAND;
+    process.env.GIT_SSH = "plink.exe";
+    expect(cloneSshEnv()).toBeUndefined();
   } finally {
-    if (prev === undefined) delete process.env.GIT_SSH_COMMAND;
-    else process.env.GIT_SSH_COMMAND = prev;
+    if (prevCommand === undefined) delete process.env.GIT_SSH_COMMAND;
+    else process.env.GIT_SSH_COMMAND = prevCommand;
+    if (prevSsh === undefined) delete process.env.GIT_SSH;
+    else process.env.GIT_SSH = prevSsh;
   }
 });
 

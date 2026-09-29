@@ -272,7 +272,13 @@ class TaskListController extends AsyncNotifier<List<Task>> {
     try {
       userId = (await ref.read(currentUserProvider.future))?.userId;
     } catch (_) {
-      userId = null;
+      // A failed REFETCH (offline after an upgrade or auth callback invalidated
+      // the user) leaves the previous user on `.value`, which is what
+      // `currentUserIdProvider` and every other per-account provider still
+      // read. Reading the same here keeps a filter change or pull-to-refresh
+      // from replacing the retained list with "no tasks"; a cold-start failure
+      // has no previous value and still resolves to signed out.
+      userId = ref.read(currentUserProvider).value?.userId;
     }
     _lastUserId = userId;
     _identityKnown = true;
