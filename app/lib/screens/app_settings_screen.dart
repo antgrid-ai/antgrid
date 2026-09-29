@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -23,6 +24,7 @@ import '../providers/sign_out.dart';
 import '../providers/ui_attention_providers.dart';
 import '../services/account_api.dart';
 import '../services/app_settings_service.dart';
+import '../util/detached.dart';
 import '../widgets/color_swatch_button.dart';
 import '../widgets/delete_account_dialog.dart';
 import '../widgets/settings/help_about_section.dart';
@@ -415,7 +417,12 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
                   _Section(
                     section: SettingsSection.account,
                     body: [
-                      if (ref.watch(currentUserProvider).value != null) ...[
+                      // Not on iOS: the web account page signs in with GitHub
+                      // and Google but not with Apple, which App Review rejects
+                      // under guideline 4.8 even inside an in-app Safari view.
+                      // The sign-in screen's password reset covers iOS.
+                      if (ref.watch(currentUserProvider).value != null &&
+                          defaultTargetPlatform != TargetPlatform.iOS) ...[
                         const SizedBox(height: AbTokens.space8),
                         Text(
                           'Set or change your password on the web, where a '
@@ -436,7 +443,11 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
                               size: 10,
                               color: antgrid.textSecondary,
                             ),
-                            onTap: () => openAccountInBrowser(ref.container),
+                            onTap: () => detached(
+                              'AppSettingsScreen',
+                              'open account page',
+                              () => openAccountInBrowser(ref.container),
+                            ),
                           ),
                         ),
                         const SizedBox(height: AbTokens.space16),

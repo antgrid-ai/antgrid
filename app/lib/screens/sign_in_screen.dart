@@ -33,10 +33,10 @@ final lastAuthMethodStoreProvider = Provider<LastAuthMethodStore>(
 );
 
 /// App Store guideline 4.8: an iOS app that offers a third-party login such as
-/// Google must also offer Sign in with Apple, which this app does not yet
-/// have. iOS keeps GitHub by choice, although 4.8 has no developer-account
-/// exemption; if App Review objects, gate GitHub the same way.
-bool get _offersGoogleSignIn => defaultTargetPlatform != TargetPlatform.iOS;
+/// GitHub or Google must also offer Sign in with Apple, which this app does not
+/// yet have. App Review rejected GitHub on those grounds, and guideline 4 also
+/// rejects OAuth's hand-off to the external browser, so iOS offers neither.
+bool get _offersOAuthSignIn => defaultTargetPlatform != TargetPlatform.iOS;
 
 /// Sign-in screen.
 ///
@@ -57,7 +57,7 @@ bool get _offersGoogleSignIn => defaultTargetPlatform != TargetPlatform.iOS;
 /// Magic-link is that fallback and the primary method: it drives the web
 /// cross-device flow ([AuthService.startMagicLink] / [AuthService.pollStatus])
 /// entirely over HTTPS — no browser, no deeplink. GitHub and Google (not on
-/// iOS, see [_offersGoogleSignIn]) remain as secondary options on the existing
+/// iOS, see [_offersOAuthSignIn]) remain as secondary options on the existing
 /// browser+deeplink path.
 ///
 /// There is no password SIGN-UP here. Creating an account with one lands on
@@ -309,14 +309,15 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
     switch (method) {
       case AuthMethod.password:
         _goToStep(_Step.password);
-      case AuthMethod.github:
+      case AuthMethod.github when _offersOAuthSignIn:
         await _startOAuth('github');
-      case AuthMethod.google when _offersGoogleSignIn:
+      case AuthMethod.google when _offersOAuthSignIn:
         await _startOAuth('google');
       // A remembered link, and an address this device has never seen, take the
       // same path — the link is what works without knowing anything. So does a
-      // Google hint on a platform that does not offer Google, which an earlier
+      // provider hint on a platform that does not offer OAuth, which an earlier
       // build can have recorded.
+      case AuthMethod.github:
       case AuthMethod.google:
       case AuthMethod.link:
       case null:
@@ -846,17 +847,18 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
         // step 2 — and the link it carries — whatever the hint says.
         _AuthMethodRow(
           methods: [
-            _AuthMethodSpec(
-              icon: AbIcons.github,
-              label: 'GitHub',
-              onTap: busy ? null : () => _startOAuth('github'),
-            ),
-            if (_offersGoogleSignIn)
+            if (_offersOAuthSignIn) ...[
+              _AuthMethodSpec(
+                icon: AbIcons.github,
+                label: 'GitHub',
+                onTap: busy ? null : () => _startOAuth('github'),
+              ),
               _AuthMethodSpec(
                 icon: _googleMark,
                 label: 'Google',
                 onTap: busy ? null : () => _startOAuth('google'),
               ),
+            ],
             // Unconditional, never keyed on what the store recalls: visibility
             // that tracked the hint would flicker as the address is typed and
             // would tell anyone watching the screen which addresses this device
