@@ -23,7 +23,7 @@ class PreviewPortForwarder {
   }) : _open = open,
        _mintConnId = mintConnId ?? (() => const Uuid().v4());
 
-  final TunnelTcpOpener _open;
+  TunnelTcpOpener? _open;
   final String Function() _mintConnId;
 
   final List<ServerSocket> _servers = [];
@@ -105,7 +105,15 @@ class PreviewPortForwarder {
   }
 
   void _accept(Socket socket) {
-    if (_closed) {
+    final open = _open;
+    if (_closed || open == null) {
+      if (open == null) {
+        AbLog.info(
+          'preview',
+          'tunnel connection refused while no session is bound',
+          fields: {'port': _port},
+        );
+      }
       socket.destroy();
       return;
     }
@@ -115,7 +123,7 @@ class PreviewPortForwarder {
     final connId = _mintConnId();
     final connection = _Connection(
       socket,
-      _open(connId),
+      open(connId),
       _live.remove,
       connId: connId,
       port: _port,
@@ -123,6 +131,11 @@ class PreviewPortForwarder {
     _live.add(connection);
     connection.start();
   }
+
+  /// Points new connections at another transport, or with null refuses them
+  /// while the listener is kept bound. Connections already open stay on the
+  /// transport they were opened on.
+  void rebind(TunnelTcpOpener? open) => _open = open;
 
   /// Stops listening and aborts every live connection.
   Future<void> close() async {

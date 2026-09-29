@@ -10,6 +10,7 @@ import '../models/ab_message.dart';
 import '../project/project_session.dart';
 import '../util/ab_log.dart';
 import '../util/detached.dart';
+import 'preview_handoff.dart';
 import 'preview_port_forwarder.dart';
 
 /// Per-project preview service. Heavy-tier primary (preview:snapshot,
@@ -29,6 +30,8 @@ class PreviewService {
   /// bounds its own connect, so this only trips when the app's stream slots
   /// are all held by other forwarded connections.
   final Duration probeTimeout;
+
+  final PreviewHandoff _handoff;
 
   StreamSubscription<Map<String, dynamic>>? _heavySub;
   StreamSubscription<Map<String, dynamic>>? _statusSub;
@@ -67,9 +70,63 @@ class PreviewService {
     this.session, {
     this.checkoutId = 'main',
     this.probeTimeout = const Duration(seconds: 15),
-  }) {
+    PreviewHandoff? handoff,
+  }) : _handoff = handoff ?? PreviewHandoff.shared {
     _heavySub = session.checkoutHeavyStream(checkoutId).listen(_onHeavyJson);
     _statusSub = session.checkoutStatusStream(checkoutId).listen(_onStatusJson);
+    if (!session.transport.isLocal) {
+      final parked = _handoff.claim(_handoffKey, _adoptLate);
+      if (parked != null) _adoptParked(parked);
+    }
+  }
+
+  String get _handoffKey => '${session.projectId}#$checkoutId';
+
+  // Held as a field so [PreviewHandoff.withdraw] can match it by identity.
+  late final void Function(ParkedPreview) _adoptLate = _adoptParked;
+
+  TunnelTcpOpener _openerFor(int port) =>
+      (connId) => session.transport.openTunnelTcp(
+        connId: connId,
+        port: port,
+        checkoutId: checkoutId,
+      );
+
+  /// Takes over a predecessor's listeners and tabs. A port this service has
+  /// already opened or is opening keeps its own forwarder.
+  void _adoptParked(ParkedPreview parked) {
+    if (_disposed) {
+      unawaited(parked.close());
+      return;
+    }
+    final adopted = <PreviewTab>[];
+    for (final tab in parked.tabs) {
+      final forwarder = parked.forwarders.remove(tab.port);
+      if (forwarder == null) continue;
+      if (_tabByPort(tab.port) != null ||
+          _forwarders.containsKey(tab.port) ||
+          _opening.containsKey(tab.port)) {
+        unawaited(forwarder.close());
+        continue;
+      }
+      forwarder.rebind(_openerFor(tab.port));
+      _forwarders[tab.port] = forwarder;
+      adopted.add(tab);
+    }
+    unawaited(parked.close());
+    _autoOpenConsidered.addAll(parked.autoOpenConsidered);
+    if (adopted.isEmpty) return;
+    final parkedActive = parked.activeTabId;
+    _setState(
+      _state.copyWith(
+        tabs: [..._state.tabs, ...adopted],
+        activeTabId:
+            _state.activeTabId ??
+            (adopted.any((t) => t.port == parkedActive)
+                ? parkedActive
+                : adopted.first.port),
+      ),
+    );
   }
 
   static const _snapshotHydratorKey = 'preview:snapshot';
@@ -371,13 +428,7 @@ class PreviewService {
     await previous?.close();
     if (superseded()) return;
 
-    final forwarder = PreviewPortForwarder(
-      open: (connId) => session.transport.openTunnelTcp(
-        connId: connId,
-        port: port,
-        checkoutId: checkoutId,
-      ),
-    );
+    final forwarder = PreviewPortForwarder(open: _openerFor(port));
     final int localPort;
     try {
       localPort = await forwarder.start(port);
@@ -465,10 +516,32 @@ class PreviewService {
     // every reconnect for the rest of the session.
     session.unhydrateCheckout(checkoutId, _snapshotHydratorKey);
 
-    for (final forwarder in _forwarders.values) {
-      await forwarder.close();
-    }
+    // Parked before any await, so a successor built while this teardown is
+    // still running finds it.
+    _handoff.withdraw(_handoffKey, _adoptLate);
+    final forwarders = Map.of(_forwarders);
     _forwarders.clear();
+    if (!session.transport.isLocal && forwarders.isNotEmpty) {
+      for (final forwarder in forwarders.values) {
+        forwarder.rebind(null);
+      }
+      _handoff.park(
+        _handoffKey,
+        ParkedPreview(
+          forwarders: forwarders,
+          tabs: [
+            for (final tab in _state.tabs)
+              if (forwarders.containsKey(tab.port)) tab,
+          ],
+          activeTabId: _state.activeTabId,
+          autoOpenConsidered: Set.of(_autoOpenConsidered),
+        ),
+      );
+    } else {
+      for (final forwarder in forwarders.values) {
+        await forwarder.close();
+      }
+    }
 
     await _heavySub?.cancel();
     _heavySub = null;

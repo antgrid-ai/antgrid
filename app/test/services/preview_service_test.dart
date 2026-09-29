@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:antgrid/demo/demo_identity.dart';
 import 'package:antgrid/project/project_session.dart';
+import 'package:antgrid/services/preview_handoff.dart';
 import 'package:antgrid/services/preview_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import '../helpers/fake_agent_transport.dart';
@@ -31,6 +32,7 @@ void main() {
   setUp(() {
     useInMemoryPrefs();
   });
+  tearDown(() => PreviewHandoff.shared.clear());
 
   group('PreviewService.fromSession', () {
     test(
@@ -284,6 +286,86 @@ void main() {
       await svc.closeTab(port);
       await _waitUntil(() => conn.aborted);
       await session.close();
+    });
+
+    test('a rebuilt session keeps the tab and its listener on the same port',
+        () async {
+      final handoff = PreviewHandoff();
+      addTearDown(handoff.clear);
+      final oldT = FakeAgentTransport()..probeTls = true;
+      final oldSession = await _newSession(oldT);
+      final oldSvc = PreviewService.fromSession(oldSession, handoff: handoff);
+      final port = await freePort();
+      await oldSvc.openTab(port, path: '/dashboard');
+      final tab = oldSvc.currentState.activeTab!;
+
+      await oldSvc.dispose();
+      await oldSession.close();
+      final gap = await Socket.connect(InternetAddress.loopbackIPv4, port);
+      addTearDown(gap.destroy);
+      await gap.drain<void>().timeout(const Duration(seconds: 2));
+      expect(oldT.tunnelTcpOpens, hasLength(1));
+
+      final newT = FakeAgentTransport();
+      final newSession = await _newSession(newT);
+      final newSvc = PreviewService.fromSession(newSession, handoff: handoff);
+      expect(newSvc.currentState.tabs.single.currentUrl, tab.currentUrl);
+      expect(newSvc.currentState.activeTabId, port);
+
+      final socket = await Socket.connect(InternetAddress.loopbackIPv4, port);
+      addTearDown(socket.destroy);
+      await _waitUntil(() => newT.tunnelTcpOpens.isNotEmpty);
+      expect(newT.tunnelTcpOpens.single.port, port);
+      expect(newT.tunnelTcpOpens.single.probe, isFalse);
+
+      await newSvc.closeTab(port);
+      await newSvc.dispose();
+      await newSession.close();
+    });
+
+    test('a successor built before the old service parks still adopts it',
+        () async {
+      final handoff = PreviewHandoff();
+      addTearDown(handoff.clear);
+      final oldSession = await _newSession(FakeAgentTransport());
+      final oldSvc = PreviewService.fromSession(oldSession, handoff: handoff);
+      final port = await freePort();
+      await oldSvc.openTab(port);
+
+      final newT = FakeAgentTransport();
+      final newSession = await _newSession(newT);
+      final newSvc = PreviewService.fromSession(newSession, handoff: handoff);
+      expect(newSvc.currentState.tabs, isEmpty);
+      await oldSvc.dispose();
+      expect(newSvc.currentState.tabs.single.port, port);
+
+      final socket = await Socket.connect(InternetAddress.loopbackIPv4, port);
+      addTearDown(socket.destroy);
+      await _waitUntil(() => newT.tunnelTcpOpens.isNotEmpty);
+
+      await newSvc.dispose();
+      await oldSession.close();
+      await newSession.close();
+    });
+
+    test('a parked preview nobody claims releases its port', () async {
+      final handoff = PreviewHandoff(grace: const Duration(milliseconds: 50));
+      addTearDown(handoff.clear);
+      final session = await _newSession(FakeAgentTransport());
+      final svc = PreviewService.fromSession(session, handoff: handoff);
+      final port = await freePort();
+      await svc.openTab(port);
+
+      await svc.dispose();
+      await session.close();
+
+      await expectLater(
+        ServerSocket.bind(InternetAddress.loopbackIPv4, port),
+        throwsA(isA<SocketException>()),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+      final rebound = await ServerSocket.bind(InternetAddress.loopbackIPv4, port);
+      await rebound.close();
     });
 
     test('an unreachable probe opens no tab and reports the error', () async {
