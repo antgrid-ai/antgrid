@@ -28,6 +28,7 @@ test("event labels", () => {
   expect(EVENT_LABELS.PermissionRequest).toBe("permission_request");
   expect(EVENT_LABELS.Stop).toBe("stop");
   expect(EVENT_LABELS.PostToolUse).toBe("post_tool_use");
+  expect(EVENT_LABELS.UserPromptSubmit).toBe("user_prompt_submit");
 });
 
 test("matches codex-generated golden (Stop, timeout 600)", () => {

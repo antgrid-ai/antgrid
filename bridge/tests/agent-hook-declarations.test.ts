@@ -29,7 +29,7 @@ describe("hook profile declarations", () => {
   test("only the agents with an installed integration declare posts", () => {
     const expected: PerAgent<readonly string[] | null> = {
       "claude-code": ["/session-title", "/turn-start", "/turn-activity", "/notify", "/handler-event"],
-      codex: ["/session-title", "/handler-event", "/notify", "/hook-alive", "/turn-activity"],
+      codex: ["/session-title", "/handler-event", "/notify", "/hook-alive", "/turn-activity", "/turn-start"],
       // Posted from inside opencode's own runtime, so this list is deliberately
       // NOT derivable from its (empty) `events`.
       opencode: ["/session-title", "/notify", "/handler-event"],
@@ -60,7 +60,9 @@ describe("needsKeystrokeTurnStart", () => {
   test("true only for agents that report turn ends and no turn start", () => {
     const expected: PerAgent<boolean> = {
       "claude-code": false,
-      codex: true,
+      // Codex has a real UserPromptSubmit turn-start hook, so it is not in
+      // the inferred set — cursor/copilot are its only members now.
+      codex: false,
       opencode: false,
       "cursor-agent": true,
       "github-copilot": true,

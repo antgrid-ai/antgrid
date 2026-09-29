@@ -329,7 +329,9 @@ const CODEX_INJECTION_WIN32: string[] = [
   "-c",
   'hooks.PostToolUse=[{hooks=[{type="command",command="& \\"/opt/antgrid/antgrid-bridge\\" \\"hook\\" \\"codex\\" \\"post-tool-use\\""}]}]',
   "-c",
-  "hooks.state={'C:\\<session-flags>\\config.toml:stop:0:0'={trusted_hash=\"sha256:1d7caa27559a541b2c55656844ac9e3586b9d87f70873f623bb3b93bde490e94\"},'C:\\<session-flags>\\config.toml:session_start:0:0'={trusted_hash=\"sha256:61c27f2f55cc14d58631afd9d17d783e02066f5a4251859af01ff1779b5d21b3\"},'C:\\<session-flags>\\config.toml:post_tool_use:0:0'={trusted_hash=\"sha256:5ee23c6ace979a23712a5b3c2ca3e3edf0d87975c9823116b5fd200f5d6dc1f5\"}}",
+  'hooks.UserPromptSubmit=[{hooks=[{type="command",command="& \\"/opt/antgrid/antgrid-bridge\\" \\"hook\\" \\"codex\\" \\"user-prompt\\""}]}]',
+  "-c",
+  "hooks.state={'C:\\<session-flags>\\config.toml:stop:0:0'={trusted_hash=\"sha256:1d7caa27559a541b2c55656844ac9e3586b9d87f70873f623bb3b93bde490e94\"},'C:\\<session-flags>\\config.toml:session_start:0:0'={trusted_hash=\"sha256:61c27f2f55cc14d58631afd9d17d783e02066f5a4251859af01ff1779b5d21b3\"},'C:\\<session-flags>\\config.toml:post_tool_use:0:0'={trusted_hash=\"sha256:5ee23c6ace979a23712a5b3c2ca3e3edf0d87975c9823116b5fd200f5d6dc1f5\"},'C:\\<session-flags>\\config.toml:user_prompt_submit:0:0'={trusted_hash=\"sha256:36508028de1a0d57fbac282ed6f87c014236fe58387ba473f376530be766406b\"}}",
 ];
 
 const CODEX_INJECTION_POSIX: string[] = [
@@ -340,7 +342,9 @@ const CODEX_INJECTION_POSIX: string[] = [
   "-c",
   `hooks.PostToolUse=[{hooks=[{type="command",command="'/opt/antgrid/antgrid-bridge' 'hook' 'codex' 'post-tool-use'"}]}]`,
   "-c",
-  `hooks.state={'/<session-flags>/config.toml:stop:0:0'={trusted_hash="sha256:d14f3ab0bb0201bcccdc987a0cbbf4418627d4f2bd725ed8be61ec81c8c65e9e"},'/<session-flags>/config.toml:session_start:0:0'={trusted_hash="sha256:ec29560fd4a6819f16dd77fe0e7a9d0507e66d8188c269e9fe6b70a64a070f3f"},'/<session-flags>/config.toml:post_tool_use:0:0'={trusted_hash="sha256:83edf9d0c13f3d373af9589462c6d02caf3ce63cb495d46c7283765f5a985a0d"}}`,
+  `hooks.UserPromptSubmit=[{hooks=[{type="command",command="'/opt/antgrid/antgrid-bridge' 'hook' 'codex' 'user-prompt'"}]}]`,
+  "-c",
+  `hooks.state={'/<session-flags>/config.toml:stop:0:0'={trusted_hash="sha256:d14f3ab0bb0201bcccdc987a0cbbf4418627d4f2bd725ed8be61ec81c8c65e9e"},'/<session-flags>/config.toml:session_start:0:0'={trusted_hash="sha256:ec29560fd4a6819f16dd77fe0e7a9d0507e66d8188c269e9fe6b70a64a070f3f"},'/<session-flags>/config.toml:post_tool_use:0:0'={trusted_hash="sha256:83edf9d0c13f3d373af9589462c6d02caf3ce63cb495d46c7283765f5a985a0d"},'/<session-flags>/config.toml:user_prompt_submit:0:0'={trusted_hash="sha256:1f928da0e2dc2aaa74bb7cb600537d81b92b109cab7e16a02a6e8700bb1c96ba"}}`,
 ];
 
 const CODEX_INJECTION = WIN ? CODEX_INJECTION_WIN32 : CODEX_INJECTION_POSIX;

@@ -178,7 +178,7 @@ test("a fresh turnStart lifts the interrupted mark, so a LATER turnActivity can 
 });
 
 test("a submitted keystroke that opens a new turn lifts the interrupted mark", () => {
-  const keystroked = fold([sessions(1, { tool: "codex" })]);
+  const keystroked = fold([sessions(1, { tool: "cursor-agent" })]);
   const working = turnStart(keystroked, "r0");
   const interrupted = closeInterruptedTurn(working, "r0");
   const resubmitted = userReply(interrupted, "r0", { submitted: true, typed: true });
@@ -252,10 +252,10 @@ test("a turn-start closes the suppression window", () => {
 });
 
 test("a keystroke-inferred turn start also closes the window", () => {
-  // The agents with no pre-turn hook (codex/cursor/copilot) open their turn off
-  // a submitted keystroke — that has to unlatch the window too, or their whole
+  // The agents with no pre-turn hook (cursor/copilot) open their turn off a
+  // submitted keystroke — that has to unlatch the window too, or their whole
   // next turn is unsupervised.
-  const done = fold([sessions(1, { tool: "codex" }), push("task_complete", "r0")]);
+  const done = fold([sessions(1, { tool: "cursor-agent" }), push("task_complete", "r0")]);
   const typed = userReply(done, "r0", { typed: true });
   expect(isStaleIdleNudge(userReply(typed, "r0", { submitted: true }), "r0")).toBe(false);
 });
@@ -766,10 +766,11 @@ test("a reply on an unblocked session is a no-op (SAME object)", () => {
 // ── Keystroke-inferred turn starts (agents with no pre-turn hook) ────────────
 
 test("a submitted prompt opens the turn for an agent that has no turn-start hook", () => {
-  // codex/cursor/copilot expose turn-END hooks only, so the CR is the sole
-  // turn-start signal their terminal-mode sessions have. Without this they read
-  // "done" for the whole turn.
-  const idle = fold([sessions(1, { tool: "codex" })]);
+  // cursor/copilot expose turn-END hooks only, so the CR is the sole turn-start
+  // signal their terminal-mode sessions have. Without this they read "done" for
+  // the whole turn. (Codex now has its own real turn-start hook and is
+  // no longer inferred; cursor-agent is this behavior's exemplar now.)
+  const idle = fold([sessions(1, { tool: "cursor-agent" })]);
   expect(idle.status).toBe("done");
   // A PTY sends one keystroke per frame: the prompt text, then the CR.
   const typed = userReply(idle, "r0", { typed: true });
@@ -780,7 +781,7 @@ test("a submitted prompt opens the turn for an agent that has no turn-start hook
 });
 
 test("a submit that arrives as one chunk (paste / send-to-agent) opens the turn", () => {
-  const idle = fold([sessions(1, { tool: "codex" })]);
+  const idle = fold([sessions(1, { tool: "cursor-agent" })]);
   expect(userReply(idle, "r0", { typed: true, submitted: true }).status).toBe("working");
 });
 
@@ -788,7 +789,7 @@ test("a bare enter with nothing typed does NOT open a turn", () => {
   // Enter on an empty prompt, or to dismiss a TUI menu, starts no turn — so no
   // stop hook is coming and an inferred turn would hang the session on
   // "working" until some unrelated later turn ended.
-  const idle = fold([sessions(1, { tool: "codex" })]);
+  const idle = fold([sessions(1, { tool: "cursor-agent" })]);
   expect(userReply(idle, "r0", { submitted: true })).toBe(idle);
   expect(userReply(idle, "r0", { submitted: true }).status).toBe("done");
 });
@@ -796,7 +797,7 @@ test("a bare enter with nothing typed does NOT open a turn", () => {
 test("the typed marker is consumed by the turn it opens", () => {
   // The next bare enter has to earn its own content, or one prompt would license
   // every subsequent stray CR.
-  const idle = fold([sessions(1, { tool: "codex" })]);
+  const idle = fold([sessions(1, { tool: "cursor-agent" })]);
   const working = userReply(idle, "r0", { typed: true, submitted: true });
   const done = reduceWorkStatus(working, push("task_complete", "r0"));
   expect(done.status).toBe("done");
@@ -804,14 +805,15 @@ test("the typed marker is consumed by the turn it opens", () => {
 });
 
 test("a bare keystroke (no CR) is not a submitted prompt", () => {
-  const idle = fold([sessions(1, { tool: "codex" })]);
+  const idle = fold([sessions(1, { tool: "cursor-agent" })]);
   expect(userReply(idle, "r0")).toBe(idle);
   expect(userReply(idle, "r0", { submitted: false })).toBe(idle);
 });
 
 test("a submitted prompt is NOT inferred for an agent that reports its own turns", () => {
-  // Claude has a real /turn-start hook and chat sessions have turn frames —
-  // guessing from keystrokes there could only be wrong.
+  // Claude has a real /turn-start hook and chat sessions have turn frames, and
+  // codex now has its own real UserPromptSubmit hook too — guessing from
+  // keystrokes there could only be wrong for either.
   // Typed content is present in every case below, so the tool gate is the only
   // thing keeping these sessions out of an inferred turn.
   const submit = (s: WorkStatusState) =>
@@ -819,8 +821,8 @@ test("a submitted prompt is NOT inferred for an agent that reports its own turns
 
   const claude = fold([sessions(1, { tool: "claude-code" })]);
   expect(submit(claude).status).toBe("done");
-  const chat = fold([sessions(1, { tool: "codex", mode: "chat" })]);
-  expect(submit(chat).status).toBe("done");
+  const codex = fold([sessions(1, { tool: "codex" })]);
+  expect(submit(codex).status).toBe("done");
 });
 
 test("a submitted prompt is NOT inferred for a hookless agent (nothing would close it)", () => {
@@ -837,17 +839,28 @@ test("a submitted prompt is NOT inferred for a hookless agent (nothing would clo
   expect(submit(untooled).status).toBe("done");
 });
 
+test("a submitted prompt is NOT inferred for a chat session either", () => {
+  // Chat sessions get precise structured `agent:turn-start` frames from their
+  // own driver regardless of agent, so the keystroke gate must exclude a chat
+  // session even on a tool that infers turns in terminal mode.
+  const submit = (s: WorkStatusState) =>
+    userReply(userReply(s, "r0", { typed: true }), "r0", { submitted: true });
+
+  const chat = fold([sessions(1, { tool: "cursor-agent", mode: "chat" })]);
+  expect(submit(chat).status).toBe("done");
+});
+
 test("a submitted prompt clears the previous turn's end before opening the new one", () => {
   // statusFor reads notifications before activeTurns, so a leftover
   // task_complete would keep the re-prompted session on "done".
-  const done = fold([sessions(1, { tool: "codex" }), push("task_complete", "r0")]);
+  const done = fold([sessions(1, { tool: "cursor-agent" }), push("task_complete", "r0")]);
   expect(done.status).toBe("done");
   expect(userReply(done, "r0", { typed: true, submitted: true }).status).toBe("working");
 });
 
 test("a submitted prompt on an already-working session is a no-op (SAME object)", () => {
   const working = userReply(
-    fold([sessions(1, { tool: "codex" })]),
+    fold([sessions(1, { tool: "cursor-agent" })]),
     "r0",
     { typed: true, submitted: true },
   );
@@ -862,10 +875,11 @@ test("a submitted prompt on an already-working session is a no-op (SAME object)"
 // ── The CLI's own commands are not prompts ───────────────────────────────────
 
 test("a submitted slash command does NOT open a turn", () => {
-  // Measured against a real codex: an ordinary prompt fires its `notify` argv,
-  // `/compact`, `/new` and `/status` fire nothing, so a start inferred from one
-  // wedged the session on "working" for the rest of its life.
-  const idle = fold([sessions(1, { tool: "codex" })]);
+  // An agent with no pre-turn hook exposes only the CR to infer from, and a
+  // CLI's own commands (e.g. cursor's `/compact`-style built-ins) fire nothing
+  // on their own turn-end channel, so a start inferred from one would wedge the
+  // session on "working" for the rest of its life.
+  const idle = fold([sessions(1, { tool: "cursor-agent" })]);
   // One keystroke per frame: the `/` that opens the line, then the rest of it.
   const slash = userReply(idle, "r0", { typed: true, command: true });
   const rest = userReply(slash, "r0", { typed: true });
@@ -874,7 +888,7 @@ test("a submitted slash command does NOT open a turn", () => {
 
 test("a slash command pasted whole (one chunk) does NOT open a turn", () => {
   // The app's send-to-agent composer delivers "line\r" as a single frame.
-  const idle = fold([sessions(1, { tool: "codex" })]);
+  const idle = fold([sessions(1, { tool: "cursor-agent" })]);
   expect(
     userReply(idle, "r0", { typed: true, submitted: true, command: true }).status,
   ).toBe("done");
@@ -882,8 +896,8 @@ test("a slash command pasted whole (one chunk) does NOT open a turn", () => {
 
 test("the command line is consumed by its submit, so the next prompt still opens", () => {
   // The whole failure this guards: leaving the classification latched turned one
-  // `/compact` into a session that could never read "working" again.
-  const idle = fold([sessions(1, { tool: "codex" })]);
+  // slash command into a session that could never read "working" again.
+  const idle = fold([sessions(1, { tool: "cursor-agent" })]);
   const afterCommand = userReply(
     userReply(idle, "r0", { typed: true, command: true }),
     "r0",
@@ -897,7 +911,7 @@ test("the command line is consumed by its submit, so the next prompt still opens
 test("only the character that OPENS the line classifies it", () => {
   // A `/` typed mid-prompt ("see /etc/hosts") is not a command, and the frames
   // after the first carry the middle of a line rather than its start.
-  const idle = fold([sessions(1, { tool: "codex" })]);
+  const idle = fold([sessions(1, { tool: "cursor-agent" })]);
   const typed = userReply(idle, "r0", { typed: true });
   const slashInside = userReply(typed, "r0", { typed: true, command: true });
   expect(userReply(slashInside, "r0", { submitted: true }).status).toBe("working");
@@ -915,7 +929,7 @@ test("a command line still clears the block it was typed into", () => {
   // The other half of userReply is unconditional: a terminal-mode session has no
   // resolve frame, so any keystroke is what says the reported block is gone —
   // typing `/model` at a permission prompt must not leave it on "needs you".
-  const blocked = fold([sessions(1, { tool: "codex" }), push("permission_request", "r0")]);
+  const blocked = fold([sessions(1, { tool: "cursor-agent" }), push("permission_request", "r0")]);
   expect(blocked.status).toBe("attention");
   expect(userReply(blocked, "r0", { typed: true, command: true }).status).toBe("done");
 });
@@ -923,14 +937,14 @@ test("a command line still clears the block it was typed into", () => {
 test("the project's agent.tool is what a session with no tool of its own inherits", () => {
   // A SessionEntry only carries `tool` when it OVERRODE the project default, so
   // reading it alone opted every default-spec session out of the inference.
-  const hello = { id: "m", timestamp: 0, type: "agent:hello", tool: "codex", version: "0" } as any;
+  const hello = { id: "m", timestamp: 0, type: "agent:hello", tool: "cursor-agent", version: "0" } as any;
   const s = fold([hello, sessions(1)]);
   expect(s.keystrokeTurnSessions.has("r0")).toBe(true);
   expect(userReply(s, "r0", { typed: true, submitted: true }).status).toBe("working");
 });
 
 test("a session's own tool still overrides the project default", () => {
-  const hello = { id: "m", timestamp: 0, type: "agent:hello", tool: "codex", version: "0" } as any;
+  const hello = { id: "m", timestamp: 0, type: "agent:hello", tool: "cursor-agent", version: "0" } as any;
   // claude-code has a real /turn-start hook, so it must stay out of the set even
   // though the project default would have put it in.
   const s = fold([hello, sessions(1, { tool: "claude-code" })]);
@@ -942,11 +956,11 @@ test("a session's own tool still overrides the project default", () => {
 const submitInto = (s: WorkStatusState, id = "r0") =>
   userReply(s, id, { typed: true, submitted: true });
 
-test("a hook turn-end closes an inferred turn on its own", () => {
+test("a hook turn-end closes a turn on its own", () => {
   // codex fires its `notify` argv and its Stop hook independently, so a session
   // that reaches only one of them must still leave "working". With one closer,
-  // an enter that dismissed a TUI menu opened a turn nothing could ever close.
-  const working = submitInto(fold([sessions(1, { tool: "codex" })]));
+  // a turn nothing but the dead channel was watching would run forever.
+  const working = turnStart(fold([sessions(1, { tool: "codex" })]), "r0");
   expect(working.status).toBe("working");
   expect(hookTurnEnd(working, "r0").status).toBe("done");
 });
@@ -958,7 +972,7 @@ test("a hook turn-end leaves the notifications map alone", () => {
   // forwarded to the Handler as a live block. closeTurn — the Esc path — does
   // clear it, which is why this is not that.
   const ended = reduceWorkStatus(
-    submitInto(fold([sessions(1, { tool: "codex" })])),
+    turnStart(fold([sessions(1, { tool: "codex" })]), "r0"),
     push("task_complete", "r0"),
   );
   const after = hookTurnEnd(ended, "r0");
@@ -973,42 +987,46 @@ test("a hook turn-end with nothing open is a no-op (SAME object)", () => {
 
 test("a session whose hook channel died stops inferring turn starts", () => {
   // The set is recomputed from the agent's STATIC spec on every session list, so
-  // without a durable mark the loss is undone by the next one.
-  const live = fold([sessions(1, { tool: "codex" })]);
+  // without a durable mark the loss is undone by the next one. Codex has its own
+  // real turn-start hook now and is no longer in this set — cursor-agent is
+  // the exemplar for the keystroke-inference path this mark gates.
+  const live = fold([sessions(1, { tool: "cursor-agent" })]);
   const dead = noteHookChannelLost(live, "r0");
   expect(dead.keystrokeTurnSessions.has("r0")).toBe(false);
   expect(submitInto(dead).status).toBe("done");
   // ...and the mark survives the next session list, which is where the spec
   // would otherwise put it straight back.
-  const relisted = reduceWorkStatus(dead, sessions(1, { tool: "codex" }));
+  const relisted = reduceWorkStatus(dead, sessions(1, { tool: "cursor-agent" }));
   expect(relisted.keystrokeTurnSessions.has("r0")).toBe(false);
 });
 
 test("losing the hook channel closes the turn that channel was going to close", () => {
-  const working = submitInto(fold([sessions(1, { tool: "codex" })]));
+  const working = submitInto(fold([sessions(1, { tool: "cursor-agent" })]));
   expect(noteHookChannelLost(working, "r0").status).toBe("done");
 });
 
 test("losing the hook channel does NOT close a turn the agent announced itself", () => {
   // Only a keystroke-inferred turn rode on the dead channel; claude's is a real
-  // /turn-start, and ending it on a probe's word would be inventing an end.
+  // /turn-start, and ending it on a probe's word would be inventing an end. Codex
+  // now has one too, via the same `/turn-start` hook post rather than a
+  // structured frame.
   const working = fold([sessions(1, { tool: "claude-code" }), turnStartFrame("r0")]);
   expect(working.status).toBe("working");
   expect(noteHookChannelLost(working, "r0").status).toBe("working");
 });
 
 test("a hook-alive ping after the fact restores the inference", () => {
-  const dead = noteHookChannelLost(fold([sessions(1, { tool: "codex" })]), "r0");
+  const dead = noteHookChannelLost(fold([sessions(1, { tool: "cursor-agent" })]), "r0");
   const back = noteHookChannelRestored(dead, "r0");
   // Not reinstated here — the state keeps no per-session tool to reinstate it
   // from. The session list that follows the restore is what recomputes it.
-  const relisted = reduceWorkStatus(back, sessions(1, { tool: "codex" }));
+  const relisted = reduceWorkStatus(back, sessions(1, { tool: "cursor-agent" }));
   expect(relisted.keystrokeTurnSessions.has("r0")).toBe(true);
   expect(submitInto(relisted).status).toBe("working");
 });
 
 test("hook channel marks are pure and pruned with their session", () => {
-  const live = fold([sessions(1, { tool: "codex" })]);
+  const live = fold([sessions(1, { tool: "cursor-agent" })]);
   expect(noteHookChannelRestored(live, "r0")).toBe(live);
   const dead = noteHookChannelLost(live, "r0");
   expect(noteHookChannelLost(dead, "r0")).toBe(dead);

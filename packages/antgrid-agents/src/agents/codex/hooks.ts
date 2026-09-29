@@ -11,7 +11,7 @@ import {
   type HookCommand,
 } from "../../hook-command";
 import { MAX_NOTIFICATION_BODY_LEN } from "../../transcript-tail";
-import { compact, parseOrEmpty, titlePost, type HookInvocation, type HookPost } from "../hook-posts";
+import { compact, namesTheSession, parseOrEmpty, titlePost, type HookInvocation, type HookPost } from "../hook-posts";
 import type { HookInjectCtx, HookPostCtx, LaunchAugmentation } from "../types";
 
 const CODEX_HOOK_TIMEOUT = 600;
@@ -35,8 +35,10 @@ export function buildCodexNotifyInjection(
   const events: Array<{ event: string; label: string; commandEvent: string }> = [
     { event: "Stop", label: EVENT_LABELS.Stop, commandEvent: "stop" },
     { event: "SessionStart", label: EVENT_LABELS.SessionStart, commandEvent: "session-start" },
-    // Codex has no pre-turn hook, so nothing re-asserts "working" mid-turn
-    // without this — the Claude side's catch-all PostToolUse has the same job.
+    // UserPromptSubmit (below) fires once, at the start of a turn — a long
+    // multi-tool turn still needs something to re-assert "working" between
+    // sibling tool calls, which is this event's whole job. The Claude side's
+    // catch-all PostToolUse has the same job.
     // Registered synchronous (no `async=true`, unlike the Claude side): codex's
     // hook_config.rs support for that field on a command handler is unconfirmed
     // against the pinned version, and a wrong guess there breaks trusted_hash
@@ -46,6 +48,10 @@ export function buildCodexNotifyInjection(
     // this off the critical path, or measure it, before relying on the
     // Claude-side cost argument covering this agent too.
     { event: "PostToolUse", label: EVENT_LABELS.PostToolUse, commandEvent: "post-tool-use" },
+    // A real turn-start: measured (bun-pty probe) to fire exactly once per
+    // submitted prompt, before the model turn, and not for /status, /new or
+    // /compact. Lets `needsKeystrokeTurnStart` drop codex — see registry.ts.
+    { event: "UserPromptSubmit", label: EVENT_LABELS.UserPromptSubmit, commandEvent: "user-prompt" },
   ];
   const stateEntries = events
     .map(({ label, commandEvent }) => {
@@ -106,17 +112,27 @@ const CodexStopPayloadSchema = z.object({
   last_assistant_message: z.string().nullish(),
 });
 
-export const events = ["after-agent", "permission-request", "stop", "session-start", "post-tool-use"] as const;
+// Codex's UserPromptSubmit stdin (measured): session_id, turn_id,
+// transcript_path, cwd, hook_event_name, model, permission_mode, prompt. Only
+// the three read here matter — turn_id correlates nothing on this side (the
+// matching Stop is found by session/terminal, not by turn_id).
+const CodexUserPromptPayloadSchema = z.object({
+  session_id: z.string().nullish(),
+  transcript_path: z.string().nullish(),
+  prompt: z.string().nullish(),
+});
+
+export const events = ["after-agent", "permission-request", "stop", "session-start", "post-tool-use", "user-prompt"] as const;
 
 // Two closers, not one: `after-agent` is the `notify` channel and `stop` is the
 // Stop command hook, and codex fires them independently.
 export const turnBoundaryEvents = {
-  start: [],
+  start: ["user-prompt"],
   end: ["after-agent", "stop"],
 } as const;
 
-export const posts = ["/session-title", "/handler-event", "/notify", "/hook-alive", "/turn-activity"] as const;
-export const observation = { notifications: true, titles: true, handler: true, turnStart: false, turnEnd: true, hookAlive: true } as const;
+export const posts = ["/session-title", "/handler-event", "/notify", "/hook-alive", "/turn-activity", "/turn-start"] as const;
+export const observation = { notifications: true, titles: true, handler: true, turnStart: true, turnEnd: true, hookAlive: true } as const;
 
 export async function toPosts(
   invocation: HookInvocation,
@@ -141,10 +157,23 @@ export async function toPosts(
       // Older running terminals may still invoke the pre-review hook.
       return [];
     } else if (invocation.event === "post-tool-use") {
-      // Codex has no turn-start hook, so this is what re-asserts "working"
-      // between the notify channel's turn-end posts rather than leaving a
-      // multi-tool turn reading stale until the next one.
+      // A sibling tool completing mid-turn is still activity, re-asserting
+      // "working" between UserPromptSubmit and Stop the same way Claude's
+      // catch-all PostToolUse does.
       if (terminalId) posts.push({ port, path: "/turn-activity", body: { terminalId } });
+    } else if (invocation.event === "user-prompt") {
+      // A fresh turn began — reset control-plane work status to "working" so a
+      // re-prompt of an existing session (the Stop hook already fired
+      // task_complete) no longer reads as done/attention. Replaces keystroke
+      // inference for codex: see `needsKeystrokeTurnStart` in registry.ts.
+      const input = parseOrEmpty(CodexUserPromptPayloadSchema, raw);
+      if (terminalId) posts.push({ port, path: "/turn-start", body: { terminalId } });
+      posts.push(
+        titlePost(port, terminalId, input?.session_id, "codex", {
+          ...(namesTheSession(input?.prompt) ? { prompt: input!.prompt } : {}),
+          ...(input?.transcript_path ? { transcriptPath: input.transcript_path } : {}),
+        }),
+      );
     } else if (invocation.event === "stop") {
       // Parse failures fall through to a bare notify rather than returning:
       // a turn-end notification must survive a payload we can't read.

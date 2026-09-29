@@ -605,7 +605,7 @@ export function judgeCapable(tool: string): boolean {
  * submitted keystroke: the inferred turn is guaranteed a closer, so it cannot
  * wedge the session on "working" (see work-status.ts's userReply).
  *
- * Excludes both ends of the spectrum. Claude declares a real UserPromptSubmit
+ * Excludes both ends of the spectrum. Claude and codex each declare a real
  * turn-start hook, so guessing there could only be wrong. An agent with no
  * turn-end event — opencode and antigravity, whose out-of-band integrations
  * declare no `bridge hook` events, and the hookless kilo/kimi/mistral-vibe —

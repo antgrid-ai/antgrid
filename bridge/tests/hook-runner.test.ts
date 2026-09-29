@@ -797,6 +797,51 @@ describe("Codex hooks", () => {
     await h.run();
     expect(h.posts).toEqual([]);
   });
+
+  test("user-prompt posts a turn-start and a title request", async () => {
+    const h = harness({
+      agent: "codex",
+      event: "user-prompt",
+      stdin: JSON.stringify({ session_id: "s1", transcript_path: "/tmp/t.jsonl", prompt: "hi" }),
+    });
+    await h.run();
+    expect(h.posts).toEqual([
+      { port: 43123, path: "/turn-start", body: { terminalId: "term-1" } },
+      {
+        port: 43123,
+        path: "/session-title",
+        body: {
+          terminalId: "term-1",
+          sessionId: "s1",
+          agent: "codex",
+          prompt: "hi",
+          transcriptPath: "/tmp/t.jsonl",
+        },
+      },
+    ]);
+  });
+
+  test("user-prompt withholds the prompt from a slash command, but still opens the turn", async () => {
+    const h = harness({
+      agent: "codex",
+      event: "user-prompt",
+      stdin: JSON.stringify({ session_id: "s1", prompt: "/compact" }),
+    });
+    await h.run();
+    expect(h.posts).toEqual([
+      { port: 43123, path: "/turn-start", body: { terminalId: "term-1" } },
+      { port: 43123, path: "/session-title", body: { terminalId: "term-1", sessionId: "s1", agent: "codex" } },
+    ]);
+  });
+
+  test("user-prompt posts nothing without a terminal id beyond the turn-start-less title", async () => {
+    const h = harness({
+      agent: "codex", event: "user-prompt", stdin: JSON.stringify({ prompt: "hi" }),
+      env: { ANTGRID_TERMINAL_ID: undefined },
+    });
+    await h.run();
+    expect(h.posts).toEqual([]);
+  });
 });
 
 describe("session capture hooks", () => {

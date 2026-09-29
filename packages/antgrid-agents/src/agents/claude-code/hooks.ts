@@ -4,7 +4,7 @@ import { atomicWriteFile } from "../../atomic-file";
 import type { HookCommand } from "../../hook-command";
 import { logger } from "../../host";
 import { hasFiles } from "../launch-inject";
-import { compact, parseOrEmpty, titlePost, type HookInvocation, type HookPost } from "../hook-posts";
+import { compact, namesTheSession, parseOrEmpty, titlePost, type HookInvocation, type HookPost } from "../hook-posts";
 import type { HookInjectCtx, HookPostCtx, LaunchAugmentation } from "../types";
 
 const log = logger.child({ component: "agent-launch" });
@@ -151,14 +151,16 @@ const ClaudePayloadSchema = z.object({
 });
 type ClaudePayload = z.infer<typeof ClaudePayloadSchema>;
 
-// "user-prompt" (→ /turn-start + /session-title) is Claude-specific: Claude exposes a
+// "user-prompt" (→ /turn-start + /session-title): Claude exposes a
 // UserPromptSubmit hook that fires before each new turn, and it is the ONLY
 // turn-start signal a terminal-mode Claude session has (chat sessions get
-// precise `agent:turn-start` frames from their driver instead).
-// Codex/Cursor/Copilot expose no pre-turn hook, so their terminal-mode sessions
-// infer the start from a submitted keystroke — see `needsKeystrokeTurnStart` in
-// ../registry.ts, which reads the `turnBoundaryEvents` declared below. Their
-// turn-END hooks still deliver attention/error/done.
+// precise `agent:turn-start` frames from their driver instead). Codex declares
+// its own UserPromptSubmit-backed "user-prompt" independently (see
+// ../codex/hooks.ts). Cursor/Copilot expose no pre-turn hook at all, so their
+// terminal-mode sessions infer the start from a submitted keystroke — see
+// `needsKeystrokeTurnStart` in ../registry.ts, which reads the
+// `turnBoundaryEvents` declared below. Their turn-END hooks still deliver
+// attention/error/done.
 //
 // "question"/"question-answered" are the AskUserQuestion pair, the second of
 // which is raised by either completion hook — the two are alternatives and
@@ -194,17 +196,6 @@ const CLAUDE_FATAL_STOP_ERRORS = new Set([
 function claudeStopFailureEvent(errorClass: string): "limit_hit" | "turn_failed" | "turn_end" {
   if (errorClass === "rate_limit") return "limit_hit";
   return CLAUDE_FATAL_STOP_ERRORS.has(errorClass) ? "turn_end" : "turn_failed";
-}
-
-// A submission the model can name a task from. A slash command is the user
-// invoking a command, not describing what they want done — "/clear", "/commit"
-// and their arguments name the command, so a title generated from one describes
-// the tool rather than the session, and the attempt it spends is gone.
-// Withholding `prompt` does not drop the post: it falls through to the on-disk
-// read, which is what a session without a pre-turn hook already does.
-function namesTheSession(prompt: string | null | undefined): boolean {
-  const text = prompt?.trim();
-  return !!text && !text.startsWith("/");
 }
 
 // Bounds the loopback POST, not the display. Set to the engine's escalation row
