@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -100,6 +101,7 @@ AuthService _authFor(
   Future<http.Response> Function(http.Request)? respond,
   List<String>? paths,
   Future<bool> Function(Uri url)? launchUrl,
+  AppleCredentialRequest? requestAppleCredential,
 }) => AuthService(
   licenseApiUrl: 'https://lic.test',
   storage: storage,
@@ -114,6 +116,9 @@ AuthService _authFor(
   // Refusing doubles as the only signal that OAuth (and not the link) is what
   // a tap reached for; pass a launcher that opens to exercise the other side.
   launchUrl: launchUrl ?? (_) async => false,
+  // The real sheet is a platform channel no widget test answers; a dismissed
+  // sheet is the inert default.
+  requestAppleCredential: requestAppleCredential ?? (_) async => null,
 );
 
 Widget _wrap(AuthStorage storage) => _wrapService(_authFor(storage));
@@ -145,12 +150,19 @@ Future<List<String>> _pumpScreen(
   LastAuthMethodStore? store,
   _GatedStorage? storage,
   Future<bool> Function(Uri url)? launchUrl,
+  AppleCredentialRequest? requestAppleCredential,
 }) async {
   final paths = <String>[];
   final tickets = storage ?? (_GatedStorage(null)..gate.complete());
   await tester.pumpWidget(
     _wrapService(
-      _authFor(tickets, respond: respond, paths: paths, launchUrl: launchUrl),
+      _authFor(
+        tickets,
+        respond: respond,
+        paths: paths,
+        launchUrl: launchUrl,
+        requestAppleCredential: requestAppleCredential,
+      ),
       store: store,
     ),
   );
@@ -374,6 +386,124 @@ void main() {
       expect(find.text('Google'), findsNothing);
       expect(find.text('Password'), findsOneWidget);
     }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+    testWidgets('Apple is offered on iOS and macOS only', (tester) async {
+      await _pumpScreen(tester);
+
+      final offered = {
+        TargetPlatform.iOS,
+        TargetPlatform.macOS,
+      }.contains(defaultTargetPlatform);
+      expect(
+        find.text('Continue with Apple'),
+        offered ? findsOneWidget : findsNothing,
+      );
+    }, variant: TargetPlatformVariant.all());
+
+    testWidgets('the Apple button signs in and records the hint', (
+      tester,
+    ) async {
+      final store = _FakeAuthMethodStore();
+      final nonces = <String>[];
+      final paths = await _pumpScreen(
+        tester,
+        store: store,
+        respond: (req) async => http.Response(
+          '{}',
+          200,
+          headers: {
+            'set-cookie': 'better-auth.session_token=signed.apple; Path=/',
+          },
+        ),
+        requestAppleCredential: (nonce) async {
+          nonces.add(nonce);
+          return const AppleCredential(
+            identityToken: 'id-token',
+            authorizationCode: 'auth-code',
+          );
+        },
+      );
+
+      await tester.enterText(find.byType(TextField), 'user@example.com');
+      await tester.tap(find.text('Continue with Apple'));
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+
+      expect(nonces, hasLength(1));
+      expect(paths, [
+        '/api/auth/sign-in/social',
+        '/account/apple/authorization-code',
+      ]);
+      expect(store.memory['user@example.com'], AuthMethod.apple);
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+    testWidgets('a dismissed Apple sheet returns to the form quietly', (
+      tester,
+    ) async {
+      final paths = await _pumpScreen(tester);
+
+      await tester.tap(find.text('Continue with Apple'));
+      await tester.pump();
+      await tester.pump();
+
+      expect(paths, isEmpty);
+      expect(find.text('Continue with Apple'), findsOneWidget);
+      expect(find.text('Continue'), findsOneWidget);
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+    testWidgets('a failed Apple sheet surfaces on the form', (tester) async {
+      await _pumpScreen(
+        tester,
+        requestAppleCredential: (_) async =>
+            throw AuthException('Apple sign-in failed. Try again.'),
+      );
+
+      await tester.tap(find.text('Continue with Apple'));
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.text('Apple sign-in failed. Try again.'), findsOneWidget);
+    }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
+
+    testWidgets('on iOS a remembered Apple hint presents the sheet', (
+      tester,
+    ) async {
+      var presented = 0;
+      final paths = await _pumpScreen(
+        tester,
+        store: _FakeAuthMethodStore({'user@example.com': AuthMethod.apple}),
+        requestAppleCredential: (_) async {
+          presented++;
+          return null;
+        },
+      );
+
+      await _continueWith(tester, 'user@example.com');
+
+      expect(presented, 1);
+      expect(paths, isEmpty);
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+    testWidgets('off Apple platforms a remembered Apple hint falls through to '
+        'the link', (tester) async {
+      var presented = 0;
+      final store = _FakeAuthMethodStore({'user@example.com': AuthMethod.apple});
+      final paths = await _pumpScreen(
+        tester,
+        store: store,
+        requestAppleCredential: (_) async {
+          presented++;
+          return null;
+        },
+      );
+
+      await _continueWith(tester, 'user@example.com');
+
+      expect(presented, 0);
+      expect(paths, contains(_startPath));
+      expect(store.memory['user@example.com'], AuthMethod.link);
+    }, variant: TargetPlatformVariant.only(TargetPlatform.android));
 
     for (final hint in [AuthMethod.github, AuthMethod.google]) {
       testWidgets('on iOS a remembered ${hint.name} hint falls through to the '

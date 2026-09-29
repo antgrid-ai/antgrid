@@ -4,6 +4,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show TextInput;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:sign_in_with_apple/sign_in_with_apple.dart'
+    show SignInWithAppleButton, SignInWithAppleButtonStyle;
 import '../demo/demo_identity.dart';
 import '../design/ab_colors.dart';
 import '../design/ab_icons.dart';
@@ -32,11 +34,18 @@ final lastAuthMethodStoreProvider = Provider<LastAuthMethodStore>(
   (ref) => LastAuthMethodStore(),
 );
 
-/// App Store guideline 4.8: an iOS app that offers a third-party login such as
-/// GitHub or Google must also offer Sign in with Apple, which this app does not
-/// yet have. App Review rejected GitHub on those grounds, and guideline 4 also
-/// rejects OAuth's hand-off to the external browser, so iOS offers neither.
+/// iOS offers neither GitHub nor Google: App Review rejects OAuth's hand-off to
+/// the external browser (guideline 4), which is the only way this app runs
+/// them.
 bool get _offersOAuthSignIn => defaultTargetPlatform != TargetPlatform.iOS;
+
+/// Sign in with Apple runs Apple's own sheet, so it needs no browser and exists
+/// only where that sheet does. The macOS build can present it only when signed
+/// with the Developer ID profile that grants the entitlement; an unsigned or
+/// debug build reports the failure on the form.
+bool get _offersAppleSignIn =>
+    defaultTargetPlatform == TargetPlatform.iOS ||
+    defaultTargetPlatform == TargetPlatform.macOS;
 
 /// Sign-in screen.
 ///
@@ -58,7 +67,8 @@ bool get _offersOAuthSignIn => defaultTargetPlatform != TargetPlatform.iOS;
 /// cross-device flow ([AuthService.startMagicLink] / [AuthService.pollStatus])
 /// entirely over HTTPS — no browser, no deeplink. GitHub and Google (not on
 /// iOS, see [_offersOAuthSignIn]) remain as secondary options on the existing
-/// browser+deeplink path.
+/// browser+deeplink path, and Sign in with Apple ([_offersAppleSignIn]) on
+/// Apple's native sheet.
 ///
 /// There is no password SIGN-UP here. Creating an account with one lands on
 /// "check your email" and then needs a second trip back to sign in (the server
@@ -240,6 +250,44 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
     );
   }
 
+  Future<void> _signInWithApple() async {
+    final email = _emailController.text.trim();
+    final analytics = ref.read(analyticsServiceProvider);
+    final auth = ref.read(authServiceProvider);
+    analytics?.track(AnalyticsEvents.signInStarted, props: {'provider': 'apple'});
+    setState(() {
+      _phase = _Phase.submitting;
+      _error = null;
+      _notice = null;
+    });
+    final bool signedIn;
+    try {
+      signedIn = await auth.signInWithApple();
+    } on AuthException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _phase = _Phase.form;
+        _error = e.message;
+      });
+      return;
+    }
+    if (!mounted) return;
+    if (!signedIn) {
+      // Dismissing Apple's sheet is a choice, not a failure: back to the form
+      // with nothing to explain.
+      setState(() => _phase = _Phase.form);
+      return;
+    }
+    // Keyed on the TYPED address, like the OAuth hint: the sheet may answer
+    // with a private relay address the user never typed here.
+    _remember(email, AuthMethod.apple);
+    analytics?.track(AnalyticsEvents.signInCompleted);
+    ref.invalidate(currentUserProvider);
+    ref.invalidate(subscriptionProvider);
+    ref.invalidate(pricingCatalogProvider);
+    prefetchSubscriptionCache(ref);
+  }
+
   /// Reclaim a sign-in started before this process existed.
   ///
   /// Approving happens outside the app, so Android is free to kill it while
@@ -313,12 +361,15 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
         await _startOAuth('github');
       case AuthMethod.google when _offersOAuthSignIn:
         await _startOAuth('google');
+      case AuthMethod.apple when _offersAppleSignIn:
+        await _signInWithApple();
       // A remembered link, and an address this device has never seen, take the
       // same path — the link is what works without knowing anything. So does a
-      // provider hint on a platform that does not offer OAuth, which an earlier
-      // build can have recorded.
+      // provider hint on a platform that does not offer that provider, which an
+      // earlier build or another surface can have recorded.
       case AuthMethod.github:
       case AuthMethod.google:
+      case AuthMethod.apple:
       case AuthMethod.link:
       case null:
         await _sendLink();
@@ -834,6 +885,10 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
         const SizedBox(height: AbTokens.space12),
         const _OrDivider(),
         const SizedBox(height: AbTokens.space12),
+        if (_offersAppleSignIn) ...[
+          _AppleSignInButton(onPressed: busy ? null : _signInWithApple),
+          const SizedBox(height: AbTokens.space8),
+        ],
         // One bordered group rather than stacked buttons: these are all
         // answers to a single question — how to prove the address is yours —
         // and [AbSegmented]'s construction is how this app already asks a small
@@ -1366,6 +1421,39 @@ const String _googleMark =
     '2.347l2.307-2.307C18.747 1.44 16.133 0 12.48 0C5.867 0 .307 5.387.307 12'
     's5.56 12 12.173 12c3.573 0 6.267-1.173 8.373-3.36c2.16-2.16 2.84-5.213 '
     '2.84-7.667c0-.76-.053-1.467-.173-2.053z"/></svg>';
+
+/// Apple's own button, not a cell in [_AuthMethodRow], because App Review holds
+/// a Sign in with Apple button to Apple's design: the title must be one of
+/// Apple's three, the logo Apple's artwork, and logo, title and fill black or
+/// white — none of which the row's token-coloured cells can be. The fill
+/// follows the theme, black on light and white on dark, as Apple's guidelines
+/// pair them. Corner radius and height are the parts Apple lets a custom
+/// button match to its neighbours.
+class _AppleSignInButton extends StatelessWidget {
+  const _AppleSignInButton({required this.onPressed});
+
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final button = SignInWithAppleButton(
+      text: 'Continue with Apple',
+      height: AbTokens.rowHeightLg,
+      borderRadius: AbTokens.borderRadius5,
+      style: Theme.of(context).brightness == Brightness.dark
+          ? SignInWithAppleButtonStyle.white
+          : SignInWithAppleButtonStyle.black,
+      // Never null: a disabled CupertinoButton swaps the fill for a system
+      // grey, which Apple's rules do not allow. Dimmed like every other
+      // control on this screen instead.
+      onPressed: onPressed ?? () {},
+    );
+    if (onPressed == null) {
+      return IgnorePointer(child: Opacity(opacity: 0.4, child: button));
+    }
+    return button;
+  }
+}
 
 /// One way to prove the address is yours, as rendered by [_AuthMethodRow].
 class _AuthMethodSpec {

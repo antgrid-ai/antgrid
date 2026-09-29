@@ -1227,6 +1227,196 @@ void main() {
       });
     });
 
+    group('Sign in with Apple', () {
+      const sessionCookie =
+          '__Secure-better-auth.session_token=signed.apple; Path=/; HttpOnly';
+
+      AuthService appleService({
+        required AuthStorage storage,
+        required List<http.Request> requests,
+        AppleCredentialRequest? request,
+        int signInStatus = 200,
+        int codeStatus = 204,
+        String licenseApiUrl = 'https://lic.test',
+      }) => AuthService(
+        licenseApiUrl: licenseApiUrl,
+        storage: storage,
+        httpClient: MockClient((req) async {
+          requests.add(req);
+          if (req.url.path == '/api/auth/sign-in/social') {
+            return http.Response(
+              jsonEncode({'redirect': false, 'token': 't'}),
+              signInStatus,
+              headers: signInStatus == 200 ? {'set-cookie': sessionCookie} : {},
+            );
+          }
+          return http.Response('', codeStatus);
+        }),
+        requestAppleCredential:
+            request ??
+            (nonce) async => const AppleCredential(
+              identityToken: 'id-token',
+              authorizationCode: 'auth-code',
+            ),
+      );
+
+      test('signs in with the id token, then hands over the code', () async {
+        final storage = _InMemoryStorage();
+        final requests = <http.Request>[];
+        String? sheetNonce;
+        final service = appleService(
+          storage: storage,
+          requests: requests,
+          request: (nonce) async {
+            sheetNonce = nonce;
+            return const AppleCredential(
+              identityToken: 'id-token',
+              authorizationCode: 'auth-code',
+              givenName: 'Ada',
+              familyName: 'Lovelace',
+            );
+          },
+        );
+
+        expect(await service.signInWithApple(), isTrue);
+
+        expect(requests.map((r) => r.url.path), [
+          '/api/auth/sign-in/social',
+          '/account/apple/authorization-code',
+        ]);
+        final signIn = jsonDecode(requests[0].body) as Map<String, dynamic>;
+        expect(signIn['provider'], 'apple');
+        expect(signIn['idToken'], {
+          'token': 'id-token',
+          'nonce': sheetNonce,
+          'user': {
+            'name': {'firstName': 'Ada', 'lastName': 'Lovelace'},
+          },
+        });
+        expect(
+          sheetNonce,
+          isNotEmpty,
+          reason:
+              'the server compares the claim with this verbatim, so Apple '
+              'and the server must see the same string',
+        );
+        expect(
+          requests[0].headers['cookie'],
+          isNull,
+          reason: 'a sign-in never rides an earlier session',
+        );
+
+        final code = requests[1];
+        expect(jsonDecode(code.body), {'code': 'auth-code'});
+        expect(
+          code.headers['cookie'],
+          '__Secure-better-auth.session_token=signed.apple',
+          reason: 'the code is bound to the session the sign-in just minted',
+        );
+        expect(
+          await storage.readCookie(),
+          '__Secure-better-auth.session_token=signed.apple',
+        );
+      });
+
+      test('omits a name Apple did not supply', () async {
+        final requests = <http.Request>[];
+        await appleService(
+          storage: _InMemoryStorage(),
+          requests: requests,
+        ).signInWithApple();
+
+        final signIn = jsonDecode(requests[0].body) as Map<String, dynamic>;
+        expect(
+          (signIn['idToken'] as Map<String, dynamic>).containsKey('user'),
+          isFalse,
+          reason: 'Apple sends the name on the first sign-in only',
+        );
+      });
+
+      test('each attempt carries a fresh nonce', () async {
+        final nonces = <String>[];
+        final service = appleService(
+          storage: _InMemoryStorage(),
+          requests: [],
+          request: (nonce) async {
+            nonces.add(nonce);
+            return null;
+          },
+        );
+
+        await service.signInWithApple();
+        await service.signInWithApple();
+
+        expect(nonces.toSet(), hasLength(2));
+      });
+
+      test('a dismissed sheet is not an error and asks nothing', () async {
+        final storage = _InMemoryStorage();
+        final requests = <http.Request>[];
+        final service = appleService(
+          storage: storage,
+          requests: requests,
+          request: (_) async => null,
+        );
+
+        expect(await service.signInWithApple(), isFalse);
+        expect(requests, isEmpty);
+        expect(await storage.readCookie(), isNull);
+      });
+
+      test('a refused id token fails without a session', () async {
+        final storage = _InMemoryStorage();
+        final requests = <http.Request>[];
+        final service = appleService(
+          storage: storage,
+          requests: requests,
+          signInStatus: 401,
+        );
+
+        await expectLater(
+          service.signInWithApple(),
+          throwsA(isA<AuthException>()),
+        );
+        expect(await storage.readCookie(), isNull);
+        expect(
+          requests.map((r) => r.url.path),
+          isNot(contains('/account/apple/authorization-code')),
+        );
+      });
+
+      test('a refused code still leaves the user signed in', () async {
+        final storage = _InMemoryStorage();
+        final service = appleService(
+          storage: storage,
+          requests: [],
+          codeStatus: 502,
+        );
+
+        expect(await service.signInWithApple(), isTrue);
+        expect(await storage.readCookie(), isNotNull);
+      });
+
+      test('refuses plaintext before presenting the sheet', () async {
+        var presented = false;
+        final service = appleService(
+          storage: _InMemoryStorage(),
+          requests: [],
+          licenseApiUrl: 'http://evil.test',
+          request: (_) async {
+            presented = true;
+            return null;
+          },
+        );
+
+        await expectLater(
+          service.signInWithApple(),
+          throwsA(isA<AuthException>()),
+        );
+        expect(presented, isFalse);
+      });
+    });
+
     group('password sign-up', () {
       test(
         'sends the address as the required name and mints no session',
