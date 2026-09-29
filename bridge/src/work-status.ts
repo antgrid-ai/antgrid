@@ -1265,6 +1265,27 @@ export function reduceWorkStatus(prev: WorkStatusState, msg: AbMessage): WorkSta
   }
 }
 
+/** [msg] as the work-status reduction should read it when [isHandlerArmed] says
+ *  who owns its slot: an agent's own `error` on an armed slot folds as a plain
+ *  turn end, so the session reads done rather than error.
+ *
+ *  The armed Handler announces that stop itself (a park notice, a wrap-up or an
+ *  escalation) and resumes the agent when a limit lifts, so a red dot held for
+ *  the length of a park would contradict it. Keyed on `isHandlerArmed`, the same
+ *  predicate push-dispatcher.ts drops the error push on, so the dot and the push
+ *  agree. Only the reduction's view changes: the frame the app receives still
+ *  says `error`. */
+export function asReducedNotification(
+  msg: AbMessage,
+  isHandlerArmed: (sessionId: string) => boolean,
+): AbMessage {
+  if (msg.type !== "notification:push" || msg.notificationType !== "error"
+    || msg.origin !== "agent" || !msg.sessionId || !isHandlerArmed(msg.sessionId)) {
+    return msg;
+  }
+  return { ...msg, notificationType: "task_complete" };
+}
+
 /** How long a turn may go with no recorded activity before {@link expireTurns}
  *  treats it as abandoned rather than working. */
 export const DEFAULT_TURN_IDLE_MS = 30 * 60_000;

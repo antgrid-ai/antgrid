@@ -1,5 +1,5 @@
-import { test, expect } from "bun:test";
-import { answerRequest, attentionEdges, becameDeliverable, busDeliverable, clientFocusState, clientGone, closeInterruptedTurn, closeTurn, DEFAULT_TURN_IDLE_MS, expireTurns, hookTurnEnd, initialWorkStatus, isStaleIdleNudge, noteHookChannelLost, noteHookChannelRestored, openedTurns, reduceWorkStatus, retractProvisionalTurn, sessionFocus, turnActivity, turnOpenFor, turnStart, UNATTRIBUTED_TURN, userReply, type WorkStatusState } from "../src/work-status";
+import { describe, test, expect } from "bun:test";
+import { answerRequest, asReducedNotification, attentionEdges, becameDeliverable, busDeliverable, clientFocusState, clientGone, closeInterruptedTurn, closeTurn, DEFAULT_TURN_IDLE_MS, expireTurns, hookTurnEnd, initialWorkStatus, isStaleIdleNudge, noteHookChannelLost, noteHookChannelRestored, openedTurns, reduceWorkStatus, retractProvisionalTurn, sessionFocus, turnActivity, turnOpenFor, turnStart, UNATTRIBUTED_TURN, userReply, type WorkStatusState } from "../src/work-status";
 import type { InboundSource } from "../src/message-bus";
 
 /** The two client classes the read state distinguishes: the phone reaches a core
@@ -1543,4 +1543,31 @@ test("a turnActivity held for a not-yet-listed session also carries its clock re
   expect(promoted.activeTurns.has("r0")).toBe(true);
   const s = expireTurns(promoted, DEFAULT_TURN_IDLE_MS + 1, DEFAULT_TURN_IDLE_MS);
   expect(s.sessionStatuses.get("r0")).toBe("done");
+});
+
+describe("asReducedNotification", () => {
+  const agentError = (sessionId?: string) =>
+    ({ ...push("error", sessionId), origin: "agent" }) as AbMessage;
+  const armed = (id: string) => id === "r0";
+
+  test("an agent error on a Handler-armed session reads done, not error", () => {
+    const working = turnStart(fold([sessions(1, { tool: "claude-code" })]), "r0", undefined, 1_000);
+    const s = reduceWorkStatus(working, asReducedNotification(agentError("r0"), armed));
+    expect(s.sessionStatuses.get("r0")).toBe("done");
+  });
+
+  test("the same error on an unarmed session still reads error", () => {
+    const working = turnStart(fold([sessions(2, { tool: "claude-code" })]), "r1", undefined, 1_000);
+    const s = reduceWorkStatus(working, asReducedNotification(agentError("r1"), armed));
+    expect(s.sessionStatuses.get("r1")).toBe("error");
+  });
+
+  test("only an agent-origin error on a named slot is rewritten", () => {
+    const bridgeError = push("error", "r0");
+    expect(asReducedNotification(bridgeError, armed)).toBe(bridgeError);
+    const unattributed = agentError();
+    expect(asReducedNotification(unattributed, armed)).toBe(unattributed);
+    const block = { ...push("permission_request", "r0"), origin: "agent" } as AbMessage;
+    expect(asReducedNotification(block, armed)).toBe(block);
+  });
 });
