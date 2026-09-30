@@ -1,6 +1,8 @@
 import { AGENTS } from "./registry";
 import type { AgentSpec } from "./types";
 
+export { stripParentClaudeSession } from "./claude-code/parent-session";
+
 export function needsShellForAgentBinary(command: string, agents: Readonly<Record<string, AgentSpec>> = AGENTS): boolean {
   return Object.values(agents).some((spec) => spec.platformIntegration?.matches(command) && spec.platformIntegration.windowsShell);
 }

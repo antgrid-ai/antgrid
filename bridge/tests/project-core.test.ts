@@ -1,4 +1,4 @@
-import { test, expect, afterEach } from "bun:test";
+import { test, expect, afterEach, spyOn } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,7 +12,7 @@ import type { ConnState } from "../src/conn-state";
 import { createMessage, type AbMessage } from "../src/protocol";
 import { SessionDirectory } from "../src/session-bus/directory";
 import { TERMINAL_PROTOCOL_VERSION } from "../src/terminal-frames/protocol";
-import type { WorkStatusState } from "../src/work-status";
+import { initialWorkStatus, reduceWorkStatus, turnStart, type WorkStatusState } from "../src/work-status";
 
 let cleanup: Array<() => void | Promise<unknown>> = [];
 // LIFO + awaited: cores shut down (stopping their file watchers) before the
@@ -544,10 +544,34 @@ test("onPeerStreamClosed(peer) clears that peer's focus claim", async () => {
   expect(work().focusedSessions.get("phone-1")).toBeUndefined();
 });
 
-test("tunnel aborts follow the peer's session: another phone coming online aborts nothing, and a session going aborts only its own runs", async () => {
-  const folder = mkdtempSync(join(tmpdir(), "antgrid-pc-tunnelabort-"));
+test("start() wires the expireTurns sweep to the interval, and shutdown() clears it", async () => {
+  // Regression: every existing expiry test drives the pure `expireTurns`
+  // directly, so a break in the wiring itself — the sweep never scheduled, or
+  // scheduled but never cleared — passed the suite unnoticed.
+  const folder = mkdtempSync(join(tmpdir(), "antgrid-pc-expirewire-"));
   cleanup.push(() => rmSync(folder, { recursive: true, force: true }));
-  writeFileSync(join(folder, "antgrid.yaml"), "");
+
+  // Wrap the REAL timer functions rather than replace them: other subsystems
+  // start their own intervals during core.start(), and only the 5-minute sweep
+  // (EXPIRE_CHECK_INTERVAL_MS, private to project-core.ts) is this test's
+  // business.
+  const EXPIRE_CHECK_INTERVAL_MS = 5 * 60_000;
+  const realSetInterval = globalThis.setInterval;
+  const realClearInterval = globalThis.clearInterval;
+  let sweep: (() => void) | null = null;
+  let sweepHandle: unknown = null;
+  const cleared: unknown[] = [];
+  const setIntervalSpy = spyOn(globalThis, "setInterval")
+    .mockImplementation(((fn: () => void, ms?: number, ...rest: unknown[]) => {
+      const handle = (realSetInterval as (...a: unknown[]) => unknown)(fn, ms, ...rest);
+      if (ms === EXPIRE_CHECK_INTERVAL_MS) { sweep = fn; sweepHandle = handle; }
+      return handle;
+    }) as unknown as typeof setInterval);
+  const clearIntervalSpy = spyOn(globalThis, "clearInterval")
+    .mockImplementation(((handle: unknown) => {
+      cleared.push(handle);
+      return (realClearInterval as (a: unknown) => void)(handle);
+    }) as unknown as typeof clearInterval);
 
   const core = new ProjectCore({
     folder,
@@ -556,21 +580,26 @@ test("tunnel aborts follow the peer's session: another phone coming online abort
   });
   cleanup.push(() => core.shutdown());
   await core.start();
-  const { deps, calls } = fakeRemoteDeps();
-  core.promote(deps);
-  const opts = calls[0].opts;
+  expect(sweep).not.toBeNull();
 
-  const agent = (core as unknown as { core: { abortTunnelStreams(peerId: string): void } }).core;
-  const aborted: string[] = [];
-  agent.abortTunnelStreams = (peerId) => { aborted.push(peerId); };
+  // White-box: seed a turn stamped at the Unix epoch, so any real Date.now()
+  // reading is already DEFAULT_TURN_IDLE_MS past it.
+  const running = reduceWorkStatus(initialWorkStatus, {
+    id: "m", timestamp: 0, type: "session:updated",
+    sessions: [{ id: "r0", name: "r0", createdAt: 0, lastUsedAt: 0, archived: false, running: true }],
+  } as unknown as Parameters<typeof reduceWorkStatus>[1]);
+  const seeded = turnStart(running, "r0", undefined, 0);
+  const core_ = core as unknown as { _work: WorkStatusState };
+  core_._work = seeded;
+  expect(core_._work.sessionStatuses.get("r0")).toBe("working");
 
-  opts.onPeerOnline?.();
-  opts.onPeerOnline?.();
-  expect(aborted).toEqual([]);
+  sweep!();
+  expect(core_._work).not.toBe(seeded);
+  expect(core_._work.sessionStatuses.get("r0")).toBe("done");
 
-  opts.onPeerSessionGone?.("phone-a");
-  expect(aborted).toEqual(["phone-a"]);
+  await core.shutdown();
+  expect(cleared).toContain(sweepHandle);
 
-  opts.onPeerOffline?.();
-  expect(aborted).toEqual(["phone-a"]);
+  setIntervalSpy.mockRestore();
+  clearIntervalSpy.mockRestore();
 });

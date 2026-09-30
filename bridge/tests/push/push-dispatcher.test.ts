@@ -282,3 +282,54 @@ test("a turn end naming no session is never suppressed", () => {
   }));
   expect(delivered).toHaveLength(1);
 });
+
+// ── An armed session's StopFailure error belongs to the Handler too ──
+// The hook posts /notify error for every StopFailure class, so the same
+// double-alert the turn-end suppression exists for applies here — keyed on
+// `isHandlerArmed` rather than `handlerOwnsCompletion`, because the Handler's
+// own park notice and escalations fire for any armed slot, backlog or not.
+
+const stopFailure = (over: Record<string, unknown> = {}) => createMessage("notification:push", {
+  notificationType: "error", message: "rate limited", sessionId: "t1", projectId: "p1",
+  origin: "agent", ...over,
+});
+
+test("an armed slot's StopFailure error is not pushed — the Handler owns the outcome", () => {
+  const { d, delivered } = harness({ isHandlerArmed: () => true });
+  d.onOutbound(stopFailure());
+  expect(delivered).toHaveLength(0);
+});
+
+test("an armed slot with an empty backlog also drops its StopFailure error", () => {
+  // The 1-tap arm before a goal is stated still gets the Handler's own park
+  // notice on a limit_hit — unlike the turn-end case, there is no wrap-up to
+  // wait for here, so this one must stay suppressed regardless of backlog.
+  const { d, delivered } = harness({ isHandlerArmed: () => true, handlerOwnsCompletion: () => false });
+  d.onOutbound(stopFailure());
+  expect(delivered).toHaveLength(0);
+});
+
+test("an unarmed slot keeps its StopFailure error", () => {
+  // Nothing else speaks for that session: with no Handler there is no park
+  // notice or wrap-up, and this notification is the only thing that ever says
+  // the agent stopped.
+  const { d, delivered } = harness();
+  d.onOutbound(stopFailure());
+  expect(delivered).toHaveLength(1);
+});
+
+test("suppression of a StopFailure error is per slot and keyed on agent origin", () => {
+  const asked: string[] = [];
+  const { d, delivered } = harness({
+    isHandlerArmed: (id) => { asked.push(id); return id === "t1"; },
+  });
+  // A different, un-owned session keeps its push.
+  d.onOutbound(stopFailure({ sessionId: "t2" }));
+  // Not `origin: "agent"`, so this is the bridge speaking and must survive
+  // even on a slot the Handler owns.
+  d.onOutbound(createMessage("notification:push", {
+    notificationType: "error", message: "internal", sessionId: "t1", projectId: "p1",
+  }));
+  expect(asked).toEqual(["t2"]);
+  expect(delivered).toHaveLength(2);
+});

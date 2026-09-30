@@ -293,22 +293,18 @@ Authoritative flow and field types: `docs/protocol/peer-session.md`.
 
 ### Tunnel Messages (own QUIC streams, not the bus)
 
-Each HTTP request/response and each browser-side WebSocket gets its own peer stream
-(`{kind:"tunnel-http"}` / `{kind:"tunnel-ws"}`, `docs/protocol/peer-session.md` §1c) — these
-records never ride the project/session stream's `AbMessage` traffic. A record is either a JSON
-control record (below) or a tagged binary data record carrying an HTTP body slice or one
-WebSocket frame; see that section for the framing and the cap constants.
+Each TCP connection the phone's preview forwarder accepts gets its own peer stream
+(`{kind:"tunnel-tcp"}`, `docs/protocol/peer-session.md` §1c) — these records never ride the
+project/session stream's `AbMessage` traffic. Each direction carries at most one JSON control
+record; after the bridge's reply, the stream is raw TCP bytes and nothing parses HTTP.
 
 | Type | Direction | Stream | Purpose |
 |------|-----------|--------|---------|
-| `tunnel:http-request` | App → Agent | `tunnel-http`, 1st record | Head-of-stream: checkoutId, headers, declared `bodyLength` |
-| `tunnel:http-head` | Agent → App | `tunnel-http` | Response status, headers, `setCookies` |
-| `tunnel:ws-open` | App → Agent | `tunnel-ws`, 1st record | Head-of-stream: checkoutId plus the upstream target |
-| `tunnel:ws-close` | App → Agent, Agent → App | `tunnel-ws`, last record | Tear the WebSocket down; carries `code`/`reason` when the closer had one |
+| `tunnel:tcp-open` | App → Agent | `tunnel-tcp`, 1st record | Head-of-stream: `connId`, `port`, `checkoutId`, optional `probe` |
+| `tunnel:tcp-ready` | Agent → App | `tunnel-tcp`, reply | Upstream connected (raw bytes follow); for a probe, carries `tls` and the stream ends |
+| `tunnel:tcp-error` | Agent → App | `tunnel-tcp`, reply | The upstream connect failed; the stream ends |
 
-A request body or WS-cancel needs no verb of its own: the app signals either by resetting or
-FIN-ing its own send half, which the bridge's pending read observes directly. A response body
-is also raw bytes with no end-of-body verb: the response is over when the bridge FINs the stream.
+Either side ends the connection by closing its send half; the other side winds down with it.
 
 ### Upload Messages (own QUIC stream, not the bus)
 
@@ -336,7 +332,7 @@ bridge/
 ├── src/
 │   ├── index.ts                  # CLI entry point & main event loop
 │   ├── protocol.ts               # Message definitions (Zod schemas, 21 types)
-│   ├── tunnel-protocol.ts        # Tunnel message types (HTTP proxy via relay)
+│   ├── tunnel-protocol.ts        # Tunnel message types (raw TCP forwarding)
 │   ├── config.ts                 # antgrid.yaml parsing & variable interpolation
 │   ├── device.ts                 # Device identity management (~/.antgrid/device.json)
 │   ├── banner.ts                 # Startup banner
@@ -349,8 +345,7 @@ bridge/
 │   ├── file-watcher.ts           # Chokidar-based file monitoring
 │   ├── file-tree.ts              # File system scanning & reading
 │   ├── port-scanner.ts           # Platform-specific port detection
-│   ├── localhost-fetch.ts        # HTTP proxying to localhost services
-│   ├── tunnel-manager.ts         # Preview URL & HTTP request routing
+│   ├── tunnel-manager.ts         # Preview URL & raw TCP forwarding
 │   └── types/
 ├── tests/                        # 15 test files (bun test)
 │   ├── crypto.test.ts
@@ -360,7 +355,6 @@ bridge/
 │   ├── banner.test.ts
 │   ├── logger.test.ts
 │   ├── port-scanner.test.ts
-│   ├── localhost-fetch.test.ts
 │   ├── file-tree.test.ts
 │   ├── file-watcher.test.ts
 │   ├── scrollback.test.ts

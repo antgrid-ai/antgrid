@@ -50,33 +50,16 @@ const int kStreamProjectBridgeRecordMaxBytes = kMaxTransferBytes;
 /// Over it, `sendFrame` returns `PeerSendOutcome.backpressured`.
 const int kSessionStreamMaxQueuedBytes = 4194304;
 
-/// Payload cap on one WS tunnel data record, after its tag byte
-/// ([kTunnelRecordTagWsText] etc.), in both directions. An HTTP tunnel body
-/// carries no tag and is bounded by `bodyLength` instead.
-const int kStreamTunnelDataMaxBytes = 1048576;
-
-/// [kStreamTunnelDataMaxBytes] plus the tag byte — the bridge reader's cap for
-/// a tunnel-stream record.
-const int kStreamTunnelRecordMaxBytes = 1048577;
-
-/// Caps an HTTP tunnel request's `bodyLength`. Equal to `MAX_TRANSFER_BYTES`,
-/// so a preview upload is bounded like every other transfer.
-const int kStreamTunnelRequestBodyMaxBytes = 33554432;
-
-/// Tunnel-ws data record tags: the first byte after the JSON/data
-/// discriminator (see `tunnel_stream.dart`'s `decodeTunnelRecord`). `0x00` and
-/// `0x01` are unassigned (HTTP bodies ride raw, with no tag and no record
-/// framing), so a stray one decodes to nothing rather than aliasing a WS frame.
-const int kTunnelRecordTagWsText = 0x02;
-const int kTunnelRecordTagWsBinary = 0x03;
+/// Caps a TCP tunnel stream's control records (`tunnel:tcp-open` and the
+/// bridge's one reply) in both directions; everything after them is raw.
+const int kStreamTunnelTcpRecordMaxBytes = 4096;
 
 /// Upload stream constants (`packages/antgrid-wire/src/stream-open.ts`).
 const int kStreamUploadBridgeRecordMaxBytes = 16384;
 const int kStreamUploadMaxFileNameLength = 255;
 const int kStreamUploadMaxMimeTypeLength = 127;
 
-/// Largest raw piece either the tunnel-http body pump or an upload's byte
-/// stream writes in one `sendRaw` call.
+/// Largest raw piece an upload's byte stream writes in one `sendRaw` call.
 const int kStreamRawSliceBytes = 262144;
 
 /// Bridge reader's cap for the four small app-to-bridge terminal verbs
@@ -177,63 +160,33 @@ final class TerminalStreamOpen extends StreamOpen {
   int get hashCode => Object.hash(kind, projectId, checkoutId, requestId);
 }
 
-/// One stream per HTTP request/response pair; `requestId` is the same id the
-/// app already mints for `tunnel:http-request`.
-final class TunnelHttpStreamOpen extends StreamOpen {
+/// One stream per TCP connection accepted on the device's local preview port,
+/// piped byte-for-byte to the same port on the bridge's loopback. `connId` is
+/// minted per accepted connection.
+final class TunnelTcpStreamOpen extends StreamOpen {
   final String projectId;
-  final String requestId;
+  final String connId;
 
-  const TunnelHttpStreamOpen({
-    required this.projectId,
-    required this.requestId,
-  });
+  const TunnelTcpStreamOpen({required this.projectId, required this.connId});
 
   @override
-  String get kind => 'tunnel-http';
+  String get kind => 'tunnel-tcp';
 
   @override
   Map<String, dynamic> toJson() => {
     'kind': kind,
     'projectId': projectId,
-    'requestId': requestId,
+    'connId': connId,
   };
 
   @override
   bool operator ==(Object other) =>
-      other is TunnelHttpStreamOpen &&
+      other is TunnelTcpStreamOpen &&
       other.projectId == projectId &&
-      other.requestId == requestId;
+      other.connId == connId;
 
   @override
-  int get hashCode => Object.hash(kind, projectId, requestId);
-}
-
-/// One stream per browser-side WebSocket for the tunnel's lifetime; `wsId`
-/// carries the `tunnelId` the app mints for `tunnel:ws-open`.
-final class TunnelWsStreamOpen extends StreamOpen {
-  final String projectId;
-  final String wsId;
-
-  const TunnelWsStreamOpen({required this.projectId, required this.wsId});
-
-  @override
-  String get kind => 'tunnel-ws';
-
-  @override
-  Map<String, dynamic> toJson() => {
-    'kind': kind,
-    'projectId': projectId,
-    'wsId': wsId,
-  };
-
-  @override
-  bool operator ==(Object other) =>
-      other is TunnelWsStreamOpen &&
-      other.projectId == projectId &&
-      other.wsId == wsId;
-
-  @override
-  int get hashCode => Object.hash(kind, projectId, wsId);
+  int get hashCode => Object.hash(kind, projectId, connId);
 }
 
 /// One stream per uploaded file. `checkoutId` follows [TerminalStreamOpen]:
@@ -297,11 +250,7 @@ const String kSessionStreamLabel = '0';
   SessionStreamOpen() => (kind: 'session', id: kSessionStreamLabel),
   ProjectStreamOpen(:final projectId) => (kind: 'project', id: projectId),
   TerminalStreamOpen(:final requestId) => (kind: 'terminal', id: requestId),
-  TunnelHttpStreamOpen(:final requestId) => (
-    kind: 'tunnel-http',
-    id: requestId,
-  ),
-  TunnelWsStreamOpen(:final wsId) => (kind: 'tunnel-ws', id: wsId),
+  TunnelTcpStreamOpen(:final connId) => (kind: 'tunnel-tcp', id: connId),
   UploadStreamOpen(:final requestId) => (kind: 'upload', id: requestId),
 };
 

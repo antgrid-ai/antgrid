@@ -27,6 +27,10 @@ class NativeStreamLink implements PeerLink {
   /// fresh [NativeTestStream] recorded in [createdStreams].
   NativeTestStream Function(StreamOpen open)? onOpen;
 
+  /// Holds an [openStream] call (after it is recorded in [opens]) until the
+  /// returned future completes; null means open immediately.
+  Future<void>? Function(StreamOpen open)? gateOpen;
+
   late MachineSession session;
 
   /// Binds [projectId] over its own native stream: the ready notice on the
@@ -93,6 +97,8 @@ class NativeStreamLink implements PeerLink {
       maxRecordBytes: maxRecordBytes,
       maxQueuedBytes: maxQueuedBytes,
     ));
+    final gate = gateOpen?.call(open);
+    if (gate != null) await gate;
     final stream = onOpen != null ? onOpen!(open) : NativeTestStream();
     createdStreams.add(stream);
     return stream;
@@ -120,6 +126,10 @@ class NativeTestStream implements PeerStream {
 
   @override
   Stream<Uint8List> get records => _records.stream;
+
+  /// Whether the consumer paused [records]: the signal a real native reader
+  /// checks before pulling another chunk off the wire.
+  bool get recordsPaused => _records.isPaused;
 
   @override
   Future<PeerSendOutcome> send(Uint8List record) async {
