@@ -1,4 +1,7 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { PassThrough, Readable } from "node:stream";
 import {
   MAX_HOOK_STDIN_BYTES,
@@ -7,6 +10,10 @@ import {
   type HookPost,
 } from "../src/hook-runner";
 import { MAX_NOTIFICATION_BODY_LEN } from "../src/transcript-tail";
+import { augmentAgentLaunch } from "../src/agent-runtime";
+
+const pluginDirs: string[] = [];
+afterEach(() => { for (const d of pluginDirs.splice(0)) try { rmSync(d, { recursive: true, force: true }); } catch {} });
 
 function harness(opts: {
   agent: string;
@@ -163,7 +170,7 @@ describe("Claude hooks", () => {
     expect(notify?.body).toEqual({ type: "task_complete", agent: "claude", transcriptPath: "/tmp/t.jsonl" });
   });
 
-  test("stop-failure maps a rate limit to limit_hit and nothing else", async () => {
+  test("stop-failure maps a rate limit to limit_hit", async () => {
     const h = harness({
       agent: "claude",
       event: "stop-failure",
@@ -188,6 +195,7 @@ describe("Claude hooks", () => {
           errorClass: "rate_limit",
         },
       },
+      { port: 43123, path: "/notify", body: { type: "error", terminalId: "term-1" } },
     ]);
   });
 
@@ -212,6 +220,7 @@ describe("Claude hooks", () => {
             errorClass: error,
           },
         },
+        { port: 43123, path: "/notify", body: { type: "error", terminalId: "term-1" } },
       ]);
     }
   });
@@ -234,7 +243,8 @@ describe("Claude hooks", () => {
       // StopFailure fires INSTEAD of Stop, so this is the only thing that ever
       // answers the "working" UserPromptSubmit set — without it the session
       // reads as actively working while the agent sits dead at its prompt.
-      // Fatal only: a park is already covered by the engine's own push.
+      // Posted for every error class; whether a phone also hears it is decided
+      // downstream, by push-dispatcher.ts.
       expect(h.posts[1]!.path).toBe("/notify");
       expect(h.posts[1]!.body).toMatchObject({ type: "error", terminalId: "term-1" });
     }
@@ -260,6 +270,7 @@ describe("Claude hooks", () => {
           errorClass: "unknown",
         },
       },
+      { port: 43123, path: "/notify", body: { type: "error", terminalId: "term-1" } },
     ]);
   });
 
@@ -424,19 +435,68 @@ describe("Claude hooks", () => {
     ]));
   });
 
-  test("a notification_type the CLI added falls back to the message", async () => {
-    // The fallback covers an installed CLI old enough to send no type at all
-    // (pinned by the two message-only cases above) AND a value added upstream,
-    // where guessing from the words is no worse than what shipped.
+  test.each(["elicitation_dialog", "elicitation_url_dialog"])(
+    "%s classifies as a block, same as a permission prompt",
+    async (notification_type) => {
+      // An MCP elicitation form/link stalls the main turn on the user exactly
+      // like a permission prompt does, so it must not fall through to silence.
+      const h = harness({
+        agent: "claude",
+        event: "notification",
+        stdin: JSON.stringify({ notification_type, message: "Claude Code needs your input" }),
+      });
+      await h.run();
+      expect(h.posts).toEqual(expect.arrayContaining([
+        { port: 43123, path: "/notify", body: { type: "permission_request", terminalId: "term-1", message: "Claude Code needs your input" } },
+        {
+          port: 43123,
+          path: "/handler-event",
+          body: {
+            terminalId: "term-1", agent: "claude", event: "awaiting_input",
+            transcriptPath: "", sessionId: "", idleNudge: false,
+          },
+        },
+      ]));
+    },
+  );
+
+  test("a notification_type the CLI added but does not classify posts nothing", async () => {
+    // A present type outside the allow-list is a real, named event — not a
+    // gap the message text should be asked to fill.
     const h = harness({
       agent: "claude",
       event: "notification",
       stdin: JSON.stringify({ notification_type: "agent_needs_input", message: "Claude is waiting for your input" }),
     });
     await h.run();
-    expect(h.posts).toEqual(expect.arrayContaining([
-      { port: 43123, path: "/notify", body: { type: "awaiting_input", terminalId: "term-1", message: "Claude is waiting for your input" } },
-    ]));
+    expect(h.posts).toEqual([]);
+  });
+
+  test("a background agent finishing posts nothing", async () => {
+    // A background agent's own completion is not this slot stalling; its
+    // message text ("<label> finished") must never be read as a block.
+    const h = harness({
+      agent: "claude",
+      event: "notification",
+      stdin: JSON.stringify({ notification_type: "agent_completed", message: "reviewer finished" }),
+    });
+    await h.run();
+    expect(h.posts).toEqual([]);
+  });
+
+  test("every other present notification_type posts nothing", async () => {
+    for (const notification_type of [
+      "worker_permission_prompt", "push_notification", "auth_success",
+      "elicitation_complete", "elicitation_response", "computer_use_exit",
+    ]) {
+      const h = harness({
+        agent: "claude",
+        event: "notification",
+        stdin: JSON.stringify({ notification_type, message: "anything at all" }),
+      });
+      await h.run();
+      expect(h.posts).toEqual([]);
+    }
   });
 
   test("an interrupted question reports the same completion as an answered one", async () => {
@@ -522,6 +582,85 @@ describe("Claude hooks", () => {
     await reworded.run();
     for (const post of reworded.posts) expect(post.body).not.toHaveProperty("promptTool");
   });
+
+  test("the Notification group is matched to only the types toPosts classifies", () => {
+    // Claude matches a Notification hook's `matcher` against `notification_type`,
+    // so this is the other half of the silence above: it keeps the hook process
+    // from spawning at all for a type `toPosts` throws away, rather than
+    // spawning it and posting nothing.
+    const abDir = mkdtempSync(join(tmpdir(), "ab-hookrunner-"));
+    pluginDirs.push(abDir);
+    const a = augmentAgentLaunch("claude-code", {
+      abDir,
+      self: { compiled: true, binary: "C:\\Program Files\\Antgrid\\antgrid-bridge.exe" },
+    });
+    const hooks = JSON.parse(readFileSync(join(a.args[1]!, "hooks", "hooks.json"), "utf8"));
+    expect(hooks.hooks.Notification[0].matcher).toBe(
+      "permission_prompt|idle_prompt|elicitation_dialog|elicitation_url_dialog",
+    );
+  });
+
+  test("PostToolUse carries both the AskUserQuestion group and an async catch-all, and only the catch-all is async", () => {
+    // The catch-all re-asserts a status the turn already has, so it may run
+    // off the critical path; the AskUserQuestion pair orders against the
+    // Notification Claude schedules afterward and must stay synchronous.
+    const abDir = mkdtempSync(join(tmpdir(), "ab-hookrunner-"));
+    pluginDirs.push(abDir);
+    const a = augmentAgentLaunch("claude-code", {
+      abDir,
+      self: { compiled: true, binary: "C:\\Program Files\\Antgrid\\antgrid-bridge.exe" },
+    });
+    const hooks = JSON.parse(readFileSync(join(a.args[1]!, "hooks", "hooks.json"), "utf8"));
+    const groups = hooks.hooks.PostToolUse;
+    expect(groups).toHaveLength(2);
+    expect(groups[0].matcher).toBe("AskUserQuestion");
+    expect(groups[0].hooks[0].async).toBeUndefined();
+    expect(groups[1].matcher).toBe("");
+    expect(groups[1].hooks[0].async).toBe(true);
+  });
+
+  test("tool-done posts /turn-activity", async () => {
+    const h = harness({
+      agent: "claude",
+      event: "tool-done",
+      stdin: JSON.stringify({ session_id: "s1" }),
+    });
+    await h.run();
+    expect(h.posts).toEqual([
+      { port: 43123, path: "/turn-activity", body: { terminalId: "term-1" } },
+    ]);
+  });
+
+  test("tool-failed posts /turn-activity — a failed tool is still activity", async () => {
+    const h = harness({
+      agent: "claude",
+      event: "tool-failed",
+      stdin: JSON.stringify({ session_id: "s1" }),
+    });
+    await h.run();
+    expect(h.posts).toEqual([
+      { port: 43123, path: "/turn-activity", body: { terminalId: "term-1" } },
+    ]);
+  });
+
+  test("PostToolUseFailure carries both the AskUserQuestion group and an async catch-all, and only the catch-all is async", () => {
+    // Same shape as PostToolUse's catch-all: the re-assert reports a fact off
+    // the critical path, not an ordering the synchronous AskUserQuestion pair
+    // depends on.
+    const abDir = mkdtempSync(join(tmpdir(), "ab-hookrunner-"));
+    pluginDirs.push(abDir);
+    const a = augmentAgentLaunch("claude-code", {
+      abDir,
+      self: { compiled: true, binary: "C:\\Program Files\\Antgrid\\antgrid-bridge.exe" },
+    });
+    const hooks = JSON.parse(readFileSync(join(a.args[1]!, "hooks", "hooks.json"), "utf8"));
+    const groups = hooks.hooks.PostToolUseFailure;
+    expect(groups).toHaveLength(2);
+    expect(groups[0].matcher).toBe("AskUserQuestion");
+    expect(groups[0].hooks[0].async).toBeUndefined();
+    expect(groups[1].matcher).toBe("");
+    expect(groups[1].hooks[0].async).toBe(true);
+  });
 });
 
 describe("Codex hooks", () => {
@@ -561,6 +700,31 @@ describe("Codex hooks", () => {
     expect(permission.posts).toEqual([]);
     expect(stop.posts).toEqual([{ port: 43123, path: "/notify", body: { type: "task_complete", terminalId: "term-1" } }]);
     expect(start.posts).toEqual([{ port: 43123, path: "/hook-alive", body: { terminalId: "term-1" } }]);
+  });
+
+  test("session-start forwards transcript_path via session-title, alongside hook-alive", async () => {
+    const h = harness({
+      agent: "codex",
+      event: "session-start",
+      stdin: JSON.stringify({ session_id: "s1", transcript_path: "/home/u/.codex/sessions/rollout-s1.jsonl" }),
+    });
+    await h.run();
+    expect(h.posts).toEqual(expect.arrayContaining([
+      { port: 43123, path: "/hook-alive", body: { terminalId: "term-1" } },
+      {
+        port: 43123, path: "/session-title",
+        body: {
+          terminalId: "term-1", sessionId: "s1", agent: "codex",
+          transcriptPath: "/home/u/.codex/sessions/rollout-s1.jsonl",
+        },
+      },
+    ]));
+  });
+
+  test("session-start with no transcript_path posts only hook-alive", async () => {
+    const h = harness({ agent: "codex", event: "session-start", stdin: JSON.stringify({ session_id: "s1" }) });
+    await h.run();
+    expect(h.posts).toEqual([{ port: 43123, path: "/hook-alive", body: { terminalId: "term-1" } }]);
   });
 
   test("codex stop forwards last_assistant_message as the notification body", async () => {
@@ -618,6 +782,65 @@ describe("Codex hooks", () => {
       type: "task_complete",
       terminalId: "term-1",
     });
+  });
+
+  test("post-tool-use posts /turn-activity", async () => {
+    const h = harness({ agent: "codex", event: "post-tool-use", stdin: "{}" });
+    await h.run();
+    expect(h.posts).toEqual([
+      { port: 43123, path: "/turn-activity", body: { terminalId: "term-1" } },
+    ]);
+  });
+
+  test("post-tool-use posts nothing without a terminal id", async () => {
+    const h = harness({ agent: "codex", event: "post-tool-use", stdin: "{}", env: { ANTGRID_TERMINAL_ID: undefined } });
+    await h.run();
+    expect(h.posts).toEqual([]);
+  });
+
+  test("user-prompt posts a turn-start and a title request", async () => {
+    const h = harness({
+      agent: "codex",
+      event: "user-prompt",
+      stdin: JSON.stringify({ session_id: "s1", transcript_path: "/tmp/t.jsonl", prompt: "hi" }),
+    });
+    await h.run();
+    expect(h.posts).toEqual([
+      { port: 43123, path: "/turn-start", body: { terminalId: "term-1" } },
+      {
+        port: 43123,
+        path: "/session-title",
+        body: {
+          terminalId: "term-1",
+          sessionId: "s1",
+          agent: "codex",
+          prompt: "hi",
+          transcriptPath: "/tmp/t.jsonl",
+        },
+      },
+    ]);
+  });
+
+  test("user-prompt withholds the prompt from a slash command, but still opens the turn", async () => {
+    const h = harness({
+      agent: "codex",
+      event: "user-prompt",
+      stdin: JSON.stringify({ session_id: "s1", prompt: "/compact" }),
+    });
+    await h.run();
+    expect(h.posts).toEqual([
+      { port: 43123, path: "/turn-start", body: { terminalId: "term-1" } },
+      { port: 43123, path: "/session-title", body: { terminalId: "term-1", sessionId: "s1", agent: "codex" } },
+    ]);
+  });
+
+  test("user-prompt posts nothing without a terminal id beyond the turn-start-less title", async () => {
+    const h = harness({
+      agent: "codex", event: "user-prompt", stdin: JSON.stringify({ prompt: "hi" }),
+      env: { ANTGRID_TERMINAL_ID: undefined },
+    });
+    await h.run();
+    expect(h.posts).toEqual([]);
   });
 });
 

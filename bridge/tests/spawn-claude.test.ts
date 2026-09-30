@@ -29,6 +29,23 @@ describe("buildClaudeEnv", () => {
     const env = buildClaudeEnv({ CLAUDE_CODE_DISABLE_AGENT_VIEW: "", PATH: "/usr/bin" });
     expect(env.CLAUDE_CODE_DISABLE_AGENT_VIEW).toBe("");
   });
+
+  // A bridge started from inside a Claude Code session inherits that session's
+  // identity; the spawned Claude must not read itself as its child.
+  it("drops a parent Claude Code session's markers but keeps user-set Claude config", () => {
+    const env = buildClaudeEnv({
+      CLAUDECODE: "1", CLAUDE_CODE_CHILD_SESSION: "1", CLAUDE_CODE_SESSION_ID: "parent",
+      CLAUDE_CODE_MESSAGING_SOCKET: "/tmp/sock", CLAUDE_CODE_ENTRYPOINT: "claude-vscode",
+      CLAUDE_CODE_USE_BEDROCK: "1", CLAUDE_CONFIG_DIR: "/cfg", PATH: "/usr/bin",
+    });
+    expect(env.CLAUDECODE).toBeUndefined();
+    expect(env.CLAUDE_CODE_CHILD_SESSION).toBeUndefined();
+    expect(env.CLAUDE_CODE_SESSION_ID).toBeUndefined();
+    expect(env.CLAUDE_CODE_MESSAGING_SOCKET).toBeUndefined();
+    expect(env.CLAUDE_CODE_ENTRYPOINT).toBe("cli");
+    expect(env.CLAUDE_CODE_USE_BEDROCK).toBe("1");
+    expect(env.CLAUDE_CONFIG_DIR).toBe("/cfg");
+  });
 });
 
 describe("resolveClaudeBinary", () => {

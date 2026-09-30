@@ -6,6 +6,7 @@ import {
   stripInheritedCertOverrides,
 } from "../../host";
 import { logger } from "../../host";
+import { stripParentClaudeSession } from "../claude-code/parent-session";
 const log = logger.child({ component: "codex-spawn" });
 
 /**
@@ -93,7 +94,7 @@ export function spawnCodex(opts: {
   // makes codex's rustls WebSocket to chatgpt.com fail with UnknownIssuer. Strip
   // them (dev-only flag) so codex falls back to the system trust store.
   const env = stripInheritedCertOverrides({
-    ...process.env,
+    ...stripParentClaudeSession(process.env),
     ...(opts.env ?? {}),
   } as Record<string, string>);
   // Resolve `command` to codex's REAL on-disk path before spawning. codex finds

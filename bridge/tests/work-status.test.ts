@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { answerRequest, attentionEdges, becameDeliverable, busDeliverable, clientFocusState, clientGone, closeTurn, hookTurnEnd, initialWorkStatus, isStaleIdleNudge, noteHookChannelLost, noteHookChannelRestored, openedTurns, reduceWorkStatus, sessionFocus, turnOpenFor, turnStart, UNATTRIBUTED_TURN, userReply, type WorkStatusState } from "../src/work-status";
+import { answerRequest, attentionEdges, becameDeliverable, busDeliverable, clientFocusState, clientGone, closeInterruptedTurn, closeTurn, DEFAULT_TURN_IDLE_MS, expireTurns, hookTurnEnd, initialWorkStatus, isStaleIdleNudge, noteHookChannelLost, noteHookChannelRestored, openedTurns, reduceWorkStatus, retractProvisionalTurn, sessionFocus, turnActivity, turnOpenFor, turnStart, UNATTRIBUTED_TURN, userReply, type WorkStatusState } from "../src/work-status";
 import type { InboundSource } from "../src/message-bus";
 
 /** The two client classes the read state distinguishes: the phone reaches a core
@@ -102,9 +102,10 @@ test("a turn-end notification closes the hook-opened turn (terminal-mode session
 
 test("closeTurn ends a hook-based session's turn on a bare Esc, with no stop hook required", () => {
   // Terminal-mode sessions have no cancel RPC — project-core's onInterrupt
-  // (keystrokes.ts' isInterruptKeystroke) calls closeTurn directly the instant
-  // the user presses Esc, rather than waiting on a Stop hook most CLIs never
-  // fire for a manual interrupt.
+  // calls closeInterruptedTurn (built on closeTurn, exercised directly here)
+  // once the transcript confirms the Esc actually interrupted the turn (see
+  // agent-core.ts' shouldArmInterruptConfirm and interrupt-confirm.ts), rather
+  // than waiting on a Stop hook most CLIs never fire for a manual interrupt.
   const working = turnStart(fold([sessions(1)]), "r0");
   expect(working.status).toBe("working");
   const interrupted = closeTurn(working, "r0");
@@ -131,6 +132,64 @@ test("closeTurn leaves a sibling session's turn running", () => {
   const interrupted = closeTurn(s, "r0");
   expect(interrupted.sessionStatuses.get("r0")).toBe("done");
   expect(interrupted.sessionStatuses.get("r1")).toBe("working");
+});
+
+test("closeInterruptedTurn closes the turn exactly like closeTurn and additionally marks it", () => {
+  const working = turnStart(fold([sessions(1)]), "r0");
+  const interrupted = closeInterruptedTurn(working, "r0");
+  expect(interrupted.status).toBe("done");
+  expect(interrupted.activeTurns.has("r0")).toBe(false);
+  expect(interrupted.interruptedTurns.has("r0")).toBe(true);
+});
+
+test("closeInterruptedTurn on an already-closed turn still marks it (not a no-op)", () => {
+  // closeTurn alone is a no-op here, but the mark itself has to land even when
+  // there was nothing left for closeTurn to close — a confirmation racing a
+  // Stop hook that beat it must still block turnActivity from reopening.
+  const idle = fold([sessions(1)]);
+  const marked = closeInterruptedTurn(idle, "r0");
+  expect(marked.interruptedTurns.has("r0")).toBe(true);
+});
+
+test("closeInterruptedTurn is a true no-op (SAME object) the second time", () => {
+  const working = turnStart(fold([sessions(1)]), "r0");
+  const once = closeInterruptedTurn(working, "r0");
+  expect(closeInterruptedTurn(once, "r0")).toBe(once);
+});
+
+test("turnActivity cannot reopen a turn closeInterruptedTurn just closed", () => {
+  // The race the mark exists for: a catch-all tool-completion hook already in
+  // flight when the confirmation lands resolves afterward, and must not undo it.
+  const working = turnStart(fold([sessions(1)]), "r0");
+  const interrupted = closeInterruptedTurn(working, "r0");
+  expect(turnActivity(interrupted, "r0")).toBe(interrupted);
+});
+
+test("a fresh turnStart lifts the interrupted mark, so a LATER turnActivity can reopen again", () => {
+  const working = turnStart(fold([sessions(1)]), "r0");
+  const interrupted = closeInterruptedTurn(working, "r0");
+  const restarted = turnStart(interrupted, "r0");
+  expect(restarted.interruptedTurns.has("r0")).toBe(false);
+  // An ordinary turn-end for this new turn, then a tool-completion hook — with
+  // the mark lifted, this reopens rather than staying a no-op the way it did
+  // right after the interrupt.
+  const closedOrdinary = closeTurn(restarted, "r0");
+  expect(turnActivity(closedOrdinary, "r0").activeTurns.has("r0")).toBe(true);
+});
+
+test("a submitted keystroke that opens a new turn lifts the interrupted mark", () => {
+  const keystroked = fold([sessions(1, { tool: "cursor-agent" })]);
+  const working = turnStart(keystroked, "r0");
+  const interrupted = closeInterruptedTurn(working, "r0");
+  const resubmitted = userReply(interrupted, "r0", { submitted: true, typed: true });
+  expect(resubmitted.interruptedTurns.has("r0")).toBe(false);
+});
+
+test("a stopped session's interrupted mark is pruned, not carried forever", () => {
+  const working = turnStart(fold([sessions(1)]), "r0");
+  const interrupted = closeInterruptedTurn(working, "r0");
+  const stopped = fold([sessions(0)], interrupted);
+  expect(stopped.interruptedTurns.size).toBe(0);
 });
 
 test("awaiting_input yields attention when the turn hasn't resolved yet (a genuine mid-turn block)", () => {
@@ -193,10 +252,10 @@ test("a turn-start closes the suppression window", () => {
 });
 
 test("a keystroke-inferred turn start also closes the window", () => {
-  // The agents with no pre-turn hook (codex/cursor/copilot) open their turn off
-  // a submitted keystroke — that has to unlatch the window too, or their whole
+  // The agents with no pre-turn hook (cursor/copilot) open their turn off a
+  // submitted keystroke — that has to unlatch the window too, or their whole
   // next turn is unsupervised.
-  const done = fold([sessions(1, { tool: "codex" }), push("task_complete", "r0")]);
+  const done = fold([sessions(1, { tool: "cursor-agent" }), push("task_complete", "r0")]);
   const typed = userReply(done, "r0", { typed: true });
   expect(isStaleIdleNudge(userReply(typed, "r0", { submitted: true }), "r0")).toBe(false);
 });
@@ -393,6 +452,82 @@ test("an unattributed notification is cleared by any turn-start", () => {
   const blocked = fold([sessions(2), push("permission_request")]);
   expect(blocked.status).toBe("attention");
   expect(reduceWorkStatus(blocked, turnStartFrame("r1")).status).toBe("working");
+});
+
+test("turn-activity does not reopen a turn its own task_complete already closed (SAME object)", () => {
+  // The catch-all is async and can race behind the REAL last Stop of a turn,
+  // with no further tool call coming to close what it would reopen — the agent
+  // has stopped, and only a fresh prompt starts it again. Reopening here would
+  // also delete the task_complete record isStaleIdleNudge depends on.
+  const done = fold([sessions(1), turnStartFrame("r0"), push("task_complete", "r0")]);
+  expect(done.status).toBe("done");
+  const after = turnActivity(done, "r0");
+  expect(after).toBe(done);
+  expect(isStaleIdleNudge(after, "r0")).toBe(true);
+});
+
+test("a late tool-done after task_complete leaves the post-completion nudge suppressed", () => {
+  const done = fold([sessions(1), turnStartFrame("r0"), push("task_complete", "r0")]);
+  const after = turnActivity(done, "r0");
+  // The generic idle nudge and a genuine mid-turn block share one hook message
+  // — isStaleIdleNudge is what tells them apart, so it must survive the race.
+  const nudged = reduceWorkStatus(after, push("awaiting_input", "r0"));
+  expect(nudged.status).toBe("done");
+});
+
+test("turn-activity on an open turn with a pending question is a no-op (SAME object)", () => {
+  // The AskUserQuestion tool fires its own synchronous hook AND the catch-all
+  // this reducer answers to — the second must never clear the question the
+  // first just opened.
+  const asked = fold([sessions(1), turnStartFrame("r0"), question("r0")]);
+  expect(asked.status).toBe("attention");
+  expect(turnActivity(asked, "r0")).toBe(asked);
+});
+
+test("turn-activity leaves an own permission_request untouched", () => {
+  const blocked = fold([sessions(1), turnStartFrame("r0"), push("permission_request", "r0")]);
+  expect(blocked.status).toBe("attention");
+  expect(turnActivity(blocked, "r0")).toBe(blocked);
+});
+
+test("turn-activity on a not-yet-listed session is held, then promoted", () => {
+  const held = turnActivity(initialWorkStatus, "r0");
+  expect(held.status).toBe("done");
+  expect(held.pendingTurns.has("r0")).toBe(true);
+  const promoted = reduceWorkStatus(held, sessions(1));
+  expect(promoted.status).toBe("working");
+  expect(promoted.pendingTurns.size).toBe(0);
+});
+
+test("turn-activity leaves an unattributed task_complete standing and keeps an unattributed awaiting_input", () => {
+  // Same race as the attributed case: a config-terminal's unattributed
+  // task_complete is that project-wide slot's own word that it is done, and a
+  // sibling session's tool-done must not undo it on nothing else's behalf.
+  const doneAnon = fold([sessions(1), turnStartFrame("r0"), push("task_complete")]);
+  expect(doneAnon.status).toBe("done");
+  expect(turnActivity(doneAnon, "r0")).toBe(doneAnon);
+
+  const waitingAnon = fold([sessions(1), turnStartFrame("r0"), push("awaiting_input")]);
+  expect(waitingAnon.status).toBe("attention");
+  const after = turnActivity(waitingAnon, "r0");
+  expect(after.notifications.get(UNATTRIBUTED_TURN)).toBe("awaiting_input");
+  expect(after.status).toBe("attention");
+});
+
+test("turn-activity does not reopen a turn a StopFailure already ended in error (SAME object)", () => {
+  // No answer is coming to lift an `error` — the agent is stopped — so
+  // reopening the turn here would only flip busDeliverable false and confirm a
+  // session-bus line against a turn nobody is reading, with nothing left to
+  // close it again.
+  const errored = fold([sessions(1), turnStartFrame("r0"), push("error", "r0")]);
+  expect(errored.status).toBe("error");
+  expect(busDeliverable(errored, "r0")).toBe(true);
+  const after = turnActivity(errored, "r0");
+  expect(after).toBe(errored);
+  expect(after.notifications.get("r0")).toBe("error");
+  expect(after.status).toBe("error");
+  expect(busDeliverable(after, "r0")).toBe(true);
+  expect(openedTurns(errored, after)).toEqual([]);
 });
 
 test("a count change with an unchanged status yields a NEW state (advert re-push trigger)", () => {
@@ -631,10 +766,11 @@ test("a reply on an unblocked session is a no-op (SAME object)", () => {
 // ── Keystroke-inferred turn starts (agents with no pre-turn hook) ────────────
 
 test("a submitted prompt opens the turn for an agent that has no turn-start hook", () => {
-  // codex/cursor/copilot expose turn-END hooks only, so the CR is the sole
-  // turn-start signal their terminal-mode sessions have. Without this they read
-  // "done" for the whole turn.
-  const idle = fold([sessions(1, { tool: "codex" })]);
+  // cursor/copilot expose turn-END hooks only, so the CR is the sole turn-start
+  // signal their terminal-mode sessions have. Without this they read "done" for
+  // the whole turn. (Codex now has its own real turn-start hook and is
+  // no longer inferred; cursor-agent is this behavior's exemplar now.)
+  const idle = fold([sessions(1, { tool: "cursor-agent" })]);
   expect(idle.status).toBe("done");
   // A PTY sends one keystroke per frame: the prompt text, then the CR.
   const typed = userReply(idle, "r0", { typed: true });
@@ -645,7 +781,7 @@ test("a submitted prompt opens the turn for an agent that has no turn-start hook
 });
 
 test("a submit that arrives as one chunk (paste / send-to-agent) opens the turn", () => {
-  const idle = fold([sessions(1, { tool: "codex" })]);
+  const idle = fold([sessions(1, { tool: "cursor-agent" })]);
   expect(userReply(idle, "r0", { typed: true, submitted: true }).status).toBe("working");
 });
 
@@ -653,7 +789,7 @@ test("a bare enter with nothing typed does NOT open a turn", () => {
   // Enter on an empty prompt, or to dismiss a TUI menu, starts no turn — so no
   // stop hook is coming and an inferred turn would hang the session on
   // "working" until some unrelated later turn ended.
-  const idle = fold([sessions(1, { tool: "codex" })]);
+  const idle = fold([sessions(1, { tool: "cursor-agent" })]);
   expect(userReply(idle, "r0", { submitted: true })).toBe(idle);
   expect(userReply(idle, "r0", { submitted: true }).status).toBe("done");
 });
@@ -661,7 +797,7 @@ test("a bare enter with nothing typed does NOT open a turn", () => {
 test("the typed marker is consumed by the turn it opens", () => {
   // The next bare enter has to earn its own content, or one prompt would license
   // every subsequent stray CR.
-  const idle = fold([sessions(1, { tool: "codex" })]);
+  const idle = fold([sessions(1, { tool: "cursor-agent" })]);
   const working = userReply(idle, "r0", { typed: true, submitted: true });
   const done = reduceWorkStatus(working, push("task_complete", "r0"));
   expect(done.status).toBe("done");
@@ -669,23 +805,92 @@ test("the typed marker is consumed by the turn it opens", () => {
 });
 
 test("a bare keystroke (no CR) is not a submitted prompt", () => {
-  const idle = fold([sessions(1, { tool: "codex" })]);
+  const idle = fold([sessions(1, { tool: "cursor-agent" })]);
   expect(userReply(idle, "r0")).toBe(idle);
   expect(userReply(idle, "r0", { submitted: false })).toBe(idle);
 });
 
-test("a submitted prompt is NOT inferred for an agent that reports its own turns", () => {
-  // Claude has a real /turn-start hook and chat sessions have turn frames —
+test("a submitted prompt is NOT inferred for an agent that reports its own turns in time", () => {
+  // Claude has a real /turn-start hook that lands fast enough on its own —
   // guessing from keystrokes there could only be wrong.
-  // Typed content is present in every case below, so the tool gate is the only
-  // thing keeping these sessions out of an inferred turn.
+  // Typed content is present, so the tool gate is the only thing keeping this
+  // session out of an inferred turn.
   const submit = (s: WorkStatusState) =>
     userReply(userReply(s, "r0", { typed: true }), "r0", { submitted: true });
 
   const claude = fold([sessions(1, { tool: "claude-code" })]);
   expect(submit(claude).status).toBe("done");
-  const chat = fold([sessions(1, { tool: "codex", mode: "chat" })]);
-  expect(submit(chat).status).toBe("done");
+  expect(submit(claude).provisionalTurns.size).toBe(0);
+});
+
+// codex's UserPromptSubmit hook is real but lands seconds after Enter, so a
+// submitted prompt opens its turn provisionally and the hook confirms it.
+const codexSubmit = (s: WorkStatusState, now = 1_000) =>
+  userReply(userReply(s, "r0", { typed: true }, now), "r0", { submitted: true }, now);
+const codexIdle = () => fold([sessions(1, { tool: "codex" })]);
+
+test("a submitted codex prompt reads working at once, provisionally", () => {
+  const s = codexSubmit(codexIdle());
+  expect(s.status).toBe("working");
+  expect(s.provisionalTurns.get("r0")).toBe(1_000);
+});
+
+test("codex's own turn-start confirms a provisional turn, so its retraction finds nothing", () => {
+  const confirmed = turnStart(codexSubmit(codexIdle()), "r0", undefined, 2_000);
+  expect(confirmed.provisionalTurns.has("r0")).toBe(false);
+  expect(confirmed.status).toBe("working");
+  expect(retractProvisionalTurn(confirmed, "r0", 1_000)).toBe(confirmed);
+});
+
+test("a tool completion confirms a provisional turn too", () => {
+  const s = turnActivity(codexSubmit(codexIdle()), "r0", 2_000);
+  expect(s.provisionalTurns.has("r0")).toBe(false);
+  expect(s.status).toBe("working");
+});
+
+test("an unconfirmed provisional turn is retracted to done, with no unread mark", () => {
+  // Someone is watching a DIFFERENT session, so a real turn ending here would
+  // turn blue; a retraction is a guess taken back and must not.
+  const watching = sessionFocus(fold([sessions(2, { tool: "codex" })]), "r1", APP);
+  const retracted = retractProvisionalTurn(codexSubmit(watching), "r0", 1_000);
+  expect(retracted.sessionStatuses.get("r0")).toBe("done");
+  expect(retracted.unreadSessions.has("r0")).toBe(false);
+  expect(retracted.provisionalTurns.has("r0")).toBe(false);
+});
+
+test("a retraction armed by an earlier Enter leaves a later provisional turn alone", () => {
+  const second = codexSubmit(hookTurnEnd(codexSubmit(codexIdle(), 1_000), "r0"), 5_000);
+  expect(retractProvisionalTurn(second, "r0", 1_000)).toBe(second);
+  expect(second.status).toBe("working");
+});
+
+test("a turn end settles a provisional turn", () => {
+  const s = reduceWorkStatus(codexSubmit(codexIdle()), push("task_complete", "r0"));
+  expect(s.provisionalTurns.has("r0")).toBe(false);
+  expect(s.status).toBe("done");
+});
+
+test("a codex slash command or bare enter opens no provisional turn", () => {
+  const idle = codexIdle();
+  const command = userReply(userReply(idle, "r0", { typed: true, command: true }), "r0", { submitted: true });
+  expect(command.status).toBe("done");
+  expect(userReply(idle, "r0", { submitted: true })).toBe(idle);
+});
+
+test("a codex session whose hook channel is dead opens no provisional turn", () => {
+  const dead = noteHookChannelLost(codexIdle(), "r0");
+  expect(codexSubmit(dead).status).toBe("done");
+  expect(codexSubmit(reduceWorkStatus(dead, sessions(1, { tool: "codex" }))).status).toBe("done");
+});
+
+test("a chat codex session opens no provisional turn", () => {
+  expect(codexSubmit(fold([sessions(1, { tool: "codex", mode: "chat" })])).status).toBe("done");
+});
+
+test("a provisional codex turn is not exempt from the idle decay", () => {
+  const decayed = expireTurns(codexSubmit(codexIdle(), 1_000), 1_000 + DEFAULT_TURN_IDLE_MS + 1, DEFAULT_TURN_IDLE_MS);
+  expect(decayed.status).toBe("done");
+  expect(decayed.provisionalTurns.has("r0")).toBe(false);
 });
 
 test("a submitted prompt is NOT inferred for a hookless agent (nothing would close it)", () => {
@@ -702,17 +907,28 @@ test("a submitted prompt is NOT inferred for a hookless agent (nothing would clo
   expect(submit(untooled).status).toBe("done");
 });
 
+test("a submitted prompt is NOT inferred for a chat session either", () => {
+  // Chat sessions get precise structured `agent:turn-start` frames from their
+  // own driver regardless of agent, so the keystroke gate must exclude a chat
+  // session even on a tool that infers turns in terminal mode.
+  const submit = (s: WorkStatusState) =>
+    userReply(userReply(s, "r0", { typed: true }), "r0", { submitted: true });
+
+  const chat = fold([sessions(1, { tool: "cursor-agent", mode: "chat" })]);
+  expect(submit(chat).status).toBe("done");
+});
+
 test("a submitted prompt clears the previous turn's end before opening the new one", () => {
   // statusFor reads notifications before activeTurns, so a leftover
   // task_complete would keep the re-prompted session on "done".
-  const done = fold([sessions(1, { tool: "codex" }), push("task_complete", "r0")]);
+  const done = fold([sessions(1, { tool: "cursor-agent" }), push("task_complete", "r0")]);
   expect(done.status).toBe("done");
   expect(userReply(done, "r0", { typed: true, submitted: true }).status).toBe("working");
 });
 
 test("a submitted prompt on an already-working session is a no-op (SAME object)", () => {
   const working = userReply(
-    fold([sessions(1, { tool: "codex" })]),
+    fold([sessions(1, { tool: "cursor-agent" })]),
     "r0",
     { typed: true, submitted: true },
   );
@@ -727,10 +943,11 @@ test("a submitted prompt on an already-working session is a no-op (SAME object)"
 // ── The CLI's own commands are not prompts ───────────────────────────────────
 
 test("a submitted slash command does NOT open a turn", () => {
-  // Measured against a real codex: an ordinary prompt fires its `notify` argv,
-  // `/compact`, `/new` and `/status` fire nothing, so a start inferred from one
-  // wedged the session on "working" for the rest of its life.
-  const idle = fold([sessions(1, { tool: "codex" })]);
+  // An agent with no pre-turn hook exposes only the CR to infer from, and a
+  // CLI's own commands (e.g. cursor's `/compact`-style built-ins) fire nothing
+  // on their own turn-end channel, so a start inferred from one would wedge the
+  // session on "working" for the rest of its life.
+  const idle = fold([sessions(1, { tool: "cursor-agent" })]);
   // One keystroke per frame: the `/` that opens the line, then the rest of it.
   const slash = userReply(idle, "r0", { typed: true, command: true });
   const rest = userReply(slash, "r0", { typed: true });
@@ -739,7 +956,7 @@ test("a submitted slash command does NOT open a turn", () => {
 
 test("a slash command pasted whole (one chunk) does NOT open a turn", () => {
   // The app's send-to-agent composer delivers "line\r" as a single frame.
-  const idle = fold([sessions(1, { tool: "codex" })]);
+  const idle = fold([sessions(1, { tool: "cursor-agent" })]);
   expect(
     userReply(idle, "r0", { typed: true, submitted: true, command: true }).status,
   ).toBe("done");
@@ -747,8 +964,8 @@ test("a slash command pasted whole (one chunk) does NOT open a turn", () => {
 
 test("the command line is consumed by its submit, so the next prompt still opens", () => {
   // The whole failure this guards: leaving the classification latched turned one
-  // `/compact` into a session that could never read "working" again.
-  const idle = fold([sessions(1, { tool: "codex" })]);
+  // slash command into a session that could never read "working" again.
+  const idle = fold([sessions(1, { tool: "cursor-agent" })]);
   const afterCommand = userReply(
     userReply(idle, "r0", { typed: true, command: true }),
     "r0",
@@ -762,7 +979,7 @@ test("the command line is consumed by its submit, so the next prompt still opens
 test("only the character that OPENS the line classifies it", () => {
   // A `/` typed mid-prompt ("see /etc/hosts") is not a command, and the frames
   // after the first carry the middle of a line rather than its start.
-  const idle = fold([sessions(1, { tool: "codex" })]);
+  const idle = fold([sessions(1, { tool: "cursor-agent" })]);
   const typed = userReply(idle, "r0", { typed: true });
   const slashInside = userReply(typed, "r0", { typed: true, command: true });
   expect(userReply(slashInside, "r0", { submitted: true }).status).toBe("working");
@@ -780,7 +997,7 @@ test("a command line still clears the block it was typed into", () => {
   // The other half of userReply is unconditional: a terminal-mode session has no
   // resolve frame, so any keystroke is what says the reported block is gone —
   // typing `/model` at a permission prompt must not leave it on "needs you".
-  const blocked = fold([sessions(1, { tool: "codex" }), push("permission_request", "r0")]);
+  const blocked = fold([sessions(1, { tool: "cursor-agent" }), push("permission_request", "r0")]);
   expect(blocked.status).toBe("attention");
   expect(userReply(blocked, "r0", { typed: true, command: true }).status).toBe("done");
 });
@@ -788,14 +1005,14 @@ test("a command line still clears the block it was typed into", () => {
 test("the project's agent.tool is what a session with no tool of its own inherits", () => {
   // A SessionEntry only carries `tool` when it OVERRODE the project default, so
   // reading it alone opted every default-spec session out of the inference.
-  const hello = { id: "m", timestamp: 0, type: "agent:hello", tool: "codex", version: "0" } as any;
+  const hello = { id: "m", timestamp: 0, type: "agent:hello", tool: "cursor-agent", version: "0" } as any;
   const s = fold([hello, sessions(1)]);
   expect(s.keystrokeTurnSessions.has("r0")).toBe(true);
   expect(userReply(s, "r0", { typed: true, submitted: true }).status).toBe("working");
 });
 
 test("a session's own tool still overrides the project default", () => {
-  const hello = { id: "m", timestamp: 0, type: "agent:hello", tool: "codex", version: "0" } as any;
+  const hello = { id: "m", timestamp: 0, type: "agent:hello", tool: "cursor-agent", version: "0" } as any;
   // claude-code has a real /turn-start hook, so it must stay out of the set even
   // though the project default would have put it in.
   const s = fold([hello, sessions(1, { tool: "claude-code" })]);
@@ -807,11 +1024,11 @@ test("a session's own tool still overrides the project default", () => {
 const submitInto = (s: WorkStatusState, id = "r0") =>
   userReply(s, id, { typed: true, submitted: true });
 
-test("a hook turn-end closes an inferred turn on its own", () => {
+test("a hook turn-end closes a turn on its own", () => {
   // codex fires its `notify` argv and its Stop hook independently, so a session
   // that reaches only one of them must still leave "working". With one closer,
-  // an enter that dismissed a TUI menu opened a turn nothing could ever close.
-  const working = submitInto(fold([sessions(1, { tool: "codex" })]));
+  // a turn nothing but the dead channel was watching would run forever.
+  const working = turnStart(fold([sessions(1, { tool: "codex" })]), "r0");
   expect(working.status).toBe("working");
   expect(hookTurnEnd(working, "r0").status).toBe("done");
 });
@@ -823,7 +1040,7 @@ test("a hook turn-end leaves the notifications map alone", () => {
   // forwarded to the Handler as a live block. closeTurn — the Esc path — does
   // clear it, which is why this is not that.
   const ended = reduceWorkStatus(
-    submitInto(fold([sessions(1, { tool: "codex" })])),
+    turnStart(fold([sessions(1, { tool: "codex" })]), "r0"),
     push("task_complete", "r0"),
   );
   const after = hookTurnEnd(ended, "r0");
@@ -838,42 +1055,46 @@ test("a hook turn-end with nothing open is a no-op (SAME object)", () => {
 
 test("a session whose hook channel died stops inferring turn starts", () => {
   // The set is recomputed from the agent's STATIC spec on every session list, so
-  // without a durable mark the loss is undone by the next one.
-  const live = fold([sessions(1, { tool: "codex" })]);
+  // without a durable mark the loss is undone by the next one. Codex has its own
+  // real turn-start hook now and is no longer in this set — cursor-agent is
+  // the exemplar for the keystroke-inference path this mark gates.
+  const live = fold([sessions(1, { tool: "cursor-agent" })]);
   const dead = noteHookChannelLost(live, "r0");
   expect(dead.keystrokeTurnSessions.has("r0")).toBe(false);
   expect(submitInto(dead).status).toBe("done");
   // ...and the mark survives the next session list, which is where the spec
   // would otherwise put it straight back.
-  const relisted = reduceWorkStatus(dead, sessions(1, { tool: "codex" }));
+  const relisted = reduceWorkStatus(dead, sessions(1, { tool: "cursor-agent" }));
   expect(relisted.keystrokeTurnSessions.has("r0")).toBe(false);
 });
 
 test("losing the hook channel closes the turn that channel was going to close", () => {
-  const working = submitInto(fold([sessions(1, { tool: "codex" })]));
+  const working = submitInto(fold([sessions(1, { tool: "cursor-agent" })]));
   expect(noteHookChannelLost(working, "r0").status).toBe("done");
 });
 
 test("losing the hook channel does NOT close a turn the agent announced itself", () => {
   // Only a keystroke-inferred turn rode on the dead channel; claude's is a real
-  // /turn-start, and ending it on a probe's word would be inventing an end.
+  // /turn-start, and ending it on a probe's word would be inventing an end. Codex
+  // now has one too, via the same `/turn-start` hook post rather than a
+  // structured frame.
   const working = fold([sessions(1, { tool: "claude-code" }), turnStartFrame("r0")]);
   expect(working.status).toBe("working");
   expect(noteHookChannelLost(working, "r0").status).toBe("working");
 });
 
 test("a hook-alive ping after the fact restores the inference", () => {
-  const dead = noteHookChannelLost(fold([sessions(1, { tool: "codex" })]), "r0");
+  const dead = noteHookChannelLost(fold([sessions(1, { tool: "cursor-agent" })]), "r0");
   const back = noteHookChannelRestored(dead, "r0");
   // Not reinstated here — the state keeps no per-session tool to reinstate it
   // from. The session list that follows the restore is what recomputes it.
-  const relisted = reduceWorkStatus(back, sessions(1, { tool: "codex" }));
+  const relisted = reduceWorkStatus(back, sessions(1, { tool: "cursor-agent" }));
   expect(relisted.keystrokeTurnSessions.has("r0")).toBe(true);
   expect(submitInto(relisted).status).toBe("working");
 });
 
 test("hook channel marks are pure and pruned with their session", () => {
-  const live = fold([sessions(1, { tool: "codex" })]);
+  const live = fold([sessions(1, { tool: "cursor-agent" })]);
   expect(noteHookChannelRestored(live, "r0")).toBe(live);
   const dead = noteHookChannelLost(live, "r0");
   expect(noteHookChannelLost(dead, "r0")).toBe(dead);
@@ -1214,4 +1435,157 @@ test("a session still blocked on a second condition is not released", () => {
   const answered = fold([retracted("r0", { permissionId: "p1" })], both);
   expect(busDeliverable(answered, "r0")).toBe(false);
   expect(becameDeliverable(both, answered)).toEqual([]);
+});
+
+// ── expireTurns (staleness decay) ───────────────────────────────────────────
+
+test("expireTurns closes only turns idle longer than the limit", () => {
+  const now = DEFAULT_TURN_IDLE_MS + 10_000;
+  const both = turnStart(turnStart(fold([sessions(2)]), "r0", undefined, 0), "r1", undefined, now - 1_000);
+  const s = expireTurns(both, now, DEFAULT_TURN_IDLE_MS);
+  expect(s.sessionStatuses.get("r0")).toBe("done");
+  expect(s.sessionStatuses.get("r1")).toBe("working");
+});
+
+test("activity refreshes the clock, delaying expiry", () => {
+  const started = turnStart(fold([sessions(1)]), "r0", undefined, 0);
+  const nudged = turnActivity(started, "r0", DEFAULT_TURN_IDLE_MS - 1);
+  const s = expireTurns(nudged, DEFAULT_TURN_IDLE_MS + 1, DEFAULT_TURN_IDLE_MS);
+  expect(s.sessionStatuses.get("r0")).toBe("working");
+});
+
+test("a decayed turn reads done without going unread", () => {
+  const watching = sessionFocus(fold([sessions(2)]), "r1", APP);
+  const started = turnStart(watching, "r0", undefined, 0);
+  const s = expireTurns(started, DEFAULT_TURN_IDLE_MS + 1, DEFAULT_TURN_IDLE_MS);
+  expect(s.sessionStatuses.get("r0")).toBe("done");
+  expect(s.unreadSessions.has("r0")).toBe(false);
+});
+
+test("expireTurns is a no-op (SAME object) when nothing has expired", () => {
+  const started = turnStart(fold([sessions(1)]), "r0", undefined, 0);
+  expect(expireTurns(started, DEFAULT_TURN_IDLE_MS - 1, DEFAULT_TURN_IDLE_MS)).toBe(started);
+  // Never stamped: nothing to measure against, so never expired either.
+  const untimed = turnStart(fold([sessions(1)]), "r0");
+  expect(expireTurns(untimed, DEFAULT_TURN_IDLE_MS + 1, DEFAULT_TURN_IDLE_MS)).toBe(untimed);
+});
+
+test("a pending request or call-to-action is excluded from decay entirely (SAME object)", () => {
+  // Both start from an OPEN, idle-since-0 turn, so expireTurns would have
+  // something to close if it read the turn alone; the block must keep it out
+  // of consideration rather than merely hide the effect of closing it — see
+  // the next test for why "hide the effect" is not enough on its own.
+  const withTurn = turnStart(fold([sessions(1)]), "r0", undefined, 0);
+
+  const blocked = reduceWorkStatus(withTurn, permission("r0"));
+  expect(blocked.activeTurns.has("r0")).toBe(true);
+  expect(blocked.sessionStatuses.get("r0")).toBe("attention");
+  expect(expireTurns(blocked, DEFAULT_TURN_IDLE_MS + 1, DEFAULT_TURN_IDLE_MS)).toBe(blocked);
+
+  const cta = reduceWorkStatus(withTurn, push("awaiting_input", "r0"));
+  expect(cta.activeTurns.has("r0")).toBe(true);
+  expect(cta.sessionStatuses.get("r0")).toBe("attention");
+  expect(expireTurns(cta, DEFAULT_TURN_IDLE_MS + 1, DEFAULT_TURN_IDLE_MS)).toBe(cta);
+});
+
+test("a request answered after a long wait resumes working, not done — decay never touched it", () => {
+  // Regression: a decay that quietly dropped activeTurns underneath a pending
+  // request read "attention" right up until the retraction, at which point
+  // nothing had a turn left to fall back to and the session read "done" (and
+  // went bus-deliverable) while the agent was actually still resuming.
+  const withTurn = turnStart(fold([sessions(1)]), "r0", undefined, 0);
+  const blocked = reduceWorkStatus(withTurn, permission("r0"));
+  const idled = expireTurns(blocked, DEFAULT_TURN_IDLE_MS + 1, DEFAULT_TURN_IDLE_MS);
+  const retracted_ = reduceWorkStatus(idled, retracted("r0", { permissionId: "p1" }));
+  expect(retracted_.sessionStatuses.get("r0")).toBe("working");
+});
+
+test("a keystroke-inferred session (no per-tool activity hook) never decays", () => {
+  // cursor/copilot have no PostToolUse-equivalent to repair a false close, so a
+  // decay here would never self-heal before the turn's real end — see expireTurns.
+  const started = userReply(fold([sessions(1, { tool: "cursor-agent" })]), "r0", { typed: true, submitted: true }, 0);
+  expect(started.sessionStatuses.get("r0")).toBe("working");
+  expect(expireTurns(started, DEFAULT_TURN_IDLE_MS + 1, DEFAULT_TURN_IDLE_MS)).toBe(started);
+});
+
+test("a decayed UNATTRIBUTED turn marks every sibling it was carrying as decayed, not unread", () => {
+  // Regression: the exclusion from deriveUnread's transition scan must reach the
+  // sessions the anonymous turn was holding "working" for, keyed by their own
+  // id — decayed itself only ever holds UNATTRIBUTED_TURN's own empty-string key.
+  const watching = sessionFocus(fold([sessions(2)]), "r1", APP);
+  const started = turnStart(watching, undefined, undefined, 0);
+  expect(started.sessionStatuses.get("r0")).toBe("working");
+  expect(started.sessionStatuses.get("r1")).toBe("working");
+  const s = expireTurns(started, DEFAULT_TURN_IDLE_MS + 1, DEFAULT_TURN_IDLE_MS);
+  expect(s.sessionStatuses.get("r0")).toBe("done");
+  expect(s.sessionStatuses.get("r1")).toBe("done");
+  expect(s.unreadSessions.has("r0")).toBe(false);
+  expect(s.unreadSessions.has("r1")).toBe(false);
+});
+
+test("a turn-start held for a not-yet-listed session carries its clock reading through promotion", () => {
+  // Regression: the held branch of turnStart recorded no clock reading at all,
+  // so a promoted turn had nothing in lastActivityAt and could never expire —
+  // the exact race pendingTurns holds for stayed unbounded forever.
+  const held = turnStart(initialWorkStatus, "r0", undefined, 0);
+  expect(held.pendingTurns.has("r0")).toBe(true);
+  const promoted = fold([sessions(1)], held);
+  expect(promoted.activeTurns.has("r0")).toBe(true);
+  expect(promoted.sessionStatuses.get("r0")).toBe("working");
+  const s = expireTurns(promoted, DEFAULT_TURN_IDLE_MS + 1, DEFAULT_TURN_IDLE_MS);
+  expect(s.sessionStatuses.get("r0")).toBe("done");
+});
+
+test("a turnActivity held for a not-yet-listed session also carries its clock reading through promotion", () => {
+  const held = turnActivity(initialWorkStatus, "r0", 0);
+  expect(held.pendingTurns.has("r0")).toBe(true);
+  const promoted = fold([sessions(1)], held);
+  expect(promoted.activeTurns.has("r0")).toBe(true);
+  const s = expireTurns(promoted, DEFAULT_TURN_IDLE_MS + 1, DEFAULT_TURN_IDLE_MS);
+  expect(s.sessionStatuses.get("r0")).toBe("done");
+});
+
+// A Handler-armed session's own error is a park the Handler announces and will
+// resume from, so it reads done; the error stays on record for when it disarms.
+const handlerStatus = (...armed: string[]): AbMessage =>
+  ({ id: "m", timestamp: 0, type: "handler:status", projectId: "p",
+    sessions: armed.map((terminalId) => ({ terminalId, backlog: [] })), snapshots: [] }) as any;
+const agentError = (sessionId?: string) => ({ ...push("error", sessionId), origin: "agent" }) as AbMessage;
+// Someone is watching r1, so a real turn end on r0 would raise an unread mark.
+const watchingR1 = () => sessionFocus(fold([sessions(2, { tool: "claude-code" })]), "r1", APP);
+
+test("an error on a Handler-armed session reads done, with no unread mark", () => {
+  const working = turnStart(reduceWorkStatus(watchingR1(), handlerStatus("r0")), "r0", undefined, 1_000);
+  const parked = reduceWorkStatus(working, agentError("r0"));
+  expect(parked.sessionStatuses.get("r0")).toBe("done");
+  expect(parked.unreadSessions.has("r0")).toBe(false);
+  expect(parked.notifications.get("r0")).toBe("error");
+});
+
+test("the same error on an unarmed session still reads error", () => {
+  const working = turnStart(reduceWorkStatus(watchingR1(), handlerStatus("r1")), "r0", undefined, 1_000);
+  expect(reduceWorkStatus(working, agentError("r0")).sessionStatuses.get("r0")).toBe("error");
+});
+
+test("disarming during a park turns the error back on at once", () => {
+  const parked = reduceWorkStatus(reduceWorkStatus(watchingR1(), handlerStatus("r0")), agentError("r0"));
+  expect(reduceWorkStatus(parked, handlerStatus()).sessionStatuses.get("r0")).toBe("error");
+});
+
+test("arming after an error reads done, with no unread mark", () => {
+  const failed = reduceWorkStatus(watchingR1(), agentError("r0"));
+  expect(failed.sessionStatuses.get("r0")).toBe("error");
+  const armed = reduceWorkStatus(failed, handlerStatus("r0"));
+  expect(armed.sessionStatuses.get("r0")).toBe("done");
+  expect(armed.unreadSessions.has("r0")).toBe(false);
+});
+
+test("an unattributed error is not a park, even for an armed session", () => {
+  const s = reduceWorkStatus(reduceWorkStatus(watchingR1(), handlerStatus("r0")), agentError());
+  expect(s.sessionStatuses.get("r0")).toBe("error");
+});
+
+test("a handler:status that arms nothing new leaves the state untouched", () => {
+  const armed = reduceWorkStatus(watchingR1(), handlerStatus("r0"));
+  expect(reduceWorkStatus(armed, handlerStatus("r0"))).toBe(armed);
 });

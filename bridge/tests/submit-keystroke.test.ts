@@ -1,12 +1,14 @@
 import { expect, test } from "bun:test";
 import {
   hasTypedContent,
-  isInterruptKeystroke,
+  isCtrlC,
+  isLoneEsc,
   isSubmitKeystroke,
   isTerminalReport,
   opensCommandLine,
   submittedLine,
 } from "../src/keystrokes";
+import { shouldArmInterruptConfirm } from "../src/agent-core";
 
 // Gates the work-status turn inference for agents with no pre-turn hook. A false
 // positive opens a turn nothing will close, so the negatives matter more than the
@@ -55,23 +57,86 @@ test("anything before the CR is content, including escape sequences", () => {
   expect(hasTypedContent("\x1b\r")).toBe(true);
 });
 
-// Gates the terminal-mode interrupt close in work-status.ts. A false positive
-// would close a turn still legitimately in flight (e.g. mid arrow-key nav), so
-// only the exact bare-ESC byte counts.
+// Byte identity only — a false positive on isLoneEsc would risk closing a turn
+// still legitimately in flight (e.g. mid arrow-key nav), so only the exact
+// bare-ESC byte counts. Whether the key actually closes a turn is confirmed
+// against the transcript, tested separately below via
+// shouldArmInterruptConfirm.
 
-test("a bare Escape keypress is an interrupt", () => {
-  expect(isInterruptKeystroke("\x1b")).toBe(true);
+test("a bare Escape keypress is a lone Esc, legacy byte or kitty-protocol form", () => {
+  expect(isLoneEsc("\x1b")).toBe(true);
+  // CSI 27u: what a terminal negotiating the kitty keyboard protocol's
+  // disambiguate flag sends for a bare Escape instead of the legacy byte.
+  expect(isLoneEsc("\x1b[27u")).toBe(true);
+  expect(isLoneEsc("\x1b[27;1u")).toBe(true); // explicit "no modifiers"
 });
 
-test("any longer ESC-prefixed sequence is content, not an interrupt", () => {
-  for (const data of ["\x1b[A", "\x1b[13;2u", "\x1b\r", "\x1bOP", "\x1b\x1b"]) {
-    expect(isInterruptKeystroke(data)).toBe(false);
+test("any longer ESC-prefixed sequence is content, not a lone Esc", () => {
+  for (const data of [
+    "\x1b[A", "\x1b[13;2u", "\x1b\r", "\x1bOP", "\x1b\x1b",
+    "\x1b[27;2u", // Escape+Shift, a different key than bare Escape
+    "\x1b[27",    // no final 'u' — not a complete kitty sequence
+  ]) {
+    expect(isLoneEsc(data)).toBe(false);
   }
 });
 
-test("ordinary keys and an empty payload are not an interrupt", () => {
+test("ordinary keys and an empty payload are not a lone Esc", () => {
   for (const data of ["a", "\r", "\t", "\x03", ""]) {
-    expect(isInterruptKeystroke(data)).toBe(false);
+    expect(isLoneEsc(data)).toBe(false);
+  }
+});
+
+test("a bare Ctrl+C keypress is isCtrlC, legacy byte or kitty-protocol form", () => {
+  expect(isCtrlC("\x03")).toBe(true);
+  // CSI 99;5u: codepoint of 'c' with modifiers=5 (ctrl alone) — what the kitty
+  // keyboard protocol's disambiguate flag sends instead of the raw ETX byte.
+  expect(isCtrlC("\x1b[99;5u")).toBe(true);
+  for (const data of [
+    "a", "\r", "\t", "\x1b", "",
+    "\x1b[99;7u", // ctrl+alt+c, a different combination than bare Ctrl+C
+    "\x1b[99u",   // no modifiers at all — not a Ctrl+C
+  ]) {
+    expect(isCtrlC(data)).toBe(false);
+  }
+});
+
+// Whether a lone Esc/Ctrl+C is even worth confirming against the transcript —
+// consumed from agent-core's terminal:input handler, BEFORE the key reaches
+// the PTY. It answers only "is there anything to confirm", never "did the key
+// interrupt": that verdict is the transcript's alone (interrupt-confirm.ts).
+
+test("opencode declares no transcript-interrupt predicate, so nothing arms — turn open or not", () => {
+  expect(shouldArmInterruptConfirm("opencode", "\x1b", true, "/tmp/t.jsonl")).toBeUndefined();
+  expect(shouldArmInterruptConfirm("opencode", "\x03", true, "/tmp/t.jsonl")).toBeUndefined();
+});
+
+test("an idle turn arms nothing, even for an agent with a predicate and a known path", () => {
+  expect(shouldArmInterruptConfirm("claude-code", "\x1b", false, "/tmp/t.jsonl")).toBeUndefined();
+});
+
+test("an unknown transcript path arms nothing, even with an open turn", () => {
+  expect(shouldArmInterruptConfirm("claude-code", "\x1b", true, undefined)).toBeUndefined();
+});
+
+test("a lone Esc on claude-code with an open turn and a known path returns claude's predicate", () => {
+  const predicate = shouldArmInterruptConfirm("claude-code", "\x1b", true, "/tmp/t.jsonl");
+  expect(predicate).toBeInstanceOf(Function);
+});
+
+test("Ctrl+C on codex with an open turn and a known path returns codex's predicate", () => {
+  const predicate = shouldArmInterruptConfirm("codex", "\x03", true, "/tmp/t.jsonl");
+  expect(predicate).toBeInstanceOf(Function);
+});
+
+test("an unknown/unlisted or undefined tool arms nothing", () => {
+  expect(shouldArmInterruptConfirm("not-a-real-agent", "\x03", true, "/tmp/t.jsonl")).toBeUndefined();
+  expect(shouldArmInterruptConfirm(undefined, "\x03", true, "/tmp/t.jsonl")).toBeUndefined();
+});
+
+test("only a lone Esc or Ctrl+C can arm — ordinary keys never do, even with everything else true", () => {
+  for (const data of ["a", "\r", "\x1b[A", ""]) {
+    expect(shouldArmInterruptConfirm("claude-code", data, true, "/tmp/t.jsonl")).toBeUndefined();
   }
 });
 

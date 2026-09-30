@@ -204,6 +204,22 @@ test("a turn boundary releases a latch no completion hook reported", async () =>
   }
 });
 
+test("a sibling tool's turn-activity does not release the latch", async () => {
+  // Unlike /turn-start, /turn-activity is a same-turn catch-all: a parallel
+  // tool completing while AskUserQuestion is still on screen must not make the
+  // CLI's re-announced "Permission needed" for that same question reappear.
+  const { sent, port } = await wire();
+  await post(port, "/handler-event", question("t1", "toolu_1"));
+
+  const dropped = await post(port, "/turn-activity", { terminalId: "t1" });
+  expect(dropped.status).toBe(200);
+  sent.length = 0;
+
+  expect(await (await post(port, "/notify", permission("t1", "AskUserQuestion", 1))).json())
+    .toEqual({ ok: true, suppressed: true });
+  expect(pushes(sent)).toHaveLength(0);
+});
+
 test("a chat slot latches too — the hooks reporting the prompt are the same ones", async () => {
   // buildChatSpawnAugment reuses the terminal-mode injection, so a chat spawn
   // posts this pair as well. The engine ignores a chat slot (its driver tap

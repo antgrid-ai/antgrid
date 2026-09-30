@@ -86,6 +86,14 @@ export interface AgentContext {
    *  status. Bridge-internal: this never emits an app-facing frame — unlike
    *  /notify, a turn-start is not a user-facing notification. */
   onTurnStart?: (terminalId?: string) => void;
+  /** Called when a per-tool-call hook pings /turn-activity — a catch-all
+   *  "the agent is still here" signal, not a turn boundary. Re-opens the turn
+   *  if a Stop hook closed it early, but unlike {@link onTurnStart} it must
+   *  never clear a pending request or a call-to-action notification: a
+   *  sibling tool completing while the same turn is waiting on a question or
+   *  a permission prompt must not make that block disappear. Bridge-internal:
+   *  like onTurnStart, this never emits an app-facing frame. */
+  onTurnActivity?: (terminalId?: string) => void;
   /** The session bus, when this core built one. Every decision the
    *  `/session-bus/*` routes make is made in here, so the MCP tools above them
    *  stay a transport and cannot answer differently from the routes. Absent
@@ -476,6 +484,22 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
         } catch { /* empty/invalid body is fine */ }
         if (ctx.acceptsHookRun?.(terminalId, runId) === false) return json({ ok: true, stale: true });
         ctx.onTurnStart?.(terminalId);
+        return json({ ok: true });
+      }
+
+      if (req.method === "POST" && path === "/turn-activity") {
+        // Same shape as /turn-start: terminalId is accepted but not required,
+        // and the body is drained either way so the hook's POST doesn't block
+        // on an unread body.
+        let terminalId: string | undefined;
+        let runId: string | undefined;
+        try {
+          const body = await req.json() as { terminalId?: unknown; runId?: unknown } | null;
+          if (typeof body?.terminalId === "string") terminalId = body.terminalId;
+          if (typeof body?.runId === "string") runId = body.runId;
+        } catch { /* empty/invalid body is fine */ }
+        if (ctx.acceptsHookRun?.(terminalId, runId) === false) return json({ ok: true, stale: true });
+        ctx.onTurnActivity?.(terminalId);
         return json({ ok: true });
       }
 

@@ -541,6 +541,14 @@ export interface HookProfile {
    */
   turnBoundaryEvents: { start: readonly string[]; end: readonly string[] };
   /**
+   * True when this agent's START hook is real but lands too late to show work
+   * the moment the user submits, so a submitted prompt line opens the turn
+   * provisionally and the hook confirms it (work-status.ts's `provisionalTurns`).
+   * Needs a non-empty `turnBoundaryEvents.start`: the confirmation is what lets
+   * the bridge take back an Enter the agent swallowed.
+   */
+  provisionalTurnStart?: boolean;
+  /**
    * True when this agent's plugin host may drop our environment, so a hook
    * invocation that arrives with no ANTGRID_API_PORT falls back to reading
    * `<ANTGRID_DIR>/api.port`. Copilot's plugin host does.
@@ -699,6 +707,27 @@ export interface AgentSpec {
    * carried no inline message, and the path is the only thing this can read.
    */
   notifyBodyFromTranscript?: (transcriptPath: string) => Promise<string | null>;
+  /**
+   * A pure predicate over one parsed JSONL record from this agent's own
+   * transcript, answering whether that record marks a turn as manually
+   * interrupted by the user. Measured against Claude Code 2.1.284 and Codex
+   * 0.156.1: neither fires ANY hook on Esc/Ctrl+C, mid-tool or mid-generation,
+   * so a keystroke alone cannot tell a real interrupt from an Esc that merely
+   * closed a picker, a dialog or a task view — the transcript is the only
+   * place either CLI records which one happened.
+   *
+   * Takes and returns nothing but the one already-parsed record: the bridge
+   * owns seeking to a byte offset and splitting whole appended lines, so this
+   * stays pure and cheap enough to run on every line without re-reading
+   * anything from disk itself.
+   *
+   * Absent = this agent's transcript carries no verified interrupt marker
+   * (every agent but claude and codex) — a lone Esc/Ctrl+C on such a session
+   * has nothing to confirm against, so the bridge closes nothing on the key
+   * alone and leaves the turn for its next Stop, tool completion or the decay
+   * clock to settle.
+   */
+  transcriptInterrupt?: (record: unknown) => boolean;
   /** Presence is what makes a tool chat-capable; there is no separate list. */
   driver?: SpecDriverFactory;
   /**

@@ -1,6 +1,7 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { SDKMessage, SDKUserMessage, CanUseTool } from "@anthropic-ai/claude-agent-sdk";
 import { stripInheritedCertOverrides } from "../../host";
+import { stripParentClaudeSession } from "./parent-session";
 import { resolveAgent } from "../../known-agents";
 import type { ApprovalPolicy } from "../types";
 
@@ -63,7 +64,7 @@ export interface SpawnedClaude {
 // sdkOptionsBuilder's ENABLE_TOOL_SEARCH guard). Base defaults to process.env.
 export function buildClaudeEnv(base?: Record<string, string | undefined>): Record<string, string> {
   const src = base ?? (process.env as Record<string, string | undefined>);
-  const env = stripInheritedCertOverrides({ ...src } as Record<string, string>);
+  const env = stripInheritedCertOverrides(stripParentClaudeSession({ ...src }) as Record<string, string>);
   delete (env as any).ANTHROPIC_API_KEY; // never silently bill an API key
   delete (env as any).OPENAI_API_KEY;
   env.CLAUDE_CODE_ENTRYPOINT ??= "cli";                 // first-party rate-limit lane
