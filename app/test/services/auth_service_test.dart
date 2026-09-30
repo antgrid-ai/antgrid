@@ -280,20 +280,26 @@ void main() {
         },
       );
 
-      test('failure copy names the provider startOAuth recorded', () async {
-        final service = make(
-          MockClient((req) async => fail('no network call expected')),
-          launchUrl: (_) async => true,
-        );
-        await service.startOAuth('github');
-        final messages = await failuresDuring(
-          service,
-          () => service.handleDeepLink(
-            Uri.parse('antgrid://auth/callback?error=server_error'),
-          ),
-        );
-        expect(messages, ["GitHub sign-in didn't complete. Try again."]);
-      });
+      for (final (provider, name) in [
+        ('github', 'GitHub'),
+        ('google', 'Google'),
+        ('apple', 'Apple'),
+      ]) {
+        test('failure copy names $provider when startOAuth recorded it', () async {
+          final service = make(
+            MockClient((req) async => fail('no network call expected')),
+            launchUrl: (_) async => true,
+          );
+          await service.startOAuth(provider);
+          final messages = await failuresDuring(
+            service,
+            () => service.handleDeepLink(
+              Uri.parse('antgrid://auth/callback?error=server_error'),
+            ),
+          );
+          expect(messages, ["$name sign-in didn't complete. Try again."]);
+        });
+      }
 
       test(
         'startOAuth surfaces an unopenable browser as AuthException',

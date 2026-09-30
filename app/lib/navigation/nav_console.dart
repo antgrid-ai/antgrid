@@ -133,8 +133,9 @@ class _NavConsoleBarState extends ConsumerState<_NavConsoleBar> {
             child: DefaultTextStyle(
               style: AbTokens.monoStyle(color: colors.textSecondary),
               // The command field is an EditableText, which builds its selection
-              // handles and context menu into an Overlay — and the app's only
-              // Overlay belongs to the Navigator, which is this bar's SIBLING.
+              // handles and context menu into an Overlay — and the app's other
+              // Overlays, the Navigator's and the toast host's, both live inside
+              // this bar's SIBLING.
               // `wrap` sizes itself to the row here, since the console's height
               // is unbounded inside the outer Column.
               child: Overlay.wrap(

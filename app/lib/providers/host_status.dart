@@ -16,6 +16,30 @@ final hostStatusProvider = StreamProvider<HostStatus>((ref) {
   return ref.watch(hostControllerProvider).statusStream;
 });
 
+/// Generation of the last host process seen `up`, or null before the first
+/// `up` of this launch. Changes only on `up`, so a restart in progress does not
+/// churn what depends on it.
+///
+/// Watch it from anything that caches an answer read off the host: a read made
+/// before the host existed fails — the first frame can beat the warm-up that
+/// supplies the spawn bootstrap — and a non-autoDispose provider would keep
+/// that failure for the rest of the launch with a healthy host right there.
+final hostUpGenerationProvider = NotifierProvider<_HostUpGeneration, int?>(
+  _HostUpGeneration.new,
+);
+
+class _HostUpGeneration extends Notifier<int?> {
+  @override
+  int? build() {
+    ref.listen<AsyncValue<HostStatus>>(hostStatusProvider, (_, next) {
+      final s = next.value;
+      if (s != null && s.phase == HostPhase.up) state = s.generation;
+    });
+    final s = ref.read(hostStatusProvider).value;
+    return s != null && s.phase == HostPhase.up ? s.generation : null;
+  }
+}
+
 /// Re-binds everything wired to the old host process after it comes back from a
 /// death we did not ask for: every open LOCAL project, and the loopback control
 /// client. The respawned host has none of the old cores open, its sockets died

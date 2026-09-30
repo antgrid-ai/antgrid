@@ -3,6 +3,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/design/theme_presets.dart';
 
+import '../helpers/toast_host.dart';
+
 /// Pumps [child] inside a MaterialApp configured with the antgrid palette.
 ///
 /// A `ProviderScope` is required here because this harness is pumped under
@@ -16,6 +18,7 @@ Future<void> pumpAntgrid(WidgetTester tester, Widget child) async {
         theme: ThemeData.dark().copyWith(
           extensions: <ThemeExtension<dynamic>>[kDefaultPalette],
         ),
+        builder: abToastHostBuilder,
         home: Scaffold(body: Center(child: child)),
       ),
     ),

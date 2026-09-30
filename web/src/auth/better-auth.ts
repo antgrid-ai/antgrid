@@ -103,7 +103,7 @@ function appleProvider(env: Env) {
       return secret();
     },
     // An identity token's audience is whoever asked Apple for it: the bundle
-    // ID from the native iOS and macOS apps, the Services ID from the web.
+    // ID from the native iOS app, the Services ID from the web.
     // When set, this list overrides appBundleIdentifier in token verification.
     audience: [env.APPLE_APP_BUNDLE_ID, env.APPLE_CLIENT_ID],
   };
@@ -330,6 +330,10 @@ export function createAuth(deps: CreateAuthDeps) {
     // (routes/ui.tsx); nothing here is a backstop for one that doesn't.
     rateLimit: {
       customRules: {
+        // app.ts applies a refilling token bucket to this endpoint. The
+        // built-in counter resets only after an idle window, so even steady
+        // lease refresh traffic eventually exhausts it at any finite max.
+        "/oauth2/token": false,
         "/sign-in/cross-device/start": { window: 60, max: 5 },
         "/sign-in/cross-device/approve": { window: 60, max: 10 },
         "/sign-in/cross-device/status": { window: 60, max: 60 },

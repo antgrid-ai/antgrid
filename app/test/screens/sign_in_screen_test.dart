@@ -149,6 +149,15 @@ Widget _wrapService(
   );
 }
 
+/// A browser launcher that records each URL it is handed, and answers [opens].
+Future<bool> Function(Uri url) _recordLaunches(
+  List<Uri> into, {
+  bool opens = true,
+}) => (url) async {
+  into.add(url);
+  return opens;
+};
+
 /// Mounts the screen on step 1 with no pending ticket, and returns the paths
 /// every request hits — so a test can assert what the screen asked the server
 /// for as well as what it rendered. Pass [storage] to keep a handle on the
@@ -406,10 +415,7 @@ void main() {
           200,
           headers: {'set-cookie': 'better-auth.session_token=signed.gh; Path=/'},
         ),
-        launchUrl: (url) async {
-          launched.add(url);
-          return true;
-        },
+        launchUrl: _recordLaunches(launched),
         authenticateInApp: (url, scheme) async {
           sheets.add(url);
           expect(scheme, 'antgrid');
@@ -490,15 +496,42 @@ void main() {
     testWidgets('Apple is offered on iOS and macOS only', (tester) async {
       await _pumpScreen(tester);
 
-      final offered = {
-        TargetPlatform.iOS,
-        TargetPlatform.macOS,
-      }.contains(defaultTargetPlatform);
       expect(
         find.text('Continue with Apple'),
-        offered ? findsOneWidget : findsNothing,
+        defaultTargetPlatform == TargetPlatform.iOS ||
+                defaultTargetPlatform == TargetPlatform.macOS
+            ? findsOneWidget
+            : findsNothing,
       );
     }, variant: TargetPlatformVariant.all());
+
+    testWidgets('on macOS the Apple button opens the browser, not the sheet', (
+      tester,
+    ) async {
+      var presented = 0;
+      final launched = <Uri>[];
+      final store = _FakeAuthMethodStore();
+      final paths = await _pumpScreen(
+        tester,
+        store: store,
+        launchUrl: _recordLaunches(launched),
+        requestAppleCredential: (_) async {
+          presented++;
+          return null;
+        },
+      );
+
+      await tester.enterText(find.byType(TextField), 'user@example.com');
+      await tester.tap(find.text('Continue with Apple'));
+      await tester.pump();
+      await tester.pump();
+
+      expect(presented, 0);
+      expect(launched.single.path, '/oauth/start');
+      expect(launched.single.queryParameters['provider'], 'apple');
+      expect(paths, isEmpty);
+      expect(store.memory['user@example.com'], AuthMethod.apple);
+    }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
 
     for (final MapEntry(key: preset, value: palette) in kPresets.entries) {
       testWidgets('the Apple button is pure black or white on ${preset.name}', (
@@ -584,7 +617,7 @@ void main() {
       await tester.pump();
 
       expect(find.text('Apple sign-in failed. Try again.'), findsOneWidget);
-    }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
     testWidgets('on iOS a remembered Apple hint presents the sheet', (
       tester,
@@ -605,8 +638,25 @@ void main() {
       expect(paths, isEmpty);
     }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
-    testWidgets('off Apple platforms a remembered Apple hint falls through to '
-        'the link', (tester) async {
+    testWidgets('on macOS a remembered Apple hint opens the browser', (
+      tester,
+    ) async {
+      final launched = <Uri>[];
+      final paths = await _pumpScreen(
+        tester,
+        store: _FakeAuthMethodStore({'user@example.com': AuthMethod.apple}),
+        launchUrl: _recordLaunches(launched),
+      );
+
+      await _continueWith(tester, 'user@example.com');
+
+      expect(launched.single.queryParameters['provider'], 'apple');
+      expect(paths, isEmpty);
+    }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
+
+    testWidgets('where Apple is not offered its hint falls through to the link', (
+      tester,
+    ) async {
       var presented = 0;
       final store = _FakeAuthMethodStore({'user@example.com': AuthMethod.apple});
       final paths = await _pumpScreen(
@@ -623,7 +673,12 @@ void main() {
       expect(presented, 0);
       expect(paths, contains(_startPath));
       expect(store.memory['user@example.com'], AuthMethod.link);
-    }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+    },
+      variant: TargetPlatformVariant({
+        TargetPlatform.android,
+        TargetPlatform.windows,
+      }),
+    );
 
     for (final hint in [AuthMethod.github, AuthMethod.google]) {
       testWidgets('on iOS a remembered ${hint.name} hint opens the in-app '
@@ -652,10 +707,7 @@ void main() {
       final paths = await _pumpScreen(
         tester,
         store: _FakeAuthMethodStore({'user@example.com': AuthMethod.google}),
-        launchUrl: (url) async {
-          launched.add(url);
-          return false;
-        },
+        launchUrl: _recordLaunches(launched, opens: false),
       );
 
       await _continueWith(tester, 'user@example.com');

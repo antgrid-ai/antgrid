@@ -6,10 +6,6 @@
 	<string>VK5VFQQ4P6.ai.radhaai.antgrid</string>
 	<key>com.apple.developer.team-identifier</key>
 	<string>VK5VFQQ4P6</string>
-	<key>com.apple.developer.applesignin</key>
-	<array>
-		<string>Default</string>
-	</array>
 	<key>keychain-access-groups</key>
 	<array>
 		<string>VK5VFQQ4P6.ai.radhaai.antgrid</string>

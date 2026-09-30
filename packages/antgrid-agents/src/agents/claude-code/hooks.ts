@@ -148,6 +148,7 @@ const ClaudePayloadSchema = z.object({
   // ("permission_prompt", "idle_prompt", …). Absent on an older installed CLI,
   // which is the whole reason the message-text fallback survives below.
   notification_type: z.string().nullish(),
+  permission_mode: z.string().nullish(),
 });
 type ClaudePayload = z.infer<typeof ClaudePayloadSchema>;
 
@@ -472,6 +473,7 @@ export async function toPosts(
           ...(terminalId ? { terminalId } : {}),
           ...(input.message ? { message: input.message } : {}),
           ...(promptTool ? { promptTool } : {}),
+          ...(input.permission_mode ? { permissionMode: input.permission_mode } : {}),
         },
       });
     }

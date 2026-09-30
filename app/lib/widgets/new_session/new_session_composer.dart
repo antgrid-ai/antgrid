@@ -19,7 +19,7 @@ import '../../design/widgets/ab_kbd.dart';
 import '../../design/widgets/ab_loading.dart';
 import '../../design/widgets/ab_menu.dart';
 import '../../design/widgets/ab_prompt_field.dart';
-import '../../design/widgets/ab_snack_bar.dart';
+import '../../design/widgets/ab_toast.dart';
 import '../../design/widgets/ab_text_field.dart';
 import '../../design/widgets/ab_switch.dart';
 import '../../design/widgets/ab_tooltip.dart';
@@ -407,7 +407,7 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
       // can't act on; either beats the raw exception the generic arm prints.
       // No navigation — the user stays here with the form intact.
       if (mounted && !_endedByCancel) {
-        showAbSnackBar(
+        showAbToast(
           context,
           sessionRefusalCopy(
             e.errorCode,
@@ -424,7 +424,7 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
       // instead would print the exception's type and code as if they were
       // part of the sentence.
       if (mounted && !_endedByCancel) {
-        showAbSnackBar(
+        showAbToast(
           context,
           sessionRefusalCopy(e.code, e.message, 'Could not switch branch.'),
           duration: const Duration(seconds: 8),
@@ -433,7 +433,7 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
     } on RpcException catch (e) {
       // Same refusal, over the remote control plane.
       if (mounted && !_endedByCancel) {
-        showAbSnackBar(
+        showAbToast(
           context,
           sessionRefusalCopy(e.code, e.message, 'Could not switch branch.'),
           duration: const Duration(seconds: 8),
@@ -448,7 +448,7 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
           'session start failed',
           fields: {'error': '$e', 'stack': '$stack'},
         );
-        showAbSnackBar(
+        showAbToast(
           context,
           'Couldn’t start the session. Check the selected agent and try again.',
           duration: const Duration(seconds: 8),
@@ -479,7 +479,7 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
         .takeAbort();
     if (abort == null) return;
     _reportedAbort = abort;
-    showAbSnackBar(
+    showAbToast(
       context,
       _abortCopy(abort),
       // A cancel the user asked for is a confirmation, not something to read —

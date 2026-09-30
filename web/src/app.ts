@@ -33,6 +33,7 @@ import type { RelayPushConfig } from "./relay/push.js";
 import type { SendEmail } from "./auth/email.js";
 import { makeClientIpResolver } from "./util/client-ip.js";
 import { hidePricingMiddleware } from "./ui/pricing-visibility.js";
+import { oauthTokenRateLimit } from "./auth/oauth-token-rate-limit.js";
 
 export type AppDeps = {
   db: DB;
@@ -130,6 +131,7 @@ export function buildApp(deps: AppDeps) {
   // do. These endpoints are reachable over HTTP as well as via `auth.api.*`, so
   // without this the raw client-supplied chain would reach them untouched. No
   // peer address (no socket) means nothing here is trustworthy — drop it.
+  app.use("/api/auth/*", oauthTokenRateLimit(clientIp));
   app.all("/api/auth/*", (c) => {
     const headers = new Headers(c.req.raw.headers);
     const ip = clientIp(c);

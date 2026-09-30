@@ -35,13 +35,19 @@ final lastAuthMethodStoreProvider = Provider<LastAuthMethodStore>(
   (ref) => LastAuthMethodStore(),
 );
 
-/// Sign in with Apple runs Apple's own sheet, so it needs no browser and exists
-/// only where that sheet does. The macOS build can present it only when signed
-/// with the Developer ID profile that grants the entitlement; an unsigned or
-/// debug build reports the failure on the form.
+/// Offered where App Review requires it beside GitHub and Google (iOS,
+/// guideline 4.8), and on macOS so an account made on the iPhone — possibly
+/// under a Hide My Email address the user cannot type — is reachable from the
+/// Mac without minting a second one.
 bool get _offersAppleSignIn =>
     defaultTargetPlatform == TargetPlatform.iOS ||
     defaultTargetPlatform == TargetPlatform.macOS;
+
+/// Apple's own sheet, which needs no browser, runs on iOS only: it needs the
+/// applesignin entitlement, and Apple will not put that in the Developer ID
+/// profile the macOS build ships under. macOS signs in through the browser as
+/// the web client instead.
+bool get _appleSheet => defaultTargetPlatform == TargetPlatform.iOS;
 
 /// Sign-in screen.
 ///
@@ -64,8 +70,8 @@ bool get _offersAppleSignIn =>
 /// entirely over HTTPS — no browser, no deeplink. GitHub and Google remain as
 /// secondary options on the browser+deeplink path (an in-app sheet on iOS, see
 /// [AuthService.startOAuth]), and Sign in with Apple ([_offersAppleSignIn]) on
-/// Apple's native sheet. App Review requires Apple beside them on iOS
-/// (guideline 4.8).
+/// Apple's native sheet where [_appleSheet] allows, else on that same browser
+/// path.
 ///
 /// There is no password SIGN-UP here. Creating an account with one lands on
 /// "check your email" and then needs a second trip back to sign in (the server
@@ -214,7 +220,18 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
     unawaited(target.remember(email, method));
   }
 
-  Future<void> _startOAuth(String provider) async {
+  Future<void> _startApple() =>
+      _appleSheet ? _signInWithApple() : _startOAuth(AuthMethod.apple);
+
+  /// [method]'s name is the web's provider id.
+  Future<void> _startOAuth(AuthMethod method) async {
+    assert(
+      method == AuthMethod.github ||
+          method == AuthMethod.google ||
+          method == AuthMethod.apple,
+      '$method is not a social provider',
+    );
+    final provider = method.name;
     ref
         .read(analyticsServiceProvider)
         ?.track(AnalyticsEvents.signInStarted, props: {'provider': provider});
@@ -233,6 +250,7 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
     setState(() {
       _phase = inApp ? _Phase.submitting : _Phase.form;
       _error = null;
+      _notice = null;
       _oauthInApp = inApp;
     });
     final OAuthStart started;
@@ -262,11 +280,7 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
     // deep link carries none — so a hint can still land wrong. What keeps that
     // survivable is "Continue with a password": it reaches step 2 whatever the
     // hint says, and step 2 carries the link.
-    _remember(
-      email,
-      provider == 'github' ? AuthMethod.github : AuthMethod.google,
-      store: store,
-    );
+    _remember(email, method, store: store);
     if (started != OAuthStart.signedIn) return;
     // The in-app round trip has no deep link behind it, so nothing else will
     // tell the root the user signed in.
@@ -396,15 +410,15 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
       case AuthMethod.password:
         _goToStep(_Step.password);
       case AuthMethod.github:
-        await _startOAuth('github');
+        await _startOAuth(AuthMethod.github);
       case AuthMethod.google:
-        await _startOAuth('google');
+        await _startOAuth(AuthMethod.google);
       case AuthMethod.apple when _offersAppleSignIn:
-        await _signInWithApple();
+        await _startApple();
       // A remembered link, and an address this device has never seen, take the
       // same path — the link is what works without knowing anything. So does an
-      // Apple hint on a platform without Apple's sheet, which another surface
-      // can have recorded.
+      // Apple hint on a platform that does not offer Apple, which another
+      // surface can have recorded.
       case AuthMethod.apple:
       case AuthMethod.link:
       case null:
@@ -915,7 +929,7 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
                 : () => detached(
                     'SignInScreen',
                     'Apple sign-in failed',
-                    _signInWithApple,
+                    _startApple,
                   ),
           ),
           const SizedBox(height: AbTokens.space8),
@@ -936,12 +950,12 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
             _AuthMethodSpec(
               icon: AbIcons.github,
               label: 'GitHub',
-              onTap: busy ? null : () => _startOAuth('github'),
+              onTap: busy ? null : () => _startOAuth(AuthMethod.github),
             ),
             _AuthMethodSpec(
               icon: _googleMark,
               label: 'Google',
-              onTap: busy ? null : () => _startOAuth('google'),
+              onTap: busy ? null : () => _startOAuth(AuthMethod.google),
             ),
             // Unconditional, never keyed on what the store recalls: visibility
             // that tracked the hint would flicker as the address is typed and

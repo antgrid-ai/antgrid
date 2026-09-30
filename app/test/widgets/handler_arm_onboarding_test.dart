@@ -4,10 +4,11 @@ import 'package:antgrid/billing/pricing_visibility.dart';
 import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/design/widgets/ab_button.dart';
 import 'package:antgrid/design/widgets/ab_text_field.dart';
+import 'package:antgrid/design/widgets/ab_toast.dart';
 import 'package:antgrid/models/agent_descriptor.dart';
 import 'package:antgrid/models/handler_state.dart';
-import 'package:antgrid/navigation/root_navigator.dart';
 import 'package:antgrid/providers/agent_catalog.dart';
+import 'package:antgrid/providers/app_toaster.dart';
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/project/project_session_registry.dart';
 import 'package:antgrid/providers/agent_transport.dart';
@@ -60,10 +61,23 @@ Widget _wrap(Widget child, {required List<Override> overrides}) {
       theme: ThemeData.dark().copyWith(
         extensions: <ThemeExtension<dynamic>>[kDefaultPalette],
       ),
+      builder: _appToastHost,
       home: Scaffold(body: child),
     ),
   );
 }
+
+/// Mounts the container's [appToasterProvider] stack, as `main.dart` does:
+/// the arm flow's failure reports go through the provider because every
+/// widget that could have shown one is gone by then, so a host with its own
+/// toaster would never render them.
+Widget _appToastHost(BuildContext context, Widget? child) => AbToastHost(
+  toaster: ProviderScope.containerOf(
+    context,
+    listen: false,
+  ).read(appToasterProvider),
+  child: child!,
+);
 
 void main() {
   group('handlerArmExplainerBody', () {
@@ -493,13 +507,10 @@ void main() {
         UncontrolledProviderScope(
           container: container,
           child: MaterialApp(
-            // The flow's own failure reports go to the ROOT navigator's
-            // overlay, since every widget that could have shown one is gone by
-            // then — so the key has to be the one the provider hands out.
-            navigatorKey: container.read(rootNavigatorKeyProvider),
             theme: ThemeData.dark().copyWith(
               extensions: <ThemeExtension<dynamic>>[kDefaultPalette],
             ),
+            builder: _appToastHost,
             home: const Scaffold(
               body: SizedBox.shrink(key: ValueKey('probe')),
             ),

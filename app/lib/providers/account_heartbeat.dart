@@ -40,7 +40,7 @@ final accountHeartbeatProvider = Provider<void>((ref) {
       if (!ref.mounted) return;
       final minter = await ref.read(licenseTokenMinterProvider.future);
       if (minter == null || !ref.mounted) return;
-      final token = minter.getToken() ?? await minter.mint();
+      final token = await minter.token();
       if (!ref.mounted) return;
       await sendAccountHeartbeat(
         licenseApiUrl: ref.read(licenseApiUrlProvider),

@@ -168,7 +168,7 @@ Future<bool> _apply(
   final target = loc.target!;
 
   if (target != ref.read(selectedTargetProvider)) {
-    // The tapped widget is transient — a toast entry, and one this very route
+    // The context is the shell that raised the toast, which this very route
     // tears down — so a dead one falls through to the app's single Navigator,
     // which outlives every route.
     BuildContext? navContext;

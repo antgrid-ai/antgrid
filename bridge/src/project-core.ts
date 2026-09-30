@@ -240,6 +240,12 @@ export class ProjectCore {
     // by the turn it opened, which is the only evidence this bridge gets that
     // the agent read it rather than left it sitting in its composer.
     const opened = openedTurns(this._work, next);
+    if (perSessionChanged) {
+      for (const [id, s] of next.sessionStatuses) {
+        const was = this._work.sessionStatuses.get(id);
+        if (was !== s) log.info("session %s status %s -> %s (notification %s)", id, was ?? "none", s, next.notifications.get(id) ?? "none");
+      }
+    }
     this._work = next;
     for (const sessionId of opened) this.deliveries?.confirm(sessionId);
     for (const sessionId of released) {
@@ -291,6 +297,12 @@ export class ProjectCore {
    *  notification — see {@link turnActivity}. Routed here from the per-core
    *  api-server via {@link AgentContext.onTurnActivity}. */
   noteTurnActivity(sessionId?: string): void {
+    // A tool finishing while the session still reads "needs you" means the
+    // block ended without a keystroke — the case that leaves the dot stale.
+    if (sessionId !== undefined && this._work.sessionStatuses.get(sessionId) === "attention") {
+      log.info("session %s finished a tool while reading attention (notification %s)",
+        sessionId, this._work.notifications.get(sessionId) ?? "none");
+    }
     this.commitWork(turnActivity(this._work, sessionId, Date.now()));
   }
 

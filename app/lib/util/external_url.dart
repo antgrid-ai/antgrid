@@ -3,7 +3,7 @@ import 'dart:io' show InternetAddress;
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-import '../design/widgets/ab_snack_bar.dart';
+import '../design/widgets/ab_toast.dart';
 import '../models/workspace_view.dart';
 import '../services/file_service.dart';
 import '../services/preview_service.dart';
@@ -14,7 +14,7 @@ import 'ab_log.dart';
 /// Longest URL echoed back to the user or written to `app.log`.
 ///
 /// A terminal hyperlink's URI is written by whatever program is running, so it
-/// is unbounded program-chosen text. `showAbSnackBar`'s line cap stops a long
+/// is unbounded program-chosen text. `showAbToast`'s line cap stops a long
 /// one being PAINTED but not laid out, and the log line would carry all of it
 /// to disk on every failure.
 const int _maxShownUrlChars = 120;
@@ -31,7 +31,7 @@ String _elide(String url) {
   return '${url.substring(0, end)}…';
 }
 
-/// Open [url] in the system browser, falling back to a SnackBar with the URL
+/// Open [url] in the system browser, falling back to a toast with the URL
 /// if launching fails. Used by the sign-in / activation / blocked screens and
 /// by [openTerminalHyperlink].
 Future<void> openExternalUrl(BuildContext context, String url) async {
@@ -49,7 +49,7 @@ Future<void> openExternalUrl(BuildContext context, String url) async {
     }
   }
   if (!ok && context.mounted) {
-    showAbSnackBar(context, 'Could not open browser. Visit ${_elide(url)}.');
+    showAbToast(context, 'Could not open browser. Visit ${_elide(url)}.');
   }
 }
 
@@ -111,7 +111,7 @@ Future<void> openTerminalHyperlink(
       // — but that is the fork's invariant, not ours, and a deferred tap (a
       // double-tap timer, a post-frame hop) would land here on a dead element.
       if (context.mounted) {
-        showAbSnackBar(
+        showAbToast(
           context,
           'Only http and https links open from the terminal.',
         );
@@ -132,8 +132,8 @@ Future<void> openTerminalHyperlink(
   } catch (error, stack) {
     // Log-only on purpose: every failure the user can actually provoke —
     // a refused scheme, an unparseable URL, a launcher that says no — already
-    // answers with a SnackBar above. Reaching here means something unforeseen
-    // threw, and a `showAbSnackBar` in this block could throw again with no
+    // answers with a toast above. Reaching here means something unforeseen
+    // threw, and a `showAbToast` in this block could throw again with no
     // catch left to hold it.
     AbLog.error(
       'TerminalView',
@@ -238,7 +238,7 @@ Future<void> _openFileLink(
   try {
     final path = terminalFilePath(rawUri);
     if (path == null) {
-      if (context.mounted) showAbSnackBar(context, 'Could not open that link.');
+      if (context.mounted) showAbToast(context, 'Could not open that link.');
       return;
     }
     final service = fileService();
@@ -249,7 +249,7 @@ Future<void> _openFileLink(
     if (relPath == null) {
       final externalImagePath = result.externalImagePath;
       if (externalImagePath == null) {
-        showAbSnackBar(context, 'That path is outside this workspace.');
+        showAbToast(context, 'That path is outside this workspace.');
         return;
       }
       await showFilePreviewDialog(
@@ -307,12 +307,12 @@ Future<void> _openPreviewLink(
   try {
     final service = previewService();
     if (service == null) return;
-    await service.openTab(port, scheme: scheme, path: path);
+    await service.openTab(port, scheme: scheme, path: path, navigateExisting: true);
     if (!context.mounted) return;
     revealView(WorkspaceView.preview);
   } catch (error, stack) {
     if (context.mounted) {
-      showAbSnackBar(context, 'Could not open preview on port $port.');
+      showAbToast(context, 'Could not open preview on port $port.');
     }
     AbLog.error(
       'ContentLink',

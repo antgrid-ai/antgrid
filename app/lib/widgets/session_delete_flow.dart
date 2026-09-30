@@ -3,7 +3,7 @@ import 'package:antgrid_relay_client/antgrid_relay_client.dart'
     show remoteCommandOutcomeUnknownMessage;
 
 import '../design/widgets/ab_confirm_dialog.dart';
-import '../design/widgets/ab_snack_bar.dart';
+import '../design/widgets/ab_toast.dart';
 import '../services/sessions_service.dart';
 import 'ab_status_helpers.dart' show sessionRefusalCopy;
 
@@ -93,7 +93,7 @@ Future<SessionDeleteResult> confirmAndDeleteSession({
     onInFlight?.call(false);
     final result = _resultFor(ack);
     if (result == SessionDeleteResult.outcomeUnknown && context.mounted) {
-      showAbSnackBar(context, remoteCommandOutcomeUnknownMessage);
+      showAbToast(context, remoteCommandOutcomeUnknownMessage);
     }
     return result;
   } on SessionOperationException catch (error) {
@@ -147,7 +147,7 @@ Future<SessionDeleteResult> confirmAndDeleteSession({
     onInFlight?.call(false);
     final result = _resultFor(ack);
     if (result == SessionDeleteResult.outcomeUnknown && context.mounted) {
-      showAbSnackBar(context, remoteCommandOutcomeUnknownMessage);
+      showAbToast(context, remoteCommandOutcomeUnknownMessage);
     }
     return result;
   } on SessionOperationException catch (error) {
@@ -170,7 +170,7 @@ SessionDeleteResult _resultFor(SessionDeleteAck ack) => switch (ack) {
 /// here: the analyzer recognises only the literal form, and folding the check
 /// into this helper turns a checked lint into an unchecked convention.
 void _report(BuildContext context, String? code, String? message) {
-  showAbSnackBar(
+  showAbToast(
     context,
     sessionRefusalCopy(code, message, 'Could not delete the session'),
   );

@@ -77,74 +77,45 @@ void main() {
   testWidgets('an escalation toast opens the session it came from', (
     tester,
   ) async {
-    await _withShell(tester, Stream.value((
-      entryId: _entryId,
-      message: _escalation,
-    )), (container) async {
-      // Every write of the pending view, so the assertion is about the
-      // MECHANISM and not only its outcome — the drain clears it again.
-      final handedOver = <PendingNav<WorkspaceView>>[];
-      final sub = container.listen(pendingWorkspaceViewProvider, (_, next) {
-        if (next != null) handedOver.add(next);
-      });
-      addTearDown(sub.close);
+    await _withShell(
+      tester,
+      Stream.value((entryId: _entryId, message: _escalation)),
+      (container) async {
+        // Every write of the pending view, so the assertion is about the
+        // MECHANISM and not only its outcome — the drain clears it again.
+        final handedOver = <PendingNav<WorkspaceView>>[];
+        final sub = container.listen(pendingWorkspaceViewProvider, (_, next) {
+          if (next != null) handedOver.add(next);
+        });
+        addTearDown(sub.close);
 
-      final toast = tester.widget<AbToast>(find.byType(AbToast));
-      expect(toast.actionLabel, 'Open');
+        final toast = tester.widget<AbToast>(find.byType(AbToast));
+        expect(toast.actionLabel, 'Open');
 
-      await tester.tap(find.text('Open'));
-      await _settle(tester);
+        await tester.tap(find.text('Open'));
+        await _settle(tester);
 
-      expect(container.read(activeSessionIdProvider), _escalation.terminalId);
-      expect(handedOver, [(target: _target, value: WorkspaceView.handler)]);
-      // Honoured by the drain, which is what a direct reveal would have lost.
-      expect(
-        container.read(visibleWorkspaceViewProvider),
-        WorkspaceView.handler,
-      );
-      // A same-project route never queues the session id: nothing would drain
-      // one here, and while set it makes `reconcileActiveSession` select null.
-      expect(container.read(pendingActiveSessionIdProvider), isNull);
+        expect(container.read(activeSessionIdProvider), _escalation.terminalId);
+        expect(handedOver, [(target: _target, value: WorkspaceView.handler)]);
+        // Honoured by the drain, which is what a direct reveal would have lost.
+        expect(
+          container.read(visibleWorkspaceViewProvider),
+          WorkspaceView.handler,
+        );
+        // A same-project route never queues the session id: nothing would drain
+        // one here, and while set it makes `reconcileActiveSession` select null.
+        expect(container.read(pendingActiveSessionIdProvider), isNull);
 
-      // Outlive the toast's own timer so nothing fires past the test.
-      await tester.pump(const Duration(seconds: 12));
-    });
+        // The tap itself dismissed the toast — nothing left to outlive.
+        expect(find.byType(AbToast), findsNothing);
+      },
+    );
   });
 
-  testWidgets('a second tap on the same toast applies once', (tester) async {
-    await _withShell(tester, Stream.value((
-      entryId: _entryId,
-      message: _escalation,
-    )), (container) async {
-      await tester.tap(find.text('Open'));
-      await _settle(tester);
-      container.read(activeSessionIdProvider.notifier).set(null);
-
-      // Past `showAbToastOverlay`'s 4s default and well inside the 8s this
-      // toast asked for: the second tap only reaches a chip that is still on
-      // screen, so the two halves — the longer duration and the dedup that has
-      // to absorb what it makes possible — are pinned together.
-      // ~2.4s has already elapsed in the settles above, so this lands near 7s:
-      // past a 6s toast, inside the 8s one, which is the window that pins the
-      // duration from both sides rather than only against the 4s default.
-      await tester.pump(const Duration(milliseconds: 4500));
-      expect(find.text('Open'), findsOneWidget);
-
-      // The action cannot dismiss its own toast, so it stays pressable for the
-      // whole 8s — the applier's dedup is what absorbs the second press.
-      await tester.tap(find.text('Open'));
-      await _settle(tester);
-
-      expect(container.read(activeSessionIdProvider), isNull);
-
-      await tester.pump(const Duration(seconds: 12));
-    });
-  });
-
-  // The complement of the case above, and what keeps that one honest: without a
-  // sourceMessageId every route about one session is value-identical, so the
-  // dedup that swallows a re-tap would swallow the NEXT escalation too — the
-  // second and every later Open on that session, permanently.
+  // Without a sourceMessageId every route about one session is
+  // value-identical, so this is what proves a second escalation on the same
+  // session still gets its OWN toast and its OWN tap, rather than the first
+  // one's dismissal (or the applier's dedup) silently swallowing it.
   testWidgets('a later escalation on the same session opens it again', (
     tester,
   ) async {
@@ -158,7 +129,9 @@ void main() {
       at: 2,
     );
     final controller =
-        StreamController<({String entryId, HandlerEscalation message})>.broadcast();
+        StreamController<
+          ({String entryId, HandlerEscalation message})
+        >.broadcast();
     addTearDown(controller.close);
 
     await _withShell(tester, controller.stream, (container) async {
@@ -168,7 +141,6 @@ void main() {
       await _settle(tester);
       expect(container.read(activeSessionIdProvider), 'session-9');
       container.read(activeSessionIdProvider.notifier).set(null);
-      await tester.pump(const Duration(seconds: 12));
 
       controller.add((entryId: _entryId, message: second));
       await _settle(tester);
@@ -176,7 +148,6 @@ void main() {
       await _settle(tester);
 
       expect(container.read(activeSessionIdProvider), 'session-9');
-      await tester.pump(const Duration(seconds: 12));
     });
   });
 

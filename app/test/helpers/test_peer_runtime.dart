@@ -6,6 +6,43 @@ import 'package:antgrid/services/keychain_device_store.dart';
 import 'package:antgrid_peer_transport/antgrid_peer_transport.dart';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 
+const leaseDeviceId = '00000000-0000-4000-8000-000000000001';
+const leasePeerId = '00000000-0000-4000-8000-000000000002';
+
+/// The enrollment [leaseSnapshotJson] authorizes.
+DeviceRecord leaseRecord() => DeviceRecord(
+  userId: 'account',
+  deviceUuid: leaseDeviceId,
+  clientId: 'credential',
+  clientSecret: 'secret',
+  ed25519Pub: base64Encode(Uint8List(32)),
+  ed25519Priv: base64Encode(Uint8List(32)),
+  x25519Pub: '',
+  x25519Priv: '',
+  endpointSecret: base64Encode(Uint8List(32)),
+);
+
+/// An allowed authorization snapshot for [leaseRecord] with [leasePeerId] as
+/// its one peer.
+final leaseSnapshotJson = jsonEncode({
+  'accountId': 'account',
+  'deviceId': leaseDeviceId,
+  'enrollmentId': 'credential',
+  'registrationGeneration': '0',
+  'policyGeneration': '1',
+  'allowed': true,
+  'leaseMs': 60000,
+  'endpoint': null,
+  'relayUrls': <String>[],
+  'peers': [
+    {
+      'deviceId': leasePeerId,
+      'ed25519Pub': base64Encode(List.filled(32, 1)),
+      'endpoint': null,
+    },
+  ],
+});
+
 /// Uses each test's in-memory relay as an explicit payload double, without
 /// provisioning native libraries or making HTTP authorization requests.
 class TestPeerRuntime extends PeerRuntime {
@@ -25,6 +62,7 @@ class TestPeerRuntime extends PeerRuntime {
         ),
         licenseApiUrl: 'https://unused.invalid',
         mintToken: () async => 'test',
+        rejectToken: (_) => false,
       );
 
   final PeerLink? _payloadLink;
