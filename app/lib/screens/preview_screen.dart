@@ -116,7 +116,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
       ((_maxScreenshotBytes + 2) ~/ 3) * 4 + 64;
   static const _maxScreenshotChunks =
       (_maxScreenshotDataChars + _screenshotChunkChars - 1) ~/
-          _screenshotChunkChars;
+      _screenshotChunkChars;
 
   final Map<int, _TabWebViewState> _tabStates = {};
 
@@ -591,8 +591,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     // so a backgrounded tab (auto-detected while looking elsewhere) starts
     // loading the moment it opens rather than only once first focused.
     for (final tab in state.tabs) {
-      final initialUrl =
-          tab.currentUrl ?? 'http://localhost:${tab.localPort}';
+      final initialUrl = tab.currentUrl ?? 'http://localhost:${tab.localPort}';
       final tabState = _tabStates.putIfAbsent(tab.port, _TabWebViewState.new);
       // Rebuild only on an actual target change: webview_flutter builds the
       // controller eagerly (unlike inappwebview's onWebViewCreated), so a
@@ -1151,6 +1150,22 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
         },
         if (activeState != null)
           AppCommand.refresh: () => activeState.controller?.reload(),
+        if (activeState?.controller != null)
+          AppCommand.hardRefresh: () =>
+              detached('PreviewScreen', 'hard refresh failed', () async {
+                final controller = activeState!.controller!;
+                await controller.clearCache();
+                await controller.reload();
+              }),
+        if (preview != null) AppCommand.newPreviewTab: _startComposingNewTab,
+        if (activeTab != null) AppCommand.closePreviewTab: _closeActiveTab,
+        if ((activeState?.canGoForward ?? false) &&
+            activeState?.controller != null)
+          AppCommand.previewForward: () => detached(
+            'PreviewScreen',
+            'page forward failed',
+            () async => activeState!.controller!.goForward(),
+          ),
       }),
       child: _buildToolbarAndBody(
         state: state,

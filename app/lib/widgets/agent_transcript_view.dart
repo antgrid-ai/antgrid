@@ -1016,7 +1016,9 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
     // synchronous derivation, so a result that lands while still valid is
     // never clobbered by a build it didn't cause.
     final mentionVisible =
-        _suggestions.isEmpty && !_mentionDismissed && _input.mentionToken != null;
+        _suggestions.isEmpty &&
+        !_mentionDismissed &&
+        _input.mentionToken != null;
     if (!mentionVisible) _mentionSuggestions = const [];
     if (_mentionIndex >= _mentionSuggestions.length) _mentionIndex = 0;
     final displayCaps = _capabilities;

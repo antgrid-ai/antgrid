@@ -85,6 +85,8 @@ final localCapabilityCardProvider = FutureProvider.autoDispose
 /// loopback round trip instead of two.
 final localProjectRemoteProvider = FutureProvider.autoDispose
     .family<String?, String>((ref, projectId) async {
-      final card = await ref.watch(localCapabilityCardProvider(projectId).future);
+      final card = await ref.watch(
+        localCapabilityCardProvider(projectId).future,
+      );
       return card?.projects[projectId]?.remote;
     });

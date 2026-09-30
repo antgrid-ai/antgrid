@@ -211,9 +211,7 @@ class _UpdateGateState extends ConsumerState<UpdateGate>
         icon: AbIcons.check,
         // Not "and reopened your sessions": nothing restores what the bridge
         // host was running.
-        title: version == 'dev'
-            ? 'Update installed'
-            : 'Updated to $version',
+        title: version == 'dev' ? 'Update installed' : 'Updated to $version',
         description: note == null
             ? 'Replaced $replaced.'
             : 'Replaced $replaced. $note',

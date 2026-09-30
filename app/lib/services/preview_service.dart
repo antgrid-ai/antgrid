@@ -323,15 +323,16 @@ class PreviewService {
       });
     }
     late final Future<void> tracked;
-    tracked = _open(
-      port,
-      scheme: scheme,
-      focus: focus,
-      path: path,
-      reportErrors: reportErrors,
-    ).whenComplete(() {
-      if (identical(_opening[port], tracked)) _opening.remove(port);
-    });
+    tracked =
+        _open(
+          port,
+          scheme: scheme,
+          focus: focus,
+          path: path,
+          reportErrors: reportErrors,
+        ).whenComplete(() {
+          if (identical(_opening[port], tracked)) _opening.remove(port);
+        });
     _opening[port] = tracked;
     return tracked;
   }
@@ -380,7 +381,11 @@ class PreviewService {
 
     // The bridge, not the caller, knows whether the dev server speaks TLS, so
     // the WebView's scheme comes from a probe instead of the detected hint.
-    final generation = _generation.update(port, (g) => g + 1, ifAbsent: () => 1);
+    final generation = _generation.update(
+      port,
+      (g) => g + 1,
+      ifAbsent: () => 1,
+    );
     bool superseded() => _disposed || _generation[port] != generation;
 
     final probe = session.transport.openTunnelTcp(

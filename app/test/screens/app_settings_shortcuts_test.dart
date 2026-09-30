@@ -6,6 +6,7 @@
 // headers behind.
 import 'package:antgrid/design/ab_theme.dart';
 import 'package:antgrid/keyboard/app_shortcuts.dart';
+import 'package:antgrid/keyboard/shortcuts_sheet.dart';
 import 'package:antgrid/models/pending_nav.dart';
 import 'package:antgrid/models/settings_section.dart';
 import 'package:antgrid/providers/ui_attention_providers.dart';
@@ -105,6 +106,43 @@ void main() {
     });
   });
 
+  // A focused chord is the terminal's while it has the keyboard, so the page
+  // says so beside that chord — and not beside its global neighbour.
+  testWidgets('a chord the terminal keeps is marked, a global one is not', (
+    tester,
+  ) async {
+    await withSettings(tester, () async {
+      await openPage(tester);
+
+      // Windows: Ctrl+Shift+N (global) and Ctrl+N (focused), plus Back/Forward
+      // and search's Ctrl+K, and the shortcut sheet's Ctrl+/.
+      expect(onPage(find.text(kOutsideTerminalNote)), findsWidgets);
+      final newSession = find.ancestor(
+        of: row(AppCommand.newSession),
+        matching: find.byType(Row),
+      );
+      expect(
+        find.descendant(
+          of: newSession.first,
+          matching: find.text(kOutsideTerminalNote),
+        ),
+        findsOneWidget,
+      );
+      // Toggle sidebar has only a global chord.
+      final sidebar = find.ancestor(
+        of: row(AppCommand.toggleSidebar),
+        matching: find.byType(Row),
+      );
+      expect(
+        find.descendant(
+          of: sidebar.first,
+          matching: find.text(kOutsideTerminalNote),
+        ),
+        findsNothing,
+      );
+    });
+  });
+
   testWidgets('back returns to the settings list', (tester) async {
     await withSettings(tester, () async {
       await openPage(tester);
@@ -167,7 +205,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(row(AppCommand.newTerminal), findsOneWidget);
-      expect(row(AppCommand.showTerminals), findsOneWidget);
+      expect(row(AppCommand.toggleSessionMode), findsOneWidget);
       expect(row(AppCommand.newSession), findsNothing);
       // Dialogs has no command mentioning a terminal.
       expect(onPage(find.text('DIALOGS')), findsNothing);

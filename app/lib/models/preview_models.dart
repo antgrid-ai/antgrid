@@ -70,9 +70,7 @@ class PreviewTab {
     return PreviewTab(
       port: port,
       scheme: scheme ?? this.scheme,
-      localPort: clearLocalPort
-          ? null
-          : (localPort ?? this.localPort),
+      localPort: clearLocalPort ? null : (localPort ?? this.localPort),
       currentUrl: clearCurrentUrl ? null : (currentUrl ?? this.currentUrl),
     );
   }
@@ -119,9 +117,7 @@ class PreviewState {
     return PreviewState(
       ports: ports ?? this.ports,
       tabs: tabs ?? this.tabs,
-      activeTabId: clearActiveTabId
-          ? null
-          : (activeTabId ?? this.activeTabId),
+      activeTabId: clearActiveTabId ? null : (activeTabId ?? this.activeTabId),
       isLoading: isLoading ?? this.isLoading,
       error: clearError ? null : (error ?? this.error),
     );

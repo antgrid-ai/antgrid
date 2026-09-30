@@ -74,11 +74,9 @@ typedef _SetInformationJobObjectC =
       Pointer<Void> info,
       Uint32 length,
     );
-typedef _SetInformationJobObject =
-    int Function(int, int, Pointer<Void>, int);
+typedef _SetInformationJobObject = int Function(int, int, Pointer<Void>, int);
 
-typedef _AssignProcessToJobObjectC =
-    Int32 Function(IntPtr job, IntPtr process);
+typedef _AssignProcessToJobObjectC = Int32 Function(IntPtr job, IntPtr process);
 typedef _AssignProcessToJobObject = int Function(int, int);
 
 typedef _OpenProcessC =
@@ -106,16 +104,19 @@ final _assignProcessToJobObject = _kernel32
     .lookupFunction<_AssignProcessToJobObjectC, _AssignProcessToJobObject>(
       'AssignProcessToJobObject',
     );
-final _openProcess = _kernel32
-    .lookupFunction<_OpenProcessC, _OpenProcess>('OpenProcess');
-final _closeHandle = _kernel32
-    .lookupFunction<_CloseHandleC, _CloseHandle>('CloseHandle');
+final _openProcess = _kernel32.lookupFunction<_OpenProcessC, _OpenProcess>(
+  'OpenProcess',
+);
+final _closeHandle = _kernel32.lookupFunction<_CloseHandleC, _CloseHandle>(
+  'CloseHandle',
+);
 
 /// Advisory only. Dart does not guarantee the thread's last-error value
 /// survives the trampoline out of the failing call and back in through this
 /// one (dart-lang/sdk#38832), so read a logged 0 as "unknown", not "success".
-final _getLastError = _kernel32
-    .lookupFunction<_GetLastErrorC, _GetLastError>('GetLastError');
+final _getLastError = _kernel32.lookupFunction<_GetLastErrorC, _GetLastError>(
+  'GetLastError',
+);
 
 /// Kernel handle to the app-lifetime job, or 0 once creation has failed.
 ///
@@ -227,8 +228,5 @@ int _ensureJob() {
   return _job = job;
 }
 
-void _warn(String what, int? pid, int err) => AbLog.warn(
-  'HostController',
-  what,
-  fields: {'pid': ?pid, 'lastError': err},
-);
+void _warn(String what, int? pid, int err) =>
+    AbLog.warn('HostController', what, fields: {'pid': ?pid, 'lastError': err});

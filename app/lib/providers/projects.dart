@@ -386,7 +386,8 @@ List<AbProject> missingLocalProjects({
           displayName: p.label ?? pathBasename(p.path!),
           hostDeviceUuid: hostUuid,
           hostMachineName: '',
-          lastOpenedAt: DateTime.tryParse(p.lastActiveAt ?? '') ?? DateTime.now(),
+          lastOpenedAt:
+              DateTime.tryParse(p.lastActiveAt ?? '') ?? DateTime.now(),
         ),
   ];
 }

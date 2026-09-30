@@ -12,6 +12,7 @@ import '../design/widgets/ab_search_field.dart';
 /// and the row height.
 class FileSearchBar extends StatefulWidget {
   final String? currentQuery;
+
   /// Coalescing window before [onQueryChanged] fires. A mount whose callback
   /// already debounces passes [Duration.zero] rather than paying both.
   final Duration debounce;

@@ -430,7 +430,10 @@ class _HandlerPaBarState extends ConsumerState<HandlerPaBar> {
                     ),
                   ),
                   if (detail != null) ...[
-                    TextSpan(text: ' · ', style: TextStyle(color: p.textMuted)),
+                    TextSpan(
+                      text: ' · ',
+                      style: TextStyle(color: p.textMuted),
+                    ),
                     TextSpan(text: detail),
                   ],
                 ],
@@ -477,7 +480,8 @@ class _HandlerPaBarState extends ConsumerState<HandlerPaBar> {
                 onTap: (chipContext) => detached(
                   'HandlerPaBar',
                   'open session settings',
-                  () => showHandlerSessionSettingsSheet(chipContext, terminalId),
+                  () =>
+                      showHandlerSessionSettingsSheet(chipContext, terminalId),
                 ),
               ),
               const SizedBox(width: AbTokens.space6),

@@ -3,7 +3,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../constants/breakpoints.dart';
 import '../models/session_entry.dart';
-import '../models/workspace_view.dart';
 import '../navigation/back_intent.dart';
 import '../navigation/nav_controller.dart';
 import '../providers/agent_transport.dart';
@@ -12,7 +11,6 @@ import '../providers/open_target_session.dart';
 import '../providers/providers.dart';
 import '../providers/session_search.dart';
 import '../providers/sessions.dart';
-import '../providers/visible_surface.dart';
 import '../util/detached.dart';
 import '../utils/platform_utils.dart';
 import '../widgets/account_footer.dart' show openAppSettings;
@@ -21,7 +19,6 @@ import '../widgets/session_row.dart' show showSessionSurface;
 import '../widgets/session_search_modal.dart';
 import 'app_command_registry.dart';
 import 'app_shortcuts.dart';
-import 'focus_regions.dart';
 import 'shortcuts_sheet.dart';
 
 /// Installs the app's keyboard shortcuts over [child] and offers the commands
@@ -79,28 +76,7 @@ class _AppShortcutScopeState extends ConsumerState<AppShortcutScope> {
   Widget build(BuildContext context) {
     final sidebar = ref.watch(sidebarControlProvider);
     final panel = ref.watch(contextPanelControlProvider);
-    final menu = ref.watch(workspaceMenuControlProvider);
-    final switchToAgent = ref.watch(switchToAgentProvider);
-    final focusAgentInput = ref.watch(focusAgentInputProvider);
     final canCycle = _cycleCandidates().length > 1;
-    final phoneWidth = MediaQuery.sizeOf(context).width < kCompactBreakpoint;
-
-    // Shows the tab AND hands it the keyboard, so arrows work in it straight
-    // away — the chord is how the keyboard leaves the agent's terminal for a
-    // tab. After the frame: a tab revealed from a hidden panel has no strip to
-    // focus until it has built.
-    VoidCallback? reveal(WorkspaceView view) => menu == null
-        ? null
-        : () {
-            menu.reveal(view);
-            WidgetsBinding.instance
-              ..addPostFrameCallback((_) {
-                if (mounted) ref.read(workspaceTabsFocusProvider).focus?.call();
-              })
-              // A tab that was already showing rebuilds nothing, and a
-              // post-frame callback waits for a frame someone else asks for.
-              ..ensureVisualUpdate();
-          };
 
     return AppCommandHandlers(
       handlers: {
@@ -118,22 +94,8 @@ class _AppShortcutScopeState extends ConsumerState<AppShortcutScope> {
             ref.read(navControllerProvider.notifier).forward(),
         AppCommand.nextSession: canCycle ? () => _cycleSession(1) : null,
         AppCommand.previousSession: canCycle ? () => _cycleSession(-1) : null,
-        AppCommand.focusAgent:
-            (switchToAgent == null && focusAgentInput == null)
-            ? null
-            : () {
-                switchToAgent?.call();
-                focusAgentInput?.call();
-              },
-        for (final view in WorkspaceView.values)
-          AppCommand.forWorkspaceView(view): reveal(view),
         AppCommand.toggleSidebar: sidebar?.toggle,
         AppCommand.toggleContextPanel: panel?.toggle,
-        // Withdrawn at phone width, where the areas are pages, not side by
-        // side: there is nothing to move between, and the key stays with
-        // whatever has focus instead of being swallowed.
-        AppCommand.nextArea: phoneWidth ? null : () => _cycleRegion(1),
-        AppCommand.previousArea: phoneWidth ? null : () => _cycleRegion(-1),
       },
       child: Shortcuts(
         shortcuts: {
@@ -167,51 +129,6 @@ class _AppShortcutScopeState extends ConsumerState<AppShortcutScope> {
       return;
     }
     ref.read(sessionSearchFocusProvider).requestFocus();
-  }
-
-  /// F6: moves the keyboard to the next area — projects sidebar, agent,
-  /// context panel — skipping any that is not on screen. Where the keyboard
-  /// is now is read off the region nodes; anything outside both is the agent.
-  void _cycleRegion(int delta) {
-    final sidebarNode = ref.read(sidebarRegionFocusProvider);
-    final panelNode = ref.read(panelRegionFocusProvider);
-    final focusTabs = ref.read(workspaceTabsFocusProvider).focus;
-    final focusAgent = ref.read(focusAgentInputProvider);
-    final switchToAgent = ref.read(switchToAgentProvider);
-
-    final sidebarTarget = sidebarNode.context == null
-        ? null
-        : sidebarNode.traversalDescendants.firstOrNull;
-    final regions = <FocusRegion, VoidCallback>{
-      if (sidebarTarget != null)
-        FocusRegion.sidebar: sidebarTarget.requestFocus,
-      if (focusAgent != null || switchToAgent != null)
-        FocusRegion.agent: () {
-          switchToAgent?.call();
-          focusAgent?.call();
-        },
-      if (focusTabs != null && panelNode.context != null)
-        FocusRegion.panel: focusTabs,
-    };
-    if (regions.isEmpty) return;
-
-    final current = sidebarNode.hasFocus
-        ? FocusRegion.sidebar
-        : panelNode.hasFocus
-        ? FocusRegion.panel
-        : FocusRegion.agent;
-    final order = FocusRegion.values;
-    var i = order.indexOf(current);
-    // Walk the fixed order, skipping absent regions, so the cycle keeps its
-    // shape whichever areas are on screen.
-    for (var step = 0; step < order.length; step++) {
-      i = (i + delta) % order.length;
-      final go = regions[order[i]];
-      if (go != null) {
-        go();
-        return;
-      }
-    }
   }
 
   /// The focused project's sessions in drawer order — the list the user sees

@@ -103,10 +103,7 @@ class _SessionForkDialogState extends State<_SessionForkDialog> {
                 alignment: Alignment.centerLeft,
                 child: AbSegmented<String>(
                   segments: const [
-                    AbSegment(
-                      value: forkWorkspaceCopy,
-                      label: 'New workspace',
-                    ),
+                    AbSegment(value: forkWorkspaceCopy, label: 'New workspace'),
                     AbSegment(
                       value: forkWorkspaceCurrent,
                       label: 'This workspace',

@@ -58,10 +58,7 @@ class SessionHandlerBadge extends ConsumerWidget {
             ? 'Handler is waiting on an answer in this session.'
             : 'Handler is waiting on $pending answers in this session.',
         triggerMode: TooltipTriggerMode.tap,
-        child: AbChip.system(
-          label: '$pending',
-          color: context.antgrid.accent,
-        ),
+        child: AbChip.system(label: '$pending', color: context.antgrid.accent),
       ),
     );
   }

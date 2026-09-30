@@ -141,6 +141,7 @@ class PeerRuntime implements PeerConnector {
     );
   }
   final DeviceRecord record;
+
   /// Whether a resume discards the current lease before asking again. A phone
   /// resumes from real backgrounding, where policy pushes may have been
   /// missed; a desktop "resumes" on every window focus, and fencing there
@@ -179,10 +180,9 @@ class PeerRuntime implements PeerConnector {
   @override
   void invalidate() => lease.invalidate();
   @override
-  Future<bool> resume() => _resuming ??=
-      (fenceOnResume ? lease.refreshFresh() : lease.refresh()).whenComplete(
-        () => _resuming = null,
-      );
+  Future<bool> resume() =>
+      _resuming ??= (fenceOnResume ? lease.refreshFresh() : lease.refresh())
+          .whenComplete(() => _resuming = null);
 
   AuthorizationSnapshot _currentSnapshot() {
     final snapshot = lease.snapshot;

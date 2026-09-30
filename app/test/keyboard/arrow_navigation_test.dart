@@ -1,13 +1,8 @@
 // Arrow-key navigation once the keyboard is on the app's own UI: the tab strip
 // is ONE stop whose ←/→ switch tabs and whose Enter/↓ go into the tab; tree
-// rows expand on → and collapse on ←; F6 moves between the sidebar, the agent
-// and the panel even while a key-eating widget (the terminal) has focus; and
-// Ctrl+1..5 hand the keyboard to the tab they show.
+// rows expand on → and collapse on ←.
 import 'package:antgrid/design/theme_presets.dart';
-import 'package:antgrid/keyboard/app_shortcut_scope.dart';
 import 'package:antgrid/keyboard/focus_regions.dart';
-import 'package:antgrid/providers/providers.dart';
-import 'package:antgrid/providers/visible_surface.dart';
 import 'package:antgrid/widgets/workspace_tab_bar.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -83,8 +78,9 @@ void main() {
       addTearDown(content.dispose);
       await tester.pumpWidget(_app(container, _StripHost(content: content)));
       await tester.pumpAndSettle();
-      // Published by the strip for Ctrl+1..5 and F6.
-      container.read(workspaceTabsFocusProvider).focus!.call();
+      FocusManager.instance.rootScope.descendants
+          .firstWhere((n) => n.debugLabel == 'workspace-tabs')
+          .requestFocus();
       await tester.pumpAndSettle();
     }
 
@@ -214,139 +210,6 @@ void main() {
 
       await _press(tester, LogicalKeyboardKey.arrowLeft);
       expect(expanded, isTrue);
-    });
-  });
-
-  group('areas', () {
-    late ProviderContainer container;
-    late FocusNode sidebarRow;
-    late FocusNode agent;
-    late FocusNode panelTab;
-    final agentKeys = <LogicalKeyboardKey>[];
-
-    /// Sidebar | agent (eats every key, like the terminal) | panel.
-    Future<void> pumpAreas(WidgetTester tester) async {
-      container = ProviderContainer();
-      addTearDown(container.dispose);
-      sidebarRow = FocusNode(debugLabel: 'sidebar-row');
-      agentKeys.clear();
-      agent = FocusNode(
-        debugLabel: 'agent',
-        onKeyEvent: (_, event) {
-          if (event is KeyDownEvent) agentKeys.add(event.logicalKey);
-          return KeyEventResult.handled;
-        },
-      );
-      panelTab = FocusNode(debugLabel: 'panel-tab');
-      addTearDown(sidebarRow.dispose);
-      addTearDown(agent.dispose);
-      addTearDown(panelTab.dispose);
-
-      await tester.pumpWidget(
-        _app(
-          container,
-          AppShortcutScope(
-            child: Row(
-              children: [
-                FocusRegionScope(
-                  region: FocusRegion.sidebar,
-                  child: Focus(
-                    focusNode: sidebarRow,
-                    child: const SizedBox(width: 100, height: 100),
-                  ),
-                ),
-                Focus(
-                  focusNode: agent,
-                  child: const SizedBox(width: 100, height: 100),
-                ),
-                FocusRegionScope(
-                  region: FocusRegion.panel,
-                  child: Focus(
-                    focusNode: panelTab,
-                    child: const SizedBox(width: 100, height: 100),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      );
-      container.read(focusAgentInputProvider.notifier).set(agent.requestFocus);
-      container.read(workspaceTabsFocusProvider).publish(panelTab.requestFocus);
-      agent.requestFocus();
-      await tester.pumpAndSettle();
-    }
-
-    Future<void> shiftF6(WidgetTester tester) async {
-      await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
-      await tester.sendKeyEvent(LogicalKeyboardKey.f6);
-      await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
-      await tester.pumpAndSettle();
-    }
-
-    // F6 is a terminal program's key too (mc's rename, htop's sort), so inside
-    // the terminal it stays there; Ctrl+0..5 are the way out.
-    _windowsTest('F6 inside the terminal is the terminal program\'s', (
-      tester,
-    ) async {
-      await pumpAreas(tester);
-
-      await _press(tester, LogicalKeyboardKey.f6);
-      expect(agent.hasPrimaryFocus, isTrue);
-      expect(agentKeys, contains(LogicalKeyboardKey.f6));
-    });
-
-    _windowsTest('F6 cycles sidebar → agent → panel from the app\'s own UI', (
-      tester,
-    ) async {
-      await pumpAreas(tester);
-      sidebarRow.requestFocus();
-      await tester.pumpAndSettle();
-
-      await _press(tester, LogicalKeyboardKey.f6);
-      expect(agent.hasPrimaryFocus, isTrue);
-
-      panelTab.requestFocus();
-      await tester.pumpAndSettle();
-      await _press(tester, LogicalKeyboardKey.f6);
-      expect(sidebarRow.hasPrimaryFocus, isTrue);
-
-      panelTab.requestFocus();
-      await tester.pumpAndSettle();
-      await shiftF6(tester);
-      expect(agent.hasPrimaryFocus, isTrue);
-    });
-
-    _windowsTest('F6 skips an area that is not on screen', (tester) async {
-      await pumpAreas(tester);
-      // The context panel hidden: no strip publishes its focus callback.
-      container.read(workspaceTabsFocusProvider).retract(panelTab.requestFocus);
-      sidebarRow.requestFocus();
-      await tester.pumpAndSettle();
-
-      // Backwards from the sidebar is the panel — absent — so the agent.
-      await shiftF6(tester);
-      expect(agent.hasPrimaryFocus, isTrue);
-    });
-
-    _windowsTest('Ctrl+2 shows Files and hands its strip the keyboard', (
-      tester,
-    ) async {
-      await pumpAreas(tester);
-      WorkspaceView? revealed;
-      container.read(workspaceMenuControlProvider.notifier).set((
-        active: null,
-        reveal: (v) => revealed = v,
-      ));
-      await tester.pump();
-
-      await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
-      await tester.sendKeyEvent(LogicalKeyboardKey.digit2);
-      await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
-      await tester.pumpAndSettle();
-
-      expect(revealed, WorkspaceView.files);
-      expect(panelTab.hasPrimaryFocus, isTrue);
     });
   });
 }

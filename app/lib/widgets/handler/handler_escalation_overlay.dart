@@ -184,11 +184,10 @@ class _HandlerEscalationOverlayState
                     ),
               onDismiss: service == null
                   ? null
-                  : () =>
-                        focusedServiceOrNull(
-                          container,
-                          (s) => s.handlerService,
-                        )?.dismiss(e),
+                  : () => focusedServiceOrNull(
+                      container,
+                      (s) => s.handlerService,
+                    )?.dismiss(e),
               onChoice: service == null
                   ? null
                   : (choiceId) =>

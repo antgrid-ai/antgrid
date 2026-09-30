@@ -659,6 +659,7 @@ void latchHandlerArmedOnConfirmation(
 
   bool confirmed(HandlerState? state) =>
       state?.sessions.containsKey(terminalId) ?? false;
+
   /// The other way an arm ends: the bridge answered, and its answer was no.
   /// Ends the latch the same way a confirmation does — nothing is retired, and
   /// the send is reported rather than left to time out in silence.

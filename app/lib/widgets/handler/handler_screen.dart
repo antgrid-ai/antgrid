@@ -170,11 +170,10 @@ class HandlerScreen extends ConsumerWidget {
                   // only ever cost a tap. Re-resolving makes that tap land.
                   onDismiss: service == null
                       ? null
-                      : () =>
-                            focusedServiceOrNull(
-                              container,
-                              (s) => s.handlerService,
-                            )?.dismiss(e),
+                      : () => focusedServiceOrNull(
+                          container,
+                          (s) => s.handlerService,
+                        )?.dismiss(e),
                   onChoice: service == null
                       ? null
                       : (choiceId) =>

@@ -308,9 +308,10 @@ class _Connection {
     } else {
       unawaited(_channel.finish());
       unawaited(
-        _socket.close().then<void>((_) {}, onError: (Object _) {}).whenComplete(
-          _socket.destroy,
-        ),
+        _socket
+            .close()
+            .then<void>((_) {}, onError: (Object _) {})
+            .whenComplete(_socket.destroy),
       );
     }
     _onGone(this);

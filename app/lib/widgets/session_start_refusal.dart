@@ -31,11 +31,13 @@ String sessionStartRefusalCopy(String? code, String? message) {
 String sessionForkRefusalCopy(String? code, String? message) =>
     sessionRefusalCopy(code, message, 'Could not fork this session.');
 
-void reportStartRefusal(BuildContext context, SessionOperationException error) =>
-    reportSessionNotice(
-      context,
-      sessionStartRefusalCopy(error.errorCode, error.message),
-    );
+void reportStartRefusal(
+  BuildContext context,
+  SessionOperationException error,
+) => reportSessionNotice(
+  context,
+  sessionStartRefusalCopy(error.errorCode, error.message),
+);
 
 /// Reports [message] about a session on the root navigator's context rather
 /// than [context]'s own: a session tap can dispose the row that fired it

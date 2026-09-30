@@ -10,7 +10,6 @@ import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_focus_ring.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../keyboard/app_shortcuts.dart';
-import '../keyboard/focus_regions.dart';
 import '../models/workspace_view.dart';
 import '../providers/visible_surface.dart';
 
@@ -85,9 +84,6 @@ class _WorkspaceTabBarState extends ConsumerState<WorkspaceTabBar> {
   /// lands here, on the tab that is already showing.
   final _stripFocus = FocusNode(debugLabel: 'workspace-tabs');
   bool _stripFocused = false;
-  late final WorkspaceTabsFocus _tabsFocus;
-
-  void _focusStrip() => _stripFocus.requestFocus();
 
   /// ←/→ switch tabs (the tab shows at once), Enter/↓ go into it.
   KeyEventResult _onStripKey(FocusNode node, KeyEvent event) {
@@ -130,8 +126,6 @@ class _WorkspaceTabBarState extends ConsumerState<WorkspaceTabBar> {
   @override
   void initState() {
     super.initState();
-    // Kept for dispose, where `ref` may no longer be read.
-    _tabsFocus = ref.read(workspaceTabsFocusProvider)..publish(_focusStrip);
     // The pane can open onto a tab that was never on screen (the popup selects
     // while the pane is closed), so the first layout needs the same reveal a
     // later selection change gets.
@@ -169,7 +163,6 @@ class _WorkspaceTabBarState extends ConsumerState<WorkspaceTabBar> {
 
   @override
   void dispose() {
-    _tabsFocus.retract(_focusStrip);
     _stripFocus.dispose();
     _scrollController.dispose();
     super.dispose();

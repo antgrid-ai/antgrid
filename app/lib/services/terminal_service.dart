@@ -2249,9 +2249,7 @@ class TerminalService {
       createAbMessage('git:list-branches', {'projectId': _state.projectId}),
     );
     unawaited(
-      latch.done.timeout(gitActionTimeout).catchError((
-        _,
-      ) {
+      latch.done.timeout(gitActionTimeout).catchError((_) {
         if (_disposed || _branchesLatch != latch) return;
         _branchesLatch = null;
         // Surface the drop, symmetric with checkoutBranch's timeout: an empty
@@ -2281,9 +2279,7 @@ class TerminalService {
       }),
     );
     unawaited(
-      latch.done.timeout(gitActionTimeout).catchError((
-        _,
-      ) {
+      latch.done.timeout(gitActionTimeout).catchError((_) {
         if (_disposed || _checkoutLatch != latch) return;
         _checkoutLatch = null;
         _setState(

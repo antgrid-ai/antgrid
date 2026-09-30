@@ -87,10 +87,7 @@ class AbIconButton extends StatefulWidget {
   /// character. Both regimes are in the max.
   static double footprintWidth(BuildContext context, {double? boxSize}) =>
       isMobilePlatform
-      ? math.max(
-          AbTokens.tapTargetMin,
-          boxExtent(context, boxSize: boxSize),
-        )
+      ? math.max(AbTokens.tapTargetMin, boxExtent(context, boxSize: boxSize))
       : boxExtent(context, boxSize: boxSize);
 
   @override

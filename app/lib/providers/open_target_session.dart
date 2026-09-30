@@ -113,9 +113,9 @@ Future<void> _switchProject(
     final machineUuid = baseDeviceUuid(registrationId);
     final projectId = baseProjectId(registrationId);
     // A warm project needs no promote round trip — its socket is already bound.
-    if (container.read(projectSessionRegistryProvider).contains(
-      registrationId,
-    )) {
+    if (container
+        .read(projectSessionRegistryProvider)
+        .contains(registrationId)) {
       container
           .read(selectedTargetProvider.notifier)
           .set(RemoteProject(machineUuid: machineUuid, projectId: projectId));

@@ -291,5 +291,9 @@ void reconcileActiveSession(WidgetRef ref, List<SessionEntry> available) {
   // sends one.
   final registrationId = ref.read(selectedRegistrationIdProvider);
   if (registrationId == null) return;
-  ref.read(projectSessionProvider(registrationId)).value?.sessionsService.focus(next);
+  ref
+      .read(projectSessionProvider(registrationId))
+      .value
+      ?.sessionsService
+      .focus(next);
 }

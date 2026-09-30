@@ -86,7 +86,9 @@ class SessionSetup {
     stepCount: (j['stepCount'] as num?)?.toInt() ?? 0,
     stepName: j['stepName'] as String?,
     stepNames:
-        (j['stepNames'] as List?)?.whereType<String>().toList(growable: false) ??
+        (j['stepNames'] as List?)?.whereType<String>().toList(
+          growable: false,
+        ) ??
         const [],
     terminalId: j['terminalId'] as String?,
     exitCode: (j['exitCode'] as num?)?.toInt(),

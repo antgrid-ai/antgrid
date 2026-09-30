@@ -122,6 +122,10 @@ class ShortcutList extends StatelessWidget {
   }
 }
 
+/// Said beside a chord that the agent's terminal keeps while it has the
+/// keyboard; the settings page's intro explains it.
+const String kOutsideTerminalNote = 'outside the terminal';
+
 class _ShortcutRow extends StatelessWidget {
   const _ShortcutRow({
     required this.label,
@@ -143,6 +147,10 @@ class _ShortcutRow extends StatelessWidget {
   /// row of caps (Ctrl+Shift+Enter is four), and sharing a phone-width row
   /// with the label squeezes it past what it can shrink to.
   static const double _stackBelow = 420;
+
+  /// Wider for a row carrying [kOutsideTerminalNote], whose keys are longer
+  /// than the label's half of a dialog-width row leaves room for.
+  static const double _stackBelowWithNote = 640;
 
   @override
   Widget build(BuildContext context) {
@@ -170,7 +178,12 @@ class _ShortcutRow extends StatelessWidget {
       padding: const EdgeInsets.symmetric(vertical: AbTokens.space4),
       child: LayoutBuilder(
         builder: (context, constraints) {
-          final stacked = constraints.maxWidth < _stackBelow;
+          final hasNote =
+              !focusedOnly &&
+              chords.any((chord) => chord.reach == ChordReach.focused);
+          final stacked =
+              constraints.maxWidth <
+              (hasNote ? _stackBelowWithNote : _stackBelow);
           final keys = Wrap(
             alignment: stacked ? WrapAlignment.start : WrapAlignment.end,
             crossAxisAlignment: WrapCrossAlignment.center,
@@ -187,6 +200,17 @@ class _ShortcutRow extends StatelessWidget {
                     ),
                   ),
                 AbKbdGroup(chords[i].keyCaps(apple: apple)),
+                // A focused chord is the terminal's whenever the agent's
+                // terminal has the keyboard, so it is not "anywhere" like its
+                // global neighbours on the same row.
+                if (!focusedOnly && chords[i].reach == ChordReach.focused)
+                  Text(
+                    kOutsideTerminalNote,
+                    style: AbTokens.sansStyle(
+                      fontSize: AbTokens.fontXs,
+                      color: c.textMuted,
+                    ),
+                  ),
               ],
             ],
           );

@@ -260,8 +260,7 @@ class HandlerLensControl extends ConsumerStatefulWidget {
   final VoidCallback? onBriefEdited;
 
   @override
-  ConsumerState<HandlerLensControl> createState() =>
-      _HandlerLensControlState();
+  ConsumerState<HandlerLensControl> createState() => _HandlerLensControlState();
 }
 
 /// Local, never-on-wire id for the sixth chip. A user lens has no

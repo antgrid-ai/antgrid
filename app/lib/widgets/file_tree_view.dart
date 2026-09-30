@@ -456,20 +456,21 @@ class _ChangesDir {
       subdirs.putIfAbsent(name, () => _ChangesDir(_childPath(name)));
 
   FileNode build(String name) {
-    final children = <FileNode>[
-      for (final entry in subdirs.entries) entry.value.build(entry.key),
-      for (final filePath in filePaths)
-        FileNode(
-          name: filePath.split('/').where((s) => s.isNotEmpty).last,
-          path: filePath,
-          type: FileNodeType.file,
-        ),
-    ]..sort((a, b) {
-      if (a.type != b.type) {
-        return a.type == FileNodeType.directory ? -1 : 1;
-      }
-      return a.name.toLowerCase().compareTo(b.name.toLowerCase());
-    });
+    final children =
+        <FileNode>[
+          for (final entry in subdirs.entries) entry.value.build(entry.key),
+          for (final filePath in filePaths)
+            FileNode(
+              name: filePath.split('/').where((s) => s.isNotEmpty).last,
+              path: filePath,
+              type: FileNodeType.file,
+            ),
+        ]..sort((a, b) {
+          if (a.type != b.type) {
+            return a.type == FileNodeType.directory ? -1 : 1;
+          }
+          return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+        });
     return FileNode(
       name: name,
       path: path,

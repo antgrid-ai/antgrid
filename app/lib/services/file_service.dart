@@ -921,6 +921,7 @@ class FileService {
         walk(child);
       }
     }
+
     walk(root);
     // `_applyTreeUpdate` marks the open file externally modified straight off
     // `msg.modified`, without going through the loaded-parent check every
@@ -1924,9 +1925,7 @@ class FileService {
       createAbMessage('git:diff', {'projectId': projectId, 'path': path}),
     );
     unawaited(
-      latch.done.timeout(gitActionTimeout).catchError((
-        _,
-      ) {
+      latch.done.timeout(gitActionTimeout).catchError((_) {
         if (_disposed || _diffLatch != latch || _state.git.diffPath != path) {
           return;
         }
@@ -2075,9 +2074,7 @@ class FileService {
       }),
     );
     unawaited(
-      latch.done.timeout(gitActionTimeout).catchError((
-        _,
-      ) {
+      latch.done.timeout(gitActionTimeout).catchError((_) {
         if (_disposed || _historyLatch != latch) return;
         _historyLatch = null;
         _pendingLogSkip = null;
@@ -2147,9 +2144,7 @@ class FileService {
       createAbMessage('git:commit-files', {'projectId': projectId, 'sha': sha}),
     );
     unawaited(
-      latch.done.timeout(gitActionTimeout).catchError((
-        _,
-      ) {
+      latch.done.timeout(gitActionTimeout).catchError((_) {
         if (_disposed || _commitFilesLatches[sha] != latch) return;
         _commitFilesLatches.remove(sha);
         final stillLoading = Set<String>.from(
@@ -2226,9 +2221,7 @@ class FileService {
       }),
     );
     unawaited(
-      latch.done.timeout(gitActionTimeout).catchError((
-        _,
-      ) {
+      latch.done.timeout(gitActionTimeout).catchError((_) {
         if (_disposed ||
             _diffLatch != latch ||
             _state.git.diffPath != path ||

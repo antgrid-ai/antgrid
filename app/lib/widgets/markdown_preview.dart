@@ -172,10 +172,7 @@ class _MarkdownPreviewState extends State<MarkdownPreview> {
               Expanded(child: _buildDocument(context)),
               if (showOutline && wide) ...[
                 const AbSeparator.vertical(),
-                SizedBox(
-                  width: AbTokens.documentOutlineWidth,
-                  child: outline,
-                ),
+                SizedBox(width: AbTokens.documentOutlineWidth, child: outline),
               ],
             ],
           ),

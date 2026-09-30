@@ -76,10 +76,7 @@ class HandlerAskFooter extends StatelessWidget {
     if (running.isEmpty) {
       return Text(
         handlerAskNothingRunningNote,
-        style: AbTokens.sansStyle(
-          fontSize: AbTokens.fontXs,
-          color: p.warning,
-        ),
+        style: AbTokens.sansStyle(fontSize: AbTokens.fontXs, color: p.warning),
       );
     }
     final hidden = running.length - _maxItemRows;

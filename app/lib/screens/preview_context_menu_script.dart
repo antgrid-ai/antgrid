@@ -82,7 +82,8 @@ String buildContextMenuPasteScript(String text) {
 /// already copied to the OS clipboard Dart-side. Only ever sent when the
 /// menu's own `editable` flag was true, so this never runs against read-only
 /// selected text.
-const String kContextMenuDeleteSelectionScript = "document.execCommand('delete');";
+const String kContextMenuDeleteSelectionScript =
+    "document.execCommand('delete');";
 
 /// Selects the whole page's content — the context menu's "Select all", same
 /// mechanism a real browser uses. Works whether or not the click landed in an

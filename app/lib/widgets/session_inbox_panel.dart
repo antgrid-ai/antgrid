@@ -113,10 +113,7 @@ class _Mailbox extends StatelessWidget {
         // terminal names no session" and "nobody has written to you" are
         // different facts, and only one of them is the reader's to act on.
         if (refusal != null)
-          AbInlineBanner(
-            text: refusal.message,
-            color: context.antgrid.warning,
-          ),
+          AbInlineBanner(text: refusal.message, color: context.antgrid.warning),
         // A LIFETIME total on the store, deliberately not worded as a delta:
         // the count never resets, so "since you last looked" would re-accuse
         // the mailbox of the same posts on every visit.

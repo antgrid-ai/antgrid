@@ -225,10 +225,7 @@ String? _sessionName(WidgetRef ref, String terminalId) {
 /// running appends it a second time. Naming what stands above instead invites
 /// what is genuinely missing.
 class _NothingQueued extends StatelessWidget {
-  const _NothingQueued({
-    required this.armed,
-    required this.hasInstructions,
-  });
+  const _NothingQueued({required this.armed, required this.hasInstructions});
 
   /// False for a terminal Handler was never armed on — a state with no
   /// invitation to make, since nothing here would receive it.
@@ -419,10 +416,7 @@ class _AskedForHeaderState extends State<_AskedForHeader> {
           Container(
             decoration: BoxDecoration(
               border: Border(
-                left: BorderSide(
-                  color: p.borderStrong,
-                  width: AbTokens.space2,
-                ),
+                left: BorderSide(color: p.borderStrong, width: AbTokens.space2),
               ),
             ),
             padding: const EdgeInsets.only(left: AbTokens.space8),
@@ -1125,10 +1119,7 @@ _EditSend _sendEdit(
   if (session == null) return _EditSend.unreachable;
   final next = edit(session.backlog);
   if (next == null) return _EditSend.unreachable;
-  return service.updateBacklog(
-        terminalId: terminalId,
-        backlog: next,
-      )
+  return service.updateBacklog(terminalId: terminalId, backlog: next)
       ? _EditSend.sent
       : _EditSend.held;
 }

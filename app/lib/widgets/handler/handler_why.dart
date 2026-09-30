@@ -64,8 +64,7 @@ class _HandlerWhyDisclosureState extends State<HandlerWhyDisclosure> {
   @override
   void didUpdateWidget(HandlerWhyDisclosure oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.escalation.escalationId !=
-        widget.escalation.escalationId) {
+    if (oldWidget.escalation.escalationId != widget.escalation.escalationId) {
       _expanded = handlerWhyOpenByDefault(widget.escalation);
     }
   }

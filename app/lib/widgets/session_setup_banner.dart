@@ -256,32 +256,34 @@ class _SessionSetupBannerState extends ConsumerState<SessionSetupBanner> {
     // sized for a decision — two `Start agent now` buttons 100px apart are not
     // alternatives but a race, since only one of them can end the run and each
     // tracks its own in-flight state.
-    final action = paneOwnsTranscript ? null : switch (phase) {
-      // Releasing an agent that is already up is meaningless, so the live case
-      // gets the one verb still worth offering: end the install holding the
-      // tree the agent is working in.
-      SessionSetupPhase.running when agentLive => (
-        label: 'Cancel setup',
-        verb: SessionSetupAction.cancel,
-      ),
-      // Named for what it does rather than for the `skip` verb underneath: it
-      // releases the queued agent start and leaves the run going — the "the
-      // deps are already cached" case, which is the common one. Nothing about
-      // the run itself is skipped, which is what the old label claimed.
-      SessionSetupPhase.running => (
-        label: 'Start agent now',
-        verb: SessionSetupAction.skip,
-      ),
-      SessionSetupPhase.failed => (
-        label: 'Run setup again',
-        verb: SessionSetupAction.rerun,
-      ),
-      SessionSetupPhase.interrupted || SessionSetupPhase.skipped => (
-        label: 'Run setup',
-        verb: SessionSetupAction.rerun,
-      ),
-      _ => null,
-    };
+    final action = paneOwnsTranscript
+        ? null
+        : switch (phase) {
+            // Releasing an agent that is already up is meaningless, so the live case
+            // gets the one verb still worth offering: end the install holding the
+            // tree the agent is working in.
+            SessionSetupPhase.running when agentLive => (
+              label: 'Cancel setup',
+              verb: SessionSetupAction.cancel,
+            ),
+            // Named for what it does rather than for the `skip` verb underneath: it
+            // releases the queued agent start and leaves the run going — the "the
+            // deps are already cached" case, which is the common one. Nothing about
+            // the run itself is skipped, which is what the old label claimed.
+            SessionSetupPhase.running => (
+              label: 'Start agent now',
+              verb: SessionSetupAction.skip,
+            ),
+            SessionSetupPhase.failed => (
+              label: 'Run setup again',
+              verb: SessionSetupAction.rerun,
+            ),
+            SessionSetupPhase.interrupted || SessionSetupPhase.skipped => (
+              label: 'Run setup',
+              verb: SessionSetupAction.rerun,
+            ),
+            _ => null,
+          };
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [

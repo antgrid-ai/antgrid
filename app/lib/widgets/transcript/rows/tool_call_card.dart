@@ -294,7 +294,8 @@ class _ToolCallCardState extends State<ToolCallCard> {
         SelectionContainer.disabled(
           child: Row(
             children: [
-              if (block.path != null) Expanded(child: _diffPathLabel(block.path!, c)),
+              if (block.path != null)
+                Expanded(child: _diffPathLabel(block.path!, c)),
               Text(
                 '+$adds ',
                 style: AbTokens.monoStyle(

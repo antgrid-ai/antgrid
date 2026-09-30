@@ -377,7 +377,10 @@ class _DiffViewerState extends State<DiffViewer> {
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [_buildHeader(context), Expanded(child: body)],
+      children: [
+        _buildHeader(context),
+        Expanded(child: body),
+      ],
     );
   }
 

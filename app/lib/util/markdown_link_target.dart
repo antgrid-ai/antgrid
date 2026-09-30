@@ -30,9 +30,7 @@ class MarkdownLinkTarget {
 
   @override
   bool operator ==(Object other) =>
-      other is MarkdownLinkTarget &&
-      other.kind == kind &&
-      other.value == value;
+      other is MarkdownLinkTarget && other.kind == kind && other.value == value;
 
   @override
   int get hashCode => Object.hash(kind, value);

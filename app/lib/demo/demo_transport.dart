@@ -357,7 +357,9 @@ class DemoTransport extends BufferedAgentTransport {
         return <Map<String, Object?>>[_fileContent(message['path'] as String?)];
 
       case 'file:tree:root:request':
-        return <Map<String, Object?>>[_childrenFrame(const <String>[''])];
+        return <Map<String, Object?>>[
+          _childrenFrame(const <String>['']),
+        ];
 
       case 'file:tree:children:request':
         final paths =

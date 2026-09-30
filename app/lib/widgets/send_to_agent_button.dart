@@ -48,11 +48,7 @@ class SendToAgentButton extends StatelessWidget {
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  AbIcon(
-                    AbIcons.send,
-                    size: 12,
-                    color: context.antgrid.accent,
-                  ),
+                  AbIcon(AbIcons.send, size: 12, color: context.antgrid.accent),
                   const SizedBox(width: AbTokens.space4),
                   Text(
                     'Send to Agent',

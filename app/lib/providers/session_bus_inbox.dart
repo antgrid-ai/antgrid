@@ -160,10 +160,7 @@ SessionBusRefusal? _refusalOf(Map<String, dynamic> json) {
   final error = json['error'];
   if (error is! String) return null;
   final code = json['code'];
-  return SessionBusRefusal(
-    message: error,
-    code: code is String ? code : null,
-  );
+  return SessionBusRefusal(message: error, code: code is String ? code : null);
 }
 
 /// A file carried alongside a post. The bytes are not here — an artifact is
@@ -496,13 +493,8 @@ class SessionInboxState {
       listEquals(other.posts, posts);
 
   @override
-  int get hashCode => Object.hash(
-    dropped,
-    loading,
-    refusal,
-    generation,
-    Object.hashAll(posts),
-  );
+  int get hashCode =>
+      Object.hash(dropped, loading, refusal, generation, Object.hashAll(posts));
 }
 
 class SessionInboxController extends Notifier<SessionInboxState> {

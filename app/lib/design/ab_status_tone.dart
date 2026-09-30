@@ -33,6 +33,7 @@ enum AbStatusTone {
   success,
   warning,
   danger,
+
   /// Something finished and nobody has looked at it yet. Not [info] (that is
   /// live activity) and not [success] (nothing was won) — the blue "new" a
   /// message list uses.

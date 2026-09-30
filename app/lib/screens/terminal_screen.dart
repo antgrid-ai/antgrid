@@ -161,15 +161,16 @@ class TerminalScreen extends ConsumerWidget {
 /// Copy for the pre-session-list wait, keyed off the checkout-wide verdict
 /// rather than the local `session`/`terminalAsync` pair — this fires before
 /// either has anything to derive a message from.
-String _bootstrapWaitMessage(CheckoutReadiness readiness) => switch (readiness) {
-  CheckoutReadiness.reachingMachine => 'reaching machine',
-  CheckoutReadiness.openingSession => 'opening session',
-  CheckoutReadiness.cold ||
-  CheckoutReadiness.blocked ||
-  CheckoutReadiness.loadingScreen ||
-  CheckoutReadiness.stalled ||
-  CheckoutReadiness.ready => 'waiting for agent...',
-};
+String _bootstrapWaitMessage(CheckoutReadiness readiness) =>
+    switch (readiness) {
+      CheckoutReadiness.reachingMachine => 'reaching machine',
+      CheckoutReadiness.openingSession => 'opening session',
+      CheckoutReadiness.cold ||
+      CheckoutReadiness.blocked ||
+      CheckoutReadiness.loadingScreen ||
+      CheckoutReadiness.stalled ||
+      CheckoutReadiness.ready => 'waiting for agent...',
+    };
 
 /// Rendered inside the terminal/chat pane when the focused session is in the
 /// `stopped` state. Project-open auto-starts the most-recent session, so

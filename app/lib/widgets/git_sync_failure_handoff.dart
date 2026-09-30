@@ -66,9 +66,7 @@ String composeSyncFailureReport({
   final verb = failure.op == GitSyncOp.push ? 'push' : 'pull';
   final command = failure.command;
 
-  buffer.writeln(
-    command != null ? '`$command` failed.' : 'git $verb failed.',
-  );
+  buffer.writeln(command != null ? '`$command` failed.' : 'git $verb failed.');
 
   final stderr = failure.stderr?.trim();
   if (stderr != null && stderr.isNotEmpty) {
@@ -92,8 +90,10 @@ String composeSyncFailureReport({
       '`$remoteRef`.',
     );
   } else if (branch != null && remoteRef != null) {
-    buffer.writeln('Branch `$branch` has no upstream; `$remoteRef` is where it '
-        'would be published.');
+    buffer.writeln(
+      'Branch `$branch` has no upstream; `$remoteRef` is where it '
+      'would be published.',
+    );
   } else if (branch != null) {
     buffer.writeln('Branch `$branch`.');
   }
@@ -111,23 +111,28 @@ String composeSyncFailureReport({
 /// — and each rules out the destructive shortcut that would technically make
 /// the error stop.
 String _instructionFor(GitSyncFailure failure) => switch (failure.kind) {
-  GitSyncFailureKind.notFastForward ||
-  GitSyncFailureKind.rejected => 'Please reconcile this and push, without '
-      'discarding my local commits and without force-pushing.',
-  GitSyncFailureKind.diverged => 'Please reconcile the two histories and bring '
-      'the branch up to date, without discarding my local commits.',
-  GitSyncFailureKind.conflict => 'Please resolve the merge conflicts, then '
-      'finish the ${failure.op.name}.',
-  GitSyncFailureKind.dirtyTree => 'Please get my uncommitted changes safely out '
-      'of the way (commit or stash them — do not discard them), then '
-      '${failure.op.name}.',
-  GitSyncFailureKind.auth => 'Please work out what credentials this remote '
-      'needs and tell me what to do — do not store any secret in the repo.',
-  GitSyncFailureKind.noUpstream ||
-  GitSyncFailureKind.ambiguousRemote => 'Please work out which remote this '
-      'branch should track, set it, and push.',
-  _ => 'Please work out what went wrong and finish the ${failure.op.name}, '
-      'without discarding my local commits.',
+  GitSyncFailureKind.notFastForward || GitSyncFailureKind.rejected =>
+    'Please reconcile this and push, without '
+        'discarding my local commits and without force-pushing.',
+  GitSyncFailureKind.diverged =>
+    'Please reconcile the two histories and bring '
+        'the branch up to date, without discarding my local commits.',
+  GitSyncFailureKind.conflict =>
+    'Please resolve the merge conflicts, then '
+        'finish the ${failure.op.name}.',
+  GitSyncFailureKind.dirtyTree =>
+    'Please get my uncommitted changes safely out '
+        'of the way (commit or stash them — do not discard them), then '
+        '${failure.op.name}.',
+  GitSyncFailureKind.auth =>
+    'Please work out what credentials this remote '
+        'needs and tell me what to do — do not store any secret in the repo.',
+  GitSyncFailureKind.noUpstream || GitSyncFailureKind.ambiguousRemote =>
+    'Please work out which remote this '
+        'branch should track, set it, and push.',
+  _ =>
+    'Please work out what went wrong and finish the ${failure.op.name}, '
+        'without discarding my local commits.',
 };
 
 /// "4 modified, 1 untracked" — the counts that explain a dirty-tree refusal,

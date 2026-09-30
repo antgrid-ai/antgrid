@@ -78,6 +78,30 @@ void main() {
     );
   });
 
+  // The browser-style preview chords exist on both families, spelled with
+  // each one's primary modifier.
+  test('preview browser chords exist on every platform', () {
+    const expected = {
+      TargetPlatform.windows: {
+        AppCommand.newPreviewTab: 'Ctrl+T',
+        AppCommand.closePreviewTab: 'Ctrl+W',
+        AppCommand.hardRefresh: 'Ctrl+Shift+R',
+        AppCommand.previewForward: 'Alt+→',
+      },
+      TargetPlatform.macOS: {
+        AppCommand.newPreviewTab: '⌘T',
+        AppCommand.closePreviewTab: '⌘W',
+        AppCommand.hardRefresh: '⇧⌘R',
+        AppCommand.previewForward: '⌘→',
+      },
+    };
+    for (final MapEntry(key: platform, value: commands) in expected.entries) {
+      for (final MapEntry(key: command, value: label) in commands.entries) {
+        expect(shortcutLabel(command, platform), label, reason: '$command');
+      }
+    }
+  });
+
   test('withShortcut appends the primary chord', () {
     debugDefaultTargetPlatformOverride = TargetPlatform.windows;
     try {
@@ -87,14 +111,6 @@ void main() {
       );
     } finally {
       debugDefaultTargetPlatformOverride = null;
-    }
-  });
-
-  test('every workspace tab has a command, and back', () {
-    for (final command in AppCommand.values) {
-      final view = command.workspaceView;
-      if (view == null) continue;
-      expect(AppCommand.forWorkspaceView(view), command);
     }
   });
 }

@@ -576,10 +576,7 @@ class TitleBarBreadcrumb extends ConsumerWidget {
           // overflow on a narrow agent panel. AbBranchPill's own Flexible
           // Text (see its doc) is what turns this shrink into an ellipsis
           // instead of a second overflow one widget down.
-          Flexible(
-            fit: FlexFit.loose,
-            child: SessionBranchPill(maxWidth: 160),
-          ),
+          Flexible(fit: FlexFit.loose, child: SessionBranchPill(maxWidth: 160)),
         ],
       ],
     );

@@ -322,8 +322,8 @@ class _MarkdownImage extends StatelessWidget {
       // The measure is the widest this can ever paint, so decoding beyond it
       // buys nothing and costs the full source resolution in memory — a 4000px
       // photo is ~48MB of ARGB the reader never sees a pixel of.
-      final cap = AbTokens.documentMaxWidth *
-          MediaQuery.devicePixelRatioOf(context);
+      final cap =
+          AbTokens.documentMaxWidth * MediaQuery.devicePixelRatioOf(context);
       return Image.network(
         url,
         width: width,

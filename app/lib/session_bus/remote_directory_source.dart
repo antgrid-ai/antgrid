@@ -161,10 +161,7 @@ Future<RemoteMachineOutcome> classifyMachine(
     );
     final sessions = card.sessions;
     if (sessions == null) return const RemoteMachineNoCard();
-    return RemoteMachineRows(
-      rows: sessions,
-      truncated: card.sessionsTruncated,
-    );
+    return RemoteMachineRows(rows: sessions, truncated: card.sessionsTruncated);
   } on RpcException catch (e) {
     if (e.code == 'NOT_ALLOWED_AGENT_REACH') {
       return const RemoteMachineReachRefused();
@@ -230,7 +227,8 @@ final class RemoteMachineReport {
     final reportedTruncated = o is RemoteMachineRows ? o.truncated : 0;
     // `ControlRequestSchema` requires `truncated >= 0`; a peer misreporting a
     // negative count must not 400 the whole push over one hostile field.
-    final truncated = (reportedTruncated < 0 ? 0 : reportedTruncated) + overflow;
+    final truncated =
+        (reportedTruncated < 0 ? 0 : reportedTruncated) + overflow;
     return {
       'machineId': machineId,
       if (machineLabel != null) 'machineLabel': machineLabel,
@@ -496,9 +494,11 @@ class RemoteDirectoryCycleResult {
 /// this class owns timing, backoff, the wire push, and the ack — the widget
 /// itself owns only the `Timer` and the `ref.listenManual` wiring.
 class RemoteDirectoryPumpEngine {
-  RemoteDirectoryPumpEngine({RemoteDirectoryCadence? cadence, RemoteMachineTracker? tracker})
-    : cadence = cadence ?? RemoteDirectoryCadence(),
-      tracker = tracker ?? RemoteMachineTracker();
+  RemoteDirectoryPumpEngine({
+    RemoteDirectoryCadence? cadence,
+    RemoteMachineTracker? tracker,
+  }) : cadence = cadence ?? RemoteDirectoryCadence(),
+       tracker = tracker ?? RemoteMachineTracker();
 
   final RemoteDirectoryCadence cadence;
   final RemoteMachineTracker tracker;
@@ -578,10 +578,9 @@ class RemoteDirectoryPumpEngine {
     );
     if (!bootstrap) cadence.notePush(now);
     try {
-      final ack = await pushFn(
-        [for (final r in clampReportsForWire(reports)) r.toWire()],
-        notConnected,
-      );
+      final ack = await pushFn([
+        for (final r in clampReportsForWire(reports)) r.toWire(),
+      ], notConnected);
       _wantedRepoKeys = ack.wantedRepoKeys;
       _everPushed = true;
       _consecutiveBadRequests = 0;

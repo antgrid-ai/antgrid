@@ -2,8 +2,6 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
-import '../models/workspace_view.dart';
-
 /// Where a command shows up in the shortcut sheet.
 enum AppCommandGroup {
   general('General'),
@@ -30,8 +28,6 @@ enum AppCommand {
   openSettings('Settings', AppCommandGroup.general),
   showShortcuts('Keyboard shortcuts', AppCommandGroup.general),
 
-  nextArea('Next area: projects → agent → panel', AppCommandGroup.keyboard),
-  previousArea('Previous area', AppCommandGroup.keyboard),
   moveFocus('Move between rows and tabs', AppCommandGroup.keyboard),
   expandCollapse(
     'Expand / collapse a folder or project',
@@ -43,12 +39,6 @@ enum AppCommand {
   goForward('Forward', AppCommandGroup.navigation),
   nextSession('Next session', AppCommandGroup.navigation),
   previousSession('Previous session', AppCommandGroup.navigation),
-  focusAgent('Focus the agent', AppCommandGroup.navigation),
-  showPreview('Go to Preview tab', AppCommandGroup.navigation),
-  showFiles('Go to Files tab', AppCommandGroup.navigation),
-  showGit('Go to Git tab', AppCommandGroup.navigation),
-  showTerminals('Go to Terminals tab', AppCommandGroup.navigation),
-  showHandler('Go to Handler tab', AppCommandGroup.navigation),
 
   toggleSidebar('Show/hide projects', AppCommandGroup.layout),
   toggleContextPanel('Show/hide context panel', AppCommandGroup.layout),
@@ -66,7 +56,11 @@ enum AppCommand {
   closeFile('Close file', AppCommandGroup.files),
 
   refresh('Refresh', AppCommandGroup.panels),
+  hardRefresh('Refresh, bypassing the cache', AppCommandGroup.panels),
   focusAddressBar('Preview address bar', AppCommandGroup.panels),
+  newPreviewTab('New preview tab', AppCommandGroup.panels),
+  closePreviewTab('Close preview tab', AppCommandGroup.panels),
+  previewForward('Preview: page forward', AppCommandGroup.panels),
 
   confirmDialog('Confirm', AppCommandGroup.dialogs),
   dismiss('Cancel / close', AppCommandGroup.dialogs);
@@ -74,24 +68,6 @@ enum AppCommand {
   const AppCommand(this.label, this.group);
   final String label;
   final AppCommandGroup group;
-
-  /// The workspace tab a `show*` command reveals, or null for any other.
-  WorkspaceView? get workspaceView => switch (this) {
-    showPreview => WorkspaceView.preview,
-    showFiles => WorkspaceView.files,
-    showGit => WorkspaceView.git,
-    showTerminals => WorkspaceView.terminals,
-    showHandler => WorkspaceView.handler,
-    _ => null,
-  };
-
-  static AppCommand forWorkspaceView(WorkspaceView view) => switch (view) {
-    WorkspaceView.preview => showPreview,
-    WorkspaceView.files => showFiles,
-    WorkspaceView.git => showGit,
-    WorkspaceView.terminals => showTerminals,
-    WorkspaceView.handler => showHandler,
-  };
 }
 
 /// How far a chord reaches.
@@ -205,6 +181,8 @@ class KeyChord {
       LogicalKeyboardKey.arrowRight: ('→', '→'),
       LogicalKeyboardKey.arrowUp: ('↑', '↑'),
       LogicalKeyboardKey.arrowDown: ('↓', '↓'),
+      LogicalKeyboardKey.pageUp: ('PgUp', '⇞'),
+      LogicalKeyboardKey.pageDown: ('PgDn', '⇟'),
       LogicalKeyboardKey.comma: (',', ','),
       LogicalKeyboardKey.slash: ('/', '/'),
       LogicalKeyboardKey.backquote: ('`', '`'),
@@ -259,21 +237,19 @@ final Map<AppCommand, List<KeyChord>> _otherChords = {
     KeyChord(LogicalKeyboardKey.keyK, control: true, shift: true),
     KeyChord(LogicalKeyboardKey.keyK, control: true, reach: _focused),
   ],
+  // Ctrl+N and Ctrl+/ are what VS Code, Cursor and the Codex app bind for
+  // these; focused, so a terminal that wants them (readline history, undo)
+  // keeps them.
   AppCommand.newSession: const [
     KeyChord(LogicalKeyboardKey.keyN, control: true, shift: true),
+    KeyChord(LogicalKeyboardKey.keyN, control: true, reach: _focused),
   ],
   AppCommand.openSettings: const [
     KeyChord(LogicalKeyboardKey.comma, control: true),
   ],
   AppCommand.showShortcuts: const [
     KeyChord(LogicalKeyboardKey.slash, control: true, shift: true),
-  ],
-  // Focused, not global: F6 means something to terminal programs (mc's
-  // rename, htop's sort), so inside the terminal it is theirs. Ctrl+0..5 are
-  // the way out of the terminal; F6 moves on from there.
-  AppCommand.nextArea: const [KeyChord(LogicalKeyboardKey.f6, reach: _focused)],
-  AppCommand.previousArea: const [
-    KeyChord(LogicalKeyboardKey.f6, shift: true, reach: _focused),
+    KeyChord(LogicalKeyboardKey.slash, control: true, reach: _focused),
   ],
   AppCommand.moveFocus: const [
     KeyChord(LogicalKeyboardKey.arrowUp, reach: _local),
@@ -294,29 +270,15 @@ final Map<AppCommand, List<KeyChord>> _otherChords = {
   AppCommand.goForward: const [
     KeyChord(LogicalKeyboardKey.arrowRight, alt: true, reach: _focused),
   ],
+  // Ctrl+PageDown/Up are the browsers' and VS Code's second spelling of tab
+  // cycling.
   AppCommand.nextSession: const [
     KeyChord(LogicalKeyboardKey.tab, control: true),
+    KeyChord(LogicalKeyboardKey.pageDown, control: true),
   ],
   AppCommand.previousSession: const [
     KeyChord(LogicalKeyboardKey.tab, control: true, shift: true),
-  ],
-  AppCommand.focusAgent: const [
-    KeyChord(LogicalKeyboardKey.digit0, control: true),
-  ],
-  AppCommand.showPreview: const [
-    KeyChord(LogicalKeyboardKey.digit1, control: true),
-  ],
-  AppCommand.showFiles: const [
-    KeyChord(LogicalKeyboardKey.digit2, control: true),
-  ],
-  AppCommand.showGit: const [
-    KeyChord(LogicalKeyboardKey.digit3, control: true),
-  ],
-  AppCommand.showTerminals: const [
-    KeyChord(LogicalKeyboardKey.digit4, control: true),
-  ],
-  AppCommand.showHandler: const [
-    KeyChord(LogicalKeyboardKey.digit5, control: true),
+    KeyChord(LogicalKeyboardKey.pageUp, control: true),
   ],
   AppCommand.toggleSidebar: const [
     KeyChord(LogicalKeyboardKey.keyB, control: true, shift: true),
@@ -351,9 +313,18 @@ final Map<AppCommand, List<KeyChord>> _otherChords = {
   AppCommand.findInFile: const [
     KeyChord(LogicalKeyboardKey.keyF, control: true, reach: _local),
   ],
-  AppCommand.findNext: const [KeyChord(LogicalKeyboardKey.f3, reach: _local)],
+  AppCommand.findNext: const [
+    KeyChord(LogicalKeyboardKey.f3, reach: _local),
+    KeyChord(LogicalKeyboardKey.keyG, control: true, reach: _local),
+  ],
   AppCommand.findPrevious: const [
     KeyChord(LogicalKeyboardKey.f3, shift: true, reach: _local),
+    KeyChord(
+      LogicalKeyboardKey.keyG,
+      control: true,
+      shift: true,
+      reach: _local,
+    ),
   ],
   AppCommand.closeFile: const [
     KeyChord(LogicalKeyboardKey.keyW, control: true, reach: _local),
@@ -362,8 +333,29 @@ final Map<AppCommand, List<KeyChord>> _otherChords = {
     KeyChord(LogicalKeyboardKey.f5, reach: _local),
     KeyChord(LogicalKeyboardKey.keyR, control: true, reach: _local),
   ],
+  AppCommand.hardRefresh: const [
+    KeyChord(
+      LogicalKeyboardKey.keyR,
+      control: true,
+      shift: true,
+      reach: _local,
+    ),
+    KeyChord(LogicalKeyboardKey.f5, control: true, reach: _local),
+  ],
   AppCommand.focusAddressBar: const [
     KeyChord(LogicalKeyboardKey.keyL, control: true, reach: _local),
+    KeyChord(LogicalKeyboardKey.keyD, alt: true, reach: _local),
+  ],
+  AppCommand.newPreviewTab: const [
+    KeyChord(LogicalKeyboardKey.keyT, control: true, reach: _local),
+  ],
+  AppCommand.closePreviewTab: const [
+    KeyChord(LogicalKeyboardKey.keyW, control: true, reach: _local),
+  ],
+  // Alt+→ also means app-level Forward; bound in the preview only while the
+  // page can go forward, so it falls through to the app's otherwise.
+  AppCommand.previewForward: const [
+    KeyChord(LogicalKeyboardKey.arrowRight, alt: true, reach: _local),
   ],
   AppCommand.confirmDialog: const [
     KeyChord(LogicalKeyboardKey.enter, reach: _local),
@@ -383,13 +375,6 @@ final Map<AppCommand, List<KeyChord>> _appleChords = {
   ],
   AppCommand.showShortcuts: const [
     KeyChord(LogicalKeyboardKey.slash, meta: true),
-  ],
-  // Focused, not global: F6 means something to terminal programs (mc's
-  // rename, htop's sort), so inside the terminal it is theirs. Ctrl+0..5 are
-  // the way out of the terminal; F6 moves on from there.
-  AppCommand.nextArea: const [KeyChord(LogicalKeyboardKey.f6, reach: _focused)],
-  AppCommand.previousArea: const [
-    KeyChord(LogicalKeyboardKey.f6, shift: true, reach: _focused),
   ],
   AppCommand.moveFocus: const [
     KeyChord(LogicalKeyboardKey.arrowUp, reach: _local),
@@ -414,23 +399,11 @@ final Map<AppCommand, List<KeyChord>> _appleChords = {
   ],
   AppCommand.nextSession: const [
     KeyChord(LogicalKeyboardKey.tab, control: true),
+    KeyChord(LogicalKeyboardKey.pageDown, control: true),
   ],
   AppCommand.previousSession: const [
     KeyChord(LogicalKeyboardKey.tab, control: true, shift: true),
-  ],
-  AppCommand.focusAgent: const [
-    KeyChord(LogicalKeyboardKey.digit0, meta: true),
-  ],
-  AppCommand.showPreview: const [
-    KeyChord(LogicalKeyboardKey.digit1, meta: true),
-  ],
-  AppCommand.showFiles: const [KeyChord(LogicalKeyboardKey.digit2, meta: true)],
-  AppCommand.showGit: const [KeyChord(LogicalKeyboardKey.digit3, meta: true)],
-  AppCommand.showTerminals: const [
-    KeyChord(LogicalKeyboardKey.digit4, meta: true),
-  ],
-  AppCommand.showHandler: const [
-    KeyChord(LogicalKeyboardKey.digit5, meta: true),
+    KeyChord(LogicalKeyboardKey.pageUp, control: true),
   ],
   AppCommand.toggleSidebar: const [
     KeyChord(LogicalKeyboardKey.keyB, meta: true),
@@ -477,9 +450,24 @@ final Map<AppCommand, List<KeyChord>> _appleChords = {
   ],
   AppCommand.refresh: const [
     KeyChord(LogicalKeyboardKey.keyR, meta: true, reach: _local),
+    KeyChord(LogicalKeyboardKey.f5, reach: _local),
+  ],
+  AppCommand.hardRefresh: const [
+    KeyChord(LogicalKeyboardKey.keyR, shift: true, meta: true, reach: _local),
   ],
   AppCommand.focusAddressBar: const [
     KeyChord(LogicalKeyboardKey.keyL, meta: true, reach: _local),
+  ],
+  AppCommand.newPreviewTab: const [
+    KeyChord(LogicalKeyboardKey.keyT, meta: true, reach: _local),
+  ],
+  AppCommand.closePreviewTab: const [
+    KeyChord(LogicalKeyboardKey.keyW, meta: true, reach: _local),
+  ],
+  // ⌘] is the app's global Forward, which claims it before the preview could
+  // see it; ⌘→ is Safari's and Chrome's other spelling.
+  AppCommand.previewForward: const [
+    KeyChord(LogicalKeyboardKey.arrowRight, meta: true, reach: _local),
   ],
   AppCommand.confirmDialog: const [
     KeyChord(LogicalKeyboardKey.enter, reach: _local),

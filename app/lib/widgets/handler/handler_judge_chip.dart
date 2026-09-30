@@ -110,9 +110,7 @@ class HandlerJudgeChip extends ConsumerWidget {
 /// build — the panel needs its own call because pane one can change the judge,
 /// and the drill that follows must not be the first touch of the new key.
 List<AgentCapabilityModel> _modelsFor(WidgetRef ref, String? tool) =>
-    tool == null
-    ? const <AgentCapabilityModel>[]
-    : cachedModelsFor(ref, tool);
+    tool == null ? const <AgentCapabilityModel>[] : cachedModelsFor(ref, tool);
 
 /// One route, two panes. The model ALWAYS drills, even for a tool with three
 /// models: one agent exposes twenty-odd, and a panel that changes shape per

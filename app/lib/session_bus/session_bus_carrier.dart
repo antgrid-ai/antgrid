@@ -349,9 +349,10 @@ class SessionBusCarrier extends Notifier<SessionBusCarrierStatus> {
   /// legs alone would refuse every frame that arrives inside that window — and
   /// refuse it for good, where holding it costs one buffer slot.
   Map<String, Set<String>> _localSessions() => {
-    for (final id in ref
-        .read(projectSessionRegistryProvider.notifier)
-        .localOpenProjects())
+    for (final id
+        in ref
+            .read(projectSessionRegistryProvider.notifier)
+            .localOpenProjects())
       id: ref.read(sessionBusLocalSessionsProvider(id)),
   };
 
@@ -435,7 +436,7 @@ class SessionBusCarrier extends Notifier<SessionBusCarrierStatus> {
     AbLog.warn(
       _kComponent,
       'this app holds the session under a project the other machine does not '
-          'address it by — routed by session instead',
+      'address it by — routed by session instead',
       fields: {
         'session': to.sessionId,
         'addressedByPeer': to.projectId,

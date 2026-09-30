@@ -137,10 +137,9 @@ final focusedSessionCoverageProvider =
       final judge = entry == null
           ? agent
           : handlerState.sessions[entry.id]?.judgeTool ??
-                focusedSessionOrNull(ref)
-                    ?.handlerService
-                    .lastKnownSettings(entry.id)
-                    ?.tool ??
+                focusedSessionOrNull(
+                  ref,
+                )?.handlerService.lastKnownSettings(entry.id)?.tool ??
                 agent;
       return (
         agent: agent,

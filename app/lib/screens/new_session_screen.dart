@@ -264,9 +264,7 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
                       duration: AbTokens.motionPane,
                       curve: Curves.easeOut,
                       padding: EdgeInsets.only(
-                        left: _tabletSidebarOpen
-                            ? AbTokens.drawerPaneWidth
-                            : 0,
+                        left: _tabletSidebarOpen ? AbTokens.drawerPaneWidth : 0,
                       ),
                       child:
                           surfaceChild ??

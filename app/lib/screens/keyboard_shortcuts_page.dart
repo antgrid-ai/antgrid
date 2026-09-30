@@ -86,9 +86,11 @@ class _KeyboardShortcutsPageState extends State<KeyboardShortcutsPage> {
                           'App-wide shortcuts use Ctrl+Shift so plain '
                               "Ctrl+letter keys stay with the agent's terminal.",
                         'Shortcuts marked "when focused" work while that area '
-                            '— a file, a panel, a dialog — has the keyboard; '
-                            'the rest work anywhere, the agent terminal '
-                            'included.',
+                            '— a file, a panel, a dialog — has the keyboard. '
+                            'Keys marked "$kOutsideTerminalNote" work '
+                            'everywhere except while the agent terminal has '
+                            'the keyboard, which keeps them for its own '
+                            'programs. The rest work anywhere.',
                         if (sheet != null)
                           '$sheet shows this list from anywhere.',
                       ].join(' '),

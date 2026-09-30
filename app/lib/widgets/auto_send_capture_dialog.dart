@@ -75,8 +75,7 @@ class _AutoSendCaptureDialog extends StatefulWidget {
   final String fileName;
 
   @override
-  State<_AutoSendCaptureDialog> createState() =>
-      _AutoSendCaptureDialogState();
+  State<_AutoSendCaptureDialog> createState() => _AutoSendCaptureDialogState();
 }
 
 class _AutoSendCaptureDialogState extends State<_AutoSendCaptureDialog> {
