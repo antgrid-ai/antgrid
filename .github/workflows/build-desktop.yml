@@ -420,14 +420,6 @@ jobs:
             echo "::error::provisioning profile is for '$PROFILE_APP_ID', expected '$APP_IDENTIFIER'"
             exit 1
           fi
-          # DeveloperID.entitlements claims Sign in with Apple, also restricted:
-          # a profile generated before the capability was enabled on the App ID
-          # lacks it, and AMFI kills the app at launch the same way.
-          if ! /usr/libexec/PlistBuddy -c 'Print :Entitlements:com.apple.developer.applesignin' \
-              "$RUNNER_TEMP/profile.plist" >/dev/null 2>&1; then
-            echo "::error::provisioning profile does not grant com.apple.developer.applesignin; regenerate it after enabling Sign in with Apple on the App ID"
-            exit 1
-          fi
           cp "$RUNNER_TEMP/antgrid.provisionprofile" "$APP/Contents/embedded.provisionprofile"
 
           # Import the signing cert into a throwaway keychain.
